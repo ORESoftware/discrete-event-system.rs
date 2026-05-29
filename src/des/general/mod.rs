@@ -14,3 +14,8 @@ pub mod random_variables;
 pub mod hungarian;
 pub mod factmachine_math;
 pub mod value_iteration;
+
+pub mod lp;
+pub mod incremental_lp;
+pub mod statistical_optimization;
+pub mod genetic_tsp;

@@ -1,0 +1,13 @@
+[package]
+name = "des_engine"
+version = "0.0.1"
+edition = "2021"
+description = "Discrete-event system engine (Rust port of the TypeScript des-engine)."
+
+# The TypeScript source maps 1:1 onto this crate:
+#   src/des/<path>.ts  ->  src/des/<path>.rs
+#   index.ts           ->  mod.rs
+# Foundation modules (des::shared::*) are dependency-free and ported first.
+[dependencies]
+
+[dev-dependencies]

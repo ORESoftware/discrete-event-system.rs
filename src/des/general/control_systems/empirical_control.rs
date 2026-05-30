@@ -1150,7 +1150,9 @@ impl DESStation for LtiDegreeEvaluatorStation {
     fn as_any(&self) -> &dyn Any {
         self
     }
-    fn run_time_step(&mut self) {}
+    fn run_time_step(&mut self) {
+        self.run_pure();
+    }
     fn has_work(&self) -> bool {
         false
     }
@@ -1223,7 +1225,9 @@ impl DESStation for MdpDegreeEvaluatorStation {
     fn as_any(&self) -> &dyn Any {
         self
     }
-    fn run_time_step(&mut self) {}
+    fn run_time_step(&mut self) {
+        self.run_pure();
+    }
     fn has_work(&self) -> bool {
         false
     }
@@ -1295,7 +1299,9 @@ impl DESStation for PomdpDegreeEvaluatorStation {
     fn as_any(&self) -> &dyn Any {
         self
     }
-    fn run_time_step(&mut self) {}
+    fn run_time_step(&mut self) {
+        self.run_pure();
+    }
     fn has_work(&self) -> bool {
         false
     }

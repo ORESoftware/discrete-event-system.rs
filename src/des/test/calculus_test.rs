@@ -54,7 +54,7 @@ mod tests {
 
         let d_ch = diff(&parse("sin(x^2)"), "x");
         let d_ch_fn = to_function(&d_ch, &["x".to_string()]);
-        for x in [0.4, 1.1, 2.0] {
+        for x in [0.4_f64, 1.1, 2.0] {
             let expected = 2.0 * x * (x * x).cos();
             assert!(approx(d_ch_fn(&[x]), expected, 1e-10), "x={x}");
         }

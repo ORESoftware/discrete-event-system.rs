@@ -42,6 +42,10 @@ pub mod animation;
 #[cfg(test)]
 mod integration_smoke;
 
+// Ported TypeScript test suite (`src/des/test/`), compiled only for tests.
+#[cfg(test)]
+mod test;
+
 // Serial driver that runs every simulation entry point one after another.
 pub mod simulations;
 

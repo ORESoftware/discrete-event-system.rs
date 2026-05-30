@@ -442,10 +442,11 @@ mod tests {
 
     #[test]
     fn tiger_pomdp_preconditions() {
-        let spec = build_tiger_spec(&TigerOpts::default());
+        // POMDPSpec holds `Box<dyn Fn>` closures (not `Clone`), so build a fresh
+        // spec per call rather than cloning a shared one.
         assert_panics_with("numSteps", || {
             simulate_tiger(TigerSimOpts {
-                spec: Some(spec.clone()),
+                spec: Some(build_tiger_spec(&TigerOpts::default())),
                 solver: TigerSolver::Qmdp,
                 num_steps: 0,
                 seed: None,
@@ -455,7 +456,7 @@ mod tests {
         });
         assert_panics_with("initialBelief", || {
             simulate_tiger(TigerSimOpts {
-                spec: Some(spec.clone()),
+                spec: Some(build_tiger_spec(&TigerOpts::default())),
                 solver: TigerSolver::Qmdp,
                 num_steps: 5,
                 seed: None,

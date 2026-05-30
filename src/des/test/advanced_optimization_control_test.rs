@@ -37,7 +37,7 @@ mod tests {
         ParetoArchiveStation, ParetoCandidateToken,
     };
     use crate::des::general::des_base::runner::{run_iterative_des, IterativeRunOptions};
-    use crate::des::general::des_base::station::{DESStation, StationRef};
+    use crate::des::general::des_base::station::StationRef;
 
     fn has(v: &[String], s: &str) -> bool {
         v.iter().any(|x| x == s)

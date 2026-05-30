@@ -16,6 +16,7 @@ mod tests {
         DcMotorSinkStation, LoadProfile, LoadSegment, SpeedPiVoltageController, SpeedPiVoltageOpts,
         SpeedReferenceSegment,
     };
+    use crate::des::general::control_systems::numerical_solvers::OdeSystem;
     use crate::des::general::des_base::runner::{run_iterative_des, IterativeRunOptions};
     use crate::des::general::des_base::station::{DESStation, StationRef};
 

@@ -117,7 +117,7 @@ mod tests {
             let d = net.predict(&[x]) - x.sin();
             sse += d * d;
         }
-        assert!(sse / m as f64 < 0.01, "mse={}", sse / m as f64);
+        assert!((sse / m as f64) < 0.01, "mse={}", sse / m as f64);
     }
 
     // [6] ML-3: denoising diffusion learns a unimodal target

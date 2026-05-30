@@ -93,7 +93,10 @@ pub struct PopulationSourceStation<I> {
 impl<I: 'static> PopulationSourceStation<I> {
     pub const CH_INITIAL_POPULATION: &'static str = POPULATION_INITIAL_CHANNEL;
 
-    pub fn new(id: impl Into<String>, initial_population: impl FnMut() -> Vec<I> + 'static) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        initial_population: impl FnMut() -> Vec<I> + 'static,
+    ) -> Self {
         PopulationSourceStation {
             core: StationCore::new(id),
             emitted: false,
@@ -153,7 +156,10 @@ impl<I: 'static> PopulationSinkStation<I> {
     pub const CH_RESULT: &'static str = POPULATION_RESULT_CHANNEL;
 
     pub fn new(id: impl Into<String>) -> Self {
-        PopulationSinkStation { core: StationCore::new(id), latest: None }
+        PopulationSinkStation {
+            core: StationCore::new(id),
+            latest: None,
+        }
     }
 }
 
@@ -286,7 +292,10 @@ pub trait PopulationOptimizer<I: Clone + 'static>: DESStation {
         if self.opt_state().initialized {
             panic!("{}: initial population already supplied", self.id());
         }
-        let population: Vec<I> = initial_population.iter().map(|x| self.clone_ind(x)).collect();
+        let population: Vec<I> = initial_population
+            .iter()
+            .map(|x| self.clone_ind(x))
+            .collect();
         let pop_size = self.opt_state().pop_size;
         if population.len() != pop_size {
             panic!(
@@ -298,7 +307,12 @@ pub trait PopulationOptimizer<I: Clone + 'static>: DESStation {
         let fitness: Vec<f64> = population.iter().map(|x| self.evaluate(x)).collect();
         for (i, f) in fitness.iter().enumerate() {
             if !f.is_finite() {
-                panic!("{}: initial population fitness[{}] must be finite; got {}", self.id(), i, f);
+                panic!(
+                    "{}: initial population fitness[{}] must be finite; got {}",
+                    self.id(),
+                    i,
+                    f
+                );
             }
         }
         {
@@ -318,8 +332,9 @@ pub trait PopulationOptimizer<I: Clone + 'static>: DESStation {
             return;
         }
         if !self.opt_state().initialized {
-            let seeds =
-                self.core_mut().drain::<PopulationInitialToken<I>>(Self::CH_INITIAL_POPULATION);
+            let seeds = self
+                .core_mut()
+                .drain::<PopulationInitialToken<I>>(Self::CH_INITIAL_POPULATION);
             if seeds.is_empty() {
                 return;
             }
@@ -335,7 +350,10 @@ pub trait PopulationOptimizer<I: Clone + 'static>: DESStation {
             return;
         }
         if self.core().inbox_size(Self::CH_INITIAL_POPULATION) > 0 {
-            panic!("{}: received an initial-population token after initialization", self.id());
+            panic!(
+                "{}: received an initial-population token after initialization",
+                self.id()
+            );
         }
         let gen = self.opt_state().generation;
         if self.should_stop(gen) {
@@ -350,8 +368,14 @@ pub trait PopulationOptimizer<I: Clone + 'static>: DESStation {
         // Elitism — copy best k unchanged.
         let elite_k = self.elite_count().min(pop_size);
         if elite_k > 0 {
-            let mut order: Vec<(f64, usize)> =
-                self.opt_state().fitness.iter().copied().enumerate().map(|(i, f)| (f, i)).collect();
+            let mut order: Vec<(f64, usize)> = self
+                .opt_state()
+                .fitness
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(i, f)| (f, i))
+                .collect();
             order.sort_by(|a, b| a.0.total_cmp(&b.0));
             for entry in order.iter().take(elite_k) {
                 let clone = self.clone_ind(&self.opt_state().population[entry.1]);
@@ -365,8 +389,11 @@ pub trait PopulationOptimizer<I: Clone + 'static>: DESStation {
             let mut child: Option<I> = None;
             let mut accepted = false;
             for attempt in 0..retry_budget {
-                let parents =
-                    self.select(&self.opt_state().population, &self.opt_state().fitness, &mut *rng);
+                let parents = self.select(
+                    &self.opt_state().population,
+                    &self.opt_state().fitness,
+                    &mut *rng,
+                );
                 let c = self.recombine(&parents, &mut *rng);
                 let c = self.mutate(c, &mut *rng);
                 let ok = self.accept_child(&c);
@@ -470,8 +497,12 @@ pub trait PopulationOptimizer<I: Clone + 'static>: DESStation {
             return;
         }
         let best = self.clone_ind(self.opt_state().best.as_ref().expect("initialized"));
-        let population: Vec<I> =
-            self.opt_state().population.iter().map(|x| self.clone_ind(x)).collect();
+        let population: Vec<I> = self
+            .opt_state()
+            .population
+            .iter()
+            .map(|x| self.clone_ind(x))
+            .collect();
         let snapshot = {
             let st = self.opt_state();
             PopulationResultSnapshot {
@@ -489,7 +520,10 @@ pub trait PopulationOptimizer<I: Clone + 'static>: DESStation {
 
     fn assert_initialized_for_read(&self) {
         if !self.opt_state().initialized {
-            panic!("{}: optimizer has not received an initial population", self.id());
+            panic!(
+                "{}: optimizer has not received an initial population",
+                self.id()
+            );
         }
     }
 }
@@ -591,7 +625,11 @@ mod tests {
         }
         assert!(ga.is_finished());
         assert!(ga.get_best_fitness() <= initial_best);
-        assert!(ga.get_best_fitness() < 1.0, "best_fitness = {}", ga.get_best_fitness());
+        assert!(
+            ga.get_best_fitness() < 1.0,
+            "best_fitness = {}",
+            ga.get_best_fitness()
+        );
     }
 
     #[test]
@@ -603,14 +641,22 @@ mod tests {
         }
         let hist = &ga.opt_state().best_history;
         for w in hist.windows(2) {
-            assert!(w[1] <= w[0], "best_history not monotone: {} -> {}", w[0], w[1]);
+            assert!(
+                w[1] <= w[0],
+                "best_history not monotone: {} -> {}",
+                w[0],
+                w[1]
+            );
         }
     }
 
     #[test]
     fn source_optimizer_sink_pipeline() {
         let pop: Vec<f64> = vec![-5.0, -2.0, 1.0, 6.0];
-        let source = Rc::new(RefCell::new(PopulationSourceStation::new("src", move || pop.clone())));
+        let source = Rc::new(RefCell::new(PopulationSourceStation::new(
+            "src",
+            move || pop.clone(),
+        )));
         let ga = Rc::new(RefCell::new(ScalarGa::new(55, 4, 2.0, 0.5, 60)));
         let sink = Rc::new(RefCell::new(PopulationSinkStation::<f64>::new("sink")));
 
@@ -636,6 +682,10 @@ mod tests {
         let latest = sink.borrow().latest.clone().expect("result captured");
         assert_eq!(latest.snapshot.generation, 60);
         assert_eq!(latest.snapshot.population.len(), 4);
-        assert!(latest.snapshot.best_fitness < 1.0, "best_fitness = {}", latest.snapshot.best_fitness);
+        assert!(
+            latest.snapshot.best_fitness < 1.0,
+            "best_fitness = {}",
+            latest.snapshot.best_fitness
+        );
     }
 }

@@ -118,16 +118,25 @@ pub fn analytical_optimal_q(p: &NewsvendorParams) -> AnalyticalResult {
     let cu = p.unit_price - p.unit_cost;
     let co = p.unit_cost - p.unit_salvage;
     if cu <= 0.0 {
-        return AnalyticalResult { q_star: 0, critical_ratio: 0.0 };
+        return AnalyticalResult {
+            q_star: 0,
+            critical_ratio: 0.0,
+        };
     }
     let cr = cu / (cu + co);
     let cdf = cdf_from_pmf(&p.demand);
     for k in 0..cdf.len() {
         if cdf[k] >= cr {
-            return AnalyticalResult { q_star: k, critical_ratio: cr };
+            return AnalyticalResult {
+                q_star: k,
+                critical_ratio: cr,
+            };
         }
     }
-    AnalyticalResult { q_star: cdf.len() - 1, critical_ratio: cr }
+    AnalyticalResult {
+        q_star: cdf.len() - 1,
+        critical_ratio: cr,
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -150,7 +159,10 @@ pub fn brute_search_optimal_q(p: &NewsvendorParams) -> BruteResult {
             best_q = q;
         }
     }
-    BruteResult { q_star: best_q, profile_ep: profile }
+    BruteResult {
+        q_star: best_q,
+        profile_ep: profile,
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -167,7 +179,11 @@ pub fn newsvendor_mdp_spec(p: &NewsvendorParams) -> MDPSpec {
             if s != 0 {
                 return vec![];
             }
-            vec![Outcome { prob: 1.0, reward: expected_profit(a, &p_outcomes), next_state: 1 }]
+            vec![Outcome {
+                prob: 1.0,
+                reward: expected_profit(a, &p_outcomes),
+                next_state: 1,
+            }]
         }),
         is_terminal: Some(Box::new(|s| s == 1)),
         terminal_reward: None,
@@ -184,8 +200,19 @@ pub struct MdpResult {
 
 pub fn mdp_optimal_q(p: &NewsvendorParams) -> MdpResult {
     let spec = newsvendor_mdp_spec(p);
-    let result = value_iteration(spec, VIOptions { gamma: 0.0, tol: 1e-12, ..Default::default() });
-    MdpResult { q_star: result.policy[0], v0: result.v[0], iterations: result.iterations }
+    let result = value_iteration(
+        spec,
+        VIOptions {
+            gamma: 0.0,
+            tol: 1e-12,
+            ..Default::default()
+        },
+    );
+    MdpResult {
+        q_star: result.policy[0],
+        v0: result.v[0],
+        iterations: result.iterations,
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -259,7 +286,14 @@ impl DESStation for NewsvendorStation {
         self.unmet_demand += lost as f64;
         self.total_leftover += leftover as f64;
         self.days_simulated += 1;
-        self.history.push(HistoryEntry { day, q: self.q, demand: d, profit: pi, sold, leftover });
+        self.history.push(HistoryEntry {
+            day,
+            q: self.q,
+            demand: d,
+            profit: pi,
+            sold,
+            leftover,
+        });
     }
 }
 
@@ -272,7 +306,12 @@ pub struct SimResult {
 
 pub fn simulate(params: &NewsvendorParams, q: usize, days: usize, seed: u32) -> SimResult {
     with_seed(seed, |_rng| {
-        let sta = Rc::new(RefCell::new(NewsvendorStation::new(params.clone(), q, days, seed)));
+        let sta = Rc::new(RefCell::new(NewsvendorStation::new(
+            params.clone(),
+            q,
+            days,
+            seed,
+        )));
         let sta_ref: StationRef = sta.clone();
         run_iterative_des(
             vec![sta_ref],
@@ -307,11 +346,17 @@ fn jn(x: f64) -> String {
 }
 
 fn env_f64(key: &str, default: f64) -> f64 {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 fn env_usize(key: &str, default: usize) -> usize {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 /// Entry point (`main()` in the TS source).
@@ -340,16 +385,28 @@ pub fn run() {
         d_max,
         params.q_max
     );
-    println!("#   underage cost c_u = p−c = {:.3}", params.unit_price - params.unit_cost);
-    println!("#   overage  cost c_o = c−s = {:.3}", params.unit_cost - params.unit_salvage);
+    println!(
+        "#   underage cost c_u = p−c = {:.3}",
+        params.unit_price - params.unit_cost
+    );
+    println!(
+        "#   overage  cost c_o = c−s = {:.3}",
+        params.unit_cost - params.unit_salvage
+    );
 
     // (a) Analytical critical-fractile.
     let a = analytical_optimal_q(&params);
     println!();
     println!("(a) Analytical critical-fractile");
-    println!("    critical ratio = c_u / (c_u + c_o) = {:.4}", a.critical_ratio);
+    println!(
+        "    critical ratio = c_u / (c_u + c_o) = {:.4}",
+        a.critical_ratio
+    );
     println!("    q* = inf{{q : P(D ≤ q) ≥ CR}} = {}", a.q_star);
-    println!("    E[profit(q*)] = {:.4}", expected_profit(a.q_star, &params));
+    println!(
+        "    E[profit(q*)] = {:.4}",
+        expected_profit(a.q_star, &params)
+    );
 
     // (b) Brute search over E[profit(q)].
     let b = brute_search_optimal_q(&params);
@@ -382,8 +439,12 @@ pub fn run() {
     let _ = std::fs::create_dir_all(out_dir);
     let out_path = out_dir.join("newsvendor.json");
 
-    let profile_json =
-        b.profile_ep.iter().map(|v| jn(*v)).collect::<Vec<_>>().join(",");
+    let profile_json = b
+        .profile_ep
+        .iter()
+        .map(|v| jn(*v))
+        .collect::<Vec<_>>()
+        .join(",");
     let history_json = sim
         .history
         .iter()

@@ -3,11 +3,11 @@
 //! the raw identifier `r#abstract`.)
 
 pub mod r#abstract;
-pub mod signal_value;
-pub mod multi_directional_signal_entity;
-pub mod single_direction_signal_entity;
 pub mod adder;
 pub mod differential;
 pub mod incrementer;
 pub mod integral;
+pub mod multi_directional_signal_entity;
 pub mod mux;
+pub mod signal_value;
+pub mod single_direction_signal_entity;

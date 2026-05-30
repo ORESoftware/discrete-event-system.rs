@@ -97,7 +97,11 @@ pub struct UnconstrainedUpdateCore {
 
 impl UnconstrainedUpdateCore {
     pub fn new(max_iter: usize, tol: f64) -> Self {
-        UnconstrainedUpdateCore { trace: Vec::new(), max_iter, tol }
+        UnconstrainedUpdateCore {
+            trace: Vec::new(),
+            max_iter,
+            tol,
+        }
     }
 }
 
@@ -130,7 +134,8 @@ pub trait UnconstrainedUpdateStation: DESStation {
                 gradient_norm,
                 x: state.x.clone(),
             });
-            if state.iter >= self.update_core().max_iter || gradient_norm <= self.update_core().tol {
+            if state.iter >= self.update_core().max_iter || gradient_norm <= self.update_core().tol
+            {
                 let result = UnconstrainedOptResult {
                     x: state.x.clone(),
                     objective,
@@ -139,7 +144,8 @@ pub trait UnconstrainedUpdateStation: DESStation {
                     trace: self.update_core().trace.clone(),
                     topology: empty_station_graph(),
                 };
-                self.core_mut().emit(Rc::new(OptResultToken { result }), CH_OPT_RESULT);
+                self.core_mut()
+                    .emit(Rc::new(OptResultToken { result }), CH_OPT_RESULT);
                 continue;
             }
             let next = self.next_state(state.as_ref(), &gradient);
@@ -156,7 +162,10 @@ pub struct NewtonRosenbrockStation {
 
 impl NewtonRosenbrockStation {
     pub fn new(id: impl Into<String>, max_iter: usize, tol: f64) -> Self {
-        NewtonRosenbrockStation { core: StationCore::new(id), update: UnconstrainedUpdateCore::new(max_iter, tol) }
+        NewtonRosenbrockStation {
+            core: StationCore::new(id),
+            update: UnconstrainedUpdateCore::new(max_iter, tol),
+        }
     }
 }
 
@@ -211,7 +220,10 @@ pub struct BFGSRosenbrockStation {
 
 impl BFGSRosenbrockStation {
     pub fn new(id: impl Into<String>, max_iter: usize, tol: f64) -> Self {
-        BFGSRosenbrockStation { core: StationCore::new(id), update: UnconstrainedUpdateCore::new(max_iter, tol) }
+        BFGSRosenbrockStation {
+            core: StationCore::new(id),
+            update: UnconstrainedUpdateCore::new(max_iter, tol),
+        }
     }
 }
 
@@ -247,7 +259,10 @@ impl UnconstrainedUpdateStation for BFGSRosenbrockStation {
         rosenbrock_grad(x)
     }
     fn next_state(&self, state: &OptStateToken, gradient: &[f64]) -> OptStateToken {
-        let h = state.h.clone().unwrap_or_else(|| vec![vec![1.0, 0.0], vec![0.0, 1.0]]);
+        let h = state
+            .h
+            .clone()
+            .unwrap_or_else(|| vec![vec![1.0, 0.0], vec![0.0, 1.0]]);
         let step = vec![-dot(&h[0], gradient), -dot(&h[1], gradient)];
         let alpha = backtracking(&state.x, &step, rosenbrock, gradient);
         let x_next = vec![state.x[0] + alpha * step[0], state.x[1] + alpha * step[1]];
@@ -255,19 +270,31 @@ impl UnconstrainedUpdateStation for BFGSRosenbrockStation {
         let s = vec![x_next[0] - state.x[0], x_next[1] - state.x[1]];
         let y = vec![g_next[0] - gradient[0], g_next[1] - gradient[1]];
         let h_next = bfgs_inverse_update(&h, &s, &y);
-        OptStateToken { iter: state.iter + 1, x: x_next, h: Some(h_next) }
+        OptStateToken {
+            iter: state.iter + 1,
+            x: x_next,
+            h: Some(h_next),
+        }
     }
 }
 
 pub fn run_newton_rosenbrock(params: UnconstrainedOptParams) -> UnconstrainedOptResult {
     let x0 = non_empty_array(params.x0.as_deref(), &[-1.2, 1.0]);
-    let update = NewtonRosenbrockStation::new("newton-update", params.max_iter.unwrap_or(50), params.tol.unwrap_or(1e-8));
+    let update = NewtonRosenbrockStation::new(
+        "newton-update",
+        params.max_iter.unwrap_or(50),
+        params.tol.unwrap_or(1e-8),
+    );
     run_unconstrained("newton-state-source", update, x0)
 }
 
 pub fn run_bfgs_rosenbrock(params: UnconstrainedOptParams) -> UnconstrainedOptResult {
     let x0 = non_empty_array(params.x0.as_deref(), &[-1.2, 1.0]);
-    let update = BFGSRosenbrockStation::new("bfgs-update", params.max_iter.unwrap_or(100), params.tol.unwrap_or(1e-6));
+    let update = BFGSRosenbrockStation::new(
+        "bfgs-update",
+        params.max_iter.unwrap_or(100),
+        params.tol.unwrap_or(1e-6),
+    );
     run_unconstrained("bfgs-state-source", update, x0)
 }
 
@@ -281,12 +308,19 @@ fn run_unconstrained<U: UnconstrainedUpdateStation + 'static>(
     let source = Rc::new(RefCell::new(SingleTokenSourceStation::with_validator(
         source_id,
         CH_OPT_STATE,
-        move || OptStateToken { iter: 0, x: x0_factory.clone(), h: None },
+        move || OptStateToken {
+            iter: 0,
+            x: x0_factory.clone(),
+            h: None,
+        },
         move |t: &OptStateToken| validate_opt_initial_state(&model, t),
     )));
     let update_rc = Rc::new(RefCell::new(update));
     let update_id = update_rc.borrow().id().to_string();
-    let sink = Rc::new(RefCell::new(LatestTokenSinkStation::<OptResultToken>::new("opt-result-sink", CH_OPT_RESULT)));
+    let sink = Rc::new(RefCell::new(LatestTokenSinkStation::<OptResultToken>::new(
+        "opt-result-sink",
+        CH_OPT_RESULT,
+    )));
 
     run_state_loop_pipeline(
         source.clone() as StationRef,
@@ -294,10 +328,17 @@ fn run_unconstrained<U: UnconstrainedUpdateStation + 'static>(
         sink.clone() as StationRef,
         CH_OPT_STATE,
         CH_OPT_RESULT,
-        IterativeRunOptions { max_ticks: Some(500), ..Default::default() },
+        IterativeRunOptions {
+            max_ticks: Some(500),
+            ..Default::default()
+        },
     );
 
-    let latest = sink.borrow().latest.clone().unwrap_or_else(|| panic!("{update_id} did not produce a result"));
+    let latest = sink
+        .borrow()
+        .latest
+        .clone()
+        .unwrap_or_else(|| panic!("{update_id} did not produce a result"));
     let mut result = latest.result.clone();
     result.topology = state_loop_topology(
         &*source.borrow(),
@@ -367,7 +408,12 @@ pub struct NlsCore {
 
 impl NlsCore {
     pub fn new(points: Vec<CurveFitPoint>, max_iter: usize, tol: f64) -> Self {
-        NlsCore { points, max_iter, tol, trace: Vec::new() }
+        NlsCore {
+            points,
+            max_iter,
+            tol,
+            trace: Vec::new(),
+        }
     }
 }
 
@@ -407,12 +453,25 @@ pub trait NonlinearLeastSquaresStation: DESStation {
                     trace: self.nls_core().trace.clone(),
                     topology: empty_station_graph(),
                 };
-                self.core_mut().emit(Rc::new(NLResultToken { result }), CH_NLS_RESULT);
+                self.core_mut()
+                    .emit(Rc::new(NLResultToken { result }), CH_NLS_RESULT);
                 continue;
             }
             let step = solve_linear(&system.a, &system.b);
-            let next: Vec<f64> = state.params.iter().enumerate().map(|(i, v)| v + step[i]).collect();
-            self.core_mut().emit(Rc::new(NLStateToken { iter: state.iter + 1, params: next, lambda: state.lambda }), CH_NLS_STATE);
+            let next: Vec<f64> = state
+                .params
+                .iter()
+                .enumerate()
+                .map(|(i, v)| v + step[i])
+                .collect();
+            self.core_mut().emit(
+                Rc::new(NLStateToken {
+                    iter: state.iter + 1,
+                    params: next,
+                    lambda: state.lambda,
+                }),
+                CH_NLS_STATE,
+            );
         }
     }
 }
@@ -424,8 +483,16 @@ pub struct GaussNewtonStation {
 }
 
 impl GaussNewtonStation {
-    pub fn new(id: impl Into<String>, points: Vec<CurveFitPoint>, max_iter: usize, tol: f64) -> Self {
-        GaussNewtonStation { core: StationCore::new(id), nls: NlsCore::new(points, max_iter, tol) }
+    pub fn new(
+        id: impl Into<String>,
+        points: Vec<CurveFitPoint>,
+        max_iter: usize,
+        tol: f64,
+    ) -> Self {
+        GaussNewtonStation {
+            core: StationCore::new(id),
+            nls: NlsCore::new(points, max_iter, tol),
+        }
     }
 }
 
@@ -466,8 +533,16 @@ pub struct LevenbergMarquardtStation {
 }
 
 impl LevenbergMarquardtStation {
-    pub fn new(id: impl Into<String>, points: Vec<CurveFitPoint>, max_iter: usize, tol: f64) -> Self {
-        LevenbergMarquardtStation { core: StationCore::new(id), nls: NlsCore::new(points, max_iter, tol) }
+    pub fn new(
+        id: impl Into<String>,
+        points: Vec<CurveFitPoint>,
+        max_iter: usize,
+        tol: f64,
+    ) -> Self {
+        LevenbergMarquardtStation {
+            core: StationCore::new(id),
+            nls: NlsCore::new(points, max_iter, tol),
+        }
     }
 }
 
@@ -501,18 +576,31 @@ impl NonlinearLeastSquaresStation for LevenbergMarquardtStation {
     }
 }
 
-pub fn run_gauss_newton_curve_fit(params: NonlinearLeastSquaresParams) -> NonlinearLeastSquaresResult {
+pub fn run_gauss_newton_curve_fit(
+    params: NonlinearLeastSquaresParams,
+) -> NonlinearLeastSquaresResult {
     let points = non_empty_array(params.points.as_deref(), &default_fit_points());
     let initial = non_empty_array(params.initial.as_deref(), &[1.0, -0.2]);
-    let update = GaussNewtonStation::new("gauss-newton-update", points, params.max_iter.unwrap_or(20), params.tol.unwrap_or(1e-8));
+    let update = GaussNewtonStation::new(
+        "gauss-newton-update",
+        points,
+        params.max_iter.unwrap_or(20),
+        params.tol.unwrap_or(1e-8),
+    );
     run_nls("gauss-newton-source", update, initial, 0.0)
 }
 
-pub fn run_levenberg_marquardt_curve_fit(params: NonlinearLeastSquaresParams) -> NonlinearLeastSquaresResult {
+pub fn run_levenberg_marquardt_curve_fit(
+    params: NonlinearLeastSquaresParams,
+) -> NonlinearLeastSquaresResult {
     let points = non_empty_array(params.points.as_deref(), &default_fit_points());
     let initial = non_empty_array(params.initial.as_deref(), &[1.0, -0.2]);
-    let update =
-        LevenbergMarquardtStation::new("levenberg-marquardt-update", points, params.max_iter.unwrap_or(30), params.tol.unwrap_or(1e-8));
+    let update = LevenbergMarquardtStation::new(
+        "levenberg-marquardt-update",
+        points,
+        params.max_iter.unwrap_or(30),
+        params.tol.unwrap_or(1e-8),
+    );
     run_nls("lm-source", update, initial, params.lambda.unwrap_or(0.1))
 }
 
@@ -527,12 +615,19 @@ fn run_nls<U: NonlinearLeastSquaresStation + 'static>(
     let source = Rc::new(RefCell::new(SingleTokenSourceStation::with_validator(
         source_id,
         CH_NLS_STATE,
-        move || NLStateToken { iter: 0, params: initial_factory.clone(), lambda },
+        move || NLStateToken {
+            iter: 0,
+            params: initial_factory.clone(),
+            lambda,
+        },
         move |t: &NLStateToken| validate_nls_initial_state(&model, t),
     )));
     let update_rc = Rc::new(RefCell::new(update));
     let update_id = update_rc.borrow().id().to_string();
-    let sink = Rc::new(RefCell::new(LatestTokenSinkStation::<NLResultToken>::new("nls-result-sink", CH_NLS_RESULT)));
+    let sink = Rc::new(RefCell::new(LatestTokenSinkStation::<NLResultToken>::new(
+        "nls-result-sink",
+        CH_NLS_RESULT,
+    )));
 
     run_state_loop_pipeline(
         source.clone() as StationRef,
@@ -540,10 +635,17 @@ fn run_nls<U: NonlinearLeastSquaresStation + 'static>(
         sink.clone() as StationRef,
         CH_NLS_STATE,
         CH_NLS_RESULT,
-        IterativeRunOptions { max_ticks: Some(200), ..Default::default() },
+        IterativeRunOptions {
+            max_ticks: Some(200),
+            ..Default::default()
+        },
     );
 
-    let latest = sink.borrow().latest.clone().unwrap_or_else(|| panic!("{update_id} did not produce a result"));
+    let latest = sink
+        .borrow()
+        .latest
+        .clone()
+        .unwrap_or_else(|| panic!("{update_id} did not produce a result"));
     let mut result = latest.result.clone();
     result.topology = state_loop_topology(
         &*source.borrow(),
@@ -559,7 +661,13 @@ fn run_nls<U: NonlinearLeastSquaresStation + 'static>(
 // ── Validators ────────────────────────────────────────────────────────────────
 
 fn validate_opt_initial_state(model: &str, token: &OptStateToken) {
-    require(Preconditions::integer_in_range(model, "iter", token.iter as f64, 0.0, 1e9));
+    require(Preconditions::integer_in_range(
+        model,
+        "iter",
+        token.iter as f64,
+        0.0,
+        1e9,
+    ));
     require(Preconditions::length_eq(model, "x0", &token.x, 2));
     require(Preconditions::all_finite(model, "x0", &token.x));
     if let Some(h) = &token.h {
@@ -572,7 +680,13 @@ fn validate_opt_initial_state(model: &str, token: &OptStateToken) {
 }
 
 fn validate_nls_initial_state(model: &str, token: &NLStateToken) {
-    require(Preconditions::integer_in_range(model, "iter", token.iter as f64, 0.0, 1e9));
+    require(Preconditions::integer_in_range(
+        model,
+        "iter",
+        token.iter as f64,
+        0.0,
+        1e9,
+    ));
     require(Preconditions::length_eq(model, "initial", &token.params, 2));
     require(Preconditions::all_finite(model, "initial", &token.params));
     require(Preconditions::non_negative(model, "lambda", token.lambda));
@@ -614,7 +728,11 @@ fn backtracking(x: &[f64], p: &[f64], f: fn(&[f64]) -> f64, g: &[f64]) -> f64 {
     let f0 = f(x);
     let slope = dot(g, p);
     while alpha > 1e-8 {
-        let next: Vec<f64> = x.iter().enumerate().map(|(i, v)| v + alpha * p[i]).collect();
+        let next: Vec<f64> = x
+            .iter()
+            .enumerate()
+            .map(|(i, v)| v + alpha * p[i])
+            .collect();
         if f(&next) <= f0 + 1e-4 * alpha * slope {
             return alpha;
         }
@@ -634,7 +752,8 @@ fn bfgs_inverse_update(h: &[Vec<f64>], s: &[f64], y: &[f64]) -> Vec<Vec<f64>> {
     let mut out: Vec<Vec<f64>> = h.iter().map(|row| row.clone()).collect();
     for i in 0..2 {
         for j in 0..2 {
-            out[i][j] += (1.0 + y_hy * rho) * rho * s[i] * s[j] - rho * (s[i] * hy[j] + hy[i] * s[j]);
+            out[i][j] +=
+                (1.0 + y_hy * rho) * rho * s[i] * s[j] - rho * (s[i] * hy[j] + hy[i] * s[j]);
         }
     }
     out
@@ -713,15 +832,27 @@ mod tests {
     fn newton_reaches_rosenbrock_minimum() {
         let result = run_newton_rosenbrock(UnconstrainedOptParams::default());
         assert!(result.objective < 1e-8, "objective = {}", result.objective);
-        assert!((result.x[0] - 1.0).abs() < 1e-4 && (result.x[1] - 1.0).abs() < 1e-4, "x = {:?}", result.x);
+        assert!(
+            (result.x[0] - 1.0).abs() < 1e-4 && (result.x[1] - 1.0).abs() < 1e-4,
+            "x = {:?}",
+            result.x
+        );
         assert!(result.gradient_norm <= 1e-8);
     }
 
     #[test]
     fn bfgs_reaches_rosenbrock_minimum() {
-        let result = run_bfgs_rosenbrock(UnconstrainedOptParams { max_iter: Some(200), tol: Some(1e-6), ..Default::default() });
+        let result = run_bfgs_rosenbrock(UnconstrainedOptParams {
+            max_iter: Some(200),
+            tol: Some(1e-6),
+            ..Default::default()
+        });
         assert!(result.objective < 1e-4, "objective = {}", result.objective);
-        assert!((result.x[0] - 1.0).abs() < 1e-2 && (result.x[1] - 1.0).abs() < 1e-2, "x = {:?}", result.x);
+        assert!(
+            (result.x[0] - 1.0).abs() < 1e-2 && (result.x[1] - 1.0).abs() < 1e-2,
+            "x = {:?}",
+            result.x
+        );
     }
 
     #[test]
@@ -729,7 +860,11 @@ mod tests {
         let result = run_gauss_newton_curve_fit(NonlinearLeastSquaresParams::default());
         // Default data ~ 2 * exp(-0.5 x); SSE should be tiny.
         assert!(result.sse < 1e-2, "sse = {}", result.sse);
-        assert!((result.params[0] - 2.0).abs() < 0.2, "a = {}", result.params[0]);
+        assert!(
+            (result.params[0] - 2.0).abs() < 0.2,
+            "a = {}",
+            result.params[0]
+        );
         assert!(result.params[1] < 0.0, "b = {}", result.params[1]);
     }
 
@@ -737,6 +872,10 @@ mod tests {
     fn levenberg_marquardt_fits_exponential() {
         let result = run_levenberg_marquardt_curve_fit(NonlinearLeastSquaresParams::default());
         assert!(result.sse < 1e-1, "sse = {}", result.sse);
-        assert!((result.params[0] - 2.0).abs() < 0.3, "a = {}", result.params[0]);
+        assert!(
+            (result.params[0] - 2.0).abs() < 0.3,
+            "a = {}",
+            result.params[0]
+        );
     }
 }

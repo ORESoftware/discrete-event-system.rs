@@ -257,7 +257,8 @@ pub struct StagHuntResult {
 /// equilibrium they coordinate on.
 pub fn run_stag_hunt(opts: &StagHuntOpts) -> StagHuntResult {
     let cls = "runStagHunt";
-    Preconditions::integer_in_range(cls, "numEpisodes", opts.num_episodes as f64, 1.0, 1e9).unwrap();
+    Preconditions::integer_in_range(cls, "numEpisodes", opts.num_episodes as f64, 1.0, 1e9)
+        .unwrap();
     if let Some(alpha) = opts.alpha {
         Preconditions::positive(cls, "alpha", alpha).unwrap();
     }
@@ -324,7 +325,10 @@ pub fn run_stag_hunt(opts: &StagHuntOpts) -> StagHuntResult {
         })),
     });
 
-    let greedy = [a1.borrow_mut().greedy_action(), a2.borrow_mut().greedy_action()];
+    let greedy = [
+        a1.borrow_mut().greedy_action(),
+        a2.borrow_mut().greedy_action(),
+    ];
 
     // Recent returns over the last (up to) 100 episodes.
     let hist = &summary.reward_history;

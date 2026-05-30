@@ -73,9 +73,19 @@ impl WindMpptScene {
             spin_angle.push(angle);
         }
         let times: Vec<f64> = opts.samples.iter().map(|s| s.time).collect();
-        let max_power = opts.samples.iter().map(|s| s.mech_power).fold(1.0_f64, f64::max);
+        let max_power = opts
+            .samples
+            .iter()
+            .map(|s| s.mech_power)
+            .fold(1.0_f64, f64::max);
         let max_omega = opts.samples.iter().map(|s| s.omega).fold(1.0_f64, f64::max);
-        WindMpptScene { opts, spin_angle, times, max_power, max_omega }
+        WindMpptScene {
+            opts,
+            spin_angle,
+            times,
+            max_power,
+            max_omega,
+        }
     }
 
     pub fn frame_count(&self) -> usize {
@@ -91,7 +101,14 @@ impl WindMpptScene {
     pub fn frame_at(&self, i: usize) -> FrameParts {
         let s = &self.opts.samples[i];
         let mut shapes: Vec<Shape> = Vec::new();
-        shapes.push(Shape::Rect(RectShape { x: 0.0, y: 0.0, w: WIND_STAGE_W, h: WIND_STAGE_H, fill: COL_BG.to_string(), ..Default::default() }));
+        shapes.push(Shape::Rect(RectShape {
+            x: 0.0,
+            y: 0.0,
+            w: WIND_STAGE_W,
+            h: WIND_STAGE_H,
+            fill: COL_BG.to_string(),
+            ..Default::default()
+        }));
         shapes.push(Shape::Text(TextShape {
             x: WIND_STAGE_W / 2.0,
             y: 34.0,
@@ -99,7 +116,10 @@ impl WindMpptScene {
             font_size: Some(22.0),
             font_weight: Some(FontWeight::Bold),
             fill: Some("#f8fafc".to_string()),
-            text: format!("Wind MPPT — PMSG WECS  \u{00b7}  {}", self.opts.controller_name),
+            text: format!(
+                "Wind MPPT — PMSG WECS  \u{00b7}  {}",
+                self.opts.controller_name
+            ),
             ..Default::default()
         }));
 
@@ -127,7 +147,11 @@ impl WindMpptScene {
         let t = &self.times;
         let samples = &self.opts.samples;
         let end = t[t.len() - 1];
-        let lambda_max = samples.iter().map(|s| s.lambda).fold(self.opts.lambda_star * 1.4, f64::max) + 1.0;
+        let lambda_max = samples
+            .iter()
+            .map(|s| s.lambda)
+            .fold(self.opts.lambda_star * 1.4, f64::max)
+            + 1.0;
         vec![
             ChartSpec {
                 x: 40.0,
@@ -139,8 +163,18 @@ impl WindMpptScene {
                 y_min: Some(0.0),
                 y_max: Some(lambda_max),
                 series: vec![
-                    ChartSeries { label: "\u{03bb}".to_string(), color: COL_LAMBDA.to_string(), t: t.clone(), y: samples.iter().map(|s| s.lambda).collect() },
-                    ChartSeries { label: "\u{03bb}*".to_string(), color: COL_TARGET.to_string(), t: vec![t[0], end], y: vec![self.opts.lambda_star, self.opts.lambda_star] },
+                    ChartSeries {
+                        label: "\u{03bb}".to_string(),
+                        color: COL_LAMBDA.to_string(),
+                        t: t.clone(),
+                        y: samples.iter().map(|s| s.lambda).collect(),
+                    },
+                    ChartSeries {
+                        label: "\u{03bb}*".to_string(),
+                        color: COL_TARGET.to_string(),
+                        t: vec![t[0], end],
+                        y: vec![self.opts.lambda_star, self.opts.lambda_star],
+                    },
                 ],
                 ..Default::default()
             },
@@ -154,8 +188,18 @@ impl WindMpptScene {
                 y_min: Some(0.0),
                 y_max: Some(self.opts.cp_max * 1.25),
                 series: vec![
-                    ChartSeries { label: "C_p".to_string(), color: COL_CP.to_string(), t: t.clone(), y: samples.iter().map(|s| s.cp).collect() },
-                    ChartSeries { label: "C_p,max".to_string(), color: COL_TARGET.to_string(), t: vec![t[0], end], y: vec![self.opts.cp_max, self.opts.cp_max] },
+                    ChartSeries {
+                        label: "C_p".to_string(),
+                        color: COL_CP.to_string(),
+                        t: t.clone(),
+                        y: samples.iter().map(|s| s.cp).collect(),
+                    },
+                    ChartSeries {
+                        label: "C_p,max".to_string(),
+                        color: COL_TARGET.to_string(),
+                        t: vec![t[0], end],
+                        y: vec![self.opts.cp_max, self.opts.cp_max],
+                    },
                 ],
                 ..Default::default()
             },
@@ -168,7 +212,12 @@ impl WindMpptScene {
                 y_label: Some("\u{03c9}".to_string()),
                 y_min: Some(0.0),
                 y_max: Some(self.max_omega * 1.15),
-                series: vec![ChartSeries { label: "\u{03c9}".to_string(), color: COL_OMEGA.to_string(), t: t.clone(), y: samples.iter().map(|s| s.omega).collect() }],
+                series: vec![ChartSeries {
+                    label: "\u{03c9}".to_string(),
+                    color: COL_OMEGA.to_string(),
+                    t: t.clone(),
+                    y: samples.iter().map(|s| s.omega).collect(),
+                }],
                 ..Default::default()
             },
             ChartSpec {
@@ -180,7 +229,12 @@ impl WindMpptScene {
                 y_label: Some("kW".to_string()),
                 y_min: Some(0.0),
                 y_max: Some((self.max_power / 1000.0) * 1.15),
-                series: vec![ChartSeries { label: "P".to_string(), color: COL_POWER.to_string(), t: t.clone(), y: samples.iter().map(|s| s.mech_power / 1000.0).collect() }],
+                series: vec![ChartSeries {
+                    label: "P".to_string(),
+                    color: COL_POWER.to_string(),
+                    t: t.clone(),
+                    y: samples.iter().map(|s| s.mech_power / 1000.0).collect(),
+                }],
                 ..Default::default()
             },
         ]
@@ -191,27 +245,72 @@ impl WindMpptScene {
         let len = 40.0 + wind_speed * 6.0;
         for k in 0..arrow_count {
             let y = 140.0 + k as f64 * 36.0;
-            shapes.push(Shape::Line(LineShape { x1: 60.0, y1: y, x2: 60.0 + len, y2: y, stroke: COL_WIND.to_string(), stroke_width: Some(2.0), opacity: Some(0.8), ..Default::default() }));
+            shapes.push(Shape::Line(LineShape {
+                x1: 60.0,
+                y1: y,
+                x2: 60.0 + len,
+                y2: y,
+                stroke: COL_WIND.to_string(),
+                stroke_width: Some(2.0),
+                opacity: Some(0.8),
+                ..Default::default()
+            }));
             shapes.push(Shape::Path(PathShape {
-                d: format!("M {},{} L {},{} L {},{}", to_fixed_raw(60.0 + len - 10.0), to_fixed_raw(y - 5.0), to_fixed_raw(60.0 + len), to_fixed_raw(y), to_fixed_raw(60.0 + len - 10.0), to_fixed_raw(y + 5.0)),
+                d: format!(
+                    "M {},{} L {},{} L {},{}",
+                    to_fixed_raw(60.0 + len - 10.0),
+                    to_fixed_raw(y - 5.0),
+                    to_fixed_raw(60.0 + len),
+                    to_fixed_raw(y),
+                    to_fixed_raw(60.0 + len - 10.0),
+                    to_fixed_raw(y + 5.0)
+                ),
                 stroke: Some(COL_WIND.to_string()),
                 fill: Some(COL_WIND.to_string()),
                 ..Default::default()
             }));
         }
-        shapes.push(Shape::Text(TextShape { x: 60.0, y: 120.0, anchor: Some(Anchor::Start), font_size: Some(14.0), fill: Some(COL_WIND.to_string()), font_weight: Some(FontWeight::Bold), text: format!("wind {} m/s \u{2192}", to_fixed(wind_speed, 1)), ..Default::default() }));
+        shapes.push(Shape::Text(TextShape {
+            x: 60.0,
+            y: 120.0,
+            anchor: Some(Anchor::Start),
+            font_size: Some(14.0),
+            fill: Some(COL_WIND.to_string()),
+            font_weight: Some(FontWeight::Bold),
+            text: format!("wind {} m/s \u{2192}", to_fixed(wind_speed, 1)),
+            ..Default::default()
+        }));
     }
 
     fn draw_turbine(&self, shapes: &mut Vec<Shape>, cx: f64, cy: f64, angle: f64) {
         // Tower.
         shapes.push(Shape::Path(PathShape {
-            d: format!("M {},{} L {},{} L {},{} L {},{} Z", to_fixed_raw(cx - 14.0), to_fixed_raw(cy + 260.0), to_fixed_raw(cx - 5.0), to_fixed_raw(cy), to_fixed_raw(cx + 5.0), to_fixed_raw(cy), to_fixed_raw(cx + 14.0), to_fixed_raw(cy + 260.0)),
+            d: format!(
+                "M {},{} L {},{} L {},{} L {},{} Z",
+                to_fixed_raw(cx - 14.0),
+                to_fixed_raw(cy + 260.0),
+                to_fixed_raw(cx - 5.0),
+                to_fixed_raw(cy),
+                to_fixed_raw(cx + 5.0),
+                to_fixed_raw(cy),
+                to_fixed_raw(cx + 14.0),
+                to_fixed_raw(cy + 260.0)
+            ),
             fill: Some("#475569".to_string()),
             stroke: Some("#1e293b".to_string()),
             ..Default::default()
         }));
         // Nacelle.
-        shapes.push(Shape::Rect(RectShape { x: cx - 18.0, y: cy - 14.0, w: 50.0, h: 28.0, rx: Some(6.0), fill: "#64748b".to_string(), stroke: Some("#1e293b".to_string()), ..Default::default() }));
+        shapes.push(Shape::Rect(RectShape {
+            x: cx - 18.0,
+            y: cy - 14.0,
+            w: 50.0,
+            h: 28.0,
+            rx: Some(6.0),
+            fill: "#64748b".to_string(),
+            stroke: Some("#1e293b".to_string()),
+            ..Default::default()
+        }));
         // Three blades.
         for b in 0..3 {
             let a = angle + (b as f64 * 2.0 * std::f64::consts::PI) / 3.0;
@@ -220,7 +319,15 @@ impl WindMpptScene {
             let perp_x = 12.0 * (a + std::f64::consts::FRAC_PI_2).cos();
             let perp_y = 12.0 * (a + std::f64::consts::FRAC_PI_2).sin();
             shapes.push(Shape::Path(PathShape {
-                d: format!("M {},{} L {},{} L {},{} Z", to_fixed_raw(cx + perp_x), to_fixed_raw(cy + perp_y), to_fixed_raw(tip_x), to_fixed_raw(tip_y), to_fixed_raw(cx - perp_x), to_fixed_raw(cy - perp_y)),
+                d: format!(
+                    "M {},{} L {},{} L {},{} Z",
+                    to_fixed_raw(cx + perp_x),
+                    to_fixed_raw(cy + perp_y),
+                    to_fixed_raw(tip_x),
+                    to_fixed_raw(tip_y),
+                    to_fixed_raw(cx - perp_x),
+                    to_fixed_raw(cy - perp_y)
+                ),
                 fill: Some(COL_BLADE.to_string()),
                 stroke: Some("#94a3b8".to_string()),
                 opacity: Some(0.95),
@@ -228,26 +335,107 @@ impl WindMpptScene {
             }));
         }
         // Hub.
-        shapes.push(Shape::Circle(CircleShape { x: cx, y: cy, r: 14.0, fill: COL_HUB.to_string(), stroke: Some("#1e293b".to_string()), stroke_width: Some(2.0), ..Default::default() }));
+        shapes.push(Shape::Circle(CircleShape {
+            x: cx,
+            y: cy,
+            r: 14.0,
+            fill: COL_HUB.to_string(),
+            stroke: Some("#1e293b".to_string()),
+            stroke_width: Some(2.0),
+            ..Default::default()
+        }));
     }
 
     fn draw_gauges(&self, shapes: &mut Vec<Shape>, s: &TurbineStateToken) {
-        self.draw_bar(shapes, 720.0, 110.0, "\u{03bb} / \u{03bb}*", s.lambda, self.opts.lambda_star, self.opts.lambda_star * 1.4, COL_LAMBDA);
-        self.draw_bar(shapes, 850.0, 110.0, "C_p / C_p,max", s.cp, self.opts.cp_max, self.opts.cp_max * 1.25, COL_CP);
+        self.draw_bar(
+            shapes,
+            720.0,
+            110.0,
+            "\u{03bb} / \u{03bb}*",
+            s.lambda,
+            self.opts.lambda_star,
+            self.opts.lambda_star * 1.4,
+            COL_LAMBDA,
+        );
+        self.draw_bar(
+            shapes,
+            850.0,
+            110.0,
+            "C_p / C_p,max",
+            s.cp,
+            self.opts.cp_max,
+            self.opts.cp_max * 1.25,
+            COL_CP,
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn draw_bar(&self, shapes: &mut Vec<Shape>, x: f64, y: f64, label: &str, value: f64, target: f64, max: f64, color: &str) {
+    fn draw_bar(
+        &self,
+        shapes: &mut Vec<Shape>,
+        x: f64,
+        y: f64,
+        label: &str,
+        value: f64,
+        target: f64,
+        max: f64,
+        color: &str,
+    ) {
         let h = 300.0;
         let w = 46.0;
-        shapes.push(Shape::Rect(RectShape { x, y, w, h, rx: Some(6.0), fill: COL_PANEL.to_string(), stroke: Some("#334155".to_string()), ..Default::default() }));
+        shapes.push(Shape::Rect(RectShape {
+            x,
+            y,
+            w,
+            h,
+            rx: Some(6.0),
+            fill: COL_PANEL.to_string(),
+            stroke: Some("#334155".to_string()),
+            ..Default::default()
+        }));
         let frac = (value / max).clamp(0.0, 1.0);
         let fill_h = frac * (h - 4.0);
-        shapes.push(Shape::Rect(RectShape { x: x + 2.0, y: y + h - 2.0 - fill_h, w: w - 4.0, h: fill_h, rx: Some(4.0), fill: color.to_string(), opacity: Some(0.9), ..Default::default() }));
+        shapes.push(Shape::Rect(RectShape {
+            x: x + 2.0,
+            y: y + h - 2.0 - fill_h,
+            w: w - 4.0,
+            h: fill_h,
+            rx: Some(4.0),
+            fill: color.to_string(),
+            opacity: Some(0.9),
+            ..Default::default()
+        }));
         let tgt_y = y + h - 2.0 - (target / max).min(1.0) * (h - 4.0);
-        shapes.push(Shape::Line(LineShape { x1: x - 6.0, y1: tgt_y, x2: x + w + 6.0, y2: tgt_y, stroke: COL_TARGET.to_string(), stroke_width: Some(2.0), dasharray: Some("5,3".to_string()), ..Default::default() }));
-        shapes.push(Shape::Text(TextShape { x: x + w / 2.0, y: y - 10.0, anchor: Some(Anchor::Middle), font_size: Some(12.0), fill: Some("#cbd5e1".to_string()), font_weight: Some(FontWeight::Bold), text: label.to_string(), ..Default::default() }));
-        shapes.push(Shape::Text(TextShape { x: x + w / 2.0, y: y + h + 18.0, anchor: Some(Anchor::Middle), font_size: Some(13.0), fill: Some(color.to_string()), font_weight: Some(FontWeight::Bold), text: to_fixed(value, 2), ..Default::default() }));
+        shapes.push(Shape::Line(LineShape {
+            x1: x - 6.0,
+            y1: tgt_y,
+            x2: x + w + 6.0,
+            y2: tgt_y,
+            stroke: COL_TARGET.to_string(),
+            stroke_width: Some(2.0),
+            dasharray: Some("5,3".to_string()),
+            ..Default::default()
+        }));
+        shapes.push(Shape::Text(TextShape {
+            x: x + w / 2.0,
+            y: y - 10.0,
+            anchor: Some(Anchor::Middle),
+            font_size: Some(12.0),
+            fill: Some("#cbd5e1".to_string()),
+            font_weight: Some(FontWeight::Bold),
+            text: label.to_string(),
+            ..Default::default()
+        }));
+        shapes.push(Shape::Text(TextShape {
+            x: x + w / 2.0,
+            y: y + h + 18.0,
+            anchor: Some(Anchor::Middle),
+            font_size: Some(13.0),
+            fill: Some(color.to_string()),
+            font_weight: Some(FontWeight::Bold),
+            text: to_fixed(value, 2),
+            ..Default::default()
+        }));
     }
 
     fn draw_readouts(&self, shapes: &mut Vec<Shape>, s: &TurbineStateToken) {
@@ -255,11 +443,53 @@ impl WindMpptScene {
         let y = 440.0;
         let w = 260.0;
         let h = 80.0;
-        shapes.push(Shape::Rect(RectShape { x, y, w, h, rx: Some(8.0), fill: COL_PANEL.to_string(), stroke: Some("#334155".to_string()), ..Default::default() }));
-        shapes.push(Shape::Text(TextShape { x: x + 14.0, y: y + 24.0, anchor: Some(Anchor::Start), font_size: Some(13.0), fill: Some("#94a3b8".to_string()), text: "Captured power".to_string(), ..Default::default() }));
-        shapes.push(Shape::Text(TextShape { x: x + 14.0, y: y + 56.0, anchor: Some(Anchor::Start), font_size: Some(26.0), fill: Some(COL_POWER.to_string()), font_weight: Some(FontWeight::Bold), text: format!("{} kW", to_fixed(s.mech_power / 1000.0, 2)), ..Default::default() }));
-        shapes.push(Shape::Text(TextShape { x: x + w - 14.0, y: y + 24.0, anchor: Some(Anchor::End), font_size: Some(12.0), fill: Some("#94a3b8".to_string()), text: format!("T_gen = {} N\u{00b7}m", to_fixed(s.gen_torque, 2)), ..Default::default() }));
-        shapes.push(Shape::Text(TextShape { x: x + w - 14.0, y: y + 56.0, anchor: Some(Anchor::End), font_size: Some(12.0), fill: Some("#94a3b8".to_string()), text: format!("K_opt = {}", to_exponential(self.opts.k_opt, 2)), ..Default::default() }));
+        shapes.push(Shape::Rect(RectShape {
+            x,
+            y,
+            w,
+            h,
+            rx: Some(8.0),
+            fill: COL_PANEL.to_string(),
+            stroke: Some("#334155".to_string()),
+            ..Default::default()
+        }));
+        shapes.push(Shape::Text(TextShape {
+            x: x + 14.0,
+            y: y + 24.0,
+            anchor: Some(Anchor::Start),
+            font_size: Some(13.0),
+            fill: Some("#94a3b8".to_string()),
+            text: "Captured power".to_string(),
+            ..Default::default()
+        }));
+        shapes.push(Shape::Text(TextShape {
+            x: x + 14.0,
+            y: y + 56.0,
+            anchor: Some(Anchor::Start),
+            font_size: Some(26.0),
+            fill: Some(COL_POWER.to_string()),
+            font_weight: Some(FontWeight::Bold),
+            text: format!("{} kW", to_fixed(s.mech_power / 1000.0, 2)),
+            ..Default::default()
+        }));
+        shapes.push(Shape::Text(TextShape {
+            x: x + w - 14.0,
+            y: y + 24.0,
+            anchor: Some(Anchor::End),
+            font_size: Some(12.0),
+            fill: Some("#94a3b8".to_string()),
+            text: format!("T_gen = {} N\u{00b7}m", to_fixed(s.gen_torque, 2)),
+            ..Default::default()
+        }));
+        shapes.push(Shape::Text(TextShape {
+            x: x + w - 14.0,
+            y: y + 56.0,
+            anchor: Some(Anchor::End),
+            font_size: Some(12.0),
+            fill: Some("#94a3b8".to_string()),
+            text: format!("K_opt = {}", to_exponential(self.opts.k_opt, 2)),
+            ..Default::default()
+        }));
     }
 }
 
@@ -274,7 +504,15 @@ mod tests {
     use super::*;
 
     fn sample(time: f64) -> TurbineStateToken {
-        TurbineStateToken { time, omega: 2.0, wind_speed: 8.0, lambda: 7.0, cp: 0.45, mech_power: 1500.0, gen_torque: 5.0 }
+        TurbineStateToken {
+            time,
+            omega: 2.0,
+            wind_speed: 8.0,
+            lambda: 7.0,
+            cp: 0.45,
+            mech_power: 1500.0,
+            gen_torque: 5.0,
+        }
     }
 
     #[test]

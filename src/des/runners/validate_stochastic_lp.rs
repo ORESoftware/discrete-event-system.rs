@@ -71,7 +71,11 @@ fn build_production_slp(c: &[f64], p: &[f64], budget: Option<f64>) -> Slp {
     }
 }
 
-fn build_production_scenarios(ranges: &[(f64, f64)], _opts: ScenarioOpts, n: usize) -> Vec<Scenario> {
+fn build_production_scenarios(
+    ranges: &[(f64, f64)],
+    _opts: ScenarioOpts,
+    n: usize,
+) -> Vec<Scenario> {
     // PORT NOTE: real impl draws U(a,b) demands via a seeded RNG. The stub
     // returns `n` deterministic mid-range scenarios so downstream indexing is sound.
     let d: Vec<f64> = ranges.iter().map(|(a, b)| 0.5 * (a + b)).collect();
@@ -122,7 +126,12 @@ impl Checker {
         } else {
             format!("  — {}", detail)
         };
-        println!("{}  {}{}", if ok { "  PASS" } else { "  FAIL" }, label, tail);
+        println!(
+            "{}  {}{}",
+            if ok { "  PASS" } else { "  FAIL" },
+            label,
+            tail
+        );
         if ok {
             self.pass += 1;
         } else {
@@ -130,7 +139,11 @@ impl Checker {
         }
     }
     fn close(&mut self, label: &str, a: f64, b: f64, tol: f64) {
-        self.check(label, (a - b).abs() <= tol, &format!("|{:.6} − {:.6}| = {:.2e}", a, b, (a - b).abs()));
+        self.check(
+            label,
+            (a - b).abs() <= tol,
+            &format!("|{:.6} − {:.6}| = {:.2e}", a, b, (a - b).abs()),
+        );
     }
     fn arr_close(&mut self, label: &str, a: &[f64], b: &[f64], tol: f64) {
         if a.len() != b.len() {
@@ -181,12 +194,35 @@ pub fn run() {
                     mono.status == "optimal" && bend.status == "optimal",
                     "",
                 );
-                c_chk.close(&format!("A.{}.{} z (mono ≡ Benders)", n, seed), mono.objective, bend.objective, 1e-6);
+                c_chk.close(
+                    &format!("A.{}.{} z (mono ≡ Benders)", n, seed),
+                    mono.objective,
+                    bend.objective,
+                    1e-6,
+                );
                 let z_mono_eval = eval_saa_objective(&mono.x, &scenarios, &c, &p);
                 let z_bend_eval = eval_saa_objective(&bend.x, &scenarios, &c, &p);
-                c_chk.close(&format!("A.{}.{} mono.x evaluates to mono.z", n, seed), z_mono_eval, mono.objective, 1e-6);
-                c_chk.close(&format!("A.{}.{} Benders.x evaluates to Benders.z", n, seed), z_bend_eval, bend.objective, 1e-6);
-                c_chk.close(&format!("A.{}.{} both x's are equally optimal under same scenarios", n, seed), z_mono_eval, z_bend_eval, 1e-6);
+                c_chk.close(
+                    &format!("A.{}.{} mono.x evaluates to mono.z", n, seed),
+                    z_mono_eval,
+                    mono.objective,
+                    1e-6,
+                );
+                c_chk.close(
+                    &format!("A.{}.{} Benders.x evaluates to Benders.z", n, seed),
+                    z_bend_eval,
+                    bend.objective,
+                    1e-6,
+                );
+                c_chk.close(
+                    &format!(
+                        "A.{}.{} both x's are equally optimal under same scenarios",
+                        n, seed
+                    ),
+                    z_mono_eval,
+                    z_bend_eval,
+                    1e-6,
+                );
             }
         }
     }
@@ -200,7 +236,10 @@ pub fn run() {
         println!(
             "  closed-form z* = {:.4}   x* = [{}]",
             z_true,
-            cf.x.iter().map(|v| format!("{:.4}", v)).collect::<Vec<_>>().join(", ")
+            cf.x.iter()
+                .map(|v| format!("{:.4}", v))
+                .collect::<Vec<_>>()
+                .join(", ")
         );
 
         let ns = [10usize, 100, 1000, 10000];
@@ -217,7 +256,13 @@ pub fn run() {
         for &n in &ns {
             let mut zs: Vec<f64> = Vec::new();
             for seed in 1..=r {
-                let sc = build_production_scenarios(&ranges, ScenarioOpts { seed: (seed * 1000 + n) as u64 }, n);
+                let sc = build_production_scenarios(
+                    &ranges,
+                    ScenarioOpts {
+                        seed: (seed * 1000 + n) as u64,
+                    },
+                    n,
+                );
                 let sol = solve_slp_benders(&slp_unc, &sc, 1e-7);
                 zs.push(sol.objective);
             }
@@ -229,10 +274,22 @@ pub fn run() {
             let mut gap_sum = 0.0;
             let mut gap_vals: Vec<f64> = Vec::new();
             for seed in 1..=r {
-                let sc = build_production_scenarios(&ranges, ScenarioOpts { seed: (seed * 1000 + n) as u64 }, n);
+                let sc = build_production_scenarios(
+                    &ranges,
+                    ScenarioOpts {
+                        seed: (seed * 1000 + n) as u64,
+                    },
+                    n,
+                );
                 let sol = solve_slp_benders(&slp_unc, &sc, 1e-7);
                 let oo_seed = 999000 + seed * 7;
-                let oo_scenarios = build_production_scenarios(&ranges, ScenarioOpts { seed: oo_seed as u64 }, 5000);
+                let oo_scenarios = build_production_scenarios(
+                    &ranges,
+                    ScenarioOpts {
+                        seed: oo_seed as u64,
+                    },
+                    5000,
+                );
                 let mut z_eval = 0.0;
                 for i in 0..c.len() {
                     z_eval += -c[i] * sol.x[i];
@@ -251,9 +308,17 @@ pub fn run() {
                 gap_sum += g;
             }
             let mean_gap = gap_sum / r as f64;
-            let var_gap = gap_vals.iter().map(|g| (g - mean_gap).powi(2)).sum::<f64>() / (r as f64 - 1.0);
+            let var_gap =
+                gap_vals.iter().map(|g| (g - mean_gap).powi(2)).sum::<f64>() / (r as f64 - 1.0);
             let stderr_gap = (var_gap / r as f64).sqrt();
-            stats.push(Stat { n, mean_z, stderr_z, bias_z, mean_gap, stderr_gap });
+            stats.push(Stat {
+                n,
+                mean_z,
+                stderr_z,
+                bias_z,
+                mean_gap,
+                stderr_gap,
+            });
             println!(
                 "  N={:>5}   mean SAA z* = {:.3} ± {:.3}   bias = {:.3}   out-of-sample gap = {:.3} ± {:.3}",
                 n, mean_z, stderr_z, bias_z, mean_gap, stderr_gap
@@ -268,7 +333,11 @@ pub fn run() {
         c_chk.check(
             "SAA z* approaches true z* at N = 10000",
             stats[3].bias_z.abs() <= 0.02 * z_true.abs(),
-            &format!("bias={:.3} vs 2% of zTrue={:.3}", stats[3].bias_z, 0.02 * z_true.abs()),
+            &format!(
+                "bias={:.3} vs 2% of zTrue={:.3}",
+                stats[3].bias_z,
+                0.02 * z_true.abs()
+            ),
         );
         let gap_shrinks = stats[3].mean_gap < stats[0].mean_gap;
         c_chk.check(
@@ -315,9 +384,17 @@ pub fn run() {
             c_chk.check(
                 &format!("D.{} mono ≡ Benders z", budget),
                 (mono.objective - bend.objective).abs() <= 1e-5,
-                &format!("mono z = {:.4}, Benders z = {:.4}", mono.objective, bend.objective),
+                &format!(
+                    "mono z = {:.4}, Benders z = {:.4}",
+                    mono.objective, bend.objective
+                ),
             );
-            c_chk.arr_close(&format!("D.{} mono ≡ Benders x", budget), &mono.x, &bend.x, 1e-4);
+            c_chk.arr_close(
+                &format!("D.{} mono ≡ Benders x", budget),
+                &mono.x,
+                &bend.x,
+                1e-4,
+            );
             let total_x = mono.x[0] + mono.x[1];
             c_chk.check(
                 &format!("D.{} budget feasibility (Σx ≤ {})", budget, budget),
@@ -327,7 +404,12 @@ pub fn run() {
         }
     }
 
-    println!("\n{} checks: {} passed, {} failed", c_chk.pass + c_chk.fail, c_chk.pass, c_chk.fail);
+    println!(
+        "\n{} checks: {} passed, {} failed",
+        c_chk.pass + c_chk.fail,
+        c_chk.pass,
+        c_chk.fail
+    );
     if c_chk.fail > 0 {
         std::process::exit(1);
     }

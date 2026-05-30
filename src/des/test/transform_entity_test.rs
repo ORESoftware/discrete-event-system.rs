@@ -27,8 +27,9 @@ mod tests {
         ChannelName, DESStation, StationCore, StationRef, DEFAULT_CHANNEL,
     };
     use crate::des::general::des_base::transform_entity::{
-        FunctionEntity, MemoryTransformEntity, OutputChannel, PureTransformEntity, TransformContext,
-        TransformEntity, TransformEntityCore, TransformEntityOptions, TransformResult,
+        FunctionEntity, MemoryTransformEntity, OutputChannel, PureTransformEntity,
+        TransformContext, TransformEntity, TransformEntityCore, TransformEntityOptions,
+        TransformResult,
     };
 
     /// Sink that collects the numeric tokens routed to it on the given channels.
@@ -82,7 +83,11 @@ mod tests {
         }
     }
     impl PureTransformEntity<i64, i64> for SquareNumberTransform {
-        fn transform(&mut self, token: &i64, _ctx: &mut TransformContext<i64>) -> TransformResult<i64> {
+        fn transform(
+            &mut self,
+            token: &i64,
+            _ctx: &mut TransformContext<i64>,
+        ) -> TransformResult<i64> {
             TransformResult::One(token * token)
         }
     }
@@ -179,10 +184,11 @@ mod tests {
             |x: &i64, _ctx: &mut TransformContext<i64>| TransformResult::Many(vec![*x, *x + 1]),
             TransformEntityOptions::default(),
         );
-        fanout
-            .tcore_mut()
-            .station
-            .pipe(sink.clone() as StationRef, DEFAULT_CHANNEL, DEFAULT_CHANNEL);
+        fanout.tcore_mut().station.pipe(
+            sink.clone() as StationRef,
+            DEFAULT_CHANNEL,
+            DEFAULT_CHANNEL,
+        );
 
         fanout.take(Rc::new(10_i64), DEFAULT_CHANNEL);
         sink.borrow_mut().run_time_step();
@@ -195,10 +201,11 @@ mod tests {
         let mut square = SquareNumberTransform {
             tcore: TransformEntityCore::new("pure-square", TransformEntityOptions::default()),
         };
-        square
-            .tcore_mut()
-            .station
-            .pipe(sink.clone() as StationRef, DEFAULT_CHANNEL, DEFAULT_CHANNEL);
+        square.tcore_mut().station.pipe(
+            sink.clone() as StationRef,
+            DEFAULT_CHANNEL,
+            DEFAULT_CHANNEL,
+        );
 
         square.take(Rc::new(5_i64), DEFAULT_CHANNEL);
         sink.borrow_mut().run_time_step();
@@ -212,10 +219,11 @@ mod tests {
             tcore: TransformEntityCore::new("running-sum", TransformEntityOptions::default()),
             previous: 0,
         };
-        running
-            .tcore_mut()
-            .station
-            .pipe(sink.clone() as StationRef, DEFAULT_CHANNEL, DEFAULT_CHANNEL);
+        running.tcore_mut().station.pipe(
+            sink.clone() as StationRef,
+            DEFAULT_CHANNEL,
+            DEFAULT_CHANNEL,
+        );
 
         running.take(Rc::new(2_i64), DEFAULT_CHANNEL);
         running.take(Rc::new(3_i64), DEFAULT_CHANNEL);
@@ -272,6 +280,9 @@ mod tests {
         let result = catch_unwind(AssertUnwindSafe(|| {
             strict.take(Rc::new(1_i64), "wrong");
         }));
-        assert!(result.is_err(), "take on an unexpected channel should panic");
+        assert!(
+            result.is_err(),
+            "take on an unexpected channel should panic"
+        );
     }
 }

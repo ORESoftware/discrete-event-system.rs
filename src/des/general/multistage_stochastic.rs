@@ -42,7 +42,9 @@ use crate::des::general::des_base::preconditions::{Check, Preconditions};
 use crate::des::general::des_base::runner::{run_iterative_des, IterativeRunOptions};
 use crate::des::general::des_base::station::{DESStation, StationCore};
 use crate::des::general::des_base::validation::intrinsic_check;
-use crate::des::general::lp::{self, solve_lp_internal, InternalSimplexOptions, LPProblem, LPStatus};
+use crate::des::general::lp::{
+    self, solve_lp_internal, InternalSimplexOptions, LPProblem, LPStatus,
+};
 use crate::des::shared::capabilities::{RandomSource, SeededRandom};
 use crate::des::shared::transform::Transform;
 
@@ -204,37 +206,142 @@ pub fn build_default_multi_stage_inventory_problem() -> MultiStageInventoryProbl
         stockout_cost: vec![7.0, 7.0, 8.0, 8.0],
         salvage_value: 1.5,
         demands: vec![
-            vec![DemandOutcome { demand: 2.0, prob: 0.45 }, DemandOutcome { demand: 6.0, prob: 0.55 }],
-            vec![DemandOutcome { demand: 1.0, prob: 0.35 }, DemandOutcome { demand: 5.0, prob: 0.65 }],
-            vec![DemandOutcome { demand: 3.0, prob: 0.50 }, DemandOutcome { demand: 7.0, prob: 0.50 }],
-            vec![DemandOutcome { demand: 2.0, prob: 0.60 }, DemandOutcome { demand: 6.0, prob: 0.40 }],
+            vec![
+                DemandOutcome {
+                    demand: 2.0,
+                    prob: 0.45,
+                },
+                DemandOutcome {
+                    demand: 6.0,
+                    prob: 0.55,
+                },
+            ],
+            vec![
+                DemandOutcome {
+                    demand: 1.0,
+                    prob: 0.35,
+                },
+                DemandOutcome {
+                    demand: 5.0,
+                    prob: 0.65,
+                },
+            ],
+            vec![
+                DemandOutcome {
+                    demand: 3.0,
+                    prob: 0.50,
+                },
+                DemandOutcome {
+                    demand: 7.0,
+                    prob: 0.50,
+                },
+            ],
+            vec![
+                DemandOutcome {
+                    demand: 2.0,
+                    prob: 0.60,
+                },
+                DemandOutcome {
+                    demand: 6.0,
+                    prob: 0.40,
+                },
+            ],
         ],
     }
 }
 
 /// Validate the problem definition. TS `throw`s become `panic!` here.
 pub fn validate_multi_stage_problem(p: &MultiStageInventoryProblem) {
-    require(Preconditions::integer_in_range(MODEL, "horizon", p.horizon as f64, 1.0, 200.0));
+    require(Preconditions::integer_in_range(
+        MODEL,
+        "horizon",
+        p.horizon as f64,
+        1.0,
+        200.0,
+    ));
     require(Preconditions::positive(MODEL, "capacity", p.capacity));
-    require(Preconditions::in_range(MODEL, "initialInventory", p.initial_inventory, 0.0, p.capacity));
-    require(Preconditions::length_eq(MODEL, "maxOrder", &p.max_order, p.horizon));
-    require(Preconditions::length_eq(MODEL, "price", &p.price, p.horizon));
-    require(Preconditions::length_eq(MODEL, "orderCost", &p.order_cost, p.horizon));
-    require(Preconditions::length_eq(MODEL, "holdCost", &p.hold_cost, p.horizon));
-    require(Preconditions::length_eq(MODEL, "stockoutCost", &p.stockout_cost, p.horizon));
-    require(Preconditions::length_eq(MODEL, "demands", &p.demands, p.horizon));
-    require(Preconditions::arr_non_negative(MODEL, "maxOrder", &p.max_order));
+    require(Preconditions::in_range(
+        MODEL,
+        "initialInventory",
+        p.initial_inventory,
+        0.0,
+        p.capacity,
+    ));
+    require(Preconditions::length_eq(
+        MODEL,
+        "maxOrder",
+        &p.max_order,
+        p.horizon,
+    ));
+    require(Preconditions::length_eq(
+        MODEL, "price", &p.price, p.horizon,
+    ));
+    require(Preconditions::length_eq(
+        MODEL,
+        "orderCost",
+        &p.order_cost,
+        p.horizon,
+    ));
+    require(Preconditions::length_eq(
+        MODEL,
+        "holdCost",
+        &p.hold_cost,
+        p.horizon,
+    ));
+    require(Preconditions::length_eq(
+        MODEL,
+        "stockoutCost",
+        &p.stockout_cost,
+        p.horizon,
+    ));
+    require(Preconditions::length_eq(
+        MODEL, "demands", &p.demands, p.horizon,
+    ));
+    require(Preconditions::arr_non_negative(
+        MODEL,
+        "maxOrder",
+        &p.max_order,
+    ));
     require(Preconditions::arr_non_negative(MODEL, "price", &p.price));
-    require(Preconditions::arr_non_negative(MODEL, "orderCost", &p.order_cost));
-    require(Preconditions::arr_non_negative(MODEL, "holdCost", &p.hold_cost));
-    require(Preconditions::arr_non_negative(MODEL, "stockoutCost", &p.stockout_cost));
-    require(Preconditions::non_negative(MODEL, "salvageValue", p.salvage_value));
+    require(Preconditions::arr_non_negative(
+        MODEL,
+        "orderCost",
+        &p.order_cost,
+    ));
+    require(Preconditions::arr_non_negative(
+        MODEL,
+        "holdCost",
+        &p.hold_cost,
+    ));
+    require(Preconditions::arr_non_negative(
+        MODEL,
+        "stockoutCost",
+        &p.stockout_cost,
+    ));
+    require(Preconditions::non_negative(
+        MODEL,
+        "salvageValue",
+        p.salvage_value,
+    ));
     for t in 0..p.horizon {
-        require(Preconditions::non_empty(MODEL, &format!("demands[{t}]"), &p.demands[t]));
+        require(Preconditions::non_empty(
+            MODEL,
+            &format!("demands[{t}]"),
+            &p.demands[t],
+        ));
         let probs: Vec<f64> = p.demands[t].iter().map(|d| d.prob).collect();
-        require(Preconditions::probability_vector(MODEL, &format!("demands[{t}].prob"), &probs, 1e-9));
+        require(Preconditions::probability_vector(
+            MODEL,
+            &format!("demands[{t}].prob"),
+            &probs,
+            1e-9,
+        ));
         for i in 0..p.demands[t].len() {
-            require(Preconditions::non_negative(MODEL, &format!("demands[{t}][{i}].demand"), p.demands[t][i].demand));
+            require(Preconditions::non_negative(
+                MODEL,
+                &format!("demands[{t}][{i}].demand"),
+                p.demands[t][i].demand,
+            ));
         }
     }
 }
@@ -267,10 +374,22 @@ impl<'p> StageDecisionSolver<'p> {
 impl<'p, 'a> Transform<StageDecisionInput<'a>, StageDecision> for StageDecisionSolver<'p> {
     fn transform(&self, input: StageDecisionInput<'a>) -> StageDecision {
         let p = self.p;
-        let StageDecisionInput { stage, state, demand, next_cuts } = input;
+        let StageDecisionInput {
+            stage,
+            state,
+            demand,
+            next_cuts,
+        } = input;
         validate_stage_inputs(p, stage, state, demand, next_cuts);
-        let c = vec![-p.order_cost[stage], p.price[stage], -p.stockout_cost[stage], -p.hold_cost[stage], 1.0];
-        let mut a_ub: Vec<Vec<f64>> = vec![vec![1.0, 0.0, 0.0, 0.0, 0.0], vec![0.0, 0.0, 0.0, 1.0, 0.0]];
+        let c = vec![
+            -p.order_cost[stage],
+            p.price[stage],
+            -p.stockout_cost[stage],
+            -p.hold_cost[stage],
+            1.0,
+        ];
+        let mut a_ub: Vec<Vec<f64>> =
+            vec![vec![1.0, 0.0, 0.0, 0.0, 0.0], vec![0.0, 0.0, 0.0, 1.0, 0.0]];
         let mut b_ub: Vec<f64> = vec![p.max_order[stage], p.capacity];
         for cut in next_cuts.all() {
             a_ub.push(vec![0.0, 0.0, 0.0, -cut.beta[0], 1.0]);
@@ -281,7 +400,10 @@ impl<'p, 'a> Transform<StageDecisionInput<'a>, StageDecision> for StageDecisionS
             c,
             a_ub: Some(a_ub),
             b_ub: Some(b_ub),
-            a_eq: Some(vec![vec![-1.0, 1.0, 0.0, 1.0, 0.0], vec![0.0, 1.0, 1.0, 0.0, 0.0]]),
+            a_eq: Some(vec![
+                vec![-1.0, 1.0, 0.0, 1.0, 0.0],
+                vec![0.0, 1.0, 1.0, 0.0, 0.0],
+            ]),
             b_eq: Some(vec![state, demand]),
             lb: Some(vec![Some(0.0), Some(0.0), Some(0.0), Some(0.0), None]),
             var_names: Some(vec![
@@ -293,7 +415,13 @@ impl<'p, 'a> Transform<StageDecisionInput<'a>, StageDecision> for StageDecisionS
             ]),
             ..Default::default()
         };
-        let sol = solve_lp_internal(&lp, &InternalSimplexOptions { max_iter: Some(10000), tol: None });
+        let sol = solve_lp_internal(
+            &lp,
+            &InternalSimplexOptions {
+                max_iter: Some(10000),
+                tol: None,
+            },
+        );
         if sol.status != LPStatus::Optimal {
             return StageDecision {
                 status: sol.status,
@@ -306,8 +434,11 @@ impl<'p, 'a> Transform<StageDecisionInput<'a>, StageDecision> for StageDecisionS
                 theta: f64::NAN,
             };
         }
-        let (order, sell, stockout, next_inventory, theta) = (sol.x[0], sol.x[1], sol.x[2], sol.x[3], sol.x[4]);
-        let immediate_reward = p.price[stage] * sell - p.order_cost[stage] * order - p.hold_cost[stage] * next_inventory
+        let (order, sell, stockout, next_inventory, theta) =
+            (sol.x[0], sol.x[1], sol.x[2], sol.x[3], sol.x[4]);
+        let immediate_reward = p.price[stage] * sell
+            - p.order_cost[stage] * order
+            - p.hold_cost[stage] * next_inventory
             - p.stockout_cost[stage] * stockout;
         StageDecision {
             status: LPStatus::Optimal,
@@ -330,15 +461,46 @@ pub fn solve_stage_decision(
     demand: f64,
     next_cuts: &AffineCutPool,
 ) -> StageDecision {
-    StageDecisionSolver::new(p).transform(StageDecisionInput { stage, state, demand, next_cuts })
+    StageDecisionSolver::new(p).transform(StageDecisionInput {
+        stage,
+        state,
+        demand,
+        next_cuts,
+    })
 }
 
-fn validate_stage_inputs(p: &MultiStageInventoryProblem, stage: usize, state: f64, demand: f64, next_cuts: &AffineCutPool) {
-    require(Preconditions::integer_in_range(MODEL, "stage", stage as f64, 0.0, p.horizon as f64 - 1.0));
-    require(Preconditions::in_range(MODEL, "state", state, 0.0, p.capacity));
+fn validate_stage_inputs(
+    p: &MultiStageInventoryProblem,
+    stage: usize,
+    state: f64,
+    demand: f64,
+    next_cuts: &AffineCutPool,
+) {
+    require(Preconditions::integer_in_range(
+        MODEL,
+        "stage",
+        stage as f64,
+        0.0,
+        p.horizon as f64 - 1.0,
+    ));
+    require(Preconditions::in_range(
+        MODEL, "state", state, 0.0, p.capacity,
+    ));
     require(Preconditions::non_negative(MODEL, "demand", demand));
-    require(Preconditions::check(MODEL, "nextCuts.dimension", "equal 1", next_cuts.dimension == 1, Some(next_cuts.dimension.to_string())));
-    require(Preconditions::check(MODEL, "nextCuts.size()", "be >= 1", next_cuts.size() >= 1, Some(next_cuts.size().to_string())));
+    require(Preconditions::check(
+        MODEL,
+        "nextCuts.dimension",
+        "equal 1",
+        next_cuts.dimension == 1,
+        Some(next_cuts.dimension.to_string()),
+    ));
+    require(Preconditions::check(
+        MODEL,
+        "nextCuts.size()",
+        "be >= 1",
+        next_cuts.size() >= 1,
+        Some(next_cuts.size().to_string()),
+    ));
 }
 
 /// Query for the expected stage value.
@@ -363,12 +525,19 @@ impl<'p> ExpectedStageValue<'p> {
 impl<'p, 'a> Transform<ExpectedStageValueInput<'a>, f64> for ExpectedStageValue<'p> {
     fn transform(&self, input: ExpectedStageValueInput<'a>) -> f64 {
         let p = self.p;
-        let ExpectedStageValueInput { stage, state, next_cuts } = input;
+        let ExpectedStageValueInput {
+            stage,
+            state,
+            next_cuts,
+        } = input;
         let mut z = 0.0;
         for d in &p.demands[stage] {
             let dec = solve_stage_decision(p, stage, state, d.demand, next_cuts);
             if dec.status != LPStatus::Optimal {
-                panic!("{MODEL}: stage LP failed with status {}", dec.status.as_str());
+                panic!(
+                    "{MODEL}: stage LP failed with status {}",
+                    dec.status.as_str()
+                );
             }
             z += d.prob * dec.value;
         }
@@ -377,8 +546,17 @@ impl<'p, 'a> Transform<ExpectedStageValueInput<'a>, f64> for ExpectedStageValue<
 }
 
 /// Deprecated shim: prefer `ExpectedStageValue::new(p).transform({stage, state, next_cuts})`.
-pub fn expected_stage_value(p: &MultiStageInventoryProblem, stage: usize, state: f64, next_cuts: &AffineCutPool) -> f64 {
-    ExpectedStageValue::new(p).transform(ExpectedStageValueInput { stage, state, next_cuts })
+pub fn expected_stage_value(
+    p: &MultiStageInventoryProblem,
+    stage: usize,
+    state: f64,
+    next_cuts: &AffineCutPool,
+) -> f64 {
+    ExpectedStageValue::new(p).transform(ExpectedStageValueInput {
+        stage,
+        state,
+        next_cuts,
+    })
 }
 
 /// The finite-difference / cut-grid options consumed by [`generate_value_cut`]
@@ -425,7 +603,11 @@ fn generate_value_cut(
         }
     }
     alpha += max_violation + 1e-8;
-    AffineCut { alpha, beta: vec![beta], source: Some(source.to_string()) }
+    AffineCut {
+        alpha,
+        beta: vec![beta],
+        source: Some(source.to_string()),
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -458,7 +640,9 @@ pub struct SDDPStation {
 }
 
 fn downcast_sddp(s: &dyn DESStation) -> &SDDPStation {
-    s.as_any().downcast_ref::<SDDPStation>().expect("validator received a non-SDDPStation station")
+    s.as_any()
+        .downcast_ref::<SDDPStation>()
+        .expect("validator received a non-SDDPStation station")
 }
 
 impl SDDPStation {
@@ -488,10 +672,20 @@ impl SDDPStation {
         station.add_validator(
             intrinsic_check::<dyn DESStation>(
                 "sddp.cut-pools-nonempty",
-                |s: &dyn DESStation| downcast_sddp(s).cut_pools.iter().all(|pool| pool.size() >= 1),
+                |s: &dyn DESStation| {
+                    downcast_sddp(s)
+                        .cut_pools
+                        .iter()
+                        .all(|pool| pool.size() >= 1)
+                },
                 Some("every stage has at least one affine cut".to_string()),
                 Some(Box::new(|s: &dyn DESStation| {
-                    downcast_sddp(s).cut_pools.iter().map(|pool| pool.size().to_string()).collect::<Vec<_>>().join(",")
+                    downcast_sddp(s)
+                        .cut_pools
+                        .iter()
+                        .map(|pool| pool.size().to_string())
+                        .collect::<Vec<_>>()
+                        .join(",")
                 })),
                 Some("sddp-intrinsic".to_string()),
                 None,
@@ -511,7 +705,11 @@ impl SDDPStation {
                 Some("SDDP upper approximation >= exact objective".to_string()),
                 Some(Box::new(|s: &dyn DESStation| {
                     let st = downcast_sddp(s);
-                    format!("upper={}, exact={:?}", st.current().upper_bound, st.exact_objective)
+                    format!(
+                        "upper={}, exact={:?}",
+                        st.current().upper_bound,
+                        st.exact_objective
+                    )
                 })),
                 Some("sddp-intrinsic".to_string()),
                 None,
@@ -531,14 +729,22 @@ impl SDDPStation {
         let mut remaining_revenue_upper = vec![0.0; horizon + 1];
         remaining_revenue_upper[horizon] = self.p.salvage_value * self.p.capacity;
         for t in (0..horizon).rev() {
-            let max_demand = self.p.demands[t].iter().map(|d| d.demand).fold(f64::NEG_INFINITY, f64::max);
-            remaining_revenue_upper[t] = remaining_revenue_upper[t + 1] + self.p.price[t] * max_demand;
+            let max_demand = self.p.demands[t]
+                .iter()
+                .map(|d| d.demand)
+                .fold(f64::NEG_INFINITY, f64::max);
+            remaining_revenue_upper[t] =
+                remaining_revenue_upper[t + 1] + self.p.price[t] * max_demand;
         }
         for t in 0..=horizon {
             let mut pool = AffineCutPool::new(1, CutEnvelopeSense::Upper, &[]).expect("cut pool");
             if t == horizon {
-                pool.add(AffineCut { alpha: 0.0, beta: vec![self.p.salvage_value], source: Some("terminal-salvage".to_string()) })
-                    .expect("terminal cut");
+                pool.add(AffineCut {
+                    alpha: 0.0,
+                    beta: vec![self.p.salvage_value],
+                    source: Some("terminal-salvage".to_string()),
+                })
+                .expect("terminal cut");
             } else {
                 pool.add(AffineCut {
                     alpha: remaining_revenue_upper[t],
@@ -579,8 +785,15 @@ impl FixedPointIterationStation<SDDPState> for SDDPStation {
     }
 
     fn initial_state(&self) -> SDDPState {
-        let ub = self.cut_pools[0].evaluate(&[self.p.initial_inventory]).expect("evaluate");
-        SDDPState { iter: 0, upper_bound: ub, policy_value: None, gap_to_exact: None }
+        let ub = self.cut_pools[0]
+            .evaluate(&[self.p.initial_inventory])
+            .expect("evaluate");
+        SDDPState {
+            iter: 0,
+            upper_bound: ub,
+            policy_value: None,
+            gap_to_exact: None,
+        }
     }
 
     fn apply_operator(&mut self, prev: &SDDPState) -> SDDPState {
@@ -596,7 +809,10 @@ impl FixedPointIterationStation<SDDPState> for SDDPStation {
             sampled_demands.push(demand);
             let dec = solve_stage_decision(&self.p, t, states[t], demand, &self.cut_pools[t + 1]);
             if dec.status != LPStatus::Optimal {
-                panic!("{MODEL}: forward LP failed at stage {t}: {}", dec.status.as_str());
+                panic!(
+                    "{MODEL}: forward LP failed at stage {t}: {}",
+                    dec.status.as_str()
+                );
             }
             path.push(SamplePathEntry {
                 stage: t,
@@ -618,18 +834,31 @@ impl FixedPointIterationStation<SDDPState> for SDDPStation {
                 t,
                 states[t],
                 &self.cut_pools[t + 1],
-                CutOpts { finite_diff_step: self.finite_diff_step, cut_grid_size: self.cut_grid_size },
+                CutOpts {
+                    finite_diff_step: self.finite_diff_step,
+                    cut_grid_size: self.cut_grid_size,
+                },
                 &format!("iter={iter} stage={t}"),
             );
             let (alpha, beta0) = (cut.alpha, cut.beta[0]);
             self.cut_pools[t].add(cut).expect("add cut");
-            cuts_added.push(CutAddedTrace { stage: t, alpha, beta: beta0, state: states[t] });
+            cuts_added.push(CutAddedTrace {
+                stage: t,
+                alpha,
+                beta: beta0,
+                state: states[t],
+            });
         }
 
-        let upper_bound = self.cut_pools[0].evaluate(&[self.p.initial_inventory]).expect("evaluate");
+        let upper_bound = self.cut_pools[0]
+            .evaluate(&[self.p.initial_inventory])
+            .expect("evaluate");
         let mut policy_value: Option<f64> = None;
         let mut gap_to_exact: Option<f64> = None;
-        if iter % self.evaluate_policy_every == 0 || iter >= self.fp.max_iter || self.exact_objective.is_some() {
+        if iter % self.evaluate_policy_every == 0
+            || iter >= self.fp.max_iter
+            || self.exact_objective.is_some()
+        {
             let pv = evaluate_policy_exact(&self.p, &self.cut_pools);
             policy_value = Some(pv);
             gap_to_exact = self.exact_objective.map(|exact| exact - pv);
@@ -649,7 +878,12 @@ impl FixedPointIterationStation<SDDPState> for SDDPStation {
                 self.final_status = SDDPStatus::Optimal;
             }
         }
-        SDDPState { iter, upper_bound, policy_value, gap_to_exact }
+        SDDPState {
+            iter,
+            upper_bound,
+            policy_value,
+            gap_to_exact,
+        }
     }
 
     fn delta(&self, prev: &SDDPState, next: &SDDPState) -> f64 {
@@ -666,8 +900,11 @@ impl FixedPointIterationStation<SDDPState> for SDDPStation {
         }
         if iter >= self.fp_core().max_iter {
             // finalStatus stays 'optimal' if already reached, else 'iter-limit'.
-            self.fp_core_mut().convergence_reason =
-                if self.final_status == SDDPStatus::Optimal { ConvergenceReason::Converged } else { ConvergenceReason::MaxIter };
+            self.fp_core_mut().convergence_reason = if self.final_status == SDDPStatus::Optimal {
+                ConvergenceReason::Converged
+            } else {
+                ConvergenceReason::MaxIter
+            };
             return true;
         }
         false
@@ -683,11 +920,16 @@ pub fn solve_multi_stage_sddp(p: MultiStageInventoryProblem, opts: SDDPOptions) 
         seed: opts.seed.unwrap_or(1),
         exact_objective: opts.exact_objective,
         evaluate_policy_every: opts.evaluate_policy_every.unwrap_or(usize::MAX),
-        finite_diff_step: opts.finite_diff_step.unwrap_or_else(|| 1e-4_f64.max(p.capacity * 1e-5)),
+        finite_diff_step: opts
+            .finite_diff_step
+            .unwrap_or_else(|| 1e-4_f64.max(p.capacity * 1e-5)),
         cut_grid_size: opts.cut_grid_size.unwrap_or(21),
     };
     let station = Rc::new(RefCell::new(SDDPStation::new(p.clone(), &filled)));
-    run_iterative_des(vec![station.clone() as Rc<RefCell<dyn DESStation>>], IterativeRunOptions::default());
+    run_iterative_des(
+        vec![station.clone() as Rc<RefCell<dyn DESStation>>],
+        IterativeRunOptions::default(),
+    );
 
     let st = station.borrow();
     let policy_value = evaluate_policy_exact(&p, &st.cut_pools);
@@ -708,7 +950,10 @@ pub fn solve_multi_stage_sddp(p: MultiStageInventoryProblem, opts: SDDPOptions) 
 }
 
 /// Run the exact extensive-form solve and the SDDP approximation together.
-pub fn run_multi_stage_inventory_demo(p: MultiStageInventoryProblem, opts: SDDPOptions) -> MultiStageRunResult {
+pub fn run_multi_stage_inventory_demo(
+    p: MultiStageInventoryProblem,
+    opts: SDDPOptions,
+) -> MultiStageRunResult {
     let exact = solve_exact_scenario_tree(&p);
     let mut sddp_opts = opts;
     sddp_opts.exact_objective = Some(exact.objective);
@@ -808,7 +1053,13 @@ fn solve_exact_scenario_tree_impl(p: &MultiStageInventoryProblem) -> ExactTreeNo
         lb: Some(vec![Some(0.0); var_count]),
         ..Default::default()
     };
-    let sol = solve_lp_internal(&lp, &InternalSimplexOptions { max_iter: Some(100000), tol: None });
+    let sol = solve_lp_internal(
+        &lp,
+        &InternalSimplexOptions {
+            max_iter: Some(100000),
+            tol: None,
+        },
+    );
     ExactTreeNodeResult {
         objective: sol.objective,
         node_count: nodes.len(),
@@ -824,14 +1075,26 @@ fn build_scenario_tree(p: &MultiStageInventoryProblem) -> Vec<TreeNode> {
         prob: f64,
     }
     let mut nodes: Vec<TreeNode> = Vec::new();
-    let mut frontier: Vec<FrontierEntry> = vec![FrontierEntry { parent_id: None, prob: 1.0 }];
+    let mut frontier: Vec<FrontierEntry> = vec![FrontierEntry {
+        parent_id: None,
+        prob: 1.0,
+    }];
     for t in 0..p.horizon {
         let mut next: Vec<FrontierEntry> = Vec::new();
         for parent in &frontier {
             for d in &p.demands[t] {
                 let id = nodes.len();
-                nodes.push(TreeNode { id, stage: t, demand: d.demand, prob: parent.prob * d.prob, parent_id: parent.parent_id });
-                next.push(FrontierEntry { parent_id: Some(id), prob: parent.prob * d.prob });
+                nodes.push(TreeNode {
+                    id,
+                    stage: t,
+                    demand: d.demand,
+                    prob: parent.prob * d.prob,
+                    parent_id: parent.parent_id,
+                });
+                next.push(FrontierEntry {
+                    parent_id: Some(id),
+                    prob: parent.prob * d.prob,
+                });
             }
         }
         frontier = next;
@@ -859,12 +1122,22 @@ impl<'p, 'a> Transform<&'a [AffineCutPool], f64> for ExactPolicyEvaluator<'p> {
     fn transform(&self, cut_pools: &'a [AffineCutPool]) -> f64 {
         let p = self.p;
         validate_multi_stage_problem(p);
-        require(Preconditions::length_eq(MODEL, "cutPools", cut_pools, p.horizon + 1));
+        require(Preconditions::length_eq(
+            MODEL,
+            "cutPools",
+            cut_pools,
+            p.horizon + 1,
+        ));
         policy_rec(p, cut_pools, 0, p.initial_inventory)
     }
 }
 
-fn policy_rec(p: &MultiStageInventoryProblem, cut_pools: &[AffineCutPool], stage: usize, state: f64) -> f64 {
+fn policy_rec(
+    p: &MultiStageInventoryProblem,
+    cut_pools: &[AffineCutPool],
+    stage: usize,
+    state: f64,
+) -> f64 {
     if stage >= p.horizon {
         return p.salvage_value * state;
     }
@@ -872,9 +1145,19 @@ fn policy_rec(p: &MultiStageInventoryProblem, cut_pools: &[AffineCutPool], stage
     for d in &p.demands[stage] {
         let dec = solve_stage_decision(p, stage, state, d.demand, &cut_pools[stage + 1]);
         if dec.status != LPStatus::Optimal {
-            panic!("{MODEL}: policy eval LP failed at stage {stage}: {}", dec.status.as_str());
+            panic!(
+                "{MODEL}: policy eval LP failed at stage {stage}: {}",
+                dec.status.as_str()
+            );
         }
-        z += d.prob * (dec.immediate_reward + policy_rec(p, cut_pools, stage + 1, clamp(dec.next_inventory, 0.0, p.capacity)));
+        z += d.prob
+            * (dec.immediate_reward
+                + policy_rec(
+                    p,
+                    cut_pools,
+                    stage + 1,
+                    clamp(dec.next_inventory, 0.0, p.capacity),
+                ));
     }
     z
 }
@@ -922,14 +1205,33 @@ mod tests {
         let exact = solve_exact_scenario_tree(&p);
         let res = solve_multi_stage_sddp(
             p,
-            SDDPOptions { max_iter: Some(40), seed: Some(7), exact_objective: Some(exact.objective), ..Default::default() },
+            SDDPOptions {
+                max_iter: Some(40),
+                seed: Some(7),
+                exact_objective: Some(exact.objective),
+                ..Default::default()
+            },
         );
         // SDDP's outer (upper) approximation is an upper bound on the optimum.
-        assert!(res.upper_bound + 1e-4 >= exact.objective, "ub={} exact={}", res.upper_bound, exact.objective);
+        assert!(
+            res.upper_bound + 1e-4 >= exact.objective,
+            "ub={} exact={}",
+            res.upper_bound,
+            exact.objective
+        );
         // The recovered policy value is a lower bound; both bracket the optimum.
-        assert!(res.policy_value <= exact.objective + 1e-4, "policy={} exact={}", res.policy_value, exact.objective);
+        assert!(
+            res.policy_value <= exact.objective + 1e-4,
+            "policy={} exact={}",
+            res.policy_value,
+            exact.objective
+        );
         // After enough iterations the gap should be small.
-        assert!((exact.objective - res.policy_value).abs() < 1.0, "gap={}", exact.objective - res.policy_value);
+        assert!(
+            (exact.objective - res.policy_value).abs() < 1.0,
+            "gap={}",
+            exact.objective - res.policy_value
+        );
         for &size in &res.cuts_per_stage {
             assert!(size >= 1);
         }

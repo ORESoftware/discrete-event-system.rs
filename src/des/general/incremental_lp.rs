@@ -466,7 +466,11 @@ impl IncrementalLP {
     /// new slack is negative (primal infeasible) the next `step()`s run dual simplex.
     pub fn apply_add_constraint(&mut self, coefs: &[f64], rhs: f64, name: Option<String>) {
         if coefs.len() != self.num_struct {
-            panic!("coefs.len()={}, num_struct={}", coefs.len(), self.num_struct);
+            panic!(
+                "coefs.len()={}, num_struct={}",
+                coefs.len(),
+                self.num_struct
+            );
         }
         let m = self.tab.len() - 1;
         let old_total = self.tab[0].len();
@@ -603,7 +607,11 @@ impl IncrementalLP {
     pub fn apply_add_variable(&mut self, column: &[f64], c_new: f64, name: Option<String>) {
         let m = self.tab.len() - 1;
         if column.len() != m {
-            panic!("add-variable: column length {}, expected {}", column.len(), m);
+            panic!(
+                "add-variable: column length {}, expected {}",
+                column.len(),
+                m
+            );
         }
         // Compute the transformed column = B^{-1} · column, plus the row-0 reduced cost.
         let mut transformed = vec![0.0f64; m + 1];
@@ -701,7 +709,10 @@ impl IncrementalLP {
             LPEvent::RemoveConstraint { index, .. } => self.apply_remove_constraint(index),
             LPEvent::ChangeObjective { new_c, .. } => self.apply_change_objective(&new_c),
             LPEvent::AddVariable {
-                column, c_new, name, ..
+                column,
+                c_new,
+                name,
+                ..
             } => self.apply_add_variable(&column, c_new, name),
             LPEvent::RemoveVariable { struct_index, .. } => {
                 self.apply_remove_variable(struct_index)

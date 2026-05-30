@@ -58,7 +58,10 @@ impl State {
 
     /// The 7 alive-compartment values as a `HashMap` (for `update_peaks`).
     fn compartment_record(&self) -> HashMap<String, f64> {
-        COMPARTMENT_ORDER.iter().map(|c| (c.to_string(), self.compartment(c))).collect()
+        COMPARTMENT_ORDER
+            .iter()
+            .map(|c| (c.to_string(), self.compartment(c)))
+            .collect()
     }
 }
 
@@ -158,7 +161,10 @@ pub fn run_difference_once(config: &SimConfig, opts: &RunOpts) -> RunResult {
         kernel: Kernel::Difference,
         config: config.clone(),
         seed: opts.seed.unwrap_or(0),
-        totals: Totals { created: x.c, absorbed: x.d },
+        totals: Totals {
+            created: x.c,
+            absorbed: x.d,
+        },
         final_populations,
         transition_counts: tables.counts,
         split_probs: tables.splits,
@@ -227,7 +233,15 @@ pub fn analytical_steady_state(config: &SimConfig) -> SteadyState {
         .sum::<f64>()
         + populations["D"];
 
-    SteadyState { mu, lambda, q, f_s, flows, populations, total_alive }
+    SteadyState {
+        mu,
+        lambda,
+        q,
+        f_s,
+        flows,
+        populations,
+        total_alive,
+    }
 }
 
 /// `maxStableStep` — largest provably-stable forward-Euler step, `2·min(mu_c)`.
@@ -273,8 +287,13 @@ mod tests {
         let cfg = default_config();
         assert!(cfg.step_size > max_stable_step(&cfg));
         let r = run_difference_once(&cfg, &RunOpts::default());
-        let all_nonneg = COMPARTMENT_ORDER.iter().all(|c| r.final_populations[*c] >= 0.0);
-        assert!(!all_nonneg, "expected explicit Euler to be unstable at dt > max_stable_step");
+        let all_nonneg = COMPARTMENT_ORDER
+            .iter()
+            .all(|c| r.final_populations[*c] >= 0.0);
+        assert!(
+            !all_nonneg,
+            "expected explicit Euler to be unstable at dt > max_stable_step"
+        );
     }
 
     #[test]

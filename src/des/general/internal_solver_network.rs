@@ -56,14 +56,14 @@ use crate::des::general::des_base::validation::{
 };
 use crate::des::general::ga_des::{TSPGAOptimizer, TSPGAOptions};
 use crate::des::general::genetic_tsp::{
-    build_pentagon_tsp, build_random_tsp, held_karp_exact, is_permutation, tour_length, HeldKarpResult,
-    InitMode, TSPInstance, Tour,
+    build_pentagon_tsp, build_random_tsp, held_karp_exact, is_permutation, tour_length,
+    HeldKarpResult, InitMode, TSPInstance, Tour,
 };
 use crate::des::general::prng::mulberry32;
-use crate::des::general::sa_des::{CoolingSchedule, Moves, TSPSAOptimizer, TSPSAOptions, temperature_at};
-use crate::des::general::shortest_path_des::{
-    build_random_graph, build_small_chain_graph, Graph,
+use crate::des::general::sa_des::{
+    temperature_at, CoolingSchedule, Moves, TSPSAOptimizer, TSPSAOptions,
 };
+use crate::des::general::shortest_path_des::{build_random_graph, build_small_chain_graph, Graph};
 use crate::des::shared::capabilities::{Clock, RandomSource, SystemClock};
 
 // =============================================================================
@@ -524,7 +524,11 @@ pub struct SolutionSinkStation {
 
 impl SolutionSinkStation {
     pub fn new(id: impl Into<String>) -> Self {
-        SolutionSinkStation { core: StationCore::new(id), trace: Vec::new(), stops: Vec::new() }
+        SolutionSinkStation {
+            core: StationCore::new(id),
+            trace: Vec::new(),
+            stops: Vec::new(),
+        }
     }
 
     pub fn best(&self) -> Option<SolverProgressPayload> {
@@ -613,7 +617,10 @@ impl ShortestPathSolverStation {
         };
         st.distance[st.source] = 0.0;
         st.dirty[st.source] = true;
-        st.pending.push(PendingNode { node_id: st.source, distance: 0.0 });
+        st.pending.push(PendingNode {
+            node_id: st.source,
+            distance: 0.0,
+        });
         st.add_validator(
             intrinsic_check::<dyn DESStation>(
                 "shortest-path-source-distance-zero",
@@ -666,7 +673,11 @@ impl ShortestPathSolverStation {
 
     fn step_dijkstra(&mut self) {
         while !self.pending.is_empty() {
-            self.pending.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(std::cmp::Ordering::Equal));
+            self.pending.sort_by(|a, b| {
+                a.distance
+                    .partial_cmp(&b.distance)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
             let top = self.pending.remove(0);
             if self.settled[top.node_id] {
                 continue;
@@ -679,7 +690,10 @@ impl ShortestPathSolverStation {
                 if cand < self.distance[edge.to] - 1e-12 {
                     self.distance[edge.to] = cand;
                     self.predecessor[edge.to] = top.node_id as i64;
-                    self.pending.push(PendingNode { node_id: edge.to, distance: cand });
+                    self.pending.push(PendingNode {
+                        node_id: edge.to,
+                        distance: cand,
+                    });
                 }
             }
             return;
@@ -750,7 +764,11 @@ impl SnapshotProvider for ShortestPathSolverStation {
         let reachable = self.distance.iter().filter(|d| d.is_finite()).count();
         let unresolved_penalty = (self.graph.num_nodes - reachable) as f64 * 1e12;
         let objective = unresolved_penalty
-            + self.distance.iter().map(|&d| if d.is_finite() { d } else { 0.0 }).sum::<f64>();
+            + self
+                .distance
+                .iter()
+                .map(|&d| if d.is_finite() { d } else { 0.0 })
+                .sum::<f64>();
         SolverProgressPayload {
             solver_id: self.id().to_string(),
             solver_kind: InternalSolverKind::ShortestPath,
@@ -767,7 +785,10 @@ impl SnapshotProvider for ShortestPathSolverStation {
             done,
             metadata: vec![
                 ("reachable".to_string(), MetaValue::Number(reachable as f64)),
-                ("wavesEmitted".to_string(), MetaValue::Number(self.waves as f64)),
+                (
+                    "wavesEmitted".to_string(),
+                    MetaValue::Number(self.waves as f64),
+                ),
             ],
         }
     }
@@ -802,7 +823,11 @@ impl KnapsackDPStation {
     pub fn new(id: impl Into<String>, params: KnapsackParams) -> Self {
         let values = params.values.clone();
         let weights = params.weights.clone();
-        let capacity = if params.capacity.is_finite() { params.capacity } else { -1.0 };
+        let capacity = if params.capacity.is_finite() {
+            params.capacity
+        } else {
+            -1.0
+        };
         validate_knapsack(&values, &weights, capacity);
         let cap = ((capacity + 1.0).max(0.0)) as usize;
         let mut st = KnapsackDPStation {
@@ -869,7 +894,13 @@ impl DESStation for KnapsackDPStation {
 
     fn assert_preconditions(&mut self) {
         validate_knapsack(&self.values, &self.weights, self.capacity);
-        Preconditions_integer_in_range("KnapsackDPStation", "capacity", self.capacity, 0.0, 100000.0);
+        Preconditions_integer_in_range(
+            "KnapsackDPStation",
+            "capacity",
+            self.capacity,
+            0.0,
+            100000.0,
+        );
         let cells = (self.values.len() as f64) * (self.capacity + 1.0);
         Preconditions_check(
             "KnapsackDPStation",
@@ -934,7 +965,10 @@ impl SnapshotProvider for KnapsackDPStation {
             },
             done,
             metadata: vec![
-                ("itemsProcessed".to_string(), MetaValue::Number(self.item as f64)),
+                (
+                    "itemsProcessed".to_string(),
+                    MetaValue::Number(self.item as f64),
+                ),
                 ("capacity".to_string(), MetaValue::Number(self.capacity)),
             ],
         }
@@ -966,7 +1000,11 @@ impl KnapsackSAStation {
         let seed = params.seed.unwrap_or(1);
         let values = params.values.clone();
         let weights = params.weights.clone();
-        let capacity = if params.capacity.is_finite() { params.capacity } else { -1.0 };
+        let capacity = if params.capacity.is_finite() {
+            params.capacity
+        } else {
+            -1.0
+        };
         validate_knapsack(&values, &weights, capacity);
         let cooling = params.cooling.unwrap_or(CoolingSchedule::Geometric {
             t0: 50.0,
@@ -993,7 +1031,9 @@ impl KnapsackSAStation {
                 "knapsack-sa-best-is-finite",
                 |s| downcast::<KnapsackSAStation>(s).get_best_cost().is_finite(),
                 Some("finite best cost".to_string()),
-                Some(Box::new(|s| downcast::<KnapsackSAStation>(s).get_best_cost().to_string())),
+                Some(Box::new(|s| {
+                    downcast::<KnapsackSAStation>(s).get_best_cost().to_string()
+                })),
                 Some("internal-solver-knapsack".to_string()),
                 None,
             )
@@ -1134,8 +1174,14 @@ impl SnapshotProvider for KnapsackSAStation {
             },
             done,
             metadata: vec![
-                ("accepted".to_string(), MetaValue::Number(self.get_accepted_count() as f64)),
-                ("improvements".to_string(), MetaValue::Number(self.get_improve_count() as f64)),
+                (
+                    "accepted".to_string(),
+                    MetaValue::Number(self.get_accepted_count() as f64),
+                ),
+                (
+                    "improvements".to_string(),
+                    MetaValue::Number(self.get_improve_count() as f64),
+                ),
             ],
         }
     }
@@ -1163,7 +1209,11 @@ impl ObservableTSPSAOptimizer {
     pub fn new(id: impl Into<String>, instance_ref: TSPInstance, opts: TSPSAOptions) -> Self {
         let id = id.into();
         let inner = TSPSAOptimizer::new(id.clone(), instance_ref.clone(), opts, false, None);
-        let mut obs = ObservableTSPSAOptimizer { core: StationCore::new(id), inner, instance_ref };
+        let mut obs = ObservableTSPSAOptimizer {
+            core: StationCore::new(id),
+            inner,
+            instance_ref,
+        };
 
         // Re-register the base optimizer's intrinsic / ground-truth validators,
         // downcasting to the wrapper (the base's own validators downcast to
@@ -1200,7 +1250,9 @@ impl ObservableTSPSAOptimizer {
                 "sa.best-cost-nonnegative",
                 |s| downcast_obs_sa(s).get_best_cost() >= 0.0,
                 Some(">= 0".to_string()),
-                Some(Box::new(|s| format!("bestCost={}", downcast_obs_sa(s).get_best_cost()))),
+                Some(Box::new(|s| {
+                    format!("bestCost={}", downcast_obs_sa(s).get_best_cost())
+                })),
                 Some("sa-intrinsic".to_string()),
                 None,
             )
@@ -1228,7 +1280,11 @@ impl ObservableTSPSAOptimizer {
                         if cache.is_none() {
                             *cache = Some(held_karp_exact(&st.instance_ref).length);
                         }
-                        format!("bestCost={:.4}  heldKarp={:.4}", st.get_best_cost(), cache.unwrap())
+                        format!(
+                            "bestCost={:.4}  heldKarp={:.4}",
+                            st.get_best_cost(),
+                            cache.unwrap()
+                        )
                     })),
                     Some("sa-ground-truth".to_string()),
                     Some("bestCost is below the true global optimum".to_string()),
@@ -1289,7 +1345,8 @@ impl SingleStateOptimizer<Tour> for ObservableTSPSAOptimizer {
         iter: usize,
         rng: &mut dyn RandomSource,
     ) -> bool {
-        self.inner.accept(current, candidate, current_cost, candidate_cost, iter, rng)
+        self.inner
+            .accept(current, candidate, current_cost, candidate_cost, iter, rng)
     }
     fn should_stop(&self, iter: usize) -> bool {
         self.inner.should_stop(iter)
@@ -1324,9 +1381,18 @@ impl SnapshotProvider for ObservableTSPSAOptimizer {
             best_state: SolverBestState::Tour { tour: best, length },
             done,
             metadata: vec![
-                ("accepted".to_string(), MetaValue::Number(self.get_accepted_count() as f64)),
-                ("improvements".to_string(), MetaValue::Number(self.get_improve_count() as f64)),
-                ("n".to_string(), MetaValue::Number(self.instance_ref.n as f64)),
+                (
+                    "accepted".to_string(),
+                    MetaValue::Number(self.get_accepted_count() as f64),
+                ),
+                (
+                    "improvements".to_string(),
+                    MetaValue::Number(self.get_improve_count() as f64),
+                ),
+                (
+                    "n".to_string(),
+                    MetaValue::Number(self.instance_ref.n as f64),
+                ),
             ],
         }
     }
@@ -1354,7 +1420,11 @@ impl ObservableTSPGAOptimizer {
     pub fn new(id: impl Into<String>, instance_ref: TSPInstance, opts: TSPGAOptions) -> Self {
         let id = id.into();
         let inner = TSPGAOptimizer::new(id.clone(), instance_ref.clone(), opts, false, None);
-        let mut obs = ObservableTSPGAOptimizer { core: StationCore::new(id), inner, instance_ref };
+        let mut obs = ObservableTSPGAOptimizer {
+            core: StationCore::new(id),
+            inner,
+            instance_ref,
+        };
 
         if obs.inner.elite_count() >= 1 {
             obs.add_validator(
@@ -1407,7 +1477,11 @@ impl ObservableTSPGAOptimizer {
                         if cache.is_none() {
                             *cache = Some(held_karp_exact(&st.instance_ref).length);
                         }
-                        format!("best={:.4}  heldKarp={:.4}", st.get_best_fitness(), cache.unwrap())
+                        format!(
+                            "best={:.4}  heldKarp={:.4}",
+                            st.get_best_fitness(),
+                            cache.unwrap()
+                        )
                     })),
                     Some("ga-ground-truth".to_string()),
                     Some("best length is below the global optimum".to_string()),
@@ -1497,8 +1571,14 @@ impl SnapshotProvider for ObservableTSPGAOptimizer {
             best_state: SolverBestState::Tour { tour: best, length },
             done,
             metadata: vec![
-                ("n".to_string(), MetaValue::Number(self.instance_ref.n as f64)),
-                ("population".to_string(), MetaValue::Number(self.get_population().len() as f64)),
+                (
+                    "n".to_string(),
+                    MetaValue::Number(self.instance_ref.n as f64),
+                ),
+                (
+                    "population".to_string(),
+                    MetaValue::Number(self.get_population().len() as f64),
+                ),
             ],
         }
     }
@@ -1520,7 +1600,13 @@ pub struct TSPHeldKarpStation {
 
 impl TSPHeldKarpStation {
     pub fn new(id: impl Into<String>, instance: TSPInstance) -> Self {
-        TSPHeldKarpStation { core: StationCore::new(id), instance, done: false, iter: 0, best: None }
+        TSPHeldKarpStation {
+            core: StationCore::new(id),
+            instance,
+            done: false,
+            iter: 0,
+            best: None,
+        }
     }
 }
 
@@ -1536,7 +1622,13 @@ impl DESStation for TSPHeldKarpStation {
     }
 
     fn assert_preconditions(&mut self) {
-        Preconditions_integer_in_range("TSPHeldKarpStation", "n", self.instance.n as f64, 3.0, 16.0);
+        Preconditions_integer_in_range(
+            "TSPHeldKarpStation",
+            "n",
+            self.instance.n as f64,
+            3.0,
+            16.0,
+        );
     }
 
     fn has_work(&self) -> bool {
@@ -1649,12 +1741,24 @@ pub fn run_internal_solver_network(params: InternalSolverRunParams) -> InternalS
     let solver = build_solver_station(&params);
 
     let solver_ref = solver.station_ref();
-    solver_ref.borrow_mut().core_mut().pipe(sink.clone() as StationRef, SOLUTION_CHANNEL, SOLUTION_CHANNEL);
-    checker.borrow_mut().core_mut().pipe(sink.clone() as StationRef, STOP_CHANNEL, STOP_CHANNEL);
+    solver_ref.borrow_mut().core_mut().pipe(
+        sink.clone() as StationRef,
+        SOLUTION_CHANNEL,
+        SOLUTION_CHANNEL,
+    );
+    checker
+        .borrow_mut()
+        .core_mut()
+        .pipe(sink.clone() as StationRef, STOP_CHANNEL, STOP_CHANNEL);
 
-    let max_ticks = params.max_ticks.unwrap_or_else(|| default_max_ticks(&params));
-    let stations: Vec<StationRef> =
-        vec![solver_ref.clone(), checker.clone() as StationRef, sink.clone() as StationRef];
+    let max_ticks = params
+        .max_ticks
+        .unwrap_or_else(|| default_max_ticks(&params));
+    let stations: Vec<StationRef> = vec![
+        solver_ref.clone(),
+        checker.clone() as StationRef,
+        sink.clone() as StationRef,
+    ];
 
     let checker_for_stop = checker.clone();
     let summary = run_iterative_des(
@@ -1704,18 +1808,24 @@ pub fn run_internal_solver_network(params: InternalSolverRunParams) -> InternalS
 
 fn build_solver_station(params: &InternalSolverRunParams) -> SolverHandle {
     match params.kind {
-        InternalSolverKind::ShortestPath => SolverHandle::ShortestPath(Rc::new(RefCell::new(
-            ShortestPathSolverStation::new(
+        InternalSolverKind::ShortestPath => {
+            SolverHandle::ShortestPath(Rc::new(RefCell::new(ShortestPathSolverStation::new(
                 "shortest-path-solver",
                 required(params.shortest_path.clone(), "shortestPath"),
-            ),
-        ))),
-        InternalSolverKind::KnapsackDp => SolverHandle::KnapsackDp(Rc::new(RefCell::new(
-            KnapsackDPStation::new("knapsack-dp-solver", required(params.knapsack.clone(), "knapsack")),
-        ))),
-        InternalSolverKind::KnapsackSa => SolverHandle::KnapsackSa(Rc::new(RefCell::new(
-            KnapsackSAStation::new("knapsack-sa-solver", required(params.knapsack.clone(), "knapsack")),
-        ))),
+            ))))
+        }
+        InternalSolverKind::KnapsackDp => {
+            SolverHandle::KnapsackDp(Rc::new(RefCell::new(KnapsackDPStation::new(
+                "knapsack-dp-solver",
+                required(params.knapsack.clone(), "knapsack"),
+            ))))
+        }
+        InternalSolverKind::KnapsackSa => {
+            SolverHandle::KnapsackSa(Rc::new(RefCell::new(KnapsackSAStation::new(
+                "knapsack-sa-solver",
+                required(params.knapsack.clone(), "knapsack"),
+            ))))
+        }
         InternalSolverKind::TspSa => {
             let tsp = required(params.tsp.clone(), "tsp");
             let inst = tsp_instance(&tsp);
@@ -1753,7 +1863,11 @@ fn describe_network(kind: InternalSolverKind, solver_id: &str) -> SolverNetworkD
                 kind: format!("{kind_str}-initial-source"),
                 role: SolverNodeRole::Source,
             },
-            SolverNetworkNode { id: solver_id.to_string(), kind: kind_str.to_string(), role: SolverNodeRole::Solver },
+            SolverNetworkNode {
+                id: solver_id.to_string(),
+                kind: kind_str.to_string(),
+                role: SolverNodeRole::Solver,
+            },
             SolverNetworkNode {
                 id: "wall-clock-checker".to_string(),
                 kind: "wall-clock-checker".to_string(),
@@ -1807,7 +1921,11 @@ fn describe_network(kind: InternalSolverKind, solver_id: &str) -> SolverNetworkD
 fn build_sa_options(tsp: &TSPSolverParams) -> TSPSAOptions {
     let sa = tsp.sa.clone().unwrap_or_default();
     TSPSAOptions {
-        cooling: sa.cooling.unwrap_or(CoolingSchedule::Geometric { t0: 100.0, alpha: 0.995, t_min: Some(1e-6) }),
+        cooling: sa.cooling.unwrap_or(CoolingSchedule::Geometric {
+            t0: 100.0,
+            alpha: 0.995,
+            t_min: Some(1e-6),
+        }),
         max_iterations: sa.max_iterations.unwrap_or(5000),
         seed: sa.seed.or(tsp.seed).unwrap_or(1),
         init: Some(sa.init.unwrap_or(InitMode::NearestNeighbor)),
@@ -1850,9 +1968,11 @@ fn graph_from_params(params: &ShortestPathSolverParams) -> Graph {
 fn tsp_instance(params: &TSPSolverParams) -> TSPInstance {
     match params.builtin {
         Some(TspBuiltin::Pentagon) => build_pentagon_tsp(params.n.unwrap_or(5), 50.0),
-        Some(TspBuiltin::Random) => {
-            build_random_tsp(params.n.unwrap_or(20), params.seed.unwrap_or(1), params.precedence.clone())
-        }
+        Some(TspBuiltin::Random) => build_random_tsp(
+            params.n.unwrap_or(20),
+            params.seed.unwrap_or(1),
+            params.precedence.clone(),
+        ),
         None => {
             if let (Some(coords), Some(dist)) = (&params.coordinates, &params.distance) {
                 TSPInstance {
@@ -1869,7 +1989,13 @@ fn tsp_instance(params: &TSPSolverParams) -> TSPInstance {
 }
 
 fn validate_graph(graph: &Graph) {
-    Preconditions_integer_in_range("ShortestPathSolverStation", "numNodes", graph.num_nodes as f64, 1.0, 100000.0);
+    Preconditions_integer_in_range(
+        "ShortestPathSolverStation",
+        "numNodes",
+        graph.num_nodes as f64,
+        1.0,
+        100000.0,
+    );
     Preconditions_check(
         "ShortestPathSolverStation",
         "edges.length",
@@ -1886,7 +2012,11 @@ fn validate_graph(graph: &Graph) {
                 0.0,
                 (graph.num_nodes as f64) - 1.0,
             );
-            Preconditions_finite("ShortestPathSolverStation", &format!("edge {u}->{}.weight", edge.to), edge.weight);
+            Preconditions_finite(
+                "ShortestPathSolverStation",
+                &format!("edge {u}->{}.weight", edge.to),
+                edge.weight,
+            );
         }
     }
 }
@@ -1898,36 +2028,80 @@ fn validate_knapsack(values: &[f64], weights: &[f64], capacity: f64) {
         .unwrap_or_else(|e| panic!("{e}"));
     Preconditions_all_finite("KnapsackSolver", "values", values);
     Preconditions_all_finite("KnapsackSolver", "weights", weights);
-    Preconditions_integer_in_range("KnapsackSolver", "capacity", capacity, 0.0, MAX_SAFE_INTEGER);
+    Preconditions_integer_in_range(
+        "KnapsackSolver",
+        "capacity",
+        capacity,
+        0.0,
+        MAX_SAFE_INTEGER,
+    );
     for (i, &w) in weights.iter().enumerate() {
-        Preconditions_integer_in_range("KnapsackSolver", &format!("weights[{i}]"), w, 0.0, MAX_SAFE_INTEGER);
+        Preconditions_integer_in_range(
+            "KnapsackSolver",
+            &format!("weights[{i}]"),
+            w,
+            0.0,
+            MAX_SAFE_INTEGER,
+        );
     }
 }
 
-fn knapsack_score(values: &[f64], weights: &[f64], capacity: f64, selected: &[f64]) -> KnapsackSolution {
+fn knapsack_score(
+    values: &[f64],
+    weights: &[f64],
+    capacity: f64,
+    selected: &[f64],
+) -> KnapsackSolution {
     let mut value = 0.0;
     let mut weight = 0.0;
     for i in 0..selected.len() {
         value += selected[i] * values[i];
         weight += selected[i] * weights[i];
     }
-    KnapsackSolution { selected: selected.to_vec(), value, weight, capacity }
+    KnapsackSolution {
+        selected: selected.to_vec(),
+        value,
+        weight,
+        capacity,
+    }
 }
 
 fn default_max_ticks(params: &InternalSolverRunParams) -> usize {
     match params.kind {
         InternalSolverKind::ShortestPath => 100000,
         InternalSolverKind::KnapsackDp => {
-            params.knapsack.as_ref().map(|k| k.values.len()).unwrap_or(1000) + 2
+            params
+                .knapsack
+                .as_ref()
+                .map(|k| k.values.len())
+                .unwrap_or(1000)
+                + 2
         }
         InternalSolverKind::KnapsackSa => {
-            params.knapsack.as_ref().and_then(|k| k.max_iterations).unwrap_or(5000) + 2
+            params
+                .knapsack
+                .as_ref()
+                .and_then(|k| k.max_iterations)
+                .unwrap_or(5000)
+                + 2
         }
         InternalSolverKind::TspSa => {
-            params.tsp.as_ref().and_then(|t| t.sa.as_ref()).and_then(|s| s.max_iterations).unwrap_or(5000) + 2
+            params
+                .tsp
+                .as_ref()
+                .and_then(|t| t.sa.as_ref())
+                .and_then(|s| s.max_iterations)
+                .unwrap_or(5000)
+                + 2
         }
         InternalSolverKind::TspGa => {
-            params.tsp.as_ref().and_then(|t| t.ga.as_ref()).and_then(|g| g.num_generations).unwrap_or(200) + 2
+            params
+                .tsp
+                .as_ref()
+                .and_then(|t| t.ga.as_ref())
+                .and_then(|g| g.num_generations)
+                .unwrap_or(200)
+                + 2
         }
         InternalSolverKind::TspHeldKarp => 2,
     }
@@ -1939,7 +2113,9 @@ fn required<T>(value: Option<T>, name: &str) -> T {
 
 /// Downcast a `&dyn DESStation` to a concrete station type for validators.
 fn downcast<T: 'static>(s: &dyn DESStation) -> &T {
-    s.as_any().downcast_ref::<T>().expect("validator received an unexpected station type")
+    s.as_any()
+        .downcast_ref::<T>()
+        .expect("validator received an unexpected station type")
 }
 
 // -----------------------------------------------------------------------------
@@ -1961,8 +2137,10 @@ fn Preconditions_non_negative(model: &str, param: &str, x: f64) {
 
 #[allow(non_snake_case)]
 fn Preconditions_integer_in_range(model: &str, param: &str, x: f64, lo: f64, hi: f64) {
-    crate::des::general::des_base::preconditions::Preconditions::integer_in_range(model, param, x, lo, hi)
-        .unwrap_or_else(|e| panic!("{e}"));
+    crate::des::general::des_base::preconditions::Preconditions::integer_in_range(
+        model, param, x, lo, hi,
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
 }
 
 #[allow(non_snake_case)]
@@ -1972,9 +2150,17 @@ fn Preconditions_all_finite(model: &str, param: &str, arr: &[f64]) {
 }
 
 #[allow(non_snake_case)]
-fn Preconditions_check(model: &str, param: &str, condition: &str, ok: bool, observed: Option<String>) {
-    crate::des::general::des_base::preconditions::Preconditions::check(model, param, condition, ok, observed)
-        .unwrap_or_else(|e| panic!("{e}"));
+fn Preconditions_check(
+    model: &str,
+    param: &str,
+    condition: &str,
+    ok: bool,
+    observed: Option<String>,
+) {
+    crate::des::general::des_base::preconditions::Preconditions::check(
+        model, param, condition, ok, observed,
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
 }
 
 // =============================================================================
@@ -2037,7 +2223,10 @@ mod tests {
         // Optimal value for this classic instance is 220 (items 2 and 3).
         if let SolverBestState::Knapsack { value, weight, .. } = &result.best.best_state {
             assert!(*weight <= 50.0);
-            assert!((*value - 220.0).abs() < 1e-9, "expected optimal value 220, got {value}");
+            assert!(
+                (*value - 220.0).abs() < 1e-9,
+                "expected optimal value 220, got {value}"
+            );
         } else {
             panic!("expected a knapsack best-state");
         }

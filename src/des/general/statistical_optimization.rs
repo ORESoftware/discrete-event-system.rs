@@ -81,7 +81,12 @@ fn intrinsic_check(
 }
 
 /// Mirror of `monotonicityValidator` for the non-increasing direction.
-fn monotonicity_non_increasing_check(name: &str, xs: &[f64], tol: f64, group: &str) -> ValidationCheck {
+fn monotonicity_non_increasing_check(
+    name: &str,
+    xs: &[f64],
+    tol: f64,
+    group: &str,
+) -> ValidationCheck {
     let mut first_violation: i64 = -1;
     for i in 1..xs.len() {
         let d = xs[i] - xs[i - 1];
@@ -300,7 +305,9 @@ fn quantile_sorted(sorted: &[f64], q: f64) -> f64 {
     if sorted.is_empty() {
         return f64::NAN;
     }
-    let pos = (q * (sorted.len() as f64 - 1.0)).max(0.0).min(sorted.len() as f64 - 1.0);
+    let pos = (q * (sorted.len() as f64 - 1.0))
+        .max(0.0)
+        .min(sorted.len() as f64 - 1.0);
     let lo = pos.floor() as usize;
     let hi = pos.ceil() as usize;
     if lo == hi {
@@ -516,7 +523,9 @@ fn fit_distribution_impl(
                 let ll: f64 = samples
                     .iter()
                     .map(|&x| {
-                        -x.ln() - sigma.ln() - 0.5 * (2.0 * PI).ln()
+                        -x.ln()
+                            - sigma.ln()
+                            - 0.5 * (2.0 * PI).ln()
                             - (x.ln() - mu) * (x.ln() - mu) / (2.0 * sigma2)
                     })
                     .sum();
@@ -540,7 +549,9 @@ fn fit_distribution_impl(
                 let ll: f64 = samples
                     .iter()
                     .map(|&x| {
-                        -x.ln() - sigma.ln() - 0.5 * (2.0 * PI).ln()
+                        -x.ln()
+                            - sigma.ln()
+                            - 0.5 * (2.0 * PI).ln()
                             - (x.ln() - mu) * (x.ln() - mu) / (2.0 * sigma2)
                     })
                     .sum();
@@ -600,7 +611,9 @@ fn fit_distribution_impl(
             let scale = m / shape;
             let ll: f64 = samples
                 .iter()
-                .map(|&x| (shape - 1.0) * x.ln() - x / scale - shape * scale.ln() - log_gamma(shape))
+                .map(|&x| {
+                    (shape - 1.0) * x.ln() - x / scale - shape * scale.ln() - log_gamma(shape)
+                })
                 .sum();
             Ok(FittedDistribution {
                 family,
@@ -679,14 +692,26 @@ fn fit_distribution_impl(
     }
 }
 
-fn sample_fitted_distribution_unchecked(fit: &FittedDistribution, rng: &mut impl RandomSource) -> f64 {
+fn sample_fitted_distribution_unchecked(
+    fit: &FittedDistribution,
+    rng: &mut impl RandomSource,
+) -> f64 {
     match fit.family {
-        DistributionFamily::Normal => sample_normal(param(&fit.params, "mu"), param(&fit.params, "sigma"), rng),
-        DistributionFamily::Lognormal => {
-            sample_normal(param(&fit.params, "muLog"), param(&fit.params, "sigmaLog"), rng).exp()
+        DistributionFamily::Normal => {
+            sample_normal(param(&fit.params, "mu"), param(&fit.params, "sigma"), rng)
         }
+        DistributionFamily::Lognormal => sample_normal(
+            param(&fit.params, "muLog"),
+            param(&fit.params, "sigmaLog"),
+            rng,
+        )
+        .exp(),
         DistributionFamily::Exponential => sample_exponential(param(&fit.params, "rate"), rng),
-        DistributionFamily::Gamma => sample_gamma(rng, param(&fit.params, "shape"), param(&fit.params, "scale")),
+        DistributionFamily::Gamma => sample_gamma(
+            rng,
+            param(&fit.params, "shape"),
+            param(&fit.params, "scale"),
+        ),
         DistributionFamily::Poisson => sample_poisson(rng, param(&fit.params, "lambda")),
         DistributionFamily::Empirical => {
             let empty = Vec::new();
@@ -803,7 +828,10 @@ impl FixedPoint for DistributionFitStation {
     }
 
     fn initial_state(&mut self) -> Self::State {
-        DistFitState { idx: 0, fits: Vec::new() }
+        DistFitState {
+            idx: 0,
+            fits: Vec::new(),
+        }
     }
 
     fn apply_operator(&mut self, prev: &Self::State) -> Self::State {
@@ -822,7 +850,10 @@ impl FixedPoint for DistributionFitStation {
             Ok(f) => fits.push(f),
             Err(e) => self.errors.push(format!("{family:?}/{method:?}: {e}")),
         }
-        DistFitState { idx: prev.idx + 1, fits }
+        DistFitState {
+            idx: prev.idx + 1,
+            fits,
+        }
     }
 
     fn delta(&self, prev: &Self::State, next: &Self::State) -> f64 {
@@ -869,7 +900,11 @@ impl ResultStation for DistributionFitStation {
 
     fn result(&self, validation: Vec<ValidationCheck>) -> DistributionFitResult {
         let mut fits = self.get_current().fits.clone();
-        fits.sort_by(|a, b| a.aic.partial_cmp(&b.aic).unwrap_or(std::cmp::Ordering::Equal));
+        fits.sort_by(|a, b| {
+            a.aic
+                .partial_cmp(&b.aic)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         if fits.is_empty() {
             panic!("no distribution fit succeeded: {}", self.errors.join("; "));
         }
@@ -884,7 +919,9 @@ impl ResultStation for DistributionFitStation {
     }
 }
 
-pub fn run_distribution_fit(params: DistributionFitParams) -> Result<DistributionFitResult, PreconditionError> {
+pub fn run_distribution_fit(
+    params: DistributionFitParams,
+) -> Result<DistributionFitResult, PreconditionError> {
     Ok(run_result_station(DistributionFitStation::new(params)?))
 }
 
@@ -915,11 +952,23 @@ pub struct DemandScenario {
 fn validate_fitted_distribution(model: &str, param_name: &str, fit: &FittedDistribution) -> Check {
     match fit.family {
         DistributionFamily::Normal => {
-            Preconditions::finite(model, &format!("{param_name}.params.mu"), param(&fit.params, "mu"))?;
-            Preconditions::positive(model, &format!("{param_name}.params.sigma"), param(&fit.params, "sigma"))?;
+            Preconditions::finite(
+                model,
+                &format!("{param_name}.params.mu"),
+                param(&fit.params, "mu"),
+            )?;
+            Preconditions::positive(
+                model,
+                &format!("{param_name}.params.sigma"),
+                param(&fit.params, "sigma"),
+            )?;
         }
         DistributionFamily::Lognormal => {
-            Preconditions::finite(model, &format!("{param_name}.params.muLog"), param(&fit.params, "muLog"))?;
+            Preconditions::finite(
+                model,
+                &format!("{param_name}.params.muLog"),
+                param(&fit.params, "muLog"),
+            )?;
             Preconditions::positive(
                 model,
                 &format!("{param_name}.params.sigmaLog"),
@@ -927,14 +976,30 @@ fn validate_fitted_distribution(model: &str, param_name: &str, fit: &FittedDistr
             )?;
         }
         DistributionFamily::Exponential => {
-            Preconditions::positive(model, &format!("{param_name}.params.rate"), param(&fit.params, "rate"))?;
+            Preconditions::positive(
+                model,
+                &format!("{param_name}.params.rate"),
+                param(&fit.params, "rate"),
+            )?;
         }
         DistributionFamily::Gamma => {
-            Preconditions::positive(model, &format!("{param_name}.params.shape"), param(&fit.params, "shape"))?;
-            Preconditions::positive(model, &format!("{param_name}.params.scale"), param(&fit.params, "scale"))?;
+            Preconditions::positive(
+                model,
+                &format!("{param_name}.params.shape"),
+                param(&fit.params, "shape"),
+            )?;
+            Preconditions::positive(
+                model,
+                &format!("{param_name}.params.scale"),
+                param(&fit.params, "scale"),
+            )?;
         }
         DistributionFamily::Poisson => {
-            Preconditions::non_negative(model, &format!("{param_name}.params.lambda"), param(&fit.params, "lambda"))?;
+            Preconditions::non_negative(
+                model,
+                &format!("{param_name}.params.lambda"),
+                param(&fit.params, "lambda"),
+            )?;
         }
         DistributionFamily::Empirical => {
             let empty = Vec::new();
@@ -943,20 +1008,38 @@ fn validate_fitted_distribution(model: &str, param_name: &str, fit: &FittedDistr
             let values: Vec<f64> = points.iter().map(|p| p.value).collect();
             Preconditions::all_finite(model, &format!("{param_name}.empirical.values"), &values)?;
             let probs: Vec<f64> = points.iter().map(|p| p.prob).collect();
-            Preconditions::probability_vector(model, &format!("{param_name}.empirical.prob"), &probs, 1e-6)?;
+            Preconditions::probability_vector(
+                model,
+                &format!("{param_name}.empirical.prob"),
+                &probs,
+                1e-6,
+            )?;
         }
     }
     Ok(())
 }
 
-fn validate_demand_spec(model: &str, param_name: &str, spec: &DemandSpec, n_products: usize) -> Check {
+fn validate_demand_spec(
+    model: &str,
+    param_name: &str,
+    spec: &DemandSpec,
+    n_products: usize,
+) -> Check {
     Preconditions::integer_in_range(model, "nProducts", n_products as f64, 1.0, MAX_SAFE_INTEGER)?;
     match spec {
         DemandSpec::Uniform(ranges) => {
             Preconditions::length_eq(model, &format!("{param_name}.ranges"), ranges, n_products)?;
             for (i, r) in ranges.iter().enumerate() {
-                Preconditions::non_negative(model, &format!("{param_name}.ranges[{i}].low"), r.low)?;
-                Preconditions::non_negative(model, &format!("{param_name}.ranges[{i}].high"), r.high)?;
+                Preconditions::non_negative(
+                    model,
+                    &format!("{param_name}.ranges[{i}].low"),
+                    r.low,
+                )?;
+                Preconditions::non_negative(
+                    model,
+                    &format!("{param_name}.ranges[{i}].high"),
+                    r.high,
+                )?;
                 Preconditions::check(
                     model,
                     &format!("{param_name}.ranges[{i}].high"),
@@ -973,20 +1056,38 @@ fn validate_demand_spec(model: &str, param_name: &str, spec: &DemandSpec, n_prod
             }
         }
         DemandSpec::Empirical(empirical) => {
-            Preconditions::length_eq(model, &format!("{param_name}.empirical"), empirical, n_products)?;
+            Preconditions::length_eq(
+                model,
+                &format!("{param_name}.empirical"),
+                empirical,
+                n_products,
+            )?;
             for (i, points) in empirical.iter().enumerate() {
                 Preconditions::non_empty(model, &format!("{param_name}.empirical[{i}]"), points)?;
                 let values: Vec<f64> = points.iter().map(|p| p.value).collect();
-                Preconditions::all_finite(model, &format!("{param_name}.empirical[{i}].values"), &values)?;
+                Preconditions::all_finite(
+                    model,
+                    &format!("{param_name}.empirical[{i}].values"),
+                    &values,
+                )?;
                 let probs: Vec<f64> = points.iter().map(|p| p.prob).collect();
-                Preconditions::probability_vector(model, &format!("{param_name}.empirical[{i}].prob"), &probs, 1e-6)?;
+                Preconditions::probability_vector(
+                    model,
+                    &format!("{param_name}.empirical[{i}].prob"),
+                    &probs,
+                    1e-6,
+                )?;
             }
         }
     }
     Ok(())
 }
 
-fn sample_demand_vector_unchecked(spec: &DemandSpec, _n_products: usize, rng: &mut impl RandomSource) -> Vec<f64> {
+fn sample_demand_vector_unchecked(
+    spec: &DemandSpec,
+    _n_products: usize,
+    rng: &mut impl RandomSource,
+) -> Vec<f64> {
     match spec {
         DemandSpec::Uniform(ranges) => ranges
             .iter()
@@ -1032,7 +1133,12 @@ impl<'a, R: RandomSource> Transform<&'a mut R, Vec<f64>> for DemandVectorSampler
     }
 }
 
-fn build_demand_scenarios(spec: &DemandSpec, n_products: usize, n: usize, seed: u32) -> Vec<DemandScenario> {
+fn build_demand_scenarios(
+    spec: &DemandSpec,
+    n_products: usize,
+    n: usize,
+    seed: u32,
+) -> Vec<DemandScenario> {
     let mut rng = mulberry32(seed);
     let mut out = Vec::with_capacity(n);
     for _ in 0..n {
@@ -1053,14 +1159,24 @@ pub struct DemandScenarioBuilder {
 
 impl DemandScenarioBuilder {
     pub fn new(n_products: usize, n: usize, seed: u32) -> Self {
-        DemandScenarioBuilder { n_products, n, seed }
+        DemandScenarioBuilder {
+            n_products,
+            n,
+            seed,
+        }
     }
 }
 
 impl<'a> Transform<&'a DemandSpec, Vec<DemandScenario>> for DemandScenarioBuilder {
     fn transform(&self, spec: &'a DemandSpec) -> Vec<DemandScenario> {
-        Preconditions::integer_in_range("buildDemandScenarios", "N", self.n as f64, 1.0, MAX_SAFE_INTEGER)
-            .unwrap_or_else(|e| panic!("{e}"));
+        Preconditions::integer_in_range(
+            "buildDemandScenarios",
+            "N",
+            self.n as f64,
+            1.0,
+            MAX_SAFE_INTEGER,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
         validate_demand_spec("buildDemandScenarios", "spec", spec, self.n_products)
             .unwrap_or_else(|e| panic!("{e}"));
         build_demand_scenarios(spec, self.n_products, self.n, self.seed)
@@ -1166,7 +1282,11 @@ fn sddp_grid_size(params: &SDDPParams) -> Result<usize, PreconditionError> {
 }
 
 fn adaptive_max_iter(params: &AdaptiveSimOptParams) -> Result<usize, PreconditionError> {
-    Preconditions::non_empty("AdaptiveSimulationOptimizerStation", "alternatives", &params.alternatives)?;
+    Preconditions::non_empty(
+        "AdaptiveSimulationOptimizerStation",
+        "alternatives",
+        &params.alternatives,
+    )?;
     Preconditions::integer_in_range(
         "AdaptiveSimulationOptimizerStation",
         "batchSize",
@@ -1257,7 +1377,12 @@ impl RiskCapacityStation {
         let grid_count = risk_grid_size(&params)?;
         let max_iter = grid_count + 1;
         Self::assert_preconditions(&params, grid_count)?;
-        let scenarios = build_demand_scenarios(&params.demand, params.cost.len(), params.num_scenarios, params.seed);
+        let scenarios = build_demand_scenarios(
+            &params.demand,
+            params.cost.len(),
+            params.num_scenarios,
+            params.seed,
+        );
         let grid = enumerate_grid(params.cost.len(), params.x_max, params.step);
         let mut st = RiskCapacityStation {
             params,
@@ -1285,7 +1410,13 @@ impl RiskCapacityStation {
         )?;
         Preconditions::positive("RiskCapacityStation", "xMax", p.x_max)?;
         Preconditions::positive("RiskCapacityStation", "step", p.step)?;
-        Preconditions::check("RiskCapacityStation", "step", "be <= xMax", p.step <= p.x_max, Some(p.step.to_string()))?;
+        Preconditions::check(
+            "RiskCapacityStation",
+            "step",
+            "be <= xMax",
+            p.step <= p.x_max,
+            Some(p.step.to_string()),
+        )?;
         Preconditions::integer_in_range(
             "RiskCapacityStation",
             "grid candidate count",
@@ -1298,7 +1429,13 @@ impl RiskCapacityStation {
             Preconditions::in_range("RiskCapacityStation", "risk.alpha", alpha, 0.5, 0.999)?;
         }
         if let Some(min_sl) = p.risk.min_service_level {
-            Preconditions::in_range("RiskCapacityStation", "risk.minServiceLevel", min_sl, 0.0, 1.0)?;
+            Preconditions::in_range(
+                "RiskCapacityStation",
+                "risk.minServiceLevel",
+                min_sl,
+                0.0,
+                1.0,
+            )?;
         }
         if let Some(sl) = p.risk.shortfall_limit {
             Preconditions::non_negative("RiskCapacityStation", "risk.shortfallLimit", sl)?;
@@ -1335,25 +1472,46 @@ impl RiskCapacityStation {
             .iter()
             .map(|s| capacity_profit(x, &s.demand, &self.params.cost, &self.params.price))
             .collect();
-        let shortfalls: Vec<f64> = self.scenarios.iter().map(|s| total_shortfall(x, &s.demand)).collect();
+        let shortfalls: Vec<f64> = self
+            .scenarios
+            .iter()
+            .map(|s| total_shortfall(x, &s.demand))
+            .collect();
         let mut losses = shortfalls.clone();
         losses.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let alpha = self.params.risk.alpha.unwrap_or(0.9);
         let var_loss = quantile_sorted(&losses, alpha);
-        let tail: Vec<f64> = losses.iter().copied().filter(|&l| l >= var_loss - 1e-12).collect();
-        let cvar_loss = if tail.is_empty() { var_loss } else { mean(&tail) };
+        let tail: Vec<f64> = losses
+            .iter()
+            .copied()
+            .filter(|&l| l >= var_loss - 1e-12)
+            .collect();
+        let cvar_loss = if tail.is_empty() {
+            var_loss
+        } else {
+            mean(&tail)
+        };
         let mean_profit = mean(&profits);
         let sd_profit = stddev(&profits);
         let shortfall_limit = self.params.risk.shortfall_limit.unwrap_or(0.0);
-        let service_level =
-            shortfalls.iter().filter(|&&s| s <= shortfall_limit + 1e-12).count() as f64 / shortfalls.len() as f64;
+        let service_level = shortfalls
+            .iter()
+            .filter(|&&s| s <= shortfall_limit + 1e-12)
+            .count() as f64
+            / shortfalls.len() as f64;
         let min_sl = self.params.risk.min_service_level.unwrap_or(0.0);
         let feasible = self.params.risk.kind != RiskKind::Chance || service_level >= min_sl - 1e-12;
         let mut robust_objective = mean_profit;
         match self.params.risk.kind {
-            RiskKind::Cvar => robust_objective = mean_profit - self.params.risk.lambda.unwrap_or(1.0) * cvar_loss,
-            RiskKind::Dro => robust_objective = mean_profit - self.params.risk.radius.unwrap_or(1.0) * sd_profit,
-            RiskKind::Chance if !feasible => robust_objective = mean_profit - 1e6 * (min_sl - service_level),
+            RiskKind::Cvar => {
+                robust_objective = mean_profit - self.params.risk.lambda.unwrap_or(1.0) * cvar_loss
+            }
+            RiskKind::Dro => {
+                robust_objective = mean_profit - self.params.risk.radius.unwrap_or(1.0) * sd_profit
+            }
+            RiskKind::Chance if !feasible => {
+                robust_objective = mean_profit - 1e6 * (min_sl - service_level)
+            }
             _ => {}
         }
         RiskCandidateResult {
@@ -1379,7 +1537,10 @@ impl FixedPoint for RiskCapacityStation {
     }
 
     fn initial_state(&mut self) -> Self::State {
-        RiskState { idx: 0, candidates: Vec::new() }
+        RiskState {
+            idx: 0,
+            candidates: Vec::new(),
+        }
     }
 
     fn apply_operator(&mut self, prev: &Self::State) -> Self::State {
@@ -1389,7 +1550,10 @@ impl FixedPoint for RiskCapacityStation {
         let mut candidates = prev.candidates.clone();
         let cand = self.evaluate(&self.grid[prev.idx]);
         candidates.push(cand);
-        RiskState { idx: prev.idx + 1, candidates }
+        RiskState {
+            idx: prev.idx + 1,
+            candidates,
+        }
     }
 
     fn delta(&self, prev: &Self::State, next: &Self::State) -> f64 {
@@ -1446,7 +1610,9 @@ impl ResultStation for RiskCapacityStation {
     }
 }
 
-pub fn run_risk_capacity(params: RiskCapacityParams) -> Result<RiskCapacityResult, PreconditionError> {
+pub fn run_risk_capacity(
+    params: RiskCapacityParams,
+) -> Result<RiskCapacityResult, PreconditionError> {
     Ok(run_result_station(RiskCapacityStation::new(params)?))
 }
 
@@ -1586,11 +1752,31 @@ impl CapacityExpansionSDDPStation {
     }
 
     fn assert_preconditions(p: &SDDPParams) -> Check {
-        Preconditions::integer_in_range("CapacityExpansionSDDPStation", "horizon", p.horizon as f64, 1.0, 200.0)?;
-        Preconditions::length_eq("CapacityExpansionSDDPStation", "demand", &p.demand, p.horizon)?;
+        Preconditions::integer_in_range(
+            "CapacityExpansionSDDPStation",
+            "horizon",
+            p.horizon as f64,
+            1.0,
+            200.0,
+        )?;
+        Preconditions::length_eq(
+            "CapacityExpansionSDDPStation",
+            "demand",
+            &p.demand,
+            p.horizon,
+        )?;
         Preconditions::length_eq("CapacityExpansionSDDPStation", "price", &p.price, p.horizon)?;
-        Preconditions::length_eq("CapacityExpansionSDDPStation", "expansionCost", &p.expansion_cost, p.horizon)?;
-        Preconditions::non_negative("CapacityExpansionSDDPStation", "initialCapacity", p.initial_capacity)?;
+        Preconditions::length_eq(
+            "CapacityExpansionSDDPStation",
+            "expansionCost",
+            &p.expansion_cost,
+            p.horizon,
+        )?;
+        Preconditions::non_negative(
+            "CapacityExpansionSDDPStation",
+            "initialCapacity",
+            p.initial_capacity,
+        )?;
         Preconditions::positive("CapacityExpansionSDDPStation", "xMax", p.x_max)?;
         Preconditions::positive("CapacityExpansionSDDPStation", "step", p.step)?;
         sddp_grid_size(p)?;
@@ -1602,7 +1788,13 @@ impl CapacityExpansionSDDPStation {
             1_000_000.0,
         )?;
         if let Some(mi) = p.max_iter {
-            Preconditions::integer_in_range("CapacityExpansionSDDPStation", "maxIter", mi as f64, 1.0, MAX_SAFE_INTEGER)?;
+            Preconditions::integer_in_range(
+                "CapacityExpansionSDDPStation",
+                "maxIter",
+                mi as f64,
+                1.0,
+                MAX_SAFE_INTEGER,
+            )?;
         }
         if let Some(t) = p.tol {
             Preconditions::non_negative("CapacityExpansionSDDPStation", "tol", t)?;
@@ -1615,17 +1807,36 @@ impl CapacityExpansionSDDPStation {
             Some(p.initial_capacity.to_string()),
         )?;
         for t in 0..p.horizon {
-            Preconditions::non_negative("CapacityExpansionSDDPStation", &format!("demand[{t}].low"), p.demand[t].low)?;
-            Preconditions::non_negative("CapacityExpansionSDDPStation", &format!("demand[{t}].high"), p.demand[t].high)?;
+            Preconditions::non_negative(
+                "CapacityExpansionSDDPStation",
+                &format!("demand[{t}].low"),
+                p.demand[t].low,
+            )?;
+            Preconditions::non_negative(
+                "CapacityExpansionSDDPStation",
+                &format!("demand[{t}].high"),
+                p.demand[t].high,
+            )?;
             Preconditions::check(
                 "CapacityExpansionSDDPStation",
                 &format!("demand[{t}].high"),
                 "be >= low",
                 p.demand[t].high >= p.demand[t].low,
-                Some(format!("low={}, high={}", p.demand[t].low, p.demand[t].high)),
+                Some(format!(
+                    "low={}, high={}",
+                    p.demand[t].low, p.demand[t].high
+                )),
             )?;
-            Preconditions::non_negative("CapacityExpansionSDDPStation", &format!("price[{t}]"), p.price[t])?;
-            Preconditions::non_negative("CapacityExpansionSDDPStation", &format!("expansionCost[{t}]"), p.expansion_cost[t])?;
+            Preconditions::non_negative(
+                "CapacityExpansionSDDPStation",
+                &format!("price[{t}]"),
+                p.price[t],
+            )?;
+            Preconditions::non_negative(
+                "CapacityExpansionSDDPStation",
+                &format!("expansionCost[{t}]"),
+                p.expansion_cost[t],
+            )?;
         }
         Ok(())
     }
@@ -1685,7 +1896,11 @@ impl CapacityExpansionSDDPStation {
         let val = self.bellman_approx(cuts, stage, x);
         let lo = self.bellman_approx(cuts, stage, x_lo);
         let hi = self.bellman_approx(cuts, stage, x_hi);
-        let slope = if x_hi == x_lo { 0.0 } else { (hi - lo) / (x_hi - x_lo) };
+        let slope = if x_hi == x_lo {
+            0.0
+        } else {
+            (hi - lo) / (x_hi - x_lo)
+        };
         Cut {
             slope,
             intercept: val - slope * x,
@@ -1713,7 +1928,9 @@ impl CapacityExpansionSDDPStation {
                 }
                 Some(d) => p.price[stage] * x_next.min(d),
             };
-            let q = -p.expansion_cost[stage] * (x_next - x) + revenue + self.vhat(cuts, stage + 1, x_next);
+            let q = -p.expansion_cost[stage] * (x_next - x)
+                + revenue
+                + self.vhat(cuts, stage + 1, x_next);
             if q > best + 1e-12 {
                 best = q;
                 best_x = x_next;
@@ -1735,7 +1952,8 @@ impl CapacityExpansionSDDPStation {
             let r = self.params.demand[t];
             let d = r.low + rng.next_float() * (r.high - r.low);
             let x_next = self.choose_next(cuts, t, x, Some(d));
-            total += -self.params.expansion_cost[t] * (x_next - x) + self.params.price[t] * x_next.min(d);
+            total += -self.params.expansion_cost[t] * (x_next - x)
+                + self.params.price[t] * x_next.min(d);
             x = x_next;
             states.push(x);
         }
@@ -1887,7 +2105,10 @@ impl FixedPoint for CapacityExpansionSDDPStation {
                     ("iter".to_string(), LogValue::Int(trace_row.iter as i64)),
                     ("upperBound".to_string(), LogValue::Num(upper_bound)),
                     ("lowerBound".to_string(), LogValue::Num(lower_bound)),
-                    ("exactObjective".to_string(), LogValue::Num(self.exact.objective)),
+                    (
+                        "exactObjective".to_string(),
+                        LogValue::Num(self.exact.objective),
+                    ),
                     ("gap".to_string(), LogValue::Num(upper_bound - lower_bound)),
                     (
                         "cutCounts".to_string(),
@@ -1936,14 +2157,20 @@ impl ResultStation for CapacityExpansionSDDPStation {
                 "sddp-upper-bound-dominates-exact",
                 cur.upper_bound + 1e-6 >= self.exact.objective,
                 "upper bound >= exact sampled-grid objective",
-                Some(format!("{:.6} vs exact {:.6}", cur.upper_bound, self.exact.objective)),
+                Some(format!(
+                    "{:.6} vs exact {:.6}",
+                    cur.upper_bound, self.exact.objective
+                )),
                 "sddp",
             ),
             intrinsic_check(
                 "sddp-lower-bound-no-better-than-exact",
                 cur.lower_bound <= self.exact.objective + 1e-6,
                 "policy lower bound <= exact objective",
-                Some(format!("{:.6} vs exact {:.6}", cur.lower_bound, self.exact.objective)),
+                Some(format!(
+                    "{:.6} vs exact {:.6}",
+                    cur.lower_bound, self.exact.objective
+                )),
                 "sddp",
             ),
             monotonicity_non_increasing_check(
@@ -1975,7 +2202,9 @@ pub fn run_capacity_expansion_sddp(
     params: SDDPParams,
     logger: Option<Box<dyn OptimizationLogger>>,
 ) -> Result<SDDPResult, PreconditionError> {
-    Ok(run_result_station(CapacityExpansionSDDPStation::new(params, logger)?))
+    Ok(run_result_station(CapacityExpansionSDDPStation::new(
+        params, logger,
+    )?))
 }
 
 // =============================================================================
@@ -2064,7 +2293,13 @@ fn sample_into(
     } else {
         f64::INFINITY
     };
-    st.ucb = st.mean + exploration * (if st.stderr.is_finite() { st.stderr } else { 1e9 });
+    st.ucb = st.mean
+        + exploration
+            * (if st.stderr.is_finite() {
+                st.stderr
+            } else {
+                1e9
+            });
 }
 
 pub struct AdaptiveSimulationOptimizerStation {
@@ -2093,7 +2328,11 @@ impl AdaptiveSimulationOptimizerStation {
     }
 
     fn assert_preconditions(p: &AdaptiveSimOptParams) -> Check {
-        Preconditions::non_empty("AdaptiveSimulationOptimizerStation", "alternatives", &p.alternatives)?;
+        Preconditions::non_empty(
+            "AdaptiveSimulationOptimizerStation",
+            "alternatives",
+            &p.alternatives,
+        )?;
         Preconditions::integer_in_range(
             "AdaptiveSimulationOptimizerStation",
             "alternatives.length",
@@ -2102,10 +2341,20 @@ impl AdaptiveSimulationOptimizerStation {
             MAX_SAFE_INTEGER,
         )?;
         Preconditions::non_empty("AdaptiveSimulationOptimizerStation", "cost", &p.cost)?;
-        Preconditions::length_eq("AdaptiveSimulationOptimizerStation", "price", &p.price, p.cost.len())?;
+        Preconditions::length_eq(
+            "AdaptiveSimulationOptimizerStation",
+            "price",
+            &p.price,
+            p.cost.len(),
+        )?;
         Preconditions::arr_non_negative("AdaptiveSimulationOptimizerStation", "cost", &p.cost)?;
         Preconditions::arr_non_negative("AdaptiveSimulationOptimizerStation", "price", &p.price)?;
-        validate_demand_spec("AdaptiveSimulationOptimizerStation", "demand", &p.demand, p.cost.len())?;
+        validate_demand_spec(
+            "AdaptiveSimulationOptimizerStation",
+            "demand",
+            &p.demand,
+            p.cost.len(),
+        )?;
         Preconditions::integer_in_range(
             "AdaptiveSimulationOptimizerStation",
             "initialSamples",
@@ -2127,7 +2376,11 @@ impl AdaptiveSimulationOptimizerStation {
             1.0,
             MAX_SAFE_INTEGER,
         )?;
-        Preconditions::non_negative("AdaptiveSimulationOptimizerStation", "exploration", p.exploration)?;
+        Preconditions::non_negative(
+            "AdaptiveSimulationOptimizerStation",
+            "exploration",
+            p.exploration,
+        )?;
         let mut names: Vec<&str> = Vec::new();
         for (i, a) in p.alternatives.iter().enumerate() {
             Preconditions::check(
@@ -2218,7 +2471,10 @@ impl FixedPoint for AdaptiveSimulationOptimizerStation {
             }
         }
         let mut total_samples = prev.total_samples;
-        let reps = self.params.batch_size.min(self.params.budget.saturating_sub(total_samples));
+        let reps = self
+            .params
+            .batch_size
+            .min(self.params.budget.saturating_sub(total_samples));
         for _ in 0..reps {
             sample_into(
                 &mut self.rng,
@@ -2255,7 +2511,10 @@ impl FixedPoint for AdaptiveSimulationOptimizerStation {
                 fields: vec![
                     ("iter".to_string(), LogValue::Int(row.iter as i64)),
                     ("sampled".to_string(), LogValue::Str(row.sampled.clone())),
-                    ("totalSamples".to_string(), LogValue::Int(row.total_samples as i64)),
+                    (
+                        "totalSamples".to_string(),
+                        LogValue::Int(row.total_samples as i64),
+                    ),
                     ("bestName".to_string(), LogValue::Str(row.best_name.clone())),
                     ("bestMean".to_string(), LogValue::Num(row.best_mean)),
                     ("maxStderr".to_string(), LogValue::Num(row.max_stderr)),
@@ -2301,7 +2560,9 @@ impl ResultStation for AdaptiveSimulationOptimizerStation {
             ),
             intrinsic_check(
                 "adaptive-all-alternatives-sampled",
-                cur.stats.iter().all(|a| a.n >= self.params.initial_samples as f64),
+                cur.stats
+                    .iter()
+                    .all(|a| a.n >= self.params.initial_samples as f64),
                 "each alternative has initialSamples",
                 None,
                 "adaptive-simopt",
@@ -2332,7 +2593,9 @@ pub fn run_adaptive_sim_opt(
     params: AdaptiveSimOptParams,
     logger: Option<Box<dyn OptimizationLogger>>,
 ) -> Result<AdaptiveSimOptResult, PreconditionError> {
-    Ok(run_result_station(AdaptiveSimulationOptimizerStation::new(params, logger)?))
+    Ok(run_result_station(AdaptiveSimulationOptimizerStation::new(
+        params, logger,
+    )?))
 }
 
 // =============================================================================
@@ -2349,7 +2612,10 @@ mod tests {
         let samples: Vec<f64> = vec![3.0, 4.0, 5.0, 6.0, 7.0, 4.5, 5.5, 5.0, 4.0, 6.0];
         let params = DistributionFitParams {
             samples: samples.clone(),
-            families: Some(vec![DistributionFamily::Normal, DistributionFamily::Exponential]),
+            families: Some(vec![
+                DistributionFamily::Normal,
+                DistributionFamily::Exponential,
+            ]),
             methods: Some(vec![FitMethod::Mle]),
         };
         let r1 = run_distribution_fit(params.clone()).unwrap();
@@ -2374,9 +2640,18 @@ mod tests {
         let params = SDDPParams {
             horizon: 3,
             demand: vec![
-                DemandRange { low: 2.0, high: 6.0 },
-                DemandRange { low: 3.0, high: 7.0 },
-                DemandRange { low: 1.0, high: 5.0 },
+                DemandRange {
+                    low: 2.0,
+                    high: 6.0,
+                },
+                DemandRange {
+                    low: 3.0,
+                    high: 7.0,
+                },
+                DemandRange {
+                    low: 1.0,
+                    high: 5.0,
+                },
             ],
             price: vec![2.0, 2.0, 2.0],
             expansion_cost: vec![1.0, 1.0, 1.0],
@@ -2397,7 +2672,11 @@ mod tests {
         // Gap is non-negative.
         assert!(res.gap >= -1e-6);
         // All registered invariants hold.
-        assert!(res.validation.iter().all(|c| c.passed), "validators: {:?}", res.validation);
+        assert!(
+            res.validation.iter().all(|c| c.passed),
+            "validators: {:?}",
+            res.validation
+        );
     }
 
     #[test]
@@ -2405,11 +2684,23 @@ mod tests {
         let make_params = || AdaptiveSimOptParams {
             cost: vec![1.0],
             price: vec![3.0],
-            demand: DemandSpec::Uniform(vec![DemandRange { low: 0.0, high: 10.0 }]),
+            demand: DemandSpec::Uniform(vec![DemandRange {
+                low: 0.0,
+                high: 10.0,
+            }]),
             alternatives: vec![
-                AdaptiveAlternative { name: "low".to_string(), x: vec![2.0] },
-                AdaptiveAlternative { name: "mid".to_string(), x: vec![5.0] },
-                AdaptiveAlternative { name: "high".to_string(), x: vec![9.0] },
+                AdaptiveAlternative {
+                    name: "low".to_string(),
+                    x: vec![2.0],
+                },
+                AdaptiveAlternative {
+                    name: "mid".to_string(),
+                    x: vec![5.0],
+                },
+                AdaptiveAlternative {
+                    name: "high".to_string(),
+                    x: vec![9.0],
+                },
             ],
             seed: 777,
             initial_samples: 10,
@@ -2427,7 +2718,10 @@ mod tests {
         // Budget respected and every alternative got at least initialSamples.
         let total: f64 = r1.stats.iter().map(|s| s.n).sum();
         assert!(total >= r1.params.budget as f64);
-        assert!(r1.stats.iter().all(|s| s.n >= r1.params.initial_samples as f64));
+        assert!(r1
+            .stats
+            .iter()
+            .all(|s| s.n >= r1.params.initial_samples as f64));
         assert!(r1.validation.iter().all(|c| c.passed));
     }
 }

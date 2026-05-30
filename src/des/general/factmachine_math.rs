@@ -97,7 +97,10 @@ pub struct OptionPrices {
 /// Compute both option prices from `(qOne, qTwo, b)`.
 pub fn option_prices(q_one: f64, q_two: f64, b: f64) -> OptionPrices {
     let p1 = OptionOnePrice.transform(LmsrPriceInput { q_one, q_two, b });
-    OptionPrices { option_one: p1, option_two: 1.0 - p1 }
+    OptionPrices {
+        option_one: p1,
+        option_two: 1.0 - p1,
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -118,7 +121,11 @@ pub struct SharesFromBudget;
 
 impl Transform<SharesFromBudgetInput, f64> for SharesFromBudget {
     fn transform(&self, input: SharesFromBudgetInput) -> f64 {
-        let SharesFromBudgetInput { budget, current_price, b } = input;
+        let SharesFromBudgetInput {
+            budget,
+            current_price,
+            b,
+        } = input;
         if b <= 0.0 {
             panic!("b must be > 0");
         }
@@ -182,8 +189,18 @@ impl Transform<BuyExecutionInput, BuyExecution> for BuyExecutor {
             current_price: side_current_price,
             b: args.b,
         });
-        let average_price = if shares == 0.0 { 0.0 } else { buy_amount / shares };
-        BuyExecution { shares, buy_amount, average_price, fee_amount, reward: shares }
+        let average_price = if shares == 0.0 {
+            0.0
+        } else {
+            buy_amount / shares
+        };
+        BuyExecution {
+            shares,
+            buy_amount,
+            average_price,
+            fee_amount,
+            reward: shares,
+        }
     }
 }
 
@@ -236,12 +253,26 @@ impl Transform<SellExecutionInput, SellExecution> for SellExecutor {
         } else {
             args.option_two_shares - args.shares_out
         };
-        let cost_after = LmsrCost.transform(LmsrPriceInput { q_one: new_q1, q_two: new_q2, b: args.b });
+        let cost_after = LmsrCost.transform(LmsrPriceInput {
+            q_one: new_q1,
+            q_two: new_q2,
+            b: args.b,
+        });
         let sell_amount = cost_before - cost_after;
         let fee_amount = (sell_amount * fee_bps) / BPS_BASE;
         let usdc_out = sell_amount - fee_amount;
-        let average_price = if args.shares_out == 0.0 { 0.0 } else { sell_amount / args.shares_out };
-        SellExecution { usdc_out, sell_amount, average_price, fee_amount, reward: usdc_out }
+        let average_price = if args.shares_out == 0.0 {
+            0.0
+        } else {
+            sell_amount / args.shares_out
+        };
+        SellExecution {
+            usdc_out,
+            sell_amount,
+            average_price,
+            fee_amount,
+            reward: usdc_out,
+        }
     }
 }
 
@@ -534,7 +565,11 @@ impl Transform<BuyThenSellRoundTripInput, RoundTripResult> for BuyThenSellRoundT
             is_option_one: args.is_option_one,
             fee_bps: args.fee_bps,
         });
-        RoundTripResult { buy, sell, net: sell.usdc_out - args.amount }
+        RoundTripResult {
+            buy,
+            sell,
+            net: sell.usdc_out - args.amount,
+        }
     }
 }
 
@@ -559,7 +594,11 @@ mod tests {
     fn lmsr_cost_matches_closed_form_when_balanced() {
         // With q1 == q2, C(q) = q + b·ln(2).
         let b = 100.0;
-        let cost = LmsrCost.transform(LmsrPriceInput { q_one: 7.0, q_two: 7.0, b });
+        let cost = LmsrCost.transform(LmsrPriceInput {
+            q_one: 7.0,
+            q_two: 7.0,
+            b,
+        });
         assert!((cost - (7.0 + b * std::f64::consts::LN_2)).abs() < 1e-9);
     }
 
@@ -576,15 +615,34 @@ mod tests {
             fee_bps: None,
         });
         assert!(rt.buy.shares > 0.0);
-        assert!(rt.net <= 1e-6, "round-trip net should be non-positive, got {}", rt.net);
+        assert!(
+            rt.net <= 1e-6,
+            "round-trip net should be non-positive, got {}",
+            rt.net
+        );
     }
 
     #[test]
     fn replay_orders_weighted_average_accounting() {
         let orders = [
-            ReplayOrder { action: OrderAction::Buy, shares: 10.0, usdc: 5.0, time: Some(2.0) },
-            ReplayOrder { action: OrderAction::Buy, shares: 10.0, usdc: 5.0, time: None },
-            ReplayOrder { action: OrderAction::Sell, shares: 5.0, usdc: 4.0, time: Some(3.0) },
+            ReplayOrder {
+                action: OrderAction::Buy,
+                shares: 10.0,
+                usdc: 5.0,
+                time: Some(2.0),
+            },
+            ReplayOrder {
+                action: OrderAction::Buy,
+                shares: 10.0,
+                usdc: 5.0,
+                time: None,
+            },
+            ReplayOrder {
+                action: OrderAction::Sell,
+                shares: 5.0,
+                usdc: 4.0,
+                time: Some(3.0),
+            },
         ];
         let r = ReplayOrders.transform(&orders);
         assert_eq!(r.total_orders, 3);

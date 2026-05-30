@@ -50,11 +50,18 @@ struct SignalSource {
 
 impl SignalSource {
     fn new(id: &str, signal: Vec<f64>) -> Self {
-        SignalSource { id: id.to_string(), signal, idx: 0 }
+        SignalSource {
+            id: id.to_string(),
+            signal,
+            idx: 0,
+        }
     }
     fn run_time_step(&mut self, conv: &mut ConvolutionStation) {
         if self.idx < self.signal.len() {
-            conv.take(Sample { n: self.idx, value: self.signal[self.idx] });
+            conv.take(Sample {
+                n: self.idx,
+                value: self.signal[self.idx],
+            });
             self.idx += 1;
         }
     }
@@ -113,7 +120,10 @@ impl ConvolutionStation {
         self.head = (self.head + 1) % self.kernel.len();
         self.flushed_after += 1;
         let y = self.dot();
-        sink.take(Sample { n: self.out_idx, value: y });
+        sink.take(Sample {
+            n: self.out_idx,
+            value: y,
+        });
         self.out_idx += 1;
     }
 
@@ -127,7 +137,10 @@ impl ConvolutionStation {
             self.head = (self.head + 1) % self.kernel.len();
             self.warmup += 1;
             let y = self.dot();
-            sink.take(Sample { n: self.out_idx, value: y });
+            sink.take(Sample {
+                n: self.out_idx,
+                value: y,
+            });
             self.out_idx += 1;
         }
     }
@@ -142,7 +155,11 @@ struct CollectorSink {
 
 impl CollectorSink {
     fn new(id: &str) -> Self {
-        CollectorSink { id: id.to_string(), inbox: VecDeque::new(), results: Vec::new() }
+        CollectorSink {
+            id: id.to_string(),
+            inbox: VecDeque::new(),
+            results: Vec::new(),
+        }
     }
     fn take(&mut self, s: Sample) {
         self.inbox.push_back(s);
@@ -229,16 +246,28 @@ fn make_test_signal(n: usize, seed: u32) -> Vec<f64> {
 
 /// Entry point (TS top-level `main`). Env vars: `N`, `K`, `SEED`.
 pub fn run() {
-    let n = std::env::var("N").ok().and_then(|v| v.parse().ok()).unwrap_or(64usize);
-    let k = std::env::var("K").ok().and_then(|v| v.parse().ok()).unwrap_or(7usize);
-    let seed = std::env::var("SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(42u32);
+    let n = std::env::var("N")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(64usize);
+    let k = std::env::var("K")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(7usize);
+    let seed = std::env::var("SEED")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(42u32);
 
     let signal = make_test_signal(n, seed);
     let kernel = make_triangle_kernel(k);
 
     println!("# Convolution simulation");
     println!("#   signal length = {}", signal.len());
-    println!("#   kernel length = {}  (triangular, normalized)", kernel.len());
+    println!(
+        "#   kernel length = {}  (triangular, normalized)",
+        kernel.len()
+    );
     println!("#   seed          = {seed}");
 
     let result = run_convolution(&signal, &kernel);

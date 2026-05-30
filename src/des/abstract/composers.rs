@@ -72,7 +72,7 @@ impl DoesFanOut {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::des::r#abstract::interfaces::{HasOutput, HasInput};
+    use crate::des::r#abstract::interfaces::{HasInput, HasOutput};
 
     // A trivial node with no outbound connections: fan-out should report "not accepted".
     struct EmptyNode;
@@ -104,8 +104,7 @@ mod tests {
 
     #[test]
     fn fan_out_with_no_targets_is_not_accepted() {
-        let node: Rc<RefCell<dyn HasManyOutputConnections>> =
-            Rc::new(RefCell::new(EmptyNode));
+        let node: Rc<RefCell<dyn HasManyOutputConnections>> = Rc::new(RefCell::new(EmptyNode));
         let fan = DoesFanOut::new(node);
         let me = crate::des::entity_moving::moving::BasicMovingEntity::new();
         let me: Rc<RefCell<dyn MovingEntity>> = Rc::new(RefCell::new(me));

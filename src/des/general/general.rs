@@ -131,7 +131,11 @@ impl<V: HasId> DESSet<V> {
     /// `toJSON()` analog: `{ size, values: [ids...] }` as a compact JSON string.
     pub fn to_json(&self) -> String {
         let ids: Vec<String> = self.items.iter().map(|v| format!("{:?}", v.id())).collect();
-        format!("{{\"size\":{},\"values\":[{}]}}", self.size(), ids.join(","))
+        format!(
+            "{{\"size\":{},\"values\":[{}]}}",
+            self.size(),
+            ids.join(",")
+        )
     }
 }
 

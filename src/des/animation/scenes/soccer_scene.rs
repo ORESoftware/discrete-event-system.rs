@@ -124,7 +124,11 @@ pub fn build_soccer_frame(_t: f64, _tick: f64, input: &SoccerFrameInput) -> Fram
     shapes.push(Shape::Text(TextShape {
         x: META_X + META_W / 2.0,
         y: META_Y + 70.0,
-        text: format!("Period {} / {}", js_num(input.period + 1.0), js_num(input.problem.num_periods)),
+        text: format!(
+            "Period {} / {}",
+            js_num(input.period + 1.0),
+            js_num(input.problem.num_periods)
+        ),
         font_size: Some(16.0),
         fill: Some("#cbd5e1".to_string()),
         anchor: Some(Anchor::Middle),
@@ -133,7 +137,11 @@ pub fn build_soccer_frame(_t: f64, _tick: f64, input: &SoccerFrameInput) -> Fram
     shapes.push(Shape::Text(TextShape {
         x: META_X + META_W / 2.0,
         y: META_Y + 110.0,
-        text: format!("Minute {} / {}", js_num(input.t), js_num(input.problem.num_periods * 20.0)),
+        text: format!(
+            "Minute {} / {}",
+            js_num(input.t),
+            js_num(input.problem.num_periods * 20.0)
+        ),
         font_size: Some(14.0),
         fill: Some("#94a3b8".to_string()),
         anchor: Some(Anchor::Middle),
@@ -143,7 +151,11 @@ pub fn build_soccer_frame(_t: f64, _tick: f64, input: &SoccerFrameInput) -> Fram
     shapes.push(Shape::Text(TextShape {
         x: META_X + META_W / 2.0,
         y: META_Y + 170.0,
-        text: format!("Us  {}  \u{2014}  {}  Them", js_num(input.goals_for), js_num(input.goals_against)),
+        text: format!(
+            "Us  {}  \u{2014}  {}  Them",
+            js_num(input.goals_for),
+            js_num(input.goals_against)
+        ),
         font_size: Some(26.0),
         fill: Some("#fde68a".to_string()),
         anchor: Some(Anchor::Middle),
@@ -319,7 +331,10 @@ pub fn build_soccer_frame(_t: f64, _tick: f64, input: &SoccerFrameInput) -> Fram
 
     // Players on the pitch.
     for pos in 0..input.problem.num_positions {
-        let slot = POSITION_RELATIVE.get(pos).copied().unwrap_or(POSITION_RELATIVE[0]);
+        let slot = POSITION_RELATIVE
+            .get(pos)
+            .copied()
+            .unwrap_or(POSITION_RELATIVE[0]);
         let cx = PITCH_X + slot.0 * PITCH_W;
         let cy = PITCH_Y + slot.1 * PITCH_H;
         let player_id = input.positions[pos];
@@ -481,7 +496,15 @@ mod tests {
             num_positions: 7,
             num_periods: 4.0,
             player_names: Some((0..14).map(|i| format!("Kid{i}")).collect()),
-            position_names: Some(vec!["GK".into(), "LB".into(), "RB".into(), "CB".into(), "LM".into(), "RM".into(), "ST".into()]),
+            position_names: Some(vec![
+                "GK".into(),
+                "LB".into(),
+                "RB".into(),
+                "CB".into(),
+                "LM".into(),
+                "RM".into(),
+                "ST".into(),
+            ]),
         };
         let input = SoccerFrameInput {
             t: 20.0,
@@ -495,9 +518,18 @@ mod tests {
             problem: &problem,
         };
         let fp = build_soccer_frame(0.0, 0.0, &input);
-        assert_eq!(fp.caption.as_deref(), Some("t=20min  P1  Us 2-1 Them  affinity 75%"));
+        assert_eq!(
+            fp.caption.as_deref(),
+            Some("t=20min  P1  Us 2-1 Them  affinity 75%")
+        );
         // Goal flash + sub-window watermark present.
-        assert!(fp.shapes.iter().any(|s| matches!(s, Shape::Text(t) if t.text == "GOAL!")));
-        assert!(fp.shapes.iter().any(|s| matches!(s, Shape::Text(t) if t.text.contains("SUB WINDOW"))));
+        assert!(fp
+            .shapes
+            .iter()
+            .any(|s| matches!(s, Shape::Text(t) if t.text == "GOAL!")));
+        assert!(fp
+            .shapes
+            .iter()
+            .any(|s| matches!(s, Shape::Text(t) if t.text.contains("SUB WINDOW"))));
     }
 }

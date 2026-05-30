@@ -32,19 +32,35 @@ fn num_str(x: f64) -> String {
 
 /// Entry point (`main()` in the TS source).
 pub fn run() {
-    let seed: u32 = std::env::var("SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(7);
+    let seed: u32 = std::env::var("SEED")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(7);
     let result = solve_stochastic_flow_mdp(
         build_default_stochastic_flow_mdp_problem(),
-        SolveStochasticFlowMDPOptions { seed: Some(seed), max_policy_rows: Some(16) },
+        SolveStochasticFlowMDPOptions {
+            seed: Some(seed),
+            max_policy_rows: Some(16),
+        },
     );
 
     println!("# Stochastic flow control MDP");
     println!("# state=(current node, remaining capacities), action=edge attempt or wait");
     println!("# horizon={}, states={}", result.horizon, result.num_states);
-    println!("# deterministic max-flow upper bound={}", num_str(result.deterministic_max_flow));
+    println!(
+        "# deterministic max-flow upper bound={}",
+        num_str(result.deterministic_max_flow)
+    );
     println!("# optimal expected reward={}", fmt(result.expected_reward));
-    println!("# simulated delivered units (seed={})={}", seed, num_str(result.simulation.delivered));
-    println!("# simulated total reward={}", fmt(result.simulation.total_reward));
+    println!(
+        "# simulated delivered units (seed={})={}",
+        seed,
+        num_str(result.simulation.delivered)
+    );
+    println!(
+        "# simulated total reward={}",
+        fmt(result.simulation.total_reward)
+    );
     println!();
 
     println!("## Initial-state policy path (success branch)");

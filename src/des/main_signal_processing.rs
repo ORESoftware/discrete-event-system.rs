@@ -11,8 +11,9 @@
 use std::collections::HashMap;
 
 use crate::des::general::signal_transforms::{
-    format_complex, run_fourier_transform, run_laplace_transform, run_z_transform, ComplexPointInput,
-    FourierTransformParams, LaplaceTransformParams, TransformRunResult, ZTransformParams,
+    format_complex, run_fourier_transform, run_laplace_transform, run_z_transform,
+    ComplexPointInput, FourierTransformParams, LaplaceTransformParams, TransformRunResult,
+    ZTransformParams,
 };
 
 /// JS `Number.prototype.toPrecision(p)` — `p` significant digits.
@@ -32,7 +33,11 @@ fn to_precision(x: f64, p: usize) -> String {
 fn print_result(result: &TransformRunResult) {
     println!("\n{} TRANSFORM", result.kind.as_str().to_uppercase());
     println!("  {}", result.convention);
-    println!("  samples={} points={}", result.samples.len(), result.outputs.len());
+    println!(
+        "  samples={} points={}",
+        result.samples.len(),
+        result.outputs.len()
+    );
     println!(
         "  source={} stations={} sink={}",
         result.entity_framework.sources.join(", "),
@@ -54,8 +59,16 @@ pub fn run() {
     print_result(&run_z_transform(ZTransformParams {
         sequence: Some(vec![1.0, 0.5, 0.25, 0.125, 0.0625]),
         z_values: Some(vec![
-            ComplexPointInput { label: Some("z=2".to_string()), re: 2.0, im: None },
-            ComplexPointInput { label: Some("z=1".to_string()), re: 1.0, im: None },
+            ComplexPointInput {
+                label: Some("z=2".to_string()),
+                re: 2.0,
+                im: None,
+            },
+            ComplexPointInput {
+                label: Some("z=1".to_string()),
+                re: 1.0,
+                im: None,
+            },
         ]),
         ..Default::default()
     }));
@@ -69,8 +82,16 @@ pub fn run() {
         t1: Some(8.0),
         dt: Some(0.01),
         s_values: Some(vec![
-            ComplexPointInput { label: Some("s=1".to_string()), re: 1.0, im: None },
-            ComplexPointInput { label: Some("s=0.5+i".to_string()), re: 0.5, im: Some(1.0) },
+            ComplexPointInput {
+                label: Some("s=1".to_string()),
+                re: 1.0,
+                im: None,
+            },
+            ComplexPointInput {
+                label: Some("s=0.5+i".to_string()),
+                re: 0.5,
+                im: Some(1.0),
+            },
         ]),
         ..Default::default()
     }));

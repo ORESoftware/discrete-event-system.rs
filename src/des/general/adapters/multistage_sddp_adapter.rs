@@ -35,12 +35,28 @@ pub struct MultiStageParams {
     pub options: Option<SDDPOptions>,
 }
 
-fn num(min: Option<f64>, max: Option<f64>, integer: Option<bool>, default: Option<f64>) -> ParamSchema {
-    ParamSchema::Number { min, max, integer, default, description: None }
+fn num(
+    min: Option<f64>,
+    max: Option<f64>,
+    integer: Option<bool>,
+    default: Option<f64>,
+) -> ParamSchema {
+    ParamSchema::Number {
+        min,
+        max,
+        integer,
+        default,
+        description: None,
+    }
 }
 
 fn arr(items: ParamSchema) -> ParamSchema {
-    ParamSchema::Array { items: Box::new(items), min_length: None, max_length: None, description: None }
+    ParamSchema::Array {
+        items: Box::new(items),
+        min_length: None,
+        max_length: None,
+        description: None,
+    }
 }
 
 fn demand_outcome_schema() -> ParamSchema {
@@ -57,14 +73,32 @@ fn demand_outcome_schema() -> ParamSchema {
 fn multi_stage_problem_schema() -> ParamSchema {
     ParamSchema::Object {
         fields: vec![
-            ("horizon".to_string(), num(Some(1.0), None, Some(true), None)),
-            ("initialInventory".to_string(), num(Some(0.0), None, None, None)),
+            (
+                "horizon".to_string(),
+                num(Some(1.0), None, Some(true), None),
+            ),
+            (
+                "initialInventory".to_string(),
+                num(Some(0.0), None, None, None),
+            ),
             ("capacity".to_string(), num(Some(1e-9), None, None, None)),
-            ("maxOrder".to_string(), arr(num(Some(0.0), None, None, None))),
+            (
+                "maxOrder".to_string(),
+                arr(num(Some(0.0), None, None, None)),
+            ),
             ("price".to_string(), arr(num(Some(0.0), None, None, None))),
-            ("orderCost".to_string(), arr(num(Some(0.0), None, None, None))),
-            ("holdCost".to_string(), arr(num(Some(0.0), None, None, None))),
-            ("stockoutCost".to_string(), arr(num(Some(0.0), None, None, None))),
+            (
+                "orderCost".to_string(),
+                arr(num(Some(0.0), None, None, None)),
+            ),
+            (
+                "holdCost".to_string(),
+                arr(num(Some(0.0), None, None, None)),
+            ),
+            (
+                "stockoutCost".to_string(),
+                arr(num(Some(0.0), None, None, None)),
+            ),
             ("salvageValue".to_string(), num(Some(0.0), None, None, None)),
             ("demands".to_string(), arr(arr(demand_outcome_schema()))),
         ],
@@ -93,12 +127,24 @@ pub fn multi_stage_schema() -> ParamSchema {
                 "options".to_string(),
                 ParamSchema::Object {
                     fields: vec![
-                        ("maxIter".to_string(), num(Some(1.0), None, Some(true), Some(80.0))),
+                        (
+                            "maxIter".to_string(),
+                            num(Some(1.0), None, Some(true), Some(80.0)),
+                        ),
                         ("tol".to_string(), num(Some(0.0), None, None, Some(1e-4))),
                         ("seed".to_string(), num(None, None, Some(true), Some(1.0))),
-                        ("evaluatePolicyEvery".to_string(), num(Some(1.0), None, Some(true), Some(80.0))),
-                        ("finiteDiffStep".to_string(), num(Some(1e-9), None, None, None)),
-                        ("cutGridSize".to_string(), num(Some(2.0), None, Some(true), Some(21.0))),
+                        (
+                            "evaluatePolicyEvery".to_string(),
+                            num(Some(1.0), None, Some(true), Some(80.0)),
+                        ),
+                        (
+                            "finiteDiffStep".to_string(),
+                            num(Some(1e-9), None, None, None),
+                        ),
+                        (
+                            "cutGridSize".to_string(),
+                            num(Some(2.0), None, Some(true), Some(21.0)),
+                        ),
                     ],
                     required: Some(vec![]),
                     description: None,
@@ -107,7 +153,8 @@ pub fn multi_stage_schema() -> ParamSchema {
         ],
         required: Some(vec![]),
         description: Some(
-            "Multi-stage stochastic inventory solved by SDDP and exact scenario tree validation.".to_string(),
+            "Multi-stage stochastic inventory solved by SDDP and exact scenario tree validation."
+                .to_string(),
         ),
     }
 }
@@ -153,7 +200,9 @@ impl DESModelRegistration<MultiStageParams, MultiStageRunResult> for MultiStageA
     }
 
     fn run(&self, params: MultiStageParams, _runtime: &DESRuntimeConfig) -> MultiStageRunResult {
-        let problem = params.problem.unwrap_or_else(build_default_multi_stage_inventory_problem);
+        let problem = params
+            .problem
+            .unwrap_or_else(build_default_multi_stage_inventory_problem);
         run_multi_stage_inventory_demo(problem, params.options.unwrap_or_default())
     }
 
@@ -187,8 +236,9 @@ impl DESModelRegistration<MultiStageParams, MultiStageRunResult> for MultiStageA
     }
 
     fn write_csv(&self, result: &MultiStageRunResult, csv_path: &str) {
-        let mut lines =
-            vec!["iter,upper_bound,policy_value,gap_to_exact,terminal_inventory,cuts_added".to_string()];
+        let mut lines = vec![
+            "iter,upper_bound,policy_value,gap_to_exact,terminal_inventory,cuts_added".to_string(),
+        ];
         for tr in &result.sddp.trace {
             lines.push(csv_row([
                 tr.iter.to_string(),

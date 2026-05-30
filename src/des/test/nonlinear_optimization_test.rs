@@ -19,11 +19,21 @@ mod tests {
     }
 
     fn unconstrained_default() -> UnconstrainedOptParams {
-        UnconstrainedOptParams { x0: None, max_iter: None, tol: None }
+        UnconstrainedOptParams {
+            x0: None,
+            max_iter: None,
+            tol: None,
+        }
     }
 
     fn nls_default() -> NonlinearLeastSquaresParams {
-        NonlinearLeastSquaresParams { points: None, initial: None, max_iter: None, tol: None, lambda: None }
+        NonlinearLeastSquaresParams {
+            points: None,
+            initial: None,
+            max_iter: None,
+            tol: None,
+            lambda: None,
+        }
     }
 
     #[test]
@@ -35,7 +45,11 @@ mod tests {
         assert!(r.topology.movables.iter().any(|m| m == "OptStateToken"));
 
         let threw = std::panic::catch_unwind(|| {
-            run_newton_rosenbrock(UnconstrainedOptParams { x0: Some(vec![f64::NAN, 1.0]), max_iter: None, tol: None })
+            run_newton_rosenbrock(UnconstrainedOptParams {
+                x0: Some(vec![f64::NAN, 1.0]),
+                max_iter: None,
+                tol: None,
+            })
         })
         .is_err();
         assert!(threw);

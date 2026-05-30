@@ -24,7 +24,9 @@ mod tests {
         MonteCarloObservability, MonteCarloObservabilityOpts, Mulberry32, ObservabilityGramian,
         RandomPolicyOpts,
     };
-    use crate::des::general::control_systems::linear_algebra::{LinAlg, MatrixInverse, SymmetricEigen};
+    use crate::des::general::control_systems::linear_algebra::{
+        LinAlg, MatrixInverse, SymmetricEigen,
+    };
     use crate::des::general::control_systems::observability_controllability::{
         MarkovDecisionProcess, MdpSpec, PartiallyObservableProcess, PomdpSpec, StateSpaceModel,
         StateSpaceSpec,
@@ -76,7 +78,9 @@ mod tests {
         let ai = MatrixInverse::new(&a, None).inverse();
         let prod = LinAlg::mat_mul(&a, &ai);
         assert!(
-            close(prod[0][0], 1.0, 1e-9) && close(prod[1][1], 1.0, 1e-9) && close(prod[0][1], 0.0, 1e-9)
+            close(prod[0][0], 1.0, 1e-9)
+                && close(prod[1][1], 1.0, 1e-9)
+                && close(prod[0][1], 0.0, 1e-9)
         );
 
         let mut eig = SymmetricEigen::new(&vec![vec![2.0, 0.0], vec![0.0, 5.0]], 100);
@@ -115,7 +119,11 @@ mod tests {
                 ones += 1;
             }
         }
-        assert!(close(ones as f64 / 5000.0, 0.8, 0.03), "got {}", ones as f64 / 5000.0);
+        assert!(
+            close(ones as f64 / 5000.0, 0.8, 0.03),
+            "got {}",
+            ones as f64 / 5000.0
+        );
     }
 
     // [3] Gramians — controllable vs deficient.
@@ -168,17 +176,32 @@ mod tests {
         let wc_eig = wc.eigenvalues();
         let wc_ratio = wc_eig[1] / wc_eig[0];
         let mc_ratio = mc.spread_eigenvalues[1] / mc.spread_eigenvalues[0];
-        assert!(close(wc_ratio, mc_ratio, wc_ratio * 0.25), "gram={wc_ratio} mc={mc_ratio}");
-        assert!(mc.target_success_rate > 0.95, "rate={}", mc.target_success_rate);
+        assert!(
+            close(wc_ratio, mc_ratio, wc_ratio * 0.25),
+            "gram={wc_ratio} mc={mc_ratio}"
+        );
+        assert!(
+            mc.target_success_rate > 0.95,
+            "rate={}",
+            mc.target_success_rate
+        );
 
         let dec = decoupled();
         let mc_d = MonteCarloControllability::new(
             &dec,
             30,
-            MonteCarloControllabilityOpts { trials: Some(2000), seed: Some(3), ..Default::default() },
+            MonteCarloControllabilityOpts {
+                trials: Some(2000),
+                seed: Some(3),
+                ..Default::default()
+            },
         )
         .run();
-        assert!(mc_d.target_success_rate < 0.3, "rate={}", mc_d.target_success_rate);
+        assert!(
+            mc_d.target_success_rate < 0.3,
+            "rate={}",
+            mc_d.target_success_rate
+        );
     }
 
     // [6] Monte-Carlo observability — reconstruction error tracks W_o.
@@ -196,7 +219,11 @@ mod tests {
             },
         )
         .run();
-        assert!(obs.mean_reconstruction_error < 0.1, "err={}", obs.mean_reconstruction_error);
+        assert!(
+            obs.mean_reconstruction_error < 0.1,
+            "err={}",
+            obs.mean_reconstruction_error
+        );
 
         let dec = decoupled();
         let obs_d = MonteCarloObservability::new(
@@ -210,7 +237,11 @@ mod tests {
             },
         )
         .run();
-        assert!(obs_d.mean_reconstruction_error > 0.5, "err={}", obs_d.mean_reconstruction_error);
+        assert!(
+            obs_d.mean_reconstruction_error > 0.5,
+            "err={}",
+            obs_d.mean_reconstruction_error
+        );
     }
 
     // [7] MDP controllability degree — value iteration + rollouts.
@@ -219,12 +250,20 @@ mod tests {
         let ring = MarkovDecisionProcess::new(MdpSpec {
             num_states: 3,
             num_actions: 1,
-            transition: vec![vec![vec![0.0, 1.0, 0.0], vec![0.0, 0.0, 1.0], vec![1.0, 0.0, 0.0]]],
+            transition: vec![vec![
+                vec![0.0, 1.0, 0.0],
+                vec![0.0, 0.0, 1.0],
+                vec![1.0, 0.0, 0.0],
+            ]],
         });
         let trap = MarkovDecisionProcess::new(MdpSpec {
             num_states: 3,
             num_actions: 1,
-            transition: vec![vec![vec![0.0, 1.0, 0.0], vec![0.0, 0.0, 1.0], vec![0.0, 0.0, 1.0]]],
+            transition: vec![vec![
+                vec![0.0, 1.0, 0.0],
+                vec![0.0, 0.0, 1.0],
+                vec![0.0, 0.0, 1.0],
+            ]],
         });
         let ring_p = MdpControllabilityDegree::new(&ring);
         let trap_p = MdpControllabilityDegree::new(&trap);
@@ -268,7 +307,11 @@ mod tests {
             observation: vec![vec![0.5, 0.5], vec![0.5, 0.5]],
         });
 
-        let opts = RandomPolicyOpts { episodes: Some(600), seed: Some(5), ..Default::default() };
+        let opts = RandomPolicyOpts {
+            episodes: Some(600),
+            seed: Some(5),
+            ..Default::default()
+        };
         let r_d = MonteCarloDistinguishability::new(&distinct).run(&opts);
         assert!(r_d.min_degree > 0.95, "min={}", r_d.min_degree);
         assert!(r_d.residual_entropy.iter().all(|&e| e < 0.05));
@@ -305,7 +348,11 @@ mod tests {
                 evalr.clone() as StationRef,
                 sink.clone() as StationRef,
             ],
-            IterativeRunOptions { shuffle: false, max_ticks: Some(10), ..Default::default() },
+            IterativeRunOptions {
+                shuffle: false,
+                max_ticks: Some(10),
+                ..Default::default()
+            },
         );
 
         let sink_ref = sink.borrow();
@@ -346,9 +393,17 @@ mod tests {
         let winv = MatrixInverse::new(cg.matrix(), None).inverse();
         let w_inv_x = LinAlg::mat_vec(&winv, &x);
         let quad = x[0] * w_inv_x[0] + x[1] * w_inv_x[1];
-        assert!(close(cg.min_energy_to_reach(&x), quad, 1e-6 * quad.abs() + 1e-9));
+        assert!(close(
+            cg.min_energy_to_reach(&x),
+            quad,
+            1e-6 * quad.abs() + 1e-9
+        ));
 
-        let m: Mat = vec![vec![3.0, 1.0, 0.0], vec![1.0, 2.0, 1.0], vec![0.0, 1.0, 4.0]];
+        let m: Mat = vec![
+            vec![3.0, 1.0, 0.0],
+            vec![1.0, 2.0, 1.0],
+            vec![0.0, 1.0, 4.0],
+        ];
         let mut eig = SymmetricEigen::new(&m, 100);
         let vals = eig.values();
         let vecs = eig.vectors();
@@ -394,8 +449,16 @@ mod tests {
             num_states: 3,
             num_actions: 2,
             transition: vec![
-                vec![vec![0.0, 1.0, 0.0], vec![0.0, 0.0, 1.0], vec![0.0, 0.0, 1.0]],
-                vec![vec![1.0, 0.0, 0.0], vec![1.0, 0.0, 0.0], vec![0.0, 1.0, 0.0]],
+                vec![
+                    vec![0.0, 1.0, 0.0],
+                    vec![0.0, 0.0, 1.0],
+                    vec![0.0, 0.0, 1.0],
+                ],
+                vec![
+                    vec![1.0, 0.0, 0.0],
+                    vec![1.0, 0.0, 0.0],
+                    vec![0.0, 1.0, 0.0],
+                ],
             ],
         });
         let planner = MdpControllabilityDegree::new(&bidir);
@@ -405,7 +468,11 @@ mod tests {
         let multi_step = PartiallyObservableProcess::new(PomdpSpec {
             num_states: 3,
             num_actions: 1,
-            transition: vec![vec![vec![0.0, 1.0, 0.0], vec![0.0, 0.0, 1.0], vec![0.0, 0.0, 1.0]]],
+            transition: vec![vec![
+                vec![0.0, 1.0, 0.0],
+                vec![0.0, 0.0, 1.0],
+                vec![0.0, 0.0, 1.0],
+            ]],
             num_observations: 2,
             observation: vec![vec![1.0, 0.0], vec![1.0, 0.0], vec![0.0, 1.0]],
         });

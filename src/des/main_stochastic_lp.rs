@@ -55,8 +55,14 @@ fn vec_fixed(xs: &[f64], d: usize) -> String {
 
 /// Entry point (`main()` in the TS source).
 pub fn run() {
-    let n: usize = std::env::var("N").ok().and_then(|v| v.parse().ok()).unwrap_or(200);
-    let seed: u32 = std::env::var("SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(42);
+    let n: usize = std::env::var("N")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(200);
+    let seed: u32 = std::env::var("SEED")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(42);
     let budget: Option<f64> = std::env::var("BUDGET").ok().and_then(|v| v.parse().ok());
     let verbose: bool = std::env::var("VERBOSE").map(|v| v == "1").unwrap_or(false);
 
@@ -99,13 +105,22 @@ pub fn run() {
     // ── 2. Monolithic SAA (single big LP) ────────────────────────────────
     println!("## Method 2 — monolithic SAA (one giant LP via solveLPInternal)");
     let slp_mono = build_production_slp(c.clone(), p.clone(), budget);
-    let scenarios_mono =
-        build_production_scenarios(UniformDemandSpec { ranges: ranges.clone(), seed }, n);
+    let scenarios_mono = build_production_scenarios(
+        UniformDemandSpec {
+            ranges: ranges.clone(),
+            seed,
+        },
+        n,
+    );
     let mono = solve_slp_monolithic(slp_mono, scenarios_mono);
     println!("     status    = {}", status_str(mono.status));
     println!("     x*        = [{}]", vec_fixed(&mono.x, 4));
     println!("     z*        = {:.4}", mono.objective);
-    println!("     simplex iters = {},  elapsed = {} ms", mono.iterations, num_str(mono.elapsed_ms));
+    println!(
+        "     simplex iters = {},  elapsed = {} ms",
+        mono.iterations,
+        num_str(mono.elapsed_ms)
+    );
     if let Some(cf) = &cf {
         println!(
             "     vs closed-form Δ = {:.4}  (Monte Carlo error)",
@@ -117,8 +132,13 @@ pub fn run() {
     // ── 3. Benders L-shaped as a DES ─────────────────────────────────────
     println!("## Method 3 — Benders decomposition AS A DES (master = IncrementalLP, cuts arrive as movables)");
     let slp_bend = build_production_slp(c.clone(), p.clone(), budget);
-    let scenarios_bend =
-        build_production_scenarios(UniformDemandSpec { ranges: ranges.clone(), seed }, n);
+    let scenarios_bend = build_production_scenarios(
+        UniformDemandSpec {
+            ranges: ranges.clone(),
+            seed,
+        },
+        n,
+    );
     let bend = solve_slp_benders(
         slp_bend,
         scenarios_bend,
@@ -135,8 +155,14 @@ pub fn run() {
     println!("     status    = {}", status_str(bend.status));
     println!("     x*        = [{}]", vec_fixed(&bend.x, 4));
     println!("     z*        = {:.4}", bend.objective);
-    println!("     iters     = {}  (one tick per master+subproblem round)", bend.iterations);
-    println!("     cuts      = {}", trace.iter().filter(|t| t.cut_added.is_some()).count());
+    println!(
+        "     iters     = {}  (one tick per master+subproblem round)",
+        bend.iterations
+    );
+    println!(
+        "     cuts      = {}",
+        trace.iter().filter(|t| t.cut_added.is_some()).count()
+    );
     println!("     elapsed   = {} ms", num_str(bend.elapsed_ms));
     println!(
         "     vs monolithic: |Δz| = {:.2e},  speedup ≈ {:.1}×",
@@ -144,7 +170,10 @@ pub fn run() {
         mono.elapsed_ms / bend.elapsed_ms.max(1.0)
     );
     if let Some(cf) = &cf {
-        println!("     vs closed-form Δ = {:.4}", bend.objective - cf.objective);
+        println!(
+            "     vs closed-form Δ = {:.4}",
+            bend.objective - cf.objective
+        );
     }
     println!();
 
@@ -201,8 +230,13 @@ pub fn run() {
 
     // ── 4. Out-of-sample evaluation ──────────────────────────────────────
     let oo_n = 50000usize;
-    let oo_scenarios =
-        build_production_scenarios(UniformDemandSpec { ranges: ranges.clone(), seed: 99999 }, oo_n);
+    let oo_scenarios = build_production_scenarios(
+        UniformDemandSpec {
+            ranges: ranges.clone(),
+            seed: 99999,
+        },
+        oo_n,
+    );
     let eval_out_of_sample = |x: &[f64]| -> f64 {
         let mut z = 0.0;
         for i in 0..c.len() {
@@ -218,10 +252,19 @@ pub fn run() {
         z + q_sum / oo_n as f64
     };
     println!("## Out-of-sample policy evaluation (N_oos = 50000 fresh scenarios)");
-    println!("     monolithic x*: z_oos = {:.4}", eval_out_of_sample(&mono.x));
-    println!("     Benders   x*: z_oos = {:.4}", eval_out_of_sample(&bend.x));
+    println!(
+        "     monolithic x*: z_oos = {:.4}",
+        eval_out_of_sample(&mono.x)
+    );
+    println!(
+        "     Benders   x*: z_oos = {:.4}",
+        eval_out_of_sample(&bend.x)
+    );
     if let Some(cf) = &cf {
-        println!("     closed-form x*: z_oos = {:.4}  (≈ true z*)", eval_out_of_sample(&cf.x));
+        println!(
+            "     closed-form x*: z_oos = {:.4}  (≈ true z*)",
+            eval_out_of_sample(&cf.x)
+        );
     }
     println!();
     println!("# Done.");
@@ -239,5 +282,8 @@ fn num_str(x: f64) -> String {
 
 /// `[10, 12].join(', ')` for integer-valued cost/revenue vectors.
 fn vec_fixed_int(xs: &[f64]) -> String {
-    xs.iter().map(|v| num_str(*v)).collect::<Vec<_>>().join(", ")
+    xs.iter()
+        .map(|v| num_str(*v))
+        .collect::<Vec<_>>()
+        .join(", ")
 }

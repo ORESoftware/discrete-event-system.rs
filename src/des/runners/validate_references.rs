@@ -58,9 +58,22 @@ fn welch(a: &[f64], b: &[f64]) -> WelchResult {
     let n_a = a.len() as f64;
     let n_b = b.len() as f64;
     let se_sq = v_a / n_a + v_b / n_b;
-    let t = if se_sq > 0.0 { (m_a - m_b) / se_sq.sqrt() } else { 0.0 };
-    let p = if se_sq > 0.0 { 2.0 * (1.0 - normal_cdf(t.abs())) } else { 1.0 };
-    WelchResult { t, p_value_two_sided: p, reject95: t.abs() > 1.96, reject99: t.abs() > 2.58 }
+    let t = if se_sq > 0.0 {
+        (m_a - m_b) / se_sq.sqrt()
+    } else {
+        0.0
+    };
+    let p = if se_sq > 0.0 {
+        2.0 * (1.0 - normal_cdf(t.abs()))
+    } else {
+        1.0
+    };
+    WelchResult {
+        t,
+        p_value_two_sided: p,
+        reject95: t.abs() > 1.96,
+        reject99: t.abs() > 2.58,
+    }
 }
 
 fn normal_cdf(x: f64) -> f64 {
@@ -68,7 +81,14 @@ fn normal_cdf(x: f64) -> f64 {
 }
 
 fn erf(x: f64) -> f64 {
-    let (a1, a2, a3, a4, a5, p) = (0.254829592, -0.284496736, 1.421413741, -1.453152027, 1.061405429, 0.3275911);
+    let (a1, a2, a3, a4, a5, p) = (
+        0.254829592,
+        -0.284496736,
+        1.421413741,
+        -1.453152027,
+        1.061405429,
+        0.3275911,
+    );
     let sign = if x < 0.0 { -1.0 } else { 1.0 };
     let ax = x.abs();
     let t = 1.0 / (1.0 + p * ax);
@@ -175,28 +195,51 @@ fn pad_end(s: &str, w: usize) -> String {
 
 fn collect_split(rs: &[RunResult], from: &str, to: &str) -> Vec<f64> {
     rs.iter()
-        .map(|r| r.split_probs.get(from).and_then(|m| m.get(to)).copied().unwrap_or(0.0))
+        .map(|r| {
+            r.split_probs
+                .get(from)
+                .and_then(|m| m.get(to))
+                .copied()
+                .unwrap_or(0.0)
+        })
         .collect()
 }
 
 fn collect_pop(rs: &[RunResult], c: &str) -> Vec<f64> {
-    rs.iter().map(|r| r.time_avg_populations.get(c).copied().unwrap_or(0.0)).collect()
+    rs.iter()
+        .map(|r| r.time_avg_populations.get(c).copied().unwrap_or(0.0))
+        .collect()
 }
 
 fn kernel_stats<F: Fn(&RunResult) -> f64>(rs: &[RunResult], extractor: F) -> String {
     let xs: Vec<f64> = rs.iter().map(|r| extractor(r)).collect();
-    pad_start(&format!("{} ± {}", fmt(mean(&xs), 4), fmt(stddev(&xs), 4)), 20)
+    pad_start(
+        &format!("{} ± {}", fmt(mean(&xs), 4), fmt(stddev(&xs), 4)),
+        20,
+    )
 }
 
 /// `validate-references.ts` `main()`.
 pub fn run() {
-    let n: usize = std::env::var("N").ok().and_then(|s| s.parse().ok()).unwrap_or(20);
-    let pi_stepsize: f64 = std::env::var("STEPSIZE").ok().and_then(|s| s.parse().ok()).unwrap_or(0.05);
+    let n: usize = std::env::var("N")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(20);
+    let pi_stepsize: f64 = std::env::var("STEPSIZE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.05);
 
     let mut cfg = default_config();
     cfg.step_size = pi_stepsize;
-    println!("validate-references.ts: N={} reps per stochastic kernel; PI stepSize={}d", n, pi_stepsize);
-    println!("  horizon={}d   phase1={}d   sourceCap={}", cfg.horizon_days, cfg.phase1_days, cfg.source_cap);
+    println!(
+        "validate-references.ts: N={} reps per stochastic kernel; PI stepSize={}d",
+        n, pi_stepsize
+    );
+    println!(
+        "  horizon={}d   phase1={}d   sourceCap={}",
+        cfg.horizon_days, cfg.phase1_days, cfg.source_cap
+    );
     println!();
 
     let mut pi_runs: Vec<RunResult> = Vec::new();
@@ -206,43 +249,136 @@ pub fn run() {
     let t0 = Instant::now();
     let default_cfg = default_config();
     for i in 0..n {
-        pi_runs.push(run_per_individual_once(&cfg, RunOpts { seed: 0xC0000 + i as u64, service_individual: false }));
-        fel_runs.push(run_fel_once(&default_cfg, RunOpts { seed: 0xD0000 + i as u64, service_individual: true }));
-        ssa_runs.push(run_gillespie_once(&default_cfg, RunOpts { seed: 0xE0000 + i as u64, service_individual: false }));
+        pi_runs.push(run_per_individual_once(
+            &cfg,
+            RunOpts {
+                seed: 0xC0000 + i as u64,
+                service_individual: false,
+            },
+        ));
+        fel_runs.push(run_fel_once(
+            &default_cfg,
+            RunOpts {
+                seed: 0xD0000 + i as u64,
+                service_individual: true,
+            },
+        ));
+        ssa_runs.push(run_gillespie_once(
+            &default_cfg,
+            RunOpts {
+                seed: 0xE0000 + i as u64,
+                service_individual: false,
+            },
+        ));
     }
     let ode = run_ode_once(&default_cfg);
     let elapsed = t0.elapsed().as_millis();
 
     println!("total wall: {} ms", elapsed);
-    println!("  per-individual mean wall:  {} ms / rep", fmt(mean(&pi_runs.iter().map(|r| r.elapsed_ms as f64).collect::<Vec<_>>()), 1));
-    println!("  fel-individual mean wall:  {} ms / rep", fmt(mean(&fel_runs.iter().map(|r| r.elapsed_ms as f64).collect::<Vec<_>>()), 1));
-    println!("  gillespie SSA  mean wall:  {} ms / rep", fmt(mean(&ssa_runs.iter().map(|r| r.elapsed_ms as f64).collect::<Vec<_>>()), 1));
-    println!("  ODE RK4  wall:             {} ms (deterministic)", ode.elapsed_ms);
+    println!(
+        "  per-individual mean wall:  {} ms / rep",
+        fmt(
+            mean(
+                &pi_runs
+                    .iter()
+                    .map(|r| r.elapsed_ms as f64)
+                    .collect::<Vec<_>>()
+            ),
+            1
+        )
+    );
+    println!(
+        "  fel-individual mean wall:  {} ms / rep",
+        fmt(
+            mean(
+                &fel_runs
+                    .iter()
+                    .map(|r| r.elapsed_ms as f64)
+                    .collect::<Vec<_>>()
+            ),
+            1
+        )
+    );
+    println!(
+        "  gillespie SSA  mean wall:  {} ms / rep",
+        fmt(
+            mean(
+                &ssa_runs
+                    .iter()
+                    .map(|r| r.elapsed_ms as f64)
+                    .collect::<Vec<_>>()
+            ),
+            1
+        )
+    );
+    println!(
+        "  ODE RK4  wall:             {} ms (deterministic)",
+        ode.elapsed_ms
+    );
 
     println!();
     println!("=== empirical branching probabilities ===");
-    let header_cols = ["expected", "PerIndividual", "FEL-individual", "Gillespie SSA", "ODE"];
-    println!("              {}", header_cols.iter().map(|s| pad_start(s, 20)).collect::<Vec<_>>().join(""));
+    let header_cols = [
+        "expected",
+        "PerIndividual",
+        "FEL-individual",
+        "Gillespie SSA",
+        "ODE",
+    ];
+    println!(
+        "              {}",
+        header_cols
+            .iter()
+            .map(|s| pad_start(s, 20))
+            .collect::<Vec<_>>()
+            .join("")
+    );
     let splits: [(&str, &str, f64); 6] = [
         ("I-P", "I-A", cfg.probabilities.asymptomatic_share),
         ("I-P", "I-S", 1.0 - cfg.probabilities.asymptomatic_share),
-        ("I-S", "R", 1.0 - cfg.probabilities.hospitalization_given_symptom),
-        ("I-S", "I-H", cfg.probabilities.hospitalization_given_symptom),
-        ("I-H", "R", 1.0 - cfg.probabilities.case_fatality_given_hospital),
+        (
+            "I-S",
+            "R",
+            1.0 - cfg.probabilities.hospitalization_given_symptom,
+        ),
+        (
+            "I-S",
+            "I-H",
+            cfg.probabilities.hospitalization_given_symptom,
+        ),
+        (
+            "I-H",
+            "R",
+            1.0 - cfg.probabilities.case_fatality_given_hospital,
+        ),
         ("I-H", "D", cfg.probabilities.case_fatality_given_hospital),
     ];
     for (from, to, expected) in splits {
         let fel = collect_split(&fel_runs, from, to);
         let pi = collect_split(&pi_runs, from, to);
         let ssa = collect_split(&ssa_runs, from, to);
-        let ode_val = ode.split_probs.get(from).and_then(|m| m.get(to)).copied().unwrap_or(0.0);
+        let ode_val = ode
+            .split_probs
+            .get(from)
+            .and_then(|m| m.get(to))
+            .copied()
+            .unwrap_or(0.0);
         println!(
             "{}{}{}{}{}{}",
             pad_end(&format!("{} -> {}", from, to), 14),
             pad_start(&fmt(expected, 4), 20),
-            pad_start(&format!("{} ± {}", fmt(mean(&pi), 4), fmt(stddev(&pi), 4)), 20),
-            pad_start(&format!("{} ± {}", fmt(mean(&fel), 4), fmt(stddev(&fel), 4)), 20),
-            pad_start(&format!("{} ± {}", fmt(mean(&ssa), 4), fmt(stddev(&ssa), 4)), 20),
+            pad_start(
+                &format!("{} ± {}", fmt(mean(&pi), 4), fmt(stddev(&pi), 4)),
+                20
+            ),
+            pad_start(
+                &format!("{} ± {}", fmt(mean(&fel), 4), fmt(stddev(&fel), 4)),
+                20
+            ),
+            pad_start(
+                &format!("{} ± {}", fmt(mean(&ssa), 4), fmt(stddev(&ssa), 4)),
+                20
+            ),
             pad_start(&fmt(ode_val, 4), 20),
         );
     }
@@ -250,7 +386,14 @@ pub fn run() {
     println!();
     println!("=== time-averaged compartment populations ===");
     let pop_cols = ["PerIndividual", "FEL-individual", "Gillespie SSA", "ODE"];
-    println!("              {}", pop_cols.iter().map(|s| pad_start(s, 20)).collect::<Vec<_>>().join(""));
+    println!(
+        "              {}",
+        pop_cols
+            .iter()
+            .map(|s| pad_start(s, 20))
+            .collect::<Vec<_>>()
+            .join("")
+    );
     for c in COMPARTMENT_ORDER {
         let pi = collect_pop(&pi_runs, c);
         let fel = collect_pop(&fel_runs, c);
@@ -258,10 +401,25 @@ pub fn run() {
         println!(
             "{}{}{}{}{}",
             pad_end(&format!("<{}>", c), 14),
-            pad_start(&format!("{} ± {}", fmt(mean(&pi), 3), fmt(stddev(&pi), 3)), 20),
-            pad_start(&format!("{} ± {}", fmt(mean(&fel), 3), fmt(stddev(&fel), 3)), 20),
-            pad_start(&format!("{} ± {}", fmt(mean(&ssa), 3), fmt(stddev(&ssa), 3)), 20),
-            pad_start(&fmt(ode.time_avg_populations.get(c).copied().unwrap_or(f64::NAN), 3), 20),
+            pad_start(
+                &format!("{} ± {}", fmt(mean(&pi), 3), fmt(stddev(&pi), 3)),
+                20
+            ),
+            pad_start(
+                &format!("{} ± {}", fmt(mean(&fel), 3), fmt(stddev(&fel), 3)),
+                20
+            ),
+            pad_start(
+                &format!("{} ± {}", fmt(mean(&ssa), 3), fmt(stddev(&ssa), 3)),
+                20
+            ),
+            pad_start(
+                &fmt(
+                    ode.time_avg_populations.get(c).copied().unwrap_or(f64::NAN),
+                    3
+                ),
+                20
+            ),
         );
     }
 
@@ -274,15 +432,33 @@ pub fn run() {
     ];
     println!(
         "compartment    {}",
-        pairs.iter().map(|p| pad_start(&format!("{}  t (p)", p.0), 30)).collect::<Vec<_>>().join("")
+        pairs
+            .iter()
+            .map(|p| pad_start(&format!("{}  t (p)", p.0), 30))
+            .collect::<Vec<_>>()
+            .join("")
     );
     for c in COMPARTMENT_ORDER {
         let cells: Vec<String> = pairs
             .iter()
             .map(|(_, a, b)| {
                 let w = welch(&collect_pop(a, c), &collect_pop(b, c));
-                let verdict = if w.reject99 { "  NO99 " } else if w.reject95 { "  no95 " } else { "  yes  " };
-                pad_start(&format!("{} (p={}) {}", pad_start(&fmt(w.t, 2), 7), fmt(w.p_value_two_sided, 3), verdict), 30)
+                let verdict = if w.reject99 {
+                    "  NO99 "
+                } else if w.reject95 {
+                    "  no95 "
+                } else {
+                    "  yes  "
+                };
+                pad_start(
+                    &format!(
+                        "{} (p={}) {}",
+                        pad_start(&fmt(w.t, 2), 7),
+                        fmt(w.p_value_two_sided, 3),
+                        verdict
+                    ),
+                    30,
+                )
             })
             .collect();
         println!("{}{}", pad_end(&format!("<{}>", c), 14), cells.join(""));

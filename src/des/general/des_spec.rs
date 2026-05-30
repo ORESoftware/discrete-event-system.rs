@@ -235,9 +235,9 @@ fn validate_inner(
             ..
         } => {
             let v = match value {
-                JsonValue::Undefined | JsonValue::Null => {
-                    default.map(JsonValue::Number).unwrap_or(JsonValue::Undefined)
-                }
+                JsonValue::Undefined | JsonValue::Null => default
+                    .map(JsonValue::Number)
+                    .unwrap_or(JsonValue::Undefined),
                 other => other.clone(),
             };
             let num = match &v {
@@ -301,7 +301,11 @@ fn validate_inner(
             match &v {
                 JsonValue::Bool(_) => {}
                 _ => {
-                    errors.push(format!("{}: expected boolean, got {}", path, type_of(value)));
+                    errors.push(format!(
+                        "{}: expected boolean, got {}",
+                        path,
+                        type_of(value)
+                    ));
                 }
             }
             v
@@ -599,12 +603,7 @@ mod tests {
     use super::*;
 
     fn obj(pairs: Vec<(&str, JsonValue)>) -> JsonValue {
-        JsonValue::Object(
-            pairs
-                .into_iter()
-                .map(|(k, v)| (k.to_string(), v))
-                .collect(),
-        )
+        JsonValue::Object(pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
     }
 
     #[test]

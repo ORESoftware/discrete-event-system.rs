@@ -532,7 +532,12 @@ struct FactMachinePortfolioStation<'a> {
 }
 
 impl<'a> FactMachinePortfolioStation<'a> {
-    fn new(config: PortfolioConfig, scheduler: SchedulerPolicy, mdp: &'a OperatorMDP, rng: SeededRandom) -> Self {
+    fn new(
+        config: PortfolioConfig,
+        scheduler: SchedulerPolicy,
+        mdp: &'a OperatorMDP,
+        rng: SeededRandom,
+    ) -> Self {
         FactMachinePortfolioStation {
             id: format!("factmachine-{}", scheduler.slug()),
             config,
@@ -567,8 +572,10 @@ impl<'a> FactMachinePortfolioStation<'a> {
         };
         if let Some(bt) = &belief_trace {
             if !bt.is_empty() {
-                aggregate.avg_belief_entropy = Some(mean(&bt.iter().map(|x| x.entropy).collect::<Vec<_>>()));
-                aggregate.avg_belief_error = Some(mean(&bt.iter().map(|x| x.error).collect::<Vec<_>>()));
+                aggregate.avg_belief_entropy =
+                    Some(mean(&bt.iter().map(|x| x.entropy).collect::<Vec<_>>()));
+                aggregate.avg_belief_error =
+                    Some(mean(&bt.iter().map(|x| x.error).collect::<Vec<_>>()));
             }
         }
         let mut action_counts: Vec<ActionCount> = self.action_counts.clone();
@@ -598,8 +605,11 @@ impl<'a> FactMachinePortfolioStation<'a> {
             let topic = sample_topic(id, now, &mut self.rng);
             self.pending.push(topic);
         }
-        self.pending
-            .sort_by(|a, b| b.observed_buzz.partial_cmp(&a.observed_buzz).unwrap_or(std::cmp::Ordering::Equal));
+        self.pending.sort_by(|a, b| {
+            b.observed_buzz
+                .partial_cmp(&a.observed_buzz)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
     }
 
     fn close_markets(&mut self, now: f64) {
@@ -649,7 +659,13 @@ impl<'a> FactMachinePortfolioStation<'a> {
             let id = self.next_market_id;
             self.next_market_id += 1;
             let close_at = now + action.duration_h;
-            self.active.push(OpenMarket { id, topic: candidate, action, open_at: now, close_at });
+            self.active.push(OpenMarket {
+                id,
+                topic: candidate,
+                action,
+                open_at: now,
+                close_at,
+            });
             *self.opened_by_day.entry(day).or_insert(0) += 1;
             self.opened_total += 1;
             if self.scheduler == SchedulerPolicy::FixedDaily {
@@ -675,7 +691,12 @@ impl<'a> FactMachinePortfolioStation<'a> {
     fn choose_action(&mut self, topic: &CandidateTopic, now: f64) -> SchedulerAction {
         let fatigue_bin = fatigue_bin_for(self.active.len() as i64, self.config.max_concurrent);
         if self.scheduler == SchedulerPolicy::FixedDaily {
-            return action_by(&self.mdp.actions, MarketKind::Binary, 24.0, Some("baseline"));
+            return action_by(
+                &self.mdp.actions,
+                MarketKind::Binary,
+                24.0,
+                Some("baseline"),
+            );
         }
         if self.scheduler == SchedulerPolicy::GreedyBuzz {
             if topic.observed_buzz < 0.38 && !self.active.is_empty() {
@@ -687,11 +708,20 @@ impl<'a> FactMachinePortfolioStation<'a> {
                     &self.mdp.actions,
                     MarketKind::Scalar,
                     duration_h,
-                    Some(if topic.observed_buzz > 0.78 { "growth" } else { "deep" }),
+                    Some(if topic.observed_buzz > 0.78 {
+                        "growth"
+                    } else {
+                        "deep"
+                    }),
                 );
             }
             if topic.observed_buzz > 0.74 && topic.observed_ambiguity > 0.42 {
-                return action_by(&self.mdp.actions, MarketKind::Threshold, 1.0, Some("over55"));
+                return action_by(
+                    &self.mdp.actions,
+                    MarketKind::Threshold,
+                    1.0,
+                    Some("over55"),
+                );
             }
             let duration_h = if topic.observed_buzz > 0.76 {
                 1.0
@@ -704,11 +734,16 @@ impl<'a> FactMachinePortfolioStation<'a> {
                 &self.mdp.actions,
                 MarketKind::Binary,
                 duration_h,
-                Some(if duration_h == 24.0 { "baseline" } else { "growth" }),
+                Some(if duration_h == 24.0 {
+                    "baseline"
+                } else {
+                    "growth"
+                }),
             );
         }
         if self.scheduler == SchedulerPolicy::MdpOracle {
-            let s = encode_operator_state(bin3(topic.true_hotness), bin3(topic.ambiguity), fatigue_bin);
+            let s =
+                encode_operator_state(bin3(topic.true_hotness), bin3(topic.ambiguity), fatigue_bin);
             return self.mdp.actions[self.mdp.policy[s] as usize].clone();
         }
 
@@ -826,17 +861,149 @@ fn operator_actions() -> Vec<SchedulerAction> {
     use VerificationTier::*;
     vec![
         wait_action(),
-        market_action("binary-baseline-24h", Binary, 24.0, 0.01, 1.0, 1.0, Basic, DelayedVotes, 1.0, None, "baseline majority market"),
-        market_action("binary-growth-15m", Binary, 0.25, 0.005, 1.35, 1.35, Open, MomentumSignals, 1.45, None, "fast low-fee launch for hot topics"),
-        market_action("binary-growth-1h", Binary, 1.0, 0.005, 1.25, 1.25, Open, LiveVotes, 1.35, None, "one-hour majority market optimized for participation"),
-        market_action("binary-surplus-6h", Binary, 6.0, 0.02, 0.75, 0.85, Basic, PriceOnly, 0.85, None, "higher-fee majority market optimized for margin"),
-        market_action("binary-proof-24h", Binary, 24.0, 0.01, 1.15, 1.05, Proof, DemographicSlices, 1.05, None, "longer majority market with proof-of-personhood trust"),
-        market_action("scalar-growth-1h", Scalar, 1.0, 0.005, 1.35, 1.25, Open, LiveVotes, 1.25, None, "distribution market for ambiguous fast-moving topics"),
-        market_action("scalar-deep-6h", Scalar, 6.0, 0.01, 1.55, 1.1, Basic, DemographicSlices, 1.0, None, "deeper-liquidity distribution market"),
-        market_action("scalar-proof-24h", Scalar, 24.0, 0.01, 1.4, 1.0, Proof, DemographicSlices, 0.95, None, "long-form scalar sentiment read with verified voting"),
-        market_action("over55-growth-1h", Threshold, 1.0, 0.005, 1.25, 1.2, Open, MomentumSignals, 1.35, Some(0.55), "over/under 55% agree, optimized for rapid debate"),
-        market_action("over60-surplus-6h", Threshold, 6.0, 0.02, 0.9, 0.9, Basic, PriceOnly, 0.85, Some(0.60), "over/under 60% agree, optimized for fee capture"),
-        market_action("over55-proof-24h", Threshold, 24.0, 0.01, 1.25, 1.05, Proof, DelayedVotes, 1.1, Some(0.55), "verified over/under sentiment threshold"),
+        market_action(
+            "binary-baseline-24h",
+            Binary,
+            24.0,
+            0.01,
+            1.0,
+            1.0,
+            Basic,
+            DelayedVotes,
+            1.0,
+            None,
+            "baseline majority market",
+        ),
+        market_action(
+            "binary-growth-15m",
+            Binary,
+            0.25,
+            0.005,
+            1.35,
+            1.35,
+            Open,
+            MomentumSignals,
+            1.45,
+            None,
+            "fast low-fee launch for hot topics",
+        ),
+        market_action(
+            "binary-growth-1h",
+            Binary,
+            1.0,
+            0.005,
+            1.25,
+            1.25,
+            Open,
+            LiveVotes,
+            1.35,
+            None,
+            "one-hour majority market optimized for participation",
+        ),
+        market_action(
+            "binary-surplus-6h",
+            Binary,
+            6.0,
+            0.02,
+            0.75,
+            0.85,
+            Basic,
+            PriceOnly,
+            0.85,
+            None,
+            "higher-fee majority market optimized for margin",
+        ),
+        market_action(
+            "binary-proof-24h",
+            Binary,
+            24.0,
+            0.01,
+            1.15,
+            1.05,
+            Proof,
+            DemographicSlices,
+            1.05,
+            None,
+            "longer majority market with proof-of-personhood trust",
+        ),
+        market_action(
+            "scalar-growth-1h",
+            Scalar,
+            1.0,
+            0.005,
+            1.35,
+            1.25,
+            Open,
+            LiveVotes,
+            1.25,
+            None,
+            "distribution market for ambiguous fast-moving topics",
+        ),
+        market_action(
+            "scalar-deep-6h",
+            Scalar,
+            6.0,
+            0.01,
+            1.55,
+            1.1,
+            Basic,
+            DemographicSlices,
+            1.0,
+            None,
+            "deeper-liquidity distribution market",
+        ),
+        market_action(
+            "scalar-proof-24h",
+            Scalar,
+            24.0,
+            0.01,
+            1.4,
+            1.0,
+            Proof,
+            DemographicSlices,
+            0.95,
+            None,
+            "long-form scalar sentiment read with verified voting",
+        ),
+        market_action(
+            "over55-growth-1h",
+            Threshold,
+            1.0,
+            0.005,
+            1.25,
+            1.2,
+            Open,
+            MomentumSignals,
+            1.35,
+            Some(0.55),
+            "over/under 55% agree, optimized for rapid debate",
+        ),
+        market_action(
+            "over60-surplus-6h",
+            Threshold,
+            6.0,
+            0.02,
+            0.9,
+            0.9,
+            Basic,
+            PriceOnly,
+            0.85,
+            Some(0.60),
+            "over/under 60% agree, optimized for fee capture",
+        ),
+        market_action(
+            "over55-proof-24h",
+            Threshold,
+            24.0,
+            0.01,
+            1.25,
+            1.05,
+            Proof,
+            DelayedVotes,
+            1.1,
+            Some(0.55),
+            "verified over/under sentiment threshold",
+        ),
     ]
 }
 
@@ -863,7 +1030,13 @@ pub fn build_operator_mdp() -> OperatorMDP {
     let n_actions = actions.len();
     let vi = value_iteration(
         build_operator_spec(),
-        VIOptions { gamma, tol: 1e-8, max_iter: 10000, random_tie_break: false, ..Default::default() },
+        VIOptions {
+            gamma,
+            tol: 1e-8,
+            max_iter: 10000,
+            random_tie_break: false,
+            ..Default::default()
+        },
     );
     let q_spec = build_operator_spec();
     let num_states = q_spec.num_states;
@@ -902,7 +1075,11 @@ fn operator_outcomes(s: usize, action: &SchedulerAction) -> Vec<Outcome> {
     let fatigue_same = fatigue_bin;
     let fatigue_down = (fatigue_bin - 1).max(0);
     vec![
-        Outcome { prob: 0.58, reward, next_state: encode_operator_state(hot_bin, amb_bin, fatigue_up) },
+        Outcome {
+            prob: 0.58,
+            reward,
+            next_state: encode_operator_state(hot_bin, amb_bin, fatigue_up),
+        },
         Outcome {
             prob: 0.28,
             reward: reward * 0.88,
@@ -916,7 +1093,12 @@ fn operator_outcomes(s: usize, action: &SchedulerAction) -> Vec<Outcome> {
     ]
 }
 
-fn expected_market_utility(hot_bin: i64, amb_bin: i64, fatigue_bin: i64, action: &SchedulerAction) -> f64 {
+fn expected_market_utility(
+    hot_bin: i64,
+    amb_bin: i64,
+    fatigue_bin: i64,
+    action: &SchedulerAction,
+) -> f64 {
     let hot = hotness_midpoint(hot_bin);
     let amb = ambiguity_midpoint(amb_bin);
     let reach = 1.0 - (-action.duration_h / 5.5).exp();
@@ -982,8 +1164,12 @@ fn expected_market_utility(hot_bin: i64, amb_bin: i64, fatigue_bin: i64, action:
     } else {
         0.0
     };
-    let cascade_penalty = (hot * amb).powf(1.1) * information_herding_multiplier(action.information_mode) * 6.0;
-    votes * 0.28 + traders * 0.55 + fees * 2.4 + verification_trust * 3.0
+    let cascade_penalty =
+        (hot * amb).powf(1.1) * information_herding_multiplier(action.information_mode) * 6.0;
+    votes * 0.28
+        + traders * 0.55
+        + fees * 2.4
+        + verification_trust * 3.0
         + information_trust * 2.0
         + scalar_resolution_bonus
         + binary_clarity_bonus
@@ -999,11 +1185,19 @@ fn expected_market_utility(hot_bin: i64, amb_bin: i64, fatigue_bin: i64, action:
 // Single-market simulation.
 // =============================================================================
 
-fn simulate_market(market: &OpenMarket, cfg: &PortfolioConfig, rng: &mut SeededRandom) -> ClosedMarket {
+fn simulate_market(
+    market: &OpenMarket,
+    cfg: &PortfolioConfig,
+    rng: &mut SeededRandom,
+) -> ClosedMarket {
     let topic = &market.topic;
     let action = &market.action;
     let kind = action.kind.to_market();
-    let n: usize = if kind == MarketKind::Scalar { cfg.scalar_bins } else { 2 };
+    let n: usize = if kind == MarketKind::Scalar {
+        cfg.scalar_bins
+    } else {
+        2
+    };
     let population_scale = (cfg.min_market_participants / 1000.0).max(1.0);
     let liquidity = cfg.liquidity * action.liquidity_multiplier * population_scale.sqrt();
     let mut lmsr = LMSR::new(liquidity, n, false);
@@ -1018,7 +1212,9 @@ fn simulate_market(market: &OpenMarket, cfg: &PortfolioConfig, rng: &mut SeededR
     };
     let kind_vote_fit = match kind {
         MarketKind::Scalar => 0.92 + topic.ambiguity * 0.22,
-        MarketKind::Threshold => 0.96 + threshold_drama(topic.true_theta, action.threshold.unwrap_or(0.55)) * 0.14,
+        MarketKind::Threshold => {
+            0.96 + threshold_drama(topic.true_theta, action.threshold.unwrap_or(0.55)) * 0.14
+        }
         MarketKind::Binary => 1.06 - topic.ambiguity * 0.10,
     };
     let reward_boost = 0.82 + action.reward_multiplier * 0.25;
@@ -1034,31 +1230,58 @@ fn simulate_market(market: &OpenMarket, cfg: &PortfolioConfig, rng: &mut SeededR
         * verification_participation
         * information_engagement
         * timing_urgency
-        * (0.82 + topic.news_cycle_intensity * 0.22 + topic.social_virality * 0.18 + topic.referral_elasticity * 0.10))
+        * (0.82
+            + topic.news_cycle_intensity * 0.22
+            + topic.social_virality * 0.18
+            + topic.referral_elasticity * 0.10))
         .max(6.0);
-    let votes = (sample_poisson(expected_votes, rng) as f64).max(cfg.min_market_participants) as i64;
+    let votes =
+        (sample_poisson(expected_votes, rng) as f64).max(cfg.min_market_participants) as i64;
     let manip_mult = manipulation_multiplier(action.verification);
     let majority_direction = if topic.true_theta >= 0.5 { 1.0 } else { -1.0 };
     let manipulation_push = topic.manipulation_risk * manip_mult * majority_direction * 0.085;
-    let turnout_push = topic.turnout_skew * topic.demographic_polarization * majority_direction * 0.045;
-    let influencer_push = topic.influencer_activity * topic.meme_momentum * majority_direction * 0.025;
-    let effective_theta = clampf(topic.true_theta + manipulation_push + turnout_push + influencer_push, 0.03, 0.97);
+    let turnout_push =
+        topic.turnout_skew * topic.demographic_polarization * majority_direction * 0.045;
+    let influencer_push =
+        topic.influencer_activity * topic.meme_momentum * majority_direction * 0.025;
+    let effective_theta = clampf(
+        topic.true_theta + manipulation_push + turnout_push + influencer_push,
+        0.03,
+        0.97,
+    );
     let suspected_sybil_votes = votes.min(sample_poisson(
         votes as f64
-            * (topic.manipulation_risk * 0.12 + topic.bot_pressure * 0.10 + topic.influencer_activity * 0.03)
+            * (topic.manipulation_risk * 0.12
+                + topic.bot_pressure * 0.10
+                + topic.influencer_activity * 0.03)
             * manip_mult
             * (1.0 + population_scale.log10() * 0.06),
         rng,
     ));
-    let external_outcome: i64 = if rng.next_float() < topic.event_probability { 1 } else { 0 };
+    let external_outcome: i64 = if rng.next_float() < topic.event_probability {
+        1
+    } else {
+        0
+    };
     let opinion_fact_gap = (topic.true_theta - topic.event_probability).abs();
     let resolution_confusion_rate = clampf(
-        0.04
-            + opinion_fact_gap * 0.18
+        0.04 + opinion_fact_gap * 0.18
             + topic.ambiguity * 0.07
-            + (if action.information_mode == InformationMode::PriceOnly { 0.06 } else { 0.0 })
-            + (if action.information_mode == InformationMode::MomentumSignals { 0.05 } else { 0.0 })
-            - (if action.information_mode == InformationMode::DemographicSlices { 0.04 } else { 0.0 }),
+            + (if action.information_mode == InformationMode::PriceOnly {
+                0.06
+            } else {
+                0.0
+            })
+            + (if action.information_mode == InformationMode::MomentumSignals {
+                0.05
+            } else {
+                0.0
+            })
+            - (if action.information_mode == InformationMode::DemographicSlices {
+                0.04
+            } else {
+                0.0
+            }),
         0.02,
         0.34,
     );
@@ -1081,45 +1304,71 @@ fn simulate_market(market: &OpenMarket, cfg: &PortfolioConfig, rng: &mut SeededR
     let mut trader_cash = 0.0;
     let mut trader_shares = vec![0.0_f64; n];
     let market_public_signal = clampf(
-        effective_theta + normal(rng) * information_observation_noise(action.information_mode, topic.ambiguity),
+        effective_theta
+            + normal(rng) * information_observation_noise(action.information_mode, topic.ambiguity),
         0.01,
         0.99,
     );
 
     for _ in 0..votes {
         let timing_exponent = clampf(
-            1.05 + action.timing_decay * 0.62 - information_wait_pressure(action.information_mode) * 0.32
+            1.05 + action.timing_decay * 0.62
+                - information_wait_pressure(action.information_mode) * 0.32
                 + action.reward_multiplier * 0.08,
             0.75,
             2.55,
         );
         let vote_time = duration * rng.next_float().powf(timing_exponent);
-        vote_time_fraction += if duration > 0.0 { vote_time / duration } else { 0.0 };
+        vote_time_fraction += if duration > 0.0 {
+            vote_time / duration
+        } else {
+            0.0
+        };
         let vote_yes = rng.next_float() < effective_theta;
         if vote_yes {
             yes_votes += 1;
         }
-        let voter_private_signal =
-            clampf(effective_theta + normal(rng) * (0.11 + 0.09 * topic.ambiguity), 0.01, 0.99);
+        let voter_private_signal = clampf(
+            effective_theta + normal(rng) * (0.11 + 0.09 * topic.ambiguity),
+            0.01,
+            0.99,
+        );
         let voter_public_signal = clampf(
-            market_public_signal + normal(rng) * information_observation_noise(action.information_mode, topic.ambiguity) * 0.55,
+            market_public_signal
+                + normal(rng)
+                    * information_observation_noise(action.information_mode, topic.ambiguity)
+                    * 0.55,
             0.01,
             0.99,
         );
         let voter_info_weight =
             information_signal_weight(action.information_mode) * (vote_time / duration.max(1e-9));
         let predicted_theta = clampf(
-            voter_private_signal * (1.0 - voter_info_weight) + voter_public_signal * voter_info_weight,
+            voter_private_signal * (1.0 - voter_info_weight)
+                + voter_public_signal * voter_info_weight,
             0.01,
             0.99,
         );
-        let predicted_agree = if vote_yes { predicted_theta } else { 1.0 - predicted_theta };
-        let actual_agree_placeholder = if vote_yes { effective_theta } else { 1.0 - effective_theta };
+        let predicted_agree = if vote_yes {
+            predicted_theta
+        } else {
+            1.0 - predicted_theta
+        };
+        let actual_agree_placeholder = if vote_yes {
+            effective_theta
+        } else {
+            1.0 - effective_theta
+        };
         let err = (predicted_agree - actual_agree_placeholder).abs();
         prediction_error += err;
-        let timing_boost = 1.0 + (-action.timing_decay * vote_time / (duration * 0.32).max(0.35)).exp();
+        let timing_boost =
+            1.0 + (-action.timing_decay * vote_time / (duration * 0.32).max(0.35)).exp();
         timing_multiplier_sum += timing_boost;
-        let accuracy_points = if err <= 0.05 { 18.0 } else { (12.0 * (1.0 - err / 0.25)).max(0.0) };
+        let accuracy_points = if err <= 0.05 {
+            18.0
+        } else {
+            (12.0 * (1.0 - err / 0.25)).max(0.0)
+        };
         voter_points += accuracy_points * timing_boost * action.reward_multiplier;
         if err <= 0.20 {
             raffle_entries += 1;
@@ -1127,8 +1376,10 @@ fn simulate_market(market: &OpenMarket, cfg: &PortfolioConfig, rng: &mut SeededR
 
         let fee_drag = clampf(1.14 - action.fee_rate * 18.0, 0.66, 1.08);
         let liquidity_boost = 0.86 + action.liquidity_multiplier * 0.14;
-        let social_trading_boost =
-            1.0 + topic.social_virality * 0.16 + topic.influencer_activity * 0.10 + topic.meme_momentum * 0.10;
+        let social_trading_boost = 1.0
+            + topic.social_virality * 0.16
+            + topic.influencer_activity * 0.10
+            + topic.meme_momentum * 0.10;
         let trade_prob = clampf(
             (0.14
                 + topic.true_hotness * 0.28
@@ -1149,24 +1400,42 @@ fn simulate_market(market: &OpenMarket, cfg: &PortfolioConfig, rng: &mut SeededR
         }
         bettor_count += 1;
         let trades_as_prediction_market = rng.next_float() < resolution_confusion_rate;
-        let trader_target = if trades_as_prediction_market { topic.event_probability } else { effective_theta };
+        let trader_target = if trades_as_prediction_market {
+            topic.event_probability
+        } else {
+            effective_theta
+        };
         let private_signal = clampf(
             trader_target
                 + normal(rng)
-                    * (0.16 - 0.05 * topic.true_hotness + (if trades_as_prediction_market { 0.04 } else { 0.0 })),
+                    * (0.16 - 0.05 * topic.true_hotness
+                        + (if trades_as_prediction_market {
+                            0.04
+                        } else {
+                            0.0
+                        })),
             0.01,
             0.99,
         );
         let public_signal = clampf(
-            (if trades_as_prediction_market { topic.event_probability } else { market_public_signal })
-                + normal(rng)
-                    * information_observation_noise(action.information_mode, topic.ambiguity)
-                    * (if trades_as_prediction_market { 0.72 } else { 0.45 }),
+            (if trades_as_prediction_market {
+                topic.event_probability
+            } else {
+                market_public_signal
+            }) + normal(rng)
+                * information_observation_noise(action.information_mode, topic.ambiguity)
+                * (if trades_as_prediction_market {
+                    0.72
+                } else {
+                    0.45
+                }),
             0.01,
             0.99,
         );
         let trader_info_weight = clampf(
-            information_signal_weight(action.information_mode) + topic.influencer_activity * 0.08 + topic.meme_momentum * 0.07,
+            information_signal_weight(action.information_mode)
+                + topic.influencer_activity * 0.08
+                + topic.meme_momentum * 0.07,
             0.0,
             0.86,
         );
@@ -1193,15 +1462,24 @@ fn simulate_market(market: &OpenMarket, cfg: &PortfolioConfig, rng: &mut SeededR
                     1
                 }
             }
-            MarketKind::Scalar => clampi((signal * n as f64).floor() as i64, 0, n as i64 - 1) as usize,
+            MarketKind::Scalar => {
+                clampi((signal * n as f64).floor() as i64, 0, n as i64 - 1) as usize
+            }
         };
         let whale_prob = clampf(
-            0.012 + topic.influencer_activity * 0.024 + topic.social_virality * 0.014 + population_scale.log10() * 0.006,
+            0.012
+                + topic.influencer_activity * 0.024
+                + topic.social_virality * 0.014
+                + population_scale.log10() * 0.006,
             0.008,
             0.08,
         );
         let is_whale = rng.next_float() < whale_prob;
-        let whale_multiplier = if is_whale { 6.0 + 18.0 * rng.next_float() } else { 1.0 };
+        let whale_multiplier = if is_whale {
+            6.0 + 18.0 * rng.next_float()
+        } else {
+            1.0
+        };
         let base_budget = clampf(
             (4.0 + exp_sample(1.0 / (7.0 + 10.0 * topic.true_hotness), rng))
                 * (0.92 + action.liquidity_multiplier * 0.10)
@@ -1209,8 +1487,13 @@ fn simulate_market(market: &OpenMarket, cfg: &PortfolioConfig, rng: &mut SeededR
             3.0,
             72.0,
         );
-        let budget = clampf(base_budget * whale_multiplier, 3.0, if is_whale { 900.0 } else { 72.0 });
-        let (buy_shares, _buy_cost, buy_fee) = buy_budget(&mut lmsr, outcome, budget, action.fee_rate);
+        let budget = clampf(
+            base_budget * whale_multiplier,
+            3.0,
+            if is_whale { 900.0 } else { 72.0 },
+        );
+        let (buy_shares, _buy_cost, buy_fee) =
+            buy_budget(&mut lmsr, outcome, budget, action.fee_rate);
         trades += 1;
         buy_volume += budget;
         fee_revenue += buy_fee;
@@ -1223,7 +1506,8 @@ fn simulate_market(market: &OpenMarket, cfg: &PortfolioConfig, rng: &mut SeededR
         if rng.next_float() < 0.26 + 0.10 * topic.manipulation_risk {
             let shares_out = trader_shares[outcome] * (0.25 + 0.35 * rng.next_float());
             if shares_out > 1e-9 {
-                let (sell_gross, sell_fee) = sell_shares(&mut lmsr, outcome, shares_out, action.fee_rate);
+                let (sell_gross, sell_fee) =
+                    sell_shares(&mut lmsr, outcome, shares_out, action.fee_rate);
                 trades += 1;
                 sell_volume += sell_gross;
                 fee_revenue += sell_fee;
@@ -1249,16 +1533,28 @@ fn simulate_market(market: &OpenMarket, cfg: &PortfolioConfig, rng: &mut SeededR
                 1
             }
         }
-        MarketKind::Scalar => clampi((final_vote_fraction * n as f64).floor() as i64, 0, n as i64 - 1) as usize,
+        MarketKind::Scalar => clampi(
+            (final_vote_fraction * n as f64).floor() as i64,
+            0,
+            n as i64 - 1,
+        ) as usize,
     };
     let payout = trader_shares[outcome_index];
     trader_cash += payout;
     let trader_pnl = trader_cash;
     let lmsr_loss = (payout - buy_volume + sell_volume).max(0.0);
-    let final_prediction_error = if votes > 0 { prediction_error / votes as f64 } else { 0.0 };
+    let final_prediction_error = if votes > 0 {
+        prediction_error / votes as f64
+    } else {
+        0.0
+    };
     let final_prices = lmsr.prices();
     let market_implied_vote_fraction = if kind == MarketKind::Scalar {
-        final_prices.iter().enumerate().map(|(i, p)| *p * scalar_bin_midpoint(i, n)).sum::<f64>()
+        final_prices
+            .iter()
+            .enumerate()
+            .map(|(i, p)| *p * scalar_bin_midpoint(i, n))
+            .sum::<f64>()
     } else {
         final_prices[0]
     };
@@ -1281,16 +1577,28 @@ fn simulate_market(market: &OpenMarket, cfg: &PortfolioConfig, rng: &mut SeededR
         * (0.012 + topic.social_virality * 0.034 + topic.meme_momentum * 0.024)
         * information_engagement_multiplier(action.information_mode))
     .round() as i64;
-    let fraud_pressure = if votes > 0 { suspected_sybil_votes as f64 / votes as f64 } else { 0.0 };
+    let fraud_pressure = if votes > 0 {
+        suspected_sybil_votes as f64 / votes as f64
+    } else {
+        0.0
+    };
     let reward_inflation_pressure = clampf(
-        (voter_points / (votes as f64).max(1.0)) / 24.0 + action.reward_multiplier * 0.10 + population_scale.log10() * 0.025,
+        (voter_points / (votes as f64).max(1.0)) / 24.0
+            + action.reward_multiplier * 0.10
+            + population_scale.log10() * 0.025,
         0.0,
         1.0,
     );
     let liquidity_utilization = buy_volume / liquidity.max(1.0);
-    let whale_trade_share = if buy_volume > 0.0 { whale_volume / buy_volume } else { 0.0 };
+    let whale_trade_share = if buy_volume > 0.0 {
+        whale_volume / buy_volume
+    } else {
+        0.0
+    };
     let churn_risk = clampf(
-        0.04 + reward_inflation_pressure * 0.20 + fraud_pressure * 0.26 + (price_opinion_gap - 0.25).max(0.0) * 0.20
+        0.04 + reward_inflation_pressure * 0.20
+            + fraud_pressure * 0.26
+            + (price_opinion_gap - 0.25).max(0.0) * 0.20
             + topic.demographic_polarization * 0.08
             - topic.referral_elasticity * 0.05,
         0.0,
@@ -1316,8 +1624,16 @@ fn simulate_market(market: &OpenMarket, cfg: &PortfolioConfig, rng: &mut SeededR
         outcome_index,
         votes,
         suspected_sybil_votes,
-        avg_vote_time_fraction: if votes > 0 { vote_time_fraction / votes as f64 } else { 0.0 },
-        avg_timing_multiplier: if votes > 0 { timing_multiplier_sum / votes as f64 } else { 0.0 },
+        avg_vote_time_fraction: if votes > 0 {
+            vote_time_fraction / votes as f64
+        } else {
+            0.0
+        },
+        avg_timing_multiplier: if votes > 0 {
+            timing_multiplier_sum / votes as f64
+        } else {
+            0.0
+        },
         bettors: bettor_count,
         trades,
         buy_volume,
@@ -1329,8 +1645,16 @@ fn simulate_market(market: &OpenMarket, cfg: &PortfolioConfig, rng: &mut SeededR
         opinion_sampling_error,
         prediction_brier_score,
         external_outcome,
-        avg_trader_belief_error: if bettor_count > 0 { trader_belief_error / bettor_count as f64 } else { 0.0 },
-        trader_belief_entropy: if bettor_count > 0 { trader_belief_entropy / bettor_count as f64 } else { 0.0 },
+        avg_trader_belief_error: if bettor_count > 0 {
+            trader_belief_error / bettor_count as f64
+        } else {
+            0.0
+        },
+        trader_belief_entropy: if bettor_count > 0 {
+            trader_belief_entropy / bettor_count as f64
+        } else {
+            0.0
+        },
         herding_index: if bettor_count > 0 {
             clampf(herding_mass / (bettor_count as f64 * 0.5), 0.0, 1.0)
         } else {
@@ -1349,7 +1673,12 @@ fn simulate_market(market: &OpenMarket, cfg: &PortfolioConfig, rng: &mut SeededR
     }
 }
 
-fn buy_budget(lmsr: &mut LMSR, outcome: usize, gross_budget: f64, fee_rate: f64) -> (f64, f64, f64) {
+fn buy_budget(
+    lmsr: &mut LMSR,
+    outcome: usize,
+    gross_budget: f64,
+    fee_rate: f64,
+) -> (f64, f64, f64) {
     let fee = gross_budget * fee_rate;
     let budget = gross_budget - fee;
     let prices = lmsr.prices();
@@ -1392,24 +1721,53 @@ fn sample_topic(id: i64, now: f64, rng: &mut SeededRandom) -> CandidateTopic {
     };
     let true_hotness = clampf(beta_like(rng, 2.0, 2.2) + category_hot_boost, 0.05, 0.98);
     let ambiguity = clampf(beta_like(rng, 2.1, 2.1), 0.05, 0.95);
-    let lean = (if rng.next_float() < 0.5 { -1.0 } else { 1.0 }) * (0.08 + 0.35 * (1.0 - ambiguity) * rng.next_float());
+    let lean = (if rng.next_float() < 0.5 { -1.0 } else { 1.0 })
+        * (0.08 + 0.35 * (1.0 - ambiguity) * rng.next_float());
     let true_theta = clampf(0.5 + lean, 0.03, 0.97);
     let news_cycle_intensity = clampf(
-        beta_like(rng, if category == Category::Breaking { 3.2 } else { 2.1 }, 2.0)
-            + (if category == Category::Breaking { 0.10 } else { 0.0 }),
+        beta_like(
+            rng,
+            if category == Category::Breaking {
+                3.2
+            } else {
+                2.1
+            },
+            2.0,
+        ) + (if category == Category::Breaking {
+            0.10
+        } else {
+            0.0
+        }),
         0.02,
         1.0,
     );
-    let social_virality = clampf(0.22 + 0.48 * true_hotness + 0.22 * news_cycle_intensity + normal(rng) * 0.13, 0.0, 1.0);
-    let influencer_activity = clampf(
-        beta_like(rng, 1.8, 2.4) + (if category == Category::Politics || category == Category::Culture { 0.08 } else { 0.0 }),
+    let social_virality = clampf(
+        0.22 + 0.48 * true_hotness + 0.22 * news_cycle_intensity + normal(rng) * 0.13,
         0.0,
         1.0,
     );
-    let meme_momentum = clampf(0.18 + 0.44 * social_virality + 0.20 * ambiguity + normal(rng) * 0.12, 0.0, 1.0);
+    let influencer_activity = clampf(
+        beta_like(rng, 1.8, 2.4)
+            + (if category == Category::Politics || category == Category::Culture {
+                0.08
+            } else {
+                0.0
+            }),
+        0.0,
+        1.0,
+    );
+    let meme_momentum = clampf(
+        0.18 + 0.44 * social_virality + 0.20 * ambiguity + normal(rng) * 0.12,
+        0.0,
+        1.0,
+    );
     let demographic_polarization = clampf(
         0.12 + 0.55 * (1.0 - ambiguity)
-            + (if category == Category::Politics || category == Category::Conspiracy { 0.14 } else { 0.0 })
+            + (if category == Category::Politics || category == Category::Conspiracy {
+                0.14
+            } else {
+                0.0
+            })
             + normal(rng) * 0.10,
         0.0,
         1.0,
@@ -1422,13 +1780,22 @@ fn sample_topic(id: i64, now: f64, rng: &mut SeededRandom) -> CandidateTopic {
         Category::Breaking => 0.66,
     };
     let opinion_event_coupling = clampf(
-        coupling_prior + news_cycle_intensity * 0.12 - ambiguity * 0.12 - demographic_polarization * 0.16,
+        coupling_prior + news_cycle_intensity * 0.12
+            - ambiguity * 0.12
+            - demographic_polarization * 0.16,
         0.12,
         0.92,
     );
     let event_probability = clampf(
         0.5 + (true_theta - 0.5) * opinion_event_coupling
-            + normal(rng) * (0.12 + ambiguity * 0.10 + (if category == Category::Conspiracy { 0.08 } else { 0.0 })),
+            + normal(rng)
+                * (0.12
+                    + ambiguity * 0.10
+                    + (if category == Category::Conspiracy {
+                        0.08
+                    } else {
+                        0.0
+                    })),
         0.03,
         0.97,
     );
@@ -1438,21 +1805,40 @@ fn sample_topic(id: i64, now: f64, rng: &mut SeededRandom) -> CandidateTopic {
         0.75,
     );
     let bot_pressure = clampf(
-        0.03 + 0.20 * social_virality + 0.22 * influencer_activity
-            + (if category == Category::Politics || category == Category::Conspiracy { 0.08 } else { 0.0 })
+        0.03 + 0.20 * social_virality
+            + 0.22 * influencer_activity
+            + (if category == Category::Politics || category == Category::Conspiracy {
+                0.08
+            } else {
+                0.0
+            })
             + normal(rng) * 0.06,
         0.0,
         0.75,
     );
-    let referral_elasticity = clampf(0.10 + 0.46 * meme_momentum + 0.22 * social_virality + normal(rng) * 0.10, 0.0, 1.0);
+    let referral_elasticity = clampf(
+        0.10 + 0.46 * meme_momentum + 0.22 * social_virality + normal(rng) * 0.10,
+        0.0,
+        1.0,
+    );
     let manipulation_risk = clampf(
-        0.06 + 0.18 * true_hotness * ambiguity + 0.16 * bot_pressure + 0.08 * demographic_polarization
-            + (if category == Category::Politics || category == Category::Conspiracy { 0.08 } else { 0.0 }),
+        0.06 + 0.18 * true_hotness * ambiguity
+            + 0.16 * bot_pressure
+            + 0.08 * demographic_polarization
+            + (if category == Category::Politics || category == Category::Conspiracy {
+                0.08
+            } else {
+                0.0
+            }),
         0.0,
         0.68,
     );
     let observed_buzz = clampf(
-        true_hotness + 0.18 * news_cycle_intensity + 0.16 * social_virality + 0.10 * influencer_activity + normal(rng) * 0.14,
+        true_hotness
+            + 0.18 * news_cycle_intensity
+            + 0.16 * social_virality
+            + 0.10 * influencer_activity
+            + normal(rng) * 0.14,
         0.0,
         1.0,
     );
@@ -1485,7 +1871,11 @@ fn sample_topic(id: i64, now: f64, rng: &mut SeededRandom) -> CandidateTopic {
 // Aggregation.
 // =============================================================================
 
-pub fn run_portfolio(policy: SchedulerPolicy, cfg: &PortfolioConfig, mdp: &OperatorMDP) -> PolicyRun {
+pub fn run_portfolio(
+    policy: SchedulerPolicy,
+    cfg: &PortfolioConfig,
+    mdp: &OperatorMDP,
+) -> PolicyRun {
     let rng = mulberry32(cfg.seed.wrapping_add(policy_seed(policy)));
     let mut station = FactMachinePortfolioStation::new(cfg.clone(), policy, mdp, rng);
     let ticks = (cfg.horizon_h / cfg.step_h).round() as i64;
@@ -1493,17 +1883,34 @@ pub fn run_portfolio(policy: SchedulerPolicy, cfg: &PortfolioConfig, mdp: &Opera
         station.run_time_step(cfg.step_h, tick as f64);
     }
     while !station.active.is_empty() {
-        let next_close = station.active.iter().map(|m| m.close_at).fold(f64::INFINITY, f64::min);
+        let next_close = station
+            .active
+            .iter()
+            .map(|m| m.close_at)
+            .fold(f64::INFINITY, f64::min);
         station.run_time_step(cfg.step_h, (next_close / cfg.step_h).ceil());
     }
     station.to_run()
 }
 
-fn aggregate_run(policy: SchedulerPolicy, markets: &[ClosedMarket], cfg: &PortfolioConfig) -> PolicyAggregate {
+fn aggregate_run(
+    policy: SchedulerPolicy,
+    markets: &[ClosedMarket],
+    cfg: &PortfolioConfig,
+) -> PolicyAggregate {
     let markets_opened = markets.len() as i64;
-    let binary_markets = markets.iter().filter(|m| m.kind == MarketKind::Binary).count() as i64;
-    let scalar_markets = markets.iter().filter(|m| m.kind == MarketKind::Scalar).count() as i64;
-    let threshold_markets = markets.iter().filter(|m| m.kind == MarketKind::Threshold).count() as i64;
+    let binary_markets = markets
+        .iter()
+        .filter(|m| m.kind == MarketKind::Binary)
+        .count() as i64;
+    let scalar_markets = markets
+        .iter()
+        .filter(|m| m.kind == MarketKind::Scalar)
+        .count() as i64;
+    let threshold_markets = markets
+        .iter()
+        .filter(|m| m.kind == MarketKind::Threshold)
+        .count() as i64;
     let fee_revenue: f64 = markets.iter().map(|m| m.fee_revenue).sum();
     let voter_points: f64 = markets.iter().map(|m| m.voter_points).sum();
     let lmsr_loss_total: f64 = markets.iter().map(|m| m.lmsr_loss).sum();
@@ -1523,12 +1930,23 @@ fn aggregate_run(policy: SchedulerPolicy, markets: &[ClosedMarket], cfg: &Portfo
         avg_fee_rate: mean_iter(markets.iter().map(|m| m.fee_rate)),
         avg_liquidity: mean_iter(markets.iter().map(|m| m.liquidity)),
         avg_reward_multiplier: mean_iter(markets.iter().map(|m| m.reward_multiplier)),
-        proof_markets: markets.iter().filter(|m| m.verification == VerificationTier::Proof).count() as i64,
+        proof_markets: markets
+            .iter()
+            .filter(|m| m.verification == VerificationTier::Proof)
+            .count() as i64,
         avg_timing_decay: mean_iter(markets.iter().map(|m| m.timing_decay)),
         votes,
         suspected_sybil_votes: markets.iter().map(|m| m.suspected_sybil_votes as f64).sum(),
-        avg_vote_time_fraction: weighted_mean_iter(markets.iter().map(|m| (m.avg_vote_time_fraction, m.votes as f64))),
-        avg_timing_multiplier: weighted_mean_iter(markets.iter().map(|m| (m.avg_timing_multiplier, m.votes as f64))),
+        avg_vote_time_fraction: weighted_mean_iter(
+            markets
+                .iter()
+                .map(|m| (m.avg_vote_time_fraction, m.votes as f64)),
+        ),
+        avg_timing_multiplier: weighted_mean_iter(
+            markets
+                .iter()
+                .map(|m| (m.avg_timing_multiplier, m.votes as f64)),
+        ),
         bettors,
         trades: markets.iter().map(|m| m.trades as f64).sum(),
         buy_volume: markets.iter().map(|m| m.buy_volume).sum(),
@@ -1536,27 +1954,79 @@ fn aggregate_run(policy: SchedulerPolicy, markets: &[ClosedMarket], cfg: &Portfo
         fee_revenue,
         voter_points,
         raffle_entries: markets.iter().map(|m| m.raffle_entries as f64).sum(),
-        avg_prediction_error: weighted_mean_iter(markets.iter().map(|m| (m.avg_prediction_error, m.votes as f64))),
-        avg_opinion_sampling_error: weighted_mean_iter(markets.iter().map(|m| (m.opinion_sampling_error, m.votes as f64))),
-        avg_prediction_brier_score: weighted_mean_iter(
-            markets.iter().map(|m| (m.prediction_brier_score, (m.trades as f64).max(1.0))),
+        avg_prediction_error: weighted_mean_iter(
+            markets
+                .iter()
+                .map(|m| (m.avg_prediction_error, m.votes as f64)),
         ),
-        avg_trader_belief_error: weighted_mean_iter(markets.iter().map(|m| (m.avg_trader_belief_error, m.bettors as f64))),
-        trader_belief_entropy: weighted_mean_iter(markets.iter().map(|m| (m.trader_belief_entropy, m.bettors as f64))),
-        herding_index: weighted_mean_iter(markets.iter().map(|m| (m.herding_index, m.bettors as f64))),
-        price_opinion_gap: weighted_mean_iter(markets.iter().map(|m| (m.price_opinion_gap, (m.trades as f64).max(1.0)))),
+        avg_opinion_sampling_error: weighted_mean_iter(
+            markets
+                .iter()
+                .map(|m| (m.opinion_sampling_error, m.votes as f64)),
+        ),
+        avg_prediction_brier_score: weighted_mean_iter(
+            markets
+                .iter()
+                .map(|m| (m.prediction_brier_score, (m.trades as f64).max(1.0))),
+        ),
+        avg_trader_belief_error: weighted_mean_iter(
+            markets
+                .iter()
+                .map(|m| (m.avg_trader_belief_error, m.bettors as f64)),
+        ),
+        trader_belief_entropy: weighted_mean_iter(
+            markets
+                .iter()
+                .map(|m| (m.trader_belief_entropy, m.bettors as f64)),
+        ),
+        herding_index: weighted_mean_iter(
+            markets.iter().map(|m| (m.herding_index, m.bettors as f64)),
+        ),
+        price_opinion_gap: weighted_mean_iter(
+            markets
+                .iter()
+                .map(|m| (m.price_opinion_gap, (m.trades as f64).max(1.0))),
+        ),
         market_maker_risk_bound: markets.iter().map(|m| m.market_maker_risk_bound).sum(),
-        fraud_pressure: weighted_mean_iter(markets.iter().map(|m| (m.fraud_pressure, m.votes as f64))),
+        fraud_pressure: weighted_mean_iter(
+            markets.iter().map(|m| (m.fraud_pressure, m.votes as f64)),
+        ),
         referral_adds: markets.iter().map(|m| m.referral_adds as f64).sum(),
         churn_risk: weighted_mean_iter(markets.iter().map(|m| (m.churn_risk, m.votes as f64))),
-        reward_inflation_pressure: weighted_mean_iter(markets.iter().map(|m| (m.reward_inflation_pressure, m.votes as f64))),
-        liquidity_utilization: weighted_mean_iter(markets.iter().map(|m| (m.liquidity_utilization, (m.trades as f64).max(1.0)))),
-        whale_trade_share: weighted_mean_iter(markets.iter().map(|m| (m.whale_trade_share, (m.trades as f64).max(1.0)))),
-        avg_news_cycle_intensity: weighted_mean_iter(markets.iter().map(|m| (m.topic.news_cycle_intensity, m.votes as f64))),
-        avg_social_virality: weighted_mean_iter(markets.iter().map(|m| (m.topic.social_virality, m.votes as f64))),
-        avg_influencer_activity: weighted_mean_iter(markets.iter().map(|m| (m.topic.influencer_activity, m.votes as f64))),
+        reward_inflation_pressure: weighted_mean_iter(
+            markets
+                .iter()
+                .map(|m| (m.reward_inflation_pressure, m.votes as f64)),
+        ),
+        liquidity_utilization: weighted_mean_iter(
+            markets
+                .iter()
+                .map(|m| (m.liquidity_utilization, (m.trades as f64).max(1.0))),
+        ),
+        whale_trade_share: weighted_mean_iter(
+            markets
+                .iter()
+                .map(|m| (m.whale_trade_share, (m.trades as f64).max(1.0))),
+        ),
+        avg_news_cycle_intensity: weighted_mean_iter(
+            markets
+                .iter()
+                .map(|m| (m.topic.news_cycle_intensity, m.votes as f64)),
+        ),
+        avg_social_virality: weighted_mean_iter(
+            markets
+                .iter()
+                .map(|m| (m.topic.social_virality, m.votes as f64)),
+        ),
+        avg_influencer_activity: weighted_mean_iter(
+            markets
+                .iter()
+                .map(|m| (m.topic.influencer_activity, m.votes as f64)),
+        ),
         avg_demographic_polarization: weighted_mean_iter(
-            markets.iter().map(|m| (m.topic.demographic_polarization, m.votes as f64)),
+            markets
+                .iter()
+                .map(|m| (m.topic.demographic_polarization, m.votes as f64)),
         ),
         trader_pnl: markets.iter().map(|m| m.trader_pnl).sum(),
         lmsr_loss: lmsr_loss_total,
@@ -1568,7 +2038,11 @@ fn aggregate_run(policy: SchedulerPolicy, markets: &[ClosedMarket], cfg: &Portfo
 }
 
 fn aggregate_by_kind(markets: &[ClosedMarket]) -> Vec<MarketKindAggregate> {
-    let kinds = [MarketKind::Binary, MarketKind::Scalar, MarketKind::Threshold];
+    let kinds = [
+        MarketKind::Binary,
+        MarketKind::Scalar,
+        MarketKind::Threshold,
+    ];
     kinds
         .iter()
         .map(|&kind| {
@@ -1590,27 +2064,63 @@ fn aggregate_by_kind(markets: &[ClosedMarket]) -> Vec<MarketKindAggregate> {
                 avg_duration_h: mean_iter(subset.iter().map(|m| m.duration_h)),
                 avg_liquidity: mean_iter(subset.iter().map(|m| m.liquidity)),
                 avg_fee_rate: mean_iter(subset.iter().map(|m| m.fee_rate)),
-                avg_prediction_error: weighted_mean_iter(subset.iter().map(|m| (m.avg_prediction_error, m.votes as f64))),
-                avg_opinion_sampling_error: weighted_mean_iter(subset.iter().map(|m| (m.opinion_sampling_error, m.votes as f64))),
+                avg_prediction_error: weighted_mean_iter(
+                    subset
+                        .iter()
+                        .map(|m| (m.avg_prediction_error, m.votes as f64)),
+                ),
+                avg_opinion_sampling_error: weighted_mean_iter(
+                    subset
+                        .iter()
+                        .map(|m| (m.opinion_sampling_error, m.votes as f64)),
+                ),
                 avg_prediction_brier_score: weighted_mean_iter(
-                    subset.iter().map(|m| (m.prediction_brier_score, (m.trades as f64).max(1.0))),
+                    subset
+                        .iter()
+                        .map(|m| (m.prediction_brier_score, (m.trades as f64).max(1.0))),
                 ),
-                avg_trader_belief_error: weighted_mean_iter(subset.iter().map(|m| (m.avg_trader_belief_error, m.bettors as f64))),
-                trader_belief_entropy: weighted_mean_iter(subset.iter().map(|m| (m.trader_belief_entropy, m.bettors as f64))),
-                herding_index: weighted_mean_iter(subset.iter().map(|m| (m.herding_index, m.bettors as f64))),
-                price_opinion_gap: weighted_mean_iter(subset.iter().map(|m| (m.price_opinion_gap, (m.trades as f64).max(1.0)))),
-                fraud_pressure: weighted_mean_iter(subset.iter().map(|m| (m.fraud_pressure, m.votes as f64))),
+                avg_trader_belief_error: weighted_mean_iter(
+                    subset
+                        .iter()
+                        .map(|m| (m.avg_trader_belief_error, m.bettors as f64)),
+                ),
+                trader_belief_entropy: weighted_mean_iter(
+                    subset
+                        .iter()
+                        .map(|m| (m.trader_belief_entropy, m.bettors as f64)),
+                ),
+                herding_index: weighted_mean_iter(
+                    subset.iter().map(|m| (m.herding_index, m.bettors as f64)),
+                ),
+                price_opinion_gap: weighted_mean_iter(
+                    subset
+                        .iter()
+                        .map(|m| (m.price_opinion_gap, (m.trades as f64).max(1.0))),
+                ),
+                fraud_pressure: weighted_mean_iter(
+                    subset.iter().map(|m| (m.fraud_pressure, m.votes as f64)),
+                ),
                 liquidity_utilization: weighted_mean_iter(
-                    subset.iter().map(|m| (m.liquidity_utilization, (m.trades as f64).max(1.0))),
+                    subset
+                        .iter()
+                        .map(|m| (m.liquidity_utilization, (m.trades as f64).max(1.0))),
                 ),
-                whale_trade_share: weighted_mean_iter(subset.iter().map(|m| (m.whale_trade_share, (m.trades as f64).max(1.0)))),
+                whale_trade_share: weighted_mean_iter(
+                    subset
+                        .iter()
+                        .map(|m| (m.whale_trade_share, (m.trades as f64).max(1.0))),
+                ),
                 platform_surplus: fee_revenue - voter_points * 0.012 - lmsr_loss_total,
             }
         })
         .collect()
 }
 
-fn build_daily_summaries(markets: &[ClosedMarket], timeline: &[TimelineFrame], cfg: &PortfolioConfig) -> Vec<DailySummary> {
+fn build_daily_summaries(
+    markets: &[ClosedMarket],
+    timeline: &[TimelineFrame],
+    cfg: &PortfolioConfig,
+) -> Vec<DailySummary> {
     let horizon_days = (cfg.horizon_h / 24.0).ceil() as i64;
     let max_close_day = if markets.is_empty() {
         0
@@ -1622,7 +2132,9 @@ fn build_daily_summaries(markets: &[ClosedMarket], timeline: &[TimelineFrame], c
     } else {
         timeline.iter().map(|x| x.day).max().unwrap()
     };
-    let days = horizon_days.max(max_close_day + 1).max(max_timeline_day + 1);
+    let days = horizon_days
+        .max(max_close_day + 1)
+        .max(max_timeline_day + 1);
     let mut last_timeline_by_day: HashMap<i64, TimelineFrame> = HashMap::new();
     for frame in timeline {
         last_timeline_by_day.insert(frame.day, frame.clone());
@@ -1630,8 +2142,14 @@ fn build_daily_summaries(markets: &[ClosedMarket], timeline: &[TimelineFrame], c
 
     let mut summaries = Vec::new();
     for day in 0..days {
-        let opened: Vec<&ClosedMarket> = markets.iter().filter(|m| day_index(m.open_at) == day).collect();
-        let closed: Vec<&ClosedMarket> = markets.iter().filter(|m| day_index(m.close_at) == day).collect();
+        let opened: Vec<&ClosedMarket> = markets
+            .iter()
+            .filter(|m| day_index(m.open_at) == day)
+            .collect();
+        let closed: Vec<&ClosedMarket> = markets
+            .iter()
+            .filter(|m| day_index(m.close_at) == day)
+            .collect();
         let last_frame = last_timeline_by_day.get(&day);
         summaries.push(DailySummary {
             day,
@@ -1645,16 +2163,39 @@ fn build_daily_summaries(markets: &[ClosedMarket], timeline: &[TimelineFrame], c
             trades: closed.iter().map(|m| m.trades as f64).sum(),
             fee_revenue: closed.iter().map(|m| m.fee_revenue).sum(),
             voter_points: closed.iter().map(|m| m.voter_points).sum(),
-            binary_closed: closed.iter().filter(|m| m.kind == MarketKind::Binary).count() as i64,
-            scalar_closed: closed.iter().filter(|m| m.kind == MarketKind::Scalar).count() as i64,
-            threshold_closed: closed.iter().filter(|m| m.kind == MarketKind::Threshold).count() as i64,
-            avg_prediction_error: weighted_mean_iter(closed.iter().map(|m| (m.avg_prediction_error, m.votes as f64))),
-            avg_opinion_sampling_error: weighted_mean_iter(closed.iter().map(|m| (m.opinion_sampling_error, m.votes as f64))),
-            avg_prediction_brier_score: weighted_mean_iter(
-                closed.iter().map(|m| (m.prediction_brier_score, (m.trades as f64).max(1.0))),
+            binary_closed: closed
+                .iter()
+                .filter(|m| m.kind == MarketKind::Binary)
+                .count() as i64,
+            scalar_closed: closed
+                .iter()
+                .filter(|m| m.kind == MarketKind::Scalar)
+                .count() as i64,
+            threshold_closed: closed
+                .iter()
+                .filter(|m| m.kind == MarketKind::Threshold)
+                .count() as i64,
+            avg_prediction_error: weighted_mean_iter(
+                closed
+                    .iter()
+                    .map(|m| (m.avg_prediction_error, m.votes as f64)),
             ),
-            fraud_pressure: weighted_mean_iter(closed.iter().map(|m| (m.fraud_pressure, m.votes as f64))),
-            herding_index: weighted_mean_iter(closed.iter().map(|m| (m.herding_index, m.bettors as f64))),
+            avg_opinion_sampling_error: weighted_mean_iter(
+                closed
+                    .iter()
+                    .map(|m| (m.opinion_sampling_error, m.votes as f64)),
+            ),
+            avg_prediction_brier_score: weighted_mean_iter(
+                closed
+                    .iter()
+                    .map(|m| (m.prediction_brier_score, (m.trades as f64).max(1.0))),
+            ),
+            fraud_pressure: weighted_mean_iter(
+                closed.iter().map(|m| (m.fraud_pressure, m.votes as f64)),
+            ),
+            herding_index: weighted_mean_iter(
+                closed.iter().map(|m| (m.herding_index, m.bettors as f64)),
+            ),
         });
     }
     summaries
@@ -1664,7 +2205,12 @@ fn build_daily_summaries(markets: &[ClosedMarket], timeline: &[TimelineFrame], c
 // Daily market caps + config.
 // =============================================================================
 
-pub fn build_daily_market_caps(horizon_days: f64, min_daily_markets: i64, max_daily_markets: i64, seed: u32) -> Vec<i64> {
+pub fn build_daily_market_caps(
+    horizon_days: f64,
+    min_daily_markets: i64,
+    max_daily_markets: i64,
+    seed: u32,
+) -> Vec<i64> {
     let days = (horizon_days.ceil() as i64).max(1);
     let lo = min_daily_markets.max(0);
     let hi = max_daily_markets.max(lo);
@@ -1677,8 +2223,16 @@ pub fn build_daily_market_caps(horizon_days: f64, min_daily_markets: i64, max_da
         let weekly_pulse =
             0.5 + 0.5 * (2.0 * std::f64::consts::PI * (day as f64 + (seed % 7) as f64) / 7.0).sin();
         let news_shock = rng.next_float();
-        let weekend_drag = if day % 7 == 5 || day % 7 == 6 { -0.12 } else { 0.04 };
-        let level = clampf(0.52 * weekly_pulse + 0.40 * news_shock + weekend_drag, 0.0, 1.0);
+        let weekend_drag = if day % 7 == 5 || day % 7 == 6 {
+            -0.12
+        } else {
+            0.04
+        };
+        let level = clampf(
+            0.52 * weekly_pulse + 0.40 * news_shock + weekend_drag,
+            0.0,
+            1.0,
+        );
         caps.push((lo as f64 + (hi - lo) as f64 * level).round() as i64);
     }
     caps[0] = lo;
@@ -1725,11 +2279,22 @@ pub fn default_config() -> PortfolioConfig {
     let horizon_days = (horizon_h / 24.0).ceil() as i64;
     let seed = env_f64("SEED", 42.0) as u32;
     let min_daily_markets = env_f64("MIN_DAILY_MARKETS", 2.0).floor().max(0.0) as i64;
-    let max_daily_markets = env_f64("MAX_DAILY_MARKETS", 10.0).floor().max(min_daily_markets as f64) as i64;
-    let daily_market_caps = parse_daily_market_caps(env_opt("DAILY_MARKET_CAPS").as_deref(), horizon_days)
-        .unwrap_or_else(|| build_daily_market_caps(horizon_days as f64, min_daily_markets, max_daily_markets, seed));
+    let max_daily_markets = env_f64("MAX_DAILY_MARKETS", 10.0)
+        .floor()
+        .max(min_daily_markets as f64) as i64;
+    let daily_market_caps =
+        parse_daily_market_caps(env_opt("DAILY_MARKET_CAPS").as_deref(), horizon_days)
+            .unwrap_or_else(|| {
+                build_daily_market_caps(
+                    horizon_days as f64,
+                    min_daily_markets,
+                    max_daily_markets,
+                    seed,
+                )
+            });
     PortfolioConfig {
-        scenario_label: env_opt("SCENARIO_LABEL").unwrap_or_else(|| format!("{} participants", locale_int(min_market_participants))),
+        scenario_label: env_opt("SCENARIO_LABEL")
+            .unwrap_or_else(|| format!("{} participants", locale_int(min_market_participants))),
         horizon_h,
         step_h: env_f64("STEP_H", 0.25),
         max_concurrent: env_f64("MAX_CONCURRENT", max_daily_markets as f64) as i64,
@@ -1802,7 +2367,11 @@ pub fn run() {
         "#   horizon={}h, maxConcurrent={}, scenarios={}",
         num_str(cfg.horizon_h),
         cfg.max_concurrent,
-        scenarios.iter().map(|s| num_str(s.min_market_participants)).collect::<Vec<_>>().join(",")
+        scenarios
+            .iter()
+            .map(|s| num_str(s.min_market_participants))
+            .collect::<Vec<_>>()
+            .join(",")
     );
     println!(
         "#   operator MDP: {} states, {} actions, {} VI sweeps",
@@ -1816,7 +2385,11 @@ pub fn run() {
         println!("# {} / {}", r.scenario_label, r.policy.slug());
         println!(
             "#   markets {} ({} binary, {} scalar, {} over/under), avg duration {:.2}h",
-            a.markets_closed, a.binary_markets, a.scalar_markets, a.threshold_markets, a.avg_duration_h
+            a.markets_closed,
+            a.binary_markets,
+            a.scalar_markets,
+            a.threshold_markets,
+            a.avg_duration_h
         );
         println!(
             "#   avg fee {:.2}%, avg liquidity ${:.0}, avg reward {:.2}x, timing decay {:.2}, proof markets {}",
@@ -1884,7 +2457,11 @@ fn operator_state_label(s: usize) -> String {
     format!("hot={hot_bin}/amb={amb_bin}/fatigue={fatigue_bin}")
 }
 fn fatigue_bin_for(active: i64, cap: i64) -> i64 {
-    let x = if cap <= 0 { 1.0 } else { active as f64 / cap as f64 };
+    let x = if cap <= 0 {
+        1.0
+    } else {
+        active as f64 / cap as f64
+    };
     if x < 0.34 {
         0
     } else if x < 0.67 {
@@ -1894,7 +2471,12 @@ fn fatigue_bin_for(active: i64, cap: i64) -> i64 {
     }
 }
 
-fn action_by(actions: &[SchedulerAction], kind: MarketKind, duration_h: f64, label_hint: Option<&str>) -> SchedulerAction {
+fn action_by(
+    actions: &[SchedulerAction],
+    kind: MarketKind,
+    duration_h: f64,
+    label_hint: Option<&str>,
+) -> SchedulerAction {
     let target = kind.as_kind();
     let hint_ok = |a: &SchedulerAction| match label_hint {
         Some(h) => a.label.contains(h),
@@ -1903,14 +2485,21 @@ fn action_by(actions: &[SchedulerAction], kind: MarketKind, duration_h: f64, lab
     actions
         .iter()
         .find(|a| a.kind == target && a.duration_h == duration_h && hint_ok(a))
-        .or_else(|| actions.iter().find(|a| a.kind == target && a.duration_h == duration_h))
+        .or_else(|| {
+            actions
+                .iter()
+                .find(|a| a.kind == target && a.duration_h == duration_h)
+        })
         .cloned()
         .unwrap_or_else(|| actions[0].clone())
 }
 
 fn contract_label(action: &SchedulerAction) -> String {
     match action.kind {
-        ActionKind::Threshold => format!("over/under {}%", (action.threshold.unwrap_or(0.55) * 100.0).round() as i64),
+        ActionKind::Threshold => format!(
+            "over/under {}%",
+            (action.threshold.unwrap_or(0.55) * 100.0).round() as i64
+        ),
         ActionKind::Scalar => "scalar distribution".to_string(),
         ActionKind::Binary => "majority binary".to_string(),
         ActionKind::Wait => "wait".to_string(),
@@ -2092,7 +2681,8 @@ fn softmax(scores: &[f64]) -> Vec<f64> {
     exps.iter().map(|x| x / z).collect()
 }
 fn entropy(ps: &[f64]) -> f64 {
-    -ps.iter().fold(0.0, |s, &p| if p > 0.0 { s + p * p.ln() } else { s })
+    -ps.iter()
+        .fold(0.0, |s, &p| if p > 0.0 { s + p * p.ln() } else { s })
 }
 fn arg_max(xs: &[f64]) -> usize {
     let mut best = 0;
@@ -2146,7 +2736,10 @@ fn bump(counts: &mut Vec<ActionCount>, key: &str) {
     if let Some(e) = counts.iter_mut().find(|c| c.action == key) {
         e.count += 1;
     } else {
-        counts.push(ActionCount { action: key.to_string(), count: 1 });
+        counts.push(ActionCount {
+            action: key.to_string(),
+            count: 1,
+        });
     }
 }
 fn policy_seed(policy: SchedulerPolicy) -> u32 {
@@ -2183,7 +2776,10 @@ fn num_str(x: f64) -> String {
 }
 
 fn env_f64(key: &str, default: f64) -> f64 {
-    std::env::var(key).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(default)
 }
 fn env_opt(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
@@ -2200,7 +2796,12 @@ fn jstr(s: &str) -> JsonValue {
     JsonValue::String(s.to_string())
 }
 fn jobj(entries: Vec<(&str, JsonValue)>) -> JsonValue {
-    JsonValue::Object(entries.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+    JsonValue::Object(
+        entries
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
+    )
 }
 fn jarr(items: Vec<JsonValue>) -> JsonValue {
     JsonValue::Array(items)
@@ -2320,8 +2921,14 @@ fn kind_agg_json(k: &MarketKindAggregate) -> JsonValue {
         ("avgLiquidity", jnum(k.avg_liquidity)),
         ("avgFeeRate", jnum(k.avg_fee_rate)),
         ("avgPredictionError", jnum(k.avg_prediction_error)),
-        ("avgOpinionSamplingError", jnum(k.avg_opinion_sampling_error)),
-        ("avgPredictionBrierScore", jnum(k.avg_prediction_brier_score)),
+        (
+            "avgOpinionSamplingError",
+            jnum(k.avg_opinion_sampling_error),
+        ),
+        (
+            "avgPredictionBrierScore",
+            jnum(k.avg_prediction_brier_score),
+        ),
         ("avgTraderBeliefError", jnum(k.avg_trader_belief_error)),
         ("traderBeliefEntropy", jnum(k.trader_belief_entropy)),
         ("herdingIndex", jnum(k.herding_index)),
@@ -2350,8 +2957,14 @@ fn daily_json(d: &DailySummary) -> JsonValue {
         ("scalarClosed", jnum(d.scalar_closed as f64)),
         ("thresholdClosed", jnum(d.threshold_closed as f64)),
         ("avgPredictionError", jnum(d.avg_prediction_error)),
-        ("avgOpinionSamplingError", jnum(d.avg_opinion_sampling_error)),
-        ("avgPredictionBrierScore", jnum(d.avg_prediction_brier_score)),
+        (
+            "avgOpinionSamplingError",
+            jnum(d.avg_opinion_sampling_error),
+        ),
+        (
+            "avgPredictionBrierScore",
+            jnum(d.avg_prediction_brier_score),
+        ),
         ("fraudPressure", jnum(d.fraud_pressure)),
         ("herdingIndex", jnum(d.herding_index)),
     ])
@@ -2385,8 +2998,14 @@ fn aggregate_json(a: &PolicyAggregate) -> JsonValue {
         ("voterPoints", jnum(a.voter_points)),
         ("raffleEntries", jnum(a.raffle_entries)),
         ("avgPredictionError", jnum(a.avg_prediction_error)),
-        ("avgOpinionSamplingError", jnum(a.avg_opinion_sampling_error)),
-        ("avgPredictionBrierScore", jnum(a.avg_prediction_brier_score)),
+        (
+            "avgOpinionSamplingError",
+            jnum(a.avg_opinion_sampling_error),
+        ),
+        (
+            "avgPredictionBrierScore",
+            jnum(a.avg_prediction_brier_score),
+        ),
         ("avgTraderBeliefError", jnum(a.avg_trader_belief_error)),
         ("traderBeliefEntropy", jnum(a.trader_belief_entropy)),
         ("herdingIndex", jnum(a.herding_index)),
@@ -2401,7 +3020,10 @@ fn aggregate_json(a: &PolicyAggregate) -> JsonValue {
         ("avgNewsCycleIntensity", jnum(a.avg_news_cycle_intensity)),
         ("avgSocialVirality", jnum(a.avg_social_virality)),
         ("avgInfluencerActivity", jnum(a.avg_influencer_activity)),
-        ("avgDemographicPolarization", jnum(a.avg_demographic_polarization)),
+        (
+            "avgDemographicPolarization",
+            jnum(a.avg_demographic_polarization),
+        ),
         ("traderPnl", jnum(a.trader_pnl)),
         ("lmsrLoss", jnum(a.lmsr_loss)),
         ("platformSurplus", jnum(a.platform_surplus)),
@@ -2439,33 +3061,49 @@ fn policy_run_json(r: &PolicyRun) -> JsonValue {
         ("minMarketParticipants", jnum(r.min_market_participants)),
         ("policy", jstr(r.policy.slug())),
         ("aggregate", aggregate_json(&r.aggregate)),
-        ("kindBreakdown", jarr(r.kind_breakdown.iter().map(kind_agg_json).collect())),
+        (
+            "kindBreakdown",
+            jarr(r.kind_breakdown.iter().map(kind_agg_json).collect()),
+        ),
         ("daily", jarr(r.daily.iter().map(daily_json).collect())),
-        ("closedMarkets", jarr(r.closed_markets.iter().map(closed_json).collect())),
+        (
+            "closedMarkets",
+            jarr(r.closed_markets.iter().map(closed_json).collect()),
+        ),
         (
             "actionCounts",
-            jarr(r
-                .action_counts
-                .iter()
-                .map(|c| jobj(vec![("action", jstr(&c.action)), ("count", jnum(c.count as f64))]))
-                .collect()),
+            jarr(
+                r.action_counts
+                    .iter()
+                    .map(|c| {
+                        jobj(vec![
+                            ("action", jstr(&c.action)),
+                            ("count", jnum(c.count as f64)),
+                        ])
+                    })
+                    .collect(),
+            ),
         ),
-        ("timeline", jarr(r.timeline.iter().map(timeline_json).collect())),
+        (
+            "timeline",
+            jarr(r.timeline.iter().map(timeline_json).collect()),
+        ),
     ];
     if let Some(bt) = &r.belief_trace {
         entries.push((
             "beliefTrace",
-            jarr(bt
-                .iter()
-                .map(|x| {
-                    jobj(vec![
-                        ("t", jnum(x.t)),
-                        ("entropy", jnum(x.entropy)),
-                        ("expectedHotness", jnum(x.expected_hotness)),
-                        ("error", jnum(x.error)),
-                    ])
-                })
-                .collect()),
+            jarr(
+                bt.iter()
+                    .map(|x| {
+                        jobj(vec![
+                            ("t", jnum(x.t)),
+                            ("entropy", jnum(x.entropy)),
+                            ("expectedHotness", jnum(x.expected_hotness)),
+                            ("error", jnum(x.error)),
+                        ])
+                    })
+                    .collect(),
+            ),
         ));
     }
     jobj(entries)
@@ -2479,7 +3117,15 @@ fn cfg_json(cfg: &PortfolioConfig) -> JsonValue {
         ("maxConcurrent", jnum(cfg.max_concurrent as f64)),
         ("minDailyMarkets", jnum(cfg.min_daily_markets as f64)),
         ("maxDailyMarkets", jnum(cfg.max_daily_markets as f64)),
-        ("dailyMarketCaps", jarr(cfg.daily_market_caps.iter().map(|&c| jnum(c as f64)).collect())),
+        (
+            "dailyMarketCaps",
+            jarr(
+                cfg.daily_market_caps
+                    .iter()
+                    .map(|&c| jnum(c as f64))
+                    .collect(),
+            ),
+        ),
         ("seed", jnum(cfg.seed as f64)),
         ("liquidity", jnum(cfg.liquidity)),
         ("feeRate", jnum(cfg.fee_rate)),
@@ -2510,7 +3156,10 @@ fn summarize_operator_mdp_json(mdp: &OperatorMDP) -> JsonValue {
     let sample_policy: Vec<JsonValue> = full_policy.iter().take(12).cloned().collect();
     jobj(vec![
         ("numStates", jnum(mdp.spec.num_states as f64)),
-        ("actions", jarr(mdp.actions.iter().map(action_json).collect())),
+        (
+            "actions",
+            jarr(mdp.actions.iter().map(action_json).collect()),
+        ),
         ("iterations", jnum(mdp.iterations as f64)),
         ("finalDelta", jnum(mdp.final_delta)),
         ("gamma", jnum(mdp.gamma)),
@@ -3091,7 +3740,8 @@ mod tests {
         let mut cfg = default_config();
         cfg.horizon_h = 48.0;
         cfg.min_market_participants = 50.0;
-        cfg.daily_market_caps = build_daily_market_caps(2.0, cfg.min_daily_markets, cfg.max_daily_markets, cfg.seed);
+        cfg.daily_market_caps =
+            build_daily_market_caps(2.0, cfg.min_daily_markets, cfg.max_daily_markets, cfg.seed);
         let run = run_portfolio(SchedulerPolicy::PomdpBelief, &cfg, &mdp);
         assert!(!run.timeline.is_empty());
         assert!(run.belief_trace.is_some());

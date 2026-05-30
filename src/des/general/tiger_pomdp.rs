@@ -150,10 +150,16 @@ impl POMDPCore<usize, usize> for SpecPomdpCore {
         self.spec.observations.len()
     }
     fn transition_prob(&self, s: usize, a: &usize, sp: usize) -> f64 {
-        (self.spec.transition)(s, *a).get(sp).copied().unwrap_or(0.0)
+        (self.spec.transition)(s, *a)
+            .get(sp)
+            .copied()
+            .unwrap_or(0.0)
     }
     fn observation_prob(&self, sp: usize, a: &usize, o: &usize) -> f64 {
-        (self.spec.observation)(sp, *a).get(*o).copied().unwrap_or(0.0)
+        (self.spec.observation)(sp, *a)
+            .get(*o)
+            .copied()
+            .unwrap_or(0.0)
     }
 }
 
@@ -481,8 +487,14 @@ pub fn simulate_tiger(opts: TigerSimOpts) -> TigerSimResult {
         Preconditions::length_eq(cls, "initialBelief", ib, spec.states.len()).unwrap();
     }
     if let Some(is) = opts.initial_state {
-        Preconditions::integer_in_range(cls, "initialState", is as f64, 0.0, (spec.states.len() - 1) as f64)
-            .unwrap();
+        Preconditions::integer_in_range(
+            cls,
+            "initialState",
+            is as f64,
+            0.0,
+            (spec.states.len() - 1) as f64,
+        )
+        .unwrap();
     }
 
     let b0 = opts.initial_belief.clone();
@@ -548,7 +560,11 @@ mod tests {
         // Information-gathering: the first move is always to LISTEN.
         assert_eq!(result.actions[0], ACT_LISTEN);
         // Over 30 steps the belief concentrates enough to commit at least once.
-        assert!(result.num_opens >= 1, "never opened a door: {:?}", result.actions);
+        assert!(
+            result.num_opens >= 1,
+            "never opened a door: {:?}",
+            result.actions
+        );
         assert!(result.total_return.is_finite());
     }
 }

@@ -33,7 +33,8 @@ use crate::des::general::advanced_optimization_models::{
     run_ant_colony_tsp, run_map_coloring_csp, run_max_sat_local_search, run_pareto_portfolio,
     run_particle_swarm, run_sdp_max_cut_relaxation, AntColonyTSPParams, AntColonyTSPResult,
     MapColoringCSPParams, MapColoringCSPResult, MaxSATParams, MaxSATResult, ParetoPortfolioParams,
-    ParetoPortfolioResult, ParticleSwarmParams, ParticleSwarmResult, SDPMaxCutParams, SDPMaxCutResult,
+    ParetoPortfolioResult, ParticleSwarmParams, ParticleSwarmResult, SDPMaxCutParams,
+    SDPMaxCutResult,
 };
 use crate::des::general::des_spec::{DESModelRegistration, DESRuntimeConfig, ParamSchema};
 
@@ -45,15 +46,27 @@ fn js_number(v: f64) -> String {
     if v.is_nan() {
         "NaN".to_string()
     } else if v.is_infinite() {
-        if v > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() }
+        if v > 0.0 {
+            "Infinity".to_string()
+        } else {
+            "-Infinity".to_string()
+        }
     } else {
         let s = v.to_string();
-        if s == "-0" { "0".to_string() } else { s }
+        if s == "-0" {
+            "0".to_string()
+        } else {
+            s
+        }
     }
 }
 
 fn json_num(v: f64) -> String {
-    if v.is_finite() { js_number(v) } else { "null".to_string() }
+    if v.is_finite() {
+        js_number(v)
+    } else {
+        "null".to_string()
+    }
 }
 
 fn to_exponential(v: f64, digits: usize) -> String {
@@ -69,15 +82,32 @@ fn to_exponential(v: f64, digits: usize) -> String {
 
 /// `JSON.stringify(number[])`.
 fn json_num_array(xs: &[f64]) -> String {
-    format!("[{}]", xs.iter().map(|v| json_num(*v)).collect::<Vec<_>>().join(","))
+    format!(
+        "[{}]",
+        xs.iter()
+            .map(|v| json_num(*v))
+            .collect::<Vec<_>>()
+            .join(",")
+    )
 }
 
 // =============================================================================
 // Schema helpers
 // =============================================================================
 
-fn num(min: Option<f64>, max: Option<f64>, integer: Option<bool>, default: Option<f64>) -> ParamSchema {
-    ParamSchema::Number { min, max, integer, default, description: None }
+fn num(
+    min: Option<f64>,
+    max: Option<f64>,
+    integer: Option<bool>,
+    default: Option<f64>,
+) -> ParamSchema {
+    ParamSchema::Number {
+        min,
+        max,
+        integer,
+        default,
+        description: None,
+    }
 }
 
 fn str_enum(allowed: &[&str], default: Option<&str>) -> ParamSchema {
@@ -89,16 +119,28 @@ fn str_enum(allowed: &[&str], default: Option<&str>) -> ParamSchema {
 }
 
 fn string_field() -> ParamSchema {
-    ParamSchema::String { allowed: None, default: None, description: None }
+    ParamSchema::String {
+        allowed: None,
+        default: None,
+        description: None,
+    }
 }
 
 fn arr(items: ParamSchema, min_length: Option<usize>, max_length: Option<usize>) -> ParamSchema {
-    ParamSchema::Array { items: Box::new(items), min_length, max_length, description: None }
+    ParamSchema::Array {
+        items: Box::new(items),
+        min_length,
+        max_length,
+        description: None,
+    }
 }
 
 fn obj(fields: Vec<(&str, ParamSchema)>, required: Vec<&str>) -> ParamSchema {
     ParamSchema::Object {
-        fields: fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+        fields: fields
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
         required: Some(required.iter().map(|s| s.to_string()).collect()),
         description: None,
     }
@@ -109,7 +151,13 @@ fn number_vector_schema() -> ParamSchema {
 }
 
 fn point_schema() -> ParamSchema {
-    obj(vec![("x", num(None, None, None, None)), ("y", num(None, None, None, None))], vec!["x", "y"])
+    obj(
+        vec![
+            ("x", num(None, None, None, None)),
+            ("y", num(None, None, None, None)),
+        ],
+        vec!["x", "y"],
+    )
 }
 
 fn string_pair_schema() -> ParamSchema {
@@ -158,7 +206,10 @@ impl DESModelRegistration<ParticleSwarmParams, ParticleSwarmResult> for Particle
     fn schema(&self) -> ParamSchema {
         obj(
             vec![
-                ("objective", str_enum(&["sphere", "rastrigin", "rosenbrock"], Some("sphere"))),
+                (
+                    "objective",
+                    str_enum(&["sphere", "rastrigin", "rosenbrock"], Some("sphere")),
+                ),
                 ("dimension", num(Some(1.0), None, Some(true), Some(3.0))),
                 ("particles", num(Some(1.0), None, Some(true), Some(32.0))),
                 ("iterations", num(Some(1.0), None, Some(true), Some(120.0))),
@@ -182,16 +233,29 @@ impl DESModelRegistration<ParticleSwarmParams, ParticleSwarmResult> for Particle
             format!("  Best value:     {}", to_exponential(result.best_value, 4)),
             format!(
                 "  Best position:  [{}]",
-                result.best_position.iter().map(|v| format!("{v:.4}")).collect::<Vec<_>>().join(", ")
+                result
+                    .best_position
+                    .iter()
+                    .map(|v| format!("{v:.4}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
             format!("  Iterations:     {}", result.iterations),
-            format!("  Stations:       {}", result.topology.stations.join(" -> ")),
+            format!(
+                "  Stations:       {}",
+                result.topology.stations.join(" -> ")
+            ),
             format!("  Movables:       {}", result.topology.movables.join(", ")),
         ]
         .join("\n")
     }
     fn write_csv(&self, result: &ParticleSwarmResult, csv_path: &str) {
-        let mut lines = vec![csv_row(["iteration", "best_value", "mean_value", "worst_value"])];
+        let mut lines = vec![csv_row([
+            "iteration",
+            "best_value",
+            "mean_value",
+            "worst_value",
+        ])];
         for row in &result.trace {
             lines.push(csv_row([
                 row.iteration.to_string(),
@@ -236,7 +300,11 @@ impl DESModelRegistration<AntColonyTSPParams, AntColonyTSPResult> for AntColonyT
             vec![],
         )
     }
-    fn run(&self, mut params: AntColonyTSPParams, _runtime: &DESRuntimeConfig) -> AntColonyTSPResult {
+    fn run(
+        &self,
+        mut params: AntColonyTSPParams,
+        _runtime: &DESRuntimeConfig,
+    ) -> AntColonyTSPResult {
         params.points = params.points.filter(|p| !p.is_empty());
         run_ant_colony_tsp(params)
     }
@@ -247,16 +315,29 @@ impl DESModelRegistration<AntColonyTSPParams, AntColonyTSPResult> for AntColonyT
             format!("  Best length:    {:.6}", result.best_length),
             format!(
                 "  Best tour:      {}",
-                result.best_tour.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(" -> ")
+                result
+                    .best_tour
+                    .iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" -> ")
             ),
             format!("  Iterations:     {}", result.iterations),
-            format!("  Stations:       {}", result.topology.stations.join(" -> ")),
+            format!(
+                "  Stations:       {}",
+                result.topology.stations.join(" -> ")
+            ),
             format!("  Movables:       {}", result.topology.movables.join(", ")),
         ]
         .join("\n")
     }
     fn write_csv(&self, result: &AntColonyTSPResult, csv_path: &str) {
-        let mut lines = vec![csv_row(["iteration", "best_length", "mean_length", "worst_length"])];
+        let mut lines = vec![csv_row([
+            "iteration",
+            "best_length",
+            "mean_length",
+            "worst_length",
+        ])];
         for row in &result.trace {
             lines.push(csv_row([
                 row.iteration.to_string(),
@@ -297,7 +378,11 @@ impl DESModelRegistration<MapColoringCSPParams, MapColoringCSPResult> for MapCol
             vec![],
         )
     }
-    fn run(&self, mut params: MapColoringCSPParams, _runtime: &DESRuntimeConfig) -> MapColoringCSPResult {
+    fn run(
+        &self,
+        mut params: MapColoringCSPParams,
+        _runtime: &DESRuntimeConfig,
+    ) -> MapColoringCSPResult {
         params.variables = params.variables.filter(|v| !v.is_empty());
         params.colors = params.colors.filter(|c| !c.is_empty());
         params.edges = params.edges.filter(|e| !e.is_empty());
@@ -314,10 +399,16 @@ impl DESModelRegistration<MapColoringCSPParams, MapColoringCSPResult> for MapCol
         [
             "MAP COLORING CSP (DES)".to_string(),
             "----------------------".to_string(),
-            format!("  Satisfied:      {}", if result.satisfied { "yes" } else { "no" }),
+            format!(
+                "  Satisfied:      {}",
+                if result.satisfied { "yes" } else { "no" }
+            ),
             format!("  Assignment:     {assignment}"),
             format!("  Nodes:          {}", result.nodes_processed),
-            format!("  Stations:       {}", result.topology.stations.join(" -> ")),
+            format!(
+                "  Stations:       {}",
+                result.topology.stations.join(" -> ")
+            ),
             format!("  Movables:       {}", result.topology.movables.join(", ")),
         ]
         .join("\n")
@@ -361,14 +452,28 @@ impl DESModelRegistration<MaxSATParams, MaxSATResult> for MaxSatLocalSearchAdapt
         [
             "MAX-SAT LOCAL SEARCH (DES)".to_string(),
             "--------------------------".to_string(),
-            format!("  Satisfied:      {}/{}", result.satisfied_clauses, result.total_clauses),
-            format!("  Complete SAT:   {}", if result.all_satisfied { "yes" } else { "no" }),
+            format!(
+                "  Satisfied:      {}/{}",
+                result.satisfied_clauses, result.total_clauses
+            ),
+            format!(
+                "  Complete SAT:   {}",
+                if result.all_satisfied { "yes" } else { "no" }
+            ),
             format!("  Iterations:     {}", result.iterations),
             format!(
                 "  Assignment:     [{}]",
-                result.assignment.iter().map(|v| if *v { "T" } else { "F" }).collect::<Vec<_>>().join(", ")
+                result
+                    .assignment
+                    .iter()
+                    .map(|v| if *v { "T" } else { "F" })
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
-            format!("  Stations:       {}", result.topology.stations.join(" -> ")),
+            format!(
+                "  Stations:       {}",
+                result.topology.stations.join(" -> ")
+            ),
             format!("  Movables:       {}", result.topology.movables.join(", ")),
         ]
         .join("\n")
@@ -376,7 +481,10 @@ impl DESModelRegistration<MaxSATParams, MaxSATResult> for MaxSatLocalSearchAdapt
     fn write_csv(&self, result: &MaxSATResult, csv_path: &str) {
         let mut lines = vec![csv_row(["iteration", "unsatisfied"])];
         for row in &result.trace {
-            lines.push(csv_row([row.iteration.to_string(), js_number(row.unsatisfied)]));
+            lines.push(csv_row([
+                row.iteration.to_string(),
+                js_number(row.unsatisfied),
+            ]));
         }
         write_csv_lines(csv_path, &lines);
     }
@@ -424,10 +532,18 @@ impl DESModelRegistration<SDPMaxCutParams, SDPMaxCutResult> for SdpMaxcutRelaxat
             format!("  Rounded cut:    {:.6}", result.rounded_cut_value),
             format!(
                 "  Cut signs:      [{}]",
-                result.cut.iter().map(|v| js_number(*v)).collect::<Vec<_>>().join(", ")
+                result
+                    .cut
+                    .iter()
+                    .map(|v| js_number(*v))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
             format!("  Iterations:     {}", result.iterations),
-            format!("  Stations:       {}", result.topology.stations.join(" -> ")),
+            format!(
+                "  Stations:       {}",
+                result.topology.stations.join(" -> ")
+            ),
             format!("  Movables:       {}", result.topology.movables.join(", ")),
         ]
         .join("\n")
@@ -435,7 +551,10 @@ impl DESModelRegistration<SDPMaxCutParams, SDPMaxCutResult> for SdpMaxcutRelaxat
     fn write_csv(&self, result: &SDPMaxCutResult, csv_path: &str) {
         let mut lines = vec![csv_row(["iteration", "objective"])];
         for row in &result.trace {
-            lines.push(csv_row([row.iteration.to_string(), js_number(row.objective)]));
+            lines.push(csv_row([
+                row.iteration.to_string(),
+                js_number(row.objective),
+            ]));
         }
         write_csv_lines(csv_path, &lines);
     }
@@ -468,7 +587,11 @@ impl DESModelRegistration<ParetoPortfolioParams, ParetoPortfolioResult> for Pare
             vec![],
         )
     }
-    fn run(&self, mut params: ParetoPortfolioParams, _runtime: &DESRuntimeConfig) -> ParetoPortfolioResult {
+    fn run(
+        &self,
+        mut params: ParetoPortfolioParams,
+        _runtime: &DESRuntimeConfig,
+    ) -> ParetoPortfolioResult {
         params.assets = params.assets.filter(|a| !a.is_empty());
         run_pareto_portfolio(params)
     }
@@ -478,8 +601,14 @@ impl DESModelRegistration<ParetoPortfolioParams, ParetoPortfolioResult> for Pare
             "----------------------".to_string(),
             format!("  Candidates:     {}", result.candidate_count),
             format!("  Pareto points:  {}", result.pareto_front.len()),
-            format!("  Hypervolume:    {}", to_exponential(result.hypervolume, 4)),
-            format!("  Stations:       {}", result.topology.stations.join(" -> ")),
+            format!(
+                "  Hypervolume:    {}",
+                to_exponential(result.hypervolume, 4)
+            ),
+            format!(
+                "  Stations:       {}",
+                result.topology.stations.join(" -> ")
+            ),
             format!("  Movables:       {}", result.topology.movables.join(", ")),
         ]
         .join("\n")
@@ -554,14 +683,27 @@ impl DESModelRegistration<HInfinityRobustControlParams, HInfinityRobustControlRe
                 result.l2_gain_estimate,
                 js_number(result.gamma)
             ),
-            format!("  Bounded:        {}", if result.bounded_by_gamma { "yes" } else { "no" }),
-            format!("  Stations:       {}", result.topology.stations.join(" -> ")),
+            format!(
+                "  Bounded:        {}",
+                if result.bounded_by_gamma { "yes" } else { "no" }
+            ),
+            format!(
+                "  Stations:       {}",
+                result.topology.stations.join(" -> ")
+            ),
             format!("  Movables:       {}", result.topology.movables.join(", ")),
         ]
         .join("\n")
     }
     fn write_csv(&self, result: &HInfinityRobustControlResult, csv_path: &str) {
-        let mut lines = vec![csv_row(["tick", "time", "state", "control", "disturbance", "cost"])];
+        let mut lines = vec![csv_row([
+            "tick",
+            "time",
+            "state",
+            "control",
+            "disturbance",
+            "cost",
+        ])];
         for row in &result.trace {
             lines.push(csv_row([
                 row.tick.to_string(),
@@ -598,7 +740,10 @@ impl DESModelRegistration<PursuitEvasionGameParams, PursuitEvasionGameResult>
     fn schema(&self) -> ParamSchema {
         obj(
             vec![
-                ("pursuer", arr(num(None, None, None, None), Some(2), Some(2))),
+                (
+                    "pursuer",
+                    arr(num(None, None, None, None), Some(2), Some(2)),
+                ),
                 ("evader", arr(num(None, None, None, None), Some(2), Some(2))),
                 ("pursuerSpeed", num(Some(1e-12), None, None, Some(1.25))),
                 ("evaderSpeed", num(Some(0.0), None, None, Some(0.6))),
@@ -631,7 +776,10 @@ impl DESModelRegistration<PursuitEvasionGameParams, PursuitEvasionGameResult>
             format!("  Capture tick:   {capture}"),
             format!("  Final distance: {:.6}", result.final_distance),
             format!("  Steps recorded: {}", result.distance_history.len()),
-            format!("  Stations:       {}", result.topology.stations.join(" -> ")),
+            format!(
+                "  Stations:       {}",
+                result.topology.stations.join(" -> ")
+            ),
             format!("  Movables:       {}", result.topology.movables.join(", ")),
         ]
         .join("\n")

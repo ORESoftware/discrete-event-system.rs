@@ -60,7 +60,12 @@ fn jb(v: bool) -> JsonValue {
     JsonValue::Bool(v)
 }
 fn jobj(entries: Vec<(&str, JsonValue)>) -> JsonValue {
-    JsonValue::Object(entries.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+    JsonValue::Object(
+        entries
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
+    )
 }
 
 enum Kind {
@@ -186,7 +191,12 @@ impl PerIndividualSim {
         }
     }
 
-    fn step_station(&mut self, idx: usize, dt: f64, rng: &mut dyn RandomSource) -> Vec<(usize, u64)> {
+    fn step_station(
+        &mut self,
+        idx: usize,
+        dt: f64,
+        rng: &mut dyn RandomSource,
+    ) -> Vec<(usize, u64)> {
         let mut routes: Vec<(usize, u64)> = Vec::new();
         let out0 = self.stations[idx].outs.first().copied();
         let outs = self.stations[idx].outs.clone();
@@ -197,9 +207,15 @@ impl PerIndividualSim {
             Sink,
         }
         let local = match &self.stations[idx].kind {
-            Kind::Source { a, b, cap } => Local::Source { a: *a, b: *b, cap: *cap },
+            Kind::Source { a, b, cap } => Local::Source {
+                a: *a,
+                b: *b,
+                cap: *cap,
+            },
             Kind::Processor { .. } => Local::Processor,
-            Kind::Decision { probs } => Local::Decision { probs: probs.clone() },
+            Kind::Decision { probs } => Local::Decision {
+                probs: probs.clone(),
+            },
             Kind::Sink => Local::Sink,
         };
         match local {
@@ -313,7 +329,12 @@ pub fn run_per_individual_once(config: &SimConfig, opts: &RunOpts) -> RunResult 
     with_seed(seed as u32, |rng| run_inner(config, opts, seed, rng))
 }
 
-fn run_inner(config: &SimConfig, opts: &RunOpts, seed: u64, rng: &mut dyn RandomSource) -> RunResult {
+fn run_inner(
+    config: &SimConfig,
+    opts: &RunOpts,
+    seed: u64,
+    rng: &mut dyn RandomSource,
+) -> RunResult {
     let sample_every = opts.sample_every_days.unwrap_or(1.0);
     let mut logger = if opts.log_events {
         opts.log_path
@@ -325,7 +346,8 @@ fn run_inner(config: &SimConfig, opts: &RunOpts, seed: u64, rng: &mut dyn Random
 
     let step_size = config.step_size;
     let phase1_steps = (config.phase1_days / config.step_size).round() as i64;
-    let phase2_steps = ((config.horizon_days - config.phase1_days) / config.step_size).round() as i64;
+    let phase2_steps =
+        ((config.horizon_days - config.phase1_days) / config.step_size).round() as i64;
     let steps_per_sample = (sample_every / config.step_size).round().max(1.0) as i64;
 
     let mut sim = PerIndividualSim::new(config);
@@ -365,9 +387,24 @@ fn run_inner(config: &SimConfig, opts: &RunOpts, seed: u64, rng: &mut dyn Random
 
     for i in 0..phase1_steps {
         current_day = (i + 1) as f64 * config.step_size;
-        run_tick(&mut sim, &mut order, step_size, current_day, rng, &mut logger);
+        run_tick(
+            &mut sim,
+            &mut order,
+            step_size,
+            current_day,
+            rng,
+            &mut logger,
+        );
         if (i + 1) % steps_per_sample == 0 {
-            sample_now(&sim, sink_idx, &mut pop_sums, &mut peak, &mut samples, &mut logger, current_day);
+            sample_now(
+                &sim,
+                sink_idx,
+                &mut pop_sums,
+                &mut peak,
+                &mut samples,
+                &mut logger,
+                current_day,
+            );
         }
     }
     sim.sources_off = true;
@@ -380,9 +417,24 @@ fn run_inner(config: &SimConfig, opts: &RunOpts, seed: u64, rng: &mut dyn Random
     }
     for i in 0..phase2_steps {
         current_day = (phase1_steps + i + 1) as f64 * config.step_size;
-        run_tick(&mut sim, &mut order, step_size, current_day, rng, &mut logger);
+        run_tick(
+            &mut sim,
+            &mut order,
+            step_size,
+            current_day,
+            rng,
+            &mut logger,
+        );
         if (phase1_steps + i + 1) % steps_per_sample == 0 {
-            sample_now(&sim, sink_idx, &mut pop_sums, &mut peak, &mut samples, &mut logger, current_day);
+            sample_now(
+                &sim,
+                sink_idx,
+                &mut pop_sums,
+                &mut peak,
+                &mut samples,
+                &mut logger,
+                current_day,
+            );
         }
     }
 
@@ -459,7 +511,12 @@ fn sample_now(
     if let Some(logger) = logger.as_mut() {
         let pops_json: Vec<(String, JsonValue)> = COMPARTMENT_ORDER
             .iter()
-            .map(|c| (c.to_string(), jn(populations.get(*c).copied().unwrap_or(0.0))))
+            .map(|c| {
+                (
+                    c.to_string(),
+                    jn(populations.get(*c).copied().unwrap_or(0.0)),
+                )
+            })
             .collect();
         logger.log(jobj(vec![
             ("kind", js("tick")),
@@ -479,9 +536,25 @@ mod tests {
 
     #[test]
     fn per_individual_kernel_runs_deterministically() {
-        let cfg = SimConfig { horizon_days: 200.0, phase1_days: 120.0, ..default_config() };
-        let a = run_per_individual_once(&cfg, &RunOpts { seed: Some(7), ..Default::default() });
-        let b = run_per_individual_once(&cfg, &RunOpts { seed: Some(7), ..Default::default() });
+        let cfg = SimConfig {
+            horizon_days: 200.0,
+            phase1_days: 120.0,
+            ..default_config()
+        };
+        let a = run_per_individual_once(
+            &cfg,
+            &RunOpts {
+                seed: Some(7),
+                ..Default::default()
+            },
+        );
+        let b = run_per_individual_once(
+            &cfg,
+            &RunOpts {
+                seed: Some(7),
+                ..Default::default()
+            },
+        );
         assert_eq!(a.kernel, Kernel::PerIndividual);
         assert_eq!(a.totals.created, b.totals.created);
         assert!(a.totals.created > 0.0);

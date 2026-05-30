@@ -52,9 +52,18 @@ impl WindMpptDemo {
 
     fn run(&self, controller_kind: &str) {
         let wind_profile = WindProfile::new(&[
-            WindProfileSegment { from_time: 0.0, speed: 8.0 },
-            WindProfileSegment { from_time: 20.0, speed: 11.0 },
-            WindProfileSegment { from_time: 40.0, speed: 9.0 },
+            WindProfileSegment {
+                from_time: 0.0,
+                speed: 8.0,
+            },
+            WindProfileSegment {
+                from_time: 20.0,
+                speed: 11.0,
+            },
+            WindProfileSegment {
+                from_time: 40.0,
+                speed: 9.0,
+            },
         ]);
 
         let plant = Rc::new(RefCell::new(WindTurbinePlantStation::new(
@@ -74,10 +83,18 @@ impl WindMpptDemo {
             Rc::new(RefCell::new(SpeedPiMpptController::new(
                 "mppt-pi",
                 &self.aero,
-                SpeedPiMpptOpts { kp: 8.0, ki: 4.0, dt: self.dt, max_torque: None },
+                SpeedPiMpptOpts {
+                    kp: 8.0,
+                    ki: 4.0,
+                    dt: self.dt,
+                    max_torque: None,
+                },
             )))
         } else {
-            Rc::new(RefCell::new(OptimalTorqueMpptController::new("mppt-opt-torque", &self.aero)))
+            Rc::new(RefCell::new(OptimalTorqueMpptController::new(
+                "mppt-opt-torque",
+                &self.aero,
+            )))
         };
 
         let sink = Rc::new(RefCell::new(WindMpptSinkStation::new("sink")));
@@ -103,7 +120,11 @@ impl WindMpptDemo {
 
         let summary = run_iterative_des(
             vec![plant_ref, controller, sink_ref],
-            IterativeRunOptions { shuffle: false, max_ticks: Some(self.steps + 5), ..Default::default() },
+            IterativeRunOptions {
+                shuffle: false,
+                max_ticks: Some(self.steps + 5),
+                ..Default::default()
+            },
         );
 
         self.report(controller_kind, &sink.borrow(), summary.ticks);
@@ -117,7 +138,10 @@ impl WindMpptDemo {
         println!(" Wind MPPT — PMSG WECS   (controller: {})", kind);
         println!("============================================================");
         println!("  blade radius R          : {} m", self.aero.blade_radius);
-        println!("  swept area A            : {:.3} m²", self.aero.swept_area());
+        println!(
+            "  swept area A            : {:.3} m²",
+            self.aero.swept_area()
+        );
         println!("  optimal λ*              : {:.4}", lambda_star);
         println!("  C_p,max                 : {:.4}", cp_max);
         println!(
@@ -154,8 +178,14 @@ impl WindMpptDemo {
             sink.final_lambda(),
             lambda_err
         );
-        println!("  final C_p / C_p,max     : {:.2}%", sink.final_cp() / cp_max * 100.0);
-        println!("  final captured power    : {:.3} kW", sink.final_power() / 1000.0);
+        println!(
+            "  final C_p / C_p,max     : {:.2}%",
+            sink.final_cp() / cp_max * 100.0
+        );
+        println!(
+            "  final captured power    : {:.3} kW",
+            sink.final_power() / 1000.0
+        );
         println!("============================================================");
         println!();
     }
@@ -163,7 +193,11 @@ impl WindMpptDemo {
 
 /// Entry point (`main()` in the TS source).
 pub fn run() {
-    let kind = if std::env::var("CONTROLLER").unwrap_or_default().to_lowercase() == "pi" {
+    let kind = if std::env::var("CONTROLLER")
+        .unwrap_or_default()
+        .to_lowercase()
+        == "pi"
+    {
         "pi"
     } else {
         "optimal-torque"

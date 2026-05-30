@@ -116,7 +116,11 @@ pub struct GeometricBrownianMotion {
 impl GeometricBrownianMotion {
     pub fn new(mu: f64, sigma: f64) -> Self {
         require(Preconditions::finite("GeometricBrownianMotion", "mu", mu));
-        require(Preconditions::non_negative("GeometricBrownianMotion", "sigma", sigma));
+        require(Preconditions::non_negative(
+            "GeometricBrownianMotion",
+            "sigma",
+            sigma,
+        ));
         GeometricBrownianMotion { mu, sigma }
     }
 
@@ -160,7 +164,11 @@ pub struct OrnsteinUhlenbeck {
 impl OrnsteinUhlenbeck {
     pub fn new(theta: f64, mu: f64, sigma: f64) -> Self {
         require(Preconditions::positive("OrnsteinUhlenbeck", "theta", theta));
-        require(Preconditions::non_negative("OrnsteinUhlenbeck", "sigma", sigma));
+        require(Preconditions::non_negative(
+            "OrnsteinUhlenbeck",
+            "sigma",
+            sigma,
+        ));
         OrnsteinUhlenbeck { theta, mu, sigma }
     }
 
@@ -236,7 +244,10 @@ impl SdeSystem for StochasticDcMotor {
         ]
     }
     fn diffusion(&self, _t: f64, _x: &[f64]) -> Matrix {
-        vec![vec![self.p.current_noise, 0.0], vec![0.0, self.p.speed_noise]]
+        vec![
+            vec![self.p.current_noise, 0.0],
+            vec![0.0, self.p.speed_noise],
+        ]
     }
 }
 
@@ -288,7 +299,12 @@ pub struct SdeEstimateToken {
 
 impl SdeEstimateToken {
     pub fn new(time: f64, step: usize, mean: Vector, variance: Vector) -> Self {
-        SdeEstimateToken { time, step, mean, variance }
+        SdeEstimateToken {
+            time,
+            step,
+            mean,
+            variance,
+        }
     }
 }
 
@@ -333,8 +349,12 @@ impl SdePlantStation {
         ));
         let rng = Mulberry32::new(opts.seed.unwrap_or(20_260_529));
         let n = opts.system.dimension();
-        let h = opts.observation_matrix.unwrap_or_else(|| LinAlg::identity(n));
-        let obs_noise = opts.observation_noise_std.unwrap_or_else(|| vec![0.0; LinAlg::rows(&h)]);
+        let h = opts
+            .observation_matrix
+            .unwrap_or_else(|| LinAlg::identity(n));
+        let obs_noise = opts
+            .observation_noise_std
+            .unwrap_or_else(|| vec![0.0; LinAlg::rows(&h)]);
         let x = opts.x0.clone();
         SdePlantStation {
             core: StationCore::new(id),
@@ -399,7 +419,11 @@ pub struct SdeEstimateSinkStation {
 
 impl SdeEstimateSinkStation {
     pub fn new(id: &str) -> Self {
-        SdeEstimateSinkStation { core: StationCore::new(id), estimates: Vec::new(), truth: Vec::new() }
+        SdeEstimateSinkStation {
+            core: StationCore::new(id),
+            estimates: Vec::new(),
+            truth: Vec::new(),
+        }
     }
 
     /// Per-state-dimension RMSE between estimate.mean and the aligned truth.
@@ -408,7 +432,11 @@ impl SdeEstimateSinkStation {
         for t in &self.truth {
             by_step.insert(t.step, t.clone());
         }
-        let n = if self.truth.is_empty() { 0 } else { self.truth[0].state.len() };
+        let n = if self.truth.is_empty() {
+            0
+        } else {
+            self.truth[0].state.len()
+        };
         let mut sse = vec![0.0; n];
         let mut count = 0usize;
         for e in &self.estimates {
@@ -423,7 +451,13 @@ impl SdeEstimateSinkStation {
             }
         }
         sse.iter()
-            .map(|s| if count > 0 { (s / count as f64).sqrt() } else { f64::NAN })
+            .map(|s| {
+                if count > 0 {
+                    (s / count as f64).sqrt()
+                } else {
+                    f64::NAN
+                }
+            })
             .collect()
     }
 }
@@ -439,7 +473,8 @@ impl DESStation for SdeEstimateSinkStation {
         self
     }
     fn has_work(&self) -> bool {
-        self.core.inbox_size(SdeChannels::ESTIMATE) > 0 || self.core.inbox_size(SdeChannels::STATE) > 0
+        self.core.inbox_size(SdeChannels::ESTIMATE) > 0
+            || self.core.inbox_size(SdeChannels::STATE) > 0
     }
     fn run_time_step(&mut self) {
         let truth = self.core.drain::<SdeStateToken>(SdeChannels::STATE);

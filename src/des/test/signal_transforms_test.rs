@@ -28,7 +28,11 @@ mod tests {
     }
 
     fn point(label: &str, re: f64) -> ComplexPointInput {
-        ComplexPointInput { label: Some(label.to_string()), re, im: None }
+        ComplexPointInput {
+            label: Some(label.to_string()),
+            re,
+            im: None,
+        }
     }
 
     fn panic_message(err: Box<dyn std::any::Any + Send>) -> String {
@@ -51,7 +55,10 @@ mod tests {
         std::panic::set_hook(prev);
         let err = res.err().expect("expected a panic");
         let msg = panic_message(err);
-        assert!(msg.contains(fragment), "panic {msg:?} did not contain {fragment:?}");
+        assert!(
+            msg.contains(fragment),
+            "panic {msg:?} did not contain {fragment:?}"
+        );
     }
 
     // [1] Z-transform station graph
@@ -70,7 +77,11 @@ mod tests {
         assert_eq!(z.entity_framework.sources.len(), 1);
         assert_eq!(z.entity_framework.stations.len(), 2);
         assert_eq!(z.entity_framework.sinks.len(), 1);
-        assert!(z.entity_framework.movable_entities.iter().any(|s| s == "TransformSampleToken"));
+        assert!(z
+            .entity_framework
+            .movable_entities
+            .iter()
+            .any(|s| s == "TransformSampleToken"));
         assert!(z
             .entity_framework
             .movable_entities
@@ -102,7 +113,11 @@ mod tests {
         });
         let exact_finite_window = (1.0 - (-24.0_f64).exp()) / 3.0;
         assert!(laplace.validation.iter().all(|c| c.passed));
-        assert!(close(laplace.outputs[0].value.re, exact_finite_window, 1e-6));
+        assert!(close(
+            laplace.outputs[0].value.re,
+            exact_finite_window,
+            1e-6
+        ));
         assert!(close(laplace.outputs[0].value.im, 0.0, 1e-9));
     }
 
@@ -126,10 +141,18 @@ mod tests {
         assert!(close(fourier.outputs[0].value.im, 0.0, 1e-9));
         // Positive frequency coefficient is -i*pi.
         assert!(close(fourier.outputs[1].value.re, 0.0, 1e-6));
-        assert!(close(fourier.outputs[1].value.im, -std::f64::consts::PI, 1e-6));
+        assert!(close(
+            fourier.outputs[1].value.im,
+            -std::f64::consts::PI,
+            1e-6
+        ));
         // Negative frequency coefficient is +i*pi.
         assert!(close(fourier.outputs[2].value.re, 0.0, 1e-6));
-        assert!(close(fourier.outputs[2].value.im, std::f64::consts::PI, 1e-6));
+        assert!(close(
+            fourier.outputs[2].value.im,
+            std::f64::consts::PI,
+            1e-6
+        ));
     }
 
     // [5] Input validation (direct-call cases 5.1–5.3)
@@ -138,7 +161,11 @@ mod tests {
         assert_panics_with(
             || {
                 run_z_transform(ZTransformParams {
-                    z_values: Some(vec![ComplexPointInput { label: None, re: 1.0, im: None }]),
+                    z_values: Some(vec![ComplexPointInput {
+                        label: None,
+                        re: 1.0,
+                        im: None,
+                    }]),
                     ..Default::default()
                 })
             },
@@ -147,7 +174,11 @@ mod tests {
         assert_panics_with(
             || {
                 run_laplace_transform(LaplaceTransformParams {
-                    s_values: Some(vec![ComplexPointInput { label: None, re: 1.0, im: None }]),
+                    s_values: Some(vec![ComplexPointInput {
+                        label: None,
+                        re: 1.0,
+                        im: None,
+                    }]),
                     ..Default::default()
                 })
             },

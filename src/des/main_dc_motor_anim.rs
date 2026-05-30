@@ -80,7 +80,11 @@ impl DcMotorAnimator {
         );
         run_iterative_des(
             vec![plant.clone() as StationRef, sink.clone() as StationRef],
-            IterativeRunOptions { shuffle: false, max_ticks: Some(steps + 5), ..Default::default() },
+            IterativeRunOptions {
+                shuffle: false,
+                max_ticks: Some(steps + 5),
+                ..Default::default()
+            },
         );
 
         let samples = sink.borrow().samples.clone();
@@ -90,8 +94,14 @@ impl DcMotorAnimator {
     fn run_closed(&self) {
         let steps = 6000usize;
         let load = LoadProfile::new(&[
-            LoadSegment { from_time: 0.0, torque: 0.0 },
-            LoadSegment { from_time: 18.0, torque: 0.3 },
+            LoadSegment {
+                from_time: 0.0,
+                torque: 0.0,
+            },
+            LoadSegment {
+                from_time: 18.0,
+                torque: 0.3,
+            },
         ]);
         let plant = Rc::new(RefCell::new(DcMotorPlantStation::new(
             "motor",
@@ -111,8 +121,14 @@ impl DcMotorAnimator {
                 dt: self.dt,
                 max_voltage: Some(48.0),
                 reference: vec![
-                    SpeedReferenceSegment { from_time: 0.0, speed: 60.0 },
-                    SpeedReferenceSegment { from_time: 10.0, speed: 100.0 },
+                    SpeedReferenceSegment {
+                        from_time: 0.0,
+                        speed: 60.0,
+                    },
+                    SpeedReferenceSegment {
+                        from_time: 10.0,
+                        speed: 100.0,
+                    },
                 ],
             },
         )));
@@ -138,18 +154,30 @@ impl DcMotorAnimator {
                 controller.clone() as StationRef,
                 sink.clone() as StationRef,
             ],
-            IterativeRunOptions { shuffle: false, max_ticks: Some(steps + 5), ..Default::default() },
+            IterativeRunOptions {
+                shuffle: false,
+                max_ticks: Some(steps + 5),
+                ..Default::default()
+            },
         );
 
         let samples = sink.borrow().samples.clone();
-        let reference: Vec<f64> =
-            samples.iter().map(|s| controller.borrow().reference_at(s.time)).collect();
+        let reference: Vec<f64> = samples
+            .iter()
+            .map(|s| controller.borrow().reference_at(s.time))
+            .collect();
         self.record(&samples, Some(reference), "closed", 15);
     }
 
     /// PORT NOTE: stands in for `FrameRecorder` + `DcMotorScene`. Reports the
     /// trajectory that would have been rendered.
-    fn record(&self, samples: &[Rc<MotorStateToken>], reference: Option<Vec<f64>>, tag: &str, stride: usize) {
+    fn record(
+        &self,
+        samples: &[Rc<MotorStateToken>],
+        reference: Option<Vec<f64>>,
+        tag: &str,
+        stride: usize,
+    ) {
         let frames = samples.len().div_ceil(stride.max(1));
         let ref_note = match &reference {
             Some(r) => format!(", reference series len={}", r.len()),

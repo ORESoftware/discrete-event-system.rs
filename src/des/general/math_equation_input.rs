@@ -320,7 +320,10 @@ pub fn run_math_equation_problem(
     if let Some(l) = logger {
         let mut fields = HashMap::new();
         fields.insert("format".to_string(), format_str(params.format).to_string());
-        fields.insert("problemKind".to_string(), kind_str(normalized.kind()).to_string());
+        fields.insert(
+            "problemKind".to_string(),
+            kind_str(normalized.kind()).to_string(),
+        );
         l.log(EquationLogEvent {
             kind: "math-equation-normalized".to_string(),
             level: Some("info".to_string()),
@@ -452,7 +455,10 @@ fn infer_problem_kind(params: &MathEquationInputParams) -> EquationProblemKind {
 
 fn normalize_json_ode(params: &MathEquationInputParams) -> R<ODEBlockSystemParams> {
     let src = src_overlay(params, params.ode.as_ref());
-    let constants = merge_constants(&[params.constants.as_ref(), object_record(src.get("constants"))])?;
+    let constants = merge_constants(&[
+        params.constants.as_ref(),
+        object_record(src.get("constants")),
+    ])?;
     let initial = merge_initial(&[params.initial.as_ref(), object_record(src.get("initial"))])?;
     let states_raw = array_value(src.get("states"), "MathEquationInput.states")?;
     let states = states_raw
@@ -460,8 +466,16 @@ fn normalize_json_ode(params: &MathEquationInputParams) -> R<ODEBlockSystemParam
         .enumerate()
         .map(|(i, raw)| state_from_json(raw, i, &initial, &constants))
         .collect::<R<Vec<_>>>()?;
-    let t0 = number_or_default(src.get("t0"), params.t0.unwrap_or(0.0), "MathEquationInput.t0")?;
-    let t1 = number_or_default(src.get("t1"), params.t1.unwrap_or(1.0), "MathEquationInput.t1")?;
+    let t0 = number_or_default(
+        src.get("t0"),
+        params.t0.unwrap_or(0.0),
+        "MathEquationInput.t0",
+    )?;
+    let t1 = number_or_default(
+        src.get("t1"),
+        params.t1.unwrap_or(1.0),
+        "MathEquationInput.t1",
+    )?;
     let dt = if is_absent(src.get("dt")) {
         match params.dt {
             Some(d) => d,
@@ -470,19 +484,51 @@ fn normalize_json_ode(params: &MathEquationInputParams) -> R<ODEBlockSystemParam
     } else {
         number_or_default(src.get("dt"), 0.0, "MathEquationInput.dt")?
     };
-    let method = method_or_default(src.get("method"), params.method.unwrap_or(IntegratorMethod::Euler))?;
-    Ok(ODEBlockSystemParams { states, constants, t0, t1, dt, method })
+    let method = method_or_default(
+        src.get("method"),
+        params.method.unwrap_or(IntegratorMethod::Euler),
+    )?;
+    Ok(ODEBlockSystemParams {
+        states,
+        constants,
+        t0,
+        t1,
+        dt,
+        method,
+    })
 }
 
 fn normalize_json_heat(params: &MathEquationInputParams) -> R<Heat1DBlockParams> {
     let src = src_overlay(params, params.heat1d.as_ref());
-    let constants = merge_constants(&[params.constants.as_ref(), object_record(src.get("constants"))])?;
-    let cells = integer_or_default(src.get("cells"), params.cells.unwrap_or(31.0), "MathEquationInput.cells")?;
-    let length = number_or_default(src.get("length"), params.length.unwrap_or(1.0), "MathEquationInput.length")?;
-    let alpha_fallback = params.alpha.or(constants.get("alpha").copied()).unwrap_or(0.01);
+    let constants = merge_constants(&[
+        params.constants.as_ref(),
+        object_record(src.get("constants")),
+    ])?;
+    let cells = integer_or_default(
+        src.get("cells"),
+        params.cells.unwrap_or(31.0),
+        "MathEquationInput.cells",
+    )?;
+    let length = number_or_default(
+        src.get("length"),
+        params.length.unwrap_or(1.0),
+        "MathEquationInput.length",
+    )?;
+    let alpha_fallback = params
+        .alpha
+        .or(constants.get("alpha").copied())
+        .unwrap_or(0.01);
     let alpha = number_or_default(src.get("alpha"), alpha_fallback, "MathEquationInput.alpha")?;
-    let t0 = number_or_default(src.get("t0"), params.t0.unwrap_or(0.0), "MathEquationInput.t0")?;
-    let t1 = number_or_default(src.get("t1"), params.t1.unwrap_or(1.0), "MathEquationInput.t1")?;
+    let t0 = number_or_default(
+        src.get("t0"),
+        params.t0.unwrap_or(0.0),
+        "MathEquationInput.t0",
+    )?;
+    let t1 = number_or_default(
+        src.get("t1"),
+        params.t1.unwrap_or(1.0),
+        "MathEquationInput.t1",
+    )?;
     let dt = if is_absent(src.get("dt")) {
         match params.dt {
             Some(d) => d,
@@ -496,9 +542,12 @@ fn normalize_json_heat(params: &MathEquationInputParams) -> R<Heat1DBlockParams>
         .clone()
         .unwrap_or_else(|| "sin(pi*x/length)".to_string());
     let initial_expression = string_or_default(src.get("initialExpression"), &fallback_ie);
-    let initial_values = numeric_array_or_undefined(src.get("initialValues"), "MathEquationInput.initialValues")?;
-    let left_boundary = number_or_undefined(src.get("leftBoundary"), "MathEquationInput.leftBoundary")?;
-    let right_boundary = number_or_undefined(src.get("rightBoundary"), "MathEquationInput.rightBoundary")?;
+    let initial_values =
+        numeric_array_or_undefined(src.get("initialValues"), "MathEquationInput.initialValues")?;
+    let left_boundary =
+        number_or_undefined(src.get("leftBoundary"), "MathEquationInput.leftBoundary")?;
+    let right_boundary =
+        number_or_undefined(src.get("rightBoundary"), "MathEquationInput.rightBoundary")?;
     Ok(Heat1DBlockParams {
         cells,
         length,
@@ -521,7 +570,11 @@ fn normalize_json_heat(params: &MathEquationInputParams) -> R<Heat1DBlockParams>
 fn normalize_latex_ode(params: &MathEquationInputParams) -> R<ODEBlockSystemParams> {
     let constants = merge_constants(&[params.constants.as_ref()])?;
     let initial = merge_initial(&[params.initial.as_ref()])?;
-    let states = parse_latex_ode(params.equation.as_deref().unwrap_or(""), &initial, &constants)?;
+    let states = parse_latex_ode(
+        params.equation.as_deref().unwrap_or(""),
+        &initial,
+        &constants,
+    )?;
     let t0 = params.t0.unwrap_or(0.0);
     let t1 = params.t1.unwrap_or(1.0);
     let dt = match params.dt {
@@ -542,7 +595,10 @@ fn normalize_latex_heat(params: &MathEquationInputParams) -> R<Heat1DBlockParams
     let constants = merge_constants(&[params.constants.as_ref()])?;
     let cells = params.cells.unwrap_or(31.0);
     let length = params.length.unwrap_or(1.0);
-    let alpha = params.alpha.or(constants.get("alpha").copied()).unwrap_or(0.01);
+    let alpha = params
+        .alpha
+        .or(constants.get("alpha").copied())
+        .unwrap_or(0.01);
     let t0 = params.t0.unwrap_or(0.0);
     let t1 = params.t1.unwrap_or(1.0);
     let dt = match params.dt {
@@ -606,7 +662,11 @@ fn parse_latex_ode(equation: &str, initial: &NumMap, constants: &NumMap) -> R<Ve
         .into_iter()
         .map(|s| {
             let init = parsed_initials.get(&s.name).copied().unwrap_or(s.initial);
-            ODEStateSpec { name: s.name, initial: init, derivative: s.derivative }
+            ODEStateSpec {
+                name: s.name,
+                initial: init,
+                derivative: s.derivative,
+            }
         })
         .collect())
 }
@@ -721,7 +781,11 @@ fn normalize_xml_ode(params: &MathEquationInputParams) -> R<ODEBlockSystemParams
             &format!("MathEquationInput.xml.state.{name}.initial"),
         )?;
         let derivative = expression_text(&rhs_raw.unwrap_or_default())?;
-        states.push(ODEStateSpec { name, initial: initial_value, derivative });
+        states.push(ODEStateSpec {
+            name,
+            initial: initial_value,
+            derivative,
+        });
     }
     for (_attrs_raw, body) in find_elements(&xml, "equation") {
         if let Some(parsed) = parse_derivative_equation(&xml_decode(&body), &constants, &initial)? {
@@ -729,8 +793,16 @@ fn normalize_xml_ode(params: &MathEquationInputParams) -> R<ODEBlockSystemParams
         }
     }
     Preconditions::non_empty("MathEquationInput", "xml.ode.states", &states)?;
-    let t0 = number_or_default(attrs.get("t0"), params.t0.unwrap_or(0.0), "MathEquationInput.xml.t0")?;
-    let t1 = number_or_default(attrs.get("t1"), params.t1.unwrap_or(1.0), "MathEquationInput.xml.t1")?;
+    let t0 = number_or_default(
+        attrs.get("t0"),
+        params.t0.unwrap_or(0.0),
+        "MathEquationInput.xml.t0",
+    )?;
+    let t1 = number_or_default(
+        attrs.get("t1"),
+        params.t1.unwrap_or(1.0),
+        "MathEquationInput.xml.t1",
+    )?;
     let dt = if !is_absent(attrs.get("dt")) {
         number_or_default(attrs.get("dt"), 0.0, "MathEquationInput.xml.dt")?
     } else if let Some(d) = params.dt {
@@ -738,8 +810,18 @@ fn normalize_xml_ode(params: &MathEquationInputParams) -> R<ODEBlockSystemParams
     } else {
         default_dt(t0, t1, 100.0)?
     };
-    let method = method_or_default(attrs.get("method"), params.method.unwrap_or(IntegratorMethod::Euler))?;
-    Ok(ODEBlockSystemParams { states, constants, t0, t1, dt, method })
+    let method = method_or_default(
+        attrs.get("method"),
+        params.method.unwrap_or(IntegratorMethod::Euler),
+    )?;
+    Ok(ODEBlockSystemParams {
+        states,
+        constants,
+        t0,
+        t1,
+        dt,
+        method,
+    })
 }
 
 fn normalize_xml_heat(params: &MathEquationInputParams) -> R<Heat1DBlockParams> {
@@ -747,12 +829,35 @@ fn normalize_xml_heat(params: &MathEquationInputParams) -> R<Heat1DBlockParams> 
     let attrs = root_attrs(&xml, "heat1d");
     let xml_consts = constants_from_xml(&xml)?;
     let constants = merge_constants(&[params.constants.as_ref(), Some(&xml_consts)])?;
-    let cells = integer_or_default(attrs.get("cells"), params.cells.unwrap_or(31.0), "MathEquationInput.xml.cells")?;
-    let length = number_or_default(attrs.get("length"), params.length.unwrap_or(1.0), "MathEquationInput.xml.length")?;
-    let alpha_fallback = params.alpha.or(constants.get("alpha").copied()).unwrap_or(0.01);
-    let alpha = number_or_default(attrs.get("alpha"), alpha_fallback, "MathEquationInput.xml.alpha")?;
-    let t0 = number_or_default(attrs.get("t0"), params.t0.unwrap_or(0.0), "MathEquationInput.xml.t0")?;
-    let t1 = number_or_default(attrs.get("t1"), params.t1.unwrap_or(1.0), "MathEquationInput.xml.t1")?;
+    let cells = integer_or_default(
+        attrs.get("cells"),
+        params.cells.unwrap_or(31.0),
+        "MathEquationInput.xml.cells",
+    )?;
+    let length = number_or_default(
+        attrs.get("length"),
+        params.length.unwrap_or(1.0),
+        "MathEquationInput.xml.length",
+    )?;
+    let alpha_fallback = params
+        .alpha
+        .or(constants.get("alpha").copied())
+        .unwrap_or(0.01);
+    let alpha = number_or_default(
+        attrs.get("alpha"),
+        alpha_fallback,
+        "MathEquationInput.xml.alpha",
+    )?;
+    let t0 = number_or_default(
+        attrs.get("t0"),
+        params.t0.unwrap_or(0.0),
+        "MathEquationInput.xml.t0",
+    )?;
+    let t1 = number_or_default(
+        attrs.get("t1"),
+        params.t1.unwrap_or(1.0),
+        "MathEquationInput.xml.t1",
+    )?;
     let dt = if !is_absent(attrs.get("dt")) {
         number_or_default(attrs.get("dt"), 0.0, "MathEquationInput.xml.dt")?
     } else if let Some(d) = params.dt {
@@ -1055,7 +1160,10 @@ fn read_braced(s: &str, start: usize) -> Option<Braced> {
             b'}' => {
                 depth -= 1;
                 if depth == 0 {
-                    return Some(Braced { value: s[begin..i].to_string(), end: i + 1 });
+                    return Some(Braced {
+                        value: s[begin..i].to_string(),
+                        end: i + 1,
+                    });
                 }
             }
             _ => {}
@@ -1116,7 +1224,10 @@ fn tokenize_expression(input: &str) -> R<Vec<ExprToken>> {
                     j += 1;
                 }
             }
-            tokens.push(ExprToken { kind: TokenKind::Num, text: c[i..j].iter().collect() });
+            tokens.push(ExprToken {
+                kind: TokenKind::Num,
+                text: c[i..j].iter().collect(),
+            });
             i = j;
             continue;
         }
@@ -1125,22 +1236,34 @@ fn tokenize_expression(input: &str) -> R<Vec<ExprToken>> {
             while j < n && (c[j].is_ascii_alphanumeric() || c[j] == '_') {
                 j += 1;
             }
-            tokens.push(ExprToken { kind: TokenKind::Id, text: c[i..j].iter().collect() });
+            tokens.push(ExprToken {
+                kind: TokenKind::Id,
+                text: c[i..j].iter().collect(),
+            });
             i = j;
             continue;
         }
         if ch == '(' {
-            tokens.push(ExprToken { kind: TokenKind::Lparen, text: ch.to_string() });
+            tokens.push(ExprToken {
+                kind: TokenKind::Lparen,
+                text: ch.to_string(),
+            });
             i += 1;
             continue;
         }
         if ch == ')' {
-            tokens.push(ExprToken { kind: TokenKind::Rparen, text: ch.to_string() });
+            tokens.push(ExprToken {
+                kind: TokenKind::Rparen,
+                text: ch.to_string(),
+            });
             i += 1;
             continue;
         }
         if matches!(ch, '+' | '-' | '*' | '/' | '^') {
-            tokens.push(ExprToken { kind: TokenKind::Op, text: ch.to_string() });
+            tokens.push(ExprToken {
+                kind: TokenKind::Op,
+                text: ch.to_string(),
+            });
             i += 1;
             continue;
         }
@@ -1150,7 +1273,9 @@ fn tokenize_expression(input: &str) -> R<Vec<ExprToken>> {
             "MathEquationInput",
             "expression",
             "contain only supported characters",
-            Some(format!("unsupported expression character \"{ch}\" in {input}")),
+            Some(format!(
+                "unsupported expression character \"{ch}\" in {input}"
+            )),
         ));
     }
     Ok(tokens)
@@ -1188,8 +1313,18 @@ fn equation_statements(equation: &str) -> Vec<String> {
 
 fn looks_latex(s: &str) -> bool {
     const NEEDLES: [&str; 12] = [
-        "\\frac", "\\dot", "\\partial", "\\alpha", "\\beta", "\\gamma", "\\lambda", "\\pi",
-        "\\sin", "\\cos", "\\exp", "^{",
+        "\\frac",
+        "\\dot",
+        "\\partial",
+        "\\alpha",
+        "\\beta",
+        "\\gamma",
+        "\\lambda",
+        "\\pi",
+        "\\sin",
+        "\\cos",
+        "\\exp",
+        "^{",
     ];
     NEEDLES.iter().any(|needle| s.contains(needle))
 }
@@ -1215,7 +1350,10 @@ fn state_from_json(
             ))
         }
     };
-    let name = required_string(obj.get("name"), &format!("MathEquationInput.states[{index}].name"))?;
+    let name = required_string(
+        obj.get("name"),
+        &format!("MathEquationInput.states[{index}].name"),
+    )?;
     let derivative_raw = match first_defined(obj, &["derivative", "rhs", "equation"]) {
         Some(v) => v,
         None => {
@@ -1249,7 +1387,11 @@ fn state_from_json(
             }
         };
     }
-    Ok(ODEStateSpec { name, initial: initial_value, derivative })
+    Ok(ODEStateSpec {
+        name,
+        initial: initial_value,
+        derivative,
+    })
 }
 
 // =============================================================================
@@ -1281,8 +1423,11 @@ fn merge_initial(records: &[Option<&JsonObject>]) -> R<NumMap> {
     for rec in records {
         if let Some(obj) = rec {
             for key in obj.keys() {
-                let value =
-                    number_or_default(obj.get(key), 0.0, &format!("MathEquationInput.initial.{key}"))?;
+                let value = number_or_default(
+                    obj.get(key),
+                    0.0,
+                    &format!("MathEquationInput.initial.{key}"),
+                )?;
                 out.insert(key.clone(), value);
             }
         }
@@ -1330,7 +1475,10 @@ fn params_as_record(p: &MathEquationInputParams) -> JsonObject {
         r.insert("dt".to_string(), JsonValue::Number(v));
     }
     if let Some(m) = p.method {
-        r.insert("method".to_string(), JsonValue::String(method_str(m).to_string()));
+        r.insert(
+            "method".to_string(),
+            JsonValue::String(method_str(m).to_string()),
+        );
     }
     if let Some(v) = p.cells {
         r.insert("cells".to_string(), JsonValue::Number(v));
@@ -1342,7 +1490,10 @@ fn params_as_record(p: &MathEquationInputParams) -> JsonObject {
         r.insert("alpha".to_string(), JsonValue::Number(v));
     }
     if let Some(v) = &p.initial_expression {
-        r.insert("initialExpression".to_string(), JsonValue::String(v.clone()));
+        r.insert(
+            "initialExpression".to_string(),
+            JsonValue::String(v.clone()),
+        );
     }
     if let Some(v) = &p.initial_values {
         r.insert(
@@ -1673,9 +1824,7 @@ fn remove_command_brace(s: &str, cmd: &str) -> String {
     let mut out = String::new();
     let mut i = 0;
     while i < c.len() {
-        if i + cmdc.len() < c.len()
-            && c[i..i + cmdc.len()] == cmdc[..]
-            && c[i + cmdc.len()] == '{'
+        if i + cmdc.len() < c.len() && c[i..i + cmdc.len()] == cmdc[..] && c[i + cmdc.len()] == '{'
         {
             let start = i + cmdc.len() + 1;
             let mut j = start;
@@ -1780,10 +1929,7 @@ mod tests {
     #[test]
     fn latex_expression_rewrites_greek_and_implicit_mult() {
         assert_eq!(latex_to_expression("2\\alpha x").unwrap(), "2*alpha*x");
-        assert_eq!(
-            latex_to_expression("\\frac{a}{b}").unwrap(),
-            "((a)/(b))"
-        );
+        assert_eq!(latex_to_expression("\\frac{a}{b}").unwrap(), "((a)/(b))");
         assert_eq!(latex_to_expression("\\sin(x)").unwrap(), "sin(x)");
     }
 
@@ -1808,7 +1954,8 @@ mod tests {
 
     #[test]
     fn xml_ode_reads_state_elements() {
-        let xml = "<ode t0=\"0\" t1=\"2\"><state name=\"x\" derivative=\"-x\" initial=\"3\"/></ode>";
+        let xml =
+            "<ode t0=\"0\" t1=\"2\"><state name=\"x\" derivative=\"-x\" initial=\"3\"/></ode>";
         let params = MathEquationInputParams {
             format: EquationInputFormat::Xml,
             equation: Some(xml.to_string()),

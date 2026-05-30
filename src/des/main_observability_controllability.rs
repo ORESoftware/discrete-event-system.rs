@@ -14,11 +14,11 @@ use std::rc::Rc;
 
 use crate::des::general::control_systems::dc_motor::{DcMotorDynamics, DcMotorParams};
 use crate::des::general::control_systems::observability_controllability::{
-    ControllabilityEvaluatorStation, EvaluationKind, EvaluationSinkStation,
-    MarkovDecisionProcess, MdpControllabilityEvaluatorStation, MdpSourceStation, MdpSpec, MdpToken,
-    ObsCtrlChannels, ObservabilityEvaluatorStation, PartiallyObservableProcess, PomdpSpec,
-    PomdpObservabilityEvaluatorStation, PomdpSourceStation, PomdpToken, StateSpaceModel,
-    StateSpaceSourceStation, StateSpaceSpec, StateSpaceToken,
+    ControllabilityEvaluatorStation, EvaluationKind, EvaluationSinkStation, MarkovDecisionProcess,
+    MdpControllabilityEvaluatorStation, MdpSourceStation, MdpSpec, MdpToken, ObsCtrlChannels,
+    ObservabilityEvaluatorStation, PartiallyObservableProcess, PomdpObservabilityEvaluatorStation,
+    PomdpSourceStation, PomdpSpec, PomdpToken, StateSpaceModel, StateSpaceSourceStation,
+    StateSpaceSpec, StateSpaceToken,
 };
 use crate::des::general::des_base::runner::{run_iterative_des, IterativeRunOptions};
 use crate::des::general::des_base::station::{DESStation, StationRef};
@@ -31,18 +31,29 @@ impl ObsCtrlDemo {
         let mdp_tokens = self.build_mdp_models();
         let pomdp_tokens = self.build_pomdp_models();
 
-        let lti_source =
-            Rc::new(RefCell::new(StateSpaceSourceStation::new("lti-source", lti_tokens.clone())));
-        let mdp_source =
-            Rc::new(RefCell::new(MdpSourceStation::new("mdp-source", mdp_tokens.clone())));
-        let pomdp_source =
-            Rc::new(RefCell::new(PomdpSourceStation::new("pomdp-source", pomdp_tokens.clone())));
+        let lti_source = Rc::new(RefCell::new(StateSpaceSourceStation::new(
+            "lti-source",
+            lti_tokens.clone(),
+        )));
+        let mdp_source = Rc::new(RefCell::new(MdpSourceStation::new(
+            "mdp-source",
+            mdp_tokens.clone(),
+        )));
+        let pomdp_source = Rc::new(RefCell::new(PomdpSourceStation::new(
+            "pomdp-source",
+            pomdp_tokens.clone(),
+        )));
 
-        let ctrl_eval = Rc::new(RefCell::new(ControllabilityEvaluatorStation::new("ctrl-eval")));
+        let ctrl_eval = Rc::new(RefCell::new(ControllabilityEvaluatorStation::new(
+            "ctrl-eval",
+        )));
         let obs_eval = Rc::new(RefCell::new(ObservabilityEvaluatorStation::new("obs-eval")));
-        let mdp_eval = Rc::new(RefCell::new(MdpControllabilityEvaluatorStation::new("mdp-eval")));
-        let pomdp_eval =
-            Rc::new(RefCell::new(PomdpObservabilityEvaluatorStation::new("pomdp-eval")));
+        let mdp_eval = Rc::new(RefCell::new(MdpControllabilityEvaluatorStation::new(
+            "mdp-eval",
+        )));
+        let pomdp_eval = Rc::new(RefCell::new(PomdpObservabilityEvaluatorStation::new(
+            "pomdp-eval",
+        )));
         let sink = Rc::new(RefCell::new(EvaluationSinkStation::new("sink")));
 
         let lti_src_ref: StationRef = lti_source.clone();
@@ -93,7 +104,11 @@ impl ObsCtrlDemo {
                 pomdp_eval_ref,
                 sink_ref,
             ],
-            IterativeRunOptions { shuffle: false, max_ticks: Some(10), ..Default::default() },
+            IterativeRunOptions {
+                shuffle: false,
+                max_ticks: Some(10),
+                ..Default::default()
+            },
         );
 
         self.report(&sink.borrow(), &lti_tokens, &mdp_tokens, &pomdp_tokens);
@@ -212,13 +227,19 @@ impl ObsCtrlDemo {
         pomdp: &[PomdpToken],
     ) {
         println!();
-        println!("================================================================================");
+        println!(
+            "================================================================================"
+        );
         println!(" Observability & Controllability — general structural evaluator");
-        println!("================================================================================");
+        println!(
+            "================================================================================"
+        );
 
         println!();
         println!(" LINEAR STATE-SPACE  (Kalman rank tests)");
-        println!(" --------------------------------------------------------------------------------");
+        println!(
+            " --------------------------------------------------------------------------------"
+        );
         for t in lti {
             let rs = sink.for_label(&t.label);
             let ctrl = rs
@@ -230,13 +251,23 @@ impl ObsCtrlDemo {
                 .find(|r| r.kind == EvaluationKind::Observability)
                 .expect("observability verdict");
             println!("   {}", t.label);
-            println!("      controllable : {}   ({})", self.verdict(ctrl.full), ctrl.detail);
-            println!("      observable   : {}   ({})", self.verdict(obs.full), obs.detail);
+            println!(
+                "      controllable : {}   ({})",
+                self.verdict(ctrl.full),
+                ctrl.detail
+            );
+            println!(
+                "      observable   : {}   ({})",
+                self.verdict(obs.full),
+                obs.detail
+            );
         }
 
         println!();
         println!(" MDP  (reachability ≈ controllability)");
-        println!(" --------------------------------------------------------------------------------");
+        println!(
+            " --------------------------------------------------------------------------------"
+        );
         for t in mdp {
             let rs = sink.for_label(&t.label);
             let r = rs
@@ -244,12 +275,18 @@ impl ObsCtrlDemo {
                 .find(|x| x.kind == EvaluationKind::MdpControllability)
                 .expect("mdp-controllability verdict");
             println!("   {}", t.label);
-            println!("      controllable : {}   ({})", self.verdict(r.full), r.detail);
+            println!(
+                "      controllable : {}   ({})",
+                self.verdict(r.full),
+                r.detail
+            );
         }
 
         println!();
         println!(" POMDP  (distinguishability ≈ observability)");
-        println!(" --------------------------------------------------------------------------------");
+        println!(
+            " --------------------------------------------------------------------------------"
+        );
         for t in pomdp {
             let rs = sink.for_label(&t.label);
             let r = rs
@@ -258,15 +295,23 @@ impl ObsCtrlDemo {
                 .expect("pomdp-observability verdict");
             let aliasing = t.pomdp.indistinguishable_pairs();
             println!("   {}", t.label);
-            println!("      observable   : {}   ({})", self.verdict(r.full), r.detail);
+            println!(
+                "      observable   : {}   ({})",
+                self.verdict(r.full),
+                r.detail
+            );
             if !aliasing.is_empty() {
-                let pairs: Vec<String> =
-                    aliasing.iter().map(|p| format!("({},{})", p.0, p.1)).collect();
+                let pairs: Vec<String> = aliasing
+                    .iter()
+                    .map(|p| format!("({},{})", p.0, p.1))
+                    .collect();
                 println!("      aliased state pairs: {}", pairs.join(" "));
             }
         }
         println!();
-        println!("================================================================================");
+        println!(
+            "================================================================================"
+        );
         println!();
     }
 

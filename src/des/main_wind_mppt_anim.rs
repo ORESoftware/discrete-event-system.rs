@@ -48,9 +48,18 @@ impl WindMpptAnimator {
 
     fn run(&self, kind: &str) {
         let wind_profile = WindProfile::new(&[
-            WindProfileSegment { from_time: 0.0, speed: 8.0 },
-            WindProfileSegment { from_time: 20.0, speed: 11.0 },
-            WindProfileSegment { from_time: 40.0, speed: 9.0 },
+            WindProfileSegment {
+                from_time: 0.0,
+                speed: 8.0,
+            },
+            WindProfileSegment {
+                from_time: 20.0,
+                speed: 11.0,
+            },
+            WindProfileSegment {
+                from_time: 40.0,
+                speed: 9.0,
+            },
         ]);
 
         let plant = Rc::new(RefCell::new(WindTurbinePlantStation::new(
@@ -70,10 +79,18 @@ impl WindMpptAnimator {
             Rc::new(RefCell::new(SpeedPiMpptController::new(
                 "mppt-pi",
                 &self.aero,
-                SpeedPiMpptOpts { kp: 8.0, ki: 4.0, dt: self.dt, max_torque: None },
+                SpeedPiMpptOpts {
+                    kp: 8.0,
+                    ki: 4.0,
+                    dt: self.dt,
+                    max_torque: None,
+                },
             )))
         } else {
-            Rc::new(RefCell::new(OptimalTorqueMpptController::new("mppt-opt-torque", &self.aero)))
+            Rc::new(RefCell::new(OptimalTorqueMpptController::new(
+                "mppt-opt-torque",
+                &self.aero,
+            )))
         };
 
         let sink = Rc::new(RefCell::new(WindMpptSinkStation::new("sink")));
@@ -99,10 +116,18 @@ impl WindMpptAnimator {
 
         run_iterative_des(
             vec![plant_ref, controller, sink_ref],
-            IterativeRunOptions { shuffle: false, max_ticks: Some(self.steps + 5), ..Default::default() },
+            IterativeRunOptions {
+                shuffle: false,
+                max_ticks: Some(self.steps + 5),
+                ..Default::default()
+            },
         );
 
-        let controller_name = if kind == "pi" { "PI speed loop" } else { "optimal torque" };
+        let controller_name = if kind == "pi" {
+            "PI speed loop"
+        } else {
+            "optimal torque"
+        };
         self.record(kind, controller_name, &sink.borrow());
     }
 
@@ -112,7 +137,9 @@ impl WindMpptAnimator {
         let stride = 3usize; // 1200 samples → ~400 frames @ 30 fps
         let sample_count = sink.samples.len();
         let frames = sample_count.div_ceil(stride.max(1));
-        let out = std::path::Path::new("out").join("wind-mppt").join(format!("animation-{}.html", kind));
+        let out = std::path::Path::new("out")
+            .join("wind-mppt")
+            .join(format!("animation-{}.html", kind));
         println!(
             "Wind-MPPT animation ({}): omitted in Rust port — {} samples, ~{} frames @ stride {} (λ*={:.2}, C_p,max={:.3}); would write {} (see PORT NOTE)",
             controller_name,
@@ -128,7 +155,11 @@ impl WindMpptAnimator {
 
 /// Entry point (TS top-level script).
 pub fn run() {
-    let kind = if std::env::var("CONTROLLER").unwrap_or_default().to_lowercase() == "pi" {
+    let kind = if std::env::var("CONTROLLER")
+        .unwrap_or_default()
+        .to_lowercase()
+        == "pi"
+    {
         "pi"
     } else {
         "optimal-torque"

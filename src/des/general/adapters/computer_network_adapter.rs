@@ -42,10 +42,18 @@ fn js_number(v: f64) -> String {
     if v.is_nan() {
         "NaN".to_string()
     } else if v.is_infinite() {
-        if v > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() }
+        if v > 0.0 {
+            "Infinity".to_string()
+        } else {
+            "-Infinity".to_string()
+        }
     } else {
         let s = v.to_string();
-        if s == "-0" { "0".to_string() } else { s }
+        if s == "-0" {
+            "0".to_string()
+        } else {
+            s
+        }
     }
 }
 
@@ -89,11 +97,21 @@ fn problem_from_builtin(builtin: Option<NetworkBuiltin>) -> ComputerNetworkProbl
 }
 
 fn num(min: Option<f64>, max: Option<f64>, integer: Option<bool>) -> ParamSchema {
-    ParamSchema::Number { min, max, integer, default: None, description: None }
+    ParamSchema::Number {
+        min,
+        max,
+        integer,
+        default: None,
+        description: None,
+    }
 }
 
 fn string_field() -> ParamSchema {
-    ParamSchema::String { allowed: None, default: None, description: None }
+    ParamSchema::String {
+        allowed: None,
+        default: None,
+        description: None,
+    }
 }
 
 fn str_enum_default(allowed: &[&str], default: &str) -> ParamSchema {
@@ -105,12 +123,24 @@ fn str_enum_default(allowed: &[&str], default: &str) -> ParamSchema {
 }
 
 fn array(items: ParamSchema, min_length: Option<usize>) -> ParamSchema {
-    ParamSchema::Array { items: Box::new(items), min_length, max_length: None, description: None }
+    ParamSchema::Array {
+        items: Box::new(items),
+        min_length,
+        max_length: None,
+        description: None,
+    }
 }
 
-fn obj(fields: Vec<(&str, ParamSchema)>, required: Vec<&str>, description: Option<&str>) -> ParamSchema {
+fn obj(
+    fields: Vec<(&str, ParamSchema)>,
+    required: Vec<&str>,
+    description: Option<&str>,
+) -> ParamSchema {
     ParamSchema::Object {
-        fields: fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+        fields: fields
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
         required: Some(required.iter().map(|s| s.to_string()).collect()),
         description: description.map(|s| s.to_string()),
     }
@@ -120,11 +150,18 @@ fn network_node_schema() -> ParamSchema {
     obj(
         vec![
             ("id", string_field()),
-            ("kind", ParamSchema::String {
-                allowed: Some(vec!["host".to_string(), "router".to_string(), "switch".to_string()]),
-                default: None,
-                description: None,
-            }),
+            (
+                "kind",
+                ParamSchema::String {
+                    allowed: Some(vec![
+                        "host".to_string(),
+                        "router".to_string(),
+                        "switch".to_string(),
+                    ]),
+                    default: None,
+                    description: None,
+                },
+            ),
             ("forwardingRatePps", num(Some(1e-9), None, None)),
             ("queueLimitPackets", num(Some(1.0), None, Some(true))),
         ],
@@ -143,7 +180,13 @@ fn network_link_schema() -> ParamSchema {
             ("latencyMs", num(Some(0.0), None, None)),
             ("costPerMb", num(Some(0.0), None, None)),
             ("queueLimitPackets", num(Some(1.0), None, Some(true))),
-            ("bidirectional", ParamSchema::Boolean { default: Some(false), description: None }),
+            (
+                "bidirectional",
+                ParamSchema::Boolean {
+                    default: Some(false),
+                    description: None,
+                },
+            ),
         ],
         vec!["id", "from", "to", "bandwidthMbps", "latencyMs"],
         None,
@@ -156,7 +199,10 @@ fn network_flow_schema() -> ParamSchema {
             ("id", string_field()),
             ("source", string_field()),
             ("destination", string_field()),
-            ("protocol", str_enum_default(&["raw", "tcp", "udp", "http"], "raw")),
+            (
+                "protocol",
+                str_enum_default(&["raw", "tcp", "udp", "http"], "raw"),
+            ),
             ("ratePps", num(Some(0.0), None, None)),
             ("packetSizeBytes", num(Some(1.0), None, Some(true))),
             ("startMs", num(Some(0.0), None, None)),
@@ -177,7 +223,10 @@ fn computer_network_problem_schema() -> ParamSchema {
             ("flows", array(network_flow_schema(), Some(1))),
             ("durationMs", num(Some(1e-9), None, None)),
             ("dtMs", num(Some(1e-9), None, None)),
-            ("routingMetric", str_enum_default(&["latency", "cost", "hop"], "latency")),
+            (
+                "routingMetric",
+                str_enum_default(&["latency", "cost", "hop"], "latency"),
+            ),
             ("drainAfterSourcesMs", num(Some(0.0), None, None)),
             ("maxPacketsInSystem", num(Some(1.0), None, Some(true))),
             ("sampleEveryMs", num(Some(1e-9), None, None)),
@@ -226,9 +275,15 @@ impl DESModelRegistration<ComputerNetworkParams, ComputerNetworkResult> for Comp
         computer_network_schema()
     }
 
-    fn run(&self, params: ComputerNetworkParams, _runtime: &DESRuntimeConfig) -> ComputerNetworkResult {
+    fn run(
+        &self,
+        params: ComputerNetworkParams,
+        _runtime: &DESRuntimeConfig,
+    ) -> ComputerNetworkResult {
         let builtin = params.builtin;
-        let problem = params.problem.unwrap_or_else(|| problem_from_builtin(builtin));
+        let problem = params
+            .problem
+            .unwrap_or_else(|| problem_from_builtin(builtin));
         run_computer_network_simulation(&problem)
     }
 
@@ -246,12 +301,24 @@ impl DESModelRegistration<ComputerNetworkParams, ComputerNetworkResult> for Comp
         [
             "COMPUTER-NETWORK DES".to_string(),
             "--------------------".to_string(),
-            format!("  Routing metric:   {}", routing_metric_str(result.routing_metric)),
-            format!("  Generated:        {}", js_number(result.generated_packets)),
-            format!("  Delivered:        {}", js_number(result.delivered_packets)),
+            format!(
+                "  Routing metric:   {}",
+                routing_metric_str(result.routing_metric)
+            ),
+            format!(
+                "  Generated:        {}",
+                js_number(result.generated_packets)
+            ),
+            format!(
+                "  Delivered:        {}",
+                js_number(result.delivered_packets)
+            ),
             format!("  Dropped:          {}", js_number(result.dropped_packets)),
             format!("  Active at stop:   {}", js_number(result.active_packets)),
-            format!("  Max active:       {}", js_number(result.max_active_packets)),
+            format!(
+                "  Max active:       {}",
+                js_number(result.max_active_packets)
+            ),
             format!("  Delivery ratio:   {:.4}", result.delivery_ratio),
             format!("  Offered load:     {:.4} Mbps", result.offered_load_mbps),
             format!("  Wire throughput:  {:.4} Mbps", result.throughput_mbps),
@@ -333,7 +400,12 @@ impl DESModelRegistration<ComputerNetworkParams, ComputerNetworkResult> for Comp
         write_csv_lines(csv_path, &lines);
     }
 
-    fn animate(&self, _result: &ComputerNetworkResult, _params: &ComputerNetworkParams, _runtime: &DESRuntimeConfig) {
+    fn animate(
+        &self,
+        _result: &ComputerNetworkResult,
+        _params: &ComputerNetworkParams,
+        _runtime: &DESRuntimeConfig,
+    ) {
         // PORT NOTE: animation subsystem not ported (see module docs). No-op.
     }
 

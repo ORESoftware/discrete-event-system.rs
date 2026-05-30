@@ -22,7 +22,11 @@ mod tests {
         let mut a = SeededRandom::new(12345);
         let mut b = SeededRandom::new(12345);
         for i in 0..2000 {
-            assert_eq!(a.next_float().to_bits(), b.next_float().to_bits(), "drift at draw {i}");
+            assert_eq!(
+                a.next_float().to_bits(),
+                b.next_float().to_bits(),
+                "drift at draw {i}"
+            );
         }
     }
 
@@ -58,7 +62,10 @@ mod tests {
             let mut r = SeededRandom::new(seed);
             for (i, &want) in expected.iter().enumerate() {
                 let got = r.next_float();
-                assert!((got - want).abs() < 1e-15, "seed {seed} draw {i}: {got} != {want}");
+                assert!(
+                    (got - want).abs() < 1e-15,
+                    "seed {seed} draw {i}: {got} != {want}"
+                );
             }
         }
     }
@@ -76,9 +83,13 @@ mod tests {
     fn distinct_seeds_diverge() {
         let mut a = SeededRandom::new(1);
         let mut b = SeededRandom::new(2);
-        let differences =
-            (0..200).filter(|_| a.next_float() != b.next_float()).count();
-        assert!(differences > 190, "seeds 1 and 2 barely differ ({differences}/200)");
+        let differences = (0..200)
+            .filter(|_| a.next_float() != b.next_float())
+            .count();
+        assert!(
+            differences > 190,
+            "seeds 1 and 2 barely differ ({differences}/200)"
+        );
     }
 
     #[test]

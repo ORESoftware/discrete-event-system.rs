@@ -33,9 +33,13 @@ use crate::des::entity_source::source::EntitySource;
 use crate::des::general::do_audit::do_audit;
 use crate::des::general::general::fisher_yates_shuffle;
 use crate::des::observers::program_observer::ProgramObserver;
-use crate::des::r#abstract::interfaces::{EntityGraphData, HasInput, HasManyOutputConnections, HasOutput};
+use crate::des::r#abstract::interfaces::{
+    EntityGraphData, HasInput, HasManyOutputConnections, HasOutput,
+};
 use crate::des::r#abstract::r#abstract::{Entity, EntityObserver};
-use crate::des::random_variables::rv::{PoissonRandomVariable, RandomVariable, UniformRandomVariable};
+use crate::des::random_variables::rv::{
+    PoissonRandomVariable, RandomVariable, UniformRandomVariable,
+};
 use crate::des::shared::capabilities::{RandomSource, SeededRandom};
 use crate::des::shared::precision::{bgn, Decimal};
 
@@ -163,7 +167,11 @@ impl SeedGen {
 
 /// `[10, 20]` uniform inter-event RV used throughout the TS spec.
 fn uniform_10_20(seeds: &mut SeedGen) -> Box<dyn RandomVariable> {
-    Box::new(UniformRandomVariable::new(bgn(10.0), bgn(20.0), seeds.next()))
+    Box::new(UniformRandomVariable::new(
+        bgn(10.0),
+        bgn(20.0),
+        seeds.next(),
+    ))
 }
 
 /// Entry point (TS top-level `run()` closure + invocation).
@@ -207,7 +215,16 @@ pub fn run() {
     for id in ["I-P-Decision", "I-S-Decision", "I-H-Decision"] {
         let d = Rc::new(RefCell::new(ProbabilityDecisionEntity::new(
             id.to_string(),
-            vec![Branch { index: 0, prob: bgn(0.4) }, Branch { index: 1, prob: bgn(0.6) }],
+            vec![
+                Branch {
+                    index: 0,
+                    prob: bgn(0.4),
+                },
+                Branch {
+                    index: 1,
+                    prob: bgn(0.6),
+                },
+            ],
             uniform_10_20(&mut seeds),
             seeds.next(),
         )));
@@ -277,7 +294,10 @@ pub fn run() {
     // `programEntities.get('A')` — there is no 'A'.
     println!("{:?}", map.get("A").map(|_| "<node>"));
 
-    let mut program_list: Vec<Node> = order.iter().map(|id| map.get(id).unwrap().clone()).collect();
+    let mut program_list: Vec<Node> = order
+        .iter()
+        .map(|id| map.get(id).unwrap().clone())
+        .collect();
     let mut rng = SeededRandom::new(0xC0FFEE);
 
     let now = std::time::Instant::now();

@@ -43,7 +43,8 @@ use crate::des::general::des_spec::{
 };
 use crate::des::general::math_equation_input::{
     BlockGraphEdge, BlockGraphNode, EquationInputFormat, EquationProblemKind, Heat1DBlockParams,
-    IntegratorMethod, MathEquationInputParams, MathEquationResult, Normalized, ODEBlockSystemParams,
+    IntegratorMethod, MathEquationInputParams, MathEquationResult, Normalized,
+    ODEBlockSystemParams,
 };
 
 /// The required value of `UniversalDESModelSpec::schema` (TS `$schema` literal).
@@ -401,7 +402,8 @@ pub fn validate_universal_des_model_spec(spec: &UniversalDESModelSpec) -> Vec<Va
     push(
         &mut checks,
         "original-input-content-or-uri",
-        is_non_empty_opt(&spec.original_input.content) || is_non_empty_opt(&spec.original_input.uri),
+        is_non_empty_opt(&spec.original_input.content)
+            || is_non_empty_opt(&spec.original_input.uri),
         Some("content/uri".to_string()),
         Some("one must be present".to_string()),
     );
@@ -441,8 +443,18 @@ pub fn validate_universal_des_model_spec(spec: &UniversalDESModelSpec) -> Vec<Va
         Some("registered target model id".to_string()),
     );
 
-    let node_ids: Vec<String> = spec.des.stationary_entities.iter().map(|n| n.id.clone()).collect();
-    let moving_ids: Vec<String> = spec.des.moving_entities.iter().map(|m| m.id.clone()).collect();
+    let node_ids: Vec<String> = spec
+        .des
+        .stationary_entities
+        .iter()
+        .map(|n| n.id.clone())
+        .collect();
+    let moving_ids: Vec<String> = spec
+        .des
+        .moving_entities
+        .iter()
+        .map(|m| m.id.clone())
+        .collect();
     push(
         &mut checks,
         "stationary-ids-unique",
@@ -620,8 +632,12 @@ pub fn universal_from_math_equation_result(
     result: &MathEquationResult,
     opts: UniversalFromOpts,
 ) -> UResult<UniversalDESModelSpec> {
-    let stationary_entities: Vec<UniversalStationaryEntity> =
-        result.network.nodes.iter().map(universal_stationary_from_block).collect();
+    let stationary_entities: Vec<UniversalStationaryEntity> = result
+        .network
+        .nodes
+        .iter()
+        .map(universal_stationary_from_block)
+        .collect();
     let edges: Vec<UniversalGraphEdge> = result
         .network
         .edges
@@ -654,7 +670,10 @@ pub fn universal_from_math_equation_result(
                     "Scalar value token moving between stationary DES math blocks.".to_string(),
                 ),
             }],
-            graph: UniversalGraph { nodes: stationary_entities, edges },
+            graph: UniversalGraph {
+                nodes: stationary_entities,
+                edges,
+            },
             sources: Some(source_endpoints(&result.network.nodes, &result.normalized)),
             sinks: Some(sink_endpoints(&result.network.nodes)),
             observability: Some(UniversalObservability {
@@ -683,7 +702,10 @@ pub fn universal_from_math_equation_result(
 // math/normalized → universal builders.
 // =============================================================================
 
-fn math_from_ode_result(_input: &MathEquationInputParams, params: &ODEBlockSystemParams) -> UniversalMathSpec {
+fn math_from_ode_result(
+    _input: &MathEquationInputParams,
+    params: &ODEBlockSystemParams,
+) -> UniversalMathSpec {
     let state_names: Vec<String> = params.states.iter().map(|s| s.name.clone()).collect();
     UniversalMathSpec {
         kind: UniversalModelKind::Ode,
@@ -741,7 +763,10 @@ fn math_from_ode_result(_input: &MathEquationInputParams, params: &ODEBlockSyste
     }
 }
 
-fn math_from_heat_result(input: &MathEquationInputParams, params: &Heat1DBlockParams) -> UniversalMathSpec {
+fn math_from_heat_result(
+    input: &MathEquationInputParams,
+    params: &Heat1DBlockParams,
+) -> UniversalMathSpec {
     let mut parameters = vec![
         param("alpha", ScalarOrArray::Number(params.alpha)),
         param("length", ScalarOrArray::Number(params.length)),
@@ -808,7 +833,10 @@ fn math_from_heat_result(input: &MathEquationInputParams, params: &Heat1DBlockPa
         objectives: None,
         domain: Some(jobj(
             "x",
-            JsonValue::Array(vec![JsonValue::Number(0.0), JsonValue::Number(params.length)]),
+            JsonValue::Array(vec![
+                JsonValue::Number(0.0),
+                JsonValue::Number(params.length),
+            ]),
         )),
         numerics: Some(UniversalNumericsSpec {
             time: Some(time_from_heat(params)),
@@ -849,7 +877,10 @@ fn universal_stationary_from_block(node: &BlockGraphNode) -> UniversalStationary
             .expression
             .clone()
             .map(|e| jobj("expression", JsonValue::String(e))),
-        ports: Some(UniversalPorts { inputs: Some(inputs), outputs: Some(outputs) }),
+        ports: Some(UniversalPorts {
+            inputs: Some(inputs),
+            outputs: Some(outputs),
+        }),
         position: None,
         metadata: None,
     }
@@ -858,8 +889,14 @@ fn universal_stationary_from_block(node: &BlockGraphNode) -> UniversalStationary
 fn universal_edge_from_block(edge: &BlockGraphEdge, index: usize) -> UniversalGraphEdge {
     UniversalGraphEdge {
         id: format!("edge:{}:{}->{}", index, edge.from, edge.to),
-        from: UniversalPortRef { entity_id: edge.from.clone(), port: edge.from_channel.clone() },
-        to: UniversalPortRef { entity_id: edge.to.clone(), port: edge.to_channel.clone() },
+        from: UniversalPortRef {
+            entity_id: edge.from.clone(),
+            port: edge.from_channel.clone(),
+        },
+        to: UniversalPortRef {
+            entity_id: edge.to.clone(),
+            port: edge.to_channel.clone(),
+        },
         moving_entity: edge.signal.clone(),
         delay_ticks: None,
         transform: None,
@@ -921,7 +958,10 @@ fn role_from_block_kind(kind: &str) -> UniversalEntityRole {
     }
 }
 
-fn source_endpoints(nodes: &[BlockGraphNode], normalized: &Normalized) -> Vec<UniversalEndpointSpec> {
+fn source_endpoints(
+    nodes: &[BlockGraphNode],
+    normalized: &Normalized,
+) -> Vec<UniversalEndpointSpec> {
     match normalized {
         Normalized::Ode(params) => params
             .states
@@ -1019,7 +1059,10 @@ fn is_non_empty(value: &str) -> bool {
 }
 
 fn is_non_empty_opt(value: &Option<String>) -> bool {
-    value.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false)
+    value
+        .as_deref()
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false)
 }
 
 fn unique(values: &[String]) -> bool {
@@ -1069,7 +1112,12 @@ fn state_var(id: &str, initial: ScalarOrArray) -> UniversalMathVariable {
 }
 
 fn param(id: &str, value: ScalarOrArray) -> UniversalMathParameter {
-    UniversalMathParameter { id: id.to_string(), value, units: None, description: None }
+    UniversalMathParameter {
+        id: id.to_string(),
+        value,
+        units: None,
+        description: None,
+    }
 }
 
 fn jobj(key: &str, value: JsonValue) -> JsonObject {
@@ -1083,8 +1131,14 @@ fn math_signal_schema() -> JsonObject {
     o.insert("value".to_string(), JsonValue::String("number".to_string()));
     o.insert("time".to_string(), JsonValue::String("number".to_string()));
     o.insert("tick".to_string(), JsonValue::String("integer".to_string()));
-    o.insert("sourceId".to_string(), JsonValue::String("string".to_string()));
-    o.insert("channel".to_string(), JsonValue::String("string".to_string()));
+    o.insert(
+        "sourceId".to_string(),
+        JsonValue::String("string".to_string()),
+    );
+    o.insert(
+        "channel".to_string(),
+        JsonValue::String("string".to_string()),
+    );
     o
 }
 
@@ -1092,9 +1146,15 @@ fn math_signal_schema() -> JsonObject {
 /// used only by `originalFromInput`'s `?? input` fallback path.
 fn params_to_json(input: &MathEquationInputParams) -> JsonObject {
     let mut o = JsonObject::new();
-    o.insert("format".to_string(), JsonValue::String(eq_format_str(input.format).to_string()));
+    o.insert(
+        "format".to_string(),
+        JsonValue::String(eq_format_str(input.format).to_string()),
+    );
     if let Some(k) = input.kind {
-        o.insert("kind".to_string(), JsonValue::String(problem_kind_str(k).to_string()));
+        o.insert(
+            "kind".to_string(),
+            JsonValue::String(problem_kind_str(k).to_string()),
+        );
     }
     if let Some(eq) = &input.equation {
         o.insert("equation".to_string(), JsonValue::String(eq.clone()));
@@ -1219,12 +1279,16 @@ fn integrator_str(m: IntegratorMethod) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::des::general::math_equation_input::{MathEquationNetwork, ODEStateSpec};
     use crate::des::general::des_spec::JsonObject as JObj;
+    use crate::des::general::math_equation_input::{MathEquationNetwork, ODEStateSpec};
 
     fn ode_params() -> ODEBlockSystemParams {
         ODEBlockSystemParams {
-            states: vec![ODEStateSpec { name: "x".to_string(), initial: 1.0, derivative: "-x".to_string() }],
+            states: vec![ODEStateSpec {
+                name: "x".to_string(),
+                initial: 1.0,
+                derivative: "-x".to_string(),
+            }],
             constants: std::collections::HashMap::new(),
             t0: 0.0,
             t1: 1.0,
@@ -1236,7 +1300,10 @@ mod tests {
     #[test]
     fn schema_guard_recognizes_universal_doc() {
         let mut o = JObj::new();
-        o.insert("$schema".to_string(), JsonValue::String(UNIVERSAL_MODEL_SPEC_SCHEMA.to_string()));
+        o.insert(
+            "$schema".to_string(),
+            JsonValue::String(UNIVERSAL_MODEL_SPEC_SCHEMA.to_string()),
+        );
         assert!(is_universal_des_model_spec(&JsonValue::Object(o)));
         assert!(!is_universal_des_model_spec(&JsonValue::Null));
     }
@@ -1250,7 +1317,10 @@ mod tests {
         let states = {
             let mut node = JObj::new();
             node.insert("name".to_string(), JsonValue::String("x".to_string()));
-            node.insert("derivative".to_string(), JsonValue::String("-x".to_string()));
+            node.insert(
+                "derivative".to_string(),
+                JsonValue::String("-x".to_string()),
+            );
             node.insert("initial".to_string(), JsonValue::Number(1.0));
             vec![JsonValue::Object(node)]
         };
@@ -1278,8 +1348,9 @@ mod tests {
             heat1d: None,
             validation: vec![],
         };
-        let spec = universal_from_math_equation_result(&input, &result, UniversalFromOpts::default())
-            .expect("from result");
+        let spec =
+            universal_from_math_equation_result(&input, &result, UniversalFromOpts::default())
+                .expect("from result");
         assert_eq!(spec.schema, UNIVERSAL_MODEL_SPEC_SCHEMA);
         assert_eq!(spec.math.kind, UniversalModelKind::Ode);
         assert_eq!(spec.solver.target_model, "math-equation");
@@ -1295,10 +1366,7 @@ mod tests {
 
     #[test]
     fn ode_math_spec_has_equation_per_state() {
-        let math = math_from_ode_result(
-            &MathEquationInputParams::default(),
-            &ode_params(),
-        );
+        let math = math_from_ode_result(&MathEquationInputParams::default(), &ode_params());
         assert_eq!(math.kind, UniversalModelKind::Ode);
         assert_eq!(math.equations.len(), 1);
         assert_eq!(math.equations[0].rhs.as_deref(), Some("-x"));
@@ -1339,7 +1407,10 @@ mod tests {
                 time: None,
                 stationary_entities: vec![],
                 moving_entities: vec![],
-                graph: UniversalGraph { nodes: vec![], edges: vec![] },
+                graph: UniversalGraph {
+                    nodes: vec![],
+                    edges: vec![],
+                },
                 sources: None,
                 sinks: None,
                 observability: None,
@@ -1353,7 +1424,9 @@ mod tests {
             metadata: None,
         };
         let checks = validate_universal_des_model_spec(&spec);
-        assert!(checks.iter().any(|c| c.name == "math-equations-non-empty" && !c.passed));
+        assert!(checks
+            .iter()
+            .any(|c| c.name == "math-equations-non-empty" && !c.passed));
         assert!(assert_universal_des_model_spec(&spec).is_err());
     }
 }

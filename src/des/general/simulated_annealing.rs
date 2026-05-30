@@ -41,7 +41,9 @@ use crate::des::general::des_base::single_state_optimizer::{
     SINGLE_STATE_INITIAL_CHANNEL, SINGLE_STATE_RESULT_CHANNEL,
 };
 use crate::des::general::des_base::station::{DESStation, StationCore, StationRef};
-use crate::des::general::des_base::validation::{intrinsic_check, monotonicity_validator, Monotonicity};
+use crate::des::general::des_base::validation::{
+    intrinsic_check, monotonicity_validator, Monotonicity,
+};
 use crate::des::general::genetic_tsp::{tour_length, InitMode, TSPInstance, Tour};
 use crate::des::general::prng::mulberry32;
 use crate::des::shared::capabilities::{RandomSource, SeededRandom};
@@ -96,10 +98,26 @@ pub trait SAProblem<S: Clone> {
 /// `0` when absent.
 #[derive(Clone, Copy, Debug)]
 pub enum CoolingSchedule {
-    Geometric { t0: f64, alpha: f64, t_min: Option<f64> },
-    Logarithmic { t0: f64, t_min: Option<f64> },
-    Linear { t0: f64, rate: f64, t_min: Option<f64> },
-    ExpRestart { t0: f64, alpha: f64, period: usize, t_min: Option<f64> },
+    Geometric {
+        t0: f64,
+        alpha: f64,
+        t_min: Option<f64>,
+    },
+    Logarithmic {
+        t0: f64,
+        t_min: Option<f64>,
+    },
+    Linear {
+        t0: f64,
+        rate: f64,
+        t_min: Option<f64>,
+    },
+    ExpRestart {
+        t0: f64,
+        alpha: f64,
+        period: usize,
+        t_min: Option<f64>,
+    },
 }
 
 /// Temperature at iteration `k`. (TS `temperatureAt`.)
@@ -114,9 +132,14 @@ pub fn temperature_at(s: &CoolingSchedule, k: usize) -> f64 {
         CoolingSchedule::Linear { t0, rate, t_min } => {
             t_min.unwrap_or(0.0).max(t0 - rate * k as f64)
         }
-        CoolingSchedule::ExpRestart { t0, alpha, period, t_min } => {
-            t_min.unwrap_or(0.0).max(t0 * alpha.powf((k % period) as f64))
-        }
+        CoolingSchedule::ExpRestart {
+            t0,
+            alpha,
+            period,
+            t_min,
+        } => t_min
+            .unwrap_or(0.0)
+            .max(t0 * alpha.powf((k % period) as f64)),
     }
 }
 
@@ -244,7 +267,8 @@ impl<S: Clone + 'static> SAOptimizer<S> {
             opt.bootstrap();
         }
         // TS seeds temperatureHistory with the iteration-0 temperature.
-        opt.temperature_history.push(temperature_at(&opt.cooling, 0));
+        opt.temperature_history
+            .push(temperature_at(&opt.cooling, 0));
 
         // Intrinsic invariant: best-so-far is monotone non-increasing.
         opt.add_validator(
@@ -267,7 +291,11 @@ impl<S: Clone + 'static> SAOptimizer<S> {
                 Some("accepted ≤ iter".to_string()),
                 Some(Box::new(|s: &dyn DESStation| {
                     let st = downcast_sa::<S>(s);
-                    format!("accepted={}  iter={}", st.get_accepted_count(), st.get_iteration())
+                    format!(
+                        "accepted={}  iter={}",
+                        st.get_accepted_count(),
+                        st.get_iteration()
+                    )
                 })),
                 Some("simulated-annealing-intrinsic".to_string()),
                 None,
@@ -306,7 +334,11 @@ impl<S: Clone + 'static> SAOptimizer<S> {
                 self.current_cand_cost.get(),
                 self.current_cand_cost.get() - cur,
                 self.current_accept_prob.get(),
-                if self.current_accepted.get() { "ACC" } else { "rej" },
+                if self.current_accepted.get() {
+                    "ACC"
+                } else {
+                    "rej"
+                },
                 self.opt_state().best_cost,
             );
         }
@@ -449,7 +481,9 @@ pub fn run_simulated_annealing<S: Clone + 'static>(
         true,
         Some(Box::new(rng.clone()) as Box<dyn RandomSource>),
     )));
-    let sink = Rc::new(RefCell::new(SingleStateSinkStation::<S>::new("simulated-annealing-sink")));
+    let sink = Rc::new(RefCell::new(SingleStateSinkStation::<S>::new(
+        "simulated-annealing-sink",
+    )));
 
     source.borrow_mut().core_mut().pipe(
         opt.clone() as StationRef,
@@ -463,15 +497,20 @@ pub fn run_simulated_annealing<S: Clone + 'static>(
     );
 
     run_iterative_des(
-        vec![source as StationRef, opt.clone() as StationRef, sink.clone() as StationRef],
-        IterativeRunOptions { shuffle: false, ..Default::default() },
+        vec![
+            source as StationRef,
+            opt.clone() as StationRef,
+            sink.clone() as StationRef,
+        ],
+        IterativeRunOptions {
+            shuffle: false,
+            ..Default::default()
+        },
     );
 
-    let latest = sink
-        .borrow()
-        .latest
-        .clone()
-        .unwrap_or_else(|| panic!("simulated-annealing: result sink did not receive a final state"));
+    let latest = sink.borrow().latest.clone().unwrap_or_else(|| {
+        panic!("simulated-annealing: result sink did not receive a final state")
+    });
     let snapshot = latest.snapshot.clone();
 
     let opt_ref = opt.borrow();
@@ -480,11 +519,26 @@ pub fn run_simulated_annealing<S: Clone + 'static>(
     let best_history_full = opt_ref.opt_state().best_history.clone();
     let current_history_full = opt_ref.opt_state().current_history.clone();
     let temp_full = opt_ref.temperature_history.clone();
-    let best_history = if best_history_full.len() > 1 { best_history_full[1..].to_vec() } else { Vec::new() };
-    let current_history = if current_history_full.len() > 1 { current_history_full[1..].to_vec() } else { Vec::new() };
-    let t_cut = best_history_full.len().saturating_sub(1).min(temp_full.len());
+    let best_history = if best_history_full.len() > 1 {
+        best_history_full[1..].to_vec()
+    } else {
+        Vec::new()
+    };
+    let current_history = if current_history_full.len() > 1 {
+        current_history_full[1..].to_vec()
+    } else {
+        Vec::new()
+    };
+    let t_cut = best_history_full
+        .len()
+        .saturating_sub(1)
+        .min(temp_full.len());
     let temperature_history = temp_full[..t_cut].to_vec();
-    let trace = if options.record_trace.unwrap_or(false) { Some(opt_ref.trace.clone()) } else { None };
+    let trace = if options.record_trace.unwrap_or(false) {
+        Some(opt_ref.trace.clone())
+    } else {
+        None
+    };
 
     SAResult {
         best_state: snapshot.best,
@@ -755,7 +809,11 @@ mod tests {
     fn opts(seed: u32) -> SASolverOptions {
         SASolverOptions {
             max_iterations: 6000,
-            cooling: CoolingSchedule::Geometric { t0: 10.0, alpha: 0.998, t_min: Some(1e-4) },
+            cooling: CoolingSchedule::Geometric {
+                t0: 10.0,
+                alpha: 0.998,
+                t_min: Some(1e-4),
+            },
             seed: Some(seed),
             stall_limit: None,
             verbose: None,
@@ -766,22 +824,38 @@ mod tests {
 
     #[test]
     fn temperature_schedules() {
-        let geo = CoolingSchedule::Geometric { t0: 10.0, alpha: 0.9, t_min: None };
+        let geo = CoolingSchedule::Geometric {
+            t0: 10.0,
+            alpha: 0.9,
+            t_min: None,
+        };
         assert!((temperature_at(&geo, 0) - 10.0).abs() < 1e-12);
         assert!((temperature_at(&geo, 1) - 9.0).abs() < 1e-12);
 
-        let lin = CoolingSchedule::Linear { t0: 10.0, rate: 2.0, t_min: Some(1.0) };
+        let lin = CoolingSchedule::Linear {
+            t0: 10.0,
+            rate: 2.0,
+            t_min: Some(1.0),
+        };
         assert!((temperature_at(&lin, 3) - 4.0).abs() < 1e-12);
         assert!((temperature_at(&lin, 100) - 1.0).abs() < 1e-12);
 
-        let restart = CoolingSchedule::ExpRestart { t0: 8.0, alpha: 0.5, period: 4, t_min: None };
+        let restart = CoolingSchedule::ExpRestart {
+            t0: 8.0,
+            alpha: 0.5,
+            period: 4,
+            t_min: None,
+        };
         assert!((temperature_at(&restart, 4) - 8.0).abs() < 1e-12);
         assert!((temperature_at(&restart, 5) - 4.0).abs() < 1e-12);
     }
 
     #[test]
     fn minimises_multimodal_function() {
-        let problem: Rc<dyn SAProblem<f64>> = Rc::new(Rastrigin1D { start: 3.7, step: 0.5 });
+        let problem: Rc<dyn SAProblem<f64>> = Rc::new(Rastrigin1D {
+            start: 3.7,
+            step: 0.5,
+        });
         let result = run_simulated_annealing(problem, opts(12345));
         // Settles into a low-cost integer basin (global f(0)=0, neighbours f(±1)≈1).
         assert!(result.best_cost < 2.0, "best_cost = {}", result.best_cost);
@@ -789,7 +863,12 @@ mod tests {
         assert_eq!(result.iterations, 6000);
         // best_history is monotone non-increasing.
         for w in result.best_history.windows(2) {
-            assert!(w[1] <= w[0] + 1e-9, "best_history not monotone: {} -> {}", w[0], w[1]);
+            assert!(
+                w[1] <= w[0] + 1e-9,
+                "best_history not monotone: {} -> {}",
+                w[0],
+                w[1]
+            );
         }
     }
 
@@ -802,13 +881,18 @@ mod tests {
             weights: vec![10.0, 20.0, 30.0],
             capacity: 50.0,
         };
-        let problem: Rc<dyn SAProblem<Vec<f64>>> = Rc::new(build_knapsack_sa_problem(inst.clone(), 1e6));
+        let problem: Rc<dyn SAProblem<Vec<f64>>> =
+            Rc::new(build_knapsack_sa_problem(inst.clone(), 1e6));
         // The knapsack's energy scale (values 100-220) is ~10x the Rastrigin's,
         // so SA needs a proportionally hotter start to accept the ~60-worse
         // intermediate state required to escape the greedy basin {0,1} -> {1,2}.
         let knapsack_opts = SASolverOptions {
             max_iterations: 8000,
-            cooling: CoolingSchedule::Geometric { t0: 100.0, alpha: 0.999, t_min: Some(1e-4) },
+            cooling: CoolingSchedule::Geometric {
+                t0: 100.0,
+                alpha: 0.999,
+                t_min: Some(1e-4),
+            },
             seed: Some(7),
             stall_limit: None,
             verbose: None,
@@ -818,7 +902,11 @@ mod tests {
         let result = run_simulated_annealing(problem, knapsack_opts);
 
         // Found a strictly better solution than the greedy start (value 160).
-        assert!(result.best_cost <= -200.0, "best_cost = {}", result.best_cost);
+        assert!(
+            result.best_cost <= -200.0,
+            "best_cost = {}",
+            result.best_cost
+        );
         // The reported best is feasible (within capacity).
         let w: f64 = (0..3).map(|i| inst.weights[i] * result.best_state[i]).sum();
         assert!(w <= inst.capacity + 1e-9, "best weight {w} over capacity");

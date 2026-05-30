@@ -117,7 +117,11 @@ pub fn run_smart_traffic_flow(
         exited: entered,
         dropped: 0,
         final_cars_len: 0,
-        mean_travel_time_sec: if entered > 0 { mean_len / mean_speed } else { 0.0 },
+        mean_travel_time_sec: if entered > 0 {
+            mean_len / mean_speed
+        } else {
+            0.0
+        },
         mean_speed_mps: mean_speed,
         scheduled_trips_len: scheduled_trips.len(),
     }
@@ -158,11 +162,17 @@ struct EngineReport {
 }
 
 fn check_row(name: &str, passed: bool, detail: String) -> CheckRow {
-    CheckRow { name: name.to_string(), passed, detail }
+    CheckRow {
+        name: name.to_string(),
+        passed,
+        detail,
+    }
 }
 
 fn out_dir() -> PathBuf {
-    repo_root_from_runner().join("out").join("external-fel-comparison")
+    repo_root_from_runner()
+        .join("out")
+        .join("external-fel-comparison")
 }
 
 /// `main()` — returns the intended exit code (1 if any report failed).
@@ -230,7 +240,12 @@ fn compare_traffic() -> Vec<EngineReport> {
         scheduled_trips_len: 0,
     };
     let demand_end_sec = 120.0;
-    let trips = generate_scheduled_trips(&network, &params, (params.seed + 4242.0) as u32, demand_end_sec);
+    let trips = generate_scheduled_trips(
+        &network,
+        &params,
+        (params.seed + 4242.0) as u32,
+        demand_end_sec,
+    );
     let input_path = out_dir().join("traffic-shared-input.json");
     let input_json = shared_traffic_input_json(&network, &params, &trips, demand_end_sec);
     let _ = fs::write(&input_path, input_json.to_string_pretty(2));
@@ -263,10 +278,25 @@ fn compare_traffic() -> Vec<EngineReport> {
     let internal = run_smart_traffic_flow(&internal_params, &network, &internal_trips);
 
     let mut reports: Vec<EngineReport> = vec![
-        run_traffic_external("Python traffic FEL", TRAFFIC_FEL_REFERENCE_ID, &input_path_str, &internal),
-        run_traffic_external("SimPy", TRAFFIC_SIMPY_REFERENCE_ID, &input_path_str, &internal),
+        run_traffic_external(
+            "Python traffic FEL",
+            TRAFFIC_FEL_REFERENCE_ID,
+            &input_path_str,
+            &internal,
+        ),
+        run_traffic_external(
+            "SimPy",
+            TRAFFIC_SIMPY_REFERENCE_ID,
+            &input_path_str,
+            &internal,
+        ),
         run_traffic_external("Ciw", TRAFFIC_CIW_REFERENCE_ID, &input_path_str, &internal),
-        run_traffic_external("SUMO", TRAFFIC_SUMO_REFERENCE_ID, &input_path_str, &internal),
+        run_traffic_external(
+            "SUMO",
+            TRAFFIC_SUMO_REFERENCE_ID,
+            &input_path_str,
+            &internal,
+        ),
     ];
     reports.insert(
         0,
@@ -317,12 +347,21 @@ fn run_traffic_external(
     let output_path_str = output_path.display().to_string();
 
     let mut params = ExternalModuleParams::new();
-    params.insert("problem".to_string(), ParamValue::Str(input_path.to_string()));
+    params.insert(
+        "problem".to_string(),
+        ParamValue::Str(input_path.to_string()),
+    );
     params.insert("out".to_string(), ParamValue::Str(output_path_str.clone()));
-    params.insert("collisionAction".to_string(), ParamValue::Str("warn".to_string()));
+    params.insert(
+        "collisionAction".to_string(),
+        ParamValue::Str("warn".to_string()),
+    );
     let ext = run_external_module_safe(module_id, &params);
 
-    let mut notes = vec![format!("external command status={}", status_str(ext.status))];
+    let mut notes = vec![format!(
+        "external command status={}",
+        status_str(ext.status)
+    )];
     if !ext.stderr.trim().is_empty() {
         notes.push(slice_chars(ext.stderr.trim(), 500));
     }
@@ -340,31 +379,63 @@ fn run_traffic_external(
     if ext.status != Some(0) || !output_path.exists() {
         return base(
             "failed",
-            vec![check_row("external process writes output JSON", false, format!("status={}", status_str(ext.status)))],
+            vec![check_row(
+                "external process writes output JSON",
+                false,
+                format!("status={}", status_str(ext.status)),
+            )],
             notes,
         );
     }
     let text = match fs::read_to_string(&output_path) {
         Ok(t) => t,
-        Err(e) => return base("failed", vec![check_row("read output JSON", false, e.to_string())], notes),
+        Err(e) => {
+            return base(
+                "failed",
+                vec![check_row("read output JSON", false, e.to_string())],
+                notes,
+            )
+        }
     };
     let payload = match parse_json(&text) {
         Ok(v) => v,
-        Err(e) => return base("failed", vec![check_row("parse output JSON", false, e)], notes),
+        Err(e) => {
+            return base(
+                "failed",
+                vec![check_row("parse output JSON", false, e)],
+                notes,
+            )
+        }
     };
     let status_field = payload.get("status").and_then(|v| v.as_str());
     if status_field == Some("unavailable") {
-        let msg = payload.get("message").and_then(|v| v.as_str()).unwrap_or("unavailable").to_string();
+        let msg = payload
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unavailable")
+            .to_string();
         return base(
             "skipped",
-            vec![check_row("external dependency reported unavailable cleanly", true, msg)],
+            vec![check_row(
+                "external dependency reported unavailable cleanly",
+                true,
+                msg,
+            )],
             notes,
         );
     }
     if let Some(s) = status_field {
         if s != "ok" {
-            let msg = payload.get("message").and_then(|v| v.as_str()).unwrap_or(s).to_string();
-            return base("failed", vec![check_row("external payload status is ok", false, msg)], notes);
+            let msg = payload
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or(s)
+                .to_string();
+            return base(
+                "failed",
+                vec![check_row("external payload status is ok", false, msg)],
+                notes,
+            );
         }
     }
     let result = payload.get("result").cloned().unwrap_or(JsonValue::Null);
@@ -373,7 +444,11 @@ fn run_traffic_external(
     let result_notes = result
         .get("notes")
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect::<Vec<_>>())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        })
         .unwrap_or(notes);
     base(if all { "passed" } else { "failed" }, checks, result_notes)
 }
@@ -401,21 +476,26 @@ fn build_bottleneck_computer_network_problem() -> ComputerNetworkProblem {
             bidirectional: Some(true),
         }
     };
-    let flow =
-        |id: &str, source: &str, destination: &str, protocol: NetworkProtocol, rate_pps: f64, packet_size_bytes: f64, max_packets: u64| {
-            NetworkFlowSpec {
-                id: id.to_string(),
-                source: source.to_string(),
-                destination: destination.to_string(),
-                protocol: Some(protocol),
-                rate_pps,
-                packet_size_bytes,
-                start_ms: None,
-                end_ms: None,
-                max_packets: Some(max_packets),
-                ttl_hops: None,
-            }
-        };
+    let flow = |id: &str,
+                source: &str,
+                destination: &str,
+                protocol: NetworkProtocol,
+                rate_pps: f64,
+                packet_size_bytes: f64,
+                max_packets: u64| {
+        NetworkFlowSpec {
+            id: id.to_string(),
+            source: source.to_string(),
+            destination: destination.to_string(),
+            protocol: Some(protocol),
+            rate_pps,
+            packet_size_bytes,
+            start_ms: None,
+            end_ms: None,
+            max_packets: Some(max_packets),
+            ttl_hops: None,
+        }
+    };
     ComputerNetworkProblem {
         nodes: vec![
             node("web-client", NetworkNodeKind::Host, 6000.0, 512),
@@ -426,14 +506,54 @@ fn build_bottleneck_computer_network_problem() -> ComputerNetworkProblem {
         ],
         links: vec![
             link("web-edge", "web-client", "edge", 100.0, 1.0, 0.001, 256),
-            link("telemetry-edge", "telemetry-client", "edge", 100.0, 1.0, 0.001, 256),
+            link(
+                "telemetry-edge",
+                "telemetry-client",
+                "edge",
+                100.0,
+                1.0,
+                0.001,
+                256,
+            ),
             link("edge-wan", "edge", "wan-router", 5.0, 25.0, 0.010, 96),
-            link("wan-api", "wan-router", "api-server", 100.0, 4.0, 0.002, 256),
+            link(
+                "wan-api",
+                "wan-router",
+                "api-server",
+                100.0,
+                4.0,
+                0.002,
+                256,
+            ),
         ],
         flows: vec![
-            flow("http-api", "web-client", "api-server", NetworkProtocol::Http, 900.0, 1100.0, 1800),
-            flow("udp-telemetry", "telemetry-client", "api-server", NetworkProtocol::Udp, 700.0, 900.0, 1400),
-            flow("tcp-bulk", "web-client", "api-server", NetworkProtocol::Tcp, 350.0, 1400.0, 700),
+            flow(
+                "http-api",
+                "web-client",
+                "api-server",
+                NetworkProtocol::Http,
+                900.0,
+                1100.0,
+                1800,
+            ),
+            flow(
+                "udp-telemetry",
+                "telemetry-client",
+                "api-server",
+                NetworkProtocol::Udp,
+                700.0,
+                900.0,
+                1400,
+            ),
+            flow(
+                "tcp-bulk",
+                "web-client",
+                "api-server",
+                NetworkProtocol::Tcp,
+                350.0,
+                1400.0,
+                700,
+            ),
         ],
         duration_ms: 2000.0,
         dt_ms: 1.0,
@@ -447,14 +567,23 @@ fn build_bottleneck_computer_network_problem() -> ComputerNetworkProblem {
 fn compare_computer_network() -> Vec<EngineReport> {
     let scenarios: Vec<(&str, ComputerNetworkProblem)> = vec![
         ("small-enterprise", build_default_computer_network_problem()),
-        ("bottleneck-lab", build_bottleneck_computer_network_problem()),
+        (
+            "bottleneck-lab",
+            build_bottleneck_computer_network_problem(),
+        ),
     ];
     let mut reports: Vec<EngineReport> = Vec::new();
     for (name, problem) in scenarios {
         validate_computer_network_problem(&problem).expect("invalid computer-network problem");
         let input = JsonValue::Object(vec![
-            ("$schema".to_string(), JsonValue::String("des/model-spec/v1".to_string())),
-            ("model".to_string(), JsonValue::String("computer-network".to_string())),
+            (
+                "$schema".to_string(),
+                JsonValue::String("des/model-spec/v1".to_string()),
+            ),
+            (
+                "model".to_string(),
+                JsonValue::String("computer-network".to_string()),
+            ),
             (
                 "description".to_string(),
                 JsonValue::String(format!("{name} shared source/sink packet-flow comparison")),
@@ -463,7 +592,10 @@ fn compare_computer_network() -> Vec<EngineReport> {
             // round-trip it through JSON (no Serialize for ComputerNetworkProblem).
             (
                 "parameters".to_string(),
-                JsonValue::Object(vec![("problem".to_string(), JsonValue::String(name.to_string()))]),
+                JsonValue::Object(vec![(
+                    "problem".to_string(),
+                    JsonValue::String(name.to_string()),
+                )]),
             ),
             (
                 "runtime".to_string(),
@@ -471,15 +603,25 @@ fn compare_computer_network() -> Vec<EngineReport> {
             ),
         ]);
         let input_path = out_dir().join(format!("computer-network-{name}.json"));
-        let output_path = out_dir().join(format!("computer-network-{name}-python-fel-reference.json"));
+        let output_path =
+            out_dir().join(format!("computer-network-{name}-python-fel-reference.json"));
         let _ = fs::write(&input_path, input.to_string_pretty(2));
 
         let internal = run_computer_network_simulation(&problem);
         let mut params = ExternalModuleParams::new();
-        params.insert("problem".to_string(), ParamValue::Str(input_path.display().to_string()));
-        params.insert("out".to_string(), ParamValue::Str(output_path.display().to_string()));
+        params.insert(
+            "problem".to_string(),
+            ParamValue::Str(input_path.display().to_string()),
+        );
+        params.insert(
+            "out".to_string(),
+            ParamValue::Str(output_path.display().to_string()),
+        );
         let ext = run_external_module_safe(COMPUTER_NETWORK_FEL_REFERENCE_ID, &params);
-        let mut notes = vec![format!("external command status={}", status_str(ext.status))];
+        let mut notes = vec![format!(
+            "external command status={}",
+            status_str(ext.status)
+        )];
         if !ext.stderr.trim().is_empty() {
             notes.push(slice_chars(ext.stderr.trim(), 500));
         }
@@ -491,20 +633,31 @@ fn compare_computer_network() -> Vec<EngineReport> {
                 status: "failed".to_string(),
                 input_path: input_path.display().to_string(),
                 output_path: Some(output_path.display().to_string()),
-                checks: vec![check_row("external process writes output JSON", false, format!("status={}", status_str(ext.status)))],
+                checks: vec![check_row(
+                    "external process writes output JSON",
+                    false,
+                    format!("status={}", status_str(ext.status)),
+                )],
                 notes,
             });
             continue;
         }
         let text = fs::read_to_string(&output_path).unwrap_or_default();
-        let external = parse_json(&text).ok().and_then(|v| v.get("result").cloned()).unwrap_or(JsonValue::Null);
+        let external = parse_json(&text)
+            .ok()
+            .and_then(|v| v.get("result").cloned())
+            .unwrap_or(JsonValue::Null);
         let checks = compare_computer_network_stats(&internal, &external);
         let all = checks.iter().all(|c| c.passed);
         reports.push(EngineReport {
             domain: "computer-network".to_string(),
             scenario: name.to_string(),
             engine: "Python computer-network FEL".to_string(),
-            status: if all { "passed".to_string() } else { "failed".to_string() },
+            status: if all {
+                "passed".to_string()
+            } else {
+                "failed".to_string()
+            },
             input_path: input_path.display().to_string(),
             output_path: Some(output_path.display().to_string()),
             checks,
@@ -520,15 +673,33 @@ fn validate_shared_traffic_input(
     trips: &[SharedTrafficTrip],
 ) -> Vec<CheckRow> {
     let mut checks: Vec<CheckRow> = Vec::new();
-    let lane_by_id: HashMap<&str, &TrafficLane> = network.lanes.iter().map(|l| (l.id.as_str(), l)).collect();
-    checks.push(check_row("has source entities", !network.sources.is_empty(), format!("sources={}", network.sources.len())));
-    checks.push(check_row("has sink entities", !network.sinks.is_empty(), format!("sinks={}", network.sinks.len())));
-    checks.push(check_row("has scheduled source trips", !trips.is_empty(), format!("trips={}", trips.len())));
+    let lane_by_id: HashMap<&str, &TrafficLane> =
+        network.lanes.iter().map(|l| (l.id.as_str(), l)).collect();
+    checks.push(check_row(
+        "has source entities",
+        !network.sources.is_empty(),
+        format!("sources={}", network.sources.len()),
+    ));
+    checks.push(check_row(
+        "has sink entities",
+        !network.sinks.is_empty(),
+        format!("sinks={}", network.sinks.len()),
+    ));
+    checks.push(check_row(
+        "has scheduled source trips",
+        !trips.is_empty(),
+        format!("trips={}", trips.len()),
+    ));
     for trip in trips {
         let source = network.sources.iter().find(|s| s.id == trip.source_id);
-        let sink = network.sinks.iter().find(|s| s.id == trip.destination_sink_id);
+        let sink = network
+            .sinks
+            .iter()
+            .find(|s| s.id == trip.destination_sink_id);
         let route_ok = match (source, sink) {
-            (Some(src), Some(snk)) => route_connects(&trip.route, &src.node_id, &snk.node_id, &lane_by_id),
+            (Some(src), Some(snk)) => {
+                route_connects(&trip.route, &src.node_id, &snk.node_id, &lane_by_id)
+            }
             _ => false,
         };
         let allowed = match source {
@@ -541,12 +712,15 @@ fn validate_shared_traffic_input(
         };
         checks.push(check_row(
             &format!("{}: source exists", trip.id),
-            source.map(|s| s.node_id == trip.source_node_id).unwrap_or(false),
+            source
+                .map(|s| s.node_id == trip.source_node_id)
+                .unwrap_or(false),
             format!("{}@{}", trip.source_id, trip.source_node_id),
         ));
         checks.push(check_row(
             &format!("{}: sink exists", trip.id),
-            sink.map(|s| s.node_id == trip.sink_node_id).unwrap_or(false),
+            sink.map(|s| s.node_id == trip.sink_node_id)
+                .unwrap_or(false),
             format!("{}@{}", trip.destination_sink_id, trip.sink_node_id),
         ));
         checks.push(check_row(
@@ -554,7 +728,11 @@ fn validate_shared_traffic_input(
             allowed,
             format!("{}->{}", trip.source_id, trip.destination_sink_id),
         ));
-        checks.push(check_row(&format!("{}: route connects source to sink", trip.id), route_ok, trip.route.join("->")));
+        checks.push(check_row(
+            &format!("{}: route connects source to sink", trip.id),
+            route_ok,
+            trip.route.join("->"),
+        ));
         checks.push(check_row(
             &format!("{}: departSec is in horizon", trip.id),
             trip.depart_sec >= 0.0 && trip.depart_sec <= params.duration_sec,
@@ -572,39 +750,124 @@ fn compare_traffic_stats(internal: &SmartTrafficResult, external: &JsonValue) ->
             g("generatedDemand").unwrap_or(f64::NAN),
             internal.scheduled_trips_len as f64,
         ),
-        relative_number("departures align with internal entered count", g("departed").unwrap_or(f64::NAN), internal.entered as f64, 0.2),
-        relative_number("arrivals align with internal exited count", g("arrived").unwrap_or(f64::NAN), internal.exited as f64, 0.45),
-        close_number("active-at-end aligns with internal final cars", g("activeAtEnd").unwrap_or(f64::NAN), internal.final_cars_len as f64, 2.0),
-        finite_number("external mean travel time is finite", g("meanTravelTimeSec").unwrap_or(f64::NAN)),
-        finite_number("external mean speed is finite", g("meanSpeedMps").unwrap_or(f64::NAN)),
+        relative_number(
+            "departures align with internal entered count",
+            g("departed").unwrap_or(f64::NAN),
+            internal.entered as f64,
+            0.2,
+        ),
+        relative_number(
+            "arrivals align with internal exited count",
+            g("arrived").unwrap_or(f64::NAN),
+            internal.exited as f64,
+            0.45,
+        ),
+        close_number(
+            "active-at-end aligns with internal final cars",
+            g("activeAtEnd").unwrap_or(f64::NAN),
+            internal.final_cars_len as f64,
+            2.0,
+        ),
+        finite_number(
+            "external mean travel time is finite",
+            g("meanTravelTimeSec").unwrap_or(f64::NAN),
+        ),
+        finite_number(
+            "external mean speed is finite",
+            g("meanSpeedMps").unwrap_or(f64::NAN),
+        ),
     ];
     let ext_mt = g("meanTravelTimeSec").unwrap_or(0.0);
     if internal.mean_travel_time_sec > 0.0 && ext_mt > 0.0 {
-        checks.push(ratio_band("mean travel time same order of magnitude", ext_mt, internal.mean_travel_time_sec, 0.2, 5.0));
+        checks.push(ratio_band(
+            "mean travel time same order of magnitude",
+            ext_mt,
+            internal.mean_travel_time_sec,
+            0.2,
+            5.0,
+        ));
     }
     checks
 }
 
-fn compare_computer_network_stats(internal: &ComputerNetworkResult, external: &JsonValue) -> Vec<CheckRow> {
+fn compare_computer_network_stats(
+    internal: &ComputerNetworkResult,
+    external: &JsonValue,
+) -> Vec<CheckRow> {
     let g = |k: &str| external.get(k).and_then(|v| v.as_f64()).unwrap_or(f64::NAN);
     let mut checks = vec![
-        exact_number("generated packets", g("generatedPackets"), internal.generated_packets),
-        exact_number("delivered packets", g("deliveredPackets"), internal.delivered_packets),
-        exact_number("dropped packets", g("droppedPackets"), internal.dropped_packets),
-        exact_number("active packets", g("activePackets"), internal.active_packets),
-        exact_number("max active packets", g("maxActivePackets"), internal.max_active_packets),
-        close_number("delivery ratio", g("deliveryRatio"), internal.delivery_ratio, 1e-9),
-        close_number("offered load Mbps", g("offeredLoadMbps"), internal.offered_load_mbps, 1e-9),
-        close_number("wire throughput Mbps", g("throughputMbps"), internal.throughput_mbps, 1e-9),
-        close_number("goodput Mbps", g("goodputMbps"), internal.goodput_mbps, 1e-9),
-        close_number("mean latency ms", g("meanLatencyMs"), internal.mean_latency_ms, 1e-9),
-        close_number("p95 latency ms", g("p95LatencyMs"), internal.p95_latency_ms, 1e-9),
+        exact_number(
+            "generated packets",
+            g("generatedPackets"),
+            internal.generated_packets,
+        ),
+        exact_number(
+            "delivered packets",
+            g("deliveredPackets"),
+            internal.delivered_packets,
+        ),
+        exact_number(
+            "dropped packets",
+            g("droppedPackets"),
+            internal.dropped_packets,
+        ),
+        exact_number(
+            "active packets",
+            g("activePackets"),
+            internal.active_packets,
+        ),
+        exact_number(
+            "max active packets",
+            g("maxActivePackets"),
+            internal.max_active_packets,
+        ),
+        close_number(
+            "delivery ratio",
+            g("deliveryRatio"),
+            internal.delivery_ratio,
+            1e-9,
+        ),
+        close_number(
+            "offered load Mbps",
+            g("offeredLoadMbps"),
+            internal.offered_load_mbps,
+            1e-9,
+        ),
+        close_number(
+            "wire throughput Mbps",
+            g("throughputMbps"),
+            internal.throughput_mbps,
+            1e-9,
+        ),
+        close_number(
+            "goodput Mbps",
+            g("goodputMbps"),
+            internal.goodput_mbps,
+            1e-9,
+        ),
+        close_number(
+            "mean latency ms",
+            g("meanLatencyMs"),
+            internal.mean_latency_ms,
+            1e-9,
+        ),
+        close_number(
+            "p95 latency ms",
+            g("p95LatencyMs"),
+            internal.p95_latency_ms,
+            1e-9,
+        ),
         close_number("total cost", g("totalCost"), internal.total_cost, 1e-9),
     ];
-    let ext_b0 = external.get("bottlenecks").and_then(|v| v.as_array()).and_then(|a| a.first());
+    let ext_b0 = external
+        .get("bottlenecks")
+        .and_then(|v| v.as_array())
+        .and_then(|a| a.first());
     let ext_kind = ext_b0.and_then(|b| b.get("kind")).and_then(|v| v.as_str());
     let ext_id = ext_b0.and_then(|b| b.get("id")).and_then(|v| v.as_str());
-    let ext_reason = ext_b0.and_then(|b| b.get("reason")).and_then(|v| v.as_str());
+    let ext_reason = ext_b0
+        .and_then(|b| b.get("reason"))
+        .and_then(|v| v.as_str());
     let int_b0 = internal.bottlenecks.first();
     let agree = ext_kind == int_b0.map(|b| b.kind.as_str())
         && ext_id == int_b0.map(|b| b.id.as_str())
@@ -612,7 +875,11 @@ fn compare_computer_network_stats(internal: &ComputerNetworkResult, external: &J
     checks.push(check_row(
         "top bottleneck agrees",
         agree,
-        format!("internal={} external={}", bottleneck_label_internal(internal), bottleneck_label_json(external)),
+        format!(
+            "internal={} external={}",
+            bottleneck_label_internal(internal),
+            bottleneck_label_json(external)
+        ),
     ));
     checks
 }
@@ -627,7 +894,11 @@ fn generate_scheduled_trips(
     let mut accumulators: HashMap<String, f64> = HashMap::new();
     let mut trips: Vec<SharedTrafficTrip> = Vec::new();
     let ticks = (demand_end_sec / params.dt_sec).ceil() as i64;
-    let sink_by_id: HashMap<&str, &str> = network.sinks.iter().map(|s| (s.id.as_str(), s.node_id.as_str())).collect();
+    let sink_by_id: HashMap<&str, &str> = network
+        .sinks
+        .iter()
+        .map(|s| (s.id.as_str(), s.node_id.as_str()))
+        .collect();
     for source in &network.sources {
         accumulators.insert(source.id.clone(), 0.0);
     }
@@ -650,7 +921,9 @@ fn generate_scheduled_trips(
                 }
                 let pick = (rng.next_float() * sink_ids.len() as f64).floor() as usize;
                 let destination_sink_id = sink_ids[pick.min(sink_ids.len() - 1)].clone();
-                let Some(sink_node) = sink_by_id.get(destination_sink_id.as_str()) else { continue };
+                let Some(sink_node) = sink_by_id.get(destination_sink_id.as_str()) else {
+                    continue;
+                };
                 let route = shortest_lane_path(network, &source.node_id, sink_node);
                 if route.is_empty() {
                     continue;
@@ -675,7 +948,8 @@ fn shortest_lane_path(network: &TrafficNetwork, from_node: &str, to_node: &str) 
     for lane in &network.lanes {
         outgoing.entry(lane.from.as_str()).or_default().push(lane);
     }
-    let mut queue: std::collections::VecDeque<(String, Vec<String>)> = std::collections::VecDeque::new();
+    let mut queue: std::collections::VecDeque<(String, Vec<String>)> =
+        std::collections::VecDeque::new();
     queue.push_back((from_node.to_string(), Vec::new()));
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     seen.insert(from_node.to_string());
@@ -698,13 +972,20 @@ fn shortest_lane_path(network: &TrafficNetwork, from_node: &str, to_node: &str) 
     Vec::new()
 }
 
-fn route_connects(route: &[String], source_node: &str, sink_node: &str, lane_by_id: &HashMap<&str, &TrafficLane>) -> bool {
+fn route_connects(
+    route: &[String],
+    source_node: &str,
+    sink_node: &str,
+    lane_by_id: &HashMap<&str, &TrafficLane>,
+) -> bool {
     if route.is_empty() {
         return false;
     }
     let mut current = source_node.to_string();
     for lane_id in route {
-        let Some(lane) = lane_by_id.get(lane_id.as_str()) else { return false };
+        let Some(lane) = lane_by_id.get(lane_id.as_str()) else {
+            return false;
+        };
         if lane.from != current {
             return false;
         }
@@ -716,7 +997,11 @@ fn route_connects(route: &[String], source_node: &str, sink_node: &str, lane_by_
 // --- check helpers -----------------------------------------------------------
 
 fn exact_number(name: &str, actual: f64, expected: f64) -> CheckRow {
-    check_row(name, actual == expected, format!("actual={} expected={}", fmt_num(actual), fmt_num(expected)))
+    check_row(
+        name,
+        actual == expected,
+        format!("actual={} expected={}", fmt_num(actual), fmt_num(expected)),
+    )
 }
 
 fn close_number(name: &str, actual: f64, expected: f64, tolerance: f64) -> CheckRow {
@@ -724,7 +1009,12 @@ fn close_number(name: &str, actual: f64, expected: f64, tolerance: f64) -> Check
     check_row(
         name,
         diff <= tolerance,
-        format!("actual={} expected={} diff={:e} tol={tolerance}", fmt_num(actual), fmt_num(expected), diff),
+        format!(
+            "actual={} expected={} diff={:e} tol={tolerance}",
+            fmt_num(actual),
+            fmt_num(expected),
+            diff
+        ),
     )
 }
 
@@ -734,7 +1024,12 @@ fn relative_number(name: &str, actual: f64, expected: f64, tolerance: f64) -> Ch
     check_row(
         name,
         rel <= tolerance,
-        format!("actual={} expected={} rel={:.3} tol={tolerance}", fmt_num(actual), fmt_num(expected), rel),
+        format!(
+            "actual={} expected={} rel={:.3} tol={tolerance}",
+            fmt_num(actual),
+            fmt_num(expected),
+            rel
+        ),
     )
 }
 
@@ -743,12 +1038,20 @@ fn ratio_band(name: &str, actual: f64, expected: f64, min_ratio: f64, max_ratio:
     check_row(
         name,
         ratio >= min_ratio && ratio <= max_ratio,
-        format!("actual={} expected={} ratio={ratio:.3}", fmt_num(actual), fmt_num(expected)),
+        format!(
+            "actual={} expected={} ratio={ratio:.3}",
+            fmt_num(actual),
+            fmt_num(expected)
+        ),
     )
 }
 
 fn finite_number(name: &str, actual: f64) -> CheckRow {
-    check_row(name, actual.is_finite(), format!("actual={}", fmt_num(actual)))
+    check_row(
+        name,
+        actual.is_finite(),
+        format!("actual={}", fmt_num(actual)),
+    )
 }
 
 fn bottleneck_label_internal(result: &ComputerNetworkResult) -> String {
@@ -759,7 +1062,10 @@ fn bottleneck_label_internal(result: &ComputerNetworkResult) -> String {
 }
 
 fn bottleneck_label_json(external: &JsonValue) -> String {
-    let b0 = external.get("bottlenecks").and_then(|v| v.as_array()).and_then(|a| a.first());
+    let b0 = external
+        .get("bottlenecks")
+        .and_then(|v| v.as_array())
+        .and_then(|a| a.first());
     match b0 {
         Some(b) => format!(
             "{}:{}:{}",
@@ -837,18 +1143,39 @@ fn shared_traffic_input_json(
     demand_end_sec: f64,
 ) -> JsonValue {
     JsonValue::Object(vec![
-        ("schema".to_string(), JsonValue::String("des/shared-traffic-source-sink/v1".to_string())),
-        ("model".to_string(), JsonValue::String("smart-traffic-flow".to_string())),
+        (
+            "schema".to_string(),
+            JsonValue::String("des/shared-traffic-source-sink/v1".to_string()),
+        ),
+        (
+            "model".to_string(),
+            JsonValue::String("smart-traffic-flow".to_string()),
+        ),
         ("params".to_string(), params_json(params)),
         ("network".to_string(), network_json(network)),
-        ("trips".to_string(), JsonValue::Array(trips.iter().map(trip_json).collect())),
+        (
+            "trips".to_string(),
+            JsonValue::Array(trips.iter().map(trip_json).collect()),
+        ),
         (
             "sourceInitialConditions".to_string(),
             JsonValue::Object(vec![
-                ("sourceCount".to_string(), JsonValue::Number(network.sources.len() as f64)),
-                ("sinkCount".to_string(), JsonValue::Number(network.sinks.len() as f64)),
-                ("scheduledTrips".to_string(), JsonValue::Number(trips.len() as f64)),
-                ("demandEndSec".to_string(), JsonValue::Number(demand_end_sec)),
+                (
+                    "sourceCount".to_string(),
+                    JsonValue::Number(network.sources.len() as f64),
+                ),
+                (
+                    "sinkCount".to_string(),
+                    JsonValue::Number(network.sinks.len() as f64),
+                ),
+                (
+                    "scheduledTrips".to_string(),
+                    JsonValue::Number(trips.len() as f64),
+                ),
+                (
+                    "demandEndSec".to_string(),
+                    JsonValue::Number(demand_end_sec),
+                ),
             ]),
         ),
     ])
@@ -862,7 +1189,10 @@ fn params_json(p: &SmartTrafficParams) -> JsonValue {
         ("actorShuffleSeed".to_string(), opt(p.actor_shuffle_seed)),
         ("maxCars".to_string(), opt(p.max_cars)),
         ("smartCarPoolSize".to_string(), opt(p.smart_car_pool_size)),
-        ("spawnRateMultiplier".to_string(), opt(p.spawn_rate_multiplier)),
+        (
+            "spawnRateMultiplier".to_string(),
+            opt(p.spawn_rate_multiplier),
+        ),
         ("carLengthM".to_string(), opt(p.car_length_m)),
         ("carWidthM".to_string(), opt(p.car_width_m)),
         ("laneWidthM".to_string(), opt(p.lane_width_m)),
@@ -874,9 +1204,18 @@ fn params_json(p: &SmartTrafficParams) -> JsonValue {
         ("timeHeadwaySec".to_string(), opt(p.time_headway_sec)),
         ("gridCellSizeM".to_string(), opt(p.grid_cell_size_m)),
         ("accidentRiskScale".to_string(), opt(p.accident_risk_scale)),
-        ("accidentProbability".to_string(), opt(p.accident_probability)),
-        ("distancePreferenceSpread".to_string(), opt(p.distance_preference_spread)),
-        ("startPreferenceSpread".to_string(), opt(p.start_preference_spread)),
+        (
+            "accidentProbability".to_string(),
+            opt(p.accident_probability),
+        ),
+        (
+            "distancePreferenceSpread".to_string(),
+            opt(p.distance_preference_spread),
+        ),
+        (
+            "startPreferenceSpread".to_string(),
+            opt(p.start_preference_spread),
+        ),
     ])
 }
 
@@ -901,7 +1240,10 @@ fn network_json(network: &TrafficNetwork) -> JsonValue {
                 ("from".to_string(), JsonValue::String(l.from.clone())),
                 ("to".to_string(), JsonValue::String(l.to.clone())),
                 ("lengthM".to_string(), JsonValue::Number(l.length_m)),
-                ("speedLimitMps".to_string(), JsonValue::Number(l.speed_limit_mps)),
+                (
+                    "speedLimitMps".to_string(),
+                    JsonValue::Number(l.speed_limit_mps),
+                ),
             ])
         })
         .collect();
@@ -938,21 +1280,47 @@ fn trip_json(t: &SharedTrafficTrip) -> JsonValue {
     JsonValue::Object(vec![
         ("id".to_string(), JsonValue::String(t.id.clone())),
         ("departSec".to_string(), JsonValue::Number(t.depart_sec)),
-        ("sourceId".to_string(), JsonValue::String(t.source_id.clone())),
-        ("destinationSinkId".to_string(), JsonValue::String(t.destination_sink_id.clone())),
-        ("route".to_string(), JsonValue::Array(t.route.iter().map(|r| JsonValue::String(r.clone())).collect())),
-        ("sourceNodeId".to_string(), JsonValue::String(t.source_node_id.clone())),
-        ("sinkNodeId".to_string(), JsonValue::String(t.sink_node_id.clone())),
+        (
+            "sourceId".to_string(),
+            JsonValue::String(t.source_id.clone()),
+        ),
+        (
+            "destinationSinkId".to_string(),
+            JsonValue::String(t.destination_sink_id.clone()),
+        ),
+        (
+            "route".to_string(),
+            JsonValue::Array(
+                t.route
+                    .iter()
+                    .map(|r| JsonValue::String(r.clone()))
+                    .collect(),
+            ),
+        ),
+        (
+            "sourceNodeId".to_string(),
+            JsonValue::String(t.source_node_id.clone()),
+        ),
+        (
+            "sinkNodeId".to_string(),
+            JsonValue::String(t.sink_node_id.clone()),
+        ),
     ])
 }
 
 fn report_to_json(r: &EngineReport) -> JsonValue {
     JsonValue::Object(vec![
         ("domain".to_string(), JsonValue::String(r.domain.clone())),
-        ("scenario".to_string(), JsonValue::String(r.scenario.clone())),
+        (
+            "scenario".to_string(),
+            JsonValue::String(r.scenario.clone()),
+        ),
         ("engine".to_string(), JsonValue::String(r.engine.clone())),
         ("status".to_string(), JsonValue::String(r.status.clone())),
-        ("inputPath".to_string(), JsonValue::String(r.input_path.clone())),
+        (
+            "inputPath".to_string(),
+            JsonValue::String(r.input_path.clone()),
+        ),
         (
             "outputPath".to_string(),
             match &r.output_path {
@@ -975,7 +1343,15 @@ fn report_to_json(r: &EngineReport) -> JsonValue {
                     .collect(),
             ),
         ),
-        ("notes".to_string(), JsonValue::Array(r.notes.iter().map(|n| JsonValue::String(n.clone())).collect())),
+        (
+            "notes".to_string(),
+            JsonValue::Array(
+                r.notes
+                    .iter()
+                    .map(|n| JsonValue::String(n.clone()))
+                    .collect(),
+            ),
+        ),
     ])
 }
 
@@ -995,7 +1371,11 @@ fn render_markdown(reports: &[EngineReport], root: &Path) -> String {
             report.status.clone(),
             format!("{}/{}", passed, report.checks.len()),
             relative(root, Path::new(&report.input_path)),
-            report.output_path.as_ref().map(|p| relative(root, Path::new(p))).unwrap_or_default(),
+            report
+                .output_path
+                .as_ref()
+                .map(|p| relative(root, Path::new(p)))
+                .unwrap_or_default(),
         ]
         .iter()
         .map(|c| escape_markdown_cell(c))
@@ -1007,7 +1387,10 @@ fn render_markdown(reports: &[EngineReport], root: &Path) -> String {
         .iter()
         .flat_map(|report| {
             report.checks.iter().filter(|c| !c.passed).map(move |c| {
-                format!("- {}/{}/{}: {} ({})", report.domain, report.scenario, report.engine, c.name, c.detail)
+                format!(
+                    "- {}/{}/{}: {} ({})",
+                    report.domain, report.scenario, report.engine, c.name, c.detail
+                )
             })
         })
         .collect();
@@ -1023,7 +1406,11 @@ fn render_markdown(reports: &[EngineReport], root: &Path) -> String {
         lines.push("## Skipped Optional Engines".to_string());
         lines.push(String::new());
         for report in skipped {
-            let detail = report.checks.first().map(|c| c.detail.clone()).unwrap_or_else(|| "skipped".to_string());
+            let detail = report
+                .checks
+                .first()
+                .map(|c| c.detail.clone())
+                .unwrap_or_else(|| "skipped".to_string());
             lines.push(format!("- {}: {detail}", report.engine));
         }
     }

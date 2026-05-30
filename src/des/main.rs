@@ -122,7 +122,11 @@ pub fn run() {
     let order = ["A", "B", "C", "D", "E"];
     let mut map: HashMap<&str, Node> = HashMap::new();
 
-    let a = Rc::new(RefCell::new(EntitySource::new("A".to_string(), uniform(200.0, 500.0, &mut seeds), -1)));
+    let a = Rc::new(RefCell::new(EntitySource::new(
+        "A".to_string(),
+        uniform(200.0, 500.0, &mut seeds),
+        -1,
+    )));
     a.borrow_mut().subscribe(obs.clone());
     map.insert("A", Node::Source(a));
 
@@ -156,7 +160,10 @@ pub fn run() {
         println!("{:?}", node_a.computed());
     }
 
-    let program_list: Vec<Node> = order.iter().map(|id| map.get(id).unwrap().clone()).collect();
+    let program_list: Vec<Node> = order
+        .iter()
+        .map(|id| map.get(id).unwrap().clone())
+        .collect();
     let mut shuffled = program_list.clone();
     let mut rng = SeededRandom::new(0xD15EA5E);
 
@@ -168,7 +175,10 @@ pub fn run() {
             println!("{i} {i} {i} {i} {i} {i} {i} {i} {i} **************************************");
             println!("{:?}", map.get(id).unwrap().computed());
         }
-        println!("obs.movingEntities.size: {}", obs.borrow().moving_entities.len());
+        println!(
+            "obs.movingEntities.size: {}",
+            obs.borrow().moving_entities.len()
+        );
     };
 
     // `runAll(102)` — warm-up loop. Work runs for i = 102 ..= 20001, then the

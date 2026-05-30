@@ -34,7 +34,7 @@ use crate::des::r#abstract::interfaces::{
     HasOutput,
 };
 use crate::des::r#abstract::r#abstract::{
-    BidirectionalCore, ConnectionOpts, Entity, EntityCore, EntityConnection,
+    BidirectionalCore, ConnectionOpts, Entity, EntityConnection, EntityCore,
 };
 use crate::des::shared::precision::Decimal;
 

@@ -211,9 +211,22 @@ impl Entity for BasicMovingEntity {
         // Object.assign(getWithComputedProperties(), getSerializableData())
         EntityGraphData::default()
             .with("timeInSystem", round5(self.core.time_in_system))
-            .with("hasExitedSystem", if self.core.has_exited_system { 1.0 } else { 0.0 })
-            .with("totalInProcessTime", round5(self.core.total_in_process_time))
-            .with("stationsVisitedCount", self.core.stations_visited_count as f64)
+            .with(
+                "hasExitedSystem",
+                if self.core.has_exited_system {
+                    1.0
+                } else {
+                    0.0
+                },
+            )
+            .with(
+                "totalInProcessTime",
+                round5(self.core.total_in_process_time),
+            )
+            .with(
+                "stationsVisitedCount",
+                self.core.stations_visited_count as f64,
+            )
     }
     fn run_time_step(&mut self, _step_size: Decimal) {
         // TS: `throw new Error('not yet implemented.')`
@@ -399,9 +412,22 @@ impl Entity for ProcessableMovingEntity {
     fn get_graph_data(&self) -> EntityGraphData {
         EntityGraphData::default()
             .with("timeInSystem", round5(self.core.time_in_system))
-            .with("hasExitedSystem", if self.core.has_exited_system { 1.0 } else { 0.0 })
-            .with("totalInProcessTime", round5(self.core.total_in_process_time))
-            .with("stationsVisitedCount", self.core.stations_visited_count as f64)
+            .with(
+                "hasExitedSystem",
+                if self.core.has_exited_system {
+                    1.0
+                } else {
+                    0.0
+                },
+            )
+            .with(
+                "totalInProcessTime",
+                round5(self.core.total_in_process_time),
+            )
+            .with(
+                "stationsVisitedCount",
+                self.core.stations_visited_count as f64,
+            )
     }
     fn run_time_step(&mut self, _step_size: Decimal) {
         panic!("not yet implemented.");
@@ -458,9 +484,22 @@ impl Entity for BasicQuantityMovingEntity {
     fn get_graph_data(&self) -> EntityGraphData {
         EntityGraphData::default()
             .with("timeInSystem", round5(self.core.time_in_system))
-            .with("hasExitedSystem", if self.core.has_exited_system { 1.0 } else { 0.0 })
-            .with("totalInProcessTime", round5(self.core.total_in_process_time))
-            .with("stationsVisitedCount", self.core.stations_visited_count as f64)
+            .with(
+                "hasExitedSystem",
+                if self.core.has_exited_system {
+                    1.0
+                } else {
+                    0.0
+                },
+            )
+            .with(
+                "totalInProcessTime",
+                round5(self.core.total_in_process_time),
+            )
+            .with(
+                "stationsVisitedCount",
+                self.core.stations_visited_count as f64,
+            )
     }
     fn run_time_step(&mut self, _step_size: Decimal) {
         panic!("not yet implemented.");

@@ -190,8 +190,8 @@ pub trait FixedPointIterationStation<S>: DESStation {
 
 #[cfg(test)]
 mod tests {
+    use super::super::station::{DESStation, StationCore};
     use super::*;
-    use super::super::station::{StationCore, DESStation};
     use std::any::Any;
 
     /// Banach fixed point of `x = cos(x)` (the Dottie number ≈ 0.739085).
@@ -249,7 +249,10 @@ mod tests {
 
     #[test]
     fn cos_iteration_converges() {
-        let mut s = CosFix::new(FixedPointOptions { tol: Some(1e-12), ..Default::default() });
+        let mut s = CosFix::new(FixedPointOptions {
+            tol: Some(1e-12),
+            ..Default::default()
+        });
         let mut guard = 0;
         while s.has_work() {
             s.run_time_step();
@@ -258,7 +261,11 @@ mod tests {
         }
         assert!(s.is_finished());
         assert_eq!(s.reason(), ConvergenceReason::Converged);
-        assert!((*s.current() - 0.739_085_133_2).abs() < 1e-6, "x = {}", s.current());
+        assert!(
+            (*s.current() - 0.739_085_133_2).abs() < 1e-6,
+            "x = {}",
+            s.current()
+        );
     }
 
     #[test]
@@ -320,7 +327,10 @@ mod tests {
     fn max_iter_stops_iteration() {
         let mut s = Diverge {
             core: StationCore::new("diverge"),
-            fp: FixedPointCore::new(FixedPointOptions { max_iter: Some(5), ..Default::default() }),
+            fp: FixedPointCore::new(FixedPointOptions {
+                max_iter: Some(5),
+                ..Default::default()
+            }),
         };
         s.bootstrap();
         while s.has_work() {

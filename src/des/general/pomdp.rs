@@ -358,7 +358,12 @@ impl<S: Clone, A, O> BeliefLookaheadSolver<S, A, O> {
 
     /// Greedy belief action (with optional ε-greedy exploration), at the
     /// solver's configured `horizon`.
-    pub fn act(&mut self, b: &DiscreteBelief<S>, rng: Option<&dyn Fn() -> f64>, epsilon: f64) -> usize {
+    pub fn act(
+        &mut self,
+        b: &DiscreteBelief<S>,
+        rng: Option<&dyn Fn() -> f64>,
+        epsilon: f64,
+    ) -> usize {
         if let Some(rng) = rng {
             if epsilon > 0.0 && rng() < epsilon {
                 return (rng() * self.qmdp.spec.actions.len() as f64).floor() as usize;
@@ -393,7 +398,11 @@ impl<S: Clone, A, O> BeliefLookaheadSolver<S, A, O> {
         self.horizon
     }
 
-    fn action_values_inner(&mut self, b: &DiscreteBelief<S>, depth: usize) -> Vec<BeliefActionValue> {
+    fn action_values_inner(
+        &mut self,
+        b: &DiscreteBelief<S>,
+        depth: usize,
+    ) -> Vec<BeliefActionValue> {
         let num_a = self.qmdp.spec.actions.len();
         let discount = self.qmdp.spec.discount;
         let mut out: Vec<BeliefActionValue> = Vec::with_capacity(num_a);
@@ -414,8 +423,7 @@ impl<S: Clone, A, O> BeliefLookaheadSolver<S, A, O> {
             out.push(BeliefActionValue { action: a, q });
         }
         out.sort_by(|x, y| {
-            y.q
-                .partial_cmp(&x.q)
+            y.q.partial_cmp(&x.q)
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then(x.action.cmp(&y.action))
         });
@@ -694,7 +702,13 @@ mod tests {
             states: vec![0, 1],
             actions: vec![0],
             observations: vec![0],
-            transition: Box::new(|s, _a| if s == 0 { vec![1.0, 0.0] } else { vec![0.0, 1.0] }),
+            transition: Box::new(|s, _a| {
+                if s == 0 {
+                    vec![1.0, 0.0]
+                } else {
+                    vec![0.0, 1.0]
+                }
+            }),
             observation: Box::new(|_s, _a| vec![1.0]),
             reward: Box::new(|s, _a| if s == 0 { 1.0 } else { 2.0 }),
             discount: 0.9,
@@ -714,7 +728,13 @@ mod tests {
             states: vec![0, 1],
             actions: vec![0, 1],
             observations: vec![0],
-            transition: Box::new(|s, _a| if s == 0 { vec![1.0, 0.0] } else { vec![0.0, 1.0] }),
+            transition: Box::new(|s, _a| {
+                if s == 0 {
+                    vec![1.0, 0.0]
+                } else {
+                    vec![0.0, 1.0]
+                }
+            }),
             observation: Box::new(|_s, _a| vec![1.0]),
             reward: Box::new(|s, a| if a == s { 1.0 } else { 0.0 }),
             discount: 0.0,
@@ -735,8 +755,20 @@ mod tests {
             states: vec![0, 1],
             actions: vec![0, 1],
             observations: vec![0, 1],
-            transition: Box::new(|s, _a| if s == 0 { vec![1.0, 0.0] } else { vec![0.0, 1.0] }),
-            observation: Box::new(|sp, _a| if sp == 0 { vec![1.0, 0.0] } else { vec![0.0, 1.0] }),
+            transition: Box::new(|s, _a| {
+                if s == 0 {
+                    vec![1.0, 0.0]
+                } else {
+                    vec![0.0, 1.0]
+                }
+            }),
+            observation: Box::new(|sp, _a| {
+                if sp == 0 {
+                    vec![1.0, 0.0]
+                } else {
+                    vec![0.0, 1.0]
+                }
+            }),
             reward: Box::new(|s, a| if a == s { 1.0 } else { 0.0 }),
             discount: 0.9,
             initial_belief: None,

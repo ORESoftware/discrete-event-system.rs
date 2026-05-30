@@ -216,7 +216,10 @@ mod tests {
         for _ in 0..1_000_000 {
             naive += 0.05;
         }
-        assert!((naive - 50000.0).abs() > 1e-9, "naive f64 should visibly drift");
+        assert!(
+            (naive - 50000.0).abs() > 1e-9,
+            "naive f64 should visibly drift"
+        );
     }
 
     #[test]
@@ -225,7 +228,11 @@ mod tests {
         let v = vec![0.05_f64; 1_000_000];
         let k = kahan_sum(&v);
         let ulp = 2f64.powi(-52) * 50000.0_f64.max(1.0);
-        assert!((k - 50000.0).abs() < 100.0 * ulp, "kahan drift {}", k - 50000.0);
+        assert!(
+            (k - 50000.0).abs() < 100.0 * ulp,
+            "kahan drift {}",
+            k - 50000.0
+        );
     }
 
     #[test]

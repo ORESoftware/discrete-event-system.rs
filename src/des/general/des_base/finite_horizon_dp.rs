@@ -175,7 +175,11 @@ pub trait FiniteHorizonDPStation: DESStation {
         st.v[t] = v_terminal;
         st.current_stage = t - 1;
         if (st.stage_history.len() as f64) < st.max_history_len {
-            st.stage_history.push(StageStat { stage: t, max_v, min_v });
+            st.stage_history.push(StageStat {
+                stage: t,
+                max_v,
+                min_v,
+            });
         }
     }
 
@@ -193,7 +197,11 @@ pub trait FiniteHorizonDPStation: DESStation {
 
         let mut vt = vec![0.0_f64; n];
         let mut pol: Vec<Option<usize>> = vec![None; n];
-        let mut rng = self.dp_state_mut().rng.take().expect("finite-horizon-dp: rng already in use");
+        let mut rng = self
+            .dp_state_mut()
+            .rng
+            .take()
+            .expect("finite-horizon-dp: rng already in use");
 
         for s in 0..n {
             let a_count = self.num_actions(s, t);
@@ -235,7 +243,11 @@ pub trait FiniteHorizonDPStation: DESStation {
             st.v[t] = vt;
             st.policy[t] = pol;
             if (st.stage_history.len() as f64) < st.max_history_len {
-                st.stage_history.push(StageStat { stage: t, max_v, min_v });
+                st.stage_history.push(StageStat {
+                    stage: t,
+                    max_v,
+                    min_v,
+                });
             }
         }
         self.on_stage_computed(t, &vt_for_hook);
@@ -258,8 +270,20 @@ pub trait FiniteHorizonDPStation: DESStation {
         let cls = self.id().to_string();
         let t = self.horizon();
         let n = self.num_states();
-        Preconditions::check(&cls, "horizon()", "be an integer >= 1", t >= 1, Some(t.to_string()))?;
-        Preconditions::check(&cls, "numStates()", "be an integer >= 1", n >= 1, Some(n.to_string()))?;
+        Preconditions::check(
+            &cls,
+            "horizon()",
+            "be an integer >= 1",
+            t >= 1,
+            Some(t.to_string()),
+        )?;
+        Preconditions::check(
+            &cls,
+            "numStates()",
+            "be an integer >= 1",
+            n >= 1,
+            Some(n.to_string()),
+        )?;
         for stage in 0..t {
             for s in 0..n {
                 let a_count = self.num_actions(s, stage);
@@ -408,7 +432,11 @@ mod tests {
                 (1, 0) => (0, 2.0),
                 (_, _) => (1, 3.0),
             };
-            vec![DPOutcome { prob: 1.0, reward, next_state }]
+            vec![DPOutcome {
+                prob: 1.0,
+                reward,
+                next_state,
+            }]
         }
     }
 
@@ -471,7 +499,11 @@ mod tests {
         }
         fn transitions(&self, _state: usize, action: usize, _stage: usize) -> Vec<DPOutcome> {
             let reward = if action == 0 { 1.0 } else { 10.0 };
-            vec![DPOutcome { prob: 1.0, reward, next_state: 0 }]
+            vec![DPOutcome {
+                prob: 1.0,
+                reward,
+                next_state: 0,
+            }]
         }
     }
 

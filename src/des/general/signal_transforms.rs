@@ -47,7 +47,9 @@ use crate::des::general::des_base::learning_optimization::{
     channel_edge, station_graph, StationGraphSummary, StationOrId,
 };
 use crate::des::general::des_base::preconditions::{Check, Preconditions};
-use crate::des::general::des_base::runner::{run_iterative_des, IterativeRunOptions, IterativeRunSummary};
+use crate::des::general::des_base::runner::{
+    run_iterative_des, IterativeRunOptions, IterativeRunSummary,
+};
 use crate::des::general::des_base::station::{DESStation, StationCore, StationRef};
 use crate::des::general::des_base::validation::{intrinsic_check, ValidationCheck};
 use crate::des::general::expr::{evaluate, parse, Env};
@@ -129,7 +131,10 @@ pub struct ComplexPoint {
 
 impl ComplexPoint {
     fn as_complex(&self) -> ComplexValue {
-        ComplexValue { re: self.re, im: self.im }
+        ComplexValue {
+            re: self.re,
+            im: self.im,
+        }
     }
 }
 
@@ -138,16 +143,25 @@ fn complex(re: f64, im: f64) -> ComplexValue {
 }
 
 fn complex_add(a: ComplexValue, b: ComplexValue) -> ComplexValue {
-    ComplexValue { re: a.re + b.re, im: a.im + b.im }
+    ComplexValue {
+        re: a.re + b.re,
+        im: a.im + b.im,
+    }
 }
 
 fn complex_scale(a: ComplexValue, k: f64) -> ComplexValue {
-    ComplexValue { re: a.re * k, im: a.im * k }
+    ComplexValue {
+        re: a.re * k,
+        im: a.im * k,
+    }
 }
 
 fn complex_exp(re: f64, im: f64) -> ComplexValue {
     let mag = re.exp();
-    ComplexValue { re: mag * im.cos(), im: mag * im.sin() }
+    ComplexValue {
+        re: mag * im.cos(),
+        im: mag * im.sin(),
+    }
 }
 
 fn complex_magnitude(a: ComplexValue) -> f64 {
@@ -159,7 +173,11 @@ fn complex_abs_diff(a: ComplexValue, b: ComplexValue) -> f64 {
 }
 
 fn complex_pow_integer(base: ComplexValue, exponent: f64) -> ComplexValue {
-    require(Preconditions::integer("signal-transform", "integer power exponent", exponent));
+    require(Preconditions::integer(
+        "signal-transform",
+        "integer power exponent",
+        exponent,
+    ));
     if exponent == 0.0 {
         return complex(1.0, 0.0);
     }
@@ -172,7 +190,10 @@ fn complex_pow_integer(base: ComplexValue, exponent: f64) -> ComplexValue {
     }
     let theta = base.im.atan2(base.re);
     let mag = r.powf(exponent);
-    ComplexValue { re: mag * (exponent * theta).cos(), im: mag * (exponent * theta).sin() }
+    ComplexValue {
+        re: mag * (exponent * theta).cos(),
+        im: mag * (exponent * theta).sin(),
+    }
 }
 
 /// JS `Number.prototype.toPrecision` (display-only; never compared).
@@ -181,7 +202,11 @@ fn to_precision(x: f64, digits: usize) -> String {
         return x.to_string();
     }
     if x == 0.0 {
-        return if digits <= 1 { "0".to_string() } else { format!("0.{}", "0".repeat(digits - 1)) };
+        return if digits <= 1 {
+            "0".to_string()
+        } else {
+            format!("0.{}", "0".repeat(digits - 1))
+        };
     }
     let neg = x < 0.0;
     let ax = x.abs();
@@ -239,7 +264,11 @@ fn finite_constants(constants: Option<&HashMap<String, f64>>) -> HashMap<String,
         if !is_identifier(key) {
             panic!("constant name must be an identifier: {key}");
         }
-        require(Preconditions::finite("signal-transform", &format!("constants.{key}"), value));
+        require(Preconditions::finite(
+            "signal-transform",
+            &format!("constants.{key}"),
+            value,
+        ));
         out.insert(key.clone(), value);
     }
     out
@@ -254,16 +283,27 @@ fn normalize_complex_points(
         Some(v) if !v.is_empty() => v,
         _ => fallback,
     };
-    require(Preconditions::non_empty("signal-transform", point_name, raw));
+    require(Preconditions::non_empty(
+        "signal-transform",
+        point_name,
+        raw,
+    ));
     raw.iter()
         .enumerate()
         .map(|(i, p)| {
             let point = ComplexPoint {
                 re: p.re,
                 im: p.im.unwrap_or(0.0),
-                label: p.label.clone().unwrap_or_else(|| format!("{point_name}[{i}]")),
+                label: p
+                    .label
+                    .clone()
+                    .unwrap_or_else(|| format!("{point_name}[{i}]")),
             };
-            finite_complex("signal-transform", &format!("{point_name}[{i}]"), point.as_complex());
+            finite_complex(
+                "signal-transform",
+                &format!("{point_name}[{i}]"),
+                point.as_complex(),
+            );
             point
         })
         .collect()
@@ -275,12 +315,24 @@ fn normalize_omega_points(values: Option<&[f64]>) -> Vec<ComplexPoint> {
         Some(v) if !v.is_empty() => v,
         _ => &default,
     };
-    require(Preconditions::non_empty("fourier-transform", "omegaValues", raw));
+    require(Preconditions::non_empty(
+        "fourier-transform",
+        "omegaValues",
+        raw,
+    ));
     raw.iter()
         .enumerate()
         .map(|(i, &omega)| {
-            require(Preconditions::finite("fourier-transform", &format!("omegaValues[{i}]"), omega));
-            ComplexPoint { re: omega, im: 0.0, label: format!("omega={omega}") }
+            require(Preconditions::finite(
+                "fourier-transform",
+                &format!("omegaValues[{i}]"),
+                omega,
+            ));
+            ComplexPoint {
+                re: omega,
+                im: 0.0,
+                label: format!("omega={omega}"),
+            }
         })
         .collect()
 }
@@ -433,18 +485,28 @@ impl TransformSampleSourceStation {
     pub const CH_SAMPLE: &'static str = SAMPLE_CHANNEL;
 
     pub fn new(id: impl Into<String>, samples: Vec<TransformSampleRecord>) -> Self {
-        let mut st = TransformSampleSourceStation { core: StationCore::new(id), samples, index: 0 };
+        let mut st = TransformSampleSourceStation {
+            core: StationCore::new(id),
+            samples,
+            index: 0,
+        };
         let id_str = st.core.id.clone();
         st.add_validator(
             intrinsic_check::<dyn DESStation>(
                 format!("{id_str}.emitted-all-samples"),
                 |s| {
-                    let st = s.as_any().downcast_ref::<TransformSampleSourceStation>().unwrap();
+                    let st = s
+                        .as_any()
+                        .downcast_ref::<TransformSampleSourceStation>()
+                        .unwrap();
                     st.index == st.samples.len()
                 },
                 Some("every input sample emitted exactly once".to_string()),
                 Some(Box::new(|s| {
-                    let st = s.as_any().downcast_ref::<TransformSampleSourceStation>().unwrap();
+                    let st = s
+                        .as_any()
+                        .downcast_ref::<TransformSampleSourceStation>()
+                        .unwrap();
                     format!("{}/{}", st.index, st.samples.len())
                 })),
                 Some("signal-transform".to_string()),
@@ -468,9 +530,19 @@ impl DESStation for TransformSampleSourceStation {
     }
     fn assert_preconditions(&mut self) {
         let model = "TransformSampleSourceStation";
-        require(Preconditions::non_empty(model, &format!("{}.samples", self.core.id), &self.samples));
+        require(Preconditions::non_empty(
+            model,
+            &format!("{}.samples", self.core.id),
+            &self.samples,
+        ));
         for sample in &self.samples {
-            require(Preconditions::integer_in_range(model, "sampleIndex", sample.sample_index as f64, 0.0, 1e9));
+            require(Preconditions::integer_in_range(
+                model,
+                "sampleIndex",
+                sample.sample_index as f64,
+                0.0,
+                1e9,
+            ));
             require(Preconditions::finite(model, "abscissa", sample.abscissa));
             require(Preconditions::finite(model, "value", sample.value));
             require(Preconditions::finite(model, "weight", sample.weight));
@@ -483,7 +555,9 @@ impl DESStation for TransformSampleSourceStation {
         if self.index >= self.samples.len() {
             return;
         }
-        let token = TransformSampleToken { sample: self.samples[self.index].clone() };
+        let token = TransformSampleToken {
+            sample: self.samples[self.index].clone(),
+        };
         self.core.emit(Rc::new(token), Self::CH_SAMPLE);
         self.index += 1;
     }
@@ -501,7 +575,11 @@ impl TransformKernelStation {
     pub const CH_CONTRIBUTION: &'static str = CONTRIBUTION_CHANNEL;
 
     pub fn new(id: impl Into<String>, points: Vec<ComplexPoint>, kernel: KernelFn) -> Self {
-        TransformKernelStation { core: StationCore::new(id), points, kernel }
+        TransformKernelStation {
+            core: StationCore::new(id),
+            points,
+            kernel,
+        }
     }
 }
 
@@ -524,7 +602,11 @@ impl DESStation for TransformKernelStation {
         for token in tokens {
             for (point_index, point) in self.points.iter().enumerate() {
                 let contribution = (self.kernel)(&token.sample, point);
-                finite_complex("TransformKernelStation", &format!("{id}.contribution"), contribution);
+                finite_complex(
+                    "TransformKernelStation",
+                    &format!("{id}.contribution"),
+                    contribution,
+                );
                 let out = TransformContributionToken {
                     sample: token.sample.clone(),
                     point_index,
@@ -570,13 +652,23 @@ impl TransformAccumulatorStation {
             intrinsic_check::<dyn DESStation>(
                 format!("{id_str}.complete-contribution-count"),
                 |s| {
-                    let st = s.as_any().downcast_ref::<TransformAccumulatorStation>().unwrap();
+                    let st = s
+                        .as_any()
+                        .downcast_ref::<TransformAccumulatorStation>()
+                        .unwrap();
                     st.counts.iter().all(|&count| count == st.expected_samples)
                 },
                 Some("one contribution per sample per evaluation point".to_string()),
                 Some(Box::new(|s| {
-                    let st = s.as_any().downcast_ref::<TransformAccumulatorStation>().unwrap();
-                    st.counts.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(",")
+                    let st = s
+                        .as_any()
+                        .downcast_ref::<TransformAccumulatorStation>()
+                        .unwrap();
+                    st.counts
+                        .iter()
+                        .map(|c| c.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",")
                 })),
                 Some("signal-transform".to_string()),
                 None,
@@ -587,8 +679,13 @@ impl TransformAccumulatorStation {
             intrinsic_check::<dyn DESStation>(
                 format!("{id_str}.finite-sums"),
                 |s| {
-                    let st = s.as_any().downcast_ref::<TransformAccumulatorStation>().unwrap();
-                    st.sums.iter().all(|sum| sum.re.is_finite() && sum.im.is_finite())
+                    let st = s
+                        .as_any()
+                        .downcast_ref::<TransformAccumulatorStation>()
+                        .unwrap();
+                    st.sums
+                        .iter()
+                        .all(|sum| sum.re.is_finite() && sum.im.is_finite())
                 },
                 Some("all accumulated complex sums finite".to_string()),
                 None,
@@ -609,8 +706,14 @@ impl TransformAccumulatorStation {
                 PartialOutputPoint {
                     point_index,
                     label: point.label.clone(),
-                    point: ComplexValue { re: point.re, im: point.im },
-                    value: ComplexValue { re: value.re, im: value.im },
+                    point: ComplexValue {
+                        re: point.re,
+                        im: point.im,
+                    },
+                    value: ComplexValue {
+                        re: value.re,
+                        im: value.im,
+                    },
                     magnitude: complex_magnitude(value),
                     phase: value.im.atan2(value.re),
                     samples_used: self.counts[point_index],
@@ -634,7 +737,9 @@ impl DESStation for TransformAccumulatorStation {
         self.core.inbox_size(Self::CH_CONTRIBUTION) > 0
     }
     fn run_time_step(&mut self) {
-        let tokens = self.core.drain::<TransformContributionToken>(Self::CH_CONTRIBUTION);
+        let tokens = self
+            .core
+            .drain::<TransformContributionToken>(Self::CH_CONTRIBUTION);
         for token in tokens {
             let point_index = token.point_index;
             self.sums[point_index] = complex_add(self.sums[point_index], token.contribution);
@@ -650,7 +755,10 @@ impl DESStation for TransformAccumulatorStation {
             });
         }
         if !self.emitted && self.total_contributions == self.expected_samples * self.points.len() {
-            let totals = TransformTotalsToken { outputs: self.outputs(), trace: self.trace.clone() };
+            let totals = TransformTotalsToken {
+                outputs: self.outputs(),
+                trace: self.trace.clone(),
+            };
             self.core.emit(Rc::new(totals), Self::CH_RESULT);
             self.emitted = true;
         }
@@ -667,13 +775,19 @@ impl TransformResultSinkStation {
     pub const CH_RESULT: &'static str = RESULT_CHANNEL;
 
     pub fn new(id: impl Into<String>) -> Self {
-        let mut st = TransformResultSinkStation { core: StationCore::new(id), latest: None };
+        let mut st = TransformResultSinkStation {
+            core: StationCore::new(id),
+            latest: None,
+        };
         let id_str = st.core.id.clone();
         st.add_validator(
             intrinsic_check::<dyn DESStation>(
                 format!("{id_str}.received-result"),
                 |s| {
-                    let st = s.as_any().downcast_ref::<TransformResultSinkStation>().unwrap();
+                    let st = s
+                        .as_any()
+                        .downcast_ref::<TransformResultSinkStation>()
+                        .unwrap();
                     st.latest.is_some()
                 },
                 Some("one transform result token reaches the sink".to_string()),
@@ -752,7 +866,11 @@ fn direct_transform(
     sums
 }
 
-fn reference_checks(outputs: &[TransformOutputPoint], tolerance: f64, kind: TransformKind) -> Vec<ValidationCheck> {
+fn reference_checks(
+    outputs: &[TransformOutputPoint],
+    tolerance: f64,
+    kind: TransformKind,
+) -> Vec<ValidationCheck> {
     outputs
         .iter()
         .map(|output| {
@@ -766,7 +884,10 @@ fn reference_checks(outputs: &[TransformOutputPoint], tolerance: f64, kind: Tran
                 details: if passed {
                     None
                 } else {
-                    Some(format!("abs-error={:.3e} > tolerance={tolerance}", output.absolute_error))
+                    Some(format!(
+                        "abs-error={:.3e} > tolerance={tolerance}",
+                        output.absolute_error
+                    ))
                 },
             }
         })
@@ -789,19 +910,39 @@ fn run_transform_pipeline(args: TransformPipelineArgs) -> TransformRunResult {
     let accumulator_id = format!("{kind_str}-accumulator-station");
     let sink_id = format!("{kind_str}-result-sink");
 
-    let source = Rc::new(RefCell::new(TransformSampleSourceStation::new(source_id.clone(), args.samples.clone())));
-    let kernel_station =
-        Rc::new(RefCell::new(TransformKernelStation::new(kernel_id.clone(), args.points.clone(), args.kernel)));
+    let source = Rc::new(RefCell::new(TransformSampleSourceStation::new(
+        source_id.clone(),
+        args.samples.clone(),
+    )));
+    let kernel_station = Rc::new(RefCell::new(TransformKernelStation::new(
+        kernel_id.clone(),
+        args.points.clone(),
+        args.kernel,
+    )));
     let accumulator = Rc::new(RefCell::new(TransformAccumulatorStation::new(
         accumulator_id.clone(),
         args.points.clone(),
         args.samples.len(),
     )));
-    let sink = Rc::new(RefCell::new(TransformResultSinkStation::new(sink_id.clone())));
+    let sink = Rc::new(RefCell::new(TransformResultSinkStation::new(
+        sink_id.clone(),
+    )));
 
-    source.borrow_mut().core_mut().pipe(kernel_station.clone() as StationRef, SAMPLE_CHANNEL, SAMPLE_CHANNEL);
-    kernel_station.borrow_mut().core_mut().pipe(accumulator.clone() as StationRef, CONTRIBUTION_CHANNEL, CONTRIBUTION_CHANNEL);
-    accumulator.borrow_mut().core_mut().pipe(sink.clone() as StationRef, RESULT_CHANNEL, RESULT_CHANNEL);
+    source.borrow_mut().core_mut().pipe(
+        kernel_station.clone() as StationRef,
+        SAMPLE_CHANNEL,
+        SAMPLE_CHANNEL,
+    );
+    kernel_station.borrow_mut().core_mut().pipe(
+        accumulator.clone() as StationRef,
+        CONTRIBUTION_CHANNEL,
+        CONTRIBUTION_CHANNEL,
+    );
+    accumulator.borrow_mut().core_mut().pipe(
+        sink.clone() as StationRef,
+        RESULT_CHANNEL,
+        RESULT_CHANNEL,
+    );
 
     let run_summary = run_iterative_des(
         vec![
@@ -810,7 +951,11 @@ fn run_transform_pipeline(args: TransformPipelineArgs) -> TransformRunResult {
             accumulator.clone() as StationRef,
             sink.clone() as StationRef,
         ],
-        IterativeRunOptions { max_ticks: Some(args.samples.len() + 10), shuffle: false, ..Default::default() },
+        IterativeRunOptions {
+            max_ticks: Some(args.samples.len() + 10),
+            shuffle: false,
+            ..Default::default()
+        },
     );
 
     let latest = sink
@@ -843,12 +988,17 @@ fn run_transform_pipeline(args: TransformPipelineArgs) -> TransformRunResult {
     let mut validation: Vec<ValidationCheck> = run_summary.validation.clone().unwrap_or_default();
     validation.extend(reference_checks(&outputs, args.tolerance, args.kind));
 
-    let entity_framework = build_entity_framework(&source_id, &kernel_id, &accumulator_id, &sink_id);
+    let entity_framework =
+        build_entity_framework(&source_id, &kernel_id, &accumulator_id, &sink_id);
     let s = StationOrId::Id(source_id.clone());
     let k = StationOrId::Id(kernel_id.clone());
     let a = StationOrId::Id(accumulator_id.clone());
     let si = StationOrId::Id(sink_id.clone());
-    let topology = station_graph(&[s, k, a, si], &entity_framework.movable_entities, &entity_framework.edges);
+    let topology = station_graph(
+        &[s, k, a, si],
+        &entity_framework.movable_entities,
+        &entity_framework.edges,
+    );
 
     TransformRunResult {
         kind: args.kind,
@@ -867,13 +1017,25 @@ fn run_transform_pipeline(args: TransformPipelineArgs) -> TransformRunResult {
 
 fn build_z_samples(params: &ZTransformParams) -> Vec<TransformSampleRecord> {
     let start_index = params.start_index.unwrap_or(0);
-    require(Preconditions::integer("z-transform", "startIndex", start_index as f64));
+    require(Preconditions::integer(
+        "z-transform",
+        "startIndex",
+        start_index as f64,
+    ));
     let sequence = match &params.sequence {
         Some(s) if !s.is_empty() => s.clone(),
         _ => build_expression_sequence(params),
     };
-    require(Preconditions::non_empty("z-transform", "sequence", &sequence));
-    require(Preconditions::all_finite("z-transform", "sequence", &sequence));
+    require(Preconditions::non_empty(
+        "z-transform",
+        "sequence",
+        &sequence,
+    ));
+    require(Preconditions::all_finite(
+        "z-transform",
+        "sequence",
+        &sequence,
+    ));
     sequence
         .iter()
         .enumerate()
@@ -893,7 +1055,13 @@ fn build_expression_sequence(params: &ZTransformParams) -> Vec<f64> {
     };
     let terms = params.terms.unwrap_or(8);
     let start_index = params.start_index.unwrap_or(0);
-    require(Preconditions::integer_in_range("z-transform", "terms", terms as f64, 1.0, 1000000.0));
+    require(Preconditions::integer_in_range(
+        "z-transform",
+        "terms",
+        terms as f64,
+        1.0,
+        1000000.0,
+    ));
     let ast = parse(expression);
     let constants = finite_constants(params.constants.as_ref());
     let mut values: Vec<f64> = Vec::new();
@@ -904,7 +1072,11 @@ fn build_expression_sequence(params: &ZTransformParams) -> Vec<f64> {
         env.insert("index".to_string(), i as f64);
         env.insert("tick".to_string(), i as f64);
         let value = evaluate(&ast, &env);
-        require(Preconditions::finite("z-transform", &format!("expression[{i}]"), value));
+        require(Preconditions::finite(
+            "z-transform",
+            &format!("expression[{i}]"),
+            value,
+        ));
         values.push(value);
     }
     values
@@ -959,7 +1131,13 @@ fn build_expression_samples(
     };
     let t1 = params.t1.unwrap_or(1.0);
     require(Preconditions::finite(model, "t1", t1));
-    require(Preconditions::check(model, "t1", "be greater than t0", t1 > t0, Some(format!("{{t0: {t0}, t1: {t1}}}"))));
+    require(Preconditions::check(
+        model,
+        "t1",
+        "be greater than t0",
+        t1 > t0,
+        Some(format!("{{t0: {t0}, t1: {t1}}}")),
+    ));
     let exact_steps = (t1 - t0) / dt;
     let steps = exact_steps.round();
     require(Preconditions::check(
@@ -969,9 +1147,15 @@ fn build_expression_samples(
         (exact_steps - steps).abs() <= 1e-9 * 1.0_f64.max(exact_steps.abs()),
         Some(exact_steps.to_string()),
     ));
-    require(Preconditions::integer_in_range(model, "steps", steps, 1.0, 1000000.0));
+    require(Preconditions::integer_in_range(
+        model, "steps", steps, 1.0, 1000000.0,
+    ));
     let steps = steps as usize;
-    let sample_count = if quadrature == QuadratureRule::Trapezoid { steps + 1 } else { steps };
+    let sample_count = if quadrature == QuadratureRule::Trapezoid {
+        steps + 1
+    } else {
+        steps
+    };
     let ast = parse(expression);
     let constants = finite_constants(params.constants.as_ref());
     let mut values: Vec<f64> = Vec::new();
@@ -982,7 +1166,11 @@ fn build_expression_samples(
         env.insert("time".to_string(), t);
         env.insert("tick".to_string(), i as f64);
         let value = evaluate(&ast, &env);
-        require(Preconditions::finite(model, &format!("expression[{i}]"), value));
+        require(Preconditions::finite(
+            model,
+            &format!("expression[{i}]"),
+            value,
+        ));
         values.push(value);
     }
     values
@@ -1014,7 +1202,10 @@ fn laplace_kernel(sample: &TransformSampleRecord, point: &ComplexPoint) -> Compl
 }
 
 fn fourier_kernel(sample: &TransformSampleRecord, point: &ComplexPoint) -> ComplexValue {
-    complex_scale(complex_exp(0.0, -point.re * sample.abscissa), sample.value * sample.weight)
+    complex_scale(
+        complex_exp(0.0, -point.re * sample.abscissa),
+        sample.value * sample.weight,
+    )
 }
 
 fn validate_z_points(samples: &[TransformSampleRecord], points: &[ComplexPoint]) {
@@ -1054,13 +1245,18 @@ pub fn run_z_transform(params: ZTransformParams) -> TransformRunResult {
     let samples = build_z_samples(&params);
     let points = normalize_complex_points(
         params.z_values.as_deref(),
-        &[ComplexPointInput { label: Some("z=1".to_string()), re: 1.0, im: Some(0.0) }],
+        &[ComplexPointInput {
+            label: Some("z=1".to_string()),
+            re: 1.0,
+            im: Some(0.0),
+        }],
         "zValues",
     );
     validate_z_points(&samples, &points);
     run_transform_pipeline(TransformPipelineArgs {
         kind: TransformKind::Z,
-        convention: "X(z) = sum_n x[n] z^(-n), evaluated over the supplied finite sequence.".to_string(),
+        convention: "X(z) = sum_n x[n] z^(-n), evaluated over the supplied finite sequence."
+            .to_string(),
         samples,
         points,
         kernel: z_kernel,
@@ -1081,12 +1277,17 @@ pub fn run_laplace_transform(params: LaplaceTransformParams) -> TransformRunResu
     let samples = build_continuous_samples("laplace-transform", &continuous);
     let points = normalize_complex_points(
         params.s_values.as_deref(),
-        &[ComplexPointInput { label: Some("s=1".to_string()), re: 1.0, im: Some(0.0) }],
+        &[ComplexPointInput {
+            label: Some("s=1".to_string()),
+            re: 1.0,
+            im: Some(0.0),
+        }],
         "sValues",
     );
     run_transform_pipeline(TransformPipelineArgs {
         kind: TransformKind::Laplace,
-        convention: "F(s) = integral f(t) exp(-s t) dt, evaluated by weighted sample tokens.".to_string(),
+        convention: "F(s) = integral f(t) exp(-s t) dt, evaluated by weighted sample tokens."
+            .to_string(),
         samples,
         points,
         kernel: laplace_kernel,
@@ -1108,7 +1309,9 @@ pub fn run_fourier_transform(params: FourierTransformParams) -> TransformRunResu
     let points = normalize_omega_points(params.omega_values.as_deref());
     run_transform_pipeline(TransformPipelineArgs {
         kind: TransformKind::Fourier,
-        convention: "F(omega) = integral f(t) exp(-i omega t) dt, evaluated by weighted sample tokens.".to_string(),
+        convention:
+            "F(omega) = integral f(t) exp(-i omega t) dt, evaluated by weighted sample tokens."
+                .to_string(),
         samples,
         points,
         kernel: fourier_kernel,

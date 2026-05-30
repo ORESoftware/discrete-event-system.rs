@@ -144,7 +144,10 @@ mod tests {
                 break;
             }
         }
-        assert_eq!(bad_k, -1, "bucket assignment out of {{k, k-1}} at k={bad_k}");
+        assert_eq!(
+            bad_k, -1,
+            "bucket assignment out of {{k, k-1}} at k={bad_k}"
+        );
 
         // Accumulator variant (matches the engine's per-tick accumulation).
         let mut t = 0.0_f64;
@@ -157,7 +160,10 @@ mod tests {
             }
             t += step_size;
         }
-        assert_eq!(first_drift, -1, "accumulator bucket drift at k={first_drift}");
+        assert_eq!(
+            first_drift, -1,
+            "accumulator bucket drift at k={first_drift}"
+        );
     }
 
     #[test]

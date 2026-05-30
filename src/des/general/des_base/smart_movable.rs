@@ -49,7 +49,10 @@ pub struct SmartMovableCore {
 impl SmartMovableCore {
     /// `active` starts `false` (matching `protected active = false`).
     pub fn new(id: impl Into<String>) -> Self {
-        SmartMovableCore { id: id.into(), active: false }
+        SmartMovableCore {
+            id: id.into(),
+            active: false,
+        }
     }
 }
 
@@ -126,7 +129,13 @@ mod tests {
 
     impl Walker {
         fn new(id: &str, velocity: f64, goal: f64) -> Self {
-            Walker { core: SmartMovableCore::new(id), position: 0.0, velocity, goal, ticks: 0 }
+            Walker {
+                core: SmartMovableCore::new(id),
+                position: 0.0,
+                velocity,
+                goal,
+                ticks: 0,
+            }
         }
     }
 

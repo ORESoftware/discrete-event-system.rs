@@ -98,7 +98,11 @@ fn distance_color(d: f64, max_finite: f64) -> String {
     if !d.is_finite() {
         return "#475569".to_string();
     }
-    let t = if max_finite > 0.0 { d / max_finite } else { 0.0 };
+    let t = if max_finite > 0.0 {
+        d / max_finite
+    } else {
+        0.0
+    };
     // Cool to warm gradient (low distance = bright yellow, high = blue).
     let r = (250.0 - 230.0 * t).round() as i64;
     let g = (220.0 - 80.0 * t).round() as i64;
@@ -156,7 +160,10 @@ pub fn build_shortest_path_frame(
     let sy = (VIEW_H - 2.0 * pad) / (y_max - y_min).max(1e-9);
     let project = |i: usize| -> (f64, f64) {
         let c = graph.coord(i);
-        (VIEW_X + pad + (c[0] - x_min) * sx, VIEW_Y + pad + (c[1] - y_min) * sy)
+        (
+            VIEW_X + pad + (c[0] - x_min) * sx,
+            VIEW_Y + pad + (c[1] - y_min) * sy,
+        )
     };
 
     // Find max finite distance for the colour scale.
@@ -181,8 +188,10 @@ pub fn build_shortest_path_frame(
     }));
 
     // Edges: thin grey by default, thick yellow if a wave fired this tick.
-    let fired_set: HashSet<String> =
-        wave_events.iter().map(|e| format!("{}->{}", e.from, e.to)).collect();
+    let fired_set: HashSet<String> = wave_events
+        .iter()
+        .map(|e| format!("{}->{}", e.from, e.to))
+        .collect();
     let improved_set: HashSet<String> = wave_events
         .iter()
         .filter(|e| e.improved)
@@ -241,7 +250,11 @@ pub fn build_shortest_path_frame(
             distance_color(distance_now[v], max_finite)
         };
         let dist = distance_now[v];
-        let title_dist = if dist.is_finite() { to_fixed(dist, 2) } else { "\u{221e}".to_string() };
+        let title_dist = if dist.is_finite() {
+            to_fixed(dist, 2)
+        } else {
+            "\u{221e}".to_string()
+        };
         shapes.push(Shape::Circle(CircleShape {
             x,
             y,
@@ -263,7 +276,11 @@ pub fn build_shortest_path_frame(
             ..Default::default()
         }));
         // Distance label below.
-        let d_str = if dist.is_finite() { to_fixed(dist, 1) } else { "\u{221e}".to_string() };
+        let d_str = if dist.is_finite() {
+            to_fixed(dist, 1)
+        } else {
+            "\u{221e}".to_string()
+        };
         shapes.push(Shape::Text(TextShape {
             x,
             y: y + 26.0,
@@ -308,17 +325,54 @@ pub fn build_shortest_path_frame(
     }));
     let mut y0 = META_Y + 100.0;
     let improved_count = wave_events.iter().filter(|e| e.improved).count();
-    meta_line(&mut shapes, &mut y0, format!("Iteration {}", crate::des::animation::types::js_num(iteration)), "#cbd5e1");
-    meta_line(&mut shapes, &mut y0, format!("Source = {}", graph.node_name(source)), "#22c55e");
-    meta_line(&mut shapes, &mut y0, format!("Waves this tick = {}", wave_events.len()), "#facc15");
-    meta_line(&mut shapes, &mut y0, format!("Improved this tick = {improved_count}"), "#fde68a");
+    meta_line(
+        &mut shapes,
+        &mut y0,
+        format!(
+            "Iteration {}",
+            crate::des::animation::types::js_num(iteration)
+        ),
+        "#cbd5e1",
+    );
+    meta_line(
+        &mut shapes,
+        &mut y0,
+        format!("Source = {}", graph.node_name(source)),
+        "#22c55e",
+    );
+    meta_line(
+        &mut shapes,
+        &mut y0,
+        format!("Waves this tick = {}", wave_events.len()),
+        "#facc15",
+    );
+    meta_line(
+        &mut shapes,
+        &mut y0,
+        format!("Improved this tick = {improved_count}"),
+        "#fde68a",
+    );
     y0 += 8.0;
-    meta_line(&mut shapes, &mut y0, "Settled / known finite distances:".to_string(), "#f1f5f9");
+    meta_line(
+        &mut shapes,
+        &mut y0,
+        "Settled / known finite distances:".to_string(),
+        "#f1f5f9",
+    );
     for v in 0..graph.num_nodes {
         let dist = distance_now[v];
-        let d_str = if dist.is_finite() { to_fixed(dist, 2) } else { "\u{221e}".to_string() };
+        let d_str = if dist.is_finite() {
+            to_fixed(dist, 2)
+        } else {
+            "\u{221e}".to_string()
+        };
         let color = distance_color(dist, max_finite);
-        meta_line(&mut shapes, &mut y0, format!("  {}: {}", graph.node_name(v), d_str), &color);
+        meta_line(
+            &mut shapes,
+            &mut y0,
+            format!("  {}: {}", graph.node_name(v), d_str),
+            &color,
+        );
     }
 
     let caption = format!(
@@ -381,7 +435,12 @@ mod tests {
             0.0,
             &g,
             &[0.0, f64::INFINITY],
-            &[WaveEvent { from: 0, to: 1, new_distance: 3.0, improved: true }],
+            &[WaveEvent {
+                from: 0,
+                to: 1,
+                new_distance: 3.0,
+                improved: true,
+            }],
             0,
             1.0,
             SpAlgorithm::BellmanFordDes,

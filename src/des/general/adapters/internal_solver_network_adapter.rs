@@ -37,8 +37,9 @@ use crate::des::general::des_spec::{
 use crate::des::general::genetic_tsp::InitMode;
 use crate::des::general::internal_solver_network::{
     run_internal_solver_network, InternalSolverKind, InternalSolverRunParams,
-    InternalSolverRunResult, InternalSolverStatus, KnapsackParams, MetaValue, ShortestPathAlgorithm,
-    SolverBestState, SolverProgressPayload, TSPGAOptionsPartial, TSPSolverParams, TspBuiltin,
+    InternalSolverRunResult, InternalSolverStatus, KnapsackParams, MetaValue,
+    ShortestPathAlgorithm, SolverBestState, SolverProgressPayload, TSPGAOptionsPartial,
+    TSPSolverParams, TspBuiltin,
 };
 use crate::des::observability::logger::JsonValue as LogJson;
 
@@ -50,20 +51,36 @@ fn js_number(v: f64) -> String {
     if v.is_nan() {
         "NaN".to_string()
     } else if v.is_infinite() {
-        if v > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() }
+        if v > 0.0 {
+            "Infinity".to_string()
+        } else {
+            "-Infinity".to_string()
+        }
     } else {
         let s = v.to_string();
-        if s == "-0" { "0".to_string() } else { s }
+        if s == "-0" {
+            "0".to_string()
+        } else {
+            s
+        }
     }
 }
 
 /// `JSON.stringify(number)` (non-finite -> `null`).
 fn json_num(v: f64) -> String {
-    if v.is_finite() { js_number(v) } else { "null".to_string() }
+    if v.is_finite() {
+        js_number(v)
+    } else {
+        "null".to_string()
+    }
 }
 
 fn bool_json(b: bool) -> String {
-    if b { "true".to_string() } else { "false".to_string() }
+    if b {
+        "true".to_string()
+    } else {
+        "false".to_string()
+    }
 }
 
 /// `v.toExponential(digits)`.
@@ -130,11 +147,26 @@ fn summarize_best_state(row: &SolverProgressPayload) -> String {
             let ds: Vec<String> = distance
                 .iter()
                 .take(8)
-                .map(|v| if v.is_finite() { format!("{v:.2}") } else { "inf".to_string() })
+                .map(|v| {
+                    if v.is_finite() {
+                        format!("{v:.2}")
+                    } else {
+                        "inf".to_string()
+                    }
+                })
                 .collect();
-            format!("dist=[{}{}]", ds.join(", "), if distance.len() > 8 { ", ..." } else { "" })
+            format!(
+                "dist=[{}{}]",
+                ds.join(", "),
+                if distance.len() > 8 { ", ..." } else { "" }
+            )
         }
-        SolverBestState::Knapsack { value, weight, capacity, .. } => format!(
+        SolverBestState::Knapsack {
+            value,
+            weight,
+            capacity,
+            ..
+        } => format!(
             "value={} weight={}/{}",
             format_number(*value),
             format_number(*weight),
@@ -155,9 +187,22 @@ fn summarize_best_state(row: &SolverProgressPayload) -> String {
 /// `JSON.stringify(row.bestState)`.
 fn best_state_json(s: &SolverBestState) -> String {
     match s {
-        SolverBestState::ShortestPath { distance, predecessor, algorithm, has_negative_cycle_from_source } => {
-            let d = distance.iter().map(|v| json_num(*v)).collect::<Vec<_>>().join(",");
-            let p = predecessor.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",");
+        SolverBestState::ShortestPath {
+            distance,
+            predecessor,
+            algorithm,
+            has_negative_cycle_from_source,
+        } => {
+            let d = distance
+                .iter()
+                .map(|v| json_num(*v))
+                .collect::<Vec<_>>()
+                .join(",");
+            let p = predecessor
+                .iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
             format!(
                 "{{\"distance\":[{}],\"predecessor\":[{}],\"algorithm\":{},\"hasNegativeCycleFromSource\":{}}}",
                 d,
@@ -166,8 +211,17 @@ fn best_state_json(s: &SolverBestState) -> String {
                 bool_json(*has_negative_cycle_from_source)
             )
         }
-        SolverBestState::Knapsack { selected, value, weight, capacity } => {
-            let sel = selected.iter().map(|v| json_num(*v)).collect::<Vec<_>>().join(",");
+        SolverBestState::Knapsack {
+            selected,
+            value,
+            weight,
+            capacity,
+        } => {
+            let sel = selected
+                .iter()
+                .map(|v| json_num(*v))
+                .collect::<Vec<_>>()
+                .join(",");
             format!(
                 "{{\"selected\":[{}],\"value\":{},\"weight\":{},\"capacity\":{}}}",
                 sel,
@@ -177,7 +231,11 @@ fn best_state_json(s: &SolverBestState) -> String {
             )
         }
         SolverBestState::Tour { tour, length } => {
-            let t = tour.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",");
+            let t = tour
+                .iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
             format!("{{\"tour\":[{}],\"length\":{}}}", t, json_num(*length))
         }
     }
@@ -203,8 +261,19 @@ fn metadata_json(meta: &[(String, MetaValue)]) -> String {
 // Schema helpers
 // =============================================================================
 
-fn num(min: Option<f64>, max: Option<f64>, integer: Option<bool>, default: Option<f64>) -> ParamSchema {
-    ParamSchema::Number { min, max, integer, default, description: None }
+fn num(
+    min: Option<f64>,
+    max: Option<f64>,
+    integer: Option<bool>,
+    default: Option<f64>,
+) -> ParamSchema {
+    ParamSchema::Number {
+        min,
+        max,
+        integer,
+        default,
+        description: None,
+    }
 }
 
 fn str_enum(allowed: &[&str], default: Option<&str>) -> ParamSchema {
@@ -216,26 +285,46 @@ fn str_enum(allowed: &[&str], default: Option<&str>) -> ParamSchema {
 }
 
 fn string_field() -> ParamSchema {
-    ParamSchema::String { allowed: None, default: None, description: None }
+    ParamSchema::String {
+        allowed: None,
+        default: None,
+        description: None,
+    }
 }
 
 fn arr(items: ParamSchema, min_length: Option<usize>, max_length: Option<usize>) -> ParamSchema {
-    ParamSchema::Array { items: Box::new(items), min_length, max_length, description: None }
+    ParamSchema::Array {
+        items: Box::new(items),
+        min_length,
+        max_length,
+        description: None,
+    }
 }
 
 fn obj(fields: Vec<(&str, ParamSchema)>, required: Vec<&str>) -> ParamSchema {
     ParamSchema::Object {
-        fields: fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+        fields: fields
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
         required: Some(required.iter().map(|s| s.to_string()).collect()),
         description: None,
     }
 }
 
-fn obj_desc(fields: Vec<(&str, ParamSchema)>, required: Vec<&str>, description: &str) -> ParamSchema {
+fn obj_desc(
+    fields: Vec<(&str, ParamSchema)>,
+    required: Vec<&str>,
+    description: &str,
+) -> ParamSchema {
     match obj(fields, required) {
-        ParamSchema::Object { fields, required, .. } => {
-            ParamSchema::Object { fields, required, description: Some(description.to_string()) }
-        }
+        ParamSchema::Object {
+            fields, required, ..
+        } => ParamSchema::Object {
+            fields,
+            required,
+            description: Some(description.to_string()),
+        },
         other => other,
     }
 }
@@ -297,7 +386,10 @@ fn cooling_schema() -> ParamSchema {
 
 fn graph_edge_schema() -> ParamSchema {
     obj(
-        vec![("to", num(Some(0.0), None, Some(true), None)), ("weight", num(None, None, None, None))],
+        vec![
+            ("to", num(Some(0.0), None, Some(true), None)),
+            ("weight", num(None, None, None, None)),
+        ],
         vec!["to", "weight"],
     )
 }
@@ -306,10 +398,17 @@ fn graph_schema() -> ParamSchema {
     obj(
         vec![
             ("numNodes", num(Some(1.0), None, Some(true), None)),
-            ("edges", arr(arr(graph_edge_schema(), None, None), None, None)),
+            (
+                "edges",
+                arr(arr(graph_edge_schema(), None, None), None, None),
+            ),
             (
                 "coordinates",
-                arr(arr(num(None, None, None, None), Some(2), Some(2)), None, None),
+                arr(
+                    arr(num(None, None, None, None), Some(2), Some(2)),
+                    None,
+                    None,
+                ),
             ),
             ("nodeNames", arr(string_field(), None, None)),
         ],
@@ -320,7 +419,10 @@ fn graph_schema() -> ParamSchema {
 fn shortest_path_schema() -> ParamSchema {
     obj(
         vec![
-            ("algorithm", str_enum(&["bellman-ford", "dijkstra"], Some("dijkstra"))),
+            (
+                "algorithm",
+                str_enum(&["bellman-ford", "dijkstra"], Some("dijkstra")),
+            ),
             ("source", num(Some(0.0), None, Some(true), Some(0.0))),
             ("builtin", str_enum(&["small-chain"], None)),
             ("graph", graph_schema()),
@@ -349,7 +451,10 @@ fn knapsack_schema() -> ParamSchema {
             ("weights", arr(num(None, None, None, None), Some(1), None)),
             ("capacity", num(Some(0.0), None, Some(true), None)),
             ("seed", num(None, None, Some(true), Some(1.0))),
-            ("maxIterations", num(Some(1.0), None, Some(true), Some(5000.0))),
+            (
+                "maxIterations",
+                num(Some(1.0), None, Some(true), Some(5000.0)),
+            ),
             ("cooling", cooling_schema()),
             ("stallLimit", num(Some(0.0), None, Some(true), Some(0.0))),
             ("penalty", num(Some(0.0), None, None, Some(1_000_000.0))),
@@ -362,11 +467,23 @@ fn tsp_sa_schema() -> ParamSchema {
     obj(
         vec![
             ("cooling", cooling_schema()),
-            ("maxIterations", num(Some(1.0), None, Some(true), Some(5000.0))),
+            (
+                "maxIterations",
+                num(Some(1.0), None, Some(true), Some(5000.0)),
+            ),
             ("seed", num(None, None, Some(true), Some(1.0))),
-            ("init", str_enum(&["random", "nearest-neighbor"], Some("nearest-neighbor"))),
-            ("moves", str_enum(&["2-opt", "or-opt", "mixed"], Some("mixed"))),
-            ("penaltyPerViolation", num(Some(0.0), None, None, Some(1_000_000.0))),
+            (
+                "init",
+                str_enum(&["random", "nearest-neighbor"], Some("nearest-neighbor")),
+            ),
+            (
+                "moves",
+                str_enum(&["2-opt", "or-opt", "mixed"], Some("mixed")),
+            ),
+            (
+                "penaltyPerViolation",
+                num(Some(0.0), None, None, Some(1_000_000.0)),
+            ),
             ("traceStride", num(Some(1.0), None, Some(true), None)),
             ("stallLimit", num(Some(0.0), None, Some(true), Some(0.0))),
         ],
@@ -378,14 +495,26 @@ fn tsp_ga_schema() -> ParamSchema {
     obj(
         vec![
             ("popSize", num(Some(2.0), None, Some(true), Some(60.0))),
-            ("numGenerations", num(Some(1.0), None, Some(true), Some(200.0))),
-            ("tournamentSize", num(Some(1.0), None, Some(true), Some(3.0))),
+            (
+                "numGenerations",
+                num(Some(1.0), None, Some(true), Some(200.0)),
+            ),
+            (
+                "tournamentSize",
+                num(Some(1.0), None, Some(true), Some(3.0)),
+            ),
             ("crossoverProb", num(Some(0.0), Some(1.0), None, Some(0.95))),
             ("mutationProb", num(Some(0.0), Some(1.0), None, Some(0.3))),
             ("elitism", num(Some(0.0), None, Some(true), Some(2.0))),
             ("seed", num(None, None, Some(true), Some(1.0))),
-            ("init", str_enum(&["random", "nearest-neighbor"], Some("nearest-neighbor"))),
-            ("penaltyPerViolation", num(Some(0.0), None, None, Some(1_000_000.0))),
+            (
+                "init",
+                str_enum(&["random", "nearest-neighbor"], Some("nearest-neighbor")),
+            ),
+            (
+                "penaltyPerViolation",
+                num(Some(0.0), None, None, Some(1_000_000.0)),
+            ),
         ],
         vec!["popSize", "numGenerations", "seed"],
     )
@@ -394,17 +523,31 @@ fn tsp_ga_schema() -> ParamSchema {
 fn tsp_schema() -> ParamSchema {
     obj(
         vec![
-            ("builtin", str_enum(&["pentagon", "random"], Some("pentagon"))),
+            (
+                "builtin",
+                str_enum(&["pentagon", "random"], Some("pentagon")),
+            ),
             ("n", num(Some(3.0), None, Some(true), Some(5.0))),
             ("seed", num(None, None, Some(true), Some(1.0))),
             (
                 "coordinates",
-                arr(arr(num(None, None, None, None), Some(2), Some(2)), None, None),
+                arr(
+                    arr(num(None, None, None, None), Some(2), Some(2)),
+                    None,
+                    None,
+                ),
             ),
-            ("distance", arr(arr(num(None, None, None, None), None, None), None, None)),
+            (
+                "distance",
+                arr(arr(num(None, None, None, None), None, None), None, None),
+            ),
             (
                 "precedence",
-                arr(arr(num(Some(0.0), None, Some(true), None), Some(2), Some(2)), None, None),
+                arr(
+                    arr(num(Some(0.0), None, Some(true), None), Some(2), Some(2)),
+                    None,
+                    None,
+                ),
             ),
             ("sa", tsp_sa_schema()),
             ("ga", tsp_ga_schema()),
@@ -420,13 +563,23 @@ pub fn internal_solver_schema() -> ParamSchema {
             (
                 "kind",
                 str_enum(
-                    &["shortest-path", "knapsack-dp", "knapsack-sa", "tsp-sa", "tsp-ga", "tsp-held-karp"],
+                    &[
+                        "shortest-path",
+                        "knapsack-dp",
+                        "knapsack-sa",
+                        "tsp-sa",
+                        "tsp-ga",
+                        "tsp-held-karp",
+                    ],
                     None,
                 ),
             ),
             ("timeLimitMs", num(Some(0.0), None, None, Some(180000.0))),
             ("maxTicks", num(Some(1.0), None, Some(true), None)),
-            ("checkEveryTicks", num(Some(1.0), None, Some(true), Some(1.0))),
+            (
+                "checkEveryTicks",
+                num(Some(1.0), None, Some(true), Some(1.0)),
+            ),
             ("shortestPath", shortest_path_schema()),
             ("knapsack", knapsack_schema()),
             ("tsp", tsp_schema()),
@@ -469,9 +622,15 @@ impl DESModelRegistration<InternalSolverRunParams, InternalSolverRunResult>
         with_logger(runtime, move |mut logger| {
             if let Some(l) = logger.as_deref_mut() {
                 l.log(LogJson::Object(vec![
-                    ("kind".to_string(), LogJson::String("internal-solver-start".to_string())),
+                    (
+                        "kind".to_string(),
+                        LogJson::String("internal-solver-start".to_string()),
+                    ),
                     ("level".to_string(), LogJson::String("info".to_string())),
-                    ("solverKind".to_string(), LogJson::String(solver_kind.as_str().to_string())),
+                    (
+                        "solverKind".to_string(),
+                        LogJson::String(solver_kind.as_str().to_string()),
+                    ),
                     ("timeLimitMs".to_string(), LogJson::Number(time_limit)),
                 ]));
             }
@@ -482,10 +641,19 @@ impl DESModelRegistration<InternalSolverRunParams, InternalSolverRunResult>
                 let row = &result.trace[i];
                 if let Some(l) = logger.as_deref_mut() {
                     l.log(LogJson::Object(vec![
-                        ("kind".to_string(), LogJson::String("internal-solver-trace".to_string())),
+                        (
+                            "kind".to_string(),
+                            LogJson::String("internal-solver-trace".to_string()),
+                        ),
                         ("level".to_string(), LogJson::String("debug".to_string())),
-                        ("solverKind".to_string(), LogJson::String(row.solver_kind.as_str().to_string())),
-                        ("iteration".to_string(), LogJson::Number(row.iteration as f64)),
+                        (
+                            "solverKind".to_string(),
+                            LogJson::String(row.solver_kind.as_str().to_string()),
+                        ),
+                        (
+                            "iteration".to_string(),
+                            LogJson::Number(row.iteration as f64),
+                        ),
                         ("objective".to_string(), LogJson::Number(row.objective)),
                         ("feasible".to_string(), LogJson::Bool(row.feasible)),
                         ("done".to_string(), LogJson::Bool(row.done)),
@@ -495,12 +663,27 @@ impl DESModelRegistration<InternalSolverRunParams, InternalSolverRunResult>
             }
             if let Some(l) = logger.as_deref_mut() {
                 l.log(LogJson::Object(vec![
-                    ("kind".to_string(), LogJson::String("internal-solver-finish".to_string())),
+                    (
+                        "kind".to_string(),
+                        LogJson::String("internal-solver-finish".to_string()),
+                    ),
                     ("level".to_string(), LogJson::String("info".to_string())),
-                    ("solverKind".to_string(), LogJson::String(result.kind.as_str().to_string())),
-                    ("status".to_string(), LogJson::String(status_str(result.status).to_string())),
-                    ("objective".to_string(), LogJson::Number(result.best.objective)),
-                    ("iterations".to_string(), LogJson::Number(result.best.iteration as f64)),
+                    (
+                        "solverKind".to_string(),
+                        LogJson::String(result.kind.as_str().to_string()),
+                    ),
+                    (
+                        "status".to_string(),
+                        LogJson::String(status_str(result.status).to_string()),
+                    ),
+                    (
+                        "objective".to_string(),
+                        LogJson::Number(result.best.objective),
+                    ),
+                    (
+                        "iterations".to_string(),
+                        LogJson::Number(result.best.iteration as f64),
+                    ),
                     (
                         "validationOk".to_string(),
                         LogJson::Bool(result.run_summary.validation_ok.unwrap_or(true)),
@@ -511,12 +694,24 @@ impl DESModelRegistration<InternalSolverRunParams, InternalSolverRunResult>
         })
     }
 
-    fn summarize(&self, result: &InternalSolverRunResult, _params: &InternalSolverRunParams) -> String {
-        let reason = result.run_summary.reason.map(|r| r.as_str()).unwrap_or("done");
+    fn summarize(
+        &self,
+        result: &InternalSolverRunResult,
+        _params: &InternalSolverRunParams,
+    ) -> String {
+        let reason = result
+            .run_summary
+            .reason
+            .map(|r| r.as_str())
+            .unwrap_or("done");
         [
             "INTERNAL SOLVER NETWORK".to_string(),
             "------------------------".to_string(),
-            format!("  kind={} status={}", result.kind.as_str(), status_str(result.status)),
+            format!(
+                "  kind={} status={}",
+                result.kind.as_str(),
+                status_str(result.status)
+            ),
             format!(
                 "  iterations={} ticks={} reason={}",
                 result.best.iteration, result.run_summary.ticks, reason
@@ -546,8 +741,9 @@ impl DESModelRegistration<InternalSolverRunParams, InternalSolverRunResult>
     }
 
     fn write_csv(&self, result: &InternalSolverRunResult, csv_path: &str) {
-        let mut lines =
-            vec!["tick,iteration,solver_kind,objective,feasible,done,best_state,metadata".to_string()];
+        let mut lines = vec![
+            "tick,iteration,solver_kind,objective,feasible,done,best_state,metadata".to_string(),
+        ];
         for row in &result.trace {
             lines.push(json_csv_row([
                 json_num(row.tick as f64),
@@ -597,7 +793,10 @@ impl DESModelRegistration<InternalSolverRunParams, InternalSolverRunResult>
                     }),
                     tsp: None,
                 },
-                runtime: Some(DESRuntimeConfig { animate: Some(true), ..Default::default() }),
+                runtime: Some(DESRuntimeConfig {
+                    animate: Some(true),
+                    ..Default::default()
+                }),
                 metadata: None,
             },
         };
@@ -636,7 +835,10 @@ impl DESModelRegistration<InternalSolverRunParams, InternalSolverRunResult>
                         }),
                     }),
                 },
-                runtime: Some(DESRuntimeConfig { animate: Some(true), ..Default::default() }),
+                runtime: Some(DESRuntimeConfig {
+                    animate: Some(true),
+                    ..Default::default()
+                }),
                 metadata: None,
             },
         };

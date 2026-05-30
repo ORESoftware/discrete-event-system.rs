@@ -89,7 +89,10 @@ impl RadarPlant {
         let dt = self.dt;
         let x0 = self.state[0];
         let x1 = self.state[1];
-        vec![x0 + dt * x1 + 0.5 * dt * dt * acc_noise, x1 + dt * acc_noise]
+        vec![
+            x0 + dt * x1 + 0.5 * dt * dt * acc_noise,
+            x1 + dt * acc_noise,
+        ]
     }
 
     /// Advance one tick (drain control → dynamics → observe) and return the
@@ -164,7 +167,13 @@ impl KalmanFilterBlock {
         Preconditions::rectangular_matrix(cls, "H", &spec.h)?;
         Preconditions::length_eq(cls, "H[0]", &spec.h[0], n)?;
         let m = spec.h.len();
-        Preconditions::check(cls, "H.length (output dim m)", "be >= 1", m >= 1, Some(m.to_string()))?;
+        Preconditions::check(
+            cls,
+            "H.length (output dim m)",
+            "be >= 1",
+            m >= 1,
+            Some(m.to_string()),
+        )?;
         Preconditions::symmetric_matrix(cls, "R", &spec.r, 1e-9)?;
         Preconditions::length_eq(cls, "R", &spec.r, m)?;
         // R MUST be PD (we invert H P Hᵀ + R and need a strictly positive total

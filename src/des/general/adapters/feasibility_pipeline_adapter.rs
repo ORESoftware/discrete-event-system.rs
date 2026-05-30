@@ -58,10 +58,18 @@ fn js_number(v: f64) -> String {
     if v.is_nan() {
         "NaN".to_string()
     } else if v.is_infinite() {
-        if v > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() }
+        if v > 0.0 {
+            "Infinity".to_string()
+        } else {
+            "-Infinity".to_string()
+        }
     } else {
         let s = v.to_string();
-        if s == "-0" { "0".to_string() } else { s }
+        if s == "-0" {
+            "0".to_string()
+        } else {
+            s
+        }
     }
 }
 
@@ -158,7 +166,10 @@ fn json_violation(v: &FeasibilityViolation) -> String {
 }
 
 fn json_violations(vs: &[FeasibilityViolation]) -> String {
-    format!("[{}]", vs.iter().map(json_violation).collect::<Vec<_>>().join(","))
+    format!(
+        "[{}]",
+        vs.iter().map(json_violation).collect::<Vec<_>>().join(",")
+    )
 }
 
 /// `function valuesSummary(e)`.
@@ -187,12 +198,27 @@ fn feasibility_status_str(s: FeasibilityStatus) -> &'static str {
 // Schema
 // =============================================================================
 
-fn num(min: Option<f64>, max: Option<f64>, integer: Option<bool>, default: Option<f64>) -> ParamSchema {
-    ParamSchema::Number { min, max, integer, default, description: None }
+fn num(
+    min: Option<f64>,
+    max: Option<f64>,
+    integer: Option<bool>,
+    default: Option<f64>,
+) -> ParamSchema {
+    ParamSchema::Number {
+        min,
+        max,
+        integer,
+        default,
+        description: None,
+    }
 }
 
 fn string_field() -> ParamSchema {
-    ParamSchema::String { allowed: None, default: None, description: None }
+    ParamSchema::String {
+        allowed: None,
+        default: None,
+        description: None,
+    }
 }
 
 fn str_enum(allowed: &[&str], default: Option<&str>) -> ParamSchema {
@@ -204,30 +230,52 @@ fn str_enum(allowed: &[&str], default: Option<&str>) -> ParamSchema {
 }
 
 fn boolean(default: Option<bool>) -> ParamSchema {
-    ParamSchema::Boolean { default, description: None }
+    ParamSchema::Boolean {
+        default,
+        description: None,
+    }
 }
 
 fn array(items: ParamSchema, min_length: Option<usize>) -> ParamSchema {
-    ParamSchema::Array { items: Box::new(items), min_length, max_length: None, description: None }
+    ParamSchema::Array {
+        items: Box::new(items),
+        min_length,
+        max_length: None,
+        description: None,
+    }
 }
 
-fn obj(fields: Vec<(&str, ParamSchema)>, required: Vec<&str>, description: Option<&str>) -> ParamSchema {
+fn obj(
+    fields: Vec<(&str, ParamSchema)>,
+    required: Vec<&str>,
+    description: Option<&str>,
+) -> ParamSchema {
     ParamSchema::Object {
-        fields: fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+        fields: fields
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
         required: Some(required.iter().map(|s| s.to_string()).collect()),
         description: description.map(|s| s.to_string()),
     }
 }
 
 fn coefficient_map_schema() -> ParamSchema {
-    obj(vec![], vec![], Some("Map from variable name to finite coefficient."))
+    obj(
+        vec![],
+        vec![],
+        Some("Map from variable name to finite coefficient."),
+    )
 }
 
 fn variable_schema() -> ParamSchema {
     obj(
         vec![
             ("name", string_field()),
-            ("type", str_enum(&["continuous", "integer", "binary"], Some("continuous"))),
+            (
+                "type",
+                str_enum(&["continuous", "integer", "binary"], Some("continuous")),
+            ),
             ("lb", num(None, None, None, None)),
             ("ub", num(None, None, None, None)),
             ("step", num(Some(0.0), None, None, None)),
@@ -292,7 +340,10 @@ fn improvement_schema() -> ParamSchema {
     obj(
         vec![
             ("enabled", boolean(Some(true))),
-            ("maxIterations", num(Some(0.0), None, Some(true), Some(200.0))),
+            (
+                "maxIterations",
+                num(Some(0.0), None, Some(true), Some(200.0)),
+            ),
             ("seed", num(None, None, Some(true), Some(1.0))),
             ("continuousStep", num(Some(0.0), None, None, Some(1.0))),
             ("integerStep", num(Some(0.0), None, None, Some(1.0))),
@@ -349,14 +400,25 @@ impl DESModelRegistration<FeasibilityPipelineParams, FeasibilityPipelineResult>
         runtime: &DESRuntimeConfig,
     ) -> FeasibilityPipelineResult {
         let variables = params.problem.variables.len();
-        let constraints = params.problem.constraints.as_ref().map(|c| c.len()).unwrap_or(0);
+        let constraints = params
+            .problem
+            .constraints
+            .as_ref()
+            .map(|c| c.len())
+            .unwrap_or(0);
         with_logger(runtime, move |mut logger| {
             if let Some(l) = logger.as_deref_mut() {
                 l.log(LogJson::Object(vec![
-                    ("kind".to_string(), LogJson::String("feasibility-pipeline-start".to_string())),
+                    (
+                        "kind".to_string(),
+                        LogJson::String("feasibility-pipeline-start".to_string()),
+                    ),
                     ("level".to_string(), LogJson::String("info".to_string())),
                     ("variables".to_string(), LogJson::Number(variables as f64)),
-                    ("constraints".to_string(), LogJson::Number(constraints as f64)),
+                    (
+                        "constraints".to_string(),
+                        LogJson::Number(constraints as f64),
+                    ),
                 ]));
             }
             let result = run_feasibility_pipeline(params);
@@ -366,25 +428,52 @@ impl DESModelRegistration<FeasibilityPipelineParams, FeasibilityPipelineResult>
                 let row = &result.trace[i];
                 if let Some(l) = logger.as_deref_mut() {
                     l.log(LogJson::Object(vec![
-                        ("kind".to_string(), LogJson::String("feasibility-pipeline-trace".to_string())),
+                        (
+                            "kind".to_string(),
+                            LogJson::String("feasibility-pipeline-trace".to_string()),
+                        ),
                         ("level".to_string(), LogJson::String("debug".to_string())),
-                        ("candidateId".to_string(), LogJson::String(row.candidate_id.clone())),
-                        ("objective".to_string(), LogJson::Number(row.objective_value)),
+                        (
+                            "candidateId".to_string(),
+                            LogJson::String(row.candidate_id.clone()),
+                        ),
+                        (
+                            "objective".to_string(),
+                            LogJson::Number(row.objective_value),
+                        ),
                         ("feasible".to_string(), LogJson::Bool(row.feasible)),
-                        ("totalViolation".to_string(), LogJson::Number(row.total_violation)),
+                        (
+                            "totalViolation".to_string(),
+                            LogJson::Number(row.total_violation),
+                        ),
                     ]));
                 }
                 i += stride;
             }
             if let Some(l) = logger.as_deref_mut() {
                 l.log(LogJson::Object(vec![
-                    ("kind".to_string(), LogJson::String("feasibility-pipeline-finish".to_string())),
+                    (
+                        "kind".to_string(),
+                        LogJson::String("feasibility-pipeline-finish".to_string()),
+                    ),
                     ("level".to_string(), LogJson::String("info".to_string())),
-                    ("status".to_string(), LogJson::String(feasibility_status_str(result.status).to_string())),
-                    ("bestCandidate".to_string(), LogJson::String(result.best.candidate_id.clone())),
+                    (
+                        "status".to_string(),
+                        LogJson::String(feasibility_status_str(result.status).to_string()),
+                    ),
+                    (
+                        "bestCandidate".to_string(),
+                        LogJson::String(result.best.candidate_id.clone()),
+                    ),
                     ("feasible".to_string(), LogJson::Bool(result.best.feasible)),
-                    ("objective".to_string(), LogJson::Number(result.best.objective_value)),
-                    ("totalViolation".to_string(), LogJson::Number(result.best.total_violation)),
+                    (
+                        "objective".to_string(),
+                        LogJson::Number(result.best.objective_value),
+                    ),
+                    (
+                        "totalViolation".to_string(),
+                        LogJson::Number(result.best.total_violation),
+                    ),
                 ]));
             }
             result
@@ -477,17 +566,43 @@ impl DESModelRegistration<FeasibilityPipelineParams, FeasibilityPipelineResult>
         let problem = StructuredOptimizationProblem {
             sense: ObjectiveSense::Max,
             variables: vec![
-                OptimizationVariable { name: "x0".to_string(), kind: Some(VariableKind::Binary), lb: None, ub: None, step: None },
-                OptimizationVariable { name: "x1".to_string(), kind: Some(VariableKind::Binary), lb: None, ub: None, step: None },
-                OptimizationVariable { name: "x2".to_string(), kind: Some(VariableKind::Binary), lb: None, ub: None, step: None },
+                OptimizationVariable {
+                    name: "x0".to_string(),
+                    kind: Some(VariableKind::Binary),
+                    lb: None,
+                    ub: None,
+                    step: None,
+                },
+                OptimizationVariable {
+                    name: "x1".to_string(),
+                    kind: Some(VariableKind::Binary),
+                    lb: None,
+                    ub: None,
+                    step: None,
+                },
+                OptimizationVariable {
+                    name: "x2".to_string(),
+                    kind: Some(VariableKind::Binary),
+                    lb: None,
+                    ub: None,
+                    step: None,
+                },
             ],
             objective: LinearObjective {
                 constant: None,
-                coefficients: vec![("x0".to_string(), 60.0), ("x1".to_string(), 100.0), ("x2".to_string(), 120.0)],
+                coefficients: vec![
+                    ("x0".to_string(), 60.0),
+                    ("x1".to_string(), 100.0),
+                    ("x2".to_string(), 120.0),
+                ],
             },
             constraints: Some(vec![LinearConstraint {
                 name: Some("capacity".to_string()),
-                coefficients: vec![("x0".to_string(), 10.0), ("x1".to_string(), 20.0), ("x2".to_string(), 30.0)],
+                coefficients: vec![
+                    ("x0".to_string(), 10.0),
+                    ("x1".to_string(), 20.0),
+                    ("x2".to_string(), 30.0),
+                ],
                 sense: ConstraintSense::Le,
                 rhs: 50.0,
                 tolerance: None,
@@ -503,7 +618,11 @@ impl DESModelRegistration<FeasibilityPipelineParams, FeasibilityPipelineResult>
                 description: None,
                 parameters: FeasibilityPipelineParams {
                     problem,
-                    candidate: CandidateSolutionInput { id: None, values: Some(candidate_values), vector: None },
+                    candidate: CandidateSolutionInput {
+                        id: None,
+                        values: Some(candidate_values),
+                        vector: None,
+                    },
                     improvement: Some(FeasibilityImprovementOptions {
                         enabled: Some(true),
                         max_iterations: Some(60),
@@ -517,7 +636,10 @@ impl DESModelRegistration<FeasibilityPipelineParams, FeasibilityPipelineResult>
                     max_ticks: None,
                     check_every_ticks: None,
                 },
-                runtime: Some(DESRuntimeConfig { animate: Some(true), ..Default::default() }),
+                runtime: Some(DESRuntimeConfig {
+                    animate: Some(true),
+                    ..Default::default()
+                }),
                 metadata: None,
             },
         }]

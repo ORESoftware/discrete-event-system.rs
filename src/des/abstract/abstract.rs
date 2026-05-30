@@ -65,7 +65,8 @@ pub struct EntityCore {
     pub time_step_count: u64,
     pub short_uuid: Option<String>,
     pub subscribers: Vec<Rc<RefCell<dyn EntityObserver>>>,
-    pub subscribers_by_event: std::collections::HashMap<String, Vec<Rc<RefCell<dyn EntityObserver>>>>,
+    pub subscribers_by_event:
+        std::collections::HashMap<String, Vec<Rc<RefCell<dyn EntityObserver>>>>,
 }
 
 impl EntityCore {
@@ -185,10 +186,7 @@ pub struct ConnectionOpts {}
 impl EntityConnection {
     /// `new EntityConnection(source, target, opts?)`. The id is the last 10 chars
     /// of a fresh v4 UUID (`uuid.v4().slice(-10)`).
-    pub fn new(
-        source: Weak<RefCell<dyn HasOutput>>,
-        target: Rc<RefCell<dyn HasInput>>,
-    ) -> Self {
+    pub fn new(source: Weak<RefCell<dyn HasOutput>>, target: Rc<RefCell<dyn HasInput>>) -> Self {
         let full = uuid::Uuid::new_v4().to_string();
         let id = full[full.len() - 10..].to_string();
         EntityConnection {

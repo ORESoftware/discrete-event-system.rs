@@ -403,13 +403,13 @@ pub fn build_random_graph(
     rng: &mut impl RandomSource,
 ) -> Graph {
     let mut edges: Vec<Vec<Edge>> = (0..num_nodes).map(|_| Vec::new()).collect();
-    for u in 0..num_nodes {
+    for (u, from_edges) in edges.iter_mut().enumerate().take(num_nodes) {
         for v in 0..num_nodes {
             if u == v {
                 continue;
             }
             if rng.next_float() < edge_prob {
-                edges[u].push(Edge {
+                from_edges.push(Edge {
                     to: v,
                     weight: w_min + (w_max - w_min) * rng.next_float(),
                 });
@@ -418,13 +418,13 @@ pub fn build_random_graph(
     }
     // Ensure every node has at least one outgoing edge (avoid trivially
     // disconnected sinks for small p).
-    for u in 0..num_nodes {
-        if edges[u].is_empty() {
+    for (u, from_edges) in edges.iter_mut().enumerate().take(num_nodes) {
+        if from_edges.is_empty() {
             let mut v = (rng.next_float() * num_nodes as f64).floor() as usize;
             if v == u {
                 v = (v + 1) % num_nodes;
             }
-            edges[u].push(Edge {
+            from_edges.push(Edge {
                 to: v,
                 weight: w_min + (w_max - w_min) * rng.next_float(),
             });
@@ -450,15 +450,15 @@ pub fn build_small_chain_graph() -> Graph {
         vec![
             Edge { to: 1, weight: 1.0 },
             Edge { to: 2, weight: 4.0 },
-            Edge { to: 4, weight: 10.0 },
+            Edge {
+                to: 4,
+                weight: 10.0,
+            },
         ], // 0
-        vec![
-            Edge { to: 2, weight: 2.0 },
-            Edge { to: 3, weight: 5.0 },
-        ], // 1
-        vec![Edge { to: 3, weight: 2.0 }], // 2
-        vec![Edge { to: 4, weight: 1.0 }], // 3
-        vec![],                            // 4
+        vec![Edge { to: 2, weight: 2.0 }, Edge { to: 3, weight: 5.0 }], // 1
+        vec![Edge { to: 3, weight: 2.0 }],                              // 2
+        vec![Edge { to: 4, weight: 1.0 }],                              // 3
+        vec![],                                                         // 4
     ];
     Graph {
         num_nodes: 5,
@@ -506,8 +506,14 @@ mod tests {
             num_nodes: 3,
             edges: vec![
                 vec![Edge { to: 1, weight: 1.0 }],
-                vec![Edge { to: 2, weight: -1.0 }],
-                vec![Edge { to: 1, weight: -1.0 }],
+                vec![Edge {
+                    to: 2,
+                    weight: -1.0,
+                }],
+                vec![Edge {
+                    to: 1,
+                    weight: -1.0,
+                }],
             ],
             coordinates: None,
             node_names: None,

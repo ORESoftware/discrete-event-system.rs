@@ -207,7 +207,8 @@ impl DESStation for InventoryDPStation {
     }
     fn assert_preconditions(&mut self) {
         // The TS base threw on a bad instance; fail fast here too.
-        self.assert_preconditions_dp().expect("inventory-dp preconditions");
+        self.assert_preconditions_dp()
+            .expect("inventory-dp preconditions");
     }
 }
 
@@ -251,7 +252,11 @@ impl FiniteHorizonDPStation for InventoryDPStation {
                 - order_cost
                 - p.hold_cost * leftover as f64
                 - p.stockout_cost * shortage;
-            out.push(DPOutcome { prob, reward, next_state: leftover });
+            out.push(DPOutcome {
+                prob,
+                reward,
+                next_state: leftover,
+            });
         }
         out
     }
@@ -425,7 +430,11 @@ mod tests {
     fn optimal_cost_on_tiny_instance() {
         let res = solve_inventory_dp(&newsvendor(), Some(1));
         // Order 1, sell 1 at price 5, everything else free ⇒ expected reward 5.
-        assert!((res.expected_reward - 5.0).abs() < 1e-9, "got {}", res.expected_reward);
+        assert!(
+            (res.expected_reward - 5.0).abs() < 1e-9,
+            "got {}",
+            res.expected_reward
+        );
         // Stage-0 policy at state 0 must order exactly one unit.
         assert_eq!(res.policy[0][0], 1);
     }
@@ -434,9 +443,16 @@ mod tests {
     fn ordering_costs_make_it_unprofitable() {
         // Same demand but the variable cost (6) exceeds the price (5): never
         // worth ordering, so the optimal value is 0 and the order is 0.
-        let p = InventoryProblem { cost: 6.0, ..newsvendor() };
+        let p = InventoryProblem {
+            cost: 6.0,
+            ..newsvendor()
+        };
         let res = solve_inventory_dp(&p, Some(7));
-        assert!(res.expected_reward.abs() < 1e-9, "got {}", res.expected_reward);
+        assert!(
+            res.expected_reward.abs() < 1e-9,
+            "got {}",
+            res.expected_reward
+        );
         assert_eq!(res.policy[0][0], 0);
     }
 
@@ -445,8 +461,14 @@ mod tests {
         let station = InventoryDPStation::new(newsvendor());
         // Drive the DP to completion so V/policy are filled.
         let s = Rc::new(RefCell::new(station));
-        run_iterative_des(vec![s.clone() as StationRef], IterativeRunOptions::default());
+        run_iterative_des(
+            vec![s.clone() as StationRef],
+            IterativeRunOptions::default(),
+        );
         let checks = crate::des::general::des_base::station::run_station_validation(&*s.borrow());
-        assert!(checks.iter().all(|c| c.passed), "validators failed: {checks:?}");
+        assert!(
+            checks.iter().all(|c| c.passed),
+            "validators failed: {checks:?}"
+        );
     }
 }

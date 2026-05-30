@@ -42,7 +42,11 @@ mod tests {
         }
         fn step(&mut self, state: f64, action: usize) -> StepResult<f64> {
             let o = self.env.step(state as usize, action);
-            StepResult { next_state: o.next_state as f64, reward: o.reward, done: o.done }
+            StepResult {
+                next_state: o.next_state as f64,
+                reward: o.reward,
+                done: o.done,
+            }
         }
     }
 
@@ -74,7 +78,9 @@ mod tests {
     #[test]
     fn neural_q_learning() {
         let r = run_neural_q_learning_des(
-            Box::new(PureEnvAdapter { env: Corridor::new(6, 0) }),
+            Box::new(PureEnvAdapter {
+                env: Corridor::new(6, 0),
+            }),
             NeuralQLearningRunParams {
                 num_episodes: 600,
                 alpha: 0.25,
@@ -97,7 +103,11 @@ mod tests {
             &eval_env,
             |s, _rng| r.policy[s],
             &mut rng,
-            EvalPolicyOptions { num_episodes: 50, max_steps_per_episode: 40, gamma: 1.0 },
+            EvalPolicyOptions {
+                num_episodes: 50,
+                max_steps_per_episode: 40,
+                gamma: 1.0,
+            },
         );
 
         assert_eq!(r.total_episodes, 600);
@@ -129,6 +139,9 @@ mod tests {
         );
         let final_y = trace.y[trace.y.len() - 1][0];
         let exact = (-rate * 2.0).exp();
-        assert!((final_y - exact).abs() < 1e-7, "final={final_y} exact={exact}");
+        assert!(
+            (final_y - exact).abs() < 1e-7,
+            "final={final_y} exact={exact}"
+        );
     }
 }

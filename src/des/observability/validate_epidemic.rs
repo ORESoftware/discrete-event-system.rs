@@ -111,7 +111,10 @@ pub fn run(event_log_path: &str) -> i32 {
         .find(|e| event_kind(e) == "sim_end")
         .unwrap_or_else(|| panic!("no sim_end event found"));
 
-    let transitions: Vec<&JsonValue> = events.iter().filter(|e| event_kind(e) == "transition").collect();
+    let transitions: Vec<&JsonValue> = events
+        .iter()
+        .filter(|e| event_kind(e) == "transition")
+        .collect();
     let ticks: Vec<&JsonValue> = events.iter().filter(|e| event_kind(e) == "tick").collect();
 
     println!("================================================================");
@@ -138,7 +141,10 @@ pub fn run(event_log_path: &str) -> i32 {
     for edge in edges {
         if let Some((a, b)) = edge_pair(edge) {
             if is_decision(a) {
-                decision_targets.entry(a.to_string()).or_default().push(b.to_string());
+                decision_targets
+                    .entry(a.to_string())
+                    .or_default()
+                    .push(b.to_string());
             }
         }
     }
@@ -175,8 +181,14 @@ pub fn run(event_log_path: &str) -> i32 {
             i1_bad += 1;
             if i1_bad <= 3 {
                 let ctx = JsonValue::Object(vec![
-                    ("t".to_string(), t.get("t").cloned().unwrap_or(JsonValue::Null)),
-                    ("entity".to_string(), t.get("entity").cloned().unwrap_or(JsonValue::Null)),
+                    (
+                        "t".to_string(),
+                        t.get("t").cloned().unwrap_or(JsonValue::Null),
+                    ),
+                    (
+                        "entity".to_string(),
+                        t.get("entity").cloned().unwrap_or(JsonValue::Null),
+                    ),
                 ]);
                 failures.push(Failure {
                     invariant: "I1 topology".to_string(),
@@ -226,14 +238,22 @@ pub fn run(event_log_path: &str) -> i32 {
         }
         last_seen.insert(entity, to);
     }
-    println!("I2 per-entity continuity:     {}  ({} jump(s))", pass_fail(i2_bad == 0), i2_bad);
+    println!(
+        "I2 per-entity continuity:     {}  ({} jump(s))",
+        pass_fail(i2_bad == 0),
+        i2_bad
+    );
 
     // ----- I3: branching probability ----------------------------------------
     let mut transitions_by_from: HashMap<String, HashMap<String, u64>> = HashMap::new();
     for &t in &transitions {
         let from = jstr(t, "from").to_string();
         let to = jstr(t, "to").to_string();
-        *transitions_by_from.entry(from).or_default().entry(to).or_insert(0) += 1;
+        *transitions_by_from
+            .entry(from)
+            .or_default()
+            .entry(to)
+            .or_insert(0) += 1;
     }
 
     let asym = start
@@ -298,11 +318,23 @@ pub fn run(event_log_path: &str) -> i32 {
     }
 
     // ----- I4: mass conservation --------------------------------------------
-    let source_out = transitions.iter().filter(|&&t| jstr(t, "from") == "__source__").count() as i64;
-    let sink_in = transitions.iter().filter(|&&t| jstr(t, "to") == "main-sink").count() as i64;
+    let source_out = transitions
+        .iter()
+        .filter(|&&t| jstr(t, "from") == "__source__")
+        .count() as i64;
+    let sink_in = transitions
+        .iter()
+        .filter(|&&t| jstr(t, "to") == "main-sink")
+        .count() as i64;
 
-    let created = end.pointer(&["totals", "created"]).and_then(|v| v.as_f64()).unwrap_or(0.0);
-    let absorbed = end.pointer(&["totals", "absorbed"]).and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let created = end
+        .pointer(&["totals", "created"])
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let absorbed = end
+        .pointer(&["totals", "absorbed"])
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
     let total_alive: f64 = end
         .pointer(&["totals", "finalPopulations"])
         .and_then(|v| v.as_object())
@@ -336,14 +368,22 @@ pub fn run(event_log_path: &str) -> i32 {
     if !i4_source_ok {
         failures.push(Failure {
             invariant: "I4 mass".to_string(),
-            detail: format!("source emissions {} != createdCount {}", source_out, js_num(created)),
+            detail: format!(
+                "source emissions {} != createdCount {}",
+                source_out,
+                js_num(created)
+            ),
             context: None,
         });
     }
     if !i4_sink_ok {
         failures.push(Failure {
             invariant: "I4 mass".to_string(),
-            detail: format!("sink absorptions {} != destroyedCount {}", sink_in, js_num(absorbed)),
+            detail: format!(
+                "sink absorptions {} != destroyedCount {}",
+                sink_in,
+                js_num(absorbed)
+            ),
             context: None,
         });
     }
@@ -361,8 +401,14 @@ pub fn run(event_log_path: &str) -> i32 {
     }
 
     // ----- I5: per-cycle death rate -----------------------------------------
-    let s_visits = transitions.iter().filter(|&&t| jstr(t, "to") == "S").count() as u64;
-    let deaths = transitions.iter().filter(|&&t| jstr(t, "to") == "D").count() as u64;
+    let s_visits = transitions
+        .iter()
+        .filter(|&&t| jstr(t, "to") == "S")
+        .count() as u64;
+    let deaths = transitions
+        .iter()
+        .filter(|&&t| jstr(t, "to") == "D")
+        .count() as u64;
     let q_theoretical = (1.0 - asym) * hosp * cfr;
     let q_observed = if s_visits > 0 {
         deaths as f64 / s_visits as f64

@@ -134,15 +134,24 @@ impl DecisionAuthority {
     }
     fn summary(self) -> &'static str {
         match self {
-            DecisionAuthority::Central => "One global controller claims requests and coordinates shafts.",
-            DecisionAuthority::Decentralized => "Each elevator chooses from its local sensor view; duplicate claims are allowed.",
-            DecisionAuthority::Hybrid => "The controller handles urgent calls while idle cars make local decisions.",
+            DecisionAuthority::Central => {
+                "One global controller claims requests and coordinates shafts."
+            }
+            DecisionAuthority::Decentralized => {
+                "Each elevator chooses from its local sensor view; duplicate claims are allowed."
+            }
+            DecisionAuthority::Hybrid => {
+                "The controller handles urgent calls while idle cars make local decisions."
+            }
         }
     }
 }
 
-pub const DECISION_AUTHORITIES: [DecisionAuthority; 3] =
-    [DecisionAuthority::Central, DecisionAuthority::Decentralized, DecisionAuthority::Hybrid];
+pub const DECISION_AUTHORITIES: [DecisionAuthority; 3] = [
+    DecisionAuthority::Central,
+    DecisionAuthority::Decentralized,
+    DecisionAuthority::Hybrid,
+];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum MDPObservability {
@@ -375,7 +384,14 @@ struct HighrisePassenger {
 }
 impl HighrisePassenger {
     fn new(id: i64, from_floor: i32, to_floor: i32, arrival_time: f64) -> Self {
-        HighrisePassenger { id, from_floor, to_floor, arrival_time, board_time: -1.0, exit_time: -1.0 }
+        HighrisePassenger {
+            id,
+            from_floor,
+            to_floor,
+            arrival_time,
+            board_time: -1.0,
+            exit_time: -1.0,
+        }
     }
     fn direction(&self) -> i32 {
         sign((self.to_floor - self.from_floor) as f64)
@@ -472,10 +488,14 @@ impl HighriseBuilding {
         authority: DecisionAuthority,
         mdp_tuning: Option<MDPDispatchTuning>,
     ) -> Self {
-        let floors: Vec<FloorQueues> = (0..config.n_floors).map(|_| FloorQueues::default()).collect();
+        let floors: Vec<FloorQueues> = (0..config.n_floors)
+            .map(|_| FloorQueues::default())
+            .collect();
         let elevators: Vec<ElevatorCar> = (0..config.n_elevators)
             .map(|i| {
-                let start = ((config.n_floors - 1) as f64 * (i + 1) as f64 / (config.n_elevators + 1) as f64).round();
+                let start = ((config.n_floors - 1) as f64 * (i + 1) as f64
+                    / (config.n_elevators + 1) as f64)
+                    .round();
                 let mut car = ElevatorCar::new(i, start, config.capacity);
                 if policy == HighrisePolicy::ZonedService {
                     car.allowed_floors = Some(allowed_floors_for(i, config.n_floors));
@@ -515,7 +535,9 @@ impl HighriseBuilding {
         self.next_arrival_index >= self.schedule.len()
     }
     fn is_drained(&self) -> bool {
-        self.all_arrivals_emitted() && self.pending_passenger_count() == 0 && self.in_car_count() == 0
+        self.all_arrivals_emitted()
+            && self.pending_passenger_count() == 0
+            && self.in_car_count() == 0
     }
     fn total_energy(&self) -> f64 {
         self.elevators.iter().map(|e| e.energy).sum()
@@ -528,11 +550,18 @@ impl HighriseBuilding {
     }
 
     fn emit_arrivals(&mut self, now: f64) {
-        while self.next_arrival_index < self.schedule.len() && self.schedule[self.next_arrival_index].t <= now {
+        while self.next_arrival_index < self.schedule.len()
+            && self.schedule[self.next_arrival_index].t <= now
+        {
             let a = self.schedule[self.next_arrival_index];
             self.next_arrival_index += 1;
             let id = self.people.len() as i64;
-            let p = Rc::new(RefCell::new(HighrisePassenger::new(id, a.from_floor, a.to_floor, a.t)));
+            let p = Rc::new(RefCell::new(HighrisePassenger::new(
+                id,
+                a.from_floor,
+                a.to_floor,
+                a.t,
+            )));
             self.people.push(p.clone());
             let dir = p.borrow().direction();
             if dir > 0 {
@@ -566,7 +595,14 @@ impl HighriseBuilding {
 
             let delta = self.elevators[k].target_floor.unwrap() - self.elevators[k].current_floor;
             if delta.abs() < 1e-9 {
-                service_floor(&mut self.elevators[k], &mut self.floors, &mut self.completed, &self.config, self.policy, now);
+                service_floor(
+                    &mut self.elevators[k],
+                    &mut self.floors,
+                    &mut self.completed,
+                    &self.config,
+                    self.policy,
+                    now,
+                );
                 continue;
             }
 
@@ -590,10 +626,19 @@ impl HighriseBuilding {
                 car.energy += move_amt * (1.0 + 0.055 * car.passengers.len() as f64);
             }
 
-            let reached = (self.elevators[k].target_floor.unwrap() - self.elevators[k].current_floor).abs() < 1e-9;
+            let reached =
+                (self.elevators[k].target_floor.unwrap() - self.elevators[k].current_floor).abs()
+                    < 1e-9;
             if reached {
                 self.elevators[k].current_floor = self.elevators[k].target_floor.unwrap();
-                service_floor(&mut self.elevators[k], &mut self.floors, &mut self.completed, &self.config, self.policy, now);
+                service_floor(
+                    &mut self.elevators[k],
+                    &mut self.floors,
+                    &mut self.completed,
+                    &self.config,
+                    self.policy,
+                    now,
+                );
             }
         }
     }
@@ -660,7 +705,12 @@ impl HighriseBuilding {
             );
             if let Some(pk) = pickup {
                 claimed.insert(request_key(pk.floor as f64, pk.dir));
-                self.elevators[k].set_target(pk.floor as f64, TargetReason::Pickup, pk.dir, n_floors);
+                self.elevators[k].set_target(
+                    pk.floor as f64,
+                    TargetReason::Pickup,
+                    pk.dir,
+                    n_floors,
+                );
                 self.elevators[k].decision_source = source.unwrap_or(DecisionSource::Central);
                 continue;
             }
@@ -687,7 +737,12 @@ impl HighriseBuilding {
         }
     }
 
-    fn assign_autonomous_cars(&mut self, now: f64, claimed: &mut HashSet<String>, source: DecisionSource) {
+    fn assign_autonomous_cars(
+        &mut self,
+        now: f64,
+        claimed: &mut HashSet<String>,
+        source: DecisionSource,
+    ) {
         let n_floors = self.config.n_floors;
         for k in 0..self.elevators.len() {
             if self.elevators[k].service_remaining > 0.0 {
@@ -742,7 +797,12 @@ impl HighriseBuilding {
                 if source != DecisionSource::Local {
                     claimed.insert(request_key(pk.floor as f64, pk.dir));
                 }
-                self.elevators[k].set_target(pk.floor as f64, TargetReason::Pickup, pk.dir, n_floors);
+                self.elevators[k].set_target(
+                    pk.floor as f64,
+                    TargetReason::Pickup,
+                    pk.dir,
+                    n_floors,
+                );
                 self.elevators[k].decision_source = source;
                 continue;
             }
@@ -808,7 +868,10 @@ fn service_floor(
         changed = changed || boarded > 0;
     }
 
-    if changed || car.target_reason == Some(TargetReason::Pickup) || car.target_reason == Some(TargetReason::Dropoff) {
+    if changed
+        || car.target_reason == Some(TargetReason::Pickup)
+        || car.target_reason == Some(TargetReason::Dropoff)
+    {
         car.stops += 1.0;
         car.energy += 0.8;
         car.service_remaining = config.service_time;
@@ -840,7 +903,11 @@ fn board_passengers(
     if dir == 0 {
         return 0;
     }
-    let queue: &[PaxRef] = if dir > 0 { &floors[fidx].up } else { &floors[fidx].down };
+    let queue: &[PaxRef] = if dir > 0 {
+        &floors[fidx].up
+    } else {
+        &floors[fidx].down
+    };
     if queue.is_empty() {
         return 0;
     }
@@ -869,7 +936,9 @@ fn board_passengers(
                 }
             }
         }
-        if policy == HighrisePolicy::EnergyEfficient && !car.passengers.is_empty() && would_add_reverse_stop(car, &p.borrow())
+        if policy == HighrisePolicy::EnergyEfficient
+            && !car.passengers.is_empty()
+            && would_add_reverse_stop(car, &p.borrow())
         {
             keep.push(p.clone());
             continue;
@@ -891,7 +960,12 @@ fn board_passengers(
     n
 }
 
-fn boarding_direction(car: &ElevatorCar, floors: &[FloorQueues], floor: usize, policy: HighrisePolicy) -> i32 {
+fn boarding_direction(
+    car: &ElevatorCar,
+    floors: &[FloorQueues],
+    floor: usize,
+    policy: HighrisePolicy,
+) -> i32 {
     if policy == HighrisePolicy::FewestStops && !car.passengers.is_empty() {
         return 0;
     }
@@ -915,8 +989,16 @@ fn boarding_direction(car: &ElevatorCar, floors: &[FloorQueues], floor: usize, p
     if down == 0 {
         return 1;
     }
-    let oldest_up = floors[floor].up.first().map(|p| p.borrow().arrival_time).unwrap_or(f64::INFINITY);
-    let oldest_down = floors[floor].down.first().map(|p| p.borrow().arrival_time).unwrap_or(f64::INFINITY);
+    let oldest_up = floors[floor]
+        .up
+        .first()
+        .map(|p| p.borrow().arrival_time)
+        .unwrap_or(f64::INFINITY);
+    let oldest_down = floors[floor]
+        .down
+        .first()
+        .map(|p| p.borrow().arrival_time)
+        .unwrap_or(f64::INFINITY);
     if oldest_up <= oldest_down {
         1
     } else {
@@ -939,8 +1021,15 @@ fn choose_pickup(
     let mut best: Option<(i32, i32, f64, PickupFeatures)> = None;
     for floor in 0..floors.len() {
         for dir in [1i32, -1] {
-            let queue: &[PaxRef] = if dir > 0 { &floors[floor].up } else { &floors[floor].down };
-            let eligible: Vec<&PaxRef> = queue.iter().filter(|p| can_car_serve_passenger(car, &p.borrow())).collect();
+            let queue: &[PaxRef] = if dir > 0 {
+                &floors[floor].up
+            } else {
+                &floors[floor].down
+            };
+            let eligible: Vec<&PaxRef> = queue
+                .iter()
+                .filter(|p| can_car_serve_passenger(car, &p.borrow()))
+                .collect();
             if eligible.is_empty() {
                 continue;
             }
@@ -960,9 +1049,20 @@ fn choose_pickup(
             }
             let queue_len = eligible.len() as f64;
             let trip = average_trip_floors_refs(&eligible);
-            let same_side = if sign(floor as f64 - car.current_floor) == dir { 1.0 } else { 0.0 };
+            let same_side = if sign(floor as f64 - car.current_floor) == dir {
+                1.0
+            } else {
+                0.0
+            };
             let max_group = largest_destination_group_refs(&eligible) as f64;
-            let features = PickupFeatures { distance, oldest_wait, queue_len, trip, same_side, max_group };
+            let features = PickupFeatures {
+                distance,
+                oldest_wait,
+                queue_len,
+                trip,
+                same_side,
+                max_group,
+            };
             let score = score_pickup(&features, policy, mdp_tuning);
             let take = match &best {
                 None => true,
@@ -980,7 +1080,11 @@ fn choose_pickup(
     None
 }
 
-fn score_pickup(features: &PickupFeatures, policy: HighrisePolicy, mdp_tuning: Option<&MDPDispatchTuning>) -> f64 {
+fn score_pickup(
+    features: &PickupFeatures,
+    policy: HighrisePolicy,
+    mdp_tuning: Option<&MDPDispatchTuning>,
+) -> f64 {
     let w = weights_for(features, policy, mdp_tuning);
     features.distance * w.distance + features.trip * w.trip
         - features.queue_len * w.queue
@@ -989,7 +1093,11 @@ fn score_pickup(features: &PickupFeatures, policy: HighrisePolicy, mdp_tuning: O
         - features.max_group * w.destination_group
 }
 
-fn weights_for(features: &PickupFeatures, policy: HighrisePolicy, mdp_tuning: Option<&MDPDispatchTuning>) -> DispatchScoreWeights {
+fn weights_for(
+    features: &PickupFeatures,
+    policy: HighrisePolicy,
+    mdp_tuning: Option<&MDPDispatchTuning>,
+) -> DispatchScoreWeights {
     if let Some(decision) = mdp_decision_for(features, policy, mdp_tuning) {
         let tuning = mdp_tuning.unwrap();
         return tuning
@@ -1012,7 +1120,11 @@ fn mdp_decision_for(
     let tuning = mdp_tuning?;
     let state_id = encode_mdp_dispatch_state(features, tuning.observability);
     let action_idx = tuning.policy[state_id].max(0) as usize;
-    let action = tuning.action_labels.get(action_idx).cloned().unwrap_or_else(|| format!("a{action_idx}"));
+    let action = tuning
+        .action_labels
+        .get(action_idx)
+        .cloned()
+        .unwrap_or_else(|| format!("a{action_idx}"));
     Some((state_id, action_idx, action))
 }
 
@@ -1033,13 +1145,21 @@ fn record_mdp_decision(
     let (state_id, _action_idx, action) = decision;
     log.push(MDPDecisionLogEntry {
         state_id,
-        state: tuning.state_labels.get(state_id).cloned().unwrap_or_else(|| format!("s{state_id}")),
+        state: tuning
+            .state_labels
+            .get(state_id)
+            .cloned()
+            .unwrap_or_else(|| format!("s{state_id}")),
         action,
         bins: mdp_bin_labels(&decode_mdp_dispatch_state(state_id, tuning.observability)),
     });
 }
 
-fn home_floor(car: &ElevatorCar, config: &HighriseElevatorConfig, policy: HighrisePolicy) -> Option<f64> {
+fn home_floor(
+    car: &ElevatorCar,
+    config: &HighriseElevatorConfig,
+    policy: HighrisePolicy,
+) -> Option<f64> {
     if policy == HighrisePolicy::CenterPreposition || is_mdp_policy(policy) {
         let center = (config.n_floors - 1) as f64 / 2.0;
         let spacing = 3.0;
@@ -1100,7 +1220,11 @@ fn build_highrise_schedule(cfg: &HighriseElevatorConfig) -> Vec<ScheduledArrival
                 }
                 to_floor = tf;
             }
-            out.push(ScheduledArrival { t, from_floor, to_floor });
+            out.push(ScheduledArrival {
+                t,
+                from_floor,
+                to_floor,
+            });
         }
         out
     })
@@ -1117,7 +1241,13 @@ fn run_highrise_elevators(
     schedule: &[ScheduledArrival],
     opts: HighriseRunOptions,
 ) -> HighriseElevatorResult {
-    let mut building = HighriseBuilding::new(cfg.clone(), policy, schedule.to_vec(), opts.authority, opts.mdp_tuning.clone());
+    let mut building = HighriseBuilding::new(
+        cfg.clone(),
+        policy,
+        schedule.to_vec(),
+        opts.authority,
+        opts.mdp_tuning.clone(),
+    );
     // PORT NOTE: frame/series recording omitted (animation not ported).
     let max_ticks = ((cfg.sim_t + cfg.drain_t) / cfg.step_size).round() as i64;
     for tick in 0..=max_ticks {
@@ -1126,7 +1256,14 @@ fn run_highrise_elevators(
             break;
         }
     }
-    make_result(policy, opts.authority, cfg, schedule, &building, opts.mdp_tuning.as_ref())
+    make_result(
+        policy,
+        opts.authority,
+        cfg,
+        schedule,
+        &building,
+        opts.mdp_tuning.as_ref(),
+    )
 }
 
 fn make_result(
@@ -1137,10 +1274,24 @@ fn make_result(
     building: &HighriseBuilding,
     mdp_tuning: Option<&MDPDispatchTuning>,
 ) -> HighriseElevatorResult {
-    let served: Vec<PaxRef> = building.people.iter().filter(|p| p.borrow().exit_time >= 0.0).cloned().collect();
-    let waits: Vec<f64> = served.iter().map(|p| p.borrow().board_time - p.borrow().arrival_time).collect();
-    let travels: Vec<f64> = served.iter().map(|p| p.borrow().exit_time - p.borrow().board_time).collect();
-    let totals: Vec<f64> = served.iter().map(|p| p.borrow().exit_time - p.borrow().arrival_time).collect();
+    let served: Vec<PaxRef> = building
+        .people
+        .iter()
+        .filter(|p| p.borrow().exit_time >= 0.0)
+        .cloned()
+        .collect();
+    let waits: Vec<f64> = served
+        .iter()
+        .map(|p| p.borrow().board_time - p.borrow().arrival_time)
+        .collect();
+    let travels: Vec<f64> = served
+        .iter()
+        .map(|p| p.borrow().exit_time - p.borrow().board_time)
+        .collect();
+    let totals: Vec<f64> = served
+        .iter()
+        .map(|p| p.borrow().exit_time - p.borrow().arrival_time)
+        .collect();
     let people: Vec<HighrisePassengerSnapshot> = building
         .people
         .iter()
@@ -1189,8 +1340,22 @@ fn make_result(
 // Policy weight tables.
 // ---------------------------------------------------------------------------
 
-fn dsw(distance: f64, trip: f64, queue: f64, wait: f64, same_direction: f64, destination_group: f64) -> DispatchScoreWeights {
-    DispatchScoreWeights { distance, trip, queue, wait, same_direction, destination_group }
+fn dsw(
+    distance: f64,
+    trip: f64,
+    queue: f64,
+    wait: f64,
+    same_direction: f64,
+    destination_group: f64,
+) -> DispatchScoreWeights {
+    DispatchScoreWeights {
+        distance,
+        trip,
+        queue,
+        wait,
+        same_direction,
+        destination_group,
+    }
 }
 
 fn policy_score_weights(policy: HighrisePolicy) -> DispatchScoreWeights {
@@ -1228,11 +1393,26 @@ const CALL_ONLY_EXPECTED_TRIP: f64 = 18.0;
 
 fn mdp_action_profiles() -> Vec<MDPActionProfile> {
     vec![
-        MDPActionProfile { label: "direct-batch", weights: dsw(1.8, 0.12, 0.3, 0.035, 0.2, 2.8) },
-        MDPActionProfile { label: "latency", weights: dsw(1.05, 0.18, 1.35, 0.105, 0.25, 0.3) },
-        MDPActionProfile { label: "energy", weights: dsw(2.45, 0.42, 0.55, 0.04, 1.1, 0.65) },
-        MDPActionProfile { label: "balanced", weights: dsw(1.35, 0.2, 0.95, 0.07, 0.45, 0.45) },
-        MDPActionProfile { label: "oldest-first", weights: dsw(0.95, 0.16, 0.75, 0.16, 0.2, 0.15) },
+        MDPActionProfile {
+            label: "direct-batch",
+            weights: dsw(1.8, 0.12, 0.3, 0.035, 0.2, 2.8),
+        },
+        MDPActionProfile {
+            label: "latency",
+            weights: dsw(1.05, 0.18, 1.35, 0.105, 0.25, 0.3),
+        },
+        MDPActionProfile {
+            label: "energy",
+            weights: dsw(2.45, 0.42, 0.55, 0.04, 1.1, 0.65),
+        },
+        MDPActionProfile {
+            label: "balanced",
+            weights: dsw(1.35, 0.2, 0.95, 0.07, 0.45, 0.45),
+        },
+        MDPActionProfile {
+            label: "oldest-first",
+            weights: dsw(0.95, 0.16, 0.75, 0.16, 0.2, 0.15),
+        },
     ]
 }
 
@@ -1267,13 +1447,17 @@ fn mdp_num_states(observability: MDPObservability) -> usize {
 }
 
 fn env_f64_opt(key: &str, default: f64) -> f64 {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 fn optimize_highrise_dispatch_mdp(observability: MDPObservability) -> MDPDispatchTuning {
     let num_states = mdp_num_states(observability);
-    let state_labels: Vec<String> =
-        (0..num_states).map(|s| label_mdp_dispatch_state(&decode_mdp_dispatch_state(s, observability))).collect();
+    let state_labels: Vec<String> = (0..num_states)
+        .map(|s| label_mdp_dispatch_state(&decode_mdp_dispatch_state(s, observability)))
+        .collect();
     let profiles = mdp_action_profiles();
     let action_labels: Vec<String> = profiles.iter().map(|a| a.label.to_string()).collect();
 
@@ -1287,11 +1471,15 @@ fn optimize_highrise_dispatch_mdp(observability: MDPObservability) -> MDPDispatc
         terminal_reward: None,
         state_label: {
             let labels = state_labels.clone();
-            Some(Box::new(move |s| labels.get(s).cloned().unwrap_or_default()))
+            Some(Box::new(move |s| {
+                labels.get(s).cloned().unwrap_or_default()
+            }))
         },
         action_label: {
             let labels = action_labels.clone();
-            Some(Box::new(move |a| labels.get(a).cloned().unwrap_or_default()))
+            Some(Box::new(move |a| {
+                labels.get(a).cloned().unwrap_or_default()
+            }))
         },
     };
     let opts = VIOptions {
@@ -1317,7 +1505,11 @@ fn optimize_highrise_dispatch_mdp(observability: MDPObservability) -> MDPDispatc
     }
 }
 
-fn abstract_dispatch_outcomes(s: usize, action_idx: usize, observability: MDPObservability) -> Vec<Outcome> {
+fn abstract_dispatch_outcomes(
+    s: usize,
+    action_idx: usize,
+    observability: MDPObservability,
+) -> Vec<Outcome> {
     let st = decode_mdp_dispatch_state(s, observability);
     let profiles = mdp_action_profiles();
     let action = &profiles[action_idx];
@@ -1342,7 +1534,8 @@ fn abstract_dispatch_outcomes(s: usize, action_idx: usize, observability: MDPObs
 
     let w = &action.weights;
     let direct_demand = if observability == MDPObservability::DestinationDispatch
-        && (st.batch_bin.unwrap_or(0) >= 1 || (st.queue_bin.unwrap_or(0) >= 1 && st.trip_bin.unwrap_or(0) >= 1))
+        && (st.batch_bin.unwrap_or(0) >= 1
+            || (st.queue_bin.unwrap_or(0) >= 1 && st.trip_bin.unwrap_or(0) >= 1))
     {
         1.0
     } else {
@@ -1351,54 +1544,102 @@ fn abstract_dispatch_outcomes(s: usize, action_idx: usize, observability: MDPObs
     let urgency = st.wait_bin as f64 / 2.0;
     let energy_risk = st.distance_bin as f64 / 3.0 + (if same > 0.0 { -0.25 } else { 0.25 });
     let time_cost = d * 1.35 + trip * 0.65 + wait * 0.85 - q * 3.5 - batch * 1.5;
-    let stop_cost = (2.2 - w.destination_group * direct_demand - st.batch_bin.unwrap_or(0) as f64 * 0.35).max(0.5);
+    let stop_cost =
+        (2.2 - w.destination_group * direct_demand - st.batch_bin.unwrap_or(0) as f64 * 0.35)
+            .max(0.5);
     let energy_cost = d * (1.0 + 0.24 * w.distance) + trip * 0.07 - same * w.same_direction;
     let hidden_queue_penalty = if observability == MDPObservability::CallOnly {
-        (urgency - w.wait * 7.0).max(0.0) + (0.8 - w.distance * 0.18 - w.same_direction * 0.25).max(0.0)
+        (urgency - w.wait * 7.0).max(0.0)
+            + (0.8 - w.distance * 0.18 - w.same_direction * 0.25).max(0.0)
     } else {
         0.0
     };
     let mismatch = (urgency - w.wait * 8.0).max(0.0)
         + (energy_risk - w.same_direction * 0.45).max(0.0)
-        + (direct_demand + st.batch_bin.unwrap_or(0) as f64 * 0.35 - w.destination_group * 0.28).max(0.0)
+        + (direct_demand + st.batch_bin.unwrap_or(0) as f64 * 0.35 - w.destination_group * 0.28)
+            .max(0.0)
         + hidden_queue_penalty;
     let reward = -(time_cost + energy_cost * 1.8 + stop_cost * 6.0 + mismatch * 12.0);
 
     let fit = clamp(
-        0.52
-            + (if w.wait > 0.09 && st.wait_bin >= 1 { 0.12 } else { 0.0 })
-            + (if w.destination_group > 1.5 && direct_demand > 0.0 { 0.12 } else { 0.0 })
-            + (if w.destination_group > 1.5 && st.batch_bin.unwrap_or(0) >= 1 { 0.08 } else { 0.0 })
-            + (if w.same_direction > 0.7 && same > 0.0 { 0.10 } else { 0.0 })
-            + (if w.distance > 2.0 && st.distance_bin <= 1 { 0.08 } else { 0.0 })
-            - mismatch * 0.05,
+        0.52 + (if w.wait > 0.09 && st.wait_bin >= 1 {
+            0.12
+        } else {
+            0.0
+        }) + (if w.destination_group > 1.5 && direct_demand > 0.0 {
+            0.12
+        } else {
+            0.0
+        }) + (if w.destination_group > 1.5 && st.batch_bin.unwrap_or(0) >= 1 {
+            0.08
+        } else {
+            0.0
+        }) + (if w.same_direction > 0.7 && same > 0.0 {
+            0.10
+        } else {
+            0.0
+        }) + (if w.distance > 2.0 && st.distance_bin <= 1 {
+            0.08
+        } else {
+            0.0
+        }) - mismatch * 0.05,
         0.2,
         0.88,
     );
 
     let mut improved = MDPDispatchStateBins {
-        distance_bin: st.distance_bin.saturating_sub(if w.distance > 1.7 { 1 } else { 0 }),
-        wait_bin: st.wait_bin.saturating_sub(if w.wait > 0.08 { 1 } else { 0 }),
+        distance_bin: st
+            .distance_bin
+            .saturating_sub(if w.distance > 1.7 { 1 } else { 0 }),
+        wait_bin: st
+            .wait_bin
+            .saturating_sub(if w.wait > 0.08 { 1 } else { 0 }),
         same_side: same as usize,
         ..Default::default()
     };
     let mut degraded = MDPDispatchStateBins {
-        distance_bin: (st.distance_bin + if w.distance < 1.2 { 1 } else { 0 }).min(mdp_distance_bins().len() - 1),
+        distance_bin: (st.distance_bin + if w.distance < 1.2 { 1 } else { 0 })
+            .min(mdp_distance_bins().len() - 1),
         wait_bin: (st.wait_bin + if w.wait < 0.07 { 1 } else { 0 }).min(mdp_wait_bins().len() - 1),
         same_side: if same > 0.0 { 1 } else { 0 },
         ..Default::default()
     };
     if observability == MDPObservability::DestinationDispatch {
-        improved.queue_bin = Some(st.queue_bin.unwrap_or(0).saturating_sub(if w.queue > 0.8 || w.destination_group > 1.5 { 1 } else { 0 }));
-        improved.trip_bin = Some(st.trip_bin.unwrap_or(0).saturating_sub(if w.destination_group > 1.5 { 1 } else { 0 }));
-        improved.batch_bin = Some(st.batch_bin.unwrap_or(0).saturating_sub(if w.destination_group > 1.5 { 1 } else { 0 }));
-        degraded.queue_bin = Some((st.queue_bin.unwrap_or(0) + if w.queue < 0.75 { 1 } else { 0 }).min(mdp_queue_bins().len() - 1));
+        improved.queue_bin = Some(st.queue_bin.unwrap_or(0).saturating_sub(
+            if w.queue > 0.8 || w.destination_group > 1.5 {
+                1
+            } else {
+                0
+            },
+        ));
+        improved.trip_bin = Some(
+            st.trip_bin
+                .unwrap_or(0)
+                .saturating_sub(if w.destination_group > 1.5 { 1 } else { 0 }),
+        );
+        improved.batch_bin = Some(
+            st.batch_bin
+                .unwrap_or(0)
+                .saturating_sub(if w.destination_group > 1.5 { 1 } else { 0 }),
+        );
+        degraded.queue_bin = Some(
+            (st.queue_bin.unwrap_or(0) + if w.queue < 0.75 { 1 } else { 0 })
+                .min(mdp_queue_bins().len() - 1),
+        );
         degraded.trip_bin = Some(st.trip_bin.unwrap_or(0));
         degraded.batch_bin = Some(st.batch_bin.unwrap_or(0));
     }
     vec![
-        Outcome { prob: fit, reward, next_state: encode_mdp_dispatch_bins(&improved, observability) },
-        Outcome { prob: 1.0 - fit, reward: reward - 5.0 - wait * 0.05, next_state: encode_mdp_dispatch_bins(&degraded, observability) },
+        Outcome {
+            prob: fit,
+            reward,
+            next_state: encode_mdp_dispatch_bins(&improved, observability),
+        },
+        Outcome {
+            prob: 1.0 - fit,
+            reward: reward - 5.0 - wait * 0.05,
+            next_state: encode_mdp_dispatch_bins(&degraded, observability),
+        },
     ]
 }
 
@@ -1460,7 +1701,14 @@ fn decode_mdp_dispatch_state(s: usize, observability: MDPObservability) -> MDPDi
         s /= mdp_queue_bins().len();
     }
     let distance_bin = s;
-    MDPDispatchStateBins { distance_bin, queue_bin, wait_bin, trip_bin, batch_bin, same_side }
+    MDPDispatchStateBins {
+        distance_bin,
+        queue_bin,
+        wait_bin,
+        trip_bin,
+        batch_bin,
+        same_side,
+    }
 }
 
 fn label_mdp_dispatch_state(st: &MDPDispatchStateBins) -> String {
@@ -1475,7 +1723,11 @@ fn label_mdp_dispatch_state(st: &MDPDispatchStateBins) -> String {
     if let Some(b) = st.batch_bin {
         parts.push(format!("batch{b}"));
     }
-    parts.push(if st.same_side != 0 { "same".to_string() } else { "reverse".to_string() });
+    parts.push(if st.same_side != 0 {
+        "same".to_string()
+    } else {
+        "reverse".to_string()
+    });
     parts.join("/")
 }
 
@@ -1483,7 +1735,14 @@ fn mdp_bin_labels(st: &MDPDispatchStateBins) -> Vec<(String, String)> {
     let mut out = vec![
         ("distance".to_string(), format!("d{}", st.distance_bin)),
         ("wait".to_string(), format!("w{}", st.wait_bin)),
-        ("direction".to_string(), if st.same_side != 0 { "same".to_string() } else { "reverse".to_string() }),
+        (
+            "direction".to_string(),
+            if st.same_side != 0 {
+                "same".to_string()
+            } else {
+                "reverse".to_string()
+            },
+        ),
     ];
     if let Some(q) = st.queue_bin {
         out.push(("queue".to_string(), format!("q{q}")));
@@ -1538,7 +1797,17 @@ fn average_mdp_weights(policy: &[i32], observability: MDPObservability) -> Dispa
 }
 
 fn summarize_mdp_tuning(tuning: &MDPDispatchTuning) -> MDPDispatchTuningSummary {
-    let candidates = [0i64, 1, 5, 17, 43, 87, 129, 173, tuning.num_states as i64 - 1];
+    let candidates = [
+        0i64,
+        1,
+        5,
+        17,
+        43,
+        87,
+        129,
+        173,
+        tuning.num_states as i64 - 1,
+    ];
     let mut interesting: Vec<usize> = Vec::new();
     for &s in &candidates {
         if s >= 0 && (s as usize) < tuning.num_states && !interesting.contains(&(s as usize)) {
@@ -1574,7 +1843,14 @@ fn summarize_mdp_run(log: &[MDPDecisionLogEntry]) -> MDPRunDiagnostics {
         let state_key = format!("{}|{}", row.state, row.action);
         match state_counts.iter_mut().find(|(k, _)| *k == state_key) {
             Some((_, ts)) => ts.count += 1,
-            None => state_counts.push((state_key, TopState { state: row.state.clone(), action: row.action.clone(), count: 1 })),
+            None => state_counts.push((
+                state_key,
+                TopState {
+                    state: row.state.clone(),
+                    action: row.action.clone(),
+                    count: 1,
+                },
+            )),
         }
         for (variable, bin) in &row.bins {
             let by_bin = match marginal.iter_mut().find(|(v, _)| v == variable) {
@@ -1597,7 +1873,15 @@ fn summarize_mdp_run(log: &[MDPDecisionLogEntry]) -> MDPRunDiagnostics {
 
     let mut action_count_rows: Vec<ActionCount> = action_counts
         .into_iter()
-        .map(|(action, count)| ActionCount { action, count, share: if total > 0 { count as f64 / total as f64 } else { 0.0 } })
+        .map(|(action, count)| ActionCount {
+            action,
+            count,
+            share: if total > 0 {
+                count as f64 / total as f64
+            } else {
+                0.0
+            },
+        })
         .collect();
     action_count_rows.sort_by(|a, b| b.count.cmp(&a.count));
 
@@ -1624,7 +1908,11 @@ fn summarize_mdp_run(log: &[MDPDecisionLogEntry]) -> MDPRunDiagnostics {
                         bin,
                         count,
                         dominant_action,
-                        share: if count > 0 { dominant_count as f64 / count as f64 } else { 0.0 },
+                        share: if count > 0 {
+                            dominant_count as f64 / count as f64
+                        } else {
+                            0.0
+                        },
                     }
                 })
                 .collect();
@@ -1634,7 +1922,12 @@ fn summarize_mdp_run(log: &[MDPDecisionLogEntry]) -> MDPRunDiagnostics {
         .collect();
     marginals.sort_by(|a, b| a.variable.cmp(&b.variable));
 
-    MDPRunDiagnostics { total_decisions: total, action_counts: action_count_rows, top_states, marginals }
+    MDPRunDiagnostics {
+        total_decisions: total,
+        action_counts: action_count_rows,
+        top_states,
+        marginals,
+    }
 }
 
 fn bump(counts: &mut Vec<(String, usize)>, key: &str) {
@@ -1644,7 +1937,10 @@ fn bump(counts: &mut Vec<(String, usize)>, key: &str) {
     }
 }
 
-fn compare_to_baseline(result: &HighriseElevatorResult, baseline: &HighriseElevatorResult) -> MarginalComparison {
+fn compare_to_baseline(
+    result: &HighriseElevatorResult,
+    baseline: &HighriseElevatorResult,
+) -> MarginalComparison {
     MarginalComparison {
         baseline_policy: baseline.policy,
         baseline_authority: baseline.authority,
@@ -1671,7 +1967,11 @@ fn variant_summary(result: &HighriseElevatorResult) -> String {
     );
     if let (Some(tuning), Some(run)) = (&result.mdp_tuning, &result.mdp_run) {
         let w = &tuning.learned_weights;
-        let marginal_name = if tuning.observability == MDPObservability::DestinationDispatch { "batch" } else { "wait" };
+        let marginal_name = if tuning.observability == MDPObservability::DestinationDispatch {
+            "batch"
+        } else {
+            "wait"
+        };
         out += &format!(
             " MDP is pre-solved by value iteration ({} states, {} sweeps, observability={}), then this run exercised {} learned pickup decisions. Observed actions: {}. {} marginal: {}. Learned weights favor destination grouping={:.2}, distance={:.2}, wait={:.2}.",
             tuning.num_states,
@@ -1707,7 +2007,15 @@ fn format_action_shares(run: &MDPRunDiagnostics, max_items: usize) -> String {
     run.action_counts
         .iter()
         .take(max_items)
-        .map(|r| format!("{} {}/{} ({:.0}%)", r.action, r.count, run.total_decisions, 100.0 * r.share))
+        .map(|r| {
+            format!(
+                "{} {}/{} ({:.0}%)",
+                r.action,
+                r.count,
+                run.total_decisions,
+                100.0 * r.share
+            )
+        })
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -1754,12 +2062,26 @@ fn choose_dropoff(car: &ElevatorCar, policy: HighrisePolicy) -> Option<f64> {
         .map(|p| p.borrow().to_floor as f64)
         .filter(|&f| dir == 0 || sign(f - current) == dir || (f - current).abs() < 1e-9)
         .collect();
-    ahead.sort_by(|a, b| (a - current).abs().partial_cmp(&(b - current).abs()).unwrap());
+    ahead.sort_by(|a, b| {
+        (a - current)
+            .abs()
+            .partial_cmp(&(b - current).abs())
+            .unwrap()
+    });
     if let Some(&first) = ahead.first() {
         return Some(first);
     }
-    let mut all: Vec<f64> = car.passengers.iter().map(|p| p.borrow().to_floor as f64).collect();
-    all.sort_by(|a, b| (a - current).abs().partial_cmp(&(b - current).abs()).unwrap());
+    let mut all: Vec<f64> = car
+        .passengers
+        .iter()
+        .map(|p| p.borrow().to_floor as f64)
+        .collect();
+    all.sort_by(|a, b| {
+        (a - current)
+            .abs()
+            .partial_cmp(&(b - current).abs())
+            .unwrap()
+    });
     all.first().copied()
 }
 
@@ -1814,7 +2136,8 @@ fn dominant_destination(queue: &[PaxRef], car: &ElevatorCar) -> Option<i32> {
         let take = count > best_count
             || (count == best_count
                 && best.is_some()
-                && (floor as f64 - car.current_floor).abs() < (best.unwrap() as f64 - car.current_floor).abs());
+                && (floor as f64 - car.current_floor).abs()
+                    < (best.unwrap() as f64 - car.current_floor).abs());
         if take {
             best = Some(floor);
             best_count = count;
@@ -1847,7 +2170,11 @@ fn average_trip_floors_refs(queue: &[&PaxRef]) -> f64 {
     if queue.is_empty() {
         return 0.0;
     }
-    queue.iter().map(|p| (p.borrow().to_floor - p.borrow().from_floor).abs() as f64).sum::<f64>() / queue.len() as f64
+    queue
+        .iter()
+        .map(|p| (p.borrow().to_floor - p.borrow().from_floor).abs() as f64)
+        .sum::<f64>()
+        / queue.len() as f64
 }
 
 fn would_add_reverse_stop(car: &ElevatorCar, p: &HighrisePassenger) -> bool {
@@ -1938,7 +2265,13 @@ fn schedule_json(schedule: &[ScheduledArrival]) -> JsonValue {
     JsonValue::Array(
         schedule
             .iter()
-            .map(|a| jobj(vec![("t", jnum(a.t)), ("fromFloor", jnum(a.from_floor as f64)), ("toFloor", jnum(a.to_floor as f64))]))
+            .map(|a| {
+                jobj(vec![
+                    ("t", jnum(a.t)),
+                    ("fromFloor", jnum(a.from_floor as f64)),
+                    ("toFloor", jnum(a.to_floor as f64)),
+                ])
+            })
             .collect(),
     )
 }
@@ -1987,7 +2320,13 @@ fn run_diag_json(r: &MDPRunDiagnostics) -> JsonValue {
             JsonValue::Array(
                 r.action_counts
                     .iter()
-                    .map(|c| jobj(vec![("action", jstr(&c.action)), ("count", jnum(c.count as f64)), ("share", jnum(c.share))]))
+                    .map(|c| {
+                        jobj(vec![
+                            ("action", jstr(&c.action)),
+                            ("count", jnum(c.count as f64)),
+                            ("share", jnum(c.share)),
+                        ])
+                    })
                     .collect(),
             ),
         ),
@@ -1996,7 +2335,13 @@ fn run_diag_json(r: &MDPRunDiagnostics) -> JsonValue {
             JsonValue::Array(
                 r.top_states
                     .iter()
-                    .map(|s| jobj(vec![("state", jstr(&s.state)), ("action", jstr(&s.action)), ("count", jnum(s.count as f64))]))
+                    .map(|s| {
+                        jobj(vec![
+                            ("state", jstr(&s.state)),
+                            ("action", jstr(&s.action)),
+                            ("count", jnum(s.count as f64)),
+                        ])
+                    })
                     .collect(),
             ),
         ),
@@ -2107,24 +2452,43 @@ pub fn run() {
     let schedule = build_highrise_schedule(&cfg);
 
     let policies: Vec<HighrisePolicy> = match std::env::var("POLICIES") {
-        Ok(s) => s.split(',').map(|x| x.trim()).filter(|x| !x.is_empty()).filter_map(HighrisePolicy::from_slug).collect(),
+        Ok(s) => s
+            .split(',')
+            .map(|x| x.trim())
+            .filter(|x| !x.is_empty())
+            .filter_map(HighrisePolicy::from_slug)
+            .collect(),
         Err(_) => HIGHRISE_POLICIES.to_vec(),
     };
     let authorities: Vec<DecisionAuthority> = match std::env::var("AUTHORITIES") {
-        Ok(s) => s.split(',').map(|x| x.trim()).filter(|x| !x.is_empty()).filter_map(DecisionAuthority::from_slug).collect(),
+        Ok(s) => s
+            .split(',')
+            .map(|x| x.trim())
+            .filter(|x| !x.is_empty())
+            .filter_map(DecisionAuthority::from_slug)
+            .collect(),
         Err(_) => DECISION_AUTHORITIES.to_vec(),
     };
-    let record_every = env_f64_opt("RECORD_EVERY", (1.0_f64).max((env_f64_opt("ANIM_DT", 2.0) / cfg.step_size).round())) as i64;
+    let record_every = env_f64_opt(
+        "RECORD_EVERY",
+        (1.0_f64).max((env_f64_opt("ANIM_DT", 2.0) / cfg.step_size).round()),
+    ) as i64;
 
     let mut mdp_tunings: Vec<(HighrisePolicy, MDPDispatchTuning)> = Vec::new();
     for &policy in &policies {
         if is_mdp_policy(policy) && !mdp_tunings.iter().any(|(p, _)| *p == policy) {
-            mdp_tunings.push((policy, optimize_highrise_dispatch_mdp(observability_for_policy(policy))));
+            mdp_tunings.push((
+                policy,
+                optimize_highrise_dispatch_mdp(observability_for_policy(policy)),
+            ));
         }
     }
 
     println!("# High-rise elevator simulation");
-    println!("#   {} floors, {} shafts, capacity {}", cfg.n_floors, cfg.n_elevators, cfg.capacity);
+    println!(
+        "#   {} floors, {} shafts, capacity {}",
+        cfg.n_floors, cfg.n_elevators, cfg.capacity
+    );
     println!(
         "#   dt={}s, recordEvery={} ticks, local sensor radius={} floors",
         cfg.step_size, record_every, cfg.local_sensor_radius
@@ -2154,13 +2518,23 @@ pub fn run() {
     let mut results: Vec<HighriseElevatorResult> = Vec::new();
     for &authority in &authorities {
         for &policy in &policies {
-            let tuning = mdp_tunings.iter().find(|(p, _)| *p == policy).map(|(_, t)| t.clone());
-            let mut result = run_highrise_elevators(&cfg, policy, &schedule, HighriseRunOptions { authority, mdp_tuning: tuning });
+            let tuning = mdp_tunings
+                .iter()
+                .find(|(p, _)| *p == policy)
+                .map(|(_, t)| t.clone());
+            let mut result = run_highrise_elevators(
+                &cfg,
+                policy,
+                &schedule,
+                HighriseRunOptions {
+                    authority,
+                    mdp_tuning: tuning,
+                },
+            );
             if is_mdp_policy(policy) {
-                if let Some(baseline) = results
-                    .iter()
-                    .find(|r| r.authority == authority && r.policy == HighrisePolicy::LowestTotalTime)
-                {
+                if let Some(baseline) = results.iter().find(|r| {
+                    r.authority == authority && r.policy == HighrisePolicy::LowestTotalTime
+                }) {
                     result.marginal_vs_lowest_time = Some(compare_to_baseline(&result, baseline));
                 }
             }
@@ -2181,7 +2555,11 @@ pub fn run() {
                     _ => "wait",
                 };
                 println!("#   MDP observed actions: {}", format_action_shares(run, 3));
-                println!("#   MDP {} marginal: {}", marginal_name, format_marginal(run, marginal_name));
+                println!(
+                    "#   MDP {} marginal: {}",
+                    marginal_name,
+                    format_marginal(run, marginal_name)
+                );
             }
             // variantSummary feeds the animation; computed for parity but unused here.
             let _ = variant_summary(&result);
@@ -2202,13 +2580,21 @@ pub fn run() {
     let tunings_json = JsonValue::Object(
         mdp_tunings
             .iter()
-            .map(|(policy, tuning)| (policy.slug().to_string(), tuning_summary_json(&summarize_mdp_tuning(tuning))))
+            .map(|(policy, tuning)| {
+                (
+                    policy.slug().to_string(),
+                    tuning_summary_json(&summarize_mdp_tuning(tuning)),
+                )
+            })
             .collect(),
     );
     let json = jobj(vec![
         ("schedule", schedule_json(&schedule)),
         ("mdpTunings", tunings_json),
-        ("results", JsonValue::Array(results.iter().map(result_json).collect())),
+        (
+            "results",
+            JsonValue::Array(results.iter().map(result_json).collect()),
+        ),
     ]);
     let json_path = "out/elevator-highrise-results.json";
     let _ = std::fs::write(json_path, json.to_string_pretty(2));
@@ -2250,7 +2636,10 @@ mod tests {
 
     #[test]
     fn mdp_state_encode_decode_roundtrips() {
-        for obs in [MDPObservability::CallOnly, MDPObservability::DestinationDispatch] {
+        for obs in [
+            MDPObservability::CallOnly,
+            MDPObservability::DestinationDispatch,
+        ] {
             for s in 0..mdp_num_states(obs) {
                 let st = decode_mdp_dispatch_state(s, obs);
                 assert_eq!(encode_mdp_dispatch_bins(&st, obs), s);

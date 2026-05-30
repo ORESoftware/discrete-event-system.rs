@@ -78,7 +78,9 @@ pub struct StartMessage {
 /// (whitespace-insensitive) since that is the only field consulted.
 pub fn de_json(raw: &str) -> StartMessage {
     let compact: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
-    StartMessage { start: compact.contains("\"start\":true") }
+    StartMessage {
+        start: compact.contains("\"start\":true"),
+    }
 }
 
 /// Resolve the child worker path (`path.resolve(__dirname + '/child.js')`).
@@ -86,7 +88,10 @@ pub fn de_json(raw: &str) -> StartMessage {
 /// falls back to the bare name when the current exe path is unavailable.
 pub fn child_path() -> std::path::PathBuf {
     match std::env::current_exe() {
-        Ok(exe) => exe.parent().map(|dir| dir.join("child")).unwrap_or_else(|| "child".into()),
+        Ok(exe) => exe
+            .parent()
+            .map(|dir| dir.join("child"))
+            .unwrap_or_else(|| "child".into()),
         Err(_) => "child".into(),
     }
 }
@@ -101,13 +106,22 @@ pub struct Parent {
 impl Parent {
     pub fn new() -> Self {
         // `const program = { stepSize: bgn(500) }`.
-        Parent { program: Program { step_size: bgn(500.0) }, request_count: 0, started: false }
+        Parent {
+            program: Program {
+                step_size: bgn(500.0),
+            },
+            request_count: 0,
+            started: false,
+        }
     }
 
     /// `httpServer.on('request', (a,b) => console.info(...))`.
     pub fn on_request(&mut self, method: &str, url: &str) {
         self.request_count += 1;
-        println!("server received request: {} {} {}", self.request_count, method, url);
+        println!(
+            "server received request: {} {} {}",
+            self.request_count, method, url
+        );
     }
 
     /// The websocket `message` handler body: gate on the first `{start:true}`.

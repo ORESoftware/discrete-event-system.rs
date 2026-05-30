@@ -30,7 +30,11 @@ pub struct ActionToken<S = f64, A = usize> {
 
 impl<S, A> ActionToken<S, A> {
     pub fn new(state: S, action: A, episode_id: f64) -> Self {
-        ActionToken { state, action, episode_id }
+        ActionToken {
+            state,
+            action,
+            episode_id,
+        }
     }
 }
 
@@ -46,8 +50,22 @@ pub struct TransitionToken<S = f64, A = usize> {
 }
 
 impl<S, A> TransitionToken<S, A> {
-    pub fn new(state: S, action: A, reward: f64, next_state: S, done: bool, episode_id: f64) -> Self {
-        TransitionToken { state, action, reward, next_state, done, episode_id }
+    pub fn new(
+        state: S,
+        action: A,
+        reward: f64,
+        next_state: S,
+        done: bool,
+        episode_id: f64,
+    ) -> Self {
+        TransitionToken {
+            state,
+            action,
+            reward,
+            next_state,
+            done,
+            episode_id,
+        }
     }
 }
 

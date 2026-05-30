@@ -157,7 +157,10 @@ pub fn register_external_module(module: ExternalProgramModule) -> Result<(), Str
     {
         let reg = registry().lock().unwrap();
         if reg.contains_key(&module.id) {
-            return Err(format!("external module \"{}\" already registered", module.id));
+            return Err(format!(
+                "external module \"{}\" already registered",
+                module.id
+            ));
         }
     }
     if !valid_module_id(&module.id) {
@@ -176,7 +179,10 @@ pub fn get_external_module(id: &str) -> Result<ExternalProgramModule, String> {
         Some(m) => Ok(m.clone()),
         None => {
             let ids: Vec<String> = reg.keys().cloned().collect();
-            Err(format!("unknown external module \"{id}\". Registered: [{}]", ids.join(", ")))
+            Err(format!(
+                "unknown external module \"{id}\". Registered: [{}]",
+                ids.join(", ")
+            ))
         }
     }
 }
@@ -278,7 +284,14 @@ pub fn run_python_reference(
     let python = std::env::var("PYTHON_BIN").unwrap_or_else(|_| "python3".to_string());
     let mut full: Vec<String> = vec![script.display().to_string()];
     full.extend_from_slice(args);
-    run_external_program(&python, &full, &RunExternalOpts { cwd: Some(root), ..Default::default() })
+    run_external_program(
+        &python,
+        &full,
+        &RunExternalOpts {
+            cwd: Some(root),
+            ..Default::default()
+        },
+    )
 }
 
 #[cfg(test)]

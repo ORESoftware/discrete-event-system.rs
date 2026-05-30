@@ -123,7 +123,11 @@ impl PontryaginBangBangController {
             let u = -10.0 * x - 6.0 * v;
             return vec![(-self.u_bound).max(self.u_bound.min(u))];
         }
-        vec![if sigma > 0.0 { -self.u_bound } else { self.u_bound }]
+        vec![if sigma > 0.0 {
+            -self.u_bound
+        } else {
+            self.u_bound
+        }]
     }
 
     fn saturate(&self, mut u: Vec<f64>) -> Vec<f64> {
@@ -200,14 +204,22 @@ pub struct PontryaginResult {
 }
 
 /// Run the PMP-optimal bang-bang controller on the double integrator.
-pub fn run_pontryagin_bang_bang(opts: PontryaginOpts) -> Result<PontryaginResult, PreconditionError> {
+pub fn run_pontryagin_bang_bang(
+    opts: PontryaginOpts,
+) -> Result<PontryaginResult, PreconditionError> {
     let x0 = opts.x0.unwrap_or([3.0, 0.0]);
     let u_max = opts.u_max.unwrap_or(1.0);
     let dt = opts.dt.unwrap_or(0.05);
     let num_steps = opts.num_steps.unwrap_or(200);
     Preconditions::positive("runPontryaginBangBang", "uMax", u_max)?;
     Preconditions::positive("runPontryaginBangBang", "dt", dt)?;
-    Preconditions::integer_in_range("runPontryaginBangBang", "numSteps", num_steps as f64, 1.0, 1e9)?;
+    Preconditions::integer_in_range(
+        "runPontryaginBangBang",
+        "numSteps",
+        num_steps as f64,
+        1.0,
+        1e9,
+    )?;
     Preconditions::length_eq("runPontryaginBangBang", "x0", &x0, 2)?;
     Preconditions::all_finite("runPontryaginBangBang", "x0", &x0)?;
     if let Some(db) = opts.deadband {
@@ -308,7 +320,11 @@ mod tests {
         assert!((r.theoretical_arrival_time - 2.0 * 3.0_f64.sqrt()).abs() < 1e-9);
         // The controller reaches the deadband, and that arrival time tracks the
         // PMP-optimal time-to-go.
-        assert!(r.arrival_tick < r.num_steps, "arrival_tick = {}", r.arrival_tick);
+        assert!(
+            r.arrival_tick < r.num_steps,
+            "arrival_tick = {}",
+            r.arrival_tick
+        );
         let arrival_time = r.arrival_tick as f64 * 0.05;
         assert!(
             (arrival_time - r.theoretical_arrival_time).abs() < 0.5,

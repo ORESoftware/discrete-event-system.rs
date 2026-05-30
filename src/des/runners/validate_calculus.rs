@@ -58,7 +58,10 @@ fn root() -> PathBuf {
 /// Returns `None` on any failure (mirrors the TS `try/catch → null`).
 fn run_python(extra_env: &[(&str, String)]) -> Option<JsonValue> {
     let python = std::env::var("CALCULUS_PY").unwrap_or_else(|_| "python3".to_string());
-    let script = root().join("external-references").join("calculus").join("calculus.py");
+    let script = root()
+        .join("external-references")
+        .join("calculus")
+        .join("calculus.py");
     let mut cmd = Command::new(&python);
     cmd.arg(&script);
     for (k, v) in extra_env {
@@ -86,7 +89,11 @@ fn js_num(n: f64) -> String {
     if n.is_nan() {
         "NaN".to_string()
     } else if n.is_infinite() {
-        if n > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() }
+        if n > 0.0 {
+            "Infinity".to_string()
+        } else {
+            "-Infinity".to_string()
+        }
     } else if n.fract() == 0.0 && n.abs() < 1e15 {
         format!("{}", n as i64)
     } else {
@@ -100,7 +107,11 @@ fn to_exp(n: f64, digits: usize) -> String {
         return "NaN".to_string();
     }
     if n.is_infinite() {
-        return if n > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() };
+        return if n > 0.0 {
+            "Infinity".to_string()
+        } else {
+            "-Infinity".to_string()
+        };
     }
     if n == 0.0 {
         return format!("0.{}e+0", "0".repeat(digits));
@@ -205,9 +216,15 @@ pub fn run() -> i32 {
         }
         None => println!("  SKIP    scipy reference unavailable (set CALCULUS_PY)"),
     }
-    let trap = TrapezoidRule::new(64).transform(Integrand1D::new(integrand, a, b)).value;
-    let simp = SimpsonRule::new(64).transform(Integrand1D::new(integrand, a, b)).value;
-    let gauss = GaussLegendreRule::new(10).transform(Integrand1D::new(integrand, a, b)).value;
+    let trap = TrapezoidRule::new(64)
+        .transform(Integrand1D::new(integrand, a, b))
+        .value;
+    let simp = SimpsonRule::new(64)
+        .transform(Integrand1D::new(integrand, a, b))
+        .value;
+    let gauss = GaussLegendreRule::new(10)
+        .transform(Integrand1D::new(integrand, a, b))
+        .value;
     c.check(
         "Simpson n=64 vs reference",
         (simp - ref_ts).abs() < 1e-7,
@@ -327,7 +344,11 @@ pub fn run() -> i32 {
             err_btcs = err_btcs.max((o2.final_values[i] - exact).abs());
         }
         c.check(
-            &format!("FTCS station-net ({} ticks at dt={})", o1.ticks, to_exp(dt_ftcs, 2)),
+            &format!(
+                "FTCS station-net ({} ticks at dt={})",
+                o1.ticks,
+                to_exp(dt_ftcs, 2)
+            ),
             err_ftcs < 5e-3,
             Some(format!("max|err vs analytical|={}", to_exp(err_ftcs, 3))),
         );
@@ -343,12 +364,18 @@ pub fn run() -> i32 {
         let ftcs_peak = o1.final_values[n / 2];
         let btcs_peak = o2.final_values[n / 2];
         c.check(
-            &format!("FTCS peak agrees with exp(-απ²T) = {}", fixed(expected_peak, 6)),
+            &format!(
+                "FTCS peak agrees with exp(-απ²T) = {}",
+                fixed(expected_peak, 6)
+            ),
             (ftcs_peak - expected_peak).abs() < 5e-3,
             Some(format!("peak={}", fixed(ftcs_peak, 6))),
         );
         c.check(
-            &format!("BTCS peak agrees with exp(-απ²T) = {}", fixed(expected_peak, 6)),
+            &format!(
+                "BTCS peak agrees with exp(-απ²T) = {}",
+                fixed(expected_peak, 6)
+            ),
             (btcs_peak - expected_peak).abs() < 5e-2,
             Some(format!("peak={}", fixed(btcs_peak, 6))),
         );
@@ -359,10 +386,17 @@ pub fn run() -> i32 {
             ("T_END", js_num(t_end)),
         ]) {
             Some(sci) => {
-                let final_values = sci.get("final_values").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                let final_values = sci
+                    .get("final_values")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
                 let mut err_sci = 0.0_f64;
                 for i in 0..n {
-                    let sv = final_values.get(i).and_then(|x| x.as_f64()).unwrap_or(f64::NAN);
+                    let sv = final_values
+                        .get(i)
+                        .and_then(|x| x.as_f64())
+                        .unwrap_or(f64::NAN);
                     err_sci = err_sci.max((o1.final_values[i] - sv).abs());
                 }
                 c.check(
@@ -421,7 +455,8 @@ pub fn run() -> i32 {
     {
         let n = 41usize;
         let tol = 1e-8;
-        let rho = "2 * 3.14159265358979^2 * sin(3.14159265358979*x) * sin(3.14159265358979*y)".to_string();
+        let rho = "2 * 3.14159265358979^2 * sin(3.14159265358979*x) * sin(3.14159265358979*y)"
+            .to_string();
         let make = |scheme: Field2DScheme, omega: Option<f64>| Poisson2DSpec {
             nx: n,
             ny: n,
@@ -452,27 +487,42 @@ pub fn run() -> i32 {
             }
         }
         c.check(
-            &format!("Jacobi pins to sin·sin within 1e-3 ({} iters)", r_j.iterations),
+            &format!(
+                "Jacobi pins to sin·sin within 1e-3 ({} iters)",
+                r_j.iterations
+            ),
             err_j < 1e-3,
             Some(format!("maxErr={}", to_exp(err_j, 2))),
         );
         c.check(
-            &format!("Gauss-Seidel pins to sin·sin within 1e-3 ({} iters)", r_g.iterations),
+            &format!(
+                "Gauss-Seidel pins to sin·sin within 1e-3 ({} iters)",
+                r_g.iterations
+            ),
             err_g < 1e-3,
             Some(format!("maxErr={}", to_exp(err_g, 2))),
         );
         c.check(
-            &format!("SOR(ω=1.85) pins to sin·sin within 1e-3 ({} iters)", r_s.iterations),
+            &format!(
+                "SOR(ω=1.85) pins to sin·sin within 1e-3 ({} iters)",
+                r_s.iterations
+            ),
             err_s < 1e-3,
             Some(format!("maxErr={}", to_exp(err_s, 2))),
         );
         c.check(
-            &format!("Gauss-Seidel ~2× faster than Jacobi ({} vs {})", r_g.iterations, r_j.iterations),
+            &format!(
+                "Gauss-Seidel ~2× faster than Jacobi ({} vs {})",
+                r_g.iterations, r_j.iterations
+            ),
             (r_g.iterations as f64) < r_j.iterations as f64 * 0.7,
             None,
         );
         c.check(
-            &format!("SOR(ω=1.85) ~10× faster than Jacobi ({} vs {})", r_s.iterations, r_j.iterations),
+            &format!(
+                "SOR(ω=1.85) ~10× faster than Jacobi ({} vs {})",
+                r_s.iterations, r_j.iterations
+            ),
             (r_s.iterations as f64) < r_j.iterations as f64 * 0.1,
             None,
         );

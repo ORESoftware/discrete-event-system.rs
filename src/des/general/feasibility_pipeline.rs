@@ -345,7 +345,10 @@ pub struct DomainCheckedToken {
 
 impl DomainCheckedToken {
     pub fn new(candidate: CandidatePayload, domain_violations: Vec<FeasibilityViolation>) -> Self {
-        DomainCheckedToken { candidate, domain_violations }
+        DomainCheckedToken {
+            candidate,
+            domain_violations,
+        }
     }
 }
 
@@ -361,7 +364,11 @@ impl ConstraintCheckedToken {
         domain_violations: Vec<FeasibilityViolation>,
         constraint_violations: Vec<FeasibilityViolation>,
     ) -> Self {
-        ConstraintCheckedToken { candidate, domain_violations, constraint_violations }
+        ConstraintCheckedToken {
+            candidate,
+            domain_violations,
+            constraint_violations,
+        }
     }
 }
 
@@ -389,7 +396,11 @@ pub struct CandidateSourceStation {
 
 impl CandidateSourceStation {
     pub fn new(id: impl Into<String>, candidate: CandidatePayload) -> Self {
-        CandidateSourceStation { core: StationCore::new(id), candidate, emitted: false }
+        CandidateSourceStation {
+            core: StationCore::new(id),
+            candidate,
+            emitted: false,
+        }
     }
 }
 
@@ -424,14 +435,26 @@ pub struct DomainCheckerStation {
 
 impl DomainCheckerStation {
     pub fn new(id: impl Into<String>, problem: StructuredOptimizationProblem) -> Self {
-        let mut st = DomainCheckerStation { core: StationCore::new(id), problem };
+        let mut st = DomainCheckerStation {
+            core: StationCore::new(id),
+            problem,
+        };
         st.add_validator(
             intrinsic_check::<dyn DESStation>(
                 "domain-checker.problem-has-variables",
-                |s| !downcast::<DomainCheckerStation>(s).problem.variables.is_empty(),
+                |s| {
+                    !downcast::<DomainCheckerStation>(s)
+                        .problem
+                        .variables
+                        .is_empty()
+                },
                 Some("at least one variable".to_string()),
                 Some(Box::new(|s| {
-                    downcast::<DomainCheckerStation>(s).problem.variables.len().to_string()
+                    downcast::<DomainCheckerStation>(s)
+                        .problem
+                        .variables
+                        .len()
+                        .to_string()
                 })),
                 Some("feasibility-pipeline".to_string()),
                 None,
@@ -475,7 +498,10 @@ pub struct ConstraintCheckerStation {
 
 impl ConstraintCheckerStation {
     pub fn new(id: impl Into<String>, problem: StructuredOptimizationProblem) -> Self {
-        ConstraintCheckerStation { core: StationCore::new(id), problem }
+        ConstraintCheckerStation {
+            core: StationCore::new(id),
+            problem,
+        }
     }
 }
 
@@ -517,14 +543,24 @@ pub struct ObjectiveEvaluatorStation {
 }
 
 impl ObjectiveEvaluatorStation {
-    pub fn new(id: impl Into<String>, problem: StructuredOptimizationProblem, penalty: f64) -> Self {
-        let mut st = ObjectiveEvaluatorStation { core: StationCore::new(id), problem, penalty };
+    pub fn new(
+        id: impl Into<String>,
+        problem: StructuredOptimizationProblem,
+        penalty: f64,
+    ) -> Self {
+        let mut st = ObjectiveEvaluatorStation {
+            core: StationCore::new(id),
+            problem,
+            penalty,
+        };
         st.add_validator(
             intrinsic_check::<dyn DESStation>(
                 "objective-evaluator.penalty-positive",
                 |s| downcast::<ObjectiveEvaluatorStation>(s).penalty > 0.0,
                 Some("penalty > 0".to_string()),
-                Some(Box::new(|s| downcast::<ObjectiveEvaluatorStation>(s).penalty.to_string())),
+                Some(Box::new(|s| {
+                    downcast::<ObjectiveEvaluatorStation>(s).penalty.to_string()
+                })),
                 Some("feasibility-pipeline".to_string()),
                 None,
             )
@@ -553,7 +589,10 @@ impl DESStation for ObjectiveEvaluatorStation {
         self.core.inbox_size(CONSTRAINT_CHANNEL) > 0
     }
     fn run_time_step(&mut self) {
-        for token in self.core.drain::<ConstraintCheckedToken>(CONSTRAINT_CHANNEL) {
+        for token in self
+            .core
+            .drain::<ConstraintCheckedToken>(CONSTRAINT_CHANNEL)
+        {
             let eval = finalize_evaluation(
                 &self.problem,
                 &token.candidate,
@@ -681,7 +720,10 @@ impl DESStation for ImprovementStation {
     }
 
     fn run_time_step(&mut self) {
-        for token in self.core.drain::<FeasibilityEvaluationToken>(EVALUATION_CHANNEL) {
+        for token in self
+            .core
+            .drain::<FeasibilityEvaluationToken>(EVALUATION_CHANNEL)
+        {
             self.waiting = false;
             self.initialized = true;
             let better = match &self.best_eval {
@@ -741,7 +783,12 @@ impl FeasibilitySinkStation {
                 "feasibility-sink.trace-nonempty",
                 |s| !downcast::<FeasibilitySinkStation>(s).trace.is_empty(),
                 Some("at least one evaluation".to_string()),
-                Some(Box::new(|s| downcast::<FeasibilitySinkStation>(s).trace.len().to_string())),
+                Some(Box::new(|s| {
+                    downcast::<FeasibilitySinkStation>(s)
+                        .trace
+                        .len()
+                        .to_string()
+                })),
                 Some("feasibility-pipeline".to_string()),
                 None,
             )
@@ -777,7 +824,10 @@ impl DESStation for FeasibilitySinkStation {
         false
     }
     fn run_time_step(&mut self) {
-        for token in self.core.drain::<FeasibilityEvaluationToken>(EVALUATION_CHANNEL) {
+        for token in self
+            .core
+            .drain::<FeasibilityEvaluationToken>(EVALUATION_CHANNEL)
+        {
             self.trace.push(token.payload.clone());
         }
         for token in self.core.drain::<StopSignalToken>(STOP_CHANNEL) {
@@ -800,7 +850,10 @@ pub fn run_feasibility_pipeline(params: FeasibilityPipelineParams) -> Feasibilit
         "candidate-source",
         candidate_payload_from_input(&params.problem, &params.candidate),
     )));
-    let domain = Rc::new(RefCell::new(DomainCheckerStation::new("domain-checker", params.problem.clone())));
+    let domain = Rc::new(RefCell::new(DomainCheckerStation::new(
+        "domain-checker",
+        params.problem.clone(),
+    )));
     let constraints = Rc::new(RefCell::new(ConstraintCheckerStation::new(
         "constraint-checker",
         params.problem.clone(),
@@ -815,7 +868,10 @@ pub fn run_feasibility_pipeline(params: FeasibilityPipelineParams) -> Feasibilit
         params.problem.clone(),
         improvement.clone(),
     )));
-    let sink = Rc::new(RefCell::new(FeasibilitySinkStation::new("feasibility-sink", params.problem.clone())));
+    let sink = Rc::new(RefCell::new(FeasibilitySinkStation::new(
+        "feasibility-sink",
+        params.problem.clone(),
+    )));
     let budget_ms = params.time_limit_ms.unwrap_or(180000.0);
     let checker = Rc::new(RefCell::new(WallClockCheckerStation::new(
         "wall-clock-checker",
@@ -824,15 +880,44 @@ pub fn run_feasibility_pipeline(params: FeasibilityPipelineParams) -> Feasibilit
         None,
     )));
 
-    source.borrow_mut().core_mut().pipe(domain.clone() as StationRef, CANDIDATE_CHANNEL, CANDIDATE_CHANNEL);
-    improver.borrow_mut().core_mut().pipe(domain.clone() as StationRef, CANDIDATE_CHANNEL, CANDIDATE_CHANNEL);
-    domain.borrow_mut().core_mut().pipe(constraints.clone() as StationRef, DOMAIN_CHANNEL, DOMAIN_CHANNEL);
-    constraints.borrow_mut().core_mut().pipe(objective.clone() as StationRef, CONSTRAINT_CHANNEL, CONSTRAINT_CHANNEL);
-    objective.borrow_mut().core_mut().pipe(sink.clone() as StationRef, EVALUATION_CHANNEL, EVALUATION_CHANNEL);
-    objective.borrow_mut().core_mut().pipe(improver.clone() as StationRef, EVALUATION_CHANNEL, EVALUATION_CHANNEL);
-    checker.borrow_mut().core_mut().pipe(sink.clone() as StationRef, STOP_CHANNEL, STOP_CHANNEL);
+    source.borrow_mut().core_mut().pipe(
+        domain.clone() as StationRef,
+        CANDIDATE_CHANNEL,
+        CANDIDATE_CHANNEL,
+    );
+    improver.borrow_mut().core_mut().pipe(
+        domain.clone() as StationRef,
+        CANDIDATE_CHANNEL,
+        CANDIDATE_CHANNEL,
+    );
+    domain.borrow_mut().core_mut().pipe(
+        constraints.clone() as StationRef,
+        DOMAIN_CHANNEL,
+        DOMAIN_CHANNEL,
+    );
+    constraints.borrow_mut().core_mut().pipe(
+        objective.clone() as StationRef,
+        CONSTRAINT_CHANNEL,
+        CONSTRAINT_CHANNEL,
+    );
+    objective.borrow_mut().core_mut().pipe(
+        sink.clone() as StationRef,
+        EVALUATION_CHANNEL,
+        EVALUATION_CHANNEL,
+    );
+    objective.borrow_mut().core_mut().pipe(
+        improver.clone() as StationRef,
+        EVALUATION_CHANNEL,
+        EVALUATION_CHANNEL,
+    );
+    checker
+        .borrow_mut()
+        .core_mut()
+        .pipe(sink.clone() as StationRef, STOP_CHANNEL, STOP_CHANNEL);
 
-    let max_ticks = params.max_ticks.unwrap_or_else(|| default_max_ticks(&improvement));
+    let max_ticks = params
+        .max_ticks
+        .unwrap_or_else(|| default_max_ticks(&improvement));
     let stations: Vec<StationRef> = vec![
         source as StationRef,
         domain as StationRef,
@@ -864,7 +949,10 @@ pub fn run_feasibility_pipeline(params: FeasibilityPipelineParams) -> Feasibilit
         .borrow()
         .trace
         .iter()
-        .filter(|row| row.candidate_id != initial.candidate_id && evaluation_better(row, &initial, &params.problem))
+        .filter(|row| {
+            row.candidate_id != initial.candidate_id
+                && evaluation_better(row, &initial, &params.problem)
+        })
         .cloned()
         .collect();
 
@@ -931,7 +1019,10 @@ fn candidate_payload_from_input(
         }
     }
     CandidatePayload {
-        id: input.id.clone().unwrap_or_else(|| "user-candidate".to_string()),
+        id: input
+            .id
+            .clone()
+            .unwrap_or_else(|| "user-candidate".to_string()),
         parent_id: None,
         iteration: 0,
         origin: CandidateOrigin::User,
@@ -939,7 +1030,10 @@ fn candidate_payload_from_input(
     }
 }
 
-fn check_domain(problem: &StructuredOptimizationProblem, values: &HashMap<String, f64>) -> Vec<FeasibilityViolation> {
+fn check_domain(
+    problem: &StructuredOptimizationProblem,
+    values: &HashMap<String, f64>,
+) -> Vec<FeasibilityViolation> {
     let tol = problem.tolerance.unwrap_or(1e-8);
     let mut out = Vec::new();
     for v in &problem.variables {
@@ -983,8 +1077,10 @@ fn check_domain(problem: &StructuredOptimizationProblem, values: &HashMap<String
                 rhs: None,
             });
         }
-        if matches!(v.kind, Some(VariableKind::Integer) | Some(VariableKind::Binary))
-            && (x - js_round(x)).abs() > tol
+        if matches!(
+            v.kind,
+            Some(VariableKind::Integer) | Some(VariableKind::Binary)
+        ) && (x - js_round(x)).abs() > tol
         {
             out.push(FeasibilityViolation {
                 kind: ViolationKind::Domain,
@@ -1059,14 +1155,23 @@ fn finalize_evaluation(
     constraint_violations: Vec<FeasibilityViolation>,
     penalty: f64,
 ) -> FeasibilityEvaluation {
-    let objective_value =
-        evaluate_linear(&problem.objective.coefficients, &candidate.values, problem.objective.constant.unwrap_or(0.0));
-    let comparable_objective =
-        if problem.sense == ObjectiveSense::Min { objective_value } else { -objective_value };
+    let objective_value = evaluate_linear(
+        &problem.objective.coefficients,
+        &candidate.values,
+        problem.objective.constant.unwrap_or(0.0),
+    );
+    let comparable_objective = if problem.sense == ObjectiveSense::Min {
+        objective_value
+    } else {
+        -objective_value
+    };
     let mut violations = domain_violations.clone();
     violations.extend(constraint_violations.iter().cloned());
     let total_violation: f64 = violations.iter().map(|v| safe_violation(v.violation)).sum();
-    let max_violation = violations.iter().map(|v| safe_violation(v.violation)).fold(0.0, f64::max);
+    let max_violation = violations
+        .iter()
+        .map(|v| safe_violation(v.violation))
+        .fold(0.0, f64::max);
     FeasibilityEvaluation {
         candidate_id: candidate.id.clone(),
         parent_id: candidate.parent_id.clone(),
@@ -1085,7 +1190,11 @@ fn finalize_evaluation(
     }
 }
 
-fn evaluate_linear(coefficients: &[(String, f64)], values: &HashMap<String, f64>, constant: f64) -> f64 {
+fn evaluate_linear(
+    coefficients: &[(String, f64)],
+    values: &HashMap<String, f64>,
+    constant: f64,
+) -> f64 {
     let mut out = constant;
     for (name, coeff) in coefficients {
         out += coeff * values.get(name).copied().unwrap_or(f64::NAN);
@@ -1165,13 +1274,21 @@ fn propose_neighbor(
 ) -> HashMap<String, f64> {
     let base = repair_values(problem, input);
     let variables = &problem.variables;
-    let binary: Vec<&OptimizationVariable> =
-        variables.iter().filter(|v| v.kind == Some(VariableKind::Binary)).collect();
+    let binary: Vec<&OptimizationVariable> = variables
+        .iter()
+        .filter(|v| v.kind == Some(VariableKind::Binary))
+        .collect();
     if binary.len() >= 2 && rng.next_float() < 0.5 {
-        let ones: Vec<&OptimizationVariable> =
-            binary.iter().copied().filter(|v| base[&v.name] >= 0.5).collect();
-        let zeros: Vec<&OptimizationVariable> =
-            binary.iter().copied().filter(|v| base[&v.name] < 0.5).collect();
+        let ones: Vec<&OptimizationVariable> = binary
+            .iter()
+            .copied()
+            .filter(|v| base[&v.name] >= 0.5)
+            .collect();
+        let zeros: Vec<&OptimizationVariable> = binary
+            .iter()
+            .copied()
+            .filter(|v| base[&v.name] < 0.5)
+            .collect();
         if !ones.is_empty() && !zeros.is_empty() {
             let mut out = base.clone();
             let drop = ones[(rng.next_float() * ones.len() as f64).floor() as usize];
@@ -1293,24 +1410,42 @@ fn validate_problem(problem: &StructuredOptimizationProblem) {
         }
         // `kind` is a typed enum, so the TS type-validity check is a no-op.
     }
-    validate_coefficients("objective.coefficients", &problem.objective.coefficients, &names);
+    validate_coefficients(
+        "objective.coefficients",
+        &problem.objective.coefficients,
+        &names,
+    );
     if let Some(c) = problem.objective.constant {
-        Preconditions::finite("FeasibilityPipeline", "objective.constant", c).unwrap_or_else(|e| panic!("{e}"));
+        Preconditions::finite("FeasibilityPipeline", "objective.constant", c)
+            .unwrap_or_else(|e| panic!("{e}"));
     }
     let empty: Vec<LinearConstraint> = Vec::new();
     let constraints = problem.constraints.as_ref().unwrap_or(&empty);
     for (i, c) in constraints.iter().enumerate() {
         // `sense` is a typed enum, so the TS sense check is a no-op.
-        Preconditions::finite("FeasibilityPipeline", &format!("constraints[{i}].rhs"), c.rhs)
-            .unwrap_or_else(|e| panic!("{e}"));
+        Preconditions::finite(
+            "FeasibilityPipeline",
+            &format!("constraints[{i}].rhs"),
+            c.rhs,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
         if let Some(t) = c.tolerance {
-            Preconditions::non_negative("FeasibilityPipeline", &format!("constraints[{i}].tolerance"), t)
-                .unwrap_or_else(|e| panic!("{e}"));
+            Preconditions::non_negative(
+                "FeasibilityPipeline",
+                &format!("constraints[{i}].tolerance"),
+                t,
+            )
+            .unwrap_or_else(|e| panic!("{e}"));
         }
-        validate_coefficients(&format!("constraints[{i}].coefficients"), &c.coefficients, &names);
+        validate_coefficients(
+            &format!("constraints[{i}].coefficients"),
+            &c.coefficients,
+            &names,
+        );
     }
     if let Some(t) = problem.tolerance {
-        Preconditions::non_negative("FeasibilityPipeline", "tolerance", t).unwrap_or_else(|e| panic!("{e}"));
+        Preconditions::non_negative("FeasibilityPipeline", "tolerance", t)
+            .unwrap_or_else(|e| panic!("{e}"));
     }
 }
 
@@ -1350,7 +1485,8 @@ fn pipeline_status(
     if reason == Some(RunReason::MaxTicks) {
         return FeasibilityStatus::TickLimit;
     }
-    let improved = best.candidate_id != initial.candidate_id && evaluation_better(best, initial, problem);
+    let improved =
+        best.candidate_id != initial.candidate_id && evaluation_better(best, initial, problem);
     if best.feasible && improved {
         return FeasibilityStatus::Improved;
     }
@@ -1383,36 +1519,113 @@ fn describe_feasibility_pipeline_network() -> FeasibilityPipelineNetwork {
     };
     FeasibilityPipelineNetwork {
         stationary_entities: vec![
-            node("candidate-source", "candidate-source", FeasibilityNodeRole::Source),
-            node("domain-checker", "domain-checker", FeasibilityNodeRole::Checker),
-            node("constraint-checker", "constraint-checker", FeasibilityNodeRole::Checker),
-            node("objective-evaluator", "objective-evaluator", FeasibilityNodeRole::Evaluator),
-            node("improvement-station", "local-improver", FeasibilityNodeRole::Improver),
-            node("wall-clock-checker", "wall-clock-checker", FeasibilityNodeRole::Checker),
-            node("feasibility-sink", "feasibility-sink", FeasibilityNodeRole::Sink),
+            node(
+                "candidate-source",
+                "candidate-source",
+                FeasibilityNodeRole::Source,
+            ),
+            node(
+                "domain-checker",
+                "domain-checker",
+                FeasibilityNodeRole::Checker,
+            ),
+            node(
+                "constraint-checker",
+                "constraint-checker",
+                FeasibilityNodeRole::Checker,
+            ),
+            node(
+                "objective-evaluator",
+                "objective-evaluator",
+                FeasibilityNodeRole::Evaluator,
+            ),
+            node(
+                "improvement-station",
+                "local-improver",
+                FeasibilityNodeRole::Improver,
+            ),
+            node(
+                "wall-clock-checker",
+                "wall-clock-checker",
+                FeasibilityNodeRole::Checker,
+            ),
+            node(
+                "feasibility-sink",
+                "feasibility-sink",
+                FeasibilityNodeRole::Sink,
+            ),
         ],
         moving_entities: vec![
             moving("CandidateToken", "candidate-solution", "CandidateToken"),
-            moving("DomainCheckedToken", "domain-checked-candidate", "DomainCheckedToken"),
-            moving("ConstraintCheckedToken", "constraint-checked-candidate", "ConstraintCheckedToken"),
-            moving("FeasibilityEvaluationToken", "evaluation", "FeasibilityEvaluationToken"),
+            moving(
+                "DomainCheckedToken",
+                "domain-checked-candidate",
+                "DomainCheckedToken",
+            ),
+            moving(
+                "ConstraintCheckedToken",
+                "constraint-checked-candidate",
+                "ConstraintCheckedToken",
+            ),
+            moving(
+                "FeasibilityEvaluationToken",
+                "evaluation",
+                "FeasibilityEvaluationToken",
+            ),
             moving("StopSignalToken", "stop-signal", "StopSignalToken"),
         ],
         edges: vec![
-            edge("candidate-source", "domain-checker", "CandidateToken", CANDIDATE_CHANNEL),
-            edge("improvement-station", "domain-checker", "CandidateToken", CANDIDATE_CHANNEL),
-            edge("domain-checker", "constraint-checker", "DomainCheckedToken", DOMAIN_CHANNEL),
-            edge("constraint-checker", "objective-evaluator", "ConstraintCheckedToken", CONSTRAINT_CHANNEL),
-            edge("objective-evaluator", "feasibility-sink", "FeasibilityEvaluationToken", EVALUATION_CHANNEL),
-            edge("objective-evaluator", "improvement-station", "FeasibilityEvaluationToken", EVALUATION_CHANNEL),
-            edge("wall-clock-checker", "feasibility-sink", "StopSignalToken", STOP_CHANNEL),
+            edge(
+                "candidate-source",
+                "domain-checker",
+                "CandidateToken",
+                CANDIDATE_CHANNEL,
+            ),
+            edge(
+                "improvement-station",
+                "domain-checker",
+                "CandidateToken",
+                CANDIDATE_CHANNEL,
+            ),
+            edge(
+                "domain-checker",
+                "constraint-checker",
+                "DomainCheckedToken",
+                DOMAIN_CHANNEL,
+            ),
+            edge(
+                "constraint-checker",
+                "objective-evaluator",
+                "ConstraintCheckedToken",
+                CONSTRAINT_CHANNEL,
+            ),
+            edge(
+                "objective-evaluator",
+                "feasibility-sink",
+                "FeasibilityEvaluationToken",
+                EVALUATION_CHANNEL,
+            ),
+            edge(
+                "objective-evaluator",
+                "improvement-station",
+                "FeasibilityEvaluationToken",
+                EVALUATION_CHANNEL,
+            ),
+            edge(
+                "wall-clock-checker",
+                "feasibility-sink",
+                "StopSignalToken",
+                STOP_CHANNEL,
+            ),
         ],
     }
 }
 
 /// Downcast a `&dyn DESStation` to a concrete station type for validators.
 fn downcast<T: 'static>(s: &dyn DESStation) -> &T {
-    s.as_any().downcast_ref::<T>().expect("validator received an unexpected station type")
+    s.as_any()
+        .downcast_ref::<T>()
+        .expect("validator received an unexpected station type")
 }
 
 // =============================================================================
@@ -1505,7 +1718,11 @@ mod tests {
         assert!(!result.trace.is_empty());
         // The improver should discover a feasible incumbent (x=1,y=0 giving
         // objective 3, the optimum under the budget).
-        assert!(result.best.feasible, "expected a feasible best, got {:?}", result.best.violations);
+        assert!(
+            result.best.feasible,
+            "expected a feasible best, got {:?}",
+            result.best.violations
+        );
         assert!(result.best.total_violation.abs() < 1e-9);
     }
 }

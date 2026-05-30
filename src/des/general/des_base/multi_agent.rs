@@ -98,7 +98,10 @@ pub struct JointEnvStationOpts {
 
 impl Default for JointEnvStationOpts {
     fn default() -> Self {
-        JointEnvStationOpts { num_episodes: None, max_steps_per_episode: None }
+        JointEnvStationOpts {
+            num_episodes: None,
+            max_steps_per_episode: None,
+        }
     }
 }
 
@@ -194,7 +197,8 @@ impl<S: Clone + 'static, A: Clone + 'static> JointEnvStation<S, A> {
     /// Emit the current joint state, one [`StateToken`] per agent channel.
     fn emit_state_for_all_agents(&mut self) {
         for i in 0..self.env.num_agents() {
-            let token: AnyToken = Rc::new(StateToken::new(self.cur_states[i].clone(), self.episode_id));
+            let token: AnyToken =
+                Rc::new(StateToken::new(self.cur_states[i].clone(), self.episode_id));
             let ch = format!("{}{i}", Self::CH_AGENT_STATE_PREFIX);
             self.core.emit(token, &ch);
         }
@@ -270,7 +274,12 @@ impl<S: Clone + 'static, A: Clone + 'static> DESStation for JointEnvStation<S, A
         }
         let mut actions: Vec<A> = Vec::with_capacity(n);
         for i in 0..n {
-            actions.push(self.pending_actions.get(&i).expect("missing pending action").clone());
+            actions.push(
+                self.pending_actions
+                    .get(&i)
+                    .expect("missing pending action")
+                    .clone(),
+            );
         }
         self.pending_actions.clear();
         let r = self.env.step(&self.cur_states, &actions);
@@ -292,7 +301,8 @@ impl<S: Clone + 'static, A: Clone + 'static> DESStation for JointEnvStation<S, A
         }
         self.cur_states = r.next_states;
         if all_done {
-            self.episode_accounting.finish_episode(self.step_in_episode as f64);
+            self.episode_accounting
+                .finish_episode(self.step_in_episode as f64);
             self.step_in_episode = 0;
             self.episode_id += 1.0;
             if self.episode_id < self.num_episodes {
@@ -374,8 +384,13 @@ impl<S: Clone + 'static, A: Clone + 'static> MultiAgentSystem<S, A> {
         for a in &self.agents {
             participants.push(a.clone());
         }
-        let summary =
-            run_iterative_des(participants, IterativeRunOptions { rng: opts.rng, ..Default::default() });
+        let summary = run_iterative_des(
+            participants,
+            IterativeRunOptions {
+                rng: opts.rng,
+                ..Default::default()
+            },
+        );
 
         let env = self.env.borrow();
         let reward_hist = env.reward_history();
@@ -483,7 +498,11 @@ mod tests {
     impl TransitionSink {
         const CH_IN: &'static str = "in";
         fn new(id: &str) -> Self {
-            TransitionSink { core: StationCore::new(id), count: 0, last_reward: f64::NAN }
+            TransitionSink {
+                core: StationCore::new(id),
+                count: 0,
+                last_reward: f64::NAN,
+            }
         }
     }
 
@@ -498,7 +517,10 @@ mod tests {
             self
         }
         fn run_time_step(&mut self) {
-            for t in self.core.drain::<TransitionToken<usize, usize>>(Self::CH_IN) {
+            for t in self
+                .core
+                .drain::<TransitionToken<usize, usize>>(Self::CH_IN)
+            {
                 self.count += 1;
                 self.last_reward = t.reward;
             }
@@ -513,12 +535,16 @@ mod tests {
             JointEnvStationOpts::default(),
         );
         let sink = Rc::new(RefCell::new(TransitionSink::new("sink")));
-        station
-            .core_mut()
-            .pipe(sink.clone(), &JointEnvStation::<usize, usize>::transition_channel(0), TransitionSink::CH_IN);
-        station
-            .core_mut()
-            .pipe(sink.clone(), &JointEnvStation::<usize, usize>::transition_channel(1), TransitionSink::CH_IN);
+        station.core_mut().pipe(
+            sink.clone(),
+            &JointEnvStation::<usize, usize>::transition_channel(0),
+            TransitionSink::CH_IN,
+        );
+        station.core_mut().pipe(
+            sink.clone(),
+            &JointEnvStation::<usize, usize>::transition_channel(1),
+            TransitionSink::CH_IN,
+        );
 
         // First tick emits start states (no agent wired to the state channels).
         station.run_time_step();
@@ -540,7 +566,10 @@ mod tests {
         let env = Rc::new(RefCell::new(JointEnvStation::<usize, usize>::new(
             "env",
             Box::new(CoordEnv { n: 2 }),
-            JointEnvStationOpts { num_episodes: Some(5.0), max_steps_per_episode: None },
+            JointEnvStationOpts {
+                num_episodes: Some(5.0),
+                max_steps_per_episode: None,
+            },
         )));
         let a0: StationRef = Rc::new(RefCell::new(DummyAgent::new("a0", 1, 1)));
         let a1: StationRef = Rc::new(RefCell::new(DummyAgent::new("a1", 2, 1)));

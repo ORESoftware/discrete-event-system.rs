@@ -104,7 +104,12 @@ pub fn build_newsvendor_frame(d: &NewsvendorFrameData) -> FrameParts {
         .collect();
     let labels = ["start inv", "ordered", "sold", "leftover"];
     let values = [d.start_inv, d.ordered, d.sold, d.leftover];
-    let bar_colors = [colors::INVENTORY, colors::ORDERED, colors::SOLD, colors::LEFTOVER];
+    let bar_colors = [
+        colors::INVENTORY,
+        colors::ORDERED,
+        colors::SOLD,
+        colors::LEFTOVER,
+    ];
 
     for i in 0..4 {
         let v = values[i];
@@ -197,20 +202,44 @@ pub fn build_newsvendor_frame(d: &NewsvendorFrameData) -> FrameParts {
     }));
 
     let rows: Vec<Row> = vec![
-        Row::metric("demand", crate::des::animation::types::js_num(d.demand), colors::DEMAND),
-        Row::metric("sold", crate::des::animation::types::js_num(d.sold), colors::SOLD),
-        Row::metric("leftover", crate::des::animation::types::js_num(d.leftover), colors::LEFTOVER),
-        Row::metric("lost", crate::des::animation::types::js_num(d.lost), colors::LOST),
+        Row::metric(
+            "demand",
+            crate::des::animation::types::js_num(d.demand),
+            colors::DEMAND,
+        ),
+        Row::metric(
+            "sold",
+            crate::des::animation::types::js_num(d.sold),
+            colors::SOLD,
+        ),
+        Row::metric(
+            "leftover",
+            crate::des::animation::types::js_num(d.leftover),
+            colors::LEFTOVER,
+        ),
+        Row::metric(
+            "lost",
+            crate::des::animation::types::js_num(d.lost),
+            colors::LOST,
+        ),
         Row::Separator,
         Row::metric(
             "profit",
             to_fixed(d.profit, 2),
-            if d.profit >= 0.0 { colors::PROFIT_POS } else { colors::PROFIT_NEG },
+            if d.profit >= 0.0 {
+                colors::PROFIT_POS
+            } else {
+                colors::PROFIT_NEG
+            },
         ),
         Row::metric(
             "cumulative",
             to_fixed(d.cum_profit, 2),
-            if d.cum_profit >= 0.0 { colors::PROFIT_POS } else { colors::PROFIT_NEG },
+            if d.cum_profit >= 0.0 {
+                colors::PROFIT_POS
+            } else {
+                colors::PROFIT_NEG
+            },
         ),
     ];
     let mut yy = ry + 56.0;
@@ -261,13 +290,21 @@ pub fn build_newsvendor_frame(d: &NewsvendorFrameData) -> FrameParts {
 
 /// A metrics-panel row: a labelled value (with colour) or a vertical spacer.
 enum Row {
-    Metric { label: String, val: String, color: String },
+    Metric {
+        label: String,
+        val: String,
+        color: String,
+    },
     Separator,
 }
 
 impl Row {
     fn metric(label: &str, val: String, color: &str) -> Row {
-        Row::Metric { label: label.to_string(), val, color: color.to_string() }
+        Row::Metric {
+            label: label.to_string(),
+            val,
+            color: color.to_string(),
+        }
     }
 }
 

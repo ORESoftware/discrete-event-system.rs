@@ -132,7 +132,12 @@ impl Checker {
         } else {
             format!("  — {}", detail)
         };
-        println!("{}  {}{}", if ok { "  PASS" } else { "  FAIL" }, label, tail);
+        println!(
+            "{}  {}{}",
+            if ok { "  PASS" } else { "  FAIL" },
+            label,
+            tail
+        );
         if ok {
             self.pass += 1;
         } else {
@@ -140,7 +145,11 @@ impl Checker {
         }
     }
     fn close(&mut self, label: &str, a: f64, b: f64) {
-        self.check(label, (a - b).abs() <= 1e-7, &format!("|{} − {}| = {:.2e}", a, b, (a - b).abs()));
+        self.check(
+            label,
+            (a - b).abs() <= 1e-7,
+            &format!("|{} − {}| = {:.2e}", a, b, (a - b).abs()),
+        );
     }
     fn array_close(&mut self, label: &str, a: &[f64], b: &[f64]) {
         if a.len() != b.len() {
@@ -182,7 +191,12 @@ pub fn run() {
     // Study 1 — Baseline 2D LP, no modifications.
     println!("\nStudy 1 — Baseline 2D LP, no modifications");
     {
-        let init = st("max", &[3.0, 5.0], &[&[2.0, 1.0], &[1.0, 3.0]], &[100.0, 90.0]);
+        let init = st(
+            "max",
+            &[3.0, 5.0],
+            &[&[2.0, 1.0], &[1.0, 3.0]],
+            &[100.0, 90.0],
+        );
         let mut inc = IncrementalLp::new(init.clone());
         inc.solve_to_optimum();
         let stat = solve_static(&init);
@@ -193,51 +207,114 @@ pub fn run() {
     // Study 2 — Add constraint after solving.
     println!("\nStudy 2 — Add constraint after solving (dual simplex restart)");
     {
-        let init = st("max", &[3.0, 5.0], &[&[2.0, 1.0], &[1.0, 3.0]], &[100.0, 90.0]);
+        let init = st(
+            "max",
+            &[3.0, 5.0],
+            &[&[2.0, 1.0], &[1.0, 3.0]],
+            &[100.0, 90.0],
+        );
         let mut inc = IncrementalLp::new(init.clone());
         inc.solve_to_optimum();
-        inc.apply_event(LpEvent::AddConstraint { coefs: vec![1.0, 0.0], rhs: 30.0 });
+        inc.apply_event(LpEvent::AddConstraint {
+            coefs: vec![1.0, 0.0],
+            rhs: 30.0,
+        });
         inc.solve_to_optimum();
-        let stat = solve_static(&st("max", &[3.0, 5.0], &[&[2.0, 1.0], &[1.0, 3.0], &[1.0, 0.0]], &[100.0, 90.0, 30.0]));
-        c.array_close("post-add-constraint x  matches static", &inc.get_x(), &stat.0);
+        let stat = solve_static(&st(
+            "max",
+            &[3.0, 5.0],
+            &[&[2.0, 1.0], &[1.0, 3.0], &[1.0, 0.0]],
+            &[100.0, 90.0, 30.0],
+        ));
+        c.array_close(
+            "post-add-constraint x  matches static",
+            &inc.get_x(),
+            &stat.0,
+        );
         c.close("post-add-constraint z  matches static", inc.get_z(), stat.1);
     }
 
     // Study 3 — Remove a binding constraint.
     println!("\nStudy 3 — Remove a binding constraint");
     {
-        let init = st("max", &[3.0, 5.0], &[&[2.0, 1.0], &[1.0, 3.0]], &[100.0, 90.0]);
+        let init = st(
+            "max",
+            &[3.0, 5.0],
+            &[&[2.0, 1.0], &[1.0, 3.0]],
+            &[100.0, 90.0],
+        );
         let mut inc = IncrementalLp::new(init.clone());
         inc.solve_to_optimum();
         inc.apply_event(LpEvent::RemoveConstraint { index: 0 });
         inc.solve_to_optimum();
         let stat = solve_static(&st("max", &[3.0, 5.0], &[&[1.0, 3.0]], &[90.0]));
-        c.array_close("post-remove-constraint x matches static", &inc.get_x(), &stat.0);
-        c.close("post-remove-constraint z matches static", inc.get_z(), stat.1);
+        c.array_close(
+            "post-remove-constraint x matches static",
+            &inc.get_x(),
+            &stat.0,
+        );
+        c.close(
+            "post-remove-constraint z matches static",
+            inc.get_z(),
+            stat.1,
+        );
     }
 
     // Study 4 — Change objective.
     println!("\nStudy 4 — Change objective (primal simplex restart)");
     {
-        let init = st("max", &[3.0, 5.0], &[&[2.0, 1.0], &[1.0, 3.0]], &[100.0, 90.0]);
+        let init = st(
+            "max",
+            &[3.0, 5.0],
+            &[&[2.0, 1.0], &[1.0, 3.0]],
+            &[100.0, 90.0],
+        );
         let mut inc = IncrementalLp::new(init.clone());
         inc.solve_to_optimum();
-        inc.apply_event(LpEvent::ChangeObjective { new_c: vec![5.0, 3.0] });
+        inc.apply_event(LpEvent::ChangeObjective {
+            new_c: vec![5.0, 3.0],
+        });
         inc.solve_to_optimum();
-        let stat = solve_static(&st("max", &[5.0, 3.0], &[&[2.0, 1.0], &[1.0, 3.0]], &[100.0, 90.0]));
-        c.array_close("post-change-objective x matches static", &inc.get_x(), &stat.0);
-        c.close("post-change-objective z matches static", inc.get_z(), stat.1);
+        let stat = solve_static(&st(
+            "max",
+            &[5.0, 3.0],
+            &[&[2.0, 1.0], &[1.0, 3.0]],
+            &[100.0, 90.0],
+        ));
+        c.array_close(
+            "post-change-objective x matches static",
+            &inc.get_x(),
+            &stat.0,
+        );
+        c.close(
+            "post-change-objective z matches static",
+            inc.get_z(),
+            stat.1,
+        );
     }
 
     // Study 5 — Add a variable mid-run.
     println!("\nStudy 5 — Add a variable mid-run");
     {
-        let init = st("max", &[3.0, 5.0], &[&[2.0, 1.0], &[1.0, 3.0]], &[100.0, 90.0]);
+        let init = st(
+            "max",
+            &[3.0, 5.0],
+            &[&[2.0, 1.0], &[1.0, 3.0]],
+            &[100.0, 90.0],
+        );
         let mut inc = IncrementalLp::new(init.clone());
         inc.solve_to_optimum();
-        inc.apply_event(LpEvent::AddVariable { column: vec![1.0, 1.0], c_new: 7.0 });
+        inc.apply_event(LpEvent::AddVariable {
+            column: vec![1.0, 1.0],
+            c_new: 7.0,
+        });
         inc.solve_to_optimum();
-        let stat = solve_static(&st("max", &[3.0, 5.0, 7.0], &[&[2.0, 1.0, 1.0], &[1.0, 3.0, 1.0]], &[100.0, 90.0]));
+        let stat = solve_static(&st(
+            "max",
+            &[3.0, 5.0, 7.0],
+            &[&[2.0, 1.0, 1.0], &[1.0, 3.0, 1.0]],
+            &[100.0, 90.0],
+        ));
         c.array_close("post-add-variable x matches static", &inc.get_x(), &stat.0);
         c.close("post-add-variable z matches static", inc.get_z(), stat.1);
     }
@@ -245,51 +322,108 @@ pub fn run() {
     // Study 6 — Remove a variable mid-run.
     println!("\nStudy 6 — Remove a variable mid-run");
     {
-        let init = st("max", &[3.0, 5.0, 7.0], &[&[2.0, 1.0, 1.0], &[1.0, 3.0, 1.0]], &[100.0, 90.0]);
+        let init = st(
+            "max",
+            &[3.0, 5.0, 7.0],
+            &[&[2.0, 1.0, 1.0], &[1.0, 3.0, 1.0]],
+            &[100.0, 90.0],
+        );
         let mut inc = IncrementalLp::new(init.clone());
         inc.solve_to_optimum();
         inc.apply_event(LpEvent::RemoveVariable { struct_index: 2 });
         inc.solve_to_optimum();
-        let stat = solve_static(&st("max", &[3.0, 5.0], &[&[2.0, 1.0], &[1.0, 3.0]], &[100.0, 90.0]));
-        c.array_close("post-remove-variable x matches static", &inc.get_x(), &stat.0);
+        let stat = solve_static(&st(
+            "max",
+            &[3.0, 5.0],
+            &[&[2.0, 1.0], &[1.0, 3.0]],
+            &[100.0, 90.0],
+        ));
+        c.array_close(
+            "post-remove-variable x matches static",
+            &inc.get_x(),
+            &stat.0,
+        );
         c.close("post-remove-variable z matches static", inc.get_z(), stat.1);
     }
 
     // Study 7 — Sequence of all 5 modifications.
     println!("\nStudy 7 — Sequence of all 5 modifications, validating each step");
     {
-        let mut inc = IncrementalLp::new(st("max", &[3.0, 5.0], &[&[2.0, 1.0], &[1.0, 3.0]], &[100.0, 90.0]));
-        let base = st("max", &[3.0, 5.0], &[&[2.0, 1.0], &[1.0, 3.0]], &[100.0, 90.0]);
+        let mut inc = IncrementalLp::new(st(
+            "max",
+            &[3.0, 5.0],
+            &[&[2.0, 1.0], &[1.0, 3.0]],
+            &[100.0, 90.0],
+        ));
+        let base = st(
+            "max",
+            &[3.0, 5.0],
+            &[&[2.0, 1.0], &[1.0, 3.0]],
+            &[100.0, 90.0],
+        );
         inc.solve_to_optimum();
         c.array_close("S7.0 initial x", &inc.get_x(), &solve_static(&base).0);
 
-        inc.apply_event(LpEvent::AddConstraint { coefs: vec![1.0, 0.0], rhs: 30.0 });
+        inc.apply_event(LpEvent::AddConstraint {
+            coefs: vec![1.0, 0.0],
+            rhs: 30.0,
+        });
         inc.solve_to_optimum();
-        let mut s = solve_static(&st("max", &[3.0, 5.0], &[&[2.0, 1.0], &[1.0, 3.0], &[1.0, 0.0]], &[100.0, 90.0, 30.0]));
+        let mut s = solve_static(&st(
+            "max",
+            &[3.0, 5.0],
+            &[&[2.0, 1.0], &[1.0, 3.0], &[1.0, 0.0]],
+            &[100.0, 90.0, 30.0],
+        ));
         c.array_close("S7.a after add-constraint x", &inc.get_x(), &s.0);
         c.close("S7.a z", inc.get_z(), s.1);
 
-        inc.apply_event(LpEvent::ChangeObjective { new_c: vec![5.0, 3.0] });
+        inc.apply_event(LpEvent::ChangeObjective {
+            new_c: vec![5.0, 3.0],
+        });
         inc.solve_to_optimum();
-        s = solve_static(&st("max", &[5.0, 3.0], &[&[2.0, 1.0], &[1.0, 3.0], &[1.0, 0.0]], &[100.0, 90.0, 30.0]));
+        s = solve_static(&st(
+            "max",
+            &[5.0, 3.0],
+            &[&[2.0, 1.0], &[1.0, 3.0], &[1.0, 0.0]],
+            &[100.0, 90.0, 30.0],
+        ));
         c.array_close("S7.b after change-objective x", &inc.get_x(), &s.0);
         c.close("S7.b z", inc.get_z(), s.1);
 
         inc.apply_event(LpEvent::RemoveConstraint { index: 0 });
         inc.solve_to_optimum();
-        s = solve_static(&st("max", &[5.0, 3.0], &[&[1.0, 3.0], &[1.0, 0.0]], &[90.0, 30.0]));
+        s = solve_static(&st(
+            "max",
+            &[5.0, 3.0],
+            &[&[1.0, 3.0], &[1.0, 0.0]],
+            &[90.0, 30.0],
+        ));
         c.array_close("S7.c after remove-constraint x", &inc.get_x(), &s.0);
         c.close("S7.c z", inc.get_z(), s.1);
 
-        inc.apply_event(LpEvent::AddVariable { column: vec![1.0, 0.0], c_new: 4.0 });
+        inc.apply_event(LpEvent::AddVariable {
+            column: vec![1.0, 0.0],
+            c_new: 4.0,
+        });
         inc.solve_to_optimum();
-        s = solve_static(&st("max", &[5.0, 3.0, 4.0], &[&[1.0, 3.0, 1.0], &[1.0, 0.0, 0.0]], &[90.0, 30.0]));
+        s = solve_static(&st(
+            "max",
+            &[5.0, 3.0, 4.0],
+            &[&[1.0, 3.0, 1.0], &[1.0, 0.0, 0.0]],
+            &[90.0, 30.0],
+        ));
         c.array_close("S7.d after add-variable x", &inc.get_x(), &s.0);
         c.close("S7.d z", inc.get_z(), s.1);
 
         inc.apply_event(LpEvent::RemoveVariable { struct_index: 1 });
         inc.solve_to_optimum();
-        s = solve_static(&st("max", &[5.0, 4.0], &[&[1.0, 1.0], &[1.0, 0.0]], &[90.0, 30.0]));
+        s = solve_static(&st(
+            "max",
+            &[5.0, 4.0],
+            &[&[1.0, 1.0], &[1.0, 0.0]],
+            &[90.0, 30.0],
+        ));
         c.array_close("S7.e after remove-variable x", &inc.get_x(), &s.0);
         c.close("S7.e z", inc.get_z(), s.1);
     }
@@ -312,8 +446,18 @@ pub fn run() {
             .map(|_| (0..base_n).map(|_| 1.0 + (rng() * 5.0).floor()).collect())
             .collect();
         let b0: Vec<f64> = (0..base_m).map(|_| 30.0 + (rng() * 50.0).floor()).collect();
-        let mut state = State { sense: "max", c: c0.clone(), a: a0.clone(), b: b0.clone() };
-        let mut inc = IncrementalLp::new(State { sense: "max", c: c0.clone(), a: a0.clone(), b: b0.clone() });
+        let mut state = State {
+            sense: "max",
+            c: c0.clone(),
+            a: a0.clone(),
+            b: b0.clone(),
+        };
+        let mut inc = IncrementalLp::new(State {
+            sense: "max",
+            c: c0.clone(),
+            a: a0.clone(),
+            b: b0.clone(),
+        });
         inc.solve_to_optimum();
         let mut sstat = solve_static(&state);
         c.array_close("S8.0 initial x matches static", &inc.get_x(), &sstat.0);
@@ -321,7 +465,10 @@ pub fn run() {
         // 1: add a constraint x1 + x2 + x3 ≤ 50.
         state.a.push(vec![1.0, 1.0, 1.0]);
         state.b.push(50.0);
-        inc.apply_event(LpEvent::AddConstraint { coefs: vec![1.0, 1.0, 1.0], rhs: 50.0 });
+        inc.apply_event(LpEvent::AddConstraint {
+            coefs: vec![1.0, 1.0, 1.0],
+            rhs: 50.0,
+        });
         inc.solve_to_optimum();
         sstat = solve_static(&state);
         c.array_close("S8.1 after add x1+x2+x3≤50", &inc.get_x(), &sstat.0);
@@ -329,7 +476,9 @@ pub fn run() {
 
         // 2: change objective.
         state.c = vec![10.0, 7.0, 4.0];
-        inc.apply_event(LpEvent::ChangeObjective { new_c: state.c.clone() });
+        inc.apply_event(LpEvent::ChangeObjective {
+            new_c: state.c.clone(),
+        });
         inc.solve_to_optimum();
         sstat = solve_static(&state);
         c.array_close("S8.2 after change obj", &inc.get_x(), &sstat.0);
@@ -347,7 +496,10 @@ pub fn run() {
         // 4: add another constraint.
         state.a.push(vec![2.0, 0.0, 1.0]);
         state.b.push(40.0);
-        inc.apply_event(LpEvent::AddConstraint { coefs: vec![2.0, 0.0, 1.0], rhs: 40.0 });
+        inc.apply_event(LpEvent::AddConstraint {
+            coefs: vec![2.0, 0.0, 1.0],
+            rhs: 40.0,
+        });
         inc.solve_to_optimum();
         sstat = solve_static(&state);
         c.array_close("S8.4 after add constraint", &inc.get_x(), &sstat.0);
@@ -367,7 +519,9 @@ pub fn run() {
 
         // 6: change obj again.
         state.c = vec![3.0, 12.0, 5.0, 8.0];
-        inc.apply_event(LpEvent::ChangeObjective { new_c: state.c.clone() });
+        inc.apply_event(LpEvent::ChangeObjective {
+            new_c: state.c.clone(),
+        });
         inc.solve_to_optimum();
         sstat = solve_static(&state);
         c.array_close("S8.6 after change obj #2", &inc.get_x(), &sstat.0);
@@ -386,7 +540,9 @@ pub fn run() {
 
         // 8: change obj final.
         state.c = (0..state.c.len()).map(|i| (i + 1) as f64).collect();
-        inc.apply_event(LpEvent::ChangeObjective { new_c: state.c.clone() });
+        inc.apply_event(LpEvent::ChangeObjective {
+            new_c: state.c.clone(),
+        });
         inc.solve_to_optimum();
         sstat = solve_static(&state);
         c.array_close("S8.8 final state x", &inc.get_x(), &sstat.0);
@@ -396,14 +552,24 @@ pub fn run() {
     // Study 9 — min-LP (sense flip).
     println!("\nStudy 9 — min-LP (sense flip)");
     {
-        let init = st("min", &[3.0, 5.0], &[&[2.0, 1.0], &[1.0, 3.0]], &[100.0, 90.0]);
+        let init = st(
+            "min",
+            &[3.0, 5.0],
+            &[&[2.0, 1.0], &[1.0, 3.0]],
+            &[100.0, 90.0],
+        );
         let mut inc = IncrementalLp::new(init.clone());
         inc.solve_to_optimum();
         c.close("min-LP at origin: z = 0", inc.get_z(), 0.0);
         c.array_close("min-LP at origin: x = 0", &inc.get_x(), &[0.0, 0.0]);
     }
 
-    println!("\n{} checks: {} passed, {} failed", c.pass + c.fail, c.pass, c.fail);
+    println!(
+        "\n{} checks: {} passed, {} failed",
+        c.pass + c.fail,
+        c.pass,
+        c.fail
+    );
     if c.fail > 0 {
         std::process::exit(1);
     }

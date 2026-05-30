@@ -40,7 +40,11 @@ impl<E: Environment> PureEnvironment<f64, usize> for PureEnvAdapter<E> {
     }
     fn step(&mut self, state: f64, action: usize) -> StepResult<f64> {
         let o = self.env.step(state as usize, action);
-        StepResult { next_state: o.next_state as f64, reward: o.reward, done: o.done }
+        StepResult {
+            next_state: o.next_state as f64,
+            reward: o.reward,
+            done: o.done,
+        }
     }
 }
 
@@ -50,7 +54,11 @@ fn to_exponential(x: f64, digits: usize) -> String {
         return "NaN".to_string();
     }
     if x.is_infinite() {
-        return if x < 0.0 { "-Infinity".to_string() } else { "Infinity".to_string() };
+        return if x < 0.0 {
+            "-Infinity".to_string()
+        } else {
+            "Infinity".to_string()
+        };
     }
     let s = format!("{:.*e}", digits, x);
     let (mant, exp) = s.split_once('e').unwrap_or((s.as_str(), "0"));
@@ -76,16 +84,27 @@ fn mean_last(xs: &[f64], n: usize) -> f64 {
 
 /// Entry point (`main()` in the TS source).
 pub fn run() {
-    let seed: u32 = std::env::var("SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(7);
+    let seed: u32 = std::env::var("SEED")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(7);
 
     println!("# Neural-net DES demo");
     println!("# seed = {}", seed);
 
     let xor = run_xor_neural_net_des(XorNeuralNetOptions {
         seed: Some(seed),
-        epochs: Some(std::env::var("XOR_EPOCHS").ok().and_then(|v| v.parse().ok()).unwrap_or(8000)),
+        epochs: Some(
+            std::env::var("XOR_EPOCHS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(8000),
+        ),
         learning_rate: Some(
-            std::env::var("XOR_LR").ok().and_then(|v| v.parse().ok()).unwrap_or(0.3),
+            std::env::var("XOR_LR")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0.3),
         ),
         hidden_layers: Some(vec![4]),
         samples_per_tick: None,
@@ -94,22 +113,38 @@ pub fn run() {
     println!();
     println!("## Supervised XOR");
     println!("samples trained = {}", xor.loss_history.len());
-    println!("ticks = {} ({})", xor.ticks, xor.reason.map(|r| r.as_str()).unwrap_or("done"));
-    println!("avg loss last 100 = {}", to_exponential(mean_last(&xor.loss_history, 100), 3));
+    println!(
+        "ticks = {} ({})",
+        xor.ticks,
+        xor.reason.map(|r| r.as_str()).unwrap_or("done")
+    );
+    println!(
+        "avg loss last 100 = {}",
+        to_exponential(mean_last(&xor.loss_history, 100), 3)
+    );
     println!(
         "predictions [00, 01, 10, 11] = [{}]",
-        xor.predictions.iter().map(|v| format!("{:.4}", v[0])).collect::<Vec<_>>().join(", ")
+        xor.predictions
+            .iter()
+            .map(|v| format!("{:.4}", v[0]))
+            .collect::<Vec<_>>()
+            .join(", ")
     );
 
     let q = run_neural_q_learning_des(
-        Box::new(PureEnvAdapter { env: Corridor::new(6, 0) }),
+        Box::new(PureEnvAdapter {
+            env: Corridor::new(6, 0),
+        }),
         NeuralQLearningRunParams {
             num_episodes: std::env::var("Q_EPISODES")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(600),
             max_steps_per_episode: Some(40),
-            alpha: std::env::var("Q_ALPHA").ok().and_then(|v| v.parse().ok()).unwrap_or(0.25),
+            alpha: std::env::var("Q_ALPHA")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0.25),
             gamma: 0.95,
             epsilon: 0.8,
             epsilon_decay: Some(0.99),
@@ -127,21 +162,35 @@ pub fn run() {
         &env_eval,
         |s, _rng| q.policy[s],
         &mut eval_rng,
-        EvalPolicyOptions { num_episodes: 50, max_steps_per_episode: 40, gamma: 1.0 },
+        EvalPolicyOptions {
+            num_episodes: 50,
+            max_steps_per_episode: 40,
+            gamma: 1.0,
+        },
     );
     println!();
     println!("## Neural Q-learning on Corridor MDP");
-    println!("episodes = {}, steps = {}, ticks = {}", q.total_episodes, q.total_steps, q.total_ticks);
+    println!(
+        "episodes = {}, steps = {}, ticks = {}",
+        q.total_episodes, q.total_steps, q.total_ticks
+    );
     println!(
         "greedy policy = [{}]",
-        q.policy.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", ")
+        q.policy
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
     );
     println!(
         "eval success = {:.1}%, mean length = {:.1}",
         100.0 * eval_q.success_rate,
         eval_q.mean_length
     );
-    println!("avg TD loss last 100 = {}", to_exponential(mean_last(&q.loss_history, 100), 3));
+    println!(
+        "avg TD loss last 100 = {}",
+        to_exponential(mean_last(&q.loss_history, 100), 3)
+    );
 
     let rate = 0.5;
     let ode_net = FeedForwardNetwork::new(vec![DenseLayerConfig {

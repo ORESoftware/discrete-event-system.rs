@@ -97,7 +97,11 @@ mod tests {
         inc.apply_remove_constraint(2);
         inc.solve_to_optimum(1000);
         let stat = solve_lp_internal(
-            &solve_internal_max(vec![3.0, 5.0], vec![vec![2.0, 1.0], vec![1.0, 3.0]], vec![100.0, 90.0]),
+            &solve_internal_max(
+                vec![3.0, 5.0],
+                vec![vec![2.0, 1.0], vec![1.0, 3.0]],
+                vec![100.0, 90.0],
+            ),
             &InternalSimplexOptions::default(),
         );
         assert!(close(inc.get_z(), stat.objective));
@@ -122,7 +126,11 @@ mod tests {
         inc.solve_to_optimum(1000);
         assert!(inc.get_z() > z1);
         let stat = solve_lp_internal(
-            &solve_internal_max(vec![10.0, 1.0], vec![vec![2.0, 1.0], vec![1.0, 3.0]], vec![100.0, 90.0]),
+            &solve_internal_max(
+                vec![10.0, 1.0],
+                vec![vec![2.0, 1.0], vec![1.0, 3.0]],
+                vec![100.0, 90.0],
+            ),
             &InternalSimplexOptions::default(),
         );
         assert!(close(inc.get_z(), stat.objective));
@@ -169,7 +177,11 @@ mod tests {
         assert!(close(inc.get_z(), z_before));
         inc.solve_to_optimum(1000);
         let stat = solve_lp_internal(
-            &solve_internal_max(vec![3.0, 5.0], vec![vec![2.0, 1.0], vec![1.0, 3.0]], vec![100.0, 90.0]),
+            &solve_internal_max(
+                vec![3.0, 5.0],
+                vec![vec![2.0, 1.0], vec![1.0, 3.0]],
+                vec![100.0, 90.0],
+            ),
             &InternalSimplexOptions::default(),
         );
         assert!(close(inc.get_z(), stat.objective));
@@ -247,11 +259,19 @@ mod tests {
         for _ in 0..12 {
             let n = 2 + (r.next_float() * 3.0).floor() as usize;
             let m = 2 + (r.next_float() * 3.0).floor() as usize;
-            let c: Vec<f64> = (0..n).map(|_| 1.0 + (r.next_float() * 9.0).floor()).collect();
-            let a: Vec<Vec<f64>> = (0..m)
-                .map(|_| (0..n).map(|_| 1.0 + (r.next_float() * 5.0).floor()).collect())
+            let c: Vec<f64> = (0..n)
+                .map(|_| 1.0 + (r.next_float() * 9.0).floor())
                 .collect();
-            let b: Vec<f64> = (0..m).map(|_| 30.0 + (r.next_float() * 40.0).floor()).collect();
+            let a: Vec<Vec<f64>> = (0..m)
+                .map(|_| {
+                    (0..n)
+                        .map(|_| 1.0 + (r.next_float() * 5.0).floor())
+                        .collect()
+                })
+                .collect();
+            let b: Vec<f64> = (0..m)
+                .map(|_| 30.0 + (r.next_float() * 40.0).floor())
+                .collect();
             let mut inc = IncrementalLP::new(IncrementalLPInit {
                 sense: IncSense::Max,
                 c: c.clone(),

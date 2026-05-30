@@ -30,7 +30,10 @@ struct DiscreteBelief {
 impl DiscreteBelief {
     fn new(states: Vec<f64>) -> Self {
         let n = states.len();
-        DiscreteBelief { states, weights: vec![1.0 / n as f64; n] }
+        DiscreteBelief {
+            states,
+            weights: vec![1.0 / n as f64; n],
+        }
     }
     fn with_weights(states: Vec<f64>, weights: Vec<f64>) -> Self {
         DiscreteBelief { states, weights }
@@ -48,7 +51,11 @@ impl DiscreteBelief {
         }
     }
     fn mean(&self) -> f64 {
-        self.states.iter().zip(self.weights.iter()).map(|(s, w)| s * w).sum()
+        self.states
+            .iter()
+            .zip(self.weights.iter())
+            .map(|(s, w)| s * w)
+            .sum()
     }
 }
 
@@ -82,7 +89,9 @@ impl ExactPomdp {
 }
 
 fn pomdp_exact_finite_horizon(spec: &PomdpSpec, _horizon: usize) -> ExactPomdp {
-    ExactPomdp { listen_index: spec.actions.iter().position(|a| a == "listen").unwrap_or(0) }
+    ExactPomdp {
+        listen_index: spec.actions.iter().position(|a| a == "listen").unwrap_or(0),
+    }
 }
 
 struct QmdpSolver {
@@ -91,7 +100,9 @@ struct QmdpSolver {
 
 impl QmdpSolver {
     fn new(spec: &PomdpSpec, _tol: f64, _max_iter: usize) -> Self {
-        QmdpSolver { listen_index: spec.actions.iter().position(|a| a == "listen").unwrap_or(0) }
+        QmdpSolver {
+            listen_index: spec.actions.iter().position(|a| a == "listen").unwrap_or(0),
+        }
     }
     fn q_belief(&self, _belief: &DiscreteBelief, _a: usize) -> f64 {
         0.0
@@ -150,7 +161,11 @@ struct FmResult {
 fn run_fact_machine(p: &FactMachineParams) -> FmResult {
     // PORT NOTE: real impl runs the DES POMDP with seeded noise traders. Stub
     // returns a uniform-prior trajectory so structural checks stay sound.
-    let bins = if p.market_type == "scalar" { p.theta_bins } else { 2 };
+    let bins = if p.market_type == "scalar" {
+        p.theta_bins
+    } else {
+        2
+    };
     let uniform = vec![1.0 / bins as f64; bins];
     FmResult {
         belief_mean: vec![0.5; p.t + 1],
@@ -175,7 +190,10 @@ struct PyJson {
 
 fn run_python(env: &[(&str, String)]) -> Option<PyJson> {
     let python = std::env::var("FACTMACHINE_PY").unwrap_or_else(|_| "python3".to_string());
-    let script = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("external-references").join("factmachine").join("factmachine.py");
+    let script = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("external-references")
+        .join("factmachine")
+        .join("factmachine.py");
     let mut cmd = Command::new(python);
     cmd.arg(&script);
     for (k, v) in env {
@@ -201,7 +219,11 @@ impl Checker {
         Checker { pass: 0, fail: 0 }
     }
     fn check(&mut self, label: &str, ok: bool, detail: &str) {
-        let extra = if detail.is_empty() { String::new() } else { format!("  ({})", detail) };
+        let extra = if detail.is_empty() {
+            String::new()
+        } else {
+            format!("  ({})", detail)
+        };
         if ok {
             self.pass += 1;
             println!("  PASS    {}{}", label, extra);
@@ -222,9 +244,27 @@ pub fn run() {
         let k = 21usize;
         let informedness = 0.6;
         let states: Vec<f64> = (0..k).map(|i| i as f64 / (k - 1) as f64).collect();
-        let obs: Vec<(i64, i64)> = vec![(12, 20), (15, 22), (9, 19), (17, 20), (11, 18), (14, 19), (16, 20), (10, 22)];
-        let obs_str = obs.iter().map(|(y, n)| format!("{}/{}", y, n)).collect::<Vec<_>>().join(",");
-        let py = run_python(&[("PROBLEM", "belief".to_string()), ("THETA_BINS", k.to_string()), ("INFORMEDNESS", informedness.to_string()), ("OBS", obs_str)]);
+        let obs: Vec<(i64, i64)> = vec![
+            (12, 20),
+            (15, 22),
+            (9, 19),
+            (17, 20),
+            (11, 18),
+            (14, 19),
+            (16, 20),
+            (10, 22),
+        ];
+        let obs_str = obs
+            .iter()
+            .map(|(y, n)| format!("{}/{}", y, n))
+            .collect::<Vec<_>>()
+            .join(",");
+        let py = run_python(&[
+            ("PROBLEM", "belief".to_string()),
+            ("THETA_BINS", k.to_string()),
+            ("INFORMEDNESS", informedness.to_string()),
+            ("OBS", obs_str),
+        ]);
         match py {
             None => println!("  SKIP    scipy/numpy reference unavailable"),
             Some(py) => {
@@ -233,26 +273,45 @@ pub fn run() {
                 for &(y, n) in &obs {
                     b.update(|theta| {
                         let q = theta * informedness + 0.5 * (1.0 - informedness);
-                        (y as f64 * f64::max(1e-300, q).ln() + (n - y) as f64 * f64::max(1e-300, 1.0 - q).ln()).exp()
+                        (y as f64 * f64::max(1e-300, q).ln()
+                            + (n - y) as f64 * f64::max(1e-300, 1.0 - q).ln())
+                        .exp()
                     });
                     ts_means.push(b.mean());
                 }
                 let d_mean = (ts_means[ts_means.len() - 1] - py.final_mean).abs();
                 c.check(
-                    &format!("final E[θ] match  TS={:.8}  PY={:.8}", ts_means[ts_means.len() - 1], py.final_mean),
+                    &format!(
+                        "final E[θ] match  TS={:.8}  PY={:.8}",
+                        ts_means[ts_means.len() - 1],
+                        py.final_mean
+                    ),
                     d_mean < 1e-10,
                     &format!("|Δ|={:.2e}", d_mean),
                 );
                 let mut max_belief_diff = 0.0_f64;
                 for i in 0..k {
-                    max_belief_diff = f64::max(max_belief_diff, (b.weights[i] - py.final_belief[i]).abs());
+                    max_belief_diff =
+                        f64::max(max_belief_diff, (b.weights[i] - py.final_belief[i]).abs());
                 }
-                c.check("per-bin |b_TS − b_PY| ≤ 1e-12 across 21 bins", max_belief_diff < 1e-12, &format!("max|Δ|={:.2e}", max_belief_diff));
+                c.check(
+                    "per-bin |b_TS − b_PY| ≤ 1e-12 across 21 bins",
+                    max_belief_diff < 1e-12,
+                    &format!("max|Δ|={:.2e}", max_belief_diff),
+                );
                 let mut max_mean_diff = 0.0_f64;
                 for t in 0..=obs.len() {
-                    max_mean_diff = f64::max(max_mean_diff, (ts_means[t] - py.mean_history[t]).abs());
+                    max_mean_diff =
+                        f64::max(max_mean_diff, (ts_means[t] - py.mean_history[t]).abs());
                 }
-                c.check(&format!("per-tick mean trajectory matches across {} steps", obs.len() + 1), max_mean_diff < 1e-10, &format!("max|Δ|={:.2e}", max_mean_diff));
+                c.check(
+                    &format!(
+                        "per-tick mean trajectory matches across {} steps",
+                        obs.len() + 1
+                    ),
+                    max_mean_diff < 1e-10,
+                    &format!("max|Δ|={:.2e}", max_mean_diff),
+                );
             }
         }
     }
@@ -260,7 +319,10 @@ pub fn run() {
     // STUDY 2.
     println!("\n=== STUDY 2: P(majority votes YES | θ) ≡ scipy.stats.binom.sf ===");
     {
-        let py = run_python(&[("PROBLEM", "pwin".to_string()), ("N_VOTERS", "51".to_string())]);
+        let py = run_python(&[
+            ("PROBLEM", "pwin".to_string()),
+            ("N_VOTERS", "51".to_string()),
+        ]);
         match py {
             None => println!("  SKIP    scipy reference unavailable"),
             Some(py) => {
@@ -279,7 +341,8 @@ pub fn run() {
                         }
                         if k < nn {
                             lcoef += ((nn - k) as f64).ln() - ((k + 1) as f64).ln();
-                            log_p += f64::max(1e-300, theta).ln() - f64::max(1e-300, 1.0 - theta).ln();
+                            log_p +=
+                                f64::max(1e-300, theta).ln() - f64::max(1e-300, 1.0 - theta).ln();
                         }
                     }
                     p.max(0.0).min(1.0)
@@ -288,7 +351,11 @@ pub fn run() {
                 for i in 0..py.thetas.len() {
                     max_diff = f64::max(max_diff, (pwin_ts(py.thetas[i]) - py.pwin[i]).abs());
                 }
-                c.check("pYesWins at 9 θ values matches scipy.stats.binom.sf to 1e-10", max_diff < 1e-10, &format!("max|Δ|={:.2e}", max_diff));
+                c.check(
+                    "pYesWins at 9 θ values matches scipy.stats.binom.sf to 1e-10",
+                    max_diff < 1e-10,
+                    &format!("max|Δ|={:.2e}", max_diff),
+                );
             }
         }
     }
@@ -319,10 +386,25 @@ pub fn run() {
         let init_brier = brier_by_t[0];
         let final_brier = brier_by_t[t];
         let mid_brier = brier_by_t[t / 2];
-        println!("#   Brier(t=0) = {:.4},  Brier(t=12) = {:.4},  Brier(t=24) = {:.4}", init_brier, mid_brier, final_brier);
-        c.check("Brier at t=0 (uniform prior, no info) = 0.25 (theoretical)", (init_brier - 0.25).abs() < 1e-8, &format!("init={:.4}", init_brier));
-        c.check("Brier at end < Brier at start (filter learns)", final_brier < init_brier - 0.02, &format!("end={:.4}, init={:.4}", final_brier, init_brier));
-        c.check("Brier at t=12 < Brier at t=0 (monotone-ish learning)", mid_brier < init_brier - 0.01, &format!("mid={:.4}", mid_brier));
+        println!(
+            "#   Brier(t=0) = {:.4},  Brier(t=12) = {:.4},  Brier(t=24) = {:.4}",
+            init_brier, mid_brier, final_brier
+        );
+        c.check(
+            "Brier at t=0 (uniform prior, no info) = 0.25 (theoretical)",
+            (init_brier - 0.25).abs() < 1e-8,
+            &format!("init={:.4}", init_brier),
+        );
+        c.check(
+            "Brier at end < Brier at start (filter learns)",
+            final_brier < init_brier - 0.02,
+            &format!("end={:.4}, init={:.4}", final_brier, init_brier),
+        );
+        c.check(
+            "Brier at t=12 < Brier at t=0 (monotone-ish learning)",
+            mid_brier < init_brier - 0.01,
+            &format!("mid={:.4}", mid_brier),
+        );
     }
 
     // STUDY 4.
@@ -360,11 +442,40 @@ pub fn run() {
             }
             (a.0 - b.0) / se
         };
-        c.check("oracle.mean > qmdp.mean (value of perfect information)", stats["oracle"].0 > stats["qmdp"].0, &format!("oracle={:.3} qmdp={:.3}", stats["oracle"].0, stats["qmdp"].0));
-        c.check("qmdp.mean > random.mean", stats["qmdp"].0 > stats["random"].0, "");
-        c.check("myopic.mean > hold.mean (which is exactly 0)", stats["myopic"].0 > stats["hold"].0, "");
-        c.check("oracle vs random Welch-t > 5 (highly significant)", welch_t(stats["oracle"], stats["random"], n_reps as f64) > 5.0, &format!("t = {:.2}", welch_t(stats["oracle"], stats["random"], n_reps as f64)));
-        c.check("qmdp vs random Welch-t > 3 (significant)", welch_t(stats["qmdp"], stats["random"], n_reps as f64) > 3.0, &format!("t = {:.2}", welch_t(stats["qmdp"], stats["random"], n_reps as f64)));
+        c.check(
+            "oracle.mean > qmdp.mean (value of perfect information)",
+            stats["oracle"].0 > stats["qmdp"].0,
+            &format!(
+                "oracle={:.3} qmdp={:.3}",
+                stats["oracle"].0, stats["qmdp"].0
+            ),
+        );
+        c.check(
+            "qmdp.mean > random.mean",
+            stats["qmdp"].0 > stats["random"].0,
+            "",
+        );
+        c.check(
+            "myopic.mean > hold.mean (which is exactly 0)",
+            stats["myopic"].0 > stats["hold"].0,
+            "",
+        );
+        c.check(
+            "oracle vs random Welch-t > 5 (highly significant)",
+            welch_t(stats["oracle"], stats["random"], n_reps as f64) > 5.0,
+            &format!(
+                "t = {:.2}",
+                welch_t(stats["oracle"], stats["random"], n_reps as f64)
+            ),
+        );
+        c.check(
+            "qmdp vs random Welch-t > 3 (significant)",
+            welch_t(stats["qmdp"], stats["random"], n_reps as f64) > 3.0,
+            &format!(
+                "t = {:.2}",
+                welch_t(stats["qmdp"], stats["random"], n_reps as f64)
+            ),
+        );
     }
 
     // STUDY 5.
@@ -401,11 +512,28 @@ pub fn run() {
         flip_delta_theta /= n_reps as f64;
         baseline_pnl /= n_reps as f64;
         flip_pnl /= n_reps as f64;
-        println!("#   true θ = {},  flip surge = {}× K_noise at t = T-2", true_theta, late_flip_multiplier);
-        println!("#   baseline:  mean(E[θ] − θ_true) = {:.4}    mean PnL = {:.3}", baseline_delta_theta, baseline_pnl);
-        println!("#   with flip: mean(E[θ] − θ_true) = {:.4}    mean PnL = {:.3}", flip_delta_theta, flip_pnl);
-        c.check("(a) without flip, |E[θ] − θ_true| ≤ 0.05 at end of market", baseline_delta_theta.abs() <= 0.05, &format!("Δθ={:.4}", baseline_delta_theta));
-        c.check("(b) with flip, E[θ] is shifted AWAY from truth (Δθ < −0.10, toward 1−θ)", flip_delta_theta < -0.10, &format!("flip Δθ={:.4}", flip_delta_theta));
+        println!(
+            "#   true θ = {},  flip surge = {}× K_noise at t = T-2",
+            true_theta, late_flip_multiplier
+        );
+        println!(
+            "#   baseline:  mean(E[θ] − θ_true) = {:.4}    mean PnL = {:.3}",
+            baseline_delta_theta, baseline_pnl
+        );
+        println!(
+            "#   with flip: mean(E[θ] − θ_true) = {:.4}    mean PnL = {:.3}",
+            flip_delta_theta, flip_pnl
+        );
+        c.check(
+            "(a) without flip, |E[θ] − θ_true| ≤ 0.05 at end of market",
+            baseline_delta_theta.abs() <= 0.05,
+            &format!("Δθ={:.4}", baseline_delta_theta),
+        );
+        c.check(
+            "(b) with flip, E[θ] is shifted AWAY from truth (Δθ < −0.10, toward 1−θ)",
+            flip_delta_theta < -0.10,
+            &format!("flip Δθ={:.4}", flip_delta_theta),
+        );
         c.check(
             "(c) flip costs the bettor money (mean PnL drop > 0.10; small because most positions are taken before the flip tick)",
             baseline_pnl - flip_pnl > 0.10,
@@ -414,12 +542,18 @@ pub fn run() {
     }
 
     // STUDY 6.
-    println!("\n=== STUDY 6: Cassandra \"Tiger\" POMDP — exact VI agrees with QMDP at flat prior ===");
+    println!(
+        "\n=== STUDY 6: Cassandra \"Tiger\" POMDP — exact VI agrees with QMDP at flat prior ==="
+    );
     {
         // PORT NOTE: transition/observation/reward closures omitted in the stub spec.
         let spec = PomdpSpec {
             states: vec!["TL".to_string(), "TR".to_string()],
-            actions: vec!["open-left".to_string(), "open-right".to_string(), "listen".to_string()],
+            actions: vec![
+                "open-left".to_string(),
+                "open-right".to_string(),
+                "listen".to_string(),
+            ],
             observations: vec!["hear-left".to_string(), "hear-right".to_string()],
             discount: 0.95,
         };
@@ -428,12 +562,27 @@ pub fn run() {
         let v_exact = exact.v(&flat);
         let qm = QmdpSolver::new(&spec, 1e-10, 5000);
         let belief = DiscreteBelief::with_weights(vec![0.0, 1.0], flat.clone());
-        let v_qmdp = qm.q_belief(&belief, 0).max(qm.q_belief(&belief, 1)).max(qm.q_belief(&belief, 2));
+        let v_qmdp = qm
+            .q_belief(&belief, 0)
+            .max(qm.q_belief(&belief, 1))
+            .max(qm.q_belief(&belief, 2));
         println!("#   V_exact(0.5, 0.5)  = {:.4}", v_exact);
         println!("#   V_QMDP (0.5, 0.5)  = {:.4}", v_qmdp);
-        c.check("QMDP value ≥ exact POMDP value at flat prior (QMDP is upper bound)", v_qmdp >= v_exact - 1e-6, &format!("QMDP={:.3} exact={:.3}", v_qmdp, v_exact));
-        c.check("exact policy at flat prior chooses 'listen'", spec.actions[exact.act(&belief)] == "listen", "");
-        c.check("QMDP policy at flat prior chooses 'listen'", spec.actions[qm.act(&belief)] == "listen", "");
+        c.check(
+            "QMDP value ≥ exact POMDP value at flat prior (QMDP is upper bound)",
+            v_qmdp >= v_exact - 1e-6,
+            &format!("QMDP={:.3} exact={:.3}", v_qmdp, v_exact),
+        );
+        c.check(
+            "exact policy at flat prior chooses 'listen'",
+            spec.actions[exact.act(&belief)] == "listen",
+            "",
+        );
+        c.check(
+            "QMDP policy at flat prior chooses 'listen'",
+            spec.actions[qm.act(&belief)] == "listen",
+            "",
+        );
     }
 
     // STUDY 7.
@@ -475,7 +624,12 @@ pub fn run() {
             }
             let mean = sum_pnl / n_reps as f64;
             let variance = f64::max(0.0, sum_sq_pnl / n_reps as f64 - mean * mean);
-            Block { mean_pnl: mean, sd_pnl: variance.sqrt(), win_rate: wins as f64 / n_reps as f64, final_belief_var: sum_belief_var / n_reps as f64 }
+            Block {
+                mean_pnl: mean,
+                sd_pnl: variance.sqrt(),
+                win_rate: wins as f64 / n_reps as f64,
+                final_belief_var: sum_belief_var / n_reps as f64,
+            }
         };
 
         let bin_my = run_block("binary", "myopic");
@@ -489,15 +643,30 @@ pub fn run() {
         println!("#                  PnL    sd      win-rate    PnL    sd       win-rate");
         println!(
             "#   random        {:>6}  {:>5}   {:.3}     {:>6}  {:>5}    {:.3}",
-            format!("{:.3}", bin_rn.mean_pnl), format!("{:.2}", bin_rn.sd_pnl), bin_rn.win_rate, format!("{:.3}", sc_rn.mean_pnl), format!("{:.2}", sc_rn.sd_pnl), sc_rn.win_rate
+            format!("{:.3}", bin_rn.mean_pnl),
+            format!("{:.2}", bin_rn.sd_pnl),
+            bin_rn.win_rate,
+            format!("{:.3}", sc_rn.mean_pnl),
+            format!("{:.2}", sc_rn.sd_pnl),
+            sc_rn.win_rate
         );
         println!(
             "#   myopic        {:>6}  {:>5}   {:.3}     {:>6}  {:>5}    {:.3}",
-            format!("{:.3}", bin_my.mean_pnl), format!("{:.2}", bin_my.sd_pnl), bin_my.win_rate, format!("{:.3}", sc_my.mean_pnl), format!("{:.2}", sc_my.sd_pnl), sc_my.win_rate
+            format!("{:.3}", bin_my.mean_pnl),
+            format!("{:.2}", bin_my.sd_pnl),
+            bin_my.win_rate,
+            format!("{:.3}", sc_my.mean_pnl),
+            format!("{:.2}", sc_my.sd_pnl),
+            sc_my.win_rate
         );
         println!(
             "#   oracle        {:>6}  {:>5}   {:.3}     {:>6}  {:>5}    {:.3}",
-            format!("{:.3}", bin_or.mean_pnl), format!("{:.2}", bin_or.sd_pnl), bin_or.win_rate, format!("{:.3}", sc_or.mean_pnl), format!("{:.2}", sc_or.sd_pnl), sc_or.win_rate
+            format!("{:.3}", bin_or.mean_pnl),
+            format!("{:.2}", bin_or.sd_pnl),
+            bin_or.win_rate,
+            format!("{:.3}", sc_or.mean_pnl),
+            format!("{:.2}", sc_or.sd_pnl),
+            sc_or.win_rate
         );
 
         {
@@ -518,17 +687,49 @@ pub fn run() {
                     max_diff = f64::max(max_diff, (r1.belief_mean[tt] - r2.belief_mean[tt]).abs());
                 }
             }
-            c.check("(a) same belief trajectory in binary vs scalar at hold-policy (max|Δ|<1e-12)", max_diff < 1e-12, &format!("max|Δ|={:.2e}", max_diff));
+            c.check(
+                "(a) same belief trajectory in binary vs scalar at hold-policy (max|Δ|<1e-12)",
+                max_diff < 1e-12,
+                &format!("max|Δ|={:.2e}", max_diff),
+            );
         }
 
-        c.check("(b) binary myopic win-rate > scalar myopic win-rate at θ=0.65 (sure-thing effect)", bin_my.win_rate > sc_my.win_rate + 0.3, &format!("binary={:.3} vs scalar={:.3}", bin_my.win_rate, sc_my.win_rate));
-        c.check("(b') binary mean PnL > scalar mean PnL for myopic at θ=0.65", bin_my.mean_pnl > sc_my.mean_pnl, &format!("binary={:.3} vs scalar={:.3}", bin_my.mean_pnl, sc_my.mean_pnl));
-        c.check("(c) scalar PnL sd > binary PnL sd for myopic (variance from bin concentration)", sc_my.sd_pnl > bin_my.sd_pnl, &format!("binary sd={:.3} vs scalar sd={:.3}", bin_my.sd_pnl, sc_my.sd_pnl));
+        c.check(
+            "(b) binary myopic win-rate > scalar myopic win-rate at θ=0.65 (sure-thing effect)",
+            bin_my.win_rate > sc_my.win_rate + 0.3,
+            &format!(
+                "binary={:.3} vs scalar={:.3}",
+                bin_my.win_rate, sc_my.win_rate
+            ),
+        );
+        c.check(
+            "(b') binary mean PnL > scalar mean PnL for myopic at θ=0.65",
+            bin_my.mean_pnl > sc_my.mean_pnl,
+            &format!(
+                "binary={:.3} vs scalar={:.3}",
+                bin_my.mean_pnl, sc_my.mean_pnl
+            ),
+        );
+        c.check(
+            "(c) scalar PnL sd > binary PnL sd for myopic (variance from bin concentration)",
+            sc_my.sd_pnl > bin_my.sd_pnl,
+            &format!(
+                "binary sd={:.3} vs scalar sd={:.3}",
+                bin_my.sd_pnl, sc_my.sd_pnl
+            ),
+        );
 
         let bin_edge = bin_or.mean_pnl - bin_my.mean_pnl;
         let sc_edge = sc_or.mean_pnl - sc_my.mean_pnl;
-        println!("#   oracle edge:   binary={:.3},  scalar={:.3}", bin_edge, sc_edge);
-        c.check("(d) scalar oracle edge > binary oracle edge (info more valuable in scalar)", sc_edge > bin_edge, &format!("scalar={:.3} vs binary={:.3}", sc_edge, bin_edge));
+        println!(
+            "#   oracle edge:   binary={:.3},  scalar={:.3}",
+            bin_edge, sc_edge
+        );
+        c.check(
+            "(d) scalar oracle edge > binary oracle edge (info more valuable in scalar)",
+            sc_edge > bin_edge,
+            &format!("scalar={:.3} vs binary={:.3}", sc_edge, bin_edge),
+        );
 
         let mut bin_h = 0.0;
         let mut sc_h = 0.0;
@@ -564,8 +765,18 @@ pub fn run() {
         }
         bin_h /= h_reps as f64;
         sc_h /= h_reps as f64;
-        println!("#   H(price vector) at t=T:  binary={:.3} (max={:.3}),  scalar={:.3} (max={:.3})", bin_h, (2.0_f64).ln(), sc_h, (21.0_f64).ln());
-        c.check("(e) scalar price vector carries more entropy than binary at θ=0.5", sc_h > bin_h * 1.5, &format!("binary={:.3} scalar={:.3}", bin_h, sc_h));
+        println!(
+            "#   H(price vector) at t=T:  binary={:.3} (max={:.3}),  scalar={:.3} (max={:.3})",
+            bin_h,
+            (2.0_f64).ln(),
+            sc_h,
+            (21.0_f64).ln()
+        );
+        c.check(
+            "(e) scalar price vector carries more entropy than binary at θ=0.5",
+            sc_h > bin_h * 1.5,
+            &format!("binary={:.3} scalar={:.3}", bin_h, sc_h),
+        );
     }
 
     println!("\n=== Summary: {} passed, {} failed ===", c.pass, c.fail);

@@ -101,7 +101,11 @@ impl ParametricSdeFamily for OuFamily {
         vec![0.5_f64.ln(), 0.0, 0.5_f64.ln()]
     }
     fn instantiate(&self, theta: &[f64]) -> Box<dyn SdeSystem> {
-        Box::new(OrnsteinUhlenbeck::new(theta[0].exp(), theta[1], theta[2].exp()))
+        Box::new(OrnsteinUhlenbeck::new(
+            theta[0].exp(),
+            theta[1],
+            theta[2].exp(),
+        ))
     }
     fn describe(&self, theta: &[f64]) -> BTreeMap<String, f64> {
         let mut map = BTreeMap::new();
@@ -182,7 +186,11 @@ impl SdeMaximumLikelihoodEstimator {
         times: &[f64],
         path: &[Vector],
     ) -> MleFitResult {
-        require(Preconditions::non_empty("SdeMaximumLikelihoodEstimator", "path", path));
+        require(Preconditions::non_empty(
+            "SdeMaximumLikelihoodEstimator",
+            "path",
+            path,
+        ));
         let iters = self.opts.iterations.unwrap_or(1500);
         let lr = self.opts.learning_rate.unwrap_or(0.05);
         let eps = self.opts.fd_eps.unwrap_or(1e-4);
@@ -217,7 +225,13 @@ impl SdeMaximumLikelihoodEstimator {
         }
         let params = family.describe(&theta);
         let system = family.instantiate(&theta);
-        MleFitResult { theta, params, system, final_neg_log_lik: last, iterations: iters }
+        MleFitResult {
+            theta,
+            params,
+            system,
+            final_neg_log_lik: last,
+            iterations: iters,
+        }
     }
 
     fn determinant(&self, m: &Matrix) -> f64 {
@@ -405,7 +419,10 @@ impl EnsembleKalmanFilter {
     pub fn step(&mut self, obs: &[f64]) -> EnkfEstimate {
         self.predict();
         self.update(obs);
-        EnkfEstimate { mean: self.mean(), variance: self.variance() }
+        EnkfEstimate {
+            mean: self.mean(),
+            variance: self.variance(),
+        }
     }
 }
 
@@ -458,7 +475,12 @@ impl MemoryTransformEntity<SdeObservationToken, SdeEstimateToken> for EnsembleKa
         _ctx: &mut TransformContext<SdeEstimateToken>,
     ) -> TransformResult<SdeEstimateToken> {
         let est = self.filter.step(&token.obs);
-        TransformResult::One(SdeEstimateToken::new(token.time, token.step, est.mean, est.variance))
+        TransformResult::One(SdeEstimateToken::new(
+            token.time,
+            token.step,
+            est.mean,
+            est.variance,
+        ))
     }
 }
 
@@ -515,7 +537,14 @@ impl Mlp {
         for _ in 0..hidden {
             w2.push(rng.normal() / (hidden as f64).sqrt());
         }
-        Mlp { w1, b1, w2, b2: 0.0, input_dim, hidden }
+        Mlp {
+            w1,
+            b1,
+            w2,
+            b2: 0.0,
+            input_dim,
+            hidden,
+        }
     }
 
     pub fn predict(&self, x: &[f64]) -> f64 {
@@ -626,13 +655,27 @@ impl DenoisingDiffusionModel {
 
     /// Train ε_θ(x_t, t/T) to predict the injected noise (denoising score matching).
     pub fn train(&mut self, data: &[f64], opts: DiffusionTrainOptions) -> f64 {
-        require(Preconditions::non_empty("DenoisingDiffusionModel", "data", data));
+        require(Preconditions::non_empty(
+            "DenoisingDiffusionModel",
+            "data",
+            data,
+        ));
         self.data_mean = data.iter().sum::<f64>() / data.len() as f64;
-        let var_d =
-            data.iter().map(|v| (v - self.data_mean).powi(2)).sum::<f64>() / data.len() as f64;
+        let var_d = data
+            .iter()
+            .map(|v| (v - self.data_mean).powi(2))
+            .sum::<f64>()
+            / data.len() as f64;
         let std_dev = var_d.sqrt();
-        self.data_std = if std_dev == 0.0 || std_dev.is_nan() { 1.0 } else { std_dev };
-        let std: Vec<f64> = data.iter().map(|v| (v - self.data_mean) / self.data_std).collect();
+        self.data_std = if std_dev == 0.0 || std_dev.is_nan() {
+            1.0
+        } else {
+            std_dev
+        };
+        let std: Vec<f64> = data
+            .iter()
+            .map(|v| (v - self.data_mean) / self.data_std)
+            .collect();
         let iters = opts.iterations.unwrap_or(20_000);
         let lr = opts.learning_rate.unwrap_or(0.01);
         let mut last_loss = 0.0;
@@ -643,7 +686,8 @@ impl DenoisingDiffusionModel {
             let ab = self.alpha_bar[t];
             let xt = ab.sqrt() * x0 + (1.0 - ab).sqrt() * z;
             last_loss =
-                self.net.train_example(&[xt, (t as f64 + 1.0) / self.t_steps as f64], z, lr);
+                self.net
+                    .train_example(&[xt, (t as f64 + 1.0) / self.t_steps as f64], z, lr);
         }
         last_loss
     }
@@ -654,11 +698,17 @@ impl DenoisingDiffusionModel {
         for _ in 0..count {
             let mut x = self.rng.normal();
             for t in (0..self.t_steps).rev() {
-                let eps = self.net.predict(&[x, (t as f64 + 1.0) / self.t_steps as f64]);
+                let eps = self
+                    .net
+                    .predict(&[x, (t as f64 + 1.0) / self.t_steps as f64]);
                 let ab = self.alpha_bar[t];
                 let mean =
                     (1.0 / self.alpha[t].sqrt()) * (x - (self.beta[t] / (1.0 - ab).sqrt()) * eps);
-                x = if t > 0 { mean + self.beta[t].sqrt() * self.rng.normal() } else { mean };
+                x = if t > 0 {
+                    mean + self.beta[t].sqrt() * self.rng.normal()
+                } else {
+                    mean
+                };
             }
             out.push(x * self.data_std + self.data_mean);
         }
@@ -680,8 +730,8 @@ impl DenoisingDiffusionModel {
     /// Sample mean / std for quick validation against the data distribution.
     pub fn summarise(samples: &[f64]) -> SampleSummary {
         let mean = samples.iter().sum::<f64>() / samples.len() as f64;
-        let std = (samples.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / samples.len() as f64)
-            .sqrt();
+        let std =
+            (samples.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / samples.len() as f64).sqrt();
         SampleSummary { mean, std }
     }
 }
@@ -734,9 +784,16 @@ mod tests {
         let fit = est.fit(&family, &times, &path);
         assert_eq!(fit.iterations, 400);
         assert!(fit.final_neg_log_lik.is_finite());
-        assert!(fit.final_neg_log_lik <= nll_initial + 1e-6, "did not improve NLL");
+        assert!(
+            fit.final_neg_log_lik <= nll_initial + 1e-6,
+            "did not improve NLL"
+        );
         // sigma is well-identified from quadratic variation of a single path.
-        assert!((fit.params["sigma"] - 0.25).abs() < 0.1, "sigma_hat = {}", fit.params["sigma"]);
+        assert!(
+            (fit.params["sigma"] - 0.25).abs() < 0.1,
+            "sigma_hat = {}",
+            fit.params["sigma"]
+        );
     }
 
     #[test]
@@ -845,12 +902,20 @@ mod tests {
         });
         assert_eq!(model.num_steps(), 50);
         let retention = model.terminal_signal_retention();
-        assert!(retention > 0.0 && retention < 1.0, "retention = {retention}");
-        let data: Vec<f64> = (0..200).map(|i| 3.0 + 0.5 * ((i as f64) * 0.1).sin()).collect();
-        let loss = model.train(&data, DiffusionTrainOptions {
-            iterations: Some(1000),
-            learning_rate: Some(0.01),
-        });
+        assert!(
+            retention > 0.0 && retention < 1.0,
+            "retention = {retention}"
+        );
+        let data: Vec<f64> = (0..200)
+            .map(|i| 3.0 + 0.5 * ((i as f64) * 0.1).sin())
+            .collect();
+        let loss = model.train(
+            &data,
+            DiffusionTrainOptions {
+                iterations: Some(1000),
+                learning_rate: Some(0.01),
+            },
+        );
         assert!(loss.is_finite());
         let samples = model.sample(16);
         assert_eq!(samples.len(), 16);

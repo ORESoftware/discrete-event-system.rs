@@ -168,10 +168,7 @@ impl<R: RandomSource> PlantBlock for UncertainDoubleIntegratorPlant<R> {
         let d = self.disturbance();
         self.t += dt;
         let ueff = u[0] + d;
-        vec![
-            x[0] + dt * x[1] + 0.5 * dt * dt * ueff,
-            x[1] + dt * ueff,
-        ]
+        vec![x[0] + dt * x[1] + 0.5 * dt * dt * ueff, x[1] + dt * ueff]
     }
 }
 

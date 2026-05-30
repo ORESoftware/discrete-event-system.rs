@@ -19,14 +19,20 @@ use crate::des::general::genetic_tsp::{
 };
 
 fn env_usize(key: &str, default: usize) -> usize {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 fn stringify_precedence(pp: &Option<Vec<(usize, usize)>>) -> String {
     match pp {
         Some(p) => format!(
             "[{}]",
-            p.iter().map(|(a, b)| format!("[{a},{b}]")).collect::<Vec<_>>().join(",")
+            p.iter()
+                .map(|(a, b)| format!("[{a},{b}]"))
+                .collect::<Vec<_>>()
+                .join(",")
         ),
         None => "null".to_string(),
     }
@@ -39,7 +45,10 @@ pub fn run() {
     let generations = env_usize("GENERATIONS", 200);
     let pop_size = env_usize("POP", 100);
     let use_precedence = std::env::var("PRECEDENCE").as_deref() == Ok("1");
-    let feasibility = match std::env::var("FEASIBILITY").unwrap_or_else(|_| "cut".into()).as_str() {
+    let feasibility = match std::env::var("FEASIBILITY")
+        .unwrap_or_else(|_| "cut".into())
+        .as_str()
+    {
         "penalize" => Feasibility::Penalize,
         "repair" => Feasibility::Repair,
         _ => Feasibility::Cut,
@@ -77,12 +86,19 @@ pub fn run() {
         println!("# no precedence constraints");
     }
     println!();
-    println!("# Lower bound (1-tree relaxation): {:.3}", one_tree_lower_bound(&instance));
+    println!(
+        "# Lower bound (1-tree relaxation): {:.3}",
+        one_tree_lower_bound(&instance)
+    );
     if n <= 14 && !use_precedence {
         print!("# Computing exact Held–Karp optimum ... ");
         let t0 = Instant::now();
         let hk = held_karp_exact(&instance);
-        println!("length = {:.3} in {}ms", hk.length, t0.elapsed().as_millis());
+        println!(
+            "length = {:.3} in {}ms",
+            hk.length,
+            t0.elapsed().as_millis()
+        );
     } else {
         println!("# (Held–Karp skipped: n > 14 or precedence active)");
     }
@@ -105,17 +121,31 @@ pub fn run() {
     println!();
 
     println!("# Best tour length found  = {:.3}", result.best_length);
-    println!("# Best tour valid permutation? {}", is_permutation(&result.best_tour, instance.n));
+    println!(
+        "# Best tour valid permutation? {}",
+        is_permutation(&result.best_tour, instance.n)
+    );
     println!(
         "# Best tour feasible (precedence)? {}",
         check_precedence(&instance, &result.best_tour).is_none()
     );
-    println!("# Total feasible children evaluated  = {}", result.total_feasible_evaluated);
-    println!("# Total infeasible children cut      = {}", result.total_infeasible_cut);
+    println!(
+        "# Total feasible children evaluated  = {}",
+        result.total_feasible_evaluated
+    );
+    println!(
+        "# Total infeasible children cut      = {}",
+        result.total_infeasible_cut
+    );
     println!();
     println!(
         "# Tour: {} → {}",
-        result.best_tour.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" → "),
+        result
+            .best_tour
+            .iter()
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>()
+            .join(" → "),
         result.best_tour[0]
     );
     println!();

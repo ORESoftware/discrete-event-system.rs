@@ -81,7 +81,10 @@ mod tests {
         let r = solve_inventory_dp(&p, Some(7));
         let v0 = &r.v[0];
         for s in 1..v0.len() {
-            assert!(v0[s] >= v0[s - 1] - 1e-6, "V(t=0) must be non-decreasing in s");
+            assert!(
+                v0[s] >= v0[s - 1] - 1e-6,
+                "V(t=0) must be non-decreasing in s"
+            );
         }
     }
 
@@ -125,8 +128,15 @@ mod tests {
             vec![Rc::new(RefCell::new(station)) as StationRef],
             IterativeRunOptions::default(),
         );
-        assert!(summary.validation.is_some(), "validators should be attached");
-        assert_eq!(summary.validation_ok, Some(true), "all invariants must pass");
+        assert!(
+            summary.validation.is_some(),
+            "validators should be attached"
+        );
+        assert_eq!(
+            summary.validation_ok,
+            Some(true),
+            "all invariants must pass"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -148,13 +158,20 @@ mod tests {
             seed: Some(1),
         });
 
-        assert_eq!(r.reward_history.len(), 80, "rewardHistory length == numEpisodes");
+        assert_eq!(
+            r.reward_history.len(),
+            80,
+            "rewardHistory length == numEpisodes"
+        );
 
         // First 5 vs last 20 episode lengths — should improve substantially.
         let first5: f64 = r.length_history[0..5].iter().sum::<f64>() / 5.0;
         let last_slice = &r.length_history[r.length_history.len() - 20..];
         let last20: f64 = last_slice.iter().sum::<f64>() / 20.0;
-        assert!(first5 > last20, "episode length should decrease: {first5} -> {last20}");
+        assert!(
+            first5 > last20,
+            "episode length should decrease: {first5} -> {last20}"
+        );
 
         // All returns negative (per-step -1, no goal yet).
         assert!(
@@ -208,7 +225,10 @@ mod tests {
             avg += tiger_one_step(s + 1).total_return;
         }
         avg /= 10.0;
-        assert!(avg.is_finite(), "avg discounted return should be finite: {avg}");
+        assert!(
+            avg.is_finite(),
+            "avg discounted return should be finite: {avg}"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -314,7 +334,10 @@ mod tests {
         // Last 50 returns positive on average (goal +10 dominates step -1).
         let last = &r.reward_history[r.reward_history.len() - 50..];
         let mean_last: f64 = last.iter().sum::<f64>() / last.len() as f64;
-        assert!(mean_last > 0.0, "mean return (last 50) should be > 0: {mean_last}");
+        assert!(
+            mean_last > 0.0,
+            "mean return (last 50) should be > 0: {mean_last}"
+        );
 
         assert!(r.greedy_reached, "greedy policy should reach the goal");
     }
@@ -352,7 +375,11 @@ mod tests {
             "greedy in canonical band (>= -0.10): {}",
             r.greedy_mean_return
         );
-        assert!(r.visited_cells > 200, "visited {} / 400 cells", r.visited_cells);
+        assert!(
+            r.visited_cells > 200,
+            "visited {} / 400 cells",
+            r.visited_cells
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -418,7 +445,10 @@ mod tests {
         assert_eq!(r.k[0].len(), 2);
 
         // Both gains positive (point mass with positive Q).
-        assert!(r.k[0][0] > 0.0 && r.k[0][1] > 0.0, "K entries should be positive");
+        assert!(
+            r.k[0][0] > 0.0 && r.k[0][1] > 0.0,
+            "K entries should be positive"
+        );
 
         // Trajectory drives state → 0.
         let last = r.trajectory.last().expect("non-empty trajectory");

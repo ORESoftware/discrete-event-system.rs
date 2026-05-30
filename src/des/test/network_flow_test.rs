@@ -29,7 +29,12 @@ mod tests {
     }
 
     fn edge(from: usize, to: usize, capacity: f64, name: &str) -> FlowEdge {
-        FlowEdge { from, to, capacity, name: Some(name.to_string()) }
+        FlowEdge {
+            from,
+            to,
+            capacity,
+            name: Some(name.to_string()),
+        }
     }
 
     fn teaching_network() -> MaxFlowParams {
@@ -59,7 +64,10 @@ mod tests {
                 (760.0, 260.0),
             ]),
             node_names: Some(
-                ["s", "a", "b", "c", "d", "t"].iter().map(|s| s.to_string()).collect(),
+                ["s", "a", "b", "c", "d", "t"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
             ),
         }
     }
@@ -75,7 +83,10 @@ mod tests {
         for i in 1..r.trace.len() {
             assert!(r.trace[i].value >= r.trace[i - 1].value - 1e-12);
         }
-        assert!(r.edge_flows.iter().all(|e| e.flow >= -1e-9 && e.flow <= e.capacity + 1e-9));
+        assert!(r
+            .edge_flows
+            .iter()
+            .all(|e| e.flow >= -1e-9 && e.flow <= e.capacity + 1e-9));
 
         // [1.7] rejects negative capacities
         let threw = std::panic::catch_unwind(|| {
@@ -84,7 +95,12 @@ mod tests {
                     num_nodes: 2,
                     source: 0,
                     sink: 1,
-                    edges: vec![FlowEdge { from: 0, to: 1, capacity: -1.0, name: None }],
+                    edges: vec![FlowEdge {
+                        from: 0,
+                        to: 1,
+                        capacity: -1.0,
+                        name: None,
+                    }],
                     max_augmentations: None,
                     node_coordinates: None,
                     node_names: None,
@@ -105,18 +121,46 @@ mod tests {
         assert!(!r.trace.is_empty());
         assert!(r.min_cut.source_side.contains(&r.source));
         assert!(r.min_cut.sink_side.contains(&r.sink));
-        assert!(r.edge_flows.iter().all(|e| e.flow >= -1e-9 && e.flow <= e.capacity + 1e-9));
+        assert!(r
+            .edge_flows
+            .iter()
+            .all(|e| e.flow >= -1e-9 && e.flow <= e.capacity + 1e-9));
 
         let p = MaxFlowProblem {
             num_nodes: 4,
             source: 0,
             sink: 3,
             edges: vec![
-                MaxFlowEdge { from: 0, to: 1, capacity: 4.0, name: Some("s-a".into()) },
-                MaxFlowEdge { from: 0, to: 2, capacity: 3.0, name: Some("s-b".into()) },
-                MaxFlowEdge { from: 1, to: 2, capacity: 1.0, name: Some("a-b".into()) },
-                MaxFlowEdge { from: 1, to: 3, capacity: 2.0, name: Some("a-t".into()) },
-                MaxFlowEdge { from: 2, to: 3, capacity: 4.0, name: Some("b-t".into()) },
+                MaxFlowEdge {
+                    from: 0,
+                    to: 1,
+                    capacity: 4.0,
+                    name: Some("s-a".into()),
+                },
+                MaxFlowEdge {
+                    from: 0,
+                    to: 2,
+                    capacity: 3.0,
+                    name: Some("s-b".into()),
+                },
+                MaxFlowEdge {
+                    from: 1,
+                    to: 2,
+                    capacity: 1.0,
+                    name: Some("a-b".into()),
+                },
+                MaxFlowEdge {
+                    from: 1,
+                    to: 3,
+                    capacity: 2.0,
+                    name: Some("a-t".into()),
+                },
+                MaxFlowEdge {
+                    from: 2,
+                    to: 3,
+                    capacity: 4.0,
+                    name: Some("b-t".into()),
+                },
             ],
         };
         let bottleneck = solve_max_flow(p);
@@ -152,7 +196,10 @@ mod tests {
         let horizon = p.horizon;
         let r = solve_stochastic_flow_mdp(
             p,
-            SolveStochasticFlowMDPOptions { seed: Some(7), max_policy_rows: None },
+            SolveStochasticFlowMDPOptions {
+                seed: Some(7),
+                max_policy_rows: None,
+            },
         );
         assert!(r.expected_reward.is_finite());
         assert!(r.num_states > 0);
@@ -172,7 +219,10 @@ mod tests {
         let h2 = p2.horizon;
         let det = solve_stochastic_flow_mdp(
             p2,
-            SolveStochasticFlowMDPOptions { seed: Some(1), max_policy_rows: None },
+            SolveStochasticFlowMDPOptions {
+                seed: Some(1),
+                max_policy_rows: None,
+            },
         );
         assert!(close(det.expected_reward, det.deterministic_max_flow));
         assert!(close(det.simulation.delivered, det.deterministic_max_flow));
@@ -203,7 +253,12 @@ mod tests {
                 num_nodes: 2,
                 source: 0,
                 sink: 0,
-                edges: vec![MaxFlowEdge { from: 0, to: 1, capacity: 1.0, name: None }],
+                edges: vec![MaxFlowEdge {
+                    from: 0,
+                    to: 1,
+                    capacity: 1.0,
+                    name: None,
+                }],
             })
         })
         .is_err();

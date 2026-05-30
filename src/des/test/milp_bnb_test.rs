@@ -102,7 +102,11 @@ mod tests {
         let milp = MILPProblem {
             sense: Sense::Max,
             c: vec![10.0, 6.0, 4.0],
-            a: vec![vec![1.0, 1.0, 1.0], vec![10.0, 4.0, 5.0], vec![2.0, 2.0, 6.0]],
+            a: vec![
+                vec![1.0, 1.0, 1.0],
+                vec![10.0, 4.0, 5.0],
+                vec![2.0, 2.0, 6.0],
+            ],
             b: vec![100.0, 600.0, 300.0],
             integer_vars: vec![true, true, true],
             ub: Some(vec![f64::INFINITY, f64::INFINITY, f64::INFINITY]),
@@ -117,7 +121,12 @@ mod tests {
             },
         );
         assert_eq!(r.status, MILPStatus::Optimal);
-        assert!(r.best_bound >= r.z - 1e-6, "bestBound={}, z={}", r.best_bound, r.z);
+        assert!(
+            r.best_bound >= r.z - 1e-6,
+            "bestBound={}, z={}",
+            r.best_bound,
+            r.z
+        );
         assert!(r.gap >= 0.0);
     }
 

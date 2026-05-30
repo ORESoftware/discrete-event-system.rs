@@ -124,7 +124,13 @@ impl Population {
             p.t_infectious = 0.0;
             p.infected_by = -1;
         }
-        Population { people, rng, params, total_contacts: 0.0, total_transmissions: 0.0 }
+        Population {
+            people,
+            rng,
+            params,
+            total_contacts: 0.0,
+            total_transmissions: 0.0,
+        }
     }
 
     fn run_time_step(&mut self, t: i64) {
@@ -286,7 +292,11 @@ pub fn run_contact_seir(params: ContactSeirParams) -> ContactSeirResult {
     let mut last_s = (params.n - params.initial_i.min(params.n)) as f64;
     for t in 0..n_ticks {
         pop.run_time_step(t);
-        last_s = pop.people.iter().filter(|p| p.state == SeirState::S).count() as f64;
+        last_s = pop
+            .people
+            .iter()
+            .filter(|p| p.state == SeirState::S)
+            .count() as f64;
     }
     let final_attack_rate = (params.n as f64 - last_s) / params.n as f64;
 
@@ -306,7 +316,11 @@ pub fn run_contact_seir(params: ContactSeirParams) -> ContactSeirResult {
         })
         .collect();
 
-    ContactSeirResult { final_attack_rate, r0_index_only, per_person }
+    ContactSeirResult {
+        final_attack_rate,
+        r0_index_only,
+        per_person,
+    }
 }
 
 // =============================================================================
@@ -340,7 +354,10 @@ fn welch(xs: &[f64], ys: &[f64]) -> Welch {
     let t = if se == 0.0 { 0.0 } else { (mx - my) / se };
     let z = t.abs();
     let phi = 0.5 * (1.0 + erf(z / std::f64::consts::SQRT_2));
-    Welch { t, p: 2.0 * (1.0 - phi) }
+    Welch {
+        t,
+        p: 2.0 * (1.0 - phi),
+    }
 }
 
 fn erf(x: f64) -> f64 {
@@ -542,8 +559,18 @@ pub fn run() -> i32 {
                 mp.contact_rate_cv = cv;
                 let pair = run_contact_seir(pp);
                 let mass = run_contact_seir(mp);
-                let o_p: Vec<f64> = pair.per_person.iter().filter(|p| p.ever).map(|p| p.offspring).collect();
-                let o_m: Vec<f64> = mass.per_person.iter().filter(|p| p.ever).map(|p| p.offspring).collect();
+                let o_p: Vec<f64> = pair
+                    .per_person
+                    .iter()
+                    .filter(|p| p.ever)
+                    .map(|p| p.offspring)
+                    .collect();
+                let o_m: Vec<f64> = mass
+                    .per_person
+                    .iter()
+                    .filter(|p| p.ever)
+                    .map(|p| p.offspring)
+                    .collect();
                 ginis_p.push(gini(&o_p));
                 shares_p.push(share_top_k(&o_p, 0.2));
                 ginis_m.push(gini(&o_m));
@@ -646,9 +673,21 @@ pub fn run() -> i32 {
                 triplet_ends_high = true;
             }
         }
-        c.check("pairwise attack rate > 30% for all I₀", pairwise_always_high, None);
-        c.check("triplet attack rate < 5% at smallest I₀", triplet_starts_low, None);
-        c.check("triplet attack rate > 50% at largest I₀", triplet_ends_high, None);
+        c.check(
+            "pairwise attack rate > 30% for all I₀",
+            pairwise_always_high,
+            None,
+        );
+        c.check(
+            "triplet attack rate < 5% at smallest I₀",
+            triplet_starts_low,
+            None,
+        );
+        c.check(
+            "triplet attack rate > 50% at largest I₀",
+            triplet_ends_high,
+            None,
+        );
     }
 
     println!("\nsummary: {} pass, {} fail", c.pass, c.fail);

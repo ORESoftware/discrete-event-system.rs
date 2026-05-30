@@ -249,28 +249,45 @@ impl ExprParser {
         let c = self.chars[self.i];
         if c == '(' {
             self.i += 1;
-            return Token { kind: TokKind::LParen, text: "(".into() };
+            return Token {
+                kind: TokKind::LParen,
+                text: "(".into(),
+            };
         }
         if c == ')' {
             self.i += 1;
-            return Token { kind: TokKind::RParen, text: ")".into() };
+            return Token {
+                kind: TokKind::RParen,
+                text: ")".into(),
+            };
         }
         if c == ',' {
             self.i += 1;
-            return Token { kind: TokKind::Comma, text: ",".into() };
+            return Token {
+                kind: TokKind::Comma,
+                text: ",".into(),
+            };
         }
         if "+-*/^".contains(c) {
             self.i += 1;
-            return Token { kind: TokKind::Op, text: c.to_string() };
+            return Token {
+                kind: TokKind::Op,
+                text: c.to_string(),
+            };
         }
         if c.is_ascii_digit() || c == '.' {
             let start = self.i;
-            while self.i < self.chars.len() && (self.chars[self.i].is_ascii_digit() || self.chars[self.i] == '.') {
+            while self.i < self.chars.len()
+                && (self.chars[self.i].is_ascii_digit() || self.chars[self.i] == '.')
+            {
                 self.i += 1;
             }
-            if self.i < self.chars.len() && (self.chars[self.i] == 'e' || self.chars[self.i] == 'E') {
+            if self.i < self.chars.len() && (self.chars[self.i] == 'e' || self.chars[self.i] == 'E')
+            {
                 self.i += 1;
-                if self.i < self.chars.len() && (self.chars[self.i] == '+' || self.chars[self.i] == '-') {
+                if self.i < self.chars.len()
+                    && (self.chars[self.i] == '+' || self.chars[self.i] == '-')
+                {
                     self.i += 1;
                 }
                 while self.i < self.chars.len() && self.chars[self.i].is_ascii_digit() {
@@ -278,15 +295,23 @@ impl ExprParser {
                 }
             }
             let text: String = self.chars[start..self.i].iter().collect();
-            return Token { kind: TokKind::Num, text };
+            return Token {
+                kind: TokKind::Num,
+                text,
+            };
         }
         if c.is_ascii_alphabetic() || c == '_' {
             let start = self.i;
-            while self.i < self.chars.len() && (self.chars[self.i].is_ascii_alphanumeric() || self.chars[self.i] == '_') {
+            while self.i < self.chars.len()
+                && (self.chars[self.i].is_ascii_alphanumeric() || self.chars[self.i] == '_')
+            {
                 self.i += 1;
             }
             let text: String = self.chars[start..self.i].iter().collect();
-            return Token { kind: TokKind::Ident, text };
+            return Token {
+                kind: TokKind::Ident,
+                text,
+            };
         }
         panic!("unexpected char '{c}' at position {}", self.i);
     }
@@ -299,7 +324,10 @@ impl ExprParser {
 
     fn expect(&mut self, kind: TokKind) -> Token {
         if self.cur.kind != kind {
-            panic!("expected {:?}, got {:?} \"{}\"", kind, self.cur.kind, self.cur.text);
+            panic!(
+                "expected {:?}, got {:?} \"{}\"",
+                kind, self.cur.kind, self.cur.text
+            );
         }
         self.advance()
     }
@@ -307,7 +335,11 @@ impl ExprParser {
     fn parse_expression(&mut self) -> Expr {
         let mut left = self.parse_term();
         while self.cur.kind == TokKind::Op && (self.cur.text == "+" || self.cur.text == "-") {
-            let op = if self.advance().text == "+" { BinOp::Add } else { BinOp::Sub };
+            let op = if self.advance().text == "+" {
+                BinOp::Add
+            } else {
+                BinOp::Sub
+            };
             let right = self.parse_term();
             left = bin(op, left, right);
         }
@@ -317,7 +349,11 @@ impl ExprParser {
     fn parse_term(&mut self) -> Expr {
         let mut left = self.parse_factor();
         while self.cur.kind == TokKind::Op && (self.cur.text == "*" || self.cur.text == "/") {
-            let op = if self.advance().text == "*" { BinOp::Mul } else { BinOp::Div };
+            let op = if self.advance().text == "*" {
+                BinOp::Mul
+            } else {
+                BinOp::Div
+            };
             let right = self.parse_factor();
             left = bin(op, left, right);
         }
@@ -533,8 +569,16 @@ impl ExprSimplifier {
                         BinOp::Pow => return num(av.powf(*bv)),
                     }
                 }
-                let a_num = if let Expr::Num(v) = &a { Some(*v) } else { None };
-                let b_num = if let Expr::Num(v) = &b { Some(*v) } else { None };
+                let a_num = if let Expr::Num(v) = &a {
+                    Some(*v)
+                } else {
+                    None
+                };
+                let b_num = if let Expr::Num(v) = &b {
+                    Some(*v)
+                } else {
+                    None
+                };
                 match op {
                     BinOp::Add => {
                         if a_num == Some(0.0) {
@@ -662,16 +706,37 @@ impl ExprDifferentiator {
                 match name {
                     FuncName::Sin => mul(func(FuncName::Cos, u.clone()), du),
                     FuncName::Cos => mul(neg(func(FuncName::Sin, u.clone())), du),
-                    FuncName::Tan => mul(div(one(), pow(func(FuncName::Cos, u.clone()), num(2.0))), du),
-                    FuncName::Asin => mul(div(one(), func(FuncName::Sqrt, sub(one(), pow(u.clone(), num(2.0))))), du),
-                    FuncName::Acos => mul(neg(div(one(), func(FuncName::Sqrt, sub(one(), pow(u.clone(), num(2.0)))))), du),
+                    FuncName::Tan => mul(
+                        div(one(), pow(func(FuncName::Cos, u.clone()), num(2.0))),
+                        du,
+                    ),
+                    FuncName::Asin => mul(
+                        div(
+                            one(),
+                            func(FuncName::Sqrt, sub(one(), pow(u.clone(), num(2.0)))),
+                        ),
+                        du,
+                    ),
+                    FuncName::Acos => mul(
+                        neg(div(
+                            one(),
+                            func(FuncName::Sqrt, sub(one(), pow(u.clone(), num(2.0)))),
+                        )),
+                        du,
+                    ),
                     FuncName::Atan => mul(div(one(), add(one(), pow(u.clone(), num(2.0)))), du),
                     FuncName::Sinh => mul(func(FuncName::Cosh, u.clone()), du),
                     FuncName::Cosh => mul(func(FuncName::Sinh, u.clone()), du),
-                    FuncName::Tanh => mul(sub(one(), pow(func(FuncName::Tanh, u.clone()), num(2.0))), du),
+                    FuncName::Tanh => mul(
+                        sub(one(), pow(func(FuncName::Tanh, u.clone()), num(2.0))),
+                        du,
+                    ),
                     FuncName::Exp => mul(func(FuncName::Exp, u.clone()), du),
                     FuncName::Log => mul(div(one(), u.clone()), du),
-                    FuncName::Sqrt => mul(div(one(), mul(num(2.0), func(FuncName::Sqrt, u.clone()))), du),
+                    FuncName::Sqrt => mul(
+                        div(one(), mul(num(2.0), func(FuncName::Sqrt, u.clone()))),
+                        du,
+                    ),
                     FuncName::Abs => mul(div(u.clone(), func(FuncName::Abs, u.clone())), du),
                 }
             }

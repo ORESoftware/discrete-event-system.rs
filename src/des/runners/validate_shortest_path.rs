@@ -108,7 +108,12 @@ impl Checker {
         } else {
             format!("  — {}", detail)
         };
-        println!("{}  {}{}", if ok { "  PASS" } else { "  FAIL" }, label, tail);
+        println!(
+            "{}  {}{}",
+            if ok { "  PASS" } else { "  FAIL" },
+            label,
+            tail
+        );
         if ok {
             self.pass += 1;
         } else {
@@ -116,7 +121,11 @@ impl Checker {
         }
     }
     fn close(&mut self, label: &str, a: f64, b: f64) {
-        self.check(label, (a - b).abs() <= 1e-12, &format!("|{} − {}| = {:.2e}", a, b, (a - b).abs()));
+        self.check(
+            label,
+            (a - b).abs() <= 1e-12,
+            &format!("|{} − {}| = {:.2e}", a, b, (a - b).abs()),
+        );
     }
 }
 
@@ -133,8 +142,16 @@ pub fn run() {
         c.close("d(b) = 3", r.distance[2], 3.0);
         c.close("d(c) = 5", r.distance[3], 5.0);
         c.close("d(t) = 6", r.distance[4], 6.0);
-        c.check("Bellman-Ford terminates in ≤ 4 iterations on 5-node graph", r.iterations <= 4, &format!("iterations = {}", r.iterations));
-        c.check("no negative cycle on positive-weight graph", !r.has_negative_cycle_from_source, "");
+        c.check(
+            "Bellman-Ford terminates in ≤ 4 iterations on 5-node graph",
+            r.iterations <= 4,
+            &format!("iterations = {}", r.iterations),
+        );
+        c.check(
+            "no negative cycle on positive-weight graph",
+            !r.has_negative_cycle_from_source,
+            "",
+        );
     }
 
     println!("\nStudy 2 — Bellman-Ford-DES ≡ Dijkstra-DES on non-negative graphs");
@@ -158,7 +175,10 @@ pub fn run() {
                 }
             }
             c.check(
-                &format!("seed={}: Bellman-Ford and Dijkstra agree on every distance", seed),
+                &format!(
+                    "seed={}: Bellman-Ford and Dijkstra agree on every distance",
+                    seed
+                ),
                 max_diff < 1e-12,
                 &format!("max |Δ| = {:.2e}", max_diff),
             );
@@ -170,7 +190,13 @@ pub fn run() {
         let g = Graph {
             num_nodes: 3,
             edges: vec![
-                vec![Edge { to: 1, weight: 5.0 }, Edge { to: 2, weight: -2.0 }],
+                vec![
+                    Edge { to: 1, weight: 5.0 },
+                    Edge {
+                        to: 2,
+                        weight: -2.0,
+                    },
+                ],
                 vec![Edge { to: 2, weight: 1.0 }],
                 vec![],
             ],
@@ -178,8 +204,16 @@ pub fn run() {
         let threw = shortest_path_dijkstra_des(&g, 0).is_err();
         c.check("Dijkstra throws on negative-weight edge", threw, "");
         let bf = shortest_path_bellman_ford_des(&g, 0);
-        c.close("Bellman-Ford handles negative edge: d(2) = -2", bf.distance[2], -2.0);
-        c.check("Bellman-Ford does not flag negative cycle", !bf.has_negative_cycle_from_source, "");
+        c.close(
+            "Bellman-Ford handles negative edge: d(2) = -2",
+            bf.distance[2],
+            -2.0,
+        );
+        c.check(
+            "Bellman-Ford does not flag negative cycle",
+            !bf.has_negative_cycle_from_source,
+            "",
+        );
     }
 
     println!("\nStudy 4 — Bellman-Ford detects negative cycles reachable from source");
@@ -188,12 +222,19 @@ pub fn run() {
             num_nodes: 3,
             edges: vec![
                 vec![Edge { to: 1, weight: 1.0 }],
-                vec![Edge { to: 2, weight: -3.0 }],
+                vec![Edge {
+                    to: 2,
+                    weight: -3.0,
+                }],
                 vec![Edge { to: 1, weight: 1.0 }],
             ],
         };
         let bf = shortest_path_bellman_ford_des(&g, 0);
-        c.check("negative cycle reachable from source flagged", bf.has_negative_cycle_from_source, "");
+        c.check(
+            "negative cycle reachable from source flagged",
+            bf.has_negative_cycle_from_source,
+            "",
+        );
     }
 
     println!("\nStudy 5 — Bellman-Ford terminates in ≤ |V|-1 iterations on positive-weight graphs");
@@ -202,7 +243,12 @@ pub fn run() {
             let g = build_random_graph(n, 0.3, 1.0, 5.0, 42 + n as u32);
             let bf = shortest_path_bellman_ford_des(&g, 0);
             c.check(
-                &format!("n={}: Bellman-Ford ran in {} iterations (≤ {})", n, bf.iterations, n - 1),
+                &format!(
+                    "n={}: Bellman-Ford ran in {} iterations (≤ {})",
+                    n,
+                    bf.iterations,
+                    n - 1
+                ),
                 bf.iterations <= n,
                 &format!("iterations={}, |V|-1={}", bf.iterations, n - 1),
             );
@@ -215,7 +261,10 @@ pub fn run() {
             let g = build_random_graph(15, 0.5, 1.0, 10.0, seed);
             let bf = shortest_path_bellman_ford_des(&g, 0);
             let dj = shortest_path_dijkstra_des(&g, 0).expect("non-negative graph");
-            println!("    seed={}: BF waves = {}, Dij waves = {}", seed, bf.waves_emitted, dj.waves_emitted);
+            println!(
+                "    seed={}: BF waves = {}, Dij waves = {}",
+                seed, bf.waves_emitted, dj.waves_emitted
+            );
             c.check(
                 &format!("seed={}: Dijkstra waves ≤ Bellman-Ford waves", seed),
                 dj.waves_emitted <= bf.waves_emitted,
@@ -224,7 +273,12 @@ pub fn run() {
         }
     }
 
-    println!("\n{} checks: {} passed, {} failed", c.pass + c.fail, c.pass, c.fail);
+    println!(
+        "\n{} checks: {} passed, {} failed",
+        c.pass + c.fail,
+        c.pass,
+        c.fail
+    );
     if c.fail > 0 {
         std::process::exit(1);
     }

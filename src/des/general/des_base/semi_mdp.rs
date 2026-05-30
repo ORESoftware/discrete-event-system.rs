@@ -229,7 +229,8 @@ pub trait SemiMDPAgentStation<S: Clone + 'static = f64, A: Clone + 'static = usi
             }
             let gamma = sc.opts.gamma;
             let tau = sc.option_tau.get();
-            sc.option_reward.set(sc.option_reward.get() + gamma.powi(tau) * reward);
+            sc.option_reward
+                .set(sc.option_reward.get() + gamma.powi(tau) * reward);
             sc.option_tau.set(tau + 1);
         }
         if done {
@@ -382,7 +383,14 @@ mod tests {
         fn pick_action(&self, state: &usize, rng: &mut dyn RandomSource) -> usize {
             self.semi_pick_action(state, rng)
         }
-        fn update(&mut self, _state: &usize, _action: &usize, reward: f64, next_state: &usize, done: bool) {
+        fn update(
+            &mut self,
+            _state: &usize,
+            _action: &usize,
+            reward: f64,
+            next_state: &usize,
+            done: bool,
+        ) {
             self.semi_update(reward, next_state, done);
         }
         fn end_of_episode(&mut self, _episode_id: f64) {
@@ -411,23 +419,38 @@ mod tests {
     ///   α=0.5 from Q=0: Q[0][0] = 0.5·2.9 = 1.45.
     #[test]
     fn semi_mdp_two_step_option_discounts_return() {
-        let lib: Vec<Box<dyn Opt<usize, usize>>> =
-            vec![Box::new(FixedOption { name: "go".into(), action: 0, beta: 0.0 })];
+        let lib: Vec<Box<dyn Opt<usize, usize>>> = vec![Box::new(FixedOption {
+            name: "go".into(),
+            action: 0,
+            beta: 0.0,
+        })];
         let mut agent = OptionsAgent::new(
             1,
-            SemiMDPOptions { alpha: Some(0.5), gamma: Some(0.95), epsilon: Some(0.0), ..Default::default() },
+            SemiMDPOptions {
+                alpha: Some(0.5),
+                gamma: Some(0.95),
+                epsilon: Some(0.0),
+                ..Default::default()
+            },
             lib,
         );
 
-        agent.core_mut().take(Rc::new(StateToken::new(0usize, 0.0)), OptionsAgent::CH_STATE);
+        agent.core_mut().take(
+            Rc::new(StateToken::new(0usize, 0.0)),
+            OptionsAgent::CH_STATE,
+        );
         agent.run_time_step();
-        agent
-            .core_mut()
-            .take(Rc::new(TransitionToken::new(0usize, 0usize, 1.0, 1usize, false, 0.0)), OptionsAgent::CH_TRANSITION);
+        agent.core_mut().take(
+            Rc::new(TransitionToken::new(
+                0usize, 0usize, 1.0, 1usize, false, 0.0,
+            )),
+            OptionsAgent::CH_TRANSITION,
+        );
         agent.run_time_step();
-        agent
-            .core_mut()
-            .take(Rc::new(TransitionToken::new(1usize, 0usize, 2.0, 2usize, true, 0.0)), OptionsAgent::CH_TRANSITION);
+        agent.core_mut().take(
+            Rc::new(TransitionToken::new(1usize, 0usize, 2.0, 2usize, true, 0.0)),
+            OptionsAgent::CH_TRANSITION,
+        );
         agent.run_time_step();
 
         let q = agent.get_q();
@@ -442,22 +465,41 @@ mod tests {
     #[test]
     fn semi_mdp_backup_bootstraps_from_next_state() {
         let lib: Vec<Box<dyn Opt<usize, usize>>> = vec![
-            Box::new(FixedOption { name: "a".into(), action: 0, beta: 1.0 }),
-            Box::new(FixedOption { name: "b".into(), action: 1, beta: 1.0 }),
+            Box::new(FixedOption {
+                name: "a".into(),
+                action: 0,
+                beta: 1.0,
+            }),
+            Box::new(FixedOption {
+                name: "b".into(),
+                action: 1,
+                beta: 1.0,
+            }),
         ];
         let mut agent = OptionsAgent::new(
             7,
-            SemiMDPOptions { alpha: Some(0.5), gamma: Some(0.5), epsilon: Some(0.0), ..Default::default() },
+            SemiMDPOptions {
+                alpha: Some(0.5),
+                gamma: Some(0.5),
+                epsilon: Some(0.0),
+                ..Default::default()
+            },
             lib,
         );
         *agent.semi.q.borrow_mut() = vec![vec![1.0, 0.0], vec![], vec![10.0, 3.0]];
 
-        agent.core_mut().take(Rc::new(StateToken::new(0usize, 0.0)), OptionsAgent::CH_STATE);
+        agent.core_mut().take(
+            Rc::new(StateToken::new(0usize, 0.0)),
+            OptionsAgent::CH_STATE,
+        );
         agent.run_time_step();
         // r=4, s0 → s2, not done: the option (β=1) terminates on the next pick.
-        agent
-            .core_mut()
-            .take(Rc::new(TransitionToken::new(0usize, 0usize, 4.0, 2usize, false, 0.0)), OptionsAgent::CH_TRANSITION);
+        agent.core_mut().take(
+            Rc::new(TransitionToken::new(
+                0usize, 0usize, 4.0, 2usize, false, 0.0,
+            )),
+            OptionsAgent::CH_TRANSITION,
+        );
         agent.run_time_step();
 
         let q = agent.get_q();

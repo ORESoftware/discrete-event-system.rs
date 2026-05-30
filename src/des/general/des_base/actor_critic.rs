@@ -98,7 +98,11 @@ pub struct TabularActorCritic {
 impl TabularActorCritic {
     /// Mirrors `new TabularActorCritic(id, opts)`: the injected `rng` becomes the
     /// boxed `dyn RandomSource` stored in [`RLAgentCore`].
-    pub fn new(id: impl Into<String>, rng: Box<dyn RandomSource>, opts: ActorCriticOptions) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        rng: Box<dyn RandomSource>,
+        opts: ActorCriticOptions,
+    ) -> Self {
         let n = opts.num_states;
         let a = opts.num_actions;
         let mut v = vec![0.0; n];
@@ -157,7 +161,8 @@ impl TabularActorCritic {
     pub fn greedy_action(&mut self, state: usize) -> usize {
         let probs = self.pi(state);
         let mut rng = self.agent.rng.take().expect("rng already in use");
-        let a = arg_max_with_tie_break(&probs, &mut RngRef(&mut *rng), ARGMAX_EPS_DEFAULT).unwrap_or(0);
+        let a =
+            arg_max_with_tie_break(&probs, &mut RngRef(&mut *rng), ARGMAX_EPS_DEFAULT).unwrap_or(0);
         self.agent.rng = Some(rng);
         a
     }
@@ -214,8 +219,21 @@ impl RLAgentStation<usize, usize> for TabularActorCritic {
         self.a - 1
     }
 
-    fn update(&mut self, state: &usize, action: &usize, reward: f64, next_state: &usize, done: bool) {
-        let delta = reward + (if done { 0.0 } else { self.gamma * self.v[*next_state] }) - self.v[*state];
+    fn update(
+        &mut self,
+        state: &usize,
+        action: &usize,
+        reward: f64,
+        next_state: &usize,
+        done: bool,
+    ) {
+        let delta = reward
+            + (if done {
+                0.0
+            } else {
+                self.gamma * self.v[*next_state]
+            })
+            - self.v[*state];
         // Critic step (tabular ∇V(s) = e_s).
         self.v[*state] += self.alpha_v * delta;
         // Actor step (∇log π(a|s) = e_a − π(·|s)).
@@ -280,8 +298,16 @@ mod tests {
         for ep in 0..500 {
             for state in 0..2usize {
                 for action in 0..2usize {
-                    let t = TransitionToken::new(state, action, reward_for(action), state, true, ep as f64);
-                    a.core_mut().take(Rc::new(t), TabularActorCritic::CH_TRANSITION);
+                    let t = TransitionToken::new(
+                        state,
+                        action,
+                        reward_for(action),
+                        state,
+                        true,
+                        ep as f64,
+                    );
+                    a.core_mut()
+                        .take(Rc::new(t), TabularActorCritic::CH_TRANSITION);
                     a.run_time_step();
                 }
             }
@@ -308,13 +334,18 @@ mod tests {
         for ep in 0..500 {
             for state in 0..2usize {
                 let t = TransitionToken::new(state, 0usize, target(state), state, true, ep as f64);
-                a.core_mut().take(Rc::new(t), TabularActorCritic::CH_TRANSITION);
+                a.core_mut()
+                    .take(Rc::new(t), TabularActorCritic::CH_TRANSITION);
                 a.run_time_step();
             }
         }
         // V(s) converges toward its consistent terminal target.
         for state in 0..2usize {
-            assert!((a.get_v()[state] - target(state)).abs() < 0.1, "V[{state}] = {}", a.get_v()[state]);
+            assert!(
+                (a.get_v()[state] - target(state)).abs() < 0.1,
+                "V[{state}] = {}",
+                a.get_v()[state]
+            );
         }
         assert_eq!(a.td_error_history.len(), 500 * 2);
         // Mean |δ| shrinks over training as V approaches the target.
@@ -322,7 +353,10 @@ mod tests {
         let window = 40;
         let mean_first: f64 = h[..window].iter().sum::<f64>() / window as f64;
         let mean_last: f64 = h[h.len() - window..].iter().sum::<f64>() / window as f64;
-        assert!(mean_last < mean_first, "mean TD error should shrink: first {mean_first}, last {mean_last}");
+        assert!(
+            mean_last < mean_first,
+            "mean TD error should shrink: first {mean_first}, last {mean_last}"
+        );
     }
 
     #[test]

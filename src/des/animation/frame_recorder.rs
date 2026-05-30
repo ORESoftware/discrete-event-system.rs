@@ -27,7 +27,9 @@ use std::path::Path;
 use std::rc::Rc;
 
 use crate::des::animation::html_player::build_html;
-use crate::des::animation::types::{js_num, to_fixed, Animation, ChartSpec, Frame, FrameParts, Shape};
+use crate::des::animation::types::{
+    js_num, to_fixed, Animation, ChartSpec, Frame, FrameParts, Shape,
+};
 use crate::des::observability::logger::{parse_json, JsonValue};
 
 // =============================================================================
@@ -160,7 +162,10 @@ impl FrameRecorder {
 
         // Header line: kind=animation-header.
         let mut header: Vec<(String, JsonValue)> = vec![
-            ("kind".to_string(), JsonValue::String("animation-header".to_string())),
+            (
+                "kind".to_string(),
+                JsonValue::String("animation-header".to_string()),
+            ),
             ("width".to_string(), JsonValue::Number(rec.width)),
             ("height".to_string(), JsonValue::Number(rec.height)),
             ("fps".to_string(), JsonValue::Number(rec.fps)),
@@ -169,7 +174,10 @@ impl FrameRecorder {
         if let Some(sub) = &rec.subtitle {
             header.push(("subtitle".to_string(), JsonValue::String(sub.clone())));
         }
-        header.push(("background".to_string(), JsonValue::String(rec.background.clone())));
+        header.push((
+            "background".to_string(),
+            JsonValue::String(rec.background.clone()),
+        ));
         writeln!(writer, "{}", JsonValue::Object(header))?;
 
         rec.stream = Some(writer);
@@ -203,7 +211,12 @@ impl FrameRecorder {
         shapes.extend(visual_shapes);
         // `...(built.caption ? {caption} : {})` — JS treats "" as falsy.
         let caption = built.caption.filter(|c| !c.is_empty());
-        let f = Frame { t, tick, shapes, caption };
+        let f = Frame {
+            t,
+            tick,
+            shapes,
+            caption,
+        };
 
         if let Some(w) = self.stream.as_mut() {
             let _ = writeln!(w, "{}", frame_event(&f));
@@ -238,7 +251,10 @@ impl FrameRecorder {
                 let charts_json =
                     JsonValue::Array(self.charts.iter().map(ChartSpec::to_json).collect());
                 let event = JsonValue::Object(vec![
-                    ("kind".to_string(), JsonValue::String("animation-charts".to_string())),
+                    (
+                        "kind".to_string(),
+                        JsonValue::String("animation-charts".to_string()),
+                    ),
                     ("charts".to_string(), charts_json),
                 ]);
                 let _ = writeln!(w, "{event}");
@@ -291,8 +307,10 @@ impl FrameRecorder {
 
 /// `{kind: 'animation-frame', ...f}` — `kind` first, then the frame fields.
 fn frame_event(f: &Frame) -> JsonValue {
-    let mut entries: Vec<(String, JsonValue)> =
-        vec![("kind".to_string(), JsonValue::String("animation-frame".to_string()))];
+    let mut entries: Vec<(String, JsonValue)> = vec![(
+        "kind".to_string(),
+        JsonValue::String("animation-frame".to_string()),
+    )];
     if let JsonValue::Object(fields) = f.to_json() {
         entries.extend(fields);
     }
@@ -321,9 +339,10 @@ pub fn read_animation(frames_path: &str) -> io::Result<Animation> {
             Some("animation-header") => header = Some(ev),
             Some("animation-frame") => frames.push(Frame::from_json(&ev)),
             Some("animation-charts") => {
-                charts = ev.get("charts").and_then(|c| c.as_array()).map(|arr| {
-                    arr.iter().map(ChartSpec::from_json).collect()
-                });
+                charts = ev
+                    .get("charts")
+                    .and_then(|c| c.as_array())
+                    .map(|arr| arr.iter().map(ChartSpec::from_json).collect());
             }
             _ => {}
         }
@@ -338,9 +357,18 @@ pub fn read_animation(frames_path: &str) -> io::Result<Animation> {
         width: header.get("width").and_then(|v| v.as_f64()).unwrap_or(0.0),
         height: header.get("height").and_then(|v| v.as_f64()).unwrap_or(0.0),
         fps: header.get("fps").and_then(|v| v.as_f64()).unwrap_or(0.0),
-        title: header.get("title").and_then(|v| v.as_str()).map(str::to_string),
-        subtitle: header.get("subtitle").and_then(|v| v.as_str()).map(str::to_string),
-        background: header.get("background").and_then(|v| v.as_str()).map(str::to_string),
+        title: header
+            .get("title")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        subtitle: header
+            .get("subtitle")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        background: header
+            .get("background")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
         frames,
         charts,
     })
@@ -384,7 +412,10 @@ mod tests {
                     )
                 });
             }
-            rec.set_charts(vec![ChartSpec { w: 10.0, ..Default::default() }]);
+            rec.set_charts(vec![ChartSpec {
+                w: 10.0,
+                ..Default::default()
+            }]);
             let anim = rec.finish().expect("finish");
             assert_eq!(anim.frames.len(), 3);
             assert_eq!(anim.width, 320.0);
@@ -421,7 +452,11 @@ mod tests {
     fn missing_header_errors() {
         let path = temp_path("noheader.frames.jsonl");
         let p = path.to_str().unwrap().to_string();
-        fs::write(&p, "{\"kind\":\"animation-frame\",\"t\":0,\"tick\":0,\"shapes\":[]}\n").unwrap();
+        fs::write(
+            &p,
+            "{\"kind\":\"animation-frame\",\"t\":0,\"tick\":0,\"shapes\":[]}\n",
+        )
+        .unwrap();
         let err = read_animation(&p).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::InvalidData);
         let _ = fs::remove_file(&p);

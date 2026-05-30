@@ -104,7 +104,12 @@ mod tests {
             ..base(InternalSolverKind::KnapsackDp)
         });
         match &dp.best.best_state {
-            SolverBestState::Knapsack { value, weight, capacity, .. } => {
+            SolverBestState::Knapsack {
+                value,
+                weight,
+                capacity,
+                ..
+            } => {
                 assert_eq!(*value, 220.0);
                 assert!(*weight <= *capacity && dp.best.feasible, "weight={weight}");
             }
@@ -119,14 +124,23 @@ mod tests {
                 capacity: 50.0,
                 seed: Some(4),
                 max_iterations: Some(80),
-                cooling: Some(CoolingSchedule::Geometric { t0: 30.0, alpha: 0.97, t_min: Some(1e-6) }),
+                cooling: Some(CoolingSchedule::Geometric {
+                    t0: 30.0,
+                    alpha: 0.97,
+                    t_min: Some(1e-6),
+                }),
                 stall_limit: None,
                 penalty: None,
             }),
             ..base(InternalSolverKind::KnapsackSa)
         });
         match &sa.best.best_state {
-            SolverBestState::Knapsack { value, weight, capacity, .. } => {
+            SolverBestState::Knapsack {
+                value,
+                weight,
+                capacity,
+                ..
+            } => {
                 assert!(*weight <= *capacity && sa.best.feasible, "weight={weight}");
                 assert!(*value >= 160.0, "value={value}");
             }
@@ -168,7 +182,11 @@ mod tests {
                 sa: Some(TSPSAOptionsPartial {
                     max_iterations: Some(80),
                     seed: Some(5),
-                    cooling: Some(CoolingSchedule::Geometric { t0: 100.0, alpha: 0.97, t_min: Some(1e-6) }),
+                    cooling: Some(CoolingSchedule::Geometric {
+                        t0: 100.0,
+                        alpha: 0.97,
+                        t_min: Some(1e-6),
+                    }),
                     init: Some(InitMode::NearestNeighbor),
                     ..Default::default()
                 }),
@@ -196,7 +214,11 @@ mod tests {
         });
         match &hk.best.best_state {
             SolverBestState::Tour { length, .. } => {
-                assert!(close(*length, exact.length, 1e-10), "best={length} exact={}", exact.length);
+                assert!(
+                    close(*length, exact.length, 1e-10),
+                    "best={length} exact={}",
+                    exact.length
+                );
             }
             other => panic!("expected tour best state, got {other:?}"),
         }
@@ -215,7 +237,11 @@ mod tests {
                 sa: Some(TSPSAOptionsPartial {
                     max_iterations: Some(1000),
                     seed: Some(6),
-                    cooling: Some(CoolingSchedule::Geometric { t0: 100.0, alpha: 0.999, t_min: Some(1e-9) }),
+                    cooling: Some(CoolingSchedule::Geometric {
+                        t0: 100.0,
+                        alpha: 0.999,
+                        t_min: Some(1e-9),
+                    }),
                     ..Default::default()
                 }),
                 ..Default::default()

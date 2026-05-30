@@ -37,9 +37,9 @@ use std::rc::Rc;
 
 use crate::des::general::des_base::learning_optimization::{
     channel_edge, dot, non_empty_array, sigmoid, softmax, station_graph, zeros, GradientEvaluation,
-    GradientOptimizerHook, GradientOptimizerOptions, GradientOptimizerStation, GradientTraceSinkStation,
-    MiniBatchStation, Optimizer, StationGraphSummary, StationOrId, VectorBatchToken, VectorSampleSourceStation,
-    VectorSampleToken,
+    GradientOptimizerHook, GradientOptimizerOptions, GradientOptimizerStation,
+    GradientTraceSinkStation, MiniBatchStation, Optimizer, StationGraphSummary, StationOrId,
+    VectorBatchToken, VectorSampleSourceStation, VectorSampleToken,
 };
 use crate::des::general::des_base::neural_network::{Meta, MetaValue, NumericVector};
 use crate::des::general::des_base::runner::{run_iterative_des, IterativeRunOptions};
@@ -164,7 +164,11 @@ impl NormalEquationStation {
 
     fn design_row(&self, x: &[f64]) -> Vec<f64> {
         if x.len() != self.input_dim {
-            panic!("expected input dimension {}, got {}", self.input_dim, x.len());
+            panic!(
+                "expected input dimension {}, got {}",
+                self.input_dim,
+                x.len()
+            );
         }
         if self.fit_intercept {
             let mut row = x.to_vec();
@@ -208,9 +212,21 @@ impl DESStation for NormalEquationStation {
                 row[i] += self.ridge;
             }
             let beta = solve_linear_system(&mat, &self.xty);
-            let intercept = if self.fit_intercept { beta[beta.len() - 1] } else { 0.0 };
-            let coefficients = if self.fit_intercept { beta[..beta.len() - 1].to_vec() } else { beta.clone() };
-            let token = RegressionFitToken { coefficients, intercept, sample_count: self.sample_count };
+            let intercept = if self.fit_intercept {
+                beta[beta.len() - 1]
+            } else {
+                0.0
+            };
+            let coefficients = if self.fit_intercept {
+                beta[..beta.len() - 1].to_vec()
+            } else {
+                beta.clone()
+            };
+            let token = RegressionFitToken {
+                coefficients,
+                intercept,
+                sample_count: self.sample_count,
+            };
             self.core.emit(Rc::new(token), Self::CH_FIT);
         }
     }
@@ -226,7 +242,10 @@ impl RegressionFitSinkStation {
     pub const CH_FIT: &'static str = NormalEquationStation::CH_FIT;
 
     pub fn new(id: impl Into<String>) -> Self {
-        RegressionFitSinkStation { core: StationCore::new(id), fit: None }
+        RegressionFitSinkStation {
+            core: StationCore::new(id),
+            fit: None,
+        }
     }
 }
 
@@ -256,14 +275,20 @@ pub fn run_linear_regression_ls(params: LinearRegressionParams) -> LinearRegress
     let samples = to_vector_samples(&raw);
     let input_dim = samples.first().map(|s| s.input.len()).unwrap_or(0);
 
-    let source = Rc::new(RefCell::new(VectorSampleSourceStation::new("sample-source", samples.clone(), 1)));
+    let source = Rc::new(RefCell::new(VectorSampleSourceStation::new(
+        "sample-source",
+        samples.clone(),
+        1,
+    )));
     let normal = Rc::new(RefCell::new(NormalEquationStation::new(
         "normal-equation-accumulator",
         input_dim,
         params.fit_intercept.unwrap_or(true),
         params.ridge.unwrap_or(0.0),
     )));
-    let sink = Rc::new(RefCell::new(RegressionFitSinkStation::new("regression-fit-sink")));
+    let sink = Rc::new(RefCell::new(RegressionFitSinkStation::new(
+        "regression-fit-sink",
+    )));
 
     source.borrow_mut().core_mut().pipe(
         normal.clone() as StationRef,
@@ -277,13 +302,31 @@ pub fn run_linear_regression_ls(params: LinearRegressionParams) -> LinearRegress
     );
 
     run_iterative_des(
-        vec![source.clone() as StationRef, normal.clone() as StationRef, sink.clone() as StationRef],
-        IterativeRunOptions { shuffle: false, ..Default::default() },
+        vec![
+            source.clone() as StationRef,
+            normal.clone() as StationRef,
+            sink.clone() as StationRef,
+        ],
+        IterativeRunOptions {
+            shuffle: false,
+            ..Default::default()
+        },
     );
 
-    let fit = sink.borrow().fit.clone().unwrap_or_else(|| panic!("linear-regression-ls did not produce a fit"));
-    let predictions: Vec<f64> = samples.iter().map(|s| dot(&s.input, &fit.coefficients) + fit.intercept).collect();
-    let residuals: Vec<f64> = samples.iter().enumerate().map(|(i, s)| predictions[i] - s.target[0]).collect();
+    let fit = sink
+        .borrow()
+        .fit
+        .clone()
+        .unwrap_or_else(|| panic!("linear-regression-ls did not produce a fit"));
+    let predictions: Vec<f64> = samples
+        .iter()
+        .map(|s| dot(&s.input, &fit.coefficients) + fit.intercept)
+        .collect();
+    let residuals: Vec<f64> = samples
+        .iter()
+        .enumerate()
+        .map(|(i, s)| predictions[i] - s.target[0])
+        .collect();
     let mse = residuals.iter().map(|r| r * r).sum::<f64>() / (residuals.len().max(1) as f64);
 
     let stations = [
@@ -292,12 +335,25 @@ pub fn run_linear_regression_ls(params: LinearRegressionParams) -> LinearRegress
         StationOrId::Id("regression-fit-sink".to_string()),
     ];
     let edges = vec![
-        channel_edge(&stations[0], VectorSampleSourceStation::CH_SAMPLE, &stations[1], Some(NormalEquationStation::CH_SAMPLE)),
-        channel_edge(&stations[1], NormalEquationStation::CH_FIT, &stations[2], Some(RegressionFitSinkStation::CH_FIT)),
+        channel_edge(
+            &stations[0],
+            VectorSampleSourceStation::CH_SAMPLE,
+            &stations[1],
+            Some(NormalEquationStation::CH_SAMPLE),
+        ),
+        channel_edge(
+            &stations[1],
+            NormalEquationStation::CH_FIT,
+            &stations[2],
+            Some(RegressionFitSinkStation::CH_FIT),
+        ),
     ];
     let topology = station_graph(
         &stations,
-        &["VectorSampleToken".to_string(), "RegressionFitToken".to_string()],
+        &[
+            "VectorSampleToken".to_string(),
+            "RegressionFitToken".to_string(),
+        ],
         &edges,
     );
 
@@ -328,7 +384,11 @@ pub struct LogisticRegressionHook {
 }
 
 impl GradientOptimizerHook for LogisticRegressionHook {
-    fn evaluate_batch(&mut self, batch: &VectorBatchToken, parameters: &[f64]) -> GradientEvaluation {
+    fn evaluate_batch(
+        &mut self,
+        batch: &VectorBatchToken,
+        parameters: &[f64],
+    ) -> GradientEvaluation {
         let n = parameters.len();
         let mut gradient = zeros(n);
         let mut loss = 0.0;
@@ -336,7 +396,8 @@ impl GradientOptimizerHook for LogisticRegressionHook {
             let z = dot(&parameters[..n - 1], &sample.input) + parameters[n - 1];
             let p = sigmoid(z);
             let y = sample.target[0];
-            loss += -sample.weight * (y * p.max(1e-12).ln() + (1.0 - y) * (1.0 - p).max(1e-12).ln());
+            loss +=
+                -sample.weight * (y * p.max(1e-12).ln() + (1.0 - y) * (1.0 - p).max(1e-12).ln());
             let err = sample.weight * (p - y);
             for i in 0..sample.input.len() {
                 gradient[i] += err * sample.input[i];
@@ -349,7 +410,11 @@ impl GradientOptimizerHook for LogisticRegressionHook {
         }
         let denom = batch.samples.len().max(1) as f64;
         let gradient: Vec<f64> = gradient.iter().map(|g| g / denom).collect();
-        GradientEvaluation { loss: loss / denom, gradient, meta: Some(batch_meta(&batch.id)) }
+        GradientEvaluation {
+            loss: loss / denom,
+            gradient,
+            meta: Some(batch_meta(&batch.id)),
+        }
     }
 }
 
@@ -363,10 +428,16 @@ pub fn run_logistic_regression_sgd(params: LogisticRegressionSGDParams) -> Gradi
         samples.clone(),
         params.epochs.unwrap_or(120),
     )));
-    let batcher = Rc::new(RefCell::new(MiniBatchStation::new("mini-batch", params.batch_size.unwrap_or(4), true)));
+    let batcher = Rc::new(RefCell::new(MiniBatchStation::new(
+        "mini-batch",
+        params.batch_size.unwrap_or(4),
+        true,
+    )));
     let learner = Rc::new(RefCell::new(GradientOptimizerStation::new(
         "logistic-gradient-update",
-        LogisticRegressionHook { l2: params.l2.unwrap_or(0.0) },
+        LogisticRegressionHook {
+            l2: params.l2.unwrap_or(0.0),
+        },
         GradientOptimizerOptions {
             initial_parameters: zeros(input_dim + 1),
             learning_rate: params.learning_rate.unwrap_or(0.2),
@@ -376,7 +447,9 @@ pub fn run_logistic_regression_sgd(params: LogisticRegressionSGDParams) -> Gradi
             epsilon: None,
         },
     )));
-    let trace = Rc::new(RefCell::new(GradientTraceSinkStation::new("gradient-trace-sink")));
+    let trace = Rc::new(RefCell::new(GradientTraceSinkStation::new(
+        "gradient-trace-sink",
+    )));
 
     wire_gradient_pipeline::<LogisticRegressionHook>(&source, &batcher, &learner, &trace);
     run_iterative_des(
@@ -386,13 +459,18 @@ pub fn run_logistic_regression_sgd(params: LogisticRegressionSGDParams) -> Gradi
             learner.clone() as StationRef,
             trace.clone() as StationRef,
         ],
-        IterativeRunOptions { shuffle: false, ..Default::default() },
+        IterativeRunOptions {
+            shuffle: false,
+            ..Default::default()
+        },
     );
 
     let topology = gradient_topology("logistic-gradient-update");
     let learner_ref = learner.borrow();
     let trace_ref = trace.borrow();
-    gradient_training_result(&samples, &*learner_ref, &*trace_ref, topology, |p, i| logistic_predict(p, i))
+    gradient_training_result(&samples, &*learner_ref, &*trace_ref, topology, |p, i| {
+        logistic_predict(p, i)
+    })
 }
 
 // ── BackpropMLPHook ───────────────────────────────────────────────────────────
@@ -416,20 +494,30 @@ impl BackpropMLPHook {
             }
             hidden[h] = sigmoid(z);
         }
-        let output = sigmoid(dot(&parameters[w2_offset..w2_offset + self.hidden_units], &hidden) + parameters[w2_offset + self.hidden_units]);
+        let output = sigmoid(
+            dot(
+                &parameters[w2_offset..w2_offset + self.hidden_units],
+                &hidden,
+            ) + parameters[w2_offset + self.hidden_units],
+        );
         (hidden, output)
     }
 }
 
 impl GradientOptimizerHook for BackpropMLPHook {
-    fn evaluate_batch(&mut self, batch: &VectorBatchToken, parameters: &[f64]) -> GradientEvaluation {
+    fn evaluate_batch(
+        &mut self,
+        batch: &VectorBatchToken,
+        parameters: &[f64],
+    ) -> GradientEvaluation {
         let mut gradient = zeros(parameters.len());
         let mut loss = 0.0;
         let w2_offset = self.hidden_units * self.input_dim + self.hidden_units;
         for sample in &batch.samples {
             let (hidden, output) = self.forward(parameters, &sample.input);
             let y = sample.target[0];
-            loss += -sample.weight * (y * output.max(1e-12).ln() + (1.0 - y) * (1.0 - output).max(1e-12).ln());
+            loss += -sample.weight
+                * (y * output.max(1e-12).ln() + (1.0 - y) * (1.0 - output).max(1e-12).ln());
             let d_out = sample.weight * (output - y);
             for h in 0..self.hidden_units {
                 gradient[w2_offset + h] += d_out * hidden[h];
@@ -446,7 +534,11 @@ impl GradientOptimizerHook for BackpropMLPHook {
         }
         let denom = batch.samples.len().max(1) as f64;
         let gradient: Vec<f64> = gradient.iter().map(|g| g / denom).collect();
-        GradientEvaluation { loss: loss / denom, gradient, meta: Some(batch_meta(&batch.id)) }
+        GradientEvaluation {
+            loss: loss / denom,
+            gradient,
+            meta: Some(batch_meta(&batch.id)),
+        }
     }
 }
 
@@ -459,13 +551,26 @@ pub fn run_backprop_mlp_classifier(params: BackpropMLPParams) -> GradientTrainin
 
     let mut rng = mulberry32(params.seed.unwrap_or(7));
     let parameter_count = hidden_units * input_dim + hidden_units + hidden_units + 1;
-    let initial_parameters: Vec<f64> = (0..parameter_count).map(|_| (rng.next_float() - 0.5) * 0.6).collect();
+    let initial_parameters: Vec<f64> = (0..parameter_count)
+        .map(|_| (rng.next_float() - 0.5) * 0.6)
+        .collect();
 
-    let source = Rc::new(RefCell::new(VectorSampleSourceStation::new("sample-source", samples.clone(), epochs)));
-    let batcher = Rc::new(RefCell::new(MiniBatchStation::new("mini-batch", params.batch_size.unwrap_or(samples.len()), true)));
+    let source = Rc::new(RefCell::new(VectorSampleSourceStation::new(
+        "sample-source",
+        samples.clone(),
+        epochs,
+    )));
+    let batcher = Rc::new(RefCell::new(MiniBatchStation::new(
+        "mini-batch",
+        params.batch_size.unwrap_or(samples.len()),
+        true,
+    )));
     let learner = Rc::new(RefCell::new(GradientOptimizerStation::new(
         "backprop-gradient-update",
-        BackpropMLPHook { input_dim, hidden_units },
+        BackpropMLPHook {
+            input_dim,
+            hidden_units,
+        },
         GradientOptimizerOptions {
             initial_parameters,
             learning_rate: params.learning_rate.unwrap_or(0.08),
@@ -475,7 +580,9 @@ pub fn run_backprop_mlp_classifier(params: BackpropMLPParams) -> GradientTrainin
             epsilon: None,
         },
     )));
-    let trace = Rc::new(RefCell::new(GradientTraceSinkStation::new("gradient-trace-sink")));
+    let trace = Rc::new(RefCell::new(GradientTraceSinkStation::new(
+        "gradient-trace-sink",
+    )));
 
     wire_gradient_pipeline::<BackpropMLPHook>(&source, &batcher, &learner, &trace);
     run_iterative_des(
@@ -485,7 +592,11 @@ pub fn run_backprop_mlp_classifier(params: BackpropMLPParams) -> GradientTrainin
             learner.clone() as StationRef,
             trace.clone() as StationRef,
         ],
-        IterativeRunOptions { shuffle: false, max_ticks: Some(epochs * 5 + 20), ..Default::default() },
+        IterativeRunOptions {
+            shuffle: false,
+            max_ticks: Some(epochs * 5 + 20),
+            ..Default::default()
+        },
     );
 
     let topology = gradient_topology("backprop-gradient-update");
@@ -494,7 +605,13 @@ pub fn run_backprop_mlp_classifier(params: BackpropMLPParams) -> GradientTrainin
     let hook_ref = learner_ref.hook();
     // `p` is the learner's current parameters (passed in by `gradient_training_result`),
     // matching the TS `learner.predict(input)` which uses `getParameters()`.
-    gradient_training_result(&samples, &*learner_ref, &*trace_ref, topology, |p, input| hook_ref.forward(p, input).1)
+    gradient_training_result(
+        &samples,
+        &*learner_ref,
+        &*trace_ref,
+        topology,
+        |p, input| hook_ref.forward(p, input).1,
+    )
 }
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
@@ -530,13 +647,32 @@ fn gradient_topology(learner_id: &str) -> StationGraphSummary {
         StationOrId::Id("gradient-trace-sink".to_string()),
     ];
     let edges = vec![
-        channel_edge(&stations[0], VectorSampleSourceStation::CH_SAMPLE, &stations[1], Some(MiniBatchStation::CH_SAMPLE)),
-        channel_edge(&stations[1], MiniBatchStation::CH_BATCH, &stations[2], Some(MiniBatchStation::CH_BATCH)),
-        channel_edge(&stations[2], GradientTraceSinkStation::CH_STEP, &stations[3], Some(GradientTraceSinkStation::CH_STEP)),
+        channel_edge(
+            &stations[0],
+            VectorSampleSourceStation::CH_SAMPLE,
+            &stations[1],
+            Some(MiniBatchStation::CH_SAMPLE),
+        ),
+        channel_edge(
+            &stations[1],
+            MiniBatchStation::CH_BATCH,
+            &stations[2],
+            Some(MiniBatchStation::CH_BATCH),
+        ),
+        channel_edge(
+            &stations[2],
+            GradientTraceSinkStation::CH_STEP,
+            &stations[3],
+            Some(GradientTraceSinkStation::CH_STEP),
+        ),
     ];
     station_graph(
         &stations,
-        &["VectorSampleToken".to_string(), "VectorBatchToken".to_string(), "GradientStepToken".to_string()],
+        &[
+            "VectorSampleToken".to_string(),
+            "VectorBatchToken".to_string(),
+            "GradientStepToken".to_string(),
+        ],
         &edges,
     )
 }
@@ -551,7 +687,10 @@ fn gradient_training_result<H: GradientOptimizerHook + 'static>(
     let parameters = learner.get_parameters();
     let weights = parameters[..parameters.len() - 1].to_vec();
     let bias = parameters[parameters.len() - 1];
-    let predictions: Vec<f64> = samples.iter().map(|s| predict(&parameters, &s.input)).collect();
+    let predictions: Vec<f64> = samples
+        .iter()
+        .map(|s| predict(&parameters, &s.input))
+        .collect();
     let correct = predictions
         .iter()
         .enumerate()
@@ -642,31 +781,76 @@ fn solve_linear_system(a: &[Vec<f64>], b: &[f64]) -> Vec<f64> {
 
 fn default_regression_samples() -> Vec<SupervisedSample> {
     vec![
-        SupervisedSample { x: vec![0.0], y: Label::Scalar(1.0) },
-        SupervisedSample { x: vec![1.0], y: Label::Scalar(3.0) },
-        SupervisedSample { x: vec![2.0], y: Label::Scalar(5.0) },
-        SupervisedSample { x: vec![3.0], y: Label::Scalar(7.0) },
-        SupervisedSample { x: vec![4.0], y: Label::Scalar(9.0) },
+        SupervisedSample {
+            x: vec![0.0],
+            y: Label::Scalar(1.0),
+        },
+        SupervisedSample {
+            x: vec![1.0],
+            y: Label::Scalar(3.0),
+        },
+        SupervisedSample {
+            x: vec![2.0],
+            y: Label::Scalar(5.0),
+        },
+        SupervisedSample {
+            x: vec![3.0],
+            y: Label::Scalar(7.0),
+        },
+        SupervisedSample {
+            x: vec![4.0],
+            y: Label::Scalar(9.0),
+        },
     ]
 }
 
 fn default_logistic_samples() -> Vec<SupervisedSample> {
     vec![
-        SupervisedSample { x: vec![-2.0, -1.0], y: Label::Scalar(0.0) },
-        SupervisedSample { x: vec![-1.0, -1.0], y: Label::Scalar(0.0) },
-        SupervisedSample { x: vec![-1.0, 0.0], y: Label::Scalar(0.0) },
-        SupervisedSample { x: vec![0.0, 1.0], y: Label::Scalar(1.0) },
-        SupervisedSample { x: vec![1.0, 1.0], y: Label::Scalar(1.0) },
-        SupervisedSample { x: vec![2.0, 1.0], y: Label::Scalar(1.0) },
+        SupervisedSample {
+            x: vec![-2.0, -1.0],
+            y: Label::Scalar(0.0),
+        },
+        SupervisedSample {
+            x: vec![-1.0, -1.0],
+            y: Label::Scalar(0.0),
+        },
+        SupervisedSample {
+            x: vec![-1.0, 0.0],
+            y: Label::Scalar(0.0),
+        },
+        SupervisedSample {
+            x: vec![0.0, 1.0],
+            y: Label::Scalar(1.0),
+        },
+        SupervisedSample {
+            x: vec![1.0, 1.0],
+            y: Label::Scalar(1.0),
+        },
+        SupervisedSample {
+            x: vec![2.0, 1.0],
+            y: Label::Scalar(1.0),
+        },
     ]
 }
 
 fn default_xor_samples() -> Vec<SupervisedSample> {
     vec![
-        SupervisedSample { x: vec![0.0, 0.0], y: Label::Scalar(0.0) },
-        SupervisedSample { x: vec![0.0, 1.0], y: Label::Scalar(1.0) },
-        SupervisedSample { x: vec![1.0, 0.0], y: Label::Scalar(1.0) },
-        SupervisedSample { x: vec![1.0, 1.0], y: Label::Scalar(0.0) },
+        SupervisedSample {
+            x: vec![0.0, 0.0],
+            y: Label::Scalar(0.0),
+        },
+        SupervisedSample {
+            x: vec![0.0, 1.0],
+            y: Label::Scalar(1.0),
+        },
+        SupervisedSample {
+            x: vec![1.0, 0.0],
+            y: Label::Scalar(1.0),
+        },
+        SupervisedSample {
+            x: vec![1.0, 1.0],
+            y: Label::Scalar(0.0),
+        },
     ]
 }
 
@@ -700,17 +884,32 @@ mod tests {
     fn linear_regression_recovers_line() {
         let result = run_linear_regression_ls(LinearRegressionParams::default());
         // y = 2x + 1 exactly.
-        assert!((result.coefficients[0] - 2.0).abs() < 1e-6, "slope = {}", result.coefficients[0]);
-        assert!((result.intercept - 1.0).abs() < 1e-6, "intercept = {}", result.intercept);
+        assert!(
+            (result.coefficients[0] - 2.0).abs() < 1e-6,
+            "slope = {}",
+            result.coefficients[0]
+        );
+        assert!(
+            (result.intercept - 1.0).abs() < 1e-6,
+            "intercept = {}",
+            result.intercept
+        );
         assert!(result.mse < 1e-10, "mse = {}", result.mse);
         assert_eq!(result.sample_count, 5);
     }
 
     #[test]
     fn ridge_regression_shrinks_but_fits_well() {
-        let result = run_ridge_regression_ls(RidgeRegressionParams { ridge: Some(0.1), ..Default::default() });
+        let result = run_ridge_regression_ls(RidgeRegressionParams {
+            ridge: Some(0.1),
+            ..Default::default()
+        });
         // Ridge biases the slope slightly below 2 but should stay close.
-        assert!(result.coefficients[0] > 1.5 && result.coefficients[0] < 2.0, "slope = {}", result.coefficients[0]);
+        assert!(
+            result.coefficients[0] > 1.5 && result.coefficients[0] < 2.0,
+            "slope = {}",
+            result.coefficients[0]
+        );
         assert!(result.mse < 0.5, "mse = {}", result.mse);
     }
 
@@ -718,7 +917,11 @@ mod tests {
     fn logistic_sgd_separates_classes() {
         let result = run_logistic_regression_sgd(LogisticRegressionSGDParams::default());
         assert!(result.accuracy >= 0.99, "accuracy = {}", result.accuracy);
-        assert!(result.final_loss < 0.3, "final loss = {}", result.final_loss);
+        assert!(
+            result.final_loss < 0.3,
+            "final loss = {}",
+            result.final_loss
+        );
     }
 
     #[test]

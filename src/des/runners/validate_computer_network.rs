@@ -49,9 +49,16 @@ struct Checks {
 
 impl Checks {
     fn check(&mut self, name: &str, passed: bool, detail: Option<String>) {
-        let suffix = detail.as_ref().map(|d| format!("  - {d}")).unwrap_or_default();
+        let suffix = detail
+            .as_ref()
+            .map(|d| format!("  - {d}"))
+            .unwrap_or_default();
         println!("  {}  {name}{suffix}", if passed { "PASS" } else { "FAIL" });
-        self.rows.push(CheckRow { name: name.to_string(), passed, detail });
+        self.rows.push(CheckRow {
+            name: name.to_string(),
+            passed,
+            detail,
+        });
     }
 
     fn close(&mut self, name: &str, actual: f64, expected: f64, tol: f64) {
@@ -73,7 +80,11 @@ impl Checks {
         self.check(
             name,
             actual == expected,
-            Some(format!("actual={} expected={}", js_num(actual), js_num(expected))),
+            Some(format!(
+                "actual={} expected={}",
+                js_num(actual),
+                js_num(expected)
+            )),
         );
     }
 }
@@ -104,7 +115,11 @@ fn js_num(n: f64) -> String {
     } else if n.is_nan() {
         "NaN".to_string()
     } else if n.is_infinite() {
-        if n > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() }
+        if n > 0.0 {
+            "Infinity".to_string()
+        } else {
+            "-Infinity".to_string()
+        }
     } else {
         format!("{n}")
     }
@@ -150,7 +165,10 @@ pub fn problem_to_json(p: &ComputerNetworkProblem) -> JsonValue {
         .map(|n| {
             let mut o: Vec<(String, JsonValue)> = vec![
                 ("id".to_string(), JsonValue::String(n.id.clone())),
-                ("kind".to_string(), JsonValue::String(n.kind.as_str().to_string())),
+                (
+                    "kind".to_string(),
+                    JsonValue::String(n.kind.as_str().to_string()),
+                ),
             ];
             if let Some(r) = n.forwarding_rate_pps {
                 o.push(("forwardingRatePps".to_string(), jn(r)));
@@ -193,10 +211,16 @@ pub fn problem_to_json(p: &ComputerNetworkProblem) -> JsonValue {
             let mut o: Vec<(String, JsonValue)> = vec![
                 ("id".to_string(), JsonValue::String(f.id.clone())),
                 ("source".to_string(), JsonValue::String(f.source.clone())),
-                ("destination".to_string(), JsonValue::String(f.destination.clone())),
+                (
+                    "destination".to_string(),
+                    JsonValue::String(f.destination.clone()),
+                ),
             ];
             if let Some(proto) = f.protocol {
-                o.push(("protocol".to_string(), JsonValue::String(proto.as_str().to_string())));
+                o.push((
+                    "protocol".to_string(),
+                    JsonValue::String(proto.as_str().to_string()),
+                ));
             }
             o.push(("ratePps".to_string(), jn(f.rate_pps)));
             o.push(("packetSizeBytes".to_string(), jn(f.packet_size_bytes)));
@@ -224,7 +248,10 @@ pub fn problem_to_json(p: &ComputerNetworkProblem) -> JsonValue {
         ("dtMs".to_string(), jn(p.dt_ms)),
     ];
     if let Some(m) = p.routing_metric {
-        obj.push(("routingMetric".to_string(), JsonValue::String(routing_metric_str(m).to_string())));
+        obj.push((
+            "routingMetric".to_string(),
+            JsonValue::String(routing_metric_str(m).to_string()),
+        ));
     }
     if let Some(d) = p.drain_after_sources_ms {
         obj.push(("drainAfterSourcesMs".to_string(), jn(d)));
@@ -312,14 +339,54 @@ fn build_bottleneck_computer_network_problem() -> ComputerNetworkProblem {
         ],
         links: vec![
             link("web-edge", "web-client", "edge", 100.0, 1.0, 0.001, 256),
-            link("telemetry-edge", "telemetry-client", "edge", 100.0, 1.0, 0.001, 256),
+            link(
+                "telemetry-edge",
+                "telemetry-client",
+                "edge",
+                100.0,
+                1.0,
+                0.001,
+                256,
+            ),
             link("edge-wan", "edge", "wan-router", 5.0, 25.0, 0.010, 96),
-            link("wan-api", "wan-router", "api-server", 100.0, 4.0, 0.002, 256),
+            link(
+                "wan-api",
+                "wan-router",
+                "api-server",
+                100.0,
+                4.0,
+                0.002,
+                256,
+            ),
         ],
         flows: vec![
-            flow("http-api", "web-client", "api-server", NetworkProtocol::Http, 900.0, 1100.0, 1800),
-            flow("udp-telemetry", "telemetry-client", "api-server", NetworkProtocol::Udp, 700.0, 900.0, 1400),
-            flow("tcp-bulk", "web-client", "api-server", NetworkProtocol::Tcp, 350.0, 1400.0, 700),
+            flow(
+                "http-api",
+                "web-client",
+                "api-server",
+                NetworkProtocol::Http,
+                900.0,
+                1100.0,
+                1800,
+            ),
+            flow(
+                "udp-telemetry",
+                "telemetry-client",
+                "api-server",
+                NetworkProtocol::Udp,
+                700.0,
+                900.0,
+                1400,
+            ),
+            flow(
+                "tcp-bulk",
+                "web-client",
+                "api-server",
+                NetworkProtocol::Tcp,
+                350.0,
+                1400.0,
+                700,
+            ),
         ],
         duration_ms: 2000.0,
         dt_ms: 1.0,
@@ -335,7 +402,10 @@ fn build_bottleneck_computer_network_problem() -> ComputerNetworkProblem {
 // -----------------------------------------------------------------------------
 
 fn out_dir() -> PathBuf {
-    repo_root_from_runner().join("out").join("external").join("computer-network")
+    repo_root_from_runner()
+        .join("out")
+        .join("external")
+        .join("computer-network")
 }
 
 fn enum_num(v: &JsonValue, key: &str) -> f64 {
@@ -357,11 +427,22 @@ fn run_external(name: &str, problem: &ComputerNetworkProblem) -> Result<JsonValu
     let out = out_dir().join(format!("{name}-reference.json"));
 
     let mut params: ExternalModuleParams = HashMap::new();
-    params.insert("problem".to_string(), ParamValue::Str(problem_path.display().to_string()));
-    params.insert("out".to_string(), ParamValue::Str(out.display().to_string()));
+    params.insert(
+        "problem".to_string(),
+        ParamValue::Str(problem_path.display().to_string()),
+    );
+    params.insert(
+        "out".to_string(),
+        ParamValue::Str(out.display().to_string()),
+    );
     let ext = run_external_module(COMPUTER_NETWORK_REFERENCE_ID, &params)?;
 
-    let arg_str = ext.args.iter().map(|a| format!("{a:?}")).collect::<Vec<_>>().join(" ");
+    let arg_str = ext
+        .args
+        .iter()
+        .map(|a| format!("{a:?}"))
+        .collect::<Vec<_>>()
+        .join(" ");
     println!("  external command: {} {}", ext.command, arg_str);
     if !ext.stdout.trim().is_empty() {
         println!("{}", ext.stdout.trim());
@@ -384,25 +465,89 @@ fn str_field(v: &JsonValue, key: &str) -> Option<String> {
     v.get(key).and_then(|x| x.as_str()).map(str::to_string)
 }
 
-fn compare_scenario(checks: &mut Checks, name: &str, problem: &ComputerNetworkProblem) -> Result<(), String> {
+fn compare_scenario(
+    checks: &mut Checks,
+    name: &str,
+    problem: &ComputerNetworkProblem,
+) -> Result<(), String> {
     println!();
     println!("-- {name} --");
     let internal: ComputerNetworkResult = run_computer_network_simulation(problem);
     let external = run_external(name, problem)?;
 
-    checks.same_count(&format!("{name}: generated packets"), internal.generated_packets, enum_num(&external, "generatedPackets"));
-    checks.same_count(&format!("{name}: delivered packets"), internal.delivered_packets, enum_num(&external, "deliveredPackets"));
-    checks.same_count(&format!("{name}: dropped packets"), internal.dropped_packets, enum_num(&external, "droppedPackets"));
-    checks.same_count(&format!("{name}: active packets"), internal.active_packets, enum_num(&external, "activePackets"));
-    checks.same_count(&format!("{name}: max active packets"), internal.max_active_packets, enum_num(&external, "maxActivePackets"));
-    checks.close(&format!("{name}: delivery ratio"), internal.delivery_ratio, enum_num(&external, "deliveryRatio"), 1e-9);
-    checks.close(&format!("{name}: offered load Mbps"), internal.offered_load_mbps, enum_num(&external, "offeredLoadMbps"), 1e-9);
-    checks.close(&format!("{name}: wire throughput Mbps"), internal.throughput_mbps, enum_num(&external, "throughputMbps"), 1e-9);
-    checks.close(&format!("{name}: goodput Mbps"), internal.goodput_mbps, enum_num(&external, "goodputMbps"), 1e-9);
-    checks.close(&format!("{name}: mean latency ms"), internal.mean_latency_ms, enum_num(&external, "meanLatencyMs"), 1e-9);
-    checks.close(&format!("{name}: p95 latency ms"), internal.p95_latency_ms, enum_num(&external, "p95LatencyMs"), 1e-9);
-    checks.close(&format!("{name}: total cost"), internal.total_cost, enum_num(&external, "totalCost"), 1e-9);
-    checks.close(&format!("{name}: total simulated ms"), internal.total_simulated_ms, enum_num(&external, "totalSimulatedMs"), 1e-9);
+    checks.same_count(
+        &format!("{name}: generated packets"),
+        internal.generated_packets,
+        enum_num(&external, "generatedPackets"),
+    );
+    checks.same_count(
+        &format!("{name}: delivered packets"),
+        internal.delivered_packets,
+        enum_num(&external, "deliveredPackets"),
+    );
+    checks.same_count(
+        &format!("{name}: dropped packets"),
+        internal.dropped_packets,
+        enum_num(&external, "droppedPackets"),
+    );
+    checks.same_count(
+        &format!("{name}: active packets"),
+        internal.active_packets,
+        enum_num(&external, "activePackets"),
+    );
+    checks.same_count(
+        &format!("{name}: max active packets"),
+        internal.max_active_packets,
+        enum_num(&external, "maxActivePackets"),
+    );
+    checks.close(
+        &format!("{name}: delivery ratio"),
+        internal.delivery_ratio,
+        enum_num(&external, "deliveryRatio"),
+        1e-9,
+    );
+    checks.close(
+        &format!("{name}: offered load Mbps"),
+        internal.offered_load_mbps,
+        enum_num(&external, "offeredLoadMbps"),
+        1e-9,
+    );
+    checks.close(
+        &format!("{name}: wire throughput Mbps"),
+        internal.throughput_mbps,
+        enum_num(&external, "throughputMbps"),
+        1e-9,
+    );
+    checks.close(
+        &format!("{name}: goodput Mbps"),
+        internal.goodput_mbps,
+        enum_num(&external, "goodputMbps"),
+        1e-9,
+    );
+    checks.close(
+        &format!("{name}: mean latency ms"),
+        internal.mean_latency_ms,
+        enum_num(&external, "meanLatencyMs"),
+        1e-9,
+    );
+    checks.close(
+        &format!("{name}: p95 latency ms"),
+        internal.p95_latency_ms,
+        enum_num(&external, "p95LatencyMs"),
+        1e-9,
+    );
+    checks.close(
+        &format!("{name}: total cost"),
+        internal.total_cost,
+        enum_num(&external, "totalCost"),
+        1e-9,
+    );
+    checks.close(
+        &format!("{name}: total simulated ms"),
+        internal.total_simulated_ms,
+        enum_num(&external, "totalSimulatedMs"),
+        1e-9,
+    );
 
     // Top bottleneck.
     let top_internal = internal.bottlenecks.first();
@@ -438,32 +583,84 @@ fn compare_scenario(checks: &mut Checks, name: &str, problem: &ComputerNetworkPr
     let ext_flows = index_by_id(external.get("flowStats"));
     for flow in &internal.flow_stats {
         let ref_flow = ext_flows.get(&flow.id);
-        checks.check(&format!("{name}/{}: external flow present", flow.id), ref_flow.is_some(), None);
+        checks.check(
+            &format!("{name}/{}: external flow present", flow.id),
+            ref_flow.is_some(),
+            None,
+        );
         let Some(r) = ref_flow else { continue };
-        checks.same_count(&format!("{name}/{}: generated", flow.id), flow.generated_packets, enum_num(r, "generatedPackets"));
-        checks.same_count(&format!("{name}/{}: delivered", flow.id), flow.delivered_packets, enum_num(r, "deliveredPackets"));
-        checks.same_count(&format!("{name}/{}: dropped", flow.id), flow.dropped_packets, enum_num(r, "droppedPackets"));
-        checks.close(&format!("{name}/{}: goodput", flow.id), flow.goodput_mbps, enum_num(r, "goodputMbps"), 1e-9);
-        checks.close(&format!("{name}/{}: mean latency", flow.id), flow.mean_latency_ms, enum_num(r, "meanLatencyMs"), 1e-9);
+        checks.same_count(
+            &format!("{name}/{}: generated", flow.id),
+            flow.generated_packets,
+            enum_num(r, "generatedPackets"),
+        );
+        checks.same_count(
+            &format!("{name}/{}: delivered", flow.id),
+            flow.delivered_packets,
+            enum_num(r, "deliveredPackets"),
+        );
+        checks.same_count(
+            &format!("{name}/{}: dropped", flow.id),
+            flow.dropped_packets,
+            enum_num(r, "droppedPackets"),
+        );
+        checks.close(
+            &format!("{name}/{}: goodput", flow.id),
+            flow.goodput_mbps,
+            enum_num(r, "goodputMbps"),
+            1e-9,
+        );
+        checks.close(
+            &format!("{name}/{}: mean latency", flow.id),
+            flow.mean_latency_ms,
+            enum_num(r, "meanLatencyMs"),
+            1e-9,
+        );
     }
 
     // Link stats.
     let ext_links = index_by_id(external.get("linkStats"));
     for link in &internal.link_stats {
         let ref_link = ext_links.get(&link.id);
-        checks.check(&format!("{name}/{}: external link present", link.id), ref_link.is_some(), None);
+        checks.check(
+            &format!("{name}/{}: external link present", link.id),
+            ref_link.is_some(),
+            None,
+        );
         let Some(r) = ref_link else { continue };
-        checks.same_count(&format!("{name}/{}: enqueued", link.id), link.enqueued_packets, enum_num(r, "enqueuedPackets"));
-        checks.same_count(&format!("{name}/{}: dropped", link.id), link.dropped_packets, enum_num(r, "droppedPackets"));
-        checks.close(&format!("{name}/{}: utilization", link.id), link.utilization, enum_num(r, "utilization"), 1e-9);
-        checks.close(&format!("{name}/{}: mean queue delay", link.id), link.mean_queue_delay_ms, enum_num(r, "meanQueueDelayMs"), 1e-9);
+        checks.same_count(
+            &format!("{name}/{}: enqueued", link.id),
+            link.enqueued_packets,
+            enum_num(r, "enqueuedPackets"),
+        );
+        checks.same_count(
+            &format!("{name}/{}: dropped", link.id),
+            link.dropped_packets,
+            enum_num(r, "droppedPackets"),
+        );
+        checks.close(
+            &format!("{name}/{}: utilization", link.id),
+            link.utilization,
+            enum_num(r, "utilization"),
+            1e-9,
+        );
+        checks.close(
+            &format!("{name}/{}: mean queue delay", link.id),
+            link.mean_queue_delay_ms,
+            enum_num(r, "meanQueueDelayMs"),
+            1e-9,
+        );
     }
 
     // Invariant-violation lists agree (JSON.stringify equality on string arrays).
     let ext_violations: Vec<String> = external
         .get("invariantViolations")
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default();
     checks.check(
         &format!("{name}: invariant violation lists agree"),
@@ -497,11 +694,19 @@ pub fn run() -> i32 {
     println!("===========================================================");
 
     let mut checks = Checks::default();
-    if let Err(e) = compare_scenario(&mut checks, "small-enterprise", &build_default_computer_network_problem()) {
+    if let Err(e) = compare_scenario(
+        &mut checks,
+        "small-enterprise",
+        &build_default_computer_network_problem(),
+    ) {
         eprintln!("{e}");
         return 1;
     }
-    if let Err(e) = compare_scenario(&mut checks, "bottleneck-lab", &build_bottleneck_computer_network_problem()) {
+    if let Err(e) = compare_scenario(
+        &mut checks,
+        "bottleneck-lab",
+        &build_bottleneck_computer_network_problem(),
+    ) {
         eprintln!("{e}");
         return 1;
     }
@@ -509,12 +714,19 @@ pub fn run() -> i32 {
     println!();
     println!("========================================");
     let passed = checks.rows.iter().filter(|c| c.passed).count();
-    println!("validate-computer-network: {passed}/{} checks passed.", checks.rows.len());
+    println!(
+        "validate-computer-network: {passed}/{} checks passed.",
+        checks.rows.len()
+    );
     if passed < checks.rows.len() {
         println!("FAILED:");
         for c in &checks.rows {
             if !c.passed {
-                let detail = c.detail.as_ref().map(|d| format!(": {d}")).unwrap_or_default();
+                let detail = c
+                    .detail
+                    .as_ref()
+                    .map(|d| format!(": {d}"))
+                    .unwrap_or_default();
                 println!("  - {}{detail}", c.name);
             }
         }

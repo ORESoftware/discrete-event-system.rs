@@ -264,7 +264,10 @@ impl<V: Clone> SynchronousDataflowState<V> {
     pub fn emit(&self, kind: &str, value: V) {
         for c in &self.out_connections {
             if c.kind == kind {
-                c.target.borrow_mut().pending_mut().insert(kind.to_string(), value.clone());
+                c.target
+                    .borrow_mut()
+                    .pending_mut()
+                    .insert(kind.to_string(), value.clone());
             }
         }
     }

@@ -173,11 +173,33 @@ pub struct MarkovDecisionProcess {
 impl MarkovDecisionProcess {
     pub fn new(spec: MdpSpec) -> Self {
         let cls = "MarkovDecisionProcess";
-        require(Preconditions::integer_in_range(cls, "numStates", spec.num_states as f64, 1.0, 100_000.0));
-        require(Preconditions::integer_in_range(cls, "numActions", spec.num_actions as f64, 1.0, 100_000.0));
-        require(Preconditions::length_eq(cls, "transition", &spec.transition, spec.num_actions));
+        require(Preconditions::integer_in_range(
+            cls,
+            "numStates",
+            spec.num_states as f64,
+            1.0,
+            100_000.0,
+        ));
+        require(Preconditions::integer_in_range(
+            cls,
+            "numActions",
+            spec.num_actions as f64,
+            1.0,
+            100_000.0,
+        ));
+        require(Preconditions::length_eq(
+            cls,
+            "transition",
+            &spec.transition,
+            spec.num_actions,
+        ));
         for a in 0..spec.num_actions {
-            require(Preconditions::length_eq(cls, &format!("transition[{a}]"), &spec.transition[a], spec.num_states));
+            require(Preconditions::length_eq(
+                cls,
+                &format!("transition[{a}]"),
+                &spec.transition[a],
+                spec.num_states,
+            ));
             for s in 0..spec.num_states {
                 require(Preconditions::probability_vector(
                     cls,
@@ -293,8 +315,19 @@ impl PartiallyObservableProcess {
             transition: spec.transition,
         });
         let cls = "PartiallyObservableProcess";
-        require(Preconditions::integer_in_range(cls, "numObservations", spec.num_observations as f64, 1.0, 100_000.0));
-        require(Preconditions::length_eq(cls, "observation", &spec.observation, spec.num_states));
+        require(Preconditions::integer_in_range(
+            cls,
+            "numObservations",
+            spec.num_observations as f64,
+            1.0,
+            100_000.0,
+        ));
+        require(Preconditions::length_eq(
+            cls,
+            "observation",
+            &spec.observation,
+            spec.num_states,
+        ));
         for s in 0..spec.num_states {
             require(Preconditions::probability_vector(
                 cls,
@@ -315,7 +348,9 @@ impl PartiallyObservableProcess {
     pub fn distinguishability_classes(&self) -> Vec<usize> {
         let tol = 1e-9;
         let n = self.mdp.num_states;
-        let init_sigs: Vec<String> = (0..n).map(|s| Self::quantise(&self.observation[s], tol)).collect();
+        let init_sigs: Vec<String> = (0..n)
+            .map(|s| Self::quantise(&self.observation[s], tol))
+            .collect();
         let mut labels = Self::label_by_signature(&init_sigs);
         for _iter in 0..(n + 1) {
             let mut signatures: Vec<String> = Vec::with_capacity(n);
@@ -362,7 +397,11 @@ impl PartiallyObservableProcess {
 
     /// Number of distinguishability classes (full-rank analog: equals S).
     pub fn class_count(&self) -> usize {
-        self.distinguishability_classes().iter().cloned().collect::<HashSet<usize>>().len()
+        self.distinguishability_classes()
+            .iter()
+            .cloned()
+            .collect::<HashSet<usize>>()
+            .len()
     }
 
     fn quantise(v: &[f64], tol: f64) -> String {
@@ -504,7 +543,14 @@ impl EvaluationToken {
         full: bool,
         detail: String,
     ) -> Self {
-        EvaluationToken { label, kind, measure, target, full, detail }
+        EvaluationToken {
+            label,
+            kind,
+            measure,
+            target,
+            full,
+            detail,
+        }
     }
 }
 
@@ -517,7 +563,11 @@ pub struct StateSpaceSourceStation {
 
 impl StateSpaceSourceStation {
     pub fn new(id: &str, models: Vec<StateSpaceToken>) -> Self {
-        StateSpaceSourceStation { core: StationCore::new(id), models, emitted: false }
+        StateSpaceSourceStation {
+            core: StationCore::new(id),
+            models,
+            emitted: false,
+        }
     }
 }
 
@@ -555,7 +605,11 @@ pub struct MdpSourceStation {
 
 impl MdpSourceStation {
     pub fn new(id: &str, models: Vec<MdpToken>) -> Self {
-        MdpSourceStation { core: StationCore::new(id), models, emitted: false }
+        MdpSourceStation {
+            core: StationCore::new(id),
+            models,
+            emitted: false,
+        }
     }
 }
 
@@ -593,7 +647,11 @@ pub struct PomdpSourceStation {
 
 impl PomdpSourceStation {
     pub fn new(id: &str, models: Vec<PomdpToken>) -> Self {
-        PomdpSourceStation { core: StationCore::new(id), models, emitted: false }
+        PomdpSourceStation {
+            core: StationCore::new(id),
+            models,
+            emitted: false,
+        }
     }
 }
 
@@ -907,12 +965,19 @@ pub struct EvaluationSinkStation {
 
 impl EvaluationSinkStation {
     pub fn new(id: &str) -> Self {
-        EvaluationSinkStation { core: StationCore::new(id), results: Vec::new() }
+        EvaluationSinkStation {
+            core: StationCore::new(id),
+            results: Vec::new(),
+        }
     }
 
     /// Verdicts for one label, in arrival order.
     pub fn for_label(&self, label: &str) -> Vec<Rc<EvaluationToken>> {
-        self.results.iter().filter(|r| r.label == label).cloned().collect()
+        self.results
+            .iter()
+            .filter(|r| r.label == label)
+            .cloned()
+            .collect()
     }
 }
 

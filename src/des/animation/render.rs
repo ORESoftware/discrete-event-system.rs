@@ -86,7 +86,10 @@ mod tests {
 
     #[test]
     fn default_output_suffix_swaps() {
-        assert_eq!(default_output("out/two-disease.frames.jsonl"), "out/two-disease.html");
+        assert_eq!(
+            default_output("out/two-disease.frames.jsonl"),
+            "out/two-disease.html"
+        );
         assert_eq!(default_output("out/raw.jsonl"), "out/raw.html");
         assert_eq!(default_output("out/keep.txt"), "out/keep.txt");
     }

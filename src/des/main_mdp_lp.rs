@@ -62,7 +62,11 @@ fn build_inventory_mdp() -> MDPSpec {
                 let stockout_penalty = q * stockout as f64;
                 let reward = revenue - order_cost - hold_cost - stockout_penalty;
                 let next_state = stock_after_order - sold;
-                out.push(Outcome { prob: pmf_out[d], reward, next_state });
+                out.push(Outcome {
+                    prob: pmf_out[d],
+                    reward,
+                    next_state,
+                });
             }
             out
         }),
@@ -83,16 +87,34 @@ fn build_chain_mdp() -> MDPSpec {
         num_actions: Box::new(|_s| 2),
         outcomes: Box::new(move |s, a| {
             if s == n - 1 {
-                return vec![Outcome { prob: 1.0, reward: 0.0, next_state: s }];
+                return vec![Outcome {
+                    prob: 1.0,
+                    reward: 0.0,
+                    next_state: s,
+                }];
             }
-            let target = if a == 1 { (n - 1).min(s + 1) } else { s.saturating_sub(1) };
+            let target = if a == 1 {
+                (n - 1).min(s + 1)
+            } else {
+                s.saturating_sub(1)
+            };
             let reward = if target == n - 1 { 1.0 } else { 0.0 };
-            vec![Outcome { prob: 1.0, reward, next_state: target }]
+            vec![Outcome {
+                prob: 1.0,
+                reward,
+                next_state: target,
+            }]
         }),
         is_terminal: Some(Box::new(move |s| s == n - 1)),
         terminal_reward: Some(Box::new(|_| 0.0)),
         state_label: Some(Box::new(|s| format!("s{}", s))),
-        action_label: Some(Box::new(|a| if a == 0 { "left".to_string() } else { "right".to_string() })),
+        action_label: Some(Box::new(|a| {
+            if a == 0 {
+                "left".to_string()
+            } else {
+                "right".to_string()
+            }
+        })),
     }
 }
 
@@ -108,10 +130,10 @@ fn build_grid_mdp() -> MDPSpec {
         let x = s % w;
         let y = s / w;
         match a {
-            0 => idx(x, y.saturating_sub(1)),  // up
-            1 => idx(x, (h - 1).min(y + 1)),   // down
-            2 => idx(x.saturating_sub(1), y),  // left
-            _ => idx((w - 1).min(x + 1), y),   // right
+            0 => idx(x, y.saturating_sub(1)), // up
+            1 => idx(x, (h - 1).min(y + 1)),  // down
+            2 => idx(x.saturating_sub(1), y), // left
+            _ => idx((w - 1).min(x + 1), y),  // right
         }
     };
     let slip: [[usize; 2]; 4] = [[2, 3], [2, 3], [0, 1], [0, 1]];
@@ -122,7 +144,11 @@ fn build_grid_mdp() -> MDPSpec {
         num_actions: Box::new(|_s| 4),
         outcomes: Box::new(move |s, a| {
             if s == goal || s == pit {
-                return vec![Outcome { prob: 1.0, reward: 0.0, next_state: s }];
+                return vec![Outcome {
+                    prob: 1.0,
+                    reward: 0.0,
+                    next_state: s,
+                }];
             }
             let intended = move_fn(s, a);
             let s1 = slip[a][0];
@@ -139,9 +165,21 @@ fn build_grid_mdp() -> MDPSpec {
                 }
             };
             vec![
-                Outcome { prob: 0.8, reward: r(intended), next_state: intended },
-                Outcome { prob: 0.1, reward: r(sl1), next_state: sl1 },
-                Outcome { prob: 0.1, reward: r(sl2), next_state: sl2 },
+                Outcome {
+                    prob: 0.8,
+                    reward: r(intended),
+                    next_state: intended,
+                },
+                Outcome {
+                    prob: 0.1,
+                    reward: r(sl1),
+                    next_state: sl1,
+                },
+                Outcome {
+                    prob: 0.1,
+                    reward: r(sl2),
+                    next_state: sl2,
+                },
             ]
         }),
         is_terminal: Some(Box::new(move |s| s == goal || s == pit)),
@@ -178,16 +216,25 @@ fn js_exp3(x: f64) -> String {
 pub fn run() {
     let _ = Sense::Max; // LP formulation sense is fixed inside des_lp_bridge.
     let which = std::env::var("PROBLEM").unwrap_or_else(|_| "inventory".to_string());
-    let gamma: f64 = std::env::var("GAMMA").ok().and_then(|v| v.parse().ok()).unwrap_or(0.95);
+    let gamma: f64 = std::env::var("GAMMA")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.95);
     let solver_env = std::env::var("LP_SOLVER").unwrap_or_else(|_| "scipy:highs".to_string());
 
     let Some(mdp_vi) = build_mdp(&which) else {
-        eprintln!("unknown PROBLEM='{}'; expected one of: inventory, chain, gridworld", which);
+        eprintln!(
+            "unknown PROBLEM='{}'; expected one of: inventory, chain, gridworld",
+            which
+        );
         return;
     };
 
     let mdp = build_mdp(&which).expect("PROBLEM validated above");
-    println!("# MDP-as-LP: solving '{}' MDP with {} states, γ={}", which, mdp.num_states, gamma);
+    println!(
+        "# MDP-as-LP: solving '{}' MDP with {} states, γ={}",
+        which, mdp.num_states, gamma
+    );
     println!("#   LP_SOLVER={}", solver_env);
     println!();
 
@@ -195,7 +242,12 @@ pub fn run() {
     let t0 = Instant::now();
     let vi = value_iteration(
         mdp_vi,
-        VIOptions { gamma, tol: 1e-12, max_iter: 100000, ..Default::default() },
+        VIOptions {
+            gamma,
+            tol: 1e-12,
+            max_iter: 100000,
+            ..Default::default()
+        },
     );
     let t_vi = t0.elapsed().as_millis();
     println!("# Value iteration (reference):");
@@ -206,12 +258,16 @@ pub fn run() {
 
     // ---- 2. MDP-as-LP ----
     let t1 = Instant::now();
-    let lp = solve_mdp_as_lp(&mdp, gamma, &MdpAsLpOptions::default()).expect("MDP-as-LP solve failed");
+    let lp =
+        solve_mdp_as_lp(&mdp, gamma, &MdpAsLpOptions::default()).expect("MDP-as-LP solve failed");
     let t_lp = t1.elapsed().as_millis();
     println!("# MDP-as-LP:");
     println!("#   solver      = {}", lp.lp.solver);
     println!("#   iterations  = {}", lp.lp.iters.unwrap_or(0));
-    println!("#   wall time   = {}ms (incl. Python startup if external)", t_lp);
+    println!(
+        "#   wall time   = {}ms (incl. Python startup if external)",
+        t_lp
+    );
     println!();
 
     // ---- 3. Compare ----
@@ -235,13 +291,20 @@ pub fn run() {
     println!("# Optimal V* and π*:");
     println!("#   {:<14} {:>12}  {:<12}", "state", "V*", "π*");
     for s in 0..n {
-        let lbl = mdp.state_label.as_ref().map(|f| f(s)).unwrap_or_else(|| format!("s{}", s));
+        let lbl = mdp
+            .state_label
+            .as_ref()
+            .map(|f| f(s))
+            .unwrap_or_else(|| format!("s{}", s));
         let v = format!("{:.6}", lp.v[s]);
         let a = lp.policy[s];
         let al = if a < 0 {
             "(terminal)".to_string()
         } else {
-            mdp.action_label.as_ref().map(|f| f(a as usize)).unwrap_or_else(|| format!("a{}", a))
+            mdp.action_label
+                .as_ref()
+                .map(|f| f(a as usize))
+                .unwrap_or_else(|| format!("a{}", a))
         };
         println!("#   {:<14} {:>12}  {}", lbl, v, al);
     }

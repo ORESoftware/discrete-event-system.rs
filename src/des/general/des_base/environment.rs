@@ -214,9 +214,9 @@ impl<S: Clone + 'static, A: Clone + 'static> DESStation for EnvironmentStation<S
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::rl_tokens::{ActionToken, TransitionToken};
     use super::super::station::{DESStation, StationCore, StationRef};
+    use super::*;
     use std::cell::RefCell;
     use std::rc::Rc;
 
@@ -254,7 +254,11 @@ mod tests {
                 pos = goal;
             }
             let done = pos >= goal;
-            StepResult { next_state: pos, reward: if done { 1.0 } else { 0.0 }, done }
+            StepResult {
+                next_state: pos,
+                reward: if done { 1.0 } else { 0.0 },
+                done,
+            }
         }
     }
 
@@ -266,7 +270,10 @@ mod tests {
 
     impl<T: 'static> Collector<T> {
         fn new() -> Self {
-            Collector { core: StationCore::new("collector"), items: Vec::new() }
+            Collector {
+                core: StationCore::new("collector"),
+                items: Vec::new(),
+            }
         }
     }
 
@@ -291,7 +298,10 @@ mod tests {
         let mut env: EnvironmentStation = EnvironmentStation::new(
             "env",
             Box::new(LineWalk::new(4)),
-            EnvironmentStationOptions { num_episodes: Some(1.0), ..Default::default() },
+            EnvironmentStationOptions {
+                num_episodes: Some(1.0),
+                ..Default::default()
+            },
         );
         let transitions: Rc<RefCell<Collector<TransitionToken<f64, usize>>>> =
             Rc::new(RefCell::new(Collector::new()));
@@ -304,9 +314,12 @@ mod tests {
         assert_eq!(transitions.borrow().items.len(), 0);
 
         // Feed three "go right" actions; from 0 → 1 → 2 → 3 (= goal).
-        env.core_mut().take(Rc::new(ActionToken::new(0.0_f64, 1usize, 0.0)), CH_ACTION);
-        env.core_mut().take(Rc::new(ActionToken::new(1.0_f64, 1usize, 0.0)), CH_ACTION);
-        env.core_mut().take(Rc::new(ActionToken::new(2.0_f64, 1usize, 0.0)), CH_ACTION);
+        env.core_mut()
+            .take(Rc::new(ActionToken::new(0.0_f64, 1usize, 0.0)), CH_ACTION);
+        env.core_mut()
+            .take(Rc::new(ActionToken::new(1.0_f64, 1usize, 0.0)), CH_ACTION);
+        env.core_mut()
+            .take(Rc::new(ActionToken::new(2.0_f64, 1usize, 0.0)), CH_ACTION);
         env.run_time_step();
         transitions.borrow_mut().run_time_step();
 
@@ -326,11 +339,16 @@ mod tests {
         let mut env: EnvironmentStation = EnvironmentStation::new(
             "env",
             Box::new(LineWalk::new(10)),
-            EnvironmentStationOptions { num_episodes: Some(5.0), max_steps_per_episode: Some(2) },
+            EnvironmentStationOptions {
+                num_episodes: Some(5.0),
+                max_steps_per_episode: Some(2),
+            },
         );
         env.run_time_step(); // emit start
-        env.core_mut().take(Rc::new(ActionToken::new(0.0_f64, 1usize, 0.0)), CH_ACTION);
-        env.core_mut().take(Rc::new(ActionToken::new(1.0_f64, 1usize, 0.0)), CH_ACTION);
+        env.core_mut()
+            .take(Rc::new(ActionToken::new(0.0_f64, 1usize, 0.0)), CH_ACTION);
+        env.core_mut()
+            .take(Rc::new(ActionToken::new(1.0_f64, 1usize, 0.0)), CH_ACTION);
         env.run_time_step();
         // Two steps → truncated done, episode finished without reaching goal.
         assert_eq!(env.reward_history().len(), 1);

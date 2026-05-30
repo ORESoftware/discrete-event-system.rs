@@ -105,14 +105,27 @@ impl Transform<BuildRandomTspInput, TSPInstance> for BuildRandomTSP {
             coords.push((rng.next_float() * 100.0, rng.next_float() * 100.0));
         }
         let distance = dist_matrix(&coords);
-        TSPInstance { n, coordinates: coords, distance, precedence: input.precedence }
+        TSPInstance {
+            n,
+            coordinates: coords,
+            distance,
+            precedence: input.precedence,
+        }
     }
 }
 
 /// Free-function form of [`BuildRandomTSP`] (TS `buildRandomTSP`, kept because
 /// it is imported by sibling modules).
-pub fn build_random_tsp(n: usize, seed: u32, precedence: Option<Vec<(usize, usize)>>) -> TSPInstance {
-    BuildRandomTSP.transform(BuildRandomTspInput { n, seed: Some(seed), precedence })
+pub fn build_random_tsp(
+    n: usize,
+    seed: u32,
+    precedence: Option<Vec<(usize, usize)>>,
+) -> TSPInstance {
+    BuildRandomTSP.transform(BuildRandomTspInput {
+        n,
+        seed: Some(seed),
+        precedence,
+    })
 }
 
 /// Input for [`BuildPentagonTSP`]. (TS `interface BuildPentagonTSPInput`.)
@@ -136,14 +149,22 @@ impl Transform<BuildPentagonTspInput, TSPInstance> for BuildPentagonTSP {
             coords.push((50.0 + radius * a.cos(), 50.0 + radius * a.sin()));
         }
         let distance = dist_matrix(&coords);
-        TSPInstance { n, coordinates: coords, distance, precedence: None }
+        TSPInstance {
+            n,
+            coordinates: coords,
+            distance,
+            precedence: None,
+        }
     }
 }
 
 /// Free-function form of [`BuildPentagonTSP`] (TS `buildPentagonTSP`, kept
 /// because it is imported by sibling modules).
 pub fn build_pentagon_tsp(n: usize, radius: f64) -> TSPInstance {
-    BuildPentagonTSP.transform(BuildPentagonTspInput { n: Some(n), radius: Some(radius) })
+    BuildPentagonTSP.transform(BuildPentagonTspInput {
+        n: Some(n),
+        radius: Some(radius),
+    })
 }
 
 // =============================================================================
@@ -251,7 +272,11 @@ pub struct TournamentSelectInput<'a, R: RandomSource> {
 
 /// Tournament selection: sample `size` chromosomes uniformly at random, return
 /// the index of the lowest-tour-length one.
-pub fn tournament_select(population_lengths: &[f64], size: usize, rng: &mut impl RandomSource) -> usize {
+pub fn tournament_select(
+    population_lengths: &[f64],
+    size: usize,
+    rng: &mut impl RandomSource,
+) -> usize {
     let len = population_lengths.len();
     let mut best_idx = (rng.next_float() * len as f64).floor() as usize;
     let mut best_len = population_lengths[best_idx];
@@ -390,14 +415,26 @@ pub struct RepairPrecedenceResult {
 
 /// Best-effort precedence repair: while a `(i, j)` constraint is violated, swap
 /// the two cities. Repeat at most `max_rounds` times.
-pub fn repair_precedence(instance: &TSPInstance, tour: &[usize], max_rounds: usize) -> RepairPrecedenceResult {
+pub fn repair_precedence(
+    instance: &TSPInstance,
+    tour: &[usize],
+    max_rounds: usize,
+) -> RepairPrecedenceResult {
     if instance.precedence.is_none() {
-        return RepairPrecedenceResult { tour: tour.to_vec(), feasible: true };
+        return RepairPrecedenceResult {
+            tour: tour.to_vec(),
+            feasible: true,
+        };
     }
     let mut out = tour.to_vec();
     for _ in 0..max_rounds {
         match check_precedence(instance, &out) {
-            None => return RepairPrecedenceResult { tour: out, feasible: true },
+            None => {
+                return RepairPrecedenceResult {
+                    tour: out,
+                    feasible: true,
+                }
+            }
             Some((a, b)) => {
                 let pa = out.iter().position(|&x| x == a).unwrap();
                 let pb = out.iter().position(|&x| x == b).unwrap();
@@ -406,7 +443,10 @@ pub fn repair_precedence(instance: &TSPInstance, tour: &[usize], max_rounds: usi
         }
     }
     let feasible = check_precedence(instance, &out).is_none();
-    RepairPrecedenceResult { tour: out, feasible }
+    RepairPrecedenceResult {
+        tour: out,
+        feasible,
+    }
 }
 
 /// Behaviour-object wrapper for [`repair_precedence`]. (TS `class RepairPrecedence`.)
@@ -817,7 +857,9 @@ impl GeneticTspOptimizer {
                 swap_mutate(&out, &mut self.rng)
             };
         }
-        if self.local_search == LocalSearch::TwoOpt && self.rng.next_float() < self.local_search_prob {
+        if self.local_search == LocalSearch::TwoOpt
+            && self.rng.next_float() < self.local_search_prob
+        {
             let improved = two_opt_improve(&self.inst, &out, self.local_search_passes);
             if tour_length(&self.inst, &improved) < tour_length(&self.inst, &out) - 1e-12 {
                 self.local_search_applications += 1;
@@ -895,7 +937,11 @@ impl GeneticTspOptimizer {
     fn on_generation(&mut self) {
         let min_len = self.fitness.iter().cloned().fold(f64::INFINITY, f64::min);
         let mean_len = self.fitness.iter().sum::<f64>() / self.fitness.len() as f64;
-        let max_len = self.fitness.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let max_len = self
+            .fitness
+            .iter()
+            .cloned()
+            .fold(f64::NEG_INFINITY, f64::max);
         let elite_idx = self.fitness.iter().position(|&x| x == min_len).unwrap();
         let elite_tour = self.population[elite_idx].clone();
         self.per_gen_best.push(min_len);
@@ -970,8 +1016,12 @@ impl GeneticTspOptimizer {
         // Elitism — copy best k unchanged.
         let elite_k = self.elite_count().min(self.pop_size);
         if elite_k > 0 {
-            let mut order: Vec<(f64, usize)> =
-                self.fitness.iter().enumerate().map(|(i, &f)| (f, i)).collect();
+            let mut order: Vec<(f64, usize)> = self
+                .fitness
+                .iter()
+                .enumerate()
+                .map(|(i, &f)| (f, i))
+                .collect();
             // Stable ascending sort by fitness (matches V8's stable Array.sort).
             order.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
             for entry in order.iter().take(elite_k) {
@@ -1047,7 +1097,11 @@ pub fn run_genetic_tsp(instance: TSPInstance, options: GASolverOptions) -> GASol
     let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
     let best = opt.best.clone();
     let estimated_evaluations = pop_size * (opt.generation + 1);
-    let initial_best = opt.per_gen_best.first().copied().unwrap_or(opt.best_fitness);
+    let initial_best = opt
+        .per_gen_best
+        .first()
+        .copied()
+        .unwrap_or(opt.best_fitness);
     let final_best = tour_length(&opt.inst, &best);
     let absolute_improvement = initial_best - final_best;
     let secs = (elapsed_ms / 1000.0).max(1e-9);
@@ -1146,7 +1200,10 @@ pub fn held_karp_exact(instance: &TSPInstance) -> HeldKarpResult {
         cur = prev;
     }
     tour.reverse();
-    HeldKarpResult { tour, length: best_len }
+    HeldKarpResult {
+        tour,
+        length: best_len,
+    }
 }
 
 /// Behaviour-object wrapper for [`held_karp_exact`]. (TS `class HeldKarpExact`.)
@@ -1224,7 +1281,12 @@ mod tests {
     fn unit_square() -> TSPInstance {
         let coords = vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)];
         let distance = dist_matrix(&coords);
-        TSPInstance { n: 4, coordinates: coords, distance, precedence: None }
+        TSPInstance {
+            n: 4,
+            coordinates: coords,
+            distance,
+            precedence: None,
+        }
     }
 
     #[test]

@@ -58,7 +58,11 @@ mod tests {
 
         let ss = dyn_.state_space();
         assert!(close(ss.a[0][0], -p.resistance / p.inductance, 1e-12));
-        assert!(close(ss.a[0][1], -p.back_emf_constant / p.inductance, 1e-12));
+        assert!(close(
+            ss.a[0][1],
+            -p.back_emf_constant / p.inductance,
+            1e-12
+        ));
         assert!(close(ss.a[1][0], p.torque_constant / p.inertia, 1e-12));
         assert!(close(ss.a[1][1], -p.friction / p.inertia, 1e-12));
         assert!(close(ss.b[0][0], 1.0 / p.inductance, 1e-12));
@@ -71,8 +75,14 @@ mod tests {
     #[test]
     fn load_profile_schedule() {
         let lp = LoadProfile::new(&[
-            LoadSegment { from_time: 0.0, torque: 0.0 },
-            LoadSegment { from_time: 5.0, torque: 0.4 },
+            LoadSegment {
+                from_time: 0.0,
+                torque: 0.0,
+            },
+            LoadSegment {
+                from_time: 5.0,
+                torque: 0.4,
+            },
         ]);
         assert!(close(lp.torque_at(2.0), 0.0, 1e-9));
         assert!(close(lp.torque_at(5.0), 0.4, 1e-9));
@@ -86,7 +96,13 @@ mod tests {
         let steps = 4000;
         let plant = Rc::new(RefCell::new(DcMotorPlantStation::new(
             "motor",
-            DcMotorPlantOpts { params: params(), dt, steps, initial_state: None, load: None },
+            DcMotorPlantOpts {
+                params: params(),
+                dt,
+                steps,
+                initial_state: None,
+                load: None,
+            },
         )));
         plant.borrow_mut().set_open_loop_voltage(12.0);
         let sink = Rc::new(RefCell::new(DcMotorSinkStation::new("sink")));
@@ -97,7 +113,11 @@ mod tests {
         );
         run_iterative_des(
             vec![plant.clone() as StationRef, sink.clone() as StationRef],
-            IterativeRunOptions { shuffle: false, max_ticks: Some(steps + 5), ..Default::default() },
+            IterativeRunOptions {
+                shuffle: false,
+                max_ticks: Some(steps + 5),
+                ..Default::default()
+            },
         );
 
         let sb = sink.borrow();
@@ -128,8 +148,14 @@ mod tests {
         let dt = 0.005;
         let steps = 6000;
         let load = LoadProfile::new(&[
-            LoadSegment { from_time: 0.0, torque: 0.0 },
-            LoadSegment { from_time: 18.0, torque: 0.3 },
+            LoadSegment {
+                from_time: 0.0,
+                torque: 0.0,
+            },
+            LoadSegment {
+                from_time: 18.0,
+                torque: 0.3,
+            },
         ]);
         let plant = Rc::new(RefCell::new(DcMotorPlantStation::new(
             "motor",
@@ -149,8 +175,14 @@ mod tests {
                 dt,
                 max_voltage: Some(48.0),
                 reference: vec![
-                    SpeedReferenceSegment { from_time: 0.0, speed: 60.0 },
-                    SpeedReferenceSegment { from_time: 10.0, speed: 100.0 },
+                    SpeedReferenceSegment {
+                        from_time: 0.0,
+                        speed: 60.0,
+                    },
+                    SpeedReferenceSegment {
+                        from_time: 10.0,
+                        speed: 100.0,
+                    },
                 ],
             },
         )));
@@ -177,18 +209,36 @@ mod tests {
                 controller.clone() as StationRef,
                 sink.clone() as StationRef,
             ],
-            IterativeRunOptions { shuffle: false, max_ticks: Some(steps + 5), ..Default::default() },
+            IterativeRunOptions {
+                shuffle: false,
+                max_ticks: Some(steps + 5),
+                ..Default::default()
+            },
         );
 
         let sb = sink.borrow();
         let s = &sb.samples;
         let at = |t: f64| {
-            let idx = ((t / dt).round() as usize).saturating_sub(1).min(s.len() - 1);
+            let idx = ((t / dt).round() as usize)
+                .saturating_sub(1)
+                .min(s.len() - 1);
             &s[idx]
         };
-        assert!((at(9.5).omega - 60.0).abs() < 0.5, "ω@9.5 = {}", at(9.5).omega);
-        assert!((at(17.5).omega - 100.0).abs() < 0.5, "ω@17.5 = {}", at(17.5).omega);
-        assert!((sb.final_omega() - 100.0).abs() < 0.1, "ω = {}", sb.final_omega());
+        assert!(
+            (at(9.5).omega - 60.0).abs() < 0.5,
+            "ω@9.5 = {}",
+            at(9.5).omega
+        );
+        assert!(
+            (at(17.5).omega - 100.0).abs() < 0.5,
+            "ω@17.5 = {}",
+            at(17.5).omega
+        );
+        assert!(
+            (sb.final_omega() - 100.0).abs() < 0.1,
+            "ω = {}",
+            sb.final_omega()
+        );
 
         let f = sb.final_state().unwrap();
         let p = params();
@@ -197,7 +247,11 @@ mod tests {
             p.friction * f.omega + f.load_torque,
             1e-2
         ));
-        assert!(close(f.voltage, p.resistance * f.current + f.back_emf, 1e-2));
+        assert!(close(
+            f.voltage,
+            p.resistance * f.current + f.back_emf,
+            1e-2
+        ));
 
         let mut peak = 0.0_f64;
         for x in s.iter() {

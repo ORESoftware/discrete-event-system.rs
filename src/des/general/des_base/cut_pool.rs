@@ -52,7 +52,11 @@ impl AffineCutPool {
         initial_cuts: &[AffineCut],
     ) -> Result<Self, PreconditionError> {
         Preconditions::integer_in_range("AffineCutPool", "dimension", dimension as f64, 1.0, 1e6)?;
-        let mut pool = AffineCutPool { dimension, sense, cuts: Vec::new() };
+        let mut pool = AffineCutPool {
+            dimension,
+            sense,
+            cuts: Vec::new(),
+        };
         for c in initial_cuts {
             pool.add(c.clone())?;
         }
@@ -153,7 +157,11 @@ mod tests {
     use super::*;
 
     fn cut(alpha: f64, beta: Vec<f64>) -> AffineCut {
-        AffineCut { alpha, beta, source: None }
+        AffineCut {
+            alpha,
+            beta,
+            source: None,
+        }
     }
 
     #[test]
@@ -162,7 +170,7 @@ mod tests {
         assert_eq!(pool.evaluate(&[0.0]).unwrap(), f64::INFINITY);
         pool.add(cut(10.0, vec![0.0])).unwrap(); // constant 10
         pool.add(cut(0.0, vec![1.0])).unwrap(); // x
-        // min(10, x) at x = 3 -> 3
+                                                // min(10, x) at x = 3 -> 3
         assert_eq!(pool.evaluate(&[3.0]).unwrap(), 3.0);
         // at x = 20 -> min(10, 20) = 10
         assert_eq!(pool.evaluate(&[20.0]).unwrap(), 10.0);
@@ -173,7 +181,7 @@ mod tests {
         let mut pool = AffineCutPool::new(1, CutEnvelopeSense::Lower, &[]).unwrap();
         pool.add(cut(0.0, vec![1.0])).unwrap(); // x
         pool.add(cut(0.0, vec![-1.0])).unwrap(); // -x
-        // max(x, -x) at x = -5 -> 5 from the -x cut (beta = -1)
+                                                 // max(x, -x) at x = -5 -> 5 from the -x cut (beta = -1)
         assert_eq!(pool.evaluate(&[-5.0]).unwrap(), 5.0);
         let active = pool.active_cut(&[-5.0]).unwrap().unwrap();
         assert_eq!(active.beta, vec![-1.0]);

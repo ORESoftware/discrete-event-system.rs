@@ -338,7 +338,11 @@ pub struct WarehouseStation {
 impl WarehouseStation {
     fn new(def: StationDefinition) -> Self {
         let id = def.id.clone();
-        WarehouseStation { core: StationCore::new(id), def, queue: Vec::new() }
+        WarehouseStation {
+            core: StationCore::new(id),
+            def,
+            queue: Vec::new(),
+        }
     }
 
     fn receive(&mut self, pallet: Rc<RefCell<WarehousePallet>>) {
@@ -377,10 +381,17 @@ pub struct WarehouseSource {
 
 impl WarehouseSource {
     fn new(def: StationDefinition) -> Self {
-        WarehouseSource { station: WarehouseStation::new(def) }
+        WarehouseSource {
+            station: WarehouseStation::new(def),
+        }
     }
 
-    fn emit_pallet(&mut self, id: String, destination_id: String, created_at: f64) -> Rc<RefCell<WarehousePallet>> {
+    fn emit_pallet(
+        &mut self,
+        id: String,
+        destination_id: String,
+        created_at: f64,
+    ) -> Rc<RefCell<WarehousePallet>> {
         let pallet = Rc::new(RefCell::new(WarehousePallet {
             id,
             destination_id,
@@ -408,12 +419,19 @@ pub struct WarehouseSink {
 
 impl WarehouseSink {
     fn new(def: StationDefinition) -> Self {
-        WarehouseSink { station: WarehouseStation::new(def), collected: Vec::new() }
+        WarehouseSink {
+            station: WarehouseStation::new(def),
+            collected: Vec::new(),
+        }
     }
 
     fn collect(&mut self, pallet: Rc<RefCell<WarehousePallet>>, time: f64, correct: bool) {
         pallet.borrow_mut().location_id = self.station.def.id.clone();
-        self.collected.push(CollectedPallet { pallet, time, correct });
+        self.collected.push(CollectedPallet {
+            pallet,
+            time,
+            correct,
+        });
     }
 }
 
@@ -426,7 +444,11 @@ pub struct WarehouseForklift {
 
 impl WarehouseForklift {
     fn new(id: String, station_id: String) -> Self {
-        WarehouseForklift { core: SmartMovableCore::new(id), station_id, carrying: None }
+        WarehouseForklift {
+            core: SmartMovableCore::new(id),
+            station_id,
+            carrying: None,
+        }
     }
 
     fn move_to(&mut self, station_id: &str) {
@@ -469,8 +491,22 @@ pub struct WarehouseFloor {
 
 pub fn default_warehouse_layout() -> WarehouseLayout {
     let mut stations: Vec<StationDefinition> = vec![
-        StationDefinition { id: "receiving".into(), label: "Recv".into(), kind: WarehouseStationKind::Source, x: 0.0, y: 3.0, can_hold_pallet: Some(true) },
-        StationDefinition { id: "staging".into(), label: "Stage".into(), kind: WarehouseStationKind::Storage, x: 2.0, y: 3.0, can_hold_pallet: Some(true) },
+        StationDefinition {
+            id: "receiving".into(),
+            label: "Recv".into(),
+            kind: WarehouseStationKind::Source,
+            x: 0.0,
+            y: 3.0,
+            can_hold_pallet: Some(true),
+        },
+        StationDefinition {
+            id: "staging".into(),
+            label: "Stage".into(),
+            kind: WarehouseStationKind::Storage,
+            x: 2.0,
+            y: 3.0,
+            can_hold_pallet: Some(true),
+        },
     ];
     let mut route_edges: Vec<(String, String)> = vec![("receiving".into(), "staging".into())];
     let row_names = ["a", "b", "c", "d"];
@@ -491,11 +527,46 @@ pub fn default_warehouse_layout() -> WarehouseLayout {
             prev_id = id;
         }
     }
-    stations.push(StationDefinition { id: "aisle-main".into(), label: "Aisle".into(), kind: WarehouseStationKind::Aisle, x: 10.0, y: 3.0, can_hold_pallet: Some(true) });
-    stations.push(StationDefinition { id: "line-a".into(), label: "Line A".into(), kind: WarehouseStationKind::Sink, x: 12.0, y: 0.0, can_hold_pallet: None });
-    stations.push(StationDefinition { id: "line-b".into(), label: "Line B".into(), kind: WarehouseStationKind::Sink, x: 12.0, y: 2.0, can_hold_pallet: None });
-    stations.push(StationDefinition { id: "line-c".into(), label: "Line C".into(), kind: WarehouseStationKind::Sink, x: 12.0, y: 4.0, can_hold_pallet: None });
-    stations.push(StationDefinition { id: "shipping".into(), label: "Ship".into(), kind: WarehouseStationKind::Sink, x: 12.0, y: 6.0, can_hold_pallet: None });
+    stations.push(StationDefinition {
+        id: "aisle-main".into(),
+        label: "Aisle".into(),
+        kind: WarehouseStationKind::Aisle,
+        x: 10.0,
+        y: 3.0,
+        can_hold_pallet: Some(true),
+    });
+    stations.push(StationDefinition {
+        id: "line-a".into(),
+        label: "Line A".into(),
+        kind: WarehouseStationKind::Sink,
+        x: 12.0,
+        y: 0.0,
+        can_hold_pallet: None,
+    });
+    stations.push(StationDefinition {
+        id: "line-b".into(),
+        label: "Line B".into(),
+        kind: WarehouseStationKind::Sink,
+        x: 12.0,
+        y: 2.0,
+        can_hold_pallet: None,
+    });
+    stations.push(StationDefinition {
+        id: "line-c".into(),
+        label: "Line C".into(),
+        kind: WarehouseStationKind::Sink,
+        x: 12.0,
+        y: 4.0,
+        can_hold_pallet: None,
+    });
+    stations.push(StationDefinition {
+        id: "shipping".into(),
+        label: "Ship".into(),
+        kind: WarehouseStationKind::Sink,
+        x: 12.0,
+        y: 6.0,
+        can_hold_pallet: None,
+    });
     for row in row_names {
         route_edges.push((format!("reserve-{row}3"), "aisle-main".into()));
     }
@@ -505,7 +576,12 @@ pub fn default_warehouse_layout() -> WarehouseLayout {
     route_edges.push(("aisle-main".into(), "shipping".into()));
     WarehouseLayout {
         source_station_id: "receiving".into(),
-        sink_station_ids: vec!["line-a".into(), "line-b".into(), "line-c".into(), "shipping".into()],
+        sink_station_ids: vec![
+            "line-a".into(),
+            "line-b".into(),
+            "line-c".into(),
+            "shipping".into(),
+        ],
         grid_meters: Some(12.0),
         stations,
         route_edges: Some(route_edges),
@@ -585,7 +661,14 @@ impl WarehousePOMDPModel {
         decode_state_raw(state_id, self.n, self.terminal_state)
     }
     pub fn next_state(&self, state_id: usize, action_idx: usize) -> usize {
-        next_state_raw(state_id, action_idx, &self.actions, self.destination_index, self.n, self.terminal_state)
+        next_state_raw(
+            state_id,
+            action_idx,
+            &self.actions,
+            self.destination_index,
+            self.n,
+            self.terminal_state,
+        )
     }
     pub fn observation_index_for_location(&self, station_idx: usize) -> usize {
         station_idx
@@ -593,21 +676,43 @@ impl WarehousePOMDPModel {
 }
 
 fn encode_state_raw(forklift: usize, pallet: usize, carrying: bool, n: usize) -> usize {
-    require(Preconditions::integer_in_range("WarehousePOMDP", "forklift", forklift as f64, 0.0, (n - 1) as f64));
-    require(Preconditions::integer_in_range("WarehousePOMDP", "pallet", pallet as f64, 0.0, (n - 1) as f64));
+    require(Preconditions::integer_in_range(
+        "WarehousePOMDP",
+        "forklift",
+        forklift as f64,
+        0.0,
+        (n - 1) as f64,
+    ));
+    require(Preconditions::integer_in_range(
+        "WarehousePOMDP",
+        "pallet",
+        pallet as f64,
+        0.0,
+        (n - 1) as f64,
+    ));
     (forklift * n + pallet) * 2 + if carrying { 1 } else { 0 }
 }
 
 fn decode_state_raw(state_id: usize, n: usize, terminal_state: usize) -> WarehouseDecisionState {
     if state_id == terminal_state {
-        return WarehouseDecisionState { forklift: -1, pallet: -1, carrying: false, terminal: true };
+        return WarehouseDecisionState {
+            forklift: -1,
+            pallet: -1,
+            carrying: false,
+            terminal: true,
+        };
     }
     let carrying = state_id % 2 == 1;
     let mut rest = state_id / 2;
     let pallet = (rest % n) as i64;
     rest /= n;
     let forklift = rest as i64;
-    WarehouseDecisionState { forklift, pallet, carrying, terminal: false }
+    WarehouseDecisionState {
+        forklift,
+        pallet,
+        carrying,
+        terminal: false,
+    }
 }
 
 fn next_state_raw(
@@ -656,7 +761,11 @@ pub fn build_warehouse_pomdp(
         .stations
         .iter()
         .enumerate()
-        .map(|(target, s)| WarehouseAction { kind: WarehouseActionKind::GoTo, target, label: format!("go to {}", s.label) })
+        .map(|(target, s)| WarehouseAction {
+            kind: WarehouseActionKind::GoTo,
+            target,
+            label: format!("go to {}", s.label),
+        })
         .collect();
     let mut observations: Vec<WarehouseObservation> = layout
         .stations
@@ -668,8 +777,16 @@ pub fn build_warehouse_pomdp(
             label: format!("sensor says {}", s.label),
         })
         .collect();
-    observations.push(WarehouseObservation { kind: WarehouseObsKind::Carrying, station: None, label: "forklift carrying pallet".into() });
-    observations.push(WarehouseObservation { kind: WarehouseObsKind::Complete, station: None, label: "delivery complete".into() });
+    observations.push(WarehouseObservation {
+        kind: WarehouseObsKind::Carrying,
+        station: None,
+        label: "forklift carrying pallet".into(),
+    });
+    observations.push(WarehouseObservation {
+        kind: WarehouseObsKind::Complete,
+        station: None,
+        label: "delivery complete".into(),
+    });
 
     let carrying_obs_idx = n;
     let complete_obs_idx = n + 1;
@@ -679,7 +796,14 @@ pub fn build_warehouse_pomdp(
     let actions_t = actions.clone();
     let transition: Box<dyn Fn(usize, usize) -> Vec<f64>> = Box::new(move |s_idx, a_idx| {
         let mut row = vec![0.0; num_states];
-        row[next_state_raw(s_idx, a_idx, &actions_t, destination_index, n, terminal_state)] = 1.0;
+        row[next_state_raw(
+            s_idx,
+            a_idx,
+            &actions_t,
+            destination_index,
+            n,
+            terminal_state,
+        )] = 1.0;
         row
     });
 
@@ -697,7 +821,11 @@ pub fn build_warehouse_pomdp(
         }
         let wrong_mass = (1.0 - scenario_o.location_accuracy) / ((n - 1).max(1) as f64);
         for (i, slot) in row.iter_mut().enumerate().take(n) {
-            *slot = if i as i64 == s.pallet { scenario_o.location_accuracy } else { wrong_mass };
+            *slot = if i as i64 == s.pallet {
+                scenario_o.location_accuracy
+            } else {
+                wrong_mass
+            };
         }
         row
     });
@@ -810,7 +938,11 @@ impl WarehouseQMDPSolver {
                 q[s][a] = (model.spec.reward)(s, a) + gamma * v[sp];
             }
         }
-        WarehouseQMDPSolver { q, iterations, final_delta }
+        WarehouseQMDPSolver {
+            q,
+            iterations,
+            final_delta,
+        }
     }
 
     pub fn act(&self, belief: &DiscreteBelief<usize>, rng: &mut dyn RandomSource) -> usize {
@@ -863,7 +995,11 @@ pub struct ChooseActionResult {
 
 impl WarehousePlanner {
     pub fn new(layout: WarehouseLayout, scenario: WarehouseScenarioConfig) -> Self {
-        WarehousePlanner { layout, scenario, cache: HashMap::new() }
+        WarehousePlanner {
+            layout,
+            scenario,
+            cache: HashMap::new(),
+        }
     }
 
     pub fn for_destination(&mut self, destination_index: usize) -> Rc<WarehousePlan> {
@@ -886,7 +1022,11 @@ impl WarehousePlanner {
         let plan = self.for_destination(destination_index);
         let action_index = plan.solver.act(belief, rng);
         let action = plan.model.actions[action_index].clone();
-        ChooseActionResult { plan, action_index, action }
+        ChooseActionResult {
+            plan,
+            action_index,
+            action,
+        }
     }
 }
 
@@ -904,16 +1044,33 @@ pub fn simulate_warehouse_scenario(
     let jobs = opts.jobs.unwrap_or(120);
     let seed = opts.seed.unwrap_or(7);
     let max_steps_per_job = opts.max_steps_per_job.unwrap_or(24);
-    require(Preconditions::integer_in_range("WarehouseSimulation", "jobs", jobs as f64, 1.0, 10000.0));
-    require(Preconditions::integer_in_range("WarehouseSimulation", "maxStepsPerJob", max_steps_per_job as f64, 1.0, 200.0));
+    require(Preconditions::integer_in_range(
+        "WarehouseSimulation",
+        "jobs",
+        jobs as f64,
+        1.0,
+        10000.0,
+    ));
+    require(Preconditions::integer_in_range(
+        "WarehouseSimulation",
+        "maxStepsPerJob",
+        max_steps_per_job as f64,
+        1.0,
+        200.0,
+    ));
 
     let mut floor = build_warehouse_floor(&layout);
     let mut rng = mulberry32(seed);
     let mut planner = WarehousePlanner::new(layout.clone(), scenario.clone());
-    let mut forklift = WarehouseForklift::new(format!("{}-forklift-1", scenario.id), layout.source_station_id.clone());
+    let mut forklift = WarehouseForklift::new(
+        format!("{}-forklift-1", scenario.id),
+        layout.source_station_id.clone(),
+    );
     forklift.activate();
     let station_to_index = station_index_map(&layout);
-    let source_index = *station_to_index.get(&layout.source_station_id).expect("source index present");
+    let source_index = *station_to_index
+        .get(&layout.source_station_id)
+        .expect("source index present");
     let sink_plan = opts
         .destination_plan
         .clone()
@@ -936,17 +1093,30 @@ pub fn simulate_warehouse_scenario(
             .get(&destination_id)
             .unwrap_or_else(|| panic!("unknown destination in plan: {destination_id}"));
         let job_id = format!("{}-p{}", scenario.id, j + 1);
-        let pallet = floor.source.emit_pallet(job_id.clone(), destination_id.clone(), now);
+        let pallet = floor
+            .source
+            .emit_pallet(job_id.clone(), destination_id.clone(), now);
         let initial_pallet_index = sample_initial_pallet_location(&layout, &scenario, &mut rng);
         pallet.borrow_mut().location_id = layout.stations[initial_pallet_index].id.clone();
         let job_start = now;
-        let initial_forklift_index = station_to_index.get(&forklift.station_id).copied().unwrap_or(source_index);
+        let initial_forklift_index = station_to_index
+            .get(&forklift.station_id)
+            .copied()
+            .unwrap_or(source_index);
 
         let plan = planner.for_destination(destination_index);
         let model = &plan.model;
-        let mut actual_state = model.encode_state(initial_forklift_index, initial_pallet_index, false);
-        let mut observed_location = sample_location_observation(&layout, &scenario, initial_pallet_index, &mut rng);
-        let mut belief = initial_warehouse_belief(&layout, &scenario, model, initial_forklift_index, observed_location);
+        let mut actual_state =
+            model.encode_state(initial_forklift_index, initial_pallet_index, false);
+        let mut observed_location =
+            sample_location_observation(&layout, &scenario, initial_pallet_index, &mut rng);
+        let mut belief = initial_warehouse_belief(
+            &layout,
+            &scenario,
+            model,
+            initial_forklift_index,
+            observed_location,
+        );
         let mut search_misses = 0usize;
         let mut completed = false;
         let mut shipping_error = false;
@@ -972,7 +1142,8 @@ pub fn simulate_warehouse_scenario(
             let target = action.target;
             let next_state_id = model.next_state(actual_state, action_index);
             let after = model.decode_state(next_state_id);
-            let duration = action_duration_minutes(&layout, &scenario, &before, target, destination_index);
+            let duration =
+                action_duration_minutes(&layout, &scenario, &before, target, destination_index);
             let time_start = now;
             now += duration;
 
@@ -1044,7 +1215,11 @@ pub fn simulate_warehouse_scenario(
                     pallet_before: pallet_before_id,
                     pallet_after: pallet_after_id,
                     carrying_before: before.carrying,
-                    carrying_after: if after.terminal { false } else { after.carrying },
+                    carrying_after: if after.terminal {
+                        false
+                    } else {
+                        after.carrying
+                    },
                     belief_entropy: entropy,
                     belief_by_station: belief_by_station(model, &belief),
                     cumulative_delivered: completed_jobs,
@@ -1105,37 +1280,69 @@ pub fn simulate_warehouse_scenario(
     }
 
     let total_cycle: f64 = job_summaries.iter().map(|j| j.cycle_time).sum();
-    let completed_list: Vec<&WarehouseJobSummary> = job_summaries.iter().filter(|j| j.completed).collect();
+    let completed_list: Vec<&WarehouseJobSummary> =
+        job_summaries.iter().filter(|j| j.completed).collect();
     let metrics = WarehouseMetrics {
         jobs_created: jobs,
         completed_jobs,
         failed_jobs,
         shipping_errors,
-        shipping_error_rate: if completed_jobs > 0 { shipping_errors as f64 / completed_jobs as f64 } else { 0.0 },
+        shipping_error_rate: if completed_jobs > 0 {
+            shipping_errors as f64 / completed_jobs as f64
+        } else {
+            0.0
+        },
         total_time: now,
-        mean_cycle_time: if !job_summaries.is_empty() { total_cycle / job_summaries.len() as f64 } else { 0.0 },
-        throughput_per_hour: if now > 0.0 { completed_jobs as f64 / now * 60.0 } else { 0.0 },
+        mean_cycle_time: if !job_summaries.is_empty() {
+            total_cycle / job_summaries.len() as f64
+        } else {
+            0.0
+        },
+        throughput_per_hour: if now > 0.0 {
+            completed_jobs as f64 / now * 60.0
+        } else {
+            0.0
+        },
         on_time_rate: if !completed_list.is_empty() {
             completed_list.iter().filter(|j| j.on_time).count() as f64 / completed_list.len() as f64
         } else {
             0.0
         },
-        mean_steps_per_job: mean(&job_summaries.iter().map(|j| j.steps as f64).collect::<Vec<_>>()),
-        mean_search_misses_per_job: mean(&job_summaries.iter().map(|j| j.search_misses as f64).collect::<Vec<_>>()),
-        mean_belief_entropy: if entropy_count > 0 { entropy_sum / entropy_count as f64 } else { 0.0 },
+        mean_steps_per_job: mean(
+            &job_summaries
+                .iter()
+                .map(|j| j.steps as f64)
+                .collect::<Vec<_>>(),
+        ),
+        mean_search_misses_per_job: mean(
+            &job_summaries
+                .iter()
+                .map(|j| j.search_misses as f64)
+                .collect::<Vec<_>>(),
+        ),
+        mean_belief_entropy: if entropy_count > 0 {
+            entropy_sum / entropy_count as f64
+        } else {
+            0.0
+        },
     };
 
-    WarehouseScenarioResult { scenario, layout, metrics, jobs: job_summaries, trace }
+    WarehouseScenarioResult {
+        scenario,
+        layout,
+        metrics,
+        jobs: job_summaries,
+        trace,
+    }
 }
 
 pub fn run_warehouse_comparison(opts: WarehouseSimulationOptions) -> WarehouseComparisonResult {
     let layout = opts.layout.clone().unwrap_or_else(default_warehouse_layout);
     let seed = opts.seed.unwrap_or(7);
     let jobs = opts.jobs.unwrap_or(120);
-    let destination_plan = opts
-        .destination_plan
-        .clone()
-        .unwrap_or_else(|| make_destination_plan(&layout, jobs, &mut mulberry32(seed.wrapping_add(404))));
+    let destination_plan = opts.destination_plan.clone().unwrap_or_else(|| {
+        make_destination_plan(&layout, jobs, &mut mulberry32(seed.wrapping_add(404)))
+    });
     let baseline = simulate_warehouse_scenario(
         baseline_warehouse_scenario(),
         WarehouseSimulationOptions {
@@ -1159,16 +1366,34 @@ pub fn run_warehouse_comparison(opts: WarehouseSimulationOptions) -> WarehouseCo
         },
     );
     let deltas = ComparisonDeltas {
-        mean_cycle_time_reduction_pct: pct_reduction(baseline.metrics.mean_cycle_time, track3t.metrics.mean_cycle_time),
-        throughput_lift_pct: pct_lift(baseline.metrics.throughput_per_hour, track3t.metrics.throughput_per_hour),
+        mean_cycle_time_reduction_pct: pct_reduction(
+            baseline.metrics.mean_cycle_time,
+            track3t.metrics.mean_cycle_time,
+        ),
+        throughput_lift_pct: pct_lift(
+            baseline.metrics.throughput_per_hour,
+            track3t.metrics.throughput_per_hour,
+        ),
         search_miss_reduction_pct: pct_reduction(
             baseline.metrics.mean_search_misses_per_job,
             track3t.metrics.mean_search_misses_per_job,
         ),
-        error_reduction_pct: pct_reduction(baseline.metrics.shipping_error_rate, track3t.metrics.shipping_error_rate),
-        entropy_reduction_pct: pct_reduction(baseline.metrics.mean_belief_entropy, track3t.metrics.mean_belief_entropy),
+        error_reduction_pct: pct_reduction(
+            baseline.metrics.shipping_error_rate,
+            track3t.metrics.shipping_error_rate,
+        ),
+        entropy_reduction_pct: pct_reduction(
+            baseline.metrics.mean_belief_entropy,
+            track3t.metrics.mean_belief_entropy,
+        ),
     };
-    WarehouseComparisonResult { layout, baseline, track3t, deltas, source_notes: track3t_archive_grounding() }
+    WarehouseComparisonResult {
+        layout,
+        baseline,
+        track3t,
+        deltas,
+        source_notes: track3t_archive_grounding(),
+    }
 }
 
 pub fn summarize_warehouse_comparison(result: &WarehouseComparisonResult) -> String {
@@ -1199,7 +1424,11 @@ pub fn summarize_warehouse_comparison(result: &WarehouseComparisonResult) -> Str
             pct(result.baseline.metrics.shipping_error_rate),
             pct(result.track3t.metrics.shipping_error_rate),
         ],
-        vec!["on-time rate".into(), pct(result.baseline.metrics.on_time_rate), pct(result.track3t.metrics.on_time_rate)],
+        vec![
+            "on-time rate".into(),
+            pct(result.baseline.metrics.on_time_rate),
+            pct(result.track3t.metrics.on_time_rate),
+        ],
         vec![
             "mean belief entropy".into(),
             fmt(result.baseline.metrics.mean_belief_entropy),
@@ -1219,7 +1448,11 @@ pub fn summarize_warehouse_comparison(result: &WarehouseComparisonResult) -> Str
                 .collect::<Vec<_>>()
                 .join("  ");
             if idx == 0 {
-                let sep = widths.iter().map(|w| "-".repeat(*w)).collect::<Vec<_>>().join("  ");
+                let sep = widths
+                    .iter()
+                    .map(|w| "-".repeat(*w))
+                    .collect::<Vec<_>>()
+                    .join("  ");
                 format!("{line}\n{sep}")
             } else {
                 line
@@ -1249,8 +1482,13 @@ pub fn build_warehouse_floor(layout: &WarehouseLayout) -> WarehouseFloor {
             stations.insert(def.id.clone(), WarehouseStation::new(def.clone()));
         }
     }
-    let source = source.unwrap_or_else(|| panic!("source station not found: {}", layout.source_station_id));
-    WarehouseFloor { source, sinks, stations }
+    let source =
+        source.unwrap_or_else(|| panic!("source station not found: {}", layout.source_station_id));
+    WarehouseFloor {
+        source,
+        sinks,
+        stations,
+    }
 }
 
 pub fn initial_warehouse_belief(
@@ -1264,7 +1502,8 @@ pub fn initial_warehouse_belief(
     let prior = initial_location_prior(layout, scenario);
     let mut location_posterior = vec![0.0; n];
     for loc in 0..n {
-        location_posterior[loc] = prior[loc] * location_observation_probability(n, scenario, loc, observed_location_index);
+        location_posterior[loc] = prior[loc]
+            * location_observation_probability(n, scenario, loc, observed_location_index);
     }
     normalize_in_place(&mut location_posterior);
     let mut weights = vec![0.0; model.states.len()];
@@ -1300,7 +1539,8 @@ pub fn travel_minutes(
     if from_station_idx == to_station_idx {
         return 0.0;
     }
-    let meters = manhattan_distance(layout, from_station_idx, to_station_idx) * layout.grid_meters.unwrap_or(12.0);
+    let meters = manhattan_distance(layout, from_station_idx, to_station_idx)
+        * layout.grid_meters.unwrap_or(12.0);
     meters / scenario.forklift_speed_meters_per_minute * scenario.route_inflation
 }
 
@@ -1333,11 +1573,16 @@ fn sample_initial_pallet_location(
     rng: &mut dyn RandomSource,
 ) -> usize {
     let station_to_index = station_index_map(layout);
-    let source_index = *station_to_index.get(&layout.source_station_id).expect("source index present");
+    let source_index = *station_to_index
+        .get(&layout.source_station_id)
+        .expect("source index present");
     if rng.next_float() >= scenario.initial_misplacement_probability {
         return source_index;
     }
-    let candidates: Vec<usize> = pallet_candidate_indexes(layout).into_iter().filter(|&i| i != source_index).collect();
+    let candidates: Vec<usize> = pallet_candidate_indexes(layout)
+        .into_iter()
+        .filter(|&i| i != source_index)
+        .collect();
     let idx = (rng.next_float() * candidates.len() as f64).floor() as usize;
     candidates.get(idx).copied().unwrap_or(source_index)
 }
@@ -1369,14 +1614,22 @@ fn observation_to_location(model: &WarehousePOMDPModel, obs_idx: usize, fallback
     fallback
 }
 
-fn initial_location_prior(layout: &WarehouseLayout, scenario: &WarehouseScenarioConfig) -> Vec<f64> {
+fn initial_location_prior(
+    layout: &WarehouseLayout,
+    scenario: &WarehouseScenarioConfig,
+) -> Vec<f64> {
     let n = layout.stations.len();
     let station_to_index = station_index_map(layout);
-    let source_index = *station_to_index.get(&layout.source_station_id).expect("source index present");
+    let source_index = *station_to_index
+        .get(&layout.source_station_id)
+        .expect("source index present");
     let candidates = pallet_candidate_indexes(layout);
     let mut prior = vec![0.0; n];
     prior[source_index] = 1.0 - scenario.initial_misplacement_probability;
-    let others: Vec<usize> = candidates.into_iter().filter(|&i| i != source_index).collect();
+    let others: Vec<usize> = candidates
+        .into_iter()
+        .filter(|&i| i != source_index)
+        .collect();
     let share = scenario.initial_misplacement_probability / (others.len().max(1) as f64);
     for i in others {
         prior[i] = share;
@@ -1398,7 +1651,11 @@ fn location_observation_probability(
     }
 }
 
-fn make_destination_plan(layout: &WarehouseLayout, jobs: usize, rng: &mut dyn RandomSource) -> Vec<String> {
+fn make_destination_plan(
+    layout: &WarehouseLayout,
+    jobs: usize,
+    rng: &mut dyn RandomSource,
+) -> Vec<String> {
     let mut out: Vec<String> = Vec::with_capacity(jobs);
     for _ in 0..jobs {
         let idx = (rng.next_float() * layout.sink_station_ids.len() as f64).floor() as usize;
@@ -1424,7 +1681,12 @@ fn manhattan_distance(layout: &WarehouseLayout, a_idx: usize, b_idx: usize) -> f
 }
 
 fn station_index_map(layout: &WarehouseLayout) -> HashMap<String, usize> {
-    layout.stations.iter().enumerate().map(|(i, s)| (s.id.clone(), i)).collect()
+    layout
+        .stations
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.id.clone(), i))
+        .collect()
 }
 
 // =============================================================================
@@ -1432,18 +1694,33 @@ fn station_index_map(layout: &WarehouseLayout) -> HashMap<String, usize> {
 // =============================================================================
 
 fn validate_layout(layout: &WarehouseLayout) {
-    require(Preconditions::non_empty("WarehouseLayout", "stations", &layout.stations));
+    require(Preconditions::non_empty(
+        "WarehouseLayout",
+        "stations",
+        &layout.stations,
+    ));
     let mut ids: HashSet<String> = HashSet::new();
     for (i, s) in layout.stations.iter().enumerate() {
         if ids.contains(&s.id) {
             panic!("WarehouseLayout: duplicate station id {}", s.id);
         }
         ids.insert(s.id.clone());
-        require(Preconditions::finite("WarehouseLayout", &format!("stations[{i}].x"), s.x));
-        require(Preconditions::finite("WarehouseLayout", &format!("stations[{i}].y"), s.y));
+        require(Preconditions::finite(
+            "WarehouseLayout",
+            &format!("stations[{i}].x"),
+            s.x,
+        ));
+        require(Preconditions::finite(
+            "WarehouseLayout",
+            &format!("stations[{i}].y"),
+            s.y,
+        ));
     }
     if !ids.contains(&layout.source_station_id) {
-        panic!("WarehouseLayout: source missing: {}", layout.source_station_id);
+        panic!(
+            "WarehouseLayout: source missing: {}",
+            layout.source_station_id
+        );
     }
     for id in &layout.sink_station_ids {
         if !ids.contains(id) {
@@ -1451,29 +1728,101 @@ fn validate_layout(layout: &WarehouseLayout) {
         }
     }
     if let Some(grid) = layout.grid_meters {
-        require(Preconditions::positive("WarehouseLayout", "gridMeters", grid));
+        require(Preconditions::positive(
+            "WarehouseLayout",
+            "gridMeters",
+            grid,
+        ));
     }
 }
 
 fn validate_scenario(s: &WarehouseScenarioConfig) {
     let model = format!("WarehouseScenario({})", s.id);
-    require(Preconditions::in_range(&model, "locationAccuracy", s.location_accuracy, 0.5, 1.0));
-    require(Preconditions::in_range(&model, "idAccuracy", s.id_accuracy, 0.0, 1.0));
-    require(Preconditions::in_range(&model, "initialMisplacementProbability", s.initial_misplacement_probability, 0.0, 1.0));
-    require(Preconditions::in_range(&model, "placementErrorProbability", s.placement_error_probability, 0.0, 1.0));
-    require(Preconditions::positive(&model, "forkliftSpeedMetersPerMinute", s.forklift_speed_meters_per_minute));
-    require(Preconditions::positive(&model, "routeInflation", s.route_inflation));
-    require(Preconditions::non_negative(&model, "handlingMinutes", s.handling_minutes));
-    require(Preconditions::non_negative(&model, "confirmationDelayMinutes", s.confirmation_delay_minutes));
-    require(Preconditions::non_negative(&model, "searchPenaltyMinutes", s.search_penalty_minutes));
-    require(Preconditions::non_negative(&model, "reworkPenaltyMinutes", s.rework_penalty_minutes));
-    require(Preconditions::positive(&model, "deliveryReward", s.delivery_reward));
-    require(Preconditions::non_negative(&model, "wrongDeliveryPenalty", s.wrong_delivery_penalty));
-    require(Preconditions::in_range(&model, "discount", s.discount, 0.0, 1.0));
+    require(Preconditions::in_range(
+        &model,
+        "locationAccuracy",
+        s.location_accuracy,
+        0.5,
+        1.0,
+    ));
+    require(Preconditions::in_range(
+        &model,
+        "idAccuracy",
+        s.id_accuracy,
+        0.0,
+        1.0,
+    ));
+    require(Preconditions::in_range(
+        &model,
+        "initialMisplacementProbability",
+        s.initial_misplacement_probability,
+        0.0,
+        1.0,
+    ));
+    require(Preconditions::in_range(
+        &model,
+        "placementErrorProbability",
+        s.placement_error_probability,
+        0.0,
+        1.0,
+    ));
+    require(Preconditions::positive(
+        &model,
+        "forkliftSpeedMetersPerMinute",
+        s.forklift_speed_meters_per_minute,
+    ));
+    require(Preconditions::positive(
+        &model,
+        "routeInflation",
+        s.route_inflation,
+    ));
+    require(Preconditions::non_negative(
+        &model,
+        "handlingMinutes",
+        s.handling_minutes,
+    ));
+    require(Preconditions::non_negative(
+        &model,
+        "confirmationDelayMinutes",
+        s.confirmation_delay_minutes,
+    ));
+    require(Preconditions::non_negative(
+        &model,
+        "searchPenaltyMinutes",
+        s.search_penalty_minutes,
+    ));
+    require(Preconditions::non_negative(
+        &model,
+        "reworkPenaltyMinutes",
+        s.rework_penalty_minutes,
+    ));
+    require(Preconditions::positive(
+        &model,
+        "deliveryReward",
+        s.delivery_reward,
+    ));
+    require(Preconditions::non_negative(
+        &model,
+        "wrongDeliveryPenalty",
+        s.wrong_delivery_penalty,
+    ));
+    require(Preconditions::in_range(
+        &model, "discount", s.discount, 0.0, 1.0,
+    ));
     require(Preconditions::positive(&model, "qmdpTol", s.qmdp_tol));
-    require(Preconditions::integer_in_range(&model, "qmdpMaxIter", s.qmdp_max_iter as f64, 1.0, 100000.0));
+    require(Preconditions::integer_in_range(
+        &model,
+        "qmdpMaxIter",
+        s.qmdp_max_iter as f64,
+        1.0,
+        100000.0,
+    ));
     require(Preconditions::positive(&model, "dueMinutes", s.due_minutes));
-    require(Preconditions::positive(&model, "sensorRefreshSeconds", s.sensor_refresh_seconds));
+    require(Preconditions::positive(
+        &model,
+        "sensorRefreshSeconds",
+        s.sensor_refresh_seconds,
+    ));
 }
 
 fn sample_index(probabilities: &[f64], rng: &mut dyn RandomSource) -> usize {
@@ -1554,7 +1903,10 @@ mod tests {
         // 2 fixed + 4 rows x 3 reserves + aisle + 4 sinks = 19 stations.
         assert_eq!(layout.stations.len(), 19);
         assert_eq!(layout.source_station_id, "receiving");
-        assert_eq!(layout.sink_station_ids, vec!["line-a", "line-b", "line-c", "shipping"]);
+        assert_eq!(
+            layout.sink_station_ids,
+            vec!["line-a", "line-b", "line-c", "shipping"]
+        );
         validate_layout(&layout);
     }
 
@@ -1599,7 +1951,10 @@ mod tests {
 
         // Carrying, drive to the destination -> terminal.
         let carrying = model.encode_state(2, 2, true);
-        assert_eq!(model.next_state(carrying, destination), model.terminal_state);
+        assert_eq!(
+            model.next_state(carrying, destination),
+            model.terminal_state
+        );
     }
 
     #[test]

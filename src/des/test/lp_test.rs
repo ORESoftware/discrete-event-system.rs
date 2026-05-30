@@ -9,9 +9,7 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::des::general::des_lp_bridge::{
-        build_mdp_lp, solve_mdp_as_lp, MdpAsLpOptions,
-    };
+    use crate::des::general::des_lp_bridge::{build_mdp_lp, solve_mdp_as_lp, MdpAsLpOptions};
     use crate::des::general::lp::{
         lp_to_string, solve_lp_internal, InternalSimplexOptions, LPProblem, LPStatus, Sense,
     };
@@ -290,7 +288,11 @@ mod tests {
                         next_state: 2,
                     }];
                 }
-                let target = if a == 1 { (s + 1).min(2) } else { s.saturating_sub(1) };
+                let target = if a == 1 {
+                    (s + 1).min(2)
+                } else {
+                    s.saturating_sub(1)
+                };
                 let reward = if target == 2 { 1.0 } else { 0.0 };
                 vec![Outcome {
                     prob: 1.0,
@@ -335,8 +337,16 @@ mod tests {
                         next_state: 3,
                     }];
                 }
-                let intended = if a == 1 { (s + 1).min(3) } else { s.saturating_sub(1) };
-                let slip = if a == 1 { s.saturating_sub(1) } else { (s + 1).min(3) };
+                let intended = if a == 1 {
+                    (s + 1).min(3)
+                } else {
+                    s.saturating_sub(1)
+                };
+                let slip = if a == 1 {
+                    s.saturating_sub(1)
+                } else {
+                    (s + 1).min(3)
+                };
                 let r = |sp: usize| if sp == 3 { 1.0 } else { 0.0 };
                 vec![
                     Outcome {

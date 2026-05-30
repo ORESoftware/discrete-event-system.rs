@@ -36,7 +36,10 @@ struct EmpiricalControlDemo {
 
 impl EmpiricalControlDemo {
     fn new() -> Self {
-        EmpiricalControlDemo { horizon: 40, dt: 0.02 }
+        EmpiricalControlDemo {
+            horizon: 40,
+            dt: 0.02,
+        }
     }
 
     /// The "real system": DC motor, state [i, ω], input V, output ω.
@@ -77,14 +80,22 @@ impl EmpiricalControlDemo {
         MarkovDecisionProcess::new(MdpSpec {
             num_states: 3,
             num_actions: 1,
-            transition: vec![vec![vec![0.0, 1.0, 0.0], vec![0.0, 0.0, 1.0], vec![1.0, 0.0, 0.0]]],
+            transition: vec![vec![
+                vec![0.0, 1.0, 0.0],
+                vec![0.0, 0.0, 1.0],
+                vec![1.0, 0.0, 0.0],
+            ]],
         })
     }
     fn trap_mdp() -> MarkovDecisionProcess {
         MarkovDecisionProcess::new(MdpSpec {
             num_states: 3,
             num_actions: 1,
-            transition: vec![vec![vec![0.0, 1.0, 0.0], vec![0.0, 0.0, 1.0], vec![0.0, 0.0, 1.0]]],
+            transition: vec![vec![
+                vec![0.0, 1.0, 0.0],
+                vec![0.0, 0.0, 1.0],
+                vec![0.0, 0.0, 1.0],
+            ]],
         })
     }
     fn distinct_pomdp() -> PartiallyObservableProcess {
@@ -118,7 +129,9 @@ impl EmpiricalControlDemo {
             "lti-src",
             systems
                 .iter()
-                .map(|(label, sys)| DiscreteSystemToken::new(label.to_string(), sys.clone(), self.horizon))
+                .map(|(label, sys)| {
+                    DiscreteSystemToken::new(label.to_string(), sys.clone(), self.horizon)
+                })
                 .collect(),
         )));
         let lti_eval = Rc::new(RefCell::new(LtiDegreeEvaluatorStation::new("lti-degree")));
@@ -137,7 +150,9 @@ impl EmpiricalControlDemo {
                 PomdpDegreeToken::new("aliased sensors".to_string(), Self::aliased_pomdp()),
             ],
         )));
-        let pomdp_eval = Rc::new(RefCell::new(PomdpDegreeEvaluatorStation::new("pomdp-degree")));
+        let pomdp_eval = Rc::new(RefCell::new(PomdpDegreeEvaluatorStation::new(
+            "pomdp-degree",
+        )));
         let sink = Rc::new(RefCell::new(DegreeReportSinkStation::new("sink")));
 
         lti_source.borrow_mut().core_mut().pipe(
@@ -180,7 +195,11 @@ impl EmpiricalControlDemo {
                 pomdp_eval.clone() as StationRef,
                 sink.clone() as StationRef,
             ],
-            IterativeRunOptions { shuffle: false, max_ticks: Some(20), ..Default::default() },
+            IterativeRunOptions {
+                shuffle: false,
+                max_ticks: Some(20),
+                ..Default::default()
+            },
         );
 
         println!("================ Gramian degree reports (DES pipeline) ================");
@@ -217,7 +236,10 @@ impl EmpiricalControlDemo {
             .run();
             println!("\n--- {label} ---");
             println!("  CONTROLLABILITY");
-            println!("    W_c eigenvalues (min..max) : [{}]", self.vec(&wc.eigenvalues()));
+            println!(
+                "    W_c eigenvalues (min..max) : [{}]",
+                self.vec(&wc.eigenvalues())
+            );
             println!(
                 "    empirical reach-cloud var  : [{}]  (∝ W_c)",
                 self.vec(&mc_c.spread_eigenvalues)
@@ -234,7 +256,10 @@ impl EmpiricalControlDemo {
                 self.cond(wc.condition_number())
             );
             println!("  OBSERVABILITY");
-            println!("    W_o eigenvalues (min..max) : [{}]", self.vec(&wo.eigenvalues()));
+            println!(
+                "    W_o eigenvalues (min..max) : [{}]",
+                self.vec(&wo.eigenvalues())
+            );
             println!(
                 "    recon error (mean/worst)   : {:.4} / {:.4}  @ noise 0.02",
                 mc_o.mean_reconstruction_error, mc_o.worst_reconstruction_error
@@ -266,9 +291,14 @@ impl EmpiricalControlDemo {
 
         // ── POMDP distinguishability (belief tracking) ──
         println!("\n================ POMDP observability via belief tracking ================");
-        for (name, pomdp) in [("distinct", Self::distinct_pomdp()), ("aliased", Self::aliased_pomdp())] {
-            let r = MonteCarloDistinguishability::new(&pomdp)
-                .run(&RandomPolicyOpts { episodes: Some(800), ..Default::default() });
+        for (name, pomdp) in [
+            ("distinct", Self::distinct_pomdp()),
+            ("aliased", Self::aliased_pomdp()),
+        ] {
+            let r = MonteCarloDistinguishability::new(&pomdp).run(&RandomPolicyOpts {
+                episodes: Some(800),
+                ..Default::default()
+            });
             println!(
                 "  {name}: belief hit-prob per state = [{}]   residual entropy = [{}] bits",
                 self.vec(&r.hit_probability),
@@ -289,7 +319,13 @@ impl EmpiricalControlDemo {
 
     fn vec(&self, v: &[f64]) -> String {
         v.iter()
-            .map(|x| if x.is_finite() { format!("{x:.4}") } else { "∞".to_string() })
+            .map(|x| {
+                if x.is_finite() {
+                    format!("{x:.4}")
+                } else {
+                    "∞".to_string()
+                }
+            })
             .collect::<Vec<_>>()
             .join(", ")
     }

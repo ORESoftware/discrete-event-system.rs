@@ -41,7 +41,9 @@ use crate::des::general::des_base::population_optimizer::{
 use crate::des::general::des_base::preconditions::Preconditions;
 use crate::des::general::des_base::runner::{run_iterative_des, IterativeRunOptions};
 use crate::des::general::des_base::station::{DESStation, StationCore, StationRef};
-use crate::des::general::des_base::validation::{intrinsic_check, monotonicity_validator, Monotonicity};
+use crate::des::general::des_base::validation::{
+    intrinsic_check, monotonicity_validator, Monotonicity,
+};
 use crate::des::general::genetic_tsp::{
     held_karp_exact, inversion_mutate, is_permutation, order_crossover, swap_mutate, tour_length,
     tournament_select, InitMode, TSPInstance, Tour,
@@ -118,7 +120,9 @@ pub struct TSPGAOptimizer {
 }
 
 fn downcast_ga(s: &dyn DESStation) -> &TSPGAOptimizer {
-    s.as_any().downcast_ref::<TSPGAOptimizer>().expect("validator received a non-TSPGAOptimizer station")
+    s.as_any()
+        .downcast_ref::<TSPGAOptimizer>()
+        .expect("validator received a non-TSPGAOptimizer station")
 }
 
 impl TSPGAOptimizer {
@@ -207,7 +211,11 @@ impl TSPGAOptimizer {
                         if cache.is_none() {
                             *cache = Some(held_karp_exact(&st.inst).length);
                         }
-                        format!("best={:.4}  heldKarp={:.4}", st.get_best_length(), cache.unwrap())
+                        format!(
+                            "best={:.4}  heldKarp={:.4}",
+                            st.get_best_length(),
+                            cache.unwrap()
+                        )
                     })),
                     Some("ga-ground-truth".to_string()),
                     Some("best length is below the global optimum".to_string()),
@@ -354,13 +362,15 @@ pub fn run_tsp_ga_des(
     let inst_init = inst.clone();
     let inst_val = inst.clone();
     let mut src_rng = rng.clone();
-    let source = Rc::new(RefCell::new(PopulationSourceStation::<Tour>::with_validator(
-        "ga-source",
-        move || initial_tour_population(&inst_init, opts.pop_size, init_mode, &mut src_rng),
-        move |population: &[Tour]| {
-            validate_initial_tour_population("ga-source", &inst_val, opts.pop_size, population)
-        },
-    )));
+    let source = Rc::new(RefCell::new(
+        PopulationSourceStation::<Tour>::with_validator(
+            "ga-source",
+            move || initial_tour_population(&inst_init, opts.pop_size, init_mode, &mut src_rng),
+            move |population: &[Tour]| {
+                validate_initial_tour_population("ga-source", &inst_val, opts.pop_size, population)
+            },
+        ),
+    ));
 
     let opt = Rc::new(RefCell::new(TSPGAOptimizer::new(
         "ga",
@@ -383,9 +393,16 @@ pub fn run_tsp_ga_des(
     );
 
     // TS forces `shuffle` off here (overriding the runner's default of `true`).
-    let run_opts = des_options.unwrap_or(IterativeRunOptions { shuffle: false, ..Default::default() });
+    let run_opts = des_options.unwrap_or(IterativeRunOptions {
+        shuffle: false,
+        ..Default::default()
+    });
     let summary = run_iterative_des(
-        vec![source as StationRef, opt.clone() as StationRef, sink.clone() as StationRef],
+        vec![
+            source as StationRef,
+            opt.clone() as StationRef,
+            sink.clone() as StationRef,
+        ],
         run_opts,
     );
 
@@ -491,8 +508,12 @@ fn validate_initial_tour_population(
             None,
         )
         .unwrap_or_else(|e| panic!("{e}"));
-        Preconditions::finite(source_id, &format!("initial population[{i}] length"), tour_length(inst, tour))
-            .unwrap_or_else(|e| panic!("{e}"));
+        Preconditions::finite(
+            source_id,
+            &format!("initial population[{i}] length"),
+            tour_length(inst, tour),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
     }
 }
 
@@ -530,14 +551,20 @@ mod tests {
         let optimal = held_karp_exact(&inst).length;
         let result = run_tsp_ga_des(inst.clone(), opts(12_345), None);
 
-        assert!(is_permutation(&result.best_tour, inst.n), "best must be a permutation");
+        assert!(
+            is_permutation(&result.best_tour, inst.n),
+            "best must be a permutation"
+        );
         assert!(
             result.best_length <= optimal * 1.05,
             "GA best {} should be near optimal {}",
             result.best_length,
             optimal
         );
-        assert!(result.best_length >= optimal - 1e-9, "cannot beat the global optimum");
+        assert!(
+            result.best_length >= optimal - 1e-9,
+            "cannot beat the global optimum"
+        );
         assert_eq!(result.generations, 120);
         assert_eq!(result.best_history.len(), 121); // bootstrap + one per generation
     }
@@ -547,7 +574,12 @@ mod tests {
         let inst = build_pentagon_tsp(6, 40.0);
         let result = run_tsp_ga_des(inst, opts(7), None);
         for w in result.best_history.windows(2) {
-            assert!(w[1] <= w[0] + 1e-9, "best_history not monotone: {} -> {}", w[0], w[1]);
+            assert!(
+                w[1] <= w[0] + 1e-9,
+                "best_history not monotone: {} -> {}",
+                w[0],
+                w[1]
+            );
         }
     }
 

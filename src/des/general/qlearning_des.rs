@@ -84,7 +84,11 @@ pub struct QLearningAgent {
 impl QLearningAgent {
     /// Mirrors `new QLearningAgent(id, {...opts, rng})`. The `rng` is threaded
     /// through `q_init` at construction and then stored in [`RLAgentCore`].
-    pub fn new(id: impl Into<String>, opts: QLearningOptions, mut rng: Box<dyn RandomSource>) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        opts: QLearningOptions,
+        mut rng: Box<dyn RandomSource>,
+    ) -> Self {
         let num_states = opts.num_states;
         let num_actions = opts.num_actions;
         let q: Vec<Vec<f64>> = (0..num_states)
@@ -117,7 +121,9 @@ impl QLearningAgent {
         let policy = self
             .q
             .iter()
-            .map(|row| arg_max_with_tie_break(row, &mut RngRef(&mut *rng), ARGMAX_EPS_DEFAULT).unwrap_or(0))
+            .map(|row| {
+                arg_max_with_tie_break(row, &mut RngRef(&mut *rng), ARGMAX_EPS_DEFAULT).unwrap_or(0)
+            })
             .collect();
         self.agent.rng = Some(rng);
         policy
@@ -163,12 +169,22 @@ impl RLAgentStation<usize, usize> for QLearningAgent {
         arg_max_with_tie_break(&self.q[*state], &mut RngRef(rng), ARGMAX_EPS_DEFAULT).unwrap_or(0)
     }
 
-    fn update(&mut self, state: &usize, action: &usize, reward: f64, next_state: &usize, done: bool) {
+    fn update(
+        &mut self,
+        state: &usize,
+        action: &usize,
+        reward: f64,
+        next_state: &usize,
+        done: bool,
+    ) {
         let qsa = self.q[*state][*action];
         let best_next = if done {
             0.0
         } else {
-            self.q[*next_state].iter().copied().fold(f64::NEG_INFINITY, f64::max)
+            self.q[*next_state]
+                .iter()
+                .copied()
+                .fold(f64::NEG_INFINITY, f64::max)
         };
         let target = reward + if done { 0.0 } else { self.gamma * best_next };
         self.q[*state][*action] = qsa + self.alpha * (target - qsa);
@@ -176,7 +192,10 @@ impl RLAgentStation<usize, usize> for QLearningAgent {
 
     fn end_of_episode(&mut self, _episode_id: f64) {
         if let Some(decay) = self.epsilon_decay {
-            self.current_epsilon = self.epsilon_min.unwrap_or(0.0).max(self.current_epsilon * decay);
+            self.current_epsilon = self
+                .epsilon_min
+                .unwrap_or(0.0)
+                .max(self.current_epsilon * decay);
         }
     }
 }
@@ -318,7 +337,11 @@ mod tests {
             self.next
         }
         fn step(&mut self, _state: usize, action: usize) -> StepResult<usize> {
-            StepResult { next_state: 0, reward: if action == 1 { 1.0 } else { 0.0 }, done: true }
+            StepResult {
+                next_state: 0,
+                reward: if action == 1 { 1.0 } else { 0.0 },
+                done: true,
+            }
         }
     }
 
@@ -397,6 +420,9 @@ mod tests {
         let window = 100;
         let first: f64 = h[..window].iter().sum::<f64>() / window as f64;
         let last: f64 = h[h.len() - window..].iter().sum::<f64>() / window as f64;
-        assert!(last > first, "mean reward should rise: first {first}, last {last}");
+        assert!(
+            last > first,
+            "mean reward should rise: first {first}, last {last}"
+        );
     }
 }

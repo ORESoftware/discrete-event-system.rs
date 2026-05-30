@@ -75,7 +75,11 @@ pub struct ControlMoveToken {
 
 impl ControlMoveToken {
     pub fn new(control: Vec<f64>, tick: f64, time: f64) -> Self {
-        ControlMoveToken { control, tick, time }
+        ControlMoveToken {
+            control,
+            tick,
+            time,
+        }
     }
 }
 
@@ -88,7 +92,11 @@ pub struct DisturbanceMoveToken {
 
 impl DisturbanceMoveToken {
     pub fn new(disturbance: Vec<f64>, tick: f64, time: f64) -> Self {
-        DisturbanceMoveToken { disturbance, tick, time }
+        DisturbanceMoveToken {
+            disturbance,
+            tick,
+            time,
+        }
     }
 }
 
@@ -136,9 +144,27 @@ impl ClosedLoopPlantCore {
         require(Preconditions::non_empty(id, "x0", &opts.x0));
         require(Preconditions::all_finite(id, "x0", &opts.x0));
         require(Preconditions::positive(id, "dt", opts.dt));
-        require(Preconditions::integer_in_range(id, "numSteps", opts.num_steps as f64, 1.0, 1e9));
-        require(Preconditions::integer_in_range(id, "controlDim", opts.control_dim as f64, 1.0, 1e6));
-        require(Preconditions::integer_in_range(id, "disturbanceDim", opts.disturbance_dim as f64, 1.0, 1e6));
+        require(Preconditions::integer_in_range(
+            id,
+            "numSteps",
+            opts.num_steps as f64,
+            1.0,
+            1e9,
+        ));
+        require(Preconditions::integer_in_range(
+            id,
+            "controlDim",
+            opts.control_dim as f64,
+            1.0,
+            1e6,
+        ));
+        require(Preconditions::integer_in_range(
+            id,
+            "disturbanceDim",
+            opts.disturbance_dim as f64,
+            1.0,
+            1e6,
+        ));
         let state = opts.x0.clone();
         ClosedLoopPlantCore {
             state: state.clone(),
@@ -175,7 +201,13 @@ pub trait ClosedLoopPlantStation: DESStation {
     // ── HOOKS (optional override) ─────────────────────────────────────────────
 
     /// Per-step cost. Default: ‖x'‖² + 0.01‖u‖² + 0.01‖w‖².
-    fn stage_cost(&self, _state: &[f64], control: &[f64], disturbance: &[f64], next_state: &[f64]) -> f64 {
+    fn stage_cost(
+        &self,
+        _state: &[f64],
+        control: &[f64],
+        disturbance: &[f64],
+        next_state: &[f64],
+    ) -> f64 {
         let state_cost: f64 = next_state.iter().map(|x| x * x).sum();
         let control_cost: f64 = control.iter().map(|u| u * u).sum();
         let disturbance_cost: f64 = disturbance.iter().map(|w| w * w).sum();
@@ -196,9 +228,27 @@ pub trait ClosedLoopPlantStation: DESStation {
         require(Preconditions::non_empty(cls, "x0", &c.state));
         require(Preconditions::all_finite(cls, "x0", &c.state));
         require(Preconditions::positive(cls, "dt", c.dt));
-        require(Preconditions::integer_in_range(cls, "numSteps", c.num_steps as f64, 1.0, 1e9));
-        require(Preconditions::integer_in_range(cls, "controlDim", c.control_dim as f64, 1.0, 1e6));
-        require(Preconditions::integer_in_range(cls, "disturbanceDim", c.disturbance_dim as f64, 1.0, 1e6));
+        require(Preconditions::integer_in_range(
+            cls,
+            "numSteps",
+            c.num_steps as f64,
+            1.0,
+            1e9,
+        ));
+        require(Preconditions::integer_in_range(
+            cls,
+            "controlDim",
+            c.control_dim as f64,
+            1.0,
+            1e6,
+        ));
+        require(Preconditions::integer_in_range(
+            cls,
+            "disturbanceDim",
+            c.disturbance_dim as f64,
+            1.0,
+            1e6,
+        ));
     }
 
     // ── TEMPLATE METHOD (final) ───────────────────────────────────────────────
@@ -220,7 +270,9 @@ pub trait ClosedLoopPlantStation: DESStation {
         if let Some(t) = controls.last() {
             self.plant_core_mut().control = t.control.clone();
         }
-        let disturbances = self.core_mut().drain::<DisturbanceMoveToken>(CH_DISTURBANCE);
+        let disturbances = self
+            .core_mut()
+            .drain::<DisturbanceMoveToken>(CH_DISTURBANCE);
         if let Some(t) = disturbances.last() {
             self.plant_core_mut().disturbance = t.disturbance.clone();
         }
@@ -230,9 +282,19 @@ pub trait ClosedLoopPlantStation: DESStation {
         let disturbance = self.plant_core().disturbance.clone();
         let control_dim = self.plant_core().control_dim;
         let disturbance_dim = self.plant_core().disturbance_dim;
-        require(Preconditions::length_eq(&id, "control", &control, control_dim));
+        require(Preconditions::length_eq(
+            &id,
+            "control",
+            &control,
+            control_dim,
+        ));
         require(Preconditions::all_finite(&id, "control", &control));
-        require(Preconditions::length_eq(&id, "disturbance", &disturbance, disturbance_dim));
+        require(Preconditions::length_eq(
+            &id,
+            "disturbance",
+            &disturbance,
+            disturbance_dim,
+        ));
         require(Preconditions::all_finite(&id, "disturbance", &disturbance));
 
         let tick = self.plant_core().tick;
@@ -245,7 +307,12 @@ pub trait ClosedLoopPlantStation: DESStation {
 
         let dt = self.plant_core().dt;
         let next = self.dynamics(&prev, &control, &disturbance, dt);
-        require(Preconditions::length_eq(&id, "next state", &next, prev.len()));
+        require(Preconditions::length_eq(
+            &id,
+            "next state",
+            &next,
+            prev.len(),
+        ));
         require(Preconditions::all_finite(&id, "next state", &next));
         let cost = self.stage_cost(&prev, &control, &disturbance, &next);
         require(Preconditions::finite(&id, "stage cost", cost));
@@ -306,8 +373,17 @@ pub struct FeedbackPolicyCore {
 
 impl FeedbackPolicyCore {
     pub fn new(id: &str, control_dim: usize) -> Self {
-        require(Preconditions::integer_in_range(id, "controlDim", control_dim as f64, 1.0, 1e6));
-        FeedbackPolicyCore { control_dim, control_history: Vec::new() }
+        require(Preconditions::integer_in_range(
+            id,
+            "controlDim",
+            control_dim as f64,
+            1.0,
+            1e6,
+        ));
+        FeedbackPolicyCore {
+            control_dim,
+            control_history: Vec::new(),
+        }
     }
 }
 
@@ -333,7 +409,9 @@ pub trait FeedbackPolicyStation: DESStation {
     }
 
     fn feedback_run_time_step(&mut self) {
-        let observations = self.core_mut().drain::<StateObservationToken>(CH_OBSERVATION);
+        let observations = self
+            .core_mut()
+            .drain::<StateObservationToken>(CH_OBSERVATION);
         let id = self.id().to_string();
         let dim = self.feedback_core().control_dim;
         for obs in observations {
@@ -359,8 +437,17 @@ pub struct DisturbancePolicyCore {
 
 impl DisturbancePolicyCore {
     pub fn new(id: &str, disturbance_dim: usize) -> Self {
-        require(Preconditions::integer_in_range(id, "disturbanceDim", disturbance_dim as f64, 1.0, 1e6));
-        DisturbancePolicyCore { disturbance_dim, disturbance_history: Vec::new() }
+        require(Preconditions::integer_in_range(
+            id,
+            "disturbanceDim",
+            disturbance_dim as f64,
+            1.0,
+            1e6,
+        ));
+        DisturbancePolicyCore {
+            disturbance_dim,
+            disturbance_history: Vec::new(),
+        }
     }
 }
 
@@ -386,14 +473,18 @@ pub trait DisturbancePolicyStation: DESStation {
     }
 
     fn disturbance_run_time_step(&mut self) {
-        let observations = self.core_mut().drain::<StateObservationToken>(CH_OBSERVATION);
+        let observations = self
+            .core_mut()
+            .drain::<StateObservationToken>(CH_OBSERVATION);
         let id = self.id().to_string();
         let dim = self.disturbance_core().disturbance_dim;
         for obs in observations {
             let w = self.policy(obs.as_ref());
             require(Preconditions::length_eq(&id, "disturbance", &w, dim));
             require(Preconditions::all_finite(&id, "disturbance", &w));
-            self.disturbance_core_mut().disturbance_history.push(w.clone());
+            self.disturbance_core_mut()
+                .disturbance_history
+                .push(w.clone());
             let tok = DisturbanceMoveToken::new(w, obs.tick, obs.time);
             self.core_mut().emit(Rc::new(tok), CH_DISTURBANCE);
         }
@@ -406,10 +497,22 @@ pub trait DisturbancePolicyStation: DESStation {
 
 /// Wire the plant ↔ controller ↔ adversary edges (by shared handle).
 pub fn wire_closed_loop_game(plant: &StationRef, controller: &StationRef, adversary: &StationRef) {
-    plant.borrow_mut().core_mut().pipe(controller.clone(), CH_OBSERVATION, CH_OBSERVATION);
-    plant.borrow_mut().core_mut().pipe(adversary.clone(), CH_OBSERVATION, CH_OBSERVATION);
-    controller.borrow_mut().core_mut().pipe(plant.clone(), CH_CONTROL, CH_CONTROL);
-    adversary.borrow_mut().core_mut().pipe(plant.clone(), CH_DISTURBANCE, CH_DISTURBANCE);
+    plant
+        .borrow_mut()
+        .core_mut()
+        .pipe(controller.clone(), CH_OBSERVATION, CH_OBSERVATION);
+    plant
+        .borrow_mut()
+        .core_mut()
+        .pipe(adversary.clone(), CH_OBSERVATION, CH_OBSERVATION);
+    controller
+        .borrow_mut()
+        .core_mut()
+        .pipe(plant.clone(), CH_CONTROL, CH_CONTROL);
+    adversary
+        .borrow_mut()
+        .core_mut()
+        .pipe(plant.clone(), CH_DISTURBANCE, CH_DISTURBANCE);
 }
 
 /// Options for [`run_closed_loop_game`].
@@ -452,8 +555,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::station::StationCore;
+    use super::*;
     use std::any::Any;
 
     /// Scalar plant x_{k+1} = x_k + dt·(u_k + w_k).
@@ -464,7 +567,10 @@ mod tests {
 
     impl ScalarPlant {
         fn new(id: &str, opts: ClosedLoopPlantOptions) -> Self {
-            ScalarPlant { core: StationCore::new(id), plant: ClosedLoopPlantCore::new(id, opts) }
+            ScalarPlant {
+                core: StationCore::new(id),
+                plant: ClosedLoopPlantCore::new(id, opts),
+            }
         }
     }
 
@@ -497,7 +603,13 @@ mod tests {
         fn plant_core_mut(&mut self) -> &mut ClosedLoopPlantCore {
             &mut self.plant
         }
-        fn dynamics(&self, state: &[f64], control: &[f64], disturbance: &[f64], dt: f64) -> Vec<f64> {
+        fn dynamics(
+            &self,
+            state: &[f64],
+            control: &[f64],
+            disturbance: &[f64],
+            dt: f64,
+        ) -> Vec<f64> {
             vec![state[0] + dt * (control[0] + disturbance[0])]
         }
     }
@@ -511,7 +623,11 @@ mod tests {
 
     impl PController {
         fn new(id: &str, k: f64) -> Self {
-            PController { core: StationCore::new(id), fb: FeedbackPolicyCore::new(id, 1), k }
+            PController {
+                core: StationCore::new(id),
+                fb: FeedbackPolicyCore::new(id, 1),
+                k,
+            }
         }
     }
 
@@ -558,7 +674,11 @@ mod tests {
 
     impl BoundedAdversary {
         fn new(id: &str, bound: f64) -> Self {
-            BoundedAdversary { core: StationCore::new(id), dist: DisturbancePolicyCore::new(id, 1), bound }
+            BoundedAdversary {
+                core: StationCore::new(id),
+                dist: DisturbancePolicyCore::new(id, 1),
+                bound,
+            }
         }
     }
 
@@ -593,13 +713,25 @@ mod tests {
         }
         fn policy(&mut self, observation: &StateObservationToken) -> Vec<f64> {
             let s = observation.state[0];
-            let sign = if s > 0.0 { 1.0 } else if s < 0.0 { -1.0 } else { 0.0 };
+            let sign = if s > 0.0 {
+                1.0
+            } else if s < 0.0 {
+                -1.0
+            } else {
+                0.0
+            };
             vec![self.bound * sign]
         }
     }
 
     fn plant_opts() -> ClosedLoopPlantOptions {
-        ClosedLoopPlantOptions { x0: vec![1.0], dt: 1.0, num_steps: 60, control_dim: 1, disturbance_dim: 1 }
+        ClosedLoopPlantOptions {
+            x0: vec![1.0],
+            dt: 1.0,
+            num_steps: 60,
+            control_dim: 1,
+            disturbance_dim: 1,
+        }
     }
 
     #[test]
@@ -611,16 +743,28 @@ mod tests {
         let plant = Rc::new(RefCell::new(ScalarPlant::new("plant", plant_opts())));
         let controller = Rc::new(RefCell::new(PController::new("ctrl", k)));
         let adversary = Rc::new(RefCell::new(BoundedAdversary::new("adv", bound)));
-        let summary = run_closed_loop_game(plant.clone(), controller.clone(), adversary.clone(), ClosedLoopGameRunOptions::default());
+        let summary = run_closed_loop_game(
+            plant.clone(),
+            controller.clone(),
+            adversary.clone(),
+            ClosedLoopGameRunOptions::default(),
+        );
         assert!(summary.ticks > 0);
 
         let final_state = plant.borrow().get_state()[0].abs();
         let steady = bound / (1.0 - k); // 0.2
-        assert!(final_state <= steady + 1e-6, "state not robustly bounded: {final_state} > {steady}");
+        assert!(
+            final_state <= steady + 1e-6,
+            "state not robustly bounded: {final_state} > {steady}"
+        );
 
         // Every emitted disturbance respected the bound.
         for w in &adversary.borrow().disturbance_core().disturbance_history {
-            assert!(w[0].abs() <= bound + 1e-12, "disturbance exceeded bound: {}", w[0]);
+            assert!(
+                w[0].abs() <= bound + 1e-12,
+                "disturbance exceeded bound: {}",
+                w[0]
+            );
         }
     }
 
@@ -630,8 +774,17 @@ mod tests {
         let controller = Rc::new(RefCell::new(PController::new("ctrl0", 0.5)));
         // bound = 0 ⇒ no disturbance; pure closed-loop contraction toward 0.
         let adversary = Rc::new(RefCell::new(BoundedAdversary::new("adv0", 0.0)));
-        run_closed_loop_game(plant.clone(), controller.clone(), adversary.clone(), ClosedLoopGameRunOptions::default());
-        assert!(plant.borrow().get_state()[0].abs() < 1e-6, "did not converge: {}", plant.borrow().get_state()[0]);
+        run_closed_loop_game(
+            plant.clone(),
+            controller.clone(),
+            adversary.clone(),
+            ClosedLoopGameRunOptions::default(),
+        );
+        assert!(
+            plant.borrow().get_state()[0].abs() < 1e-6,
+            "did not converge: {}",
+            plant.borrow().get_state()[0]
+        );
     }
 
     #[test]
@@ -639,7 +792,12 @@ mod tests {
         let plant = Rc::new(RefCell::new(ScalarPlant::new("plantT", plant_opts())));
         let controller = Rc::new(RefCell::new(PController::new("ctrlT", 0.5)));
         let adversary = Rc::new(RefCell::new(BoundedAdversary::new("advT", 0.05)));
-        run_closed_loop_game(plant.clone(), controller.clone(), adversary.clone(), ClosedLoopGameRunOptions::default());
+        run_closed_loop_game(
+            plant.clone(),
+            controller.clone(),
+            adversary.clone(),
+            ClosedLoopGameRunOptions::default(),
+        );
         let p = plant.borrow();
         let c = p.plant_core();
         assert_eq!(c.trace.len(), c.num_steps);

@@ -163,7 +163,11 @@ impl FeedForwardNetwork {
         validate_shape(&layers);
         let input_dim = layers[0].weights[0].len();
         let output_dim = layers[layers.len() - 1].biases.len();
-        FeedForwardNetwork { layers, input_dim, output_dim }
+        FeedForwardNetwork {
+            layers,
+            input_dim,
+            output_dim,
+        }
     }
 
     /// Build a randomly-initialised network. (TS `FeedForwardNetwork.random`,
@@ -176,16 +180,26 @@ impl FeedForwardNetwork {
         for k in 0..dims.len() - 1 {
             let fan_in = dims[k];
             let fan_out = dims[k + 1];
-            let limit = spec.weight_scale.unwrap_or_else(|| (6.0 / (fan_in + fan_out) as f64).sqrt());
+            let limit = spec
+                .weight_scale
+                .unwrap_or_else(|| (6.0 / (fan_in + fan_out) as f64).sqrt());
             let weights: Vec<Vec<f64>> = (0..fan_out)
-                .map(|_| (0..fan_in).map(|_| (2.0 * rng.next_float() - 1.0) * limit).collect())
+                .map(|_| {
+                    (0..fan_in)
+                        .map(|_| (2.0 * rng.next_float() - 1.0) * limit)
+                        .collect()
+                })
                 .collect();
             let activation = if k == dims.len() - 2 {
                 spec.output_activation
             } else {
                 spec.hidden_activation
             };
-            layers.push(DenseLayerConfig { weights, biases: vec![0.0; fan_out], activation });
+            layers.push(DenseLayerConfig {
+                weights,
+                biases: vec![0.0; fan_out],
+                activation,
+            });
         }
         FeedForwardNetwork::new(layers)
     }
@@ -196,7 +210,11 @@ impl FeedForwardNetwork {
     }
 
     /// Mean loss over a batch. (TS `trainBatch`.)
-    pub fn train_batch(&mut self, samples: &[(NumericVector, NumericVector)], learning_rate: f64) -> f64 {
+    pub fn train_batch(
+        &mut self,
+        samples: &[(NumericVector, NumericVector)],
+        learning_rate: f64,
+    ) -> f64 {
         let mut total = 0.0;
         for (input, target) in samples {
             total += self.train_sample(input, target, learning_rate).loss;
@@ -283,7 +301,12 @@ impl NeuralNetworkLike for FeedForwardNetwork {
 }
 
 impl TrainableNeuralNetwork for FeedForwardNetwork {
-    fn train_sample(&mut self, input: &[f64], target: &[f64], learning_rate: f64) -> TrainSampleResult {
+    fn train_sample(
+        &mut self,
+        input: &[f64],
+        target: &[f64],
+        learning_rate: f64,
+    ) -> TrainSampleResult {
         if learning_rate < 0.0 {
             panic!("learningRate must be non-negative, got {learning_rate}");
         }
@@ -550,13 +573,18 @@ pub fn run_supervised_neural_net_des<N: TrainableNeuralNetwork + Clone + 'static
     let max_ticks = params.epochs * ticks_per_epoch + 1000;
     let summary = run_iterative_des(
         vec![source as StationRef, trainer.clone() as StationRef],
-        IterativeRunOptions { shuffle: false, max_ticks: Some(max_ticks), ..Default::default() },
+        IterativeRunOptions {
+            shuffle: false,
+            max_ticks: Some(max_ticks),
+            ..Default::default()
+        },
     );
 
     let trainer_ref = trainer.borrow();
     let network = trainer_ref.get_network().clone();
     let loss_history = trainer_ref.loss_history.clone();
-    let predictions: Vec<NumericVector> = dataset.iter().map(|s| network.predict(&s.input)).collect();
+    let predictions: Vec<NumericVector> =
+        dataset.iter().map(|s| network.predict(&s.input)).collect();
 
     SupervisedNeuralNetDESResult {
         network,
@@ -570,10 +598,22 @@ pub fn run_supervised_neural_net_des<N: TrainableNeuralNetwork + Clone + 'static
 /// The canonical XOR truth table. (TS `XOR_DATASET`.)
 pub fn xor_dataset() -> Vec<SupervisedSample> {
     vec![
-        SupervisedSample { input: vec![0.0, 0.0], target: vec![0.0] },
-        SupervisedSample { input: vec![0.0, 1.0], target: vec![1.0] },
-        SupervisedSample { input: vec![1.0, 0.0], target: vec![1.0] },
-        SupervisedSample { input: vec![1.0, 1.0], target: vec![0.0] },
+        SupervisedSample {
+            input: vec![0.0, 0.0],
+            target: vec![0.0],
+        },
+        SupervisedSample {
+            input: vec![0.0, 1.0],
+            target: vec![1.0],
+        },
+        SupervisedSample {
+            input: vec![1.0, 0.0],
+            target: vec![1.0],
+        },
+        SupervisedSample {
+            input: vec![1.0, 1.0],
+            target: vec![0.0],
+        },
     ]
 }
 
@@ -589,7 +629,9 @@ pub struct XorNeuralNetOptions {
 }
 
 /// Train a small MLP to learn XOR. (TS `runXorNeuralNetDES`.)
-pub fn run_xor_neural_net_des(opts: XorNeuralNetOptions) -> SupervisedNeuralNetDESResult<FeedForwardNetwork> {
+pub fn run_xor_neural_net_des(
+    opts: XorNeuralNetOptions,
+) -> SupervisedNeuralNetDESResult<FeedForwardNetwork> {
     let seed = opts.seed.unwrap_or(7);
     let mut rng = mulberry32(seed);
     let network = FeedForwardNetwork::random(
@@ -666,7 +708,9 @@ impl<S: Clone + 'static> NeuralQLearningAgent<S> {
     }
 
     pub fn predict_q(&self, state: &S) -> NumericVector {
-        self.network.borrow().predict(&(self.opts.state_encoder)(state))
+        self.network
+            .borrow()
+            .predict(&(self.opts.state_encoder)(state))
     }
 
     pub fn get_epsilon(&self) -> f64 {
@@ -697,7 +741,10 @@ impl<S: Clone + 'static> DESStation for NeuralQLearningAgent<S> {
     fn assert_preconditions(&mut self) {
         let out = self.network.borrow().output_dim();
         if out != self.opts.num_actions {
-            panic!("network outputDim {out} must equal numActions {}", self.opts.num_actions);
+            panic!(
+                "network outputDim {out} must equal numActions {}",
+                self.opts.num_actions
+            );
         }
     }
 }
@@ -714,7 +761,10 @@ impl<S: Clone + 'static> RLAgentStation<S, usize> for NeuralQLearningAgent<S> {
         if rng.next_float() < self.current_epsilon {
             return (rng.next_float() * self.opts.num_actions as f64).floor() as usize;
         }
-        let q = self.network.borrow().predict(&(self.opts.state_encoder)(state));
+        let q = self
+            .network
+            .borrow()
+            .predict(&(self.opts.state_encoder)(state));
         arg_max_with_tie_break(&q, &mut RngRef(rng), ARGMAX_EPS_DEFAULT).unwrap_or(0)
     }
 
@@ -726,18 +776,28 @@ impl<S: Clone + 'static> RLAgentStation<S, usize> for NeuralQLearningAgent<S> {
         let add = if done {
             0.0
         } else {
-            let q_next = self.network.borrow().predict(&(self.opts.state_encoder)(next_state));
+            let q_next = self
+                .network
+                .borrow()
+                .predict(&(self.opts.state_encoder)(next_state));
             self.opts.gamma * q_next.iter().copied().fold(f64::NEG_INFINITY, f64::max)
         };
         target[*action] = reward + add;
-        let r = self.network.borrow_mut().train_sample(&x, &target, self.opts.alpha);
+        let r = self
+            .network
+            .borrow_mut()
+            .train_sample(&x, &target, self.opts.alpha);
         self.loss_history.push(r.loss);
         self.td_error_history.push(target[*action] - old_q);
     }
 
     fn end_of_episode(&mut self, _episode_id: f64) {
         if let Some(decay) = self.opts.epsilon_decay {
-            self.current_epsilon = self.opts.epsilon_min.unwrap_or(0.0).max(self.current_epsilon * decay);
+            self.current_epsilon = self
+                .opts
+                .epsilon_min
+                .unwrap_or(0.0)
+                .max(self.current_epsilon * decay);
         }
     }
 }
@@ -799,8 +859,9 @@ pub fn run_neural_q_learning_des(
     let num_actions = env.num_actions();
     let rng = SharedRng::new(seed);
 
-    let encoder: StateEncoder<f64> =
-        params.state_encoder.unwrap_or_else(|| one_hot_encoder(num_states));
+    let encoder: StateEncoder<f64> = params
+        .state_encoder
+        .unwrap_or_else(|| one_hot_encoder(num_states));
 
     let net_box: Box<dyn TrainableNeuralNetwork> = match params.network {
         Some(n) => n,
@@ -863,7 +924,9 @@ pub fn run_neural_q_learning_des(
     );
 
     let agent_ref = agent.borrow();
-    let q_values: Vec<Vec<f64>> = (0..num_states).map(|s| agent_ref.predict_q(&(s as f64))).collect();
+    let q_values: Vec<Vec<f64>> = (0..num_states)
+        .map(|s| agent_ref.predict_q(&(s as f64)))
+        .collect();
     let policy: Vec<usize> = q_values
         .iter()
         .map(|row| arg_max_with_tie_break(row, &mut rng.clone(), ARGMAX_EPS_DEFAULT).unwrap_or(0))
@@ -923,9 +986,16 @@ pub struct NeuralODEOptions {
 /// false). (TS `solveNeuralODE`.)
 pub fn solve_neural_ode(network: &dyn NeuralNetworkLike, opts: &NeuralODEOptions) -> ODETrace {
     let include_time = opts.include_time.unwrap_or(false);
-    let input_dim = if include_time { opts.y0.len() + 1 } else { opts.y0.len() };
+    let input_dim = if include_time {
+        opts.y0.len() + 1
+    } else {
+        opts.y0.len()
+    };
     if network.input_dim() != input_dim {
-        panic!("neural ODE network inputDim {} must equal {input_dim}", network.input_dim());
+        panic!(
+            "neural ODE network inputDim {} must equal {input_dim}",
+            network.input_dim()
+        );
     }
     if network.output_dim() != opts.y0.len() {
         panic!(
@@ -950,9 +1020,7 @@ pub fn solve_neural_ode(network: &dyn NeuralNetworkLike, opts: &NeuralODEOptions
         NeuralODESolverName::Euler => {
             EulerIntegrator::new(dt).transform(IVP { f: rhs, y0, t0, t1 })
         }
-        NeuralODESolverName::Heun => {
-            HeunIntegrator::new(dt).transform(IVP { f: rhs, y0, t0, t1 })
-        }
+        NeuralODESolverName::Heun => HeunIntegrator::new(dt).transform(IVP { f: rhs, y0, t0, t1 }),
         NeuralODESolverName::Rk4 => RK4Integrator::new(dt).transform(IVP { f: rhs, y0, t0, t1 }),
         NeuralODESolverName::Rk45 => {
             let tuning = opts.rk45.clone().unwrap_or_default();
@@ -995,7 +1063,10 @@ impl<N: NeuralNetworkLike + 'static> NeuralODESolverStation<N> {
     pub const CH_SOLUTION: &'static str = "solution";
 
     pub fn new(id: impl Into<String>, network: N) -> Self {
-        NeuralODESolverStation { core: StationCore::new(id), network }
+        NeuralODESolverStation {
+            core: StationCore::new(id),
+            network,
+        }
     }
 }
 
@@ -1016,7 +1087,10 @@ impl<N: NeuralNetworkLike + 'static> DESStation for NeuralODESolverStation<N> {
         let requests = self.core.drain::<NeuralODESolveToken>(Self::CH_SOLVE);
         for req in requests {
             let trace = solve_neural_ode(&self.network as &dyn NeuralNetworkLike, &req.options);
-            let token = NeuralODESolutionToken { id: req.id.clone(), trace };
+            let token = NeuralODESolutionToken {
+                id: req.id.clone(),
+                trace,
+            };
             self.core.emit(Rc::new(token), Self::CH_SOLUTION);
         }
     }
@@ -1034,7 +1108,10 @@ impl NeuralPredictionSink {
     pub const CH_PREDICTION: &'static str = "prediction";
 
     pub fn new(id: impl Into<String>) -> Self {
-        NeuralPredictionSink { core: StationCore::new(id), predictions: Vec::new() }
+        NeuralPredictionSink {
+            core: StationCore::new(id),
+            predictions: Vec::new(),
+        }
     }
 }
 
@@ -1100,10 +1177,22 @@ mod tests {
             activation: ActivationName::Linear,
         }]);
         let dataset = vec![
-            SupervisedSample { input: vec![0.0], target: vec![1.0] },
-            SupervisedSample { input: vec![1.0], target: vec![3.0] },
-            SupervisedSample { input: vec![2.0], target: vec![5.0] },
-            SupervisedSample { input: vec![3.0], target: vec![7.0] },
+            SupervisedSample {
+                input: vec![0.0],
+                target: vec![1.0],
+            },
+            SupervisedSample {
+                input: vec![1.0],
+                target: vec![3.0],
+            },
+            SupervisedSample {
+                input: vec![2.0],
+                target: vec![5.0],
+            },
+            SupervisedSample {
+                input: vec![3.0],
+                target: vec![7.0],
+            },
         ];
         let result = run_supervised_neural_net_des(SupervisedRunParams {
             network,

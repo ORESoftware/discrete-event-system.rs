@@ -51,7 +51,7 @@ use crate::des::r#abstract::interfaces::{
     EntityGraphData, HasEntityValidation, HasInput, HasInternalQueue, HasManyInputConnections,
     HasManyOutputConnections, HasOutput,
 };
-use crate::des::r#abstract::r#abstract::{Entity, EntityCore, EntityConnection};
+use crate::des::r#abstract::r#abstract::{Entity, EntityConnection, EntityCore};
 use crate::des::random_variables::rv::RandomVariable;
 use crate::des::shared::iterable_int::IterableInt;
 use crate::des::shared::precision::{bgn, to_f64, Decimal};
@@ -101,7 +101,11 @@ impl ProcessorTag for EntityProcessor {}
 
 impl EntityProcessor {
     /// `new(id, { rv, outputRouting = 'random' })`.
-    pub fn new(id: String, rv: Box<dyn RandomVariable>, output_routing: OutputRoutingPolicy) -> Self {
+    pub fn new(
+        id: String,
+        rv: Box<dyn RandomVariable>,
+        output_routing: OutputRoutingPolicy,
+    ) -> Self {
         EntityProcessor {
             base: QueueEntity::new(id, QueueOpts { xx: Some(true) }),
             concurrency: 5,
@@ -139,7 +143,10 @@ impl EntityProcessor {
 
     fn add_to_processing_histogram(&mut self, time_step: Decimal) {
         let size = self.processing_queue.len() as i64;
-        let e = self.processing_queue_histogram.entry(size).or_insert(bgn(0.0));
+        let e = self
+            .processing_queue_histogram
+            .entry(size)
+            .or_insert(bgn(0.0));
         *e += time_step;
     }
 
@@ -260,7 +267,8 @@ impl Entity for EntityProcessor {
                 };
                 if target.borrow_mut().accept_item(v.clone()) {
                     if let Some(ix) = connections.iter().position(|c| Rc::ptr_eq(c, conn)) {
-                        self.output_router.mark_accepted_index(connections.len(), ix);
+                        self.output_router
+                            .mark_accepted_index(connections.len(), ix);
                     }
                     // setTimeInOutputQueue + bumpHistogram: omitted (see module note).
                     target.borrow_mut().take_item(v.clone());
@@ -307,7 +315,8 @@ impl Entity for EntityProcessor {
                 };
                 if target.borrow_mut().accept_item(next.clone()) {
                     if let Some(ix) = connections.iter().position(|c| Rc::ptr_eq(c, conn)) {
-                        self.output_router.mark_accepted_index(connections.len(), ix);
+                        self.output_router
+                            .mark_accepted_index(connections.len(), ix);
                     }
                     target.borrow_mut().take_item(next.clone());
                 } else {
@@ -429,9 +438,9 @@ impl HasManyOutputConnections for EntityProcessor {
 mod tests {
     use super::*;
     use crate::des::entity_moving::moving::ProcessableMovingEntity;
+    use crate::des::general::time_accrued::{reset_global_clock, set_step_size};
     use crate::des::random_variables::rv::BernoulliRandomVariable;
     use crate::des::shared::capabilities::SeededRandom;
-    use crate::des::general::time_accrued::{reset_global_clock, set_step_size};
 
     fn rv() -> Box<dyn RandomVariable> {
         Box::new(BernoulliRandomVariable::new(Box::new(SeededRandom::new(5))))
@@ -442,7 +451,8 @@ mod tests {
         reset_global_clock();
         set_step_size(bgn(0.1));
         let mut p = EntityProcessor::new("proc1".to_string(), rv(), OutputRoutingPolicy::Random);
-        let m: Rc<RefCell<dyn MovingEntity>> = Rc::new(RefCell::new(ProcessableMovingEntity::new()));
+        let m: Rc<RefCell<dyn MovingEntity>> =
+            Rc::new(RefCell::new(ProcessableMovingEntity::new()));
         p.take_item(m.clone());
         // under concurrency, the item promotes straight into the processing queue.
         assert_eq!(p.processing_queue.len(), 1);

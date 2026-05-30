@@ -52,7 +52,9 @@ impl StochasticSdeReport {
             log: Some(log),
         });
 
-        let out = std::path::Path::new("out").join("stochastic-sde").join("report.html");
+        let out = std::path::Path::new("out")
+            .join("stochastic-sde")
+            .join("report.html");
         if let Some(dir) = out.parent() {
             let _ = std::fs::create_dir_all(dir);
         }

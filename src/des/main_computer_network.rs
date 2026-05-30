@@ -40,14 +40,25 @@ pub fn run() {
 
     println!("# Computer-network DES");
     println!("# stationary hosts/routers/switches/links + moving packets");
-    println!("# scenario={}", if scenario == "baseline" { "baseline" } else { "bottleneck" });
+    println!(
+        "# scenario={}",
+        if scenario == "baseline" {
+            "baseline"
+        } else {
+            "bottleneck"
+        }
+    );
     println!(
         "# nodes={}, links={}, flows={}",
         problem.nodes.len(),
         problem.links.len(),
         problem.flows.len()
     );
-    println!("# routing={}, simulated={} ms", result.routing_metric, fmt(result.total_simulated_ms, 1));
+    println!(
+        "# routing={}, simulated={} ms",
+        result.routing_metric,
+        fmt(result.total_simulated_ms, 1)
+    );
     println!();
 
     println!("## Flow summary");
@@ -57,8 +68,14 @@ pub fn run() {
     println!("  active at stop:    {}", result.active_packets);
     println!("  max active:        {}", result.max_active_packets);
     println!("  delivery ratio:    {}", fmt(result.delivery_ratio, 4));
-    println!("  offered load:      {} Mbps", fmt(result.offered_load_mbps, 4));
-    println!("  wire throughput:   {} Mbps", fmt(result.throughput_mbps, 4));
+    println!(
+        "  offered load:      {} Mbps",
+        fmt(result.offered_load_mbps, 4)
+    );
+    println!(
+        "  wire throughput:   {} Mbps",
+        fmt(result.throughput_mbps, 4)
+    );
     println!("  goodput:           {} Mbps", fmt(result.goodput_mbps, 4));
     println!("  total cost:        {}", fmt(result.total_cost, 6));
     println!();
@@ -132,7 +149,15 @@ pub fn run() {
     }
     if result.time_series.len() > 8 {
         println!("  ...");
-        for s in result.time_series.iter().rev().take(4).collect::<Vec<_>>().into_iter().rev() {
+        for s in result
+            .time_series
+            .iter()
+            .rev()
+            .take(4)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+        {
             println!(
                 "  t={:>4}ms active={:>4} delivered={:>4} dropped={:>4}",
                 s.t_ms, s.active_packets, s.delivered_packets, s.dropped_packets
@@ -252,6 +277,9 @@ mod cn {
         NetworkProblem::default()
     }
     pub fn run_computer_network_simulation(_p: &NetworkProblem) -> NetworkResult {
-        NetworkResult { routing_metric: "n/a (stub)".to_string(), ..Default::default() }
+        NetworkResult {
+            routing_metric: "n/a (stub)".to_string(),
+            ..Default::default()
+        }
     }
 }

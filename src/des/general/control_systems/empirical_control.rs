@@ -220,7 +220,11 @@ impl GramianDegree {
         let mut eig = SymmetricEigen::new(&gramian, 100);
         let values = eig.values();
         let vectors = eig.vectors();
-        GramianDegree { gramian, values, vectors }
+        GramianDegree {
+            gramian,
+            values,
+            vectors,
+        }
     }
     pub fn matrix(&self) -> &Matrix {
         &self.gramian
@@ -280,7 +284,9 @@ impl ControllabilityGramian {
             w = LinAlg::add(&w, &term);
             a_pow = LinAlg::mat_mul(&a_pow, &sys.ad);
         }
-        ControllabilityGramian { degree: GramianDegree::new(w) }
+        ControllabilityGramian {
+            degree: GramianDegree::new(w),
+        }
     }
 
     pub fn matrix(&self) -> &Matrix {
@@ -319,7 +325,10 @@ impl ControllabilityGramian {
 
     fn regularised(&self) -> Matrix {
         let n = self.degree.matrix().len();
-        LinAlg::add(self.degree.matrix(), &LinAlg::scale(&LinAlg::identity(n), 1e-12))
+        LinAlg::add(
+            self.degree.matrix(),
+            &LinAlg::scale(&LinAlg::identity(n), 1e-12),
+        )
     }
 }
 
@@ -347,7 +356,9 @@ impl ObservabilityGramian {
             w = LinAlg::add(&w, &term);
             a_pow = LinAlg::mat_mul(&a_pow, &sys.ad);
         }
-        ObservabilityGramian { degree: GramianDegree::new(w) }
+        ObservabilityGramian {
+            degree: GramianDegree::new(w),
+        }
     }
 
     pub fn matrix(&self) -> &Matrix {
@@ -399,7 +410,10 @@ impl MinEnergyController {
 
     /// Stacked input u* = Rᵀ (RRᵀ)⁻¹ target.
     pub fn input_for(&self, target: &[f64]) -> Vector {
-        LinAlg::mat_vec(&LinAlg::transpose(&self.r), &LinAlg::mat_vec(&self.rrt_inv, target))
+        LinAlg::mat_vec(
+            &LinAlg::transpose(&self.r),
+            &LinAlg::mat_vec(&self.rrt_inv, target),
+        )
     }
 
     /// The state actually reached by u*.
@@ -585,7 +599,10 @@ impl<'a> MonteCarloObservability<'a> {
             &LinAlg::mat_mul(&LinAlg::transpose(&o), &o),
             &LinAlg::scale(&LinAlg::identity(n), 1e-9),
         );
-        let recon = LinAlg::mat_mul(&MatrixInverse::new(&oto, None).inverse(), &LinAlg::transpose(&o));
+        let recon = LinAlg::mat_mul(
+            &MatrixInverse::new(&oto, None).inverse(),
+            &LinAlg::transpose(&o),
+        );
 
         let mut sum = 0.0;
         let mut worst = 0.0_f64;
@@ -892,7 +909,11 @@ pub struct DiscreteSystemToken {
 
 impl DiscreteSystemToken {
     pub fn new(label: String, sys: DiscreteLinearSystem, horizon: usize) -> Self {
-        DiscreteSystemToken { label, sys, horizon }
+        DiscreteSystemToken {
+            label,
+            sys,
+            horizon,
+        }
     }
 }
 
@@ -979,7 +1000,11 @@ pub struct DiscreteSystemSourceStation {
 
 impl DiscreteSystemSourceStation {
     pub fn new(id: &str, items: Vec<DiscreteSystemToken>) -> Self {
-        DiscreteSystemSourceStation { core: StationCore::new(id), items, emitted: false }
+        DiscreteSystemSourceStation {
+            core: StationCore::new(id),
+            items,
+            emitted: false,
+        }
     }
 }
 
@@ -1016,7 +1041,11 @@ pub struct MdpDegreeSourceStation {
 
 impl MdpDegreeSourceStation {
     pub fn new(id: &str, items: Vec<MdpDegreeToken>) -> Self {
-        MdpDegreeSourceStation { core: StationCore::new(id), items, emitted: false }
+        MdpDegreeSourceStation {
+            core: StationCore::new(id),
+            items,
+            emitted: false,
+        }
     }
 }
 
@@ -1053,7 +1082,11 @@ pub struct PomdpDegreeSourceStation {
 
 impl PomdpDegreeSourceStation {
     pub fn new(id: &str, items: Vec<PomdpDegreeToken>) -> Self {
-        PomdpDegreeSourceStation { core: StationCore::new(id), items, emitted: false }
+        PomdpDegreeSourceStation {
+            core: StationCore::new(id),
+            items,
+            emitted: false,
+        }
     }
 }
 
@@ -1196,12 +1229,16 @@ impl PureTransformEntity<MdpDegreeToken, DegreeReportToken> for MdpDegreeEvaluat
         token: &MdpDegreeToken,
         _ctx: &mut TransformContext<DegreeReportToken>,
     ) -> TransformResult<DegreeReportToken> {
-        let deg = MdpControllabilityDegree::new(&token.mdp).per_target_degree(&RandomPolicyOpts::default());
+        let deg = MdpControllabilityDegree::new(&token.mdp)
+            .per_target_degree(&RandomPolicyOpts::default());
         let min = deg.iter().cloned().fold(f64::INFINITY, f64::min);
         let max = deg.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         let detail = format!(
             "random-policy reach degree per target: [{}]",
-            deg.iter().map(|d| format!("{d:.2}")).collect::<Vec<String>>().join(", ")
+            deg.iter()
+                .map(|d| format!("{d:.2}"))
+                .collect::<Vec<String>>()
+                .join(", ")
         );
         TransformResult::One(DegreeReportToken::new(
             token.label.clone(),
@@ -1274,8 +1311,16 @@ impl PureTransformEntity<PomdpDegreeToken, DegreeReportToken> for PomdpDegreeEva
         let r = MonteCarloDistinguishability::new(&token.pomdp).run(&RandomPolicyOpts::default());
         let detail = format!(
             "belief hit-prob per state: [{}]; residual entropy: [{}] bits",
-            r.hit_probability.iter().map(|d| format!("{d:.2}")).collect::<Vec<String>>().join(", "),
-            r.residual_entropy.iter().map(|d| format!("{d:.2}")).collect::<Vec<String>>().join(", "),
+            r.hit_probability
+                .iter()
+                .map(|d| format!("{d:.2}"))
+                .collect::<Vec<String>>()
+                .join(", "),
+            r.residual_entropy
+                .iter()
+                .map(|d| format!("{d:.2}"))
+                .collect::<Vec<String>>()
+                .join(", "),
         );
         TransformResult::One(DegreeReportToken::new(
             token.label.clone(),
@@ -1317,7 +1362,10 @@ pub struct DegreeReportSinkStation {
 
 impl DegreeReportSinkStation {
     pub fn new(id: &str) -> Self {
-        DegreeReportSinkStation { core: StationCore::new(id), reports: Vec::new() }
+        DegreeReportSinkStation {
+            core: StationCore::new(id),
+            reports: Vec::new(),
+        }
     }
 }
 
@@ -1335,7 +1383,9 @@ impl DESStation for DegreeReportSinkStation {
         self.core.inbox_size(EmpiricalChannels::REPORT) > 0
     }
     fn run_time_step(&mut self) {
-        let drained = self.core.drain::<DegreeReportToken>(EmpiricalChannels::REPORT);
+        let drained = self
+            .core
+            .drain::<DegreeReportToken>(EmpiricalChannels::REPORT);
         self.reports.extend(drained);
     }
 }

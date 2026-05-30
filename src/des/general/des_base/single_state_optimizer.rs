@@ -164,7 +164,10 @@ impl<S: 'static> SingleStateSinkStation<S> {
     pub const CH_RESULT: &'static str = SINGLE_STATE_RESULT_CHANNEL;
 
     pub fn new(id: impl Into<String>) -> Self {
-        SingleStateSinkStation { core: StationCore::new(id), latest: None }
+        SingleStateSinkStation {
+            core: StationCore::new(id),
+            latest: None,
+        }
     }
 }
 
@@ -184,7 +187,9 @@ impl<S: 'static> DESStation for SingleStateSinkStation<S> {
     }
 
     fn run_time_step(&mut self) {
-        let tokens = self.core.drain::<SingleStateResultToken<S>>(Self::CH_RESULT);
+        let tokens = self
+            .core
+            .drain::<SingleStateResultToken<S>>(Self::CH_RESULT);
         if let Some(last) = tokens.into_iter().last() {
             self.latest = Some(last);
         }
@@ -310,7 +315,11 @@ pub trait SingleStateOptimizer<S: Clone + 'static>: DESStation {
         let current = self.clone_state(&initial_state);
         let current_cost = self.cost(&current);
         if !current_cost.is_finite() {
-            panic!("{}: initial state cost must be finite; got {}", self.id(), current_cost);
+            panic!(
+                "{}: initial state cost must be finite; got {}",
+                self.id(),
+                current_cost
+            );
         }
         let best = self.clone_state(&current);
         {
@@ -335,19 +344,28 @@ pub trait SingleStateOptimizer<S: Clone + 'static>: DESStation {
             return;
         }
         if !self.opt_state().initialized {
-            let seeds = self.core_mut().drain::<SingleStateInitialToken<S>>(Self::CH_INITIAL_STATE);
+            let seeds = self
+                .core_mut()
+                .drain::<SingleStateInitialToken<S>>(Self::CH_INITIAL_STATE);
             if seeds.is_empty() {
                 return;
             }
             if seeds.len() > 1 {
-                panic!("{}: expected exactly one initial-state token, got {}", self.id(), seeds.len());
+                panic!(
+                    "{}: expected exactly one initial-state token, got {}",
+                    self.id(),
+                    seeds.len()
+                );
             }
             let state = seeds[0].state.clone();
             self.bootstrap_from_state(state);
             return;
         }
         if self.core().inbox_size(Self::CH_INITIAL_STATE) > 0 {
-            panic!("{}: received an initial-state token after initialization", self.id());
+            panic!(
+                "{}: received an initial-state token after initialization",
+                self.id()
+            );
         }
         let iter = self.opt_state().iteration;
         if self.should_stop(iter) {
@@ -362,7 +380,14 @@ pub trait SingleStateOptimizer<S: Clone + 'static>: DESStation {
         let candidate = self.propose(&current, &mut *rng);
         let cand_cost = self.cost(&candidate);
         let delta = cand_cost - current_cost;
-        let ok = self.accept(&current, &candidate, current_cost, cand_cost, iter, &mut *rng);
+        let ok = self.accept(
+            &current,
+            &candidate,
+            current_cost,
+            cand_cost,
+            iter,
+            &mut *rng,
+        );
         self.opt_state_mut().rng = Some(rng);
         if ok {
             if cand_cost < self.opt_state().best_cost {
@@ -552,7 +577,11 @@ mod tests {
             opt.run_time_step();
         }
         assert!(opt.is_finished());
-        assert!(opt.get_best_cost() < 1.0, "best_cost = {}", opt.get_best_cost());
+        assert!(
+            opt.get_best_cost() < 1.0,
+            "best_cost = {}",
+            opt.get_best_cost()
+        );
         assert!(opt.get_improve_count() > 0);
     }
 
@@ -570,17 +599,22 @@ mod tests {
 
     #[test]
     fn source_optimizer_sink_pipeline() {
-        let source = Rc::new(RefCell::new(SingleStateSourceStation::new("src", || 0.0_f64)));
+        let source = Rc::new(RefCell::new(SingleStateSourceStation::new("src", || {
+            0.0_f64
+        })));
         let opt = Rc::new(RefCell::new(Quadratic::new(99, 3.0, 0.6, 300)));
         let sink = Rc::new(RefCell::new(SingleStateSinkStation::<f64>::new("sink")));
 
-        source
-            .borrow_mut()
-            .core_mut()
-            .pipe(opt.clone() as StationRef, SINGLE_STATE_INITIAL_CHANNEL, SINGLE_STATE_INITIAL_CHANNEL);
-        opt.borrow_mut()
-            .core_mut()
-            .pipe(sink.clone() as StationRef, SINGLE_STATE_RESULT_CHANNEL, SINGLE_STATE_RESULT_CHANNEL);
+        source.borrow_mut().core_mut().pipe(
+            opt.clone() as StationRef,
+            SINGLE_STATE_INITIAL_CHANNEL,
+            SINGLE_STATE_INITIAL_CHANNEL,
+        );
+        opt.borrow_mut().core_mut().pipe(
+            sink.clone() as StationRef,
+            SINGLE_STATE_RESULT_CHANNEL,
+            SINGLE_STATE_RESULT_CHANNEL,
+        );
 
         source.borrow_mut().run_time_step();
         let mut guard = 0;
@@ -591,7 +625,11 @@ mod tests {
         }
         sink.borrow_mut().run_time_step();
         let latest = sink.borrow().latest.clone().expect("result captured");
-        assert!(latest.snapshot.best_cost < 1.0, "best_cost = {}", latest.snapshot.best_cost);
+        assert!(
+            latest.snapshot.best_cost < 1.0,
+            "best_cost = {}",
+            latest.snapshot.best_cost
+        );
         assert_eq!(latest.snapshot.iteration, 300);
     }
 }

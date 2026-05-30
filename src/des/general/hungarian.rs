@@ -46,7 +46,11 @@ pub fn hungarian(matrix: &[Vec<f64>], dir: AssignmentDirection) -> AssignmentRes
     let n_rows = matrix.len();
     let n_cols = matrix[0].len();
     let n = n_rows.max(n_cols);
-    let sign = if dir == AssignmentDirection::Max { -1.0 } else { 1.0 };
+    let sign = if dir == AssignmentDirection::Max {
+        -1.0
+    } else {
+        1.0
+    };
 
     // Pad to a square matrix with a constant fill (so dummy rows/cols don't
     // distort the optimal pairing). For 'max', use min-1; for 'min' use max+1.

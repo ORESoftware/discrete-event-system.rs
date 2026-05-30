@@ -19,18 +19,12 @@ use crate::des::general::general::fisher_yates_shuffle;
 use crate::des::shared::capabilities::{RandomSource, SeededRandom};
 
 /// `type OutputRoutingPolicy = 'random' | 'round-robin' | 'ordered'`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum OutputRoutingPolicy {
+    #[default]
     Random,
     RoundRobin,
     Ordered,
-}
-
-impl Default for OutputRoutingPolicy {
-    fn default() -> Self {
-        // TS ctor default is 'random'.
-        OutputRoutingPolicy::Random
-    }
 }
 
 /// `interface HasOutputRoutingPolicy { outputRouting?: OutputRoutingPolicy }`.

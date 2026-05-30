@@ -46,7 +46,11 @@ impl<E: Environment> PureEnvironment<usize, usize> for PureEnvAdapter<E> {
     }
     fn step(&mut self, state: usize, action: usize) -> StepResult<usize> {
         let o = self.env.step(state, action);
-        StepResult { next_state: o.next_state, reward: o.reward, done: o.done }
+        StepResult {
+            next_state: o.next_state,
+            reward: o.reward,
+            done: o.done,
+        }
     }
 }
 
@@ -72,7 +76,11 @@ fn tsp_pentagon_study() {
     let sa = run_tsp_sa_des(
         inst.clone(),
         TSPSAOptions {
-            cooling: CoolingSchedule::Geometric { t0: 50.0, alpha: 0.998, t_min: None },
+            cooling: CoolingSchedule::Geometric {
+                t0: 50.0,
+                alpha: 0.998,
+                t_min: None,
+            },
             max_iterations: 3000,
             seed: 1,
             init: None,
@@ -86,7 +94,11 @@ fn tsp_pentagon_study() {
     let hc = run_tsp_hill_climber_des(
         inst.clone(),
         TSPSAOptions {
-            cooling: CoolingSchedule::Geometric { t0: 50.0, alpha: 0.998, t_min: None },
+            cooling: CoolingSchedule::Geometric {
+                t0: 50.0,
+                alpha: 0.998,
+                t_min: None,
+            },
             max_iterations: 3000,
             seed: 1,
             init: None,
@@ -160,7 +172,11 @@ fn tsp_random12_study() {
     let sa = run_tsp_sa_des(
         inst.clone(),
         TSPSAOptions {
-            cooling: CoolingSchedule::Geometric { t0: 100.0, alpha: 0.998, t_min: None },
+            cooling: CoolingSchedule::Geometric {
+                t0: 100.0,
+                alpha: 0.998,
+                t_min: None,
+            },
             max_iterations: 5000,
             seed: 1,
             init: None,
@@ -174,7 +190,11 @@ fn tsp_random12_study() {
     let hc = run_tsp_hill_climber_des(
         inst.clone(),
         TSPSAOptions {
-            cooling: CoolingSchedule::Geometric { t0: 100.0, alpha: 0.998, t_min: None },
+            cooling: CoolingSchedule::Geometric {
+                t0: 100.0,
+                alpha: 0.998,
+                t_min: None,
+            },
             max_iterations: 5000,
             seed: 1,
             init: None,
@@ -233,7 +253,9 @@ fn grid_world_study() {
     let env = GridWorld::new(GridWorldOptions::default());
     let opt = env.optimal_v(0.95, 1e-9, 5000);
     let ql = run_qlearning_des(
-        Box::new(PureEnvAdapter { env: GridWorld::new(GridWorldOptions::default()) }),
+        Box::new(PureEnvAdapter {
+            env: GridWorld::new(GridWorldOptions::default()),
+        }),
         RunQLearningOptions {
             num_episodes: 600.0,
             alpha: 0.3,
@@ -251,7 +273,11 @@ fn grid_world_study() {
         &env,
         |s, _rng| ql.policy[s],
         &mut rng,
-        EvalPolicyOptions { num_episodes: 200, max_steps_per_episode: 100, gamma: 0.95 },
+        EvalPolicyOptions {
+            num_episodes: 200,
+            max_steps_per_episode: 100,
+            gamma: 0.95,
+        },
     );
     println!("  state    optimal V*    learned max_a Q[s,a]    optimal a*    learned a*");
     for s in 0..env.num_states {
@@ -287,7 +313,9 @@ fn corridor_study() {
     let env = Corridor::new(8, 0);
     let opt = env.optimal_v(0.95, 1e-9, 5000);
     let ppo = run_ppo_des(
-        Box::new(PureEnvAdapter { env: Corridor::new(8, 0) }),
+        Box::new(PureEnvAdapter {
+            env: Corridor::new(8, 0),
+        }),
         RunPPOOptions {
             total_steps: 10_000,
             rollout_len: 64,
@@ -310,7 +338,11 @@ fn corridor_study() {
         &env,
         |s, _rng| ppo.policy[s],
         &mut rng,
-        EvalPolicyOptions { num_episodes: 200, max_steps_per_episode: 30, gamma: 0.95 },
+        EvalPolicyOptions {
+            num_episodes: 200,
+            max_steps_per_episode: 30,
+            gamma: 0.95,
+        },
     );
     println!("  state    optimal V*    PPO V_φ(s)    optimal a*    PPO a*");
     for s in 0..env.num_states {

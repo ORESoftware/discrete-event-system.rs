@@ -90,7 +90,8 @@ pub fn run_smart_traffic_flow(
     let mean_speed = if network.lanes.is_empty() {
         1.0
     } else {
-        (network.lanes.iter().map(|l| l.speed_limit_mps).sum::<f64>() / network.lanes.len() as f64).max(1e-6)
+        (network.lanes.iter().map(|l| l.speed_limit_mps).sum::<f64>() / network.lanes.len() as f64)
+            .max(1e-6)
     };
     SmartTrafficResult {
         entered,
@@ -98,7 +99,11 @@ pub fn run_smart_traffic_flow(
         dropped: 0,
         final_cars_len: 0,
         max_active_cars: entered,
-        mean_travel_time_sec: if entered > 0 { mean_len / mean_speed } else { 0.0 },
+        mean_travel_time_sec: if entered > 0 {
+            mean_len / mean_speed
+        } else {
+            0.0
+        },
         mean_speed_mps: mean_speed,
         mean_abs_jerk_mps3: 0.0,
         min_leader_gap_m: 0.0,
@@ -199,27 +204,55 @@ pub fn run() {
         dt_sec: params.dt_sec,
         scheduled_trips: trips.len(),
         lanes: network.lanes.len(),
-        intersections: network.nodes.iter().filter(|n| n.kind == TrafficNodeKind::Intersection).count(),
+        intersections: network
+            .nodes
+            .iter()
+            .filter(|n| n.kind == TrafficNodeKind::Intersection)
+            .count(),
     };
     let engines = [des_stats, sumo_stats, uxsim_stats];
 
     let comparison = JsonValue::Object(vec![
-        ("generatedAt".to_string(), JsonValue::String(format!("{}", SystemClock.now_ms()))),
+        (
+            "generatedAt".to_string(),
+            JsonValue::String(format!("{}", SystemClock.now_ms())),
+        ),
         (
             "scenario".to_string(),
             JsonValue::Object(vec![
-                ("network".to_string(), JsonValue::String(scenario.network.clone())),
-                ("durationSec".to_string(), JsonValue::Number(scenario.duration_sec)),
+                (
+                    "network".to_string(),
+                    JsonValue::String(scenario.network.clone()),
+                ),
+                (
+                    "durationSec".to_string(),
+                    JsonValue::Number(scenario.duration_sec),
+                ),
                 ("dtSec".to_string(), JsonValue::Number(scenario.dt_sec)),
-                ("scheduledTrips".to_string(), JsonValue::Number(scenario.scheduled_trips as f64)),
-                ("lanes".to_string(), JsonValue::Number(scenario.lanes as f64)),
-                ("intersections".to_string(), JsonValue::Number(scenario.intersections as f64)),
+                (
+                    "scheduledTrips".to_string(),
+                    JsonValue::Number(scenario.scheduled_trips as f64),
+                ),
+                (
+                    "lanes".to_string(),
+                    JsonValue::Number(scenario.lanes as f64),
+                ),
+                (
+                    "intersections".to_string(),
+                    JsonValue::Number(scenario.intersections as f64),
+                ),
             ]),
         ),
-        ("engines".to_string(), JsonValue::Array(engines.iter().map(engine_json).collect())),
+        (
+            "engines".to_string(),
+            JsonValue::Array(engines.iter().map(engine_json).collect()),
+        ),
     ]);
 
-    let _ = fs::write(out.join("traffic-engine-comparison.json"), comparison.to_string_pretty(2));
+    let _ = fs::write(
+        out.join("traffic-engine-comparison.json"),
+        comparison.to_string_pretty(2),
+    );
     let md = render_markdown(&engines, &scenario);
     let _ = fs::write(out.join("traffic-engine-comparison.md"), &md);
     println!("{md}");
@@ -229,19 +262,28 @@ pub fn run() {
     );
 }
 
-fn generate_scheduled_trips(network: &TrafficNetwork, params: &SmartTrafficParams, seed: u32) -> Vec<SharedTrip> {
+fn generate_scheduled_trips(
+    network: &TrafficNetwork,
+    params: &SmartTrafficParams,
+    seed: u32,
+) -> Vec<SharedTrip> {
     let mut rng = mulberry32(seed);
     let mut accumulators: HashMap<String, f64> = HashMap::new();
     let mut trips: Vec<SharedTrip> = Vec::new();
     let ticks = (params.duration_sec / params.dt_sec).ceil() as i64;
-    let sink_by_id: HashMap<&str, &str> = network.sinks.iter().map(|s| (s.id.as_str(), s.node_id.as_str())).collect();
+    let sink_by_id: HashMap<&str, &str> = network
+        .sinks
+        .iter()
+        .map(|s| (s.id.as_str(), s.node_id.as_str()))
+        .collect();
     for source in &network.sources {
         accumulators.insert(source.id.clone(), 0.0);
     }
     for tick in 0..ticks {
         let depart_sec = round_time(tick as f64 * params.dt_sec);
         for source in &network.sources {
-            let expected = source.rate_per_min * params.spawn_rate_multiplier * params.dt_sec / 60.0;
+            let expected =
+                source.rate_per_min * params.spawn_rate_multiplier * params.dt_sec / 60.0;
             let mut acc = accumulators.get(&source.id).copied().unwrap_or(0.0) + expected;
             let count = acc.floor() as i64;
             acc -= count as f64;
@@ -256,7 +298,9 @@ fn generate_scheduled_trips(network: &TrafficNetwork, params: &SmartTrafficParam
                 }
                 let pick = (rng.next_float() * sink_ids.len() as f64).floor() as usize;
                 let destination_sink_id = sink_ids[pick.min(sink_ids.len() - 1)].clone();
-                let Some(sink_node) = sink_by_id.get(destination_sink_id.as_str()) else { continue };
+                let Some(sink_node) = sink_by_id.get(destination_sink_id.as_str()) else {
+                    continue;
+                };
                 let route = shortest_lane_path(network, &source.node_id, sink_node);
                 if route.is_empty() {
                     continue;
@@ -276,7 +320,11 @@ fn generate_scheduled_trips(network: &TrafficNetwork, params: &SmartTrafficParam
     trips
 }
 
-fn run_des(params: &SmartTrafficParams, network: &TrafficNetwork, trips: &[SharedTrip]) -> EngineStats {
+fn run_des(
+    params: &SmartTrafficParams,
+    network: &TrafficNetwork,
+    trips: &[SharedTrip],
+) -> EngineStats {
     let result = run_smart_traffic_flow(params, network, trips);
     EngineStats {
         engine: "DES smart traffic".to_string(),
@@ -291,11 +339,17 @@ fn run_des(params: &SmartTrafficParams, network: &TrafficNetwork, trips: &[Share
         mean_speed_mps: round_metric(Some(result.mean_speed_mps)),
         mean_abs_jerk_mps3: round_metric(Some(result.mean_abs_jerk_mps3)),
         min_headway_m: round_metric(Some(result.min_leader_gap_m)),
-        notes: vec!["uses one-foot cell stations and smart movable car runTimeStep decisions".to_string()],
+        notes: vec![
+            "uses one-foot cell stations and smart movable car runTimeStep decisions".to_string(),
+        ],
     }
 }
 
-fn run_sumo(network: &TrafficNetwork, params: &SmartTrafficParams, trips: &[SharedTrip]) -> EngineStats {
+fn run_sumo(
+    network: &TrafficNetwork,
+    params: &SmartTrafficParams,
+    trips: &[SharedTrip],
+) -> EngineStats {
     let venv = venv_dir();
     let sumo_bin = venv.join("bin").join("sumo");
     let netconvert_bin = venv.join("bin").join("netconvert");
@@ -387,10 +441,20 @@ fn run_sumo_inner(
         ],
         &dir,
     )?;
-    let trip_infos = parse_xml_records(&fs::read_to_string(&tripinfo_file).map_err(|e| e.to_string())?, "tripinfo");
-    let summary_steps = parse_xml_records(&fs::read_to_string(&summary_file).map_err(|e| e.to_string())?, "step");
+    let trip_infos = parse_xml_records(
+        &fs::read_to_string(&tripinfo_file).map_err(|e| e.to_string())?,
+        "tripinfo",
+    );
+    let summary_steps = parse_xml_records(
+        &fs::read_to_string(&summary_file).map_err(|e| e.to_string())?,
+        "step",
+    );
     let last = summary_steps.last().cloned().unwrap_or_default();
-    let durations: Vec<f64> = trip_infos.iter().filter_map(|t| t.get("duration").and_then(|s| s.parse::<f64>().ok())).filter(|x| x.is_finite()).collect();
+    let durations: Vec<f64> = trip_infos
+        .iter()
+        .filter_map(|t| t.get("duration").and_then(|s| s.parse::<f64>().ok()))
+        .filter(|x| x.is_finite())
+        .collect();
     let speeds: Vec<f64> = trip_infos
         .iter()
         .filter_map(|t| {
@@ -400,7 +464,10 @@ fn run_sumo_inner(
         })
         .filter(|x| x.is_finite())
         .collect();
-    let max_active = summary_steps.iter().filter_map(|s| s.get("running").and_then(|v| v.parse::<f64>().ok())).fold(0.0_f64, f64::max);
+    let max_active = summary_steps
+        .iter()
+        .filter_map(|s| s.get("running").and_then(|v| v.parse::<f64>().ok()))
+        .fold(0.0_f64, f64::max);
     let inserted = last.get("inserted").and_then(|v| v.parse::<f64>().ok());
     let ended = last.get("ended").and_then(|v| v.parse::<f64>().ok());
     let active_at_end = match (inserted, ended) {
@@ -417,12 +484,19 @@ fn run_sumo_inner(
         max_active: Some(max_active),
         mean_travel_time_sec: mean_rounded(&durations),
         mean_speed_mps: mean_rounded(&speeds),
-        notes: vec!["microscopic, space-continuous SUMO run with the shared scheduled trip table".to_string()],
+        notes: vec![
+            "microscopic, space-continuous SUMO run with the shared scheduled trip table"
+                .to_string(),
+        ],
         ..Default::default()
     })
 }
 
-fn run_uxsim(network: &TrafficNetwork, params: &SmartTrafficParams, trips: &[SharedTrip]) -> EngineStats {
+fn run_uxsim(
+    network: &TrafficNetwork,
+    params: &SmartTrafficParams,
+    trips: &[SharedTrip],
+) -> EngineStats {
     let venv = venv_dir();
     let python_bin = venv.join("bin").join("python");
     if !python_bin.exists() {
@@ -431,7 +505,10 @@ fn run_uxsim(network: &TrafficNetwork, params: &SmartTrafficParams, trips: &[Sha
             generated: trips.len() as f64,
             completed: 0.0,
             active_at_end: trips.len() as f64,
-            notes: vec![format!("UXsim virtualenv Python not found under {}", venv.display())],
+            notes: vec![format!(
+                "UXsim virtualenv Python not found under {}",
+                venv.display()
+            )],
             ..Default::default()
         };
     }
@@ -462,13 +539,20 @@ fn run_uxsim_inner(
     let input = JsonValue::Object(vec![
         ("network".to_string(), network_json(network)),
         ("params".to_string(), params_json(params)),
-        ("trips".to_string(), JsonValue::Array(trips.iter().map(trip_json).collect())),
+        (
+            "trips".to_string(),
+            JsonValue::Array(trips.iter().map(trip_json).collect()),
+        ),
     ]);
     fs::write(&input_file, input.to_string_pretty(2)).map_err(|e| e.to_string())?;
     fs::write(&script_file, uxsim_script()).map_err(|e| e.to_string())?;
     run_command(
         python_bin,
-        &[script_file.display().to_string(), input_file.display().to_string(), output_file.display().to_string()],
+        &[
+            script_file.display().to_string(),
+            input_file.display().to_string(),
+            output_file.display().to_string(),
+        ],
         &dir,
     )?;
     let text = fs::read_to_string(&output_file).map_err(|e| e.to_string())?;
@@ -493,9 +577,15 @@ fn write_shared_input(network: &TrafficNetwork, params: &SmartTrafficParams, tri
     let payload = JsonValue::Object(vec![
         ("network".to_string(), network_json(network)),
         ("params".to_string(), params_json(params)),
-        ("trips".to_string(), JsonValue::Array(trips.iter().map(trip_json).collect())),
+        (
+            "trips".to_string(),
+            JsonValue::Array(trips.iter().map(trip_json).collect()),
+        ),
     ]);
-    let _ = fs::write(out_dir().join("shared-traffic-input.json"), payload.to_string_pretty(2));
+    let _ = fs::write(
+        out_dir().join("shared-traffic-input.json"),
+        payload.to_string_pretty(2),
+    );
 }
 
 // --- SUMO XML ----------------------------------------------------------------
@@ -508,7 +598,11 @@ fn sumo_nodes_xml(network: &TrafficNetwork) -> String {
         .unwrap_or_default();
     let mut lines = vec!["<nodes>".to_string()];
     for node in &network.nodes {
-        let ty = if signal_nodes.contains(&node.id) { "traffic_light" } else { "priority" };
+        let ty = if signal_nodes.contains(&node.id) {
+            "traffic_light"
+        } else {
+            "priority"
+        };
         lines.push(format!(
             "  <node id=\"{}\" x=\"{}\" y=\"{}\" type=\"{ty}\"/>",
             xml(&node.id),
@@ -559,7 +653,10 @@ fn sumo_routes_xml(params: &SmartTrafficParams, trips: &[SharedTrip]) -> String 
         lines.push(format!("  <route id=\"{id}\" edges=\"{}\"/>", xml(edges)));
     }
     for trip in trips {
-        let route_id = route_index.get(&trip.route.join(" ")).cloned().unwrap_or_default();
+        let route_id = route_index
+            .get(&trip.route.join(" "))
+            .cloned()
+            .unwrap_or_default();
         lines.push(format!(
             "  <vehicle id=\"{}\" type=\"car\" route=\"{route_id}\" depart=\"{:.1}\" departLane=\"best\" departSpeed=\"max\"/>",
             xml(&trip.id),
@@ -666,7 +763,8 @@ fn shortest_lane_path(network: &TrafficNetwork, from_node: &str, to_node: &str) 
     for lane in &network.lanes {
         outgoing.entry(lane.from.as_str()).or_default().push(lane);
     }
-    let mut queue: std::collections::VecDeque<(String, Vec<String>)> = std::collections::VecDeque::new();
+    let mut queue: std::collections::VecDeque<(String, Vec<String>)> =
+        std::collections::VecDeque::new();
     queue.push_back((from_node.to_string(), Vec::new()));
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     seen.insert(from_node.to_string());
@@ -690,7 +788,10 @@ fn shortest_lane_path(network: &TrafficNetwork, from_node: &str, to_node: &str) 
 }
 
 fn run_command(command: &Path, args: &[String], cwd: &Path) -> Result<String, String> {
-    let parent_path = command.parent().map(|p| p.display().to_string()).unwrap_or_default();
+    let parent_path = command
+        .parent()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
     let existing_path = std::env::var("PATH").unwrap_or_default();
     let output = Command::new(command)
         .args(args)
@@ -700,11 +801,19 @@ fn run_command(command: &Path, args: &[String], cwd: &Path) -> Result<String, St
         .map_err(|e| format!("failed to spawn {}: {e}", command.display()))?;
     if !output.status.success() {
         let parts = [
-            format!("{} failed with status {}", base_name(command), status_str(output.status.code())),
+            format!(
+                "{} failed with status {}",
+                base_name(command),
+                status_str(output.status.code())
+            ),
             String::from_utf8_lossy(&output.stdout).to_string(),
             String::from_utf8_lossy(&output.stderr).to_string(),
         ];
-        return Err(parts.into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n"));
+        return Err(parts
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"));
     }
     Ok(format!(
         "{}{}",
@@ -732,7 +841,10 @@ fn parse_xml_records(text: &str, tag: &str) -> Vec<HashMap<String, String>> {
         let start = search_from + rel;
         let after = start + open.len();
         // Require a word boundary (whitespace, '>' or '/').
-        let boundary_ok = bytes.get(after).map(|&b| b == b' ' || b == b'\t' || b == b'\n' || b == b'>' || b == b'/').unwrap_or(false);
+        let boundary_ok = bytes
+            .get(after)
+            .map(|&b| b == b' ' || b == b'\t' || b == b'\n' || b == b'>' || b == b'/')
+            .unwrap_or(false);
         if !boundary_ok {
             search_from = after;
             continue;
@@ -760,7 +872,9 @@ fn parse_xml_attrs(text: &str) -> HashMap<String, String> {
             i += 1;
         }
         let key_start = i;
-        while i < chars.len() && (chars[i].is_ascii_alphanumeric() || matches!(chars[i], '_' | '.' | ':' | '-')) {
+        while i < chars.len()
+            && (chars[i].is_ascii_alphanumeric() || matches!(chars[i], '_' | '.' | ':' | '-'))
+        {
             i += 1;
         }
         if i == key_start {
@@ -878,7 +992,9 @@ fn status_str(code: Option<i32>) -> String {
 }
 
 fn base_name(p: &Path) -> String {
-    p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| p.display().to_string())
+    p.file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| p.display().to_string())
 }
 
 fn relative(root: &Path, p: &Path) -> String {
@@ -897,23 +1013,33 @@ fn xml(value: &str) -> String {
 // --- JSON serialization for shared input -------------------------------------
 
 fn engine_json(e: &EngineStats) -> JsonValue {
-    let mut fields: Vec<(String, JsonValue)> = vec![
-        ("engine".to_string(), JsonValue::String(e.engine.clone())),
-    ];
+    let mut fields: Vec<(String, JsonValue)> =
+        vec![("engine".to_string(), JsonValue::String(e.engine.clone()))];
     if let Some(v) = &e.version {
         fields.push(("version".to_string(), JsonValue::String(v.clone())));
     }
     fields.push(("generated".to_string(), JsonValue::Number(e.generated)));
     push_opt(&mut fields, "entered", e.entered);
     fields.push(("completed".to_string(), JsonValue::Number(e.completed)));
-    fields.push(("activeAtEnd".to_string(), JsonValue::Number(e.active_at_end)));
+    fields.push((
+        "activeAtEnd".to_string(),
+        JsonValue::Number(e.active_at_end),
+    ));
     push_opt(&mut fields, "dropped", e.dropped);
     push_opt(&mut fields, "maxActive", e.max_active);
     push_opt(&mut fields, "meanTravelTimeSec", e.mean_travel_time_sec);
     push_opt(&mut fields, "meanSpeedMps", e.mean_speed_mps);
     push_opt(&mut fields, "meanAbsJerkMps3", e.mean_abs_jerk_mps3);
     push_opt(&mut fields, "minHeadwayM", e.min_headway_m);
-    fields.push(("notes".to_string(), JsonValue::Array(e.notes.iter().map(|n| JsonValue::String(n.clone())).collect())));
+    fields.push((
+        "notes".to_string(),
+        JsonValue::Array(
+            e.notes
+                .iter()
+                .map(|n| JsonValue::String(n.clone()))
+                .collect(),
+        ),
+    ));
     JsonValue::Object(fields)
 }
 
@@ -944,7 +1070,10 @@ fn network_json(network: &TrafficNetwork) -> JsonValue {
                 ("from".to_string(), JsonValue::String(l.from.clone())),
                 ("to".to_string(), JsonValue::String(l.to.clone())),
                 ("lengthM".to_string(), JsonValue::Number(l.length_m)),
-                ("speedLimitMps".to_string(), JsonValue::Number(l.speed_limit_mps)),
+                (
+                    "speedLimitMps".to_string(),
+                    JsonValue::Number(l.speed_limit_mps),
+                ),
             ])
         })
         .collect();
@@ -968,10 +1097,30 @@ fn trip_json(t: &SharedTrip) -> JsonValue {
     JsonValue::Object(vec![
         ("id".to_string(), JsonValue::String(t.id.clone())),
         ("departSec".to_string(), JsonValue::Number(t.depart_sec)),
-        ("sourceId".to_string(), JsonValue::String(t.source_id.clone())),
-        ("destinationSinkId".to_string(), JsonValue::String(t.destination_sink_id.clone())),
-        ("route".to_string(), JsonValue::Array(t.route.iter().map(|r| JsonValue::String(r.clone())).collect())),
-        ("sourceNodeId".to_string(), JsonValue::String(t.source_node_id.clone())),
-        ("sinkNodeId".to_string(), JsonValue::String(t.sink_node_id.clone())),
+        (
+            "sourceId".to_string(),
+            JsonValue::String(t.source_id.clone()),
+        ),
+        (
+            "destinationSinkId".to_string(),
+            JsonValue::String(t.destination_sink_id.clone()),
+        ),
+        (
+            "route".to_string(),
+            JsonValue::Array(
+                t.route
+                    .iter()
+                    .map(|r| JsonValue::String(r.clone()))
+                    .collect(),
+            ),
+        ),
+        (
+            "sourceNodeId".to_string(),
+            JsonValue::String(t.source_node_id.clone()),
+        ),
+        (
+            "sinkNodeId".to_string(),
+            JsonValue::String(t.sink_node_id.clone()),
+        ),
     ])
 }

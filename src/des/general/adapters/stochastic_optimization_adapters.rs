@@ -46,10 +46,18 @@ fn js_number(v: f64) -> String {
     if v.is_nan() {
         "NaN".to_string()
     } else if v.is_infinite() {
-        if v > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() }
+        if v > 0.0 {
+            "Infinity".to_string()
+        } else {
+            "-Infinity".to_string()
+        }
     } else {
         let s = v.to_string();
-        if s == "-0" { "0".to_string() } else { s }
+        if s == "-0" {
+            "0".to_string()
+        } else {
+            s
+        }
     }
 }
 
@@ -74,12 +82,18 @@ fn to_exponential(v: f64, digits: usize) -> String {
 
 /// `JSON.stringify(numbers)` for a number array.
 fn json_num_array(v: &[f64]) -> String {
-    format!("[{}]", v.iter().map(|x| json_num(*x)).collect::<Vec<_>>().join(","))
+    format!(
+        "[{}]",
+        v.iter().map(|x| json_num(*x)).collect::<Vec<_>>().join(",")
+    )
 }
 
 /// `function fmtVec(x)` — `x.map(v => v.toFixed(4)).join(', ')`.
 fn fmt_vec(x: &[f64]) -> String {
-    x.iter().map(|v| format!("{v:.4}")).collect::<Vec<_>>().join(", ")
+    x.iter()
+        .map(|v| format!("{v:.4}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn slp_status_str(s: SLPStatus) -> &'static str {
@@ -110,17 +124,40 @@ fn sddp_status_str(s: SDDPStatus) -> &'static str {
 // Schema helpers
 // =============================================================================
 
-fn num(min: Option<f64>, max: Option<f64>, integer: Option<bool>, default: Option<f64>) -> ParamSchema {
-    ParamSchema::Number { min, max, integer, default, description: None }
+fn num(
+    min: Option<f64>,
+    max: Option<f64>,
+    integer: Option<bool>,
+    default: Option<f64>,
+) -> ParamSchema {
+    ParamSchema::Number {
+        min,
+        max,
+        integer,
+        default,
+        description: None,
+    }
 }
 
 fn arr(items: ParamSchema, min_length: Option<usize>, max_length: Option<usize>) -> ParamSchema {
-    ParamSchema::Array { items: Box::new(items), min_length, max_length, description: None }
+    ParamSchema::Array {
+        items: Box::new(items),
+        min_length,
+        max_length,
+        description: None,
+    }
 }
 
-fn obj(fields: Vec<(&str, ParamSchema)>, required: Vec<&str>, description: Option<&str>) -> ParamSchema {
+fn obj(
+    fields: Vec<(&str, ParamSchema)>,
+    required: Vec<&str>,
+    description: Option<&str>,
+) -> ParamSchema {
     ParamSchema::Object {
-        fields: fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+        fields: fields
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
         required: Some(required.iter().map(|s| s.to_string()).collect()),
         description: description.map(|s| s.to_string()),
     }
@@ -206,15 +243,24 @@ impl DESModelRegistration<StochasticLPParams, StochasticLPRunResult> for Stochas
         stochastic_lp_schema()
     }
 
-    fn run(&self, params: StochasticLPParams, _runtime: &DESRuntimeConfig) -> StochasticLPRunResult {
+    fn run(
+        &self,
+        params: StochasticLPParams,
+        _runtime: &DESRuntimeConfig,
+    ) -> StochasticLPRunResult {
         if params.c.len() != params.p.len() || params.c.len() != params.ranges.len() {
             panic!("stochastic-lp: c, p, and ranges must have the same length");
         }
         let n = params.n.unwrap_or(200);
         let seed = params.seed.unwrap_or(42);
         let slp = build_production_slp(params.c.clone(), params.p.clone(), params.budget);
-        let scenarios =
-            build_production_scenarios(UniformDemandSpec { ranges: params.ranges.clone(), seed }, n);
+        let scenarios = build_production_scenarios(
+            UniformDemandSpec {
+                ranges: params.ranges.clone(),
+                seed,
+            },
+            n,
+        );
         let closed_form = if params.budget.is_none() {
             Some(solve_production_closed_form(
                 params.c.clone(),
@@ -241,7 +287,10 @@ impl DESModelRegistration<StochasticLPParams, StochasticLPRunResult> for Stochas
         let oos_n = params.oos_n.unwrap_or(0);
         let out_of_sample = if oos_n > 0 {
             let oos = build_production_scenarios(
-                UniformDemandSpec { ranges: params.ranges.clone(), seed: seed + 99991 },
+                UniformDemandSpec {
+                    ranges: params.ranges.clone(),
+                    seed: seed + 99991,
+                },
                 oos_n,
             );
             let eval_x = |x: &[f64]| -> f64 {
@@ -251,7 +300,10 @@ impl DESModelRegistration<StochasticLPParams, StochasticLPRunResult> for Stochas
                 }
                 let mut q = 0.0;
                 for sc in &oos {
-                    let d = sc.meta.as_ref().expect("production scenario carries demand meta");
+                    let d = sc
+                        .meta
+                        .as_ref()
+                        .expect("production scenario carries demand meta");
                     for i in 0..params.p.len() {
                         q += params.p[i] * x[i].min(d.d[i]);
                     }
@@ -268,7 +320,12 @@ impl DESModelRegistration<StochasticLPParams, StochasticLPRunResult> for Stochas
             None
         };
 
-        StochasticLPRunResult { closed_form, monolithic, benders, out_of_sample }
+        StochasticLPRunResult {
+            closed_form,
+            monolithic,
+            benders,
+            out_of_sample,
+        }
     }
 
     fn summarize(&self, result: &StochasticLPRunResult, params: &StochasticLPParams) -> String {
@@ -278,7 +335,10 @@ impl DESModelRegistration<StochasticLPParams, StochasticLPRunResult> for Stochas
             format!("  Scenarios:       {}", params.n.unwrap_or(200)),
             format!(
                 "  Budget:          {}",
-                params.budget.map(js_number).unwrap_or_else(|| "none".to_string())
+                params
+                    .budget
+                    .map(js_number)
+                    .unwrap_or_else(|| "none".to_string())
             ),
             format!(
                 "  Monolithic:      {}  z={:.6}  x=[{}]",
@@ -294,7 +354,10 @@ impl DESModelRegistration<StochasticLPParams, StochasticLPRunResult> for Stochas
             ),
             format!(
                 "  |Delta z|:       {}",
-                to_exponential((result.benders.objective - result.monolithic.objective).abs(), 2)
+                to_exponential(
+                    (result.benders.objective - result.monolithic.objective).abs(),
+                    2
+                )
             ),
             format!("  Benders iters:   {}", result.benders.iterations),
         ];
@@ -368,13 +431,28 @@ fn multi_stage_problem_schema() -> ParamSchema {
             ("horizon", num(Some(1.0), None, Some(true), None)),
             ("initialInventory", num(Some(0.0), None, None, None)),
             ("capacity", num(Some(1e-9), None, None, None)),
-            ("maxOrder", arr(num(Some(0.0), None, None, None), None, None)),
+            (
+                "maxOrder",
+                arr(num(Some(0.0), None, None, None), None, None),
+            ),
             ("price", arr(num(Some(0.0), None, None, None), None, None)),
-            ("orderCost", arr(num(Some(0.0), None, None, None), None, None)),
-            ("holdCost", arr(num(Some(0.0), None, None, None), None, None)),
-            ("stockoutCost", arr(num(Some(0.0), None, None, None), None, None)),
+            (
+                "orderCost",
+                arr(num(Some(0.0), None, None, None), None, None),
+            ),
+            (
+                "holdCost",
+                arr(num(Some(0.0), None, None, None), None, None),
+            ),
+            (
+                "stockoutCost",
+                arr(num(Some(0.0), None, None, None), None, None),
+            ),
             ("salvageValue", num(Some(0.0), None, None, None)),
-            ("demands", arr(arr(demand_outcome_schema(), None, None), None, None)),
+            (
+                "demands",
+                arr(arr(demand_outcome_schema(), None, None), None, None),
+            ),
         ],
         vec![
             "horizon",
@@ -404,7 +482,10 @@ pub fn multi_stage_schema() -> ParamSchema {
                         ("maxIter", num(Some(1.0), None, Some(true), Some(80.0))),
                         ("tol", num(Some(0.0), None, None, Some(1e-4))),
                         ("seed", num(None, None, Some(true), Some(1.0))),
-                        ("evaluatePolicyEvery", num(Some(1.0), None, Some(true), Some(80.0))),
+                        (
+                            "evaluatePolicyEvery",
+                            num(Some(1.0), None, Some(true), Some(80.0)),
+                        ),
                         ("finiteDiffStep", num(Some(1e-9), None, None, None)),
                         ("cutGridSize", num(Some(2.0), None, Some(true), Some(21.0))),
                     ],
@@ -440,7 +521,9 @@ impl DESModelRegistration<MultiStageParams, MultiStageRunResult> for MultiStageS
     }
 
     fn run(&self, params: MultiStageParams, _runtime: &DESRuntimeConfig) -> MultiStageRunResult {
-        let problem = params.problem.unwrap_or_else(build_default_multi_stage_inventory_problem);
+        let problem = params
+            .problem
+            .unwrap_or_else(build_default_multi_stage_inventory_problem);
         let options = params
             .options
             .map(|o| SDDPOptions {
@@ -477,7 +560,11 @@ impl DESModelRegistration<MultiStageParams, MultiStageRunResult> for MultiStageS
             format!("  Policy value:    {:.6}", result.sddp.policy_value),
             format!(
                 "  Gap to exact:    {}",
-                result.sddp.gap_to_exact.map(|g| to_exponential(g, 3)).unwrap_or_else(|| "n/a".to_string())
+                result
+                    .sddp
+                    .gap_to_exact
+                    .map(|g| to_exponential(g, 3))
+                    .unwrap_or_else(|| "n/a".to_string())
             ),
             format!("  Cuts/stage:      [{cuts_per_stage}]"),
         ]
@@ -485,8 +572,9 @@ impl DESModelRegistration<MultiStageParams, MultiStageRunResult> for MultiStageS
     }
 
     fn write_csv(&self, result: &MultiStageRunResult, csv_path: &str) {
-        let mut lines =
-            vec!["iter,upper_bound,policy_value,gap_to_exact,terminal_inventory,cuts_added".to_string()];
+        let mut lines = vec![
+            "iter,upper_bound,policy_value,gap_to_exact,terminal_inventory,cuts_added".to_string(),
+        ];
         for tr in &result.sddp.trace {
             lines.push(csv_row([
                 tr.iter.to_string(),

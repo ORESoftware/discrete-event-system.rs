@@ -132,7 +132,9 @@ impl LinAlg {
 
     /// s·M.
     pub fn scale(m: &Matrix, s: f64) -> Matrix {
-        m.iter().map(|row| row.iter().map(|x| x * s).collect()).collect()
+        m.iter()
+            .map(|row| row.iter().map(|x| x * s).collect())
+            .collect()
     }
 
     /// A^k via repeated multiplication (k ≥ 0; k = 0 → identity).
@@ -532,7 +534,11 @@ impl SymmetricEigen {
         let mut idx: Vec<usize> = (0..n).collect();
         idx.sort_by(|&i, &j| a[i][i].partial_cmp(&a[j][j]).unwrap());
         self.vals = Some(idx.iter().map(|&i| a[i][i]).collect());
-        self.vecs = Some((0..n).map(|r| idx.iter().map(|&i| v[r][i]).collect()).collect());
+        self.vecs = Some(
+            (0..n)
+                .map(|r| idx.iter().map(|&i| v[r][i]).collect())
+                .collect(),
+        );
     }
 
     pub fn values(&mut self) -> Vector {
@@ -575,7 +581,11 @@ mod tests {
     #[test]
     fn identity_and_matmul() {
         let i = LinAlg::identity(3);
-        let m = vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0], vec![7.0, 8.0, 10.0]];
+        let m = vec![
+            vec![1.0, 2.0, 3.0],
+            vec![4.0, 5.0, 6.0],
+            vec![7.0, 8.0, 10.0],
+        ];
         assert_eq!(LinAlg::mat_mul(&i, &m), m);
     }
 

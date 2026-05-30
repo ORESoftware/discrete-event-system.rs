@@ -275,7 +275,9 @@ impl RK45Integrator {
 
 impl Default for RK45Integrator {
     fn default() -> Self {
-        RK45Integrator { opts: RK45Options::default() }
+        RK45Integrator {
+            opts: RK45Options::default(),
+        }
     }
 }
 
@@ -344,12 +346,13 @@ where
                 .iter()
                 .enumerate()
                 .map(|(i, v)| {
-                    v + h * (A71 * k1[i]
-                        + A72 * k2[i]
-                        + A73 * k3[i]
-                        + A74 * k4[i]
-                        + A75 * k5[i]
-                        + A76 * k6[i])
+                    v + h
+                        * (A71 * k1[i]
+                            + A72 * k2[i]
+                            + A73 * k3[i]
+                            + A74 * k4[i]
+                            + A75 * k5[i]
+                            + A76 * k6[i])
                 })
                 .collect();
             let k7 = f(tn + h, &y5);
@@ -406,12 +409,20 @@ pub struct BackwardEulerIntegrator {
 
 impl BackwardEulerIntegrator {
     pub fn new(dt: f64, newton_tol: f64, newton_max_iter: usize) -> Self {
-        BackwardEulerIntegrator { dt, newton_tol, newton_max_iter }
+        BackwardEulerIntegrator {
+            dt,
+            newton_tol,
+            newton_max_iter,
+        }
     }
 
     /// Construct with the TS default Newton settings (`tol=1e-10`, `maxIter=50`).
     pub fn with_dt(dt: f64) -> Self {
-        BackwardEulerIntegrator { dt, newton_tol: 1e-10, newton_max_iter: 50 }
+        BackwardEulerIntegrator {
+            dt,
+            newton_tol: 1e-10,
+            newton_max_iter: 50,
+        }
     }
 }
 
@@ -506,10 +517,13 @@ fn solve_linear(a: &[Vec<f64>], b: &[f64]) -> Vec<f64> {
             m.swap(i, p);
             x.swap(i, p);
         }
-        for k in (i + 1)..n {
-            let factor = m[k][i] / m[i][i];
-            for jj in i..n {
-                m[k][jj] -= factor * m[i][jj];
+        let (pivot_rows, elimination_rows) = m.split_at_mut(i + 1);
+        let pivot_row = &pivot_rows[i];
+        for (offset, row) in elimination_rows.iter_mut().enumerate() {
+            let k = i + 1 + offset;
+            let factor = row[i] / pivot_row[i];
+            for (jj, value) in row.iter_mut().enumerate().skip(i) {
+                *value -= factor * pivot_row[jj];
             }
             x[k] -= factor * x[i];
         }

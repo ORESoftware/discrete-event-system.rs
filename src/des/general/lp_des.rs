@@ -229,7 +229,10 @@ impl SimplexState {
 /// Shared `hasWork` predicate of the TS `abstract class SimplexRoleStation`:
 /// there is work while the solve is mid-flight or a phase has just completed.
 fn role_has_work(s: &SimplexState) -> bool {
-    matches!(s.status, SimplexStatus::InProgress | SimplexStatus::PhaseDone)
+    matches!(
+        s.status,
+        SimplexStatus::InProgress | SimplexStatus::PhaseDone
+    )
 }
 
 /// Elementary row operations (Gauss-Jordan on the pivot column). Returns the
@@ -920,7 +923,11 @@ pub fn solve_lp_via_des(p: &LPProblem, opts: &DESSimplexOptions) -> DESSimplexSo
     let message = format!(
         "DES simplex: {} pivots across {}",
         s.trace.pivot_history.len(),
-        if s.phase == 2 { "two phases" } else { "phase 2 only" }
+        if s.phase == 2 {
+            "two phases"
+        } else {
+            "phase 2 only"
+        }
     );
     DESSimplexSolution {
         status: LPStatus::Optimal,
@@ -1027,7 +1034,13 @@ mod tests {
             b_eq: Some(vec![4.0]),
             ..Default::default()
         };
-        let des = solve_lp_via_des(&p, &DESSimplexOptions { pivot_rule: Some(PivotRule::Bland), ..Default::default() });
+        let des = solve_lp_via_des(
+            &p,
+            &DESSimplexOptions {
+                pivot_rule: Some(PivotRule::Bland),
+                ..Default::default()
+            },
+        );
         let direct = solve_lp_internal(&p, &InternalSimplexOptions::default());
         assert_eq!(des.status, LPStatus::Optimal);
         assert!((des.objective - 11.0).abs() < TOL, "obj={}", des.objective);

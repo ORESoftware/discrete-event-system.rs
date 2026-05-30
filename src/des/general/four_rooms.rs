@@ -39,13 +39,15 @@ use std::rc::Rc;
 
 use crate::des::general::des_base::argmax::{scan_arg_max_tie_break, ARGMAX_EPS_DEFAULT};
 use crate::des::general::des_base::environment::{
-    EnvironmentStation, EnvironmentStationOptions, PureEnvironment, StepResult, CH_ACTION, CH_STATE,
-    CH_TRANSITION,
+    EnvironmentStation, EnvironmentStationOptions, PureEnvironment, StepResult, CH_ACTION,
+    CH_STATE, CH_TRANSITION,
 };
 use crate::des::general::des_base::preconditions::Preconditions;
 use crate::des::general::des_base::rl_agent::{RLAgentCore, RLAgentStation};
 use crate::des::general::des_base::runner::{run_iterative_des, IterativeRunOptions};
-use crate::des::general::des_base::semi_mdp::{Opt, SemiMDPAgentStation, SemiMDPCore, SemiMDPOptions};
+use crate::des::general::des_base::semi_mdp::{
+    Opt, SemiMDPAgentStation, SemiMDPCore, SemiMDPOptions,
+};
 use crate::des::general::des_base::station::{DESStation, StationCore, StationRef};
 use crate::des::shared::capabilities::{RandomSource, SeededRandom};
 
@@ -184,7 +186,11 @@ impl PureEnvironment<usize, usize> for FourRoomsEnv {
         let (gr, gc) = GOAL;
         let done = nr == gr as i64 && nc == gc as i64;
         let reward = if done { 1.0 } else { 0.0 };
-        StepResult { next_state, reward, done }
+        StepResult {
+            next_state,
+            reward,
+            done,
+        }
     }
 
     fn render(&self, state: &usize) -> String {
@@ -332,7 +338,11 @@ impl Opt<usize, usize> for PrimitiveOption {
     }
 }
 
-fn make_hallway_option(name: &str, hallway_idx: usize, owner_rooms: &[usize]) -> Box<dyn Opt<usize, usize>> {
+fn make_hallway_option(
+    name: &str,
+    hallway_idx: usize,
+    owner_rooms: &[usize],
+) -> Box<dyn Opt<usize, usize>> {
     let (hr, hc) = HALLWAYS[hallway_idx];
     Box::new(HallwayOption {
         name: name.to_string(),
@@ -358,7 +368,10 @@ pub fn build_four_rooms_options(include_primitive: bool) -> Vec<Box<dyn Opt<usiz
     if include_primitive {
         let dirs = ["N", "E", "S", "W"];
         for (a, d) in dirs.iter().enumerate() {
-            opts.push(Box::new(PrimitiveOption { name: format!("prim-{d}"), action: a }));
+            opts.push(Box::new(PrimitiveOption {
+                name: format!("prim-{d}"),
+                action: a,
+            }));
         }
     }
     opts
@@ -423,7 +436,14 @@ impl RLAgentStation<usize, usize> for FourRoomsSMDPAgent {
     fn pick_action(&self, state: &usize, rng: &mut dyn RandomSource) -> usize {
         self.semi_pick_action(state, rng)
     }
-    fn update(&mut self, _state: &usize, _action: &usize, reward: f64, next_state: &usize, done: bool) {
+    fn update(
+        &mut self,
+        _state: &usize,
+        _action: &usize,
+        reward: f64,
+        next_state: &usize,
+        done: bool,
+    ) {
         self.semi_update(reward, next_state, done);
     }
     fn end_of_episode(&mut self, _episode_id: f64) {
@@ -504,7 +524,8 @@ pub struct FourRoomsResult {
 /// out the greedy option policy from the start.
 pub fn run_four_rooms_smdp(opts: FourRoomsTrainOpts) -> FourRoomsResult {
     let cls = "run_four_rooms_smdp";
-    Preconditions::integer_in_range(cls, "numEpisodes", opts.num_episodes as f64, 1.0, 1e9).unwrap();
+    Preconditions::integer_in_range(cls, "numEpisodes", opts.num_episodes as f64, 1.0, 1e9)
+        .unwrap();
     if let Some(m) = opts.max_steps_per_episode {
         Preconditions::integer_in_range(cls, "maxStepsPerEpisode", m as f64, 1.0, 1e9).unwrap();
     }
@@ -532,7 +553,13 @@ pub fn run_four_rooms_smdp(opts: FourRoomsTrainOpts) -> FourRoomsResult {
 
     let seed = opts.seed.unwrap_or(1);
     let rng = SharedRng::new(seed);
-    let env = FourRoomsEnv::new(FourRoomsOpts { slip: Some(opts.slip.unwrap_or(0.0)), start_state: None }, rng.clone());
+    let env = FourRoomsEnv::new(
+        FourRoomsOpts {
+            slip: Some(opts.slip.unwrap_or(0.0)),
+            start_state: None,
+        },
+        rng.clone(),
+    );
     let options = build_four_rooms_options(opts.include_primitive.unwrap_or(true));
     let agent = FourRoomsSMDPAgent::new(
         Box::new(rng.clone()),
@@ -558,14 +585,28 @@ pub fn run_four_rooms_smdp(opts: FourRoomsTrainOpts) -> FourRoomsResult {
     );
 
     let agent: Rc<RefCell<FourRoomsSMDPAgent>> = Rc::new(RefCell::new(agent));
-    let env_station: Rc<RefCell<EnvironmentStation<usize, usize>>> = Rc::new(RefCell::new(env_station));
+    let env_station: Rc<RefCell<EnvironmentStation<usize, usize>>> =
+        Rc::new(RefCell::new(env_station));
 
-    env_station.borrow_mut().core_mut().pipe(agent.clone() as StationRef, CH_STATE, CH_STATE);
-    env_station.borrow_mut().core_mut().pipe(agent.clone() as StationRef, CH_TRANSITION, CH_TRANSITION);
-    agent.borrow_mut().core_mut().pipe(env_station.clone() as StationRef, CH_ACTION, CH_ACTION);
+    env_station
+        .borrow_mut()
+        .core_mut()
+        .pipe(agent.clone() as StationRef, CH_STATE, CH_STATE);
+    env_station.borrow_mut().core_mut().pipe(
+        agent.clone() as StationRef,
+        CH_TRANSITION,
+        CH_TRANSITION,
+    );
+    agent
+        .borrow_mut()
+        .core_mut()
+        .pipe(env_station.clone() as StationRef, CH_ACTION, CH_ACTION);
 
     let summary = run_iterative_des(
-        vec![env_station.clone() as StationRef, agent.clone() as StationRef],
+        vec![
+            env_station.clone() as StationRef,
+            agent.clone() as StationRef,
+        ],
         IterativeRunOptions {
             rng: Some({
                 let mut r = rng.clone();
@@ -577,7 +618,13 @@ pub fn run_four_rooms_smdp(opts: FourRoomsTrainOpts) -> FourRoomsResult {
 
     // Greedy rollout from start. (The TS `evalAgent` whose Q is copied but never
     // read is omitted — see module docs.)
-    let mut eval_env = FourRoomsEnv::new(FourRoomsOpts { slip: Some(0.0), start_state: None }, rng.clone());
+    let mut eval_env = FourRoomsEnv::new(
+        FourRoomsOpts {
+            slip: Some(0.0),
+            start_state: None,
+        },
+        rng.clone(),
+    );
     let mut s = eval_env.reset();
     let mut len = 0usize;
     let mut reached = false;
@@ -670,7 +717,10 @@ mod tests {
         assert_eq!(res.length_history.len(), 800);
         assert!(res.ticks > 0);
         // With hallway options the greedy policy should solve the task.
-        assert!(res.greedy_reached_goal, "greedy option policy reaches the goal");
+        assert!(
+            res.greedy_reached_goal,
+            "greedy option policy reaches the goal"
+        );
         assert!(res.greedy_episode_length.is_finite());
     }
 }

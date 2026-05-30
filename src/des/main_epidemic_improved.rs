@@ -113,17 +113,29 @@ impl Stn {
     }
     fn add_out_connection(&self, target: Rc<RefCell<dyn HasInput>>) {
         match self {
-            Stn::Source(s) => { s.borrow_mut().add_out_connection(target); }
-            Stn::Proc(p) => { p.borrow_mut().add_out_connection(target); }
-            Stn::Decision(d) => { d.borrow_mut().add_out_connection(target); }
+            Stn::Source(s) => {
+                s.borrow_mut().add_out_connection(target);
+            }
+            Stn::Proc(p) => {
+                p.borrow_mut().add_out_connection(target);
+            }
+            Stn::Decision(d) => {
+                d.borrow_mut().add_out_connection(target);
+            }
             Stn::Sink(_) => {}
         }
     }
     fn add_in_connection(&self, source: Rc<RefCell<dyn HasManyOutputConnections>>) {
         match self {
-            Stn::Proc(p) => { p.borrow_mut().add_in_connection(source); }
-            Stn::Decision(d) => { d.borrow_mut().add_in_connection(source); }
-            Stn::Sink(s) => { s.borrow_mut().add_in_connection(source); }
+            Stn::Proc(p) => {
+                p.borrow_mut().add_in_connection(source);
+            }
+            Stn::Decision(d) => {
+                d.borrow_mut().add_in_connection(source);
+            }
+            Stn::Sink(s) => {
+                s.borrow_mut().add_in_connection(source);
+            }
             Stn::Source(_) => {}
         }
     }
@@ -204,14 +216,38 @@ pub fn run() {
 
     let mut decisions: HashMap<String, Rc<RefCell<ProbabilityDecisionEntity>>> = HashMap::new();
     let decision_branches: [(&str, [Decimal; 2]); 3] = [
-        ("I-P-Decision", [asymptomatic_share, bgn(1.0) - asymptomatic_share]),
-        ("I-S-Decision", [bgn(1.0) - hospitalization_given_symptom, hospitalization_given_symptom]),
-        ("I-H-Decision", [bgn(1.0) - case_fatality_given_hospital, case_fatality_given_hospital]),
+        (
+            "I-P-Decision",
+            [asymptomatic_share, bgn(1.0) - asymptomatic_share],
+        ),
+        (
+            "I-S-Decision",
+            [
+                bgn(1.0) - hospitalization_given_symptom,
+                hospitalization_given_symptom,
+            ],
+        ),
+        (
+            "I-H-Decision",
+            [
+                bgn(1.0) - case_fatality_given_hospital,
+                case_fatality_given_hospital,
+            ],
+        ),
     ];
     for (id, probs) in decision_branches {
         let d = Rc::new(RefCell::new(ProbabilityDecisionEntity::new(
             id.to_string(),
-            vec![Branch { index: 0, prob: probs[0] }, Branch { index: 1, prob: probs[1] }],
+            vec![
+                Branch {
+                    index: 0,
+                    prob: probs[0],
+                },
+                Branch {
+                    index: 1,
+                    prob: probs[1],
+                },
+            ],
             uni(id, &mut seeds),
             seeds.next(),
         )));
@@ -224,8 +260,19 @@ pub fn run() {
 
     // Ordered station table (matches the TS Map literal order).
     let order: Vec<&str> = vec![
-        "main-source", "S", "E", "I-P", "I-P-Decision", "I-A", "I-S", "I-S-Decision", "I-H",
-        "I-H-Decision", "R", "D", "main-sink",
+        "main-source",
+        "S",
+        "E",
+        "I-P",
+        "I-P-Decision",
+        "I-A",
+        "I-S",
+        "I-S-Decision",
+        "I-H",
+        "I-H-Decision",
+        "R",
+        "D",
+        "main-sink",
     ];
     let node_of = |id: &str| -> Stn {
         match id {
@@ -268,8 +315,10 @@ pub fn run() {
     let event_log_path = "out/epidemic-events.jsonl";
     let mut logger = JsonlLogger::new(event_log_path, LogLevel::Info);
 
-    let edges_json: Vec<JsonValue> =
-        edges.iter().map(|(a, b)| JsonValue::Array(vec![jstr(a), jstr(b)])).collect();
+    let edges_json: Vec<JsonValue> = edges
+        .iter()
+        .map(|(a, b)| JsonValue::Array(vec![jstr(a), jstr(b)]))
+        .collect();
     logger.log(jobj(vec![
         ("kind", jstr("sim_start")),
         (
@@ -281,14 +330,23 @@ pub fn run() {
                 ("sourceCap", jnum(TURN_OFF_AFTER_COUNT as f64)),
                 (
                     "arrivalsInterarrival",
-                    JsonValue::Array(vec![jnum(ARRIVALS_INTERARRIVAL[0]), jnum(ARRIVALS_INTERARRIVAL[1])]),
+                    JsonValue::Array(vec![
+                        jnum(ARRIVALS_INTERARRIVAL[0]),
+                        jnum(ARRIVALS_INTERARRIVAL[1]),
+                    ]),
                 ),
                 (
                     "probabilities",
                     jobj(vec![
                         ("asymptomaticShare", jnum(to_f64(asymptomatic_share))),
-                        ("hospitalizationGivenSymptom", jnum(to_f64(hospitalization_given_symptom))),
-                        ("caseFatalityGivenHospital", jnum(to_f64(case_fatality_given_hospital))),
+                        (
+                            "hospitalizationGivenSymptom",
+                            jnum(to_f64(hospitalization_given_symptom)),
+                        ),
+                        (
+                            "caseFatalityGivenHospital",
+                            jnum(to_f64(case_fatality_given_hospital)),
+                        ),
                     ]),
                 ),
                 ("edges", JsonValue::Array(edges_json)),
@@ -307,8 +365,12 @@ pub fn run() {
             0
         }
     };
-    let compartment_population =
-        |c: &str| -> usize { compartment_groups(c).into_iter().map(|sid| station_population(sid)).sum() };
+    let compartment_population = |c: &str| -> usize {
+        compartment_groups(c)
+            .into_iter()
+            .map(|sid| station_population(sid))
+            .sum()
+    };
     let cumulative_deaths = || -> i64 { sink.borrow().destroyed_count };
 
     let mut trajectory: Vec<HashMap<String, f64>> = Vec::new();
@@ -341,7 +403,15 @@ pub fn run() {
         logger.log(jobj(vec![
             ("kind", jstr("tick")),
             ("t", jnum(t as f64)),
-            ("populations", JsonValue::Object(populations.into_iter().map(|(k, v)| (k.to_string(), v)).collect())),
+            (
+                "populations",
+                JsonValue::Object(
+                    populations
+                        .into_iter()
+                        .map(|(k, v)| (k.to_string(), v))
+                        .collect(),
+                ),
+            ),
             ("cumD", jnum(d_cum as f64)),
             ("alive", jnum(total_alive as f64)),
             ("sourcesActive", JsonValue::Bool(sources_active)),
@@ -353,7 +423,10 @@ pub fn run() {
                 last_processor: &mut HashMap<String, String>,
                 absorbed: &mut HashSet<String>| {
         let record = |tc: &mut HashMap<String, HashMap<String, u64>>, from: &str, to: &str| {
-            *tc.entry(from.to_string()).or_default().entry(to.to_string()).or_insert(0) += 1;
+            *tc.entry(from.to_string())
+                .or_default()
+                .entry(to.to_string())
+                .or_insert(0) += 1;
         };
         let mut present_proc: HashMap<String, String> = HashMap::new();
         let mut present_any: HashSet<String> = HashSet::new();
@@ -375,7 +448,10 @@ pub fn run() {
         }
         for (eid, cur) in &present_proc {
             if last_processor.get(eid) != Some(cur) {
-                let prev = last_processor.get(eid).cloned().unwrap_or_else(|| "__source__".to_string());
+                let prev = last_processor
+                    .get(eid)
+                    .cloned()
+                    .unwrap_or_else(|| "__source__".to_string());
                 record(transition_count, &prev, cur);
                 last_processor.insert(eid.clone(), cur.clone());
             }
@@ -434,21 +510,42 @@ pub fn run() {
     );
     println!("wall time: {elapsed} ms");
     println!("total entities created: {}", source.borrow().created_count);
-    println!("cumulative deaths absorbed by sink: {}", cumulative_deaths());
+    println!(
+        "cumulative deaths absorbed by sink: {}",
+        cumulative_deaths()
+    );
     println!();
 
     let final_row = trajectory.last().cloned().unwrap_or_default();
     println!("--- final compartment populations ---");
     for c in COMPARTMENT_ORDER {
-        println!("  {:<4}: {}", c, final_row.get(c).copied().unwrap_or(0.0) as i64);
+        println!(
+            "  {:<4}: {}",
+            c,
+            final_row.get(c).copied().unwrap_or(0.0) as i64
+        );
     }
-    println!("  D (cum): {}", final_row.get("D_cum").copied().unwrap_or(0.0) as i64);
+    println!(
+        "  D (cum): {}",
+        final_row.get("D_cum").copied().unwrap_or(0.0) as i64
+    );
     println!();
 
     let matrix_rows = ["__source__", "S", "E", "I-P", "I-A", "I-S", "I-H", "R", "D"];
     let matrix_cols = ["S", "E", "I-P", "I-A", "I-S", "I-H", "R", "D", "main-sink"];
-    let count = |r: &str, c: &str| -> u64 { transition_count.get(r).and_then(|row| row.get(c)).copied().unwrap_or(0) };
-    let row_sum = |r: &str| -> u64 { transition_count.get(r).map(|row| row.values().sum()).unwrap_or(0) };
+    let count = |r: &str, c: &str| -> u64 {
+        transition_count
+            .get(r)
+            .and_then(|row| row.get(c))
+            .copied()
+            .unwrap_or(0)
+    };
+    let row_sum = |r: &str| -> u64 {
+        transition_count
+            .get(r)
+            .map(|row| row.values().sum())
+            .unwrap_or(0)
+    };
 
     let mut header = format!("{:<11}", "from \\ to");
     for c in matrix_cols {
@@ -477,7 +574,11 @@ pub fn run() {
             let v = count(r, c);
             let cell = if total > 0 {
                 let p = v as f64 / total as f64;
-                if p == 0.0 { ".".to_string() } else { format!("{p:.3}") }
+                if p == 0.0 {
+                    ".".to_string()
+                } else {
+                    format!("{p:.3}")
+                }
             } else {
                 ".".to_string()
             };
@@ -497,8 +598,10 @@ pub fn run() {
     let mut csv = cols.join(",");
     csv.push('\n');
     for r in &trajectory {
-        let line: Vec<String> =
-            cols.iter().map(|c| (r.get(c).copied().unwrap_or(0.0) as i64).to_string()).collect();
+        let line: Vec<String> = cols
+            .iter()
+            .map(|c| (r.get(c).copied().unwrap_or(0.0) as i64).to_string())
+            .collect();
         csv.push_str(&line.join(","));
         csv.push('\n');
     }
@@ -511,7 +614,11 @@ pub fn run() {
         let mut row_entries: Vec<(String, JsonValue)> = Vec::new();
         for c in matrix_cols {
             let v = count(r, c);
-            let p = if total > 0 { (v as f64 / total as f64 * 1e6).round() / 1e6 } else { 0.0 };
+            let p = if total > 0 {
+                (v as f64 / total as f64 * 1e6).round() / 1e6
+            } else {
+                0.0
+            };
             row_entries.push((c.to_string(), jnum(p)));
         }
         serial.push((r.to_string(), JsonValue::Object(row_entries)));
@@ -532,7 +639,12 @@ pub fn run() {
                     JsonValue::Object(
                         COMPARTMENT_ORDER
                             .iter()
-                            .map(|c| (c.to_string(), jnum(final_row.get(*c).copied().unwrap_or(0.0))))
+                            .map(|c| {
+                                (
+                                    c.to_string(),
+                                    jnum(final_row.get(*c).copied().unwrap_or(0.0)),
+                                )
+                            })
                             .collect(),
                     ),
                 ),
@@ -550,6 +662,11 @@ pub fn run() {
         .map(|(k, n)| format!("{k}={n}"))
         .collect::<Vec<_>>()
         .join(", ");
-    println!("  {}  ({} events: {})", event_log_path, logger.get_event_count(), kind_counts);
+    println!(
+        "  {}  ({} events: {})",
+        event_log_path,
+        logger.get_event_count(),
+        kind_counts
+    );
     println!("============================================================");
 }

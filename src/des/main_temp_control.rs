@@ -82,11 +82,45 @@ pub fn run() {
     let mut runs: Vec<(String, RunResult)> = Vec::new();
     let comparison: Vec<(&str, ControllerSpec)> = vec![
         ("bang-bang", ControllerSpec::BangBang),
-        ("PID (filtered-D)", ControllerSpec::Pid { kp: 3.0, ki: 0.5, kd: 0.5 }),
+        (
+            "PID (filtered-D)",
+            ControllerSpec::Pid {
+                kp: 3.0,
+                ki: 0.5,
+                kd: 0.5,
+            },
+        ),
         ("Fuzzy-PI (Mamdani)", ControllerSpec::Fuzzy),
-        ("MDP-MPC (H=1h)", ControllerSpec::MdpMpc { horizon_h: 1.0, n_levels: 6, comfort_penalty: 0.5, cost_per_kwh: 0.15, track_weight: Some(1.0) }),
-        ("MDP-MPC (H=6h)", ControllerSpec::MdpMpc { horizon_h: 6.0, n_levels: 6, comfort_penalty: 0.5, cost_per_kwh: 0.15, track_weight: Some(1.0) }),
-        ("MDP-MPC (loose,w=0.05)", ControllerSpec::MdpMpc { horizon_h: 6.0, n_levels: 6, comfort_penalty: 0.5, cost_per_kwh: 0.15, track_weight: Some(0.05) }),
+        (
+            "MDP-MPC (H=1h)",
+            ControllerSpec::MdpMpc {
+                horizon_h: 1.0,
+                n_levels: 6,
+                comfort_penalty: 0.5,
+                cost_per_kwh: 0.15,
+                track_weight: Some(1.0),
+            },
+        ),
+        (
+            "MDP-MPC (H=6h)",
+            ControllerSpec::MdpMpc {
+                horizon_h: 6.0,
+                n_levels: 6,
+                comfort_penalty: 0.5,
+                cost_per_kwh: 0.15,
+                track_weight: Some(1.0),
+            },
+        ),
+        (
+            "MDP-MPC (loose,w=0.05)",
+            ControllerSpec::MdpMpc {
+                horizon_h: 6.0,
+                n_levels: 6,
+                comfort_penalty: 0.5,
+                cost_per_kwh: 0.15,
+                track_weight: Some(0.05),
+            },
+        ),
     ];
     for (name, spec) in comparison {
         let mut c = cfg.clone();
@@ -99,7 +133,9 @@ pub fn run() {
     }
 
     header("MDP-MPC SENSITIVITY: forecast horizon × tracking weight");
-    println!("  Demonstrates the energy/comfort frontier the MDP discovers when given more lookahead");
+    println!(
+        "  Demonstrates the energy/comfort frontier the MDP discovers when given more lookahead"
+    );
     println!("  or different relative penalties. With weak tracking (w=0.05) the controller saves");
     println!("  energy by riding closer to the band edges; with strong tracking (w=1.0) it stays");
     println!("  near the centre at slightly higher cost.");
@@ -143,9 +179,25 @@ pub fn run() {
     });
     let stress_controllers: Vec<(&str, ControllerSpec)> = vec![
         ("bang-bang", ControllerSpec::BangBang),
-        ("PID", ControllerSpec::Pid { kp: 5.0, ki: 1.0, kd: 1.0 }),
+        (
+            "PID",
+            ControllerSpec::Pid {
+                kp: 5.0,
+                ki: 1.0,
+                kd: 1.0,
+            },
+        ),
         ("Fuzzy-PI", ControllerSpec::Fuzzy),
-        ("MDP-MPC (H=6h, w=1)", ControllerSpec::MdpMpc { horizon_h: 6.0, n_levels: 6, comfort_penalty: 2.0, cost_per_kwh: 0.15, track_weight: Some(1.0) }),
+        (
+            "MDP-MPC (H=6h, w=1)",
+            ControllerSpec::MdpMpc {
+                horizon_h: 6.0,
+                n_levels: 6,
+                comfort_penalty: 2.0,
+                cost_per_kwh: 0.15,
+                track_weight: Some(1.0),
+            },
+        ),
     ];
     for (name, spec) in stress_controllers {
         let mut c = stress.clone();

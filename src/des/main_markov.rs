@@ -111,7 +111,11 @@ struct AuditSizes {
 
 impl AuditSizes {
     fn new(processors: Vec<Rc<RefCell<EntityProcessor>>>) -> Self {
-        AuditSizes { processors, first: true, previous_total: 0 }
+        AuditSizes {
+            processors,
+            first: true,
+            previous_total: 0,
+        }
     }
 
     /// The returned closure body of the TS `auditSizes`.
@@ -150,7 +154,11 @@ fn add_source(
     a: f64,
     b: f64,
 ) {
-    let s = Rc::new(RefCell::new(EntitySource::new(id.to_string(), uniform(a, b, seeds), 300)));
+    let s = Rc::new(RefCell::new(EntitySource::new(
+        id.to_string(),
+        uniform(a, b, seeds),
+        300,
+    )));
     s.borrow_mut().subscribe(obs.clone());
     order.push(id.to_string());
     map.insert(id.to_string(), Node::Source(s));
@@ -190,16 +198,78 @@ pub fn run() {
     let mut all_processors: Vec<Rc<RefCell<EntityProcessor>>> = Vec::new();
 
     // `programEntities` Map literal — insertion order preserved exactly.
-    add_source(&mut order, &mut map, &obs, &mut seeds, "A-source", 10.0, 20.0);
-    add_proc(&mut order, &mut map, &obs, &mut seeds, &mut all_processors, "A", 10.0, 20.0);
-    add_source(&mut order, &mut map, &obs, &mut seeds, "B-source", 10.0, 20.0);
-    add_proc(&mut order, &mut map, &obs, &mut seeds, &mut all_processors, "B", 10.0, 20.0);
-    add_proc(&mut order, &mut map, &obs, &mut seeds, &mut all_processors, "C", 10.0, 20.0);
-    add_source(&mut order, &mut map, &obs, &mut seeds, "C-source", 10.0, 20.0);
-    add_proc(&mut order, &mut map, &obs, &mut seeds, &mut all_processors, "D", 10.0, 20.0);
-    add_proc(&mut order, &mut map, &obs, &mut seeds, &mut all_processors, "E", 10.0, 20.0);
-    add_proc(&mut order, &mut map, &obs, &mut seeds, &mut all_processors, "F", 5.0, 10.0);
-    add_source(&mut order, &mut map, &obs, &mut seeds, "D-source", 10.0, 20.0);
+    add_source(
+        &mut order, &mut map, &obs, &mut seeds, "A-source", 10.0, 20.0,
+    );
+    add_proc(
+        &mut order,
+        &mut map,
+        &obs,
+        &mut seeds,
+        &mut all_processors,
+        "A",
+        10.0,
+        20.0,
+    );
+    add_source(
+        &mut order, &mut map, &obs, &mut seeds, "B-source", 10.0, 20.0,
+    );
+    add_proc(
+        &mut order,
+        &mut map,
+        &obs,
+        &mut seeds,
+        &mut all_processors,
+        "B",
+        10.0,
+        20.0,
+    );
+    add_proc(
+        &mut order,
+        &mut map,
+        &obs,
+        &mut seeds,
+        &mut all_processors,
+        "C",
+        10.0,
+        20.0,
+    );
+    add_source(
+        &mut order, &mut map, &obs, &mut seeds, "C-source", 10.0, 20.0,
+    );
+    add_proc(
+        &mut order,
+        &mut map,
+        &obs,
+        &mut seeds,
+        &mut all_processors,
+        "D",
+        10.0,
+        20.0,
+    );
+    add_proc(
+        &mut order,
+        &mut map,
+        &obs,
+        &mut seeds,
+        &mut all_processors,
+        "E",
+        10.0,
+        20.0,
+    );
+    add_proc(
+        &mut order,
+        &mut map,
+        &obs,
+        &mut seeds,
+        &mut all_processors,
+        "F",
+        5.0,
+        10.0,
+    );
+    add_source(
+        &mut order, &mut map, &obs, &mut seeds, "D-source", 10.0, 20.0,
+    );
 
     // `doAudit = auditSizes(allProcessors)`.
     let mut do_audit = AuditSizes::new(all_processors.clone());
@@ -236,7 +306,10 @@ pub fn run() {
         println!("{:?}", a.computed());
     }
 
-    let mut program_list: Vec<Node> = order.iter().map(|id| map.get(id).unwrap().clone()).collect();
+    let mut program_list: Vec<Node> = order
+        .iter()
+        .map(|id| map.get(id).unwrap().clone())
+        .collect();
     let mut rng = SeededRandom::new(0xC0FFEE);
 
     for i in 0..1000 {

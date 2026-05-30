@@ -362,8 +362,16 @@ pub fn run_double_integrator_lqr(
         q: vec![vec![q_pos, 0.0], vec![0.0, q_vel]],
         r: vec![vec![r_u]],
         gamma: Some(gamma),
-        u_min_vec: if u_sat.is_finite() { Some(vec![-u_sat]) } else { None },
-        u_max_vec: if u_sat.is_finite() { Some(vec![u_sat]) } else { None },
+        u_min_vec: if u_sat.is_finite() {
+            Some(vec![-u_sat])
+        } else {
+            None
+        },
+        u_max_vec: if u_sat.is_finite() {
+            Some(vec![u_sat])
+        } else {
+            None
+        },
         riccati_tol: None,
         riccati_max_iter: None,
     };
@@ -383,8 +391,16 @@ pub fn run_double_integrator_lqr(
         stage_costs.push(sc);
         total += sc;
         // Dynamics step: x_{k+1} = A x_k + B u_k + w_k.
-        let w0 = if noise_std > 0.0 { noise_std * gaussian(&mut rng) } else { 0.0 };
-        let w1 = if noise_std > 0.0 { noise_std * gaussian(&mut rng) } else { 0.0 };
+        let w0 = if noise_std > 0.0 {
+            noise_std * gaussian(&mut rng)
+        } else {
+            0.0
+        };
+        let w1 = if noise_std > 0.0 {
+            noise_std * gaussian(&mut rng)
+        } else {
+            0.0
+        };
         let x_next: [f64; 2] = [
             x[0] + dt * x[1] + (dt * dt / 2.0) * u_val + w0,
             x[1] + dt * u_val + w1,
@@ -430,7 +446,11 @@ mod tests {
     fn riccati_converges() {
         let res = run_double_integrator_lqr(DoubleIntegratorOpts::default()).unwrap();
         assert!(res.riccati_iters > 0);
-        assert!(res.riccati_residual < 1e-10, "residual {}", res.riccati_residual);
+        assert!(
+            res.riccati_residual < 1e-10,
+            "residual {}",
+            res.riccati_residual
+        );
         // Gain has shape m × n = 1 × 2 and positive position feedback.
         assert_eq!(res.k.len(), 1);
         assert_eq!(res.k[0].len(), 2);

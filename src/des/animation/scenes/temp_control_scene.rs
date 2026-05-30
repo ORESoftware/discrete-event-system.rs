@@ -122,7 +122,11 @@ pub fn build_temp_control_frame(_t: f64, tick: f64, d: &SceneData) -> FrameParts
                 font_size: Some(12.0),
                 fill: Some("#222".to_string()),
                 anchor: Some(Anchor::Middle),
-                font_weight: Some(if i == 0 { FontWeight::Bold } else { FontWeight::Normal }),
+                font_weight: Some(if i == 0 {
+                    FontWeight::Bold
+                } else {
+                    FontWeight::Normal
+                }),
                 ..Default::default()
             }));
         }
@@ -201,7 +205,8 @@ pub fn build_temp_control_frame(_t: f64, tick: f64, d: &SceneData) -> FrameParts
     let therm_y_bot = mid_y + 280.0;
     let t_min = 50.0;
     let t_max = 90.0;
-    let t_to_y = |tt: f64| therm_y_bot - ((tt - t_min) / (t_max - t_min)) * (therm_y_bot - therm_y_top);
+    let t_to_y =
+        |tt: f64| therm_y_bot - ((tt - t_min) / (t_max - t_min)) * (therm_y_bot - therm_y_top);
     // Frame.
     shapes.push(Shape::Rect(RectShape {
         x: therm_x,
@@ -309,12 +314,17 @@ pub fn build_temp_control_frame(_t: f64, tick: f64, d: &SceneData) -> FrameParts
     }));
     let q_frac = 0.0_f64.max(1.0_f64.min(d.tick.q / d.q_max));
     let start_angle = std::f64::consts::PI * (5.0 / 6.0);
-    let end_angle = std::f64::consts::PI * (5.0 / 6.0) + q_frac * (std::f64::consts::PI * 4.0 / 3.0);
+    let end_angle =
+        std::f64::consts::PI * (5.0 / 6.0) + q_frac * (std::f64::consts::PI * 4.0 / 3.0);
     let arc_end_x = dial_x + dial_r * end_angle.cos();
     let arc_end_y = dial_y + dial_r * end_angle.sin();
     let arc_start_x = dial_x + dial_r * start_angle.cos();
     let arc_start_y = dial_y + dial_r * start_angle.sin();
-    let large_arc = if (end_angle - start_angle) > std::f64::consts::PI { 1 } else { 0 };
+    let large_arc = if (end_angle - start_angle) > std::f64::consts::PI {
+        1
+    } else {
+        0
+    };
     shapes.push(Shape::Path(PathShape {
         d: format!(
             "M {} {} L {} {} A {} {} 0 {} 1 {} {} Z",
@@ -541,9 +551,24 @@ pub fn build_temp_control_animation(
             y_max: Some(spread_max(&run.t_out, &run.t_in) + 2.0),
             y_label: Some("\u{00b0}F".to_string()),
             series: vec![
-                ChartSeries { label: "T_in".to_string(), color: COL_T_IN.to_string(), t: t_h_arr.clone(), y: run.t_in.clone() },
-                ChartSeries { label: "T_out".to_string(), color: COL_T_OUT.to_string(), t: t_h_arr.clone(), y: run.t_out.clone() },
-                ChartSeries { label: "target".to_string(), color: COL_TARGET.to_string(), t: vec![first, last], y: vec![t_target, t_target] },
+                ChartSeries {
+                    label: "T_in".to_string(),
+                    color: COL_T_IN.to_string(),
+                    t: t_h_arr.clone(),
+                    y: run.t_in.clone(),
+                },
+                ChartSeries {
+                    label: "T_out".to_string(),
+                    color: COL_T_OUT.to_string(),
+                    t: t_h_arr.clone(),
+                    y: run.t_out.clone(),
+                },
+                ChartSeries {
+                    label: "target".to_string(),
+                    color: COL_TARGET.to_string(),
+                    t: vec![first, last],
+                    y: vec![t_target, t_target],
+                },
             ],
             ..Default::default()
         },
@@ -556,7 +581,12 @@ pub fn build_temp_control_animation(
             y_min: Some(-0.2),
             y_max: Some(q_max + 0.2),
             y_label: Some("kW".to_string()),
-            series: vec![ChartSeries { label: "Q".to_string(), color: COL_HEAT.to_string(), t: t_h_arr.clone(), y: run.q.clone() }],
+            series: vec![ChartSeries {
+                label: "Q".to_string(),
+                color: COL_HEAT.to_string(),
+                t: t_h_arr.clone(),
+                y: run.q.clone(),
+            }],
             ..Default::default()
         },
     ];
@@ -596,10 +626,18 @@ mod tests {
     #[test]
     fn animation_records_every_nth_and_last() {
         let trace: Vec<TickRecord> = (0..10)
-            .map(|k| TickRecord { t_h: k as f64 * 0.1, tick: k as f64, in_band: true, ..Default::default() })
+            .map(|k| TickRecord {
+                t_h: k as f64 * 0.1,
+                tick: k as f64,
+                in_band: true,
+                ..Default::default()
+            })
             .collect();
         let run = RunResult {
-            cfg: RunConfig { t_target: 70.0, band: Some(2.0) },
+            cfg: RunConfig {
+                t_target: 70.0,
+                band: Some(2.0),
+            },
             trace,
             t_in: vec![68.0; 10],
             t_out: vec![40.0; 10],

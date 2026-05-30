@@ -103,13 +103,26 @@ impl LayerStation {
                 }
                 a[i] = sigmoid(zi);
             }
-            self.cache.insert(t.sample_id, SampleCache { input, activation: a.clone() });
-            fwd.push(ForwardToken { sample_id: t.sample_id, payload: a, target: t.target });
+            self.cache.insert(
+                t.sample_id,
+                SampleCache {
+                    input,
+                    activation: a.clone(),
+                },
+            );
+            fwd.push(ForwardToken {
+                sample_id: t.sample_id,
+                payload: a,
+                target: t.target,
+            });
         }
         // Backward pass.
         let bwd_tokens = std::mem::take(&mut self.backward_inbox);
         for t in bwd_tokens {
-            let c = self.cache.remove(&t.sample_id).expect("missing cache entry");
+            let c = self
+                .cache
+                .remove(&t.sample_id)
+                .expect("missing cache entry");
             let a = &c.activation;
             let in_dim = c.input.len();
             let out_dim = a.len();
@@ -131,7 +144,10 @@ impl LayerStation {
                 }
                 self.b[i] -= self.lr * dz[i];
             }
-            bwd.push(BackwardToken { sample_id: t.sample_id, grad: grad_input });
+            bwd.push(BackwardToken {
+                sample_id: t.sample_id,
+                grad: grad_input,
+            });
         }
         (fwd, bwd)
     }
@@ -146,7 +162,11 @@ struct LossStation {
 
 impl LossStation {
     fn new() -> Self {
-        LossStation { id: "loss".to_string(), losses: Vec::new(), forward_inbox: Vec::new() }
+        LossStation {
+            id: "loss".to_string(),
+            losses: Vec::new(),
+            forward_inbox: Vec::new(),
+        }
     }
     fn run_time_step(&mut self) -> Vec<BackwardToken> {
         let mut bwd = Vec::new();
@@ -162,7 +182,10 @@ impl LossStation {
                 grad[i] = e;
             }
             self.losses.push(loss);
-            bwd.push(BackwardToken { sample_id: t.sample_id, grad });
+            bwd.push(BackwardToken {
+                sample_id: t.sample_id,
+                grad,
+            });
         }
         bwd
     }
@@ -186,7 +209,13 @@ const XOR_SAMPLES: [([f64; 2], [f64; 1]); 4] = [
 
 impl XorSource {
     fn new(id: &str, total: usize) -> Self {
-        XorSource { id: id.to_string(), total, idx: 0, in_flight: 0, backward_inbox: Vec::new() }
+        XorSource {
+            id: id.to_string(),
+            total,
+            idx: 0,
+            in_flight: 0,
+            backward_inbox: Vec::new(),
+        }
     }
     fn run_time_step(&mut self) -> Vec<ForwardToken> {
         // Drain done-signal backward tokens.
@@ -195,7 +224,11 @@ impl XorSource {
         let mut fwd = Vec::new();
         if self.in_flight == 0 && self.idx < self.total {
             let s = &XOR_SAMPLES[self.idx % 4];
-            fwd.push(ForwardToken { sample_id: self.idx, payload: s.0.to_vec(), target: s.1.to_vec() });
+            fwd.push(ForwardToken {
+                sample_id: self.idx,
+                payload: s.0.to_vec(),
+                target: s.1.to_vec(),
+            });
             self.idx += 1;
             self.in_flight = 1;
         }
@@ -231,7 +264,9 @@ pub struct BackpropResult {
 pub fn init_weights(seed: u32, hidden: usize) -> InitialWeights {
     let mut rng = mulberry32(seed);
     let mut draw = || 2.0 * rng.next_float() - 1.0;
-    let w1: Vec<Vec<f64>> = (0..hidden).map(|_| (0..2).map(|_| draw()).collect()).collect();
+    let w1: Vec<Vec<f64>> = (0..hidden)
+        .map(|_| (0..2).map(|_| draw()).collect())
+        .collect();
     let b1: Vec<f64> = (0..hidden).map(|_| draw()).collect();
     let w2: Vec<Vec<f64>> = vec![(0..hidden).map(|_| draw()).collect()];
     let b2: Vec<f64> = vec![draw()];
@@ -309,9 +344,18 @@ pub fn run_backprop(init: &InitialWeights, total_samples: usize, lr: f64) -> Bac
 
 /// Entry point (TS top-level `main`). Env vars: `SEED`, `N`, `LR`.
 pub fn run() {
-    let seed = std::env::var("SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(7u32);
-    let n = std::env::var("N").ok().and_then(|v| v.parse().ok()).unwrap_or(10000usize);
-    let lr = std::env::var("LR").ok().and_then(|v| v.parse().ok()).unwrap_or(0.5_f64);
+    let seed = std::env::var("SEED")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(7u32);
+    let n = std::env::var("N")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10000usize);
+    let lr = std::env::var("LR")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.5_f64);
 
     let init = init_weights(seed, 3);
 
@@ -321,7 +365,13 @@ pub fn run() {
     let result = run_backprop(&init, n, lr);
 
     println!("# ticks = {}", result.ticks);
-    let last100: Vec<f64> = result.loss_history.iter().rev().take(100).copied().collect();
+    let last100: Vec<f64> = result
+        .loss_history
+        .iter()
+        .rev()
+        .take(100)
+        .copied()
+        .collect();
     let avg_loss = last100.iter().sum::<f64>() / last100.len() as f64;
     println!("# avg loss over last 100 samples = {avg_loss:.3e}");
     println!("# XOR predictions:");

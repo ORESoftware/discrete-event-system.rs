@@ -82,7 +82,8 @@ impl RunReportPage {
     }
 
     fn render_section(&self, s: &ReportSection) -> String {
-        let mut parts: Vec<String> = vec![format!("<section><h2>{}</h2>", Self::escape(&s.heading))];
+        let mut parts: Vec<String> =
+            vec![format!("<section><h2>{}</h2>", Self::escape(&s.heading))];
         if let Some(desc) = &s.description {
             if !desc.is_empty() {
                 parts.push(format!("<p class=\"desc\">{}</p>", Self::escape(desc)));
@@ -352,7 +353,10 @@ mod tests {
 
     #[test]
     fn escape_handles_the_four_entities() {
-        assert_eq!(RunReportPage::escape("a&b<c>\"d"), "a&amp;b&lt;c&gt;&quot;d");
+        assert_eq!(
+            RunReportPage::escape("a&b<c>\"d"),
+            "a&amp;b&lt;c&gt;&quot;d"
+        );
         // Single quotes are intentionally NOT escaped.
         assert_eq!(RunReportPage::escape("it's"), "it's");
     }
@@ -363,7 +367,10 @@ mod tests {
         page.add_section(ReportSection {
             heading: "Metrics".to_string(),
             description: Some("desc".to_string()),
-            metrics: Some(vec![MetricRow { label: "n".to_string(), value: "42".to_string() }]),
+            metrics: Some(vec![MetricRow {
+                label: "n".to_string(),
+                value: "42".to_string(),
+            }]),
             log: Some("hello".to_string()),
         });
         let html = page.to_html();

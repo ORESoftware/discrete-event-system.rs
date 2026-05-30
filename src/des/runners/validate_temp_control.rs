@@ -48,9 +48,19 @@ struct Outdoor {
 #[derive(Clone, Debug)]
 enum ControllerSpec {
     BangBang,
-    Pid { kp: f64, ki: f64, kd: f64 },
+    Pid {
+        kp: f64,
+        ki: f64,
+        kd: f64,
+    },
     Fuzzy,
-    MdpMpc { horizon_h: f64, n_levels: usize, comfort_penalty: f64, cost_per_kwh: f64, track_weight: f64 },
+    MdpMpc {
+        horizon_h: f64,
+        n_levels: usize,
+        comfort_penalty: f64,
+        cost_per_kwh: f64,
+        track_weight: f64,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -104,8 +114,17 @@ impl Checker {
         Checker { pass: 0, fail: 0 }
     }
     fn check(&mut self, label: &str, ok: bool, detail: &str) {
-        let tail = if detail.is_empty() { String::new() } else { format!("  — {}", detail) };
-        println!("{}  {}{}", if ok { "  PASS" } else { "  FAIL" }, label, tail);
+        let tail = if detail.is_empty() {
+            String::new()
+        } else {
+            format!("  — {}", detail)
+        };
+        println!(
+            "{}  {}{}",
+            if ok { "  PASS" } else { "  FAIL" },
+            label,
+            tail
+        );
         if ok {
             self.pass += 1;
         } else {
@@ -113,7 +132,17 @@ impl Checker {
         }
     }
     fn close(&mut self, label: &str, a: f64, b: f64, tol: f64) {
-        self.check(label, (a - b).abs() <= tol, &format!("|{:.6} − {:.6}| = {:.2e} (tol {:.2e})", a, b, (a - b).abs(), tol));
+        self.check(
+            label,
+            (a - b).abs() <= tol,
+            &format!(
+                "|{:.6} − {:.6}| = {:.2e} (tol {:.2e})",
+                a,
+                b,
+                (a - b).abs(),
+                tol
+            ),
+        );
     }
 }
 
@@ -141,13 +170,24 @@ pub fn run() {
     println!("\nStudy 1 — House physics: forward-Euler self-consistency");
     {
         let t1 = house_step(60.0, 80.0, 0.0, 1.0, DEFAULT_HOUSE);
-        c.check("Q=0, hot outside: T rises", t1 > 60.0, &format!("T_in: 60 → {:.3}", t1));
+        c.check(
+            "Q=0, hot outside: T rises",
+            t1 > 60.0,
+            &format!("T_in: 60 → {:.3}", t1),
+        );
         let t2 = house_step(70.0, 30.0, 0.0, 1.0, DEFAULT_HOUSE);
-        c.check("Q=0, cold outside: T falls", t2 < 70.0, &format!("T_in: 70 → {:.3}", t2));
+        c.check(
+            "Q=0, cold outside: T falls",
+            t2 < 70.0,
+            &format!("T_in: 70 → {:.3}", t2),
+        );
         let q_ss = (70.0 - 30.0) / (DEFAULT_HOUSE.tau * DEFAULT_HOUSE.g);
         let t3 = house_step(70.0, 30.0, q_ss, 1.0, DEFAULT_HOUSE);
         c.close("Q = Q_ss → no change in 1h", t3, 70.0, 1e-12);
-        let insulated = House { tau: 1e9, g: DEFAULT_HOUSE.g };
+        let insulated = House {
+            tau: 1e9,
+            g: DEFAULT_HOUSE.g,
+        };
         let t4 = house_step(70.0, 30.0, 5.0, 1.0, insulated);
         c.close("insulated, Q=5, Δt=1h: ΔT = 5°F", t4 - 70.0, 5.0, 1e-3);
     }
@@ -156,14 +196,38 @@ pub fn run() {
     {
         let cases: Vec<(&str, ControllerSpec)> = vec![
             ("bang-bang", ControllerSpec::BangBang),
-            ("PID", ControllerSpec::Pid { kp: 3.0, ki: 0.5, kd: 0.5 }),
+            (
+                "PID",
+                ControllerSpec::Pid {
+                    kp: 3.0,
+                    ki: 0.5,
+                    kd: 0.5,
+                },
+            ),
             ("fuzzy-PI", ControllerSpec::Fuzzy),
-            ("MDP-MPC", ControllerSpec::MdpMpc { horizon_h: 6.0, n_levels: 6, comfort_penalty: 0.5, cost_per_kwh: 0.15, track_weight: 1.0 }),
+            (
+                "MDP-MPC",
+                ControllerSpec::MdpMpc {
+                    horizon_h: 6.0,
+                    n_levels: 6,
+                    comfort_penalty: 0.5,
+                    cost_per_kwh: 0.15,
+                    track_weight: 1.0,
+                },
+            ),
         ];
         for (name, spec) in cases {
             let r = run_temp_control(&base_config(spec));
-            c.check(&format!("{} achieves 100% in-band comfort", name), r.comfort_pct == 1.0, &format!("comfort = {:.1}%", 100.0 * r.comfort_pct));
-            c.check(&format!("{} consumes plausible energy (50–120 kWh)", name), r.energy_kwh > 50.0 && r.energy_kwh < 120.0, &format!("{:.2} kWh", r.energy_kwh));
+            c.check(
+                &format!("{} achieves 100% in-band comfort", name),
+                r.comfort_pct == 1.0,
+                &format!("comfort = {:.1}%", 100.0 * r.comfort_pct),
+            );
+            c.check(
+                &format!("{} consumes plausible energy (50–120 kWh)", name),
+                r.energy_kwh > 50.0 && r.energy_kwh < 120.0,
+                &format!("{:.2} kWh", r.energy_kwh),
+            );
         }
     }
 
@@ -180,16 +244,35 @@ pub fn run() {
             forecast_noise_std: 0.0,
             forecast_horizon_h: 1.0,
             seed: 1,
-            outdoor: Some(Outdoor { mean: 30.0, amp: 0.0, phase: 0.0, noise_std: 0.0 }),
+            outdoor: Some(Outdoor {
+                mean: 30.0,
+                amp: 0.0,
+                phase: 0.0,
+                noise_std: 0.0,
+            }),
             controller: ControllerSpec::BangBang,
         };
-        for (name, spec) in [("PID", ControllerSpec::Pid { kp: 3.0, ki: 0.5, kd: 0.5 }), ("fuzzy-PI", ControllerSpec::Fuzzy)] {
+        for (name, spec) in [
+            (
+                "PID",
+                ControllerSpec::Pid {
+                    kp: 3.0,
+                    ki: 0.5,
+                    kd: 0.5,
+                },
+            ),
+            ("fuzzy-PI", ControllerSpec::Fuzzy),
+        ] {
             let mut cfg = cfg_const.clone();
             cfg.controller = spec;
             let r = run_temp_control(&cfg);
             let last: Vec<f64> = r.t_in.iter().rev().take(60).copied().collect();
             let mean = last.iter().sum::<f64>() / last.len() as f64;
-            c.check(&format!("{} steady-state |error| < 0.5°F", name), (mean - 70.0).abs() < 0.5, &format!("mean T_in last 1h = {:.3}°F", mean));
+            c.check(
+                &format!("{} steady-state |error| < 0.5°F", name),
+                (mean - 70.0).abs() < 0.5,
+                &format!("mean T_in last 1h = {:.3}°F", mean),
+            );
         }
     }
 
@@ -199,12 +282,21 @@ pub fn run() {
         cfg.seed = 7;
         let bb = run_temp_control(&cfg);
         let mut mpc_cfg = cfg.clone();
-        mpc_cfg.controller = ControllerSpec::MdpMpc { horizon_h: 6.0, n_levels: 6, comfort_penalty: 0.5, cost_per_kwh: 0.15, track_weight: 0.05 };
+        mpc_cfg.controller = ControllerSpec::MdpMpc {
+            horizon_h: 6.0,
+            n_levels: 6,
+            comfort_penalty: 0.5,
+            cost_per_kwh: 0.15,
+            track_weight: 0.05,
+        };
         let mpc = run_temp_control(&mpc_cfg);
         c.check(
             "MDP-MPC cost ≤ bang-bang cost (or within 1%)",
             mpc.cost_dollar <= bb.cost_dollar * 1.01,
-            &format!("bang-bang cost = ${:.3}, MDP-MPC cost = ${:.3}", bb.cost_dollar, mpc.cost_dollar),
+            &format!(
+                "bang-bang cost = ${:.3}, MDP-MPC cost = ${:.3}",
+                bb.cost_dollar, mpc.cost_dollar
+            ),
         );
     }
 
@@ -221,17 +313,31 @@ pub fn run() {
             forecast_noise_std: 1.0,
             forecast_horizon_h: 6.0,
             seed: 11,
-            outdoor: Some(Outdoor { mean: 15.0, amp: 20.0, phase: 9.0, noise_std: 2.0 }),
+            outdoor: Some(Outdoor {
+                mean: 15.0,
+                amp: 20.0,
+                phase: 9.0,
+                noise_std: 2.0,
+            }),
             controller: ControllerSpec::BangBang,
         };
         let bb = run_temp_control(&stress);
         let mut mpc_cfg = stress.clone();
-        mpc_cfg.controller = ControllerSpec::MdpMpc { horizon_h: 6.0, n_levels: 6, comfort_penalty: 2.0, cost_per_kwh: 0.15, track_weight: 1.0 };
+        mpc_cfg.controller = ControllerSpec::MdpMpc {
+            horizon_h: 6.0,
+            n_levels: 6,
+            comfort_penalty: 2.0,
+            cost_per_kwh: 0.15,
+            track_weight: 1.0,
+        };
         let mpc = run_temp_control(&mpc_cfg);
         c.check(
             "MDP-MPC produces lower cost than bang-bang on stress test",
             mpc.cost_dollar < bb.cost_dollar,
-            &format!("bang-bang ${:.2}  vs  MDP-MPC ${:.2}", bb.cost_dollar, mpc.cost_dollar),
+            &format!(
+                "bang-bang ${:.2}  vs  MDP-MPC ${:.2}",
+                bb.cost_dollar, mpc.cost_dollar
+            ),
         );
     }
 
@@ -249,7 +355,11 @@ pub fn run() {
             forecast_horizon_h: 2.0,
             seed: 99,
             outdoor: None,
-            controller: ControllerSpec::Pid { kp: 3.0, ki: 0.5, kd: 0.5 },
+            controller: ControllerSpec::Pid {
+                kp: 3.0,
+                ki: 0.5,
+                kd: 0.5,
+            },
         };
         let r1 = run_temp_control(&cfg);
         let r2 = run_temp_control(&cfg);
@@ -257,15 +367,28 @@ pub fn run() {
         for k in 0..r1.t_in.len() {
             max_diff = f64::max(max_diff, (r1.t_in[k] - r2.t_in[k]).abs());
         }
-        c.close("two identical runs produce identical T_in trajectories", max_diff, 0.0, 1e-12);
+        c.close(
+            "two identical runs produce identical T_in trajectories",
+            max_diff,
+            0.0,
+            1e-12,
+        );
     }
 
     println!("\nStudy 7 — Fuzzy controller boundary behaviour");
     {
         let dq1 = fuzzy_delta_controller(6.0, 4.0);
-        c.check("fuzzy: e≫0, de/dt≫0 → Δ-Q ≈ +1", dq1 > 0.7, &format!("Δ-Q = {:.3}", dq1));
+        c.check(
+            "fuzzy: e≫0, de/dt≫0 → Δ-Q ≈ +1",
+            dq1 > 0.7,
+            &format!("Δ-Q = {:.3}", dq1),
+        );
         let dq2 = fuzzy_delta_controller(-6.0, -4.0);
-        c.check("fuzzy: e≪0, de/dt≪0 → Δ-Q ≈ −1", dq2 < -0.7, &format!("Δ-Q = {:.3}", dq2));
+        c.check(
+            "fuzzy: e≪0, de/dt≪0 → Δ-Q ≈ −1",
+            dq2 < -0.7,
+            &format!("Δ-Q = {:.3}", dq2),
+        );
         let dq3 = fuzzy_delta_controller(0.0, 0.0);
         c.close("fuzzy: e=0, de/dt=0 → Δ-Q = 0", dq3, 0.0, 1e-12);
     }
@@ -287,12 +410,28 @@ pub fn run() {
             controller: ControllerSpec::BangBang,
         };
         let mut loose = cfg.clone();
-        loose.controller = ControllerSpec::MdpMpc { horizon_h: 4.0, n_levels: 6, comfort_penalty: 0.5, cost_per_kwh: 0.15, track_weight: 0.01 };
+        loose.controller = ControllerSpec::MdpMpc {
+            horizon_h: 4.0,
+            n_levels: 6,
+            comfort_penalty: 0.5,
+            cost_per_kwh: 0.15,
+            track_weight: 0.01,
+        };
         let mut tight = cfg.clone();
-        tight.controller = ControllerSpec::MdpMpc { horizon_h: 4.0, n_levels: 6, comfort_penalty: 0.5, cost_per_kwh: 0.15, track_weight: 5.0 };
+        tight.controller = ControllerSpec::MdpMpc {
+            horizon_h: 4.0,
+            n_levels: 6,
+            comfort_penalty: 0.5,
+            cost_per_kwh: 0.15,
+            track_weight: 5.0,
+        };
         let e_loose = run_temp_control(&loose).energy_kwh;
         let e_tight = run_temp_control(&tight).energy_kwh;
-        c.check("higher trackWeight ⇒ ≥ energy use", e_tight >= e_loose - 1e-3, &format!("e_loose={:.3}, e_tight={:.3}", e_loose, e_tight));
+        c.check(
+            "higher trackWeight ⇒ ≥ energy use",
+            e_tight >= e_loose - 1e-3,
+            &format!("e_loose={:.3}, e_tight={:.3}", e_loose, e_tight),
+        );
     }
 
     println!("\n  ─────────────────────────────────────────────────────────────────────────");

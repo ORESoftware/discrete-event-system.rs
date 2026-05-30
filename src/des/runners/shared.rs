@@ -45,7 +45,9 @@ pub struct TransitionCounter {
 
 impl TransitionCounter {
     pub fn new() -> Self {
-        TransitionCounter { counts_by_from: HashMap::new() }
+        TransitionCounter {
+            counts_by_from: HashMap::new(),
+        }
     }
 
     /// `record(from, to)` — increment the `(from -> to)` cell by one.
@@ -103,7 +105,10 @@ pub fn analytical_transition_tables(probabilities: &Probabilities) -> Transition
         ("E", vec![("I-P", 1.0)]),
         (
             "I-P",
-            vec![("I-A", p.asymptomatic_share), ("I-S", 1.0 - p.asymptomatic_share)],
+            vec![
+                ("I-A", p.asymptomatic_share),
+                ("I-S", 1.0 - p.asymptomatic_share),
+            ],
         ),
         ("I-A", vec![("R", 1.0)]),
         (
@@ -135,7 +140,10 @@ pub fn analytical_transition_tables(probabilities: &Probabilities) -> Transition
 
 /// `zeroCompartmentRecord` — `{S: 0, E: 0, …}` over `COMPARTMENT_ORDER`.
 pub fn zero_compartment_record() -> HashMap<String, f64> {
-    COMPARTMENT_ORDER.iter().map(|c| (c.to_string(), 0.0)).collect()
+    COMPARTMENT_ORDER
+        .iter()
+        .map(|c| (c.to_string(), 0.0))
+        .collect()
 }
 
 /// `compartmentPopulations` — fold per-station populations into compartments.
@@ -144,7 +152,10 @@ pub fn compartment_populations(
 ) -> HashMap<String, f64> {
     let mut out: HashMap<String, f64> = HashMap::new();
     for c in COMPARTMENT_ORDER {
-        let sum: f64 = compartment_groups(c).iter().map(|sid| population_of_station(sid)).sum();
+        let sum: f64 = compartment_groups(c)
+            .iter()
+            .map(|sid| population_of_station(sid))
+            .sum();
         out.insert(c.to_string(), sum);
     }
     out
@@ -155,7 +166,10 @@ pub fn average_record(sums: &HashMap<String, f64>, denominator: f64) -> HashMap<
     let safe_denominator = denominator.max(1.0);
     let mut out: HashMap<String, f64> = HashMap::new();
     for c in COMPARTMENT_ORDER {
-        out.insert(c.to_string(), sums.get(c).copied().unwrap_or(0.0) / safe_denominator);
+        out.insert(
+            c.to_string(),
+            sums.get(c).copied().unwrap_or(0.0) / safe_denominator,
+        );
     }
     out
 }
@@ -206,15 +220,25 @@ fn map_to_json(m: &HashMap<String, f64>) -> JsonValue {
 fn nested_map_to_json(m: &HashMap<String, HashMap<String, f64>>) -> JsonValue {
     let mut keys: Vec<&String> = m.keys().collect();
     keys.sort();
-    JsonValue::Object(keys.into_iter().map(|k| (k.clone(), map_to_json(&m[k]))).collect())
+    JsonValue::Object(
+        keys.into_iter()
+            .map(|k| (k.clone(), map_to_json(&m[k])))
+            .collect(),
+    )
 }
 
 /// Serialize the model branching probabilities.
 pub fn probabilities_to_json(p: &Probabilities) -> JsonValue {
     JsonValue::Object(vec![
         ("asymptomaticShare".to_string(), jn(p.asymptomatic_share)),
-        ("hospitalizationGivenSymptom".to_string(), jn(p.hospitalization_given_symptom)),
-        ("caseFatalityGivenHospital".to_string(), jn(p.case_fatality_given_hospital)),
+        (
+            "hospitalizationGivenSymptom".to_string(),
+            jn(p.hospitalization_given_symptom),
+        ),
+        (
+            "caseFatalityGivenHospital".to_string(),
+            jn(p.case_fatality_given_hospital),
+        ),
     ])
 }
 
@@ -227,7 +251,10 @@ pub fn config_to_json(c: &SimConfig) -> JsonValue {
         ("sourceCap".to_string(), jn(c.source_cap)),
         (
             "arrivalsInterarrival".to_string(),
-            JsonValue::Array(vec![jn(c.arrivals_interarrival.0), jn(c.arrivals_interarrival.1)]),
+            JsonValue::Array(vec![
+                jn(c.arrivals_interarrival.0),
+                jn(c.arrivals_interarrival.1),
+            ]),
         ),
         ("residence".to_string(), {
             let mut keys: Vec<&String> = c.residence.keys().collect();
@@ -241,7 +268,10 @@ pub fn config_to_json(c: &SimConfig) -> JsonValue {
                     .collect(),
             )
         }),
-        ("probabilities".to_string(), probabilities_to_json(&c.probabilities)),
+        (
+            "probabilities".to_string(),
+            probabilities_to_json(&c.probabilities),
+        ),
     ])
 }
 
@@ -258,11 +288,23 @@ pub fn result_to_json(r: &RunResult) -> JsonValue {
                 ("absorbed".to_string(), jn(r.totals.absorbed)),
             ]),
         ),
-        ("finalPopulations".to_string(), map_to_json(&r.final_populations)),
-        ("transitionCounts".to_string(), nested_map_to_json(&r.transition_counts)),
+        (
+            "finalPopulations".to_string(),
+            map_to_json(&r.final_populations),
+        ),
+        (
+            "transitionCounts".to_string(),
+            nested_map_to_json(&r.transition_counts),
+        ),
         ("splitProbs".to_string(), nested_map_to_json(&r.split_probs)),
-        ("timeAvgPopulations".to_string(), map_to_json(&r.time_avg_populations)),
-        ("peakPopulations".to_string(), map_to_json(&r.peak_populations)),
+        (
+            "timeAvgPopulations".to_string(),
+            map_to_json(&r.time_avg_populations),
+        ),
+        (
+            "peakPopulations".to_string(),
+            map_to_json(&r.peak_populations),
+        ),
         ("elapsedMs".to_string(), jn(r.elapsed_ms as f64)),
     ])
 }

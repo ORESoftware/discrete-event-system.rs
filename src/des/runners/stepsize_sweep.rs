@@ -85,7 +85,10 @@ fn ascii_bars(label: &str, values: &[f64], step_sizes: &[f64], max_len: usize) -
 
 /// `main()` — run the sweep and write artifacts.
 pub fn run() {
-    let n: usize = std::env::var("N").ok().and_then(|s| s.parse().ok()).unwrap_or(8);
+    let n: usize = std::env::var("N")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8);
     let step_sizes: Vec<f64> = std::env::var("STEPSIZES")
         .unwrap_or_else(|_| "1.0,0.5,0.1,0.05".to_string())
         .split(',')
@@ -94,7 +97,11 @@ pub fn run() {
 
     let step_sizes_json = format!(
         "[{}]",
-        step_sizes.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(",")
+        step_sizes
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
     );
     println!("stepsize-sweep.ts: {n} reps per stepSize, sweeping {step_sizes_json}");
 
@@ -106,7 +113,10 @@ pub fn run() {
     for i in 0..n {
         fel_runs_per_step.push(run_fel_once(
             &default_cfg,
-            &RunOpts { seed: Some(0x40000 + i as u64), ..Default::default() },
+            &RunOpts {
+                seed: Some(0x40000 + i as u64),
+                ..Default::default()
+            },
         ));
     }
     let fel_wall = t0.elapsed().as_millis();
@@ -114,7 +124,10 @@ pub fn run() {
     let mut fel_mean: HashMap<String, f64> = HashMap::new();
     let mut fel_sd: HashMap<String, f64> = HashMap::new();
     for c in COMPARTMENT_ORDER {
-        let xs: Vec<f64> = fel_runs_per_step.iter().map(|r| get(&r.time_avg_populations, c)).collect();
+        let xs: Vec<f64> = fel_runs_per_step
+            .iter()
+            .map(|r| get(&r.time_avg_populations, c))
+            .collect();
         fel_mean.insert(c.to_string(), mean(&xs));
         fel_sd.insert(c.to_string(), stddev(&xs));
     }
@@ -123,13 +136,19 @@ pub fn run() {
     let mut sweep: Vec<SweepPoint> = Vec::new();
 
     for &ss in &step_sizes {
-        let cfg = SimConfig { step_size: ss, ..default_cfg.clone() };
+        let cfg = SimConfig {
+            step_size: ss,
+            ..default_cfg.clone()
+        };
         let t_start = Instant::now();
         let mut reps: Vec<RunResult> = Vec::new();
         for i in 0..n {
             reps.push(run_framework_once(
                 &cfg,
-                &RunOpts { seed: Some(0x50000 + i as u64), ..Default::default() },
+                &RunOpts {
+                    seed: Some(0x50000 + i as u64),
+                    ..Default::default()
+                },
             ));
         }
         let fw_wall = t_start.elapsed().as_millis();
@@ -138,7 +157,10 @@ pub fn run() {
         let mut fw_sd: HashMap<String, f64> = HashMap::new();
         let mut ratio: HashMap<String, f64> = HashMap::new();
         for c in COMPARTMENT_ORDER {
-            let xs: Vec<f64> = reps.iter().map(|r| get(&r.time_avg_populations, c)).collect();
+            let xs: Vec<f64> = reps
+                .iter()
+                .map(|r| get(&r.time_avg_populations, c))
+                .collect();
             let m = mean(&xs);
             fw_mean.insert(c.to_string(), m);
             fw_sd.insert(c.to_string(), stddev(&xs));
@@ -173,13 +195,27 @@ pub fn run() {
     for c in COMPARTMENT_ORDER {
         header_cells.push(c.to_string());
     }
-    println!("{}", header_cells.iter().map(|h| pad_end(h, 10)).collect::<Vec<_>>().join("  "));
+    println!(
+        "{}",
+        header_cells
+            .iter()
+            .map(|h| pad_end(h, 10))
+            .collect::<Vec<_>>()
+            .join("  ")
+    );
     for sp in &sweep {
         let mut cells: Vec<String> = vec![fmt(sp.step_size, 3)];
         for c in COMPARTMENT_ORDER {
             cells.push(fmt(get(&sp.ratio, c), 3));
         }
-        println!("{}", cells.iter().map(|s| pad_end(s, 10)).collect::<Vec<_>>().join("  "));
+        println!(
+            "{}",
+            cells
+                .iter()
+                .map(|s| pad_end(s, 10))
+                .collect::<Vec<_>>()
+                .join("  ")
+        );
     }
 
     // ---- Per-compartment bar charts --------------------------------------
@@ -187,19 +223,28 @@ pub fn run() {
     println!();
     println!("=== ASCII bar chart: framework <S>(t) vs stepSize ===");
     println!("{}", ascii_bars("<S>", &fw_s, &step_sizes, 40));
-    println!("  fel <S>={}     <-- this is the target", fmt(get(&fel_mean, "S"), 3));
+    println!(
+        "  fel <S>={}     <-- this is the target",
+        fmt(get(&fel_mean, "S"), 3)
+    );
 
     let fw_e: Vec<f64> = sweep.iter().map(|s| get(&s.fw_mean, "E")).collect();
     println!();
     println!("=== ASCII bar chart: framework <E>(t) vs stepSize ===");
     println!("{}", ascii_bars("<E>", &fw_e, &step_sizes, 40));
-    println!("  fel <E>={}     <-- this is the target", fmt(get(&fel_mean, "E"), 3));
+    println!(
+        "  fel <E>={}     <-- this is the target",
+        fmt(get(&fel_mean, "E"), 3)
+    );
 
     let fw_ip: Vec<f64> = sweep.iter().map(|s| get(&s.fw_mean, "I-P")).collect();
     println!();
     println!("=== ASCII bar chart: framework <I-P>(t) vs stepSize ===");
     println!("{}", ascii_bars("<I-P>", &fw_ip, &step_sizes, 40));
-    println!("  fel <I-P>={}     <-- this is the target", fmt(get(&fel_mean, "I-P"), 3));
+    println!(
+        "  fel <I-P>={}     <-- this is the target",
+        fmt(get(&fel_mean, "I-P"), 3)
+    );
 
     let ratio_ip: Vec<f64> = sweep.iter().map(|s| get(&s.ratio, "I-P")).collect();
     println!();
@@ -273,7 +318,9 @@ fn render_svg(sweep: &[SweepPoint], fel_mean: &HashMap<String, f64>) -> String {
     let h = 420.0_f64;
     let pad = 60.0_f64;
     let compartments = ["S", "E", "I-P", "I-A", "I-S", "I-H"];
-    let colors = ["#d62728", "#ff7f0e", "#2ca02c", "#1f77b4", "#9467bd", "#8c564b"];
+    let colors = [
+        "#d62728", "#ff7f0e", "#2ca02c", "#1f77b4", "#9467bd", "#8c564b",
+    ];
 
     let xs: Vec<f64> = sweep.iter().map(|s| s.step_size.log10()).collect();
     let xmin = xs.iter().copied().fold(f64::INFINITY, f64::min);
@@ -306,7 +353,10 @@ fn render_svg(sweep: &[SweepPoint], fel_mean: &HashMap<String, f64>) -> String {
         w - pad,
         h - pad
     ));
-    svg.push_str(&format!("<line x1='{pad}' y1='{pad}' x2='{pad}' y2='{}' stroke='black'/>", h - pad));
+    svg.push_str(&format!(
+        "<line x1='{pad}' y1='{pad}' x2='{pad}' y2='{}' stroke='black'/>",
+        h - pad
+    ));
     svg.push_str(&format!(
         "<text x='{}' y='{}' text-anchor='middle' font-size='14' font-weight='bold'>Framework time-averaged compartment populations vs stepSize (FEL reference dashed)</text>",
         w / 2.0,
@@ -353,7 +403,13 @@ fn render_svg(sweep: &[SweepPoint], fel_mean: &HashMap<String, f64>) -> String {
         let color = colors[i];
         let points: Vec<String> = sweep
             .iter()
-            .map(|sp| format!("{},{}", x_to_px(sp.step_size.log10()), y_to_px(get(&sp.fw_mean, c))))
+            .map(|sp| {
+                format!(
+                    "{},{}",
+                    x_to_px(sp.step_size.log10()),
+                    y_to_px(get(&sp.fw_mean, c))
+                )
+            })
             .collect();
         svg.push_str(&format!(
             "<polyline points='{}' fill='none' stroke='{color}' stroke-width='2'/>",
@@ -362,7 +418,9 @@ fn render_svg(sweep: &[SweepPoint], fel_mean: &HashMap<String, f64>) -> String {
         for sp in sweep {
             let cx = x_to_px(sp.step_size.log10());
             let cy = y_to_px(get(&sp.fw_mean, c));
-            svg.push_str(&format!("<circle cx='{cx}' cy='{cy}' r='4' fill='{color}'/>"));
+            svg.push_str(&format!(
+                "<circle cx='{cx}' cy='{cy}' r='4' fill='{color}'/>"
+            ));
         }
         let py = y_to_px(get(fel_mean, c));
         svg.push_str(&format!(

@@ -14,11 +14,11 @@
 #[cfg(test)]
 mod tests {
     use crate::des::general::classical_optimization_models::{
-        run_auction_assignment, run_flow_shop_neh, run_hungarian_assignment,
-        run_job_shop_dispatch, run_qp_coordinate_descent, run_qp_projected_gradient,
-        run_vrp_nearest_neighbor, run_vrp_savings, AssignmentParams, AuctionAssignmentParams,
-        DispatchRule, FlowShopNEHParams, JobShopDispatchParams, QPProjectedGradientParams,
-        ScheduledOperation, VRPSavingsParams,
+        run_auction_assignment, run_flow_shop_neh, run_hungarian_assignment, run_job_shop_dispatch,
+        run_qp_coordinate_descent, run_qp_projected_gradient, run_vrp_nearest_neighbor,
+        run_vrp_savings, AssignmentParams, AuctionAssignmentParams, DispatchRule,
+        FlowShopNEHParams, JobShopDispatchParams, QPProjectedGradientParams, ScheduledOperation,
+        VRPSavingsParams,
     };
 
     fn close(a: f64, b: f64) -> bool {

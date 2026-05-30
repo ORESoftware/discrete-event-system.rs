@@ -51,42 +51,77 @@ fn build_default_scenario() -> (IncrementalLPInit, Vec<ScenarioStep>) {
     let steps = vec![
         ScenarioStep {
             tick: 4,
-            event: LPEvent::AddConstraint { tick: 4.0, coefs: vec![1.0, 0.0], rhs: 30.0, name: Some("cap_widget".into()) },
+            event: LPEvent::AddConstraint {
+                tick: 4.0,
+                coefs: vec![1.0, 0.0],
+                rhs: 30.0,
+                name: Some("cap_widget".into()),
+            },
             description: "add x_widget ≤ 30",
         },
         ScenarioStep {
             tick: 8,
-            event: LPEvent::ChangeObjective { tick: 8.0, new_c: vec![5.0, 3.0], name: None },
+            event: LPEvent::ChangeObjective {
+                tick: 8.0,
+                new_c: vec![5.0, 3.0],
+                name: None,
+            },
             description: "change c → (5, 3)",
         },
         ScenarioStep {
             tick: 12,
-            event: LPEvent::RemoveConstraint { tick: 12.0, index: 0, name: None },
+            event: LPEvent::RemoveConstraint {
+                tick: 12.0,
+                index: 0,
+                name: None,
+            },
             description: "remove labor constraint",
         },
         ScenarioStep {
             tick: 16,
-            event: LPEvent::AddVariable { tick: 16.0, column: vec![1.0, 1.0], c_new: 7.0, name: Some("thingamajig".into()) },
+            event: LPEvent::AddVariable {
+                tick: 16.0,
+                column: vec![1.0, 1.0],
+                c_new: 7.0,
+                name: Some("thingamajig".into()),
+            },
             description: "add new product x_thingamajig (c=7, col [1,1])",
         },
         ScenarioStep {
             tick: 22,
-            event: LPEvent::RemoveConstraint { tick: 22.0, index: 0, name: None },
+            event: LPEvent::RemoveConstraint {
+                tick: 22.0,
+                index: 0,
+                name: None,
+            },
             description: "remove material constraint (LP becomes unbounded)",
         },
         ScenarioStep {
             tick: 26,
-            event: LPEvent::AddConstraint { tick: 26.0, coefs: vec![1.0, 1.0, 1.0], rhs: 50.0, name: Some("budget".into()) },
+            event: LPEvent::AddConstraint {
+                tick: 26.0,
+                coefs: vec![1.0, 1.0, 1.0],
+                rhs: 50.0,
+                name: Some("budget".into()),
+            },
             description: "add budget: w+g+t ≤ 50  (re-bounds the LP)",
         },
         ScenarioStep {
             tick: 32,
-            event: LPEvent::ChangeObjective { tick: 32.0, new_c: vec![1.0, 1.0, 8.0], name: None },
+            event: LPEvent::ChangeObjective {
+                tick: 32.0,
+                new_c: vec![1.0, 1.0, 8.0],
+                name: None,
+            },
             description: "change c → (1, 1, 8) — favour thingamajig",
         },
         ScenarioStep {
             tick: 36,
-            event: LPEvent::RemoveVariable { tick: 36.0, struct_index: 1, name: None },
+            event: LPEvent::RemoveVariable {
+                tick: 36.0,
+                struct_index: 1,
+                name: None,
+            },
             description: "remove gadget (line discontinued)",
         },
     ];
@@ -119,7 +154,11 @@ pub fn run() {
         let pivot_label: Option<String> = match ev.mode {
             PivotMode::Primal | PivotMode::Dual => Some(format!(
                 "{}: {} enters, {} leaves",
-                if ev.mode == PivotMode::Primal { "primal" } else { "dual" },
+                if ev.mode == PivotMode::Primal {
+                    "primal"
+                } else {
+                    "dual"
+                },
                 ev.entering_name.as_deref().unwrap_or("?"),
                 ev.leaving_name.as_deref().unwrap_or("?")
             )),
@@ -135,7 +174,11 @@ pub fn run() {
             "tick {:>2}  z={:>8}  x=[{}]  {}{}",
             tick,
             format!("{:.3}", inc.get_z()),
-            inc.get_x().iter().map(|v| format!("{v:.2}")).collect::<Vec<_>>().join(", "),
+            inc.get_x()
+                .iter()
+                .map(|v| format!("{v:.2}"))
+                .collect::<Vec<_>>()
+                .join(", "),
             event_str,
             pivot_str
         );
@@ -144,7 +187,11 @@ pub fn run() {
     println!(
         "# Final: z = {:.4}, x = [{}], status = {}",
         inc.get_z(),
-        inc.get_x().iter().map(|v| format!("{v:.4}")).collect::<Vec<_>>().join(", "),
+        inc.get_x()
+            .iter()
+            .map(|v| format!("{v:.4}"))
+            .collect::<Vec<_>>()
+            .join(", "),
         status_str(inc.status)
     );
 

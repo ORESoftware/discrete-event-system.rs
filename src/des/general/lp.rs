@@ -690,7 +690,11 @@ impl ExternalSolver {
         use std::process::{Command, Stdio};
 
         let t0 = Instant::now();
-        let method = self.opts.method.clone().unwrap_or_else(|| "highs".to_string());
+        let method = self
+            .opts
+            .method
+            .clone()
+            .unwrap_or_else(|| "highs".to_string());
         let python = self
             .opts
             .python
@@ -760,10 +764,7 @@ impl ExternalSolver {
                 stderr.to_string()
             };
             eprintln!("[lp.external] scipy:{method} process exited with code {code}: {stderr}");
-            return numerical_error(
-                format!("external solver exited with {code}: {stderr}"),
-                t0,
-            );
+            return numerical_error(format!("external solver exited with {code}: {stderr}"), t0);
         }
 
         let stdout = String::from_utf8_lossy(&out.stdout);
@@ -926,12 +927,18 @@ fn term(a: f64, name: &str) -> String {
     }
     let sign = if a >= 0.0 { " + " } else { " − " };
     let mag = a.abs();
-    let mag_str = if mag == 1.0 { String::new() } else { fmt_num(mag) };
+    let mag_str = if mag == 1.0 {
+        String::new()
+    } else {
+        fmt_num(mag)
+    };
     format!("{sign}{mag_str}{name}")
 }
 
 fn strip_leading_plus(s: &str) -> String {
-    s.strip_prefix(" + ").map(str::to_string).unwrap_or_else(|| s.to_string())
+    s.strip_prefix(" + ")
+        .map(str::to_string)
+        .unwrap_or_else(|| s.to_string())
 }
 
 fn render(p: &LPProblem) -> String {
@@ -943,8 +950,7 @@ fn render(p: &LPProblem) -> String {
     };
 
     let obj_line = strip_leading_plus(
-        &p.c
-            .iter()
+        &p.c.iter()
             .enumerate()
             .map(|(i, &a)| term(a, &names[i]))
             .collect::<String>(),
@@ -1104,7 +1110,10 @@ impl<'a> JsonParser<'a> {
             Some(b't') | Some(b'f') => self.boolean(),
             Some(b'n') => self.null(),
             Some(c) if c == b'-' || c.is_ascii_digit() => self.number(),
-            Some(c) => Err(format!("unexpected character '{}' at {}", c as char, self.pos)),
+            Some(c) => Err(format!(
+                "unexpected character '{}' at {}",
+                c as char, self.pos
+            )),
             None => Err("unexpected end of input".to_string()),
         }
     }
@@ -1214,7 +1223,9 @@ impl<'a> JsonParser<'a> {
                     while end < self.bytes.len() && (self.bytes[end] & 0xC0) == 0x80 {
                         end += 1;
                     }
-                    out.push_str(std::str::from_utf8(&self.bytes[start..end]).map_err(|_| "bad utf8")?);
+                    out.push_str(
+                        std::str::from_utf8(&self.bytes[start..end]).map_err(|_| "bad utf8")?,
+                    );
                     self.pos = end;
                 }
             }
@@ -1225,13 +1236,7 @@ impl<'a> JsonParser<'a> {
     fn number(&mut self) -> Result<Json, String> {
         let start = self.pos;
         while let Some(&b) = self.bytes.get(self.pos) {
-            if b.is_ascii_digit()
-                || b == b'-'
-                || b == b'+'
-                || b == b'.'
-                || b == b'e'
-                || b == b'E'
-            {
+            if b.is_ascii_digit() || b == b'-' || b == b'+' || b == b'.' || b == b'e' || b == b'E' {
                 self.pos += 1;
             } else {
                 break;
@@ -1320,7 +1325,10 @@ fn json_opt_array(v: &[Option<f64>]) -> String {
 }
 
 fn json_str_array(v: &[String]) -> String {
-    let inner: Vec<String> = v.iter().map(|s| format!("\"{}\"", json_escape(s))).collect();
+    let inner: Vec<String> = v
+        .iter()
+        .map(|s| format!("\"{}\"", json_escape(s)))
+        .collect();
     format!("[{}]", inner.join(","))
 }
 

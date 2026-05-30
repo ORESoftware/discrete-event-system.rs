@@ -77,13 +77,28 @@ impl DcMotorScene {
             spin_angle.push(angle);
         }
         let times: Vec<f64> = opts.samples.iter().map(|s| s.time).collect();
-        let max_abs_i = opts.samples.iter().map(|s| s.current.abs()).fold(1.0_f64, f64::max);
-        let max_v = opts.samples.iter().map(|s| s.voltage.abs()).fold(1.0_f64, f64::max);
+        let max_abs_i = opts
+            .samples
+            .iter()
+            .map(|s| s.current.abs())
+            .fold(1.0_f64, f64::max);
+        let max_v = opts
+            .samples
+            .iter()
+            .map(|s| s.voltage.abs())
+            .fold(1.0_f64, f64::max);
         let mut max_omega = opts.samples.iter().map(|s| s.omega).fold(1.0_f64, f64::max);
         if let Some(reference) = &opts.reference {
             max_omega = reference.iter().copied().fold(max_omega, f64::max);
         }
-        DcMotorScene { opts, spin_angle, times, max_abs_i, max_v, max_omega }
+        DcMotorScene {
+            opts,
+            spin_angle,
+            times,
+            max_abs_i,
+            max_v,
+            max_omega,
+        }
     }
 
     pub fn frame_count(&self) -> usize {
@@ -98,7 +113,14 @@ impl DcMotorScene {
         let s = &self.opts.samples[i];
         let ref_val: Option<f64> = self.opts.reference.as_ref().map(|r| r[i]);
         let mut shapes: Vec<Shape> = Vec::new();
-        shapes.push(Shape::Rect(RectShape { x: 0.0, y: 0.0, w: MOTOR_STAGE_W, h: MOTOR_STAGE_H, fill: COL_BG.to_string(), ..Default::default() }));
+        shapes.push(Shape::Rect(RectShape {
+            x: 0.0,
+            y: 0.0,
+            w: MOTOR_STAGE_W,
+            h: MOTOR_STAGE_H,
+            fill: COL_BG.to_string(),
+            ..Default::default()
+        }));
         shapes.push(Shape::Text(TextShape {
             x: MOTOR_STAGE_W / 2.0,
             y: 34.0,
@@ -134,9 +156,19 @@ impl DcMotorScene {
     pub fn charts(&self) -> Vec<ChartSpec> {
         let t = &self.times;
         let s = &self.opts.samples;
-        let mut series = vec![ChartSeries { label: "\u{03c9}".to_string(), color: COL_OMEGA.to_string(), t: t.clone(), y: s.iter().map(|x| x.omega).collect() }];
+        let mut series = vec![ChartSeries {
+            label: "\u{03c9}".to_string(),
+            color: COL_OMEGA.to_string(),
+            t: t.clone(),
+            y: s.iter().map(|x| x.omega).collect(),
+        }];
         if let Some(reference) = &self.opts.reference {
-            series.push(ChartSeries { label: "\u{03c9}*".to_string(), color: COL_REF.to_string(), t: t.clone(), y: reference.clone() });
+            series.push(ChartSeries {
+                label: "\u{03c9}*".to_string(),
+                color: COL_REF.to_string(),
+                t: t.clone(),
+                y: reference.clone(),
+            });
         }
         let back_emf_max = s.iter().map(|x| x.back_emf).fold(1.0_f64, f64::max) * 1.2;
         let voltage_min = s.iter().map(|x| x.voltage).fold(0.0_f64, f64::min) * 1.1 - 0.1;
@@ -162,7 +194,12 @@ impl DcMotorScene {
                 y_label: Some("V".to_string()),
                 y_min: Some(0.0),
                 y_max: Some(back_emf_max),
-                series: vec![ChartSeries { label: "E".to_string(), color: COL_EMF.to_string(), t: t.clone(), y: s.iter().map(|x| x.back_emf).collect() }],
+                series: vec![ChartSeries {
+                    label: "E".to_string(),
+                    color: COL_EMF.to_string(),
+                    t: t.clone(),
+                    y: s.iter().map(|x| x.back_emf).collect(),
+                }],
                 ..Default::default()
             },
             ChartSpec {
@@ -174,7 +211,12 @@ impl DcMotorScene {
                 y_label: Some("A".to_string()),
                 y_min: Some(-self.max_abs_i * 1.1),
                 y_max: Some(self.max_abs_i * 1.1),
-                series: vec![ChartSeries { label: "i".to_string(), color: COL_I.to_string(), t: t.clone(), y: s.iter().map(|x| x.current).collect() }],
+                series: vec![ChartSeries {
+                    label: "i".to_string(),
+                    color: COL_I.to_string(),
+                    t: t.clone(),
+                    y: s.iter().map(|x| x.current).collect(),
+                }],
                 ..Default::default()
             },
             ChartSpec {
@@ -186,7 +228,12 @@ impl DcMotorScene {
                 y_label: Some("V".to_string()),
                 y_min: Some(voltage_min),
                 y_max: Some(self.max_v * 1.1),
-                series: vec![ChartSeries { label: "V".to_string(), color: COL_V.to_string(), t: t.clone(), y: s.iter().map(|x| x.voltage).collect() }],
+                series: vec![ChartSeries {
+                    label: "V".to_string(),
+                    color: COL_V.to_string(),
+                    t: t.clone(),
+                    y: s.iter().map(|x| x.voltage).collect(),
+                }],
                 ..Default::default()
             },
         ]
@@ -197,39 +244,189 @@ impl DcMotorScene {
         let r = 560.0;
         let t = 110.0;
         let b = 360.0;
-        shapes.push(Shape::Rect(RectShape { x: l - 30.0, y: t - 30.0, w: r - l + 120.0, h: b - t + 70.0, rx: Some(10.0), fill: COL_PANEL.to_string(), stroke: Some("#334155".to_string()), ..Default::default() }));
-        shapes.push(Shape::Line(LineShape { x1: l, y1: t, x2: r, y2: t, stroke: COL_WIRE.to_string(), stroke_width: Some(3.0), ..Default::default() }));
-        shapes.push(Shape::Line(LineShape { x1: l, y1: b, x2: r, y2: b, stroke: COL_WIRE.to_string(), stroke_width: Some(3.0), ..Default::default() }));
-        shapes.push(Shape::Line(LineShape { x1: l, y1: t, x2: l, y2: b, stroke: COL_WIRE.to_string(), stroke_width: Some(3.0), ..Default::default() }));
-        shapes.push(Shape::Line(LineShape { x1: r, y1: t, x2: r, y2: b, stroke: COL_WIRE.to_string(), stroke_width: Some(3.0), ..Default::default() }));
+        shapes.push(Shape::Rect(RectShape {
+            x: l - 30.0,
+            y: t - 30.0,
+            w: r - l + 120.0,
+            h: b - t + 70.0,
+            rx: Some(10.0),
+            fill: COL_PANEL.to_string(),
+            stroke: Some("#334155".to_string()),
+            ..Default::default()
+        }));
+        shapes.push(Shape::Line(LineShape {
+            x1: l,
+            y1: t,
+            x2: r,
+            y2: t,
+            stroke: COL_WIRE.to_string(),
+            stroke_width: Some(3.0),
+            ..Default::default()
+        }));
+        shapes.push(Shape::Line(LineShape {
+            x1: l,
+            y1: b,
+            x2: r,
+            y2: b,
+            stroke: COL_WIRE.to_string(),
+            stroke_width: Some(3.0),
+            ..Default::default()
+        }));
+        shapes.push(Shape::Line(LineShape {
+            x1: l,
+            y1: t,
+            x2: l,
+            y2: b,
+            stroke: COL_WIRE.to_string(),
+            stroke_width: Some(3.0),
+            ..Default::default()
+        }));
+        shapes.push(Shape::Line(LineShape {
+            x1: r,
+            y1: t,
+            x2: r,
+            y2: b,
+            stroke: COL_WIRE.to_string(),
+            stroke_width: Some(3.0),
+            ..Default::default()
+        }));
 
         // Supply source (left).
         let mid = (t + b) / 2.0;
-        shapes.push(Shape::Circle(CircleShape { x: l, y: mid, r: 26.0, fill: "#1e293b".to_string(), stroke: Some(COL_V.to_string()), stroke_width: Some(2.0), ..Default::default() }));
-        shapes.push(Shape::Text(TextShape { x: l, y: mid - 2.0, anchor: Some(Anchor::Middle), font_size: Some(13.0), fill: Some(COL_V.to_string()), font_weight: Some(FontWeight::Bold), text: "V".to_string(), ..Default::default() }));
-        shapes.push(Shape::Text(TextShape { x: l, y: mid + 16.0, anchor: Some(Anchor::Middle), font_size: Some(11.0), fill: Some(COL_V.to_string()), text: to_fixed(s.voltage, 1), ..Default::default() }));
+        shapes.push(Shape::Circle(CircleShape {
+            x: l,
+            y: mid,
+            r: 26.0,
+            fill: "#1e293b".to_string(),
+            stroke: Some(COL_V.to_string()),
+            stroke_width: Some(2.0),
+            ..Default::default()
+        }));
+        shapes.push(Shape::Text(TextShape {
+            x: l,
+            y: mid - 2.0,
+            anchor: Some(Anchor::Middle),
+            font_size: Some(13.0),
+            fill: Some(COL_V.to_string()),
+            font_weight: Some(FontWeight::Bold),
+            text: "V".to_string(),
+            ..Default::default()
+        }));
+        shapes.push(Shape::Text(TextShape {
+            x: l,
+            y: mid + 16.0,
+            anchor: Some(Anchor::Middle),
+            font_size: Some(11.0),
+            fill: Some(COL_V.to_string()),
+            text: to_fixed(s.voltage, 1),
+            ..Default::default()
+        }));
 
         // Resistor R (top wire, box).
-        shapes.push(Shape::Rect(RectShape { x: 220.0, y: t - 12.0, w: 70.0, h: 24.0, rx: Some(3.0), fill: "#1e293b".to_string(), stroke: Some(COL_WIRE.to_string()), ..Default::default() }));
-        shapes.push(Shape::Text(TextShape { x: 255.0, y: t + 5.0, anchor: Some(Anchor::Middle), font_size: Some(12.0), fill: Some("#cbd5e1".to_string()), text: format!("R={}\u{03a9}", js_num(self.opts.params.resistance)), ..Default::default() }));
+        shapes.push(Shape::Rect(RectShape {
+            x: 220.0,
+            y: t - 12.0,
+            w: 70.0,
+            h: 24.0,
+            rx: Some(3.0),
+            fill: "#1e293b".to_string(),
+            stroke: Some(COL_WIRE.to_string()),
+            ..Default::default()
+        }));
+        shapes.push(Shape::Text(TextShape {
+            x: 255.0,
+            y: t + 5.0,
+            anchor: Some(Anchor::Middle),
+            font_size: Some(12.0),
+            fill: Some("#cbd5e1".to_string()),
+            text: format!("R={}\u{03a9}", js_num(self.opts.params.resistance)),
+            ..Default::default()
+        }));
         // Inductor L (top wire, coil hint).
-        shapes.push(Shape::Rect(RectShape { x: 340.0, y: t - 12.0, w: 70.0, h: 24.0, rx: Some(12.0), fill: "#1e293b".to_string(), stroke: Some(COL_WIRE.to_string()), ..Default::default() }));
-        shapes.push(Shape::Text(TextShape { x: 375.0, y: t + 5.0, anchor: Some(Anchor::Middle), font_size: Some(12.0), fill: Some("#cbd5e1".to_string()), text: format!("L={}H", js_num(self.opts.params.inductance)), ..Default::default() }));
+        shapes.push(Shape::Rect(RectShape {
+            x: 340.0,
+            y: t - 12.0,
+            w: 70.0,
+            h: 24.0,
+            rx: Some(12.0),
+            fill: "#1e293b".to_string(),
+            stroke: Some(COL_WIRE.to_string()),
+            ..Default::default()
+        }));
+        shapes.push(Shape::Text(TextShape {
+            x: 375.0,
+            y: t + 5.0,
+            anchor: Some(Anchor::Middle),
+            font_size: Some(12.0),
+            fill: Some("#cbd5e1".to_string()),
+            text: format!("L={}H", js_num(self.opts.params.inductance)),
+            ..Default::default()
+        }));
 
         // Back-EMF source (right vertical).
         let emf_x = r;
         let emf_y = (t + b) / 2.0;
-        shapes.push(Shape::Circle(CircleShape { x: emf_x, y: emf_y, r: 26.0, fill: "#1e293b".to_string(), stroke: Some(COL_EMF.to_string()), stroke_width: Some(2.0), ..Default::default() }));
-        shapes.push(Shape::Text(TextShape { x: emf_x, y: emf_y - 2.0, anchor: Some(Anchor::Middle), font_size: Some(12.0), fill: Some(COL_EMF.to_string()), font_weight: Some(FontWeight::Bold), text: "E".to_string(), ..Default::default() }));
-        shapes.push(Shape::Text(TextShape { x: emf_x, y: emf_y + 16.0, anchor: Some(Anchor::Middle), font_size: Some(11.0), fill: Some(COL_EMF.to_string()), text: to_fixed(s.back_emf, 1), ..Default::default() }));
-        shapes.push(Shape::Text(TextShape { x: emf_x, y: emf_y + 44.0, anchor: Some(Anchor::Middle), font_size: Some(10.0), fill: Some("#94a3b8".to_string()), text: "K_e\u{00b7}\u{03c9}".to_string(), ..Default::default() }));
+        shapes.push(Shape::Circle(CircleShape {
+            x: emf_x,
+            y: emf_y,
+            r: 26.0,
+            fill: "#1e293b".to_string(),
+            stroke: Some(COL_EMF.to_string()),
+            stroke_width: Some(2.0),
+            ..Default::default()
+        }));
+        shapes.push(Shape::Text(TextShape {
+            x: emf_x,
+            y: emf_y - 2.0,
+            anchor: Some(Anchor::Middle),
+            font_size: Some(12.0),
+            fill: Some(COL_EMF.to_string()),
+            font_weight: Some(FontWeight::Bold),
+            text: "E".to_string(),
+            ..Default::default()
+        }));
+        shapes.push(Shape::Text(TextShape {
+            x: emf_x,
+            y: emf_y + 16.0,
+            anchor: Some(Anchor::Middle),
+            font_size: Some(11.0),
+            fill: Some(COL_EMF.to_string()),
+            text: to_fixed(s.back_emf, 1),
+            ..Default::default()
+        }));
+        shapes.push(Shape::Text(TextShape {
+            x: emf_x,
+            y: emf_y + 44.0,
+            anchor: Some(Anchor::Middle),
+            font_size: Some(10.0),
+            fill: Some("#94a3b8".to_string()),
+            text: "K_e\u{00b7}\u{03c9}".to_string(),
+            ..Default::default()
+        }));
 
         // Current-flow markers around the loop.
         self.draw_current_markers(shapes, l, r, t, b, s.current);
-        shapes.push(Shape::Text(TextShape { x: 255.0, y: b + 26.0, anchor: Some(Anchor::Middle), font_size: Some(13.0), fill: Some(COL_I.to_string()), font_weight: Some(FontWeight::Bold), text: format!("i = {} A", to_fixed(s.current, 3)), ..Default::default() }));
+        shapes.push(Shape::Text(TextShape {
+            x: 255.0,
+            y: b + 26.0,
+            anchor: Some(Anchor::Middle),
+            font_size: Some(13.0),
+            fill: Some(COL_I.to_string()),
+            font_weight: Some(FontWeight::Bold),
+            text: format!("i = {} A", to_fixed(s.current, 3)),
+            ..Default::default()
+        }));
     }
 
-    fn draw_current_markers(&self, shapes: &mut Vec<Shape>, l: f64, r: f64, t: f64, b: f64, current: f64) {
+    fn draw_current_markers(
+        &self,
+        shapes: &mut Vec<Shape>,
+        l: f64,
+        r: f64,
+        t: f64,
+        b: f64,
+        current: f64,
+    ) {
         let perim = 2.0 * (r - l) + 2.0 * (b - t);
         let count = 8;
         let sign = if current >= 0.0 { 1.0 } else { -1.0 };
@@ -238,7 +435,14 @@ impl DcMotorScene {
             let d = (phase + (k as f64 / count as f64) * perim) % perim;
             let p = self.perimeter_point(d, l, r, t, b);
             let opacity = 0.35 + 0.5 * (current.abs() / 1.0_f64.max(self.max_abs_i)).min(1.0);
-            shapes.push(Shape::Circle(CircleShape { x: p.0, y: p.1, r: 4.0, fill: COL_I.to_string(), opacity: Some(opacity), ..Default::default() }));
+            shapes.push(Shape::Circle(CircleShape {
+                x: p.0,
+                y: p.1,
+                r: 4.0,
+                fill: COL_I.to_string(),
+                opacity: Some(opacity),
+                ..Default::default()
+            }));
         }
     }
 
@@ -262,15 +466,62 @@ impl DcMotorScene {
     }
 
     fn draw_rotor(&self, shapes: &mut Vec<Shape>, cx: f64, cy: f64, angle: f64, omega: f64) {
-        shapes.push(Shape::Circle(CircleShape { x: cx, y: cy, r: 64.0, fill: "#1e293b".to_string(), stroke: Some(COL_WIRE.to_string()), stroke_width: Some(3.0), ..Default::default() }));
-        shapes.push(Shape::Circle(CircleShape { x: cx, y: cy, r: 58.0, fill: "transparent".to_string(), stroke: Some("#334155".to_string()), stroke_width: Some(1.0), ..Default::default() }));
+        shapes.push(Shape::Circle(CircleShape {
+            x: cx,
+            y: cy,
+            r: 64.0,
+            fill: "#1e293b".to_string(),
+            stroke: Some(COL_WIRE.to_string()),
+            stroke_width: Some(3.0),
+            ..Default::default()
+        }));
+        shapes.push(Shape::Circle(CircleShape {
+            x: cx,
+            y: cy,
+            r: 58.0,
+            fill: "transparent".to_string(),
+            stroke: Some("#334155".to_string()),
+            stroke_width: Some(1.0),
+            ..Default::default()
+        }));
         for k in 0..4 {
             let a = angle + (k as f64 * std::f64::consts::PI) / 2.0;
-            shapes.push(Shape::Line(LineShape { x1: cx, y1: cy, x2: cx + 54.0 * a.cos(), y2: cy + 54.0 * a.sin(), stroke: COL_OMEGA.to_string(), stroke_width: Some(3.0), ..Default::default() }));
+            shapes.push(Shape::Line(LineShape {
+                x1: cx,
+                y1: cy,
+                x2: cx + 54.0 * a.cos(),
+                y2: cy + 54.0 * a.sin(),
+                stroke: COL_OMEGA.to_string(),
+                stroke_width: Some(3.0),
+                ..Default::default()
+            }));
         }
-        shapes.push(Shape::Circle(CircleShape { x: cx, y: cy, r: 8.0, fill: COL_OMEGA.to_string(), ..Default::default() }));
-        shapes.push(Shape::Text(TextShape { x: cx, y: cy + 92.0, anchor: Some(Anchor::Middle), font_size: Some(13.0), fill: Some(COL_OMEGA.to_string()), font_weight: Some(FontWeight::Bold), text: format!("\u{03c9} = {} rad/s", to_fixed(omega, 1)), ..Default::default() }));
-        shapes.push(Shape::Text(TextShape { x: cx, y: cy - 84.0, anchor: Some(Anchor::Middle), font_size: Some(12.0), fill: Some("#94a3b8".to_string()), text: "ROTOR".to_string(), ..Default::default() }));
+        shapes.push(Shape::Circle(CircleShape {
+            x: cx,
+            y: cy,
+            r: 8.0,
+            fill: COL_OMEGA.to_string(),
+            ..Default::default()
+        }));
+        shapes.push(Shape::Text(TextShape {
+            x: cx,
+            y: cy + 92.0,
+            anchor: Some(Anchor::Middle),
+            font_size: Some(13.0),
+            fill: Some(COL_OMEGA.to_string()),
+            font_weight: Some(FontWeight::Bold),
+            text: format!("\u{03c9} = {} rad/s", to_fixed(omega, 1)),
+            ..Default::default()
+        }));
+        shapes.push(Shape::Text(TextShape {
+            x: cx,
+            y: cy - 84.0,
+            anchor: Some(Anchor::Middle),
+            font_size: Some(12.0),
+            fill: Some("#94a3b8".to_string()),
+            text: "ROTOR".to_string(),
+            ..Default::default()
+        }));
     }
 
     fn draw_gauges(&self, shapes: &mut Vec<Shape>, s: &MotorStateToken, ref_val: Option<f64>) {
@@ -279,19 +530,68 @@ impl DcMotorScene {
         let w = 150.0;
         let row_h = 64.0;
         let mut rows: Vec<(String, String, &str)> = vec![
-            ("speed \u{03c9}".to_string(), format!("{} rad/s", to_fixed(s.omega, 1)), COL_OMEGA),
-            ("back-EMF E".to_string(), format!("{} V", to_fixed(s.back_emf, 2)), COL_EMF),
-            ("current i".to_string(), format!("{} A", to_fixed(s.current, 3)), COL_I),
-            ("voltage V".to_string(), format!("{} V", to_fixed(s.voltage, 2)), COL_V),
+            (
+                "speed \u{03c9}".to_string(),
+                format!("{} rad/s", to_fixed(s.omega, 1)),
+                COL_OMEGA,
+            ),
+            (
+                "back-EMF E".to_string(),
+                format!("{} V", to_fixed(s.back_emf, 2)),
+                COL_EMF,
+            ),
+            (
+                "current i".to_string(),
+                format!("{} A", to_fixed(s.current, 3)),
+                COL_I,
+            ),
+            (
+                "voltage V".to_string(),
+                format!("{} V", to_fixed(s.voltage, 2)),
+                COL_V,
+            ),
         ];
         if let Some(r) = ref_val {
-            rows.insert(0, ("reference \u{03c9}*".to_string(), format!("{} rad/s", to_fixed(r, 1)), COL_REF));
+            rows.insert(
+                0,
+                (
+                    "reference \u{03c9}*".to_string(),
+                    format!("{} rad/s", to_fixed(r, 1)),
+                    COL_REF,
+                ),
+            );
         }
-        shapes.push(Shape::Rect(RectShape { x, y, w, h: rows.len() as f64 * row_h + 12.0, rx: Some(8.0), fill: COL_PANEL.to_string(), stroke: Some("#334155".to_string()), ..Default::default() }));
+        shapes.push(Shape::Rect(RectShape {
+            x,
+            y,
+            w,
+            h: rows.len() as f64 * row_h + 12.0,
+            rx: Some(8.0),
+            fill: COL_PANEL.to_string(),
+            stroke: Some("#334155".to_string()),
+            ..Default::default()
+        }));
         for (k, row) in rows.iter().enumerate() {
             let ry = y + 12.0 + k as f64 * row_h;
-            shapes.push(Shape::Text(TextShape { x: x + 12.0, y: ry + 18.0, anchor: Some(Anchor::Start), font_size: Some(11.0), fill: Some("#94a3b8".to_string()), text: row.0.clone(), ..Default::default() }));
-            shapes.push(Shape::Text(TextShape { x: x + 12.0, y: ry + 42.0, anchor: Some(Anchor::Start), font_size: Some(18.0), fill: Some(row.2.to_string()), font_weight: Some(FontWeight::Bold), text: row.1.clone(), ..Default::default() }));
+            shapes.push(Shape::Text(TextShape {
+                x: x + 12.0,
+                y: ry + 18.0,
+                anchor: Some(Anchor::Start),
+                font_size: Some(11.0),
+                fill: Some("#94a3b8".to_string()),
+                text: row.0.clone(),
+                ..Default::default()
+            }));
+            shapes.push(Shape::Text(TextShape {
+                x: x + 12.0,
+                y: ry + 42.0,
+                anchor: Some(Anchor::Start),
+                font_size: Some(18.0),
+                fill: Some(row.2.to_string()),
+                font_weight: Some(FontWeight::Bold),
+                text: row.1.clone(),
+                ..Default::default()
+            }));
         }
     }
 }
@@ -301,7 +601,14 @@ mod tests {
     use super::*;
 
     fn sample(time: f64, omega: f64) -> MotorStateToken {
-        MotorStateToken { time, omega, current: 0.5, voltage: 12.0, back_emf: 4.0, load_torque: 0.2 }
+        MotorStateToken {
+            time,
+            omega,
+            current: 0.5,
+            voltage: 12.0,
+            back_emf: 4.0,
+            load_torque: 0.2,
+        }
     }
 
     #[test]
@@ -309,7 +616,10 @@ mod tests {
         let scene = DcMotorScene::new(DcMotorSceneOpts {
             samples: vec![sample(0.0, 0.0), sample(0.1, 10.0)],
             dt: 0.1,
-            params: DcMotorParams { resistance: 1.0, inductance: 0.5 },
+            params: DcMotorParams {
+                resistance: 1.0,
+                inductance: 0.5,
+            },
             mode_name: "open loop".to_string(),
             reference: None,
         });
@@ -327,7 +637,10 @@ mod tests {
         let scene = DcMotorScene::new(DcMotorSceneOpts {
             samples: vec![sample(0.0, 0.0), sample(0.1, 10.0)],
             dt: 0.1,
-            params: DcMotorParams { resistance: 1.0, inductance: 0.5 },
+            params: DcMotorParams {
+                resistance: 1.0,
+                inductance: 0.5,
+            },
             mode_name: "PI".to_string(),
             reference: Some(vec![5.0, 9.0]),
         });

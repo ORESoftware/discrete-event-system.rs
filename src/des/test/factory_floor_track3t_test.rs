@@ -27,10 +27,14 @@ mod tests {
             .iter()
             .position(|s| s.id == "shipping")
             .expect("shipping station");
-        let base_model =
-            build_warehouse_pomdp(&layout, &baseline_warehouse_scenario(), dest);
+        let base_model = build_warehouse_pomdp(&layout, &baseline_warehouse_scenario(), dest);
         let n = layout.stations.len();
-        assert_eq!(base_model.states.len(), n * n * 2 + 1, "states={}", base_model.states.len());
+        assert_eq!(
+            base_model.states.len(),
+            n * n * 2 + 1,
+            "states={}",
+            base_model.states.len()
+        );
     }
 
     #[test]
@@ -41,8 +45,7 @@ mod tests {
             .iter()
             .position(|s| s.id == "shipping")
             .expect("shipping station");
-        let base_model =
-            build_warehouse_pomdp(&layout, &baseline_warehouse_scenario(), dest);
+        let base_model = build_warehouse_pomdp(&layout, &baseline_warehouse_scenario(), dest);
         assert_eq!(base_model.actions.len(), layout.stations.len());
     }
 
@@ -66,10 +69,8 @@ mod tests {
             .iter()
             .position(|s| s.id == "shipping")
             .expect("shipping station");
-        let base_model =
-            build_warehouse_pomdp(&layout, &baseline_warehouse_scenario(), dest);
-        let track_model =
-            build_warehouse_pomdp(&layout, &track3t_warehouse_scenario(), dest);
+        let base_model = build_warehouse_pomdp(&layout, &baseline_warehouse_scenario(), dest);
+        let track_model = build_warehouse_pomdp(&layout, &track3t_warehouse_scenario(), dest);
         assert_eq!(track_model.states.len(), base_model.states.len());
     }
 

@@ -29,9 +29,16 @@ pub fn run() {
 
     println!("# Maximum-flow optimiser as DES");
     println!("# one augmenting path = one DES fixed-point tick");
-    println!("# source={}, sink={}, nodes={}", result.source, result.sink, result.num_nodes);
+    println!(
+        "# source={}, sink={}, nodes={}",
+        result.source, result.sink, result.num_nodes
+    );
     println!("# max flow = {}", fmt(result.max_flow));
-    println!("# augmentations = {}, iterations = {}", result.trace.len(), result.iterations);
+    println!(
+        "# augmentations = {}, iterations = {}",
+        result.trace.len(),
+        result.iterations
+    );
     println!();
 
     println!("## Augmenting-path trace");
@@ -53,13 +60,30 @@ pub fn run() {
             Some(n) => format!("{} ", n),
             None => String::new(),
         };
-        println!("  {}{} -> {}: {} / {}", name, e.from, e.to, fmt(e.flow), fmt(e.capacity));
+        println!(
+            "  {}{} -> {}: {} / {}",
+            name,
+            e.from,
+            e.to,
+            fmt(e.flow),
+            fmt(e.capacity)
+        );
     }
     println!();
 
     println!("## Min cut");
-    let source_side: Vec<String> = result.min_cut.source_side.iter().map(|n| n.to_string()).collect();
-    let sink_side: Vec<String> = result.min_cut.sink_side.iter().map(|n| n.to_string()).collect();
+    let source_side: Vec<String> = result
+        .min_cut
+        .source_side
+        .iter()
+        .map(|n| n.to_string())
+        .collect();
+    let sink_side: Vec<String> = result
+        .min_cut
+        .sink_side
+        .iter()
+        .map(|n| n.to_string())
+        .collect();
     println!("  S = {{{}}}", source_side.join(", "));
     println!("  T = {{{}}}", sink_side.join(", "));
     println!("  capacity = {}", fmt(result.min_cut.capacity));

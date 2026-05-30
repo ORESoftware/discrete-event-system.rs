@@ -34,8 +34,8 @@ use crate::des::general::des_base::learning_optimization::{
     channel_edge, softmax, station_graph, StationGraphSummary, StationOrId,
 };
 use crate::des::general::des_base::policy_gradient_agent::{
-    self, PolicyGradientAgent, PolicyGradientCore, PolicyOutput, PolicyUpdateCore, PolicyUpdateStation,
-    RolloutEntry,
+    self, PolicyGradientAgent, PolicyGradientCore, PolicyOutput, PolicyUpdateCore,
+    PolicyUpdateStation, RolloutEntry,
 };
 use crate::des::general::des_base::rl_agent::{RLAgentCore, RLAgentStation, RngRef};
 use crate::des::general::des_base::runner::{run_iterative_des, IterativeRunOptions};
@@ -77,7 +77,11 @@ impl PureEnvironment<usize, usize> for EnvAdapter {
     }
     fn step(&mut self, state: usize, action: usize) -> StepResult<usize> {
         let o = self.env.step(state, action);
-        StepResult { next_state: o.next_state, reward: o.reward, done: o.done }
+        StepResult {
+            next_state: o.next_state,
+            reward: o.reward,
+            done: o.done,
+        }
     }
 }
 
@@ -139,17 +143,29 @@ impl SoftmaxPolicyGradientAgent {
     }
 
     /// `θ[s][·] += α · A · (1[a'=a] − π(a'|s))`.
-    pub fn apply_policy_gradient(&mut self, state: usize, action: usize, advantage: f64, alpha: f64) {
+    pub fn apply_policy_gradient(
+        &mut self,
+        state: usize,
+        action: usize,
+        advantage: f64,
+        alpha: f64,
+    ) {
         let probs = softmax(&self.theta[state]);
         for a in 0..self.num_actions {
-            self.theta[state][a] += alpha * advantage * ((if a == action { 1.0 } else { 0.0 }) - probs[a]);
+            self.theta[state][a] +=
+                alpha * advantage * ((if a == action { 1.0 } else { 0.0 }) - probs[a]);
         }
     }
 
     /// Greedy (argmax) action with random tie-break, drawing the agent's RNG.
     pub fn greedy_action(&mut self, state: usize) -> usize {
         let mut rng = self.pg.rng.take().expect("rng already in use");
-        let a = arg_max_with_tie_break(&self.theta[state], &mut RngRef(&mut *rng), ARGMAX_EPS_DEFAULT).unwrap_or(0);
+        let a = arg_max_with_tie_break(
+            &self.theta[state],
+            &mut RngRef(&mut *rng),
+            ARGMAX_EPS_DEFAULT,
+        )
+        .unwrap_or(0);
         self.pg.rng = Some(rng);
         a
     }
@@ -181,17 +197,29 @@ impl PolicyGradientAgent<usize, usize> for SoftmaxPolicyGradientAgent {
         &mut self.pg
     }
 
-    fn sample_policy_and_value(&self, state: &usize, rng: &mut dyn RandomSource) -> PolicyOutput<usize> {
+    fn sample_policy_and_value(
+        &self,
+        state: &usize,
+        rng: &mut dyn RandomSource,
+    ) -> PolicyOutput<usize> {
         let probs = softmax(&self.theta[*state]);
         let mut u = rng.next_float();
         for (a, &p) in probs.iter().enumerate() {
             u -= p;
             if u <= 0.0 {
-                return PolicyOutput { action: a, log_prob: p.max(1e-12).ln(), value: 0.0 };
+                return PolicyOutput {
+                    action: a,
+                    log_prob: p.max(1e-12).ln(),
+                    value: 0.0,
+                };
             }
         }
         let action = probs.len() - 1;
-        PolicyOutput { action, log_prob: probs[action].max(1e-12).ln(), value: 0.0 }
+        PolicyOutput {
+            action,
+            log_prob: probs[action].max(1e-12).ln(),
+            value: 0.0,
+        }
     }
 }
 
@@ -206,8 +234,20 @@ pub struct ReinforceUpdateStation {
 }
 
 impl ReinforceUpdateStation {
-    pub fn new(id: impl Into<String>, agent: Rc<RefCell<SoftmaxPolicyGradientAgent>>, alpha: f64, gamma: f64) -> Self {
-        ReinforceUpdateStation { core: StationCore::new(id), pu: PolicyUpdateCore::new(), agent, alpha, gamma, update_returns: Vec::new() }
+    pub fn new(
+        id: impl Into<String>,
+        agent: Rc<RefCell<SoftmaxPolicyGradientAgent>>,
+        alpha: f64,
+        gamma: f64,
+    ) -> Self {
+        ReinforceUpdateStation {
+            core: StationCore::new(id),
+            pu: PolicyUpdateCore::new(),
+            agent,
+            alpha,
+            gamma,
+            update_returns: Vec::new(),
+        }
     }
 }
 
@@ -266,7 +306,9 @@ impl PolicyUpdateStation for ReinforceUpdateStation {
 }
 
 /// Run the REINFORCE corridor model and report learned policy + greedy eval.
-pub fn run_policy_gradient_corridor(params: PolicyGradientCorridorParams) -> PolicyGradientCorridorResult {
+pub fn run_policy_gradient_corridor(
+    params: PolicyGradientCorridorParams,
+) -> PolicyGradientCorridorResult {
     let num_episodes = params.num_episodes.unwrap_or(300);
     let max_steps = params.max_steps_per_episode.unwrap_or(40);
     let env_rc: Rc<Corridor> = Rc::new(Corridor::new(params.length.unwrap_or(7), 0));
@@ -276,8 +318,13 @@ pub fn run_policy_gradient_corridor(params: PolicyGradientCorridorParams) -> Pol
 
     let env_station = Rc::new(RefCell::new(EnvironmentStation::new(
         "corridor-env",
-        Box::new(EnvAdapter { env: env_rc.clone() }),
-        EnvironmentStationOptions { num_episodes: Some(num_episodes as f64), max_steps_per_episode: Some(max_steps) },
+        Box::new(EnvAdapter {
+            env: env_rc.clone(),
+        }),
+        EnvironmentStationOptions {
+            num_episodes: Some(num_episodes as f64),
+            max_steps_per_episode: Some(max_steps),
+        },
     )));
     let agent = Rc::new(RefCell::new(SoftmaxPolicyGradientAgent::new(
         "softmax-policy-agent",
@@ -293,17 +340,44 @@ pub fn run_policy_gradient_corridor(params: PolicyGradientCorridorParams) -> Pol
         params.gamma.unwrap_or(0.95),
     )));
 
-    env_station.borrow_mut().core_mut().pipe(agent.clone() as StationRef, environment::CH_STATE, policy_gradient_agent::CH_STATE);
-    env_station.borrow_mut().core_mut().pipe(agent.clone() as StationRef, environment::CH_TRANSITION, policy_gradient_agent::CH_TRANSITION);
-    agent.borrow_mut().core_mut().pipe(env_station.clone() as StationRef, policy_gradient_agent::CH_ACTION, environment::CH_ACTION);
-    agent.borrow_mut().core_mut().pipe(updater.clone() as StationRef, policy_gradient_agent::CH_TRAIN, policy_gradient_agent::CH_TRAIN);
-    updater.borrow_mut().core_mut().pipe(agent.clone() as StationRef, policy_gradient_agent::CH_RESUME, policy_gradient_agent::CH_RESUME);
+    env_station.borrow_mut().core_mut().pipe(
+        agent.clone() as StationRef,
+        environment::CH_STATE,
+        policy_gradient_agent::CH_STATE,
+    );
+    env_station.borrow_mut().core_mut().pipe(
+        agent.clone() as StationRef,
+        environment::CH_TRANSITION,
+        policy_gradient_agent::CH_TRANSITION,
+    );
+    agent.borrow_mut().core_mut().pipe(
+        env_station.clone() as StationRef,
+        policy_gradient_agent::CH_ACTION,
+        environment::CH_ACTION,
+    );
+    agent.borrow_mut().core_mut().pipe(
+        updater.clone() as StationRef,
+        policy_gradient_agent::CH_TRAIN,
+        policy_gradient_agent::CH_TRAIN,
+    );
+    updater.borrow_mut().core_mut().pipe(
+        agent.clone() as StationRef,
+        policy_gradient_agent::CH_RESUME,
+        policy_gradient_agent::CH_RESUME,
+    );
 
-    let mut des = IterativeRunOptions { max_ticks: Some(num_episodes * max_steps * 4), ..Default::default() };
+    let mut des = IterativeRunOptions {
+        max_ticks: Some(num_episodes * max_steps * 4),
+        ..Default::default()
+    };
     let r = shared.clone();
     des.rng = Some(Box::new(move || r.borrow_mut().next_float()));
     run_iterative_des(
-        vec![env_station.clone() as StationRef, agent.clone() as StationRef, updater.clone() as StationRef],
+        vec![
+            env_station.clone() as StationRef,
+            agent.clone() as StationRef,
+            updater.clone() as StationRef,
+        ],
         des,
     );
 
@@ -312,10 +386,16 @@ pub fn run_policy_gradient_corridor(params: PolicyGradientCorridorParams) -> Pol
         &*env_rc,
         |s, _rng| agent.borrow_mut().greedy_action(s),
         &mut eval_rng,
-        EvalPolicyOptions { num_episodes: 50, max_steps_per_episode: max_steps, gamma: 1.0 },
+        EvalPolicyOptions {
+            num_episodes: 50,
+            max_steps_per_episode: max_steps,
+            gamma: 1.0,
+        },
     );
 
-    let policy: Vec<usize> = (0..num_states).map(|s| agent.borrow_mut().greedy_action(s)).collect();
+    let policy: Vec<usize> = (0..num_states)
+        .map(|s| agent.borrow_mut().greedy_action(s))
+        .collect();
     let reward_history = env_station.borrow().reward_history().to_vec();
     let length_history = env_station.borrow().length_history().to_vec();
     let updates = updater.borrow().pu_core().num_updates;
@@ -325,13 +405,45 @@ pub fn run_policy_gradient_corridor(params: PolicyGradientCorridorParams) -> Pol
     let updater_id = StationOrId::Id("reinforce-update".to_string());
     let topology = station_graph(
         &[env_id.clone(), agent_id.clone(), updater_id.clone()],
-        &["StateToken", "ActionToken", "TransitionToken", "TrainTriggerToken", "ResumeToken"].map(String::from),
         &[
-            channel_edge(&env_id, environment::CH_STATE, &agent_id, Some(policy_gradient_agent::CH_STATE)),
-            channel_edge(&agent_id, policy_gradient_agent::CH_ACTION, &env_id, Some(environment::CH_ACTION)),
-            channel_edge(&env_id, environment::CH_TRANSITION, &agent_id, Some(policy_gradient_agent::CH_TRANSITION)),
-            channel_edge(&agent_id, policy_gradient_agent::CH_TRAIN, &updater_id, Some(policy_gradient_agent::CH_TRAIN)),
-            channel_edge(&updater_id, policy_gradient_agent::CH_RESUME, &agent_id, Some(policy_gradient_agent::CH_RESUME)),
+            "StateToken",
+            "ActionToken",
+            "TransitionToken",
+            "TrainTriggerToken",
+            "ResumeToken",
+        ]
+        .map(String::from),
+        &[
+            channel_edge(
+                &env_id,
+                environment::CH_STATE,
+                &agent_id,
+                Some(policy_gradient_agent::CH_STATE),
+            ),
+            channel_edge(
+                &agent_id,
+                policy_gradient_agent::CH_ACTION,
+                &env_id,
+                Some(environment::CH_ACTION),
+            ),
+            channel_edge(
+                &env_id,
+                environment::CH_TRANSITION,
+                &agent_id,
+                Some(policy_gradient_agent::CH_TRANSITION),
+            ),
+            channel_edge(
+                &agent_id,
+                policy_gradient_agent::CH_TRAIN,
+                &updater_id,
+                Some(policy_gradient_agent::CH_TRAIN),
+            ),
+            channel_edge(
+                &updater_id,
+                policy_gradient_agent::CH_RESUME,
+                &agent_id,
+                Some(policy_gradient_agent::CH_RESUME),
+            ),
         ],
     );
 
@@ -426,7 +538,8 @@ impl ExpectedSarsaAgent {
         let greedy = self.greedy_idx(state, rng);
         let mut v = 0.0;
         for a in 0..self.num_actions {
-            let p = self.epsilon / self.num_actions as f64 + if a == greedy { 1.0 - self.epsilon } else { 0.0 };
+            let p = self.epsilon / self.num_actions as f64
+                + if a == greedy { 1.0 - self.epsilon } else { 0.0 };
             v += p * self.q[state][a];
         }
         v
@@ -478,9 +591,20 @@ impl RLAgentStation<usize, usize> for ExpectedSarsaAgent {
         self.greedy_idx(*state, rng)
     }
 
-    fn update(&mut self, state: &usize, action: &usize, reward: f64, next_state: &usize, done: bool) {
+    fn update(
+        &mut self,
+        state: &usize,
+        action: &usize,
+        reward: f64,
+        next_state: &usize,
+        done: bool,
+    ) {
         let mut rng = self.agent.rng.take().expect("rng already in use");
-        let expected = if done { 0.0 } else { self.expected_value_with(*next_state, &mut *rng) };
+        let expected = if done {
+            0.0
+        } else {
+            self.expected_value_with(*next_state, &mut *rng)
+        };
         self.agent.rng = Some(rng);
         let target = reward + self.gamma * expected;
         self.q[*state][*action] += self.alpha * (target - self.q[*state][*action]);
@@ -497,15 +621,23 @@ pub fn run_expected_sarsa_gridworld(params: ExpectedSarsaGridParams) -> Expected
     let num_episodes = params.num_episodes.unwrap_or(900);
     let max_steps = params.max_steps_per_episode.unwrap_or(80);
     let shared = Rc::new(RefCell::new(mulberry32(params.seed.unwrap_or(1))));
-    let env_concrete: Rc<GridWorld> =
-        Rc::new(GridWorld::new(GridWorldOptions { width: Some(4), height: Some(4), ..Default::default() }));
+    let env_concrete: Rc<GridWorld> = Rc::new(GridWorld::new(GridWorldOptions {
+        width: Some(4),
+        height: Some(4),
+        ..Default::default()
+    }));
     let num_states = env_concrete.num_states();
     let num_actions = env_concrete.num_actions();
 
     let env_station = Rc::new(RefCell::new(EnvironmentStation::new(
         "grid-env",
-        Box::new(EnvAdapter { env: env_concrete.clone() }),
-        EnvironmentStationOptions { num_episodes: Some(num_episodes as f64), max_steps_per_episode: Some(max_steps) },
+        Box::new(EnvAdapter {
+            env: env_concrete.clone(),
+        }),
+        EnvironmentStationOptions {
+            num_episodes: Some(num_episodes as f64),
+            max_steps_per_episode: Some(max_steps),
+        },
     )));
     let agent = Rc::new(RefCell::new(ExpectedSarsaAgent::new(
         "expected-sarsa-agent",
@@ -535,10 +667,19 @@ pub fn run_expected_sarsa_gridworld(params: ExpectedSarsaGridParams) -> Expected
         environment::CH_ACTION,
     );
 
-    let mut des = IterativeRunOptions { max_ticks: Some(num_episodes * max_steps * 3), ..Default::default() };
+    let mut des = IterativeRunOptions {
+        max_ticks: Some(num_episodes * max_steps * 3),
+        ..Default::default()
+    };
     let r = shared.clone();
     des.rng = Some(Box::new(move || r.borrow_mut().next_float()));
-    run_iterative_des(vec![env_station.clone() as StationRef, agent.clone() as StationRef], des);
+    run_iterative_des(
+        vec![
+            env_station.clone() as StationRef,
+            agent.clone() as StationRef,
+        ],
+        des,
+    );
 
     // Greedy rollout from the start state.
     let mut s = env_concrete.reset();
@@ -556,7 +697,9 @@ pub fn run_expected_sarsa_gridworld(params: ExpectedSarsaGridParams) -> Expected
     }
 
     let q_start = agent.borrow().q_values(env_concrete.start);
-    let policy: Vec<usize> = (0..num_states).map(|state| agent.borrow_mut().greedy_action(state)).collect();
+    let policy: Vec<usize> = (0..num_states)
+        .map(|state| agent.borrow_mut().greedy_action(state))
+        .collect();
     let reward_history = agent.borrow().reward_history().to_vec();
     let length_history = agent.borrow().length_history().to_vec();
 
@@ -637,15 +780,25 @@ mod tests {
         let window = 150.min(h.len() / 4).max(1);
         let first: f64 = h[..window].iter().sum::<f64>() / window as f64;
         let last: f64 = h[h.len() - window..].iter().sum::<f64>() / window as f64;
-        assert!(last > first, "mean reward should rise: first {first}, last {last}");
+        assert!(
+            last > first,
+            "mean reward should rise: first {first}, last {last}"
+        );
     }
 
     #[test]
     fn expected_sarsa_reaches_gridworld_goal() {
-        let res = run_expected_sarsa_gridworld(ExpectedSarsaGridParams { seed: Some(1), ..Default::default() });
+        let res = run_expected_sarsa_gridworld(ExpectedSarsaGridParams {
+            seed: Some(1),
+            ..Default::default()
+        });
         assert!(res.greedy_reached, "greedy policy should reach the goal");
         // Optimal path from start (0) to goal (15) on a 4×4 grid is 6 steps.
-        assert!(res.greedy_len <= 12, "greedy path should be short: {}", res.greedy_len);
+        assert!(
+            res.greedy_len <= 12,
+            "greedy path should be short: {}",
+            res.greedy_len
+        );
         assert_eq!(res.policy.len(), 16);
         assert_eq!(res.q_start.len(), 4);
     }

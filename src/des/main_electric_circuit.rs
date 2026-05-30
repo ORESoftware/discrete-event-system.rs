@@ -50,11 +50,19 @@ struct VoltageSource {
 
 impl VoltageSource {
     fn new(id: &str, v_step: f64, t0: f64) -> Self {
-        VoltageSource { id: id.to_string(), v_step, t0 }
+        VoltageSource {
+            id: id.to_string(),
+            v_step,
+            t0,
+        }
     }
     /// Emits `V_in` = Heaviside step at `t0`.
     fn run_time_step(&self, t: f64) -> f64 {
-        if t >= self.t0 { self.v_step } else { 0.0 }
+        if t >= self.t0 {
+            self.v_step
+        } else {
+            0.0
+        }
     }
 }
 
@@ -68,7 +76,13 @@ struct Inductor {
 
 impl Inductor {
     fn new(id: &str, l: f64, r: f64) -> Self {
-        Inductor { id: id.to_string(), l, r, i: 0.0, inbox: HashMap::new() }
+        Inductor {
+            id: id.to_string(),
+            l,
+            r,
+            i: 0.0,
+            inbox: HashMap::new(),
+        }
     }
     /// `dI/dt = (V_in − I·R − V_C) / L` (Kirchhoff's voltage law). Returns the
     /// emitted current.
@@ -89,7 +103,12 @@ struct Capacitor {
 
 impl Capacitor {
     fn new(id: &str, c: f64) -> Self {
-        Capacitor { id: id.to_string(), c, v_c: 0.0, inbox: HashMap::new() }
+        Capacitor {
+            id: id.to_string(),
+            c,
+            v_c: 0.0,
+            inbox: HashMap::new(),
+        }
     }
     /// `dV_C/dt = I / C`. Returns the emitted capacitor voltage.
     fn run_time_step(&mut self, step_size: f64) -> f64 {
@@ -107,11 +126,20 @@ struct Recorder {
 
 impl Recorder {
     fn new(id: &str) -> Self {
-        Recorder { id: id.to_string(), inbox: HashMap::new(), trace: Vec::new() }
+        Recorder {
+            id: id.to_string(),
+            inbox: HashMap::new(),
+            trace: Vec::new(),
+        }
     }
     fn run_time_step(&mut self, step_size: f64, t: f64, inductor_i: f64, capacitor_v_c: f64) {
         let v_in = *self.inbox.get("V_in").unwrap_or(&0.0);
-        self.trace.push(TraceRow { t: t * step_size, i: inductor_i, v_c: capacitor_v_c, v_in });
+        self.trace.push(TraceRow {
+            t: t * step_size,
+            i: inductor_i,
+            v_c: capacitor_v_c,
+            v_in,
+        });
     }
 }
 
@@ -157,12 +185,23 @@ pub fn run_rlc(cfg: RLCConfig) -> RLCResult {
         rec.inbox.insert("V_in".to_string(), v);
     }
 
-    RLCResult { config: cfg, ticks: n, trace: rec.trace }
+    RLCResult {
+        config: cfg,
+        ticks: n,
+        trace: rec.trace,
+    }
 }
 
 /// Underdamped default: ω0 ≈ 1 rad/s, α = R/(2L) ≈ 0.1 (mild damping).
 fn default_config(dt: f64) -> RLCConfig {
-    RLCConfig { r: 0.2, l: 1.0, c: 1.0, v_step: 1.0, t: 30.0, dt }
+    RLCConfig {
+        r: 0.2,
+        l: 1.0,
+        c: 1.0,
+        v_step: 1.0,
+        t: 30.0,
+        dt,
+    }
 }
 
 /// Entry point (TS top-level `main`). Env vars: `DTS`, `T`.
@@ -172,7 +211,10 @@ pub fn run() {
         .split(',')
         .filter_map(|s| s.trim().parse().ok())
         .collect();
-    let t = std::env::var("T").ok().and_then(|v| v.parse().ok()).unwrap_or(30.0_f64);
+    let t = std::env::var("T")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30.0_f64);
 
     println!("# Series RLC step response sweep");
     println!("#   R=0.2 ohm, L=1 H, C=1 F, V_step=1 V");
@@ -202,9 +244,20 @@ mod tests {
     /// At small dt the underdamped RLC settles toward V_C → V_step.
     #[test]
     fn settles_to_step_amplitude() {
-        let cfg = RLCConfig { r: 0.2, l: 1.0, c: 1.0, v_step: 1.0, t: 200.0, dt: 0.001 };
+        let cfg = RLCConfig {
+            r: 0.2,
+            l: 1.0,
+            c: 1.0,
+            v_step: 1.0,
+            t: 200.0,
+            dt: 0.001,
+        };
         let result = run_rlc(cfg);
         let last = *result.trace.last().unwrap();
-        assert!((last.v_c - 1.0).abs() < 0.05, "V_C={} not near step", last.v_c);
+        assert!(
+            (last.v_c - 1.0).abs() < 0.05,
+            "V_C={} not near step",
+            last.v_c
+        );
     }
 }

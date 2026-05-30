@@ -38,8 +38,35 @@ use crate::des::general::neural_network::{
     XorNeuralNetOptions,
 };
 use crate::des::general::ode::ODETrace;
-use crate::des::general::rl_environments::{eval_policy, Corridor, EvalPolicyOptions, EvalPolicyResult};
+use crate::des::general::des_base::environment::{PureEnvironment, StepResult};
+use crate::des::general::rl_environments::{
+    eval_policy, Corridor, Environment, EvalPolicyOptions, EvalPolicyResult,
+};
 use crate::des::shared::capabilities::SeededRandom;
+
+/// Bridges the pure [`Environment`] trait to the [`PureEnvironment<f64, usize>`]
+/// that the neural Q-learning runner requires (state indices carried as `f64`).
+/// TS passes the `Corridor` directly; Rust's neural runner is generic over a
+/// float state encoding, so we adapt the index-based environment here.
+struct PureEnvAdapter<E: Environment> {
+    env: E,
+}
+
+impl<E: Environment> PureEnvironment<f64, usize> for PureEnvAdapter<E> {
+    fn num_states(&self) -> usize {
+        self.env.num_states()
+    }
+    fn num_actions(&self) -> usize {
+        self.env.num_actions()
+    }
+    fn reset(&mut self) -> f64 {
+        self.env.reset() as f64
+    }
+    fn step(&mut self, state: f64, action: usize) -> StepResult<f64> {
+        let o = self.env.step(state as usize, action);
+        StepResult { next_state: o.next_state as f64, reward: o.reward, done: o.done }
+    }
+}
 
 // =============================================================================
 // Formatting helpers (JS parity).
@@ -283,7 +310,7 @@ impl DESModelRegistration<NeuralQCorridorParams, NeuralQCorridorResult>
         let hidden = p.hidden_layers.clone().filter(|h| !h.is_empty()).unwrap_or_default();
 
         let base = run_neural_q_learning_des(
-            Box::new(Corridor::new(length, 0)),
+            Box::new(PureEnvAdapter { env: Corridor::new(length, 0) }),
             NeuralQLearningRunParams {
                 num_episodes: p.num_episodes.unwrap_or(600),
                 alpha: p.alpha.unwrap_or(0.25),

@@ -234,6 +234,7 @@ impl DESModelRegistration<StochasticLPParams, StochasticLPRunResult> for Stochas
                 verbose: None,
                 reference_path: None,
                 reference_tol: None,
+                silent_if_missing: None,
             },
         );
 

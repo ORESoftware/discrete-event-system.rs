@@ -102,3 +102,6 @@ pub mod factory_floor_track3t;
 pub mod math_equation_input;
 pub mod smart_traffic_flow;
 pub mod traffic_flow;
+
+// Adapters: wrap solver/model modules as DES stations / universal-model specs.
+pub mod adapters;

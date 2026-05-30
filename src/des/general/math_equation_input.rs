@@ -96,12 +96,18 @@ pub struct Heat1DBlockParams {
     pub right_boundary: Option<f64>,
 }
 
-/// A node in the generated block graph (TS `BlockGraphNode`).
+/// A node in the generated block graph (TS `BlockGraphNode`). Field set mirrors
+/// the (unported) math-blocks node so downstream consumers such as
+/// `universal_model_spec` can read `inputs`/`output`/`expression`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct BlockGraphNode {
     pub id: String,
-    pub label: String,
     pub kind: String,
+    /// PORT NOTE: the TS node's `inputs` is `string[] | Record<...>`; modelled
+    /// here as the simple list-of-channel-names case.
+    pub inputs: Option<Vec<String>>,
+    pub output: Option<String>,
+    pub expression: Option<String>,
 }
 
 /// An edge in the generated block graph (TS `BlockGraphEdge`).
@@ -109,7 +115,9 @@ pub struct BlockGraphNode {
 pub struct BlockGraphEdge {
     pub from: String,
     pub to: String,
-    pub label: String,
+    pub from_channel: String,
+    pub to_channel: String,
+    pub signal: String,
 }
 
 /// A validation check entry (TS `{name; passed; group?}`).

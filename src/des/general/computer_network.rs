@@ -1684,6 +1684,68 @@ pub fn build_default_computer_network_problem() -> ComputerNetworkProblem {
     }
 }
 
+pub fn build_bottleneck_computer_network_problem() -> ComputerNetworkProblem {
+    ComputerNetworkProblem {
+        nodes: vec![
+            node("web-client", NetworkNodeKind::Host, 6000.0, 512),
+            node("telemetry-client", NetworkNodeKind::Host, 6000.0, 512),
+            node("edge", NetworkNodeKind::Switch, 12000.0, 1024),
+            node("wan-router", NetworkNodeKind::Router, 9000.0, 1024),
+            node("api-server", NetworkNodeKind::Host, 9000.0, 1024),
+        ],
+        links: vec![
+            link("web-edge", "web-client", "edge", 100.0, 1.0, 0.001, 256),
+            link("telemetry-edge", "telemetry-client", "edge", 100.0, 1.0, 0.001, 256),
+            link("edge-wan", "edge", "wan-router", 5.0, 25.0, 0.010, 96),
+            link("wan-api", "wan-router", "api-server", 100.0, 4.0, 0.002, 256),
+        ],
+        flows: vec![
+            NetworkFlowSpec {
+                id: "http-api".to_string(),
+                source: "web-client".to_string(),
+                destination: "api-server".to_string(),
+                protocol: Some(NetworkProtocol::Http),
+                rate_pps: 900.0,
+                packet_size_bytes: 1100.0,
+                start_ms: None,
+                end_ms: None,
+                max_packets: Some(1800),
+                ttl_hops: None,
+            },
+            NetworkFlowSpec {
+                id: "udp-telemetry".to_string(),
+                source: "telemetry-client".to_string(),
+                destination: "api-server".to_string(),
+                protocol: Some(NetworkProtocol::Udp),
+                rate_pps: 700.0,
+                packet_size_bytes: 900.0,
+                start_ms: None,
+                end_ms: None,
+                max_packets: Some(1400),
+                ttl_hops: None,
+            },
+            NetworkFlowSpec {
+                id: "tcp-bulk".to_string(),
+                source: "web-client".to_string(),
+                destination: "api-server".to_string(),
+                protocol: Some(NetworkProtocol::Tcp),
+                rate_pps: 350.0,
+                packet_size_bytes: 1400.0,
+                start_ms: None,
+                end_ms: None,
+                max_packets: Some(700),
+                ttl_hops: None,
+            },
+        ],
+        duration_ms: 2000.0,
+        dt_ms: 1.0,
+        routing_metric: Some(NetworkRoutingMetric::Latency),
+        drain_after_sources_ms: Some(4000.0),
+        max_packets_in_system: Some(10000),
+        sample_every_ms: Some(100.0),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

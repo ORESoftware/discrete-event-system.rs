@@ -42,6 +42,11 @@ pub mod animation;
 #[cfg(test)]
 mod integration_smoke;
 
+// Extensive cross-cutting tests: RNG determinism, statistical properties,
+// Decimal edge cases (compiled only under cfg(test)).
+#[cfg(test)]
+mod extensive_tests;
+
 // Ported TypeScript test suite (`src/des/test/`), compiled only for tests.
 #[cfg(test)]
 mod test;

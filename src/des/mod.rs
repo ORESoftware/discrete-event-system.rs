@@ -34,3 +34,6 @@ pub mod reference;
 pub mod signals;
 pub mod observers;
 pub mod visual;
+
+// Animation framework (frame recording, rendering, scene builders).
+pub mod animation;

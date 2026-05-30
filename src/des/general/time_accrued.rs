@@ -79,10 +79,63 @@ impl SimClock {
     }
 }
 
+// ── Global singleton (faithful 1:1 of the TS module-level `timeAccrued`) ──────
+//
+// The TypeScript module exposed a process-global mutable clock read ambiently by
+// dozens of files (e.g. `entity-moving/moving.ts` calls `des.getTimeAccrued()`
+// deep inside entity bookkeeping). Threading a `SimClock` through every one of
+// those call sites would diverge from the 1:1 port, so we mirror the original
+// global with a single-threaded `thread_local!` `SimClock` and the same
+// free-function API. Code that wants an isolated clock can still own a
+// [`SimClock`] directly.
+use std::cell::RefCell;
+
+thread_local! {
+    static GLOBAL_CLOCK: RefCell<SimClock> = RefCell::new(SimClock::new());
+}
+
+/// `getStepSize()` — the global clock's current step size.
+pub fn get_step_size() -> Decimal {
+    GLOBAL_CLOCK.with(|c| c.borrow().step_size())
+}
+
+/// `setStepSize(v)` — set the global clock's step size.
+pub fn set_step_size(v: Decimal) {
+    GLOBAL_CLOCK.with(|c| c.borrow_mut().set_step_size(v));
+}
+
+/// `bumpTimeAccruedByTimeStep(timeStep)` — advance the global clock.
+pub fn bump_time_accrued_by_time_step(time_step: Decimal) {
+    GLOBAL_CLOCK.with(|c| c.borrow_mut().bump(time_step));
+}
+
+/// `getTimeAccrued()` — read the global clock's accrued time.
+pub fn get_time_accrued() -> Decimal {
+    GLOBAL_CLOCK.with(|c| c.borrow().now())
+}
+
+/// Reset the global clock to a fresh state (test/runner setup convenience; the
+/// TS code relied on module re-evaluation between runs).
+pub fn reset_global_clock() {
+    GLOBAL_CLOCK.with(|c| *c.borrow_mut() = SimClock::new());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::des::shared::precision::bgn;
+
+    #[test]
+    fn global_clock_accrues_and_resets() {
+        reset_global_clock();
+        set_step_size(bgn(0.05));
+        for _ in 0..10 {
+            bump_time_accrued_by_time_step(get_step_size());
+        }
+        assert_eq!(get_time_accrued(), bgn(0.5));
+        reset_global_clock();
+        assert_eq!(get_time_accrued(), Decimal::ZERO);
+    }
 
     #[test]
     fn defaults_match_ts_singleton() {

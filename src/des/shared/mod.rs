@@ -8,3 +8,4 @@ pub mod result;
 pub mod transform;
 pub mod capabilities;
 pub mod linalg;
+pub mod precision;

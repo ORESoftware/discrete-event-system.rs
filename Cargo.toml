@@ -9,5 +9,16 @@ description = "Discrete-event system engine (Rust port of the TypeScript des-eng
 #   index.ts           ->  mod.rs
 # Foundation modules (des::shared::*) are dependency-free and ported first.
 [dependencies]
+# Exact base-10 decimal arithmetic for COMPOUND bookkeeping that must not drift
+# (the DES simulation clock, money/markets, routing probabilities, RV algebra) —
+# the faithful Rust analog of the TypeScript engine's `mathjs.BigNumber`.
+# `maths` enables powi/powd/exp/ln; `macros` provides the `dec!()` literal.
+# Numerical kernels (linalg/optim/ODE/LP/eigen/stats) deliberately stay on `f64`.
+rust_decimal = { version = "1.42.0", default-features = false, features = ["maths", "std"] }
+rust_decimal_macros = "1.40.0"
+# Exact rationals (p/q) for the rare spots the TS used `Fraction`.
+# `num-bigint-std` enables the arbitrary-precision `BigRational`.
+num-rational = { version = "0.4.2", default-features = false, features = ["num-bigint-std", "std"] }
+num-traits = { version = "0.2.19", default-features = false }
 
 [dev-dependencies]

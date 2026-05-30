@@ -41,6 +41,7 @@ pub mod root;
 pub mod run;
 
 // Intra-general dependency leaves (unblock dispatch, ip-mip, internal-solver, etc.).
+pub mod time_accrued;
 pub mod mcts;
 pub mod field_station;
 pub mod max_flow;

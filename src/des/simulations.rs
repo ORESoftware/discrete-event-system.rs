@@ -46,6 +46,7 @@ pub fn simulation_catalogue() -> Vec<(&'static str, fn())> {
         ("main_epidemic", crate::des::main_epidemic::run),
         ("main_epidemic_improved", crate::des::main_epidemic_improved::run),
         ("main_factmachine", crate::des::main_factmachine::run),
+        ("main_factmachine_markets", crate::des::main_factmachine_markets::run),
         ("main_factory_floor_track3t", crate::des::main_factory_floor_track3t::run),
         ("main_fibonacci_recursion", crate::des::main_fibonacci_recursion::run),
         ("main_from_json", crate::des::main_from_json::run),

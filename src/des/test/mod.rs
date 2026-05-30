@@ -18,7 +18,7 @@ pub mod domain_application_test;
 pub mod elevator_invariants_test;
 pub mod empirical_control_test;
 pub mod external_module_test;
-// pub mod factmachine_markets_test; // waits on main_factmachine_markets
+pub mod factmachine_markets_test;
 pub mod factmachine_math_test;
 pub mod factory_floor_track3t_test;
 pub mod feasibility_pipeline_test;

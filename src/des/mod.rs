@@ -83,6 +83,7 @@ pub mod main_empirical_control_report;
 pub mod main_epidemic;
 pub mod main_epidemic_improved;
 pub mod main_factmachine;
+pub mod main_factmachine_markets;
 pub mod main_factory_floor_track3t;
 pub mod main_fibonacci_recursion;
 pub mod main_from_json;

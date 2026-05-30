@@ -37,3 +37,10 @@ pub mod lqr_controller;
 pub mod adversarial_control;
 pub mod learning_optimization;
 pub mod smart_movable;
+
+// Tier 4: depend on rl_agent.
+pub mod actor_critic;
+pub mod linear_vfa;
+pub mod monte_carlo_rl;
+pub mod semi_mdp;
+pub mod multi_agent;

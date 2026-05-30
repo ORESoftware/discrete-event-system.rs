@@ -200,7 +200,8 @@ impl TSPSAOptimizer {
         rng: Option<Box<dyn RandomSource>>,
         accept_rule: AcceptRule,
     ) -> Self {
-        let rng: Box<dyn RandomSource> = rng.unwrap_or_else(|| Box::new(mulberry32(opts.seed)));
+        let rng: Box<dyn RandomSource> =
+            rng.unwrap_or_else(|| Box::new(mulberry32(opts.seed)) as Box<dyn RandomSource>);
         let mut opt = TSPSAOptimizer {
             core: StationCore::new(id),
             state: SingleStateState::new(opts.trace_stride.unwrap_or(1), rng),
@@ -521,7 +522,7 @@ fn run_single_state_des(
         inst.clone(),
         opts,
         true,
-        Some(Box::new(rng.clone())),
+        Some(Box::new(rng.clone()) as Box<dyn RandomSource>),
         accept_rule,
     )));
     let sink = Rc::new(RefCell::new(SingleStateSinkStation::<Tour>::new(format!("{prefix}-sink"))));
@@ -571,7 +572,7 @@ fn run_single_state_des(
 // Free helpers
 // =============================================================================
 
-fn initial_tour(inst: &TSPInstance, init_mode: InitMode, rng: &mut impl RandomSource) -> Tour {
+fn initial_tour(inst: &TSPInstance, init_mode: InitMode, rng: &mut dyn RandomSource) -> Tour {
     let n = inst.n;
     if init_mode == InitMode::NearestNeighbor {
         let start = (rng.next_float() * n as f64).floor() as usize;

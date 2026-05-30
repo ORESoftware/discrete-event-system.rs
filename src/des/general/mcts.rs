@@ -470,48 +470,68 @@ mod tests {
     use super::*;
     use crate::des::shared::capabilities::SeededRandom;
 
-    /// A length-`horizon` chain. Action 1 yields +1 reward, action 0 yields -1;
-    /// every step advances the state by one and ends once the horizon is hit.
-    struct ChainEnv {
+    /// Position on a line plus the step counter (the horizon clock).
+    #[derive(Clone)]
+    struct LineState {
+        pos: i64,
+        step: i64,
+    }
+
+    /// A walk on the integer line. Action 1 steps right (`pos + 1`), action 0
+    /// steps left (`pos - 1`); the per-step reward equals the new position, so
+    /// the higher-position branch yields strictly larger returns. The episode
+    /// ends after `horizon` steps. Because the action changes the resulting
+    /// STATE (not just the immediate reward), the subtree-return backup makes
+    /// the rewarding action's child genuinely more valuable.
+    struct LineWalk {
         horizon: i64,
     }
 
-    impl MCTSEnv<i64> for ChainEnv {
-        fn num_actions(&self, _s: &i64) -> usize {
+    impl MCTSEnv<LineState> for LineWalk {
+        fn num_actions(&self, _s: &LineState) -> usize {
             2
         }
-        fn apply_action(&self, s: &i64, a: usize) -> ApplyResult<i64> {
-            let reward = if a == 1 { 1.0 } else { -1.0 };
-            let next = s + 1;
-            ApplyResult { next, reward, done: next >= self.horizon }
+        fn apply_action(&self, s: &LineState, a: usize) -> ApplyResult<LineState> {
+            let pos = s.pos + if a == 1 { 1 } else { -1 };
+            let step = s.step + 1;
+            ApplyResult {
+                reward: pos as f64,
+                done: step >= self.horizon,
+                next: LineState { pos, step },
+            }
         }
-        fn is_terminal(&self, s: &i64) -> bool {
-            *s >= self.horizon
+        fn is_terminal(&self, s: &LineState) -> bool {
+            s.step >= self.horizon
         }
         fn rollout_depth(&self) -> usize {
             20
         }
     }
 
+    fn root() -> LineState {
+        LineState { pos: 0, step: 0 }
+    }
+
     #[test]
     fn prefers_the_rewarding_action() {
         let res = mcts(
-            Box::new(ChainEnv { horizon: 5 }),
-            0i64,
+            Box::new(LineWalk { horizon: 6 }),
+            root(),
             MCTSOptions { iterations: 300, ..Default::default() },
             SeededRandom::new(42),
         );
         assert_eq!(res.action, 1);
         assert_eq!(res.visits.len(), 2);
-        // The rewarding child should have a higher mean value than the other.
+        // The right-stepping child reaches higher positions, so its subtree
+        // return (the stored child value) is strictly larger.
         assert!(res.values[&1] > res.values[&0]);
     }
 
     #[test]
     fn root_child_visits_sum_to_iterations() {
         let res = mcts(
-            Box::new(ChainEnv { horizon: 5 }),
-            0i64,
+            Box::new(LineWalk { horizon: 6 }),
+            root(),
             MCTSOptions::default(),
             SeededRandom::new(1),
         );
@@ -524,8 +544,8 @@ mod tests {
     #[test]
     fn deterministic_for_fixed_seed() {
         let opts = MCTSOptions { iterations: 150, ..Default::default() };
-        let r1 = mcts(Box::new(ChainEnv { horizon: 6 }), 0i64, opts, SeededRandom::new(7));
-        let r2 = mcts(Box::new(ChainEnv { horizon: 6 }), 0i64, opts, SeededRandom::new(7));
+        let r1 = mcts(Box::new(LineWalk { horizon: 6 }), root(), opts, SeededRandom::new(7));
+        let r2 = mcts(Box::new(LineWalk { horizon: 6 }), root(), opts, SeededRandom::new(7));
         assert_eq!(r1.action, r2.action);
         assert_eq!(r1.visits, r2.visits);
         assert_eq!(r1.values, r2.values);

@@ -132,7 +132,8 @@ impl TSPGAOptimizer {
         defer_bootstrap: bool,
         rng: Option<Box<dyn RandomSource>>,
     ) -> Self {
-        let rng: Box<dyn RandomSource> = rng.unwrap_or_else(|| Box::new(mulberry32(opts.seed)));
+        let rng: Box<dyn RandomSource> =
+            rng.unwrap_or_else(|| Box::new(mulberry32(opts.seed)) as Box<dyn RandomSource>);
         let elite = opts.elitism.unwrap_or(2).min(opts.pop_size);
         let mut opt = TSPGAOptimizer {
             core: StationCore::new(id),
@@ -366,7 +367,7 @@ pub fn run_tsp_ga_des(
         inst.clone(),
         opts,
         true,
-        Some(Box::new(rng.clone())),
+        Some(Box::new(rng.clone()) as Box<dyn RandomSource>),
     )));
     let sink = Rc::new(RefCell::new(PopulationSinkStation::<Tour>::new("ga-sink")));
 

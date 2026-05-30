@@ -39,3 +39,12 @@ pub mod shortest_path_des;
 pub mod des_lp_bridge;
 pub mod root;
 pub mod run;
+
+// Intra-general dependency leaves (unblock dispatch, ip-mip, internal-solver, etc.).
+pub mod mcts;
+pub mod field_station;
+pub mod max_flow;
+pub mod network_flow;
+pub mod lp_des;
+pub mod ga_des;
+pub mod sa_des;

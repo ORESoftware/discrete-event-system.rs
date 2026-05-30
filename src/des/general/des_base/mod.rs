@@ -26,3 +26,14 @@ pub mod belief_state;
 pub mod runner;
 pub mod composite_station;
 pub mod transform_entity;
+
+// Tier 3: depend on tier-2 bases.
+pub mod rl_agent;
+pub mod environment;
+pub mod policy_gradient_agent;
+pub mod finite_horizon_dp;
+pub mod advanced_optimization;
+pub mod lqr_controller;
+pub mod adversarial_control;
+pub mod learning_optimization;
+pub mod smart_movable;

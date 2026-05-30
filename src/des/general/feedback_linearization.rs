@@ -221,7 +221,7 @@ impl ControllerBlock for FeedbackLinearizationController {
     fn control_law(&mut self, y: &[f64], _tick: usize, t: f64) -> Vec<f64> {
         let theta = y[0];
         let theta_d = y[1];
-        let rf = (&*self.reference)(t);
+        let rf = (*self.reference)(t);
         let e = theta - rf.theta;
         let ed = theta_d - rf.theta_dot;
         let v = rf.theta_ddot - self.kv * ed - self.kp * e;
@@ -242,6 +242,7 @@ impl ControllerBlock for FeedbackLinearizationController {
 
 /// Options for `run_feedback_linearization` (TS `FeedbackLinearizationOpts`).
 #[derive(Clone)]
+#[derive(Default)]
 pub struct FeedbackLinearizationOpts {
     /// Partial override of the pendulum parameters (each defaults individually).
     pub params: Option<PartialPendulumParams>,
@@ -260,21 +261,6 @@ pub struct FeedbackLinearizationOpts {
     pub num_steps: Option<usize>,
 }
 
-impl Default for FeedbackLinearizationOpts {
-    fn default() -> Self {
-        FeedbackLinearizationOpts {
-            params: None,
-            theta0: None,
-            theta_dot0: None,
-            reference: None,
-            kp: None,
-            kv: None,
-            u_bound: None,
-            dt: None,
-            num_steps: None,
-        }
-    }
-}
 
 /// Per-field optional override of `PendulumParams` (TS `Partial<PendulumParams>`).
 #[derive(Clone, Copy, Debug, Default)]

@@ -348,7 +348,7 @@ pub fn run() {
             .iter()
             .map(|col| match col {
                 Column::Runs(_, runs) => {
-                    let xs: Vec<f64> = runs.iter().map(|r| extract(r)).collect();
+                    let xs: Vec<f64> = runs.iter().map(&extract).collect();
                     pad_start(&format!("{} ± {}", fmt(mean(&xs), 1), fmt(stddev(&xs), 1)), col_width)
                 }
                 Column::Single(_, single) => pad_start(&fmt(extract(single), 1), col_width),

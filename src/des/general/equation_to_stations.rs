@@ -329,12 +329,12 @@ fn run_btcs(
         values.push(u.clone());
     }
     let final_values: Vec<f64> = sim.fields.iter().map(|f| f.borrow().value).collect();
-    let out = FieldSimulationResult {
+    
+    FieldSimulationResult {
         trace: FieldTrace { t, values },
         final_values,
         ticks: tick,
-    };
-    out
+    }
 }
 
 /// Build a 1-D PDE field simulation (TS `buildField1D`).

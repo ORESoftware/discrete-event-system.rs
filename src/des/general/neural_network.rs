@@ -546,7 +546,7 @@ pub fn run_supervised_neural_net_des<N: TrainableNeuralNetwork + Clone + 'static
         SupervisedNeuralNetworkStation::<N>::CH_TRAIN,
     );
 
-    let ticks_per_epoch = (dataset.len() + samples_per_tick - 1) / samples_per_tick;
+    let ticks_per_epoch = dataset.len().div_ceil(samples_per_tick);
     let max_ticks = params.epochs * ticks_per_epoch + 1000;
     let summary = run_iterative_des(
         vec![source as StationRef, trainer.clone() as StationRef],

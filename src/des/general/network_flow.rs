@@ -1445,7 +1445,7 @@ impl TrafficGridStation {
 
     fn snap_cars(&self) -> Vec<TrafficCarSnapshot> {
         let mut cars: Vec<&TrafficCar> = self.cars.values().collect();
-        cars.sort_by(|a, b| a.id.cmp(&b.id));
+        cars.sort_by_key(|a| a.id);
         cars.iter().map(|c| to_car_snapshot(c)).collect()
     }
 

@@ -1181,7 +1181,7 @@ fn adaptive_max_iter(params: &AdaptiveSimOptParams) -> Result<usize, Preconditio
         1.0,
         MAX_SAFE_INTEGER,
     )?;
-    let ceil_div = (params.budget + params.batch_size - 1) / params.batch_size;
+    let ceil_div = params.budget.div_ceil(params.batch_size);
     Ok(ceil_div + params.alternatives.len() + 2)
 }
 

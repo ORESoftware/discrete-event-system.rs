@@ -486,14 +486,14 @@ impl Transform<DispatchProblem, FluidLpPolicyResult> for PolicyFluidLP {
             seed,
             rng: mulberry32(seed),
         };
-        let out = FluidLpPolicyResult {
+        
+        FluidLpPolicyResult {
             policy,
             x,
             bottleneck_load: sol.x[k * m],
             solver: sol.solver.clone(),
             iters: sol.iters.unwrap_or(0),
-        };
-        out
+        }
     }
 }
 
@@ -699,14 +699,14 @@ impl Transform<DispatchProblem, MdpViPolicyResult> for PolicyMDPVI {
             m,
             k,
         };
-        let out = MdpViPolicyResult {
+        
+        MdpViPolicyResult {
             policy,
             v: vi.v.clone(),
             q: q_for_result,
             q_max,
             num_states,
-        };
-        out
+        }
     }
 }
 

@@ -263,6 +263,7 @@ const E7: f64 = -1.0 / 40.0;
 
 /// Dormand-Prince RK45 with adaptive step size. CONFIG (tolerances, step-size
 /// bounds, step cap) lives on the struct; the IVP is the `transform` input.
+#[derive(Default)]
 pub struct RK45Integrator {
     pub opts: RK45Options,
 }
@@ -273,11 +274,6 @@ impl RK45Integrator {
     }
 }
 
-impl Default for RK45Integrator {
-    fn default() -> Self {
-        RK45Integrator { opts: RK45Options::default() }
-    }
-}
 
 impl<F> Transform<IVP<F>, ODETrace> for RK45Integrator
 where
@@ -486,7 +482,7 @@ where
 /// a singular matrix, matching the TS invariant violation (`throw`).
 fn solve_linear(a: &[Vec<f64>], b: &[f64]) -> Vec<f64> {
     let n = b.len();
-    let mut m: Vec<Vec<f64>> = a.iter().map(|r| r.clone()).collect();
+    let mut m: Vec<Vec<f64>> = a.iter().cloned().collect();
     let mut x = b.to_vec();
     for i in 0..n {
         let mut p = i;

@@ -349,9 +349,9 @@ pub fn run_radar_tracking(
     let final_cov_trace = p_final[0][0] + p_final[1][1];
 
     Ok(RadarTrackingResult {
-        true_trajectory: true_traj.iter().map(|x| x.clone()).collect(),
-        measurements: meas.iter().map(|y| y.clone()).collect(),
-        estimates: est.iter().map(|x| x.clone()).collect(),
+        true_trajectory: true_traj.iter().cloned().collect(),
+        measurements: meas.iter().cloned().collect(),
+        estimates: est.iter().cloned().collect(),
         rmse_pos,
         rmse_meas_pos,
         final_cov_trace,

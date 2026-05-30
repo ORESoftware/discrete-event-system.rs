@@ -90,7 +90,7 @@ impl Entity for EntitySplitter {
         self.bi.entity.time_step_count += 1;
 
         let conns = self.bi.get_out_connections();
-        if conns.len() < 1 {
+        if conns.is_empty() {
             eprintln!(
                 "[splitter:{}] has no out-connections; queued items cannot be broadcast downstream.",
                 self.bi.entity.id

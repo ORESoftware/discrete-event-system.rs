@@ -173,7 +173,7 @@ impl<'a> Transform<&'a [f64], Vec<f64>> for DiscreteConvolveSelf {
 /// # Panics
 /// Panics unless `0 ≤ p ≤ 1`.
 pub fn bernoulli_pmf(p: f64) -> Vec<f64> {
-    if !(p >= 0.0 && p <= 1.0) {
+    if !(0.0..=1.0).contains(&p) {
         panic!("bad p {p}");
     }
     vec![1.0 - p, p]
@@ -194,7 +194,7 @@ impl BinomialPMF {
 impl Transform<u32, Vec<f64>> for BinomialPMF {
     fn transform(&self, n: u32) -> Vec<f64> {
         let p = self.p;
-        if !(p >= 0.0 && p <= 1.0) {
+        if !(0.0..=1.0).contains(&p) {
             panic!("bad p {p}");
         }
         if n == 0 {
@@ -245,7 +245,7 @@ impl<'a> Transform<&'a [f64], Vec<f64>> for PoissonBinomialPMF {
         let mut pmf: Vec<f64> = vec![1.0];
         for i in 0..probs.len() {
             let p = probs[i];
-            if !(p >= 0.0 && p <= 1.0) {
+            if !(0.0..=1.0).contains(&p) {
                 panic!("bad p[{i}] {p}");
             }
             let mut next = vec![0.0; pmf.len() + 1];

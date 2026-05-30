@@ -456,7 +456,7 @@ fn route_path_points(layout: &WarehouseLayout, from_id: &str, to_id: &str, g: &P
         cur = prev.get(&c).cloned().flatten();
     }
     ids.reverse();
-    ids.iter().filter_map(|id| by_id.get(id.as_str()).map(|s| station_point(*s, g))).collect()
+    ids.iter().filter_map(|id| by_id.get(id.as_str()).map(|s| station_point(s, g))).collect()
 }
 
 #[derive(Clone, Debug)]
@@ -468,14 +468,14 @@ struct ReserveRow {
 
 fn push_opt(points: &mut Vec<StationDefinition>, s: Option<&StationDefinition>) {
     if let Some(s) = s {
-        if points.last().map_or(true, |last| last.id != s.id) {
+        if points.last().is_none_or(|last| last.id != s.id) {
             points.push(s.clone());
         }
     }
 }
 
 fn push_point(points: &mut Vec<StationDefinition>, station: &StationDefinition) {
-    if points.last().map_or(true, |last| last.id != station.id) {
+    if points.last().is_none_or(|last| last.id != station.id) {
         points.push(station.clone());
     }
 }
@@ -512,10 +512,10 @@ fn row_corridor_path(layout: &WarehouseLayout, from: &StationDefinition, to: &St
             append_row_from_main(&mut points, &row.stations, to);
             if to.id == staging.id {
                 push_opt(&mut points, Some(staging));
-            } else if receiving.map_or(false, |r| to.id == r.id) {
+            } else if receiving.is_some_and(|r| to.id == r.id) {
                 push_opt(&mut points, Some(staging));
                 push_opt(&mut points, receiving);
-            } else if to_reserve.is_none() && to.id != staging.id && !receiving.map_or(false, |r| to.id == r.id) {
+            } else if to_reserve.is_none() && to.id != staging.id && !receiving.is_some_and(|r| to.id == r.id) {
                 push_opt(&mut points, Some(to));
             }
         }
@@ -523,7 +523,7 @@ fn row_corridor_path(layout: &WarehouseLayout, from: &StationDefinition, to: &St
     }
 
     push_opt(&mut points, Some(from));
-    if receiving.map_or(false, |r| from.id == r.id) {
+    if receiving.is_some_and(|r| from.id == r.id) {
         push_opt(&mut points, Some(staging));
     }
     if to.kind == "sink" || to.id == main.id {
@@ -537,7 +537,7 @@ fn row_corridor_path(layout: &WarehouseLayout, from: &StationDefinition, to: &St
 
     if from.id == main.id {
         append_row_from_main(&mut points, &row.stations, to);
-        if receiving.map_or(false, |r| to.id == r.id) {
+        if receiving.is_some_and(|r| to.id == r.id) {
             push_opt(&mut points, Some(staging));
             push_opt(&mut points, receiving);
         } else if to.id == staging.id {

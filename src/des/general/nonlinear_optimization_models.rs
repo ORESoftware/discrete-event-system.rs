@@ -626,12 +626,12 @@ fn backtracking(x: &[f64], p: &[f64], f: fn(&[f64]) -> f64, g: &[f64]) -> f64 {
 fn bfgs_inverse_update(h: &[Vec<f64>], s: &[f64], y: &[f64]) -> Vec<Vec<f64>> {
     let ys = dot(y, s);
     if ys <= 1e-12 {
-        return h.iter().map(|row| row.clone()).collect();
+        return h.iter().cloned().collect();
     }
     let rho = 1.0 / ys;
     let hy = vec![dot(&h[0], y), dot(&h[1], y)];
     let y_hy = dot(y, &hy);
-    let mut out: Vec<Vec<f64>> = h.iter().map(|row| row.clone()).collect();
+    let mut out: Vec<Vec<f64>> = h.iter().cloned().collect();
     for i in 0..2 {
         for j in 0..2 {
             out[i][j] += (1.0 + y_hy * rho) * rho * s[i] * s[j] - rho * (s[i] * hy[j] + hy[i] * s[j]);

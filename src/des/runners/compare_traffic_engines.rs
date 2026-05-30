@@ -472,7 +472,7 @@ fn run_uxsim_inner(
         &dir,
     )?;
     let text = fs::read_to_string(&output_file).map_err(|e| e.to_string())?;
-    let stats = parse_json(&text).map_err(|e| e)?;
+    let stats = parse_json(&text)?;
     let g = |k: &str| stats.get(k).and_then(|v| v.as_f64());
     Ok(EngineStats {
         engine: "UXsim".to_string(),

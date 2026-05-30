@@ -328,22 +328,27 @@ impl StatefulTokenRegistry {
     /// without re-counting (faithful to the TS dedup-by-id behaviour).
     pub fn track<T: TrackedToken + 'static>(&mut self, t: T) {
         let id = t.lineage().token_id.clone();
-        if self.tokens.contains_key(&id) {
-            self.tokens.insert(id, Box::new(t));
-            return;
-        }
         let kind = t.kind().to_string();
         let mode = t.state_mode();
         let generation = t.lineage().generation;
-        self.tokens.insert(id, Box::new(t));
-        self.created += 1;
-        *self.by_kind.entry(kind).or_insert(0) += 1;
-        if mode == TokenStateMode::Stateful {
-            self.stateful += 1;
-        } else {
-            self.stateless += 1;
+        match self.tokens.entry(id) {
+            std::collections::hash_map::Entry::Occupied(mut e) => {
+                // Re-tracking an existing id updates the stored handle without
+                // re-counting (faithful to the TS dedup-by-id behaviour).
+                e.insert(Box::new(t));
+            }
+            std::collections::hash_map::Entry::Vacant(v) => {
+                v.insert(Box::new(t));
+                self.created += 1;
+                *self.by_kind.entry(kind).or_insert(0) += 1;
+                if mode == TokenStateMode::Stateful {
+                    self.stateful += 1;
+                } else {
+                    self.stateless += 1;
+                }
+                self.max_generation = self.max_generation.max(generation);
+            }
         }
-        self.max_generation = self.max_generation.max(generation);
     }
 
     pub fn snapshot(&self) -> StatefulTokenRegistryStats {

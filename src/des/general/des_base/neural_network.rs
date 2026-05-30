@@ -295,7 +295,7 @@ impl<N: TrainableNeuralNetwork + 'static> DESStation for SupervisedNeuralNetwork
                 meta: sample.meta.clone(),
             };
             self.base.core_mut().emit(Rc::new(result), Self::CH_TRAINING_RESULT);
-            if self.snapshot_every > 0 && self.training_step % self.snapshot_every == 0 {
+            if self.snapshot_every > 0 && self.training_step.is_multiple_of(self.snapshot_every) {
                 let snapshot = NeuralSnapshotToken {
                     training_step: self.training_step,
                     loss: Some(r.loss),

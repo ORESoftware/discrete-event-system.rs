@@ -184,7 +184,7 @@ fn collect_pop(rs: &[RunResult], c: &str) -> Vec<f64> {
 }
 
 fn kernel_stats<F: Fn(&RunResult) -> f64>(rs: &[RunResult], extractor: F) -> String {
-    let xs: Vec<f64> = rs.iter().map(|r| extractor(r)).collect();
+    let xs: Vec<f64> = rs.iter().map(extractor).collect();
     pad_start(&format!("{} ± {}", fmt(mean(&xs), 4), fmt(stddev(&xs), 4)), 20)
 }
 

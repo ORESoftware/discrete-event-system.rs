@@ -155,7 +155,7 @@ fn event_path(ev: Option<&IPMIPTraceEvent>) -> Vec<&'static str> {
         "cut" => vec!["source", "ip-search-controller", "ip-lp-relaxation", "ip-cut-generator", "ip-node-decision", "ip-search-controller"],
         "branch" => vec!["source", "ip-search-controller", "ip-lp-relaxation", "ip-node-decision", "ip-search-controller"],
         "incumbent" => vec!["source", "ip-search-controller", "ip-lp-relaxation", "ip-node-decision", "ip-incumbent", "sink"],
-        "prune" if ev.reason.as_deref().map_or(false, |r| r.contains("incumbent")) => {
+        "prune" if ev.reason.as_deref().is_some_and(|r| r.contains("incumbent")) => {
             vec!["source", "ip-search-controller", "ip-lp-relaxation", "ip-rounding-repair", "ip-incumbent", "ip-node-decision", "sink"]
         }
         _ => vec!["source", "ip-search-controller", "ip-lp-relaxation", "ip-node-decision", "sink"],

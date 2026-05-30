@@ -262,7 +262,7 @@ impl DefiniteFiniteSource {
     }
 
     pub fn is_done_emitting(&self) -> bool {
-        self.queue.len() < 1
+        self.queue.is_empty()
     }
 
     /// `getNextValue()` — dequeue the next input value.
@@ -331,7 +331,7 @@ impl Entity for DefiniteFiniteSource {
             }
         }
 
-        if self.queue.len() < 1 {
+        if self.queue.is_empty() {
             return;
         }
 

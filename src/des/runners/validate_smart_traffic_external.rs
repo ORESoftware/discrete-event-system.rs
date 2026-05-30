@@ -335,7 +335,7 @@ impl Driver {
             let ratio = internal.mean_travel_time_sec / external.mean_travel_time_sec;
             self.check(
                 "SUMO and DES mean travel times are comparable order-of-magnitude",
-                ratio >= 0.2 && ratio <= 5.0,
+                (0.2..=5.0).contains(&ratio),
                 Some(format!("internal={:.3} external={:.3} ratio={:.3}", internal.mean_travel_time_sec, external.mean_travel_time_sec, ratio)),
             );
         }

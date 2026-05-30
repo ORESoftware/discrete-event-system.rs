@@ -985,7 +985,7 @@ impl ComputerNetworkStation {
                     deliver_packet(delivered, packet, &node_id, time_ms);
                     continue;
                 }
-                if packet.hops.len() as i64 - 1 >= packet.ttl_hops {
+                if packet.hops.len() as i64 > packet.ttl_hops {
                     node.dropped_packets += 1;
                     drop_into(dropped, packet, PacketDropReason::TtlExpired, &node_id, time_ms);
                     continue;

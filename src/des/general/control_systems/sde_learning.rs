@@ -222,7 +222,7 @@ impl SdeMaximumLikelihoodEstimator {
 
     fn determinant(&self, m: &Matrix) -> f64 {
         let n = m.len();
-        let mut a: Matrix = m.iter().map(|r| r.clone()).collect();
+        let mut a: Matrix = m.iter().cloned().collect();
         let mut det = 1.0;
         for col in 0..n {
             let mut piv = col;

@@ -493,7 +493,7 @@ impl DESModelRegistration<InternalSolverRunParams, InternalSolverRunResult>
                 }
                 i += stride;
             }
-            if let Some(l) = logger.as_deref_mut() {
+            if let Some(l) = logger {
                 l.log(LogJson::Object(vec![
                     ("kind".to_string(), LogJson::String("internal-solver-finish".to_string())),
                     ("level".to_string(), LogJson::String("info".to_string())),

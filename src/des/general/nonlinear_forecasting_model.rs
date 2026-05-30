@@ -1287,7 +1287,7 @@ fn fine_tune_equation(scenario: &ForecastScenario, discovery: &VariableDiscovery
     let all_rows = &discovery.rows;
     let target = ridge_fit(&discovery.selected_feature_indices, &scenario.feature_candidates, all_rows, scenario.params.ridge);
     let mut start_coefficients = vec![mean(&all_rows.iter().map(|row| row.target).collect::<Vec<_>>())];
-    start_coefficients.extend(std::iter::repeat(0.0).take(discovery.selected_feature_indices.len()));
+    start_coefficients.extend(std::iter::repeat_n(0.0, discovery.selected_feature_indices.len()));
     let mut trace: Vec<FineTuneTraceRow> = Vec::new();
     for iter in 0..=scenario.params.fine_tune_iterations {
         let alpha = if iter == scenario.params.fine_tune_iterations {

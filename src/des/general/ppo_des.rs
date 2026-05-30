@@ -331,7 +331,7 @@ impl PolicyUpdateStation for PPOClipUpdateStation {
         }
         let n = buf.len();
         // 1. GAE advantages and returns-to-go.
-        let (mut adv, ret) = compute_advantages(&*agent, &buf, opts.gamma, opts.lambda);
+        let (mut adv, ret) = compute_advantages(&agent, &buf, opts.gamma, opts.lambda);
         if opts.normalise_advantage.unwrap_or(true) {
             let mean = adv.iter().sum::<f64>() / n as f64;
             let var = adv.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n as f64;
@@ -348,7 +348,7 @@ impl PolicyUpdateStation for PPOClipUpdateStation {
             while mb < n {
                 let end = n.min(mb + opts.mini_batch_size);
                 for &i in &idx[mb..end] {
-                    apply_one_sample_update(&mut *agent, &buf[i], adv[i], ret[i], &opts);
+                    apply_one_sample_update(&mut agent, &buf[i], adv[i], ret[i], &opts);
                 }
                 mb += opts.mini_batch_size;
             }

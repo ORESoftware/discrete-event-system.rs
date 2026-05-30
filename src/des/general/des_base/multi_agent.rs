@@ -88,6 +88,7 @@ pub trait JointEnvironment<S = f64, A = usize> {
 }
 
 /// Options for constructing a [`JointEnvStation`] (the TS inline `opts` object).
+#[derive(Default)]
 pub struct JointEnvStationOpts {
     /// Number of episodes to run before the station goes quiescent. TS default
     /// `Infinity`.
@@ -96,11 +97,6 @@ pub struct JointEnvStationOpts {
     pub max_steps_per_episode: Option<usize>,
 }
 
-impl Default for JointEnvStationOpts {
-    fn default() -> Self {
-        JointEnvStationOpts { num_episodes: None, max_steps_per_episode: None }
-    }
-}
 
 /// A single tick of the joint env: deal joint state to every agent, collect
 /// every agent's action, apply `env.step`, dispatch transitions + new states.
@@ -385,7 +381,7 @@ impl<S: Clone + 'static, A: Clone + 'static> MultiAgentSystem<S, A> {
                 per_agent[i].push(ep[i]);
             }
         }
-        let reward_history: Vec<Vec<f64>> = reward_hist.iter().map(|r| r.clone()).collect();
+        let reward_history: Vec<Vec<f64>> = reward_hist.iter().cloned().collect();
         MultiAgentRunResult {
             ticks: summary.ticks,
             reward_history,

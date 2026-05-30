@@ -238,7 +238,7 @@ impl ControllerBlock for MRACController {
     }
     fn control_law(&mut self, y: &[f64], _tick: usize, t: f64) -> Vec<f64> {
         let x = y[0];
-        let r = (&*self.reference)(t);
+        let r = (*self.reference)(t);
         // 1. Step the reference model first to compute x_m(t).
         let xm = self.ref_model.step(r);
         // 2. Tracking error e = x - x_m.
@@ -262,6 +262,7 @@ impl ControllerBlock for MRACController {
 /// Options for `run_mrac` (TS `MRACOpts`). `reference` defaults to a square wave
 /// of amplitude 1 and period 4 s.
 #[derive(Clone)]
+#[derive(Default)]
 pub struct MRACOpts {
     /// True (hidden) plant parameter a. Default 1 (unstable plant).
     pub a: Option<f64>,
@@ -282,23 +283,6 @@ pub struct MRACOpts {
     pub u_bound: Option<f64>,
 }
 
-impl Default for MRACOpts {
-    fn default() -> Self {
-        MRACOpts {
-            a: None,
-            b: None,
-            am: None,
-            bm: None,
-            x0: None,
-            xm0: None,
-            gamma: None,
-            reference: None,
-            dt: None,
-            num_steps: None,
-            u_bound: None,
-        }
-    }
-}
 
 /// Result of an MRAC run (TS `MRACResult extends ClosedLoopResult`, flattened).
 #[derive(Clone, Debug)]
@@ -379,7 +363,7 @@ fn run_mrac_impl(opts: MRACOpts) -> Result<MRACResult, PreconditionError> {
     // Reconstruct r history.
     let mut r_hist: Vec<f64> = Vec::with_capacity(num_steps);
     for k in 0..num_steps {
-        r_hist.push((&*reference)(k as f64 * dt));
+        r_hist.push((*reference)(k as f64 * dt));
     }
 
     let final_theta = [

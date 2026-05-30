@@ -72,6 +72,7 @@ pub struct SecondOrderProblem<F, G, H> {
 
 /// Gradient descent with Armijo backtracking line search.
 ///   x_{k+1} = x_k − α_k · ∇f(x_k)
+#[derive(Default)]
 pub struct GradientDescent {
     pub opts: OptimOptions,
 }
@@ -82,13 +83,6 @@ impl GradientDescent {
     }
 }
 
-impl Default for GradientDescent {
-    fn default() -> Self {
-        GradientDescent {
-            opts: OptimOptions::default(),
-        }
-    }
-}
 
 impl<F, G> Transform<FirstOrderProblem<F, G>, OptimResult> for GradientDescent
 where

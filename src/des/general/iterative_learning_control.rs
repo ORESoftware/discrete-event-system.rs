@@ -511,7 +511,7 @@ pub fn run_iterative_learning_control(
 
     IterativeLearningControlResult {
         reference_trajectory: reference.clone(),
-        trial_summaries: sink_ref.results.iter().map(|r| to_summary(&**r)).collect(),
+        trial_summaries: sink_ref.results.iter().map(|r| to_summary(r)).collect(),
         initial_rms_error: first.rms_error,
         final_rms_error: last.rms_error,
         improvement_ratio: last.rms_error / first.rms_error.max(1e-12),

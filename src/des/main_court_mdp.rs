@@ -184,11 +184,11 @@ fn step_case(c: &mut Case, policy: &dyn Policy, stage_rng: &mut SeededRandom) ->
     let ol = outcomes(state_id, action);
     let r = stage_rng.next_float();
     let mut cum = 0.0;
-    let mut chosen = ol[0].clone();
+    let mut chosen = ol[0];
     for o in &ol {
         cum += o.prob;
         if r <= cum {
-            chosen = o.clone();
+            chosen = *o;
             break;
         }
     }
@@ -361,7 +361,7 @@ pub fn run() {
     println!();
     println!("# Optimal action distribution by stage (from π*):");
     for stage in 0..4 {
-        let mut counts = vec![0usize; N_ACTIONS];
+        let mut counts = [0usize; N_ACTIONS];
         let mut total = 0;
         for s in 0..864usize {
             if let Some(cs) = decode(s) {

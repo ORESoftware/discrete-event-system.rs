@@ -1894,7 +1894,7 @@ fn solve_incremental_relaxation(p: &IPMIPProblem, node: &IpNode, lp_max_iters: u
 }
 
 fn node_to_lp_problem(p: &IPMIPProblem, node: &IpNode) -> LPProblem {
-    let mut a: Vec<Vec<f64>> = p.a.iter().map(|r| r.clone()).collect();
+    let mut a: Vec<Vec<f64>> = p.a.iter().cloned().collect();
     let mut b = p.b.clone();
     for c in &node.constraints {
         a.push(c.coefs.clone());
@@ -1920,7 +1920,7 @@ struct RootRows {
 }
 
 fn root_incremental_rows(p: &IPMIPProblem) -> RootRows {
-    let mut a: Vec<Vec<f64>> = p.a.iter().map(|r| r.clone()).collect();
+    let mut a: Vec<Vec<f64>> = p.a.iter().cloned().collect();
     let mut b = p.b.clone();
     let mut names: Vec<String> = match &p.con_names {
         Some(n) => n.clone(),

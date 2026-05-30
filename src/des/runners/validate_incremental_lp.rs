@@ -159,7 +159,7 @@ fn solve_static(s: &State) -> (Vec<f64>, f64, String) {
     let lp = LpProblem {
         sense: s.sense,
         c: s.c.clone(),
-        a_ub: s.a.iter().map(|r| r.clone()).collect(),
+        a_ub: s.a.iter().cloned().collect(),
         b_ub: s.b.clone(),
     };
     let sol = solve_lp_internal(&lp);

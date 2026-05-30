@@ -213,15 +213,11 @@ impl Entity for ProbabilityDecisionEntity {
 
             let target = out_conn.borrow().get_target();
             let routed = match target {
-                Some(t) => {
-                    if t.borrow_mut().accept_item(item.clone()) {
-                        t.borrow_mut().take_item(item.clone());
-                        true
-                    } else {
-                        false
-                    }
+                Some(t) if t.borrow_mut().accept_item(item.clone()) => {
+                    t.borrow_mut().take_item(item.clone());
+                    true
                 }
-                None => false,
+                _ => false,
             };
             if !routed {
                 rejected.push(item);

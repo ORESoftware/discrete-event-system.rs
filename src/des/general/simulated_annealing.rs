@@ -279,7 +279,7 @@ impl<S: Clone + 'static> SAOptimizer<S> {
 
     fn record_tick_event(&mut self, k: usize) {
         let stride = self.opt_state().trace_stride;
-        if stride != 0 && k % stride == 0 {
+        if stride != 0 && k.is_multiple_of(stride) {
             self.temperature_history.push(self.current_t.get());
         }
         if self.record_trace {

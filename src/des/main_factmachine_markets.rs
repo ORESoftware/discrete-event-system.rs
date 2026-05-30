@@ -2165,7 +2165,7 @@ fn locale_int(n: f64) -> String {
     let len = digits.len();
     let mut out = String::new();
     for (idx, ch) in digits.chars().enumerate() {
-        if idx > 0 && (len - idx) % 3 == 0 {
+        if idx > 0 && (len - idx).is_multiple_of(3) {
             out.push(',');
         }
         out.push(ch);

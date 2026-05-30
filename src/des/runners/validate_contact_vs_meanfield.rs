@@ -134,18 +134,16 @@ impl Population {
         // E → I and I → R (snapshot-driven).
         for i in 0..self.people.len() {
             match state_now[i] {
-                SeirState::E => {
-                    if self.rng.next_float() < 1.0 - (-self.params.sigma * dt).exp() {
+                SeirState::E
+                    if self.rng.next_float() < 1.0 - (-self.params.sigma * dt).exp() => {
                         self.people[i].state = SeirState::I;
                         self.people[i].t_infectious = (t as f64 + 1.0) * dt;
                     }
-                }
-                SeirState::I => {
-                    if self.rng.next_float() < 1.0 - (-self.params.gamma * dt).exp() {
+                SeirState::I
+                    if self.rng.next_float() < 1.0 - (-self.params.gamma * dt).exp() => {
                         self.people[i].state = SeirState::R;
                         self.people[i].t_recovered = (t as f64 + 1.0) * dt;
                     }
-                }
                 _ => {}
             }
         }
@@ -216,15 +214,13 @@ impl Population {
                 } else if my_state == SeirState::I
                     && part_state == SeirState::S
                     && self.rng.next_float() < self.params.p_transmit
-                {
-                    if self.people[other].state == SeirState::S {
+                    && self.people[other].state == SeirState::S {
                         self.people[i].offspring += 1.0;
                         self.people[other].state = SeirState::E;
                         self.people[other].t_exposed = (t as f64 + 1.0) * dt;
                         self.people[other].infected_by = i as i64;
                         self.total_transmissions += 1.0;
                     }
-                }
             }
         }
     }

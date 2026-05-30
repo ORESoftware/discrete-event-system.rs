@@ -317,7 +317,7 @@ pub fn solve_inventory_dp(p: &InventoryProblem, seed: Option<u32>) -> InventoryD
     );
 
     let st = station.borrow();
-    let v: Vec<Vec<f64>> = st.dp.v.iter().map(|row| row.clone()).collect();
+    let v: Vec<Vec<f64>> = st.dp.v.iter().cloned().collect();
     let policy: Vec<Vec<usize>> = st
         .dp
         .policy

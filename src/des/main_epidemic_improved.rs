@@ -308,7 +308,7 @@ pub fn run() {
         }
     };
     let compartment_population =
-        |c: &str| -> usize { compartment_groups(c).into_iter().map(|sid| station_population(sid)).sum() };
+        |c: &str| -> usize { compartment_groups(c).into_iter().map(&station_population).sum() };
     let cumulative_deaths = || -> i64 { sink.borrow().destroyed_count };
 
     let mut trajectory: Vec<HashMap<String, f64>> = Vec::new();
@@ -316,7 +316,7 @@ pub fn run() {
     let mut last_processor: HashMap<String, String> = HashMap::new();
     let mut absorbed: HashSet<String> = HashSet::new();
 
-    let program_list: Vec<Stn> = order.iter().copied().map(|id| node_of(id)).collect();
+    let program_list: Vec<Stn> = order.iter().copied().map(node_of).collect();
     let mut list = program_list.clone();
     let mut rng = SeededRandom::new(0x00BEEF02);
 

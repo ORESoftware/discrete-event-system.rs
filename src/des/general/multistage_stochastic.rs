@@ -629,7 +629,7 @@ impl FixedPointIterationStation<SDDPState> for SDDPStation {
         let upper_bound = self.cut_pools[0].evaluate(&[self.p.initial_inventory]).expect("evaluate");
         let mut policy_value: Option<f64> = None;
         let mut gap_to_exact: Option<f64> = None;
-        if iter % self.evaluate_policy_every == 0 || iter >= self.fp.max_iter || self.exact_objective.is_some() {
+        if iter.is_multiple_of(self.evaluate_policy_every) || iter >= self.fp.max_iter || self.exact_objective.is_some() {
             let pv = evaluate_policy_exact(&self.p, &self.cut_pools);
             policy_value = Some(pv);
             gap_to_exact = self.exact_objective.map(|exact| exact - pv);

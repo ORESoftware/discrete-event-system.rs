@@ -392,7 +392,7 @@ pub fn run_logistic_regression_sgd(params: LogisticRegressionSGDParams) -> Gradi
     let topology = gradient_topology("logistic-gradient-update");
     let learner_ref = learner.borrow();
     let trace_ref = trace.borrow();
-    gradient_training_result(&samples, &*learner_ref, &*trace_ref, topology, |p, i| logistic_predict(p, i))
+    gradient_training_result(&samples, &*learner_ref, &trace_ref, topology, logistic_predict)
 }
 
 // ── BackpropMLPHook ───────────────────────────────────────────────────────────
@@ -494,7 +494,7 @@ pub fn run_backprop_mlp_classifier(params: BackpropMLPParams) -> GradientTrainin
     let hook_ref = learner_ref.hook();
     // `p` is the learner's current parameters (passed in by `gradient_training_result`),
     // matching the TS `learner.predict(input)` which uses `getParameters()`.
-    gradient_training_result(&samples, &*learner_ref, &*trace_ref, topology, |p, input| hook_ref.forward(p, input).1)
+    gradient_training_result(&samples, &*learner_ref, &trace_ref, topology, |p, input| hook_ref.forward(p, input).1)
 }
 
 // ── Shared helpers ────────────────────────────────────────────────────────────

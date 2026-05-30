@@ -252,8 +252,8 @@ impl DESStation for NewsvendorStation {
         let day = self.days_simulated;
         let d = sample_demand(&self.params.demand, &mut self.rng);
         let sold = self.q.min(d);
-        let leftover = if self.q > d { self.q - d } else { 0 };
-        let lost = if d > self.q { d - self.q } else { 0 };
+        let leftover = self.q.saturating_sub(d);
+        let lost = d.saturating_sub(self.q);
         let pi = profit(self.q, d, &self.params);
         self.total_profit += pi;
         self.unmet_demand += lost as f64;

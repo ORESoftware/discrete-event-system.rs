@@ -54,7 +54,7 @@ fn to_locale_usize(n: usize) -> String {
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     let len = bytes.len();
     for (i, b) in bytes.iter().enumerate() {
-        if i > 0 && (len - i) % 3 == 0 {
+        if i > 0 && (len - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(*b as char);

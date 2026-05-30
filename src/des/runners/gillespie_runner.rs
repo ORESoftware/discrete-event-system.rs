@@ -108,13 +108,10 @@ impl<'a> Sim<'a> {
         let mu = &self.mu;
         let n = &self.n;
         match idx {
-            0 => {
-                if self.source_created < self.config.source_cap && !self.phase2 {
+            0
+                if self.source_created < self.config.source_cap && !self.phase2 => {
                     1.0 / mu.arrival
-                } else {
-                    0.0
                 }
-            }
             1 => n.s / mu.s,
             2 => n.e / mu.e,
             3 => n.i_p * p.asymptomatic_share / mu.i_p,

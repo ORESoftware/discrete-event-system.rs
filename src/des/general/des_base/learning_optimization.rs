@@ -867,7 +867,7 @@ pub fn non_empty_array<T: Clone>(value: Option<&[T]>, fallback: &[T]) -> Vec<T> 
 
 /// Deep-copy a row-major matrix.
 pub fn clone_matrix<T: Clone>(matrix: &[Vec<T>]) -> Vec<Vec<T>> {
-    matrix.iter().map(|row| row.clone()).collect()
+    matrix.iter().cloned().collect()
 }
 
 /// Zero vector of length `n`. Thin wrapper over [`VecOps::zeros`] (the local

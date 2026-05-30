@@ -1357,7 +1357,7 @@ impl MaxCutSDPStation {
         let mut st = MaxCutSDPStation {
             core: StationCore::new("sdp-maxcut-relaxation-station"),
             state,
-            edges: config.edges.iter().map(|edge| edge.clone()).collect(),
+            edges: config.edges.iter().cloned().collect(),
             started: false,
             result_emitted: false,
         };

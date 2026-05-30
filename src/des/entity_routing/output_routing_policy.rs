@@ -20,18 +20,14 @@ use crate::des::shared::capabilities::{RandomSource, SeededRandom};
 
 /// `type OutputRoutingPolicy = 'random' | 'round-robin' | 'ordered'`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Default)]
 pub enum OutputRoutingPolicy {
+    #[default]
     Random,
     RoundRobin,
     Ordered,
 }
 
-impl Default for OutputRoutingPolicy {
-    fn default() -> Self {
-        // TS ctor default is 'random'.
-        OutputRoutingPolicy::Random
-    }
-}
 
 /// `interface HasOutputRoutingPolicy { outputRouting?: OutputRoutingPolicy }`.
 ///

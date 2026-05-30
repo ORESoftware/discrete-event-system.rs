@@ -534,7 +534,7 @@ fn elevator_run_time_step(e: &mut Elevator, floors: &mut [Floor], mut coord: Opt
                         Dir2::Down => Edir::Down,
                     };
                     e.state = ElevatorState::Moving;
-                    if let Some(c) = coord.as_deref_mut() {
+                    if let Some(c) = coord {
                         c.claim(floor.round() as i64, dir, e.idx);
                     }
                 }

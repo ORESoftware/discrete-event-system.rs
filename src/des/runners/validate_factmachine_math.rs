@@ -467,7 +467,7 @@ pub fn run() {
             let slip = (rng() * 2000.0).floor();
             let max = max_price_with_slippage(price, slip);
             let min = min_price_with_slippage(price, slip);
-            if !(max >= 0.0 && max <= 1.0 && min >= 0.0 && min <= 1.0) {
+            if !((0.0..=1.0).contains(&max) && (0.0..=1.0).contains(&min)) {
                 c.check("A15 slippage clamps to [0, 1]", false, &format!("t={}, max={}, min={}", t, max, min));
                 early = true;
                 break;

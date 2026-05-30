@@ -853,7 +853,7 @@ fn run_transform_pipeline(args: TransformPipelineArgs) -> TransformRunResult {
     TransformRunResult {
         kind: args.kind,
         convention: args.convention,
-        samples: args.samples.iter().cloned().collect(),
+        samples: args.samples.to_vec(),
         outputs,
         trace: latest.trace,
         topology,

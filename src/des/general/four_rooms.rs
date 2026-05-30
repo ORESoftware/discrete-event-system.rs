@@ -104,7 +104,7 @@ fn idx_to_rc(i: usize) -> (usize, usize) {
 /// is a wall except at rows 2 and 6; row 5 is a wall except at columns 1 and 8;
 /// the (5, 5) corner is a wall (covered by both clauses).
 fn is_free(r: i64, c: i64) -> bool {
-    if r < 0 || r > 10 || c < 0 || c > 10 {
+    if !(0..=10).contains(&r) || !(0..=10).contains(&c) {
         return false;
     }
     let wall = (c == 5 && r != 2 && r != 6) || (r == 5 && c != 1 && c != 8);

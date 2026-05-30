@@ -755,7 +755,7 @@ impl FixedPointIterationStation<BendersIterState> for BendersStation {
         if lower_bound > self.best_lower_bound {
             self.best_lower_bound = lower_bound;
             self.best_x = x_master.clone();
-            self.best_y = scenario_y.iter().map(|y| y.clone()).collect();
+            self.best_y = scenario_y.iter().cloned().collect();
             self.best_scenario_values = scenario_values.clone();
         }
         self.last_scenario_values = scenario_values.clone();
@@ -879,7 +879,7 @@ pub fn solve_slp_benders(p: SLPProblem, scenarios: Vec<Scenario>, opts: BendersO
                 objective: final_state.lower_bound,
                 c_first_x: c_tx,
                 expected_q: final_state.lower_bound - c_tx,
-                y_by_scenario: st.last_scenario_y.iter().map(|y| y.clone()).collect(),
+                y_by_scenario: st.last_scenario_y.iter().cloned().collect(),
                 scenario_values: st.last_scenario_values.clone(),
                 iterations: final_state.iter,
                 method: SLPMethod::Benders,

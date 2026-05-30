@@ -245,8 +245,7 @@ pub fn run() {
     println!();
 
     // ─── Policies ───────────────────────────────────────────────────────────
-    let policies = vec![
-        PolicyDesc { name: "random", note: "L3: trivial baseline, ignores fairness" },
+    let policies = [PolicyDesc { name: "random", note: "L3: trivial baseline, ignores fairness" },
         PolicyDesc {
             name: "MDP-memoryless",
             note: "L2 with state=(t,) — Markov but NO history → cannot express fairness",
@@ -266,8 +265,7 @@ pub fn run() {
         PolicyDesc {
             name: "MDP-VI-exact",
             note: "L2 with state=(t, prev-bench) — Markov + 1-period memory ⇒ fairness",
-        },
-    ];
+        }];
     let filtered: Vec<&PolicyDesc> = if policy_filter.is_empty() {
         policies.iter().collect()
     } else {
@@ -295,8 +293,8 @@ pub fn run() {
         }
         let eval_res = evaluate_schedule(&problem, &schedule);
         let belief = evaluate_soccer_pomdp_features(&problem, &schedule, &SoccerPOMDPFeatureOptions::default());
-        print!(
-            "affinity={:.2}, fairness={}, beliefFresh={:.3}, build={}ms\n",
+        println!(
+            "affinity={:.2}, fairness={}, beliefFresh={:.3}, build={}ms",
             eval_res.affinity_sum,
             if eval_res.fairness_ok { "OK" } else { "VIOLATED" },
             belief.mean_expected_fresh_on_field,

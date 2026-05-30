@@ -279,7 +279,7 @@ fn run_internal_simplex(p: &LPProblem, opts: &InternalSimplexOptions) -> LPSolut
 
     // ---- Solve  max c_Y^T y  s.t.  Ay · y ≤ by, y ≥ 0  via Big-M two-phase. ----
     let m = ay.len();
-    let mut acopy: Vec<Vec<f64>> = ay.iter().map(|r| r.clone()).collect();
+    let mut acopy: Vec<Vec<f64>> = ay.iter().cloned().collect();
     let mut bcopy: Vec<f64> = by.clone();
     let total_cols = ny + m;
     let slack_start = ny;

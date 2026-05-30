@@ -80,6 +80,7 @@ pub struct NetworkLinkSpec {
 }
 
 #[derive(Clone, Debug)]
+#[derive(Default)]
 pub struct ComputerNetworkProblem {
     pub nodes: Vec<NetworkNode>,
     pub links: Vec<NetworkLinkSpec>,
@@ -160,11 +161,6 @@ pub struct ComputerNetworkResult {
     pub total_simulated_ms: f64,
 }
 
-impl Default for ComputerNetworkProblem {
-    fn default() -> Self {
-        ComputerNetworkProblem { nodes: Vec::new(), links: Vec::new() }
-    }
-}
 
 pub fn build_computer_network_animation(
     problem: &ComputerNetworkProblem,
@@ -472,7 +468,7 @@ fn draw_packet_if_active(
     if pkt.hops.len() < 2 {
         return;
     }
-    let progress = (((t_ms - pkt.created_at_ms) / (end - pkt.created_at_ms).max(1.0))).clamp(0.0, 0.999);
+    let progress = ((t_ms - pkt.created_at_ms) / (end - pkt.created_at_ms).max(1.0)).clamp(0.0, 0.999);
     let seg_float = progress * (pkt.hops.len() as f64 - 1.0);
     let seg = ((pkt.hops.len() - 2) as f64).min(seg_float.floor()) as usize;
     let local = seg_float - seg as f64;

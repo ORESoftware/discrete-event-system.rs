@@ -190,8 +190,8 @@ fn study1(c: &mut Checker) {
     let warmup = 250;
     let seed_base = 5000;
     let random = evaluate_policy(&problem, || policy_random(11), "random", num_reps, num_arrivals, seed_base, warmup);
-    let rr = evaluate_policy(&problem, || policy_round_robin(), "round-robin", num_reps, num_arrivals, seed_base, warmup);
-    let sq = evaluate_policy(&problem, || policy_shortest_queue(), "shortest-queue", num_reps, num_arrivals, seed_base, warmup);
+    let rr = evaluate_policy(&problem, policy_round_robin, "round-robin", num_reps, num_arrivals, seed_base, warmup);
+    let sq = evaluate_policy(&problem, policy_shortest_queue, "shortest-queue", num_reps, num_arrivals, seed_base, warmup);
     let sect = evaluate_policy(&problem, || policy_sect(&problem), "SECT", num_reps, num_arrivals, seed_base, warmup);
     let fluid = evaluate_policy(&problem, || policy_fluid_lp(&problem).policy, "fluid-LP", num_reps, num_arrivals, seed_base, warmup);
     println!("    random         mean = {:.3}", random.mean_wait);
@@ -235,8 +235,8 @@ fn study2(c: &mut Checker) {
     let warmup = 300;
     let seed_base = 9000;
     let random = evaluate_policy(&problem, || policy_random(31), "random", num_reps, num_arrivals, seed_base, warmup);
-    let rr = evaluate_policy(&problem, || policy_round_robin(), "round-robin", num_reps, num_arrivals, seed_base, warmup);
-    let sq = evaluate_policy(&problem, || policy_shortest_queue(), "shortest-queue", num_reps, num_arrivals, seed_base, warmup);
+    let rr = evaluate_policy(&problem, policy_round_robin, "round-robin", num_reps, num_arrivals, seed_base, warmup);
+    let sq = evaluate_policy(&problem, policy_shortest_queue, "shortest-queue", num_reps, num_arrivals, seed_base, warmup);
     let sect = evaluate_policy(&problem, || policy_sect(&problem), "SECT", num_reps, num_arrivals, seed_base, warmup);
     let fluid = evaluate_policy(&problem, || policy_fluid_lp(&problem).policy, "fluid-LP", num_reps, num_arrivals, seed_base, warmup);
     println!("    random         mean = {:.3}", random.mean_wait);

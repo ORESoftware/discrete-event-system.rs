@@ -541,6 +541,7 @@ pub enum LocalSearch {
 ///
 /// `on_generation` is a `FnMut` callback invoked after each generation with
 /// `(gen, &info)` — mirroring the TS `onGeneration` closure.
+#[derive(Default)]
 pub struct GASolverOptions {
     pub population_size: Option<usize>,
     pub num_generations: Option<usize>,
@@ -559,27 +560,6 @@ pub struct GASolverOptions {
     pub on_generation: Option<Box<dyn FnMut(usize, &GenerationInfo)>>,
 }
 
-impl Default for GASolverOptions {
-    fn default() -> Self {
-        GASolverOptions {
-            population_size: None,
-            num_generations: None,
-            tournament_size: None,
-            crossover_prob: None,
-            mutation_prob: None,
-            elitism: None,
-            seed: None,
-            feasibility: None,
-            penalty_per_violation: None,
-            retry_limit: None,
-            init: None,
-            local_search: None,
-            local_search_prob: None,
-            local_search_passes: None,
-            on_generation: None,
-        }
-    }
-}
 
 /// Per-generation summary passed to the `on_generation` callback. (TS
 /// `interface GenerationInfo`.)

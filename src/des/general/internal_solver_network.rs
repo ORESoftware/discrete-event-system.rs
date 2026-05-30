@@ -491,7 +491,7 @@ impl DESStation for WallClockCheckerStation {
         if self.expired_flag {
             return;
         }
-        if self.tick % self.check_every_ticks == 0 {
+        if self.tick.is_multiple_of(self.check_every_ticks) {
             self.checks += 1;
             self.elapsed = self.elapsed_since_start();
             if self.elapsed >= self.budget_ms {

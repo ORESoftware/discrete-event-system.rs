@@ -55,16 +55,13 @@ pub use crate::des::general::incremental_lp::Sense;
 
 /// Branching rule. (TS `'most-fractional' | 'first-fractional'`.)
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Default)]
 pub enum BranchRule {
+    #[default]
     MostFractional,
     FirstFractional,
 }
 
-impl Default for BranchRule {
-    fn default() -> Self {
-        BranchRule::MostFractional
-    }
-}
 
 /// Direction a branch constraint was added in. (TS `'le' | 'ge'`.)
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -277,7 +274,7 @@ impl MILPBnBStation {
         };
 
         // Build root LP, encoding any explicit upper bounds as ≤ rows.
-        let mut a: Vec<Vec<f64>> = p.a.iter().map(|row| row.clone()).collect();
+        let mut a: Vec<Vec<f64>> = p.a.iter().cloned().collect();
         let mut b: Vec<f64> = p.b.clone();
         let mut con_names: Vec<String> = match &p.con_names {
             Some(cn) => cn.clone(),

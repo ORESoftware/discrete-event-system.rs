@@ -157,7 +157,7 @@ pub struct MdpAsLpOptions {
 /// (invariant violations → TS `throw`).
 pub fn build_mdp_lp(mdp: &MDPSpec, gamma: f64, state_dist: Option<&[f64]>) -> LPProblem {
     let n = mdp.num_states;
-    if gamma < 0.0 || gamma >= 1.0 {
+    if !(0.0..1.0).contains(&gamma) {
         panic!("MDP-as-LP requires 0 ≤ γ < 1");
     }
     let mu: Vec<f64> = match state_dist {

@@ -1181,7 +1181,7 @@ fn equation_statements(equation: &str) -> Vec<String> {
         .replace("\\end{cases}", "");
     let s = s.replace("\\\\", "\n").replace(';', "\n");
     s.split('\n')
-        .map(|x| x.replace('$', "").replace('&', "").trim().to_string())
+        .map(|x| x.replace(['$', '&'], "").trim().to_string())
         .filter(|x| !x.is_empty())
         .collect()
 }
@@ -1260,17 +1260,15 @@ fn merge_constants(records: &[Option<&JsonObject>]) -> R<NumMap> {
     let mut out: NumMap = NumMap::new();
     out.insert("pi".to_string(), std::f64::consts::PI);
     out.insert("e".to_string(), std::f64::consts::E);
-    for rec in records {
-        if let Some(obj) = rec {
-            for key in obj.keys() {
-                let fallback = out.get(key).copied().unwrap_or(0.0);
-                let value = number_or_default(
-                    obj.get(key),
-                    fallback,
-                    &format!("MathEquationInput.constants.{key}"),
-                )?;
-                out.insert(key.clone(), value);
-            }
+    for obj in records.iter().flatten() {
+        for key in obj.keys() {
+            let fallback = out.get(key).copied().unwrap_or(0.0);
+            let value = number_or_default(
+                obj.get(key),
+                fallback,
+                &format!("MathEquationInput.constants.{key}"),
+            )?;
+            out.insert(key.clone(), value);
         }
     }
     Ok(out)
@@ -1278,13 +1276,11 @@ fn merge_constants(records: &[Option<&JsonObject>]) -> R<NumMap> {
 
 fn merge_initial(records: &[Option<&JsonObject>]) -> R<NumMap> {
     let mut out: NumMap = NumMap::new();
-    for rec in records {
-        if let Some(obj) = rec {
-            for key in obj.keys() {
-                let value =
-                    number_or_default(obj.get(key), 0.0, &format!("MathEquationInput.initial.{key}"))?;
-                out.insert(key.clone(), value);
-            }
+    for obj in records.iter().flatten() {
+        for key in obj.keys() {
+            let value =
+                number_or_default(obj.get(key), 0.0, &format!("MathEquationInput.initial.{key}"))?;
+            out.insert(key.clone(), value);
         }
     }
     Ok(out)

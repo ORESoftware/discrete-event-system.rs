@@ -16,19 +16,27 @@
 //!     split into free functions so `floors`, `completed`, `mdp_decision_log`,
 //!     and the active car are borrowed as disjoint `self` fields.
 //!   * the HTML animation (`animation/types`, `animation/html-player`, frames,
-//!     shapes, charts, `buildHTMLSet`) is NOT ported: frame/series recording is
-//!     omitted and a placeholder `.html` is written. The full data artifact
-//!     (`elevator-highrise-results.json`) is produced faithfully.
+//!     shapes, charts, `buildHTMLSet`) is ported: `run_highrise_elevators`
+//!     records per-tick frames + a system-trajectory chart into an
+//!     [`Animation`], and `run` collects one variant per policy/authority pair
+//!     into a single self-contained `out/elevator-highrise.html` via
+//!     [`build_html_set`]. The full data artifact
+//!     (`elevator-highrise-results.json`) is produced alongside it.
 
 #![allow(dead_code)]
 #![allow(clippy::too_many_arguments)]
 
+use crate::des::animation::html_player::{build_html_set, AnimationSetOptions, AnimationVariant};
+use crate::des::animation::types::{
+    js_num, to_fixed, Anchor, Animation, ChartSeries, ChartSpec, CircleShape, FontWeight, Frame,
+    FrameParts, LineShape, RectShape, Shape, TextShape,
+};
 use crate::des::general::prng::{mulberry32, with_seed};
 use crate::des::general::value_iteration::{value_iteration, MDPSpec, Outcome, VIOptions};
 use crate::des::observability::logger::JsonValue;
 use crate::des::shared::capabilities::RandomSource;
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 // ---------------------------------------------------------------------------
@@ -173,6 +181,16 @@ enum CarState {
     Moving,
     Serving,
     Prepositioning,
+}
+impl CarState {
+    fn label(self) -> &'static str {
+        match self {
+            CarState::Idle => "idle",
+            CarState::Moving => "moving",
+            CarState::Serving => "serving",
+            CarState::Prepositioning => "prepositioning",
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1233,6 +1251,8 @@ fn build_highrise_schedule(cfg: &HighriseElevatorConfig) -> Vec<ScheduledArrival
 struct HighriseRunOptions {
     authority: DecisionAuthority,
     mdp_tuning: Option<MDPDispatchTuning>,
+    /// Record one animation frame every Nth tick (>= 1).
+    record_every_ticks: i64,
 }
 
 fn run_highrise_elevators(
@@ -1240,7 +1260,7 @@ fn run_highrise_elevators(
     policy: HighrisePolicy,
     schedule: &[ScheduledArrival],
     opts: HighriseRunOptions,
-) -> HighriseElevatorResult {
+) -> (HighriseElevatorResult, Animation) {
     let mut building = HighriseBuilding::new(
         cfg.clone(),
         policy,
@@ -1248,22 +1268,58 @@ fn run_highrise_elevators(
         opts.authority,
         opts.mdp_tuning.clone(),
     );
-    // PORT NOTE: frame/series recording omitted (animation not ported).
+    let record_every = opts.record_every_ticks.max(1);
+    let mut frames: Vec<Frame> = Vec::new();
+    let mut series = HighriseSeries::default();
+
     let max_ticks = ((cfg.sim_t + cfg.drain_t) / cfg.step_size).round() as i64;
     for tick in 0..=max_ticks {
         building.run_time_step(tick);
+        let t = tick as f64 * cfg.step_size;
+        // Frames are collected offline (never rendered during the loop), so the
+        // player can scrub / reverse / change speed purely over the index.
+        if tick % record_every == 0 {
+            let parts = build_highrise_frame(t, tick as f64, &building);
+            frames.push(parts.into_frame(t, tick as f64));
+            series.t.push(t);
+            series
+                .waiting
+                .push(building.pending_passenger_count() as f64);
+            series.in_car.push(building.in_car_count() as f64);
+            series.served.push(building.completed.len() as f64);
+            series.energy.push(building.total_energy());
+        }
         if tick as f64 * cfg.step_size >= cfg.sim_t && building.is_drained() {
             break;
         }
     }
-    make_result(
+
+    let result = make_result(
         policy,
         opts.authority,
         cfg,
         schedule,
         &building,
         opts.mdp_tuning.as_ref(),
-    )
+    );
+    let animation = Animation {
+        width: STAGE_W,
+        height: STAGE_H,
+        fps: 18.0,
+        title: Some("High-rise elevator dispatch policies".to_string()),
+        subtitle: Some(format!(
+            "{} floors, {} shafts, cap={}, dt={}s, {} arrivals",
+            cfg.n_floors,
+            cfg.n_elevators,
+            cfg.capacity,
+            js_num(cfg.step_size),
+            schedule.len()
+        )),
+        frames,
+        charts: Some(vec![build_highrise_chart(&series)]),
+        background: Some("#ffffff".to_string()),
+    };
+    (result, animation)
 }
 
 fn make_result(
@@ -1333,6 +1389,415 @@ fn make_result(
             Some(summarize_mdp_run(&building.mdp_decision_log))
         },
         marginal_vs_lowest_time: None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Animation (port of `buildHighriseFrame` / `drawMetrics` / `buildHighriseChart`).
+// ---------------------------------------------------------------------------
+
+const STAGE_W: f64 = 1200.0;
+const STAGE_H: f64 = 760.0;
+const BUILD_X: f64 = 78.0;
+const BUILD_Y: f64 = 44.0;
+const BUILD_W: f64 = 760.0;
+const BUILD_H: f64 = 560.0;
+const METRIC_X: f64 = 870.0;
+const METRIC_Y: f64 = 44.0;
+const METRIC_W: f64 = 290.0;
+const METRIC_H: f64 = 560.0;
+
+/// Parallel time-series collected during a run, fed to [`build_highrise_chart`].
+#[derive(Default)]
+struct HighriseSeries {
+    t: Vec<f64>,
+    waiting: Vec<f64>,
+    in_car: Vec<f64>,
+    served: Vec<f64>,
+    energy: Vec<f64>,
+}
+
+/// Pixel y of a (possibly fractional) floor; floor 0 at the bottom.
+fn floor_y(floor: f64, cfg: &HighriseElevatorConfig) -> f64 {
+    let span = ((cfg.n_floors - 1) as f64).max(1.0);
+    BUILD_Y + BUILD_H - (floor / span) * BUILD_H
+}
+
+fn car_color(car: &ElevatorCar) -> &'static str {
+    if car.state == CarState::Serving {
+        return "#f59e0b";
+    }
+    if car.state == CarState::Prepositioning {
+        return "#7c3aed";
+    }
+    if car.direction > 0 {
+        return "#16a34a";
+    }
+    if car.direction < 0 {
+        return "#2563eb";
+    }
+    "#9ca3af"
+}
+
+fn build_highrise_frame(t: f64, tick: f64, b: &HighriseBuilding) -> FrameParts {
+    let mut shapes: Vec<Shape> = Vec::new();
+    let cfg = &b.config;
+    let n_floors = cfg.n_floors;
+    let floor_h = BUILD_H / n_floors as f64;
+    let shaft_w = BUILD_W / cfg.n_elevators as f64;
+    let car_w = 42.0_f64.min(shaft_w * 0.42);
+    let car_h = 7.0_f64.max(floor_h * 0.82);
+
+    shapes.push(Shape::Rect(RectShape {
+        x: BUILD_X,
+        y: BUILD_Y,
+        w: BUILD_W,
+        h: BUILD_H,
+        fill: "#fff".to_string(),
+        stroke: Some("#c8c8c8".to_string()),
+        stroke_width: Some(1.0),
+        rx: Some(4.0),
+        ..Default::default()
+    }));
+
+    for f in 0..n_floors {
+        let y = floor_y(f as f64, cfg);
+        let major = f % 5 == 0 || f == n_floors - 1;
+        if major {
+            shapes.push(Shape::Line(LineShape {
+                x1: BUILD_X,
+                y1: y,
+                x2: BUILD_X + BUILD_W,
+                y2: y,
+                stroke: (if f == 0 { "#a3a3a3" } else { "#e3e3e3" }).to_string(),
+                stroke_width: Some(if f == 0 { 1.2 } else { 1.0 }),
+                ..Default::default()
+            }));
+            shapes.push(Shape::Text(TextShape {
+                x: BUILD_X - 10.0,
+                y: y + 4.0,
+                text: f.to_string(),
+                font_size: Some(10.0),
+                fill: Some("#555".to_string()),
+                anchor: Some(Anchor::End),
+                ..Default::default()
+            }));
+        }
+        let queues = &b.floors[f as usize];
+        let waiting = queues.up.len() + queues.down.len();
+        if waiting > 0 {
+            let y_mid = y - floor_h / 2.0;
+            let up_w = 80.0_f64.min(queues.up.len() as f64 * 4.0);
+            let down_w = 80.0_f64.min(queues.down.len() as f64 * 4.0);
+            if up_w > 0.0 {
+                shapes.push(Shape::Rect(RectShape {
+                    x: BUILD_X + 8.0,
+                    y: y_mid - 4.0,
+                    w: up_w,
+                    h: 4.0,
+                    fill: "#16a34a".to_string(),
+                    rx: Some(1.0),
+                    ..Default::default()
+                }));
+            }
+            if down_w > 0.0 {
+                shapes.push(Shape::Rect(RectShape {
+                    x: BUILD_X + 8.0,
+                    y: y_mid + 1.0,
+                    w: down_w,
+                    h: 4.0,
+                    fill: "#2563eb".to_string(),
+                    rx: Some(1.0),
+                    ..Default::default()
+                }));
+            }
+            shapes.push(Shape::Text(TextShape {
+                x: BUILD_X + 94.0,
+                y: y_mid + 4.0,
+                text: waiting.to_string(),
+                font_size: Some(8.0),
+                fill: Some("#444".to_string()),
+                anchor: Some(Anchor::Start),
+                ..Default::default()
+            }));
+        }
+    }
+
+    for k in 0..cfg.n_elevators {
+        let sx = BUILD_X + k as f64 * shaft_w + shaft_w / 2.0;
+        shapes.push(Shape::Line(LineShape {
+            x1: sx,
+            y1: BUILD_Y,
+            x2: sx,
+            y2: BUILD_Y + BUILD_H,
+            stroke: "#ededed".to_string(),
+            stroke_width: Some(1.0),
+            ..Default::default()
+        }));
+        shapes.push(Shape::Text(TextShape {
+            x: sx,
+            y: BUILD_Y + BUILD_H + 18.0,
+            text: format!("E{k}"),
+            font_size: Some(10.0),
+            fill: Some("#555".to_string()),
+            anchor: Some(Anchor::Middle),
+            ..Default::default()
+        }));
+    }
+
+    for car in &b.elevators {
+        let sx = BUILD_X + car.idx as f64 * shaft_w + shaft_w / 2.0;
+        let y = floor_y(car.current_floor, cfg) - car_h / 2.0;
+        let fill = car_color(car);
+        shapes.push(Shape::Rect(RectShape {
+            x: sx - car_w / 2.0,
+            y,
+            w: car_w,
+            h: car_h,
+            fill: fill.to_string(),
+            stroke: Some("#222".to_string()),
+            stroke_width: Some(0.7),
+            rx: Some(2.0),
+            title: Some(format!(
+                "{} {} F{} pax={}/{}",
+                car.id(),
+                car.state.label(),
+                to_fixed(car.current_floor, 1),
+                car.passengers.len(),
+                car.capacity
+            )),
+            ..Default::default()
+        }));
+        shapes.push(Shape::Text(TextShape {
+            x: sx,
+            y: y + car_h / 2.0 + 3.0,
+            text: car.passengers.len().to_string(),
+            font_size: Some(9.0),
+            fill: Some("#fff".to_string()),
+            anchor: Some(Anchor::Middle),
+            font_weight: Some(FontWeight::Bold),
+            ..Default::default()
+        }));
+        if let Some(target) = car.target_floor {
+            if car.target_reason != Some(TargetReason::Home) {
+                let ty = floor_y(target, cfg);
+                shapes.push(Shape::Line(LineShape {
+                    x1: sx,
+                    y1: y + car_h / 2.0,
+                    x2: sx,
+                    y2: ty,
+                    stroke: "#777".to_string(),
+                    stroke_width: Some(0.7),
+                    dasharray: Some("2,3".to_string()),
+                    opacity: Some(0.75),
+                    ..Default::default()
+                }));
+                shapes.push(Shape::Circle(CircleShape {
+                    x: sx,
+                    y: ty,
+                    r: 2.4,
+                    fill: "#777".to_string(),
+                    ..Default::default()
+                }));
+            }
+        }
+    }
+
+    draw_metrics(&mut shapes, b, t, tick);
+    FrameParts::with_caption(
+        shapes,
+        format!(
+            "policy={}  authority={}  t={}s  waiting={}  in-car={}  served={}",
+            b.policy.label(),
+            b.authority.label(),
+            to_fixed(t, 1),
+            b.pending_passenger_count(),
+            b.in_car_count(),
+            b.completed.len()
+        ),
+    )
+}
+
+fn draw_metrics(shapes: &mut Vec<Shape>, b: &HighriseBuilding, t: f64, tick: f64) {
+    let result = make_result(
+        b.policy,
+        b.authority,
+        &b.config,
+        &b.schedule,
+        b,
+        b.mdp_tuning.as_ref(),
+    );
+    let a = &result.aggregates;
+    shapes.push(Shape::Rect(RectShape {
+        x: METRIC_X,
+        y: METRIC_Y,
+        w: METRIC_W,
+        h: METRIC_H,
+        fill: "#fbfbfb".to_string(),
+        stroke: Some("#ddd".to_string()),
+        stroke_width: Some(1.0),
+        rx: Some(4.0),
+        ..Default::default()
+    }));
+    shapes.push(Shape::Text(TextShape {
+        x: METRIC_X + 14.0,
+        y: METRIC_Y + 24.0,
+        text: b.policy.label().to_string(),
+        font_size: Some(15.0),
+        fill: Some("#111".to_string()),
+        font_weight: Some(FontWeight::Bold),
+        ..Default::default()
+    }));
+    shapes.push(Shape::Text(TextShape {
+        x: METRIC_X + 14.0,
+        y: METRIC_Y + 44.0,
+        text: format!(
+            "{}  tick {}  t={}s",
+            b.authority.label(),
+            js_num(tick),
+            to_fixed(t, 1)
+        ),
+        font_size: Some(11.0),
+        fill: Some("#555".to_string()),
+        ..Default::default()
+    }));
+
+    let rows: [(&str, String); 9] = [
+        ("waiting", b.pending_passenger_count().to_string()),
+        ("in cars", b.in_car_count().to_string()),
+        ("served", format!("{}/{}", a.n_served, a.n)),
+        ("mean wait", format!("{}s", to_fixed(a.mean_wait, 1))),
+        ("mean total", format!("{}s", to_fixed(a.mean_total, 1))),
+        ("p95 total", format!("{}s", to_fixed(a.p95_total, 1))),
+        ("stops", js_num(a.total_stops.round())),
+        (
+            "distance",
+            format!("{} floors", to_fixed(a.total_distance_floors, 1)),
+        ),
+        ("energy index", to_fixed(a.total_energy, 1)),
+    ];
+    for (i, (label, value)) in rows.iter().enumerate() {
+        let y = METRIC_Y + 76.0 + i as f64 * 24.0;
+        shapes.push(Shape::Text(TextShape {
+            x: METRIC_X + 14.0,
+            y,
+            text: label.to_string(),
+            font_size: Some(11.0),
+            fill: Some("#666".to_string()),
+            ..Default::default()
+        }));
+        shapes.push(Shape::Text(TextShape {
+            x: METRIC_X + METRIC_W - 14.0,
+            y,
+            text: value.clone(),
+            font_size: Some(12.0),
+            fill: Some("#222".to_string()),
+            anchor: Some(Anchor::End),
+            font_weight: Some(FontWeight::Bold),
+            ..Default::default()
+        }));
+    }
+
+    let y0 = METRIC_Y + 320.0;
+    shapes.push(Shape::Text(TextShape {
+        x: METRIC_X + 14.0,
+        y: y0,
+        text: "Shafts".to_string(),
+        font_size: Some(12.0),
+        fill: Some("#333".to_string()),
+        font_weight: Some(FontWeight::Bold),
+        ..Default::default()
+    }));
+    for car in &b.elevators {
+        let y = y0 + 22.0 + car.idx as f64 * 28.0;
+        shapes.push(Shape::Rect(RectShape {
+            x: METRIC_X + 14.0,
+            y: y - 10.0,
+            w: 12.0,
+            h: 12.0,
+            fill: car_color(car).to_string(),
+            rx: Some(2.0),
+            ..Default::default()
+        }));
+        shapes.push(Shape::Text(TextShape {
+            x: METRIC_X + 34.0,
+            y,
+            text: car.id(),
+            font_size: Some(11.0),
+            fill: Some("#222".to_string()),
+            font_weight: Some(FontWeight::Bold),
+            ..Default::default()
+        }));
+        shapes.push(Shape::Text(TextShape {
+            x: METRIC_X + 66.0,
+            y,
+            text: format!(
+                "F{} {}/{}",
+                to_fixed(car.current_floor, 1),
+                car.passengers.len(),
+                car.capacity
+            ),
+            font_size: Some(11.0),
+            fill: Some("#444".to_string()),
+            ..Default::default()
+        }));
+        let status = match car.target_floor {
+            None => format!("{} {}", car.state.label(), car.decision_source.slug()),
+            Some(tf) => format!(
+                "{} ->F{} {}",
+                car.state.label(),
+                js_num(tf),
+                car.decision_source.slug()
+            ),
+        };
+        shapes.push(Shape::Text(TextShape {
+            x: METRIC_X + 150.0,
+            y,
+            text: status,
+            font_size: Some(10.0),
+            fill: Some("#666".to_string()),
+            ..Default::default()
+        }));
+    }
+}
+
+fn build_highrise_chart(series: &HighriseSeries) -> ChartSpec {
+    ChartSpec {
+        x: BUILD_X,
+        y: 635.0,
+        w: BUILD_W,
+        h: 95.0,
+        title: Some("System trajectory".to_string()),
+        y_min: Some(0.0),
+        y_max: None,
+        y_label: None,
+        series: vec![
+            ChartSeries {
+                label: "waiting".to_string(),
+                color: "#dc2626".to_string(),
+                t: series.t.clone(),
+                y: series.waiting.clone(),
+            },
+            ChartSeries {
+                label: "in cars".to_string(),
+                color: "#2563eb".to_string(),
+                t: series.t.clone(),
+                y: series.in_car.clone(),
+            },
+            ChartSeries {
+                label: "served".to_string(),
+                color: "#16a34a".to_string(),
+                t: series.t.clone(),
+                y: series.served.clone(),
+            },
+            ChartSeries {
+                label: "energy/10".to_string(),
+                color: "#7c3aed".to_string(),
+                t: series.t.clone(),
+                y: series.energy.iter().map(|v| v / 10.0).collect(),
+            },
+        ],
+        cursor: None,
     }
 }
 
@@ -2516,19 +2981,21 @@ pub fn run() {
     }
 
     let mut results: Vec<HighriseElevatorResult> = Vec::new();
+    let mut variants: Vec<AnimationVariant> = Vec::new();
     for &authority in &authorities {
         for &policy in &policies {
             let tuning = mdp_tunings
                 .iter()
                 .find(|(p, _)| *p == policy)
                 .map(|(_, t)| t.clone());
-            let mut result = run_highrise_elevators(
+            let (mut result, animation) = run_highrise_elevators(
                 &cfg,
                 policy,
                 &schedule,
                 HighriseRunOptions {
                     authority,
                     mdp_tuning: tuning,
+                    record_every_ticks: record_every,
                 },
             );
             if is_mdp_policy(policy) {
@@ -2561,21 +3028,37 @@ pub fn run() {
                     format_marginal(run, marginal_name)
                 );
             }
-            // variantSummary feeds the animation; computed for parity but unused here.
-            let _ = variant_summary(&result);
+            let mut controls = HashMap::new();
+            controls.insert("policy".to_string(), policy.label().to_string());
+            controls.insert("authority".to_string(), authority.label().to_string());
+            variants.push(AnimationVariant {
+                id: format!("{}-{}", policy.slug(), authority.slug()),
+                label: format!("{} / {}", policy.label(), authority.label()),
+                controls: Some(controls),
+                summary: Some(variant_summary(&result)),
+                animation,
+            });
             results.push(result);
         }
     }
 
     let _ = std::fs::create_dir_all("out");
-    // PORT NOTE: HTML animation player not ported; write a placeholder artifact.
     let html_path = "out/elevator-highrise.html";
-    let _ = std::fs::write(
-        html_path,
-        "<!doctype html><meta charset=\"utf-8\"><title>High-rise elevator dispatch policies</title>\
-         <p>PORT NOTE: animation/html-player not ported in the Rust migration. \
-         See out/elevator-highrise-results.json for the full data artifact.</p>",
+    let html = build_html_set(
+        &variants,
+        &AnimationSetOptions {
+            title: Some("High-rise elevator dispatch policies".to_string()),
+            subtitle: Some(format!(
+                "{} floors, {} shafts, dt={}s, {} arrivals. Switch policy and decision authority.",
+                cfg.n_floors,
+                cfg.n_elevators,
+                js_num(cfg.step_size),
+                schedule.len()
+            )),
+            selector_label: None,
+        },
     );
+    let _ = std::fs::write(html_path, html);
 
     let tunings_json = JsonValue::Object(
         mdp_tunings

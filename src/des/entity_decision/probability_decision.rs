@@ -212,13 +212,19 @@ impl Entity for ProbabilityDecisionEntity {
             };
 
             let target = out_conn.borrow().get_target();
-            match target {
-                Some(t) if t.borrow_mut().accept_item(item.clone()) => {
-                    t.borrow_mut().take_item(item.clone());
+            let routed = match target {
+                Some(t) => {
+                    if t.borrow_mut().accept_item(item.clone()) {
+                        t.borrow_mut().take_item(item.clone());
+                        true
+                    } else {
+                        false
+                    }
                 }
-                _ => {
-                    rejected.push(item);
-                }
+                None => false,
+            };
+            if !routed {
+                rejected.push(item);
             }
         }
 
@@ -355,10 +361,26 @@ mod tests {
             rv(),
             Box::new(SeededRandom::new(3)),
         );
+        // No items enqueued -> stepping is a no-op (the while-loop body, which
+        // would panic on a missing out-connection, never runs).
+        d.run_time_step(bgn(0.1));
+        assert_eq!(d.queue.len(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "missing connection with index")]
+    fn run_step_without_wired_branch_panics() {
+        // Faithful to the TS source, which throws `missing connection with index`
+        // when a sampled branch has no out-connection.
+        let probs = vec![Branch { index: 0, prob: bgn(1.0) }];
+        let mut d = ProbabilityDecisionEntity::new(
+            "prob4".to_string(),
+            probs,
+            rv(),
+            Box::new(SeededRandom::new(3)),
+        );
         let m: Rc<RefCell<dyn MovingEntity>> = Rc::new(RefCell::new(BasicMovingEntity::new()));
         d.take_item(m);
-        // One branch, no wired target -> the item is rejected and re-queued.
         d.run_time_step(bgn(0.1));
-        assert_eq!(d.queue.len(), 1);
     }
 }

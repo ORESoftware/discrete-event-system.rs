@@ -55,12 +55,18 @@ pub struct WsConnectionRegistry {
 
 impl WsConnectionRegistry {
     pub fn new() -> Self {
-        WsConnectionRegistry { connections: Vec::new() }
+        WsConnectionRegistry {
+            connections: Vec::new(),
+        }
     }
 
     /// `connections.add(c)` (set semantics — no duplicate ids).
     pub fn add(&mut self, c: Box<dyn WsConnection>) {
-        if !self.connections.iter().any(|existing| existing.id() == c.id()) {
+        if !self
+            .connections
+            .iter()
+            .any(|existing| existing.id() == c.id())
+        {
             self.connections.push(c);
         }
     }
@@ -78,7 +84,10 @@ impl WsConnectionRegistry {
     }
 
     pub fn ids(&self) -> Vec<String> {
-        self.connections.iter().map(|c| c.id().to_string()).collect()
+        self.connections
+            .iter()
+            .map(|c| c.id().to_string())
+            .collect()
     }
 }
 
@@ -141,25 +150,22 @@ pub fn get_websocket_server() -> &'static Mutex<WebsocketServer> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
-    use std::rc::Rc;
+    use std::sync::{Arc, Mutex};
 
-    /// A test connection that records what it was sent.
+    /// A test connection that records what it was sent. Uses `Arc<Mutex<…>>`
+    /// (genuinely `Send`) so it satisfies the `WsConnection: Send` bound without
+    /// any `unsafe impl`.
     struct FakeConn {
         id: String,
-        sent: Rc<RefCell<Vec<String>>>,
+        sent: Arc<Mutex<Vec<String>>>,
     }
-
-    // The trait is `Send`; the test stays single-threaded, but we satisfy the
-    // bound by storing only `Send` data.
-    unsafe impl Send for FakeConn {}
 
     impl WsConnection for FakeConn {
         fn id(&self) -> &str {
             &self.id
         }
         fn send(&self, message: &str) {
-            self.sent.borrow_mut().push(message.to_string());
+            self.sent.lock().unwrap().push(message.to_string());
         }
     }
 
@@ -168,14 +174,23 @@ mod tests {
         let mut server = WebsocketServer::new();
         assert_eq!(server.port, 6969);
 
-        let sent = Rc::new(RefCell::new(Vec::new()));
-        server.on_connection(Box::new(FakeConn { id: "c1".to_string(), sent: sent.clone() }));
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        server.on_connection(Box::new(FakeConn {
+            id: "c1".to_string(),
+            sent: sent.clone(),
+        }));
 
         assert_eq!(server.connections.size(), 1);
-        assert_eq!(sent.borrow().as_slice(), [RECEIVED_MESSAGE.to_string()]);
+        assert_eq!(
+            sent.lock().unwrap().as_slice(),
+            [RECEIVED_MESSAGE.to_string()]
+        );
 
         // Duplicate id is ignored (set semantics).
-        server.on_connection(Box::new(FakeConn { id: "c1".to_string(), sent: sent.clone() }));
+        server.on_connection(Box::new(FakeConn {
+            id: "c1".to_string(),
+            sent: sent.clone(),
+        }));
         assert_eq!(server.connections.size(), 1);
 
         server.on_close("c1");

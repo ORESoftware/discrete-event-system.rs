@@ -38,6 +38,12 @@ pub mod visual;
 // Animation framework (frame recording, rendering, scene builders).
 pub mod animation;
 
+// WebSocket server: live-connection registry for broadcasting (e.g. animation
+// frames). Faithful port; the network binding is stubbed (see module docs). The
+// directory holds a single `ws_server.rs`, reached via an explicit path.
+#[path = "ws_server/ws_server.rs"]
+pub mod ws_server;
+
 // Cross-subsystem integration smoke tests (compiled only under cfg(test)).
 #[cfg(test)]
 mod integration_smoke;

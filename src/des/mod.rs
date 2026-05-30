@@ -5,3 +5,14 @@
 
 pub mod shared;
 pub mod general;
+
+// Entity framework (queueing-network model). `abstract` is a reserved keyword,
+// so the module is reached via the raw identifier `r#abstract`.
+pub mod r#abstract;
+pub mod entity_moving;
+pub mod random_variables;
+
+// Standalone infrastructure clusters.
+pub mod mdp;
+pub mod observability;
+pub mod reference;

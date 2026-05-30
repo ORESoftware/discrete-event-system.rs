@@ -5,6 +5,11 @@
 pub mod des_base;
 pub mod prng;
 
+// Grab-bag utilities (DESSet/DESMap, bgn, histograms, shuffle, uuid) + the
+// entity registry — foundations of the entity framework.
+pub mod general;
+pub mod entity_registration;
+
 pub mod expr;
 pub mod optim;
 

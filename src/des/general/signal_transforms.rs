@@ -789,15 +789,15 @@ fn run_transform_pipeline(args: TransformPipelineArgs) -> TransformRunResult {
     let accumulator_id = format!("{kind_str}-accumulator-station");
     let sink_id = format!("{kind_str}-result-sink");
 
-    let source = Rc::new(std::cell::RefCell::new(TransformSampleSourceStation::new(source_id.clone(), args.samples.clone())));
+    let source = Rc::new(RefCell::new(TransformSampleSourceStation::new(source_id.clone(), args.samples.clone())));
     let kernel_station =
-        Rc::new(std::cell::RefCell::new(TransformKernelStation::new(kernel_id.clone(), args.points.clone(), args.kernel)));
-    let accumulator = Rc::new(std::cell::RefCell::new(TransformAccumulatorStation::new(
+        Rc::new(RefCell::new(TransformKernelStation::new(kernel_id.clone(), args.points.clone(), args.kernel)));
+    let accumulator = Rc::new(RefCell::new(TransformAccumulatorStation::new(
         accumulator_id.clone(),
         args.points.clone(),
         args.samples.len(),
     )));
-    let sink = Rc::new(std::cell::RefCell::new(TransformResultSinkStation::new(sink_id.clone())));
+    let sink = Rc::new(RefCell::new(TransformResultSinkStation::new(sink_id.clone())));
 
     source.borrow_mut().core_mut().pipe(kernel_station.clone() as StationRef, SAMPLE_CHANNEL, SAMPLE_CHANNEL);
     kernel_station.borrow_mut().core_mut().pipe(accumulator.clone() as StationRef, CONTRIBUTION_CHANNEL, CONTRIBUTION_CHANNEL);
@@ -1046,12 +1046,6 @@ struct ContinuousParams<'a> {
     t1: Option<f64>,
     dt: Option<f64>,
     quadrature: Option<QuadratureRule>,
-}
-
-impl ContinuousParams<'_> {
-    fn constants(&self) -> Option<&HashMap<String, f64>> {
-        self.constants.as_ref()
-    }
 }
 
 // ── Public entry points ───────────────────────────────────────────────────────

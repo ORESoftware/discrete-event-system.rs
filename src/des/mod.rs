@@ -26,9 +26,11 @@ pub mod entity_travel;
 pub mod entity_conn;
 
 // Standalone infrastructure clusters.
+pub mod http_server;
 pub mod mdp;
 pub mod observability;
 pub mod reference;
+pub mod ws_server;
 
 // Signal-flow entities + observers + visual (build on the entity framework).
 pub mod observers;

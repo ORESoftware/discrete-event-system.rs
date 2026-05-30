@@ -47,7 +47,8 @@ const TEMPLATE_TOKEN: &str = "{{∆∆∆}}";
 
 /// Fallback template used when the HTML asset is not present on disk (so the
 /// handler is exercisable in tests / headless builds).
-const FALLBACK_INDEX: &str = "<!doctype html><html><body><script>window.__FORMATION__ = {{∆∆∆}};</script></body></html>";
+const FALLBACK_INDEX: &str =
+    "<!doctype html><html><body><script>window.__FORMATION__ = {{∆∆∆}};</script></body></html>";
 
 /// Bind port (`5000`).
 pub const HTTP_PORT: u16 = 5000;
@@ -146,7 +147,11 @@ pub struct HttpServer {
 
 impl HttpServer {
     fn new() -> Self {
-        HttpServer { port: HTTP_PORT, host: HTTP_HOST.to_string(), request_count: 0 }
+        HttpServer {
+            port: HTTP_PORT,
+            host: HTTP_HOST.to_string(),
+            request_count: 0,
+        }
     }
 
     /// `http.createServer((req,res) => res.end(render_index(...)))` body. A real
@@ -178,7 +183,9 @@ mod tests {
 
     #[test]
     fn render_injects_formation_for_default_graph() {
-        let program = Program { step_size: bgn(500.0) };
+        let program = Program {
+            step_size: bgn(500.0),
+        };
         let html = render_index(&program);
         // The template token is consumed and the formation envelope injected.
         assert!(!html.contains(TEMPLATE_TOKEN));

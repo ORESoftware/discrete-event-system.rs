@@ -55,12 +55,18 @@ pub struct WsConnectionRegistry {
 
 impl WsConnectionRegistry {
     pub fn new() -> Self {
-        WsConnectionRegistry { connections: Vec::new() }
+        WsConnectionRegistry {
+            connections: Vec::new(),
+        }
     }
 
     /// `connections.add(c)` (set semantics — no duplicate ids).
     pub fn add(&mut self, c: Box<dyn WsConnection>) {
-        if !self.connections.iter().any(|existing| existing.id() == c.id()) {
+        if !self
+            .connections
+            .iter()
+            .any(|existing| existing.id() == c.id())
+        {
             self.connections.push(c);
         }
     }
@@ -78,7 +84,10 @@ impl WsConnectionRegistry {
     }
 
     pub fn ids(&self) -> Vec<String> {
-        self.connections.iter().map(|c| c.id().to_string()).collect()
+        self.connections
+            .iter()
+            .map(|c| c.id().to_string())
+            .collect()
     }
 }
 
@@ -169,13 +178,19 @@ mod tests {
         assert_eq!(server.port, 6969);
 
         let sent = Rc::new(RefCell::new(Vec::new()));
-        server.on_connection(Box::new(FakeConn { id: "c1".to_string(), sent: sent.clone() }));
+        server.on_connection(Box::new(FakeConn {
+            id: "c1".to_string(),
+            sent: sent.clone(),
+        }));
 
         assert_eq!(server.connections.size(), 1);
         assert_eq!(sent.borrow().as_slice(), [RECEIVED_MESSAGE.to_string()]);
 
         // Duplicate id is ignored (set semantics).
-        server.on_connection(Box::new(FakeConn { id: "c1".to_string(), sent: sent.clone() }));
+        server.on_connection(Box::new(FakeConn {
+            id: "c1".to_string(),
+            sent: sent.clone(),
+        }));
         assert_eq!(server.connections.size(), 1);
 
         server.on_close("c1");

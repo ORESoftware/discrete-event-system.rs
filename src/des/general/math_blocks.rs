@@ -49,7 +49,6 @@ use std::cell::{Ref, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use super::expr::{evaluate, parse, Env, Expr};
 use super::des_base::preconditions::{Check, Preconditions};
 use super::des_base::runner::{run_iterative_des, IterativeRunOptions, IterativeRunSummary};
 use super::des_base::station::{AnyToken, DESStation, StationCore, StationRef};
@@ -58,6 +57,7 @@ use super::des_base::visual_block::{
     visual_block_specs, VisualBlock, VisualBlockOptions, VisualBlockPortSpec, VisualBlockSpec,
     VisualBlockStyle, VisualPortInput, VisualPortOptions,
 };
+use super::expr::{evaluate, parse, Env, Expr};
 
 /// Default input channel name (`MATH_IN = 'in'`).
 pub const MATH_IN: &str = "in";
@@ -219,11 +219,21 @@ fn duration_steps(model: &str, t0: f64, t1: f64, dt: f64) -> usize {
         (exact - steps).abs() <= 1e-9 * 1.0_f64.max(exact.abs()),
         Some(exact.to_string()),
     ));
-    require(Preconditions::integer_in_range(model, "steps", steps, 1.0, 1_000_000.0));
+    require(Preconditions::integer_in_range(
+        model,
+        "steps",
+        steps,
+        1.0,
+        1_000_000.0,
+    ));
     steps as usize
 }
 
-fn finite_record(model: &str, param: &str, r: Option<&HashMap<String, f64>>) -> HashMap<String, f64> {
+fn finite_record(
+    model: &str,
+    param: &str,
+    r: Option<&HashMap<String, f64>>,
+) -> HashMap<String, f64> {
     let mut out = HashMap::new();
     let Some(r) = r else {
         return out;
@@ -345,7 +355,11 @@ impl MathBlockCore {
 
     /// Base preconditions (the body of `MathBlock.assertPreconditions`).
     fn assert_base_preconditions(&self) {
-        require(Preconditions::positive("MathBlock", &format!("{}.dt", self.id), self.dt));
+        require(Preconditions::positive(
+            "MathBlock",
+            &format!("{}.dt", self.id),
+            self.dt,
+        ));
         require(Preconditions::integer_in_range(
             "MathBlock",
             &format!("{}.ticks", self.id),
@@ -353,7 +367,11 @@ impl MathBlockCore {
             1.0,
             1_000_000.0,
         ));
-        require(Preconditions::finite("MathBlock", &format!("{}.t0", self.id), self.t0));
+        require(Preconditions::finite(
+            "MathBlock",
+            &format!("{}.t0", self.id),
+            self.t0,
+        ));
     }
 
     /// Connect this block's `src` output channel to `target`'s `tgt` channel.
@@ -367,9 +385,18 @@ impl MathBlockCore {
         let tokens = self.station_core_mut().drain::<MathSignal>(channel);
         let mut signals = Vec::with_capacity(tokens.len());
         for token in tokens {
-            require(Preconditions::finite(&id, &format!("signal.{channel}.value"), token.value));
-            require(Preconditions::finite(&id, &format!("signal.{channel}.time"), token.time));
-            self.latest_by_channel.insert(channel.to_string(), (*token).clone());
+            require(Preconditions::finite(
+                &id,
+                &format!("signal.{channel}.value"),
+                token.value,
+            ));
+            require(Preconditions::finite(
+                &id,
+                &format!("signal.{channel}.time"),
+                token.time,
+            ));
+            self.latest_by_channel
+                .insert(channel.to_string(), (*token).clone());
             signals.push((*token).clone());
         }
         signals
@@ -405,7 +432,11 @@ impl MathBlockCore {
     /// `emitValue(value, tick, time, channel)`.
     fn emit_value(&mut self, value: f64, tick: usize, time: f64, channel: &str) {
         let id = self.id.clone();
-        require(Preconditions::finite(&id, &format!("output.{channel}"), value));
+        require(Preconditions::finite(
+            &id,
+            &format!("output.{channel}"),
+            value,
+        ));
         let signal = MathSignal {
             kind: "math-signal",
             source_id: id.clone(),
@@ -517,7 +548,11 @@ pub struct ConstantSourceBlock {
 
 impl ConstantSourceBlock {
     pub fn new(id: &str, value: f64, opts: MathBlockOptions, output_channel: &str) -> Self {
-        ConstantSourceBlock { m: MathBlockCore::new(id, opts), value, output_channel: output_channel.to_string() }
+        ConstantSourceBlock {
+            m: MathBlockCore::new(id, opts),
+            value,
+            output_channel: output_channel.to_string(),
+        }
     }
 }
 
@@ -530,7 +565,11 @@ impl MathBlock for ConstantSourceBlock {
     }
     fn assert_block_preconditions(&self) {
         self.m.assert_base_preconditions();
-        require(Preconditions::finite("ConstantSourceBlock", &format!("{}.value", self.m.id), self.value));
+        require(Preconditions::finite(
+            "ConstantSourceBlock",
+            &format!("{}.value", self.m.id),
+            self.value,
+        ));
     }
     fn step(&mut self, tick: usize, time: f64, _dt: f64) {
         let value = self.value;
@@ -554,7 +593,11 @@ impl FunctionSourceBlock {
         opts: MathBlockOptions,
         output_channel: &str,
     ) -> Self {
-        FunctionSourceBlock { m: MathBlockCore::new(id, opts), f, output_channel: output_channel.to_string() }
+        FunctionSourceBlock {
+            m: MathBlockCore::new(id, opts),
+            f,
+            output_channel: output_channel.to_string(),
+        }
     }
 }
 
@@ -591,7 +634,11 @@ impl ExpressionSourceBlock {
         output_channel: &str,
     ) -> Self {
         let ast = parse(expression);
-        let constants = finite_record("ExpressionSourceBlock", &format!("{id}.constants"), constants);
+        let constants = finite_record(
+            "ExpressionSourceBlock",
+            &format!("{id}.constants"),
+            constants,
+        );
         ExpressionSourceBlock {
             m: MathBlockCore::new(id, opts),
             expression: expression.to_string(),
@@ -629,7 +676,11 @@ pub struct SinkBlock {
 
 impl SinkBlock {
     pub fn new(id: &str, opts: MathBlockOptions, input_channels: Vec<String>) -> Self {
-        SinkBlock { m: MathBlockCore::new(id, opts), input_channels, received: Vec::new() }
+        SinkBlock {
+            m: MathBlockCore::new(id, opts),
+            input_channels,
+            received: Vec::new(),
+        }
     }
 
     /// `series(sourceId?)`.
@@ -711,10 +762,27 @@ impl MathBlock for SumBlock {
     }
     fn assert_block_preconditions(&self) {
         self.m.assert_base_preconditions();
-        require(Preconditions::non_empty("SumBlock", &format!("{}.inputChannels", self.m.id), &self.input_channels));
-        require(Preconditions::length_eq("SumBlock", &format!("{}.weights", self.m.id), &self.weights, self.input_channels.len()));
-        assert_unique("SumBlock", &format!("{}.inputChannels", self.m.id), &self.input_channels);
-        require(Preconditions::all_finite("SumBlock", &format!("{}.weights", self.m.id), &self.weights));
+        require(Preconditions::non_empty(
+            "SumBlock",
+            &format!("{}.inputChannels", self.m.id),
+            &self.input_channels,
+        ));
+        require(Preconditions::length_eq(
+            "SumBlock",
+            &format!("{}.weights", self.m.id),
+            &self.weights,
+            self.input_channels.len(),
+        ));
+        assert_unique(
+            "SumBlock",
+            &format!("{}.inputChannels", self.m.id),
+            &self.input_channels,
+        );
+        require(Preconditions::all_finite(
+            "SumBlock",
+            &format!("{}.weights", self.m.id),
+            &self.weights,
+        ));
     }
     fn step(&mut self, tick: usize, time: f64, _dt: f64) {
         let channels = self.input_channels.clone();
@@ -785,7 +853,13 @@ pub struct ProductBlock {
 }
 
 impl ProductBlock {
-    pub fn new(id: &str, input_channels: Vec<String>, opts: MathBlockOptions, hold_last: bool, output_channel: &str) -> Self {
+    pub fn new(
+        id: &str,
+        input_channels: Vec<String>,
+        opts: MathBlockOptions,
+        hold_last: bool,
+        output_channel: &str,
+    ) -> Self {
         ProductBlock {
             m: MathBlockCore::new(id, opts),
             input_channels,
@@ -804,8 +878,16 @@ impl MathBlock for ProductBlock {
     }
     fn assert_block_preconditions(&self) {
         self.m.assert_base_preconditions();
-        require(Preconditions::non_empty("ProductBlock", &format!("{}.inputChannels", self.m.id), &self.input_channels));
-        assert_unique("ProductBlock", &format!("{}.inputChannels", self.m.id), &self.input_channels);
+        require(Preconditions::non_empty(
+            "ProductBlock",
+            &format!("{}.inputChannels", self.m.id),
+            &self.input_channels,
+        ));
+        assert_unique(
+            "ProductBlock",
+            &format!("{}.inputChannels", self.m.id),
+            &self.input_channels,
+        );
     }
     fn step(&mut self, tick: usize, time: f64, _dt: f64) {
         let channels = self.input_channels.clone();
@@ -830,7 +912,14 @@ pub struct GainBlock {
 }
 
 impl GainBlock {
-    pub fn new(id: &str, gain: f64, opts: MathBlockOptions, input_channel: &str, hold_last: bool, output_channel: &str) -> Self {
+    pub fn new(
+        id: &str,
+        gain: f64,
+        opts: MathBlockOptions,
+        input_channel: &str,
+        hold_last: bool,
+        output_channel: &str,
+    ) -> Self {
         GainBlock {
             m: MathBlockCore::new(id, opts),
             gain,
@@ -850,7 +939,11 @@ impl MathBlock for GainBlock {
     }
     fn assert_block_preconditions(&self) {
         self.m.assert_base_preconditions();
-        require(Preconditions::finite("GainBlock", &format!("{}.gain", self.m.id), self.gain));
+        require(Preconditions::finite(
+            "GainBlock",
+            &format!("{}.gain", self.m.id),
+            self.gain,
+        ));
     }
     fn step(&mut self, tick: usize, time: f64, _dt: f64) {
         let ch = self.input_channel.clone();
@@ -905,8 +998,16 @@ impl MathBlock for SaturationBlock {
     }
     fn assert_block_preconditions(&self) {
         self.m.assert_base_preconditions();
-        require(Preconditions::finite("SaturationBlock", &format!("{}.min", self.m.id), self.min));
-        require(Preconditions::finite("SaturationBlock", &format!("{}.max", self.m.id), self.max));
+        require(Preconditions::finite(
+            "SaturationBlock",
+            &format!("{}.min", self.m.id),
+            self.min,
+        ));
+        require(Preconditions::finite(
+            "SaturationBlock",
+            &format!("{}.max", self.m.id),
+            self.max,
+        ));
         require(Preconditions::check(
             "SaturationBlock",
             &format!("{}.bounds", self.m.id),
@@ -971,8 +1072,15 @@ impl IntegratorBlock {
 
     fn advance_toward(&mut self, target_tick: usize, incoming: &[MathSignal], dt: f64) {
         while self.state_tick < target_tick {
-            let fresh = latest_unused_at_or_before(incoming, self.state_tick, self.consumed_through_tick);
-            let sig = fresh.clone().or_else(|| if self.hold_last { self.last_input.clone() } else { None });
+            let fresh =
+                latest_unused_at_or_before(incoming, self.state_tick, self.consumed_through_tick);
+            let sig = fresh.clone().or_else(|| {
+                if self.hold_last {
+                    self.last_input.clone()
+                } else {
+                    None
+                }
+            });
             let Some(sig) = sig else {
                 return;
             };
@@ -985,7 +1093,11 @@ impl IntegratorBlock {
                 sig.value
             };
             self.state += dt * slope;
-            require(Preconditions::finite("IntegratorBlock", &format!("{}.state", self.m.id), self.state));
+            require(Preconditions::finite(
+                "IntegratorBlock",
+                &format!("{}.state", self.m.id),
+                self.state,
+            ));
             self.last_input = Some(sig);
             if let Some(f) = &fresh {
                 self.consumed_through_tick = f.tick as i64;
@@ -1004,12 +1116,19 @@ impl MathBlock for IntegratorBlock {
     }
     fn assert_block_preconditions(&self) {
         self.m.assert_base_preconditions();
-        require(Preconditions::finite("IntegratorBlock", &format!("{}.initialState", self.m.id), self.state));
+        require(Preconditions::finite(
+            "IntegratorBlock",
+            &format!("{}.initialState", self.m.id),
+            self.state,
+        ));
         require(Preconditions::check(
             "IntegratorBlock",
             &format!("{}.method", self.m.id),
             "be euler or trapezoid",
-            matches!(self.method, IntegratorMethod::Euler | IntegratorMethod::Trapezoid),
+            matches!(
+                self.method,
+                IntegratorMethod::Euler | IntegratorMethod::Trapezoid
+            ),
             Some(self.method.as_str().to_string()),
         ));
     }
@@ -1087,8 +1206,17 @@ impl MathBlock for DerivativeBlock {
             return;
         }
         let prev = self.previous.clone().unwrap();
-        let denom = if (sig.time - prev.time).abs() > 1e-12 { sig.time - prev.time } else { dt };
-        require(Preconditions::not_div_by_zero("DerivativeBlock", &format!("{}.dt", self.m.id), denom, 1e-12));
+        let denom = if (sig.time - prev.time).abs() > 1e-12 {
+            sig.time - prev.time
+        } else {
+            dt
+        };
+        require(Preconditions::not_div_by_zero(
+            "DerivativeBlock",
+            &format!("{}.dt", self.m.id),
+            denom,
+            1e-12,
+        ));
         let value = (sig.value - prev.value) / denom;
         self.previous = Some(sig);
         let oc = self.output_channel.clone();
@@ -1137,8 +1265,16 @@ impl MathBlock for FirstOrderFilterBlock {
     }
     fn assert_block_preconditions(&self) {
         self.m.assert_base_preconditions();
-        require(Preconditions::positive("FirstOrderFilterBlock", &format!("{}.tau", self.m.id), self.tau));
-        require(Preconditions::finite("FirstOrderFilterBlock", &format!("{}.initial", self.m.id), self.y));
+        require(Preconditions::positive(
+            "FirstOrderFilterBlock",
+            &format!("{}.tau", self.m.id),
+            self.tau,
+        ));
+        require(Preconditions::finite(
+            "FirstOrderFilterBlock",
+            &format!("{}.initial", self.m.id),
+            self.y,
+        ));
     }
     fn step(&mut self, tick: usize, time: f64, dt: f64) {
         let ch = self.input_channel.clone();
@@ -1219,7 +1355,11 @@ impl MathBlock for ComparatorBlock {
             true,
             None,
         ));
-        require(Preconditions::non_negative("ComparatorBlock", &format!("{}.tolerance", self.m.id), self.tolerance));
+        require(Preconditions::non_negative(
+            "ComparatorBlock",
+            &format!("{}.tolerance", self.m.id),
+            self.tolerance,
+        ));
         if self.right_channel.is_none() {
             require(Preconditions::finite(
                 "ComparatorBlock",
@@ -1295,11 +1435,24 @@ impl MathBlock for LogicBlock {
             true,
             None,
         ));
-        require(Preconditions::non_empty("LogicBlock", &format!("{}.inputChannels", self.m.id), &self.input_channels));
+        require(Preconditions::non_empty(
+            "LogicBlock",
+            &format!("{}.inputChannels", self.m.id),
+            &self.input_channels,
+        ));
         if self.op == LogicOp::Not {
-            require(Preconditions::length_eq("LogicBlock", &format!("{}.inputChannels", self.m.id), &self.input_channels, 1));
+            require(Preconditions::length_eq(
+                "LogicBlock",
+                &format!("{}.inputChannels", self.m.id),
+                &self.input_channels,
+                1,
+            ));
         }
-        assert_unique("LogicBlock", &format!("{}.inputChannels", self.m.id), &self.input_channels);
+        assert_unique(
+            "LogicBlock",
+            &format!("{}.inputChannels", self.m.id),
+            &self.input_channels,
+        );
     }
     fn step(&mut self, tick: usize, time: f64, _dt: f64) {
         let channels = self.input_channels.clone();
@@ -1315,7 +1468,8 @@ impl MathBlock for LogicBlock {
             LogicOp::Xor => bits.iter().filter(|b| **b).count() % 2 == 1,
         };
         let oc = self.output_channel.clone();
-        self.m.emit_value(if result { 1.0 } else { 0.0 }, tick, time, &oc);
+        self.m
+            .emit_value(if result { 1.0 } else { 0.0 }, tick, time, &oc);
     }
 }
 math_block_station!(LogicBlock);
@@ -1366,12 +1520,28 @@ impl MathBlock for ExpressionBlock {
     }
     fn assert_block_preconditions(&self) {
         self.m.assert_base_preconditions();
-        let names: Vec<String> = self.variable_channels.iter().map(|(n, _)| n.clone()).collect();
-        require(Preconditions::non_empty("ExpressionBlock", &format!("{}.variables", self.m.id), &names));
+        let names: Vec<String> = self
+            .variable_channels
+            .iter()
+            .map(|(n, _)| n.clone())
+            .collect();
+        require(Preconditions::non_empty(
+            "ExpressionBlock",
+            &format!("{}.variables", self.m.id),
+            &names,
+        ));
         for name in &names {
-            assert_name("ExpressionBlock", &format!("{}.variable.{name}", self.m.id), name);
+            assert_name(
+                "ExpressionBlock",
+                &format!("{}.variable.{name}", self.m.id),
+                name,
+            );
         }
-        assert_unique("ExpressionBlock", &format!("{}.variables", self.m.id), &names);
+        assert_unique(
+            "ExpressionBlock",
+            &format!("{}.variables", self.m.id),
+            &names,
+        );
         for key in self.constants.keys() {
             require(Preconditions::check(
                 "ExpressionBlock",
@@ -1448,7 +1618,11 @@ impl MathBlock for Laplacian1DBlock {
     }
     fn assert_block_preconditions(&self) {
         self.m.assert_base_preconditions();
-        require(Preconditions::finite("Laplacian1DBlock", &format!("{}.coefficient", self.m.id), self.coefficient));
+        require(Preconditions::finite(
+            "Laplacian1DBlock",
+            &format!("{}.coefficient", self.m.id),
+            self.coefficient,
+        ));
     }
     fn step(&mut self, tick: usize, time: f64, _dt: f64) {
         let lc = self.left_channel.clone();
@@ -1497,12 +1671,26 @@ pub struct RunDiagramOptions<'a> {
 }
 
 /// `runMathBlockDiagram(blocks, opts)`.
-pub fn run_math_block_diagram(blocks: Vec<MathBlockHandle>, opts: RunDiagramOptions) -> MathBlockRunResult {
-    require(Preconditions::non_empty("runMathBlockDiagram", "blocks", &blocks));
-    let ids: Vec<String> = blocks.iter().map(|h| h.reader.borrow().id().to_string()).collect();
+pub fn run_math_block_diagram(
+    blocks: Vec<MathBlockHandle>,
+    opts: RunDiagramOptions,
+) -> MathBlockRunResult {
+    require(Preconditions::non_empty(
+        "runMathBlockDiagram",
+        "blocks",
+        &blocks,
+    ));
+    let ids: Vec<String> = blocks
+        .iter()
+        .map(|h| h.reader.borrow().id().to_string())
+        .collect();
     assert_unique("runMathBlockDiagram", "block ids", &ids);
 
-    let max_block_ticks = blocks.iter().map(|h| h.reader.borrow().ticks()).max().unwrap_or(0);
+    let max_block_ticks = blocks
+        .iter()
+        .map(|h| h.reader.borrow().ticks())
+        .max()
+        .unwrap_or(0);
     let max_ticks = opts.max_ticks.unwrap_or(max_block_ticks + 1);
 
     if let Some(l) = opts.logger {
@@ -1519,7 +1707,11 @@ pub fn run_math_block_diagram(blocks: Vec<MathBlockHandle>, opts: RunDiagramOpti
     let stations: Vec<StationRef> = blocks.iter().map(|h| h.station.clone()).collect();
     let mut summary = run_iterative_des(
         stations,
-        IterativeRunOptions { shuffle: false, max_ticks: Some(max_ticks), ..Default::default() },
+        IterativeRunOptions {
+            shuffle: false,
+            max_ticks: Some(max_ticks),
+            ..Default::default()
+        },
     );
 
     let mut outputs: Vec<MathSample> = Vec::new();
@@ -1533,7 +1725,13 @@ pub fn run_math_block_diagram(blocks: Vec<MathBlockHandle>, opts: RunDiagramOpti
             level: Some("info".to_string()),
             fields: vec![
                 ("ticks".to_string(), summary.ticks.to_string()),
-                ("reason".to_string(), summary.reason.map(|r| r.as_str().to_string()).unwrap_or_default()),
+                (
+                    "reason".to_string(),
+                    summary
+                        .reason
+                        .map(|r| r.as_str().to_string())
+                        .unwrap_or_default(),
+                ),
                 ("outputs".to_string(), outputs.len().to_string()),
             ],
         });
@@ -1544,7 +1742,10 @@ pub fn run_math_block_diagram(blocks: Vec<MathBlockHandle>, opts: RunDiagramOpti
     let mut checks: Vec<ValidationCheck> = Vec::new();
     for h in &blocks {
         let b = h.reader.borrow();
-        let passed = b.output_history().iter().all(|x| x.value.is_finite() && x.time.is_finite());
+        let passed = b
+            .output_history()
+            .iter()
+            .all(|x| x.value.is_finite() && x.time.is_finite());
         checks.push(ValidationCheck {
             name: format!("math-block-finite-output/{}", b.id()),
             passed,
@@ -1567,7 +1768,12 @@ pub fn run_math_block_diagram(blocks: Vec<MathBlockHandle>, opts: RunDiagramOpti
     let visual_blocks = visual_block_specs(&refs);
 
     let validation = summary.validation.clone().unwrap_or_default();
-    MathBlockRunResult { summary, validation, outputs, visual_blocks }
+    MathBlockRunResult {
+        summary,
+        validation,
+        outputs,
+        visual_blocks,
+    }
 }
 
 // =============================================================================
@@ -1652,7 +1858,11 @@ pub fn run_ode_block_system(
     let t0 = params.t0.unwrap_or(0.0);
     let steps = duration_steps("ODEBlockSystem", t0, params.t1, params.dt);
     let ticks = steps + 1;
-    let opts = MathBlockOptions { dt: params.dt, ticks, t0: Some(t0) };
+    let opts = MathBlockOptions {
+        dt: params.dt,
+        ticks,
+        t0: Some(t0),
+    };
     let constants = finite_record("ODEBlockSystem", "constants", params.constants.as_ref());
     let method = params.method.unwrap_or(IntegratorMethod::Euler);
     let names: Vec<String> = params.states.iter().map(|s| s.name.clone()).collect();
@@ -1672,7 +1882,9 @@ pub fn run_ode_block_system(
             id: format!("rhs:{}", s.name),
             kind: "expression".to_string(),
             expression: Some(s.derivative.clone()),
-            inputs: Some(BlockGraphInputs::Map(names.iter().map(|n| (n.clone(), n.clone())).collect())),
+            inputs: Some(BlockGraphInputs::Map(
+                names.iter().map(|n| (n.clone(), n.clone())).collect(),
+            )),
             output: Some(MATH_OUT.to_string()),
         });
     }
@@ -1697,7 +1909,8 @@ pub fn run_ode_block_system(
         .states
         .iter()
         .map(|s| {
-            let variable_channels: Vec<(String, String)> = names.iter().map(|n| (n.clone(), n.clone())).collect();
+            let variable_channels: Vec<(String, String)> =
+                names.iter().map(|n| (n.clone(), n.clone())).collect();
             Rc::new(RefCell::new(ExpressionBlock::new(
                 &format!("rhs:{}", s.name),
                 &s.derivative,
@@ -1713,8 +1926,11 @@ pub fn run_ode_block_system(
     for (i, integ) in integrators.iter().enumerate() {
         let state_name = names[i].clone();
         for (j, rhs) in rhs_blocks.iter().enumerate() {
-            let target: StationRef = Rc::clone(rhs);
-            integ.borrow_mut().m_mut().pipe(target, MATH_OUT, &state_name);
+            let target: StationRef = rhs.clone();
+            integ
+                .borrow_mut()
+                .m_mut()
+                .pipe(target, MATH_OUT, &state_name);
             block_graph_edges.push(BlockGraphEdge {
                 from: format!("integrator:{state_name}"),
                 to: format!("rhs:{}", names[j]),
@@ -1725,8 +1941,11 @@ pub fn run_ode_block_system(
         }
     }
     for i in 0..rhs_blocks.len() {
-        let target: StationRef = Rc::clone(&integrators[i]);
-        rhs_blocks[i].borrow_mut().m_mut().pipe(target, MATH_OUT, MATH_IN);
+        let target: StationRef = integrators[i].clone();
+        rhs_blocks[i]
+            .borrow_mut()
+            .m_mut()
+            .pipe(target, MATH_OUT, MATH_IN);
         block_graph_edges.push(BlockGraphEdge {
             from: format!("rhs:{}", names[i]),
             to: format!("integrator:{}", names[i]),
@@ -1755,7 +1974,13 @@ pub fn run_ode_block_system(
     for rhs in &rhs_blocks {
         handles.push(MathBlockHandle::new(Rc::clone(rhs)));
     }
-    let run = run_math_block_diagram(handles, RunDiagramOptions { max_ticks: None, logger });
+    let run = run_math_block_diagram(
+        handles,
+        RunDiagramOptions {
+            max_ticks: None,
+            logger,
+        },
+    );
 
     let mut trace: Vec<ODETraceRow> = Vec::new();
     for tick in 0..ticks {
@@ -1763,17 +1988,35 @@ pub fn run_ode_block_system(
         let mut derivatives: HashMap<String, f64> = HashMap::new();
         for i in 0..params.states.len() {
             let name = names[i].clone();
-            let sv = integrators[i].borrow().output_history().get(tick).map(|s| s.value).unwrap_or(f64::NAN);
-            let dv = rhs_blocks[i].borrow().output_history().get(tick).map(|s| s.value).unwrap_or(f64::NAN);
+            let sv = integrators[i]
+                .borrow()
+                .output_history()
+                .get(tick)
+                .map(|s| s.value)
+                .unwrap_or(f64::NAN);
+            let dv = rhs_blocks[i]
+                .borrow()
+                .output_history()
+                .get(tick)
+                .map(|s| s.value)
+                .unwrap_or(f64::NAN);
             state.insert(name.clone(), sv);
             derivatives.insert(name, dv);
         }
-        let row = ODETraceRow { tick, time: t0 + tick as f64 * params.dt, state, derivatives };
+        let row = ODETraceRow {
+            tick,
+            time: t0 + tick as f64 * params.dt,
+            state,
+            derivatives,
+        };
         if let Some(l) = logger {
             l.log(LogEvent {
                 kind: "math-ode-tick".to_string(),
                 level: Some("debug".to_string()),
-                fields: vec![("tick".to_string(), tick.to_string()), ("time".to_string(), row.time.to_string())],
+                fields: vec![
+                    ("tick".to_string(), tick.to_string()),
+                    ("time".to_string(), row.time.to_string()),
+                ],
             });
         }
         trace.push(row);
@@ -1796,15 +2039,29 @@ pub fn run_ode_block_system(
 }
 
 fn validate_ode_params(params: &ODEBlockSystemParams) {
-    require(Preconditions::non_empty("ODEBlockSystem", "states", &params.states));
-    require(Preconditions::integer_in_range("ODEBlockSystem", "states.length", params.states.len() as f64, 1.0, 100.0));
+    require(Preconditions::non_empty(
+        "ODEBlockSystem",
+        "states",
+        &params.states,
+    ));
+    require(Preconditions::integer_in_range(
+        "ODEBlockSystem",
+        "states.length",
+        params.states.len() as f64,
+        1.0,
+        100.0,
+    ));
     let names: Vec<String> = params.states.iter().map(|s| s.name.clone()).collect();
     for name in &names {
         assert_name("ODEBlockSystem", "state.name", name);
     }
     assert_unique("ODEBlockSystem", "state.name", &names);
     for s in &params.states {
-        require(Preconditions::finite("ODEBlockSystem", &format!("{}.initial", s.name), s.initial));
+        require(Preconditions::finite(
+            "ODEBlockSystem",
+            &format!("{}.initial", s.name),
+            s.initial,
+        ));
         require(Preconditions::check(
             "ODEBlockSystem",
             &format!("{}.derivative", s.name),
@@ -1928,17 +2185,31 @@ pub fn run_heat1d_block_grid(
     let last_idx = initial.len() - 1;
     initial[last_idx] = right_boundary;
 
-    let opts = MathBlockOptions { dt: params.dt, ticks, t0: Some(t0) };
+    let opts = MathBlockOptions {
+        dt: params.dt,
+        ticks,
+        t0: Some(t0),
+    };
     let mut block_graph_edges: Vec<BlockGraphEdge> = Vec::new();
 
     // Cells occupy `handles[0..params.cells]`.
     let mut handles: Vec<MathBlockHandle> = Vec::new();
     for i in 0..params.cells {
         if i == 0 {
-            let b = Rc::new(RefCell::new(ConstantSourceBlock::new(&format!("cell:{i}"), left_boundary, opts, MATH_OUT)));
+            let b = Rc::new(RefCell::new(ConstantSourceBlock::new(
+                &format!("cell:{i}"),
+                left_boundary,
+                opts,
+                MATH_OUT,
+            )));
             handles.push(MathBlockHandle::new(b));
         } else if i == params.cells - 1 {
-            let b = Rc::new(RefCell::new(ConstantSourceBlock::new(&format!("cell:{i}"), right_boundary, opts, MATH_OUT)));
+            let b = Rc::new(RefCell::new(ConstantSourceBlock::new(
+                &format!("cell:{i}"),
+                right_boundary,
+                opts,
+                MATH_OUT,
+            )));
             handles.push(MathBlockHandle::new(b));
         } else {
             let b = Rc::new(RefCell::new(IntegratorBlock::new(
@@ -1966,15 +2237,53 @@ pub fn run_heat1d_block_grid(
             true,
             MATH_OUT,
         )));
-        let lap_station: StationRef = Rc::clone(&lap);
-        handles[i - 1].reader.borrow_mut().core_mut().pipe(lap_station.clone(), MATH_OUT, "left");
-        handles[i].reader.borrow_mut().core_mut().pipe(lap_station.clone(), MATH_OUT, "center");
-        handles[i + 1].reader.borrow_mut().core_mut().pipe(lap_station.clone(), MATH_OUT, "right");
-        lap.borrow_mut().m_mut().pipe(handles[i].station.clone(), MATH_OUT, MATH_IN);
-        block_graph_edges.push(BlockGraphEdge { from: format!("cell:{}", i - 1), to: format!("laplacian:{i}"), from_channel: MATH_OUT.to_string(), to_channel: "left".to_string(), signal: "MathSignal".to_string() });
-        block_graph_edges.push(BlockGraphEdge { from: format!("cell:{i}"), to: format!("laplacian:{i}"), from_channel: MATH_OUT.to_string(), to_channel: "center".to_string(), signal: "MathSignal".to_string() });
-        block_graph_edges.push(BlockGraphEdge { from: format!("cell:{}", i + 1), to: format!("laplacian:{i}"), from_channel: MATH_OUT.to_string(), to_channel: "right".to_string(), signal: "MathSignal".to_string() });
-        block_graph_edges.push(BlockGraphEdge { from: format!("laplacian:{i}"), to: format!("cell:{i}"), from_channel: MATH_OUT.to_string(), to_channel: MATH_IN.to_string(), signal: "MathSignal".to_string() });
+        let lap_station: StationRef = lap.clone();
+        handles[i - 1]
+            .reader
+            .borrow_mut()
+            .core_mut()
+            .pipe(lap_station.clone(), MATH_OUT, "left");
+        handles[i]
+            .reader
+            .borrow_mut()
+            .core_mut()
+            .pipe(lap_station.clone(), MATH_OUT, "center");
+        handles[i + 1]
+            .reader
+            .borrow_mut()
+            .core_mut()
+            .pipe(lap_station.clone(), MATH_OUT, "right");
+        lap.borrow_mut()
+            .m_mut()
+            .pipe(handles[i].station.clone(), MATH_OUT, MATH_IN);
+        block_graph_edges.push(BlockGraphEdge {
+            from: format!("cell:{}", i - 1),
+            to: format!("laplacian:{i}"),
+            from_channel: MATH_OUT.to_string(),
+            to_channel: "left".to_string(),
+            signal: "MathSignal".to_string(),
+        });
+        block_graph_edges.push(BlockGraphEdge {
+            from: format!("cell:{i}"),
+            to: format!("laplacian:{i}"),
+            from_channel: MATH_OUT.to_string(),
+            to_channel: "center".to_string(),
+            signal: "MathSignal".to_string(),
+        });
+        block_graph_edges.push(BlockGraphEdge {
+            from: format!("cell:{}", i + 1),
+            to: format!("laplacian:{i}"),
+            from_channel: MATH_OUT.to_string(),
+            to_channel: "right".to_string(),
+            signal: "MathSignal".to_string(),
+        });
+        block_graph_edges.push(BlockGraphEdge {
+            from: format!("laplacian:{i}"),
+            to: format!("cell:{i}"),
+            from_channel: MATH_OUT.to_string(),
+            to_channel: MATH_IN.to_string(),
+            signal: "MathSignal".to_string(),
+        });
         lap_handles.push(MathBlockHandle::new(lap));
     }
 
@@ -1993,7 +2302,13 @@ pub fn run_heat1d_block_grid(
 
     let cell_count = params.cells;
     handles.extend(lap_handles);
-    let run = run_math_block_diagram(handles, RunDiagramOptions { max_ticks: None, logger });
+    let run = run_math_block_diagram(
+        handles,
+        RunDiagramOptions {
+            max_ticks: None,
+            logger,
+        },
+    );
 
     // Re-acquire cell readers from `run` is not possible (handles moved); instead
     // read cell output from the run's flattened outputs keyed by block id.
@@ -2017,7 +2332,14 @@ pub fn run_heat1d_block_grid(
         let min = values.iter().cloned().fold(f64::INFINITY, f64::min);
         let max = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         let mean = values.iter().sum::<f64>() / values.len() as f64;
-        let row = Heat1DTraceRow { tick, time: t0 + tick as f64 * params.dt, values, min, max, mean };
+        let row = Heat1DTraceRow {
+            tick,
+            time: t0 + tick as f64 * params.dt,
+            values,
+            min,
+            max,
+            mean,
+        };
         if let Some(l) = logger {
             l.log(LogEvent {
                 kind: "math-heat1d-tick".to_string(),
@@ -2038,7 +2360,11 @@ pub fn run_heat1d_block_grid(
     for i in 0..params.cells {
         block_graph.push(BlockGraphNode {
             id: format!("cell:{i}"),
-            kind: if i == 0 || i == params.cells - 1 { "constant-boundary".to_string() } else { "integrator".to_string() },
+            kind: if i == 0 || i == params.cells - 1 {
+                "constant-boundary".to_string()
+            } else {
+                "integrator".to_string()
+            },
             expression: None,
             inputs: None,
             output: Some(MATH_OUT.to_string()),
@@ -2049,14 +2375,24 @@ pub fn run_heat1d_block_grid(
             id: format!("laplacian:{i}"),
             kind: "laplacian-1d".to_string(),
             expression: None,
-            inputs: Some(BlockGraphInputs::List(vec!["left".to_string(), "center".to_string(), "right".to_string()])),
+            inputs: Some(BlockGraphInputs::List(vec![
+                "left".to_string(),
+                "center".to_string(),
+                "right".to_string(),
+            ])),
             output: Some(MATH_OUT.to_string()),
         });
     }
 
     let final_values = trace.last().map(|r| r.values.clone()).unwrap_or_default();
     let mut validation = run.validation.clone();
-    validation.extend(validate_heat_trace(&trace, ticks, &initial, left_boundary, right_boundary));
+    validation.extend(validate_heat_trace(
+        &trace,
+        ticks,
+        &initial,
+        left_boundary,
+        right_boundary,
+    ));
 
     Heat1DBlockResult {
         params,
@@ -2075,17 +2411,40 @@ pub fn run_heat1d_block_grid(
 }
 
 fn validate_heat_params(params: &Heat1DBlockParams) {
-    require(Preconditions::integer_in_range("Heat1DBlockGrid", "cells", params.cells as f64, 3.0, 1000.0));
-    require(Preconditions::positive("Heat1DBlockGrid", "length", params.length));
-    require(Preconditions::non_negative("Heat1DBlockGrid", "alpha", params.alpha));
+    require(Preconditions::integer_in_range(
+        "Heat1DBlockGrid",
+        "cells",
+        params.cells as f64,
+        3.0,
+        1000.0,
+    ));
+    require(Preconditions::positive(
+        "Heat1DBlockGrid",
+        "length",
+        params.length,
+    ));
+    require(Preconditions::non_negative(
+        "Heat1DBlockGrid",
+        "alpha",
+        params.alpha,
+    ));
     require(Preconditions::positive("Heat1DBlockGrid", "dt", params.dt));
     require(Preconditions::finite("Heat1DBlockGrid", "t1", params.t1));
     if let Some(t0) = params.t0 {
         require(Preconditions::finite("Heat1DBlockGrid", "t0", t0));
     }
     if let Some(iv) = &params.initial_values {
-        require(Preconditions::length_eq("Heat1DBlockGrid", "initialValues", iv, params.cells));
-        require(Preconditions::all_finite("Heat1DBlockGrid", "initialValues", iv));
+        require(Preconditions::length_eq(
+            "Heat1DBlockGrid",
+            "initialValues",
+            iv,
+            params.cells,
+        ));
+        require(Preconditions::all_finite(
+            "Heat1DBlockGrid",
+            "initialValues",
+            iv,
+        ));
     }
     if let Some(ie) = &params.initial_expression {
         parse(ie);
@@ -2094,7 +2453,11 @@ fn validate_heat_params(params: &Heat1DBlockParams) {
         require(Preconditions::finite("Heat1DBlockGrid", "leftBoundary", lb));
     }
     if let Some(rb) = params.right_boundary {
-        require(Preconditions::finite("Heat1DBlockGrid", "rightBoundary", rb));
+        require(Preconditions::finite(
+            "Heat1DBlockGrid",
+            "rightBoundary",
+            rb,
+        ));
     }
     finite_record("Heat1DBlockGrid", "constants", params.constants.as_ref());
 }
@@ -2103,7 +2466,10 @@ fn build_heat_initial_values(params: &Heat1DBlockParams, x: &[f64]) -> Vec<f64> 
     if let Some(iv) = &params.initial_values {
         return iv.clone();
     }
-    let expression = params.initial_expression.clone().unwrap_or_else(|| "sin(pi*x/length)".to_string());
+    let expression = params
+        .initial_expression
+        .clone()
+        .unwrap_or_else(|| "sin(pi*x/length)".to_string());
     let ast = parse(&expression);
     let mut constants: HashMap<String, f64> = HashMap::new();
     constants.insert("pi".to_string(), std::f64::consts::PI);
@@ -2119,7 +2485,11 @@ fn build_heat_initial_values(params: &Heat1DBlockParams, x: &[f64]) -> Vec<f64> 
             let mut env = constants.clone();
             env.insert("x".to_string(), *xi);
             let value = evaluate(&ast, &env);
-            require(Preconditions::finite("Heat1DBlockGrid", "initialExpression", value));
+            require(Preconditions::finite(
+                "Heat1DBlockGrid",
+                "initialExpression",
+                value,
+            ));
             value
         })
         .collect()
@@ -2132,7 +2502,9 @@ fn validate_heat_trace(
     left_boundary: f64,
     right_boundary: f64,
 ) -> Vec<ValidationCheck> {
-    let finite = trace.iter().all(|row| row.time.is_finite() && row.values.iter().all(|v| v.is_finite()));
+    let finite = trace
+        .iter()
+        .all(|row| row.time.is_finite() && row.values.iter().all(|v| v.is_finite()));
     let mut lo = f64::INFINITY;
     let mut hi = f64::NEG_INFINITY;
     for &v in initial.iter().chain([left_boundary, right_boundary].iter()) {
@@ -2141,9 +2513,14 @@ fn validate_heat_trace(
     }
     lo -= 1e-9;
     hi += 1e-9;
-    let max_principle = trace.iter().all(|row| row.values.iter().all(|&v| v >= lo && v <= hi));
+    let max_principle = trace
+        .iter()
+        .all(|row| row.values.iter().all(|&v| v >= lo && v <= hi));
     let obs_lo = trace.iter().map(|r| r.min).fold(f64::INFINITY, f64::min);
-    let obs_hi = trace.iter().map(|r| r.max).fold(f64::NEG_INFINITY, f64::max);
+    let obs_hi = trace
+        .iter()
+        .map(|r| r.max)
+        .fold(f64::NEG_INFINITY, f64::max);
     vec![
         ValidationCheck {
             name: "heat-trace-length".to_string(),
@@ -2178,9 +2555,18 @@ mod tests {
 
     #[test]
     fn constant_source_emits_each_tick() {
-        let opts = MathBlockOptions { dt: 0.1, ticks: 3, t0: Some(0.0) };
-        let block = Rc::new(RefCell::new(ConstantSourceBlock::new("c", 2.5, opts, MATH_OUT)));
-        let run = run_math_block_diagram(vec![MathBlockHandle::new(block)], RunDiagramOptions::default());
+        let opts = MathBlockOptions {
+            dt: 0.1,
+            ticks: 3,
+            t0: Some(0.0),
+        };
+        let block = Rc::new(RefCell::new(ConstantSourceBlock::new(
+            "c", 2.5, opts, MATH_OUT,
+        )));
+        let run = run_math_block_diagram(
+            vec![MathBlockHandle::new(block)],
+            RunDiagramOptions::default(),
+        );
         assert_eq!(run.outputs.len(), 3);
         assert!(run.outputs.iter().all(|s| (s.value - 2.5).abs() < 1e-12));
         assert!(run.validation.iter().all(|c| c.passed));
@@ -2190,7 +2576,11 @@ mod tests {
     fn integrator_of_constant_is_a_ramp() {
         // dx/dt = 1, x0 = 0, dt = 1, over 4 steps -> x(4) ≈ 4.
         let params = ODEBlockSystemParams {
-            states: vec![ODEStateSpec { name: "x".to_string(), initial: 0.0, derivative: "1".to_string() }],
+            states: vec![ODEStateSpec {
+                name: "x".to_string(),
+                initial: 0.0,
+                derivative: "1".to_string(),
+            }],
             t0: Some(0.0),
             t1: 4.0,
             dt: 1.0,
@@ -2201,14 +2591,22 @@ mod tests {
         assert_eq!(result.trace.len(), 5);
         let xf = *result.final_state.get("x").unwrap();
         assert!((xf - 4.0).abs() < 1e-9, "x(4) = {xf}");
-        assert!(result.validation.iter().all(|c| c.passed), "validation: {:?}", result.validation);
+        assert!(
+            result.validation.iter().all(|c| c.passed),
+            "validation: {:?}",
+            result.validation
+        );
     }
 
     #[test]
     fn exponential_decay_ode() {
         // dx/dt = -x, x0 = 1, small dt -> decays toward 0, stays in (0, 1].
         let params = ODEBlockSystemParams {
-            states: vec![ODEStateSpec { name: "x".to_string(), initial: 1.0, derivative: "-x".to_string() }],
+            states: vec![ODEStateSpec {
+                name: "x".to_string(),
+                initial: 1.0,
+                derivative: "-x".to_string(),
+            }],
             t0: Some(0.0),
             t1: 1.0,
             dt: 0.05,
@@ -2239,6 +2637,10 @@ mod tests {
         let result = run_heat1d_block_grid(params, None);
         assert_eq!(result.trace.len(), result.steps + 1);
         assert!(result.cfl <= 0.5 + 1e-12);
-        assert!(result.validation.iter().all(|c| c.passed), "validation: {:?}", result.validation);
+        assert!(
+            result.validation.iter().all(|c| c.passed),
+            "validation: {:?}",
+            result.validation
+        );
     }
 }

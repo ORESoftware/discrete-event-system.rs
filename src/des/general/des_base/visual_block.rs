@@ -296,7 +296,12 @@ pub struct VisualBlockMember {
     pub kind: String,
 }
 
-const DEFAULT_LAYOUT: ResolvedLayout = ResolvedLayout { x: 24.0, y: 24.0, w: 180.0, h: 64.0 };
+const DEFAULT_LAYOUT: ResolvedLayout = ResolvedLayout {
+    x: 24.0,
+    y: 24.0,
+    w: 180.0,
+    h: 64.0,
+};
 
 fn default_style() -> ResolvedStyle {
     ResolvedStyle {
@@ -352,14 +357,20 @@ impl VisualBlock {
     /// `static source(id, outputs, opts)`.
     pub fn source(id: &str, outputs: Vec<VisualPortInput>, mut opts: VisualBlockOptions) -> Self {
         opts.role = Some(VisualBlockRole::Source);
-        opts.ports = Some(VisualBlockPortSpec { inputs: Vec::new(), outputs });
+        opts.ports = Some(VisualBlockPortSpec {
+            inputs: Vec::new(),
+            outputs,
+        });
         VisualBlock::new(id, opts)
     }
 
     /// `static sink(id, inputs, opts)`.
     pub fn sink(id: &str, inputs: Vec<VisualPortInput>, mut opts: VisualBlockOptions) -> Self {
         opts.role = Some(VisualBlockRole::Sink);
-        opts.ports = Some(VisualBlockPortSpec { inputs, outputs: Vec::new() });
+        opts.ports = Some(VisualBlockPortSpec {
+            inputs,
+            outputs: Vec::new(),
+        });
         VisualBlock::new(id, opts)
     }
 
@@ -409,10 +420,18 @@ impl VisualBlock {
     /// `addInputPort(port)`.
     pub fn add_input_port(&mut self, port: VisualPortInput) -> VisualBlockPort {
         if self.visual_options.role == VisualBlockRole::Source {
-            panic!("VisualBlock({}): source blocks cannot have input ports", self.id());
+            panic!(
+                "VisualBlock({}): source blocks cannot have input ports",
+                self.id()
+            );
         }
         let normalized = normalize_port(&port, VisualPortDirection::In);
-        assert_unique_port(&self.visual_options.inputs, &normalized.id, &self.id(), "input");
+        assert_unique_port(
+            &self.visual_options.inputs,
+            &normalized.id,
+            &self.id(),
+            "input",
+        );
         self.visual_options.inputs.push(normalized.clone());
         normalized
     }
@@ -420,10 +439,18 @@ impl VisualBlock {
     /// `addOutputPort(port)`.
     pub fn add_output_port(&mut self, port: VisualPortInput) -> VisualBlockPort {
         if self.visual_options.role == VisualBlockRole::Sink {
-            panic!("VisualBlock({}): sink blocks cannot have output ports", self.id());
+            panic!(
+                "VisualBlock({}): sink blocks cannot have output ports",
+                self.id()
+            );
         }
         let normalized = normalize_port(&port, VisualPortDirection::Out);
-        assert_unique_port(&self.visual_options.outputs, &normalized.id, &self.id(), "output");
+        assert_unique_port(
+            &self.visual_options.outputs,
+            &normalized.id,
+            &self.id(),
+            "output",
+        );
         self.visual_options.outputs.push(normalized.clone());
         normalized
     }
@@ -435,8 +462,12 @@ impl VisualBlock {
         target: &mut VisualBlock,
         opts: VisualBlockConnectionOptions,
     ) -> VisualBlockConnectionSpec {
-        let output = self.resolve_port(VisualPortDirection::Out, opts.from_port.as_deref()).clone();
-        let input = target.resolve_port(VisualPortDirection::In, opts.to_port.as_deref()).clone();
+        let output = self
+            .resolve_port(VisualPortDirection::Out, opts.from_port.as_deref())
+            .clone();
+        let input = target
+            .resolve_port(VisualPortDirection::In, opts.to_port.as_deref())
+            .clone();
         let kind = opts.kind.clone().unwrap_or_else(|| output.kind.clone());
         if output.kind != kind {
             panic!(
@@ -457,13 +488,18 @@ impl VisualBlock {
             );
         }
         let connection = VisualBlockConnectionSpec {
-            id: opts
-                .id
-                .clone()
-                .unwrap_or_else(|| format!("{}:{}->{}:{}", self.id(), output.id, target.id(), input.id)),
+            id: opts.id.clone().unwrap_or_else(|| {
+                format!("{}:{}->{}:{}", self.id(), output.id, target.id(), input.id)
+            }),
             kind,
-            from: ConnectionEndpoint { block_id: self.id(), port_id: output.id.clone() },
-            to: ConnectionEndpoint { block_id: target.id(), port_id: input.id.clone() },
+            from: ConnectionEndpoint {
+                block_id: self.id(),
+                port_id: output.id.clone(),
+            },
+            to: ConnectionEndpoint {
+                block_id: target.id(),
+                port_id: input.id.clone(),
+            },
             metadata: opts.metadata.clone(),
         };
         self.visual_connections_out.push(connection.clone());
@@ -505,12 +541,23 @@ impl VisualBlock {
                 inputs: clone_ports(&self.visual_options.inputs),
                 outputs: clone_ports(&self.visual_options.outputs),
             },
-            connections_in: self.visual_connections_in.iter().map(clone_connection).collect(),
-            connections_out: self.visual_connections_out.iter().map(clone_connection).collect(),
+            connections_in: self
+                .visual_connections_in
+                .iter()
+                .map(clone_connection)
+                .collect(),
+            connections_out: self
+                .visual_connections_out
+                .iter()
+                .map(clone_connection)
+                .collect(),
             contains: self
                 .visual_members
                 .iter()
-                .map(|m| VisualBlockContains { id: member_id(m), kind: member_kind(m) })
+                .map(|m| VisualBlockContains {
+                    id: member_id(m),
+                    kind: member_kind(m),
+                })
                 .collect(),
             style: self.visual_options.style.clone(),
             metadata: self.visual_options.metadata.clone(),
@@ -532,18 +579,31 @@ impl VisualBlock {
         self.visual_connections_in.push(connection);
     }
 
-    fn resolve_port(&self, direction: VisualPortDirection, port_id: Option<&str>) -> &VisualBlockPort {
+    fn resolve_port(
+        &self,
+        direction: VisualPortDirection,
+        port_id: Option<&str>,
+    ) -> &VisualBlockPort {
         let ports = match direction {
             VisualPortDirection::In => &self.visual_options.inputs,
             VisualPortDirection::Out => &self.visual_options.outputs,
         };
         if let Some(pid) = port_id {
             return ports.iter().find(|p| p.id == pid).unwrap_or_else(|| {
-                panic!("VisualBlock({}): unknown {} port \"{}\"", self.id(), direction.as_str(), pid)
+                panic!(
+                    "VisualBlock({}): unknown {} port \"{}\"",
+                    self.id(),
+                    direction.as_str(),
+                    pid
+                )
             });
         }
         if ports.len() != 1 {
-            let hint = if direction == VisualPortDirection::In { "toPort" } else { "fromPort" };
+            let hint = if direction == VisualPortDirection::In {
+                "toPort"
+            } else {
+                "fromPort"
+            };
             panic!(
                 "VisualBlock({}): expected exactly one {} port, found {}; pass {}",
                 self.id(),
@@ -556,11 +616,21 @@ impl VisualBlock {
     }
 
     fn assert_role_ports(&self) {
-        if self.visual_options.role == VisualBlockRole::Source && !self.visual_options.inputs.is_empty() {
-            panic!("VisualBlock({}): source blocks can only define output ports", self.id());
+        if self.visual_options.role == VisualBlockRole::Source
+            && !self.visual_options.inputs.is_empty()
+        {
+            panic!(
+                "VisualBlock({}): source blocks can only define output ports",
+                self.id()
+            );
         }
-        if self.visual_options.role == VisualBlockRole::Sink && !self.visual_options.outputs.is_empty() {
-            panic!("VisualBlock({}): sink blocks can only define input ports", self.id());
+        if self.visual_options.role == VisualBlockRole::Sink
+            && !self.visual_options.outputs.is_empty()
+        {
+            panic!(
+                "VisualBlock({}): sink blocks can only define input ports",
+                self.id()
+            );
         }
     }
 }
@@ -736,13 +806,20 @@ fn default_layout_for(index: usize, layout: ResolvedLayout) -> ResolvedLayout {
     }
 }
 
-fn normalize_ports(ports: &[VisualPortInput], direction: VisualPortDirection) -> Vec<VisualBlockPort> {
+fn normalize_ports(
+    ports: &[VisualPortInput],
+    direction: VisualPortDirection,
+) -> Vec<VisualBlockPort> {
     let normalized: Vec<VisualBlockPort> =
         ports.iter().map(|p| normalize_port(p, direction)).collect();
     let mut seen = std::collections::HashSet::new();
     for port in &normalized {
         if !seen.insert(port.id.clone()) {
-            panic!("VisualBlock: duplicate {} port \"{}\"", direction.as_str(), port.id);
+            panic!(
+                "VisualBlock: duplicate {} port \"{}\"",
+                direction.as_str(),
+                port.id
+            );
         }
     }
     normalized
@@ -750,7 +827,10 @@ fn normalize_ports(ports: &[VisualPortInput], direction: VisualPortDirection) ->
 
 fn normalize_port(port: &VisualPortInput, direction: VisualPortDirection) -> VisualBlockPort {
     let raw: VisualPortOptions = match port {
-        VisualPortInput::Name(s) => VisualPortOptions { id: s.clone(), ..Default::default() },
+        VisualPortInput::Name(s) => VisualPortOptions {
+            id: s.clone(),
+            ..Default::default()
+        },
         VisualPortInput::Opts(o) => o.clone(),
     };
     if raw.id.trim().is_empty() {
@@ -760,7 +840,10 @@ fn normalize_port(port: &VisualPortInput, direction: VisualPortDirection) -> Vis
     // only the non-negativity guard remains.
     if let Some(cap) = raw.capacity {
         if cap < 0 {
-            panic!("VisualBlock port \"{}\" capacity must be a non-negative integer", raw.id);
+            panic!(
+                "VisualBlock port \"{}\" capacity must be a non-negative integer",
+                raw.id
+            );
         }
     }
     let kind = raw.kind.clone().unwrap_or_else(|| "token".to_string());
@@ -832,7 +915,11 @@ mod tests {
 
     #[test]
     fn render_emits_box_labels_and_ports() {
-        let block = VisualBlock::source("gen", vec!["a".into(), "b".into()], VisualBlockOptions::default());
+        let block = VisualBlock::source(
+            "gen",
+            vec!["a".into(), "b".into()],
+            VisualBlockOptions::default(),
+        );
         let shapes = block.render_visual_block(VisualBlockRenderContext::default());
         // rect + 2 text + 2 output port circles.
         assert_eq!(shapes.len(), 5);

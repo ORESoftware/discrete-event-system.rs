@@ -36,8 +36,8 @@ use crate::des::general::des_spec::{
 };
 
 use crate::des::general::network_flow::{
-    build_five_intersection_traffic_network, run_max_flow, run_traffic_flow, FlowEdge,
-    MaxFlowParams, MaxFlowResult, TrafficNodeKind, TrafficParams, TrafficResult,
+    run_max_flow, run_traffic_flow, FlowEdge, MaxFlowParams, MaxFlowResult, TrafficNodeKind,
+    TrafficParams, TrafficResult,
 };
 use crate::des::general::smart_traffic_flow::{
     run_smart_traffic_flow, SmartTrafficParams, SmartTrafficResult,
@@ -47,11 +47,26 @@ use crate::des::general::smart_traffic_flow::{
 // Schema builders.
 // =============================================================================
 
-fn num(min: Option<f64>, max: Option<f64>, integer: Option<bool>, default: Option<f64>) -> ParamSchema {
-    ParamSchema::Number { min, max, integer, default, description: None }
+fn num(
+    min: Option<f64>,
+    max: Option<f64>,
+    integer: Option<bool>,
+    default: Option<f64>,
+) -> ParamSchema {
+    ParamSchema::Number {
+        min,
+        max,
+        integer,
+        default,
+        description: None,
+    }
 }
 fn string_field() -> ParamSchema {
-    ParamSchema::String { allowed: None, default: None, description: None }
+    ParamSchema::String {
+        allowed: None,
+        default: None,
+        description: None,
+    }
 }
 fn str_enum(allowed: &[&str], default: &str) -> ParamSchema {
     ParamSchema::String {
@@ -61,11 +76,19 @@ fn str_enum(allowed: &[&str], default: &str) -> ParamSchema {
     }
 }
 fn arr(items: ParamSchema, min_length: Option<usize>, max_length: Option<usize>) -> ParamSchema {
-    ParamSchema::Array { items: Box::new(items), min_length, max_length, description: None }
+    ParamSchema::Array {
+        items: Box::new(items),
+        min_length,
+        max_length,
+        description: None,
+    }
 }
 fn obj(fields: Vec<(&str, ParamSchema)>, required: Vec<&str>) -> ParamSchema {
     ParamSchema::Object {
-        fields: fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+        fields: fields
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
         required: Some(required.iter().map(|s| s.to_string()).collect()),
         description: None,
     }
@@ -92,14 +115,21 @@ fn max_flow_problem_fields() -> Vec<(&'static str, ParamSchema)> {
         ("maxAugmentations", num(Some(1.0), None, Some(true), None)),
         (
             "nodeCoordinates",
-            arr(arr(num(None, None, None, None), Some(2), Some(2)), None, None),
+            arr(
+                arr(num(None, None, None, None), Some(2), Some(2)),
+                None,
+                None,
+            ),
         ),
         ("nodeNames", arr(string_field(), None, None)),
     ]
 }
 
 fn max_flow_problem_schema() -> ParamSchema {
-    obj(max_flow_problem_fields(), vec!["numNodes", "source", "sink", "edges"])
+    obj(
+        max_flow_problem_fields(),
+        vec!["numNodes", "source", "sink", "edges"],
+    )
 }
 
 fn max_flow_schema() -> ParamSchema {
@@ -115,7 +145,10 @@ fn traffic_fields() -> Vec<(&'static str, ParamSchema)> {
     let traffic_node = obj(
         vec![
             ("id", string_field()),
-            ("kind", str_enum(&["source", "intersection", "sink"], "intersection")),
+            (
+                "kind",
+                str_enum(&["source", "intersection", "sink"], "intersection"),
+            ),
             ("x", num(None, None, None, None)),
             ("y", num(None, None, None, None)),
         ],
@@ -172,12 +205,18 @@ fn traffic_fields() -> Vec<(&'static str, ParamSchema)> {
         vec!["nodes", "lanes", "sources", "sinks"],
     );
     vec![
-        ("builtin", str_enum(&["five-intersection"], "five-intersection")),
+        (
+            "builtin",
+            str_enum(&["five-intersection"], "five-intersection"),
+        ),
         ("network", traffic_network),
         ("durationSec", num(Some(1.0), None, None, Some(180.0))),
         ("dtSec", num(Some(0.01), None, None, Some(1.0))),
         ("seed", num(None, None, Some(true), Some(19.0))),
-        ("maxCars", num(Some(1.0), Some(299.0), Some(true), Some(250.0))),
+        (
+            "maxCars",
+            num(Some(1.0), Some(299.0), Some(true), Some(250.0)),
+        ),
         ("carLengthM", num(Some(0.1), None, None, Some(4.8))),
         ("carWidthM", num(Some(0.1), None, None, Some(1.8))),
         ("laneWidthM", num(Some(0.1), None, None, Some(3.7))),
@@ -194,7 +233,10 @@ fn traffic_fields() -> Vec<(&'static str, ParamSchema)> {
 }
 
 fn traffic_schema() -> ParamSchema {
-    obj(traffic_fields(), vec!["durationSec", "dtSec", "seed", "maxCars"])
+    obj(
+        traffic_fields(),
+        vec!["durationSec", "dtSec", "seed", "maxCars"],
+    )
 }
 
 fn smart_traffic_schema() -> ParamSchema {
@@ -204,15 +246,36 @@ fn smart_traffic_schema() -> ParamSchema {
         slot.1 = num(Some(0.01), None, None, Some(0.1));
     }
     fields.extend(vec![
-        ("smartCarPoolSize", num(Some(1.0), Some(10000.0), Some(true), Some(250.0))),
+        (
+            "smartCarPoolSize",
+            num(Some(1.0), Some(10000.0), Some(true), Some(250.0)),
+        ),
         ("actorShuffleSeed", num(None, None, Some(true), None)),
         ("accidentRiskScale", num(Some(0.0), None, None, Some(0.0))),
-        ("accidentProbability", num(Some(0.0), Some(1.0), None, Some(0.0))),
-        ("accidentAccelBoostMps2", num(Some(0.0), None, None, Some(10.0))),
-        ("accidentFaultDurationSec", num(Some(0.1), None, None, Some(1.0))),
-        ("distancePreferenceSpread", num(Some(0.0), Some(1.5), None, Some(0.0))),
-        ("startPreferenceSpread", num(Some(0.0), Some(1.5), None, Some(0.0))),
-        ("accidentFlashSeconds", num(Some(0.1), None, None, Some(2.0))),
+        (
+            "accidentProbability",
+            num(Some(0.0), Some(1.0), None, Some(0.0)),
+        ),
+        (
+            "accidentAccelBoostMps2",
+            num(Some(0.0), None, None, Some(10.0)),
+        ),
+        (
+            "accidentFaultDurationSec",
+            num(Some(0.1), None, None, Some(1.0)),
+        ),
+        (
+            "distancePreferenceSpread",
+            num(Some(0.0), Some(1.5), None, Some(0.0)),
+        ),
+        (
+            "startPreferenceSpread",
+            num(Some(0.0), Some(1.5), None, Some(0.0)),
+        ),
+        (
+            "accidentFlashSeconds",
+            num(Some(0.1), None, None, Some(2.0)),
+        ),
     ]);
     obj(fields, vec!["durationSec", "dtSec", "seed", "maxCars"])
 }
@@ -247,7 +310,12 @@ fn build_teaching_max_flow_params() -> MaxFlowParams {
         num_nodes: 6,
         source: 0,
         sink: 5,
-        node_names: Some(vec!["s", "a", "b", "c", "d", "t"].into_iter().map(String::from).collect()),
+        node_names: Some(
+            vec!["s", "a", "b", "c", "d", "t"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+        ),
         node_coordinates: Some(vec![
             (90.0, 260.0),
             (260.0, 160.0),
@@ -320,13 +388,30 @@ impl DESModelRegistration<MaxFlowAdapterParams, MaxFlowResult> for MaxFlowAdapte
         run_max_flow(normalize_max_flow_params(params), None)
     }
     fn summarize(&self, r: &MaxFlowResult, _p: &MaxFlowAdapterParams) -> String {
-        let cut_edges = r.min_cut.cut_edges.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", ");
+        let cut_edges = r
+            .min_cut
+            .cut_edges
+            .iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
         [
             "MAX FLOW".to_string(),
             "------------------------".to_string(),
-            format!("  nodes={} edges={}", r.params.num_nodes, r.params.edges.len()),
-            format!("  max flow={:.4} augmentations={}", r.max_flow, r.trace.len()),
-            format!("  min cut capacity={:.4} cut edges=[{cut_edges}]", r.min_cut.capacity),
+            format!(
+                "  nodes={} edges={}",
+                r.params.num_nodes,
+                r.params.edges.len()
+            ),
+            format!(
+                "  max flow={:.4} augmentations={}",
+                r.max_flow,
+                r.trace.len()
+            ),
+            format!(
+                "  min cut capacity={:.4} cut edges=[{cut_edges}]",
+                r.min_cut.capacity
+            ),
             format!("  validation: {}", validation_line(&r.validation)),
         ]
         .join("\n")
@@ -345,11 +430,21 @@ impl DESModelRegistration<MaxFlowAdapterParams, MaxFlowResult> for MaxFlowAdapte
         }
         write_csv_lines(csv_path, &lines);
     }
-    fn animate(&self, _result: &MaxFlowResult, _params: &MaxFlowAdapterParams, _runtime: &DESRuntimeConfig) {
+    fn animate(
+        &self,
+        _result: &MaxFlowResult,
+        _params: &MaxFlowAdapterParams,
+        _runtime: &DESRuntimeConfig,
+    ) {
         // PORT NOTE: animation subsystem not ported (see module docs). No-op.
     }
     fn examples(&self) -> Vec<RegistrationExample<MaxFlowAdapterParams>> {
-        let edge = |from, to, capacity: f64| FlowEdge { from, to, capacity, name: None };
+        let edge = |from, to, capacity: f64| FlowEdge {
+            from,
+            to,
+            capacity,
+            name: None,
+        };
         vec![RegistrationExample {
             name: "six-node teaching network".to_string(),
             spec: DESModelSpec {
@@ -361,7 +456,10 @@ impl DESModelRegistration<MaxFlowAdapterParams, MaxFlowResult> for MaxFlowAdapte
                     source: Some(0),
                     sink: Some(5),
                     node_names: Some(
-                        vec!["s", "a", "b", "c", "d", "t"].into_iter().map(String::from).collect(),
+                        vec!["s", "a", "b", "c", "d", "t"]
+                            .into_iter()
+                            .map(String::from)
+                            .collect(),
                     ),
                     node_coordinates: Some(vec![
                         (90.0, 260.0),
@@ -385,7 +483,10 @@ impl DESModelRegistration<MaxFlowAdapterParams, MaxFlowResult> for MaxFlowAdapte
                     ]),
                     ..Default::default()
                 },
-                runtime: Some(DESRuntimeConfig { animate: Some(true), ..Default::default() }),
+                runtime: Some(DESRuntimeConfig {
+                    animate: Some(true),
+                    ..Default::default()
+                }),
                 metadata: None,
             },
         }]
@@ -397,7 +498,11 @@ impl DESModelRegistration<MaxFlowAdapterParams, MaxFlowResult> for MaxFlowAdapte
 // =============================================================================
 
 fn count_intersections(network: &crate::des::general::network_flow::TrafficNetwork) -> usize {
-    network.nodes.iter().filter(|n| n.kind == TrafficNodeKind::Intersection).count()
+    network
+        .nodes
+        .iter()
+        .filter(|n| n.kind == TrafficNodeKind::Intersection)
+        .count()
 }
 
 pub struct TrafficFlowAdapter;
@@ -430,7 +535,10 @@ impl DESModelRegistration<TrafficParams, TrafficResult> for TrafficFlowAdapter {
             ),
             format!(
                 "  entered={} exited={} active={} dropped={}",
-                r.entered, r.exited, r.final_cars.len(), r.dropped
+                r.entered,
+                r.exited,
+                r.final_cars.len(),
+                r.dropped
             ),
             format!(
                 "  max active cars={} mean speed={:.2} m/s mean travel={:.1} s",
@@ -438,7 +546,9 @@ impl DESModelRegistration<TrafficParams, TrafficResult> for TrafficFlowAdapter {
             ),
             format!(
                 "  grid cell={:.4} m active cells={} created stations={}",
-                r.cell_stats.cell_size_m, r.cell_stats.active_cells, r.cell_stats.created_cell_stations
+                r.cell_stats.cell_size_m,
+                r.cell_stats.active_cells,
+                r.cell_stats.created_cell_stations
             ),
             format!("  validation: {}", validation_line(&r.validation)),
         ]
@@ -463,7 +573,12 @@ impl DESModelRegistration<TrafficParams, TrafficResult> for TrafficFlowAdapter {
         }
         write_csv_lines(csv_path, &lines);
     }
-    fn animate(&self, _result: &TrafficResult, _params: &TrafficParams, _runtime: &DESRuntimeConfig) {
+    fn animate(
+        &self,
+        _result: &TrafficResult,
+        _params: &TrafficParams,
+        _runtime: &DESRuntimeConfig,
+    ) {
         // PORT NOTE: animation subsystem not ported (see module docs). No-op.
     }
     fn examples(&self) -> Vec<RegistrationExample<TrafficParams>> {
@@ -494,7 +609,10 @@ impl DESModelRegistration<TrafficParams, TrafficResult> for TrafficFlowAdapter {
                     spawn_rate_multiplier: Some(1.0),
                     scheduled_trips: None,
                 },
-                runtime: Some(DESRuntimeConfig { animate: Some(true), ..Default::default() }),
+                runtime: Some(DESRuntimeConfig {
+                    animate: Some(true),
+                    ..Default::default()
+                }),
                 metadata: None,
             },
         }]
@@ -540,11 +658,17 @@ impl DESModelRegistration<SmartTrafficParams, SmartTrafficResult> for SmartTraff
             ),
             format!(
                 "  participants={} smart movables={} shuffled={}",
-                r.execution.participant_count, r.execution.smart_movable_count, r.execution.shuffled_by_runner
+                r.execution.participant_count,
+                r.execution.smart_movable_count,
+                r.execution.shuffled_by_runner
             ),
             format!(
                 "  entered={} exited={} crashed={} active={} dropped={}",
-                r.entered, r.exited, r.crashed, r.final_cars.len(), r.dropped
+                r.entered,
+                r.exited,
+                r.crashed,
+                r.final_cars.len(),
+                r.dropped
             ),
             format!(
                 "  max active cars={} mean speed={:.2} m/s mean travel={:.1} s",
@@ -552,7 +676,8 @@ impl DESModelRegistration<SmartTrafficParams, SmartTrafficResult> for SmartTraff
             ),
             format!(
                 "  accidents={} accident risk scale={:.2}",
-                r.accidents.len(), accident_scale
+                r.accidents.len(),
+                accident_scale
             ),
             format!(
                 "  distance preference spread={:.2} start preference spread={:.2}",
@@ -565,7 +690,9 @@ impl DESModelRegistration<SmartTrafficParams, SmartTrafficResult> for SmartTraff
             ),
             format!(
                 "  grid cell={:.4} m active cells={} created stations={}",
-                r.cell_stats.cell_size_m, r.cell_stats.active_cells, r.cell_stats.created_cell_stations
+                r.cell_stats.cell_size_m,
+                r.cell_stats.active_cells,
+                r.cell_stats.created_cell_stations
             ),
             format!("  validation: {}", validation_line(&r.validation)),
         ]
@@ -594,7 +721,12 @@ impl DESModelRegistration<SmartTrafficParams, SmartTrafficResult> for SmartTraff
         }
         write_csv_lines(csv_path, &lines);
     }
-    fn animate(&self, _result: &SmartTrafficResult, _params: &SmartTrafficParams, _runtime: &DESRuntimeConfig) {
+    fn animate(
+        &self,
+        _result: &SmartTrafficResult,
+        _params: &SmartTrafficParams,
+        _runtime: &DESRuntimeConfig,
+    ) {
         // PORT NOTE: animation subsystem not ported (see module docs). No-op.
     }
     fn examples(&self) -> Vec<RegistrationExample<SmartTrafficParams>> {
@@ -636,7 +768,10 @@ impl DESModelRegistration<SmartTrafficParams, SmartTrafficResult> for SmartTraff
                     start_preference_spread: Some(0.65),
                     accident_flash_seconds: Some(2.5),
                 },
-                runtime: Some(DESRuntimeConfig { animate: Some(true), ..Default::default() }),
+                runtime: Some(DESRuntimeConfig {
+                    animate: Some(true),
+                    ..Default::default()
+                }),
                 metadata: None,
             },
         }]

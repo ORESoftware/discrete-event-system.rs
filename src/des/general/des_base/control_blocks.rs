@@ -73,7 +73,11 @@ pub struct VectorSignal {
 impl VectorSignal {
     /// `new VectorSignal(vec, kind, tick)` (copies `vec`).
     pub fn new(vec: &[f64], kind: &str, tick: usize) -> Self {
-        VectorSignal { vec: vec.to_vec(), kind: kind.to_string(), tick }
+        VectorSignal {
+            vec: vec.to_vec(),
+            kind: kind.to_string(),
+            tick,
+        }
     }
 
     /// `getValue(): number { return this.vec[0]; }`.
@@ -104,7 +108,10 @@ pub struct BlockCore {
 
 impl BlockCore {
     pub fn new(id: &str) -> Self {
-        BlockCore { id: id.to_string(), ..Default::default() }
+        BlockCore {
+            id: id.to_string(),
+            ..Default::default()
+        }
     }
 
     /// `takeItem(m) { this.queue.enqueue(m); }`.
@@ -218,7 +225,9 @@ pub trait PlantBlock: SignalBlock {
             let p = self.plant_core_mut();
             p.output_history.push(y.clone());
         }
-        self.block_core_mut().pending_out.push(VectorSignal::new(&y, "y", tick));
+        self.block_core_mut()
+            .pending_out
+            .push(VectorSignal::new(&y, "y", tick));
     }
 }
 
@@ -303,7 +312,11 @@ pub trait ControllerBlock: SignalBlock {
     /// Pre-run guard.
     fn assert_preconditions(&self) {
         let c = self.controller_core();
-        require(Preconditions::integer("ControllerBlock", "mDim", c.m_dim as f64));
+        require(Preconditions::integer(
+            "ControllerBlock",
+            "mDim",
+            c.m_dim as f64,
+        ));
         require(Preconditions::check(
             "ControllerBlock",
             "mDim",
@@ -312,8 +325,18 @@ pub trait ControllerBlock: SignalBlock {
             Some(c.m_dim.to_string()),
         ));
         if let (Some(lo), Some(hi)) = (&c.u_min, &c.u_max) {
-            require(Preconditions::length_eq("ControllerBlock", "uMin", lo, c.m_dim));
-            require(Preconditions::length_eq("ControllerBlock", "uMax", hi, c.m_dim));
+            require(Preconditions::length_eq(
+                "ControllerBlock",
+                "uMin",
+                lo,
+                c.m_dim,
+            ));
+            require(Preconditions::length_eq(
+                "ControllerBlock",
+                "uMax",
+                hi,
+                c.m_dim,
+            ));
             for i in 0..c.m_dim {
                 require(Preconditions::check(
                     "ControllerBlock",
@@ -357,7 +380,9 @@ pub trait ControllerBlock: SignalBlock {
             c.input_history.push(y);
             c.output_history.push(u.clone());
         }
-        self.block_core_mut().pending_out.push(VectorSignal::new(&u, "u", tick));
+        self.block_core_mut()
+            .pending_out
+            .push(VectorSignal::new(&u, "u", tick));
     }
 }
 
@@ -424,8 +449,12 @@ pub trait EstimatorBlock: SignalBlock {
         };
         let last_u = self.estimator_core().last_u.clone();
         let xhat = self.update(&y, last_u.as_deref());
-        self.estimator_core_mut().estimate_history.push(xhat.clone());
-        self.block_core_mut().pending_out.push(VectorSignal::new(&xhat, "xhat", tick));
+        self.estimator_core_mut()
+            .estimate_history
+            .push(xhat.clone());
+        self.block_core_mut()
+            .pending_out
+            .push(VectorSignal::new(&xhat, "xhat", tick));
     }
 }
 
@@ -477,7 +506,7 @@ fn deliver(
     targets: &[String],
     plant: &mut dyn PlantBlock,
     controller: &mut dyn ControllerBlock,
-    estimator: &mut Option<&mut dyn EstimatorBlock>,
+    mut estimator: Option<&mut dyn EstimatorBlock>,
 ) {
     let plant_id = plant.id().to_string();
     let controller_id = controller.id().to_string();
@@ -508,7 +537,11 @@ pub fn run_closed_loop(
     mut estimator: Option<&mut dyn EstimatorBlock>,
     opts: ClosedLoopOpts,
 ) -> ClosedLoopResult {
-    require(Preconditions::integer("runClosedLoop", "numSteps", opts.num_steps as f64));
+    require(Preconditions::integer(
+        "runClosedLoop",
+        "numSteps",
+        opts.num_steps as f64,
+    ));
     require(Preconditions::check(
         "runClosedLoop",
         "numSteps",
@@ -523,7 +556,9 @@ pub fn run_closed_loop(
 
     // Auto-wire: plant → (estimator ?? controller); estimator → controller;
     // controller → plant; controller → estimator.
-    let plant_target = estimator_id.clone().unwrap_or_else(|| controller_id.clone());
+    let plant_target = estimator_id
+        .clone()
+        .unwrap_or_else(|| controller_id.clone());
     ensure_connected(plant.block_core_mut(), &plant_target);
     if let Some(eid) = &estimator_id {
         if let Some(est) = estimator.as_deref_mut() {
@@ -556,36 +591,59 @@ pub fn run_closed_loop(
 
     // Step loop. `stepBN = bgn(plant.dt)` was computed in TS but ignored by the
     // tick hooks, so it is omitted here.
-    for _k in 0..opts.num_steps {
-        plant.run_time_step();
-        {
-            let pending: Vec<VectorSignal> = std::mem::take(&mut plant.block_core_mut().pending_out);
-            let targets = plant.block_core().out_targets.clone();
-            let mut est_ref = estimator.as_deref_mut();
-            deliver(pending, &targets, plant, controller, &mut est_ref);
-        }
-        if let Some(est) = estimator.as_deref_mut() {
+    let estimates = if let Some(est) = estimator.as_deref_mut() {
+        for _k in 0..opts.num_steps {
+            plant.run_time_step();
+            {
+                let pending: Vec<VectorSignal> =
+                    std::mem::take(&mut plant.block_core_mut().pending_out);
+                let targets = plant.block_core().out_targets.clone();
+                deliver(pending, &targets, plant, controller, Some(&mut *est));
+            }
+
             est.run_time_step();
-            let pending: Vec<VectorSignal> = std::mem::take(&mut est.block_core_mut().pending_out);
-            let targets = est.block_core().out_targets.clone();
-            let mut none_est: Option<&mut dyn EstimatorBlock> = None;
-            deliver(pending, &targets, plant, controller, &mut none_est);
+            {
+                let pending: Vec<VectorSignal> =
+                    std::mem::take(&mut est.block_core_mut().pending_out);
+                let targets = est.block_core().out_targets.clone();
+                deliver(pending, &targets, plant, controller, None);
+            }
+
+            controller.run_time_step();
+            {
+                let pending: Vec<VectorSignal> =
+                    std::mem::take(&mut controller.block_core_mut().pending_out);
+                let targets = controller.block_core().out_targets.clone();
+                deliver(pending, &targets, plant, controller, Some(&mut *est));
+            }
         }
-        controller.run_time_step();
-        {
-            let pending: Vec<VectorSignal> =
-                std::mem::take(&mut controller.block_core_mut().pending_out);
-            let targets = controller.block_core().out_targets.clone();
-            let mut est_ref = estimator.as_deref_mut();
-            deliver(pending, &targets, plant, controller, &mut est_ref);
+        Some(est.estimator_core().estimate_history.clone())
+    } else {
+        for _k in 0..opts.num_steps {
+            plant.run_time_step();
+            {
+                let pending: Vec<VectorSignal> =
+                    std::mem::take(&mut plant.block_core_mut().pending_out);
+                let targets = plant.block_core().out_targets.clone();
+                deliver(pending, &targets, plant, controller, None);
+            }
+
+            controller.run_time_step();
+            {
+                let pending: Vec<VectorSignal> =
+                    std::mem::take(&mut controller.block_core_mut().pending_out);
+                let targets = controller.block_core().out_targets.clone();
+                deliver(pending, &targets, plant, controller, None);
+            }
         }
-    }
+        None
+    };
 
     ClosedLoopResult {
         trajectory: plant.plant_core().state_history.clone(),
         controls: controller.controller_core().output_history.clone(),
         measurements: plant.plant_core().output_history.clone(),
-        estimates: estimator.as_deref().map(|e| e.estimator_core().estimate_history.clone()),
+        estimates,
         num_steps: opts.num_steps,
     }
 }
@@ -600,7 +658,9 @@ mod tests {
     }
     impl DoubleIntegrator {
         fn new() -> Self {
-            DoubleIntegrator { core: PlantCore::new("plant", &[1.0, 0.0], 0.1, 1) }
+            DoubleIntegrator {
+                core: PlantCore::new("plant", &[1.0, 0.0], 0.1, 1),
+            }
         }
     }
     impl SignalBlock for DoubleIntegrator {
@@ -624,14 +684,19 @@ mod tests {
         }
     }
 
-    /// Proportional controller: u = -k * pos.
+    /// PD controller: u = -k_p * pos - k_d * vel.
     struct PController {
         core: ControllerCore,
-        k: f64,
+        kp: f64,
+        kd: f64,
     }
     impl PController {
-        fn new(k: f64) -> Self {
-            PController { core: ControllerCore::new("ctrl", 1), k }
+        fn new(kp: f64, kd: f64) -> Self {
+            PController {
+                core: ControllerCore::new("ctrl", 1),
+                kp,
+                kd,
+            }
         }
     }
     impl SignalBlock for PController {
@@ -650,16 +715,25 @@ mod tests {
             &mut self.core
         }
         fn control_law(&self, y: &[f64], _tick: usize, _t: f64) -> Vec<f64> {
-            vec![-self.k * y[0]]
+            let pos = y.first().copied().unwrap_or(0.0);
+            let vel = y.get(1).copied().unwrap_or(0.0);
+            vec![-self.kp * pos - self.kd * vel]
         }
     }
 
     #[test]
     fn closed_loop_drives_state_toward_zero() {
         let mut plant = DoubleIntegrator::new();
-        let mut ctrl = PController::new(0.5);
-        let result =
-            run_closed_loop(&mut plant, &mut ctrl, None, ClosedLoopOpts { num_steps: 50, u0: None });
+        let mut ctrl = PController::new(0.5, 1.0);
+        let result = run_closed_loop(
+            &mut plant,
+            &mut ctrl,
+            None,
+            ClosedLoopOpts {
+                num_steps: 50,
+                u0: None,
+            },
+        );
         assert_eq!(result.num_steps, 50);
         // One seed state + one per step.
         assert_eq!(result.trajectory.len(), 51);

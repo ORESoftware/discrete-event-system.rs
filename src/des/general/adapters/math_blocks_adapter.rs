@@ -102,7 +102,8 @@ pub struct MathEquationResult {
     pub validation: Vec<ValidationCheck>,
 }
 
-const ENGINE_MISSING: &str = "math-blocks numerical engine is not ported yet (see module PORT NOTE)";
+const ENGINE_MISSING: &str =
+    "math-blocks numerical engine is not ported yet (see module PORT NOTE)";
 
 pub fn run_ode_block_system(_params: ODEBlockSystemParams) -> ODEBlockSystemResult {
     unimplemented!("{ENGINE_MISSING}")
@@ -122,10 +123,18 @@ fn js_number(v: f64) -> String {
     if v.is_nan() {
         "NaN".to_string()
     } else if v.is_infinite() {
-        if v > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() }
+        if v > 0.0 {
+            "Infinity".to_string()
+        } else {
+            "-Infinity".to_string()
+        }
     } else {
         let s = v.to_string();
-        if s == "-0" { "0".to_string() } else { s }
+        if s == "-0" {
+            "0".to_string()
+        } else {
+            s
+        }
     }
 }
 
@@ -135,7 +144,11 @@ fn to_precision(x: f64, digits: usize) -> String {
         return x.to_string();
     }
     if x == 0.0 {
-        return if digits <= 1 { "0".to_string() } else { format!("0.{}", "0".repeat(digits - 1)) };
+        return if digits <= 1 {
+            "0".to_string()
+        } else {
+            format!("0.{}", "0".repeat(digits - 1))
+        };
     }
     let neg = x < 0.0;
     let ax = x.abs();
@@ -261,16 +274,35 @@ fn write_heat_csv(r: &Heat1DBlockResult, csv_path: &str) {
 // Schema helpers
 // =============================================================================
 
-fn num(min: Option<f64>, max: Option<f64>, integer: Option<bool>, default: Option<f64>) -> ParamSchema {
-    ParamSchema::Number { min, max, integer, default, description: None }
+fn num(
+    min: Option<f64>,
+    max: Option<f64>,
+    integer: Option<bool>,
+    default: Option<f64>,
+) -> ParamSchema {
+    ParamSchema::Number {
+        min,
+        max,
+        integer,
+        default,
+        description: None,
+    }
 }
 
 fn string_field() -> ParamSchema {
-    ParamSchema::String { allowed: None, default: None, description: None }
+    ParamSchema::String {
+        allowed: None,
+        default: None,
+        description: None,
+    }
 }
 
 fn string_default(default: &str) -> ParamSchema {
-    ParamSchema::String { allowed: None, default: Some(default.to_string()), description: None }
+    ParamSchema::String {
+        allowed: None,
+        default: Some(default.to_string()),
+        description: None,
+    }
 }
 
 fn str_enum(allowed: &[&str], default: Option<&str>) -> ParamSchema {
@@ -282,12 +314,20 @@ fn str_enum(allowed: &[&str], default: Option<&str>) -> ParamSchema {
 }
 
 fn arr(items: ParamSchema, min_length: Option<usize>, max_length: Option<usize>) -> ParamSchema {
-    ParamSchema::Array { items: Box::new(items), min_length, max_length, description: None }
+    ParamSchema::Array {
+        items: Box::new(items),
+        min_length,
+        max_length,
+        description: None,
+    }
 }
 
 fn obj(fields: Vec<(&str, ParamSchema)>, required: Vec<&str>) -> ParamSchema {
     ParamSchema::Object {
-        fields: fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+        fields: fields
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
         required: Some(required.iter().map(|s| s.to_string()).collect()),
         description: None,
     }
@@ -332,7 +372,10 @@ fn heat_schema() -> ParamSchema {
             ("t1", num(None, None, None, None)),
             ("dt", num(Some(1e-12), None, None, None)),
             ("initialExpression", string_default("sin(pi*x/length)")),
-            ("initialValues", arr(num(None, None, None, None), Some(3), None)),
+            (
+                "initialValues",
+                arr(num(None, None, None, None), Some(3), None),
+            ),
             ("leftBoundary", num(None, None, None, None)),
             ("rightBoundary", num(None, None, None, None)),
             ("constants", numeric_map_schema()),
@@ -360,7 +403,10 @@ fn equation_schema() -> ParamSchema {
             ("length", num(Some(1e-12), None, None, None)),
             ("alpha", num(Some(0.0), None, None, None)),
             ("initialExpression", string_field()),
-            ("initialValues", arr(num(None, None, None, None), Some(3), None)),
+            (
+                "initialValues",
+                arr(num(None, None, None, None), Some(3), None),
+            ),
             ("leftBoundary", num(None, None, None, None)),
             ("rightBoundary", num(None, None, None, None)),
         ],
@@ -372,7 +418,12 @@ fn equation_schema() -> ParamSchema {
 // Examples
 // =============================================================================
 
-fn example<P>(name: &str, model: &str, parameters: P, runtime: Option<DESRuntimeConfig>) -> RegistrationExample<P> {
+fn example<P>(
+    name: &str,
+    model: &str,
+    parameters: P,
+    runtime: Option<DESRuntimeConfig>,
+) -> RegistrationExample<P> {
     RegistrationExample {
         name: name.to_string(),
         spec: DESModelSpec {
@@ -387,7 +438,10 @@ fn example<P>(name: &str, model: &str, parameters: P, runtime: Option<DESRuntime
 }
 
 fn animate_runtime() -> DESRuntimeConfig {
-    DESRuntimeConfig { animate: Some(true), ..Default::default() }
+    DESRuntimeConfig {
+        animate: Some(true),
+        ..Default::default()
+    }
 }
 
 // =============================================================================
@@ -409,7 +463,11 @@ impl DESModelRegistration<ODEBlockSystemParams, ODEBlockSystemResult> for MathOD
     fn schema(&self) -> ParamSchema {
         ode_schema()
     }
-    fn run(&self, params: ODEBlockSystemParams, _runtime: &DESRuntimeConfig) -> ODEBlockSystemResult {
+    fn run(
+        &self,
+        params: ODEBlockSystemParams,
+        _runtime: &DESRuntimeConfig,
+    ) -> ODEBlockSystemResult {
         // PORT NOTE: TS wraps this in `withLogger`; kernel is unimplemented.
         run_ode_block_system(params)
     }
@@ -419,7 +477,12 @@ impl DESModelRegistration<ODEBlockSystemParams, ODEBlockSystemResult> for MathOD
     fn write_csv(&self, result: &ODEBlockSystemResult, csv_path: &str) {
         write_ode_csv(result, csv_path);
     }
-    fn animate(&self, _result: &ODEBlockSystemResult, _params: &ODEBlockSystemParams, _runtime: &DESRuntimeConfig) {
+    fn animate(
+        &self,
+        _result: &ODEBlockSystemResult,
+        _params: &ODEBlockSystemParams,
+        _runtime: &DESRuntimeConfig,
+    ) {
         // PORT NOTE: animation subsystem not ported (see module docs). No-op.
     }
     fn examples(&self) -> Vec<RegistrationExample<ODEBlockSystemParams>> {
@@ -427,7 +490,11 @@ impl DESModelRegistration<ODEBlockSystemParams, ODEBlockSystemResult> for MathOD
             "exponential decay",
             "math-ode-blocks",
             ODEBlockSystemParams {
-                states: vec![ODEStateSpec { name: "y".to_string(), initial: 1.0, derivative: "-k*y".to_string() }],
+                states: vec![ODEStateSpec {
+                    name: "y".to_string(),
+                    initial: 1.0,
+                    derivative: "-k*y".to_string(),
+                }],
                 constants: HashMap::from([("k".to_string(), 1.0)]),
                 t0: 0.0,
                 t1: 1.0,
@@ -493,7 +560,12 @@ impl DESModelRegistration<Heat1DBlockParams, Heat1DBlockResult> for MathHeat1DBl
     fn write_csv(&self, result: &Heat1DBlockResult, csv_path: &str) {
         write_heat_csv(result, csv_path);
     }
-    fn animate(&self, _result: &Heat1DBlockResult, _params: &Heat1DBlockParams, _runtime: &DESRuntimeConfig) {
+    fn animate(
+        &self,
+        _result: &Heat1DBlockResult,
+        _params: &Heat1DBlockParams,
+        _runtime: &DESRuntimeConfig,
+    ) {
         // PORT NOTE: animation subsystem not ported (see module docs). No-op.
     }
     fn examples(&self) -> Vec<RegistrationExample<Heat1DBlockParams>> {
@@ -537,13 +609,16 @@ impl DESModelRegistration<MathEquationInputParams, MathEquationResult> for MathE
     fn schema(&self) -> ParamSchema {
         equation_schema()
     }
-    fn run(&self, params: MathEquationInputParams, _runtime: &DESRuntimeConfig) -> MathEquationResult {
+    fn run(
+        &self,
+        params: MathEquationInputParams,
+        _runtime: &DESRuntimeConfig,
+    ) -> MathEquationResult {
         // PORT NOTE: TS wraps this in `withLogger`; kernel is unimplemented.
         run_math_equation_problem(params)
     }
     fn summarize(&self, r: &MathEquationResult, _params: &MathEquationInputParams) -> String {
-        let model_line = if matches!(r.kind, EquationProblemKind::Ode) && r.ode.is_some() {
-            let ode = r.ode.as_ref().unwrap();
+        let model_line = if let (EquationProblemKind::Ode, Some(ode)) = (r.kind, r.ode.as_ref()) {
             let entries = ode
                 .final_state
                 .iter()
@@ -563,8 +638,16 @@ impl DESModelRegistration<MathEquationInputParams, MathEquationResult> for MathE
         [
             "MATH EQUATION INPUT".to_string(),
             "------------------------".to_string(),
-            format!("  format={} kind={}", input_format_str(r.input_format), problem_kind_str(r.kind)),
-            format!("  generated network: nodes={} edges={}", r.network.nodes.len(), r.network.edges.len()),
+            format!(
+                "  format={} kind={}",
+                input_format_str(r.input_format),
+                problem_kind_str(r.kind)
+            ),
+            format!(
+                "  generated network: nodes={} edges={}",
+                r.network.nodes.len(),
+                r.network.edges.len()
+            ),
             model_line,
             format!("  validation: {}", validation_line(&r.validation)),
         ]
@@ -581,7 +664,12 @@ impl DESModelRegistration<MathEquationInputParams, MathEquationResult> for MathE
             write_heat_csv(heat, csv_path);
         }
     }
-    fn animate(&self, _result: &MathEquationResult, _params: &MathEquationInputParams, _runtime: &DESRuntimeConfig) {
+    fn animate(
+        &self,
+        _result: &MathEquationResult,
+        _params: &MathEquationInputParams,
+        _runtime: &DESRuntimeConfig,
+    ) {
         // PORT NOTE: animation subsystem not ported (see module docs). No-op.
     }
     fn examples(&self) -> Vec<RegistrationExample<MathEquationInputParams>> {

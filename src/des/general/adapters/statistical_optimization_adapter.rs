@@ -65,10 +65,18 @@ fn js_number(v: f64) -> String {
     if v.is_nan() {
         "NaN".to_string()
     } else if v.is_infinite() {
-        if v > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() }
+        if v > 0.0 {
+            "Infinity".to_string()
+        } else {
+            "-Infinity".to_string()
+        }
     } else {
         let s = v.to_string();
-        if s == "-0" { "0".to_string() } else { s }
+        if s == "-0" {
+            "0".to_string()
+        } else {
+            s
+        }
     }
 }
 
@@ -86,19 +94,33 @@ fn to_exponential(v: f64, digits: usize) -> String {
 
 /// `numbers.map(String).join(', ')` — the JS `Array.prototype.join`.
 fn join_nums(values: &[f64]) -> String {
-    values.iter().map(|v| js_number(*v)).collect::<Vec<_>>().join(", ")
+    values
+        .iter()
+        .map(|v| js_number(*v))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// `lengths.join(', ')` for an integer list.
 fn join_usize(values: &[usize]) -> String {
-    values.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", ")
+    values
+        .iter()
+        .map(|v| v.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// `JSON.stringify(numbers)` — a JSON array (`NaN`/`Infinity` -> `null`).
 fn json_num_array(values: &[f64]) -> String {
     let inner: Vec<String> = values
         .iter()
-        .map(|v| if v.is_finite() { js_number(*v) } else { "null".to_string() })
+        .map(|v| {
+            if v.is_finite() {
+                js_number(*v)
+            } else {
+                "null".to_string()
+            }
+        })
         .collect();
     format!("[{}]", inner.join(","))
 }
@@ -125,7 +147,11 @@ fn json_str_num_map(map: &HashMap<String, f64>) -> String {
         .iter()
         .map(|k| {
             let v = map[*k];
-            let val = if v.is_finite() { js_number(v) } else { "null".to_string() };
+            let val = if v.is_finite() {
+                js_number(v)
+            } else {
+                "null".to_string()
+            };
             format!("{}:{}", json_quote(k), val)
         })
         .collect();
@@ -176,12 +202,27 @@ fn slp_status_str(s: SLPStatus) -> &'static str {
 // Schema helpers
 // =============================================================================
 
-fn num(min: Option<f64>, max: Option<f64>, integer: Option<bool>, default: Option<f64>) -> ParamSchema {
-    ParamSchema::Number { min, max, integer, default, description: None }
+fn num(
+    min: Option<f64>,
+    max: Option<f64>,
+    integer: Option<bool>,
+    default: Option<f64>,
+) -> ParamSchema {
+    ParamSchema::Number {
+        min,
+        max,
+        integer,
+        default,
+        description: None,
+    }
 }
 
 fn string_field() -> ParamSchema {
-    ParamSchema::String { allowed: None, default: None, description: None }
+    ParamSchema::String {
+        allowed: None,
+        default: None,
+        description: None,
+    }
 }
 
 fn str_enum(allowed: &[&str], default: &str) -> ParamSchema {
@@ -202,28 +243,50 @@ fn str_enum_nd(allowed: &[&str]) -> ParamSchema {
 }
 
 fn arr(items: ParamSchema, min_length: Option<usize>) -> ParamSchema {
-    ParamSchema::Array { items: Box::new(items), min_length, max_length: None, description: None }
+    ParamSchema::Array {
+        items: Box::new(items),
+        min_length,
+        max_length: None,
+        description: None,
+    }
 }
 
 fn arr_mm(items: ParamSchema, min_length: Option<usize>, max_length: Option<usize>) -> ParamSchema {
-    ParamSchema::Array { items: Box::new(items), min_length, max_length, description: None }
+    ParamSchema::Array {
+        items: Box::new(items),
+        min_length,
+        max_length,
+        description: None,
+    }
 }
 
 fn obj(fields: Vec<(&str, ParamSchema)>, required: Vec<&str>) -> ParamSchema {
     ParamSchema::Object {
-        fields: fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+        fields: fields
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
         required: Some(required.iter().map(|s| s.to_string()).collect()),
         description: None,
     }
 }
 
-const FAMILY_VALUES: [&str; 6] =
-    ["normal", "lognormal", "exponential", "gamma", "poisson", "empirical"];
+const FAMILY_VALUES: [&str; 6] = [
+    "normal",
+    "lognormal",
+    "exponential",
+    "gamma",
+    "poisson",
+    "empirical",
+];
 const METHOD_VALUES: [&str; 2] = ["mle", "moments"];
 
 fn range_schema() -> ParamSchema {
     obj(
-        vec![("low", num(Some(0.0), None, None, None)), ("high", num(Some(0.0), None, None, None))],
+        vec![
+            ("low", num(Some(0.0), None, None, None)),
+            ("high", num(Some(0.0), None, None, None)),
+        ],
         vec!["low", "high"],
     )
 }
@@ -238,7 +301,13 @@ fn fitted_distribution_schema() -> ParamSchema {
             ("aic", num(None, None, None, Some(0.0))),
             ("mean", num(None, None, None, Some(0.0))),
             ("variance", num(None, None, None, Some(0.0))),
-            ("support", str_enum(&["real", "positive", "nonnegative-integer", "empirical"], "positive")),
+            (
+                "support",
+                str_enum(
+                    &["real", "positive", "nonnegative-integer", "empirical"],
+                    "positive",
+                ),
+            ),
         ],
         vec!["family", "params"],
     )
@@ -246,7 +315,10 @@ fn fitted_distribution_schema() -> ParamSchema {
 
 fn empirical_point_schema() -> ParamSchema {
     obj(
-        vec![("value", num(None, None, None, None)), ("prob", num(Some(0.0), Some(1.0), None, None))],
+        vec![
+            ("value", num(None, None, None, None)),
+            ("prob", num(Some(0.0), Some(1.0), None, None)),
+        ],
         vec!["value", "prob"],
     )
 }
@@ -285,7 +357,10 @@ fn demand_schema() -> ParamSchema {
                 schema: obj(
                     vec![
                         ("kind", str_enum_nd(&["empirical"])),
-                        ("empirical", arr(arr(empirical_point_schema(), Some(1)), Some(1))),
+                        (
+                            "empirical",
+                            arr(arr(empirical_point_schema(), Some(1)), Some(1)),
+                        ),
                     ],
                     vec!["kind", "empirical"],
                 ),
@@ -312,7 +387,10 @@ fn risk_params_schema() -> ParamSchema {
             ("cost", arr(num(Some(0.0), None, None, None), Some(1))),
             ("price", arr(num(Some(0.0), None, None, None), Some(1))),
             ("demand", demand_schema()),
-            ("numScenarios", num(Some(1.0), None, Some(true), Some(200.0))),
+            (
+                "numScenarios",
+                num(Some(1.0), None, Some(true), Some(200.0)),
+            ),
             ("seed", num(None, None, Some(true), Some(42.0))),
             ("xMax", num(Some(0.0), None, None, None)),
             ("step", num(Some(0.0), None, None, None)),
@@ -320,10 +398,16 @@ fn risk_params_schema() -> ParamSchema {
                 "risk",
                 obj(
                     vec![
-                        ("kind", str_enum(&["expectation", "cvar", "chance", "dro"], "expectation")),
+                        (
+                            "kind",
+                            str_enum(&["expectation", "cvar", "chance", "dro"], "expectation"),
+                        ),
                         ("alpha", num(Some(0.5), Some(0.999), None, Some(0.9))),
                         ("lambda", num(Some(0.0), None, None, Some(1.0))),
-                        ("minServiceLevel", num(Some(0.0), Some(1.0), None, Some(0.9))),
+                        (
+                            "minServiceLevel",
+                            num(Some(0.0), Some(1.0), None, Some(0.9)),
+                        ),
                         ("shortfallLimit", num(Some(0.0), None, None, Some(0.0))),
                         ("radius", num(Some(0.0), None, None, Some(1.0))),
                     ],
@@ -341,22 +425,38 @@ fn sddp_params_schema() -> ParamSchema {
             ("horizon", num(Some(1.0), None, Some(true), None)),
             ("demand", arr(range_schema(), Some(1))),
             ("price", arr(num(Some(0.0), None, None, None), Some(1))),
-            ("expansionCost", arr(num(Some(0.0), None, None, None), Some(1))),
+            (
+                "expansionCost",
+                arr(num(Some(0.0), None, None, None), Some(1)),
+            ),
             ("initialCapacity", num(Some(0.0), None, None, Some(0.0))),
             ("xMax", num(Some(0.0), None, None, None)),
             ("step", num(Some(0.0), None, None, None)),
-            ("samplesPerStage", num(Some(1.0), None, Some(true), Some(40.0))),
+            (
+                "samplesPerStage",
+                num(Some(1.0), None, Some(true), Some(40.0)),
+            ),
             ("seed", num(None, None, Some(true), Some(7.0))),
             ("maxIter", num(Some(1.0), None, Some(true), Some(40.0))),
             ("tol", num(Some(0.0), None, None, Some(1e-3))),
         ],
-        vec!["horizon", "demand", "price", "expansionCost", "xMax", "step"],
+        vec![
+            "horizon",
+            "demand",
+            "price",
+            "expansionCost",
+            "xMax",
+            "step",
+        ],
     )
 }
 
 fn alt_schema() -> ParamSchema {
     obj(
-        vec![("name", string_field()), ("x", arr(num(Some(0.0), None, None, None), Some(1)))],
+        vec![
+            ("name", string_field()),
+            ("x", arr(num(Some(0.0), None, None, None), Some(1))),
+        ],
         vec!["name", "x"],
     )
 }
@@ -369,7 +469,10 @@ fn adaptive_params_schema() -> ParamSchema {
             ("demand", demand_schema()),
             ("alternatives", arr(alt_schema(), Some(2))),
             ("seed", num(None, None, Some(true), Some(11.0))),
-            ("initialSamples", num(Some(1.0), None, Some(true), Some(5.0))),
+            (
+                "initialSamples",
+                num(Some(1.0), None, Some(true), Some(5.0)),
+            ),
             ("budget", num(Some(1.0), None, Some(true), Some(120.0))),
             ("batchSize", num(Some(1.0), None, Some(true), Some(5.0))),
             ("exploration", num(Some(0.0), None, None, Some(1.5))),
@@ -387,9 +490,15 @@ fn stochastic_lp_schema() -> ParamSchema {
             ("p", arr(num(Some(0.0), None, None, None), Some(1))),
             (
                 "ranges",
-                arr(arr_mm(num(Some(0.0), None, None, None), Some(2), Some(2)), Some(1)),
+                arr(
+                    arr_mm(num(Some(0.0), None, None, None), Some(2), Some(2)),
+                    Some(1),
+                ),
             ),
-            ("numScenarios", num(Some(1.0), None, Some(true), Some(200.0))),
+            (
+                "numScenarios",
+                num(Some(1.0), None, Some(true), Some(200.0)),
+            ),
             ("N", num(Some(1.0), None, Some(true), Some(200.0))),
             ("seed", num(None, None, Some(true), Some(42.0))),
             ("budget", num(Some(0.0), None, None, None)),
@@ -506,7 +615,10 @@ fn example<P>(name: &str, model: &str, parameters: P) -> RegistrationExample<P> 
             model: model.to_string(),
             description: None,
             parameters,
-            runtime: Some(DESRuntimeConfig { animate: Some(true), ..Default::default() }),
+            runtime: Some(DESRuntimeConfig {
+                animate: Some(true),
+                ..Default::default()
+            }),
             metadata: None,
         },
     }
@@ -531,20 +643,34 @@ impl DESModelRegistration<StochasticLPParams, StochasticLPAdapterResult> for Sto
     fn schema(&self) -> ParamSchema {
         stochastic_lp_schema()
     }
-    fn run(&self, params: StochasticLPParams, runtime: &DESRuntimeConfig) -> StochasticLPAdapterResult {
+    fn run(
+        &self,
+        params: StochasticLPParams,
+        runtime: &DESRuntimeConfig,
+    ) -> StochasticLPAdapterResult {
         let actual = normalize_stochastic_lp_params(params);
         with_logger(runtime, move |mut logger| {
             assert_stochastic_lp_params(&actual);
-            let slp = build_production_slp(actual.cost.clone(), actual.price.clone(), actual.budget);
+            let slp =
+                build_production_slp(actual.cost.clone(), actual.price.clone(), actual.budget);
             let scenarios = build_production_scenarios(
-                UniformDemandSpec { ranges: actual.ranges.clone(), seed: actual.seed },
+                UniformDemandSpec {
+                    ranges: actual.ranges.clone(),
+                    seed: actual.seed,
+                },
                 actual.num_scenarios,
             );
             if let Some(l) = logger.as_deref_mut() {
                 l.log(LogJson::Object(vec![
-                    ("kind".to_string(), LogJson::String("stochastic-lp-start".to_string())),
+                    (
+                        "kind".to_string(),
+                        LogJson::String("stochastic-lp-start".to_string()),
+                    ),
                     ("level".to_string(), LogJson::String("info".to_string())),
-                    ("numScenarios".to_string(), LogJson::Number(actual.num_scenarios as f64)),
+                    (
+                        "numScenarios".to_string(),
+                        LogJson::Number(actual.num_scenarios as f64),
+                    ),
                     (
                         "budget".to_string(),
                         match actual.budget {
@@ -609,14 +735,31 @@ impl DESModelRegistration<StochasticLPParams, StochasticLPAdapterResult> for Sto
             };
             if let Some(l) = logger.as_deref_mut() {
                 l.log(LogJson::Object(vec![
-                    ("kind".to_string(), LogJson::String("stochastic-lp-finish".to_string())),
+                    (
+                        "kind".to_string(),
+                        LogJson::String("stochastic-lp-finish".to_string()),
+                    ),
                     ("level".to_string(), LogJson::String("info".to_string())),
-                    ("monoObjective".to_string(), LogJson::Number(monolithic.objective)),
-                    ("bendersObjective".to_string(), LogJson::Number(benders.objective)),
-                    ("iterations".to_string(), LogJson::Number(benders.iterations as f64)),
+                    (
+                        "monoObjective".to_string(),
+                        LogJson::Number(monolithic.objective),
+                    ),
+                    (
+                        "bendersObjective".to_string(),
+                        LogJson::Number(benders.objective),
+                    ),
+                    (
+                        "iterations".to_string(),
+                        LogJson::Number(benders.iterations as f64),
+                    ),
                 ]));
             }
-            StochasticLPAdapterResult { closed_form, monolithic, benders, out_of_sample }
+            StochasticLPAdapterResult {
+                closed_form,
+                monolithic,
+                benders,
+                out_of_sample,
+            }
         })
     }
     fn summarize(&self, r: &StochasticLPAdapterResult, _params: &StochasticLPParams) -> String {
@@ -716,7 +859,11 @@ impl DESModelRegistration<DistributionFitParams, DistributionFitResult> for Dist
     fn schema(&self) -> ParamSchema {
         fit_params_schema()
     }
-    fn run(&self, params: DistributionFitParams, _runtime: &DESRuntimeConfig) -> DistributionFitResult {
+    fn run(
+        &self,
+        params: DistributionFitParams,
+        _runtime: &DESRuntimeConfig,
+    ) -> DistributionFitResult {
         run_distribution_fit(params).unwrap_or_else(|e| panic!("{e}"))
     }
     fn summarize(&self, r: &DistributionFitResult, _params: &DistributionFitParams) -> String {
@@ -740,7 +887,8 @@ impl DESModelRegistration<DistributionFitParams, DistributionFitResult> for Dist
         .join("\n")
     }
     fn write_csv(&self, r: &DistributionFitResult, csv_path: &str) {
-        let mut lines = vec!["rank,family,method,aic,log_likelihood,mean,variance,params".to_string()];
+        let mut lines =
+            vec!["rank,family,method,aic,log_likelihood,mean,variance,params".to_string()];
         for (i, f) in r.fits.iter().enumerate() {
             lines.push(csv_row([
                 js_number((i + 1) as f64),
@@ -806,9 +954,15 @@ impl DESModelRegistration<RiskCapacityParams, RiskCapacityResult> for RiskCapaci
         with_logger(runtime, move |mut logger| {
             if let Some(l) = logger.as_deref_mut() {
                 l.log(LogJson::Object(vec![
-                    ("kind".to_string(), LogJson::String("risk-capacity-start".to_string())),
+                    (
+                        "kind".to_string(),
+                        LogJson::String("risk-capacity-start".to_string()),
+                    ),
                     ("level".to_string(), LogJson::String("info".to_string())),
-                    ("risk".to_string(), LogJson::String(risk_kind_str(risk_kind).to_string())),
+                    (
+                        "risk".to_string(),
+                        LogJson::String(risk_kind_str(risk_kind).to_string()),
+                    ),
                     ("scenarios".to_string(), LogJson::Number(scenarios as f64)),
                 ]));
             }
@@ -816,20 +970,31 @@ impl DESModelRegistration<RiskCapacityParams, RiskCapacityResult> for RiskCapaci
             if let Some(l) = logger.as_deref_mut() {
                 let best = &result.best;
                 l.log(LogJson::Object(vec![
-                    ("kind".to_string(), LogJson::String("risk-capacity-finish".to_string())),
+                    (
+                        "kind".to_string(),
+                        LogJson::String("risk-capacity-finish".to_string()),
+                    ),
                     ("level".to_string(), LogJson::String("info".to_string())),
                     (
                         "best".to_string(),
                         LogJson::Object(vec![
                             (
                                 "x".to_string(),
-                                LogJson::Array(best.x.iter().map(|v| LogJson::Number(*v)).collect()),
+                                LogJson::Array(
+                                    best.x.iter().map(|v| LogJson::Number(*v)).collect(),
+                                ),
                             ),
                             ("meanProfit".to_string(), LogJson::Number(best.mean_profit)),
                             ("sdProfit".to_string(), LogJson::Number(best.sd_profit)),
                             ("cvarLoss".to_string(), LogJson::Number(best.cvar_loss)),
-                            ("serviceLevel".to_string(), LogJson::Number(best.service_level)),
-                            ("robustObjective".to_string(), LogJson::Number(best.robust_objective)),
+                            (
+                                "serviceLevel".to_string(),
+                                LogJson::Number(best.service_level),
+                            ),
+                            (
+                                "robustObjective".to_string(),
+                                LogJson::Number(best.robust_objective),
+                            ),
                             ("feasible".to_string(), LogJson::Bool(best.feasible)),
                         ]),
                     ),
@@ -864,8 +1029,9 @@ impl DESModelRegistration<RiskCapacityParams, RiskCapacityResult> for RiskCapaci
         .join("\n")
     }
     fn write_csv(&self, r: &RiskCapacityResult, csv_path: &str) {
-        let mut lines =
-            vec!["x,mean_profit,sd_profit,cvar_loss,service_level,robust_objective,feasible".to_string()];
+        let mut lines = vec![
+            "x,mean_profit,sd_profit,cvar_loss,service_level,robust_objective,feasible".to_string(),
+        ];
         for c in &r.candidates {
             lines.push(csv_row([
                 json_num_array(&c.x),
@@ -874,7 +1040,11 @@ impl DESModelRegistration<RiskCapacityParams, RiskCapacityResult> for RiskCapaci
                 js_number(c.cvar_loss),
                 js_number(c.service_level),
                 js_number(c.robust_objective),
-                if c.feasible { "1".to_string() } else { "0".to_string() },
+                if c.feasible {
+                    "1".to_string()
+                } else {
+                    "0".to_string()
+                },
             ]));
         }
         write_csv_lines(csv_path, &lines);
@@ -895,8 +1065,14 @@ impl DESModelRegistration<RiskCapacityParams, RiskCapacityResult> for RiskCapaci
                 cost: vec![10.0, 12.0],
                 price: vec![25.0, 28.0],
                 demand: DemandSpec::Uniform(vec![
-                    DemandRange { low: 50.0, high: 100.0 },
-                    DemandRange { low: 40.0, high: 80.0 },
+                    DemandRange {
+                        low: 50.0,
+                        high: 100.0,
+                    },
+                    DemandRange {
+                        low: 40.0,
+                        high: 80.0,
+                    },
                 ]),
                 num_scenarios: 250,
                 seed: 5,
@@ -945,7 +1121,11 @@ impl DESModelRegistration<SDDPParams, SDDPResult> for SddpCapacityAdapter {
         [
             "SDDP CAPACITY".to_string(),
             "------------------------".to_string(),
-            format!("  horizon={} iterations={}", r.params.horizon, r.trace.len()),
+            format!(
+                "  horizon={} iterations={}",
+                r.params.horizon,
+                r.trace.len()
+            ),
             format!("  exact sampled-grid objective={:.4}", r.exact_objective),
             format!(
                 "  upper={:.4} lower={:.4} gap={:.4}",
@@ -985,9 +1165,18 @@ impl DESModelRegistration<SDDPParams, SDDPResult> for SddpCapacityAdapter {
             SDDPParams {
                 horizon: 3,
                 demand: vec![
-                    DemandRange { low: 20.0, high: 50.0 },
-                    DemandRange { low: 30.0, high: 70.0 },
-                    DemandRange { low: 40.0, high: 90.0 },
+                    DemandRange {
+                        low: 20.0,
+                        high: 50.0,
+                    },
+                    DemandRange {
+                        low: 30.0,
+                        high: 70.0,
+                    },
+                    DemandRange {
+                        low: 40.0,
+                        high: 90.0,
+                    },
                 ],
                 price: vec![25.0, 24.0, 23.0],
                 expansion_cost: vec![12.0, 10.0, 8.0],
@@ -1022,7 +1211,11 @@ impl DESModelRegistration<AdaptiveSimOptParams, AdaptiveSimOptResult> for Adapti
     fn schema(&self) -> ParamSchema {
         adaptive_params_schema()
     }
-    fn run(&self, params: AdaptiveSimOptParams, _runtime: &DESRuntimeConfig) -> AdaptiveSimOptResult {
+    fn run(
+        &self,
+        params: AdaptiveSimOptParams,
+        _runtime: &DESRuntimeConfig,
+    ) -> AdaptiveSimOptResult {
         // PORT NOTE: TS passes the withLogger JsonlLogger into runAdaptiveSimOpt; the Rust
         // engine takes an owned `Option<Box<dyn OptimizationLogger>>` ('static) which cannot
         // borrow the with_logger JsonlLogger, so logging is omitted (None).
@@ -1041,7 +1234,11 @@ impl DESModelRegistration<AdaptiveSimOptParams, AdaptiveSimOptResult> for Adapti
                 r.best.stderr,
                 js_number(r.best.n)
             ),
-            format!("  total samples={} alternatives={}", js_number(total), r.stats.len()),
+            format!(
+                "  total samples={} alternatives={}",
+                js_number(total),
+                r.stats.len()
+            ),
             format!("  validation: {}", validation_line(&r.validation)),
         ]
         .join("\n")
@@ -1077,13 +1274,28 @@ impl DESModelRegistration<AdaptiveSimOptParams, AdaptiveSimOptResult> for Adapti
                 cost: vec![10.0, 12.0],
                 price: vec![25.0, 28.0],
                 demand: DemandSpec::Uniform(vec![
-                    DemandRange { low: 50.0, high: 100.0 },
-                    DemandRange { low: 40.0, high: 80.0 },
+                    DemandRange {
+                        low: 50.0,
+                        high: 100.0,
+                    },
+                    DemandRange {
+                        low: 40.0,
+                        high: 80.0,
+                    },
                 ]),
                 alternatives: vec![
-                    AdaptiveAlternative { name: "lean".to_string(), x: vec![60.0, 50.0] },
-                    AdaptiveAlternative { name: "balanced".to_string(), x: vec![80.0, 65.0] },
-                    AdaptiveAlternative { name: "buffered".to_string(), x: vec![100.0, 80.0] },
+                    AdaptiveAlternative {
+                        name: "lean".to_string(),
+                        x: vec![60.0, 50.0],
+                    },
+                    AdaptiveAlternative {
+                        name: "balanced".to_string(),
+                        x: vec![80.0, 65.0],
+                    },
+                    AdaptiveAlternative {
+                        name: "buffered".to_string(),
+                        x: vec![100.0, 80.0],
+                    },
                 ],
                 seed: 11,
                 initial_samples: 5,

@@ -76,3 +76,14 @@ pub mod learning_optimization_models;
 pub mod simulated_annealing;
 pub mod milp_bnb;
 pub mod neural_network;
+
+// Control-theory models (self-contained numeric cluster on shared/linalg).
+pub mod control_systems;
+
+// Standalone optimisation/forecasting/LP models built on des-base + general kernels.
+pub mod internal_solver_network;
+pub mod signal_transforms;
+pub mod stochastic_flow_mdp;
+pub mod multistage_stochastic;
+pub mod stochastic_lp;
+pub mod ip_mip_des;

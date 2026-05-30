@@ -38,6 +38,7 @@ pub struct AffineCut {
 }
 
 /// A pool of affine cuts forming an upper or lower envelope.
+#[derive(Clone, Debug)]
 pub struct AffineCutPool {
     pub dimension: usize,
     pub sense: CutEnvelopeSense,

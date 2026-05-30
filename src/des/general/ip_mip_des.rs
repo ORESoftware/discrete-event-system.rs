@@ -57,7 +57,7 @@ use crate::des::general::des_base::stateful_token::{
 };
 use crate::des::general::des_base::validation::intrinsic_check;
 use crate::des::general::incremental_lp::{IncrementalLP, IncrementalLPInit, PivotMode, Sense as IncSense, SolverStatus};
-use crate::des::general::lp::{self, solve_lp_external, solve_lp_internal, ExternalSolverOptions, InternalSimplexOptions, LPProblem, LPStatus, Sense};
+use crate::des::general::lp::{solve_lp_external, solve_lp_internal, ExternalSolverOptions, InternalSimplexOptions, LPProblem, LPStatus, Sense};
 use crate::des::general::lp_des::{solve_lp_via_des, DESSimplexOptions, PivotRule};
 
 // -----------------------------------------------------------------------------
@@ -227,6 +227,20 @@ pub enum IPMIPStatus {
     MaxNodes,
     TickLimit,
     TimeLimit,
+}
+
+impl IPMIPStatus {
+    /// The TS string spelling of this status.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            IPMIPStatus::Optimal => "optimal",
+            IPMIPStatus::Infeasible => "infeasible",
+            IPMIPStatus::Unbounded => "unbounded",
+            IPMIPStatus::MaxNodes => "maxnodes",
+            IPMIPStatus::TickLimit => "tick-limit",
+            IPMIPStatus::TimeLimit => "time-limit",
+        }
+    }
 }
 
 /// Aggregate performance counters.
@@ -1239,6 +1253,8 @@ impl NodeDecisionStation {
         let r = &tok.payload;
         let mut fractional = r.fractional.clone();
         fractional.truncate(16);
+        let reason_for_log = reason.clone();
+        let (node_id, depth, z, action_dbg) = (r.node.node_id, r.node.depth, r.z, action);
         self.trace.push(IPMIPTraceEvent {
             node_id: r.node.node_id,
             parent_id: r.node.parent_id,
@@ -1258,14 +1274,8 @@ impl NodeDecisionStation {
             state_mode: Some(tok.base.state_mode),
         });
         if self.verbose {
-            eprintln!(
-                "node {} d={} z={} {:?}{}",
-                r.node.node_id,
-                r.node.depth,
-                r.z,
-                action,
-                tok.payload.fractional.first().map(|_| "").unwrap_or("")
-            );
+            let reason_part = reason_for_log.map(|x| format!(" ({x})")).unwrap_or_default();
+            eprintln!("node {node_id} d={depth} z={z} {action_dbg:?}{reason_part}");
         }
     }
 }
@@ -1524,7 +1534,7 @@ pub fn solve_ipmip_with_des(p: IPMIPProblem, opts: IPMIPSolveOptions) -> IPMIPSo
         tokens_created: token_stats.created,
     });
 
-    IPMIPSolution {
+    let solution = IPMIPSolution {
         status,
         x: if has_inc { solver_ref.incumbent.borrow().best_x.clone() } else { Vec::new() },
         z,
@@ -1549,7 +1559,8 @@ pub fn solve_ipmip_with_des(p: IPMIPProblem, opts: IPMIPSolveOptions) -> IPMIPSo
         token_stats,
         trace: solver_ref.decision.borrow().trace.clone(),
         topology: solver_ref.topology(),
-    }
+    };
+    solution
 }
 
 // -----------------------------------------------------------------------------

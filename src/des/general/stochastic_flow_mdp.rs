@@ -526,7 +526,8 @@ pub fn solve_stochastic_flow_mdp(
         IterativeRunOptions { shuffle: false, ..Default::default() },
     );
     assert_no_validation_failures(&summary, MODEL).expect("stochastic-flow-mdp: post-run validation failed");
-    station.borrow().build_result(opts.seed.unwrap_or(1), opts.max_policy_rows.unwrap_or(24))
+    let result = station.borrow().build_result(opts.seed.unwrap_or(1), opts.max_policy_rows.unwrap_or(24));
+    result
 }
 
 pub fn simulate_stochastic_flow_policy(

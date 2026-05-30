@@ -124,7 +124,10 @@ struct DomainScenarioToken<S> {
 }
 
 struct DomainPlanToken<S, P> {
+    // Carried for parity with the TS token shape; not read by the Rust pipeline.
+    #[allow(dead_code)]
     model_id: String,
+    #[allow(dead_code)]
     category: String,
     scenario: S,
     candidate_id: String,
@@ -1047,7 +1050,7 @@ fn financial_candidates(_scenario: &FinancialScenario) -> Vec<DomainCandidate<Fi
 fn evaluate_financial_plan(scenario: &FinancialScenario, plan: &FinancialPlan, candidate_id: &str) -> DomainEvaluation<FinancialPlan> {
     let mut wealth = scenario.initial_wealth;
     let mut peak = wealth;
-    let mut max_drawdown = 0.0;
+    let mut max_drawdown = 0.0_f64;
     let mut turnover = 0.0;
     let mut prev_risk = 0.0;
     for &r in &scenario.returns {

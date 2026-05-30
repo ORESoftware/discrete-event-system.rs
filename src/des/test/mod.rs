@@ -14,7 +14,7 @@ pub mod collaborative_inference_test;
 pub mod computer_network_test;
 pub mod dc_motor_test;
 pub mod dispatch_test;
-// pub mod domain_application_test; // waits on general::domain_application_models
+pub mod domain_application_test;
 pub mod elevator_invariants_test;
 pub mod empirical_control_test;
 pub mod external_module_test;

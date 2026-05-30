@@ -103,5 +103,12 @@ pub mod math_equation_input;
 pub mod smart_traffic_flow;
 pub mod traffic_flow;
 
+// Universal-model spec, the model registry, and domain application models.
+// (`math_blocks` waits on des_base::visual_block, which needs the unported
+// `general::ln`, so it stays unwired for now.)
+pub mod des_registry;
+pub mod domain_application_models;
+pub mod universal_model_spec;
+
 // Adapters: wrap solver/model modules as DES stations / universal-model specs.
 pub mod adapters;

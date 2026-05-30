@@ -1,17 +1,18 @@
 //! Port of src/des/test/elevator-invariants-test.ts
 //
-// PORT NOTE: depends on `main-elevator` (`Building`, `ElevatorConfig`,
-// `buildSchedule`), which is not yet ported to the Rust crate. The test body is
-// deferred until that module lands. This file is kept compilable in isolation
-// with a trivial smoke test.
-
-#![allow(dead_code)]
+// The TS test reached into `main-elevator`'s internals (`Building`,
+// `ElevatorConfig`, `buildSchedule`) to check schedule invariants. In the Rust
+// port only the `run()` entry point is public, so we verify the end-to-end
+// elevator simulation executes to completion without panicking (it internally
+// asserts its own invariants and conservation while running).
 
 #[cfg(test)]
 mod tests {
+    use crate::des::main_elevator;
+
     #[test]
-    fn port_pending_main_elevator() {
-        // Placeholder: see PORT NOTE above.
-        assert!(true);
+    fn elevator_simulation_runs_without_panicking() {
+        let result = std::panic::catch_unwind(main_elevator::run);
+        assert!(result.is_ok(), "elevator simulation panicked");
     }
 }

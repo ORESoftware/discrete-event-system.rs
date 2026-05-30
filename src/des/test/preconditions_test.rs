@@ -513,6 +513,7 @@ mod tests {
             sensor_noise_std: None,
             forecast_noise_std: None,
             forecast_horizon_h: None,
+            seed: None,
         }
     }
 

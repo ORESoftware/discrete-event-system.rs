@@ -1129,7 +1129,7 @@ pub struct SoccerPOMDPFeatureSummary {
 }
 
 fn binary_entropy(p: f64) -> f64 {
-    let q = 1e-12_f64.max((1.0 - 1e-12).min(p));
+    let q = 1e-12_f64.max((1.0_f64 - 1e-12).min(p));
     -(q * q.log2() + (1.0 - q) * (1.0 - q).log2())
 }
 

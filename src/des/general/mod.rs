@@ -87,3 +87,8 @@ pub mod stochastic_flow_mdp;
 pub mod multistage_stochastic;
 pub mod stochastic_lp;
 pub mod ip_mip_des;
+pub mod feasibility_pipeline;
+pub mod nonlinear_forecasting_model;
+pub mod soccer_rotation;
+pub mod do_audit;
+pub mod equation_to_stations;

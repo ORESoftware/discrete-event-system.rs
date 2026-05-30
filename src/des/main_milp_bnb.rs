@@ -10,7 +10,7 @@
 
 use std::time::Instant;
 
-use crate::des::general::lp::Sense;
+use crate::des::general::incremental_lp::Sense;
 use crate::des::general::milp_bnb::{
     build_knapsack_milp, solve_milp, MILPProblem, MILPSolution, MILPSolveOptions, MILPStatus,
 };

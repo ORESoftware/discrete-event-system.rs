@@ -14,7 +14,8 @@ use std::time::Instant;
 
 use crate::des::animation::frame_recorder::{FrameRecorder, FrameRecorderOpts};
 use crate::des::animation::scenes::temp_control_scene::{
-    build_temp_control_animation, STAGE_H, STAGE_W,
+    build_temp_control_animation, RunConfig as SceneRunConfig, RunResult as SceneRunResult,
+    TickRecord as SceneTick, STAGE_H, STAGE_W,
 };
 use crate::des::animation::types::{Frame, FrameParts};
 use crate::des::general::temp_control::{run_temp_control, ControllerSpec, SimConfig};
@@ -40,15 +41,15 @@ fn parse_args() -> Args {
             if ["bang-bang", "pid", "fuzzy", "mdp-mpc"].contains(&v) {
                 controller = v.to_string();
             } else {
-                eprintln!("unknown controller \"{}\"", v);
-                std::process::exit(1);
+                eprintln!("unknown controller \"{}\"; using default", v);
+                return Args { controller, out };
             }
         } else if argv[i] == "--out" && i + 1 < argv.len() {
             i += 1;
             out = argv[i].clone();
         } else if argv[i] == "-h" || argv[i] == "--help" {
             println!("Usage: main-temp-control-anim [--controller bang-bang|pid|fuzzy|mdp-mpc] [--out path]");
-            std::process::exit(0);
+            return Args { controller, out };
         }
         i += 1;
     }
@@ -110,10 +111,30 @@ pub fn run() {
     println!("  comfort = {:.1}%", 100.0 * r.comfort_pct);
     println!("  cost = ${:.2}", r.cost);
 
-    // Build the animation.
+    // Build the animation. The scene module carries a trace-focused mirror of
+    // the run result (TS used one shared type); adapt the model result into it.
     let ctl_name = controller_label(&args.controller);
     let record_every = 5usize; // 5-min frames → 24h × 12fps
-    let (frames, charts) = build_temp_control_animation(&r, ctl_name, record_every);
+    let scene_r = SceneRunResult {
+        cfg: SceneRunConfig { t_target, band: Some(band) },
+        trace: r
+            .trace
+            .iter()
+            .map(|t| SceneTick {
+                t_h: t.t_h,
+                tick: t.tick as f64,
+                t_in_true: t.t_in_true,
+                t_out_true: t.t_out_true,
+                q: t.q,
+                in_band: t.in_band,
+                energy_cum_k_wh: t.energy_cum_kwh,
+            })
+            .collect(),
+        t_in: r.t_in.clone(),
+        t_out: r.t_out.clone(),
+        q: r.q.clone(),
+    };
+    let (frames, charts) = build_temp_control_animation(&scene_r, ctl_name, record_every);
 
     let frames_path = if let Some(stripped) = args.out.strip_suffix(".html") {
         format!("{}.frames.jsonl", stripped)

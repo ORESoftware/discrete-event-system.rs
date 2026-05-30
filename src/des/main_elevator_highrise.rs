@@ -1765,7 +1765,7 @@ fn choose_dropoff(car: &ElevatorCar, policy: HighrisePolicy) -> Option<f64> {
 
 fn allowed_floors_for(idx: i32, n_floors: i32) -> HashSet<i32> {
     let mut floors = HashSet::new();
-    let mut add_range = |a: i32, b: i32, floors: &mut HashSet<i32>| {
+    let add_range = |a: i32, b: i32, floors: &mut HashSet<i32>| {
         for f in a.max(0)..=b.min(n_floors - 1) {
             floors.insert(f);
         }

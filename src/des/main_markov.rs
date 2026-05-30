@@ -27,7 +27,6 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::des::entity_moving::moving::MovingEntity;
 use crate::des::entity_processing::processing::EntityProcessor;
 use crate::des::entity_routing::output_routing_policy::OutputRoutingPolicy;
 use crate::des::entity_source::source::EntitySource;

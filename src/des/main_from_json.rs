@@ -37,7 +37,9 @@ pub fn run() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.is_empty() || argv[0] == "-h" || argv[0] == "--help" {
         print_help();
-        std::process::exit(if argv.is_empty() { 1 } else { 0 });
+        // TS called `process.exit`; as a library entry point we return instead
+        // so callers (e.g. the serial simulation driver) keep running.
+        return;
     }
 
     if argv[0] == "--list" {
@@ -58,7 +60,7 @@ pub fn run() {
             }
             None => {
                 eprintln!("Unknown model: {}", argv[1]);
-                std::process::exit(1);
+                return;
             }
         }
         return;
@@ -70,11 +72,11 @@ pub fn run() {
             }
             Some(_) => {
                 eprintln!("No examples registered for \"{}\".", argv[1]);
-                std::process::exit(1);
+                return;
             }
             None => {
                 eprintln!("Unknown model: {}", argv[1]);
-                std::process::exit(1);
+                return;
             }
         }
         return;
@@ -83,7 +85,7 @@ pub fn run() {
     let spec_path = &argv[0];
     if !std::path::Path::new(spec_path).exists() {
         eprintln!("Spec file not found: {spec_path}");
-        std::process::exit(1);
+        return;
     }
     match run_from_json_file(spec_path, RunFromJsonOptions { verbose: true }) {
         Ok(summary) => {
@@ -99,7 +101,6 @@ pub fn run() {
         }
         Err(e) => {
             eprintln!("Error: {e}");
-            std::process::exit(1);
         }
     }
 }

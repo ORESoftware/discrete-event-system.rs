@@ -337,13 +337,13 @@ pub trait ControllerBlock: SignalBlock {
         let Some(y) = y else {
             return;
         };
-        let (tick, t) = {
+        let tick = {
             let c = self.controller_core_mut();
             c.last_y = Some(y.clone());
             c.tick += 1;
-            (c.tick, 0.0)
+            c.tick
         };
-        let t = t + tick as f64 * self.get_dt();
+        let t = tick as f64 * self.get_dt();
         let mut u = self.control_law(&y, tick, t);
         let needs_sat = {
             let c = self.controller_core();
@@ -452,18 +452,20 @@ pub struct ClosedLoopResult {
     pub num_steps: usize,
 }
 
-/// `ensureConnected(src, tgt)` — wire `src → tgt` if not already wired.
-fn ensure_connected(src: &mut dyn SignalBlock, tgt_id: &str) {
-    if src.block_core().out_targets.iter().any(|t| t == tgt_id) {
+/// `ensureConnected(src, tgt)` — wire `src → tgt` if not already wired. Operates
+/// on the shared [`BlockCore`] so it works for every block type without trait
+/// upcasting.
+fn ensure_connected(src: &mut BlockCore, tgt_id: &str) {
+    if src.out_targets.iter().any(|t| t == tgt_id) {
         return;
     }
-    src.block_core_mut().out_targets.push(tgt_id.to_string());
+    src.out_targets.push(tgt_id.to_string());
 }
 
 /// Record the reverse (in) edge for fidelity.
-fn add_in_edge(tgt: &mut dyn SignalBlock, src_id: &str) {
-    if !tgt.block_core().in_sources.iter().any(|s| s == src_id) {
-        tgt.block_core_mut().in_sources.push(src_id.to_string());
+fn add_in_edge(tgt: &mut BlockCore, src_id: &str) {
+    if !tgt.in_sources.iter().any(|s| s == src_id) {
+        tgt.in_sources.push(src_id.to_string());
     }
 }
 
@@ -473,18 +475,21 @@ fn add_in_edge(tgt: &mut dyn SignalBlock, src_id: &str) {
 fn deliver(
     pending: Vec<VectorSignal>,
     targets: &[String],
-    plant: &mut dyn SignalBlock,
-    controller: &mut dyn SignalBlock,
-    estimator: &mut Option<&mut dyn SignalBlock>,
+    plant: &mut dyn PlantBlock,
+    controller: &mut dyn ControllerBlock,
+    estimator: &mut Option<&mut dyn EstimatorBlock>,
 ) {
+    let plant_id = plant.id().to_string();
+    let controller_id = controller.id().to_string();
+    let estimator_id = estimator.as_deref().map(|e| e.id().to_string());
     for sig in pending {
         for target_id in targets {
-            if target_id == plant.id() {
+            if *target_id == plant_id {
                 plant.take_item(sig.clone());
-            } else if target_id == controller.id() {
+            } else if *target_id == controller_id {
                 controller.take_item(sig.clone());
-            } else if let Some(est) = estimator.as_deref_mut() {
-                if target_id == est.id() {
+            } else if estimator_id.as_deref() == Some(target_id.as_str()) {
+                if let Some(est) = estimator.as_deref_mut() {
                     est.take_item(sig.clone());
                 }
             }
@@ -519,20 +524,20 @@ pub fn run_closed_loop(
     // Auto-wire: plant → (estimator ?? controller); estimator → controller;
     // controller → plant; controller → estimator.
     let plant_target = estimator_id.clone().unwrap_or_else(|| controller_id.clone());
-    ensure_connected(plant.as_signal_mut(), &plant_target);
+    ensure_connected(plant.block_core_mut(), &plant_target);
     if let Some(eid) = &estimator_id {
         if let Some(est) = estimator.as_deref_mut() {
-            ensure_connected(est.as_signal_mut(), &controller_id);
-            add_in_edge(est.as_signal_mut(), &plant_id);
+            ensure_connected(est.block_core_mut(), &controller_id);
+            add_in_edge(est.block_core_mut(), &plant_id);
         }
-        add_in_edge(controller.as_signal_mut(), eid);
+        add_in_edge(controller.block_core_mut(), eid);
     } else {
-        add_in_edge(controller.as_signal_mut(), &plant_id);
+        add_in_edge(controller.block_core_mut(), &plant_id);
     }
-    ensure_connected(controller.as_signal_mut(), &plant_id);
-    add_in_edge(plant.as_signal_mut(), &controller_id);
+    ensure_connected(controller.block_core_mut(), &plant_id);
+    add_in_edge(plant.block_core_mut(), &controller_id);
     if let Some(eid) = &estimator_id {
-        ensure_connected(controller.as_signal_mut(), eid);
+        ensure_connected(controller.block_core_mut(), eid);
     }
 
     // Pre-run guards.
@@ -556,32 +561,23 @@ pub fn run_closed_loop(
         {
             let pending: Vec<VectorSignal> = std::mem::take(&mut plant.block_core_mut().pending_out);
             let targets = plant.block_core().out_targets.clone();
-            deliver(
-                pending,
-                &targets,
-                plant.as_signal_mut(),
-                controller.as_signal_mut(),
-                &mut estimator.as_deref_mut().map(|e| e.as_signal_mut()),
-            );
+            let mut est_ref = estimator.as_deref_mut();
+            deliver(pending, &targets, plant, controller, &mut est_ref);
         }
         if let Some(est) = estimator.as_deref_mut() {
             est.run_time_step();
             let pending: Vec<VectorSignal> = std::mem::take(&mut est.block_core_mut().pending_out);
             let targets = est.block_core().out_targets.clone();
-            deliver(pending, &targets, plant.as_signal_mut(), controller.as_signal_mut(), &mut None);
+            let mut none_est: Option<&mut dyn EstimatorBlock> = None;
+            deliver(pending, &targets, plant, controller, &mut none_est);
         }
         controller.run_time_step();
         {
             let pending: Vec<VectorSignal> =
                 std::mem::take(&mut controller.block_core_mut().pending_out);
             let targets = controller.block_core().out_targets.clone();
-            deliver(
-                pending,
-                &targets,
-                plant.as_signal_mut(),
-                controller.as_signal_mut(),
-                &mut estimator.as_deref_mut().map(|e| e.as_signal_mut()),
-            );
+            let mut est_ref = estimator.as_deref_mut();
+            deliver(pending, &targets, plant, controller, &mut est_ref);
         }
     }
 
@@ -591,28 +587,6 @@ pub fn run_closed_loop(
         measurements: plant.plant_core().output_history.clone(),
         estimates: estimator.as_deref().map(|e| e.estimator_core().estimate_history.clone()),
         num_steps: opts.num_steps,
-    }
-}
-
-/// Upcast helpers so a `&mut dyn PlantBlock` (etc.) can be passed where a
-/// `&mut dyn SignalBlock` is needed (Rust does not auto-coerce between trait
-/// objects).
-trait AsSignal {
-    fn as_signal_mut(&mut self) -> &mut dyn SignalBlock;
-}
-impl AsSignal for dyn PlantBlock + '_ {
-    fn as_signal_mut(&mut self) -> &mut dyn SignalBlock {
-        self
-    }
-}
-impl AsSignal for dyn ControllerBlock + '_ {
-    fn as_signal_mut(&mut self) -> &mut dyn SignalBlock {
-        self
-    }
-}
-impl AsSignal for dyn EstimatorBlock + '_ {
-    fn as_signal_mut(&mut self) -> &mut dyn SignalBlock {
-        self
     }
 }
 

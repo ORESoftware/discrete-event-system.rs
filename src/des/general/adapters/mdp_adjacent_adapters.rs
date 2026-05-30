@@ -1,25 +1,29 @@
 //! Port of `src/des/general/adapters/mdp-adjacent-adapters.ts`
 //! (module `des::general::adapters::mdp_adjacent_adapters`).
 //!
-//! Registers nine MDP-adjacent JSON adapters (inventory-DP, mountain-car,
-//! tiger/grid POMDPs, four-rooms SMDP, actor-critic, blackjack-MC, stag-hunt,
-//! double-integrator LQR).
+//! JSON adapters for nine MDP-adjacent models: `inventory-dp`,
+//! `mountain-car-vfa`, `tiger-pomdp`, `grid-localization-pomdp`,
+//! `four-rooms-smdp`, `actor-critic-grid`, `blackjack-mc`, `stag-hunt`,
+//! `double-integrator-lqr`. Each follows the [`DESModelRegistration`] contract.
 //!
 //! ## Conversion notes
 //!
-//!   * Intersection-typed `P` shapes become explicit structs:
-//!     - `InventoryProblem & {seed?}` -> [`InventoryDPParams`].
-//!     - `TigerOpts & {solver; numSteps; seed}` -> [`TigerPomdpParams`].
-//!     - `BlackjackTrainOpts & {evalEpisodes?}` reuses the engine
-//!       [`BlackjackTrainOpts`] (it already carries `eval_episodes`).
-//!   * `solver: 'qmdp'|'one-step-lookahead'` -> [`TigerSolver`].
-//!   * `x0`/`hiddenTarget` fixed-length tuples are `[f64; 2]` / `(usize, usize)`
-//!     in the engine types, so the TS `numberPair` coercion is unnecessary; the
-//!     LQR default `[3, 0]` is applied by the engine.
-//!   * `uSat` default `Infinity` -> `f64::INFINITY`.
+//!   * `solver: 'qmdp'|'one-step-lookahead'` literal union → the engine's
+//!     [`TigerSolver`] enum.
+//!   * Intersection-typed `P` shapes (`InventoryProblem & {seed?}`,
+//!     `TigerOpts & {solver; numSteps; seed}`) have no Rust analogue and are
+//!     flattened into the [`InventoryDpParams`] / [`TigerPomdpParams`] structs.
+//!   * `x0` / `hiddenTarget` fixed-length arrays are already `[f64;2]` /
+//!     `(usize,usize)` on the engine types, so the TS `numberPair` coercion is a
+//!     no-op and is dropped (see the LQR adapter).
+//!   * `run_double_integrator_lqr` returns `Result` (the engine's
+//!     `Preconditions` are recoverable); the TS `run` threw, so the adapter
+//!     `.expect()`s — an invariant violation → `panic!`.
 //!
-//! PORT NOTE: `registerModel` / the registry is not ported yet; each adapter is
-//! exposed via the `adapter_*()` constructors.
+//! PORT NOTE: `registerModel` / the `des_registry` is not wired here (the
+//! registry stores type-erased adapters); each model is exposed via an
+//! `adapter_*()` constructor returning the registration struct, matching the
+//! sibling `signal_transforms_adapter` port.
 
 #![allow(dead_code)]
 
@@ -49,72 +53,7 @@ use crate::des::general::tiger_pomdp::{
 };
 
 // =============================================================================
-// Formatting / shared helpers.
-// =============================================================================
-
-fn js_number(v: f64) -> String {
-    if v.is_nan() {
-        "NaN".to_string()
-    } else if v.is_infinite() {
-        if v > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() }
-    } else {
-        let s = v.to_string();
-        if s == "-0" { "0".to_string() } else { s }
-    }
-}
-
-fn to_exponential(v: f64, digits: usize) -> String {
-    if !v.is_finite() {
-        return js_number(v);
-    }
-    let raw = format!("{:.*e}", digits, v);
-    match raw.split_once('e') {
-        Some((mant, exp)) if !exp.starts_with('-') => format!("{mant}e+{exp}"),
-        _ => raw,
-    }
-}
-
-/// `xs.slice(-min(n, xs.length))` mean, with the JS `/ Math.max(1, len)` guard.
-fn mean_last(xs: &[f64], n: usize) -> f64 {
-    let take = n.min(xs.len());
-    let slice = &xs[xs.len() - take..];
-    let sum: f64 = slice.iter().sum();
-    sum / (slice.len().max(1) as f64)
-}
-
-fn count_actions(actions: &[usize], names: &[&str]) -> String {
-    let mut counts = vec![0usize; names.len()];
-    for &a in actions {
-        counts[a] += 1;
-    }
-    names
-        .iter()
-        .enumerate()
-        .map(|(i, n)| format!("{n}={}", counts[i]))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-fn join_usize(v: &[usize]) -> String {
-    v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", ")
-}
-
-fn observation_str(o: &GridLocalizationObservation) -> &'static str {
-    match o {
-        GridLocalizationObservation::No => "no",
-        GridLocalizationObservation::Yes => "yes",
-    }
-}
-
-fn solver_str(s: TigerSolver) -> &'static str {
-    match s {
-        TigerSolver::Qmdp => "qmdp",
-        TigerSolver::OneStepLookahead => "one-step-lookahead",
-    }
-}
-
-// =============================================================================
-// Schema helpers
+// Schema builders (JS-parity, copied from the sibling adapter style).
 // =============================================================================
 
 fn num(min: Option<f64>, max: Option<f64>, integer: Option<bool>, default: Option<f64>) -> ParamSchema {
@@ -137,11 +76,47 @@ fn arr(items: ParamSchema, min_length: Option<usize>, max_length: Option<usize>)
     ParamSchema::Array { items: Box::new(items), min_length, max_length, description: None }
 }
 
-fn obj(fields: Vec<(&str, ParamSchema)>, required: Vec<&str>, description: &str) -> ParamSchema {
+fn obj(description: &str, fields: Vec<(&str, ParamSchema)>, required: Vec<&str>) -> ParamSchema {
     ParamSchema::Object {
         fields: fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
         required: Some(required.iter().map(|s| s.to_string()).collect()),
         description: Some(description.to_string()),
+    }
+}
+
+// =============================================================================
+// Shared helpers.
+// =============================================================================
+
+/// `meanLast(xs, n)` — mean of the last `min(n, len)` elements.
+fn mean_last(xs: &[f64], n: usize) -> f64 {
+    let take = n.min(xs.len());
+    let slice = &xs[xs.len() - take..];
+    slice.iter().sum::<f64>() / slice.len().max(1) as f64
+}
+
+/// `countActions(actions, names)`.
+fn count_actions(actions: &[usize], names: &[&str]) -> String {
+    let mut counts = vec![0usize; names.len()];
+    for &a in actions {
+        if a < counts.len() {
+            counts[a] += 1;
+        }
+    }
+    names.iter().enumerate().map(|(i, n)| format!("{n}={}", counts[i])).collect::<Vec<_>>().join(", ")
+}
+
+fn obs_str(o: GridLocalizationObservation) -> &'static str {
+    match o {
+        GridLocalizationObservation::No => "no",
+        GridLocalizationObservation::Yes => "yes",
+    }
+}
+
+fn solver_str(s: TigerSolver) -> &'static str {
+    match s {
+        TigerSolver::Qmdp => "qmdp",
+        TigerSolver::OneStepLookahead => "one-step-lookahead",
     }
 }
 
@@ -151,13 +126,14 @@ fn obj(fields: Vec<(&str, ParamSchema)>, required: Vec<&str>, description: &str)
 
 /// `InventoryProblem & {seed?: number}`.
 #[derive(Clone, Debug)]
-pub struct InventoryDPParams {
+pub struct InventoryDpParams {
     pub problem: InventoryProblem,
     pub seed: Option<u32>,
 }
 
 fn inventory_schema() -> ParamSchema {
     obj(
+        "Multi-period stochastic inventory by finite-horizon DP.",
         vec![
             ("horizon", num(Some(1.0), None, Some(true), None)),
             ("S_max", num(Some(0.0), None, Some(true), None)),
@@ -172,16 +148,15 @@ fn inventory_schema() -> ParamSchema {
             ("initialInventory", num(Some(0.0), None, Some(true), None)),
         ],
         vec!["horizon", "S_max", "demandPmf", "price", "cost", "initialInventory"],
-        "Multi-period stochastic inventory by finite-horizon DP.",
     )
 }
 
-pub struct InventoryDPAdapter;
-pub fn adapter_inventory_dp() -> InventoryDPAdapter {
-    InventoryDPAdapter
+pub struct InventoryDpAdapter;
+pub fn adapter_inventory_dp() -> InventoryDpAdapter {
+    InventoryDpAdapter
 }
 
-impl DESModelRegistration<InventoryDPParams, InventoryDPResult> for InventoryDPAdapter {
+impl DESModelRegistration<InventoryDpParams, InventoryDPResult> for InventoryDpAdapter {
     fn id(&self) -> &str {
         "inventory-dp"
     }
@@ -191,10 +166,11 @@ impl DESModelRegistration<InventoryDPParams, InventoryDPResult> for InventoryDPA
     fn schema(&self) -> ParamSchema {
         inventory_schema()
     }
-    fn run(&self, p: InventoryDPParams, _runtime: &DESRuntimeConfig) -> InventoryDPResult {
-        solve_inventory_dp(&p.problem, Some(p.seed.unwrap_or(1)))
+    fn run(&self, params: InventoryDpParams, _runtime: &DESRuntimeConfig) -> InventoryDPResult {
+        solve_inventory_dp(&params.problem, Some(params.seed.unwrap_or(1)))
     }
-    fn summarize(&self, r: &InventoryDPResult, p: &InventoryDPParams) -> String {
+    fn summarize(&self, r: &InventoryDPResult, p: &InventoryDpParams) -> String {
+        let seed = p.seed.unwrap_or(1);
         [
             "INVENTORY DP".to_string(),
             "────────────────────────────".to_string(),
@@ -202,7 +178,7 @@ impl DESModelRegistration<InventoryDPParams, InventoryDPResult> for InventoryDPA
             format!("  S_max:        {}", p.problem.s_max),
             format!("  E[demand]:    {:.2}", r.mean_demand),
             format!("  V*(t=0, s={}): {:.3}", p.problem.initial_inventory, r.expected_reward),
-            format!("  Sim total reward (seed={}): {:.3}", p.seed.unwrap_or(1), r.simulation.total_reward),
+            format!("  Sim total reward (seed={seed}): {:.3}", r.simulation.total_reward),
             format!("  Orders:       {}", join_usize(&r.simulation.orders)),
             format!("  Demands:      {}", join_usize(&r.simulation.demands)),
             format!("  Inventory:    {}", join_usize(&r.simulation.inventory)),
@@ -224,12 +200,17 @@ impl DESModelRegistration<InventoryDPParams, InventoryDPResult> for InventoryDPA
     }
 }
 
+fn join_usize(xs: &[usize]) -> String {
+    xs.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", ")
+}
+
 // =============================================================================
 // 2. mountain-car-vfa
 // =============================================================================
 
 fn mountain_car_schema() -> ParamSchema {
     obj(
+        "Mountain Car solved by linear VFA with tile coding (Sutton-Albus).",
         vec![
             ("numEpisodes", num(Some(1.0), None, Some(true), Some(200.0))),
             ("maxStepsPerEpisode", num(Some(1.0), None, Some(true), Some(1000.0))),
@@ -243,16 +224,15 @@ fn mountain_car_schema() -> ParamSchema {
             ("numTilesPerDim", num(Some(2.0), None, Some(true), Some(8.0))),
         ],
         vec!["numEpisodes"],
-        "Mountain Car solved by linear VFA with tile coding (Sutton-Albus).",
     )
 }
 
-pub struct MountainCarVFAAdapter;
-pub fn adapter_mountain_car_vfa() -> MountainCarVFAAdapter {
-    MountainCarVFAAdapter
+pub struct MountainCarAdapter;
+pub fn adapter_mountain_car() -> MountainCarAdapter {
+    MountainCarAdapter
 }
 
-impl DESModelRegistration<MountainCarTrainOpts, MountainCarResult> for MountainCarVFAAdapter {
+impl DESModelRegistration<MountainCarTrainOpts, MountainCarResult> for MountainCarAdapter {
     fn id(&self) -> &str {
         "mountain-car-vfa"
     }
@@ -262,14 +242,14 @@ impl DESModelRegistration<MountainCarTrainOpts, MountainCarResult> for MountainC
     fn schema(&self) -> ParamSchema {
         mountain_car_schema()
     }
-    fn run(&self, p: MountainCarTrainOpts, _runtime: &DESRuntimeConfig) -> MountainCarResult {
-        run_mountain_car(p)
+    fn run(&self, params: MountainCarTrainOpts, _runtime: &DESRuntimeConfig) -> MountainCarResult {
+        run_mountain_car(params)
     }
     fn summarize(&self, r: &MountainCarResult, _p: &MountainCarTrainOpts) -> String {
         let greedy = if r.greedy_solves {
-            format!("solves in {} steps", js_number(r.greedy_episode_length))
+            format!("solves in {} steps", r.greedy_episode_length)
         } else {
-            format!("does NOT solve in {} steps", js_number(r.greedy_episode_length))
+            format!("does NOT solve in {} steps", r.greedy_episode_length)
         };
         [
             "MOUNTAIN CAR (linear VFA + tile coding)".to_string(),
@@ -295,11 +275,12 @@ pub struct TigerPomdpParams {
     pub opts: TigerOpts,
     pub solver: TigerSolver,
     pub num_steps: usize,
-    pub seed: u32,
+    pub seed: Option<u32>,
 }
 
 fn tiger_schema() -> ParamSchema {
     obj(
+        "Cassandra-Kaelbling-Littman 1994 Tiger problem with QMDP / 1-step look-ahead.",
         vec![
             ("listenAccuracy", num(Some(0.5), Some(1.0), None, Some(0.85))),
             ("openGood", num(None, None, None, Some(10.0))),
@@ -311,7 +292,6 @@ fn tiger_schema() -> ParamSchema {
             ("seed", num(None, None, Some(true), Some(1.0))),
         ],
         vec![],
-        "Cassandra-Kaelbling-Littman 1994 Tiger problem with QMDP / 1-step look-ahead.",
     )
 }
 
@@ -330,12 +310,12 @@ impl DESModelRegistration<TigerPomdpParams, TigerSimResult> for TigerPomdpAdapte
     fn schema(&self) -> ParamSchema {
         tiger_schema()
     }
-    fn run(&self, p: TigerPomdpParams, _runtime: &DESRuntimeConfig) -> TigerSimResult {
+    fn run(&self, params: TigerPomdpParams, _runtime: &DESRuntimeConfig) -> TigerSimResult {
         simulate_tiger(TigerSimOpts {
-            spec: Some(build_tiger_spec(&p.opts)),
-            solver: p.solver,
-            num_steps: p.num_steps,
-            seed: Some(p.seed),
+            spec: Some(build_tiger_spec(&params.opts)),
+            solver: params.solver,
+            num_steps: params.num_steps,
+            seed: params.seed,
             initial_state: None,
             initial_belief: None,
         })
@@ -362,6 +342,7 @@ impl DESModelRegistration<TigerPomdpParams, TigerSimResult> for TigerPomdpAdapte
 
 fn grid_localization_schema() -> ParamSchema {
     obj(
+        "2D hidden-target localization POMDP with row/column scans and inspect actions.",
         vec![
             ("width", num(Some(2.0), Some(8.0), Some(true), Some(3.0))),
             ("height", num(Some(2.0), Some(8.0), Some(true), Some(3.0))),
@@ -378,27 +359,25 @@ fn grid_localization_schema() -> ParamSchema {
             ("discount", num(Some(0.0), Some(1.0), None, Some(0.95))),
         ],
         vec![],
-        "2D hidden-target localization POMDP with row/column scans and inspect actions.",
     )
 }
 
+/// `normalizeGridLocalizationParams(p)` — drop empty/malformed optional inputs.
 fn normalize_grid_localization_params(p: GridLocalizationParams) -> GridLocalizationParams {
-    // `hiddenTarget` is already a `(usize, usize)` tuple (no length coercion
-    // needed); only the empty-`initialBelief` -> `None` normalization remains.
-    GridLocalizationParams {
-        initial_belief: p.initial_belief.filter(|b| !b.is_empty()),
-        ..p
-    }
+    let hidden_target = p.hidden_target; // already (usize, usize) — length is fixed.
+    let initial_belief = match &p.initial_belief {
+        Some(b) if !b.is_empty() => Some(b.clone()),
+        _ => None,
+    };
+    GridLocalizationParams { hidden_target, initial_belief, ..p }
 }
 
-pub struct GridLocalizationPomdpAdapter;
-pub fn adapter_grid_localization_pomdp() -> GridLocalizationPomdpAdapter {
-    GridLocalizationPomdpAdapter
+pub struct GridLocalizationAdapter;
+pub fn adapter_grid_localization() -> GridLocalizationAdapter {
+    GridLocalizationAdapter
 }
 
-impl DESModelRegistration<GridLocalizationParams, GridLocalizationResult>
-    for GridLocalizationPomdpAdapter
-{
+impl DESModelRegistration<GridLocalizationParams, GridLocalizationResult> for GridLocalizationAdapter {
     fn id(&self) -> &str {
         "grid-localization-pomdp"
     }
@@ -408,30 +387,29 @@ impl DESModelRegistration<GridLocalizationParams, GridLocalizationResult>
     fn schema(&self) -> ParamSchema {
         grid_localization_schema()
     }
-    fn run(&self, p: GridLocalizationParams, _runtime: &DESRuntimeConfig) -> GridLocalizationResult {
-        run_grid_localization_pomdp(&normalize_grid_localization_params(p))
+    fn run(&self, params: GridLocalizationParams, _runtime: &DESRuntimeConfig) -> GridLocalizationResult {
+        run_grid_localization_pomdp(&normalize_grid_localization_params(params))
     }
     fn summarize(&self, r: &GridLocalizationResult, _p: &GridLocalizationParams) -> String {
         let first = r.trace.first();
         let last = r.trace.last();
-        let first_action = first
-            .map(|f| format!("{} -> {}", f.action.label, observation_str(&f.observation)))
-            .unwrap_or_else(|| "n/a".to_string());
+        let first_action = match first {
+            Some(row) => format!("{} -> {}", row.action.label, obs_str(row.observation)),
+            None => "n/a".to_string(),
+        };
         let found = if r.found {
-            format!(
-                "YES at step {}",
-                r.found_at_step.map(|s| s.to_string()).unwrap_or_else(|| "undefined".to_string())
-            )
+            format!("YES at step {}", r.found_at_step.map(|s| s.to_string()).unwrap_or_default())
         } else {
             "no".to_string()
         };
         let entropy = format!(
             "{} -> {}",
-            first.map(|f| format!("{:.3}", f.entropy)).unwrap_or_else(|| "n/a".to_string()),
-            last.map(|l| format!("{:.3}", l.entropy)).unwrap_or_else(|| "n/a".to_string())
+            first.map(|row| format!("{:.3}", row.entropy)).unwrap_or_else(|| "n/a".to_string()),
+            last.map(|row| format!("{:.3}", row.entropy)).unwrap_or_else(|| "n/a".to_string())
         );
-        let p_hidden =
-            last.map(|l| format!("{:.3}", l.hidden_probability)).unwrap_or_else(|| "n/a".to_string());
+        let p_hidden = last
+            .map(|row| format!("{:.3}", row.hidden_probability))
+            .unwrap_or_else(|| "n/a".to_string());
         [
             "GRID LOCALIZATION POMDP".to_string(),
             "───────────────────────────────".to_string(),
@@ -458,12 +436,12 @@ impl DESModelRegistration<GridLocalizationParams, GridLocalizationResult>
             lines.push(csv_row([
                 row.step.to_string(),
                 row.action.label.clone(),
-                observation_str(&row.observation).to_string(),
+                obs_str(row.observation).to_string(),
                 row.mode.0.to_string(),
                 row.mode.1.to_string(),
-                js_number(row.mode_probability),
-                js_number(row.hidden_probability),
-                js_number(row.entropy),
+                row.mode_probability.to_string(),
+                row.hidden_probability.to_string(),
+                row.entropy.to_string(),
                 row.found.to_string(),
             ]));
         }
@@ -511,6 +489,7 @@ impl DESModelRegistration<GridLocalizationParams, GridLocalizationResult>
 
 fn four_rooms_schema() -> ParamSchema {
     obj(
+        "Four-Rooms gridworld with hallway options (Sutton, Precup, Singh 1999).",
         vec![
             ("numEpisodes", num(Some(1.0), None, Some(true), Some(200.0))),
             ("maxStepsPerEpisode", num(Some(1.0), None, Some(true), Some(5000.0))),
@@ -525,16 +504,15 @@ fn four_rooms_schema() -> ParamSchema {
             ("initQ", num(None, None, None, Some(1.0))),
         ],
         vec![],
-        "Four-Rooms gridworld with hallway options (Sutton, Precup, Singh 1999).",
     )
 }
 
-pub struct FourRoomsSmdpAdapter;
-pub fn adapter_four_rooms_smdp() -> FourRoomsSmdpAdapter {
-    FourRoomsSmdpAdapter
+pub struct FourRoomsAdapter;
+pub fn adapter_four_rooms() -> FourRoomsAdapter {
+    FourRoomsAdapter
 }
 
-impl DESModelRegistration<FourRoomsTrainOpts, FourRoomsResult> for FourRoomsSmdpAdapter {
+impl DESModelRegistration<FourRoomsTrainOpts, FourRoomsResult> for FourRoomsAdapter {
     fn id(&self) -> &str {
         "four-rooms-smdp"
     }
@@ -544,13 +522,13 @@ impl DESModelRegistration<FourRoomsTrainOpts, FourRoomsResult> for FourRoomsSmdp
     fn schema(&self) -> ParamSchema {
         four_rooms_schema()
     }
-    fn run(&self, p: FourRoomsTrainOpts, _runtime: &DESRuntimeConfig) -> FourRoomsResult {
-        run_four_rooms_smdp(p)
+    fn run(&self, params: FourRoomsTrainOpts, _runtime: &DESRuntimeConfig) -> FourRoomsResult {
+        run_four_rooms_smdp(params)
     }
     fn summarize(&self, r: &FourRoomsResult, _p: &FourRoomsTrainOpts) -> String {
         let mean_l = mean_last(&r.length_history, 20);
         let greedy = if r.greedy_reached_goal {
-            format!("YES in {} steps", js_number(r.greedy_episode_length))
+            format!("YES in {} steps", r.greedy_episode_length)
         } else {
             "no".to_string()
         };
@@ -572,6 +550,7 @@ impl DESModelRegistration<FourRoomsTrainOpts, FourRoomsResult> for FourRoomsSmdp
 
 fn actor_critic_schema() -> ParamSchema {
     obj(
+        "One-step tabular actor-critic on GridWorld.",
         vec![
             ("numEpisodes", num(Some(1.0), None, Some(true), Some(1000.0))),
             ("maxStepsPerEpisode", num(Some(1.0), None, Some(true), Some(100.0))),
@@ -584,16 +563,15 @@ fn actor_critic_schema() -> ParamSchema {
             ("height", num(Some(2.0), None, Some(true), Some(4.0))),
         ],
         vec![],
-        "One-step tabular actor-critic on GridWorld.",
     )
 }
 
-pub struct ActorCriticGridAdapter;
-pub fn adapter_actor_critic_grid() -> ActorCriticGridAdapter {
-    ActorCriticGridAdapter
+pub struct ActorCriticAdapter;
+pub fn adapter_actor_critic() -> ActorCriticAdapter {
+    ActorCriticAdapter
 }
 
-impl DESModelRegistration<ActorCriticTrainOpts, ActorCriticResult> for ActorCriticGridAdapter {
+impl DESModelRegistration<ActorCriticTrainOpts, ActorCriticResult> for ActorCriticAdapter {
     fn id(&self) -> &str {
         "actor-critic-grid"
     }
@@ -603,8 +581,8 @@ impl DESModelRegistration<ActorCriticTrainOpts, ActorCriticResult> for ActorCrit
     fn schema(&self) -> ParamSchema {
         actor_critic_schema()
     }
-    fn run(&self, p: ActorCriticTrainOpts, _runtime: &DESRuntimeConfig) -> ActorCriticResult {
-        run_actor_critic_gridworld(p)
+    fn run(&self, params: ActorCriticTrainOpts, _runtime: &DESRuntimeConfig) -> ActorCriticResult {
+        run_actor_critic_gridworld(params)
     }
     fn summarize(&self, r: &ActorCriticResult, _p: &ActorCriticTrainOpts) -> String {
         let mean_r = mean_last(&r.reward_history, 20);
@@ -631,6 +609,7 @@ impl DESModelRegistration<ActorCriticTrainOpts, ActorCriticResult> for ActorCrit
 
 fn blackjack_schema() -> ParamSchema {
     obj(
+        "Sutton & Barto §5.1 Blackjack with first-visit Monte Carlo control.",
         vec![
             ("numEpisodes", num(Some(1.0), None, Some(true), Some(50_000.0))),
             ("seed", num(None, None, Some(true), Some(1.0))),
@@ -642,16 +621,15 @@ fn blackjack_schema() -> ParamSchema {
             ("evalEpisodes", num(Some(1.0), None, Some(true), Some(5000.0))),
         ],
         vec![],
-        "Sutton & Barto §5.1 Blackjack with first-visit Monte Carlo control.",
     )
 }
 
-pub struct BlackjackMcAdapter;
-pub fn adapter_blackjack_mc() -> BlackjackMcAdapter {
-    BlackjackMcAdapter
+pub struct BlackjackAdapter;
+pub fn adapter_blackjack() -> BlackjackAdapter {
+    BlackjackAdapter
 }
 
-impl DESModelRegistration<BlackjackTrainOpts, BlackjackResult> for BlackjackMcAdapter {
+impl DESModelRegistration<BlackjackTrainOpts, BlackjackResult> for BlackjackAdapter {
     fn id(&self) -> &str {
         "blackjack-mc"
     }
@@ -661,17 +639,26 @@ impl DESModelRegistration<BlackjackTrainOpts, BlackjackResult> for BlackjackMcAd
     fn schema(&self) -> ParamSchema {
         blackjack_schema()
     }
-    fn run(&self, p: BlackjackTrainOpts, _runtime: &DESRuntimeConfig) -> BlackjackResult {
-        run_blackjack_mc(p)
+    fn run(&self, params: BlackjackTrainOpts, _runtime: &DESRuntimeConfig) -> BlackjackResult {
+        run_blackjack_mc(params)
     }
     fn summarize(&self, r: &BlackjackResult, _p: &BlackjackTrainOpts) -> String {
         [
             "BLACKJACK MC".to_string(),
             "──────────────────────".to_string(),
             format!("  Cells visited:          {} / 400", r.visited_cells),
-            format!("  Greedy mean return:     {:.3}  (theoretical optimum ≈ -0.04)", r.greedy_mean_return),
-            format!("  Baseline (stick≥20):    {:.3}  (≈ -0.27)", r.baseline_mean_return),
-            format!("  Improvement over base:  {:.3}", r.greedy_mean_return - r.baseline_mean_return),
+            format!(
+                "  Greedy mean return:     {:.3}  (theoretical optimum ≈ -0.04)",
+                r.greedy_mean_return
+            ),
+            format!(
+                "  Baseline (stick≥20):    {:.3}  (≈ -0.27)",
+                r.baseline_mean_return
+            ),
+            format!(
+                "  Improvement over base:  {:.3}",
+                r.greedy_mean_return - r.baseline_mean_return
+            ),
         ]
         .join("\n")
     }
@@ -683,6 +670,7 @@ impl DESModelRegistration<BlackjackTrainOpts, BlackjackResult> for BlackjackMcAd
 
 fn stag_hunt_schema() -> ParamSchema {
     obj(
+        "Stag Hunt coordination game with two independent Q-learners (Tan 1993 IQL).",
         vec![
             ("numEpisodes", num(Some(1.0), None, Some(true), Some(5000.0))),
             ("alpha", num(Some(0.0), None, None, Some(0.05))),
@@ -693,7 +681,6 @@ fn stag_hunt_schema() -> ParamSchema {
             ("seed", num(None, None, Some(true), Some(1.0))),
         ],
         vec![],
-        "Stag Hunt coordination game with two independent Q-learners (Tan 1993 IQL).",
     )
 }
 
@@ -712,8 +699,8 @@ impl DESModelRegistration<StagHuntOpts, StagHuntResult> for StagHuntAdapter {
     fn schema(&self) -> ParamSchema {
         stag_hunt_schema()
     }
-    fn run(&self, p: StagHuntOpts, _runtime: &DESRuntimeConfig) -> StagHuntResult {
-        run_stag_hunt(&p)
+    fn run(&self, params: StagHuntOpts, _runtime: &DESRuntimeConfig) -> StagHuntResult {
+        run_stag_hunt(&params)
     }
     fn summarize(&self, r: &StagHuntResult, _p: &StagHuntOpts) -> String {
         let acts = ["STAG", "HARE"];
@@ -748,6 +735,7 @@ impl DESModelRegistration<StagHuntOpts, StagHuntResult> for StagHuntAdapter {
 
 fn lqr_schema() -> ParamSchema {
     obj(
+        "Discrete-time LQR on a double integrator, computed by Riccati iteration.",
         vec![
             ("dt", num(Some(1e-6), None, None, Some(0.1))),
             ("qPos", num(Some(0.0), None, None, Some(1.0))),
@@ -761,7 +749,6 @@ fn lqr_schema() -> ParamSchema {
             ("seed", num(None, None, Some(true), Some(1.0))),
         ],
         vec![],
-        "Discrete-time LQR on a double integrator, computed by Riccati iteration.",
     )
 }
 
@@ -780,21 +767,25 @@ impl DESModelRegistration<DoubleIntegratorOpts, DoubleIntegratorResult> for Doub
     fn schema(&self) -> ParamSchema {
         lqr_schema()
     }
-    fn run(&self, p: DoubleIntegratorOpts, _runtime: &DESRuntimeConfig) -> DoubleIntegratorResult {
-        // The engine defaults `x0` to `[3, 0]`; the TS `numberPair` coercion is a
-        // no-op given the typed `[f64; 2]`. A precondition failure mirrors `throw`.
-        run_double_integrator_lqr(p).unwrap_or_else(|e| panic!("{e}"))
+    fn run(&self, params: DoubleIntegratorOpts, _runtime: &DESRuntimeConfig) -> DoubleIntegratorResult {
+        // PORT NOTE: TS `numberPair(p.x0, [3,0], 'x0')` is a no-op here (x0 is
+        // `Option<[f64;2]>` and the runner defaults it to `[3,0]`). The runner
+        // returns `Result`; the TS `run` threw on failure → `.expect()` (panic).
+        run_double_integrator_lqr(params).expect("double-integrator-lqr precondition failed")
     }
     fn summarize(&self, r: &DoubleIntegratorResult, _p: &DoubleIntegratorOpts) -> String {
-        let final_state = r.trajectory.last().expect("trajectory is non-empty");
-        let k_row = r.k[0].iter().map(|x| format!("{x:.3}")).collect::<Vec<_>>().join(", ");
+        let final_state = r.trajectory.last().copied().unwrap_or([0.0, 0.0]);
+        let k_row = r
+            .k
+            .first()
+            .map(|row| row.iter().map(|x| format!("{:.3}", x)).collect::<Vec<_>>().join(", "))
+            .unwrap_or_default();
         [
             "DOUBLE-INTEGRATOR LQR".to_string(),
             "────────────────────────────────────".to_string(),
             format!(
-                "  Riccati iters:           {}  (residual {})",
-                r.riccati_iters,
-                to_exponential(r.riccati_residual, 2)
+                "  Riccati iters:           {}  (residual {:.2e})",
+                r.riccati_iters, r.riccati_residual
             ),
             format!("  Optimal feedback K:      [{k_row}]"),
             format!("  Cost-to-go (DARE):       {:.3}", r.riccati_cost_from_x0),
@@ -815,5 +806,35 @@ impl DESModelRegistration<DoubleIntegratorOpts, DoubleIntegratorResult> for Doub
             ]));
         }
         write_csv_lines(csv_path, &lines);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adapters_expose_stable_ids() {
+        assert_eq!(adapter_inventory_dp().id(), "inventory-dp");
+        assert_eq!(adapter_mountain_car().id(), "mountain-car-vfa");
+        assert_eq!(adapter_tiger_pomdp().id(), "tiger-pomdp");
+        assert_eq!(adapter_grid_localization().id(), "grid-localization-pomdp");
+        assert_eq!(adapter_four_rooms().id(), "four-rooms-smdp");
+        assert_eq!(adapter_actor_critic().id(), "actor-critic-grid");
+        assert_eq!(adapter_blackjack().id(), "blackjack-mc");
+        assert_eq!(adapter_stag_hunt().id(), "stag-hunt");
+        assert_eq!(adapter_double_integrator_lqr().id(), "double-integrator-lqr");
+    }
+
+    #[test]
+    fn count_actions_tallies_by_index() {
+        assert_eq!(count_actions(&[0, 0, 1, 2, 2, 2], &["A", "B", "C"]), "A=2, B=1, C=3");
+    }
+
+    #[test]
+    fn grid_example_present() {
+        let ex = adapter_grid_localization().examples();
+        assert_eq!(ex.len(), 1);
+        assert_eq!(ex[0].spec.model, "grid-localization-pomdp");
     }
 }

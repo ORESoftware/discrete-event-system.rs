@@ -44,7 +44,7 @@ use crate::des::general::do_audit::do_audit;
 use crate::des::general::general::fisher_yates_shuffle;
 use crate::des::general::time_accrued::{bump_time_accrued_by_time_step, get_step_size};
 use crate::des::observers::program_observer::ProgramObserver;
-use crate::des::r#abstract::interfaces::{EntityGraphData, HasInput};
+use crate::des::r#abstract::interfaces::{EntityGraphData, HasInput, HasOutput};
 use crate::des::r#abstract::r#abstract::{Entity, EntityObserver};
 use crate::des::random_variables::rv::{RandomVariable, UniformRandomVariable};
 use crate::des::shared::capabilities::{RandomSource, SeededRandom};

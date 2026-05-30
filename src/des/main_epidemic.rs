@@ -26,7 +26,6 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::des::entity_decision::probability_decision::{Branch, ProbabilityDecisionEntity};
-use crate::des::entity_moving::moving::MovingEntity;
 use crate::des::entity_processing::processing::EntityProcessor;
 use crate::des::entity_routing::output_routing_policy::OutputRoutingPolicy;
 use crate::des::entity_sink::sink::EntitySink;
@@ -177,7 +176,7 @@ pub fn run() {
     let mut order: Vec<String> = Vec::new();
     let mut map: HashMap<String, Node> = HashMap::new();
 
-    let mut add = |order: &mut Vec<String>, map: &mut HashMap<String, Node>, id: &str, node: Node| {
+    let add = |order: &mut Vec<String>, map: &mut HashMap<String, Node>, id: &str, node: Node| {
         order.push(id.to_string());
         map.insert(id.to_string(), node);
     };

@@ -170,6 +170,7 @@ pub fn newsvendor_mdp_spec(p: &NewsvendorParams) -> MDPSpec {
             vec![Outcome { prob: 1.0, reward: expected_profit(a, &p_outcomes), next_state: 1 }]
         }),
         is_terminal: Some(Box::new(|s| s == 1)),
+        terminal_reward: None,
         state_label: Some(Box::new(|s| ["morning", "end-of-day"][s].to_string())),
         action_label: Some(Box::new(|a| format!("q={}", a))),
     }

@@ -352,7 +352,7 @@ pub fn run() {
     let scan = |transition_count: &mut HashMap<String, HashMap<String, u64>>,
                 last_processor: &mut HashMap<String, String>,
                 absorbed: &mut HashSet<String>| {
-        let mut record = |tc: &mut HashMap<String, HashMap<String, u64>>, from: &str, to: &str| {
+        let record = |tc: &mut HashMap<String, HashMap<String, u64>>, from: &str, to: &str| {
             *tc.entry(from.to_string()).or_default().entry(to.to_string()).or_insert(0) += 1;
         };
         let mut present_proc: HashMap<String, String> = HashMap::new();

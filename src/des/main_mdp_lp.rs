@@ -162,7 +162,7 @@ fn build_mdp(which: &str) -> Option<MDPSpec> {
 
 /// `maxAbs(u, v)` — max element-wise absolute difference.
 fn max_abs(u: &[f64], v: &[f64]) -> f64 {
-    let mut m = 0.0;
+    let mut m = 0.0_f64;
     for i in 0..u.len() {
         m = m.max((u[i] - v[i]).abs());
     }

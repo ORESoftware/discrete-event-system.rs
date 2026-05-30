@@ -1,0 +1,593 @@
+status	path	lb_added	main_removed	decision	basis
+M	.gitignore	1	3	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	Cargo.lock	855	15	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	Cargo.toml	36	20	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+A	MIGRATION_MANIFEST.md	397	0	SKIP	main-lb doc; main keeps its own docs (main-only per strategy)
+A	MIGRATION_STATUS.md	155	0	SKIP	main-lb doc; main keeps its own docs (main-only per strategy)
+A	README.md	35	0	SKIP	main-lb doc; main keeps its own docs (main-only per strategy)
+D	scripts/migration_status.py	0	62	KEEP	main-only file (complete, tested content kept verbatim)
+A	src/bin/compare_elevator_dispatch.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/compare_external_fel_models.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/compare_traffic_engines.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_backpropagation.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_build_site.rs	124	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_calculus.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_computer_network.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_contact_seir.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_convolution.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_court_mdp.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_dc_motor.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_dc_motor_anim.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_dispatch_combo.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_electric_circuit.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_elevator.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_elevator_highrise.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_empirical_control.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_empirical_control_report.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_epidemic.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_epidemic_improved.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_factmachine.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_factmachine_markets.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_factory_floor_track3t.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_fibonacci_recursion.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_from_json.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_genetic_tsp.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_hazard_function_survival_analysis.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_incremental_lp.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_inventory_mdp.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_ip_mip_des.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_knapsack_problem.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_lp_des.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_lp_factory.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_markov.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_mdp_lp.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_milp_bnb.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_monte_carlo_sim.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_network_mutex.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_neural_net.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_newsvendor.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_observability_controllability.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_observability_controllability_anim.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_optimization_as_des.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_plumbing_flow.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_shortest_path.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_shortest_path_algo.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_signal_processing.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_simulated_annealing.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_snowball.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_soccer_rotation.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_stochastic_flow_mdp.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_stochastic_lp.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_stochastic_sde.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_stochastic_sde_report.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_temp_control.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_temp_control_anim.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_traffic.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_two_disease.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_wind_mppt.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/main_wind_mppt_anim.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/per_individual_vs_fel.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/replicate.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+D	src/bin/run_all_simulations.rs	0	17	KEEP	main-only file (complete, tested content kept verbatim)
+A	src/bin/run_external_module.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/steady_state.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/stepsize_sweep.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/validate_backpropagation.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/validate_calculus.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/validate_computer_network.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/validate_contact_vs_meanfield.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/validate_convolution.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/validate_court_mdp.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/validate_dispatch.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/validate_electric_circuit.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/validate_elevator.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/validate_external_fel_models.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/validate_factmachine.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/validate_factmachine_math.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/validate_genetic_tsp.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/validate_incremental_lp.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/validate_ip_mip_external.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/validate_lp.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/validate_milp_bnb.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/validate_neural_network.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/validate_newsvendor.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/validate_optimization_as_des.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/validate_references.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/validate_shortest_path.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/validate_simulated_annealing.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/validate_smart_traffic_external.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/validate_soccer.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/validate_stochastic_lp.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/validate_temp_control.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/validate_two_disease.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/bin/validate_with_externals.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
+A	src/core.rs	286	0	SKIP	main-lb foundation module; main uses its own foundation
+M	src/des/abstract/abstract.rs	132	335	KEEP-main	reviewed vs main-lb: main-lb is an alt scaffold (serde/Result/crate::core); no safe additive idea
+M	src/des/abstract/composers.rs	16	112	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/abstract/interfaces.rs	86	139	KEEP-main	reviewed vs main-lb: main-lb is an alt scaffold (serde/Result/crate::core); no safe additive idea
+M	src/des/abstract/mod.rs	7	5	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/abstract/test.rs	16	14	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/animation/frame_recorder.rs	10	425	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/animation/html_player.rs	167	377	KEEP-main	reviewed vs main-lb: main-lb is an alt scaffold (serde/Result/crate::core); no safe additive idea
+M	src/des/animation/mod.rs	7	4	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/animation/render.rs	10	89	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/animation/run_report.rs	10	402	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/animation/scenes/calculus_scene.rs	10	310	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/animation/scenes/computer_network_scene.rs	10	932	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/animation/scenes/contact_seir_scene.rs	10	357	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/animation/scenes/dc_motor_scene.rs	10	334	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/animation/scenes/elevator_scene.rs	10	543	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/animation/scenes/factmachine_scene.rs	10	502	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/animation/scenes/genetic_tsp_scene.rs	10	527	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/animation/scenes/incremental_lp_scene.rs	10	658	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/animation/scenes/mod.rs	5	2	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/animation/scenes/neural_network_scene.rs	10	474	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/animation/scenes/newsvendor_scene.rs	10	379	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/animation/scenes/obs_ctrl_scene.rs	10	343	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/animation/scenes/shortest_path_scene.rs	10	392	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/animation/scenes/soccer_ipmip_solver_scene.rs	10	370	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/animation/scenes/soccer_scene.rs	10	499	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/animation/scenes/temp_control_scene.rs	10	609	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/animation/scenes/two_disease_scene.rs	10	267	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/animation/scenes/warehouse_track3t_scene.rs	10	726	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/animation/scenes/wind_mppt_scene.rs	10	291	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/animation/types.rs	110	516	KEEP-main	reviewed vs main-lb: main-lb is an alt scaffold (serde/Result/crate::core); no safe additive idea
+M	src/des/child.rs	10	142	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+D	src/des/entity_conn.ts/conn.rs	0	53	KEEP	main-only file (complete, tested content kept verbatim)
+A	src/des/entity_conn_ts/conn.rs	19	0	SKIP	main-lb foundation module; main uses its own foundation
+A	src/des/entity_conn_ts/mod.rs	7	0	SKIP	main-lb foundation module; main uses its own foundation
+M	src/des/entity_decision/binary_decision.rs	51	201	KEEP-main	reviewed vs main-lb: main-lb is an alt scaffold (serde/Result/crate::core); no safe additive idea
+M	src/des/entity_decision/decision.rs	53	176	KEEP-main	reviewed vs main-lb: main-lb is an alt scaffold (serde/Result/crate::core); no safe additive idea
+M	src/des/entity_decision/mod.rs	6	2	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/entity_decision/probability_decision.rs	87	367	KEEP-main	reviewed vs main-lb: main-lb is an alt scaffold (serde/Result/crate::core); no safe additive idea
+M	src/des/entity_moving/mod.rs	5	2	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/entity_moving/moving.rs	143	489	KEEP-main	reviewed vs main-lb: main-lb is an alt scaffold (serde/Result/crate::core); no safe additive idea
+M	src/des/entity_processing/mod.rs	6	2	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/entity_processing/per_individual_processor.rs	233	235	KEEP-main	reviewed vs main-lb: main-lb is an alt scaffold (serde/Result/crate::core); no safe additive idea
+M	src/des/entity_processing/processing.rs	18	465	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/entity_processing/value_adder.rs	17	278	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/entity_queue/mod.rs	5	1	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/entity_queue/queue.rs	66	225	KEEP-main	reviewed vs main-lb: main-lb is an alt scaffold (serde/Result/crate::core); no safe additive idea
+M	src/des/entity_routing/entity_splitter.rs	17	220	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/entity_routing/mod.rs	6	2	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/entity_routing/output_routing_policy.rs	48	152	KEEP-main	reviewed vs main-lb: main-lb is an alt scaffold (serde/Result/crate::core); no safe additive idea
+M	src/des/entity_sink/generic_sink.rs	17	125	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/entity_sink/mod.rs	6	2	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/entity_sink/sink.rs	17	182	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/entity_source/mod.rs	5	1	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/entity_source/source.rs	21	448	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/entity_travel/mod.rs	5	1	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/entity_travel/time_delay.rs	21	215	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+D	src/des/extensive_tests.rs	0	186	KEEP	main-only file (complete, tested content kept verbatim)
+M	src/des/general/actor_critic_gridworld.rs	11	275	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/adapters/adapter_utils.rs	10	174	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/adapters/advanced_optimization_control_adapter.rs	10	657	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/adapters/classical_optimization_adapter.rs	10	659	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/adapters/collaborative_inference_adapter.rs	10	347	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/adapters/computer_network_adapter.rs	10	374	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/adapters/domain_application_adapter.rs	9	516	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/adapters/feasibility_pipeline_adapter.rs	10	521	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/adapters/internal_solver_network_adapter.rs	10	642	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/adapters/learning_optimization_adapter.rs	10	577	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/adapters/math_blocks_adapter.rs	10	601	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/adapters/mdp_adjacent_adapters.rs	10	836	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/adapters/milp_bnb_adapter.rs	10	706	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/adapters/mod.rs	10	2	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/adapters/multistage_sddp_adapter.rs	10	200	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/adapters/network_flow_adapter.rs	10	680	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/adapters/network_flow_adapters.rs	10	574	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/adapters/neural_network_adapters.rs	10	463	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/adapters/nonlinear_forecasting_adapter.rs	10	133	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/adapters/nonlinear_optimization_adapter.rs	10	349	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/adapters/optimal_control_adapters.rs	10	706	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/adapters/shortest_path_adapter.rs	10	263	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/adapters/signal_transforms_adapter.rs	10	412	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/adapters/simulated_annealing_adapter.rs	10	501	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/adapters/statistical_optimization_adapter.rs	10	1092	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/adapters/stochastic_flow_mdp_adapter.rs	10	234	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/adapters/stochastic_optimization_adapters.rs	10	498	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/adapters/temp_control_adapter.rs	10	290	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/advanced_control_models.rs	11	427	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/advanced_optimization_models.rs	10	1833	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/belief.rs	11	302	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/blackjack.rs	11	415	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/cartesian_state_space.rs	11	330	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/classical_optimization_models.rs	10	2021	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/collaborative_inference.rs	10	1659	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/computer_network.rs	10	1768	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/control_systems/dc_motor.rs	11	660	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/control_systems/empirical_control.rs	11	1419	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/control_systems/linear_algebra.rs	13	13	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/control_systems/mod.rs	8	6	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/control_systems/numerical_solvers.rs	11	165	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/control_systems/observability_controllability.rs	11	1063	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/control_systems/sde_learning.rs	11	858	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/control_systems/stochastic_sde.rs	11	558	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/control_systems/wind_mppt.rs	11	761	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/des_base/actor_critic.rs	23	338	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/des_base/advanced_optimization.rs	44	1404	KEEP-main	reviewed vs main-lb: main-lb is an alt scaffold (serde/Result/crate::core); no safe additive idea
+M	src/des/general/des_base/adversarial_control.rs	36	653	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/des_base/argmax.rs	95	85	KEEP-main	reviewed vs main-lb: main-lb is an alt scaffold (serde/Result/crate::core); no safe additive idea
+M	src/des/general/des_base/belief_state.rs	26	315	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/des_base/composite_station.rs	21	406	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/des_base/control_blocks.rs	25	676	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/des_base/controller.rs	21	330	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/des_base/cut_pool.rs	21	194	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/des_base/environment.rs	25	353	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/des_base/episode_accounting.rs	26	131	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/des_base/finite_horizon_dp.rs	21	525	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/des_base/fixed_point.rs	134	276	KEEP-main	reviewed vs main-lb: main-lb is an alt scaffold (serde/Result/crate::core); no safe additive idea
+M	src/des/general/des_base/learning_optimization.rs	52	1034	KEEP-main	reviewed vs main-lb: main-lb is an alt scaffold (serde/Result/crate::core); no safe additive idea
+M	src/des/general/des_base/linear_vfa.rs	21	434	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/des_base/lqr_controller.rs	21	390	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/des_base/mod.rs	47	35	KEEP-main	reviewed vs main-lb: main-lb is an alt scaffold (serde/Result/crate::core); no safe additive idea
+M	src/des/general/des_base/model_topology.rs	18	28	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/des_base/monte_carlo_rl.rs	25	296	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/des_base/multi_agent.rs	26	570	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/des_base/neural_network.rs	33	428	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/des_base/policy_gradient_agent.rs	25	673	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/des_base/population_optimizer.rs	30	641	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/des_base/preconditions.rs	276	150	KEEP-main	reviewed vs main-lb: main-lb is an alt scaffold (serde/Result/crate::core); no safe additive idea
+M	src/des/general/des_base/rl_agent.rs	25	393	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/des_base/rl_tokens.rs	27	95	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/des_base/runner.rs	133	379	KEEP-main	reviewed vs main-lb: main-lb is an alt scaffold (serde/Result/crate::core); no safe additive idea
+M	src/des/general/des_base/semi_mdp.rs	21	466	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/des_base/single_state_optimizer.rs	34	597	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/des_base/smart_movable.rs	21	201	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/des_base/stateful_token.rs	35	455	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/des_base/station.rs	156	217	KEEP-main	reviewed vs main-lb: main-lb is an alt scaffold (serde/Result/crate::core); no safe additive idea
+M	src/des/general/des_base/transform_entity.rs	135	554	KEEP-main	reviewed vs main-lb: main-lb is an alt scaffold (serde/Result/crate::core); no safe additive idea
+M	src/des/general/des_base/tree_search.rs	25	414	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/des_base/validation.rs	609	243	KEEP-main	reviewed vs main-lb: main-lb is an alt scaffold (serde/Result/crate::core); no safe additive idea
+M	src/des/general/des_base/visual_block.rs	39	855	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/des_lp_bridge.rs	11	445	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/des_registry.rs	10	834	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/des_spec.rs	11	722	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/dispatch.rs	10	1170	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/do_audit.rs	10	118	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/domain_application_models.rs	11	1783	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/double_integrator_lqr.rs	10	448	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/entity_registration.rs	10	147	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/equation_to_stations.rs	10	723	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/expr.rs	58	803	KEEP-main	reviewed vs main-lb: main-lb is an alt scaffold (serde/Result/crate::core); no safe additive idea
+M	src/des/general/factmachine_math.rs	11	595	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/factory_floor_track3t.rs	10	1616	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/feasibility_pipeline.rs	10	1507	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/feedback_linearization.rs	11	443	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/field_station.rs	11	338	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/four_rooms.rs	11	673	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/ga_des.rs	11	564	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/general.rs	82	303	KEEP-main	reviewed vs main-lb: main-lb is an alt scaffold (serde/Result/crate::core); no safe additive idea
+M	src/des/general/genetic_tsp.rs	11	1276	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/grid_localization_pomdp.rs	11	571	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/hungarian.rs	11	218	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/incremental_lp.rs	11	888	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/internal_solver_network.rs	10	2059	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/inventory_dp.rs	11	449	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/ip_mip_des.rs	10	2394	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/iterative_learning_control.rs	11	601	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/kalman_filter.rs	10	422	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/learning_optimization_models.rs	10	735	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/lp.rs	11	1444	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/lp_des.rs	11	1035	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/math_blocks.rs	11	2241	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/math_equation_input.rs	10	1830	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/max_flow.rs	11	579	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/mcts.rs	11	550	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/milp_bnb.rs	11	1038	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/mod.rs	75	95	KEEP-main	reviewed vs main-lb: main-lb is an alt scaffold (serde/Result/crate::core); no safe additive idea
+M	src/des/general/mountain_car.rs	11	551	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/mpc_double_integrator.rs	11	405	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/mrac.rs	11	444	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/multistage_stochastic.rs	10	941	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/network_flow.rs	402	1828	KEEP-main	reviewed vs main-lb: main-lb is an alt scaffold (serde/Result/crate::core); no safe additive idea
+M	src/des/general/network_mutex.rs	11	1332	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/neural_network.rs	11	1149	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/nonlinear_forecasting_model.rs	10	1596	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/nonlinear_optimization_models.rs	10	738	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/ode.rs	333	550	KEEP-main	reviewed vs main-lb: main-lb is an alt scaffold (serde/Result/crate::core); no safe additive idea
+M	src/des/general/optim.rs	28	371	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/pomdp.rs	11	748	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/pontryagin_bang_bang.rs	11	333	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/ppo_des.rs	11	548	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/prng.rs	54	17	KEEP-main	reviewed vs main-lb: main-lb is an alt scaffold (serde/Result/crate::core); no safe additive idea
+M	src/des/general/qlearning_des.rs	11	399	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/quadrature.rs	260	405	KEEP-main	reviewed vs main-lb: main-lb is an alt scaffold (serde/Result/crate::core); no safe additive idea
+M	src/des/general/random_variables.rs	177	441	KEEP-main	reviewed vs main-lb: main-lb is an alt scaffold (serde/Result/crate::core); no safe additive idea
+M	src/des/general/rl_environments.rs	11	552	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/rl_learning_models.rs	11	649	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/root.rs	88	108	KEEP-main	reviewed vs main-lb: main-lb is an alt scaffold (serde/Result/crate::core); no safe additive idea
+M	src/des/general/run.rs	14	4	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/sa_des.rs	11	700	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/shortest_path_des.rs	370	365	KEEP-main	reviewed vs main-lb: main-lb is an alt scaffold (serde/Result/crate::core); no safe additive idea
+M	src/des/general/signal_transforms.rs	10	1113	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/simulated_annealing.rs	11	823	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/sliding_mode_control.rs	11	389	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/smart_traffic_flow.rs	10	2155	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/soccer_rotation.rs	10	1534	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/stag_hunt.rs	11	392	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/statistical_optimization.rs	10	2429	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/stochastic_flow_mdp.rs	10	643	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/stochastic_lp.rs	10	1270	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/temp_control.rs	11	883	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/tiger_pomdp.rs	11	551	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/time_accrued.rs	11	167	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/time_stepped_station.rs	11	374	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/traffic_flow.rs	10	1121	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/universal_model_spec.rs	10	1355	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/general/value_iteration.rs	11	518	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/http_server/mod.rs	12	185	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+D	src/des/integration_smoke.rs	0	98	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main.rs	0	210	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_backpropagation.rs	0	353	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_build_site.rs	0	200	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_calculus.rs	0	377	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_computer_network.rs	0	257	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_contact_seir.rs	0	561	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_convolution.rs	0	288	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_court_mdp.rs	0	385	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_dc_motor.rs	0	222	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_dc_motor_anim.rs	0	176	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_dispatch_combo.rs	0	254	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_electric_circuit.rs	0	210	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_elevator.rs	0	760	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_elevator_highrise.rs	0	2268	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_empirical_control.rs	0	309	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_empirical_control_report.rs	0	64	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_epidemic.rs	0	315	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_epidemic_improved.rs	0	555	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_factmachine.rs	0	964	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_factmachine_markets.rs	0	3099	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_factory_floor_track3t.rs	0	66	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_fibonacci_recursion.rs	0	79	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_from_json.rs	0	166	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_genetic_tsp.rs	0	141	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_hazard_function_survival_analysis.rs	0	17	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_incremental_lp.rs	0	154	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_inventory_mdp.rs	0	338	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_ip_mip_des.rs	0	151	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_knapsack_problem.rs	0	19	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_lp_des.rs	0	204	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_lp_factory.rs	0	346	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_markov.rs	0	272	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_mdp_lp.rs	0	248	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_milp_bnb.rs	0	196	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_monte_carlo_sim.rs	0	12	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_network_mutex.rs	0	89	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_neural_net.rs	0	175	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_newsvendor.rs	0	435	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_observability_controllability.rs	0	285	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_observability_controllability_anim.rs	0	27	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_optimization_as_des.rs	0	349	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_plumbing_flow.rs	0	8	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_shortest_path.rs	0	225	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_shortest_path_algo.rs	0	11	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_signal_processing.rs	0	89	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_simulated_annealing.rs	0	210	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_snowball.rs	0	13	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_soccer_rotation.rs	0	554	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_stochastic_flow_mdp.rs	0	84	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_stochastic_lp.rs	0	243	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_stochastic_sde.rs	0	246	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_stochastic_sde_report.rs	0	70	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_temp_control.rs	0	183	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_temp_control_anim.rs	0	187	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_traffic.rs	0	123	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_two_disease.rs	0	866	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_wind_mppt.rs	0	172	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/main_wind_mppt_anim.rs	0	137	KEEP	main-only file (complete, tested content kept verbatim)
+M	src/des/max_flow.rs	11	63	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/mdp/mod.rs	5	1	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/mdp/usacc_mdp.rs	53	634	KEEP-main	reviewed vs main-lb: main-lb is an alt scaffold (serde/Result/crate::core); no safe additive idea
+M	src/des/mdp/value_iteration.rs	22	195	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/mod.rs	20	112	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/observability/logger.rs	21	698	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/observability/mod.rs	5	2	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/observability/validate_epidemic.rs	17	502	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/observers/mod.rs	5	1	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/observers/program_observer.rs	17	105	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/parent.rs	10	196	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/program.rs	10	152	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/random_variables/generate.rs	17	108	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/random_variables/half.rs	17	74	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/random_variables/mod.rs	6	3	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/random_variables/rv.rs	26	504	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/reference/compare_epidemic.rs	10	346	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/reference/main_epidemic_fel.rs	10	655	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/reference/mod.rs	5	2	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+D	src/des/runners/compare_elevator_dispatch.rs	0	459	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/runners/compare_external_fel_models.rs	0	1036	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/runners/compare_traffic_engines.rs	0	977	KEEP	main-only file (complete, tested content kept verbatim)
+M	src/des/runners/difference_runner.rs	10	282	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/runners/external_modules.rs	10	327	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/runners/external_program.rs	10	292	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/runners/fel_runner.rs	10	472	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/runners/framework_runner.rs	10	503	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/runners/gillespie_runner.rs	10	418	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/runners/mod.rs	7	47	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/runners/ode_runner.rs	10	292	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/runners/per_individual_runner.rs	10	485	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+D	src/des/runners/per_individual_vs_fel.rs	0	247	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/runners/replicate.rs	0	229	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/runners/run_external_module.rs	0	209	KEEP	main-only file (complete, tested content kept verbatim)
+M	src/des/runners/shared.rs	10	306	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/runners/stats.rs	10	131	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+D	src/des/runners/steady_state.rs	0	270	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/runners/stepsize_sweep.rs	0	398	KEEP	main-only file (complete, tested content kept verbatim)
+M	src/des/runners/types.rs	10	272	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+D	src/des/runners/validate_backpropagation.rs	0	215	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/runners/validate_calculus.rs	0	508	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/runners/validate_computer_network.rs	0	524	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/runners/validate_contact_vs_meanfield.rs	0	660	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/runners/validate_convolution.rs	0	110	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/runners/validate_court_mdp.rs	0	235	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/runners/validate_dispatch.rs	0	374	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/runners/validate_electric_circuit.rs	0	197	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/runners/validate_elevator.rs	0	223	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/runners/validate_external_fel_models.rs	0	327	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/runners/validate_factmachine.rs	0	575	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/runners/validate_factmachine_math.rs	0	516	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/runners/validate_genetic_tsp.rs	0	250	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/runners/validate_incremental_lp.rs	0	410	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/runners/validate_ip_mip_external.rs	0	272	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/runners/validate_lp.rs	0	785	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/runners/validate_milp_bnb.rs	0	317	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/runners/validate_neural_network.rs	0	376	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/runners/validate_newsvendor.rs	0	417	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/runners/validate_optimization_as_des.rs	0	434	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/runners/validate_references.rs	0	309	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/runners/validate_shortest_path.rs	0	231	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/runners/validate_simulated_annealing.rs	0	323	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/runners/validate_smart_traffic_external.rs	0	418	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/runners/validate_soccer.rs	0	275	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/runners/validate_stochastic_lp.rs	0	334	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/runners/validate_temp_control.rs	0	301	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/runners/validate_two_disease.rs	0	345	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/runners/validate_with_externals.rs	0	359	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/shared/capabilities.rs	0	144	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/shared/iterable_int.rs	0	56	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/shared/linalg.rs	0	621	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/shared/linked_queue.rs	0	152	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/shared/mod.rs	0	14	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/shared/precision.rs	0	245	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/shared/result.rs	0	74	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/shared/transform.rs	0	86	KEEP	main-only file (complete, tested content kept verbatim)
+M	src/des/signals/abstract.rs	22	147	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/signals/adder.rs	17	246	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/signals/differential.rs	17	203	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/signals/incrementer.rs	18	133	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/signals/integral.rs	17	171	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/signals/mod.rs	8	6	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/signals/multi_directional_signal_entity.rs	17	229	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/signals/mux.rs	18	149	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/signals/signal_value.rs	76	185	KEEP-main	reviewed vs main-lb: main-lb is an alt scaffold (serde/Result/crate::core); no safe additive idea
+M	src/des/signals/single_direction_signal_entity.rs	17	215	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+D	src/des/simulations.rs	0	181	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/advanced_optimization_control_test.rs	0	208	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/animation_test.rs	0	47	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/argmax_tiebreak_test.rs	0	471	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/calculus_test.rs	0	255	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/classical_optimization_test.rs	0	157	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/collaborative_inference_test.rs	0	40	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/computer_network_test.rs	0	36	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/dc_motor_test.rs	0	210	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/dispatch_test.rs	0	224	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/domain_application_test.rs	0	17	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/elevator_invariants_test.rs	0	18	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/empirical_control_test.rs	0	419	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/external_module_test.rs	0	31	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/factmachine_markets_test.rs	0	65	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/factmachine_math_test.rs	0	341	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/factory_floor_track3t_test.rs	0	142	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/feasibility_pipeline_test.rs	0	251	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/float_bias_test.rs	0	240	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/genetic_tsp_test.rs	0	258	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/incremental_lp_test.rs	0	275	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/internal_solver_network_test.rs	0	228	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/ip_mip_des_test.rs	0	307	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/iterator_test.rs	0	49	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/learning_optimization_test.rs	0	131	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/lp_test.rs	0	387	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/math_blocks_test.rs	0	18	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/mdp_adjacent_test.rs	0	436	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/milp_bnb_test.rs	0	201	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/mod.rs	0	65	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/multistage_stochastic_test.rs	0	158	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/network_flow_test.rs	0	221	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/network_mutex_test.rs	0	151	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/neural_animation_test.rs	0	11	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/neural_network_test.rs	0	134	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/newsvendor_test.rs	0	12	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/nonlinear_forecasting_test.rs	0	49	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/nonlinear_optimization_test.rs	0	64	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/observability_controllability_test.rs	0	132	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/optimal_control_test.rs	0	217	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/optimization_as_des_test.rs	0	223	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/output_routing_policy_test.rs	0	11	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/preconditions_test.rs	0	544	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/queue_bias_test.rs	0	129	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/random_variables_test.rs	0	277	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/shortest_path_test.rs	0	175	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/signal_transforms_test.rs	0	166	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/simulated_annealing_test.rs	0	291	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/soccer_test.rs	0	254	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/statistical_optimization_test.rs	0	295	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/stochastic_lp_test.rs	0	182	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/stochastic_sde_test.rs	0	218	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/temp_control_test.rs	0	204	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/test.rs	0	48	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/transform_entity_test.rs	0	277	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/ts_test.rs	0	47	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/universal_model_spec_test.rs	0	12	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/validation_test.rs	0	101	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/visual_block_test.rs	0	10	KEEP	main-only file (complete, tested content kept verbatim)
+D	src/des/test/wind_mppt_test.rs	0	102	KEEP	main-only file (complete, tested content kept verbatim)
+M	src/des/visual/mod.rs	5	1	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/des/visual/visual_node.rs	27	352	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+A	src/des/ws_server/mod.rs	8	0	SKIP	main-lb foundation module; main uses its own foundation
+M	src/des/ws_server/ws_server.rs	10	180	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+M	src/lib.rs	10	5	KEEP-main	main-lb version is a stub / alt-phrasing of same logic
+A	src/migration.rs	49	0	SKIP	main-lb foundation module; main uses its own foundation
+A	src/numeric.rs	165	0	SKIP	main-lb foundation module; main uses its own foundation
+A	tests/advanced_optimization_control_test.rs	11	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/animation_test.rs	151	0	HARVEST	substantive main-lb test; unique cases ported into src/des/test where additive
+A	tests/argmax_tiebreak_test.rs	112	0	HARVEST	substantive main-lb test; unique cases ported into src/des/test where additive
+A	tests/calculus_test.rs	67	0	HARVEST	substantive main-lb test; unique cases ported into src/des/test where additive
+A	tests/classical_optimization_test.rs	11	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/collaborative_inference_test.rs	11	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/computer_network_test.rs	11	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/dc_motor_test.rs	11	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/dispatch_test.rs	11	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/domain_application_test.rs	11	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/elevator_invariants_test.rs	11	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/empirical_control_test.rs	11	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/external_module_test.rs	11	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/factmachine_markets_test.rs	11	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/factmachine_math_test.rs	11	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/factory_floor_track3t_test.rs	11	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/feasibility_pipeline_test.rs	11	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/float_bias_test.rs	11	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/genetic_tsp_test.rs	11	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/incremental_lp_test.rs	11	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/internal_solver_network_test.rs	11	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/ip_mip_des_test.rs	11	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/iterator_test.rs	11	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/learning_optimization_test.rs	11	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/lp_test.rs	8	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/math_blocks_test.rs	11	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/mdp_adjacent_test.rs	11	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/milp_bnb_test.rs	11	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/multistage_stochastic_test.rs	11	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/network_flow_test.rs	101	0	HARVEST	substantive main-lb test; unique cases ported into src/des/test where additive
+A	tests/network_mutex_test.rs	11	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/neural_animation_test.rs	11	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/neural_network_test.rs	11	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/newsvendor_test.rs	11	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/nonlinear_forecasting_test.rs	11	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/nonlinear_optimization_test.rs	11	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/numeric_test.rs	116	0	HARVEST	substantive main-lb test; unique cases ported into src/des/test where additive
+A	tests/observability_controllability_test.rs	11	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/optimal_control_test.rs	11	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/optimization_as_des_test.rs	11	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/output_routing_policy_test.rs	196	0	HARVEST	substantive main-lb test; unique cases ported into src/des/test where additive
+A	tests/preconditions_test.rs	78	0	HARVEST	substantive main-lb test; unique cases ported into src/des/test where additive
+A	tests/probability_decision_test.rs	64	0	HARVEST	substantive main-lb test; unique cases ported into src/des/test where additive
+A	tests/queue_bias_test.rs	11	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/random_variables_test.rs	281	0	HARVEST	substantive main-lb test; unique cases ported into src/des/test where additive
+A	tests/shortest_path_test.rs	189	0	HARVEST	substantive main-lb test; unique cases ported into src/des/test where additive
+A	tests/signal_transforms_test.rs	11	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/simulated_annealing_test.rs	11	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/soccer_test.rs	8	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/statistical_optimization_test.rs	11	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/stochastic_lp_test.rs	11	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/stochastic_sde_test.rs	11	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/temp_control_test.rs	11	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/test.rs	8	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/transform_entity_test.rs	11	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/ts_test.rs	8	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/universal_model_spec_test.rs	11	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/validation_test.rs	453	0	HARVEST	substantive main-lb test; unique cases ported into src/des/test where additive
+A	tests/visual_block_test.rs	11	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tests/wind_mppt_test.rs	11	0	SKIP	8-11 line placeholder; my src/des/test version is the real test
+A	tools/migrate_ts_tree.js	274	0	SKIP	main-lb migration tool; not needed by main

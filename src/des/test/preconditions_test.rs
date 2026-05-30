@@ -541,4 +541,20 @@ mod tests {
             run_temp_control(cfg);
         });
     }
+
+    // =========================================================================
+    // 5. PreconditionError structured fields (reconciliation harvest)
+    // =========================================================================
+    //
+    // main-lb's preconditions_test asserted the structured error payload, not
+    // just that a guard fired. main exposes the same fields on `PreconditionError`,
+    // so pin them here for TS parity / message stability.
+    #[test]
+    fn precondition_error_exposes_structured_fields() {
+        let err = Preconditions::positive("Plant", "dt", 0.0).unwrap_err();
+        assert_eq!(err.model, "Plant");
+        assert_eq!(err.param, "dt");
+        assert!(err.condition.contains("> 0"));
+        assert_eq!(err.observed.as_deref(), Some("0"));
+    }
 }

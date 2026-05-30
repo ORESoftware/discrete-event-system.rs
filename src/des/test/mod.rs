@@ -46,6 +46,7 @@ pub mod optimal_control_test;
 pub mod optimization_as_des_test;
 pub mod output_routing_policy_test;
 pub mod preconditions_test;
+pub mod probability_decision_test;
 pub mod queue_bias_test;
 pub mod random_variables_test;
 pub mod shortest_path_test;

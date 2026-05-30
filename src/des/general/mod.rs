@@ -32,3 +32,10 @@ pub mod feedback_linearization;
 pub mod mpc_double_integrator;
 pub mod pontryagin_bang_bang;
 pub mod advanced_control_models;
+
+pub mod rl_environments;
+pub mod time_stepped_station;
+pub mod shortest_path_des;
+pub mod des_lp_bridge;
+pub mod root;
+pub mod run;

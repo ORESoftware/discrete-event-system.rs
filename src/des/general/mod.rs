@@ -19,3 +19,16 @@ pub mod lp;
 pub mod incremental_lp;
 pub mod statistical_optimization;
 pub mod genetic_tsp;
+
+pub mod belief;
+pub mod des_spec;
+pub mod cartesian_state_space;
+pub mod pomdp;
+pub mod kalman_filter;
+pub mod double_integrator_lqr;
+pub mod sliding_mode_control;
+pub mod mrac;
+pub mod feedback_linearization;
+pub mod mpc_double_integrator;
+pub mod pontryagin_bang_bang;
+pub mod advanced_control_models;

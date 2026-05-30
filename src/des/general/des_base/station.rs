@@ -76,7 +76,10 @@ impl StationCore {
         self.outs
             .entry(src_channel.to_string())
             .or_default()
-            .push(OutEdge { target, target_channel: tgt_channel.to_string() });
+            .push(OutEdge {
+                target,
+                target_channel: tgt_channel.to_string(),
+            });
     }
 
     /// Place a token on the inbox of the given channel.
@@ -92,12 +95,18 @@ impl StationCore {
             return Vec::new();
         };
         let taken = std::mem::take(arr);
-        taken.into_iter().filter_map(|t| t.downcast::<T>().ok()).collect()
+        taken
+            .into_iter()
+            .filter_map(|t| t.downcast::<T>().ok())
+            .collect()
     }
 
     /// Drain the raw `Rc<dyn Any>` tokens without downcasting.
     pub fn drain_any(&mut self, channel: &str) -> Vec<AnyToken> {
-        self.inboxes.get_mut(channel).map(std::mem::take).unwrap_or_default()
+        self.inboxes
+            .get_mut(channel)
+            .map(std::mem::take)
+            .unwrap_or_default()
     }
 
     /// Peek (clone the handles) without consuming.
@@ -137,7 +146,10 @@ impl StationCore {
 
     /// Snapshot of inbox sizes by channel.
     pub fn inbox_sizes(&self) -> HashMap<ChannelName, usize> {
-        self.inboxes.iter().map(|(k, v)| (k.clone(), v.len())).collect()
+        self.inboxes
+            .iter()
+            .map(|(k, v)| (k.clone(), v.len()))
+            .collect()
     }
 
     /// Whether any inbox holds work.
@@ -211,7 +223,11 @@ mod tests {
 
     impl Counter {
         fn new(id: &str) -> Self {
-            Counter { core: StationCore::new(id), ticks: 0, received: 0 }
+            Counter {
+                core: StationCore::new(id),
+                ticks: 0,
+                received: 0,
+            }
         }
     }
 
@@ -248,7 +264,8 @@ mod tests {
     fn emit_routes_through_graph() {
         let sink = Rc::new(RefCell::new(Counter::new("sink")));
         let mut src = Counter::new("src");
-        src.core_mut().pipe(sink.clone() as StationRef, DEFAULT_CHANNEL, DEFAULT_CHANNEL);
+        src.core_mut()
+            .pipe(sink.clone() as StationRef, DEFAULT_CHANNEL, DEFAULT_CHANNEL);
         src.core_mut().emit(Rc::new(42u32), DEFAULT_CHANNEL);
         sink.borrow_mut().run_time_step();
         assert_eq!(sink.borrow().received, 1);
@@ -259,15 +276,16 @@ mod tests {
         use super::super::validation::FnValidator;
         let mut c = Counter::new("c");
         c.ticks = 5;
-        let v: Box<dyn Validator<dyn DESStation>> = FnValidator::new("ticked", |s: &dyn DESStation| {
-            let counter = s.as_any().downcast_ref::<Counter>().unwrap();
-            vec![ValidationCheck {
-                name: "ticked".to_string(),
-                passed: counter.ticks > 0,
-                ..Default::default()
-            }]
-        })
-        .boxed();
+        let v: Box<dyn Validator<dyn DESStation>> =
+            FnValidator::new("ticked", |s: &dyn DESStation| {
+                let counter = s.as_any().downcast_ref::<Counter>().unwrap();
+                vec![ValidationCheck {
+                    name: "ticked".to_string(),
+                    passed: counter.ticks > 0,
+                    ..Default::default()
+                }]
+            })
+            .boxed();
         c.add_validator(v);
         assert_eq!(c.num_validators(), 1);
         let checks = run_station_validation(&c);

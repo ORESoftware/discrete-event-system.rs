@@ -17,15 +17,18 @@ mod tests {
         let root = Path::new("/tmp/some-repo");
         // A path that escapes the external-references sandbox must be rejected.
         let err = resolve_external_script(root, "src/secret.py").unwrap_err();
-        assert!(err.contains("external-references"), "unexpected error: {err}");
+        assert!(
+            err.contains("external-references"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
     fn resolve_rejects_missing_script_under_sandbox() {
         let root = Path::new("/tmp/some-repo");
         // Lives under external-references/ but does not exist on disk.
-        let err = resolve_external_script(root, "external-references/does-not-exist.py")
-            .unwrap_err();
+        let err =
+            resolve_external_script(root, "external-references/does-not-exist.py").unwrap_err();
         assert!(err.contains("not found"), "unexpected error: {err}");
     }
 }

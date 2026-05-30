@@ -27,8 +27,7 @@ mod tests {
 
     #[test]
     fn frame_recorder_records_and_reads_back_frames() {
-        let path = std::env::temp_dir()
-            .join(format!("des_anim_test_{}.jsonl", std::process::id()));
+        let path = std::env::temp_dir().join(format!("des_anim_test_{}.jsonl", std::process::id()));
         let path_str = path.to_string_lossy().into_owned();
 
         let mut rec = FrameRecorder::new(opts(&path_str)).expect("create recorder");

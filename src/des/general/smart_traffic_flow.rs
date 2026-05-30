@@ -38,18 +38,20 @@ use std::rc::{Rc, Weak};
 use std::sync::OnceLock;
 
 use crate::des::general::des_base::preconditions::{Check, Preconditions};
-use crate::des::general::des_base::runner::{run_iterative_des, IterativeRunOptions, IterativeRunSummary};
+use crate::des::general::des_base::runner::{
+    run_iterative_des, IterativeRunOptions, IterativeRunSummary,
+};
 use crate::des::general::des_base::smart_movable::{SmartMovable, SmartMovableCore};
 use crate::des::general::des_base::station::{DESStation, StationCore, StationRef};
 use crate::des::general::des_base::validation::{intrinsic_check, ValidationCheck};
-use crate::des::general::prng::{mulberry32, SeededRandom};
-use crate::des::general::random_variables::{
-    mean_from_pmf, normalize_pmf, sample_from_pmf, variance_from_pmf, DiscreteConvolveSelf,
-};
 use crate::des::general::network_flow::{
     build_five_intersection_traffic_network, LogEvent, OptimizationLogger, TrafficLane,
     TrafficNetwork, TrafficNode, TrafficNodeKind, TrafficParams, TrafficScheduledTrip,
     TrafficSignal, TrafficSignalPhase, TrafficSource,
+};
+use crate::des::general::prng::{mulberry32, SeededRandom};
+use crate::des::general::random_variables::{
+    mean_from_pmf, normalize_pmf, sample_from_pmf, variance_from_pmf, DiscreteConvolveSelf,
 };
 use crate::des::shared::capabilities::RandomSource;
 use crate::des::shared::transform::Transform;
@@ -275,7 +277,11 @@ pub struct SmartTrafficCellStation {
 
 impl SmartTrafficCellStation {
     fn new(bounds: SmartTrafficCellBounds) -> Self {
-        SmartTrafficCellStation { bounds, car_ids: HashSet::new(), accident_ids: Vec::new() }
+        SmartTrafficCellStation {
+            bounds,
+            car_ids: HashSet::new(),
+            accident_ids: Vec::new(),
+        }
     }
     fn clear_occupancy(&mut self) {
         self.car_ids.clear();
@@ -284,8 +290,10 @@ impl SmartTrafficCellStation {
         self.car_ids.insert(car_id);
     }
     fn record_accident(&mut self, accident: &SmartTrafficAccident) {
-        self.accident_ids
-            .push(format!("{}:{}->{}", accident.tick, accident.car_id, accident.other_car_id));
+        self.accident_ids.push(format!(
+            "{}:{}->{}",
+            accident.tick, accident.car_id, accident.other_car_id
+        ));
     }
 }
 
@@ -445,7 +453,11 @@ impl SmartTrafficCar {
             run_count: self.run_count,
             accident_count: self.accidents.len(),
             fault_mode: self.fault_mode,
-            fault_until_sec: if self.fault_until_sec > 0.0 { Some(self.fault_until_sec) } else { None },
+            fault_until_sec: if self.fault_until_sec > 0.0 {
+                Some(self.fault_until_sec)
+            } else {
+                None
+            },
             last_run_tick: self.last_run_tick,
         }
     }
@@ -560,10 +572,14 @@ pub fn build_world(
     params: SmartTrafficParams,
     logger: Option<Rc<dyn OptimizationLogger>>,
 ) -> Rc<RefCell<SmartTrafficWorldStation>> {
-    let world = Rc::new(RefCell::new(SmartTrafficWorldStation::new_inner(params, logger)));
+    let world = Rc::new(RefCell::new(SmartTrafficWorldStation::new_inner(
+        params, logger,
+    )));
     let pool_size = {
         let w = world.borrow();
-        w.params.smart_car_pool_size.unwrap_or(w.params.base.max_cars)
+        w.params
+            .smart_car_pool_size
+            .unwrap_or(w.params.base.max_cars)
     };
     let cars: Vec<Rc<RefCell<SmartTrafficCar>>> = (0..pool_size)
         .map(|i| Rc::new(RefCell::new(SmartTrafficCar::new(i, Rc::downgrade(&world)))))
@@ -615,7 +631,10 @@ impl SmartTrafficWorldStation {
             cell_stations: HashMap::new(),
             active_cell_ids: HashSet::new(),
             rng,
-            spatial: SpatialIndex { by_cell: HashMap::new(), active_cell_count: 0 },
+            spatial: SpatialIndex {
+                by_cell: HashMap::new(),
+                active_cell_count: 0,
+            },
             proposals: HashMap::new(),
             current_actor_run_order: Vec::new(),
             completed_travel_times: Vec::new(),
@@ -653,7 +672,10 @@ impl SmartTrafficWorldStation {
             Some("active smart cars never exceed maxCars or 299".to_string()),
             Some(Box::new(|st: &dyn DESStation| {
                 let s = downcast(st);
-                format!("maxActive={} cap={}", s.max_active_cars, s.params.base.max_cars)
+                format!(
+                    "maxActive={} cap={}",
+                    s.max_active_cars, s.params.base.max_cars
+                )
             })),
             Some("smart-traffic-flow".to_string()),
             None,
@@ -672,7 +694,10 @@ impl SmartTrafficWorldStation {
                 let s = downcast(st);
                 format!(
                     "entered={} exited={} crashed={} active={}",
-                    s.entered, s.exited, s.crashed, s.active_car_count()
+                    s.entered,
+                    s.exited,
+                    s.crashed,
+                    s.active_car_count()
                 )
             })),
             Some("smart-traffic-flow".to_string()),
@@ -685,7 +710,9 @@ impl SmartTrafficWorldStation {
             "smart-traffic-no-collisions",
             |st| downcast(st).minimum_body_gap() >= -1e-7,
             Some("same-lane smart cars do not physically overlap".to_string()),
-            Some(Box::new(|st: &dyn DESStation| format!("{:.6}", downcast(st).minimum_body_gap()))),
+            Some(Box::new(|st: &dyn DESStation| {
+                format!("{:.6}", downcast(st).minimum_body_gap())
+            })),
             Some("smart-traffic-flow".to_string()),
             None,
         )
@@ -703,8 +730,15 @@ impl SmartTrafficWorldStation {
             Some("every active smart movable receives runTimeStep once per tick".to_string()),
             Some(Box::new(|st: &dyn DESStation| {
                 let s = downcast(st);
-                match s.trace.iter().find(|row| row.scheduled_smart_cars != row.smart_movable_runs) {
-                    Some(bad) => format!("tick={} scheduled={} ran={}", bad.tick, bad.scheduled_smart_cars, bad.smart_movable_runs),
+                match s
+                    .trace
+                    .iter()
+                    .find(|row| row.scheduled_smart_cars != row.smart_movable_runs)
+                {
+                    Some(bad) => format!(
+                        "tick={} scheduled={} ran={}",
+                        bad.tick, bad.scheduled_smart_cars, bad.smart_movable_runs
+                    ),
                     None => "all active smart cars ran".to_string(),
                 }
             })),
@@ -751,9 +785,18 @@ impl SmartTrafficWorldStation {
             let (slot, sp, pos, acc, jerk, tacc, lid, lgap, cfault, fmode, funtil, ready) = {
                 let p = &self.proposals[cid];
                 (
-                    p.slot_index, p.speed_mps, p.position_m, p.acceleration_mps2, p.jerk_mps3,
-                    p.target_acceleration_mps2, p.leader_id, p.leader_gap_m, p.control_fault,
-                    p.fault_mode, p.fault_until_sec, p.start_ready_since_sec,
+                    p.slot_index,
+                    p.speed_mps,
+                    p.position_m,
+                    p.acceleration_mps2,
+                    p.jerk_mps3,
+                    p.target_acceleration_mps2,
+                    p.leader_id,
+                    p.leader_gap_m,
+                    p.control_fault,
+                    p.fault_mode,
+                    p.fault_until_sec,
+                    p.start_ready_since_sec,
                 )
             };
             let mut car = self.car_actors[slot].borrow_mut();
@@ -802,8 +845,9 @@ impl SmartTrafficWorldStation {
         }
         self.max_active_cars = self.max_active_cars.max(self.active_car_count());
         self.total_smart_movable_runs += self.current_actor_run_order.len() as u64;
-        self.max_smart_movable_runs_per_tick =
-            self.max_smart_movable_runs_per_tick.max(self.current_actor_run_order.len());
+        self.max_smart_movable_runs_per_tick = self
+            .max_smart_movable_runs_per_tick
+            .max(self.current_actor_run_order.len());
         let row = self.snapshot_row(time_after);
         self.trace.push(row);
         self.tick += 1;
@@ -825,8 +869,16 @@ impl SmartTrafficWorldStation {
         } else {
             travel_times.iter().sum::<f64>() / travel_times.len() as f64
         };
-        let accident_cell_stations = self.cell_stations.values().filter(|c| !c.accident_ids.is_empty()).count();
-        let accident_cell_hits = self.cell_stations.values().map(|c| c.accident_ids.len()).sum();
+        let accident_cell_stations = self
+            .cell_stations
+            .values()
+            .filter(|c| !c.accident_ids.is_empty())
+            .count();
+        let accident_cell_hits = self
+            .cell_stations
+            .values()
+            .map(|c| c.accident_ids.len())
+            .sum();
         SmartTrafficResult {
             params: self.params.clone(),
             network: self.network.clone(),
@@ -837,7 +889,11 @@ impl SmartTrafficWorldStation {
             crashed: self.crashed,
             dropped: self.dropped,
             mean_travel_time_sec,
-            mean_speed_mps: if self.speed_samples > 0 { self.speed_sum / self.speed_samples as f64 } else { 0.0 },
+            mean_speed_mps: if self.speed_samples > 0 {
+                self.speed_sum / self.speed_samples as f64
+            } else {
+                0.0
+            },
             max_active_cars: self.max_active_cars,
             cell_stats: SmartTrafficCellStats {
                 cell_size_m: self.grid_cell_size_m(),
@@ -854,7 +910,10 @@ impl SmartTrafficWorldStation {
                 smart_movable_count: self.car_actors.len(),
                 world_station_id: self.core.id.clone(),
                 shuffled_by_runner: true,
-                actor_shuffle_seed: self.params.actor_shuffle_seed.unwrap_or(self.params.base.seed + 1009.0),
+                actor_shuffle_seed: self
+                    .params
+                    .actor_shuffle_seed
+                    .unwrap_or(self.params.base.seed + 1009.0),
                 total_smart_movable_runs: self.total_smart_movable_runs,
                 max_smart_movable_runs_per_tick: self.max_smart_movable_runs_per_tick,
             },
@@ -901,7 +960,12 @@ impl SmartTrafficWorldStation {
         let sources = self.network.sources.clone();
         for source in &sources {
             let expected = source.rate_per_min * mult * dt / 60.0;
-            let mut acc = self.source_accumulators.get(&source.id).copied().unwrap_or(0.0) + expected;
+            let mut acc = self
+                .source_accumulators
+                .get(&source.id)
+                .copied()
+                .unwrap_or(0.0)
+                + expected;
             let count = acc.floor() as i64;
             acc -= count as f64;
             self.source_accumulators.insert(source.id.clone(), acc);
@@ -918,7 +982,12 @@ impl SmartTrafficWorldStation {
                 return;
             }
             self.next_scheduled_trip_index += 1;
-            let source = self.network.sources.iter().find(|s| s.id == trip.source_id).cloned();
+            let source = self
+                .network
+                .sources
+                .iter()
+                .find(|s| s.id == trip.source_id)
+                .cloned();
             match source {
                 None => {
                     self.dropped += 1;
@@ -930,7 +999,11 @@ impl SmartTrafficWorldStation {
         }
     }
 
-    fn try_spawn_from_source(&mut self, source: &TrafficSource, destination_sink_id: Option<String>) {
+    fn try_spawn_from_source(
+        &mut self,
+        source: &TrafficSource,
+        destination_sink_id: Option<String>,
+    ) {
         if self.active_car_count() >= self.params.base.max_cars {
             self.dropped += 1;
             return;
@@ -953,7 +1026,8 @@ impl SmartTrafficWorldStation {
                     self.dropped += 1;
                     return;
                 }
-                let idx = ((self.rng.next_float() * sink_ids.len() as f64).floor() as usize).min(sink_ids.len() - 1);
+                let idx = ((self.rng.next_float() * sink_ids.len() as f64).floor() as usize)
+                    .min(sink_ids.len() - 1);
                 sink_ids[idx].clone()
             }
         };
@@ -1004,14 +1078,20 @@ impl SmartTrafficWorldStation {
                 .clone()
                 .unwrap_or_else(|| self.network.sinks.iter().map(|s| s.id.clone()).collect());
             for sink_id in &sinks {
-                let sink = self.network.sinks.iter().find(|s| &s.id == sink_id).cloned();
+                let sink = self
+                    .network
+                    .sinks
+                    .iter()
+                    .find(|s| &s.id == sink_id)
+                    .cloned();
                 let sink = match sink {
                     Some(s) => s,
                     None => continue,
                 };
                 let route = shortest_lane_path(&self.network, &source.node_id, &sink.node_id);
                 if !route.is_empty() {
-                    self.routes.insert(format!("{}->{}", source.id, sink_id), route);
+                    self.routes
+                        .insert(format!("{}->{}", source.id, sink_id), route);
                 }
             }
         }
@@ -1040,7 +1120,10 @@ impl SmartTrafficWorldStation {
                 history: l.history.clone(),
             }
         });
-        let leader_position = leader.as_ref().map(|l| l.position_m).unwrap_or(f64::INFINITY);
+        let leader_position = leader
+            .as_ref()
+            .map(|l| l.position_m)
+            .unwrap_or(f64::INFINITY);
         let current_leader_gap = if leader_position.is_finite() {
             leader_position - car.position_m - vehicle_space
         } else {
@@ -1065,13 +1148,14 @@ impl SmartTrafficWorldStation {
             _ => None,
         };
         // perceived = {positionM, speedMps, id}
-        let (perceived_position, perceived_speed, perceived_id): (f64, f64, Option<u64>) = if use_barrier {
-            (barrier.unwrap_or(f64::INFINITY), 0.0, None)
-        } else if let Some((pp, ps)) = perceived_leader {
-            (pp, ps, leader.as_ref().map(|l| l.car_id))
-        } else {
-            (f64::INFINITY, lane.speed_limit_mps, None)
-        };
+        let (perceived_position, perceived_speed, perceived_id): (f64, f64, Option<u64>) =
+            if use_barrier {
+                (barrier.unwrap_or(f64::INFINITY), 0.0, None)
+            } else if let Some((pp, ps)) = perceived_leader {
+                (pp, ps, leader.as_ref().map(|l| l.car_id))
+            } else {
+                (f64::INFINITY, lane.speed_limit_mps, None)
+            };
         let perceived_gap = (perceived_position - car.position_m - vehicle_space).max(0.05);
         let max_accel = self.max_accel_mps2();
         let max_decel = self.max_decel_mps2();
@@ -1079,8 +1163,10 @@ impl SmartTrafficWorldStation {
         let v0 = lane.speed_limit_mps;
         let distance_preference = car.distance_preference;
         let preferred_vehicle_space = self.car_length_m() + self.min_gap_m() * distance_preference;
-        let time_headway = (self.time_headway_sec() + self.reaction_time_sec()) * distance_preference;
-        let closing_term = (v * (v - perceived_speed) / (2.0 * (max_accel * max_decel).sqrt())).max(0.0);
+        let time_headway =
+            (self.time_headway_sec() + self.reaction_time_sec()) * distance_preference;
+        let closing_term =
+            (v * (v - perceived_speed) / (2.0 * (max_accel * max_decel).sqrt())).max(0.0);
         let desired_gap = preferred_vehicle_space + v * time_headway + closing_term;
         let free_road = 1.0 - (v / v0.max(1e-9)).min(2.0).powi(2);
         let interaction = if perceived_position.is_finite() {
@@ -1088,10 +1174,16 @@ impl SmartTrafficWorldStation {
         } else {
             0.0
         };
-        let mut target_acceleration = clamp(max_accel * (free_road - interaction), -max_decel, max_accel);
+        let mut target_acceleration =
+            clamp(max_accel * (free_road - interaction), -max_decel, max_accel);
         let mut start_ready_since_sec = car.start_ready_since_sec;
         if v < 0.5 && target_acceleration > 0.0 {
-            let has_clearance = self.has_startup_clearance(car, perceived_position, perceived_id, physical_leader_gap);
+            let has_clearance = self.has_startup_clearance(
+                car,
+                perceived_position,
+                perceived_id,
+                physical_leader_gap,
+            );
             if has_clearance {
                 start_ready_since_sec = start_ready_since_sec.or(Some(self.time_sec));
             } else {
@@ -1108,7 +1200,11 @@ impl SmartTrafficWorldStation {
             start_ready_since_sec = None;
         }
         let max_jerk_step = self.max_jerk_mps3() * dt;
-        let closing_speed = if perceived_position.is_finite() { (v - perceived_speed).max(0.0) } else { 0.0 };
+        let closing_speed = if perceived_position.is_finite() {
+            (v - perceived_speed).max(0.0)
+        } else {
+            0.0
+        };
         let time_to_contact = if closing_speed > 1e-9 && physical_leader_gap.is_finite() {
             physical_leader_gap / closing_speed
         } else {
@@ -1116,7 +1212,11 @@ impl SmartTrafficWorldStation {
         };
         let speed_risk = clamp((v / v0.max(1e-9) - 1.0) / 0.35, 0.0, 1.0);
         let close_risk = if physical_leader_gap.is_finite() {
-            clamp((desired_gap / physical_leader_gap.max(0.05) - 1.0) / 4.0, 0.0, 1.0)
+            clamp(
+                (desired_gap / physical_leader_gap.max(0.05) - 1.0) / 4.0,
+                0.0,
+                1.0,
+            )
         } else {
             0.0
         };
@@ -1125,10 +1225,22 @@ impl SmartTrafficWorldStation {
         } else {
             0.0
         };
-        let braking_risk = clamp((-target_acceleration / max_decel.max(1e-9) - 0.35) / 0.65, 0.0, 1.0);
-        let accel_risk = clamp((target_acceleration / max_accel.max(1e-9) - 0.7) / 0.3, 0.0, 1.0);
+        let braking_risk = clamp(
+            (-target_acceleration / max_decel.max(1e-9) - 0.35) / 0.65,
+            0.0,
+            1.0,
+        );
+        let accel_risk = clamp(
+            (target_acceleration / max_accel.max(1e-9) - 0.7) / 0.3,
+            0.0,
+            1.0,
+        );
         let risk_score = clamp(
-            0.45 * ttc_risk + 0.25 * close_risk + 0.2 * braking_risk + 0.15 * speed_risk + 0.1 * accel_risk,
+            0.45 * ttc_risk
+                + 0.25 * close_risk
+                + 0.2 * braking_risk
+                + 0.15 * speed_risk
+                + 0.1 * accel_risk,
             0.0,
             1.0,
         );
@@ -1142,7 +1254,12 @@ impl SmartTrafficWorldStation {
         let fault_mode: Option<SmartTrafficFaultMode> = if active_fault {
             car.fault_mode
         } else if starts_fault {
-            Some(fault_mode_for_risk(speed_risk, braking_risk, accel_risk, ttc_risk))
+            Some(fault_mode_for_risk(
+                speed_risk,
+                braking_risk,
+                accel_risk,
+                ttc_risk,
+            ))
         } else {
             None
         };
@@ -1155,24 +1272,35 @@ impl SmartTrafficWorldStation {
             if fault_mode == Some(SmartTrafficFaultMode::BrakeTooSlow) {
                 target_acceleration = target_acceleration.max(-max_decel * 0.12);
             } else {
-                target_acceleration = max_accel + self.accident_accel_boost_mps2() * risk_score.max(0.25);
+                target_acceleration =
+                    max_accel + self.accident_accel_boost_mps2() * risk_score.max(0.25);
             }
         }
         let mut acceleration = clamp(
-            car.acceleration_mps2 + clamp(target_acceleration - car.acceleration_mps2, -max_jerk_step, max_jerk_step),
+            car.acceleration_mps2
+                + clamp(
+                    target_acceleration - car.acceleration_mps2,
+                    -max_jerk_step,
+                    max_jerk_step,
+                ),
             -max_decel,
             max_accel,
         );
         if control_fault && fault_mode == Some(SmartTrafficFaultMode::BrakeTooSlow) {
             acceleration = acceleration.max(-max_decel * 0.12);
         } else if control_fault {
-            acceleration = acceleration.max(max_accel + self.accident_accel_boost_mps2() * risk_score.max(0.25));
+            acceleration = acceleration
+                .max(max_accel + self.accident_accel_boost_mps2() * risk_score.max(0.25));
         }
         let mut speed = if control_fault {
             clamp(
                 v + acceleration * dt,
                 0.0,
-                v0 * if fault_mode == Some(SmartTrafficFaultMode::Speeding) { 1.6 } else { 1.3 },
+                v0 * if fault_mode == Some(SmartTrafficFaultMode::Speeding) {
+                    1.6
+                } else {
+                    1.3
+                },
             )
         } else {
             clamp(v + acceleration * dt, 0.0, v0)
@@ -1190,7 +1318,11 @@ impl SmartTrafficWorldStation {
         let jerk = if control_fault {
             (acceleration - car.acceleration_mps2) / dt
         } else {
-            clamp((acceleration - car.acceleration_mps2) / dt, -self.max_jerk_mps3(), self.max_jerk_mps3())
+            clamp(
+                (acceleration - car.acceleration_mps2) / dt,
+                -self.max_jerk_mps3(),
+                self.max_jerk_mps3(),
+            )
         };
         SmartCarProposal {
             slot_index: car.slot_index,
@@ -1201,10 +1333,18 @@ impl SmartTrafficWorldStation {
             jerk_mps3: jerk,
             target_acceleration_mps2: target_acceleration,
             leader_id: perceived_id,
-            leader_gap_m: if perceived_position.is_finite() { Some(perceived_gap.max(0.0)) } else { None },
+            leader_gap_m: if perceived_position.is_finite() {
+                Some(perceived_gap.max(0.0))
+            } else {
+                None
+            },
             control_fault,
             fault_mode,
-            fault_until_sec: if fault_until_sec > self.time_sec { Some(fault_until_sec) } else { None },
+            fault_until_sec: if fault_until_sec > self.time_sec {
+                Some(fault_until_sec)
+            } else {
+                None
+            },
             start_ready_since_sec,
             risk_score,
             hazard_per_sec,
@@ -1250,22 +1390,35 @@ impl SmartTrafficWorldStation {
                     other_car_id: leader.car_id,
                     other_actor_id: format!("smart-car-{}", leader.slot),
                     speed_mps: p.map(|p| p.speed_mps).unwrap_or(car.speed_mps),
-                    fault_mode: p.and_then(|p| p.fault_mode).unwrap_or(SmartTrafficFaultMode::BrakeTooSlow),
+                    fault_mode: p
+                        .and_then(|p| p.fault_mode)
+                        .unwrap_or(SmartTrafficFaultMode::BrakeTooSlow),
                     risk_score: p.map(|p| p.risk_score).unwrap_or(0.0),
                     hazard_per_sec: p.map(|p| p.hazard_per_sec).unwrap_or(0.0),
                     reason: "body-contact-rear-end".to_string(),
                 };
                 crashed_ids.insert(car.car_id);
-                applies.push(Apply { accident, car_slot: car.slot, leader_slot: leader.slot });
+                applies.push(Apply {
+                    accident,
+                    car_slot: car.slot,
+                    leader_slot: leader.slot,
+                });
             }
         }
         for ap in applies {
             self.accidents.push(ap.accident.clone());
             self.accidents_this_tick.push(ap.accident.clone());
             self.crashed += 1;
-            self.car_actors[ap.car_slot].borrow_mut().accidents.push(ap.accident.clone());
-            self.car_actors[ap.leader_slot].borrow_mut().accidents.push(ap.accident.clone());
-            self.ensure_cell_station(&ap.accident.cell_id).record_accident(&ap.accident);
+            self.car_actors[ap.car_slot]
+                .borrow_mut()
+                .accidents
+                .push(ap.accident.clone());
+            self.car_actors[ap.leader_slot]
+                .borrow_mut()
+                .accidents
+                .push(ap.accident.clone());
+            self.ensure_cell_station(&ap.accident.cell_id)
+                .record_accident(&ap.accident);
             self.car_actors[ap.car_slot].borrow_mut().retire();
             if let Some(logger) = &self.logger {
                 // PORT NOTE: the TS event carries the full accident payload as an
@@ -1309,11 +1462,26 @@ impl SmartTrafficWorldStation {
     }
 
     fn handle_lane_end(&mut self, slot: usize, time_sec: f64) {
-        let (mut lane_id, mut position_m, mut speed_mps, route, mut route_index, car_id, created_at, active) = {
+        let (
+            mut lane_id,
+            mut position_m,
+            mut speed_mps,
+            route,
+            mut route_index,
+            car_id,
+            created_at,
+            active,
+        ) = {
             let c = self.car_actors[slot].borrow();
             (
-                c.lane_id.clone(), c.position_m, c.speed_mps, c.route.clone(), c.route_index,
-                c.car_id, c.created_at_sec, c.is_active(),
+                c.lane_id.clone(),
+                c.position_m,
+                c.speed_mps,
+                c.route.clone(),
+                c.route_index,
+                c.car_id,
+                c.created_at_sec,
+                c.is_active(),
             )
         };
         if !active {
@@ -1346,7 +1514,9 @@ impl SmartTrafficWorldStation {
                     route_index += 1;
                     lane_id = nid;
                     lane = self.lane(&lane_id).clone();
-                    position_m = overshoot.max(0.0).min((lane.length_m - self.vehicle_space()).max(0.0));
+                    position_m = overshoot
+                        .max(0.0)
+                        .min((lane.length_m - self.vehicle_space()).max(0.0));
                     speed_mps = speed_mps.min(lane.speed_limit_mps);
                     overshoot = (position_m - lane.length_m).max(0.0);
                     if overshoot <= 1e-9 {
@@ -1410,16 +1580,28 @@ impl SmartTrafficWorldStation {
             }
         }
         let active_cell_count = self.active_cell_ids.len();
-        SpatialIndex { by_cell, active_cell_count }
+        SpatialIndex {
+            by_cell,
+            active_cell_count,
+        }
     }
 
-    fn find_leader_ahead_from_grid(&self, car: &SmartTrafficCar, lane: &TrafficLane) -> Option<usize> {
+    fn find_leader_ahead_from_grid(
+        &self,
+        car: &SmartTrafficCar,
+        lane: &TrafficLane,
+    ) -> Option<usize> {
         let cell_size = self.grid_cell_size_m();
-        let look_ahead = (lane.length_m - car.position_m).min(self.params.base.grid_look_ahead_m.unwrap_or_else(
-            || (car.speed_mps * (self.reaction_time_sec() + 4.0) + 3.0 * self.vehicle_space()).max(60.0),
-        ));
+        let look_ahead = (lane.length_m - car.position_m).min(
+            self.params.base.grid_look_ahead_m.unwrap_or_else(|| {
+                (car.speed_mps * (self.reaction_time_sec() + 4.0) + 3.0 * self.vehicle_space())
+                    .max(60.0)
+            }),
+        );
         let first = (car.position_m / cell_size).floor().max(0.0) as i64;
-        let last = ((car.position_m + look_ahead) / cell_size).floor().max(first as f64) as i64;
+        let last = ((car.position_m + look_ahead) / cell_size)
+            .floor()
+            .max(first as f64) as i64;
         let lateral = self.occupied_lateral_cell_range();
         let mut best: Option<(usize, f64)> = None;
         for x in first..=last {
@@ -1452,7 +1634,8 @@ impl SmartTrafficWorldStation {
     fn sorted_leader_ahead(&self, car: &SmartTrafficCar) -> Option<usize> {
         let mut best: Option<(usize, f64)> = None;
         for v in self.active_car_views() {
-            if v.car_id == car.car_id || v.lane_id != car.lane_id || v.position_m <= car.position_m {
+            if v.car_id == car.car_id || v.lane_id != car.lane_id || v.position_m <= car.position_m
+            {
                 continue;
             }
             if best.is_none() || v.position_m < best.unwrap().1 {
@@ -1472,7 +1655,10 @@ impl SmartTrafficWorldStation {
         }
         let mut signal_phases: HashMap<String, String> = HashMap::new();
         for signal in self.network.signals.iter().flatten() {
-            signal_phases.insert(signal.node_id.clone(), current_signal_phase(signal, time_sec).name.clone());
+            signal_phases.insert(
+                signal.node_id.clone(),
+                current_signal_phase(signal, time_sec).name.clone(),
+            );
         }
         let cars = self.snap_cars();
         let mean_speed_mps = if cars.is_empty() {
@@ -1483,7 +1669,8 @@ impl SmartTrafficWorldStation {
         let mean_travel_time_sec = if self.completed_travel_times.is_empty() {
             0.0
         } else {
-            self.completed_travel_times.iter().sum::<f64>() / self.completed_travel_times.len() as f64
+            self.completed_travel_times.iter().sum::<f64>()
+                / self.completed_travel_times.len() as f64
         };
         let queue_length = cars.iter().filter(|c| c.speed_mps < 0.5).count();
         SmartTrafficTraceRow {
@@ -1501,7 +1688,12 @@ impl SmartTrafficWorldStation {
             lane_occupancy,
             active_grid_cells: self.active_cell_ids.len(),
             signal_phases,
-            actor_run_order: self.current_actor_run_order.iter().take(24).cloned().collect(),
+            actor_run_order: self
+                .current_actor_run_order
+                .iter()
+                .take(24)
+                .cloned()
+                .collect(),
             accidents: self.accidents_this_tick.clone(),
             cars,
         }
@@ -1511,7 +1703,12 @@ impl SmartTrafficWorldStation {
         let mut snaps: Vec<SmartTrafficCarSnapshot> = self
             .car_actors
             .iter()
-            .filter_map(|rc| rc.try_borrow().ok().filter(|c| c.is_active()).map(|c| c.snapshot()))
+            .filter_map(|rc| {
+                rc.try_borrow()
+                    .ok()
+                    .filter(|c| c.is_active())
+                    .map(|c| c.snapshot())
+            })
             .collect();
         snaps.sort_by_key(|c| c.id);
         snaps
@@ -1521,13 +1718,16 @@ impl SmartTrafficWorldStation {
         self.car_actors
             .iter()
             .filter_map(|rc| {
-                rc.try_borrow().ok().filter(|c| c.is_active()).map(|c| CarView {
-                    slot: c.slot_index,
-                    car_id: c.car_id,
-                    lane_id: c.lane_id.clone(),
-                    position_m: c.position_m,
-                    speed_mps: c.speed_mps,
-                })
+                rc.try_borrow()
+                    .ok()
+                    .filter(|c| c.is_active())
+                    .map(|c| CarView {
+                        slot: c.slot_index,
+                        car_id: c.car_id,
+                        lane_id: c.lane_id.clone(),
+                        position_m: c.position_m,
+                        speed_mps: c.speed_mps,
+                    })
             })
             .collect()
     }
@@ -1586,7 +1786,10 @@ impl SmartTrafficWorldStation {
             Some(s) => s,
             None => return true,
         };
-        current_signal_phase(signal, self.time_sec).green_lanes.iter().any(|l| l == incoming_lane_id)
+        current_signal_phase(signal, self.time_sec)
+            .green_lanes
+            .iter()
+            .any(|l| l == incoming_lane_id)
     }
 
     fn can_enter_lane(&self, lane_id: &str, ignore_car_id: Option<u64>) -> bool {
@@ -1596,7 +1799,9 @@ impl SmartTrafficWorldStation {
             .into_iter()
             .filter(|c| c.lane_id == lane_id && Some(c.car_id) != ignore_car_id)
             .collect();
-        let cap = lane.capacity.unwrap_or_else(|| default_lane_capacity(lane, self.vehicle_space()));
+        let cap = lane
+            .capacity
+            .unwrap_or_else(|| default_lane_capacity(lane, self.vehicle_space()));
         if cars.len() >= cap {
             return false;
         }
@@ -1701,7 +1906,10 @@ impl SmartTrafficWorldStation {
         self.params.base.min_gap_m.unwrap_or(2.5)
     }
     fn accident_risk_scale(&self) -> f64 {
-        self.params.accident_risk_scale.or(self.params.accident_probability).unwrap_or(0.0)
+        self.params
+            .accident_risk_scale
+            .or(self.params.accident_probability)
+            .unwrap_or(0.0)
     }
     fn accident_accel_boost_mps2(&self) -> f64 {
         self.params.accident_accel_boost_mps2.unwrap_or(10.0)
@@ -1730,7 +1938,11 @@ impl SmartTrafficWorldStation {
         }
         let dt = driver_trait();
         let k = sample_from_pmf(&mut self.rng, &dt.pmf);
-        let z = if dt.std > 0.0 { (k as f64 - dt.mean) / dt.std } else { 0.0 };
+        let z = if dt.std > 0.0 {
+            (k as f64 - dt.mean) / dt.std
+        } else {
+            0.0
+        };
         clamp(1.0 + (spread / 3.0_f64.sqrt()) * z, 0.35, 2.25)
     }
 
@@ -1762,13 +1974,31 @@ impl SmartTrafficWorldStation {
 
     fn assert_preconditions_checked(&self) -> Check {
         let p = &self.params;
-        Preconditions::check(MODEL, "network", "be provided by builtin or network", p.base.builtin.as_deref() == Some("five-intersection") || p.base.network.is_some(), None)?;
+        Preconditions::check(
+            MODEL,
+            "network",
+            "be provided by builtin or network",
+            p.base.builtin.as_deref() == Some("five-intersection") || p.base.network.is_some(),
+            None,
+        )?;
         Preconditions::positive(MODEL, "durationSec", p.base.duration_sec)?;
         Preconditions::positive(MODEL, "dtSec", p.base.dt_sec)?;
-        Preconditions::check(MODEL, "dtSec", "be <= 5 seconds", p.base.dt_sec <= 5.0, Some(p.base.dt_sec.to_string()))?;
+        Preconditions::check(
+            MODEL,
+            "dtSec",
+            "be <= 5 seconds",
+            p.base.dt_sec <= 5.0,
+            Some(p.base.dt_sec.to_string()),
+        )?;
         Preconditions::integer(MODEL, "seed", p.base.seed)?;
         Preconditions::integer_in_range(MODEL, "maxCars", p.base.max_cars as f64, 1.0, 299.0)?;
-        Preconditions::integer_in_range(MODEL, "smartCarPoolSize", p.smart_car_pool_size.unwrap_or(p.base.max_cars) as f64, p.base.max_cars as f64, 10000.0)?;
+        Preconditions::integer_in_range(
+            MODEL,
+            "smartCarPoolSize",
+            p.smart_car_pool_size.unwrap_or(p.base.max_cars) as f64,
+            p.base.max_cars as f64,
+            10000.0,
+        )?;
         if let Some(s) = p.actor_shuffle_seed {
             Preconditions::integer(MODEL, "actorShuffleSeed", s)?;
         }
@@ -1826,9 +2056,19 @@ impl SmartTrafficWorldStation {
         if let Some(x) = p.accident_flash_seconds {
             Preconditions::positive(MODEL, "accidentFlashSeconds", x)?;
         }
-        Preconditions::check(MODEL, "carWidthM", "fit within laneWidthM", self.car_width_m() <= self.lane_width_m(), None)?;
+        Preconditions::check(
+            MODEL,
+            "carWidthM",
+            "fit within laneWidthM",
+            self.car_width_m() <= self.lane_width_m(),
+            None,
+        )?;
         validate_smart_traffic_network(&self.network)?;
-        validate_smart_traffic_scheduled_trips(&self.network, p.base.scheduled_trips.as_deref().unwrap_or(&[]), p.base.duration_sec)?;
+        validate_smart_traffic_scheduled_trips(
+            &self.network,
+            p.base.scheduled_trips.as_deref().unwrap_or(&[]),
+            p.base.duration_sec,
+        )?;
         Ok(())
     }
 }
@@ -1844,7 +2084,8 @@ impl DESStation for SmartTrafficWorldStation {
         self
     }
     fn assert_preconditions(&mut self) {
-        self.assert_preconditions_checked().unwrap_or_else(|e| panic!("{e}"));
+        self.assert_preconditions_checked()
+            .unwrap_or_else(|e| panic!("{e}"));
     }
     fn has_work(&self) -> bool {
         self.time_sec < self.params.base.duration_sec - 1e-9
@@ -1869,7 +2110,11 @@ struct LeaderView {
     history: Vec<KinematicSample>,
 }
 
-fn perceived_sample(leader: &LeaderView, target_time_sec: f64, car: &SmartTrafficCar) -> KinematicSample {
+fn perceived_sample(
+    leader: &LeaderView,
+    target_time_sec: f64,
+    car: &SmartTrafficCar,
+) -> KinematicSample {
     for i in (0..leader.history.len()).rev() {
         if leader.history[i].time_sec <= target_time_sec + 1e-12 {
             return leader.history[i].clone();
@@ -1892,7 +2137,9 @@ pub fn run_smart_traffic_flow(
     params: SmartTrafficParams,
     logger: Option<Rc<dyn OptimizationLogger>>,
 ) -> SmartTrafficResult {
-    let actor_shuffle_seed = params.actor_shuffle_seed.unwrap_or(params.base.seed + 1009.0);
+    let actor_shuffle_seed = params
+        .actor_shuffle_seed
+        .unwrap_or(params.base.seed + 1009.0);
     let max_ticks = (params.base.duration_sec / params.base.dt_sec).ceil() as usize + 1;
     let world = build_world(params, logger);
     world.borrow_mut().assert_preconditions();
@@ -1914,7 +2161,9 @@ pub fn run_smart_traffic_flow(
                 Box::new(move || shuffle_rng.next_float())
             }),
             max_ticks: Some(max_ticks),
-            on_tick: Some(Box::new(move |_, _| world_for_tick.borrow_mut().finish_tick())),
+            on_tick: Some(Box::new(move |_, _| {
+                world_for_tick.borrow_mut().finish_tick()
+            })),
             ..Default::default()
         },
     );
@@ -1931,8 +2180,20 @@ fn validate_smart_traffic_network(network: &TrafficNetwork) -> Check {
     let mut node_ids: HashSet<String> = HashSet::new();
     let mut node_by_id: HashMap<String, TrafficNode> = HashMap::new();
     for node in &network.nodes {
-        Preconditions::check(MODEL, &format!("node.{}", node.id), "have a non-empty id", !node.id.is_empty(), None)?;
-        Preconditions::check(MODEL, &format!("node.{}", node.id), "be unique", !node_ids.contains(&node.id), None)?;
+        Preconditions::check(
+            MODEL,
+            &format!("node.{}", node.id),
+            "have a non-empty id",
+            !node.id.is_empty(),
+            None,
+        )?;
+        Preconditions::check(
+            MODEL,
+            &format!("node.{}", node.id),
+            "be unique",
+            !node_ids.contains(&node.id),
+            None,
+        )?;
         Preconditions::finite(MODEL, &format!("node.{}.x", node.id), node.x)?;
         Preconditions::finite(MODEL, &format!("node.{}.y", node.id), node.y)?;
         node_ids.insert(node.id.clone());
@@ -1940,48 +2201,169 @@ fn validate_smart_traffic_network(network: &TrafficNetwork) -> Check {
     }
     let mut lane_ids: HashSet<String> = HashSet::new();
     for lane in &network.lanes {
-        Preconditions::check(MODEL, &format!("lane.{}", lane.id), "have a non-empty id", !lane.id.is_empty(), None)?;
-        Preconditions::check(MODEL, &format!("lane.{}", lane.id), "be unique", !lane_ids.contains(&lane.id), None)?;
+        Preconditions::check(
+            MODEL,
+            &format!("lane.{}", lane.id),
+            "have a non-empty id",
+            !lane.id.is_empty(),
+            None,
+        )?;
+        Preconditions::check(
+            MODEL,
+            &format!("lane.{}", lane.id),
+            "be unique",
+            !lane_ids.contains(&lane.id),
+            None,
+        )?;
         lane_ids.insert(lane.id.clone());
-        Preconditions::check(MODEL, &format!("lane.{}.from", lane.id), "reference a node", node_ids.contains(&lane.from), None)?;
-        Preconditions::check(MODEL, &format!("lane.{}.to", lane.id), "reference a node", node_ids.contains(&lane.to), None)?;
+        Preconditions::check(
+            MODEL,
+            &format!("lane.{}.from", lane.id),
+            "reference a node",
+            node_ids.contains(&lane.from),
+            None,
+        )?;
+        Preconditions::check(
+            MODEL,
+            &format!("lane.{}.to", lane.id),
+            "reference a node",
+            node_ids.contains(&lane.to),
+            None,
+        )?;
         Preconditions::positive(MODEL, &format!("lane.{}.lengthM", lane.id), lane.length_m)?;
-        Preconditions::positive(MODEL, &format!("lane.{}.speedLimitMps", lane.id), lane.speed_limit_mps)?;
+        Preconditions::positive(
+            MODEL,
+            &format!("lane.{}.speedLimitMps", lane.id),
+            lane.speed_limit_mps,
+        )?;
         if let Some(c) = lane.capacity {
-            Preconditions::integer_in_range(MODEL, &format!("lane.{}.capacity", lane.id), c as f64, 1.0, 299.0)?;
+            Preconditions::integer_in_range(
+                MODEL,
+                &format!("lane.{}.capacity", lane.id),
+                c as f64,
+                1.0,
+                299.0,
+            )?;
         }
     }
     for signal in network.signals.iter().flatten() {
-        Preconditions::check(MODEL, &format!("signal.{}", signal.node_id), "reference a node", node_ids.contains(&signal.node_id), None)?;
+        Preconditions::check(
+            MODEL,
+            &format!("signal.{}", signal.node_id),
+            "reference a node",
+            node_ids.contains(&signal.node_id),
+            None,
+        )?;
         for phase in &signal.phases {
-            Preconditions::positive(MODEL, &format!("signal.{}.{}.durationSec", signal.node_id, phase.name), phase.duration_sec)?;
+            Preconditions::positive(
+                MODEL,
+                &format!("signal.{}.{}.durationSec", signal.node_id, phase.name),
+                phase.duration_sec,
+            )?;
             for lane_id in &phase.green_lanes {
-                Preconditions::check(MODEL, &format!("signal.{}.{}.greenLanes", signal.node_id, phase.name), "reference a lane", lane_ids.contains(lane_id), None)?;
+                Preconditions::check(
+                    MODEL,
+                    &format!("signal.{}.{}.greenLanes", signal.node_id, phase.name),
+                    "reference a lane",
+                    lane_ids.contains(lane_id),
+                    None,
+                )?;
             }
         }
     }
     let mut sink_ids: HashSet<String> = HashSet::new();
     for sink in &network.sinks {
-        Preconditions::check(MODEL, &format!("sink.{}", sink.id), "have a non-empty id", !sink.id.is_empty(), None)?;
-        Preconditions::check(MODEL, &format!("sink.{}", sink.id), "be unique", !sink_ids.contains(&sink.id), None)?;
-        Preconditions::check(MODEL, &format!("sink.{}.nodeId", sink.id), "reference a node", node_ids.contains(&sink.node_id), None)?;
-        Preconditions::check(MODEL, &format!("sink.{}.nodeId", sink.id), "reference a sink node", node_by_id.get(&sink.node_id).map(|n| n.kind) == Some(TrafficNodeKind::Sink), None)?;
+        Preconditions::check(
+            MODEL,
+            &format!("sink.{}", sink.id),
+            "have a non-empty id",
+            !sink.id.is_empty(),
+            None,
+        )?;
+        Preconditions::check(
+            MODEL,
+            &format!("sink.{}", sink.id),
+            "be unique",
+            !sink_ids.contains(&sink.id),
+            None,
+        )?;
+        Preconditions::check(
+            MODEL,
+            &format!("sink.{}.nodeId", sink.id),
+            "reference a node",
+            node_ids.contains(&sink.node_id),
+            None,
+        )?;
+        Preconditions::check(
+            MODEL,
+            &format!("sink.{}.nodeId", sink.id),
+            "reference a sink node",
+            node_by_id.get(&sink.node_id).map(|n| n.kind) == Some(TrafficNodeKind::Sink),
+            None,
+        )?;
         sink_ids.insert(sink.id.clone());
     }
     let mut source_ids: HashSet<String> = HashSet::new();
     for source in &network.sources {
-        Preconditions::check(MODEL, &format!("source.{}", source.id), "have a non-empty id", !source.id.is_empty(), None)?;
-        Preconditions::check(MODEL, &format!("source.{}", source.id), "be unique", !source_ids.contains(&source.id), None)?;
-        Preconditions::check(MODEL, &format!("source.{}.nodeId", source.id), "reference a node", node_ids.contains(&source.node_id), None)?;
-        Preconditions::check(MODEL, &format!("source.{}.nodeId", source.id), "reference a source node", node_by_id.get(&source.node_id).map(|n| n.kind) == Some(TrafficNodeKind::Source), None)?;
-        Preconditions::non_negative(MODEL, &format!("source.{}.ratePerMin", source.id), source.rate_per_min)?;
-        let destination_sink_ids: Vec<String> = source.destination_sink_ids.clone().unwrap_or_else(|| sink_ids.iter().cloned().collect());
-        Preconditions::non_empty(MODEL, &format!("source.{}.destinationSinkIds", source.id), &destination_sink_ids)?;
+        Preconditions::check(
+            MODEL,
+            &format!("source.{}", source.id),
+            "have a non-empty id",
+            !source.id.is_empty(),
+            None,
+        )?;
+        Preconditions::check(
+            MODEL,
+            &format!("source.{}", source.id),
+            "be unique",
+            !source_ids.contains(&source.id),
+            None,
+        )?;
+        Preconditions::check(
+            MODEL,
+            &format!("source.{}.nodeId", source.id),
+            "reference a node",
+            node_ids.contains(&source.node_id),
+            None,
+        )?;
+        Preconditions::check(
+            MODEL,
+            &format!("source.{}.nodeId", source.id),
+            "reference a source node",
+            node_by_id.get(&source.node_id).map(|n| n.kind) == Some(TrafficNodeKind::Source),
+            None,
+        )?;
+        Preconditions::non_negative(
+            MODEL,
+            &format!("source.{}.ratePerMin", source.id),
+            source.rate_per_min,
+        )?;
+        let destination_sink_ids: Vec<String> = source
+            .destination_sink_ids
+            .clone()
+            .unwrap_or_else(|| sink_ids.iter().cloned().collect());
+        Preconditions::non_empty(
+            MODEL,
+            &format!("source.{}.destinationSinkIds", source.id),
+            &destination_sink_ids,
+        )?;
         source_ids.insert(source.id.clone());
         for sink_id in &destination_sink_ids {
-            Preconditions::check(MODEL, &format!("source.{}.destinationSinkIds", source.id), "reference a sink id", sink_ids.contains(sink_id), None)?;
+            Preconditions::check(
+                MODEL,
+                &format!("source.{}.destinationSinkIds", source.id),
+                "reference a sink id",
+                sink_ids.contains(sink_id),
+                None,
+            )?;
             if let Some(sink) = network.sinks.iter().find(|s| &s.id == sink_id) {
-                Preconditions::check(MODEL, &format!("route {}->{}", source.id, sink_id), "have at least one directed lane path", !shortest_lane_path(network, &source.node_id, &sink.node_id).is_empty(), None)?;
+                Preconditions::check(
+                    MODEL,
+                    &format!("route {}->{}", source.id, sink_id),
+                    "have at least one directed lane path",
+                    !shortest_lane_path(network, &source.node_id, &sink.node_id).is_empty(),
+                    None,
+                )?;
             }
         }
     }
@@ -1995,18 +2377,60 @@ fn validate_smart_traffic_scheduled_trips(
 ) -> Check {
     for trip in trips {
         Preconditions::non_negative(MODEL, "scheduledTrips.departSec", trip.depart_sec)?;
-        Preconditions::check(MODEL, "scheduledTrips.departSec", "be within durationSec", trip.depart_sec <= duration_sec + 1e-9, None)?;
+        Preconditions::check(
+            MODEL,
+            "scheduledTrips.departSec",
+            "be within durationSec",
+            trip.depart_sec <= duration_sec + 1e-9,
+            None,
+        )?;
         let source = network.sources.iter().find(|s| s.id == trip.source_id);
-        let sink = network.sinks.iter().find(|s| s.id == trip.destination_sink_id);
-        Preconditions::check(MODEL, &format!("scheduledTrips.{}", trip.source_id), "reference a source id", source.is_some(), None)?;
-        Preconditions::check(MODEL, &format!("scheduledTrips.{}", trip.destination_sink_id), "reference a sink id", sink.is_some(), None)?;
+        let sink = network
+            .sinks
+            .iter()
+            .find(|s| s.id == trip.destination_sink_id);
+        Preconditions::check(
+            MODEL,
+            &format!("scheduledTrips.{}", trip.source_id),
+            "reference a source id",
+            source.is_some(),
+            None,
+        )?;
+        Preconditions::check(
+            MODEL,
+            &format!("scheduledTrips.{}", trip.destination_sink_id),
+            "reference a sink id",
+            sink.is_some(),
+            None,
+        )?;
         let (source, sink) = match (source, sink) {
             (Some(s), Some(k)) => (s, k),
             _ => continue,
         };
-        let allowed: Vec<String> = source.destination_sink_ids.clone().unwrap_or_else(|| network.sinks.iter().map(|s| s.id.clone()).collect());
-        Preconditions::check(MODEL, &format!("scheduledTrips.{}->{}", trip.source_id, trip.destination_sink_id), "use a sink allowed by the source", allowed.contains(&trip.destination_sink_id), None)?;
-        Preconditions::check(MODEL, &format!("scheduledTrips.{}->{}", trip.source_id, trip.destination_sink_id), "have at least one directed lane path", !shortest_lane_path(network, &source.node_id, &sink.node_id).is_empty(), None)?;
+        let allowed: Vec<String> = source
+            .destination_sink_ids
+            .clone()
+            .unwrap_or_else(|| network.sinks.iter().map(|s| s.id.clone()).collect());
+        Preconditions::check(
+            MODEL,
+            &format!(
+                "scheduledTrips.{}->{}",
+                trip.source_id, trip.destination_sink_id
+            ),
+            "use a sink allowed by the source",
+            allowed.contains(&trip.destination_sink_id),
+            None,
+        )?;
+        Preconditions::check(
+            MODEL,
+            &format!(
+                "scheduledTrips.{}->{}",
+                trip.source_id, trip.destination_sink_id
+            ),
+            "have at least one directed lane path",
+            !shortest_lane_path(network, &source.node_id, &sink.node_id).is_empty(),
+            None,
+        )?;
     }
     Ok(())
 }
@@ -2027,7 +2451,11 @@ fn current_signal_phase(signal: &TrafficSignal, time_sec: f64) -> &TrafficSignal
     signal.phases.last().expect("signal must have phases")
 }
 
-fn shortest_lane_path(network: &TrafficNetwork, source_node_id: &str, sink_node_id: &str) -> Vec<String> {
+fn shortest_lane_path(
+    network: &TrafficNetwork,
+    source_node_id: &str,
+    sink_node_id: &str,
+) -> Vec<String> {
     let mut dist: HashMap<String, f64> = HashMap::new();
     let mut prev_lane: HashMap<String, String> = HashMap::new();
     let mut prev_node: HashMap<String, String> = HashMap::new();
@@ -2063,7 +2491,12 @@ fn shortest_lane_path(network: &TrafficNetwork, source_node_id: &str, sink_node_
             }
         }
     }
-    if !dist.get(sink_node_id).copied().unwrap_or(f64::INFINITY).is_finite() {
+    if !dist
+        .get(sink_node_id)
+        .copied()
+        .unwrap_or(f64::INFINITY)
+        .is_finite()
+    {
         return Vec::new();
     }
     let mut route: Vec<String> = Vec::new();
@@ -2084,7 +2517,12 @@ fn shortest_lane_path(network: &TrafficNetwork, source_node_id: &str, sink_node_
     route
 }
 
-fn fault_mode_for_risk(speed_risk: f64, braking_risk: f64, accel_risk: f64, ttc_risk: f64) -> SmartTrafficFaultMode {
+fn fault_mode_for_risk(
+    speed_risk: f64,
+    braking_risk: f64,
+    accel_risk: f64,
+    ttc_risk: f64,
+) -> SmartTrafficFaultMode {
     if speed_risk >= braking_risk && speed_risk >= ttc_risk {
         return SmartTrafficFaultMode::Speeding;
     }

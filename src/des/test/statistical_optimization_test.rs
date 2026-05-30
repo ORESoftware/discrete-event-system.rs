@@ -37,7 +37,9 @@ mod tests {
     }
 
     fn ranges(rs: &[(f64, f64)]) -> Vec<DemandRange> {
-        rs.iter().map(|&(low, high)| DemandRange { low, high }).collect()
+        rs.iter()
+            .map(|&(low, high)| DemandRange { low, high })
+            .collect()
     }
 
     // [1] Distribution fitting: MLE vs method of moments
@@ -95,7 +97,10 @@ mod tests {
             seed: 9,
             x_max: 100.0,
             step: 10.0,
-            risk: RiskConfig { radius: Some(1.0), ..risk(RiskKind::Dro) },
+            risk: RiskConfig {
+                radius: Some(1.0),
+                ..risk(RiskKind::Dro)
+            },
         })
         .unwrap();
         assert!(dro.best.robust_objective <= dro.best.mean_profit + 1e-9);
@@ -104,8 +109,14 @@ mod tests {
             cost: vec![10.0],
             price: vec![25.0],
             demand: DemandSpec::Empirical(vec![vec![
-                EmpiricalPoint { value: 20.0, prob: 0.5 },
-                EmpiricalPoint { value: 60.0, prob: 0.5 },
+                EmpiricalPoint {
+                    value: 20.0,
+                    prob: 0.5,
+                },
+                EmpiricalPoint {
+                    value: 60.0,
+                    prob: 0.5,
+                },
             ]]),
             num_scenarios: 30,
             seed: 4,
@@ -152,9 +163,18 @@ mod tests {
                 price: vec![25.0, 28.0],
                 demand: DemandSpec::Uniform(ranges(&[(50.0, 100.0), (40.0, 80.0)])),
                 alternatives: vec![
-                    AdaptiveAlternative { name: "lean".to_string(), x: vec![60.0, 50.0] },
-                    AdaptiveAlternative { name: "balanced".to_string(), x: vec![80.0, 65.0] },
-                    AdaptiveAlternative { name: "buffered".to_string(), x: vec![100.0, 80.0] },
+                    AdaptiveAlternative {
+                        name: "lean".to_string(),
+                        x: vec![60.0, 50.0],
+                    },
+                    AdaptiveAlternative {
+                        name: "balanced".to_string(),
+                        x: vec![80.0, 65.0],
+                    },
+                    AdaptiveAlternative {
+                        name: "buffered".to_string(),
+                        x: vec![100.0, 80.0],
+                    },
                 ],
                 seed: 11,
                 initial_samples: 3,
@@ -199,8 +219,14 @@ mod tests {
                 price: vec![20.0],
                 demand: DemandSpec::Uniform(ranges(&[(0.0, 10.0)])),
                 alternatives: vec![
-                    AdaptiveAlternative { name: "a".to_string(), x: vec![5.0] },
-                    AdaptiveAlternative { name: "b".to_string(), x: vec![6.0] },
+                    AdaptiveAlternative {
+                        name: "a".to_string(),
+                        x: vec![5.0],
+                    },
+                    AdaptiveAlternative {
+                        name: "b".to_string(),
+                        x: vec![6.0],
+                    },
                 ],
                 seed: 1,
                 initial_samples: 5,
@@ -221,8 +247,14 @@ mod tests {
             cost: vec![10.0],
             price: vec![25.0],
             demand: DemandSpec::Empirical(vec![vec![
-                EmpiricalPoint { value: 20.0, prob: 0.4 },
-                EmpiricalPoint { value: 60.0, prob: 0.4 },
+                EmpiricalPoint {
+                    value: 20.0,
+                    prob: 0.4
+                },
+                EmpiricalPoint {
+                    value: 60.0,
+                    prob: 0.4
+                },
             ]]),
             num_scenarios: 5,
             seed: 4,
@@ -279,8 +311,14 @@ mod tests {
                 price: vec![25.0],
                 demand: DemandSpec::Uniform(ranges(&[(20.0, 50.0)])),
                 alternatives: vec![
-                    AdaptiveAlternative { name: "same".to_string(), x: vec![20.0] },
-                    AdaptiveAlternative { name: "same".to_string(), x: vec![40.0] },
+                    AdaptiveAlternative {
+                        name: "same".to_string(),
+                        x: vec![20.0]
+                    },
+                    AdaptiveAlternative {
+                        name: "same".to_string(),
+                        x: vec![40.0]
+                    },
                 ],
                 seed: 1,
                 initial_samples: 1,

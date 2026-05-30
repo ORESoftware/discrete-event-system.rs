@@ -19,8 +19,8 @@ mod tests {
     use crate::des::general::random_variables::{
         bernoulli_pmf, mean_from_pmf, normalize_pmf, pmf_total_mass, sample_categorical,
         sample_exponential, sample_gamma, sample_poisson, variance_from_pmf, BinomialPMF,
-        CompetingRisks, ConvolvePair, DiscreteConvolve, DiscreteConvolveMany,
-        DiscreteConvolveSelf, PoissonBinomialPMF,
+        CompetingRisks, ConvolvePair, DiscreteConvolve, DiscreteConvolveMany, DiscreteConvolveSelf,
+        PoissonBinomialPMF,
     };
     use crate::des::shared::capabilities::RandomSource;
     use crate::des::shared::transform::Transform;

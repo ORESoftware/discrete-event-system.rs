@@ -122,12 +122,22 @@ impl VariableSource {
 
 /// `REGIMES` — canonical order parallel to the transition/observation matrices.
 fn regimes() -> Vec<RegimeId> {
-    vec![RegimeId::Baseline, RegimeId::Expansion, RegimeId::Contraction, RegimeId::Shock]
+    vec![
+        RegimeId::Baseline,
+        RegimeId::Expansion,
+        RegimeId::Contraction,
+        RegimeId::Shock,
+    ]
 }
 
 /// `REGIME_OBSERVATIONS` — canonical observation order.
 fn regime_observations() -> Vec<RegimeObservation> {
-    vec![RegimeObservation::Low, RegimeObservation::Flat, RegimeObservation::High, RegimeObservation::Volatile]
+    vec![
+        RegimeObservation::Low,
+        RegimeObservation::Flat,
+        RegimeObservation::High,
+        RegimeObservation::Volatile,
+    ]
 }
 
 /// Index of an observation in [`regime_observations`] (TS `indexOf`).
@@ -428,7 +438,11 @@ struct ForecastDataSourceStation {
 
 impl ForecastDataSourceStation {
     fn new(id: &str, scenario: Rc<ForecastScenario>) -> Self {
-        ForecastDataSourceStation { core: StationCore::new(id), scenario, emitted: false }
+        ForecastDataSourceStation {
+            core: StationCore::new(id),
+            scenario,
+            emitted: false,
+        }
     }
 }
 
@@ -449,7 +463,12 @@ impl DESStation for ForecastDataSourceStation {
         if self.emitted {
             return;
         }
-        self.core.emit(Rc::new(ForecastDataToken { scenario: self.scenario.clone() }), CH_DATA);
+        self.core.emit(
+            Rc::new(ForecastDataToken {
+                scenario: self.scenario.clone(),
+            }),
+            CH_DATA,
+        );
         self.emitted = true;
     }
 }
@@ -460,7 +479,9 @@ struct POMDPLatentVariableStation {
 
 impl POMDPLatentVariableStation {
     fn new(id: &str) -> Self {
-        POMDPLatentVariableStation { core: StationCore::new(id) }
+        POMDPLatentVariableStation {
+            core: StationCore::new(id),
+        }
     }
 }
 
@@ -481,7 +502,10 @@ impl DESStation for POMDPLatentVariableStation {
         for token in self.core.drain::<ForecastDataToken>(CH_DATA) {
             let belief_trace = infer_latent_regime_beliefs(token.scenario.as_ref());
             self.core.emit(
-                Rc::new(LatentBeliefTraceToken { scenario: token.scenario.clone(), belief_trace }),
+                Rc::new(LatentBeliefTraceToken {
+                    scenario: token.scenario.clone(),
+                    belief_trace,
+                }),
                 CH_BELIEF,
             );
         }
@@ -494,7 +518,9 @@ struct MDPVariableDiscoveryStation {
 
 impl MDPVariableDiscoveryStation {
     fn new(id: &str) -> Self {
-        MDPVariableDiscoveryStation { core: StationCore::new(id) }
+        MDPVariableDiscoveryStation {
+            core: StationCore::new(id),
+        }
     }
 }
 
@@ -532,7 +558,9 @@ struct NonlinearEquationTuningStation {
 
 impl NonlinearEquationTuningStation {
     fn new(id: &str) -> Self {
-        NonlinearEquationTuningStation { core: StationCore::new(id) }
+        NonlinearEquationTuningStation {
+            core: StationCore::new(id),
+        }
     }
 }
 
@@ -571,7 +599,9 @@ struct ForecastProjectionStation {
 
 impl ForecastProjectionStation {
     fn new(id: &str) -> Self {
-        ForecastProjectionStation { core: StationCore::new(id) }
+        ForecastProjectionStation {
+            core: StationCore::new(id),
+        }
     }
 }
 
@@ -598,7 +628,12 @@ impl DESStation for ForecastProjectionStation {
             let baseline_forecast_mse = mse(&actual, &vec![last_training_y; actual.len()]);
             let result = NonlinearMDPPOMDPForecastResult {
                 model_id: "nonlinear-mdp-pomdp-forecast",
-                selected_variables: token.discovery.selected_variables.iter().map(|v| v.id.clone()).collect(),
+                selected_variables: token
+                    .discovery
+                    .selected_variables
+                    .iter()
+                    .map(|v| v.id.clone())
+                    .collect(),
                 discovered_variables: token.discovery.selected_variables.clone(),
                 equation: token.equation.clone(),
                 pomdp: token.belief_trace.clone(),
@@ -622,7 +657,8 @@ impl DESStation for ForecastProjectionStation {
                 projection,
                 topology: station_graph(&[], &[], &[]),
             };
-            self.core.emit(Rc::new(ForecastProjectionToken { result }), CH_PROJECTION);
+            self.core
+                .emit(Rc::new(ForecastProjectionToken { result }), CH_PROJECTION);
         }
     }
 }
@@ -634,7 +670,10 @@ struct ForecastResultSinkStation {
 
 impl ForecastResultSinkStation {
     fn new(id: &str) -> Self {
-        ForecastResultSinkStation { core: StationCore::new(id), result: None }
+        ForecastResultSinkStation {
+            core: StationCore::new(id),
+            result: None,
+        }
     }
 }
 
@@ -668,18 +707,46 @@ pub fn run_nonlinear_mdp_pomdp_forecast(
     params: NonlinearMDPPOMDPForecastParams,
 ) -> NonlinearMDPPOMDPForecastResult {
     let scenario = Rc::new(build_forecast_scenario(&params));
-    let source = Rc::new(RefCell::new(ForecastDataSourceStation::new("nonlinear-forecast-data-source", scenario.clone())));
-    let pomdp = Rc::new(RefCell::new(POMDPLatentVariableStation::new("pomdp-latent-variable-station")));
-    let mdp = Rc::new(RefCell::new(MDPVariableDiscoveryStation::new("mdp-variable-discovery-station")));
-    let tuning = Rc::new(RefCell::new(NonlinearEquationTuningStation::new("nonlinear-equation-tuning-station")));
-    let projection = Rc::new(RefCell::new(ForecastProjectionStation::new("forecast-projection-station")));
-    let sink = Rc::new(RefCell::new(ForecastResultSinkStation::new("forecast-result-sink")));
+    let source = Rc::new(RefCell::new(ForecastDataSourceStation::new(
+        "nonlinear-forecast-data-source",
+        scenario.clone(),
+    )));
+    let pomdp = Rc::new(RefCell::new(POMDPLatentVariableStation::new(
+        "pomdp-latent-variable-station",
+    )));
+    let mdp = Rc::new(RefCell::new(MDPVariableDiscoveryStation::new(
+        "mdp-variable-discovery-station",
+    )));
+    let tuning = Rc::new(RefCell::new(NonlinearEquationTuningStation::new(
+        "nonlinear-equation-tuning-station",
+    )));
+    let projection = Rc::new(RefCell::new(ForecastProjectionStation::new(
+        "forecast-projection-station",
+    )));
+    let sink = Rc::new(RefCell::new(ForecastResultSinkStation::new(
+        "forecast-result-sink",
+    )));
 
-    source.borrow_mut().core_mut().pipe(pomdp.clone() as StationRef, CH_DATA, CH_DATA);
-    pomdp.borrow_mut().core_mut().pipe(mdp.clone() as StationRef, CH_BELIEF, CH_BELIEF);
-    mdp.borrow_mut().core_mut().pipe(tuning.clone() as StationRef, CH_VARIABLES, CH_VARIABLES);
-    tuning.borrow_mut().core_mut().pipe(projection.clone() as StationRef, CH_EQUATION, CH_EQUATION);
-    projection.borrow_mut().core_mut().pipe(sink.clone() as StationRef, CH_PROJECTION, CH_PROJECTION);
+    source
+        .borrow_mut()
+        .core_mut()
+        .pipe(pomdp.clone() as StationRef, CH_DATA, CH_DATA);
+    pomdp
+        .borrow_mut()
+        .core_mut()
+        .pipe(mdp.clone() as StationRef, CH_BELIEF, CH_BELIEF);
+    mdp.borrow_mut()
+        .core_mut()
+        .pipe(tuning.clone() as StationRef, CH_VARIABLES, CH_VARIABLES);
+    tuning
+        .borrow_mut()
+        .core_mut()
+        .pipe(projection.clone() as StationRef, CH_EQUATION, CH_EQUATION);
+    projection.borrow_mut().core_mut().pipe(
+        sink.clone() as StationRef,
+        CH_PROJECTION,
+        CH_PROJECTION,
+    );
 
     run_iterative_des(
         vec![
@@ -690,7 +757,12 @@ pub fn run_nonlinear_mdp_pomdp_forecast(
             projection.clone() as StationRef,
             sink.clone() as StationRef,
         ],
-        IterativeRunOptions { shuffle: false, max_ticks: Some(12), run_validators: false, ..Default::default() },
+        IterativeRunOptions {
+            shuffle: false,
+            max_ticks: Some(12),
+            run_validators: false,
+            ..Default::default()
+        },
     );
 
     let mut result = sink
@@ -768,7 +840,11 @@ fn normalize_params(params: &NonlinearMDPPOMDPForecastParams) -> NormalizedForec
         1.0,
         10.0,
     ));
-    require(Preconditions::non_negative("runNonlinearMDPPOMDPForecast", "ridge", actual.ridge));
+    require(Preconditions::non_negative(
+        "runNonlinearMDPPOMDPForecast",
+        "ridge",
+        actual.ridge,
+    ));
     require(Preconditions::integer_in_range(
         "runNonlinearMDPPOMDPForecast",
         "fineTuneIterations",
@@ -786,17 +862,33 @@ fn normalize_params(params: &NonlinearMDPPOMDPForecastParams) -> NormalizedForec
     actual
 }
 
-fn synthetic_forecast_series(training_periods: usize, forecast_horizon: usize) -> Vec<ForecastObservation> {
+fn synthetic_forecast_series(
+    training_periods: usize,
+    forecast_horizon: usize,
+) -> Vec<ForecastObservation> {
     let total = training_periods + forecast_horizon;
     let mut out: Vec<ForecastObservation> = Vec::with_capacity(total);
     for t in 0..total {
         let hidden_regime = hidden_regime_at(t, training_periods);
-        let shock = if hidden_regime == RegimeId::Shock { 1.0 } else { 0.0 };
-        let contraction = if hidden_regime == RegimeId::Contraction { 1.0 } else { 0.0 };
-        let expansion = if hidden_regime == RegimeId::Expansion { 1.0 } else { 0.0 };
+        let shock = if hidden_regime == RegimeId::Shock {
+            1.0
+        } else {
+            0.0
+        };
+        let contraction = if hidden_regime == RegimeId::Contraction {
+            1.0
+        } else {
+            0.0
+        };
+        let expansion = if hidden_regime == RegimeId::Expansion {
+            1.0
+        } else {
+            0.0
+        };
         let tf = t as f64;
         let demand = 1.18 + 0.018 * tf + 0.22 * (tf / 3.2).sin() + 0.12 * expansion - 0.13 * shock;
-        let supply = 1.02 + 0.17 * (tf / 4.6).cos() + 0.04 * expansion - 0.11 * contraction - 0.23 * shock;
+        let supply =
+            1.02 + 0.17 * (tf / 4.6).cos() + 0.04 * expansion - 0.11 * contraction - 0.23 * shock;
         let price = 1.00 + 0.07 * (tf / 5.1).sin() + (0.94 - supply).max(0.0) * 0.24 + 0.10 * shock;
         let regime_lift = match hidden_regime {
             RegimeId::Expansion => 5.8,
@@ -816,7 +908,14 @@ fn synthetic_forecast_series(training_periods: usize, forecast_horizon: usize) -
                 + regime_lift
                 + deterministic_noise
         };
-        out.push(ForecastObservation { t, demand, supply, price, y, hidden_regime });
+        out.push(ForecastObservation {
+            t,
+            demand,
+            supply,
+            price,
+            y,
+            hidden_regime,
+        });
     }
     out
 }
@@ -892,7 +991,8 @@ fn infer_latent_regime_beliefs(scenario: &ForecastScenario) -> LatentBeliefTrace
         entropy: posterior.entropy(),
     }];
     for t in 1..scenario.params.training_periods {
-        let obs = classify_regime_observation(&scenario.observations[t - 1], &scenario.observations[t]);
+        let obs =
+            classify_regime_observation(&scenario.observations[t - 1], &scenario.observations[t]);
         let mut prior = posterior.clone();
         prior.propagate(|_state, index| (spec.transition)(index, 0));
         posterior = belief_update(spec, &posterior, 0, regime_observation_index(obs));
@@ -913,9 +1013,13 @@ fn infer_latent_regime_beliefs(scenario: &ForecastScenario) -> LatentBeliefTrace
     }
 }
 
-fn classify_regime_observation(prev: &ForecastObservation, cur: &ForecastObservation) -> RegimeObservation {
+fn classify_regime_observation(
+    prev: &ForecastObservation,
+    cur: &ForecastObservation,
+) -> RegimeObservation {
     let dy = cur.y - prev.y;
-    let expected = 8.0 * (cur.demand - prev.demand) - 5.0 * (cur.price - prev.price) + 3.0 * (cur.supply - prev.supply);
+    let expected = 8.0 * (cur.demand - prev.demand) - 5.0 * (cur.price - prev.price)
+        + 3.0 * (cur.supply - prev.supply);
     let residual = dy - expected;
     if residual.abs() > 7.0 || (cur.supply - prev.supply).abs() > 0.18 {
         return RegimeObservation::Volatile;
@@ -1050,7 +1154,12 @@ fn evaluate_mask_cached(
     if let Some(v) = cached {
         return v;
     }
-    let v = evaluate_feature_mask(&mask_to_indices(mask, num_features), scenario, train_rows, validation_rows);
+    let v = evaluate_feature_mask(
+        &mask_to_indices(mask, num_features),
+        scenario,
+        train_rows,
+        validation_rows,
+    );
     cache.borrow_mut().insert(mask, v);
     v
 }
@@ -1075,8 +1184,22 @@ fn reward_of(
     if next == mask {
         return -5.0;
     }
-    let before = evaluate_mask_cached(cache, mask, num_features, scenario, train_rows, validation_rows);
-    let after = evaluate_mask_cached(cache, next, num_features, scenario, train_rows, validation_rows);
+    let before = evaluate_mask_cached(
+        cache,
+        mask,
+        num_features,
+        scenario,
+        train_rows,
+        validation_rows,
+    );
+    let after = evaluate_mask_cached(
+        cache,
+        next,
+        num_features,
+        scenario,
+        train_rows,
+        validation_rows,
+    );
     let feature_cost = scenario.feature_candidates[action].cost * 0.55;
     let overfit_penalty = 0.05 * (after.validation_mse - after.train_mse).max(0.0);
     before.validation_mse - after.validation_mse - feature_cost - overfit_penalty
@@ -1090,12 +1213,17 @@ fn discover_variables_by_mdp(
     let split = split_rows(&rows, scenario.params.validation_share);
     let num_features = scenario.feature_candidates.len();
     let num_states = 1usize << num_features;
-    let mut actions: Vec<String> = scenario.feature_candidates.iter().map(|f| f.id.clone()).collect();
+    let mut actions: Vec<String> = scenario
+        .feature_candidates
+        .iter()
+        .map(|f| f.id.clone())
+        .collect();
     actions.push("stop".to_string());
     let stop_action = actions.len() - 1;
     let mdp_budget = scenario.params.mdp_budget;
 
-    let eval_cache: Rc<RefCell<HashMap<u32, FitEvaluation>>> = Rc::new(RefCell::new(HashMap::new()));
+    let eval_cache: Rc<RefCell<HashMap<u32, FitEvaluation>>> =
+        Rc::new(RefCell::new(HashMap::new()));
 
     let transition: Box<dyn Fn(usize, usize) -> Vec<f64>> = {
         Box::new(move |s_idx, a_idx| {
@@ -1136,15 +1264,35 @@ fn discover_variables_by_mdp(
         initial_belief: None,
         is_terminal: None,
     };
-    let vi = mdp_value_iteration(&mdp_spec, &MDPVIOptions { tol: 1e-7, max_iter: 250 });
+    let vi = mdp_value_iteration(
+        &mdp_spec,
+        &MDPVIOptions {
+            tol: 1e-7,
+            max_iter: 250,
+        },
+    );
 
     let mut mask: u32 = 0;
     let mut action_trace: Vec<MDPDiscoveryStep> = Vec::new();
     for step in 0..(mdp_budget + 2) {
         let action = vi.policy[mask as usize];
         let next = transition_to(mask, action, stop_action, mdp_budget);
-        let before = evaluate_mask_cached(&eval_cache, mask, num_features, scenario, &split.train_rows, &split.validation_rows);
-        let after = evaluate_mask_cached(&eval_cache, next, num_features, scenario, &split.train_rows, &split.validation_rows);
+        let before = evaluate_mask_cached(
+            &eval_cache,
+            mask,
+            num_features,
+            scenario,
+            &split.train_rows,
+            &split.validation_rows,
+        );
+        let after = evaluate_mask_cached(
+            &eval_cache,
+            next,
+            num_features,
+            scenario,
+            &split.train_rows,
+            &split.validation_rows,
+        );
         action_trace.push(MDPDiscoveryStep {
             step,
             state_mask: mask,
@@ -1174,13 +1322,32 @@ fn discover_variables_by_mdp(
     }
 
     let selected = mask_to_indices(mask, num_features);
-    let final_eval = evaluate_mask_cached(&eval_cache, mask, num_features, scenario, &split.train_rows, &split.validation_rows);
-    let baseline = evaluate_mask_cached(&eval_cache, 0, num_features, scenario, &split.train_rows, &split.validation_rows);
+    let final_eval = evaluate_mask_cached(
+        &eval_cache,
+        mask,
+        num_features,
+        scenario,
+        &split.train_rows,
+        &split.validation_rows,
+    );
+    let baseline = evaluate_mask_cached(
+        &eval_cache,
+        0,
+        num_features,
+        scenario,
+        &split.train_rows,
+        &split.validation_rows,
+    );
     let selected_variables: Vec<SelectedVariable> = selected
         .iter()
         .map(|&i| {
             let f = &scenario.feature_candidates[i];
-            SelectedVariable { id: f.id.clone(), label: f.label.clone(), source: f.source, cost: f.cost }
+            SelectedVariable {
+                id: f.id.clone(),
+                label: f.label.clone(),
+                source: f.source,
+                cost: f.cost,
+            }
         })
         .collect();
     VariableDiscoveryResult {
@@ -1200,31 +1367,52 @@ fn discover_variables_by_mdp(
     }
 }
 
-fn build_forecast_rows(scenario: &ForecastScenario, belief_trace: &LatentBeliefTrace) -> Vec<ForecastRow> {
+fn build_forecast_rows(
+    scenario: &ForecastScenario,
+    belief_trace: &LatentBeliefTrace,
+) -> Vec<ForecastRow> {
     let mut rows: Vec<ForecastRow> = Vec::new();
     let train_n = scenario.params.training_periods;
-    let validation_count = (((train_n - 2) as f64) * scenario.params.validation_share).floor().max(2.0) as usize;
+    let validation_count = (((train_n - 2) as f64) * scenario.params.validation_share)
+        .floor()
+        .max(2.0) as usize;
     let validation_start = train_n - validation_count;
     for t in 2..train_n {
         rows.push(ForecastRow {
             t,
             target: scenario.observations[t].y,
             context: feature_context_for_training(scenario, belief_trace, t),
-            split: if t >= validation_start { Split::Validation } else { Split::Train },
+            split: if t >= validation_start {
+                Split::Validation
+            } else {
+                Split::Train
+            },
         });
     }
     rows
 }
 
-fn feature_context_for_training(scenario: &ForecastScenario, belief_trace: &LatentBeliefTrace, t: usize) -> FeatureContext {
+fn feature_context_for_training(
+    scenario: &ForecastScenario,
+    belief_trace: &LatentBeliefTrace,
+    t: usize,
+) -> FeatureContext {
     let cur = &scenario.observations[t];
     let lag = scenario.observations[t - 1].y;
     let prev = scenario.observations[t - 2].y;
-    let point = belief_trace
-        .points
-        .get(t)
-        .unwrap_or_else(|| belief_trace.points.last().expect("belief trace has at least one point"));
-    feature_context(cur, lag, prev, &point.prior, scenario.params.training_periods)
+    let point = belief_trace.points.get(t).unwrap_or_else(|| {
+        belief_trace
+            .points
+            .last()
+            .expect("belief trace has at least one point")
+    });
+    feature_context(
+        cur,
+        lag,
+        prev,
+        &point.prior,
+        scenario.params.training_periods,
+    )
 }
 
 fn feature_context(
@@ -1264,7 +1452,12 @@ fn evaluate_feature_mask(
     train_rows: &[ForecastRow],
     validation_rows: &[ForecastRow],
 ) -> FitEvaluation {
-    let fit = ridge_fit(feature_indices, &scenario.feature_candidates, train_rows, scenario.params.ridge);
+    let fit = ridge_fit(
+        feature_indices,
+        &scenario.feature_candidates,
+        train_rows,
+        scenario.params.ridge,
+    );
     FitEvaluation {
         train_mse: prediction_mse(&fit, &scenario.feature_candidates, train_rows),
         validation_mse: prediction_mse(&fit, &scenario.feature_candidates, validation_rows),
@@ -1283,11 +1476,24 @@ struct RidgeFit {
     scales: Vec<f64>,
 }
 
-fn fine_tune_equation(scenario: &ForecastScenario, discovery: &VariableDiscoveryResult) -> TunedEquation {
+fn fine_tune_equation(
+    scenario: &ForecastScenario,
+    discovery: &VariableDiscoveryResult,
+) -> TunedEquation {
     let all_rows = &discovery.rows;
-    let target = ridge_fit(&discovery.selected_feature_indices, &scenario.feature_candidates, all_rows, scenario.params.ridge);
-    let mut start_coefficients = vec![mean(&all_rows.iter().map(|row| row.target).collect::<Vec<_>>())];
-    start_coefficients.extend(std::iter::repeat_n(0.0, discovery.selected_feature_indices.len()));
+    let target = ridge_fit(
+        &discovery.selected_feature_indices,
+        &scenario.feature_candidates,
+        all_rows,
+        scenario.params.ridge,
+    );
+    let mut start_coefficients = vec![mean(
+        &all_rows.iter().map(|row| row.target).collect::<Vec<_>>(),
+    )];
+    start_coefficients.extend(std::iter::repeat_n(
+        0.0,
+        discovery.selected_feature_indices.len(),
+    ));
     let mut trace: Vec<FineTuneTraceRow> = Vec::new();
     for iter in 0..=scenario.params.fine_tune_iterations {
         let alpha = if iter == scenario.params.fine_tune_iterations {
@@ -1310,7 +1516,11 @@ fn fine_tune_equation(scenario: &ForecastScenario, discovery: &VariableDiscovery
         trace.push(FineTuneTraceRow {
             iter,
             mse: prediction_mse(&iter_fit, &scenario.feature_candidates, all_rows),
-            validation_mse: prediction_mse(&iter_fit, &scenario.feature_candidates, &discovery.validation_rows),
+            validation_mse: prediction_mse(
+                &iter_fit,
+                &scenario.feature_candidates,
+                &discovery.validation_rows,
+            ),
             coefficients: coeffs,
         });
     }
@@ -1323,18 +1533,30 @@ fn fine_tune_equation(scenario: &ForecastScenario, discovery: &VariableDiscovery
             split: row.split,
         })
         .collect();
-    let feature_ids: Vec<String> = discovery.selected_variables.iter().map(|v| v.id.clone()).collect();
+    let feature_ids: Vec<String> = discovery
+        .selected_variables
+        .iter()
+        .map(|v| v.id.clone())
+        .collect();
     TunedEquation {
         feature_indices: discovery.selected_feature_indices.clone(),
         feature_ids: feature_ids.clone(),
-        feature_labels: discovery.selected_variables.iter().map(|v| v.label.clone()).collect(),
+        feature_labels: discovery
+            .selected_variables
+            .iter()
+            .map(|v| v.label.clone())
+            .collect(),
         coefficients: target.coefficients[1..].to_vec(),
         means: target.means.clone(),
         scales: target.scales.clone(),
         intercept: target.coefficients[0],
         equation_text: equation_text(&feature_ids, &target.coefficients),
         in_sample_mse: prediction_mse(&target, &scenario.feature_candidates, all_rows),
-        validation_mse: prediction_mse(&target, &scenario.feature_candidates, &discovery.validation_rows),
+        validation_mse: prediction_mse(
+            &target,
+            &scenario.feature_candidates,
+            &discovery.validation_rows,
+        ),
         trace,
         fitted,
     }
@@ -1349,13 +1571,22 @@ fn ridge_fit(
     let p = feature_indices.len();
     let raw: Vec<Vec<f64>> = rows
         .iter()
-        .map(|row| feature_indices.iter().map(|&i| (candidates[i].compute)(&row.context)).collect())
+        .map(|row| {
+            feature_indices
+                .iter()
+                .map(|&i| (candidates[i].compute)(&row.context))
+                .collect()
+        })
         .collect();
     let mut means = vec![0.0; p];
     let mut scales = vec![1.0; p];
     for j in 0..p {
         means[j] = mean(&raw.iter().map(|row| row[j]).collect::<Vec<_>>());
-        let variance = mean(&raw.iter().map(|row| (row[j] - means[j]).powi(2)).collect::<Vec<_>>());
+        let variance = mean(
+            &raw.iter()
+                .map(|row| (row[j] - means[j]).powi(2))
+                .collect::<Vec<_>>(),
+        );
         scales[j] = variance.max(1e-10).sqrt();
     }
     let dim = p + 1;
@@ -1386,11 +1617,18 @@ fn ridge_fit(
 
 fn prediction_mse(fit: &RidgeFit, candidates: &[FeatureCandidate], rows: &[ForecastRow]) -> f64 {
     let actual: Vec<f64> = rows.iter().map(|row| row.target).collect();
-    let predicted: Vec<f64> = rows.iter().map(|row| predict_with_fit(fit, candidates, &row.context)).collect();
+    let predicted: Vec<f64> = rows
+        .iter()
+        .map(|row| predict_with_fit(fit, candidates, &row.context))
+        .collect();
     mse(&actual, &predicted)
 }
 
-fn predict_with_fit(fit: &RidgeFit, candidates: &[FeatureCandidate], context: &FeatureContext) -> f64 {
+fn predict_with_fit(
+    fit: &RidgeFit,
+    candidates: &[FeatureCandidate],
+    context: &FeatureContext,
+) -> f64 {
     let mut y = fit.coefficients[0];
     for j in 0..fit.feature_indices.len() {
         let raw = (candidates[fit.feature_indices[j]].compute)(context);
@@ -1426,7 +1664,13 @@ fn project_forecast(
         let t = scenario.params.training_periods + h - 1;
         let obs = &scenario.observations[t];
         let belief_array = belief.as_array();
-        let ctx = feature_context(obs, lag_y, prev_y, &belief_array, scenario.params.training_periods);
+        let ctx = feature_context(
+            obs,
+            lag_y,
+            prev_y,
+            &belief_array,
+            scenario.params.training_periods,
+        );
         let forecast = predict_with_fit(&feature_fit, &scenario.feature_candidates, &ctx);
         let band = residual_scale * (1.1 + 0.07 * h as f64 + 0.22 * belief.entropy());
         out.push(ForecastProjectionPoint {
@@ -1531,7 +1775,12 @@ fn equation_text(feature_ids: &[String], coefficients: &[f64]) -> String {
     let mut terms = vec![format!("{:.3}", coefficients[0])];
     for i in 0..feature_ids.len() {
         let sign = if coefficients[i + 1] >= 0.0 { "+" } else { "-" };
-        terms.push(format!("{} {:.3}*z({})", sign, coefficients[i + 1].abs(), feature_ids[i]));
+        terms.push(format!(
+            "{} {:.3}*z({})",
+            sign,
+            coefficients[i + 1].abs(),
+            feature_ids[i]
+        ));
     }
     format!("y_hat = {}", terms.join(" "))
 }

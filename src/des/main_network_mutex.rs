@@ -15,7 +15,10 @@ use crate::des::general::network_mutex::{
 
 /// `Number(process.env.KEY ?? default)` for integer env vars.
 fn env_usize(key: &str, default: usize) -> usize {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 /// `fmt(n)` — finite numbers to 3 decimals, else `"n/a"`.
@@ -35,7 +38,9 @@ pub fn run() {
             interarrival_ticks: env_usize("INTERARRIVAL", 1),
             first_arrival_tick: None,
         }),
-        worker: Some(NetworkMutexWorkerOpts { processing_ticks: env_usize("PROCESSING_TICKS", 4) }),
+        worker: Some(NetworkMutexWorkerOpts {
+            processing_ticks: env_usize("PROCESSING_TICKS", 4),
+        }),
         lock: Some(NetworkMutexLockServiceOpts {
             grant_delay_ticks: Some(env_usize("GRANT_DELAY_TICKS", 2)),
         }),
@@ -48,12 +53,30 @@ pub fn run() {
     println!("completed:              {}", result.completed);
     println!("total ticks:            {}", result.total_ticks);
     println!("worker max queue:       {}", result.worker.max_queue);
-    println!("mean queue wait:        {} ticks", fmt(result.worker.mean_queue_wait_ticks));
-    println!("mean lock wait:         {} ticks", fmt(result.worker.mean_lock_wait_ticks));
-    println!("mean time in system:    {} ticks", fmt(result.worker.mean_time_in_system_ticks));
-    println!("child lock requests:    {}", result.worker.child_requests_spawned);
-    println!("child lock releases:    {}", result.worker.child_releases_spawned);
-    println!("lock grants/releases:   {}/{}", result.lock.grant_count, result.lock.release_count);
+    println!(
+        "mean queue wait:        {} ticks",
+        fmt(result.worker.mean_queue_wait_ticks)
+    );
+    println!(
+        "mean lock wait:         {} ticks",
+        fmt(result.worker.mean_lock_wait_ticks)
+    );
+    println!(
+        "mean time in system:    {} ticks",
+        fmt(result.worker.mean_time_in_system_ticks)
+    );
+    println!(
+        "child lock requests:    {}",
+        result.worker.child_requests_spawned
+    );
+    println!(
+        "child lock releases:    {}",
+        result.worker.child_releases_spawned
+    );
+    println!(
+        "lock grants/releases:   {}/{}",
+        result.lock.grant_count, result.lock.release_count
+    );
     println!("lock max wait queue:    {}", result.lock.max_wait_queue);
     println!("lock utilization:       {}", fmt(result.lock.utilization));
     println!(
@@ -67,15 +90,31 @@ pub fn run() {
 
     println!();
     println!("Completion order:");
-    let order: Vec<String> = result.completed_items.iter().map(|x| x.item_id.clone()).collect();
+    let order: Vec<String> = result
+        .completed_items
+        .iter()
+        .map(|x| x.item_id.clone())
+        .collect();
     println!("{}", order.join(" -> "));
 
     println!();
     println!("First trace events:");
     for e in result.trace.iter().take(24) {
-        let item = e.item_id.as_ref().map(|i| format!(" {}", i)).unwrap_or_default();
-        let child = e.child_token_id.as_ref().map(|c| format!(" child={}", c)).unwrap_or_default();
-        let detail = e.detail.as_ref().map(|d| format!(" ({})", d)).unwrap_or_default();
+        let item = e
+            .item_id
+            .as_ref()
+            .map(|i| format!(" {}", i))
+            .unwrap_or_default();
+        let child = e
+            .child_token_id
+            .as_ref()
+            .map(|c| format!(" child={}", c))
+            .unwrap_or_default();
+        let detail = e
+            .detail
+            .as_ref()
+            .map(|d| format!(" ({})", d))
+            .unwrap_or_default();
         println!(
             "  t={:>3} {:<14} {}{}{}{}",
             e.tick,

@@ -41,43 +41,91 @@ mod tests {
     #[test]
     fn temperature_schedules() {
         assert_eq!(
-            temperature_at(&CoolingSchedule::Geometric { t0: 100.0, alpha: 0.9, t_min: None }, 0),
+            temperature_at(
+                &CoolingSchedule::Geometric {
+                    t0: 100.0,
+                    alpha: 0.9,
+                    t_min: None
+                },
+                0
+            ),
             100.0
         );
         assert!(close(
-            temperature_at(&CoolingSchedule::Geometric { t0: 100.0, alpha: 0.9, t_min: None }, 1),
+            temperature_at(
+                &CoolingSchedule::Geometric {
+                    t0: 100.0,
+                    alpha: 0.9,
+                    t_min: None
+                },
+                1
+            ),
             90.0,
             1e-6
         ));
         assert!(close(
-            temperature_at(&CoolingSchedule::Geometric { t0: 100.0, alpha: 0.9, t_min: None }, 10),
+            temperature_at(
+                &CoolingSchedule::Geometric {
+                    t0: 100.0,
+                    alpha: 0.9,
+                    t_min: None
+                },
+                10
+            ),
             100.0 * 0.9_f64.powi(10),
             1e-6
         ));
         assert!(close(
-            temperature_at(&CoolingSchedule::Logarithmic { t0: 100.0, t_min: None }, 0),
+            temperature_at(
+                &CoolingSchedule::Logarithmic {
+                    t0: 100.0,
+                    t_min: None
+                },
+                0
+            ),
             100.0 / 2.0_f64.ln(),
             1e-6
         ));
         assert!(close(
-            temperature_at(&CoolingSchedule::Linear { t0: 100.0, rate: 1.0, t_min: None }, 50),
+            temperature_at(
+                &CoolingSchedule::Linear {
+                    t0: 100.0,
+                    rate: 1.0,
+                    t_min: None
+                },
+                50
+            ),
             50.0,
             1e-6
         ));
         assert_eq!(
             temperature_at(
-                &CoolingSchedule::Geometric { t0: 100.0, alpha: 0.5, t_min: Some(5.0) },
+                &CoolingSchedule::Geometric {
+                    t0: 100.0,
+                    alpha: 0.5,
+                    t_min: Some(5.0)
+                },
                 1000
             ),
             5.0
         );
         assert!(close(
             temperature_at(
-                &CoolingSchedule::ExpRestart { t0: 100.0, alpha: 0.9, period: 10, t_min: None },
+                &CoolingSchedule::ExpRestart {
+                    t0: 100.0,
+                    alpha: 0.9,
+                    period: 10,
+                    t_min: None
+                },
                 5
             ),
             temperature_at(
-                &CoolingSchedule::ExpRestart { t0: 100.0, alpha: 0.9, period: 10, t_min: None },
+                &CoolingSchedule::ExpRestart {
+                    t0: 100.0,
+                    alpha: 0.9,
+                    period: 10,
+                    t_min: None
+                },
                 15
             ),
             1e-6
@@ -89,7 +137,10 @@ mod tests {
     fn tsp_initial_is_permutation() {
         let p = build_tsp_sa_problem(
             build_random_tsp(15, 42, None),
-            TSPSAProblemOptions { init: Some(InitMode::Random), ..Default::default() },
+            TSPSAProblemOptions {
+                init: Some(InitMode::Random),
+                ..Default::default()
+            },
         );
         let mut rng = mulberry32(1);
         let init = p.initial(&mut rng);
@@ -97,7 +148,10 @@ mod tests {
 
         let p2 = build_tsp_sa_problem(
             build_random_tsp(15, 42, None),
-            TSPSAProblemOptions { init: Some(InitMode::NearestNeighbor), ..Default::default() },
+            TSPSAProblemOptions {
+                init: Some(InitMode::NearestNeighbor),
+                ..Default::default()
+            },
         );
         let init2 = p2.initial(&mut rng);
         assert!(is_permutation(&init2, 15));
@@ -109,7 +163,10 @@ mod tests {
     // [3] TSP adapter — neighbour preserves permutation
     #[test]
     fn tsp_neighbour_preserves_permutation() {
-        let p = build_tsp_sa_problem(build_random_tsp(15, 42, None), TSPSAProblemOptions::default());
+        let p = build_tsp_sa_problem(
+            build_random_tsp(15, 42, None),
+            TSPSAProblemOptions::default(),
+        );
         let mut rng = mulberry32(1);
         let init = p.initial(&mut rng);
         for _ in 0..200 {
@@ -119,7 +176,10 @@ mod tests {
 
         let p2 = build_tsp_sa_problem(
             build_random_tsp(15, 42, None),
-            TSPSAProblemOptions { moves: Some(SAMove::TwoOpt), ..Default::default() },
+            TSPSAProblemOptions {
+                moves: Some(SAMove::TwoOpt),
+                ..Default::default()
+            },
         );
         for _ in 0..200 {
             let nb = p2.neighbour(&init, &mut rng);
@@ -128,7 +188,10 @@ mod tests {
 
         let p3 = build_tsp_sa_problem(
             build_random_tsp(15, 42, None),
-            TSPSAProblemOptions { moves: Some(SAMove::OrOpt), ..Default::default() },
+            TSPSAProblemOptions {
+                moves: Some(SAMove::OrOpt),
+                ..Default::default()
+            },
         );
         for _ in 0..200 {
             let nb = p3.neighbour(&init, &mut rng);
@@ -147,11 +210,20 @@ mod tests {
             problem,
             solver_options(
                 3000,
-                CoolingSchedule::Geometric { t0: 50.0, alpha: 0.999, t_min: None },
+                CoolingSchedule::Geometric {
+                    t0: 50.0,
+                    alpha: 0.999,
+                    t_min: None,
+                },
                 Some(1),
             ),
         );
-        assert!(close(r.best_cost, opt, 1e-4), "SA={}, opt={}", r.best_cost, opt);
+        assert!(
+            close(r.best_cost, opt, 1e-4),
+            "SA={}, opt={}",
+            r.best_cost,
+            opt
+        );
         assert!(is_permutation(&r.best_state, 5));
     }
 
@@ -169,14 +241,23 @@ mod tests {
             problem,
             solver_options(
                 3000,
-                CoolingSchedule::Geometric { t0: 30.0, alpha: 0.999, t_min: None },
+                CoolingSchedule::Geometric {
+                    t0: 30.0,
+                    alpha: 0.999,
+                    t_min: None,
+                },
                 Some(1),
             ),
         );
         let value = -r.best_cost;
         assert!(close(value, 220.0, 1e-3), "value={value}");
         assert!(r.best_state.iter().all(|&v| v == 0.0 || v == 1.0));
-        let weight: f64 = inst.weights.iter().zip(&r.best_state).map(|(w, x)| w * x).sum();
+        let weight: f64 = inst
+            .weights
+            .iter()
+            .zip(&r.best_state)
+            .map(|(w, x)| w * x)
+            .sum();
         assert!(weight <= inst.capacity);
     }
 
@@ -184,13 +265,20 @@ mod tests {
     #[test]
     fn reproducibility() {
         let make = || -> Rc<dyn SAProblem<Tour>> {
-            Rc::new(build_tsp_sa_problem(build_random_tsp(10, 1, None), TSPSAProblemOptions::default()))
+            Rc::new(build_tsp_sa_problem(
+                build_random_tsp(10, 1, None),
+                TSPSAProblemOptions::default(),
+            ))
         };
         let r1 = run_simulated_annealing(
             make(),
             solver_options(
                 1000,
-                CoolingSchedule::Geometric { t0: 50.0, alpha: 0.99, t_min: None },
+                CoolingSchedule::Geometric {
+                    t0: 50.0,
+                    alpha: 0.99,
+                    t_min: None,
+                },
                 Some(42),
             ),
         );
@@ -198,7 +286,11 @@ mod tests {
             make(),
             solver_options(
                 1000,
-                CoolingSchedule::Geometric { t0: 50.0, alpha: 0.99, t_min: None },
+                CoolingSchedule::Geometric {
+                    t0: 50.0,
+                    alpha: 0.99,
+                    t_min: None,
+                },
                 Some(42),
             ),
         );
@@ -211,13 +303,19 @@ mod tests {
     // [7] Best history is monotonic
     #[test]
     fn best_history_monotonic() {
-        let problem: Rc<dyn SAProblem<Tour>> =
-            Rc::new(build_tsp_sa_problem(build_random_tsp(15, 4, None), TSPSAProblemOptions::default()));
+        let problem: Rc<dyn SAProblem<Tour>> = Rc::new(build_tsp_sa_problem(
+            build_random_tsp(15, 4, None),
+            TSPSAProblemOptions::default(),
+        ));
         let r = run_simulated_annealing(
             problem,
             solver_options(
                 5000,
-                CoolingSchedule::Geometric { t0: 50.0, alpha: 0.999, t_min: None },
+                CoolingSchedule::Geometric {
+                    t0: 50.0,
+                    alpha: 0.999,
+                    t_min: None,
+                },
                 Some(1),
             ),
         );
@@ -248,7 +346,11 @@ mod tests {
             problem,
             solver_options(
                 5000,
-                CoolingSchedule::Geometric { t0: 100.0, alpha: 0.99, t_min: None },
+                CoolingSchedule::Geometric {
+                    t0: 100.0,
+                    alpha: 0.99,
+                    t_min: None,
+                },
                 Some(1),
             ),
         );
@@ -259,11 +361,17 @@ mod tests {
     // [9] Trace recording
     #[test]
     fn trace_recording() {
-        let problem: Rc<dyn SAProblem<Tour>> =
-            Rc::new(build_tsp_sa_problem(build_random_tsp(8, 2, None), TSPSAProblemOptions::default()));
+        let problem: Rc<dyn SAProblem<Tour>> = Rc::new(build_tsp_sa_problem(
+            build_random_tsp(8, 2, None),
+            TSPSAProblemOptions::default(),
+        ));
         let mut opts = solver_options(
             100,
-            CoolingSchedule::Geometric { t0: 50.0, alpha: 0.99, t_min: None },
+            CoolingSchedule::Geometric {
+                t0: 50.0,
+                alpha: 0.99,
+                t_min: None,
+            },
             Some(1),
         );
         opts.record_trace = Some(true);
@@ -277,11 +385,17 @@ mod tests {
     // [10] Stall-limit terminates early
     #[test]
     fn stall_limit_early_exit() {
-        let problem: Rc<dyn SAProblem<Tour>> =
-            Rc::new(build_tsp_sa_problem(build_random_tsp(8, 1, None), TSPSAProblemOptions::default()));
+        let problem: Rc<dyn SAProblem<Tour>> = Rc::new(build_tsp_sa_problem(
+            build_random_tsp(8, 1, None),
+            TSPSAProblemOptions::default(),
+        ));
         let mut opts = solver_options(
             100_000,
-            CoolingSchedule::Geometric { t0: 1e-12, alpha: 1.0, t_min: None },
+            CoolingSchedule::Geometric {
+                t0: 1e-12,
+                alpha: 1.0,
+                t_min: None,
+            },
             Some(1),
         );
         opts.stall_limit = Some(30);

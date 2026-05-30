@@ -21,7 +21,10 @@ use crate::des::general::factory_floor_track3t::{
 };
 
 fn env_usize(key: &str, default: usize) -> usize {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 /// Entry point (TS top-level `main`).
@@ -46,11 +49,26 @@ pub fn run() {
     println!("{}", summarize_warehouse_comparison(&result));
     println!();
     println!("# Improvement deltas");
-    println!("mean cycle time reduction = {:.1}%", result.deltas.mean_cycle_time_reduction_pct);
-    println!("throughput lift           = {:.1}%", result.deltas.throughput_lift_pct);
-    println!("search miss reduction     = {:.1}%", result.deltas.search_miss_reduction_pct);
-    println!("shipping error reduction  = {:.1}%", result.deltas.error_reduction_pct);
-    println!("belief entropy reduction  = {:.1}%", result.deltas.entropy_reduction_pct);
+    println!(
+        "mean cycle time reduction = {:.1}%",
+        result.deltas.mean_cycle_time_reduction_pct
+    );
+    println!(
+        "throughput lift           = {:.1}%",
+        result.deltas.throughput_lift_pct
+    );
+    println!(
+        "search miss reduction     = {:.1}%",
+        result.deltas.search_miss_reduction_pct
+    );
+    println!(
+        "shipping error reduction  = {:.1}%",
+        result.deltas.error_reduction_pct
+    );
+    println!(
+        "belief entropy reduction  = {:.1}%",
+        result.deltas.entropy_reduction_pct
+    );
     println!();
     println!("# Archived Track3t grounding");
     for source in track3t_archive_grounding() {

@@ -29,7 +29,10 @@ mod tests {
 
     impl Stub {
         fn scalar(x: f64) -> Self {
-            Stub { x, history: Vec::new() }
+            Stub {
+                x,
+                history: Vec::new(),
+            }
         }
         fn series(history: Vec<f64>) -> Self {
             Stub { x: 0.0, history }
@@ -51,11 +54,25 @@ mod tests {
     #[test]
     fn validator_factories() {
         // numericValidator — absolute tol pass.
-        let num_abs = numeric_validator::<Stub>("t.numAbs", |s| s.x, |_| 1.0, 1e-9, NumericMode::Absolute, None);
+        let num_abs = numeric_validator::<Stub>(
+            "t.numAbs",
+            |s| s.x,
+            |_| 1.0,
+            1e-9,
+            NumericMode::Absolute,
+            None,
+        );
         assert!(num_abs.validate(&Stub::scalar(1.0))[0].passed);
 
         // numericValidator — relative tol fail.
-        let num_rel = numeric_validator::<Stub>("t.numRel", |s| s.x, |_| 100.0, 1e-3, NumericMode::Relative, None);
+        let num_rel = numeric_validator::<Stub>(
+            "t.numRel",
+            |s| s.x,
+            |_| 100.0,
+            1e-3,
+            NumericMode::Relative,
+            None,
+        );
         assert!(!num_rel.validate(&Stub::scalar(101.0))[0].passed);
 
         // boundValidator — inside / outside.
@@ -86,7 +103,11 @@ mod tests {
 
         // formatValidationReport renders pass/fail counts.
         let txt = format_validation_report(&[
-            ValidationCheck { name: "a".into(), passed: true, ..Default::default() },
+            ValidationCheck {
+                name: "a".into(),
+                passed: true,
+                ..Default::default()
+            },
             ValidationCheck {
                 name: "b".into(),
                 passed: false,

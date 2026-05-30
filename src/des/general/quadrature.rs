@@ -227,8 +227,31 @@ where
     if err.abs() <= tol || depth >= max_depth {
         return left + right + err;
     }
-    adaptive_recurse(f, a, fa, fm, flm, m, left, tol / 2.0, depth + 1, max_depth, evals)
-        + adaptive_recurse(f, m, fm, fb, frm, b, right, tol / 2.0, depth + 1, max_depth, evals)
+    adaptive_recurse(
+        f,
+        a,
+        fa,
+        fm,
+        flm,
+        m,
+        left,
+        tol / 2.0,
+        depth + 1,
+        max_depth,
+        evals,
+    ) + adaptive_recurse(
+        f,
+        m,
+        fm,
+        fb,
+        frm,
+        b,
+        right,
+        tol / 2.0,
+        depth + 1,
+        max_depth,
+        evals,
+    )
 }
 
 impl<F> Transform<Integrand1D<F>, QuadResult> for AdaptiveSimpsonRule
@@ -245,7 +268,17 @@ where
         evals += 3;
         let whole = simpson_s(a, fa, fb, fm, b);
         let value = adaptive_recurse(
-            &f, a, fa, fb, fm, b, whole, self.tol, 0, self.max_depth, &mut evals,
+            &f,
+            a,
+            fa,
+            fb,
+            fm,
+            b,
+            whole,
+            self.tol,
+            0,
+            self.max_depth,
+            &mut evals,
         );
         QuadResult {
             value,
@@ -264,10 +297,7 @@ where
 /// `None` if `n` is not supported (n ∈ {2,3,4,5,7,10}).
 fn gl_nodes(n: u64) -> Option<(&'static [f64], &'static [f64])> {
     match n {
-        2 => Some((
-            &[-0.5773502691896257, 0.5773502691896257],
-            &[1.0, 1.0],
-        )),
+        2 => Some((&[-0.5773502691896257, 0.5773502691896257], &[1.0, 1.0])),
         3 => Some((
             &[-0.7745966692414834, 0.0, 0.7745966692414834],
             &[0.5555555555555556, 0.8888888888888888, 0.5555555555555556],

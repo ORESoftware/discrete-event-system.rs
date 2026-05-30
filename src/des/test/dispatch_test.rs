@@ -35,7 +35,11 @@ mod tests {
             k: 3,
             arrival_rate: 2.4,
             class_prob: vec![1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0],
-            service_rate: vec![vec![1.6, 0.9, 0.7], vec![0.7, 1.6, 0.9], vec![0.9, 0.7, 1.6]],
+            service_rate: vec![
+                vec![1.6, 0.9, 0.7],
+                vec![0.7, 1.6, 0.9],
+                vec![0.9, 0.7, 1.6],
+            ],
         }
     }
 
@@ -58,7 +62,10 @@ mod tests {
         assert!(r.completed_jobs > 0);
         assert_eq!(r.per_machine_jobs.iter().sum::<i64>(), 1000);
         assert!(r.mean_sojourn.is_finite() && r.mean_sojourn > 0.0);
-        assert!(r.per_machine_utilisation.iter().all(|&u| (0.0..=1.0).contains(&u)));
+        assert!(r
+            .per_machine_utilisation
+            .iter()
+            .all(|&u| (0.0..=1.0).contains(&u)));
     }
 
     // Group 2 — Round-robin distributes evenly.
@@ -113,12 +120,11 @@ mod tests {
         assert_eq!(a.status, LPStatus::Optimal);
         assert_eq!(b.status, LPStatus::Optimal);
         assert!((a.objective - b.objective).abs() <= 1e-9);
-        let dx = a
-            .x
-            .iter()
-            .zip(b.x.iter())
-            .map(|(v, w)| (v - w).abs())
-            .fold(0.0_f64, f64::max);
+        let dx =
+            a.x.iter()
+                .zip(b.x.iter())
+                .map(|(v, w)| (v - w).abs())
+                .fold(0.0_f64, f64::max);
         assert!(dx < 1e-6, "max |Δx| = {dx}");
     }
 
@@ -132,7 +138,11 @@ mod tests {
             assert!((sum - 1.0).abs() <= 1e-6, "class {c}: Σ = {sum}");
             assert!(r.x[c].iter().all(|&v| v >= -1e-9));
         }
-        assert!(r.bottleneck_load > 0.0 && r.bottleneck_load <= 1.0, "t* = {}", r.bottleneck_load);
+        assert!(
+            r.bottleneck_load > 0.0 && r.bottleneck_load <= 1.0,
+            "t* = {}",
+            r.bottleneck_load
+        );
     }
 
     // Group 8 — MDP-VI policy returns a legal action at every state.
@@ -188,7 +198,10 @@ mod tests {
         let result = mcts(
             Box::new(TwoActionEnv),
             0_i64,
-            MCTSOptions { iterations: 50, ..Default::default() },
+            MCTSOptions {
+                iterations: 50,
+                ..Default::default()
+            },
             mulberry32(7),
         );
         assert_eq!(result.action, 1, "got {}", result.action);

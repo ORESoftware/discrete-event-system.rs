@@ -37,7 +37,11 @@ mod tests {
     #[test]
     fn linear_regression_ls() {
         let r = run_linear_regression_ls(LinearRegressionParams::default());
-        assert!(close(r.coefficients[0], 2.0, 1e-8), "slope={}", r.coefficients[0]);
+        assert!(
+            close(r.coefficients[0], 2.0, 1e-8),
+            "slope={}",
+            r.coefficients[0]
+        );
         assert!(close(r.intercept, 1.0, 1e-8), "intercept={}", r.intercept);
         assert!(r.mse < 1e-20, "mse={}", r.mse);
         assert!(has(&r.topology.stations, "normal-equation-accumulator"));
@@ -47,9 +51,16 @@ mod tests {
     // -- ridge-regression-ls --
     #[test]
     fn ridge_regression_ls() {
-        let r = run_ridge_regression_ls(RidgeRegressionParams { ridge: Some(0.01), ..Default::default() });
+        let r = run_ridge_regression_ls(RidgeRegressionParams {
+            ridge: Some(0.01),
+            ..Default::default()
+        });
         assert!(r.coefficients.iter().all(|c| c.is_finite()) && r.intercept.is_finite());
-        assert!(close(r.coefficients[0], 2.0, 0.02), "slope={}", r.coefficients[0]);
+        assert!(
+            close(r.coefficients[0], 2.0, 0.02),
+            "slope={}",
+            r.coefficients[0]
+        );
         assert!(has(&r.topology.movables, "RegressionFitToken"));
     }
 
@@ -64,7 +75,11 @@ mod tests {
         });
         assert!(!r.loss_history.is_empty());
         assert_eq!(r.accuracy, 1.0);
-        assert!(r.final_loss.is_finite() && r.final_loss < 0.2, "loss={}", r.final_loss);
+        assert!(
+            r.final_loss.is_finite() && r.final_loss < 0.2,
+            "loss={}",
+            r.final_loss
+        );
         assert!(has(&r.topology.movables, "VectorBatchToken"));
         assert!(has(&r.topology.movables, "GradientStepToken"));
     }
@@ -81,7 +96,11 @@ mod tests {
             seed: Some(7),
             ..Default::default()
         });
-        assert!(r.loss_history.len() >= 800, "steps={}", r.loss_history.len());
+        assert!(
+            r.loss_history.len() >= 800,
+            "steps={}",
+            r.loss_history.len()
+        );
         assert_eq!(r.accuracy, 1.0);
         assert!(r.final_loss.is_finite());
         assert!(has(&r.topology.stations, "backprop-gradient-update"));

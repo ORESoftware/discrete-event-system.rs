@@ -57,10 +57,18 @@ fn build_binary_knapsack_ip(values: &[f64], weights: &[f64], capacity: f64) -> I
     }
 }
 
-fn solve_ipmip_with_des(problem: &IPMIPProblem, _lp_algorithm: &str, _max_cut_rounds: usize) -> IPMIPSolution {
+fn solve_ipmip_with_des(
+    problem: &IPMIPProblem,
+    _lp_algorithm: &str,
+    _max_cut_rounds: usize,
+) -> IPMIPSolution {
     // PORT NOTE: real branch-and-cut DES solver. Stub returns the all-zero
     // incumbent (always feasible for these ≤ models with b ≥ 0).
-    IPMIPSolution { status: "optimal".to_string(), z: 0.0, x: vec![0.0; problem.c.len()] }
+    IPMIPSolution {
+        status: "optimal".to_string(),
+        z: 0.0,
+        x: vec![0.0; problem.c.len()],
+    }
 }
 
 // =============================================================================
@@ -108,14 +116,33 @@ struct Driver {
 
 impl Driver {
     fn check(&mut self, name: &str, passed: bool, detail: Option<String>) {
-        let tail = detail.as_ref().map(|d| format!(" - {}", d)).unwrap_or_default();
-        println!("  {}  {}{}", if passed { "PASS" } else { "FAIL" }, name, tail);
-        self.checks.push(CheckRow { name: name.to_string(), passed, detail });
+        let tail = detail
+            .as_ref()
+            .map(|d| format!(" - {}", d))
+            .unwrap_or_default();
+        println!(
+            "  {}  {}{}",
+            if passed { "PASS" } else { "FAIL" },
+            name,
+            tail
+        );
+        self.checks.push(CheckRow {
+            name: name.to_string(),
+            passed,
+            detail,
+        });
     }
 
     fn close(&mut self, name: &str, actual: f64, expected: f64, tol: f64) {
         let diff = (actual - expected).abs();
-        self.check(name, diff <= tol, Some(format!("actual={} expected={} diff={:.3e} tol={}", actual, expected, diff, tol)));
+        self.check(
+            name,
+            diff <= tol,
+            Some(format!(
+                "actual={} expected={} diff={:.3e} tol={}",
+                actual, expected, diff, tol
+            )),
+        );
     }
 
     fn write_problem(&self, name: &str, _problem: &IPMIPProblem) -> PathBuf {
@@ -126,7 +153,12 @@ impl Driver {
         p
     }
 
-    fn run_external(&mut self, name: &str, problem: &IPMIPProblem, solver: &str) -> ExternalPayload {
+    fn run_external(
+        &mut self,
+        name: &str,
+        problem: &IPMIPProblem,
+        solver: &str,
+    ) -> ExternalPayload {
         let problem_path = self.write_problem(name, problem);
         let out = self.out_dir.join(format!("{}-reference.json", name));
         // PORT NOTE: real call → run_external_module(IP_MIP_REFERENCE_ID, {...}).
@@ -145,7 +177,15 @@ impl Driver {
             stdout: String::new(),
             stderr: String::new(),
         };
-        println!("  external command: {} {}", ext.command, ext.args.iter().map(|a| format!("{:?}", a)).collect::<Vec<_>>().join(" "));
+        println!(
+            "  external command: {} {}",
+            ext.command,
+            ext.args
+                .iter()
+                .map(|a| format!("{:?}", a))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
         if !ext.stdout.trim().is_empty() {
             println!("  external stdout: {}", ext.stdout.trim());
         }
@@ -153,7 +193,10 @@ impl Driver {
             eprintln!("{}", ext.stderr.trim());
         }
         if ext.status != 0 {
-            panic!("external IP/MIP reference exited with status {}", ext.status);
+            panic!(
+                "external IP/MIP reference exited with status {}",
+                ext.status
+            );
         }
         // PORT NOTE: JSON.parse(fs.readFileSync(out)). Needs serde_json (absent);
         // synthesize the optimal payload matching the all-zero stub incumbent.
@@ -177,12 +220,25 @@ impl Driver {
         self.compare(name, &problem, &internal, &external);
     }
 
-    fn compare(&mut self, name: &str, problem: &IPMIPProblem, internal: &IPMIPSolution, external: &ExternalPayload) {
-        self.check(&format!("{}: external reference available", name), external.result.status != "unavailable", external.result.message.clone());
+    fn compare(
+        &mut self,
+        name: &str,
+        problem: &IPMIPProblem,
+        internal: &IPMIPSolution,
+        external: &ExternalPayload,
+    ) {
+        self.check(
+            &format!("{}: external reference available", name),
+            external.result.status != "unavailable",
+            external.result.message.clone(),
+        );
         self.check(
             &format!("{}: statuses agree optimal", name),
             internal.status == "optimal" && external.result.status == "optimal",
-            Some(format!("internal={} external={}", internal.status, external.result.status)),
+            Some(format!(
+                "internal={} external={}",
+                internal.status, external.result.status
+            )),
         );
         if external.result.status != "optimal" || external.result.objective.is_none() {
             return;
@@ -192,13 +248,28 @@ impl Driver {
         self.check(
             &format!("{}: internal incumbent feasible", name),
             feasible(problem, &internal.x, 1e-8),
-            Some(format!("x=[{}]", internal.x.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","))),
+            Some(format!(
+                "x=[{}]",
+                internal
+                    .x
+                    .iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )),
         );
         let ext_x = external.result.x.clone().unwrap_or_default();
         self.check(
             &format!("{}: external incumbent feasible", name),
             feasible(problem, &ext_x, 1e-8),
-            Some(format!("x=[{}]", ext_x.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","))),
+            Some(format!(
+                "x=[{}]",
+                ext_x
+                    .iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )),
         );
     }
 }
@@ -235,14 +306,25 @@ fn feasible(p: &IPMIPProblem, x: &[f64], tol: f64) -> bool {
 
 /// `validate-ip-mip-external.ts` `main`.
 pub fn run() {
-    let root = std::env::var("REPO_ROOT").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
-    let mut d = Driver { checks: Vec::new(), out_dir: root.join("out").join("external").join("ip-mip") };
+    let root = std::env::var("REPO_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    let mut d = Driver {
+        checks: Vec::new(),
+        out_dir: root.join("out").join("external").join("ip-mip"),
+    };
 
     println!("IP/MIP DES: framework vs sanctioned external Python reference");
     println!("=============================================================");
 
-    d.compare_scenario("knapsack-4item", build_binary_knapsack_ip(&[10.0, 40.0, 30.0, 50.0], &[5.0, 4.0, 6.0, 3.0], 10.0));
-    d.compare_scenario("cover-cut-lab", build_binary_knapsack_ip(&[10.0, 10.0, 10.0], &[2.0, 2.0, 2.0], 3.0));
+    d.compare_scenario(
+        "knapsack-4item",
+        build_binary_knapsack_ip(&[10.0, 40.0, 30.0, 50.0], &[5.0, 4.0, 6.0, 3.0], 10.0),
+    );
+    d.compare_scenario(
+        "cover-cut-lab",
+        build_binary_knapsack_ip(&[10.0, 10.0, 10.0], &[2.0, 2.0, 2.0], 3.0),
+    );
     d.compare_scenario(
         "integer-bounded",
         IPMIPProblem {
@@ -259,12 +341,23 @@ pub fn run() {
 
     println!();
     let passed = d.checks.iter().filter(|c| c.passed).count();
-    println!("validate-ip-mip-external: {}/{} checks passed.", passed, d.checks.len());
+    println!(
+        "validate-ip-mip-external: {}/{} checks passed.",
+        passed,
+        d.checks.len()
+    );
     if passed < d.checks.len() {
         println!("FAILED:");
         for c in &d.checks {
             if !c.passed {
-                println!("  - {}{}", c.name, c.detail.as_ref().map(|x| format!(": {}", x)).unwrap_or_default());
+                println!(
+                    "  - {}{}",
+                    c.name,
+                    c.detail
+                        .as_ref()
+                        .map(|x| format!(": {}", x))
+                        .unwrap_or_default()
+                );
             }
         }
         std::process::exit(1);

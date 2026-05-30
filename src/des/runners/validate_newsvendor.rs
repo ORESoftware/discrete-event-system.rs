@@ -58,10 +58,16 @@ fn demand_uniform_pmf(_a: usize, _b: usize, q_max: usize) -> Vec<f64> {
     vec![0.0; q_max + 1]
 }
 fn analytical_optimal_q(_p: &NewsvendorParams) -> AnalyticalResult {
-    AnalyticalResult { q_star: 0, critical_ratio: 0.0 }
+    AnalyticalResult {
+        q_star: 0,
+        critical_ratio: 0.0,
+    }
 }
 fn brute_search_optimal_q(p: &NewsvendorParams) -> BruteResult {
-    BruteResult { q_star: 0, profile_ep: vec![0.0; p.q_max + 1] }
+    BruteResult {
+        q_star: 0,
+        profile_ep: vec![0.0; p.q_max + 1],
+    }
 }
 fn mdp_optimal_q(_p: &NewsvendorParams) -> MdpQResult {
     MdpQResult { q_star: 0, v0: 0.0 }
@@ -102,7 +108,10 @@ struct ViResult {
     v: Vec<f64>,
 }
 fn value_iteration(spec: &MdpSpec, _opts: ViOptions) -> ViResult {
-    ViResult { policy: vec![0; spec.n], v: vec![0.0; spec.n] }
+    ViResult {
+        policy: vec![0; spec.n],
+        v: vec![0.0; spec.n],
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -113,14 +122,24 @@ struct PolicyStructure {
 }
 fn detect_policy_structure(_policy: &[i64]) -> PolicyStructure {
     // PORT NOTE: real classifier inspects the policy for base-stock vs (s,S).
-    PolicyStructure { kind: "base-stock".to_string(), s: 0, reorder_point: 0 }
+    PolicyStructure {
+        kind: "base-stock".to_string(),
+        s: 0,
+        reorder_point: 0,
+    }
 }
 
 #[derive(Clone, Debug, Default)]
 struct SimResult {
     mean_reward: f64,
 }
-fn simulate_inventory_mdp<F: Fn(usize) -> i64>(_p: &InventoryParams, _policy: F, _days: usize, _seed: u64, _x0: usize) -> SimResult {
+fn simulate_inventory_mdp<F: Fn(usize) -> i64>(
+    _p: &InventoryParams,
+    _policy: F,
+    _days: usize,
+    _seed: u64,
+    _x0: usize,
+) -> SimResult {
     SimResult { mean_reward: 0.0 }
 }
 
@@ -177,7 +196,11 @@ impl Checker {
             println!("  PASS    {}", label);
         } else {
             self.fail += 1;
-            let extra = if detail.is_empty() { String::new() } else { format!("  ({})", detail) };
+            let extra = if detail.is_empty() {
+                String::new()
+            } else {
+                format!("  ({})", detail)
+            };
             println!("  FAIL    {}{}", label, extra);
         }
     }
@@ -197,19 +220,43 @@ pub fn run() {
     let scenarios: Vec<(&str, NewsvendorParams)> = vec![
         (
             "classic Poisson, λ=50, p/c/s = 1.0/0.5/0.1",
-            NewsvendorParams { unit_cost: 0.5, unit_price: 1.0, unit_salvage: 0.1, demand: demand_poisson_pmf(50.0, 125), q_max: 125 },
+            NewsvendorParams {
+                unit_cost: 0.5,
+                unit_price: 1.0,
+                unit_salvage: 0.1,
+                demand: demand_poisson_pmf(50.0, 125),
+                q_max: 125,
+            },
         ),
         (
             "high margin, low salvage, λ=20",
-            NewsvendorParams { unit_cost: 0.3, unit_price: 2.0, unit_salvage: 0.0, demand: demand_poisson_pmf(20.0, 60), q_max: 60 },
+            NewsvendorParams {
+                unit_cost: 0.3,
+                unit_price: 2.0,
+                unit_salvage: 0.0,
+                demand: demand_poisson_pmf(20.0, 60),
+                q_max: 60,
+            },
         ),
         (
             "low margin, high salvage, λ=100",
-            NewsvendorParams { unit_cost: 0.9, unit_price: 1.0, unit_salvage: 0.7, demand: demand_poisson_pmf(100.0, 200), q_max: 200 },
+            NewsvendorParams {
+                unit_cost: 0.9,
+                unit_price: 1.0,
+                unit_salvage: 0.7,
+                demand: demand_poisson_pmf(100.0, 200),
+                q_max: 200,
+            },
         ),
         (
             "uniform demand U[10, 30]",
-            NewsvendorParams { unit_cost: 0.5, unit_price: 1.0, unit_salvage: 0.1, demand: demand_uniform_pmf(10, 30, 40), q_max: 40 },
+            NewsvendorParams {
+                unit_cost: 0.5,
+                unit_price: 1.0,
+                unit_salvage: 0.1,
+                demand: demand_uniform_pmf(10, 30, 40),
+                q_max: 40,
+            },
         ),
     ];
 
@@ -218,7 +265,10 @@ pub fn run() {
         let a = analytical_optimal_q(params);
         let b = brute_search_optimal_q(params);
         let m = mdp_optimal_q(params);
-        println!("    analytical q*={} (CR={:.4}),  brute q*={},  MDP q*={}", a.q_star, a.critical_ratio, b.q_star, m.q_star);
+        println!(
+            "    analytical q*={} (CR={:.4}),  brute q*={},  MDP q*={}",
+            a.q_star, a.critical_ratio, b.q_star, m.q_star
+        );
         println!(
             "    E[profit(q*)] analytical={:.4}  brute={:.4}  MDP V={:.4}",
             expected_profit(a.q_star, params),
@@ -227,8 +277,20 @@ pub fn run() {
         );
         c.check("analytical q* ≡ brute q*", a.q_star == b.q_star as i64, "");
         c.check("analytical q* ≡ MDP q*", a.q_star == m.q_star, "");
-        c.check("E[profit] analytical ≡ brute", approx(expected_profit(a.q_star, params), b.profile_ep[b.q_star], 1e-9), "");
-        c.check("E[profit] analytical ≡ MDP V", approx(expected_profit(a.q_star, params), m.v0, 1e-9), "");
+        c.check(
+            "E[profit] analytical ≡ brute",
+            approx(
+                expected_profit(a.q_star, params),
+                b.profile_ep[b.q_star],
+                1e-9,
+            ),
+            "",
+        );
+        c.check(
+            "E[profit] analytical ≡ MDP V",
+            approx(expected_profit(a.q_star, params), m.v0, 1e-9),
+            "",
+        );
     }
 
     println!("\nStudy 2  Multi-period MDP at γ=0 reduces to newsvendor");
@@ -249,11 +311,24 @@ pub fn run() {
             gamma: 0.0,
         };
         let spec = inventory_mdp_spec(&ip);
-        let result = value_iteration(&spec, ViOptions { gamma: 0.0, tol: 1e-12 });
+        let result = value_iteration(
+            &spec,
+            ViOptions {
+                gamma: 0.0,
+                tol: 1e-12,
+            },
+        );
         let policy_at_zero = result.policy[0];
         let newsvendor_q_star = analytical_optimal_q(np).q_star;
-        println!("    multi-period MDP π(0) = {}    newsvendor q* = {}", policy_at_zero, newsvendor_q_star);
-        c.check("γ=0 multi-period MDP π(0) = newsvendor q*", policy_at_zero == newsvendor_q_star, "");
+        println!(
+            "    multi-period MDP π(0) = {}    newsvendor q* = {}",
+            policy_at_zero, newsvendor_q_star
+        );
+        c.check(
+            "γ=0 multi-period MDP π(0) = newsvendor q*",
+            policy_at_zero == newsvendor_q_star,
+            "",
+        );
     }
 
     println!("\nStudy 3  Optimal policy structure: base-stock vs (s, S)");
@@ -275,11 +350,24 @@ pub fn run() {
         let mut params = inv_base.clone();
         params.fixed_cost = 0.0;
         let spec = inventory_mdp_spec(&params);
-        let result = value_iteration(&spec, ViOptions { gamma: params.gamma, tol: 1e-9 });
+        let result = value_iteration(
+            &spec,
+            ViOptions {
+                gamma: params.gamma,
+                tol: 1e-9,
+            },
+        );
         let policy: Vec<i64> = result.policy.iter().map(|&v| v.max(0)).collect();
         let st = detect_policy_structure(&policy);
-        println!("  fixedCost = 0:  structure={}  S*={}  s*={}", st.kind, st.s, st.reorder_point);
-        c.check("fixedCost=0 ⇒ base-stock policy", st.kind == "base-stock", "");
+        println!(
+            "  fixedCost = 0:  structure={}  S*={}  s*={}",
+            st.kind, st.s, st.reorder_point
+        );
+        c.check(
+            "fixedCost=0 ⇒ base-stock policy",
+            st.kind == "base-stock",
+            "",
+        );
         c.check("base-stock S* > 0", st.s > 0, "");
         c.check("base-stock S* ≤ xMax", st.s <= params.x_max as i64, "");
     }
@@ -288,12 +376,25 @@ pub fn run() {
         let mut params = inv_base.clone();
         params.fixed_cost = 10.0;
         let spec = inventory_mdp_spec(&params);
-        let result = value_iteration(&spec, ViOptions { gamma: params.gamma, tol: 1e-9 });
+        let result = value_iteration(
+            &spec,
+            ViOptions {
+                gamma: params.gamma,
+                tol: 1e-9,
+            },
+        );
         let policy: Vec<i64> = result.policy.iter().map(|&v| v.max(0)).collect();
         let st = detect_policy_structure(&policy);
-        println!("  fixedCost = 10: structure={}  S*={}  s*={}", st.kind, st.s, st.reorder_point);
+        println!(
+            "  fixedCost = 10: structure={}  S*={}  s*={}",
+            st.kind, st.s, st.reorder_point
+        );
         c.check("fixedCost>0 ⇒ (s, S) policy", st.kind == "s-S", "");
-        c.check("s* < S* − 1 (gap due to setup cost)", st.reorder_point < st.s - 1, &format!("s={} S={}", st.reorder_point, st.s));
+        c.check(
+            "s* < S* − 1 (gap due to setup cost)",
+            st.reorder_point < st.s - 1,
+            &format!("s={} S={}", st.reorder_point, st.s),
+        );
     }
 
     {
@@ -305,7 +406,13 @@ pub fn run() {
             let mut p = inv_base.clone();
             p.fixed_cost = k;
             let spec = inventory_mdp_spec(&p);
-            let r = value_iteration(&spec, ViOptions { gamma: p.gamma, tol: 1e-9 });
+            let r = value_iteration(
+                &spec,
+                ViOptions {
+                    gamma: p.gamma,
+                    tol: 1e-9,
+                },
+            );
             let policy: Vec<i64> = r.policy.iter().map(|&v| v.max(0)).collect();
             let st = detect_policy_structure(&policy);
             let gap = st.s - st.reorder_point;
@@ -332,14 +439,26 @@ pub fn run() {
         params.fixed_cost = 0.0;
         params.gamma = 0.95;
         let spec = inventory_mdp_spec(&params);
-        let result = value_iteration(&spec, ViOptions { gamma: params.gamma, tol: 1e-9 });
+        let result = value_iteration(
+            &spec,
+            ViOptions {
+                gamma: params.gamma,
+                tol: 1e-9,
+            },
+        );
         let policy: Vec<i64> = result.policy.iter().map(|&v| v.max(0)).collect();
         let days = 50000usize;
         let policy_clone = policy.clone();
         let sim = simulate_inventory_mdp(&params, move |x| policy_clone[x], days, 42, 0);
         let expected_avg = result.v[0] * (1.0 - params.gamma);
-        println!("    V(0) = {:.3},  V(0)·(1−γ) = {:.3}", result.v[0], expected_avg);
-        println!("    simulated mean reward over {} days = {:.3}", days, sim.mean_reward);
+        println!(
+            "    V(0) = {:.3},  V(0)·(1−γ) = {:.3}",
+            result.v[0], expected_avg
+        );
+        println!(
+            "    simulated mean reward over {} days = {:.3}",
+            days, sim.mean_reward
+        );
         let tol = 0.05 * expected_avg.abs();
         c.check(
             "simulation mean ≈ V(0)·(1−γ) within 5%",
@@ -384,30 +503,62 @@ pub fn run() {
             gamma: 0.95,
         };
         let spec = inventory_mdp_spec(&params);
-        let ts_result = value_iteration(&spec, ViOptions { gamma: params.gamma, tol: 1e-9 });
+        let ts_result = value_iteration(
+            &spec,
+            ViOptions {
+                gamma: params.gamma,
+                tol: 1e-9,
+            },
+        );
         let ts_policy: Vec<i64> = ts_result.policy.iter().map(|&v| v.max(0)).collect();
         let py = run_python(&[
-            "--multi", "--lambda", "20", "--c", "1.0", "--K", "10", "--p", "2.0", "--h", "0.1", "--L", "0.5", "--gamma", "0.95", "--x-max", "50", "--a-max", "50",
+            "--multi", "--lambda", "20", "--c", "1.0", "--K", "10", "--p", "2.0", "--h", "0.1",
+            "--L", "0.5", "--gamma", "0.95", "--x-max", "50", "--a-max", "50",
         ]);
         match py {
             None => println!("  SKIP    Python reference not runnable for multi-period"),
             Some(py) => {
                 let ts_v0 = ts_result.v[0];
                 let py_v0 = py.inventory_mdp.v_at_zero;
-                println!("  multi-period: TS V(0)={:.4},  Py V(0)={:.4}", ts_v0, py_v0);
-                let ts_head: Vec<String> = ts_policy.iter().take(20).map(|v| v.to_string()).collect();
-                let py_head: Vec<String> = py.inventory_mdp.policy_first_20.iter().take(20).map(|v| v.to_string()).collect();
+                println!(
+                    "  multi-period: TS V(0)={:.4},  Py V(0)={:.4}",
+                    ts_v0, py_v0
+                );
+                let ts_head: Vec<String> =
+                    ts_policy.iter().take(20).map(|v| v.to_string()).collect();
+                let py_head: Vec<String> = py
+                    .inventory_mdp
+                    .policy_first_20
+                    .iter()
+                    .take(20)
+                    .map(|v| v.to_string())
+                    .collect();
                 println!("  TS policy[0..19] = [{}]", ts_head.join(", "));
                 println!("  Py policy[0..19] = [{}]", py_head.join(", "));
-                c.check("multi-period V(0) matches Python within 1e-3", approx(ts_v0, py_v0, 1e-3), &format!("|diff|={:.2e}", (ts_v0 - py_v0).abs()));
+                c.check(
+                    "multi-period V(0) matches Python within 1e-3",
+                    approx(ts_v0, py_v0, 1e-3),
+                    &format!("|diff|={:.2e}", (ts_v0 - py_v0).abs()),
+                );
                 let mut policy_match = true;
                 for x in 0..20 {
-                    if ts_policy.get(x).copied().unwrap_or(0) != py.inventory_mdp.policy_first_20.get(x).copied().unwrap_or(0) {
+                    if ts_policy.get(x).copied().unwrap_or(0)
+                        != py
+                            .inventory_mdp
+                            .policy_first_20
+                            .get(x)
+                            .copied()
+                            .unwrap_or(0)
+                    {
                         policy_match = false;
                         break;
                     }
                 }
-                c.check("multi-period policy[0..19] matches Python", policy_match, "");
+                c.check(
+                    "multi-period policy[0..19] matches Python",
+                    policy_match,
+                    "",
+                );
             }
         }
     }

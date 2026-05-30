@@ -33,7 +33,7 @@ use crate::des::r#abstract::interfaces::{
     EntityGraphData, HasEntityValidation, HasInput, HasInternalQueue, HasManyInputConnections,
     HasManyOutputConnections, HasOutput,
 };
-use crate::des::r#abstract::r#abstract::{Entity, EntityCore, EntityConnection};
+use crate::des::r#abstract::r#abstract::{Entity, EntityConnection, EntityCore};
 use crate::des::shared::precision::Decimal;
 
 /// `interface GraphData extends QueueEntityGraphData`.

@@ -39,8 +39,14 @@ const META_Y: f64 = 40.0;
 const META_W: f64 = 440.0;
 const META_H: f64 = 660.0;
 
-const STATION_NAMES: [&str; 6] =
-    ["Selection", "Crossover", "Mutation", "Feasibility", "Fitness", "Replacement"];
+const STATION_NAMES: [&str; 6] = [
+    "Selection",
+    "Crossover",
+    "Mutation",
+    "Feasibility",
+    "Fitness",
+    "Replacement",
+];
 const STATION_COLOR: &str = "#1e293b";
 const STATION_ACTIVE_FILL: &str = "#fef3c7";
 const STATION_ACTIVE_STROKE: &str = "#f59e0b";
@@ -95,8 +101,16 @@ fn draw_station(
         y: cy - h / 2.0,
         w,
         h,
-        fill: if active { STATION_ACTIVE_FILL.to_string() } else { STATION_COLOR.to_string() },
-        stroke: Some(if active { STATION_ACTIVE_STROKE.to_string() } else { "#475569".to_string() }),
+        fill: if active {
+            STATION_ACTIVE_FILL.to_string()
+        } else {
+            STATION_COLOR.to_string()
+        },
+        stroke: Some(if active {
+            STATION_ACTIVE_STROKE.to_string()
+        } else {
+            "#475569".to_string()
+        }),
         stroke_width: Some(if active { 3.0 } else { 1.5 }),
         rx: Some(6.0),
         ..Default::default()
@@ -106,7 +120,11 @@ fn draw_station(
         y: cy - 6.0,
         text: title.to_string(),
         font_size: Some(12.0),
-        fill: Some(if active { "#92400e".to_string() } else { "#fde68a".to_string() }),
+        fill: Some(if active {
+            "#92400e".to_string()
+        } else {
+            "#fde68a".to_string()
+        }),
         font_weight: Some(FontWeight::Bold),
         anchor: Some(Anchor::Middle),
         ..Default::default()
@@ -117,7 +135,11 @@ fn draw_station(
             y: cy + 12.0,
             text: sub.to_string(),
             font_size: Some(10.0),
-            fill: Some(if active { "#1f2937".to_string() } else { "#cbd5e1".to_string() }),
+            fill: Some(if active {
+                "#1f2937".to_string()
+            } else {
+                "#cbd5e1".to_string()
+            }),
             anchor: Some(Anchor::Middle),
             ..Default::default()
         }));
@@ -187,7 +209,16 @@ pub fn build_genetic_tsp_frame(_t: f64, _tick: f64, args: &GeneticTSPFrameArgs) 
             4 => "tour len".to_string(),
             _ => "\u{03bc}+\u{03bb}".to_string(),
         };
-        draw_station(&mut shapes, x, station_y, station_w, station_h, STATION_NAMES[i], &sub_text, phase == i);
+        draw_station(
+            &mut shapes,
+            x,
+            station_y,
+            station_w,
+            station_h,
+            STATION_NAMES[i],
+            &sub_text,
+            phase == i,
+        );
     }
     // Edges with chromosomes in flight.
     for i in 0..n - 1 {
@@ -306,7 +337,10 @@ pub fn build_genetic_tsp_frame(_t: f64, _tick: f64, args: &GeneticTSPFrameArgs) 
     let sx = (VIEW_W - 2.0 * pad) / (x_max - x_min).max(1e-9);
     let sy = (VIEW_H - 2.0 * pad) / (y_max - y_min).max(1e-9);
     let project = |p: [f64; 2]| -> (f64, f64) {
-        (VIEW_X + pad + (p[0] - x_min) * sx, VIEW_Y + pad + (p[1] - y_min) * sy)
+        (
+            VIEW_X + pad + (p[0] - x_min) * sx,
+            VIEW_Y + pad + (p[1] - y_min) * sy,
+        )
     };
 
     shapes.push(Shape::Rect(RectShape {
@@ -431,18 +465,61 @@ pub fn build_genetic_tsp_frame(_t: f64, _tick: f64, args: &GeneticTSPFrameArgs) 
         ..Default::default()
     }));
     let mut y = META_Y + 110.0;
-    meta_line(&mut shapes, &mut y, format!("best  tour length = {}", to_fixed(args.best, 2)), "#22d3ee");
-    meta_line(&mut shapes, &mut y, format!("mean  tour length = {}", to_fixed(args.mean, 2)), "#94a3b8");
-    meta_line(&mut shapes, &mut y, format!("worst tour length = {}", to_fixed(args.worst, 2)), "#ef4444");
+    meta_line(
+        &mut shapes,
+        &mut y,
+        format!("best  tour length = {}", to_fixed(args.best, 2)),
+        "#22d3ee",
+    );
+    meta_line(
+        &mut shapes,
+        &mut y,
+        format!("mean  tour length = {}", to_fixed(args.mean, 2)),
+        "#94a3b8",
+    );
+    meta_line(
+        &mut shapes,
+        &mut y,
+        format!("worst tour length = {}", to_fixed(args.worst, 2)),
+        "#ef4444",
+    );
     y += 8.0;
-    meta_line(&mut shapes, &mut y, format!("# feasible kids   = {}", js_num(args.num_feasible_children)), "#22c55e");
-    meta_line(&mut shapes, &mut y, format!("# cut (infeasible)= {}", js_num(args.num_infeasible_children)), "#facc15");
+    meta_line(
+        &mut shapes,
+        &mut y,
+        format!("# feasible kids   = {}", js_num(args.num_feasible_children)),
+        "#22c55e",
+    );
+    meta_line(
+        &mut shapes,
+        &mut y,
+        format!(
+            "# cut (infeasible)= {}",
+            js_num(args.num_infeasible_children)
+        ),
+        "#facc15",
+    );
     y += 8.0;
-    meta_line(&mut shapes, &mut y, format!("# cities            = {}", instance.n), "#cbd5e1");
-    meta_line(&mut shapes, &mut y, format!("# precedence pairs  = {}", js_num(args.precedence_count)), "#cbd5e1");
+    meta_line(
+        &mut shapes,
+        &mut y,
+        format!("# cities            = {}", instance.n),
+        "#cbd5e1",
+    );
+    meta_line(
+        &mut shapes,
+        &mut y,
+        format!("# precedence pairs  = {}", js_num(args.precedence_count)),
+        "#cbd5e1",
+    );
     y += 8.0;
     // Architecture legend.
-    meta_line(&mut shapes, &mut y, "Architecture legend:".to_string(), "#f1f5f9");
+    meta_line(
+        &mut shapes,
+        &mut y,
+        "Architecture legend:".to_string(),
+        "#f1f5f9",
+    );
     shapes.push(Shape::Circle(CircleShape {
         x: META_X + 30.0,
         y: y - 4.0,
@@ -494,8 +571,18 @@ pub fn build_genetic_tsp_charts(generations: &[f64], best: &[f64], mean: &[f64])
         h: 280.0,
         title: Some("Best & mean tour length per generation".to_string()),
         series: vec![
-            ChartSeries { label: "best".to_string(), color: "#22d3ee".to_string(), t: generations.to_vec(), y: best.to_vec() },
-            ChartSeries { label: "mean".to_string(), color: "#94a3b8".to_string(), t: generations.to_vec(), y: mean.to_vec() },
+            ChartSeries {
+                label: "best".to_string(),
+                color: "#22d3ee".to_string(),
+                t: generations.to_vec(),
+                y: best.to_vec(),
+            },
+            ChartSeries {
+                label: "mean".to_string(),
+                color: "#94a3b8".to_string(),
+                t: generations.to_vec(),
+                y: mean.to_vec(),
+            },
         ],
         ..Default::default()
     }]
@@ -523,9 +610,15 @@ mod tests {
             num_feasible_children: 10.0,
             num_infeasible_children: 2.0,
             precedence_count: 1.0,
-            arch: Some(ArchitectureFrameArgs { phase: Some(3), ..Default::default() }),
+            arch: Some(ArchitectureFrameArgs {
+                phase: Some(3),
+                ..Default::default()
+            }),
         };
         let fp = build_genetic_tsp_frame(0.0, 0.0, &args);
-        assert_eq!(fp.caption.as_deref(), Some("gen=7 phase=Feasibility best=3.50"));
+        assert_eq!(
+            fp.caption.as_deref(),
+            Some("gen=7 phase=Feasibility best=3.50")
+        );
     }
 }

@@ -98,7 +98,11 @@ impl StochasticSdeDemo {
             fd_eps: None,
         });
         let fit = est.fit(&GbmFamily, &sim.times, &sim.path);
-        println!("  true   : mu={}, sigma={}", num_str(true_mu), num_str(true_sigma));
+        println!(
+            "  true   : mu={}, sigma={}",
+            num_str(true_mu),
+            num_str(true_sigma)
+        );
         println!(
             "  learned: mu={:.4}, sigma={:.4}   (NLL={:.1}, {} Adam steps)",
             fit.params["mu"], fit.params["sigma"], fit.final_neg_log_lik, fit.iterations
@@ -148,7 +152,9 @@ impl StochasticSdeDemo {
                 seed: Some(9),
             },
         );
-        let enkf = Rc::new(RefCell::new(EnsembleKalmanFilterStation::new("enkf", filter)));
+        let enkf = Rc::new(RefCell::new(EnsembleKalmanFilterStation::new(
+            "enkf", filter,
+        )));
         let sink = Rc::new(RefCell::new(SdeEstimateSinkStation::new("sink")));
 
         let plant_ref: StationRef = plant.clone();
@@ -173,7 +179,11 @@ impl StochasticSdeDemo {
 
         run_iterative_des(
             vec![plant_ref, enkf_ref, sink_ref],
-            IterativeRunOptions { shuffle: false, max_ticks: Some(steps + 5), ..Default::default() },
+            IterativeRunOptions {
+                shuffle: false,
+                max_ticks: Some(steps + 5),
+                ..Default::default()
+            },
         );
 
         let sink_b = sink.borrow();
@@ -192,7 +202,10 @@ impl StochasticSdeDemo {
             / n)
             .sqrt();
         println!("  observed: speed ω (noisy, σ=0.6);  hidden: current i");
-        println!("  EnKF RMSE  → current i = {:.4},  speed ω = {:.4}", rmse[0], rmse[1]);
+        println!(
+            "  EnKF RMSE  → current i = {:.4},  speed ω = {:.4}",
+            rmse[0], rmse[1]
+        );
         println!(
             "  baseline   → current i (guess mean) = {:.4}   ⇒ filter recovers the hidden state",
             base_i
@@ -218,7 +231,10 @@ impl StochasticSdeDemo {
         });
         let loss = model.train(
             &data,
-            DiffusionTrainOptions { iterations: Some(60000), learning_rate: Some(0.004) },
+            DiffusionTrainOptions {
+                iterations: Some(60000),
+                learning_rate: Some(0.004),
+            },
         );
         let samples = model.sample(3000);
         let data_stats = DenoisingDiffusionModel::summarise(&data);

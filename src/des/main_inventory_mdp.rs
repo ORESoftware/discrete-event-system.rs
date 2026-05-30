@@ -110,7 +110,11 @@ pub fn inventory_mdp_spec(p: &InventoryParams) -> MDPSpec {
                 {
                     o.prob += pr;
                 } else {
-                    ol.push(Outcome { prob: pr, reward, next_state: next_x });
+                    ol.push(Outcome {
+                        prob: pr,
+                        reward,
+                        next_state: next_x,
+                    });
                 }
             }
         }
@@ -121,7 +125,11 @@ pub fn inventory_mdp_spec(p: &InventoryParams) -> MDPSpec {
         num_states,
         num_actions: Box::new(move |s: usize| x_max.saturating_sub(s).min(a_max) + 1),
         outcomes: Box::new(move |s: usize, a: usize| {
-            cache.get(s).and_then(|per| per.get(a)).cloned().unwrap_or_default()
+            cache
+                .get(s)
+                .and_then(|per| per.get(a))
+                .cloned()
+                .unwrap_or_default()
         }),
         is_terminal: Some(Box::new(|_s| false)),
         terminal_reward: None,
@@ -182,7 +190,15 @@ pub fn simulate_inventory_mdp(
             total_inv += x as f64;
             total_lost += lost as f64;
             total_leftover += leftover as f64;
-            history.push(DayRecord { day, x, a, d, sold, reward, next_x: leftover });
+            history.push(DayRecord {
+                day,
+                x,
+                a,
+                d,
+                sold,
+                reward,
+                next_x: leftover,
+            });
             x = leftover;
         }
         InventorySim {
@@ -215,7 +231,11 @@ pub struct PolicyStructure {
 pub fn detect_policy_structure(policy: &[i64]) -> PolicyStructure {
     let x_max = policy.len() as i64 - 1;
     let per_state: Vec<i64> = policy.to_vec();
-    let t: Vec<i64> = per_state.iter().enumerate().map(|(x, &a)| x as i64 + a).collect();
+    let t: Vec<i64> = per_state
+        .iter()
+        .enumerate()
+        .map(|(x, &a)| x as i64 + a)
+        .collect();
     let mut s: i64 = -1;
     let mut s_targets: Vec<i64> = Vec::new();
     for x in 0..=x_max {
@@ -228,30 +248,61 @@ pub fn detect_policy_structure(policy: &[i64]) -> PolicyStructure {
         }
     }
     if s == -1 {
-        return PolicyStructure { kind: PolicyKind::Irregular, s_level: 0, reorder_point: -1, per_state };
+        return PolicyStructure {
+            kind: PolicyKind::Irregular,
+            s_level: 0,
+            reorder_point: -1,
+            per_state,
+        };
     }
     if s_targets.len() > 1 {
         let max_s = *s_targets.iter().max().unwrap();
-        return PolicyStructure { kind: PolicyKind::Irregular, s_level: max_s, reorder_point: s, per_state };
+        return PolicyStructure {
+            kind: PolicyKind::Irregular,
+            s_level: max_s,
+            reorder_point: s,
+            per_state,
+        };
     }
     let s_level = s_targets[0];
     for x in (s + 1)..=x_max {
         if per_state[x as usize] > 0 {
-            return PolicyStructure { kind: PolicyKind::Irregular, s_level, reorder_point: s, per_state };
+            return PolicyStructure {
+                kind: PolicyKind::Irregular,
+                s_level,
+                reorder_point: s,
+                per_state,
+            };
         }
     }
     if s == s_level - 1 {
-        PolicyStructure { kind: PolicyKind::BaseStock, s_level, reorder_point: s_level - 1, per_state }
+        PolicyStructure {
+            kind: PolicyKind::BaseStock,
+            s_level,
+            reorder_point: s_level - 1,
+            per_state,
+        }
     } else {
-        PolicyStructure { kind: PolicyKind::SS, s_level, reorder_point: s, per_state }
+        PolicyStructure {
+            kind: PolicyKind::SS,
+            s_level,
+            reorder_point: s,
+            per_state,
+        }
     }
 }
 
 fn env_f64(key: &str, default: f64) -> f64 {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 fn env_usize(key: &str, default: usize) -> usize {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 /// Entry point (TS top-level `main`).
@@ -272,21 +323,35 @@ pub fn run() {
         gamma: env_f64("GAMMA", 0.95),
     };
     let days = env_usize("DAYS", 5000);
-    let seed = std::env::var("SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(1u32);
+    let seed = std::env::var("SEED")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1u32);
 
     println!("# Multi-period inventory MDP");
     println!("#   demand = Poisson(λ={lambda})  truncated at {d_max}");
-    println!("#   xMax={}, aMax={}, γ={}", params.x_max, params.a_max, params.gamma);
+    println!(
+        "#   xMax={}, aMax={}, γ={}",
+        params.x_max, params.a_max, params.gamma
+    );
     println!(
         "#   unitCost={}, fixedCost={}, unitPrice={}",
         params.unit_cost, params.fixed_cost, params.unit_price
     );
-    println!("#   holdCost={}, lostCost={}", params.hold_cost, params.lost_cost);
+    println!(
+        "#   holdCost={}, lostCost={}",
+        params.hold_cost, params.lost_cost
+    );
 
     let spec = inventory_mdp_spec(&params);
     let result = value_iteration(
         spec,
-        VIOptions { gamma: params.gamma, tol: 1e-8, max_iter: 5000, ..Default::default() },
+        VIOptions {
+            gamma: params.gamma,
+            tol: 1e-8,
+            max_iter: 5000,
+            ..Default::default()
+        },
     );
 
     println!(

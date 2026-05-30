@@ -98,21 +98,48 @@ mod tests {
         let errs = |h: f64| -> (f64, f64, f64) {
             let idx = (1.0 / h).round() as usize;
             let eu = EulerIntegrator::new(h)
-                .transform(IVP { f, y0: vec![1.0], t0: 0.0, t1: 1.0 })
+                .transform(IVP {
+                    f,
+                    y0: vec![1.0],
+                    t0: 0.0,
+                    t1: 1.0,
+                })
                 .y[idx][0];
             let rk = HeunIntegrator::new(h)
-                .transform(IVP { f, y0: vec![1.0], t0: 0.0, t1: 1.0 })
+                .transform(IVP {
+                    f,
+                    y0: vec![1.0],
+                    t0: 0.0,
+                    t1: 1.0,
+                })
                 .y[idx][0];
             let rk4 = RK4Integrator::new(h)
-                .transform(IVP { f, y0: vec![1.0], t0: 0.0, t1: 1.0 })
+                .transform(IVP {
+                    f,
+                    y0: vec![1.0],
+                    t0: 0.0,
+                    t1: 1.0,
+                })
                 .y[idx][0];
             ((eu - exact).abs(), (rk - exact).abs(), (rk4 - exact).abs())
         };
         let e1 = errs(0.1);
         let e2 = errs(0.05);
-        assert!((e1.0 / e2.0 - 2.0).abs() < 0.5, "euler order ~1: {}", e1.0 / e2.0);
-        assert!((e1.1 / e2.1 - 4.0).abs() < 1.0, "rk2 order ~2: {}", e1.1 / e2.1);
-        assert!((e1.2 / e2.2 - 16.0).abs() < 4.0, "rk4 order ~4: {}", e1.2 / e2.2);
+        assert!(
+            (e1.0 / e2.0 - 2.0).abs() < 0.5,
+            "euler order ~1: {}",
+            e1.0 / e2.0
+        );
+        assert!(
+            (e1.1 / e2.1 - 4.0).abs() < 1.0,
+            "rk2 order ~2: {}",
+            e1.1 / e2.1
+        );
+        assert!(
+            (e1.2 / e2.2 - 16.0).abs() < 4.0,
+            "rk4 order ~4: {}",
+            e1.2 / e2.2
+        );
     }
 
     // T4 — ODE station network ≡ pure-math RK4 on the same dt grid.
@@ -166,14 +193,18 @@ mod tests {
         let mut r = build_field1d(&mk(Field1DScheme::Ftcs));
         let o = r.run(0.0, t_end, dt_safe);
         assert!(
-            o.final_values.iter().all(|&v| v.is_finite() && v.abs() <= 2.0),
+            o.final_values
+                .iter()
+                .all(|&v| v.is_finite() && v.abs() <= 2.0),
             "FTCS bounded at safe dt"
         );
 
         let mut rb = build_field1d(&mk(Field1DScheme::Btcs));
         let ob = rb.run(0.0, t_end, 30.0 * dt_safe);
         assert!(
-            ob.final_values.iter().all(|&v| v.is_finite() && v.abs() <= 2.0),
+            ob.final_values
+                .iter()
+                .all(|&v| v.is_finite() && v.abs() <= 2.0),
             "BTCS bounded at 30× FTCS-bound dt"
         );
     }
@@ -228,8 +259,8 @@ mod tests {
     fn poisson2d_relaxation_ordering() {
         let n = 31;
         let tol = 1e-7;
-        let rho =
-            "2 * 3.14159265358979^2 * sin(3.14159265358979*x) * sin(3.14159265358979*y)".to_string();
+        let rho = "2 * 3.14159265358979^2 * sin(3.14159265358979*x) * sin(3.14159265358979*y)"
+            .to_string();
         let mk = |scheme: Field2DScheme, omega: Option<f64>| Poisson2DSpec {
             nx: n,
             ny: n,
@@ -248,8 +279,23 @@ mod tests {
         let j = solve_poisson2d(&mk(Field2DScheme::Jacobi, None));
         let g = solve_poisson2d(&mk(Field2DScheme::GaussSeidel, None));
         let s = solve_poisson2d(&mk(Field2DScheme::Sor, Some(1.8)));
-        assert!(g.iterations < j.iterations, "GS {} < Jacobi {}", g.iterations, j.iterations);
-        assert!(s.iterations < g.iterations, "SOR {} < GS {}", s.iterations, g.iterations);
-        assert!(s.iterations * 5 <= j.iterations, "SOR {} vs Jacobi {}", s.iterations, j.iterations);
+        assert!(
+            g.iterations < j.iterations,
+            "GS {} < Jacobi {}",
+            g.iterations,
+            j.iterations
+        );
+        assert!(
+            s.iterations < g.iterations,
+            "SOR {} < GS {}",
+            s.iterations,
+            g.iterations
+        );
+        assert!(
+            s.iterations * 5 <= j.iterations,
+            "SOR {} vs Jacobi {}",
+            s.iterations,
+            j.iterations
+        );
     }
 }

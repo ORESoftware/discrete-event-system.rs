@@ -83,7 +83,6 @@ impl GradientDescent {
     }
 }
 
-
 impl<F, G> Transform<FirstOrderProblem<F, G>, OptimResult> for GradientDescent
 where
     F: Fn(&[f64]) -> f64,
@@ -98,9 +97,20 @@ where
         for iter in 0..o.max_iter {
             let g = grad(&x);
             let gn = VecOps::norm2(&g);
-            history.push(HistoryEntry { iter, fx, grad_norm: gn });
+            history.push(HistoryEntry {
+                iter,
+                fx,
+                grad_norm: gn,
+            });
             if gn < o.tol {
-                return OptimResult { x, fx, iterations: iter, converged: true, final_grad_norm: gn, history };
+                return OptimResult {
+                    x,
+                    fx,
+                    iterations: iter,
+                    converged: true,
+                    final_grad_norm: gn,
+                    history,
+                };
             }
             let mut alpha = o.initial_step;
             let mut x_new: Vector = x.iter().zip(&g).map(|(v, gi)| v - alpha * gi).collect();
@@ -120,7 +130,14 @@ where
         if gn >= o.tol {
             eprintln!("[optim.GradientDescent] hit max_iter={} without converging; final |grad|={gn} (tol={}), fx={fx}.", o.max_iter, o.tol);
         }
-        OptimResult { x, fx, iterations: o.max_iter, converged: gn < o.tol, final_grad_norm: gn, history }
+        OptimResult {
+            x,
+            fx,
+            iterations: o.max_iter,
+            converged: gn < o.tol,
+            final_grad_norm: gn,
+            history,
+        }
     }
 }
 
@@ -139,7 +156,11 @@ impl NewtonOptim {
 impl Default for NewtonOptim {
     fn default() -> Self {
         NewtonOptim {
-            opts: OptimOptions { tol: 1e-10, max_iter: 100, ..OptimOptions::default() },
+            opts: OptimOptions {
+                tol: 1e-10,
+                max_iter: 100,
+                ..OptimOptions::default()
+            },
         }
     }
 }
@@ -159,9 +180,20 @@ where
         for iter in 0..o.max_iter {
             let g = grad(&x);
             let gn = VecOps::norm2(&g);
-            history.push(HistoryEntry { iter, fx, grad_norm: gn });
+            history.push(HistoryEntry {
+                iter,
+                fx,
+                grad_norm: gn,
+            });
             if gn < o.tol {
-                return OptimResult { x, fx, iterations: iter, converged: true, final_grad_norm: gn, history };
+                return OptimResult {
+                    x,
+                    fx,
+                    iterations: iter,
+                    converged: true,
+                    final_grad_norm: gn,
+                    history,
+                };
             }
             let h = hess(&x);
             let p = match LinearSystem::new(&h, &g, 1e-12).try_solve() {
@@ -190,7 +222,14 @@ where
         if gn >= o.tol {
             eprintln!("[optim.NewtonOptim] hit max_iter={} without converging; final |grad|={gn} (tol={}), fx={fx}.", o.max_iter, o.tol);
         }
-        OptimResult { x, fx, iterations: o.max_iter, converged: gn < o.tol, final_grad_norm: gn, history }
+        OptimResult {
+            x,
+            fx,
+            iterations: o.max_iter,
+            converged: gn < o.tol,
+            final_grad_norm: gn,
+            history,
+        }
     }
 }
 
@@ -209,7 +248,11 @@ impl Bfgs {
 impl Default for Bfgs {
     fn default() -> Self {
         Bfgs {
-            opts: OptimOptions { tol: 1e-8, max_iter: 200, ..OptimOptions::default() },
+            opts: OptimOptions {
+                tol: 1e-8,
+                max_iter: 200,
+                ..OptimOptions::default()
+            },
         }
     }
 }
@@ -230,9 +273,20 @@ where
         let mut history = Vec::new();
         for iter in 0..o.max_iter {
             let gn = VecOps::norm2(&g);
-            history.push(HistoryEntry { iter, fx, grad_norm: gn });
+            history.push(HistoryEntry {
+                iter,
+                fx,
+                grad_norm: gn,
+            });
             if gn < o.tol {
-                return OptimResult { x, fx, iterations: iter, converged: true, final_grad_norm: gn, history };
+                return OptimResult {
+                    x,
+                    fx,
+                    iterations: iter,
+                    converged: true,
+                    final_grad_norm: gn,
+                    history,
+                };
             }
             let p: Vector = LinAlg::mat_vec(&h_inv, &g).iter().map(|v| -v).collect();
             let directional = VecOps::dot(&g, &p);
@@ -257,8 +311,7 @@ where
                 let mut h_new = LinAlg::identity(n);
                 for i in 0..n {
                     for j in 0..n {
-                        h_new[i][j] = h_inv[i][j]
-                            - rho2 * (s[i] * hy[j] + hy[i] * s[j])
+                        h_new[i][j] = h_inv[i][j] - rho2 * (s[i] * hy[j] + hy[i] * s[j])
                             + rho2 * rho2 * yhy * s[i] * s[j]
                             + rho2 * s[i] * s[j];
                     }
@@ -273,7 +326,14 @@ where
         if gn >= o.tol {
             eprintln!("[optim.Bfgs] hit max_iter={} without converging; final |grad|={gn} (tol={}), fx={fx}.", o.max_iter, o.tol);
         }
-        OptimResult { x, fx, iterations: o.max_iter, converged: gn < o.tol, final_grad_norm: gn, history }
+        OptimResult {
+            x,
+            fx,
+            iterations: o.max_iter,
+            converged: gn < o.tol,
+            final_grad_norm: gn,
+            history,
+        }
     }
 }
 

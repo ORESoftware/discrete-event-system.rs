@@ -245,7 +245,8 @@ impl<I: Any, O: Any> TransformEntityCore<I, O> {
     ) {
         let emitted_before = self.emitted_count;
         for (token, channel) in ctx.emitted {
-            let channel = channel.unwrap_or_else(|| self.resolve_output_channel(input_channel, &token));
+            let channel =
+                channel.unwrap_or_else(|| self.resolve_output_channel(input_channel, &token));
             self.emit_output(token, channel);
         }
         let outputs: Vec<O> = match result {
@@ -462,7 +463,11 @@ mod tests {
     }
 
     impl PureTransformEntity<f64, f64> for Doubler {
-        fn transform(&mut self, token: &f64, _ctx: &mut TransformContext<f64>) -> TransformResult<f64> {
+        fn transform(
+            &mut self,
+            token: &f64,
+            _ctx: &mut TransformContext<f64>,
+        ) -> TransformResult<f64> {
             TransformResult::One(token * 2.0)
         }
     }

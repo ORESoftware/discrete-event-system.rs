@@ -23,9 +23,18 @@
 
 #[derive(Clone, Copy, Debug)]
 enum Cooling {
-    Geometric { t0: f64, alpha: f64, tmin: Option<f64> },
-    Linear { t0: f64, rate: f64 },
-    Logarithmic { t0: f64 },
+    Geometric {
+        t0: f64,
+        alpha: f64,
+        tmin: Option<f64>,
+    },
+    Linear {
+        t0: f64,
+        rate: f64,
+    },
+    Logarithmic {
+        t0: f64,
+    },
 }
 
 fn temperature_at(s: &Cooling, k: usize) -> f64 {
@@ -145,7 +154,12 @@ impl Checker {
         } else {
             format!("  — {}", detail)
         };
-        println!("{}  {}{}", if ok { "  PASS" } else { "  FAIL" }, label, tail);
+        println!(
+            "{}  {}{}",
+            if ok { "  PASS" } else { "  FAIL" },
+            label,
+            tail
+        );
         if ok {
             self.pass += 1;
         } else {
@@ -169,7 +183,16 @@ pub fn run() {
         for seed in [1u64, 7, 13, 42, 99] {
             let r = run_simulated_annealing(
                 build_tsp_sa_problem(&inst),
-                &SaOpts { max_iterations: 5000, cooling: Cooling::Geometric { t0: 50.0, alpha: 0.998, tmin: None }, seed, stall_limit: None },
+                &SaOpts {
+                    max_iterations: 5000,
+                    cooling: Cooling::Geometric {
+                        t0: 50.0,
+                        alpha: 0.998,
+                        tmin: None,
+                    },
+                    seed,
+                    stall_limit: None,
+                },
             );
             c.check(
                 &format!("1.x seed={}: SA matches optimum", seed),
@@ -187,12 +210,26 @@ pub fn run() {
                 let exact = held_karp_exact(&inst);
                 let r = run_simulated_annealing(
                     build_tsp_sa_problem(&inst),
-                    &SaOpts { max_iterations: 30000, cooling: Cooling::Geometric { t0: 50.0, alpha: 0.9995, tmin: None }, seed: 1, stall_limit: None },
+                    &SaOpts {
+                        max_iterations: 30000,
+                        cooling: Cooling::Geometric {
+                            t0: 50.0,
+                            alpha: 0.9995,
+                            tmin: None,
+                        },
+                        seed: 1,
+                        stall_limit: None,
+                    },
                 );
                 c.check(
                     &format!("2.x n={} seed={}: SA ratio ≤ 1.05 of exact", n, seed),
                     r.best_cost <= exact.length * 1.05 + 1e-9,
-                    &format!("SA={:.4}, exact={:.4}, ratio={:.4}", r.best_cost, exact.length, r.best_cost / exact.length),
+                    &format!(
+                        "SA={:.4}, exact={:.4}, ratio={:.4}",
+                        r.best_cost,
+                        exact.length,
+                        r.best_cost / exact.length
+                    ),
                 );
             }
         }
@@ -213,21 +250,42 @@ pub fn run() {
             let exact = solve_milp(&build_knapsack_milp(&v, &w, cap));
             let sa = run_simulated_annealing(
                 build_knapsack_sa_problem(&v, &w, cap),
-                &SaOpts { max_iterations: 10000, cooling: Cooling::Geometric { t0: 50.0, alpha: 0.999, tmin: None }, seed: trial, stall_limit: None },
+                &SaOpts {
+                    max_iterations: 10000,
+                    cooling: Cooling::Geometric {
+                        t0: 50.0,
+                        alpha: 0.999,
+                        tmin: None,
+                    },
+                    seed: trial,
+                    stall_limit: None,
+                },
             );
             let sa_value = -sa.best_cost;
             c.check(
                 &format!("3.x trial={}: SA value ≥ 0.95 × exact", trial),
                 sa_value >= 0.95 * exact.z - 1e-6,
-                &format!("SA={:.2}, exact={:.2}, ratio={:.4}", sa_value, exact.z, sa_value / exact.z),
+                &format!(
+                    "SA={:.2}, exact={:.2}, ratio={:.4}",
+                    sa_value,
+                    exact.z,
+                    sa_value / exact.z
+                ),
             );
         }
     }
 
     println!("\nStudy 4 — Cooling schedules");
     {
-        let geom = Cooling::Geometric { t0: 100.0, alpha: 0.99, tmin: None };
-        let lin = Cooling::Linear { t0: 100.0, rate: 1.0 };
+        let geom = Cooling::Geometric {
+            t0: 100.0,
+            alpha: 0.99,
+            tmin: None,
+        };
+        let lin = Cooling::Linear {
+            t0: 100.0,
+            rate: 1.0,
+        };
         let log = Cooling::Logarithmic { t0: 100.0 };
         let (mut geo_mono, mut lin_mono, mut log_mono) = (true, true, true);
         let (mut prev_g, mut prev_l, mut prev_lg) = (f64::INFINITY, f64::INFINITY, f64::INFINITY);
@@ -248,13 +306,45 @@ pub fn run() {
             prev_l = tl;
             prev_lg = tlg;
         }
-        c.check("4.1 geometric schedule monotone non-increasing", geo_mono, "");
+        c.check(
+            "4.1 geometric schedule monotone non-increasing",
+            geo_mono,
+            "",
+        );
         c.check("4.2 linear schedule monotone non-increasing", lin_mono, "");
-        c.check("4.3 logarithmic schedule monotone non-increasing", log_mono, "");
-        let t = temperature_at(&Cooling::Geometric { t0: 100.0, alpha: 0.5, tmin: Some(0.01) }, 1000);
-        c.check("4.4 Tmin floor enforced", t == 0.01, &format!("T(1000) = {}", t));
-        let t0g = temperature_at(&Cooling::Geometric { t0: 50.0, alpha: 0.99, tmin: None }, 0);
-        let t0l = temperature_at(&Cooling::Linear { t0: 50.0, rate: 1.0 }, 0);
+        c.check(
+            "4.3 logarithmic schedule monotone non-increasing",
+            log_mono,
+            "",
+        );
+        let t = temperature_at(
+            &Cooling::Geometric {
+                t0: 100.0,
+                alpha: 0.5,
+                tmin: Some(0.01),
+            },
+            1000,
+        );
+        c.check(
+            "4.4 Tmin floor enforced",
+            t == 0.01,
+            &format!("T(1000) = {}", t),
+        );
+        let t0g = temperature_at(
+            &Cooling::Geometric {
+                t0: 50.0,
+                alpha: 0.99,
+                tmin: None,
+            },
+            0,
+        );
+        let t0l = temperature_at(
+            &Cooling::Linear {
+                t0: 50.0,
+                rate: 1.0,
+            },
+            0,
+        );
         c.check("4.5 geometric T(0) = T0", t0g == 50.0, "");
         c.check("4.6 linear T(0) = T0", t0l == 50.0, "");
     }
@@ -262,15 +352,64 @@ pub fn run() {
     println!("\nStudy 5 — Reproducibility: same seed → same trajectory");
     {
         let inst = build_random_tsp(10, 1);
-        let sa1 = run_simulated_annealing(build_tsp_sa_problem(&inst), &SaOpts { max_iterations: 1000, cooling: Cooling::Geometric { t0: 50.0, alpha: 0.99, tmin: None }, seed: 42, stall_limit: None });
-        let sa2 = run_simulated_annealing(build_tsp_sa_problem(&inst), &SaOpts { max_iterations: 1000, cooling: Cooling::Geometric { t0: 50.0, alpha: 0.99, tmin: None }, seed: 42, stall_limit: None });
-        c.check("5.1 same seed: same best cost", close(sa1.best_cost, sa2.best_cost, 1e-12), "");
-        c.check("5.2 same seed: same iteration count", sa1.iterations == sa2.iterations, "");
-        c.check("5.3 same seed: same accepted count", sa1.accepted_count == sa2.accepted_count, "");
-        let sa3 = run_simulated_annealing(build_tsp_sa_problem(&inst), &SaOpts { max_iterations: 1000, cooling: Cooling::Geometric { t0: 50.0, alpha: 0.99, tmin: None }, seed: 99, stall_limit: None });
+        let sa1 = run_simulated_annealing(
+            build_tsp_sa_problem(&inst),
+            &SaOpts {
+                max_iterations: 1000,
+                cooling: Cooling::Geometric {
+                    t0: 50.0,
+                    alpha: 0.99,
+                    tmin: None,
+                },
+                seed: 42,
+                stall_limit: None,
+            },
+        );
+        let sa2 = run_simulated_annealing(
+            build_tsp_sa_problem(&inst),
+            &SaOpts {
+                max_iterations: 1000,
+                cooling: Cooling::Geometric {
+                    t0: 50.0,
+                    alpha: 0.99,
+                    tmin: None,
+                },
+                seed: 42,
+                stall_limit: None,
+            },
+        );
+        c.check(
+            "5.1 same seed: same best cost",
+            close(sa1.best_cost, sa2.best_cost, 1e-12),
+            "",
+        );
+        c.check(
+            "5.2 same seed: same iteration count",
+            sa1.iterations == sa2.iterations,
+            "",
+        );
+        c.check(
+            "5.3 same seed: same accepted count",
+            sa1.accepted_count == sa2.accepted_count,
+            "",
+        );
+        let sa3 = run_simulated_annealing(
+            build_tsp_sa_problem(&inst),
+            &SaOpts {
+                max_iterations: 1000,
+                cooling: Cooling::Geometric {
+                    t0: 50.0,
+                    alpha: 0.99,
+                    tmin: None,
+                },
+                seed: 99,
+                stall_limit: None,
+            },
+        );
         c.check(
             "5.4 different seed: different bestHistory[100]",
-            (sa1.best_history[100] - sa3.best_history[100]).abs() > 1e-9 || (sa1.best_history[500] - sa3.best_history[500]).abs() > 1e-9,
+            (sa1.best_history[100] - sa3.best_history[100]).abs() > 1e-9
+                || (sa1.best_history[500] - sa3.best_history[500]).abs() > 1e-9,
             "",
         );
     }
@@ -278,7 +417,19 @@ pub fn run() {
     println!("\nStudy 6 — Best history is monotonic (best can only improve)");
     {
         let inst = build_random_tsp(15, 4);
-        let sa = run_simulated_annealing(build_tsp_sa_problem(&inst), &SaOpts { max_iterations: 5000, cooling: Cooling::Geometric { t0: 50.0, alpha: 0.999, tmin: None }, seed: 1, stall_limit: None });
+        let sa = run_simulated_annealing(
+            build_tsp_sa_problem(&inst),
+            &SaOpts {
+                max_iterations: 5000,
+                cooling: Cooling::Geometric {
+                    t0: 50.0,
+                    alpha: 0.999,
+                    tmin: None,
+                },
+                seed: 1,
+                stall_limit: None,
+            },
+        );
         let mut mono = true;
         for k in 1..sa.best_history.len() {
             if sa.best_history[k] > sa.best_history[k - 1] + 1e-12 {
@@ -292,29 +443,79 @@ pub fn run() {
     println!("\nStudy 7 — Acceptance rate decreases with cooling");
     {
         let inst = build_random_tsp(15, 9);
-        let sa_hot = run_simulated_annealing(build_tsp_sa_problem(&inst), &SaOpts { max_iterations: 5000, cooling: Cooling::Geometric { t0: 1000.0, alpha: 1.0, tmin: None }, seed: 1, stall_limit: None });
-        let sa_cold = run_simulated_annealing(build_tsp_sa_problem(&inst), &SaOpts { max_iterations: 5000, cooling: Cooling::Geometric { t0: 1e-12, alpha: 1.0, tmin: None }, seed: 1, stall_limit: None });
+        let sa_hot = run_simulated_annealing(
+            build_tsp_sa_problem(&inst),
+            &SaOpts {
+                max_iterations: 5000,
+                cooling: Cooling::Geometric {
+                    t0: 1000.0,
+                    alpha: 1.0,
+                    tmin: None,
+                },
+                seed: 1,
+                stall_limit: None,
+            },
+        );
+        let sa_cold = run_simulated_annealing(
+            build_tsp_sa_problem(&inst),
+            &SaOpts {
+                max_iterations: 5000,
+                cooling: Cooling::Geometric {
+                    t0: 1e-12,
+                    alpha: 1.0,
+                    tmin: None,
+                },
+                seed: 1,
+                stall_limit: None,
+            },
+        );
         let hot_rate = sa_hot.accepted_count as f64 / sa_hot.iterations as f64;
         let cold_rate = sa_cold.accepted_count as f64 / sa_cold.iterations as f64;
-        c.check("7.1 high-T accept rate > low-T accept rate", hot_rate > cold_rate, &format!("hot={:.3}, cold={:.3}", hot_rate, cold_rate));
+        c.check(
+            "7.1 high-T accept rate > low-T accept rate",
+            hot_rate > cold_rate,
+            &format!("hot={:.3}, cold={:.3}", hot_rate, cold_rate),
+        );
         let ratio = sa_cold.improve_count as f64 / (1usize.max(sa_cold.accepted_count)) as f64;
         c.check(
             "7.2 cold-T improveCount/acceptedCount ratio low (only improvements + zero-Δ)",
             ratio >= 0.1,
-            &format!("improvements={}, accepted={}, ratio={:.3}", sa_cold.improve_count, sa_cold.accepted_count, ratio),
+            &format!(
+                "improvements={}, accepted={}, ratio={:.3}",
+                sa_cold.improve_count, sa_cold.accepted_count, ratio
+            ),
         );
         c.check(
             "7.3 cold-T finalCost ≤ initial",
             sa_cold.final_cost <= sa_cold.best_history[0] + 1e-9,
-            &format!("final={:.2}, init={:.2}", sa_cold.final_cost, sa_cold.best_history[0]),
+            &format!(
+                "final={:.2}, init={:.2}",
+                sa_cold.final_cost, sa_cold.best_history[0]
+            ),
         );
     }
 
     println!("\nStudy 8 — Stall-limit early stopping");
     {
         let inst = build_random_tsp(8, 1);
-        let sa = run_simulated_annealing(build_tsp_sa_problem(&inst), &SaOpts { max_iterations: 100000, cooling: Cooling::Geometric { t0: 0.001, alpha: 1.0, tmin: None }, seed: 1, stall_limit: Some(50) });
-        c.check("8.1 stall-limit triggers early termination", sa.iterations < 100000, &format!("iterations = {} (< 100000)", sa.iterations));
+        let sa = run_simulated_annealing(
+            build_tsp_sa_problem(&inst),
+            &SaOpts {
+                max_iterations: 100000,
+                cooling: Cooling::Geometric {
+                    t0: 0.001,
+                    alpha: 1.0,
+                    tmin: None,
+                },
+                seed: 1,
+                stall_limit: Some(50),
+            },
+        );
+        c.check(
+            "8.1 stall-limit triggers early termination",
+            sa.iterations < 100000,
+            &format!("iterations = {} (< 100000)", sa.iterations),
+        );
     }
 
     println!("\n  ─────────────────────────────────────────────────────────────────────────");

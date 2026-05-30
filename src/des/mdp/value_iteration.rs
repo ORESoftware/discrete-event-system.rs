@@ -180,7 +180,11 @@ mod tests {
         assert_eq!(res.policy[CLOSED], -1);
         assert_eq!(res.policy[EXHAUSTED], -1);
         // It should converge within the default cap.
-        assert!(res.final_delta < VIOptions::default().tol, "delta={}", res.final_delta);
+        assert!(
+            res.final_delta < VIOptions::default().tol,
+            "delta={}",
+            res.final_delta
+        );
         for &x in &res.v {
             assert!(x.is_finite(), "value not finite: {x}");
         }

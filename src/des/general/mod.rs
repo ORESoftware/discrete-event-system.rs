@@ -7,91 +7,91 @@ pub mod prng;
 
 // Grab-bag utilities (DESSet/DESMap, bgn, histograms, shuffle, uuid) + the
 // entity registry — foundations of the entity framework.
-pub mod general;
 pub mod entity_registration;
+pub mod general;
 
 pub mod expr;
 pub mod optim;
 
+pub mod factmachine_math;
+pub mod hungarian;
 pub mod ode;
 pub mod quadrature;
 pub mod random_variables;
-pub mod hungarian;
-pub mod factmachine_math;
 pub mod value_iteration;
 
-pub mod lp;
-pub mod incremental_lp;
-pub mod statistical_optimization;
 pub mod genetic_tsp;
+pub mod incremental_lp;
+pub mod lp;
+pub mod statistical_optimization;
 
-pub mod belief;
-pub mod des_spec;
-pub mod cartesian_state_space;
-pub mod pomdp;
-pub mod kalman_filter;
-pub mod double_integrator_lqr;
-pub mod sliding_mode_control;
-pub mod mrac;
-pub mod feedback_linearization;
-pub mod mpc_double_integrator;
-pub mod pontryagin_bang_bang;
 pub mod advanced_control_models;
+pub mod belief;
+pub mod cartesian_state_space;
+pub mod des_spec;
+pub mod double_integrator_lqr;
+pub mod feedback_linearization;
+pub mod kalman_filter;
+pub mod mpc_double_integrator;
+pub mod mrac;
+pub mod pomdp;
+pub mod pontryagin_bang_bang;
+pub mod sliding_mode_control;
 
-pub mod rl_environments;
-pub mod time_stepped_station;
-pub mod shortest_path_des;
 pub mod des_lp_bridge;
+pub mod rl_environments;
 pub mod root;
 pub mod run;
+pub mod shortest_path_des;
+pub mod time_stepped_station;
 
 // Intra-general dependency leaves (unblock dispatch, ip-mip, internal-solver, etc.).
-pub mod time_accrued;
-pub mod mcts;
 pub mod field_station;
-pub mod max_flow;
-pub mod network_flow;
-pub mod lp_des;
 pub mod ga_des;
+pub mod lp_des;
+pub mod max_flow;
+pub mod mcts;
+pub mod network_flow;
 pub mod sa_des;
+pub mod time_accrued;
 
 // Model/algorithm consumers (built on des-base + general kernels).
-pub mod blackjack;
-pub mod four_rooms;
-pub mod mountain_car;
-pub mod qlearning_des;
-pub mod ppo_des;
-pub mod rl_learning_models;
 pub mod actor_critic_gridworld;
-pub mod stag_hunt;
-pub mod tiger_pomdp;
+pub mod blackjack;
+pub mod classical_optimization_models;
+pub mod four_rooms;
 pub mod grid_localization_pomdp;
 pub mod inventory_dp;
 pub mod iterative_learning_control;
-pub mod temp_control;
-pub mod network_mutex;
-pub mod nonlinear_optimization_models;
-pub mod classical_optimization_models;
 pub mod learning_optimization_models;
-pub mod simulated_annealing;
 pub mod milp_bnb;
+pub mod mountain_car;
+pub mod network_mutex;
 pub mod neural_network;
+pub mod nonlinear_optimization_models;
+pub mod ppo_des;
+pub mod qlearning_des;
+pub mod rl_learning_models;
+pub mod simulated_annealing;
+pub mod stag_hunt;
+pub mod temp_control;
+pub mod tiger_pomdp;
 
 // Control-theory models (self-contained numeric cluster on shared/linalg).
 pub mod control_systems;
 
 // Standalone optimisation/forecasting/LP models built on des-base + general kernels.
-pub mod internal_solver_network;
-pub mod signal_transforms;
-pub mod stochastic_flow_mdp;
-pub mod multistage_stochastic;
-pub mod stochastic_lp;
-pub mod ip_mip_des;
-pub mod feasibility_pipeline;
-pub mod nonlinear_forecasting_model;
-pub mod soccer_rotation;
 pub mod do_audit;
 pub mod equation_to_stations;
+pub mod feasibility_pipeline;
+pub mod internal_solver_network;
+pub mod ip_mip_des;
+pub mod multistage_stochastic;
+pub mod nonlinear_forecasting_model;
+pub mod signal_transforms;
+pub mod soccer_rotation;
+pub mod stochastic_flow_mdp;
+pub mod stochastic_lp;
 
 // Domain/simulation models + dispatch (port wave G).
 pub mod advanced_optimization_models;

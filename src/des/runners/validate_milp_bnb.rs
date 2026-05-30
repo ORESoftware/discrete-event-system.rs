@@ -98,7 +98,12 @@ impl Checker {
         } else {
             format!("  — {}", detail)
         };
-        println!("{}  {}{}", if ok { "  PASS" } else { "  FAIL" }, label, tail);
+        println!(
+            "{}  {}{}",
+            if ok { "  PASS" } else { "  FAIL" },
+            label,
+            tail
+        );
         if ok {
             self.pass += 1;
         } else {
@@ -126,7 +131,9 @@ fn brute_knapsack(values: &[f64], weights: &[f64], capacity: f64) -> (f64, Vec<f
         }
         if w <= capacity && v > best_z {
             best_z = v;
-            best_x = (0..n).map(|i| if mask & (1 << i) != 0 { 1.0 } else { 0.0 }).collect();
+            best_x = (0..n)
+                .map(|i| if mask & (1 << i) != 0 { 1.0 } else { 0.0 })
+                .collect();
         }
     }
     (best_z, best_x)
@@ -172,12 +179,25 @@ pub fn run() {
     {
         let milp = build_knapsack_milp(&[10.0, 40.0, 30.0, 50.0], &[5.0, 4.0, 6.0, 3.0], 10.0);
         let r = solve_milp(&milp, None);
-        let (brute_z, _brute_x) = brute_knapsack(&[10.0, 40.0, 30.0, 50.0], &[5.0, 4.0, 6.0, 3.0], 10.0);
+        let (brute_z, _brute_x) =
+            brute_knapsack(&[10.0, 40.0, 30.0, 50.0], &[5.0, 4.0, 6.0, 3.0], 10.0);
         c.check("1.1 status optimal", r.status == "optimal", "");
-        c.check("1.2 z matches brute force", close(r.z, brute_z), &format!("B&B={}, brute={}", r.z, brute_z));
+        c.check(
+            "1.2 z matches brute force",
+            close(r.z, brute_z),
+            &format!("B&B={}, brute={}", r.z, brute_z),
+        );
         c.check("1.3 solution feasible", feasible(&milp, &r.x), "");
-        c.check("1.4 gap = 0 at optimal", r.gap < 1e-9, &format!("gap={}", r.gap));
-        c.check("1.5 explores ≤ 16 nodes", r.nodes_explored <= 16, &format!("nodes={}", r.nodes_explored));
+        c.check(
+            "1.4 gap = 0 at optimal",
+            r.gap < 1e-9,
+            &format!("gap={}", r.gap),
+        );
+        c.check(
+            "1.5 explores ≤ 16 nodes",
+            r.nodes_explored <= 16,
+            &format!("nodes={}", r.nodes_explored),
+        );
     }
 
     // Study 2 — Random knapsacks vs brute force (n=8 to 14).
@@ -207,7 +227,11 @@ pub fn run() {
                 total_brute_perm += 1usize << n;
             }
         }
-        c.check("2.1 all 20 random knapsack instances match brute force", all_match, "");
+        c.check(
+            "2.1 all 20 random knapsack instances match brute force",
+            all_match,
+            "",
+        );
         c.check(
             "2.2 total B&B nodes far less than total enumerations",
             total_nodes < total_brute_perm / 5,
@@ -233,9 +257,21 @@ pub fn run() {
             a_ub: vec![vec![1.0, 0.0], vec![0.0, 2.0], vec![3.0, 2.0]],
             b_ub: vec![4.0, 12.0, 18.0],
         });
-        c.check("3.1 MILP-no-integers status optimal", milp_r.status == "optimal", "");
-        c.check("3.2 z agrees with solveLPInternal", close(milp_r.z, lp_r.objective), &format!("MILP={}, LP={}", milp_r.z, lp_r.objective));
-        c.check("3.3 only the root node was explored", milp_r.nodes_explored == 1, &format!("nodes={}", milp_r.nodes_explored));
+        c.check(
+            "3.1 MILP-no-integers status optimal",
+            milp_r.status == "optimal",
+            "",
+        );
+        c.check(
+            "3.2 z agrees with solveLPInternal",
+            close(milp_r.z, lp_r.objective),
+            &format!("MILP={}, LP={}", milp_r.z, lp_r.objective),
+        );
+        c.check(
+            "3.3 only the root node was explored",
+            milp_r.nodes_explored == 1,
+            &format!("nodes={}", milp_r.nodes_explored),
+        );
     }
 
     // Study 4 — Mixed integer/continuous (3 vars).
@@ -244,7 +280,11 @@ pub fn run() {
         let milp = MilpProblem {
             sense: "max",
             c: vec![3.0, 5.0, 7.0],
-            a: vec![vec![1.0, 1.0, 1.0], vec![2.0, 1.0, 0.0], vec![1.0, 2.0, 3.0]],
+            a: vec![
+                vec![1.0, 1.0, 1.0],
+                vec![2.0, 1.0, 0.0],
+                vec![1.0, 2.0, 3.0],
+            ],
             b: vec![10.0, 8.0, 15.0],
             integer_vars: vec![true, true, false],
             ub: None,
@@ -260,10 +300,18 @@ pub fn run() {
         let lp = solve_lp_internal(&LpProblem {
             sense: "max",
             c: vec![3.0, 5.0, 7.0],
-            a_ub: vec![vec![1.0, 1.0, 1.0], vec![2.0, 1.0, 0.0], vec![1.0, 2.0, 3.0]],
+            a_ub: vec![
+                vec![1.0, 1.0, 1.0],
+                vec![2.0, 1.0, 0.0],
+                vec![1.0, 2.0, 3.0],
+            ],
             b_ub: vec![10.0, 8.0, 15.0],
         });
-        c.check("4.4 MILP z ≤ LP relaxation z (max)", r.z <= lp.objective + 1e-6, &format!("MILP={}, LP={}", r.z, lp.objective));
+        c.check(
+            "4.4 MILP z ≤ LP relaxation z (max)",
+            r.z <= lp.objective + 1e-6,
+            &format!("MILP={}, LP={}", r.z, lp.objective),
+        );
     }
 
     // Study 5 — Infeasibility / zero-capacity knapsack.
@@ -271,7 +319,11 @@ pub fn run() {
     {
         let milp = build_knapsack_milp(&[1.0, 1.0, 1.0], &[2.0, 3.0, 5.0], 0.0);
         let r = solve_milp(&milp, None);
-        c.check("5.1 zero-capacity knapsack: optimal", r.status == "optimal", "");
+        c.check(
+            "5.1 zero-capacity knapsack: optimal",
+            r.status == "optimal",
+            "",
+        );
         c.check("5.2 z = 0 (no items selected)", close(r.z, 0.0), "");
         c.check("5.3 x = 0 vector", r.x.iter().all(|v| v.abs() < 1e-9), "");
     }
@@ -291,8 +343,16 @@ pub fn run() {
         let t0 = Instant::now();
         let r = solve_milp(&milp, Some(100_000));
         let dt = t0.elapsed().as_millis();
-        c.check("6.1 24-item knapsack solves to optimum", r.status == "optimal", &format!("dt={}ms, nodes={}", dt, r.nodes_explored));
-        c.check("6.2 nodes ≪ 2^24 = 16.7M", r.nodes_explored < 1000, &format!("nodes={}", r.nodes_explored));
+        c.check(
+            "6.1 24-item knapsack solves to optimum",
+            r.status == "optimal",
+            &format!("dt={}ms, nodes={}", dt, r.nodes_explored),
+        );
+        c.check(
+            "6.2 nodes ≪ 2^24 = 16.7M",
+            r.nodes_explored < 1000,
+            &format!("nodes={}", r.nodes_explored),
+        );
         c.check("6.3 wall < 1 second", dt < 1000, &format!("dt={}ms", dt));
     }
 
@@ -303,10 +363,15 @@ pub fn run() {
         let w = [5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
         let r1 = solve_milp(&build_knapsack_milp(&v, &w, 30.0), None);
         let r2 = solve_milp(&build_knapsack_milp(&v, &w, 5.0), None);
-        c.check("7.1 tighter capacity ⇒ smaller (or equal) optimal", r2.z <= r1.z, "");
+        c.check(
+            "7.1 tighter capacity ⇒ smaller (or equal) optimal",
+            r2.z <= r1.z,
+            "",
+        );
         c.check(
             "7.2 both solutions feasible",
-            feasible(&build_knapsack_milp(&v, &w, 30.0), &r1.x) && feasible(&build_knapsack_milp(&v, &w, 5.0), &r2.x),
+            feasible(&build_knapsack_milp(&v, &w, 30.0), &r1.x)
+                && feasible(&build_knapsack_milp(&v, &w, 5.0), &r2.x),
             "",
         );
     }

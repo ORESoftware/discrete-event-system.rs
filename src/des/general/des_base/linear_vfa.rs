@@ -190,7 +190,11 @@ pub trait LinearVFAStation<S: Clone + 'static = f64>: RLAgentStation<S, usize> {
     /// Public greedy read using the embedded (injected) RNG, moved out
     /// transiently for the tie-break.
     fn vfa_greedy_action(&mut self, state: &S) -> usize {
-        let mut rng = self.agent_core_mut().rng.take().expect("rng already in use");
+        let mut rng = self
+            .agent_core_mut()
+            .rng
+            .take()
+            .expect("rng already in use");
         let a = self.greedy_with_rng(state, &mut *rng);
         self.agent_core_mut().rng = Some(rng);
         a
@@ -214,7 +218,14 @@ pub trait LinearVFAStation<S: Clone + 'static = f64>: RLAgentStation<S, usize> {
     }
 
     /// Semi-gradient TD(0) update with Q-learning (max over next actions).
-    fn linear_vfa_update(&mut self, state: &S, action: usize, reward: f64, next_state: &S, done: bool) {
+    fn linear_vfa_update(
+        &mut self,
+        state: &S,
+        action: usize,
+        reward: f64,
+        next_state: &S,
+        done: bool,
+    ) {
         let phi = self.features(state);
         let q_sa = self.q(state, action);
         let mut bootstrap = 0.0;
@@ -255,7 +266,8 @@ pub trait LinearVFAStation<S: Clone + 'static = f64>: RLAgentStation<S, usize> {
     fn linear_vfa_end_of_episode(&mut self) {
         let core = self.vfa_core_mut();
         if core.episode_updates > 0.0 {
-            core.td_error_history.push(core.episode_abs_td / core.episode_updates);
+            core.td_error_history
+                .push(core.episode_abs_td / core.episode_updates);
         }
         core.episode_abs_td = 0.0;
         core.episode_updates = 0.0;
@@ -336,7 +348,14 @@ mod tests {
         fn pick_action(&self, state: &usize, rng: &mut dyn RandomSource) -> usize {
             self.linear_vfa_pick_action(state, rng)
         }
-        fn update(&mut self, state: &usize, action: &usize, reward: f64, next_state: &usize, done: bool) {
+        fn update(
+            &mut self,
+            state: &usize,
+            action: &usize,
+            reward: f64,
+            next_state: &usize,
+            done: bool,
+        ) {
             self.linear_vfa_update(state, *action, reward, next_state, done);
         }
         fn end_of_episode(&mut self, _episode_id: f64) {
@@ -381,7 +400,8 @@ mod tests {
         for ep in 0..4000 {
             for s in 0..4usize {
                 let t = TransitionToken::new(s, 0usize, target(s), s, true, ep as f64);
-                a.core_mut().take(Rc::new(t), LinearRegressor::CH_TRANSITION);
+                a.core_mut()
+                    .take(Rc::new(t), LinearRegressor::CH_TRANSITION);
                 a.run_time_step();
             }
         }
@@ -390,7 +410,11 @@ mod tests {
         assert!((theta[0] - 1.0).abs() < 0.05, "theta0 = {}", theta[0]);
         assert!((theta[1] - 0.5).abs() < 0.05, "theta1 = {}", theta[1]);
         for s in 0..4usize {
-            assert!((a.q(&s, 0) - target(s)).abs() < 0.05, "Q({s}) = {}", a.q(&s, 0));
+            assert!(
+                (a.q(&s, 0) - target(s)).abs() < 0.05,
+                "Q({s}) = {}",
+                a.q(&s, 0)
+            );
         }
     }
 
@@ -400,7 +424,8 @@ mod tests {
         for ep in 0..4000 {
             for s in 0..4usize {
                 let t = TransitionToken::new(s, 0usize, target(s), s, true, ep as f64);
-                a.core_mut().take(Rc::new(t), LinearRegressor::CH_TRANSITION);
+                a.core_mut()
+                    .take(Rc::new(t), LinearRegressor::CH_TRANSITION);
                 a.run_time_step();
             }
         }
@@ -427,8 +452,13 @@ mod tests {
         assert!(g < 2);
         // One terminal transition finishes one episode → ε halves.
         let t = TransitionToken::new(0usize, 0usize, 0.0, 0usize, true, 0.0);
-        a.core_mut().take(Rc::new(t), LinearRegressor::CH_TRANSITION);
+        a.core_mut()
+            .take(Rc::new(t), LinearRegressor::CH_TRANSITION);
         a.run_time_step();
-        assert!((a.get_epsilon() - 0.5).abs() < 1e-12, "epsilon = {}", a.get_epsilon());
+        assert!(
+            (a.get_epsilon() - 0.5).abs() < 1e-12,
+            "epsilon = {}",
+            a.get_epsilon()
+        );
     }
 }

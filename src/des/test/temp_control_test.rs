@@ -40,29 +40,62 @@ mod tests {
     // [1] House physics — forward-Euler step
     #[test]
     fn house_physics_step() {
-        assert!(close(house_step(70.0, 30.0, 5.0, 0.0, &DEFAULT_HOUSE), 70.0, 1e-9));
-        assert!(close(house_step(60.0, 60.0, 0.0, 1.0, &DEFAULT_HOUSE), 60.0, 1e-9));
+        assert!(close(
+            house_step(70.0, 30.0, 5.0, 0.0, &DEFAULT_HOUSE),
+            70.0,
+            1e-9
+        ));
+        assert!(close(
+            house_step(60.0, 60.0, 0.0, 1.0, &DEFAULT_HOUSE),
+            60.0,
+            1e-9
+        ));
         let a = house_step(70.0, 30.0, 0.0, 0.5, &DEFAULT_HOUSE);
         let b = house_step(70.0, 30.0, 3.0, 0.5, &DEFAULT_HOUSE);
         let c = house_step(70.0, 30.0, 5.0, 0.5, &DEFAULT_HOUSE);
         assert!(close(b - a, (3.0 / 5.0) * (c - a), 1e-9));
         let q_ss = (70.0 - 30.0) / (DEFAULT_HOUSE.tau * DEFAULT_HOUSE.g);
-        assert!(close(house_step(70.0, 30.0, q_ss, 1.0, &DEFAULT_HOUSE), 70.0, 1e-9));
-        let ins = HouseParams { tau: 1e9, ..DEFAULT_HOUSE };
-        assert!(close(house_step(70.0, 30.0, 5.0, 1.0, &ins) - 70.0, 5.0, 1e-3));
+        assert!(close(
+            house_step(70.0, 30.0, q_ss, 1.0, &DEFAULT_HOUSE),
+            70.0,
+            1e-9
+        ));
+        let ins = HouseParams {
+            tau: 1e9,
+            ..DEFAULT_HOUSE
+        };
+        assert!(close(
+            house_step(70.0, 30.0, 5.0, 1.0, &ins) - 70.0,
+            5.0,
+            1e-3
+        ));
     }
 
     // [2] Outdoor temperature pattern
     #[test]
     fn outdoor_temperature_pattern() {
-        let p = OutdoorPattern { mean: 30.0, amp: 0.0, phase: 0.0, noise_std: 0.0 };
+        let p = OutdoorPattern {
+            mean: 30.0,
+            amp: 0.0,
+            phase: 0.0,
+            noise_std: 0.0,
+        };
         for t in [0.0, 6.0, 12.0, 18.0, 24.0] {
             assert!(close(true_outdoor_temp(t, &p, None), 30.0, 1e-9));
         }
-        let q = OutdoorPattern { mean: 25.0, amp: 15.0, phase: 9.0, noise_std: 0.0 };
+        let q = OutdoorPattern {
+            mean: 25.0,
+            amp: 15.0,
+            phase: 9.0,
+            noise_std: 0.0,
+        };
         assert!(close(true_outdoor_temp(15.0, &q, None), 40.0, 1e-9));
         assert!(close(true_outdoor_temp(3.0, &q, None), 10.0, 1e-9));
-        assert!(close(true_outdoor_temp(7.0, &q, None), true_outdoor_temp(31.0, &q, None), 1e-9));
+        assert!(close(
+            true_outdoor_temp(7.0, &q, None),
+            true_outdoor_temp(31.0, &q, None),
+            1e-9
+        ));
     }
 
     // [3] PRNG reproducibility
@@ -97,7 +130,11 @@ mod tests {
     fn pid_steady_state() {
         let cfg = SimConfig {
             duration_h: 80.0,
-            controller: ControllerSpec::Pid { kp: 3.0, ki: 0.5, kd: 0.5 },
+            controller: ControllerSpec::Pid {
+                kp: 3.0,
+                ki: 0.5,
+                kd: 0.5,
+            },
             outdoor: Some(OutdoorPatternPartial {
                 mean: Some(25.0),
                 amp: Some(0.0),
@@ -110,27 +147,76 @@ mod tests {
         let last: Vec<f64> = r.t_in.iter().rev().take(60).copied().collect();
         let mean = last.iter().sum::<f64>() / last.len() as f64;
         assert!((mean - 70.0).abs() < 0.1, "mean = {mean}");
-        assert!(r.q.iter().all(|&q| q >= 0.0 && q <= DEFAULT_HOUSE.q_max + 1e-9));
+        assert!(r
+            .q
+            .iter()
+            .all(|&q| q >= 0.0 && q <= DEFAULT_HOUSE.q_max + 1e-9));
     }
 
     // [6] MDP-MPC — basic correctness
     #[test]
     fn mdp_mpc_basic() {
         let fc = vec![20.0; 360];
-        let q_cold =
-            mdp_mpc_controller(60.0, &fc, 6.0, 6, 70.0, 1.0 / 60.0, 5.0, &DEFAULT_HOUSE, 0.5, 0.15, 1.0);
+        let q_cold = mdp_mpc_controller(
+            60.0,
+            &fc,
+            6.0,
+            6,
+            70.0,
+            1.0 / 60.0,
+            5.0,
+            &DEFAULT_HOUSE,
+            0.5,
+            0.15,
+            1.0,
+        );
         assert!(q_cold >= 4.0, "Q = {q_cold}");
-        let q_hot =
-            mdp_mpc_controller(75.0, &fc, 6.0, 6, 70.0, 1.0 / 60.0, 5.0, &DEFAULT_HOUSE, 0.5, 0.15, 1.0);
+        let q_hot = mdp_mpc_controller(
+            75.0,
+            &fc,
+            6.0,
+            6,
+            70.0,
+            1.0 / 60.0,
+            5.0,
+            &DEFAULT_HOUSE,
+            0.5,
+            0.15,
+            1.0,
+        );
         assert_eq!(q_hot, 0.0);
-        let q_at =
-            mdp_mpc_controller(70.0, &fc, 6.0, 6, 70.0, 1.0 / 60.0, 5.0, &DEFAULT_HOUSE, 0.5, 0.15, 1.0);
+        let q_at = mdp_mpc_controller(
+            70.0,
+            &fc,
+            6.0,
+            6,
+            70.0,
+            1.0 / 60.0,
+            5.0,
+            &DEFAULT_HOUSE,
+            0.5,
+            0.15,
+            1.0,
+        );
         assert!(q_at > 0.0 && q_at <= 5.0, "Q = {q_at}");
 
         let fc_mild = vec![50.0; 60];
-        let q5 =
-            mdp_mpc_controller(70.0, &fc_mild, 1.0, 5, 70.0, 1.0 / 60.0, 5.0, &DEFAULT_HOUSE, 0.5, 0.15, 1.0);
-        let valid = [0.0, 1.25, 2.5, 3.75, 5.0].iter().any(|v| (v - q5).abs() < 1e-9);
+        let q5 = mdp_mpc_controller(
+            70.0,
+            &fc_mild,
+            1.0,
+            5,
+            70.0,
+            1.0 / 60.0,
+            5.0,
+            &DEFAULT_HOUSE,
+            0.5,
+            0.15,
+            1.0,
+        );
+        let valid = [0.0, 1.25, 2.5, 3.75, 5.0]
+            .iter()
+            .any(|v| (v - q5).abs() < 1e-9);
         assert!(valid, "Q = {q5}");
     }
 
@@ -147,17 +233,30 @@ mod tests {
         };
         let mut st = ControllerState::default();
         ctx.t_in_meas = 65.0;
-        assert_eq!(controller_step(&ControllerSpec::BangBang, &mut st, &ctx), 5.0);
+        assert_eq!(
+            controller_step(&ControllerSpec::BangBang, &mut st, &ctx),
+            5.0
+        );
         ctx.t_in_meas = 75.0;
-        assert_eq!(controller_step(&ControllerSpec::BangBang, &mut st, &ctx), 0.0);
+        assert_eq!(
+            controller_step(&ControllerSpec::BangBang, &mut st, &ctx),
+            0.0
+        );
         ctx.t_in_meas = 70.0;
-        assert_eq!(controller_step(&ControllerSpec::BangBang, &mut st, &ctx), 0.0);
+        assert_eq!(
+            controller_step(&ControllerSpec::BangBang, &mut st, &ctx),
+            0.0
+        );
     }
 
     // [8] Full-run invariants
     #[test]
     fn full_run_invariants() {
-        let cfg = SimConfig { duration_h: 4.0, controller: ControllerSpec::Fuzzy, ..base_cfg() };
+        let cfg = SimConfig {
+            duration_h: 4.0,
+            controller: ControllerSpec::Fuzzy,
+            ..base_cfg()
+        };
         let r = run_temp_control(cfg.clone());
         for k in 1..r.energy.len() {
             assert!(r.energy[k] >= r.energy[k - 1] - 1e-9);
@@ -169,7 +268,11 @@ mod tests {
         }
         let cost_check = cfg.cost_per_kwh * r.energy_kwh + cfg.comfort_penalty * r.violation_fh;
         assert!(close(r.cost, cost_check, 1e-9));
-        assert!(close(r.trace[r.trace.len() - 1].energy_cum_kwh, r.energy_kwh, 1e-9));
+        assert!(close(
+            r.trace[r.trace.len() - 1].energy_cum_kwh,
+            r.energy_kwh,
+            1e-9
+        ));
     }
 
     // [9] Different controllers, same scenario, all stay in band
@@ -185,7 +288,11 @@ mod tests {
         };
         let specs = [
             ControllerSpec::BangBang,
-            ControllerSpec::Pid { kp: 3.0, ki: 0.5, kd: 0.5 },
+            ControllerSpec::Pid {
+                kp: 3.0,
+                ki: 0.5,
+                kd: 0.5,
+            },
             ControllerSpec::Fuzzy,
             ControllerSpec::MdpMpc {
                 horizon_h: 4.0,
@@ -196,9 +303,17 @@ mod tests {
             },
         ];
         for spec in specs {
-            let cfg = SimConfig { controller: spec, ..base.clone() };
+            let cfg = SimConfig {
+                controller: spec,
+                ..base.clone()
+            };
             let r = run_temp_control(cfg);
-            assert!(r.comfort_pct >= 0.99, "{:?}: {}%", spec, 100.0 * r.comfort_pct);
+            assert!(
+                r.comfort_pct >= 0.99,
+                "{:?}: {}%",
+                spec,
+                100.0 * r.comfort_pct
+            );
         }
     }
 }

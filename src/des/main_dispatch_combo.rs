@@ -21,10 +21,16 @@ use crate::des::general::dispatch::{
 use crate::des::general::lp::lp_to_string;
 
 fn env_usize(key: &str, default: usize) -> usize {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 fn env_u32(key: &str, default: u32) -> u32 {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 /// A shared dispatch policy: the factory hands out clones of the same `Rc`, so
@@ -62,14 +68,23 @@ pub fn run() {
     println!("# arrival rate λ = {}", problem.arrival_rate);
     println!(
         "# class probs    = [{}]",
-        problem.class_prob.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", ")
+        problem
+            .class_prob
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
     );
     println!("# service rates μ_{{c,m}}:");
     for c in 0..problem.k {
         println!(
             "#   class {}: [{}]",
             c + 1,
-            problem.service_rate[c].iter().map(|v| format!("{v:.2}")).collect::<Vec<_>>().join(", ")
+            problem.service_rate[c]
+                .iter()
+                .map(|v| format!("{v:.2}"))
+                .collect::<Vec<_>>()
+                .join(", ")
         );
     }
     let mut total_capacity = 0.0;
@@ -99,13 +114,23 @@ pub fn run() {
     println!();
 
     let fluid = policy_fluid_lp(&problem, 12345);
-    println!("# Fluid LP solved via {} in {} iterations", fluid.solver, fluid.iters);
-    println!("#   bottleneck load t* = max_m ρ_m = {:.4}", fluid.bottleneck_load);
+    println!(
+        "# Fluid LP solved via {} in {} iterations",
+        fluid.solver, fluid.iters
+    );
+    println!(
+        "#   bottleneck load t* = max_m ρ_m = {:.4}",
+        fluid.bottleneck_load
+    );
     for c in 0..problem.k {
         println!(
             "#   class {} → x* = [{}]",
             c + 1,
-            fluid.x[c].iter().map(|v| format!("{v:.3}")).collect::<Vec<_>>().join(", ")
+            fluid.x[c]
+                .iter()
+                .map(|v| format!("{v:.3}"))
+                .collect::<Vec<_>>()
+                .join(", ")
         );
     }
     println!();
@@ -135,7 +160,11 @@ pub fn run() {
 
     // Policy registry: (name, note, factory).
     let mut entries: Vec<(&str, &str, Factory)> = Vec::new();
-    entries.push(("random", "Layer 3: trivial baseline", Box::new(|| Box::new(policy_random(13)))));
+    entries.push((
+        "random",
+        "Layer 3: trivial baseline",
+        Box::new(|| Box::new(policy_random(13))),
+    ));
     entries.push((
         "round-robin",
         "Layer 3: state-blind heuristic",
@@ -178,7 +207,11 @@ pub fn run() {
             Box::new(move || {
                 Box::new(policy_mcts(
                     &p,
-                    MctsPolicyOptions { iterations: Some(200), rollout_depth: Some(35), ..Default::default() },
+                    MctsPolicyOptions {
+                        iterations: Some(200),
+                        rollout_depth: Some(35),
+                        ..Default::default()
+                    },
                 ))
             }),
         ));
@@ -192,8 +225,20 @@ pub fn run() {
     for (name, _note, factory) in entries.into_iter() {
         print!("# Evaluating '{name}' ({num_reps} reps × {num_arrivals} arrivals) ... ");
         let t0 = Instant::now();
-        let r = evaluate_policy(&problem, factory, name, num_reps, num_arrivals, seed_base, warmup);
-        println!("done in {}ms,  mean sojourn = {:.4}", t0.elapsed().as_millis(), r.mean_wait);
+        let r = evaluate_policy(
+            &problem,
+            factory,
+            name,
+            num_reps,
+            num_arrivals,
+            seed_base,
+            warmup,
+        );
+        println!(
+            "done in {}ms,  mean sojourn = {:.4}",
+            t0.elapsed().as_millis(),
+            r.mean_wait
+        );
         results.push(r);
     }
     println!();
@@ -209,7 +254,11 @@ pub fn run() {
     for r in &results {
         let util = format!(
             "[{}]",
-            r.utilisation.iter().map(|u| format!("{:.1}%", u * 100.0)).collect::<Vec<_>>().join(", ")
+            r.utilisation
+                .iter()
+                .map(|u| format!("{:.1}%", u * 100.0))
+                .collect::<Vec<_>>()
+                .join(", ")
         );
         println!(
             "#   {:<18}{:>15}{:>11}{:>20}",
@@ -224,7 +273,10 @@ pub fn run() {
     println!("# {bar}");
     println!("# Welch t-statistic vs random (large positive ⇒ policy is significantly better):");
     println!("# {bar}");
-    let random = results.iter().find(|r| r.policy_name == "random").expect("random present");
+    let random = results
+        .iter()
+        .find(|r| r.policy_name == "random")
+        .expect("random present");
     for r in &results {
         if r.policy_name == "random" {
             continue;

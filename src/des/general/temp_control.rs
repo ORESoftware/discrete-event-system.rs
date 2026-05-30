@@ -50,7 +50,12 @@ pub struct HouseParams {
     pub t_init: f64,
 }
 
-pub const DEFAULT_HOUSE: HouseParams = HouseParams { tau: 12.0, g: 1.0, q_max: 5.0, t_init: 70.0 };
+pub const DEFAULT_HOUSE: HouseParams = HouseParams {
+    tau: 12.0,
+    g: 1.0,
+    q_max: 5.0,
+    t_init: 70.0,
+};
 
 /// Partial house override (TS `Partial<HouseParams>`).
 #[derive(Clone, Copy, Debug, Default)]
@@ -86,7 +91,12 @@ pub struct OutdoorPattern {
 }
 
 // Default: cold winter day. Peak at 3 PM (phase = 9), minimum at 3 AM.
-pub const DEFAULT_OUTDOOR: OutdoorPattern = OutdoorPattern { mean: 25.0, amp: 15.0, phase: 9.0, noise_std: 1.5 };
+pub const DEFAULT_OUTDOOR: OutdoorPattern = OutdoorPattern {
+    mean: 25.0,
+    amp: 15.0,
+    phase: 9.0,
+    noise_std: 1.5,
+};
 
 /// Partial outdoor override (TS `Partial<OutdoorPattern>`).
 #[derive(Clone, Copy, Debug, Default)]
@@ -109,9 +119,13 @@ impl OutdoorPattern {
 }
 
 /// True outside temperature at simulation time `t_hours`, with optional rng noise.
-pub fn true_outdoor_temp(t_hours: f64, pattern: &OutdoorPattern, rng: Option<&mut dyn RandomSource>) -> f64 {
-    let periodic =
-        pattern.mean + pattern.amp * (2.0 * std::f64::consts::PI * (t_hours - pattern.phase) / 24.0).sin();
+pub fn true_outdoor_temp(
+    t_hours: f64,
+    pattern: &OutdoorPattern,
+    rng: Option<&mut dyn RandomSource>,
+) -> f64 {
+    let periodic = pattern.mean
+        + pattern.amp * (2.0 * std::f64::consts::PI * (t_hours - pattern.phase) / 24.0).sin();
     match rng {
         None => periodic,
         Some(_) if pattern.noise_std == 0.0 => periodic,
@@ -148,7 +162,11 @@ pub fn mulberry32(seed: u32) -> SeededRandom {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ControllerSpec {
     BangBang,
-    Pid { kp: f64, ki: f64, kd: f64 },
+    Pid {
+        kp: f64,
+        ki: f64,
+        kd: f64,
+    },
     Fuzzy,
     MdpMpc {
         horizon_h: f64,
@@ -208,7 +226,11 @@ pub fn controller_step(spec: &ControllerSpec, state: &mut ControllerState, ctx: 
             let u_pre = kp * e + ki * i_prev + kd * d_err;
             let sat_high = u_pre >= ctx.q_max && e > 0.0;
             let sat_low = u_pre <= 0.0 && e < 0.0;
-            state.integral = Some(if sat_high || sat_low { i_prev } else { i_prev + e * ctx.dt_h });
+            state.integral = Some(if sat_high || sat_low {
+                i_prev
+            } else {
+                i_prev + e * ctx.dt_h
+            });
             state.prev_error = Some(e);
             let u = kp * e + ki * state.integral.unwrap() + kd * d_err;
             u.clamp(0.0, ctx.q_max)
@@ -225,21 +247,25 @@ pub fn controller_step(spec: &ControllerSpec, state: &mut ControllerState, ctx: 
             state.fuzzy_q = Some(q);
             q
         }
-        ControllerSpec::MdpMpc { horizon_h, n_levels, comfort_penalty, cost_per_kwh, track_weight } => {
-            mdp_mpc_controller(
-                ctx.t_in_meas,
-                &ctx.forecast,
-                horizon_h,
-                n_levels,
-                ctx.t_target,
-                ctx.dt_h,
-                ctx.q_max,
-                &ctx.house,
-                comfort_penalty,
-                cost_per_kwh,
-                track_weight.unwrap_or(1.0),
-            )
-        }
+        ControllerSpec::MdpMpc {
+            horizon_h,
+            n_levels,
+            comfort_penalty,
+            cost_per_kwh,
+            track_weight,
+        } => mdp_mpc_controller(
+            ctx.t_in_meas,
+            &ctx.forecast,
+            horizon_h,
+            n_levels,
+            ctx.t_target,
+            ctx.dt_h,
+            ctx.q_max,
+            &ctx.house,
+            comfort_penalty,
+            cost_per_kwh,
+            track_weight.unwrap_or(1.0),
+        ),
     }
 }
 
@@ -448,7 +474,9 @@ pub fn mdp_mpc_controller(
         (1.0 - w) * v_row[i0] + w * v_row[i1]
     };
     // Action grid.
-    let actions: Vec<f64> = (0..n_levels).map(|k| (q_max * k as f64) / (n_levels as f64 - 1.0)).collect();
+    let actions: Vec<f64> = (0..n_levels)
+        .map(|k| (q_max * k as f64) / (n_levels as f64 - 1.0))
+        .collect();
     // Backward induction. V[k][i] = optimal cost-to-go from tick k with T_in in bin i.
     let mut v: Vec<Vec<f64>> = vec![vec![0.0; n_t]; h + 1];
     let mut pi: Vec<Vec<f64>> = vec![vec![0.0; n_t]; h];
@@ -541,7 +569,11 @@ impl TempControllerBase {
             Some("0 ≤ u ≤ Q_max".to_string()),
             Some(Box::new(|s: &dyn DESStation| {
                 let st = s.as_any().downcast_ref::<TempControllerBase>().unwrap();
-                format!("n={}  Q_max={}", st.ctrl.control_history.len(), st.q_max_cached)
+                format!(
+                    "n={}  Q_max={}",
+                    st.ctrl.control_history.len(),
+                    st.q_max_cached
+                )
             })),
             Some("temp-control-intrinsic".to_string()),
             Some("controller emitted a u outside its saturation band".to_string()),
@@ -612,8 +644,15 @@ pub fn fuzzy_controller(id: &str, q_max: f64) -> TempControllerBase {
 
 /// `class MdpMpcController` — receding-horizon DP. `spec` must be
 /// [`ControllerSpec::MdpMpc`]; any other variant panics (TS used a narrowed type).
-pub fn mdp_mpc_controller_station(id: &str, q_max: f64, spec: ControllerSpec) -> TempControllerBase {
-    assert!(matches!(spec, ControllerSpec::MdpMpc { .. }), "mdp-mpc controller requires an MdpMpc spec");
+pub fn mdp_mpc_controller_station(
+    id: &str,
+    q_max: f64,
+    spec: ControllerSpec,
+) -> TempControllerBase {
+    assert!(
+        matches!(spec, ControllerSpec::MdpMpc { .. }),
+        "mdp-mpc controller requires an MdpMpc spec"
+    );
     TempControllerBase::new(id, q_max, spec)
 }
 
@@ -708,8 +747,10 @@ pub fn run_temp_control(cfg: SimConfig) -> RunResult {
     if let Some(s) = cfg.forecast_horizon_h {
         Preconditions::positive(cls, "cfg.forecastHorizon_h", s).expect("cfg.forecastHorizon_h");
     }
-    Preconditions::non_negative(cls, "cfg.cost_per_kWh", cfg.cost_per_kwh).expect("cfg.cost_per_kWh");
-    Preconditions::non_negative(cls, "cfg.comfort_penalty", cfg.comfort_penalty).expect("cfg.comfort_penalty");
+    Preconditions::non_negative(cls, "cfg.cost_per_kWh", cfg.cost_per_kwh)
+        .expect("cfg.cost_per_kWh");
+    Preconditions::non_negative(cls, "cfg.comfort_penalty", cfg.comfort_penalty)
+        .expect("cfg.comfort_penalty");
     if let Some(h) = &cfg.house {
         if let Some(q) = h.q_max {
             Preconditions::positive(cls, "cfg.house.Q_max", q).expect("cfg.house.Q_max");
@@ -753,7 +794,9 @@ pub fn run_temp_control(cfg: SimConfig) -> RunResult {
         let t_out_true = true_outdoor_temp(t_h, &outdoor, Some(&mut rng as &mut dyn RandomSource));
         let t_in_meas = if sensor_std > 0.0 {
             t_in + sensor_std
-                * (sensor_rng.next_float() + sensor_rng.next_float() + sensor_rng.next_float()
+                * (sensor_rng.next_float()
+                    + sensor_rng.next_float()
+                    + sensor_rng.next_float()
                     + sensor_rng.next_float()
                     - 2.0)
                 / 0.577
@@ -764,11 +807,15 @@ pub fn run_temp_control(cfg: SimConfig) -> RunResult {
         let mut forecast: Vec<f64> = Vec::with_capacity(horizon_ticks);
         for i in 0..horizon_ticks {
             let t_future = t_h + i as f64 * dt_h;
-            let periodic =
-                outdoor.mean + outdoor.amp * (2.0 * std::f64::consts::PI * (t_future - outdoor.phase) / 24.0).sin();
+            let periodic = outdoor.mean
+                + outdoor.amp
+                    * (2.0 * std::f64::consts::PI * (t_future - outdoor.phase) / 24.0).sin();
             let fc_noise = if forecast_std > 0.0 {
                 forecast_std
-                    * (fc_rng.next_float() + fc_rng.next_float() + fc_rng.next_float() + fc_rng.next_float()
+                    * (fc_rng.next_float()
+                        + fc_rng.next_float()
+                        + fc_rng.next_float()
+                        + fc_rng.next_float()
                         - 2.0)
                     / 0.577
             } else {
@@ -859,20 +906,35 @@ mod tests {
 
     #[test]
     fn pid_settles_to_setpoint() {
-        let res = run_temp_control(base_cfg(ControllerSpec::Pid { kp: 4.0, ki: 2.0, kd: 0.5 }));
+        let res = run_temp_control(base_cfg(ControllerSpec::Pid {
+            kp: 4.0,
+            ki: 2.0,
+            kd: 0.5,
+        }));
         // After a 12-hour run the final indoor temperature should be close to the
         // 70°F setpoint.
         let final_t_in = *res.t_in.last().unwrap();
-        assert!((final_t_in - 70.0).abs() < 2.0, "did not settle: T_in={final_t_in}");
+        assert!(
+            (final_t_in - 70.0).abs() < 2.0,
+            "did not settle: T_in={final_t_in}"
+        );
         // And the controller should spend most of the run inside the comfort band.
-        assert!(res.comfort_pct > 0.5, "comfort too low: {}", res.comfort_pct);
+        assert!(
+            res.comfort_pct > 0.5,
+            "comfort too low: {}",
+            res.comfort_pct
+        );
     }
 
     #[test]
     fn bang_bang_respects_saturation() {
         let res = run_temp_control(base_cfg(ControllerSpec::BangBang));
         for rec in &res.trace {
-            assert!(rec.q >= -1e-9 && rec.q <= DEFAULT_HOUSE.q_max + 1e-9, "Q out of band: {}", rec.q);
+            assert!(
+                rec.q >= -1e-9 && rec.q <= DEFAULT_HOUSE.q_max + 1e-9,
+                "Q out of band: {}",
+                rec.q
+            );
         }
     }
 

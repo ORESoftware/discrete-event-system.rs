@@ -135,8 +135,15 @@ where
         let disturbance = adversary(&state);
         assert_eq!(control.len(), control_dim, "control dimension mismatch");
         assert!(control.iter().all(|v| v.is_finite()), "control not finite");
-        assert_eq!(disturbance.len(), disturbance_dim, "disturbance dimension mismatch");
-        assert!(disturbance.iter().all(|v| v.is_finite()), "disturbance not finite");
+        assert_eq!(
+            disturbance.len(),
+            disturbance_dim,
+            "disturbance dimension mismatch"
+        );
+        assert!(
+            disturbance.iter().all(|v| v.is_finite()),
+            "disturbance not finite"
+        );
 
         if tick >= num_steps || plant.terminal(&state, tick) {
             break;
@@ -160,7 +167,10 @@ where
             cost,
         });
     }
-    GameOutput { state_history, trace }
+    GameOutput {
+        state_history,
+        trace,
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -204,7 +214,13 @@ impl GamePlant for ScalarRobustPlant {
         vec![state[0] + dt * xdot]
     }
 
-    fn stage_cost(&self, _state: &[f64], control: &[f64], disturbance: &[f64], next: &[f64]) -> f64 {
+    fn stage_cost(
+        &self,
+        _state: &[f64],
+        control: &[f64],
+        disturbance: &[f64],
+        next: &[f64],
+    ) -> f64 {
         next[0] * next[0] + 0.02 * control[0] * control[0] - 0.02 * disturbance[0] * disturbance[0]
     }
 }
@@ -238,14 +254,34 @@ pub fn run_h_infinity_robust_control(
     let mut plant = ScalarRobustPlant { a, b };
     let controller = move |state: &[f64]| vec![clamp(-gain * state[0], -control_max, control_max)];
     let adversary = move |state: &[f64]| {
-        vec![if state[0] >= 0.0 { disturbance_max } else { -disturbance_max }]
+        vec![if state[0] >= 0.0 {
+            disturbance_max
+        } else {
+            -disturbance_max
+        }]
     };
-    let out = run_closed_loop_game(&mut plant, &[x0], dt, num_steps, 1, 1, controller, adversary);
+    let out = run_closed_loop_game(
+        &mut plant,
+        &[x0],
+        dt,
+        num_steps,
+        1,
+        1,
+        controller,
+        adversary,
+    );
 
     let state_energy: f64 = out.trace.iter().map(|r| r.state[0] * r.state[0]).sum();
-    let disturbance_energy: f64 = out.trace.iter().map(|r| r.disturbance[0] * r.disturbance[0]).sum();
+    let disturbance_energy: f64 = out
+        .trace
+        .iter()
+        .map(|r| r.disturbance[0] * r.disturbance[0])
+        .sum();
     let l2_gain_estimate = (state_energy / disturbance_energy.max(1e-12)).sqrt();
-    let peak_abs_state = out.state_history.iter().fold(0.0_f64, |acc, s| acc.max(s[0].abs()));
+    let peak_abs_state = out
+        .state_history
+        .iter()
+        .fold(0.0_f64, |acc, s| acc.max(s[0].abs()));
     let final_state = out.state_history.last().map(|s| s[0]).unwrap_or(x0);
 
     Ok(HInfinityRobustControlResult {
@@ -256,8 +292,16 @@ pub fn run_h_infinity_robust_control(
         gamma,
         bounded_by_gamma: l2_gain_estimate <= gamma,
         topology: station_graph_topology(
-            &["hinfinity-plant", "hinfinity-state-feedback-controller", "worst-case-disturbance-station"],
-            &["StateObservationToken", "ControlMoveToken", "DisturbanceMoveToken"],
+            &[
+                "hinfinity-plant",
+                "hinfinity-state-feedback-controller",
+                "worst-case-disturbance-station",
+            ],
+            &[
+                "StateObservationToken",
+                "ControlMoveToken",
+                "DisturbanceMoveToken",
+            ],
         ),
     })
 }
@@ -310,7 +354,13 @@ impl GamePlant for PursuitEvasionPlant {
         ]
     }
 
-    fn stage_cost(&self, _state: &[f64], _control: &[f64], _disturbance: &[f64], next: &[f64]) -> f64 {
+    fn stage_cost(
+        &self,
+        _state: &[f64],
+        _control: &[f64],
+        _disturbance: &[f64],
+        next: &[f64],
+    ) -> f64 {
         Self::distance(next)
     }
 
@@ -346,7 +396,13 @@ pub fn run_pursuit_evasion_game(
     Preconditions::non_negative(cls, "evaderSpeed", evader_speed)?;
     Preconditions::positive(cls, "captureRadius", capture_radius)?;
     Preconditions::positive("pursuit-evasion-plant", "dt", dt)?;
-    Preconditions::integer_in_range("pursuit-evasion-plant", "numSteps", num_steps as f64, 1.0, 1e9)?;
+    Preconditions::integer_in_range(
+        "pursuit-evasion-plant",
+        "numSteps",
+        num_steps as f64,
+        1.0,
+        1e9,
+    )?;
 
     let mut plant = PursuitEvasionPlant {
         capture_radius,
@@ -381,8 +437,16 @@ pub fn run_pursuit_evasion_game(
         capture_tick: plant.capture_tick,
         final_distance,
         topology: station_graph_topology(
-            &["pursuit-evasion-plant", "pure-pursuit-controller", "pure-evasion-controller"],
-            &["StateObservationToken", "ControlMoveToken", "DisturbanceMoveToken"],
+            &[
+                "pursuit-evasion-plant",
+                "pure-pursuit-controller",
+                "pure-evasion-controller",
+            ],
+            &[
+                "StateObservationToken",
+                "ControlMoveToken",
+                "DisturbanceMoveToken",
+            ],
         ),
     })
 }
@@ -409,7 +473,11 @@ mod tests {
         // The faster pursuer closes the gap and captures before the run ends.
         let capture = r.capture_tick.expect("expected a capture");
         assert!(capture > 0 && capture < 120, "capture_tick = {capture}");
-        assert!(r.final_distance <= 0.25 + 1e-9, "final_distance = {}", r.final_distance);
+        assert!(
+            r.final_distance <= 0.25 + 1e-9,
+            "final_distance = {}",
+            r.final_distance
+        );
         // Distance is monotonically non-increasing while closing in a straight line.
         assert!(r.distance_history[0] > r.final_distance);
     }

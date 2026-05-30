@@ -38,9 +38,7 @@ use crate::des::r#abstract::interfaces::{
     EntityGraphData, HasInput, HasInternalQueue, HasManyInputConnections, HasManyOutputConnections,
     HasOutput,
 };
-use crate::des::r#abstract::r#abstract::{
-    BidirectionalCore, Entity, EntityCore, EntityConnection,
-};
+use crate::des::r#abstract::r#abstract::{BidirectionalCore, Entity, EntityConnection, EntityCore};
 use crate::des::random_variables::rv::RandomVariable;
 use crate::des::shared::capabilities::RandomSource;
 use crate::des::shared::precision::{bgn, Decimal};
@@ -197,7 +195,10 @@ impl Entity for ProbabilityDecisionEntity {
                 }
             }
 
-            let out_conn = self.connections_out_by_index.get(&(index as usize)).cloned();
+            let out_conn = self
+                .connections_out_by_index
+                .get(&(index as usize))
+                .cloned();
             let out_conn = match out_conn {
                 Some(c) => c,
                 None => {
@@ -324,8 +325,14 @@ mod tests {
     #[test]
     fn constructs_with_valid_probabilities() {
         let probs = vec![
-            Branch { index: 0, prob: bgn(0.5) },
-            Branch { index: 1, prob: bgn(0.5) },
+            Branch {
+                index: 0,
+                prob: bgn(0.5),
+            },
+            Branch {
+                index: 1,
+                prob: bgn(0.5),
+            },
         ];
         let d = ProbabilityDecisionEntity::new(
             "prob1".to_string(),
@@ -339,7 +346,10 @@ mod tests {
     #[test]
     #[should_panic(expected = "probability sum too high")]
     fn rejects_probabilities_that_do_not_sum_to_one() {
-        let probs = vec![Branch { index: 0, prob: bgn(0.5) }];
+        let probs = vec![Branch {
+            index: 0,
+            prob: bgn(0.5),
+        }];
         let _ = ProbabilityDecisionEntity::new(
             "prob2".to_string(),
             probs,
@@ -350,7 +360,10 @@ mod tests {
 
     #[test]
     fn empty_queue_run_step_is_noop() {
-        let probs = vec![Branch { index: 0, prob: bgn(1.0) }];
+        let probs = vec![Branch {
+            index: 0,
+            prob: bgn(1.0),
+        }];
         let mut d = ProbabilityDecisionEntity::new(
             "prob3".to_string(),
             probs,
@@ -368,7 +381,10 @@ mod tests {
     fn run_step_without_wired_branch_panics() {
         // Faithful to the TS source, which throws `missing connection with index`
         // when a sampled branch has no out-connection.
-        let probs = vec![Branch { index: 0, prob: bgn(1.0) }];
+        let probs = vec![Branch {
+            index: 0,
+            prob: bgn(1.0),
+        }];
         let mut d = ProbabilityDecisionEntity::new(
             "prob4".to_string(),
             probs,

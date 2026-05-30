@@ -153,7 +153,11 @@ struct Person {
 
 impl Person {
     fn new(id: usize) -> Self {
-        Person { id, state: CompartmentId::S, history: vec![(CompartmentId::S, 0.0)] }
+        Person {
+            id,
+            state: CompartmentId::S,
+            history: vec![(CompartmentId::S, 0.0)],
+        }
     }
     fn transition(&mut self, to: CompartmentId, time: f64) {
         self.state = to;
@@ -205,7 +209,16 @@ impl WorldCensus {
         r: CompartmentRef,
         d: CompartmentRef,
     ) -> Self {
-        WorldCensus { id: id.into(), s, a, b, ab, r, d, counts: GlobalCounts::default() }
+        WorldCensus {
+            id: id.into(),
+            s,
+            a,
+            b,
+            ab,
+            r,
+            d,
+            counts: GlobalCounts::default(),
+        }
     }
 }
 
@@ -242,7 +255,12 @@ struct Compartment {
 }
 
 impl Compartment {
-    fn new(id: impl Into<String>, kind: CompartmentId, params: TwoDiseaseParams, rng: RngRef) -> Self {
+    fn new(
+        id: impl Into<String>,
+        kind: CompartmentId,
+        params: TwoDiseaseParams,
+        rng: RngRef,
+    ) -> Self {
         Compartment {
             id: id.into(),
             kind,
@@ -275,7 +293,14 @@ impl Compartment {
     }
 
     /// The S compartment: dual-exposure resolution (A, B, or AB).
-    fn run_s(&self, people: Vec<PersonRef>, counts: &GlobalCounts, n: f64, dt: f64, time: f64) -> Vec<PersonRef> {
+    fn run_s(
+        &self,
+        people: Vec<PersonRef>,
+        counts: &GlobalCounts,
+        n: f64,
+        dt: f64,
+        time: f64,
+    ) -> Vec<PersonRef> {
         let lambda_a = self.params.beta_a * (counts.a + counts.ab) / n;
         let lambda_b = self.params.beta_b * (counts.b + counts.ab) / n;
         let pmf = competing_risks(&[lambda_a, lambda_b], dt);
@@ -290,7 +315,11 @@ impl Compartment {
                 survivors.push(p);
                 continue;
             }
-            let mut final_state = if idx == 1 { CompartmentId::A } else { CompartmentId::B };
+            let mut final_state = if idx == 1 {
+                CompartmentId::A
+            } else {
+                CompartmentId::B
+            };
             if idx == 1 {
                 let p_b = 1.0 - (-lambda_b * dt).exp();
                 if rng.next_float() < p_b {
@@ -458,18 +487,42 @@ pub fn run_two_disease(params: &TwoDiseaseParams) -> TwoDiseaseResult {
     with_seed(params.seed, |global_rng| {
         let rng: RngRef = Rc::new(RefCell::new(mulberry32(params.seed)));
 
-        let s: CompartmentRef =
-            Rc::new(RefCell::new(Compartment::new("S", CompartmentId::S, *params, rng.clone())));
-        let a: CompartmentRef =
-            Rc::new(RefCell::new(Compartment::new("A", CompartmentId::A, *params, rng.clone())));
-        let b: CompartmentRef =
-            Rc::new(RefCell::new(Compartment::new("B", CompartmentId::B, *params, rng.clone())));
-        let ab: CompartmentRef =
-            Rc::new(RefCell::new(Compartment::new("AB", CompartmentId::AB, *params, rng.clone())));
-        let r: CompartmentRef =
-            Rc::new(RefCell::new(Compartment::new("R", CompartmentId::R, *params, rng.clone())));
-        let d: CompartmentRef =
-            Rc::new(RefCell::new(Compartment::new("D", CompartmentId::D, *params, rng.clone())));
+        let s: CompartmentRef = Rc::new(RefCell::new(Compartment::new(
+            "S",
+            CompartmentId::S,
+            *params,
+            rng.clone(),
+        )));
+        let a: CompartmentRef = Rc::new(RefCell::new(Compartment::new(
+            "A",
+            CompartmentId::A,
+            *params,
+            rng.clone(),
+        )));
+        let b: CompartmentRef = Rc::new(RefCell::new(Compartment::new(
+            "B",
+            CompartmentId::B,
+            *params,
+            rng.clone(),
+        )));
+        let ab: CompartmentRef = Rc::new(RefCell::new(Compartment::new(
+            "AB",
+            CompartmentId::AB,
+            *params,
+            rng.clone(),
+        )));
+        let r: CompartmentRef = Rc::new(RefCell::new(Compartment::new(
+            "R",
+            CompartmentId::R,
+            *params,
+            rng.clone(),
+        )));
+        let d: CompartmentRef = Rc::new(RefCell::new(Compartment::new(
+            "D",
+            CompartmentId::D,
+            *params,
+            rng.clone(),
+        )));
 
         let census: CensusRef = Rc::new(RefCell::new(WorldCensus::new(
             "census",
@@ -493,7 +546,10 @@ pub fn run_two_disease(params: &TwoDiseaseParams) -> TwoDiseaseResult {
 
         // Seed populations.
         let mut next_id = 0usize;
-        let init_s = params.n as i64 - params.initial_a as i64 - params.initial_b as i64 - params.initial_ab as i64;
+        let init_s = params.n as i64
+            - params.initial_a as i64
+            - params.initial_b as i64
+            - params.initial_ab as i64;
         if init_s < 0 {
             panic!("initial A + B + AB exceed N");
         }
@@ -527,13 +583,22 @@ pub fn run_two_disease(params: &TwoDiseaseParams) -> TwoDiseaseResult {
             all_people.push(p);
         }
 
-        let compartments = vec![s.clone(), a.clone(), b.clone(), ab.clone(), r.clone(), d.clone()];
+        let compartments = vec![
+            s.clone(),
+            a.clone(),
+            b.clone(),
+            ab.clone(),
+            r.clone(),
+            d.clone(),
+        ];
         let mut trace = TwoDiseaseTrace::default();
 
         let n_steps = (params.sim_t / params.step_size).round() as usize;
         for t in 0..n_steps {
             // 1. Census reads frozen counts.
-            census.borrow_mut().run_time_step(params.step_size, t as f64);
+            census
+                .borrow_mut()
+                .run_time_step(params.step_size, t as f64);
             // 2. Compartments process in shuffled order using frozen counts.
             let mut order = compartments.clone();
             fisher_yates_shuffle(&mut order, global_rng);
@@ -577,11 +642,22 @@ pub fn run_two_disease(params: &TwoDiseaseParams) -> TwoDiseaseResult {
                     .iter()
                     .any(|(st, _)| *st == CompartmentId::B || *st == CompartmentId::AB);
                 let ever_ab = pp.history.iter().any(|(st, _)| *st == CompartmentId::AB);
-                PerPerson { id: pp.id, final_state: pp.state, ever_a, ever_b, ever_ab }
+                PerPerson {
+                    id: pp.id,
+                    final_state: pp.state,
+                    ever_a,
+                    ever_b,
+                    ever_ab,
+                }
             })
             .collect();
 
-        TwoDiseaseResult { params: *params, trace, final_counts, per_person }
+        TwoDiseaseResult {
+            params: *params,
+            trace,
+            final_counts,
+            per_person,
+        }
     })
 }
 
@@ -590,11 +666,17 @@ pub fn run_two_disease(params: &TwoDiseaseParams) -> TwoDiseaseResult {
 // -----------------------------------------------------------------------------
 
 fn env_f64(key: &str, default: f64) -> f64 {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 fn env_usize(key: &str, default: usize) -> usize {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 fn mean(xs: &[f64]) -> f64 {
@@ -695,7 +777,13 @@ pub fn run() {
             result
                 .per_person
                 .iter()
-                .map(|p| if p.final_state == CompartmentId::D { 1.0 } else { 0.0 })
+                .map(|p| {
+                    if p.final_state == CompartmentId::D {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                })
                 .collect(),
         );
         traces.push(result.trace);
@@ -746,21 +834,39 @@ pub fn run() {
             mean(&final_deaths),
             std_dev(&final_deaths)
         );
-        println!("#     PB model  :  E[D] = {:.2}  std = {:.2}", pb_mean, pb_std);
+        println!(
+            "#     PB model  :  E[D] = {:.2}  std = {:.2}",
+            pb_mean, pb_std
+        );
     }
 
     // Dump for downstream analysis.
     let out_dir = std::path::Path::new("out");
     let _ = std::fs::create_dir_all(out_dir);
     let t_len = traces[0].t.len();
-    let mut mean_trace = TwoDiseaseTrace { t: traces[0].t.clone(), ..Default::default() };
+    let mut mean_trace = TwoDiseaseTrace {
+        t: traces[0].t.clone(),
+        ..Default::default()
+    };
     for i in 0..t_len {
-        mean_trace.s.push(mean(&traces.iter().map(|tr| tr.s[i]).collect::<Vec<_>>()));
-        mean_trace.a.push(mean(&traces.iter().map(|tr| tr.a[i]).collect::<Vec<_>>()));
-        mean_trace.b.push(mean(&traces.iter().map(|tr| tr.b[i]).collect::<Vec<_>>()));
-        mean_trace.ab.push(mean(&traces.iter().map(|tr| tr.ab[i]).collect::<Vec<_>>()));
-        mean_trace.r.push(mean(&traces.iter().map(|tr| tr.r[i]).collect::<Vec<_>>()));
-        mean_trace.d.push(mean(&traces.iter().map(|tr| tr.d[i]).collect::<Vec<_>>()));
+        mean_trace
+            .s
+            .push(mean(&traces.iter().map(|tr| tr.s[i]).collect::<Vec<_>>()));
+        mean_trace
+            .a
+            .push(mean(&traces.iter().map(|tr| tr.a[i]).collect::<Vec<_>>()));
+        mean_trace
+            .b
+            .push(mean(&traces.iter().map(|tr| tr.b[i]).collect::<Vec<_>>()));
+        mean_trace
+            .ab
+            .push(mean(&traces.iter().map(|tr| tr.ab[i]).collect::<Vec<_>>()));
+        mean_trace
+            .r
+            .push(mean(&traces.iter().map(|tr| tr.r[i]).collect::<Vec<_>>()));
+        mean_trace
+            .d
+            .push(mean(&traces.iter().map(|tr| tr.d[i]).collect::<Vec<_>>()));
     }
     let out_path = out_dir.join("two-disease-framework.json");
     let params_json = format!(
@@ -861,6 +967,10 @@ pub fn run() {
         };
         rec.set_charts(vec![scene::build_compartment_chart(&scene_trace, n_f)]);
         rec.finish().expect("finish recorder");
-        println!("# wrote {} ({} frames)", html_path.display(), rec.get_frame_count());
+        println!(
+            "# wrote {} ({} frames)",
+            html_path.display(),
+            rec.get_frame_count()
+        );
     }
 }

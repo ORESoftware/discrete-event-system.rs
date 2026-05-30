@@ -127,7 +127,10 @@ pub fn run() {
 
     println!("Series RLC step response: framework vs analytical + scipy LSODA");
     println!("=================================================================");
-    println!("  R={} ohm, L={} H, C={} F", ts.config.r, ts.config.l, ts.config.c);
+    println!(
+        "  R={} ohm, L={} H, C={} F",
+        ts.config.r, ts.config.l, ts.config.c
+    );
     println!(
         "  α = R/(2L) = {:.4} rad/s",
         ts.config.r / (2.0 * ts.config.l)

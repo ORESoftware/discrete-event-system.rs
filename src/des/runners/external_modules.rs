@@ -50,7 +50,10 @@ fn s(v: &str) -> ParamValue {
 }
 
 fn params(entries: &[(&str, ParamValue)]) -> ExternalModuleParams {
-    entries.iter().map(|(k, v)| (k.to_string(), v.clone())).collect()
+    entries
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.clone()))
+        .collect()
 }
 
 /// `stringParam(v, fallback)`.
@@ -78,7 +81,10 @@ fn number_param(v: Option<&ParamValue>, fallback: f64) -> Result<String, String>
                 ParamValue::Str(text) => text.trim().parse::<f64>().unwrap_or(f64::NAN),
             };
             if !num.is_finite() {
-                return Err(format!("expected finite numeric external param, got {}", param_to_string(pv)));
+                return Err(format!(
+                    "expected finite numeric external param, got {}",
+                    param_to_string(pv)
+                ));
             }
             Ok(num_to_js_string(num))
         }
@@ -107,7 +113,10 @@ fn join_out(ctx: &ExternalModuleContext, file: &str) -> String {
     ctx.module_out_dir.join(file).display().to_string()
 }
 
-fn build_neural_network(p: &ExternalModuleParams, ctx: &ExternalModuleContext) -> Result<Vec<String>, String> {
+fn build_neural_network(
+    p: &ExternalModuleParams,
+    ctx: &ExternalModuleContext,
+) -> Result<Vec<String>, String> {
     let out = string_param(p.get("out"), &join_out(ctx, "reference.json"));
     Ok(vec![
         "--out".into(),
@@ -133,7 +142,10 @@ fn build_neural_network(p: &ExternalModuleParams, ctx: &ExternalModuleContext) -
     ])
 }
 
-fn build_computer_network(p: &ExternalModuleParams, ctx: &ExternalModuleContext) -> Result<Vec<String>, String> {
+fn build_computer_network(
+    p: &ExternalModuleParams,
+    ctx: &ExternalModuleContext,
+) -> Result<Vec<String>, String> {
     let out = string_param(p.get("out"), &join_out(ctx, "reference.json"));
     let mut args = vec!["--out".to_string(), out];
     if p.get("problem").is_some() {
@@ -146,7 +158,10 @@ fn build_computer_network(p: &ExternalModuleParams, ctx: &ExternalModuleContext)
     Ok(args)
 }
 
-fn build_computer_network_fel(p: &ExternalModuleParams, ctx: &ExternalModuleContext) -> Result<Vec<String>, String> {
+fn build_computer_network_fel(
+    p: &ExternalModuleParams,
+    ctx: &ExternalModuleContext,
+) -> Result<Vec<String>, String> {
     let out = string_param(p.get("out"), &join_out(ctx, "fel-reference.json"));
     let mut args = vec!["--out".to_string(), out];
     if p.get("problem").is_some() {
@@ -159,7 +174,10 @@ fn build_computer_network_fel(p: &ExternalModuleParams, ctx: &ExternalModuleCont
     Ok(args)
 }
 
-fn build_ip_mip(p: &ExternalModuleParams, ctx: &ExternalModuleContext) -> Result<Vec<String>, String> {
+fn build_ip_mip(
+    p: &ExternalModuleParams,
+    ctx: &ExternalModuleContext,
+) -> Result<Vec<String>, String> {
     let out = string_param(p.get("out"), &join_out(ctx, "reference.json"));
     Ok(vec![
         "--problem".into(),
@@ -173,24 +191,56 @@ fn build_ip_mip(p: &ExternalModuleParams, ctx: &ExternalModuleContext) -> Result
     ])
 }
 
-fn build_traffic_simpy(p: &ExternalModuleParams, ctx: &ExternalModuleContext) -> Result<Vec<String>, String> {
+fn build_traffic_simpy(
+    p: &ExternalModuleParams,
+    ctx: &ExternalModuleContext,
+) -> Result<Vec<String>, String> {
     let out = string_param(p.get("out"), &join_out(ctx, "traffic-simpy-reference.json"));
-    Ok(vec!["--problem".into(), string_param(p.get("problem"), ""), "--out".into(), out])
+    Ok(vec![
+        "--problem".into(),
+        string_param(p.get("problem"), ""),
+        "--out".into(),
+        out,
+    ])
 }
 
-fn build_traffic_ciw(p: &ExternalModuleParams, ctx: &ExternalModuleContext) -> Result<Vec<String>, String> {
+fn build_traffic_ciw(
+    p: &ExternalModuleParams,
+    ctx: &ExternalModuleContext,
+) -> Result<Vec<String>, String> {
     let out = string_param(p.get("out"), &join_out(ctx, "traffic-ciw-reference.json"));
-    Ok(vec!["--problem".into(), string_param(p.get("problem"), ""), "--out".into(), out])
+    Ok(vec![
+        "--problem".into(),
+        string_param(p.get("problem"), ""),
+        "--out".into(),
+        out,
+    ])
 }
 
-fn build_traffic_fel(p: &ExternalModuleParams, ctx: &ExternalModuleContext) -> Result<Vec<String>, String> {
+fn build_traffic_fel(
+    p: &ExternalModuleParams,
+    ctx: &ExternalModuleContext,
+) -> Result<Vec<String>, String> {
     let out = string_param(p.get("out"), &join_out(ctx, "traffic-fel-reference.json"));
-    Ok(vec!["--problem".into(), string_param(p.get("problem"), ""), "--out".into(), out])
+    Ok(vec![
+        "--problem".into(),
+        string_param(p.get("problem"), ""),
+        "--out".into(),
+        out,
+    ])
 }
 
-fn build_traffic_sumo(p: &ExternalModuleParams, ctx: &ExternalModuleContext) -> Result<Vec<String>, String> {
+fn build_traffic_sumo(
+    p: &ExternalModuleParams,
+    ctx: &ExternalModuleContext,
+) -> Result<Vec<String>, String> {
     let out = string_param(p.get("out"), &join_out(ctx, "sumo-reference.json"));
-    let mut args = vec!["--problem".to_string(), string_param(p.get("problem"), ""), "--out".to_string(), out];
+    let mut args = vec![
+        "--problem".to_string(),
+        string_param(p.get("problem"), ""),
+        "--out".to_string(),
+        out,
+    ];
     if p.get("workdir").is_some() {
         args.push("--workdir".into());
         args.push(string_param(p.get("workdir"), ""));

@@ -111,7 +111,10 @@ pub fn run() {
     );
     println!(
         "  travel={}s/floor, service={}s, λ={}/s, simT={}s",
-        ts.config.floor_travel_time, ts.config.service_time, ts.config.arrival_rate, ts.config.sim_t
+        ts.config.floor_travel_time,
+        ts.config.service_time,
+        ts.config.arrival_rate,
+        ts.config.sim_t
     );
     println!("  framework dt = {}s", ts.config.step_size);
     println!();
@@ -202,7 +205,10 @@ pub fn run() {
         mean_abs_exit,
         mean_abs_exit / ts.config.step_size
     );
-    println!("    max  |board diff|             = {:.3} s", max_board_diff);
+    println!(
+        "    max  |board diff|             = {:.3} s",
+        max_board_diff
+    );
     println!("    max  |exit  diff|             = {:.3} s", max_exit_diff);
     if unmatched > 0 {
         println!("  WARN: {} unmatched persons", unmatched);

@@ -33,7 +33,7 @@ use crate::des::r#abstract::interfaces::{
     HasOutput,
 };
 use crate::des::r#abstract::r#abstract::{
-    BidirectionalCore, Entity, EntityCore, EntityConnection, TimeStepOpts,
+    BidirectionalCore, Entity, EntityConnection, EntityCore, TimeStepOpts,
 };
 use crate::des::random_variables::rv::RandomVariable;
 use crate::des::shared::precision::Decimal;

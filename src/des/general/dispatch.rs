@@ -384,7 +384,8 @@ impl Transform<DispatchProblem, LPProblem> for BuildDispatchFluidLP {
         for mm in 0..m {
             let mut row = vec![0.0; n];
             for c in 0..k {
-                row[c * m + mm] = arrival_rate * class_prob[c] / f64::max(1e-12, service_rate[c][mm]);
+                row[c * m + mm] =
+                    arrival_rate * class_prob[c] / f64::max(1e-12, service_rate[c][mm]);
             }
             row[t_idx] = -1.0;
             a_ub.push(row);
@@ -395,8 +396,9 @@ impl Transform<DispatchProblem, LPProblem> for BuildDispatchFluidLP {
             .map(|i| format!("x_{}_{}", i / m + 1, i % m + 1))
             .collect();
         var_names.push("t".to_string());
-        let mut con_names: Vec<String> =
-            (0..k).map(|c| format!("class-{} fully served", c + 1)).collect();
+        let mut con_names: Vec<String> = (0..k)
+            .map(|c| format!("class-{} fully served", c + 1))
+            .collect();
         con_names.extend((0..m).map(|mm| format!("machine-{} <= t", mm + 1)));
 
         LPProblem {
@@ -486,7 +488,7 @@ impl Transform<DispatchProblem, FluidLpPolicyResult> for PolicyFluidLP {
             seed,
             rng: mulberry32(seed),
         };
-        
+
         FluidLpPolicyResult {
             policy,
             x,
@@ -699,7 +701,7 @@ impl Transform<DispatchProblem, MdpViPolicyResult> for PolicyMDPVI {
             m,
             k,
         };
-        
+
         MdpViPolicyResult {
             policy,
             v: vi.v.clone(),
@@ -768,7 +770,11 @@ fn clone_state(s: &MctsDispatchState) -> MctsDispatchState {
 }
 
 /// Advance one decision epoch and apply `action` (TS `advance`).
-fn advance(env: &DispatchMctsEnv, s: &MctsDispatchState, action: usize) -> ApplyResult<MctsDispatchState> {
+fn advance(
+    env: &DispatchMctsEnv,
+    s: &MctsDispatchState,
+    action: usize,
+) -> ApplyResult<MctsDispatchState> {
     let mut out = clone_state(s);
     let mut local_rng = mulberry32(out.rng_seed);
     if out.cursor >= out.arrival_q.len() {
@@ -825,7 +831,8 @@ fn advance(env: &DispatchMctsEnv, s: &MctsDispatchState, action: usize) -> Apply
         out.class_queue[action].push(head.class_of as i64);
     }
     out.q[action] += 1;
-    let sojourn_est = out.q[action] as f64 / f64::max(1e-12, env.service_rate[head.class_of][action]);
+    let sojourn_est =
+        out.q[action] as f64 / f64::max(1e-12, env.service_rate[head.class_of][action]);
     out.cursor += 1;
     if out.cursor >= out.arrival_q.len() {
         out.arrival_q.push(PendingJob {
@@ -923,7 +930,11 @@ impl DispatchPolicy for MctsPolicy {
             arrival_q,
             cursor: 0,
             now: state.now,
-            rng_seed: if self.next_seed == 0 { 1 } else { self.next_seed },
+            rng_seed: if self.next_seed == 0 {
+                1
+            } else {
+                self.next_seed
+            },
         };
         let env = DispatchMctsEnv {
             m: self.m,
@@ -1068,8 +1079,10 @@ impl Transform<WelchTInput, f64> for WelchT {
         let WelchTInput { a, b } = input;
         let ma = a.iter().sum::<f64>() / a.len() as f64;
         let mb = b.iter().sum::<f64>() / b.len() as f64;
-        let va = a.iter().map(|v| (v - ma).powi(2)).sum::<f64>() / ((a.len() as i64 - 1).max(1) as f64);
-        let vb = b.iter().map(|v| (v - mb).powi(2)).sum::<f64>() / ((b.len() as i64 - 1).max(1) as f64);
+        let va =
+            a.iter().map(|v| (v - ma).powi(2)).sum::<f64>() / ((a.len() as i64 - 1).max(1) as f64);
+        let vb =
+            b.iter().map(|v| (v - mb).powi(2)).sum::<f64>() / ((b.len() as i64 - 1).max(1) as f64);
         (ma - mb) / (va / a.len() as f64 + vb / b.len() as f64 + 1e-30).sqrt()
     }
 }

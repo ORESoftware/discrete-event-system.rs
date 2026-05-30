@@ -164,7 +164,10 @@ fn shuffle_in_place<T>(arr: &mut [T], rng: &mut dyn FnMut() -> f64) {
 ///
 /// Each tick: compute "any participant has work?", shuffle the order (if
 /// enabled), tick every participant, then fire `on_tick`.
-pub fn run_iterative_des(stations: Vec<StationRef>, opts: IterativeRunOptions) -> IterativeRunSummary {
+pub fn run_iterative_des(
+    stations: Vec<StationRef>,
+    opts: IterativeRunOptions,
+) -> IterativeRunSummary {
     let IterativeRunOptions {
         max_ticks,
         mut stop_when,
@@ -262,7 +265,11 @@ pub fn run_iterative_des(stations: Vec<StationRef>, opts: IterativeRunOptions) -
         if !all_checks.is_empty() {
             let ok = all_checks.iter().all(|c| c.passed);
             if !ok {
-                let failed: Vec<&str> = all_checks.iter().filter(|c| !c.passed).map(|c| c.name.as_str()).collect();
+                let failed: Vec<&str> = all_checks
+                    .iter()
+                    .filter(|c| !c.passed)
+                    .map(|c| c.name.as_str())
+                    .collect();
                 eprintln!(
                     "[run_iterative_des] {}/{} validators FAILED after {tick} ticks: {}",
                     failed.len(),
@@ -301,7 +308,11 @@ pub fn failed_validation_checks(summary: &IterativeRunSummary) -> Vec<Validation
 
 /// Comma-joined names of the failed validation checks.
 pub fn validation_failure_names(summary: &IterativeRunSummary) -> String {
-    failed_validation_checks(summary).iter().map(|c| c.name.clone()).collect::<Vec<_>>().join(", ")
+    failed_validation_checks(summary)
+        .iter()
+        .map(|c| c.name.clone())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Return `Err` if any validation check failed (TS threw an `Error`).
@@ -309,7 +320,10 @@ pub fn validation_failure_names(summary: &IterativeRunSummary) -> String {
 /// A validation failure is a recoverable, expected runtime outcome (not an
 /// invariant bug), so per the repo's error convention this returns
 /// `Result<(), String>` rather than `panic!`-ing.
-pub fn assert_no_validation_failures(summary: &IterativeRunSummary, model_name: &str) -> Result<(), String> {
+pub fn assert_no_validation_failures(
+    summary: &IterativeRunSummary,
+    model_name: &str,
+) -> Result<(), String> {
     let names = validation_failure_names(summary);
     if !names.is_empty() {
         let n = failed_validation_checks(summary).len();
@@ -336,7 +350,11 @@ mod tests {
 
     impl Countdown {
         fn new(id: &str, remaining: usize) -> Self {
-            Countdown { core: StationCore::new(id), remaining, ticks: 0 }
+            Countdown {
+                core: StationCore::new(id),
+                remaining,
+                ticks: 0,
+            }
         }
     }
 
@@ -393,7 +411,10 @@ mod tests {
         let s = Rc::new(RefCell::new(Countdown::new("cd", 4)));
         let summary = run_iterative_des(
             vec![s.clone() as StationRef],
-            IterativeRunOptions { shuffle: false, ..Default::default() },
+            IterativeRunOptions {
+                shuffle: false,
+                ..Default::default()
+            },
         );
         assert_eq!(summary.reason, Some(RunReason::Done));
         assert_eq!(summary.ticks, 4);
@@ -405,16 +426,24 @@ mod tests {
 
     #[test]
     fn respects_max_ticks_and_stop_when() {
-        let forever = Rc::new(RefCell::new(Forever { core: StationCore::new("inf") }));
+        let forever = Rc::new(RefCell::new(Forever {
+            core: StationCore::new("inf"),
+        }));
         let summary = run_iterative_des(
             vec![forever.clone() as StationRef],
-            IterativeRunOptions { max_ticks: Some(5), shuffle: false, ..Default::default() },
+            IterativeRunOptions {
+                max_ticks: Some(5),
+                shuffle: false,
+                ..Default::default()
+            },
         );
         assert_eq!(summary.reason, Some(RunReason::MaxTicks));
         assert_eq!(summary.ticks, 5);
 
         // stop_when fires before max_ticks.
-        let forever2 = Rc::new(RefCell::new(Forever { core: StationCore::new("inf2") }));
+        let forever2 = Rc::new(RefCell::new(Forever {
+            core: StationCore::new("inf2"),
+        }));
         let summary = run_iterative_des(
             vec![forever2 as StationRef],
             IterativeRunOptions {
@@ -445,7 +474,13 @@ mod tests {
             s.borrow_mut().add_validator(v);
         }
 
-        let ticks = run_result_station(s.clone(), IterativeRunOptions { shuffle: false, ..Default::default() });
+        let ticks = run_result_station(
+            s.clone(),
+            IterativeRunOptions {
+                shuffle: false,
+                ..Default::default()
+            },
+        );
         assert_eq!(ticks, 3);
 
         // Re-run via the raw runner to inspect the validation summary.
@@ -463,7 +498,13 @@ mod tests {
                 .boxed();
             s2.borrow_mut().add_validator(v);
         }
-        let summary = run_iterative_des(vec![s2 as StationRef], IterativeRunOptions { shuffle: false, ..Default::default() });
+        let summary = run_iterative_des(
+            vec![s2 as StationRef],
+            IterativeRunOptions {
+                shuffle: false,
+                ..Default::default()
+            },
+        );
         assert_eq!(summary.validation_ok, Some(true));
         assert_eq!(summary.validation.as_ref().map(|v| v.len()), Some(1));
         assert!(assert_no_validation_failures(&summary, "test-model").is_ok());

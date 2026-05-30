@@ -92,7 +92,9 @@ mod tests {
         while (removed.len() as i32) < target {
             let i = (rng.next_float() * n as f64).floor() as i32;
             if !removed.contains(&i) {
-                let val = q.remove(&format!("k{i}")).expect("remove should find the key");
+                let val = q
+                    .remove(&format!("k{i}"))
+                    .expect("remove should find the key");
                 assert_eq!(val, i, "remove returned the wrong value at i={i}");
                 removed.insert(i);
             }

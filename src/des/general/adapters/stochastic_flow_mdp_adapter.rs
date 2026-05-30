@@ -43,8 +43,19 @@ pub struct StochasticFlowMDPParams {
     pub max_policy_rows: Option<usize>,
 }
 
-fn num(min: Option<f64>, max: Option<f64>, integer: Option<bool>, default: Option<f64>) -> ParamSchema {
-    ParamSchema::Number { min, max, integer, default, description: None }
+fn num(
+    min: Option<f64>,
+    max: Option<f64>,
+    integer: Option<bool>,
+    default: Option<f64>,
+) -> ParamSchema {
+    ParamSchema::Number {
+        min,
+        max,
+        integer,
+        default,
+        description: None,
+    }
 }
 
 fn stochastic_flow_edge_schema() -> ParamSchema {
@@ -52,12 +63,22 @@ fn stochastic_flow_edge_schema() -> ParamSchema {
         fields: vec![
             ("from".to_string(), num(Some(0.0), None, Some(true), None)),
             ("to".to_string(), num(Some(0.0), None, Some(true), None)),
-            ("capacity".to_string(), num(Some(0.0), None, Some(true), None)),
-            ("successProb".to_string(), num(Some(0.0), Some(1.0), None, None)),
+            (
+                "capacity".to_string(),
+                num(Some(0.0), None, Some(true), None),
+            ),
+            (
+                "successProb".to_string(),
+                num(Some(0.0), Some(1.0), None, None),
+            ),
             ("cost".to_string(), num(Some(0.0), None, None, None)),
             (
                 "name".to_string(),
-                ParamSchema::String { allowed: None, default: None, description: None },
+                ParamSchema::String {
+                    allowed: None,
+                    default: None,
+                    description: None,
+                },
             ),
         ],
         required: Some(vec![
@@ -73,7 +94,10 @@ fn stochastic_flow_edge_schema() -> ParamSchema {
 fn stochastic_flow_problem_schema() -> ParamSchema {
     ParamSchema::Object {
         fields: vec![
-            ("numNodes".to_string(), num(Some(2.0), None, Some(true), None)),
+            (
+                "numNodes".to_string(),
+                num(Some(2.0), None, Some(true), None),
+            ),
             ("source".to_string(), num(Some(0.0), None, Some(true), None)),
             ("sink".to_string(), num(Some(0.0), None, Some(true), None)),
             (
@@ -85,12 +109,27 @@ fn stochastic_flow_problem_schema() -> ParamSchema {
                     description: None,
                 },
             ),
-            ("horizon".to_string(), num(Some(1.0), None, Some(true), None)),
-            ("deliveredReward".to_string(), num(Some(1e-9), None, None, None)),
+            (
+                "horizon".to_string(),
+                num(Some(1.0), None, Some(true), None),
+            ),
+            (
+                "deliveredReward".to_string(),
+                num(Some(1e-9), None, None, None),
+            ),
             ("waitPenalty".to_string(), num(Some(0.0), None, None, None)),
-            ("failurePenalty".to_string(), num(Some(0.0), None, None, None)),
-            ("discount".to_string(), num(Some(0.0), Some(1.0), None, None)),
-            ("maxStates".to_string(), num(Some(1.0), None, Some(true), None)),
+            (
+                "failurePenalty".to_string(),
+                num(Some(0.0), None, None, None),
+            ),
+            (
+                "discount".to_string(),
+                num(Some(0.0), Some(1.0), None, None),
+            ),
+            (
+                "maxStates".to_string(),
+                num(Some(1.0), None, Some(true), None),
+            ),
         ],
         required: Some(vec![
             "numNodes".to_string(),
@@ -99,7 +138,9 @@ fn stochastic_flow_problem_schema() -> ParamSchema {
             "edges".to_string(),
             "horizon".to_string(),
         ]),
-        description: Some("Finite-horizon stochastic flow-control MDP on a directed network.".to_string()),
+        description: Some(
+            "Finite-horizon stochastic flow-control MDP on a directed network.".to_string(),
+        ),
     }
 }
 
@@ -117,11 +158,15 @@ pub fn stochastic_flow_mdp_schema() -> ParamSchema {
             ),
             ("problem".to_string(), stochastic_flow_problem_schema()),
             ("seed".to_string(), num(None, None, Some(true), Some(7.0))),
-            ("maxPolicyRows".to_string(), num(Some(1.0), None, Some(true), Some(24.0))),
+            (
+                "maxPolicyRows".to_string(),
+                num(Some(1.0), None, Some(true), Some(24.0)),
+            ),
         ],
         required: Some(vec![]),
         description: Some(
-            "MDP interpretation of max-flow when edge availability/capacity is stochastic.".to_string(),
+            "MDP interpretation of max-flow when edge availability/capacity is stochastic."
+                .to_string(),
         ),
     }
 }
@@ -134,7 +179,9 @@ pub fn adapter() -> StochasticFlowMDPAdapter {
     StochasticFlowMDPAdapter
 }
 
-impl DESModelRegistration<StochasticFlowMDPParams, StochasticFlowMDPResult> for StochasticFlowMDPAdapter {
+impl DESModelRegistration<StochasticFlowMDPParams, StochasticFlowMDPResult>
+    for StochasticFlowMDPAdapter
+{
     fn id(&self) -> &str {
         "stochastic-flow-mdp"
     }
@@ -152,12 +199,10 @@ impl DESModelRegistration<StochasticFlowMDPParams, StochasticFlowMDPResult> for 
         params: StochasticFlowMDPParams,
         runtime: &DESRuntimeConfig,
     ) -> StochasticFlowMDPResult {
-        let seed = runtime
-            .seed
-            .map(|s| s as u32)
-            .or(params.seed)
-            .unwrap_or(7);
-        let problem = params.problem.unwrap_or_else(build_default_stochastic_flow_mdp_problem);
+        let seed = runtime.seed.map(|s| s as u32).or(params.seed).unwrap_or(7);
+        let problem = params
+            .problem
+            .unwrap_or_else(build_default_stochastic_flow_mdp_problem);
         solve_stochastic_flow_mdp(
             problem,
             SolveStochasticFlowMDPOptions {
@@ -201,7 +246,12 @@ impl DESModelRegistration<StochasticFlowMDPParams, StochasticFlowMDPResult> for 
         for row in &result.policy {
             let caps = format!(
                 "[{}]",
-                row.state.capacities.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(",")
+                row.state
+                    .capacities
+                    .iter()
+                    .map(|c| c.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
             );
             lines.push(json_csv_row([
                 row.stage.to_string(),
@@ -230,7 +280,10 @@ impl DESModelRegistration<StochasticFlowMDPParams, StochasticFlowMDPResult> for 
                     seed: Some(7),
                     max_policy_rows: None,
                 },
-                runtime: Some(DESRuntimeConfig { seed: Some(7.0), ..Default::default() }),
+                runtime: Some(DESRuntimeConfig {
+                    seed: Some(7.0),
+                    ..Default::default()
+                }),
                 metadata: None,
             },
         }]

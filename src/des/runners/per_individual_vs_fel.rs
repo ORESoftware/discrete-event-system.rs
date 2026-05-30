@@ -20,7 +20,9 @@ use super::fel_runner::run_fel_once;
 use super::framework_runner::run_framework_once;
 use super::per_individual_runner::run_per_individual_once;
 use super::stats::{mean, stddev, welch};
-use super::types::{default_config, RunOpts, RunResult, ServiceDiscipline, SimConfig, COMPARTMENT_ORDER};
+use super::types::{
+    default_config, RunOpts, RunResult, ServiceDiscipline, SimConfig, COMPARTMENT_ORDER,
+};
 
 fn fmt(n: f64, d: usize) -> String {
     if n.is_finite() {
@@ -48,12 +50,20 @@ fn pad_start(s: &str, width: usize) -> String {
 
 fn collect_split(rs: &[RunResult], from: &str, to: &str) -> Vec<f64> {
     rs.iter()
-        .map(|r| r.split_probs.get(from).and_then(|m| m.get(to)).copied().unwrap_or(0.0))
+        .map(|r| {
+            r.split_probs
+                .get(from)
+                .and_then(|m| m.get(to))
+                .copied()
+                .unwrap_or(0.0)
+        })
         .collect()
 }
 
 fn collect_pop(rs: &[RunResult], c: &str) -> Vec<f64> {
-    rs.iter().map(|r| r.time_avg_populations.get(c).copied().unwrap_or(0.0)).collect()
+    rs.iter()
+        .map(|r| r.time_avg_populations.get(c).copied().unwrap_or(0.0))
+        .collect()
 }
 
 struct Kernel<'a> {
@@ -87,9 +97,15 @@ fn report_table(label: &str, kernels: &[Kernel], cfg: &SimConfig) {
         let mut cells = String::new();
         for k in kernels {
             let xs = collect_split(k.runs, from, to);
-            cells += &pad_start(&format!("{} ± {}", fmt(mean(&xs), 4), fmt(stddev(&xs), 4)), 28);
+            cells += &pad_start(
+                &format!("{} ± {}", fmt(mean(&xs), 4), fmt(stddev(&xs), 4)),
+                28,
+            );
         }
-        let w = welch(&collect_split(kernels[0].runs, from, to), &collect_split(kernels[1].runs, from, to));
+        let w = welch(
+            &collect_split(kernels[0].runs, from, to),
+            &collect_split(kernels[1].runs, from, to),
+        );
         let verdict = if w.reject95 { "NO (95%)" } else { "yes" };
         println!(
             "{}{cells}      t={}   p={}   {verdict}",
@@ -103,9 +119,15 @@ fn report_table(label: &str, kernels: &[Kernel], cfg: &SimConfig) {
         let mut cells = String::new();
         for k in kernels {
             let xs = collect_pop(k.runs, c);
-            cells += &pad_start(&format!("{} ± {}", fmt(mean(&xs), 3), fmt(stddev(&xs), 3)), 28);
+            cells += &pad_start(
+                &format!("{} ± {}", fmt(mean(&xs), 3), fmt(stddev(&xs), 3)),
+                28,
+            );
         }
-        let w = welch(&collect_pop(kernels[0].runs, c), &collect_pop(kernels[1].runs, c));
+        let w = welch(
+            &collect_pop(kernels[0].runs, c),
+            &collect_pop(kernels[1].runs, c),
+        );
         let verdict = if w.reject99 {
             "NO (99%)"
         } else if w.reject95 {
@@ -124,8 +146,14 @@ fn report_table(label: &str, kernels: &[Kernel], cfg: &SimConfig) {
 
 /// `main()` — run the per-individual vs FEL convergence study.
 pub fn run() {
-    let n: usize = std::env::var("N").ok().and_then(|s| s.parse().ok()).unwrap_or(30);
-    let pi_config = SimConfig { step_size: 0.1, ..default_config() };
+    let n: usize = std::env::var("N")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(30);
+    let pi_config = SimConfig {
+        step_size: 0.1,
+        ..default_config()
+    };
     let default_cfg = default_config();
 
     println!(
@@ -141,7 +169,10 @@ pub fn run() {
     for i in 0..n {
         pi_runs.push(run_per_individual_once(
             &pi_config,
-            &RunOpts { seed: Some(0x60000 + i as u64), ..Default::default() },
+            &RunOpts {
+                seed: Some(0x60000 + i as u64),
+                ..Default::default()
+            },
         ));
         fel_runs.push(run_fel_once(
             &default_cfg,
@@ -153,7 +184,10 @@ pub fn run() {
         ));
         fw_runs.push(run_framework_once(
             &pi_config,
-            &RunOpts { seed: Some(0x80000 + i as u64), ..Default::default() },
+            &RunOpts {
+                seed: Some(0x80000 + i as u64),
+                ..Default::default()
+            },
         ));
     }
     let elapsed = t0.elapsed().as_millis();
@@ -176,8 +210,14 @@ pub fn run() {
             pi_config.step_size
         ),
         &[
-            Kernel { name: "per-individual", runs: &pi_runs },
-            Kernel { name: "fel", runs: &fel_runs },
+            Kernel {
+                name: "per-individual",
+                runs: &pi_runs,
+            },
+            Kernel {
+                name: "fel",
+                runs: &fel_runs,
+            },
         ],
         &pi_config,
     );
@@ -188,8 +228,14 @@ pub fn run() {
             pi_config.step_size
         ),
         &[
-            Kernel { name: "per-individual", runs: &pi_runs },
-            Kernel { name: "three-queue", runs: &fw_runs },
+            Kernel {
+                name: "per-individual",
+                runs: &pi_runs,
+            },
+            Kernel {
+                name: "three-queue",
+                runs: &fw_runs,
+            },
         ],
         &pi_config,
     );
@@ -226,11 +272,20 @@ pub fn run() {
     let pi_conv_runs: Vec<Vec<RunResult>> = step_sweep
         .iter()
         .map(|&ss| {
-            let cfg = SimConfig { step_size: ss, ..default_cfg.clone() };
+            let cfg = SimConfig {
+                step_size: ss,
+                ..default_cfg.clone()
+            };
             let mut reps: Vec<RunResult> = Vec::new();
             for i in 0..n_conv {
                 let seed = 0xB0000 + i as u64 + (ss * 1000.0).round() as u64;
-                reps.push(run_per_individual_once(&cfg, &RunOpts { seed: Some(seed), ..Default::default() }));
+                reps.push(run_per_individual_once(
+                    &cfg,
+                    &RunOpts {
+                        seed: Some(seed),
+                        ..Default::default()
+                    },
+                ));
             }
             reps
         })

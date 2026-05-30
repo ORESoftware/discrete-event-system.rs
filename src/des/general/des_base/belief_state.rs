@@ -39,7 +39,10 @@ pub struct ActionObservationToken<A = f64, O = f64> {
 
 impl<A, O> ActionObservationToken<A, O> {
     pub fn new(action: A, observation: O) -> Self {
-        ActionObservationToken { action, observation }
+        ActionObservationToken {
+            action,
+            observation,
+        }
     }
 }
 
@@ -125,13 +128,16 @@ pub trait BeliefStateStation<A: 'static = f64, O: 'static = f64>: DESStation {
         A: 'static,
         O: 'static,
     {
-        let tokens = self.core_mut().drain::<ActionObservationToken<A, O>>(CH_INPUT);
+        let tokens = self
+            .core_mut()
+            .drain::<ActionObservationToken<A, O>>(CH_INPUT);
         for t in tokens {
             let cur = self.belief_core().belief.clone();
             let next = self.belief_update(&cur, &t.action, &t.observation);
             self.belief_core_mut().belief = next.clone();
             self.belief_core_mut().belief_history.push(next.clone());
-            self.core_mut().emit(Rc::new(BeliefToken { belief: next }), CH_BELIEF);
+            self.core_mut()
+                .emit(Rc::new(BeliefToken { belief: next }), CH_BELIEF);
         }
     }
 
@@ -194,8 +200,8 @@ pub trait BeliefStateStation<A: 'static = f64, O: 'static = f64>: DESStation {
 
 #[cfg(test)]
 mod tests {
+    use super::super::station::{DESStation, StationCore};
     use super::*;
-    use super::super::station::{StationCore, DESStation};
     use std::any::Any;
 
     /// 2-state identity-transition HMM; the observation favours the matching
@@ -301,8 +307,10 @@ mod tests {
     fn run_time_step_updates_and_picks() {
         let mut f = Filter::new(None);
         assert!(!f.has_work());
-        f.core_mut()
-            .take(Rc::new(ActionObservationToken::new(0usize, 0usize)), CH_INPUT);
+        f.core_mut().take(
+            Rc::new(ActionObservationToken::new(0usize, 0usize)),
+            CH_INPUT,
+        );
         assert!(f.has_work());
         f.run_time_step();
         let b = f.get_belief().to_vec();

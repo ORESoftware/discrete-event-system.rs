@@ -274,7 +274,6 @@ impl RK45Integrator {
     }
 }
 
-
 impl<F> Transform<IVP<F>, ODETrace> for RK45Integrator
 where
     F: Fn(f64, &[f64]) -> Vec<f64>,
@@ -340,12 +339,13 @@ where
                 .iter()
                 .enumerate()
                 .map(|(i, v)| {
-                    v + h * (A71 * k1[i]
-                        + A72 * k2[i]
-                        + A73 * k3[i]
-                        + A74 * k4[i]
-                        + A75 * k5[i]
-                        + A76 * k6[i])
+                    v + h
+                        * (A71 * k1[i]
+                            + A72 * k2[i]
+                            + A73 * k3[i]
+                            + A74 * k4[i]
+                            + A75 * k5[i]
+                            + A76 * k6[i])
                 })
                 .collect();
             let k7 = f(tn + h, &y5);
@@ -402,12 +402,20 @@ pub struct BackwardEulerIntegrator {
 
 impl BackwardEulerIntegrator {
     pub fn new(dt: f64, newton_tol: f64, newton_max_iter: usize) -> Self {
-        BackwardEulerIntegrator { dt, newton_tol, newton_max_iter }
+        BackwardEulerIntegrator {
+            dt,
+            newton_tol,
+            newton_max_iter,
+        }
     }
 
     /// Construct with the TS default Newton settings (`tol=1e-10`, `maxIter=50`).
     pub fn with_dt(dt: f64) -> Self {
-        BackwardEulerIntegrator { dt, newton_tol: 1e-10, newton_max_iter: 50 }
+        BackwardEulerIntegrator {
+            dt,
+            newton_tol: 1e-10,
+            newton_max_iter: 50,
+        }
     }
 }
 

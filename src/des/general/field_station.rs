@@ -173,7 +173,11 @@ pub struct FieldSimulationOptions {
 
 impl Default for FieldSimulationOptions {
     fn default() -> Self {
-        FieldSimulationOptions { seed: 1, shuffle: true, record_trace: true }
+        FieldSimulationOptions {
+            seed: 1,
+            shuffle: true,
+            record_trace: true,
+        }
     }
 }
 
@@ -262,7 +266,11 @@ impl FieldSimulation {
             }
         }
         let final_values: Vec<f64> = self.fields.iter().map(|f| f.borrow().value).collect();
-        FieldSimulationResult { trace: FieldTrace { t, values }, final_values, ticks: tick }
+        FieldSimulationResult {
+            trace: FieldTrace { t, values },
+            final_values,
+            ticks: tick,
+        }
     }
 }
 
@@ -306,11 +314,20 @@ mod tests {
             let census = placeholder_census();
             let u0: FieldUpdater = Box::new(|_p, cur, i, dt, _t| cur[i] + dt * cur[1]);
             let u1: FieldUpdater = Box::new(|_p, cur, i, dt, _t| cur[i] - dt * cur[0]);
-            let a = Rc::new(RefCell::new(FieldStation::new("a", 1.0, u0, census.clone())));
+            let a = Rc::new(RefCell::new(FieldStation::new(
+                "a",
+                1.0,
+                u0,
+                census.clone(),
+            )));
             let b = Rc::new(RefCell::new(FieldStation::new("b", 0.0, u1, census)));
             let mut sim = FieldSimulation::new(
                 vec![a, b],
-                FieldSimulationOptions { seed: 5, shuffle, record_trace: false },
+                FieldSimulationOptions {
+                    seed: 5,
+                    shuffle,
+                    record_trace: false,
+                },
             );
             sim.run(0.0, 1.0, 0.05).final_values
         }
@@ -329,7 +346,11 @@ mod tests {
         let f = Rc::new(RefCell::new(FieldStation::new("c", 3.0, updater, census)));
         let mut sim = FieldSimulation::new(
             vec![f.clone()],
-            FieldSimulationOptions { seed: 1, shuffle: false, record_trace: true },
+            FieldSimulationOptions {
+                seed: 1,
+                shuffle: false,
+                record_trace: true,
+            },
         );
         let res = sim.run(0.0, 0.3, 0.1);
         assert_eq!(res.ticks, 3);

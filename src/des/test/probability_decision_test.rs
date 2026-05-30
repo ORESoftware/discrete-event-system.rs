@@ -47,10 +47,19 @@ mod tests {
         //   draw 0.20 -> 0.20 < 0.25 -> branch 0
         //   draw 0.90 -> not < 0.25, but < 1.00 -> branch 1
         let probs = vec![
-            Branch { index: 0, prob: bgn(0.25) },
-            Branch { index: 1, prob: bgn(0.75) },
+            Branch {
+                index: 0,
+                prob: bgn(0.25),
+            },
+            Branch {
+                index: 1,
+                prob: bgn(0.75),
+            },
         ];
-        let rng = Box::new(FixedSequenceRandom { seq: vec![0.20, 0.90], i: 0 });
+        let rng = Box::new(FixedSequenceRandom {
+            seq: vec![0.20, 0.90],
+            i: 0,
+        });
         let mut d = ProbabilityDecisionEntity::new("pd".to_string(), probs, rv(), rng);
 
         let b0 = Rc::new(RefCell::new(EntitySink::new("b0".to_string())));

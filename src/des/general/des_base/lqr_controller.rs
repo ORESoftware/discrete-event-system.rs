@@ -134,22 +134,61 @@ impl LQRController {
     pub fn new(id: impl Into<String>, spec: LQRSpec) -> Self {
         let cls = "LQRController";
         // Pre-construction guards — DARE math is only valid if these hold.
-        require(Preconditions::integer_in_range(cls, "spec.n", spec.n as f64, 1.0, 10_000.0));
-        require(Preconditions::integer_in_range(cls, "spec.m", spec.m as f64, 1.0, 10_000.0));
+        require(Preconditions::integer_in_range(
+            cls,
+            "spec.n",
+            spec.n as f64,
+            1.0,
+            10_000.0,
+        ));
+        require(Preconditions::integer_in_range(
+            cls,
+            "spec.m",
+            spec.m as f64,
+            1.0,
+            10_000.0,
+        ));
         require(Preconditions::length_eq(cls, "spec.A", &spec.a, spec.n));
         require(Preconditions::rectangular_matrix(cls, "spec.A", &spec.a));
-        require(Preconditions::length_eq(cls, "spec.A[0]", &spec.a[0], spec.n));
+        require(Preconditions::length_eq(
+            cls,
+            "spec.A[0]",
+            &spec.a[0],
+            spec.n,
+        ));
         require(Preconditions::length_eq(cls, "spec.B", &spec.b, spec.n));
         require(Preconditions::rectangular_matrix(cls, "spec.B", &spec.b));
-        require(Preconditions::length_eq(cls, "spec.B[0]", &spec.b[0], spec.m));
-        require(Preconditions::symmetric_matrix(cls, "spec.Q", &spec.q, STRUCTURAL_TOL));
+        require(Preconditions::length_eq(
+            cls,
+            "spec.B[0]",
+            &spec.b[0],
+            spec.m,
+        ));
+        require(Preconditions::symmetric_matrix(
+            cls,
+            "spec.Q",
+            &spec.q,
+            STRUCTURAL_TOL,
+        ));
         require(Preconditions::length_eq(cls, "spec.Q", &spec.q, spec.n));
-        require(Preconditions::positive_semidefinite_diag(cls, "spec.Q", &spec.q, STRUCTURAL_TOL));
-        require(Preconditions::symmetric_matrix(cls, "spec.R", &spec.r, STRUCTURAL_TOL));
+        require(Preconditions::positive_semidefinite_diag(
+            cls,
+            "spec.Q",
+            &spec.q,
+            STRUCTURAL_TOL,
+        ));
+        require(Preconditions::symmetric_matrix(
+            cls,
+            "spec.R",
+            &spec.r,
+            STRUCTURAL_TOL,
+        ));
         require(Preconditions::length_eq(cls, "spec.R", &spec.r, spec.m));
         // R MUST be positive-definite (we take its inverse). Cholesky test
         // catches user errors like R = 0.
-        require(Preconditions::positive_definite_cholesky(cls, "spec.R", &spec.r));
+        require(Preconditions::positive_definite_cholesky(
+            cls, "spec.R", &spec.r,
+        ));
         if let Some(gamma) = spec.gamma {
             require(Preconditions::in_range(cls, "spec.gamma", gamma, 1e-9, 1.0));
         }
@@ -176,7 +215,13 @@ impl LQRController {
         let tol = spec.riccati_tol.unwrap_or(1e-10);
         let max_iter = spec.riccati_max_iter.unwrap_or(5000);
         require(Preconditions::positive(cls, "riccatiTol", tol));
-        require(Preconditions::integer_in_range(cls, "riccatiMaxIter", max_iter as f64, 1.0, 10_000_000.0));
+        require(Preconditions::integer_in_range(
+            cls,
+            "riccatiMaxIter",
+            max_iter as f64,
+            1.0,
+            10_000_000.0,
+        ));
 
         let n = spec.n;
         let bt = LinAlg::transpose(&spec.b);
@@ -199,7 +244,10 @@ impl LQRController {
             let at_pa = LinAlg::mat_mul(&at_p, &spec.a);
             let at_pb = LinAlg::mat_mul(&at_p, &spec.b);
             let at_pbk = LinAlg::mat_mul(&at_pb, &k);
-            let p_new = LinAlg::add(&spec.q, &LinAlg::scale(&LinAlg::sub(&at_pa, &at_pbk), gamma));
+            let p_new = LinAlg::add(
+                &spec.q,
+                &LinAlg::scale(&LinAlg::sub(&at_pa, &at_pbk), gamma),
+            );
             // Residual = ‖P_new − P‖_∞
             let mut r = 0.0_f64;
             for i in 0..n {
@@ -331,8 +379,18 @@ mod tests {
         // golden ratio P = (1+√5)/2 and gain K = P/(P+1) = 1/φ ≈ 0.618034.
         let mut lqr = LQRController::new("lqr", scalar_spec());
         let phi = (1.0 + 5.0_f64.sqrt()) / 2.0;
-        assert!((lqr.k[0][0] - 1.0 / phi).abs() < 1e-6, "gain {} != {}", lqr.k[0][0], 1.0 / phi);
-        assert!((lqr.p[0][0] - phi).abs() < 1e-6, "P {} != {}", lqr.p[0][0], phi);
+        assert!(
+            (lqr.k[0][0] - 1.0 / phi).abs() < 1e-6,
+            "gain {} != {}",
+            lqr.k[0][0],
+            1.0 / phi
+        );
+        assert!(
+            (lqr.p[0][0] - phi).abs() < 1e-6,
+            "P {} != {}",
+            lqr.p[0][0],
+            phi
+        );
 
         // Closed-loop x_{k+1} = x_k + u_k with u = step(x) drives x → 0.
         let a = lqr.spec.a.clone();
@@ -383,8 +441,16 @@ mod tests {
         let mut lqr = LQRController::new("lqr-clamped", spec);
         // Large state ⇒ large raw control, clamped into [−0.1, 0.1].
         let u = lqr.step(vec![100.0], 0.0, 0.0);
-        assert!(u[0] <= 0.1 + 1e-12 && u[0] >= -0.1 - 1e-12, "not clamped: {}", u[0]);
+        assert!(
+            u[0] <= 0.1 + 1e-12 && u[0] >= -0.1 - 1e-12,
+            "not clamped: {}",
+            u[0]
+        );
         // Raw u = −Kx ≈ −61.8 ⇒ clamp pins it to the lower bound.
-        assert!((u[0] + 0.1).abs() < 1e-9, "expected lower-bound clamp, got {}", u[0]);
+        assert!(
+            (u[0] + 0.1).abs() < 1e-9,
+            "expected lower-bound clamp, got {}",
+            u[0]
+        );
     }
 }

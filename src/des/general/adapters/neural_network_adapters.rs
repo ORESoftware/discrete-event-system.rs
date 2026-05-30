@@ -29,6 +29,7 @@
 #![allow(dead_code)]
 
 use crate::des::general::adapters::adapter_utils::write_csv_lines;
+use crate::des::general::des_base::environment::{PureEnvironment, StepResult};
 use crate::des::general::des_base::runner::RunReason;
 use crate::des::general::des_spec::{DESModelRegistration, DESRuntimeConfig, ParamSchema};
 use crate::des::general::neural_network::{
@@ -38,7 +39,6 @@ use crate::des::general::neural_network::{
     XorNeuralNetOptions,
 };
 use crate::des::general::ode::ODETrace;
-use crate::des::general::des_base::environment::{PureEnvironment, StepResult};
 use crate::des::general::rl_environments::{
     eval_policy, Corridor, Environment, EvalPolicyOptions, EvalPolicyResult,
 };
@@ -64,7 +64,11 @@ impl<E: Environment> PureEnvironment<f64, usize> for PureEnvAdapter<E> {
     }
     fn step(&mut self, state: f64, action: usize) -> StepResult<f64> {
         let o = self.env.step(state as usize, action);
-        StepResult { next_state: o.next_state as f64, reward: o.reward, done: o.done }
+        StepResult {
+            next_state: o.next_state as f64,
+            reward: o.reward,
+            done: o.done,
+        }
     }
 }
 
@@ -76,10 +80,18 @@ fn js_number(v: f64) -> String {
     if v.is_nan() {
         "NaN".to_string()
     } else if v.is_infinite() {
-        if v > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() }
+        if v > 0.0 {
+            "Infinity".to_string()
+        } else {
+            "-Infinity".to_string()
+        }
     } else {
         let s = v.to_string();
-        if s == "-0" { "0".to_string() } else { s }
+        if s == "-0" {
+            "0".to_string()
+        } else {
+            s
+        }
     }
 }
 
@@ -119,12 +131,26 @@ fn solver_str(s: NeuralODESolverName) -> &'static str {
 // Schema helpers
 // =============================================================================
 
-fn num(min: Option<f64>, max: Option<f64>, integer: Option<bool>, default: Option<f64>) -> ParamSchema {
-    ParamSchema::Number { min, max, integer, default, description: None }
+fn num(
+    min: Option<f64>,
+    max: Option<f64>,
+    integer: Option<bool>,
+    default: Option<f64>,
+) -> ParamSchema {
+    ParamSchema::Number {
+        min,
+        max,
+        integer,
+        default,
+        description: None,
+    }
 }
 
 fn boolean(default: Option<bool>) -> ParamSchema {
-    ParamSchema::Boolean { default, description: None }
+    ParamSchema::Boolean {
+        default,
+        description: None,
+    }
 }
 
 /// `const hiddenLayersSchema: ParamSchema`.
@@ -139,7 +165,10 @@ fn hidden_layers_schema() -> ParamSchema {
 
 fn obj(fields: Vec<(&str, ParamSchema)>, description: &str) -> ParamSchema {
     ParamSchema::Object {
-        fields: fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+        fields: fields
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
         required: Some(Vec::new()),
         description: Some(description.to_string()),
     }
@@ -191,7 +220,10 @@ impl DESModelRegistration<NeuralXorParams, SupervisedNeuralNetDESResult<FeedForw
                 ("learningRate", num(Some(0.0), None, None, Some(0.3))),
                 ("seed", num(None, None, Some(true), Some(7.0))),
                 ("hiddenLayers", hidden_layers_schema()),
-                ("samplesPerTick", num(Some(1.0), None, Some(true), Some(1.0))),
+                (
+                    "samplesPerTick",
+                    num(Some(1.0), None, Some(true), Some(1.0)),
+                ),
                 ("shuffleEachEpoch", boolean(Some(false))),
             ],
             "XOR learned by a feed-forward neural network running as DES training stations.",
@@ -235,7 +267,11 @@ impl DESModelRegistration<NeuralXorParams, SupervisedNeuralNetDESResult<FeedForw
             format!("  Epochs:                 {}", p.epochs.unwrap_or(8000)),
             format!("  Hidden layers:          {hidden}"),
             format!("  Samples trained:        {}", r.loss_history.len()),
-            format!("  Ticks:                  {} ({})", r.ticks, reason_str(&r.reason)),
+            format!(
+                "  Ticks:                  {} ({})",
+                r.ticks,
+                reason_str(&r.reason)
+            ),
             format!("  Avg loss (last 100):    {}", to_exponential(avg, 3)),
             format!("  XOR predictions:        [{preds}]"),
             format!("  Parameter count:        {}", r.network.num_parameters()),
@@ -290,7 +326,10 @@ impl DESModelRegistration<NeuralQCorridorParams, NeuralQCorridorResult>
             vec![
                 ("length", num(Some(2.0), None, Some(true), Some(6.0))),
                 ("numEpisodes", num(Some(1.0), None, Some(true), Some(600.0))),
-                ("maxStepsPerEpisode", num(Some(1.0), None, Some(true), Some(40.0))),
+                (
+                    "maxStepsPerEpisode",
+                    num(Some(1.0), None, Some(true), Some(40.0)),
+                ),
                 ("alpha", num(Some(0.0), None, None, Some(0.25))),
                 ("gamma", num(Some(0.0), Some(1.0), None, Some(0.95))),
                 ("epsilon", num(Some(0.0), Some(1.0), None, Some(0.8))),
@@ -307,10 +346,16 @@ impl DESModelRegistration<NeuralQCorridorParams, NeuralQCorridorResult>
         let max_steps = p.max_steps_per_episode.unwrap_or(40);
         let gamma = p.gamma.unwrap_or(0.95);
         let seed = p.seed.unwrap_or(1);
-        let hidden = p.hidden_layers.clone().filter(|h| !h.is_empty()).unwrap_or_default();
+        let hidden = p
+            .hidden_layers
+            .clone()
+            .filter(|h| !h.is_empty())
+            .unwrap_or_default();
 
         let base = run_neural_q_learning_des(
-            Box::new(PureEnvAdapter { env: Corridor::new(length, 0) }),
+            Box::new(PureEnvAdapter {
+                env: Corridor::new(length, 0),
+            }),
             NeuralQLearningRunParams {
                 num_episodes: p.num_episodes.unwrap_or(600),
                 alpha: p.alpha.unwrap_or(0.25),
@@ -334,7 +379,11 @@ impl DESModelRegistration<NeuralQCorridorParams, NeuralQCorridorResult>
             &env_eval,
             |s, _rng| policy[s],
             &mut eval_rng,
-            EvalPolicyOptions { num_episodes: 50, max_steps_per_episode: max_steps, gamma },
+            EvalPolicyOptions {
+                num_episodes: 50,
+                max_steps_per_episode: max_steps,
+                gamma,
+            },
         );
 
         NeuralQCorridorResult { base, eval }
@@ -349,9 +398,17 @@ impl DESModelRegistration<NeuralQCorridorParams, NeuralQCorridorResult>
             format!("  Ticks:                   {}", r.base.total_ticks),
             format!(
                 "  Greedy policy:           [{}]",
-                r.base.policy.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", ")
+                r.base
+                    .policy
+                    .iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
-            format!("  Eval success rate:       {:.1}%", 100.0 * r.eval.success_rate),
+            format!(
+                "  Eval success rate:       {:.1}%",
+                100.0 * r.eval.success_rate
+            ),
             format!("  Eval mean length:        {:.1}", r.eval.mean_length),
             format!(
                 "  Avg TD loss (last 100):  {}",
@@ -408,7 +465,10 @@ impl DESModelRegistration<NeuralODEDecayParams, NeuralODEDecayResult> for Neural
                     "solver",
                     ParamSchema::String {
                         allowed: Some(
-                            ["euler", "heun", "rk4", "rk45"].iter().map(|s| s.to_string()).collect(),
+                            ["euler", "heun", "rk4", "rk45"]
+                                .iter()
+                                .map(|s| s.to_string())
+                                .collect(),
                         ),
                         default: Some("rk4".to_string()),
                         description: None,
@@ -441,15 +501,25 @@ impl DESModelRegistration<NeuralODEDecayParams, NeuralODEDecayResult> for Neural
         );
         let final_y = trace.y[trace.y.len() - 1][0];
         let exact_final = y0 * (-rate * t1).exp();
-        NeuralODEDecayResult { error: (final_y - exact_final).abs(), exact_final, trace }
+        NeuralODEDecayResult {
+            error: (final_y - exact_final).abs(),
+            exact_final,
+            trace,
+        }
     }
     fn summarize(&self, r: &NeuralODEDecayResult, p: &NeuralODEDecayParams) -> String {
         let final_y = r.trace.y[r.trace.y.len() - 1][0];
         [
             "NEURAL ODE DECAY".to_string(),
             "─".repeat(32),
-            format!("  Equation:                y' = -{} y", js_number(p.rate.unwrap_or(0.5))),
-            format!("  Solver:                  {}", solver_str(p.solver.unwrap_or(NeuralODESolverName::Rk4))),
+            format!(
+                "  Equation:                y' = -{} y",
+                js_number(p.rate.unwrap_or(0.5))
+            ),
+            format!(
+                "  Solver:                  {}",
+                solver_str(p.solver.unwrap_or(NeuralODESolverName::Rk4))
+            ),
             format!("  Steps recorded:          {}", r.trace.t.len()),
             format!("  Final y:                 {:.6}", final_y),
             format!("  Exact y:                 {:.6}", r.exact_final),

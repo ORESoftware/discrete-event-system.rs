@@ -35,7 +35,9 @@ use std::rc::Rc;
 
 use crate::des::general::des_base::preconditions::Preconditions;
 use crate::des::general::des_base::runner::{run_iterative_des, IterativeRunOptions};
-use crate::des::general::des_base::station::{DESStation, StationCore, StationRef, DEFAULT_CHANNEL};
+use crate::des::general::des_base::station::{
+    DESStation, StationCore, StationRef, DEFAULT_CHANNEL,
+};
 use crate::des::general::des_base::validation::{intrinsic_check, ValidationCheck};
 use crate::des::general::prng::mulberry32;
 use crate::des::shared::capabilities::{RandomSource, SeededRandom};
@@ -187,8 +189,13 @@ impl MaxFlowOptimizationStation {
             intrinsic_check::<dyn DESStation>(
                 "max-flow-capacity-feasible",
                 |s| {
-                    let st = s.as_any().downcast_ref::<MaxFlowOptimizationStation>().unwrap();
-                    st.edge_flows().iter().all(|e| e.flow >= -1e-8 && e.flow <= e.capacity + 1e-8)
+                    let st = s
+                        .as_any()
+                        .downcast_ref::<MaxFlowOptimizationStation>()
+                        .unwrap();
+                    st.edge_flows()
+                        .iter()
+                        .all(|e| e.flow >= -1e-8 && e.flow <= e.capacity + 1e-8)
                 },
                 Some("0 <= flow <= capacity on every edge".to_string()),
                 None,
@@ -201,7 +208,10 @@ impl MaxFlowOptimizationStation {
             intrinsic_check::<dyn DESStation>(
                 "max-flow-conservation",
                 |s| {
-                    let st = s.as_any().downcast_ref::<MaxFlowOptimizationStation>().unwrap();
+                    let st = s
+                        .as_any()
+                        .downcast_ref::<MaxFlowOptimizationStation>()
+                        .unwrap();
                     st.flow_conservation_ok()
                 },
                 Some("inflow equals outflow at every transshipment node".to_string()),
@@ -215,13 +225,23 @@ impl MaxFlowOptimizationStation {
             intrinsic_check::<dyn DESStation>(
                 "max-flow-min-cut-tight",
                 |s| {
-                    let st = s.as_any().downcast_ref::<MaxFlowOptimizationStation>().unwrap();
+                    let st = s
+                        .as_any()
+                        .downcast_ref::<MaxFlowOptimizationStation>()
+                        .unwrap();
                     (st.current_value() - st.min_cut().capacity).abs() <= 1e-7
                 },
                 Some("max-flow value equals residual min-cut capacity".to_string()),
                 Some(Box::new(|s| {
-                    let st = s.as_any().downcast_ref::<MaxFlowOptimizationStation>().unwrap();
-                    format!("flow={:.6} cut={:.6}", st.current_value(), st.min_cut().capacity)
+                    let st = s
+                        .as_any()
+                        .downcast_ref::<MaxFlowOptimizationStation>()
+                        .unwrap();
+                    format!(
+                        "flow={:.6} cut={:.6}",
+                        st.current_value(),
+                        st.min_cut().capacity
+                    )
                 })),
                 Some("max-flow".to_string()),
                 None,
@@ -282,7 +302,12 @@ impl MaxFlowOptimizationStation {
                 capacity += e.capacity;
             }
         }
-        MaxFlowMinCut { source_side, sink_side, cut_edges, capacity }
+        MaxFlowMinCut {
+            source_side,
+            sink_side,
+            cut_edges,
+            capacity,
+        }
     }
 
     fn flow_conservation_ok(&self) -> bool {
@@ -331,7 +356,10 @@ impl MaxFlowOptimizationStation {
         let n = self.params.num_nodes;
         let mut parent: Vec<Option<ParentEntry>> = (0..n).map(|_| None).collect();
         let mut q: Vec<usize> = vec![self.params.source];
-        parent[self.params.source] = Some(ParentEntry { prev: -1, step: ResidualStep { edge: 0, dir: 1 } });
+        parent[self.params.source] = Some(ParentEntry {
+            prev: -1,
+            step: ResidualStep { edge: 0, dir: 1 },
+        });
         let mut qi = 0;
         while qi < q.len() {
             let u = q[qi];
@@ -343,7 +371,10 @@ impl MaxFlowOptimizationStation {
                 if parent[nb.0].is_some() {
                     continue;
                 }
-                parent[nb.0] = Some(ParentEntry { prev: u as isize, step: nb.1 });
+                parent[nb.0] = Some(ParentEntry {
+                    prev: u as isize,
+                    step: nb.1,
+                });
                 q.push(nb.0);
             }
         }
@@ -401,19 +432,62 @@ impl DESStation for MaxFlowOptimizationStation {
         let p = &self.params;
         let m = "MaxFlowOptimizationStation";
         Preconditions::integer_in_range(m, "numNodes", p.num_nodes as f64, 2.0, 10000.0).unwrap();
-        Preconditions::integer_in_range(m, "source", p.source as f64, 0.0, (p.num_nodes - 1) as f64).unwrap();
-        Preconditions::integer_in_range(m, "sink", p.sink as f64, 0.0, (p.num_nodes - 1) as f64).unwrap();
-        Preconditions::check(m, "sink", "differ from source", p.sink != p.source, Some(p.sink.to_string())).unwrap();
+        Preconditions::integer_in_range(
+            m,
+            "source",
+            p.source as f64,
+            0.0,
+            (p.num_nodes - 1) as f64,
+        )
+        .unwrap();
+        Preconditions::integer_in_range(m, "sink", p.sink as f64, 0.0, (p.num_nodes - 1) as f64)
+            .unwrap();
+        Preconditions::check(
+            m,
+            "sink",
+            "differ from source",
+            p.sink != p.source,
+            Some(p.sink.to_string()),
+        )
+        .unwrap();
         Preconditions::non_empty(m, "edges", &p.edges).unwrap();
         for i in 0..p.edges.len() {
             let e = &p.edges[i];
-            Preconditions::integer_in_range(m, &format!("edges[{i}].from"), e.from as f64, 0.0, (p.num_nodes - 1) as f64).unwrap();
-            Preconditions::integer_in_range(m, &format!("edges[{i}].to"), e.to as f64, 0.0, (p.num_nodes - 1) as f64).unwrap();
-            Preconditions::check(m, &format!("edges[{i}]"), "not be a self-loop", e.from != e.to, None).unwrap();
+            Preconditions::integer_in_range(
+                m,
+                &format!("edges[{i}].from"),
+                e.from as f64,
+                0.0,
+                (p.num_nodes - 1) as f64,
+            )
+            .unwrap();
+            Preconditions::integer_in_range(
+                m,
+                &format!("edges[{i}].to"),
+                e.to as f64,
+                0.0,
+                (p.num_nodes - 1) as f64,
+            )
+            .unwrap();
+            Preconditions::check(
+                m,
+                &format!("edges[{i}]"),
+                "not be a self-loop",
+                e.from != e.to,
+                None,
+            )
+            .unwrap();
             Preconditions::non_negative(m, &format!("edges[{i}].capacity"), e.capacity).unwrap();
         }
         if let Some(ma) = p.max_augmentations {
-            Preconditions::integer_in_range(m, "maxAugmentations", ma as f64, 1.0, 9_007_199_254_740_991.0).unwrap();
+            Preconditions::integer_in_range(
+                m,
+                "maxAugmentations",
+                ma as f64,
+                1.0,
+                9_007_199_254_740_991.0,
+            )
+            .unwrap();
         }
         if let Some(nc) = &p.node_coordinates {
             Preconditions::length_eq(m, "nodeCoordinates", nc, p.num_nodes).unwrap();
@@ -464,19 +538,36 @@ impl DESStation for MaxFlowOptimizationStation {
             fields.insert("iter".to_string(), row.iter.to_string());
             fields.insert("bottleneck".to_string(), row.bottleneck.to_string());
             fields.insert("value".to_string(), row.value.to_string());
-            logger.log(LogEvent { kind: "max-flow-augment".to_string(), level: Some(LogLevel::Info), fields });
+            logger.log(LogEvent {
+                kind: "max-flow-augment".to_string(),
+                level: Some(LogLevel::Info),
+                fields,
+            });
         }
-        self.core_mut().emit(Rc::new(AugmentingPathToken { row }), DEFAULT_CHANNEL);
+        self.core_mut()
+            .emit(Rc::new(AugmentingPathToken { row }), DEFAULT_CHANNEL);
     }
 }
 
 /// Run a max-flow optimisation to completion (TS `runMaxFlow`).
-pub fn run_max_flow(params: MaxFlowParams, logger: Option<Box<dyn OptimizationLogger>>) -> MaxFlowResult {
-    let max_ticks = params.max_augmentations.unwrap_or(params.edges.len() * params.num_nodes + 1) + 2;
-    let station = Rc::new(RefCell::new(MaxFlowOptimizationStation::new(params, logger)));
+pub fn run_max_flow(
+    params: MaxFlowParams,
+    logger: Option<Box<dyn OptimizationLogger>>,
+) -> MaxFlowResult {
+    let max_ticks = params
+        .max_augmentations
+        .unwrap_or(params.edges.len() * params.num_nodes + 1)
+        + 2;
+    let station = Rc::new(RefCell::new(MaxFlowOptimizationStation::new(
+        params, logger,
+    )));
     let summary = run_iterative_des(
         vec![station.clone() as StationRef],
-        IterativeRunOptions { shuffle: false, max_ticks: Some(max_ticks), ..Default::default() },
+        IterativeRunOptions {
+            shuffle: false,
+            max_ticks: Some(max_ticks),
+            ..Default::default()
+        },
     );
     let checks = summary.validation.unwrap_or_default();
     let result = station.borrow().result(checks);
@@ -722,7 +813,11 @@ impl TrafficCellStation {
             "traffic-cell-{}-{}-{}",
             bounds.lane_id, bounds.longitudinal_index, bounds.lateral_index
         );
-        TrafficCellStation { core: StationCore::new(id), bounds, car_ids: HashSet::new() }
+        TrafficCellStation {
+            core: StationCore::new(id),
+            bounds,
+            car_ids: HashSet::new(),
+        }
     }
     pub fn clear_occupancy(&mut self) {
         self.car_ids.clear();
@@ -812,7 +907,10 @@ pub struct TrafficGridStation {
 
 impl TrafficGridStation {
     pub fn new(params: TrafficParams, options: TrafficOptions) -> Self {
-        let network = params.network.clone().unwrap_or_else(build_five_intersection_traffic_network);
+        let network = params
+            .network
+            .clone()
+            .unwrap_or_else(build_five_intersection_traffic_network);
         let rng = mulberry32(params.seed as u32);
         let mut nodes: HashMap<String, TrafficNode> = HashMap::new();
         for node in &network.nodes {
@@ -822,7 +920,10 @@ impl TrafficGridStation {
         let mut outgoing: HashMap<String, Vec<String>> = HashMap::new();
         for lane in &network.lanes {
             lanes.insert(lane.id.clone(), lane.clone());
-            outgoing.entry(lane.from.clone()).or_default().push(lane.id.clone());
+            outgoing
+                .entry(lane.from.clone())
+                .or_default()
+                .push(lane.id.clone());
         }
         let mut signal_by_node: HashMap<String, TrafficSignal> = HashMap::new();
         for signal in network.signals.iter().flatten() {
@@ -890,7 +991,12 @@ impl TrafficGridStation {
                 Some("entered = exited + active".to_string()),
                 Some(Box::new(|s| {
                     let st = s.as_any().downcast_ref::<TrafficGridStation>().unwrap();
-                    format!("entered={} exited={} active={}", st.entered, st.exited, st.cars.len())
+                    format!(
+                        "entered={} exited={} active={}",
+                        st.entered,
+                        st.exited,
+                        st.cars.len()
+                    )
                 })),
                 Some("traffic-flow".to_string()),
                 None,
@@ -921,7 +1027,10 @@ impl TrafficGridStation {
                     let st = s.as_any().downcast_ref::<TrafficGridStation>().unwrap();
                     st.grid_cell_size_m() <= 0.3048 + 1e-12
                 },
-                Some("default/selected spatial grid cells are at most about one foot on a side".to_string()),
+                Some(
+                    "default/selected spatial grid cells are at most about one foot on a side"
+                        .to_string(),
+                ),
                 Some(Box::new(|s| {
                     let st = s.as_any().downcast_ref::<TrafficGridStation>().unwrap();
                     format!("{:.4} m", st.grid_cell_size_m())
@@ -936,8 +1045,16 @@ impl TrafficGridStation {
 
     pub fn result(&self, validation: Vec<ValidationCheck>) -> TrafficResult {
         let final_cars = self.snap_cars();
-        let mean_travel = if self.exited > 0 { self.travel_time_sum / self.exited as f64 } else { 0.0 };
-        let mean_speed = if self.speed_samples > 0 { self.speed_sum / self.speed_samples as f64 } else { 0.0 };
+        let mean_travel = if self.exited > 0 {
+            self.travel_time_sum / self.exited as f64
+        } else {
+            0.0
+        };
+        let mean_speed = if self.speed_samples > 0 {
+            self.speed_sum / self.speed_samples as f64
+        } else {
+            0.0
+        };
         TrafficResult {
             params: self.params.clone(),
             network: self.network.clone(),
@@ -965,16 +1082,25 @@ impl TrafficGridStation {
         let sources = self.network.sources.clone();
         let sinks_all: Vec<String> = self.network.sinks.iter().map(|s| s.id.clone()).collect();
         for source in &sources {
-            let sink_ids = source.destination_sink_ids.clone().unwrap_or_else(|| sinks_all.clone());
+            let sink_ids = source
+                .destination_sink_ids
+                .clone()
+                .unwrap_or_else(|| sinks_all.clone());
             for sink_id in &sink_ids {
-                let sink = self.network.sinks.iter().find(|s| &s.id == sink_id).cloned();
+                let sink = self
+                    .network
+                    .sinks
+                    .iter()
+                    .find(|s| &s.id == sink_id)
+                    .cloned();
                 let sink = match sink {
                     Some(s) => s,
                     None => continue,
                 };
                 let route = shortest_lane_path(&self.network, &source.node_id, &sink.node_id);
                 if !route.is_empty() {
-                    self.routes.insert(format!("{}->{}", source.id, sink_id), route);
+                    self.routes
+                        .insert(format!("{}->{}", source.id, sink_id), route);
                 }
             }
         }
@@ -986,7 +1112,12 @@ impl TrafficGridStation {
         let sources = self.network.sources.clone();
         for source in &sources {
             let expected = source.rate_per_min * mult * dt / 60.0;
-            let mut acc = self.source_accumulators.get(&source.id).copied().unwrap_or(0.0) + expected;
+            let mut acc = self
+                .source_accumulators
+                .get(&source.id)
+                .copied()
+                .unwrap_or(0.0)
+                + expected;
             let count = acc.floor();
             acc -= count;
             self.source_accumulators.insert(source.id.clone(), acc);
@@ -1015,7 +1146,10 @@ impl TrafficGridStation {
             idx = sink_ids.len() - 1;
         }
         let sink_id = sink_ids[idx].clone();
-        let route = self.routes.get(&format!("{}->{}", source.id, sink_id)).cloned();
+        let route = self
+            .routes
+            .get(&format!("{}->{}", source.id, sink_id))
+            .cloned();
         let route = match route {
             Some(r) if !r.is_empty() => r,
             _ => {
@@ -1054,7 +1188,8 @@ impl TrafficGridStation {
         let snap = to_car_snapshot(&car);
         self.cars.insert(id, car);
         self.entered += 1;
-        self.core_mut().emit(Rc::new(CarToken { car: snap }), DEFAULT_CHANNEL);
+        self.core_mut()
+            .emit(Rc::new(CarToken { car: snap }), DEFAULT_CHANNEL);
     }
 
     fn advance_cars(&mut self, time_sec: f64) {
@@ -1132,7 +1267,8 @@ impl TrafficGridStation {
         };
         let use_barrier = barrier_gap <= current_leader_gap;
 
-        let delayed_leader = leader.map(|l| self.perceived_sample(l, time_sec - self.reaction_time_sec()));
+        let delayed_leader =
+            leader.map(|l| self.perceived_sample(l, time_sec - self.reaction_time_sec()));
         // perceivedLeader: the delayed sample if it stayed in this lane, else the
         // (live) leader car.
         let perceived_leader: Option<(f64, f64)> = match (&delayed_leader, leader) {
@@ -1155,7 +1291,8 @@ impl TrafficGridStation {
         let v = 0.0_f64.max(car.speed_mps);
         let v0 = lane.speed_limit_mps;
         let time_headway = self.time_headway_sec() + self.reaction_time_sec();
-        let closing_term = 0.0_f64.max(v * (v - perceived.1) / (2.0 * (max_accel * max_decel).sqrt()));
+        let closing_term =
+            0.0_f64.max(v * (v - perceived.1) / (2.0 * (max_accel * max_decel).sqrt()));
         let desired_gap = vehicle_space + v * time_headway + closing_term;
         let free_road = {
             let ratio = (v / 1e-9_f64.max(v0)).min(2.0);
@@ -1167,10 +1304,16 @@ impl TrafficGridStation {
         } else {
             0.0
         };
-        let target_acceleration = clamp(max_accel * (free_road - interaction), -max_decel, max_accel);
+        let target_acceleration =
+            clamp(max_accel * (free_road - interaction), -max_decel, max_accel);
         let max_jerk_step = self.max_jerk_mps3() * dt;
         let acceleration = clamp(
-            car.acceleration_mps2 + clamp(target_acceleration - car.acceleration_mps2, -max_jerk_step, max_jerk_step),
+            car.acceleration_mps2
+                + clamp(
+                    target_acceleration - car.acceleration_mps2,
+                    -max_jerk_step,
+                    max_jerk_step,
+                ),
             -max_decel,
             max_accel,
         );
@@ -1195,13 +1338,23 @@ impl TrafficGridStation {
             jerk,
             target_acceleration,
             leader_id: perceived.2,
-            leader_gap_m: if perceived.0.is_finite() { Some(0.0_f64.max(perceived_gap)) } else { None },
+            leader_gap_m: if perceived.0.is_finite() {
+                Some(0.0_f64.max(perceived_gap))
+            } else {
+                None
+            },
         }
     }
 
-    fn stop_barrier_position(&self, car: &TrafficCar, lane: &TrafficLane, time_sec: f64) -> Option<f64> {
+    fn stop_barrier_position(
+        &self,
+        car: &TrafficCar,
+        lane: &TrafficLane,
+        time_sec: f64,
+    ) -> Option<f64> {
         let next_lane_id = car.route.get(car.route_index + 1)?;
-        if self.signal_allows(&lane.id, time_sec) && self.can_enter_lane(next_lane_id, Some(car.id)) {
+        if self.signal_allows(&lane.id, time_sec) && self.can_enter_lane(next_lane_id, Some(car.id))
+        {
             return None;
         }
         Some(lane.length_m)
@@ -1250,7 +1403,9 @@ impl TrafficGridStation {
                     return;
                 }
                 Some(next) => {
-                    if !self.signal_allows(&lane.id, time_sec) || !self.can_enter_lane(&next, Some(car_id)) {
+                    if !self.signal_allows(&lane.id, time_sec)
+                        || !self.can_enter_lane(&next, Some(car_id))
+                    {
                         car.position_m = self.blocked_stop_position(&car);
                         car.speed_mps = 0.0;
                         self.cars.insert(car_id, car);
@@ -1259,7 +1414,9 @@ impl TrafficGridStation {
                     car.route_index += 1;
                     car.lane_id = next.clone();
                     lane = self.lane(&car.lane_id);
-                    car.position_m = 0.0_f64.max(overshoot).min(0.0_f64.max(lane.length_m - self.vehicle_space()));
+                    car.position_m = 0.0_f64
+                        .max(overshoot)
+                        .min(0.0_f64.max(lane.length_m - self.vehicle_space()));
                     car.speed_mps = car.speed_mps.min(lane.speed_limit_mps);
                     overshoot = 0.0_f64.max(car.position_m - lane.length_m);
                     if overshoot <= 1e-9 {
@@ -1281,7 +1438,11 @@ impl TrafficGridStation {
             .values()
             .filter(|c| c.id != car.id && c.lane_id == car.lane_id)
             .collect();
-        others.sort_by(|a, b| b.position_m.partial_cmp(&a.position_m).unwrap_or(std::cmp::Ordering::Equal));
+        others.sort_by(|a, b| {
+            b.position_m
+                .partial_cmp(&a.position_m)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         for other in others {
             if other.position_m <= safe + vehicle_space {
                 safe = safe.min(other.position_m - vehicle_space);
@@ -1316,7 +1477,9 @@ impl TrafficGridStation {
             .values()
             .filter(|c| c.lane_id == lane_id && Some(c.id) != ignore_car_id)
             .collect();
-        let cap = lane.capacity.unwrap_or_else(|| default_lane_capacity(&lane, self.vehicle_space()));
+        let cap = lane
+            .capacity
+            .unwrap_or_else(|| default_lane_capacity(&lane, self.vehicle_space()));
         if cars.len() >= cap {
             return false;
         }
@@ -1353,7 +1516,11 @@ impl TrafficGridStation {
             }
         }
         let active_cell_count = self.active_cell_ids.len();
-        TrafficSpatialIndex { by_cell, cell_ids_by_car, active_cell_count }
+        TrafficSpatialIndex {
+            by_cell,
+            cell_ids_by_car,
+            active_cell_count,
+        }
     }
 
     fn find_leader_ahead_from_grid(
@@ -1364,12 +1531,15 @@ impl TrafficGridStation {
     ) -> Option<u64> {
         let cell_size = self.grid_cell_size_m();
         let look_ahead = (lane.length_m - car.position_m).min(
-            self.params
-                .grid_look_ahead_m
-                .unwrap_or_else(|| 60.0_f64.max(car.speed_mps * (self.reaction_time_sec() + 4.0) + 3.0 * self.vehicle_space())),
+            self.params.grid_look_ahead_m.unwrap_or_else(|| {
+                60.0_f64.max(
+                    car.speed_mps * (self.reaction_time_sec() + 4.0) + 3.0 * self.vehicle_space(),
+                )
+            }),
         );
         let first = 0.0_f64.max((car.position_m / cell_size).floor()) as usize;
-        let last = first.max(0.0_f64.max(((car.position_m + look_ahead) / cell_size).floor()) as usize);
+        let last =
+            first.max(0.0_f64.max(((car.position_m + look_ahead) / cell_size).floor()) as usize);
         let lateral = self.occupied_lateral_cell_range();
         let mut best: Option<u64> = None;
         let mut best_pos = f64::INFINITY;
@@ -1417,7 +1587,10 @@ impl TrafficGridStation {
         }
         let mut signal_phases: HashMap<String, String> = HashMap::new();
         for signal in self.network.signals.iter().flatten() {
-            signal_phases.insert(signal.node_id.clone(), current_signal_phase(signal, time_sec).name);
+            signal_phases.insert(
+                signal.node_id.clone(),
+                current_signal_phase(signal, time_sec).name,
+            );
         }
         let cars = self.snap_cars();
         let mean_speed = if !cars.is_empty() {
@@ -1425,7 +1598,11 @@ impl TrafficGridStation {
         } else {
             0.0
         };
-        let mean_travel = if self.exited > 0 { self.travel_time_sum / self.exited as f64 } else { 0.0 };
+        let mean_travel = if self.exited > 0 {
+            self.travel_time_sum / self.exited as f64
+        } else {
+            0.0
+        };
         let queue_length = cars.iter().filter(|c| c.speed_mps < 0.5).count();
         TrafficTraceRow {
             tick: self.tick,
@@ -1460,7 +1637,9 @@ impl TrafficGridStation {
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
             for i in 1..ids.len() {
-                let gap = self.cars[&ids[i]].position_m - self.cars[&ids[i - 1]].position_m - self.vehicle_space();
+                let gap = self.cars[&ids[i]].position_m
+                    - self.cars[&ids[i - 1]].position_m
+                    - self.vehicle_space();
                 min = min.min(gap);
             }
         }
@@ -1575,13 +1754,16 @@ impl TrafficGridStation {
                 return car.history[i].clone();
             }
         }
-        car.history.first().cloned().unwrap_or(TrafficKinematicSample {
-            time_sec: target_time_sec,
-            lane_id: car.lane_id.clone(),
-            position_m: car.position_m,
-            speed_mps: car.speed_mps,
-            acceleration_mps2: car.acceleration_mps2,
-        })
+        car.history
+            .first()
+            .cloned()
+            .unwrap_or(TrafficKinematicSample {
+                time_sec: target_time_sec,
+                lane_id: car.lane_id.clone(),
+                position_m: car.position_m,
+                speed_mps: car.speed_mps,
+                acceleration_mps2: car.acceleration_mps2,
+            })
     }
 
     fn push_history(car: &mut TrafficCar, time_sec: f64, horizon: f64) {
@@ -1622,7 +1804,14 @@ impl DESStation for TrafficGridStation {
         .unwrap();
         Preconditions::positive(m, "durationSec", p.duration_sec).unwrap();
         Preconditions::positive(m, "dtSec", p.dt_sec).unwrap();
-        Preconditions::check(m, "dtSec", "be <= 5 seconds", p.dt_sec <= 5.0, Some(p.dt_sec.to_string())).unwrap();
+        Preconditions::check(
+            m,
+            "dtSec",
+            "be <= 5 seconds",
+            p.dt_sec <= 5.0,
+            Some(p.dt_sec.to_string()),
+        )
+        .unwrap();
         Preconditions::integer(m, "seed", p.seed).unwrap();
         Preconditions::integer_in_range(m, "maxCars", p.max_cars as f64, 1.0, 299.0).unwrap();
         if let Some(v) = p.car_length_m {
@@ -1661,7 +1850,14 @@ impl DESStation for TrafficGridStation {
         if let Some(v) = p.spawn_rate_multiplier {
             Preconditions::non_negative(m, "spawnRateMultiplier", v).unwrap();
         }
-        Preconditions::check(m, "carWidthM", "fit within laneWidthM", self.car_width_m() <= self.lane_width_m(), None).unwrap();
+        Preconditions::check(
+            m,
+            "carWidthM",
+            "fit within laneWidthM",
+            self.car_width_m() <= self.lane_width_m(),
+            None,
+        )
+        .unwrap();
         validate_traffic_network(&self.network);
         let max_ticks = (p.duration_sec / p.dt_sec).ceil();
         Preconditions::integer_in_range(m, "tick count", max_ticks, 1.0, 100000.0).unwrap();
@@ -1687,7 +1883,11 @@ impl DESStation for TrafficGridStation {
             fields.insert("entered".to_string(), self.entered.to_string());
             fields.insert("exited".to_string(), self.exited.to_string());
             fields.insert("dropped".to_string(), self.dropped.to_string());
-            logger.log(LogEvent { kind: "traffic-flow-tick".to_string(), level: Some(LogLevel::Debug), fields });
+            logger.log(LogEvent {
+                kind: "traffic-flow-tick".to_string(),
+                level: Some(LogLevel::Debug),
+                fields,
+            });
         }
         self.tick += 1;
     }
@@ -1726,45 +1926,138 @@ fn validate_traffic_network(network: &TrafficNetwork) {
     Preconditions::non_empty(m, "network.sinks", &network.sinks).unwrap();
     let mut node_ids: HashSet<String> = HashSet::new();
     for node in &network.nodes {
-        Preconditions::check(m, "node.id", "be unique and non-empty", !node.id.is_empty() && !node_ids.contains(&node.id), Some(node.id.clone())).unwrap();
+        Preconditions::check(
+            m,
+            "node.id",
+            "be unique and non-empty",
+            !node.id.is_empty() && !node_ids.contains(&node.id),
+            Some(node.id.clone()),
+        )
+        .unwrap();
         node_ids.insert(node.id.clone());
         Preconditions::finite(m, &format!("node.{}.x", node.id), node.x).unwrap();
         Preconditions::finite(m, &format!("node.{}.y", node.id), node.y).unwrap();
     }
     let mut lane_ids: HashSet<String> = HashSet::new();
     for lane in &network.lanes {
-        Preconditions::check(m, "lane.id", "be unique and non-empty", !lane.id.is_empty() && !lane_ids.contains(&lane.id), Some(lane.id.clone())).unwrap();
+        Preconditions::check(
+            m,
+            "lane.id",
+            "be unique and non-empty",
+            !lane.id.is_empty() && !lane_ids.contains(&lane.id),
+            Some(lane.id.clone()),
+        )
+        .unwrap();
         lane_ids.insert(lane.id.clone());
-        Preconditions::check(m, &format!("lane.{}.from", lane.id), "reference a node", node_ids.contains(&lane.from), Some(lane.from.clone())).unwrap();
-        Preconditions::check(m, &format!("lane.{}.to", lane.id), "reference a node", node_ids.contains(&lane.to), Some(lane.to.clone())).unwrap();
+        Preconditions::check(
+            m,
+            &format!("lane.{}.from", lane.id),
+            "reference a node",
+            node_ids.contains(&lane.from),
+            Some(lane.from.clone()),
+        )
+        .unwrap();
+        Preconditions::check(
+            m,
+            &format!("lane.{}.to", lane.id),
+            "reference a node",
+            node_ids.contains(&lane.to),
+            Some(lane.to.clone()),
+        )
+        .unwrap();
         Preconditions::positive(m, &format!("lane.{}.lengthM", lane.id), lane.length_m).unwrap();
-        Preconditions::positive(m, &format!("lane.{}.speedLimitMps", lane.id), lane.speed_limit_mps).unwrap();
+        Preconditions::positive(
+            m,
+            &format!("lane.{}.speedLimitMps", lane.id),
+            lane.speed_limit_mps,
+        )
+        .unwrap();
         if let Some(cap) = lane.capacity {
-            Preconditions::integer_in_range(m, &format!("lane.{}.capacity", lane.id), cap as f64, 1.0, 10000.0).unwrap();
+            Preconditions::integer_in_range(
+                m,
+                &format!("lane.{}.capacity", lane.id),
+                cap as f64,
+                1.0,
+                10000.0,
+            )
+            .unwrap();
         }
     }
     for signal in network.signals.iter().flatten() {
-        Preconditions::check(m, &format!("signal.{}.nodeId", signal.node_id), "reference a node", node_ids.contains(&signal.node_id), Some(signal.node_id.clone())).unwrap();
-        Preconditions::non_empty(m, &format!("signal.{}.phases", signal.node_id), &signal.phases).unwrap();
+        Preconditions::check(
+            m,
+            &format!("signal.{}.nodeId", signal.node_id),
+            "reference a node",
+            node_ids.contains(&signal.node_id),
+            Some(signal.node_id.clone()),
+        )
+        .unwrap();
+        Preconditions::non_empty(
+            m,
+            &format!("signal.{}.phases", signal.node_id),
+            &signal.phases,
+        )
+        .unwrap();
         for phase in &signal.phases {
-            Preconditions::positive(m, &format!("signal.{}.phase.{}.durationSec", signal.node_id, phase.name), phase.duration_sec).unwrap();
+            Preconditions::positive(
+                m,
+                &format!("signal.{}.phase.{}.durationSec", signal.node_id, phase.name),
+                phase.duration_sec,
+            )
+            .unwrap();
             for lane_id in &phase.green_lanes {
-                Preconditions::check(m, &format!("signal.{}.greenLanes", signal.node_id), "reference a lane", lane_ids.contains(lane_id), Some(lane_id.clone())).unwrap();
+                Preconditions::check(
+                    m,
+                    &format!("signal.{}.greenLanes", signal.node_id),
+                    "reference a lane",
+                    lane_ids.contains(lane_id),
+                    Some(lane_id.clone()),
+                )
+                .unwrap();
             }
         }
     }
     for source in &network.sources {
-        Preconditions::check(m, &format!("source.{}.nodeId", source.id), "reference a source node", node_ids.contains(&source.node_id), Some(source.node_id.clone())).unwrap();
-        Preconditions::non_negative(m, &format!("source.{}.ratePerMin", source.id), source.rate_per_min).unwrap();
+        Preconditions::check(
+            m,
+            &format!("source.{}.nodeId", source.id),
+            "reference a source node",
+            node_ids.contains(&source.node_id),
+            Some(source.node_id.clone()),
+        )
+        .unwrap();
+        Preconditions::non_negative(
+            m,
+            &format!("source.{}.ratePerMin", source.id),
+            source.rate_per_min,
+        )
+        .unwrap();
     }
     let sink_ids: HashSet<String> = network.sinks.iter().map(|s| s.id.clone()).collect();
     for sink in &network.sinks {
-        Preconditions::check(m, &format!("sink.{}.nodeId", sink.id), "reference a sink node", node_ids.contains(&sink.node_id), Some(sink.node_id.clone())).unwrap();
+        Preconditions::check(
+            m,
+            &format!("sink.{}.nodeId", sink.id),
+            "reference a sink node",
+            node_ids.contains(&sink.node_id),
+            Some(sink.node_id.clone()),
+        )
+        .unwrap();
     }
     for source in &network.sources {
-        let dests = source.destination_sink_ids.clone().unwrap_or_else(|| sink_ids.iter().cloned().collect());
+        let dests = source
+            .destination_sink_ids
+            .clone()
+            .unwrap_or_else(|| sink_ids.iter().cloned().collect());
         for sink_id in &dests {
-            Preconditions::check(m, &format!("source.{}.destinationSinkIds", source.id), "reference a sink id", sink_ids.contains(sink_id), Some(sink_id.clone())).unwrap();
+            Preconditions::check(
+                m,
+                &format!("source.{}.destinationSinkIds", source.id),
+                "reference a sink id",
+                sink_ids.contains(sink_id),
+                Some(sink_id.clone()),
+            )
+            .unwrap();
             if let Some(sink) = network.sinks.iter().find(|s| &s.id == sink_id) {
                 Preconditions::check(
                     m,
@@ -1799,7 +2092,11 @@ fn current_signal_phase(signal: &TrafficSignal, time_sec: f64) -> TrafficSignalP
     signal.phases[signal.phases.len() - 1].clone()
 }
 
-fn shortest_lane_path(network: &TrafficNetwork, source_node_id: &str, sink_node_id: &str) -> Vec<String> {
+fn shortest_lane_path(
+    network: &TrafficNetwork,
+    source_node_id: &str,
+    sink_node_id: &str,
+) -> Vec<String> {
     let mut dist: HashMap<String, f64> = HashMap::new();
     let mut prev_lane: HashMap<String, String> = HashMap::new();
     let mut prev_node: HashMap<String, String> = HashMap::new();
@@ -1835,7 +2132,12 @@ fn shortest_lane_path(network: &TrafficNetwork, source_node_id: &str, sink_node_
             }
         }
     }
-    if !dist.get(sink_node_id).copied().unwrap_or(f64::INFINITY).is_finite() {
+    if !dist
+        .get(sink_node_id)
+        .copied()
+        .unwrap_or(f64::INFINITY)
+        .is_finite()
+    {
         return Vec::new();
     }
     let mut route: Vec<String> = Vec::new();
@@ -1859,17 +2161,72 @@ fn shortest_lane_path(network: &TrafficNetwork, source_node_id: &str, sink_node_
 /// `buildFiveIntersectionTrafficNetwork`).
 pub fn build_five_intersection_traffic_network() -> TrafficNetwork {
     let nodes: Vec<TrafficNode> = vec![
-        TrafficNode { id: "W".to_string(), kind: TrafficNodeKind::Source, x: 0.0, y: 1.0 },
-        TrafficNode { id: "S0".to_string(), kind: TrafficNodeKind::Source, x: 1.0, y: 2.0 },
-        TrafficNode { id: "N2".to_string(), kind: TrafficNodeKind::Source, x: 3.0, y: 0.0 },
-        TrafficNode { id: "I0".to_string(), kind: TrafficNodeKind::Intersection, x: 1.0, y: 1.0 },
-        TrafficNode { id: "I1".to_string(), kind: TrafficNodeKind::Intersection, x: 2.0, y: 1.0 },
-        TrafficNode { id: "I2".to_string(), kind: TrafficNodeKind::Intersection, x: 3.0, y: 1.0 },
-        TrafficNode { id: "I3".to_string(), kind: TrafficNodeKind::Intersection, x: 4.0, y: 1.0 },
-        TrafficNode { id: "I4".to_string(), kind: TrafficNodeKind::Intersection, x: 5.0, y: 1.0 },
-        TrafficNode { id: "E".to_string(), kind: TrafficNodeKind::Sink, x: 6.0, y: 1.0 },
-        TrafficNode { id: "N1".to_string(), kind: TrafficNodeKind::Sink, x: 2.0, y: 0.0 },
-        TrafficNode { id: "S4".to_string(), kind: TrafficNodeKind::Sink, x: 5.0, y: 2.0 },
+        TrafficNode {
+            id: "W".to_string(),
+            kind: TrafficNodeKind::Source,
+            x: 0.0,
+            y: 1.0,
+        },
+        TrafficNode {
+            id: "S0".to_string(),
+            kind: TrafficNodeKind::Source,
+            x: 1.0,
+            y: 2.0,
+        },
+        TrafficNode {
+            id: "N2".to_string(),
+            kind: TrafficNodeKind::Source,
+            x: 3.0,
+            y: 0.0,
+        },
+        TrafficNode {
+            id: "I0".to_string(),
+            kind: TrafficNodeKind::Intersection,
+            x: 1.0,
+            y: 1.0,
+        },
+        TrafficNode {
+            id: "I1".to_string(),
+            kind: TrafficNodeKind::Intersection,
+            x: 2.0,
+            y: 1.0,
+        },
+        TrafficNode {
+            id: "I2".to_string(),
+            kind: TrafficNodeKind::Intersection,
+            x: 3.0,
+            y: 1.0,
+        },
+        TrafficNode {
+            id: "I3".to_string(),
+            kind: TrafficNodeKind::Intersection,
+            x: 4.0,
+            y: 1.0,
+        },
+        TrafficNode {
+            id: "I4".to_string(),
+            kind: TrafficNodeKind::Intersection,
+            x: 5.0,
+            y: 1.0,
+        },
+        TrafficNode {
+            id: "E".to_string(),
+            kind: TrafficNodeKind::Sink,
+            x: 6.0,
+            y: 1.0,
+        },
+        TrafficNode {
+            id: "N1".to_string(),
+            kind: TrafficNodeKind::Sink,
+            x: 2.0,
+            y: 0.0,
+        },
+        TrafficNode {
+            id: "S4".to_string(),
+            kind: TrafficNodeKind::Sink,
+            x: 5.0,
+            y: 2.0,
+        },
     ];
     let mk = |id: &str, from: &str, to: &str, length_m: f64| TrafficLane {
         id: id.to_string(),
@@ -1897,32 +2254,106 @@ pub fn build_five_intersection_traffic_network() -> TrafficNetwork {
         duration_sec,
     };
     let signals: Vec<TrafficSignal> = vec![
-        TrafficSignal { node_id: "I0".to_string(), phases: vec![phase("main", vec!["W-I0"], 28.0), phase("side", vec!["S0-I0"], 16.0)], offset_sec: None },
-        TrafficSignal { node_id: "I1".to_string(), phases: vec![phase("main", vec!["I0-I1"], 30.0)], offset_sec: None },
-        TrafficSignal { node_id: "I2".to_string(), phases: vec![phase("main", vec!["I1-I2"], 26.0), phase("side", vec!["N2-I2"], 18.0)], offset_sec: Some(5.0) },
-        TrafficSignal { node_id: "I3".to_string(), phases: vec![phase("main", vec!["I2-I3"], 30.0)], offset_sec: None },
-        TrafficSignal { node_id: "I4".to_string(), phases: vec![phase("main", vec!["I3-I4"], 26.0)], offset_sec: None },
+        TrafficSignal {
+            node_id: "I0".to_string(),
+            phases: vec![
+                phase("main", vec!["W-I0"], 28.0),
+                phase("side", vec!["S0-I0"], 16.0),
+            ],
+            offset_sec: None,
+        },
+        TrafficSignal {
+            node_id: "I1".to_string(),
+            phases: vec![phase("main", vec!["I0-I1"], 30.0)],
+            offset_sec: None,
+        },
+        TrafficSignal {
+            node_id: "I2".to_string(),
+            phases: vec![
+                phase("main", vec!["I1-I2"], 26.0),
+                phase("side", vec!["N2-I2"], 18.0),
+            ],
+            offset_sec: Some(5.0),
+        },
+        TrafficSignal {
+            node_id: "I3".to_string(),
+            phases: vec![phase("main", vec!["I2-I3"], 30.0)],
+            offset_sec: None,
+        },
+        TrafficSignal {
+            node_id: "I4".to_string(),
+            phases: vec![phase("main", vec!["I3-I4"], 26.0)],
+            offset_sec: None,
+        },
     ];
     let sources: Vec<TrafficSource> = vec![
-        TrafficSource { id: "west".to_string(), node_id: "W".to_string(), rate_per_min: 18.0, destination_sink_ids: Some(vec!["east".to_string(), "north1".to_string(), "south4".to_string()]) },
-        TrafficSource { id: "south0".to_string(), node_id: "S0".to_string(), rate_per_min: 7.0, destination_sink_ids: Some(vec!["east".to_string(), "north1".to_string(), "south4".to_string()]) },
-        TrafficSource { id: "north2".to_string(), node_id: "N2".to_string(), rate_per_min: 8.0, destination_sink_ids: Some(vec!["east".to_string(), "south4".to_string()]) },
+        TrafficSource {
+            id: "west".to_string(),
+            node_id: "W".to_string(),
+            rate_per_min: 18.0,
+            destination_sink_ids: Some(vec![
+                "east".to_string(),
+                "north1".to_string(),
+                "south4".to_string(),
+            ]),
+        },
+        TrafficSource {
+            id: "south0".to_string(),
+            node_id: "S0".to_string(),
+            rate_per_min: 7.0,
+            destination_sink_ids: Some(vec![
+                "east".to_string(),
+                "north1".to_string(),
+                "south4".to_string(),
+            ]),
+        },
+        TrafficSource {
+            id: "north2".to_string(),
+            node_id: "N2".to_string(),
+            rate_per_min: 8.0,
+            destination_sink_ids: Some(vec!["east".to_string(), "south4".to_string()]),
+        },
     ];
     let sinks: Vec<TrafficSink> = vec![
-        TrafficSink { id: "east".to_string(), node_id: "E".to_string() },
-        TrafficSink { id: "north1".to_string(), node_id: "N1".to_string() },
-        TrafficSink { id: "south4".to_string(), node_id: "S4".to_string() },
+        TrafficSink {
+            id: "east".to_string(),
+            node_id: "E".to_string(),
+        },
+        TrafficSink {
+            id: "north1".to_string(),
+            node_id: "N1".to_string(),
+        },
+        TrafficSink {
+            id: "south4".to_string(),
+            node_id: "S4".to_string(),
+        },
     ];
-    TrafficNetwork { nodes, lanes, signals: Some(signals), sources, sinks }
+    TrafficNetwork {
+        nodes,
+        lanes,
+        signals: Some(signals),
+        sources,
+        sinks,
+    }
 }
 
 /// Run a fixed-step traffic simulation (TS `runTrafficFlow`).
-pub fn run_traffic_flow(params: TrafficParams, logger: Option<Box<dyn OptimizationLogger>>) -> TrafficResult {
+pub fn run_traffic_flow(
+    params: TrafficParams,
+    logger: Option<Box<dyn OptimizationLogger>>,
+) -> TrafficResult {
     let max_ticks = (params.duration_sec / params.dt_sec).ceil() as usize + 1;
-    let station = Rc::new(RefCell::new(TrafficGridStation::new(params, TrafficOptions { logger })));
+    let station = Rc::new(RefCell::new(TrafficGridStation::new(
+        params,
+        TrafficOptions { logger },
+    )));
     let summary = run_iterative_des(
         vec![station.clone() as StationRef],
-        IterativeRunOptions { shuffle: false, max_ticks: Some(max_ticks), ..Default::default() },
+        IterativeRunOptions {
+            shuffle: false,
+            max_ticks: Some(max_ticks),
+            ..Default::default()
+        },
     );
     let checks = summary.validation.unwrap_or_default();
     let result = station.borrow().result(checks);
@@ -1942,7 +2373,12 @@ mod tests {
     use super::*;
 
     fn edge(from: usize, to: usize, capacity: f64) -> FlowEdge {
-        FlowEdge { from, to, capacity, name: None }
+        FlowEdge {
+            from,
+            to,
+            capacity,
+            name: None,
+        }
     }
 
     #[test]
@@ -1952,13 +2388,23 @@ mod tests {
             num_nodes: 4,
             source: 0,
             sink: 3,
-            edges: vec![edge(0, 1, 3.0), edge(0, 2, 2.0), edge(1, 3, 2.0), edge(2, 3, 3.0), edge(1, 2, 1.0)],
+            edges: vec![
+                edge(0, 1, 3.0),
+                edge(0, 2, 2.0),
+                edge(1, 3, 2.0),
+                edge(2, 3, 3.0),
+                edge(1, 2, 1.0),
+            ],
             max_augmentations: None,
             node_coordinates: None,
             node_names: None,
         };
         let res = run_max_flow(params, None);
-        assert!((res.max_flow - 5.0).abs() < 1e-9, "max flow = {}", res.max_flow);
+        assert!(
+            (res.max_flow - 5.0).abs() < 1e-9,
+            "max flow = {}",
+            res.max_flow
+        );
         assert!((res.min_cut.capacity - res.max_flow).abs() < 1e-9);
     }
 
@@ -1975,7 +2421,11 @@ mod tests {
             node_names: None,
         };
         let res = run_max_flow(params, None);
-        assert!((res.max_flow - 4.0).abs() < 1e-9, "max flow = {}", res.max_flow);
+        assert!(
+            (res.max_flow - 4.0).abs() < 1e-9,
+            "max flow = {}",
+            res.max_flow
+        );
         assert_eq!(res.min_cut.cut_edges, vec![1]);
         assert!((res.min_cut.capacity - 4.0).abs() < 1e-9);
     }

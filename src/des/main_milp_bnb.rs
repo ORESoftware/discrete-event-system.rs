@@ -47,23 +47,34 @@ fn brute_knapsack(values: &[f64], weights: &[f64], capacity: f64) -> (f64, Vec<i
         }
         if w <= capacity && v > best_z {
             best_z = v;
-            best_x = (0..n).map(|i| if mask & (1 << i) != 0 { 1 } else { 0 }).collect();
+            best_x = (0..n)
+                .map(|i| if mask & (1 << i) != 0 { 1 } else { 0 })
+                .collect();
         }
     }
     (best_z, best_x)
 }
 
 fn print_solution(label: &str, r: &MILPSolution) {
-    let x_pretty: Vec<String> = r
-        .x
-        .iter()
-        .take(16)
-        .map(|&v| if v.is_finite() { format!("{:.3}", v) } else { "N/A".to_string() })
-        .collect();
+    let x_pretty: Vec<String> =
+        r.x.iter()
+            .take(16)
+            .map(|&v| {
+                if v.is_finite() {
+                    format!("{:.3}", v)
+                } else {
+                    "N/A".to_string()
+                }
+            })
+            .collect();
     let z_str = if r.z.is_finite() {
         format!("{:.4}", r.z)
     } else if r.z.is_infinite() {
-        if r.z > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() }
+        if r.z > 0.0 {
+            "Infinity".to_string()
+        } else {
+            "-Infinity".to_string()
+        }
     } else {
         "NaN".to_string()
     };
@@ -76,7 +87,10 @@ fn print_solution(label: &str, r: &MILPSolution) {
         x_pretty.join(", "),
         if r.x.len() > 16 { ", …" } else { "" }
     );
-    println!("    nodes:    {}    LP pivots: {}", r.nodes_explored, r.total_pivots);
+    println!(
+        "    nodes:    {}    LP pivots: {}",
+        r.nodes_explored, r.total_pivots
+    );
 }
 
 /// Entry point (`main()` in the TS source).
@@ -86,9 +100,16 @@ pub fn run() {
     println!("  weights w = [ 5,  4,  6,  3]");
     println!("  capacity W = 10");
     {
-        let milp = build_knapsack_milp(vec![10.0, 40.0, 30.0, 50.0], vec![5.0, 4.0, 6.0, 3.0], 10.0);
+        let milp =
+            build_knapsack_milp(vec![10.0, 40.0, 30.0, 50.0], vec![5.0, 4.0, 6.0, 3.0], 10.0);
         let t0 = Instant::now();
-        let r = solve_milp(&milp, MILPSolveOptions { verbose: Some(true), ..Default::default() });
+        let r = solve_milp(
+            &milp,
+            MILPSolveOptions {
+                verbose: Some(true),
+                ..Default::default()
+            },
+        );
         let dt = t0.elapsed().as_millis();
         println!();
         print_solution(&format!("B&B solution (wall={}ms):", dt), &r);
@@ -96,7 +117,9 @@ pub fn run() {
 
     header("STUDY 2 — 12-item knapsack vs brute force (4096 enumerations)");
     {
-        let v = vec![12.0, 18.0, 9.0, 4.0, 21.0, 35.0, 14.0, 25.0, 30.0, 8.0, 17.0, 6.0];
+        let v = vec![
+            12.0, 18.0, 9.0, 4.0, 21.0, 35.0, 14.0, 25.0, 30.0, 8.0, 17.0, 6.0,
+        ];
         let w = vec![5.0, 8.0, 4.0, 3.0, 9.0, 13.0, 6.0, 7.0, 11.0, 3.0, 6.0, 4.0];
         let cap = 30.0;
         let milp = build_knapsack_milp(v.clone(), w.clone(), cap);
@@ -108,7 +131,11 @@ pub fn run() {
         let t2 = t0b.elapsed().as_millis();
         print_solution("B&B", &r);
         let bx: Vec<String> = brute.1.iter().map(|x| x.to_string()).collect();
-        println!("    brute force z={}, x=[{}]", num_str(brute.0), bx.join(", "));
+        println!(
+            "    brute force z={}, x=[{}]",
+            num_str(brute.0),
+            bx.join(", ")
+        );
         let is_match = (r.z - brute.0).abs() < 1e-6;
         println!(
             "    match: {}    (B&B={}ms, brute={}ms)",
@@ -128,14 +155,24 @@ pub fn run() {
         let milp = MILPProblem {
             sense: Sense::Max,
             c: vec![3.0, 5.0, 7.0],
-            a: vec![vec![1.0, 1.0, 1.0], vec![2.0, 1.0, 0.0], vec![1.0, 2.0, 3.0]],
+            a: vec![
+                vec![1.0, 1.0, 1.0],
+                vec![2.0, 1.0, 0.0],
+                vec![1.0, 2.0, 3.0],
+            ],
             b: vec![10.0, 8.0, 15.0],
             integer_vars: vec![true, true, false],
             ub: None,
             var_names: None,
             con_names: None,
         };
-        let r = solve_milp(&milp, MILPSolveOptions { verbose: Some(false), ..Default::default() });
+        let r = solve_milp(
+            &milp,
+            MILPSolveOptions {
+                verbose: Some(false),
+                ..Default::default()
+            },
+        );
         print_solution("B&B", &r);
     }
 
@@ -173,7 +210,13 @@ pub fn run() {
         let cap = (w.iter().sum::<f64>() * 0.4).floor();
         let milp = build_knapsack_milp(v, w, cap);
         let t0 = Instant::now();
-        let r = solve_milp(&milp, MILPSolveOptions { max_nodes: Some(50000), ..Default::default() });
+        let r = solve_milp(
+            &milp,
+            MILPSolveOptions {
+                max_nodes: Some(50000),
+                ..Default::default()
+            },
+        );
         let dt = t0.elapsed().as_millis();
         println!(
             "  {:>2}     {:>7}  {:>7}  {:>7}    {:>5}",

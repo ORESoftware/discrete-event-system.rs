@@ -128,8 +128,16 @@ fn draw_station(
         y,
         w,
         h,
-        fill: if active { "#fef3c7".to_string() } else { "#1e293b".to_string() },
-        stroke: Some(if active { "#f59e0b".to_string() } else { "#475569".to_string() }),
+        fill: if active {
+            "#fef3c7".to_string()
+        } else {
+            "#1e293b".to_string()
+        },
+        stroke: Some(if active {
+            "#f59e0b".to_string()
+        } else {
+            "#475569".to_string()
+        }),
         stroke_width: Some(if active { 3.0 } else { 1.5 }),
         rx: Some(8.0),
         ..Default::default()
@@ -139,7 +147,11 @@ fn draw_station(
         y: y + 22.0,
         text: title.to_string(),
         font_size: Some(13.0),
-        fill: Some(if active { "#92400e".to_string() } else { "#fde68a".to_string() }),
+        fill: Some(if active {
+            "#92400e".to_string()
+        } else {
+            "#fde68a".to_string()
+        }),
         font_weight: Some(FontWeight::Bold),
         anchor: Some(Anchor::Middle),
         ..Default::default()
@@ -150,7 +162,11 @@ fn draw_station(
             y: y + 44.0 + i as f64 * 16.0,
             text: line.clone(),
             font_size: Some(11.0),
-            fill: Some(if active { "#1f2937".to_string() } else { "#cbd5e1".to_string() }),
+            fill: Some(if active {
+                "#1f2937".to_string()
+            } else {
+                "#cbd5e1".to_string()
+            }),
             anchor: Some(Anchor::Middle),
             ..Default::default()
         }));
@@ -170,7 +186,16 @@ fn draw_edge(
     dot_color: &str,
     progress: f64,
 ) {
-    shapes.push(Shape::Line(LineShape { x1, y1, x2, y2, stroke: "#64748b".to_string(), stroke_width: Some(1.5), opacity: Some(0.7), ..Default::default() }));
+    shapes.push(Shape::Line(LineShape {
+        x1,
+        y1,
+        x2,
+        y2,
+        stroke: "#64748b".to_string(),
+        stroke_width: Some(1.5),
+        opacity: Some(0.7),
+        ..Default::default()
+    }));
     // Arrow tip.
     let dx = x2 - x1;
     let dy = y2 - y1;
@@ -182,14 +207,49 @@ fn draw_edge(
         let ay = y2 - 8.0 * uy;
         let px = -uy;
         let py = ux;
-        shapes.push(Shape::Line(LineShape { x1: ax, y1: ay, x2: ax + 4.0 * px, y2: ay + 4.0 * py, stroke: "#64748b".to_string(), stroke_width: Some(1.5), ..Default::default() }));
-        shapes.push(Shape::Line(LineShape { x1: ax, y1: ay, x2: ax - 4.0 * px, y2: ay - 4.0 * py, stroke: "#64748b".to_string(), stroke_width: Some(1.5), ..Default::default() }));
+        shapes.push(Shape::Line(LineShape {
+            x1: ax,
+            y1: ay,
+            x2: ax + 4.0 * px,
+            y2: ay + 4.0 * py,
+            stroke: "#64748b".to_string(),
+            stroke_width: Some(1.5),
+            ..Default::default()
+        }));
+        shapes.push(Shape::Line(LineShape {
+            x1: ax,
+            y1: ay,
+            x2: ax - 4.0 * px,
+            y2: ay - 4.0 * py,
+            stroke: "#64748b".to_string(),
+            stroke_width: Some(1.5),
+            ..Default::default()
+        }));
     }
     // Label at midpoint.
     let mx = (x1 + x2) / 2.0;
     let my = (y1 + y2) / 2.0;
-    shapes.push(Shape::Rect(RectShape { x: mx - 50.0, y: my - 8.0, w: 100.0, h: 16.0, fill: "#0f172a".to_string(), stroke: Some("#334155".to_string()), stroke_width: Some(1.0), rx: Some(3.0), opacity: Some(0.9), ..Default::default() }));
-    shapes.push(Shape::Text(TextShape { x: mx, y: my + 4.0, text: label.to_string(), font_size: Some(10.0), fill: Some("#fde68a".to_string()), anchor: Some(Anchor::Middle), ..Default::default() }));
+    shapes.push(Shape::Rect(RectShape {
+        x: mx - 50.0,
+        y: my - 8.0,
+        w: 100.0,
+        h: 16.0,
+        fill: "#0f172a".to_string(),
+        stroke: Some("#334155".to_string()),
+        stroke_width: Some(1.0),
+        rx: Some(3.0),
+        opacity: Some(0.9),
+        ..Default::default()
+    }));
+    shapes.push(Shape::Text(TextShape {
+        x: mx,
+        y: my + 4.0,
+        text: label.to_string(),
+        font_size: Some(10.0),
+        fill: Some("#fde68a".to_string()),
+        anchor: Some(Anchor::Middle),
+        ..Default::default()
+    }));
     // Movable dots: spread along the edge, centred at `progress`.
     let n = dot_count.min(8.0);
     let count = n.max(0.0) as usize;
@@ -197,7 +257,15 @@ fn draw_edge(
         let t = (progress + (i as f64 - (n - 1.0) / 2.0) * 0.04).clamp(0.02, 0.98);
         let cx = x1 + (x2 - x1) * t;
         let cy = y1 + (y2 - y1) * t;
-        shapes.push(Shape::Circle(CircleShape { x: cx, y: cy, r: 3.5, fill: dot_color.to_string(), stroke: Some("#0b1220".to_string()), stroke_width: Some(0.5), ..Default::default() }));
+        shapes.push(Shape::Circle(CircleShape {
+            x: cx,
+            y: cy,
+            r: 3.5,
+            fill: dot_color.to_string(),
+            stroke: Some("#0b1220".to_string()),
+            stroke_width: Some(0.5),
+            ..Default::default()
+        }));
     }
 }
 
@@ -241,7 +309,12 @@ pub fn build_fact_machine_frame(
     shapes.push(Shape::Text(TextShape {
         x: ARCH_X + ARCH_W / 2.0,
         y: ARCH_Y + 24.0,
-        text: format!("DES architecture — t = {}/{} — {}", js_num(tick), js_num(params.t), phase_label),
+        text: format!(
+            "DES architecture — t = {}/{} — {}",
+            js_num(tick),
+            js_num(params.t),
+            phase_label
+        ),
         font_size: Some(14.0),
         fill: Some("#f1f5f9".to_string()),
         font_weight: Some(FontWeight::Bold),
@@ -264,12 +337,23 @@ pub fn build_fact_machine_frame(
         &[
             format!("K = {}", js_num(params.k_noise)),
             format!("informedness {}", to_fixed(params.informedness, 2)),
-            if tot > 0.0 { format!("last batch {}/{}", js_num(yes), js_num(tot)) } else { "idle".to_string() },
+            if tot > 0.0 {
+                format!("last batch {}/{}", js_num(yes), js_num(tot))
+            } else {
+                "idle".to_string()
+            },
         ],
         noise_active,
     );
-    let price0 = arch.and_then(|a| a.prices.as_ref().and_then(|p| p.first().copied())).unwrap_or(0.5);
-    let b_divisor = (if params.market_type == "binary" { 2.0 } else { params.theta_bins }).ln();
+    let price0 = arch
+        .and_then(|a| a.prices.as_ref().and_then(|p| p.first().copied()))
+        .unwrap_or(0.5);
+    let b_divisor = (if params.market_type == "binary" {
+        2.0
+    } else {
+        params.theta_bins
+    })
+    .ln();
     draw_station(
         &mut shapes,
         MARKET_X,
@@ -298,7 +382,11 @@ pub fn build_fact_machine_frame(
         &[
             format!("policy = {}", params.policy),
             format!("E[\u{03b8}] = {}", to_fixed(b_mean, 3)),
-            if bettor_action < 0.0 { "action = hold".to_string() } else { format!("action = buy {}", js_num(bettor_action)) },
+            if bettor_action < 0.0 {
+                "action = hold".to_string()
+            } else {
+                format!("action = buy {}", js_num(bettor_action))
+            },
         ],
         bettor_active,
     );
@@ -309,7 +397,11 @@ pub fn build_fact_machine_frame(
         STATION_W,
         STATION_H,
         "Census",
-        &["snapshots".to_string(), "prices + b(\u{03b8})".to_string(), "for trace".to_string()],
+        &[
+            "snapshots".to_string(),
+            "prices + b(\u{03b8})".to_string(),
+            "for trace".to_string(),
+        ],
         census_active,
     );
     let resolution_lines: Vec<String> = if is_last && phase == 4 {
@@ -328,25 +420,88 @@ pub fn build_fact_machine_frame(
             format!("{} voters", js_num(params.n_voters)),
         ]
     };
-    draw_station(&mut shapes, RESOL_X, RESOL_Y, STATION_W, STATION_H, "Resolution", &resolution_lines, resolution_active);
+    draw_station(
+        &mut shapes,
+        RESOL_X,
+        RESOL_Y,
+        STATION_W,
+        STATION_H,
+        "Resolution",
+        &resolution_lines,
+        resolution_active,
+    );
 
     // Edges with movables.
     let cxf = |x: f64, w: f64| x + w / 2.0;
     // 1. NoiseTrader → Market.
     if phase == 0 {
-        draw_edge(&mut shapes, cxf(NOISE_X, STATION_W), NOISE_Y + STATION_H, cxf(MARKET_X, STATION_W), MARKET_Y, &format!("{} noise orders", js_num(noise_order_count)), noise_order_count, "#22d3ee", 0.5);
+        draw_edge(
+            &mut shapes,
+            cxf(NOISE_X, STATION_W),
+            NOISE_Y + STATION_H,
+            cxf(MARKET_X, STATION_W),
+            MARKET_Y,
+            &format!("{} noise orders", js_num(noise_order_count)),
+            noise_order_count,
+            "#22d3ee",
+            0.5,
+        );
     } else {
-        draw_edge(&mut shapes, cxf(NOISE_X, STATION_W), NOISE_Y + STATION_H, cxf(MARKET_X, STATION_W), MARKET_Y, &(if tot > 0.0 { format!("{} settled", js_num(tot)) } else { "idle".to_string() }), 0.0, "#22d3ee", 0.0);
+        draw_edge(
+            &mut shapes,
+            cxf(NOISE_X, STATION_W),
+            NOISE_Y + STATION_H,
+            cxf(MARKET_X, STATION_W),
+            MARKET_Y,
+            &(if tot > 0.0 {
+                format!("{} settled", js_num(tot))
+            } else {
+                "idle".to_string()
+            }),
+            0.0,
+            "#22d3ee",
+            0.0,
+        );
     }
     // 2. Market → Census (read).
     if phase == 1 {
-        draw_edge(&mut shapes, MARKET_X + STATION_W / 2.0, MARKET_Y, CENSUS_X + STATION_W / 2.0, CENSUS_Y + STATION_H, "snapshot", 1.0, "#a78bfa", 0.4);
+        draw_edge(
+            &mut shapes,
+            MARKET_X + STATION_W / 2.0,
+            MARKET_Y,
+            CENSUS_X + STATION_W / 2.0,
+            CENSUS_Y + STATION_H,
+            "snapshot",
+            1.0,
+            "#a78bfa",
+            0.4,
+        );
     } else {
-        draw_edge(&mut shapes, MARKET_X + STATION_W / 2.0, MARKET_Y, CENSUS_X + STATION_W / 2.0, CENSUS_Y + STATION_H, "reads", 0.0, "#a78bfa", 0.0);
+        draw_edge(
+            &mut shapes,
+            MARKET_X + STATION_W / 2.0,
+            MARKET_Y,
+            CENSUS_X + STATION_W / 2.0,
+            CENSUS_Y + STATION_H,
+            "reads",
+            0.0,
+            "#a78bfa",
+            0.0,
+        );
     }
     // 3. Market → Bettor (read prices).
     if phase == 2 {
-        draw_edge(&mut shapes, MARKET_X, MARKET_Y + STATION_H / 2.0, BETTOR_X + STATION_W, BETTOR_Y + STATION_H / 2.0, "reads prices", 1.0, "#fb7185", 0.5);
+        draw_edge(
+            &mut shapes,
+            MARKET_X,
+            MARKET_Y + STATION_H / 2.0,
+            BETTOR_X + STATION_W,
+            BETTOR_Y + STATION_H / 2.0,
+            "reads prices",
+            1.0,
+            "#fb7185",
+            0.5,
+        );
     }
     // 4. Bettor → Market (send order).
     if phase == 2 && bettor_action >= 0.0 {
@@ -357,19 +512,57 @@ pub fn build_fact_machine_frame(
         } else {
             format!("#{}", js_num(bettor_action))
         };
-        draw_edge(&mut shapes, BETTOR_X + STATION_W, BETTOR_Y + 20.0, MARKET_X, MARKET_Y + 20.0, &format!("1 order (buy {order_label})"), 1.0, "#f472b6", 0.5);
+        draw_edge(
+            &mut shapes,
+            BETTOR_X + STATION_W,
+            BETTOR_Y + 20.0,
+            MARKET_X,
+            MARKET_Y + 20.0,
+            &format!("1 order (buy {order_label})"),
+            1.0,
+            "#f472b6",
+            0.5,
+        );
     }
     // 5. Resolution receives votes (only final phase 4 of last tick).
     if resolution_active {
-        draw_edge(&mut shapes, MARKET_X + STATION_W / 2.0, MARKET_Y + STATION_H, RESOL_X + STATION_W / 2.0, RESOL_Y, &format!("{} votes", js_num(params.n_voters)), params.n_voters, "#fda4af", 0.6);
+        draw_edge(
+            &mut shapes,
+            MARKET_X + STATION_W / 2.0,
+            MARKET_Y + STATION_H,
+            RESOL_X + STATION_W / 2.0,
+            RESOL_Y,
+            &format!("{} votes", js_num(params.n_voters)),
+            params.n_voters,
+            "#fda4af",
+            0.6,
+        );
     }
 
     // ============ ANALYTICS (right panel) ============
     let k = belief_weights.len();
 
     // Belief histogram (compact).
-    shapes.push(Shape::Rect(RectShape { x: HIST_X - 6.0, y: HIST_Y - 6.0, w: HIST_W + 12.0, h: HIST_H + 12.0, fill: "#0f172a".to_string(), stroke: Some("#334155".to_string()), stroke_width: Some(1.0), rx: Some(4.0), ..Default::default() }));
-    shapes.push(Shape::Text(TextShape { x: HIST_X, y: HIST_Y - 12.0, text: format!("Bettor's belief b(\u{03b8}) — t = {}", js_num(tick)), font_size: Some(12.0), fill: Some("#e2e8f0".to_string()), font_weight: Some(FontWeight::Bold), ..Default::default() }));
+    shapes.push(Shape::Rect(RectShape {
+        x: HIST_X - 6.0,
+        y: HIST_Y - 6.0,
+        w: HIST_W + 12.0,
+        h: HIST_H + 12.0,
+        fill: "#0f172a".to_string(),
+        stroke: Some("#334155".to_string()),
+        stroke_width: Some(1.0),
+        rx: Some(4.0),
+        ..Default::default()
+    }));
+    shapes.push(Shape::Text(TextShape {
+        x: HIST_X,
+        y: HIST_Y - 12.0,
+        text: format!("Bettor's belief b(\u{03b8}) — t = {}", js_num(tick)),
+        font_size: Some(12.0),
+        fill: Some("#e2e8f0".to_string()),
+        font_weight: Some(FontWeight::Bold),
+        ..Default::default()
+    }));
     let mut max_w = 0.0_f64;
     for &w in belief_weights {
         if w > max_w {
@@ -392,18 +585,79 @@ pub fn build_fact_machine_frame(
     }
     // True θ marker.
     let truth_x = HIST_X + params.true_theta * HIST_W;
-    shapes.push(Shape::Line(LineShape { x1: truth_x, y1: HIST_Y + 4.0, x2: truth_x, y2: HIST_Y + HIST_H - 26.0, stroke: "#dc2626".to_string(), stroke_width: Some(2.0), dasharray: Some("4 3".to_string()), ..Default::default() }));
-    shapes.push(Shape::Text(TextShape { x: truth_x + 4.0, y: HIST_Y + 16.0, text: format!("true \u{03b8} = {}", to_fixed(params.true_theta, 2)), font_size: Some(10.0), fill: Some("#fca5a5".to_string()), ..Default::default() }));
+    shapes.push(Shape::Line(LineShape {
+        x1: truth_x,
+        y1: HIST_Y + 4.0,
+        x2: truth_x,
+        y2: HIST_Y + HIST_H - 26.0,
+        stroke: "#dc2626".to_string(),
+        stroke_width: Some(2.0),
+        dasharray: Some("4 3".to_string()),
+        ..Default::default()
+    }));
+    shapes.push(Shape::Text(TextShape {
+        x: truth_x + 4.0,
+        y: HIST_Y + 16.0,
+        text: format!("true \u{03b8} = {}", to_fixed(params.true_theta, 2)),
+        font_size: Some(10.0),
+        fill: Some("#fca5a5".to_string()),
+        ..Default::default()
+    }));
     // E_b[θ] marker.
     let mean_x = HIST_X + b_mean * HIST_W;
-    shapes.push(Shape::Line(LineShape { x1: mean_x, y1: HIST_Y + 4.0, x2: mean_x, y2: HIST_Y + HIST_H - 26.0, stroke: "#60a5fa".to_string(), stroke_width: Some(2.0), ..Default::default() }));
-    shapes.push(Shape::Text(TextShape { x: mean_x + 4.0, y: HIST_Y + 32.0, text: format!("E[\u{03b8}] = {}", to_fixed(b_mean, 3)), font_size: Some(10.0), fill: Some("#93c5fd".to_string()), ..Default::default() }));
+    shapes.push(Shape::Line(LineShape {
+        x1: mean_x,
+        y1: HIST_Y + 4.0,
+        x2: mean_x,
+        y2: HIST_Y + HIST_H - 26.0,
+        stroke: "#60a5fa".to_string(),
+        stroke_width: Some(2.0),
+        ..Default::default()
+    }));
+    shapes.push(Shape::Text(TextShape {
+        x: mean_x + 4.0,
+        y: HIST_Y + 32.0,
+        text: format!("E[\u{03b8}] = {}", to_fixed(b_mean, 3)),
+        font_size: Some(10.0),
+        fill: Some("#93c5fd".to_string()),
+        ..Default::default()
+    }));
 
     // Price + E[θ] line chart (compact).
-    shapes.push(Shape::Rect(RectShape { x: PRICE_X - 6.0, y: PRICE_Y - 6.0, w: PRICE_W + 12.0, h: PRICE_H + 12.0, fill: "#0f172a".to_string(), stroke: Some("#334155".to_string()), stroke_width: Some(1.0), rx: Some(4.0), ..Default::default() }));
-    shapes.push(Shape::Text(TextShape { x: PRICE_X, y: PRICE_Y - 12.0, text: format!("P(YES) red, E[\u{03b8}] blue — through t = {}", js_num(tick)), font_size: Some(12.0), fill: Some("#e2e8f0".to_string()), font_weight: Some(FontWeight::Bold), ..Default::default() }));
+    shapes.push(Shape::Rect(RectShape {
+        x: PRICE_X - 6.0,
+        y: PRICE_Y - 6.0,
+        w: PRICE_W + 12.0,
+        h: PRICE_H + 12.0,
+        fill: "#0f172a".to_string(),
+        stroke: Some("#334155".to_string()),
+        stroke_width: Some(1.0),
+        rx: Some(4.0),
+        ..Default::default()
+    }));
+    shapes.push(Shape::Text(TextShape {
+        x: PRICE_X,
+        y: PRICE_Y - 12.0,
+        text: format!(
+            "P(YES) red, E[\u{03b8}] blue — through t = {}",
+            js_num(tick)
+        ),
+        font_size: Some(12.0),
+        fill: Some("#e2e8f0".to_string()),
+        font_weight: Some(FontWeight::Bold),
+        ..Default::default()
+    }));
     let y_true = PRICE_Y + (1.0 - params.true_theta) * (PRICE_H - 18.0) + 4.0;
-    shapes.push(Shape::Line(LineShape { x1: PRICE_X, y1: y_true, x2: PRICE_X + PRICE_W, y2: y_true, stroke: "#dc2626".to_string(), stroke_width: Some(1.0), dasharray: Some("3 3".to_string()), ..Default::default() }));
+    shapes.push(Shape::Line(LineShape {
+        x1: PRICE_X,
+        y1: y_true,
+        x2: PRICE_X + PRICE_W,
+        y2: y_true,
+        stroke: "#dc2626".to_string(),
+        stroke_width: Some(1.0),
+        dasharray: Some("3 3".to_string()),
+        ..Default::default()
+    }));
     let t_idx = result.price_history.len() as f64 - 1.0;
     let x_at = |i: f64| PRICE_X + (i / t_idx.max(1.0)) * PRICE_W;
     let y_at = |v: f64| PRICE_Y + (1.0 - v) * (PRICE_H - 18.0) + 4.0;
@@ -424,17 +678,66 @@ pub fn build_fact_machine_frame(
     let mut price_d = String::new();
     let mut mean_d = String::new();
     for i in 0..=up_to {
-        price_d += &format!("{}{} {}", if i == 0 { "M" } else { " L" }, to_fixed(x_at(i as f64), 1), to_fixed(y_at(price_scalar(i)), 1));
-        mean_d += &format!("{}{} {}", if i == 0 { "M" } else { " L" }, to_fixed(x_at(i as f64), 1), to_fixed(y_at(result.belief_mean[i]), 1));
+        price_d += &format!(
+            "{}{} {}",
+            if i == 0 { "M" } else { " L" },
+            to_fixed(x_at(i as f64), 1),
+            to_fixed(y_at(price_scalar(i)), 1)
+        );
+        mean_d += &format!(
+            "{}{} {}",
+            if i == 0 { "M" } else { " L" },
+            to_fixed(x_at(i as f64), 1),
+            to_fixed(y_at(result.belief_mean[i]), 1)
+        );
     }
-    shapes.push(Shape::Path(PathShape { d: price_d, stroke: Some("#dc2626".to_string()), stroke_width: Some(2.0), fill: Some("none".to_string()), ..Default::default() }));
-    shapes.push(Shape::Path(PathShape { d: mean_d, stroke: Some("#60a5fa".to_string()), stroke_width: Some(2.0), fill: Some("none".to_string()), ..Default::default() }));
+    shapes.push(Shape::Path(PathShape {
+        d: price_d,
+        stroke: Some("#dc2626".to_string()),
+        stroke_width: Some(2.0),
+        fill: Some("none".to_string()),
+        ..Default::default()
+    }));
+    shapes.push(Shape::Path(PathShape {
+        d: mean_d,
+        stroke: Some("#60a5fa".to_string()),
+        stroke_width: Some(2.0),
+        fill: Some("none".to_string()),
+        ..Default::default()
+    }));
 
     // Order flow ratio panel.
-    shapes.push(Shape::Rect(RectShape { x: FLOW_X - 6.0, y: FLOW_Y - 6.0, w: FLOW_W + 12.0, h: FLOW_H + 12.0, fill: "#0f172a".to_string(), stroke: Some("#334155".to_string()), stroke_width: Some(1.0), rx: Some(4.0), ..Default::default() }));
-    shapes.push(Shape::Text(TextShape { x: FLOW_X, y: FLOW_Y - 12.0, text: "Order flow YES/total".to_string(), font_size: Some(11.0), fill: Some("#e2e8f0".to_string()), font_weight: Some(FontWeight::Bold), ..Default::default() }));
+    shapes.push(Shape::Rect(RectShape {
+        x: FLOW_X - 6.0,
+        y: FLOW_Y - 6.0,
+        w: FLOW_W + 12.0,
+        h: FLOW_H + 12.0,
+        fill: "#0f172a".to_string(),
+        stroke: Some("#334155".to_string()),
+        stroke_width: Some(1.0),
+        rx: Some(4.0),
+        ..Default::default()
+    }));
+    shapes.push(Shape::Text(TextShape {
+        x: FLOW_X,
+        y: FLOW_Y - 12.0,
+        text: "Order flow YES/total".to_string(),
+        font_size: Some(11.0),
+        fill: Some("#e2e8f0".to_string()),
+        font_weight: Some(FontWeight::Bold),
+        ..Default::default()
+    }));
     let flow_true = FLOW_Y + (1.0 - params.true_theta) * (FLOW_H - 18.0) + 4.0;
-    shapes.push(Shape::Line(LineShape { x1: FLOW_X, y1: flow_true, x2: FLOW_X + FLOW_W, y2: flow_true, stroke: "#dc2626".to_string(), stroke_width: Some(1.0), dasharray: Some("3 3".to_string()), ..Default::default() }));
+    shapes.push(Shape::Line(LineShape {
+        x1: FLOW_X,
+        y1: flow_true,
+        x2: FLOW_X + FLOW_W,
+        y2: flow_true,
+        stroke: "#dc2626".to_string(),
+        stroke_width: Some(1.0),
+        dasharray: Some("3 3".to_string()),
+        ..Default::default()
+    }));
     let flow_upper = (tick - 1.0).min(result.yes_orders_history.len() as f64 - 1.0);
     if flow_upper >= 0.0 {
         for i in 0..=(flow_upper as usize) {
@@ -445,21 +748,56 @@ pub fn build_fact_machine_frame(
             };
             let x = FLOW_X + ((i as f64 + 0.5) / t_idx.max(1.0)) * FLOW_W;
             let y = FLOW_Y + (1.0 - ratio) * (FLOW_H - 18.0) + 4.0;
-            shapes.push(Shape::Circle(CircleShape { x, y, r: 2.5, fill: "#fbbf24".to_string(), ..Default::default() }));
+            shapes.push(Shape::Circle(CircleShape {
+                x,
+                y,
+                r: 2.5,
+                fill: "#fbbf24".to_string(),
+                ..Default::default()
+            }));
         }
     }
 
     // Entropy panel.
-    shapes.push(Shape::Rect(RectShape { x: ENT_X - 6.0, y: ENT_Y - 6.0, w: ENT_W + 12.0, h: ENT_H + 12.0, fill: "#0f172a".to_string(), stroke: Some("#334155".to_string()), stroke_width: Some(1.0), rx: Some(4.0), ..Default::default() }));
-    shapes.push(Shape::Text(TextShape { x: ENT_X, y: ENT_Y - 12.0, text: "Belief entropy H(b)".to_string(), font_size: Some(11.0), fill: Some("#e2e8f0".to_string()), font_weight: Some(FontWeight::Bold), ..Default::default() }));
+    shapes.push(Shape::Rect(RectShape {
+        x: ENT_X - 6.0,
+        y: ENT_Y - 6.0,
+        w: ENT_W + 12.0,
+        h: ENT_H + 12.0,
+        fill: "#0f172a".to_string(),
+        stroke: Some("#334155".to_string()),
+        stroke_width: Some(1.0),
+        rx: Some(4.0),
+        ..Default::default()
+    }));
+    shapes.push(Shape::Text(TextShape {
+        x: ENT_X,
+        y: ENT_Y - 12.0,
+        text: "Belief entropy H(b)".to_string(),
+        font_size: Some(11.0),
+        fill: Some("#e2e8f0".to_string()),
+        font_weight: Some(FontWeight::Bold),
+        ..Default::default()
+    }));
     let max_h = (k as f64).ln();
     let mut ent_d = String::new();
     for i in 0..=up_to {
         let x = ENT_X + (i as f64 / t_idx.max(1.0)) * ENT_W;
         let y = ENT_Y + (1.0 - result.belief_entropy[i] / max_h) * (ENT_H - 18.0) + 4.0;
-        ent_d += &format!("{}{} {}", if i == 0 { "M" } else { " L" }, to_fixed(x, 1), to_fixed(y, 1));
+        ent_d += &format!(
+            "{}{} {}",
+            if i == 0 { "M" } else { " L" },
+            to_fixed(x, 1),
+            to_fixed(y, 1)
+        );
     }
-    shapes.push(Shape::Path(PathShape { d: ent_d, stroke: Some("#a78bfa".to_string()), stroke_width: Some(2.0), fill: Some("none".to_string()), ..Default::default() }));
+    shapes.push(Shape::Path(PathShape {
+        d: ent_d,
+        stroke: Some("#a78bfa".to_string()),
+        stroke_width: Some(2.0),
+        fill: Some("none".to_string()),
+        ..Default::default()
+    }));
 
     let caption = format!("t={} {}", js_num(tick), phase_label);
     FrameParts::with_caption(shapes, caption)
@@ -501,6 +839,9 @@ mod tests {
         };
         let belief = vec![0.2, 0.3, 0.5];
         let fp = build_fact_machine_frame(1.0, &belief, &result, &params, None);
-        assert_eq!(fp.caption.as_deref(), Some("t=1 phase 1: noise settles \u{00b7} census reads"));
+        assert_eq!(
+            fp.caption.as_deref(),
+            Some("t=1 phase 1: noise settles \u{00b7} census reads")
+        );
     }
 }

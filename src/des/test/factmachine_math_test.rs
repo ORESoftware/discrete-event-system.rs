@@ -65,8 +65,14 @@ mod tests {
     #[test]
     fn option_prices_values_and_symmetry() {
         assert!(close(option_one_price(50.0, 50.0, 100.0), 0.5));
-        assert!(close(option_one_price(1000.0, 0.0, 100.0), 1.0 / (1.0 + (-10.0_f64).exp())));
-        assert!(close(option_one_price(0.0, 1000.0, 100.0), 1.0 / (1.0 + 10.0_f64.exp())));
+        assert!(close(
+            option_one_price(1000.0, 0.0, 100.0),
+            1.0 / (1.0 + (-10.0_f64).exp())
+        ));
+        assert!(close(
+            option_one_price(0.0, 1000.0, 100.0),
+            1.0 / (1.0 + 10.0_f64.exp())
+        ));
 
         let mut rng = SeededRandom::new(2);
         for _ in 0..10 {

@@ -185,7 +185,13 @@ pub struct SAAdapterResult {
 }
 
 fn num(min: Option<f64>, max: Option<f64>, integer: Option<bool>) -> ParamSchema {
-    ParamSchema::Number { min, max, integer, default: None, description: None }
+    ParamSchema::Number {
+        min,
+        max,
+        integer,
+        default: None,
+        description: None,
+    }
 }
 
 fn str_enum(allowed: &[&str]) -> ParamSchema {
@@ -198,14 +204,22 @@ fn str_enum(allowed: &[&str]) -> ParamSchema {
 
 fn obj(fields: Vec<(&str, ParamSchema)>, required: Vec<&str>) -> ParamSchema {
     ParamSchema::Object {
-        fields: fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+        fields: fields
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
         required: Some(required.iter().map(|s| s.to_string()).collect()),
         description: None,
     }
 }
 
 fn arr(items: ParamSchema) -> ParamSchema {
-    ParamSchema::Array { items: Box::new(items), min_length: None, max_length: None, description: None }
+    ParamSchema::Array {
+        items: Box::new(items),
+        min_length: None,
+        max_length: None,
+        description: None,
+    }
 }
 
 /// `const coolingSchema` (the `oneOf` over cooling-schedule kinds).
@@ -312,16 +326,27 @@ pub fn sa_schema() -> ParamSchema {
                         ("maxIterations", num(Some(1.0), None, Some(true))),
                         ("seed", num(None, None, Some(true))),
                         ("stallLimit", num(Some(0.0), None, Some(true))),
-                        ("recordTrace", ParamSchema::Boolean { default: None, description: None }),
+                        (
+                            "recordTrace",
+                            ParamSchema::Boolean {
+                                default: None,
+                                description: None,
+                            },
+                        ),
                         ("traceStride", num(Some(1.0), None, Some(true))),
                     ],
                     vec!["maxIterations"],
                 ),
             ),
         ],
-        required: Some(vec!["problem".to_string(), "cooling".to_string(), "options".to_string()]),
+        required: Some(vec![
+            "problem".to_string(),
+            "cooling".to_string(),
+            "options".to_string(),
+        ]),
         description: Some(
-            "Simulated annealing on a generic combinatorial problem (TSP / knapsack built-in).".to_string(),
+            "Simulated annealing on a generic combinatorial problem (TSP / knapsack built-in)."
+                .to_string(),
         ),
     }
 }
@@ -376,10 +401,15 @@ impl DESModelRegistration<SAParams, SAAdapterResult> for SimulatedAnnealingAdapt
                 let inst: TSPInstance = if builtin == Some(TspBuiltin::Pentagon) {
                     build_pentagon_tsp(tsp.and_then(|t| t.n).unwrap_or(5), 50.0)
                 } else if builtin == Some(TspBuiltin::Random) {
-                    build_random_tsp(tsp.and_then(|t| t.n).unwrap_or(20), tsp.and_then(|t| t.seed).unwrap_or(42), None)
-                } else if let (Some(coords), Some(dist)) =
-                    (tsp.and_then(|t| t.coordinates.clone()), tsp.and_then(|t| t.distance.clone()))
-                {
+                    build_random_tsp(
+                        tsp.and_then(|t| t.n).unwrap_or(20),
+                        tsp.and_then(|t| t.seed).unwrap_or(42),
+                        None,
+                    )
+                } else if let (Some(coords), Some(dist)) = (
+                    tsp.and_then(|t| t.coordinates.clone()),
+                    tsp.and_then(|t| t.distance.clone()),
+                ) {
                     TSPInstance {
                         n: coords.len(),
                         coordinates: coords,
@@ -393,17 +423,26 @@ impl DESModelRegistration<SAParams, SAAdapterResult> for SimulatedAnnealingAdapt
                 let problem = build_tsp_sa_problem(
                     inst.clone(),
                     TSPSAProblemOptions {
-                        init: Some(tsp.and_then(|t| t.init).unwrap_or(InitMode::NearestNeighbor)),
+                        init: Some(
+                            tsp.and_then(|t| t.init)
+                                .unwrap_or(InitMode::NearestNeighbor),
+                        ),
                         moves: Some(tsp.and_then(|t| t.moves).unwrap_or(SAMove::Mixed)),
                         penalty_per_violation: tsp.and_then(|t| t.penalty_per_violation),
                     },
                 );
-                let r = run_simulated_annealing(Rc::new(problem) as Rc<dyn SAProblem<Tour>>, solver_options(&params));
+                let r = run_simulated_annealing(
+                    Rc::new(problem) as Rc<dyn SAProblem<Tour>>,
+                    solver_options(&params),
+                );
                 let tour_len = tour_length(&inst, &r.best_state);
                 SAAdapterResult {
                     problem: SAProblemKind::Tsp,
                     raw: SAAdapterRaw::Tsp(r),
-                    tsp_extras: Some(TspExtras { tour_length: tour_len, n }),
+                    tsp_extras: Some(TspExtras {
+                        tour_length: tour_len,
+                        n,
+                    }),
                     knap_extras: None,
                 }
             }
@@ -434,7 +473,11 @@ impl DESModelRegistration<SAParams, SAAdapterResult> for SimulatedAnnealingAdapt
                     problem: SAProblemKind::Knapsack,
                     raw: SAAdapterRaw::Knapsack(r),
                     tsp_extras: None,
-                    knap_extras: Some(KnapExtras { value: v, weight: w, capacity }),
+                    knap_extras: Some(KnapExtras {
+                        value: v,
+                        weight: w,
+                        capacity,
+                    }),
                 }
             }
         }
@@ -494,8 +537,16 @@ impl DESModelRegistration<SAParams, SAAdapterResult> for SimulatedAnnealingAdapt
                         ..Default::default()
                     }),
                     knapsack: None,
-                    cooling: CoolingSchedule::Geometric { t0: 100.0, alpha: 0.999, t_min: None },
-                    options: SAOptions { max_iterations: 30000, seed: Some(1), ..Default::default() },
+                    cooling: CoolingSchedule::Geometric {
+                        t0: 100.0,
+                        alpha: 0.999,
+                        t_min: None,
+                    },
+                    options: SAOptions {
+                        max_iterations: 30000,
+                        seed: Some(1),
+                        ..Default::default()
+                    },
                 },
                 runtime: None,
                 metadata: None,

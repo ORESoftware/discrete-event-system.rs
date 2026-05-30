@@ -55,7 +55,11 @@ mod tests {
         let r = run_network_mutex_simulation(sim_opts(5, 1, 3, 2));
         assert!(r.generated == 5 && r.completed == 5);
 
-        let order: Vec<String> = r.completed_items.iter().map(|x| x.item_id.clone()).collect();
+        let order: Vec<String> = r
+            .completed_items
+            .iter()
+            .map(|x| x.item_id.clone())
+            .collect();
         assert_eq!(order.join(","), "item-1,item-2,item-3,item-4,item-5");
 
         assert!(r.completed_items.iter().all(|x| matches!(

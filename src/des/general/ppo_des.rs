@@ -36,8 +36,8 @@ use crate::des::general::des_base::environment::{
     self, EnvironmentStation, EnvironmentStationOptions, PureEnvironment,
 };
 use crate::des::general::des_base::policy_gradient_agent::{
-    self, PolicyGradientAgent, PolicyGradientCore, PolicyOutput, PolicyUpdateCore, PolicyUpdateStation,
-    RolloutEntry,
+    self, PolicyGradientAgent, PolicyGradientCore, PolicyOutput, PolicyUpdateCore,
+    PolicyUpdateStation, RolloutEntry,
 };
 use crate::des::general::des_base::rl_agent::RngRef;
 use crate::des::general::des_base::runner::{run_iterative_des, IterativeRunOptions};
@@ -96,7 +96,9 @@ impl TabularPPOAgent {
         let policy = self
             .theta
             .iter()
-            .map(|row| arg_max_with_tie_break(row, &mut RngRef(&mut *rng), ARGMAX_EPS_DEFAULT).unwrap_or(0))
+            .map(|row| {
+                arg_max_with_tie_break(row, &mut RngRef(&mut *rng), ARGMAX_EPS_DEFAULT).unwrap_or(0)
+            })
             .collect();
         self.pg.rng = Some(rng);
         policy
@@ -129,7 +131,11 @@ impl PolicyGradientAgent<usize, usize> for TabularPPOAgent {
         &mut self.pg
     }
 
-    fn sample_policy_and_value(&self, state: &usize, rng: &mut dyn RandomSource) -> PolicyOutput<usize> {
+    fn sample_policy_and_value(
+        &self,
+        state: &usize,
+        rng: &mut dyn RandomSource,
+    ) -> PolicyOutput<usize> {
         let logits = &self.theta[*state];
         let mut m = f64::NEG_INFINITY;
         for &x in logits {
@@ -152,7 +158,11 @@ impl PolicyGradientAgent<usize, usize> for TabularPPOAgent {
                 break;
             }
         }
-        PolicyOutput { action: a, log_prob: logits[a] - log_z, value: self.v[*state] }
+        PolicyOutput {
+            action: a,
+            log_prob: logits[a] - log_z,
+            value: self.v[*state],
+        }
     }
 }
 
@@ -247,7 +257,8 @@ fn apply_one_sample_update(
     let log_z = m + z.ln();
     let log_prob_new = logits[a] - log_z;
     let ratio = (log_prob_new - e.log_prob_old).exp();
-    let in_clip = (a_adv >= 0.0 && ratio < 1.0 + opts.clip_eps) || (a_adv < 0.0 && ratio > 1.0 - opts.clip_eps);
+    let in_clip = (a_adv >= 0.0 && ratio < 1.0 + opts.clip_eps)
+        || (a_adv < 0.0 && ratio > 1.0 - opts.clip_eps);
     if in_clip {
         let n = agent.theta[s].len();
         for a_prime in 0..n {
@@ -291,7 +302,13 @@ impl PPOClipUpdateStation {
         opts: PPOUpdateOptions,
         rng: Box<dyn RandomSource>,
     ) -> Self {
-        PPOClipUpdateStation { core: StationCore::new(id), pu: PolicyUpdateCore::new(), agent, opts, shuffle_rng: rng }
+        PPOClipUpdateStation {
+            core: StationCore::new(id),
+            pu: PolicyUpdateCore::new(),
+            agent,
+            opts,
+            shuffle_rng: rng,
+        }
     }
 }
 
@@ -397,7 +414,10 @@ pub struct RunPPOOptions {
 
 /// Wire the PPO station graph (env ⇄ agent → updater → agent) and run until the
 /// global step budget is reached.
-pub fn run_ppo_des(env: Box<dyn PureEnvironment<usize, usize>>, opts: RunPPOOptions) -> PPODESResult {
+pub fn run_ppo_des(
+    env: Box<dyn PureEnvironment<usize, usize>>,
+    opts: RunPPOOptions,
+) -> PPODESResult {
     let num_states = env.num_states();
     let num_actions = env.num_actions();
     let shared = Rc::new(RefCell::new(mulberry32(opts.seed.unwrap_or(1))));
@@ -428,15 +448,38 @@ pub fn run_ppo_des(env: Box<dyn PureEnvironment<usize, usize>>, opts: RunPPOOpti
     let env_st = Rc::new(RefCell::new(EnvironmentStation::new(
         "env",
         env,
-        EnvironmentStationOptions { num_episodes: None, max_steps_per_episode: opts.max_steps_per_episode },
+        EnvironmentStationOptions {
+            num_episodes: None,
+            max_steps_per_episode: opts.max_steps_per_episode,
+        },
     )));
 
     // Channel wiring.
-    env_st.borrow_mut().core_mut().pipe(agent.clone() as StationRef, environment::CH_STATE, policy_gradient_agent::CH_STATE);
-    env_st.borrow_mut().core_mut().pipe(agent.clone() as StationRef, environment::CH_TRANSITION, policy_gradient_agent::CH_TRANSITION);
-    agent.borrow_mut().core_mut().pipe(env_st.clone() as StationRef, policy_gradient_agent::CH_ACTION, environment::CH_ACTION);
-    agent.borrow_mut().core_mut().pipe(updater.clone() as StationRef, policy_gradient_agent::CH_TRAIN, policy_gradient_agent::CH_TRAIN);
-    updater.borrow_mut().core_mut().pipe(agent.clone() as StationRef, policy_gradient_agent::CH_RESUME, policy_gradient_agent::CH_RESUME);
+    env_st.borrow_mut().core_mut().pipe(
+        agent.clone() as StationRef,
+        environment::CH_STATE,
+        policy_gradient_agent::CH_STATE,
+    );
+    env_st.borrow_mut().core_mut().pipe(
+        agent.clone() as StationRef,
+        environment::CH_TRANSITION,
+        policy_gradient_agent::CH_TRANSITION,
+    );
+    agent.borrow_mut().core_mut().pipe(
+        env_st.clone() as StationRef,
+        policy_gradient_agent::CH_ACTION,
+        environment::CH_ACTION,
+    );
+    agent.borrow_mut().core_mut().pipe(
+        updater.clone() as StationRef,
+        policy_gradient_agent::CH_TRAIN,
+        policy_gradient_agent::CH_TRAIN,
+    );
+    updater.borrow_mut().core_mut().pipe(
+        agent.clone() as StationRef,
+        policy_gradient_agent::CH_RESUME,
+        policy_gradient_agent::CH_RESUME,
+    );
 
     let mut des_options = opts.des_options.unwrap_or_default();
     if des_options.rng.is_none() {
@@ -446,10 +489,16 @@ pub fn run_ppo_des(env: Box<dyn PureEnvironment<usize, usize>>, opts: RunPPOOpti
     let total_steps_budget = opts.total_steps;
     if des_options.stop_when.is_none() {
         let env_for_stop = env_st.clone();
-        des_options.stop_when = Some(Box::new(move |_tick, _| env_for_stop.borrow().total_steps() >= total_steps_budget));
+        des_options.stop_when = Some(Box::new(move |_tick, _| {
+            env_for_stop.borrow().total_steps() >= total_steps_budget
+        }));
     }
     let summary = run_iterative_des(
-        vec![env_st.clone() as StationRef, agent.clone() as StationRef, updater.clone() as StationRef],
+        vec![
+            env_st.clone() as StationRef,
+            agent.clone() as StationRef,
+            updater.clone() as StationRef,
+        ],
         des_options,
     );
     env_st.borrow_mut().done = true;
@@ -498,7 +547,11 @@ mod tests {
             0
         }
         fn step(&mut self, _state: usize, action: usize) -> StepResult<usize> {
-            StepResult { next_state: 0, reward: if action == 1 { 1.0 } else { 0.0 }, done: true }
+            StepResult {
+                next_state: 0,
+                reward: if action == 1 { 1.0 } else { 0.0 },
+                done: true,
+            }
         }
     }
 
@@ -527,7 +580,11 @@ mod tests {
     #[test]
     fn learns_to_prefer_paying_action() {
         let res = run();
-        assert!(res.theta[0][1] > res.theta[0][0], "theta = {:?}", res.theta[0]);
+        assert!(
+            res.theta[0][1] > res.theta[0][0],
+            "theta = {:?}",
+            res.theta[0]
+        );
         assert_eq!(res.policy[0], 1);
     }
 
@@ -546,6 +603,9 @@ mod tests {
         let window = 200.min(h.len() / 4);
         let first: f64 = h[..window].iter().sum::<f64>() / window as f64;
         let last: f64 = h[h.len() - window..].iter().sum::<f64>() / window as f64;
-        assert!(last >= first, "mean reward should not fall: first {first}, last {last}");
+        assert!(
+            last >= first,
+            "mean reward should not fall: first {first}, last {last}"
+        );
     }
 }

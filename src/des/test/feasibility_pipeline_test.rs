@@ -121,7 +121,11 @@ mod tests {
             &candidate(None, &[("x0", 1.0), ("x1", 1.0), ("x2", 0.0)]),
             PENALTY,
         );
-        assert!(ok.feasible && ok.objective_value == 160.0, "objective={}", ok.objective_value);
+        assert!(
+            ok.feasible && ok.objective_value == 160.0,
+            "objective={}",
+            ok.objective_value
+        );
 
         let bad = evaluate_candidate(
             &knapsack(),

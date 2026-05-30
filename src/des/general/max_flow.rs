@@ -147,7 +147,13 @@ const MODEL: &str = "max-flow";
 /// `Result`).
 pub fn validate_max_flow_problem(p: &MaxFlowProblem) -> Result<(), PreconditionError> {
     Preconditions::integer_in_range(MODEL, "numNodes", p.num_nodes as f64, 2.0, 1e7)?;
-    Preconditions::integer_in_range(MODEL, "source", p.source as f64, 0.0, (p.num_nodes - 1) as f64)?;
+    Preconditions::integer_in_range(
+        MODEL,
+        "source",
+        p.source as f64,
+        0.0,
+        (p.num_nodes - 1) as f64,
+    )?;
     Preconditions::integer_in_range(MODEL, "sink", p.sink as f64, 0.0, (p.num_nodes - 1) as f64)?;
     Preconditions::check(
         MODEL,
@@ -159,8 +165,20 @@ pub fn validate_max_flow_problem(p: &MaxFlowProblem) -> Result<(), PreconditionE
     Preconditions::non_empty(MODEL, "edges", &p.edges)?;
     for i in 0..p.edges.len() {
         let e = &p.edges[i];
-        Preconditions::integer_in_range(MODEL, &format!("edges[{i}].from"), e.from as f64, 0.0, (p.num_nodes - 1) as f64)?;
-        Preconditions::integer_in_range(MODEL, &format!("edges[{i}].to"), e.to as f64, 0.0, (p.num_nodes - 1) as f64)?;
+        Preconditions::integer_in_range(
+            MODEL,
+            &format!("edges[{i}].from"),
+            e.from as f64,
+            0.0,
+            (p.num_nodes - 1) as f64,
+        )?;
+        Preconditions::integer_in_range(
+            MODEL,
+            &format!("edges[{i}].to"),
+            e.to as f64,
+            0.0,
+            (p.num_nodes - 1) as f64,
+        )?;
         Preconditions::non_negative(MODEL, &format!("edges[{i}].capacity"), e.capacity)?;
     }
     Ok(())
@@ -190,7 +208,13 @@ impl MaxFlowStation {
         let max_iter = (p.num_nodes * e * e + 1).max(1);
 
         let mut residual: Vec<Vec<ResidualEdge>> = (0..p.num_nodes).map(|_| Vec::new()).collect();
-        let mut forward_refs: Vec<ForwardRef> = vec![ForwardRef { from: 0, edge_index: 0 }; p.edges.len()];
+        let mut forward_refs: Vec<ForwardRef> = vec![
+            ForwardRef {
+                from: 0,
+                edge_index: 0
+            };
+            p.edges.len()
+        ];
         for i in 0..p.edges.len() {
             Self::add_residual_edge(&mut residual, &mut forward_refs, &p.edges[i], i);
         }
@@ -237,7 +261,11 @@ impl MaxFlowStation {
                 Some("min-cut capacity equals max flow".to_string()),
                 Some(Box::new(|s| {
                     let st = s.as_any().downcast_ref::<MaxFlowStation>().unwrap();
-                    format!("cut={}, flow={}", st.build_result().min_cut.capacity, st.final_flow)
+                    format!(
+                        "cut={}, flow={}",
+                        st.build_result().min_cut.capacity,
+                        st.final_flow
+                    )
                 })),
                 Some("max-flow-intrinsic".to_string()),
                 None,
@@ -310,11 +338,24 @@ impl MaxFlowStation {
     ) {
         let len_to = residual[e.to].len();
         let len_from = residual[e.from].len();
-        let fwd = ResidualEdge { to: e.to, rev: len_to, cap: e.capacity, original_index };
-        let rev = ResidualEdge { to: e.from, rev: len_from, cap: 0.0, original_index };
+        let fwd = ResidualEdge {
+            to: e.to,
+            rev: len_to,
+            cap: e.capacity,
+            original_index,
+        };
+        let rev = ResidualEdge {
+            to: e.from,
+            rev: len_from,
+            cap: 0.0,
+            original_index,
+        };
         residual[e.from].push(fwd);
         residual[e.to].push(rev);
-        forward_refs[original_index] = ForwardRef { from: e.from, edge_index: residual[e.from].len() - 1 };
+        forward_refs[original_index] = ForwardRef {
+            from: e.from,
+            edge_index: residual[e.from].len() - 1,
+        };
     }
 
     fn find_augmenting_path(&self) -> Option<AugmentingPath> {
@@ -347,7 +388,12 @@ impl MaxFlowStation {
                     }
                     nodes.push(self.p.source);
                     nodes.reverse();
-                    return Some(AugmentingPath { nodes, bottleneck, parent_node, parent_edge });
+                    return Some(AugmentingPath {
+                        nodes,
+                        bottleneck,
+                        parent_node,
+                        parent_edge,
+                    });
                 }
                 q.push(e.to);
             }
@@ -418,14 +464,22 @@ impl FixedPointIterationStation<MaxFlowState> for MaxFlowStation {
     }
 
     fn initial_state(&self) -> MaxFlowState {
-        MaxFlowState { iter: 0, flow: 0.0, done: false }
+        MaxFlowState {
+            iter: 0,
+            flow: 0.0,
+            done: false,
+        }
     }
 
     fn apply_operator(&mut self, prev: &MaxFlowState) -> MaxFlowState {
         match self.find_augmenting_path() {
             None => {
                 self.final_flow = prev.flow;
-                MaxFlowState { iter: prev.iter + 1, flow: prev.flow, done: true }
+                MaxFlowState {
+                    iter: prev.iter + 1,
+                    flow: prev.flow,
+                    done: true,
+                }
             }
             Some(aug) => {
                 let mut v = self.p.sink;
@@ -448,7 +502,11 @@ impl FixedPointIterationStation<MaxFlowState> for MaxFlowStation {
                     bottleneck: aug.bottleneck,
                     flow_after: flow,
                 });
-                MaxFlowState { iter: prev.iter + 1, flow, done: false }
+                MaxFlowState {
+                    iter: prev.iter + 1,
+                    flow,
+                    done: false,
+                }
             }
         }
     }
@@ -490,9 +548,13 @@ pub fn solve_max_flow(p: MaxFlowProblem) -> MaxFlowResult {
     let st = Rc::new(RefCell::new(MaxFlowStation::new(p)));
     let summary = run_iterative_des(
         vec![st.clone() as StationRef],
-        IterativeRunOptions { shuffle: false, ..Default::default() },
+        IterativeRunOptions {
+            shuffle: false,
+            ..Default::default()
+        },
     );
-    assert_no_validation_failures(&summary, "max-flow").expect("max-flow: post-run validation failed");
+    assert_no_validation_failures(&summary, "max-flow")
+        .expect("max-flow: post-run validation failed");
     let result = st.borrow().build_result();
     result
 }
@@ -505,16 +567,66 @@ pub fn build_textbook_max_flow_problem() -> MaxFlowProblem {
         source: 0,
         sink: 5,
         edges: vec![
-            MaxFlowEdge { from: 0, to: 1, capacity: 16.0, name: Some("s-v1".to_string()) },
-            MaxFlowEdge { from: 0, to: 2, capacity: 13.0, name: Some("s-v2".to_string()) },
-            MaxFlowEdge { from: 1, to: 2, capacity: 10.0, name: Some("v1-v2".to_string()) },
-            MaxFlowEdge { from: 2, to: 1, capacity: 4.0, name: Some("v2-v1".to_string()) },
-            MaxFlowEdge { from: 1, to: 3, capacity: 12.0, name: Some("v1-v3".to_string()) },
-            MaxFlowEdge { from: 3, to: 2, capacity: 9.0, name: Some("v3-v2".to_string()) },
-            MaxFlowEdge { from: 2, to: 4, capacity: 14.0, name: Some("v2-v4".to_string()) },
-            MaxFlowEdge { from: 4, to: 3, capacity: 7.0, name: Some("v4-v3".to_string()) },
-            MaxFlowEdge { from: 3, to: 5, capacity: 20.0, name: Some("v3-t".to_string()) },
-            MaxFlowEdge { from: 4, to: 5, capacity: 4.0, name: Some("v4-t".to_string()) },
+            MaxFlowEdge {
+                from: 0,
+                to: 1,
+                capacity: 16.0,
+                name: Some("s-v1".to_string()),
+            },
+            MaxFlowEdge {
+                from: 0,
+                to: 2,
+                capacity: 13.0,
+                name: Some("s-v2".to_string()),
+            },
+            MaxFlowEdge {
+                from: 1,
+                to: 2,
+                capacity: 10.0,
+                name: Some("v1-v2".to_string()),
+            },
+            MaxFlowEdge {
+                from: 2,
+                to: 1,
+                capacity: 4.0,
+                name: Some("v2-v1".to_string()),
+            },
+            MaxFlowEdge {
+                from: 1,
+                to: 3,
+                capacity: 12.0,
+                name: Some("v1-v3".to_string()),
+            },
+            MaxFlowEdge {
+                from: 3,
+                to: 2,
+                capacity: 9.0,
+                name: Some("v3-v2".to_string()),
+            },
+            MaxFlowEdge {
+                from: 2,
+                to: 4,
+                capacity: 14.0,
+                name: Some("v2-v4".to_string()),
+            },
+            MaxFlowEdge {
+                from: 4,
+                to: 3,
+                capacity: 7.0,
+                name: Some("v4-v3".to_string()),
+            },
+            MaxFlowEdge {
+                from: 3,
+                to: 5,
+                capacity: 20.0,
+                name: Some("v3-t".to_string()),
+            },
+            MaxFlowEdge {
+                from: 4,
+                to: 5,
+                capacity: 4.0,
+                name: Some("v4-t".to_string()),
+            },
         ],
     }
 }
@@ -533,9 +645,17 @@ mod tests {
     fn textbook_max_flow_is_23() {
         let res = solve_max_flow(build_textbook_max_flow_problem());
         assert_eq!(res.status, MaxFlowStatus::Optimal);
-        assert!((res.max_flow - 23.0).abs() < 1e-9, "max flow = {}", res.max_flow);
+        assert!(
+            (res.max_flow - 23.0).abs() < 1e-9,
+            "max flow = {}",
+            res.max_flow
+        );
         // max-flow = min-cut.
-        assert!((res.min_cut.capacity - 23.0).abs() < 1e-9, "cut = {}", res.min_cut.capacity);
+        assert!(
+            (res.min_cut.capacity - 23.0).abs() < 1e-9,
+            "cut = {}",
+            res.min_cut.capacity
+        );
     }
 
     #[test]
@@ -547,15 +667,44 @@ mod tests {
             source: 0,
             sink: 3,
             edges: vec![
-                MaxFlowEdge { from: 0, to: 1, capacity: 3.0, name: None },
-                MaxFlowEdge { from: 0, to: 2, capacity: 2.0, name: None },
-                MaxFlowEdge { from: 1, to: 3, capacity: 2.0, name: None },
-                MaxFlowEdge { from: 2, to: 3, capacity: 3.0, name: None },
-                MaxFlowEdge { from: 1, to: 2, capacity: 1.0, name: None },
+                MaxFlowEdge {
+                    from: 0,
+                    to: 1,
+                    capacity: 3.0,
+                    name: None,
+                },
+                MaxFlowEdge {
+                    from: 0,
+                    to: 2,
+                    capacity: 2.0,
+                    name: None,
+                },
+                MaxFlowEdge {
+                    from: 1,
+                    to: 3,
+                    capacity: 2.0,
+                    name: None,
+                },
+                MaxFlowEdge {
+                    from: 2,
+                    to: 3,
+                    capacity: 3.0,
+                    name: None,
+                },
+                MaxFlowEdge {
+                    from: 1,
+                    to: 2,
+                    capacity: 1.0,
+                    name: None,
+                },
             ],
         };
         let res = solve_max_flow(p);
-        assert!((res.max_flow - 5.0).abs() < 1e-9, "max flow = {}", res.max_flow);
+        assert!(
+            (res.max_flow - 5.0).abs() < 1e-9,
+            "max flow = {}",
+            res.max_flow
+        );
         assert!((res.min_cut.capacity - res.max_flow).abs() < 1e-9);
     }
 
@@ -567,16 +716,39 @@ mod tests {
             source: 0,
             sink: 3,
             edges: vec![
-                MaxFlowEdge { from: 0, to: 1, capacity: 10.0, name: None },
-                MaxFlowEdge { from: 1, to: 2, capacity: 4.0, name: None },
-                MaxFlowEdge { from: 2, to: 3, capacity: 10.0, name: None },
+                MaxFlowEdge {
+                    from: 0,
+                    to: 1,
+                    capacity: 10.0,
+                    name: None,
+                },
+                MaxFlowEdge {
+                    from: 1,
+                    to: 2,
+                    capacity: 4.0,
+                    name: None,
+                },
+                MaxFlowEdge {
+                    from: 2,
+                    to: 3,
+                    capacity: 10.0,
+                    name: None,
+                },
             ],
         };
         let res = solve_max_flow(p);
-        assert!((res.max_flow - 4.0).abs() < 1e-9, "max flow = {}", res.max_flow);
+        assert!(
+            (res.max_flow - 4.0).abs() < 1e-9,
+            "max flow = {}",
+            res.max_flow
+        );
         assert!((res.min_cut.capacity - 4.0).abs() < 1e-9);
         // The narrow edge 1→2 carries the full flow.
-        let mid = res.edge_flows.iter().find(|e| e.from == 1 && e.to == 2).unwrap();
+        let mid = res
+            .edge_flows
+            .iter()
+            .find(|e| e.from == 1 && e.to == 2)
+            .unwrap();
         assert!((mid.flow - 4.0).abs() < 1e-9);
     }
 }

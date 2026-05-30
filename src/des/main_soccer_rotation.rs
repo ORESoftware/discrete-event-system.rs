@@ -77,8 +77,11 @@ fn to_scene_solution(
             reason: e.reason.clone(),
         })
         .collect();
-    let mut usage: Vec<(String, f64)> =
-        mip.lp_algorithm_usage.iter().map(|(k, v)| (k.as_str().to_string(), *v as f64)).collect();
+    let mut usage: Vec<(String, f64)> = mip
+        .lp_algorithm_usage
+        .iter()
+        .map(|(k, v)| (k.as_str().to_string(), *v as f64))
+        .collect();
     usage.sort_by(|a, b| a.0.cmp(&b.0));
     solver_scene::IPMIPSolution {
         trace,
@@ -107,11 +110,17 @@ fn jn(x: f64) -> String {
 }
 
 fn env_f64(key: &str, default: f64) -> f64 {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 fn env_usize(key: &str, default: usize) -> usize {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 /// `process.env.MIP_LP_ALGO` (a `LPRelaxationAlgorithm` string) → enum.
@@ -163,9 +172,12 @@ fn build_schedule(
     match name {
         "random" => policy_random_schedule(problem, seed + 1),
         "MDP-memoryless" => policy_mdp_vi_memoryless(problem).schedule,
-        "greedy-Hungarian" => {
-            policy_greedy_hungarian(problem, &GreedyHungarianOptions { fairness_aware: Some(true) })
-        }
+        "greedy-Hungarian" => policy_greedy_hungarian(
+            problem,
+            &GreedyHungarianOptions {
+                fairness_aware: Some(true),
+            },
+        ),
         "LP-relaxation" => policy_lp_relaxed(problem).schedule,
         "IP/MIP-feasible" => {
             let r = policy_ipmip_feasible(problem, mip_opts);
@@ -183,13 +195,21 @@ pub fn run() {
     let seed = env_usize("SEED", 4242) as u32;
     let num_matches = env_usize("N_MATCHES", 100);
     let animate = std::env::var("ANIMATE").as_deref() == Ok("1");
-    let policy_filter = std::env::var("POLICY").unwrap_or_default().to_lowercase().trim().to_string();
+    let policy_filter = std::env::var("POLICY")
+        .unwrap_or_default()
+        .to_lowercase()
+        .trim()
+        .to_string();
     let mip_time_limit_ms = env_f64("MIP_TIME_LIMIT_MS", 30_000.0);
     let mip_max_nodes = env_usize("MIP_MAX_NODES", 5_000);
-    let mip_lp_algorithm =
-        parse_lp_algorithm(&std::env::var("MIP_LP_ALGO").unwrap_or_else(|_| "internal-simplex".to_string()));
+    let mip_lp_algorithm = parse_lp_algorithm(
+        &std::env::var("MIP_LP_ALGO").unwrap_or_else(|_| "internal-simplex".to_string()),
+    );
 
-    let problem = build_sample_soccer_problem(&AffinityBuilderOptions { seed: Some(seed), ..Default::default() });
+    let problem = build_sample_soccer_problem(&AffinityBuilderOptions {
+        seed: Some(seed),
+        ..Default::default()
+    });
     let mip_opts = SoccerIPMIPPolicyOptions {
         time_limit_ms: Some(mip_time_limit_ms),
         max_nodes: Some(mip_max_nodes),
@@ -269,7 +289,10 @@ pub fn run() {
     let filtered: Vec<&PolicyDesc> = if policy_filter.is_empty() {
         policies.iter().collect()
     } else {
-        policies.iter().filter(|p| p.name.to_lowercase().contains(&policy_filter)).collect()
+        policies
+            .iter()
+            .filter(|p| p.name.to_lowercase().contains(&policy_filter))
+            .collect()
     };
 
     // LP upper bound for context.
@@ -292,11 +315,19 @@ pub fn run() {
             continue;
         }
         let eval_res = evaluate_schedule(&problem, &schedule);
-        let belief = evaluate_soccer_pomdp_features(&problem, &schedule, &SoccerPOMDPFeatureOptions::default());
+        let belief = evaluate_soccer_pomdp_features(
+            &problem,
+            &schedule,
+            &SoccerPOMDPFeatureOptions::default(),
+        );
         println!(
             "affinity={:.2}, fairness={}, beliefFresh={:.3}, build={}ms",
             eval_res.affinity_sum,
-            if eval_res.fairness_ok { "OK" } else { "VIOLATED" },
+            if eval_res.fairness_ok {
+                "OK"
+            } else {
+                "VIOLATED"
+            },
             belief.mean_expected_fresh_on_field,
             build_ms
         );
@@ -315,10 +346,17 @@ pub fn run() {
                         .map(|(k, v)| (k.as_str().to_string(), *v))
                         .collect();
                     entries.sort_by(|a, b| a.0.cmp(&b.0));
-                    entries.iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<_>>().join(",")
+                    entries
+                        .iter()
+                        .map(|(k, v)| format!("{}={}", k, v))
+                        .collect::<Vec<_>>()
+                        .join(",")
                 };
                 let fallback = if latest.used_fallback {
-                    format!(", fallback={}", latest.fallback_reason.as_deref().unwrap_or(""))
+                    format!(
+                        ", fallback={}",
+                        latest.fallback_reason.as_deref().unwrap_or("")
+                    )
                 } else {
                     String::new()
                 };
@@ -353,7 +391,9 @@ pub fn run() {
     // ─── Comparison table ────────────────────────────────────────────────
     let rule = "─".repeat(94);
     println!("# {}", rule);
-    println!("# Policy comparison: deterministic affinity (offline) + simulated match outcome (DES)");
+    println!(
+        "# Policy comparison: deterministic affinity (offline) + simulated match outcome (DES)"
+    );
     println!("# {}", rule);
     println!(
         "#   {}{}{}{}{}{}{}{}",
@@ -372,7 +412,11 @@ pub fn run() {
             Some(r) => welch_t(&a.raw_goal_diffs, &r.raw_goal_diffs),
             None => f64::NAN,
         };
-        let tstr = if t.is_nan() { "   —".to_string() } else { format!("{:.2}", t) };
+        let tstr = if t.is_nan() {
+            "   —".to_string()
+        } else {
+            format!("{:.2}", t)
+        };
         println!(
             "#   {}{}{}{}{}{}{}{}",
             format!("{:<20}", a.policy_name),
@@ -388,7 +432,10 @@ pub fn run() {
     println!();
 
     // ─── Player-fairness audit ──────────────────────────────────────────
-    println!("# Per-player periods on bench (out of {}):", problem.num_periods);
+    println!(
+        "# Per-player periods on bench (out of {}):",
+        problem.num_periods
+    );
     for a in &aggs {
         let counts = a
             .bench_counts
@@ -405,8 +452,17 @@ pub fn run() {
             })
             .collect::<Vec<_>>()
             .join(" ");
-        let flag = if a.fairness_ok { "" } else { "  ← VIOLATES fairness" };
-        println!("#   {}  {}{}", format!("{:<20}", a.policy_name), counts, flag);
+        let flag = if a.fairness_ok {
+            ""
+        } else {
+            "  ← VIOLATES fairness"
+        };
+        println!(
+            "#   {}  {}{}",
+            format!("{:<20}", a.policy_name),
+            counts,
+            flag
+        );
     }
     println!();
 
@@ -421,15 +477,21 @@ pub fn run() {
     println!("#                  triggers a substitution event at every period boundary.");
     println!("#   Layer 2 (MDP): exact backward induction; |S| = 4 periods × C(12,5) = 3168,");
     println!("#                  reward at each (s, a) is the Hungarian-optimal assignment.");
-    println!("#   POMDP feature: hidden fatigue belief is carried across periods for audit metrics.");
+    println!(
+        "#   POMDP feature: hidden fatigue belief is carried across periods for audit metrics."
+    );
     println!("#   Layer 3:       random / greedy-Hungarian / LP-relaxation / IP-MIP / MDP-VI.");
     println!();
 
     // ─── Optional animation of the best policy ──────────────────────────
     if animate {
-        let best = aggs
-            .iter()
-            .fold(aggs[0].clone(), |acc, x| if x.mean_goal_diff > acc.mean_goal_diff { x.clone() } else { acc });
+        let best = aggs.iter().fold(aggs[0].clone(), |acc, x| {
+            if x.mean_goal_diff > acc.mean_goal_diff {
+                x.clone()
+            } else {
+                acc
+            }
+        });
         println!(
             "# Animating policy '{}' (best mean goal diff = {:.3})",
             best.policy_name, best.mean_goal_diff
@@ -464,7 +526,10 @@ pub fn run() {
         let m = simulate_match_des(
             &problem,
             &best.schedule,
-            &MatchSimOptions { seed: Some(seed + 1000), ..Default::default() },
+            &MatchSimOptions {
+                seed: Some(seed + 1000),
+                ..Default::default()
+            },
         );
         let mut ts: Vec<f64> = Vec::new();
         let mut affs: Vec<f64> = Vec::new();
@@ -544,9 +609,14 @@ pub fn run() {
                     solver_scene::build_soccer_ipmip_solver_frame(&solver_solution, i)
                 });
             }
-            solver_rec.set_charts(solver_scene::build_soccer_ipmip_solver_charts(&solver_solution));
+            solver_rec.set_charts(solver_scene::build_soccer_ipmip_solver_charts(
+                &solver_solution,
+            ));
             solver_rec.finish().expect("finish solver recorder");
-            println!("# Solver entity animation written to {}", solver_html_path.display());
+            println!(
+                "# Solver entity animation written to {}",
+                solver_html_path.display()
+            );
         }
     }
 }

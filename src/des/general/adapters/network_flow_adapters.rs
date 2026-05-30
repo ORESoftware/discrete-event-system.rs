@@ -32,8 +32,8 @@ use crate::des::general::max_flow::{
     build_textbook_max_flow_problem, solve_max_flow, MaxFlowProblem, MaxFlowResult, MaxFlowStatus,
 };
 use crate::des::general::stochastic_flow_mdp::{
-    build_default_stochastic_flow_mdp_problem, solve_stochastic_flow_mdp, SolveStochasticFlowMDPOptions,
-    StochasticFlowMDPProblem, StochasticFlowMDPResult,
+    build_default_stochastic_flow_mdp_problem, solve_stochastic_flow_mdp,
+    SolveStochasticFlowMDPOptions, StochasticFlowMDPProblem, StochasticFlowMDPResult,
 };
 use crate::des::general::traffic_flow::{
     build_default_traffic_problem, run_traffic_simulation, TrafficProblem, TrafficSimulationResult,
@@ -47,15 +47,27 @@ fn js_number(v: f64) -> String {
     if v.is_nan() {
         "NaN".to_string()
     } else if v.is_infinite() {
-        if v > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() }
+        if v > 0.0 {
+            "Infinity".to_string()
+        } else {
+            "-Infinity".to_string()
+        }
     } else {
         let s = v.to_string();
-        if s == "-0" { "0".to_string() } else { s }
+        if s == "-0" {
+            "0".to_string()
+        } else {
+            s
+        }
     }
 }
 
 fn json_num(v: f64) -> String {
-    if v.is_finite() { js_number(v) } else { "null".to_string() }
+    if v.is_finite() {
+        js_number(v)
+    } else {
+        "null".to_string()
+    }
 }
 
 fn json_str(s: &str) -> String {
@@ -78,7 +90,13 @@ fn json_str(s: &str) -> String {
 
 /// `JSON.stringify(number[])`.
 fn json_num_array(xs: &[f64]) -> String {
-    format!("[{}]", xs.iter().map(|v| json_num(*v)).collect::<Vec<_>>().join(","))
+    format!(
+        "[{}]",
+        xs.iter()
+            .map(|v| json_num(*v))
+            .collect::<Vec<_>>()
+            .join(",")
+    )
 }
 
 fn max_flow_status_str(s: MaxFlowStatus) -> &'static str {
@@ -92,8 +110,19 @@ fn max_flow_status_str(s: MaxFlowStatus) -> &'static str {
 // Schema helpers
 // =============================================================================
 
-fn num(min: Option<f64>, max: Option<f64>, integer: Option<bool>, default: Option<f64>) -> ParamSchema {
-    ParamSchema::Number { min, max, integer, default, description: None }
+fn num(
+    min: Option<f64>,
+    max: Option<f64>,
+    integer: Option<bool>,
+    default: Option<f64>,
+) -> ParamSchema {
+    ParamSchema::Number {
+        min,
+        max,
+        integer,
+        default,
+        description: None,
+    }
 }
 
 fn str_enum(allowed: &[&str], default: Option<&str>) -> ParamSchema {
@@ -105,26 +134,46 @@ fn str_enum(allowed: &[&str], default: Option<&str>) -> ParamSchema {
 }
 
 fn string_field() -> ParamSchema {
-    ParamSchema::String { allowed: None, default: None, description: None }
+    ParamSchema::String {
+        allowed: None,
+        default: None,
+        description: None,
+    }
 }
 
 fn arr(items: ParamSchema, min_length: Option<usize>) -> ParamSchema {
-    ParamSchema::Array { items: Box::new(items), min_length, max_length: None, description: None }
+    ParamSchema::Array {
+        items: Box::new(items),
+        min_length,
+        max_length: None,
+        description: None,
+    }
 }
 
 fn obj(fields: Vec<(&str, ParamSchema)>, required: Vec<&str>) -> ParamSchema {
     ParamSchema::Object {
-        fields: fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+        fields: fields
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
         required: Some(required.iter().map(|s| s.to_string()).collect()),
         description: None,
     }
 }
 
-fn obj_desc(fields: Vec<(&str, ParamSchema)>, required: Vec<&str>, description: &str) -> ParamSchema {
+fn obj_desc(
+    fields: Vec<(&str, ParamSchema)>,
+    required: Vec<&str>,
+    description: &str,
+) -> ParamSchema {
     match obj(fields, required) {
-        ParamSchema::Object { fields, required, .. } => {
-            ParamSchema::Object { fields, required, description: Some(description.to_string()) }
-        }
+        ParamSchema::Object {
+            fields, required, ..
+        } => ParamSchema::Object {
+            fields,
+            required,
+            description: Some(description.to_string()),
+        },
         other => other,
     }
 }
@@ -193,14 +242,22 @@ impl DESModelRegistration<MaxFlowParams, MaxFlowResult> for MaxFlowAdapter {
         )
     }
     fn run(&self, params: MaxFlowParams, _runtime: &DESRuntimeConfig) -> MaxFlowResult {
-        solve_max_flow(params.problem.unwrap_or_else(build_textbook_max_flow_problem))
+        solve_max_flow(
+            params
+                .problem
+                .unwrap_or_else(build_textbook_max_flow_problem),
+        )
     }
     fn summarize(&self, result: &MaxFlowResult, _params: &MaxFlowParams) -> String {
         let cut_edges = result
             .min_cut
             .cut_edges
             .iter()
-            .map(|e| e.name.clone().unwrap_or_else(|| format!("{}->{}", e.from, e.to)))
+            .map(|e| {
+                e.name
+                    .clone()
+                    .unwrap_or_else(|| format!("{}->{}", e.from, e.to))
+            })
             .collect::<Vec<_>>()
             .join(", ");
         [
@@ -213,7 +270,13 @@ impl DESModelRegistration<MaxFlowParams, MaxFlowResult> for MaxFlowAdapter {
             format!("  Min-cut cap:     {:.6}", result.min_cut.capacity),
             format!(
                 "  Source side:     {{{}}}",
-                result.min_cut.source_side.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", ")
+                result
+                    .min_cut
+                    .source_side
+                    .iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
             format!("  Cut edges:       {cut_edges}"),
         ]
@@ -239,7 +302,10 @@ impl DESModelRegistration<MaxFlowParams, MaxFlowResult> for MaxFlowAdapter {
                 schema: DES_MODEL_SPEC_SCHEMA.to_string(),
                 model: "max-flow".to_string(),
                 description: Some("Textbook six-node maximum-flow/min-cut example.".to_string()),
-                parameters: MaxFlowParams { builtin: Some(MaxFlowBuiltin::Textbook), problem: None },
+                parameters: MaxFlowParams {
+                    builtin: Some(MaxFlowBuiltin::Textbook),
+                    problem: None,
+                },
                 runtime: None,
                 metadata: None,
             },
@@ -303,7 +369,9 @@ pub fn stochastic_flow_mdp_adapter() -> StochasticFlowMdpAdapter {
     StochasticFlowMdpAdapter
 }
 
-impl DESModelRegistration<StochasticFlowMDPParams, StochasticFlowMDPResult> for StochasticFlowMdpAdapter {
+impl DESModelRegistration<StochasticFlowMDPParams, StochasticFlowMDPResult>
+    for StochasticFlowMdpAdapter
+{
     fn id(&self) -> &str {
         "stochastic-flow-mdp"
     }
@@ -313,10 +381,19 @@ impl DESModelRegistration<StochasticFlowMDPParams, StochasticFlowMDPResult> for 
     fn schema(&self) -> ParamSchema {
         obj_desc(
             vec![
-                ("builtin", str_enum(&["small-stochastic-network"], Some("small-stochastic-network"))),
+                (
+                    "builtin",
+                    str_enum(
+                        &["small-stochastic-network"],
+                        Some("small-stochastic-network"),
+                    ),
+                ),
                 ("problem", stochastic_flow_problem_schema()),
                 ("seed", num(None, None, Some(true), Some(7.0))),
-                ("maxPolicyRows", num(Some(1.0), None, Some(true), Some(24.0))),
+                (
+                    "maxPolicyRows",
+                    num(Some(1.0), None, Some(true), Some(24.0)),
+                ),
             ],
             vec![],
             "MDP interpretation of max-flow when edge availability/capacity is stochastic.",
@@ -329,14 +406,20 @@ impl DESModelRegistration<StochasticFlowMDPParams, StochasticFlowMDPResult> for 
     ) -> StochasticFlowMDPResult {
         let seed = runtime.seed.map(|s| s as u32).or(params.seed).unwrap_or(7);
         solve_stochastic_flow_mdp(
-            params.problem.unwrap_or_else(build_default_stochastic_flow_mdp_problem),
+            params
+                .problem
+                .unwrap_or_else(build_default_stochastic_flow_mdp_problem),
             SolveStochasticFlowMDPOptions {
                 seed: Some(seed),
                 max_policy_rows: Some(params.max_policy_rows.unwrap_or(24)),
             },
         )
     }
-    fn summarize(&self, result: &StochasticFlowMDPResult, _params: &StochasticFlowMDPParams) -> String {
+    fn summarize(
+        &self,
+        result: &StochasticFlowMDPResult,
+        _params: &StochasticFlowMDPParams,
+    ) -> String {
         let first = result
             .initial_policy
             .iter()
@@ -355,7 +438,10 @@ impl DESModelRegistration<StochasticFlowMDPParams, StochasticFlowMDPResult> for 
                 result.deterministic_max_flow
             ),
             format!("  First policy:    {first}"),
-            format!("  Sim delivered:   {}", js_number(result.simulation.delivered)),
+            format!(
+                "  Sim delivered:   {}",
+                js_number(result.simulation.delivered)
+            ),
             format!("  Sim reward:      {:.6}", result.simulation.total_reward),
         ]
         .join("\n")
@@ -389,7 +475,10 @@ impl DESModelRegistration<StochasticFlowMDPParams, StochasticFlowMDPResult> for 
                     seed: Some(7),
                     max_policy_rows: None,
                 },
-                runtime: Some(DESRuntimeConfig { seed: Some(7.0), ..Default::default() }),
+                runtime: Some(DESRuntimeConfig {
+                    seed: Some(7.0),
+                    ..Default::default()
+                }),
                 metadata: None,
             },
         }]
@@ -522,11 +611,20 @@ impl DESModelRegistration<TrafficParams, TrafficSimulationResult> for TrafficFlo
             format!("  Completed:       {}", js_number(result.completed_cars)),
             format!("  Active at stop:  {}", js_number(result.active_cars)),
             format!("  Max active:      {}", js_number(result.max_active_cars)),
-            format!("  Blocked tries:   {}", js_number(result.blocked_source_attempts)),
+            format!(
+                "  Blocked tries:   {}",
+                js_number(result.blocked_source_attempts)
+            ),
             format!("  Mean travel:     {:.3} sec", result.mean_travel_time_sec),
             format!("  P95 travel:      {:.3} sec", result.p95_travel_time_sec),
-            format!("  Throughput:      {:.3} cars/hour", result.throughput_per_hour),
-            format!("  Max-flow bound:  {:.3} cars/min", result.max_flow_upper_bound_per_min),
+            format!(
+                "  Throughput:      {:.3} cars/hour",
+                result.throughput_per_hour
+            ),
+            format!(
+                "  Max-flow bound:  {:.3} cars/min",
+                result.max_flow_upper_bound_per_min
+            ),
             format!("  Throughput/bnd:  {:.3}", result.throughput_vs_max_flow),
             format!(
                 "  Invariants:      {}",
@@ -540,8 +638,10 @@ impl DESModelRegistration<TrafficParams, TrafficSimulationResult> for TrafficFlo
         .join("\n")
     }
     fn write_csv(&self, result: &TrafficSimulationResult, csv_path: &str) {
-        let mut lines =
-            vec!["id,from,to,capacity,entered,exited,final_occupancy,max_occupancy,avg_occupancy".to_string()];
+        let mut lines = vec![
+            "id,from,to,capacity,entered,exited,final_occupancy,max_occupancy,avg_occupancy"
+                .to_string(),
+        ];
         for l in &result.link_stats {
             lines.push(csv_row([
                 l.id.clone(),
@@ -570,7 +670,10 @@ impl DESModelRegistration<TrafficParams, TrafficSimulationResult> for TrafficFlo
                     builtin: Some(TrafficBuiltin::FiveIntersection),
                     problem: None,
                 },
-                runtime: Some(DESRuntimeConfig { seed: Some(7.0), ..Default::default() }),
+                runtime: Some(DESRuntimeConfig {
+                    seed: Some(7.0),
+                    ..Default::default()
+                }),
                 metadata: None,
             },
         }]

@@ -70,7 +70,10 @@ impl RLAgentCore {
     /// Mirrors `new RLAgentStation(id, {rng})`: stores the injected RNG and a
     /// fresh [`EpisodeAccounting`].
     pub fn new(rng: Box<dyn RandomSource>) -> Self {
-        RLAgentCore { episode_accounting: EpisodeAccounting::new(), rng: Some(rng) }
+        RLAgentCore {
+            episode_accounting: EpisodeAccounting::new(),
+            rng: Some(rng),
+        }
     }
 }
 
@@ -130,37 +133,55 @@ pub trait RLAgentStation<S: Clone + 'static = f64, A: Clone + 'static = usize>: 
     /// 2. Process [`StateToken`]s (start of an episode) by acting.
     fn rl_agent_run_time_step(&mut self) {
         // 1. Apply transitions (TD update, then act on s' if not done).
-        let transitions = self.core_mut().drain::<TransitionToken<S, A>>(Self::CH_TRANSITION);
+        let transitions = self
+            .core_mut()
+            .drain::<TransitionToken<S, A>>(Self::CH_TRANSITION);
         for t in transitions {
             self.update(&t.state, &t.action, t.reward, &t.next_state, t.done);
-            self.agent_core_mut().episode_accounting.record_step(t.reward);
+            self.agent_core_mut()
+                .episode_accounting
+                .record_step(t.reward);
             if t.done {
                 self.agent_core_mut().episode_accounting.finish_episode();
                 self.end_of_episode(t.episode_id);
                 // Note: do NOT emit on done — wait for the env's next
                 // StateToken (it will arrive on the same tick or the next).
             } else {
-                let mut rng = self.agent_core_mut().rng.take().expect("rng already in use");
+                let mut rng = self
+                    .agent_core_mut()
+                    .rng
+                    .take()
+                    .expect("rng already in use");
                 let a = self.pick_action(&t.next_state, &mut *rng);
                 self.agent_core_mut().rng = Some(rng);
-                let token: AnyToken = Rc::new(ActionToken::<S, A>::new(t.next_state.clone(), a, t.episode_id));
+                let token: AnyToken = Rc::new(ActionToken::<S, A>::new(
+                    t.next_state.clone(),
+                    a,
+                    t.episode_id,
+                ));
                 self.core_mut().emit(token, Self::CH_ACTION);
             }
         }
         // 2. Process StateTokens (start of an episode).
         let states = self.core_mut().drain::<StateToken<S>>(Self::CH_STATE);
         for s in states {
-            let mut rng = self.agent_core_mut().rng.take().expect("rng already in use");
+            let mut rng = self
+                .agent_core_mut()
+                .rng
+                .take()
+                .expect("rng already in use");
             let a = self.pick_action(&s.state, &mut *rng);
             self.agent_core_mut().rng = Some(rng);
-            let token: AnyToken = Rc::new(ActionToken::<S, A>::new(s.state.clone(), a, s.episode_id));
+            let token: AnyToken =
+                Rc::new(ActionToken::<S, A>::new(s.state.clone(), a, s.episode_id));
             self.core_mut().emit(token, Self::CH_ACTION);
         }
     }
 
     /// `hasWork` override: any pending transition or state token is work.
     fn rl_agent_has_work(&self) -> bool {
-        self.core().inbox_size(Self::CH_TRANSITION) > 0 || self.core().inbox_size(Self::CH_STATE) > 0
+        self.core().inbox_size(Self::CH_TRANSITION) > 0
+            || self.core().inbox_size(Self::CH_STATE) > 0
     }
 
     // ── ACCESSORS (proxy the embedded EpisodeAccounting) ───────────────────────
@@ -196,10 +217,10 @@ pub trait RLAgentStation<S: Clone + 'static = f64, A: Clone + 'static = usize>: 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::any::Any;
     use crate::des::general::des_base::argmax::{arg_max_with_tie_break, ARGMAX_EPS_DEFAULT};
     use crate::des::general::des_base::station::StationCore;
     use crate::des::shared::capabilities::SeededRandom;
+    use std::any::Any;
     use std::cell::RefCell;
 
     /// Tiny tabular Q-learning agent over `2 states × 2 actions` implementing
@@ -266,14 +287,25 @@ mod tests {
             if rng.next_float() < self.epsilon {
                 (rng.next_float() * 2.0).floor() as usize
             } else {
-                arg_max_with_tie_break(&self.q[*state], &mut RngRef(rng), ARGMAX_EPS_DEFAULT).unwrap_or(0)
+                arg_max_with_tie_break(&self.q[*state], &mut RngRef(rng), ARGMAX_EPS_DEFAULT)
+                    .unwrap_or(0)
             }
         }
-        fn update(&mut self, state: &usize, action: &usize, reward: f64, next_state: &usize, done: bool) {
+        fn update(
+            &mut self,
+            state: &usize,
+            action: &usize,
+            reward: f64,
+            next_state: &usize,
+            done: bool,
+        ) {
             let best_next = if done {
                 0.0
             } else {
-                self.q[*next_state].iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+                self.q[*next_state]
+                    .iter()
+                    .cloned()
+                    .fold(f64::NEG_INFINITY, f64::max)
             };
             let target = reward + self.gamma * best_next;
             let q = &mut self.q[*state][*action];
@@ -299,7 +331,14 @@ mod tests {
         for ep in 0..200 {
             for state in 0..2usize {
                 for action in 0..2usize {
-                    let t = TransitionToken::new(state, action, reward_for(action), state, true, ep as f64);
+                    let t = TransitionToken::new(
+                        state,
+                        action,
+                        reward_for(action),
+                        state,
+                        true,
+                        ep as f64,
+                    );
                     agent.core_mut().take(Rc::new(t), QLearner::CH_TRANSITION);
                     agent.run_time_step();
                 }
@@ -307,7 +346,11 @@ mod tests {
         }
         // Q[s][1] (rewarding) should dominate Q[s][0], so greedy picks 1.
         for state in 0..2usize {
-            assert!(agent.q[state][1] > agent.q[state][0], "state {state}: {:?}", agent.q[state]);
+            assert!(
+                agent.q[state][1] > agent.q[state][0],
+                "state {state}: {:?}",
+                agent.q[state]
+            );
             assert_eq!(agent.greedy_action(state), 1);
         }
         // Bookkeeping: 200 episodes × 2 states × 2 actions terminal steps.
@@ -322,7 +365,9 @@ mod tests {
         agent.q = vec![vec![0.0, 0.0], vec![0.0, 5.0]];
 
         let sink = Rc::new(RefCell::new(ActionSink::new("sink")));
-        agent.core_mut().pipe(sink.clone(), QLearner::CH_ACTION, ActionSink::CH_IN);
+        agent
+            .core_mut()
+            .pipe(sink.clone(), QLearner::CH_ACTION, ActionSink::CH_IN);
 
         // A non-done transition: agent must act on next_state (=1) and record.
         let t = TransitionToken::new(0usize, 0usize, 0.3, 1usize, false, 0.0);
@@ -331,7 +376,10 @@ mod tests {
 
         assert_eq!(agent.total_steps(), 1);
         assert!((agent.episode_reward() - 0.3).abs() < 1e-12);
-        assert!(agent.reward_history().is_empty(), "episode not finished yet");
+        assert!(
+            agent.reward_history().is_empty(),
+            "episode not finished yet"
+        );
 
         // `emit` placed the ActionToken in the sink's inbox; run it to capture.
         sink.borrow_mut().run_time_step();
@@ -346,7 +394,9 @@ mod tests {
         agent.q = vec![vec![2.0, 0.0], vec![0.0, 0.0]];
 
         let sink = Rc::new(RefCell::new(ActionSink::new("sink")));
-        agent.core_mut().pipe(sink.clone(), QLearner::CH_ACTION, ActionSink::CH_IN);
+        agent
+            .core_mut()
+            .pipe(sink.clone(), QLearner::CH_ACTION, ActionSink::CH_IN);
 
         let s = StateToken::new(0usize, 42.0);
         agent.core_mut().take(Rc::new(s), QLearner::CH_STATE);
@@ -369,7 +419,10 @@ mod tests {
     impl ActionSink {
         const CH_IN: &'static str = "action";
         fn new(id: &str) -> Self {
-            ActionSink { core: StationCore::new(id), last: None }
+            ActionSink {
+                core: StationCore::new(id),
+                last: None,
+            }
         }
     }
 

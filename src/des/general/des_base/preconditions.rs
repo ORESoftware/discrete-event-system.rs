@@ -37,7 +37,11 @@ impl fmt::Display for PreconditionError {
             Some(s) => format!("; got {s}"),
             None => String::new(),
         };
-        write!(f, "{}: {} must {}{}", self.model, self.param, self.condition, obs)
+        write!(
+            f,
+            "{}: {} must {}{}",
+            self.model, self.param, self.condition, obs
+        )
     }
 }
 
@@ -65,7 +69,12 @@ impl Preconditions {
     pub fn positive(model: &str, param: &str, x: f64) -> Check {
         Self::finite(model, param, x)?;
         if x <= 0.0 {
-            return err(model, param, "be > 0 (positive, not zero)", Some(x.to_string()));
+            return err(
+                model,
+                param,
+                "be > 0 (positive, not zero)",
+                Some(x.to_string()),
+            );
         }
         Ok(())
     }
@@ -83,7 +92,12 @@ impl Preconditions {
     pub fn in_range(model: &str, param: &str, x: f64, lo: f64, hi: f64) -> Check {
         Self::finite(model, param, x)?;
         if x < lo || x > hi {
-            return err(model, param, &format!("be in [{lo}, {hi}]"), Some(x.to_string()));
+            return err(
+                model,
+                param,
+                &format!("be in [{lo}, {hi}]"),
+                Some(x.to_string()),
+            );
         }
         Ok(())
     }
@@ -101,7 +115,12 @@ impl Preconditions {
     pub fn integer_in_range(model: &str, param: &str, x: f64, lo: f64, hi: f64) -> Check {
         Self::integer(model, param, x)?;
         if x < lo || x > hi {
-            return err(model, param, &format!("be an integer in [{lo}, {hi}]"), Some(x.to_string()));
+            return err(
+                model,
+                param,
+                &format!("be an integer in [{lo}, {hi}]"),
+                Some(x.to_string()),
+            );
         }
         Ok(())
     }
@@ -110,7 +129,12 @@ impl Preconditions {
     pub fn all_finite(model: &str, param: &str, arr: &[f64]) -> Check {
         for (i, &v) in arr.iter().enumerate() {
             if !v.is_finite() {
-                return err(model, &format!("{param}[{i}]"), "be a finite number", Some(v.to_string()));
+                return err(
+                    model,
+                    &format!("{param}[{i}]"),
+                    "be a finite number",
+                    Some(v.to_string()),
+                );
             }
         }
         Ok(())
@@ -127,7 +151,12 @@ impl Preconditions {
     /// `arr.len() == expected`.
     pub fn length_eq<T>(model: &str, param: &str, arr: &[T], expected: usize) -> Check {
         if arr.len() != expected {
-            return err(model, &format!("{param}.length"), &format!("equal {expected}"), Some(arr.len().to_string()));
+            return err(
+                model,
+                &format!("{param}.length"),
+                &format!("equal {expected}"),
+                Some(arr.len().to_string()),
+            );
         }
         Ok(())
     }
@@ -136,7 +165,12 @@ impl Preconditions {
     pub fn arr_non_negative(model: &str, param: &str, arr: &[f64]) -> Check {
         for (i, &v) in arr.iter().enumerate() {
             if !v.is_finite() || v < 0.0 {
-                return err(model, &format!("{param}[{i}]"), "be >= 0", Some(v.to_string()));
+                return err(
+                    model,
+                    &format!("{param}[{i}]"),
+                    "be >= 0",
+                    Some(v.to_string()),
+                );
             }
         }
         Ok(())
@@ -148,12 +182,22 @@ impl Preconditions {
         let mut s = 0.0;
         for (i, &p) in arr.iter().enumerate() {
             if !p.is_finite() || p < 0.0 || p > 1.0 + tol {
-                return err(model, &format!("{param}[{i}]"), "be in [0, 1]", Some(p.to_string()));
+                return err(
+                    model,
+                    &format!("{param}[{i}]"),
+                    "be in [0, 1]",
+                    Some(p.to_string()),
+                );
             }
             s += p;
         }
         if (s - 1.0).abs() > tol {
-            return err(model, param, &format!("sum to 1 (within {tol})"), Some(s.to_string()));
+            return err(
+                model,
+                param,
+                &format!("sum to 1 (within {tol})"),
+                Some(s.to_string()),
+            );
         }
         Ok(())
     }
@@ -166,11 +210,21 @@ impl Preconditions {
         let cols = m[0].len();
         for (i, row) in m.iter().enumerate() {
             if row.len() != cols {
-                return err(model, &format!("{param}[{i}].length"), &format!("equal {cols}"), Some(row.len().to_string()));
+                return err(
+                    model,
+                    &format!("{param}[{i}].length"),
+                    &format!("equal {cols}"),
+                    Some(row.len().to_string()),
+                );
             }
             for (j, &v) in row.iter().enumerate() {
                 if !v.is_finite() {
-                    return err(model, &format!("{param}[{i}][{j}]"), "be finite", Some(v.to_string()));
+                    return err(
+                        model,
+                        &format!("{param}[{i}][{j}]"),
+                        "be finite",
+                        Some(v.to_string()),
+                    );
                 }
             }
         }
@@ -181,7 +235,12 @@ impl Preconditions {
     pub fn square_matrix(model: &str, param: &str, m: &Matrix) -> Check {
         Self::rectangular_matrix(model, param, m)?;
         if m.len() != m[0].len() {
-            return err(model, param, "be a square matrix", Some(format!("[{}, {}]", m.len(), m[0].len())));
+            return err(
+                model,
+                param,
+                "be a square matrix",
+                Some(format!("[{}, {}]", m.len(), m[0].len())),
+            );
         }
         Ok(())
     }
@@ -193,7 +252,12 @@ impl Preconditions {
         for i in 0..n {
             for j in (i + 1)..n {
                 if (m[i][j] - m[j][i]).abs() > tol {
-                    return err(model, param, &format!("be symmetric (M[{i}][{j}] vs M[{j}][{i}])"), None);
+                    return err(
+                        model,
+                        param,
+                        &format!("be symmetric (M[{i}][{j}] vs M[{j}][{i}])"),
+                        None,
+                    );
                 }
             }
         }
@@ -205,7 +269,12 @@ impl Preconditions {
         Self::symmetric_matrix(model, param, m, tol)?;
         for i in 0..m.len() {
             if m[i][i] < -tol {
-                return err(model, &format!("{param}[{i}][{i}]"), "be >= 0 (PSD diagonal)", Some(m[i][i].to_string()));
+                return err(
+                    model,
+                    &format!("{param}[{i}][{i}]"),
+                    "be >= 0 (PSD diagonal)",
+                    Some(m[i][i].to_string()),
+                );
             }
         }
         Ok(())
@@ -224,7 +293,12 @@ impl Preconditions {
                 }
                 if i == j {
                     if s <= 1e-12 {
-                        return err(model, param, "be positive-definite (Cholesky failed)", Some(s.to_string()));
+                        return err(
+                            model,
+                            param,
+                            "be positive-definite (Cholesky failed)",
+                            Some(s.to_string()),
+                        );
                     }
                     l[i][j] = s.sqrt();
                 } else {
@@ -239,13 +313,24 @@ impl Preconditions {
     pub fn not_div_by_zero(model: &str, param: &str, denom: f64, tol: f64) -> Check {
         Self::finite(model, param, denom)?;
         if denom.abs() < tol {
-            return err(model, param, &format!("be non-zero (>{tol} in magnitude) — would divide by zero"), Some(denom.to_string()));
+            return err(
+                model,
+                param,
+                &format!("be non-zero (>{tol} in magnitude) — would divide by zero"),
+                Some(denom.to_string()),
+            );
         }
         Ok(())
     }
 
     /// Generic predicate guard.
-    pub fn check(model: &str, param: &str, condition: &str, ok: bool, observed: Option<String>) -> Check {
+    pub fn check(
+        model: &str,
+        param: &str,
+        condition: &str,
+        ok: bool,
+        observed: Option<String>,
+    ) -> Check {
         if !ok {
             return err(model, param, condition, observed);
         }
@@ -256,7 +341,12 @@ impl Preconditions {
     pub fn magnitude_leq(model: &str, param: &str, x: f64, bound: f64) -> Check {
         Self::finite(model, param, x)?;
         if x.abs() > bound {
-            return err(model, param, &format!("have magnitude <= {bound}"), Some(x.to_string()));
+            return err(
+                model,
+                param,
+                &format!("have magnitude <= {bound}"),
+                Some(x.to_string()),
+            );
         }
         Ok(())
     }

@@ -24,7 +24,9 @@ use super::fel_runner::run_fel_once;
 use super::gillespie_runner::run_gillespie_once;
 use super::ode_runner::run_ode_once;
 use super::stats::{mean, stddev};
-use super::types::{default_config, RunOpts, RunResult, ServiceDiscipline, SimConfig, COMPARTMENT_ORDER};
+use super::types::{
+    default_config, RunOpts, RunResult, ServiceDiscipline, SimConfig, COMPARTMENT_ORDER,
+};
 
 fn fmt(n: f64, d: usize) -> String {
     if n.is_finite() {
@@ -56,7 +58,10 @@ fn pop(map: &HashMap<String, f64>, c: &str) -> f64 {
 
 /// `main()` — run the steady-state verification.
 pub fn run() {
-    let n_reps: usize = std::env::var("N").ok().and_then(|s| s.parse().ok()).unwrap_or(5);
+    let n_reps: usize = std::env::var("N")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5);
     let horizon: f64 = std::env::var("HORIZON")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -77,15 +82,30 @@ pub fn run() {
     let a = analytical_steady_state(&cfg_open);
     let lifespan = (1.0 / a.q) * (3.0 * 0.3 + 0.4 * 0.3 + 0.6 * (0.3 + 0.2 * (0.3 + 0.2)) + 2.0);
     println!("=== closed-form analytical steady state ===");
-    println!("  arrival rate                lambda = 1/mu_arr      = {}/day", fmt(a.lambda, 4));
-    println!("  per-S-pass death fraction   q = (1-p_a)*p_h*p_d    = {}", fmt(a.q, 5));
-    println!("  S throughput                f_S = lambda/q         = {}/day", fmt(a.f_s, 3));
+    println!(
+        "  arrival rate                lambda = 1/mu_arr      = {}/day",
+        fmt(a.lambda, 4)
+    );
+    println!(
+        "  per-S-pass death fraction   q = (1-p_a)*p_h*p_d    = {}",
+        fmt(a.q, 5)
+    );
+    println!(
+        "  S throughput                f_S = lambda/q         = {}/day",
+        fmt(a.f_s, 3)
+    );
     println!(
         "  total alive at steady state Sum N*_alive           = {}",
         fmt(a.total_alive - pop(&a.populations, "D"), 3)
     );
-    println!("  mean lifespan               1/q * cycle_time       ≈ {} days", fmt(lifespan, 1));
-    println!("  max stable forward-Euler dt 2 * min(mu_c)          = {} days", fmt(max_stable_step(&cfg_open), 3));
+    println!(
+        "  mean lifespan               1/q * cycle_time       ≈ {} days",
+        fmt(lifespan, 1)
+    );
+    println!(
+        "  max stable forward-Euler dt 2 * min(mu_c)          = {} days",
+        fmt(max_stable_step(&cfg_open), 3)
+    );
     println!();
 
     // --- Forward-Euler stability + convergence demo -----------------------
@@ -94,7 +114,10 @@ pub fn run() {
     let dts = [0.5_f64, 0.39, 0.1, 0.05, 0.01];
     let mut diff_runs: HashMap<u64, RunResult> = HashMap::new();
     for &dt in &dts {
-        let cfg = SimConfig { step_size: dt, ..cfg_open.clone() };
+        let cfg = SimConfig {
+            step_size: dt,
+            ..cfg_open.clone()
+        };
         diff_runs.insert(dt.to_bits(), run_difference_once(&cfg, &RunOpts::default()));
     }
     let mut header = pad_end("compartment", 14) + &pad_start("analytical", 12);
@@ -103,7 +126,8 @@ pub fn run() {
     }
     println!("{header}");
     for c in COMPARTMENT_ORDER {
-        let mut line = pad_end(&format!("<{c}>"), 14) + &pad_start(&fmt(pop(&a.populations, c), 3), 12);
+        let mut line =
+            pad_end(&format!("<{c}>"), 14) + &pad_start(&fmt(pop(&a.populations, c), 3), 12);
         for d in dts {
             let v = pop(&diff_runs[&d.to_bits()].final_populations, c);
             line += &pad_start(&fmt(v, 3), 12);
@@ -113,12 +137,16 @@ pub fn run() {
     let dt_ref = 0.01_f64;
     let mut max_err = f64::NEG_INFINITY;
     for c in COMPARTMENT_ORDER {
-        let e = (pop(&diff_runs[&dt_ref.to_bits()].final_populations, c) - pop(&a.populations, c)).abs();
+        let e = (pop(&diff_runs[&dt_ref.to_bits()].final_populations, c) - pop(&a.populations, c))
+            .abs();
         if e > max_err {
             max_err = e;
         }
     }
-    println!("  max |diff(dt={dt_ref}) - analytical| over compartments: {}", fmt(max_err, 6));
+    println!(
+        "  max |diff(dt={dt_ref}) - analytical| over compartments: {}",
+        fmt(max_err, 6)
+    );
     if !max_err.is_finite() || max_err > 1e-2 {
         eprintln!(
             "[steady-state] difference-equation final state disagrees with closed form at dt={dt_ref}: max|Δ|={} — kernel and analytics may be inconsistent.",
@@ -133,10 +161,16 @@ pub fn run() {
 
     // --- Run all kernels in open-system mode at horizon T -----------------
     let ode = run_ode_once(
-        &SimConfig { horizon_days: horizon, ..cfg_open.clone() },
+        &SimConfig {
+            horizon_days: horizon,
+            ..cfg_open.clone()
+        },
         &RunOpts::default(),
     );
-    if COMPARTMENT_ORDER.iter().any(|c| !pop(&ode.final_populations, c).is_finite()) {
+    if COMPARTMENT_ORDER
+        .iter()
+        .any(|c| !pop(&ode.final_populations, c).is_finite())
+    {
         eprintln!(
             "[steady-state] ODE RK4 produced non-finite final populations at horizon={horizon} (stepSize={}) — integration likely diverged.",
             cfg_open.step_size
@@ -147,7 +181,10 @@ pub fn run() {
     for i in 0..n_reps {
         ssa_runs.push(run_gillespie_once(
             &cfg_open,
-            &RunOpts { seed: Some(0xA0000 + i as u64), ..Default::default() },
+            &RunOpts {
+                seed: Some(0xA0000 + i as u64),
+                ..Default::default()
+            },
         ));
         fel_runs.push(run_fel_once(
             &cfg_open,
@@ -192,16 +229,28 @@ pub fn run() {
         let ana = pop(&a.populations, c);
         let dif = pop(&diff_runs[&0.05_f64.to_bits()].final_populations, c);
         let ode_f = pop(&ode.final_populations, c);
-        let ssa_f: Vec<f64> = ssa_runs.iter().map(|r| pop(&r.final_populations, c)).collect();
-        let fel_f: Vec<f64> = fel_runs.iter().map(|r| pop(&r.final_populations, c)).collect();
+        let ssa_f: Vec<f64> = ssa_runs
+            .iter()
+            .map(|r| pop(&r.final_populations, c))
+            .collect();
+        let fel_f: Vec<f64> = fel_runs
+            .iter()
+            .map(|r| pop(&r.final_populations, c))
+            .collect();
         println!(
             "{}{}{}{}{}{}",
             pad_end(&format!("<{c}>"), 14),
             pad_start(&fmt(ana, 3), 13),
             pad_start(&fmt(dif, 3), 13),
             pad_start(&fmt(ode_f, 3), 13),
-            pad_start(&format!("{} ± {}", fmt(mean(&ssa_f), 1), fmt(stddev(&ssa_f), 1)), 20),
-            pad_start(&format!("{} ± {}", fmt(mean(&fel_f), 1), fmt(stddev(&fel_f), 1)), 20)
+            pad_start(
+                &format!("{} ± {}", fmt(mean(&ssa_f), 1), fmt(stddev(&ssa_f), 1)),
+                20
+            ),
+            pad_start(
+                &format!("{} ± {}", fmt(mean(&fel_f), 1), fmt(stddev(&fel_f), 1)),
+                20
+            )
         );
     }
     println!("  notes:");
@@ -223,15 +272,27 @@ pub fn run() {
     for c in COMPARTMENT_ORDER {
         let ana = pop(&a.populations, c);
         let ode_t = pop(&ode.time_avg_populations, c);
-        let ssa_t: Vec<f64> = ssa_runs.iter().map(|r| pop(&r.time_avg_populations, c)).collect();
-        let fel_t: Vec<f64> = fel_runs.iter().map(|r| pop(&r.time_avg_populations, c)).collect();
+        let ssa_t: Vec<f64> = ssa_runs
+            .iter()
+            .map(|r| pop(&r.time_avg_populations, c))
+            .collect();
+        let fel_t: Vec<f64> = fel_runs
+            .iter()
+            .map(|r| pop(&r.time_avg_populations, c))
+            .collect();
         println!(
             "{}{}{}{}{}",
             pad_end(&format!("<{c}>"), 14),
             pad_start(&fmt(ana, 3), 15),
             pad_start(&fmt(ode_t, 3), 13),
-            pad_start(&format!("{} ± {}", fmt(mean(&ssa_t), 3), fmt(stddev(&ssa_t), 3)), 20),
-            pad_start(&format!("{} ± {}", fmt(mean(&fel_t), 3), fmt(stddev(&fel_t), 3)), 20)
+            pad_start(
+                &format!("{} ± {}", fmt(mean(&ssa_t), 3), fmt(stddev(&ssa_t), 3)),
+                20
+            ),
+            pad_start(
+                &format!("{} ± {}", fmt(mean(&fel_t), 3), fmt(stddev(&fel_t), 3)),
+                20
+            )
         );
     }
     println!("  notes:");
@@ -243,28 +304,60 @@ pub fn run() {
     // --- Sanity checks ----------------------------------------------------
     println!("=== sanity: total alive populations and cumulative deaths ===");
     let all_ana = a.total_alive - pop(&a.populations, "D");
-    let ode_alive: f64 = COMPARTMENT_ORDER.iter().map(|c| pop(&ode.final_populations, c)).sum();
+    let ode_alive: f64 = COMPARTMENT_ORDER
+        .iter()
+        .map(|c| pop(&ode.final_populations, c))
+        .sum();
     let ssa_alive: Vec<f64> = ssa_runs
         .iter()
-        .map(|r| COMPARTMENT_ORDER.iter().map(|c| pop(&r.final_populations, c)).sum())
+        .map(|r| {
+            COMPARTMENT_ORDER
+                .iter()
+                .map(|c| pop(&r.final_populations, c))
+                .sum()
+        })
         .collect();
     let fel_alive: Vec<f64> = fel_runs
         .iter()
-        .map(|r| COMPARTMENT_ORDER.iter().map(|c| pop(&r.final_populations, c)).sum())
+        .map(|r| {
+            COMPARTMENT_ORDER
+                .iter()
+                .map(|c| pop(&r.final_populations, c))
+                .sum()
+        })
         .collect();
     println!("  analytical Sum N*_alive    : {}", fmt(all_ana, 3));
     println!("  ODE     N(T) Sum alive     : {}", fmt(ode_alive, 3));
-    println!("  Gillespie    <N(T)> alive  : {} ± {}", fmt(mean(&ssa_alive), 3), fmt(stddev(&ssa_alive), 3));
-    println!("  FEL-ind      <N(T)> alive  : {} ± {}", fmt(mean(&fel_alive), 3), fmt(stddev(&fel_alive), 3));
+    println!(
+        "  Gillespie    <N(T)> alive  : {} ± {}",
+        fmt(mean(&ssa_alive), 3),
+        fmt(stddev(&ssa_alive), 3)
+    );
+    println!(
+        "  FEL-ind      <N(T)> alive  : {} ± {}",
+        fmt(mean(&fel_alive), 3),
+        fmt(stddev(&fel_alive), 3)
+    );
 
     println!();
     let exp_deaths = horizon * a.lambda;
     println!("cumulative deaths over [0, T] (steady-state rate = lambda = 1/day):");
     println!("  expected horizon * lambda  : {}", fmt(exp_deaths, 1));
-    println!("  ODE D(T)                   : {}", fmt(ode.totals.absorbed, 1));
+    println!(
+        "  ODE D(T)                   : {}",
+        fmt(ode.totals.absorbed, 1)
+    );
     let ssa_abs: Vec<f64> = ssa_runs.iter().map(|r| r.totals.absorbed).collect();
     let fel_abs: Vec<f64> = fel_runs.iter().map(|r| r.totals.absorbed).collect();
-    println!("  Gillespie absorbed         : {} ± {}", fmt(mean(&ssa_abs), 1), fmt(stddev(&ssa_abs), 1));
-    println!("  FEL-ind   absorbed         : {} ± {}", fmt(mean(&fel_abs), 1), fmt(stddev(&fel_abs), 1));
+    println!(
+        "  Gillespie absorbed         : {} ± {}",
+        fmt(mean(&ssa_abs), 1),
+        fmt(stddev(&ssa_abs), 1)
+    );
+    println!(
+        "  FEL-ind   absorbed         : {} ± {}",
+        fmt(mean(&fel_abs), 1),
+        fmt(stddev(&fel_abs), 1)
+    );
     println!("  (these are biased low by transient deficit; ratio actual/expected -> 1 as T -> infinity)");
 }

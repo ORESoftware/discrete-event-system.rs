@@ -30,7 +30,11 @@ struct SimulationSiteBuilder;
 impl SimulationSiteBuilder {
     /// `run(script, env)` — see PORT NOTE: logs the intended invocation only.
     fn run_script(&self, script: &str, env: &[(&str, &str)]) {
-        let env_str = env.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
+        let env_str = env
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join(" ");
         eprintln!("  • {script} {env_str}");
         // PORT NOTE: would `execFileSync(ts-node, [script], { stdio: 'inherit', … })`.
     }
@@ -76,8 +80,10 @@ impl SimulationSiteBuilder {
                 self.scan_html(&full, base, acc);
             } else if full.extension().and_then(|e| e.to_str()) == Some("html") {
                 if let Ok(rel) = full.strip_prefix(base) {
-                    let parts: Vec<String> =
-                        rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+                    let parts: Vec<String> = rel
+                        .components()
+                        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                        .collect();
                     acc.push(parts.join("/"));
                 }
             }
@@ -98,12 +104,16 @@ impl SimulationSiteBuilder {
         let out_dir = std::fs::canonicalize("out").unwrap_or_else(|_| PathBuf::from("out"));
         let mut found: Vec<String> = Vec::new();
         self.scan_html(&out_dir, &out_dir, &mut found);
-        let mut rels: Vec<String> =
-            found.into_iter().filter(|rel| rel != "index.html" && !featured.contains(rel)).collect();
+        let mut rels: Vec<String> = found
+            .into_iter()
+            .filter(|rel| rel != "index.html" && !featured.contains(rel))
+            .collect();
         rels.sort();
         rels.into_iter()
             .map(|rel| {
-                let size = std::fs::metadata(out_dir.join(&rel)).ok().map(|m| self.human_size(m.len()));
+                let size = std::fs::metadata(out_dir.join(&rel))
+                    .ok()
+                    .map(|m| self.human_size(m.len()));
                 CatalogEntry {
                     href: rel.clone(),
                     label: rel.strip_suffix(".html").unwrap_or(&rel).to_string(),
@@ -115,11 +125,44 @@ impl SimulationSiteBuilder {
 
     fn write_index(&self) {
         let animations: Vec<IndexEntry> = vec![
-            IndexEntry { kind: "animation".into(), title: "Wind MPPT — optimal torque".into(), href: "wind-mppt/animation-optimal-torque.html".into(), description: "Variable-speed PMSG turbine tracking optimal tip-speed ratio via T = K_opt·ω².".into() },
-            IndexEntry { kind: "animation".into(), title: "Wind MPPT — PI speed loop".into(), href: "wind-mppt/animation-pi.html".into(), description: "Same turbine driven by a PI controller tracking ω* = λ*·V/R.".into() },
-            IndexEntry { kind: "animation".into(), title: "DC motor — closed-loop PI".into(), href: "dc-motor/animation-closed.html".into(), description: "Back-EMF ODE motor; PI speed control tracking 60→100 rad/s with a load step.".into() },
-            IndexEntry { kind: "animation".into(), title: "DC motor — open loop".into(), href: "dc-motor/animation-open.html".into(), description: "Step-voltage response showing back-EMF rise throttling armature current.".into() },
-            IndexEntry { kind: "animation".into(), title: "Controllability & Observability".into(), href: "obs-ctrl/animation.html".into(), description: "Kalman rank tests, MDP reachability, and POMDP distinguishability storyboard.".into() },
+            IndexEntry {
+                kind: "animation".into(),
+                title: "Wind MPPT — optimal torque".into(),
+                href: "wind-mppt/animation-optimal-torque.html".into(),
+                description:
+                    "Variable-speed PMSG turbine tracking optimal tip-speed ratio via T = K_opt·ω²."
+                        .into(),
+            },
+            IndexEntry {
+                kind: "animation".into(),
+                title: "Wind MPPT — PI speed loop".into(),
+                href: "wind-mppt/animation-pi.html".into(),
+                description: "Same turbine driven by a PI controller tracking ω* = λ*·V/R.".into(),
+            },
+            IndexEntry {
+                kind: "animation".into(),
+                title: "DC motor — closed-loop PI".into(),
+                href: "dc-motor/animation-closed.html".into(),
+                description:
+                    "Back-EMF ODE motor; PI speed control tracking 60→100 rad/s with a load step."
+                        .into(),
+            },
+            IndexEntry {
+                kind: "animation".into(),
+                title: "DC motor — open loop".into(),
+                href: "dc-motor/animation-open.html".into(),
+                description:
+                    "Step-voltage response showing back-EMF rise throttling armature current."
+                        .into(),
+            },
+            IndexEntry {
+                kind: "animation".into(),
+                title: "Controllability & Observability".into(),
+                href: "obs-ctrl/animation.html".into(),
+                description:
+                    "Kalman rank tests, MDP reachability, and POMDP distinguishability storyboard."
+                        .into(),
+            },
         ];
         let runs: Vec<IndexEntry> = vec![
             IndexEntry { kind: "run report".into(), title: "Empirical controllability & observability".into(), href: "empirical-control/report.html".into(), description: "Gramian degree (min/max directions) and Monte-Carlo trial estimates vs analytic Kalman tests.".into() },
@@ -131,7 +174,9 @@ impl SimulationSiteBuilder {
             "Control-system animations and numerical / machine-learning runs, generated from the discrete-event-system submodule.",
         );
         let present = |es: Vec<IndexEntry>| -> Vec<IndexEntry> {
-            es.into_iter().filter_map(|e| self.link_if_exists(e)).collect()
+            es.into_iter()
+                .filter_map(|e| self.link_if_exists(e))
+                .collect()
         };
         let featured_anims = present(animations);
         let featured_runs = present(runs);
@@ -142,7 +187,8 @@ impl SimulationSiteBuilder {
         });
         page.add_group(IndexGroup {
             heading: "Numerical & machine-learning runs".into(),
-            blurb: "Reproducible run reports with the full console output of each simulation.".into(),
+            blurb: "Reproducible run reports with the full console output of each simulation."
+                .into(),
             entries: featured_runs.clone(),
         });
 
@@ -176,7 +222,10 @@ epidemic/traffic/network simulations, and more. Click any to open its rendered p
 /// dropped relative to JS's millisecond `toISOString`).
 fn iso_now() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) as i64;
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0) as i64;
     let days = secs.div_euclid(86_400);
     let rem = secs.rem_euclid(86_400);
     let (hh, mm, ss) = (rem / 3600, (rem % 3600) / 60, rem % 60);

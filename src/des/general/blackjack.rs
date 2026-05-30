@@ -33,8 +33,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::des::general::des_base::environment::{
-    EnvironmentStation, EnvironmentStationOptions, PureEnvironment, StepResult, CH_ACTION, CH_STATE,
-    CH_TRANSITION,
+    EnvironmentStation, EnvironmentStationOptions, PureEnvironment, StepResult, CH_ACTION,
+    CH_STATE, CH_TRANSITION,
 };
 use crate::des::general::des_base::monte_carlo_rl::{MonteCarloAgent, MonteCarloOptions};
 use crate::des::general::des_base::preconditions::Preconditions;
@@ -100,7 +100,10 @@ fn hand_total(cards: &[usize]) -> HandTotal {
         s -= 10;
         aces -= 1;
     }
-    HandTotal { sum: s, usable_ace: aces > 0 }
+    HandTotal {
+        sum: s,
+        usable_ace: aces > 0,
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -123,7 +126,11 @@ impl Blackjack {
     pub const NUM_ACTIONS: usize = 2;
 
     fn new(rng: SharedRng) -> Self {
-        Blackjack { rng, dealer_cards: Vec::new(), player_cards: Vec::new() }
+        Blackjack {
+            rng,
+            dealer_cards: Vec::new(),
+            player_cards: Vec::new(),
+        }
     }
 
     /// Reset using an injected RNG (for reproducibility). Deal until the player
@@ -183,9 +190,17 @@ impl PureEnvironment<usize, usize> for Blackjack {
             self.player_cards.push(draw_card(&mut rng));
             let t = hand_total(&self.player_cards);
             if t.sum > 21 {
-                return StepResult { next_state: self.encode_state(true), reward: -1.0, done: true };
+                return StepResult {
+                    next_state: self.encode_state(true),
+                    reward: -1.0,
+                    done: true,
+                };
             }
-            return StepResult { next_state: self.encode_state(false), reward: 0.0, done: false };
+            return StepResult {
+                next_state: self.encode_state(false),
+                reward: 0.0,
+                done: false,
+            };
         }
         // STICK: dealer plays, then settle.
         let player_sum = hand_total(&self.player_cards).sum;
@@ -203,7 +218,11 @@ impl PureEnvironment<usize, usize> for Blackjack {
         } else {
             -1.0
         };
-        StepResult { next_state: self.encode_state(true), reward: r, done: true }
+        StepResult {
+            next_state: self.encode_state(true),
+            reward: r,
+            done: true,
+        }
     }
 }
 
@@ -258,7 +277,8 @@ pub struct BlackjackResult {
 /// greedy policy and the stick-on-20+ baseline.
 pub fn run_blackjack_mc(opts: BlackjackTrainOpts) -> BlackjackResult {
     let cls = "run_blackjack_mc";
-    Preconditions::integer_in_range(cls, "numEpisodes", opts.num_episodes as f64, 1.0, 1e9).unwrap();
+    Preconditions::integer_in_range(cls, "numEpisodes", opts.num_episodes as f64, 1.0, 1e9)
+        .unwrap();
     if let Some(e) = opts.eval_episodes {
         Preconditions::integer_in_range(cls, "evalEpisodes", e as f64, 1.0, 1e9).unwrap();
     }
@@ -301,14 +321,28 @@ pub fn run_blackjack_mc(opts: BlackjackTrainOpts) -> BlackjackResult {
     );
 
     let agent: Rc<RefCell<MonteCarloAgent>> = Rc::new(RefCell::new(agent));
-    let env_station: Rc<RefCell<EnvironmentStation<usize, usize>>> = Rc::new(RefCell::new(env_station));
+    let env_station: Rc<RefCell<EnvironmentStation<usize, usize>>> =
+        Rc::new(RefCell::new(env_station));
 
-    env_station.borrow_mut().core_mut().pipe(agent.clone() as StationRef, CH_STATE, CH_STATE);
-    env_station.borrow_mut().core_mut().pipe(agent.clone() as StationRef, CH_TRANSITION, CH_TRANSITION);
-    agent.borrow_mut().core_mut().pipe(env_station.clone() as StationRef, CH_ACTION, CH_ACTION);
+    env_station
+        .borrow_mut()
+        .core_mut()
+        .pipe(agent.clone() as StationRef, CH_STATE, CH_STATE);
+    env_station.borrow_mut().core_mut().pipe(
+        agent.clone() as StationRef,
+        CH_TRANSITION,
+        CH_TRANSITION,
+    );
+    agent
+        .borrow_mut()
+        .core_mut()
+        .pipe(env_station.clone() as StationRef, CH_ACTION, CH_ACTION);
 
     let summary = run_iterative_des(
-        vec![env_station.clone() as StationRef, agent.clone() as StationRef],
+        vec![
+            env_station.clone() as StationRef,
+            agent.clone() as StationRef,
+        ],
         IterativeRunOptions {
             rng: Some({
                 let mut r = rng.clone();
@@ -354,7 +388,12 @@ pub fn run_blackjack_mc(opts: BlackjackTrainOpts) -> BlackjackResult {
         }
     }
 
-    let visited = agent.borrow().get_visit_counts().iter().filter(|&&c| c > 0).count();
+    let visited = agent
+        .borrow()
+        .get_visit_counts()
+        .iter()
+        .filter(|&&c| c > 0)
+        .count();
     let reward_history = agent.borrow().reward_history().to_vec();
     let final_epsilon = agent.borrow().get_epsilon();
 
@@ -409,7 +448,11 @@ mod tests {
             eval_episodes: Some(100),
             ..Default::default()
         });
-        assert_eq!(res.reward_history.len(), 300, "one reward logged per episode");
+        assert_eq!(
+            res.reward_history.len(),
+            300,
+            "one reward logged per episode"
+        );
         assert!(res.ticks > 0);
         assert!(res.visited_cells > 0);
         assert!((-1.0..=1.0).contains(&res.greedy_mean_return));

@@ -382,7 +382,12 @@ impl<S: Clone + 'static, R: RandomSource + 'static> TreeSearchStation<usize> for
             g_acc = self.arena[cur].reward_in + self.gamma * g_acc;
         }
 
-        NodeEvaluation { bound: g, is_leaf: true, value: Some(g), is_feasible: false }
+        NodeEvaluation {
+            bound: g,
+            is_leaf: true,
+            value: Some(g),
+            is_feasible: false,
+        }
     }
 
     /// Never reached: every `evaluate` returns `is_leaf = true`.
@@ -417,7 +422,10 @@ where
 {
     let sel = opts.selection;
     let station = Rc::new(RefCell::new(MCTSStation::new(env, root_state, opts, rng)));
-    run_iterative_des(vec![station.clone() as StationRef], IterativeRunOptions::default());
+    run_iterative_des(
+        vec![station.clone() as StationRef],
+        IterativeRunOptions::default(),
+    );
 
     let mut st = station.borrow_mut();
     let visits = st.root_child_visits();
@@ -427,7 +435,11 @@ where
     let mut child_keys: Vec<usize> = st.arena[st.root].children.iter().map(|&(a, _)| a).collect();
     child_keys.sort_unstable();
     if child_keys.is_empty() {
-        return MctsResult { action: 0, visits, values };
+        return MctsResult {
+            action: 0,
+            visits,
+            values,
+        };
     }
 
     let scores: Vec<f64> = child_keys
@@ -457,7 +469,11 @@ where
         .expect("non-empty child keys");
     let action = child_keys[best];
 
-    MctsResult { action, visits, values }
+    MctsResult {
+        action,
+        visits,
+        values,
+    }
 }
 
 #[cfg(test)]
@@ -517,7 +533,10 @@ mod tests {
         let res = mcts(
             Box::new(LineWalk { horizon: 6 }),
             root(),
-            MCTSOptions { iterations: 300, ..Default::default() },
+            MCTSOptions {
+                iterations: 300,
+                ..Default::default()
+            },
             SeededRandom::new(42),
         );
         assert_eq!(res.action, 1);
@@ -543,9 +562,22 @@ mod tests {
 
     #[test]
     fn deterministic_for_fixed_seed() {
-        let opts = MCTSOptions { iterations: 150, ..Default::default() };
-        let r1 = mcts(Box::new(LineWalk { horizon: 6 }), root(), opts, SeededRandom::new(7));
-        let r2 = mcts(Box::new(LineWalk { horizon: 6 }), root(), opts, SeededRandom::new(7));
+        let opts = MCTSOptions {
+            iterations: 150,
+            ..Default::default()
+        };
+        let r1 = mcts(
+            Box::new(LineWalk { horizon: 6 }),
+            root(),
+            opts,
+            SeededRandom::new(7),
+        );
+        let r2 = mcts(
+            Box::new(LineWalk { horizon: 6 }),
+            root(),
+            opts,
+            SeededRandom::new(7),
+        );
         assert_eq!(r1.action, r2.action);
         assert_eq!(r1.visits, r2.visits);
         assert_eq!(r1.values, r2.values);

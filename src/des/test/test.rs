@@ -25,8 +25,7 @@ mod tests {
         let ts = bgn(600.0);
         let lambda = bgn(1.0) / bgn(500.0);
 
-        let mut erv =
-            ExponentialRandomVariable::new(lambda, ts, Box::new(SeededRandom::new(600)));
+        let mut erv = ExponentialRandomVariable::new(lambda, ts, Box::new(SeededRandom::new(600)));
         let mut bucket1: HashMap<i64, i64> = HashMap::new();
         for _ in 0..100_000 {
             let val = erv.get_next_event_quantity(ts);

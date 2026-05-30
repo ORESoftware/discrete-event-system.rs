@@ -363,7 +363,9 @@ impl Shape {
                 font_size: jget_f64(v, "fontSize"),
                 fill: jget_str(v, "fill"),
                 anchor: jget_str(v, "anchor").as_deref().and_then(Anchor::from_str),
-                font_weight: jget_str(v, "fontWeight").as_deref().and_then(FontWeight::from_str),
+                font_weight: jget_str(v, "fontWeight")
+                    .as_deref()
+                    .and_then(FontWeight::from_str),
                 font_family: jget_str(v, "fontFamily"),
                 visual_block_id,
             })),
@@ -407,16 +409,27 @@ pub struct FrameParts {
 
 impl FrameParts {
     pub fn new(shapes: Vec<Shape>) -> Self {
-        FrameParts { shapes, caption: None }
+        FrameParts {
+            shapes,
+            caption: None,
+        }
     }
 
     pub fn with_caption(shapes: Vec<Shape>, caption: impl Into<String>) -> Self {
-        FrameParts { shapes, caption: Some(caption.into()) }
+        FrameParts {
+            shapes,
+            caption: Some(caption.into()),
+        }
     }
 
     /// Promote to a full [`Frame`] by attaching `t` and `tick`.
     pub fn into_frame(self, t: f64, tick: f64) -> Frame {
-        Frame { t, tick, shapes: self.shapes, caption: self.caption }
+        Frame {
+            t,
+            tick,
+            shapes: self.shapes,
+            caption: self.caption,
+        }
     }
 }
 

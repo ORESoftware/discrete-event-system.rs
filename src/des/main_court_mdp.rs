@@ -34,7 +34,10 @@ use crate::des::mdp::value_iteration::{value_iteration, VIOptions, VIResult};
 use crate::des::shared::capabilities::{RandomSource, SeededRandom};
 
 fn action_index(name: &str) -> usize {
-    ACTIONS.iter().position(|&a| a == name).expect("known action")
+    ACTIONS
+        .iter()
+        .position(|&a| a == name)
+        .expect("known action")
 }
 
 // -----------------------------------------------------------------------------
@@ -89,7 +92,8 @@ impl Policy for NaiveThresholdPolicy {
         if s.corroboration == 0 {
             return action_index("verify_identity");
         }
-        let score = s.evidence as f64 + s.corroboration as f64 - s.manipulation as f64
+        let score = s.evidence as f64 + s.corroboration as f64
+            - s.manipulation as f64
             - 1.5 * s.conflict as f64;
         if score - 1.5 * 0.0 >= 2.0 {
             // NOTE: matches TS `evidence + corroboration − manipulation − 1.5·conflict ≥ 2`.
@@ -298,7 +302,11 @@ pub fn run_court_sim(cfg: CourtMDPConfig, policy: &dyn Policy) -> CourtMDPResult
 }
 
 fn dump_vi() -> VIResult {
-    let vi = value_iteration(VIOptions { gamma: 0.95, tol: 1e-10, max_iter: 5000 });
+    let vi = value_iteration(VIOptions {
+        gamma: 0.95,
+        tol: 1e-10,
+        max_iter: 5000,
+    });
     println!(
         "# value iteration: {} sweeps, max|ΔV| = {:.3e}",
         vi.iterations, vi.final_delta
@@ -307,13 +315,19 @@ fn dump_vi() -> VIResult {
 }
 
 fn env_usize(key: &str, default: usize) -> usize {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 /// Entry point (TS top-level `main`).
 pub fn run() {
     let n = env_usize("CASES", 5000);
-    let seed = std::env::var("SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(42u32);
+    let seed = std::env::var("SEED")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(42u32);
     let arrivals_per_tick = env_usize("ARRIVALS_PER_TICK", 5);
     let max_ticks = env_usize("MAX_TICKS", 10000);
 
@@ -321,7 +335,9 @@ pub fn run() {
     println!("#   {n} cases, {arrivals_per_tick} arrivals/tick, maxTicks={max_ticks}, seed={seed}");
 
     let vi = dump_vi();
-    let optimal = OptimalPolicy { action: vi.policy.clone() };
+    let optimal = OptimalPolicy {
+        action: vi.policy.clone(),
+    };
 
     let policies: Vec<Box<dyn Policy>> = vec![
         Box::new(RejectAllPolicy),
@@ -330,7 +346,12 @@ pub fn run() {
         Box::new(optimal),
     ];
 
-    let cfg = CourtMDPConfig { total_cases: n, arrivals_per_tick, max_ticks, seed };
+    let cfg = CourtMDPConfig {
+        total_cases: n,
+        arrivals_per_tick,
+        max_ticks,
+        seed,
+    };
 
     for p in &policies {
         let r = run_court_sim(cfg, p.as_ref());
@@ -348,7 +369,10 @@ pub fn run() {
             a.fraction_exhausted * 100.0
         );
         if a.n_timed_out > 0 {
-            println!("#   WARNING: {} cases timed out (raise MAX_TICKS)", a.n_timed_out);
+            println!(
+                "#   WARNING: {} cases timed out (raise MAX_TICKS)",
+                a.n_timed_out
+            );
         }
     }
 
@@ -380,6 +404,11 @@ pub fn run() {
             .filter(|(_, &c)| c > 0)
             .map(|(i, &c)| format!("{}={}", &ACTIONS[i][..4], c))
             .collect();
-        println!("#   {:<4} ({} states): {}", STAGES[stage], total, parts.join(" "));
+        println!(
+            "#   {:<4} ({} states): {}",
+            STAGES[stage],
+            total,
+            parts.join(" ")
+        );
     }
 }

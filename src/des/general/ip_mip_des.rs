@@ -50,14 +50,19 @@ use crate::des::general::des_base::composite_station::CompositeDESStation;
 use crate::des::general::des_base::runner::{
     assert_no_validation_failures, run_iterative_des, IterativeRunOptions, RunReason,
 };
-use crate::des::general::des_base::station::{DESStation, StationCore, StationRef};
 use crate::des::general::des_base::stateful_token::{
-    transition_token, PayloadStatefulToken, PayloadStatefulTokenOpts, StatefulToken, StatefulTokenRegistry,
-    StatefulTokenRegistryStats, TokenStateMode, TransitionTokenOpts,
+    transition_token, PayloadStatefulToken, PayloadStatefulTokenOpts, StatefulToken,
+    StatefulTokenRegistry, StatefulTokenRegistryStats, TokenStateMode, TransitionTokenOpts,
 };
+use crate::des::general::des_base::station::{DESStation, StationCore, StationRef};
 use crate::des::general::des_base::validation::intrinsic_check;
-use crate::des::general::incremental_lp::{IncrementalLP, IncrementalLPInit, PivotMode, Sense as IncSense, SolverStatus};
-use crate::des::general::lp::{solve_lp_external, solve_lp_internal, ExternalSolverOptions, InternalSimplexOptions, LPProblem, LPStatus, Sense};
+use crate::des::general::incremental_lp::{
+    IncrementalLP, IncrementalLPInit, PivotMode, Sense as IncSense, SolverStatus,
+};
+use crate::des::general::lp::{
+    solve_lp_external, solve_lp_internal, ExternalSolverOptions, InternalSimplexOptions, LPProblem,
+    LPStatus, Sense,
+};
 use crate::des::general::lp_des::{solve_lp_via_des, DESSimplexOptions, PivotRule};
 
 // -----------------------------------------------------------------------------
@@ -461,7 +466,11 @@ fn new_complete_token(node_id: usize, opts: TokenOpts) -> CompleteToken {
     })
 }
 
-fn new_relaxation_token(payload: RelaxationPayload, parent: &StatefulToken<IpmipTokenState>, opts: TokenOpts) -> RelaxationToken {
+fn new_relaxation_token(
+    payload: RelaxationPayload,
+    parent: &StatefulToken<IpmipTokenState>,
+    opts: TokenOpts,
+) -> RelaxationToken {
     PayloadStatefulToken::new(PayloadStatefulTokenOpts {
         kind: "ip-relaxation".to_string(),
         token_id: opts.token_id,
@@ -477,7 +486,11 @@ fn new_relaxation_token(payload: RelaxationPayload, parent: &StatefulToken<Ipmip
     })
 }
 
-fn new_candidate_token(payload: CandidatePayload, parent: &StatefulToken<IpmipTokenState>, opts: TokenOpts) -> CandidateToken {
+fn new_candidate_token(
+    payload: CandidatePayload,
+    parent: &StatefulToken<IpmipTokenState>,
+    opts: TokenOpts,
+) -> CandidateToken {
     PayloadStatefulToken::new(PayloadStatefulTokenOpts {
         kind: "ip-candidate".to_string(),
         token_id: opts.token_id,
@@ -493,7 +506,11 @@ fn new_candidate_token(payload: CandidatePayload, parent: &StatefulToken<IpmipTo
     })
 }
 
-fn new_cut_token(payload: CutPayload, parent: &StatefulToken<IpmipTokenState>, opts: TokenOpts) -> CutToken {
+fn new_cut_token(
+    payload: CutPayload,
+    parent: &StatefulToken<IpmipTokenState>,
+    opts: TokenOpts,
+) -> CutToken {
     PayloadStatefulToken::new(PayloadStatefulTokenOpts {
         kind: "ip-cut".to_string(),
         token_id: opts.token_id,
@@ -590,7 +607,12 @@ impl SearchControllerStation {
     }
 
     pub fn best_frontier_bound(&self) -> Option<f64> {
-        let finite: Vec<f64> = self.frontier.iter().filter_map(|t| t.payload.bound_guess).filter(|x| x.is_finite()).collect();
+        let finite: Vec<f64> = self
+            .frontier
+            .iter()
+            .filter_map(|t| t.payload.bound_guess)
+            .filter(|x| x.is_finite())
+            .collect();
         if finite.is_empty() {
             return None;
         }
@@ -608,11 +630,19 @@ impl SearchControllerStation {
             return;
         }
         let sense = self.sense;
-        let default = if sense == Sense::Max { f64::NEG_INFINITY } else { f64::INFINITY };
+        let default = if sense == Sense::Max {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        };
         self.frontier.sort_by(|a, b| {
             let ba = a.payload.bound_guess.unwrap_or(default);
             let bb = b.payload.bound_guess.unwrap_or(default);
-            let key = if sense == Sense::Max { ba - bb } else { bb - ba };
+            let key = if sense == Sense::Max {
+                ba - bb
+            } else {
+                bb - ba
+            };
             key.partial_cmp(&0.0).unwrap_or(std::cmp::Ordering::Equal)
         });
     }
@@ -675,7 +705,12 @@ impl DESStation for SearchControllerStation {
         transition_token(
             &mut tok.base,
             IpmipTokenState::RelaxationQueued,
-            TransitionTokenOpts { tick: self.tick as f64, station_id: sid, event: "dispatch-to-relaxation".to_string(), detail: None },
+            TransitionTokenOpts {
+                tick: self.tick as f64,
+                station_id: sid,
+                event: "dispatch-to-relaxation".to_string(),
+                detail: None,
+            },
         );
         self.registry.borrow_mut().track(tok.base.clone());
         self.core.emit(Rc::new(tok), "relax");
@@ -741,14 +776,22 @@ impl DESStation for LPRelaxationStation {
         for rc in nodes {
             let mut tok = (*rc).clone();
             self.registry.borrow_mut().track(tok.base.clone());
-            let selected = select_lp_relaxation_algorithm(&self.p, &tok.payload, self.algorithm, &self.technique_plan);
+            let selected = select_lp_relaxation_algorithm(
+                &self.p,
+                &tok.payload,
+                self.algorithm,
+                &self.technique_plan,
+            );
             let mut used = selected;
             let mut r = solve_node_relaxation(&self.p, &tok.payload, selected, self.lp_max_iters);
             if self.algorithm == LpRelaxationAlgorithm::Auto
                 && is_external_lp_algorithm(selected)
                 && r.status == LPStatus::NumericalError
             {
-                let fallback_message = r.message.clone().unwrap_or_else(|| "external solver unavailable".to_string());
+                let fallback_message = r
+                    .message
+                    .clone()
+                    .unwrap_or_else(|| "external solver unavailable".to_string());
                 used = if has_negative_root_rhs(&self.p) {
                     ConcreteLpRelaxationAlgorithm::InternalSimplex
                 } else {
@@ -757,7 +800,10 @@ impl DESStation for LPRelaxationStation {
                 r = solve_node_relaxation(&self.p, &tok.payload, used, self.lp_max_iters);
                 let prev = r.message.clone().unwrap_or_default();
                 let sep = if r.message.is_some() { " | " } else { "" };
-                r.message = Some(format!("{prev}{sep}auto fallback from {}: {fallback_message}", selected.as_str()));
+                r.message = Some(format!(
+                    "{prev}{sep}auto fallback from {}: {fallback_message}",
+                    selected.as_str()
+                ));
                 r.solver = format!("{} (auto fallback from {})", r.solver, selected.as_str());
             }
             self.lp_solves += 1;
@@ -856,14 +902,24 @@ impl DESStation for RoundingRepairStation {
             if r.status != LPStatus::Optimal || r.x.is_empty() {
                 continue;
             }
-            for cand in generate_integer_candidates(&self.p, &r.x, self.int_tol, self.heuristic_passes) {
+            for cand in
+                generate_integer_candidates(&self.p, &r.x, self.int_tol, self.heuristic_passes)
+            {
                 self.candidates_tried += 1;
                 let z = objective(&self.p, &cand.x);
                 let out = new_candidate_token(
-                    CandidatePayload { node_id: r.node.node_id, x: cand.x, z, source: cand.source },
+                    CandidatePayload {
+                        node_id: r.node.node_id,
+                        x: cand.x,
+                        z,
+                        source: cand.source,
+                    },
                     &tok.base,
                     TokenOpts {
-                        token_id: format!("ip-candidate-{}-{}", r.node.node_id, self.candidates_tried),
+                        token_id: format!(
+                            "ip-candidate-{}-{}",
+                            r.node.node_id, self.candidates_tried
+                        ),
                         tick: self.tick as f64,
                         station_id: sid.clone(),
                         parent: None,
@@ -893,12 +949,18 @@ pub struct IncumbentStation {
 }
 
 fn downcast_incumbent(s: &dyn DESStation) -> &IncumbentStation {
-    s.as_any().downcast_ref::<IncumbentStation>().expect("validator received a non-IncumbentStation station")
+    s.as_any()
+        .downcast_ref::<IncumbentStation>()
+        .expect("validator received a non-IncumbentStation station")
 }
 
 impl IncumbentStation {
     fn new(p: Rc<IPMIPProblem>, int_tol: f64, registry: Registry) -> Self {
-        let best_z = if p.sense == Sense::Max { f64::NEG_INFINITY } else { f64::INFINITY };
+        let best_z = if p.sense == Sense::Max {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        };
         let mut station = IncumbentStation {
             core: StationCore::new("ip-incumbent"),
             p,
@@ -920,7 +982,11 @@ impl IncumbentStation {
                 Some("incumbent satisfies Ax <= b, bounds, and integrality".to_string()),
                 Some(Box::new(|s: &dyn DESStation| {
                     let st = downcast_incumbent(s);
-                    format!("z={}, source={}", st.best_z, st.source.as_deref().unwrap_or("none"))
+                    format!(
+                        "z={}, source={}",
+                        st.best_z,
+                        st.source.as_deref().unwrap_or("none")
+                    )
                 })),
                 Some("ip-mip-des-intrinsic".to_string()),
                 None,
@@ -984,7 +1050,12 @@ pub struct CutGeneratorStation {
 }
 
 impl CutGeneratorStation {
-    fn new(p: Rc<IPMIPProblem>, int_tol: f64, max_cuts_per_node: usize, registry: Registry) -> Self {
+    fn new(
+        p: Rc<IPMIPProblem>,
+        int_tol: f64,
+        max_cuts_per_node: usize,
+        registry: Registry,
+    ) -> Self {
         CutGeneratorStation {
             core: StationCore::new("ip-cut-generator"),
             p,
@@ -1016,11 +1087,20 @@ impl DESStation for CutGeneratorStation {
             if r.status != LPStatus::Optimal || r.fractional.is_empty() {
                 continue;
             }
-            let cuts = generate_binary_cover_cuts(&self.p, &r.x, self.int_tol, self.max_cuts_per_node, &r.node);
+            let cuts = generate_binary_cover_cuts(
+                &self.p,
+                &r.x,
+                self.int_tol,
+                self.max_cuts_per_node,
+                &r.node,
+            );
             for cut in cuts {
                 self.cuts_generated += 1;
                 let out = new_cut_token(
-                    CutPayload { node_id: r.node.node_id, cut },
+                    CutPayload {
+                        node_id: r.node.node_id,
+                        cut,
+                    },
                     &tok.base,
                     TokenOpts {
                         token_id: format!("ip-cut-{}-{}", r.node.node_id, self.cuts_generated),
@@ -1086,16 +1166,37 @@ impl NodeDecisionStation {
         let r = tok.payload.clone();
         let node = r.node.clone();
         if r.status == LPStatus::Infeasible {
-            self.record(tok, TraceAction::Prune, Some("LP infeasible".to_string()), None, None, None);
+            self.record(
+                tok,
+                TraceAction::Prune,
+                Some("LP infeasible".to_string()),
+                None,
+                None,
+                None,
+            );
             return;
         }
         if r.status == LPStatus::Unbounded {
             self.saw_unbounded = true;
-            self.record(tok, TraceAction::Unbounded, Some("LP relaxation unbounded".to_string()), None, None, None);
+            self.record(
+                tok,
+                TraceAction::Unbounded,
+                Some("LP relaxation unbounded".to_string()),
+                None,
+                None,
+                None,
+            );
             return;
         }
         if r.status != LPStatus::Optimal {
-            self.record(tok, TraceAction::Prune, Some(r.status.as_str().to_string()), None, None, None);
+            self.record(
+                tok,
+                TraceAction::Prune,
+                Some(r.status.as_str().to_string()),
+                None,
+                None,
+                None,
+            );
             return;
         }
         let (best_z, has_inc) = {
@@ -1103,12 +1204,24 @@ impl NodeDecisionStation {
             (inc.best_z, inc.has_incumbent())
         };
         if bound_dominated(&self.p, r.z, best_z, has_inc) {
-            self.record(tok, TraceAction::Prune, Some("bound dominated by incumbent".to_string()), None, None, None);
+            self.record(
+                tok,
+                TraceAction::Prune,
+                Some("bound dominated by incumbent".to_string()),
+                None,
+                None,
+                None,
+            );
             return;
         }
         if r.fractional.is_empty() && is_integer_feasible(&self.p, &r.x, self.int_tol) {
             let cand = new_candidate_token(
-                CandidatePayload { node_id: node.node_id, x: r.x.clone(), z: r.z, source: "lp-integer".to_string() },
+                CandidatePayload {
+                    node_id: node.node_id,
+                    x: r.x.clone(),
+                    z: r.z,
+                    source: "lp-integer".to_string(),
+                },
                 &tok.base,
                 TokenOpts {
                     token_id: format!("ip-candidate-lp-{}-{}", node.node_id, self.tick),
@@ -1120,13 +1233,27 @@ impl NodeDecisionStation {
                 },
             );
             self.registry.borrow_mut().track(cand.base.clone());
-            self.incumbent.borrow_mut().core_mut().take(Rc::new(cand), "candidate");
+            self.incumbent
+                .borrow_mut()
+                .core_mut()
+                .take(Rc::new(cand), "candidate");
             self.incumbent.borrow_mut().run_time_step();
-            self.record(tok, TraceAction::Incumbent, Some("LP relaxation is integer-feasible".to_string()), None, None, None);
+            self.record(
+                tok,
+                TraceAction::Incumbent,
+                Some("LP relaxation is integer-feasible".to_string()),
+                None,
+                None,
+                None,
+            );
             return;
         }
 
-        let pending_cuts = self.cuts_by_node.get(&node.node_id).cloned().unwrap_or_default();
+        let pending_cuts = self
+            .cuts_by_node
+            .get(&node.node_id)
+            .cloned()
+            .unwrap_or_default();
         if !pending_cuts.is_empty() && node.cut_rounds < self.max_cut_rounds {
             let child_id = self.controller.borrow_mut().allocate_node_id();
             let mut constraints = node.constraints.clone();
@@ -1176,7 +1303,12 @@ impl NodeDecisionStation {
         ge[j] = -1.0;
         let left_id = self.controller.borrow_mut().allocate_node_id();
         let mut left_constraints = node.constraints.clone();
-        left_constraints.push(BranchOrCutConstraint { coefs: le, rhs: lo, name: format!("{}<={lo}", var_name(&self.p, j)), kind: ConstraintKind::Branch });
+        left_constraints.push(BranchOrCutConstraint {
+            coefs: le,
+            rhs: lo,
+            name: format!("{}<={lo}", var_name(&self.p, j)),
+            kind: ConstraintKind::Branch,
+        });
         let left = IpNode {
             node_id: left_id,
             parent_id: Some(node.node_id),
@@ -1190,7 +1322,12 @@ impl NodeDecisionStation {
         };
         let right_id = self.controller.borrow_mut().allocate_node_id();
         let mut right_constraints = node.constraints.clone();
-        right_constraints.push(BranchOrCutConstraint { coefs: ge, rhs: -hi, name: format!("{}>={hi}", var_name(&self.p, j)), kind: ConstraintKind::Branch });
+        right_constraints.push(BranchOrCutConstraint {
+            coefs: ge,
+            rhs: -hi,
+            name: format!("{}>={hi}", var_name(&self.p, j)),
+            kind: ConstraintKind::Branch,
+        });
         let right = IpNode {
             node_id: right_id,
             parent_id: Some(node.node_id),
@@ -1268,13 +1405,21 @@ impl NodeDecisionStation {
             branch_var,
             children,
             cuts_added,
-            node_token_id: Some(tok.base.lineage.parent_token_id.clone().unwrap_or_else(|| tok.base.lineage.token_id.clone())),
+            node_token_id: Some(
+                tok.base
+                    .lineage
+                    .parent_token_id
+                    .clone()
+                    .unwrap_or_else(|| tok.base.lineage.token_id.clone()),
+            ),
             lineage_root: Some(tok.base.lineage.root_token_id.clone()),
             token_generation: Some(tok.base.lineage.generation),
             state_mode: Some(tok.base.state_mode),
         });
         if self.verbose {
-            let reason_part = reason_for_log.map(|x| format!(" ({x})")).unwrap_or_default();
+            let reason_part = reason_for_log
+                .map(|x| format!(" ({x})"))
+                .unwrap_or_default();
             eprintln!("node {node_id} d={depth} z={z} {action_dbg:?}{reason_part}");
         }
     }
@@ -1293,7 +1438,10 @@ impl DESStation for NodeDecisionStation {
     fn run_time_step(&mut self) {
         for rc in self.core.drain::<CutToken>("cuts") {
             self.registry.borrow_mut().track(rc.base.clone());
-            self.cuts_by_node.entry(rc.payload.node_id).or_default().push(rc.payload.cut.clone());
+            self.cuts_by_node
+                .entry(rc.payload.node_id)
+                .or_default()
+                .push(rc.payload.cut.clone());
         }
         let relaxed = self.core.drain::<RelaxationToken>("relaxed");
         let sid = self.core.id.clone();
@@ -1341,9 +1489,14 @@ impl BranchAndCutSolverStation {
     fn new(id: &str, p: Rc<IPMIPProblem>, opts: &FilledIPMIPSolveOptions) -> Self {
         let mut composite = CompositeDESStation::new(id);
         let registry: Registry = Rc::new(RefCell::new(StatefulTokenRegistry::new()));
-        let technique_plan = build_ipmip_solver_technique_plan(&p, opts.lp_algorithm, opts.allow_external_solvers);
+        let technique_plan =
+            build_ipmip_solver_technique_plan(&p, opts.lp_algorithm, opts.allow_external_solvers);
 
-        let controller = Rc::new(RefCell::new(SearchControllerStation::new(&p, opts, registry.clone())));
+        let controller = Rc::new(RefCell::new(SearchControllerStation::new(
+            &p,
+            opts,
+            registry.clone(),
+        )));
         composite.add_substation(controller.clone());
         let lp = Rc::new(RefCell::new(LPRelaxationStation::new(
             p.clone(),
@@ -1354,11 +1507,25 @@ impl BranchAndCutSolverStation {
             registry.clone(),
         )));
         composite.add_substation(lp.clone());
-        let heuristic = Rc::new(RefCell::new(RoundingRepairStation::new(p.clone(), opts.int_tol, opts.heuristic_passes, registry.clone())));
+        let heuristic = Rc::new(RefCell::new(RoundingRepairStation::new(
+            p.clone(),
+            opts.int_tol,
+            opts.heuristic_passes,
+            registry.clone(),
+        )));
         composite.add_substation(heuristic.clone());
-        let incumbent = Rc::new(RefCell::new(IncumbentStation::new(p.clone(), opts.int_tol, registry.clone())));
+        let incumbent = Rc::new(RefCell::new(IncumbentStation::new(
+            p.clone(),
+            opts.int_tol,
+            registry.clone(),
+        )));
         composite.add_substation(incumbent.clone());
-        let cuts = Rc::new(RefCell::new(CutGeneratorStation::new(p.clone(), opts.int_tol, opts.max_cuts_per_node, registry.clone())));
+        let cuts = Rc::new(RefCell::new(CutGeneratorStation::new(
+            p.clone(),
+            opts.int_tol,
+            opts.max_cuts_per_node,
+            registry.clone(),
+        )));
         composite.add_substation(cuts.clone());
         let decision = Rc::new(RefCell::new(NodeDecisionStation::new(
             p.clone(),
@@ -1370,14 +1537,36 @@ impl BranchAndCutSolverStation {
         )));
         composite.add_substation(decision.clone());
 
-        controller.borrow_mut().core_mut().pipe(lp.clone() as StationRef, "relax", "nodes");
-        lp.borrow_mut().core_mut().pipe(heuristic.clone() as StationRef, "relaxed", "relaxed");
-        lp.borrow_mut().core_mut().pipe(cuts.clone() as StationRef, "relaxed", "relaxed");
-        lp.borrow_mut().core_mut().pipe(decision.clone() as StationRef, "relaxed", "relaxed");
-        heuristic.borrow_mut().core_mut().pipe(incumbent.clone() as StationRef, "candidate", "candidate");
-        cuts.borrow_mut().core_mut().pipe(decision.clone() as StationRef, "cut", "cuts");
-        decision.borrow_mut().core_mut().pipe(controller.clone() as StationRef, "nodes", "nodes");
-        decision.borrow_mut().core_mut().pipe(controller.clone() as StationRef, "complete", "complete");
+        controller
+            .borrow_mut()
+            .core_mut()
+            .pipe(lp.clone() as StationRef, "relax", "nodes");
+        lp.borrow_mut()
+            .core_mut()
+            .pipe(heuristic.clone() as StationRef, "relaxed", "relaxed");
+        lp.borrow_mut()
+            .core_mut()
+            .pipe(cuts.clone() as StationRef, "relaxed", "relaxed");
+        lp.borrow_mut()
+            .core_mut()
+            .pipe(decision.clone() as StationRef, "relaxed", "relaxed");
+        heuristic.borrow_mut().core_mut().pipe(
+            incumbent.clone() as StationRef,
+            "candidate",
+            "candidate",
+        );
+        cuts.borrow_mut()
+            .core_mut()
+            .pipe(decision.clone() as StationRef, "cut", "cuts");
+        decision
+            .borrow_mut()
+            .core_mut()
+            .pipe(controller.clone() as StationRef, "nodes", "nodes");
+        decision.borrow_mut().core_mut().pipe(
+            controller.clone() as StationRef,
+            "complete",
+            "complete",
+        );
 
         BranchAndCutSolverStation {
             composite,
@@ -1462,7 +1651,11 @@ pub fn solve_ipmip_with_des(p: IPMIPProblem, opts: IPMIPSolveOptions) -> IPMIPSo
     let filled = fill_ipmip_options(&opts);
     let t0 = Instant::now();
     let p_rc = Rc::new(p);
-    let solver = Rc::new(RefCell::new(BranchAndCutSolverStation::new("ip-branch-and-cut", p_rc.clone(), &filled)));
+    let solver = Rc::new(RefCell::new(BranchAndCutSolverStation::new(
+        "ip-branch-and-cut",
+        p_rc.clone(),
+        &filled,
+    )));
 
     let time_limit = filled.time_limit_ms;
     let stop_clock = t0;
@@ -1536,7 +1729,11 @@ pub fn solve_ipmip_with_des(p: IPMIPProblem, opts: IPMIPSolveOptions) -> IPMIPSo
 
     let solution = IPMIPSolution {
         status,
-        x: if has_inc { solver_ref.incumbent.borrow().best_x.clone() } else { Vec::new() },
+        x: if has_inc {
+            solver_ref.incumbent.borrow().best_x.clone()
+        } else {
+            Vec::new()
+        },
         z,
         best_bound: final_bound,
         gap: if optimal { 0.0 } else { gap },
@@ -1579,7 +1776,12 @@ struct NodeLPResult {
     message: Option<String>,
 }
 
-fn solve_node_relaxation(p: &IPMIPProblem, node: &IpNode, algorithm: ConcreteLpRelaxationAlgorithm, lp_max_iters: usize) -> NodeLPResult {
+fn solve_node_relaxation(
+    p: &IPMIPProblem,
+    node: &IpNode,
+    algorithm: ConcreteLpRelaxationAlgorithm,
+    lp_max_iters: usize,
+) -> NodeLPResult {
     use ConcreteLpRelaxationAlgorithm::*;
     if algorithm == IncrementalPrimalDual {
         return solve_incremental_relaxation(p, node, lp_max_iters);
@@ -1587,16 +1789,60 @@ fn solve_node_relaxation(p: &IPMIPProblem, node: &IpNode, algorithm: ConcreteLpR
     let lp = node_to_lp_problem(p, node);
     match algorithm {
         InternalSimplex => {
-            let s = solve_lp_internal(&lp, &InternalSimplexOptions { max_iter: Some(lp_max_iters), tol: None });
-            NodeLPResult { status: s.status, x: s.x, objective: s.objective, solver: s.solver, elapsed_ms: s.elapsed_ms, iters: s.iters, message: s.message }
+            let s = solve_lp_internal(
+                &lp,
+                &InternalSimplexOptions {
+                    max_iter: Some(lp_max_iters),
+                    tol: None,
+                },
+            );
+            NodeLPResult {
+                status: s.status,
+                x: s.x,
+                objective: s.objective,
+                solver: s.solver,
+                elapsed_ms: s.elapsed_ms,
+                iters: s.iters,
+                message: s.message,
+            }
         }
         DesSimplexDantzig => {
-            let s = solve_lp_via_des(&lp, &DESSimplexOptions { max_iter: Some(lp_max_iters), pivot_rule: Some(PivotRule::Dantzig), tol: None });
-            NodeLPResult { status: s.status, x: s.x, objective: s.objective, solver: s.solver, elapsed_ms: s.elapsed_ms, iters: s.iters, message: s.message }
+            let s = solve_lp_via_des(
+                &lp,
+                &DESSimplexOptions {
+                    max_iter: Some(lp_max_iters),
+                    pivot_rule: Some(PivotRule::Dantzig),
+                    tol: None,
+                },
+            );
+            NodeLPResult {
+                status: s.status,
+                x: s.x,
+                objective: s.objective,
+                solver: s.solver,
+                elapsed_ms: s.elapsed_ms,
+                iters: s.iters,
+                message: s.message,
+            }
         }
         DesSimplexBland => {
-            let s = solve_lp_via_des(&lp, &DESSimplexOptions { max_iter: Some(lp_max_iters), pivot_rule: Some(PivotRule::Bland), tol: None });
-            NodeLPResult { status: s.status, x: s.x, objective: s.objective, solver: s.solver, elapsed_ms: s.elapsed_ms, iters: s.iters, message: s.message }
+            let s = solve_lp_via_des(
+                &lp,
+                &DESSimplexOptions {
+                    max_iter: Some(lp_max_iters),
+                    pivot_rule: Some(PivotRule::Bland),
+                    tol: None,
+                },
+            );
+            NodeLPResult {
+                status: s.status,
+                x: s.x,
+                objective: s.objective,
+                solver: s.solver,
+                elapsed_ms: s.elapsed_ms,
+                iters: s.iters,
+                message: s.message,
+            }
         }
         ExternalHighs | ExternalHighsDs | ExternalHighsIpm => {
             let method = match algorithm {
@@ -1604,8 +1850,22 @@ fn solve_node_relaxation(p: &IPMIPProblem, node: &IpNode, algorithm: ConcreteLpR
                 ExternalHighsIpm => "highs-ipm",
                 _ => "highs",
             };
-            let s = solve_lp_external(&lp, &ExternalSolverOptions { method: Some(method.to_string()), ..Default::default() });
-            NodeLPResult { status: s.status, x: s.x, objective: s.objective, solver: s.solver, elapsed_ms: s.elapsed_ms, iters: s.iters, message: s.message }
+            let s = solve_lp_external(
+                &lp,
+                &ExternalSolverOptions {
+                    method: Some(method.to_string()),
+                    ..Default::default()
+                },
+            );
+            NodeLPResult {
+                status: s.status,
+                x: s.x,
+                objective: s.objective,
+                solver: s.solver,
+                elapsed_ms: s.elapsed_ms,
+                iters: s.iters,
+                message: s.message,
+            }
         }
         IncrementalPrimalDual => unreachable!(),
     }
@@ -1630,14 +1890,19 @@ pub fn build_ipmip_solver_technique_plan(
                 panic!("{MODEL}: external LP backend \"{}\" requested, but allowExternalSolvers is false", req.as_str());
             }
             root_lp_algorithm = req;
-            rationale.push(format!("fixed LP relaxation backend requested: {}", req.as_str()));
+            rationale.push(format!(
+                "fixed LP relaxation backend requested: {}",
+                req.as_str()
+            ));
             if req == IncrementalPrimalDual && negative_root_rhs {
                 rationale.push("warning: root has negative RHS rows; incremental LP requires a non-negative initial RHS".to_string());
             }
         }
         LpRelaxationAlgorithm::Auto => {
             if negative_root_rhs {
-                root_lp_algorithm = if allow_external_solvers && features.variable_count * features.constraint_count >= 2500 {
+                root_lp_algorithm = if allow_external_solvers
+                    && features.variable_count * features.constraint_count >= 2500
+                {
                     ExternalHighs
                 } else {
                     InternalSimplex
@@ -1652,7 +1917,9 @@ pub fn build_ipmip_solver_technique_plan(
                 );
             } else if features.variable_count * features.constraint_count >= 2500 {
                 root_lp_algorithm = if allow_external_solvers {
-                    if features.density > 0.35 || features.variable_count > features.constraint_count * 3 {
+                    if features.density > 0.35
+                        || features.variable_count > features.constraint_count * 3
+                    {
                         ExternalHighsIpm
                     } else if features.constraint_count > features.variable_count * 2 {
                         ExternalHighsDs
@@ -1678,19 +1945,31 @@ pub fn build_ipmip_solver_technique_plan(
     }
 
     if features.all_binary {
-        rationale.push("all integer variables are binary, so cover cuts and rounding/repair are active".to_string());
+        rationale.push(
+            "all integer variables are binary, so cover cuts and rounding/repair are active"
+                .to_string(),
+        );
     } else if features.continuous_count > 0 {
-        rationale.push("mixed integer/continuous model keeps continuous variables in the LP relaxation".to_string());
+        rationale.push(
+            "mixed integer/continuous model keeps continuous variables in the LP relaxation"
+                .to_string(),
+        );
     }
 
     let decomposition_candidate = features.constraint_variable_components > 1;
     let decomposition_reason = if decomposition_candidate {
-        Some(format!("constraint-variable graph has {} disconnected components", features.constraint_variable_components))
+        Some(format!(
+            "constraint-variable graph has {} disconnected components",
+            features.constraint_variable_components
+        ))
     } else {
         None
     };
     if decomposition_candidate {
-        rationale.push(format!("{}; separable decomposition is structurally valid", decomposition_reason.as_ref().unwrap()));
+        rationale.push(format!(
+            "{}; separable decomposition is structurally valid",
+            decomposition_reason.as_ref().unwrap()
+        ));
     }
 
     IPMIPSolverTechniquePlan {
@@ -1699,7 +1978,8 @@ pub fn build_ipmip_solver_technique_plan(
         external_solvers_allowed: allow_external_solvers,
         uses_external_solvers: is_external_lp_algorithm(root_lp_algorithm),
         external_candidate: allow_external_solvers && is_external_lp_algorithm(root_lp_algorithm),
-        primal_dual_dynamic: root_lp_algorithm == IncrementalPrimalDual || requested_lp_algorithm == LpRelaxationAlgorithm::Auto,
+        primal_dual_dynamic: root_lp_algorithm == IncrementalPrimalDual
+            || requested_lp_algorithm == LpRelaxationAlgorithm::Auto,
         decomposition_candidate,
         decomposition_reason,
         rationale,
@@ -1748,7 +2028,9 @@ fn is_external_lp_algorithm(a: ConcreteLpRelaxationAlgorithm) -> bool {
 }
 
 fn did_use_external_lp(usage: &HashMap<ConcreteLpRelaxationAlgorithm, u64>) -> bool {
-    usage.iter().any(|(&k, &v)| v > 0 && is_external_lp_algorithm(k))
+    usage
+        .iter()
+        .any(|(&k, &v)| v > 0 && is_external_lp_algorithm(k))
 }
 
 struct BuildPerfArgs {
@@ -1775,7 +2057,11 @@ fn build_ipmip_performance(o: BuildPerfArgs) -> IPMIPPerformanceStats {
         ms_per_node: o.elapsed_ms / node_denom,
         total_lp_solver_ms: o.total_lp_solver_ms,
         avg_lp_solver_ms: o.total_lp_solver_ms / lp_denom,
-        lp_solver_time_share: if o.elapsed_ms > 0.0 { o.total_lp_solver_ms / o.elapsed_ms } else { 0.0 },
+        lp_solver_time_share: if o.elapsed_ms > 0.0 {
+            o.total_lp_solver_ms / o.elapsed_ms
+        } else {
+            0.0
+        },
         avg_lp_iterations_per_solve: o.total_lp_iterations as f64 / lp_denom,
         cuts_per_node: o.cuts_added as f64 / node_denom,
         candidates_per_node: o.candidates_tried as f64 / node_denom,
@@ -1792,10 +2078,16 @@ pub fn analyze_ipmip_problem(p: &IPMIPProblem) -> IPMIPProblemFeatures {
     let variable_count = p.c.len();
     let constraint_count = p.a.len();
     let integer_count = p.integer_vars.iter().filter(|&&b| b).count();
-    let finite_upper_bounds = p.ub.as_ref().map_or(0, |u| u.iter().filter(|v| v.is_finite()).count());
+    let finite_upper_bounds =
+        p.ub.as_ref()
+            .map_or(0, |u| u.iter().filter(|v| v.is_finite()).count());
     let mut binary_count = 0;
     for j in 0..variable_count {
-        let ubj = p.ub.as_ref().and_then(|u| u.get(j)).copied().unwrap_or(f64::INFINITY);
+        let ubj =
+            p.ub.as_ref()
+                .and_then(|u| u.get(j))
+                .copied()
+                .unwrap_or(f64::INFINITY);
         if p.integer_vars[j] && ubj <= 1.0 + 1e-9 {
             binary_count += 1;
         }
@@ -1860,7 +2152,11 @@ fn count_constraint_variable_components(p: &IPMIPProblem) -> usize {
     components
 }
 
-fn solve_incremental_relaxation(p: &IPMIPProblem, node: &IpNode, lp_max_iters: usize) -> NodeLPResult {
+fn solve_incremental_relaxation(
+    p: &IPMIPProblem,
+    node: &IpNode,
+    lp_max_iters: usize,
+) -> NodeLPResult {
     let t0 = Instant::now();
     let root = root_incremental_rows(p);
     let mut lp = IncrementalLP::new(IncrementalLPInit {
@@ -1881,11 +2177,22 @@ fn solve_incremental_relaxation(p: &IPMIPProblem, node: &IpNode, lp_max_iters: u
         SolverStatus::Unbounded => LPStatus::Unbounded,
         _ => LPStatus::IterLimit,
     };
-    let iters = trace.iter().filter(|e| e.mode == PivotMode::Primal || e.mode == PivotMode::Dual).count();
+    let iters = trace
+        .iter()
+        .filter(|e| e.mode == PivotMode::Primal || e.mode == PivotMode::Dual)
+        .count();
     NodeLPResult {
         status,
-        x: if status == LPStatus::Optimal { lp.get_x() } else { Vec::new() },
-        objective: if status == LPStatus::Optimal { lp.get_z() } else { f64::NAN },
+        x: if status == LPStatus::Optimal {
+            lp.get_x()
+        } else {
+            Vec::new()
+        },
+        objective: if status == LPStatus::Optimal {
+            lp.get_z()
+        } else {
+            f64::NAN
+        },
         solver: "incremental-primal-dual".to_string(),
         elapsed_ms: t0.elapsed().as_secs_f64() * 1000.0,
         iters: Some(iters),
@@ -1906,7 +2213,11 @@ fn node_to_lp_problem(p: &IPMIPProblem, node: &IpNode) -> LPProblem {
         a_ub: Some(a),
         b_ub: Some(b),
         lb: Some(vec![Some(0.0); p.c.len()]),
-        ub: p.ub.as_ref().map(|u| u.iter().map(|&v| if v.is_finite() { Some(v) } else { None }).collect()),
+        ub: p.ub.as_ref().map(|u| {
+            u.iter()
+                .map(|&v| if v.is_finite() { Some(v) } else { None })
+                .collect()
+        }),
         var_names: p.var_names.clone(),
         con_names: p.con_names.clone(),
         ..Default::default()
@@ -1950,7 +2261,12 @@ struct Candidate {
     source: String,
 }
 
-fn generate_integer_candidates(p: &IPMIPProblem, x_lp: &[f64], tol: f64, passes: usize) -> Vec<Candidate> {
+fn generate_integer_candidates(
+    p: &IPMIPProblem,
+    x_lp: &[f64],
+    tol: f64,
+    passes: usize,
+) -> Vec<Candidate> {
     let mut seeds: Vec<Candidate> = Vec::new();
     for mode in ["round", "floor", "ceil"] {
         let mut x = x_lp.to_vec();
@@ -1964,9 +2280,15 @@ fn generate_integer_candidates(p: &IPMIPProblem, x_lp: &[f64], tol: f64, passes:
                 _ => x[j].ceil(),
             };
         }
-        seeds.push(Candidate { x: clamp_bounds(p, &x), source: mode.to_string() });
+        seeds.push(Candidate {
+            x: clamp_bounds(p, &x),
+            source: mode.to_string(),
+        });
     }
-    let frac: Vec<usize> = list_fractionals(x_lp, &p.integer_vars, tol).into_iter().take(4).collect();
+    let frac: Vec<usize> = list_fractionals(x_lp, &p.integer_vars, tol)
+        .into_iter()
+        .take(4)
+        .collect();
     for j in frac {
         for val in [x_lp[j].floor(), x_lp[j].ceil()] {
             let mut x = x_lp.to_vec();
@@ -1976,7 +2298,10 @@ fn generate_integer_candidates(p: &IPMIPProblem, x_lp: &[f64], tol: f64, passes:
                 }
             }
             x[j] = val;
-            seeds.push(Candidate { x: clamp_bounds(p, &x), source: format!("one-flip-{}", var_name(p, j)) });
+            seeds.push(Candidate {
+                x: clamp_bounds(p, &x),
+                source: format!("one-flip-{}", var_name(p, j)),
+            });
         }
     }
 
@@ -1987,17 +2312,29 @@ fn generate_integer_candidates(p: &IPMIPProblem, x_lp: &[f64], tol: f64, passes:
             Some(r) => r,
             None => continue,
         };
-        let key = repaired.iter().map(|v| format!("{v:.9}")).collect::<Vec<_>>().join(",");
+        let key = repaired
+            .iter()
+            .map(|v| format!("{v:.9}"))
+            .collect::<Vec<_>>()
+            .join(",");
         if seen.contains(&key) {
             continue;
         }
         seen.insert(key);
-        out.push(Candidate { x: repaired, source: format!("round-repair:{}", s.source) });
+        out.push(Candidate {
+            x: repaired,
+            source: format!("round-repair:{}", s.source),
+        });
     }
     out
 }
 
-fn repair_and_improve_candidate(p: &IPMIPProblem, x0: &[f64], tol: f64, passes: usize) -> Option<Vec<f64>> {
+fn repair_and_improve_candidate(
+    p: &IPMIPProblem,
+    x0: &[f64],
+    tol: f64,
+    passes: usize,
+) -> Option<Vec<f64>> {
     let mut x = clamp_bounds(p, x0);
     let mut pass = 0;
     while pass < passes && !satisfies_linear_rows(p, &x, tol) {
@@ -2018,7 +2355,11 @@ fn repair_and_improve_candidate(p: &IPMIPProblem, x0: &[f64], tol: f64, passes: 
                 if reduction <= 1e-12 {
                     continue;
                 }
-                let obj_loss = if p.sense == Sense::Max { -dir * p.c[j] } else { dir * p.c[j] };
+                let obj_loss = if p.sense == Sense::Max {
+                    -dir * p.c[j]
+                } else {
+                    dir * p.c[j]
+                };
                 let score = reduction / 1e-9_f64.max(1.0 + 0.0_f64.max(obj_loss));
                 if best.is_none() || score > best.unwrap().2 {
                     best = Some((j, dir, score));
@@ -2048,7 +2389,9 @@ fn repair_and_improve_candidate(p: &IPMIPProblem, x0: &[f64], tol: f64, passes: 
                     continue;
                 }
                 let z = objective(p, &y);
-                if (p.sense == Sense::Max && z > best_z + 1e-9) || (p.sense == Sense::Min && z < best_z - 1e-9) {
+                if (p.sense == Sense::Max && z > best_z + 1e-9)
+                    || (p.sense == Sense::Min && z < best_z - 1e-9)
+                {
                     best_z = z;
                     best_x = y;
                     improved = true;
@@ -2063,7 +2406,13 @@ fn repair_and_improve_candidate(p: &IPMIPProblem, x0: &[f64], tol: f64, passes: 
     Some(x)
 }
 
-fn generate_binary_cover_cuts(p: &IPMIPProblem, x: &[f64], tol: f64, max_cuts: usize, node: &IpNode) -> Vec<BranchOrCutConstraint> {
+fn generate_binary_cover_cuts(
+    p: &IPMIPProblem,
+    x: &[f64],
+    tol: f64,
+    max_cuts: usize,
+    node: &IpNode,
+) -> Vec<BranchOrCutConstraint> {
     let mut out: Vec<BranchOrCutConstraint> = Vec::new();
     let existing: HashSet<String> = node.constraints.iter().map(|c| c.name.clone()).collect();
     let mut r = 0;
@@ -2077,7 +2426,16 @@ fn generate_binary_cover_cuts(p: &IPMIPProblem, x: &[f64], tol: f64, max_cuts: u
             .iter()
             .enumerate()
             .map(|(j, &a)| (a, j, x[j]))
-            .filter(|&(a, j, _)| a > tol && p.integer_vars[j] && p.ub.as_ref().and_then(|u| u.get(j)).copied().unwrap_or(f64::INFINITY) <= 1.0 + tol)
+            .filter(|&(a, j, _)| {
+                a > tol
+                    && p.integer_vars[j]
+                    && p.ub
+                        .as_ref()
+                        .and_then(|u| u.get(j))
+                        .copied()
+                        .unwrap_or(f64::INFINITY)
+                        <= 1.0 + tol
+            })
             .collect();
         binary.sort_by(|u, v| v.2.partial_cmp(&u.2).unwrap_or(std::cmp::Ordering::Equal));
         if binary.len() < 2 {
@@ -2107,12 +2465,24 @@ fn generate_binary_cover_cuts(p: &IPMIPProblem, x: &[f64], tol: f64, max_cuts: u
             r += 1;
             continue;
         }
-        let name = format!("cover_r{r}_{}", cover.iter().map(|j| j.to_string()).collect::<Vec<_>>().join("_"));
+        let name = format!(
+            "cover_r{r}_{}",
+            cover
+                .iter()
+                .map(|j| j.to_string())
+                .collect::<Vec<_>>()
+                .join("_")
+        );
         if existing.contains(&name) {
             r += 1;
             continue;
         }
-        out.push(BranchOrCutConstraint { coefs, rhs, name, kind: ConstraintKind::Cut });
+        out.push(BranchOrCutConstraint {
+            coefs,
+            rhs,
+            name,
+            kind: ConstraintKind::Cut,
+        });
         r += 1;
     }
     out
@@ -2162,11 +2532,22 @@ pub fn validate_ipmip_problem(p: &IPMIPProblem) {
         }
     };
     use crate::des::general::des_base::preconditions::Preconditions as P;
-    req(P::check(model, "sense", "be max or min", true, Some(p.sense.as_str().to_string())));
+    req(P::check(
+        model,
+        "sense",
+        "be max or min",
+        true,
+        Some(p.sense.as_str().to_string()),
+    ));
     req(P::non_empty(model, "c", &p.c));
     req(P::non_empty(model, "A", &p.a));
     req(P::length_eq(model, "b", &p.b, p.a.len()));
-    req(P::length_eq(model, "integerVars", &p.integer_vars, p.c.len()));
+    req(P::length_eq(
+        model,
+        "integerVars",
+        &p.integer_vars,
+        p.c.len(),
+    ));
     req(P::all_finite(model, "c", &p.c));
     req(P::all_finite(model, "b", &p.b));
     for i in 0..p.a.len() {
@@ -2281,7 +2662,11 @@ fn bound_dominated(p: &IPMIPProblem, bound: f64, incumbent: f64, has_incumbent: 
     }
 }
 
-fn compute_best_bound(p: &IPMIPProblem, inc: &IncumbentStation, ctrl: &SearchControllerStation) -> f64 {
+fn compute_best_bound(
+    p: &IPMIPProblem,
+    inc: &IncumbentStation,
+    ctrl: &SearchControllerStation,
+) -> f64 {
     if let Some(frontier) = ctrl.best_frontier_bound() {
         return frontier;
     }
@@ -2296,7 +2681,11 @@ fn compute_best_bound(p: &IPMIPProblem, inc: &IncumbentStation, ctrl: &SearchCon
 }
 
 fn var_name(p: &IPMIPProblem, j: usize) -> String {
-    p.var_names.as_ref().and_then(|v| v.get(j)).cloned().unwrap_or_else(|| format!("x{j}"))
+    p.var_names
+        .as_ref()
+        .and_then(|v| v.get(j))
+        .cloned()
+        .unwrap_or_else(|| format!("x{j}"))
 }
 
 fn to_inc_sense(s: Sense) -> IncSense {
@@ -2309,13 +2698,48 @@ fn to_inc_sense(s: Sense) -> IncSense {
 fn solver_topology(parent_id: &str) -> Vec<SolverTopologyNode> {
     let pid = parent_id.to_string();
     vec![
-        SolverTopologyNode { id: pid.clone(), role: "composite single-threaded in-house branch-and-cut solver".to_string(), emits: vec![], parent_id: None },
-        SolverTopologyNode { id: "ip-search-controller".to_string(), parent_id: Some(pid.clone()), role: "frontier of branch/cut subproblems".to_string(), emits: vec!["node".to_string()] },
-        SolverTopologyNode { id: "ip-lp-relaxation".to_string(), parent_id: Some(pid.clone()), role: "stationary LP solver block with selectable backend".to_string(), emits: vec!["relaxation".to_string()] },
-        SolverTopologyNode { id: "ip-rounding-repair".to_string(), parent_id: Some(pid.clone()), role: "movable-variable rounding, repair, and local search".to_string(), emits: vec!["candidate".to_string()] },
-        SolverTopologyNode { id: "ip-incumbent".to_string(), parent_id: Some(pid.clone()), role: "best feasible integer solution anchor".to_string(), emits: vec![] },
-        SolverTopologyNode { id: "ip-cut-generator".to_string(), parent_id: Some(pid.clone()), role: "valid-inequality station, currently binary cover cuts".to_string(), emits: vec!["cut".to_string()] },
-        SolverTopologyNode { id: "ip-node-decision".to_string(), parent_id: Some(pid), role: "prune, strengthen, or branch".to_string(), emits: vec!["node".to_string(), "complete".to_string()] },
+        SolverTopologyNode {
+            id: pid.clone(),
+            role: "composite single-threaded in-house branch-and-cut solver".to_string(),
+            emits: vec![],
+            parent_id: None,
+        },
+        SolverTopologyNode {
+            id: "ip-search-controller".to_string(),
+            parent_id: Some(pid.clone()),
+            role: "frontier of branch/cut subproblems".to_string(),
+            emits: vec!["node".to_string()],
+        },
+        SolverTopologyNode {
+            id: "ip-lp-relaxation".to_string(),
+            parent_id: Some(pid.clone()),
+            role: "stationary LP solver block with selectable backend".to_string(),
+            emits: vec!["relaxation".to_string()],
+        },
+        SolverTopologyNode {
+            id: "ip-rounding-repair".to_string(),
+            parent_id: Some(pid.clone()),
+            role: "movable-variable rounding, repair, and local search".to_string(),
+            emits: vec!["candidate".to_string()],
+        },
+        SolverTopologyNode {
+            id: "ip-incumbent".to_string(),
+            parent_id: Some(pid.clone()),
+            role: "best feasible integer solution anchor".to_string(),
+            emits: vec![],
+        },
+        SolverTopologyNode {
+            id: "ip-cut-generator".to_string(),
+            parent_id: Some(pid.clone()),
+            role: "valid-inequality station, currently binary cover cuts".to_string(),
+            emits: vec!["cut".to_string()],
+        },
+        SolverTopologyNode {
+            id: "ip-node-decision".to_string(),
+            parent_id: Some(pid),
+            role: "prune, strengthen, or branch".to_string(),
+            emits: vec!["node".to_string(), "complete".to_string()],
+        },
     ]
 }
 
@@ -2324,8 +2748,17 @@ fn solver_topology(parent_id: &str) -> Vec<SolverTopologyNode> {
 // -----------------------------------------------------------------------------
 
 /// Build a binary knapsack IP `max v·x s.t. w·x <= capacity, x in {0,1}`.
-pub fn build_binary_knapsack_ip(values: Vec<f64>, weights: Vec<f64>, capacity: f64) -> IPMIPProblem {
-    if let Err(e) = crate::des::general::des_base::preconditions::Preconditions::length_eq(MODEL, "weights", &weights, values.len()) {
+pub fn build_binary_knapsack_ip(
+    values: Vec<f64>,
+    weights: Vec<f64>,
+    capacity: f64,
+) -> IPMIPProblem {
+    if let Err(e) = crate::des::general::des_base::preconditions::Preconditions::length_eq(
+        MODEL,
+        "weights",
+        &weights,
+        values.len(),
+    ) {
         panic!("{e}");
     }
     let n = values.len();
@@ -2338,8 +2771,20 @@ pub fn build_binary_knapsack_ip(values: Vec<f64>, weights: Vec<f64>, capacity: f
         ub: Some(vec![1.0; n]),
         var_names: Some((0..n).map(|i| format!("item_{i}")).collect()),
         con_names: Some(vec!["capacity".to_string()]),
-        variable_nodes: Some((0..n).map(|i| VariableNode { var_index: i, node_id: format!("item_{i}"), label: Some(format!("item {i}")) }).collect()),
-        constraint_nodes: Some(vec![ConstraintNode { row_index: 0, node_id: "capacity".to_string(), label: Some("capacity anchor".to_string()) }]),
+        variable_nodes: Some(
+            (0..n)
+                .map(|i| VariableNode {
+                    var_index: i,
+                    node_id: format!("item_{i}"),
+                    label: Some(format!("item {i}")),
+                })
+                .collect(),
+        ),
+        constraint_nodes: Some(vec![ConstraintNode {
+            row_index: 0,
+            node_id: "capacity".to_string(),
+            label: Some("capacity anchor".to_string()),
+        }]),
     }
 }
 
@@ -2352,7 +2797,11 @@ pub fn build_small_mixed_ip() -> IPMIPProblem {
         b: vec![3.0],
         integer_vars: vec![true, true, false],
         ub: Some(vec![10.0, 10.0, 10.0]),
-        var_names: Some(vec!["x_int_a".to_string(), "x_int_b".to_string(), "y_cont".to_string()]),
+        var_names: Some(vec![
+            "x_int_a".to_string(),
+            "x_int_b".to_string(),
+            "y_cont".to_string(),
+        ]),
         con_names: Some(vec!["integer_sum".to_string()]),
         variable_nodes: None,
         constraint_nodes: None,

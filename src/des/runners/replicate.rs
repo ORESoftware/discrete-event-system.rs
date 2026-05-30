@@ -74,13 +74,21 @@ fn collect_split(results: &[RunResult], from: &str, to: &str) -> Vec<f64> {
 fn collect_pop(results: &[RunResult], compartment: &str) -> Vec<f64> {
     results
         .iter()
-        .map(|r| r.time_avg_populations.get(compartment).copied().unwrap_or(0.0))
+        .map(|r| {
+            r.time_avg_populations
+                .get(compartment)
+                .copied()
+                .unwrap_or(0.0)
+        })
         .collect()
 }
 
 /// `main()` — run the replication study and print the report.
 pub fn run() {
-    let n: usize = std::env::var("N").ok().and_then(|s| s.parse().ok()).unwrap_or(30);
+    let n: usize = std::env::var("N")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(30);
     let config = default_config();
     println!("replicate.ts: {n} replications per kernel");
     println!(
@@ -95,11 +103,17 @@ pub fn run() {
     for i in 0..n {
         fw_results.push(run_framework_once(
             &config,
-            &RunOpts { seed: Some(BASE_SEED_FW + i as u64), ..Default::default() },
+            &RunOpts {
+                seed: Some(BASE_SEED_FW + i as u64),
+                ..Default::default()
+            },
         ));
         fel_results.push(run_fel_once(
             &config,
-            &RunOpts { seed: Some(BASE_SEED_FEL + i as u64), ..Default::default() },
+            &RunOpts {
+                seed: Some(BASE_SEED_FEL + i as u64),
+                ..Default::default()
+            },
         ));
     }
     let elapsed = t0.elapsed().as_millis();

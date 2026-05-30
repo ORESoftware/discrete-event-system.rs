@@ -26,7 +26,7 @@ use crate::des::entity_sink::sink::{AbstractSinkEntity, SinkCore, SinkKind};
 use crate::des::r#abstract::interfaces::{
     EntityGraphData, HasInput, HasManyInputConnections, HasManyOutputConnections,
 };
-use crate::des::r#abstract::r#abstract::{Entity, EntityCore, EntityConnection};
+use crate::des::r#abstract::r#abstract::{Entity, EntityConnection, EntityCore};
 use crate::des::shared::precision::Decimal;
 
 /// `class GenericEntitySink` — like `EntitySink` but logs each token's value.

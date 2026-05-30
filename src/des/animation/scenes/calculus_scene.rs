@@ -177,7 +177,10 @@ pub fn build_field1d_frame(
     }));
     let stats: [(String, String); 4] = [
         ("peak |u|".to_string(), to_fixed(peak.abs(), 4)),
-        ("L2 norm".to_string(), to_fixed((sum_sq / n as f64).sqrt(), 4)),
+        (
+            "L2 norm".to_string(),
+            to_fixed((sum_sq / n as f64).sqrt(), 4),
+        ),
         ("scheme".to_string(), scheme.to_string()),
         ("family".to_string(), family.to_string()),
     ];

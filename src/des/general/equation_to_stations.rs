@@ -35,10 +35,10 @@ use std::rc::Rc;
 use std::cell::RefCell;
 
 use crate::des::general::expr::{evaluate, parse, Env, Expr};
-use crate::des::general::time_stepped_station::TimeSteppedStation;
 use crate::des::general::field_station::{
     FieldSimulationOptions, FieldSimulationResult, FieldTrace, FieldUpdater, Position,
 };
+use crate::des::general::time_stepped_station::TimeSteppedStation;
 // Re-export the simulation types so callers can inspect / extend (TS re-export
 // of `FieldSimulation` / `FieldStation` / `Census`). The `pub use` also brings
 // them into this module's scope for the builders below.
@@ -171,7 +171,12 @@ pub fn build_ode_system(spec: &OdeSystemSpec) -> FieldSimulation {
                 cur[idx] + dt / 6.0 * (k1[idx] + 2.0 * k2[idx] + 2.0 * k3[idx] + k4[idx])
             }),
         };
-        let fs = FieldStation::new(spec.names[i].clone(), spec.y0[i], updater, placeholder_census());
+        let fs = FieldStation::new(
+            spec.names[i].clone(),
+            spec.y0[i],
+            updater,
+            placeholder_census(),
+        );
         stations.push(Rc::new(RefCell::new(fs)));
     }
     FieldSimulation::new(stations, FieldSimulationOptions::default())
@@ -329,7 +334,7 @@ fn run_btcs(
         values.push(u.clone());
     }
     let final_values: Vec<f64> = sim.fields.iter().map(|f| f.borrow().value).collect();
-    
+
     FieldSimulationResult {
         trace: FieldTrace { t, values },
         final_values,
@@ -595,10 +600,26 @@ pub fn solve_poisson2d(spec: &Poisson2DSpec) -> Poisson2DResult {
                 let k = idx(i, j);
                 let rho = rho_fn(&[xs[i], ys[j]]);
                 let jacobi = spec.scheme == Field2DScheme::Jacobi;
-                let u_e = if jacobi { u_old[idx(i + 1, j)] } else { u[idx(i + 1, j)] };
-                let u_w = if jacobi { u_old[idx(i - 1, j)] } else { u[idx(i - 1, j)] };
-                let u_n = if jacobi { u_old[idx(i, j + 1)] } else { u[idx(i, j + 1)] };
-                let u_s = if jacobi { u_old[idx(i, j - 1)] } else { u[idx(i, j - 1)] };
+                let u_e = if jacobi {
+                    u_old[idx(i + 1, j)]
+                } else {
+                    u[idx(i + 1, j)]
+                };
+                let u_w = if jacobi {
+                    u_old[idx(i - 1, j)]
+                } else {
+                    u[idx(i - 1, j)]
+                };
+                let u_n = if jacobi {
+                    u_old[idx(i, j + 1)]
+                } else {
+                    u[idx(i, j + 1)]
+                };
+                let u_s = if jacobi {
+                    u_old[idx(i, j - 1)]
+                } else {
+                    u[idx(i, j - 1)]
+                };
                 let gs = (dy2 * (u_e + u_w) + dx2 * (u_n + u_s) + dx2 * dy2 * rho) / denom;
                 let next = if spec.scheme == Field2DScheme::Sor {
                     (1.0 - omega) * u[k] + omega * gs

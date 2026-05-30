@@ -104,10 +104,8 @@ mod tests {
 
     #[test]
     fn per_individual_ordered_floods_first_sink() {
-        let mut p = PerIndividualProcessor::new(
-            "ord".to_string(),
-            opts(OutputRoutingPolicy::Ordered, 1.0),
-        );
+        let mut p =
+            PerIndividualProcessor::new("ord".to_string(), opts(OutputRoutingPolicy::Ordered, 1.0));
         let sinks = wire_three_sinks(&mut p);
         feed(&mut p, 6);
         p.run_time_step(bgn(1.0));

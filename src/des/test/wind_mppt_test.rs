@@ -55,10 +55,19 @@ mod tests {
         let euler_err = (euler.states[euler.states.len() - 1][0] - exact).abs();
         assert!(rk4.times.len() == 11 && close(rk4.times[10], 1.0, 1e-12));
         assert!(rk4_err < 1e-6, "err={rk4_err:e}");
-        assert!(rk4_err < euler_err / 100.0, "rk4={rk4_err:e} euler={euler_err:e}");
+        assert!(
+            rk4_err < euler_err / 100.0,
+            "rk4={rk4_err:e} euler={euler_err:e}"
+        );
 
         let threw = std::panic::catch_unwind(|| {
-            RungeKutta4Integrator::new().integrate(&ExponentialDecay { k: 1.0 }, 0.0, &[1.0], 0.0, 1)
+            RungeKutta4Integrator::new().integrate(
+                &ExponentialDecay { k: 1.0 },
+                0.0,
+                &[1.0],
+                0.0,
+                1,
+            )
         })
         .is_err();
         assert!(threw);
@@ -71,7 +80,10 @@ mod tests {
         assert!(close(aero.swept_area(), std::f64::consts::PI * 6.25, 1e-9));
         assert!(close(aero.tip_speed_ratio(16.0, 5.0), 8.0, 1e-9));
         let lambda_star = aero.optimal_tip_speed_ratio();
-        assert!(lambda_star > 7.5 && lambda_star < 8.5, "lambda*={lambda_star}");
+        assert!(
+            lambda_star > 7.5 && lambda_star < 8.5,
+            "lambda*={lambda_star}"
+        );
         let cp_max = aero.max_power_coefficient();
         assert!(cp_max > 0.45 && cp_max < 0.50, "cp_max={cp_max}");
         for i in 1..=36 {
@@ -91,9 +103,18 @@ mod tests {
     #[test]
     fn wind_profile_schedule() {
         let wp = WindProfile::new(&[
-            WindProfileSegment { from_time: 0.0, speed: 8.0 },
-            WindProfileSegment { from_time: 20.0, speed: 11.0 },
-            WindProfileSegment { from_time: 40.0, speed: 9.0 },
+            WindProfileSegment {
+                from_time: 0.0,
+                speed: 8.0,
+            },
+            WindProfileSegment {
+                from_time: 20.0,
+                speed: 11.0,
+            },
+            WindProfileSegment {
+                from_time: 40.0,
+                speed: 9.0,
+            },
         ]);
         assert!(close(wp.speed_at(5.0), 8.0, 1e-9));
         assert!(close(wp.speed_at(20.0), 11.0, 1e-9));

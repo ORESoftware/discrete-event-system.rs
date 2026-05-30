@@ -54,7 +54,10 @@ pub struct VisualNodeObserver {
 impl VisualNodeObserver {
     /// `constructor(e, fn) { super(); e.subscribe(this); entity = e; fn = fn; }`.
     /// See module PORT NOTE: the `e.subscribe(this)` self-registration is deferred.
-    pub fn new(entity: Rc<RefCell<dyn StationaryEntity>>, fn_: Box<dyn FnMut(&str, &dyn Any)>) -> Self {
+    pub fn new(
+        entity: Rc<RefCell<dyn StationaryEntity>>,
+        fn_: Box<dyn FnMut(&str, &dyn Any)>,
+    ) -> Self {
         VisualNodeObserver {
             entity,
             fn_: Some(fn_),
@@ -349,7 +352,8 @@ mod tests {
     #[should_panic(expected = "Method not implemented.")]
     fn subscribe_to_panics() {
         let mut node = make_node("n2");
-        let obs: Rc<RefCell<dyn EntityObserver>> = Rc::new(RefCell::new(CountingObserver { count: 0 }));
+        let obs: Rc<RefCell<dyn EntityObserver>> =
+            Rc::new(RefCell::new(CountingObserver { count: 0 }));
         node.subscribe_to("FOO", obs);
     }
 }

@@ -56,10 +56,18 @@ fn js_number(v: f64) -> String {
     if v.is_nan() {
         "NaN".to_string()
     } else if v.is_infinite() {
-        if v > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() }
+        if v > 0.0 {
+            "Infinity".to_string()
+        } else {
+            "-Infinity".to_string()
+        }
     } else {
         let s = v.to_string();
-        if s == "-0" { "0".to_string() } else { s }
+        if s == "-0" {
+            "0".to_string()
+        } else {
+            s
+        }
     }
 }
 
@@ -88,7 +96,13 @@ fn to_exponential(v: f64, digits: usize) -> String {
 fn x_pretty(x: &[f64]) -> String {
     x.iter()
         .take(16)
-        .map(|&v| if v.is_finite() { format!("{v:.3}") } else { "N/A".to_string() })
+        .map(|&v| {
+            if v.is_finite() {
+                format!("{v:.3}")
+            } else {
+                "N/A".to_string()
+            }
+        })
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -132,11 +146,22 @@ pub struct KnapsackParams {
 // =============================================================================
 
 fn num(min: Option<f64>, max: Option<f64>, integer: Option<bool>) -> ParamSchema {
-    ParamSchema::Number { min, max, integer, default: None, description: None }
+    ParamSchema::Number {
+        min,
+        max,
+        integer,
+        default: None,
+        description: None,
+    }
 }
 
 fn arr(items: ParamSchema) -> ParamSchema {
-    ParamSchema::Array { items: Box::new(items), min_length: None, max_length: None, description: None }
+    ParamSchema::Array {
+        items: Box::new(items),
+        min_length: None,
+        max_length: None,
+        description: None,
+    }
 }
 
 fn str_enum(allowed: &[&str]) -> ParamSchema {
@@ -149,7 +174,10 @@ fn str_enum(allowed: &[&str]) -> ParamSchema {
 
 fn obj(fields: Vec<(&str, ParamSchema)>, required: Vec<&str>) -> ParamSchema {
     ParamSchema::Object {
-        fields: fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+        fields: fields
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
         required: Some(required.iter().map(|s| s.to_string()).collect()),
         description: None,
     }
@@ -163,10 +191,30 @@ fn raw_schema() -> ParamSchema {
             ("c", arr(num(None, None, None))),
             ("A", arr(arr(num(None, None, None)))),
             ("b", arr(num(None, None, None))),
-            ("integerVars", arr(ParamSchema::Boolean { default: None, description: None })),
+            (
+                "integerVars",
+                arr(ParamSchema::Boolean {
+                    default: None,
+                    description: None,
+                }),
+            ),
             ("ub", arr(num(None, None, None))),
-            ("varNames", arr(ParamSchema::String { allowed: None, default: None, description: None })),
-            ("conNames", arr(ParamSchema::String { allowed: None, default: None, description: None })),
+            (
+                "varNames",
+                arr(ParamSchema::String {
+                    allowed: None,
+                    default: None,
+                    description: None,
+                }),
+            ),
+            (
+                "conNames",
+                arr(ParamSchema::String {
+                    allowed: None,
+                    default: None,
+                    description: None,
+                }),
+            ),
         ],
         vec!["sense", "c", "A", "b", "integerVars"],
     )
@@ -232,7 +280,10 @@ pub fn milp_schema() -> ParamSchema {
                         ("maxNodes", num(Some(1.0), None, Some(true))),
                         ("lpMaxIters", num(Some(1.0), None, Some(true))),
                         ("intTol", num(Some(0.0), None, None)),
-                        ("branchRule", str_enum(&["most-fractional", "first-fractional"])),
+                        (
+                            "branchRule",
+                            str_enum(&["most-fractional", "first-fractional"]),
+                        ),
                         ("initialIncumbentZ", num(None, None, None)),
                     ],
                     vec![],
@@ -241,7 +292,8 @@ pub fn milp_schema() -> ParamSchema {
         ],
         required: Some(vec![]),
         description: Some(
-            "MILP solved via branch-and-bound with IncrementalLP relaxations at each node.".to_string(),
+            "MILP solved via branch-and-bound with IncrementalLP relaxations at each node."
+                .to_string(),
         ),
     }
 }
@@ -346,7 +398,10 @@ impl DESModelRegistration<MILPParams, MILPSolution> for MilpBnbAdapter {
             "──────────────────────────────────".to_string(),
             format!("  Status:           {}", milp_status_str(result.status)),
             format!("  z*:               {}", fixed_or_raw(result.z, 6)),
-            format!("  Best bound:       {}", format!("{:.6}", result.best_bound)),
+            format!(
+                "  Best bound:       {}",
+                format!("{:.6}", result.best_bound)
+            ),
             format!("  Optimality gap:   {}", to_exponential(result.gap, 2)),
             format!("  Nodes explored:   {}", result.nodes_explored),
             format!("  LP pivots total:  {}", result.total_pivots),
@@ -405,13 +460,17 @@ fn milp_trace_cells(e: &NodeEvent) -> Vec<String> {
         e.parent_id.map(|p| p.to_string()).unwrap_or_default(),
         e.depth.to_string(),
         e.branch_var.map(|b| b.to_string()).unwrap_or_default(),
-        e.branch_type.map(|t| branch_type_str(t).to_string()).unwrap_or_default(),
+        e.branch_type
+            .map(|t| branch_type_str(t).to_string())
+            .unwrap_or_default(),
         e.branch_value.map(js_number).unwrap_or_default(),
         milp_lp_status_str(e.lp_status).to_string(),
         e.lp_z.map(js_number).unwrap_or_default(),
         e.fractional.len().to_string(),
         e.pruned.to_string(),
-        e.pruned_reason.map(|r| pruned_reason_str(r).to_string()).unwrap_or_default(),
+        e.pruned_reason
+            .map(|r| pruned_reason_str(r).to_string())
+            .unwrap_or_default(),
         e.incumbent_updated.to_string(),
     ]
 }
@@ -474,7 +533,10 @@ pub fn ip_mip_des_schema() -> ParamSchema {
                         ("maxTicks", num(Some(1.0), None, Some(true))),
                         ("lpMaxIters", num(Some(1.0), None, Some(true))),
                         ("intTol", num(Some(0.0), None, None)),
-                        ("branchRule", str_enum(&["most-fractional", "first-fractional"])),
+                        (
+                            "branchRule",
+                            str_enum(&["most-fractional", "first-fractional"]),
+                        ),
                         ("nodeSelection", str_enum(&["dfs", "best-bound"])),
                         (
                             "lpAlgorithm",
@@ -492,7 +554,13 @@ pub fn ip_mip_des_schema() -> ParamSchema {
                         ("maxCutRounds", num(Some(0.0), None, Some(true))),
                         ("maxCutsPerNode", num(Some(0.0), None, Some(true))),
                         ("heuristicPasses", num(Some(0.0), None, Some(true))),
-                        ("allowExternalSolvers", ParamSchema::Boolean { default: None, description: None }),
+                        (
+                            "allowExternalSolvers",
+                            ParamSchema::Boolean {
+                                default: None,
+                                description: None,
+                            },
+                        ),
                     ],
                     vec![],
                 ),
@@ -600,7 +668,11 @@ impl DESModelRegistration<IPMIPDESParams, IPMIPSolution> for IpMipDesAdapter {
                 .map(|(k, v)| format!("{k}={v}"))
                 .collect::<Vec<_>>()
                 .join(", ");
-            if joined.is_empty() { "none".to_string() } else { joined }
+            if joined.is_empty() {
+                "none".to_string()
+            } else {
+                joined
+            }
         };
         [
             "IP/MIP DES SOLVER GRAPH".to_string(),
@@ -613,7 +685,11 @@ impl DESModelRegistration<IPMIPDESParams, IPMIPSolution> for IpMipDesAdapter {
             format!(
                 "  Technique plan:   {}{}",
                 result.technique_plan.root_lp_algorithm.as_str(),
-                if result.technique_plan.external_candidate { " (external candidate)" } else { "" }
+                if result.technique_plan.external_candidate {
+                    " (external candidate)"
+                } else {
+                    ""
+                }
             ),
             format!("  z*:               {}", fixed_or_raw(result.z, 6)),
             format!("  Best bound:       {}", fixed_or_raw(result.best_bound, 6)),
@@ -625,17 +701,25 @@ impl DESModelRegistration<IPMIPDESParams, IPMIPSolution> for IpMipDesAdapter {
                 format!("{:.2}", result.performance.nodes_per_second)
             ),
             format!("  LP solves:        {}", result.lp_solves),
-            format!("  LP solver time:   {} ms", js_number(result.performance.total_lp_solver_ms)),
+            format!(
+                "  LP solver time:   {} ms",
+                js_number(result.performance.total_lp_solver_ms)
+            ),
             format!("  LP iterations:    {}", result.total_lp_iterations),
             format!("  Cuts added:       {}", result.cuts_added),
             format!("  Candidates tried: {}", result.candidates_tried),
             format!(
                 "  Solver tokens:    {} ({} stateful / {} stateless)",
-                result.token_stats.created, result.token_stats.stateful, result.token_stats.stateless
+                result.token_stats.created,
+                result.token_stats.stateful,
+                result.token_stats.stateless
             ),
             format!(
                 "  Incumbent source: {}",
-                result.incumbent_source.clone().unwrap_or_else(|| "none".to_string())
+                result
+                    .incumbent_source
+                    .clone()
+                    .unwrap_or_else(|| "none".to_string())
             ),
             format!(
                 "  x* (first 16):    [{}{}]",
@@ -699,12 +783,21 @@ fn ip_mip_trace_cells(e: &IPMIPTraceEvent) -> Vec<String> {
         e.reason.clone().unwrap_or_default(),
         e.children
             .as_ref()
-            .map(|c| c.iter().map(|x| x.to_string()).collect::<Vec<_>>().join("|"))
+            .map(|c| {
+                c.iter()
+                    .map(|x| x.to_string())
+                    .collect::<Vec<_>>()
+                    .join("|")
+            })
             .unwrap_or_default(),
         e.cuts_added.map(|c| c.to_string()).unwrap_or_default(),
         e.node_token_id.clone().unwrap_or_default(),
         e.lineage_root.clone().unwrap_or_default(),
-        e.token_generation.map(|g| g.to_string()).unwrap_or_default(),
-        e.state_mode.map(|m| token_state_mode_str(m).to_string()).unwrap_or_default(),
+        e.token_generation
+            .map(|g| g.to_string())
+            .unwrap_or_default(),
+        e.state_mode
+            .map(|m| token_state_mode_str(m).to_string())
+            .unwrap_or_default(),
     ]
 }

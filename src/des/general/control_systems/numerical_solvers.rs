@@ -145,7 +145,10 @@ mod tests {
         let rk4 = RungeKutta4Integrator::new();
         let result = rk4.integrate(&Exponential, 0.0, &[1.0], 0.01, 100);
         let last = *result.states.last().unwrap().first().unwrap();
-        assert!((last - std::f64::consts::E).abs() < 1e-6, "RK4 e drift {last}");
+        assert!(
+            (last - std::f64::consts::E).abs() < 1e-6,
+            "RK4 e drift {last}"
+        );
         // Includes the initial point: 100 steps -> 101 samples reaching t = 1.
         assert_eq!(result.states.len(), 101);
         assert!((result.times.last().unwrap() - 1.0).abs() < 1e-9);

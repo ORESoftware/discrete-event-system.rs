@@ -61,7 +61,12 @@ pub struct OptimizationCandidateToken<T> {
 
 impl<T> OptimizationCandidateToken<T> {
     pub fn new(kind: String, candidate: T, score: f64, iteration: usize) -> Self {
-        OptimizationCandidateToken { kind, candidate, score, iteration }
+        OptimizationCandidateToken {
+            kind,
+            candidate,
+            score,
+            iteration,
+        }
     }
 }
 
@@ -75,7 +80,11 @@ pub struct GraphWalkToken<N = usize> {
 
 impl<N> GraphWalkToken<N> {
     pub fn new(nodes: Vec<N>, cost: f64, iteration: usize) -> Self {
-        GraphWalkToken { nodes, cost, iteration }
+        GraphWalkToken {
+            nodes,
+            cost,
+            iteration,
+        }
     }
 }
 
@@ -103,10 +112,18 @@ pub struct ParetoCandidateToken<T> {
 impl<T> ParetoCandidateToken<T> {
     /// `generation` defaults to 0 (TS default parameter).
     pub fn new(candidate: T, objectives: Vec<f64>) -> Self {
-        ParetoCandidateToken { candidate, objectives, generation: 0 }
+        ParetoCandidateToken {
+            candidate,
+            objectives,
+            generation: 0,
+        }
     }
     pub fn with_generation(candidate: T, objectives: Vec<f64>, generation: usize) -> Self {
-        ParetoCandidateToken { candidate, objectives, generation }
+        ParetoCandidateToken {
+            candidate,
+            objectives,
+            generation,
+        }
     }
 }
 
@@ -221,9 +238,14 @@ pub trait NumericSwarmOptimizerStation: DESStation {
     // ── TEMPLATE ───────────────────────────────────────────────────────────────
 
     fn bootstrap(&mut self) {
-        self.assert_preconditions_swarm().expect("swarm preconditions");
+        self.assert_preconditions_swarm()
+            .expect("swarm preconditions");
         let count = self.swarm_state().particle_count;
-        let mut rng = self.swarm_state_mut().rng.take().expect("swarm: rng already in use");
+        let mut rng = self
+            .swarm_state_mut()
+            .rng
+            .take()
+            .expect("swarm: rng already in use");
         let mut particles: Vec<NumericSwarmParticle> = Vec::with_capacity(count);
         let mut best_score = f64::INFINITY;
         let mut best_position: Vec<f64> = Vec::new();
@@ -271,25 +293,41 @@ pub trait NumericSwarmOptimizerStation: DESStation {
         let particles = self.swarm_state().particles.clone();
         let id = self.id().to_string();
 
-        let mut rng = self.swarm_state_mut().rng.take().expect("swarm: rng already in use");
+        let mut rng = self
+            .swarm_state_mut()
+            .rng
+            .take()
+            .expect("swarm: rng already in use");
         let mut next_particles: Vec<NumericSwarmParticle> = Vec::with_capacity(particles.len());
         let mut best_score = self.swarm_state().best_score;
         let mut best_position = self.swarm_state().best_position.clone();
         let mut emits: Vec<(Vec<f64>, f64)> = Vec::new();
 
         for particle in particles {
-            let mut next = self.update_particle(particle.clone(), &global_best, iteration, &mut *rng);
-            Preconditions::length_eq(&id, &format!("{}.position", next.id), &next.position, dimension)
-                .expect("position length");
-            Preconditions::length_eq(&id, &format!("{}.velocity", next.id), &next.velocity, dimension)
-                .expect("velocity length");
+            let mut next =
+                self.update_particle(particle.clone(), &global_best, iteration, &mut *rng);
+            Preconditions::length_eq(
+                &id,
+                &format!("{}.position", next.id),
+                &next.position,
+                dimension,
+            )
+            .expect("position length");
+            Preconditions::length_eq(
+                &id,
+                &format!("{}.velocity", next.id),
+                &next.velocity,
+                dimension,
+            )
+            .expect("velocity length");
             Preconditions::all_finite(&id, &format!("{}.position", next.id), &next.position)
                 .expect("position finite");
             Preconditions::all_finite(&id, &format!("{}.velocity", next.id), &next.velocity)
                 .expect("velocity finite");
             next.position = self.clamp_position(&next.position);
             next.score = self.objective(&next.position);
-            Preconditions::finite(&id, &format!("{}.score", next.id), next.score).expect("score finite");
+            Preconditions::finite(&id, &format!("{}.score", next.id), next.score)
+                .expect("score finite");
             if next.score < next.best_score {
                 next.best_score = next.score;
                 next.best_position = next.position.clone();
@@ -311,8 +349,12 @@ pub trait NumericSwarmOptimizerStation: DESStation {
             st.iteration += 1;
         }
         for (position, score) in emits {
-            let token: AnyToken =
-                Rc::new(OptimizationCandidateToken::new("swarm-particle".to_string(), position, score, iteration));
+            let token: AnyToken = Rc::new(OptimizationCandidateToken::new(
+                "swarm-particle".to_string(),
+                position,
+                score,
+                iteration,
+            ));
             self.core_mut().emit(token, DEFAULT_CHANNEL);
         }
         self.record_trace_swarm();
@@ -373,7 +415,11 @@ pub trait NumericSwarmOptimizerStation: DESStation {
             let st = self.swarm_state();
             let n = st.particles.len().max(1) as f64;
             let sum: f64 = st.particles.iter().map(|p| p.score).sum();
-            let worst = st.particles.iter().map(|p| p.score).fold(f64::NEG_INFINITY, f64::max);
+            let worst = st
+                .particles
+                .iter()
+                .map(|p| p.score)
+                .fold(f64::NEG_INFINITY, f64::max);
             (sum / n, worst, st.best_score, st.iteration)
         };
         self.swarm_state_mut().trace.push(OptimizationTraceRow {
@@ -479,7 +525,11 @@ pub trait PheromoneGraphSearchStation: DESStation {
         let iteration = self.aco_state().iteration;
         let id = self.id().to_string();
 
-        let mut rng = self.aco_state_mut().rng.take().expect("aco: rng already in use");
+        let mut rng = self
+            .aco_state_mut()
+            .rng
+            .take()
+            .expect("aco: rng already in use");
         let mut walks: Vec<(Vec<usize>, f64)> = Vec::new();
         let mut best_cost = self.aco_state().best_cost;
         let mut best_path = self.aco_state().best_path.clone();
@@ -630,7 +680,10 @@ impl<D: Clone> ConstraintSearchCore<D> {
         ConstraintSearchCore {
             variables: variables.to_vec(),
             domains: dom,
-            frontier: vec![ConstraintSearchNode { assignment: HashMap::new(), depth: 0 }],
+            frontier: vec![ConstraintSearchNode {
+                assignment: HashMap::new(),
+                depth: 0,
+            }],
             solution: None,
         }
     }
@@ -670,9 +723,18 @@ pub trait ConstraintSatisfactionSearchStation<D: Clone + 'static>:
 
     fn csp_evaluate(&mut self, node: &ConstraintSearchNode<D>) -> NodeEvaluation {
         if !self.is_consistent(&node.assignment) {
-            return NodeEvaluation { bound: f64::NEG_INFINITY, is_leaf: true, value: None, is_feasible: false };
+            return NodeEvaluation {
+                bound: f64::NEG_INFINITY,
+                is_leaf: true,
+                value: None,
+                is_feasible: false,
+            };
         }
-        let complete = self.csp_core().variables.iter().all(|v| node.assignment.contains_key(v));
+        let complete = self
+            .csp_core()
+            .variables
+            .iter()
+            .all(|v| node.assignment.contains_key(v));
         let nvars = self.csp_core().variables.len() as f64;
         NodeEvaluation {
             bound: nvars,
@@ -686,13 +748,21 @@ pub trait ConstraintSatisfactionSearchStation<D: Clone + 'static>:
         let Some(variable) = self.choose_variable(&node.assignment) else {
             return Vec::new();
         };
-        let domain = self.csp_core().domains.get(&variable).cloned().unwrap_or_default();
+        let domain = self
+            .csp_core()
+            .domains
+            .get(&variable)
+            .cloned()
+            .unwrap_or_default();
         let mut out: Vec<ConstraintSearchNode<D>> = Vec::new();
         for value in domain {
             let mut assignment = node.assignment.clone();
             assignment.insert(variable.clone(), value);
             if self.is_consistent(&assignment) {
-                out.push(ConstraintSearchNode { assignment, depth: node.depth + 1 });
+                out.push(ConstraintSearchNode {
+                    assignment,
+                    depth: node.depth + 1,
+                });
             }
         }
         out.reverse();
@@ -885,7 +955,8 @@ impl<T: Clone + 'static> ParetoArchiveStation<T> {
 
     fn consider(&mut self, token: ParetoCandidateToken<T>) {
         let id = self.core.id.clone();
-        Preconditions::non_empty(&id, "objectives", &token.objectives).expect("objectives non-empty");
+        Preconditions::non_empty(&id, "objectives", &token.objectives)
+            .expect("objectives non-empty");
         Preconditions::all_finite(&id, "objectives", &token.objectives).expect("objectives finite");
         for row in &self.archive {
             if same_objectives(&row.objectives, &token.objectives) {
@@ -1004,7 +1075,9 @@ impl UnitVectorRelaxationState {
         step_size: f64,
         mut rng: Box<dyn RandomSource>,
     ) -> Self {
-        let vectors: Vec<Vec<f64>> = (0..nodes).map(|_| random_unit_vector(rank, &mut *rng)).collect();
+        let vectors: Vec<Vec<f64>> = (0..nodes)
+            .map(|_| random_unit_vector(rank, &mut *rng))
+            .collect();
         let best_vectors = vectors.clone();
         UnitVectorRelaxationState {
             nodes,
@@ -1071,8 +1144,10 @@ pub trait UnitVectorRelaxationStation: DESStation {
         let grad = self.gradient(&self.uvr_state().vectors);
         Preconditions::length_eq(&id, "gradient", &grad, nodes).expect("gradient length");
         for i in 0..nodes {
-            Preconditions::length_eq(&id, &format!("gradient[{i}]"), &grad[i], rank).expect("gradient row length");
-            Preconditions::all_finite(&id, &format!("gradient[{i}]"), &grad[i]).expect("gradient finite");
+            Preconditions::length_eq(&id, &format!("gradient[{i}]"), &grad[i], rank)
+                .expect("gradient row length");
+            Preconditions::all_finite(&id, &format!("gradient[{i}]"), &grad[i])
+                .expect("gradient finite");
         }
         {
             let st = self.uvr_state_mut();
@@ -1116,7 +1191,10 @@ pub trait UnitVectorRelaxationStation: DESStation {
         let value = self.objective(&self.uvr_state().vectors);
         Preconditions::finite(self.id(), "objective", value).expect("objective finite");
         let st = self.uvr_state_mut();
-        st.trace.push(UnitVectorRelaxationTraceRow { iteration: st.iteration, objective: value });
+        st.trace.push(UnitVectorRelaxationTraceRow {
+            iteration: st.iteration,
+            objective: value,
+        });
         if value > st.best_objective {
             st.best_objective = value;
             st.best_vectors = st.vectors.clone();
@@ -1157,7 +1235,9 @@ pub fn gram(vectors: &[Vec<f64>]) -> Vec<Vec<f64>> {
 mod tests {
     use super::*;
     use crate::des::general::des_base::station::StationCore;
-    use crate::des::general::des_base::tree_search::{NodeEvaluation, SearchObjective, TreeSearchCore, TreeSearchStation};
+    use crate::des::general::des_base::tree_search::{
+        NodeEvaluation, SearchObjective, TreeSearchCore, TreeSearchStation,
+    };
     use crate::des::shared::capabilities::SeededRandom;
 
     // ── CSP B&B test ─────────────────────────────────────────────────────────────
@@ -1216,7 +1296,11 @@ mod tests {
         fn evaluate(&mut self, node: &ConstraintSearchNode<i32>) -> NodeEvaluation {
             self.csp_evaluate(node)
         }
-        fn expand(&mut self, node: &ConstraintSearchNode<i32>, _ev: &NodeEvaluation) -> Vec<ConstraintSearchNode<i32>> {
+        fn expand(
+            &mut self,
+            node: &ConstraintSearchNode<i32>,
+            _ev: &NodeEvaluation,
+        ) -> Vec<ConstraintSearchNode<i32>> {
             self.csp_expand(node)
         }
         fn push_children(&mut self, children: Vec<ConstraintSearchNode<i32>>) {

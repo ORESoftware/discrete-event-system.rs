@@ -40,7 +40,12 @@ pub struct FactoryProblem {
 pub fn factory() -> FactoryProblem {
     FactoryProblem {
         products: vec!["Widget-A".into(), "Widget-B".into(), "Widget-C".into()],
-        machines: vec!["Lathe".into(), "Mill".into(), "Drill".into(), "Press".into()],
+        machines: vec![
+            "Lathe".into(),
+            "Mill".into(),
+            "Drill".into(),
+            "Press".into(),
+        ],
         tau: vec![
             vec![3.0, 5.0, 2.5], // Lathe
             vec![2.5, 1.5, 4.0], // Mill
@@ -71,7 +76,12 @@ pub fn build_factory_lp(prob: &FactoryProblem, robust_factor: f64) -> LPProblem 
         lb: None,
         ub: None,
         var_names: Some(prob.products.clone()),
-        con_names: Some(prob.machines.iter().map(|m| format!("{m} capacity")).collect()),
+        con_names: Some(
+            prob.machines
+                .iter()
+                .map(|m| format!("{m} capacity"))
+                .collect(),
+        ),
     }
 }
 
@@ -139,9 +149,13 @@ pub fn simulate_factory(prob: &FactoryProblem, plan: &[f64], params: SimParams) 
     for t in 0..params.total_min {
         // Step machines last → first.
         for mi in (0..m).rev() {
-            if t >= down_until[mi] && slot[mi].is_some() && rng.next_float() < params.break_prob_per_min {
+            if t >= down_until[mi]
+                && slot[mi].is_some()
+                && rng.next_float() < params.break_prob_per_min
+            {
                 breakdowns[mi] += 1.0;
-                let dur = (-(1e-12_f64.max(rng.next_float())).ln() * params.break_duration_min).round() as i64;
+                let dur = (-(1e-12_f64.max(rng.next_float())).ln() * params.break_duration_min)
+                    .round() as i64;
                 down_until[mi] = t + dur.max(1);
             }
             let is_down = t < down_until[mi];
@@ -178,7 +192,10 @@ pub fn simulate_factory(prob: &FactoryProblem, plan: &[f64], params: SimParams) 
     SimResult {
         realised_throughput,
         realised_revenue,
-        utilisation: utilisation.iter().map(|u| u / params.total_min as f64).collect(),
+        utilisation: utilisation
+            .iter()
+            .map(|u| u / params.total_min as f64)
+            .collect(),
         breakdowns,
         wall_clock_min: params.total_min as f64,
     }
@@ -204,21 +221,38 @@ pub fn welch_t(a: &[f64], b: &[f64]) -> WelchT {
     let va = variance(a, ma);
     let vb = variance(b, mb);
     let t = (ma - mb) / (va / a.len() as f64 + vb / b.len() as f64).sqrt();
-    WelchT { t, mean_a: ma, mean_b: mb, sd_a: va.sqrt(), sd_b: vb.sqrt() }
+    WelchT {
+        t,
+        mean_a: ma,
+        mean_b: mb,
+        sd_a: va.sqrt(),
+        sd_b: vb.sqrt(),
+    }
 }
 
 fn env_f64(key: &str, default: f64) -> f64 {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 /// Run the N replications used in `main` / the robustness sweep.
-fn run_reps(prob: &FactoryProblem, plan: &LPSolution, n_reps: usize, params_base: SimParams) -> Vec<SimResult> {
+fn run_reps(
+    prob: &FactoryProblem,
+    plan: &LPSolution,
+    n_reps: usize,
+    params_base: SimParams,
+) -> Vec<SimResult> {
     (0..n_reps)
         .map(|r| {
             simulate_factory(
                 prob,
                 &plan.x,
-                SimParams { seed: 1000 + r as u32, ..params_base },
+                SimParams {
+                    seed: 1000 + r as u32,
+                    ..params_base
+                },
             )
         })
         .collect()
@@ -231,7 +265,10 @@ pub fn run() {
     let break_prob = env_f64("BREAK_PROB", 0.002);
     let break_duration = env_f64("BREAK_DUR", 30.0);
     let total_min = env_f64("TOTAL_MIN", 2400.0) as i64;
-    let n_reps = std::env::var("N_REPS").ok().and_then(|v| v.parse().ok()).unwrap_or(30usize);
+    let n_reps = std::env::var("N_REPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30usize);
     let solver_label = std::env::var("LP_SOLVER").unwrap_or_else(|_| "scipy:highs".to_string());
 
     let prob = factory();
@@ -262,22 +299,41 @@ pub fn run() {
     println!(
         "# LP solver:    {}    iters={}    elapsed={}ms",
         plan.solver,
-        plan.iters.map(|i| i.to_string()).unwrap_or_else(|| "-".into()),
+        plan.iters
+            .map(|i| i.to_string())
+            .unwrap_or_else(|| "-".into()),
         plan.elapsed_ms
     );
-    println!("# LP plan x = [ {} ]", plan.x.iter().map(|v| format!("{v:.2}")).collect::<Vec<_>>().join(", "));
+    println!(
+        "# LP plan x = [ {} ]",
+        plan.x
+            .iter()
+            .map(|v| format!("{v:.2}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     println!("# LP NOMINAL revenue = ${:.2}", plan.objective);
     if let Some(dual) = &plan.dual_ub {
         if !dual.is_empty() {
             println!("# Shadow prices on capacity (machine $/min):");
             for mi in 0..prob.machines.len() {
-                println!("#   {:<8} : ${:.4}/min", prob.machines[mi], dual.get(mi).copied().unwrap_or(0.0));
+                println!(
+                    "#   {:<8} : ${:.4}/min",
+                    prob.machines[mi],
+                    dual.get(mi).copied().unwrap_or(0.0)
+                );
             }
         }
     }
     if let Some(rc) = &plan.reduced_costs {
         if !rc.is_empty() {
-            println!("# Reduced costs (binding ⇒ x = 0): {}", rc.iter().map(|v| format!("{v:.4}")).collect::<Vec<_>>().join(", "));
+            println!(
+                "# Reduced costs (binding ⇒ x = 0): {}",
+                rc.iter()
+                    .map(|v| format!("{v:.4}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
         }
     }
     println!();
@@ -294,19 +350,38 @@ pub fn run() {
     let p = prob.products.len();
     let m = prob.machines.len();
     let tput: Vec<String> = (0..p)
-        .map(|pi| format!("{:.1}", reps.iter().map(|r| r.realised_throughput[pi]).sum::<f64>() / reps.len() as f64))
+        .map(|pi| {
+            format!(
+                "{:.1}",
+                reps.iter().map(|r| r.realised_throughput[pi]).sum::<f64>() / reps.len() as f64
+            )
+        })
         .collect();
     println!("#   throughput   = [ {} ]", tput.join(", "));
     let util: Vec<String> = (0..m)
-        .map(|mi| format!("{:.1}%", 100.0 * reps.iter().map(|r| r.utilisation[mi]).sum::<f64>() / reps.len() as f64))
+        .map(|mi| {
+            format!(
+                "{:.1}%",
+                100.0 * reps.iter().map(|r| r.utilisation[mi]).sum::<f64>() / reps.len() as f64
+            )
+        })
         .collect();
     println!("#   utilisation  = [ {} ]", util.join(", "));
     let brk: Vec<String> = (0..m)
-        .map(|mi| format!("{:.2}", reps.iter().map(|r| r.breakdowns[mi]).sum::<f64>() / reps.len() as f64))
+        .map(|mi| {
+            format!(
+                "{:.2}",
+                reps.iter().map(|r| r.breakdowns[mi]).sum::<f64>() / reps.len() as f64
+            )
+        })
         .collect();
     println!("#   breakdowns   = [ {} ]", brk.join(", "));
     println!();
-    println!("# Plan-vs-realised gap: ${:.2} ({:.1}% of nominal)", plan.objective - mean_rev, gap);
+    println!(
+        "# Plan-vs-realised gap: ${:.2} ({:.1}% of nominal)",
+        plan.objective - mean_rev,
+        gap
+    );
     println!("#   ↑ this is the cost of believing a deterministic LP in a stochastic factory");
     println!();
 
@@ -325,7 +400,9 @@ pub fn run() {
             .expect("LP solved");
             let rev: Vec<f64> = sub.realised.iter().map(|r| r.realised_revenue).collect();
             let mr = rev.iter().sum::<f64>() / rev.len() as f64;
-            let sr = (rev.iter().map(|v| (v - mr).powi(2)).sum::<f64>() / (rev.len() as f64 - 1.0).max(1.0)).sqrt();
+            let sr = (rev.iter().map(|v| (v - mr).powi(2)).sum::<f64>()
+                / (rev.len() as f64 - 1.0).max(1.0))
+            .sqrt();
             let delta = mr - baseline_rev;
             println!(
                 "#   {:.2}      ${:>9}      ${:>9}      ${:>7}      {}${:.2}",

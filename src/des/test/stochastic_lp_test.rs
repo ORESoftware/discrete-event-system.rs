@@ -8,8 +8,8 @@
 mod tests {
     use crate::des::general::stochastic_lp::{
         build_production_scenarios, build_production_slp, solve_production_closed_form,
-        solve_slp_benders, solve_slp_monolithic, solve_subproblem_with_duals, BendersOpts, Scenario,
-        ScenarioMeta, SLPStatus, SubproblemStatus, UniformDemandSpec,
+        solve_slp_benders, solve_slp_monolithic, solve_subproblem_with_duals, BendersOpts,
+        SLPStatus, Scenario, ScenarioMeta, SubproblemStatus, UniformDemandSpec,
     };
 
     fn close(a: f64, b: f64, tol: f64) -> bool {
@@ -35,7 +35,12 @@ mod tests {
     // [2] solveSubproblemWithDuals — two-product, capacity-bound
     #[test]
     fn subproblem_two_product() {
-        let w = vec![vec![1.0, 0.0], vec![0.0, 1.0], vec![1.0, 0.0], vec![0.0, 1.0]];
+        let w = vec![
+            vec![1.0, 0.0],
+            vec![0.0, 1.0],
+            vec![1.0, 0.0],
+            vec![0.0, 1.0],
+        ];
         let r = solve_subproblem_with_duals(&[25.0, 28.0], &w, &[50.0, 40.0, 80.0, 60.0]);
         assert!(close(r.y[0], 50.0, 1e-7) && close(r.y[1], 40.0, 1e-7));
         assert!(close(r.obj, 2370.0, 1e-7));
@@ -59,7 +64,12 @@ mod tests {
         let scenarios: Vec<Scenario> = demands
             .iter()
             .map(|d| Scenario {
-                t: vec![vec![-1.0, 0.0], vec![0.0, -1.0], vec![0.0, 0.0], vec![0.0, 0.0]],
+                t: vec![
+                    vec![-1.0, 0.0],
+                    vec![0.0, -1.0],
+                    vec![0.0, 0.0],
+                    vec![0.0, 0.0],
+                ],
                 h: vec![0.0, 0.0, d[0], d[1]],
                 prob: Some(1.0 / 3.0),
                 meta: Some(ScenarioMeta { d: d.to_vec() }),
@@ -81,10 +91,22 @@ mod tests {
     #[test]
     fn benders_matches_monolithic() {
         let slp = build_production_slp(vec![10.0, 12.0], vec![25.0, 28.0], None);
-        let sc =
-            build_production_scenarios(UniformDemandSpec { ranges: vec![(50.0, 100.0), (40.0, 80.0)], seed: 7 }, 100);
+        let sc = build_production_scenarios(
+            UniformDemandSpec {
+                ranges: vec![(50.0, 100.0), (40.0, 80.0)],
+                seed: 7,
+            },
+            100,
+        );
         let mono = solve_slp_monolithic(slp.clone(), sc.clone());
-        let bend = solve_slp_benders(slp, sc, BendersOpts { tol: Some(1e-9), ..Default::default() });
+        let bend = solve_slp_benders(
+            slp,
+            sc,
+            BendersOpts {
+                tol: Some(1e-9),
+                ..Default::default()
+            },
+        );
         assert_eq!(mono.status, SLPStatus::Optimal);
         assert_eq!(bend.status, SLPStatus::Optimal);
         assert!((mono.objective - bend.objective).abs() <= 1e-6);
@@ -98,10 +120,22 @@ mod tests {
     #[test]
     fn benders_convergence_properties() {
         let slp = build_production_slp(vec![10.0, 12.0], vec![25.0, 28.0], None);
-        let sc =
-            build_production_scenarios(UniformDemandSpec { ranges: vec![(50.0, 100.0), (40.0, 80.0)], seed: 11 }, 50);
-        let bend =
-            solve_slp_benders(slp, sc, BendersOpts { tol: Some(1e-9), max_iter: Some(200), ..Default::default() });
+        let sc = build_production_scenarios(
+            UniformDemandSpec {
+                ranges: vec![(50.0, 100.0), (40.0, 80.0)],
+                seed: 11,
+            },
+            50,
+        );
+        let bend = solve_slp_benders(
+            slp,
+            sc,
+            BendersOpts {
+                tol: Some(1e-9),
+                max_iter: Some(200),
+                ..Default::default()
+            },
+        );
         let trace = bend.benders_trace.as_ref().unwrap();
         for i in 1..trace.len() {
             assert!(trace[i].upper_bound <= trace[i - 1].upper_bound + 1e-6);
@@ -128,10 +162,20 @@ mod tests {
             let mut acc = 0.0;
             for seed in 1..=r {
                 let sc = build_production_scenarios(
-                    UniformDemandSpec { ranges: ranges.clone(), seed: seed * 100 + n as u32 },
+                    UniformDemandSpec {
+                        ranges: ranges.clone(),
+                        seed: seed * 100 + n as u32,
+                    },
                     n,
                 );
-                let sol = solve_slp_benders(slp.clone(), sc, BendersOpts { tol: Some(1e-7), ..Default::default() });
+                let sol = solve_slp_benders(
+                    slp.clone(),
+                    sc,
+                    BendersOpts {
+                        tol: Some(1e-7),
+                        ..Default::default()
+                    },
+                );
                 acc += sol.objective - cf.objective;
             }
             acc / r as f64
@@ -150,8 +194,22 @@ mod tests {
         let slp_unc = build_production_slp(c.clone(), p.clone(), None);
         let slp_budget = build_production_slp(c, p, Some(80.0));
         let sc = build_production_scenarios(UniformDemandSpec { ranges, seed: 31 }, 200);
-        let unc = solve_slp_benders(slp_unc, sc.clone(), BendersOpts { tol: Some(1e-9), ..Default::default() });
-        let bud = solve_slp_benders(slp_budget, sc, BendersOpts { tol: Some(1e-9), ..Default::default() });
+        let unc = solve_slp_benders(
+            slp_unc,
+            sc.clone(),
+            BendersOpts {
+                tol: Some(1e-9),
+                ..Default::default()
+            },
+        );
+        let bud = solve_slp_benders(
+            slp_budget,
+            sc,
+            BendersOpts {
+                tol: Some(1e-9),
+                ..Default::default()
+            },
+        );
         assert!(unc.x[0] + unc.x[1] >= 80.0 - 1e-7);
         assert!(bud.x[0] + bud.x[1] <= 80.0 + 1e-7);
         assert!(bud.objective <= unc.objective + 1e-7);
@@ -160,10 +218,20 @@ mod tests {
     // [9] Subproblem duals: KKT optimality direct check
     #[test]
     fn subproblem_kkt_conditions() {
-        let w = vec![vec![1.0, 0.0], vec![0.0, 1.0], vec![1.0, 0.0], vec![0.0, 1.0]];
+        let w = vec![
+            vec![1.0, 0.0],
+            vec![0.0, 1.0],
+            vec![1.0, 0.0],
+            vec![0.0, 1.0],
+        ];
         for trial in 0..5 {
             let t = trial as f64;
-            let rhs = [40.0 + t * 5.0, 30.0 + t * 7.0, 80.0 - t * 3.0, 60.0 + t * 4.0];
+            let rhs = [
+                40.0 + t * 5.0,
+                30.0 + t * 7.0,
+                80.0 - t * 3.0,
+                60.0 + t * 4.0,
+            ];
             let r = solve_subproblem_with_duals(&[25.0, 28.0], &w, &rhs);
             assert_eq!(r.status, SubproblemStatus::Optimal);
             let mut comp = 0.0;

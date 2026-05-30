@@ -40,9 +40,7 @@ use crate::des::entity_queue::queue::build_out_conn;
 use crate::des::r#abstract::interfaces::{
     EntityGraphData, HasInput, HasManyOutputConnections, HasOutput,
 };
-use crate::des::r#abstract::r#abstract::{
-    Entity, EntityCore, EntityConnection, HasNumericValue,
-};
+use crate::des::r#abstract::r#abstract::{Entity, EntityConnection, EntityCore, HasNumericValue};
 use crate::des::random_variables::rv::RandomVariable;
 use crate::des::shared::precision::Decimal;
 
@@ -137,7 +135,10 @@ impl Entity for EntitySource {
     fn get_with_computed_properties(&self) -> EntityGraphData {
         EntityGraphData::default()
             .with("createdCount", self.created_count as f64)
-            .with("connectionsOut.size", self.core.connections_out.len() as f64)
+            .with(
+                "connectionsOut.size",
+                self.core.connections_out.len() as f64,
+            )
             .with("queue.size", self.queue.len() as f64)
     }
     fn run_time_step(&mut self, step_size: Decimal) {
@@ -297,7 +298,10 @@ impl Entity for DefiniteFiniteSource {
     fn get_with_computed_properties(&self) -> EntityGraphData {
         EntityGraphData::default()
             .with("createdCount", self.created_count as f64)
-            .with("connectionsOut.size", self.core.connections_out.len() as f64)
+            .with(
+                "connectionsOut.size",
+                self.core.connections_out.len() as f64,
+            )
             .with("queue.size", self.queue.len() as f64)
     }
     fn run_time_step(&mut self, _step_size: Decimal) {

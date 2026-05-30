@@ -142,10 +142,21 @@ mod tests {
         assert!(r.final_rms_error < 0.05 * r.initial_rms_error);
         assert!(r.final_rms_error < 0.01);
         assert_eq!(r.topology.stations[0], "ilc-trial-source");
-        assert!(r.topology.stations.iter().any(|s| s == "ilc-learning-update-station"));
+        assert!(r
+            .topology
+            .stations
+            .iter()
+            .any(|s| s == "ilc-learning-update-station"));
         assert!(r.topology.stations.iter().any(|s| s == "ilc-result-sink"));
-        for t in ["ILCTrialPlanToken", "ILCControlProgramToken", "ILCTrialResultToken"] {
-            assert!(r.topology.movables.iter().any(|m| m == t), "missing movable {t}");
+        for t in [
+            "ILCTrialPlanToken",
+            "ILCControlProgramToken",
+            "ILCTrialResultToken",
+        ] {
+            assert!(
+                r.topology.movables.iter().any(|m| m == t),
+                "missing movable {t}"
+            );
         }
     }
 
@@ -164,10 +175,16 @@ mod tests {
             num_steps: Some(1000),
         });
         assert!(r.rms_error_steady_state < 1e-3);
-        assert!(r.trajectory.iter().all(|x| x[0].abs() < 100.0 && x[1].abs() < 100.0));
+        assert!(r
+            .trajectory
+            .iter()
+            .all(|x| x[0].abs() < 100.0 && x[1].abs() < 100.0));
 
-        let step_ref: Rc<dyn Fn(f64) -> Reference> =
-            Rc::new(|_t| Reference { theta: 0.0, theta_dot: 0.0, theta_ddot: 0.0 });
+        let step_ref: Rc<dyn Fn(f64) -> Reference> = Rc::new(|_t| Reference {
+            theta: 0.0,
+            theta_dot: 0.0,
+            theta_ddot: 0.0,
+        });
         let r2 = run_feedback_linearization(FeedbackLinearizationOpts {
             params: None,
             theta0: Some(PI),

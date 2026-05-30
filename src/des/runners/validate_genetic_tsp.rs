@@ -52,7 +52,10 @@ struct HeldKarpResult {
 }
 
 fn build_pentagon_tsp(n: usize, _radius: f64) -> TspInstance {
-    TspInstance { n, precedence: vec![] }
+    TspInstance {
+        n,
+        precedence: vec![],
+    }
 }
 
 fn build_random_tsp(n: usize, _seed: u32, precedence: Option<Vec<(usize, usize)>>) -> TspInstance {
@@ -123,7 +126,12 @@ impl Checker {
         } else {
             format!("  — {}", detail)
         };
-        println!("{}  {}{}", if ok { "  PASS" } else { "  FAIL" }, label, tail);
+        println!(
+            "{}  {}{}",
+            if ok { "  PASS" } else { "  FAIL" },
+            label,
+            tail
+        );
         if ok {
             self.pass += 1;
         } else {
@@ -143,14 +151,26 @@ pub fn run() {
         let inst = build_pentagon_tsp(n, r_radius);
         let optimal = n as f64 * 2.0 * r_radius * (std::f64::consts::PI / n as f64).sin();
         println!("    analytical optimum = {:.6}", optimal);
-        let r = run_genetic_tsp(&inst, &GaOptions { population_size: 60, num_generations: 100, seed: 1, ..Default::default() });
+        let r = run_genetic_tsp(
+            &inst,
+            &GaOptions {
+                population_size: 60,
+                num_generations: 100,
+                seed: 1,
+                ..Default::default()
+            },
+        );
         println!("    GA best length     = {:.6}", r.best_length);
         c.check(
             "GA finds an optimal pentagon tour (within 1e-9)",
             (r.best_length - optimal).abs() < 1e-9,
             &format!("Δ = {:.2e}", r.best_length - optimal),
         );
-        c.check("best tour is a valid permutation", is_permutation(&r.best_tour, n), "");
+        c.check(
+            "best tour is a valid permutation",
+            is_permutation(&r.best_tour, n),
+            "",
+        );
     }
 
     println!("\nStudy 2 — Small random instance: GA matches Held–Karp exact");
@@ -158,12 +178,26 @@ pub fn run() {
         for seed_tsp in [3u32, 17, 99] {
             let inst = build_random_tsp(10, seed_tsp, None);
             let exact = held_karp_exact(&inst);
-            let r = run_genetic_tsp(&inst, &GaOptions { population_size: 80, num_generations: 200, seed: (seed_tsp + 1) as u64, ..Default::default() });
-            println!("    seed {}: HK = {:.3}, GA = {:.3}", seed_tsp, exact.length, r.best_length);
+            let r = run_genetic_tsp(
+                &inst,
+                &GaOptions {
+                    population_size: 80,
+                    num_generations: 200,
+                    seed: (seed_tsp + 1) as u64,
+                    ..Default::default()
+                },
+            );
+            println!(
+                "    seed {}: HK = {:.3}, GA = {:.3}",
+                seed_tsp, exact.length, r.best_length
+            );
             c.check(
                 &format!("seed={}: GA within 0.5% of Held–Karp optimum", seed_tsp),
                 r.best_length <= exact.length * 1.005,
-                &format!("gap = {:.3}%", (r.best_length - exact.length) / exact.length * 100.0),
+                &format!(
+                    "gap = {:.3}%",
+                    (r.best_length - exact.length) / exact.length * 100.0
+                ),
             );
         }
     }
@@ -173,8 +207,19 @@ pub fn run() {
         for n in [8usize, 12, 15] {
             let inst = build_random_tsp(n, n as u32, None);
             let lb = one_tree_lower_bound(&inst);
-            let r = run_genetic_tsp(&inst, &GaOptions { population_size: 60, num_generations: 100, seed: (n + 100) as u64, ..Default::default() });
-            println!("    n={}: 1-tree lb = {:.2}, GA best = {:.2}", n, lb, r.best_length);
+            let r = run_genetic_tsp(
+                &inst,
+                &GaOptions {
+                    population_size: 60,
+                    num_generations: 100,
+                    seed: (n + 100) as u64,
+                    ..Default::default()
+                },
+            );
+            println!(
+                "    n={}: 1-tree lb = {:.2}, GA best = {:.2}",
+                n, lb, r.best_length
+            );
             c.check(
                 &format!("n={}: 1-tree lower bound ≤ GA best", n),
                 lb <= r.best_length + 1e-9,
@@ -187,14 +232,31 @@ pub fn run() {
     {
         let mut inst = build_random_tsp(15, 42, None);
         inst.precedence = vec![(0, 14), (1, 13), (2, 12), (3, 11)];
-        let r = run_genetic_tsp(&inst, &GaOptions { population_size: 80, num_generations: 150, seed: 42, feasibility: Some("cut"), retry_limit: Some(12), ..Default::default() });
-        c.check("best tour is a valid permutation", is_permutation(&r.best_tour, 15), "");
+        let r = run_genetic_tsp(
+            &inst,
+            &GaOptions {
+                population_size: 80,
+                num_generations: 150,
+                seed: 42,
+                feasibility: Some("cut"),
+                retry_limit: Some(12),
+                ..Default::default()
+            },
+        );
+        c.check(
+            "best tour is a valid permutation",
+            is_permutation(&r.best_tour, 15),
+            "",
+        );
         c.check(
             "best tour respects all 4 precedence pairs (no violations remain)",
             check_precedence(&inst, &r.best_tour).is_none(),
             &format!("violation: {:?}", check_precedence(&inst, &r.best_tour)),
         );
-        println!("    feasible kids evaluated = {}, infeasible kids cut = {}", r.total_feasible_evaluated, r.total_infeasible_cut);
+        println!(
+            "    feasible kids evaluated = {}, infeasible kids cut = {}",
+            r.total_feasible_evaluated, r.total_infeasible_cut
+        );
         c.check(
             "at least some children were infeasible (i.e. branch-cutting active)",
             r.total_infeasible_cut > 0,
@@ -206,21 +268,77 @@ pub fn run() {
     {
         let mut inst = build_random_tsp(16, 11, None);
         inst.precedence = vec![(0, 15), (2, 13), (4, 11), (6, 9)];
-        let cut = run_genetic_tsp(&inst, &GaOptions { population_size: 80, num_generations: 200, seed: 11, feasibility: Some("cut"), retry_limit: Some(12), ..Default::default() });
-        let pen = run_genetic_tsp(&inst, &GaOptions { population_size: 80, num_generations: 200, seed: 11, feasibility: Some("penalize"), penalty_per_violation: Some(1e6), ..Default::default() });
-        let repair = run_genetic_tsp(&inst, &GaOptions { population_size: 80, num_generations: 200, seed: 11, feasibility: Some("repair"), ..Default::default() });
-        println!("    cut     best length = {:.3}, infeasible cut = {}", cut.best_length, cut.total_infeasible_cut);
-        println!("    penalize best length = {:.3} (might include +∞ if infeasible)", pen.best_length);
+        let cut = run_genetic_tsp(
+            &inst,
+            &GaOptions {
+                population_size: 80,
+                num_generations: 200,
+                seed: 11,
+                feasibility: Some("cut"),
+                retry_limit: Some(12),
+                ..Default::default()
+            },
+        );
+        let pen = run_genetic_tsp(
+            &inst,
+            &GaOptions {
+                population_size: 80,
+                num_generations: 200,
+                seed: 11,
+                feasibility: Some("penalize"),
+                penalty_per_violation: Some(1e6),
+                ..Default::default()
+            },
+        );
+        let repair = run_genetic_tsp(
+            &inst,
+            &GaOptions {
+                population_size: 80,
+                num_generations: 200,
+                seed: 11,
+                feasibility: Some("repair"),
+                ..Default::default()
+            },
+        );
+        println!(
+            "    cut     best length = {:.3}, infeasible cut = {}",
+            cut.best_length, cut.total_infeasible_cut
+        );
+        println!(
+            "    penalize best length = {:.3} (might include +∞ if infeasible)",
+            pen.best_length
+        );
         println!("    repair  best length = {:.3}", repair.best_length);
-        c.check("cut policy: best tour is feasible", check_precedence(&inst, &cut.best_tour).is_none(), "");
-        c.check("repair policy: best tour is feasible", check_precedence(&inst, &repair.best_tour).is_none(), "");
-        c.check("cut policy actually cut some offspring", cut.total_infeasible_cut > 0, "");
+        c.check(
+            "cut policy: best tour is feasible",
+            check_precedence(&inst, &cut.best_tour).is_none(),
+            "",
+        );
+        c.check(
+            "repair policy: best tour is feasible",
+            check_precedence(&inst, &repair.best_tour).is_none(),
+            "",
+        );
+        c.check(
+            "cut policy actually cut some offspring",
+            cut.total_infeasible_cut > 0,
+            "",
+        );
     }
 
     println!("\nStudy 6 — Convergence: best tour length is monotone non-increasing");
     {
         let inst = build_random_tsp(20, 7, None);
-        let r = run_genetic_tsp(&inst, &GaOptions { population_size: 80, num_generations: 200, seed: 7, elitism: Some(4), ..Default::default() });
+        let r = run_genetic_tsp(
+            &inst,
+            &GaOptions {
+                population_size: 80,
+                num_generations: 200,
+                seed: 7,
+                elitism: Some(4),
+                ..Default::default()
+            },
+        );
         let mut monotone = true;
         for g in 1..r.per_generation_best.len() {
             if r.per_generation_best[g] > r.per_generation_best[g - 1] + 1e-9 {
@@ -228,7 +346,13 @@ pub fn run() {
                 break;
             }
         }
-        let head = r.per_generation_best.iter().take(15).map(|v| format!("{:.2}", v)).collect::<Vec<_>>().join(" ");
+        let head = r
+            .per_generation_best
+            .iter()
+            .take(15)
+            .map(|v| format!("{:.2}", v))
+            .collect::<Vec<_>>()
+            .join(" ");
         c.check(
             "elitism guarantees best-so-far is monotone non-increasing",
             monotone,
@@ -243,7 +367,12 @@ pub fn run() {
         );
     }
 
-    println!("\n{} checks: {} passed, {} failed", c.pass + c.fail, c.pass, c.fail);
+    println!(
+        "\n{} checks: {} passed, {} failed",
+        c.pass + c.fail,
+        c.pass,
+        c.fail
+    );
     if c.fail > 0 {
         std::process::exit(1);
     }

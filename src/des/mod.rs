@@ -3,8 +3,8 @@
 //! Modules are added here as they are ported from TypeScript, in dependency
 //! order (foundation first).
 
-pub mod shared;
 pub mod general;
+pub mod shared;
 
 // Entity framework (queueing-network model). `abstract` is a reserved keyword,
 // so the module is reached via the raw identifier `r#abstract`.
@@ -13,13 +13,13 @@ pub mod entity_moving;
 pub mod random_variables;
 
 // Concrete entity stations (built on entity_moving + abstract framework).
-pub mod entity_queue;
-pub mod entity_source;
-pub mod entity_sink;
-pub mod entity_travel;
-pub mod entity_routing;
 pub mod entity_decision;
 pub mod entity_processing;
+pub mod entity_queue;
+pub mod entity_routing;
+pub mod entity_sink;
+pub mod entity_source;
+pub mod entity_travel;
 // `entity-conn.ts/` is a directory whose name literally ends in `.ts`; reach
 // its single `conn` module via an explicit path so the file mapping is 1:1.
 #[path = "entity_conn.ts/conn.rs"]
@@ -31,8 +31,8 @@ pub mod observability;
 pub mod reference;
 
 // Signal-flow entities + observers + visual (build on the entity framework).
-pub mod signals;
 pub mod observers;
+pub mod signals;
 pub mod visual;
 
 // Animation framework (frame recording, rendering, scene builders).
@@ -61,9 +61,6 @@ pub mod simulations;
 // a `pub fn run()`), plus the cluster/process scaffolding scripts. These mirror
 // the executable scripts under the TS `src/des/` root.
 pub mod child;
-pub mod parent;
-pub mod program;
-pub mod max_flow;
 pub mod main;
 pub mod main_backpropagation;
 pub mod main_build_site;
@@ -122,3 +119,6 @@ pub mod main_traffic;
 pub mod main_two_disease;
 pub mod main_wind_mppt;
 pub mod main_wind_mppt_anim;
+pub mod max_flow;
+pub mod parent;
+pub mod program;

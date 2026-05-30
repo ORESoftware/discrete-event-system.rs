@@ -160,7 +160,12 @@ impl DESStation for QPProjectedGradientStation {
             let gradient = qp_gradient(&self.q, &self.c, &state.x);
             let gradient_norm = norm2(&gradient);
             let objective = qp_objective(&self.q, &self.c, &state.x);
-            self.trace.push(QPTraceEntry { iter: state.iter, objective, gradient_norm, x: state.x.clone() });
+            self.trace.push(QPTraceEntry {
+                iter: state.iter,
+                objective,
+                gradient_norm,
+                x: state.x.clone(),
+            });
             if state.iter >= self.max_iter || gradient_norm <= self.tol {
                 let result = QPProjectedGradientResult {
                     x: state.x.clone(),
@@ -170,16 +175,25 @@ impl DESStation for QPProjectedGradientStation {
                     trace: self.trace.clone(),
                     topology: empty_station_graph(),
                 };
-                self.core.emit(Rc::new(QPResultToken { result }), Self::CH_RESULT);
+                self.core
+                    .emit(Rc::new(QPResultToken { result }), Self::CH_RESULT);
                 continue;
             }
             let next: Vec<f64> = state
                 .x
                 .iter()
                 .enumerate()
-                .map(|(i, v)| self.upper[i].min(self.lower[i].max(v - self.step_size * gradient[i])))
+                .map(|(i, v)| {
+                    self.upper[i].min(self.lower[i].max(v - self.step_size * gradient[i]))
+                })
                 .collect();
-            self.core.emit(Rc::new(QPStateToken { iter: state.iter + 1, x: next }), Self::CH_STATE);
+            self.core.emit(
+                Rc::new(QPStateToken {
+                    iter: state.iter + 1,
+                    x: next,
+                }),
+                Self::CH_STATE,
+            );
         }
     }
 }
@@ -241,7 +255,12 @@ impl DESStation for QPCoordinateDescentStation {
             let gradient = qp_gradient(&self.q, &self.c, &state.x);
             let gradient_norm = norm2(&gradient);
             let objective = qp_objective(&self.q, &self.c, &state.x);
-            self.trace.push(QPTraceEntry { iter: state.iter, objective, gradient_norm, x: state.x.clone() });
+            self.trace.push(QPTraceEntry {
+                iter: state.iter,
+                objective,
+                gradient_norm,
+                x: state.x.clone(),
+            });
             if state.iter >= self.max_iter || gradient_norm <= self.tol {
                 let result = QPProjectedGradientResult {
                     x: state.x.clone(),
@@ -251,7 +270,8 @@ impl DESStation for QPCoordinateDescentStation {
                     trace: self.trace.clone(),
                     topology: empty_station_graph(),
                 };
-                self.core.emit(Rc::new(QPResultToken { result }), Self::CH_RESULT);
+                self.core
+                    .emit(Rc::new(QPResultToken { result }), Self::CH_RESULT);
                 continue;
             }
             let mut next = state.x.clone();
@@ -263,13 +283,31 @@ impl DESStation for QPCoordinateDescentStation {
                 let g = dot(&self.q[i], &next) + self.c[i];
                 next[i] = self.upper[i].min(self.lower[i].max(next[i] - g / diag));
             }
-            self.core.emit(Rc::new(QPStateToken { iter: state.iter + 1, x: next }), Self::CH_STATE);
+            self.core.emit(
+                Rc::new(QPStateToken {
+                    iter: state.iter + 1,
+                    x: next,
+                }),
+                Self::CH_STATE,
+            );
         }
     }
 }
 
-fn validate_qp_initial_state(model: &str, token: &QPStateToken, n: usize, lower: &[f64], upper: &[f64]) {
-    require(Preconditions::integer_in_range(model, "iter", token.iter as f64, 0.0, 1e9));
+fn validate_qp_initial_state(
+    model: &str,
+    token: &QPStateToken,
+    n: usize,
+    lower: &[f64],
+    upper: &[f64],
+) {
+    require(Preconditions::integer_in_range(
+        model,
+        "iter",
+        token.iter as f64,
+        0.0,
+        1e9,
+    ));
     require(Preconditions::length_eq(model, "x0", &token.x, n));
     require(Preconditions::all_finite(model, "x0", &token.x));
     require(Preconditions::length_eq(model, "lower", lower, n));
@@ -301,7 +339,10 @@ pub fn run_qp_projected_gradient(params: QPProjectedGradientParams) -> QPProject
     let source = Rc::new(RefCell::new(SingleTokenSourceStation::with_validator(
         "qp-state-source",
         CH_QP_STATE,
-        move || QPStateToken { iter: 0, x: x0_factory.clone() },
+        move || QPStateToken {
+            iter: 0,
+            x: x0_factory.clone(),
+        },
         move |t: &QPStateToken| validate_qp_initial_state(&model, t, n, &lower_v, &upper_v),
     )));
     let update = Rc::new(RefCell::new(QPProjectedGradientStation::new(
@@ -314,9 +355,19 @@ pub fn run_qp_projected_gradient(params: QPProjectedGradientParams) -> QPProject
         max_iter,
         params.tol.unwrap_or(1e-8),
     )));
-    let sink = Rc::new(RefCell::new(LatestTokenSinkStation::<QPResultToken>::new("qp-result-sink", CH_QP_RESULT)));
+    let sink = Rc::new(RefCell::new(LatestTokenSinkStation::<QPResultToken>::new(
+        "qp-result-sink",
+        CH_QP_RESULT,
+    )));
 
-    run_qp("qp-state-source", "projected-gradient-update", source, update, sink, max_iter)
+    run_qp(
+        "qp-state-source",
+        "projected-gradient-update",
+        source,
+        update,
+        sink,
+        max_iter,
+    )
 }
 
 pub fn run_qp_coordinate_descent(params: QPProjectedGradientParams) -> QPProjectedGradientResult {
@@ -335,7 +386,10 @@ pub fn run_qp_coordinate_descent(params: QPProjectedGradientParams) -> QPProject
     let source = Rc::new(RefCell::new(SingleTokenSourceStation::with_validator(
         "qp-coordinate-state-source",
         CH_QP_STATE,
-        move || QPStateToken { iter: 0, x: x0_factory.clone() },
+        move || QPStateToken {
+            iter: 0,
+            x: x0_factory.clone(),
+        },
         move |t: &QPStateToken| validate_qp_initial_state(&model, t, n, &lower_v, &upper_v),
     )));
     let update = Rc::new(RefCell::new(QPCoordinateDescentStation::new(
@@ -347,9 +401,19 @@ pub fn run_qp_coordinate_descent(params: QPProjectedGradientParams) -> QPProject
         max_iter,
         params.tol.unwrap_or(1e-8),
     )));
-    let sink = Rc::new(RefCell::new(LatestTokenSinkStation::<QPResultToken>::new("qp-result-sink", CH_QP_RESULT)));
+    let sink = Rc::new(RefCell::new(LatestTokenSinkStation::<QPResultToken>::new(
+        "qp-result-sink",
+        CH_QP_RESULT,
+    )));
 
-    run_qp("qp-coordinate-state-source", "coordinate-descent-update", source, update, sink, max_iter)
+    run_qp(
+        "qp-coordinate-state-source",
+        "coordinate-descent-update",
+        source,
+        update,
+        sink,
+        max_iter,
+    )
 }
 
 fn run_qp<U: DESStation + 'static>(
@@ -366,7 +430,10 @@ fn run_qp<U: DESStation + 'static>(
         sink.clone() as StationRef,
         CH_QP_STATE,
         CH_QP_RESULT,
-        IterativeRunOptions { max_ticks: Some(max_iter + 10), ..Default::default() },
+        IterativeRunOptions {
+            max_ticks: Some(max_iter + 10),
+            ..Default::default()
+        },
     );
 
     let latest = sink
@@ -443,7 +510,11 @@ pub struct AssignmentSourceStation {
 impl AssignmentSourceStation {
     pub const CH_MATRIX: &'static str = CH_ASSIGNMENT_MATRIX;
     pub fn new(id: impl Into<String>, cost: Vec<Vec<f64>>) -> Self {
-        AssignmentSourceStation { core: StationCore::new(id), cost, emitted: false }
+        AssignmentSourceStation {
+            core: StationCore::new(id),
+            cost,
+            emitted: false,
+        }
     }
 }
 
@@ -484,7 +555,9 @@ impl RowReductionStation {
     pub const CH_MATRIX: &'static str = CH_ASSIGNMENT_MATRIX;
     pub const CH_REDUCED: &'static str = CH_ROW_REDUCED;
     pub fn new(id: impl Into<String>) -> Self {
-        RowReductionStation { core: StationCore::new(id) }
+        RowReductionStation {
+            core: StationCore::new(id),
+        }
     }
 }
 
@@ -504,7 +577,10 @@ impl DESStation for RowReductionStation {
     fn run_time_step(&mut self) {
         for token in self.core.drain::<AssignmentMatrixToken>(Self::CH_MATRIX) {
             let mut reduced = clone_matrix(&token.reduced);
-            let rows: Vec<f64> = reduced.iter().map(|row| row.iter().copied().fold(f64::INFINITY, f64::min)).collect();
+            let rows: Vec<f64> = reduced
+                .iter()
+                .map(|row| row.iter().copied().fold(f64::INFINITY, f64::min))
+                .collect();
             for (i, row) in reduced.iter_mut().enumerate() {
                 for v in row.iter_mut() {
                     *v -= rows[i];
@@ -530,7 +606,9 @@ impl ColumnReductionStation {
     pub const CH_REDUCED: &'static str = CH_ROW_REDUCED;
     pub const CH_REDUCED2: &'static str = CH_COLUMN_REDUCED;
     pub fn new(id: impl Into<String>) -> Self {
-        ColumnReductionStation { core: StationCore::new(id) }
+        ColumnReductionStation {
+            core: StationCore::new(id),
+        }
     }
 }
 
@@ -552,7 +630,10 @@ impl DESStation for ColumnReductionStation {
             let mut reduced = clone_matrix(&token.reduced);
             let mut cols = zeros(reduced[0].len());
             for (j, col) in cols.iter_mut().enumerate() {
-                *col = reduced.iter().map(|row| row[j]).fold(f64::INFINITY, f64::min);
+                *col = reduced
+                    .iter()
+                    .map(|row| row[j])
+                    .fold(f64::INFINITY, f64::min);
             }
             for row in reduced.iter_mut() {
                 for (j, v) in row.iter_mut().enumerate() {
@@ -579,7 +660,9 @@ impl AssignmentSolverStation {
     pub const CH_REDUCED: &'static str = CH_COLUMN_REDUCED;
     pub const CH_RESULT: &'static str = CH_ASSIGNMENT_RESULT;
     pub fn new(id: impl Into<String>) -> Self {
-        AssignmentSolverStation { core: StationCore::new(id) }
+        AssignmentSolverStation {
+            core: StationCore::new(id),
+        }
     }
 }
 
@@ -606,7 +689,8 @@ impl DESStation for AssignmentSolverStation {
                 col_reductions: token.col_reductions.clone(),
                 topology: empty_station_graph(),
             };
-            self.core.emit(Rc::new(AssignmentResultToken { result }), Self::CH_RESULT);
+            self.core
+                .emit(Rc::new(AssignmentResultToken { result }), Self::CH_RESULT);
         }
     }
 }
@@ -620,7 +704,10 @@ pub struct AssignmentSinkStation {
 impl AssignmentSinkStation {
     pub const CH_RESULT: &'static str = CH_ASSIGNMENT_RESULT;
     pub fn new(id: impl Into<String>) -> Self {
-        AssignmentSinkStation { core: StationCore::new(id), result: None }
+        AssignmentSinkStation {
+            core: StationCore::new(id),
+            result: None,
+        }
     }
 }
 
@@ -655,7 +742,11 @@ pub struct AssignmentAuctionSourceStation {
 impl AssignmentAuctionSourceStation {
     pub const CH_STATE: &'static str = CH_AUCTION_STATE;
     pub fn new(id: impl Into<String>, cost: Vec<Vec<f64>>) -> Self {
-        AssignmentAuctionSourceStation { core: StationCore::new(id), cost, emitted: false }
+        AssignmentAuctionSourceStation {
+            core: StationCore::new(id),
+            cost,
+            emitted: false,
+        }
     }
 }
 
@@ -700,7 +791,11 @@ impl AuctionAssignmentStation {
     pub const CH_STATE: &'static str = CH_AUCTION_STATE;
     pub const CH_RESULT: &'static str = CH_ASSIGNMENT_RESULT;
     pub fn new(id: impl Into<String>, epsilon: f64, max_iter: usize) -> Self {
-        AuctionAssignmentStation { core: StationCore::new(id), epsilon, max_iter }
+        AuctionAssignmentStation {
+            core: StationCore::new(id),
+            epsilon,
+            max_iter,
+        }
     }
 }
 
@@ -718,14 +813,23 @@ impl DESStation for AuctionAssignmentStation {
         self.core.inbox_size(Self::CH_STATE) > 0
     }
     fn run_time_step(&mut self) {
-        for state in self.core.drain::<AssignmentAuctionStateToken>(Self::CH_STATE) {
+        for state in self
+            .core
+            .drain::<AssignmentAuctionStateToken>(Self::CH_STATE)
+        {
             let unassigned = state.assignment.iter().position(|&job| job < 0);
             if unassigned.is_none() || state.iter >= self.max_iter {
                 let objective: f64 = state
                     .assignment
                     .iter()
                     .enumerate()
-                    .map(|(worker, &job)| if job >= 0 { state.original[worker][job as usize] } else { f64::NAN })
+                    .map(|(worker, &job)| {
+                        if job >= 0 {
+                            state.original[worker][job as usize]
+                        } else {
+                            f64::NAN
+                        }
+                    })
                     .sum();
                 let result = AssignmentResult {
                     assignment: state.assignment.clone(),
@@ -734,7 +838,8 @@ impl DESStation for AuctionAssignmentStation {
                     col_reductions: state.prices.clone(),
                     topology: empty_station_graph(),
                 };
-                self.core.emit(Rc::new(AssignmentResultToken { result }), Self::CH_RESULT);
+                self.core
+                    .emit(Rc::new(AssignmentResultToken { result }), Self::CH_RESULT);
                 continue;
             }
             let unassigned = unassigned.unwrap();
@@ -769,21 +874,51 @@ impl DESStation for AuctionAssignmentStation {
 }
 
 fn default_assignment_cost() -> Vec<Vec<f64>> {
-    vec![vec![9.0, 2.0, 7.0], vec![6.0, 4.0, 3.0], vec![5.0, 8.0, 1.0]]
+    vec![
+        vec![9.0, 2.0, 7.0],
+        vec![6.0, 4.0, 3.0],
+        vec![5.0, 8.0, 1.0],
+    ]
 }
 
 pub fn run_hungarian_assignment(params: AssignmentParams) -> AssignmentResult {
-    let cost = clone_matrix(&non_empty_array(params.cost.as_deref(), &default_assignment_cost()));
-    let source = Rc::new(RefCell::new(AssignmentSourceStation::new("assignment-source", cost)));
+    let cost = clone_matrix(&non_empty_array(
+        params.cost.as_deref(),
+        &default_assignment_cost(),
+    ));
+    let source = Rc::new(RefCell::new(AssignmentSourceStation::new(
+        "assignment-source",
+        cost,
+    )));
     let row = Rc::new(RefCell::new(RowReductionStation::new("row-reduction")));
-    let col = Rc::new(RefCell::new(ColumnReductionStation::new("column-reduction")));
-    let solver = Rc::new(RefCell::new(AssignmentSolverStation::new("assignment-builder")));
+    let col = Rc::new(RefCell::new(ColumnReductionStation::new(
+        "column-reduction",
+    )));
+    let solver = Rc::new(RefCell::new(AssignmentSolverStation::new(
+        "assignment-builder",
+    )));
     let sink = Rc::new(RefCell::new(AssignmentSinkStation::new("assignment-sink")));
 
-    source.borrow_mut().core_mut().pipe(row.clone() as StationRef, AssignmentSourceStation::CH_MATRIX, RowReductionStation::CH_MATRIX);
-    row.borrow_mut().core_mut().pipe(col.clone() as StationRef, RowReductionStation::CH_REDUCED, ColumnReductionStation::CH_REDUCED);
-    col.borrow_mut().core_mut().pipe(solver.clone() as StationRef, ColumnReductionStation::CH_REDUCED2, AssignmentSolverStation::CH_REDUCED);
-    solver.borrow_mut().core_mut().pipe(sink.clone() as StationRef, AssignmentSolverStation::CH_RESULT, AssignmentSinkStation::CH_RESULT);
+    source.borrow_mut().core_mut().pipe(
+        row.clone() as StationRef,
+        AssignmentSourceStation::CH_MATRIX,
+        RowReductionStation::CH_MATRIX,
+    );
+    row.borrow_mut().core_mut().pipe(
+        col.clone() as StationRef,
+        RowReductionStation::CH_REDUCED,
+        ColumnReductionStation::CH_REDUCED,
+    );
+    col.borrow_mut().core_mut().pipe(
+        solver.clone() as StationRef,
+        ColumnReductionStation::CH_REDUCED2,
+        AssignmentSolverStation::CH_REDUCED,
+    );
+    solver.borrow_mut().core_mut().pipe(
+        sink.clone() as StationRef,
+        AssignmentSolverStation::CH_RESULT,
+        AssignmentSinkStation::CH_RESULT,
+    );
 
     run_iterative_des(
         vec![
@@ -793,10 +928,17 @@ pub fn run_hungarian_assignment(params: AssignmentParams) -> AssignmentResult {
             solver.clone() as StationRef,
             sink.clone() as StationRef,
         ],
-        IterativeRunOptions { shuffle: false, ..Default::default() },
+        IterativeRunOptions {
+            shuffle: false,
+            ..Default::default()
+        },
     );
 
-    let mut result = sink.borrow().result.clone().unwrap_or_else(|| panic!("hungarian-assignment did not produce a result"));
+    let mut result = sink
+        .borrow()
+        .result
+        .clone()
+        .unwrap_or_else(|| panic!("hungarian-assignment did not produce a result"));
     let stations = [
         StationOrId::Id("assignment-source".to_string()),
         StationOrId::Id("row-reduction".to_string()),
@@ -805,12 +947,39 @@ pub fn run_hungarian_assignment(params: AssignmentParams) -> AssignmentResult {
         StationOrId::Id("assignment-sink".to_string()),
     ];
     let edges = vec![
-        channel_edge(&stations[0], AssignmentSourceStation::CH_MATRIX, &stations[1], Some(RowReductionStation::CH_MATRIX)),
-        channel_edge(&stations[1], RowReductionStation::CH_REDUCED, &stations[2], Some(ColumnReductionStation::CH_REDUCED)),
-        channel_edge(&stations[2], ColumnReductionStation::CH_REDUCED2, &stations[3], Some(AssignmentSolverStation::CH_REDUCED)),
-        channel_edge(&stations[3], AssignmentSolverStation::CH_RESULT, &stations[4], Some(AssignmentSinkStation::CH_RESULT)),
+        channel_edge(
+            &stations[0],
+            AssignmentSourceStation::CH_MATRIX,
+            &stations[1],
+            Some(RowReductionStation::CH_MATRIX),
+        ),
+        channel_edge(
+            &stations[1],
+            RowReductionStation::CH_REDUCED,
+            &stations[2],
+            Some(ColumnReductionStation::CH_REDUCED),
+        ),
+        channel_edge(
+            &stations[2],
+            ColumnReductionStation::CH_REDUCED2,
+            &stations[3],
+            Some(AssignmentSolverStation::CH_REDUCED),
+        ),
+        channel_edge(
+            &stations[3],
+            AssignmentSolverStation::CH_RESULT,
+            &stations[4],
+            Some(AssignmentSinkStation::CH_RESULT),
+        ),
     ];
-    result.topology = station_graph(&stations, &["AssignmentMatrixToken".to_string(), "AssignmentResultToken".to_string()], &edges);
+    result.topology = station_graph(
+        &stations,
+        &[
+            "AssignmentMatrixToken".to_string(),
+            "AssignmentResultToken".to_string(),
+        ],
+        &edges,
+    );
     result
 }
 
@@ -822,30 +991,67 @@ pub struct AuctionAssignmentParams {
 }
 
 pub fn run_auction_assignment(params: AuctionAssignmentParams) -> AssignmentResult {
-    let cost = clone_matrix(&non_empty_array(params.cost.as_deref(), &default_assignment_cost()));
+    let cost = clone_matrix(&non_empty_array(
+        params.cost.as_deref(),
+        &default_assignment_cost(),
+    ));
     let n = cost.len();
     let max_iter = params.max_iter.unwrap_or_else(|| (20).max(n * n * 20));
-    let source = Rc::new(RefCell::new(AssignmentAuctionSourceStation::new("auction-assignment-source", cost)));
-    let auction = Rc::new(RefCell::new(AuctionAssignmentStation::new("auction-bid-update", params.epsilon.unwrap_or(0.01), max_iter)));
+    let source = Rc::new(RefCell::new(AssignmentAuctionSourceStation::new(
+        "auction-assignment-source",
+        cost,
+    )));
+    let auction = Rc::new(RefCell::new(AuctionAssignmentStation::new(
+        "auction-bid-update",
+        params.epsilon.unwrap_or(0.01),
+        max_iter,
+    )));
     let sink = Rc::new(RefCell::new(AssignmentSinkStation::new("assignment-sink")));
 
-    source.borrow_mut().core_mut().pipe(auction.clone() as StationRef, AssignmentAuctionSourceStation::CH_STATE, AuctionAssignmentStation::CH_STATE);
-    auction.borrow_mut().core_mut().pipe(auction.clone() as StationRef, AuctionAssignmentStation::CH_STATE, AuctionAssignmentStation::CH_STATE);
-    auction.borrow_mut().core_mut().pipe(sink.clone() as StationRef, AuctionAssignmentStation::CH_RESULT, AssignmentSinkStation::CH_RESULT);
-
-    run_iterative_des(
-        vec![source.clone() as StationRef, auction.clone() as StationRef, sink.clone() as StationRef],
-        IterativeRunOptions { shuffle: false, max_ticks: Some(max_iter + 10), ..Default::default() },
+    source.borrow_mut().core_mut().pipe(
+        auction.clone() as StationRef,
+        AssignmentAuctionSourceStation::CH_STATE,
+        AuctionAssignmentStation::CH_STATE,
+    );
+    auction.borrow_mut().core_mut().pipe(
+        auction.clone() as StationRef,
+        AuctionAssignmentStation::CH_STATE,
+        AuctionAssignmentStation::CH_STATE,
+    );
+    auction.borrow_mut().core_mut().pipe(
+        sink.clone() as StationRef,
+        AuctionAssignmentStation::CH_RESULT,
+        AssignmentSinkStation::CH_RESULT,
     );
 
-    let mut result = sink.borrow().result.clone().unwrap_or_else(|| panic!("auction-assignment did not produce a result"));
+    run_iterative_des(
+        vec![
+            source.clone() as StationRef,
+            auction.clone() as StationRef,
+            sink.clone() as StationRef,
+        ],
+        IterativeRunOptions {
+            shuffle: false,
+            max_ticks: Some(max_iter + 10),
+            ..Default::default()
+        },
+    );
+
+    let mut result = sink
+        .borrow()
+        .result
+        .clone()
+        .unwrap_or_else(|| panic!("auction-assignment did not produce a result"));
     result.topology = state_loop_topology(
         &*source.borrow(),
         &*auction.borrow(),
         &*sink.borrow(),
         CH_AUCTION_STATE,
         CH_ASSIGNMENT_RESULT,
-        &["AssignmentAuctionStateToken".to_string(), "AssignmentResultToken".to_string()],
+        &[
+            "AssignmentAuctionStateToken".to_string(),
+            "AssignmentResultToken".to_string(),
+        ],
     );
     result
 }
@@ -929,7 +1135,11 @@ pub struct VRPSourceStation {
 impl VRPSourceStation {
     pub const CH_PROBLEM: &'static str = CH_VRP_PROBLEM;
     pub fn new(id: impl Into<String>, problem: VRPProblemToken) -> Self {
-        VRPSourceStation { core: StationCore::new(id), problem, emitted: false }
+        VRPSourceStation {
+            core: StationCore::new(id),
+            problem,
+            emitted: false,
+        }
     }
 }
 
@@ -950,7 +1160,8 @@ impl DESStation for VRPSourceStation {
         if self.emitted {
             return;
         }
-        self.core.emit(Rc::new(self.problem.clone()), Self::CH_PROBLEM);
+        self.core
+            .emit(Rc::new(self.problem.clone()), Self::CH_PROBLEM);
         self.emitted = true;
     }
 }
@@ -964,7 +1175,9 @@ impl SavingsStation {
     pub const CH_PROBLEM: &'static str = CH_VRP_PROBLEM;
     pub const CH_SAVINGS: &'static str = CH_VRP_SAVINGS;
     pub fn new(id: impl Into<String>) -> Self {
-        SavingsStation { core: StationCore::new(id) }
+        SavingsStation {
+            core: StationCore::new(id),
+        }
     }
 }
 
@@ -999,7 +1212,10 @@ impl DESStation for SavingsStation {
                 }
             }
             savings.sort_by(|a, b| b.saving.total_cmp(&a.saving));
-            self.core.emit(Rc::new(VRPSavingsToken { problem, savings }), Self::CH_SAVINGS);
+            self.core.emit(
+                Rc::new(VRPSavingsToken { problem, savings }),
+                Self::CH_SAVINGS,
+            );
         }
     }
 }
@@ -1013,7 +1229,9 @@ impl RouteMergeStation {
     pub const CH_SAVINGS: &'static str = CH_VRP_SAVINGS;
     pub const CH_RESULT: &'static str = CH_VRP_RESULT;
     pub fn new(id: impl Into<String>) -> Self {
-        RouteMergeStation { core: StationCore::new(id) }
+        RouteMergeStation {
+            core: StationCore::new(id),
+        }
     }
 }
 
@@ -1033,13 +1251,22 @@ impl DESStation for RouteMergeStation {
     fn run_time_step(&mut self) {
         for token in self.core.drain::<VRPSavingsToken>(Self::CH_SAVINGS) {
             let problem = &token.problem;
-            let by_id: HashMap<String, VRPCustomer> =
-                problem.customers.iter().map(|c| (c.id.clone(), c.clone())).collect();
-            let mut routes: Vec<Vec<String>> = problem.customers.iter().map(|c| vec![c.id.clone()]).collect();
+            let by_id: HashMap<String, VRPCustomer> = problem
+                .customers
+                .iter()
+                .map(|c| (c.id.clone(), c.clone()))
+                .collect();
+            let mut routes: Vec<Vec<String>> = problem
+                .customers
+                .iter()
+                .map(|c| vec![c.id.clone()])
+                .collect();
             for s in &token.savings {
                 let ri_idx = routes.iter().position(|r| r.contains(&s.i));
                 let rj_idx = routes.iter().position(|r| r.contains(&s.j));
-                let (Some(ri_idx), Some(rj_idx)) = (ri_idx, rj_idx) else { continue };
+                let (Some(ri_idx), Some(rj_idx)) = (ri_idx, rj_idx) else {
+                    continue;
+                };
                 if ri_idx == rj_idx {
                     continue;
                 }
@@ -1057,7 +1284,10 @@ impl DESStation for RouteMergeStation {
                     None
                 };
                 let Some(merged) = merged else { continue };
-                let load: f64 = merged.iter().map(|id| by_id.get(id).map(|c| c.demand).unwrap_or(0.0)).sum();
+                let load: f64 = merged
+                    .iter()
+                    .map(|id| by_id.get(id).map(|c| c.demand).unwrap_or(0.0))
+                    .sum();
                 if load > problem.capacity {
                     continue;
                 }
@@ -1069,7 +1299,10 @@ impl DESStation for RouteMergeStation {
             let result_routes: Vec<VRPRoute> = routes
                 .iter()
                 .map(|route| {
-                    let customers: Vec<VRPCustomer> = route.iter().map(|id| by_id.get(id).unwrap().clone()).collect();
+                    let customers: Vec<VRPCustomer> = route
+                        .iter()
+                        .map(|id| by_id.get(id).unwrap().clone())
+                        .collect();
                     VRPRoute {
                         customers: route.clone(),
                         load: customers.iter().map(|c| c.demand).sum(),
@@ -1084,7 +1317,8 @@ impl DESStation for RouteMergeStation {
                 savings_considered: token.savings.len(),
                 topology: empty_station_graph(),
             };
-            self.core.emit(Rc::new(VRPResultToken { result }), Self::CH_RESULT);
+            self.core
+                .emit(Rc::new(VRPResultToken { result }), Self::CH_RESULT);
         }
     }
 }
@@ -1098,7 +1332,10 @@ pub struct VRPSinkStation {
 impl VRPSinkStation {
     pub const CH_RESULT: &'static str = CH_VRP_RESULT;
     pub fn new(id: impl Into<String>) -> Self {
-        VRPSinkStation { core: StationCore::new(id), result: None }
+        VRPSinkStation {
+            core: StationCore::new(id),
+            result: None,
+        }
     }
 }
 
@@ -1132,7 +1369,9 @@ impl NearestNeighborRouteStation {
     pub const CH_PROBLEM: &'static str = CH_VRP_PROBLEM;
     pub const CH_RESULT: &'static str = CH_VRP_RESULT;
     pub fn new(id: impl Into<String>) -> Self {
-        NearestNeighborRouteStation { core: StationCore::new(id) }
+        NearestNeighborRouteStation {
+            core: StationCore::new(id),
+        }
     }
 }
 
@@ -1152,8 +1391,11 @@ impl DESStation for NearestNeighborRouteStation {
     fn run_time_step(&mut self) {
         for problem in self.core.drain::<VRPProblemToken>(Self::CH_PROBLEM) {
             let problem = (*problem).clone();
-            let by_id: HashMap<String, VRPCustomer> =
-                problem.customers.iter().map(|c| (c.id.clone(), c.clone())).collect();
+            let by_id: HashMap<String, VRPCustomer> = problem
+                .customers
+                .iter()
+                .map(|c| (c.id.clone(), c.clone()))
+                .collect();
             let mut served: HashSet<String> = HashSet::new();
             let mut routes: Vec<VRPRoute> = Vec::new();
             while served.len() < problem.customers.len() {
@@ -1171,14 +1413,26 @@ impl DESStation for NearestNeighborRouteStation {
                     feasible.sort_by(|a, b| {
                         dist(here.x, here.y, a.x, a.y).total_cmp(&dist(here.x, here.y, b.x, b.y))
                     });
-                    let Some(next) = feasible.first().copied() else { break };
+                    let Some(next) = feasible.first().copied() else {
+                        break;
+                    };
                     route.push(next.id.clone());
                     load += next.demand;
-                    here = Point { x: next.x, y: next.y };
+                    here = Point {
+                        x: next.x,
+                        y: next.y,
+                    };
                     served.insert(next.id.clone());
                 }
-                let customers: Vec<VRPCustomer> = route.iter().map(|id| by_id.get(id).unwrap().clone()).collect();
-                routes.push(VRPRoute { customers: route, load, distance: route_distance(problem.depot, &customers) });
+                let customers: Vec<VRPCustomer> = route
+                    .iter()
+                    .map(|id| by_id.get(id).unwrap().clone())
+                    .collect();
+                routes.push(VRPRoute {
+                    customers: route,
+                    load,
+                    distance: route_distance(problem.depot, &customers),
+                });
             }
             let total_distance = routes.iter().map(|r| r.distance).sum();
             let result = VRPSavingsResult {
@@ -1187,18 +1441,44 @@ impl DESStation for NearestNeighborRouteStation {
                 savings_considered: 0,
                 topology: empty_station_graph(),
             };
-            self.core.emit(Rc::new(VRPResultToken { result }), Self::CH_RESULT);
+            self.core
+                .emit(Rc::new(VRPResultToken { result }), Self::CH_RESULT);
         }
     }
 }
 
 fn default_customers() -> Vec<VRPCustomer> {
     vec![
-        VRPCustomer { id: "A".to_string(), x: 1.0, y: 2.0, demand: 2.0 },
-        VRPCustomer { id: "B".to_string(), x: 2.0, y: 1.0, demand: 2.0 },
-        VRPCustomer { id: "C".to_string(), x: 4.0, y: 1.0, demand: 2.0 },
-        VRPCustomer { id: "D".to_string(), x: 5.0, y: 2.0, demand: 1.0 },
-        VRPCustomer { id: "E".to_string(), x: 3.0, y: 4.0, demand: 2.0 },
+        VRPCustomer {
+            id: "A".to_string(),
+            x: 1.0,
+            y: 2.0,
+            demand: 2.0,
+        },
+        VRPCustomer {
+            id: "B".to_string(),
+            x: 2.0,
+            y: 1.0,
+            demand: 2.0,
+        },
+        VRPCustomer {
+            id: "C".to_string(),
+            x: 4.0,
+            y: 1.0,
+            demand: 2.0,
+        },
+        VRPCustomer {
+            id: "D".to_string(),
+            x: 5.0,
+            y: 2.0,
+            demand: 1.0,
+        },
+        VRPCustomer {
+            id: "E".to_string(),
+            x: 3.0,
+            y: 4.0,
+            demand: 2.0,
+        },
     ]
 }
 
@@ -1218,16 +1498,40 @@ pub fn run_vrp_savings(params: VRPSavingsParams) -> VRPSavingsResult {
     let merge = Rc::new(RefCell::new(RouteMergeStation::new("route-merge")));
     let sink = Rc::new(RefCell::new(VRPSinkStation::new("vrp-sink")));
 
-    source.borrow_mut().core_mut().pipe(savings.clone() as StationRef, VRPSourceStation::CH_PROBLEM, SavingsStation::CH_PROBLEM);
-    savings.borrow_mut().core_mut().pipe(merge.clone() as StationRef, SavingsStation::CH_SAVINGS, RouteMergeStation::CH_SAVINGS);
-    merge.borrow_mut().core_mut().pipe(sink.clone() as StationRef, RouteMergeStation::CH_RESULT, VRPSinkStation::CH_RESULT);
-
-    run_iterative_des(
-        vec![source.clone() as StationRef, savings.clone() as StationRef, merge.clone() as StationRef, sink.clone() as StationRef],
-        IterativeRunOptions { shuffle: false, ..Default::default() },
+    source.borrow_mut().core_mut().pipe(
+        savings.clone() as StationRef,
+        VRPSourceStation::CH_PROBLEM,
+        SavingsStation::CH_PROBLEM,
+    );
+    savings.borrow_mut().core_mut().pipe(
+        merge.clone() as StationRef,
+        SavingsStation::CH_SAVINGS,
+        RouteMergeStation::CH_SAVINGS,
+    );
+    merge.borrow_mut().core_mut().pipe(
+        sink.clone() as StationRef,
+        RouteMergeStation::CH_RESULT,
+        VRPSinkStation::CH_RESULT,
     );
 
-    let mut result = sink.borrow().result.clone().unwrap_or_else(|| panic!("vrp-savings did not produce a result"));
+    run_iterative_des(
+        vec![
+            source.clone() as StationRef,
+            savings.clone() as StationRef,
+            merge.clone() as StationRef,
+            sink.clone() as StationRef,
+        ],
+        IterativeRunOptions {
+            shuffle: false,
+            ..Default::default()
+        },
+    );
+
+    let mut result = sink
+        .borrow()
+        .result
+        .clone()
+        .unwrap_or_else(|| panic!("vrp-savings did not produce a result"));
     let stations = [
         StationOrId::Id("vrp-source".to_string()),
         StationOrId::Id("savings-calculator".to_string()),
@@ -1235,13 +1539,32 @@ pub fn run_vrp_savings(params: VRPSavingsParams) -> VRPSavingsResult {
         StationOrId::Id("vrp-sink".to_string()),
     ];
     let edges = vec![
-        channel_edge(&stations[0], VRPSourceStation::CH_PROBLEM, &stations[1], Some(SavingsStation::CH_PROBLEM)),
-        channel_edge(&stations[1], SavingsStation::CH_SAVINGS, &stations[2], Some(RouteMergeStation::CH_SAVINGS)),
-        channel_edge(&stations[2], RouteMergeStation::CH_RESULT, &stations[3], Some(VRPSinkStation::CH_RESULT)),
+        channel_edge(
+            &stations[0],
+            VRPSourceStation::CH_PROBLEM,
+            &stations[1],
+            Some(SavingsStation::CH_PROBLEM),
+        ),
+        channel_edge(
+            &stations[1],
+            SavingsStation::CH_SAVINGS,
+            &stations[2],
+            Some(RouteMergeStation::CH_SAVINGS),
+        ),
+        channel_edge(
+            &stations[2],
+            RouteMergeStation::CH_RESULT,
+            &stations[3],
+            Some(VRPSinkStation::CH_RESULT),
+        ),
     ];
     result.topology = station_graph(
         &stations,
-        &["VRPProblemToken".to_string(), "VRPSavingsToken".to_string(), "VRPResultToken".to_string()],
+        &[
+            "VRPProblemToken".to_string(),
+            "VRPSavingsToken".to_string(),
+            "VRPResultToken".to_string(),
+        ],
         &edges,
     );
     result
@@ -1250,28 +1573,63 @@ pub fn run_vrp_savings(params: VRPSavingsParams) -> VRPSavingsResult {
 pub fn run_vrp_nearest_neighbor(params: VRPSavingsParams) -> VRPSavingsResult {
     let problem = build_vrp_problem(&params);
     let source = Rc::new(RefCell::new(VRPSourceStation::new("vrp-source", problem)));
-    let route = Rc::new(RefCell::new(NearestNeighborRouteStation::new("nearest-neighbor-route")));
+    let route = Rc::new(RefCell::new(NearestNeighborRouteStation::new(
+        "nearest-neighbor-route",
+    )));
     let sink = Rc::new(RefCell::new(VRPSinkStation::new("vrp-sink")));
 
-    source.borrow_mut().core_mut().pipe(route.clone() as StationRef, VRPSourceStation::CH_PROBLEM, NearestNeighborRouteStation::CH_PROBLEM);
-    route.borrow_mut().core_mut().pipe(sink.clone() as StationRef, NearestNeighborRouteStation::CH_RESULT, VRPSinkStation::CH_RESULT);
-
-    run_iterative_des(
-        vec![source.clone() as StationRef, route.clone() as StationRef, sink.clone() as StationRef],
-        IterativeRunOptions { shuffle: false, ..Default::default() },
+    source.borrow_mut().core_mut().pipe(
+        route.clone() as StationRef,
+        VRPSourceStation::CH_PROBLEM,
+        NearestNeighborRouteStation::CH_PROBLEM,
+    );
+    route.borrow_mut().core_mut().pipe(
+        sink.clone() as StationRef,
+        NearestNeighborRouteStation::CH_RESULT,
+        VRPSinkStation::CH_RESULT,
     );
 
-    let mut result = sink.borrow().result.clone().unwrap_or_else(|| panic!("vrp-nearest-neighbor did not produce a result"));
+    run_iterative_des(
+        vec![
+            source.clone() as StationRef,
+            route.clone() as StationRef,
+            sink.clone() as StationRef,
+        ],
+        IterativeRunOptions {
+            shuffle: false,
+            ..Default::default()
+        },
+    );
+
+    let mut result = sink
+        .borrow()
+        .result
+        .clone()
+        .unwrap_or_else(|| panic!("vrp-nearest-neighbor did not produce a result"));
     let stations = [
         StationOrId::Id("vrp-source".to_string()),
         StationOrId::Id("nearest-neighbor-route".to_string()),
         StationOrId::Id("vrp-sink".to_string()),
     ];
     let edges = vec![
-        channel_edge(&stations[0], VRPSourceStation::CH_PROBLEM, &stations[1], Some(NearestNeighborRouteStation::CH_PROBLEM)),
-        channel_edge(&stations[1], NearestNeighborRouteStation::CH_RESULT, &stations[2], Some(VRPSinkStation::CH_RESULT)),
+        channel_edge(
+            &stations[0],
+            VRPSourceStation::CH_PROBLEM,
+            &stations[1],
+            Some(NearestNeighborRouteStation::CH_PROBLEM),
+        ),
+        channel_edge(
+            &stations[1],
+            NearestNeighborRouteStation::CH_RESULT,
+            &stations[2],
+            Some(VRPSinkStation::CH_RESULT),
+        ),
     ];
-    result.topology = station_graph(&stations, &["VRPProblemToken".to_string(), "VRPResultToken".to_string()], &edges);
+    result.topology = station_graph(
+        &stations,
+        &["VRPProblemToken".to_string(), "VRPResultToken".to_string()],
+        &edges,
+    );
     result
 }
 
@@ -1370,7 +1728,11 @@ pub struct JobSourceStation {
 impl JobSourceStation {
     pub const CH_JOB: &'static str = CH_JOB;
     pub fn new(id: impl Into<String>, jobs: Vec<JobShopJob>) -> Self {
-        JobSourceStation { core: StationCore::new(id), jobs, emitted: false }
+        JobSourceStation {
+            core: StationCore::new(id),
+            jobs,
+            emitted: false,
+        }
     }
 }
 
@@ -1411,7 +1773,12 @@ impl DispatchSchedulerStation {
     pub const CH_JOB: &'static str = CH_JOB;
     pub const CH_SCHEDULE: &'static str = CH_SCHEDULE;
     pub fn new(id: impl Into<String>, rule: DispatchRule) -> Self {
-        DispatchSchedulerStation { core: StationCore::new(id), rule, jobs: Vec::new(), scheduled: false }
+        DispatchSchedulerStation {
+            core: StationCore::new(id),
+            rule,
+            jobs: Vec::new(),
+            scheduled: false,
+        }
     }
 }
 
@@ -1431,7 +1798,8 @@ impl DESStation for DispatchSchedulerStation {
     fn run_time_step(&mut self) {
         let incoming = self.core.drain::<JobToken>(Self::CH_JOB);
         let incoming_len = incoming.len();
-        self.jobs.extend(incoming.into_iter().map(|t| t.job.clone()));
+        self.jobs
+            .extend(incoming.into_iter().map(|t| t.job.clone()));
         if incoming_len > 0 {
             return;
         }
@@ -1439,7 +1807,8 @@ impl DESStation for DispatchSchedulerStation {
             return;
         }
         let result = dispatch_schedule(&self.jobs, self.rule);
-        self.core.emit(Rc::new(ScheduleToken { result }), Self::CH_SCHEDULE);
+        self.core
+            .emit(Rc::new(ScheduleToken { result }), Self::CH_SCHEDULE);
         self.scheduled = true;
     }
 }
@@ -1453,7 +1822,10 @@ pub struct ScheduleSinkStation {
 impl ScheduleSinkStation {
     pub const CH_SCHEDULE: &'static str = CH_SCHEDULE;
     pub fn new(id: impl Into<String>) -> Self {
-        ScheduleSinkStation { core: StationCore::new(id), result: None }
+        ScheduleSinkStation {
+            core: StationCore::new(id),
+            result: None,
+        }
     }
 }
 
@@ -1503,7 +1875,11 @@ pub struct FlowShopJobSourceStation {
 impl FlowShopJobSourceStation {
     pub const CH_JOB: &'static str = CH_FLOW_JOB;
     pub fn new(id: impl Into<String>, jobs: Vec<FlowShopJob>) -> Self {
-        FlowShopJobSourceStation { core: StationCore::new(id), jobs, emitted: false }
+        FlowShopJobSourceStation {
+            core: StationCore::new(id),
+            jobs,
+            emitted: false,
+        }
     }
 }
 
@@ -1543,7 +1919,11 @@ impl NEHSequenceStation {
     pub const CH_JOB: &'static str = CH_FLOW_JOB;
     pub const CH_SEQUENCE: &'static str = CH_FLOW_SEQUENCE;
     pub fn new(id: impl Into<String>) -> Self {
-        NEHSequenceStation { core: StationCore::new(id), jobs: Vec::new(), sequenced: false }
+        NEHSequenceStation {
+            core: StationCore::new(id),
+            jobs: Vec::new(),
+            sequenced: false,
+        }
     }
 }
 
@@ -1563,14 +1943,20 @@ impl DESStation for NEHSequenceStation {
     fn run_time_step(&mut self) {
         let incoming = self.core.drain::<FlowJobToken>(Self::CH_JOB);
         let incoming_len = incoming.len();
-        self.jobs.extend(incoming.into_iter().map(|t| t.job.clone()));
+        self.jobs
+            .extend(incoming.into_iter().map(|t| t.job.clone()));
         if incoming_len > 0 {
             return;
         }
         if self.sequenced || self.jobs.is_empty() {
             return;
         }
-        self.core.emit(Rc::new(FlowSequenceToken { jobs: neh_sequence(&self.jobs) }), Self::CH_SEQUENCE);
+        self.core.emit(
+            Rc::new(FlowSequenceToken {
+                jobs: neh_sequence(&self.jobs),
+            }),
+            Self::CH_SEQUENCE,
+        );
         self.sequenced = true;
     }
 }
@@ -1584,7 +1970,9 @@ impl FlowShopScheduleStation {
     pub const CH_SEQUENCE: &'static str = CH_FLOW_SEQUENCE;
     pub const CH_SCHEDULE: &'static str = CH_FLOW_SCHEDULE;
     pub fn new(id: impl Into<String>) -> Self {
-        FlowShopScheduleStation { core: StationCore::new(id) }
+        FlowShopScheduleStation {
+            core: StationCore::new(id),
+        }
     }
 }
 
@@ -1609,7 +1997,11 @@ impl DESStation for FlowShopScheduleStation {
                 .jobs
                 .iter()
                 .map(|job| {
-                    schedule.iter().filter(|op| op.job_id == job.id).map(|op| op.finish).fold(f64::NEG_INFINITY, f64::max)
+                    schedule
+                        .iter()
+                        .filter(|op| op.job_id == job.id)
+                        .map(|op| op.finish)
+                        .fold(f64::NEG_INFINITY, f64::max)
                 })
                 .sum();
             let result = FlowShopNEHResult {
@@ -1619,7 +2011,8 @@ impl DESStation for FlowShopScheduleStation {
                 total_flow_time,
                 topology: empty_station_graph(),
             };
-            self.core.emit(Rc::new(FlowScheduleToken { result }), Self::CH_SCHEDULE);
+            self.core
+                .emit(Rc::new(FlowScheduleToken { result }), Self::CH_SCHEDULE);
         }
     }
 }
@@ -1633,7 +2026,10 @@ pub struct FlowShopSinkStation {
 impl FlowShopSinkStation {
     pub const CH_SCHEDULE: &'static str = CH_FLOW_SCHEDULE;
     pub fn new(id: impl Into<String>) -> Self {
-        FlowShopSinkStation { core: StationCore::new(id), result: None }
+        FlowShopSinkStation {
+            core: StationCore::new(id),
+            result: None,
+        }
     }
 }
 
@@ -1664,24 +2060,42 @@ fn default_jobs() -> Vec<JobShopJob> {
             id: "J1".to_string(),
             due: Some(10.0),
             operations: vec![
-                JobOperation { machine: "M1".to_string(), duration: 3.0 },
-                JobOperation { machine: "M2".to_string(), duration: 2.0 },
+                JobOperation {
+                    machine: "M1".to_string(),
+                    duration: 3.0,
+                },
+                JobOperation {
+                    machine: "M2".to_string(),
+                    duration: 2.0,
+                },
             ],
         },
         JobShopJob {
             id: "J2".to_string(),
             due: Some(8.0),
             operations: vec![
-                JobOperation { machine: "M2".to_string(), duration: 2.0 },
-                JobOperation { machine: "M1".to_string(), duration: 4.0 },
+                JobOperation {
+                    machine: "M2".to_string(),
+                    duration: 2.0,
+                },
+                JobOperation {
+                    machine: "M1".to_string(),
+                    duration: 4.0,
+                },
             ],
         },
         JobShopJob {
             id: "J3".to_string(),
             due: Some(12.0),
             operations: vec![
-                JobOperation { machine: "M1".to_string(), duration: 2.0 },
-                JobOperation { machine: "M2".to_string(), duration: 3.0 },
+                JobOperation {
+                    machine: "M1".to_string(),
+                    duration: 2.0,
+                },
+                JobOperation {
+                    machine: "M2".to_string(),
+                    duration: 3.0,
+                },
             ],
         },
     ]
@@ -1690,50 +2104,121 @@ fn default_jobs() -> Vec<JobShopJob> {
 pub fn run_job_shop_dispatch(params: JobShopDispatchParams) -> JobShopDispatchResult {
     let jobs = non_empty_array(params.jobs.as_deref(), &default_jobs());
     let source = Rc::new(RefCell::new(JobSourceStation::new("job-source", jobs)));
-    let scheduler = Rc::new(RefCell::new(DispatchSchedulerStation::new("dispatch-scheduler", params.rule.unwrap_or(DispatchRule::Spt))));
+    let scheduler = Rc::new(RefCell::new(DispatchSchedulerStation::new(
+        "dispatch-scheduler",
+        params.rule.unwrap_or(DispatchRule::Spt),
+    )));
     let sink = Rc::new(RefCell::new(ScheduleSinkStation::new("schedule-sink")));
 
-    source.borrow_mut().core_mut().pipe(scheduler.clone() as StationRef, JobSourceStation::CH_JOB, DispatchSchedulerStation::CH_JOB);
-    scheduler.borrow_mut().core_mut().pipe(sink.clone() as StationRef, DispatchSchedulerStation::CH_SCHEDULE, ScheduleSinkStation::CH_SCHEDULE);
-
-    run_iterative_des(
-        vec![source.clone() as StationRef, scheduler.clone() as StationRef, sink.clone() as StationRef],
-        IterativeRunOptions { shuffle: false, ..Default::default() },
+    source.borrow_mut().core_mut().pipe(
+        scheduler.clone() as StationRef,
+        JobSourceStation::CH_JOB,
+        DispatchSchedulerStation::CH_JOB,
+    );
+    scheduler.borrow_mut().core_mut().pipe(
+        sink.clone() as StationRef,
+        DispatchSchedulerStation::CH_SCHEDULE,
+        ScheduleSinkStation::CH_SCHEDULE,
     );
 
-    let mut result = sink.borrow().result.clone().unwrap_or_else(|| panic!("job-shop-dispatch did not produce a result"));
+    run_iterative_des(
+        vec![
+            source.clone() as StationRef,
+            scheduler.clone() as StationRef,
+            sink.clone() as StationRef,
+        ],
+        IterativeRunOptions {
+            shuffle: false,
+            ..Default::default()
+        },
+    );
+
+    let mut result = sink
+        .borrow()
+        .result
+        .clone()
+        .unwrap_or_else(|| panic!("job-shop-dispatch did not produce a result"));
     let stations = [
         StationOrId::Id("job-source".to_string()),
         StationOrId::Id("dispatch-scheduler".to_string()),
         StationOrId::Id("schedule-sink".to_string()),
     ];
     let edges = vec![
-        channel_edge(&stations[0], JobSourceStation::CH_JOB, &stations[1], Some(DispatchSchedulerStation::CH_JOB)),
-        channel_edge(&stations[1], DispatchSchedulerStation::CH_SCHEDULE, &stations[2], Some(ScheduleSinkStation::CH_SCHEDULE)),
+        channel_edge(
+            &stations[0],
+            JobSourceStation::CH_JOB,
+            &stations[1],
+            Some(DispatchSchedulerStation::CH_JOB),
+        ),
+        channel_edge(
+            &stations[1],
+            DispatchSchedulerStation::CH_SCHEDULE,
+            &stations[2],
+            Some(ScheduleSinkStation::CH_SCHEDULE),
+        ),
     ];
-    result.topology = station_graph(&stations, &["JobToken".to_string(), "ScheduleToken".to_string()], &edges);
+    result.topology = station_graph(
+        &stations,
+        &["JobToken".to_string(), "ScheduleToken".to_string()],
+        &edges,
+    );
     result
 }
 
 fn default_flow_shop_jobs() -> Vec<FlowShopJob> {
     vec![
-        FlowShopJob { id: "F1".to_string(), processing_times: vec![2.0, 3.0, 2.0], due: None },
-        FlowShopJob { id: "F2".to_string(), processing_times: vec![4.0, 1.0, 3.0], due: None },
-        FlowShopJob { id: "F3".to_string(), processing_times: vec![3.0, 2.0, 4.0], due: None },
-        FlowShopJob { id: "F4".to_string(), processing_times: vec![2.0, 5.0, 1.0], due: None },
+        FlowShopJob {
+            id: "F1".to_string(),
+            processing_times: vec![2.0, 3.0, 2.0],
+            due: None,
+        },
+        FlowShopJob {
+            id: "F2".to_string(),
+            processing_times: vec![4.0, 1.0, 3.0],
+            due: None,
+        },
+        FlowShopJob {
+            id: "F3".to_string(),
+            processing_times: vec![3.0, 2.0, 4.0],
+            due: None,
+        },
+        FlowShopJob {
+            id: "F4".to_string(),
+            processing_times: vec![2.0, 5.0, 1.0],
+            due: None,
+        },
     ]
 }
 
 pub fn run_flow_shop_neh(params: FlowShopNEHParams) -> FlowShopNEHResult {
     let jobs = non_empty_array(params.jobs.as_deref(), &default_flow_shop_jobs());
-    let source = Rc::new(RefCell::new(FlowShopJobSourceStation::new("flow-shop-source", jobs)));
-    let neh = Rc::new(RefCell::new(NEHSequenceStation::new("neh-sequence-builder")));
-    let scheduler = Rc::new(RefCell::new(FlowShopScheduleStation::new("flow-shop-scheduler")));
+    let source = Rc::new(RefCell::new(FlowShopJobSourceStation::new(
+        "flow-shop-source",
+        jobs,
+    )));
+    let neh = Rc::new(RefCell::new(NEHSequenceStation::new(
+        "neh-sequence-builder",
+    )));
+    let scheduler = Rc::new(RefCell::new(FlowShopScheduleStation::new(
+        "flow-shop-scheduler",
+    )));
     let sink = Rc::new(RefCell::new(FlowShopSinkStation::new("flow-shop-sink")));
 
-    source.borrow_mut().core_mut().pipe(neh.clone() as StationRef, FlowShopJobSourceStation::CH_JOB, NEHSequenceStation::CH_JOB);
-    neh.borrow_mut().core_mut().pipe(scheduler.clone() as StationRef, NEHSequenceStation::CH_SEQUENCE, FlowShopScheduleStation::CH_SEQUENCE);
-    scheduler.borrow_mut().core_mut().pipe(sink.clone() as StationRef, FlowShopScheduleStation::CH_SCHEDULE, FlowShopSinkStation::CH_SCHEDULE);
+    source.borrow_mut().core_mut().pipe(
+        neh.clone() as StationRef,
+        FlowShopJobSourceStation::CH_JOB,
+        NEHSequenceStation::CH_JOB,
+    );
+    neh.borrow_mut().core_mut().pipe(
+        scheduler.clone() as StationRef,
+        NEHSequenceStation::CH_SEQUENCE,
+        FlowShopScheduleStation::CH_SEQUENCE,
+    );
+    scheduler.borrow_mut().core_mut().pipe(
+        sink.clone() as StationRef,
+        FlowShopScheduleStation::CH_SCHEDULE,
+        FlowShopSinkStation::CH_SCHEDULE,
+    );
 
     run_iterative_des(
         vec![
@@ -1742,10 +2227,17 @@ pub fn run_flow_shop_neh(params: FlowShopNEHParams) -> FlowShopNEHResult {
             scheduler.clone() as StationRef,
             sink.clone() as StationRef,
         ],
-        IterativeRunOptions { shuffle: false, ..Default::default() },
+        IterativeRunOptions {
+            shuffle: false,
+            ..Default::default()
+        },
     );
 
-    let mut result = sink.borrow().result.clone().unwrap_or_else(|| panic!("flow-shop-neh did not produce a result"));
+    let mut result = sink
+        .borrow()
+        .result
+        .clone()
+        .unwrap_or_else(|| panic!("flow-shop-neh did not produce a result"));
     let stations = [
         StationOrId::Id("flow-shop-source".to_string()),
         StationOrId::Id("neh-sequence-builder".to_string()),
@@ -1753,13 +2245,32 @@ pub fn run_flow_shop_neh(params: FlowShopNEHParams) -> FlowShopNEHResult {
         StationOrId::Id("flow-shop-sink".to_string()),
     ];
     let edges = vec![
-        channel_edge(&stations[0], FlowShopJobSourceStation::CH_JOB, &stations[1], Some(NEHSequenceStation::CH_JOB)),
-        channel_edge(&stations[1], NEHSequenceStation::CH_SEQUENCE, &stations[2], Some(FlowShopScheduleStation::CH_SEQUENCE)),
-        channel_edge(&stations[2], FlowShopScheduleStation::CH_SCHEDULE, &stations[3], Some(FlowShopSinkStation::CH_SCHEDULE)),
+        channel_edge(
+            &stations[0],
+            FlowShopJobSourceStation::CH_JOB,
+            &stations[1],
+            Some(NEHSequenceStation::CH_JOB),
+        ),
+        channel_edge(
+            &stations[1],
+            NEHSequenceStation::CH_SEQUENCE,
+            &stations[2],
+            Some(FlowShopScheduleStation::CH_SEQUENCE),
+        ),
+        channel_edge(
+            &stations[2],
+            FlowShopScheduleStation::CH_SCHEDULE,
+            &stations[3],
+            Some(FlowShopSinkStation::CH_SCHEDULE),
+        ),
     ];
     result.topology = station_graph(
         &stations,
-        &["FlowJobToken".to_string(), "FlowSequenceToken".to_string(), "FlowScheduleToken".to_string()],
+        &[
+            "FlowJobToken".to_string(),
+            "FlowSequenceToken".to_string(),
+            "FlowScheduleToken".to_string(),
+        ],
         &edges,
     );
     result
@@ -1775,7 +2286,10 @@ fn qp_objective(q: &[Vec<f64>], c: &[f64], x: &[f64]) -> f64 {
 }
 
 fn qp_gradient(q: &[Vec<f64>], c: &[f64], x: &[f64]) -> Vec<f64> {
-    q.iter().enumerate().map(|(i, row)| dot(row, x) + c[i]).collect()
+    q.iter()
+        .enumerate()
+        .map(|(i, row)| dot(row, x) + c[i])
+        .collect()
 }
 
 /// Exact assignment via memoised bitmask DP (TS `solveAssignmentDP`).
@@ -1783,7 +2297,10 @@ fn solve_assignment_dp(cost: &[Vec<f64>]) -> (Vec<i64>, f64) {
     let n = cost.len();
     let mut memo: HashMap<(usize, u32), (f64, Vec<usize>)> = HashMap::new();
     let (objective, assignment) = dp_solve(0, 0, cost, n, &mut memo);
-    (assignment.into_iter().map(|c| c as i64).collect(), objective)
+    (
+        assignment.into_iter().map(|c| c as i64).collect(),
+        objective,
+    )
 }
 
 fn dp_solve(
@@ -1826,9 +2343,19 @@ fn route_distance(depot: Point, customers: &[VRPCustomer]) -> f64 {
     }
     let mut d = dist(depot.x, depot.y, customers[0].x, customers[0].y);
     for i in 1..customers.len() {
-        d += dist(customers[i - 1].x, customers[i - 1].y, customers[i].x, customers[i].y);
+        d += dist(
+            customers[i - 1].x,
+            customers[i - 1].y,
+            customers[i].x,
+            customers[i].y,
+        );
     }
-    d + dist(customers[customers.len() - 1].x, customers[customers.len() - 1].y, depot.x, depot.y)
+    d + dist(
+        customers[customers.len() - 1].x,
+        customers[customers.len() - 1].y,
+        depot.x,
+        depot.y,
+    )
 }
 
 /// Internal remaining-job cursor for dispatch scheduling.
@@ -1840,10 +2367,18 @@ struct Remaining {
 fn dispatch_schedule(jobs: &[JobShopJob], rule: DispatchRule) -> JobShopDispatchResult {
     let mut machine_ready: HashMap<String, f64> = HashMap::new();
     let mut job_ready: HashMap<String, f64> = HashMap::new();
-    let mut remaining: Vec<Remaining> = (0..jobs.len()).map(|job_idx| Remaining { job_idx, op_index: 0 }).collect();
+    let mut remaining: Vec<Remaining> = (0..jobs.len())
+        .map(|job_idx| Remaining {
+            job_idx,
+            op_index: 0,
+        })
+        .collect();
     let mut schedule: Vec<ScheduledOperation> = Vec::new();
 
-    while remaining.iter().any(|r| r.op_index < jobs[r.job_idx].operations.len()) {
+    while remaining
+        .iter()
+        .any(|r| r.op_index < jobs[r.job_idx].operations.len())
+    {
         let mut ready: Vec<usize> = (0..remaining.len())
             .filter(|&k| remaining[k].op_index < jobs[remaining[k].job_idx].operations.len())
             .collect();
@@ -1851,9 +2386,10 @@ fn dispatch_schedule(jobs: &[JobShopJob], rule: DispatchRule) -> JobShopDispatch
             let ra = &remaining[a];
             let rb = &remaining[b];
             match rule {
-                DispatchRule::Edd => {
-                    jobs[ra.job_idx].due.unwrap_or(f64::INFINITY).total_cmp(&jobs[rb.job_idx].due.unwrap_or(f64::INFINITY))
-                }
+                DispatchRule::Edd => jobs[ra.job_idx]
+                    .due
+                    .unwrap_or(f64::INFINITY)
+                    .total_cmp(&jobs[rb.job_idx].due.unwrap_or(f64::INFINITY)),
                 DispatchRule::Spt => jobs[ra.job_idx].operations[ra.op_index]
                     .duration
                     .total_cmp(&jobs[rb.job_idx].operations[rb.op_index].duration),
@@ -1864,7 +2400,11 @@ fn dispatch_schedule(jobs: &[JobShopJob], rule: DispatchRule) -> JobShopDispatch
         let job_idx = remaining[next_idx].job_idx;
         let op_index = remaining[next_idx].op_index;
         let op = jobs[job_idx].operations[op_index].clone();
-        let start = machine_ready.get(&op.machine).copied().unwrap_or(0.0).max(job_ready.get(&jobs[job_idx].id).copied().unwrap_or(0.0));
+        let start = machine_ready
+            .get(&op.machine)
+            .copied()
+            .unwrap_or(0.0)
+            .max(job_ready.get(&jobs[job_idx].id).copied().unwrap_or(0.0));
         let finish = start + op.duration;
         schedule.push(ScheduledOperation {
             job_id: jobs[job_idx].id.clone(),
@@ -1878,12 +2418,26 @@ fn dispatch_schedule(jobs: &[JobShopJob], rule: DispatchRule) -> JobShopDispatch
         remaining[next_idx].op_index += 1;
     }
 
-    let makespan = schedule.iter().map(|op| op.finish).fold(f64::NEG_INFINITY, f64::max);
+    let makespan = schedule
+        .iter()
+        .map(|op| op.finish)
+        .fold(f64::NEG_INFINITY, f64::max);
     let total_flow_time: f64 = jobs
         .iter()
-        .map(|job| schedule.iter().filter(|op| op.job_id == job.id).map(|op| op.finish).fold(f64::NEG_INFINITY, f64::max))
+        .map(|job| {
+            schedule
+                .iter()
+                .filter(|op| op.job_id == job.id)
+                .map(|op| op.finish)
+                .fold(f64::NEG_INFINITY, f64::max)
+        })
         .sum();
-    JobShopDispatchResult { schedule, makespan, total_flow_time, topology: empty_station_graph() }
+    JobShopDispatchResult {
+        schedule,
+        makespan,
+        total_flow_time,
+        topology: empty_station_graph(),
+    }
 }
 
 fn neh_sequence(jobs: &[FlowShopJob]) -> Vec<FlowShopJob> {
@@ -1891,7 +2445,9 @@ fn neh_sequence(jobs: &[FlowShopJob]) -> Vec<FlowShopJob> {
     ordered.sort_by(|a, b| total_processing_time(b).total_cmp(&total_processing_time(a)));
     let mut sequence: Vec<FlowShopJob> = Vec::new();
     for job in ordered {
-        let mut best: Vec<FlowShopJob> = std::iter::once(job.clone()).chain(sequence.iter().cloned()).collect();
+        let mut best: Vec<FlowShopJob> = std::iter::once(job.clone())
+            .chain(sequence.iter().cloned())
+            .collect();
         let mut best_makespan = flow_shop_makespan(&best);
         for pos in 1..=sequence.len() {
             let mut candidate = sequence.clone();
@@ -1934,7 +2490,10 @@ fn build_flow_shop_schedule(sequence: &[FlowShopJob]) -> Vec<ScheduledOperation>
 }
 
 fn flow_shop_makespan(sequence: &[FlowShopJob]) -> f64 {
-    build_flow_shop_schedule(sequence).iter().map(|op| op.finish).fold(0.0_f64, f64::max)
+    build_flow_shop_schedule(sequence)
+        .iter()
+        .map(|op| op.finish)
+        .fold(0.0_f64, f64::max)
 }
 
 fn total_processing_time(job: &FlowShopJob) -> f64 {
@@ -1956,17 +2515,41 @@ mod tests {
     fn qp_projected_gradient_reaches_optimum() {
         let result = run_qp_projected_gradient(QPProjectedGradientParams::default());
         // min of ½xᵀQx + cᵀx for Q=[[4,1],[1,2]], c=[-8,-6] is x=(10/7, 16/7).
-        assert!((result.x[0] - 10.0 / 7.0).abs() < 1e-2, "x0 = {}", result.x[0]);
-        assert!((result.x[1] - 16.0 / 7.0).abs() < 1e-2, "x1 = {}", result.x[1]);
-        assert!((result.objective + 12.571).abs() < 1e-1, "objective = {}", result.objective);
+        assert!(
+            (result.x[0] - 10.0 / 7.0).abs() < 1e-2,
+            "x0 = {}",
+            result.x[0]
+        );
+        assert!(
+            (result.x[1] - 16.0 / 7.0).abs() < 1e-2,
+            "x1 = {}",
+            result.x[1]
+        );
+        assert!(
+            (result.objective + 12.571).abs() < 1e-1,
+            "objective = {}",
+            result.objective
+        );
     }
 
     #[test]
     fn qp_coordinate_descent_reaches_optimum() {
         let result = run_qp_coordinate_descent(QPProjectedGradientParams::default());
-        assert!((result.x[0] - 10.0 / 7.0).abs() < 1e-2, "x0 = {}", result.x[0]);
-        assert!((result.x[1] - 16.0 / 7.0).abs() < 1e-2, "x1 = {}", result.x[1]);
-        assert!(result.gradient_norm <= 1e-6, "‖g‖ = {}", result.gradient_norm);
+        assert!(
+            (result.x[0] - 10.0 / 7.0).abs() < 1e-2,
+            "x0 = {}",
+            result.x[0]
+        );
+        assert!(
+            (result.x[1] - 16.0 / 7.0).abs() < 1e-2,
+            "x1 = {}",
+            result.x[1]
+        );
+        assert!(
+            result.gradient_norm <= 1e-6,
+            "‖g‖ = {}",
+            result.gradient_norm
+        );
     }
 
     #[test]
@@ -1974,7 +2557,11 @@ mod tests {
         let result = run_hungarian_assignment(AssignmentParams::default());
         // The minimal perfect matching of [[9,2,7],[6,4,3],[5,8,1]] is
         // w0→j1 (2) + w1→j0 (6) + w2→j2 (1) = 9.
-        assert!((result.objective - 9.0).abs() < 1e-9, "objective = {}", result.objective);
+        assert!(
+            (result.objective - 9.0).abs() < 1e-9,
+            "objective = {}",
+            result.objective
+        );
         assert_eq!(result.assignment, vec![1, 0, 2]);
     }
 
@@ -1983,8 +2570,16 @@ mod tests {
         let result = run_auction_assignment(AuctionAssignmentParams::default());
         // Auction must converge to a complete (no -1) assignment at the
         // ε-optimal cost (within n·ε of the exact optimum 9).
-        assert!(result.assignment.iter().all(|&j| j >= 0), "incomplete: {:?}", result.assignment);
-        assert!(result.objective <= 9.0 + 0.1, "objective = {}", result.objective);
+        assert!(
+            result.assignment.iter().all(|&j| j >= 0),
+            "incomplete: {:?}",
+            result.assignment
+        );
+        assert!(
+            result.objective <= 9.0 + 0.1,
+            "objective = {}",
+            result.objective
+        );
     }
 
     #[test]
@@ -1992,7 +2587,10 @@ mod tests {
         let result = run_vrp_savings(VRPSavingsParams::default());
         let served: usize = result.routes.iter().map(|r| r.customers.len()).sum();
         assert_eq!(served, 5);
-        assert!(result.routes.iter().all(|r| r.load <= 5.0 + 1e-9), "capacity violated");
+        assert!(
+            result.routes.iter().all(|r| r.load <= 5.0 + 1e-9),
+            "capacity violated"
+        );
         assert!(result.total_distance > 0.0);
     }
 
@@ -2001,7 +2599,10 @@ mod tests {
         let result = run_vrp_nearest_neighbor(VRPSavingsParams::default());
         let served: usize = result.routes.iter().map(|r| r.customers.len()).sum();
         assert_eq!(served, 5);
-        assert!(result.routes.iter().all(|r| r.load <= 5.0 + 1e-9), "capacity violated");
+        assert!(
+            result.routes.iter().all(|r| r.load <= 5.0 + 1e-9),
+            "capacity violated"
+        );
     }
 
     #[test]

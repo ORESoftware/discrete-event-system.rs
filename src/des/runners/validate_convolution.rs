@@ -44,14 +44,21 @@ fn arr_f64(v: &JsonValue, key: &str) -> Vec<f64> {
 }
 
 fn arr_len(v: &JsonValue, key: &str) -> usize {
-    v.get(key).and_then(|a| a.as_array()).map(|a| a.len()).unwrap_or(0)
+    v.get(key)
+        .and_then(|a| a.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0)
 }
 
 /// `main()` — returns the exit code (0 = PASS).
 pub fn run() -> i32 {
     let root = root();
     let ts_path = root.join("out").join("convolution-framework.json");
-    let np_path = root.join("out").join("external").join("convolution").join("numpy.json");
+    let np_path = root
+        .join("out")
+        .join("external")
+        .join("convolution")
+        .join("numpy.json");
 
     let ts = match load_json(&ts_path) {
         Ok(v) => v,
@@ -66,7 +73,11 @@ pub fn run() -> i32 {
     let y_np = arr_f64(&np, "y");
 
     if y_ts.len() != y_np.len() {
-        eprintln!("length mismatch: framework={} numpy={}", y_ts.len(), y_np.len());
+        eprintln!(
+            "length mismatch: framework={} numpy={}",
+            y_ts.len(),
+            y_np.len()
+        );
         return 1;
     }
 

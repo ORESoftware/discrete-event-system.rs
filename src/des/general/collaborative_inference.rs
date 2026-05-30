@@ -316,8 +316,17 @@ struct RespondentSourceStation {
 }
 
 impl RespondentSourceStation {
-    fn new(id: impl Into<String>, responses: Vec<CollaborativeInferenceResponse>, respondents_per_tick: usize) -> Self {
-        RespondentSourceStation { core: StationCore::new(id), responses, respondents_per_tick, emitted_count: 0 }
+    fn new(
+        id: impl Into<String>,
+        responses: Vec<CollaborativeInferenceResponse>,
+        respondents_per_tick: usize,
+    ) -> Self {
+        RespondentSourceStation {
+            core: StationCore::new(id),
+            responses,
+            respondents_per_tick,
+            emitted_count: 0,
+        }
     }
 }
 
@@ -335,7 +344,9 @@ impl DESStation for RespondentSourceStation {
         self.emitted_count < self.responses.len()
     }
     fn run_time_step(&mut self) {
-        let n = self.respondents_per_tick.min(self.responses.len() - self.emitted_count);
+        let n = self
+            .respondents_per_tick
+            .min(self.responses.len() - self.emitted_count);
         for _ in 0..n {
             let response = self.responses[self.emitted_count].clone();
             let token: AnyToken = Rc::new(RespondentToken { response });
@@ -390,15 +401,18 @@ impl SurveyEncoderStation {
     }
 
     fn process(&mut self, response: &CollaborativeInferenceResponse) {
-        let respondent_id =
-            response.id.clone().unwrap_or_else(|| format!("respondent-{}", self.respondents_processed));
+        let respondent_id = response
+            .id
+            .clone()
+            .unwrap_or_else(|| format!("respondent-{}", self.respondents_processed));
         let mut seen: HashSet<String> = HashSet::new();
         if let Some(item_ids) = &response.item_ids {
             for item_id in item_ids {
                 if self.valid_item_ids.contains(item_id) {
                     seen.insert(item_id.clone());
                 } else {
-                    self.invalid_evidence.push(format!("{respondent_id}: unknown item {item_id}"));
+                    self.invalid_evidence
+                        .push(format!("{respondent_id}: unknown item {item_id}"));
                 }
             }
         }
@@ -416,7 +430,12 @@ impl SurveyEncoderStation {
                 }
             }
         }
-        let profile = respondent_weight_profile(response, &seen, &self.credibility, self.preliminary_scores.as_ref());
+        let profile = respondent_weight_profile(
+            response,
+            &seen,
+            &self.credibility,
+            self.preliminary_scores.as_ref(),
+        );
         self.respondent_weight_sum += profile.respondent_weight;
         self.max_respondent_weight = self.max_respondent_weight.max(profile.respondent_weight);
         self.capped_experience_claims += profile.capped_experience_claims;
@@ -428,10 +447,15 @@ impl SurveyEncoderStation {
             for item_id in sorted_keys(ratings) {
                 let raw_rating = ratings[&item_id];
                 if !self.valid_item_ids.contains(&item_id) {
-                    self.invalid_evidence.push(format!("{respondent_id}: rating references unknown item {item_id}"));
+                    self.invalid_evidence.push(format!(
+                        "{respondent_id}: rating references unknown item {item_id}"
+                    ));
                     continue;
                 }
-                if !raw_rating.is_finite() || raw_rating < self.rating_min || raw_rating > self.rating_max {
+                if !raw_rating.is_finite()
+                    || raw_rating < self.rating_min
+                    || raw_rating > self.rating_max
+                {
                     self.invalid_evidence.push(format!(
                         "{respondent_id}: rating for {item_id} outside [{}, {}]",
                         self.rating_min, self.rating_max
@@ -439,7 +463,11 @@ impl SurveyEncoderStation {
                     continue;
                 }
                 seen.insert(item_id.clone());
-                let weight = profile.item_weights.get(&item_id).copied().unwrap_or(profile.respondent_weight);
+                let weight = profile
+                    .item_weights
+                    .get(&item_id)
+                    .copied()
+                    .unwrap_or(profile.respondent_weight);
                 let token: AnyToken = Rc::new(RatingEvidenceToken {
                     respondent_id: respondent_id.clone(),
                     item_id: item_id.clone(),
@@ -454,8 +482,16 @@ impl SurveyEncoderStation {
         let ranking = self.valid_ranking(response, &seen, &respondent_id);
         for i in 0..ranking.len() {
             for j in (i + 1)..ranking.len() {
-                let wi = profile.item_weights.get(&ranking[i]).copied().unwrap_or(profile.respondent_weight);
-                let wj = profile.item_weights.get(&ranking[j]).copied().unwrap_or(profile.respondent_weight);
+                let wi = profile
+                    .item_weights
+                    .get(&ranking[i])
+                    .copied()
+                    .unwrap_or(profile.respondent_weight);
+                let wj = profile
+                    .item_weights
+                    .get(&ranking[j])
+                    .copied()
+                    .unwrap_or(profile.respondent_weight);
                 let token: AnyToken = Rc::new(PairwisePreferenceToken {
                     respondent_id: respondent_id.clone(),
                     winner_id: ranking[i].clone(),
@@ -480,8 +516,18 @@ impl SurveyEncoderStation {
             _ => {
                 let mut v: Vec<String> = seen.iter().cloned().collect();
                 v.sort_by(|a, b| {
-                    let ar = response.ratings.as_ref().and_then(|m| m.get(a)).copied().unwrap_or(0.0);
-                    let br = response.ratings.as_ref().and_then(|m| m.get(b)).copied().unwrap_or(0.0);
+                    let ar = response
+                        .ratings
+                        .as_ref()
+                        .and_then(|m| m.get(a))
+                        .copied()
+                        .unwrap_or(0.0);
+                    let br = response
+                        .ratings
+                        .as_ref()
+                        .and_then(|m| m.get(b))
+                        .copied()
+                        .unwrap_or(0.0);
                     match br.partial_cmp(&ar) {
                         Some(Ordering::Equal) | None => a.cmp(b),
                         Some(o) => o,
@@ -494,7 +540,9 @@ impl SurveyEncoderStation {
         let mut used: HashSet<String> = HashSet::new();
         for item_id in raw_ranking {
             if !self.valid_item_ids.contains(&item_id) {
-                self.invalid_evidence.push(format!("{respondent_id}: ranking references unknown item {item_id}"));
+                self.invalid_evidence.push(format!(
+                    "{respondent_id}: ranking references unknown item {item_id}"
+                ));
                 continue;
             }
             if used.contains(&item_id) {
@@ -537,12 +585,22 @@ struct EvidenceAggregatorStation {
 }
 
 impl EvidenceAggregatorStation {
-    fn new(id: impl Into<String>, item_ids: &[String], survey: Rc<RefCell<SurveyEncoderStation>>) -> Self {
+    fn new(
+        id: impl Into<String>,
+        item_ids: &[String],
+        survey: Rc<RefCell<SurveyEncoderStation>>,
+    ) -> Self {
         let mut stats: HashMap<String, ItemEvidenceStats> = HashMap::new();
         for item_id in item_ids {
             stats.insert(item_id.clone(), empty_stats(item_id));
         }
-        EvidenceAggregatorStation { core: StationCore::new(id), stats, rating_evidence_count: 0, pairwise_evidence_count: 0, survey }
+        EvidenceAggregatorStation {
+            core: StationCore::new(id),
+            stats,
+            rating_evidence_count: 0,
+            pairwise_evidence_count: 0,
+            survey,
+        }
     }
 }
 
@@ -557,11 +615,14 @@ impl DESStation for EvidenceAggregatorStation {
         self
     }
     fn has_work(&self) -> bool {
-        self.core.inbox_size(CH_RATING_EVIDENCE) > 0 || self.core.inbox_size(CH_PAIRWISE_EVIDENCE) > 0
+        self.core.inbox_size(CH_RATING_EVIDENCE) > 0
+            || self.core.inbox_size(CH_PAIRWISE_EVIDENCE) > 0
     }
     fn run_time_step(&mut self) {
         let mut changed = false;
-        let ratings = self.core_mut().drain::<RatingEvidenceToken>(CH_RATING_EVIDENCE);
+        let ratings = self
+            .core_mut()
+            .drain::<RatingEvidenceToken>(CH_RATING_EVIDENCE);
         for rating in &ratings {
             if let Some(s) = self.stats.get_mut(&rating.item_id) {
                 s.rating_sum += rating.rating * rating.weight;
@@ -571,7 +632,9 @@ impl DESStation for EvidenceAggregatorStation {
                 changed = true;
             }
         }
-        let comparisons = self.core_mut().drain::<PairwisePreferenceToken>(CH_PAIRWISE_EVIDENCE);
+        let comparisons = self
+            .core_mut()
+            .drain::<PairwisePreferenceToken>(CH_PAIRWISE_EVIDENCE);
         for cmp in &comparisons {
             if !self.stats.contains_key(&cmp.winner_id) || !self.stats.contains_key(&cmp.loser_id) {
                 continue;
@@ -620,7 +683,15 @@ impl RankingInferenceStation {
         ranking_weight: f64,
         shrinkage: f64,
     ) -> Self {
-        RankingInferenceStation { core: StationCore::new(id), items, rating_min, rating_max, rating_weight, ranking_weight, shrinkage }
+        RankingInferenceStation {
+            core: StationCore::new(id),
+            items,
+            rating_min,
+            rating_max,
+            rating_weight,
+            ranking_weight,
+            shrinkage,
+        }
     }
 
     fn rank(&self, snapshot: &EvidenceSnapshotToken) -> Vec<CollaborativeItemScore> {
@@ -630,15 +701,30 @@ impl RankingInferenceStation {
             .items
             .iter()
             .map(|item| {
-                let s = snapshot.item_stats.get(&item.id).cloned().unwrap_or_else(|| empty_stats(&item.id));
-                let rating_mean = if s.rating_weight > 0.0 { s.rating_sum / s.rating_weight } else { midpoint };
+                let s = snapshot
+                    .item_stats
+                    .get(&item.id)
+                    .cloned()
+                    .unwrap_or_else(|| empty_stats(&item.id));
+                let rating_mean = if s.rating_weight > 0.0 {
+                    s.rating_sum / s.rating_weight
+                } else {
+                    midpoint
+                };
                 let rating_score = clamp01((rating_mean - self.rating_min) / width);
                 let comparisons = s.pairwise_wins + s.pairwise_losses;
-                let pairwise_win_rate = if comparisons > 0.0 { s.pairwise_wins / comparisons } else { 0.5 };
-                let pairwise_score = (s.pairwise_wins + 0.5 * self.shrinkage) / (comparisons + self.shrinkage);
-                let rating_confidence = s.rating_count as f64 / (s.rating_count as f64 + self.shrinkage);
+                let pairwise_win_rate = if comparisons > 0.0 {
+                    s.pairwise_wins / comparisons
+                } else {
+                    0.5
+                };
+                let pairwise_score =
+                    (s.pairwise_wins + 0.5 * self.shrinkage) / (comparisons + self.shrinkage);
+                let rating_confidence =
+                    s.rating_count as f64 / (s.rating_count as f64 + self.shrinkage);
                 let ranking_confidence = comparisons / (comparisons + self.shrinkage);
-                let evidence_weight = self.rating_weight * rating_confidence + self.ranking_weight * ranking_confidence;
+                let evidence_weight = self.rating_weight * rating_confidence
+                    + self.ranking_weight * ranking_confidence;
                 let prior_score = clamp01(item.prior_score.unwrap_or(0.5));
                 let empirical = if evidence_weight > 0.0 {
                     (self.rating_weight * rating_confidence * rating_score
@@ -650,7 +736,8 @@ impl RankingInferenceStation {
                 let support = s.rating_count as f64 + comparisons;
                 let confidence = support / (support + self.shrinkage);
                 let score = clamp01(confidence * empirical + (1.0 - confidence) * prior_score);
-                let uncertainty = ((score * (1.0 - score)).max(0.0) / (support + self.shrinkage).max(1.0)).sqrt();
+                let uncertainty =
+                    ((score * (1.0 - score)).max(0.0) / (support + self.shrinkage).max(1.0)).sqrt();
                 CollaborativeItemScore {
                     rank: 0,
                     item_id: item.id.clone(),
@@ -695,7 +782,9 @@ impl DESStation for RankingInferenceStation {
         self.core.inbox_size(CH_EVIDENCE_SNAPSHOT) > 0
     }
     fn run_time_step(&mut self) {
-        let snapshots = self.core_mut().drain::<EvidenceSnapshotToken>(CH_EVIDENCE_SNAPSHOT);
+        let snapshots = self
+            .core_mut()
+            .drain::<EvidenceSnapshotToken>(CH_EVIDENCE_SNAPSHOT);
         if snapshots.is_empty() {
             return;
         }
@@ -713,7 +802,10 @@ struct InferenceResultSinkStation {
 
 impl InferenceResultSinkStation {
     fn new(id: impl Into<String>) -> Self {
-        InferenceResultSinkStation { core: StationCore::new(id), latest: None }
+        InferenceResultSinkStation {
+            core: StationCore::new(id),
+            latest: None,
+        }
     }
 }
 
@@ -744,14 +836,25 @@ impl DESStation for InferenceResultSinkStation {
 
 /// Run the multi-pass collaborative-inference pipeline. (TS
 /// `runCollaborativeInference`.)
-pub fn run_collaborative_inference(params: CollaborativeInferenceParams) -> CollaborativeInferenceResult {
+pub fn run_collaborative_inference(
+    params: CollaborativeInferenceParams,
+) -> CollaborativeInferenceResult {
     let cfg = normalize_collaborative_inference_params(params);
-    let passes = if cfg.credibility.enabled { cfg.credibility.passes } else { 1 };
+    let passes = if cfg.credibility.enabled {
+        cfg.credibility.passes
+    } else {
+        1
+    };
     let mut preliminary_scores: Option<HashMap<String, f64>> = None;
     let mut final_run: Option<CollaborativeInferencePassResult> = None;
     for _pass in 0..passes {
         let run = run_collaborative_inference_pass(&cfg, preliminary_scores.as_ref());
-        preliminary_scores = Some(run.rankings.iter().map(|row| (row.item_id.clone(), row.score)).collect());
+        preliminary_scores = Some(
+            run.rankings
+                .iter()
+                .map(|row| (row.item_id.clone(), row.score))
+                .collect(),
+        );
         final_run = Some(run);
     }
     let final_run = final_run.unwrap_or_else(|| panic!("collaborative-inference did not run"));
@@ -792,8 +895,11 @@ fn run_collaborative_inference_pass(
         preliminary_scores.cloned(),
     )));
     let item_ids: Vec<String> = cfg.items.iter().map(|i| i.id.clone()).collect();
-    let aggregator =
-        Rc::new(RefCell::new(EvidenceAggregatorStation::new("evidence-aggregator", &item_ids, survey.clone())));
+    let aggregator = Rc::new(RefCell::new(EvidenceAggregatorStation::new(
+        "evidence-aggregator",
+        &item_ids,
+        survey.clone(),
+    )));
     let ranker = Rc::new(RefCell::new(RankingInferenceStation::new(
         "ranking-inference",
         cfg.items.clone(),
@@ -803,15 +909,36 @@ fn run_collaborative_inference_pass(
         cfg.ranking_weight,
         cfg.shrinkage,
     )));
-    let sink = Rc::new(RefCell::new(InferenceResultSinkStation::new("inference-result-sink")));
+    let sink = Rc::new(RefCell::new(InferenceResultSinkStation::new(
+        "inference-result-sink",
+    )));
 
-    source.borrow_mut().core_mut().pipe(survey.clone() as StationRef, CH_RESPONDENT, CH_RESPONDENT);
-    survey.borrow_mut().core_mut().pipe(aggregator.clone() as StationRef, CH_RATING_EVIDENCE, CH_RATING_EVIDENCE);
-    survey.borrow_mut().core_mut().pipe(aggregator.clone() as StationRef, CH_PAIRWISE_EVIDENCE, CH_PAIRWISE_EVIDENCE);
-    aggregator.borrow_mut().core_mut().pipe(ranker.clone() as StationRef, CH_EVIDENCE_SNAPSHOT, CH_EVIDENCE_SNAPSHOT);
-    ranker.borrow_mut().core_mut().pipe(sink.clone() as StationRef, CH_RANKING, CH_RANKING);
+    source
+        .borrow_mut()
+        .core_mut()
+        .pipe(survey.clone() as StationRef, CH_RESPONDENT, CH_RESPONDENT);
+    survey.borrow_mut().core_mut().pipe(
+        aggregator.clone() as StationRef,
+        CH_RATING_EVIDENCE,
+        CH_RATING_EVIDENCE,
+    );
+    survey.borrow_mut().core_mut().pipe(
+        aggregator.clone() as StationRef,
+        CH_PAIRWISE_EVIDENCE,
+        CH_PAIRWISE_EVIDENCE,
+    );
+    aggregator.borrow_mut().core_mut().pipe(
+        ranker.clone() as StationRef,
+        CH_EVIDENCE_SNAPSHOT,
+        CH_EVIDENCE_SNAPSHOT,
+    );
+    ranker
+        .borrow_mut()
+        .core_mut()
+        .pipe(sink.clone() as StationRef, CH_RANKING, CH_RANKING);
 
-    let max_ticks = (cfg.responses.len() as f64 / cfg.respondents_per_tick as f64).ceil() as usize + 5;
+    let max_ticks =
+        (cfg.responses.len() as f64 / cfg.respondents_per_tick as f64).ceil() as usize + 5;
     run_iterative_des(
         vec![
             source.clone() as StationRef,
@@ -820,15 +947,31 @@ fn run_collaborative_inference_pass(
             ranker.clone() as StationRef,
             sink.clone() as StationRef,
         ],
-        IterativeRunOptions { shuffle: false, max_ticks: Some(max_ticks), run_validators: false, ..Default::default() },
+        IterativeRunOptions {
+            shuffle: false,
+            max_ticks: Some(max_ticks),
+            run_validators: false,
+            ..Default::default()
+        },
     );
 
     let latest = sink.borrow().latest.clone();
-    let rankings =
-        latest.unwrap_or_else(|| panic!("collaborative-inference did not produce a ranking")).rankings.clone();
+    let rankings = latest
+        .unwrap_or_else(|| panic!("collaborative-inference did not produce a ranking"))
+        .rankings
+        .clone();
     let coverage = coverage_summary(&aggregator.borrow().stats);
     let emitted_count = source.borrow().emitted_count;
-    let (survey_processed, survey_rating, survey_pairwise, weight_sum, max_weight, capped, high_bonus, invalid) = {
+    let (
+        survey_processed,
+        survey_rating,
+        survey_pairwise,
+        weight_sum,
+        max_weight,
+        capped,
+        high_bonus,
+        invalid,
+    ) = {
         let s = survey.borrow();
         (
             s.respondents_processed,
@@ -883,7 +1026,9 @@ fn run_collaborative_inference_pass(
         ValidationCheck {
             name: "scores are finite probabilities".to_string(),
             group: group(),
-            passed: rankings.iter().all(|r| r.score.is_finite() && r.score >= 0.0 && r.score <= 1.0),
+            passed: rankings
+                .iter()
+                .all(|r| r.score.is_finite() && r.score >= 0.0 && r.score <= 1.0),
             expected: Some("score in [0, 1] for every item".to_string()),
             ..Default::default()
         },
@@ -908,7 +1053,14 @@ fn run_collaborative_inference_pass(
             passed: invalid.is_empty(),
             observed: Some(invalid.len().to_string()),
             expected: Some("0".to_string()),
-            details: Some(invalid.iter().take(3).cloned().collect::<Vec<_>>().join("; ")),
+            details: Some(
+                invalid
+                    .iter()
+                    .take(3)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            ),
         },
         ValidationCheck {
             name: "credibility weights are finite".to_string(),
@@ -916,7 +1068,11 @@ fn run_collaborative_inference_pass(
             passed: weight_sum.is_finite() && max_weight.is_finite(),
             observed: Some(format!(
                 "mean={}, max={}",
-                if survey_processed > 0 { weight_sum / survey_processed as f64 } else { 0.0 },
+                if survey_processed > 0 {
+                    weight_sum / survey_processed as f64
+                } else {
+                    0.0
+                },
                 max_weight
             )),
             expected: Some("finite respondent weights".to_string()),
@@ -1006,9 +1162,24 @@ fn build_topology() -> StationGraphSummary {
     let sink = StationOrId::Id("inference-result-sink".to_string());
     let edges = vec![
         channel_edge(&source, CH_RESPONDENT, &survey, Some(CH_RESPONDENT)),
-        channel_edge(&survey, CH_RATING_EVIDENCE, &aggregator, Some(CH_RATING_EVIDENCE)),
-        channel_edge(&survey, CH_PAIRWISE_EVIDENCE, &aggregator, Some(CH_PAIRWISE_EVIDENCE)),
-        channel_edge(&aggregator, CH_EVIDENCE_SNAPSHOT, &ranker, Some(CH_EVIDENCE_SNAPSHOT)),
+        channel_edge(
+            &survey,
+            CH_RATING_EVIDENCE,
+            &aggregator,
+            Some(CH_RATING_EVIDENCE),
+        ),
+        channel_edge(
+            &survey,
+            CH_PAIRWISE_EVIDENCE,
+            &aggregator,
+            Some(CH_PAIRWISE_EVIDENCE),
+        ),
+        channel_edge(
+            &aggregator,
+            CH_EVIDENCE_SNAPSHOT,
+            &ranker,
+            Some(CH_EVIDENCE_SNAPSHOT),
+        ),
         channel_edge(&ranker, CH_RANKING, &sink, Some(CH_RANKING)),
     ];
     station_graph(
@@ -1028,8 +1199,12 @@ fn build_topology() -> StationGraphSummary {
 // Normalization
 // =============================================================================
 
-fn normalize_collaborative_inference_params(params: CollaborativeInferenceParams) -> NormalizedConfig {
-    let scenario = params.scenario.unwrap_or(CollaborativeInferenceScenario::ProgrammingLanguages);
+fn normalize_collaborative_inference_params(
+    params: CollaborativeInferenceParams,
+) -> NormalizedConfig {
+    let scenario = params
+        .scenario
+        .unwrap_or(CollaborativeInferenceScenario::ProgrammingLanguages);
     let preset = scenario_preset(scenario);
     let items_src = match &params.items {
         Some(it) if !it.is_empty() => it.clone(),
@@ -1044,9 +1219,16 @@ fn normalize_collaborative_inference_params(params: CollaborativeInferenceParams
         panic!("collaborative-inference: item ids must be unique");
     }
 
-    let respondent_count = params.respondent_count.or(params.respondents).unwrap_or(preset.default_respondents);
-    let min_items = params.min_items_per_respondent.unwrap_or(preset.min_items_per_respondent);
-    let max_items = params.max_items_per_respondent.unwrap_or(preset.max_items_per_respondent);
+    let respondent_count = params
+        .respondent_count
+        .or(params.respondents)
+        .unwrap_or(preset.default_respondents);
+    let min_items = params
+        .min_items_per_respondent
+        .unwrap_or(preset.min_items_per_respondent);
+    let max_items = params
+        .max_items_per_respondent
+        .unwrap_or(preset.max_items_per_respondent);
     let rating_min = params.rating_min.unwrap_or(preset.rating_min);
     let rating_max = params.rating_max.unwrap_or(preset.rating_max);
     let seed = params.seed.unwrap_or(1);
@@ -1055,13 +1237,26 @@ fn normalize_collaborative_inference_params(params: CollaborativeInferenceParams
         panic!("collaborative-inference: ratingMax must be greater than ratingMin");
     }
     if min_items < 1 || max_items < min_items {
-        panic!("collaborative-inference: require 1 <= minItemsPerRespondent <= maxItemsPerRespondent");
+        panic!(
+            "collaborative-inference: require 1 <= minItemsPerRespondent <= maxItemsPerRespondent"
+        );
     }
 
     let noise_std = params.noise_std.unwrap_or(preset.noise_std);
-    let has_responses = params.responses.as_ref().map(|r| !r.is_empty()).unwrap_or(false);
+    let has_responses = params
+        .responses
+        .as_ref()
+        .map(|r| !r.is_empty())
+        .unwrap_or(false);
     let responses = if has_responses {
-        params.responses.as_ref().unwrap().iter().enumerate().map(|(i, r)| normalize_response(r, i)).collect()
+        params
+            .responses
+            .as_ref()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .map(|(i, r)| normalize_response(r, i))
+            .collect()
     } else {
         generate_synthetic_responses(
             &items,
@@ -1107,7 +1302,11 @@ fn normalize_items(items: &[CollaborativeInferenceItem]) -> Vec<CollaborativeInf
         .iter()
         .enumerate()
         .map(|(i, item)| {
-            let id = if item.id.is_empty() { format!("item-{}", i + 1) } else { item.id.clone() };
+            let id = if item.id.is_empty() {
+                format!("item-{}", i + 1)
+            } else {
+                item.id.clone()
+            };
             CollaborativeInferenceItem {
                 label: Some(item.label.clone().unwrap_or_else(|| id.clone())),
                 group: item.group.clone(),
@@ -1120,8 +1319,15 @@ fn normalize_items(items: &[CollaborativeInferenceItem]) -> Vec<CollaborativeInf
         .collect()
 }
 
-fn normalize_response(response: &CollaborativeInferenceResponse, index: usize) -> CollaborativeInferenceResponse {
-    let rating_ids: Vec<String> = response.ratings.as_ref().map(sorted_keys).unwrap_or_default();
+fn normalize_response(
+    response: &CollaborativeInferenceResponse,
+    index: usize,
+) -> CollaborativeInferenceResponse {
+    let rating_ids: Vec<String> = response
+        .ratings
+        .as_ref()
+        .map(sorted_keys)
+        .unwrap_or_default();
     let item_ids: Vec<String> = match &response.item_ids {
         Some(ids) if !ids.is_empty() => ids.clone(),
         _ => match &response.ranking {
@@ -1130,7 +1336,12 @@ fn normalize_response(response: &CollaborativeInferenceResponse, index: usize) -
         },
     };
     CollaborativeInferenceResponse {
-        id: Some(response.id.clone().unwrap_or_else(|| format!("respondent-{}", index + 1))),
+        id: Some(
+            response
+                .id
+                .clone()
+                .unwrap_or_else(|| format!("respondent-{}", index + 1)),
+        ),
         item_ids: Some(unique(&item_ids)),
         ratings: response.ratings.clone(),
         ranking: response.ranking.as_ref().map(|r| unique(r)),
@@ -1141,7 +1352,9 @@ fn normalize_response(response: &CollaborativeInferenceResponse, index: usize) -
     }
 }
 
-fn normalize_credibility_config(params: &CollaborativeInferenceParams) -> CredibilityWeightingConfig {
+fn normalize_credibility_config(
+    params: &CollaborativeInferenceParams,
+) -> CredibilityWeightingConfig {
     CredibilityWeightingConfig {
         enabled: params.credibility_weighting.unwrap_or(true),
         passes: params.credibility_passes.unwrap_or(2).max(1),
@@ -1151,7 +1364,10 @@ fn normalize_credibility_config(params: &CollaborativeInferenceParams) -> Credib
         age_weight_strength: params.age_weight_strength.unwrap_or(0.35).max(0.0),
         experience_weight_strength: params.experience_weight_strength.unwrap_or(0.60).max(0.0),
         high_rated_breadth_strength: params.high_rated_breadth_strength.unwrap_or(0.40).max(0.0),
-        high_rated_score_threshold: params.high_rated_score_threshold.unwrap_or(0.72).clamp(0.0, 1.0),
+        high_rated_score_threshold: params
+            .high_rated_score_threshold
+            .unwrap_or(0.72)
+            .clamp(0.0, 1.0),
         min_high_rated_items: params.min_high_rated_items.unwrap_or(2).max(1),
         max_multiplier: params.max_credibility_multiplier.unwrap_or(3.0).max(1.0),
     }
@@ -1187,37 +1403,59 @@ fn respondent_weight_profile(
         None => 1.0,
         Some(a) => {
             1.0 + cfg.age_weight_strength
-                * normalized_log((a - cfg.min_credible_age).max(0.0), (cfg.reference_age - cfg.min_credible_age).max(1.0))
+                * normalized_log(
+                    (a - cfg.min_credible_age).max(0.0),
+                    (cfg.reference_age - cfg.min_credible_age).max(1.0),
+                )
         }
     };
 
     let high_rated_item_count = match preliminary_scores {
         Some(scores) => seen_items
             .iter()
-            .filter(|item_id| scores.get(*item_id).copied().unwrap_or(0.0) >= cfg.high_rated_score_threshold)
+            .filter(|item_id| {
+                scores.get(*item_id).copied().unwrap_or(0.0) >= cfg.high_rated_score_threshold
+            })
             .count(),
         None => 0,
     };
     let breadth_multiplier = if high_rated_item_count >= cfg.min_high_rated_items {
-        1.0 + cfg.high_rated_breadth_strength * 2.0_f64.min(high_rated_item_count as f64 / cfg.min_high_rated_items as f64)
+        1.0 + cfg.high_rated_breadth_strength
+            * 2.0_f64.min(high_rated_item_count as f64 / cfg.min_high_rated_items as f64)
     } else {
         1.0
     };
 
-    let base = cap_multiplier(explicit_weight * age_multiplier * breadth_multiplier, explicit_weight, cfg.max_multiplier);
+    let base = cap_multiplier(
+        explicit_weight * age_multiplier * breadth_multiplier,
+        explicit_weight,
+        cfg.max_multiplier,
+    );
     let mut item_weights: HashMap<String, f64> = HashMap::new();
     let mut capped_experience_claims = 0usize;
     for item_id in seen_items {
         let raw_years = finite_non_negative(
-            response.experience_years.as_ref().and_then(|m| m.get(item_id).copied()),
+            response
+                .experience_years
+                .as_ref()
+                .and_then(|m| m.get(item_id).copied()),
         )
         .unwrap_or(0.0);
         let capped_years = raw_years.min(max_credible_years);
         if raw_years > capped_years + 1e-9 {
             capped_experience_claims += 1;
         }
-        let experience_multiplier = 1.0 + cfg.experience_weight_strength * normalized_log(capped_years, cfg.reference_experience_years);
-        item_weights.insert(item_id.clone(), cap_multiplier(base * experience_multiplier, explicit_weight, cfg.max_multiplier));
+        let experience_multiplier = 1.0
+            + cfg.experience_weight_strength
+                * normalized_log(capped_years, cfg.reference_experience_years);
+        item_weights.insert(
+            item_id.clone(),
+            cap_multiplier(
+                base * experience_multiplier,
+                explicit_weight,
+                cfg.max_multiplier,
+            ),
+        );
     }
 
     RespondentWeightProfile {
@@ -1253,8 +1491,12 @@ fn generate_synthetic_responses(
         let mut experience_years: HashMap<String, f64> = HashMap::new();
         for item in &selected {
             let latent = item.latent_utility.unwrap_or(0.5);
-            let noisy_utility = clamp01(latent + personal_offset + normal01(&mut rng) * noise_std / 10.0);
-            ratings.insert(item.id.clone(), round_to(rating_min + noisy_utility * (rating_max - rating_min), 2));
+            let noisy_utility =
+                clamp01(latent + personal_offset + normal01(&mut rng) * noise_std / 10.0);
+            ratings.insert(
+                item.id.clone(),
+                round_to(rating_min + noisy_utility * (rating_max - rating_min), 2),
+            );
             let seniority = 0.35 + 0.65 * rng.next_float();
             let inner = seniority * 18.0_f64.min(max_credible_years);
             experience_years.insert(item.id.clone(), round_to(max_credible_years.min(inner), 1));
@@ -1320,7 +1562,13 @@ fn simple_item(id: &str, label: &str, latent: f64, exposure: f64) -> Collaborati
     }
 }
 
-fn grouped_item(id: &str, label: &str, latent: f64, exposure: f64, group: &str) -> CollaborativeInferenceItem {
+fn grouped_item(
+    id: &str,
+    label: &str,
+    latent: f64,
+    exposure: f64,
+    group: &str,
+) -> CollaborativeInferenceItem {
     CollaborativeInferenceItem {
         id: id.to_string(),
         label: Some(label.to_string()),
@@ -1393,22 +1641,81 @@ fn programming_language_preset() -> ScenarioPreset {
         rating_min: 1.0,
         rating_max: 10.0,
         noise_std: 1.1,
-        items: names.iter().map(|(id, label, latent, exposure)| grouped_item(id, label, *latent, *exposure, "language")).collect(),
+        items: names
+            .iter()
+            .map(|(id, label, latent, exposure)| {
+                grouped_item(id, label, *latent, *exposure, "language")
+            })
+            .collect(),
     }
 }
 
 fn model_validation_preset() -> ScenarioPreset {
     let rows: [(&str, &str, f64, f64, &str); 12] = [
-        ("des-station-graph", "DES station graph", 0.86, 1.2, "execution"),
-        ("fel-reference", "Future-event-list reference", 0.78, 0.9, "validation"),
-        ("monte-carlo", "Monte Carlo replication", 0.76, 1.1, "validation"),
-        ("analytical-baseline", "Analytical baseline", 0.74, 0.8, "validation"),
-        ("simpy-reference", "SimPy reference model", 0.71, 0.7, "external"),
-        ("ciw-reference", "Ciw queueing reference", 0.68, 0.5, "external"),
+        (
+            "des-station-graph",
+            "DES station graph",
+            0.86,
+            1.2,
+            "execution",
+        ),
+        (
+            "fel-reference",
+            "Future-event-list reference",
+            0.78,
+            0.9,
+            "validation",
+        ),
+        (
+            "monte-carlo",
+            "Monte Carlo replication",
+            0.76,
+            1.1,
+            "validation",
+        ),
+        (
+            "analytical-baseline",
+            "Analytical baseline",
+            0.74,
+            0.8,
+            "validation",
+        ),
+        (
+            "simpy-reference",
+            "SimPy reference model",
+            0.71,
+            0.7,
+            "external",
+        ),
+        (
+            "ciw-reference",
+            "Ciw queueing reference",
+            0.68,
+            0.5,
+            "external",
+        ),
         ("agent-based", "Agent-based model", 0.66, 0.8, "execution"),
-        ("digital-twin", "Hybrid digital twin", 0.64, 0.45, "execution"),
-        ("neural-surrogate", "Neural surrogate", 0.60, 0.55, "approximation"),
-        ("spreadsheet", "Spreadsheet prototype", 0.48, 0.9, "baseline"),
+        (
+            "digital-twin",
+            "Hybrid digital twin",
+            0.64,
+            0.45,
+            "execution",
+        ),
+        (
+            "neural-surrogate",
+            "Neural surrogate",
+            0.60,
+            0.55,
+            "approximation",
+        ),
+        (
+            "spreadsheet",
+            "Spreadsheet prototype",
+            0.48,
+            0.9,
+            "baseline",
+        ),
         ("ad-hoc-script", "Ad-hoc script", 0.38, 1.0, "baseline"),
         ("manual-review", "Manual review only", 0.30, 0.6, "baseline"),
     ];
@@ -1421,19 +1728,48 @@ fn model_validation_preset() -> ScenarioPreset {
         rating_min: 1.0,
         rating_max: 7.0,
         noise_std: 0.9,
-        items: rows.iter().map(|(id, label, latent, exposure, group)| grouped_item(id, label, *latent, *exposure, group)).collect(),
+        items: rows
+            .iter()
+            .map(|(id, label, latent, exposure, group)| {
+                grouped_item(id, label, *latent, *exposure, group)
+            })
+            .collect(),
     }
 }
 
 fn learning_resources_preset() -> ScenarioPreset {
     let rows: [(&str, &str, f64, f64, &str); 10] = [
         ("worked-examples", "Worked examples", 0.84, 1.3, "practice"),
-        ("interactive-notebooks", "Interactive notebooks", 0.81, 1.1, "practice"),
-        ("project-builds", "Small project builds", 0.79, 1.0, "practice"),
+        (
+            "interactive-notebooks",
+            "Interactive notebooks",
+            0.81,
+            1.1,
+            "practice",
+        ),
+        (
+            "project-builds",
+            "Small project builds",
+            0.79,
+            1.0,
+            "practice",
+        ),
         ("office-hours", "Office hours", 0.74, 0.8, "support"),
-        ("visual-simulations", "Visual simulations", 0.72, 0.7, "exploration"),
+        (
+            "visual-simulations",
+            "Visual simulations",
+            0.72,
+            0.7,
+            "exploration",
+        ),
         ("short-videos", "Short videos", 0.68, 1.4, "content"),
-        ("textbook-chapters", "Textbook chapters", 0.62, 1.1, "content"),
+        (
+            "textbook-chapters",
+            "Textbook chapters",
+            0.62,
+            1.1,
+            "content",
+        ),
         ("flashcards", "Flashcards", 0.55, 0.8, "review"),
         ("long-lectures", "Long lectures", 0.50, 1.0, "content"),
         ("discussion-board", "Discussion board", 0.46, 0.7, "support"),
@@ -1447,7 +1783,12 @@ fn learning_resources_preset() -> ScenarioPreset {
         rating_min: 1.0,
         rating_max: 5.0,
         noise_std: 0.8,
-        items: rows.iter().map(|(id, label, latent, exposure, group)| grouped_item(id, label, *latent, *exposure, group)).collect(),
+        items: rows
+            .iter()
+            .map(|(id, label, latent, exposure, group)| {
+                grouped_item(id, label, *latent, *exposure, group)
+            })
+            .collect(),
     }
 }
 
@@ -1458,17 +1799,29 @@ fn learning_resources_preset() -> ScenarioPreset {
 fn coverage_summary(stats: &HashMap<String, ItemEvidenceStats>) -> CollaborativeInferenceCoverage {
     let rows: Vec<&ItemEvidenceStats> = stats.values().collect();
     let rating_counts: Vec<f64> = rows.iter().map(|r| r.rating_count as f64).collect();
-    let comparison_counts: Vec<f64> = rows.iter().map(|r| r.pairwise_wins + r.pairwise_losses).collect();
+    let comparison_counts: Vec<f64> = rows
+        .iter()
+        .map(|r| r.pairwise_wins + r.pairwise_losses)
+        .collect();
     CollaborativeInferenceCoverage {
         items: rows.len(),
         items_with_ratings: rating_counts.iter().filter(|&&v| v > 0.0).count(),
         items_with_comparisons: comparison_counts.iter().filter(|&&v| v > 0.0).count(),
         min_ratings_per_item: rating_counts.iter().copied().fold(f64::INFINITY, f64::min),
         mean_ratings_per_item: mean(&rating_counts),
-        max_ratings_per_item: rating_counts.iter().copied().fold(f64::NEG_INFINITY, f64::max),
-        min_comparisons_per_item: comparison_counts.iter().copied().fold(f64::INFINITY, f64::min),
+        max_ratings_per_item: rating_counts
+            .iter()
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max),
+        min_comparisons_per_item: comparison_counts
+            .iter()
+            .copied()
+            .fold(f64::INFINITY, f64::min),
         mean_comparisons_per_item: mean(&comparison_counts),
-        max_comparisons_per_item: comparison_counts.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+        max_comparisons_per_item: comparison_counts
+            .iter()
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max),
     }
 }
 
@@ -1496,11 +1849,23 @@ fn weighted_sample_without_replacement(
     let mut out: Vec<CollaborativeInferenceItem> = Vec::new();
     let n = count.min(pool.len());
     for _ in 0..n {
-        let total: f64 = pool.iter().map(|item| item.exposure.unwrap_or(1.0).max(0.0)).sum();
-        let mut draw = rng.next_float() * (if total > 0.0 { total } else { pool.len() as f64 });
+        let total: f64 = pool
+            .iter()
+            .map(|item| item.exposure.unwrap_or(1.0).max(0.0))
+            .sum();
+        let mut draw = rng.next_float()
+            * (if total > 0.0 {
+                total
+            } else {
+                pool.len() as f64
+            });
         let mut idx = 0usize;
         while idx < pool.len() {
-            draw -= if total > 0.0 { pool[idx].exposure.unwrap_or(1.0).max(0.0) } else { 1.0 };
+            draw -= if total > 0.0 {
+                pool[idx].exposure.unwrap_or(1.0).max(0.0)
+            } else {
+                1.0
+            };
             if draw <= 0.0 {
                 break;
             }
@@ -1614,7 +1979,10 @@ mod tests {
         };
         let result = run_collaborative_inference(params);
         assert_eq!(result.rankings.len(), 3);
-        assert!(result.rankings.iter().all(|r| r.score.is_finite() && r.score >= 0.0 && r.score <= 1.0));
+        assert!(result
+            .rankings
+            .iter()
+            .all(|r| r.score.is_finite() && r.score >= 0.0 && r.score <= 1.0));
         assert_eq!(result.coverage.items, 3);
         let mut ranks: Vec<usize> = result.rankings.iter().map(|r| r.rank).collect();
         ranks.sort();
@@ -1637,7 +2005,11 @@ mod tests {
         for (k, v) in ratings {
             m.insert(k.to_string(), *v);
         }
-        CollaborativeInferenceResponse { id: Some(id.to_string()), ratings: Some(m), ..Default::default() }
+        CollaborativeInferenceResponse {
+            id: Some(id.to_string()),
+            ratings: Some(m),
+            ..Default::default()
+        }
     }
 
     #[test]

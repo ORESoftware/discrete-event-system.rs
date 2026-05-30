@@ -76,7 +76,11 @@ impl PureEnvironment<usize, usize> for EnvAdapter {
     }
     fn step(&mut self, state: usize, action: usize) -> StepResult<usize> {
         let o = self.env.step(state, action);
-        StepResult { next_state: o.next_state, reward: o.reward, done: o.done }
+        StepResult {
+            next_state: o.next_state,
+            reward: o.reward,
+            done: o.done,
+        }
     }
 }
 
@@ -120,9 +124,21 @@ pub fn run_actor_critic_gridworld(opts: ActorCriticTrainOpts) -> ActorCriticResu
             panic!("{e}");
         }
     };
-    must(Preconditions::integer_in_range(cls, "numEpisodes", opts.num_episodes as f64, 1.0, 1e9));
+    must(Preconditions::integer_in_range(
+        cls,
+        "numEpisodes",
+        opts.num_episodes as f64,
+        1.0,
+        1e9,
+    ));
     if let Some(m) = opts.max_steps_per_episode {
-        must(Preconditions::integer_in_range(cls, "maxStepsPerEpisode", m as f64, 1.0, 1e9));
+        must(Preconditions::integer_in_range(
+            cls,
+            "maxStepsPerEpisode",
+            m as f64,
+            1.0,
+            1e9,
+        ));
     }
     if let Some(v) = opts.alpha_v {
         must(Preconditions::positive(cls, "alphaV", v));
@@ -137,10 +153,14 @@ pub fn run_actor_critic_gridworld(opts: ActorCriticTrainOpts) -> ActorCriticResu
         must(Preconditions::non_negative(cls, "entropyCoef", v));
     }
     if let Some(v) = opts.width {
-        must(Preconditions::integer_in_range(cls, "width", v as f64, 1.0, 10000.0));
+        must(Preconditions::integer_in_range(
+            cls, "width", v as f64, 1.0, 10000.0,
+        ));
     }
     if let Some(v) = opts.height {
-        must(Preconditions::integer_in_range(cls, "height", v as f64, 1.0, 10000.0));
+        must(Preconditions::integer_in_range(
+            cls, "height", v as f64, 1.0, 10000.0,
+        ));
     }
 
     let width = opts.width.unwrap_or(4);
@@ -148,8 +168,11 @@ pub fn run_actor_critic_gridworld(opts: ActorCriticTrainOpts) -> ActorCriticResu
     let max_steps = opts.max_steps_per_episode.unwrap_or(100);
     let shared = Rc::new(RefCell::new(mulberry32(opts.seed.unwrap_or(1))));
 
-    let env_concrete: Rc<GridWorld> =
-        Rc::new(GridWorld::new(GridWorldOptions { width: Some(width), height: Some(height), ..Default::default() }));
+    let env_concrete: Rc<GridWorld> = Rc::new(GridWorld::new(GridWorldOptions {
+        width: Some(width),
+        height: Some(height),
+        ..Default::default()
+    }));
     let num_states = env_concrete.num_states();
     let num_actions = env_concrete.num_actions();
 
@@ -168,7 +191,9 @@ pub fn run_actor_critic_gridworld(opts: ActorCriticTrainOpts) -> ActorCriticResu
     )));
     let env_station = Rc::new(RefCell::new(EnvironmentStation::new(
         "env",
-        Box::new(EnvAdapter { env: env_concrete.clone() }),
+        Box::new(EnvAdapter {
+            env: env_concrete.clone(),
+        }),
         EnvironmentStationOptions {
             num_episodes: Some(opts.num_episodes as f64),
             max_steps_per_episode: Some(max_steps),
@@ -195,12 +220,19 @@ pub fn run_actor_critic_gridworld(opts: ActorCriticTrainOpts) -> ActorCriticResu
     let r = shared.clone();
     des.rng = Some(Box::new(move || r.borrow_mut().next_float()));
     let summary = run_iterative_des(
-        vec![env_station.clone() as StationRef, agent.clone() as StationRef],
+        vec![
+            env_station.clone() as StationRef,
+            agent.clone() as StationRef,
+        ],
         des,
     );
 
     // Greedy rollout from a fresh evaluation environment.
-    let eval_env = GridWorld::new(GridWorldOptions { width: Some(width), height: Some(height), ..Default::default() });
+    let eval_env = GridWorld::new(GridWorldOptions {
+        width: Some(width),
+        height: Some(height),
+        ..Default::default()
+    });
     let mut s = eval_env.reset();
     let mut len = 0usize;
     let mut reached = false;
@@ -253,8 +285,16 @@ mod tests {
         let res = train(3000, 1);
         assert!(res.greedy_reached, "greedy policy should reach the goal");
         // Optimal path from start (0) to goal (15) on a 4×4 grid is 6 steps.
-        assert!(res.greedy_len <= 8, "greedy path should be short: {}", res.greedy_len);
-        assert!(res.v_start > 0.0, "start value should be positive: {}", res.v_start);
+        assert!(
+            res.greedy_len <= 8,
+            "greedy path should be short: {}",
+            res.greedy_len
+        );
+        assert!(
+            res.v_start > 0.0,
+            "start value should be positive: {}",
+            res.v_start
+        );
     }
 
     #[test]
@@ -273,6 +313,9 @@ mod tests {
         let window = 100;
         let first: f64 = h[..window].iter().sum::<f64>() / window as f64;
         let last: f64 = h[h.len() - window..].iter().sum::<f64>() / window as f64;
-        assert!(last < first, "mean TD error should shrink: first {first}, last {last}");
+        assert!(
+            last < first,
+            "mean TD error should shrink: first {first}, last {last}"
+        );
     }
 }

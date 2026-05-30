@@ -35,7 +35,12 @@ fn jb(v: bool) -> JsonValue {
     JsonValue::Bool(v)
 }
 fn jobj(entries: Vec<(&str, JsonValue)>) -> JsonValue {
-    JsonValue::Object(entries.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+    JsonValue::Object(
+        entries
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
+    )
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -72,7 +77,10 @@ impl State {
     }
 
     fn compartment_record(&self) -> HashMap<String, f64> {
-        COMPARTMENT_ORDER.iter().map(|c| (c.to_string(), self.compartment(c))).collect()
+        COMPARTMENT_ORDER
+            .iter()
+            .map(|c| (c.to_string(), self.compartment(c)))
+            .collect()
     }
 }
 
@@ -258,7 +266,10 @@ pub fn run_ode_once(config: &SimConfig, opts: &RunOpts) -> RunResult {
                 JsonValue::Object(vec![
                     ("created".to_string(), jn(x.c)),
                     ("absorbed".to_string(), jn(x.d)),
-                    ("finalPopulations".to_string(), JsonValue::Object(final_pop_json)),
+                    (
+                        "finalPopulations".to_string(),
+                        JsonValue::Object(final_pop_json),
+                    ),
                 ]),
             ),
         ]));
@@ -269,7 +280,10 @@ pub fn run_ode_once(config: &SimConfig, opts: &RunOpts) -> RunResult {
         kernel: Kernel::Ode,
         config: config.clone(),
         seed: opts.seed.unwrap_or(0),
-        totals: Totals { created: x.c, absorbed: x.d },
+        totals: Totals {
+            created: x.c,
+            absorbed: x.d,
+        },
         final_populations,
         transition_counts: tables.counts,
         split_probs: tables.splits,
@@ -286,7 +300,10 @@ mod tests {
 
     #[test]
     fn ode_kernel_runs_and_is_finite() {
-        let cfg = SimConfig { horizon_days: 50.0, ..default_config() };
+        let cfg = SimConfig {
+            horizon_days: 50.0,
+            ..default_config()
+        };
         let r = run_ode_once(&cfg, &RunOpts::default());
         assert_eq!(r.kernel, Kernel::Ode);
         for c in COMPARTMENT_ORDER {

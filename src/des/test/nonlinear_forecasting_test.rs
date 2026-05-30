@@ -30,12 +30,23 @@ mod tests {
             "FineTunedEquationToken",
             "ForecastProjectionToken",
         ] {
-            assert!(r.topology.movables.iter().any(|x| x == m), "missing movable {m}");
+            assert!(
+                r.topology.movables.iter().any(|x| x == m),
+                "missing movable {m}"
+            );
         }
 
         assert_eq!(r.pomdp.points.len(), 42);
-        assert!(r.mdp.states >= 512 && r.mdp.actions >= 8, "states={} actions={}", r.mdp.states, r.mdp.actions);
-        assert!(r.discovered_variables.iter().any(|v| v.source == VariableSource::Pomdp));
+        assert!(
+            r.mdp.states >= 512 && r.mdp.actions >= 8,
+            "states={} actions={}",
+            r.mdp.states,
+            r.mdp.actions
+        );
+        assert!(r
+            .discovered_variables
+            .iter()
+            .any(|v| v.source == VariableSource::Pomdp));
         assert!(r.metrics.validation_mse < r.metrics.baseline_validation_mse);
         assert!(r.metrics.forecast_mse < r.metrics.baseline_forecast_mse);
         assert_eq!(r.projection.len(), 8);

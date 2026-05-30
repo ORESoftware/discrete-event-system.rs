@@ -70,8 +70,12 @@ mod tests {
         let trials = 5000;
         let mut tie_rng = mulberry32(42);
         for _ in 0..trials {
-            let idx = arg_max_with_tie_break(&[7.0, 7.0, 7.0, 7.0, 7.0], &mut tie_rng, ARGMAX_EPS_DEFAULT)
-                .unwrap();
+            let idx = arg_max_with_tie_break(
+                &[7.0, 7.0, 7.0, 7.0, 7.0],
+                &mut tie_rng,
+                ARGMAX_EPS_DEFAULT,
+            )
+            .unwrap();
             counts[idx] += 1;
         }
         let expected = trials as f64 / 5.0;
@@ -85,7 +89,10 @@ mod tests {
                 sigma
             );
         }
-        assert!(counts.iter().all(|&c| c > 0), "every index hit at least once");
+        assert!(
+            counts.iter().all(|&c| c > 0),
+            "every index hit at least once"
+        );
     }
 
     #[test]
@@ -120,7 +127,12 @@ mod tests {
 
     #[test]
     fn scan_all_neg_infinity_returns_none() {
-        let r1 = scan_arg_max_tie_break(3, |_a| f64::NEG_INFINITY, &mut mulberry32(1), ARGMAX_EPS_DEFAULT);
+        let r1 = scan_arg_max_tie_break(
+            3,
+            |_a| f64::NEG_INFINITY,
+            &mut mulberry32(1),
+            ARGMAX_EPS_DEFAULT,
+        );
         assert_eq!(r1, None);
     }
 
@@ -128,8 +140,13 @@ mod tests {
     fn scan_uniform_over_four_way_tie() {
         let mut counts = [0usize; 4];
         for t in 0..2000u32 {
-            let i = scan_arg_max_tie_break(4, |_a| 1.0, &mut mulberry32(t * 31 + 17), ARGMAX_EPS_DEFAULT)
-                .unwrap();
+            let i = scan_arg_max_tie_break(
+                4,
+                |_a| 1.0,
+                &mut mulberry32(t * 31 + 17),
+                ARGMAX_EPS_DEFAULT,
+            )
+            .unwrap();
             counts[i] += 1;
         }
         assert!(
@@ -150,7 +167,10 @@ mod tests {
             vec![1, 2, 4]
         );
         assert_eq!(all_arg_max_ties(&[5.0], ARGMAX_EPS_DEFAULT), vec![0]);
-        assert_eq!(all_arg_max_ties(&[], ARGMAX_EPS_DEFAULT), Vec::<usize>::new());
+        assert_eq!(
+            all_arg_max_ties(&[], ARGMAX_EPS_DEFAULT),
+            Vec::<usize>::new()
+        );
         assert_eq!(choose_random_tied::<i32>(&[], &mut mulberry32(1)), None);
         assert_eq!(choose_random_tied(&[42], &mut mulberry32(1)), Some(&42));
     }
@@ -238,7 +258,10 @@ mod tests {
             },
         );
         for s in 0..5 {
-            assert!((rnd.v[s] - det.v[s]).abs() <= 1e-9, "V* mismatch at state {s}");
+            assert!(
+                (rnd.v[s] - det.v[s]).abs() <= 1e-9,
+                "V* mismatch at state {s}"
+            );
         }
     }
 

@@ -66,7 +66,11 @@ pub fn welch(a: &[f64], b: &[f64]) -> WelchResult {
     let n_a = a.len();
     let n_b = b.len();
     let se_sq = v_a / n_a as f64 + v_b / n_b as f64;
-    let t = if se_sq > 0.0 { (m_a - m_b) / se_sq.sqrt() } else { 0.0 };
+    let t = if se_sq > 0.0 {
+        (m_a - m_b) / se_sq.sqrt()
+    } else {
+        0.0
+    };
     let df = if se_sq > 0.0 {
         (se_sq * se_sq)
             / ((v_a / n_a as f64).powi(2) / (1.0_f64).max(n_a as f64 - 1.0)
@@ -74,7 +78,11 @@ pub fn welch(a: &[f64], b: &[f64]) -> WelchResult {
     } else {
         1.0
     };
-    let p_value_two_sided = if se_sq > 0.0 { 2.0 * (1.0 - normal_cdf(t.abs())) } else { 1.0 };
+    let p_value_two_sided = if se_sq > 0.0 {
+        2.0 * (1.0 - normal_cdf(t.abs()))
+    } else {
+        1.0
+    };
     WelchResult {
         mean_a: m_a,
         mean_b: m_b,

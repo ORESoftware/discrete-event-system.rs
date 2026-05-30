@@ -146,7 +146,13 @@ impl Population {
             p.t_infectious = 0.0;
             p.infected_by = -1;
         }
-        Population { people, rng, params, total_contacts: 0, total_transmissions: 0 }
+        Population {
+            people,
+            rng,
+            params,
+            total_contacts: 0,
+            total_transmissions: 0,
+        }
     }
 
     fn run_time_step(&mut self, t: i64) {
@@ -303,7 +309,13 @@ pub fn run_contact_seir(
         for t in 0..n_ticks {
             pop.run_time_step(t);
             if let Some(cb) = on_tick.as_deref_mut() {
-                cb(&pop.people, (t + 1) as f64 * params.step_size, t + 1, pop.total_contacts, pop.total_transmissions);
+                cb(
+                    &pop.people,
+                    (t + 1) as f64 * params.step_size,
+                    t + 1,
+                    pop.total_contacts,
+                    pop.total_transmissions,
+                );
             }
             let (mut s, mut e, mut i, mut r) = (0i64, 0i64, 0i64, 0i64);
             for p in &pop.people {
@@ -324,7 +336,11 @@ pub fn run_contact_seir(
         let final_attack_rate =
             (params.n as f64 - *trace.s.last().unwrap_or(&0) as f64) / params.n as f64;
 
-        let ever_infectious: Vec<&Person> = pop.people.iter().filter(|p| !p.t_infectious.is_nan()).collect();
+        let ever_infectious: Vec<&Person> = pop
+            .people
+            .iter()
+            .filter(|p| !p.t_infectious.is_nan())
+            .collect();
         let r0_empirical = if ever_infectious.is_empty() {
             0.0
         } else {
@@ -339,7 +355,11 @@ pub fn run_contact_seir(
             index_cases.iter().map(|p| p.offspring).sum::<f64>() / index_cases.len() as f64
         };
 
-        let gen2: Vec<&Person> = pop.people.iter().filter(|p| index_ids.contains(&p.infected_by)).collect();
+        let gen2: Vec<&Person> = pop
+            .people
+            .iter()
+            .filter(|p| index_ids.contains(&p.infected_by))
+            .collect();
         let r0_second_gen = if gen2.is_empty() {
             0.0
         } else {
@@ -373,7 +393,10 @@ pub fn run_contact_seir(
 }
 
 fn env_f64(key: &str, default: f64) -> f64 {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 fn mean(xs: &[f64]) -> f64 {
@@ -458,7 +481,10 @@ pub fn run() {
         params.sigma,
         params.gamma
     );
-    println!("#   simT={}, dt={}, reps={}", params.sim_t, params.step_size, reps);
+    println!(
+        "#   simT={}, dt={}, reps={}",
+        params.sim_t, params.step_size, reps
+    );
 
     let beta_theory = params.contact_rate * params.p_transmit;
     let r0_theory = beta_theory / params.gamma;
@@ -484,7 +510,10 @@ pub fn run() {
     let r0s: Vec<f64> = results.iter().map(|r| r.r0_empirical).collect();
     let r0idx: Vec<f64> = results.iter().map(|r| r.r0_index_only).collect();
     let total_c: Vec<f64> = results.iter().map(|r| r.total_contacts as f64).collect();
-    let total_t: Vec<f64> = results.iter().map(|r| r.total_transmissions as f64).collect();
+    let total_t: Vec<f64> = results
+        .iter()
+        .map(|r| r.total_transmissions as f64)
+        .collect();
 
     println!();
     println!("# {reps} replication(s) in {ms} ms");
@@ -493,11 +522,27 @@ pub fn run() {
         mean(&attack_rates) * 100.0,
         std_dev(&attack_rates) * 100.0
     );
-    println!("#   R₀ (all infectives): mean={:.2}   std={:.2}", mean(&r0s), std_dev(&r0s));
-    println!("#   R₀ (index cases)  : mean={:.2}   std={:.2}", mean(&r0idx), std_dev(&r0idx));
+    println!(
+        "#   R₀ (all infectives): mean={:.2}   std={:.2}",
+        mean(&r0s),
+        std_dev(&r0s)
+    );
+    println!(
+        "#   R₀ (index cases)  : mean={:.2}   std={:.2}",
+        mean(&r0idx),
+        std_dev(&r0idx)
+    );
     if params.kernel != Kernel::MassAction {
-        println!("#   total contacts    : mean={:.0}   std={:.0}", mean(&total_c), std_dev(&total_c));
-        println!("#   total transmissions: mean={:.0}   std={:.0}", mean(&total_t), std_dev(&total_t));
+        println!(
+            "#   total contacts    : mean={:.0}   std={:.0}",
+            mean(&total_c),
+            std_dev(&total_c)
+        );
+        println!(
+            "#   total transmissions: mean={:.0}   std={:.0}",
+            mean(&total_t),
+            std_dev(&total_t)
+        );
     }
 
     let _ = std::fs::create_dir_all("out");
@@ -548,7 +593,10 @@ pub fn run() {
         ("finalAttackRates", jarr_f64(&attack_rates)),
         ("R0_empirical", jarr_f64(&r0s)),
         ("R0_indexOnly", jarr_f64(&r0idx)),
-        ("traces", JsonValue::Array(results.iter().map(|r| trace_json(&r.trace)).collect())),
+        (
+            "traces",
+            JsonValue::Array(results.iter().map(|r| trace_json(&r.trace)).collect()),
+        ),
         ("perPerson", per_person_json),
     ]);
     let _ = std::fs::write(&out_path, doc.to_string());

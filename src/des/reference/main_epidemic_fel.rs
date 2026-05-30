@@ -89,34 +89,82 @@ fn successors_table() -> Vec<(&'static str, Vec<Branch>)> {
     vec![
         ("main-source", vec![Branch { prob: 1.0, to: "S" }]),
         ("S", vec![Branch { prob: 1.0, to: "E" }]),
-        ("E", vec![Branch { prob: 1.0, to: "I-P" }]),
-        ("I-P", vec![Branch { prob: 1.0, to: "I-P-Decision" }]),
+        (
+            "E",
+            vec![Branch {
+                prob: 1.0,
+                to: "I-P",
+            }],
+        ),
+        (
+            "I-P",
+            vec![Branch {
+                prob: 1.0,
+                to: "I-P-Decision",
+            }],
+        ),
         (
             "I-P-Decision",
             vec![
-                Branch { prob: PROBS_ASYMPTOMATIC_SHARE, to: "I-A" },
-                Branch { prob: 1.0 - PROBS_ASYMPTOMATIC_SHARE, to: "I-S" },
+                Branch {
+                    prob: PROBS_ASYMPTOMATIC_SHARE,
+                    to: "I-A",
+                },
+                Branch {
+                    prob: 1.0 - PROBS_ASYMPTOMATIC_SHARE,
+                    to: "I-S",
+                },
             ],
         ),
         ("I-A", vec![Branch { prob: 1.0, to: "R" }]),
-        ("I-S", vec![Branch { prob: 1.0, to: "I-S-Decision" }]),
+        (
+            "I-S",
+            vec![Branch {
+                prob: 1.0,
+                to: "I-S-Decision",
+            }],
+        ),
         (
             "I-S-Decision",
             vec![
-                Branch { prob: 1.0 - PROBS_HOSPITALIZATION_GIVEN_SYMPTOM, to: "R" },
-                Branch { prob: PROBS_HOSPITALIZATION_GIVEN_SYMPTOM, to: "I-H" },
+                Branch {
+                    prob: 1.0 - PROBS_HOSPITALIZATION_GIVEN_SYMPTOM,
+                    to: "R",
+                },
+                Branch {
+                    prob: PROBS_HOSPITALIZATION_GIVEN_SYMPTOM,
+                    to: "I-H",
+                },
             ],
         ),
-        ("I-H", vec![Branch { prob: 1.0, to: "I-H-Decision" }]),
+        (
+            "I-H",
+            vec![Branch {
+                prob: 1.0,
+                to: "I-H-Decision",
+            }],
+        ),
         (
             "I-H-Decision",
             vec![
-                Branch { prob: 1.0 - PROBS_CASE_FATALITY_GIVEN_HOSPITAL, to: "R" },
-                Branch { prob: PROBS_CASE_FATALITY_GIVEN_HOSPITAL, to: "D" },
+                Branch {
+                    prob: 1.0 - PROBS_CASE_FATALITY_GIVEN_HOSPITAL,
+                    to: "R",
+                },
+                Branch {
+                    prob: PROBS_CASE_FATALITY_GIVEN_HOSPITAL,
+                    to: "D",
+                },
             ],
         ),
         ("R", vec![Branch { prob: 1.0, to: "S" }]),
-        ("D", vec![Branch { prob: 1.0, to: "main-sink" }]),
+        (
+            "D",
+            vec![Branch {
+                prob: 1.0,
+                to: "main-sink",
+            }],
+        ),
     ]
 }
 
@@ -212,7 +260,12 @@ fn arr(items: Vec<JsonValue>) -> JsonValue {
 }
 
 fn obj(entries: Vec<(&str, JsonValue)>) -> JsonValue {
-    JsonValue::Object(entries.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+    JsonValue::Object(
+        entries
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
+    )
 }
 
 /// JS `String(number)`: shortest round-trip for finite values, with `Infinity`
@@ -368,15 +421,24 @@ pub fn run(out_dir: &Path, rng: &mut dyn RandomSource) {
                 ("sourceCap", num(TURN_OFF_AFTER_COUNT as f64)),
                 (
                     "arrivalsInterarrival",
-                    arr(vec![num(ARRIVALS_INTERARRIVAL.0), num(ARRIVALS_INTERARRIVAL.1)]),
+                    arr(vec![
+                        num(ARRIVALS_INTERARRIVAL.0),
+                        num(ARRIVALS_INTERARRIVAL.1),
+                    ]),
                 ),
                 ("residence", residence_json()),
                 (
                     "probabilities",
                     obj(vec![
                         ("asymptomaticShare", num(PROBS_ASYMPTOMATIC_SHARE)),
-                        ("hospitalizationGivenSymptom", num(PROBS_HOSPITALIZATION_GIVEN_SYMPTOM)),
-                        ("caseFatalityGivenHospital", num(PROBS_CASE_FATALITY_GIVEN_HOSPITAL)),
+                        (
+                            "hospitalizationGivenSymptom",
+                            num(PROBS_HOSPITALIZATION_GIVEN_SYMPTOM),
+                        ),
+                        (
+                            "caseFatalityGivenHospital",
+                            num(PROBS_CASE_FATALITY_GIVEN_HOSPITAL),
+                        ),
                     ]),
                 ),
                 ("edges", edges_json()),
@@ -435,7 +497,14 @@ pub fn run(out_dir: &Path, rng: &mut dyn RandomSource) {
         // Sample any integer ticks we passed since the last event.
         let floor_t = e.time.floor() as i64;
         while next_sample_at <= floor_t && next_sample_at <= T_MAX {
-            sample_at(next_sample_at, &queues, absorbed, phase2, &mut trajectory, &mut logger);
+            sample_at(
+                next_sample_at,
+                &queues,
+                absorbed,
+                phase2,
+                &mut trajectory,
+                &mut logger,
+            );
             next_sample_at += 1;
         }
 
@@ -467,7 +536,13 @@ pub fn run(out_dir: &Path, rng: &mut dyn RandomSource) {
             }
             let (a, b) = ARRIVALS_INTERARRIVAL;
             let nt = e.time + draw_uniform(a, b, rng);
-            insert_event(&mut fel, FelEvent { time: nt, station: "main-source" });
+            insert_event(
+                &mut fel,
+                FelEvent {
+                    time: nt,
+                    station: "main-source",
+                },
+            );
         } else {
             // Service one entity at this station's queue head, if any.
             let head = queues.get_mut(e.station).and_then(|q| q.pop_front());
@@ -486,13 +561,26 @@ pub fn run(out_dir: &Path, rng: &mut dyn RandomSource) {
             }
             let (a, b) = residence_of(e.station);
             let nt = e.time + draw_uniform(a, b, rng);
-            insert_event(&mut fel, FelEvent { time: nt, station: e.station });
+            insert_event(
+                &mut fel,
+                FelEvent {
+                    time: nt,
+                    station: e.station,
+                },
+            );
         }
     }
 
     // Flush any remaining ticks up to T_MAX.
     while next_sample_at <= T_MAX {
-        sample_at(next_sample_at, &queues, absorbed, phase2, &mut trajectory, &mut logger);
+        sample_at(
+            next_sample_at,
+            &queues,
+            absorbed,
+            phase2,
+            &mut trajectory,
+            &mut logger,
+        );
         next_sample_at += 1;
     }
 
@@ -517,7 +605,10 @@ pub fn run(out_dir: &Path, rng: &mut dyn RandomSource) {
     for c in COMPARTMENT_ORDER {
         println!("  {:<4}: {}", c, js_num(*final_row.get(c).unwrap_or(&0.0)));
     }
-    println!("  D (cum): {}", js_num(*final_row.get("D_cum").unwrap_or(&0.0)));
+    println!(
+        "  D (cum): {}",
+        js_num(*final_row.get("D_cum").unwrap_or(&0.0))
+    );
     println!();
 
     // ---- Persist artifacts --------------------------------------------------
@@ -530,7 +621,10 @@ pub fn run(out_dir: &Path, rng: &mut dyn RandomSource) {
     csv.push_str(&cols.join(","));
     csv.push('\n');
     for r in &trajectory {
-        let line: Vec<String> = cols.iter().map(|c| js_num(*r.get(*c).unwrap_or(&0.0))).collect();
+        let line: Vec<String> = cols
+            .iter()
+            .map(|c| js_num(*r.get(*c).unwrap_or(&0.0)))
+            .collect();
         csv.push_str(&line.join(","));
         csv.push('\n');
     }
@@ -566,7 +660,12 @@ pub fn run(out_dir: &Path, rng: &mut dyn RandomSource) {
 
     let final_populations: Vec<(String, JsonValue)> = COMPARTMENT_ORDER
         .iter()
-        .map(|c| (c.to_string(), JsonValue::Number(*final_row.get(*c).unwrap_or(&0.0))))
+        .map(|c| {
+            (
+                c.to_string(),
+                JsonValue::Number(*final_row.get(*c).unwrap_or(&0.0)),
+            )
+        })
         .collect();
     let transition_counts: Vec<(String, JsonValue)> = matrix_rows
         .iter()
@@ -590,10 +689,19 @@ pub fn run(out_dir: &Path, rng: &mut dyn RandomSource) {
         (
             "totals",
             JsonValue::Object(vec![
-                ("created".to_string(), JsonValue::Number(source_created as f64)),
+                (
+                    "created".to_string(),
+                    JsonValue::Number(source_created as f64),
+                ),
                 ("absorbed".to_string(), JsonValue::Number(absorbed as f64)),
-                ("finalPopulations".to_string(), JsonValue::Object(final_populations)),
-                ("transitionCounts".to_string(), JsonValue::Object(transition_counts)),
+                (
+                    "finalPopulations".to_string(),
+                    JsonValue::Object(final_populations),
+                ),
+                (
+                    "transitionCounts".to_string(),
+                    JsonValue::Object(transition_counts),
+                ),
             ]),
         ),
     ]));
@@ -644,7 +752,10 @@ mod tests {
             .pointer(&["totals", "created"])
             .and_then(|v| v.as_f64())
             .unwrap_or(-1.0);
-        assert!(created >= 0.0 && created <= TURN_OFF_AFTER_COUNT as f64, "created={created}");
+        assert!(
+            created >= 0.0 && created <= TURN_OFF_AFTER_COUNT as f64,
+            "created={created}"
+        );
         let source_emissions = events
             .iter()
             .filter(|e| {
@@ -652,7 +763,10 @@ mod tests {
                     && e.get("from").and_then(|v| v.as_str()) == Some("__source__")
             })
             .count() as f64;
-        assert_eq!(source_emissions, created, "source emissions match createdCount");
+        assert_eq!(
+            source_emissions, created,
+            "source emissions match createdCount"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

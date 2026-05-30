@@ -59,12 +59,22 @@ pub struct NodeEvaluation {
 impl NodeEvaluation {
     /// A non-feasible interior/leaf evaluation carrying only a `bound`.
     pub fn new(bound: f64, is_leaf: bool) -> Self {
-        NodeEvaluation { bound, is_leaf, value: None, is_feasible: false }
+        NodeEvaluation {
+            bound,
+            is_leaf,
+            value: None,
+            is_feasible: false,
+        }
     }
 
     /// A feasible-solution evaluation with a concrete `value`.
     pub fn feasible(bound: f64, is_leaf: bool, value: f64) -> Self {
-        NodeEvaluation { bound, is_leaf, value: Some(value), is_feasible: true }
+        NodeEvaluation {
+            bound,
+            is_leaf,
+            value: Some(value),
+            is_feasible: true,
+        }
     }
 }
 
@@ -295,7 +305,10 @@ mod tests {
     impl BanditSearch {
         fn new(seed: u32) -> Self {
             let mut frontier = Vec::new();
-            frontier.push(BanditNode { reward: 0.0, is_root: true });
+            frontier.push(BanditNode {
+                reward: 0.0,
+                is_root: true,
+            });
             BanditSearch {
                 core: StationCore::new("bandit"),
                 search: TreeSearchCore::unbounded(SearchObjective::Maximise),
@@ -357,8 +370,14 @@ mod tests {
         fn expand(&mut self, node: &BanditNode, _ev: &NodeEvaluation) -> Vec<BanditNode> {
             if node.is_root {
                 vec![
-                    BanditNode { reward: 1.0, is_root: false },
-                    BanditNode { reward: 5.0, is_root: false },
+                    BanditNode {
+                        reward: 1.0,
+                        is_root: false,
+                    },
+                    BanditNode {
+                        reward: 5.0,
+                        is_root: false,
+                    },
                 ]
             } else {
                 Vec::new()

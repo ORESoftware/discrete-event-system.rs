@@ -131,7 +131,12 @@ struct ILCTrialSourceStation {
 
 impl ILCTrialSourceStation {
     fn new(id: &str, reference: Vec<f64>, horizon: usize) -> Self {
-        ILCTrialSourceStation { core: StationCore::new(id), reference, horizon, emitted: false }
+        ILCTrialSourceStation {
+            core: StationCore::new(id),
+            reference,
+            horizon,
+            emitted: false,
+        }
     }
 }
 
@@ -170,7 +175,11 @@ struct ILCControllerProgramStation {
 
 impl ILCControllerProgramStation {
     fn new(id: &str, feedback_gain: f64, control_max: f64) -> Self {
-        ILCControllerProgramStation { core: StationCore::new(id), feedback_gain, control_max }
+        ILCControllerProgramStation {
+            core: StationCore::new(id),
+            feedback_gain,
+            control_max,
+        }
     }
 }
 
@@ -212,7 +221,13 @@ struct ILCPlantTrialStation {
 
 impl ILCPlantTrialStation {
     fn new(id: &str, plant_rate: f64, plant_gain: f64, dt: f64, initial_output: f64) -> Self {
-        ILCPlantTrialStation { core: StationCore::new(id), plant_rate, plant_gain, dt, initial_output }
+        ILCPlantTrialStation {
+            core: StationCore::new(id),
+            plant_rate,
+            plant_gain,
+            dt,
+            initial_output,
+        }
     }
 
     fn run_trial(&self, program: &ILCControlProgramToken) -> ILCTrialResultToken {
@@ -283,7 +298,12 @@ struct ILCLearningUpdateStation {
 
 impl ILCLearningUpdateStation {
     fn new(id: &str, max_trials: usize, learning_gain: f64, control_max: f64) -> Self {
-        ILCLearningUpdateStation { core: StationCore::new(id), max_trials, learning_gain, control_max }
+        ILCLearningUpdateStation {
+            core: StationCore::new(id),
+            max_trials,
+            learning_gain,
+            control_max,
+        }
     }
 }
 
@@ -313,7 +333,11 @@ impl DESStation for ILCLearningUpdateStation {
                 .enumerate()
                 .map(|(k, &u)| {
                     let next_error = result.reference[k + 1] - result.output[k + 1];
-                    clamp(u + self.learning_gain * next_error, -self.control_max, self.control_max)
+                    clamp(
+                        u + self.learning_gain * next_error,
+                        -self.control_max,
+                        self.control_max,
+                    )
                 })
                 .collect();
             let token = ILCTrialPlanToken {
@@ -333,7 +357,10 @@ struct ILCResultSinkStation {
 
 impl ILCResultSinkStation {
     fn new(id: &str) -> Self {
-        ILCResultSinkStation { core: StationCore::new(id), results: Vec::new() }
+        ILCResultSinkStation {
+            core: StationCore::new(id),
+            results: Vec::new(),
+        }
     }
 }
 

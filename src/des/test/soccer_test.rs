@@ -15,14 +15,17 @@ mod tests {
         evaluate_soccer_pomdp_features, policy_greedy_hungarian, policy_ipmip_feasible,
         policy_lp_relaxed, policy_mdp_vi, policy_mdp_vi_memoryless, policy_random_schedule,
         run_many_matches, schedule_from_soccer_ipmip_vector, simulate_match_des,
-        validate_schedule_structure, AffinityBuilderOptions, GreedyHungarianOptions, MatchSimOptions,
-        SoccerIPMIPPolicyOptions, SoccerPOMDPFeatureOptions,
+        validate_schedule_structure, AffinityBuilderOptions, GreedyHungarianOptions,
+        MatchSimOptions, SoccerIPMIPPolicyOptions, SoccerPOMDPFeatureOptions,
     };
 
     const TOL: f64 = 1e-9;
 
     fn problem(seed: u32) -> crate::des::general::soccer_rotation::SoccerProblem {
-        build_sample_soccer_problem(&AffinityBuilderOptions { seed: Some(seed), ..Default::default() })
+        build_sample_soccer_problem(&AffinityBuilderOptions {
+            seed: Some(seed),
+            ..Default::default()
+        })
     }
 
     // -------------------------------------------------------------------------
@@ -30,7 +33,11 @@ mod tests {
     // -------------------------------------------------------------------------
     #[test]
     fn hungarian_textbook_min() {
-        let cost = vec![vec![4.0, 1.0, 3.0], vec![2.0, 0.0, 5.0], vec![3.0, 2.0, 2.0]];
+        let cost = vec![
+            vec![4.0, 1.0, 3.0],
+            vec![2.0, 0.0, 5.0],
+            vec![3.0, 2.0, 2.0],
+        ];
         let r = hungarian(&cost, AssignmentDirection::Min);
         assert!((r.total - 5.0).abs() < TOL);
         assert_eq!(r.rows[0], 1);
@@ -40,7 +47,11 @@ mod tests {
 
     #[test]
     fn hungarian_textbook_max() {
-        let w = vec![vec![4.0, 1.0, 3.0], vec![2.0, 0.0, 5.0], vec![3.0, 2.0, 2.0]];
+        let w = vec![
+            vec![4.0, 1.0, 3.0],
+            vec![2.0, 0.0, 5.0],
+            vec![3.0, 2.0, 2.0],
+        ];
         let r = hungarian(&w, AssignmentDirection::Max);
         assert!((r.total - 11.0).abs() < TOL);
         assert_eq!(r.rows[1], 2);
@@ -82,10 +93,9 @@ mod tests {
         assert_eq!(p.affinity.len(), 12);
         assert_eq!(p.affinity[0].len(), 7);
         assert_eq!(p.affinity[0][0].len(), 4);
-        assert!(p
-            .affinity
+        assert!(p.affinity.iter().all(|p1| p1
             .iter()
-            .all(|p1| p1.iter().all(|p2| p2.iter().all(|&v| (0.0..=1.0).contains(&v)))));
+            .all(|p2| p2.iter().all(|&v| (0.0..=1.0).contains(&v)))));
         assert_eq!(p.player_names.as_ref().map(|v| v.len()), Some(12));
         assert_eq!(p.position_names.as_ref().map(|v| v.len()), Some(7));
     }
@@ -99,8 +109,12 @@ mod tests {
         let random = policy_random_schedule(&p, 7);
         assert!(validate_schedule_structure(&p, &random).is_none());
 
-        let greedy =
-            policy_greedy_hungarian(&p, &GreedyHungarianOptions { fairness_aware: Some(true) });
+        let greedy = policy_greedy_hungarian(
+            &p,
+            &GreedyHungarianOptions {
+                fairness_aware: Some(true),
+            },
+        );
         assert!(validate_schedule_structure(&p, &greedy).is_none());
 
         let mdp = policy_mdp_vi(&p);
@@ -151,7 +165,14 @@ mod tests {
     fn des_match_simulator_invariants() {
         let p = problem(3);
         let schedule = policy_mdp_vi(&p).to_schedule();
-        let r = simulate_match_des(&p, &schedule, &MatchSimOptions { seed: Some(11), ..Default::default() });
+        let r = simulate_match_des(
+            &p,
+            &schedule,
+            &MatchSimOptions {
+                seed: Some(11),
+                ..Default::default()
+            },
+        );
         assert!(r.goals_for >= 0);
         assert!(r.goals_against >= 0);
         assert_eq!(r.goal_differential, r.goals_for - r.goals_against);
@@ -169,8 +190,22 @@ mod tests {
     fn reproducibility_same_seed() {
         let p = problem(99);
         let sched = policy_mdp_vi(&p).to_schedule();
-        let r1 = simulate_match_des(&p, &sched, &MatchSimOptions { seed: Some(7), ..Default::default() });
-        let r2 = simulate_match_des(&p, &sched, &MatchSimOptions { seed: Some(7), ..Default::default() });
+        let r1 = simulate_match_des(
+            &p,
+            &sched,
+            &MatchSimOptions {
+                seed: Some(7),
+                ..Default::default()
+            },
+        );
+        let r2 = simulate_match_des(
+            &p,
+            &sched,
+            &MatchSimOptions {
+                seed: Some(7),
+                ..Default::default()
+            },
+        );
         assert_eq!(r1.goals_for, r2.goals_for);
         assert_eq!(r1.goals_against, r2.goals_against);
         assert_eq!(r1.goal_events.len(), r2.goal_events.len());
@@ -213,7 +248,11 @@ mod tests {
             ..Default::default()
         };
         let mip = policy_ipmip_feasible(&p, &opts);
-        assert!(!mip.used_fallback, "fallback_reason = {:?}", mip.fallback_reason);
+        assert!(
+            !mip.used_fallback,
+            "fallback_reason = {:?}",
+            mip.fallback_reason
+        );
         assert!(validate_schedule_structure(&p, &mip.schedule).is_none());
         let eval_res = evaluate_schedule(&p, &mip.schedule);
         assert!(eval_res.fairness_ok);
@@ -230,11 +269,21 @@ mod tests {
     fn pomdp_feature_trace() {
         let p = problem(21);
         let sched = policy_mdp_vi(&p).to_schedule();
-        let belief = evaluate_soccer_pomdp_features(&p, &sched, &SoccerPOMDPFeatureOptions::default());
+        let belief =
+            evaluate_soccer_pomdp_features(&p, &sched, &SoccerPOMDPFeatureOptions::default());
         assert_eq!(belief.per_period.len(), p.num_periods);
-        assert!(belief.final_fresh_probability.iter().all(|&v| (0.0..=1.0).contains(&v)));
-        assert!(belief.mean_expected_fresh_on_field.is_finite() && belief.mean_expected_fresh_on_field > 0.0);
-        assert!(belief.mean_expected_lineup_reliability.is_finite() && belief.mean_expected_lineup_reliability > 0.0);
+        assert!(belief
+            .final_fresh_probability
+            .iter()
+            .all(|&v| (0.0..=1.0).contains(&v)));
+        assert!(
+            belief.mean_expected_fresh_on_field.is_finite()
+                && belief.mean_expected_fresh_on_field > 0.0
+        );
+        assert!(
+            belief.mean_expected_lineup_reliability.is_finite()
+                && belief.mean_expected_lineup_reliability > 0.0
+        );
     }
 
     // -------------------------------------------------------------------------

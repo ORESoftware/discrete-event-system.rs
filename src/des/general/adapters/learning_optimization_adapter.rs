@@ -42,10 +42,18 @@ fn js_number(v: f64) -> String {
     if v.is_nan() {
         "NaN".to_string()
     } else if v.is_infinite() {
-        if v > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() }
+        if v > 0.0 {
+            "Infinity".to_string()
+        } else {
+            "-Infinity".to_string()
+        }
     } else {
         let s = v.to_string();
-        if s == "-0" { "0".to_string() } else { s }
+        if s == "-0" {
+            "0".to_string()
+        } else {
+            s
+        }
     }
 }
 
@@ -64,16 +72,35 @@ fn to_exponential(v: f64, digits: usize) -> String {
 // Schema helpers
 // =============================================================================
 
-fn num(min: Option<f64>, max: Option<f64>, integer: Option<bool>, default: Option<f64>) -> ParamSchema {
-    ParamSchema::Number { min, max, integer, default, description: None }
+fn num(
+    min: Option<f64>,
+    max: Option<f64>,
+    integer: Option<bool>,
+    default: Option<f64>,
+) -> ParamSchema {
+    ParamSchema::Number {
+        min,
+        max,
+        integer,
+        default,
+        description: None,
+    }
 }
 
 fn boolean(default: Option<bool>) -> ParamSchema {
-    ParamSchema::Boolean { default, description: None }
+    ParamSchema::Boolean {
+        default,
+        description: None,
+    }
 }
 
 fn arr(items: ParamSchema, min_length: Option<usize>) -> ParamSchema {
-    ParamSchema::Array { items: Box::new(items), min_length, max_length: None, description: None }
+    ParamSchema::Array {
+        items: Box::new(items),
+        min_length,
+        max_length: None,
+        description: None,
+    }
 }
 
 fn str_enum(allowed: &[&str], default: &str) -> ParamSchema {
@@ -86,7 +113,10 @@ fn str_enum(allowed: &[&str], default: &str) -> ParamSchema {
 
 fn obj(fields: Vec<(&str, ParamSchema)>, required: Vec<&str>) -> ParamSchema {
     ParamSchema::Object {
-        fields: fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+        fields: fields
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
         required: Some(required.iter().map(|s| s.to_string()).collect()),
         description: None,
     }
@@ -94,7 +124,10 @@ fn obj(fields: Vec<(&str, ParamSchema)>, required: Vec<&str>) -> ParamSchema {
 
 fn supervised_sample_schema() -> ParamSchema {
     obj(
-        vec![("x", arr(num(None, None, None, None), Some(1))), ("y", num(None, None, None, None))],
+        vec![
+            ("x", arr(num(None, None, None, None), Some(1))),
+            ("y", num(None, None, None, None)),
+        ],
         vec!["x", "y"],
     )
 }
@@ -126,9 +159,16 @@ fn gradient_summary(title: &str, result: &GradientTrainingResult) -> String {
         format!(
             "  Weights:        [{}{}]",
             weights,
-            if result.weights.len() > 8 { ", ..." } else { "" }
+            if result.weights.len() > 8 {
+                ", ..."
+            } else {
+                ""
+            }
         ),
-        format!("  Stations:       {}", result.topology.stations.join(" -> ")),
+        format!(
+            "  Stations:       {}",
+            result.topology.stations.join(" -> ")
+        ),
         format!("  Movables:       {}", result.topology.movables.join(", ")),
     ]
     .join("\n")
@@ -173,7 +213,11 @@ fn rl_summary(
 fn write_regression_csv(result: &LinearRegressionResult, csv_path: &str) {
     let mut lines = vec![csv_row(["sample", "prediction", "residual"])];
     for (i, &p) in result.predictions.iter().enumerate() {
-        lines.push(csv_row([i.to_string(), js_number(p), js_number(result.residuals[i])]));
+        lines.push(csv_row([
+            i.to_string(),
+            js_number(p),
+            js_number(result.residuals[i]),
+        ]));
     }
     write_csv_lines(csv_path, &lines);
 }
@@ -185,11 +229,19 @@ fn linear_like_summary(title: &str, result: &LinearRegressionResult) -> String {
         format!("  Samples:        {}", result.sample_count),
         format!(
             "  Coefficients:   [{}]",
-            result.coefficients.iter().map(|v| format!("{v:.6}")).collect::<Vec<_>>().join(", ")
+            result
+                .coefficients
+                .iter()
+                .map(|v| format!("{v:.6}"))
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
         format!("  Intercept:      {:.6}", result.intercept),
         format!("  MSE:            {}", to_exponential(result.mse, 3)),
-        format!("  Stations:       {}", result.topology.stations.join(" -> ")),
+        format!(
+            "  Stations:       {}",
+            result.topology.stations.join(" -> ")
+        ),
         format!("  Movables:       {}", result.topology.movables.join(", ")),
     ]
     .join("\n")
@@ -198,7 +250,11 @@ fn linear_like_summary(title: &str, result: &LinearRegressionResult) -> String {
 fn rl_history_csv(reward_history: &[f64], length_history: &[f64], csv_path: &str) {
     let mut lines = vec![csv_row(["episode", "reward", "length"])];
     for (i, &r) in reward_history.iter().enumerate() {
-        lines.push(csv_row([i.to_string(), js_number(r), js_number(length_history[i])]));
+        lines.push(csv_row([
+            i.to_string(),
+            js_number(r),
+            js_number(length_history[i]),
+        ]));
     }
     write_csv_lines(csv_path, &lines);
 }
@@ -227,7 +283,9 @@ pub fn linear_regression_ls_adapter() -> LinearRegressionLsAdapter {
     LinearRegressionLsAdapter
 }
 
-impl DESModelRegistration<LinearRegressionParams, LinearRegressionResult> for LinearRegressionLsAdapter {
+impl DESModelRegistration<LinearRegressionParams, LinearRegressionResult>
+    for LinearRegressionLsAdapter
+{
     fn id(&self) -> &str {
         "linear-regression-ls"
     }
@@ -244,10 +302,18 @@ impl DESModelRegistration<LinearRegressionParams, LinearRegressionResult> for Li
             vec![],
         )
     }
-    fn run(&self, params: LinearRegressionParams, _runtime: &DESRuntimeConfig) -> LinearRegressionResult {
+    fn run(
+        &self,
+        params: LinearRegressionParams,
+        _runtime: &DESRuntimeConfig,
+    ) -> LinearRegressionResult {
         run_linear_regression_ls(params)
     }
-    fn summarize(&self, result: &LinearRegressionResult, _params: &LinearRegressionParams) -> String {
+    fn summarize(
+        &self,
+        result: &LinearRegressionResult,
+        _params: &LinearRegressionParams,
+    ) -> String {
         linear_like_summary("LINEAR REGRESSION (least squares DES)", result)
     }
     fn write_csv(&self, result: &LinearRegressionResult, csv_path: &str) {
@@ -273,7 +339,9 @@ pub fn ridge_regression_ls_adapter() -> RidgeRegressionLsAdapter {
     RidgeRegressionLsAdapter
 }
 
-impl DESModelRegistration<RidgeRegressionParams, LinearRegressionResult> for RidgeRegressionLsAdapter {
+impl DESModelRegistration<RidgeRegressionParams, LinearRegressionResult>
+    for RidgeRegressionLsAdapter
+{
     fn id(&self) -> &str {
         "ridge-regression-ls"
     }
@@ -290,10 +358,18 @@ impl DESModelRegistration<RidgeRegressionParams, LinearRegressionResult> for Rid
             vec![],
         )
     }
-    fn run(&self, params: RidgeRegressionParams, _runtime: &DESRuntimeConfig) -> LinearRegressionResult {
+    fn run(
+        &self,
+        params: RidgeRegressionParams,
+        _runtime: &DESRuntimeConfig,
+    ) -> LinearRegressionResult {
         run_ridge_regression_ls(params)
     }
-    fn summarize(&self, result: &LinearRegressionResult, _params: &RidgeRegressionParams) -> String {
+    fn summarize(
+        &self,
+        result: &LinearRegressionResult,
+        _params: &RidgeRegressionParams,
+    ) -> String {
         linear_like_summary("RIDGE REGRESSION (least squares DES)", result)
     }
     fn write_csv(&self, result: &LinearRegressionResult, csv_path: &str) {
@@ -304,7 +380,11 @@ impl DESModelRegistration<RidgeRegressionParams, LinearRegressionResult> for Rid
             "regularized-line-fit",
             "ridge-regression-ls",
             "Fit a regularized line through the shared DES least-squares station graph.",
-            RidgeRegressionParams { samples: None, fit_intercept: None, ridge: Some(0.1) },
+            RidgeRegressionParams {
+                samples: None,
+                fit_intercept: None,
+                ridge: Some(0.1),
+            },
         )]
     }
 }
@@ -341,10 +421,18 @@ impl DESModelRegistration<LogisticRegressionSGDParams, GradientTrainingResult>
             vec![],
         )
     }
-    fn run(&self, params: LogisticRegressionSGDParams, _runtime: &DESRuntimeConfig) -> GradientTrainingResult {
+    fn run(
+        &self,
+        params: LogisticRegressionSGDParams,
+        _runtime: &DESRuntimeConfig,
+    ) -> GradientTrainingResult {
         run_logistic_regression_sgd(params)
     }
-    fn summarize(&self, result: &GradientTrainingResult, _params: &LogisticRegressionSGDParams) -> String {
+    fn summarize(
+        &self,
+        result: &GradientTrainingResult,
+        _params: &LogisticRegressionSGDParams,
+    ) -> String {
         gradient_summary("LOGISTIC REGRESSION (mini-batch gradient DES)", result)
     }
     fn write_csv(&self, result: &GradientTrainingResult, csv_path: &str) {
@@ -375,7 +463,9 @@ pub fn backprop_mlp_classifier_adapter() -> BackpropMlpClassifierAdapter {
     BackpropMlpClassifierAdapter
 }
 
-impl DESModelRegistration<BackpropMLPParams, GradientTrainingResult> for BackpropMlpClassifierAdapter {
+impl DESModelRegistration<BackpropMLPParams, GradientTrainingResult>
+    for BackpropMlpClassifierAdapter
+{
     fn id(&self) -> &str {
         "backprop-mlp-classifier"
     }
@@ -396,7 +486,11 @@ impl DESModelRegistration<BackpropMLPParams, GradientTrainingResult> for Backpro
             vec![],
         )
     }
-    fn run(&self, params: BackpropMLPParams, _runtime: &DESRuntimeConfig) -> GradientTrainingResult {
+    fn run(
+        &self,
+        params: BackpropMLPParams,
+        _runtime: &DESRuntimeConfig,
+    ) -> GradientTrainingResult {
         run_backprop_mlp_classifier(params)
     }
     fn summarize(&self, result: &GradientTrainingResult, _params: &BackpropMLPParams) -> String {
@@ -446,7 +540,10 @@ impl DESModelRegistration<PolicyGradientCorridorParams, PolicyGradientCorridorRe
         obj(
             vec![
                 ("numEpisodes", num(Some(1.0), None, Some(true), Some(300.0))),
-                ("maxStepsPerEpisode", num(Some(1.0), None, Some(true), Some(40.0))),
+                (
+                    "maxStepsPerEpisode",
+                    num(Some(1.0), None, Some(true), Some(40.0)),
+                ),
                 ("rolloutLen", num(Some(1.0), None, Some(true), Some(12.0))),
                 ("alpha", num(Some(1e-9), None, None, Some(0.04))),
                 ("gamma", num(Some(0.0), Some(1.0), None, Some(0.95))),
@@ -521,7 +618,10 @@ impl DESModelRegistration<ExpectedSarsaGridParams, ExpectedSarsaGridResult>
         obj(
             vec![
                 ("numEpisodes", num(Some(1.0), None, Some(true), Some(900.0))),
-                ("maxStepsPerEpisode", num(Some(1.0), None, Some(true), Some(80.0))),
+                (
+                    "maxStepsPerEpisode",
+                    num(Some(1.0), None, Some(true), Some(80.0)),
+                ),
                 ("alpha", num(Some(1e-9), None, None, Some(0.2))),
                 ("gamma", num(Some(0.0), Some(1.0), None, Some(0.95))),
                 ("epsilon", num(Some(0.0), Some(1.0), None, Some(0.35))),
@@ -539,7 +639,11 @@ impl DESModelRegistration<ExpectedSarsaGridParams, ExpectedSarsaGridResult>
     ) -> ExpectedSarsaGridResult {
         run_expected_sarsa_gridworld(params)
     }
-    fn summarize(&self, result: &ExpectedSarsaGridResult, _params: &ExpectedSarsaGridParams) -> String {
+    fn summarize(
+        &self,
+        result: &ExpectedSarsaGridResult,
+        _params: &ExpectedSarsaGridParams,
+    ) -> String {
         [
             "EXPECTED SARSA GRIDWORLD (DES)".to_string(),
             "----------------------------------------".to_string(),
@@ -551,9 +655,17 @@ impl DESModelRegistration<ExpectedSarsaGridParams, ExpectedSarsaGridResult>
             ),
             format!(
                 "  Q(start):       [{}]",
-                result.q_start.iter().map(|v| format!("{v:.3}")).collect::<Vec<_>>().join(", ")
+                result
+                    .q_start
+                    .iter()
+                    .map(|v| format!("{v:.3}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
-            format!("  Stations:       {}", result.topology.stations.join(" -> ")),
+            format!(
+                "  Stations:       {}",
+                result.topology.stations.join(" -> ")
+            ),
             format!("  Movables:       {}", result.topology.movables.join(", ")),
         ]
         .join("\n")

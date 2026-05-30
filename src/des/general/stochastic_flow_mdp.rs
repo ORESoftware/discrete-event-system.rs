@@ -120,7 +120,11 @@ pub struct FlowMDPAction {
 
 impl FlowMDPAction {
     fn wait() -> Self {
-        FlowMDPAction { kind: FlowMDPActionKind::Wait, edge_index: None, label: "wait".to_string() }
+        FlowMDPAction {
+            kind: FlowMDPActionKind::Wait,
+            edge_index: None,
+            label: "wait".to_string(),
+        }
     }
 }
 
@@ -178,24 +182,106 @@ pub struct SolveStochasticFlowMDPOptions {
 // ── Validation ────────────────────────────────────────────────────────────────
 
 pub fn validate_stochastic_flow_mdp_problem(p: &StochasticFlowMDPProblem) {
-    require(Preconditions::integer_in_range(MODEL, "numNodes", p.num_nodes as f64, 2.0, 1000.0));
-    require(Preconditions::integer_in_range(MODEL, "source", p.source as f64, 0.0, (p.num_nodes - 1) as f64));
-    require(Preconditions::integer_in_range(MODEL, "sink", p.sink as f64, 0.0, (p.num_nodes - 1) as f64));
-    require(Preconditions::check(MODEL, "source != sink", "hold", p.source != p.sink, Some(format!("[{}, {}]", p.source, p.sink))));
+    require(Preconditions::integer_in_range(
+        MODEL,
+        "numNodes",
+        p.num_nodes as f64,
+        2.0,
+        1000.0,
+    ));
+    require(Preconditions::integer_in_range(
+        MODEL,
+        "source",
+        p.source as f64,
+        0.0,
+        (p.num_nodes - 1) as f64,
+    ));
+    require(Preconditions::integer_in_range(
+        MODEL,
+        "sink",
+        p.sink as f64,
+        0.0,
+        (p.num_nodes - 1) as f64,
+    ));
+    require(Preconditions::check(
+        MODEL,
+        "source != sink",
+        "hold",
+        p.source != p.sink,
+        Some(format!("[{}, {}]", p.source, p.sink)),
+    ));
     require(Preconditions::non_empty(MODEL, "edges", &p.edges));
-    require(Preconditions::integer_in_range(MODEL, "horizon", p.horizon as f64, 1.0, 1000.0));
-    require(Preconditions::positive(MODEL, "deliveredReward", p.delivered_reward.unwrap_or(1.0)));
-    require(Preconditions::non_negative(MODEL, "waitPenalty", p.wait_penalty.unwrap_or(0.0)));
-    require(Preconditions::non_negative(MODEL, "failurePenalty", p.failure_penalty.unwrap_or(0.0)));
-    require(Preconditions::in_range(MODEL, "discount", p.discount.unwrap_or(1.0), 0.0, 1.0));
-    require(Preconditions::integer_in_range(MODEL, "maxStates", p.max_states.unwrap_or(20000) as f64, 1.0, 1e7));
+    require(Preconditions::integer_in_range(
+        MODEL,
+        "horizon",
+        p.horizon as f64,
+        1.0,
+        1000.0,
+    ));
+    require(Preconditions::positive(
+        MODEL,
+        "deliveredReward",
+        p.delivered_reward.unwrap_or(1.0),
+    ));
+    require(Preconditions::non_negative(
+        MODEL,
+        "waitPenalty",
+        p.wait_penalty.unwrap_or(0.0),
+    ));
+    require(Preconditions::non_negative(
+        MODEL,
+        "failurePenalty",
+        p.failure_penalty.unwrap_or(0.0),
+    ));
+    require(Preconditions::in_range(
+        MODEL,
+        "discount",
+        p.discount.unwrap_or(1.0),
+        0.0,
+        1.0,
+    ));
+    require(Preconditions::integer_in_range(
+        MODEL,
+        "maxStates",
+        p.max_states.unwrap_or(20000) as f64,
+        1.0,
+        1e7,
+    ));
     for (i, e) in p.edges.iter().enumerate() {
-        require(Preconditions::integer_in_range(MODEL, &format!("edges[{i}].from"), e.from as f64, 0.0, (p.num_nodes - 1) as f64));
-        require(Preconditions::integer_in_range(MODEL, &format!("edges[{i}].to"), e.to as f64, 0.0, (p.num_nodes - 1) as f64));
-        require(Preconditions::integer_in_range(MODEL, &format!("edges[{i}].capacity"), e.capacity, 0.0, 100.0));
-        require(Preconditions::in_range(MODEL, &format!("edges[{i}].successProb"), e.success_prob, 0.0, 1.0));
+        require(Preconditions::integer_in_range(
+            MODEL,
+            &format!("edges[{i}].from"),
+            e.from as f64,
+            0.0,
+            (p.num_nodes - 1) as f64,
+        ));
+        require(Preconditions::integer_in_range(
+            MODEL,
+            &format!("edges[{i}].to"),
+            e.to as f64,
+            0.0,
+            (p.num_nodes - 1) as f64,
+        ));
+        require(Preconditions::integer_in_range(
+            MODEL,
+            &format!("edges[{i}].capacity"),
+            e.capacity,
+            0.0,
+            100.0,
+        ));
+        require(Preconditions::in_range(
+            MODEL,
+            &format!("edges[{i}].successProb"),
+            e.success_prob,
+            0.0,
+            1.0,
+        ));
         if let Some(cost) = e.cost {
-            require(Preconditions::non_negative(MODEL, &format!("edges[{i}].cost"), cost));
+            require(Preconditions::non_negative(
+                MODEL,
+                &format!("edges[{i}].cost"),
+                cost,
+            ));
         }
     }
 }
@@ -232,19 +318,28 @@ impl StochasticFlowMDPStation {
         };
         st.enumerate_states();
         let init_caps: Vec<f64> = st.p.edges.iter().map(|e| e.capacity).collect();
-        st.initial_state_index = st.state_index(&FlowMDPState { node: st.p.source, capacities: init_caps });
+        st.initial_state_index = st.state_index(&FlowMDPState {
+            node: st.p.source,
+            capacities: init_caps,
+        });
         st.bootstrap();
 
         st.add_validator(
             intrinsic_check::<dyn DESStation>(
                 "stochastic-flow-mdp.policy-actions-legal",
                 |s| {
-                    let st = s.as_any().downcast_ref::<StochasticFlowMDPStation>().unwrap();
+                    let st = s
+                        .as_any()
+                        .downcast_ref::<StochasticFlowMDPStation>()
+                        .unwrap();
                     st.policy_actions_legal()
                 },
                 Some("every policy action is legal for its state".to_string()),
                 Some(Box::new(|s| {
-                    let st = s.as_any().downcast_ref::<StochasticFlowMDPStation>().unwrap();
+                    let st = s
+                        .as_any()
+                        .downcast_ref::<StochasticFlowMDPStation>()
+                        .unwrap();
                     format!("states={}, horizon={}", st.states.len(), st.p.horizon)
                 })),
                 Some("stochastic-flow-mdp-intrinsic".to_string()),
@@ -256,14 +351,24 @@ impl StochasticFlowMDPStation {
             intrinsic_check::<dyn DESStation>(
                 "stochastic-flow-mdp.values-finite",
                 |s| {
-                    let st = s.as_any().downcast_ref::<StochasticFlowMDPStation>().unwrap();
+                    let st = s
+                        .as_any()
+                        .downcast_ref::<StochasticFlowMDPStation>()
+                        .unwrap();
                     st.dp.v.iter().all(|row| row.iter().all(|v| v.is_finite()))
                 },
                 Some("all value-function entries finite".to_string()),
                 Some(Box::new(|s| {
-                    let st = s.as_any().downcast_ref::<StochasticFlowMDPStation>().unwrap();
+                    let st = s
+                        .as_any()
+                        .downcast_ref::<StochasticFlowMDPStation>()
+                        .unwrap();
                     let v0 = st.dp.v.first().map(|r| r[st.initial_state_index]);
-                    format!("V0(initial)={}", v0.map(|x| x.to_string()).unwrap_or_else(|| "undefined".to_string()))
+                    format!(
+                        "V0(initial)={}",
+                        v0.map(|x| x.to_string())
+                            .unwrap_or_else(|| "undefined".to_string())
+                    )
                 })),
                 Some("stochastic-flow-mdp-intrinsic".to_string()),
                 None,
@@ -289,12 +394,17 @@ impl StochasticFlowMDPStation {
                     out.push(FlowMDPAction {
                         kind: FlowMDPActionKind::Edge,
                         edge_index: Some(edge_index),
-                        label: e.name.clone().unwrap_or_else(|| format!("{}->{}", e.from, e.to)),
+                        label: e
+                            .name
+                            .clone()
+                            .unwrap_or_else(|| format!("{}->{}", e.from, e.to)),
                     });
                 }
             }
         }
-        self.action_cache.borrow_mut().insert(state_index, out.clone());
+        self.action_cache
+            .borrow_mut()
+            .insert(state_index, out.clone());
         out
     }
 
@@ -321,7 +431,11 @@ impl StochasticFlowMDPStation {
             });
             let action_idx = self.get_action(t, s).unwrap_or(0);
             let outs = self.transitions(s, action_idx, t);
-            let delivered_success = outs.iter().find(|o| o.next_state != s).copied().unwrap_or(outs[0]);
+            let delivered_success = outs
+                .iter()
+                .find(|o| o.next_state != s)
+                .copied()
+                .unwrap_or(outs[0]);
             s = delivered_success.next_state;
         }
         StochasticFlowMDPResult {
@@ -347,7 +461,12 @@ impl StochasticFlowMDPStation {
                 .p
                 .edges
                 .iter()
-                .map(|e| MaxFlowEdge { from: e.from, to: e.to, capacity: e.capacity, name: e.name.clone() })
+                .map(|e| MaxFlowEdge {
+                    from: e.from,
+                    to: e.to,
+                    capacity: e.capacity,
+                    name: e.name.clone(),
+                })
                 .collect(),
         }
     }
@@ -392,7 +511,10 @@ impl StochasticFlowMDPStation {
         if idx == caps.len() {
             let max_states = self.p.max_states.unwrap_or(20000);
             for node in 0..self.p.num_nodes {
-                let st = FlowMDPState { node, capacities: current.clone() };
+                let st = FlowMDPState {
+                    node,
+                    capacities: current.clone(),
+                };
                 let key = state_key(&st);
                 self.key_to_index.insert(key, self.states.len());
                 self.states.push(st);
@@ -452,7 +574,8 @@ impl DESStation for StochasticFlowMDPStation {
         self.dp_has_work()
     }
     fn assert_preconditions(&mut self) {
-        self.assert_preconditions_dp().expect("stochastic-flow-mdp preconditions");
+        self.assert_preconditions_dp()
+            .expect("stochastic-flow-mdp preconditions");
     }
 }
 
@@ -477,7 +600,12 @@ impl FiniteHorizonDPStation for StochasticFlowMDPStation {
         self.legal_actions(state).len()
     }
 
-    fn transitions(&self, state_index: usize, action_index: usize, _stage: usize) -> Vec<DPOutcome> {
+    fn transitions(
+        &self,
+        state_index: usize,
+        action_index: usize,
+        _stage: usize,
+    ) -> Vec<DPOutcome> {
         let state = &self.states[state_index];
         let actions = self.legal_actions(state_index);
         let action = actions.get(action_index);
@@ -486,7 +614,11 @@ impl FiniteHorizonDPStation for StochasticFlowMDPStation {
             Some(a) => a.kind == FlowMDPActionKind::Wait,
         };
         if is_wait {
-            return vec![DPOutcome { prob: 1.0, reward: -(self.p.wait_penalty.unwrap_or(0.0)), next_state: state_index }];
+            return vec![DPOutcome {
+                prob: 1.0,
+                reward: -(self.p.wait_penalty.unwrap_or(0.0)),
+                next_state: state_index,
+            }];
         }
         let action = action.unwrap();
         let edge_index = action.edge_index.unwrap();
@@ -498,18 +630,41 @@ impl FiniteHorizonDPStation for StochasticFlowMDPStation {
         next_caps[edge_index] -= 1.0;
         let delivered = edge.to == self.p.sink;
         let next_node = if delivered { self.p.source } else { edge.to };
-        let success_state = self.state_index(&FlowMDPState { node: next_node, capacities: next_caps });
-        let success_reward = (if delivered { self.p.delivered_reward.unwrap_or(1.0) } else { 0.0 }) - attempt_cost;
+        let success_state = self.state_index(&FlowMDPState {
+            node: next_node,
+            capacities: next_caps,
+        });
+        let success_reward = (if delivered {
+            self.p.delivered_reward.unwrap_or(1.0)
+        } else {
+            0.0
+        }) - attempt_cost;
         let failure_reward = -attempt_cost - fail_penalty;
         if p_succ <= 0.0 {
-            return vec![DPOutcome { prob: 1.0, reward: failure_reward, next_state: state_index }];
+            return vec![DPOutcome {
+                prob: 1.0,
+                reward: failure_reward,
+                next_state: state_index,
+            }];
         }
         if p_succ >= 1.0 {
-            return vec![DPOutcome { prob: 1.0, reward: success_reward, next_state: success_state }];
+            return vec![DPOutcome {
+                prob: 1.0,
+                reward: success_reward,
+                next_state: success_state,
+            }];
         }
         vec![
-            DPOutcome { prob: p_succ, reward: success_reward, next_state: success_state },
-            DPOutcome { prob: 1.0 - p_succ, reward: failure_reward, next_state: state_index },
+            DPOutcome {
+                prob: p_succ,
+                reward: success_reward,
+                next_state: success_state,
+            },
+            DPOutcome {
+                prob: 1.0 - p_succ,
+                reward: failure_reward,
+                next_state: state_index,
+            },
         ]
     }
 }
@@ -523,10 +678,16 @@ pub fn solve_stochastic_flow_mdp(
     let station = Rc::new(RefCell::new(StochasticFlowMDPStation::new(p)));
     let summary = run_iterative_des(
         vec![station.clone() as StationRef],
-        IterativeRunOptions { shuffle: false, ..Default::default() },
+        IterativeRunOptions {
+            shuffle: false,
+            ..Default::default()
+        },
     );
-    assert_no_validation_failures(&summary, MODEL).expect("stochastic-flow-mdp: post-run validation failed");
-    let result = station.borrow().build_result(opts.seed.unwrap_or(1), opts.max_policy_rows.unwrap_or(24));
+    assert_no_validation_failures(&summary, MODEL)
+        .expect("stochastic-flow-mdp: post-run validation failed");
+    let result = station
+        .borrow()
+        .build_result(opts.seed.unwrap_or(1), opts.max_policy_rows.unwrap_or(24));
     result
 }
 
@@ -601,24 +762,74 @@ pub fn build_default_stochastic_flow_mdp_problem() -> StochasticFlowMDPProblem {
         failure_penalty: Some(0.03),
         discount: Some(1.0),
         edges: vec![
-            StochasticFlowEdge { from: 0, to: 1, capacity: 2.0, success_prob: 0.90, cost: Some(0.01), name: Some("s-a".to_string()) },
-            StochasticFlowEdge { from: 1, to: 4, capacity: 2.0, success_prob: 0.80, cost: Some(0.01), name: Some("a-t".to_string()) },
-            StochasticFlowEdge { from: 0, to: 2, capacity: 2.0, success_prob: 0.65, cost: Some(0.01), name: Some("s-b".to_string()) },
-            StochasticFlowEdge { from: 2, to: 4, capacity: 2.0, success_prob: 0.95, cost: Some(0.01), name: Some("b-t".to_string()) },
-            StochasticFlowEdge { from: 1, to: 2, capacity: 1.0, success_prob: 0.75, cost: Some(0.01), name: Some("a-b".to_string()) },
-            StochasticFlowEdge { from: 2, to: 1, capacity: 1.0, success_prob: 0.70, cost: Some(0.01), name: Some("b-a".to_string()) },
+            StochasticFlowEdge {
+                from: 0,
+                to: 1,
+                capacity: 2.0,
+                success_prob: 0.90,
+                cost: Some(0.01),
+                name: Some("s-a".to_string()),
+            },
+            StochasticFlowEdge {
+                from: 1,
+                to: 4,
+                capacity: 2.0,
+                success_prob: 0.80,
+                cost: Some(0.01),
+                name: Some("a-t".to_string()),
+            },
+            StochasticFlowEdge {
+                from: 0,
+                to: 2,
+                capacity: 2.0,
+                success_prob: 0.65,
+                cost: Some(0.01),
+                name: Some("s-b".to_string()),
+            },
+            StochasticFlowEdge {
+                from: 2,
+                to: 4,
+                capacity: 2.0,
+                success_prob: 0.95,
+                cost: Some(0.01),
+                name: Some("b-t".to_string()),
+            },
+            StochasticFlowEdge {
+                from: 1,
+                to: 2,
+                capacity: 1.0,
+                success_prob: 0.75,
+                cost: Some(0.01),
+                name: Some("a-b".to_string()),
+            },
+            StochasticFlowEdge {
+                from: 2,
+                to: 1,
+                capacity: 1.0,
+                success_prob: 0.70,
+                cost: Some(0.01),
+                name: Some("b-a".to_string()),
+            },
         ],
         max_states: Some(10000),
     }
 }
 
 fn state_key(s: &FlowMDPState) -> String {
-    let caps = s.capacities.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(",");
+    let caps = s
+        .capacities
+        .iter()
+        .map(|c| c.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
     format!("{}|{}", s.node, caps)
 }
 
 fn clone_state(s: &FlowMDPState) -> FlowMDPState {
-    FlowMDPState { node: s.node, capacities: s.capacities.clone() }
+    FlowMDPState {
+        node: s.node,
+        capacities: s.capacities.clone(),
+    }
 }
 
 #[cfg(test)]
@@ -642,6 +853,10 @@ mod tests {
         assert_eq!(result.initial_policy.len(), 8);
         assert!(result.deterministic_max_flow >= 0.0);
         // The optimal expected reward cannot exceed delivering one unit per tick.
-        assert!(result.expected_reward <= 8.0 + 1e-9, "expected_reward = {}", result.expected_reward);
+        assert!(
+            result.expected_reward <= 8.0 + 1e-9,
+            "expected_reward = {}",
+            result.expected_reward
+        );
     }
 }

@@ -452,14 +452,21 @@ mod tests {
             num_states: 2,
             num_actions: Box::new(|_s| 1),
             outcomes: Box::new(move |s, _a| {
-                vec![Outcome { prob: 1.0, reward: rewards[s], next_state: s }]
+                vec![Outcome {
+                    prob: 1.0,
+                    reward: rewards[s],
+                    next_state: s,
+                }]
             }),
             is_terminal: None,
             terminal_reward: None,
             state_label: None,
             action_label: None,
         };
-        let opts = VIOptions { gamma: 0.9, ..Default::default() };
+        let opts = VIOptions {
+            gamma: 0.9,
+            ..Default::default()
+        };
         let res = value_iteration(spec, opts);
         assert!((res.v[0] - 10.0).abs() < 1e-6, "V[0]={}", res.v[0]);
         assert!((res.v[1] - 20.0).abs() < 1e-6, "V[1]={}", res.v[1]);
@@ -475,9 +482,17 @@ mod tests {
             num_actions: Box::new(|s| if s == 0 { 2 } else { 0 }),
             outcomes: Box::new(|s, a| {
                 if s == 0 && a == 0 {
-                    vec![Outcome { prob: 1.0, reward: 0.0, next_state: 0 }]
+                    vec![Outcome {
+                        prob: 1.0,
+                        reward: 0.0,
+                        next_state: 0,
+                    }]
                 } else if s == 0 && a == 1 {
-                    vec![Outcome { prob: 1.0, reward: 1.0, next_state: 1 }]
+                    vec![Outcome {
+                        prob: 1.0,
+                        reward: 1.0,
+                        next_state: 1,
+                    }]
                 } else {
                     Vec::new()
                 }
@@ -487,7 +502,10 @@ mod tests {
             state_label: None,
             action_label: None,
         };
-        let opts = VIOptions { gamma: 0.9, ..Default::default() };
+        let opts = VIOptions {
+            gamma: 0.9,
+            ..Default::default()
+        };
         let res = value_iteration(spec, opts);
         assert!((res.v[0] - 1.0).abs() < 1e-6, "V[0]={}", res.v[0]);
         assert!((res.v[1] - 0.0).abs() < 1e-9, "V[1]={}", res.v[1]);
@@ -503,14 +521,24 @@ mod tests {
             num_states: 2,
             num_actions: Box::new(|_s| 1),
             outcomes: Box::new(move |s, _a| {
-                vec![Outcome { prob: 1.0, reward: rewards[s], next_state: s }]
+                vec![Outcome {
+                    prob: 1.0,
+                    reward: rewards[s],
+                    next_state: s,
+                }]
             }),
             is_terminal: None,
             terminal_reward: None,
             state_label: None,
             action_label: None,
         };
-        let res = value_iteration(make_spec(), VIOptions { gamma: 0.9, ..Default::default() });
+        let res = value_iteration(
+            make_spec(),
+            VIOptions {
+                gamma: 0.9,
+                ..Default::default()
+            },
+        );
         let spec = make_spec();
         let q0 = q_value(&spec, &res.v, 0, 0, 0.9);
         assert!((q0 - res.v[0]).abs() < 1e-6, "q0={q0} V0={}", res.v[0]);

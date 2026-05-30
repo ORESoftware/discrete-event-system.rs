@@ -223,7 +223,10 @@ pub fn build_contact_frame(
     }));
 
     let stats: [(String, String); 4] = [
-        ("attack rate".to_string(), format!("{}%", to_fixed((1.0 - n_s / n as f64) * 100.0, 1))),
+        (
+            "attack rate".to_string(),
+            format!("{}%", to_fixed((1.0 - n_s / n as f64) * 100.0, 1)),
+        ),
         ("contacts".to_string(), js_num(total_contacts)),
         ("transmissions".to_string(), js_num(total_transmissions)),
         ("kernel".to_string(), kernel.to_string()),
@@ -323,10 +326,30 @@ pub fn build_contact_chart(trace: &ContactTrace, n: f64) -> ChartSpec {
         y_min: Some(0.0),
         y_max: Some(n),
         series: vec![
-            ChartSeries { label: "S".to_string(), color: color(SeirState::S).to_string(), t: trace.t.clone(), y: trace.s.clone() },
-            ChartSeries { label: "E".to_string(), color: color(SeirState::E).to_string(), t: trace.t.clone(), y: trace.e.clone() },
-            ChartSeries { label: "I".to_string(), color: color(SeirState::I).to_string(), t: trace.t.clone(), y: trace.i.clone() },
-            ChartSeries { label: "R".to_string(), color: color(SeirState::R).to_string(), t: trace.t.clone(), y: trace.r.clone() },
+            ChartSeries {
+                label: "S".to_string(),
+                color: color(SeirState::S).to_string(),
+                t: trace.t.clone(),
+                y: trace.s.clone(),
+            },
+            ChartSeries {
+                label: "E".to_string(),
+                color: color(SeirState::E).to_string(),
+                t: trace.t.clone(),
+                y: trace.e.clone(),
+            },
+            ChartSeries {
+                label: "I".to_string(),
+                color: color(SeirState::I).to_string(),
+                t: trace.t.clone(),
+                y: trace.i.clone(),
+            },
+            ChartSeries {
+                label: "R".to_string(),
+                color: color(SeirState::R).to_string(),
+                t: trace.t.clone(),
+                y: trace.r.clone(),
+            },
         ],
         ..Default::default()
     }
@@ -348,8 +371,16 @@ mod tests {
     #[test]
     fn frame_caption_reports_compartments_and_attack_rate() {
         let people = vec![
-            PersonView { id: 0.0, state: SeirState::S, c: 1.0 },
-            PersonView { id: 1.0, state: SeirState::I, c: 2.0 },
+            PersonView {
+                id: 0.0,
+                state: SeirState::S,
+                c: 1.0,
+            },
+            PersonView {
+                id: 1.0,
+                state: SeirState::I,
+                c: 2.0,
+            },
         ];
         let pos = layout_grid(2);
         let fp = build_contact_frame(1.0, 4.0, &people, &pos, 1.5, 7.0, 2.0, "exponential");

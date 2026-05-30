@@ -22,10 +22,10 @@
 use crate::des::general::adapters::adapter_utils::{csv_row, write_csv_lines};
 use crate::des::general::classical_optimization_models::{
     run_auction_assignment, run_flow_shop_neh, run_hungarian_assignment, run_job_shop_dispatch,
-    run_qp_coordinate_descent, run_qp_projected_gradient, run_vrp_nearest_neighbor, run_vrp_savings,
-    AssignmentParams, AssignmentResult, AuctionAssignmentParams, DispatchRule, FlowShopNEHParams,
-    FlowShopNEHResult, JobShopDispatchParams, JobShopDispatchResult, QPProjectedGradientParams,
-    QPProjectedGradientResult, VRPSavingsParams, VRPSavingsResult,
+    run_qp_coordinate_descent, run_qp_projected_gradient, run_vrp_nearest_neighbor,
+    run_vrp_savings, AssignmentParams, AssignmentResult, AuctionAssignmentParams, DispatchRule,
+    FlowShopNEHParams, FlowShopNEHResult, JobShopDispatchParams, JobShopDispatchResult,
+    QPProjectedGradientParams, QPProjectedGradientResult, VRPSavingsParams, VRPSavingsResult,
 };
 use crate::des::general::des_spec::{
     DESModelRegistration, DESModelSpec, DESRuntimeConfig, ParamSchema, RegistrationExample,
@@ -40,10 +40,18 @@ fn js_number(v: f64) -> String {
     if v.is_nan() {
         "NaN".to_string()
     } else if v.is_infinite() {
-        if v > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() }
+        if v > 0.0 {
+            "Infinity".to_string()
+        } else {
+            "-Infinity".to_string()
+        }
     } else {
         let s = v.to_string();
-        if s == "-0" { "0".to_string() } else { s }
+        if s == "-0" {
+            "0".to_string()
+        } else {
+            s
+        }
     }
 }
 
@@ -62,26 +70,51 @@ fn to_exponential(v: f64, digits: usize) -> String {
 fn json_num_array(values: &[f64]) -> String {
     let inner: Vec<String> = values
         .iter()
-        .map(|v| if v.is_finite() { js_number(*v) } else { "null".to_string() })
+        .map(|v| {
+            if v.is_finite() {
+                js_number(*v)
+            } else {
+                "null".to_string()
+            }
+        })
         .collect();
     format!("[{}]", inner.join(","))
 }
 
 /// `numbers.map(v => v.toFixed(n)).join(', ')`.
 fn fixed_join(values: &[f64], digits: usize) -> String {
-    values.iter().map(|v| format!("{:.*}", digits, v)).collect::<Vec<_>>().join(", ")
+    values
+        .iter()
+        .map(|v| format!("{:.*}", digits, v))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 // =============================================================================
 // Schema helpers
 // =============================================================================
 
-fn num(min: Option<f64>, max: Option<f64>, integer: Option<bool>, default: Option<f64>) -> ParamSchema {
-    ParamSchema::Number { min, max, integer, default, description: None }
+fn num(
+    min: Option<f64>,
+    max: Option<f64>,
+    integer: Option<bool>,
+    default: Option<f64>,
+) -> ParamSchema {
+    ParamSchema::Number {
+        min,
+        max,
+        integer,
+        default,
+        description: None,
+    }
 }
 
 fn string_field() -> ParamSchema {
-    ParamSchema::String { allowed: None, default: None, description: None }
+    ParamSchema::String {
+        allowed: None,
+        default: None,
+        description: None,
+    }
 }
 
 fn str_enum(allowed: &[&str], default: &str) -> ParamSchema {
@@ -93,12 +126,20 @@ fn str_enum(allowed: &[&str], default: &str) -> ParamSchema {
 }
 
 fn arr(items: ParamSchema, min_length: Option<usize>) -> ParamSchema {
-    ParamSchema::Array { items: Box::new(items), min_length, max_length: None, description: None }
+    ParamSchema::Array {
+        items: Box::new(items),
+        min_length,
+        max_length: None,
+        description: None,
+    }
 }
 
 fn obj(fields: Vec<(&str, ParamSchema)>, required: Vec<&str>) -> ParamSchema {
     ParamSchema::Object {
-        fields: fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+        fields: fields
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
         required: Some(required.iter().map(|s| s.to_string()).collect()),
         description: None,
     }
@@ -126,7 +167,10 @@ fn customer_schema() -> ParamSchema {
 
 fn operation_schema() -> ParamSchema {
     obj(
-        vec![("machine", string_field()), ("duration", num(Some(0.0), None, None, None))],
+        vec![
+            ("machine", string_field()),
+            ("duration", num(Some(0.0), None, None, None)),
+        ],
         vec!["machine", "duration"],
     )
 }
@@ -146,7 +190,10 @@ fn flow_shop_job_schema() -> ParamSchema {
     obj(
         vec![
             ("id", string_field()),
-            ("processingTimes", arr(num(Some(0.0), None, None, None), Some(1))),
+            (
+                "processingTimes",
+                arr(num(Some(0.0), None, None, None), Some(1)),
+            ),
             ("due", num(None, None, None, None)),
         ],
         vec!["id", "processingTimes"],
@@ -189,7 +236,11 @@ fn qp_write_csv(result: &QPProjectedGradientResult, csv_path: &str) {
 fn assignment_write_csv(result: &AssignmentResult, csv_path: &str) {
     let mut lines = vec![csv_row(["worker", "job", "objective"])];
     for (worker, job) in result.assignment.iter().enumerate() {
-        lines.push(csv_row([worker.to_string(), job.to_string(), js_number(result.objective)]));
+        lines.push(csv_row([
+            worker.to_string(),
+            job.to_string(),
+            js_number(result.objective),
+        ]));
     }
     write_csv_lines(csv_path, &lines);
 }
@@ -209,7 +260,10 @@ fn vrp_write_csv(result: &VRPSavingsResult, csv_path: &str) {
 }
 
 // Shared CSV emitter for the scheduling variants.
-fn schedule_write_csv(schedule: &[crate::des::general::classical_optimization_models::ScheduledOperation], csv_path: &str) {
+fn schedule_write_csv(
+    schedule: &[crate::des::general::classical_optimization_models::ScheduledOperation],
+    csv_path: &str,
+) {
     let mut lines = vec![csv_row(["job", "operation", "machine", "start", "finish"])];
     for op in schedule {
         lines.push(csv_row([
@@ -256,18 +310,32 @@ impl DESModelRegistration<QPProjectedGradientParams, QPProjectedGradientResult>
             vec![],
         )
     }
-    fn run(&self, params: QPProjectedGradientParams, _runtime: &DESRuntimeConfig) -> QPProjectedGradientResult {
+    fn run(
+        &self,
+        params: QPProjectedGradientParams,
+        _runtime: &DESRuntimeConfig,
+    ) -> QPProjectedGradientResult {
         run_qp_projected_gradient(params)
     }
-    fn summarize(&self, result: &QPProjectedGradientResult, _params: &QPProjectedGradientParams) -> String {
+    fn summarize(
+        &self,
+        result: &QPProjectedGradientResult,
+        _params: &QPProjectedGradientParams,
+    ) -> String {
         [
             "QP PROJECTED GRADIENT (DES)".to_string(),
             "---------------------------".to_string(),
             format!("  Objective:      {:.8}", result.objective),
             format!("  x*:             [{}]", fixed_join(&result.x, 6)),
             format!("  Iterations:     {}", result.iterations),
-            format!("  Gradient norm:  {}", to_exponential(result.gradient_norm, 3)),
-            format!("  Stations:       {}", result.topology.stations.join(" -> ")),
+            format!(
+                "  Gradient norm:  {}",
+                to_exponential(result.gradient_norm, 3)
+            ),
+            format!(
+                "  Stations:       {}",
+                result.topology.stations.join(" -> ")
+            ),
             format!("  Movables:       {}", result.topology.movables.join(", ")),
         ]
         .join("\n")
@@ -317,18 +385,32 @@ impl DESModelRegistration<QPProjectedGradientParams, QPProjectedGradientResult>
             vec![],
         )
     }
-    fn run(&self, params: QPProjectedGradientParams, _runtime: &DESRuntimeConfig) -> QPProjectedGradientResult {
+    fn run(
+        &self,
+        params: QPProjectedGradientParams,
+        _runtime: &DESRuntimeConfig,
+    ) -> QPProjectedGradientResult {
         run_qp_coordinate_descent(params)
     }
-    fn summarize(&self, result: &QPProjectedGradientResult, _params: &QPProjectedGradientParams) -> String {
+    fn summarize(
+        &self,
+        result: &QPProjectedGradientResult,
+        _params: &QPProjectedGradientParams,
+    ) -> String {
         [
             "QP COORDINATE DESCENT (DES)".to_string(),
             "---------------------------".to_string(),
             format!("  Objective:      {:.8}", result.objective),
             format!("  x*:             [{}]", fixed_join(&result.x, 6)),
             format!("  Iterations:     {}", result.iterations),
-            format!("  Gradient norm:  {}", to_exponential(result.gradient_norm, 3)),
-            format!("  Stations:       {}", result.topology.stations.join(" -> ")),
+            format!(
+                "  Gradient norm:  {}",
+                to_exponential(result.gradient_norm, 3)
+            ),
+            format!(
+                "  Stations:       {}",
+                result.topology.stations.join(" -> ")
+            ),
             format!("  Movables:       {}", result.topology.movables.join(", ")),
         ]
         .join("\n")
@@ -375,11 +457,25 @@ impl DESModelRegistration<AssignmentParams, AssignmentResult> for HungarianAssig
             format!("  Objective:      {:.6}", result.objective),
             format!(
                 "  Assignment:     [{}]",
-                result.assignment.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", ")
+                result
+                    .assignment
+                    .iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
-            format!("  Row reductions: [{}]", fixed_join(&result.row_reductions, 2)),
-            format!("  Col reductions: [{}]", fixed_join(&result.col_reductions, 2)),
-            format!("  Stations:       {}", result.topology.stations.join(" -> ")),
+            format!(
+                "  Row reductions: [{}]",
+                fixed_join(&result.row_reductions, 2)
+            ),
+            format!(
+                "  Col reductions: [{}]",
+                fixed_join(&result.col_reductions, 2)
+            ),
+            format!(
+                "  Stations:       {}",
+                result.topology.stations.join(" -> ")
+            ),
             format!("  Movables:       {}", result.topology.movables.join(", ")),
         ]
         .join("\n")
@@ -423,7 +519,11 @@ impl DESModelRegistration<AuctionAssignmentParams, AssignmentResult> for Auction
             vec![],
         )
     }
-    fn run(&self, params: AuctionAssignmentParams, _runtime: &DESRuntimeConfig) -> AssignmentResult {
+    fn run(
+        &self,
+        params: AuctionAssignmentParams,
+        _runtime: &DESRuntimeConfig,
+    ) -> AssignmentResult {
         run_auction_assignment(params)
     }
     fn summarize(&self, result: &AssignmentResult, _params: &AuctionAssignmentParams) -> String {
@@ -433,10 +533,21 @@ impl DESModelRegistration<AuctionAssignmentParams, AssignmentResult> for Auction
             format!("  Objective:      {:.6}", result.objective),
             format!(
                 "  Assignment:     [{}]",
-                result.assignment.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", ")
+                result
+                    .assignment
+                    .iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
-            format!("  Price vector:   [{}]", fixed_join(&result.col_reductions, 3)),
-            format!("  Stations:       {}", result.topology.stations.join(" -> ")),
+            format!(
+                "  Price vector:   [{}]",
+                fixed_join(&result.col_reductions, 3)
+            ),
+            format!(
+                "  Stations:       {}",
+                result.topology.stations.join(" -> ")
+            ),
             format!("  Movables:       {}", result.topology.movables.join(", ")),
         ]
         .join("\n")
@@ -449,7 +560,10 @@ impl DESModelRegistration<AuctionAssignmentParams, AssignmentResult> for Auction
             "three-by-three-auction",
             "auction-assignment",
             "3x3 assignment through movable auction state tokens.",
-            AuctionAssignmentParams { epsilon: Some(0.01), ..Default::default() },
+            AuctionAssignmentParams {
+                epsilon: Some(0.01),
+                ..Default::default()
+            },
         )]
     }
 }
@@ -468,7 +582,13 @@ fn vrp_schema() -> ParamSchema {
         vec![
             (
                 "depot",
-                obj(vec![("x", num(None, None, None, None)), ("y", num(None, None, None, None))], vec!["x", "y"]),
+                obj(
+                    vec![
+                        ("x", num(None, None, None, None)),
+                        ("y", num(None, None, None, None)),
+                    ],
+                    vec!["x", "y"],
+                ),
             ),
             ("customers", arr(customer_schema(), Some(1))),
             ("vehicleCapacity", num(Some(1e-12), None, None, Some(5.0))),
@@ -497,7 +617,10 @@ impl DESModelRegistration<VRPSavingsParams, VRPSavingsResult> for VRPSavingsAdap
             format!("  Routes:         {}", result.routes.len()),
             format!("  Total distance: {:.6}", result.total_distance),
             format!("  Savings pairs:  {}", result.savings_considered),
-            format!("  Stations:       {}", result.topology.stations.join(" -> ")),
+            format!(
+                "  Stations:       {}",
+                result.topology.stations.join(" -> ")
+            ),
             format!("  Movables:       {}", result.topology.movables.join(", ")),
         ]
         .join("\n")
@@ -510,7 +633,10 @@ impl DESModelRegistration<VRPSavingsParams, VRPSavingsResult> for VRPSavingsAdap
             "small-cvrp",
             "vrp-savings",
             "Small capacitated VRP using savings and route-merge stations.",
-            VRPSavingsParams { vehicle_capacity: Some(5.0), ..Default::default() },
+            VRPSavingsParams {
+                vehicle_capacity: Some(5.0),
+                ..Default::default()
+            },
         )]
     }
 }
@@ -543,7 +669,10 @@ impl DESModelRegistration<VRPSavingsParams, VRPSavingsResult> for VRPNearestNeig
             "--------------------------".to_string(),
             format!("  Routes:         {}", result.routes.len()),
             format!("  Total distance: {:.6}", result.total_distance),
-            format!("  Stations:       {}", result.topology.stations.join(" -> ")),
+            format!(
+                "  Stations:       {}",
+                result.topology.stations.join(" -> ")
+            ),
             format!("  Movables:       {}", result.topology.movables.join(", ")),
         ]
         .join("\n")
@@ -556,7 +685,10 @@ impl DESModelRegistration<VRPSavingsParams, VRPSavingsResult> for VRPNearestNeig
             "small-cvrp-nearest",
             "vrp-nearest-neighbor",
             "Small capacitated VRP using a nearest-neighbor route-construction station.",
-            VRPSavingsParams { vehicle_capacity: Some(5.0), ..Default::default() },
+            VRPSavingsParams {
+                vehicle_capacity: Some(5.0),
+                ..Default::default()
+            },
         )]
     }
 }
@@ -586,7 +718,11 @@ impl DESModelRegistration<JobShopDispatchParams, JobShopDispatchResult> for JobS
             vec![],
         )
     }
-    fn run(&self, params: JobShopDispatchParams, _runtime: &DESRuntimeConfig) -> JobShopDispatchResult {
+    fn run(
+        &self,
+        params: JobShopDispatchParams,
+        _runtime: &DESRuntimeConfig,
+    ) -> JobShopDispatchResult {
         run_job_shop_dispatch(params)
     }
     fn summarize(&self, result: &JobShopDispatchResult, _params: &JobShopDispatchParams) -> String {
@@ -596,7 +732,10 @@ impl DESModelRegistration<JobShopDispatchParams, JobShopDispatchResult> for JobS
             format!("  Operations:     {}", result.schedule.len()),
             format!("  Makespan:       {:.3}", result.makespan),
             format!("  Total flow:     {:.3}", result.total_flow_time),
-            format!("  Stations:       {}", result.topology.stations.join(" -> ")),
+            format!(
+                "  Stations:       {}",
+                result.topology.stations.join(" -> ")
+            ),
             format!("  Movables:       {}", result.topology.movables.join(", ")),
         ]
         .join("\n")
@@ -609,7 +748,10 @@ impl DESModelRegistration<JobShopDispatchParams, JobShopDispatchResult> for JobS
             "three-job-spt",
             "job-shop-dispatch",
             "Three-job two-machine schedule using a shortest-processing-time dispatch station.",
-            JobShopDispatchParams { rule: Some(DispatchRule::Spt), ..Default::default() },
+            JobShopDispatchParams {
+                rule: Some(DispatchRule::Spt),
+                ..Default::default()
+            },
         )]
     }
 }
@@ -644,7 +786,10 @@ impl DESModelRegistration<FlowShopNEHParams, FlowShopNEHResult> for FlowShopNEHA
             format!("  Operations:     {}", result.schedule.len()),
             format!("  Makespan:       {:.3}", result.makespan),
             format!("  Total flow:     {:.3}", result.total_flow_time),
-            format!("  Stations:       {}", result.topology.stations.join(" -> ")),
+            format!(
+                "  Stations:       {}",
+                result.topology.stations.join(" -> ")
+            ),
             format!("  Movables:       {}", result.topology.movables.join(", ")),
         ]
         .join("\n")

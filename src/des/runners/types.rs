@@ -209,7 +209,10 @@ pub struct Successor {
 
 impl Successor {
     fn new(prob: f64, to: &str) -> Self {
-        Successor { prob, to: to.to_string() }
+        Successor {
+            prob,
+            to: to.to_string(),
+        }
     }
 }
 
@@ -228,7 +231,10 @@ pub fn build_successors(p: &Probabilities) -> Vec<(String, Vec<Successor>)> {
         ("I-P".to_string(), vec![Successor::new(1.0, "I-P-Decision")]),
         (
             "I-P-Decision".to_string(),
-            vec![Successor::new(asym, "I-A"), Successor::new(1.0 - asym, "I-S")],
+            vec![
+                Successor::new(asym, "I-A"),
+                Successor::new(1.0 - asym, "I-S"),
+            ],
         ),
         ("I-A".to_string(), vec![Successor::new(1.0, "R")]),
         ("I-S".to_string(), vec![Successor::new(1.0, "I-S-Decision")]),

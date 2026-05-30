@@ -143,12 +143,11 @@ mod tests {
     fn accumulates_running_sum() {
         let mut integ = Integrator::new("integ".into());
         for x in [0.5, 0.5, 0.5, 0.5] {
-            let sv: Rc<RefCell<dyn MovingEntity>> = Rc::new(RefCell::new(SignalValue::new(
-                SignalValueArgs {
+            let sv: Rc<RefCell<dyn MovingEntity>> =
+                Rc::new(RefCell::new(SignalValue::new(SignalValueArgs {
                     id: None,
                     val: Some(x),
-                },
-            )));
+                })));
             integ.take_item(sv);
         }
         integ.run_time_step_signal(bgn(0.1), None);

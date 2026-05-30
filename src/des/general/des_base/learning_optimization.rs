@@ -71,7 +71,13 @@ pub struct VectorSampleToken {
 impl VectorSampleToken {
     /// `weight` defaults to `1`, `meta` to empty (matching the TS defaults).
     pub fn new(id: impl Into<String>, input: NumericVector, target: NumericVector) -> Self {
-        VectorSampleToken { id: id.into(), input, target, weight: 1.0, meta: Meta::new() }
+        VectorSampleToken {
+            id: id.into(),
+            input,
+            target,
+            weight: 1.0,
+            meta: Meta::new(),
+        }
     }
 }
 
@@ -104,7 +110,11 @@ pub struct CandidateToken<S> {
 
 impl<S> CandidateToken<S> {
     pub fn new(id: impl Into<String>, candidate: S) -> Self {
-        CandidateToken { id: id.into(), candidate, meta: Meta::new() }
+        CandidateToken {
+            id: id.into(),
+            candidate,
+            meta: Meta::new(),
+        }
     }
 }
 
@@ -121,7 +131,13 @@ pub struct EvaluatedCandidateToken<S> {
 impl<S> EvaluatedCandidateToken<S> {
     /// `feasible` defaults to `true`, `meta` to empty (matching the TS defaults).
     pub fn new(id: impl Into<String>, candidate: S, objective: f64) -> Self {
-        EvaluatedCandidateToken { id: id.into(), candidate, objective, feasible: true, meta: Meta::new() }
+        EvaluatedCandidateToken {
+            id: id.into(),
+            candidate,
+            objective,
+            feasible: true,
+            meta: Meta::new(),
+        }
     }
 }
 
@@ -150,7 +166,12 @@ impl VectorSampleSourceStation {
 
     /// `epochs` defaults to `1` in the TS; pass it explicitly here.
     pub fn new(id: impl Into<String>, samples: Vec<VectorSampleToken>, epochs: usize) -> Self {
-        VectorSampleSourceStation { core: StationCore::new(id), samples, epochs, epoch: 0 }
+        VectorSampleSourceStation {
+            core: StationCore::new(id),
+            samples,
+            epochs,
+            epoch: 0,
+        }
     }
 
     pub fn get_epoch(&self) -> usize {
@@ -272,7 +293,8 @@ impl DESStation for MiniBatchStation {
     fn run_time_step(&mut self) {
         let incoming = self.core.drain::<VectorSampleToken>(Self::CH_SAMPLE);
         let incoming_len = incoming.len();
-        self.buffer.extend(incoming.into_iter().map(|rc| (*rc).clone()));
+        self.buffer
+            .extend(incoming.into_iter().map(|rc| (*rc).clone()));
         while self.buffer.len() >= self.batch_size {
             let size = self.batch_size;
             self.emit_next_batch(size);
@@ -317,7 +339,11 @@ pub struct GradientOptimizerOptions {
 /// The abstract template-method hook: subclasses supply `evaluate_batch`.
 /// (`protected abstract evaluateBatch(batch, parameters): GradientEvaluation`.)
 pub trait GradientOptimizerHook {
-    fn evaluate_batch(&mut self, batch: &VectorBatchToken, parameters: &[f64]) -> GradientEvaluation;
+    fn evaluate_batch(
+        &mut self,
+        batch: &VectorBatchToken,
+        parameters: &[f64],
+    ) -> GradientEvaluation;
 }
 
 /// Drains batches, runs the (SGD or Adam) update template, and emits a
@@ -456,7 +482,10 @@ impl GradientTraceSinkStation {
     pub const CH_STEP: &'static str = CH_GRADIENT_STEP;
 
     pub fn new(id: impl Into<String>) -> Self {
-        GradientTraceSinkStation { core: StationCore::new(id), trace: Vec::new() }
+        GradientTraceSinkStation {
+            core: StationCore::new(id),
+            trace: Vec::new(),
+        }
     }
 }
 
@@ -492,7 +521,11 @@ impl<S: Clone + 'static> CandidateSourceStation<S> {
     pub const CH_CANDIDATE: &'static str = "candidate";
 
     pub fn new(id: impl Into<String>, candidates: Vec<CandidateToken<S>>) -> Self {
-        CandidateSourceStation { core: StationCore::new(id), candidates, emitted: false }
+        CandidateSourceStation {
+            core: StationCore::new(id),
+            candidates,
+            emitted: false,
+        }
     }
 }
 
@@ -543,7 +576,11 @@ impl<S: 'static, H: CandidateEvaluatorHook<S> + 'static> CandidateEvaluatorStati
     pub const CH_EVALUATED: &'static str = CH_EVALUATED;
 
     pub fn new(id: impl Into<String>, hook: H) -> Self {
-        CandidateEvaluatorStation { core: StationCore::new(id), hook, _marker: PhantomData }
+        CandidateEvaluatorStation {
+            core: StationCore::new(id),
+            hook,
+            _marker: PhantomData,
+        }
     }
 
     pub fn hook(&self) -> &H {
@@ -554,7 +591,9 @@ impl<S: 'static, H: CandidateEvaluatorHook<S> + 'static> CandidateEvaluatorStati
     }
 }
 
-impl<S: 'static, H: CandidateEvaluatorHook<S> + 'static> DESStation for CandidateEvaluatorStation<S, H> {
+impl<S: 'static, H: CandidateEvaluatorHook<S> + 'static> DESStation
+    for CandidateEvaluatorStation<S, H>
+{
     fn core(&self) -> &StationCore {
         &self.core
     }
@@ -590,7 +629,11 @@ impl<S: Clone + 'static> IncumbentSinkStation<S> {
     pub const CH_EVALUATED: &'static str = CH_EVALUATED;
 
     pub fn new(id: impl Into<String>) -> Self {
-        IncumbentSinkStation { core: StationCore::new(id), evaluations: Vec::new(), incumbent: None }
+        IncumbentSinkStation {
+            core: StationCore::new(id),
+            evaluations: Vec::new(),
+            incumbent: None,
+        }
     }
 
     pub fn get_incumbent(&self) -> Option<&EvaluatedCandidateToken<S>> {
@@ -612,7 +655,9 @@ impl<S: Clone + 'static> DESStation for IncumbentSinkStation<S> {
         self.core.inbox_size(Self::CH_EVALUATED) > 0
     }
     fn run_time_step(&mut self) {
-        let evaluated = self.core.drain::<EvaluatedCandidateToken<S>>(Self::CH_EVALUATED);
+        let evaluated = self
+            .core
+            .drain::<EvaluatedCandidateToken<S>>(Self::CH_EVALUATED);
         for item in evaluated {
             let item = (*item).clone();
             self.evaluations.push(item.clone());
@@ -726,7 +771,11 @@ pub struct LatestTokenSinkStation<T: 'static> {
 
 impl<T: 'static> LatestTokenSinkStation<T> {
     pub fn new(id: impl Into<String>, input_channel: impl Into<String>) -> Self {
-        LatestTokenSinkStation { core: StationCore::new(id), input_channel: input_channel.into(), latest: None }
+        LatestTokenSinkStation {
+            core: StationCore::new(id),
+            input_channel: input_channel.into(),
+            latest: None,
+        }
     }
 }
 
@@ -788,7 +837,11 @@ impl From<StationRef> for StationOrId {
 
 /// Build a [`StationGraphSummary`] from stations (resolved to ids), movable
 /// ids, and edge labels.
-pub fn station_graph(stations: &[StationOrId], movables: &[String], edges: &[String]) -> StationGraphSummary {
+pub fn station_graph(
+    stations: &[StationOrId],
+    movables: &[String],
+    edges: &[String],
+) -> StationGraphSummary {
     StationGraphSummary {
         stations: stations.iter().map(StationOrId::id).collect(),
         movables: movables.to_vec(),
@@ -810,7 +863,11 @@ pub fn channel_edge(
     target_channel: Option<&str>,
 ) -> String {
     let target_channel = target_channel.unwrap_or(source_channel);
-    format!("{}:{source_channel} -> {}:{target_channel}", source.id(), target.id())
+    format!(
+        "{}:{source_channel} -> {}:{target_channel}",
+        source.id(),
+        target.id()
+    )
 }
 
 /// A self-looping state-update topology: `source → update`, `update → update`,
@@ -848,9 +905,18 @@ pub fn run_state_loop_pipeline(
     result_channel: &str,
     mut opts: IterativeRunOptions,
 ) -> IterativeRunSummary {
-    source.borrow_mut().core_mut().pipe(update.clone(), state_channel, state_channel);
-    update.borrow_mut().core_mut().pipe(update.clone(), state_channel, state_channel);
-    update.borrow_mut().core_mut().pipe(sink.clone(), result_channel, result_channel);
+    source
+        .borrow_mut()
+        .core_mut()
+        .pipe(update.clone(), state_channel, state_channel);
+    update
+        .borrow_mut()
+        .core_mut()
+        .pipe(update.clone(), state_channel, state_channel);
+    update
+        .borrow_mut()
+        .core_mut()
+        .pipe(sink.clone(), result_channel, result_channel);
     opts.shuffle = false;
     run_iterative_des(vec![source, update, sink], opts)
 }
@@ -917,7 +983,11 @@ mod tests {
     }
 
     impl GradientOptimizerHook for QuadHook {
-        fn evaluate_batch(&mut self, _batch: &VectorBatchToken, parameters: &[f64]) -> GradientEvaluation {
+        fn evaluate_batch(
+            &mut self,
+            _batch: &VectorBatchToken,
+            parameters: &[f64],
+        ) -> GradientEvaluation {
             let mut loss = 0.0;
             let gradient: Vec<f64> = parameters
                 .iter()
@@ -928,7 +998,11 @@ mod tests {
                     2.0 * e
                 })
                 .collect();
-            GradientEvaluation { loss, gradient, meta: None }
+            GradientEvaluation {
+                loss,
+                gradient,
+                meta: None,
+            }
         }
     }
 
@@ -936,7 +1010,9 @@ mod tests {
     fn gradient_optimizer_reduces_loss() {
         let mut station = GradientOptimizerStation::new(
             "opt",
-            QuadHook { target: vec![1.0, -2.0] },
+            QuadHook {
+                target: vec![1.0, -2.0],
+            },
             GradientOptimizerOptions {
                 initial_parameters: vec![0.0, 0.0],
                 learning_rate: 0.1,
@@ -962,8 +1038,14 @@ mod tests {
 
         let history = station.get_loss_history();
         assert_eq!(history.len(), 40);
-        assert!(history[history.len() - 1] < history[0], "loss should drop over steps");
-        assert!(history[history.len() - 1] < 1e-4, "loss should converge near zero");
+        assert!(
+            history[history.len() - 1] < history[0],
+            "loss should drop over steps"
+        );
+        assert!(
+            history[history.len() - 1] < 1e-4,
+            "loss should converge near zero"
+        );
         let p = station.get_parameters();
         assert!((p[0] - 1.0).abs() < 1e-2 && (p[1] + 2.0).abs() < 1e-2);
     }
@@ -973,7 +1055,11 @@ mod tests {
         let mut station = MiniBatchStation::new("mb", 2, true);
         for i in 0..3 {
             station.core_mut().take(
-                Rc::new(VectorSampleToken::new(format!("s{i}"), vec![i as f64], vec![0.0])),
+                Rc::new(VectorSampleToken::new(
+                    format!("s{i}"),
+                    vec![i as f64],
+                    vec![0.0],
+                )),
                 MiniBatchStation::CH_SAMPLE,
             );
         }
@@ -989,8 +1075,15 @@ mod tests {
 
     struct SquareEval;
     impl CandidateEvaluatorHook<f64> for SquareEval {
-        fn evaluate_candidate(&mut self, token: &CandidateToken<f64>) -> EvaluatedCandidateToken<f64> {
-            EvaluatedCandidateToken::new(token.id.clone(), token.candidate, token.candidate * token.candidate)
+        fn evaluate_candidate(
+            &mut self,
+            token: &CandidateToken<f64>,
+        ) -> EvaluatedCandidateToken<f64> {
+            EvaluatedCandidateToken::new(
+                token.id.clone(),
+                token.candidate,
+                token.candidate * token.candidate,
+            )
         }
     }
 
@@ -1004,8 +1097,9 @@ mod tests {
                 CandidateToken::new("c", 2.0_f64),
             ],
         )));
-        let evaluator =
-            Rc::new(RefCell::new(CandidateEvaluatorStation::<f64, SquareEval>::new("eval", SquareEval)));
+        let evaluator = Rc::new(RefCell::new(
+            CandidateEvaluatorStation::<f64, SquareEval>::new("eval", SquareEval),
+        ));
         let sink = Rc::new(RefCell::new(IncumbentSinkStation::<f64>::new("sink")));
 
         source.borrow_mut().core_mut().pipe(
@@ -1020,13 +1114,22 @@ mod tests {
         );
 
         let summary = run_iterative_des(
-            vec![source.clone() as StationRef, evaluator.clone() as StationRef, sink.clone() as StationRef],
-            IterativeRunOptions { shuffle: false, ..Default::default() },
+            vec![
+                source.clone() as StationRef,
+                evaluator.clone() as StationRef,
+                sink.clone() as StationRef,
+            ],
+            IterativeRunOptions {
+                shuffle: false,
+                ..Default::default()
+            },
         );
         assert!(summary.ticks >= 1);
 
         let sink_ref = sink.borrow();
-        let inc = sink_ref.get_incumbent().expect("an incumbent should be chosen");
+        let inc = sink_ref
+            .get_incumbent()
+            .expect("an incumbent should be chosen");
         assert_eq!(inc.id, "b");
         assert!((inc.objective - 1.0).abs() < 1e-12);
         assert_eq!(sink_ref.evaluations.len(), 3);

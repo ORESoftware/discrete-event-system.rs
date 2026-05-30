@@ -146,7 +146,8 @@ impl PlantBlock for PendulumPlant {
         let f = |xx: &[f64]| -> Vec<f64> {
             let (theta, theta_d) = (xx[0], xx[1]);
             let PendulumParams { m, l, g, c } = params;
-            let theta_dd = -(g / l) * theta.sin() - (c / (m * l * l)) * theta_d + (1.0 / (m * l * l)) * u0;
+            let theta_dd =
+                -(g / l) * theta.sin() - (c / (m * l * l)) * theta_d + (1.0 / (m * l * l)) * u0;
             vec![theta_d, theta_dd]
         };
         rk4(x, f, dt)
@@ -241,8 +242,7 @@ impl ControllerBlock for FeedbackLinearizationController {
 // -----------------------------------------------------------------------------
 
 /// Options for `run_feedback_linearization` (TS `FeedbackLinearizationOpts`).
-#[derive(Clone)]
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct FeedbackLinearizationOpts {
     /// Partial override of the pendulum parameters (each defaults individually).
     pub params: Option<PartialPendulumParams>,
@@ -260,7 +260,6 @@ pub struct FeedbackLinearizationOpts {
     pub dt: Option<f64>,
     pub num_steps: Option<usize>,
 }
-
 
 /// Per-field optional override of `PendulumParams` (TS `Partial<PendulumParams>`).
 #[derive(Clone, Copy, Debug, Default)]
@@ -314,7 +313,13 @@ fn run_feedback_linearization_impl(
         Preconditions::positive(cls, "uBound", ub)?;
     }
     Preconditions::positive(cls, "dt", opts.dt.unwrap_or(0.01))?;
-    Preconditions::integer_in_range(cls, "numSteps", opts.num_steps.unwrap_or(1000) as f64, 1.0, 1e9)?;
+    Preconditions::integer_in_range(
+        cls,
+        "numSteps",
+        opts.num_steps.unwrap_or(1000) as f64,
+        1.0,
+        1e9,
+    )?;
     if let Some(t0) = opts.theta0 {
         Preconditions::finite(cls, "theta0", t0)?;
     }
@@ -372,11 +377,23 @@ fn run_feedback_linearization_impl(
 /// One Runge–Kutta-4 step of `ẋ = f(x)` (TS `rk4`). `f` is a derivative closure.
 fn rk4(x: &[f64], f: impl Fn(&[f64]) -> Vec<f64>, dt: f64) -> Vec<f64> {
     let k1 = f(x);
-    let x2: Vec<f64> = x.iter().enumerate().map(|(i, xi)| xi + 0.5 * dt * k1[i]).collect();
+    let x2: Vec<f64> = x
+        .iter()
+        .enumerate()
+        .map(|(i, xi)| xi + 0.5 * dt * k1[i])
+        .collect();
     let k2 = f(&x2);
-    let x3: Vec<f64> = x.iter().enumerate().map(|(i, xi)| xi + 0.5 * dt * k2[i]).collect();
+    let x3: Vec<f64> = x
+        .iter()
+        .enumerate()
+        .map(|(i, xi)| xi + 0.5 * dt * k2[i])
+        .collect();
     let k3 = f(&x3);
-    let x4: Vec<f64> = x.iter().enumerate().map(|(i, xi)| xi + dt * k3[i]).collect();
+    let x4: Vec<f64> = x
+        .iter()
+        .enumerate()
+        .map(|(i, xi)| xi + dt * k3[i])
+        .collect();
     let k4 = f(&x4);
     x.iter()
         .enumerate()

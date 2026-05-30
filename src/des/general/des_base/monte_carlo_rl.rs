@@ -212,7 +212,14 @@ impl RLAgentStation<usize, usize> for MonteCarloAgent {
 
     /// Each transition just APPENDS to the in-progress trajectory; no Q update
     /// happens until `done`.
-    fn update(&mut self, state: &usize, action: &usize, reward: f64, _next_state: &usize, done: bool) {
+    fn update(
+        &mut self,
+        state: &usize,
+        action: &usize,
+        reward: f64,
+        _next_state: &usize,
+        done: bool,
+    ) {
         self.traj_s.push(*state);
         self.traj_a.push(*action);
         self.traj_r.push(reward);
@@ -259,7 +266,8 @@ mod tests {
             for action in 0..2usize {
                 let reward = if action == 1 { 1.0 } else { 0.0 };
                 let t = TransitionToken::new(0usize, action, reward, 0usize, true, ep as f64);
-                a.core_mut().take(Rc::new(t), MonteCarloAgent::CH_TRANSITION);
+                a.core_mut()
+                    .take(Rc::new(t), MonteCarloAgent::CH_TRANSITION);
                 a.run_time_step();
             }
         }
@@ -279,11 +287,13 @@ mod tests {
         let mut a = agent(2, 2, 2, true);
         // Step 1: not done — buffered, then template acts on next_state.
         let t1 = TransitionToken::new(0usize, 0usize, 0.0, 1usize, false, 0.0);
-        a.core_mut().take(Rc::new(t1), MonteCarloAgent::CH_TRANSITION);
+        a.core_mut()
+            .take(Rc::new(t1), MonteCarloAgent::CH_TRANSITION);
         a.run_time_step();
         // Step 2: done — applies the episode return over the buffered trajectory.
         let t2 = TransitionToken::new(1usize, 1usize, 1.0, 1usize, true, 0.0);
-        a.core_mut().take(Rc::new(t2), MonteCarloAgent::CH_TRANSITION);
+        a.core_mut()
+            .take(Rc::new(t2), MonteCarloAgent::CH_TRANSITION);
         a.run_time_step();
 
         let q = a.get_q();

@@ -89,7 +89,11 @@ pub fn build_html_set(variants: &[AnimationVariant], opts: &AnimationSetOptions)
         ("variants".to_string(), JsonValue::Array(variant_json)),
         (
             "selectorLabel".to_string(),
-            JsonValue::String(opts.selector_label.clone().unwrap_or_else(|| "variant".to_string())),
+            JsonValue::String(
+                opts.selector_label
+                    .clone()
+                    .unwrap_or_else(|| "variant".to_string()),
+            ),
         ),
     ]);
     let json = json_for_script(&payload);

@@ -95,7 +95,11 @@ pub struct NeuralInferenceToken {
 
 impl NeuralInferenceToken {
     pub fn new(id: impl Into<String>, input: NumericVector) -> Self {
-        NeuralInferenceToken { id: id.into(), input, meta: Meta::new() }
+        NeuralInferenceToken {
+            id: id.into(),
+            input,
+            meta: Meta::new(),
+        }
     }
 }
 
@@ -110,7 +114,12 @@ pub struct SupervisedSampleToken {
 
 impl SupervisedSampleToken {
     pub fn new(id: impl Into<String>, input: NumericVector, target: NumericVector) -> Self {
-        SupervisedSampleToken { id: id.into(), input, target, meta: Meta::new() }
+        SupervisedSampleToken {
+            id: id.into(),
+            input,
+            target,
+            meta: Meta::new(),
+        }
     }
 }
 
@@ -157,7 +166,10 @@ impl<N: NeuralNetworkLike + 'static> NeuralNetworkStation<N> {
     pub const CH_SNAPSHOT: &'static str = "snapshot";
 
     pub fn new(id: impl Into<String>, network: N) -> Self {
-        NeuralNetworkStation { core: StationCore::new(id), network }
+        NeuralNetworkStation {
+            core: StationCore::new(id),
+            network,
+        }
     }
 
     pub fn get_network(&self) -> &N {
@@ -215,7 +227,10 @@ pub struct SupervisedNeuralNetworkStationOptions {
 
 impl SupervisedNeuralNetworkStationOptions {
     pub fn new(learning_rate: f64) -> Self {
-        SupervisedNeuralNetworkStationOptions { learning_rate, snapshot_every: 0 }
+        SupervisedNeuralNetworkStationOptions {
+            learning_rate,
+            snapshot_every: 0,
+        }
     }
 }
 
@@ -277,13 +292,15 @@ impl<N: TrainableNeuralNetwork + 'static> DESStation for SupervisedNeuralNetwork
     }
 
     fn run_time_step(&mut self) {
-        let samples = self.base.core_mut().drain::<SupervisedSampleToken>(Self::CH_TRAIN);
+        let samples = self
+            .base
+            .core_mut()
+            .drain::<SupervisedSampleToken>(Self::CH_TRAIN);
         for sample in samples {
-            let r = self.base.network.train_sample(
-                &sample.input,
-                &sample.target,
-                self.learning_rate,
-            );
+            let r =
+                self.base
+                    .network
+                    .train_sample(&sample.input, &sample.target, self.learning_rate);
             self.training_step += 1;
             self.loss_history.push(r.loss);
             let result = NeuralTrainingResultToken {
@@ -294,7 +311,9 @@ impl<N: TrainableNeuralNetwork + 'static> DESStation for SupervisedNeuralNetwork
                 step: self.training_step,
                 meta: sample.meta.clone(),
             };
-            self.base.core_mut().emit(Rc::new(result), Self::CH_TRAINING_RESULT);
+            self.base
+                .core_mut()
+                .emit(Rc::new(result), Self::CH_TRAINING_RESULT);
             if self.snapshot_every > 0 && self.training_step.is_multiple_of(self.snapshot_every) {
                 let snapshot = NeuralSnapshotToken {
                     training_step: self.training_step,
@@ -327,7 +346,12 @@ mod tests {
         fn new(w: Vec<Vec<f64>>, b: Vec<f64>) -> Self {
             let out_dim = w.len();
             let in_dim = if out_dim == 0 { 0 } else { w[0].len() };
-            LinearNet { w, b, in_dim, out_dim }
+            LinearNet {
+                w,
+                b,
+                in_dim,
+                out_dim,
+            }
         }
     }
 

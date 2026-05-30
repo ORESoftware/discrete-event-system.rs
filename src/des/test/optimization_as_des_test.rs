@@ -51,12 +51,20 @@ mod tests {
         }
         fn step(&mut self, state: usize, action: usize) -> StepResult<usize> {
             let o = self.env.step(state, action);
-            StepResult { next_state: o.next_state, reward: o.reward, done: o.done }
+            StepResult {
+                next_state: o.next_state,
+                reward: o.reward,
+                done: o.done,
+            }
         }
     }
 
     fn pentagon_cooling() -> CoolingSchedule {
-        CoolingSchedule::Geometric { t0: 50.0, alpha: 0.998, t_min: None }
+        CoolingSchedule::Geometric {
+            t0: 50.0,
+            alpha: 0.998,
+            t_min: None,
+        }
     }
 
     fn sa_options() -> TSPSAOptions {
@@ -132,7 +140,9 @@ mod tests {
         let env = GridWorld::new(GridWorldOptions::default());
         let opt = env.optimal_v(0.95, 1e-9, 5000);
         let ql = run_qlearning_des(
-            Box::new(PureEnvAdapter { env: GridWorld::new(GridWorldOptions::default()) }),
+            Box::new(PureEnvAdapter {
+                env: GridWorld::new(GridWorldOptions::default()),
+            }),
             RunQLearningOptions {
                 num_episodes: 500.0,
                 alpha: 0.3,
@@ -153,7 +163,11 @@ mod tests {
             &env,
             |s, _rng| ql.policy[s],
             &mut rng,
-            EvalPolicyOptions { num_episodes: 100, max_steps_per_episode: 100, gamma: 0.95 },
+            EvalPolicyOptions {
+                num_episodes: 100,
+                max_steps_per_episode: 100,
+                gamma: 0.95,
+            },
         );
         assert_eq!(eval_q.success_rate, 1.0);
         assert_eq!(ql.total_episodes, 500);
@@ -166,7 +180,9 @@ mod tests {
         let env = Corridor::new(8, 0);
         let opt = env.optimal_v(0.95, 1e-9, 5000);
         let ppo = run_ppo_des(
-            Box::new(PureEnvAdapter { env: Corridor::new(8, 0) }),
+            Box::new(PureEnvAdapter {
+                env: Corridor::new(8, 0),
+            }),
             RunPPOOptions {
                 total_steps: 8000,
                 rollout_len: 64,
@@ -192,7 +208,11 @@ mod tests {
             &env,
             |s, _rng| ppo.policy[s],
             &mut rng,
-            EvalPolicyOptions { num_episodes: 50, max_steps_per_episode: 30, gamma: 0.95 },
+            EvalPolicyOptions {
+                num_episodes: 50,
+                max_steps_per_episode: 30,
+                gamma: 0.95,
+            },
         );
         assert_eq!(eval_p.success_rate, 1.0);
         assert!(ppo.total_updates >= 100);

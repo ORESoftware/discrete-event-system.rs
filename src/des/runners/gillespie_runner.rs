@@ -16,9 +16,9 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
+use crate::des::general::prng::with_seed;
 use crate::des::observability::logger::{JsonValue, JsonlLogger, LogLevel};
 use crate::des::shared::capabilities::{Clock, RandomSource, SystemClock};
-use crate::des::general::prng::with_seed;
 
 use super::shared::{
     average_record, mean_residence, update_peaks, zero_compartment_record, TransitionCounter,
@@ -35,7 +35,12 @@ fn jb(v: bool) -> JsonValue {
     JsonValue::Bool(v)
 }
 fn jobj(entries: Vec<(&str, JsonValue)>) -> JsonValue {
-    JsonValue::Object(entries.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+    JsonValue::Object(
+        entries
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
+    )
 }
 
 /// Compartment counts (`N`). No `D` — deaths are absorbed immediately.
@@ -108,10 +113,7 @@ impl<'a> Sim<'a> {
         let mu = &self.mu;
         let n = &self.n;
         match idx {
-            0
-                if self.source_created < self.config.source_cap && !self.phase2 => {
-                    1.0 / mu.arrival
-                }
+            0 if self.source_created < self.config.source_cap && !self.phase2 => 1.0 / mu.arrival,
             1 => n.s / mu.s,
             2 => n.e / mu.e,
             3 => n.i_p * p.asymptomatic_share / mu.i_p,
@@ -193,7 +195,9 @@ impl<'a> Sim<'a> {
 /// `runGillespieOnce` — seed the RNG then run the direct-method SSA.
 pub fn run_gillespie_once(config: &SimConfig, opts: &RunOpts) -> RunResult {
     let seed = opts.seed.unwrap_or_else(|| SystemClock.now_ms() as u64);
-    with_seed(seed as u32, |rng| run_gillespie_inner(config, opts, seed, rng))
+    with_seed(seed as u32, |rng| {
+        run_gillespie_inner(config, opts, seed, rng)
+    })
 }
 
 fn run_gillespie_inner(
@@ -348,7 +352,10 @@ fn run_gillespie_inner(
                 JsonValue::Object(vec![
                     ("created".to_string(), jn(sim.source_created)),
                     ("absorbed".to_string(), jn(sim.absorbed)),
-                    ("finalPopulations".to_string(), JsonValue::Object(final_pop_json)),
+                    (
+                        "finalPopulations".to_string(),
+                        JsonValue::Object(final_pop_json),
+                    ),
                 ]),
             ),
         ]));
@@ -360,7 +367,10 @@ fn run_gillespie_inner(
         kernel: Kernel::Gillespie,
         config: config.clone(),
         seed,
-        totals: Totals { created: sim.source_created, absorbed: sim.absorbed },
+        totals: Totals {
+            created: sim.source_created,
+            absorbed: sim.absorbed,
+        },
         final_populations,
         transition_counts: tables.counts,
         split_probs: tables.splits,
@@ -409,9 +419,24 @@ mod tests {
 
     #[test]
     fn gillespie_kernel_runs_deterministically() {
-        let cfg = SimConfig { horizon_days: 100.0, ..default_config() };
-        let a = run_gillespie_once(&cfg, &RunOpts { seed: Some(42), ..Default::default() });
-        let b = run_gillespie_once(&cfg, &RunOpts { seed: Some(42), ..Default::default() });
+        let cfg = SimConfig {
+            horizon_days: 100.0,
+            ..default_config()
+        };
+        let a = run_gillespie_once(
+            &cfg,
+            &RunOpts {
+                seed: Some(42),
+                ..Default::default()
+            },
+        );
+        let b = run_gillespie_once(
+            &cfg,
+            &RunOpts {
+                seed: Some(42),
+                ..Default::default()
+            },
+        );
         assert_eq!(a.kernel, Kernel::Gillespie);
         assert_eq!(a.totals.created, b.totals.created);
         assert_eq!(a.totals.absorbed, b.totals.absorbed);

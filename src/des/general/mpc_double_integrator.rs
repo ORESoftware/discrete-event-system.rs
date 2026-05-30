@@ -373,7 +373,11 @@ mod tests {
         assert_eq!(r.trajectory.len(), r.num_steps + 1);
         assert_eq!(r.controls.len(), r.num_steps);
         // The closed loop reaches the |x|+|v| < 1e-2 band before the run ends…
-        assert!(r.arrival_tick < r.num_steps, "arrival_tick = {}", r.arrival_tick);
+        assert!(
+            r.arrival_tick < r.num_steps,
+            "arrival_tick = {}",
+            r.arrival_tick
+        );
         // …and finishes essentially at the origin.
         let last = r.trajectory.last().unwrap();
         assert!(last[0].abs() + last[1].abs() < 1e-1, "final = {last:?}");

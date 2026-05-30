@@ -14,7 +14,8 @@ mod tests {
     use crate::des::general::control_systems::empirical_control::Mulberry32;
     use crate::des::general::control_systems::sde_learning::{
         DenoisingDiffusionModel, DiffusionOptions, DiffusionTrainOptions, EnkfOptions,
-        EnsembleKalmanFilter, GbmFamily, Mlp, OuFamily, SdeMaximumLikelihoodEstimator, SdeMleOptions,
+        EnsembleKalmanFilter, GbmFamily, Mlp, OuFamily, SdeMaximumLikelihoodEstimator,
+        SdeMleOptions,
     };
     use crate::des::general::control_systems::stochastic_sde::{
         EulerMaruyamaIntegrator, GeometricBrownianMotion, OrnsteinUhlenbeck, StochasticDcMotor,
@@ -69,8 +70,12 @@ mod tests {
         assert!(rel(emp_mean, gbm.mean_at(x0, t)) < 0.03);
         assert!(rel(emp_var, gbm.var_at(x0, t)) < 0.12);
 
-        let a = em.simulate(&gbm, &[1.0], 0.01, 10, &mut Mulberry32::new(1)).path;
-        let b = em.simulate(&gbm, &[1.0], 0.01, 10, &mut Mulberry32::new(1)).path;
+        let a = em
+            .simulate(&gbm, &[1.0], 0.01, 10, &mut Mulberry32::new(1))
+            .path;
+        let b = em
+            .simulate(&gbm, &[1.0], 0.01, 10, &mut Mulberry32::new(1))
+            .path;
         assert_eq!(a, b);
     }
 
@@ -78,8 +83,17 @@ mod tests {
     #[test]
     fn ou_stationary_variance() {
         let ou = OrnsteinUhlenbeck::new(1.0, 0.0, 0.5);
-        let sde = EulerMaruyamaIntegrator::new().simulate(&ou, &[0.0], 0.01, 60000, &mut Mulberry32::new(3));
-        let tail: Vec<f64> = sde.path[sde.path.len() / 2..].iter().map(|x| x[0]).collect();
+        let sde = EulerMaruyamaIntegrator::new().simulate(
+            &ou,
+            &[0.0],
+            0.01,
+            60000,
+            &mut Mulberry32::new(3),
+        );
+        let tail: Vec<f64> = sde.path[sde.path.len() / 2..]
+            .iter()
+            .map(|x| x[0])
+            .collect();
         let mean = tail.iter().sum::<f64>() / tail.len() as f64;
         let variance = tail.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / tail.len() as f64;
         assert!((mean - ou.stationary_mean()).abs() < 0.05);
@@ -90,13 +104,25 @@ mod tests {
     #[test]
     fn mle_gbm_recovery() {
         let gbm = GeometricBrownianMotion::new(0.15, 0.25);
-        let sde = EulerMaruyamaIntegrator::new().simulate(&gbm, &[1.0], 0.004, 6000, &mut Mulberry32::new(11));
-        let fit = SdeMaximumLikelihoodEstimator::new(mle_opts(1000, 0.05)).fit(&GbmFamily, &sde.times, &sde.path);
+        let sde = EulerMaruyamaIntegrator::new().simulate(
+            &gbm,
+            &[1.0],
+            0.004,
+            6000,
+            &mut Mulberry32::new(11),
+        );
+        let fit = SdeMaximumLikelihoodEstimator::new(mle_opts(1000, 0.05))
+            .fit(&GbmFamily, &sde.times, &sde.path);
         assert!(rel(fit.params["sigma"], 0.25) < 0.1);
         assert!((fit.params["mu"] - 0.15).abs() < 0.15);
 
-        let est = SdeMaximumLikelihoodEstimator::new(SdeMleOptions { iterations: None, learning_rate: None, fd_eps: None });
-        let nll_truth = est.neg_log_likelihood(&GbmFamily, &[0.15, 0.25_f64.ln()], &sde.times, &sde.path);
+        let est = SdeMaximumLikelihoodEstimator::new(SdeMleOptions {
+            iterations: None,
+            learning_rate: None,
+            fd_eps: None,
+        });
+        let nll_truth =
+            est.neg_log_likelihood(&GbmFamily, &[0.15, 0.25_f64.ln()], &sde.times, &sde.path);
         assert!(fit.final_neg_log_lik <= nll_truth + 1e-6);
     }
 
@@ -132,7 +158,13 @@ mod tests {
             hidden: Some(64),
             seed: Some(2),
         });
-        model.train(&data, DiffusionTrainOptions { iterations: Some(25000), learning_rate: Some(0.006) });
+        model.train(
+            &data,
+            DiffusionTrainOptions {
+                iterations: Some(25000),
+                learning_rate: Some(0.006),
+            },
+        );
         let s = DenoisingDiffusionModel::summarise(&model.sample(2000));
         assert!((s.mean - 3.0).abs() < 0.5, "mean={}", s.mean);
         assert!((s.std - 0.6).abs() < 0.35, "std={}", s.std);
@@ -143,7 +175,13 @@ mod tests {
     fn deterministic_motor_steady_state() {
         let (r, ke, kt, bf, v) = (2.0, 0.1, 0.1, 0.002, 12.0);
         let motor = StochasticDcMotor::new(motor_spec(0.0, 0.0));
-        let sde = EulerMaruyamaIntegrator::new().simulate(&motor, &[0.0, 0.0], 0.001, 20000, &mut Mulberry32::new(1));
+        let sde = EulerMaruyamaIntegrator::new().simulate(
+            &motor,
+            &[0.0, 0.0],
+            0.001,
+            20000,
+            &mut Mulberry32::new(1),
+        );
         let last = &sde.path[sde.path.len() - 1];
         let (i_end, w_end) = (last[0], last[1]);
         let w_star = v / (ke + (r * bf) / kt);
@@ -179,8 +217,15 @@ mod tests {
     #[test]
     fn mle_ou_recovery() {
         let ou = OrnsteinUhlenbeck::new(0.8, 1.5, 0.4);
-        let sde = EulerMaruyamaIntegrator::new().simulate(&ou, &[0.0], 0.01, 8000, &mut Mulberry32::new(21));
-        let fit = SdeMaximumLikelihoodEstimator::new(mle_opts(600, 0.05)).fit(&OuFamily, &sde.times, &sde.path);
+        let sde = EulerMaruyamaIntegrator::new().simulate(
+            &ou,
+            &[0.0],
+            0.01,
+            8000,
+            &mut Mulberry32::new(21),
+        );
+        let fit = SdeMaximumLikelihoodEstimator::new(mle_opts(600, 0.05))
+            .fit(&OuFamily, &sde.times, &sde.path);
         assert!(rel(fit.params["sigma"], 0.4) < 0.1);
         assert!(rel(fit.params["theta"], 0.8) < 0.3);
         assert!((fit.params["mu"] - 1.5).abs() < 0.3);

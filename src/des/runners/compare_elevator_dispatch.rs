@@ -123,7 +123,13 @@ fn build_schedule(cfg: &ElevatorConfig) -> Vec<Passenger> {
             if to == from {
                 to = (to + 1) % n;
             }
-            passengers.push(Passenger { arrival: t, from, to, board: None, exit: None });
+            passengers.push(Passenger {
+                arrival: t,
+                from,
+                to,
+                board: None,
+                exit: None,
+            });
         }
         passengers
     })
@@ -141,7 +147,12 @@ fn run_elevator(cfg: &ElevatorConfig, mode: DispatchMode, schedule: &[Passenger]
     let mut passengers: Vec<Passenger> = schedule.to_vec();
     let dt = cfg.step_size.max(1e-3);
     let mut elevators: Vec<Elevator> = (0..cfg.n_elevators.max(1))
-        .map(|_| Elevator { pos: 0.0, dwell: 0.0, target: None, onboard: Vec::new() })
+        .map(|_| Elevator {
+            pos: 0.0,
+            dwell: 0.0,
+            target: None,
+            onboard: Vec::new(),
+        })
         .collect();
     // Index of next arrival not yet released into the waiting pool.
     let mut next_arrival = 0usize;
@@ -153,7 +164,12 @@ fn run_elevator(cfg: &ElevatorConfig, mode: DispatchMode, schedule: &[Passenger]
     let mut t = 0.0_f64;
     let arrival_order: Vec<usize> = {
         let mut idx: Vec<usize> = (0..passengers.len()).collect();
-        idx.sort_by(|&a, &b| passengers[a].arrival.partial_cmp(&passengers[b].arrival).unwrap());
+        idx.sort_by(|&a, &b| {
+            passengers[a]
+                .arrival
+                .partial_cmp(&passengers[b].arrival)
+                .unwrap()
+        });
         idx
     };
 
@@ -203,15 +219,27 @@ fn run_elevator(cfg: &ElevatorConfig, mode: DispatchMode, schedule: &[Passenger]
             }
             // Choose a target if none.
             if elevators[ei].target.is_none() {
-                elevators[ei].target = choose_target(ei, mode, &elevators, &waiting, &claimed_by, &passengers);
+                elevators[ei].target =
+                    choose_target(ei, mode, &elevators, &waiting, &claimed_by, &passengers);
             }
-            let Some(target) = elevators[ei].target else { continue };
+            let Some(target) = elevators[ei].target else {
+                continue;
+            };
             // Move toward target.
             let speed = dt / cfg.floor_travel_time.max(1e-9);
             let diff = target as f64 - elevators[ei].pos;
             if diff.abs() <= speed + eps {
                 elevators[ei].pos = target as f64;
-                service_stop(ei, cfg, mode, t, &mut elevators, &mut waiting, &mut claimed_by, &mut passengers);
+                service_stop(
+                    ei,
+                    cfg,
+                    mode,
+                    t,
+                    &mut elevators,
+                    &mut waiting,
+                    &mut claimed_by,
+                    &mut passengers,
+                );
                 elevators[ei].dwell = cfg.service_time;
                 elevators[ei].target = None;
             } else {
@@ -354,19 +382,35 @@ pub fn run() {
         .map(|x| x as u64)
         .collect::<Vec<_>>();
     let lambdas = parse_list(std::env::var("LAMBDAS").ok(), &[0.2, 0.4]);
-    let sim_t: f64 = std::env::var("SIM_T").ok().and_then(|s| s.parse().ok()).unwrap_or(1800.0);
+    let sim_t: f64 = std::env::var("SIM_T")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1800.0);
 
     let mut trials: Vec<TrialAggregate> = Vec::new();
     println!("# elevator dispatch comparison");
-    println!("#   seeds = {}", seeds.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(","));
+    println!(
+        "#   seeds = {}",
+        seeds
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    );
     println!(
         "#   λ     = {} arrivals/s",
-        lambdas.iter().map(|l| l.to_string()).collect::<Vec<_>>().join(",")
+        lambdas
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
     );
     println!("#   simT  = {sim_t}s");
     println!();
     println!("  λ     seed   meanWait u→c     p95Wait u→c     meanTotal u→c    Δmean   Δp95");
-    println!("  ────  ────  ─────────────────  ─────────────────  ──────────────────  ──────  ──────");
+    println!(
+        "  ────  ────  ─────────────────  ─────────────────  ──────────────────  ──────  ──────"
+    );
 
     for &lambda in &lambdas {
         for &seed in &seeds {
@@ -384,14 +428,35 @@ pub fn run() {
             let schedule = build_schedule(&base);
             let u = run_elevator(&base, DispatchMode::Uncoordinated, &schedule);
             let c = run_elevator(&base, DispatchMode::Coordinated, &schedule);
-            trials.push(TrialAggregate { seed, lambda, uncoord: u, coord: c });
+            trials.push(TrialAggregate {
+                seed,
+                lambda,
+                uncoord: u,
+                coord: c,
+            });
 
-            let mw = format!("{} → {}", pad_start(&format!("{:.2}", u.mean_wait), 5), pad_start(&format!("{:.2}", c.mean_wait), 5));
-            let pw = format!("{} → {}", pad_start(&format!("{:.1}", u.p95_wait), 5), pad_start(&format!("{:.1}", c.p95_wait), 5));
-            let mt = format!("{} → {}", pad_start(&format!("{:.2}", u.mean_total), 6), pad_start(&format!("{:.2}", c.mean_total), 6));
+            let mw = format!(
+                "{} → {}",
+                pad_start(&format!("{:.2}", u.mean_wait), 5),
+                pad_start(&format!("{:.2}", c.mean_wait), 5)
+            );
+            let pw = format!(
+                "{} → {}",
+                pad_start(&format!("{:.1}", u.p95_wait), 5),
+                pad_start(&format!("{:.1}", c.p95_wait), 5)
+            );
+            let mt = format!(
+                "{} → {}",
+                pad_start(&format!("{:.2}", u.mean_total), 6),
+                pad_start(&format!("{:.2}", c.mean_total), 6)
+            );
             let dm = pad_start(&pct(c.mean_wait, u.mean_wait), 7);
             let dp = pad_start(&pct(c.p95_wait, u.p95_wait), 7);
-            println!("  {:.2}  {}  {mw}   {pw}   {mt}  {dm} {dp}", lambda, pad_start(&seed.to_string(), 4));
+            println!(
+                "  {:.2}  {}  {mw}   {pw}   {mt}  {dm} {dp}",
+                lambda,
+                pad_start(&seed.to_string(), 4)
+            );
         }
     }
 
@@ -445,8 +510,14 @@ pub fn run() {
             .collect(),
     );
     let payload = JsonValue::Object(vec![
-        ("seeds".to_string(), JsonValue::Array(seeds.iter().map(|s| jn(*s as f64)).collect())),
-        ("lambdas".to_string(), JsonValue::Array(lambdas.iter().map(|l| jn(*l)).collect())),
+        (
+            "seeds".to_string(),
+            JsonValue::Array(seeds.iter().map(|s| jn(*s as f64)).collect()),
+        ),
+        (
+            "lambdas".to_string(),
+            JsonValue::Array(lambdas.iter().map(|l| jn(*l)).collect()),
+        ),
         ("simT".to_string(), jn(sim_t)),
         ("trials".to_string(), trials_json),
     ]);

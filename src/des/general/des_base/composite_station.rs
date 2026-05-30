@@ -37,7 +37,9 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use super::station::{run_station_validation, AnyToken, ChannelName, DESStation, StationCore, StationRef};
+use super::station::{
+    run_station_validation, AnyToken, ChannelName, DESStation, StationCore, StationRef,
+};
 use super::validation::{run_validators, ValidationCheck, Validator};
 
 /// Internal egress buffer station: holds tokens emitted by an internal source
@@ -48,7 +50,9 @@ pub struct CompositePortBridgeStation {
 
 impl CompositePortBridgeStation {
     fn new(id: impl Into<String>) -> Self {
-        CompositePortBridgeStation { core: StationCore::new(id) }
+        CompositePortBridgeStation {
+            core: StationCore::new(id),
+        }
     }
 
     /// Drain (and clear) the bridge's buffer for `channel`, returning the raw
@@ -133,7 +137,10 @@ impl CompositeDESStation {
     }
 
     /// Register a substation and return its shared handle for further wiring.
-    pub fn add_substation<S: DESStation + 'static>(&mut self, station: Rc<RefCell<S>>) -> Rc<RefCell<S>> {
+    pub fn add_substation<S: DESStation + 'static>(
+        &mut self,
+        station: Rc<RefCell<S>>,
+    ) -> Rc<RefCell<S>> {
         self.children.push(station.clone());
         station
     }
@@ -141,7 +148,12 @@ impl CompositeDESStation {
     /// Expose an outer input channel, routing its tokens into `target`'s
     /// `target_channel`. (TS defaulted `targetChannel = outerChannel`; pass it
     /// explicitly here.)
-    pub fn expose_input(&mut self, outer_channel: &str, target: StationRef, target_channel: &str) -> &mut Self {
+    pub fn expose_input(
+        &mut self,
+        outer_channel: &str,
+        target: StationRef,
+        target_channel: &str,
+    ) -> &mut Self {
         self.input_ports.push(CompositeInputPort {
             outer_channel: outer_channel.to_string(),
             target,
@@ -154,12 +166,29 @@ impl CompositeDESStation {
     /// `outer_channel` output (via a generated egress bridge). (TS defaulted
     /// `source_channel = DEFAULT_CHANNEL`, `outer_channel = source_channel`;
     /// pass them explicitly here.)
-    pub fn expose_output(&mut self, source: StationRef, source_channel: &str, outer_channel: &str) -> &mut Self {
-        let bridge_id = format!("{}:out:{}:{}", self.core.id, outer_channel, self.output_ports.len());
+    pub fn expose_output(
+        &mut self,
+        source: StationRef,
+        source_channel: &str,
+        outer_channel: &str,
+    ) -> &mut Self {
+        let bridge_id = format!(
+            "{}:out:{}:{}",
+            self.core.id,
+            outer_channel,
+            self.output_ports.len()
+        );
         let bridge = Rc::new(RefCell::new(CompositePortBridgeStation::new(bridge_id)));
         self.children.push(bridge.clone() as StationRef);
-        source.borrow_mut().core_mut().pipe(bridge.clone() as StationRef, source_channel, outer_channel);
-        self.output_ports.push(CompositeOutputPort { outer_channel: outer_channel.to_string(), bridge });
+        source.borrow_mut().core_mut().pipe(
+            bridge.clone() as StationRef,
+            source_channel,
+            outer_channel,
+        );
+        self.output_ports.push(CompositeOutputPort {
+            outer_channel: outer_channel.to_string(),
+            bridge,
+        });
         self
     }
 
@@ -209,7 +238,10 @@ impl CompositeDESStation {
         for port in &ports {
             let tokens = self.core.drain_any(&port.outer_channel);
             for token in tokens {
-                port.target.borrow_mut().core_mut().take(token, &port.target_channel);
+                port.target
+                    .borrow_mut()
+                    .core_mut()
+                    .take(token, &port.target_channel);
             }
         }
     }
@@ -280,7 +312,11 @@ impl DESStation for CompositeDESStation {
 
     fn num_validators(&self) -> usize {
         let own = self.own_validators.len();
-        let children: usize = self.children.iter().map(|c| c.borrow().num_validators()).sum();
+        let children: usize = self
+            .children
+            .iter()
+            .map(|c| c.borrow().num_validators())
+            .sum();
         own + children
     }
 }
@@ -298,7 +334,9 @@ mod tests {
 
     impl Passthrough {
         fn new(id: &str) -> Self {
-            Passthrough { core: StationCore::new(id) }
+            Passthrough {
+                core: StationCore::new(id),
+            }
         }
     }
 
@@ -328,7 +366,10 @@ mod tests {
 
     impl Collector {
         fn new(id: &str) -> Self {
-            Collector { core: StationCore::new(id), received: 0 }
+            Collector {
+                core: StationCore::new(id),
+                received: 0,
+            }
         }
     }
 
@@ -347,7 +388,11 @@ mod tests {
         }
     }
 
-    fn build() -> (Rc<RefCell<CompositeDESStation>>, Rc<RefCell<Passthrough>>, Rc<RefCell<Collector>>) {
+    fn build() -> (
+        Rc<RefCell<CompositeDESStation>>,
+        Rc<RefCell<Passthrough>>,
+        Rc<RefCell<Collector>>,
+    ) {
         let comp = Rc::new(RefCell::new(CompositeDESStation::new("comp")));
         let child = Rc::new(RefCell::new(Passthrough::new("pass")));
         let sink = Rc::new(RefCell::new(Collector::new("sink")));

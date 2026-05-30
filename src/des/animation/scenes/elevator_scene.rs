@@ -349,17 +349,28 @@ pub fn build_elevator_frame(t: f64, tick: f64, b: &Building) -> FrameParts {
         ..Default::default()
     }));
 
-    let total_waiting: usize =
-        b.floors.iter().map(|f| f.up_queue.len() + f.down_queue.len()).sum();
+    let total_waiting: usize = b
+        .floors
+        .iter()
+        .map(|f| f.up_queue.len() + f.down_queue.len())
+        .sum();
     let total_in_car: usize = b.elevators.iter().map(|e| e.passengers.len()).sum();
-    let total_served = b.sink.collected.iter().filter(|p| p.exit_time > 0.0).count();
+    let total_served = b
+        .sink
+        .collected
+        .iter()
+        .filter(|p| p.exit_time > 0.0)
+        .count();
     let lines: [(String, String); 7] = [
         ("waiting".to_string(), total_waiting.to_string()),
         ("in elevator".to_string(), total_in_car.to_string()),
         ("served".to_string(), total_served.to_string()),
         (
             "mode".to_string(),
-            b.config.dispatch_mode.clone().unwrap_or_else(|| "uncoordinated".to_string()),
+            b.config
+                .dispatch_mode
+                .clone()
+                .unwrap_or_else(|| "uncoordinated".to_string()),
         ),
         ("nFloors".to_string(), b.config.n_floors.to_string()),
         ("nElevators".to_string(), b.elevators.len().to_string()),
@@ -423,7 +434,12 @@ pub fn build_elevator_frame(t: f64, tick: f64, b: &Building) -> FrameParts {
         shapes.push(Shape::Text(TextShape {
             x: METRIC_X + 60.0,
             y,
-            text: format!("F{}  {}/{}", to_fixed(e.current_floor, 1), e.passengers.len(), js_num(e.capacity)),
+            text: format!(
+                "F{}  {}/{}",
+                to_fixed(e.current_floor, 1),
+                e.passengers.len(),
+                js_num(e.capacity)
+            ),
             font_size: Some(11.0),
             fill: Some("#444".to_string()),
             ..Default::default()
@@ -435,7 +451,12 @@ pub fn build_elevator_frame(t: f64, tick: f64, b: &Building) -> FrameParts {
         shapes.push(Shape::Text(TextShape {
             x: METRIC_X + 12.0,
             y: y + 12.0,
-            text: format!("{} {}{}", e.state.label().to_lowercase(), e.direction.label(), target_arrow),
+            text: format!(
+                "{} {}{}",
+                e.state.label().to_lowercase(),
+                e.direction.label(),
+                target_arrow
+            ),
             font_size: Some(10.0),
             fill: Some("#666".to_string()),
             ..Default::default()
@@ -502,9 +523,24 @@ pub fn build_elevator_chart(series: &ElevatorSeries, panel_y: f64, panel_h: f64)
         title: Some("System occupancy over time".to_string()),
         y_min: Some(0.0),
         series: vec![
-            ChartSeries { label: "waiting".to_string(), color: "#dc2626".to_string(), t: series.t.clone(), y: series.waiting.clone() },
-            ChartSeries { label: "in elevator".to_string(), color: "#2563eb".to_string(), t: series.t.clone(), y: series.in_car.clone() },
-            ChartSeries { label: "served".to_string(), color: "#16a34a".to_string(), t: series.t.clone(), y: series.served.clone() },
+            ChartSeries {
+                label: "waiting".to_string(),
+                color: "#dc2626".to_string(),
+                t: series.t.clone(),
+                y: series.waiting.clone(),
+            },
+            ChartSeries {
+                label: "in elevator".to_string(),
+                color: "#2563eb".to_string(),
+                t: series.t.clone(),
+                y: series.in_car.clone(),
+            },
+            ChartSeries {
+                label: "served".to_string(),
+                color: "#16a34a".to_string(),
+                t: series.t.clone(),
+                y: series.served.clone(),
+            },
         ],
         ..Default::default()
     }
@@ -516,7 +552,10 @@ mod tests {
 
     #[test]
     fn dir_color_priorities_serving() {
-        assert_eq!(dir_color(Direction::Up, ElevatorState::Serving), COLOR_SERVE);
+        assert_eq!(
+            dir_color(Direction::Up, ElevatorState::Serving),
+            COLOR_SERVE
+        );
         assert_eq!(dir_color(Direction::Up, ElevatorState::Moving), COLOR_UP);
         assert_eq!(dir_color(Direction::Down, ElevatorState::Idle), COLOR_DOWN);
         assert_eq!(dir_color(Direction::Idle, ElevatorState::Idle), COLOR_IDLE);
@@ -525,7 +564,11 @@ mod tests {
     #[test]
     fn frame_caption_totals() {
         let b = Building {
-            config: BuildingConfig { n_floors: 3, dispatch_mode: None, capacity: 4.0 },
+            config: BuildingConfig {
+                n_floors: 3,
+                dispatch_mode: None,
+                capacity: 4.0,
+            },
             elevators: vec![Elevator {
                 current_floor: 1.5,
                 passengers: vec![Passenger { to_floor: 3.0 }],
@@ -535,13 +578,21 @@ mod tests {
                 target_floor: Some(3.0),
             }],
             floors: vec![
-                Floor { up_queue: vec![QueuePerson { to_floor: 2.0 }], down_queue: vec![] },
+                Floor {
+                    up_queue: vec![QueuePerson { to_floor: 2.0 }],
+                    down_queue: vec![],
+                },
                 Floor::default(),
                 Floor::default(),
             ],
-            sink: Sink { collected: vec![CollectedPassenger { exit_time: 5.0 }] },
+            sink: Sink {
+                collected: vec![CollectedPassenger { exit_time: 5.0 }],
+            },
         };
         let fp = build_elevator_frame(12.0, 3.25, &b);
-        assert_eq!(fp.caption.as_deref(), Some("tick=3.25  t=12.00s  waiting=1  in-car=1  served=1"));
+        assert_eq!(
+            fp.caption.as_deref(),
+            Some("tick=3.25  t=12.00s  waiting=1  in-car=1  served=1")
+        );
     }
 }

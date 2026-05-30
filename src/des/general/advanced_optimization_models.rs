@@ -31,8 +31,8 @@
 #![allow(dead_code)]
 
 use std::any::Any;
-use std::collections::{HashMap, HashSet};
 use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::f64::consts::PI;
 use std::rc::Rc;
 
@@ -49,7 +49,9 @@ use crate::des::general::des_base::learning_optimization::{
 use crate::des::general::des_base::model_topology::{station_graph_topology, StationGraphTopology};
 use crate::des::general::des_base::preconditions::{Check, Preconditions};
 use crate::des::general::des_base::runner::{run_iterative_des, IterativeRunOptions};
-use crate::des::general::des_base::single_state_optimizer::{SingleStateOptimizer, SingleStateState};
+use crate::des::general::des_base::single_state_optimizer::{
+    SingleStateOptimizer, SingleStateState,
+};
 use crate::des::general::des_base::station::{
     AnyToken, DESStation, StationCore, StationRef, DEFAULT_CHANNEL,
 };
@@ -92,7 +94,10 @@ struct OptimizationStartToken<P> {
 
 impl<P> OptimizationStartToken<P> {
     fn new(model: impl Into<String>, params: P) -> Self {
-        OptimizationStartToken { model: model.into(), params }
+        OptimizationStartToken {
+            model: model.into(),
+            params,
+        }
     }
 }
 
@@ -243,9 +248,21 @@ impl DESStation for ParticleSwarmStation {
 
     fn assert_preconditions(&mut self) {
         require(self.assert_preconditions_swarm());
-        require(Preconditions::non_negative(self.id(), "inertia", self.inertia));
-        require(Preconditions::non_negative(self.id(), "cognitive", self.cognitive));
-        require(Preconditions::non_negative(self.id(), "social", self.social));
+        require(Preconditions::non_negative(
+            self.id(),
+            "inertia",
+            self.inertia,
+        ));
+        require(Preconditions::non_negative(
+            self.id(),
+            "cognitive",
+            self.cognitive,
+        ));
+        require(Preconditions::non_negative(
+            self.id(),
+            "social",
+            self.social,
+        ));
     }
 
     fn has_work(&self) -> bool {
@@ -257,12 +274,16 @@ impl DESStation for ParticleSwarmStation {
 
     fn run_time_step(&mut self) {
         if !self.started {
-            let starts =
-                self.core_mut().drain::<OptimizationStartToken<ParticleSwarmConfig>>(PARTICLE_SWARM_CH_START);
+            let starts = self
+                .core_mut()
+                .drain::<OptimizationStartToken<ParticleSwarmConfig>>(PARTICLE_SWARM_CH_START);
             if starts.is_empty() {
                 return;
             }
-            validate_particle_swarm_params("particle-swarm-source", &starts[starts.len() - 1].params);
+            validate_particle_swarm_params(
+                "particle-swarm-source",
+                &starts[starts.len() - 1].params,
+            );
             self.bootstrap();
             self.started = true;
             return;
@@ -291,7 +312,10 @@ impl NumericSwarmOptimizerStation for ParticleSwarmStation {
         match self.objective_name {
             ContinuousObjectiveName::Rastrigin => {
                 10.0 * position.len() as f64
-                    + position.iter().map(|&x| x * x - 10.0 * (2.0 * PI * x).cos()).sum::<f64>()
+                    + position
+                        .iter()
+                        .map(|&x| x * x - 10.0 * (2.0 * PI * x).cos())
+                        .sum::<f64>()
             }
             ContinuousObjectiveName::Rosenbrock => {
                 let mut value = 0.0;
@@ -327,9 +351,27 @@ impl NumericSwarmOptimizerStation for ParticleSwarmStation {
 }
 
 fn validate_particle_swarm_params(model: &str, params: &ParticleSwarmConfig) {
-    require(Preconditions::integer_in_range(model, "dimension", params.dimension as f64, 1.0, 1e6));
-    require(Preconditions::integer_in_range(model, "particles", params.particles as f64, 1.0, 1e9));
-    require(Preconditions::integer_in_range(model, "iterations", params.iterations as f64, 1.0, 1e9));
+    require(Preconditions::integer_in_range(
+        model,
+        "dimension",
+        params.dimension as f64,
+        1.0,
+        1e6,
+    ));
+    require(Preconditions::integer_in_range(
+        model,
+        "particles",
+        params.particles as f64,
+        1.0,
+        1e9,
+    ));
+    require(Preconditions::integer_in_range(
+        model,
+        "iterations",
+        params.iterations as f64,
+        1.0,
+        1e9,
+    ));
     require(Preconditions::finite(model, "lower", params.lower));
     require(Preconditions::finite(model, "upper", params.upper));
     require(Preconditions::check(
@@ -339,8 +381,16 @@ fn validate_particle_swarm_params(model: &str, params: &ParticleSwarmConfig) {
         params.lower < params.upper,
         Some(format!("[{}, {}]", params.lower, params.upper)),
     ));
-    require(Preconditions::non_negative(model, "inertia", params.inertia));
-    require(Preconditions::non_negative(model, "cognitive", params.cognitive));
+    require(Preconditions::non_negative(
+        model,
+        "inertia",
+        params.inertia,
+    ));
+    require(Preconditions::non_negative(
+        model,
+        "cognitive",
+        params.cognitive,
+    ));
     require(Preconditions::non_negative(model, "social", params.social));
 }
 
@@ -371,15 +421,34 @@ pub fn run_particle_swarm(params: ParticleSwarmParams) -> ParticleSwarmResult {
         },
     )));
     let station = Rc::new(RefCell::new(ParticleSwarmStation::new(config)));
-    let sink = Rc::new(RefCell::new(LatestTokenSinkStation::<ParticleSwarmResultToken>::new(
+    let sink = Rc::new(RefCell::new(LatestTokenSinkStation::<
+        ParticleSwarmResultToken,
+    >::new(
         "particle-swarm-result-sink",
         PARTICLE_SWARM_CH_RESULT,
     )));
-    source.borrow_mut().core_mut().pipe(station.clone() as StationRef, PARTICLE_SWARM_CH_START, PARTICLE_SWARM_CH_START);
-    station.borrow_mut().core_mut().pipe(sink.clone() as StationRef, PARTICLE_SWARM_CH_RESULT, PARTICLE_SWARM_CH_RESULT);
+    source.borrow_mut().core_mut().pipe(
+        station.clone() as StationRef,
+        PARTICLE_SWARM_CH_START,
+        PARTICLE_SWARM_CH_START,
+    );
+    station.borrow_mut().core_mut().pipe(
+        sink.clone() as StationRef,
+        PARTICLE_SWARM_CH_RESULT,
+        PARTICLE_SWARM_CH_RESULT,
+    );
     run_iterative_des(
-        vec![source as StationRef, station as StationRef, sink.clone() as StationRef],
-        IterativeRunOptions { shuffle: false, max_ticks: Some(max_ticks), run_validators: false, ..Default::default() },
+        vec![
+            source as StationRef,
+            station as StationRef,
+            sink.clone() as StationRef,
+        ],
+        IterativeRunOptions {
+            shuffle: false,
+            max_ticks: Some(max_ticks),
+            run_validators: false,
+            ..Default::default()
+        },
     );
     let latest = sink.borrow().latest.clone();
     let token = latest.unwrap_or_else(|| panic!("particle-swarm did not produce a result"));
@@ -467,7 +536,11 @@ impl AntColonyTSPStation {
         AntColonyTSPStation {
             core: StationCore::new("ant-colony-tsp-station"),
             state,
-            points: config.points.iter().map(|p| Point2 { x: p.x, y: p.y }).collect(),
+            points: config
+                .points
+                .iter()
+                .map(|p| Point2 { x: p.x, y: p.y })
+                .collect(),
             started: false,
             result_emitted: false,
         }
@@ -530,12 +603,16 @@ impl DESStation for AntColonyTSPStation {
 
     fn run_time_step(&mut self) {
         if !self.started {
-            let starts =
-                self.core_mut().drain::<OptimizationStartToken<AntColonyTSPConfig>>(ANT_COLONY_TSP_CH_START);
+            let starts = self
+                .core_mut()
+                .drain::<OptimizationStartToken<AntColonyTSPConfig>>(ANT_COLONY_TSP_CH_START);
             if starts.is_empty() {
                 return;
             }
-            validate_ant_colony_tsp_params("ant-colony-tsp-source", &starts[starts.len() - 1].params);
+            validate_ant_colony_tsp_params(
+                "ant-colony-tsp-source",
+                &starts[starts.len() - 1].params,
+            );
             self.started = true;
             return;
         }
@@ -574,7 +651,13 @@ impl PheromoneGraphSearchStation for AntColonyTSPStation {
 
 fn validate_ant_colony_tsp_params(model: &str, params: &AntColonyTSPConfig) {
     let points = &params.points;
-    require(Preconditions::check(model, "points.length", "be at least 2", points.len() >= 2, Some(points.len().to_string())));
+    require(Preconditions::check(
+        model,
+        "points.length",
+        "be at least 2",
+        points.len() >= 2,
+        Some(points.len().to_string()),
+    ));
     let mut seen_points: HashSet<String> = HashSet::new();
     for (i, p) in points.iter().enumerate() {
         require(Preconditions::finite(model, &format!("points[{i}].x"), p.x));
@@ -589,11 +672,29 @@ fn validate_ant_colony_tsp_params(model: &str, params: &AntColonyTSPConfig) {
         ));
         seen_points.insert(key);
     }
-    require(Preconditions::integer_in_range(model, "ants", params.ants as f64, 1.0, 1e9));
-    require(Preconditions::integer_in_range(model, "iterations", params.iterations as f64, 1.0, 1e9));
+    require(Preconditions::integer_in_range(
+        model,
+        "ants",
+        params.ants as f64,
+        1.0,
+        1e9,
+    ));
+    require(Preconditions::integer_in_range(
+        model,
+        "iterations",
+        params.iterations as f64,
+        1.0,
+        1e9,
+    ));
     require(Preconditions::non_negative(model, "alpha", params.alpha));
     require(Preconditions::non_negative(model, "beta", params.beta));
-    require(Preconditions::in_range(model, "evaporation", params.evaporation, 0.0, 1.0));
+    require(Preconditions::in_range(
+        model,
+        "evaporation",
+        params.evaporation,
+        0.0,
+        1.0,
+    ));
     require(Preconditions::positive(model, "deposit", params.deposit));
 }
 
@@ -624,15 +725,34 @@ pub fn run_ant_colony_tsp(params: AntColonyTSPParams) -> AntColonyTSPResult {
         },
     )));
     let station = Rc::new(RefCell::new(AntColonyTSPStation::new(config)));
-    let sink = Rc::new(RefCell::new(LatestTokenSinkStation::<AntColonyTSPResultToken>::new(
+    let sink = Rc::new(RefCell::new(LatestTokenSinkStation::<
+        AntColonyTSPResultToken,
+    >::new(
         "ant-colony-tsp-result-sink",
         ANT_COLONY_TSP_CH_RESULT,
     )));
-    source.borrow_mut().core_mut().pipe(station.clone() as StationRef, ANT_COLONY_TSP_CH_START, ANT_COLONY_TSP_CH_START);
-    station.borrow_mut().core_mut().pipe(sink.clone() as StationRef, ANT_COLONY_TSP_CH_RESULT, ANT_COLONY_TSP_CH_RESULT);
+    source.borrow_mut().core_mut().pipe(
+        station.clone() as StationRef,
+        ANT_COLONY_TSP_CH_START,
+        ANT_COLONY_TSP_CH_START,
+    );
+    station.borrow_mut().core_mut().pipe(
+        sink.clone() as StationRef,
+        ANT_COLONY_TSP_CH_RESULT,
+        ANT_COLONY_TSP_CH_RESULT,
+    );
     run_iterative_des(
-        vec![source as StationRef, station as StationRef, sink.clone() as StationRef],
-        IterativeRunOptions { shuffle: false, max_ticks: Some(max_ticks), run_validators: false, ..Default::default() },
+        vec![
+            source as StationRef,
+            station as StationRef,
+            sink.clone() as StationRef,
+        ],
+        IterativeRunOptions {
+            shuffle: false,
+            max_ticks: Some(max_ticks),
+            run_validators: false,
+            ..Default::default()
+        },
     );
     let latest = sink.borrow().latest.clone();
     let token = latest.unwrap_or_else(|| panic!("ant-colony-tsp did not produce a result"));
@@ -704,12 +824,19 @@ impl MapColoringCSPStation {
             search: TreeSearchCore::new(SearchObjective::Maximise, config.max_nodes as f64),
             csp: ConstraintSearchCore::new(&config.variables, &domains),
             source: SourceDrivenCspState::new(MAP_COLORING_CH_START, MAP_COLORING_CH_RESULT),
-            edges: config.edges.iter().map(|(a, b)| (a.clone(), b.clone())).collect(),
+            edges: config
+                .edges
+                .iter()
+                .map(|(a, b)| (a.clone(), b.clone()))
+                .collect(),
         }
     }
 
     fn check_assignment(&self, assignment: &HashMap<String, String>) -> bool {
-        self.get_variables().iter().all(|v| assignment.contains_key(v)) && self.is_consistent(assignment)
+        self.get_variables()
+            .iter()
+            .all(|v| assignment.contains_key(v))
+            && self.is_consistent(assignment)
     }
 
     fn result(&self) -> MapColoringCSPResult {
@@ -849,7 +976,9 @@ impl
     }
 
     fn make_result_token(&mut self) -> Rc<MapColoringCSPResultToken> {
-        Rc::new(MapColoringCSPResultToken { result: self.result() })
+        Rc::new(MapColoringCSPResultToken {
+            result: self.result(),
+        })
     }
 }
 
@@ -859,9 +988,19 @@ fn unique_strings(values: &[String]) -> bool {
 }
 
 fn validate_map_coloring_csp_params(model: &str, params: &MapColoringCSPConfig) {
-    require(Preconditions::non_empty(model, "variables", &params.variables));
+    require(Preconditions::non_empty(
+        model,
+        "variables",
+        &params.variables,
+    ));
     require(Preconditions::non_empty(model, "colors", &params.colors));
-    require(Preconditions::integer_in_range(model, "maxNodes", params.max_nodes as f64, 1.0, 1e9));
+    require(Preconditions::integer_in_range(
+        model,
+        "maxNodes",
+        params.max_nodes as f64,
+        1.0,
+        1e9,
+    ));
     require(Preconditions::check(
         model,
         "variables",
@@ -869,7 +1008,13 @@ fn validate_map_coloring_csp_params(model: &str, params: &MapColoringCSPConfig) 
         unique_strings(&params.variables),
         Some(params.variables.join(",")),
     ));
-    require(Preconditions::check(model, "colors", "be unique", unique_strings(&params.colors), Some(params.colors.join(","))));
+    require(Preconditions::check(
+        model,
+        "colors",
+        "be unique",
+        unique_strings(&params.colors),
+        Some(params.colors.join(",")),
+    ));
     let known: HashSet<&String> = params.variables.iter().collect();
     for (i, edge) in params.edges.iter().enumerate() {
         // A `(String, String)` tuple is always length 2 (TS `Preconditions.lengthEq(..., 2)`).
@@ -893,7 +1038,9 @@ fn validate_map_coloring_csp_params(model: &str, params: &MapColoringCSPConfig) 
 
 pub fn run_map_coloring_csp(params: MapColoringCSPParams) -> MapColoringCSPResult {
     let config = MapColoringCSPConfig {
-        variables: params.variables.unwrap_or_else(default_map_coloring_variables),
+        variables: params
+            .variables
+            .unwrap_or_else(default_map_coloring_variables),
         colors: params.colors.unwrap_or_else(default_map_coloring_colors),
         edges: params.edges.unwrap_or_else(default_map_coloring_edges),
         max_nodes: params.max_nodes.unwrap_or(10_000),
@@ -912,15 +1059,34 @@ pub fn run_map_coloring_csp(params: MapColoringCSPParams) -> MapColoringCSPResul
         },
     )));
     let station = Rc::new(RefCell::new(MapColoringCSPStation::new(config)));
-    let sink = Rc::new(RefCell::new(LatestTokenSinkStation::<MapColoringCSPResultToken>::new(
+    let sink = Rc::new(RefCell::new(LatestTokenSinkStation::<
+        MapColoringCSPResultToken,
+    >::new(
         "map-coloring-csp-result-sink",
         MAP_COLORING_CH_RESULT,
     )));
-    source.borrow_mut().core_mut().pipe(station.clone() as StationRef, MAP_COLORING_CH_START, MAP_COLORING_CH_START);
-    station.borrow_mut().core_mut().pipe(sink.clone() as StationRef, MAP_COLORING_CH_RESULT, MAP_COLORING_CH_RESULT);
+    source.borrow_mut().core_mut().pipe(
+        station.clone() as StationRef,
+        MAP_COLORING_CH_START,
+        MAP_COLORING_CH_START,
+    );
+    station.borrow_mut().core_mut().pipe(
+        sink.clone() as StationRef,
+        MAP_COLORING_CH_RESULT,
+        MAP_COLORING_CH_RESULT,
+    );
     run_iterative_des(
-        vec![source as StationRef, station as StationRef, sink.clone() as StationRef],
-        IterativeRunOptions { shuffle: false, max_ticks: Some(max_ticks), run_validators: false, ..Default::default() },
+        vec![
+            source as StationRef,
+            station as StationRef,
+            sink.clone() as StationRef,
+        ],
+        IterativeRunOptions {
+            shuffle: false,
+            max_ticks: Some(max_ticks),
+            run_validators: false,
+            ..Default::default()
+        },
     );
     let result_token = sink.borrow().latest.clone();
     require(Preconditions::check(
@@ -930,16 +1096,23 @@ pub fn run_map_coloring_csp(params: MapColoringCSPParams) -> MapColoringCSPResul
         result_token.is_some(),
         Some("map-coloring-csp-result-sink".to_string()),
     ));
-    let token = result_token.unwrap_or_else(|| panic!("runMapColoringCSP: result token was not emitted"));
+    let token =
+        result_token.unwrap_or_else(|| panic!("runMapColoringCSP: result token was not emitted"));
     token.result.clone()
 }
 
 fn default_map_coloring_variables() -> Vec<String> {
-    ["WA", "NT", "SA", "Q", "NSW", "V", "T"].iter().map(|s| s.to_string()).collect()
+    ["WA", "NT", "SA", "Q", "NSW", "V", "T"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
 }
 
 fn default_map_coloring_colors() -> Vec<String> {
-    ["red", "green", "blue"].iter().map(|s| s.to_string()).collect()
+    ["red", "green", "blue"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
 }
 
 fn default_map_coloring_edges() -> Vec<(String, String)> {
@@ -1045,7 +1218,10 @@ impl MaxSATLocalSearchStation {
                 .best_history
                 .iter()
                 .enumerate()
-                .map(|(i, &unsatisfied)| MaxSATTraceRow { iteration: i, unsatisfied })
+                .map(|(i, &unsatisfied)| MaxSATTraceRow {
+                    iteration: i,
+                    unsatisfied,
+                })
                 .collect(),
             assignment,
             topology: station_graph_topology(
@@ -1077,12 +1253,38 @@ impl DESStation for MaxSATLocalSearchStation {
     }
 
     fn assert_preconditions(&mut self) {
-        require(Preconditions::integer_in_range(self.core.id.as_str(), "numVars", self.num_vars as f64, 1.0, 1e9));
-        require(Preconditions::non_empty(self.core.id.as_str(), "clauses", &self.clauses));
-        require(Preconditions::integer_in_range(self.core.id.as_str(), "iterations", self.iterations as f64, 1.0, 1e9));
-        require(Preconditions::in_range(self.core.id.as_str(), "noise", self.noise, 0.0, 1.0));
+        require(Preconditions::integer_in_range(
+            self.core.id.as_str(),
+            "numVars",
+            self.num_vars as f64,
+            1.0,
+            1e9,
+        ));
+        require(Preconditions::non_empty(
+            self.core.id.as_str(),
+            "clauses",
+            &self.clauses,
+        ));
+        require(Preconditions::integer_in_range(
+            self.core.id.as_str(),
+            "iterations",
+            self.iterations as f64,
+            1.0,
+            1e9,
+        ));
+        require(Preconditions::in_range(
+            self.core.id.as_str(),
+            "noise",
+            self.noise,
+            0.0,
+            1.0,
+        ));
         for i in 0..self.clauses.len() {
-            require(Preconditions::non_empty(self.core.id.as_str(), &format!("clauses[{i}]"), &self.clauses[i]));
+            require(Preconditions::non_empty(
+                self.core.id.as_str(),
+                &format!("clauses[{i}]"),
+                &self.clauses[i],
+            ));
             for &lit in &self.clauses[i] {
                 let var = lit.unsigned_abs() as usize;
                 require(Preconditions::check(
@@ -1105,11 +1307,16 @@ impl DESStation for MaxSATLocalSearchStation {
 
     fn run_time_step(&mut self) {
         if !self.started {
-            let starts = self.core_mut().drain::<OptimizationStartToken<MaxSATConfig>>(MAX_SAT_CH_START);
+            let starts = self
+                .core_mut()
+                .drain::<OptimizationStartToken<MaxSATConfig>>(MAX_SAT_CH_START);
             if starts.is_empty() {
                 return;
             }
-            validate_max_sat_params("max-sat-local-search-source", &starts[starts.len() - 1].params);
+            validate_max_sat_params(
+                "max-sat-local-search-source",
+                &starts[starts.len() - 1].params,
+            );
             self.bootstrap();
             self.started = true;
             return;
@@ -1143,13 +1350,19 @@ impl SingleStateOptimizer<Vec<bool>> for MaxSATLocalSearchStation {
     }
 
     fn propose(&self, state: &Vec<bool>, rng: &mut dyn RandomSource) -> Vec<bool> {
-        let unsat: Vec<&Vec<i64>> = self.clauses.iter().filter(|clause| !clause_satisfied(clause, state)).collect();
+        let unsat: Vec<&Vec<i64>> = self
+            .clauses
+            .iter()
+            .filter(|clause| !clause_satisfied(clause, state))
+            .collect();
         let mut next = state.clone();
         if unsat.is_empty() {
             return next;
         }
         let clause = unsat[(rng.next_float() * unsat.len() as f64).floor() as usize];
-        let mut variable = (clause[(rng.next_float() * clause.len() as f64).floor() as usize].unsigned_abs() as usize) - 1;
+        let mut variable = (clause[(rng.next_float() * clause.len() as f64).floor() as usize]
+            .unsigned_abs() as usize)
+            - 1;
         if rng.next_float() >= self.noise {
             let mut best_var = variable;
             let mut best_score = f64::NEG_INFINITY;
@@ -1187,12 +1400,34 @@ impl SingleStateOptimizer<Vec<bool>> for MaxSATLocalSearchStation {
 }
 
 fn validate_max_sat_params(model: &str, params: &MaxSATConfig) {
-    require(Preconditions::integer_in_range(model, "numVars", params.num_vars as f64, 1.0, 1e9));
+    require(Preconditions::integer_in_range(
+        model,
+        "numVars",
+        params.num_vars as f64,
+        1.0,
+        1e9,
+    ));
     require(Preconditions::non_empty(model, "clauses", &params.clauses));
-    require(Preconditions::integer_in_range(model, "iterations", params.iterations as f64, 1.0, 1e9));
-    require(Preconditions::in_range(model, "noise", params.noise, 0.0, 1.0));
+    require(Preconditions::integer_in_range(
+        model,
+        "iterations",
+        params.iterations as f64,
+        1.0,
+        1e9,
+    ));
+    require(Preconditions::in_range(
+        model,
+        "noise",
+        params.noise,
+        0.0,
+        1.0,
+    ));
     for (i, clause) in params.clauses.iter().enumerate() {
-        require(Preconditions::non_empty(model, &format!("clauses[{i}]"), clause));
+        require(Preconditions::non_empty(
+            model,
+            &format!("clauses[{i}]"),
+            clause,
+        ));
         for &lit in clause {
             let var = lit.unsigned_abs() as usize;
             require(Preconditions::check(
@@ -1232,18 +1467,39 @@ pub fn run_max_sat_local_search(params: MaxSATParams) -> MaxSATResult {
             let d = config.clone();
             move || OptimizationStartToken::new("max-sat-local-search", d.clone())
         },
-        |t: &OptimizationStartToken<MaxSATConfig>| validate_max_sat_params("max-sat-local-search-source", &t.params),
+        |t: &OptimizationStartToken<MaxSATConfig>| {
+            validate_max_sat_params("max-sat-local-search-source", &t.params)
+        },
     )));
     let station = Rc::new(RefCell::new(MaxSATLocalSearchStation::new(config)));
-    let sink = Rc::new(RefCell::new(LatestTokenSinkStation::<MaxSATResultToken>::new(
-        "max-sat-local-search-result-sink",
+    let sink = Rc::new(RefCell::new(
+        LatestTokenSinkStation::<MaxSATResultToken>::new(
+            "max-sat-local-search-result-sink",
+            MAX_SAT_CH_RESULT,
+        ),
+    ));
+    source.borrow_mut().core_mut().pipe(
+        station.clone() as StationRef,
+        MAX_SAT_CH_START,
+        MAX_SAT_CH_START,
+    );
+    station.borrow_mut().core_mut().pipe(
+        sink.clone() as StationRef,
         MAX_SAT_CH_RESULT,
-    )));
-    source.borrow_mut().core_mut().pipe(station.clone() as StationRef, MAX_SAT_CH_START, MAX_SAT_CH_START);
-    station.borrow_mut().core_mut().pipe(sink.clone() as StationRef, MAX_SAT_CH_RESULT, MAX_SAT_CH_RESULT);
+        MAX_SAT_CH_RESULT,
+    );
     run_iterative_des(
-        vec![source as StationRef, station as StationRef, sink.clone() as StationRef],
-        IterativeRunOptions { shuffle: false, max_ticks: Some(max_ticks), run_validators: false, ..Default::default() },
+        vec![
+            source as StationRef,
+            station as StationRef,
+            sink.clone() as StationRef,
+        ],
+        IterativeRunOptions {
+            shuffle: false,
+            max_ticks: Some(max_ticks),
+            run_validators: false,
+            ..Default::default()
+        },
     );
     let latest = sink.borrow().latest.clone();
     let token = latest.unwrap_or_else(|| panic!("max-sat-local-search did not produce a result"));
@@ -1279,7 +1535,10 @@ fn clause_satisfied(clause: &[i64], assignment: &[bool]) -> bool {
 }
 
 fn count_satisfied(clauses: &[Vec<i64>], assignment: &[bool]) -> usize {
-    clauses.iter().filter(|clause| clause_satisfied(clause, assignment)).count()
+    clauses
+        .iter()
+        .filter(|clause| clause_satisfied(clause, assignment))
+        .count()
 }
 
 // =============================================================================
@@ -1377,7 +1636,10 @@ impl MaxCutSDPStation {
                 .uvr_state()
                 .trace
                 .iter()
-                .map(|row| SDPMaxCutTraceRow { iteration: row.iteration, objective: row.objective })
+                .map(|row| SDPMaxCutTraceRow {
+                    iteration: row.iteration,
+                    objective: row.objective,
+                })
                 .collect(),
             topology: station_graph_topology(
                 &[
@@ -1411,9 +1673,25 @@ impl DESStation for MaxCutSDPStation {
         require(self.assert_preconditions_uvr());
         let nodes = self.uvr_state().nodes;
         for edge in &self.edges {
-            require(Preconditions::integer_in_range(self.core.id.as_str(), "edge.i", edge.i as f64, 0.0, (nodes - 1) as f64));
-            require(Preconditions::integer_in_range(self.core.id.as_str(), "edge.j", edge.j as f64, 0.0, (nodes - 1) as f64));
-            require(Preconditions::positive(self.core.id.as_str(), "edge.weight", edge.weight));
+            require(Preconditions::integer_in_range(
+                self.core.id.as_str(),
+                "edge.i",
+                edge.i as f64,
+                0.0,
+                (nodes - 1) as f64,
+            ));
+            require(Preconditions::integer_in_range(
+                self.core.id.as_str(),
+                "edge.j",
+                edge.j as f64,
+                0.0,
+                (nodes - 1) as f64,
+            ));
+            require(Preconditions::positive(
+                self.core.id.as_str(),
+                "edge.weight",
+                edge.weight,
+            ));
         }
     }
 
@@ -1426,11 +1704,16 @@ impl DESStation for MaxCutSDPStation {
 
     fn run_time_step(&mut self) {
         if !self.started {
-            let starts = self.core_mut().drain::<OptimizationStartToken<SDPMaxCutConfig>>(SDP_MAXCUT_CH_START);
+            let starts = self
+                .core_mut()
+                .drain::<OptimizationStartToken<SDPMaxCutConfig>>(SDP_MAXCUT_CH_START);
             if starts.is_empty() {
                 return;
             }
-            validate_sdp_max_cut_params("sdp-maxcut-relaxation-source", &starts[starts.len() - 1].params);
+            validate_sdp_max_cut_params(
+                "sdp-maxcut-relaxation-source",
+                &starts[starts.len() - 1].params,
+            );
             self.bootstrap();
             self.started = true;
             return;
@@ -1478,14 +1761,44 @@ impl UnitVectorRelaxationStation for MaxCutSDPStation {
 }
 
 fn validate_sdp_max_cut_params(model: &str, params: &SDPMaxCutConfig) {
-    require(Preconditions::integer_in_range(model, "nodes", params.nodes as f64, 2.0, 1e6));
-    require(Preconditions::integer_in_range(model, "rank", params.rank as f64, 1.0, 1e6));
-    require(Preconditions::integer_in_range(model, "iterations", params.iterations as f64, 1.0, 1e9));
+    require(Preconditions::integer_in_range(
+        model,
+        "nodes",
+        params.nodes as f64,
+        2.0,
+        1e6,
+    ));
+    require(Preconditions::integer_in_range(
+        model,
+        "rank",
+        params.rank as f64,
+        1.0,
+        1e6,
+    ));
+    require(Preconditions::integer_in_range(
+        model,
+        "iterations",
+        params.iterations as f64,
+        1.0,
+        1e9,
+    ));
     require(Preconditions::positive(model, "stepSize", params.step_size));
     require(Preconditions::non_empty(model, "edges", &params.edges));
     for edge in &params.edges {
-        require(Preconditions::integer_in_range(model, "edge.i", edge.i as f64, 0.0, (params.nodes - 1) as f64));
-        require(Preconditions::integer_in_range(model, "edge.j", edge.j as f64, 0.0, (params.nodes - 1) as f64));
+        require(Preconditions::integer_in_range(
+            model,
+            "edge.i",
+            edge.i as f64,
+            0.0,
+            (params.nodes - 1) as f64,
+        ));
+        require(Preconditions::integer_in_range(
+            model,
+            "edge.j",
+            edge.j as f64,
+            0.0,
+            (params.nodes - 1) as f64,
+        ));
         require(Preconditions::positive(model, "edge.weight", edge.weight));
     }
 }
@@ -1512,18 +1825,39 @@ pub fn run_sdp_max_cut_relaxation(params: SDPMaxCutParams) -> SDPMaxCutResult {
             let d = config.clone();
             move || OptimizationStartToken::new("sdp-maxcut-relaxation", d.clone())
         },
-        |t: &OptimizationStartToken<SDPMaxCutConfig>| validate_sdp_max_cut_params("sdp-maxcut-relaxation-source", &t.params),
+        |t: &OptimizationStartToken<SDPMaxCutConfig>| {
+            validate_sdp_max_cut_params("sdp-maxcut-relaxation-source", &t.params)
+        },
     )));
     let station = Rc::new(RefCell::new(MaxCutSDPStation::new(config)));
-    let sink = Rc::new(RefCell::new(LatestTokenSinkStation::<SDPMaxCutResultToken>::new(
-        "sdp-maxcut-relaxation-result-sink",
+    let sink = Rc::new(RefCell::new(
+        LatestTokenSinkStation::<SDPMaxCutResultToken>::new(
+            "sdp-maxcut-relaxation-result-sink",
+            SDP_MAXCUT_CH_RESULT,
+        ),
+    ));
+    source.borrow_mut().core_mut().pipe(
+        station.clone() as StationRef,
+        SDP_MAXCUT_CH_START,
+        SDP_MAXCUT_CH_START,
+    );
+    station.borrow_mut().core_mut().pipe(
+        sink.clone() as StationRef,
         SDP_MAXCUT_CH_RESULT,
-    )));
-    source.borrow_mut().core_mut().pipe(station.clone() as StationRef, SDP_MAXCUT_CH_START, SDP_MAXCUT_CH_START);
-    station.borrow_mut().core_mut().pipe(sink.clone() as StationRef, SDP_MAXCUT_CH_RESULT, SDP_MAXCUT_CH_RESULT);
+        SDP_MAXCUT_CH_RESULT,
+    );
     run_iterative_des(
-        vec![source as StationRef, station as StationRef, sink.clone() as StationRef],
-        IterativeRunOptions { shuffle: false, max_ticks: Some(max_ticks), run_validators: false, ..Default::default() },
+        vec![
+            source as StationRef,
+            station as StationRef,
+            sink.clone() as StationRef,
+        ],
+        IterativeRunOptions {
+            shuffle: false,
+            max_ticks: Some(max_ticks),
+            run_validators: false,
+            ..Default::default()
+        },
     );
     let latest = sink.borrow().latest.clone();
     let token = latest.unwrap_or_else(|| panic!("sdp-maxcut-relaxation did not produce a result"));
@@ -1532,14 +1866,46 @@ pub fn run_sdp_max_cut_relaxation(params: SDPMaxCutParams) -> SDPMaxCutResult {
 
 fn default_max_cut_edges() -> Vec<WeightedEdge> {
     vec![
-        WeightedEdge { i: 0, j: 1, weight: 1.0 },
-        WeightedEdge { i: 1, j: 2, weight: 1.0 },
-        WeightedEdge { i: 2, j: 3, weight: 1.0 },
-        WeightedEdge { i: 3, j: 4, weight: 1.0 },
-        WeightedEdge { i: 4, j: 0, weight: 1.0 },
-        WeightedEdge { i: 0, j: 2, weight: 0.7 },
-        WeightedEdge { i: 1, j: 3, weight: 0.5 },
-        WeightedEdge { i: 2, j: 4, weight: 0.8 },
+        WeightedEdge {
+            i: 0,
+            j: 1,
+            weight: 1.0,
+        },
+        WeightedEdge {
+            i: 1,
+            j: 2,
+            weight: 1.0,
+        },
+        WeightedEdge {
+            i: 2,
+            j: 3,
+            weight: 1.0,
+        },
+        WeightedEdge {
+            i: 3,
+            j: 4,
+            weight: 1.0,
+        },
+        WeightedEdge {
+            i: 4,
+            j: 0,
+            weight: 1.0,
+        },
+        WeightedEdge {
+            i: 0,
+            j: 2,
+            weight: 0.7,
+        },
+        WeightedEdge {
+            i: 1,
+            j: 3,
+            weight: 0.5,
+        },
+        WeightedEdge {
+            i: 2,
+            j: 4,
+            weight: 0.8,
+        },
     ]
 }
 
@@ -1550,7 +1916,10 @@ fn best_hyperplane_cut(vectors: &[Vec<f64>], edges: &[WeightedEdge]) -> (Vec<f64
     let mut best_cut = vec![0.0; vectors.len()];
     let mut best_value = f64::NEG_INFINITY;
     for dir in &directions {
-        let cut: Vec<f64> = vectors.iter().map(|v| if vector_dot(v, dir) >= 0.0 { 1.0 } else { -1.0 }).collect();
+        let cut: Vec<f64> = vectors
+            .iter()
+            .map(|v| if vector_dot(v, dir) >= 0.0 { 1.0 } else { -1.0 })
+            .collect();
         let value = cut_value(&cut, edges);
         if value > best_value {
             best_value = value;
@@ -1623,7 +1992,11 @@ struct ParetoCandidateSourceStation<T> {
 
 impl<T: Clone + 'static> ParetoCandidateSourceStation<T> {
     fn new(id: impl Into<String>, candidates: Vec<ParetoCandidateToken<T>>) -> Self {
-        ParetoCandidateSourceStation { core: StationCore::new(id), candidates, emitted: false }
+        ParetoCandidateSourceStation {
+            core: StationCore::new(id),
+            candidates,
+            emitted: false,
+        }
     }
 }
 
@@ -1639,10 +2012,22 @@ impl<T: Clone + 'static> DESStation for ParetoCandidateSourceStation<T> {
     }
 
     fn assert_preconditions(&mut self) {
-        require(Preconditions::non_empty(self.core.id.as_str(), "candidates", &self.candidates));
+        require(Preconditions::non_empty(
+            self.core.id.as_str(),
+            "candidates",
+            &self.candidates,
+        ));
         for candidate in &self.candidates {
-            require(Preconditions::non_empty(self.core.id.as_str(), "candidate.objectives", &candidate.objectives));
-            require(Preconditions::all_finite(self.core.id.as_str(), "candidate.objectives", &candidate.objectives));
+            require(Preconditions::non_empty(
+                self.core.id.as_str(),
+                "candidate.objectives",
+                &candidate.objectives,
+            ));
+            require(Preconditions::all_finite(
+                self.core.id.as_str(),
+                "candidate.objectives",
+                &candidate.objectives,
+            ));
         }
     }
 
@@ -1668,10 +2053,24 @@ pub fn run_pareto_portfolio(params: ParetoPortfolioParams) -> ParetoPortfolioRes
         _ => default_portfolio_assets(),
     };
     let samples = params.samples.unwrap_or(240);
-    require(Preconditions::integer_in_range("runParetoPortfolio", "samples", samples as f64, 1.0, 1e9));
+    require(Preconditions::integer_in_range(
+        "runParetoPortfolio",
+        "samples",
+        samples as f64,
+        1.0,
+        1e9,
+    ));
     for asset in &assets {
-        require(Preconditions::finite("runParetoPortfolio", &format!("{}.expectedReturn", asset.name), asset.expected_return));
-        require(Preconditions::non_negative("runParetoPortfolio", &format!("{}.risk", asset.name), asset.risk));
+        require(Preconditions::finite(
+            "runParetoPortfolio",
+            &format!("{}.expectedReturn", asset.name),
+            asset.expected_return,
+        ));
+        require(Preconditions::non_negative(
+            "runParetoPortfolio",
+            &format!("{}.risk", asset.name),
+            asset.risk,
+        ));
     }
     let mut rng = mulberry32(params.seed.unwrap_or(19));
     let mut candidates: Vec<ParetoCandidateToken<ParetoPortfolioPoint>> = Vec::new();
@@ -1686,26 +2085,49 @@ pub fn run_pareto_portfolio(params: ParetoPortfolioParams) -> ParetoPortfolioRes
         weights[i] = 1.0;
         let point = portfolio_point(&assets, &weights);
         let objectives = vec![point.risk, -point.expected_return];
-        candidates.push(ParetoCandidateToken::with_generation(point, objectives, samples + i));
+        candidates.push(ParetoCandidateToken::with_generation(
+            point,
+            objectives,
+            samples + i,
+        ));
     }
     let max_ticks = candidates.len() + 3;
-    let source = Rc::new(RefCell::new(ParetoCandidateSourceStation::new("pareto-portfolio-source", candidates)));
-    let station = Rc::new(RefCell::new(ParetoArchiveStation::<ParetoPortfolioPoint>::new(
-        "pareto-portfolio-archive",
-        Vec::new(),
+    let source = Rc::new(RefCell::new(ParetoCandidateSourceStation::new(
+        "pareto-portfolio-source",
+        candidates,
     )));
-    source.borrow_mut().core_mut().pipe(station.clone() as StationRef, DEFAULT_CHANNEL, DEFAULT_CHANNEL);
+    let station = Rc::new(RefCell::new(
+        ParetoArchiveStation::<ParetoPortfolioPoint>::new("pareto-portfolio-archive", Vec::new()),
+    ));
+    source.borrow_mut().core_mut().pipe(
+        station.clone() as StationRef,
+        DEFAULT_CHANNEL,
+        DEFAULT_CHANNEL,
+    );
     run_iterative_des(
         vec![source as StationRef, station.clone() as StationRef],
-        IterativeRunOptions { shuffle: false, max_ticks: Some(max_ticks), run_validators: false, ..Default::default() },
+        IterativeRunOptions {
+            shuffle: false,
+            max_ticks: Some(max_ticks),
+            run_validators: false,
+            ..Default::default()
+        },
     );
-    let mut pareto_front: Vec<ParetoPortfolioPoint> =
-        station.borrow().get_archive().into_iter().map(|row| row.candidate).collect();
+    let mut pareto_front: Vec<ParetoPortfolioPoint> = station
+        .borrow()
+        .get_archive()
+        .into_iter()
+        .map(|row| row.candidate)
+        .collect();
     pareto_front.sort_by(|a, b| {
         a.risk
             .partial_cmp(&b.risk)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then(a.expected_return.partial_cmp(&b.expected_return).unwrap_or(std::cmp::Ordering::Equal))
+            .then(
+                a.expected_return
+                    .partial_cmp(&b.expected_return)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
     });
     let candidate_count = station.borrow().get_processed_count();
     ParetoPortfolioResult {
@@ -1713,23 +2135,47 @@ pub fn run_pareto_portfolio(params: ParetoPortfolioParams) -> ParetoPortfolioRes
         pareto_front,
         candidate_count,
         topology: station_graph_topology(
-            &["pareto-portfolio-source".to_string(), "pareto-portfolio-archive".to_string()],
-            &["ParetoCandidateToken<portfolio>".to_string(), "ParetoArchiveRow".to_string()],
+            &[
+                "pareto-portfolio-source".to_string(),
+                "pareto-portfolio-archive".to_string(),
+            ],
+            &[
+                "ParetoCandidateToken<portfolio>".to_string(),
+                "ParetoArchiveRow".to_string(),
+            ],
         ),
     }
 }
 
 fn default_portfolio_assets() -> Vec<PortfolioAsset> {
     vec![
-        PortfolioAsset { name: "cash".to_string(), expected_return: 0.02, risk: 0.01 },
-        PortfolioAsset { name: "bonds".to_string(), expected_return: 0.045, risk: 0.06 },
-        PortfolioAsset { name: "equity".to_string(), expected_return: 0.09, risk: 0.18 },
-        PortfolioAsset { name: "growth".to_string(), expected_return: 0.13, risk: 0.30 },
+        PortfolioAsset {
+            name: "cash".to_string(),
+            expected_return: 0.02,
+            risk: 0.01,
+        },
+        PortfolioAsset {
+            name: "bonds".to_string(),
+            expected_return: 0.045,
+            risk: 0.06,
+        },
+        PortfolioAsset {
+            name: "equity".to_string(),
+            expected_return: 0.09,
+            risk: 0.18,
+        },
+        PortfolioAsset {
+            name: "growth".to_string(),
+            expected_return: 0.13,
+            risk: 0.30,
+        },
     ]
 }
 
 fn random_simplex(n: usize, rng: &mut dyn RandomSource) -> Vec<f64> {
-    let draws: Vec<f64> = (0..n).map(|_| -(1e-12_f64.max(rng.next_float())).ln()).collect();
+    let draws: Vec<f64> = (0..n)
+        .map(|_| -(1e-12_f64.max(rng.next_float())).ln())
+        .collect();
     let total: f64 = draws.iter().sum();
     draws.iter().map(|x| x / total).collect()
 }
@@ -1741,15 +2187,27 @@ fn portfolio_point(assets: &[PortfolioAsset], weights: &[f64]) -> ParetoPortfoli
         expected_return += weights[i] * assets[i].expected_return;
         variance += sq(weights[i] * assets[i].risk);
     }
-    ParetoPortfolioPoint { weights: weights.to_vec(), expected_return, risk: variance.sqrt() }
+    ParetoPortfolioPoint {
+        weights: weights.to_vec(),
+        expected_return,
+        risk: variance.sqrt(),
+    }
 }
 
 fn portfolio_hypervolume(front: &[ParetoPortfolioPoint]) -> f64 {
     if front.is_empty() {
         return 0.0;
     }
-    let max_risk = front.iter().map(|p| p.risk).fold(f64::NEG_INFINITY, f64::max) * 1.1;
-    let min_return = front.iter().map(|p| p.expected_return).fold(f64::INFINITY, f64::min) * 0.9;
+    let max_risk = front
+        .iter()
+        .map(|p| p.risk)
+        .fold(f64::NEG_INFINITY, f64::max)
+        * 1.1;
+    let min_return = front
+        .iter()
+        .map(|p| p.expected_return)
+        .fold(f64::INFINITY, f64::min)
+        * 0.9;
     let mut hv = 0.0;
     let mut prev_risk = 0.0;
     for point in front {
@@ -1765,7 +2223,10 @@ fn portfolio_hypervolume(front: &[ParetoPortfolioPoint]) -> f64 {
 }
 
 pub fn pareto_front_is_nondominated(front: &[ParetoPortfolioPoint]) -> bool {
-    let objectives: Vec<Vec<f64>> = front.iter().map(|p| vec![p.risk, -p.expected_return]).collect();
+    let objectives: Vec<Vec<f64>> = front
+        .iter()
+        .map(|p| vec![p.risk, -p.expected_return])
+        .collect();
     for i in 0..objectives.len() {
         for j in 0..objectives.len() {
             if i != j && dominates(&objectives[j], &objectives[i]) {
@@ -1793,7 +2254,11 @@ mod tests {
         assert_eq!(result.iterations, 120);
         assert!(result.best_value.is_finite());
         assert!(result.best_value >= 0.0);
-        assert!(result.best_value < 5.0, "best_value = {}", result.best_value);
+        assert!(
+            result.best_value < 5.0,
+            "best_value = {}",
+            result.best_value
+        );
         assert_eq!(result.best_position.len(), 3);
     }
 
@@ -1816,7 +2281,11 @@ mod tests {
     fn max_sat_satisfies_most_clauses() {
         let result = run_max_sat_local_search(MaxSATParams::default());
         assert_eq!(result.total_clauses, 6);
-        assert!(result.satisfied_clauses >= 5, "satisfied = {}", result.satisfied_clauses);
+        assert!(
+            result.satisfied_clauses >= 5,
+            "satisfied = {}",
+            result.satisfied_clauses
+        );
     }
 
     #[test]

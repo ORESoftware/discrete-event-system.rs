@@ -22,8 +22,11 @@ fn fmt(x: f64, digits: usize) -> String {
 }
 
 fn mean_abs_jerk(result: &TrafficResult) -> f64 {
-    let jerks: Vec<f64> =
-        result.trace.iter().flat_map(|row| row.cars.iter().map(|car| car.jerk_mps3.abs())).collect();
+    let jerks: Vec<f64> = result
+        .trace
+        .iter()
+        .flat_map(|row| row.cars.iter().map(|car| car.jerk_mps3.abs()))
+        .collect();
     if jerks.is_empty() {
         0.0
     } else {
@@ -100,11 +103,17 @@ pub fn run() {
     println!();
 
     println!("## Kinematics");
-    println!("  mean travel:       {} sec", fmt(result.mean_travel_time_sec, 1));
+    println!(
+        "  mean travel:       {} sec",
+        fmt(result.mean_travel_time_sec, 1)
+    );
     println!("  mean speed:        {} m/s", fmt(result.mean_speed_mps, 2));
     println!("  mean |jerk|:       {} m/s^3", fmt(mean_abs_jerk_mps3, 2));
     println!("  min leader gap:    {} m", fmt(min_leader_gap_m, 3));
-    println!("  max cell occup.:   {}", result.cell_stats.max_cell_occupancy);
+    println!(
+        "  max cell occup.:   {}",
+        result.cell_stats.max_cell_occupancy
+    );
     println!();
 
     println!("## Final sample");

@@ -32,13 +32,19 @@ pub fn run() {
     // input(0,1) -> recurse (processor) -> splitter -> sink, with splitter -> processor feedback.
     let a = Rc::new(RefCell::new(DefiniteFiniteSource::new(
         "A".to_string(),
-        vec![HasNumericValue { value: 0.0 }, HasNumericValue { value: 1.0 }],
+        vec![
+            HasNumericValue { value: 0.0 },
+            HasNumericValue { value: 1.0 },
+        ],
         -1,
     )));
     let b = Rc::new(RefCell::new(EntityNumericProcessor::new("B".to_string())));
     let c = Rc::new(RefCell::new(EntitySplitter::new(
         "C".to_string(),
-        SplitterOpts { xx: None, replay_items_if_not_first_accepted: false },
+        SplitterOpts {
+            xx: None,
+            replay_items_if_not_first_accepted: false,
+        },
     )));
     let d = Rc::new(RefCell::new(GenericEntitySink::new("D".to_string())));
 

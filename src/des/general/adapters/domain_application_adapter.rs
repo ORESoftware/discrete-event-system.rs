@@ -120,7 +120,9 @@ pub type DecisionScienceResult = DomainModelResult;
 const ENGINE_MISSING: &str =
     "domain-application-models engine is not ported yet (see module PORT NOTE)";
 
-pub fn run_adaptive_fuzzy_control(_params: AdaptiveFuzzyControlParams) -> AdaptiveFuzzyControlResult {
+pub fn run_adaptive_fuzzy_control(
+    _params: AdaptiveFuzzyControlParams,
+) -> AdaptiveFuzzyControlResult {
     unimplemented!("{ENGINE_MISSING}")
 }
 pub fn run_logistics_routing_heuristics(_params: LogisticsRoutingParams) -> LogisticsRoutingResult {
@@ -164,10 +166,18 @@ fn js_number(v: f64) -> String {
     if v.is_nan() {
         "NaN".to_string()
     } else if v.is_infinite() {
-        if v > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() }
+        if v > 0.0 {
+            "Infinity".to_string()
+        } else {
+            "-Infinity".to_string()
+        }
     } else {
         let s = v.to_string();
-        if s == "-0" { "0".to_string() } else { s }
+        if s == "-0" {
+            "0".to_string()
+        } else {
+            s
+        }
     }
 }
 
@@ -272,7 +282,13 @@ fn json_value_string(v: &JsonValue) -> String {
         JsonValue::Object(obj) => {
             let inner: Vec<String> = obj
                 .keys()
-                .map(|k| format!("{}:{}", json_quote(k), json_value_string(obj.get(k).unwrap())))
+                .map(|k| {
+                    format!(
+                        "{}:{}",
+                        json_quote(k),
+                        json_value_string(obj.get(k).unwrap())
+                    )
+                })
                 .collect();
             format!("{{{}}}", inner.join(","))
         }
@@ -292,14 +308,23 @@ fn domain_summary(title: &str, result: &DomainModelResult) -> String {
         format!("  Objective:      {:.6}", result.best.objective),
         format!("  Metrics:        {}", metrics_line(&result.best.metrics)),
         format!("  Candidates:     {}", result.candidates.len()),
-        format!("  Stations:       {}", result.topology.stations.join(" -> ")),
+        format!(
+            "  Stations:       {}",
+            result.topology.stations.join(" -> ")
+        ),
         format!("  Movables:       {}", result.topology.movables.join(", ")),
     ]
     .join("\n")
 }
 
 fn write_domain_csv(result: &DomainModelResult, csv_path: &str) {
-    let mut lines = vec![csv_row(["candidate_id", "objective", "feasible", "metrics", "plan"])];
+    let mut lines = vec![csv_row([
+        "candidate_id",
+        "objective",
+        "feasible",
+        "metrics",
+        "plan",
+    ])];
     for row in &result.candidates {
         let prefix = csv_row([
             row.candidate_id.clone(),
@@ -321,12 +346,21 @@ fn write_domain_csv(result: &DomainModelResult, csv_path: &str) {
 // =============================================================================
 
 fn num(min: Option<f64>, integer: Option<bool>, default: Option<f64>) -> ParamSchema {
-    ParamSchema::Number { min, max: None, integer, default, description: None }
+    ParamSchema::Number {
+        min,
+        max: None,
+        integer,
+        default,
+        description: None,
+    }
 }
 
 fn obj(fields: Vec<(&str, ParamSchema)>) -> ParamSchema {
     ParamSchema::Object {
-        fields: fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+        fields: fields
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
         required: Some(Vec::new()),
         description: None,
     }

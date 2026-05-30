@@ -28,7 +28,11 @@ fn to_exponential(x: f64, digits: usize) -> String {
         return "NaN".to_string();
     }
     if x.is_infinite() {
-        return if x < 0.0 { "-Infinity".to_string() } else { "Infinity".to_string() };
+        return if x < 0.0 {
+            "-Infinity".to_string()
+        } else {
+            "Infinity".to_string()
+        };
     }
     let s = format!("{:.*e}", digits, x);
     let (mant, exp) = s.split_once('e').unwrap_or((s.as_str(), "0"));
@@ -53,25 +57,51 @@ fn to_scene_graph(g: &Graph) -> scene::Graph {
         edges: g
             .edges
             .iter()
-            .map(|es| es.iter().map(|e| scene::Edge { to: e.to, weight: e.weight }).collect())
+            .map(|es| {
+                es.iter()
+                    .map(|e| scene::Edge {
+                        to: e.to,
+                        weight: e.weight,
+                    })
+                    .collect()
+            })
             .collect(),
-        coordinates: g.coordinates.as_ref().map(|cs| cs.iter().map(|c| [c.0, c.1]).collect()),
+        coordinates: g
+            .coordinates
+            .as_ref()
+            .map(|cs| cs.iter().map(|c| [c.0, c.1]).collect()),
         node_names: g.node_names.clone(),
     }
 }
 
 fn to_scene_wave(w: &WaveEvent) -> scene::WaveEvent {
-    scene::WaveEvent { from: w.from, to: w.to, new_distance: w.new_distance, improved: w.improved }
+    scene::WaveEvent {
+        from: w.from,
+        to: w.to,
+        new_distance: w.new_distance,
+        improved: w.improved,
+    }
 }
 
 /// Entry point (`main()` in the TS source).
 pub fn run() {
     let algo = std::env::var("ALGO").unwrap_or_else(|_| "bellman-ford".to_string());
-    let n_nodes: usize = std::env::var("N_NODES").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
-    let edge_prob: f64 =
-        std::env::var("EDGE_PROB").ok().and_then(|v| v.parse().ok()).unwrap_or(0.35);
-    let seed: u32 = std::env::var("SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(13);
-    let source: usize = std::env::var("SOURCE").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let n_nodes: usize = std::env::var("N_NODES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let edge_prob: f64 = std::env::var("EDGE_PROB")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.35);
+    let seed: u32 = std::env::var("SEED")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(13);
+    let source: usize = std::env::var("SOURCE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
     let animate = std::env::var("ANIMATE").map(|v| v == "1").unwrap_or(false);
 
     let graph: Graph = if n_nodes > 0 {
@@ -83,7 +113,11 @@ pub fn run() {
 
     // ── Banner ──
     println!("# Shortest-path solver as DES (each node is a station, waves are movables)");
-    println!("# graph: {} nodes, source = {}", graph.num_nodes, node_name(&graph, source));
+    println!(
+        "# graph: {} nodes, source = {}",
+        graph.num_nodes,
+        node_name(&graph, source)
+    );
     let mut edge_count = 0usize;
     for e in &graph.edges {
         edge_count += e.len();
@@ -96,7 +130,10 @@ pub fn run() {
     if algo == "bellman-ford" || algo == "both" {
         let t0 = Instant::now();
         let r = shortest_path_bellman_ford_des(&graph, source, BellmanFordOptions::default());
-        println!("# Bellman-Ford-DES finished in {}ms", t0.elapsed().as_millis());
+        println!(
+            "# Bellman-Ford-DES finished in {}ms",
+            t0.elapsed().as_millis()
+        );
         println!("#   iterations  = {}", r.iterations);
         println!("#   waves emitted = {}", r.waves_emitted);
         println!("#   negative cycle = {}", r.has_negative_cycle_from_source);
@@ -105,7 +142,10 @@ pub fn run() {
     if algo == "dijkstra" || algo == "both" {
         let t0 = Instant::now();
         let r = shortest_path_dijkstra_des(&graph, source, BellmanFordOptions::default());
-        println!("# Dijkstra-DES       finished in {}ms", t0.elapsed().as_millis());
+        println!(
+            "# Dijkstra-DES       finished in {}ms",
+            t0.elapsed().as_millis()
+        );
         println!("#   priority-queue pops = {}", r.iterations);
         println!("#   waves emitted       = {}", r.waves_emitted);
         runs.push(("dijkstra".to_string(), r));
@@ -124,7 +164,10 @@ pub fn run() {
                 max_diff = f64::INFINITY;
             }
         }
-        println!("# Bellman-Ford vs Dijkstra:  max |Δ distance| = {}", to_exponential(max_diff, 2));
+        println!(
+            "# Bellman-Ford vs Dijkstra:  max |Δ distance| = {}",
+            to_exponential(max_diff, 2)
+        );
         println!();
     }
 

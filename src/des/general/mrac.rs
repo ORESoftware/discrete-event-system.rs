@@ -261,8 +261,7 @@ impl ControllerBlock for MRACController {
 
 /// Options for `run_mrac` (TS `MRACOpts`). `reference` defaults to a square wave
 /// of amplitude 1 and period 4 s.
-#[derive(Clone)]
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct MRACOpts {
     /// True (hidden) plant parameter a. Default 1 (unstable plant).
     pub a: Option<f64>,
@@ -282,7 +281,6 @@ pub struct MRACOpts {
     pub num_steps: Option<usize>,
     pub u_bound: Option<f64>,
 }
-
 
 /// Result of an MRAC run (TS `MRACResult extends ClosedLoopResult`, flattened).
 #[derive(Clone, Debug)]
@@ -321,16 +319,27 @@ fn run_mrac_impl(opts: MRACOpts) -> Result<MRACResult, PreconditionError> {
     let gamma = opts.gamma.unwrap_or(5.0);
     let dt = opts.dt.unwrap_or(0.01);
     let num_steps = opts.num_steps.unwrap_or(4000);
-    let reference: Rc<dyn Fn(f64) -> f64> = opts
-        .reference
-        .clone()
-        .unwrap_or_else(|| Rc::new(|t: f64| if (t / 2.0).floor() as i64 % 2 == 0 { 1.0 } else { -1.0 }));
+    let reference: Rc<dyn Fn(f64) -> f64> = opts.reference.clone().unwrap_or_else(|| {
+        Rc::new(|t: f64| {
+            if (t / 2.0).floor() as i64 % 2 == 0 {
+                1.0
+            } else {
+                -1.0
+            }
+        })
+    });
 
     // Pre-run guards.
     let cls = "runMRAC";
     Preconditions::finite(cls, "a", a)?;
     Preconditions::positive(cls, "b", b)?;
-    Preconditions::check(cls, "am", "be < 0 (reference model must be stable)", am < 0.0, Some(am.to_string()))?;
+    Preconditions::check(
+        cls,
+        "am",
+        "be < 0 (reference model must be stable)",
+        am < 0.0,
+        Some(am.to_string()),
+    )?;
     Preconditions::finite(cls, "bm", bm)?;
     Preconditions::finite(cls, "x0", x0)?;
     Preconditions::finite(cls, "xm0", xm0)?;
@@ -348,7 +357,14 @@ fn run_mrac_impl(opts: MRACOpts) -> Result<MRACResult, PreconditionError> {
 
     let mut plant = UnknownGainPlant::new(a, b, dt);
     let ref_model = ReferenceModel::new(xm0, am, bm, dt);
-    let mut ctrl = MRACController::new(gamma, math_sign(b), dt, ref_model, reference.clone(), opts.u_bound);
+    let mut ctrl = MRACController::new(
+        gamma,
+        math_sign(b),
+        dt,
+        ref_model,
+        reference.clone(),
+        opts.u_bound,
+    );
     let closed = run_closed_loop(&mut plant, &[x0], &mut ctrl, num_steps);
 
     // RMS tracking error in steady state.

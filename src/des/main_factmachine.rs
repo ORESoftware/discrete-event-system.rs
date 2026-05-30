@@ -24,8 +24,9 @@
 
 use crate::des::general::belief::{brier_score, BinaryOutcome, DiscreteBelief};
 use crate::des::general::factmachine_math::{
-    option_prices, BuyExecution, BuyExecutionInput, BuyExecutor, LmsrCost, LmsrPriceInput, OptionPrices,
-    RecapResult, Recapitalization, RecapitalizationInput, SellExecution, SellExecutionInput, SellExecutor,
+    option_prices, BuyExecution, BuyExecutionInput, BuyExecutor, LmsrCost, LmsrPriceInput,
+    OptionPrices, RecapResult, Recapitalization, RecapitalizationInput, SellExecution,
+    SellExecutionInput, SellExecutor,
 };
 use crate::des::general::prng::mulberry32;
 use crate::des::general::random_variables::sample_poisson;
@@ -169,7 +170,11 @@ fn p_yes_wins(theta: f64, params: &FactMachineParams) -> f64 {
 // -----------------------------------------------------------------------------
 
 fn lmsr_cost(q0: f64, q1: f64, b: f64) -> f64 {
-    LmsrCost.transform(LmsrPriceInput { q_one: q0, q_two: q1, b })
+    LmsrCost.transform(LmsrPriceInput {
+        q_one: q0,
+        q_two: q1,
+        b,
+    })
 }
 
 pub struct LMSR {
@@ -186,8 +191,17 @@ impl LMSR {
         if !liquidity.is_finite() || liquidity <= 0.0 {
             panic!("LMSR: liquidity must be a finite positive number");
         }
-        let b = if liquidity_is_b { liquidity } else { liquidity / (n as f64).ln() };
-        LMSR { q: vec![0.0; n], b, n, liquidity }
+        let b = if liquidity_is_b {
+            liquidity
+        } else {
+            liquidity / (n as f64).ln()
+        };
+        LMSR {
+            q: vec![0.0; n],
+            b,
+            n,
+            liquidity,
+        }
     }
     pub fn prices(&self) -> Vec<f64> {
         let m = self.q.iter().cloned().fold(f64::NEG_INFINITY, f64::max) / self.b;
@@ -209,10 +223,17 @@ impl LMSR {
             panic!("LMSR.cost: dq length {} ≠ N={}", dq.len(), self.n);
         }
         if self.n == 2 {
-            return lmsr_cost(self.q[0] + dq[0], self.q[1] + dq[1], self.b) - lmsr_cost(self.q[0], self.q[1], self.b);
+            return lmsr_cost(self.q[0] + dq[0], self.q[1] + dq[1], self.b)
+                - lmsr_cost(self.q[0], self.q[1], self.b);
         }
         let m0 = self.q.iter().cloned().fold(f64::NEG_INFINITY, f64::max) / self.b;
-        let m1 = self.q.iter().zip(dq).map(|(qi, d)| qi + d).fold(f64::NEG_INFINITY, f64::max) / self.b;
+        let m1 = self
+            .q
+            .iter()
+            .zip(dq)
+            .map(|(qi, d)| qi + d)
+            .fold(f64::NEG_INFINITY, f64::max)
+            / self.b;
         let mut s0 = 0.0;
         let mut s1 = 0.0;
         for i in 0..self.n {
@@ -270,7 +291,11 @@ impl LMSR {
         if self.n != 2 {
             panic!("LMSR.recap() requires N = 2");
         }
-        let new_b = if liquidity_is_b { new_liquidity } else { new_liquidity / (self.n as f64).ln() };
+        let new_b = if liquidity_is_b {
+            new_liquidity
+        } else {
+            new_liquidity / (self.n as f64).ln()
+        };
         let r: RecapResult = Recapitalization.transform(RecapitalizationInput {
             option_one_shares: self.q[0],
             option_two_shares: self.q[1],
@@ -351,7 +376,8 @@ fn order_prob(theta: f64, informedness: f64) -> f64 {
 
 fn obs_likelihood(theta: f64, yes_orders: f64, total: f64, informedness: f64) -> f64 {
     let p = order_prob(theta, informedness);
-    let log_l = yes_orders * (1e-300_f64.max(p)).ln() + (total - yes_orders) * (1e-300_f64.max(1.0 - p)).ln();
+    let log_l = yes_orders * (1e-300_f64.max(p)).ln()
+        + (total - yes_orders) * (1e-300_f64.max(1.0 - p)).ln();
     log_l.exp()
 }
 
@@ -478,7 +504,10 @@ impl MarketStation {
         self.noise_queue.push(Order { side, is_yes });
     }
     fn enqueue_bettor(&mut self, side: usize) {
-        self.bettor_queue.push(Order { side, is_yes: false });
+        self.bettor_queue.push(Order {
+            side,
+            is_yes: false,
+        });
     }
     fn settle_noise(&mut self) {
         let mut yes = 0;
@@ -514,7 +543,12 @@ impl MarketStation {
     }
 }
 
-fn noise_run(params: &FactMachineParams, rng: &mut SeededRandom, market: &mut MarketStation, t: i64) {
+fn noise_run(
+    params: &FactMachineParams,
+    rng: &mut SeededRandom,
+    market: &mut MarketStation,
+    t: i64,
+) {
     let mut k = params.k_noise;
     let mut q_signal = order_prob(params.true_theta, params.informedness);
     if params.late_flip && t == params.t - 2 {
@@ -556,7 +590,9 @@ struct BettorStation {
 }
 impl BettorStation {
     fn new(params: &FactMachineParams, n_outcomes: usize) -> Self {
-        let states: Vec<f64> = (0..params.theta_bins).map(|i| i as f64 / (params.theta_bins - 1) as f64).collect();
+        let states: Vec<f64> = (0..params.theta_bins)
+            .map(|i| i as f64 / (params.theta_bins - 1) as f64)
+            .collect();
         let belief = DiscreteBelief::new(states, None);
         let belief_mean = vec![belief.mean()];
         let belief_var = vec![belief.variance()];
@@ -585,7 +621,8 @@ impl BettorStation {
             let informedness = params.informedness;
             let yes_f = yes as f64;
             let total_f = total as f64;
-            self.belief.update(|theta: &f64, _i| obs_likelihood(*theta, yes_f, total_f, informedness));
+            self.belief
+                .update(|theta: &f64, _i| obs_likelihood(*theta, yes_f, total_f, informedness));
         }
         let tau = (params.t - t) as f64;
         let action = pick_action(params, &self.belief, &market.lmsr, rng, tau, outcomes);
@@ -613,7 +650,12 @@ struct ResolutionStation {
 }
 impl ResolutionStation {
     fn new() -> Self {
-        ResolutionStation { outcome_idx: 0, vote_fraction: 0.0, payout: 0.0, fired: false }
+        ResolutionStation {
+            outcome_idx: 0,
+            vote_fraction: 0.0,
+            payout: 0.0,
+            fired: false,
+        }
     }
     fn run(
         &mut self,
@@ -636,13 +678,21 @@ impl ResolutionStation {
         self.vote_fraction = yes_votes as f64 / params.n_voters as f64;
         if params.market_type == MarketType::Binary {
             if params.resolution_mode == ResolutionMode::Majority {
-                self.outcome_idx = if yes_votes as f64 > params.n_voters as f64 / 2.0 { 0 } else { 1 };
+                self.outcome_idx = if yes_votes as f64 > params.n_voters as f64 / 2.0 {
+                    0
+                } else {
+                    1
+                };
             } else {
-                self.outcome_idx = if rng.next_float() < params.true_theta { 0 } else { 1 };
+                self.outcome_idx = if rng.next_float() < params.true_theta {
+                    0
+                } else {
+                    1
+                };
             }
         } else {
-            self.outcome_idx =
-                ((self.vote_fraction * market.n_outcomes as f64).floor() as usize).min(market.n_outcomes - 1);
+            self.outcome_idx = ((self.vote_fraction * market.n_outcomes as f64).floor() as usize)
+                .min(market.n_outcomes - 1);
         }
         self.payout = bettor.shares[self.outcome_idx];
     }
@@ -676,11 +726,17 @@ pub struct FactMachineResult {
 }
 
 pub fn run_fact_machine(mut params: FactMachineParams) -> FactMachineResult {
-    if params.market_type == MarketType::Scalar && params.resolution_mode != ResolutionMode::Majority {
+    if params.market_type == MarketType::Scalar
+        && params.resolution_mode != ResolutionMode::Majority
+    {
         params.resolution_mode = ResolutionMode::Majority;
     }
     let mut rng = mulberry32(params.seed);
-    let n_outcomes = if params.market_type == MarketType::Binary { 2 } else { params.theta_bins };
+    let n_outcomes = if params.market_type == MarketType::Binary {
+        2
+    } else {
+        params.theta_bins
+    };
     let outcomes = outcome_matrix(&params);
 
     let mut market = MarketStation::new(n_outcomes, params.liquidity);
@@ -744,7 +800,10 @@ pub fn run_fact_machine(mut params: FactMachineParams) -> FactMachineResult {
 // -----------------------------------------------------------------------------
 
 fn env_f64(key: &str, default: f64) -> f64 {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 fn env_str(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
@@ -789,11 +848,25 @@ pub fn run() {
         if base.market_type == MarketType::Binary {
             println!("# t      P(YES)      E[θ]       Var[θ]    H(b)     yes/total");
             for t in 0..=base.t as usize {
-                let yo = if t > 0 { r.yes_orders_history[t - 1] } else { 0 };
-                let to = if t > 0 { r.total_orders_history[t - 1] } else { 0 };
+                let yo = if t > 0 {
+                    r.yes_orders_history[t - 1]
+                } else {
+                    0
+                };
+                let to = if t > 0 {
+                    r.total_orders_history[t - 1]
+                } else {
+                    0
+                };
                 println!(
                     "# {:>2}  {:.4}  {:.4}  {:.5}  {:.3}  {}/{}",
-                    t, r.price_history[t][0], r.belief_mean[t], r.belief_var[t], r.belief_entropy[t], yo, to
+                    t,
+                    r.price_history[t][0],
+                    r.belief_mean[t],
+                    r.belief_var[t],
+                    r.belief_entropy[t],
+                    yo,
+                    to
                 );
             }
         } else {
@@ -867,7 +940,13 @@ pub fn run() {
         "#   trueθ={}  T={}  informedness={}  fee={}\n",
         base.true_theta, base.t, base.informedness, base.fee
     );
-    let policies = [Policy::Hold, Policy::Random, Policy::Myopic, Policy::Qmdp, Policy::Oracle];
+    let policies = [
+        Policy::Hold,
+        Policy::Random,
+        Policy::Myopic,
+        Policy::Qmdp,
+        Policy::Oracle,
+    ];
     println!("# policy     mean PnL    sd PnL    win-rate   final-Brier   total shares   trades");
     for policy in policies {
         let mut sum = 0.0;
@@ -887,7 +966,11 @@ pub fn run() {
                 wins += 1.0;
             }
             let last_mean = out.belief_mean[out.belief_mean.len() - 1];
-            let y = if out.final_outcome == 1 { BinaryOutcome::One } else { BinaryOutcome::Zero };
+            let y = if out.final_outcome == 1 {
+                BinaryOutcome::One
+            } else {
+                BinaryOutcome::Zero
+            };
             brier += brier_score(last_mean, y);
             let ts: f64 = out.shares.iter().sum();
             total_shares += ts;

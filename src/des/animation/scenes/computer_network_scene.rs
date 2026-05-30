@@ -79,8 +79,7 @@ pub struct NetworkLinkSpec {
     pub bidirectional: bool,
 }
 
-#[derive(Clone, Debug)]
-#[derive(Default)]
+#[derive(Clone, Debug, Default)]
 pub struct ComputerNetworkProblem {
     pub nodes: Vec<NetworkNode>,
     pub links: Vec<NetworkLinkSpec>,
@@ -161,7 +160,6 @@ pub struct ComputerNetworkResult {
     pub total_simulated_ms: f64,
 }
 
-
 pub fn build_computer_network_animation(
     problem: &ComputerNetworkProblem,
     result: &ComputerNetworkResult,
@@ -186,7 +184,15 @@ pub fn build_computer_network_animation(
     };
 
     for (i, sample) in samples.iter().enumerate() {
-        let frame = build_computer_network_frame(sample, i, problem, &normalized, &coords, result, &packet_traces);
+        let frame = build_computer_network_frame(
+            sample,
+            i,
+            problem,
+            &normalized,
+            &coords,
+            result,
+            &packet_traces,
+        );
         frames.push(frame.into_frame(sample.t_ms, i as f64));
     }
 
@@ -204,10 +210,16 @@ fn build_computer_network_frame(
     packet_traces: &[NetworkPacketSnapshot],
 ) -> FrameParts {
     let mut shapes: Vec<Shape> = Vec::new();
-    let link_stats: HashMap<String, LinkStat> =
-        result.link_stats.iter().map(|l| (l.id.clone(), l.clone())).collect();
-    let node_stats: HashMap<String, NodeStat> =
-        result.node_stats.iter().map(|n| (n.id.clone(), n.clone())).collect();
+    let link_stats: HashMap<String, LinkStat> = result
+        .link_stats
+        .iter()
+        .map(|l| (l.id.clone(), l.clone()))
+        .collect();
+    let node_stats: HashMap<String, NodeStat> = result
+        .node_stats
+        .iter()
+        .map(|n| (n.id.clone(), n.clone()))
+        .collect();
     let top_bottleneck_id = result.bottlenecks.first().map(|b| b.id.clone());
 
     shapes.push(Shape::Rect(RectShape {
@@ -255,13 +267,28 @@ fn build_computer_network_frame(
     }));
 
     for link in links {
-        draw_link(&mut shapes, link, coords, &link_stats, sample, &top_bottleneck_id);
+        draw_link(
+            &mut shapes,
+            link,
+            coords,
+            &link_stats,
+            sample,
+            &top_bottleneck_id,
+        );
     }
     for pkt in packet_traces {
         draw_packet_if_active(&mut shapes, pkt, sample.t_ms, coords);
     }
     for node in &problem.nodes {
-        draw_node(&mut shapes, &node.id, &node.kind, coords, sample, &node_stats, &top_bottleneck_id);
+        draw_node(
+            &mut shapes,
+            &node.id,
+            &node.kind,
+            coords,
+            sample,
+            &node_stats,
+            &top_bottleneck_id,
+        );
     }
 
     draw_legend(&mut shapes);
@@ -303,9 +330,18 @@ fn draw_link(
     let dy = b.y - a.y;
     let len = (dx * dx + dy * dy).sqrt().max(1.0);
     let offset = if is_reverse { -7.0 } else { 7.0 };
-    let n = Point { x: -dy / len * offset, y: dx / len * offset };
-    let aa = Point { x: a.x + n.x, y: a.y + n.y };
-    let bb = Point { x: b.x + n.x, y: b.y + n.y };
+    let n = Point {
+        x: -dy / len * offset,
+        y: dx / len * offset,
+    };
+    let aa = Point {
+        x: a.x + n.x,
+        y: a.y + n.y,
+    };
+    let bb = Point {
+        x: b.x + n.x,
+        y: b.y + n.y,
+    };
     let st = link_stats.get(&link.id);
     let util = sample
         .link_utilization
@@ -324,7 +360,11 @@ fn draw_link(
     } else {
         "#64748b"
     };
-    let width = if is_top { 5.0 } else { 1.4 + 4.0 * 1.0_f64.min(util) };
+    let width = if is_top {
+        5.0
+    } else {
+        1.4 + 4.0 * 1.0_f64.min(util)
+    };
     shapes.push(Shape::Line(LineShape {
         x1: aa.x,
         y1: aa.y,
@@ -333,11 +373,18 @@ fn draw_link(
         stroke: stroke.to_string(),
         stroke_width: Some(width),
         opacity: Some(if is_reverse { 0.45 } else { 0.85 }),
-        dasharray: if is_reverse { Some("4,4".to_string()) } else { None },
+        dasharray: if is_reverse {
+            Some("4,4".to_string())
+        } else {
+            None
+        },
         ..Default::default()
     }));
     draw_arrow(shapes, aa, bb, stroke);
-    let mid = Point { x: (aa.x + bb.x) / 2.0, y: (aa.y + bb.y) / 2.0 };
+    let mid = Point {
+        x: (aa.x + bb.x) / 2.0,
+        y: (aa.y + bb.y) / 2.0,
+    };
     let inflight = sample
         .link_in_flight
         .get(&link.id)
@@ -408,7 +455,11 @@ fn draw_node(
         y: p.y,
         r: if is_top { 28.0 } else { 24.0 },
         fill: fill.to_string(),
-        stroke: Some(if is_top { "#dc2626".to_string() } else { "#0f172a".to_string() }),
+        stroke: Some(if is_top {
+            "#dc2626".to_string()
+        } else {
+            "#0f172a".to_string()
+        }),
         stroke_width: Some(if is_top { 4.0 } else { 2.0 }),
         title: Some(format!(
             "{} ({}) queue={}, dropped={}",
@@ -468,7 +519,8 @@ fn draw_packet_if_active(
     if pkt.hops.len() < 2 {
         return;
     }
-    let progress = ((t_ms - pkt.created_at_ms) / (end - pkt.created_at_ms).max(1.0)).clamp(0.0, 0.999);
+    let progress =
+        ((t_ms - pkt.created_at_ms) / (end - pkt.created_at_ms).max(1.0)).clamp(0.0, 0.999);
     let seg_float = progress * (pkt.hops.len() as f64 - 1.0);
     let seg = ((pkt.hops.len() - 2) as f64).min(seg_float.floor()) as usize;
     let local = seg_float - seg as f64;
@@ -481,12 +533,25 @@ fn draw_packet_if_active(
     shapes.push(Shape::Circle(CircleShape {
         x,
         y,
-        r: if pkt.protocol == NetworkProtocol::Http { 4.5 } else { 3.7 },
+        r: if pkt.protocol == NetworkProtocol::Http {
+            4.5
+        } else {
+            3.7
+        },
         fill: protocol_color(pkt.protocol).to_string(),
         stroke: Some("#ffffff".to_string()),
         stroke_width: Some(1.0),
-        opacity: Some(if pkt.dropped_at_ms.is_some() { 0.55 } else { 0.9 }),
-        title: Some(format!("packet {} {} {}", pkt.packet_id, protocol_label(pkt.protocol), pkt.flow_id)),
+        opacity: Some(if pkt.dropped_at_ms.is_some() {
+            0.55
+        } else {
+            0.9
+        }),
+        title: Some(format!(
+            "packet {} {} {}",
+            pkt.packet_id,
+            protocol_label(pkt.protocol),
+            pkt.flow_id
+        )),
         ..Default::default()
     }));
 }
@@ -500,7 +565,11 @@ fn protocol_label(p: NetworkProtocol) -> &'static str {
     }
 }
 
-fn draw_metrics_panel(shapes: &mut Vec<Shape>, result: &ComputerNetworkResult, sample: &NetworkTimeSample) {
+fn draw_metrics_panel(
+    shapes: &mut Vec<Shape>,
+    result: &ComputerNetworkResult,
+    sample: &NetworkTimeSample,
+) {
     shapes.push(Shape::Rect(RectShape {
         x: PANEL_X,
         y: PANEL_Y,
@@ -526,7 +595,11 @@ fn draw_metrics_panel(shapes: &mut Vec<Shape>, result: &ComputerNetworkResult, s
         format!("wire {} Mbps", to_fixed(result.throughput_mbps, 2)),
         format!("goodput {} Mbps", to_fixed(result.goodput_mbps, 2)),
         format!("delivery {}%", to_fixed(result.delivery_ratio * 100.0, 1)),
-        format!("active now {} / max {}", js_num(sample.active_packets), js_num(result.max_active_packets)),
+        format!(
+            "active now {} / max {}",
+            js_num(sample.active_packets),
+            js_num(result.max_active_packets)
+        ),
     ];
     for (i, row) in rows.iter().enumerate() {
         shapes.push(Shape::Text(TextShape {
@@ -566,7 +639,11 @@ fn draw_metrics_panel(shapes: &mut Vec<Shape>, result: &ComputerNetworkResult, s
             y: PANEL_Y + 207.0 + i as f64 * 18.0,
             text: format!("{}. {}:{} {}", i + 1, b.kind, b.id, b.reason),
             font_size: Some(11.0),
-            fill: Some(if i == 0 { "#dc2626".to_string() } else { "#334155".to_string() }),
+            fill: Some(if i == 0 {
+                "#dc2626".to_string()
+            } else {
+                "#334155".to_string()
+            }),
             ..Default::default()
         }));
     }
@@ -638,8 +715,16 @@ fn draw_fanout_policy_panel(shapes: &mut Vec<Shape>, tick: usize) {
                 x: lx,
                 y: yy - 4.0,
                 r: if active { 13.0 } else { 10.0 },
-                fill: if active { (*color).to_string() } else { "#e2e8f0".to_string() },
-                stroke: Some(if active { "#0f172a".to_string() } else { "#94a3b8".to_string() }),
+                fill: if active {
+                    (*color).to_string()
+                } else {
+                    "#e2e8f0".to_string()
+                },
+                stroke: Some(if active {
+                    "#0f172a".to_string()
+                } else {
+                    "#94a3b8".to_string()
+                }),
                 stroke_width: Some(1.2),
                 ..Default::default()
             }));
@@ -648,7 +733,11 @@ fn draw_fanout_policy_panel(shapes: &mut Vec<Shape>, tick: usize) {
                 y: yy,
                 text: (*label).to_string(),
                 font_size: Some(10.0),
-                fill: Some(if active { "#ffffff".to_string() } else { "#334155".to_string() }),
+                fill: Some(if active {
+                    "#ffffff".to_string()
+                } else {
+                    "#334155".to_string()
+                }),
                 anchor: Some(Anchor::Middle),
                 font_weight: Some(FontWeight::Bold),
                 ..Default::default()
@@ -714,9 +803,36 @@ fn build_computer_network_charts(result: &ComputerNetworkResult) -> Vec<ChartSpe
             title: Some("Traffic buildup".to_string()),
             y_min: Some(0.0),
             series: vec![
-                ChartSeries { label: "active".to_string(), color: "#2563eb".to_string(), t: t.clone(), y: result.time_series.iter().map(|s| s.active_packets).collect() },
-                ChartSeries { label: "dropped".to_string(), color: "#dc2626".to_string(), t: t.clone(), y: result.time_series.iter().map(|s| s.dropped_packets).collect() },
-                ChartSeries { label: "delivered".to_string(), color: "#16a34a".to_string(), t: t.clone(), y: result.time_series.iter().map(|s| s.delivered_packets).collect() },
+                ChartSeries {
+                    label: "active".to_string(),
+                    color: "#2563eb".to_string(),
+                    t: t.clone(),
+                    y: result
+                        .time_series
+                        .iter()
+                        .map(|s| s.active_packets)
+                        .collect(),
+                },
+                ChartSeries {
+                    label: "dropped".to_string(),
+                    color: "#dc2626".to_string(),
+                    t: t.clone(),
+                    y: result
+                        .time_series
+                        .iter()
+                        .map(|s| s.dropped_packets)
+                        .collect(),
+                },
+                ChartSeries {
+                    label: "delivered".to_string(),
+                    color: "#16a34a".to_string(),
+                    t: t.clone(),
+                    y: result
+                        .time_series
+                        .iter()
+                        .map(|s| s.delivered_packets)
+                        .collect(),
+                },
             ],
             ..Default::default()
         },
@@ -760,7 +876,11 @@ fn top_utilization_series(result: &ComputerNetworkResult) -> Vec<ChartSeries> {
         .iter()
         .filter(|l| l.delivered_packets > 0.0 || l.dropped_packets > 0.0)
         .collect();
-    top_links.sort_by(|a, b| b.utilization.partial_cmp(&a.utilization).unwrap_or(std::cmp::Ordering::Equal));
+    top_links.sort_by(|a, b| {
+        b.utilization
+            .partial_cmp(&a.utilization)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     top_links.truncate(3);
     let colors = ["#dc2626", "#f97316", "#2563eb"];
     top_links
@@ -773,7 +893,12 @@ fn top_utilization_series(result: &ComputerNetworkResult) -> Vec<ChartSeries> {
             y: result
                 .time_series
                 .iter()
-                .map(|s| s.link_utilization.get(&l.id).copied().unwrap_or(l.utilization))
+                .map(|s| {
+                    s.link_utilization
+                        .get(&l.id)
+                        .copied()
+                        .unwrap_or(l.utilization)
+                })
                 .collect(),
         })
         .collect()
@@ -810,7 +935,13 @@ fn layout_nodes(problem: &ComputerNetworkProblem) -> HashMap<String, Point> {
     for (i, id) in ids.iter().enumerate() {
         let a = -std::f64::consts::PI / 2.0
             + 2.0 * std::f64::consts::PI * i as f64 / (ids.len().max(1)) as f64;
-        out.insert(id.clone(), Point { x: cx + r * a.cos(), y: cy + r * a.sin() });
+        out.insert(
+            id.clone(),
+            Point {
+                x: cx + r * a.cos(),
+                y: cy + r * a.sin(),
+            },
+        );
     }
     out
 }
@@ -819,7 +950,10 @@ fn normalize_links(links: &[NetworkLinkSpec]) -> Vec<NetworkLinkSpec> {
     let mut out: Vec<NetworkLinkSpec> = Vec::new();
     let mut ids: HashSet<String> = HashSet::new();
     for link in links {
-        out.push(NetworkLinkSpec { bidirectional: false, ..link.clone() });
+        out.push(NetworkLinkSpec {
+            bidirectional: false,
+            ..link.clone()
+        });
         ids.insert(link.id.clone());
         if !link.bidirectional {
             continue;
@@ -843,7 +977,10 @@ fn normalize_links(links: &[NetworkLinkSpec]) -> Vec<NetworkLinkSpec> {
 
 fn draw_arrow(shapes: &mut Vec<Shape>, a: Point, b: Point, color: &str) {
     let ang = (b.y - a.y).atan2(b.x - a.x);
-    let tip = Point { x: b.x - 28.0 * ang.cos(), y: b.y - 28.0 * ang.sin() };
+    let tip = Point {
+        x: b.x - 28.0 * ang.cos(),
+        y: b.y - 28.0 * ang.sin(),
+    };
     let left = Point {
         x: tip.x - 9.0 * (ang - std::f64::consts::PI / 6.0).cos(),
         y: tip.y - 9.0 * (ang - std::f64::consts::PI / 6.0).sin(),
@@ -885,7 +1022,12 @@ fn queue_color(q: f64, cap: f64) -> String {
 fn short_node_label(id: &str) -> String {
     let initials: String = id
         .split(['-', '_'])
-        .map(|s| s.chars().next().map(|c| c.to_ascii_uppercase().to_string()).unwrap_or_default())
+        .map(|s| {
+            s.chars()
+                .next()
+                .map(|c| c.to_ascii_uppercase().to_string())
+                .unwrap_or_default()
+        })
         .collect();
     let sliced: String = initials.chars().take(3).collect();
     if !sliced.is_empty() {

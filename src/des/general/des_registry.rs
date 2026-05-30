@@ -36,7 +36,7 @@ use std::time::Instant;
 
 use crate::des::general::adapters::adapter_utils::default_frames_path;
 use crate::des::general::des_spec::{
-    validate, DESModelSpec, DESModelMetadata, DESOutputs, DESRunSummary, DESRuntimeConfig,
+    validate, DESModelMetadata, DESModelSpec, DESOutputs, DESRunSummary, DESRuntimeConfig,
     JsonObject, JsonValue, OutputEntry, OutputKind, ParamSchema, DES_MODEL_SPEC_SCHEMA,
 };
 use crate::des::general::universal_model_spec::is_universal_des_model_spec;
@@ -72,9 +72,15 @@ pub trait ModelAdapter {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RegistryError {
     AlreadyRegistered(String),
-    UnknownModel { id: String, registered: Vec<String> },
+    UnknownModel {
+        id: String,
+        registered: Vec<String>,
+    },
     UnknownSchema(String),
-    InvalidParameters { model_id: String, errors: Vec<String> },
+    InvalidParameters {
+        model_id: String,
+        errors: Vec<String>,
+    },
     Io(String),
     Parse(String),
     Unsupported(String),
@@ -85,13 +91,24 @@ impl fmt::Display for RegistryError {
         match self {
             RegistryError::AlreadyRegistered(id) => write!(f, "model \"{id}\" already registered"),
             RegistryError::UnknownModel { id, registered } => {
-                write!(f, "unknown model \"{id}\". Registered: [{}]", registered.join(", "))
+                write!(
+                    f,
+                    "unknown model \"{id}\". Registered: [{}]",
+                    registered.join(", ")
+                )
             }
             RegistryError::UnknownSchema(s) => {
-                write!(f, "unknown $schema \"{s}\". Expected \"{DES_MODEL_SPEC_SCHEMA}\".")
+                write!(
+                    f,
+                    "unknown $schema \"{s}\". Expected \"{DES_MODEL_SPEC_SCHEMA}\"."
+                )
             }
             RegistryError::InvalidParameters { model_id, errors } => {
-                write!(f, "invalid parameters for model \"{model_id}\":\n  {}", errors.join("\n  "))
+                write!(
+                    f,
+                    "invalid parameters for model \"{model_id}\":\n  {}",
+                    errors.join("\n  ")
+                )
             }
             RegistryError::Io(s) => write!(f, "{s}"),
             RegistryError::Parse(s) => write!(f, "{s}"),
@@ -117,7 +134,10 @@ pub struct Registry {
 
 impl Registry {
     pub fn new() -> Self {
-        Registry { map: HashMap::new(), order: Vec::new() }
+        Registry {
+            map: HashMap::new(),
+            order: Vec::new(),
+        }
     }
 
     /// TS `registerModel`. Duplicate ids are an error (the TS `throw`).
@@ -144,7 +164,10 @@ impl Registry {
                     "[des-registry] unknown model \"{id}\". Registered models: [{}]",
                     registered.join(", ")
                 );
-                Err(RegistryError::UnknownModel { id: id.to_string(), registered })
+                Err(RegistryError::UnknownModel {
+                    id: id.to_string(),
+                    registered,
+                })
             }
         }
     }
@@ -154,7 +177,10 @@ impl Registry {
         self.order
             .iter()
             .filter_map(|id| self.map.get(id))
-            .map(|r| ModelInfo { id: r.id().to_string(), description: r.description().to_string() })
+            .map(|r| ModelInfo {
+                id: r.id().to_string(),
+                description: r.description().to_string(),
+            })
             .collect()
     }
 
@@ -186,14 +212,24 @@ impl Registry {
                 }
             }
         }
-        let runtime_for_run = DESRuntimeConfig { outputs: Some(out_cfg.clone()), ..runtime.clone() };
+        let runtime_for_run = DESRuntimeConfig {
+            outputs: Some(out_cfg.clone()),
+            ..runtime.clone()
+        };
         let verbose = opts.verbose.or(runtime.verbose).unwrap_or(true);
 
         let params = validate_model_parameters(&spec.model, &spec.parameters, reg)?;
 
         if verbose {
-            let desc = spec.description.clone().unwrap_or_else(|| reg.description().to_string());
-            eprintln!("[runFromSpec] model=\"{}\"  description={}", spec.model, to_pretty_json(&JsonValue::String(desc), 0));
+            let desc = spec
+                .description
+                .clone()
+                .unwrap_or_else(|| reg.description().to_string());
+            eprintln!(
+                "[runFromSpec] model=\"{}\"  description={}",
+                spec.model,
+                to_pretty_json(&JsonValue::String(desc), 0)
+            );
         }
 
         let t0 = Instant::now();
@@ -212,19 +248,31 @@ impl Registry {
             if reg.has_write_csv() {
                 mkdir_parent(csv);
                 reg.write_csv(&result, csv);
-                outputs.push(OutputEntry { kind: OutputKind::Csv, path: csv.clone() });
+                outputs.push(OutputEntry {
+                    kind: OutputKind::Csv,
+                    path: csv.clone(),
+                });
                 if verbose {
                     eprintln!("[runFromSpec] wrote CSV: {csv}");
                 }
             }
         }
-        if (out_cfg.html.is_some() || out_cfg.frames.is_some()) && reg.has_animate() && animate_enabled {
+        if (out_cfg.html.is_some() || out_cfg.frames.is_some())
+            && reg.has_animate()
+            && animate_enabled
+        {
             reg.animate(&result, &params, &runtime_for_run);
             if let Some(html) = &out_cfg.html {
-                outputs.push(OutputEntry { kind: OutputKind::Html, path: html.clone() });
+                outputs.push(OutputEntry {
+                    kind: OutputKind::Html,
+                    path: html.clone(),
+                });
             }
             if let Some(frames) = &out_cfg.frames {
-                outputs.push(OutputEntry { kind: OutputKind::Frames, path: frames.clone() });
+                outputs.push(OutputEntry {
+                    kind: OutputKind::Frames,
+                    path: frames.clone(),
+                });
             }
             if verbose {
                 if let Some(html) = &out_cfg.html {
@@ -234,7 +282,10 @@ impl Registry {
         }
         if let Some(log) = &out_cfg.log {
             if Path::new(log).exists() {
-                outputs.push(OutputEntry { kind: OutputKind::Log, path: log.clone() });
+                outputs.push(OutputEntry {
+                    kind: OutputKind::Log,
+                    path: log.clone(),
+                });
                 if verbose {
                     eprintln!("[runFromSpec] wrote log: {log}");
                 }
@@ -246,12 +297,19 @@ impl Registry {
             payload.insert("modelId".to_string(), JsonValue::String(spec.model.clone()));
             payload.insert("params".to_string(), params.clone());
             payload.insert("runtimeMs".to_string(), JsonValue::Number(runtime_ms));
-            payload.insert("summaryText".to_string(), JsonValue::String(summary_text.clone()));
+            payload.insert(
+                "summaryText".to_string(),
+                JsonValue::String(summary_text.clone()),
+            );
             payload.insert("result".to_string(), serialise_result(&result));
             let text = to_pretty_json(&JsonValue::Object(payload), 0);
-            std::fs::write(summary, text)
-                .map_err(|e| RegistryError::Io(format!("failed to write summary {summary}: {e}")))?;
-            outputs.push(OutputEntry { kind: OutputKind::Summary, path: summary.clone() });
+            std::fs::write(summary, text).map_err(|e| {
+                RegistryError::Io(format!("failed to write summary {summary}: {e}"))
+            })?;
+            outputs.push(OutputEntry {
+                kind: OutputKind::Summary,
+                path: summary.clone(),
+            });
             if verbose {
                 eprintln!("[runFromSpec] wrote summary: {summary}");
             }
@@ -376,15 +434,29 @@ fn serialise_result(r: &JsonValue) -> JsonValue {
 fn json_to_model_spec(value: &JsonValue) -> Result<DESModelSpec<JsonValue>, RegistryError> {
     let obj = match value {
         JsonValue::Object(o) => o,
-        _ => return Err(RegistryError::Parse("spec must be a JSON object".to_string())),
+        _ => {
+            return Err(RegistryError::Parse(
+                "spec must be a JSON object".to_string(),
+            ))
+        }
     };
     let schema = string_field(obj, "$schema").unwrap_or_default();
     let model = string_field(obj, "model").unwrap_or_default();
     let description = string_field(obj, "description");
-    let parameters = obj.get("parameters").cloned().unwrap_or(JsonValue::Undefined);
+    let parameters = obj
+        .get("parameters")
+        .cloned()
+        .unwrap_or(JsonValue::Undefined);
     let runtime = obj.get("runtime").map(runtime_from_json);
     let metadata = obj.get("metadata").map(metadata_from_json);
-    Ok(DESModelSpec { schema, model, description, parameters, runtime, metadata })
+    Ok(DESModelSpec {
+        schema,
+        model,
+        description,
+        parameters,
+        runtime,
+        metadata,
+    })
 }
 
 fn runtime_from_json(value: &JsonValue) -> DESRuntimeConfig {
@@ -423,7 +495,13 @@ fn metadata_from_json(value: &JsonValue) -> DESModelMetadata {
         Some(JsonValue::Array(items)) => Some(
             items
                 .iter()
-                .filter_map(|v| if let JsonValue::String(s) = v { Some(s.clone()) } else { None })
+                .filter_map(|v| {
+                    if let JsonValue::String(s) = v {
+                        Some(s.clone())
+                    } else {
+                        None
+                    }
+                })
                 .collect(),
         ),
         _ => None,
@@ -462,12 +540,18 @@ fn bool_field(obj: &JsonObject, key: &str) -> Option<bool> {
 /// Minimal recursive-descent JSON parser into [`JsonValue`] (`JSON.parse`).
 pub fn parse_json(text: &str) -> Result<JsonValue, String> {
     let chars: Vec<char> = text.chars().collect();
-    let mut p = JsonParser { chars: &chars, pos: 0 };
+    let mut p = JsonParser {
+        chars: &chars,
+        pos: 0,
+    };
     p.skip_ws();
     let value = p.parse_value()?;
     p.skip_ws();
     if p.pos != p.chars.len() {
-        return Err(format!("unexpected trailing characters at position {}", p.pos));
+        return Err(format!(
+            "unexpected trailing characters at position {}",
+            p.pos
+        ));
     }
     Ok(value)
 }
@@ -506,7 +590,10 @@ impl<'a> JsonParser<'a> {
             Some('t') | Some('f') => self.parse_bool(),
             Some('n') => self.parse_null(),
             Some(c) if c == '-' || c.is_ascii_digit() => self.parse_number(),
-            Some(c) => Err(format!("unexpected character '{c}' at position {}", self.pos)),
+            Some(c) => Err(format!(
+                "unexpected character '{c}' at position {}",
+                self.pos
+            )),
             None => Err("unexpected end of input".to_string()),
         }
     }
@@ -626,11 +713,16 @@ impl<'a> JsonParser<'a> {
     fn expect(&mut self, c: char) -> Result<(), String> {
         match self.next() {
             Some(got) if got == c => Ok(()),
-            other => Err(format!("expected '{c}', got {other:?} at position {}", self.pos)),
+            other => Err(format!(
+                "expected '{c}', got {other:?} at position {}",
+                self.pos
+            )),
         }
     }
     fn starts_with(&self, lit: &str) -> bool {
-        lit.chars().enumerate().all(|(i, c)| self.chars.get(self.pos + i).copied() == Some(c))
+        lit.chars()
+            .enumerate()
+            .all(|(i, c)| self.chars.get(self.pos + i).copied() == Some(c))
     }
 }
 
@@ -668,7 +760,11 @@ pub fn to_pretty_json(value: &JsonValue, indent: usize) -> String {
                 .iter()
                 .map(|k| {
                     let v = obj.get(k).expect("key present");
-                    format!("{pad_inner}{}: {}", quote_json_string(k), to_pretty_json(v, indent + 1))
+                    format!(
+                        "{pad_inner}{}: {}",
+                        quote_json_string(k),
+                        to_pretty_json(v, indent + 1)
+                    )
                 })
                 .collect();
             format!("{{\n{}\n{pad}}}", inner.join(",\n"))
@@ -710,7 +806,13 @@ mod tests {
             ParamSchema::Object {
                 fields: vec![(
                     "x".to_string(),
-                    ParamSchema::Number { min: None, max: None, integer: None, default: Some(1.0), description: None },
+                    ParamSchema::Number {
+                        min: None,
+                        max: None,
+                        integer: None,
+                        default: Some(1.0),
+                        description: None,
+                    },
                 )],
                 required: Some(vec![]),
                 description: None,
@@ -757,7 +859,10 @@ mod tests {
     #[test]
     fn unknown_model_errors() {
         let r = registry();
-        assert!(matches!(r.get_model("nope"), Err(RegistryError::UnknownModel { .. })));
+        assert!(matches!(
+            r.get_model("nope"),
+            Err(RegistryError::UnknownModel { .. })
+        ));
     }
 
     #[test]
@@ -770,10 +875,20 @@ mod tests {
             model: "double".to_string(),
             description: None,
             parameters: JsonValue::Object(params),
-            runtime: Some(DESRuntimeConfig { verbose: Some(false), ..Default::default() }),
+            runtime: Some(DESRuntimeConfig {
+                verbose: Some(false),
+                ..Default::default()
+            }),
             metadata: None,
         };
-        let summary = r.run_from_spec(&spec, &RunFromSpecOptions { verbose: Some(false) }).unwrap();
+        let summary = r
+            .run_from_spec(
+                &spec,
+                &RunFromSpecOptions {
+                    verbose: Some(false),
+                },
+            )
+            .unwrap();
         assert_eq!(summary.model_id, "double");
         match summary.result {
             JsonValue::Object(o) => assert_eq!(o.get("y"), Some(&JsonValue::Number(42.0))),
@@ -806,7 +921,9 @@ mod tests {
                 assert_eq!(o.get("a"), Some(&JsonValue::Number(1.0)));
                 assert!(matches!(o.get("b"), Some(JsonValue::Array(_))));
                 match o.get("c") {
-                    Some(JsonValue::Object(c)) => assert_eq!(c.get("d"), Some(&JsonValue::Number(-25.0))),
+                    Some(JsonValue::Object(c)) => {
+                        assert_eq!(c.get("d"), Some(&JsonValue::Number(-25.0)))
+                    }
                     _ => panic!("c"),
                 }
             }
@@ -825,7 +942,10 @@ mod tests {
     #[test]
     fn serialise_result_omits_giant_numeric_arrays() {
         let mut o = JsonObject::new();
-        o.insert("big".to_string(), JsonValue::Array((0..1001).map(|i| JsonValue::Number(i as f64)).collect()));
+        o.insert(
+            "big".to_string(),
+            JsonValue::Array((0..1001).map(|i| JsonValue::Number(i as f64)).collect()),
+        );
         let out = serialise_result(&JsonValue::Object(o));
         match out {
             JsonValue::Object(o) => match o.get("big") {

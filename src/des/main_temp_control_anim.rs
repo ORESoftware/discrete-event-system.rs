@@ -68,7 +68,11 @@ fn controller_spec(kind: &str) -> ControllerSpec {
             track_weight: Some(1.0),
         },
         // "pid" and any default.
-        _ => ControllerSpec::Pid { kp: 3.0, ki: 0.5, kd: 0.5 },
+        _ => ControllerSpec::Pid {
+            kp: 3.0,
+            ki: 0.5,
+            kd: 0.5,
+        },
     }
 }
 
@@ -106,7 +110,10 @@ pub fn run() {
     let t0 = Instant::now();
     let r = run_temp_control(cfg);
     let elapsed = t0.elapsed().as_millis();
-    println!("Simulated {}h with {} in {}ms", duration_h, args.controller, elapsed);
+    println!(
+        "Simulated {}h with {} in {}ms",
+        duration_h, args.controller, elapsed
+    );
     println!("  energy = {:.2} kWh", r.energy_kwh);
     println!("  comfort = {:.1}%", 100.0 * r.comfort_pct);
     println!("  cost = ${:.2}", r.cost);
@@ -116,7 +123,10 @@ pub fn run() {
     let ctl_name = controller_label(&args.controller);
     let record_every = 5usize; // 5-min frames → 24h × 12fps
     let scene_r = SceneRunResult {
-        cfg: SceneRunConfig { t_target, band: Some(band) },
+        cfg: SceneRunConfig {
+            t_target,
+            band: Some(band),
+        },
         trace: r
             .trace
             .iter()
@@ -162,7 +172,12 @@ pub fn run() {
     .expect("create frame recorder");
 
     for f in frames {
-        let Frame { t, tick, shapes, caption } = f;
+        let Frame {
+            t,
+            tick,
+            shapes,
+            caption,
+        } = f;
         recorder.frame(t, tick, move || FrameParts { shapes, caption });
     }
     recorder.set_charts(charts);

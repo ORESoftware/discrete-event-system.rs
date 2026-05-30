@@ -25,9 +25,7 @@
 
 #![allow(dead_code)]
 
-use crate::des::general::des_spec::{
-    DESModelRegistration, DESRuntimeConfig, ParamSchema,
-};
+use crate::des::general::des_spec::{DESModelRegistration, DESRuntimeConfig, ParamSchema};
 use crate::des::general::prng::mulberry32;
 use crate::des::general::shortest_path_des::{
     build_random_graph, build_small_chain_graph, shortest_path_bellman_ford_des,
@@ -98,11 +96,23 @@ pub fn sp_schema() -> ParamSchema {
         fields: vec![
             (
                 "to".to_string(),
-                ParamSchema::Number { min: Some(0.0), max: None, integer: Some(true), default: None, description: None },
+                ParamSchema::Number {
+                    min: Some(0.0),
+                    max: None,
+                    integer: Some(true),
+                    default: None,
+                    description: None,
+                },
             ),
             (
                 "weight".to_string(),
-                ParamSchema::Number { min: None, max: None, integer: None, default: None, description: None },
+                ParamSchema::Number {
+                    min: None,
+                    max: None,
+                    integer: None,
+                    default: None,
+                    description: None,
+                },
             ),
         ],
         required: Some(vec!["to".to_string(), "weight".to_string()]),
@@ -112,12 +122,23 @@ pub fn sp_schema() -> ParamSchema {
         fields: vec![
             (
                 "numNodes".to_string(),
-                ParamSchema::Number { min: Some(1.0), max: None, integer: Some(true), default: None, description: None },
+                ParamSchema::Number {
+                    min: Some(1.0),
+                    max: None,
+                    integer: Some(true),
+                    default: None,
+                    description: None,
+                },
             ),
             (
                 "edges".to_string(),
                 ParamSchema::Array {
-                    items: Box::new(ParamSchema::Array { items: Box::new(edge_obj), min_length: None, max_length: None, description: None }),
+                    items: Box::new(ParamSchema::Array {
+                        items: Box::new(edge_obj),
+                        min_length: None,
+                        max_length: None,
+                        description: None,
+                    }),
                     min_length: None,
                     max_length: None,
                     description: None,
@@ -131,17 +152,53 @@ pub fn sp_schema() -> ParamSchema {
         fields: vec![
             (
                 "numNodes".to_string(),
-                ParamSchema::Number { min: Some(2.0), max: Some(1000.0), integer: Some(true), default: None, description: None },
+                ParamSchema::Number {
+                    min: Some(2.0),
+                    max: Some(1000.0),
+                    integer: Some(true),
+                    default: None,
+                    description: None,
+                },
             ),
             (
                 "edgeProb".to_string(),
-                ParamSchema::Number { min: Some(0.0), max: Some(1.0), integer: None, default: None, description: None },
+                ParamSchema::Number {
+                    min: Some(0.0),
+                    max: Some(1.0),
+                    integer: None,
+                    default: None,
+                    description: None,
+                },
             ),
-            ("wMin".to_string(), ParamSchema::Number { min: None, max: None, integer: None, default: None, description: None }),
-            ("wMax".to_string(), ParamSchema::Number { min: None, max: None, integer: None, default: None, description: None }),
+            (
+                "wMin".to_string(),
+                ParamSchema::Number {
+                    min: None,
+                    max: None,
+                    integer: None,
+                    default: None,
+                    description: None,
+                },
+            ),
+            (
+                "wMax".to_string(),
+                ParamSchema::Number {
+                    min: None,
+                    max: None,
+                    integer: None,
+                    default: None,
+                    description: None,
+                },
+            ),
             (
                 "seed".to_string(),
-                ParamSchema::Number { min: None, max: None, integer: Some(true), default: None, description: None },
+                ParamSchema::Number {
+                    min: None,
+                    max: None,
+                    integer: Some(true),
+                    default: None,
+                    description: None,
+                },
             ),
         ],
         required: Some(vec![]),
@@ -159,17 +216,29 @@ pub fn sp_schema() -> ParamSchema {
             ),
             (
                 "source".to_string(),
-                ParamSchema::Number { min: Some(0.0), max: None, integer: Some(true), default: None, description: Some("Source node id".to_string()) },
+                ParamSchema::Number {
+                    min: Some(0.0),
+                    max: None,
+                    integer: Some(true),
+                    default: None,
+                    description: Some("Source node id".to_string()),
+                },
             ),
             ("graph".to_string(), graph_schema),
             ("randomGraph".to_string(), random_graph_schema),
             (
                 "builtin".to_string(),
-                ParamSchema::String { allowed: Some(vec!["small-chain".to_string()]), default: None, description: None },
+                ParamSchema::String {
+                    allowed: Some(vec!["small-chain".to_string()]),
+                    default: None,
+                    description: None,
+                },
             ),
         ],
         required: Some(vec!["algorithm".to_string(), "source".to_string()]),
-        description: Some("Shortest path on a directed graph using a DES wave-propagation solver.".to_string()),
+        description: Some(
+            "Shortest path on a directed graph using a DES wave-propagation solver.".to_string(),
+        ),
     }
 }
 
@@ -206,7 +275,14 @@ impl DESModelRegistration<SPParams, SPResult> for ShortestPathAdapter {
                 edges: gr
                     .edges
                     .iter()
-                    .map(|row| row.iter().map(|e| Edge { to: e.to, weight: e.weight }).collect())
+                    .map(|row| {
+                        row.iter()
+                            .map(|e| Edge {
+                                to: e.to,
+                                weight: e.weight,
+                            })
+                            .collect()
+                    })
                     .collect(),
                 coordinates: gr.coordinates.clone(),
                 node_names: gr.node_names.clone(),
@@ -231,7 +307,13 @@ impl DESModelRegistration<SPParams, SPResult> for ShortestPathAdapter {
             .distance
             .iter()
             .take(12)
-            .map(|&d| if d.is_finite() { format!("{d:.2}") } else { "∞".to_string() })
+            .map(|&d| {
+                if d.is_finite() {
+                    format!("{d:.2}")
+                } else {
+                    "∞".to_string()
+                }
+            })
             .collect::<Vec<_>>()
             .join(", ");
         let lines = vec![
@@ -241,10 +323,18 @@ impl DESModelRegistration<SPParams, SPResult> for ShortestPathAdapter {
             format!("  Source:          {}", params.source),
             format!("  Iterations:      {}", result.iterations),
             format!("  Waves emitted:   {}", result.waves_emitted),
-            format!("  Reachable nodes: {} / {}", reachable, result.distance.len()),
+            format!(
+                "  Reachable nodes: {} / {}",
+                reachable,
+                result.distance.len()
+            ),
             format!(
                 "  Negative cycle:  {}",
-                if result.has_negative_cycle_from_source { "YES (from source)" } else { "no" }
+                if result.has_negative_cycle_from_source {
+                    "YES (from source)"
+                } else {
+                    "no"
+                }
             ),
             "".to_string(),
             format!("  Distances (first 12 nodes):  {distances_preview}"),

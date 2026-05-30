@@ -76,7 +76,11 @@ impl DcMotorDemo {
         );
         run_iterative_des(
             vec![plant.clone() as StationRef, sink.clone() as StationRef],
-            IterativeRunOptions { shuffle: false, max_ticks: Some(self.steps + 5), ..Default::default() },
+            IterativeRunOptions {
+                shuffle: false,
+                max_ticks: Some(self.steps + 5),
+                ..Default::default()
+            },
         );
 
         let p = &self.params;
@@ -87,7 +91,10 @@ impl DcMotorDemo {
         println!("============================================================");
         self.print_params(self.steps);
         println!("  analytic ω_ss           : {:.3} rad/s", omega_ss);
-        println!("  analytic back-EMF_ss    : {:.3} V", p.back_emf_constant * omega_ss);
+        println!(
+            "  analytic back-EMF_ss    : {:.3} V",
+            p.back_emf_constant * omega_ss
+        );
         self.print_table(&sink.borrow().samples);
         let sink_ref = sink.borrow();
         let f = sink_ref.final_state().expect("final state");
@@ -100,8 +107,14 @@ impl DcMotorDemo {
     fn run_closed_loop(&self) {
         let closed_loop_steps = 6000usize;
         let load = LoadProfile::new(&[
-            LoadSegment { from_time: 0.0, torque: 0.0 },
-            LoadSegment { from_time: 18.0, torque: 0.3 },
+            LoadSegment {
+                from_time: 0.0,
+                torque: 0.0,
+            },
+            LoadSegment {
+                from_time: 18.0,
+                torque: 0.3,
+            },
         ]);
         let plant = Rc::new(RefCell::new(DcMotorPlantStation::new(
             "motor",
@@ -121,8 +134,14 @@ impl DcMotorDemo {
                 dt: self.dt,
                 max_voltage: Some(48.0),
                 reference: vec![
-                    SpeedReferenceSegment { from_time: 0.0, speed: 60.0 },
-                    SpeedReferenceSegment { from_time: 10.0, speed: 100.0 },
+                    SpeedReferenceSegment {
+                        from_time: 0.0,
+                        speed: 60.0,
+                    },
+                    SpeedReferenceSegment {
+                        from_time: 10.0,
+                        speed: 100.0,
+                    },
                 ],
             },
         )));
@@ -174,7 +193,12 @@ impl DcMotorDemo {
         let p = &self.params;
         println!(
             "  R={}Ω  L={}H  K_e={}  K_t={}  J={}  B={}",
-            p.resistance, p.inductance, p.back_emf_constant, p.torque_constant, p.inertia, p.friction
+            p.resistance,
+            p.inductance,
+            p.back_emf_constant,
+            p.torque_constant,
+            p.inertia,
+            p.friction
         );
         println!("  dt={}s  steps={}", self.dt, steps);
     }

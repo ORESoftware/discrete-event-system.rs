@@ -12,7 +12,11 @@ pub const ARGMAX_EPS_DEFAULT: f64 = 1e-12;
 
 /// Index of the maximum value, breaking ties uniformly at random. `None` if
 /// `values` is empty. Two scores within `eps` are treated as tied.
-pub fn arg_max_with_tie_break(values: &[f64], rng: &mut impl RandomSource, eps: f64) -> Option<usize> {
+pub fn arg_max_with_tie_break(
+    values: &[f64],
+    rng: &mut impl RandomSource,
+    eps: f64,
+) -> Option<usize> {
     let n = values.len();
     if n == 0 {
         return None;
@@ -73,7 +77,10 @@ pub fn scan_arg_max_tie_break(
 
 /// Pick one uniformly at random from an already-tied candidate set. `None` if
 /// empty.
-pub fn choose_random_tied<'a, T>(candidates: &'a [T], rng: &mut impl RandomSource) -> Option<&'a T> {
+pub fn choose_random_tied<'a, T>(
+    candidates: &'a [T],
+    rng: &mut impl RandomSource,
+) -> Option<&'a T> {
     if candidates.is_empty() {
         return None;
     }
@@ -107,8 +114,14 @@ mod tests {
     #[test]
     fn clear_winner() {
         let mut r = SeededRandom::new(1);
-        assert_eq!(arg_max_with_tie_break(&[1.0, 5.0, 2.0], &mut r, ARGMAX_EPS_DEFAULT), Some(1));
-        assert_eq!(arg_max_with_tie_break(&[], &mut r, ARGMAX_EPS_DEFAULT), None);
+        assert_eq!(
+            arg_max_with_tie_break(&[1.0, 5.0, 2.0], &mut r, ARGMAX_EPS_DEFAULT),
+            Some(1)
+        );
+        assert_eq!(
+            arg_max_with_tie_break(&[], &mut r, ARGMAX_EPS_DEFAULT),
+            None
+        );
     }
 
     #[test]
@@ -118,13 +131,21 @@ mod tests {
             let w = arg_max_with_tie_break(&[3.0, 3.0, 3.0], &mut r, ARGMAX_EPS_DEFAULT).unwrap();
             assert!(w < 3);
         }
-        assert_eq!(all_arg_max_ties(&[3.0, 3.0, 1.0], ARGMAX_EPS_DEFAULT), vec![0, 1]);
+        assert_eq!(
+            all_arg_max_ties(&[3.0, 3.0, 1.0], ARGMAX_EPS_DEFAULT),
+            vec![0, 1]
+        );
     }
 
     #[test]
     fn scan_skips_non_finite() {
         let mut r = SeededRandom::new(3);
-        let w = scan_arg_max_tie_break(3, |a| if a == 2 { 9.0 } else { f64::NEG_INFINITY }, &mut r, ARGMAX_EPS_DEFAULT);
+        let w = scan_arg_max_tie_break(
+            3,
+            |a| if a == 2 { 9.0 } else { f64::NEG_INFINITY },
+            &mut r,
+            ARGMAX_EPS_DEFAULT,
+        );
         assert_eq!(w, Some(2));
     }
 }

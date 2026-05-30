@@ -39,7 +39,11 @@ struct SimConfig {
 fn default_config() -> SimConfig {
     SimConfig {
         step_size: 1.0,
-        probabilities: Probabilities { asymptomatic_share: 0.40, hospitalization_given_symptom: 0.20, case_fatality_given_hospital: 0.12 },
+        probabilities: Probabilities {
+            asymptomatic_share: 0.40,
+            hospitalization_given_symptom: 0.20,
+            case_fatality_given_hospital: 0.12,
+        },
     }
 }
 
@@ -90,7 +94,14 @@ struct WelchResult {
 }
 
 fn erf(x: f64) -> f64 {
-    let (a1, a2, a3, a4, a5, p) = (0.254829592, -0.284496736, 1.421413741, -1.453152027, 1.061405429, 0.3275911);
+    let (a1, a2, a3, a4, a5, p) = (
+        0.254829592,
+        -0.284496736,
+        1.421413741,
+        -1.453152027,
+        1.061405429,
+        0.3275911,
+    );
     let sign = if x < 0.0 { -1.0 } else { 1.0 };
     let ax = x.abs();
     let t = 1.0 / (1.0 + p * ax);
@@ -104,9 +115,22 @@ fn welch(a: &[f64], b: &[f64]) -> WelchResult {
     let (m_a, m_b) = (mean(a), mean(b));
     let (v_a, v_b) = (sample_variance(a), sample_variance(b));
     let se_sq = v_a / a.len() as f64 + v_b / b.len() as f64;
-    let t = if se_sq > 0.0 { (m_a - m_b) / se_sq.sqrt() } else { 0.0 };
-    let p = if se_sq > 0.0 { 2.0 * (1.0 - normal_cdf(t.abs())) } else { 1.0 };
-    WelchResult { t, p_value_two_sided: p, reject95: t.abs() > 1.96, reject99: t.abs() > 2.58 }
+    let t = if se_sq > 0.0 {
+        (m_a - m_b) / se_sq.sqrt()
+    } else {
+        0.0
+    };
+    let p = if se_sq > 0.0 {
+        2.0 * (1.0 - normal_cdf(t.abs()))
+    } else {
+        1.0
+    };
+    WelchResult {
+        t,
+        p_value_two_sided: p,
+        reject95: t.abs() > 1.96,
+        reject99: t.abs() > 2.58,
+    }
 }
 
 // =============================================================================
@@ -120,16 +144,31 @@ struct RunOpts {
 }
 
 fn run_per_individual_once(_cfg: &SimConfig, opts: RunOpts) -> RunResult {
-    RunResult { kernel: "per-individual".to_string(), seed: opts.seed, ..Default::default() }
+    RunResult {
+        kernel: "per-individual".to_string(),
+        seed: opts.seed,
+        ..Default::default()
+    }
 }
 fn run_fel_once(_cfg: &SimConfig, opts: RunOpts) -> RunResult {
-    RunResult { kernel: "fel".to_string(), seed: opts.seed, ..Default::default() }
+    RunResult {
+        kernel: "fel".to_string(),
+        seed: opts.seed,
+        ..Default::default()
+    }
 }
 fn run_gillespie_once(_cfg: &SimConfig, opts: RunOpts) -> RunResult {
-    RunResult { kernel: "gillespie".to_string(), seed: opts.seed, ..Default::default() }
+    RunResult {
+        kernel: "gillespie".to_string(),
+        seed: opts.seed,
+        ..Default::default()
+    }
 }
 fn run_ode_once(_cfg: &SimConfig) -> RunResult {
-    RunResult { kernel: "ode".to_string(), ..Default::default() }
+    RunResult {
+        kernel: "ode".to_string(),
+        ..Default::default()
+    }
 }
 
 fn load_external(_tool_dir: &PathBuf) -> Vec<RunResult> {
@@ -139,10 +178,20 @@ fn load_external(_tool_dir: &PathBuf) -> Vec<RunResult> {
 }
 
 fn collect_split(rs: &[RunResult], from: &str, to: &str) -> Vec<f64> {
-    rs.iter().map(|r| r.split_probs.get(from).and_then(|m| m.get(to)).copied().unwrap_or(0.0)).collect()
+    rs.iter()
+        .map(|r| {
+            r.split_probs
+                .get(from)
+                .and_then(|m| m.get(to))
+                .copied()
+                .unwrap_or(0.0)
+        })
+        .collect()
 }
 fn collect_pop(rs: &[RunResult], c: &str) -> Vec<f64> {
-    rs.iter().map(|r| r.time_avg_populations.get(c).copied().unwrap_or(0.0)).collect()
+    rs.iter()
+        .map(|r| r.time_avg_populations.get(c).copied().unwrap_or(0.0))
+        .collect()
 }
 
 fn fmt(n: f64, d: usize) -> String {
@@ -183,9 +232,17 @@ impl Column {
 
 /// `validate-with-externals.ts` `main`.
 pub fn run() {
-    let n: usize = std::env::var("N").ok().and_then(|s| s.parse().ok()).unwrap_or(20);
-    let pi_stepsize: f64 = std::env::var("STEPSIZE").ok().and_then(|s| s.parse().ok()).unwrap_or(0.05);
-    let root = std::env::var("REPO_ROOT").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    let n: usize = std::env::var("N")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(20);
+    let pi_stepsize: f64 = std::env::var("STEPSIZE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.05);
+    let root = std::env::var("REPO_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
     let external_dir = root.join("out").join("external");
 
     let mut cfg = default_config();
@@ -203,9 +260,27 @@ pub fn run() {
     let mut ssa_runs = Vec::new();
     let t0 = std::time::Instant::now();
     for i in 0..n {
-        pi_runs.push(run_per_individual_once(&cfg, RunOpts { seed: 0xC0000 + i as u64, service_individual: false }));
-        fel_runs.push(run_fel_once(&default_config(), RunOpts { seed: 0xD0000 + i as u64, service_individual: true }));
-        ssa_runs.push(run_gillespie_once(&default_config(), RunOpts { seed: 0xE0000 + i as u64, service_individual: false }));
+        pi_runs.push(run_per_individual_once(
+            &cfg,
+            RunOpts {
+                seed: 0xC0000 + i as u64,
+                service_individual: false,
+            },
+        ));
+        fel_runs.push(run_fel_once(
+            &default_config(),
+            RunOpts {
+                seed: 0xD0000 + i as u64,
+                service_individual: true,
+            },
+        ));
+        ssa_runs.push(run_gillespie_once(
+            &default_config(),
+            RunOpts {
+                seed: 0xE0000 + i as u64,
+                service_individual: false,
+            },
+        ));
     }
     let ode = run_ode_once(&default_config());
     let in_repo_ms = t0.elapsed().as_millis();
@@ -225,11 +300,17 @@ pub fn run() {
     for tool in &external_dirs {
         let runs = load_external(tool);
         if !runs.is_empty() {
-            externals.push((tool.file_name().unwrap().to_string_lossy().to_string(), runs));
+            externals.push((
+                tool.file_name().unwrap().to_string_lossy().to_string(),
+                runs,
+            ));
         }
     }
     if externals.is_empty() {
-        println!("NOTE: no external JSONs found under {}", external_dir.display());
+        println!(
+            "NOTE: no external JSONs found under {}",
+            external_dir.display()
+        );
         println!("      run `bash external-references/run-all.sh` first to populate them.");
         println!();
     }
@@ -252,11 +333,18 @@ pub fn run() {
                     "  {} N={}  mean wall={} ms / rep",
                     pad_end(name, 18),
                     pad_start(&runs.len().to_string(), 3),
-                    fmt(mean(&runs.iter().map(|r| r.elapsed_ms).collect::<Vec<_>>()), 1)
+                    fmt(
+                        mean(&runs.iter().map(|r| r.elapsed_ms).collect::<Vec<_>>()),
+                        1
+                    )
                 );
             }
             Column::Single(name, single) => {
-                println!("  {} (deterministic)  wall={} ms", pad_end(name, 18), single.elapsed_ms);
+                println!(
+                    "  {} (deterministic)  wall={} ms",
+                    pad_end(name, 18),
+                    single.elapsed_ms
+                );
             }
         }
     }
@@ -265,9 +353,21 @@ pub fn run() {
     let splits: Vec<(&str, &str, f64)> = vec![
         ("I-P", "I-A", cfg.probabilities.asymptomatic_share),
         ("I-P", "I-S", 1.0 - cfg.probabilities.asymptomatic_share),
-        ("I-S", "R", 1.0 - cfg.probabilities.hospitalization_given_symptom),
-        ("I-S", "I-H", cfg.probabilities.hospitalization_given_symptom),
-        ("I-H", "R", 1.0 - cfg.probabilities.case_fatality_given_hospital),
+        (
+            "I-S",
+            "R",
+            1.0 - cfg.probabilities.hospitalization_given_symptom,
+        ),
+        (
+            "I-S",
+            "I-H",
+            cfg.probabilities.hospitalization_given_symptom,
+        ),
+        (
+            "I-H",
+            "R",
+            1.0 - cfg.probabilities.case_fatality_given_hospital,
+        ),
         ("I-H", "D", cfg.probabilities.case_fatality_given_hospital),
     ];
 
@@ -277,7 +377,10 @@ pub fn run() {
         "{}{}{}",
         pad_end("transition", 14),
         pad_start("expected", 10),
-        columns.iter().map(|c| pad_start(c.name(), col_width)).collect::<String>()
+        columns
+            .iter()
+            .map(|c| pad_start(c.name(), col_width))
+            .collect::<String>()
     );
     for (from, to, expected) in &splits {
         let cells: String = columns
@@ -285,27 +388,50 @@ pub fn run() {
             .map(|col| match col {
                 Column::Runs(_, runs) => {
                     let xs = collect_split(runs, from, to);
-                    pad_start(&format!("{} ± {}", fmt(mean(&xs), 4), fmt(stddev(&xs), 4)), col_width)
+                    pad_start(
+                        &format!("{} ± {}", fmt(mean(&xs), 4), fmt(stddev(&xs), 4)),
+                        col_width,
+                    )
                 }
                 Column::Single(_, single) => {
-                    let v = single.split_probs.get(*from).and_then(|m| m.get(*to)).copied().unwrap_or(0.0);
+                    let v = single
+                        .split_probs
+                        .get(*from)
+                        .and_then(|m| m.get(*to))
+                        .copied()
+                        .unwrap_or(0.0);
                     pad_start(&fmt(v, 4), col_width)
                 }
             })
             .collect();
-        println!("{}{}{}", pad_end(&format!("{} -> {}", from, to), 14), pad_start(&fmt(*expected, 4), 10), cells);
+        println!(
+            "{}{}{}",
+            pad_end(&format!("{} -> {}", from, to), 14),
+            pad_start(&fmt(*expected, 4), 10),
+            cells
+        );
     }
 
     println!();
     println!("=== time-averaged compartment populations ===");
-    println!("{}{}", pad_end("compartment", 14), columns.iter().map(|c| pad_start(c.name(), col_width)).collect::<String>());
+    println!(
+        "{}{}",
+        pad_end("compartment", 14),
+        columns
+            .iter()
+            .map(|c| pad_start(c.name(), col_width))
+            .collect::<String>()
+    );
     for c in COMPARTMENT_ORDER {
         let cells: String = columns
             .iter()
             .map(|col| match col {
                 Column::Runs(_, runs) => {
                     let xs = collect_pop(runs, c);
-                    pad_start(&format!("{} ± {}", fmt(mean(&xs), 3), fmt(stddev(&xs), 3)), col_width)
+                    pad_start(
+                        &format!("{} ± {}", fmt(mean(&xs), 3), fmt(stddev(&xs), 3)),
+                        col_width,
+                    )
                 }
                 Column::Single(_, single) => {
                     let v = single.time_avg_populations.get(c).copied().unwrap_or(0.0);
@@ -320,18 +446,41 @@ pub fn run() {
         println!();
         println!("=== pairwise Welch t-tests vs FEL-individual (populations) ===");
         let ref_runs = &fel_runs;
-        let mut others: Vec<(String, &Vec<RunResult>)> = vec![("PerIndividual ".to_string(), &pi_runs), ("Gillespie SSA ".to_string(), &ssa_runs)];
+        let mut others: Vec<(String, &Vec<RunResult>)> = vec![
+            ("PerIndividual ".to_string(), &pi_runs),
+            ("Gillespie SSA ".to_string(), &ssa_runs),
+        ];
         for (name, runs) in &externals {
             others.push((pad_end(name, 14), runs));
         }
-        println!("compartment    {}", others.iter().map(|o| pad_start(&format!("{}  t (p)", o.0), 28)).collect::<String>());
+        println!(
+            "compartment    {}",
+            others
+                .iter()
+                .map(|o| pad_start(&format!("{}  t (p)", o.0), 28))
+                .collect::<String>()
+        );
         for c in COMPARTMENT_ORDER {
             let cells: String = others
                 .iter()
                 .map(|(_, rs)| {
                     let w = welch(&collect_pop(rs, c), &collect_pop(ref_runs, c));
-                    let verdict = if w.reject99 { "NO99 " } else if w.reject95 { "no95 " } else { " yes " };
-                    pad_start(&format!("{} (p={}) {}", pad_start(&fmt(w.t, 2), 6), fmt(w.p_value_two_sided, 3), verdict), 28)
+                    let verdict = if w.reject99 {
+                        "NO99 "
+                    } else if w.reject95 {
+                        "no95 "
+                    } else {
+                        " yes "
+                    };
+                    pad_start(
+                        &format!(
+                            "{} (p={}) {}",
+                            pad_start(&fmt(w.t, 2), 6),
+                            fmt(w.p_value_two_sided, 3),
+                            verdict
+                        ),
+                        28,
+                    )
                 })
                 .collect();
             println!("{}{}", pad_end(&format!("<{}>", c), 14), cells);
@@ -340,16 +489,28 @@ pub fn run() {
 
     println!();
     println!("=== totals ===");
-    println!("{}{}", pad_end("metric", 14), columns.iter().map(|c| pad_start(c.name(), col_width)).collect::<String>());
-    let extractors: [(&str, fn(&RunResult) -> f64); 2] =
-        [("created   ", |r: &RunResult| r.totals.created), ("absorbed D", |r: &RunResult| r.totals.absorbed)];
+    println!(
+        "{}{}",
+        pad_end("metric", 14),
+        columns
+            .iter()
+            .map(|c| pad_start(c.name(), col_width))
+            .collect::<String>()
+    );
+    let extractors: [(&str, fn(&RunResult) -> f64); 2] = [
+        ("created   ", |r: &RunResult| r.totals.created),
+        ("absorbed D", |r: &RunResult| r.totals.absorbed),
+    ];
     for (label, extract) in extractors {
         let cells: String = columns
             .iter()
             .map(|col| match col {
                 Column::Runs(_, runs) => {
                     let xs: Vec<f64> = runs.iter().map(&extract).collect();
-                    pad_start(&format!("{} ± {}", fmt(mean(&xs), 1), fmt(stddev(&xs), 1)), col_width)
+                    pad_start(
+                        &format!("{} ± {}", fmt(mean(&xs), 1), fmt(stddev(&xs), 1)),
+                        col_width,
+                    )
                 }
                 Column::Single(_, single) => pad_start(&fmt(extract(single), 1), col_width),
             })

@@ -38,9 +38,7 @@ use crate::des::entity_routing::output_routing_policy::OutputRoutingPolicy;
 use crate::des::entity_sink::sink::EntitySink;
 use crate::des::entity_source::source::EntitySource;
 use crate::des::r#abstract::r#abstract::StationaryEntity;
-use crate::des::random_variables::rv::{
-    ExponentialRandomVariable, RandomVariable,
-};
+use crate::des::random_variables::rv::{ExponentialRandomVariable, RandomVariable};
 use crate::des::shared::capabilities::SeededRandom;
 use crate::des::shared::precision::{bgn, Decimal};
 use crate::des::visual::visual_node::{VisualNode, VisualNodeArgs};
@@ -90,7 +88,11 @@ impl SeedGen {
 
 /// `new ExponentialRandomVariable({lambda, timeStep})`.
 fn exp_rv(lambda: Decimal, time_step: Decimal, seeds: &mut SeedGen) -> Box<dyn RandomVariable> {
-    Box::new(ExponentialRandomVariable::new(lambda, time_step, seeds.next_rng()))
+    Box::new(ExponentialRandomVariable::new(
+        lambda,
+        time_step,
+        seeds.next_rng(),
+    ))
 }
 
 fn visual<E: StationaryEntity + 'static>(label: &str, entity: E) -> VisualNode {
@@ -107,7 +109,11 @@ pub fn get_entities(step_size: Decimal) -> Vec<(String, VisualNode)> {
     let mut seeds = SeedGen(0);
 
     // A: source, exponential inter-arrival, never turns off (turnOffAfterCount: -1).
-    let a = EntitySource::new("A".to_string(), exp_rv(bgn(5.0 / 100.0), step_size, &mut seeds), -1);
+    let a = EntitySource::new(
+        "A".to_string(),
+        exp_rv(bgn(5.0 / 100.0), step_size, &mut seeds),
+        -1,
+    );
 
     // B / C / D: exponential service-time processors (lambda = 1/10).
     let b = EntityProcessor::new(

@@ -501,7 +501,8 @@ impl NetworkNodeStation {
             final_queue: self.input_queue.len() as f64,
             max_queue: self.max_queue as f64,
             avg_queue: self.queue_area / total_ms.max(1.0),
-            mean_queue_delay_ms: self.total_queue_delay_ms / (self.processed_from_queue.max(1) as f64),
+            mean_queue_delay_ms: self.total_queue_delay_ms
+                / (self.processed_from_queue.max(1) as f64),
             max_queue_delay_ms: self.max_queue_delay_ms,
         }
     }
@@ -640,7 +641,8 @@ impl NetworkLinkStation {
             avg_in_flight: self.occupancy_area / total_ms.max(1.0),
             mean_queue_delay_ms: self.total_queue_delay_ms / (self.enqueued_packets.max(1) as f64),
             max_queue_delay_ms: self.max_queue_delay_ms,
-            mean_time_on_link_ms: self.total_time_on_link_ms / (self.enqueued_packets.max(1) as f64),
+            mean_time_on_link_ms: self.total_time_on_link_ms
+                / (self.enqueued_packets.max(1) as f64),
             max_time_on_link_ms: self.max_time_on_link_ms,
             total_cost: self.total_cost,
         }
@@ -712,11 +714,14 @@ impl ComputerNetworkStation {
         for l in &p.links {
             links.insert(l.id.clone(), NetworkLinkStation::new(l.clone()));
             link_order.push(l.id.clone());
-            topo_outgoing.entry(l.from.clone()).or_default().push(RouteEdge {
-                link_id: l.id.clone(),
-                to: l.to.clone(),
-                weight: link_weight(l, metric),
-            });
+            topo_outgoing
+                .entry(l.from.clone())
+                .or_default()
+                .push(RouteEdge {
+                    link_id: l.id.clone(),
+                    to: l.to.clone(),
+                    weight: link_weight(l, metric),
+                });
         }
 
         let flows: Vec<FlowRuntimeState> = p
@@ -755,7 +760,8 @@ impl ComputerNetworkStation {
             "computer-network.conservation",
             |st: &dyn DESStation| {
                 let s = downcast(st);
-                s.generated_packets() as usize == s.delivered.len() + s.dropped.len() + s.active_packets()
+                s.generated_packets() as usize
+                    == s.delivered.len() + s.dropped.len() + s.active_packets()
             },
             Some("generated = delivered + dropped + active".to_string()),
             Some(Box::new(|st: &dyn DESStation| {
@@ -798,7 +804,8 @@ impl ComputerNetworkStation {
             .collect();
         latencies.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let total_delivered_bytes: f64 = self.delivered.iter().map(|p| p.size_bytes).sum();
-        let total_delivered_payload_bytes: f64 = self.delivered.iter().map(|p| p.payload_bytes).sum();
+        let total_delivered_payload_bytes: f64 =
+            self.delivered.iter().map(|p| p.payload_bytes).sum();
         let total_generated_bytes: f64 = self
             .flows
             .iter()
@@ -833,14 +840,27 @@ impl ComputerNetworkStation {
             p95_latency_ms: percentile(&latencies, 0.95),
             total_cost,
             total_simulated_ms: self.time_ms,
-            routing_metric: self.p.routing_metric.unwrap_or(NetworkRoutingMetric::Latency),
+            routing_metric: self
+                .p
+                .routing_metric
+                .unwrap_or(NetworkRoutingMetric::Latency),
             flow_stats,
             node_stats,
             link_stats,
             bottlenecks,
             time_series: self.time_series.clone(),
-            delivered_packets_trace: self.delivered.iter().take(200).map(|p| p.snapshot()).collect(),
-            dropped_packets_trace: self.dropped.iter().take(200).map(|p| p.snapshot()).collect(),
+            delivered_packets_trace: self
+                .delivered
+                .iter()
+                .take(200)
+                .map(|p| p.snapshot())
+                .collect(),
+            dropped_packets_trace: self
+                .dropped
+                .iter()
+                .take(200)
+                .map(|p| p.snapshot())
+                .collect(),
             invariant_violations: self.invariant_violations.clone(),
         }
     }
@@ -865,7 +885,11 @@ impl ComputerNetworkStation {
                                 None
                             } else {
                                 node.dropped_packets += 1;
-                                Some((packet, PacketDropReason::NodeQueueOverflow, node.spec.id.clone()))
+                                Some((
+                                    packet,
+                                    PacketDropReason::NodeQueueOverflow,
+                                    node.spec.id.clone(),
+                                ))
                             }
                         }
                         None => Some((packet, PacketDropReason::NoRoute, to.clone())),
@@ -936,7 +960,10 @@ impl ComputerNetworkStation {
                     .map(|n| n.can_accept_packet(0))
                     .unwrap_or(false);
                 if can {
-                    self.nodes.get_mut(&spec.source).unwrap().receive_packet(packet, time_ms);
+                    self.nodes
+                        .get_mut(&spec.source)
+                        .unwrap()
+                        .receive_packet(packet, time_ms);
                 } else {
                     self.flows[fi].dropped_at_source += 1;
                     if let Some(source) = self.nodes.get_mut(&spec.source) {
@@ -987,14 +1014,32 @@ impl ComputerNetworkStation {
                 }
                 if packet.hops.len() as i64 > packet.ttl_hops {
                     node.dropped_packets += 1;
-                    drop_into(dropped, packet, PacketDropReason::TtlExpired, &node_id, time_ms);
+                    drop_into(
+                        dropped,
+                        packet,
+                        PacketDropReason::TtlExpired,
+                        &node_id,
+                        time_ms,
+                    );
                     continue;
                 }
-                let link_id = next_link(node_id_set, topo_outgoing, route_cache, &node_id, &packet.destination);
+                let link_id = next_link(
+                    node_id_set,
+                    topo_outgoing,
+                    route_cache,
+                    &node_id,
+                    &packet.destination,
+                );
                 match link_id {
                     None => {
                         node.dropped_packets += 1;
-                        drop_into(dropped, packet, PacketDropReason::NoRoute, &node_id, time_ms);
+                        drop_into(
+                            dropped,
+                            packet,
+                            PacketDropReason::NoRoute,
+                            &node_id,
+                            time_ms,
+                        );
                     }
                     Some(lid) => {
                         let link = links.get_mut(&lid).unwrap();
@@ -1002,7 +1047,13 @@ impl ComputerNetworkStation {
                             node.dropped_packets += 1;
                             link.dropped_packets += 1;
                             let link_id = link.spec.id.clone();
-                            drop_into(dropped, packet, PacketDropReason::LinkQueueOverflow, &link_id, time_ms);
+                            drop_into(
+                                dropped,
+                                packet,
+                                PacketDropReason::LinkQueueOverflow,
+                                &link_id,
+                                time_ms,
+                            );
                         } else {
                             node.forwarded_packets += 1;
                             link.enqueue_packet(packet, time_ms);
@@ -1019,7 +1070,13 @@ impl ComputerNetworkStation {
     }
 
     fn drop(&mut self, packet: NetworkPacket, reason: PacketDropReason, at_station_id: &str) {
-        drop_into(&mut self.dropped, packet, reason, at_station_id, self.time_ms);
+        drop_into(
+            &mut self.dropped,
+            packet,
+            reason,
+            at_station_id,
+            self.time_ms,
+        );
     }
 
     fn build_flow_stats(&self) -> Vec<NetworkFlowStats> {
@@ -1028,10 +1085,16 @@ impl ComputerNetworkStation {
             .map(|flow| {
                 let spec = &flow.spec;
                 let protocol = protocol_profile(spec.protocol).protocol;
-                let delivered: Vec<&NetworkPacket> =
-                    self.delivered.iter().filter(|p| p.flow_id == spec.id).collect();
-                let dropped: Vec<&NetworkPacket> =
-                    self.dropped.iter().filter(|p| p.flow_id == spec.id).collect();
+                let delivered: Vec<&NetworkPacket> = self
+                    .delivered
+                    .iter()
+                    .filter(|p| p.flow_id == spec.id)
+                    .collect();
+                let dropped: Vec<&NetworkPacket> = self
+                    .dropped
+                    .iter()
+                    .filter(|p| p.flow_id == spec.id)
+                    .collect();
                 let mut latencies: Vec<f64> = delivered
                     .iter()
                     .map(|p| p.delivered_at_ms.unwrap_or(self.time_ms) - p.created_at_ms)
@@ -1053,7 +1116,9 @@ impl ComputerNetworkStation {
                     delivery_ratio: delivered.len() as f64 / (flow.generated.max(1) as f64),
                     generated_bytes: flow.generated as f64 * effective_packet_size_bytes(spec),
                     delivered_bytes,
-                    offered_load_mbps: flow.generated as f64 * effective_packet_size_bytes(spec) * 8.0
+                    offered_load_mbps: flow.generated as f64
+                        * effective_packet_size_bytes(spec)
+                        * 8.0
                         / simulated_sec
                         / 1e6,
                     throughput_mbps: delivered_bytes * 8.0 / simulated_sec / 1e6,
@@ -1101,7 +1166,10 @@ impl ComputerNetworkStation {
     fn record_stats(&mut self) {
         let active = self.active_packets();
         self.max_active_packets = self.max_active_packets.max(active);
-        let sample_every_ms = self.p.sample_every_ms.unwrap_or_else(|| self.p.dt_ms.max(100.0));
+        let sample_every_ms = self
+            .p
+            .sample_every_ms
+            .unwrap_or_else(|| self.p.dt_ms.max(100.0));
         if self.time_ms + 1e-9 < self.next_sample_at_ms {
             return;
         }
@@ -1194,7 +1262,12 @@ fn downcast(st: &dyn DESStation) -> &ComputerNetworkStation {
 }
 
 /// Mark `packet` delivered and record it (TS `deliver`).
-fn deliver_packet(delivered: &mut Vec<NetworkPacket>, mut packet: NetworkPacket, node_id: &str, time_ms: f64) {
+fn deliver_packet(
+    delivered: &mut Vec<NetworkPacket>,
+    mut packet: NetworkPacket,
+    node_id: &str,
+    time_ms: f64,
+) {
     packet.delivered_at_ms = Some(time_ms);
     packet.current_node_id = Some(node_id.to_string());
     packet.current_link_id = None;
@@ -1247,8 +1320,10 @@ fn shortest_next_link(
     if source == destination {
         return None;
     }
-    let mut dist: HashMap<String, f64> =
-        node_id_set.iter().map(|id| (id.clone(), f64::INFINITY)).collect();
+    let mut dist: HashMap<String, f64> = node_id_set
+        .iter()
+        .map(|id| (id.clone(), f64::INFINITY))
+        .collect();
     let mut prev_node: HashMap<String, String> = HashMap::new();
     let mut prev_link: HashMap<String, String> = HashMap::new();
     let mut unsettled: HashSet<String> = node_id_set.clone();
@@ -1320,70 +1395,205 @@ pub fn validate_computer_network_problem(p: &ComputerNetworkProblem) -> Check {
     let mut node_ids: HashSet<String> = HashSet::new();
     let mut node_by_id: HashMap<String, NetworkNodeSpec> = HashMap::new();
     for n in &p.nodes {
-        Preconditions::check(MODEL, &format!("node {}", n.id), "have a non-empty id", !n.id.is_empty(), Some(n.id.clone()))?;
-        Preconditions::check(MODEL, &format!("node {}", n.id), "be unique", !node_ids.contains(&n.id), Some(n.id.clone()))?;
+        Preconditions::check(
+            MODEL,
+            &format!("node {}", n.id),
+            "have a non-empty id",
+            !n.id.is_empty(),
+            Some(n.id.clone()),
+        )?;
+        Preconditions::check(
+            MODEL,
+            &format!("node {}", n.id),
+            "be unique",
+            !node_ids.contains(&n.id),
+            Some(n.id.clone()),
+        )?;
         node_ids.insert(n.id.clone());
         node_by_id.insert(n.id.clone(), n.clone());
         if let Some(r) = n.forwarding_rate_pps {
             Preconditions::positive(MODEL, &format!("{}.forwardingRatePps", n.id), r)?;
         }
         if let Some(q) = n.queue_limit_packets {
-            Preconditions::integer_in_range(MODEL, &format!("{}.queueLimitPackets", n.id), q as f64, 1.0, 1e7)?;
+            Preconditions::integer_in_range(
+                MODEL,
+                &format!("{}.queueLimitPackets", n.id),
+                q as f64,
+                1.0,
+                1e7,
+            )?;
         }
     }
 
     let mut link_ids: HashSet<String> = HashSet::new();
     for l in &p.links {
-        Preconditions::check(MODEL, &format!("link {}", l.id), "have a non-empty id", !l.id.is_empty(), Some(l.id.clone()))?;
-        Preconditions::check(MODEL, &format!("link {}", l.id), "be unique", !link_ids.contains(&l.id), Some(l.id.clone()))?;
+        Preconditions::check(
+            MODEL,
+            &format!("link {}", l.id),
+            "have a non-empty id",
+            !l.id.is_empty(),
+            Some(l.id.clone()),
+        )?;
+        Preconditions::check(
+            MODEL,
+            &format!("link {}", l.id),
+            "be unique",
+            !link_ids.contains(&l.id),
+            Some(l.id.clone()),
+        )?;
         link_ids.insert(l.id.clone());
-        Preconditions::check(MODEL, &format!("{}.from", l.id), "reference a node", node_ids.contains(&l.from), Some(l.from.clone()))?;
-        Preconditions::check(MODEL, &format!("{}.to", l.id), "reference a node", node_ids.contains(&l.to), Some(l.to.clone()))?;
-        Preconditions::check(MODEL, &format!("{}.from != to", l.id), "hold", l.from != l.to, None)?;
+        Preconditions::check(
+            MODEL,
+            &format!("{}.from", l.id),
+            "reference a node",
+            node_ids.contains(&l.from),
+            Some(l.from.clone()),
+        )?;
+        Preconditions::check(
+            MODEL,
+            &format!("{}.to", l.id),
+            "reference a node",
+            node_ids.contains(&l.to),
+            Some(l.to.clone()),
+        )?;
+        Preconditions::check(
+            MODEL,
+            &format!("{}.from != to", l.id),
+            "hold",
+            l.from != l.to,
+            None,
+        )?;
         Preconditions::positive(MODEL, &format!("{}.bandwidthMbps", l.id), l.bandwidth_mbps)?;
         Preconditions::non_negative(MODEL, &format!("{}.latencyMs", l.id), l.latency_ms)?;
         if let Some(c) = l.cost_per_mb {
             Preconditions::non_negative(MODEL, &format!("{}.costPerMb", l.id), c)?;
         }
         if let Some(q) = l.queue_limit_packets {
-            Preconditions::integer_in_range(MODEL, &format!("{}.queueLimitPackets", l.id), q as f64, 1.0, 1e7)?;
+            Preconditions::integer_in_range(
+                MODEL,
+                &format!("{}.queueLimitPackets", l.id),
+                q as f64,
+                1.0,
+                1e7,
+            )?;
         }
     }
 
     let normalized = normalize_computer_network_problem(p);
     let mut outgoing: HashMap<String, Vec<String>> = HashMap::new();
     for l in &normalized.links {
-        outgoing.entry(l.from.clone()).or_default().push(l.to.clone());
+        outgoing
+            .entry(l.from.clone())
+            .or_default()
+            .push(l.to.clone());
     }
     let mut flow_ids: HashSet<String> = HashSet::new();
     for f in &p.flows {
-        Preconditions::check(MODEL, &format!("flow {}", f.id), "have a non-empty id", !f.id.is_empty(), Some(f.id.clone()))?;
-        Preconditions::check(MODEL, &format!("flow {}", f.id), "be unique", !flow_ids.contains(&f.id), Some(f.id.clone()))?;
+        Preconditions::check(
+            MODEL,
+            &format!("flow {}", f.id),
+            "have a non-empty id",
+            !f.id.is_empty(),
+            Some(f.id.clone()),
+        )?;
+        Preconditions::check(
+            MODEL,
+            &format!("flow {}", f.id),
+            "be unique",
+            !flow_ids.contains(&f.id),
+            Some(f.id.clone()),
+        )?;
         flow_ids.insert(f.id.clone());
-        Preconditions::check(MODEL, &format!("{}.source", f.id), "reference a node", node_ids.contains(&f.source), Some(f.source.clone()))?;
-        Preconditions::check(MODEL, &format!("{}.destination", f.id), "reference a node", node_ids.contains(&f.destination), Some(f.destination.clone()))?;
-        Preconditions::check(MODEL, &format!("{}.source", f.id), "reference a host source entity", node_by_id.get(&f.source).map(|n| n.kind) == Some(NetworkNodeKind::Host), Some(f.source.clone()))?;
-        Preconditions::check(MODEL, &format!("{}.destination", f.id), "reference a host sink entity", node_by_id.get(&f.destination).map(|n| n.kind) == Some(NetworkNodeKind::Host), Some(f.destination.clone()))?;
-        Preconditions::check(MODEL, &format!("{}.source != destination", f.id), "hold", f.source != f.destination, None)?;
+        Preconditions::check(
+            MODEL,
+            &format!("{}.source", f.id),
+            "reference a node",
+            node_ids.contains(&f.source),
+            Some(f.source.clone()),
+        )?;
+        Preconditions::check(
+            MODEL,
+            &format!("{}.destination", f.id),
+            "reference a node",
+            node_ids.contains(&f.destination),
+            Some(f.destination.clone()),
+        )?;
+        Preconditions::check(
+            MODEL,
+            &format!("{}.source", f.id),
+            "reference a host source entity",
+            node_by_id.get(&f.source).map(|n| n.kind) == Some(NetworkNodeKind::Host),
+            Some(f.source.clone()),
+        )?;
+        Preconditions::check(
+            MODEL,
+            &format!("{}.destination", f.id),
+            "reference a host sink entity",
+            node_by_id.get(&f.destination).map(|n| n.kind) == Some(NetworkNodeKind::Host),
+            Some(f.destination.clone()),
+        )?;
+        Preconditions::check(
+            MODEL,
+            &format!("{}.source != destination", f.id),
+            "hold",
+            f.source != f.destination,
+            None,
+        )?;
         Preconditions::non_negative(MODEL, &format!("{}.ratePps", f.id), f.rate_pps)?;
-        Preconditions::integer_in_range(MODEL, &format!("{}.packetSizeBytes", f.id), f.packet_size_bytes, 1.0, 1e9)?;
+        Preconditions::integer_in_range(
+            MODEL,
+            &format!("{}.packetSizeBytes", f.id),
+            f.packet_size_bytes,
+            1.0,
+            1e9,
+        )?;
         if let Some(s) = f.start_ms {
             Preconditions::non_negative(MODEL, &format!("{}.startMs", f.id), s)?;
-            Preconditions::check(MODEL, &format!("{}.startMs", f.id), "fall within durationMs", s <= p.duration_ms, None)?;
+            Preconditions::check(
+                MODEL,
+                &format!("{}.startMs", f.id),
+                "fall within durationMs",
+                s <= p.duration_ms,
+                None,
+            )?;
         }
         if let Some(e) = f.end_ms {
             Preconditions::non_negative(MODEL, &format!("{}.endMs", f.id), e)?;
         }
         if let (Some(s), Some(e)) = (f.start_ms, f.end_ms) {
-            Preconditions::check(MODEL, &format!("{}.startMs <= endMs", f.id), "hold", s <= e, None)?;
+            Preconditions::check(
+                MODEL,
+                &format!("{}.startMs <= endMs", f.id),
+                "hold",
+                s <= e,
+                None,
+            )?;
         }
         if let Some(mp) = f.max_packets {
-            Preconditions::integer_in_range(MODEL, &format!("{}.maxPackets", f.id), mp as f64, 0.0, 1e9)?;
+            Preconditions::integer_in_range(
+                MODEL,
+                &format!("{}.maxPackets", f.id),
+                mp as f64,
+                0.0,
+                1e9,
+            )?;
         }
         if let Some(t) = f.ttl_hops {
-            Preconditions::integer_in_range(MODEL, &format!("{}.ttlHops", f.id), t as f64, 1.0, 1e6)?;
+            Preconditions::integer_in_range(
+                MODEL,
+                &format!("{}.ttlHops", f.id),
+                t as f64,
+                1.0,
+                1e6,
+            )?;
         }
-        Preconditions::check(MODEL, &format!("{}.route", f.id), "exist in directed link graph", has_directed_path(&f.source, &f.destination, &outgoing), None)?;
+        Preconditions::check(
+            MODEL,
+            &format!("{}.route", f.id),
+            "exist in directed link graph",
+            has_directed_path(&f.source, &f.destination, &outgoing),
+            None,
+        )?;
     }
     Ok(())
 }
@@ -1452,10 +1662,26 @@ struct ProtocolProfile {
 
 fn protocol_profile(protocol: Option<NetworkProtocol>) -> ProtocolProfile {
     match protocol.unwrap_or(NetworkProtocol::Raw) {
-        NetworkProtocol::Http => ProtocolProfile { protocol: NetworkProtocol::Http, overhead_bytes: 640.0, startup_delay_ms: 40.0 },
-        NetworkProtocol::Tcp => ProtocolProfile { protocol: NetworkProtocol::Tcp, overhead_bytes: 40.0, startup_delay_ms: 20.0 },
-        NetworkProtocol::Udp => ProtocolProfile { protocol: NetworkProtocol::Udp, overhead_bytes: 28.0, startup_delay_ms: 0.0 },
-        NetworkProtocol::Raw => ProtocolProfile { protocol: NetworkProtocol::Raw, overhead_bytes: 0.0, startup_delay_ms: 0.0 },
+        NetworkProtocol::Http => ProtocolProfile {
+            protocol: NetworkProtocol::Http,
+            overhead_bytes: 640.0,
+            startup_delay_ms: 40.0,
+        },
+        NetworkProtocol::Tcp => ProtocolProfile {
+            protocol: NetworkProtocol::Tcp,
+            overhead_bytes: 40.0,
+            startup_delay_ms: 20.0,
+        },
+        NetworkProtocol::Udp => ProtocolProfile {
+            protocol: NetworkProtocol::Udp,
+            overhead_bytes: 28.0,
+            startup_delay_ms: 0.0,
+        },
+        NetworkProtocol::Raw => ProtocolProfile {
+            protocol: NetworkProtocol::Raw,
+            overhead_bytes: 0.0,
+            startup_delay_ms: 0.0,
+        },
     }
 }
 
@@ -1471,13 +1697,20 @@ fn identify_bottlenecks(
     for l in link_stats {
         let queue_pressure = l.avg_in_flight / l.queue_limit_packets.max(1.0);
         let delay_pressure = 1.0_f64.min(l.mean_queue_delay_ms / 1000.0);
-        let drop_pressure = 1.0_f64.min(l.dropped_packets / (l.enqueued_packets + l.dropped_packets).max(1.0));
+        let drop_pressure =
+            1.0_f64.min(l.dropped_packets / (l.enqueued_packets + l.dropped_packets).max(1.0));
         let score = l.utilization + queue_pressure + delay_pressure + drop_pressure;
         reports.push(NetworkBottleneckReport {
             id: l.id.clone(),
             kind: "link".to_string(),
             score,
-            reason: bottleneck_reason(Some(l.utilization), l.avg_in_flight, l.max_in_flight, l.dropped_packets, l.mean_queue_delay_ms),
+            reason: bottleneck_reason(
+                Some(l.utilization),
+                l.avg_in_flight,
+                l.max_in_flight,
+                l.dropped_packets,
+                l.mean_queue_delay_ms,
+            ),
             utilization: Some(l.utilization),
             avg_queue: l.avg_in_flight,
             max_queue: l.max_in_flight,
@@ -1488,14 +1721,25 @@ fn identify_bottlenecks(
     for n in node_stats {
         let queue_pressure = n.avg_queue / n.queue_limit_packets.max(1.0);
         let delay_pressure = 1.0_f64.min(n.mean_queue_delay_ms / 1000.0);
-        let drop_pressure = 1.0_f64.min(n.dropped_packets / (n.received_packets + n.dropped_packets).max(1.0));
-        let service_pressure = if n.forwarded_packets > 0.0 && n.avg_queue > 0.0 { 0.25 } else { 0.0 };
+        let drop_pressure =
+            1.0_f64.min(n.dropped_packets / (n.received_packets + n.dropped_packets).max(1.0));
+        let service_pressure = if n.forwarded_packets > 0.0 && n.avg_queue > 0.0 {
+            0.25
+        } else {
+            0.0
+        };
         let score = queue_pressure + delay_pressure + drop_pressure + service_pressure;
         reports.push(NetworkBottleneckReport {
             id: n.id.clone(),
             kind: "node".to_string(),
             score,
-            reason: bottleneck_reason(None, n.avg_queue, n.max_queue, n.dropped_packets, n.mean_queue_delay_ms),
+            reason: bottleneck_reason(
+                None,
+                n.avg_queue,
+                n.max_queue,
+                n.dropped_packets,
+                n.mean_queue_delay_ms,
+            ),
             utilization: None,
             avg_queue: n.avg_queue,
             max_queue: n.max_queue,
@@ -1621,7 +1865,15 @@ fn node(id: &str, kind: NetworkNodeKind, fwd: f64, qlim: usize) -> NetworkNodeSp
 }
 
 #[allow(clippy::too_many_arguments)]
-fn link(id: &str, from: &str, to: &str, bw: f64, lat: f64, cost: f64, qlim: usize) -> NetworkLinkSpec {
+fn link(
+    id: &str,
+    from: &str,
+    to: &str,
+    bw: f64,
+    lat: f64,
+    cost: f64,
+    qlim: usize,
+) -> NetworkLinkSpec {
     NetworkLinkSpec {
         id: id.to_string(),
         from: from.to_string(),
@@ -1644,7 +1896,15 @@ pub fn build_default_computer_network_problem() -> ComputerNetworkProblem {
             node("server", NetworkNodeKind::Host, 4000.0, 512),
         ],
         links: vec![
-            link("client-a-edge", "client-a", "edge-1", 100.0, 1.0, 0.001, 128),
+            link(
+                "client-a-edge",
+                "client-a",
+                "edge-1",
+                100.0,
+                1.0,
+                0.001,
+                128,
+            ),
             link("client-b-edge", "client-b", "edge-1", 50.0, 2.0, 0.001, 128),
             link("edge-core", "edge-1", "core-1", 25.0, 8.0, 0.004, 96),
             link("core-server", "core-1", "server", 100.0, 3.0, 0.002, 128),
@@ -1695,9 +1955,25 @@ pub fn build_bottleneck_computer_network_problem() -> ComputerNetworkProblem {
         ],
         links: vec![
             link("web-edge", "web-client", "edge", 100.0, 1.0, 0.001, 256),
-            link("telemetry-edge", "telemetry-client", "edge", 100.0, 1.0, 0.001, 256),
+            link(
+                "telemetry-edge",
+                "telemetry-client",
+                "edge",
+                100.0,
+                1.0,
+                0.001,
+                256,
+            ),
             link("edge-wan", "edge", "wan-router", 5.0, 25.0, 0.010, 96),
-            link("wan-api", "wan-router", "api-server", 100.0, 4.0, 0.002, 256),
+            link(
+                "wan-api",
+                "wan-router",
+                "api-server",
+                100.0,
+                4.0,
+                0.002,
+                256,
+            ),
         ],
         flows: vec![
             NetworkFlowSpec {

@@ -50,8 +50,10 @@ pub enum GridLocalizationObservation {
 }
 
 /// Observation set, parallel to the spec's `[P(no), P(yes)]` rows.
-const OBSERVATIONS: [GridLocalizationObservation; 2] =
-    [GridLocalizationObservation::No, GridLocalizationObservation::Yes];
+const OBSERVATIONS: [GridLocalizationObservation; 2] = [
+    GridLocalizationObservation::No,
+    GridLocalizationObservation::Yes,
+];
 
 /// User-facing parameters. Absent optionals fall back to the TS defaults.
 #[derive(Clone, Debug)]
@@ -206,9 +208,7 @@ fn build_grid_spec(
         let true_yes = match action.kind {
             GridLocalizationActionKind::ScanRow => y == action.y.unwrap(),
             GridLocalizationActionKind::ScanColumn => x == action.x.unwrap(),
-            GridLocalizationActionKind::Inspect => {
-                x == action.x.unwrap() && y == action.y.unwrap()
-            }
+            GridLocalizationActionKind::Inspect => x == action.x.unwrap() && y == action.y.unwrap(),
         };
         let acc = if action.kind == GridLocalizationActionKind::Inspect {
             inspect_accuracy
@@ -307,25 +307,27 @@ pub fn run_grid_localization_pomdp(params: &GridLocalizationParams) -> GridLocal
     let mut rng = mulberry32(p.seed);
     let hidden_target = p.hidden_target;
     let hidden_index = model.space.encode(&[hidden_target.0, hidden_target.1]);
-    let mut belief = DiscreteBelief::new(model.spec.states.clone(), model.spec.initial_belief.as_deref());
+    let mut belief = DiscreteBelief::new(
+        model.spec.states.clone(),
+        model.spec.initial_belief.as_deref(),
+    );
 
     // The planner takes its spec by value, so it gets a private second copy
     // (identical, since the spec is a pure function of the resolved params).
-    let planner_spec = build_grid_spec(
-        &model.space,
-        &model.actions,
-        p.scan_accuracy,
-        p.inspect_accuracy,
-        p.scan_cost,
-        p.inspect_correct_reward,
-        p.inspect_wrong_penalty,
-        p.discount,
-        model
-            .spec
-            .initial_belief
-            .clone()
-            .unwrap_or_else(|| vec![1.0 / model.space.num_states as f64; model.space.num_states]),
-    );
+    let planner_spec =
+        build_grid_spec(
+            &model.space,
+            &model.actions,
+            p.scan_accuracy,
+            p.inspect_accuracy,
+            p.scan_cost,
+            p.inspect_correct_reward,
+            p.inspect_wrong_penalty,
+            p.discount,
+            model.spec.initial_belief.clone().unwrap_or_else(|| {
+                vec![1.0 / model.space.num_states as f64; model.space.num_states]
+            }),
+        );
     let mut planner = BeliefLookaheadSolver::new(
         planner_spec,
         BeliefLookaheadOptions {
@@ -464,10 +466,22 @@ fn validate_params(params: &GridLocalizationParams) {
     }
     if let Some(ht) = &params.hidden_target {
         // The TS `lengthEq(hiddenTarget, 2)` is structural for a `(usize, usize)`.
-        Preconditions::integer_in_range(cls, "hiddenTarget.x", ht.0 as f64, 0.0, (params.width - 1) as f64)
-            .unwrap();
-        Preconditions::integer_in_range(cls, "hiddenTarget.y", ht.1 as f64, 0.0, (params.height - 1) as f64)
-            .unwrap();
+        Preconditions::integer_in_range(
+            cls,
+            "hiddenTarget.x",
+            ht.0 as f64,
+            0.0,
+            (params.width - 1) as f64,
+        )
+        .unwrap();
+        Preconditions::integer_in_range(
+            cls,
+            "hiddenTarget.y",
+            ht.1 as f64,
+            0.0,
+            (params.height - 1) as f64,
+        )
+        .unwrap();
     }
 }
 

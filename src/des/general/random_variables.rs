@@ -512,7 +512,10 @@ mod tests {
             psum += sample_poisson(&mut rng, lambda);
         }
         let pmean = psum / n as f64;
-        assert!((pmean - lambda).abs() < 0.1, "poisson mean {pmean} vs {lambda}");
+        assert!(
+            (pmean - lambda).abs() < 0.1,
+            "poisson mean {pmean} vs {lambda}"
+        );
     }
 
     #[test]

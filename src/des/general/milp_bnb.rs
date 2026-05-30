@@ -54,14 +54,12 @@ pub use crate::des::general::incremental_lp::Sense;
 // =============================================================================
 
 /// Branching rule. (TS `'most-fractional' | 'first-fractional'`.)
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[derive(Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum BranchRule {
     #[default]
     MostFractional,
     FirstFractional,
 }
-
 
 /// Direction a branch constraint was added in. (TS `'le' | 'ge'`.)
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -360,7 +358,11 @@ impl MILPBnBStation {
                     if st.is_finished() {
                         "finished".to_string()
                     } else {
-                        format!("nodesProcessed={}/{}", st.get_nodes_processed(), st.max_nodes_cap())
+                        format!(
+                            "nodesProcessed={}/{}",
+                            st.get_nodes_processed(),
+                            st.max_nodes_cap()
+                        )
                     }
                 })),
                 Some("milp-bnb-intrinsic".to_string()),
@@ -435,7 +437,8 @@ impl MILPBnBStation {
             self.current_trail.pop();
         }
         for c in &target[lca_len..] {
-            self.lp.apply_add_constraint(&c.coefs, c.rhs, Some(c.name.clone()));
+            self.lp
+                .apply_add_constraint(&c.coefs, c.rhs, Some(c.name.clone()));
         }
         self.current_trail = target.to_vec();
     }
@@ -518,9 +521,21 @@ impl TreeSearchStation<MILPNode> for MILPBnBStation {
             self.trace.push(ev);
             self.node_evals.insert(
                 node.node_id,
-                NodeEvalData { lp_status: LpStatus::Infeasible, lp_z: None, x: Vec::new(), fractional: Vec::new() },
+                NodeEvalData {
+                    lp_status: LpStatus::Infeasible,
+                    lp_z: None,
+                    x: Vec::new(),
+                    fractional: Vec::new(),
+                },
             );
-            return NodeEvaluation::new(if maximise { f64::NEG_INFINITY } else { f64::INFINITY }, true);
+            return NodeEvaluation::new(
+                if maximise {
+                    f64::NEG_INFINITY
+                } else {
+                    f64::INFINITY
+                },
+                true,
+            );
         }
         if self.lp.status == SolverStatus::Unbounded {
             ev.pruned = true;
@@ -531,9 +546,21 @@ impl TreeSearchStation<MILPNode> for MILPBnBStation {
             self.trace.push(ev);
             self.node_evals.insert(
                 node.node_id,
-                NodeEvalData { lp_status: LpStatus::Unbounded, lp_z: None, x: Vec::new(), fractional: Vec::new() },
+                NodeEvalData {
+                    lp_status: LpStatus::Unbounded,
+                    lp_z: None,
+                    x: Vec::new(),
+                    fractional: Vec::new(),
+                },
             );
-            return NodeEvaluation::new(if maximise { f64::INFINITY } else { f64::NEG_INFINITY }, true);
+            return NodeEvaluation::new(
+                if maximise {
+                    f64::INFINITY
+                } else {
+                    f64::NEG_INFINITY
+                },
+                true,
+            );
         }
 
         let lp_z = self.lp.get_z();
@@ -567,7 +594,10 @@ impl TreeSearchStation<MILPNode> for MILPBnBStation {
 
     fn expand(&mut self, node: &MILPNode, ev: &NodeEvaluation) -> Vec<MILPNode> {
         let (x, fractionals) = {
-            let e = self.node_evals.get(&node.node_id).expect("expand on an evaluated node");
+            let e = self
+                .node_evals
+                .get(&node.node_id)
+                .expect("expand on an evaluated node");
             (e.x.clone(), e.fractional.clone())
         };
         let branch_on = pick_branch_var(&x, &fractionals, self.branch_rule, &mut self.branch_rng);
@@ -576,7 +606,11 @@ impl TreeSearchStation<MILPNode> for MILPBnBStation {
         let hi = xv.ceil();
 
         let frac10: Vec<usize> = fractionals.iter().take(10).copied().collect();
-        let last_is_this = self.trace.last().map(|e| e.node_id == node.node_id).unwrap_or(false);
+        let last_is_this = self
+            .trace
+            .last()
+            .map(|e| e.node_id == node.node_id)
+            .unwrap_or(false);
         if self.verbose {
             if last_is_this {
                 eprintln!(
@@ -614,7 +648,11 @@ impl TreeSearchStation<MILPNode> for MILPBnBStation {
         coefs_ge[branch_on] = -1.0;
 
         let mut left_trail = node.trail.clone();
-        left_trail.push(MILPBranch { coefs: coefs_le, rhs: lo, name: format!("x{branch_on}≤{lo}") });
+        left_trail.push(MILPBranch {
+            coefs: coefs_le,
+            rhs: lo,
+            name: format!("x{branch_on}≤{lo}"),
+        });
         let left = MILPNode {
             node_id: self.node_counter,
             parent_id: Some(node.node_id),
@@ -627,7 +665,11 @@ impl TreeSearchStation<MILPNode> for MILPBnBStation {
         self.node_counter += 1;
 
         let mut right_trail = node.trail.clone();
-        right_trail.push(MILPBranch { coefs: coefs_ge, rhs: -hi, name: format!("x{branch_on}≥{hi}") });
+        right_trail.push(MILPBranch {
+            coefs: coefs_ge,
+            rhs: -hi,
+            name: format!("x{branch_on}≥{hi}"),
+        });
         let right = MILPNode {
             node_id: self.node_counter,
             parent_id: Some(node.node_id),
@@ -653,7 +695,11 @@ impl TreeSearchStation<MILPNode> for MILPBnBStation {
             }
         }
         let (lp_status, lp_z, frac) = match self.node_evals.get(&node.node_id) {
-            Some(e) => (e.lp_status, e.lp_z, e.fractional.iter().take(10).copied().collect()),
+            Some(e) => (
+                e.lp_status,
+                e.lp_z,
+                e.fractional.iter().take(10).copied().collect(),
+            ),
             None => (LpStatus::Optimal, None, Vec::new()),
         };
         self.trace.push(NodeEvent {
@@ -683,7 +729,10 @@ impl TreeSearchStation<MILPNode> for MILPBnBStation {
     }
 
     fn current_best_bound(&self) -> f64 {
-        if self.stack.is_empty() && self.root_bound.is_some() && self.search.incumbent_value.is_finite() {
+        if self.stack.is_empty()
+            && self.root_bound.is_some()
+            && self.search.incumbent_value.is_finite()
+        {
             // Fully explored — the proven bound is the incumbent itself.
             return self.search.incumbent_value;
         }
@@ -705,13 +754,20 @@ pub fn solve_milp(p: &MILPProblem, opts: MILPSolveOptions) -> MILPSolution {
         verbose: opts.verbose.unwrap_or(false),
         initial_incumbent_z: opts
             .initial_incumbent_z
-            .unwrap_or(if p.sense == Sense::Max { f64::NEG_INFINITY } else { f64::INFINITY }),
+            .unwrap_or(if p.sense == Sense::Max {
+                f64::NEG_INFINITY
+            } else {
+                f64::INFINITY
+            }),
         branch_seed: opts.branch_seed.unwrap_or(1),
     };
     validate_problem(p);
 
     let station = Rc::new(RefCell::new(MILPBnBStation::new(p, filled)));
-    run_iterative_des(vec![station.clone() as StationRef], IterativeRunOptions::default());
+    run_iterative_des(
+        vec![station.clone() as StationRef],
+        IterativeRunOptions::default(),
+    );
 
     let st = station.borrow();
     let nodes = st.get_nodes_processed();
@@ -729,14 +785,22 @@ pub fn solve_milp(p: &MILPProblem, opts: MILPSolveOptions) -> MILPSolution {
     };
 
     let z = if !has_incumbent {
-        if p.sense == Sense::Max { f64::NEG_INFINITY } else { f64::INFINITY }
+        if p.sense == Sense::Max {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        }
     } else {
         st.get_incumbent_value()
     };
     let final_best_bound = if is_optimal {
         z
     } else {
-        st.root_bound.unwrap_or(if p.sense == Sense::Max { f64::INFINITY } else { f64::NEG_INFINITY })
+        st.root_bound.unwrap_or(if p.sense == Sense::Max {
+            f64::INFINITY
+        } else {
+            f64::NEG_INFINITY
+        })
     };
     let gap = if !z.is_finite() {
         f64::INFINITY
@@ -840,7 +904,11 @@ fn format_node(ev: &NodeEvent) -> String {
     } else {
         String::new()
     };
-    let inc = if ev.incumbent_updated { "  ★ NEW INCUMBENT" } else { "" };
+    let inc = if ev.incumbent_updated {
+        "  ★ NEW INCUMBENT"
+    } else {
+        ""
+    };
     let z = match ev.lp_z {
         None => "N/A".to_string(),
         Some(v) => format!("{v:.4}"),
@@ -991,7 +1059,13 @@ mod tests {
         // items (value, weight): (60,10),(100,20),(120,30); capacity 50.
         // Best 0/1 choice is {1,2}: value 220 at weight 50.
         let p = build_knapsack_milp(vec![60.0, 100.0, 120.0], vec![10.0, 20.0, 30.0], 50.0);
-        let sol = solve_milp(&p, MILPSolveOptions { branch_seed: Some(1), ..Default::default() });
+        let sol = solve_milp(
+            &p,
+            MILPSolveOptions {
+                branch_seed: Some(1),
+                ..Default::default()
+            },
+        );
 
         assert_eq!(sol.status, MILPStatus::Optimal);
         assert!(approx(sol.z, 220.0), "z = {}", sol.z);
@@ -1016,14 +1090,24 @@ mod tests {
             var_names: None,
             con_names: None,
         };
-        let sol = solve_milp(&p, MILPSolveOptions { branch_seed: Some(3), ..Default::default() });
+        let sol = solve_milp(
+            &p,
+            MILPSolveOptions {
+                branch_seed: Some(3),
+                ..Default::default()
+            },
+        );
 
         assert_eq!(sol.status, MILPStatus::Optimal);
         assert!(approx(sol.z, 20.0), "z = {}", sol.z);
         assert!(approx(sol.x[0], 4.0), "x = {:?}", sol.x);
         assert!(approx(sol.x[1], 0.0), "y = {:?}", sol.x);
         // The relaxation bound (21) dominates the integer optimum (20).
-        assert!(sol.nodes_explored >= 2, "expected branching, nodes={}", sol.nodes_explored);
+        assert!(
+            sol.nodes_explored >= 2,
+            "expected branching, nodes={}",
+            sol.nodes_explored
+        );
     }
 
     #[test]
@@ -1031,7 +1115,10 @@ mod tests {
         let p = build_knapsack_milp(vec![60.0, 100.0, 120.0], vec![10.0, 20.0, 30.0], 50.0);
         let sol = solve_milp(
             &p,
-            MILPSolveOptions { branch_rule: Some(BranchRule::FirstFractional), ..Default::default() },
+            MILPSolveOptions {
+                branch_rule: Some(BranchRule::FirstFractional),
+                ..Default::default()
+            },
         );
         assert_eq!(sol.status, MILPStatus::Optimal);
         assert!(approx(sol.z, 220.0), "z = {}", sol.z);

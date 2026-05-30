@@ -35,8 +35,19 @@ use crate::des::general::nonlinear_optimization_models::{
 
 // ── Shared schema fragments ───────────────────────────────────────────────────
 
-fn num(min: Option<f64>, max: Option<f64>, integer: Option<bool>, default: Option<f64>) -> ParamSchema {
-    ParamSchema::Number { min, max, integer, default, description: None }
+fn num(
+    min: Option<f64>,
+    max: Option<f64>,
+    integer: Option<bool>,
+    default: Option<f64>,
+) -> ParamSchema {
+    ParamSchema::Number {
+        min,
+        max,
+        integer,
+        default,
+        description: None,
+    }
 }
 
 fn vector_schema() -> ParamSchema {
@@ -52,7 +63,10 @@ fn unconstrained_schema() -> ParamSchema {
     ParamSchema::Object {
         fields: vec![
             ("x0".to_string(), vector_schema()),
-            ("maxIter".to_string(), num(Some(1.0), None, Some(true), Some(100.0))),
+            (
+                "maxIter".to_string(),
+                num(Some(1.0), None, Some(true), Some(100.0)),
+            ),
             ("tol".to_string(), num(Some(0.0), None, None, Some(1e-8))),
         ],
         required: Some(vec![]),
@@ -84,7 +98,10 @@ fn nls_schema() -> ParamSchema {
                 },
             ),
             ("initial".to_string(), vector_schema()),
-            ("maxIter".to_string(), num(Some(1.0), None, Some(true), Some(30.0))),
+            (
+                "maxIter".to_string(),
+                num(Some(1.0), None, Some(true), Some(30.0)),
+            ),
             ("tol".to_string(), num(Some(0.0), None, None, Some(1e-8))),
             ("lambda".to_string(), num(Some(0.0), None, None, Some(0.1))),
         ],
@@ -109,34 +126,65 @@ fn js_to_exponential(x: f64, digits: usize) -> String {
 
 /// `JSON.stringify(numbers)` for a number array.
 fn json_num_array(v: &[f64]) -> String {
-    format!("[{}]", v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(","))
+    format!(
+        "[{}]",
+        v.iter()
+            .map(|x| x.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    )
 }
 
 fn unconstrained_summary(title: &str, result: &UnconstrainedOptResult) -> String {
-    let x = result.x.iter().map(|v| format!("{v:.6}")).collect::<Vec<_>>().join(", ");
+    let x = result
+        .x
+        .iter()
+        .map(|v| format!("{v:.6}"))
+        .collect::<Vec<_>>()
+        .join(", ");
     [
         title.to_string(),
         "----------------------------------------".to_string(),
-        format!("  Objective:      {}", js_to_exponential(result.objective, 3)),
+        format!(
+            "  Objective:      {}",
+            js_to_exponential(result.objective, 3)
+        ),
         format!("  x*:             [{x}]"),
-        format!("  Gradient norm:  {}", js_to_exponential(result.gradient_norm, 3)),
+        format!(
+            "  Gradient norm:  {}",
+            js_to_exponential(result.gradient_norm, 3)
+        ),
         format!("  Iterations:     {}", result.iterations),
-        format!("  Stations:       {}", result.topology.stations.join(" -> ")),
+        format!(
+            "  Stations:       {}",
+            result.topology.stations.join(" -> ")
+        ),
         format!("  Movables:       {}", result.topology.movables.join(", ")),
     ]
     .join("\n")
 }
 
 fn nls_summary(title: &str, result: &NonlinearLeastSquaresResult) -> String {
-    let params = result.params.iter().map(|v| format!("{v:.6}")).collect::<Vec<_>>().join(", ");
+    let params = result
+        .params
+        .iter()
+        .map(|v| format!("{v:.6}"))
+        .collect::<Vec<_>>()
+        .join(", ");
     [
         title.to_string(),
         "----------------------------------------".to_string(),
         format!("  SSE:            {}", js_to_exponential(result.sse, 3)),
         format!("  Params:         [{params}]"),
-        format!("  Gradient norm:  {}", js_to_exponential(result.gradient_norm, 3)),
+        format!(
+            "  Gradient norm:  {}",
+            js_to_exponential(result.gradient_norm, 3)
+        ),
         format!("  Iterations:     {}", result.iterations),
-        format!("  Stations:       {}", result.topology.stations.join(" -> ")),
+        format!(
+            "  Stations:       {}",
+            result.topology.stations.join(" -> ")
+        ),
         format!("  Movables:       {}", result.topology.movables.join(", ")),
     ]
     .join("\n")
@@ -197,10 +245,18 @@ impl DESModelRegistration<UnconstrainedOptParams, UnconstrainedOptResult> for Un
     fn schema(&self) -> ParamSchema {
         unconstrained_schema()
     }
-    fn run(&self, params: UnconstrainedOptParams, _runtime: &DESRuntimeConfig) -> UnconstrainedOptResult {
+    fn run(
+        &self,
+        params: UnconstrainedOptParams,
+        _runtime: &DESRuntimeConfig,
+    ) -> UnconstrainedOptResult {
         (self.run_fn)(params)
     }
-    fn summarize(&self, result: &UnconstrainedOptResult, _params: &UnconstrainedOptParams) -> String {
+    fn summarize(
+        &self,
+        result: &UnconstrainedOptResult,
+        _params: &UnconstrainedOptParams,
+    ) -> String {
         unconstrained_summary(self.title, result)
     }
     fn write_csv(&self, result: &UnconstrainedOptResult, csv_path: &str) {

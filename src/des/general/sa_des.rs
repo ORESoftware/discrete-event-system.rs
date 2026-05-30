@@ -45,8 +45,12 @@ use crate::des::general::des_base::single_state_optimizer::{
     SINGLE_STATE_INITIAL_CHANNEL, SINGLE_STATE_RESULT_CHANNEL,
 };
 use crate::des::general::des_base::station::{DESStation, StationCore, StationRef};
-use crate::des::general::des_base::validation::{intrinsic_check, monotonicity_validator, Monotonicity};
-use crate::des::general::genetic_tsp::{held_karp_exact, is_permutation, tour_length, InitMode, TSPInstance, Tour};
+use crate::des::general::des_base::validation::{
+    intrinsic_check, monotonicity_validator, Monotonicity,
+};
+use crate::des::general::genetic_tsp::{
+    held_karp_exact, is_permutation, tour_length, InitMode, TSPInstance, Tour,
+};
 use crate::des::general::prng::mulberry32;
 use crate::des::shared::capabilities::{RandomSource, SeededRandom};
 
@@ -78,10 +82,26 @@ impl RandomSource for SharedRng {
 /// `0` when absent.
 #[derive(Clone, Copy, Debug)]
 pub enum CoolingSchedule {
-    Geometric { t0: f64, alpha: f64, t_min: Option<f64> },
-    Logarithmic { t0: f64, t_min: Option<f64> },
-    Linear { t0: f64, rate: f64, t_min: Option<f64> },
-    ExpRestart { t0: f64, alpha: f64, period: usize, t_min: Option<f64> },
+    Geometric {
+        t0: f64,
+        alpha: f64,
+        t_min: Option<f64>,
+    },
+    Logarithmic {
+        t0: f64,
+        t_min: Option<f64>,
+    },
+    Linear {
+        t0: f64,
+        rate: f64,
+        t_min: Option<f64>,
+    },
+    ExpRestart {
+        t0: f64,
+        alpha: f64,
+        period: usize,
+        t_min: Option<f64>,
+    },
 }
 
 /// Temperature at iteration `k`. (TS `temperatureAt`.)
@@ -96,9 +116,14 @@ pub fn temperature_at(s: &CoolingSchedule, k: usize) -> f64 {
         CoolingSchedule::Linear { t0, rate, t_min } => {
             t_min.unwrap_or(0.0).max(t0 - rate * k as f64)
         }
-        CoolingSchedule::ExpRestart { t0, alpha, period, t_min } => {
-            t_min.unwrap_or(0.0).max(t0 * alpha.powf((k % period) as f64))
-        }
+        CoolingSchedule::ExpRestart {
+            t0,
+            alpha,
+            period,
+            t_min,
+        } => t_min
+            .unwrap_or(0.0)
+            .max(t0 * alpha.powf((k % period) as f64)),
     }
 }
 
@@ -165,7 +190,9 @@ pub struct TSPSAOptimizer {
 pub type TSPHillClimber = TSPSAOptimizer;
 
 fn downcast_sa(s: &dyn DESStation) -> &TSPSAOptimizer {
-    s.as_any().downcast_ref::<TSPSAOptimizer>().expect("validator received a non-TSPSAOptimizer station")
+    s.as_any()
+        .downcast_ref::<TSPSAOptimizer>()
+        .expect("validator received a non-TSPSAOptimizer station")
 }
 
 impl TSPSAOptimizer {
@@ -256,7 +283,9 @@ impl TSPSAOptimizer {
                 "sa.best-cost-nonnegative",
                 |s: &dyn DESStation| downcast_sa(s).get_best_cost() >= 0.0,
                 Some("≥ 0".to_string()),
-                Some(Box::new(|s: &dyn DESStation| format!("bestCost={}", downcast_sa(s).get_best_cost()))),
+                Some(Box::new(|s: &dyn DESStation| {
+                    format!("bestCost={}", downcast_sa(s).get_best_cost())
+                })),
                 Some("sa-intrinsic".to_string()),
                 None,
             )
@@ -286,10 +315,17 @@ impl TSPSAOptimizer {
                         if cache.is_none() {
                             *cache = Some(held_karp_exact(&st.inst).length);
                         }
-                        format!("bestCost={:.4}  heldKarp={:.4}", st.get_best_cost(), cache.unwrap())
+                        format!(
+                            "bestCost={:.4}  heldKarp={:.4}",
+                            st.get_best_cost(),
+                            cache.unwrap()
+                        )
                     })),
                     Some("sa-ground-truth".to_string()),
-                    Some("bestCost is below the true global optimum — would indicate a bug".to_string()),
+                    Some(
+                        "bestCost is below the true global optimum — would indicate a bug"
+                            .to_string(),
+                    ),
                 )
                 .boxed(),
             );
@@ -511,11 +547,13 @@ fn run_single_state_des(
     let inst_init = inst.clone();
     let inst_val = inst.clone();
     let mut src_rng = rng.clone();
-    let source = Rc::new(RefCell::new(SingleStateSourceStation::<Tour>::with_validator(
-        source_id,
-        move || initial_tour(&inst_init, init_mode, &mut src_rng),
-        move |tour: &Tour| validate_initial_tour(&validate_id, &inst_val, tour),
-    )));
+    let source = Rc::new(RefCell::new(
+        SingleStateSourceStation::<Tour>::with_validator(
+            source_id,
+            move || initial_tour(&inst_init, init_mode, &mut src_rng),
+            move |tour: &Tour| validate_initial_tour(&validate_id, &inst_val, tour),
+        ),
+    ));
 
     let opt = Rc::new(RefCell::new(TSPSAOptimizer::with_rule(
         prefix.to_string(),
@@ -525,7 +563,9 @@ fn run_single_state_des(
         Some(Box::new(rng.clone()) as Box<dyn RandomSource>),
         accept_rule,
     )));
-    let sink = Rc::new(RefCell::new(SingleStateSinkStation::<Tour>::new(format!("{prefix}-sink"))));
+    let sink = Rc::new(RefCell::new(SingleStateSinkStation::<Tour>::new(format!(
+        "{prefix}-sink"
+    ))));
 
     source.borrow_mut().core_mut().pipe(
         opt.clone() as StationRef,
@@ -539,9 +579,16 @@ fn run_single_state_des(
     );
 
     // TS forces `shuffle` off here (overriding the runner's default of `true`).
-    let run_opts = des_options.unwrap_or(IterativeRunOptions { shuffle: false, ..Default::default() });
+    let run_opts = des_options.unwrap_or(IterativeRunOptions {
+        shuffle: false,
+        ..Default::default()
+    });
     let summary = run_iterative_des(
-        vec![source as StationRef, opt.clone() as StationRef, sink.clone() as StationRef],
+        vec![
+            source as StationRef,
+            opt.clone() as StationRef,
+            sink.clone() as StationRef,
+        ],
         run_opts,
     );
 
@@ -636,7 +683,11 @@ mod tests {
     use crate::des::general::genetic_tsp::build_pentagon_tsp;
 
     fn cooling() -> CoolingSchedule {
-        CoolingSchedule::Geometric { t0: 50.0, alpha: 0.995, t_min: Some(1e-3) }
+        CoolingSchedule::Geometric {
+            t0: 50.0,
+            alpha: 0.995,
+            t_min: Some(1e-3),
+        }
     }
 
     fn opts(seed: u32) -> TSPSAOptions {
@@ -654,18 +705,34 @@ mod tests {
 
     #[test]
     fn temperature_schedules() {
-        let geo = CoolingSchedule::Geometric { t0: 10.0, alpha: 0.9, t_min: None };
+        let geo = CoolingSchedule::Geometric {
+            t0: 10.0,
+            alpha: 0.9,
+            t_min: None,
+        };
         assert!((temperature_at(&geo, 0) - 10.0).abs() < 1e-12);
         assert!((temperature_at(&geo, 1) - 9.0).abs() < 1e-12);
 
-        let log = CoolingSchedule::Logarithmic { t0: 10.0, t_min: None };
+        let log = CoolingSchedule::Logarithmic {
+            t0: 10.0,
+            t_min: None,
+        };
         assert!((temperature_at(&log, 0) - 10.0 / 2.0_f64.ln()).abs() < 1e-9);
 
-        let lin = CoolingSchedule::Linear { t0: 10.0, rate: 2.0, t_min: Some(1.0) };
+        let lin = CoolingSchedule::Linear {
+            t0: 10.0,
+            rate: 2.0,
+            t_min: Some(1.0),
+        };
         assert!((temperature_at(&lin, 3) - 4.0).abs() < 1e-12);
         assert!((temperature_at(&lin, 100) - 1.0).abs() < 1e-12); // clamped at t_min
 
-        let restart = CoolingSchedule::ExpRestart { t0: 8.0, alpha: 0.5, period: 4, t_min: None };
+        let restart = CoolingSchedule::ExpRestart {
+            t0: 8.0,
+            alpha: 0.5,
+            period: 4,
+            t_min: None,
+        };
         assert!((temperature_at(&restart, 4) - 8.0).abs() < 1e-12); // 4 % 4 == 0
         assert!((temperature_at(&restart, 5) - 4.0).abs() < 1e-12); // 5 % 4 == 1
     }
@@ -676,8 +743,14 @@ mod tests {
         let optimal = held_karp_exact(&inst).length;
         let result = run_tsp_sa_des(inst.clone(), opts(2024), None);
 
-        assert!(is_permutation(&result.best_tour, inst.n), "best must be a permutation");
-        assert!(result.best_cost >= optimal - 1e-9, "cannot beat the global optimum");
+        assert!(
+            is_permutation(&result.best_tour, inst.n),
+            "best must be a permutation"
+        );
+        assert!(
+            result.best_cost >= optimal - 1e-9,
+            "cannot beat the global optimum"
+        );
         assert!(
             result.best_cost <= optimal * 1.05,
             "SA best {} should be near optimal {}",
@@ -695,9 +768,17 @@ mod tests {
         assert!(is_permutation(&result.best_tour, inst.n));
         // best_history is monotone non-increasing and ends at the final best.
         for w in result.best_history.windows(2) {
-            assert!(w[1] <= w[0] + 1e-9, "best_history not monotone: {} -> {}", w[0], w[1]);
+            assert!(
+                w[1] <= w[0] + 1e-9,
+                "best_history not monotone: {} -> {}",
+                w[0],
+                w[1]
+            );
         }
         let first = *result.best_history.first().unwrap();
-        assert!(result.best_cost <= first + 1e-9, "hill climber must not worsen the start");
+        assert!(
+            result.best_cost <= first + 1e-9,
+            "hill climber must not worsen the start"
+        );
     }
 }

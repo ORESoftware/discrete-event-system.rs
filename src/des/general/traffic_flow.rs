@@ -413,7 +413,11 @@ impl TrafficGridStation {
         for n in &p.nodes {
             intersections.insert(
                 n.id,
-                IntersectionStation::new(n.clone(), *degree.get(&n.id).unwrap_or(&0), p.signal_cycle_sec),
+                IntersectionStation::new(
+                    n.clone(),
+                    *degree.get(&n.id).unwrap_or(&0),
+                    p.signal_cycle_sec,
+                ),
             );
         }
 
@@ -521,7 +525,8 @@ impl TrafficGridStation {
             completed_cars: self.completed.len() as f64,
             active_cars: self.active_cars() as f64,
             max_active_cars: self.max_active_cars as f64,
-            blocked_source_attempts: self.sources.iter().map(|x| x.blocked_attempts).sum::<u64>() as f64,
+            blocked_source_attempts: self.sources.iter().map(|x| x.blocked_attempts).sum::<u64>()
+                as f64,
             mean_travel_time_sec: mean_travel,
             p95_travel_time_sec: p95,
             mean_speed_mps: self.speed_integral / (self.speed_samples.max(1) as f64),
@@ -568,7 +573,11 @@ impl TrafficGridStation {
                         continue;
                     }
                 };
-                let reserved = self.incoming_reservations.get(&next_link).copied().unwrap_or(0);
+                let reserved = self
+                    .incoming_reservations
+                    .get(&next_link)
+                    .copied()
+                    .unwrap_or(0);
                 let can = self
                     .links_by_id
                     .get(&next_link)
@@ -580,7 +589,10 @@ impl TrafficGridStation {
                 }
                 let car = TrafficCar::new(self.next_car_id, s.node, s.dest_node, time);
                 self.next_car_id += 1;
-                self.links_by_id.get_mut(&next_link).unwrap().insert_at_entry(car);
+                self.links_by_id
+                    .get_mut(&next_link)
+                    .unwrap()
+                    .insert_at_entry(car);
                 self.sources[si].generated += 1;
                 self.sources[si].pending -= 1.0;
             }
@@ -630,7 +642,10 @@ impl TrafficGridStation {
             car.position_m += mv;
             car.speed_mps = mv / dt;
 
-            if car.position_m >= spec.length_m - 1e-9 && exit_credit >= 1.0 && self.can_leave(&spec, &car) {
+            if car.position_m >= spec.length_m - 1e-9
+                && exit_credit >= 1.0
+                && self.can_leave(&spec, &car)
+            {
                 exit_credit -= 1.0;
                 self.reserve_exit(&spec, &car);
                 exited_delta += 1;
@@ -663,7 +678,10 @@ impl TrafficGridStation {
         let to = link.to;
         let axis = self.axis_of(link);
         let allows = {
-            let node = self.intersections.get(&to).expect("intersection must exist");
+            let node = self
+                .intersections
+                .get(&to)
+                .expect("intersection must exist");
             node.allows(axis, self.time_sec)
         };
         if !allows {
@@ -676,7 +694,11 @@ impl TrafficGridStation {
             Some(x) => x,
             None => return false,
         };
-        let reserved = self.incoming_reservations.get(&next_link_id).copied().unwrap_or(0);
+        let reserved = self
+            .incoming_reservations
+            .get(&next_link_id)
+            .copied()
+            .unwrap_or(0);
         let min_gap = self.p.min_gap_m;
         self.links_by_id
             .get(&next_link_id)
@@ -714,7 +736,10 @@ impl TrafficGridStation {
                 return;
             }
         };
-        self.links_by_id.get_mut(&next_link_id).unwrap().insert_at_entry(car);
+        self.links_by_id
+            .get_mut(&next_link_id)
+            .unwrap()
+            .insert_at_entry(car);
     }
 
     fn next_link_from(&mut self, node: usize, dest: usize) -> Option<String> {
@@ -918,19 +943,49 @@ pub fn validate_traffic_problem(p: &TrafficProblem) -> Check {
 
     let mut node_ids: HashSet<usize> = HashSet::new();
     for n in &p.nodes {
-        Preconditions::check(MODEL, &format!("node {}", n.id), "be unique", !node_ids.contains(&n.id), Some(n.id.to_string()))?;
+        Preconditions::check(
+            MODEL,
+            &format!("node {}", n.id),
+            "be unique",
+            !node_ids.contains(&n.id),
+            Some(n.id.to_string()),
+        )?;
         node_ids.insert(n.id);
     }
     let mut link_ids: HashSet<String> = HashSet::new();
     for l in &p.links {
-        Preconditions::check(MODEL, &format!("link {}", l.id), "be unique", !link_ids.contains(&l.id), Some(l.id.clone()))?;
+        Preconditions::check(
+            MODEL,
+            &format!("link {}", l.id),
+            "be unique",
+            !link_ids.contains(&l.id),
+            Some(l.id.clone()),
+        )?;
         link_ids.insert(l.id.clone());
-        Preconditions::check(MODEL, &format!("{}.from", l.id), "reference a node", node_ids.contains(&l.from), Some(l.from.to_string()))?;
-        Preconditions::check(MODEL, &format!("{}.to", l.id), "reference a node", node_ids.contains(&l.to), Some(l.to.to_string()))?;
+        Preconditions::check(
+            MODEL,
+            &format!("{}.from", l.id),
+            "reference a node",
+            node_ids.contains(&l.from),
+            Some(l.from.to_string()),
+        )?;
+        Preconditions::check(
+            MODEL,
+            &format!("{}.to", l.id),
+            "reference a node",
+            node_ids.contains(&l.to),
+            Some(l.to.to_string()),
+        )?;
         Preconditions::positive(MODEL, &format!("{}.lengthM", l.id), l.length_m)?;
         Preconditions::positive(MODEL, &format!("{}.speedLimitMps", l.id), l.speed_limit_mps)?;
         if let Some(c) = l.capacity {
-            Preconditions::integer_in_range(MODEL, &format!("{}.capacity", l.id), c as f64, 1.0, 299.0)?;
+            Preconditions::integer_in_range(
+                MODEL,
+                &format!("{}.capacity", l.id),
+                c as f64,
+                1.0,
+                299.0,
+            )?;
         }
         if let Some(d) = l.discharge_per_min {
             Preconditions::positive(MODEL, &format!("{}.dischargePerMin", l.id), d)?;
@@ -942,12 +997,36 @@ pub fn validate_traffic_problem(p: &TrafficProblem) -> Check {
         outgoing.entry(l.from).or_default().push(l.to);
     }
     for s in &p.sources {
-        Preconditions::check(MODEL, &format!("{}.node", s.id), "reference a node", node_ids.contains(&s.node), Some(s.node.to_string()))?;
-        Preconditions::check(MODEL, &format!("{}.destNode", s.id), "reference a node", node_ids.contains(&s.dest_node), Some(s.dest_node.to_string()))?;
-        Preconditions::check(MODEL, &format!("{}.node != destNode", s.id), "hold", s.node != s.dest_node, Some(format!("[{}, {}]", s.node, s.dest_node)))?;
+        Preconditions::check(
+            MODEL,
+            &format!("{}.node", s.id),
+            "reference a node",
+            node_ids.contains(&s.node),
+            Some(s.node.to_string()),
+        )?;
+        Preconditions::check(
+            MODEL,
+            &format!("{}.destNode", s.id),
+            "reference a node",
+            node_ids.contains(&s.dest_node),
+            Some(s.dest_node.to_string()),
+        )?;
+        Preconditions::check(
+            MODEL,
+            &format!("{}.node != destNode", s.id),
+            "hold",
+            s.node != s.dest_node,
+            Some(format!("[{}, {}]", s.node, s.dest_node)),
+        )?;
         Preconditions::non_negative(MODEL, &format!("{}.ratePerMin", s.id), s.rate_per_min)?;
         if let Some(mg) = s.max_generated {
-            Preconditions::integer_in_range(MODEL, &format!("{}.maxGenerated", s.id), mg as f64, 0.0, 1e6)?;
+            Preconditions::integer_in_range(
+                MODEL,
+                &format!("{}.maxGenerated", s.id),
+                mg as f64,
+                0.0,
+                1e6,
+            )?;
         }
         if let Some(st) = s.start_sec {
             Preconditions::non_negative(MODEL, &format!("{}.startSec", s.id), st)?;
@@ -956,9 +1035,21 @@ pub fn validate_traffic_problem(p: &TrafficProblem) -> Check {
             Preconditions::non_negative(MODEL, &format!("{}.endSec", s.id), en)?;
         }
         if let (Some(st), Some(en)) = (s.start_sec, s.end_sec) {
-            Preconditions::check(MODEL, &format!("{}.startSec <= endSec", s.id), "hold", st <= en, Some(format!("[{st}, {en}]")))?;
+            Preconditions::check(
+                MODEL,
+                &format!("{}.startSec <= endSec", s.id),
+                "hold",
+                st <= en,
+                Some(format!("[{st}, {en}]")),
+            )?;
         }
-        Preconditions::check(MODEL, &format!("{}.route", s.id), "exist in directed link graph", has_directed_path(s.node, s.dest_node, &outgoing), Some(format!("[{}, {}]", s.node, s.dest_node)))?;
+        Preconditions::check(
+            MODEL,
+            &format!("{}.route", s.id),
+            "exist in directed link graph",
+            has_directed_path(s.node, s.dest_node, &outgoing),
+            Some(format!("[{}, {}]", s.node, s.dest_node)),
+        )?;
     }
     if let Some(d) = p.drain_after_sources_sec {
         Preconditions::non_negative(MODEL, "drainAfterSourcesSec", d)?;
@@ -1031,11 +1122,41 @@ pub fn build_traffic_max_flow_problem(p: &TrafficProblem) -> MaxFlowProblem {
 
 pub fn build_default_traffic_problem() -> TrafficProblem {
     let nodes = vec![
-        TrafficNodeSpec { id: 0, name: "W".to_string(), x: 0.0, y: 1.0, signal_offset_sec: None },
-        TrafficNodeSpec { id: 1, name: "C".to_string(), x: 1.0, y: 1.0, signal_offset_sec: None },
-        TrafficNodeSpec { id: 2, name: "E".to_string(), x: 2.0, y: 1.0, signal_offset_sec: None },
-        TrafficNodeSpec { id: 3, name: "N".to_string(), x: 1.0, y: 2.0, signal_offset_sec: None },
-        TrafficNodeSpec { id: 4, name: "S".to_string(), x: 1.0, y: 0.0, signal_offset_sec: None },
+        TrafficNodeSpec {
+            id: 0,
+            name: "W".to_string(),
+            x: 0.0,
+            y: 1.0,
+            signal_offset_sec: None,
+        },
+        TrafficNodeSpec {
+            id: 1,
+            name: "C".to_string(),
+            x: 1.0,
+            y: 1.0,
+            signal_offset_sec: None,
+        },
+        TrafficNodeSpec {
+            id: 2,
+            name: "E".to_string(),
+            x: 2.0,
+            y: 1.0,
+            signal_offset_sec: None,
+        },
+        TrafficNodeSpec {
+            id: 3,
+            name: "N".to_string(),
+            x: 1.0,
+            y: 2.0,
+            signal_offset_sec: None,
+        },
+        TrafficNodeSpec {
+            id: 4,
+            name: "S".to_string(),
+            x: 1.0,
+            y: 0.0,
+            signal_offset_sec: None,
+        },
     ];
     let mk = |id: &str, from: usize, to: usize| TrafficLinkSpec {
         id: id.to_string(),
@@ -1049,16 +1170,52 @@ pub fn build_default_traffic_problem() -> TrafficProblem {
     TrafficProblem {
         nodes,
         links: vec![
-            mk("W-C", 0, 1), mk("C-W", 1, 0),
-            mk("C-E", 1, 2), mk("E-C", 2, 1),
-            mk("N-C", 3, 1), mk("C-N", 1, 3),
-            mk("S-C", 4, 1), mk("C-S", 1, 4),
+            mk("W-C", 0, 1),
+            mk("C-W", 1, 0),
+            mk("C-E", 1, 2),
+            mk("E-C", 2, 1),
+            mk("N-C", 3, 1),
+            mk("C-N", 1, 3),
+            mk("S-C", 4, 1),
+            mk("C-S", 1, 4),
         ],
         sources: vec![
-            TrafficSourceSpec { id: "west-to-east".to_string(), node: 0, dest_node: 2, rate_per_min: 12.0, max_generated: Some(90), start_sec: None, end_sec: None },
-            TrafficSourceSpec { id: "north-to-south".to_string(), node: 3, dest_node: 4, rate_per_min: 9.0, max_generated: Some(70), start_sec: None, end_sec: None },
-            TrafficSourceSpec { id: "south-to-east".to_string(), node: 4, dest_node: 2, rate_per_min: 6.0, max_generated: Some(50), start_sec: None, end_sec: None },
-            TrafficSourceSpec { id: "east-to-west".to_string(), node: 2, dest_node: 0, rate_per_min: 5.0, max_generated: Some(30), start_sec: None, end_sec: None },
+            TrafficSourceSpec {
+                id: "west-to-east".to_string(),
+                node: 0,
+                dest_node: 2,
+                rate_per_min: 12.0,
+                max_generated: Some(90),
+                start_sec: None,
+                end_sec: None,
+            },
+            TrafficSourceSpec {
+                id: "north-to-south".to_string(),
+                node: 3,
+                dest_node: 4,
+                rate_per_min: 9.0,
+                max_generated: Some(70),
+                start_sec: None,
+                end_sec: None,
+            },
+            TrafficSourceSpec {
+                id: "south-to-east".to_string(),
+                node: 4,
+                dest_node: 2,
+                rate_per_min: 6.0,
+                max_generated: Some(50),
+                start_sec: None,
+                end_sec: None,
+            },
+            TrafficSourceSpec {
+                id: "east-to-west".to_string(),
+                node: 2,
+                dest_node: 0,
+                rate_per_min: 5.0,
+                max_generated: Some(30),
+                start_sec: None,
+                end_sec: None,
+            },
         ],
         duration_sec: 600.0,
         dt_sec: 1.0,

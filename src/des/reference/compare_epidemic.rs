@@ -90,7 +90,11 @@ fn summarize(label: &str, file: &str) -> RunSummary {
         let to = jstr(t, "to").to_string();
         let from = jstr(t, "from").to_string();
         *totals_by_destination.entry(to.clone()).or_insert(0) += 1;
-        *splits_by_from.entry(from).or_default().entry(to).or_insert(0) += 1;
+        *splits_by_from
+            .entry(from)
+            .or_default()
+            .entry(to)
+            .or_insert(0) += 1;
     }
 
     let mut time_avg: HashMap<String, f64> = HashMap::new();
@@ -164,7 +168,11 @@ fn split_total(splits: &HashMap<String, HashMap<String, u64>>, from: &str) -> u6
 }
 
 fn split_count(splits: &HashMap<String, HashMap<String, u64>>, from: &str, to: &str) -> u64 {
-    splits.get(from).and_then(|r| r.get(to)).copied().unwrap_or(0)
+    splits
+        .get(from)
+        .and_then(|r| r.get(to))
+        .copied()
+        .unwrap_or(0)
 }
 
 /// Default framework / FEL log paths (repository-root `out/`).
@@ -198,14 +206,26 @@ pub fn run(fw_file: &str, fel_file: &str) {
     );
     compare_row(
         "S-visits (anything -> S)",
-        fw.transitions.iter().filter(|t| jstr(t, "to") == "S").count() as f64,
-        fel.transitions.iter().filter(|t| jstr(t, "to") == "S").count() as f64,
+        fw.transitions
+            .iter()
+            .filter(|t| jstr(t, "to") == "S")
+            .count() as f64,
+        fel.transitions
+            .iter()
+            .filter(|t| jstr(t, "to") == "S")
+            .count() as f64,
         0,
     );
     compare_row(
         "cumulative deaths (sink absorbs)",
-        fw.end.pointer(&["totals", "absorbed"]).and_then(|v| v.as_f64()).unwrap_or(0.0),
-        fel.end.pointer(&["totals", "absorbed"]).and_then(|v| v.as_f64()).unwrap_or(0.0),
+        fw.end
+            .pointer(&["totals", "absorbed"])
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
+        fel.end
+            .pointer(&["totals", "absorbed"])
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
         0,
     );
     compare_row(

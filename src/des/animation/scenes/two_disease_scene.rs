@@ -237,7 +237,14 @@ mod tests {
 
     #[test]
     fn bars_produce_four_shapes_per_compartment_plus_header() {
-        let counts = CompartmentCounts { s: 90.0, a: 5.0, b: 3.0, ab: 1.0, r: 1.0, d: 0.0 };
+        let counts = CompartmentCounts {
+            s: 90.0,
+            a: 5.0,
+            b: 3.0,
+            ab: 1.0,
+            r: 1.0,
+            d: 0.0,
+        };
         let shapes = build_bars(&counts, 100.0);
         // 1 header + 6 * 4 shapes.
         assert_eq!(shapes.len(), 25);
@@ -245,7 +252,14 @@ mod tests {
 
     #[test]
     fn frame_caption_lists_compartments() {
-        let counts = CompartmentCounts { s: 90.0, a: 5.0, b: 3.0, ab: 1.0, r: 1.0, d: 0.0 };
+        let counts = CompartmentCounts {
+            s: 90.0,
+            a: 5.0,
+            b: 3.0,
+            ab: 1.0,
+            r: 1.0,
+            d: 0.0,
+        };
         let fp = build_frame(1.5, 3.0, &counts, 100.0);
         let cap = fp.caption.unwrap();
         assert!(cap.starts_with("t=1.50   alive=100   dead=0   "));

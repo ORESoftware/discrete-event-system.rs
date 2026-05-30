@@ -72,7 +72,14 @@ struct Person {
 }
 impl Person {
     fn new(id: i64, from_floor: i64, to_floor: i64) -> Self {
-        Person { id, from_floor, to_floor, arrival_time: -1.0, board_time: -1.0, exit_time: -1.0 }
+        Person {
+            id,
+            from_floor,
+            to_floor,
+            arrival_time: -1.0,
+            board_time: -1.0,
+            exit_time: -1.0,
+        }
     }
 }
 
@@ -137,7 +144,9 @@ impl Coordinator {
         }
     }
     fn claim(&mut self, floor: i64, dir: Dir2, by_idx: usize) {
-        self.claimed_by.entry(Coordinator::key(floor, dir)).or_insert(by_idx);
+        self.claimed_by
+            .entry(Coordinator::key(floor, dir))
+            .or_insert(by_idx);
     }
     fn seed_from_active(&mut self, elevators: &[Elevator]) {
         self.reset();
@@ -145,7 +154,11 @@ impl Coordinator {
             if (e.state == ElevatorState::Moving || e.state == ElevatorState::Serving)
                 && (e.direction == Edir::Up || e.direction == Edir::Down)
             {
-                self.claim(e.target_floor.round() as i64, e.direction.to_dir2_or_up(), e.idx);
+                self.claim(
+                    e.target_floor.round() as i64,
+                    e.direction.to_dir2_or_up(),
+                    e.idx,
+                );
             }
         }
     }
@@ -235,7 +248,11 @@ fn build_schedule(cfg: &ElevatorConfig) -> Vec<ScheduledArrival> {
                     break;
                 }
             }
-            out.push(ScheduledArrival { t, from_floor, to_floor });
+            out.push(ScheduledArrival {
+                t,
+                from_floor,
+                to_floor,
+            });
         }
         out
     })
@@ -253,10 +270,23 @@ struct Building {
 impl Building {
     fn new(cfg: ElevatorConfig, schedule: Vec<ScheduledArrival>) -> Self {
         let floors: Vec<Floor> = (1..=cfg.n_floors)
-            .map(|i| Floor { floor_number: i, up_queue: Vec::new(), down_queue: Vec::new(), exited_here: Vec::new() })
+            .map(|i| Floor {
+                floor_number: i,
+                up_queue: Vec::new(),
+                down_queue: Vec::new(),
+                exited_here: Vec::new(),
+            })
             .collect();
-        let source = PersonSource { schedule, idx: 0, next_id: 0 };
-        let dispatch_mode = if cfg.dispatch_mode.is_empty() { "uncoordinated".to_string() } else { cfg.dispatch_mode.clone() };
+        let source = PersonSource {
+            schedule,
+            idx: 0,
+            next_id: 0,
+        };
+        let dispatch_mode = if cfg.dispatch_mode.is_empty() {
+            "uncoordinated".to_string()
+        } else {
+            cfg.dispatch_mode.clone()
+        };
         let coordinated = dispatch_mode != "uncoordinated";
         let elevators: Vec<Elevator> = (0..cfg.n_elevators)
             .map(|k| {
@@ -276,15 +306,28 @@ impl Building {
                 }
             })
             .collect();
-        let coordinator = if coordinated { Some(Coordinator::default()) } else { None };
-        Building { source, floors, elevators, sink: ExitSink::default(), coordinator, config: cfg }
+        let coordinator = if coordinated {
+            Some(Coordinator::default())
+        } else {
+            None
+        };
+        Building {
+            source,
+            floors,
+            elevators,
+            sink: ExitSink::default(),
+            coordinator,
+            config: cfg,
+        }
     }
 
     fn tick_once(&mut self, t: i64) {
         let dt = self.config.step_size;
         // 1. Source emits newly-arrived persons onto floors.
         let now = t as f64 * dt;
-        while self.source.idx < self.source.schedule.len() && self.source.schedule[self.source.idx].t <= now {
+        while self.source.idx < self.source.schedule.len()
+            && self.source.schedule[self.source.idx].t <= now
+        {
             let a = self.source.schedule[self.source.idx];
             self.source.idx += 1;
             let mut p = Person::new(self.source.next_id, a.from_floor, a.to_floor);
@@ -306,7 +349,13 @@ impl Building {
         }
         // 4. Elevators run in index order (deterministic coordinated picks).
         for k in 0..self.elevators.len() {
-            elevator_run_time_step(&mut self.elevators[k], &mut self.floors, self.coordinator.as_mut(), dt, t);
+            elevator_run_time_step(
+                &mut self.elevators[k],
+                &mut self.floors,
+                self.coordinator.as_mut(),
+                dt,
+                t,
+            );
         }
     }
 
@@ -316,7 +365,11 @@ impl Building {
 }
 
 /// SCAN/LOOK next-target selection (`pickNextTarget`).
-fn pick_next_target(e: &Elevator, floors: &[Floor], coord: Option<&Coordinator>) -> Option<(f64, Dir2)> {
+fn pick_next_target(
+    e: &Elevator,
+    floors: &[Floor],
+    coord: Option<&Coordinator>,
+) -> Option<(f64, Dir2)> {
     let cur = e.current_floor;
 
     let try_dir = |dir: Dir2| -> Option<(f64, Dir2)> {
@@ -385,8 +438,12 @@ fn pick_next_target(e: &Elevator, floors: &[Floor], coord: Option<&Coordinator>)
     let mut best_dir = Dir2::Up;
     for f in floors {
         let d = (f.floor_number as f64 - cur).abs();
-        let up_claimed = coord.map(|c| c.is_claimed_by_other(f.floor_number, Dir2::Up, e.idx)).unwrap_or(false);
-        let down_claimed = coord.map(|c| c.is_claimed_by_other(f.floor_number, Dir2::Down, e.idx)).unwrap_or(false);
+        let up_claimed = coord
+            .map(|c| c.is_claimed_by_other(f.floor_number, Dir2::Up, e.idx))
+            .unwrap_or(false);
+        let down_claimed = coord
+            .map(|c| c.is_claimed_by_other(f.floor_number, Dir2::Down, e.idx))
+            .unwrap_or(false);
         if f.has_call(Dir2::Up) && !up_claimed && d < best_dist {
             best_dist = d;
             best_floor = f.floor_number as f64;
@@ -405,7 +462,12 @@ fn pick_next_target(e: &Elevator, floors: &[Floor], coord: Option<&Coordinator>)
     }
 }
 
-fn opportunistic_pit_stop(e: &Elevator, floors: &[Floor], coord: Option<&Coordinator>, new_floor: f64) -> Option<f64> {
+fn opportunistic_pit_stop(
+    e: &Elevator,
+    floors: &[Floor],
+    coord: Option<&Coordinator>,
+    new_floor: f64,
+) -> Option<f64> {
     if !e.opportunistic_pickups || e.is_full() {
         return None;
     }
@@ -455,7 +517,13 @@ fn opportunistic_pit_stop(e: &Elevator, floors: &[Floor], coord: Option<&Coordin
     }
 }
 
-fn elevator_run_time_step(e: &mut Elevator, floors: &mut [Floor], mut coord: Option<&mut Coordinator>, step_size: f64, t: i64) {
+fn elevator_run_time_step(
+    e: &mut Elevator,
+    floors: &mut [Floor],
+    mut coord: Option<&mut Coordinator>,
+    step_size: f64,
+    t: i64,
+) {
     let now = t as f64 * step_size;
 
     if e.state == ElevatorState::Idle {
@@ -473,7 +541,11 @@ fn elevator_run_time_step(e: &mut Elevator, floors: &mut [Floor], mut coord: Opt
     }
 
     if e.state == ElevatorState::Moving {
-        let sign = if e.target_floor > e.current_floor { 1.0 } else { -1.0 };
+        let sign = if e.target_floor > e.current_floor {
+            1.0
+        } else {
+            -1.0
+        };
         let remaining = e.target_floor - e.current_floor;
         let delta = e.speed() * step_size * sign;
         let new_floor = e.current_floor + delta;
@@ -570,10 +642,22 @@ fn run_elevator(cfg: ElevatorConfig, schedule: Vec<ScheduledArrival>) -> Elevato
         b.tick_once(n + extra);
         extra += 1;
     }
-    let served: Vec<Person> = b.sink.collected.iter().filter(|p| p.exit_time > 0.0).cloned().collect();
-    let waits: Vec<f64> = served.iter().map(|p| p.board_time - p.arrival_time).collect();
+    let served: Vec<Person> = b
+        .sink
+        .collected
+        .iter()
+        .filter(|p| p.exit_time > 0.0)
+        .cloned()
+        .collect();
+    let waits: Vec<f64> = served
+        .iter()
+        .map(|p| p.board_time - p.arrival_time)
+        .collect();
     let travels: Vec<f64> = served.iter().map(|p| p.exit_time - p.board_time).collect();
-    let totals: Vec<f64> = served.iter().map(|p| p.exit_time - p.arrival_time).collect();
+    let totals: Vec<f64> = served
+        .iter()
+        .map(|p| p.exit_time - p.arrival_time)
+        .collect();
     ElevatorResult {
         config: cfg,
         schedule,
@@ -657,7 +741,10 @@ fn schedule_json(schedule: &[ScheduledArrival]) -> JsonValue {
 }
 
 fn env_f64(key: &str, default: f64) -> f64 {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 /// Entry point (TS top-level `main`).
@@ -675,12 +762,18 @@ pub fn run() {
         dispatch_mode: String::new(),
     };
     println!("# Elevator simulation");
-    println!("#   {} floors, {} elevators, capacity {}", base.n_floors, base.n_elevators, base.capacity);
+    println!(
+        "#   {} floors, {} elevators, capacity {}",
+        base.n_floors, base.n_elevators, base.capacity
+    );
     println!(
         "#   travel={}s/floor, service={}s, λ={}/s",
         base.floor_travel_time, base.service_time, base.arrival_rate
     );
-    println!("#   simT={}s, dt={}s, seed={}", base.sim_t, base.step_size, base.seed);
+    println!(
+        "#   simT={}s, dt={}s, seed={}",
+        base.sim_t, base.step_size, base.seed
+    );
 
     let schedule = build_schedule(&base);
     println!("#   schedule has {} arrivals", schedule.len());
@@ -706,9 +799,15 @@ pub fn run() {
         println!();
         println!("# dispatchMode = {:<20} ({ms} ms)", mode);
         println!("#   served {}/{} people", a.n_served, a.n);
-        println!("#   meanWait   = {:.2} s     p95Wait  = {:.2} s", a.mean_wait, a.p95_wait);
+        println!(
+            "#   meanWait   = {:.2} s     p95Wait  = {:.2} s",
+            a.mean_wait, a.p95_wait
+        );
         println!("#   meanTravel = {:.2} s", a.mean_travel);
-        println!("#   meanTotal  = {:.2} s     p95Total = {:.2} s", a.mean_total, a.p95_total);
+        println!(
+            "#   meanTotal  = {:.2} s     p95Total = {:.2} s",
+            a.mean_total, a.p95_total
+        );
         results.push(result);
     }
 
@@ -753,7 +852,10 @@ pub fn run() {
                 })
                 .collect(),
         );
-        let cmp = jobj(vec![("schedule", schedule_json(&schedule)), ("runs", runs_json)]);
+        let cmp = jobj(vec![
+            ("schedule", schedule_json(&schedule)),
+            ("runs", runs_json),
+        ]);
         let _ = std::fs::write(cmp_path, cmp.to_string());
         println!("# wrote {cmp_path}");
     }

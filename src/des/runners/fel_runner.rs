@@ -20,9 +20,9 @@
 use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 
+use crate::des::general::prng::with_seed;
 use crate::des::observability::logger::{JsonValue, JsonlLogger, LogLevel};
 use crate::des::shared::capabilities::{Clock, RandomSource, SystemClock};
-use crate::des::general::prng::with_seed;
 
 use super::shared::{
     average_record, compartment_populations, update_peaks, zero_compartment_record,
@@ -43,7 +43,12 @@ fn jb(v: bool) -> JsonValue {
     JsonValue::Bool(v)
 }
 fn jobj(entries: Vec<(&str, JsonValue)>) -> JsonValue {
-    JsonValue::Object(entries.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+    JsonValue::Object(
+        entries
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
+    )
 }
 
 fn draw_uniform(a: f64, b: f64, rng: &mut dyn RandomSource) -> f64 {
@@ -161,7 +166,8 @@ impl<'a> Fel<'a> {
                 .entry(to_station.to_string())
                 .or_default()
                 .push_back(entity_id.to_string());
-            self.last_station.insert(entity_id.to_string(), to_station.to_string());
+            self.last_station
+                .insert(entity_id.to_string(), to_station.to_string());
         } else {
             let (a, b) = match self.config.residence.get(to_station) {
                 Some(r) => *r,
@@ -305,7 +311,15 @@ fn run_fel_inner(
         }
 
         while next_sample_at <= e.time.floor() && next_sample_at <= config.horizon_days {
-            sample_at(&sim, &mut pop_sums, &mut peak, &mut samples, &mut logger, phase2, next_sample_at);
+            sample_at(
+                &sim,
+                &mut pop_sums,
+                &mut peak,
+                &mut samples,
+                &mut logger,
+                phase2,
+                next_sample_at,
+            );
             next_sample_at += sample_every;
         }
 
@@ -336,7 +350,12 @@ fn run_fel_inner(
                     );
                 insert_event(
                     &mut sim.fel,
-                    FelEvent { time: nt, kind: FelKind::Source, station: None, entity: None },
+                    FelEvent {
+                        time: nt,
+                        kind: FelKind::Source,
+                        station: None,
+                        entity: None,
+                    },
                 );
             }
             FelKind::Service => {
@@ -344,7 +363,8 @@ fn run_fel_inner(
                 let head = sim.queues.get_mut(&station).and_then(|q| q.pop_front());
                 if let Some(head) = head {
                     *sim.population.get_mut(&station).unwrap() -= 1.0;
-                    let dest = draw_successor(succ_lookup(&sim.successors, &station), &station, rng);
+                    let dest =
+                        draw_successor(succ_lookup(&sim.successors, &station), &station, rng);
                     sim.arrive(e.time, &head, &station, &dest, rng, &mut logger);
                 }
                 let (a, b) = config.residence[&station];
@@ -369,12 +389,21 @@ fn run_fel_inner(
         }
     }
     while next_sample_at <= config.horizon_days {
-        sample_at(&sim, &mut pop_sums, &mut peak, &mut samples, &mut logger, phase2, next_sample_at);
+        sample_at(
+            &sim,
+            &mut pop_sums,
+            &mut peak,
+            &mut samples,
+            &mut logger,
+            phase2,
+            next_sample_at,
+        );
         next_sample_at += sample_every;
     }
 
     let elapsed = started_at.elapsed().as_millis();
-    let final_populations = compartment_populations(|sid| sim.population.get(sid).copied().unwrap_or(0.0));
+    let final_populations =
+        compartment_populations(|sid| sim.population.get(sid).copied().unwrap_or(0.0));
 
     let tables = sim.transitions.tables();
     let time_avg = average_record(&pop_sums, samples);
@@ -382,7 +411,12 @@ fn run_fel_inner(
     if let Some(logger) = logger.as_mut() {
         let final_pop_json: Vec<(String, JsonValue)> = COMPARTMENT_ORDER
             .iter()
-            .map(|c| (c.to_string(), jn(final_populations.get(*c).copied().unwrap_or(0.0))))
+            .map(|c| {
+                (
+                    c.to_string(),
+                    jn(final_populations.get(*c).copied().unwrap_or(0.0)),
+                )
+            })
             .collect();
         logger.log(jobj(vec![
             ("kind", js("sim_end")),
@@ -393,7 +427,10 @@ fn run_fel_inner(
                 JsonValue::Object(vec![
                     ("created".to_string(), jn(source_created)),
                     ("absorbed".to_string(), jn(sim.absorbed)),
-                    ("finalPopulations".to_string(), JsonValue::Object(final_pop_json)),
+                    (
+                        "finalPopulations".to_string(),
+                        JsonValue::Object(final_pop_json),
+                    ),
                 ]),
             ),
         ]));
@@ -404,7 +441,10 @@ fn run_fel_inner(
         kernel: Kernel::Fel,
         config: config.clone(),
         seed,
-        totals: Totals { created: source_created, absorbed: sim.absorbed },
+        totals: Totals {
+            created: source_created,
+            absorbed: sim.absorbed,
+        },
         final_populations,
         transition_counts: tables.counts,
         split_probs: tables.splits,
@@ -424,7 +464,8 @@ fn sample_at(
     phase2: bool,
     t: f64,
 ) {
-    let populations = compartment_populations(|sid| sim.population.get(sid).copied().unwrap_or(0.0));
+    let populations =
+        compartment_populations(|sid| sim.population.get(sid).copied().unwrap_or(0.0));
     let mut total_alive = 0.0;
     for c in COMPARTMENT_ORDER {
         let v = populations.get(c).copied().unwrap_or(0.0);
@@ -436,7 +477,12 @@ fn sample_at(
     if let Some(logger) = logger.as_mut() {
         let pops_json: Vec<(String, JsonValue)> = COMPARTMENT_ORDER
             .iter()
-            .map(|c| (c.to_string(), jn(populations.get(*c).copied().unwrap_or(0.0))))
+            .map(|c| {
+                (
+                    c.to_string(),
+                    jn(populations.get(*c).copied().unwrap_or(0.0)),
+                )
+            })
             .collect();
         logger.log(jobj(vec![
             ("kind", js("tick")),
@@ -456,9 +502,25 @@ mod tests {
 
     #[test]
     fn fel_fifo_runs_deterministically() {
-        let cfg = SimConfig { horizon_days: 200.0, phase1_days: 120.0, ..default_config() };
-        let a = run_fel_once(&cfg, &RunOpts { seed: Some(7), ..Default::default() });
-        let b = run_fel_once(&cfg, &RunOpts { seed: Some(7), ..Default::default() });
+        let cfg = SimConfig {
+            horizon_days: 200.0,
+            phase1_days: 120.0,
+            ..default_config()
+        };
+        let a = run_fel_once(
+            &cfg,
+            &RunOpts {
+                seed: Some(7),
+                ..Default::default()
+            },
+        );
+        let b = run_fel_once(
+            &cfg,
+            &RunOpts {
+                seed: Some(7),
+                ..Default::default()
+            },
+        );
         assert_eq!(a.kernel, Kernel::Fel);
         assert_eq!(a.totals.created, b.totals.created);
         assert_eq!(a.totals.absorbed, b.totals.absorbed);
@@ -466,10 +528,18 @@ mod tests {
 
     #[test]
     fn fel_individual_service_runs() {
-        let cfg = SimConfig { horizon_days: 200.0, phase1_days: 120.0, ..default_config() };
+        let cfg = SimConfig {
+            horizon_days: 200.0,
+            phase1_days: 120.0,
+            ..default_config()
+        };
         let r = run_fel_once(
             &cfg,
-            &RunOpts { seed: Some(11), service: Some(ServiceDiscipline::Individual), ..Default::default() },
+            &RunOpts {
+                seed: Some(11),
+                service: Some(ServiceDiscipline::Individual),
+                ..Default::default()
+            },
         );
         assert!(r.totals.created > 0.0);
     }

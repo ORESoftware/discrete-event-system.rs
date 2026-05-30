@@ -137,13 +137,7 @@ pub fn newton<F: Fn(f64) -> f64, DF: Fn(f64) -> f64>(
 
 /// Secant method: derivative-free Newton, using finite-difference slope
 /// between the last two iterates. Superlinear (golden ratio) convergence.
-pub fn secant<F: Fn(f64) -> f64>(
-    f: F,
-    x0: f64,
-    x1: f64,
-    tol: f64,
-    max_iter: usize,
-) -> RootResult {
+pub fn secant<F: Fn(f64) -> f64>(f: F, x0: f64, x1: f64, tol: f64, max_iter: usize) -> RootResult {
     let mut x0 = x0;
     let mut x1 = x1;
     let mut f0 = f(x0);

@@ -41,7 +41,11 @@ pub struct ObservationToken<O = f64> {
 
 impl<O> ObservationToken<O> {
     pub fn new(observation: O, tick: f64, time: f64) -> Self {
-        ObservationToken { observation, tick, time }
+        ObservationToken {
+            observation,
+            tick,
+            time,
+        }
     }
 }
 
@@ -212,8 +216,8 @@ pub trait ControllerStation<O, U>: DESStation {
 
 #[cfg(test)]
 mod tests {
+    use super::super::station::{DESStation, StationCore};
     use super::*;
-    use super::super::station::{StationCore, DESStation};
     use std::any::Any;
 
     /// A textbook PID controller over scalar observation/control.
@@ -308,17 +312,24 @@ mod tests {
         // Huge error => raw control 100, clamped to 2.0.
         let u = pid.step(0.0, 0.0, 0.0);
         assert_eq!(u, 2.0);
-        assert_eq!(pid.controller_core().control_history.last().copied(), Some(2.0));
+        assert_eq!(
+            pid.controller_core().control_history.last().copied(),
+            Some(2.0)
+        );
     }
 
     #[test]
     fn run_time_step_drains_and_records() {
         let mut pid = Pid::new(0.5, 0.0, 0.0, 10.0);
         assert!(!pid.has_work());
-        pid.core_mut()
-            .take(Rc::new(ObservationToken::new(0.0_f64, 0.0, 0.0)), CH_OBSERVATION);
-        pid.core_mut()
-            .take(Rc::new(ObservationToken::new(4.0_f64, 1.0, 1.0)), CH_OBSERVATION);
+        pid.core_mut().take(
+            Rc::new(ObservationToken::new(0.0_f64, 0.0, 0.0)),
+            CH_OBSERVATION,
+        );
+        pid.core_mut().take(
+            Rc::new(ObservationToken::new(4.0_f64, 1.0, 1.0)),
+            CH_OBSERVATION,
+        );
         assert!(pid.has_work());
         pid.run_time_step();
         assert_eq!(pid.ticks_processed(), 2);

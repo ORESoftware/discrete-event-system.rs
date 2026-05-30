@@ -38,7 +38,12 @@ fn problem(name: &str) -> Option<LPProblem> {
         "2var-diamond" => LPProblem {
             sense: Sense::Max,
             c: vec![2.0, 3.0],
-            a_ub: Some(vec![vec![1.0, 0.0], vec![0.0, 1.0], vec![1.0, 1.0], vec![1.0, 2.0]]),
+            a_ub: Some(vec![
+                vec![1.0, 0.0],
+                vec![0.0, 1.0],
+                vec![1.0, 1.0],
+                vec![1.0, 2.0],
+            ]),
             b_ub: Some(vec![4.0, 5.0, 6.0, 9.0]),
             a_eq: None,
             b_eq: None,
@@ -112,12 +117,18 @@ pub fn run() {
             return;
         }
     };
-    let pivot_rule = match std::env::var("PIVOT_RULE").unwrap_or_else(|_| "dantzig".into()).as_str() {
+    let pivot_rule = match std::env::var("PIVOT_RULE")
+        .unwrap_or_else(|_| "dantzig".into())
+        .as_str()
+    {
         "bland" => PivotRule::Bland,
         _ => PivotRule::Dantzig,
     };
 
-    println!("# DES-driven simplex on '{which}' problem  (pivotRule = {})", pivot_rule.as_str());
+    println!(
+        "# DES-driven simplex on '{which}' problem  (pivotRule = {})",
+        pivot_rule.as_str()
+    );
     println!("#");
     println!("# LP:");
     for line in lp_to_string(&lp).split('\n') {
@@ -127,17 +138,31 @@ pub fn run() {
 
     let des = solve_lp_via_des(
         &lp,
-        &DESSimplexOptions { pivot_rule: Some(pivot_rule), max_iter: Some(1000), tol: None },
+        &DESSimplexOptions {
+            pivot_rule: Some(pivot_rule),
+            max_iter: Some(1000),
+            tol: None,
+        },
     );
     let internal = solve_lp_internal(&lp, &InternalSimplexOptions::default());
-    let external = solve_lp_external(&lp, &ExternalSolverOptions { method: Some("highs".into()), ..Default::default() });
+    let external = solve_lp_external(
+        &lp,
+        &ExternalSolverOptions {
+            method: Some("highs".into()),
+            ..Default::default()
+        },
+    );
 
     println!("# DES simplex (this engine):");
     println!("#   status     = {}", des.status.as_str());
     println!("#   pivots     = {}", des.trace.pivot_history.len());
     println!(
         "#   x*         = [ {} ]",
-        des.x.iter().map(|v| format!("{v:.6}")).collect::<Vec<_>>().join(", ")
+        des.x
+            .iter()
+            .map(|v| format!("{v:.6}"))
+            .collect::<Vec<_>>()
+            .join(", ")
     );
     println!("#   objective  = {:.8}", des.objective);
     println!("#   wall time  = {}ms", des.elapsed_ms);
@@ -164,7 +189,10 @@ pub fn run() {
         if !dual.is_empty() {
             println!(
                 "#   shadow prices on each ≤ constraint = [ {} ]",
-                dual.iter().map(|v| format!("{v:.4}")).collect::<Vec<_>>().join(", ")
+                dual.iter()
+                    .map(|v| format!("{v:.4}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             );
         }
     }
@@ -179,12 +207,20 @@ pub fn run() {
         "",
         "",
         "",
-        des.trace.vertex_history[0].iter().map(|v| format!("{v:.3}")).collect::<Vec<_>>().join(", "),
+        des.trace.vertex_history[0]
+            .iter()
+            .map(|v| format!("{v:.3}"))
+            .collect::<Vec<_>>()
+            .join(", "),
         des.trace.obj_history[0]
     );
     for (i, p) in des.trace.pivot_history.iter().enumerate() {
         let v = &des.trace.vertex_history[i + 1];
-        let obj_str = if p.obj.is_nan() { "(phase-1)".to_string() } else { format!("{:.4}", p.obj) };
+        let obj_str = if p.obj.is_nan() {
+            "(phase-1)".to_string()
+        } else {
+            format!("{:.4}", p.obj)
+        };
         println!(
             "#   {:<6} {:<7} {:<7} {:<7} {:<13} [ {} ]    obj = {}",
             p.tick,
@@ -192,7 +228,10 @@ pub fn run() {
             format!("col={}", p.enter),
             format!("row={}", p.leave),
             format!("{:.3e}", p.pivot_elt),
-            v.iter().map(|x| format!("{x:.3}")).collect::<Vec<_>>().join(", "),
+            v.iter()
+                .map(|x| format!("{x:.3}"))
+                .collect::<Vec<_>>()
+                .join(", "),
             obj_str
         );
     }

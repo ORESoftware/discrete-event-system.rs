@@ -31,13 +31,9 @@ mod tests {
     use crate::des::general::inventory_dp::{solve_inventory_dp, InventoryProblem};
     use crate::des::general::kalman_filter::{run_radar_tracking, RadarTrackingOpts};
     use crate::des::general::mountain_car::{run_mountain_car, MountainCarTrainOpts};
-    use crate::des::general::mpc_double_integrator::{
-        run_mpc_double_integrator, MpcDoubleIntOpts,
-    };
+    use crate::des::general::mpc_double_integrator::{run_mpc_double_integrator, MpcDoubleIntOpts};
     use crate::des::general::mrac::{run_mrac, MRACOpts};
-    use crate::des::general::pontryagin_bang_bang::{
-        run_pontryagin_bang_bang, PontryaginOpts,
-    };
+    use crate::des::general::pontryagin_bang_bang::{run_pontryagin_bang_bang, PontryaginOpts};
     use crate::des::general::sliding_mode_control::{run_sliding_mode, SlidingModeOpts};
     use crate::des::general::stag_hunt::{run_stag_hunt, StagHuntOpts};
     use crate::des::general::temp_control::{run_temp_control, ControllerSpec, SimConfig};
@@ -85,10 +81,13 @@ mod tests {
         assert!(Preconditions::integer("m", "k", 3.7).is_err());
         assert!(Preconditions::probability_vector("m", "p", &[0.5, 0.4, 0.09], 1e-9).is_err());
         assert!(Preconditions::probability_vector("m", "p", &[0.5, -0.1, 0.6], 1e-9).is_err());
-        assert!(
-            Preconditions::symmetric_matrix("m", "M", &vec![vec![1.0, 2.0], vec![3.0, 4.0]], 1e-9)
-                .is_err()
-        );
+        assert!(Preconditions::symmetric_matrix(
+            "m",
+            "M",
+            &vec![vec![1.0, 2.0], vec![3.0, 4.0]],
+            1e-9
+        )
+        .is_err());
         assert!(Preconditions::positive_definite_cholesky(
             "m",
             "M",
@@ -112,10 +111,13 @@ mod tests {
         assert!(Preconditions::positive("m", "x", 0.001).is_ok());
         assert!(Preconditions::in_range("m", "x", 0.5, 0.0, 1.0).is_ok());
         assert!(Preconditions::probability_vector("m", "p", &[0.4, 0.3, 0.3], 1e-9).is_ok());
-        assert!(
-            Preconditions::symmetric_matrix("m", "M", &vec![vec![1.0, 2.0], vec![2.0, 3.0]], 1e-9)
-                .is_ok()
-        );
+        assert!(Preconditions::symmetric_matrix(
+            "m",
+            "M",
+            &vec![vec![1.0, 2.0], vec![2.0, 3.0]],
+            1e-9
+        )
+        .is_ok());
         assert!(Preconditions::positive_definite_cholesky(
             "m",
             "M",

@@ -59,7 +59,8 @@ mod tests {
     // Group 1 — Station-graph knapsack with incremental LP backend.
     #[test]
     fn station_graph_knapsack() {
-        let p = build_binary_knapsack_ip(vec![10.0, 40.0, 30.0, 50.0], vec![5.0, 4.0, 6.0, 3.0], 10.0);
+        let p =
+            build_binary_knapsack_ip(vec![10.0, 40.0, 30.0, 50.0], vec![5.0, 4.0, 6.0, 3.0], 10.0);
         let r = solve_ipmip_with_des(p.clone(), incremental());
         assert_eq!(r.status, IPMIPStatus::Optimal);
         assert!(close(r.z, 90.0), "z={}", r.z);
@@ -82,14 +83,25 @@ mod tests {
         );
         assert!(
             r.token_stats.by_kind.get("ip-node").copied().unwrap_or(0) > 0
-                && r.token_stats.by_kind.get("ip-relaxation").copied().unwrap_or(0) > 0
-                && r.token_stats.by_kind.get("ip-candidate").copied().unwrap_or(0) > 0
+                && r.token_stats
+                    .by_kind
+                    .get("ip-relaxation")
+                    .copied()
+                    .unwrap_or(0)
+                    > 0
+                && r.token_stats
+                    .by_kind
+                    .get("ip-candidate")
+                    .copied()
+                    .unwrap_or(0)
+                    > 0
         );
         assert!(r.token_stats.state_transitions >= r.token_stats.stateful);
         assert!(r
             .trace
             .iter()
-            .any(|e| e.lineage_root.as_deref() == Some("ip-node-0") && e.token_generation.unwrap_or(0) > 0));
+            .any(|e| e.lineage_root.as_deref() == Some("ip-node-0")
+                && e.token_generation.unwrap_or(0) > 0));
         assert!(r.token_stats.stateless > 0);
         assert!(r.candidates_tried > 0, "candidates={}", r.candidates_tried);
         assert!(r.in_house_only && !r.uses_external_solvers);
@@ -103,7 +115,8 @@ mod tests {
     // Group 2 — Selectable LP algorithms agree.
     #[test]
     fn selectable_lp_algorithms_agree() {
-        let p = build_binary_knapsack_ip(vec![10.0, 40.0, 30.0, 50.0], vec![5.0, 4.0, 6.0, 3.0], 10.0);
+        let p =
+            build_binary_knapsack_ip(vec![10.0, 40.0, 30.0, 50.0], vec![5.0, 4.0, 6.0, 3.0], 10.0);
         for alg in [
             ConcreteLpRelaxationAlgorithm::InternalSimplex,
             ConcreteLpRelaxationAlgorithm::DesSimplexDantzig,
@@ -179,7 +192,8 @@ mod tests {
     // Group 5 — Auto technique selection.
     #[test]
     fn auto_technique_selection() {
-        let p = build_binary_knapsack_ip(vec![10.0, 40.0, 30.0, 50.0], vec![5.0, 4.0, 6.0, 3.0], 10.0);
+        let p =
+            build_binary_knapsack_ip(vec![10.0, 40.0, 30.0, 50.0], vec![5.0, 4.0, 6.0, 3.0], 10.0);
         let r = solve_ipmip_with_des(
             p,
             IPMIPSolveOptions {
@@ -225,7 +239,8 @@ mod tests {
     #[test]
     fn auto_plan_dense_root_in_house_or_external() {
         let dense = dense_problem();
-        let in_house = build_ipmip_solver_technique_plan(&dense, LpRelaxationAlgorithm::Auto, false);
+        let in_house =
+            build_ipmip_solver_technique_plan(&dense, LpRelaxationAlgorithm::Auto, false);
         assert!(
             !in_house.external_candidate
                 && in_house.root_lp_algorithm
@@ -263,7 +278,8 @@ mod tests {
             variable_nodes: None,
             constraint_nodes: None,
         };
-        let plan = build_ipmip_solver_technique_plan(&separable, LpRelaxationAlgorithm::Auto, false);
+        let plan =
+            build_ipmip_solver_technique_plan(&separable, LpRelaxationAlgorithm::Auto, false);
         assert!(plan.decomposition_candidate && plan.features.constraint_variable_components == 2);
     }
 

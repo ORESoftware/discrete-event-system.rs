@@ -224,7 +224,10 @@ pub fn parse_json(input: &str) -> Result<JsonValue, String> {
     let v = p.parse_value()?;
     p.skip_ws();
     if p.pos != p.chars.len() {
-        return Err(format!("unexpected trailing characters at position {}", p.pos));
+        return Err(format!(
+            "unexpected trailing characters at position {}",
+            p.pos
+        ));
     }
     Ok(v)
 }
@@ -266,7 +269,10 @@ impl JsonParser {
             Some('t') | Some('f') => self.parse_bool(),
             Some('n') => self.parse_null(),
             Some(c) if c == '-' || c.is_ascii_digit() => self.parse_number(),
-            Some(c) => Err(format!("unexpected character '{c}' at position {}", self.pos)),
+            Some(c) => Err(format!(
+                "unexpected character '{c}' at position {}",
+                self.pos
+            )),
             None => Err("unexpected end of input".to_string()),
         }
     }
@@ -584,7 +590,8 @@ impl Drop for JsonlLogger {
 /// Convenience reader for offline validators / comparators. Returns an error
 /// (carrying the 1-based line number) on a malformed JSONL line.
 pub fn read_events(file_path: &str) -> Result<Vec<JsonValue>, String> {
-    let raw = fs::read_to_string(file_path).map_err(|e| format!("cannot read '{file_path}': {e}"))?;
+    let raw =
+        fs::read_to_string(file_path).map_err(|e| format!("cannot read '{file_path}': {e}"))?;
     let mut events: Vec<JsonValue> = Vec::new();
     for (i, line) in raw.split('\n').enumerate() {
         if line.is_empty() {
@@ -614,7 +621,12 @@ mod tests {
     }
 
     fn obj(entries: Vec<(&str, JsonValue)>) -> JsonValue {
-        JsonValue::Object(entries.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+        JsonValue::Object(
+            entries
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect(),
+        )
     }
 
     #[test]
@@ -646,8 +658,14 @@ mod tests {
         let events = read_events(p).expect("read events");
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].get("kind").and_then(|v| v.as_str()), Some("a"));
-        assert_eq!(events[0].get("level").and_then(|v| v.as_str()), Some("info"));
-        assert_eq!(events[1].get("level").and_then(|v| v.as_str()), Some("warn"));
+        assert_eq!(
+            events[0].get("level").and_then(|v| v.as_str()),
+            Some("info")
+        );
+        assert_eq!(
+            events[1].get("level").and_then(|v| v.as_str()),
+            Some("warn")
+        );
         let _ = fs::remove_file(p);
     }
 
@@ -656,13 +674,19 @@ mod tests {
         let src = r#"{"kind":"tick","t":3,"populations":{"S":2,"E":1},"flag":true,"none":null,"edges":[["a","b"],["c","d"]]}"#;
         let v = parse_json(src).expect("parse");
         assert_eq!(v.get("kind").and_then(|x| x.as_str()), Some("tick"));
-        assert_eq!(v.pointer(&["populations", "S"]).and_then(|x| x.as_f64()), Some(2.0));
+        assert_eq!(
+            v.pointer(&["populations", "S"]).and_then(|x| x.as_f64()),
+            Some(2.0)
+        );
         assert_eq!(v.get("flag").and_then(|x| x.as_bool()), Some(true));
         assert_eq!(v.get("none"), Some(&JsonValue::Null));
 
         let serialized = v.to_string();
         let v2 = parse_json(&serialized).expect("reparse");
-        assert_eq!(v2.pointer(&["populations", "E"]).and_then(|x| x.as_f64()), Some(1.0));
+        assert_eq!(
+            v2.pointer(&["populations", "E"]).and_then(|x| x.as_f64()),
+            Some(1.0)
+        );
 
         let edges = v.get("edges").and_then(|x| x.as_array()).unwrap();
         assert_eq!(edges.len(), 2);

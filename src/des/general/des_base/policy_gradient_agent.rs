@@ -150,7 +150,9 @@ pub trait PolicyGradientAgent<S: 'static = f64, A: 'static = usize>: DESStation 
             }
         }
         // 1. Process transitions: fill the buffer entry for (s, a) just emitted.
-        let transitions = self.core_mut().drain::<TransitionToken<S, A>>(CH_TRANSITION);
+        let transitions = self
+            .core_mut()
+            .drain::<TransitionToken<S, A>>(CH_TRANSITION);
         for t in transitions {
             // Find the most-recent un-completed entry; this should be the last.
             {
@@ -174,8 +176,10 @@ pub trait PolicyGradientAgent<S: 'static = f64, A: 'static = usize>: DESStation 
                 // If the just-completed transition was NON-terminal we owe an
                 // action on s' once the update station finishes — stash it.
                 if !t.done {
-                    self.pg_core_mut().pending_action_state =
-                        Some(PendingAction { state: t.next_state.clone(), episode_id: t.episode_id });
+                    self.pg_core_mut().pending_action_state = Some(PendingAction {
+                        state: t.next_state.clone(),
+                        episode_id: t.episode_id,
+                    });
                 }
                 self.core_mut().emit(Rc::new(TrainTriggerToken), CH_TRAIN);
                 return;
@@ -313,9 +317,11 @@ pub trait PolicyUpdateStation: DESStation {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use super::super::rl_tokens::{ActionToken, ResumeToken, StateToken, TrainTriggerToken, TransitionToken};
+    use super::super::rl_tokens::{
+        ActionToken, ResumeToken, StateToken, TrainTriggerToken, TransitionToken,
+    };
     use super::super::station::{DESStation, StationCore, StationRef};
+    use super::*;
     use crate::des::shared::capabilities::{RandomSource, SeededRandom};
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -371,11 +377,19 @@ mod tests {
         fn pg_core_mut(&mut self) -> &mut PolicyGradientCore<f64, usize> {
             &mut self.pg
         }
-        fn sample_policy_and_value(&self, _state: &f64, rng: &mut dyn RandomSource) -> PolicyOutput<usize> {
+        fn sample_policy_and_value(
+            &self,
+            _state: &f64,
+            rng: &mut dyn RandomSource,
+        ) -> PolicyOutput<usize> {
             let probs = softmax2(&self.theta.borrow());
             let u = rng.next_float();
             let action = if u < probs[0] { 0 } else { 1 };
-            PolicyOutput { action, log_prob: probs[action].ln(), value: 0.0 }
+            PolicyOutput {
+                action,
+                log_prob: probs[action].ln(),
+                value: 0.0,
+            }
         }
     }
 
@@ -470,17 +484,34 @@ mod tests {
         // action 1 pays 1.0, action 0 pays 0.0.
         let theta = Rc::new(RefCell::new(vec![0.0, 0.0]));
         let agent = Rc::new(RefCell::new(BanditAgent::new(8, 12345, theta.clone())));
-        let update = Rc::new(RefCell::new(BanditUpdate::new(agent.clone(), theta.clone(), 0.1)));
-        let actions: Rc<RefCell<ActionCollector>> = Rc::new(RefCell::new(ActionCollector::default()));
+        let update = Rc::new(RefCell::new(BanditUpdate::new(
+            agent.clone(),
+            theta.clone(),
+            0.1,
+        )));
+        let actions: Rc<RefCell<ActionCollector>> =
+            Rc::new(RefCell::new(ActionCollector::default()));
 
         // Wire agent↔update; route the agent's actions to the collector.
-        agent.borrow_mut().core_mut().pipe(update.clone() as StationRef, CH_TRAIN, CH_TRAIN);
-        update.borrow_mut().core_mut().pipe(agent.clone() as StationRef, CH_RESUME, CH_RESUME);
-        agent.borrow_mut().core_mut().pipe(actions.clone() as StationRef, CH_ACTION, "in");
+        agent
+            .borrow_mut()
+            .core_mut()
+            .pipe(update.clone() as StationRef, CH_TRAIN, CH_TRAIN);
+        update
+            .borrow_mut()
+            .core_mut()
+            .pipe(agent.clone() as StationRef, CH_RESUME, CH_RESUME);
+        agent
+            .borrow_mut()
+            .core_mut()
+            .pipe(actions.clone() as StationRef, CH_ACTION, "in");
 
         // Seed the first episode start.
         let mut episode = 0.0_f64;
-        agent.borrow_mut().core_mut().take(Rc::new(StateToken::new(0.0_f64, episode)), CH_STATE);
+        agent
+            .borrow_mut()
+            .core_mut()
+            .take(Rc::new(StateToken::new(0.0_f64, episode)), CH_STATE);
 
         for _ in 0..8000 {
             if update.borrow().has_work() {
@@ -495,11 +526,21 @@ mod tests {
                 let reward = if a.action == 1 { 1.0 } else { 0.0 };
                 // Terminal transition, then reset → next-episode StateToken.
                 agent.borrow_mut().core_mut().take(
-                    Rc::new(TransitionToken::new(a.state, a.action, reward, 0.0, true, a.episode_id)),
+                    Rc::new(TransitionToken::new(
+                        a.state,
+                        a.action,
+                        reward,
+                        0.0,
+                        true,
+                        a.episode_id,
+                    )),
                     CH_TRANSITION,
                 );
                 episode += 1.0;
-                agent.borrow_mut().core_mut().take(Rc::new(StateToken::new(0.0_f64, episode)), CH_STATE);
+                agent
+                    .borrow_mut()
+                    .core_mut()
+                    .take(Rc::new(StateToken::new(0.0_f64, episode)), CH_STATE);
             }
         }
 
@@ -541,8 +582,16 @@ mod tests {
         fn pg_core_mut(&mut self) -> &mut PolicyGradientCore<f64, usize> {
             &mut self.pg
         }
-        fn sample_policy_and_value(&self, _state: &f64, _rng: &mut dyn RandomSource) -> PolicyOutput<usize> {
-            PolicyOutput { action: 0, log_prob: (0.5_f64).ln(), value: 0.0 }
+        fn sample_policy_and_value(
+            &self,
+            _state: &f64,
+            _rng: &mut dyn RandomSource,
+        ) -> PolicyOutput<usize> {
+            PolicyOutput {
+                action: 0,
+                log_prob: (0.5_f64).ln(),
+                value: 0.0,
+            }
         }
     }
 
@@ -553,15 +602,20 @@ mod tests {
             pg: PolicyGradientCore::new(3, Box::new(SeededRandom::new(1))),
         };
         let trains: Rc<RefCell<TrainCollector>> = Rc::new(RefCell::new(TrainCollector::default()));
-        agent.core_mut().pipe(trains.clone() as StationRef, CH_TRAIN, "in");
+        agent
+            .core_mut()
+            .pipe(trains.clone() as StationRef, CH_TRAIN, "in");
 
         // Seed one episode start, then feed three non-terminal transitions.
-        agent.core_mut().take(Rc::new(StateToken::new(0.0_f64, 0.0)), CH_STATE);
+        agent
+            .core_mut()
+            .take(Rc::new(StateToken::new(0.0_f64, 0.0)), CH_STATE);
         agent.run_time_step();
         for _ in 0..3 {
-            agent
-                .core_mut()
-                .take(Rc::new(TransitionToken::new(0.0_f64, 0usize, 0.5, 0.0, false, 0.0)), CH_TRANSITION);
+            agent.core_mut().take(
+                Rc::new(TransitionToken::new(0.0_f64, 0usize, 0.5, 0.0, false, 0.0)),
+                CH_TRANSITION,
+            );
         }
         agent.run_time_step();
         trains.borrow_mut().run_time_step();
@@ -636,8 +690,11 @@ mod tests {
             pu: PolicyUpdateCore::new(),
             ran: 0,
         };
-        let resumes: Rc<RefCell<ResumeCollector>> = Rc::new(RefCell::new(ResumeCollector::default()));
-        update.core_mut().pipe(resumes.clone() as StationRef, CH_RESUME, "in");
+        let resumes: Rc<RefCell<ResumeCollector>> =
+            Rc::new(RefCell::new(ResumeCollector::default()));
+        update
+            .core_mut()
+            .pipe(resumes.clone() as StationRef, CH_RESUME, "in");
 
         assert!(!update.has_work());
         update.core_mut().take(Rc::new(TrainTriggerToken), CH_TRAIN);

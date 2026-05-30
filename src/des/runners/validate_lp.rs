@@ -68,7 +68,11 @@ fn solve_lp_external(lp: &LpProblem, method: &str) -> LpResult {
     stub_lp(lp, &format!("scipy:{}", method))
 }
 
-fn solve_lp_via_des(lp: &LpProblem, _pivot_rule: Option<&str>, _max_iter: Option<usize>) -> LpResult {
+fn solve_lp_via_des(
+    lp: &LpProblem,
+    _pivot_rule: Option<&str>,
+    _max_iter: Option<usize>,
+) -> LpResult {
     stub_lp(lp, "des-simplex")
 }
 
@@ -79,7 +83,9 @@ fn solve_lp(lp: &LpProblem) -> LpResult {
 
 fn scipy_unavailable(r: &LpResult) -> bool {
     r.status == "numerical-error"
-        && (r.message.contains("scipy") || r.message.contains("numpy") || r.message.contains("No module named"))
+        && (r.message.contains("scipy")
+            || r.message.contains("numpy")
+            || r.message.contains("No module named"))
 }
 
 // =============================================================================
@@ -198,7 +204,10 @@ fn max_abs_diff(u: &[f64], v: &[f64]) -> f64 {
 }
 
 fn arr_to_string(a: &[f64], digits: usize) -> String {
-    a.iter().map(|x| format!("{:.*}", digits, x)).collect::<Vec<_>>().join(", ")
+    a.iter()
+        .map(|x| format!("{:.*}", digits, x))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 // Grid-world helpers for Study 5 (W = H = 3), as free fns so the boxed MDP
@@ -298,14 +307,23 @@ pub fn run() {
         println!(
             "#   internal cost  = {:.6}   x = {}",
             internal.objective,
-            internal.x.iter().map(|v| format!("{:.4}", v)).collect::<Vec<_>>().join(", ")
+            internal
+                .x
+                .iter()
+                .map(|v| format!("{:.4}", v))
+                .collect::<Vec<_>>()
+                .join(", ")
         );
         let ext = solve_lp_external(&lp, "highs");
         if ext.status == "optimal" {
             println!(
                 "#   scipy:highs    = {:.6}   x = {}",
                 ext.objective,
-                ext.x.iter().map(|v| format!("{:.4}", v)).collect::<Vec<_>>().join(", ")
+                ext.x
+                    .iter()
+                    .map(|v| format!("{:.4}", v))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             );
             c.check(
                 "internal cost ≡ scipy:highs cost (|Δ| ≤ 1e-7)",
@@ -322,9 +340,21 @@ pub fn run() {
         let protein = 2.0 * x[0] + 3.0 * x[1] + 1.0 * x[2] + 4.0 * x[3];
         let vit_a = 1.0 * x[0] + 2.0 * x[1] + 3.0 * x[2] + 1.0 * x[3];
         let vit_c = 3.0 * x[0] + 1.0 * x[1] + 2.0 * x[2] + 0.0 * x[3];
-        c.check("protein ≥ 12 (constraint feasibility)", protein >= 12.0 - 1e-7, &format!("got {:.4}", protein));
-        c.check("vit-A   ≥  6", vit_a >= 6.0 - 1e-7, &format!("got {:.4}", vit_a));
-        c.check("vit-C   ≥  4", vit_c >= 4.0 - 1e-7, &format!("got {:.4}", vit_c));
+        c.check(
+            "protein ≥ 12 (constraint feasibility)",
+            protein >= 12.0 - 1e-7,
+            &format!("got {:.4}", protein),
+        );
+        c.check(
+            "vit-A   ≥  6",
+            vit_a >= 6.0 - 1e-7,
+            &format!("got {:.4}", vit_a),
+        );
+        c.check(
+            "vit-C   ≥  4",
+            vit_c >= 4.0 - 1e-7,
+            &format!("got {:.4}", vit_c),
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -374,7 +404,10 @@ pub fn run() {
             c.check(
                 "transportation cost: internal ≡ scipy:highs (|Δ| ≤ 1e-7)",
                 approx_eq(internal.objective, ext.objective, 1e-7),
-                &format!("internal={:.6}  highs={:.6}", internal.objective, ext.objective),
+                &format!(
+                    "internal={:.6}  highs={:.6}",
+                    internal.objective, ext.objective
+                ),
             );
         }
         let mut supply_ok = true;
@@ -412,20 +445,47 @@ pub fn run() {
             num_actions: Box::new(|_s| 2),
             outcomes: Box::new(move |s, a| {
                 if s == n - 1 {
-                    return vec![Outcome { prob: 1.0, reward: 0.0, next_state: s }];
+                    return vec![Outcome {
+                        prob: 1.0,
+                        reward: 0.0,
+                        next_state: s,
+                    }];
                 }
-                let target = if a == 1 { (n - 1).min(s + 1) } else { s.saturating_sub(1) };
+                let target = if a == 1 {
+                    (n - 1).min(s + 1)
+                } else {
+                    s.saturating_sub(1)
+                };
                 let reward = if target == n - 1 { 1.0 } else { 0.0 };
-                vec![Outcome { prob: 1.0, reward, next_state: target }]
+                vec![Outcome {
+                    prob: 1.0,
+                    reward,
+                    next_state: target,
+                }]
             }),
             is_terminal: Box::new(move |s| s == n - 1),
             terminal_reward: Box::new(|_s| 0.0),
         };
         let gamma = 0.9;
-        let vi = value_iteration(&mdp, ViOptions { gamma, tol: 1e-12, max_iter: 10000 });
+        let vi = value_iteration(
+            &mdp,
+            ViOptions {
+                gamma,
+                tol: 1e-12,
+                max_iter: 10000,
+            },
+        );
         let lp_sol = solve_mdp_as_lp(&mdp, gamma);
-        println!("#   VI    V = {}    iters={}", arr_to_string(&vi.v, 6), vi.iterations);
-        println!("#   LP    V = {}    iters={}", arr_to_string(&lp_sol.v, 6), lp_sol.lp.iters);
+        println!(
+            "#   VI    V = {}    iters={}",
+            arr_to_string(&vi.v, 6),
+            vi.iterations
+        );
+        println!(
+            "#   LP    V = {}    iters={}",
+            arr_to_string(&lp_sol.v, 6),
+            lp_sol.lp.iters
+        );
         c.check(
             "V*_LP ≡ V*_VI (max|Δ| ≤ 1e-6)",
             max_abs_diff(&lp_sol.v, &vi.v) < 1e-6,
@@ -442,8 +502,17 @@ pub fn run() {
             pol_match,
             &format!(
                 "LP={}  VI={}",
-                lp_sol.policy.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","),
-                vi.policy.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",")
+                lp_sol
+                    .policy
+                    .iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+                vi.policy
+                    .iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
             ),
         );
     }
@@ -460,7 +529,11 @@ pub fn run() {
             num_actions: Box::new(|_s| 4),
             outcomes: Box::new(move |s, a| {
                 if s == goal {
-                    return vec![Outcome { prob: 1.0, reward: 0.0, next_state: s }];
+                    return vec![Outcome {
+                        prob: 1.0,
+                        reward: 0.0,
+                        next_state: s,
+                    }];
                 }
                 let intended = grid_move(s, a);
                 let (sa1, sa2) = match a {
@@ -472,16 +545,35 @@ pub fn run() {
                 let step_cost = -0.04;
                 let r = |sp: usize| if sp == goal { 1.0 } else { step_cost };
                 vec![
-                    Outcome { prob: 0.8, reward: r(intended), next_state: intended },
-                    Outcome { prob: 0.1, reward: r(slip1), next_state: slip1 },
-                    Outcome { prob: 0.1, reward: r(slip2), next_state: slip2 },
+                    Outcome {
+                        prob: 0.8,
+                        reward: r(intended),
+                        next_state: intended,
+                    },
+                    Outcome {
+                        prob: 0.1,
+                        reward: r(slip1),
+                        next_state: slip1,
+                    },
+                    Outcome {
+                        prob: 0.1,
+                        reward: r(slip2),
+                        next_state: slip2,
+                    },
                 ]
             }),
             is_terminal: Box::new(move |s| s == goal),
             terminal_reward: Box::new(|_s| 0.0),
         };
         let gamma = 0.95;
-        let vi = value_iteration(&mdp, ViOptions { gamma, tol: 1e-12, max_iter: 10000 });
+        let vi = value_iteration(
+            &mdp,
+            ViOptions {
+                gamma,
+                tol: 1e-12,
+                max_iter: 10000,
+            },
+        );
         let lp = solve_mdp_as_lp(&mdp, gamma);
         println!(
             "#   VI iters={}    LP iters={}    LP solver={}",
@@ -545,7 +637,13 @@ pub fn run() {
                 a_ub.push((0..n).map(|_| rng() * 2.0).collect());
                 b_ub.push(1.0 + rng() * 9.0);
             }
-            let lp = LpProblem { sense: "max", c: cvec, a_ub, b_ub, ..Default::default() };
+            let lp = LpProblem {
+                sense: "max",
+                c: cvec,
+                a_ub,
+                b_ub,
+                ..Default::default()
+            };
             let internal = solve_lp_internal(&lp, Some(1000));
             let ext = solve_lp_external(&lp, "highs");
             if ext.status == "numerical-error" && ext.message.contains("scipy") {
@@ -577,7 +675,12 @@ pub fn run() {
             c.check(
                 "all random LPs match within 1e-7 (excluding skipped)",
                 n_match == n_prob - n_skip,
-                &format!("nMatch={}  N={}  maxΔ={:.3e}", n_match, n_prob - n_skip, max_obj_diff),
+                &format!(
+                    "nMatch={}  N={}  maxΔ={:.3e}",
+                    n_match,
+                    n_prob - n_skip,
+                    max_obj_diff
+                ),
             );
         }
     }
@@ -595,7 +698,12 @@ pub fn run() {
             ..Default::default()
         };
         let expected = 8.0;
-        for choice in ["internal", "scipy:highs", "scipy:highs-ds", "scipy:highs-ipm"] {
+        for choice in [
+            "internal",
+            "scipy:highs",
+            "scipy:highs-ds",
+            "scipy:highs-ipm",
+        ] {
             std::env::set_var("LP_SOLVER", choice);
             let r = solve_lp(&lp);
             println!(
@@ -630,14 +738,24 @@ pub fn run() {
         let cases = vec![
             Case {
                 name: "2-var max",
-                lp: LpProblem { sense: "max", c: vec![3.0, 2.0], a_ub: vec![vec![1.0, 1.0], vec![1.0, 3.0]], b_ub: vec![4.0, 6.0], ..Default::default() },
+                lp: LpProblem {
+                    sense: "max",
+                    c: vec![3.0, 2.0],
+                    a_ub: vec![vec![1.0, 1.0], vec![1.0, 3.0]],
+                    b_ub: vec![4.0, 6.0],
+                    ..Default::default()
+                },
             },
             Case {
                 name: "diet (phase-1)",
                 lp: LpProblem {
                     sense: "min",
                     c: vec![0.5, 0.3, 0.7, 0.2],
-                    a_ub: vec![vec![-2.0, -3.0, -1.0, -4.0], vec![-1.0, -2.0, -3.0, -1.0], vec![-3.0, -1.0, -2.0, 0.0]],
+                    a_ub: vec![
+                        vec![-2.0, -3.0, -1.0, -4.0],
+                        vec![-1.0, -2.0, -3.0, -1.0],
+                        vec![-3.0, -1.0, -2.0, 0.0],
+                    ],
                     b_ub: vec![-12.0, -6.0, -4.0],
                     ..Default::default()
                 },
@@ -661,11 +779,23 @@ pub fn run() {
             },
             Case {
                 name: "unbounded",
-                lp: LpProblem { sense: "max", c: vec![1.0, 1.0], a_ub: vec![vec![-1.0, 1.0]], b_ub: vec![3.0], ..Default::default() },
+                lp: LpProblem {
+                    sense: "max",
+                    c: vec![1.0, 1.0],
+                    a_ub: vec![vec![-1.0, 1.0]],
+                    b_ub: vec![3.0],
+                    ..Default::default()
+                },
             },
             Case {
                 name: "infeasible",
-                lp: LpProblem { sense: "max", c: vec![1.0, 1.0], a_ub: vec![vec![1.0, 1.0], vec![-1.0, -1.0]], b_ub: vec![3.0, -5.0], ..Default::default() },
+                lp: LpProblem {
+                    sense: "max",
+                    c: vec![1.0, 1.0],
+                    a_ub: vec![vec![1.0, 1.0], vec![-1.0, -1.0]],
+                    b_ub: vec![3.0, -5.0],
+                    ..Default::default()
+                },
             },
         ];
         for case in &cases {
@@ -680,9 +810,16 @@ pub fn run() {
             };
             let stats: Vec<String> = all.iter().map(|r| r.status.clone()).collect();
             let same_status = stats.iter().all(|s| *s == stats[0]);
-            let scope = if scipy_unavailable(&ext) { "available solvers" } else { "all four solvers" };
+            let scope = if scipy_unavailable(&ext) {
+                "available solvers"
+            } else {
+                "all four solvers"
+            };
             if scipy_unavailable(&ext) {
-                println!("#   {:<32}  scipy:highs skipped ({})", case.name, ext.message);
+                println!(
+                    "#   {:<32}  scipy:highs skipped ({})",
+                    case.name, ext.message
+                );
             }
             c.check(
                 &format!("'{}': {} agree on status ({})", case.name, scope, stats[0]),
@@ -692,21 +829,41 @@ pub fn run() {
             if des_d.status == "optimal" {
                 let objs: Vec<f64> = all.iter().map(|r| r.objective).collect();
                 let reference_obj = objs[objs.len() - 1];
-                let max_delta = objs.iter().map(|o| (o - reference_obj).abs()).fold(0.0_f64, f64::max);
+                let max_delta = objs
+                    .iter()
+                    .map(|o| (o - reference_obj).abs())
+                    .fold(0.0_f64, f64::max);
                 c.check(
-                    &format!("'{}': {} agree on objective (max|Δ| ≤ 1e-7)", case.name, scope),
+                    &format!(
+                        "'{}': {} agree on objective (max|Δ| ≤ 1e-7)",
+                        case.name, scope
+                    ),
                     max_delta < 1e-7,
                     &format!(
                         "objs=[{}]   maxΔ={:.2e}",
-                        objs.iter().map(|o| format!("{:.6}", o)).collect::<Vec<_>>().join(", "),
+                        objs.iter()
+                            .map(|o| format!("{:.6}", o))
+                            .collect::<Vec<_>>()
+                            .join(", "),
                         max_delta
                     ),
                 );
-                let reference_x = if scipy_unavailable(&ext) { &internal.x } else { &ext.x };
-                let reference_name = if scipy_unavailable(&ext) { "internal simplex" } else { "scipy:highs" };
+                let reference_x = if scipy_unavailable(&ext) {
+                    &internal.x
+                } else {
+                    &ext.x
+                };
+                let reference_name = if scipy_unavailable(&ext) {
+                    "internal simplex"
+                } else {
+                    "scipy:highs"
+                };
                 let x_max_delta = max_abs_diff(&des_d.x, reference_x);
                 c.check(
-                    &format!("'{}': DES-simplex x ≡ {}  (max|Δ| ≤ 1e-7)", case.name, reference_name),
+                    &format!(
+                        "'{}': DES-simplex x ≡ {}  (max|Δ| ≤ 1e-7)",
+                        case.name, reference_name
+                    ),
                     x_max_delta < 1e-7,
                     &format!("max|Δx|={:.2e}", x_max_delta),
                 );
@@ -747,7 +904,13 @@ pub fn run() {
                 a_ub.push((0..nv).map(|_| rng() * 2.0).collect());
                 b_ub.push(1.0 + rng() * 9.0);
             }
-            let lp = LpProblem { sense: "max", c: cvec, a_ub, b_ub, ..Default::default() };
+            let lp = LpProblem {
+                sense: "max",
+                c: cvec,
+                a_ub,
+                b_ub,
+                ..Default::default()
+            };
             let des = solve_lp_via_des(&lp, None, Some(500));
             let ext = solve_lp_external(&lp, "highs");
             if scipy_unavailable(&ext) {
@@ -771,7 +934,10 @@ pub fn run() {
         if !scipy_available || compared == 0 {
             println!("#   scipy unavailable; skipping random DES/scipy comparison");
         } else {
-            println!("#   {}/{} matched to 1e-7   max|Δobj| = {:.3e}", n_match, compared, max_obj_diff);
+            println!(
+                "#   {}/{} matched to 1e-7   max|Δobj| = {:.3e}",
+                n_match, compared, max_obj_diff
+            );
             c.check(
                 "all 50 random LPs: DES-simplex obj ≡ scipy:highs obj  (|Δ| ≤ 1e-7)",
                 n_match == compared,

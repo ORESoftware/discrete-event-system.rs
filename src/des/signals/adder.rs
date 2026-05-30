@@ -156,12 +156,11 @@ mod tests {
     fn sums_enqueued_samples_into_running_total() {
         let mut adder = Adder::new("adder".into());
         for x in [1.0, 2.5, 4.0] {
-            let sv: Rc<RefCell<dyn MovingEntity>> = Rc::new(RefCell::new(SignalValue::new(
-                SignalValueArgs {
+            let sv: Rc<RefCell<dyn MovingEntity>> =
+                Rc::new(RefCell::new(SignalValue::new(SignalValueArgs {
                     id: None,
                     val: Some(x),
-                },
-            )));
+                })));
             adder.take_item(sv);
         }
         adder.run_time_step_signal(bgn(0.1), None);

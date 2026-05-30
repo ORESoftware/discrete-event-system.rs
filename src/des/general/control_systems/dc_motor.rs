@@ -80,7 +80,16 @@ impl MotorStateToken {
         voltage: f64,
         load_torque: f64,
     ) -> Self {
-        MotorStateToken { tick, time, current, omega, back_emf, torque, voltage, load_torque }
+        MotorStateToken {
+            tick,
+            time,
+            current,
+            omega,
+            back_emf,
+            torque,
+            voltage,
+            load_torque,
+        }
     }
 }
 
@@ -137,13 +146,37 @@ pub struct DcMotorDynamics {
 impl DcMotorDynamics {
     pub fn new(params: DcMotorParams) -> Self {
         let cls = "DcMotorDynamics";
-        require(Preconditions::positive(cls, "resistance", params.resistance));
-        require(Preconditions::positive(cls, "inductance", params.inductance));
-        require(Preconditions::positive(cls, "backEmfConstant", params.back_emf_constant));
-        require(Preconditions::positive(cls, "torqueConstant", params.torque_constant));
+        require(Preconditions::positive(
+            cls,
+            "resistance",
+            params.resistance,
+        ));
+        require(Preconditions::positive(
+            cls,
+            "inductance",
+            params.inductance,
+        ));
+        require(Preconditions::positive(
+            cls,
+            "backEmfConstant",
+            params.back_emf_constant,
+        ));
+        require(Preconditions::positive(
+            cls,
+            "torqueConstant",
+            params.torque_constant,
+        ));
         require(Preconditions::positive(cls, "inertia", params.inertia));
-        require(Preconditions::non_negative(cls, "friction", params.friction));
-        DcMotorDynamics { params, voltage: 0.0, load_torque: 0.0 }
+        require(Preconditions::non_negative(
+            cls,
+            "friction",
+            params.friction,
+        ));
+        DcMotorDynamics {
+            params,
+            voltage: 0.0,
+            load_torque: 0.0,
+        }
     }
 
     /// Set the inputs for the upcoming numerical step.
@@ -167,7 +200,10 @@ impl DcMotorDynamics {
         let p = &self.params;
         StateSpaceMatrices {
             a: vec![
-                vec![-p.resistance / p.inductance, -p.back_emf_constant / p.inductance],
+                vec![
+                    -p.resistance / p.inductance,
+                    -p.back_emf_constant / p.inductance,
+                ],
                 vec![p.torque_constant / p.inertia, -p.friction / p.inertia],
             ],
             b: vec![vec![1.0 / p.inductance], vec![0.0]],
@@ -212,7 +248,10 @@ pub struct LoadProfile {
 impl LoadProfile {
     pub fn new(segments: &[LoadSegment]) -> Self {
         let mut segs: Vec<LoadSegment> = if segments.is_empty() {
-            vec![LoadSegment { from_time: 0.0, torque: 0.0 }]
+            vec![LoadSegment {
+                from_time: 0.0,
+                torque: 0.0,
+            }]
         } else {
             segments.to_vec()
         };
@@ -267,7 +306,11 @@ pub struct DcMotorPlantStation {
 
 impl DcMotorPlantStation {
     pub fn new(id: &str, opts: DcMotorPlantOpts) -> Self {
-        require(Preconditions::positive("DcMotorPlantStation", "dt", opts.dt));
+        require(Preconditions::positive(
+            "DcMotorPlantStation",
+            "dt",
+            opts.dt,
+        ));
         require(Preconditions::integer_in_range(
             "DcMotorPlantStation",
             "steps",
@@ -276,12 +319,24 @@ impl DcMotorPlantStation {
             10_000_000.0,
         ));
         let dynamics = DcMotorDynamics::new(opts.params);
-        let load = opts
-            .load
-            .unwrap_or_else(|| LoadProfile::new(&[LoadSegment { from_time: 0.0, torque: 0.0 }]));
+        let load = opts.load.unwrap_or_else(|| {
+            LoadProfile::new(&[LoadSegment {
+                from_time: 0.0,
+                torque: 0.0,
+            }])
+        });
         let state = opts.initial_state.unwrap_or_else(|| vec![0.0, 0.0]);
-        require(Preconditions::length_eq("DcMotorPlantStation", "initialState", &state, 2));
-        require(Preconditions::all_finite("DcMotorPlantStation", "initialState", &state));
+        require(Preconditions::length_eq(
+            "DcMotorPlantStation",
+            "initialState",
+            &state,
+            2,
+        ));
+        require(Preconditions::all_finite(
+            "DcMotorPlantStation",
+            "initialState",
+            &state,
+        ));
         DcMotorPlantStation {
             core: StationCore::new(id),
             dynamics,
@@ -329,8 +384,16 @@ impl DESStation for DcMotorPlantStation {
         self.tick < self.steps
     }
     fn assert_preconditions(&mut self) {
-        require(Preconditions::positive("DcMotorPlantStation", "dt", self.dt));
-        require(Preconditions::all_finite("DcMotorPlantStation", "state", &self.state));
+        require(Preconditions::positive(
+            "DcMotorPlantStation",
+            "dt",
+            self.dt,
+        ));
+        require(Preconditions::all_finite(
+            "DcMotorPlantStation",
+            "state",
+            &self.state,
+        ));
     }
     fn run_time_step(&mut self) {
         if self.tick >= self.steps {
@@ -344,7 +407,9 @@ impl DESStation for DcMotorPlantStation {
         let time = self.tick as f64 * self.dt;
         let load_torque = self.load.torque_at(time);
         self.dynamics.set_inputs(self.last_voltage, load_torque);
-        self.state = self.integrator.step(&self.dynamics, time, &self.state, self.dt);
+        self.state = self
+            .integrator
+            .step(&self.dynamics, time, &self.state, self.dt);
         // 3. Emit the measured state (back-EMF included).
         let current = self.state[0];
         let omega = self.state[1];
@@ -505,7 +570,10 @@ pub struct DcMotorSinkStation {
 
 impl DcMotorSinkStation {
     pub fn new(id: &str) -> Self {
-        DcMotorSinkStation { core: StationCore::new(id), samples: Vec::new() }
+        DcMotorSinkStation {
+            core: StationCore::new(id),
+            samples: Vec::new(),
+        }
     }
 
     pub fn final_state(&self) -> Option<&MotorStateToken> {
@@ -576,8 +644,14 @@ mod tests {
     #[test]
     fn load_profile_is_piecewise_constant() {
         let lp = LoadProfile::new(&[
-            LoadSegment { from_time: 1.0, torque: 5.0 },
-            LoadSegment { from_time: 0.0, torque: 1.0 },
+            LoadSegment {
+                from_time: 1.0,
+                torque: 5.0,
+            },
+            LoadSegment {
+                from_time: 0.0,
+                torque: 1.0,
+            },
         ]);
         assert_eq!(lp.torque_at(0.0), 1.0);
         assert_eq!(lp.torque_at(0.5), 1.0);
@@ -640,7 +714,10 @@ mod tests {
                 kp: 1.0,
                 ki: 0.0,
                 dt: 0.001,
-                reference: vec![SpeedReferenceSegment { from_time: 0.0, speed: 100.0 }],
+                reference: vec![SpeedReferenceSegment {
+                    from_time: 0.0,
+                    speed: 100.0,
+                }],
                 max_voltage: None,
             },
         );
@@ -658,6 +735,10 @@ mod tests {
         sink.borrow_mut().run_time_step();
         let got = &sink.borrow().got;
         assert_eq!(got.len(), 1);
-        assert!((got[0].voltage - 100.0).abs() < 1e-9, "voltage {}", got[0].voltage);
+        assert!(
+            (got[0].voltage - 100.0).abs() < 1e-9,
+            "voltage {}",
+            got[0].voltage
+        );
     }
 }

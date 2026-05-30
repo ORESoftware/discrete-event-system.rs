@@ -54,8 +54,12 @@ use crate::des::general::des_base::fixed_point::{
 use crate::des::general::des_base::runner::{run_iterative_des, IterativeRunOptions};
 use crate::des::general::des_base::station::{DESStation, StationCore};
 use crate::des::general::des_base::validation::{intrinsic_check, FnValidator, ValidationCheck};
-use crate::des::general::incremental_lp::{IncrementalLP, IncrementalLPInit, Sense as IncSense, SolverStatus};
-use crate::des::general::lp::{self, solve_lp_internal, InternalSimplexOptions, LPProblem, LPStatus};
+use crate::des::general::incremental_lp::{
+    IncrementalLP, IncrementalLPInit, Sense as IncSense, SolverStatus,
+};
+use crate::des::general::lp::{
+    self, solve_lp_internal, InternalSimplexOptions, LPProblem, LPStatus,
+};
 use crate::des::shared::capabilities::{RandomSource, SeededRandom};
 use crate::des::shared::transform::Transform;
 
@@ -228,7 +232,9 @@ impl Transform<SubproblemDualsInput, SubproblemDualsResult> for SubproblemWithDu
         for (i, &ri) in rhs.iter().enumerate() {
             if ri < -1e-9 {
                 // Negative RHS would require Phase-1 simplex in IncrementalLP.
-                panic!("solveSubproblemWithDuals: rhs[{i}] = {ri} < 0; would require Phase-1 simplex");
+                panic!(
+                    "solveSubproblemWithDuals: rhs[{i}] = {ri} < 0; would require Phase-1 simplex"
+                );
             }
         }
         let mut lp = IncrementalLP::new(IncrementalLPInit {
@@ -241,23 +247,46 @@ impl Transform<SubproblemDualsInput, SubproblemDualsResult> for SubproblemWithDu
         });
         lp.solve_to_optimum(1000);
         if lp.status == SolverStatus::Unbounded {
-            return SubproblemDualsResult { status: SubproblemStatus::Unbounded, y: vec![], obj: f64::NAN, duals: vec![] };
+            return SubproblemDualsResult {
+                status: SubproblemStatus::Unbounded,
+                y: vec![],
+                obj: f64::NAN,
+                duals: vec![],
+            };
         }
         if lp.status == SolverStatus::Infeasible {
-            return SubproblemDualsResult { status: SubproblemStatus::Infeasible, y: vec![], obj: f64::NAN, duals: vec![] };
+            return SubproblemDualsResult {
+                status: SubproblemStatus::Infeasible,
+                y: vec![],
+                obj: f64::NAN,
+                duals: vec![],
+            };
         }
         let y = lp.get_x();
         let obj = lp.get_z();
         // Duals = reduced costs of slack columns at the optimum.
         let rc = lp.get_reduced_costs();
         let duals = rc[q.len()..q.len() + w.len()].to_vec();
-        SubproblemDualsResult { status: SubproblemStatus::Optimal, y, obj, duals }
+        SubproblemDualsResult {
+            status: SubproblemStatus::Optimal,
+            y,
+            obj,
+            duals,
+        }
     }
 }
 
 /// Deprecated shim: prefer `SubproblemWithDualsSolver.transform({q, w, rhs})`.
-pub fn solve_subproblem_with_duals(q: &[f64], w: &[Vec<f64>], rhs: &[f64]) -> SubproblemDualsResult {
-    SubproblemWithDualsSolver.transform(SubproblemDualsInput { q: q.to_vec(), w: w.to_vec(), rhs: rhs.to_vec() })
+pub fn solve_subproblem_with_duals(
+    q: &[f64],
+    w: &[Vec<f64>],
+    rhs: &[f64],
+) -> SubproblemDualsResult {
+    SubproblemWithDualsSolver.transform(SubproblemDualsInput {
+        q: q.to_vec(),
+        w: w.to_vec(),
+        rhs: rhs.to_vec(),
+    })
 }
 
 // -----------------------------------------------------------------------------
@@ -341,15 +370,29 @@ impl Transform<Vec<Scenario>, SLPSolveResult> for SLPMonolithicSolver {
             b_ub: Some(b_ub),
             ..Default::default()
         };
-        let sol = solve_lp_internal(&lp, &InternalSimplexOptions { max_iter: Some(50000), tol: None });
+        let sol = solve_lp_internal(
+            &lp,
+            &InternalSimplexOptions {
+                max_iter: Some(50000),
+                tol: None,
+            },
+        );
 
-        let x = sol.x.get(0..n_first).map(|s| s.to_vec()).unwrap_or_default();
+        let x = sol
+            .x
+            .get(0..n_first)
+            .map(|s| s.to_vec())
+            .unwrap_or_default();
         let mut y_by_scenario: Vec<Vec<f64>> = Vec::new();
         let mut scenario_values: Vec<f64> = Vec::new();
         for s in 0..n {
             let lo = n_first + s * n_second;
             let hi = n_first + (s + 1) * n_second;
-            let y_s = sol.x.get(lo..hi).map(|v| v.to_vec()).unwrap_or_else(|| vec![0.0; n_second]);
+            let y_s = sol
+                .x
+                .get(lo..hi)
+                .map(|v| v.to_vec())
+                .unwrap_or_else(|| vec![0.0; n_second]);
             let mut qy = 0.0;
             for j in 0..n_second {
                 qy += p.q_second[j] * y_s[j];
@@ -471,7 +514,9 @@ pub struct BendersStation {
 }
 
 fn downcast_benders(s: &dyn DESStation) -> &BendersStation {
-    s.as_any().downcast_ref::<BendersStation>().expect("validator received a non-BendersStation station")
+    s.as_any()
+        .downcast_ref::<BendersStation>()
+        .expect("validator received a non-BendersStation station")
 }
 
 impl BendersStation {
@@ -517,7 +562,11 @@ impl BendersStation {
 
         let mut station = BendersStation {
             core: StationCore::new("benders"),
-            fp: FixedPointCore::new(FixedPointOptions { tol: Some(opts.tol), max_iter: Some(opts.max_iter), max_history_len: None }),
+            fp: FixedPointCore::new(FixedPointOptions {
+                tol: Some(opts.tol),
+                max_iter: Some(opts.max_iter),
+                max_history_len: None,
+            }),
             p,
             scenarios,
             n,
@@ -544,12 +593,18 @@ impl BendersStation {
                 "benders.optimal-implies-gap-le-tol",
                 |s: &dyn DESStation| {
                     let st = downcast_benders(s);
-                    st.final_status != BendersFinalStatus::Optimal || st.current().gap <= st.fp.tol + 1e-9
+                    st.final_status != BendersFinalStatus::Optimal
+                        || st.current().gap <= st.fp.tol + 1e-9
                 },
                 Some("gap ≤ tol when optimal".to_string()),
                 Some(Box::new(|s: &dyn DESStation| {
                     let st = downcast_benders(s);
-                    format!("status={:?}  gap={}  tol={}", st.final_status, st.current().gap, st.fp.tol)
+                    format!(
+                        "status={:?}  gap={}  tol={}",
+                        st.final_status,
+                        st.current().gap,
+                        st.fp.tol
+                    )
                 })),
                 Some("benders-intrinsic".to_string()),
                 Some("optimality declared but UB − LB exceeds tol".to_string()),
@@ -570,7 +625,11 @@ impl BendersStation {
                 Some("LB ≤ UB".to_string()),
                 Some(Box::new(|s: &dyn DESStation| {
                     let st = downcast_benders(s);
-                    format!("LB={}  UB={}", st.current().lower_bound, st.current().upper_bound)
+                    format!(
+                        "LB={}  UB={}",
+                        st.current().lower_bound,
+                        st.current().upper_bound
+                    )
                 })),
                 Some("benders-intrinsic".to_string()),
                 Some("lower bound exceeds upper bound — would indicate a duality bug".to_string()),
@@ -621,7 +680,11 @@ impl BendersStation {
                         if let Some(ref_obj) = reference.objective {
                             if ref_obj.is_finite() {
                                 let cur = st.current();
-                                let obj = if cur.lower_bound.is_finite() { cur.lower_bound } else { f64::NAN };
+                                let obj = if cur.lower_bound.is_finite() {
+                                    cur.lower_bound
+                                } else {
+                                    f64::NAN
+                                };
                                 let e = (obj - ref_obj).abs() / ref_obj.abs().max(1e-12);
                                 let passed = e <= ref_tol;
                                 out.push(ValidationCheck {
@@ -630,7 +693,11 @@ impl BendersStation {
                                     observed: Some(format!("{obj:.8e}")),
                                     expected: Some(format!("{ref_obj:.8e}")),
                                     group: Some("benders-external".to_string()),
-                                    details: if passed { None } else { Some(format!("rel-err={e:.3e} > {ref_tol}")) },
+                                    details: if passed {
+                                        None
+                                    } else {
+                                        Some(format!("rel-err={e:.3e} > {ref_tol}"))
+                                    },
                                 });
                             }
                         }
@@ -689,11 +756,19 @@ impl FixedPointIterationStation<BendersIterState> for BendersStation {
         self.pivots_total += self.master.tick - pivots_before;
         if self.master.status != SolverStatus::Optimal {
             let (run, fin) = match self.master.status {
-                SolverStatus::Unbounded => (BendersRunStatus::Unbounded, BendersFinalStatus::Unbounded),
+                SolverStatus::Unbounded => {
+                    (BendersRunStatus::Unbounded, BendersFinalStatus::Unbounded)
+                }
                 _ => (BendersRunStatus::Infeasible, BendersFinalStatus::Infeasible),
             };
             self.final_status = fin;
-            return BendersIterState { iter, gap: 0.0, upper_bound: f64::NAN, lower_bound: self.best_lower_bound, status: run };
+            return BendersIterState {
+                iter,
+                gap: 0.0,
+                upper_bound: f64::NAN,
+                lower_bound: self.best_lower_bound,
+                status: run,
+            };
         }
         let master_x = self.master.get_x();
         let x_master: Vec<f64> = master_x[0..self.n_first].to_vec();
@@ -711,18 +786,17 @@ impl FixedPointIterationStation<BendersIterState> for BendersStation {
         let mut scenario_y: Vec<Vec<f64>> = Vec::new();
         for s in 0..self.n {
             let sc = &self.scenarios[s];
-            let rhs: Vec<f64> = sc
-                .h
-                .iter()
-                .enumerate()
-                .map(|(i, &hi)| {
-                    let mut v = hi;
-                    for j in 0..self.n_first {
-                        v -= sc.t[i][j] * x_master[j];
-                    }
-                    v
-                })
-                .collect();
+            let rhs: Vec<f64> =
+                sc.h.iter()
+                    .enumerate()
+                    .map(|(i, &hi)| {
+                        let mut v = hi;
+                        for j in 0..self.n_first {
+                            v -= sc.t[i][j] * x_master[j];
+                        }
+                        v
+                    })
+                    .collect();
             let sub = solve_subproblem_with_duals(&self.p.q_second, &self.p.w_second, &rhs);
             if sub.status != SubproblemStatus::Optimal {
                 self.final_status = BendersFinalStatus::SubproblemError;
@@ -740,7 +814,13 @@ impl FixedPointIterationStation<BendersIterState> for BendersStation {
                     stop_reason: Some(BendersStopReason::SubproblemError),
                 };
                 self.trace.push(stop);
-                return BendersIterState { iter, gap: 0.0, upper_bound: f64::NAN, lower_bound: f64::NAN, status: BendersRunStatus::SubproblemError };
+                return BendersIterState {
+                    iter,
+                    gap: 0.0,
+                    upper_bound: f64::NAN,
+                    lower_bound: f64::NAN,
+                    status: BendersRunStatus::SubproblemError,
+                };
             }
             scenario_values.push(sub.obj);
             scenario_duals.push(sub.duals);
@@ -748,7 +828,8 @@ impl FixedPointIterationStation<BendersIterState> for BendersStation {
         }
         let mut expected_q = 0.0;
         for s in 0..self.n {
-            expected_q += self.scenarios[s].prob.unwrap_or(1.0 / self.n as f64) * scenario_values[s];
+            expected_q +=
+                self.scenarios[s].prob.unwrap_or(1.0 / self.n as f64) * scenario_values[s];
         }
         let upper_bound = c_tx + theta_master;
         let lower_bound = c_tx + expected_q;
@@ -784,7 +865,13 @@ impl FixedPointIterationStation<BendersIterState> for BendersStation {
                 gap,
                 stop_reason: Some(BendersStopReason::Converged),
             });
-            return BendersIterState { iter, gap, upper_bound, lower_bound, status: BendersRunStatus::Optimal };
+            return BendersIterState {
+                iter,
+                gap,
+                upper_bound,
+                lower_bound,
+                status: BendersRunStatus::Optimal,
+            };
         }
 
         // 4. Build the optimality cut and add it to the master.
@@ -808,7 +895,8 @@ impl FixedPointIterationStation<BendersIterState> for BendersStation {
         let mut cut_coefs = pi_t_avg.clone();
         cut_coefs.push(1.0);
         let cut_rhs = pi_h_avg - self.p.theta_lower_bound;
-        self.master.apply_add_constraint(&cut_coefs, cut_rhs, Some(format!("cut{iter}")));
+        self.master
+            .apply_add_constraint(&cut_coefs, cut_rhs, Some(format!("cut{iter}")));
         self.trace.push(BendersIteration {
             iter,
             x_master,
@@ -816,13 +904,24 @@ impl FixedPointIterationStation<BendersIterState> for BendersStation {
             scenario_values,
             scenario_duals,
             expected_q,
-            cut_added: Some(CutAdded { coefs: cut_coefs, rhs: cut_rhs, pi_h: pi_h_avg, pi_t: pi_t_avg }),
+            cut_added: Some(CutAdded {
+                coefs: cut_coefs,
+                rhs: cut_rhs,
+                pi_h: pi_h_avg,
+                pi_t: pi_t_avg,
+            }),
             upper_bound,
             lower_bound,
             gap,
             stop_reason: None,
         });
-        BendersIterState { iter, gap, upper_bound, lower_bound, status: BendersRunStatus::Running }
+        BendersIterState {
+            iter,
+            gap,
+            upper_bound,
+            lower_bound,
+            status: BendersRunStatus::Running,
+        }
     }
 
     fn delta(&self, _prev: &BendersIterState, next: &BendersIterState) -> f64 {
@@ -832,8 +931,11 @@ impl FixedPointIterationStation<BendersIterState> for BendersStation {
     fn should_stop(&mut self, iter: usize, last_delta: f64) -> bool {
         let st = self.current().status;
         if st != BendersRunStatus::Running && iter > 0 {
-            self.fp_core_mut().convergence_reason =
-                if st == BendersRunStatus::Optimal { ConvergenceReason::Converged } else { ConvergenceReason::MaxIter };
+            self.fp_core_mut().convergence_reason = if st == BendersRunStatus::Optimal {
+                ConvergenceReason::Converged
+            } else {
+                ConvergenceReason::MaxIter
+            };
             return true;
         }
         // super.shouldStop (the default FixedPointIterationStation behaviour).
@@ -850,7 +952,11 @@ impl FixedPointIterationStation<BendersIterState> for BendersStation {
 }
 
 /// Benders / L-shaped decomposition solve of a two-stage SLP.
-pub fn solve_slp_benders(p: SLPProblem, scenarios: Vec<Scenario>, opts: BendersOpts) -> SLPSolveResult {
+pub fn solve_slp_benders(
+    p: SLPProblem,
+    scenarios: Vec<Scenario>,
+    opts: BendersOpts,
+) -> SLPSolveResult {
     let t0 = Instant::now();
     let filled = FilledBendersOpts {
         max_iter: opts.max_iter.unwrap_or(100),
@@ -863,7 +969,10 @@ pub fn solve_slp_benders(p: SLPProblem, scenarios: Vec<Scenario>, opts: BendersO
 
     let c_first = p.c_first.clone();
     let station = Rc::new(RefCell::new(BendersStation::new(p, scenarios, &filled)));
-    run_iterative_des(vec![station.clone() as Rc<RefCell<dyn DESStation>>], IterativeRunOptions::default());
+    run_iterative_des(
+        vec![station.clone() as Rc<RefCell<dyn DESStation>>],
+        IterativeRunOptions::default(),
+    );
 
     let st = station.borrow();
     let final_state = st.current().clone();
@@ -888,7 +997,11 @@ pub fn solve_slp_benders(p: SLPProblem, scenarios: Vec<Scenario>, opts: BendersO
             }
         }
         BendersFinalStatus::Infeasible | BendersFinalStatus::Unbounded => SLPSolveResult {
-            status: if status == BendersFinalStatus::Infeasible { SLPStatus::Infeasible } else { SLPStatus::Unbounded },
+            status: if status == BendersFinalStatus::Infeasible {
+                SLPStatus::Infeasible
+            } else {
+                SLPStatus::Unbounded
+            },
             x: st.best_x.clone(),
             objective: f64::NAN,
             c_first_x: f64::NAN,
@@ -985,7 +1098,12 @@ impl Transform<UniformDemandSpec, Vec<Scenario>> for ProductionScenarioBuilder {
             // h = [0...0, D_1, ..., D_n].
             let mut h = vec![0.0; n];
             h.extend_from_slice(&d);
-            scenarios.push(Scenario { t, h, prob: Some(1.0 / big_n as f64), meta: Some(ScenarioMeta { d }) });
+            scenarios.push(Scenario {
+                t,
+                h,
+                prob: Some(1.0 / big_n as f64),
+                meta: Some(ScenarioMeta { d }),
+            });
         }
         scenarios
     }
@@ -1117,7 +1235,11 @@ impl Transform<ProductionClosedFormInput, SLPSolveResult> for ProductionClosedFo
 }
 
 /// Deprecated shim: prefer `ProductionClosedFormSolver.transform({c, p, ranges})`.
-pub fn solve_production_closed_form(c: Vec<f64>, p: Vec<f64>, ranges: Vec<(f64, f64)>) -> SLPSolveResult {
+pub fn solve_production_closed_form(
+    c: Vec<f64>,
+    p: Vec<f64>,
+    ranges: Vec<(f64, f64)>,
+) -> SLPSolveResult {
     ProductionClosedFormSolver.transform(ProductionClosedFormInput { c, p, ranges })
 }
 
@@ -1177,7 +1299,11 @@ fn json_extract_number(src: &str, key: &str) -> Option<f64> {
     let after = &src[start + needle.len()..];
     let colon = after.find(':')?;
     let rest = after[colon + 1..].trim_start();
-    let end = rest.find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-' || c == '+' || c == 'e' || c == 'E')).unwrap_or(rest.len());
+    let end = rest
+        .find(|c: char| {
+            !(c.is_ascii_digit() || c == '.' || c == '-' || c == '+' || c == 'e' || c == 'E')
+        })
+        .unwrap_or(rest.len());
     rest[..end].trim().parse::<f64>().ok()
 }
 
@@ -1222,43 +1348,88 @@ mod tests {
 
     #[test]
     fn subproblem_recovers_duals() {
-        let res = solve_subproblem_with_duals(&[3.0, 2.0], &[vec![1.0, 0.0], vec![0.0, 1.0]], &[4.0, 5.0]);
+        let res = solve_subproblem_with_duals(
+            &[3.0, 2.0],
+            &[vec![1.0, 0.0], vec![0.0, 1.0]],
+            &[4.0, 5.0],
+        );
         assert_eq!(res.status, SubproblemStatus::Optimal);
         assert!((res.obj - 22.0).abs() < 1e-6, "obj = {}", res.obj);
         assert!((res.y[0] - 4.0).abs() < 1e-6 && (res.y[1] - 5.0).abs() < 1e-6);
-        assert!((res.duals[0] - 3.0).abs() < 1e-6 && (res.duals[1] - 2.0).abs() < 1e-6, "duals = {:?}", res.duals);
+        assert!(
+            (res.duals[0] - 3.0).abs() < 1e-6 && (res.duals[1] - 2.0).abs() < 1e-6,
+            "duals = {:?}",
+            res.duals
+        );
     }
 
     #[test]
     fn benders_matches_monolithic_on_same_scenarios() {
         let (c, p, ranges) = small_problem();
         let problem = build_production_slp(c.clone(), p.clone(), None);
-        let scenarios = build_production_scenarios(UniformDemandSpec { ranges: ranges.clone(), seed: 42 }, 25);
+        let scenarios = build_production_scenarios(
+            UniformDemandSpec {
+                ranges: ranges.clone(),
+                seed: 42,
+            },
+            25,
+        );
 
         let mono = solve_slp_monolithic(problem.clone(), scenarios.clone());
         assert_eq!(mono.status, SLPStatus::Optimal);
 
-        let benders = solve_slp_benders(problem, scenarios, BendersOpts { tol: Some(1e-6), max_iter: Some(200), ..Default::default() });
+        let benders = solve_slp_benders(
+            problem,
+            scenarios,
+            BendersOpts {
+                tol: Some(1e-6),
+                max_iter: Some(200),
+                ..Default::default()
+            },
+        );
         assert_eq!(benders.status, SLPStatus::Optimal);
 
         // Both solve the same SAA; objectives must agree at convergence.
         let rel = (benders.objective - mono.objective).abs() / mono.objective.abs().max(1e-9);
-        assert!(rel < 1e-3, "benders={} mono={}", benders.objective, mono.objective);
+        assert!(
+            rel < 1e-3,
+            "benders={} mono={}",
+            benders.objective,
+            mono.objective
+        );
     }
 
     #[test]
     fn closed_form_is_near_saa_optimum() {
         let (c, p, ranges) = small_problem();
         let problem = build_production_slp(c.clone(), p.clone(), None);
-        let scenarios = build_production_scenarios(UniformDemandSpec { ranges: ranges.clone(), seed: 7 }, 60);
+        let scenarios = build_production_scenarios(
+            UniformDemandSpec {
+                ranges: ranges.clone(),
+                seed: 7,
+            },
+            60,
+        );
 
-        let benders = solve_slp_benders(problem, scenarios, BendersOpts { tol: Some(1e-6), ..Default::default() });
+        let benders = solve_slp_benders(
+            problem,
+            scenarios,
+            BendersOpts {
+                tol: Some(1e-6),
+                ..Default::default()
+            },
+        );
         let closed = solve_production_closed_form(c, p, ranges);
 
         assert_eq!(benders.status, SLPStatus::Optimal);
         // Closed-form first-stage x should be in the same ballpark as the SAA x.
         for i in 0..2 {
-            assert!((benders.x[i] - closed.x[i]).abs() < 3.0, "x[{i}]: benders={} closed={}", benders.x[i], closed.x[i]);
+            assert!(
+                (benders.x[i] - closed.x[i]).abs() < 3.0,
+                "x[{i}]: benders={} closed={}",
+                benders.x[i],
+                closed.x[i]
+            );
         }
     }
 

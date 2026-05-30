@@ -22,15 +22,17 @@ mod tests {
         let problem = build_bottleneck_computer_network_problem();
         let result = run_computer_network_simulation(&problem);
         // Every generated packet is delivered, dropped, or still in flight.
-        let conserved =
-            result.delivered_packets + result.dropped_packets + result.active_packets;
+        let conserved = result.delivered_packets + result.dropped_packets + result.active_packets;
         assert!(
             (result.generated_packets - conserved).abs() < 0.5,
             "packet conservation violated: generated={} conserved={}",
             result.generated_packets,
             conserved
         );
-        assert!(result.generated_packets > 0.0, "source generated no packets");
+        assert!(
+            result.generated_packets > 0.0,
+            "source generated no packets"
+        );
         assert_eq!(result.node_stats.len(), 5);
     }
 }

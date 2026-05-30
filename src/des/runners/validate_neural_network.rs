@@ -146,7 +146,10 @@ struct XorOpts {
 }
 
 fn run_xor_neural_net_des(_opts: &XorOpts) -> XorResult {
-    XorResult { predictions: vec![vec![0.0]; 4], loss_history: vec![0.0; 200] }
+    XorResult {
+        predictions: vec![vec![0.0]; 4],
+        loss_history: vec![0.0; 200],
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -177,7 +180,9 @@ struct QOpts {
 }
 
 fn run_neural_q_learning_des(env: &Corridor, _opts: &QOpts) -> QResult {
-    QResult { policy: vec![0; env.length] }
+    QResult {
+        policy: vec![0; env.length],
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -272,20 +277,47 @@ fn max_abs_diff(a: &[f64], b: &[f64]) -> f64 {
 /// `validate-neural-network.ts` `main`.
 pub fn run() {
     let mut checks: Vec<CheckRow> = Vec::new();
-    let mut check = |checks: &mut Vec<CheckRow>, name: &str, passed: bool, detail: Option<String>| {
-        let tail = detail.as_ref().map(|d| format!("  - {}", d)).unwrap_or_default();
-        println!("  {}  {}{}", if passed { "PASS" } else { "FAIL" }, name, tail);
-        checks.push(CheckRow { name: name.to_string(), passed, detail });
-    };
+    let mut check =
+        |checks: &mut Vec<CheckRow>, name: &str, passed: bool, detail: Option<String>| {
+            let tail = detail
+                .as_ref()
+                .map(|d| format!("  - {}", d))
+                .unwrap_or_default();
+            println!(
+                "  {}  {}{}",
+                if passed { "PASS" } else { "FAIL" },
+                name,
+                tail
+            );
+            checks.push(CheckRow {
+                name: name.to_string(),
+                passed,
+                detail,
+            });
+        };
 
-    let root = std::env::var("REPO_ROOT").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
-    let out_path = root.join("out").join("external").join("neural-network").join("reference.json");
+    let root = std::env::var("REPO_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    let out_path = root
+        .join("out")
+        .join("external")
+        .join("neural-network")
+        .join("reference.json");
 
     let ext = run_external_module(&out_path);
 
     println!("Neural-network: framework vs external Python reference");
     println!("======================================================");
-    println!("  external command: {} {}", ext.command, ext.args.iter().map(|a| format!("{:?}", a)).collect::<Vec<_>>().join(" "));
+    println!(
+        "  external command: {} {}",
+        ext.command,
+        ext.args
+            .iter()
+            .map(|a| format!("{:?}", a))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
     if !ext.stdout.trim().is_empty() {
         println!("{}", ext.stdout.trim());
     }
@@ -301,16 +333,34 @@ pub fn run() {
 
     println!();
     println!("-- XOR supervised network --");
-    let xor = run_xor_neural_net_des(&XorOpts { seed: 7, epochs: 8000, learning_rate: 0.3, hidden_layers: vec![4] });
+    let xor = run_xor_neural_net_des(&XorOpts {
+        seed: 7,
+        epochs: 8000,
+        learning_rate: 0.3,
+        hidden_layers: vec![4],
+    });
     let xor_pred: Vec<f64> = xor.predictions.iter().map(|v| v[0]).collect();
     match &reference {
         Some(reference) => {
             let pred_diff = max_abs_diff(&xor_pred, &reference.xor.predictions);
             let n = xor.loss_history.len();
             let m = reference.xor.loss_history.len();
-            let loss_diff = max_abs_diff(&xor.loss_history[n.saturating_sub(100)..], &reference.xor.loss_history[m.saturating_sub(100)..]);
-            check(&mut checks, "XOR predictions match external reference", pred_diff < 1e-12, Some(format!("max abs diff={:.3e}", pred_diff)));
-            check(&mut checks, "XOR trailing losses match external reference", loss_diff < 1e-12, Some(format!("max abs diff={:.3e}", loss_diff)));
+            let loss_diff = max_abs_diff(
+                &xor.loss_history[n.saturating_sub(100)..],
+                &reference.xor.loss_history[m.saturating_sub(100)..],
+            );
+            check(
+                &mut checks,
+                "XOR predictions match external reference",
+                pred_diff < 1e-12,
+                Some(format!("max abs diff={:.3e}", pred_diff)),
+            );
+            check(
+                &mut checks,
+                "XOR trailing losses match external reference",
+                loss_diff < 1e-12,
+                Some(format!("max abs diff={:.3e}", loss_diff)),
+            );
         }
         None => println!("  SKIP  XOR comparison (reference JSON unavailable; see PORT NOTES)"),
     }
@@ -320,36 +370,92 @@ pub fn run() {
     let env = Corridor::new(6);
     let q = run_neural_q_learning_des(
         &env,
-        &QOpts { num_episodes: 600, max_steps_per_episode: 40, alpha: 0.25, gamma: 0.95, epsilon: 0.8, epsilon_decay: 0.99, epsilon_min: 0.02, seed: 1 },
+        &QOpts {
+            num_episodes: 600,
+            max_steps_per_episode: 40,
+            alpha: 0.25,
+            gamma: 0.95,
+            epsilon: 0.8,
+            epsilon_decay: 0.99,
+            epsilon_min: 0.02,
+            seed: 1,
+        },
     );
     let policy = q.policy.clone();
-    let eval_q = eval_policy(&env, |s| policy[s], &EvalOpts { num_episodes: 50, max_steps_per_episode: 40 });
+    let eval_q = eval_policy(
+        &env,
+        |s| policy[s],
+        &EvalOpts {
+            num_episodes: 50,
+            max_steps_per_episode: 40,
+        },
+    );
     match &reference {
         Some(reference) => {
             check(
                 &mut checks,
                 "learned policy matches external optimal policy on nonterminal states",
-                q.policy.iter().take(5).copied().collect::<Vec<_>>() == reference.corridor.policy.iter().take(5).copied().collect::<Vec<_>>(),
+                q.policy.iter().take(5).copied().collect::<Vec<_>>()
+                    == reference
+                        .corridor
+                        .policy
+                        .iter()
+                        .take(5)
+                        .copied()
+                        .collect::<Vec<_>>(),
                 Some(format!(
                     "learned=[{}], optimal=[{}]",
-                    q.policy.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", "),
-                    reference.corridor.policy.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", ")
+                    q.policy
+                        .iter()
+                        .map(|x| x.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    reference
+                        .corridor
+                        .policy
+                        .iter()
+                        .map(|x| x.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 )),
             );
         }
         None => println!("  SKIP  corridor policy comparison (reference JSON unavailable)"),
     }
-    check(&mut checks, "learned greedy policy succeeds in evaluation", eval_q.success_rate == 1.0, Some(format!("success={}", eval_q.success_rate)));
+    check(
+        &mut checks,
+        "learned greedy policy succeeds in evaluation",
+        eval_q.success_rate == 1.0,
+        Some(format!("success={}", eval_q.success_rate)),
+    );
 
     println!();
     println!("-- Neural ODE decay --");
-    let net = FeedForwardNetwork::new(vec![Layer { weights: vec![vec![-0.5]], biases: vec![0.0], activation: Activation::Linear }]);
-    let trace = solve_neural_ode(&net, &OdeOpts { y0: vec![1.0], t0: 0.0, t1: 2.0, dt: 0.05, solver: "rk4" });
+    let net = FeedForwardNetwork::new(vec![Layer {
+        weights: vec![vec![-0.5]],
+        biases: vec![0.0],
+        activation: Activation::Linear,
+    }]);
+    let trace = solve_neural_ode(
+        &net,
+        &OdeOpts {
+            y0: vec![1.0],
+            t0: 0.0,
+            t1: 2.0,
+            dt: 0.05,
+            solver: "rk4",
+        },
+    );
     let framework_final = trace.y[trace.y.len() - 1][0];
     match &reference {
         Some(reference) => {
             let final_diff = (framework_final - reference.neural_ode_decay.final_value).abs();
-            check(&mut checks, "neural ODE final state matches external RK4", final_diff < 1e-12, Some(format!("diff={:.3e}", final_diff)));
+            check(
+                &mut checks,
+                "neural ODE final state matches external RK4",
+                final_diff < 1e-12,
+                Some(format!("diff={:.3e}", final_diff)),
+            );
         }
         None => println!("  SKIP  neural ODE external comparison (reference JSON unavailable)"),
     }
@@ -357,18 +463,32 @@ pub fn run() {
         &mut checks,
         "neural ODE agrees with analytical decay",
         (framework_final - (-1.0_f64).exp()).abs() < 1e-7,
-        Some(format!("error={:.3e}", (framework_final - (-1.0_f64).exp()).abs())),
+        Some(format!(
+            "error={:.3e}",
+            (framework_final - (-1.0_f64).exp()).abs()
+        )),
     );
 
     println!();
     println!("========================================");
     let passed = checks.iter().filter(|c| c.passed).count();
-    println!("validate-neural-network: {}/{} checks passed.", passed, checks.len());
+    println!(
+        "validate-neural-network: {}/{} checks passed.",
+        passed,
+        checks.len()
+    );
     if passed < checks.len() {
         println!("FAILED:");
         for c in &checks {
             if !c.passed {
-                println!("  - {}{}", c.name, c.detail.as_ref().map(|d| format!(": {}", d)).unwrap_or_default());
+                println!(
+                    "  - {}{}",
+                    c.name,
+                    c.detail
+                        .as_ref()
+                        .map(|d| format!(": {}", d))
+                        .unwrap_or_default()
+                );
             }
         }
         std::process::exit(1);

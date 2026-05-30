@@ -41,7 +41,10 @@ struct Program {
 impl Program {
     fn new() -> Self {
         // `bgn(parseInt(process.env.step_size || '500'))`.
-        let step = std::env::var("step_size").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(500.0);
+        let step = std::env::var("step_size")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(500.0);
         Program {
             step_size: bgn(step),
             batches: Vec::new(),

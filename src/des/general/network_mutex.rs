@@ -39,11 +39,11 @@ use crate::des::general::des_base::preconditions::Preconditions;
 use crate::des::general::des_base::runner::{
     failed_validation_checks, run_iterative_des, IterativeRunOptions, RunReason,
 };
-use crate::des::general::des_base::station::{DESStation, StationCore, StationRef};
 use crate::des::general::des_base::stateful_token::{
     make_stateful_token, spawn_stateful_child_token, transition_token, MakeStatefulTokenOpts,
     SpawnStatefulChildTokenOpts, StatefulToken, TransitionTokenOpts,
 };
+use crate::des::general::des_base::station::{DESStation, StationCore, StationRef};
 use crate::des::general::des_base::validation::intrinsic_check;
 
 pub const MUTEX_WORK_CHANNEL: &str = "work";
@@ -352,8 +352,14 @@ impl DESStation for MutexWorkSourceStation {
     }
     fn assert_preconditions(&mut self) {
         let id = self.core.id.clone();
-        Preconditions::integer_in_range("network-mutex", &format!("{id}.count"), self.count as f64, 0.0, 1e9)
-            .expect("count");
+        Preconditions::integer_in_range(
+            "network-mutex",
+            &format!("{id}.count"),
+            self.count as f64,
+            0.0,
+            1e9,
+        )
+        .expect("count");
         Preconditions::integer_in_range(
             "network-mutex",
             &format!("{id}.interarrivalTicks"),
@@ -387,7 +393,12 @@ impl DESStation for MutexWorkSourceStation {
                 event: None,
                 detail: None,
             });
-            let item = MutexWorkItem { token: base, item_id, created_tick: self.tick, lock: None };
+            let item = MutexWorkItem {
+                token: base,
+                item_id,
+                created_tick: self.tick,
+                lock: None,
+            };
             self.emitted += 1;
             self.core.emit(Rc::new(item), MUTEX_WORK_CHANNEL);
         }
@@ -435,12 +446,18 @@ impl NetworkMutexLockServiceStation {
         let v = intrinsic_check::<dyn DESStation>(
             "network-mutex.lock.single-holder",
             |s: &dyn DESStation| {
-                let st = s.as_any().downcast_ref::<NetworkMutexLockServiceStation>().unwrap();
+                let st = s
+                    .as_any()
+                    .downcast_ref::<NetworkMutexLockServiceStation>()
+                    .unwrap();
                 st.pending_grant_count() <= 1 || st.current_holder().is_some()
             },
             Some("at most one outstanding grant for the current holder".to_string()),
             Some(Box::new(|s: &dyn DESStation| {
-                let st = s.as_any().downcast_ref::<NetworkMutexLockServiceStation>().unwrap();
+                let st = s
+                    .as_any()
+                    .downcast_ref::<NetworkMutexLockServiceStation>()
+                    .unwrap();
                 format!(
                     "holder={}, pendingGrants={}",
                     st.current_holder().unwrap_or_else(|| "none".to_string()),
@@ -459,7 +476,10 @@ impl NetworkMutexLockServiceStation {
             grant_count: self.grants,
             release_count: self.releases,
             invalid_release_count: self.invalid_releases,
-            final_holder_item_id: self.holder.as_ref().map(|h| h.request.parent_item_id.clone()),
+            final_holder_item_id: self
+                .holder
+                .as_ref()
+                .map(|h| h.request.parent_item_id.clone()),
             waiting_requests: self.wait_queue.len(),
             max_wait_queue: self.max_wait_queue,
             mean_service_queue_wait_ticks: self.total_service_queue_wait_ticks as f64
@@ -470,7 +490,9 @@ impl NetworkMutexLockServiceStation {
     }
 
     pub fn current_holder(&self) -> Option<String> {
-        self.holder.as_ref().map(|h| h.request.parent_item_id.clone())
+        self.holder
+            .as_ref()
+            .map(|h| h.request.parent_item_id.clone())
     }
 
     pub fn pending_grant_count(&self) -> usize {
@@ -614,7 +636,10 @@ impl DESStation for NetworkMutexLockServiceStation {
             };
             let parent_item_id = req.parent_item_id.clone();
             let token_id = req.token_id.clone();
-            self.holder = Some(CurrentHolder { request: req, acquired_tick: self.tick });
+            self.holder = Some(CurrentHolder {
+                request: req,
+                acquired_tick: self.tick,
+            });
             self.pending_grants.push(PendingGrant {
                 grant,
                 deliver_at_tick: self.tick + self.grant_delay_ticks,
@@ -737,10 +762,21 @@ impl DESStation for MutexQueueSubstation {
                 },
             );
             let item_id = item.item_id.clone();
-            self.queue.push(QueuedWork { item, enqueued_tick: self.tick });
+            self.queue.push(QueuedWork {
+                item,
+                enqueued_tick: self.tick,
+            });
             self.arrived += 1;
             self.max_queue = self.max_queue.max(self.queue.len());
-            trace(&self.events, self.tick, &id, NetworkMutexEventKind::WorkArrived, Some(item_id), None, None);
+            trace(
+                &self.events,
+                self.tick,
+                &id,
+                NetworkMutexEventKind::WorkArrived,
+                Some(item_id),
+                None,
+                None,
+            );
         }
 
         // Incoming grants.
@@ -764,7 +800,11 @@ impl DESStation for MutexQueueSubstation {
                     detail: None,
                 },
             );
-            let mut lock = lock_with(queued.item.lock.take(), &grant.token_id, outstanding.created_tick);
+            let mut lock = lock_with(
+                queued.item.lock.take(),
+                &grant.token_id,
+                outstanding.created_tick,
+            );
             lock.granted_tick = Some(self.tick);
             queued.item.lock = Some(lock);
             self.total_queue_wait_ticks += self.tick.saturating_sub(queued.enqueued_tick);
@@ -772,7 +812,10 @@ impl DESStation for MutexQueueSubstation {
             let item_id = queued.item.item_id.clone();
             let grant_token_id = grant.token_id.clone();
             self.core.emit(
-                Rc::new(LockedWorkToken { item: queued.item, grant: (*grant).clone() }),
+                Rc::new(LockedWorkToken {
+                    item: queued.item,
+                    grant: (*grant).clone(),
+                }),
                 MUTEX_LOCKED_WORK_CHANNEL,
             );
             trace(
@@ -892,7 +935,8 @@ impl MutexProcessorSubstation {
         MutexProcessorStats {
             completed: self.completed,
             final_queue: self.ready.len() + usize::from(self.active.is_some()),
-            mean_time_in_system_ticks: self.total_time_in_system_ticks as f64 / (self.completed.max(1)) as f64,
+            mean_time_in_system_ticks: self.total_time_in_system_ticks as f64
+                / (self.completed.max(1)) as f64,
             child_releases_spawned: self.child_releases,
         }
     }
@@ -927,8 +971,11 @@ impl DESStation for MutexProcessorSubstation {
     }
     fn run_time_step(&mut self) {
         let id = self.core.id.clone();
-        let drained = self.core.drain::<LockedWorkToken>(MUTEX_LOCKED_WORK_CHANNEL);
-        self.ready.extend(drained.into_iter().map(|rc| (*rc).clone()));
+        let drained = self
+            .core
+            .drain::<LockedWorkToken>(MUTEX_LOCKED_WORK_CHANNEL);
+        self.ready
+            .extend(drained.into_iter().map(|rc| (*rc).clone()));
 
         if self.active.is_none() && !self.ready.is_empty() {
             let mut next = self.ready.remove(0);
@@ -938,7 +985,9 @@ impl DESStation for MutexProcessorSubstation {
                 TransitionTokenOpts {
                     tick: self.tick as f64,
                     station_id: id.clone(),
-                    event: NetworkMutexEventKind::ProcessingStarted.as_str().to_string(),
+                    event: NetworkMutexEventKind::ProcessingStarted
+                        .as_str()
+                        .to_string(),
                     detail: None,
                 },
             );
@@ -951,7 +1000,11 @@ impl DESStation for MutexProcessorSubstation {
             next.item.lock = Some(lock);
             let item_id = next.item.item_id.clone();
             let token_id = next.grant.token_id.clone();
-            self.active = Some(ActiveWork { item: next.item, grant: next.grant, remaining_ticks: self.processing_ticks });
+            self.active = Some(ActiveWork {
+                item: next.item,
+                grant: next.grant,
+                remaining_ticks: self.processing_ticks,
+            });
             trace(
                 &self.events,
                 self.tick,
@@ -980,11 +1033,17 @@ impl DESStation for MutexProcessorSubstation {
                 TransitionTokenOpts {
                     tick: self.tick as f64,
                     station_id: id.clone(),
-                    event: NetworkMutexEventKind::ProcessingFinished.as_str().to_string(),
+                    event: NetworkMutexEventKind::ProcessingFinished
+                        .as_str()
+                        .to_string(),
                     detail: None,
                 },
             );
-            let mut lock = lock_with(item.lock.take(), &token_id, active.grant.service_request_queued_tick);
+            let mut lock = lock_with(
+                item.lock.take(),
+                &token_id,
+                active.grant.service_request_queued_tick,
+            );
             lock.processing_finished_tick = Some(self.tick);
             lock.released_tick = Some(self.tick);
             item.lock = Some(lock);
@@ -1070,29 +1129,52 @@ pub struct NetworkMutexWorkerStation {
 impl NetworkMutexWorkerStation {
     pub fn new(id: &str, opts: NetworkMutexWorkerOpts, events: TraceLog) -> Self {
         let mut composite = CompositeDESStation::new(id);
-        let queue_station = composite.add_substation(Rc::new(RefCell::new(MutexQueueSubstation::new(
-            &format!("{id}:queue"),
-            id,
-            events.clone(),
-        ))));
-        let processor_station = composite.add_substation(Rc::new(RefCell::new(MutexProcessorSubstation::new(
-            &format!("{id}:processor"),
-            id,
-            opts.processing_ticks,
-            events,
-        ))));
-        composite.expose_input(MUTEX_WORK_CHANNEL, queue_station.clone() as StationRef, MUTEX_WORK_CHANNEL);
-        composite.expose_input(MUTEX_GRANT_CHANNEL, queue_station.clone() as StationRef, MUTEX_GRANT_CHANNEL);
+        let queue_station = composite.add_substation(Rc::new(RefCell::new(
+            MutexQueueSubstation::new(&format!("{id}:queue"), id, events.clone()),
+        )));
+        let processor_station =
+            composite.add_substation(Rc::new(RefCell::new(MutexProcessorSubstation::new(
+                &format!("{id}:processor"),
+                id,
+                opts.processing_ticks,
+                events,
+            ))));
+        composite.expose_input(
+            MUTEX_WORK_CHANNEL,
+            queue_station.clone() as StationRef,
+            MUTEX_WORK_CHANNEL,
+        );
+        composite.expose_input(
+            MUTEX_GRANT_CHANNEL,
+            queue_station.clone() as StationRef,
+            MUTEX_GRANT_CHANNEL,
+        );
         queue_station.borrow_mut().core_mut().pipe(
             processor_station.clone() as StationRef,
             MUTEX_LOCKED_WORK_CHANNEL,
             MUTEX_LOCKED_WORK_CHANNEL,
         );
-        composite.expose_output(queue_station.clone() as StationRef, MUTEX_REQUEST_CHANNEL, MUTEX_REQUEST_CHANNEL);
-        composite.expose_output(processor_station.clone() as StationRef, MUTEX_RELEASE_CHANNEL, MUTEX_RELEASE_CHANNEL);
-        composite.expose_output(processor_station.clone() as StationRef, MUTEX_DONE_CHANNEL, MUTEX_DONE_CHANNEL);
+        composite.expose_output(
+            queue_station.clone() as StationRef,
+            MUTEX_REQUEST_CHANNEL,
+            MUTEX_REQUEST_CHANNEL,
+        );
+        composite.expose_output(
+            processor_station.clone() as StationRef,
+            MUTEX_RELEASE_CHANNEL,
+            MUTEX_RELEASE_CHANNEL,
+        );
+        composite.expose_output(
+            processor_station.clone() as StationRef,
+            MUTEX_DONE_CHANNEL,
+            MUTEX_DONE_CHANNEL,
+        );
 
-        let mut worker = NetworkMutexWorkerStation { composite, queue_station, processor_station };
+        let mut worker = NetworkMutexWorkerStation {
+            composite,
+            queue_station,
+            processor_station,
+        };
         // Worker-level validator: completed item ids unique. Registered via the
         // DEFAULT add_validator so it lands in `core().validators` (which the
         // runner's `run_station_validation` reads) rather than the composite's
@@ -1100,13 +1182,19 @@ impl NetworkMutexWorkerStation {
         let v = intrinsic_check::<dyn DESStation>(
             "network-mutex.worker.no-duplicate-completions",
             |s: &dyn DESStation| {
-                let st = s.as_any().downcast_ref::<NetworkMutexWorkerStation>().unwrap();
+                let st = s
+                    .as_any()
+                    .downcast_ref::<NetworkMutexWorkerStation>()
+                    .unwrap();
                 let ids = st.completed_item_ids();
                 ids.iter().cloned().collect::<HashSet<_>>().len() == ids.len()
             },
             Some("completed item ids unique".to_string()),
             Some(Box::new(|s: &dyn DESStation| {
-                let st = s.as_any().downcast_ref::<NetworkMutexWorkerStation>().unwrap();
+                let st = s
+                    .as_any()
+                    .downcast_ref::<NetworkMutexWorkerStation>()
+                    .unwrap();
                 format!("completed={}", st.completed_item_ids().join(","))
             })),
             Some("network-mutex".to_string()),
@@ -1133,11 +1221,19 @@ impl NetworkMutexWorkerStation {
     }
 
     pub fn completed_items_view(&self) -> Vec<MutexWorkItem> {
-        self.processor_station.borrow().completed_items_view().to_vec()
+        self.processor_station
+            .borrow()
+            .completed_items_view()
+            .to_vec()
     }
 
     fn completed_item_ids(&self) -> Vec<String> {
-        self.processor_station.borrow().completed_items_view().iter().map(|x| x.item_id.clone()).collect()
+        self.processor_station
+            .borrow()
+            .completed_items_view()
+            .iter()
+            .map(|x| x.item_id.clone())
+            .collect()
     }
 }
 
@@ -1176,7 +1272,10 @@ pub struct MutexCompletionSinkStation {
 
 impl MutexCompletionSinkStation {
     pub fn new(id: &str) -> Self {
-        MutexCompletionSinkStation { core: StationCore::new(id), completed: Vec::new() }
+        MutexCompletionSinkStation {
+            core: StationCore::new(id),
+            completed: Vec::new(),
+        }
     }
 }
 
@@ -1192,7 +1291,8 @@ impl DESStation for MutexCompletionSinkStation {
     }
     fn run_time_step(&mut self) {
         let drained = self.core.drain::<MutexWorkItem>(MUTEX_DONE_CHANNEL);
-        self.completed.extend(drained.into_iter().map(|rc| (*rc).clone()));
+        self.completed
+            .extend(drained.into_iter().map(|rc| (*rc).clone()));
     }
 }
 
@@ -1214,39 +1314,86 @@ pub fn build_network_mutex_stations(opts: NetworkMutexSimulationOpts) -> Network
     let events: TraceLog = Rc::new(RefCell::new(Vec::new()));
     let source = Rc::new(RefCell::new(MutexWorkSourceStation::new(
         "source",
-        opts.source.unwrap_or(MutexSourceSpec { count: 8, interarrival_ticks: 1, first_arrival_tick: None }),
+        opts.source.unwrap_or(MutexSourceSpec {
+            count: 8,
+            interarrival_ticks: 1,
+            first_arrival_tick: None,
+        }),
     )));
     let worker = Rc::new(RefCell::new(NetworkMutexWorkerStation::new(
         "station-A",
-        opts.worker.unwrap_or(NetworkMutexWorkerOpts { processing_ticks: 4 }),
+        opts.worker.unwrap_or(NetworkMutexWorkerOpts {
+            processing_ticks: 4,
+        }),
         events.clone(),
     )));
     let lock = Rc::new(RefCell::new(NetworkMutexLockServiceStation::new(
         "station-B-lock",
-        opts.lock.unwrap_or(NetworkMutexLockServiceOpts { grant_delay_ticks: Some(2) }),
+        opts.lock.unwrap_or(NetworkMutexLockServiceOpts {
+            grant_delay_ticks: Some(2),
+        }),
         events.clone(),
     )));
     let sink = Rc::new(RefCell::new(MutexCompletionSinkStation::new("station-C")));
 
-    source.borrow_mut().core_mut().pipe(worker.clone() as StationRef, MUTEX_WORK_CHANNEL, MUTEX_WORK_CHANNEL);
-    worker.borrow_mut().core_mut().pipe(lock.clone() as StationRef, MUTEX_REQUEST_CHANNEL, MUTEX_REQUEST_CHANNEL);
-    worker.borrow_mut().core_mut().pipe(lock.clone() as StationRef, MUTEX_RELEASE_CHANNEL, MUTEX_RELEASE_CHANNEL);
-    lock.borrow_mut().core_mut().pipe(worker.clone() as StationRef, MUTEX_GRANT_CHANNEL, MUTEX_GRANT_CHANNEL);
-    worker.borrow_mut().core_mut().pipe(sink.clone() as StationRef, MUTEX_DONE_CHANNEL, MUTEX_DONE_CHANNEL);
+    source.borrow_mut().core_mut().pipe(
+        worker.clone() as StationRef,
+        MUTEX_WORK_CHANNEL,
+        MUTEX_WORK_CHANNEL,
+    );
+    worker.borrow_mut().core_mut().pipe(
+        lock.clone() as StationRef,
+        MUTEX_REQUEST_CHANNEL,
+        MUTEX_REQUEST_CHANNEL,
+    );
+    worker.borrow_mut().core_mut().pipe(
+        lock.clone() as StationRef,
+        MUTEX_RELEASE_CHANNEL,
+        MUTEX_RELEASE_CHANNEL,
+    );
+    lock.borrow_mut().core_mut().pipe(
+        worker.clone() as StationRef,
+        MUTEX_GRANT_CHANNEL,
+        MUTEX_GRANT_CHANNEL,
+    );
+    worker.borrow_mut().core_mut().pipe(
+        sink.clone() as StationRef,
+        MUTEX_DONE_CHANNEL,
+        MUTEX_DONE_CHANNEL,
+    );
 
-    NetworkMutexStations { source, worker, lock, sink, events }
+    NetworkMutexStations {
+        source,
+        worker,
+        lock,
+        sink,
+        events,
+    }
 }
 
 /// Run the mutex network to quiescence and reduce it to summary statistics.
-pub fn run_network_mutex_simulation(opts: NetworkMutexSimulationOpts) -> NetworkMutexSimulationResult {
+pub fn run_network_mutex_simulation(
+    opts: NetworkMutexSimulationOpts,
+) -> NetworkMutexSimulationResult {
     let max_ticks = opts.max_ticks.unwrap_or(10_000);
     let stations = build_network_mutex_stations(opts);
-    let NetworkMutexStations { source, worker, lock, sink, events } = stations;
+    let NetworkMutexStations {
+        source,
+        worker,
+        lock,
+        sink,
+        events,
+    } = stations;
 
-    let participants: Vec<StationRef> = vec![source.clone(), worker.clone(), lock.clone(), sink.clone()];
+    let participants: Vec<StationRef> =
+        vec![source.clone(), worker.clone(), lock.clone(), sink.clone()];
     let summary = run_iterative_des(
         participants,
-        IterativeRunOptions { shuffle: false, max_ticks: Some(max_ticks), ..Default::default() },
+        IterativeRunOptions {
+            shuffle: false,
+            max_ticks: Some(max_ticks),
+            ..Default::default()
+        },
     );
 
     let mut invariant_violations: Vec<String> = Vec::new();
@@ -1260,10 +1407,16 @@ pub fn run_network_mutex_simulation(opts: NetworkMutexSimulationOpts) -> Network
     }
     let lock_stats = lock.borrow().stats(summary.ticks);
     if lock_stats.invalid_release_count > 0 {
-        invariant_violations.push(format!("invalid releases: {}", lock_stats.invalid_release_count));
+        invariant_violations.push(format!(
+            "invalid releases: {}",
+            lock_stats.invalid_release_count
+        ));
     }
     for c in failed_validation_checks(&summary) {
-        let detail = c.details.or(c.observed).unwrap_or_else(|| "failed".to_string());
+        let detail = c
+            .details
+            .or(c.observed)
+            .unwrap_or_else(|| "failed".to_string());
         invariant_violations.push(format!("{}: {}", c.name, detail));
     }
 
@@ -1294,9 +1447,17 @@ mod tests {
     #[test]
     fn grants_exclusive_access_and_completes_all() {
         let res = run_network_mutex_simulation(NetworkMutexSimulationOpts {
-            source: Some(MutexSourceSpec { count: 5, interarrival_ticks: 1, first_arrival_tick: None }),
-            worker: Some(NetworkMutexWorkerOpts { processing_ticks: 3 }),
-            lock: Some(NetworkMutexLockServiceOpts { grant_delay_ticks: Some(2) }),
+            source: Some(MutexSourceSpec {
+                count: 5,
+                interarrival_ticks: 1,
+                first_arrival_tick: None,
+            }),
+            worker: Some(NetworkMutexWorkerOpts {
+                processing_ticks: 3,
+            }),
+            lock: Some(NetworkMutexLockServiceOpts {
+                grant_delay_ticks: Some(2),
+            }),
             max_ticks: Some(1000),
         });
         assert_eq!(res.generated, 5);
@@ -1305,16 +1466,28 @@ mod tests {
         assert_eq!(res.lock.invalid_release_count, 0);
         assert_eq!(res.lock.grant_count, 5);
         assert_eq!(res.lock.release_count, 5);
-        assert!(res.invariant_violations.is_empty(), "violations: {:?}", res.invariant_violations);
+        assert!(
+            res.invariant_violations.is_empty(),
+            "violations: {:?}",
+            res.invariant_violations
+        );
     }
 
     #[test]
     fn completed_item_ids_are_unique() {
         let res = run_network_mutex_simulation(NetworkMutexSimulationOpts {
-            source: Some(MutexSourceSpec { count: 6, interarrival_ticks: 2, first_arrival_tick: None }),
+            source: Some(MutexSourceSpec {
+                count: 6,
+                interarrival_ticks: 2,
+                first_arrival_tick: None,
+            }),
             ..Default::default()
         });
-        let ids: HashSet<_> = res.completed_items.iter().map(|i| i.item_id.clone()).collect();
+        let ids: HashSet<_> = res
+            .completed_items
+            .iter()
+            .map(|i| i.item_id.clone())
+            .collect();
         assert_eq!(ids.len(), res.completed_items.len());
         // Every completed item ended in the terminal `Completed` state.
         for item in &res.completed_items {
@@ -1325,7 +1498,11 @@ mod tests {
     #[test]
     fn empty_source_completes_immediately() {
         let res = run_network_mutex_simulation(NetworkMutexSimulationOpts {
-            source: Some(MutexSourceSpec { count: 0, interarrival_ticks: 1, first_arrival_tick: None }),
+            source: Some(MutexSourceSpec {
+                count: 0,
+                interarrival_ticks: 1,
+                first_arrival_tick: None,
+            }),
             ..Default::default()
         });
         assert_eq!(res.generated, 0);

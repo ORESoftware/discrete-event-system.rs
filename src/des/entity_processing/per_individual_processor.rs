@@ -39,9 +39,7 @@ use crate::des::r#abstract::interfaces::{
     EntityGraphData, HasInput, HasInternalQueue, HasManyInputConnections, HasManyOutputConnections,
     HasOutput,
 };
-use crate::des::r#abstract::r#abstract::{
-    BidirectionalCore, Entity, EntityCore, EntityConnection,
-};
+use crate::des::r#abstract::r#abstract::{BidirectionalCore, Entity, EntityConnection, EntityCore};
 use crate::des::random_variables::rv::RandomVariable;
 use crate::des::shared::precision::{to_f64, Decimal};
 
@@ -143,7 +141,8 @@ impl Entity for PerIndividualProcessor {
                 };
                 if target.borrow_mut().accept_item(item.entity.clone()) {
                     if let Some(ix) = connections.iter().position(|c| Rc::ptr_eq(c, conn)) {
-                        self.output_router.mark_accepted_index(connections.len(), ix);
+                        self.output_router
+                            .mark_accepted_index(connections.len(), ix);
                     }
                     target.borrow_mut().take_item(item.entity.clone());
                     routed = true;
@@ -268,7 +267,8 @@ mod tests {
     #[test]
     fn take_item_draws_a_duration() {
         let mut p = PerIndividualProcessor::new("pi1".to_string(), opts(2.0));
-        let m: Rc<RefCell<dyn MovingEntity>> = Rc::new(RefCell::new(ProcessableMovingEntity::new()));
+        let m: Rc<RefCell<dyn MovingEntity>> =
+            Rc::new(RefCell::new(ProcessableMovingEntity::new()));
         p.take_item(m.clone());
         assert_eq!(p.items.len(), 1);
         assert_eq!(p.items[0].remaining_time, 2.0);
@@ -278,7 +278,8 @@ mod tests {
     #[test]
     fn run_step_counts_down_and_retries_when_unrouted() {
         let mut p = PerIndividualProcessor::new("pi2".to_string(), opts(0.05));
-        let m: Rc<RefCell<dyn MovingEntity>> = Rc::new(RefCell::new(ProcessableMovingEntity::new()));
+        let m: Rc<RefCell<dyn MovingEntity>> =
+            Rc::new(RefCell::new(ProcessableMovingEntity::new()));
         p.take_item(m);
         // dt = 0.1 > 0.05 -> ready, but no out-connections -> re-queued at remaining 0.
         p.run_time_step(bgn(0.1));

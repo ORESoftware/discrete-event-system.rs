@@ -25,10 +25,17 @@ mod tests {
         assert!(r.candidates.len() >= 3, "n={}", r.candidates.len());
 
         // A feasible incumbent is selected, and dynamic pricing earns revenue.
-        assert!(r.best.feasible, "incumbent {} infeasible", r.best.candidate_id);
+        assert!(
+            r.best.feasible,
+            "incumbent {} infeasible",
+            r.best.candidate_id
+        );
 
         // Source / generator / evaluator / sink topology.
-        assert_eq!(r.topology.stations[0], "dynamic-pricing-revenue-scenario-source");
+        assert_eq!(
+            r.topology.stations[0],
+            "dynamic-pricing-revenue-scenario-source"
+        );
         for stage in [
             "dynamic-pricing-revenue-candidate-generator",
             "dynamic-pricing-revenue-plan-evaluator",
@@ -41,7 +48,11 @@ mod tests {
         }
 
         // Domain movables exposed for animation/inspection.
-        for token in ["DomainScenarioToken", "DomainPlanToken", "DomainEvaluationToken"] {
+        for token in [
+            "DomainScenarioToken",
+            "DomainPlanToken",
+            "DomainEvaluationToken",
+        ] {
             assert!(
                 r.topology.movables.iter().any(|m| m == token),
                 "missing movable {token}"

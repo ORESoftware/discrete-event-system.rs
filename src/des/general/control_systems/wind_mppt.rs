@@ -83,7 +83,16 @@ impl TurbineStateToken {
         mech_power: f64,
         gen_torque: f64,
     ) -> Self {
-        TurbineStateToken { tick, time, omega, wind_speed, lambda, cp, mech_power, gen_torque }
+        TurbineStateToken {
+            tick,
+            time,
+            omega,
+            wind_speed,
+            lambda,
+            cp,
+            mech_power,
+            gen_torque,
+        }
     }
 }
 
@@ -134,8 +143,13 @@ impl WindTurbineAerodynamics {
         require(Preconditions::positive(cls, "airDensity", air_density));
         require(Preconditions::positive(cls, "bladeRadius", blade_radius));
         require(Preconditions::non_negative(cls, "pitchDeg", pitch_deg));
-        let mut aero =
-            WindTurbineAerodynamics { air_density, blade_radius, pitch_deg, opt_lambda: 0.0, opt_cp: 0.0 };
+        let mut aero = WindTurbineAerodynamics {
+            air_density,
+            blade_radius,
+            pitch_deg,
+            opt_lambda: 0.0,
+            opt_cp: 0.0,
+        };
         aero.compute_optimum();
         aero
     }
@@ -158,7 +172,8 @@ impl WindTurbineAerodynamics {
         }
         let beta = self.pitch_deg;
         let inv_li = 1.0 / (lambda + 0.08 * beta) - 0.035 / (beta * beta * beta + 1.0);
-        let cp = 0.5176 * (116.0 * inv_li - 0.4 * beta - 5.0) * (-21.0 * inv_li).exp() + 0.0068 * lambda;
+        let cp =
+            0.5176 * (116.0 * inv_li - 0.4 * beta - 5.0) * (-21.0 * inv_li).exp() + 0.0068 * lambda;
         if cp > 0.0 {
             cp
         } else {
@@ -177,7 +192,8 @@ impl WindTurbineAerodynamics {
     pub fn aero_torque(&self, wind_speed: f64, omega: f64) -> f64 {
         let lambda = self.tip_speed_ratio(omega, wind_speed);
         let cp = self.power_coefficient(lambda);
-        let power = 0.5 * self.air_density * self.swept_area() * cp * wind_speed * wind_speed * wind_speed;
+        let power =
+            0.5 * self.air_density * self.swept_area() * cp * wind_speed * wind_speed * wind_speed;
         if omega > 1e-3 {
             return power / omega;
         }
@@ -185,7 +201,12 @@ impl WindTurbineAerodynamics {
         if lambda <= 1e-9 {
             return 0.0;
         }
-        0.5 * self.air_density * self.swept_area() * self.blade_radius * (cp / lambda) * wind_speed * wind_speed
+        0.5 * self.air_density
+            * self.swept_area()
+            * self.blade_radius
+            * (cp / lambda)
+            * wind_speed
+            * wind_speed
     }
 
     /// Optimal tip-speed ratio λ* maximising C_p (scanned + cached eagerly).
@@ -291,8 +312,18 @@ pub struct RotorDynamics {
 impl RotorDynamics {
     pub fn new(aero: WindTurbineAerodynamics, inertia: f64, friction: f64) -> Self {
         require(Preconditions::positive("RotorDynamics", "inertia", inertia));
-        require(Preconditions::non_negative("RotorDynamics", "friction", friction));
-        RotorDynamics { aero, inertia, friction, wind_speed: 0.0, gen_torque: 0.0 }
+        require(Preconditions::non_negative(
+            "RotorDynamics",
+            "friction",
+            friction,
+        ));
+        RotorDynamics {
+            aero,
+            inertia,
+            friction,
+            wind_speed: 0.0,
+            gen_torque: 0.0,
+        }
     }
 
     /// Set the operating conditions for the upcoming numerical step.
@@ -355,8 +386,18 @@ impl WindTurbinePlantStation {
     pub fn new(id: &str, opts: WindTurbinePlantOpts) -> Self {
         let cls = "WindTurbinePlantStation";
         require(Preconditions::positive(cls, "dt", opts.dt));
-        require(Preconditions::integer_in_range(cls, "steps", opts.steps as f64, 1.0, 10_000_000.0));
-        require(Preconditions::non_negative(cls, "initialOmega", opts.initial_omega));
+        require(Preconditions::integer_in_range(
+            cls,
+            "steps",
+            opts.steps as f64,
+            1.0,
+            10_000_000.0,
+        ));
+        require(Preconditions::non_negative(
+            cls,
+            "initialOmega",
+            opts.initial_omega,
+        ));
         let aero = opts.aero;
         let dynamics = RotorDynamics::new(aero.clone(), opts.inertia, opts.friction);
         WindTurbinePlantStation {
@@ -397,8 +438,16 @@ impl DESStation for WindTurbinePlantStation {
         self.tick < self.steps
     }
     fn assert_preconditions(&mut self) {
-        require(Preconditions::positive("WindTurbinePlantStation", "dt", self.dt));
-        require(Preconditions::finite("WindTurbinePlantStation", "initialOmega", self.omega));
+        require(Preconditions::positive(
+            "WindTurbinePlantStation",
+            "dt",
+            self.dt,
+        ));
+        require(Preconditions::finite(
+            "WindTurbinePlantStation",
+            "initialOmega",
+            self.omega,
+        ));
     }
     fn run_time_step(&mut self) {
         if self.tick >= self.steps {
@@ -411,8 +460,11 @@ impl DESStation for WindTurbinePlantStation {
         // 2. Advance the rotor ODE one RK4 step under the current conditions.
         let time = self.tick as f64 * self.dt;
         let wind_speed = self.wind_profile.speed_at(time);
-        self.dynamics.set_conditions(wind_speed, self.last_gen_torque);
-        let next = self.integrator.step(&self.dynamics, time, &[self.omega], self.dt);
+        self.dynamics
+            .set_conditions(wind_speed, self.last_gen_torque);
+        let next = self
+            .integrator
+            .step(&self.dynamics, time, &[self.omega], self.dt);
         self.omega = next[0].max(0.0);
         // 3. Emit the measured turbine state.
         let lambda = self.aero.tip_speed_ratio(self.omega, wind_speed);
@@ -622,7 +674,10 @@ pub struct WindMpptSinkStation {
 
 impl WindMpptSinkStation {
     pub fn new(id: &str) -> Self {
-        WindMpptSinkStation { core: StationCore::new(id), samples: Vec::new() }
+        WindMpptSinkStation {
+            core: StationCore::new(id),
+            samples: Vec::new(),
+        }
     }
 
     /// Final captured power [W].
@@ -655,7 +710,9 @@ impl DESStation for WindMpptSinkStation {
         self.core.inbox_size(WindMpptChannels::STATE) > 0
     }
     fn run_time_step(&mut self) {
-        let drained = self.core.drain::<TurbineStateToken>(WindMpptChannels::STATE);
+        let drained = self
+            .core
+            .drain::<TurbineStateToken>(WindMpptChannels::STATE);
         self.samples.extend(drained);
     }
 }
@@ -689,8 +746,14 @@ mod tests {
     #[test]
     fn wind_profile_is_piecewise_constant() {
         let wp = WindProfile::new(&[
-            WindProfileSegment { from_time: 2.0, speed: 10.0 },
-            WindProfileSegment { from_time: 0.0, speed: 6.0 },
+            WindProfileSegment {
+                from_time: 2.0,
+                speed: 10.0,
+            },
+            WindProfileSegment {
+                from_time: 0.0,
+                speed: 6.0,
+            },
         ]);
         assert_eq!(wp.speed_at(0.0), 6.0);
         assert_eq!(wp.speed_at(1.9), 6.0);
@@ -703,7 +766,10 @@ mod tests {
             "turbine",
             WindTurbinePlantOpts {
                 aero: aero(),
-                wind_profile: WindProfile::new(&[WindProfileSegment { from_time: 0.0, speed: 12.0 }]),
+                wind_profile: WindProfile::new(&[WindProfileSegment {
+                    from_time: 0.0,
+                    speed: 12.0,
+                }]),
                 inertia: 5.0,
                 friction: 0.1,
                 dt: 0.01,
@@ -753,12 +819,18 @@ mod tests {
             WindMpptChannels::TORQUE,
         );
         ctrl.take(
-            Rc::new(TurbineStateToken::new(0, 0.0, 5.0, 12.0, 0.0, 0.0, 0.0, 0.0)),
+            Rc::new(TurbineStateToken::new(
+                0, 0.0, 5.0, 12.0, 0.0, 0.0, 0.0, 0.0,
+            )),
             WindMpptChannels::STATE,
         );
         sink.borrow_mut().run_time_step();
         let got = &sink.borrow().got;
         assert_eq!(got.len(), 1);
-        assert!((got[0].torque - k * 25.0).abs() < 1e-9, "torque {}", got[0].torque);
+        assert!(
+            (got[0].torque - k * 25.0).abs() < 1e-9,
+            "torque {}",
+            got[0].torque
+        );
     }
 }

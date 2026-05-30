@@ -122,7 +122,11 @@ mod tests {
             let inst = build_random_tsp(8, seed, None);
             let lb = one_tree_lower_bound(&inst);
             let exact = held_karp_exact(&inst);
-            assert!(lb <= exact.length + 1e-9, "seed={seed}: lb={lb} opt={}", exact.length);
+            assert!(
+                lb <= exact.length + 1e-9,
+                "seed={seed}: lb={lb} opt={}",
+                exact.length
+            );
         }
     }
 
@@ -140,7 +144,12 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert!(close(r.best_length, optimal, 1e-6), "best={} opt={}", r.best_length, optimal);
+        assert!(
+            close(r.best_length, optimal, 1e-6),
+            "best={} opt={}",
+            r.best_length,
+            optimal
+        );
     }
 
     // Group 8 — Reproducibility.

@@ -109,7 +109,11 @@ impl GridWorld {
         let num_states = width * height;
         let start = opts.start.unwrap_or(0);
         let goal = opts.goal.unwrap_or(num_states - 1);
-        let pits: HashSet<usize> = opts.pits.unwrap_or_else(|| vec![5, 10]).into_iter().collect();
+        let pits: HashSet<usize> = opts
+            .pits
+            .unwrap_or_else(|| vec![5, 10])
+            .into_iter()
+            .collect();
         GridWorld {
             width,
             height,

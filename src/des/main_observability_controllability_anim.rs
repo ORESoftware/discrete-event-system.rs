@@ -17,7 +17,9 @@
 
 /// Entry point (TS top-level script).
 pub fn run() {
-    let out = std::path::Path::new("out").join("obs-ctrl").join("animation.html");
+    let out = std::path::Path::new("out")
+        .join("obs-ctrl")
+        .join("animation.html");
     println!(
         "Obs/Ctrl animation: omitted in Rust port — the storyboard scene \
          (animation::scenes::obs_ctrl_scene) is not yet ported; would write {} (see PORT NOTE). \

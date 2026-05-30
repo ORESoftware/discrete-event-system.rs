@@ -38,18 +38,16 @@
 use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 
-use crate::des::observability::logger::{JsonValue, JsonlLogger, LogLevel};
-use crate::des::shared::capabilities::{Clock, RandomSource, SystemClock};
 use crate::des::general::general::fisher_yates_shuffle;
 use crate::des::general::prng::with_seed;
+use crate::des::observability::logger::{JsonValue, JsonlLogger, LogLevel};
+use crate::des::shared::capabilities::{Clock, RandomSource, SystemClock};
 
 use super::shared::{
     average_record, compartment_populations, update_peaks, zero_compartment_record,
     TransitionCounter,
 };
-use super::types::{
-    Kernel, RunOpts, RunResult, SimConfig, Totals, COMPARTMENT_ORDER, EDGES,
-};
+use super::types::{Kernel, RunOpts, RunResult, SimConfig, Totals, COMPARTMENT_ORDER, EDGES};
 
 fn js(v: &str) -> JsonValue {
     JsonValue::String(v.to_string())
@@ -61,7 +59,12 @@ fn jb(v: bool) -> JsonValue {
     JsonValue::Bool(v)
 }
 fn jobj(entries: Vec<(&str, JsonValue)>) -> JsonValue {
-    JsonValue::Object(entries.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+    JsonValue::Object(
+        entries
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
+    )
 }
 
 /// Station behaviour (`EntitySource` / `EntityProcessor` /
@@ -192,7 +195,12 @@ impl FrameworkSim {
     }
 
     /// Advance one station by `dt`, returning routing actions `(target, entity)`.
-    fn step_station(&mut self, idx: usize, dt: f64, rng: &mut dyn RandomSource) -> Vec<(usize, u64)> {
+    fn step_station(
+        &mut self,
+        idx: usize,
+        dt: f64,
+        rng: &mut dyn RandomSource,
+    ) -> Vec<(usize, u64)> {
         let mut routes: Vec<(usize, u64)> = Vec::new();
         let out0 = self.stations[idx].outs.first().copied();
         let outs = self.stations[idx].outs.clone();
@@ -205,9 +213,19 @@ impl FrameworkSim {
             Sink,
         }
         let local = match &self.stations[idx].kind {
-            Kind::Source { a, b, turn_off_after } => Local::Source { a: *a, b: *b, cap: *turn_off_after },
+            Kind::Source {
+                a,
+                b,
+                turn_off_after,
+            } => Local::Source {
+                a: *a,
+                b: *b,
+                cap: *turn_off_after,
+            },
             Kind::Processor { a, b } => Local::Processor { a: *a, b: *b },
-            Kind::Decision { probs } => Local::Decision { probs: probs.clone() },
+            Kind::Decision { probs } => Local::Decision {
+                probs: probs.clone(),
+            },
             Kind::Sink => Local::Sink,
         };
         match local {
@@ -274,13 +292,7 @@ impl FrameworkSim {
 
     /// Take an entity into `target` (the `takeItem` hook): record the transition
     /// when entering a processor/sink (decisions flattened).
-    fn deliver(
-        &mut self,
-        target: usize,
-        entity: u64,
-        t: f64,
-        logger: &mut Option<JsonlLogger>,
-    ) {
+    fn deliver(&mut self, target: usize, entity: u64, t: f64, logger: &mut Option<JsonlLogger>) {
         let target_id = self.stations[target].id.clone();
         let is_decision = matches!(self.stations[target].kind, Kind::Decision { .. });
         let is_sink = matches!(self.stations[target].kind, Kind::Sink);
@@ -315,7 +327,9 @@ impl FrameworkSim {
 /// `runFrameworkOnce` — seed the RNG then run the framework kernel.
 pub fn run_framework_once(config: &SimConfig, opts: &RunOpts) -> RunResult {
     let seed = opts.seed.unwrap_or_else(|| SystemClock.now_ms() as u64);
-    with_seed(seed as u32, |rng| run_framework_inner(config, opts, seed, rng))
+    with_seed(seed as u32, |rng| {
+        run_framework_inner(config, opts, seed, rng)
+    })
 }
 
 fn run_framework_inner(
@@ -335,14 +349,18 @@ fn run_framework_inner(
 
     let step_size = config.step_size;
     let phase1_steps = (config.phase1_days / config.step_size).round() as i64;
-    let phase2_steps = ((config.horizon_days - config.phase1_days) / config.step_size).round() as i64;
+    let phase2_steps =
+        ((config.horizon_days - config.phase1_days) / config.step_size).round() as i64;
     let steps_per_sample = (sample_every / config.step_size).round().max(1.0) as i64;
 
     if !(phase1_steps as f64).is_finite() || !(phase2_steps as f64).is_finite() {
         eprintln!("[framework-runner] non-finite phase step counts — open-system config will not terminate.");
     }
     if config.step_size <= 0.0 {
-        eprintln!("[framework-runner] stepSize={} is not positive.", config.step_size);
+        eprintln!(
+            "[framework-runner] stepSize={} is not positive.",
+            config.step_size
+        );
     }
 
     let mut sim = FrameworkSim::new(config);
@@ -382,9 +400,24 @@ fn run_framework_inner(
 
     for i in 0..phase1_steps {
         current_day = (i + 1) as f64 * config.step_size;
-        run_tick(&mut sim, &mut order, step_size, current_day, rng, &mut logger);
+        run_tick(
+            &mut sim,
+            &mut order,
+            step_size,
+            current_day,
+            rng,
+            &mut logger,
+        );
         if (i + 1) % steps_per_sample == 0 {
-            sample_now(&sim, sink_idx, &mut pop_sums, &mut peak, &mut samples, &mut logger, current_day);
+            sample_now(
+                &sim,
+                sink_idx,
+                &mut pop_sums,
+                &mut peak,
+                &mut samples,
+                &mut logger,
+                current_day,
+            );
         }
     }
     sim.sources_off = true;
@@ -397,9 +430,24 @@ fn run_framework_inner(
     }
     for i in 0..phase2_steps {
         current_day = (phase1_steps + i + 1) as f64 * config.step_size;
-        run_tick(&mut sim, &mut order, step_size, current_day, rng, &mut logger);
+        run_tick(
+            &mut sim,
+            &mut order,
+            step_size,
+            current_day,
+            rng,
+            &mut logger,
+        );
         if (phase1_steps + i + 1) % steps_per_sample == 0 {
-            sample_now(&sim, sink_idx, &mut pop_sums, &mut peak, &mut samples, &mut logger, current_day);
+            sample_now(
+                &sim,
+                sink_idx,
+                &mut pop_sums,
+                &mut peak,
+                &mut samples,
+                &mut logger,
+                current_day,
+            );
         }
     }
 
@@ -477,7 +525,12 @@ fn sample_now(
     if let Some(logger) = logger.as_mut() {
         let pops_json: Vec<(String, JsonValue)> = COMPARTMENT_ORDER
             .iter()
-            .map(|c| (c.to_string(), jn(populations.get(*c).copied().unwrap_or(0.0))))
+            .map(|c| {
+                (
+                    c.to_string(),
+                    jn(populations.get(*c).copied().unwrap_or(0.0)),
+                )
+            })
             .collect();
         logger.log(jobj(vec![
             ("kind", js("tick")),
@@ -497,9 +550,25 @@ mod tests {
 
     #[test]
     fn framework_kernel_runs_deterministically() {
-        let cfg = SimConfig { horizon_days: 200.0, phase1_days: 120.0, ..default_config() };
-        let a = run_framework_once(&cfg, &RunOpts { seed: Some(0x10000), ..Default::default() });
-        let b = run_framework_once(&cfg, &RunOpts { seed: Some(0x10000), ..Default::default() });
+        let cfg = SimConfig {
+            horizon_days: 200.0,
+            phase1_days: 120.0,
+            ..default_config()
+        };
+        let a = run_framework_once(
+            &cfg,
+            &RunOpts {
+                seed: Some(0x10000),
+                ..Default::default()
+            },
+        );
+        let b = run_framework_once(
+            &cfg,
+            &RunOpts {
+                seed: Some(0x10000),
+                ..Default::default()
+            },
+        );
         assert_eq!(a.kernel, Kernel::Framework);
         assert_eq!(a.totals.created, b.totals.created);
         assert!(a.totals.created > 0.0);

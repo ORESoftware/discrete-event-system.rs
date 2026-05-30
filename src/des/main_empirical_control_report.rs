@@ -48,7 +48,9 @@ MDP random-policy reach degree, and POMDP belief-tracking hit-probability / resi
             log: Some(log),
         });
 
-        let out = std::path::Path::new("out").join("empirical-control").join("report.html");
+        let out = std::path::Path::new("out")
+            .join("empirical-control")
+            .join("report.html");
         if let Some(parent) = out.parent() {
             let _ = std::fs::create_dir_all(parent);
         }

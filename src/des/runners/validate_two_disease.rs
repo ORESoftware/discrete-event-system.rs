@@ -175,8 +175,8 @@ fn welch_t(xs: &[f64], ys: &[f64]) -> WelchOut {
     let se = (vx / nx + vy / ny).sqrt();
     let t = if se == 0.0 { 0.0 } else { (mx - my) / se };
     let num = (vx / nx + vy / ny).powi(2);
-    let den = (vx / nx).powi(2) / (1.0_f64).max(nx - 1.0)
-        + (vy / ny).powi(2) / (1.0_f64).max(ny - 1.0);
+    let den =
+        (vx / nx).powi(2) / (1.0_f64).max(nx - 1.0) + (vy / ny).powi(2) / (1.0_f64).max(ny - 1.0);
     let df = if den == 0.0 { f64::INFINITY } else { num / den };
     let z = t.abs();
     let phi = 0.5 * (1.0 + erf(z / std::f64::consts::SQRT_2));
@@ -265,9 +265,9 @@ pub fn run() {
         .sum::<f64>()
         / (1.0_f64).max(ts_final_d.len() as f64 - 1.0))
     .sqrt();
-    let se_gap =
-        (ts_std_d * ts_std_d / ts_final_d.len() as f64 + py_ssa_std_d * py_ssa_std_d / py_ssa_reps)
-            .sqrt();
+    let se_gap = (ts_std_d * ts_std_d / ts_final_d.len() as f64
+        + py_ssa_std_d * py_ssa_std_d / py_ssa_reps)
+        .sqrt();
     let t_stat = if se_gap == 0.0 {
         0.0
     } else {

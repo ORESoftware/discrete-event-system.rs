@@ -30,9 +30,7 @@ use crate::des::r#abstract::interfaces::{
     EntityGraphData, HasInput, HasInternalQueue, HasManyInputConnections, HasManyOutputConnections,
     HasOutput,
 };
-use crate::des::r#abstract::r#abstract::{
-    BidirectionalCore, Entity, EntityCore, EntityConnection,
-};
+use crate::des::r#abstract::r#abstract::{BidirectionalCore, Entity, EntityConnection, EntityCore};
 use crate::des::shared::precision::Decimal;
 
 /// `interface DecisionEntityGraph` — empty marker.

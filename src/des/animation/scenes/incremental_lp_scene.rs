@@ -85,12 +85,7 @@ pub struct IncrementalLPFrameArgs<'a> {
     pub pivot_label: Option<String>,
 }
 
-fn project_fn(
-    x_min: f64,
-    x_max: f64,
-    y_min: f64,
-    y_max: f64,
-) -> impl Fn(f64, f64) -> (f64, f64) {
+fn project_fn(x_min: f64, x_max: f64, y_min: f64, y_max: f64) -> impl Fn(f64, f64) -> (f64, f64) {
     let sx = (POLY_W - 2.0 * VIEW_PAD) / (x_max - x_min).max(1e-9);
     let sy = (POLY_H - 2.0 * VIEW_PAD) / (y_max - y_min).max(1e-9);
     move |x: f64, y: f64| {
@@ -177,14 +172,21 @@ fn con_name_or(snap: &LPSnapshot, idx: usize, fallback: String) -> String {
 fn basis_name(snap: &LPSnapshot, col: usize) -> String {
     if col < snap.num_struct {
         // No `??` fallback in the TS for this path.
-        snap.var_names.get(col).cloned().unwrap_or_else(|| "undefined".to_string())
+        snap.var_names
+            .get(col)
+            .cloned()
+            .unwrap_or_else(|| "undefined".to_string())
     } else {
         let idx = col - snap.num_struct;
         format!("{}_s", con_name_or(snap, idx, format!("s{}", idx + 1)))
     }
 }
 
-pub fn build_incremental_lp_frame(_t: f64, _tick: f64, args: &IncrementalLPFrameArgs) -> FrameParts {
+pub fn build_incremental_lp_frame(
+    _t: f64,
+    _tick: f64,
+    args: &IncrementalLPFrameArgs,
+) -> FrameParts {
     let mut shapes: Vec<Shape> = Vec::new();
     let snap = args.snap;
     let (a, b, c, sense, history) = (args.a, args.b, args.c, args.sense, args.history);
@@ -262,10 +264,42 @@ pub fn build_incremental_lp_frame(_t: f64, _tick: f64, args: &IncrementalLPFrame
         let (ox, oy) = project(0.0, 0.0);
         let ax_end = project(x_max, 0.0).0;
         let y_axis_end = project(0.0, y_max).1;
-        shapes.push(Shape::Line(LineShape { x1: ox, y1: oy, x2: ax_end, y2: oy, stroke: "#334155".to_string(), stroke_width: Some(1.0), ..Default::default() }));
-        shapes.push(Shape::Line(LineShape { x1: ox, y1: oy, x2: ox, y2: y_axis_end, stroke: "#334155".to_string(), stroke_width: Some(1.0), ..Default::default() }));
-        shapes.push(Shape::Text(TextShape { x: ax_end - 8.0, y: oy + 16.0, text: var_name_or(snap, 0, "x1".to_string()), font_size: Some(11.0), fill: Some("#94a3b8".to_string()), anchor: Some(Anchor::End), ..Default::default() }));
-        shapes.push(Shape::Text(TextShape { x: ox - 8.0, y: y_axis_end + 12.0, text: var_name_or(snap, 1, "x2".to_string()), font_size: Some(11.0), fill: Some("#94a3b8".to_string()), anchor: Some(Anchor::End), ..Default::default() }));
+        shapes.push(Shape::Line(LineShape {
+            x1: ox,
+            y1: oy,
+            x2: ax_end,
+            y2: oy,
+            stroke: "#334155".to_string(),
+            stroke_width: Some(1.0),
+            ..Default::default()
+        }));
+        shapes.push(Shape::Line(LineShape {
+            x1: ox,
+            y1: oy,
+            x2: ox,
+            y2: y_axis_end,
+            stroke: "#334155".to_string(),
+            stroke_width: Some(1.0),
+            ..Default::default()
+        }));
+        shapes.push(Shape::Text(TextShape {
+            x: ax_end - 8.0,
+            y: oy + 16.0,
+            text: var_name_or(snap, 0, "x1".to_string()),
+            font_size: Some(11.0),
+            fill: Some("#94a3b8".to_string()),
+            anchor: Some(Anchor::End),
+            ..Default::default()
+        }));
+        shapes.push(Shape::Text(TextShape {
+            x: ox - 8.0,
+            y: y_axis_end + 12.0,
+            text: var_name_or(snap, 1, "x2".to_string()),
+            font_size: Some(11.0),
+            fill: Some("#94a3b8".to_string()),
+            anchor: Some(Anchor::End),
+            ..Default::default()
+        }));
         // Polytope (filled polygon path).
         if verts.len() >= 2 {
             let mut d = String::new();
@@ -278,7 +312,14 @@ pub fn build_incremental_lp_frame(_t: f64, _tick: f64, args: &IncrementalLPFrame
                 d.push(' ');
             }
             d.push('Z');
-            shapes.push(Shape::Path(PathShape { d, fill: Some("#1e293b".to_string()), stroke: Some("#38bdf8".to_string()), stroke_width: Some(2.0), opacity: Some(0.8), ..Default::default() }));
+            shapes.push(Shape::Path(PathShape {
+                d,
+                fill: Some("#1e293b".to_string()),
+                stroke: Some("#38bdf8".to_string()),
+                stroke_width: Some(2.0),
+                opacity: Some(0.8),
+                ..Default::default()
+            }));
         }
         // Each constraint line.
         for i in 0..a.len() {
@@ -306,10 +347,28 @@ pub fn build_incremental_lp_frame(_t: f64, _tick: f64, args: &IncrementalLPFrame
                 let (pa, pb) = (pts[0], pts[1]);
                 let (x1, y1) = project(pa[0], pa[1]);
                 let (x2, y2) = project(pb[0], pb[1]);
-                shapes.push(Shape::Line(LineShape { x1, y1, x2, y2, stroke: "#38bdf8".to_string(), stroke_width: Some(1.5), dasharray: Some("4,3".to_string()), opacity: Some(0.7), ..Default::default() }));
+                shapes.push(Shape::Line(LineShape {
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    stroke: "#38bdf8".to_string(),
+                    stroke_width: Some(1.5),
+                    dasharray: Some("4,3".to_string()),
+                    opacity: Some(0.7),
+                    ..Default::default()
+                }));
                 let mx = (x1 + x2) / 2.0;
                 let my = (y1 + y2) / 2.0;
-                shapes.push(Shape::Text(TextShape { x: mx, y: my - 4.0, text: con_name_or(snap, i, format!("c{}", i + 1)), font_size: Some(10.0), fill: Some("#7dd3fc".to_string()), anchor: Some(Anchor::Middle), ..Default::default() }));
+                shapes.push(Shape::Text(TextShape {
+                    x: mx,
+                    y: my - 4.0,
+                    text: con_name_or(snap, i, format!("c{}", i + 1)),
+                    font_size: Some(10.0),
+                    fill: Some("#7dd3fc".to_string()),
+                    anchor: Some(Anchor::Middle),
+                    ..Default::default()
+                }));
             }
         }
         // Objective gradient arrow at the centroid of the polytope.
@@ -328,7 +387,15 @@ pub fn build_incremental_lp_frame(_t: f64, _tick: f64, args: &IncrementalLPFrame
             let dir_y = c[1] / norm * (y_max - y_min) * 0.18;
             let (ax_, ay) = project(cx, cy);
             let (bx, by) = project(cx + dir_x, cy + dir_y);
-            shapes.push(Shape::Line(LineShape { x1: ax_, y1: ay, x2: bx, y2: by, stroke: "#f59e0b".to_string(), stroke_width: Some(3.0), ..Default::default() }));
+            shapes.push(Shape::Line(LineShape {
+                x1: ax_,
+                y1: ay,
+                x2: bx,
+                y2: by,
+                stroke: "#f59e0b".to_string(),
+                stroke_width: Some(3.0),
+                ..Default::default()
+            }));
             let dx = bx - ax_;
             let dy = by - ay;
             let a_len = {
@@ -344,12 +411,33 @@ pub fn build_incremental_lp_frame(_t: f64, _tick: f64, args: &IncrementalLPFrame
             let px = -uy;
             let py = ux;
             let head_size = 8.0;
-            shapes.push(Shape::Line(LineShape { x1: bx, y1: by, x2: bx - ux * head_size + px * head_size / 2.0, y2: by - uy * head_size + py * head_size / 2.0, stroke: "#f59e0b".to_string(), stroke_width: Some(3.0), ..Default::default() }));
-            shapes.push(Shape::Line(LineShape { x1: bx, y1: by, x2: bx - ux * head_size - px * head_size / 2.0, y2: by - uy * head_size - py * head_size / 2.0, stroke: "#f59e0b".to_string(), stroke_width: Some(3.0), ..Default::default() }));
+            shapes.push(Shape::Line(LineShape {
+                x1: bx,
+                y1: by,
+                x2: bx - ux * head_size + px * head_size / 2.0,
+                y2: by - uy * head_size + py * head_size / 2.0,
+                stroke: "#f59e0b".to_string(),
+                stroke_width: Some(3.0),
+                ..Default::default()
+            }));
+            shapes.push(Shape::Line(LineShape {
+                x1: bx,
+                y1: by,
+                x2: bx - ux * head_size - px * head_size / 2.0,
+                y2: by - uy * head_size - py * head_size / 2.0,
+                stroke: "#f59e0b".to_string(),
+                stroke_width: Some(3.0),
+                ..Default::default()
+            }));
             shapes.push(Shape::Text(TextShape {
                 x: bx + 8.0,
                 y: by - 4.0,
-                text: format!("{} \u{2207}c = ({}, {})", sense.label(), js_num(c[0]), js_num(c[1])),
+                text: format!(
+                    "{} \u{2207}c = ({}, {})",
+                    sense.label(),
+                    js_num(c[0]),
+                    js_num(c[1])
+                ),
                 font_size: Some(11.0),
                 fill: Some("#fbbf24".to_string()),
                 ..Default::default()
@@ -359,12 +447,28 @@ pub fn build_incremental_lp_frame(_t: f64, _tick: f64, args: &IncrementalLPFrame
         for k in 1..history.len() {
             let (x1, y1) = project(history[k - 1][0], history[k - 1][1]);
             let (x2, y2) = project(history[k][0], history[k][1]);
-            shapes.push(Shape::Line(LineShape { x1, y1, x2, y2, stroke: "#f97316".to_string(), stroke_width: Some(2.0), opacity: Some(0.6), ..Default::default() }));
+            shapes.push(Shape::Line(LineShape {
+                x1,
+                y1,
+                x2,
+                y2,
+                stroke: "#f97316".to_string(),
+                stroke_width: Some(2.0),
+                opacity: Some(0.6),
+                ..Default::default()
+            }));
         }
         // Visited vertices.
         for x in history {
             let (px, py) = project(x[0], x[1]);
-            shapes.push(Shape::Circle(CircleShape { x: px, y: py, r: 4.0, fill: "#fb923c".to_string(), opacity: Some(0.7), ..Default::default() }));
+            shapes.push(Shape::Circle(CircleShape {
+                x: px,
+                y: py,
+                r: 4.0,
+                fill: "#fb923c".to_string(),
+                opacity: Some(0.7),
+                ..Default::default()
+            }));
         }
         // Current x*.
         let (cx, cy) = project(snap.x[0], snap.x[1]);
@@ -372,7 +476,11 @@ pub fn build_incremental_lp_frame(_t: f64, _tick: f64, args: &IncrementalLPFrame
             x: cx,
             y: cy,
             r: 9.0,
-            fill: if snap.is_optimal { "#22c55e".to_string() } else { "#fbbf24".to_string() },
+            fill: if snap.is_optimal {
+                "#22c55e".to_string()
+            } else {
+                "#fbbf24".to_string()
+            },
             stroke: Some("#0b1220".to_string()),
             stroke_width: Some(2.0),
             ..Default::default()
@@ -380,7 +488,12 @@ pub fn build_incremental_lp_frame(_t: f64, _tick: f64, args: &IncrementalLPFrame
         shapes.push(Shape::Text(TextShape {
             x: cx + 14.0,
             y: cy + 4.0,
-            text: format!("x* = ({}, {})  z = {}", to_fixed(snap.x[0], 2), to_fixed(snap.x[1], 2), to_fixed(snap.z, 2)),
+            text: format!(
+                "x* = ({}, {})  z = {}",
+                to_fixed(snap.x[0], 2),
+                to_fixed(snap.x[1], 2),
+                to_fixed(snap.z, 2)
+            ),
             font_size: Some(11.0),
             fill: Some("#f1f5f9".to_string()),
             ..Default::default()
@@ -390,7 +503,10 @@ pub fn build_incremental_lp_frame(_t: f64, _tick: f64, args: &IncrementalLPFrame
         shapes.push(Shape::Text(TextShape {
             x: POLY_X + POLY_W / 2.0,
             y: POLY_Y + POLY_H / 2.0,
-            text: format!("{} structural variables — polytope view limited to 2D", snap.num_struct),
+            text: format!(
+                "{} structural variables — polytope view limited to 2D",
+                snap.num_struct
+            ),
             font_size: Some(16.0),
             fill: Some("#94a3b8".to_string()),
             anchor: Some(Anchor::Middle),
@@ -479,16 +595,29 @@ pub fn build_incremental_lp_frame(_t: f64, _tick: f64, args: &IncrementalLPFrame
     shapes.push(Shape::Text(TextShape {
         x: TAB_X + 14.0,
         y: TAB_Y + 76.0,
-        text: format!("tick {}  \u{2022}  z = {}", js_num(snap.tick), to_fixed(snap.z, 3)),
+        text: format!(
+            "tick {}  \u{2022}  z = {}",
+            js_num(snap.tick),
+            to_fixed(snap.z, 3)
+        ),
         font_size: Some(12.0),
         fill: Some("#cbd5e1".to_string()),
         ..Default::default()
     }));
-    let basis_str: Vec<String> = snap.basis.iter().map(|&bcol| basis_name(snap, bcol)).collect();
+    let basis_str: Vec<String> = snap
+        .basis
+        .iter()
+        .map(|&bcol| basis_name(snap, bcol))
+        .collect();
     shapes.push(Shape::Text(TextShape {
         x: TAB_X + 14.0,
         y: TAB_Y + 94.0,
-        text: format!("n={}  m={}  basis=[{}]", snap.num_struct, snap.num_constraints, basis_str.join(", ")),
+        text: format!(
+            "n={}  m={}  basis=[{}]",
+            snap.num_struct,
+            snap.num_constraints,
+            basis_str.join(", ")
+        ),
         font_size: Some(11.0),
         fill: Some("#94a3b8".to_string()),
         ..Default::default()
@@ -507,7 +636,14 @@ pub fn build_incremental_lp_frame(_t: f64, _tick: f64, args: &IncrementalLPFrame
 
     // Header row.
     let mut y_row = TAB_Y + 142.0;
-    shapes.push(Shape::Text(TextShape { x: TAB_X + 14.0, y: y_row, text: "basic".to_string(), font_size: Some(10.0), fill: Some("#64748b".to_string()), ..Default::default() }));
+    shapes.push(Shape::Text(TextShape {
+        x: TAB_X + 14.0,
+        y: y_row,
+        text: "basic".to_string(),
+        font_size: Some(10.0),
+        fill: Some("#64748b".to_string()),
+        ..Default::default()
+    }));
     let mut col_names: Vec<String> = Vec::new();
     for j in 0..snap.num_struct {
         col_names.push(var_name_or(snap, j, format!("x{}", j + 1)));
@@ -518,11 +654,27 @@ pub fn build_incremental_lp_frame(_t: f64, _tick: f64, args: &IncrementalLPFrame
     col_names.push("rhs".to_string());
     let col_w = (TAB_W - 80.0) / col_names.len() as f64;
     for (j, name) in col_names.iter().enumerate() {
-        shapes.push(Shape::Text(TextShape { x: TAB_X + 80.0 + j as f64 * col_w + col_w / 2.0, y: y_row, text: name.clone(), font_size: Some(9.0), fill: Some("#94a3b8".to_string()), anchor: Some(Anchor::Middle), ..Default::default() }));
+        shapes.push(Shape::Text(TextShape {
+            x: TAB_X + 80.0 + j as f64 * col_w + col_w / 2.0,
+            y: y_row,
+            text: name.clone(),
+            font_size: Some(9.0),
+            fill: Some("#94a3b8".to_string()),
+            anchor: Some(Anchor::Middle),
+            ..Default::default()
+        }));
     }
     y_row += 14.0;
     // Z-row.
-    shapes.push(Shape::Text(TextShape { x: TAB_X + 14.0, y: y_row, text: "z".to_string(), font_size: Some(10.0), fill: Some("#fbbf24".to_string()), font_weight: Some(FontWeight::Bold), ..Default::default() }));
+    shapes.push(Shape::Text(TextShape {
+        x: TAB_X + 14.0,
+        y: y_row,
+        text: "z".to_string(),
+        font_size: Some(10.0),
+        fill: Some("#fbbf24".to_string()),
+        font_weight: Some(FontWeight::Bold),
+        ..Default::default()
+    }));
     for j in 0..snap.num_struct + snap.num_constraints {
         let val = snap.reduced_costs.get(j).copied().unwrap_or(0.0);
         let color = if val < -1e-7 {
@@ -532,7 +684,15 @@ pub fn build_incremental_lp_frame(_t: f64, _tick: f64, args: &IncrementalLPFrame
         } else {
             "#cbd5e1"
         };
-        shapes.push(Shape::Text(TextShape { x: TAB_X + 80.0 + j as f64 * col_w + col_w / 2.0, y: y_row, text: to_fixed(val, 2), font_size: Some(9.0), fill: Some(color.to_string()), anchor: Some(Anchor::Middle), ..Default::default() }));
+        shapes.push(Shape::Text(TextShape {
+            x: TAB_X + 80.0 + j as f64 * col_w + col_w / 2.0,
+            y: y_row,
+            text: to_fixed(val, 2),
+            font_size: Some(9.0),
+            fill: Some(color.to_string()),
+            anchor: Some(Anchor::Middle),
+            ..Default::default()
+        }));
     }
     shapes.push(Shape::Text(TextShape {
         x: TAB_X + 80.0 + (snap.num_struct + snap.num_constraints) as f64 * col_w + col_w / 2.0,
@@ -554,14 +714,26 @@ pub fn build_incremental_lp_frame(_t: f64, _tick: f64, args: &IncrementalLPFrame
             let idx = base_col - snap.num_struct;
             format!("{}_s", con_name_or(snap, idx, format!("c{}", idx + 1)))
         };
-        shapes.push(Shape::Text(TextShape { x: TAB_X + 14.0, y: y_row, text: base_name, font_size: Some(10.0), fill: Some("#22d3ee".to_string()), font_weight: Some(FontWeight::Bold), ..Default::default() }));
+        shapes.push(Shape::Text(TextShape {
+            x: TAB_X + 14.0,
+            y: y_row,
+            text: base_name,
+            font_size: Some(10.0),
+            fill: Some("#22d3ee".to_string()),
+            font_weight: Some(FontWeight::Bold),
+            ..Default::default()
+        }));
         let rhs_col = snap.num_struct + snap.num_constraints;
         shapes.push(Shape::Text(TextShape {
             x: TAB_X + 80.0 + rhs_col as f64 * col_w + col_w / 2.0,
             y: y_row,
             text: to_fixed(snap.rhs[i], 2),
             font_size: Some(9.0),
-            fill: Some(if snap.rhs[i] < -1e-7 { "#ef4444".to_string() } else { "#cbd5e1".to_string() }),
+            fill: Some(if snap.rhs[i] < -1e-7 {
+                "#ef4444".to_string()
+            } else {
+                "#cbd5e1".to_string()
+            }),
             anchor: Some(Anchor::Middle),
             ..Default::default()
         }));
@@ -573,26 +745,90 @@ pub fn build_incremental_lp_frame(_t: f64, _tick: f64, args: &IncrementalLPFrame
 
     // Footer: feasibility flags.
     let foot_y = TAB_Y + TAB_H - 60.0;
-    shapes.push(Shape::Text(TextShape { x: TAB_X + 14.0, y: foot_y, text: format!("primal-feasible:  {}", if snap.primal_feasible { "YES" } else { "NO" }), font_size: Some(11.0), fill: Some(if snap.primal_feasible { "#22c55e".to_string() } else { "#ef4444".to_string() }), ..Default::default() }));
-    shapes.push(Shape::Text(TextShape { x: TAB_X + 14.0, y: foot_y + 18.0, text: format!("dual-feasible:    {}", if snap.dual_feasible { "YES" } else { "NO" }), font_size: Some(11.0), fill: Some(if snap.dual_feasible { "#22c55e".to_string() } else { "#ef4444".to_string() }), ..Default::default() }));
-    shapes.push(Shape::Text(TextShape { x: TAB_X + 14.0, y: foot_y + 36.0, text: format!("optimal:          {}", if snap.is_optimal { "YES" } else { "NO" }), font_size: Some(11.0), fill: Some(if snap.is_optimal { "#22c55e".to_string() } else { "#94a3b8".to_string() }), ..Default::default() }));
+    shapes.push(Shape::Text(TextShape {
+        x: TAB_X + 14.0,
+        y: foot_y,
+        text: format!(
+            "primal-feasible:  {}",
+            if snap.primal_feasible { "YES" } else { "NO" }
+        ),
+        font_size: Some(11.0),
+        fill: Some(if snap.primal_feasible {
+            "#22c55e".to_string()
+        } else {
+            "#ef4444".to_string()
+        }),
+        ..Default::default()
+    }));
+    shapes.push(Shape::Text(TextShape {
+        x: TAB_X + 14.0,
+        y: foot_y + 18.0,
+        text: format!(
+            "dual-feasible:    {}",
+            if snap.dual_feasible { "YES" } else { "NO" }
+        ),
+        font_size: Some(11.0),
+        fill: Some(if snap.dual_feasible {
+            "#22c55e".to_string()
+        } else {
+            "#ef4444".to_string()
+        }),
+        ..Default::default()
+    }));
+    shapes.push(Shape::Text(TextShape {
+        x: TAB_X + 14.0,
+        y: foot_y + 36.0,
+        text: format!(
+            "optimal:          {}",
+            if snap.is_optimal { "YES" } else { "NO" }
+        ),
+        font_size: Some(11.0),
+        fill: Some(if snap.is_optimal {
+            "#22c55e".to_string()
+        } else {
+            "#94a3b8".to_string()
+        }),
+        ..Default::default()
+    }));
 
     // Caption.
-    let mut caption = format!("tick {}  \u{2022}  z = {}  \u{2022}  mode = {}", js_num(snap.tick), to_fixed(snap.z, 3), snap.mode);
+    let mut caption = format!(
+        "tick {}  \u{2022}  z = {}  \u{2022}  mode = {}",
+        js_num(snap.tick),
+        to_fixed(snap.z, 3),
+        snap.mode
+    );
     if event_truthy {
-        caption += &format!("  \u{2022}  event: {}", args.event_label.clone().unwrap_or_default());
+        caption += &format!(
+            "  \u{2022}  event: {}",
+            args.event_label.clone().unwrap_or_default()
+        );
     }
     if matches!(&args.pivot_label, Some(s) if !s.is_empty()) {
-        caption += &format!("  \u{2022}  pivot: {}", args.pivot_label.clone().unwrap_or_default());
+        caption += &format!(
+            "  \u{2022}  pivot: {}",
+            args.pivot_label.clone().unwrap_or_default()
+        );
     }
 
     FrameParts::with_caption(shapes, caption)
 }
 
 /// Telemetry charts to plot underneath the main panels.
-pub fn build_incremental_lp_charts(ticks: &[f64], z_values: &[f64], x_series: &[Vec<f64>]) -> Vec<ChartSpec> {
-    let series = vec![ChartSeries { label: "z".to_string(), color: "#fbbf24".to_string(), t: ticks.to_vec(), y: z_values.to_vec() }];
-    let x_colors = ["#22d3ee", "#a78bfa", "#fb923c", "#34d399", "#f472b6", "#facc15"];
+pub fn build_incremental_lp_charts(
+    ticks: &[f64],
+    z_values: &[f64],
+    x_series: &[Vec<f64>],
+) -> Vec<ChartSpec> {
+    let series = vec![ChartSeries {
+        label: "z".to_string(),
+        color: "#fbbf24".to_string(),
+        t: ticks.to_vec(),
+        y: z_values.to_vec(),
+    }];
+    let x_colors = [
+        "#22d3ee", "#a78bfa", "#fb923c", "#34d399", "#f472b6", "#facc15",
+    ];
     let mut x_charts: Vec<ChartSpec> = Vec::new();
     if !x_series.is_empty() {
         // `xs = xSeries[0].map((_, j) => xSeries.map(x => x[j] ?? 0))` — transpose.
@@ -602,12 +838,31 @@ pub fn build_incremental_lp_charts(ticks: &[f64], z_values: &[f64], x_series: &[
                 label: format!("x{}", j + 1),
                 color: x_colors[j % x_colors.len()].to_string(),
                 t: ticks.to_vec(),
-                y: x_series.iter().map(|x| x.get(j).copied().unwrap_or(0.0)).collect(),
+                y: x_series
+                    .iter()
+                    .map(|x| x.get(j).copied().unwrap_or(0.0))
+                    .collect(),
             })
             .collect();
-        x_charts.push(ChartSpec { x: 30.0, y: 660.0, w: 600.0, h: 30.0, title: Some("x* (per structural variable)".to_string()), series: x_series_out, ..Default::default() });
+        x_charts.push(ChartSpec {
+            x: 30.0,
+            y: 660.0,
+            w: 600.0,
+            h: 30.0,
+            title: Some("x* (per structural variable)".to_string()),
+            series: x_series_out,
+            ..Default::default()
+        });
     }
-    let mut out = vec![ChartSpec { x: 660.0, y: 660.0, w: 490.0, h: 30.0, title: Some("objective z over time".to_string()), series, ..Default::default() }];
+    let mut out = vec![ChartSpec {
+        x: 660.0,
+        y: 660.0,
+        w: 490.0,
+        h: 30.0,
+        title: Some("objective z over time".to_string()),
+        series,
+        ..Default::default()
+    }];
     out.extend(x_charts);
     out
 }

@@ -43,7 +43,9 @@ fn as_vec(v: &JsonValue) -> Vec<f64> {
 }
 
 fn as_mat(v: &JsonValue) -> Vec<Vec<f64>> {
-    v.as_array().map(|a| a.iter().map(as_vec).collect()).unwrap_or_default()
+    v.as_array()
+        .map(|a| a.iter().map(as_vec).collect())
+        .unwrap_or_default()
 }
 
 /// Path lookup `v[a][b]...` returning a borrowed value.
@@ -113,7 +115,11 @@ fn fmt_num(v: Option<&JsonValue>) -> String {
 pub fn run() -> i32 {
     let root = root();
     let ts_path = root.join("out").join("backprop-framework.json");
-    let py_path = root.join("out").join("external").join("backpropagation").join("numpy.json");
+    let py_path = root
+        .join("out")
+        .join("external")
+        .join("backpropagation")
+        .join("numpy.json");
 
     let ts = match load_json(&ts_path) {
         Ok(v) => v,
@@ -169,12 +175,30 @@ pub fn run() -> i32 {
         Err(c) => return c,
     };
 
-    println!("  W1   max-abs-error  = {:e}  (at [{}][{}])", w1_diff.max, w1_diff.row, w1_diff.col);
-    println!("  b1   max-abs-error  = {:e}  (at [{}])", b1_diff.max, b1_diff.idx);
-    println!("  W2   max-abs-error  = {:e}  (at [{}][{}])", w2_diff.max, w2_diff.row, w2_diff.col);
-    println!("  b2   max-abs-error  = {:e}  (at [{}])", b2_diff.max, b2_diff.idx);
-    println!("  loss max-abs-error  = {:e}  (at sample {})", loss_diff.max, loss_diff.idx);
-    println!("  pred max-abs-error  = {:e}  (at case {})", pred_diff.max, pred_diff.idx);
+    println!(
+        "  W1   max-abs-error  = {:e}  (at [{}][{}])",
+        w1_diff.max, w1_diff.row, w1_diff.col
+    );
+    println!(
+        "  b1   max-abs-error  = {:e}  (at [{}])",
+        b1_diff.max, b1_diff.idx
+    );
+    println!(
+        "  W2   max-abs-error  = {:e}  (at [{}][{}])",
+        w2_diff.max, w2_diff.row, w2_diff.col
+    );
+    println!(
+        "  b2   max-abs-error  = {:e}  (at [{}])",
+        b2_diff.max, b2_diff.idx
+    );
+    println!(
+        "  loss max-abs-error  = {:e}  (at sample {})",
+        loss_diff.max, loss_diff.idx
+    );
+    println!(
+        "  pred max-abs-error  = {:e}  (at case {})",
+        pred_diff.max, pred_diff.idx
+    );
 
     let tol = 1e-12_f64;
     let all_diffs = [

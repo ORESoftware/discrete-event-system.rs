@@ -40,10 +40,18 @@ fn js_number(v: f64) -> String {
     if v.is_nan() {
         "NaN".to_string()
     } else if v.is_infinite() {
-        if v > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() }
+        if v > 0.0 {
+            "Infinity".to_string()
+        } else {
+            "-Infinity".to_string()
+        }
     } else {
         let s = v.to_string();
-        if s == "-0" { "0".to_string() } else { s }
+        if s == "-0" {
+            "0".to_string()
+        } else {
+            s
+        }
     }
 }
 
@@ -66,8 +74,19 @@ fn to_locale_usize(n: usize) -> String {
 // Schema helpers
 // =============================================================================
 
-fn num(min: Option<f64>, max: Option<f64>, integer: Option<bool>, default: Option<f64>) -> ParamSchema {
-    ParamSchema::Number { min, max, integer, default, description: None }
+fn num(
+    min: Option<f64>,
+    max: Option<f64>,
+    integer: Option<bool>,
+    default: Option<f64>,
+) -> ParamSchema {
+    ParamSchema::Number {
+        min,
+        max,
+        integer,
+        default,
+        description: None,
+    }
 }
 
 fn str_enum(allowed: &[&str], default: Option<&str>) -> ParamSchema {
@@ -79,20 +98,35 @@ fn str_enum(allowed: &[&str], default: Option<&str>) -> ParamSchema {
 }
 
 fn string_field() -> ParamSchema {
-    ParamSchema::String { allowed: None, default: None, description: None }
+    ParamSchema::String {
+        allowed: None,
+        default: None,
+        description: None,
+    }
 }
 
 fn boolean(default: Option<bool>) -> ParamSchema {
-    ParamSchema::Boolean { default, description: None }
+    ParamSchema::Boolean {
+        default,
+        description: None,
+    }
 }
 
 fn arr(items: ParamSchema, min_length: Option<usize>) -> ParamSchema {
-    ParamSchema::Array { items: Box::new(items), min_length, max_length: None, description: None }
+    ParamSchema::Array {
+        items: Box::new(items),
+        min_length,
+        max_length: None,
+        description: None,
+    }
 }
 
 fn obj(fields: Vec<(&str, ParamSchema)>, required: Vec<&str>) -> ParamSchema {
     ParamSchema::Object {
-        fields: fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+        fields: fields
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
         required: Some(required.iter().map(|s| s.to_string()).collect()),
         description: None,
     }
@@ -134,7 +168,12 @@ fn collaborative_schema() -> ParamSchema {
             (
                 "scenario",
                 str_enum(
-                    &["programming-languages", "model-validation", "learning-resources", "custom"],
+                    &[
+                        "programming-languages",
+                        "model-validation",
+                        "learning-resources",
+                        "custom",
+                    ],
                     Some("programming-languages"),
                 ),
             ),
@@ -142,9 +181,18 @@ fn collaborative_schema() -> ParamSchema {
             ("responses", arr(response_schema(), Some(0))),
             ("respondentCount", num(Some(1.0), None, Some(true), None)),
             ("respondents", num(Some(1.0), None, Some(true), None)),
-            ("minItemsPerRespondent", num(Some(1.0), None, Some(true), None)),
-            ("maxItemsPerRespondent", num(Some(1.0), None, Some(true), None)),
-            ("respondentsPerTick", num(Some(1.0), None, Some(true), Some(100.0))),
+            (
+                "minItemsPerRespondent",
+                num(Some(1.0), None, Some(true), None),
+            ),
+            (
+                "maxItemsPerRespondent",
+                num(Some(1.0), None, Some(true), None),
+            ),
+            (
+                "respondentsPerTick",
+                num(Some(1.0), None, Some(true), Some(100.0)),
+            ),
             ("ratingMin", num(None, None, None, None)),
             ("ratingMax", num(None, None, None, None)),
             ("noiseStd", num(Some(0.0), None, None, None)),
@@ -154,16 +202,37 @@ fn collaborative_schema() -> ParamSchema {
             ("shrinkage", num(Some(0.0), None, None, Some(12.0))),
             ("topK", num(Some(1.0), None, Some(true), Some(10.0))),
             ("credibilityWeighting", boolean(Some(true))),
-            ("credibilityPasses", num(Some(1.0), None, Some(true), Some(2.0))),
+            (
+                "credibilityPasses",
+                num(Some(1.0), None, Some(true), Some(2.0)),
+            ),
             ("minCredibleAge", num(Some(0.0), None, None, Some(15.0))),
             ("referenceAge", num(Some(1.0), None, None, Some(50.0))),
-            ("referenceExperienceYears", num(Some(1.0), None, None, Some(15.0))),
+            (
+                "referenceExperienceYears",
+                num(Some(1.0), None, None, Some(15.0)),
+            ),
             ("ageWeightStrength", num(Some(0.0), None, None, Some(0.35))),
-            ("experienceWeightStrength", num(Some(0.0), None, None, Some(0.6))),
-            ("highRatedBreadthStrength", num(Some(0.0), None, None, Some(0.4))),
-            ("highRatedScoreThreshold", num(Some(0.0), Some(1.0), None, Some(0.72))),
-            ("minHighRatedItems", num(Some(1.0), None, Some(true), Some(2.0))),
-            ("maxCredibilityMultiplier", num(Some(1.0), None, None, Some(3.0))),
+            (
+                "experienceWeightStrength",
+                num(Some(0.0), None, None, Some(0.6)),
+            ),
+            (
+                "highRatedBreadthStrength",
+                num(Some(0.0), None, None, Some(0.4)),
+            ),
+            (
+                "highRatedScoreThreshold",
+                num(Some(0.0), Some(1.0), None, Some(0.72)),
+            ),
+            (
+                "minHighRatedItems",
+                num(Some(1.0), None, Some(true), Some(2.0)),
+            ),
+            (
+                "maxCredibilityMultiplier",
+                num(Some(1.0), None, None, Some(3.0)),
+            ),
         ],
         vec![],
     )
@@ -238,9 +307,18 @@ impl DESModelRegistration<CollaborativeInferenceParams, CollaborativeInferenceRe
             "COLLABORATIVE INFERENCE (sparse preference learning DES)".to_string(),
             "-------------------------------------------------------".to_string(),
             format!("  Scenario:       {}", result.scenario_label),
-            format!("  Respondents:    {}", to_locale_usize(result.respondents_processed)),
-            format!("  Ratings:        {}", to_locale_usize(result.rating_evidence_count)),
-            format!("  Comparisons:    {}", to_locale_usize(result.pairwise_evidence_count)),
+            format!(
+                "  Respondents:    {}",
+                to_locale_usize(result.respondents_processed)
+            ),
+            format!(
+                "  Ratings:        {}",
+                to_locale_usize(result.rating_evidence_count)
+            ),
+            format!(
+                "  Comparisons:    {}",
+                to_locale_usize(result.pairwise_evidence_count)
+            ),
             format!(
                 "  Coverage:       ratings {}/{}, comparisons {}/{}",
                 result.coverage.items_with_ratings,
@@ -260,10 +338,22 @@ impl DESModelRegistration<CollaborativeInferenceParams, CollaborativeInferenceRe
             ));
         }
         lines.push(String::new());
-        lines.push(format!("  Sources:        {}", result.station_roles.sources.join(", ")));
-        lines.push(format!("  Stations:       {}", result.station_roles.stations.join(" -> ")));
-        lines.push(format!("  Sinks:          {}", result.station_roles.sinks.join(", ")));
-        lines.push(format!("  Movables:       {}", result.station_roles.movables.join(", ")));
+        lines.push(format!(
+            "  Sources:        {}",
+            result.station_roles.sources.join(", ")
+        ));
+        lines.push(format!(
+            "  Stations:       {}",
+            result.station_roles.stations.join(" -> ")
+        ));
+        lines.push(format!(
+            "  Sinks:          {}",
+            result.station_roles.sinks.join(", ")
+        ));
+        lines.push(format!(
+            "  Movables:       {}",
+            result.station_roles.movables.join(", ")
+        ));
         lines.join("\n")
     }
     fn write_csv(&self, result: &CollaborativeInferenceResult, csv_path: &str) {

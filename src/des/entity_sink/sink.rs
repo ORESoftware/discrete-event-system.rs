@@ -31,7 +31,7 @@ use crate::des::entity_queue::queue::build_in_conn;
 use crate::des::r#abstract::interfaces::{
     EntityGraphData, HasInput, HasManyInputConnections, HasManyOutputConnections,
 };
-use crate::des::r#abstract::r#abstract::{Entity, EntityCore, EntityConnection};
+use crate::des::r#abstract::r#abstract::{Entity, EntityConnection, EntityCore};
 use crate::des::shared::precision::Decimal;
 
 /// The sink brand (`[entityType] = 'Sink'`), shared with `generic_sink`.

@@ -107,7 +107,10 @@ struct HeldKarpResult {
 fn held_karp_exact(inst: &TspInstance) -> HeldKarpResult {
     let n = inst.n;
     if n <= 1 {
-        return HeldKarpResult { length: 0.0, tour: (0..n).collect() };
+        return HeldKarpResult {
+            length: 0.0,
+            tour: (0..n).collect(),
+        };
     }
     let full = 1usize << n;
     let mut dp = vec![vec![f64::INFINITY; n]; full];
@@ -174,12 +177,26 @@ struct SaResult {
 
 fn run_tsp_sa_des(inst: &TspInstance) -> SaResult {
     let hk = held_karp_exact(inst);
-    SaResult { best_cost: hk.length, best_tour: hk.tour, best_history: vec![hk.length], accepted_count: 0, improve_count: 0, current_history: vec![hk.length] }
+    SaResult {
+        best_cost: hk.length,
+        best_tour: hk.tour,
+        best_history: vec![hk.length],
+        accepted_count: 0,
+        improve_count: 0,
+        current_history: vec![hk.length],
+    }
 }
 
 fn run_tsp_hill_climber_des(inst: &TspInstance) -> SaResult {
     let hk = held_karp_exact(inst);
-    SaResult { best_cost: hk.length, best_tour: hk.tour.clone(), best_history: vec![hk.length], accepted_count: 0, improve_count: 0, current_history: vec![hk.length] }
+    SaResult {
+        best_cost: hk.length,
+        best_tour: hk.tour.clone(),
+        best_history: vec![hk.length],
+        accepted_count: 0,
+        improve_count: 0,
+        current_history: vec![hk.length],
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -192,7 +209,12 @@ struct GaResult {
 
 fn run_tsp_ga_des(inst: &TspInstance) -> GaResult {
     let hk = held_karp_exact(inst);
-    GaResult { best_length: hk.length, best_tour: hk.tour, best_history: vec![hk.length], mean_history: vec![hk.length] }
+    GaResult {
+        best_length: hk.length,
+        best_tour: hk.tour,
+        best_history: vec![hk.length],
+        mean_history: vec![hk.length],
+    }
 }
 
 // =============================================================================
@@ -212,10 +234,15 @@ struct GridWorld {
 
 impl GridWorld {
     fn new() -> Self {
-        GridWorld { n_states: 16, n_actions: 4 }
+        GridWorld {
+            n_states: 16,
+            n_actions: 4,
+        }
     }
     fn optimal_v(&self, _gamma: f64) -> OptimalV {
-        OptimalV { v: vec![0.0; self.n_states] }
+        OptimalV {
+            v: vec![0.0; self.n_states],
+        }
     }
 }
 
@@ -229,7 +256,9 @@ impl Corridor {
         Corridor { length }
     }
     fn optimal_v(&self, _gamma: f64) -> OptimalV {
-        OptimalV { v: vec![0.0; self.length] }
+        OptimalV {
+            v: vec![0.0; self.length],
+        }
     }
 }
 
@@ -240,7 +269,10 @@ struct QResult {
 }
 
 fn run_qlearning_des(env: &GridWorld) -> QResult {
-    QResult { q: vec![vec![0.0; env.n_actions]; env.n_states], policy: vec![0; env.n_states] }
+    QResult {
+        q: vec![vec![0.0; env.n_actions]; env.n_states],
+        policy: vec![0; env.n_states],
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -251,7 +283,11 @@ struct PpoResult {
 }
 
 fn run_ppo_des(cor: &Corridor, total_steps: usize, rollout_len: usize) -> PpoResult {
-    PpoResult { v: vec![0.0; cor.length], policy: vec![1; cor.length], total_updates: total_steps / rollout_len }
+    PpoResult {
+        v: vec![0.0; cor.length],
+        policy: vec![1; cor.length],
+        total_updates: total_steps / rollout_len,
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -261,10 +297,16 @@ struct EvalResult {
 }
 
 fn eval_policy_grid<F: Fn(usize) -> usize>(_env: &GridWorld, _policy: F) -> EvalResult {
-    EvalResult { success_rate: 1.0, mean_return: 0.0 }
+    EvalResult {
+        success_rate: 1.0,
+        mean_return: 0.0,
+    }
 }
 fn eval_policy_corridor<F: Fn(usize) -> usize>(_env: &Corridor, _policy: F) -> EvalResult {
-    EvalResult { success_rate: 1.0, mean_return: 0.0 }
+    EvalResult {
+        success_rate: 1.0,
+        mean_return: 0.0,
+    }
 }
 
 // =============================================================================
@@ -283,9 +325,21 @@ struct Driver {
 
 impl Driver {
     fn check(&mut self, name: &str, passed: bool, detail: Option<String>) {
-        let tail = detail.as_ref().map(|d| format!("  — {}", d)).unwrap_or_default();
-        println!("  {}  {}{}", if passed { "PASS" } else { "FAIL" }, name, tail);
-        self.checks.push(CheckRow { name: name.to_string(), passed, detail });
+        let tail = detail
+            .as_ref()
+            .map(|d| format!("  — {}", d))
+            .unwrap_or_default();
+        println!(
+            "  {}  {}{}",
+            if passed { "PASS" } else { "FAIL" },
+            name,
+            tail
+        );
+        self.checks.push(CheckRow {
+            name: name.to_string(),
+            passed,
+            detail,
+        });
     }
 }
 
@@ -308,8 +362,16 @@ pub fn run() {
         let inst = build_pentagon_tsp(5, 50.0);
         let opt = tour_length(&inst, &[0, 1, 2, 3, 4]);
         let sa = run_tsp_sa_des(&inst);
-        d.check(&format!("SA seed={} pentagon optimum", seed), (sa.best_cost - opt).abs() < 1e-9, Some(format!("cost={:.4} opt={:.4}", sa.best_cost, opt)));
-        d.check(&format!("SA seed={} valid tour", seed), is_permutation(&sa.best_tour, inst.n), None);
+        d.check(
+            &format!("SA seed={} pentagon optimum", seed),
+            (sa.best_cost - opt).abs() < 1e-9,
+            Some(format!("cost={:.4} opt={:.4}", sa.best_cost, opt)),
+        );
+        d.check(
+            &format!("SA seed={} valid tour", seed),
+            is_permutation(&sa.best_tour, inst.n),
+            None,
+        );
     }
     {
         let inst = build_random_tsp(10, 23);
@@ -318,22 +380,44 @@ pub fn run() {
         d.check(
             "SA n=10 within 5% of Held-Karp",
             sa.best_cost <= exact.length * 1.05,
-            Some(format!("cost={:.4} HK={:.4} gap={:.2}%", sa.best_cost, exact.length, (sa.best_cost / exact.length - 1.0) * 100.0)),
+            Some(format!(
+                "cost={:.4} HK={:.4} gap={:.2}%",
+                sa.best_cost,
+                exact.length,
+                (sa.best_cost / exact.length - 1.0) * 100.0
+            )),
         );
     }
     {
         let inst = build_random_tsp(10, 23);
         let sa = run_tsp_sa_des(&inst);
-        d.check("SA bestHistory monotone non-increasing", monotone_non_increasing(&sa.best_history), None);
+        d.check(
+            "SA bestHistory monotone non-increasing",
+            monotone_non_increasing(&sa.best_history),
+            None,
+        );
     }
     {
         let inst = build_random_tsp(8, 5);
         let a = run_tsp_sa_des(&inst);
         let b = run_tsp_sa_des(&inst);
-        d.check("SA seed reproducibility (cost)", a.best_cost == b.best_cost, None);
+        d.check(
+            "SA seed reproducibility (cost)",
+            a.best_cost == b.best_cost,
+            None,
+        );
         d.check(
             "SA seed reproducibility (tour)",
-            a.best_tour.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",") == b.best_tour.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(","),
+            a.best_tour
+                .iter()
+                .map(|x| x.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+                == b.best_tour
+                    .iter()
+                    .map(|x| x.to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
             None,
         );
     }
@@ -343,8 +427,19 @@ pub fn run() {
     {
         let inst = build_random_tsp(15, 11);
         let hc = run_tsp_hill_climber_des(&inst);
-        d.check("HC accepted == improvements", hc.accepted_count == hc.improve_count, Some(format!("accepted={} improvements={}", hc.accepted_count, hc.improve_count)));
-        d.check("HC currentHistory monotone non-increasing", monotone_non_increasing(&hc.current_history), None);
+        d.check(
+            "HC accepted == improvements",
+            hc.accepted_count == hc.improve_count,
+            Some(format!(
+                "accepted={} improvements={}",
+                hc.accepted_count, hc.improve_count
+            )),
+        );
+        d.check(
+            "HC currentHistory monotone non-increasing",
+            monotone_non_increasing(&hc.current_history),
+            None,
+        );
     }
 
     // GA validation.
@@ -354,13 +449,25 @@ pub fn run() {
             let inst = build_pentagon_tsp(5, 50.0);
             let opt = tour_length(&inst, &[0, 1, 2, 3, 4]);
             let ga = run_tsp_ga_des(&inst);
-            d.check(&format!("GA seed={} pentagon optimum", seed), (ga.best_length - opt).abs() < 1e-9, Some(format!("len={:.4} opt={:.4}", ga.best_length, opt)));
+            d.check(
+                &format!("GA seed={} pentagon optimum", seed),
+                (ga.best_length - opt).abs() < 1e-9,
+                Some(format!("len={:.4} opt={:.4}", ga.best_length, opt)),
+            );
         }
         let inst = build_random_tsp(10, 23);
         let exact = held_karp_exact(&inst);
         let ga = run_tsp_ga_des(&inst);
-        d.check("GA n=10 within 5% of Held-Karp", ga.best_length <= exact.length * 1.05, Some(format!("len={:.4} HK={:.4}", ga.best_length, exact.length)));
-        d.check("GA bestHistory monotone (elitism)", monotone_non_increasing(&ga.best_history), None);
+        d.check(
+            "GA n=10 within 5% of Held-Karp",
+            ga.best_length <= exact.length * 1.05,
+            Some(format!("len={:.4} HK={:.4}", ga.best_length, exact.length)),
+        );
+        d.check(
+            "GA bestHistory monotone (elitism)",
+            monotone_non_increasing(&ga.best_history),
+            None,
+        );
         let mut mean_check = true;
         for i in 0..ga.best_history.len() {
             if ga.mean_history[i] < ga.best_history[i] - 1e-9 {
@@ -377,7 +484,16 @@ pub fn run() {
         d.check(
             "GA seed reproducibility",
             a.best_length == b.best_length
-                && a.best_tour.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",") == b.best_tour.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(","),
+                && a.best_tour
+                    .iter()
+                    .map(|x| x.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+                    == b.best_tour
+                        .iter()
+                        .map(|x| x.to_string())
+                        .collect::<Vec<_>>()
+                        .join(","),
             None,
         );
     }
@@ -390,11 +506,23 @@ pub fn run() {
         for seed in [1, 2, 3] {
             let ql = run_qlearning_des(&env);
             let v0 = ql.q[0].iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-            d.check(&format!("Q-learning seed={} V(0) close to optimal", seed), (v0 - opt.v[0]).abs() < 0.05, Some(format!("learned={:.3} opt={:.3}", v0, opt.v[0])));
+            d.check(
+                &format!("Q-learning seed={} V(0) close to optimal", seed),
+                (v0 - opt.v[0]).abs() < 0.05,
+                Some(format!("learned={:.3} opt={:.3}", v0, opt.v[0])),
+            );
             let policy = ql.policy.clone();
             let eval_q = eval_policy_grid(&env, |s| policy[s]);
-            d.check(&format!("Q-learning seed={} greedy 100% success", seed), eval_q.success_rate == 1.0, None);
-            d.check(&format!("Q-learning seed={} mean return matches V*(0)", seed), (eval_q.mean_return - opt.v[0]).abs() < 0.01, None);
+            d.check(
+                &format!("Q-learning seed={} greedy 100% success", seed),
+                eval_q.success_rate == 1.0,
+                None,
+            );
+            d.check(
+                &format!("Q-learning seed={} mean return matches V*(0)", seed),
+                (eval_q.mean_return - opt.v[0]).abs() < 0.01,
+                None,
+            );
         }
     }
 
@@ -405,29 +533,61 @@ pub fn run() {
         let opt = cor.optimal_v(0.95);
         for seed in [1, 2, 3] {
             let ppo = run_ppo_des(&cor, 10_000, 64);
-            d.check(&format!("PPO seed={} V(0) close to optimal", seed), (ppo.v[0] - opt.v[0]).abs() < 0.1, Some(format!("learned={:.3} opt={:.3}", ppo.v[0], opt.v[0])));
-            d.check(&format!("PPO seed={} action(0) is right (=1)", seed), ppo.policy[0] == 1, None);
+            d.check(
+                &format!("PPO seed={} V(0) close to optimal", seed),
+                (ppo.v[0] - opt.v[0]).abs() < 0.1,
+                Some(format!("learned={:.3} opt={:.3}", ppo.v[0], opt.v[0])),
+            );
+            d.check(
+                &format!("PPO seed={} action(0) is right (=1)", seed),
+                ppo.policy[0] == 1,
+                None,
+            );
             let policy = ppo.policy.clone();
             let eval_p = eval_policy_corridor(&cor, |s| policy[s]);
-            d.check(&format!("PPO seed={} greedy 100% success", seed), eval_p.success_rate == 1.0, None);
-            d.check(&format!("PPO seed={} mean return matches V*(0)", seed), (eval_p.mean_return - opt.v[0]).abs() < 0.05, None);
+            d.check(
+                &format!("PPO seed={} greedy 100% success", seed),
+                eval_p.success_rate == 1.0,
+                None,
+            );
+            d.check(
+                &format!("PPO seed={} mean return matches V*(0)", seed),
+                (eval_p.mean_return - opt.v[0]).abs() < 0.05,
+                None,
+            );
         }
     }
     {
         let cor = Corridor::new(8);
         let ppo = run_ppo_des(&cor, 5_000, 100);
-        d.check("PPO updates ≈ steps / rolloutLen", (ppo.total_updates as f64 - 5000.0 / 100.0).abs() <= 2.0, Some(format!("updates={}", ppo.total_updates)));
+        d.check(
+            "PPO updates ≈ steps / rolloutLen",
+            (ppo.total_updates as f64 - 5000.0 / 100.0).abs() <= 2.0,
+            Some(format!("updates={}", ppo.total_updates)),
+        );
     }
 
     // Summary.
     let passed = d.checks.iter().filter(|c| c.passed).count();
     let failed = d.checks.len() - passed;
-    println!("\n=== validate-optimization-as-DES summary: {}/{} passed, {} failed", passed, d.checks.len(), failed);
+    println!(
+        "\n=== validate-optimization-as-DES summary: {}/{} passed, {} failed",
+        passed,
+        d.checks.len(),
+        failed
+    );
     if failed > 0 {
         println!("Failures:");
         for c in &d.checks {
             if !c.passed {
-                println!("  - {}{}", c.name, c.detail.as_ref().map(|x| format!(": {}", x)).unwrap_or_default());
+                println!(
+                    "  - {}{}",
+                    c.name,
+                    c.detail
+                        .as_ref()
+                        .map(|x| format!(": {}", x))
+                        .unwrap_or_default()
+                );
             }
         }
         std::process::exit(1);

@@ -28,8 +28,7 @@ mod tests {
         assert!(validate_computer_network_problem(&p).is_ok());
 
         let result = run_computer_network_simulation(&p);
-        let conserved =
-            result.delivered_packets + result.dropped_packets + result.active_packets;
+        let conserved = result.delivered_packets + result.dropped_packets + result.active_packets;
         assert!(
             (result.generated_packets - conserved).abs() < 0.5,
             "packet conservation violated: generated={} conserved={}",
@@ -57,7 +56,11 @@ mod tests {
     fn textbook_max_flow_equals_min_cut() {
         let res = solve_max_flow(build_textbook_max_flow_problem());
         assert_eq!(res.status, MaxFlowStatus::Optimal);
-        assert!((res.max_flow - 23.0).abs() < 1e-9, "max_flow={}", res.max_flow);
+        assert!(
+            (res.max_flow - 23.0).abs() < 1e-9,
+            "max_flow={}",
+            res.max_flow
+        );
         assert!(
             (res.min_cut.capacity - res.max_flow).abs() < 1e-9,
             "cut={} flow={}",

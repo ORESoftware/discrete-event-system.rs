@@ -450,15 +450,15 @@ pub fn build_small_chain_graph() -> Graph {
         vec![
             Edge { to: 1, weight: 1.0 },
             Edge { to: 2, weight: 4.0 },
-            Edge { to: 4, weight: 10.0 },
+            Edge {
+                to: 4,
+                weight: 10.0,
+            },
         ], // 0
-        vec![
-            Edge { to: 2, weight: 2.0 },
-            Edge { to: 3, weight: 5.0 },
-        ], // 1
-        vec![Edge { to: 3, weight: 2.0 }], // 2
-        vec![Edge { to: 4, weight: 1.0 }], // 3
-        vec![],                            // 4
+        vec![Edge { to: 2, weight: 2.0 }, Edge { to: 3, weight: 5.0 }], // 1
+        vec![Edge { to: 3, weight: 2.0 }],                              // 2
+        vec![Edge { to: 4, weight: 1.0 }],                              // 3
+        vec![],                                                         // 4
     ];
     Graph {
         num_nodes: 5,
@@ -506,8 +506,14 @@ mod tests {
             num_nodes: 3,
             edges: vec![
                 vec![Edge { to: 1, weight: 1.0 }],
-                vec![Edge { to: 2, weight: -1.0 }],
-                vec![Edge { to: 1, weight: -1.0 }],
+                vec![Edge {
+                    to: 2,
+                    weight: -1.0,
+                }],
+                vec![Edge {
+                    to: 1,
+                    weight: -1.0,
+                }],
             ],
             coordinates: None,
             node_names: None,

@@ -43,9 +43,19 @@ mod tests {
     // [2] Linear state-space — the worked example
     #[test]
     fn state_space_worked_example() {
-        let m = ss(vec![vec![0.0, 1.0], vec![0.0, 0.0]], vec![vec![0.0], vec![1.0]], vec![vec![1.0, 0.0]]);
-        assert_eq!(m.controllability_matrix(), vec![vec![0.0, 1.0], vec![1.0, 0.0]]);
-        assert_eq!(m.observability_matrix(), vec![vec![1.0, 0.0], vec![0.0, 1.0]]);
+        let m = ss(
+            vec![vec![0.0, 1.0], vec![0.0, 0.0]],
+            vec![vec![0.0], vec![1.0]],
+            vec![vec![1.0, 0.0]],
+        );
+        assert_eq!(
+            m.controllability_matrix(),
+            vec![vec![0.0, 1.0], vec![1.0, 0.0]]
+        );
+        assert_eq!(
+            m.observability_matrix(),
+            vec![vec![1.0, 0.0], vec![0.0, 1.0]]
+        );
         assert!(m.controllability_rank() == 2 && m.is_controllable());
         assert!(m.observability_rank() == 2 && m.is_observable());
     }
@@ -82,7 +92,11 @@ mod tests {
         let ring = MarkovDecisionProcess::new(MdpSpec {
             num_states: 3,
             num_actions: 1,
-            transition: vec![vec![vec![0.0, 1.0, 0.0], vec![0.0, 0.0, 1.0], vec![1.0, 0.0, 0.0]]],
+            transition: vec![vec![
+                vec![0.0, 1.0, 0.0],
+                vec![0.0, 0.0, 1.0],
+                vec![1.0, 0.0, 0.0],
+            ]],
         });
         assert!(ring.is_structurally_controllable());
         assert_eq!(ring.reachable_pair_count(), 9);
@@ -90,7 +104,11 @@ mod tests {
         let trap = MarkovDecisionProcess::new(MdpSpec {
             num_states: 3,
             num_actions: 1,
-            transition: vec![vec![vec![0.0, 1.0, 0.0], vec![0.0, 0.0, 1.0], vec![0.0, 0.0, 1.0]]],
+            transition: vec![vec![
+                vec![0.0, 1.0, 0.0],
+                vec![0.0, 0.0, 1.0],
+                vec![0.0, 0.0, 1.0],
+            ]],
         });
         assert!(!trap.is_structurally_controllable());
         assert!(trap.reachable_pair_count() < 9);
@@ -122,7 +140,11 @@ mod tests {
         let multi_step = PartiallyObservableProcess::new(PomdpSpec {
             num_states: 3,
             num_actions: 1,
-            transition: vec![vec![vec![0.0, 0.0, 1.0], vec![0.0, 1.0, 0.0], vec![0.0, 0.0, 1.0]]],
+            transition: vec![vec![
+                vec![0.0, 0.0, 1.0],
+                vec![0.0, 1.0, 0.0],
+                vec![0.0, 0.0, 1.0],
+            ]],
             num_observations: 2,
             observation: vec![vec![1.0, 0.0], vec![1.0, 0.0], vec![0.0, 1.0]],
         });

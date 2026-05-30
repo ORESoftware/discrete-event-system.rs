@@ -18,12 +18,12 @@
 
 use std::f64::consts::PI;
 
+use crate::des::general::equation_to_stations::to_function;
 use crate::des::general::equation_to_stations::{
     build_field1d, build_ode_system, solve_poisson2d, Bc, Field1DFamily, Field1DScheme,
     Field1DSpec, Field2DScheme, OdeScheme, OdeSystemSpec, Poisson2DSpec,
 };
 use crate::des::general::expr::{diff, parse, stringify, RichardsonDerivative};
-use crate::des::general::equation_to_stations::to_function;
 use crate::des::general::ode::{RK45Integrator, RK45Options, IVP};
 use crate::des::general::prng::mulberry32;
 use crate::des::general::quadrature::{
@@ -36,10 +36,16 @@ fn env_str(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 fn env_f64(key: &str, default: f64) -> f64 {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 fn env_usize(key: &str, default: usize) -> usize {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 fn jnum(x: f64) -> String {
@@ -50,10 +56,16 @@ fn jnum(x: f64) -> String {
     }
 }
 fn jarr(xs: &[f64]) -> String {
-    format!("[{}]", xs.iter().map(|v| jnum(*v)).collect::<Vec<_>>().join(","))
+    format!(
+        "[{}]",
+        xs.iter().map(|v| jnum(*v)).collect::<Vec<_>>().join(",")
+    )
 }
 fn jarr2(rows: &[Vec<f64>]) -> String {
-    format!("[{}]", rows.iter().map(|r| jarr(r)).collect::<Vec<_>>().join(","))
+    format!(
+        "[{}]",
+        rows.iter().map(|r| jarr(r)).collect::<Vec<_>>().join(",")
+    )
 }
 
 fn report_method(name: &str, r: QuadResult, reference: f64) {
@@ -101,7 +113,8 @@ fn run_expr() {
         RichardsonDerivative::default().eval(|x| f_fn(&[x]), x_val)
     );
     println!("\n# Quadrature ∫_{a}^{b} f(x) dx, comparing 5 methods:");
-    let ref_true = AdaptiveSimpsonRule::new(1e-15, 50).transform(Integrand1D::new(|x| f_fn(&[x]), a, b));
+    let ref_true =
+        AdaptiveSimpsonRule::new(1e-15, 50).transform(Integrand1D::new(|x| f_fn(&[x]), a, b));
     let reference = ref_true.value;
     println!(
         "#   reference (adaptive Simpson at tol 1e-15) = {:.12}  ({} evals)",
@@ -137,18 +150,31 @@ fn run_expr() {
 
 fn run_ode() {
     let omega = env_f64("OMEGA", 1.0);
-    let names: Vec<String> = env_str("NAMES", "y,v").split(',').map(|s| s.to_string()).collect();
+    let names: Vec<String> = env_str("NAMES", "y,v")
+        .split(',')
+        .map(|s| s.to_string())
+        .collect();
     let rhs: Vec<String> = env_str("RHS", &format!("v;-{omega}*{omega}*y"))
         .split(';')
         .map(|s| s.to_string())
         .collect();
-    let y0: Vec<f64> = env_str("Y0", "1,0").split(',').map(|s| s.parse().unwrap_or(0.0)).collect();
+    let y0: Vec<f64> = env_str("Y0", "1,0")
+        .split(',')
+        .map(|s| s.parse().unwrap_or(0.0))
+        .collect();
     let t1 = env_f64("T_END", 2.0 * PI);
     let dt = env_f64("DT", 0.01);
-    println!("# ODE system:  d/dt [{}] = [{}]", names.join(", "), rhs.join(", "));
+    println!(
+        "# ODE system:  d/dt [{}] = [{}]",
+        names.join(", "),
+        rhs.join(", ")
+    );
     println!(
         "#   y(0) = [{}],  t ∈ [0, {:.4}],  dt = {}",
-        y0.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", "),
+        y0.iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join(", "),
         t1,
         dt
     );
@@ -159,7 +185,10 @@ fn run_ode() {
         v.extend(names.iter().cloned());
         v
     };
-    let fns: Vec<_> = rhs.iter().map(|s| to_function(&parse(s), &arg_names)).collect();
+    let fns: Vec<_> = rhs
+        .iter()
+        .map(|s| to_function(&parse(s), &arg_names))
+        .collect();
     let n = names.len();
     let f_ref = move |t: f64, y: &[f64]| -> Vec<f64> {
         let mut arg = Vec::with_capacity(y.len() + 1);
@@ -172,16 +201,28 @@ fn run_ode() {
         atol: Some(1e-14),
         ..Default::default()
     })
-    .transform(IVP { f: f_ref, y0: y0.clone(), t0: 0.0, t1 });
+    .transform(IVP {
+        f: f_ref,
+        y0: y0.clone(),
+        t0: 0.0,
+        t1,
+    });
 
-    println!("\n# Reference (RK45 adaptive, rtol=1e-12): {} accepted steps", reference.t.len());
+    println!(
+        "\n# Reference (RK45 adaptive, rtol=1e-12): {} accepted steps",
+        reference.t.len()
+    );
     let ref_final = reference.y.last().expect("non-empty trace").clone();
     for (i, name) in names.iter().enumerate() {
         println!("#   {}({:.4}) = {:.10}", name, t1, ref_final[i]);
     }
 
     println!("\n# Station-network solvers (one station per state variable, dt = {dt}):");
-    for (label, scheme) in [("euler", OdeScheme::Euler), ("rk2", OdeScheme::Rk2), ("rk4", OdeScheme::Rk4)] {
+    for (label, scheme) in [
+        ("euler", OdeScheme::Euler),
+        ("rk2", OdeScheme::Rk2),
+        ("rk4", OdeScheme::Rk4),
+    ] {
         let mut sim = build_ode_system(&OdeSystemSpec {
             names: names.clone(),
             rhs: rhs.clone(),
@@ -199,7 +240,12 @@ fn run_ode() {
             .enumerate()
             .map(|(i, nm)| format!("{}={:.8}", nm, sim_out.final_values[i]))
             .collect();
-        println!("#   {:<6} {}  max|Δ vs RK45 ref| = {:.3e}", label, finals.join("  "), max_err);
+        println!(
+            "#   {:<6} {}  max|Δ vs RK45 ref| = {:.3e}",
+            label,
+            finals.join("  "),
+            max_err
+        );
     }
 
     // Artifact write (cwd-relative; see PORT NOTE).
@@ -279,8 +325,14 @@ fn run_pde() {
             err_btcs = err_btcs.max((out_btcs.final_values[i] - exact).abs());
         }
         println!("\n# Final t = {t},  analytical peak = exp(-απ²T) = {decay:.6}");
-        println!("#   FTCS ({} ticks):  max|err| = {:.3e}", out_ftcs.ticks, err_ftcs);
-        println!("#   BTCS ({} ticks):  max|err| = {:.3e}", out_btcs.ticks, err_btcs);
+        println!(
+            "#   FTCS ({} ticks):  max|err| = {:.3e}",
+            out_ftcs.ticks, err_ftcs
+        );
+        println!(
+            "#   BTCS ({} ticks):  max|err| = {:.3e}",
+            out_btcs.ticks, err_btcs
+        );
 
         let _ = std::fs::create_dir_all("out");
         let analytical: Vec<f64> = xs.iter().map(|&x| decay * (PI * x).sin()).collect();
@@ -301,7 +353,9 @@ fn run_pde() {
         let init_expr = env_str("INIT", "sin(3.14159265358979 * x)");
         let dx = 1.0 / (n as f64 - 1.0);
         let dt = 0.5 * dx / c;
-        println!("# PDE: wave 1D  u_tt = {c}² · u_xx,  init={init_expr},  v(x,0)=0,  N={n},  T={t}");
+        println!(
+            "# PDE: wave 1D  u_tt = {c}² · u_xx,  init={init_expr},  v(x,0)=0,  N={n},  T={t}"
+        );
         println!("#   CFL bound:  c·dt/dx ≤ 1;  using dt={dt:.6} (c·dt/dx = 0.5)");
         let mut r = build_field1d(&Field1DSpec {
             n,
@@ -324,7 +378,10 @@ fn run_pde() {
             let exact = (PI * xs[i]).sin() * (PI * c * t).cos();
             err = err.max((out.final_values[i] - exact).abs());
         }
-        println!("#   leapfrog ({} ticks):  max|err vs cos(πct)·sin(πx)| = {:.3e}", out.ticks, err);
+        println!(
+            "#   leapfrog ({} ticks):  max|err vs cos(πct)·sin(πx)| = {:.3e}",
+            out.ticks, err
+        );
     }
 }
 

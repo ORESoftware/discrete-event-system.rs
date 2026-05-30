@@ -40,10 +40,12 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::des::general::des_base::environment::{
-    EnvironmentStation, EnvironmentStationOptions, PureEnvironment, StepResult, CH_ACTION, CH_STATE,
-    CH_TRANSITION,
+    EnvironmentStation, EnvironmentStationOptions, PureEnvironment, StepResult, CH_ACTION,
+    CH_STATE, CH_TRANSITION,
 };
-use crate::des::general::des_base::linear_vfa::{LinearVFACore, LinearVFAOptions, LinearVFAStation};
+use crate::des::general::des_base::linear_vfa::{
+    LinearVFACore, LinearVFAOptions, LinearVFAStation,
+};
 use crate::des::general::des_base::preconditions::Preconditions;
 use crate::des::general::des_base::rl_agent::{RLAgentCore, RLAgentStation};
 use crate::des::general::des_base::runner::{run_iterative_des, IterativeRunOptions};
@@ -161,7 +163,11 @@ impl MountainCarEnv {
         let done = x_new >= self.opts.goal_pos;
         let id = self.alloc_id();
         self.states.insert(id, (x_new, v_new));
-        StepResult { next_state: id, reward: -1.0, done }
+        StepResult {
+            next_state: id,
+            reward: -1.0,
+            done,
+        }
     }
 
     /// (position, velocity) for an id. Panics on an unknown id (TS `throw`).
@@ -296,7 +302,14 @@ impl RLAgentStation<usize, usize> for MountainCarLinearVFA {
     fn pick_action(&self, state: &usize, rng: &mut dyn RandomSource) -> usize {
         self.linear_vfa_pick_action(state, rng)
     }
-    fn update(&mut self, state: &usize, action: &usize, reward: f64, next_state: &usize, done: bool) {
+    fn update(
+        &mut self,
+        state: &usize,
+        action: &usize,
+        reward: f64,
+        next_state: &usize,
+        done: bool,
+    ) {
         self.linear_vfa_update(state, *action, reward, next_state, done);
     }
     fn end_of_episode(&mut self, _episode_id: f64) {
@@ -391,7 +404,8 @@ pub struct MountainCarResult {
 /// policy from a quiet start to evaluate it.
 pub fn run_mountain_car(opts: MountainCarTrainOpts) -> MountainCarResult {
     let cls = "run_mountain_car";
-    Preconditions::integer_in_range(cls, "numEpisodes", opts.num_episodes as f64, 1.0, 1e9).unwrap();
+    Preconditions::integer_in_range(cls, "numEpisodes", opts.num_episodes as f64, 1.0, 1e9)
+        .unwrap();
     if let Some(m) = opts.max_steps_per_episode {
         Preconditions::integer_in_range(cls, "maxStepsPerEpisode", m as f64, 1.0, 1e9).unwrap();
     }
@@ -435,7 +449,10 @@ pub fn run_mountain_car(opts: MountainCarTrainOpts) -> MountainCarResult {
     );
 
     let max = opts.max_steps_per_episode.unwrap_or(1000);
-    let station_env = McStationEnv { env: env.clone(), rng: rng.clone() };
+    let station_env = McStationEnv {
+        env: env.clone(),
+        rng: rng.clone(),
+    };
     let env_station = EnvironmentStation::<usize, usize>::new(
         "env",
         Box::new(station_env),
@@ -446,14 +463,28 @@ pub fn run_mountain_car(opts: MountainCarTrainOpts) -> MountainCarResult {
     );
 
     let agent: Rc<RefCell<MountainCarLinearVFA>> = Rc::new(RefCell::new(agent));
-    let env_station: Rc<RefCell<EnvironmentStation<usize, usize>>> = Rc::new(RefCell::new(env_station));
+    let env_station: Rc<RefCell<EnvironmentStation<usize, usize>>> =
+        Rc::new(RefCell::new(env_station));
 
-    env_station.borrow_mut().core_mut().pipe(agent.clone() as StationRef, CH_STATE, CH_STATE);
-    env_station.borrow_mut().core_mut().pipe(agent.clone() as StationRef, CH_TRANSITION, CH_TRANSITION);
-    agent.borrow_mut().core_mut().pipe(env_station.clone() as StationRef, CH_ACTION, CH_ACTION);
+    env_station
+        .borrow_mut()
+        .core_mut()
+        .pipe(agent.clone() as StationRef, CH_STATE, CH_STATE);
+    env_station.borrow_mut().core_mut().pipe(
+        agent.clone() as StationRef,
+        CH_TRANSITION,
+        CH_TRANSITION,
+    );
+    agent
+        .borrow_mut()
+        .core_mut()
+        .pipe(env_station.clone() as StationRef, CH_ACTION, CH_ACTION);
 
     let summary = run_iterative_des(
-        vec![env_station.clone() as StationRef, agent.clone() as StationRef],
+        vec![
+            env_station.clone() as StationRef,
+            agent.clone() as StationRef,
+        ],
         IterativeRunOptions {
             rng: Some({
                 let mut r = rng.clone();

@@ -47,10 +47,18 @@ fn js_number(v: f64) -> String {
     if v.is_nan() {
         "NaN".to_string()
     } else if v.is_infinite() {
-        if v > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() }
+        if v > 0.0 {
+            "Infinity".to_string()
+        } else {
+            "-Infinity".to_string()
+        }
     } else {
         let s = v.to_string();
-        if s == "-0" { "0".to_string() } else { s }
+        if s == "-0" {
+            "0".to_string()
+        } else {
+            s
+        }
     }
 }
 
@@ -61,7 +69,11 @@ fn to_precision(x: f64, digits: usize) -> String {
         return x.to_string();
     }
     if x == 0.0 {
-        return if digits <= 1 { "0".to_string() } else { format!("0.{}", "0".repeat(digits - 1)) };
+        return if digits <= 1 {
+            "0".to_string()
+        } else {
+            format!("0.{}", "0".repeat(digits - 1))
+        };
     }
     let neg = x < 0.0;
     let ax = x.abs();
@@ -100,7 +112,10 @@ fn summarize_transform(title: &str, result: &TransformRunResult) -> String {
             result.entity_framework.stations.len(),
             result.entity_framework.sinks.len()
         ),
-        format!("  movables:   {}", result.entity_framework.movable_entities.join(", ")),
+        format!(
+            "  movables:   {}",
+            result.entity_framework.movable_entities.join(", ")
+        ),
         format!("  validation: {}", validation_line(&result.validation)),
     ];
     for output in result.outputs.iter().take(6) {
@@ -155,12 +170,27 @@ fn write_transform_csv(result: &TransformRunResult, csv_path: &str) {
 // Schema helpers
 // =============================================================================
 
-fn num(min: Option<f64>, max: Option<f64>, integer: Option<bool>, default: Option<f64>) -> ParamSchema {
-    ParamSchema::Number { min, max, integer, default, description: None }
+fn num(
+    min: Option<f64>,
+    max: Option<f64>,
+    integer: Option<bool>,
+    default: Option<f64>,
+) -> ParamSchema {
+    ParamSchema::Number {
+        min,
+        max,
+        integer,
+        default,
+        description: None,
+    }
 }
 
 fn string_field() -> ParamSchema {
-    ParamSchema::String { allowed: None, default: None, description: None }
+    ParamSchema::String {
+        allowed: None,
+        default: None,
+        description: None,
+    }
 }
 
 fn str_enum(allowed: &[&str], default: &str) -> ParamSchema {
@@ -172,12 +202,20 @@ fn str_enum(allowed: &[&str], default: &str) -> ParamSchema {
 }
 
 fn arr(items: ParamSchema, min_length: Option<usize>) -> ParamSchema {
-    ParamSchema::Array { items: Box::new(items), min_length, max_length: None, description: None }
+    ParamSchema::Array {
+        items: Box::new(items),
+        min_length,
+        max_length: None,
+        description: None,
+    }
 }
 
 fn obj(fields: Vec<(&str, ParamSchema)>, required: Vec<&str>) -> ParamSchema {
     ParamSchema::Object {
-        fields: fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+        fields: fields
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
         required: Some(required.iter().map(|s| s.to_string()).collect()),
         description: None,
     }
@@ -215,7 +253,10 @@ fn continuous_transform_fields() -> Vec<(&'static str, ParamSchema)> {
         ("t0", num(None, None, None, Some(0.0))),
         ("t1", num(None, None, None, Some(1.0))),
         ("dt", num(Some(1e-12), None, None, Some(0.01))),
-        ("quadrature", str_enum(&["rectangular", "trapezoid"], "trapezoid")),
+        (
+            "quadrature",
+            str_enum(&["rectangular", "trapezoid"], "trapezoid"),
+        ),
         ("tolerance", num(Some(0.0), None, None, Some(1e-9))),
     ]
 }
@@ -226,7 +267,10 @@ fn z_transform_schema() -> ParamSchema {
             ("sequence", number_vector_schema()),
             ("expression", string_field()),
             ("constants", numeric_map_schema()),
-            ("terms", num(Some(1.0), Some(1_000_000.0), Some(true), Some(8.0))),
+            (
+                "terms",
+                num(Some(1.0), Some(1_000_000.0), Some(true), Some(8.0)),
+            ),
             ("startIndex", num(None, None, Some(true), Some(0.0))),
             ("zValues", complex_point_array_schema()),
             ("tolerance", num(Some(0.0), None, None, Some(1e-9))),
@@ -266,7 +310,11 @@ fn example<P>(name: &str, model: &str, description: &str, parameters: P) -> Regi
 }
 
 fn cp(label: &str, re: f64, im: Option<f64>) -> ComplexPointInput {
-    ComplexPointInput { label: Some(label.to_string()), re, im }
+    ComplexPointInput {
+        label: Some(label.to_string()),
+        re,
+        im,
+    }
 }
 
 // =============================================================================
@@ -297,7 +345,12 @@ impl DESModelRegistration<ZTransformParams, TransformRunResult> for ZTransformAd
     fn write_csv(&self, result: &TransformRunResult, csv_path: &str) {
         write_transform_csv(result, csv_path);
     }
-    fn animate(&self, _result: &TransformRunResult, _params: &ZTransformParams, _runtime: &DESRuntimeConfig) {
+    fn animate(
+        &self,
+        _result: &TransformRunResult,
+        _params: &ZTransformParams,
+        _runtime: &DESRuntimeConfig,
+    ) {
         // PORT NOTE: animation subsystem not ported (see module docs). No-op.
     }
     fn examples(&self) -> Vec<RegistrationExample<ZTransformParams>> {
@@ -308,7 +361,11 @@ impl DESModelRegistration<ZTransformParams, TransformRunResult> for ZTransformAd
             ZTransformParams {
                 sequence: Some(vec![1.0, 0.5, 0.25, 0.125, 0.0625, 0.03125]),
                 start_index: Some(0),
-                z_values: Some(vec![cp("z=2", 2.0, None), cp("z=1", 1.0, None), cp("z=-1", -1.0, None)]),
+                z_values: Some(vec![
+                    cp("z=2", 2.0, None),
+                    cp("z=1", 1.0, None),
+                    cp("z=-1", -1.0, None),
+                ]),
                 ..Default::default()
             },
         )]
@@ -334,7 +391,11 @@ impl DESModelRegistration<LaplaceTransformParams, TransformRunResult> for Laplac
     fn schema(&self) -> ParamSchema {
         laplace_transform_schema()
     }
-    fn run(&self, params: LaplaceTransformParams, _runtime: &DESRuntimeConfig) -> TransformRunResult {
+    fn run(
+        &self,
+        params: LaplaceTransformParams,
+        _runtime: &DESRuntimeConfig,
+    ) -> TransformRunResult {
         run_laplace_transform(params)
     }
     fn summarize(&self, result: &TransformRunResult, _params: &LaplaceTransformParams) -> String {
@@ -343,7 +404,12 @@ impl DESModelRegistration<LaplaceTransformParams, TransformRunResult> for Laplac
     fn write_csv(&self, result: &TransformRunResult, csv_path: &str) {
         write_transform_csv(result, csv_path);
     }
-    fn animate(&self, _result: &TransformRunResult, _params: &LaplaceTransformParams, _runtime: &DESRuntimeConfig) {
+    fn animate(
+        &self,
+        _result: &TransformRunResult,
+        _params: &LaplaceTransformParams,
+        _runtime: &DESRuntimeConfig,
+    ) {
         // PORT NOTE: animation subsystem not ported (see module docs). No-op.
     }
     fn examples(&self) -> Vec<RegistrationExample<LaplaceTransformParams>> {
@@ -384,7 +450,11 @@ impl DESModelRegistration<FourierTransformParams, TransformRunResult> for Fourie
     fn schema(&self) -> ParamSchema {
         fourier_transform_schema()
     }
-    fn run(&self, params: FourierTransformParams, _runtime: &DESRuntimeConfig) -> TransformRunResult {
+    fn run(
+        &self,
+        params: FourierTransformParams,
+        _runtime: &DESRuntimeConfig,
+    ) -> TransformRunResult {
         run_fourier_transform(params)
     }
     fn summarize(&self, result: &TransformRunResult, _params: &FourierTransformParams) -> String {
@@ -393,7 +463,12 @@ impl DESModelRegistration<FourierTransformParams, TransformRunResult> for Fourie
     fn write_csv(&self, result: &TransformRunResult, csv_path: &str) {
         write_transform_csv(result, csv_path);
     }
-    fn animate(&self, _result: &TransformRunResult, _params: &FourierTransformParams, _runtime: &DESRuntimeConfig) {
+    fn animate(
+        &self,
+        _result: &TransformRunResult,
+        _params: &FourierTransformParams,
+        _runtime: &DESRuntimeConfig,
+    ) {
         // PORT NOTE: animation subsystem not ported (see module docs). No-op.
     }
     fn examples(&self) -> Vec<RegistrationExample<FourierTransformParams>> {

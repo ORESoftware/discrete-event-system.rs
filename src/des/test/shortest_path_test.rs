@@ -10,7 +10,8 @@ mod tests {
     use crate::des::general::prng::mulberry32;
     use crate::des::general::shortest_path_des::{
         build_random_graph, build_small_chain_graph, reconstruct_path,
-        shortest_path_bellman_ford_des, shortest_path_dijkstra_des, BellmanFordOptions, Edge, Graph,
+        shortest_path_bellman_ford_des, shortest_path_dijkstra_des, BellmanFordOptions, Edge,
+        Graph,
     };
 
     const TOL: f64 = 1e-12;
@@ -101,7 +102,13 @@ mod tests {
         let g = Graph {
             num_nodes: 3,
             edges: vec![
-                vec![Edge { to: 1, weight: 5.0 }, Edge { to: 2, weight: -2.0 }],
+                vec![
+                    Edge { to: 1, weight: 5.0 },
+                    Edge {
+                        to: 2,
+                        weight: -2.0,
+                    },
+                ],
                 vec![Edge { to: 2, weight: 1.0 }],
                 vec![],
             ],
@@ -123,7 +130,10 @@ mod tests {
             num_nodes: 3,
             edges: vec![
                 vec![Edge { to: 1, weight: 1.0 }],
-                vec![Edge { to: 2, weight: -3.0 }],
+                vec![Edge {
+                    to: 2,
+                    weight: -3.0,
+                }],
                 vec![Edge { to: 1, weight: 1.0 }],
             ],
             ..Default::default()
@@ -162,10 +172,17 @@ mod tests {
         let n = 6;
         let mut edges: Vec<Vec<Edge>> = Vec::new();
         for i in 0..n - 1 {
-            edges.push(vec![Edge { to: i + 1, weight: 1.0 }]);
+            edges.push(vec![Edge {
+                to: i + 1,
+                weight: 1.0,
+            }]);
         }
         edges.push(vec![]);
-        let g = Graph { num_nodes: n, edges, ..Default::default() };
+        let g = Graph {
+            num_nodes: n,
+            edges,
+            ..Default::default()
+        };
         let bf = shortest_path_bellman_ford_des(&g, 0, opts());
         for v in 0..n {
             assert!((bf.distance[v] - v as f64).abs() <= TOL);

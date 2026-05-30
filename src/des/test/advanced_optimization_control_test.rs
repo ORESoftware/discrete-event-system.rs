@@ -28,7 +28,7 @@ mod tests {
     };
     use crate::des::general::advanced_optimization_models::{
         pareto_front_is_nondominated, run_ant_colony_tsp, run_map_coloring_csp,
-        run_max_sat_local_search, run_particle_swarm, run_pareto_portfolio,
+        run_max_sat_local_search, run_pareto_portfolio, run_particle_swarm,
         run_sdp_max_cut_relaxation, AntColonyTSPParams, ContinuousObjectiveName,
         MapColoringCSPParams, MaxSATParams, ParetoPortfolioParams, ParticleSwarmParams, Point2,
         SDPMaxCutParams,
@@ -74,7 +74,10 @@ mod tests {
     #[test]
     #[should_panic]
     fn particle_swarm_rejects_invalid_dimension() {
-        let _ = run_particle_swarm(ParticleSwarmParams { dimension: Some(0), ..Default::default() });
+        let _ = run_particle_swarm(ParticleSwarmParams {
+            dimension: Some(0),
+            ..Default::default()
+        });
     }
 
     // -- ant-colony-tsp --
@@ -127,25 +130,53 @@ mod tests {
     #[test]
     fn max_sat_local_search() {
         let r = run_max_sat_local_search(MaxSATParams::default());
-        assert!(r.all_satisfied, "{}/{}", r.satisfied_clauses, r.total_clauses);
-        assert!(r.topology.movables.iter().any(|v| v.contains("OptimizationCandidateToken")));
-        assert_eq!(r.topology.stations[0].as_str(), "max-sat-local-search-source");
-        assert!(has(&r.topology.stations, "max-sat-local-search-result-sink"));
+        assert!(
+            r.all_satisfied,
+            "{}/{}",
+            r.satisfied_clauses, r.total_clauses
+        );
+        assert!(r
+            .topology
+            .movables
+            .iter()
+            .any(|v| v.contains("OptimizationCandidateToken")));
+        assert_eq!(
+            r.topology.stations[0].as_str(),
+            "max-sat-local-search-source"
+        );
+        assert!(has(
+            &r.topology.stations,
+            "max-sat-local-search-result-sink"
+        ));
     }
 
     // -- sdp-maxcut-relaxation --
     #[test]
     fn sdp_maxcut_relaxation() {
         let r = run_sdp_max_cut_relaxation(SDPMaxCutParams::default());
-        assert!(r.sdp_value + 1e-9 >= r.rounded_cut_value, "sdp={} cut={}", r.sdp_value, r.rounded_cut_value);
+        assert!(
+            r.sdp_value + 1e-9 >= r.rounded_cut_value,
+            "sdp={} cut={}",
+            r.sdp_value,
+            r.rounded_cut_value
+        );
         for (i, row) in r.gram_matrix.iter().enumerate() {
             assert!((row[i] - 1.0).abs() <= 1e-9);
         }
         assert!(has(&r.topology.stations, "sdp-maxcut-relaxation-station"));
-        assert_eq!(r.topology.stations[0].as_str(), "sdp-maxcut-relaxation-source");
-        assert!(has(&r.topology.stations, "sdp-maxcut-relaxation-result-sink"));
+        assert_eq!(
+            r.topology.stations[0].as_str(),
+            "sdp-maxcut-relaxation-source"
+        );
+        assert!(has(
+            &r.topology.stations,
+            "sdp-maxcut-relaxation-result-sink"
+        ));
 
-        let fallback = run_sdp_max_cut_relaxation(SDPMaxCutParams { edges: Some(vec![]), ..Default::default() });
+        let fallback = run_sdp_max_cut_relaxation(SDPMaxCutParams {
+            edges: Some(vec![]),
+            ..Default::default()
+        });
         assert!(fallback.rounded_cut_value > 0.0);
     }
 
@@ -162,15 +193,30 @@ mod tests {
 
     #[test]
     fn pareto_archive_reuse_and_dedup() {
-        let archive = Rc::new(RefCell::new(ParetoArchiveStation::<i32>::new("pareto-reuse-test", vec![])));
+        let archive = Rc::new(RefCell::new(ParetoArchiveStation::<i32>::new(
+            "pareto-reuse-test",
+            vec![],
+        )));
         run_iterative_des(
             vec![archive.clone() as StationRef],
-            IterativeRunOptions { shuffle: false, max_ticks: Some(2), run_validators: false, ..Default::default() },
+            IterativeRunOptions {
+                shuffle: false,
+                max_ticks: Some(2),
+                run_validators: false,
+                ..Default::default()
+            },
         );
-        archive.borrow_mut().enqueue(ParetoCandidateToken::new(1, vec![1.0, -1.0]));
+        archive
+            .borrow_mut()
+            .enqueue(ParetoCandidateToken::new(1, vec![1.0, -1.0]));
         run_iterative_des(
             vec![archive.clone() as StationRef],
-            IterativeRunOptions { shuffle: false, max_ticks: Some(2), run_validators: false, ..Default::default() },
+            IterativeRunOptions {
+                shuffle: false,
+                max_ticks: Some(2),
+                run_validators: false,
+                ..Default::default()
+            },
         );
         assert_eq!(archive.borrow().get_processed_count(), 1);
 
@@ -183,7 +229,12 @@ mod tests {
         )));
         run_iterative_des(
             vec![dup.clone() as StationRef],
-            IterativeRunOptions { shuffle: false, max_ticks: Some(4), run_validators: false, ..Default::default() },
+            IterativeRunOptions {
+                shuffle: false,
+                max_ticks: Some(4),
+                run_validators: false,
+                ..Default::default()
+            },
         );
         assert_eq!(dup.borrow().get_archive().len(), 1);
     }
@@ -192,7 +243,11 @@ mod tests {
     #[test]
     fn hinfinity_robust_control() {
         let r = run_h_infinity_robust_control(HInfinityRobustControlParams::default()).unwrap();
-        assert!(r.bounded_by_gamma, "gain={} gamma={}", r.l2_gain_estimate, r.gamma);
+        assert!(
+            r.bounded_by_gamma,
+            "gain={} gamma={}",
+            r.l2_gain_estimate, r.gamma
+        );
         assert!(r.final_state.abs() < 0.5, "final={}", r.final_state);
         assert_eq!(r.topology.stations.len(), 3);
     }
@@ -202,7 +257,15 @@ mod tests {
     fn pursuit_evasion_game() {
         let r = run_pursuit_evasion_game(PursuitEvasionGameParams::default()).unwrap();
         assert!(r.capture_tick.is_some(), "capture={:?}", r.capture_tick);
-        assert!(r.final_distance < r.distance_history[0], "d0={} df={}", r.distance_history[0], r.final_distance);
-        assert!(has(&r.topology.movables, "ControlMoveToken") && has(&r.topology.movables, "DisturbanceMoveToken"));
+        assert!(
+            r.final_distance < r.distance_history[0],
+            "d0={} df={}",
+            r.distance_history[0],
+            r.final_distance
+        );
+        assert!(
+            has(&r.topology.movables, "ControlMoveToken")
+                && has(&r.topology.movables, "DisturbanceMoveToken")
+        );
     }
 }

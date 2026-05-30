@@ -200,7 +200,11 @@ pub fn spawn_stateful_child_token<S: Clone>(
 }
 
 /// Apply a state transition in place. No-op for stateless tokens.
-pub fn transition_token<S: Clone>(token: &mut StatefulToken<S>, next_state: S, opts: TransitionTokenOpts) {
+pub fn transition_token<S: Clone>(
+    token: &mut StatefulToken<S>,
+    next_state: S,
+    opts: TransitionTokenOpts,
+) {
     if token.state_mode != TokenStateMode::Stateful {
         return;
     }
@@ -286,11 +290,24 @@ impl<S: Clone, P> PayloadStatefulToken<S, P> {
         } = opts;
 
         let base = if state_mode == Some(TokenStateMode::Stateless) {
-            make_stateless_token::<S>(MakeStatelessTokenOpts { kind, token_id, parent, causation_token_id })
+            make_stateless_token::<S>(MakeStatelessTokenOpts {
+                kind,
+                token_id,
+                parent,
+                causation_token_id,
+            })
         } else if let Some(parent_lineage) = parent {
             spawn_stateful_child_token(
                 &parent_lineage,
-                SpawnStatefulChildTokenOpts { kind, token_id, initial_state, tick, station_id, event, detail },
+                SpawnStatefulChildTokenOpts {
+                    kind,
+                    token_id,
+                    initial_state,
+                    tick,
+                    station_id,
+                    event,
+                    detail,
+                },
             )
         } else {
             make_stateful_token(MakeStatefulTokenOpts {
@@ -388,7 +405,12 @@ mod tests {
         transition_token(
             &mut tok,
             "running".to_string(),
-            TransitionTokenOpts { tick: 1.0, station_id: "proc".to_string(), event: "start".to_string(), detail: None },
+            TransitionTokenOpts {
+                tick: 1.0,
+                station_id: "proc".to_string(),
+                event: "start".to_string(),
+                detail: None,
+            },
         );
         assert_eq!(tok.current_state.as_deref(), Some("running"));
         let history = tok.state_history.as_ref().unwrap();

@@ -155,7 +155,7 @@ mod tests {
     use super::*;
     use crate::des::entity_moving::moving::MovingValue;
     use crate::des::r#abstract::interfaces::EntityGraphData;
-    use crate::des::r#abstract::r#abstract::EntityCore;
+    use crate::des::r#abstract::r#abstract::{Entity, EntityCore};
     use crate::des::shared::precision::Decimal;
     use crate::des::signals::r#abstract::{SignalEntity, SignalTimeStepOpts};
     use crate::des::signals::signal_value::SignalValue;
@@ -183,7 +183,6 @@ mod tests {
             self.run_time_step_signal(step_size, None);
         }
     }
-    use crate::des::r#abstract::r#abstract::Entity;
 
     impl MovingEntity for StubNode {
         fn moving_core(&self) -> &MovingCore {

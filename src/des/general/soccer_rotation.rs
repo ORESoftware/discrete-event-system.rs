@@ -1,0 +1,1538 @@
+//! Port of `src/des/general/soccer-rotation.ts` — module `des::general::soccer_rotation`.
+//!
+//! 7v7 youth-soccer player rotation as a multi-period bipartite-assignment
+//! combinatorial optimisation problem, solved many ways (greedy Hungarian, exact
+//! backward-induction MDP, LP relaxation, in-house IP/MIP) plus a stochastic
+//! match simulator used as the evaluator.
+//!
+//! The problem: a 12-player roster, 7 on field, 5 on bench, a match split into T
+//! periods. For each (player, position, period) there is an affinity in [0, 1].
+//! Fairness constraint: no player may be benched two periods in a row. Goal:
+//! pick a schedule that maximises total affinity (and simulated goal
+//! differential).
+//!
+//! ## Conversion notes (per the TS "RUST MIGRATION" header)
+//!
+//!   * Each `PureTransform` subclass → a struct that implements
+//!     [`Transform`]; the deprecated free functions are kept and hold the actual
+//!     logic (the `Transform::transform` impls delegate to them).
+//!   * RNG injection: `mulberry32(seed)` → the project's [`SeededRandom`]
+//!     (re-exported through `prng`), constructed from the stored seed inside each
+//!     transform so the transform stays deterministic.
+//!   * Depends on `hungarian`, `lp`, `ip_mip_des`.
+//!   * `benchKey(bench)` string map key → a sorted `Vec<usize>` key with
+//!     `Hash + Eq` (the empty bench-set is the `''`/"none" key).
+//!   * Schedules are `number[][]`: assignment entries can be a `-1` sentinel
+//!     (Hungarian leaving a slot unmatched) so `assignment` is `Vec<Vec<i64>>`;
+//!     bench entries are always valid player ids (`Vec<Vec<usize>>`).
+//!   * `validate*` returns the recoverable `string | null` as `Option<String>`;
+//!     the only hard failures (`throw`) become `panic!`.
+
+#![allow(dead_code)]
+
+use std::collections::{HashMap, HashSet};
+
+use crate::des::general::hungarian::{hungarian, AssignmentDirection};
+use crate::des::general::ip_mip_des::{
+    solve_ipmip_with_des, BranchRule, ConcreteLpRelaxationAlgorithm, ConstraintNode, IPMIPProblem, IPMIPSolution,
+    IPMIPSolveOptions, LpRelaxationAlgorithm, NodeSelection, VariableNode,
+};
+use crate::des::general::lp::{solve_lp, LPProblem, LPStatus, LpSolverOptions, Sense};
+use crate::des::general::prng::mulberry32;
+use crate::des::shared::capabilities::RandomSource;
+use crate::des::shared::transform::Transform;
+
+// =============================================================================
+// PROBLEM DEFINITION
+// =============================================================================
+
+/// A multi-period soccer rotation problem instance.
+#[derive(Clone, Debug)]
+pub struct SoccerProblem {
+    pub num_players: usize,
+    pub num_positions: usize,
+    pub num_periods: usize,
+    pub bench_size: usize,
+    /// `affinity[p][pos][t]` in `[0, 1]`.
+    pub affinity: Vec<Vec<Vec<f64>>>,
+    pub player_names: Option<Vec<String>>,
+    pub position_names: Option<Vec<String>>,
+}
+
+/// A chosen rotation schedule.
+#[derive(Clone, Debug)]
+pub struct Schedule {
+    /// `assignment[t][pos]` = player id at position `pos` in period `t` (`-1` if unset).
+    pub assignment: Vec<Vec<i64>>,
+    /// `bench[t]` = sorted list of bench player ids in period `t`.
+    pub bench: Vec<Vec<usize>>,
+}
+
+// -----------------------------------------------------------------------------
+// AFFINITY MODEL
+// -----------------------------------------------------------------------------
+
+/// Options controlling the synthetic affinity-tensor builder.
+#[derive(Clone, Debug, Default)]
+pub struct AffinityBuilderOptions {
+    pub num_players: Option<usize>,
+    pub num_positions: Option<usize>,
+    pub num_periods: Option<usize>,
+    /// PRNG seed for reproducibility.
+    pub seed: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StaminaProfile {
+    Starter,
+    Closer,
+    Iron,
+}
+
+/// `PureTransform<AffinityBuilderOptions, SoccerProblem>`.
+pub struct BuildSampleSoccerProblem;
+
+impl Transform<AffinityBuilderOptions, SoccerProblem> for BuildSampleSoccerProblem {
+    fn transform(&self, opts: AffinityBuilderOptions) -> SoccerProblem {
+        build_sample_soccer_problem(&opts)
+    }
+}
+
+/// Build a "realistic" affinity tensor for a 12-player squad.
+pub fn build_sample_soccer_problem(opts: &AffinityBuilderOptions) -> SoccerProblem {
+    let num_players = opts.num_players.unwrap_or(12);
+    let num_positions = opts.num_positions.unwrap_or(7);
+    let num_periods = opts.num_periods.unwrap_or(4);
+    let bench_size = num_players - num_positions;
+    let seed = opts.seed.unwrap_or(4242);
+    let mut rng = mulberry32(seed);
+
+    let mut player_names: Vec<String> = Vec::new();
+    for p in 0..num_players {
+        player_names.push(format!("P{}", p + 1));
+    }
+    let mut position_names: Vec<String> = Vec::new();
+    let letters: Vec<char> = "ABCDEFGHIJKLMN".chars().collect();
+    for pos in 0..num_positions {
+        position_names.push(letters[pos].to_string());
+    }
+
+    let mut natural_pos: Vec<usize> = Vec::new();
+    let mut secondary: Vec<[usize; 2]> = Vec::new();
+    let mut profile: Vec<StaminaProfile> = Vec::new();
+    let mut fitness: Vec<f64> = Vec::new();
+    for _p in 0..num_players {
+        natural_pos.push((rng.next_float() * num_positions as f64).floor() as usize);
+        let sec1 = (rng.next_float() * num_positions as f64).floor() as usize;
+        let sec2 = (rng.next_float() * num_positions as f64).floor() as usize;
+        secondary.push([sec1, sec2]);
+        let r = rng.next_float();
+        profile.push(if r < 0.35 {
+            StaminaProfile::Starter
+        } else if r < 0.7 {
+            StaminaProfile::Closer
+        } else {
+            StaminaProfile::Iron
+        });
+        fitness.push(0.7 + 0.3 * rng.next_float());
+    }
+
+    let mut aff: Vec<Vec<Vec<f64>>> = Vec::new();
+    for p in 0..num_players {
+        let mut player_aff: Vec<Vec<f64>> = Vec::new();
+        for pos in 0..num_positions {
+            let mut period_aff: Vec<f64> = Vec::new();
+            let mut base_pos_fit = 0.20 + 0.25 * rng.next_float();
+            if pos == natural_pos[p] {
+                base_pos_fit = 0.85 + 0.15 * rng.next_float();
+            } else if secondary[p].contains(&pos) {
+                base_pos_fit = 0.55 + 0.20 * rng.next_float();
+            }
+            let mid = (num_periods as f64 - 1.0) / 2.0;
+            let denom = 1.0_f64.max(num_periods as f64 - 1.0);
+            for t in 0..num_periods {
+                let period_mod = match profile[p] {
+                    StaminaProfile::Starter => 1.05 - 0.20 * (t as f64 / denom),
+                    StaminaProfile::Closer => 0.85 + 0.20 * (t as f64 / denom),
+                    StaminaProfile::Iron => 0.95 + 0.05 * ((t as f64 - mid) / denom).cos(),
+                };
+                let noise = 0.95 + 0.10 * rng.next_float();
+                let v = base_pos_fit * period_mod * fitness[p] * noise;
+                period_aff.push(v.max(0.0).min(1.0));
+            }
+            player_aff.push(period_aff);
+        }
+        aff.push(player_aff);
+    }
+
+    SoccerProblem {
+        num_players,
+        num_positions,
+        num_periods,
+        bench_size,
+        affinity: aff,
+        player_names: Some(player_names),
+        position_names: Some(position_names),
+    }
+}
+
+// =============================================================================
+// SCHEDULE EVALUATION + FAIRNESS
+// =============================================================================
+
+/// A fairness violation: a player benched in two consecutive periods.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FairnessViolation {
+    pub player_id: usize,
+    pub period_a: usize,
+    pub period_b: usize,
+}
+
+/// The deterministic evaluation of a schedule.
+#[derive(Clone, Debug)]
+pub struct ScheduleEvaluation {
+    pub affinity_sum: f64,
+    pub per_period_affinity: Vec<f64>,
+    pub fairness_ok: bool,
+    pub fairness_violations: Vec<FairnessViolation>,
+    pub bench_counts: Vec<usize>,
+}
+
+/// Bundled `(problem, schedule)` input shared by the schedule analysers.
+pub struct ProblemScheduleInput<'a> {
+    pub problem: &'a SoccerProblem,
+    pub schedule: &'a Schedule,
+}
+
+/// `PureTransform<ProblemScheduleInput, ScheduleEvaluation>`.
+pub struct EvaluateSchedule;
+
+impl<'a> Transform<ProblemScheduleInput<'a>, ScheduleEvaluation> for EvaluateSchedule {
+    fn transform(&self, input: ProblemScheduleInput<'a>) -> ScheduleEvaluation {
+        evaluate_schedule(input.problem, input.schedule)
+    }
+}
+
+/// Score a schedule and check the fairness constraint.
+pub fn evaluate_schedule(problem: &SoccerProblem, schedule: &Schedule) -> ScheduleEvaluation {
+    let t_count = problem.num_periods;
+    let mut per_period: Vec<f64> = Vec::new();
+    let mut total = 0.0;
+    for t in 0..t_count {
+        let mut s = 0.0;
+        for pos in 0..problem.num_positions {
+            let p = schedule.assignment[t][pos];
+            s += problem.affinity[p as usize][pos][t];
+        }
+        per_period.push(s);
+        total += s;
+    }
+    let mut fairness_violations: Vec<FairnessViolation> = Vec::new();
+    for t in 0..t_count.saturating_sub(1) {
+        for &p in &schedule.bench[t] {
+            if schedule.bench[t + 1].contains(&p) {
+                fairness_violations.push(FairnessViolation { player_id: p, period_a: t, period_b: t + 1 });
+            }
+        }
+    }
+    let mut bench_counts = vec![0usize; problem.num_players];
+    for t in 0..t_count {
+        for &p in &schedule.bench[t] {
+            bench_counts[p] += 1;
+        }
+    }
+    ScheduleEvaluation {
+        affinity_sum: total,
+        per_period_affinity: per_period,
+        fairness_ok: fairness_violations.is_empty(),
+        fairness_violations,
+        bench_counts,
+    }
+}
+
+/// `PureTransform<ProblemScheduleInput, string | null>`.
+pub struct ValidateScheduleStructure;
+
+impl<'a> Transform<ProblemScheduleInput<'a>, Option<String>> for ValidateScheduleStructure {
+    fn transform(&self, input: ProblemScheduleInput<'a>) -> Option<String> {
+        validate_schedule_structure(input.problem, input.schedule)
+    }
+}
+
+/// Sanity-check that a schedule is well-formed; returns `Some(reason)` if not.
+pub fn validate_schedule_structure(problem: &SoccerProblem, schedule: &Schedule) -> Option<String> {
+    let (num_players, num_positions, num_periods, bench_size) =
+        (problem.num_players, problem.num_positions, problem.num_periods, problem.bench_size);
+    if schedule.assignment.len() != num_periods {
+        return Some(format!("assignment.length != {num_periods}"));
+    }
+    if schedule.bench.len() != num_periods {
+        return Some(format!("bench.length != {num_periods}"));
+    }
+    for t in 0..num_periods {
+        if schedule.assignment[t].len() != num_positions {
+            return Some(format!("assignment[{t}].length != {num_positions}"));
+        }
+        if schedule.bench[t].len() != bench_size {
+            return Some(format!("bench[{t}].length != {bench_size}"));
+        }
+        let mut seen: HashSet<i64> = HashSet::new();
+        for &p in &schedule.assignment[t] {
+            if p < 0 || p >= num_players as i64 {
+                return Some(format!("assignment[{t}] has invalid player {p}"));
+            }
+            if seen.contains(&p) {
+                return Some(format!("player {p} appears twice on field in period {t}"));
+            }
+            seen.insert(p);
+        }
+        for &p in &schedule.bench[t] {
+            if p >= num_players {
+                return Some(format!("bench[{t}] has invalid player {p}"));
+            }
+            let pi = p as i64;
+            if seen.contains(&pi) {
+                return Some(format!("player {p} both on field and bench in period {t}"));
+            }
+            seen.insert(pi);
+        }
+        if seen.len() != num_players {
+            return Some(format!("period {t}: total players != {num_players}"));
+        }
+    }
+    None
+}
+
+// =============================================================================
+// SCHEDULING POLICIES
+// =============================================================================
+
+/// `PureTransform<SoccerProblem, Schedule>` — random (baseline) schedule.
+pub struct PolicyRandomSchedule {
+    seed: u32,
+}
+
+impl PolicyRandomSchedule {
+    pub fn new(seed: u32) -> Self {
+        PolicyRandomSchedule { seed }
+    }
+}
+
+impl<'a> Transform<&'a SoccerProblem, Schedule> for PolicyRandomSchedule {
+    fn transform(&self, problem: &'a SoccerProblem) -> Schedule {
+        policy_random_schedule(problem, self.seed)
+    }
+}
+
+/// Build a random valid schedule (does NOT respect fairness with high probability).
+pub fn policy_random_schedule(problem: &SoccerProblem, seed: u32) -> Schedule {
+    let mut rng = mulberry32(seed);
+    let mut assignment: Vec<Vec<i64>> = Vec::new();
+    let mut bench: Vec<Vec<usize>> = Vec::new();
+    for _t in 0..problem.num_periods {
+        let mut order: Vec<usize> = (0..problem.num_players).collect();
+        let mut i = order.len() - 1;
+        while i > 0 {
+            let j = (rng.next_float() * ((i + 1) as f64)).floor() as usize;
+            order.swap(i, j);
+            i -= 1;
+        }
+        assignment.push(order[0..problem.num_positions].iter().map(|&x| x as i64).collect());
+        let mut tbench: Vec<usize> = order[problem.num_positions..].to_vec();
+        tbench.sort_unstable();
+        bench.push(tbench);
+    }
+    Schedule { assignment, bench }
+}
+
+/// Options for the greedy-Hungarian policy.
+#[derive(Clone, Debug, Default)]
+pub struct GreedyHungarianOptions {
+    pub fairness_aware: Option<bool>,
+}
+
+/// `PureTransform<SoccerProblem, Schedule>` — greedy per-period Hungarian.
+pub struct PolicyGreedyHungarian {
+    opts: GreedyHungarianOptions,
+}
+
+impl PolicyGreedyHungarian {
+    pub fn new(opts: GreedyHungarianOptions) -> Self {
+        PolicyGreedyHungarian { opts }
+    }
+}
+
+impl<'a> Transform<&'a SoccerProblem, Schedule> for PolicyGreedyHungarian {
+    fn transform(&self, problem: &'a SoccerProblem) -> Schedule {
+        policy_greedy_hungarian(problem, &self.opts)
+    }
+}
+
+/// Greedy fairness-aware per-period Hungarian assignment.
+pub fn policy_greedy_hungarian(problem: &SoccerProblem, opts: &GreedyHungarianOptions) -> Schedule {
+    let fairness_aware = opts.fairness_aware.unwrap_or(true);
+    let t_count = problem.num_periods;
+    let mut assignment: Vec<Vec<i64>> = Vec::new();
+    let mut bench: Vec<Vec<usize>> = Vec::new();
+    let mut prev_bench: Vec<usize> = Vec::new();
+    for t in 0..t_count {
+        let mut best_pos: Vec<f64> = Vec::new();
+        for p in 0..problem.num_players {
+            let mut mx = f64::NEG_INFINITY;
+            for pos in 0..problem.num_positions {
+                if problem.affinity[p][pos][t] > mx {
+                    mx = problem.affinity[p][pos][t];
+                }
+            }
+            best_pos.push(mx);
+        }
+        let mut candidates: Vec<usize> = (0..problem.num_players).collect();
+        candidates.sort_by(|&a, &b| best_pos[b].partial_cmp(&best_pos[a]).unwrap_or(std::cmp::Ordering::Equal));
+        let must_play: HashSet<usize> = if fairness_aware { prev_bench.iter().copied().collect() } else { HashSet::new() };
+        let mut on_field: Vec<usize> = Vec::new();
+        for &p in &candidates {
+            if must_play.contains(&p) {
+                on_field.push(p);
+            }
+            if on_field.len() >= problem.num_positions {
+                break;
+            }
+        }
+        for &p in &candidates {
+            if on_field.len() >= problem.num_positions {
+                break;
+            }
+            if !must_play.contains(&p) && !on_field.contains(&p) {
+                on_field.push(p);
+            }
+        }
+        let period_assign = hungarian_assign_period(problem, t, &on_field);
+        assignment.push(period_assign);
+        let mut tbench: Vec<usize> = (0..problem.num_players).filter(|p| !on_field.contains(p)).collect();
+        tbench.sort_unstable();
+        bench.push(tbench.clone());
+        prev_bench = tbench;
+    }
+    Schedule { assignment, bench }
+}
+
+/// Hungarian-assign the chosen on-field players to positions for period `t`.
+fn hungarian_assign_period(problem: &SoccerProblem, t: usize, on_field: &[usize]) -> Vec<i64> {
+    let mut w_matrix: Vec<Vec<f64>> = Vec::new();
+    for &p in on_field {
+        let mut row: Vec<f64> = Vec::new();
+        for pos in 0..problem.num_positions {
+            row.push(problem.affinity[p][pos][t]);
+        }
+        w_matrix.push(row);
+    }
+    let res = hungarian(&w_matrix, AssignmentDirection::Max);
+    let mut period_assign = vec![-1i64; problem.num_positions];
+    for i in 0..on_field.len() {
+        let pos = res.rows[i];
+        if pos >= 0 {
+            period_assign[pos as usize] = on_field[i] as i64;
+        }
+    }
+    period_assign
+}
+
+// -----------------------------------------------------------------------------
+// MDP-VI exact backward induction.
+// -----------------------------------------------------------------------------
+
+/// Enumerate all C(n, k) sorted subsets of size k from {0, …, n-1}.
+fn combinations(n: usize, k: usize) -> Vec<Vec<usize>> {
+    let mut out: Vec<Vec<usize>> = Vec::new();
+    if k == 0 {
+        out.push(Vec::new());
+        return out;
+    }
+    if k > n {
+        return out;
+    }
+    let mut idx: Vec<usize> = (0..k).collect();
+    loop {
+        out.push(idx.clone());
+        let mut i: isize = k as isize - 1;
+        while i >= 0 && idx[i as usize] == n - k + i as usize {
+            i -= 1;
+        }
+        if i < 0 {
+            return out;
+        }
+        idx[i as usize] += 1;
+        for j in (i as usize + 1)..k {
+            idx[j] = idx[j - 1] + 1;
+        }
+    }
+}
+
+struct PeriodReward {
+    reward: f64,
+    assignment: Vec<i64>,
+    on_field: Vec<usize>,
+}
+
+/// Period-t reward for a chosen bench-set: the Hungarian-optimal affinity of the
+/// on-field players plus the position assignment.
+fn period_reward_and_assignment(problem: &SoccerProblem, t: usize, bench_set: &[usize]) -> PeriodReward {
+    let bench_set_map: HashSet<usize> = bench_set.iter().copied().collect();
+    let mut on_field: Vec<usize> = Vec::new();
+    for p in 0..problem.num_players {
+        if !bench_set_map.contains(&p) {
+            on_field.push(p);
+        }
+    }
+    let mut w_matrix: Vec<Vec<f64>> = Vec::new();
+    for &p in &on_field {
+        let mut row: Vec<f64> = Vec::new();
+        for pos in 0..problem.num_positions {
+            row.push(problem.affinity[p][pos][t]);
+        }
+        w_matrix.push(row);
+    }
+    let res = hungarian(&w_matrix, AssignmentDirection::Max);
+    let mut period_assign = vec![-1i64; problem.num_positions];
+    for i in 0..on_field.len() {
+        let pos = res.rows[i];
+        if pos >= 0 {
+            period_assign[pos as usize] = on_field[i] as i64;
+        }
+    }
+    PeriodReward { reward: res.total, assignment: period_assign, on_field }
+}
+
+/// Result of the memoryless MDP — value IGNORES fairness.
+#[derive(Clone, Debug)]
+pub struct MemorylessMDPResult {
+    pub schedule: Schedule,
+    pub value: f64,
+}
+
+/// `PureTransform<SoccerProblem, MemorylessMDPResult>`.
+pub struct PolicyMDPVIMemoryless;
+
+impl<'a> Transform<&'a SoccerProblem, MemorylessMDPResult> for PolicyMDPVIMemoryless {
+    fn transform(&self, problem: &'a SoccerProblem) -> MemorylessMDPResult {
+        policy_mdp_vi_memoryless(problem)
+    }
+}
+
+/// Solve each period independently — no `prev_bench` state, so fairness cannot
+/// be expressed (the pedagogical counter-example).
+pub fn policy_mdp_vi_memoryless(problem: &SoccerProblem) -> MemorylessMDPResult {
+    let t_count = problem.num_periods;
+    let k = problem.bench_size;
+    let all_benches = combinations(problem.num_players, k);
+    let mut assignment: Vec<Vec<i64>> = Vec::new();
+    let mut bench: Vec<Vec<usize>> = Vec::new();
+    let mut total = 0.0;
+    for t in 0..t_count {
+        let mut best_val = f64::NEG_INFINITY;
+        let mut best_b: Vec<usize> = Vec::new();
+        let mut best_assign: Vec<i64> = Vec::new();
+        for b in &all_benches {
+            let r = period_reward_and_assignment(problem, t, b);
+            if r.reward > best_val {
+                best_val = r.reward;
+                best_b = b.clone();
+                best_assign = r.assignment;
+            }
+        }
+        assignment.push(best_assign);
+        bench.push(best_b);
+        total += best_val;
+    }
+    MemorylessMDPResult { schedule: Schedule { assignment, bench }, value: total }
+}
+
+/// The `Schedule & {optimalValue}` returned by the exact MDP.
+#[derive(Clone, Debug)]
+pub struct MdpScheduleResult {
+    pub assignment: Vec<Vec<i64>>,
+    pub bench: Vec<Vec<usize>>,
+    pub optimal_value: f64,
+}
+
+impl MdpScheduleResult {
+    pub fn to_schedule(&self) -> Schedule {
+        Schedule { assignment: self.assignment.clone(), bench: self.bench.clone() }
+    }
+}
+
+#[derive(Clone)]
+struct MdpChoice {
+    bench: Vec<usize>,
+    assignment: Vec<i64>,
+}
+
+/// `PureTransform<SoccerProblem, Schedule & {optimalValue}>`.
+pub struct PolicyMDPVI;
+
+impl<'a> Transform<&'a SoccerProblem, MdpScheduleResult> for PolicyMDPVI {
+    fn transform(&self, problem: &'a SoccerProblem) -> MdpScheduleResult {
+        policy_mdp_vi(problem)
+    }
+}
+
+/// Solve the multi-period rotation MDP exactly via backward induction.
+pub fn policy_mdp_vi(problem: &SoccerProblem) -> MdpScheduleResult {
+    let t_count = problem.num_periods;
+    let k = problem.bench_size;
+    let all_benches = combinations(problem.num_players, k);
+    let mut value_by_t: Vec<HashMap<Vec<usize>, f64>> = Vec::new();
+    let mut choice_by_t: Vec<HashMap<Vec<usize>, MdpChoice>> = Vec::new();
+    for _t in 0..=t_count {
+        value_by_t.push(HashMap::new());
+        choice_by_t.push(HashMap::new());
+    }
+    // Terminal: any prev bench (and the "none" key) has value 0.
+    for b in &all_benches {
+        value_by_t[t_count].insert(b.clone(), 0.0);
+    }
+    value_by_t[t_count].insert(Vec::new(), 0.0);
+    // Backward induction.
+    for t in (0..t_count).rev() {
+        let prev_benches: Vec<Vec<usize>> = if t == 0 { vec![Vec::new()] } else { all_benches.clone() };
+        for prev in &prev_benches {
+            let prev_set: HashSet<usize> = prev.iter().copied().collect();
+            let mut best_val = f64::NEG_INFINITY;
+            let mut best_b: Vec<usize> = Vec::new();
+            let mut best_assign: Vec<i64> = Vec::new();
+            for b in &all_benches {
+                let ok = b.iter().all(|x| !prev_set.contains(x));
+                if !ok {
+                    continue;
+                }
+                let r = period_reward_and_assignment(problem, t, b);
+                let fut = value_by_t[t + 1].get(b).copied().unwrap_or(0.0);
+                let val = r.reward + fut;
+                if val > best_val {
+                    best_val = val;
+                    best_b = b.clone();
+                    best_assign = r.assignment;
+                }
+            }
+            value_by_t[t].insert(prev.clone(), best_val);
+            choice_by_t[t].insert(prev.clone(), MdpChoice { bench: best_b, assignment: best_assign });
+        }
+    }
+    // Reconstruct policy.
+    let mut assignment: Vec<Vec<i64>> = Vec::new();
+    let mut bench: Vec<Vec<usize>> = Vec::new();
+    let mut prev_key: Vec<usize> = Vec::new();
+    for t in 0..t_count {
+        let choice = choice_by_t[t].get(&prev_key).expect("MDP choice missing for reachable state").clone();
+        assignment.push(choice.assignment);
+        bench.push(choice.bench.clone());
+        prev_key = choice.bench;
+    }
+    let optimal_value = *value_by_t[0].get(&Vec::new()).expect("MDP root value missing");
+    MdpScheduleResult { assignment, bench, optimal_value }
+}
+
+// -----------------------------------------------------------------------------
+// LP RELAXATION
+// -----------------------------------------------------------------------------
+
+/// `PureTransform<SoccerProblem, LPProblem>`.
+pub struct BuildSoccerLP;
+
+impl<'a> Transform<&'a SoccerProblem, LPProblem> for BuildSoccerLP {
+    fn transform(&self, problem: &'a SoccerProblem) -> LPProblem {
+        build_soccer_lp(problem)
+    }
+}
+
+/// Build the multi-period LP relaxation of the 0/1 rotation program.
+pub fn build_soccer_lp(problem: &SoccerProblem) -> LPProblem {
+    let (p_count, k, t_count) = (problem.num_players, problem.num_positions, problem.num_periods);
+    let n = p_count * k * t_count;
+    let idx = |p: usize, pos: usize, t: usize| (p * k + pos) * t_count + t;
+    let mut c = vec![0.0; n];
+    for p in 0..p_count {
+        for pos in 0..k {
+            for t in 0..t_count {
+                c[idx(p, pos, t)] = problem.affinity[p][pos][t];
+            }
+        }
+    }
+    let mut a_eq: Vec<Vec<f64>> = Vec::new();
+    let mut b_eq: Vec<f64> = Vec::new();
+    let mut a_ub: Vec<Vec<f64>> = Vec::new();
+    let mut b_ub: Vec<f64> = Vec::new();
+    // (1) Σ_pos x_{p,pos,t} ≤ 1
+    for p in 0..p_count {
+        for t in 0..t_count {
+            let mut row = vec![0.0; n];
+            for pos in 0..k {
+                row[idx(p, pos, t)] = 1.0;
+            }
+            a_ub.push(row);
+            b_ub.push(1.0);
+        }
+    }
+    // (2) Σ_p x_{p,pos,t} = 1
+    for pos in 0..k {
+        for t in 0..t_count {
+            let mut row = vec![0.0; n];
+            for p in 0..p_count {
+                row[idx(p, pos, t)] = 1.0;
+            }
+            a_eq.push(row);
+            b_eq.push(1.0);
+        }
+    }
+    // (3) Σ_pos x_{p,pos,t} + Σ_pos x_{p,pos,t+1} ≥ 1  ->  ≤ form with negative RHS.
+    for p in 0..p_count {
+        for t in 0..t_count.saturating_sub(1) {
+            let mut row = vec![0.0; n];
+            for pos in 0..k {
+                row[idx(p, pos, t)] -= 1.0;
+                row[idx(p, pos, t + 1)] -= 1.0;
+            }
+            a_ub.push(row);
+            b_ub.push(-1.0);
+        }
+    }
+    let ub = vec![Some(1.0); n];
+    LPProblem {
+        sense: Sense::Max,
+        c,
+        a_ub: Some(a_ub),
+        b_ub: Some(b_ub),
+        a_eq: Some(a_eq),
+        b_eq: Some(b_eq),
+        ub: Some(ub),
+        ..Default::default()
+    }
+}
+
+/// Result of the LP relaxation policy.
+#[derive(Clone, Debug)]
+pub struct LPRelaxedScheduleResult {
+    pub schedule: Schedule,
+    pub lp_value: f64,
+    pub upper_bound_on_rotation: f64,
+    pub solver: String,
+    pub iters: usize,
+}
+
+/// `PureTransform<SoccerProblem, LPRelaxedScheduleResult>`.
+pub struct PolicyLPRelaxed;
+
+impl<'a> Transform<&'a SoccerProblem, LPRelaxedScheduleResult> for PolicyLPRelaxed {
+    fn transform(&self, problem: &'a SoccerProblem) -> LPRelaxedScheduleResult {
+        policy_lp_relaxed(problem)
+    }
+}
+
+/// Solve the LP relaxation and round it with fairness-aware per-period Hungarian.
+pub fn policy_lp_relaxed(problem: &SoccerProblem) -> LPRelaxedScheduleResult {
+    let lp = build_soccer_lp(problem);
+    let sol = solve_lp(&lp, &LpSolverOptions::default());
+    if sol.status != LPStatus::Optimal {
+        panic!("soccer LP relaxation failed: {} — {}", sol.status.as_str(), sol.message.clone().unwrap_or_default());
+    }
+    let (p_count, k, t_count) = (problem.num_players, problem.num_positions, problem.num_periods);
+    // Marginal "player p on field in period t" = Σ_pos x_{p,pos,t}.
+    let mut on_field_marg: Vec<Vec<f64>> = Vec::new();
+    for t in 0..t_count {
+        let mut row: Vec<f64> = Vec::new();
+        for p in 0..p_count {
+            let mut s = 0.0;
+            for pos in 0..k {
+                s += sol.x[(p * k + pos) * t_count + t];
+            }
+            row.push(s);
+        }
+        on_field_marg.push(row);
+    }
+    let mut assignment: Vec<Vec<i64>> = Vec::new();
+    let mut bench: Vec<Vec<usize>> = Vec::new();
+    let mut prev_bench: Vec<usize> = Vec::new();
+    for t in 0..t_count {
+        let must_play: HashSet<usize> = prev_bench.iter().copied().collect();
+        let mut candidates: Vec<usize> = (0..p_count).collect();
+        candidates.sort_by(|&a, &b| {
+            on_field_marg[t][b]
+                .partial_cmp(&on_field_marg[t][a])
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.cmp(&b))
+        });
+        let mut chosen: Vec<usize> = Vec::new();
+        for &p in &candidates {
+            if must_play.contains(&p) {
+                chosen.push(p);
+            }
+            if chosen.len() >= k {
+                break;
+            }
+        }
+        for &p in &candidates {
+            if chosen.len() >= k {
+                break;
+            }
+            if !chosen.contains(&p) {
+                chosen.push(p);
+            }
+        }
+        let period_assign = hungarian_assign_period(problem, t, &chosen);
+        assignment.push(period_assign);
+        let mut tbench: Vec<usize> = (0..p_count).filter(|p| !chosen.contains(p)).collect();
+        tbench.sort_unstable();
+        bench.push(tbench.clone());
+        prev_bench = tbench;
+    }
+    LPRelaxedScheduleResult {
+        schedule: Schedule { assignment, bench },
+        lp_value: sol.objective,
+        upper_bound_on_rotation: sol.objective,
+        solver: sol.solver,
+        iters: sol.iters.unwrap_or(0),
+    }
+}
+
+// -----------------------------------------------------------------------------
+// IP/MIP over the exact 0/1 rotation program.
+// -----------------------------------------------------------------------------
+
+/// The IP/MIP model plus its variable-indexing scheme.
+#[derive(Clone, Debug)]
+pub struct SoccerIPMIPModel {
+    pub ip: IPMIPProblem,
+    num_positions: usize,
+    num_periods: usize,
+}
+
+impl SoccerIPMIPModel {
+    /// `x[p,pos,t]`'s dense column index.
+    pub fn variable_index(&self, player_id: usize, position_id: usize, period: usize) -> usize {
+        (player_id * self.num_positions + position_id) * self.num_periods + period
+    }
+}
+
+/// `PureTransform<SoccerProblem, SoccerIPMIPModel>`.
+pub struct BuildSoccerIPMIP;
+
+impl<'a> Transform<&'a SoccerProblem, SoccerIPMIPModel> for BuildSoccerIPMIP {
+    fn transform(&self, problem: &'a SoccerProblem) -> SoccerIPMIPModel {
+        build_soccer_ipmip(problem)
+    }
+}
+
+/// Build the exact 0/1 rotation program as an [`IPMIPProblem`].
+pub fn build_soccer_ipmip(problem: &SoccerProblem) -> SoccerIPMIPModel {
+    let (p_count, k, t_count) = (problem.num_players, problem.num_positions, problem.num_periods);
+    let n = p_count * k * t_count;
+    let idx = |p: usize, pos: usize, t: usize| (p * k + pos) * t_count + t;
+    let player_name = |p: usize| problem.player_names.as_ref().and_then(|v| v.get(p)).cloned().unwrap_or_else(|| format!("P{}", p + 1));
+    let position_name = |pos: usize| problem.position_names.as_ref().and_then(|v| v.get(pos)).cloned().unwrap_or_else(|| pos.to_string());
+
+    let mut c = vec![0.0; n];
+    let mut var_names: Vec<String> = vec![String::new(); n];
+    let mut variable_nodes: Vec<VariableNode> = Vec::new();
+    for p in 0..p_count {
+        for pos in 0..k {
+            for t in 0..t_count {
+                let j = idx(p, pos, t);
+                c[j] = problem.affinity[p][pos][t];
+                var_names[j] = format!("x_{}_{}_T{}", player_name(p), position_name(pos), t + 1);
+                variable_nodes.push(VariableNode {
+                    var_index: j,
+                    node_id: format!("movable:{}:period-{}:position-{}", player_name(p), t + 1, position_name(pos)),
+                    label: Some(format!("{} -> {} in period {}", player_name(p), position_name(pos), t + 1)),
+                });
+            }
+        }
+    }
+
+    let mut a: Vec<Vec<f64>> = Vec::new();
+    let mut b: Vec<f64> = Vec::new();
+    let mut con_names: Vec<String> = Vec::new();
+    let mut constraint_nodes: Vec<ConstraintNode> = Vec::new();
+
+    // (1) Each player can occupy at most one position per period.
+    for p in 0..p_count {
+        for t in 0..t_count {
+            let mut row = vec![0.0; n];
+            for pos in 0..k {
+                row[idx(p, pos, t)] = 1.0;
+            }
+            let row_index = a.len();
+            a.push(row);
+            b.push(1.0);
+            con_names.push(format!("player_once_{}_T{}", player_name(p), t + 1));
+            constraint_nodes.push(ConstraintNode {
+                row_index,
+                node_id: format!("station:eligibility:{}:T{}", player_name(p), t + 1),
+                label: Some(format!("{} at most one field role in period {}", player_name(p), t + 1)),
+            });
+        }
+    }
+
+    // (2) Each position is filled by exactly one player per period.
+    for pos in 0..k {
+        for t in 0..t_count {
+            let mut le = vec![0.0; n];
+            let mut ge = vec![0.0; n];
+            for p in 0..p_count {
+                le[idx(p, pos, t)] = 1.0;
+                ge[idx(p, pos, t)] = -1.0;
+            }
+            let row_index_le = a.len();
+            a.push(le);
+            b.push(1.0);
+            con_names.push(format!("position_filled_le_{}_T{}", position_name(pos), t + 1));
+            constraint_nodes.push(ConstraintNode {
+                row_index: row_index_le,
+                node_id: format!("station:position:{}:T{}", position_name(pos), t + 1),
+                label: Some(format!("position {} has at most one player in period {}", position_name(pos), t + 1)),
+            });
+            let row_index_ge = a.len();
+            a.push(ge);
+            b.push(-1.0);
+            con_names.push(format!("position_filled_ge_{}_T{}", position_name(pos), t + 1));
+            constraint_nodes.push(ConstraintNode {
+                row_index: row_index_ge,
+                node_id: format!("station:position:{}:T{}", position_name(pos), t + 1),
+                label: Some(format!("position {} has at least one player in period {}", position_name(pos), t + 1)),
+            });
+        }
+    }
+
+    // (3) Fairness: a player may not be benched in two consecutive periods.
+    for p in 0..p_count {
+        for t in 0..t_count.saturating_sub(1) {
+            let mut row = vec![0.0; n];
+            for pos in 0..k {
+                row[idx(p, pos, t)] -= 1.0;
+                row[idx(p, pos, t + 1)] -= 1.0;
+            }
+            let row_index = a.len();
+            a.push(row);
+            b.push(-1.0);
+            con_names.push(format!("no_consecutive_bench_{}_T{}_{}", player_name(p), t + 1, t + 2));
+            constraint_nodes.push(ConstraintNode {
+                row_index,
+                node_id: format!("station:fairness:{}:T{}-{}", player_name(p), t + 1, t + 2),
+                label: Some(format!("{} plays in period {} or {}", player_name(p), t + 1, t + 2)),
+            });
+        }
+    }
+
+    SoccerIPMIPModel {
+        ip: IPMIPProblem {
+            sense: Sense::Max,
+            c,
+            a,
+            b,
+            integer_vars: vec![true; n],
+            ub: Some(vec![1.0; n]),
+            var_names: Some(var_names),
+            con_names: Some(con_names),
+            variable_nodes: Some(variable_nodes),
+            constraint_nodes: Some(constraint_nodes),
+        },
+        num_positions: k,
+        num_periods: t_count,
+    }
+}
+
+/// Input for [`ScheduleFromSoccerIPMIPVector`].
+pub struct ScheduleFromSoccerIPMIPVectorInput<'a> {
+    pub problem: &'a SoccerProblem,
+    pub model: &'a SoccerIPMIPModel,
+    pub x: &'a [f64],
+}
+
+/// `PureTransform<ScheduleFromSoccerIPMIPVectorInput, Schedule | null>`.
+pub struct ScheduleFromSoccerIPMIPVector {
+    threshold: f64,
+}
+
+impl ScheduleFromSoccerIPMIPVector {
+    pub fn new(threshold: f64) -> Self {
+        ScheduleFromSoccerIPMIPVector { threshold }
+    }
+}
+
+impl Default for ScheduleFromSoccerIPMIPVector {
+    fn default() -> Self {
+        ScheduleFromSoccerIPMIPVector { threshold: 0.5 }
+    }
+}
+
+impl<'a> Transform<ScheduleFromSoccerIPMIPVectorInput<'a>, Option<Schedule>> for ScheduleFromSoccerIPMIPVector {
+    fn transform(&self, input: ScheduleFromSoccerIPMIPVectorInput<'a>) -> Option<Schedule> {
+        schedule_from_soccer_ipmip_vector(input.problem, input.model, input.x, self.threshold)
+    }
+}
+
+/// Decode an IP/MIP solution vector into a feasible [`Schedule`], or `None`.
+pub fn schedule_from_soccer_ipmip_vector(
+    problem: &SoccerProblem,
+    model: &SoccerIPMIPModel,
+    x: &[f64],
+    threshold: f64,
+) -> Option<Schedule> {
+    if x.len() != model.ip.c.len() {
+        return None;
+    }
+    let mut assignment: Vec<Vec<i64>> = Vec::new();
+    let mut bench: Vec<Vec<usize>> = Vec::new();
+    for t in 0..problem.num_periods {
+        let mut used: HashSet<usize> = HashSet::new();
+        let mut period_assign = vec![-1i64; problem.num_positions];
+        for pos in 0..problem.num_positions {
+            let mut chosen: i64 = -1;
+            let mut best = threshold;
+            for p in 0..problem.num_players {
+                let v = x[model.variable_index(p, pos, t)];
+                if v > best {
+                    best = v;
+                    chosen = p as i64;
+                }
+            }
+            if chosen < 0 || used.contains(&(chosen as usize)) {
+                return None;
+            }
+            period_assign[pos] = chosen;
+            used.insert(chosen as usize);
+        }
+        assignment.push(period_assign);
+        let mut tbench: Vec<usize> = (0..problem.num_players).filter(|p| !used.contains(p)).collect();
+        tbench.sort_unstable();
+        bench.push(tbench);
+    }
+    let schedule = Schedule { assignment, bench };
+    if validate_schedule_structure(problem, &schedule).is_some() {
+        return None;
+    }
+    if !evaluate_schedule(problem, &schedule).fairness_ok {
+        return None;
+    }
+    Some(schedule)
+}
+
+/// Options for the IP/MIP rotation policy.
+#[derive(Clone, Debug, Default)]
+pub struct SoccerIPMIPPolicyOptions {
+    pub time_limit_ms: Option<f64>,
+    pub max_nodes: Option<usize>,
+    pub max_ticks: Option<usize>,
+    pub lp_max_iters: Option<usize>,
+    pub lp_algorithm: Option<LpRelaxationAlgorithm>,
+    pub max_cut_rounds: Option<usize>,
+    pub node_selection: Option<NodeSelection>,
+    pub branch_rule: Option<BranchRule>,
+    pub heuristic_passes: Option<usize>,
+    /// Keep demos animatable even when the MIP has no incumbent yet. Default true.
+    pub fallback_to_mdp: Option<bool>,
+}
+
+/// Result of the IP/MIP rotation policy.
+#[derive(Clone, Debug)]
+pub struct SoccerIPMIPPolicyResult {
+    pub schedule: Schedule,
+    pub model: SoccerIPMIPModel,
+    pub mip: IPMIPSolution,
+    pub solver_options: IPMIPSolveOptions,
+    pub used_fallback: bool,
+    pub fallback_reason: Option<String>,
+}
+
+/// `PureTransform<SoccerProblem, SoccerIPMIPPolicyResult>`.
+pub struct PolicyIPMIPFeasible {
+    opts: SoccerIPMIPPolicyOptions,
+}
+
+impl PolicyIPMIPFeasible {
+    pub fn new(opts: SoccerIPMIPPolicyOptions) -> Self {
+        PolicyIPMIPFeasible { opts }
+    }
+}
+
+impl<'a> Transform<&'a SoccerProblem, SoccerIPMIPPolicyResult> for PolicyIPMIPFeasible {
+    fn transform(&self, problem: &'a SoccerProblem) -> SoccerIPMIPPolicyResult {
+        policy_ipmip_feasible(problem, &self.opts)
+    }
+}
+
+/// Solve the rotation IP/MIP, decode an incumbent, falling back to the exact MDP.
+pub fn policy_ipmip_feasible(problem: &SoccerProblem, opts: &SoccerIPMIPPolicyOptions) -> SoccerIPMIPPolicyResult {
+    let model = build_soccer_ipmip(problem);
+    let max_nodes = opts.max_nodes.unwrap_or(5_000);
+    let solver_options = IPMIPSolveOptions {
+        time_limit_ms: Some(opts.time_limit_ms.unwrap_or(30_000.0)),
+        max_nodes: Some(max_nodes),
+        max_ticks: Some(opts.max_ticks.unwrap_or_else(|| 100.max(max_nodes * 8))),
+        lp_max_iters: Some(opts.lp_max_iters.unwrap_or(6_000)),
+        lp_algorithm: Some(
+            opts.lp_algorithm
+                .unwrap_or(LpRelaxationAlgorithm::Concrete(ConcreteLpRelaxationAlgorithm::InternalSimplex)),
+        ),
+        max_cut_rounds: Some(opts.max_cut_rounds.unwrap_or(0)),
+        node_selection: Some(opts.node_selection.unwrap_or(NodeSelection::BestBound)),
+        branch_rule: Some(opts.branch_rule.unwrap_or(BranchRule::MostFractional)),
+        heuristic_passes: Some(opts.heuristic_passes.unwrap_or(120)),
+        ..Default::default()
+    };
+    let mip = solve_ipmip_with_des(model.ip.clone(), solver_options.clone());
+    let from_incumbent = schedule_from_soccer_ipmip_vector(problem, &model, &mip.x, 0.5);
+    if let Some(schedule) = from_incumbent {
+        return SoccerIPMIPPolicyResult { schedule, model, mip, solver_options, used_fallback: false, fallback_reason: None };
+    }
+    if opts.fallback_to_mdp == Some(false) {
+        panic!("soccer IP/MIP produced no decodable feasible schedule: status={}", mip.status.as_str());
+    }
+    let mdp = policy_mdp_vi(problem);
+    let schedule = mdp.to_schedule();
+    let reason = format!(
+        "IP/MIP status={} had no feasible incumbent; used exact MDP schedule for continuity",
+        mip.status.as_str()
+    );
+    SoccerIPMIPPolicyResult { schedule, model, mip, solver_options, used_fallback: true, fallback_reason: Some(reason) }
+}
+
+// -----------------------------------------------------------------------------
+// POMDP-style hidden-fatigue feature trace.
+// -----------------------------------------------------------------------------
+
+/// Options for the hidden-fatigue belief feature extractor.
+#[derive(Clone, Debug, Default)]
+pub struct SoccerPOMDPFeatureOptions {
+    pub initial_fresh_probability: Option<f64>,
+    pub fatigue_rate: Option<f64>,
+    pub recovery_rate: Option<f64>,
+}
+
+/// Per-period belief-state feature.
+#[derive(Clone, Debug)]
+pub struct SoccerPOMDPPeriodFeature {
+    pub period: usize,
+    pub expected_fresh_on_field: f64,
+    pub expected_fresh_bench: f64,
+    pub expected_lineup_reliability: f64,
+    pub mean_belief_entropy: f64,
+}
+
+/// Summary of the hidden-fatigue belief feature trace.
+#[derive(Clone, Debug)]
+pub struct SoccerPOMDPFeatureSummary {
+    pub model: &'static str,
+    pub per_period: Vec<SoccerPOMDPPeriodFeature>,
+    pub final_fresh_probability: Vec<f64>,
+    pub mean_expected_fresh_on_field: f64,
+    pub mean_expected_lineup_reliability: f64,
+}
+
+fn binary_entropy(p: f64) -> f64 {
+    let q = 1e-12_f64.max((1.0 - 1e-12).min(p));
+    -(q * q.log2() + (1.0 - q) * (1.0 - q).log2())
+}
+
+/// `PureTransform<ProblemScheduleInput, SoccerPOMDPFeatureSummary>`.
+pub struct EvaluateSoccerPOMDPFeatures {
+    opts: SoccerPOMDPFeatureOptions,
+}
+
+impl EvaluateSoccerPOMDPFeatures {
+    pub fn new(opts: SoccerPOMDPFeatureOptions) -> Self {
+        EvaluateSoccerPOMDPFeatures { opts }
+    }
+}
+
+impl<'a> Transform<ProblemScheduleInput<'a>, SoccerPOMDPFeatureSummary> for EvaluateSoccerPOMDPFeatures {
+    fn transform(&self, input: ProblemScheduleInput<'a>) -> SoccerPOMDPFeatureSummary {
+        evaluate_soccer_pomdp_features(input.problem, input.schedule, &self.opts)
+    }
+}
+
+/// Evaluate a schedule under a compact hidden-fatigue belief state.
+pub fn evaluate_soccer_pomdp_features(
+    problem: &SoccerProblem,
+    schedule: &Schedule,
+    opts: &SoccerPOMDPFeatureOptions,
+) -> SoccerPOMDPFeatureSummary {
+    let fatigue_rate = opts.fatigue_rate.unwrap_or(0.22);
+    let recovery_rate = opts.recovery_rate.unwrap_or(0.55);
+    let mut belief = vec![opts.initial_fresh_probability.unwrap_or(0.82); problem.num_players];
+    let mut per_period: Vec<SoccerPOMDPPeriodFeature> = Vec::new();
+
+    for t in 0..problem.num_periods {
+        let on_field: HashSet<i64> = schedule.assignment[t].iter().copied().collect();
+        let bench = &schedule.bench[t];
+        let on_field_len = schedule.assignment[t].len();
+        let expected_fresh_on_field =
+            schedule.assignment[t].iter().map(|&p| belief[p as usize]).sum::<f64>() / 1.0_f64.max(on_field_len as f64);
+        let expected_fresh_bench = bench.iter().map(|&p| belief[p]).sum::<f64>() / 1.0_f64.max(bench.len() as f64);
+        let mut reliability = 0.0;
+        for pos in 0..problem.num_positions {
+            let p = schedule.assignment[t][pos] as usize;
+            reliability += problem.affinity[p][pos][t] * (0.65 + 0.35 * belief[p]);
+        }
+        let mean_belief_entropy = belief.iter().map(|&p| binary_entropy(p)).sum::<f64>() / belief.len() as f64;
+        per_period.push(SoccerPOMDPPeriodFeature {
+            period: t,
+            expected_fresh_on_field,
+            expected_fresh_bench,
+            expected_lineup_reliability: reliability,
+            mean_belief_entropy,
+        });
+
+        for p in 0..problem.num_players {
+            if on_field.contains(&(p as i64)) {
+                belief[p] = 0.0_f64.max(belief[p] * (1.0 - fatigue_rate));
+            } else {
+                belief[p] = 1.0_f64.min(belief[p] + (1.0 - belief[p]) * recovery_rate);
+            }
+        }
+    }
+
+    let pp = per_period.len().max(1) as f64;
+    let mean_expected_fresh_on_field = per_period.iter().map(|x| x.expected_fresh_on_field).sum::<f64>() / pp;
+    let mean_expected_lineup_reliability = per_period.iter().map(|x| x.expected_lineup_reliability).sum::<f64>() / pp;
+    SoccerPOMDPFeatureSummary {
+        model: "hidden-fatigue-belief",
+        per_period,
+        final_fresh_probability: belief,
+        mean_expected_fresh_on_field,
+        mean_expected_lineup_reliability,
+    }
+}
+
+// =============================================================================
+// DES MATCH SIMULATOR (Layer 1)
+// =============================================================================
+
+/// Options for [`simulate_match_des`].
+#[derive(Clone, Debug, Default)]
+pub struct MatchSimOptions {
+    pub minutes_per_period: Option<usize>,
+    pub team_score_rate: Option<f64>,
+    pub opp_score_rate: Option<f64>,
+    pub seed: Option<u32>,
+}
+
+/// A substitution event at a period boundary.
+#[derive(Clone, Debug)]
+pub struct SubEvent {
+    pub t: usize,
+    pub period: usize,
+    pub new_on_field: Vec<i64>,
+    pub new_bench: Vec<usize>,
+}
+
+/// Which side scored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GoalSide {
+    Us,
+    Them,
+}
+
+/// A goal event.
+#[derive(Clone, Copy, Debug)]
+pub struct GoalEvent {
+    pub t: usize,
+    pub side: GoalSide,
+}
+
+/// A per-tick animation snapshot.
+#[derive(Clone, Debug)]
+pub struct MatchTraceFrame {
+    pub t: usize,
+    pub period: usize,
+    pub on_field: Vec<i64>,
+    pub bench: Vec<usize>,
+    pub affinity_now: f64,
+    pub goals_for_cum: i64,
+    pub goals_against_cum: i64,
+    pub positions: Vec<i64>,
+}
+
+/// The result of a single simulated match.
+#[derive(Clone, Debug)]
+pub struct MatchResult {
+    pub goals_for: i64,
+    pub goals_against: i64,
+    pub goal_differential: i64,
+    pub affinity_sum_deterministic: f64,
+    pub per_period_affinity: Vec<f64>,
+    pub goal_events: Vec<GoalEvent>,
+    pub sub_events: Vec<SubEvent>,
+    pub trace: Vec<MatchTraceFrame>,
+}
+
+/// `PureTransform<ProblemScheduleInput, MatchResult>`.
+pub struct SimulateMatchDES {
+    opts: MatchSimOptions,
+}
+
+impl SimulateMatchDES {
+    pub fn new(opts: MatchSimOptions) -> Self {
+        SimulateMatchDES { opts }
+    }
+}
+
+impl<'a> Transform<ProblemScheduleInput<'a>, MatchResult> for SimulateMatchDES {
+    fn transform(&self, input: ProblemScheduleInput<'a>) -> MatchResult {
+        simulate_match_des(input.problem, input.schedule, &self.opts)
+    }
+}
+
+/// Run a single DES match given a schedule; goal events from a thinned Poisson
+/// process modulated by on-field average affinity.
+pub fn simulate_match_des(problem: &SoccerProblem, schedule: &Schedule, opts: &MatchSimOptions) -> MatchResult {
+    let minutes_per_period = opts.minutes_per_period.unwrap_or(20);
+    let team_rate = opts.team_score_rate.unwrap_or(0.06);
+    let opp_rate = opts.opp_score_rate.unwrap_or(0.04);
+    let seed = opts.seed.unwrap_or(1);
+    let mut rng = mulberry32(seed);
+    let t_count = problem.num_periods;
+    let total_minutes = minutes_per_period * t_count;
+    let mut goals_for: i64 = 0;
+    let mut goals_against: i64 = 0;
+    let mut goal_events: Vec<GoalEvent> = Vec::new();
+    let mut sub_events: Vec<SubEvent> = Vec::new();
+    let mut trace: Vec<MatchTraceFrame> = Vec::new();
+    let mut per_period_affinity = vec![0.0; t_count];
+
+    let mut period_avg_aff: Vec<f64> = Vec::new();
+    for t in 0..t_count {
+        let mut s = 0.0;
+        for pos in 0..problem.num_positions {
+            let p = schedule.assignment[t][pos];
+            s += problem.affinity[p as usize][pos][t];
+        }
+        period_avg_aff.push(s / problem.num_positions as f64);
+        per_period_affinity[t] = s;
+    }
+
+    for minute in 0..total_minutes {
+        let period = minute / minutes_per_period;
+        let is_start_of_period = minute % minutes_per_period == 0;
+        if is_start_of_period {
+            sub_events.push(SubEvent {
+                t: minute,
+                period,
+                new_on_field: schedule.assignment[period].clone(),
+                new_bench: schedule.bench[period].clone(),
+            });
+        }
+        let aff = period_avg_aff[period];
+        let lambda_us = team_rate * aff.powi(2);
+        let lambda_them = opp_rate * (1.6 - 0.5 * aff);
+        if rng.next_float() < lambda_us {
+            goals_for += 1;
+            goal_events.push(GoalEvent { t: minute, side: GoalSide::Us });
+        }
+        if rng.next_float() < lambda_them {
+            goals_against += 1;
+            goal_events.push(GoalEvent { t: minute, side: GoalSide::Them });
+        }
+        trace.push(MatchTraceFrame {
+            t: minute,
+            period,
+            on_field: schedule.assignment[period].clone(),
+            bench: schedule.bench[period].clone(),
+            affinity_now: aff,
+            goals_for_cum: goals_for,
+            goals_against_cum: goals_against,
+            positions: schedule.assignment[period].clone(),
+        });
+    }
+
+    MatchResult {
+        goals_for,
+        goals_against,
+        goal_differential: goals_for - goals_against,
+        affinity_sum_deterministic: per_period_affinity.iter().sum(),
+        per_period_affinity,
+        goal_events,
+        sub_events,
+        trace,
+    }
+}
+
+/// Aggregate statistics over many simulated matches.
+#[derive(Clone, Debug)]
+pub struct MatchAggregate {
+    pub policy_name: String,
+    pub schedule: Schedule,
+    pub affinity_sum_deterministic: f64,
+    pub fairness_ok: bool,
+    pub mean_goals_for: f64,
+    pub mean_goals_against: f64,
+    pub mean_goal_diff: f64,
+    pub sd_goal_diff: f64,
+    pub raw_goal_diffs: Vec<f64>,
+    pub bench_counts: Vec<usize>,
+}
+
+/// Configuration for [`RunManyMatches`].
+#[derive(Clone, Debug)]
+pub struct RunManyMatchesConfig {
+    pub policy_name: String,
+    pub num_matches: usize,
+    pub seed_base: u32,
+    pub match_opts: Option<MatchSimOptions>,
+}
+
+/// `PureTransform<ProblemScheduleInput, MatchAggregate>`.
+pub struct RunManyMatches {
+    config: RunManyMatchesConfig,
+}
+
+impl RunManyMatches {
+    pub fn new(config: RunManyMatchesConfig) -> Self {
+        RunManyMatches { config }
+    }
+}
+
+impl<'a> Transform<ProblemScheduleInput<'a>, MatchAggregate> for RunManyMatches {
+    fn transform(&self, input: ProblemScheduleInput<'a>) -> MatchAggregate {
+        let match_opts = self.config.match_opts.clone().unwrap_or_default();
+        run_many_matches(
+            input.problem,
+            input.schedule,
+            &self.config.policy_name,
+            self.config.num_matches,
+            self.config.seed_base,
+            &match_opts,
+        )
+    }
+}
+
+/// Run N independent matches and aggregate.
+pub fn run_many_matches(
+    problem: &SoccerProblem,
+    schedule: &Schedule,
+    policy_name: &str,
+    num_matches: usize,
+    seed_base: u32,
+    match_opts: &MatchSimOptions,
+) -> MatchAggregate {
+    let eval_res = evaluate_schedule(problem, schedule);
+    let mut diffs: Vec<f64> = Vec::new();
+    let mut g_f = 0.0;
+    let mut g_a = 0.0;
+    for n in 0..num_matches {
+        let mut o = match_opts.clone();
+        o.seed = Some(seed_base + n as u32);
+        let r = simulate_match_des(problem, schedule, &o);
+        diffs.push(r.goal_differential as f64);
+        g_f += r.goals_for as f64 / num_matches as f64;
+        g_a += r.goals_against as f64 / num_matches as f64;
+    }
+    let mean_diff = diffs.iter().sum::<f64>() / diffs.len() as f64;
+    let sd_diff =
+        (diffs.iter().map(|&b| (b - mean_diff).powi(2)).sum::<f64>() / 1.0_f64.max((diffs.len() as f64) - 1.0)).sqrt();
+    MatchAggregate {
+        policy_name: policy_name.to_string(),
+        schedule: schedule.clone(),
+        affinity_sum_deterministic: eval_res.affinity_sum,
+        fairness_ok: eval_res.fairness_ok,
+        mean_goals_for: g_f,
+        mean_goals_against: g_a,
+        mean_goal_diff: mean_diff,
+        sd_goal_diff: sd_diff,
+        raw_goal_diffs: diffs,
+        bench_counts: eval_res.bench_counts,
+    }
+}
+
+/// Input for Welch's t-test.
+#[derive(Clone, Debug)]
+pub struct WelchTInput {
+    pub a: Vec<f64>,
+    pub b: Vec<f64>,
+}
+
+/// `PureTransform<WelchTInput, number>`.
+pub struct WelchT;
+
+impl Transform<WelchTInput, f64> for WelchT {
+    fn transform(&self, input: WelchTInput) -> f64 {
+        welch_t(&input.a, &input.b)
+    }
+}
+
+/// Welch's t-statistic for difference of means.
+pub fn welch_t(a: &[f64], b: &[f64]) -> f64 {
+    let ma = a.iter().sum::<f64>() / a.len() as f64;
+    let mb = b.iter().sum::<f64>() / b.len() as f64;
+    let va = a.iter().map(|&v| (v - ma).powi(2)).sum::<f64>() / 1.0_f64.max((a.len() as f64) - 1.0);
+    let vb = b.iter().map(|&v| (v - mb).powi(2)).sum::<f64>() / 1.0_f64.max((b.len() as f64) - 1.0);
+    (ma - mb) / (va / a.len() as f64 + vb / b.len() as f64 + 1e-30).sqrt()
+}
+
+#[cfg(test)]
+mod tests {
+    //! The MDP optimum dominates the greedy and random baselines on affinity and
+    //! respects the no-consecutive-bench fairness constraint.
+
+    use super::*;
+
+    fn problem() -> SoccerProblem {
+        build_sample_soccer_problem(&AffinityBuilderOptions { seed: Some(7), ..Default::default() })
+    }
+
+    #[test]
+    fn sample_problem_dimensions() {
+        let p = problem();
+        assert_eq!(p.num_players, 12);
+        assert_eq!(p.num_positions, 7);
+        assert_eq!(p.num_periods, 4);
+        assert_eq!(p.bench_size, 5);
+        for row in &p.affinity {
+            for col in row {
+                for &v in col {
+                    assert!((0.0..=1.0).contains(&v));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mdp_is_fair_and_dominates_baselines() {
+        let p = problem();
+        let mdp = policy_mdp_vi(&p);
+        let mdp_schedule = mdp.to_schedule();
+        assert!(validate_schedule_structure(&p, &mdp_schedule).is_none());
+        let mdp_eval = evaluate_schedule(&p, &mdp_schedule);
+        assert!(mdp_eval.fairness_ok, "MDP schedule must satisfy fairness");
+        // The MDP's reported optimal value equals the realised affinity sum.
+        assert!((mdp.optimal_value - mdp_eval.affinity_sum).abs() < 1e-6);
+
+        // The exact MDP dominates the fairness-aware greedy heuristic (which is a
+        // feasible schedule for the same fairness-constrained program).
+        let greedy = policy_greedy_hungarian(&p, &GreedyHungarianOptions::default());
+        assert!(evaluate_schedule(&p, &greedy).fairness_ok);
+        let greedy_aff = evaluate_schedule(&p, &greedy).affinity_sum;
+        assert!(mdp.optimal_value + 1e-9 >= greedy_aff, "mdp={} greedy={}", mdp.optimal_value, greedy_aff);
+
+        // Dropping the fairness constraint (memoryless MDP) can only raise the value.
+        let memoryless = policy_mdp_vi_memoryless(&p);
+        assert!(memoryless.value + 1e-9 >= mdp.optimal_value);
+    }
+
+    #[test]
+    fn greedy_schedule_is_well_formed() {
+        let p = problem();
+        let sched = policy_greedy_hungarian(&p, &GreedyHungarianOptions::default());
+        assert!(validate_schedule_structure(&p, &sched).is_none());
+    }
+
+    #[test]
+    fn match_sim_is_deterministic_for_seed() {
+        let p = problem();
+        let sched = policy_greedy_hungarian(&p, &GreedyHungarianOptions::default());
+        let a = simulate_match_des(&p, &sched, &MatchSimOptions { seed: Some(123), ..Default::default() });
+        let b = simulate_match_des(&p, &sched, &MatchSimOptions { seed: Some(123), ..Default::default() });
+        assert_eq!(a.goals_for, b.goals_for);
+        assert_eq!(a.goals_against, b.goals_against);
+        assert_eq!(a.trace.len(), 4 * 20);
+    }
+}

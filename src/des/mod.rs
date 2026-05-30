@@ -16,3 +16,8 @@ pub mod random_variables;
 pub mod mdp;
 pub mod observability;
 pub mod reference;
+
+// Signal-flow entities + observers + visual (build on the entity framework).
+pub mod signals;
+pub mod observers;
+pub mod visual;

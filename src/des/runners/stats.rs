@@ -128,6 +128,8 @@ mod tests {
         let w = welch(&a, &a);
         assert_eq!(w.t, 0.0);
         assert!(!w.reject95);
-        assert!((w.p_value_two_sided - 1.0).abs() < 1e-9);
+        // p must be ~1 for identical samples; the bound reflects the A&S 7.1.26
+        // erf approximation's accuracy (~1.5e-7), not exact arithmetic.
+        assert!((w.p_value_two_sided - 1.0).abs() < 1e-6);
     }
 }

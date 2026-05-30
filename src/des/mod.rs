@@ -46,6 +46,9 @@ mod integration_smoke;
 #[cfg(test)]
 mod test;
 
+// Validation / comparison harnesses (cross-checking models against references).
+pub mod runners;
+
 // Serial driver that runs every simulation entry point one after another.
 pub mod simulations;
 

@@ -288,7 +288,8 @@ fn run_gillespie_inner(
                 sample_at(&sim, &mut peak, &mut samples, &mut logger, next_sample_at);
                 next_sample_at += sample_every;
             }
-            t = config.horizon_days;
+            // TS advanced `t` to the horizon here; in Rust `t` is not read after
+            // the loop, so the assignment is omitted to avoid a dead store.
             break;
         }
 

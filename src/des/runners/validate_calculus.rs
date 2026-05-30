@@ -319,8 +319,8 @@ pub fn run() -> i32 {
         });
         let o2 = r2.run(0.0, t_end, dt_btcs);
 
-        let mut err_ftcs = 0.0;
-        let mut err_btcs = 0.0;
+        let mut err_ftcs = 0.0_f64;
+        let mut err_btcs = 0.0_f64;
         for i in 0..n {
             let exact = decay * (PI * r1.xs[i]).sin();
             err_ftcs = err_ftcs.max((o1.final_values[i] - exact).abs());
@@ -360,7 +360,7 @@ pub fn run() -> i32 {
         ]) {
             Some(sci) => {
                 let final_values = sci.get("final_values").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-                let mut err_sci = 0.0;
+                let mut err_sci = 0.0_f64;
                 for i in 0..n {
                     let sv = final_values.get(i).and_then(|x| x.as_f64()).unwrap_or(f64::NAN);
                     err_sci = err_sci.max((o1.final_values[i] - sv).abs());
@@ -402,7 +402,7 @@ pub fn run() -> i32 {
         });
         let o = r.run(0.0, t_end, dt);
         let expected_amplitude = (PI * cc * t_end).cos();
-        let mut err = 0.0;
+        let mut err = 0.0_f64;
         for i in 0..n {
             let exact = (PI * r.xs[i]).sin() * expected_amplitude;
             err = err.max((o.final_values[i] - exact).abs());
@@ -440,9 +440,9 @@ pub fn run() -> i32 {
         let r_j = solve_poisson2d(&make(Field2DScheme::Jacobi, None));
         let r_g = solve_poisson2d(&make(Field2DScheme::GaussSeidel, None));
         let r_s = solve_poisson2d(&make(Field2DScheme::Sor, Some(1.85)));
-        let mut err_j = 0.0;
-        let mut err_g = 0.0;
-        let mut err_s = 0.0;
+        let mut err_j = 0.0_f64;
+        let mut err_g = 0.0_f64;
+        let mut err_s = 0.0_f64;
         for j in 0..n {
             for i in 0..n {
                 let exact = (PI * r_j.xs[i]).sin() * (PI * r_j.ys[j]).sin();

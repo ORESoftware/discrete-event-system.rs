@@ -252,10 +252,29 @@ mod tests {
 
     #[test]
     fn difference_kernel_runs() {
-        let cfg = default_config();
+        // The default step (1.0) intentionally exceeds max_stable_step (0.40),
+        // so explicit Euler is unstable there. Exercise the kernel at a STABLE
+        // step where populations stay finite and (essentially) non-negative.
+        let mut cfg = default_config();
+        cfg.step_size = 0.1;
+        assert!(cfg.step_size < max_stable_step(&cfg));
         let r = run_difference_once(&cfg, &RunOpts::default());
         assert_eq!(r.kernel, Kernel::Difference);
-        assert!(r.final_populations["S"] >= 0.0);
+        for c in COMPARTMENT_ORDER {
+            let v = r.final_populations[c];
+            assert!(v.is_finite() && v >= -1e-6, "{c} = {v}");
+        }
+    }
+
+    #[test]
+    fn difference_kernel_unstable_above_max_step() {
+        // Documents the instability the engine guards against: at the default
+        // step (> max_stable_step) the kernel does not stay non-negative.
+        let cfg = default_config();
+        assert!(cfg.step_size > max_stable_step(&cfg));
+        let r = run_difference_once(&cfg, &RunOpts::default());
+        let all_nonneg = COMPARTMENT_ORDER.iter().all(|c| r.final_populations[*c] >= 0.0);
+        assert!(!all_nonneg, "expected explicit Euler to be unstable at dt > max_stable_step");
     }
 
     #[test]

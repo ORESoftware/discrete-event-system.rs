@@ -248,8 +248,8 @@ impl MaxFlowOptimizationStation {
         let seen = self.residual_reachable();
         let mut source_side = Vec::new();
         let mut sink_side = Vec::new();
-        for node in 0..self.params.num_nodes {
-            if seen[node] {
+        for (node, is_seen) in seen.iter().enumerate().take(self.params.num_nodes) {
+            if *is_seen {
                 source_side.push(node);
             } else {
                 sink_side.push(node);

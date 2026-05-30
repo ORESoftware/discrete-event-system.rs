@@ -231,6 +231,7 @@ where
     Ok(OdeTrace { t, y })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn backward_euler<F, J>(
     f: F,
     jac: Option<J>,
@@ -354,10 +355,13 @@ fn solve_linear(mut matrix: Vec<Vec<f64>>, mut rhs: Vec<f64>) -> Result<Vec<f64>
             matrix.swap(i, pivot);
             rhs.swap(i, pivot);
         }
-        for k in (i + 1)..n {
-            let factor = matrix[k][i] / matrix[i][i];
-            for j in i..n {
-                matrix[k][j] -= factor * matrix[i][j];
+        let (pivot_rows, elimination_rows) = matrix.split_at_mut(i + 1);
+        let pivot_row = &pivot_rows[i];
+        for (offset, row) in elimination_rows.iter_mut().enumerate() {
+            let k = i + 1 + offset;
+            let factor = row[i] / pivot_row[i];
+            for (j, value) in row.iter_mut().enumerate().skip(i) {
+                *value -= factor * pivot_row[j];
             }
             rhs[k] -= factor * rhs[i];
         }

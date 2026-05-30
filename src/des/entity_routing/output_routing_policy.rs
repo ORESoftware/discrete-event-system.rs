@@ -15,17 +15,12 @@ pub const MIGRATION: MigrationFile = MigrationFile::ported_core(
     &["OutputConnectionRouter", "OutputRoutingPolicy"],
 );
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OutputRoutingPolicy {
     RoundRobin,
+    #[default]
     Random,
     Ordered,
-}
-
-impl Default for OutputRoutingPolicy {
-    fn default() -> Self {
-        Self::Random
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

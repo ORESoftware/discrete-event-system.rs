@@ -32,6 +32,7 @@ pub mod feedback_linearization;
 pub mod field_station;
 pub mod four_rooms;
 pub mod ga_des;
+#[allow(clippy::module_inception)]
 pub mod general;
 pub mod genetic_tsp;
 pub mod grid_localization_pomdp;

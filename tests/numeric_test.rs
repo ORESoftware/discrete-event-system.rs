@@ -1,7 +1,8 @@
 //! Numeric policy tests for exact decimals, exact fractions, and deliberate f64 use.
 
 use discrete_event_system_rs::numeric::{
-    compensated_sum, decimal_from_f64, decimal_from_str, decimal_mean, rational, rational_mean,
+    absolute_decimal, approximately_equal_f64, compensated_sum, decimal_from_f64, decimal_from_str,
+    decimal_mean, decimal_sum, decimal_to_f64, rational, rational_mean,
 };
 use discrete_event_system_rs::DesDecimal;
 
@@ -64,4 +65,52 @@ fn decimal_policy_keeps_integer_conversion_lossless() {
         DesDecimal::from(42),
         decimal_from_str("42", "test").unwrap()
     );
+}
+
+#[test]
+fn decimal_sum_accumulates_base10_values_exactly() {
+    let values = ["0.10", "0.20", "0.30", "0.40"]
+        .into_iter()
+        .map(|value| decimal_from_str(value, "test").expect("decimal parses"));
+
+    assert_eq!(
+        decimal_sum(values),
+        decimal_from_str("1.00", "test").expect("decimal parses")
+    );
+}
+
+#[test]
+fn decimal_mean_rejects_empty_inputs() {
+    let err = decimal_mean(&[], "empty decimal mean").expect_err("empty input is rejected");
+
+    assert!(format!("{err}").contains("expected at least one decimal value"));
+}
+
+#[test]
+fn decimal_to_f64_preserves_simple_boundary_values() {
+    let value = decimal_from_str("12.5", "test").expect("decimal parses");
+
+    assert_eq!(
+        decimal_to_f64(value, "test").expect("decimal converts"),
+        12.5
+    );
+}
+
+#[test]
+fn absolute_decimal_normalizes_negative_values() {
+    let value = decimal_from_str("-123.456", "test").expect("decimal parses");
+
+    assert_eq!(
+        absolute_decimal(value),
+        decimal_from_str("123.456", "test").expect("decimal parses")
+    );
+}
+
+#[test]
+fn approximate_f64_equality_rejects_invalid_inputs() {
+    assert!(approximately_equal_f64(100.0, 100.000_000_1, 1e-8));
+    assert!(!approximately_equal_f64(100.0, 100.1, 1e-8));
+    assert!(!approximately_equal_f64(f64::NAN, 1.0, 1e-8));
+    assert!(!approximately_equal_f64(1.0, f64::INFINITY, 1e-8));
+    assert!(!approximately_equal_f64(1.0, 1.0, -1e-8));
 }

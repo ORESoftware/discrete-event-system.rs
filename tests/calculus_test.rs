@@ -61,6 +61,7 @@ fn rk4_matches_simple_harmonic_oscillator_period() {
     let trace = rk4(|_t, y| vec![y[1], -y[0]], &[1.0, 0.0], 0.0, period, dt).unwrap();
     let final_state = trace.y.last().unwrap();
     let energy = final_state[0] * final_state[0] + final_state[1] * final_state[1];
+    let expected_final_time = (period / dt).round() * dt;
     assert!(approx(energy, 1.0, 1e-10));
-    assert!(approx(*trace.t.last().unwrap(), 6.283, 1e-12));
+    assert!(approx(*trace.t.last().unwrap(), expected_final_time, 1e-12));
 }

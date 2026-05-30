@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 // BEGIN GENERATED MODULE DECLARATIONS
+#[allow(clippy::module_inception)]
 pub mod r#abstract;
 pub mod composers;
 pub mod interfaces;

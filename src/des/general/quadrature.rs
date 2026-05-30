@@ -73,7 +73,7 @@ pub fn simpson<F>(f: F, a: f64, b: f64, n: usize) -> Result<QuadResult, QuadErro
 where
     F: Fn(f64) -> f64,
 {
-    if n < 2 || n % 2 != 0 {
+    if n < 2 || !n.is_multiple_of(2) {
         return Err(QuadError::InvalidCount {
             method: "simpson",
             condition: "even and >= 2",

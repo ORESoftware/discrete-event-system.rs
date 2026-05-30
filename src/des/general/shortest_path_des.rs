@@ -329,7 +329,7 @@ pub fn build_random_graph(
         .expect("random graph maximum weight must be finite");
     let weight_span = weight_max - weight_min;
     let mut edges = vec![Vec::new(); num_nodes];
-    for from in 0..num_nodes {
+    for (from, from_edges) in edges.iter_mut().enumerate().take(num_nodes) {
         for to in 0..num_nodes {
             if from == to {
                 continue;
@@ -337,7 +337,7 @@ pub fn build_random_graph(
             if rng.next_f64() < edge_probability {
                 let sample = decimal_from_f64(rng.next_f64(), "build_random_graph")
                     .expect("Mulberry32 sample should be finite");
-                edges[from].push(Edge {
+                from_edges.push(Edge {
                     to,
                     weight: weight_min + weight_span * sample,
                 });

@@ -191,11 +191,20 @@ pub fn format_validation_report(checks: &[ValidationCheck]) -> String {
     lines.join("\n")
 }
 
+pub type PredicateFn<S> = Box<dyn Fn(&S) -> bool>;
+pub type ObservedStringFn<S> = Box<dyn Fn(&S) -> String>;
+pub type NumericExtractFn<S> = Box<dyn Fn(&S) -> f64>;
+pub type SeriesExtractFn<S> = Box<dyn Fn(&S) -> Vec<f64>>;
+pub type GroundTruthExtractFn<S, T> = Box<dyn Fn(&S) -> T>;
+pub type GroundTruthCompareFn<T> = Box<dyn Fn(&T, &T) -> Option<String>>;
+pub type GroundTruthFormatFn<T> = Box<dyn Fn(&T) -> String>;
+pub type ExternalReferenceCompareFn<S> = Box<dyn Fn(&S, &JsonValue) -> Vec<ValidationCheck>>;
+
 pub struct IntrinsicCheckOptions<S> {
     pub name: String,
-    pub predicate: Box<dyn Fn(&S) -> bool>,
+    pub predicate: PredicateFn<S>,
     pub expected: Option<String>,
-    pub observed_fn: Option<Box<dyn Fn(&S) -> String>>,
+    pub observed_fn: Option<ObservedStringFn<S>>,
     pub group: Option<String>,
     pub details: Option<String>,
 }
@@ -283,7 +292,7 @@ impl NumericMode {
 
 pub struct NumericValidatorOptions<S> {
     pub name: String,
-    pub extract: Box<dyn Fn(&S) -> f64>,
+    pub extract: NumericExtractFn<S>,
     pub expected: ExpectedNumber<S>,
     pub tol: f64,
     pub mode: NumericMode,
@@ -353,7 +362,7 @@ pub fn numeric_validator<S: 'static>(opts: NumericValidatorOptions<S>) -> Box<dy
 
 pub struct BoundValidatorOptions<S> {
     pub name: String,
-    pub extract: Box<dyn Fn(&S) -> f64>,
+    pub extract: NumericExtractFn<S>,
     pub low: Option<f64>,
     pub high: Option<f64>,
     pub inclusive: bool,
@@ -433,7 +442,7 @@ impl MonotonicityDirection {
 
 pub struct MonotonicityValidatorOptions<S> {
     pub name: String,
-    pub extract: Box<dyn Fn(&S) -> Vec<f64>>,
+    pub extract: SeriesExtractFn<S>,
     pub direction: MonotonicityDirection,
     pub tol: f64,
     pub group: Option<String>,
@@ -522,10 +531,10 @@ impl<S, T> From<T> for GroundTruthExpected<S, T> {
 
 pub struct GroundTruthValidatorOptions<S, T> {
     pub name: String,
-    pub extract: Box<dyn Fn(&S) -> T>,
+    pub extract: GroundTruthExtractFn<S, T>,
     pub expected: GroundTruthExpected<S, T>,
-    pub compare: Box<dyn Fn(&T, &T) -> Option<String>>,
-    pub format: Box<dyn Fn(&T) -> String>,
+    pub compare: GroundTruthCompareFn<T>,
+    pub format: GroundTruthFormatFn<T>,
     pub group: Option<String>,
 }
 
@@ -585,7 +594,7 @@ where
 pub struct ExternalReferenceValidatorOptions<S> {
     pub name: String,
     pub reference_path: String,
-    pub compare: Box<dyn Fn(&S, &JsonValue) -> Vec<ValidationCheck>>,
+    pub compare: ExternalReferenceCompareFn<S>,
     pub silent_if_missing: bool,
     pub group: Option<String>,
 }

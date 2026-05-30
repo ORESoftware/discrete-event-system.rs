@@ -274,15 +274,14 @@ impl Preconditions {
         tol: f64,
     ) -> PreconditionResult {
         Self::square_matrix(model, param, matrix)?;
-        let n = matrix.len();
-        for i in 0..n {
-            for j in (i + 1)..n {
-                if (matrix[i][j] - matrix[j][i]).abs() > tol {
+        for (i, row) in matrix.iter().enumerate() {
+            for (j, other_row) in matrix.iter().enumerate().skip(i + 1) {
+                if (row[j] - other_row[i]).abs() > tol {
                     return Err(error(
                         model,
                         param,
                         &format!("be symmetric (M[{i}][{j}] vs M[{j}][{i}])"),
-                        json!([matrix[i][j], matrix[j][i]]),
+                        json!([row[j], other_row[i]]),
                     ));
                 }
             }
@@ -321,8 +320,8 @@ impl Preconditions {
         for i in 0..n {
             for j in 0..=i {
                 let mut sum = matrix[i][j];
-                for k in 0..j {
-                    sum -= lower[i][k] * lower[j][k];
+                for (left, right) in lower[i].iter().zip(lower[j].iter()).take(j) {
+                    sum -= left * right;
                 }
                 if i == j {
                     if sum <= 1e-12 {

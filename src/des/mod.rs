@@ -26,9 +26,11 @@ pub mod entity_travel;
 pub mod entity_conn;
 
 // Standalone infrastructure clusters.
+pub mod http_server;
 pub mod mdp;
 pub mod observability;
 pub mod reference;
+pub mod ws_server;
 
 // Signal-flow entities + observers + visual (build on the entity framework).
 pub mod observers;
@@ -37,12 +39,6 @@ pub mod visual;
 
 // Animation framework (frame recording, rendering, scene builders).
 pub mod animation;
-
-// WebSocket server: live-connection registry for broadcasting (e.g. animation
-// frames). Faithful port; the network binding is stubbed (see module docs). The
-// directory holds a single `ws_server.rs`, reached via an explicit path.
-#[path = "ws_server/ws_server.rs"]
-pub mod ws_server;
 
 // Cross-subsystem integration smoke tests (compiled only under cfg(test)).
 #[cfg(test)]

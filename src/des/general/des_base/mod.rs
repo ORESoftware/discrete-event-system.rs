@@ -11,10 +11,12 @@ pub mod episode_accounting;
 pub mod model_topology;
 pub mod station;
 pub mod validation;
+pub mod visual_block;
 
 // Tier 2: directly on the station core.
 pub mod belief_state;
 pub mod composite_station;
+pub mod control_blocks;
 pub mod controller;
 pub mod cut_pool;
 pub mod fixed_point;

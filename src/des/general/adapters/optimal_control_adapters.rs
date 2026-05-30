@@ -41,7 +41,9 @@ use crate::des::general::iterative_learning_control::{
     run_iterative_learning_control, ILCReferenceKind, IterativeLearningControlParams,
     IterativeLearningControlResult,
 };
-use crate::des::general::kalman_filter::{run_radar_tracking, RadarTrackingOpts, RadarTrackingResult};
+use crate::des::general::kalman_filter::{
+    run_radar_tracking, RadarTrackingOpts, RadarTrackingResult,
+};
 use crate::des::general::mpc_double_integrator::{
     run_mpc_double_integrator, MpcDoubleIntOpts, MpcDoubleIntResult,
 };
@@ -61,10 +63,18 @@ fn js_number(v: f64) -> String {
     if v.is_nan() {
         "NaN".to_string()
     } else if v.is_infinite() {
-        if v > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() }
+        if v > 0.0 {
+            "Infinity".to_string()
+        } else {
+            "-Infinity".to_string()
+        }
     } else {
         let s = v.to_string();
-        if s == "-0" { "0".to_string() } else { s }
+        if s == "-0" {
+            "0".to_string()
+        } else {
+            s
+        }
     }
 }
 
@@ -82,12 +92,20 @@ fn to_exponential(v: f64, digits: usize) -> String {
 
 /// `numbers.map(String).join(', ')`.
 fn join_nums(values: &[f64]) -> String {
-    values.iter().map(|v| js_number(*v)).collect::<Vec<_>>().join(", ")
+    values
+        .iter()
+        .map(|v| js_number(*v))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// `numbers.map(v => v.toFixed(digits)).join(', ')`.
 fn fixed_join(values: &[f64], digits: usize) -> String {
-    values.iter().map(|v| format!("{:.*}", digits, v)).collect::<Vec<_>>().join(", ")
+    values
+        .iter()
+        .map(|v| format!("{:.*}", digits, v))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn disturbance_type_str(d: DisturbanceType) -> &'static str {
@@ -124,8 +142,19 @@ fn write_xvu_csv(trajectory: &[Vec<f64>], controls: &[Vec<f64>], csv_path: &str)
 // Schema helpers
 // =============================================================================
 
-fn num(min: Option<f64>, max: Option<f64>, integer: Option<bool>, default: Option<f64>) -> ParamSchema {
-    ParamSchema::Number { min, max, integer, default, description: None }
+fn num(
+    min: Option<f64>,
+    max: Option<f64>,
+    integer: Option<bool>,
+    default: Option<f64>,
+) -> ParamSchema {
+    ParamSchema::Number {
+        min,
+        max,
+        integer,
+        default,
+        description: None,
+    }
 }
 
 fn str_enum(allowed: &[&str], default: &str) -> ParamSchema {
@@ -137,12 +166,24 @@ fn str_enum(allowed: &[&str], default: &str) -> ParamSchema {
 }
 
 fn arr_mm(items: ParamSchema, min_length: Option<usize>, max_length: Option<usize>) -> ParamSchema {
-    ParamSchema::Array { items: Box::new(items), min_length, max_length, description: None }
+    ParamSchema::Array {
+        items: Box::new(items),
+        min_length,
+        max_length,
+        description: None,
+    }
 }
 
-fn obj_desc(description: &str, fields: Vec<(&str, ParamSchema)>, required: Vec<&str>) -> ParamSchema {
+fn obj_desc(
+    description: &str,
+    fields: Vec<(&str, ParamSchema)>,
+    required: Vec<&str>,
+) -> ParamSchema {
     ParamSchema::Object {
-        fields: fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+        fields: fields
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
         required: Some(required.iter().map(|s| s.to_string()).collect()),
         description: Some(description.to_string()),
     }
@@ -198,11 +239,26 @@ impl DESModelRegistration<PontryaginOpts, PontryaginResult> for PontryaginBangBa
             "PONTRYAGIN BANG-BANG (time-optimal)".to_string(),
             "────────────────────────────────────".to_string(),
             format!("  Initial state:           [{}]", join_nums(&x0)),
-            format!("  |u| bound:               {}", js_number(p.u_max.unwrap_or(1.0))),
-            format!("  Bang-bang switches:      {}  (PMP predicts ≤ 1)", r.switch_count),
-            format!("  Arrival tick:            {}    (entered deadband)", r.arrival_tick),
-            format!("  Arrival time:            {:.3} s", r.arrival_tick as f64 * dt),
-            format!("  Theoretical optimum t*:  {:.3} s", r.theoretical_arrival_time),
+            format!(
+                "  |u| bound:               {}",
+                js_number(p.u_max.unwrap_or(1.0))
+            ),
+            format!(
+                "  Bang-bang switches:      {}  (PMP predicts ≤ 1)",
+                r.switch_count
+            ),
+            format!(
+                "  Arrival tick:            {}    (entered deadband)",
+                r.arrival_tick
+            ),
+            format!(
+                "  Arrival time:            {:.3} s",
+                r.arrival_tick as f64 * dt
+            ),
+            format!(
+                "  Theoretical optimum t*:  {:.3} s",
+                r.theoretical_arrival_time
+            ),
             format!("  Final state:             [{}]", fixed_join(last, 3)),
         ]
         .join("\n")
@@ -254,8 +310,14 @@ impl DESModelRegistration<RadarTrackingOpts, RadarTrackingResult> for KalmanFilt
         [
             "KALMAN FILTER — RADAR TRACKING".to_string(),
             "────────────────────────────────────".to_string(),
-            format!("  Process noise σ_w:       {}", js_number(p.proc_noise_std.unwrap_or(0.1))),
-            format!("  Sensor noise σ_v:        {}", js_number(p.meas_noise_std.unwrap_or(1.0))),
+            format!(
+                "  Process noise σ_w:       {}",
+                js_number(p.proc_noise_std.unwrap_or(0.1))
+            ),
+            format!(
+                "  Sensor noise σ_v:        {}",
+                js_number(p.meas_noise_std.unwrap_or(1.0))
+            ),
             format!("  Steps:                   {}", r.num_steps),
             format!("  RMSE (KF estimate):      {:.3} m", r.rmse_pos),
             format!("  RMSE (raw measurement):  {:.3} m", r.rmse_meas_pos),
@@ -300,7 +362,10 @@ fn sliding_mode_schema() -> ParamSchema {
             ("boundary", num(Some(0.0), None, None, Some(0.05))),
             ("uBound", num(Some(0.0), None, None, Some(5.0))),
             ("disturbanceAmp", num(Some(0.0), None, None, Some(1.0))),
-            ("disturbanceType", str_enum(&["sin", "square", "random"], "sin")),
+            (
+                "disturbanceType",
+                str_enum(&["sin", "square", "random"], "sin"),
+            ),
             ("seed", num(None, None, Some(true), Some(1.0))),
         ],
         vec![],
@@ -334,14 +399,26 @@ impl DESModelRegistration<SlidingModeOpts, SlidingModeResult> for SlidingModeAda
                 disturbance_type_str(p.disturbance_type.unwrap_or(DisturbanceType::Sin)),
                 js_number(p.disturbance_amp.unwrap_or(1.0))
             ),
-            format!("  Reaching tick:           {}    (s = 0 hit)", r.reaching_tick),
+            format!(
+                "  Reaching tick:           {}    (s = 0 hit)",
+                r.reaching_tick
+            ),
             format!(
                 "  Stayed near origin?      {}",
                 if r.stayed_near_origin { "YES" } else { "no" }
             ),
-            format!("  Final |x|+|v|:           {:.3}", r.final_distance_from_origin),
-            format!("  λ:                       {}", js_number(p.lambda.unwrap_or(2.0))),
-            format!("  η:                       {}", js_number(p.eta.unwrap_or(3.0))),
+            format!(
+                "  Final |x|+|v|:           {:.3}",
+                r.final_distance_from_origin
+            ),
+            format!(
+                "  λ:                       {}",
+                js_number(p.lambda.unwrap_or(2.0))
+            ),
+            format!(
+                "  η:                       {}",
+                js_number(p.eta.unwrap_or(3.0))
+            ),
         ]
         .join("\n")
     }
@@ -405,9 +482,18 @@ impl DESModelRegistration<MRACOpts, MRACResult> for MracAdapter {
                 js_number(p.am.unwrap_or(-2.0)),
                 js_number(p.bm.unwrap_or(2.0))
             ),
-            format!("  Adaptation gain γ:       {}", js_number(p.gamma.unwrap_or(5.0))),
-            format!("  Final θ_x, θ_r:          [{}]", fixed_join(&r.final_theta, 3)),
-            format!("  Ideal θ*_x, θ*_r:        [{}]", fixed_join(&r.ideal_theta, 3)),
+            format!(
+                "  Adaptation gain γ:       {}",
+                js_number(p.gamma.unwrap_or(5.0))
+            ),
+            format!(
+                "  Final θ_x, θ_r:          [{}]",
+                fixed_join(&r.final_theta, 3)
+            ),
+            format!(
+                "  Ideal θ*_x, θ*_r:        [{}]",
+                fixed_join(&r.ideal_theta, 3)
+            ),
             format!("  Steady-state RMS error:  {:.4}", r.rms_error_steady_state),
         ]
         .join("\n")
@@ -503,8 +589,10 @@ impl DESModelRegistration<IterativeLearningControlParams, IterativeLearningContr
         .join("\n")
     }
     fn write_csv(&self, r: &IterativeLearningControlResult, csv_path: &str) {
-        let mut lines =
-            vec!["trial,rms_error,max_abs_error,max_abs_control,final_output,final_reference".to_string()];
+        let mut lines = vec![
+            "trial,rms_error,max_abs_error,max_abs_control,final_output,final_reference"
+                .to_string(),
+        ];
         for row in &r.trial_summaries {
             lines.push(csv_row([
                 row.trial.to_string(),
@@ -585,7 +673,11 @@ impl DESModelRegistration<FlatFeedbackLinParams, FeedbackLinearizationResult>
     fn schema(&self) -> ParamSchema {
         feedback_lin_schema()
     }
-    fn run(&self, p: FlatFeedbackLinParams, _runtime: &DESRuntimeConfig) -> FeedbackLinearizationResult {
+    fn run(
+        &self,
+        p: FlatFeedbackLinParams,
+        _runtime: &DESRuntimeConfig,
+    ) -> FeedbackLinearizationResult {
         let opts = FeedbackLinearizationOpts {
             params: Some(PartialPendulumParams {
                 m: Some(p.m.unwrap_or(1.0)),
@@ -595,6 +687,7 @@ impl DESModelRegistration<FlatFeedbackLinParams, FeedbackLinearizationResult>
             }),
             theta0: p.theta0,
             theta_dot0: p.theta_dot0,
+            reference: None,
             kp: p.kp,
             kv: p.kv,
             u_bound: p.u_bound,
@@ -691,7 +784,10 @@ impl DESModelRegistration<MpcDoubleIntOpts, MpcDoubleIntResult> for MpcDoubleInt
             "MPC — DOUBLE INTEGRATOR (constrained QP)".to_string(),
             "──────────────────────────────────────────".to_string(),
             format!("  Initial state:           [{}]", join_nums(&x0)),
-            format!("  |u| bound:               {}", js_number(p.u_max.unwrap_or(1.0))),
+            format!(
+                "  |u| bound:               {}",
+                js_number(p.u_max.unwrap_or(1.0))
+            ),
             format!("  Horizon N:               {}", p.n.unwrap_or(15)),
             format!("  Sample period dt:        {}", js_number(dt)),
             format!(

@@ -46,7 +46,9 @@ use crate::des::general::grid_localization_pomdp::{
     GridLocalizationResult,
 };
 use crate::des::general::inventory_dp::{solve_inventory_dp, InventoryDPResult, InventoryProblem};
-use crate::des::general::mountain_car::{run_mountain_car, MountainCarResult, MountainCarTrainOpts};
+use crate::des::general::mountain_car::{
+    run_mountain_car, MountainCarResult, MountainCarTrainOpts,
+};
 use crate::des::general::stag_hunt::{run_stag_hunt, StagHuntOpts, StagHuntResult};
 use crate::des::general::tiger_pomdp::{
     build_tiger_spec, simulate_tiger, TigerOpts, TigerSimOpts, TigerSimResult, TigerSolver,
@@ -56,12 +58,26 @@ use crate::des::general::tiger_pomdp::{
 // Schema builders (JS-parity, copied from the sibling adapter style).
 // =============================================================================
 
-fn num(min: Option<f64>, max: Option<f64>, integer: Option<bool>, default: Option<f64>) -> ParamSchema {
-    ParamSchema::Number { min, max, integer, default, description: None }
+fn num(
+    min: Option<f64>,
+    max: Option<f64>,
+    integer: Option<bool>,
+    default: Option<f64>,
+) -> ParamSchema {
+    ParamSchema::Number {
+        min,
+        max,
+        integer,
+        default,
+        description: None,
+    }
 }
 
 fn boolean(default: Option<bool>) -> ParamSchema {
-    ParamSchema::Boolean { default, description: None }
+    ParamSchema::Boolean {
+        default,
+        description: None,
+    }
 }
 
 fn str_enum(allowed: &[&str], default: &str) -> ParamSchema {
@@ -73,12 +89,20 @@ fn str_enum(allowed: &[&str], default: &str) -> ParamSchema {
 }
 
 fn arr(items: ParamSchema, min_length: Option<usize>, max_length: Option<usize>) -> ParamSchema {
-    ParamSchema::Array { items: Box::new(items), min_length, max_length, description: None }
+    ParamSchema::Array {
+        items: Box::new(items),
+        min_length,
+        max_length,
+        description: None,
+    }
 }
 
 fn obj(description: &str, fields: Vec<(&str, ParamSchema)>, required: Vec<&str>) -> ParamSchema {
     ParamSchema::Object {
-        fields: fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+        fields: fields
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
         required: Some(required.iter().map(|s| s.to_string()).collect()),
         description: Some(description.to_string()),
     }
@@ -103,7 +127,12 @@ fn count_actions(actions: &[usize], names: &[&str]) -> String {
             counts[a] += 1;
         }
     }
-    names.iter().enumerate().map(|(i, n)| format!("{n}={}", counts[i])).collect::<Vec<_>>().join(", ")
+    names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| format!("{n}={}", counts[i]))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn obs_str(o: GridLocalizationObservation) -> &'static str {
@@ -137,7 +166,10 @@ fn inventory_schema() -> ParamSchema {
         vec![
             ("horizon", num(Some(1.0), None, Some(true), None)),
             ("S_max", num(Some(0.0), None, Some(true), None)),
-            ("demandPmf", arr(num(Some(0.0), Some(1.0), None, None), None, None)),
+            (
+                "demandPmf",
+                arr(num(Some(0.0), Some(1.0), None, None), None, None),
+            ),
             ("price", num(Some(0.0), None, None, None)),
             ("cost", num(Some(0.0), None, None, None)),
             ("fixedCost", num(Some(0.0), None, None, Some(0.0))),
@@ -147,7 +179,14 @@ fn inventory_schema() -> ParamSchema {
             ("discount", num(Some(0.0), Some(1.0), None, Some(1.0))),
             ("initialInventory", num(Some(0.0), None, Some(true), None)),
         ],
-        vec!["horizon", "S_max", "demandPmf", "price", "cost", "initialInventory"],
+        vec![
+            "horizon",
+            "S_max",
+            "demandPmf",
+            "price",
+            "cost",
+            "initialInventory",
+        ],
     )
 }
 
@@ -177,8 +216,14 @@ impl DESModelRegistration<InventoryDpParams, InventoryDPResult> for InventoryDpA
             format!("  Horizon:      {}", p.problem.horizon),
             format!("  S_max:        {}", p.problem.s_max),
             format!("  E[demand]:    {:.2}", r.mean_demand),
-            format!("  V*(t=0, s={}): {:.3}", p.problem.initial_inventory, r.expected_reward),
-            format!("  Sim total reward (seed={seed}): {:.3}", r.simulation.total_reward),
+            format!(
+                "  V*(t=0, s={}): {:.3}",
+                p.problem.initial_inventory, r.expected_reward
+            ),
+            format!(
+                "  Sim total reward (seed={seed}): {:.3}",
+                r.simulation.total_reward
+            ),
             format!("  Orders:       {}", join_usize(&r.simulation.orders)),
             format!("  Demands:      {}", join_usize(&r.simulation.demands)),
             format!("  Inventory:    {}", join_usize(&r.simulation.inventory)),
@@ -201,7 +246,10 @@ impl DESModelRegistration<InventoryDpParams, InventoryDPResult> for InventoryDpA
 }
 
 fn join_usize(xs: &[usize]) -> String {
-    xs.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", ")
+    xs.iter()
+        .map(|x| x.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 // =============================================================================
@@ -213,7 +261,10 @@ fn mountain_car_schema() -> ParamSchema {
         "Mountain Car solved by linear VFA with tile coding (Sutton-Albus).",
         vec![
             ("numEpisodes", num(Some(1.0), None, Some(true), Some(200.0))),
-            ("maxStepsPerEpisode", num(Some(1.0), None, Some(true), Some(1000.0))),
+            (
+                "maxStepsPerEpisode",
+                num(Some(1.0), None, Some(true), Some(1000.0)),
+            ),
             ("alpha", num(Some(0.0), None, None, Some(0.5))),
             ("gamma", num(Some(0.0), Some(1.0), None, Some(1.0))),
             ("epsilon", num(Some(0.0), Some(1.0), None, Some(0.0))),
@@ -221,7 +272,10 @@ fn mountain_car_schema() -> ParamSchema {
             ("epsilonMin", num(Some(0.0), Some(1.0), None, Some(0.0))),
             ("seed", num(None, None, Some(true), Some(1.0))),
             ("numTilings", num(Some(1.0), None, Some(true), Some(8.0))),
-            ("numTilesPerDim", num(Some(2.0), None, Some(true), Some(8.0))),
+            (
+                "numTilesPerDim",
+                num(Some(2.0), None, Some(true), Some(8.0)),
+            ),
         ],
         vec!["numEpisodes"],
     )
@@ -255,9 +309,18 @@ impl DESModelRegistration<MountainCarTrainOpts, MountainCarResult> for MountainC
             "MOUNTAIN CAR (linear VFA + tile coding)".to_string(),
             "─────────────────────────────────────────".to_string(),
             format!("  Episodes:               {}", r.reward_history.len()),
-            format!("  Mean return (last 20):  {:.2}", mean_last(&r.reward_history, 20)),
-            format!("  Mean length (last 20):  {:.1}", mean_last(&r.length_history, 20)),
-            format!("  Mean |TD-err| (last 20):{:.4}", mean_last(&r.td_error_history, 20)),
+            format!(
+                "  Mean return (last 20):  {:.2}",
+                mean_last(&r.reward_history, 20)
+            ),
+            format!(
+                "  Mean length (last 20):  {:.1}",
+                mean_last(&r.length_history, 20)
+            ),
+            format!(
+                "  Mean |TD-err| (last 20):{:.4}",
+                mean_last(&r.td_error_history, 20)
+            ),
             format!("  Greedy from x=-0.5:     {greedy}"),
             format!("  ‖θ‖₂:                   {:.2}", r.theta_norm),
         ]
@@ -282,12 +345,18 @@ fn tiger_schema() -> ParamSchema {
     obj(
         "Cassandra-Kaelbling-Littman 1994 Tiger problem with QMDP / 1-step look-ahead.",
         vec![
-            ("listenAccuracy", num(Some(0.5), Some(1.0), None, Some(0.85))),
+            (
+                "listenAccuracy",
+                num(Some(0.5), Some(1.0), None, Some(0.85)),
+            ),
             ("openGood", num(None, None, None, Some(10.0))),
             ("openBad", num(None, None, None, Some(-100.0))),
             ("listenCost", num(None, None, None, Some(-1.0))),
             ("discount", num(Some(0.0), Some(1.0), None, Some(0.95))),
-            ("solver", str_enum(&["qmdp", "one-step-lookahead"], "one-step-lookahead")),
+            (
+                "solver",
+                str_enum(&["qmdp", "one-step-lookahead"], "one-step-lookahead"),
+            ),
             ("numSteps", num(Some(1.0), None, Some(true), Some(50.0))),
             ("seed", num(None, None, Some(true), Some(1.0))),
         ],
@@ -329,8 +398,14 @@ impl DESModelRegistration<TigerPomdpParams, TigerSimResult> for TigerPomdpAdapte
             format!("  Steps:        {}", r.steps),
             format!("  Total return: {:.2}", r.total_return),
             format!("  # opens:      {}", r.num_opens),
-            format!("  # bad opens:  {}  (catastrophic open of tiger door)", r.num_bad_opens),
-            format!("  Action mix:   {}", count_actions(&r.actions, &action_names)),
+            format!(
+                "  # bad opens:  {}  (catastrophic open of tiger door)",
+                r.num_bad_opens
+            ),
+            format!(
+                "  Action mix:   {}",
+                count_actions(&r.actions, &action_names)
+            ),
         ]
         .join("\n")
     }
@@ -347,12 +422,24 @@ fn grid_localization_schema() -> ParamSchema {
             ("width", num(Some(2.0), Some(8.0), Some(true), Some(3.0))),
             ("height", num(Some(2.0), Some(8.0), Some(true), Some(3.0))),
             ("horizon", num(Some(0.0), Some(6.0), Some(true), Some(3.0))),
-            ("numSteps", num(Some(1.0), Some(100.0), Some(true), Some(8.0))),
+            (
+                "numSteps",
+                num(Some(1.0), Some(100.0), Some(true), Some(8.0)),
+            ),
             ("seed", num(None, None, Some(true), Some(1.0))),
-            ("hiddenTarget", arr(num(None, None, Some(true), None), Some(2), Some(2))),
-            ("initialBelief", arr(num(Some(0.0), Some(1.0), None, None), None, None)),
+            (
+                "hiddenTarget",
+                arr(num(None, None, Some(true), None), Some(2), Some(2)),
+            ),
+            (
+                "initialBelief",
+                arr(num(Some(0.0), Some(1.0), None, None), None, None),
+            ),
             ("scanAccuracy", num(Some(0.5), Some(1.0), None, Some(0.9))),
-            ("inspectAccuracy", num(Some(0.5), Some(1.0), None, Some(0.99))),
+            (
+                "inspectAccuracy",
+                num(Some(0.5), Some(1.0), None, Some(0.99)),
+            ),
             ("scanCost", num(None, None, None, Some(-0.2))),
             ("inspectCorrectReward", num(None, None, None, Some(20.0))),
             ("inspectWrongPenalty", num(None, None, None, Some(-12.0))),
@@ -369,7 +456,11 @@ fn normalize_grid_localization_params(p: GridLocalizationParams) -> GridLocaliza
         Some(b) if !b.is_empty() => Some(b.clone()),
         _ => None,
     };
-    GridLocalizationParams { hidden_target, initial_belief, ..p }
+    GridLocalizationParams {
+        hidden_target,
+        initial_belief,
+        ..p
+    }
 }
 
 pub struct GridLocalizationAdapter;
@@ -377,7 +468,9 @@ pub fn adapter_grid_localization() -> GridLocalizationAdapter {
     GridLocalizationAdapter
 }
 
-impl DESModelRegistration<GridLocalizationParams, GridLocalizationResult> for GridLocalizationAdapter {
+impl DESModelRegistration<GridLocalizationParams, GridLocalizationResult>
+    for GridLocalizationAdapter
+{
     fn id(&self) -> &str {
         "grid-localization-pomdp"
     }
@@ -387,7 +480,11 @@ impl DESModelRegistration<GridLocalizationParams, GridLocalizationResult> for Gr
     fn schema(&self) -> ParamSchema {
         grid_localization_schema()
     }
-    fn run(&self, params: GridLocalizationParams, _runtime: &DESRuntimeConfig) -> GridLocalizationResult {
+    fn run(
+        &self,
+        params: GridLocalizationParams,
+        _runtime: &DESRuntimeConfig,
+    ) -> GridLocalizationResult {
         run_grid_localization_pomdp(&normalize_grid_localization_params(params))
     }
     fn summarize(&self, r: &GridLocalizationResult, _p: &GridLocalizationParams) -> String {
@@ -398,14 +495,20 @@ impl DESModelRegistration<GridLocalizationParams, GridLocalizationResult> for Gr
             None => "n/a".to_string(),
         };
         let found = if r.found {
-            format!("YES at step {}", r.found_at_step.map(|s| s.to_string()).unwrap_or_default())
+            format!(
+                "YES at step {}",
+                r.found_at_step.map(|s| s.to_string()).unwrap_or_default()
+            )
         } else {
             "no".to_string()
         };
         let entropy = format!(
             "{} -> {}",
-            first.map(|row| format!("{:.3}", row.entropy)).unwrap_or_else(|| "n/a".to_string()),
-            last.map(|row| format!("{:.3}", row.entropy)).unwrap_or_else(|| "n/a".to_string())
+            first
+                .map(|row| format!("{:.3}", row.entropy))
+                .unwrap_or_else(|| "n/a".to_string()),
+            last.map(|row| format!("{:.3}", row.entropy))
+                .unwrap_or_else(|| "n/a".to_string())
         );
         let p_hidden = last
             .map(|row| format!("{:.3}", row.hidden_probability))
@@ -417,8 +520,14 @@ impl DESModelRegistration<GridLocalizationParams, GridLocalizationResult> for Gr
                 "  State space:    {} x {} = {} hidden cells",
                 r.params.width, r.params.height, r.state_space.num_states
             ),
-            format!("  Planner:        belief lookahead horizon={}", r.params.horizon),
-            format!("  Hidden target:  ({}, {})", r.params.hidden_target.0, r.params.hidden_target.1),
+            format!(
+                "  Planner:        belief lookahead horizon={}",
+                r.params.horizon
+            ),
+            format!(
+                "  Hidden target:  ({}, {})",
+                r.params.hidden_target.0, r.params.hidden_target.1
+            ),
             format!("  First action:   {first_action}"),
             format!("  Found target:   {found}"),
             format!("  Entropy:        {entropy}"),
@@ -492,7 +601,10 @@ fn four_rooms_schema() -> ParamSchema {
         "Four-Rooms gridworld with hallway options (Sutton, Precup, Singh 1999).",
         vec![
             ("numEpisodes", num(Some(1.0), None, Some(true), Some(200.0))),
-            ("maxStepsPerEpisode", num(Some(1.0), None, Some(true), Some(5000.0))),
+            (
+                "maxStepsPerEpisode",
+                num(Some(1.0), None, Some(true), Some(5000.0)),
+            ),
             ("alpha", num(Some(0.0), None, None, Some(0.25))),
             ("gamma", num(Some(0.0), Some(1.0), None, Some(0.99))),
             ("epsilon", num(Some(0.0), Some(1.0), None, Some(0.1))),
@@ -552,8 +664,14 @@ fn actor_critic_schema() -> ParamSchema {
     obj(
         "One-step tabular actor-critic on GridWorld.",
         vec![
-            ("numEpisodes", num(Some(1.0), None, Some(true), Some(1000.0))),
-            ("maxStepsPerEpisode", num(Some(1.0), None, Some(true), Some(100.0))),
+            (
+                "numEpisodes",
+                num(Some(1.0), None, Some(true), Some(1000.0)),
+            ),
+            (
+                "maxStepsPerEpisode",
+                num(Some(1.0), None, Some(true), Some(100.0)),
+            ),
             ("alphaV", num(Some(0.0), None, None, Some(0.1))),
             ("alphaP", num(Some(0.0), None, None, Some(0.05))),
             ("gamma", num(Some(0.0), Some(1.0), None, Some(0.95))),
@@ -611,14 +729,20 @@ fn blackjack_schema() -> ParamSchema {
     obj(
         "Sutton & Barto §5.1 Blackjack with first-visit Monte Carlo control.",
         vec![
-            ("numEpisodes", num(Some(1.0), None, Some(true), Some(50_000.0))),
+            (
+                "numEpisodes",
+                num(Some(1.0), None, Some(true), Some(50_000.0)),
+            ),
             ("seed", num(None, None, Some(true), Some(1.0))),
             ("epsilon", num(Some(0.0), Some(1.0), None, Some(0.1))),
             ("epsilonDecay", num(Some(0.0), Some(1.0), None, Some(1.0))),
             ("epsilonMin", num(Some(0.0), Some(1.0), None, Some(0.05))),
             ("firstVisit", boolean(Some(true))),
             ("gamma", num(Some(0.0), Some(1.0), None, Some(1.0))),
-            ("evalEpisodes", num(Some(1.0), None, Some(true), Some(5000.0))),
+            (
+                "evalEpisodes",
+                num(Some(1.0), None, Some(true), Some(5000.0)),
+            ),
         ],
         vec![],
     )
@@ -672,7 +796,10 @@ fn stag_hunt_schema() -> ParamSchema {
     obj(
         "Stag Hunt coordination game with two independent Q-learners (Tan 1993 IQL).",
         vec![
-            ("numEpisodes", num(Some(1.0), None, Some(true), Some(5000.0))),
+            (
+                "numEpisodes",
+                num(Some(1.0), None, Some(true), Some(5000.0)),
+            ),
             ("alpha", num(Some(0.0), None, None, Some(0.05))),
             ("gamma", num(Some(0.0), Some(1.0), None, Some(0.0))),
             ("epsilon", num(Some(0.0), Some(1.0), None, Some(0.2))),
@@ -718,11 +845,19 @@ impl DESModelRegistration<StagHuntOpts, StagHuntResult> for StagHuntAdapter {
             ),
             format!(
                 "  Coordinated on Stag?    {}",
-                if r.coordinated_on_stag { "YES (payoff-dominant)" } else { "no" }
+                if r.coordinated_on_stag {
+                    "YES (payoff-dominant)"
+                } else {
+                    "no"
+                }
             ),
             format!(
                 "  Coordinated on Hare?    {}",
-                if r.coordinated_on_hare { "YES (risk-dominant)" } else { "no" }
+                if r.coordinated_on_hare {
+                    "YES (risk-dominant)"
+                } else {
+                    "no"
+                }
             ),
         ]
         .join("\n")
@@ -757,7 +892,9 @@ pub fn adapter_double_integrator_lqr() -> DoubleIntegratorLqrAdapter {
     DoubleIntegratorLqrAdapter
 }
 
-impl DESModelRegistration<DoubleIntegratorOpts, DoubleIntegratorResult> for DoubleIntegratorLqrAdapter {
+impl DESModelRegistration<DoubleIntegratorOpts, DoubleIntegratorResult>
+    for DoubleIntegratorLqrAdapter
+{
     fn id(&self) -> &str {
         "double-integrator-lqr"
     }
@@ -767,7 +904,11 @@ impl DESModelRegistration<DoubleIntegratorOpts, DoubleIntegratorResult> for Doub
     fn schema(&self) -> ParamSchema {
         lqr_schema()
     }
-    fn run(&self, params: DoubleIntegratorOpts, _runtime: &DESRuntimeConfig) -> DoubleIntegratorResult {
+    fn run(
+        &self,
+        params: DoubleIntegratorOpts,
+        _runtime: &DESRuntimeConfig,
+    ) -> DoubleIntegratorResult {
         // PORT NOTE: TS `numberPair(p.x0, [3,0], 'x0')` is a no-op here (x0 is
         // `Option<[f64;2]>` and the runner defaults it to `[3,0]`). The runner
         // returns `Result`; the TS `run` threw on failure → `.expect()` (panic).
@@ -775,11 +916,15 @@ impl DESModelRegistration<DoubleIntegratorOpts, DoubleIntegratorResult> for Doub
     }
     fn summarize(&self, r: &DoubleIntegratorResult, _p: &DoubleIntegratorOpts) -> String {
         let final_state = r.trajectory.last().copied().unwrap_or([0.0, 0.0]);
-        let k_row = r
-            .k
-            .first()
-            .map(|row| row.iter().map(|x| format!("{:.3}", x)).collect::<Vec<_>>().join(", "))
-            .unwrap_or_default();
+        let k_row =
+            r.k.first()
+                .map(|row| {
+                    row.iter()
+                        .map(|x| format!("{:.3}", x))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
         [
             "DOUBLE-INTEGRATOR LQR".to_string(),
             "────────────────────────────────────".to_string(),
@@ -790,7 +935,10 @@ impl DESModelRegistration<DoubleIntegratorOpts, DoubleIntegratorResult> for Doub
             format!("  Optimal feedback K:      [{k_row}]"),
             format!("  Cost-to-go (DARE):       {:.3}", r.riccati_cost_from_x0),
             format!("  Realised cumulative cost {:.3}", r.total_cost),
-            format!("  Final state:             [{:.3}, {:.3}]", final_state[0], final_state[1]),
+            format!(
+                "  Final state:             [{:.3}, {:.3}]",
+                final_state[0], final_state[1]
+            ),
         ]
         .join("\n")
     }
@@ -823,12 +971,18 @@ mod tests {
         assert_eq!(adapter_actor_critic().id(), "actor-critic-grid");
         assert_eq!(adapter_blackjack().id(), "blackjack-mc");
         assert_eq!(adapter_stag_hunt().id(), "stag-hunt");
-        assert_eq!(adapter_double_integrator_lqr().id(), "double-integrator-lqr");
+        assert_eq!(
+            adapter_double_integrator_lqr().id(),
+            "double-integrator-lqr"
+        );
     }
 
     #[test]
     fn count_actions_tallies_by_index() {
-        assert_eq!(count_actions(&[0, 0, 1, 2, 2, 2], &["A", "B", "C"]), "A=2, B=1, C=3");
+        assert_eq!(
+            count_actions(&[0, 0, 1, 2, 2, 2], &["A", "B", "C"]),
+            "A=2, B=1, C=3"
+        );
     }
 
     #[test]

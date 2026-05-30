@@ -680,7 +680,9 @@ impl DESStation for ControllabilityEvaluatorStation {
     fn as_any(&self) -> &dyn Any {
         self
     }
-    fn run_time_step(&mut self) {}
+    fn run_time_step(&mut self) {
+        self.run_pure();
+    }
     fn has_work(&self) -> bool {
         false
     }
@@ -747,7 +749,9 @@ impl DESStation for ObservabilityEvaluatorStation {
     fn as_any(&self) -> &dyn Any {
         self
     }
-    fn run_time_step(&mut self) {}
+    fn run_time_step(&mut self) {
+        self.run_pure();
+    }
     fn has_work(&self) -> bool {
         false
     }
@@ -815,7 +819,9 @@ impl DESStation for MdpControllabilityEvaluatorStation {
     fn as_any(&self) -> &dyn Any {
         self
     }
-    fn run_time_step(&mut self) {}
+    fn run_time_step(&mut self) {
+        self.run_pure();
+    }
     fn has_work(&self) -> bool {
         false
     }
@@ -882,7 +888,9 @@ impl DESStation for PomdpObservabilityEvaluatorStation {
     fn as_any(&self) -> &dyn Any {
         self
     }
-    fn run_time_step(&mut self) {}
+    fn run_time_step(&mut self) {
+        self.run_pure();
+    }
     fn has_work(&self) -> bool {
         false
     }

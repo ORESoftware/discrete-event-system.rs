@@ -297,6 +297,26 @@ pub trait PureTransformEntity<I: Any, O: Any>: TransformEntity<I, O> {
         let result = self.transform(&input, &mut ctx);
         self.tcore_mut().flush_result(channel, ctx, result);
     }
+
+    /// Drain every input channel's inbox and process each token through
+    /// [`transform`](PureTransformEntity::transform).
+    ///
+    /// A pure station processes immediately in [`take`](PureTransformEntity::take),
+    /// but the DES graph router (`StationCore::emit`) deposits tokens into the
+    /// raw inbox rather than calling the polymorphic `take`. When a pure station
+    /// is wired downstream in an iterative DES graph it must therefore drain its
+    /// inbox on each tick; call this from `run_time_step`.
+    fn run_pure(&mut self) {
+        let channels = self.tcore().input_channel_names();
+        for channel in channels {
+            let inputs = self.tcore_mut().station.drain::<I>(&channel);
+            for input in inputs {
+                let mut ctx = self.tcore_mut().next_context(&channel);
+                let result = self.transform(&input, &mut ctx);
+                self.tcore_mut().flush_result(&channel, ctx, result);
+            }
+        }
+    }
 }
 
 /// Queue-backed transform (TS `abstract class MemoryTransformEntity`): inputs

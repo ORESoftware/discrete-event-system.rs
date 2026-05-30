@@ -139,6 +139,16 @@ pub fn run_all_simulations() -> Vec<SimOutcome> {
 mod tests {
     use super::*;
 
+    /// Smoke check that the observability/controllability pipeline runs without
+    /// panicking (it previously panicked because pure evaluator stations never
+    /// drained their DES inbox). `#[ignore]`d because it prints a full report;
+    /// run with `cargo test obs_ctrl_simulation_runs -- --ignored`.
+    #[test]
+    #[ignore]
+    fn obs_ctrl_simulation_runs() {
+        crate::des::main_observability_controllability::run();
+    }
+
     /// The catalogue is non-empty and free of duplicate names.
     #[test]
     fn catalogue_is_well_formed() {

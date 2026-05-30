@@ -1,0 +1,26 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stochastic Differential Equations + 3 ML algorithms</title>
+<style>
+:root{color-scheme:dark;}
+body{font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;margin:0;background:#0b1021;color:#e6edf3;}
+main{max-width:960px;margin:0 auto;padding:28px 20px 72px;}
+a.back{color:#58a6ff;text-decoration:none;font-size:.9rem;}
+a.back:hover{text-decoration:underline;}
+h1{font-size:1.7rem;margin:14px 0 4px;}
+p.sub{color:#8b949e;margin:0 0 26px;font-size:.95rem;}
+section{background:#161d33;border:1px solid #21262d;border-radius:10px;padding:18px 20px;margin:0 0 20px;}
+h2{font-size:1.15rem;margin:0 0 8px;color:#f0f6fc;}
+p.desc{color:#9aa5b1;margin:0 0 14px;font-size:.92rem;}
+table{border-collapse:collapse;width:100%;margin:0 0 4px;}
+th{text-align:left;color:#8b949e;font-weight:600;font-size:.82rem;padding:6px 12px 6px 0;white-space:nowrap;vertical-align:top;}
+td{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.86rem;color:#e6edf3;padding:6px 0;}
+pre.log{background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:14px 16px;overflow:auto;
+font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8rem;line-height:1.5;color:#c9d1d9;}
+</style></head><body><main>
+<a class="back" href="../index.html">&larr; all simulations</a>
+<h1>Stochastic Differential Equations + 3 ML algorithms</h1>
+<p class="sub">Euler–Maruyama SDE engine with system identification, ensemble filtering, and score-based diffusion.</p>
+<section><h2>What this run covers</h2><p class="desc">Models dX = f(X,t)dt + g(X,t)dW where the solution is a random process. Three machine-learning paradigms run on it: (1) maximum-likelihood SDE parameter recovery (system identification); (2) an Ensemble Kalman Filter that estimates a hidden motor current from noisy speed-only measurements (filtering/inference); (3) a denoising-diffusion generative model that learns a bimodal target and samples it by integrating the reverse-time SDE.</p></section>
+<section><h2>Run output</h2><pre class="log">Run output streamed to stdout (see console). Subprocess/stdout capture is unavailable in the library crate — see PORT NOTE.</pre></section>
+</main></body></html>

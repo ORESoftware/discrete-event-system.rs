@@ -33,12 +33,12 @@ use crate::des::animation::types::{
 use crate::des::observability::logger::{parse_json, JsonValue};
 
 // =============================================================================
-// PORT NOTE: `crate::des::general::des_base::visual_block` is not yet ported.
-// The recorder only needs the `VisualBlockRenderable` capability + the
-// `renderVisualBlocks` helper, so the minimal surface is reproduced locally.
-// When `visual_block.rs` lands, delete this block and instead
-// `use crate::des::general::des_base::visual_block::{VisualBlockRenderable,
-// VisualBlockRenderContext, render_visual_blocks};`.
+// NOTE: `crate::des::general::des_base::visual_block` is ported, but it models
+// `VisualBlockRenderable` as a concrete enum (`VisualBlock | VisualBlockSpec`)
+// with a richer render context. The recorder only needs "anything that can emit
+// `Vec<Shape>` for a frame", so it keeps this minimal `dyn`-object trait plus
+// the `render_visual_blocks` helper — letting scenes supply lightweight ad-hoc
+// renderables without constructing a full `VisualBlock`.
 // =============================================================================
 
 /// Context handed to a renderable block (`index` is filled per-block by

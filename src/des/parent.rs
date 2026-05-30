@@ -34,13 +34,16 @@
 use std::process::{Command, Stdio};
 
 use crate::des::shared::precision::{bgn, Decimal};
+use crate::des::ws_server::ws_server::get_websocket_server;
 
-// PORT NOTE: `./http-server` (`getHTTPServer`) and `./ws-server/ws-server`
-// (`getWebsocketServer`) are separate Node modules — they are NOT part of this
-// port's file set and are absent from the Rust tree. They are stubbed locally so
-// `parent.rs` never references a non-existent module path; a real port would back
-// these with a `hyper` / `tokio-tungstenite` stack (see the async-runtime note
-// below). `program` was the bag `getHTTPServer` received.
+// PORT NOTE: `./ws-server/ws-server` (`getWebsocketServer`) IS ported — `run`
+// wires the real singleton from `crate::des::ws_server::ws_server`. That module
+// intentionally abstracts the socket bind (no `TcpListener`: `std` has no async
+// socket runtime, and the repo avoids a heavy `tokio` / `tungstenite`
+// dependency); the websocket handshake + connection-registry LOGIC is ported and
+// unit-tested there. Only `./http-server` (`getHTTPServer`) remains unported
+// (not in this port's file set), so it keeps a local stub; `program` is the bag
+// `getHTTPServer` received.
 
 /// `const program = { stepSize: bgn(500) }` — the object the TS passed to
 /// `getHTTPServer`.
@@ -57,30 +60,24 @@ fn get_http_server(_program: &Program) -> HttpServerStub {
     HttpServerStub
 }
 
-/// Stub websocket server handle (the value `getWebsocketServer()` returned).
-pub struct WsServerStub;
-
-/// `getWebsocketServer()` — PORT NOTE: no websocket stack is wired; returns a stub.
-fn get_websocket_server() -> WsServerStub {
-    WsServerStub
-}
-
 /// `deJSON(cb)` — parse a raw websocket frame into a [`StartMessage`] before
-/// handing it to the callback. The TS helper `JSON.parse`d the frame; with no
-/// `serde` dependency we recognise just the one field the gate inspects.
+/// handing it to the callback. The TS helper `JSON.parse`d the frame; here we
+/// parse with `serde_json` and read just the one field the gate inspects.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct StartMessage {
     pub start: bool,
 }
 
-/// `deJSON` — best-effort parse of `{ "start": true }`. PORT NOTE: a real port
-/// uses `serde_json::from_str`; here we scan for the literal `"start":true`
-/// (whitespace-insensitive) since that is the only field consulted.
+/// `deJSON` — parse the frame with `serde_json` and read the `start` flag. A
+/// malformed frame or a missing / non-boolean `start` field yields
+/// `start: false` (the gate simply never fires), matching the TS behaviour
+/// where only a truthy `start` triggers the child.
 pub fn de_json(raw: &str) -> StartMessage {
-    let compact: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
-    StartMessage {
-        start: compact.contains("\"start\":true"),
-    }
+    let start = serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|v| v.get("start").and_then(|s| s.as_bool()))
+        .unwrap_or(false);
+    StartMessage { start }
 }
 
 /// Resolve the child worker path (`path.resolve(__dirname + '/child.js')`).
@@ -165,7 +162,8 @@ pub fn run() {
     // `const httpServer = getHTTPServer(program)`.
     let _http_server = get_http_server(&parent.program);
 
-    // `const wsServer = getWebsocketServer()`.
+    // `const wsServer = getWebsocketServer()` — the real ported singleton
+    // (`&'static Mutex<WebsocketServer>`); no socket is bound (see PORT NOTE).
     let _ws_server = get_websocket_server();
 
     // PORT NOTE: the `wsServer.on('connection', …)` / `httpServer.on('request',

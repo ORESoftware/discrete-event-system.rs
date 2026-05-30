@@ -15,28 +15,46 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use serde::Deserialize;
+
 // =============================================================================
-// Typed views of the two JSON files (PORT NOTE: `#[derive(Deserialize)]`).
+// Typed views of the two JSON files. The framework writer emits uppercase
+// compartment keys (`S/A/B/AB/R/D`) and camelCase params; the python reference
+// is snake_case. `serde(default)` keeps both tolerant of omitted fields.
 // =============================================================================
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
 struct MeanTrace {
     t: Vec<f64>,
+    #[serde(rename = "S")]
     s: Vec<f64>,
+    #[serde(rename = "A")]
     a: Vec<f64>,
+    #[serde(rename = "B")]
     b: Vec<f64>,
+    #[serde(rename = "AB")]
     ab: Vec<f64>,
+    #[serde(rename = "R")]
     r: Vec<f64>,
+    #[serde(rename = "D")]
     d: Vec<f64>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
 struct Compartments {
+    #[serde(rename = "S")]
     s: Vec<f64>,
+    #[serde(rename = "A")]
     a: Vec<f64>,
+    #[serde(rename = "B")]
     b: Vec<f64>,
+    #[serde(rename = "AB")]
     ab: Vec<f64>,
+    #[serde(rename = "R")]
     r: Vec<f64>,
+    #[serde(rename = "D")]
     d: Vec<f64>,
 }
 
@@ -68,14 +86,16 @@ impl Compartments {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 struct TwoDiseaseParams {
     n: f64,
     sim_t: f64,
     step_size: f64,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 struct FrameworkJson {
     mean_trace: MeanTrace,
     params: TwoDiseaseParams,
@@ -83,7 +103,8 @@ struct FrameworkJson {
     final_deaths: Vec<f64>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
 struct PythonJson {
     ode: Compartments,
     ssa_mean: Compartments,
@@ -92,17 +113,21 @@ struct PythonJson {
     ssa_reps: f64,
 }
 
-fn load_json<T>(p: &Path) -> T {
+/// `loadJson` — faithful missing-file `exit(1)`, then `JSON.parse` via
+/// `serde_json::from_str` (a read or parse failure exits, mirroring the TS throw).
+fn load_json<T: serde::de::DeserializeOwned>(p: &Path) -> T {
     if !p.exists() {
         eprintln!("[validate-two-disease] missing {}", p.display());
         std::process::exit(1);
     }
-    // PORT NOTE: `serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap()`.
-    eprintln!(
-        "[validate-two-disease] PORT NOTE: JSON parsing not wired (needs serde_json): {}",
-        p.display()
-    );
-    std::process::exit(1);
+    let text = std::fs::read_to_string(p).unwrap_or_else(|e| {
+        eprintln!("[validate-two-disease] read error {}: {e}", p.display());
+        std::process::exit(1);
+    });
+    serde_json::from_str(&text).unwrap_or_else(|e| {
+        eprintln!("[validate-two-disease] parse error {}: {e}", p.display());
+        std::process::exit(1);
+    })
 }
 
 fn root() -> PathBuf {

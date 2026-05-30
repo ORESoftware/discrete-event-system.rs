@@ -37,6 +37,8 @@ use super::des_base::learning_optimization::{
     channel_edge, station_graph, StationGraphSummary, StationOrId,
 };
 use super::des_base::preconditions::{Check, Preconditions};
+use serde::Serialize;
+
 use super::des_base::runner::{run_iterative_des, IterativeRunOptions};
 use super::des_base::station::{AnyToken, DESStation, StationCore, StationRef};
 
@@ -494,7 +496,8 @@ pub struct FuzzyControlScenario {
     pub control_max: f64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FuzzyControlPlan {
     pub error_gain: f64,
     pub derivative_gain: f64,
@@ -653,7 +656,8 @@ pub struct RoutingScenario {
 }
 
 /// `type ... = 'nearest-neighbor' | 'sweep' | 'savings' | 'balanced-savings'`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum RoutingHeuristic {
     NearestNeighbor,
     Sweep,
@@ -661,7 +665,8 @@ pub enum RoutingHeuristic {
     BalancedSavings,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RoutingPlan {
     pub heuristic: RoutingHeuristic,
     pub routes: Vec<Vec<usize>>,
@@ -982,7 +987,8 @@ pub struct ManufacturingScenario {
     pub stage2_rate: f64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ManufacturingPlan {
     pub release_lot: f64,
     pub wip_cap: f64,
@@ -1129,7 +1135,8 @@ pub struct SupplyChainScenario {
     pub lead_time: usize,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SupplyChainPlan {
     pub base_stock: f64,
     pub review_period: usize,
@@ -1274,7 +1281,8 @@ pub struct OperationsScenario {
     pub overtime_cost: f64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct OperationsPlan {
     pub staffing: Vec<f64>,
     pub flex_pool: f64,
@@ -1392,7 +1400,8 @@ pub struct FinancialScenario {
     pub returns: Vec<f64>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FinancialPlan {
     pub floor_fraction: f64,
     pub multiplier: f64,
@@ -1517,7 +1526,8 @@ pub struct RevenueScenario {
     pub elasticity: f64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PricingPlan {
     pub price_floor: f64,
     pub price_ceiling: f64,
@@ -1678,7 +1688,8 @@ pub struct BuyerAwarePricingScenario {
     pub segments: Vec<BuyerSegment>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BuyerAwarePricingPlan {
     pub price_floor: f64,
     pub price_ceiling: f64,
@@ -2197,7 +2208,8 @@ pub struct EnergyScenario {
     pub max_charge: f64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EnergyPlan {
     pub charge_below: f64,
     pub discharge_above: f64,
@@ -2346,7 +2358,8 @@ pub struct ActiveLearningScenario {
     pub pool: Vec<PoolItem>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ActiveLearningPlan {
     pub uncertainty_weight: f64,
     pub diversity_weight: f64,
@@ -2530,7 +2543,8 @@ pub struct DecisionScenario {
     pub risk_weight: f64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DecisionPlan {
     pub impact_weight: f64,
     pub adoption_weight: f64,

@@ -284,10 +284,26 @@ pub fn run() {
         println!("  y[{i}] = {:.6}", result.y[i]);
     }
 
-    // PORT NOTE: the TS writes out/convolution-framework.json via fs; the JSON
-    // serialization is omitted here (no serde dependency assumed). Wire to
-    // serde_json when the output-artifact layer is ported.
-    println!("# (JSON artifact write omitted in port — see PORT NOTE)");
+    let out = serde_json::json!({
+        "signal": signal,
+        "kernel": kernel,
+        "y": result.y,
+        "meta": {
+            "signalLen": result.meta.signal_len,
+            "kernelLen": result.meta.kernel_len,
+            "mode": result.meta.mode,
+        },
+        "ticks": result.ticks,
+        "seed": seed,
+    });
+    let _ = std::fs::create_dir_all("out");
+    let out_path = "out/convolution-framework.json";
+    std::fs::write(
+        out_path,
+        serde_json::to_string_pretty(&out).expect("serialize convolution result"),
+    )
+    .expect("write convolution-framework.json");
+    println!("# wrote {out_path}");
 }
 
 #[cfg(test)]

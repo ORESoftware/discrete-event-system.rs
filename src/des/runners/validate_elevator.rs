@@ -16,11 +16,16 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use serde::Deserialize;
+
 // =============================================================================
-// Typed views of the two JSON files (PORT NOTE: `#[derive(Deserialize)]`).
+// Typed views of the two JSON files. The framework writer emits camelCase keys
+// (`nFloors`, `meanWait`, `fromFloor`, …); `serde(default)` keeps parsing
+// tolerant of a reference file that omits fields.
 // =============================================================================
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 struct ElevatorConfig {
     n_floors: i64,
     n_elevators: i64,
@@ -32,7 +37,8 @@ struct ElevatorConfig {
     step_size: f64,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 struct Aggregates {
     n: f64,
     n_served: f64,
@@ -43,7 +49,8 @@ struct Aggregates {
     p95_total: f64,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 struct Person {
     id: i64,
     from_floor: i64,
@@ -53,30 +60,36 @@ struct Person {
     exit_time: f64,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
 struct FrameworkJson {
     config: ElevatorConfig,
     aggregates: Aggregates,
     people: Vec<Person>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
 struct SimPyJson {
     aggregates: Aggregates,
     people: Vec<Person>,
 }
 
-fn load_json<T>(p: &Path) -> T {
+/// `loadJson` — faithful missing-file `exit(1)`, then `JSON.parse` via
+/// `serde_json::from_str` (a read or parse failure exits, mirroring the TS throw).
+fn load_json<T: serde::de::DeserializeOwned>(p: &Path) -> T {
     if !p.exists() {
         eprintln!("[validate-elevator] missing {}", p.display());
         std::process::exit(1);
     }
-    // PORT NOTE: `serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap()`.
-    eprintln!(
-        "[validate-elevator] PORT NOTE: JSON parsing not wired (needs serde_json): {}",
-        p.display()
-    );
-    std::process::exit(1);
+    let text = std::fs::read_to_string(p).unwrap_or_else(|e| {
+        eprintln!("[validate-elevator] read error {}: {e}", p.display());
+        std::process::exit(1);
+    });
+    serde_json::from_str(&text).unwrap_or_else(|e| {
+        eprintln!("[validate-elevator] parse error {}: {e}", p.display());
+        std::process::exit(1);
+    })
 }
 
 fn root() -> PathBuf {

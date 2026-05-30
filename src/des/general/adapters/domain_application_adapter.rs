@@ -15,12 +15,12 @@
 //!   * `row.plan: unknown` -> [`JsonValue`]; `jsonCsvCell(...)` receives the
 //!     pre-stringified JSON (matching the `adapter_utils` convention).
 //!
-//! PORT NOTE: the entire `des/general/domain-application-models` engine module
-//! is NOT yet ported. The result/candidate/trace/metric types below are MINIMAL
-//! local stubs, and every `run_*` kernel is a `unimplemented!()` placeholder.
-//! When the engine is ported, replace these stubs with the real types/functions
-//! and delete the placeholders. The adapter glue (schemas, summaries, CSV,
-//! examples) is faithful and should carry over unchanged.
+//! PORT NOTE: the `des/general/domain-application-models` engine is now ported
+//! (`crate::des::general::domain_application_models`). Each `run_*` kernel
+//! delegates to the real engine and erases the typed plan `P` to a `JsonValue`
+//! (the TS `DomainModelResult<unknown>` erasure) so the shared summarize/CSV
+//! glue stays plan-agnostic. The parameter types are re-exported from the
+//! engine; the erased result/candidate/trace/metric view types are kept local.
 //!
 //! PORT NOTE: the animation subsystem (`animation/frame-recorder`,
 //! `animation/types`, and `buildDomainFrame`/`drawCandidateBars`/
@@ -34,6 +34,7 @@ use crate::des::general::des_base::learning_optimization::StationGraphSummary;
 use crate::des::general::des_spec::{
     DESModelRegistration, DESRuntimeConfig, JsonValue, ParamSchema,
 };
+use crate::des::general::domain_application_models as engine;
 
 // =============================================================================
 // PORT NOTE: local stubs for the unported `domain-application-models` engine.
@@ -79,30 +80,15 @@ pub struct DomainModelResult {
     pub topology: StationGraphSummary,
 }
 
-// Per-model parameter stubs. Field shapes live in each adapter's `schema()`;
-// the integrator should replace these with the real engine structs.
-#[derive(Clone, Debug, Default)]
-pub struct AdaptiveFuzzyControlParams {}
-#[derive(Clone, Debug, Default)]
-pub struct LogisticsRoutingParams {}
-#[derive(Clone, Debug, Default)]
-pub struct ManufacturingParams {}
-#[derive(Clone, Debug, Default)]
-pub struct SupplyChainParams {}
-#[derive(Clone, Debug, Default)]
-pub struct OperationsParams {}
-#[derive(Clone, Debug, Default)]
-pub struct FinancialControlParams {}
-#[derive(Clone, Debug, Default)]
-pub struct RevenueManagementParams {}
-#[derive(Clone, Debug, Default)]
-pub struct BuyerAwareDynamicPricingParams {}
-#[derive(Clone, Debug, Default)]
-pub struct EnergyParams {}
-#[derive(Clone, Debug, Default)]
-pub struct ActiveLearningParams {}
-#[derive(Clone, Debug, Default)]
-pub struct DecisionScienceParams {}
+// Per-model parameters are the real engine structs (the `domain-application-
+// models` engine is now ported); re-exported so the adapter and its callers
+// keep the original type names.
+pub use engine::DecisionScienceParams;
+pub use engine::{
+    ActiveLearningParams, AdaptiveFuzzyControlParams, BuyerAwareDynamicPricingParams, EnergyParams,
+    FinancialControlParams, LogisticsRoutingParams, ManufacturingParams, OperationsParams,
+    RevenueManagementParams, SupplyChainParams,
+};
 
 // All result aliases collapse onto the erased `DomainModelResult`.
 pub type AdaptiveFuzzyControlResult = DomainModelResult;
@@ -117,45 +103,91 @@ pub type EnergyResult = DomainModelResult;
 pub type ActiveLearningResult = DomainModelResult;
 pub type DecisionScienceResult = DomainModelResult;
 
-const ENGINE_MISSING: &str =
-    "domain-application-models engine is not ported yet (see module PORT NOTE)";
+// =============================================================================
+// Engine bridge: call the real `domain_application_models` kernels and erase the
+// typed plan `P` to a `JsonValue` (via serde) so the shared summarize/CSV glue
+// stays plan-agnostic, mirroring the TS `DomainModelResult<unknown>` erasure.
+// =============================================================================
+
+fn erase_metric(v: engine::MetricValue) -> MetricValue {
+    match v {
+        engine::MetricValue::Num(n) => MetricValue::Number(n),
+        engine::MetricValue::Str(s) => MetricValue::Text(s),
+        engine::MetricValue::Bool(b) => MetricValue::Flag(b),
+    }
+}
+
+fn erase_trace(t: engine::DomainTrace) -> DomainTrace {
+    DomainTrace {
+        t: t.t,
+        series: t.series.into_iter().collect(),
+    }
+}
+
+fn erase_eval<P: serde::Serialize>(e: engine::DomainEvaluation<P>) -> DomainCandidate {
+    DomainCandidate {
+        candidate_id: e.candidate_id,
+        objective: e.objective,
+        feasible: e.feasible,
+        metrics: e
+            .metrics
+            .into_iter()
+            .map(|(k, v)| (k, erase_metric(v)))
+            .collect(),
+        // TS `JSON.stringify(plan)`; serde -> `serde_json::Value` -> `JsonValue`.
+        plan: serde_json::to_value(&e.plan)
+            .map(JsonValue::from)
+            .unwrap_or(JsonValue::Null),
+        trace: e.trace.map(erase_trace),
+    }
+}
+
+fn erase<P: serde::Serialize>(r: engine::DomainModelResult<P>) -> DomainModelResult {
+    DomainModelResult {
+        model_id: r.model_id,
+        category: r.category,
+        best: erase_eval(r.best),
+        candidates: r.candidates.into_iter().map(erase_eval).collect(),
+        topology: r.topology,
+    }
+}
 
 pub fn run_adaptive_fuzzy_control(
-    _params: AdaptiveFuzzyControlParams,
+    params: AdaptiveFuzzyControlParams,
 ) -> AdaptiveFuzzyControlResult {
-    unimplemented!("{ENGINE_MISSING}")
+    erase(engine::run_adaptive_fuzzy_control(params))
 }
-pub fn run_logistics_routing_heuristics(_params: LogisticsRoutingParams) -> LogisticsRoutingResult {
-    unimplemented!("{ENGINE_MISSING}")
+pub fn run_logistics_routing_heuristics(params: LogisticsRoutingParams) -> LogisticsRoutingResult {
+    erase(engine::run_logistics_routing_heuristics(params))
 }
-pub fn run_bottleneck_production_control(_params: ManufacturingParams) -> ManufacturingResult {
-    unimplemented!("{ENGINE_MISSING}")
+pub fn run_bottleneck_production_control(params: ManufacturingParams) -> ManufacturingResult {
+    erase(engine::run_bottleneck_production_control(params))
 }
-pub fn run_supply_chain_risk_pooling(_params: SupplyChainParams) -> SupplyChainResult {
-    unimplemented!("{ENGINE_MISSING}")
+pub fn run_supply_chain_risk_pooling(params: SupplyChainParams) -> SupplyChainResult {
+    erase(engine::run_supply_chain_risk_pooling(params))
 }
-pub fn run_workforce_service_operations(_params: OperationsParams) -> OperationsResult {
-    unimplemented!("{ENGINE_MISSING}")
+pub fn run_workforce_service_operations(params: OperationsParams) -> OperationsResult {
+    erase(engine::run_workforce_service_operations(params))
 }
-pub fn run_portfolio_drawdown_control(_params: FinancialControlParams) -> FinancialControlResult {
-    unimplemented!("{ENGINE_MISSING}")
+pub fn run_portfolio_drawdown_control(params: FinancialControlParams) -> FinancialControlResult {
+    erase(engine::run_portfolio_drawdown_control(params))
 }
-pub fn run_dynamic_pricing_revenue(_params: RevenueManagementParams) -> RevenueManagementResult {
-    unimplemented!("{ENGINE_MISSING}")
+pub fn run_dynamic_pricing_revenue(params: RevenueManagementParams) -> RevenueManagementResult {
+    erase(engine::run_dynamic_pricing_revenue(params))
 }
 pub fn run_buyer_aware_dynamic_pricing(
-    _params: BuyerAwareDynamicPricingParams,
+    params: BuyerAwareDynamicPricingParams,
 ) -> BuyerAwareDynamicPricingResult {
-    unimplemented!("{ENGINE_MISSING}")
+    erase(engine::run_buyer_aware_dynamic_pricing(params))
 }
-pub fn run_energy_storage_dispatch(_params: EnergyParams) -> EnergyResult {
-    unimplemented!("{ENGINE_MISSING}")
+pub fn run_energy_storage_dispatch(params: EnergyParams) -> EnergyResult {
+    erase(engine::run_energy_storage_dispatch(params))
 }
-pub fn run_active_learning_acquisition(_params: ActiveLearningParams) -> ActiveLearningResult {
-    unimplemented!("{ENGINE_MISSING}")
+pub fn run_active_learning_acquisition(params: ActiveLearningParams) -> ActiveLearningResult {
+    erase(engine::run_active_learning_acquisition(params))
 }
-pub fn run_visual_decision_frontier(_params: DecisionScienceParams) -> DecisionScienceResult {
-    unimplemented!("{ENGINE_MISSING}")
+pub fn run_visual_decision_frontier(params: DecisionScienceParams) -> DecisionScienceResult {
+    erase(engine::run_visual_decision_frontier(params))
 }
 
 // =============================================================================
@@ -553,3 +585,51 @@ domain_adapter!(
     run_visual_decision_frontier,
     obj(vec![("riskWeight", num(Some(0.0), None, Some(0.35)))])
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression for the formerly-`unimplemented!()` fuzzy-control kernel: it
+    /// now drives the real engine, producing evaluated candidates with metrics
+    /// and a serialized (camelCase) plan — not a panic.
+    #[test]
+    fn fuzzy_control_adapter_runs_and_serializes_plan() {
+        let adapter = adapter_adaptive_fuzzy_control();
+        let result = adapter.run(
+            AdaptiveFuzzyControlParams::default(),
+            &DESRuntimeConfig::default(),
+        );
+        assert!(!result.candidates.is_empty(), "engine produced candidates");
+        assert!(!result.best.metrics.is_empty(), "best has metrics");
+        // The erased plan must be a non-null JSON object with camelCase keys
+        // (serde `rename_all`), proving real plan serialization.
+        match &result.best.plan {
+            JsonValue::Object(o) => {
+                assert!(o.contains_key("errorGain"), "camelCase plan key present");
+            }
+            other => panic!("expected object plan, got {other:?}"),
+        }
+        // CSV emission exercises the plan stringify path end-to-end.
+        let summary = domain_summary("ADAPTIVE FUZZY CONTROL", &result);
+        assert!(summary.contains("Candidates:"));
+    }
+
+    /// The routing kernel exercises a nested plan (enum + Vec<Vec<usize>>): the
+    /// `RoutingHeuristic` serializes to its kebab-case wire name.
+    #[test]
+    fn routing_adapter_serializes_nested_plan() {
+        let adapter = adapter_logistics_routing_heuristics();
+        let result = adapter.run(
+            LogisticsRoutingParams::default(),
+            &DESRuntimeConfig::default(),
+        );
+        assert!(!result.candidates.is_empty());
+        match &result.best.plan {
+            JsonValue::Object(o) => {
+                assert!(o.contains_key("heuristic") && o.contains_key("routes"));
+            }
+            other => panic!("expected object plan, got {other:?}"),
+        }
+    }
+}

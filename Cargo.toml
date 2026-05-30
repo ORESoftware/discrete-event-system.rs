@@ -22,5 +22,11 @@ num-rational = { version = "0.4.2", default-features = false, features = ["num-b
 num-traits = { version = "0.2.19", default-features = false }
 # Entity ids / short UUIDs (`uuid.v4().slice(-10)` in the TS entity framework).
 uuid = { version = "1", features = ["v4"] }
+# JSON (de)serialization for the framework artifacts the TS writes via `fs`
+# (`out/*-framework.json`) and for the external-reference payloads the
+# `validate_*` runners parse. The crate's core stays on its own serde-free
+# `JsonValue`; serde is used only at the I/O boundary, bridged to `JsonValue`.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [dev-dependencies]

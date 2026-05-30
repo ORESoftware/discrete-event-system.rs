@@ -9,9 +9,9 @@
 //! PORT NOTE: the HTML animation uses `FrameRecorder` +
 //! `animation/scenes/warehouse-track3t-scene`, which is NOT yet ported
 //! (`animation::scenes` has no `warehouse_track3t_scene`). The rendering step is
-//! stubbed. The full `JSON.stringify(result, null, 2)` artifact write is also
-//! omitted (no `serde` dependency assumed); the improvement deltas are emitted
-//! to stdout.
+//! stubbed. The full `JSON.stringify(result, null, 2)` artifact write IS ported
+//! here via `serde_json::to_string_pretty` over the `WarehouseComparisonResult`
+//! tree (which derives `Serialize` with `rename_all = "camelCase"`).
 
 #![allow(dead_code)]
 
@@ -75,9 +75,16 @@ pub fn run() {
         println!("- {}: {}", source.label, source.url);
     }
 
-    // PORT NOTE: full JSON artifact + animation omitted (see header).
     let _ = std::fs::create_dir_all("out");
-    println!("# (JSON artifact + animation omitted in Rust port — see PORT NOTE)");
+    let json_path = "out/factory-floor-track3t.json";
+    std::fs::write(
+        json_path,
+        serde_json::to_string_pretty(&result).expect("serialize warehouse comparison"),
+    )
+    .expect("write factory-floor-track3t.json");
+    println!("# wrote {json_path}");
+
+    // PORT NOTE: animation frames/html omitted (warehouse-track3t scene not ported).
     if animate {
         println!("# (animation frames/html not rendered — warehouse-track3t scene not ported)");
     }

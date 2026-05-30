@@ -353,6 +353,7 @@ pub fn run() {
         seed,
     };
 
+    let mut results_json: Vec<serde_json::Value> = Vec::new();
     for p in &policies {
         let r = run_court_sim(cfg, p.as_ref());
         let a = &r.aggregates;
@@ -374,12 +375,50 @@ pub fn run() {
                 a.n_timed_out
             );
         }
+        results_json.push(serde_json::json!({
+            "policy": r.policy,
+            "aggregates": {
+                "n": a.n,
+                "nAccepted": a.n_accepted,
+                "nClosed": a.n_closed,
+                "nExhausted": a.n_exhausted,
+                "nTimedOut": a.n_timed_out,
+                "meanReward": a.mean_reward,
+                "meanSteps": a.mean_steps,
+                "p95Steps": a.p95_steps,
+                "fractionAccepted": a.fraction_accepted,
+                "fractionClosed": a.fraction_closed,
+                "fractionExhausted": a.fraction_exhausted,
+            },
+        }));
     }
 
-    // PORT NOTE: the TS writes out/court-mdp-framework.json via fs; omitted here
-    // (no serde dependency assumed).
+    // Dump V*, π*, and per-policy aggregates for the validator.
+    let out = serde_json::json!({
+        "config": {
+            "totalCases": cfg.total_cases,
+            "arrivalsPerTick": cfg.arrivals_per_tick,
+            "maxTicks": cfg.max_ticks,
+            "seed": cfg.seed,
+        },
+        "vi": {
+            "gamma": vi.gamma,
+            "iterations": vi.iterations,
+            "finalDelta": vi.final_delta,
+            "V": vi.v,
+            "policy": vi.policy,
+        },
+        "results": results_json,
+    });
+    let _ = std::fs::create_dir_all("out");
+    let out_path = "out/court-mdp-framework.json";
+    std::fs::write(
+        out_path,
+        serde_json::to_string(&out).expect("serialize court-mdp result"),
+    )
+    .expect("write court-mdp-framework.json");
     println!();
-    println!("# (JSON artifact write omitted in port — see PORT NOTE)");
+    println!("# wrote {out_path}");
 
     // Optimal action distribution by stage (from π*).
     println!();

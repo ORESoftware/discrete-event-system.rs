@@ -25,23 +25,22 @@
 //!     `replaceFractions` / ...) are ported as small char/byte scanners rather
 //!     than regex, since `regex` is not a dependency of this crate.
 //!
-//! PORT NOTE: this file builds on `general/math-blocks`, which is NOT yet ported
-//! to the Rust crate (see `src/des/test/math_blocks_test.rs`). The math-block
-//! types it imports (`ODEBlockSystemParams`, `Heat1DBlockParams`,
-//! `BlockGraphNode`, `runODEBlockSystem`, ...) are therefore defined here as
-//! local placeholders, and the two `run_*_block_*` solvers are stubs that
-//! return an empty block graph plus a single structural validation check. All
-//! of the format-normalization logic above them is a faithful 1:1 port. When
-//! `math-blocks` lands, these locals should be replaced with
-//! `use crate::des::general::math_blocks::{...}`.
+//! PORT NOTE: this file builds on `general/math-blocks`, which is now ported
+//! (`crate::des::general::math_blocks`). The two `run_*_block_*` solvers
+//! delegate to the real numerical engine (see the "`math-blocks` engine
+//! bridge" section); the lightweight block-graph/validation view types are
+//! kept locally because `universal_model_spec` and `math_blocks_adapter` read
+//! them, and the engine's richer types are converted at the boundary.
 
 #![allow(dead_code)]
 
 use std::collections::HashMap;
 
 use crate::des::general::des_base::preconditions::{PreconditionError, Preconditions};
+use crate::des::general::des_base::validation::ValidationCheck;
 use crate::des::general::des_spec::{JsonObject, JsonValue};
 use crate::des::general::expr::{evaluate, parse, Env};
+use crate::des::general::math_blocks;
 
 /// Result alias for the precondition-bearing pipeline (TS `throw` → `Result`).
 type R<T> = Result<T, PreconditionError>;
@@ -70,7 +69,7 @@ pub struct ODEStateSpec {
 }
 
 /// ODE system parameters (TS `ODEBlockSystemParams`).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct ODEBlockSystemParams {
     pub states: Vec<ODEStateSpec>,
     pub constants: NumMap,
@@ -81,7 +80,7 @@ pub struct ODEBlockSystemParams {
 }
 
 /// 1-D heat equation parameters (TS `Heat1DBlockParams`).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Heat1DBlockParams {
     pub cells: f64,
     pub length: f64,
@@ -128,53 +127,217 @@ pub struct EquationValidationCheck {
     pub group: Option<String>,
 }
 
-/// ODE solver result (TS `ODEBlockSystemResult`, trimmed to the fields used).
+/// A single ODE integration trace row (TS `ODETraceRow`).
+#[derive(Clone, Debug)]
+pub struct ODETraceRow {
+    pub tick: usize,
+    pub time: f64,
+    pub state: HashMap<String, f64>,
+    pub derivatives: HashMap<String, f64>,
+}
+
+/// ODE solver result (TS `ODEBlockSystemResult`).
+///
+/// Now carries the real numerical solution produced by the `math_blocks`
+/// engine: the integration `trace`, the insertion-ordered `final_state`, and
+/// the generated block graph/validation.
 #[derive(Clone, Debug, Default)]
 pub struct ODEBlockSystemResult {
+    pub params: ODEBlockSystemParams,
+    pub steps: usize,
+    /// Insertion-ordered (`Object.entries`) final state, keyed by state name.
+    pub final_state: Vec<(String, f64)>,
+    pub trace: Vec<ODETraceRow>,
     pub block_graph: Vec<BlockGraphNode>,
     pub block_graph_edges: Vec<BlockGraphEdge>,
     pub validation: Vec<EquationValidationCheck>,
 }
 
-/// Heat1D solver result (TS `Heat1DBlockResult`, trimmed to the fields used).
+/// A single heat-grid trace row (TS `Heat1DTraceRow`).
+#[derive(Clone, Debug)]
+pub struct Heat1DTraceRow {
+    pub tick: usize,
+    pub time: f64,
+    pub values: Vec<f64>,
+    pub min: f64,
+    pub max: f64,
+    pub mean: f64,
+}
+
+/// Heat1D solver result (TS `Heat1DBlockResult`).
 #[derive(Clone, Debug, Default)]
 pub struct Heat1DBlockResult {
+    pub params: Heat1DBlockParams,
+    pub steps: usize,
+    pub dx: f64,
+    pub cfl: f64,
+    pub x: Vec<f64>,
+    pub trace: Vec<Heat1DTraceRow>,
     pub block_graph: Vec<BlockGraphNode>,
     pub block_graph_edges: Vec<BlockGraphEdge>,
     pub validation: Vec<EquationValidationCheck>,
 }
 
-/// PORT NOTE: the real numerical integration lives in the unported `math-blocks`
-/// module. This placeholder returns an empty block graph and a single passing
-/// structural check so the rest of the pipeline can be exercised.
-fn run_ode_block_system(
-    _params: &ODEBlockSystemParams,
-    _logger: Option<&dyn EquationLogger>,
-) -> ODEBlockSystemResult {
-    ODEBlockSystemResult {
-        block_graph: Vec::new(),
-        block_graph_edges: Vec::new(),
-        validation: vec![EquationValidationCheck {
-            name: "ode-block-system-placeholder".to_string(),
-            passed: true,
-            group: Some("math-blocks".to_string()),
-        }],
+// =============================================================================
+// `math-blocks` engine bridge.
+//
+// PORT NOTE: `general/math-blocks` is now ported (`crate::des::general::
+// math_blocks`), so the two solvers below delegate to the real numerical
+// engine instead of returning an empty block graph. The local block-graph /
+// validation types are kept (universal_model_spec and the math-blocks adapter
+// read them), so the engine's richer types are converted at the boundary.
+// =============================================================================
+
+fn to_engine_ode_params(p: &ODEBlockSystemParams) -> math_blocks::ODEBlockSystemParams {
+    math_blocks::ODEBlockSystemParams {
+        states: p
+            .states
+            .iter()
+            .map(|s| math_blocks::ODEStateSpec {
+                name: s.name.clone(),
+                initial: s.initial,
+                derivative: s.derivative.clone(),
+            })
+            .collect(),
+        t0: Some(p.t0),
+        t1: p.t1,
+        dt: p.dt,
+        method: Some(match p.method {
+            IntegratorMethod::Euler => math_blocks::IntegratorMethod::Euler,
+            IntegratorMethod::Trapezoid => math_blocks::IntegratorMethod::Trapezoid,
+        }),
+        constants: Some(p.constants.clone()),
     }
 }
 
-/// PORT NOTE: placeholder for the unported `runHeat1DBlockGrid` (see above).
-fn run_heat1d_block_grid(
-    _params: &Heat1DBlockParams,
+fn to_engine_heat_params(p: &Heat1DBlockParams) -> math_blocks::Heat1DBlockParams {
+    math_blocks::Heat1DBlockParams {
+        cells: p.cells as usize,
+        length: p.length,
+        alpha: p.alpha,
+        t0: Some(p.t0),
+        t1: p.t1,
+        dt: p.dt,
+        initial_expression: Some(p.initial_expression.clone()),
+        initial_values: p.initial_values.clone(),
+        left_boundary: p.left_boundary,
+        right_boundary: p.right_boundary,
+        constants: Some(p.constants.clone()),
+    }
+}
+
+fn from_engine_node(n: &math_blocks::BlockGraphNode) -> BlockGraphNode {
+    BlockGraphNode {
+        id: n.id.clone(),
+        kind: n.kind.clone(),
+        inputs: n.inputs.as_ref().map(|i| match i {
+            math_blocks::BlockGraphInputs::List(v) => v.clone(),
+            // TS modelled `inputs` as a list of channel names; for the keyed
+            // form, take the channel names (the map values).
+            math_blocks::BlockGraphInputs::Map(m) => m.iter().map(|(_, v)| v.clone()).collect(),
+        }),
+        output: n.output.clone(),
+        expression: n.expression.clone(),
+    }
+}
+
+fn from_engine_edge(e: &math_blocks::BlockGraphEdge) -> BlockGraphEdge {
+    BlockGraphEdge {
+        from: e.from.clone(),
+        to: e.to.clone(),
+        from_channel: e.from_channel.clone(),
+        to_channel: e.to_channel.clone(),
+        signal: e.signal.clone(),
+    }
+}
+
+fn from_engine_validation(checks: &[ValidationCheck]) -> Vec<EquationValidationCheck> {
+    checks
+        .iter()
+        .map(|c| EquationValidationCheck {
+            name: c.name.clone(),
+            passed: c.passed,
+            group: c.group.clone(),
+        })
+        .collect()
+}
+
+/// Run the ODE block system via the real `math_blocks` engine, projecting its
+/// result onto this module's block-graph view.
+pub fn run_ode_block_system(
+    params: &ODEBlockSystemParams,
+    _logger: Option<&dyn EquationLogger>,
+) -> ODEBlockSystemResult {
+    let engine = math_blocks::run_ode_block_system(to_engine_ode_params(params), None);
+    // Insertion-ordered final state, following the declared state order (the TS
+    // `Object.entries(finalState)` order, which mirrors state declaration).
+    let final_state = params
+        .states
+        .iter()
+        .map(|s| {
+            (
+                s.name.clone(),
+                engine.final_state.get(&s.name).copied().unwrap_or(f64::NAN),
+            )
+        })
+        .collect();
+    let trace = engine
+        .trace
+        .iter()
+        .map(|r| ODETraceRow {
+            tick: r.tick,
+            time: r.time,
+            state: r.state.clone(),
+            derivatives: r.derivatives.clone(),
+        })
+        .collect();
+    ODEBlockSystemResult {
+        params: params.clone(),
+        steps: engine.steps,
+        final_state,
+        trace,
+        block_graph: engine.block_graph.iter().map(from_engine_node).collect(),
+        block_graph_edges: engine
+            .block_graph_edges
+            .iter()
+            .map(from_engine_edge)
+            .collect(),
+        validation: from_engine_validation(&engine.validation),
+    }
+}
+
+/// Run the 1-D heat-equation block grid via the real `math_blocks` engine.
+pub fn run_heat1d_block_grid(
+    params: &Heat1DBlockParams,
     _logger: Option<&dyn EquationLogger>,
 ) -> Heat1DBlockResult {
+    let engine = math_blocks::run_heat1d_block_grid(to_engine_heat_params(params), None);
+    let trace = engine
+        .trace
+        .iter()
+        .map(|r| Heat1DTraceRow {
+            tick: r.tick,
+            time: r.time,
+            values: r.values.clone(),
+            min: r.min,
+            max: r.max,
+            mean: r.mean,
+        })
+        .collect();
     Heat1DBlockResult {
-        block_graph: Vec::new(),
-        block_graph_edges: Vec::new(),
-        validation: vec![EquationValidationCheck {
-            name: "heat1d-block-grid-placeholder".to_string(),
-            passed: true,
-            group: Some("math-blocks".to_string()),
-        }],
+        params: params.clone(),
+        steps: engine.steps,
+        dx: engine.dx,
+        cfl: engine.cfl,
+        x: engine.x.clone(),
+        trace,
+        block_graph: engine.block_graph.iter().map(from_engine_node).collect(),
+        block_graph_edges: engine
+            .block_graph_edges
+            .iter()
+            .map(from_engine_edge)
+            .collect(),
+        validation: from_engine_validation(&engine.validation),
     }
 }
 

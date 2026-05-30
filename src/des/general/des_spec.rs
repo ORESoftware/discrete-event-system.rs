@@ -110,6 +110,30 @@ impl JsonValue {
     }
 }
 
+/// Bridge `serde_json::Value` (the I/O boundary type) into the crate's
+/// serde-free [`JsonValue`]. Used by adapters and validators that need to
+/// embed a serde-serialized payload (e.g. a typed plan) into a `JsonValue`.
+impl From<serde_json::Value> for JsonValue {
+    fn from(v: serde_json::Value) -> Self {
+        match v {
+            serde_json::Value::Null => JsonValue::Null,
+            serde_json::Value::Bool(b) => JsonValue::Bool(b),
+            serde_json::Value::Number(n) => JsonValue::Number(n.as_f64().unwrap_or(f64::NAN)),
+            serde_json::Value::String(s) => JsonValue::String(s),
+            serde_json::Value::Array(a) => {
+                JsonValue::Array(a.into_iter().map(JsonValue::from).collect())
+            }
+            serde_json::Value::Object(o) => {
+                let mut obj = JsonObject::new();
+                for (k, val) in o {
+                    obj.insert(k, JsonValue::from(val));
+                }
+                JsonValue::Object(obj)
+            }
+        }
+    }
+}
+
 /// JSON-escape and quote a string (`JSON.stringify` of a string).
 fn json_quote(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);

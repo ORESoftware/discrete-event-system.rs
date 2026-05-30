@@ -847,7 +847,7 @@ fn row_corridor_path(
                 push_opt(&mut points, receiving);
             } else if to_reserve.is_none()
                 && to.id != staging.id
-                && !receiving.is_some_and(|r| to.id == r.id)
+                && receiving.is_none_or(|r| to.id != r.id)
             {
                 push_opt(&mut points, Some(to));
             }

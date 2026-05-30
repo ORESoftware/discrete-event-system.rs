@@ -380,9 +380,22 @@ pub fn run() {
     println!("    1 XOR 0  →  {:.4}    (target 1)", result.predictions[2]);
     println!("    1 XOR 1  →  {:.4}    (target 0)", result.predictions[3]);
 
-    // PORT NOTE: the TS writes out/backprop-framework.json via fs; omitted here
-    // (no serde dependency assumed).
-    println!("# (JSON artifact write omitted in port — see PORT NOTE)");
+    let out = serde_json::json!({
+        "config": {"seed": seed, "N": n, "lr": lr},
+        "init": {"W1": init.w1, "b1": init.b1, "W2": init.w2, "b2": init.b2},
+        "final": {"W1": result.w1, "b1": result.b1, "W2": result.w2, "b2": result.b2},
+        "predictions": result.predictions,
+        "lossHistory": result.loss_history,
+        "ticks": result.ticks,
+    });
+    let _ = std::fs::create_dir_all("out");
+    let out_path = "out/backprop-framework.json";
+    std::fs::write(
+        out_path,
+        serde_json::to_string(&out).expect("serialize backprop result"),
+    )
+    .expect("write backprop-framework.json");
+    println!("# wrote {out_path}");
 }
 
 #[cfg(test)]

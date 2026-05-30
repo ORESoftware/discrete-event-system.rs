@@ -18,57 +18,26 @@
 
 use std::path::{Path, PathBuf};
 
-// =============================================================================
-// Stubbed cross-module deps — PORT NOTE: reuse `crate::des::mdp::usacc_mdp`.
-// =============================================================================
+use serde::Deserialize;
 
-/// Number of MDP states (stub). PORT NOTE: `usacc_mdp::N_STATES`.
-const N_STATES: usize = 1875;
-
-/// Action labels (stub). PORT NOTE: `usacc_mdp::ACTIONS`.
-const ACTIONS: &[&str] = &["dismiss", "investigate", "charge", "settle", "trial"];
-const STAGES: &[&str] = &["intake", "discovery", "pretrial", "trial"];
-const EVIDENCE: &[&str] = &["none", "weak", "moderate", "strong"];
-const CORROBORATION: &[&str] = &["none", "partial", "full"];
-const MANIPULATION: &[&str] = &["none", "suspected", "confirmed"];
-
-/// A decoded composite court state. PORT NOTE: `usacc_mdp::CourtState`.
-#[derive(Clone, Copy, Debug)]
-struct CourtState {
-    stage: usize,
-    evidence: usize,
-    corroboration: usize,
-    manipulation: usize,
-    conflict: bool,
-    funding: i64,
-}
-
-/// PORT NOTE: `usacc_mdp::is_terminal`.
-fn is_terminal(s: usize) -> bool {
-    s >= N_STATES.saturating_sub(3)
-}
-
-/// PORT NOTE: `usacc_mdp::decode`.
-fn decode(s: usize) -> Option<CourtState> {
-    if s >= N_STATES {
-        return None;
-    }
-    Some(CourtState {
-        stage: 0,
-        evidence: 0,
-        corroboration: 0,
-        manipulation: 0,
-        conflict: false,
-        funding: 0,
-    })
-}
+// The MDP label tables, `decode`, and `is_terminal` are the real model. The
+// original port stubbed them locally with the wrong arity (N_STATES = 1875 and
+// invented action/stage labels); they now come straight from `usacc_mdp`, which
+// is the same model the framework writer (`main_court_mdp`) value-iterates over.
+use crate::des::mdp::usacc_mdp::{
+    decode, is_terminal, ACTIONS, CORROBORATION, EVIDENCE, MANIPULATION, N_STATES, STAGES,
+};
 
 // =============================================================================
-// Typed views of the two JSON files (PORT NOTE: `#[derive(Deserialize)]`).
+// Typed views of the two JSON files. The framework writer emits camelCase keys
+// (`finalDelta`, `meanReward`, …) and an uppercase `V` array; `serde(default)`
+// keeps the python reference tolerant of omitted fields.
 // =============================================================================
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 struct ViBlock {
+    #[serde(rename = "V")]
     v: Vec<f64>,
     policy: Vec<i64>,
     gamma: f64,
@@ -76,7 +45,8 @@ struct ViBlock {
     final_delta: f64,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 struct Aggregates {
     mean_reward: f64,
     fraction_accepted: f64,
@@ -84,40 +54,45 @@ struct Aggregates {
     fraction_exhausted: f64,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
 struct ResultRow {
     policy: String,
     aggregates: Aggregates,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
 struct CourtMdpFramework {
     vi: ViBlock,
     results: Vec<ResultRow>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 struct PythonReference {
+    #[serde(rename = "V")]
     v: Vec<f64>,
     policy: Vec<i64>,
     iterations: usize,
     final_delta: f64,
 }
 
-/// `loadJson` — faithful missing-file `exit(1)`; the parse step is stubbed.
-///
-/// PORT NOTE: once `serde_json` is a dependency, replace the diverging tail with
-/// `serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap()`.
-fn load_json<T>(p: &Path) -> T {
+/// `loadJson` — faithful missing-file `exit(1)`, then `JSON.parse` via
+/// `serde_json::from_str` (a read or parse failure exits, mirroring the TS throw).
+fn load_json<T: serde::de::DeserializeOwned>(p: &Path) -> T {
     if !p.exists() {
         eprintln!("[validate-court-mdp] missing {}", p.display());
         std::process::exit(1);
     }
-    eprintln!(
-        "[validate-court-mdp] PORT NOTE: JSON parsing not wired (needs serde_json): {}",
-        p.display()
-    );
-    std::process::exit(1);
+    let text = std::fs::read_to_string(p).unwrap_or_else(|e| {
+        eprintln!("[validate-court-mdp] read error {}: {e}", p.display());
+        std::process::exit(1);
+    });
+    serde_json::from_str(&text).unwrap_or_else(|e| {
+        eprintln!("[validate-court-mdp] parse error {}: {e}", p.display());
+        std::process::exit(1);
+    })
 }
 
 fn root() -> PathBuf {
@@ -190,11 +165,11 @@ pub fn run() {
         println!(
             "    first disagree: state {} = ({}, ev={}, corr={}, man={}, conf={}, fund={})",
             first_disagree_state,
-            STAGES[cs.stage],
-            EVIDENCE[cs.evidence],
-            CORROBORATION[cs.corroboration],
-            MANIPULATION[cs.manipulation],
-            if cs.conflict { "HI" } else { "LO" },
+            STAGES[cs.stage as usize],
+            EVIDENCE[cs.evidence as usize],
+            CORROBORATION[cs.corroboration as usize],
+            MANIPULATION[cs.manipulation as usize],
+            if cs.conflict != 0 { "HI" } else { "LO" },
             cs.funding
         );
         println!(
@@ -232,4 +207,36 @@ pub fn run() {
     );
     println!("{}", if ok { "  PASS" } else { "  FAIL" });
     std::process::exit(if ok { 0 } else { 1 });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The framework structs must deserialize what `main_court_mdp` writes to
+    /// `out/court-mdp-framework.json` (camelCase aggregates, uppercase `V`,
+    /// extra aggregate fields ignored).
+    #[test]
+    fn framework_json_parses_sim_output_shape() {
+        let json = r#"{
+            "config": {"totalCases": 5000, "arrivalsPerTick": 5, "maxTicks": 10000, "seed": 42},
+            "vi": {"gamma": 0.95, "iterations": 200, "finalDelta": 1e-9,
+                   "V": [0.0, 1.0, 2.0], "policy": [0, 7, 3]},
+            "results": [
+                {"policy": "reject-all",
+                 "aggregates": {"n": 5000, "nAccepted": 10, "meanReward": -1.0,
+                                "meanSteps": 2.0, "p95Steps": 4,
+                                "fractionAccepted": 0.1, "fractionClosed": 0.5,
+                                "fractionExhausted": 0.4}}
+            ]
+        }"#;
+        let fw: CourtMdpFramework = serde_json::from_str(json).expect("parse framework json");
+        assert_eq!(fw.vi.v, vec![0.0, 1.0, 2.0]);
+        assert_eq!(fw.vi.policy, vec![0, 7, 3]);
+        assert_eq!(fw.vi.final_delta, 1e-9);
+        assert_eq!(fw.results.len(), 1);
+        assert_eq!(fw.results[0].policy, "reject-all");
+        assert_eq!(fw.results[0].aggregates.mean_reward, -1.0);
+        assert_eq!(fw.results[0].aggregates.fraction_accepted, 0.1);
+    }
 }

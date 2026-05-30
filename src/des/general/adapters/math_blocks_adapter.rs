@@ -13,15 +13,12 @@
 //!   * The `math-equation` result is a tagged union over ode/heat1d, matched in
 //!     summarize/writeCsv (`r.ode!`/`r.heat1d?` -> `Option` match).
 //!
-//! PORT NOTE: the numerical `des/general/math-blocks` engine is NOT ported. The
-//! partially-ported `des/general/math_equation_input` exists but its
-//! `ODEBlockSystemResult`/`Heat1DBlockResult`/`MathEquationResult` are TRIMMED
-//! (only block-graph + validation), lacking `finalState`/`trace`/`steps`/`dx`/
-//! `cfl`/`x`/`finalValues` that this adapter reads. To keep the adapter glue
-//! faithful and self-contained, this file defines FULL local stub result types
-//! and `unimplemented!()` `run_*` kernels. When `math-blocks` (and the full
-//! `math-equation-input` result) are ported, replace these stubs and delete the
-//! placeholders. The parameter types are reused from `math_equation_input`.
+//! PORT NOTE: the numerical `des/general/math-blocks` engine is now ported, and
+//! `des/general/math_equation_input` delegates to it, so the result types and
+//! `run_*` kernels are imported from `math_equation_input` directly (they carry
+//! the real `finalState`/`trace`/`steps`/`dx`/`cfl`/`x`). This adapter is pure
+//! glue: schemas, summaries, CSV, examples. The parameter types are reused from
+//! `math_equation_input`.
 //!
 //! PORT NOTE: `registerModel` / the registry is not ported yet; each adapter is
 //! exposed via the `adapter_*()` constructors.
@@ -38,82 +35,21 @@
 use std::collections::HashMap;
 
 use crate::des::general::adapters::adapter_utils::{csv_row, validation_line, write_csv_lines};
-use crate::des::general::des_base::validation::ValidationCheck;
 use crate::des::general::des_spec::{
     DESModelRegistration, DESModelSpec, DESRuntimeConfig, JsonObject, JsonValue, ParamSchema,
     RegistrationExample, DES_MODEL_SPEC_SCHEMA,
 };
 use crate::des::general::math_equation_input::{
-    EquationInputFormat, EquationProblemKind, Heat1DBlockParams, IntegratorMethod,
-    MathEquationInputParams, MathEquationNetwork, ODEBlockSystemParams, ODEStateSpec,
+    run_heat1d_block_grid, run_math_equation_problem, run_ode_block_system, EquationInputFormat,
+    EquationProblemKind, Heat1DBlockParams, Heat1DBlockResult, IntegratorMethod,
+    MathEquationInputParams, MathEquationResult, ODEBlockSystemParams, ODEBlockSystemResult,
+    ODEStateSpec,
 };
 
-// =============================================================================
-// PORT NOTE: full local stub result types for the unported `math-blocks` engine.
-// =============================================================================
-
-#[derive(Clone, Debug)]
-pub struct ODETraceRow {
-    pub tick: u64,
-    pub time: f64,
-    pub state: HashMap<String, f64>,
-    pub derivatives: HashMap<String, f64>,
-}
-
-#[derive(Clone, Debug)]
-pub struct ODEBlockSystemResult {
-    /// Insertion-ordered final state (TS `Object.entries(finalState)`).
-    pub final_state: Vec<(String, f64)>,
-    pub steps: u64,
-    pub params: ODEBlockSystemParams,
-    pub trace: Vec<ODETraceRow>,
-    pub validation: Vec<ValidationCheck>,
-}
-
-#[derive(Clone, Debug)]
-pub struct Heat1DTraceRow {
-    pub tick: u64,
-    pub time: f64,
-    pub min: f64,
-    pub max: f64,
-    pub mean: f64,
-    pub values: Vec<f64>,
-}
-
-#[derive(Clone, Debug)]
-pub struct Heat1DBlockResult {
-    pub trace: Vec<Heat1DTraceRow>,
-    pub steps: u64,
-    pub params: Heat1DBlockParams,
-    pub dx: f64,
-    pub cfl: f64,
-    pub x: Vec<f64>,
-    pub final_values: Vec<f64>,
-    pub validation: Vec<ValidationCheck>,
-}
-
-#[derive(Clone, Debug)]
-pub struct MathEquationResult {
-    pub input_format: EquationInputFormat,
-    pub kind: EquationProblemKind,
-    pub network: MathEquationNetwork,
-    pub ode: Option<ODEBlockSystemResult>,
-    pub heat1d: Option<Heat1DBlockResult>,
-    pub validation: Vec<ValidationCheck>,
-}
-
-const ENGINE_MISSING: &str =
-    "math-blocks numerical engine is not ported yet (see module PORT NOTE)";
-
-pub fn run_ode_block_system(_params: ODEBlockSystemParams) -> ODEBlockSystemResult {
-    unimplemented!("{ENGINE_MISSING}")
-}
-pub fn run_heat1d_block_grid(_params: Heat1DBlockParams) -> Heat1DBlockResult {
-    unimplemented!("{ENGINE_MISSING}")
-}
-pub fn run_math_equation_problem(_params: MathEquationInputParams) -> MathEquationResult {
-    unimplemented!("{ENGINE_MISSING}")
-}
+// The ODE/heat1d/equation result types and `run_*` kernels are the real ones
+// from `math_equation_input` (which delegates to the `math_blocks` engine);
+// they are imported above. This adapter is pure glue: schemas, summaries, CSV,
+// examples.
 
 // =============================================================================
 // Formatting helpers (JS parity).
@@ -468,8 +404,8 @@ impl DESModelRegistration<ODEBlockSystemParams, ODEBlockSystemResult> for MathOD
         params: ODEBlockSystemParams,
         _runtime: &DESRuntimeConfig,
     ) -> ODEBlockSystemResult {
-        // PORT NOTE: TS wraps this in `withLogger`; kernel is unimplemented.
-        run_ode_block_system(params)
+        // PORT NOTE: TS wraps this in `withLogger`; the logging wrapper is dropped.
+        run_ode_block_system(&params, None)
     }
     fn summarize(&self, result: &ODEBlockSystemResult, _params: &ODEBlockSystemParams) -> String {
         summarize_ode(result)
@@ -531,8 +467,8 @@ impl DESModelRegistration<Heat1DBlockParams, Heat1DBlockResult> for MathHeat1DBl
             initial_values: params.initial_values.filter(|v| !v.is_empty()),
             ..params
         };
-        // PORT NOTE: TS wraps this in `withLogger`; kernel is unimplemented.
-        run_heat1d_block_grid(normalized)
+        // PORT NOTE: TS wraps this in `withLogger`; the logging wrapper is dropped.
+        run_heat1d_block_grid(&normalized, None)
     }
     fn summarize(&self, result: &Heat1DBlockResult, _params: &Heat1DBlockParams) -> String {
         let last = result.trace.last().expect("heat trace is non-empty");
@@ -614,8 +550,10 @@ impl DESModelRegistration<MathEquationInputParams, MathEquationResult> for MathE
         params: MathEquationInputParams,
         _runtime: &DESRuntimeConfig,
     ) -> MathEquationResult {
-        // PORT NOTE: TS wraps this in `withLogger`; kernel is unimplemented.
-        run_math_equation_problem(params)
+        // PORT NOTE: TS wraps this in `withLogger`; the logging wrapper is dropped.
+        // The TS `run` throws on a precondition failure; mirror that by panicking.
+        run_math_equation_problem(&params, None)
+            .expect("math-equation kernel failed a precondition")
     }
     fn summarize(&self, r: &MathEquationResult, _params: &MathEquationInputParams) -> String {
         let model_line = if let (EquationProblemKind::Ode, Some(ode)) = (r.kind, r.ode.as_ref()) {
@@ -689,5 +627,92 @@ impl DESModelRegistration<MathEquationInputParams, MathEquationResult> for MathE
             },
             Some(animate_runtime()),
         )]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression for the formerly-`unimplemented!()` ODE kernel: it now drives
+    /// the real `math_blocks` engine, so Euler integration of dy/dt = -k·y
+    /// (k=1, y0=1) over [0,1] with dt=0.01 must yield (1-dt)^100 ≈ 0.366 and a
+    /// full 101-row trace — not an empty stub / panic.
+    #[test]
+    fn ode_adapter_runs_real_euler_integration() {
+        let adapter = adapter_math_ode_blocks();
+        let params = ODEBlockSystemParams {
+            states: vec![ODEStateSpec {
+                name: "y".to_string(),
+                initial: 1.0,
+                derivative: "-k*y".to_string(),
+            }],
+            constants: HashMap::from([("k".to_string(), 1.0)]),
+            t0: 0.0,
+            t1: 1.0,
+            dt: 0.01,
+            method: IntegratorMethod::Euler,
+        };
+        let res = adapter.run(params, &DESRuntimeConfig::default());
+        assert_eq!(res.steps, 100);
+        assert_eq!(res.trace.len(), 101);
+        let y = res
+            .final_state
+            .iter()
+            .find(|(k, _)| k == "y")
+            .map(|(_, v)| *v)
+            .expect("state y present");
+        assert!((y - 0.366f64).abs() < 0.01, "y(1) = {y}, expected ~0.366");
+        assert!(!res.block_graph.is_empty(), "engine produced a block graph");
+    }
+
+    /// Heat1D kernel now runs the real explicit grid (was `unimplemented!()`).
+    #[test]
+    fn heat1d_adapter_runs_real_grid() {
+        let adapter = adapter_math_heat1d_blocks();
+        let params = Heat1DBlockParams {
+            cells: 11.0,
+            length: 1.0,
+            alpha: 0.01,
+            t0: 0.0,
+            t1: 0.1,
+            dt: 0.01,
+            constants: std::collections::HashMap::new(),
+            initial_expression: "sin(pi*x/length)".to_string(),
+            initial_values: None,
+            left_boundary: Some(0.0),
+            right_boundary: Some(0.0),
+        };
+        let res = adapter.run(params, &DESRuntimeConfig::default());
+        assert_eq!(res.x.len(), 11);
+        assert!(res.dx > 0.0 && res.cfl > 0.0 && res.cfl <= 0.5);
+        assert_eq!(res.trace.len(), 11);
+        // A cooling sine pulse with zero boundaries stays bounded in [0, 1].
+        let last = res.trace.last().expect("non-empty trace");
+        assert!(last.max <= 1.0 + 1e-9 && last.min >= -1e-9);
+    }
+
+    /// The math-equation kernel now solves through `math_blocks` end-to-end:
+    /// a LaTeX ODE produces a non-empty generated network and a real final state.
+    #[test]
+    fn equation_adapter_solves_latex_ode() {
+        let adapter = adapter_math_equation();
+        let mut constants = JsonObject::new();
+        constants.insert("k".to_string(), JsonValue::Number(1.0));
+        let params = MathEquationInputParams {
+            format: EquationInputFormat::Latex,
+            kind: Some(EquationProblemKind::Ode),
+            equation: Some("\\frac{dy}{dt} = -k y; y(0)=1".to_string()),
+            constants: Some(constants),
+            t1: Some(1.0),
+            dt: Some(0.01),
+            ..Default::default()
+        };
+        let res = adapter.run(params, &DESRuntimeConfig::default());
+        assert!(matches!(res.kind, EquationProblemKind::Ode));
+        assert!(!res.network.nodes.is_empty(), "non-empty generated network");
+        let ode = res.ode.expect("ode result present");
+        assert!(!ode.final_state.is_empty());
+        assert!(!ode.trace.is_empty());
     }
 }

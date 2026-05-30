@@ -13,45 +13,62 @@
 
 use std::path::{Path, PathBuf};
 
+use serde::Deserialize;
+
 // =============================================================================
-// Typed views of the two JSON files (PORT NOTE: `#[derive(Deserialize)]`).
+// Typed views of the two JSON files. The framework writer emits the TS field
+// names (`R/L/C/T`, trace rows `t/I/V_C/V_in`); the scipy/analytic reference is
+// snake_case. `serde(default)` keeps both tolerant of omitted fields.
 // =============================================================================
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(default)]
 struct CircuitConfig {
+    #[serde(rename = "R")]
     r: f64,
+    #[serde(rename = "L")]
     l: f64,
+    #[serde(rename = "C")]
     c: f64,
+    #[serde(rename = "T")]
     t: f64,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(default)]
 struct TracePoint {
     t: f64,
+    #[serde(rename = "V_C")]
     v_c: f64,
+    #[serde(rename = "I")]
     i: f64,
+    #[serde(rename = "V_in")]
     v_in: f64,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
 struct SweepRun {
     dt: f64,
     ticks: usize,
     trace: Vec<TracePoint>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
 struct FrameworkJson {
     config: CircuitConfig,
     sweep: Vec<SweepRun>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
 struct SelfCheck {
     max_abs_v_c: f64,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
 struct ReferenceJson {
     config: CircuitConfig,
     self_check: SelfCheck,
@@ -61,17 +78,27 @@ struct ReferenceJson {
     v_c_scipy: Vec<f64>,
 }
 
-fn load_json<T>(p: &Path) -> T {
+/// `loadJson` — faithful missing-file `exit(1)`, then `JSON.parse` via
+/// `serde_json::from_str` (a read or parse failure exits, mirroring the TS throw).
+fn load_json<T: serde::de::DeserializeOwned>(p: &Path) -> T {
     if !p.exists() {
         eprintln!("[validate-electric-circuit] missing {}", p.display());
         std::process::exit(1);
     }
-    // PORT NOTE: `serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap()`.
-    eprintln!(
-        "[validate-electric-circuit] PORT NOTE: JSON parsing not wired (needs serde_json): {}",
-        p.display()
-    );
-    std::process::exit(1);
+    let text = std::fs::read_to_string(p).unwrap_or_else(|e| {
+        eprintln!(
+            "[validate-electric-circuit] read error {}: {e}",
+            p.display()
+        );
+        std::process::exit(1);
+    });
+    serde_json::from_str(&text).unwrap_or_else(|e| {
+        eprintln!(
+            "[validate-electric-circuit] parse error {}: {e}",
+            p.display()
+        );
+        std::process::exit(1);
+    })
 }
 
 fn root() -> PathBuf {
@@ -197,4 +224,34 @@ pub fn run() {
     println!("{}", if ok { "  PASS" } else { "  FAIL" });
 
     std::process::exit(if ok { 0 } else { 1 });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The framework structs must deserialize exactly what
+    /// `main_electric_circuit` writes to `out/electric-circuit-framework.json`
+    /// (config `{R,L,C,Vstep,T}`, trace rows `{t, I, V_C, V_in}`).
+    #[test]
+    fn framework_json_parses_sim_output_shape() {
+        let json = r#"{
+            "sweep": [
+                {"dt": 0.5, "ticks": 60, "final_V_C": 0.99, "final_I": 1e-3,
+                 "trace": [
+                    {"t": 0.0, "I": 0.0, "V_C": 0.0, "V_in": 1.0},
+                    {"t": 0.5, "I": 0.4, "V_C": 0.1, "V_in": 1.0}
+                 ]}
+            ],
+            "config": {"R": 0.2, "L": 1.0, "C": 1.0, "Vstep": 1.0, "T": 30.0}
+        }"#;
+        let fw: FrameworkJson = serde_json::from_str(json).expect("parse framework json");
+        assert_eq!(fw.sweep.len(), 1);
+        assert_eq!(fw.config.r, 0.2);
+        assert_eq!(fw.config.t, 30.0);
+        assert_eq!(fw.sweep[0].trace.len(), 2);
+        assert_eq!(fw.sweep[0].trace[1].v_c, 0.1);
+        assert_eq!(fw.sweep[0].trace[1].i, 0.4);
+        assert_eq!(fw.sweep[0].trace[1].v_in, 1.0);
+    }
 }

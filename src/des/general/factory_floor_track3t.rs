@@ -49,6 +49,8 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+use serde::Serialize;
+
 use crate::des::general::belief::DiscreteBelief;
 use crate::des::general::des_base::preconditions::{Check, Preconditions};
 use crate::des::general::des_base::smart_movable::{SmartMovable, SmartMovableCore};
@@ -69,7 +71,8 @@ fn require(check: Check) {
 // =============================================================================
 
 /// One archived Track3t source note.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ArchiveNote {
     pub label: &'static str,
     pub url: &'static str,
@@ -102,7 +105,8 @@ pub fn track3t_archive_grounding() -> Vec<ArchiveNote> {
 // =============================================================================
 
 /// `'source' | 'storage' | 'aisle' | 'sink'`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum WarehouseStationKind {
     Source,
     Storage,
@@ -121,26 +125,32 @@ impl WarehouseStationKind {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StationDefinition {
     pub id: String,
     pub label: String,
     pub kind: WarehouseStationKind,
     pub x: f64,
     pub y: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub can_hold_pallet: Option<bool>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WarehouseLayout {
     pub stations: Vec<StationDefinition>,
     pub source_station_id: String,
     pub sink_station_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub grid_meters: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub route_edges: Option<Vec<(String, String)>>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WarehouseScenarioConfig {
     pub id: String,
     pub label: String,
@@ -211,7 +221,8 @@ pub struct WarehouseDecisionState {
 }
 
 /// Trace event kind.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum WarehouseEvent {
     SearchMiss,
     Pickup,
@@ -234,7 +245,8 @@ impl WarehouseEvent {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WarehouseStepTrace {
     pub scenario_id: String,
     pub job_id: String,
@@ -261,7 +273,8 @@ pub struct WarehouseStepTrace {
     pub cycle_time_so_far: f64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WarehouseJobSummary {
     pub job_id: String,
     pub destination: String,
@@ -273,7 +286,8 @@ pub struct WarehouseJobSummary {
     pub on_time: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WarehouseMetrics {
     pub jobs_created: usize,
     pub completed_jobs: usize,
@@ -289,7 +303,8 @@ pub struct WarehouseMetrics {
     pub mean_belief_entropy: f64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WarehouseScenarioResult {
     pub scenario: WarehouseScenarioConfig,
     pub layout: WarehouseLayout,
@@ -298,7 +313,8 @@ pub struct WarehouseScenarioResult {
     pub trace: Vec<WarehouseStepTrace>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ComparisonDeltas {
     pub mean_cycle_time_reduction_pct: f64,
     pub throughput_lift_pct: f64,
@@ -307,7 +323,8 @@ pub struct ComparisonDeltas {
     pub entropy_reduction_pct: f64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WarehouseComparisonResult {
     pub layout: WarehouseLayout,
     pub baseline: WarehouseScenarioResult,

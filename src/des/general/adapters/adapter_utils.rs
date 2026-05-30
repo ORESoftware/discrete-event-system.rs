@@ -49,6 +49,12 @@ impl HasPassed for crate::des::general::statistical_optimization::ValidationChec
     }
 }
 
+impl HasPassed for crate::des::general::math_equation_input::EquationValidationCheck {
+    fn passed(&self) -> bool {
+        self.passed
+    }
+}
+
 impl HasPassed for bool {
     fn passed(&self) -> bool {
         *self

@@ -221,6 +221,7 @@ pub fn run() {
     println!("#   ω0 = 1 rad/s, α = R/(2L) = 0.1, period = 2π s");
     println!("#   T = {t} s");
 
+    let mut sweep: Vec<serde_json::Value> = Vec::new();
     for dt in dts {
         let mut cfg = default_config(dt);
         cfg.t = t;
@@ -230,11 +231,39 @@ pub fn run() {
             "  dt={:<8}  ticks={:>6}  V_C({:.3})={:.6}  I={:.2e}",
             dt, result.ticks, last.t, last.v_c, last.i
         );
+        let trace: Vec<serde_json::Value> = result
+            .trace
+            .iter()
+            .map(|row| {
+                serde_json::json!({
+                    "t": row.t,
+                    "I": row.i,
+                    "V_C": row.v_c,
+                    "V_in": row.v_in,
+                })
+            })
+            .collect();
+        sweep.push(serde_json::json!({
+            "dt": dt,
+            "ticks": result.ticks,
+            "trace": trace,
+            "final_V_C": last.v_c,
+            "final_I": last.i,
+        }));
     }
 
-    // PORT NOTE: the TS writes out/electric-circuit-framework.json via fs; the
-    // JSON serialization is omitted here (no serde dependency assumed).
-    println!("# (JSON artifact write omitted in port — see PORT NOTE)");
+    let out = serde_json::json!({
+        "sweep": sweep,
+        "config": {"R": 0.2, "L": 1.0, "C": 1.0, "Vstep": 1.0, "T": t},
+    });
+    let _ = std::fs::create_dir_all("out");
+    let out_path = "out/electric-circuit-framework.json";
+    std::fs::write(
+        out_path,
+        serde_json::to_string(&out).expect("serialize RLC sweep"),
+    )
+    .expect("write electric-circuit-framework.json");
+    println!("# wrote {out_path}");
 }
 
 #[cfg(test)]

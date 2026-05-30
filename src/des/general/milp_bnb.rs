@@ -718,8 +718,9 @@ pub fn solve_milp(p: &MILPProblem, opts: MILPSolveOptions) -> MILPSolution {
 
     let st = station.borrow();
     let nodes = st.get_nodes_processed();
-    // Simplifies to `nodes >= max_nodes` (kept verbatim from the TS source).
-    let stopped_early = nodes >= filled.max_nodes && !st.is_finished() || nodes >= filled.max_nodes;
+    // TS wrote `(nodes >= max && !finished) || nodes >= max`, which is logically
+    // just `nodes >= max` — simplified here, preserving the original semantics.
+    let stopped_early = nodes >= filled.max_nodes;
     let has_incumbent = st.get_incumbent().is_some();
     let is_optimal = !stopped_early && has_incumbent;
     let status = if stopped_early {

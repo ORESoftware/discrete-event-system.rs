@@ -405,7 +405,7 @@ impl DESModelRegistration<FourierTransformParams, TransformRunResult> for Fourie
                 expression: Some("sin(omega0*t)".to_string()),
                 constants: Some(HashMap::from([("omega0".to_string(), 2.0)])),
                 t0: Some(0.0),
-                t1: Some(6.283185307179586),
+                t1: Some(std::f64::consts::TAU),
                 dt: Some(0.0031415926535897933),
                 quadrature: Some(QuadratureRule::Trapezoid),
                 omega_values: Some(vec![0.0, 1.0, 2.0, 3.0, -2.0]),

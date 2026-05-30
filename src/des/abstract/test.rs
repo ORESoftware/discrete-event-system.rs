@@ -11,7 +11,8 @@
 mod tests {
     #[test]
     fn scratch_module_is_empty() {
-        // Placeholder smoke test: the TS scratch file declared nothing.
-        assert!(true);
+        // The TS `abstract/test.ts` was a ts-node scratchpad that declared
+        // nothing; there is no behaviour to assert. This test exists only to
+        // document that the ported module compiles as an empty unit.
     }
 }

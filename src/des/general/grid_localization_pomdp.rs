@@ -542,7 +542,7 @@ mod tests {
             uniform_entropy
         );
         // Posterior mass on the true hidden cell exceeds the uniform share.
-        let hidden_index = (1) + (1) * 3; // encode((1,1)) on a 3x3 grid.
+        let hidden_index = 4usize; // encode((col=1, row=1)) on a 3x3 grid = 1 + 1*3.
         assert!(
             result.final_belief[hidden_index] > uniform_share,
             "no information gained on the true cell: {}",
@@ -561,8 +561,8 @@ mod tests {
 
         let n = result.state_space.num_states as f64;
         let uniform_share = 1.0 / n;
-        // encode((2,0)) on a 3x3 grid is 2 + 0*3 = 2.
-        let hidden_index = 2 + 0 * 3;
+        // encode((col=2, row=0)) on a 3x3 grid is 2 + 0*width = 2.
+        let hidden_index = 2usize;
 
         // Localisation concentrates posterior mass on the true cell well above
         // its uniform share, and the final-step trace agrees with the belief.

@@ -61,7 +61,8 @@ fn mulberry32(seed: u32) -> impl FnMut() -> f64 {
         let mut t = a;
         t = (t ^ (t >> 15)).wrapping_mul(t | 1);
         t ^= t.wrapping_add((t ^ (t >> 7)).wrapping_mul(t | 61));
-        (((t ^ (t >> 14)) >> 0) as f64) / 4294967296.0
+        // TS `>>> 0` is an unsigned coercion; `t` is already u32 here, so it is a no-op.
+        ((t ^ (t >> 14)) as f64) / 4294967296.0
     }
 }
 

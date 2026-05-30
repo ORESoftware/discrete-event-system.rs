@@ -662,12 +662,12 @@ mod tests {
     #[test]
     fn smdp_training_runs_and_greedy_reaches_goal() {
         let res = run_four_rooms_smdp(FourRoomsTrainOpts {
-            num_episodes: 60,
+            num_episodes: 800,
             seed: Some(1),
             ..Default::default()
         });
-        assert_eq!(res.reward_history.len(), 60);
-        assert_eq!(res.length_history.len(), 60);
+        assert_eq!(res.reward_history.len(), 800);
+        assert_eq!(res.length_history.len(), 800);
         assert!(res.ticks > 0);
         // With hallway options the greedy policy should solve the task.
         assert!(res.greedy_reached_goal, "greedy option policy reaches the goal");

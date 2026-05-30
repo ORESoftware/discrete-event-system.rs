@@ -26,7 +26,7 @@ use crate::des::general::des_base::finite_horizon_dp::{
 use crate::des::general::des_base::preconditions::Preconditions;
 use crate::des::general::des_base::runner::{run_iterative_des, IterativeRunOptions};
 use crate::des::general::des_base::station::{DESStation, StationCore, StationRef};
-use crate::des::general::des_base::validation::{intrinsic_check, Validator};
+use crate::des::general::des_base::validation::intrinsic_check;
 use crate::des::shared::capabilities::{RandomSource, SeededRandom};
 
 /// Specification of a multi-period stochastic inventory problem.

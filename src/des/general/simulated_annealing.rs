@@ -803,7 +803,19 @@ mod tests {
             capacity: 50.0,
         };
         let problem: Rc<dyn SAProblem<Vec<f64>>> = Rc::new(build_knapsack_sa_problem(inst.clone(), 1e6));
-        let result = run_simulated_annealing(problem, opts(7));
+        // The knapsack's energy scale (values 100-220) is ~10x the Rastrigin's,
+        // so SA needs a proportionally hotter start to accept the ~60-worse
+        // intermediate state required to escape the greedy basin {0,1} -> {1,2}.
+        let knapsack_opts = SASolverOptions {
+            max_iterations: 8000,
+            cooling: CoolingSchedule::Geometric { t0: 100.0, alpha: 0.999, t_min: Some(1e-4) },
+            seed: Some(7),
+            stall_limit: None,
+            verbose: None,
+            record_trace: None,
+            trace_stride: None,
+        };
+        let result = run_simulated_annealing(problem, knapsack_opts);
 
         // Found a strictly better solution than the greedy start (value 160).
         assert!(result.best_cost <= -200.0, "best_cost = {}", result.best_cost);

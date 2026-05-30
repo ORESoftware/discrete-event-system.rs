@@ -1267,14 +1267,18 @@ pub fn run_network_mutex_simulation(opts: NetworkMutexSimulationOpts) -> Network
         invariant_violations.push(format!("{}: {}", c.name, detail));
     }
 
+    let worker_stats = worker.borrow().stats();
+    let completed_items = sink.borrow().completed.clone();
+    let trace = events.borrow().clone();
+
     NetworkMutexSimulationResult {
         generated,
         completed,
         total_ticks: summary.ticks,
-        worker: worker.borrow().stats(),
+        worker: worker_stats,
         lock: lock_stats,
-        completed_items: sink.borrow().completed.clone(),
-        trace: events.borrow().clone(),
+        completed_items,
+        trace,
         invariant_violations,
     }
 }

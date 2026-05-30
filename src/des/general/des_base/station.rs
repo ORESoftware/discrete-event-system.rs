@@ -111,6 +111,15 @@ impl StationCore {
     }
 
     /// Emit a token on a channel to every connected target.
+    ///
+    /// SELF-EDGE handling: a station may wire an output channel back to its own
+    /// input (the iterative state-loop pipeline pattern: `source → update
+    /// (self-loop) → sink`). When that happens, the target `RefCell` is the very
+    /// station currently executing `run_time_step`, so it is already borrowed
+    /// and `borrow_mut()` would panic. We detect this via `try_borrow_mut` and
+    /// route directly into our OWN inbox (`self` *is* the target's core on a
+    /// self-edge). This matches the TypeScript engine, where `emit` to self just
+    /// appended to the shared inbox (no `RefCell`).
     pub fn emit(&mut self, t: AnyToken, channel: &str) {
         let Some(edges) = self.outs.get(channel) else {
             return;
@@ -119,7 +128,10 @@ impl StationCore {
         // mutating targets.
         let edges: Vec<OutEdge> = edges.clone();
         for edge in edges {
-            edge.target.borrow_mut().core_mut().take(t.clone(), &edge.target_channel);
+            match edge.target.try_borrow_mut() {
+                Ok(mut target) => target.core_mut().take(t.clone(), &edge.target_channel),
+                Err(_) => self.take(t.clone(), &edge.target_channel),
+            }
         }
     }
 

@@ -49,3 +49,25 @@ pub mod network_flow;
 pub mod lp_des;
 pub mod ga_des;
 pub mod sa_des;
+
+// Model/algorithm consumers (built on des-base + general kernels).
+pub mod blackjack;
+pub mod four_rooms;
+pub mod mountain_car;
+pub mod qlearning_des;
+pub mod ppo_des;
+pub mod rl_learning_models;
+pub mod actor_critic_gridworld;
+pub mod stag_hunt;
+pub mod tiger_pomdp;
+pub mod grid_localization_pomdp;
+pub mod inventory_dp;
+pub mod iterative_learning_control;
+pub mod temp_control;
+pub mod network_mutex;
+pub mod nonlinear_optimization_models;
+pub mod classical_optimization_models;
+pub mod learning_optimization_models;
+pub mod simulated_annealing;
+pub mod milp_bnb;
+pub mod neural_network;

@@ -97,6 +97,18 @@ pub fn simulation_catalogue() -> Vec<(&'static str, fn())> {
     ]
 }
 
+/// Run only the simulations whose name contains `needle`, in series. Useful for
+/// targeted cross-validation against the reference implementation.
+pub fn run_simulations_matching(needle: &str) -> Vec<SimOutcome> {
+    let selected: Vec<(&'static str, fn())> =
+        simulation_catalogue().into_iter().filter(|(n, _)| n.contains(needle)).collect();
+    if selected.is_empty() {
+        eprintln!("no simulation matches `{needle}`");
+        return Vec::new();
+    }
+    run_list(selected)
+}
+
 /// Run every simulation in [`simulation_catalogue`] one at a time, in series.
 ///
 /// Each simulation is isolated with [`catch_unwind`] so that one failure (a
@@ -104,7 +116,12 @@ pub fn simulation_catalogue() -> Vec<(&'static str, fn())> {
 /// keeps going through the rest of the catalogue. Returns one [`SimOutcome`] per
 /// simulation in run order.
 pub fn run_all_simulations() -> Vec<SimOutcome> {
-    let catalogue = simulation_catalogue();
+    run_list(simulation_catalogue())
+}
+
+/// Run a specific list of `(name, fn)` simulations in series with panic
+/// isolation, printing per-simulation headers and a final summary.
+fn run_list(catalogue: Vec<(&'static str, fn())>) -> Vec<SimOutcome> {
     let total = catalogue.len();
     let mut outcomes = Vec::with_capacity(total);
 

@@ -37,3 +37,7 @@ pub mod visual;
 
 // Animation framework (frame recording, rendering, scene builders).
 pub mod animation;
+
+// Cross-subsystem integration smoke tests (compiled only under cfg(test)).
+#[cfg(test)]
+mod integration_smoke;

@@ -165,7 +165,14 @@ pub fn queue_line() -> Result<StudioDemo, StudioError> {
             "arrivals",
             NodeRole::Source,
             // 0 arrivals/tick until t=3, then a burst of 8/tick (overloads the server).
-            RuntimeCell::single(Box::new(Source::new("step", SourceKind::Step { t0: 3.0, before: 0.0, after: 8.0 }))),
+            RuntimeCell::single(Box::new(Source::new(
+                "step",
+                SourceKind::Step {
+                    t0: 3.0,
+                    before: 0.0,
+                    after: 8.0,
+                },
+            ))),
         )
         .with_label("arrivals (step)")
         .at(40.0, 130.0),
@@ -267,8 +274,16 @@ mod tests {
         // Server output saturates at the service rate (5) once overloaded; after
         // the 4-tick belt delay the sink sees a steady 5.
         let server = run_out.series("server").unwrap();
-        assert!((server[10] - 5.0).abs() < 1e-9, "server holds at 5/tick; got {}", server[10]);
-        assert!((dep[20] - 5.0).abs() < 1e-9, "departures steady at 5; got {}", dep[20]);
+        assert!(
+            (server[10] - 5.0).abs() < 1e-9,
+            "server holds at 5/tick; got {}",
+            server[10]
+        );
+        assert!(
+            (dep[20] - 5.0).abs() < 1e-9,
+            "departures steady at 5; got {}",
+            dep[20]
+        );
     }
 
     #[test]

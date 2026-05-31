@@ -302,7 +302,11 @@ pub struct Queue {
 }
 impl Queue {
     pub fn new(name: &str, service_rate: f64) -> Self {
-        Queue { name: name.to_string(), service_rate: service_rate.max(0.0), backlog: 0.0 }
+        Queue {
+            name: name.to_string(),
+            service_rate: service_rate.max(0.0),
+            backlog: 0.0,
+        }
     }
     pub fn backlog(&self) -> f64 {
         self.backlog
@@ -348,7 +352,11 @@ pub struct TransportDelay {
 impl TransportDelay {
     pub fn new(name: &str, delay: usize) -> Self {
         let delay = delay.max(1);
-        TransportDelay { name: name.to_string(), delay, buf: VecDeque::from(vec![0.0; delay]) }
+        TransportDelay {
+            name: name.to_string(),
+            delay,
+            buf: VecDeque::from(vec![0.0; delay]),
+        }
     }
 }
 impl StatefulTransform<f64, f64> for TransportDelay {
@@ -427,7 +435,10 @@ pub struct Composite {
 }
 impl Composite {
     pub fn new(name: &str, inner: RuntimeCell) -> Self {
-        Composite { name: name.to_string(), inner }
+        Composite {
+            name: name.to_string(),
+            inner,
+        }
     }
     /// How many Layer-2 elements are nested directly inside this composite.
     pub fn inner_len(&self) -> usize {
@@ -528,7 +539,11 @@ impl RuntimeCell {
     /// a leaf op). Each nested [`Composite`] adds a level. Visual blocks are
     /// always flat; this measures only the runtime-element tree inside a block.
     pub fn max_child_depth(&self) -> usize {
-        self.stages.iter().map(|s| s.nested_depth()).max().unwrap_or(0)
+        self.stages
+            .iter()
+            .map(|s| s.nested_depth())
+            .max()
+            .unwrap_or(0)
     }
 
     /// Thread the block's `inputs` through every stage and return its outputs.
@@ -634,7 +649,10 @@ mod tests {
         let inner = RuntimeCell::single(Box::new(Integrator::new("int", 0.0)));
         let comp = Composite::new("wrapped-int", inner);
         let cell = RuntimeCell::single(Box::new(comp));
-        assert!(cell.has_state(), "nested integrator makes the cell stateful");
+        assert!(
+            cell.has_state(),
+            "nested integrator makes the cell stateful"
+        );
     }
 
     #[test]

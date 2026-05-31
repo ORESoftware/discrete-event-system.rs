@@ -44,8 +44,8 @@ impl ModelCitizen for StudioCitizen {
             "queue-line" => queue_line(),
             other => {
                 return Err(CitizenError::InvalidSpec(format!(
-                    "unknown studio demo `{other}` (expected `signal-chain`, `mixer` or `queue-line`)"
-                )))
+                "unknown studio demo `{other}` (expected `signal-chain`, `mixer` or `queue-line`)"
+            )))
             }
         }
         .map_err(|e| CitizenError::Run(e.to_string()))?;

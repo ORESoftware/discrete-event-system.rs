@@ -6,24 +6,77 @@
 //! Conversion notes:
 //!   - `class ObsCtrlAnimator` → struct + impl; async `run()` → [`run`].
 //!
-//! PORT NOTE: this entry point is a pure renderer — all of its content comes
-//! from `animation/scenes/obs-ctrl-scene` (`ObsCtrlScene`, `OC_STAGE_W`,
-//! `OC_STAGE_H`), which is NOT yet ported (`animation::scenes` has no
-//! `obs_ctrl_scene.rs`). There is no simulation to run faithfully here, so the
-//! render is stubbed with a note. Wire `ObsCtrlScene` +
-//! `crate::des::animation::frame_recorder::FrameRecorder` once the scene exists.
 //! The structural evaluator itself is fully ported in
-//! `crate::des::main_observability_controllability`.
+//! `crate::des::main_observability_controllability`; this renderer is the
+//! animated storyboard counterpart.
+
+#![allow(dead_code)]
+
+use std::io;
+use std::path::Path;
+
+use crate::des::animation::frame_recorder::{FrameRecorder, FrameRecorderOpts};
+use crate::des::animation::scenes::obs_ctrl_scene::{ObsCtrlScene, OC_STAGE_H, OC_STAGE_W};
+
+struct ObsCtrlAnimator;
+
+impl ObsCtrlAnimator {
+    fn output_paths() -> (String, String) {
+        let dir = Path::new("out").join("obs-ctrl");
+        let frames = dir.join("animation.frames.jsonl");
+        let html = dir.join("animation.html");
+        (
+            frames.to_string_lossy().into_owned(),
+            html.to_string_lossy().into_owned(),
+        )
+    }
+
+    fn run(&self) -> io::Result<()> {
+        let scene = ObsCtrlScene::new();
+        let (frames_path, html_path) = Self::output_paths();
+        let mut recorder = FrameRecorder::new(FrameRecorderOpts {
+            frames_path,
+            html_path: Some(html_path.clone()),
+            width: OC_STAGE_W,
+            height: OC_STAGE_H,
+            fps: Some(0.8),
+            title: Some("Controllability & Observability".to_string()),
+            subtitle: Some(
+                "Kalman rank tests, MDP reachability, and POMDP distinguishability.".to_string(),
+            ),
+            background: Some("#0b1021".to_string()),
+            live_tick_line: Some(false),
+            record_every_ticks: Some(1.0),
+            visual_blocks: None,
+        })?;
+        for (i, step) in scene.steps().iter().cloned().enumerate() {
+            recorder.frame(i as f64, i as f64, || step);
+        }
+        let recorded = recorder.get_frame_count();
+        let anim = recorder.finish()?;
+        println!(
+            "Obs/Ctrl animation: {} storyboard frames -> {}",
+            anim.frames.len().max(recorded as usize),
+            html_path
+        );
+        Ok(())
+    }
+}
 
 /// Entry point (TS top-level script).
 pub fn run() {
-    let out = std::path::Path::new("out")
-        .join("obs-ctrl")
-        .join("animation.html");
-    println!(
-        "Obs/Ctrl animation: omitted in Rust port — the storyboard scene \
-         (animation::scenes::obs_ctrl_scene) is not yet ported; would write {} (see PORT NOTE). \
-         Run `main_observability_controllability` for the evaluator itself.",
-        out.display()
-    );
+    ObsCtrlAnimator
+        .run()
+        .expect("write observability/controllability animation");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn output_path_matches_site_link() {
+        let (_, html) = ObsCtrlAnimator::output_paths();
+        assert!(html.ends_with("out/obs-ctrl/animation.html"));
+    }
 }

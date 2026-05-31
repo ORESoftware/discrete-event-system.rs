@@ -53,12 +53,21 @@ impl Executive for StudioExecutive {
     }
 
     fn capabilities(&self) -> ExecCapabilities {
-        ExecCapabilities { dataflow: true, discrete: self.compiled.has_state(), ..Default::default() }
+        ExecCapabilities {
+            dataflow: true,
+            discrete: self.compiled.has_state(),
+            ..Default::default()
+        }
     }
 
     fn run(&mut self) -> RunArtifact {
         let out = studio_run(&mut self.compiled, self.steps, self.dt);
-        out.to_artifact("studio", &self.title, &self.description, self.blocks.clone())
+        out.to_artifact(
+            "studio",
+            &self.title,
+            &self.description,
+            self.blocks.clone(),
+        )
     }
 }
 
@@ -127,7 +136,14 @@ impl Executive for HybridExecutive {
             &self.description,
             frames,
             results,
-            vec![UiControl::range("speed", "Speed (fps)", 1.0, 60.0, 1.0, 20.0)],
+            vec![UiControl::range(
+                "speed",
+                "Speed (fps)",
+                1.0,
+                60.0,
+                1.0,
+                20.0,
+            )],
             &summary,
         )
     }

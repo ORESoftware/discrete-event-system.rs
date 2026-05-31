@@ -86,13 +86,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // The same seam routes a continuous/event workload to the hybrid executive.
     let (compiled, opts) = hybrid_demos::closed_loop()?;
-    let mut hybrid_exec =
-        HybridExecutive::new(compiled, opts, "closed-loop", "Hybrid Block Diagram", "Closed-loop control.");
+    let mut hybrid_exec = HybridExecutive::new(
+        compiled,
+        opts,
+        "closed-loop",
+        "Hybrid Block Diagram",
+        "Closed-loop control.",
+    );
     println!(
         "exec: a continuous+events workload → routed to `{}`",
-        select(ExecCapabilities { continuous: true, events: true, ..Default::default() })
-            .unwrap()
-            .kind
+        select(ExecCapabilities {
+            continuous: true,
+            events: true,
+            ..Default::default()
+        })
+        .unwrap()
+        .kind
     );
     let _ = hybrid_exec.run();
 

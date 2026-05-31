@@ -142,8 +142,11 @@ pub trait PluginTransport {
     /// Run the plugin, optionally handing it a JSON `input` spec, and return the
     /// parsed output. Implementations must not panic on plugin misbehavior —
     /// every failure is a [`PluginError`].
-    fn run(&self, manifest: &PluginManifest, input: Option<&Value>)
-        -> Result<PluginRun, PluginError>;
+    fn run(
+        &self,
+        manifest: &PluginManifest,
+        input: Option<&Value>,
+    ) -> Result<PluginRun, PluginError>;
 }
 
 /// The built-in transport: spawn a child process. Streams an optional JSON spec
@@ -205,7 +208,11 @@ fn run_process(manifest: &PluginManifest, input: Option<&Value>) -> Result<Plugi
         command.env(key, value);
     }
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    command.stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() });
+    command.stdin(if input.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    });
 
     let mut child = command
         .spawn()
@@ -249,10 +256,14 @@ fn run_process(manifest: &PluginManifest, input: Option<&Value>) -> Result<Plugi
                 // them so the host returns immediately on a hung plugin.
                 drop(out_handle);
                 drop(err_handle);
-                return Err(PluginError::Timeout { after_ms: dur.as_millis() as u64 });
+                return Err(PluginError::Timeout {
+                    after_ms: dur.as_millis() as u64,
+                });
             }
         },
-        None => child.wait().map_err(|e| PluginError::Spawn(e.to_string()))?,
+        None => child
+            .wait()
+            .map_err(|e| PluginError::Spawn(e.to_string()))?,
     };
 
     let stdout_bytes = out_handle.join().unwrap_or_default();
@@ -260,7 +271,10 @@ fn run_process(manifest: &PluginManifest, input: Option<&Value>) -> Result<Plugi
     let stderr = String::from_utf8_lossy(&stderr_bytes).into_owned();
 
     if !status.success() {
-        return Err(PluginError::NonZeroExit { code: status.code(), stderr });
+        return Err(PluginError::NonZeroExit {
+            code: status.code(),
+            stderr,
+        });
     }
 
     let stdout = String::from_utf8_lossy(&stdout_bytes);

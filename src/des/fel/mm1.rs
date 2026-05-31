@@ -217,7 +217,12 @@ mod tests {
         assert!((r.lq - 0.5).abs() < 0.1, "Lq={}", r.lq);
         assert!((r.throughput - 0.5).abs() < 0.03, "X={}", r.throughput);
         // Little's law derived wait vs directly measured wait should agree.
-        assert!((r.wq - r.wq_direct).abs() < 0.1, "wq={} wq_direct={}", r.wq, r.wq_direct);
+        assert!(
+            (r.wq - r.wq_direct).abs() < 0.1,
+            "wq={} wq_direct={}",
+            r.wq,
+            r.wq_direct
+        );
     }
 
     #[test]

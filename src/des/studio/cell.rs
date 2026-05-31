@@ -37,11 +37,22 @@ pub trait RuntimeOp {
 pub enum SourceKind {
     Const(f64),
     /// `before` until `t0`, then `after`.
-    Step { t0: f64, before: f64, after: f64 },
+    Step {
+        t0: f64,
+        before: f64,
+        after: f64,
+    },
     /// `slope * t + intercept`.
-    Ramp { slope: f64, intercept: f64 },
+    Ramp {
+        slope: f64,
+        intercept: f64,
+    },
     /// `amp * sin(2π·freq·t) + bias`.
-    Sine { amp: f64, freq: f64, bias: f64 },
+    Sine {
+        amp: f64,
+        freq: f64,
+        bias: f64,
+    },
 }
 
 pub struct Source {
@@ -51,7 +62,10 @@ pub struct Source {
 
 impl Source {
     pub fn new(name: &str, kind: SourceKind) -> Self {
-        Source { name: name.to_string(), kind }
+        Source {
+            name: name.to_string(),
+            kind,
+        }
     }
     pub fn value(&self, t: f64) -> f64 {
         match &self.kind {
@@ -95,7 +109,10 @@ pub struct Gain {
 }
 impl Gain {
     pub fn new(name: &str, k: f64) -> Self {
-        Gain { name: name.to_string(), k }
+        Gain {
+            name: name.to_string(),
+            k,
+        }
     }
 }
 impl Transform<f64, f64> for Gain {
@@ -112,7 +129,11 @@ pub struct Saturation {
 }
 impl Saturation {
     pub fn new(name: &str, lo: f64, hi: f64) -> Self {
-        Saturation { name: name.to_string(), lo, hi }
+        Saturation {
+            name: name.to_string(),
+            lo,
+            hi,
+        }
     }
 }
 impl Transform<f64, f64> for Saturation {
@@ -129,7 +150,11 @@ pub struct Affine {
 }
 impl Affine {
     pub fn new(name: &str, m: f64, b: f64) -> Self {
-        Affine { name: name.to_string(), m, b }
+        Affine {
+            name: name.to_string(),
+            m,
+            b,
+        }
     }
 }
 impl Transform<f64, f64> for Affine {
@@ -169,7 +194,10 @@ pub struct Sum {
 }
 impl Sum {
     pub fn new(name: &str, weights: Vec<f64>) -> Self {
-        Sum { name: name.to_string(), weights }
+        Sum {
+            name: name.to_string(),
+            weights,
+        }
     }
 }
 impl RuntimeOp for Sum {
@@ -203,7 +231,11 @@ pub struct Integrator {
 }
 impl Integrator {
     pub fn new(name: &str, x0: f64) -> Self {
-        Integrator { name: name.to_string(), state: x0, last_t: 0.0 }
+        Integrator {
+            name: name.to_string(),
+            state: x0,
+            last_t: 0.0,
+        }
     }
 }
 impl StatefulTransform<(f64, f64), f64> for Integrator {
@@ -244,7 +276,10 @@ pub struct Map {
 }
 impl Map {
     pub fn new(name: &str, f: impl Fn(f64) -> f64 + 'static) -> Self {
-        Map { name: name.to_string(), f: Box::new(f) }
+        Map {
+            name: name.to_string(),
+            f: Box::new(f),
+        }
     }
 }
 impl RuntimeOp for Map {

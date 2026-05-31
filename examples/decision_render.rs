@@ -58,7 +58,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //    cells of one-or-more Layer-2 elements), rendered as a live wiring diagram.
     for demo in ["signal-chain", "mixer"] {
         let studio = registry.run("studio", &json!({ "demo": demo }))?;
-        std::fs::write(format!("out/decision/studio-{demo}.html"), studio.to_player_html())?;
+        std::fs::write(
+            format!("out/decision/studio-{demo}.html"),
+            studio.to_player_html(),
+        )?;
         println!("studio: {} — {}", demo, studio.summary);
     }
 

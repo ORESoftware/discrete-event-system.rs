@@ -171,12 +171,15 @@ impl StudioGraph {
         to_node: usize,
         to_port: usize,
     ) -> Result<(), StudioError> {
-        let src = self.nodes.get(from_node).ok_or_else(|| StudioError::PortOutOfRange {
-            node: format!("#{from_node}"),
-            port: from_port,
-            available: 0,
-            direction: "output",
-        })?;
+        let src = self
+            .nodes
+            .get(from_node)
+            .ok_or_else(|| StudioError::PortOutOfRange {
+                node: format!("#{from_node}"),
+                port: from_port,
+                available: 0,
+                direction: "output",
+            })?;
         if from_port >= src.n_out() {
             return Err(StudioError::PortOutOfRange {
                 node: src.id.clone(),
@@ -185,12 +188,15 @@ impl StudioGraph {
                 direction: "output",
             });
         }
-        let dst = self.nodes.get(to_node).ok_or_else(|| StudioError::PortOutOfRange {
-            node: format!("#{to_node}"),
-            port: to_port,
-            available: 0,
-            direction: "input",
-        })?;
+        let dst = self
+            .nodes
+            .get(to_node)
+            .ok_or_else(|| StudioError::PortOutOfRange {
+                node: format!("#{to_node}"),
+                port: to_port,
+                available: 0,
+                direction: "input",
+            })?;
         if to_port >= dst.n_in() {
             return Err(StudioError::PortOutOfRange {
                 node: dst.id.clone(),
@@ -199,7 +205,12 @@ impl StudioGraph {
                 direction: "input",
             });
         }
-        self.wires.push(Wire { from_node, from_port, to_node, to_port });
+        self.wires.push(Wire {
+            from_node,
+            from_port,
+            to_node,
+            to_port,
+        });
         Ok(())
     }
 
@@ -302,11 +313,21 @@ mod tests {
         VisualNode::new(
             "src",
             NodeRole::Source,
-            RuntimeCell::single(Box::new(Source::new("ramp", SourceKind::Ramp { slope: 1.0, intercept: 0.0 }))),
+            RuntimeCell::single(Box::new(Source::new(
+                "ramp",
+                SourceKind::Ramp {
+                    slope: 1.0,
+                    intercept: 0.0,
+                },
+            ))),
         )
     }
     fn gain(id: &str) -> VisualNode {
-        VisualNode::new(id, NodeRole::Transform, RuntimeCell::single(Box::new(Gain::new("g", 2.0))))
+        VisualNode::new(
+            id,
+            NodeRole::Transform,
+            RuntimeCell::single(Box::new(Gain::new("g", 2.0))),
+        )
     }
 
     #[test]
@@ -337,12 +358,13 @@ mod tests {
     fn double_driven_input_is_rejected() {
         let mut g = StudioGraph::new();
         let s1 = g.add(src()).unwrap();
-        let s2 = g.add(VisualNode::new(
-            "src2",
-            NodeRole::Source,
-            RuntimeCell::single(Box::new(Source::new("c", SourceKind::Const(1.0)))),
-        ))
-        .unwrap();
+        let s2 = g
+            .add(VisualNode::new(
+                "src2",
+                NodeRole::Source,
+                RuntimeCell::single(Box::new(Source::new("c", SourceKind::Const(1.0)))),
+            ))
+            .unwrap();
         let t = g.add(gain("g1")).unwrap();
         g.connect(s1, 0, t, 0).unwrap();
         g.connect(s2, 0, t, 0).unwrap();

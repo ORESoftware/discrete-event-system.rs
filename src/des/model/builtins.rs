@@ -41,7 +41,10 @@ impl ModelCitizen for HybridCitizen {
     }
 
     fn run_json(&self, spec: &Value) -> Result<RunArtifact, CitizenError> {
-        let demo = spec.get("demo").and_then(Value::as_str).unwrap_or("closed-loop");
+        let demo = spec
+            .get("demo")
+            .and_then(Value::as_str)
+            .unwrap_or("closed-loop");
         let (compiled, opts) = match demo {
             "bouncing-ball" => hybrid_demos::bouncing_ball(),
             "closed-loop" => hybrid_demos::closed_loop(),
@@ -73,7 +76,14 @@ impl ModelCitizen for HybridCitizen {
             "Mixed continuous/discrete/event simulation rendered as an animated scope.",
             frames,
             results,
-            vec![UiControl::range("speed", "Speed (fps)", 1.0, 60.0, 1.0, 20.0)],
+            vec![UiControl::range(
+                "speed",
+                "Speed (fps)",
+                1.0,
+                60.0,
+                1.0,
+                20.0,
+            )],
             &summary,
         ))
     }
@@ -113,10 +123,18 @@ mod tests {
                 .run(&desc.kind, &desc.example_spec)
                 .unwrap_or_else(|e| panic!("kind {} failed: {e}", desc.kind));
             assert_eq!(art.kind, desc.kind);
-            assert!(!art.frames.is_empty(), "kind {} produced no frames", desc.kind);
+            assert!(
+                !art.frames.is_empty(),
+                "kind {} produced no frames",
+                desc.kind
+            );
             // Every artifact renders to a non-trivial HTML page.
             let html = art.to_player_html();
-            assert!(html.contains("<html") || html.contains("<!DOCTYPE"), "kind {} html", desc.kind);
+            assert!(
+                html.contains("<html") || html.contains("<!DOCTYPE"),
+                "kind {} html",
+                desc.kind
+            );
         }
     }
 

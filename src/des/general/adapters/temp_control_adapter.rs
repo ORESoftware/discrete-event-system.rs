@@ -226,13 +226,23 @@ pub fn temp_control_schema() -> ParamSchema {
                 ),
             ),
             (
+                "Q_min".to_string(),
+                num(
+                    None,
+                    Some(0.0),
+                    None,
+                    Some(0.0),
+                    Some("Max cooling power as a negative command (kW); 0 keeps the model heating-only"),
+                ),
+            ),
+            (
                 "Q_max".to_string(),
                 num(
                     Some(0.0),
                     None,
                     None,
                     Some(5.0),
-                    Some("Max heater power (kW)"),
+                    Some("Max heating power (kW)"),
                 ),
             ),
             (

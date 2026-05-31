@@ -30,7 +30,10 @@ impl ModelCitizen for StudioCitizen {
     }
 
     fn run_json(&self, spec: &Value) -> Result<RunArtifact, CitizenError> {
-        let demo_name = spec.get("demo").and_then(Value::as_str).unwrap_or("signal-chain");
+        let demo_name = spec
+            .get("demo")
+            .and_then(Value::as_str)
+            .unwrap_or("signal-chain");
         let demo: StudioDemo = match demo_name {
             "signal-chain" => signal_chain(),
             "mixer" => mixer(),

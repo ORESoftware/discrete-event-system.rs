@@ -40,7 +40,13 @@ pub fn signal_chain() -> Result<StudioDemo, StudioError> {
         VisualNode::new(
             "input",
             NodeRole::Source,
-            RuntimeCell::single(Box::new(Source::new("ramp", SourceKind::Ramp { slope: 1.0, intercept: 0.0 }))),
+            RuntimeCell::single(Box::new(Source::new(
+                "ramp",
+                SourceKind::Ramp {
+                    slope: 1.0,
+                    intercept: 0.0,
+                },
+            ))),
         )
         .with_label("input (ramp)")
         .at(40.0, 130.0),
@@ -90,7 +96,14 @@ pub fn mixer() -> Result<StudioDemo, StudioError> {
         VisualNode::new(
             "carrier",
             NodeRole::Source,
-            RuntimeCell::single(Box::new(Source::new("sine", SourceKind::Sine { amp: 1.0, freq: 0.25, bias: 0.0 }))),
+            RuntimeCell::single(Box::new(Source::new(
+                "sine",
+                SourceKind::Sine {
+                    amp: 1.0,
+                    freq: 0.25,
+                    bias: 0.0,
+                },
+            ))),
         )
         .with_label("carrier (sine)")
         .at(40.0, 60.0),
@@ -162,7 +175,11 @@ mod tests {
             .iter()
             .find(|n| n.id == "shaper")
             .unwrap();
-        assert_eq!(shaper.cell.len(), 2, "one block should hold two Layer-2 ops");
+        assert_eq!(
+            shaper.cell.len(),
+            2,
+            "one block should hold two Layer-2 ops"
+        );
     }
 
     #[test]
@@ -172,13 +189,22 @@ mod tests {
         // ramp = t; gain 0.5 → 0.5t; saturates at 2 once t ≥ 4 (step 40+).
         let out = run_out.series("output").unwrap();
         assert!((out[10] - 0.5).abs() < 1e-9, "t=1 → 0.5; got {}", out[10]);
-        assert!((out[70] - 2.0).abs() < 1e-9, "t=7 → saturated 2; got {}", out[70]);
+        assert!(
+            (out[70] - 2.0).abs() < 1e-9,
+            "t=7 → saturated 2; got {}",
+            out[70]
+        );
     }
 
     #[test]
     fn mixer_combines_two_inputs_through_a_two_op_cell() {
         let mut demo = mixer().unwrap();
-        let mix = demo.compiled.nodes().iter().find(|n| n.id == "mix").unwrap();
+        let mix = demo
+            .compiled
+            .nodes()
+            .iter()
+            .find(|n| n.id == "mix")
+            .unwrap();
         assert_eq!(mix.n_in(), 2, "mix block has two input ports");
         assert_eq!(mix.cell.len(), 2, "mix block packs sum ▸ gain");
         let run_out = run(&mut demo.compiled, demo.steps, demo.dt);

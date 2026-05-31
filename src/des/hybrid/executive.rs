@@ -29,13 +29,21 @@ pub struct SimOptions {
 
 impl Default for SimOptions {
     fn default() -> Self {
-        SimOptions { t_end: 10.0, max_step: 0.01, zc_tol: 1e-9 }
+        SimOptions {
+            t_end: 10.0,
+            max_step: 0.01,
+            zc_tol: 1e-9,
+        }
     }
 }
 
 impl SimOptions {
     pub fn new(t_end: f64, max_step: f64) -> Self {
-        SimOptions { t_end, max_step, zc_tol: 1e-9 }
+        SimOptions {
+            t_end,
+            max_step,
+            zc_tol: 1e-9,
+        }
     }
 }
 
@@ -65,7 +73,12 @@ impl Trace {
                 }
             }
         }
-        Trace { columns, times: Vec::new(), rows: Vec::new(), events: 0 }
+        Trace {
+            columns,
+            times: Vec::new(),
+            rows: Vec::new(),
+            events: 0,
+        }
     }
 
     fn record(&mut self, t: f64, outs: &[Vec<Vec<f64>>]) {
@@ -96,7 +109,10 @@ impl Trace {
     /// `(times, values)` for a named column.
     pub fn series(&self, name: &str) -> Option<(Vec<f64>, Vec<f64>)> {
         let idx = self.column_index(name)?;
-        Some((self.times.clone(), self.rows.iter().map(|r| r[idx]).collect()))
+        Some((
+            self.times.clone(),
+            self.rows.iter().map(|r| r[idx]).collect(),
+        ))
     }
 
     /// CSV with a leading `t` column.

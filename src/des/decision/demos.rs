@@ -21,15 +21,31 @@ pub fn machine_maintenance_mdp() -> MdpSpec {
         // Operate.
         let operate = if c + 1 < n {
             vec![
-                MdpTransition { prob: 1.0 - degrade_p, reward: revenue[c], next: c },
-                MdpTransition { prob: degrade_p, reward: revenue[c], next: c + 1 },
+                MdpTransition {
+                    prob: 1.0 - degrade_p,
+                    reward: revenue[c],
+                    next: c,
+                },
+                MdpTransition {
+                    prob: degrade_p,
+                    reward: revenue[c],
+                    next: c + 1,
+                },
             ]
         } else {
             // Broken: operating loses money and stays broken.
-            vec![MdpTransition { prob: 1.0, reward: revenue[c], next: c }]
+            vec![MdpTransition {
+                prob: 1.0,
+                reward: revenue[c],
+                next: c,
+            }]
         };
         // Repair: back to new (condition 0) at a cost.
-        let repair = vec![MdpTransition { prob: 1.0, reward: -repair_cost, next: 0 }];
+        let repair = vec![MdpTransition {
+            prob: 1.0,
+            reward: -repair_cost,
+            next: 0,
+        }];
         transitions.push(vec![operate, repair]);
     }
 
@@ -147,7 +163,10 @@ mod tests {
         let b1 = belief_update(&closure, &b0, 0, 0);
         let b2 = belief_update(&closure, &b1, 0, 0);
         assert!(b1.weights[0] > 0.5, "belief should shift toward tiger-left");
-        assert!(b2.weights[0] > b1.weights[0], "belief should sharpen further");
+        assert!(
+            b2.weights[0] > b1.weights[0],
+            "belief should sharpen further"
+        );
         assert!(b2.entropy() < b0.entropy(), "entropy should drop");
     }
 

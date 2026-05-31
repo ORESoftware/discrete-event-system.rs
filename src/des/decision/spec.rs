@@ -136,7 +136,11 @@ impl MdpSpec {
 
     /// Largest action count across states (for layout / dense tables).
     pub fn max_actions(&self) -> usize {
-        self.transitions.iter().map(|av| av.len()).max().unwrap_or(0)
+        self.transitions
+            .iter()
+            .map(|av| av.len())
+            .max()
+            .unwrap_or(0)
     }
 
     /// Bridge to the closure-based [`MDPSpec`] consumed by `value_iteration`.
@@ -242,16 +246,25 @@ impl PomdpSpec {
         check_dist3(&self.transition, ns, na, ns, "transition")?;
         check_dist3(&self.observation, ns, na, no, "observation")?;
         if self.reward.len() != ns {
-            return Err(format!("reward has {} rows, expected numStates={ns}", self.reward.len()));
+            return Err(format!(
+                "reward has {} rows, expected numStates={ns}",
+                self.reward.len()
+            ));
         }
         for (s, row) in self.reward.iter().enumerate() {
             if row.len() != na {
-                return Err(format!("reward[{s}] has {} entries, expected numActions={na}", row.len()));
+                return Err(format!(
+                    "reward[{s}] has {} entries, expected numActions={na}",
+                    row.len()
+                ));
             }
         }
         if let Some(b) = &self.initial_belief {
             if b.len() != ns {
-                return Err(format!("initialBelief has {} entries, expected numStates={ns}", b.len()));
+                return Err(format!(
+                    "initialBelief has {} entries, expected numStates={ns}",
+                    b.len()
+                ));
             }
             let sum: f64 = b.iter().sum();
             if (sum - 1.0).abs() > 1e-6 {
@@ -262,13 +275,22 @@ impl PomdpSpec {
     }
 
     pub fn state_label(&self, s: usize) -> String {
-        self.state_labels.get(s).cloned().unwrap_or_else(|| format!("s{s}"))
+        self.state_labels
+            .get(s)
+            .cloned()
+            .unwrap_or_else(|| format!("s{s}"))
     }
     pub fn action_label(&self, a: usize) -> String {
-        self.action_labels.get(a).cloned().unwrap_or_else(|| format!("a{a}"))
+        self.action_labels
+            .get(a)
+            .cloned()
+            .unwrap_or_else(|| format!("a{a}"))
     }
     pub fn observation_label(&self, o: usize) -> String {
-        self.observation_labels.get(o).cloned().unwrap_or_else(|| format!("o{o}"))
+        self.observation_labels
+            .get(o)
+            .cloned()
+            .unwrap_or_else(|| format!("o{o}"))
     }
 
     /// The initial belief vector (uniform if unspecified).
@@ -319,7 +341,10 @@ fn check_dist3(
     }
     for (i, row) in t.iter().enumerate() {
         if row.len() != d1 {
-            return Err(format!("{name}[{i}] has {} action entries, expected {d1}", row.len()));
+            return Err(format!(
+                "{name}[{i}] has {} action entries, expected {d1}",
+                row.len()
+            ));
         }
         for (j, dist) in row.iter().enumerate() {
             if dist.len() != d2 {
@@ -347,11 +372,18 @@ mod tests {
             schema: mdp_schema(),
             num_states: 2,
             transitions: vec![
-                vec![vec![MdpTransition { prob: 1.0, reward: 0.0, next: 1 }]],
+                vec![vec![MdpTransition {
+                    prob: 1.0,
+                    reward: 0.0,
+                    next: 1,
+                }]],
                 vec![],
             ],
             discount: 0.9,
-            terminal: vec![TerminalState { state: 1, reward: 1.0 }],
+            terminal: vec![TerminalState {
+                state: 1,
+                reward: 1.0,
+            }],
             state_labels: vec!["start".into(), "goal".into()],
             action_labels: vec!["go".into()],
         };
@@ -367,7 +399,11 @@ mod tests {
         let spec = MdpSpec {
             schema: mdp_schema(),
             num_states: 1,
-            transitions: vec![vec![vec![MdpTransition { prob: 0.5, reward: 0.0, next: 0 }]]],
+            transitions: vec![vec![vec![MdpTransition {
+                prob: 0.5,
+                reward: 0.0,
+                next: 0,
+            }]]],
             discount: 0.9,
             terminal: vec![],
             state_labels: vec![],

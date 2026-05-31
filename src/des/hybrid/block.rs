@@ -140,5 +140,13 @@ pub trait Block {
 
     /// Handle a located event. `zc_index` is the *local* crossing index that
     /// fired; the block may reset its continuous/discrete state in place.
-    fn on_event(&self, _t: f64, _xc: &mut [f64], _xd: &mut Vec<f64>, _u: &[Signal], _zc_index: usize) {}
+    fn on_event(
+        &self,
+        _t: f64,
+        _xc: &mut [f64],
+        _xd: &mut Vec<f64>,
+        _u: &[Signal],
+        _zc_index: usize,
+    ) {
+    }
 }

@@ -20,7 +20,10 @@ pub struct Constant {
 
 impl Constant {
     pub fn new(name: &str, value: Vec<f64>) -> Self {
-        Constant { name: name.to_string(), value }
+        Constant {
+            name: name.to_string(),
+            value,
+        }
     }
     pub fn scalar(name: &str, value: f64) -> Self {
         Constant::new(name, vec![value])
@@ -56,7 +59,11 @@ pub struct Gain {
 
 impl Gain {
     pub fn new(name: &str, width: usize, k: f64) -> Self {
-        Gain { name: name.to_string(), width, k }
+        Gain {
+            name: name.to_string(),
+            width,
+            k,
+        }
     }
 }
 
@@ -81,7 +88,11 @@ pub struct Sum {
 
 impl Sum {
     pub fn new(name: &str, width: usize, signs: Vec<f64>) -> Self {
-        Sum { name: name.to_string(), width, signs }
+        Sum {
+            name: name.to_string(),
+            width,
+            signs,
+        }
     }
 }
 
@@ -114,7 +125,11 @@ pub struct Saturation {
 
 impl Saturation {
     pub fn new(name: &str, lo: f64, hi: f64) -> Self {
-        Saturation { name: name.to_string(), lo, hi }
+        Saturation {
+            name: name.to_string(),
+            lo,
+            hi,
+        }
     }
 }
 
@@ -147,7 +162,10 @@ pub struct Integrator {
 
 impl Integrator {
     pub fn new(name: &str, init: Vec<f64>) -> Self {
-        Integrator { name: name.to_string(), init }
+        Integrator {
+            name: name.to_string(),
+            init,
+        }
     }
 }
 
@@ -201,7 +219,17 @@ impl StateSpace {
         let n = a.len();
         let m = if b.is_empty() { 0 } else { b[0].len() };
         let p = c.len();
-        StateSpace { name: name.to_string(), a, b, c, d, n, m, p, x0: vec![0.0; n] }
+        StateSpace {
+            name: name.to_string(),
+            a,
+            b,
+            c,
+            d,
+            n,
+            m,
+            p,
+            x0: vec![0.0; n],
+        }
     }
 
     pub fn with_x0(mut self, x0: Vec<f64>) -> Self {
@@ -261,7 +289,13 @@ pub struct BouncingBall {
 
 impl BouncingBall {
     pub fn new(name: &str, h0: f64, v0: f64, restitution: f64) -> Self {
-        BouncingBall { name: name.to_string(), g: 9.81, restitution, h0, v0 }
+        BouncingBall {
+            name: name.to_string(),
+            g: 9.81,
+            restitution,
+            h0,
+            v0,
+        }
     }
 }
 
@@ -316,7 +350,13 @@ pub struct DiscretePi {
 
 impl DiscretePi {
     pub fn new(name: &str, kp: f64, ki: f64, period: f64) -> Self {
-        DiscretePi { name: name.to_string(), kp, ki, period, offset: 0.0 }
+        DiscretePi {
+            name: name.to_string(),
+            kp,
+            ki,
+            period,
+            offset: 0.0,
+        }
     }
 }
 
@@ -328,7 +368,10 @@ impl Block for DiscretePi {
         PortSpec::siso(1, 1)
     }
     fn sample_time(&self) -> SampleTime {
-        SampleTime::Discrete { period: self.period, offset: self.offset }
+        SampleTime::Discrete {
+            period: self.period,
+            offset: self.offset,
+        }
     }
     fn n_disc(&self) -> usize {
         2 // [integral, u_held]
@@ -358,7 +401,10 @@ pub struct Counter {
 
 impl Counter {
     pub fn new(name: &str, period: f64) -> Self {
-        Counter { name: name.to_string(), period }
+        Counter {
+            name: name.to_string(),
+            period,
+        }
     }
 }
 
@@ -370,7 +416,10 @@ impl Block for Counter {
         PortSpec::source(1)
     }
     fn sample_time(&self) -> SampleTime {
-        SampleTime::Discrete { period: self.period, offset: 0.0 }
+        SampleTime::Discrete {
+            period: self.period,
+            offset: 0.0,
+        }
     }
     fn n_disc(&self) -> usize {
         1

@@ -45,20 +45,36 @@ pub enum HybridError {
 impl std::fmt::Display for HybridError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            HybridError::PortOutOfRange { block, port, is_input } => write!(
+            HybridError::PortOutOfRange {
+                block,
+                port,
+                is_input,
+            } => write!(
                 f,
                 "{} port {port} out of range on block `{block}`",
                 if *is_input { "input" } else { "output" }
             ),
-            HybridError::WidthMismatch { from, to, src_width, dst_width } => write!(
+            HybridError::WidthMismatch {
+                from,
+                to,
+                src_width,
+                dst_width,
+            } => write!(
                 f,
                 "width mismatch wiring `{from}` ({src_width}) -> `{to}` ({dst_width})"
             ),
             HybridError::InputAlreadyDriven { block, port } => {
-                write!(f, "input port {port} of `{block}` already driven by another wire")
+                write!(
+                    f,
+                    "input port {port} of `{block}` already driven by another wire"
+                )
             }
             HybridError::AlgebraicLoop(names) => {
-                write!(f, "algebraic loop among direct-feedthrough blocks: {}", names.join(" -> "))
+                write!(
+                    f,
+                    "algebraic loop among direct-feedthrough blocks: {}",
+                    names.join(" -> ")
+                )
             }
         }
     }
@@ -120,13 +136,22 @@ impl Diagram {
                 dst_width: dw,
             });
         }
-        if self.wires.iter().any(|w| w.dst == dst && w.dst_port == dst_port) {
+        if self
+            .wires
+            .iter()
+            .any(|w| w.dst == dst && w.dst_port == dst_port)
+        {
             return Err(HybridError::InputAlreadyDriven {
                 block: self.blocks[dst].name().to_string(),
                 port: dst_port,
             });
         }
-        self.wires.push(Wire { src, src_port, dst, dst_port });
+        self.wires.push(Wire {
+            src,
+            src_port,
+            dst,
+            dst_port,
+        });
         Ok(())
     }
 
@@ -446,7 +471,13 @@ impl Compiled {
     }
 
     /// Run discrete `update` for block `b` using inputs gathered from `outs`.
-    pub(super) fn discrete_update(&self, b: usize, t: f64, xd: &mut [Vec<f64>], outs: &[Vec<Signal>]) {
+    pub(super) fn discrete_update(
+        &self,
+        b: usize,
+        t: f64,
+        xd: &mut [Vec<f64>],
+        outs: &[Vec<Signal>],
+    ) {
         let u = self.gather(b, outs);
         let mut state = std::mem::take(&mut xd[b]);
         self.blocks[b].update(t, &mut state, &u);

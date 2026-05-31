@@ -172,11 +172,18 @@ mod tests {
             schema: "des/mdp/v1".into(),
             num_states: 2,
             transitions: vec![
-                vec![vec![MdpTransition { prob: 1.0, reward: 2.0, next: 1 }]],
+                vec![vec![MdpTransition {
+                    prob: 1.0,
+                    reward: 2.0,
+                    next: 1,
+                }]],
                 vec![],
             ],
             discount: 0.9,
-            terminal: vec![TerminalState { state: 1, reward: 0.0 }],
+            terminal: vec![TerminalState {
+                state: 1,
+                reward: 0.0,
+            }],
             state_labels: vec![],
             action_labels: vec![],
         };

@@ -776,7 +776,10 @@ mod tests {
         let m = s / n as f64;
         let var = s2 / n as f64 - m * m;
         assert!((m - mu).abs() < 0.03, "normal mean {m} vs {mu}");
-        assert!((var - sigma * sigma).abs() < 0.15, "normal var {var} vs 4.0");
+        assert!(
+            (var - sigma * sigma).abs() < 0.15,
+            "normal var {var} vs 4.0"
+        );
     }
 
     #[test]
@@ -843,7 +846,10 @@ mod tests {
             seen_hi |= x == hi;
             s += x as f64;
         }
-        assert!(seen_lo && seen_hi, "both inclusive endpoints must be reachable");
+        assert!(
+            seen_lo && seen_hi,
+            "both inclusive endpoints must be reachable"
+        );
         assert!((s / n as f64 - (lo + hi) as f64 / 2.0).abs() < 0.05);
     }
 
@@ -852,7 +858,10 @@ mod tests {
         let (r, p) = (4.0, 0.4);
         let theory = r * (1.0 - p) / p;
         let m = mc_mean(444, 100_000, |g| sample_negative_binomial(g, r, p));
-        assert!((m - theory).abs() < 0.2, "neg-binomial mean {m} vs {theory}");
+        assert!(
+            (m - theory).abs() < 0.2,
+            "neg-binomial mean {m} vs {theory}"
+        );
     }
 
     // ---- mixed continuous–discrete ----
@@ -871,7 +880,10 @@ mod tests {
             s += x;
         }
         let zero_frac = zeros as f64 / n as f64;
-        assert!((zero_frac - pi).abs() < 0.02, "atom mass {zero_frac} vs {pi}");
+        assert!(
+            (zero_frac - pi).abs() < 0.02,
+            "atom mass {zero_frac} vs {pi}"
+        );
         assert!(
             (s / n as f64 - (1.0 - pi) / rate).abs() < 0.05,
             "mean vs (1-pi)/rate"
@@ -897,8 +909,14 @@ mod tests {
         let mass_lo = std_normal_cdf((lo - mu) / sigma);
         let mass_hi = 1.0 - std_normal_cdf((hi - mu) / sigma);
         assert!(at_lo > 0 && at_hi > 0, "both atoms must be present");
-        assert!((at_lo as f64 / n as f64 - mass_lo).abs() < 0.02, "lo atom mass");
-        assert!((at_hi as f64 / n as f64 - mass_hi).abs() < 0.02, "hi atom mass");
+        assert!(
+            (at_lo as f64 / n as f64 - mass_lo).abs() < 0.02,
+            "lo atom mass"
+        );
+        assert!(
+            (at_hi as f64 / n as f64 - mass_hi).abs() < 0.02,
+            "hi atom mass"
+        );
     }
 
     #[test]

@@ -574,7 +574,13 @@ mod tests {
             SolverKind::IterativeSolver
         }
         fn contract(&self) -> StreamContract {
-            StreamContract::new("panic", SolverKind::IterativeSolver, "panics", vec![], vec![])
+            StreamContract::new(
+                "panic",
+                SolverKind::IterativeSolver,
+                "panics",
+                vec![],
+                vec![],
+            )
         }
         fn apply(&mut self, _command: &Value) -> Vec<Value> {
             panic!("boom");
@@ -603,7 +609,10 @@ mod tests {
             let back: Value = serde_json::from_str(&json_str).expect("contract round-trips");
             assert_eq!(back["kind"], json!("iterative-solver"));
             assert!(back["model"].as_str().is_some());
-            assert!(back["inputOps"].as_array().map(|a| !a.is_empty()).unwrap_or(false));
+            assert!(back["inputOps"]
+                .as_array()
+                .map(|a| !a.is_empty())
+                .unwrap_or(false));
         }
         // Aliases route integer/mixed-integer programs to the MILP streamer.
         assert!(build_streaming_model("mip").is_some());

@@ -37,7 +37,14 @@ pub fn closed_loop() -> Result<(Compiled, SimOptions), HybridError> {
 pub fn bouncing_ball() -> Result<(Compiled, SimOptions), HybridError> {
     let mut d = Diagram::new();
     d.add(Box::new(BouncingBall::new("ball", 1.0, 0.0, 0.8)));
-    Ok((d.build()?, SimOptions { t_end: 4.0, max_step: 0.02, zc_tol: 1e-10 }))
+    Ok((
+        d.build()?,
+        SimOptions {
+            t_end: 4.0,
+            max_step: 0.02,
+            zc_tol: 1e-10,
+        },
+    ))
 }
 
 /// Constant -> Integrator: `ẋ = 1`, so `x(t) = t` (smallest continuous test).
@@ -81,7 +88,10 @@ mod tests {
         let trace = simulate(&compiled, &SimOptions::new(12.0, 0.01));
         let (_t, y) = trace.series("plant.p0").unwrap();
         let last = *y.last().unwrap();
-        assert!((last - 3.0).abs() < 0.02, "steady-state y = {last}, expected ~3.0");
+        assert!(
+            (last - 3.0).abs() < 0.02,
+            "steady-state y = {last}, expected ~3.0"
+        );
     }
 
     #[test]
@@ -90,7 +100,10 @@ mod tests {
         let trace = simulate(&compiled, &opts);
         let (_t, y) = trace.series("plant.p0").unwrap();
         let last = *y.last().unwrap();
-        assert!((last - 1.0).abs() < 0.02, "closed-loop output {last}, expected ~1.0");
+        assert!(
+            (last - 1.0).abs() < 0.02,
+            "closed-loop output {last}, expected ~1.0"
+        );
     }
 
     #[test]
@@ -118,10 +131,17 @@ mod tests {
     fn bouncing_ball_loses_energy_and_never_penetrates_floor() {
         let (compiled, opts) = bouncing_ball().unwrap();
         let trace = simulate(&compiled, &opts);
-        assert!(trace.events >= 2, "expected multiple bounces, got {}", trace.events);
+        assert!(
+            trace.events >= 2,
+            "expected multiple bounces, got {}",
+            trace.events
+        );
         let (t, h) = trace.series("ball.p0[0]").unwrap(); // height channel
         let min_h = h.iter().cloned().fold(f64::INFINITY, f64::min);
-        assert!(min_h > -1e-2, "ball penetrated the floor: min height {min_h}");
+        assert!(
+            min_h > -1e-2,
+            "ball penetrated the floor: min height {min_h}"
+        );
         // Energy loss: the first rebound peak (e=0.8 => 0.64·h0) is well below h0.
         let peak_after_first_bounce = t
             .iter()
@@ -188,7 +208,11 @@ mod tests {
         let src = d.add(Box::new(Constant::new("v2", vec![1.0, 2.0]))); // width 2
         let g = d.add(Box::new(Gain::new("g", 1, 1.0))); // width 1
         match d.connect((src, 0), (g, 0)) {
-            Err(HybridError::WidthMismatch { src_width, dst_width, .. }) => {
+            Err(HybridError::WidthMismatch {
+                src_width,
+                dst_width,
+                ..
+            }) => {
                 assert_eq!((src_width, dst_width), (2, 1));
             }
             other => panic!("expected WidthMismatch, got {other:?}"),

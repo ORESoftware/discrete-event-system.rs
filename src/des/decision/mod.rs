@@ -32,7 +32,5 @@ pub use solve::{
     solve_mdp, solve_pomdp, solve_pomdp_underlying, MdpMethod, MdpSolution, PomdpMethod, PomdpPlan,
     PomdpSolution,
 };
-pub use spec::{
-    MdpSpec, MdpTransition, PomdpSpec, TerminalState, MDP_SCHEMA, POMDP_SCHEMA,
-};
+pub use spec::{MdpSpec, MdpTransition, PomdpSpec, TerminalState, MDP_SCHEMA, POMDP_SCHEMA};
 pub use viz::{mdp_artifact, pomdp_artifact};

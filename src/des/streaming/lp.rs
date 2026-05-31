@@ -240,7 +240,11 @@ impl StreamingModel for StreamingLp {
                     "Replace the objective weight vector `c` (length == #vars).",
                     json!({"op":"change_objective","c":[1,5]}),
                 ),
-                StreamOp::new("step", "Perform a single simplex pivot.", json!({"op":"step"})),
+                StreamOp::new(
+                    "step",
+                    "Perform a single simplex pivot.",
+                    json!({"op":"step"}),
+                ),
                 StreamOp::new(
                     "solve",
                     "Pivot to optimality from the current tableau.",
@@ -281,15 +285,16 @@ impl StreamingModel for StreamingLp {
                 let coefs = vec_f64(command, "coefs").unwrap_or_default();
                 let rhs = f64_at(command, "rhs", 0.0);
                 if coefs.len() != self.n_vars() {
-                    return vec![error_frame("`coefs` length must equal the number of variables")];
+                    return vec![error_frame(
+                        "`coefs` length must equal the number of variables",
+                    )];
                 }
                 let name = str_at(command, "name");
                 self.lp
                     .as_mut()
                     .unwrap()
                     .apply_add_constraint(&coefs, rhs, name);
-                let mut frames =
-                    vec![json!({"event":"applied","op":"add_constraint","rhs":rhs})];
+                let mut frames = vec![json!({"event":"applied","op":"add_constraint","rhs":rhs})];
                 frames.extend(self.maybe_resolve());
                 frames
             }
@@ -320,8 +325,7 @@ impl StreamingModel for StreamingLp {
                     .as_mut()
                     .unwrap()
                     .apply_add_variable(&column, c_new, name);
-                let mut frames =
-                    vec![json!({"event":"applied","op":"add_variable","c":c_new})];
+                let mut frames = vec![json!({"event":"applied","op":"add_variable","c":c_new})];
                 frames.extend(self.maybe_resolve());
                 frames
             }
@@ -359,7 +363,9 @@ impl StreamingModel for StreamingLp {
             "solution" | "snapshot" => {
                 vec![Self::solution_frame(self.lp.as_ref().unwrap())]
             }
-            other => vec![error_frame(format!("unknown op `{other}` for streaming-lp"))],
+            other => vec![error_frame(format!(
+                "unknown op `{other}` for streaming-lp"
+            ))],
         }
     }
 }
@@ -430,7 +436,10 @@ mod tests {
     #[test]
     fn edit_before_init_errors() {
         let mut m = StreamingLp::new();
-        let frames = drive(&mut m, &[json!({"op":"add_constraint","coefs":[1],"rhs":1})]);
+        let frames = drive(
+            &mut m,
+            &[json!({"op":"add_constraint","coefs":[1],"rhs":1})],
+        );
         assert_eq!(frames[0]["event"], json!("error"));
     }
 }

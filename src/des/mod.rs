@@ -156,6 +156,7 @@ pub mod main_observability_controllability;
 pub mod main_observability_controllability_anim;
 pub mod main_optimization_as_des;
 pub mod main_plumbing_flow;
+pub mod main_shadow_eval;
 pub mod main_shortest_path;
 pub mod main_shortest_path_algo;
 pub mod main_signal_processing;

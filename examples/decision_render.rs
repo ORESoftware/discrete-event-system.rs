@@ -64,7 +64,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //    `queue-line` uses the DES station/movable primitives as Layer-2 ops.
     for demo in ["signal-chain", "mixer", "queue-line"] {
         let studio = registry.run("studio", &json!({ "demo": demo }))?;
-        std::fs::write(format!("out/decision/studio-{demo}.html"), studio.to_player_html())?;
+        std::fs::write(
+            format!("out/decision/studio-{demo}.html"),
+            studio.to_player_html(),
+        )?;
         println!("studio: {} — {}", demo, studio.summary);
     }
 
@@ -83,13 +86,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // The same seam routes a continuous/event workload to the hybrid executive.
     let (compiled, opts) = hybrid_demos::closed_loop()?;
-    let mut hybrid_exec =
-        HybridExecutive::new(compiled, opts, "closed-loop", "Hybrid Block Diagram", "Closed-loop control.");
+    let mut hybrid_exec = HybridExecutive::new(
+        compiled,
+        opts,
+        "closed-loop",
+        "Hybrid Block Diagram",
+        "Closed-loop control.",
+    );
     println!(
         "exec: a continuous+events workload → routed to `{}`",
-        select(ExecCapabilities { continuous: true, events: true, ..Default::default() })
-            .unwrap()
-            .kind
+        select(ExecCapabilities {
+            continuous: true,
+            events: true,
+            ..Default::default()
+        })
+        .unwrap()
+        .kind
     );
     let _ = hybrid_exec.run();
 

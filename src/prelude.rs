@@ -36,7 +36,7 @@ pub use crate::des::exec::{
 
 // Two-layer visual-block + runtime core.
 pub use crate::des::studio::{
-    Composite, CompiledStudio, RuntimeCell, RuntimeOp, StudioGraph, VisualNode, Wire,
+    CompiledStudio, Composite, RuntimeCell, RuntimeOp, StudioGraph, VisualNode, Wire,
 };
 
 // JSONL streaming solver contract + registry.

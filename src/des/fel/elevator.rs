@@ -396,7 +396,9 @@ pub fn elevator_mdp_spec() -> Value {
                     for j in 0..floors {
                         outs.push(json!({"prob": each, "reward": reward, "next": enc(f2, j)}));
                     }
-                    outs.push(json!({"prob": 1.0 - p_arrive, "reward": reward, "next": enc(f2, none)}));
+                    outs.push(
+                        json!({"prob": 1.0 - p_arrive, "reward": reward, "next": enc(f2, none)}),
+                    );
                 }
                 actions.push(outs);
             }

@@ -50,10 +50,17 @@ impl ExecCapabilities {
     /// Number of capabilities present (used to prefer the simplest sufficient
     /// executive).
     pub fn count(&self) -> usize {
-        [self.continuous, self.discrete, self.events, self.feedback, self.dataflow, self.agents]
-            .iter()
-            .filter(|b| **b)
-            .count()
+        [
+            self.continuous,
+            self.discrete,
+            self.events,
+            self.feedback,
+            self.dataflow,
+            self.agents,
+        ]
+        .iter()
+        .filter(|b| **b)
+        .count()
     }
 
     /// True when `self` (an executive's profile) provides every capability that
@@ -69,7 +76,10 @@ impl ExecCapabilities {
 
     /// A pure stateless dataflow requirement.
     pub fn dataflow_only() -> Self {
-        ExecCapabilities { dataflow: true, ..Default::default() }
+        ExecCapabilities {
+            dataflow: true,
+            ..Default::default()
+        }
     }
 }
 
@@ -163,7 +173,11 @@ pub fn select(req: ExecCapabilities) -> Option<&'static ExecProfile> {
 /// discrete stepping if any block carries state. This is how a VisualBlock
 /// subgraph asks the seam which executive it needs.
 pub fn requirements_for_studio(c: &crate::des::studio::CompiledStudio) -> ExecCapabilities {
-    ExecCapabilities { dataflow: true, discrete: c.has_state(), ..Default::default() }
+    ExecCapabilities {
+        dataflow: true,
+        discrete: c.has_state(),
+        ..Default::default()
+    }
 }
 
 #[cfg(test)]
@@ -173,22 +187,39 @@ mod tests {
     #[test]
     fn selection_routes_by_capability() {
         // Pure dataflow → the simplest capable executive, studio.
-        assert_eq!(select(ExecCapabilities::dataflow_only()).unwrap().kind, "studio");
+        assert_eq!(
+            select(ExecCapabilities::dataflow_only()).unwrap().kind,
+            "studio"
+        );
         // Continuous dynamics → only hybrid offers it.
         assert_eq!(
-            select(ExecCapabilities { continuous: true, ..Default::default() }).unwrap().kind,
+            select(ExecCapabilities {
+                continuous: true,
+                ..Default::default()
+            })
+            .unwrap()
+            .kind,
             "hybrid"
         );
         // Events + feedback → hybrid.
         assert_eq!(
-            select(ExecCapabilities { events: true, feedback: true, ..Default::default() })
-                .unwrap()
-                .kind,
+            select(ExecCapabilities {
+                events: true,
+                feedback: true,
+                ..Default::default()
+            })
+            .unwrap()
+            .kind,
             "hybrid"
         );
         // Token agents → the DES run-loop.
         assert_eq!(
-            select(ExecCapabilities { agents: true, ..Default::default() }).unwrap().kind,
+            select(ExecCapabilities {
+                agents: true,
+                ..Default::default()
+            })
+            .unwrap()
+            .kind,
             "des-run-loop"
         );
     }

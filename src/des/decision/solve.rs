@@ -150,12 +150,10 @@ pub fn solve_pomdp(
         PomdpMethod::ExactFiniteHorizon => {
             let closure = make();
             let h = horizon.max(1);
-            let result = catch_unwind(AssertUnwindSafe(|| {
-                pomdp_exact_finite_horizon(&closure, h)
-            }))
-            .map_err(|_| {
-                "exact finite-horizon VI blew up (reduce horizon or use qmdp)".to_string()
-            })?;
+            let result = catch_unwind(AssertUnwindSafe(|| pomdp_exact_finite_horizon(&closure, h)))
+                .map_err(|_| {
+                    "exact finite-horizon VI blew up (reduce horizon or use qmdp)".to_string()
+                })?;
             Ok(PomdpPlan::Exact(result))
         }
     }
@@ -196,11 +194,18 @@ mod tests {
             schema: "des/mdp/v1".into(),
             num_states: 2,
             transitions: vec![
-                vec![vec![MdpTransition { prob: 1.0, reward: 0.0, next: 1 }]],
+                vec![vec![MdpTransition {
+                    prob: 1.0,
+                    reward: 0.0,
+                    next: 1,
+                }]],
                 vec![],
             ],
             discount: 0.9,
-            terminal: vec![TerminalState { state: 1, reward: 1.0 }],
+            terminal: vec![TerminalState {
+                state: 1,
+                reward: 1.0,
+            }],
             state_labels: vec![],
             action_labels: vec![],
         }

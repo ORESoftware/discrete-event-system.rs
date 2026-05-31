@@ -47,25 +47,39 @@ fn main() {
         meta["served"],
         meta["meanWait"].as_f64().unwrap_or(0.0)
     );
-    println!("  frames={}", data["frames"].as_array().map(|a| a.len()).unwrap_or(0));
+    println!(
+        "  frames={}",
+        data["frames"].as_array().map(|a| a.len()).unwrap_or(0)
+    );
     println!("  -> {}", anim_path.display());
 
     // 2) MDP / POMDP elevator-dispatch models on the first-class citizens.
     let reg = with_builtins();
 
     let mdp_spec = elevator_mdp_spec();
-    fs::write(dir.join("mdp.json"), serde_json::to_string_pretty(&mdp_spec).unwrap())
-        .expect("write mdp.json");
+    fs::write(
+        dir.join("mdp.json"),
+        serde_json::to_string_pretty(&mdp_spec).unwrap(),
+    )
+    .expect("write mdp.json");
     let mdp = reg.run("mdp", &mdp_spec).expect("elevator MDP solves");
     fs::write(dir.join("mdp-player.html"), mdp.to_player_html()).expect("write mdp player");
-    println!("\nElevator-dispatch MDP  ({} states)", mdp_spec["numStates"]);
+    println!(
+        "\nElevator-dispatch MDP  ({} states)",
+        mdp_spec["numStates"]
+    );
     println!("  {}", mdp.summary);
     println!("  -> {}", dir.join("mdp-player.html").display());
 
     let pomdp_spec = elevator_pomdp_spec();
-    fs::write(dir.join("pomdp.json"), serde_json::to_string_pretty(&pomdp_spec).unwrap())
-        .expect("write pomdp.json");
-    let pomdp = reg.run("pomdp", &pomdp_spec).expect("elevator POMDP solves");
+    fs::write(
+        dir.join("pomdp.json"),
+        serde_json::to_string_pretty(&pomdp_spec).unwrap(),
+    )
+    .expect("write pomdp.json");
+    let pomdp = reg
+        .run("pomdp", &pomdp_spec)
+        .expect("elevator POMDP solves");
     fs::write(dir.join("pomdp-player.html"), pomdp.to_player_html()).expect("write pomdp player");
     println!("\nElevator-dispatch POMDP  (noisy call button)");
     println!("  {}", pomdp.summary);

@@ -27,7 +27,8 @@ fn entropy(b: &[f64]) -> f64 {
 fn ring_positions(n: usize, cx: f64, cy: f64, r: f64) -> Vec<(f64, f64)> {
     (0..n)
         .map(|i| {
-            let theta = -std::f64::consts::FRAC_PI_2 + 2.0 * std::f64::consts::PI * i as f64 / n.max(1) as f64;
+            let theta = -std::f64::consts::FRAC_PI_2
+                + 2.0 * std::f64::consts::PI * i as f64 / n.max(1) as f64;
             (cx + r * theta.cos(), cy + r * theta.sin())
         })
         .collect()
@@ -42,7 +43,11 @@ fn policy_next(spec: &MdpSpec, policy: &[i32], s: usize) -> Option<usize> {
     }
     let outs = spec.transitions.get(s)?.get(a as usize)?;
     outs.iter()
-        .max_by(|x, y| x.prob.partial_cmp(&y.prob).unwrap_or(std::cmp::Ordering::Equal))
+        .max_by(|x, y| {
+            x.prob
+                .partial_cmp(&y.prob)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
         .map(|o| o.next)
 }
 
@@ -126,7 +131,11 @@ pub fn mdp_artifact(
         }
         let action = trace.actions.get(k).copied();
         let reward = trace.rewards.get(k).copied().unwrap_or(0.0);
-        let ret = if k == 0 { 0.0 } else { trace.returns.get(k - 1).copied().unwrap_or(0.0) };
+        let ret = if k == 0 {
+            0.0
+        } else {
+            trace.returns.get(k - 1).copied().unwrap_or(0.0)
+        };
         let caption = match action {
             Some(a) => format!(
                 "t={k} · state {} · action {} · reward {:.2}",
@@ -235,14 +244,21 @@ pub fn pomdp_artifact(
             }));
         }
         let action = trace.actions.get(k).map(|&a| spec.action_label(a));
-        let obs = trace.observations.get(k).map(|&o| spec.observation_label(o));
+        let obs = trace
+            .observations
+            .get(k)
+            .map(|&o| spec.observation_label(o));
         let caption = match (&action, &obs) {
-            (Some(a), Some(o)) => format!(
-                "t={k} · belief over hidden state · action {a} → observe {o}"
-            ),
+            (Some(a), Some(o)) => {
+                format!("t={k} · belief over hidden state · action {a} → observe {o}")
+            }
             _ => format!("t={k} · final belief"),
         };
-        let ret = if k == 0 { 0.0 } else { trace.returns.get(k - 1).copied().unwrap_or(0.0) };
+        let ret = if k == 0 {
+            0.0
+        } else {
+            trace.returns.get(k - 1).copied().unwrap_or(0.0)
+        };
         let mut frame = json!({
             "t": k,
             "entropy": entropy(belief),

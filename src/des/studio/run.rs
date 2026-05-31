@@ -26,7 +26,10 @@ pub struct StudioRun {
 
 impl StudioRun {
     pub fn series(&self, id: &str) -> Option<&Vec<f64>> {
-        self.node_ids.iter().position(|n| n == id).map(|i| &self.node_series[i])
+        self.node_ids
+            .iter()
+            .position(|n| n == id)
+            .map(|i| &self.node_series[i])
     }
 
     /// Final recorded value of a block's primary signal.
@@ -87,7 +90,13 @@ pub fn run(compiled: &mut CompiledStudio, steps: usize, dt: f64) -> StudioRun {
         frames.push(build_frame(compiled, t, k, &outs, &node_series));
     }
 
-    StudioRun { steps, dt, node_ids, node_series, frames }
+    StudioRun {
+        steps,
+        dt,
+        node_ids,
+        node_series,
+        frames,
+    }
 }
 
 fn build_frame(
@@ -151,10 +160,14 @@ fn build_frame(
         }
     }
 
-    let mut frame = json!({ "t": t, "step": k as f64, "shapes": shapes, "caption": format!("t={t:.2}s") });
+    let mut frame =
+        json!({ "t": t, "step": k as f64, "shapes": shapes, "caption": format!("t={t:.2}s") });
     if let Value::Object(map) = &mut frame {
         for (idx, node) in compiled.nodes().iter().enumerate() {
-            map.insert(node.id.clone(), json!(node_series[idx].last().copied().unwrap_or(0.0)));
+            map.insert(
+                node.id.clone(),
+                json!(node_series[idx].last().copied().unwrap_or(0.0)),
+            );
         }
     }
     frame
@@ -162,7 +175,13 @@ fn build_frame(
 
 impl StudioRun {
     /// Render this run as a uniform [`RunArtifact`] (animated wiring diagram).
-    pub fn to_artifact(&self, kind: &str, title: &str, description: &str, blocks: Value) -> RunArtifact {
+    pub fn to_artifact(
+        &self,
+        kind: &str,
+        title: &str,
+        description: &str,
+        blocks: Value,
+    ) -> RunArtifact {
         let results = json!({
             "kind": kind,
             "steps": self.steps,
@@ -184,7 +203,14 @@ impl StudioRun {
             description,
             self.frames.clone(),
             results,
-            vec![UiControl::range("speed", "Speed (fps)", 1.0, 60.0, 1.0, 12.0)],
+            vec![UiControl::range(
+                "speed",
+                "Speed (fps)",
+                1.0,
+                60.0,
+                1.0,
+                12.0,
+            )],
             &summary,
         )
     }

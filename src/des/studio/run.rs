@@ -56,13 +56,16 @@ pub fn run(compiled: &mut CompiledStudio, steps: usize, dt: f64) -> StudioRun {
     let mut node_series: Vec<Vec<f64>> = vec![Vec::with_capacity(steps); n];
     let mut frames: Vec<Value> = Vec::with_capacity(steps);
 
+    // The topological order is fixed for the whole run; clone it once (rather
+    // than every step) so we can iterate it while mutably stepping the nodes.
+    let order = compiled.order.clone();
+
     for k in 0..steps {
         let t = k as f64 * dt;
         let mut outs: Vec<Vec<f64>> = vec![Vec::new(); n];
 
         // Evaluate blocks in topological order, threading wired inputs.
-        let order = compiled.order.clone();
-        for idx in order {
+        for &idx in &order {
             let n_in = compiled.nodes[idx].n_in();
             let mut inputs = vec![0.0; n_in];
             for (p, slot) in inputs.iter_mut().enumerate() {

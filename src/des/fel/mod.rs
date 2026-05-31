@@ -13,6 +13,10 @@
 //!   entity engine (calls it, does not modify it).
 //! * [`compare`] — runs both against the closed-form analytical M/M/1 and reports
 //!   accuracy and work performed.
+//! * [`elevator`] — a next-event single-car elevator under a LOOK policy (a new
+//!   FEL model that does *not* touch the existing time-stepped elevator), plus
+//!   canonical MDP/POMDP formulations of elevator dispatch that run on the
+//!   first-class model citizens.
 //!
 //! Nothing here modifies the existing engine; the comparison wraps it through
 //! its public API only.
@@ -47,6 +51,7 @@
 //! to make that trade-off measurable rather than asserted.
 
 pub mod compare;
+pub mod elevator;
 pub mod engine;
 pub mod mm1;
 pub mod time_stepped_mm1;

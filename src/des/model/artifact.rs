@@ -16,8 +16,8 @@
 use serde_json::Value;
 
 use crate::des::plugin::{
-    render_player_html, OutputKind, PlayerKind, PluginManifest, PluginOutput, PluginRun, RunSpec,
-    UiControl,
+    render_player_html, OutputKind, PlayerKind, PluginManifest, PluginOutput, PluginRun,
+    PluginRuntimeKind, PluginTransportKind, RunSpec, UiControl,
 };
 
 /// The uniform result of running a first-class model.
@@ -93,6 +93,9 @@ impl RunArtifact {
             name: self.title.clone(),
             version: "1.0.0".to_string(),
             description: self.description.clone(),
+            runtime: PluginRuntimeKind::Rust,
+            transport: PluginTransportKind::Stdio,
+            language: None,
             // Placeholder: rendered from in-memory output, never spawned.
             run: RunSpec::new("model-internal", &[]),
             output: match self.player {

@@ -12,8 +12,8 @@ use serde_json::{json, Value};
 
 use des_engine::des::hybrid::{demos, executive::simulate, Trace};
 use des_engine::des::plugin::{
-    render_player_html, OutputKind, PlayerKind, PluginManifest, PluginOutput, PluginRun, RunSpec,
-    UiControl,
+    render_player_html, OutputKind, PlayerKind, PluginManifest, PluginOutput, PluginRun,
+    PluginRuntimeKind, PluginTransportKind, RunSpec, UiControl,
 };
 
 fn manifest(id: &str, name: &str, desc: &str, controls: Vec<UiControl>) -> PluginManifest {
@@ -22,6 +22,9 @@ fn manifest(id: &str, name: &str, desc: &str, controls: Vec<UiControl>) -> Plugi
         name: name.to_string(),
         version: "1.0.0".to_string(),
         description: desc.to_string(),
+        runtime: PluginRuntimeKind::Rust,
+        transport: PluginTransportKind::Stdio,
+        language: None,
         // Placeholder: we render from in-memory frames, so this is never spawned.
         run: RunSpec::new("hybrid-internal", &[]),
         output: OutputKind::Jsonl,

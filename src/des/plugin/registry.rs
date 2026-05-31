@@ -31,7 +31,9 @@ pub struct PluginRegistry {
 
 impl PluginRegistry {
     pub fn new() -> Self {
-        PluginRegistry { plugins: Vec::new() }
+        PluginRegistry {
+            plugins: Vec::new(),
+        }
     }
 
     /// Register a plugin. Rejects a duplicate `id` (mirrors the service
@@ -129,7 +131,9 @@ impl DesExtension for PluginCatalogExtension {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::des::plugin::manifest::{OutputKind, PlayerKind, RunSpec};
+    use crate::des::plugin::manifest::{
+        OutputKind, PlayerKind, PluginRuntimeKind, PluginTransportKind, RunSpec,
+    };
     use crate::des::service::{ServiceBuilder, ServiceInfo};
 
     fn manifest(id: &str) -> PluginManifest {
@@ -138,6 +142,9 @@ mod tests {
             name: format!("Plugin {id}"),
             version: "1.0.0".to_string(),
             description: String::new(),
+            runtime: PluginRuntimeKind::Rust,
+            transport: PluginTransportKind::Stdio,
+            language: None,
             run: RunSpec::new("./bin", &[]),
             output: OutputKind::Jsonl,
             player: PlayerKind::Sim,
@@ -150,7 +157,10 @@ mod tests {
     fn registry_dedupes_by_id() {
         let mut r = PluginRegistry::new();
         r.register(manifest("a")).unwrap();
-        assert_eq!(r.register(manifest("a")).unwrap_err(), DuplicatePlugin("a".to_string()));
+        assert_eq!(
+            r.register(manifest("a")).unwrap_err(),
+            DuplicatePlugin("a".to_string())
+        );
         assert_eq!(r.len(), 1);
     }
 
@@ -171,7 +181,14 @@ mod tests {
         assert!(d.capabilities.iter().any(|c| c.name == "lp-stream"));
         assert!(d.capabilities.iter().any(|c| c.name == "mm1"));
         assert!(d.endpoints.iter().any(|e| e.path == "/plugins/mm1/player"));
-        let ep = d.endpoints.iter().find(|e| e.path == "/plugins/mm1/player").unwrap();
-        assert_eq!(ep.provided_by.as_deref(), Some(PluginCatalogExtension::NAME));
+        let ep = d
+            .endpoints
+            .iter()
+            .find(|e| e.path == "/plugins/mm1/player")
+            .unwrap();
+        assert_eq!(
+            ep.provided_by.as_deref(),
+            Some(PluginCatalogExtension::NAME)
+        );
     }
 }

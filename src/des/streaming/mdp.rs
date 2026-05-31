@@ -20,8 +20,8 @@ use serde_json::{json, Value};
 use crate::des::general::value_iteration::{value_iteration, MDPSpec, Outcome, VIOptions};
 
 use super::{
-    error_frame, f64_at, op_of, usize_at, SolverKind, StreamContract, StreamEvent, StreamOp,
-    StreamingModel,
+    error_frame, f64_at, op_of, probability_error, usize_at, SolverKind, StreamContract,
+    StreamEvent, StreamOp, StreamingModel,
 };
 
 /// One outcome row stored tabularly: `(prob, reward, next_state)`.
@@ -106,6 +106,10 @@ impl StreamingMdp {
         if outcomes.iter().any(|&(_, _, next)| next >= self.num_states) {
             return vec![error_frame("an outcome `next` is out of range")];
         }
+        let probs: Vec<f64> = outcomes.iter().map(|&(prob, _, _)| prob).collect();
+        if let Some(err) = probability_error(&probs, "outcomes") {
+            return vec![err];
+        }
         if action >= self.transitions[state].len() {
             self.transitions[state].resize(action + 1, Vec::new());
         }
@@ -131,7 +135,9 @@ impl StreamingMdp {
 
     fn solve(&mut self, command: &Value) -> Vec<Value> {
         if !self.initialized {
-            return vec![error_frame("no MDP initialized; send {\"op\":\"init\", ...} first")];
+            return vec![error_frame(
+                "no MDP initialized; send {\"op\":\"init\", ...} first",
+            )];
         }
         let gamma = f64_at(command, "gamma", self.gamma);
         let num_states = self.num_states;
@@ -257,12 +263,16 @@ impl StreamingModel for StreamingMdp {
             _ => {}
         }
         if !self.initialized {
-            return vec![error_frame("no MDP initialized; send {\"op\":\"init\", ...} first")];
+            return vec![error_frame(
+                "no MDP initialized; send {\"op\":\"init\", ...} first",
+            )];
         }
         match op {
             "set_transition" => self.set_transition(command),
             "set_terminal" => self.set_terminal(command),
-            other => vec![error_frame(format!("unknown op `{other}` for streaming-mdp"))],
+            other => vec![error_frame(format!(
+                "unknown op `{other}` for streaming-mdp"
+            ))],
         }
     }
 }
@@ -302,5 +312,23 @@ mod tests {
         let mut m = StreamingMdp::new();
         let frames = drive(&mut m, &[json!({"op":"solve"})]);
         assert_eq!(frames[0]["event"], json!("error"));
+    }
+
+    #[test]
+    fn rejects_non_normalized_transition_streams() {
+        let mut m = StreamingMdp::new();
+        let frames = drive(
+            &mut m,
+            &[
+                json!({"op":"init","numStates":2}),
+                json!({"op":"set_transition","state":0,"action":0,
+                       "outcomes":[{"prob":0.7,"reward":0.0,"next":1}]}),
+            ],
+        );
+        assert_eq!(frames.last().unwrap()["event"], json!("error"));
+        assert!(frames.last().unwrap()["message"]
+            .as_str()
+            .unwrap()
+            .contains("sum to 1.0"));
     }
 }

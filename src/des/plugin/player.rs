@@ -42,7 +42,8 @@ pub fn render_player_html(manifest: &PluginManifest, run: &PluginRun) -> String 
 
 /// The embedded payload `{ player, title, subtitle, controls, frames|result }`.
 fn build_payload(manifest: &PluginManifest, run: &PluginRun) -> Value {
-    let controls = serde_json::to_value(&manifest.controls).unwrap_or_else(|_| Value::Array(vec![]));
+    let controls =
+        serde_json::to_value(&manifest.controls).unwrap_or_else(|_| Value::Array(vec![]));
     let mut obj = serde_json::Map::new();
     obj.insert(
         "player".to_string(),
@@ -54,13 +55,19 @@ fn build_payload(manifest: &PluginManifest, run: &PluginRun) -> Value {
     obj.insert("pluginId".to_string(), json!(manifest.id));
     obj.insert(
         "title".to_string(),
-        json!(manifest.title.clone().unwrap_or_else(|| manifest.name.clone())),
+        json!(manifest
+            .title
+            .clone()
+            .unwrap_or_else(|| manifest.name.clone())),
     );
     obj.insert("subtitle".to_string(), json!(manifest.description.clone()));
     obj.insert("controls".to_string(), controls);
     match manifest.player {
         PlayerKind::Sim => {
-            obj.insert("frames".to_string(), Value::Array(normalize_frames(&run.output)));
+            obj.insert(
+                "frames".to_string(),
+                Value::Array(normalize_frames(&run.output)),
+            );
         }
         PlayerKind::Results => {
             obj.insert("result".to_string(), result_value(&run.output));
@@ -582,7 +589,9 @@ const TEMPLATE: &str = r##"<!DOCTYPE html>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::des::plugin::manifest::{OutputKind, RunSpec, UiControl};
+    use crate::des::plugin::manifest::{
+        OutputKind, PluginRuntimeKind, PluginTransportKind, RunSpec, UiControl,
+    };
     use crate::des::plugin::runner::PluginOutput;
 
     fn sim_manifest() -> PluginManifest {
@@ -591,6 +600,9 @@ mod tests {
             name: "M/M/1 queue".to_string(),
             version: "1.0.0".to_string(),
             description: "queue length over time".to_string(),
+            runtime: PluginRuntimeKind::Rust,
+            transport: PluginTransportKind::Stdio,
+            language: None,
             run: RunSpec::new("./mm1", &[]),
             output: OutputKind::Jsonl,
             player: PlayerKind::Sim,

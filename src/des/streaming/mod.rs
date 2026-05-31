@@ -37,7 +37,7 @@
 //! them. JSON is the boundary, so `serde_json` is used here (never in the
 //! engine core), mirroring [`crate::des::service`].
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -46,6 +46,11 @@ pub mod lp;
 pub mod mdp;
 pub mod milp;
 pub mod pomdp;
+
+pub use lp::StreamingLp;
+pub use mdp::StreamingMdp;
+pub use milp::{StreamingIp, StreamingMilp, StreamingMip};
+pub use pomdp::StreamingPomdp;
 
 /// Newline-delimited JSON media type the streaming contract speaks in both
 /// directions (a.k.a. JSON Lines / `jsonl`).
@@ -62,6 +67,128 @@ pub enum SolverKind {
     TimeSteppedNumeric,
     /// Iterative algorithmic solver (LP / MIP / MDP / POMDP / graph).
     IterativeSolver,
+}
+
+/// The concrete optimization/decision model family carried by a stream.
+///
+/// This is intentionally narrower than [`SolverKind`]: all current streaming
+/// models are iterative solvers, but a server/desktop app/IPC bridge still needs
+/// to know whether a frame belongs to LP, integer programming, MDP, or POMDP.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ModelStreamKind {
+    Lp,
+    Ip,
+    Mip,
+    Mdp,
+    Pomdp,
+    GenericIterative,
+}
+
+impl ModelStreamKind {
+    pub fn from_model_name(model: &str) -> Self {
+        let m = model.to_ascii_lowercase();
+        if m.contains("pomdp") {
+            ModelStreamKind::Pomdp
+        } else if m.contains("mdp") {
+            ModelStreamKind::Mdp
+        } else if m.contains("milp") || m.contains("mip") {
+            ModelStreamKind::Mip
+        } else if m.contains("integer") || m.ends_with("-ip") || m.contains("ip-") {
+            ModelStreamKind::Ip
+        } else if m.contains("lp") {
+            ModelStreamKind::Lp
+        } else {
+            ModelStreamKind::GenericIterative
+        }
+    }
+}
+
+/// Direction of a framed streaming document at the SDK/IPC boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StreamDirection {
+    In,
+    Out,
+}
+
+/// A typed JSONL envelope for IPC/server/desktop transports.
+///
+/// Existing streamers still accept their compact command objects directly. This
+/// envelope is the hardened SDK boundary: transport code can sequence,
+/// authenticate, multiplex, and route frames without inspecting model-specific
+/// payloads.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamFrame {
+    pub seq: u64,
+    pub model: ModelStreamKind,
+    pub direction: StreamDirection,
+    pub payload: Value,
+}
+
+impl StreamFrame {
+    pub fn input(seq: u64, model: ModelStreamKind, payload: Value) -> Self {
+        StreamFrame {
+            seq,
+            model,
+            direction: StreamDirection::In,
+            payload,
+        }
+    }
+
+    pub fn output(seq: u64, model: ModelStreamKind, payload: Value) -> Self {
+        StreamFrame {
+            seq,
+            model,
+            direction: StreamDirection::Out,
+            payload,
+        }
+    }
+}
+
+/// Minimal state for validating and producing sequential stream envelopes.
+#[derive(Clone, Debug)]
+pub struct StreamSession {
+    model: ModelStreamKind,
+    next_in_seq: u64,
+    next_out_seq: u64,
+}
+
+impl StreamSession {
+    pub fn new(model: ModelStreamKind) -> Self {
+        StreamSession {
+            model,
+            next_in_seq: 0,
+            next_out_seq: 0,
+        }
+    }
+
+    pub fn accept(&mut self, frame: &StreamFrame) -> Result<(), String> {
+        if frame.model != self.model {
+            return Err(format!(
+                "frame model {:?} does not match session model {:?}",
+                frame.model, self.model
+            ));
+        }
+        if frame.direction != StreamDirection::In {
+            return Err("input session only accepts inbound frames".to_string());
+        }
+        if frame.seq != self.next_in_seq {
+            return Err(format!(
+                "expected inbound seq {}, got {}",
+                self.next_in_seq, frame.seq
+            ));
+        }
+        self.next_in_seq += 1;
+        Ok(())
+    }
+
+    pub fn emit(&mut self, payload: Value) -> StreamFrame {
+        let frame = StreamFrame::output(self.next_out_seq, self.model, payload);
+        self.next_out_seq += 1;
+        frame
+    }
 }
 
 /// One input command the model accepts, for the self-describing contract.
@@ -109,6 +236,7 @@ impl StreamEvent {
 pub struct StreamContract {
     pub model: String,
     pub kind: SolverKind,
+    pub model_stream_kind: ModelStreamKind,
     pub input_media_type: String,
     pub output_media_type: String,
     pub description: String,
@@ -125,9 +253,29 @@ impl StreamContract {
         input_ops: Vec<StreamOp>,
         output_events: Vec<StreamEvent>,
     ) -> Self {
+        Self::new_for_stream_kind(
+            model,
+            kind,
+            ModelStreamKind::from_model_name(model),
+            description,
+            input_ops,
+            output_events,
+        )
+    }
+
+    /// Build a contract with an explicit concrete model family.
+    pub fn new_for_stream_kind(
+        model: &str,
+        kind: SolverKind,
+        model_stream_kind: ModelStreamKind,
+        description: &str,
+        input_ops: Vec<StreamOp>,
+        output_events: Vec<StreamEvent>,
+    ) -> Self {
         StreamContract {
             model: model.to_string(),
             kind,
+            model_stream_kind,
             input_media_type: JSONL_MEDIA_TYPE.to_string(),
             output_media_type: JSONL_MEDIA_TYPE.to_string(),
             description: description.to_string(),
@@ -322,6 +470,24 @@ pub(crate) fn vec_str(command: &Value, key: &str) -> Option<Vec<String>> {
     })
 }
 
+pub(crate) fn probability_error(probs: &[f64], label: &str) -> Option<Value> {
+    if probs.is_empty() {
+        return Some(error_frame(format!("`{label}` must not be empty")));
+    }
+    if probs.iter().any(|p| !p.is_finite() || *p < 0.0) {
+        return Some(error_frame(format!(
+            "`{label}` must contain only finite, non-negative probabilities"
+        )));
+    }
+    let sum: f64 = probs.iter().sum();
+    if (sum - 1.0).abs() > 1e-6 {
+        return Some(error_frame(format!(
+            "`{label}` probabilities must sum to 1.0 (got {sum})"
+        )));
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -337,7 +503,11 @@ mod tests {
                 "echo",
                 SolverKind::IterativeSolver,
                 "echoes the `value` of each command",
-                vec![StreamOp::new("echo", "echo a value", json!({"op":"echo","value":1}))],
+                vec![StreamOp::new(
+                    "echo",
+                    "echo a value",
+                    json!({"op":"echo","value":1}),
+                )],
                 vec![StreamEvent::new("echo", "the echoed value")],
             )
         }
@@ -354,7 +524,10 @@ mod tests {
         let mut m = EchoModel;
         let frames = drive(
             &mut m,
-            &[json!({"op":"echo","value":1}), json!({"op":"echo","value":2})],
+            &[
+                json!({"op":"echo","value":1}),
+                json!({"op":"echo","value":2}),
+            ],
         );
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0]["value"], json!(1));
@@ -390,6 +563,7 @@ mod tests {
         let v: Value = serde_json::from_str(&c.to_json_string()).unwrap();
         assert_eq!(v["model"], json!("echo"));
         assert_eq!(v["kind"], json!("iterative-solver"));
+        assert_eq!(v["modelStreamKind"], json!("generic-iterative"));
         assert_eq!(v["inputMediaType"], json!(JSONL_MEDIA_TYPE));
     }
 
@@ -453,5 +627,40 @@ mod tests {
         let handled = run_named_jsonl("does-not-exist", "{}\n".as_bytes(), &mut out2).unwrap();
         assert!(!handled);
         assert!(out2.is_empty());
+    }
+
+    #[test]
+    fn stream_session_rejects_wrong_sequence_or_model() {
+        let mut session = StreamSession::new(ModelStreamKind::Mip);
+        session
+            .accept(&StreamFrame::input(
+                0,
+                ModelStreamKind::Mip,
+                json!({"op":"init"}),
+            ))
+            .unwrap();
+        assert!(session
+            .accept(&StreamFrame::input(
+                0,
+                ModelStreamKind::Mip,
+                json!({"op":"solve"})
+            ))
+            .unwrap_err()
+            .contains("expected inbound seq 1"));
+        assert!(StreamSession::new(ModelStreamKind::Mdp)
+            .accept(&StreamFrame::input(0, ModelStreamKind::Pomdp, json!({})))
+            .unwrap_err()
+            .contains("does not match"));
+    }
+
+    #[test]
+    fn stream_session_emits_sequential_output_frames() {
+        let mut session = StreamSession::new(ModelStreamKind::Lp);
+        let a = session.emit(json!({"event":"solution"}));
+        let b = session.emit(json!({"event":"trace"}));
+        assert_eq!(a.seq, 0);
+        assert_eq!(b.seq, 1);
+        assert_eq!(a.direction, StreamDirection::Out);
+        assert_eq!(a.model, ModelStreamKind::Lp);
     }
 }

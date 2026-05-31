@@ -89,7 +89,8 @@ pub mod registry;
 pub mod runner;
 
 pub use manifest::{
-    ControlKind, OutputKind, PlayerKind, PluginManifest, RunSpec, UiControl, PLUGIN_PROTOCOL_SCHEMA,
+    ControlKind, OutputKind, PlayerKind, PluginManifest, PluginRuntimeKind, PluginTransportKind,
+    RunSpec, UiControl, PLUGIN_PROTOCOL_SCHEMA,
 };
 pub use player::render_player_html;
 pub use registry::{DuplicatePlugin, PluginCatalogExtension, PluginRegistry};
@@ -116,9 +117,15 @@ mod tests {
             name: "End to end".to_string(),
             version: "1.0.0".to_string(),
             description: "spawn + parse + render".to_string(),
+            runtime: PluginRuntimeKind::Rust,
+            transport: PluginTransportKind::Stdio,
+            language: None,
             run: RunSpec::new(
                 "sh",
-                &["-c", "printf '{\"t\":0,\"n\":1}\\n{\"t\":1,\"n\":2}\\n{\"t\":2,\"n\":1}\\n'"],
+                &[
+                    "-c",
+                    "printf '{\"t\":0,\"n\":1}\\n{\"t\":1,\"n\":2}\\n{\"t\":2,\"n\":1}\\n'",
+                ],
             ),
             output: OutputKind::Jsonl,
             player: PlayerKind::Sim,

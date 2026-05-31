@@ -1,9 +1,39 @@
-//! des_engine — Rust port of the TypeScript discrete-event-system engine.
+//! des_engine — a library/SDK for modeling, simulating, solving, and rendering
+//! discrete, continuous, and mixed systems (a Rust port of the TypeScript
+//! discrete-event-system engine).
 //!
-//! The TypeScript tree under `src/des/` maps 1:1 onto this crate's `des`
-//! module. Foundation modules in `des::shared` are dependency-free and are the
-//! reference for the engine-wide conventions (the `Transform` trait, `Result`/
-//! `Option` helpers, capability ports, and linear algebra).
+//! # Using it as a library
+//!
+//! The whole engine lives under [`des`], but most consumers — a web server, a
+//! desktop app, a CLI — only need the **first-class seams**, which are gathered
+//! in [`prelude`]:
+//!
+//! ```ignore
+//! use des_engine::prelude::*;
+//!
+//! // 1. Run any first-class model from a JSON spec → a uniform RunArtifact.
+//! let registry = with_builtins();
+//! let artifact = registry.run("mdp", &spec_json)?;
+//! let html = artifact.to_player_html();
+//!
+//! // 2. Stream an iterative solver (LP/MILP/MDP/POMDP) over JSONL.
+//! run_named_jsonl("lp", std::io::stdin().lock(), &mut std::io::stdout())?;
+//!
+//! // 3. Run an external plugin program and render its player.
+//! let html = run_and_render(&manifest)?;
+//! ```
+//!
+//! The seams are intentionally JSON-first so the same contracts work across an
+//! HTTP boundary ([`des::service`] advertises them for discovery), an IPC
+//! boundary ([`des::plugin::PluginTransport`]), or in-process.
+//!
+//! # The full tree
+//!
+//! The TypeScript source under `src/des/` maps 1:1 onto the [`des`] module.
+//! Foundation modules in `des::shared` are dependency-free and define the
+//! engine-wide conventions (the `Transform` trait, `Result`/`Option` helpers,
+//! capability ports, and linear algebra). The `main_*` modules are runnable
+//! simulation demos rather than part of the SDK surface.
 
 #![allow(
     clippy::approx_constant,
@@ -59,3 +89,4 @@
 )]
 
 pub mod des;
+pub mod prelude;

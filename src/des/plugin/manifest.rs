@@ -10,6 +10,12 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Versioned identity of the plugin stdout protocol (the JSON/JSONL output
+/// contract a plugin and the host agree on). Bump the version when the frame
+/// envelope or output semantics change incompatibly; a host can compare this to
+/// negotiate or reject a plugin before running it.
+pub const PLUGIN_PROTOCOL_SCHEMA: &str = "des/plugin/v1";
+
 /// Shape of the program's stdout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -177,6 +183,11 @@ impl PluginManifest {
     /// Parse a manifest from JSON (e.g. a plugin's shipped `plugin.json`).
     pub fn from_json_str(text: &str) -> Result<Self, String> {
         serde_json::from_str(text).map_err(|e| e.to_string())
+    }
+
+    /// The plugin output protocol this host speaks ([`PLUGIN_PROTOCOL_SCHEMA`]).
+    pub fn protocol_schema(&self) -> &'static str {
+        PLUGIN_PROTOCOL_SCHEMA
     }
 }
 

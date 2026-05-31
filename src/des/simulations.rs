@@ -117,6 +117,7 @@ pub fn simulation_catalogue() -> Vec<(&'static str, fn())> {
             crate::des::main_optimization_as_des::run,
         ),
         ("main_plumbing_flow", crate::des::main_plumbing_flow::run),
+        ("main_shadow_eval", crate::des::main_shadow_eval::run),
         ("main_shortest_path", crate::des::main_shortest_path::run),
         (
             "main_shortest_path_algo",

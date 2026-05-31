@@ -5,11 +5,13 @@
 //! backward-induction MDP, LP relaxation, in-house IP/MIP) plus a stochastic
 //! match simulator used as the evaluator.
 //!
-//! The problem: a 12-player roster, 7 on field, 5 on bench, a match split into T
-//! periods. For each (player, position, period) there is an affinity in [0, 1].
-//! Fairness constraint: no player may be benched two periods in a row. Goal:
-//! pick a schedule that maximises total affinity (and simulated goal
-//! differential).
+//! The problem: a configurable roster (default 12; e.g. 11 or 13), 7 on field,
+//! the rest on bench, a match split into T periods. For each (player, position,
+//! period) there is an affinity in [0, 1].
+//! Fairness constraint: no player may be benched two periods in a row.
+//! Stamina constraint (optional): no player may stay on the field for more than
+//! `max_consecutive_on_field` consecutive periods. Goal: pick a schedule that
+//! maximises total affinity (and simulated goal differential).
 //!
 //! ## Conversion notes (per the TS "RUST MIGRATION" header)
 //!
@@ -53,6 +55,9 @@ pub struct SoccerProblem {
     pub num_positions: usize,
     pub num_periods: usize,
     pub bench_size: usize,
+    /// Max consecutive periods any single player may stay on the field. `None`
+    /// disables the stamina constraint (the historical behaviour).
+    pub max_consecutive_on_field: Option<usize>,
     /// `affinity[p][pos][t]` in `[0, 1]`.
     pub affinity: Vec<Vec<Vec<f64>>>,
     pub player_names: Option<Vec<String>>,
@@ -78,6 +83,9 @@ pub struct AffinityBuilderOptions {
     pub num_players: Option<usize>,
     pub num_positions: Option<usize>,
     pub num_periods: Option<usize>,
+    /// Optional stamina cap: max consecutive periods on field per player.
+    /// `None` (the default) disables the constraint.
+    pub max_consecutive_on_field: Option<usize>,
     /// PRNG seed for reproducibility.
     pub seed: Option<u32>,
 }
@@ -98,12 +106,17 @@ impl Transform<AffinityBuilderOptions, SoccerProblem> for BuildSampleSoccerProbl
     }
 }
 
-/// Build a "realistic" affinity tensor for a 12-player squad.
+/// Build a "realistic" affinity tensor for a configurable squad (default 12).
 pub fn build_sample_soccer_problem(opts: &AffinityBuilderOptions) -> SoccerProblem {
     let num_players = opts.num_players.unwrap_or(12);
     let num_positions = opts.num_positions.unwrap_or(7);
     let num_periods = opts.num_periods.unwrap_or(4);
+    assert!(
+        num_players > num_positions,
+        "soccer-rotation: num_players ({num_players}) must exceed num_positions ({num_positions}) so there is at least one bench slot"
+    );
     let bench_size = num_players - num_positions;
+    let max_consecutive_on_field = opts.max_consecutive_on_field;
     let seed = opts.seed.unwrap_or(4242);
     let mut rng = mulberry32(seed);
 
@@ -170,6 +183,7 @@ pub fn build_sample_soccer_problem(opts: &AffinityBuilderOptions) -> SoccerProbl
         num_positions,
         num_periods,
         bench_size,
+        max_consecutive_on_field,
         affinity: aff,
         player_names: Some(player_names),
         position_names: Some(position_names),
@@ -188,6 +202,17 @@ pub struct FairnessViolation {
     pub period_b: usize,
 }
 
+/// A stamina violation: a player kept on the field for a run of periods longer
+/// than [`SoccerProblem::max_consecutive_on_field`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConsecutiveOnFieldViolation {
+    pub player_id: usize,
+    /// First period of the over-long on-field run (0-based).
+    pub start_period: usize,
+    /// Number of consecutive periods on the field (`> max_consecutive_on_field`).
+    pub length: usize,
+}
+
 /// The deterministic evaluation of a schedule.
 #[derive(Clone, Debug)]
 pub struct ScheduleEvaluation {
@@ -195,6 +220,9 @@ pub struct ScheduleEvaluation {
     pub per_period_affinity: Vec<f64>,
     pub fairness_ok: bool,
     pub fairness_violations: Vec<FairnessViolation>,
+    /// `true` when there is no stamina cap, or no run exceeds it.
+    pub stamina_ok: bool,
+    pub consecutive_on_field_violations: Vec<ConsecutiveOnFieldViolation>,
     pub bench_counts: Vec<usize>,
 }
 
@@ -245,13 +273,69 @@ pub fn evaluate_schedule(problem: &SoccerProblem, schedule: &Schedule) -> Schedu
             bench_counts[p] += 1;
         }
     }
+    let consecutive_on_field_violations =
+        consecutive_on_field_violations(problem, schedule);
     ScheduleEvaluation {
         affinity_sum: total,
         per_period_affinity: per_period,
         fairness_ok: fairness_violations.is_empty(),
         fairness_violations,
+        stamina_ok: consecutive_on_field_violations.is_empty(),
+        consecutive_on_field_violations,
         bench_counts,
     }
+}
+
+/// Find every run where a player stays on the field for more than
+/// [`SoccerProblem::max_consecutive_on_field`] periods. Empty when the problem
+/// has no stamina cap.
+pub fn consecutive_on_field_violations(
+    problem: &SoccerProblem,
+    schedule: &Schedule,
+) -> Vec<ConsecutiveOnFieldViolation> {
+    let limit = match problem.max_consecutive_on_field {
+        Some(limit) => limit,
+        None => return Vec::new(),
+    };
+    let t_count = problem.num_periods;
+    let mut on_field = vec![vec![false; problem.num_players]; t_count];
+    for t in 0..t_count {
+        for &p in &schedule.assignment[t] {
+            if p >= 0 && (p as usize) < problem.num_players {
+                on_field[t][p as usize] = true;
+            }
+        }
+    }
+    let mut violations: Vec<ConsecutiveOnFieldViolation> = Vec::new();
+    for p in 0..problem.num_players {
+        let mut run = 0usize;
+        let mut run_start = 0usize;
+        for t in 0..t_count {
+            if on_field[t][p] {
+                if run == 0 {
+                    run_start = t;
+                }
+                run += 1;
+            } else {
+                if run > limit {
+                    violations.push(ConsecutiveOnFieldViolation {
+                        player_id: p,
+                        start_period: run_start,
+                        length: run,
+                    });
+                }
+                run = 0;
+            }
+        }
+        if run > limit {
+            violations.push(ConsecutiveOnFieldViolation {
+                player_id: p,
+                start_period: run_start,
+                length: run,
+            });
+        }
+    }
+    violations
 }
 
 /// `PureTransform<ProblemScheduleInput, string | null>`.
@@ -756,6 +840,25 @@ pub fn build_soccer_lp(problem: &SoccerProblem) -> LPProblem {
             b_ub.push(-1.0);
         }
     }
+    // (4) Stamina: over any window of (M+1) periods a player is on field ≤ M
+    //     times, i.e. Σ_{τ=t0}^{t0+M} Σ_pos x_{p,pos,τ} ≤ M.
+    if let Some(m) = problem.max_consecutive_on_field {
+        if m >= 1 && t_count > m {
+            for p in 0..p_count {
+                for t0 in 0..=(t_count - (m + 1)) {
+                    let mut row = vec![0.0; n];
+                    for dt in 0..=m {
+                        let t = t0 + dt;
+                        for pos in 0..k {
+                            row[idx(p, pos, t)] += 1.0;
+                        }
+                    }
+                    a_ub.push(row);
+                    b_ub.push(m as f64);
+                }
+            }
+        }
+    }
     let ub = vec![Some(1.0); n];
     LPProblem {
         sense: Sense::Max,
@@ -1048,6 +1151,49 @@ pub fn build_soccer_ipmip(problem: &SoccerProblem) -> SoccerIPMIPModel {
         }
     }
 
+    // (4) Stamina: a player may stay on field at most M consecutive periods.
+    //     For every window [t0, t0+M], Σ_{τ} Σ_pos x[p,pos,τ] ≤ M so each
+    //     player must sit at least once inside any (M+1)-period window.
+    if let Some(m) = problem.max_consecutive_on_field {
+        if m >= 1 && t_count > m {
+            for p in 0..p_count {
+                for t0 in 0..=(t_count - (m + 1)) {
+                    let mut row = vec![0.0; n];
+                    for dt in 0..=m {
+                        let t = t0 + dt;
+                        for pos in 0..k {
+                            row[idx(p, pos, t)] += 1.0;
+                        }
+                    }
+                    let row_index = a.len();
+                    a.push(row);
+                    b.push(m as f64);
+                    con_names.push(format!(
+                        "max_consec_on_field_{}_T{}_{}",
+                        player_name(p),
+                        t0 + 1,
+                        t0 + m + 1
+                    ));
+                    constraint_nodes.push(ConstraintNode {
+                        row_index,
+                        node_id: format!(
+                            "station:stamina:{}:T{}-{}",
+                            player_name(p),
+                            t0 + 1,
+                            t0 + m + 1
+                        ),
+                        label: Some(format!(
+                            "{} rests at least once in periods {}-{}",
+                            player_name(p),
+                            t0 + 1,
+                            t0 + m + 1
+                        )),
+                    });
+                }
+            }
+        }
+    }
+
     SoccerIPMIPModel {
         ip: IPMIPProblem {
             sense: Sense::Max,
@@ -1140,7 +1286,8 @@ pub fn schedule_from_soccer_ipmip_vector(
     if validate_schedule_structure(problem, &schedule).is_some() {
         return None;
     }
-    if !evaluate_schedule(problem, &schedule).fairness_ok {
+    let eval = evaluate_schedule(problem, &schedule);
+    if !eval.fairness_ok || !eval.stamina_ok {
         return None;
     }
     Some(schedule)
@@ -1664,6 +1811,9 @@ mod tests {
         assert_eq!(p.num_positions, 7);
         assert_eq!(p.num_periods, 4);
         assert_eq!(p.bench_size, 5);
+        // The default builder leaves the stamina cap disabled so the historical
+        // LP/IP row counts (and behaviour) are unchanged.
+        assert_eq!(p.max_consecutive_on_field, None);
         for row in &p.affinity {
             for col in row {
                 for &v in col {
@@ -1731,5 +1881,101 @@ mod tests {
         assert_eq!(a.goals_for, b.goals_for);
         assert_eq!(a.goals_against, b.goals_against);
         assert_eq!(a.trace.len(), 4 * 20);
+    }
+
+    /// A hand-built schedule that parks player 0 on the field for periods 0–1
+    /// trips the stamina detector when the cap is 1.
+    #[test]
+    fn detects_over_long_on_field_run() {
+        let problem = SoccerProblem {
+            num_players: 2,
+            num_positions: 1,
+            num_periods: 3,
+            bench_size: 1,
+            max_consecutive_on_field: Some(1),
+            affinity: vec![vec![vec![0.0; 3]; 1]; 2],
+            player_names: None,
+            position_names: None,
+        };
+        let schedule = Schedule {
+            assignment: vec![vec![0], vec![0], vec![1]],
+            bench: vec![vec![1], vec![1], vec![0]],
+        };
+        let v = consecutive_on_field_violations(&problem, &schedule);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].player_id, 0);
+        assert_eq!(v[0].start_period, 0);
+        assert_eq!(v[0].length, 2);
+        // With no cap the same schedule is clean.
+        let mut uncapped = problem.clone();
+        uncapped.max_consecutive_on_field = None;
+        assert!(consecutive_on_field_violations(&uncapped, &schedule).is_empty());
+    }
+
+    /// Turning on the stamina cap adds exactly one rolling window row per player
+    /// (for the default 4-period instance and a cap of 3) to both the LP and the
+    /// IP, and the solved IP/MIP incumbent respects the cap.
+    #[test]
+    fn stamina_cap_constrains_lp_ip_and_solution() {
+        let base = build_sample_soccer_problem(&AffinityBuilderOptions {
+            seed: Some(1234),
+            ..Default::default()
+        });
+        let capped = build_sample_soccer_problem(&AffinityBuilderOptions {
+            seed: Some(1234),
+            max_consecutive_on_field: Some(3),
+            ..Default::default()
+        });
+
+        // 4 periods, cap 3 => one window [T1..T4] per player => +num_players rows.
+        let lp_base = build_soccer_lp(&base);
+        let lp_capped = build_soccer_lp(&capped);
+        assert_eq!(
+            lp_capped.a_ub.as_ref().unwrap().len(),
+            lp_base.a_ub.as_ref().unwrap().len() + capped.num_players
+        );
+        let ip_base = build_soccer_ipmip(&base);
+        let ip_capped = build_soccer_ipmip(&capped);
+        assert_eq!(ip_capped.ip.a.len(), ip_base.ip.a.len() + capped.num_players);
+
+        let opts = SoccerIPMIPPolicyOptions {
+            time_limit_ms: Some(15_000.0),
+            max_nodes: Some(400),
+            max_ticks: Some(4_000),
+            lp_algorithm: Some(LpRelaxationAlgorithm::Concrete(
+                ConcreteLpRelaxationAlgorithm::InternalSimplex,
+            )),
+            max_cut_rounds: Some(0),
+            fallback_to_mdp: Some(false),
+            ..Default::default()
+        };
+        let res = policy_ipmip_feasible(&capped, &opts);
+        assert!(!res.used_fallback, "reason={:?}", res.fallback_reason);
+        let eval = evaluate_schedule(&capped, &res.schedule);
+        assert!(eval.fairness_ok);
+        assert!(
+            eval.stamina_ok,
+            "stamina violations: {:?}",
+            eval.consecutive_on_field_violations
+        );
+    }
+
+    /// The roster size is configurable while staying 7-a-side: 11 and 13 players
+    /// shrink/grow only the bench.
+    #[test]
+    fn roster_size_is_configurable() {
+        for (players, bench) in [(11usize, 4usize), (13usize, 6usize)] {
+            let p = build_sample_soccer_problem(&AffinityBuilderOptions {
+                num_players: Some(players),
+                max_consecutive_on_field: Some(3),
+                seed: Some(7),
+                ..Default::default()
+            });
+            assert_eq!(p.num_players, players);
+            assert_eq!(p.num_positions, 7);
+            assert_eq!(p.bench_size, bench);
+            let sched = policy_greedy_hungarian(&p, &GreedyHungarianOptions::default());
+            assert!(validate_schedule_structure(&p, &sched).is_none());
+        }
     }
 }

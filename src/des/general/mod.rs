@@ -70,6 +70,7 @@ pub mod mountain_car;
 pub mod network_mutex;
 pub mod neural_network;
 pub mod nonlinear_optimization_models;
+pub mod numerical_solver_models;
 pub mod ppo_des;
 pub mod qlearning_des;
 pub mod rl_learning_models;

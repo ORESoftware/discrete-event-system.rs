@@ -410,7 +410,10 @@ mod tests {
     fn duplicate_id_is_rejected() {
         let mut g = StudioGraph::new();
         g.add(gain("dup")).unwrap();
-        assert!(matches!(g.add(gain("dup")), Err(StudioError::DuplicateId(_))));
+        assert!(matches!(
+            g.add(gain("dup")),
+            Err(StudioError::DuplicateId(_))
+        ));
     }
 
     #[test]

@@ -155,6 +155,25 @@ fn safe_policy_name(name: &str) -> String {
     out.trim_matches('-').to_string()
 }
 
+/// Longest run (in periods) any single player stays on the field, across the
+/// whole schedule. Used for the stamina audit print-out.
+fn longest_on_field_run(problem: &SoccerProblem, schedule: &Schedule) -> usize {
+    let mut longest = 0usize;
+    for p in 0..problem.num_players {
+        let mut run = 0usize;
+        for t in 0..problem.num_periods {
+            let on_field = schedule.assignment[t].iter().any(|&q| q == p as i64);
+            if on_field {
+                run += 1;
+                longest = longest.max(run);
+            } else {
+                run = 0;
+            }
+        }
+    }
+    longest
+}
+
 struct PolicyDesc {
     name: &'static str,
     note: &'static str,
@@ -190,26 +209,96 @@ fn build_schedule(
     }
 }
 
-/// Entry point (`main()` in the TS source).
+/// Pre-env defaults for a soccer run. `run()` keeps the historical
+/// 12-player / 20-minute shape with animation gated by `ANIMATE=1`; `run_anim()`
+/// uses a 13-player / 10-minute showcase with the animation forced on. Every
+/// field is still overridable through the same env vars.
+struct SoccerRunDefaults {
+    force_animate: bool,
+    num_players: usize,
+    num_positions: usize,
+    num_periods: usize,
+    minutes_per_period: usize,
+    max_consec_on_field: usize,
+    policy: &'static str,
+}
+
+impl Default for SoccerRunDefaults {
+    fn default() -> Self {
+        SoccerRunDefaults {
+            force_animate: false,
+            num_players: 12,
+            num_positions: 7,
+            num_periods: 4,
+            minutes_per_period: 20,
+            max_consec_on_field: 3,
+            policy: "",
+        }
+    }
+}
+
+/// Entry point (`main()` in the TS source). Roster/match shape is read from env
+/// (`NUM_PLAYERS`, `NUM_POSITIONS`, `NUM_PERIODS`, `MINUTES_PER_PERIOD`,
+/// `MAX_CONSEC_ON_FIELD`, `POLICY`); animation is gated by `ANIMATE=1`.
 pub fn run() {
+    run_with_defaults(&SoccerRunDefaults::default());
+}
+
+/// Always-animating showcase used by the `main_soccer_rotation_anim` catalogue
+/// entry (mirrors the `*_anim` convention): a 13-player squad, still 7-a-side,
+/// four 10-minute periods, a stamina cap of 3 consecutive periods on the field,
+/// focused on the IP/MIP solver. Every value is still overridable via env.
+pub fn run_anim() {
+    run_with_defaults(&SoccerRunDefaults {
+        force_animate: true,
+        num_players: 13,
+        num_periods: 4,
+        minutes_per_period: 10,
+        max_consec_on_field: 3,
+        policy: "IP/MIP",
+        ..SoccerRunDefaults::default()
+    });
+}
+
+fn run_with_defaults(defaults: &SoccerRunDefaults) {
     let seed = env_usize("SEED", 4242) as u32;
     let num_matches = env_usize("N_MATCHES", 100);
-    let animate = std::env::var("ANIMATE").as_deref() == Ok("1");
+    let animate = defaults.force_animate || std::env::var("ANIMATE").as_deref() == Ok("1");
     let policy_filter = std::env::var("POLICY")
-        .unwrap_or_default()
-        .to_lowercase()
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| defaults.policy.to_string())
         .trim()
-        .to_string();
+        .to_lowercase();
     let mip_time_limit_ms = env_f64("MIP_TIME_LIMIT_MS", 30_000.0);
     let mip_max_nodes = env_usize("MIP_MAX_NODES", 5_000);
     let mip_lp_algorithm = parse_lp_algorithm(
         &std::env::var("MIP_LP_ALGO").unwrap_or_else(|_| "internal-simplex".to_string()),
     );
 
+    // Roster / match shape (all overridable so the same model serves 11-, 12-,
+    // or 13-player squads, different match lengths, and a tunable stamina cap).
+    let num_positions = env_usize("NUM_POSITIONS", defaults.num_positions);
+    let num_players = env_usize("NUM_PLAYERS", defaults.num_players).max(num_positions + 1);
+    let num_periods = env_usize("NUM_PERIODS", defaults.num_periods).max(1);
+    let minutes_per_period = env_usize("MINUTES_PER_PERIOD", defaults.minutes_per_period).max(1);
+    // 0 (or unset-to-0) disables the stamina cap; default caps on-field runs at 3.
+    let max_consecutive_on_field = match env_usize("MAX_CONSEC_ON_FIELD", defaults.max_consec_on_field) {
+        0 => None,
+        m => Some(m),
+    };
+
     let problem = build_sample_soccer_problem(&AffinityBuilderOptions {
+        num_players: Some(num_players),
+        num_positions: Some(num_positions),
+        num_periods: Some(num_periods),
+        max_consecutive_on_field,
         seed: Some(seed),
-        ..Default::default()
     });
+    let match_opts = MatchSimOptions {
+        minutes_per_period: Some(minutes_per_period),
+        ..Default::default()
+    };
     let mip_opts = SoccerIPMIPPolicyOptions {
         time_limit_ms: Some(mip_time_limit_ms),
         max_nodes: Some(mip_max_nodes),
@@ -220,12 +309,27 @@ pub fn run() {
     let mut mip_latest: Option<SoccerIPMIPPolicyResult> = None;
 
     // ─── Banner ───────────────────────────────────────────────────────────
-    println!("# 7v7 youth soccer player rotation as combinatorial optimisation");
     println!(
-        "# {} players, {} positions, {} periods of 20 min each",
-        problem.num_players, problem.num_positions, problem.num_periods
+        "# {}v{} youth soccer player rotation as combinatorial optimisation",
+        problem.num_positions, problem.num_positions
+    );
+    println!(
+        "# {} players, {} positions ({} on the bench), {} periods of {} min each",
+        problem.num_players,
+        problem.num_positions,
+        problem.bench_size,
+        problem.num_periods,
+        minutes_per_period
     );
     println!("# fairness constraint: no player benched two consecutive periods");
+    match problem.max_consecutive_on_field {
+        Some(m) => println!(
+            "# stamina constraint: no player on the field for more than {} consecutive periods ({} min)",
+            m,
+            m * minutes_per_period
+        ),
+        None => println!("# stamina constraint: disabled (MAX_CONSEC_ON_FIELD=0)"),
+    }
     println!("# affinity tensor seed = {}", seed);
     println!();
     println!("# Per-player best position and period peak (sample of affinity tensor):");
@@ -320,14 +424,23 @@ pub fn run() {
             &schedule,
             &SoccerPOMDPFeatureOptions::default(),
         );
+        let stamina_str = match problem.max_consecutive_on_field {
+            None => "n/a".to_string(),
+            Some(_) if eval_res.stamina_ok => "OK".to_string(),
+            Some(_) => format!(
+                "VIOLATED({})",
+                eval_res.consecutive_on_field_violations.len()
+            ),
+        };
         println!(
-            "affinity={:.2}, fairness={}, beliefFresh={:.3}, build={}ms",
+            "affinity={:.2}, fairness={}, stamina={}, beliefFresh={:.3}, build={}ms",
             eval_res.affinity_sum,
             if eval_res.fairness_ok {
                 "OK"
             } else {
                 "VIOLATED"
             },
+            stamina_str,
             belief.mean_expected_fresh_on_field,
             build_ms
         );
@@ -381,7 +494,7 @@ pub fn run() {
             p.name,
             num_matches,
             seed + 1000,
-            &MatchSimOptions::default(),
+            &match_opts,
         );
         println!("done in {}ms", t_sim.elapsed().as_millis());
         aggs.push(agg);
@@ -466,17 +579,61 @@ pub fn run() {
     }
     println!();
 
+    // ─── Stamina audit (only when the cap is active) ────────────────────
+    if let Some(m) = problem.max_consecutive_on_field {
+        println!(
+            "# Stamina audit: longest consecutive on-field run per policy (cap = {} periods):",
+            m
+        );
+        for a in &aggs {
+            let eval = evaluate_schedule(&problem, &a.schedule);
+            let longest = longest_on_field_run(&problem, &a.schedule);
+            let flag = if eval.stamina_ok {
+                ""
+            } else {
+                "  ← EXCEEDS stamina cap"
+            };
+            println!(
+                "#   {}  longest run = {} period(s){}",
+                format!("{:<20}", a.policy_name),
+                longest,
+                flag
+            );
+        }
+        println!(
+            "#   (only the LP-relaxation and IP/MIP encode this rolling-window constraint;"
+        );
+        println!(
+            "#    the memoryless/greedy/1-step-MDP baselines cannot express it and may exceed it.)"
+        );
+        println!();
+    }
+
     // ─── Architectural recap ────────────────────────────────────────────
     println!("# Architectural recap:");
     for p in &filtered {
         println!("#   {} → {}", format!("{:<20}", p.name), p.note);
     }
     println!("#");
-    println!("#   Layer 1 (DES): simulateMatchDES runs 80 game-minutes per match,");
+    println!(
+        "#   Layer 1 (DES): simulateMatchDES runs {} game-minutes per match,",
+        problem.num_periods * minutes_per_period
+    );
     println!("#                  samples Poisson goal events from on-field affinity,");
     println!("#                  triggers a substitution event at every period boundary.");
-    println!("#   Layer 2 (MDP): exact backward induction; |S| = 4 periods × C(12,5) = 3168,");
+    println!(
+        "#   Layer 2 (MDP): exact backward induction over {} periods × C({},{}) bench-sets,",
+        problem.num_periods, problem.num_players, problem.bench_size
+    );
     println!("#                  reward at each (s, a) is the Hungarian-optimal assignment.");
+    if let Some(m) = problem.max_consecutive_on_field {
+        println!(
+            "#   Stamina:       only the LP/IP-MIP encode the rolling \"≤ {m} consecutive periods",
+        );
+        println!(
+            "#                  on field\" constraint; the 1-step-memory MDP and greedy cannot."
+        );
+    }
     println!(
         "#   POMDP feature: hidden fatigue belief is carried across periods for audit metrics."
     );
@@ -528,6 +685,7 @@ pub fn run() {
             &best.schedule,
             &MatchSimOptions {
                 seed: Some(seed + 1000),
+                minutes_per_period: Some(minutes_per_period),
                 ..Default::default()
             },
         );

@@ -1867,7 +1867,9 @@ fn solve_node_relaxation(
                 message: s.message,
             }
         }
-        IncrementalPrimalDual => unreachable!(),
+        IncrementalPrimalDual => {
+            unreachable!("IncrementalPrimalDual is dispatched by the early return above")
+        }
     }
 }
 

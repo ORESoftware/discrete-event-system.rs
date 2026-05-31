@@ -39,14 +39,13 @@ impl ModelCitizen for StudioCitizen {
             .and_then(Value::as_str)
             .unwrap_or("signal-chain");
         let demo: StudioDemo = match demo_name {
-            "signal-chain" => signal_chain(),
-            "mixer" => mixer(),
-            "queue-line" => queue_line(),
-            other => return Err(CitizenError::InvalidSpec(format!(
+            "signal-chain" => signal_chain().map_err(|e| CitizenError::Run(e.to_string())),
+            "mixer" => mixer().map_err(|e| CitizenError::Run(e.to_string())),
+            "queue-line" => queue_line().map_err(|e| CitizenError::Run(e.to_string())),
+            other => Err(CitizenError::InvalidSpec(format!(
                 "unknown studio demo `{other}` (expected `signal-chain`, `mixer` or `queue-line`)"
             ))),
-        }
-        .map_err(|e| CitizenError::Run(e.to_string()))?;
+        }?;
 
         let mut demo = demo;
         let run_out = run(&mut demo.compiled, demo.steps, demo.dt);

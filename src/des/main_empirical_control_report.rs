@@ -27,9 +27,6 @@ impl EmpiricalControlReport {
         let out_dir = std::path::Path::new("out").join("empirical-control");
         let player = out_dir.join("player.html");
         let frames = out_dir.join("player.frames.jsonl");
-        let _ = std::fs::create_dir_all(&out_dir);
-        let _ = std::fs::write(&player, artifact.to_player_html());
-        let _ = std::fs::write(&frames, artifact.to_jsonl());
         let log = "The textual run executed in-process and streamed to stdout. \
                    Use player.html for the playable structured run; player.frames.jsonl \
                    contains the same frame stream."
@@ -77,14 +74,22 @@ MDP random-policy reach degree, and POMDP belief-tracking hit-probability / resi
         });
 
         let out = out_dir.join("report.html");
-        if let Some(parent) = out.parent() {
-            let _ = std::fs::create_dir_all(parent);
+        let write_result = (|| -> std::io::Result<(std::path::PathBuf, std::path::PathBuf)> {
+            std::fs::create_dir_all(&out_dir)?;
+            std::fs::write(&player, artifact.to_player_html())?;
+            std::fs::write(&frames, artifact.to_jsonl())?;
+            std::fs::write(&out, page.to_html())?;
+            let resolved = std::fs::canonicalize(&out).unwrap_or_else(|_| out.clone());
+            let player_abs = std::fs::canonicalize(&player).unwrap_or_else(|_| player.clone());
+            Ok((resolved, player_abs))
+        })();
+        match write_result {
+            Ok((resolved, player_abs)) => {
+                println!("Empirical-control report: {}", resolved.display());
+                println!("Empirical-control player: {}", player_abs.display());
+            }
+            Err(e) => eprintln!("Empirical-control report write failed: {e}"),
         }
-        let _ = std::fs::write(&out, page.to_html());
-        let resolved = std::fs::canonicalize(&out).unwrap_or(out);
-        println!("Empirical-control report: {}", resolved.display());
-        let player_abs = std::fs::canonicalize(&player).unwrap_or(player);
-        println!("Empirical-control player: {}", player_abs.display());
     }
 }
 

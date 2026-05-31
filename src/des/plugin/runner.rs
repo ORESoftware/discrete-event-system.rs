@@ -9,11 +9,15 @@ use std::process::Command;
 
 use serde_json::Value;
 
-use super::manifest::{OutputKind, PluginManifest};
+use super::manifest::{OutputKind, PluginManifest, PluginTransportKind};
 
 /// Why a plugin run failed. Recoverable (returned, never panicked).
 #[derive(Debug)]
 pub enum PluginError {
+    /// The manifest failed SDK-boundary validation.
+    Manifest(String),
+    /// The manifest asks for a future transport this runner cannot execute.
+    UnsupportedTransport(String),
     /// The process could not be spawned (command missing, not executable, …).
     Spawn(String),
     /// The process ran but exited non-zero.
@@ -27,11 +31,14 @@ pub enum PluginError {
 impl std::fmt::Display for PluginError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            PluginError::Manifest(m) => write!(f, "invalid plugin manifest: {m}"),
+            PluginError::UnsupportedTransport(m) => write!(f, "unsupported plugin transport: {m}"),
             PluginError::Spawn(m) => write!(f, "failed to spawn plugin: {m}"),
             PluginError::NonZeroExit { code, stderr } => write!(
                 f,
                 "plugin exited with {} — stderr: {}",
-                code.map(|c| c.to_string()).unwrap_or_else(|| "signal".to_string()),
+                code.map(|c| c.to_string())
+                    .unwrap_or_else(|| "signal".to_string()),
                 stderr.trim()
             ),
             PluginError::Parse(m) => write!(f, "could not parse plugin output: {m}"),
@@ -106,6 +113,16 @@ pub fn parse_output(kind: OutputKind, stdout: &str) -> Result<PluginOutput, Plug
 /// Note: synchronous (`Command::output`) — `run.timeout_ms` is advisory and not
 /// yet enforced. stderr is captured and surfaced on non-zero exit.
 pub fn run_plugin(manifest: &PluginManifest) -> Result<PluginRun, PluginError> {
+    manifest
+        .validate_sdk_boundary()
+        .map_err(PluginError::Manifest)?;
+    if manifest.transport != PluginTransportKind::Stdio {
+        return Err(PluginError::UnsupportedTransport(format!(
+            "{:?} is declared for plugin `{}`; the synchronous runner supports stdio only",
+            manifest.transport, manifest.id
+        )));
+    }
+
     let mut command = Command::new(&manifest.run.command);
     command.args(&manifest.run.args);
     if let Some(cwd) = &manifest.run.cwd {
@@ -140,7 +157,7 @@ pub fn run_plugin(manifest: &PluginManifest) -> Result<PluginRun, PluginError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::des::plugin::manifest::{PlayerKind, RunSpec};
+    use crate::des::plugin::manifest::{PlayerKind, PluginRuntimeKind, RunSpec};
 
     #[test]
     fn parses_single_json_document() {
@@ -169,8 +186,14 @@ mod tests {
 
     #[test]
     fn empty_output_is_an_error() {
-        assert!(matches!(parse_output(OutputKind::Json, "   "), Err(PluginError::Empty)));
-        assert!(matches!(parse_output(OutputKind::Jsonl, "\n\n"), Err(PluginError::Empty)));
+        assert!(matches!(
+            parse_output(OutputKind::Json, "   "),
+            Err(PluginError::Empty)
+        ));
+        assert!(matches!(
+            parse_output(OutputKind::Jsonl, "\n\n"),
+            Err(PluginError::Empty)
+        ));
     }
 
     #[cfg(unix)]
@@ -184,6 +207,9 @@ mod tests {
             name: "Echo".to_string(),
             version: String::new(),
             description: String::new(),
+            runtime: PluginRuntimeKind::Rust,
+            transport: PluginTransportKind::Stdio,
+            language: None,
             run: RunSpec::new(
                 "sh",
                 &["-c", "printf '{\"t\":0,\"n\":1}\\n{\"t\":1,\"n\":3}\\n'"],
@@ -206,6 +232,9 @@ mod tests {
             name: "Fail".to_string(),
             version: String::new(),
             description: String::new(),
+            runtime: PluginRuntimeKind::Rust,
+            transport: PluginTransportKind::Stdio,
+            language: None,
             run: RunSpec::new("sh", &["-c", "echo oops >&2; exit 3"]),
             output: OutputKind::Json,
             player: PlayerKind::Results,
@@ -218,6 +247,28 @@ mod tests {
                 assert!(stderr.contains("oops"));
             }
             other => panic!("expected NonZeroExit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn runner_rejects_future_transports_explicitly() {
+        let manifest = PluginManifest {
+            id: "ffi".to_string(),
+            name: "FFI".to_string(),
+            version: String::new(),
+            description: String::new(),
+            runtime: PluginRuntimeKind::ForeignFfi,
+            transport: PluginTransportKind::CAbi,
+            language: Some("c++".to_string()),
+            run: RunSpec::new("./libplugin.so", &[]),
+            output: OutputKind::Json,
+            player: PlayerKind::Results,
+            controls: Vec::new(),
+            title: None,
+        };
+        match run_plugin(&manifest) {
+            Err(PluginError::UnsupportedTransport(m)) => assert!(m.contains("stdio only")),
+            other => panic!("expected UnsupportedTransport, got {other:?}"),
         }
     }
 }

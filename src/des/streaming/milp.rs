@@ -20,13 +20,13 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use serde_json::{json, Value};
 
 use crate::des::general::milp_bnb::{
-    solve_milp, BranchType, LpStatus, MILPProblem, MILPSolveOptions, MILPSolution, MILPStatus,
+    solve_milp, BranchType, LpStatus, MILPProblem, MILPSolution, MILPSolveOptions, MILPStatus,
     NodeEvent, PrunedReason, Sense,
 };
 
 use super::{
     bool_at, error_frame, f64_at, op_of, str_at, usize_at, vec_f64, vec_str, vec_vec_f64,
-    SolverKind, StreamContract, StreamEvent, StreamOp, StreamingModel,
+    ModelStreamKind, SolverKind, StreamContract, StreamEvent, StreamOp, StreamingModel,
 };
 
 /// A MILP assembled by a JSONL command stream and solved on demand.
@@ -36,6 +36,12 @@ pub struct StreamingMilp {
     /// Emit one `node` frame per explored B&B node on solve.
     emit_nodes: bool,
 }
+
+/// Integer-programming streams use the same branch-and-bound engine as MILP.
+pub type StreamingMip = StreamingMilp;
+
+/// Pure IP is a MILP with all decision variables marked integer.
+pub type StreamingIp = StreamingMilp;
 
 impl Default for StreamingMilp {
     fn default() -> Self {
@@ -144,7 +150,9 @@ impl StreamingMilp {
 
     fn solve(&mut self, command: &Value) -> Vec<Value> {
         if !self.initialized {
-            return vec![error_frame("no MILP initialized; send {\"op\":\"init\", ...} first")];
+            return vec![error_frame(
+                "no MILP initialized; send {\"op\":\"init\", ...} first",
+            )];
         }
         let opts = MILPSolveOptions {
             max_nodes: usize_at(command, "maxNodes"),
@@ -195,7 +203,9 @@ impl StreamingMilp {
             return vec![error_frame("`a` rows must match `b` length")];
         }
         if b.iter().any(|&v| v < 0.0) {
-            return vec![error_frame("`b` must be non-negative (standard form A·x ≤ b, x ≥ 0)")];
+            return vec![error_frame(
+                "`b` must be non-negative (standard form A·x ≤ b, x ≥ 0)",
+            )];
         }
         if a.iter().any(|row| row.len() != c.len()) {
             return vec![error_frame("each row of `a` must have length == len(c)")];
@@ -232,9 +242,10 @@ impl StreamingModel for StreamingMilp {
     }
 
     fn contract(&self) -> StreamContract {
-        StreamContract::new(
+        StreamContract::new_for_stream_kind(
             "streaming-milp",
             SolverKind::IterativeSolver,
+            ModelStreamKind::Mip,
             "Mixed-integer linear program assembled by a command stream and \
              solved on demand by branch-and-bound. On `solve`, the node trace is \
              streamed (when emitNodes), then the final solution. Standard form \
@@ -292,7 +303,9 @@ impl StreamingModel for StreamingMilp {
             _ => {}
         }
         if !self.initialized {
-            return vec![error_frame("no MILP initialized; send {\"op\":\"init\", ...} first")];
+            return vec![error_frame(
+                "no MILP initialized; send {\"op\":\"init\", ...} first",
+            )];
         }
 
         match op {
@@ -300,7 +313,9 @@ impl StreamingModel for StreamingMilp {
                 let coefs = vec_f64(command, "coefs").unwrap_or_default();
                 let rhs = f64_at(command, "rhs", 0.0);
                 if coefs.len() != self.n_vars() {
-                    return vec![error_frame("`coefs` length must equal the number of variables")];
+                    return vec![error_frame(
+                        "`coefs` length must equal the number of variables",
+                    )];
                 }
                 if rhs < 0.0 {
                     return vec![error_frame("`rhs` must be non-negative (b ≥ 0)")];
@@ -308,14 +323,20 @@ impl StreamingModel for StreamingMilp {
                 self.problem.a.push(coefs);
                 self.problem.b.push(rhs);
                 if let Some(names) = self.problem.con_names.as_mut() {
-                    names.push(str_at(command, "name").unwrap_or_else(|| format!("c{}", names.len() + 1)));
+                    names.push(
+                        str_at(command, "name").unwrap_or_else(|| format!("c{}", names.len() + 1)),
+                    );
                 }
-                vec![json!({"event":"applied","op":"add_constraint","numConstraints": self.n_cons()})]
+                vec![
+                    json!({"event":"applied","op":"add_constraint","numConstraints": self.n_cons()}),
+                ]
             }
             "add_variable" => {
                 let column = vec_f64(command, "column").unwrap_or_default();
                 if column.len() != self.n_cons() {
-                    return vec![error_frame("`column` length must equal the number of constraints")];
+                    return vec![error_frame(
+                        "`column` length must equal the number of constraints",
+                    )];
                 }
                 let coef = f64_at(command, "c", 0.0);
                 let integer = bool_at(command, "integer", false);
@@ -328,7 +349,9 @@ impl StreamingModel for StreamingMilp {
                     ub.push(f64_at(command, "ub", 1e30));
                 }
                 if let Some(names) = self.problem.var_names.as_mut() {
-                    names.push(str_at(command, "name").unwrap_or_else(|| format!("x{}", names.len() + 1)));
+                    names.push(
+                        str_at(command, "name").unwrap_or_else(|| format!("x{}", names.len() + 1)),
+                    );
                 }
                 vec![json!({"event":"applied","op":"add_variable","numVars": self.n_vars()})]
             }
@@ -352,7 +375,9 @@ impl StreamingModel for StreamingMilp {
                 self.problem.integer_vars[index] = integer;
                 vec![json!({"event":"applied","op":"set_integer","index":index,"integer":integer})]
             }
-            other => vec![error_frame(format!("unknown op `{other}` for streaming-milp"))],
+            other => vec![error_frame(format!(
+                "unknown op `{other}` for streaming-milp"
+            ))],
         }
     }
 }

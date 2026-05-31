@@ -19,8 +19,8 @@ use crate::des::decision::{solve_pomdp, solve_pomdp_underlying, PomdpMethod, Pom
 use crate::des::general::belief::DiscreteBelief;
 
 use super::{
-    error_frame, f64_at, op_of, usize_at, vec_f64, SolverKind, StreamContract, StreamEvent,
-    StreamOp, StreamingModel,
+    error_frame, f64_at, op_of, probability_error, usize_at, vec_f64, SolverKind, StreamContract,
+    StreamEvent, StreamOp, StreamingModel,
 };
 
 /// A tabular POMDP assembled by a JSONL command stream and solved on demand.
@@ -68,7 +68,11 @@ impl StreamingPomdp {
         };
         let no = match usize_at(command, "numObservations") {
             Some(n) if n > 0 => n,
-            _ => return vec![error_frame("`numObservations` (positive integer) is required")],
+            _ => {
+                return vec![error_frame(
+                    "`numObservations` (positive integer) is required",
+                )]
+            }
         };
         self.ns = ns;
         self.na = na;
@@ -109,6 +113,9 @@ impl StreamingPomdp {
             Some(p) if p.len() == self.ns => p,
             _ => return vec![error_frame("`probs` must be an array of length numStates")],
         };
+        if let Some(err) = probability_error(&probs, "probs") {
+            return vec![err];
+        }
         self.transition[s][a] = probs;
         vec![json!({"event":"applied","op":"set_transition","state":s,"action":a})]
     }
@@ -124,8 +131,15 @@ impl StreamingPomdp {
         };
         let probs = match vec_f64(command, "probs") {
             Some(p) if p.len() == self.no => p,
-            _ => return vec![error_frame("`probs` must be an array of length numObservations")],
+            _ => {
+                return vec![error_frame(
+                    "`probs` must be an array of length numObservations",
+                )]
+            }
         };
+        if let Some(err) = probability_error(&probs, "probs") {
+            return vec![err];
+        }
         self.observation[sp][a] = probs;
         vec![json!({"event":"applied","op":"set_observation","nextState":sp,"action":a})]
     }
@@ -175,7 +189,9 @@ impl StreamingPomdp {
 
     fn solve(&mut self, command: &Value) -> Vec<Value> {
         if !self.initialized {
-            return vec![error_frame("no POMDP initialized; send {\"op\":\"init\", ...} first")];
+            return vec![error_frame(
+                "no POMDP initialized; send {\"op\":\"init\", ...} first",
+            )];
         }
         let method: PomdpMethod = command
             .get("method")
@@ -279,14 +295,18 @@ impl StreamingModel for StreamingPomdp {
             _ => {}
         }
         if !self.initialized {
-            return vec![error_frame("no POMDP initialized; send {\"op\":\"init\", ...} first")];
+            return vec![error_frame(
+                "no POMDP initialized; send {\"op\":\"init\", ...} first",
+            )];
         }
         match op {
             "set_transition" => self.set_transition(command),
             "set_observation" => self.set_observation(command),
             "set_reward" => self.set_reward(command),
             "set_belief" => self.set_belief(command),
-            other => vec![error_frame(format!("unknown op `{other}` for streaming-pomdp"))],
+            other => vec![error_frame(format!(
+                "unknown op `{other}` for streaming-pomdp"
+            ))],
         }
     }
 }
@@ -335,5 +355,22 @@ mod tests {
         let mut m = StreamingPomdp::new();
         let frames = drive(&mut m, &[json!({"op":"solve"})]);
         assert_eq!(frames[0]["event"], json!("error"));
+    }
+
+    #[test]
+    fn rejects_invalid_probability_rows_before_solve() {
+        let mut m = StreamingPomdp::new();
+        let frames = drive(
+            &mut m,
+            &[
+                json!({"op":"init","numStates":2,"numActions":1,"numObservations":2}),
+                json!({"op":"set_transition","state":0,"action":0,"probs":[0.4,0.4]}),
+            ],
+        );
+        assert_eq!(frames.last().unwrap()["event"], json!("error"));
+        assert!(frames.last().unwrap()["message"]
+            .as_str()
+            .unwrap()
+            .contains("sum to 1.0"));
     }
 }

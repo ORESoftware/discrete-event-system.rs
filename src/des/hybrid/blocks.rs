@@ -296,7 +296,7 @@ impl Block for BouncingBall {
     }
     fn on_event(&self, _t: f64, xc: &mut [f64], _xd: &mut Vec<f64>, _u: &[Signal], _zc: usize) {
         xc[0] = 0.0; // clamp to floor
-        xc[1] = -self.restitution * xc[1]; // reflect velocity, losing energy
+        xc[1] *= -self.restitution; // reflect velocity, losing energy
     }
 }
 

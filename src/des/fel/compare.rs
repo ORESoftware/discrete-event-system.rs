@@ -31,6 +31,74 @@ pub struct AnalyticalMm1 {
     pub wq: f64,
 }
 
+/// Engine family to prefer for a model class.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SimulationEngineKind {
+    FutureEventList,
+    TimeStepped,
+    Hybrid,
+}
+
+impl SimulationEngineKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SimulationEngineKind::FutureEventList => "future-event-list",
+            SimulationEngineKind::TimeStepped => "time-stepped",
+            SimulationEngineKind::Hybrid => "hybrid",
+        }
+    }
+}
+
+/// A small, serializable engine-fit note for reports and server descriptors.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineRecommendation {
+    pub recommended: SimulationEngineKind,
+    pub reason: String,
+    pub fel_fit: String,
+    pub time_stepped_fit: String,
+}
+
+/// Choose an engine family from the model's dominant dynamics.
+///
+/// FEL wins for sparse, exact event jumps. Time-stepped or hybrid wins when the
+/// model has continuous state, dense sampled updates, or discrete events coupled
+/// to continuous dynamics.
+pub fn recommend_engine_for_model(
+    has_continuous_state: bool,
+    has_dense_or_regular_updates: bool,
+    needs_exact_event_times: bool,
+) -> EngineRecommendation {
+    if has_continuous_state || has_dense_or_regular_updates {
+        return EngineRecommendation {
+            recommended: SimulationEngineKind::TimeStepped,
+            reason: "mixed discrete/continuous or dense sampled dynamics need a fixed integration/sampling spine".to_string(),
+            fel_fit: "good for sparse jumps, but awkward when state evolves continuously between jumps".to_string(),
+            time_stepped_fit: "natural fit for sampled control, ODE/SDE coupling, and simultaneous regular updates".to_string(),
+        };
+    }
+    if needs_exact_event_times {
+        return EngineRecommendation {
+            recommended: SimulationEngineKind::FutureEventList,
+            reason: "sparse event jumps with exact event times avoid idle ticks".to_string(),
+            fel_fit: "natural fit for queues, arrivals, departures, and other jump-only systems"
+                .to_string(),
+            time_stepped_fit:
+                "converges as dt shrinks, but pays for every tick and carries discretization bias"
+                    .to_string(),
+        };
+    }
+    EngineRecommendation {
+        recommended: SimulationEngineKind::Hybrid,
+        reason:
+            "no single paradigm dominates; use the hybrid executive or a library-facing adapter"
+                .to_string(),
+        fel_fit: "use for the sparse event subset".to_string(),
+        time_stepped_fit: "use for regular sampled state and deterministic integration".to_string(),
+    }
+}
+
 /// Standard M/M/1 formulas: ρ=λ/μ, L=ρ/(1−ρ), Lq=ρ²/(1−ρ), W=1/(μ−λ),
 /// Wq=ρ/(μ−λ).
 pub fn analytical_mm1(lambda: f64, mu: f64) -> AnalyticalMm1 {
@@ -57,6 +125,7 @@ pub struct ComparisonReport {
     pub analytical: AnalyticalMm1,
     pub fel: FelMm1Result,
     pub time_stepped: Vec<TimeSteppedMm1Result>,
+    pub engine_recommendation: EngineRecommendation,
     /// time-stepped station-updates ÷ FEL events, for the finest Δt run.
     pub work_ratio_finest_dt: f64,
 }
@@ -95,14 +164,13 @@ pub fn compare_mm1(lambda: f64, mu: f64, horizon: f64, dts: &[f64], seed: u32) -
         analytical,
         fel,
         time_stepped,
+        engine_recommendation: recommend_engine_for_model(false, false, true),
         work_ratio_finest_dt,
     }
 }
 
 fn fmt_row(label: &str, rho: f64, l: f64, lq: f64, w: f64, wq: f64, work: String) -> String {
-    format!(
-        "{label:<26} ρ={rho:>6.3}  L={l:>7.3}  Lq={lq:>7.3}  W={w:>7.3}  Wq={wq:>7.3}  {work}"
-    )
+    format!("{label:<26} ρ={rho:>6.3}  L={l:>7.3}  Lq={lq:>7.3}  W={w:>7.3}  Wq={wq:>7.3}  {work}")
 }
 
 /// Print a human-readable table plus the full JSON report. Suitable as a
@@ -114,12 +182,23 @@ pub fn run() {
     let dts = [1.0, 0.25, 0.05];
     let report = compare_mm1(lambda, mu, horizon, &dts, 20_240_530);
 
-    println!("=== FEL vs time-stepped DES — M/M/1 (λ={lambda}, μ={mu}, ρ={}) ===", lambda / mu);
+    println!(
+        "=== FEL vs time-stepped DES — M/M/1 (λ={lambda}, μ={mu}, ρ={}) ===",
+        lambda / mu
+    );
     println!("horizon = {horizon} simulated time units\n");
     let a = &report.analytical;
     println!(
         "{}",
-        fmt_row("analytical (exact)", a.rho, a.l, a.lq, a.w, a.wq, String::new())
+        fmt_row(
+            "analytical (exact)",
+            a.rho,
+            a.l,
+            a.lq,
+            a.w,
+            a.wq,
+            String::new()
+        )
     );
     let f = &report.fel;
     println!(
@@ -151,6 +230,10 @@ pub fn run() {
     println!(
         "\nWork to cover the same horizon at the finest Δt: time-stepped did {:.1}× the \nFEL's event count (the FEL skips idle time; the time-step engine cannot).",
         report.work_ratio_finest_dt
+    );
+    println!(
+        "Engine fit: {} recommended here. For mixed discrete/continuous models, prefer time-stepped or hybrid.",
+        report.engine_recommendation.recommended.as_str()
     );
     println!("\n--- JSON ---");
     println!(
@@ -188,7 +271,12 @@ mod tests {
         assert!((ts.throughput - a.lambda).abs() < 0.06);
 
         // The two engines agree with each other on mean queue length.
-        assert!((fel.lq - ts.lq).abs() < 0.25, "fel.lq={} ts.lq={}", fel.lq, ts.lq);
+        assert!(
+            (fel.lq - ts.lq).abs() < 0.25,
+            "fel.lq={} ts.lq={}",
+            fel.lq,
+            ts.lq
+        );
     }
 
     #[test]
@@ -202,5 +290,19 @@ mod tests {
             "expected time-stepping to do >10x the work, got {}",
             report.work_ratio_finest_dt
         );
+    }
+
+    #[test]
+    fn mixed_discrete_continuous_models_prefer_time_stepped() {
+        let rec = recommend_engine_for_model(true, false, true);
+        assert_eq!(rec.recommended, SimulationEngineKind::TimeStepped);
+        assert!(rec.reason.contains("mixed discrete/continuous"));
+    }
+
+    #[test]
+    fn sparse_jump_models_prefer_fel() {
+        let rec = recommend_engine_for_model(false, false, true);
+        assert_eq!(rec.recommended, SimulationEngineKind::FutureEventList);
+        assert!(rec.fel_fit.contains("queues"));
     }
 }

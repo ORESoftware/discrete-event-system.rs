@@ -36,7 +36,7 @@
 
 #![allow(dead_code)]
 
-use std::any::Any;
+use std::any::{Any, TypeId};
 
 use crate::des::animation::types::{Anchor, CircleShape, FontWeight, RectShape, Shape, TextShape};
 use crate::des::general::des_base::composite_station::CompositeDESStation;
@@ -384,6 +384,12 @@ impl VisualBlock {
         &mut self,
         station: std::rc::Rc<std::cell::RefCell<S>>,
     ) -> std::rc::Rc<std::cell::RefCell<S>> {
+        if TypeId::of::<S>() == TypeId::of::<VisualBlock>() {
+            panic!(
+                "VisualBlock({}): visual blocks cannot contain/nest other visual blocks",
+                self.id()
+            );
+        }
         let child = self.composite.add_substation(station);
         let child_id = {
             let b = child.borrow();
@@ -399,6 +405,12 @@ impl VisualBlock {
 
     /// `addVisualMember(member)` — dedup by value.
     pub fn add_visual_member(&mut self, member: VisualBlockMember) -> VisualBlockMember {
+        if is_visual_block_member_kind(&member.kind) {
+            panic!(
+                "VisualBlock({}): visual block members must stay flat; nest runtime members instead",
+                self.id()
+            );
+        }
         if !self.visual_members.contains(&member) {
             self.visual_members.push(member.clone());
         }
@@ -881,6 +893,11 @@ fn member_kind(member: &VisualBlockMember) -> String {
     member.kind.clone()
 }
 
+fn is_visual_block_member_kind(kind: &str) -> bool {
+    let kind = kind.trim();
+    kind == "visual-block" || kind == "VisualBlock" || kind.ends_with("::VisualBlock")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -941,5 +958,32 @@ mod tests {
             )
         });
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn visual_blocks_reject_nested_visual_block_substations() {
+        let mut parent = VisualBlock::new("parent", VisualBlockOptions::default());
+        let child = std::rc::Rc::new(std::cell::RefCell::new(VisualBlock::new(
+            "child",
+            VisualBlockOptions::default(),
+        )));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            parent.add_substation(child);
+        }));
+        assert!(result.is_err());
+        assert!(parent.contained_visual_members().is_empty());
+    }
+
+    #[test]
+    fn explicit_visual_block_members_are_rejected() {
+        let mut parent = VisualBlock::new("parent", VisualBlockOptions::default());
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            parent.add_visual_member(VisualBlockMember {
+                id: Some("child".to_string()),
+                kind: "visual-block".to_string(),
+            });
+        }));
+        assert!(result.is_err());
+        assert!(parent.contained_visual_members().is_empty());
     }
 }

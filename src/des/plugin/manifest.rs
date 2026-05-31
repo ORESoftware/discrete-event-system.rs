@@ -20,6 +20,44 @@ pub enum OutputKind {
     Jsonl,
 }
 
+/// Runtime family for the plugin implementation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PluginRuntimeKind {
+    /// First-class path: a Rust binary speaking the plugin JSON contract.
+    Rust,
+    /// A non-Rust child process (Python, C++, etc.) connected over IPC.
+    ForeignProcess,
+    /// A non-Rust library loaded through an explicit ABI layer.
+    ForeignFfi,
+}
+
+impl Default for PluginRuntimeKind {
+    fn default() -> Self {
+        PluginRuntimeKind::Rust
+    }
+}
+
+/// Boundary/transport between the host SDK and the plugin.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PluginTransportKind {
+    /// Current supported runner: spawn a process, read stdout, parse JSON/JSONL.
+    Stdio,
+    /// Future IPC option for long-lived external runtimes.
+    TcpSocket,
+    /// Future IPC option for same-host external runtimes.
+    UnixSocket,
+    /// Future low-level bridge for C/C++ ABI shims.
+    CAbi,
+}
+
+impl Default for PluginTransportKind {
+    fn default() -> Self {
+        PluginTransportKind::Stdio
+    }
+}
+
 /// Which player the host renders for this plugin.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -86,7 +124,13 @@ impl UiControl {
         }
     }
 
-    pub fn select(id: &str, label: &str, options: &[&str], default: &str, target: Option<&str>) -> Self {
+    pub fn select(
+        id: &str,
+        label: &str,
+        options: &[&str],
+        default: &str,
+        target: Option<&str>,
+    ) -> Self {
         UiControl {
             id: id.to_string(),
             label: label.to_string(),
@@ -158,6 +202,16 @@ pub struct PluginManifest {
     pub version: String,
     #[serde(default)]
     pub description: String,
+    /// Runtime family. Defaults to Rust because Rust plugins are the native SDK path.
+    #[serde(default)]
+    pub runtime: PluginRuntimeKind,
+    /// Host/plugin boundary. Only [`PluginTransportKind::Stdio`] is executed by
+    /// the synchronous runner today; other variants are explicit future ports.
+    #[serde(default)]
+    pub transport: PluginTransportKind,
+    /// Optional concrete implementation language for foreign runtimes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
     pub run: RunSpec,
     pub output: OutputKind,
     pub player: PlayerKind,
@@ -178,6 +232,30 @@ impl PluginManifest {
     pub fn from_json_str(text: &str) -> Result<Self, String> {
         serde_json::from_str(text).map_err(|e| e.to_string())
     }
+
+    /// Validate the SDK boundary before a host attempts to run the plugin.
+    pub fn validate_sdk_boundary(&self) -> Result<(), String> {
+        if self.id.trim().is_empty() {
+            return Err("plugin id must be non-empty".to_string());
+        }
+        if self.name.trim().is_empty() {
+            return Err("plugin name must be non-empty".to_string());
+        }
+        if self.run.command.trim().is_empty() {
+            return Err("plugin run.command must be non-empty".to_string());
+        }
+        match (self.runtime, self.transport) {
+            (PluginRuntimeKind::ForeignProcess, PluginTransportKind::CAbi) => {
+                Err("foreign-process plugins must use an IPC transport, not c-abi".to_string())
+            }
+            (PluginRuntimeKind::ForeignFfi, PluginTransportKind::Stdio)
+            | (PluginRuntimeKind::ForeignFfi, PluginTransportKind::TcpSocket)
+            | (PluginRuntimeKind::ForeignFfi, PluginTransportKind::UnixSocket) => {
+                Err("foreign-ffi plugins must declare the c-abi transport".to_string())
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -191,6 +269,9 @@ mod tests {
             name: "Demo".to_string(),
             version: "1.0.0".to_string(),
             description: "a demo plugin".to_string(),
+            runtime: PluginRuntimeKind::Rust,
+            transport: PluginTransportKind::Stdio,
+            language: None,
             run: RunSpec::new("./demo", &["--frames", "100"]),
             output: OutputKind::Jsonl,
             player: PlayerKind::Sim,
@@ -208,6 +289,8 @@ mod tests {
         assert_eq!(back.player, PlayerKind::Sim);
         assert_eq!(back.controls.len(), 3);
         assert_eq!(back.run.args, vec!["--frames", "100"]);
+        assert_eq!(back.runtime, PluginRuntimeKind::Rust);
+        assert_eq!(back.transport, PluginTransportKind::Stdio);
     }
 
     #[test]
@@ -216,5 +299,26 @@ mod tests {
         assert_eq!(v, serde_json::json!("jsonl"));
         let v = serde_json::to_value(PlayerKind::Results).unwrap();
         assert_eq!(v, serde_json::json!("results"));
+    }
+
+    #[test]
+    fn boundary_validation_accepts_python_ipc_and_rejects_bad_ffi_mix() {
+        let mut m = PluginManifest {
+            id: "py".to_string(),
+            name: "Python plugin".to_string(),
+            version: String::new(),
+            description: String::new(),
+            runtime: PluginRuntimeKind::ForeignProcess,
+            transport: PluginTransportKind::Stdio,
+            language: Some("python".to_string()),
+            run: RunSpec::new("python3", &["plugin.py"]),
+            output: OutputKind::Jsonl,
+            player: PlayerKind::Sim,
+            controls: Vec::new(),
+            title: None,
+        };
+        assert!(m.validate_sdk_boundary().is_ok());
+        m.transport = PluginTransportKind::CAbi;
+        assert!(m.validate_sdk_boundary().unwrap_err().contains("IPC"));
     }
 }

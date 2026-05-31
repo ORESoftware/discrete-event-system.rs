@@ -9,7 +9,8 @@
 //! ```
 
 use des_engine::des::plugin::{
-    run_and_render, OutputKind, PlayerKind, PluginManifest, RunSpec, UiControl,
+    run_and_render, OutputKind, PlayerKind, PluginManifest, PluginRuntimeKind, PluginTransportKind,
+    RunSpec, UiControl,
 };
 
 fn main() {
@@ -20,7 +21,12 @@ fn main() {
         id: "queue".to_string(),
         name: "M/M/1 Queue (external Rust plugin)".to_string(),
         version: "1.0.0".to_string(),
-        description: "An external Rust program streams JSONL frames; the core renders a sim player.".to_string(),
+        description:
+            "An external Rust program streams JSONL frames; the core renders a sim player."
+                .to_string(),
+        runtime: PluginRuntimeKind::Rust,
+        transport: PluginTransportKind::Stdio,
+        language: None,
         run: RunSpec::new("target/debug/examples/plugin_queue", &[]),
         output: OutputKind::Jsonl,
         player: PlayerKind::Sim,
@@ -39,7 +45,12 @@ fn main() {
         id: "lp".to_string(),
         name: "LP Solver (external Rust plugin)".to_string(),
         version: "1.0.0".to_string(),
-        description: "An external Rust program emits one JSON result; the core renders a results player.".to_string(),
+        description:
+            "An external Rust program emits one JSON result; the core renders a results player."
+                .to_string(),
+        runtime: PluginRuntimeKind::Rust,
+        transport: PluginTransportKind::Stdio,
+        language: None,
         run: RunSpec::new("target/debug/examples/plugin_lp", &[]),
         output: OutputKind::Json,
         player: PlayerKind::Results,

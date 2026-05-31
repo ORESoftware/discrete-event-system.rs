@@ -59,3 +59,49 @@
 )]
 
 pub mod des;
+
+pub use des::{decision, fel, hybrid, model, plugin, service, streaming, studio};
+
+/// Stable SDK-facing exports for embedders (servers, desktop apps, CLIs).
+pub mod sdk {
+    pub use crate::{decision, fel, hybrid, model, plugin, service, streaming, studio};
+
+    /// Modules intended to be treated as the public SDK surface.
+    pub const SDK_MODULES: &[&str] = &[
+        "service",
+        "model",
+        "streaming",
+        "studio",
+        "hybrid",
+        "fel",
+        "plugin",
+        "decision",
+    ];
+
+    /// Lightweight descriptor embedders can expose in their own diagnostics.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct SdkSurface {
+        pub crate_name: &'static str,
+        pub version: &'static str,
+        pub modules: &'static [&'static str],
+    }
+
+    pub fn surface() -> SdkSurface {
+        SdkSurface {
+            crate_name: env!("CARGO_PKG_NAME"),
+            version: env!("CARGO_PKG_VERSION"),
+            modules: SDK_MODULES,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn sdk_surface_lists_embedding_modules() {
+        let surface = crate::sdk::surface();
+        assert!(surface.modules.contains(&"service"));
+        assert!(surface.modules.contains(&"streaming"));
+        assert!(surface.modules.contains(&"plugin"));
+    }
+}

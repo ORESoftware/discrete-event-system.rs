@@ -120,7 +120,7 @@ impl ElevWorld {
     /// Floors with a pending reason to visit (waiting passengers or in-car drop-offs).
     fn targets(&self) -> Vec<usize> {
         (0..self.floors)
-            .filter(|&f| !self.waiting[f].is_empty() || self.car.iter().any(|&d| d == f))
+            .filter(|&f| !self.waiting[f].is_empty() || self.car.contains(&f))
             .collect()
     }
 }
@@ -181,7 +181,7 @@ fn car_step(eng: &mut Engine<ElevWorld>) {
 /// Decide, on arriving at `car_floor`, whether to stop (open doors) or roll on.
 fn on_arrive(eng: &mut Engine<ElevWorld>) {
     let f = eng.world.car_floor;
-    let need_alight = eng.world.car.iter().any(|&d| d == f);
+    let need_alight = eng.world.car.contains(&f);
     let need_board = !eng.world.waiting[f].is_empty() && eng.world.car.len() < eng.world.capacity;
     if need_alight || need_board {
         eng.world.doors_open = true;
@@ -225,7 +225,7 @@ fn decide_step(eng: &mut Engine<ElevWorld>) {
     }
     let f = eng.world.car_floor;
     // A new arrival (or drop-off) at the current floor that we can service now.
-    let serviceable_here = eng.world.car.iter().any(|&d| d == f)
+    let serviceable_here = eng.world.car.contains(&f)
         || (!eng.world.waiting[f].is_empty() && eng.world.car.len() < eng.world.capacity);
     if targets.contains(&f) && serviceable_here {
         on_arrive(eng);
@@ -282,7 +282,7 @@ impl Default for ElevatorConfig {
             dwell: 2.5,
             arrival_rate: 0.55,
             horizon: 120.0,
-            seed: 0xE1E_4A70_5_u64,
+            seed: 0xE1E4_A705_u64,
         }
     }
 }

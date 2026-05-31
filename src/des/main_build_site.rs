@@ -8,13 +8,10 @@
 //! `std::env::var`; `fs` → `std::fs`.
 //!
 //! PORT NOTE: the TS regenerates artifacts with
-//! `execFileSync(ts-node, [siblingScript], …)`. This is a library crate with no
-//! sibling binaries, so [`SimulationSiteBuilder::run_script`] only *logs* the
-//! command it would invoke (to stderr) and does not execute it; some referenced
-//! siblings (`main-wind-mppt-anim`, `main-observability-controllability-anim`,
-//! `main-stochastic-sde-report`) are not part of this port set. The index build
-//! — the substantive deliverable — runs fully against whatever HTML already
-//! exists under `out/`.
+//! `execFileSync(ts-node, [siblingScript], …)`. Rust-native generators are
+//! called directly from this module as they become available; scripts still
+//! represented only by TS-style placeholders are logged by
+//! [`SimulationSiteBuilder::run_script`].
 
 #![allow(dead_code)]
 
@@ -48,9 +45,8 @@ impl SimulationSiteBuilder {
         eprintln!("Regenerating animations...");
         self.run_script("src/des/main-wind-mppt-anim.ts", &[]);
         self.run_script("src/des/main-wind-mppt-anim.ts", &[("CONTROLLER", "pi")]);
-        self.run_script("src/des/main-dc-motor-anim.ts", &[]);
-        self.run_script("src/des/main-dc-motor-anim.ts", &[("MODE", "open")]);
-        self.run_script("src/des/main-observability-controllability-anim.ts", &[]);
+        self.generate_dc_motor_pages();
+        crate::des::main_observability_controllability_anim::run();
 
         eprintln!("Generating run reports...");
         self.run_script("src/des/main-empirical-control-report.ts", &[]);
@@ -66,6 +62,18 @@ impl SimulationSiteBuilder {
         }
 
         self.write_index();
+    }
+
+    fn generate_dc_motor_pages(&self) {
+        let original_mode = std::env::var("MODE").ok();
+        std::env::remove_var("MODE");
+        crate::des::main_dc_motor_anim::run();
+        std::env::set_var("MODE", "open");
+        crate::des::main_dc_motor_anim::run();
+        match original_mode {
+            Some(value) => std::env::set_var("MODE", value),
+            None => std::env::remove_var("MODE"),
+        }
     }
 
     fn link_if_exists(&self, entry: IndexEntry) -> Option<IndexEntry> {
@@ -200,6 +208,7 @@ impl SimulationSiteBuilder {
         let runs: Vec<IndexEntry> = vec![
             IndexEntry { kind: "simulation".into(), title: "Traffic flow — five intersection".into(), href: "traffic-flow-five-intersection.html".into(), description: "Signalized five-intersection road network with moving car snapshots and lane-phase highlights.".into() },
             IndexEntry { kind: "simulation".into(), title: "Smart traffic flow".into(), href: "smart-traffic-flow.html".into(), description: "Smart movable cars with shuffled actor updates, accident instrumentation, and live traffic metrics.".into() },
+            IndexEntry { kind: "run report".into(), title: "DC motor — shadow controllability & observability".into(), href: "dc-motor/shadow-observability-controllability.html".into(), description: "Dual evaluator for the back-EMF plant: Kalman rank tests plus Gramian degree metrics for weak/strong directions.".into() },
             IndexEntry { kind: "run report".into(), title: "Empirical controllability & observability".into(), href: "empirical-control/report.html".into(), description: "Gramian degree (min/max directions) and Monte-Carlo trial estimates vs analytic Kalman tests.".into() },
             IndexEntry { kind: "run report".into(), title: "Stochastic SDEs + 3 ML algorithms".into(), href: "stochastic-sde/report.html".into(), description: "Euler–Maruyama engine with MLE system-id, Ensemble Kalman filtering, and a diffusion model.".into() },
         ];

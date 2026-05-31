@@ -3,8 +3,10 @@
 //! (bang-bang / PID / fuzzy / MDP-MPC) compared on the same physical house and
 //! the same 24-hour outdoor temperature trajectory.
 //!
-//! Keep indoor temperature within ±2°F of a target while minimising heating
-//! energy. The outside temperature follows a known diurnal pattern plus noise;
+//! Keep indoor temperature within ±2°F of a target while minimising HVAC
+//! energy. The default run is heating-only, while mixed-season runs can opt into
+//! bidirectional heat-pump behavior by setting `Q_min < 0`. The outside
+//! temperature follows a known diurnal pattern plus noise;
 //! a noisy forecast of the next H hours feeds the MPC-style controller (that is
 //! where the partial observability lives). Each tick is one minute of simulated
 //! time. The house integrates a first-order thermal ODE
@@ -44,6 +46,9 @@ pub struct HouseParams {
     pub tau: f64,
     /// Heater gain G (°F per kW per hour). dT/dt has a Q · G term.
     pub g: f64,
+    /// Maximum cooling power (kW), encoded as a negative command. Defaults to
+    /// zero for the original heating-only scenario.
+    pub q_min: f64,
     /// Maximum heater power Q_max (kW).
     pub q_max: f64,
     /// Initial indoor temperature (°F).
@@ -53,6 +58,7 @@ pub struct HouseParams {
 pub const DEFAULT_HOUSE: HouseParams = HouseParams {
     tau: 12.0,
     g: 1.0,
+    q_min: 0.0,
     q_max: 5.0,
     t_init: 70.0,
 };
@@ -62,6 +68,7 @@ pub const DEFAULT_HOUSE: HouseParams = HouseParams {
 pub struct HouseParamsPartial {
     pub tau: Option<f64>,
     pub g: Option<f64>,
+    pub q_min: Option<f64>,
     pub q_max: Option<f64>,
     pub t_init: Option<f64>,
 }
@@ -71,6 +78,7 @@ impl HouseParams {
         HouseParams {
             tau: p.tau.unwrap_or(self.tau),
             g: p.g.unwrap_or(self.g),
+            q_min: p.q_min.unwrap_or(self.q_min),
             q_max: p.q_max.unwrap_or(self.q_max),
             t_init: p.t_init.unwrap_or(self.t_init),
         }
@@ -200,6 +208,7 @@ pub struct TempObs {
     pub t_in_meas: f64,
     pub forecast: Vec<f64>,
     pub dt_h: f64,
+    pub q_min: f64,
     pub q_max: f64,
     pub house: HouseParams,
 }
@@ -211,6 +220,8 @@ pub fn controller_step(spec: &ControllerSpec, state: &mut ControllerState, ctx: 
         ControllerSpec::BangBang => {
             if e > 0.0 {
                 ctx.q_max
+            } else if e < 0.0 {
+                ctx.q_min
             } else {
                 0.0
             }
@@ -225,7 +236,7 @@ pub fn controller_step(spec: &ControllerSpec, state: &mut ControllerState, ctx: 
             state.d_err_filt = Some(d_err);
             let u_pre = kp * e + ki * i_prev + kd * d_err;
             let sat_high = u_pre >= ctx.q_max && e > 0.0;
-            let sat_low = u_pre <= 0.0 && e < 0.0;
+            let sat_low = u_pre <= ctx.q_min && e < 0.0;
             state.integral = Some(if sat_high || sat_low {
                 i_prev
             } else {
@@ -233,7 +244,7 @@ pub fn controller_step(spec: &ControllerSpec, state: &mut ControllerState, ctx: 
             });
             state.prev_error = Some(e);
             let u = kp * e + ki * state.integral.unwrap() + kd * d_err;
-            u.clamp(0.0, ctx.q_max)
+            u.clamp(ctx.q_min, ctx.q_max)
         }
         ControllerSpec::Fuzzy => {
             // Fuzzy-PI: the rule base outputs Δ-Q normalised to [-1,+1] (units of
@@ -241,9 +252,16 @@ pub fn controller_step(spec: &ControllerSpec, state: &mut ControllerState, ctx: 
             let de_dt = (e - state.prev_error.unwrap_or(e)) / ctx.dt_h;
             state.prev_error = Some(e);
             let dq_norm = fuzzy_delta_controller(e, de_dt);
-            let dq = dq_norm * ctx.q_max * ctx.dt_h * 6.0; // 6/h gain factor — empirical
+            let actuator_scale = if dq_norm >= 0.0 {
+                ctx.q_max
+            } else if ctx.q_min < 0.0 {
+                -ctx.q_min
+            } else {
+                ctx.q_max
+            };
+            let dq = dq_norm * actuator_scale * ctx.dt_h * 6.0; // 6/h gain factor — empirical
             let q_prev = state.fuzzy_q.unwrap_or(0.0);
-            let q = (q_prev + dq).clamp(0.0, ctx.q_max);
+            let q = (q_prev + dq).clamp(ctx.q_min, ctx.q_max);
             state.fuzzy_q = Some(q);
             q
         }
@@ -253,13 +271,14 @@ pub fn controller_step(spec: &ControllerSpec, state: &mut ControllerState, ctx: 
             comfort_penalty,
             cost_per_kwh,
             track_weight,
-        } => mdp_mpc_controller(
+        } => mdp_mpc_controller_with_bounds(
             ctx.t_in_meas,
             &ctx.forecast,
             horizon_h,
             n_levels,
             ctx.t_target,
             ctx.dt_h,
+            ctx.q_min,
             ctx.q_max,
             &ctx.house,
             comfort_penalty,
@@ -452,6 +471,39 @@ pub fn mdp_mpc_controller(
     cost_per_kwh: f64,
     track_weight: f64,
 ) -> f64 {
+    mdp_mpc_controller_with_bounds(
+        t_in_now,
+        forecast,
+        horizon_h,
+        n_levels,
+        t_target,
+        dt_h,
+        0.0,
+        q_max,
+        house,
+        comfort_penalty,
+        cost_per_kwh,
+        track_weight,
+    )
+}
+
+/// Bidirectional variant of [`mdp_mpc_controller`]. `q_min < 0` lets the action
+/// grid include cooling commands; `q_min = 0` is the original heating-only MDP.
+#[allow(clippy::too_many_arguments)]
+pub fn mdp_mpc_controller_with_bounds(
+    t_in_now: f64,
+    forecast: &[f64],
+    horizon_h: f64,
+    n_levels: usize,
+    t_target: f64,
+    dt_h: f64,
+    q_min: f64,
+    q_max: f64,
+    house: &HouseParams,
+    comfort_penalty: f64,
+    cost_per_kwh: f64,
+    track_weight: f64,
+) -> f64 {
     let h = forecast.len().min((horizon_h / dt_h).round() as usize);
     // T_in grid covering [T_target − 10, T_target + 10] in fine 0.1°F steps.
     let t_lo = t_target - 10.0;
@@ -474,9 +526,13 @@ pub fn mdp_mpc_controller(
         (1.0 - w) * v_row[i0] + w * v_row[i1]
     };
     // Action grid.
-    let actions: Vec<f64> = (0..n_levels)
-        .map(|k| (q_max * k as f64) / (n_levels as f64 - 1.0))
+    let mut actions: Vec<f64> = (0..n_levels)
+        .map(|k| q_min + (q_max - q_min) * k as f64 / (n_levels as f64 - 1.0))
         .collect();
+    if q_min < 0.0 && q_max > 0.0 && !actions.iter().any(|q| q.abs() < 1e-12) {
+        actions.push(0.0);
+        actions.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    }
     // Backward induction. V[k][i] = optimal cost-to-go from tick k with T_in in bin i.
     let mut v: Vec<Vec<f64>> = vec![vec![0.0; n_t]; h + 1];
     let mut pi: Vec<Vec<f64>> = vec![vec![0.0; n_t]; h];
@@ -490,7 +546,7 @@ pub fn mdp_mpc_controller(
                     let t_now = t_val(i);
                     let t_next = t_now + ((t_out_k - t_now) / house.tau + q * house.g) * dt_h;
                     let future_v = interp_v(&v[k + 1], t_next);
-                    let energy_cost = cost_per_kwh * q * dt_h;
+                    let energy_cost = cost_per_kwh * q.abs() * dt_h;
                     let track_err = t_now - t_target;
                     let dev = (track_err.abs() - 2.0).max(0.0);
                     let comfort_cost =
@@ -540,24 +596,30 @@ pub struct TempControllerBase {
     ctrl: ControllerCore<TempObs, f64>,
     spec: ControllerSpec,
     ctrl_state: ControllerState,
+    q_min_cached: f64,
     q_max_cached: f64,
 }
 
 impl TempControllerBase {
     pub fn new(id: &str, q_max: f64, spec: ControllerSpec) -> Self {
+        Self::new_with_bounds(id, 0.0, q_max, spec)
+    }
+
+    pub fn new_with_bounds(id: &str, q_min: f64, q_max: f64, spec: ControllerSpec) -> Self {
         let mut st = TempControllerBase {
             core: StationCore::new(id),
             ctrl: ControllerCore::new(),
             spec,
             ctrl_state: ControllerState::default(),
+            q_min_cached: q_min,
             q_max_cached: q_max,
         };
-        // Intrinsic invariant: every emitted control must lie in [0, Q_max].
+        // Intrinsic invariant: every emitted control must lie in [Q_min, Q_max].
         let v = intrinsic_check::<dyn DESStation>(
             "temp-control.u-in-saturation",
             |s: &dyn DESStation| {
                 let st = s.as_any().downcast_ref::<TempControllerBase>().unwrap();
-                let lo = 0.0;
+                let lo = st.q_min_cached;
                 let hi = st.q_max_cached;
                 for &u in &st.ctrl.control_history {
                     if u < lo - 1e-9 || u > hi + 1e-9 {
@@ -570,8 +632,9 @@ impl TempControllerBase {
             Some(Box::new(|s: &dyn DESStation| {
                 let st = s.as_any().downcast_ref::<TempControllerBase>().unwrap();
                 format!(
-                    "n={}  Q_max={}",
+                    "n={}  Q_min={}  Q_max={}",
                     st.ctrl.control_history.len(),
+                    st.q_min_cached,
                     st.q_max_cached
                 )
             })),
@@ -613,7 +676,7 @@ impl ControllerStation<TempObs, f64> for TempControllerBase {
         controller_step(&spec, &mut self.ctrl_state, observation)
     }
     fn u_min(&self) -> Option<f64> {
-        Some(0.0)
+        Some(self.q_min_cached)
     }
     fn u_max(&self) -> Option<f64> {
         Some(self.q_max_cached)
@@ -659,6 +722,17 @@ pub fn mdp_mpc_controller_station(
 /// Factory: build the right controller leaf for a spec.
 pub fn make_temp_controller(spec: ControllerSpec, q_max: f64, id: &str) -> TempControllerBase {
     TempControllerBase::new(id, q_max, spec)
+}
+
+/// Factory for a heat-pump style controller that can cool (`q_min < 0`) as well
+/// as heat (`q_max > 0`).
+pub fn make_temp_controller_with_bounds(
+    spec: ControllerSpec,
+    q_min: f64,
+    q_max: f64,
+    id: &str,
+) -> TempControllerBase {
+    TempControllerBase::new_with_bounds(id, q_min, q_max, spec)
 }
 
 // -----------------------------------------------------------------------------
@@ -755,12 +829,23 @@ pub fn run_temp_control(cfg: SimConfig) -> RunResult {
         if let Some(q) = h.q_max {
             Preconditions::positive(cls, "cfg.house.Q_max", q).expect("cfg.house.Q_max");
         }
+        if let Some(q) = h.q_min {
+            Preconditions::finite(cls, "cfg.house.Q_min", q).expect("cfg.house.Q_min");
+        }
         if let Some(t) = h.tau {
             Preconditions::positive(cls, "cfg.house.tau", t).expect("cfg.house.tau");
         }
     }
 
     let house = DEFAULT_HOUSE.merged(&cfg.house.unwrap_or_default());
+    Preconditions::check(
+        cls,
+        "cfg.house.Q_min/Q_max",
+        "satisfy Q_min < Q_max",
+        house.q_min < house.q_max,
+        Some(format!("{}/{}", house.q_min, house.q_max)),
+    )
+    .expect("cfg.house.Q_min/Q_max");
     let outdoor = DEFAULT_OUTDOOR.merged(&cfg.outdoor.unwrap_or_default());
     let dt_h = cfg.dt_min / 60.0;
     let n = (cfg.duration_h / dt_h).round() as usize;
@@ -788,7 +873,8 @@ pub fn run_temp_control(cfg: SimConfig) -> RunResult {
     let mut q_trace: Vec<f64> = Vec::new();
     let mut energy_trace: Vec<f64> = Vec::new();
 
-    let mut ctrl = make_temp_controller(cfg.controller, house.q_max, "tempctrl");
+    let mut ctrl =
+        make_temp_controller_with_bounds(cfg.controller, house.q_min, house.q_max, "tempctrl");
     for k in 0..n {
         let t_h = k as f64 * dt_h;
         let t_out_true = true_outdoor_temp(t_h, &outdoor, Some(&mut rng as &mut dyn RandomSource));
@@ -828,13 +914,14 @@ pub fn run_temp_control(cfg: SimConfig) -> RunResult {
             t_in_meas,
             forecast,
             dt_h,
+            q_min: house.q_min,
             q_max: house.q_max,
             house,
         };
         let q = ctrl.step(obs, k as f64, t_h);
         // House physics + energy + comfort.
         let t_next = house_step(t_in, t_out_true, q, dt_h, &house);
-        energy += q * dt_h;
+        energy += q.abs() * dt_h;
         let dev = (t_in - t_target).abs();
         let in_b = dev <= band;
         if in_b {

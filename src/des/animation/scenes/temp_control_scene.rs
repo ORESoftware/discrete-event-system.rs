@@ -28,6 +28,7 @@ const COL_BAND: &str = "#bbf7d0";
 const COL_T_IN: &str = "#dc2626";
 const COL_T_OUT: &str = "#1d4ed8";
 const COL_HEAT: &str = "#f97316";
+const COL_COOL: &str = "#0284c7";
 const COL_BG: &str = "#f9fafb";
 
 // PORT NOTE: local mirror of the temp-control model (subset used by the scene).
@@ -46,6 +47,8 @@ pub struct TickRecord {
 pub struct RunConfig {
     pub t_target: f64,
     pub band: Option<f64>,
+    pub q_min: f64,
+    pub q_max: f64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -63,6 +66,7 @@ pub struct SceneData<'a> {
     pub tick: &'a TickRecord,
     pub t_target: f64,
     pub band: f64,
+    pub q_min: f64,
     pub q_max: f64,
     pub controller_name: String,
     pub energy: f64,
@@ -92,12 +96,17 @@ pub fn build_temp_control_frame(_t: f64, tick: f64, d: &SceneData) -> FrameParts
     }));
 
     // Top row: station-flow diagram.
+    let actuator_label = if d.q_min < 0.0 {
+        "Heat/Cool".to_string()
+    } else {
+        "Heater".to_string()
+    };
     let stations: Vec<(f64, String)> = vec![
         (60.0, "Outdoor\nSource".to_string()),
         (220.0, "Forecast\nStation".to_string()),
         (380.0, "Sensor +\nComparator".to_string()),
         (540.0, d.controller_name.clone()),
-        (700.0, "Heater".to_string()),
+        (700.0, actuator_label),
         (860.0, "House\n(Physics)".to_string()),
     ];
     let st_row_y = 70.0;
@@ -299,70 +308,193 @@ pub fn build_temp_control_frame(_t: f64, tick: f64, d: &SceneData) -> FrameParts
         ..Default::default()
     }));
 
-    // Heater dial — circle gauge, 0..Q_max.
+    // HVAC command: heating-only keeps the original circular dial; heat/cool
+    // runs use a centered bidirectional bar so negative cooling power is honest.
     let dial_x = 320.0;
     let dial_y = mid_y + 130.0;
-    let dial_r = 90.0;
-    shapes.push(Shape::Circle(CircleShape {
-        x: dial_x,
-        y: dial_y,
-        r: dial_r + 5.0,
-        fill: "#fff".to_string(),
-        stroke: Some("#444".to_string()),
-        stroke_width: Some(1.5),
-        ..Default::default()
-    }));
-    let q_frac = 0.0_f64.max(1.0_f64.min(d.tick.q / d.q_max));
-    let start_angle = std::f64::consts::PI * (5.0 / 6.0);
-    let end_angle =
-        std::f64::consts::PI * (5.0 / 6.0) + q_frac * (std::f64::consts::PI * 4.0 / 3.0);
-    let arc_end_x = dial_x + dial_r * end_angle.cos();
-    let arc_end_y = dial_y + dial_r * end_angle.sin();
-    let arc_start_x = dial_x + dial_r * start_angle.cos();
-    let arc_start_y = dial_y + dial_r * start_angle.sin();
-    let large_arc = if (end_angle - start_angle) > std::f64::consts::PI {
-        1
+    if d.q_min < 0.0 {
+        let box_x = dial_x - 105.0;
+        let box_y = dial_y - 85.0;
+        let box_w = 210.0;
+        let box_h = 170.0;
+        let bar_x = box_x + 24.0;
+        let bar_y = box_y + 90.0;
+        let bar_w = box_w - 48.0;
+        let bar_h = 20.0;
+        let zero_x = bar_x + bar_w * (-d.q_min) / (d.q_max - d.q_min);
+        shapes.push(Shape::Rect(RectShape {
+            x: box_x,
+            y: box_y,
+            w: box_w,
+            h: box_h,
+            fill: "#fff".to_string(),
+            stroke: Some("#444".to_string()),
+            rx: Some(6.0),
+            ..Default::default()
+        }));
+        shapes.push(Shape::Text(TextShape {
+            x: dial_x,
+            y: box_y + 24.0,
+            text: "HVAC COMMAND".to_string(),
+            font_size: Some(11.0),
+            fill: Some("#666".to_string()),
+            anchor: Some(Anchor::Middle),
+            ..Default::default()
+        }));
+        shapes.push(Shape::Text(TextShape {
+            x: dial_x,
+            y: box_y + 56.0,
+            text: format!("Q = {} kW", to_fixed(d.tick.q, 2)),
+            font_size: Some(17.0),
+            fill: Some(if d.tick.q < -1e-9 {
+                COL_COOL.to_string()
+            } else if d.tick.q > 1e-9 {
+                COL_HEAT.to_string()
+            } else {
+                "#222".to_string()
+            }),
+            anchor: Some(Anchor::Middle),
+            font_weight: Some(FontWeight::Bold),
+            ..Default::default()
+        }));
+        shapes.push(Shape::Rect(RectShape {
+            x: bar_x,
+            y: bar_y,
+            w: bar_w,
+            h: bar_h,
+            fill: "#eef2f7".to_string(),
+            stroke: Some("#94a3b8".to_string()),
+            rx: Some(3.0),
+            ..Default::default()
+        }));
+        if d.tick.q < 0.0 {
+            let w = (zero_x - bar_x) * (d.tick.q / d.q_min).clamp(0.0, 1.0);
+            shapes.push(Shape::Rect(RectShape {
+                x: zero_x - w,
+                y: bar_y + 1.0,
+                w,
+                h: bar_h - 2.0,
+                fill: COL_COOL.to_string(),
+                opacity: Some(0.9),
+                ..Default::default()
+            }));
+        } else if d.tick.q > 0.0 {
+            let w = (bar_x + bar_w - zero_x) * (d.tick.q / d.q_max).clamp(0.0, 1.0);
+            shapes.push(Shape::Rect(RectShape {
+                x: zero_x,
+                y: bar_y + 1.0,
+                w,
+                h: bar_h - 2.0,
+                fill: COL_HEAT.to_string(),
+                opacity: Some(0.9),
+                ..Default::default()
+            }));
+        }
+        shapes.push(Shape::Line(LineShape {
+            x1: zero_x,
+            y1: bar_y - 8.0,
+            x2: zero_x,
+            y2: bar_y + bar_h + 8.0,
+            stroke: "#111827".to_string(),
+            stroke_width: Some(1.3),
+            ..Default::default()
+        }));
+        shapes.push(Shape::Text(TextShape {
+            x: bar_x,
+            y: bar_y + bar_h + 20.0,
+            text: "cool".to_string(),
+            font_size: Some(11.0),
+            fill: Some(COL_COOL.to_string()),
+            anchor: Some(Anchor::Start),
+            font_weight: Some(FontWeight::Bold),
+            ..Default::default()
+        }));
+        shapes.push(Shape::Text(TextShape {
+            x: bar_x + bar_w,
+            y: bar_y + bar_h + 20.0,
+            text: "heat".to_string(),
+            font_size: Some(11.0),
+            fill: Some(COL_HEAT.to_string()),
+            anchor: Some(Anchor::End),
+            font_weight: Some(FontWeight::Bold),
+            ..Default::default()
+        }));
+        shapes.push(Shape::Text(TextShape {
+            x: dial_x,
+            y: bar_y + bar_h + 44.0,
+            text: format!(
+                "range {}..{} kW",
+                to_fixed(d.q_min, 0),
+                to_fixed(d.q_max, 0)
+            ),
+            font_size: Some(11.0),
+            fill: Some("#666".to_string()),
+            anchor: Some(Anchor::Middle),
+            ..Default::default()
+        }));
     } else {
-        0
-    };
-    shapes.push(Shape::Path(PathShape {
-        d: format!(
-            "M {} {} L {} {} A {} {} 0 {} 1 {} {} Z",
-            js_num(dial_x),
-            js_num(dial_y),
-            js_num(arc_start_x),
-            js_num(arc_start_y),
-            js_num(dial_r),
-            js_num(dial_r),
-            large_arc,
-            js_num(arc_end_x),
-            js_num(arc_end_y)
-        ),
-        fill: Some(COL_HEAT.to_string()),
-        opacity: Some(0.85),
-        stroke: Some("#7c2d12".to_string()),
-        stroke_width: Some(1.0),
-        ..Default::default()
-    }));
-    shapes.push(Shape::Text(TextShape {
-        x: dial_x,
-        y: dial_y - 5.0,
-        text: format!("Q = {} kW", to_fixed(d.tick.q, 2)),
-        font_size: Some(14.0),
-        fill: Some("#222".to_string()),
-        anchor: Some(Anchor::Middle),
-        font_weight: Some(FontWeight::Bold),
-        ..Default::default()
-    }));
-    shapes.push(Shape::Text(TextShape {
-        x: dial_x,
-        y: dial_y + 18.0,
-        text: format!("{}% of max", to_fixed(q_frac * 100.0, 0)),
-        font_size: Some(11.0),
-        fill: Some("#666".to_string()),
-        anchor: Some(Anchor::Middle),
-        ..Default::default()
-    }));
+        let dial_r = 90.0;
+        shapes.push(Shape::Circle(CircleShape {
+            x: dial_x,
+            y: dial_y,
+            r: dial_r + 5.0,
+            fill: "#fff".to_string(),
+            stroke: Some("#444".to_string()),
+            stroke_width: Some(1.5),
+            ..Default::default()
+        }));
+        let q_frac = 0.0_f64.max(1.0_f64.min(d.tick.q / d.q_max));
+        let start_angle = std::f64::consts::PI * (5.0 / 6.0);
+        let end_angle =
+            std::f64::consts::PI * (5.0 / 6.0) + q_frac * (std::f64::consts::PI * 4.0 / 3.0);
+        let arc_end_x = dial_x + dial_r * end_angle.cos();
+        let arc_end_y = dial_y + dial_r * end_angle.sin();
+        let arc_start_x = dial_x + dial_r * start_angle.cos();
+        let arc_start_y = dial_y + dial_r * start_angle.sin();
+        let large_arc = if (end_angle - start_angle) > std::f64::consts::PI {
+            1
+        } else {
+            0
+        };
+        shapes.push(Shape::Path(PathShape {
+            d: format!(
+                "M {} {} L {} {} A {} {} 0 {} 1 {} {} Z",
+                js_num(dial_x),
+                js_num(dial_y),
+                js_num(arc_start_x),
+                js_num(arc_start_y),
+                js_num(dial_r),
+                js_num(dial_r),
+                large_arc,
+                js_num(arc_end_x),
+                js_num(arc_end_y)
+            ),
+            fill: Some(COL_HEAT.to_string()),
+            opacity: Some(0.85),
+            stroke: Some("#7c2d12".to_string()),
+            stroke_width: Some(1.0),
+            ..Default::default()
+        }));
+        shapes.push(Shape::Text(TextShape {
+            x: dial_x,
+            y: dial_y - 5.0,
+            text: format!("Q = {} kW", to_fixed(d.tick.q, 2)),
+            font_size: Some(14.0),
+            fill: Some("#222".to_string()),
+            anchor: Some(Anchor::Middle),
+            font_weight: Some(FontWeight::Bold),
+            ..Default::default()
+        }));
+        shapes.push(Shape::Text(TextShape {
+            x: dial_x,
+            y: dial_y + 18.0,
+            text: format!("{}% of max", to_fixed(q_frac * 100.0, 0)),
+            font_size: Some(11.0),
+            fill: Some("#666".to_string()),
+            anchor: Some(Anchor::Middle),
+            ..Default::default()
+        }));
+    }
 
     // Outdoor temperature mini-display.
     let out_x = 480.0;
@@ -510,7 +642,8 @@ pub fn build_temp_control_animation(
 ) -> (Vec<Frame>, Vec<ChartSpec>) {
     let t_target = run.cfg.t_target;
     let band = run.cfg.band.unwrap_or(2.0);
-    let q_max = 5.0;
+    let q_min = run.cfg.q_min;
+    let q_max = run.cfg.q_max;
     // Build per-tick scene data.
     let mut frames: Vec<Frame> = Vec::new();
     let mut in_band_count = 0usize;
@@ -527,6 +660,7 @@ pub fn build_temp_control_animation(
             tick: tk,
             t_target,
             band,
+            q_min,
             q_max,
             controller_name: controller_name.to_string(),
             energy: tk.energy_cum_k_wh,
@@ -577,16 +711,37 @@ pub fn build_temp_control_animation(
             y: 510.0,
             w: 320.0,
             h: 170.0,
-            title: Some("Heater Q (kW)".to_string()),
-            y_min: Some(-0.2),
+            title: Some(if q_min < 0.0 {
+                "HVAC Q (kW): cooling < 0, heating > 0".to_string()
+            } else {
+                "Heater Q (kW)".to_string()
+            }),
+            y_min: Some(q_min - 0.2),
             y_max: Some(q_max + 0.2),
             y_label: Some("kW".to_string()),
-            series: vec![ChartSeries {
-                label: "Q".to_string(),
-                color: COL_HEAT.to_string(),
-                t: t_h_arr.clone(),
-                y: run.q.clone(),
-            }],
+            series: if q_min < 0.0 {
+                vec![
+                    ChartSeries {
+                        label: "Q".to_string(),
+                        color: COL_HEAT.to_string(),
+                        t: t_h_arr.clone(),
+                        y: run.q.clone(),
+                    },
+                    ChartSeries {
+                        label: "zero".to_string(),
+                        color: "#64748b".to_string(),
+                        t: vec![first, last],
+                        y: vec![0.0, 0.0],
+                    },
+                ]
+            } else {
+                vec![ChartSeries {
+                    label: "Q".to_string(),
+                    color: COL_HEAT.to_string(),
+                    t: t_h_arr.clone(),
+                    y: run.q.clone(),
+                }]
+            },
             ..Default::default()
         },
     ];
@@ -612,6 +767,7 @@ mod tests {
             tick: &tk,
             t_target: 70.0,
             band: 2.0,
+            q_min: 0.0,
             q_max: 5.0,
             controller_name: "PID".to_string(),
             energy: 1.2,
@@ -637,6 +793,8 @@ mod tests {
             cfg: RunConfig {
                 t_target: 70.0,
                 band: Some(2.0),
+                q_min: 0.0,
+                q_max: 5.0,
             },
             trace,
             t_in: vec![68.0; 10],

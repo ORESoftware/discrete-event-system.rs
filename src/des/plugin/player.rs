@@ -139,12 +139,16 @@ const TEMPLATE: &str = r##"<!DOCTYPE html>
   .stage-svg { width: 100%; max-height: 460px; background: #fff; }
   .chart-svg { width: 100%; height: auto; }
   .caption { margin-top: 8px; text-align: center; color: #475569; font-size: 13px; min-height: 18px; }
-  .transport { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .transport { display: grid; grid-template-columns: repeat(4, max-content) 30ch minmax(220px, 1fr); align-items: center; gap: 10px; }
   .transport button { font-size: 15px; line-height: 1; padding: 6px 11px; border: 1px solid #cbd5e1; background: #f8fafc; border-radius: 7px; cursor: pointer; }
   .transport button:hover { background: #eef2f7; }
-  .transport .frame-label { font-variant-numeric: tabular-nums; color: #475569; min-width: 150px; }
+  .transport .frame-label { font-variant-numeric: tabular-nums; color: #475569; width: 30ch; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   input[type=range] { accent-color: #2563eb; }
-  .scrub { flex: 1 1 220px; }
+  .scrub { width: 100%; min-width: 0; }
+  @media (max-width: 720px) {
+    .transport { grid-template-columns: repeat(4, max-content); }
+    .transport .frame-label, .transport .scrub { grid-column: 1 / -1; width: 100%; }
+  }
   .controls { display: flex; flex-wrap: wrap; gap: 14px 22px; }
   .ctrl { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
   .ctrl label { color: #475569; font-weight: 600; }

@@ -1,7 +1,8 @@
 //! Port of `src/des/main-temp-control-anim.ts`.
 //!
 //! Generates an HTML animation of the temperature-control DES for a chosen
-//! controller (`--controller bang-bang|pid|fuzzy|mdp-mpc`, `--out path`).
+//! controller (`--controller bang-bang|pid|fuzzy|mdp-mpc`,
+//! `--scenario winter|heat-cool`, `--out path`).
 //!
 //! Conversion notes:
 //!   - `process.argv` flag parsing → `std::env::args`; `process.exit` →
@@ -18,21 +19,58 @@ use crate::des::animation::scenes::temp_control_scene::{
     TickRecord as SceneTick, STAGE_H, STAGE_W,
 };
 use crate::des::animation::types::{Frame, FrameParts};
-use crate::des::general::temp_control::{run_temp_control, ControllerSpec, SimConfig};
+use crate::des::general::temp_control::{
+    run_temp_control, ControllerSpec, HouseParamsPartial, OutdoorPatternPartial, SimConfig,
+    DEFAULT_HOUSE,
+};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Scenario {
+    Winter,
+    HeatCool,
+}
+
+impl Scenario {
+    fn as_str(self) -> &'static str {
+        match self {
+            Scenario::Winter => "winter",
+            Scenario::HeatCool => "heat-cool",
+        }
+    }
+
+    fn title_suffix(self) -> &'static str {
+        match self {
+            Scenario::Winter => "winter heat",
+            Scenario::HeatCool => "heat/cool",
+        }
+    }
+
+    fn subtitle(self) -> &'static str {
+        match self {
+            Scenario::Winter => "24-hour winter scenario",
+            Scenario::HeatCool => {
+                "24-hour shoulder-season scenario with cold night heating and hot afternoon cooling"
+            }
+        }
+    }
+}
 
 struct Args {
     controller: String,
     out: String,
+    scenario: Scenario,
 }
 
 fn parse_args() -> Args {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut controller = "pid".to_string();
+    let mut scenario = Scenario::Winter;
     let mut out = std::path::Path::new("out")
         .join("temp-control")
         .join("animation.html")
         .to_string_lossy()
         .into_owned();
+    let mut explicit_out = false;
     let mut i = 0;
     while i < argv.len() {
         if argv[i] == "--controller" && i + 1 < argv.len() {
@@ -42,37 +80,83 @@ fn parse_args() -> Args {
                 controller = v.to_string();
             } else {
                 eprintln!("unknown controller \"{}\"; using default", v);
-                return Args { controller, out };
+                return Args {
+                    controller,
+                    out,
+                    scenario,
+                };
             }
+        } else if argv[i] == "--scenario" && i + 1 < argv.len() {
+            i += 1;
+            match argv[i].as_str() {
+                "winter" => scenario = Scenario::Winter,
+                "heat-cool" | "heatcool" | "mixed" => scenario = Scenario::HeatCool,
+                v => {
+                    eprintln!("unknown scenario \"{}\"; using winter", v);
+                    scenario = Scenario::Winter;
+                }
+            }
+        } else if argv[i] == "--heat-cool" {
+            scenario = Scenario::HeatCool;
         } else if argv[i] == "--out" && i + 1 < argv.len() {
             i += 1;
             out = argv[i].clone();
+            explicit_out = true;
         } else if argv[i] == "-h" || argv[i] == "--help" {
-            println!("Usage: main-temp-control-anim [--controller bang-bang|pid|fuzzy|mdp-mpc] [--out path]");
-            return Args { controller, out };
+            println!("Usage: main-temp-control-anim [--controller bang-bang|pid|fuzzy|mdp-mpc] [--scenario winter|heat-cool] [--out path]");
+            return Args {
+                controller,
+                out,
+                scenario,
+            };
         }
         i += 1;
     }
-    Args { controller, out }
+    if !explicit_out && scenario == Scenario::HeatCool {
+        out = std::path::Path::new("out")
+            .join("temp-control")
+            .join("animation-heat-cool.html")
+            .to_string_lossy()
+            .into_owned();
+    }
+    Args {
+        controller,
+        out,
+        scenario,
+    }
 }
 
-fn controller_spec(kind: &str) -> ControllerSpec {
+fn controller_spec(kind: &str, scenario: Scenario) -> ControllerSpec {
     match kind {
         "bang-bang" => ControllerSpec::BangBang,
         "fuzzy" => ControllerSpec::Fuzzy,
         "mdp-mpc" => ControllerSpec::MdpMpc {
             horizon_h: 6.0,
-            n_levels: 6,
+            n_levels: if scenario == Scenario::HeatCool {
+                11
+            } else {
+                6
+            },
             comfort_penalty: 0.5,
             cost_per_kwh: 0.15,
             track_weight: Some(1.0),
         },
         // "pid" and any default.
-        _ => ControllerSpec::Pid {
-            kp: 3.0,
-            ki: 0.5,
-            kd: 0.5,
-        },
+        _ => {
+            if scenario == Scenario::HeatCool {
+                ControllerSpec::Pid {
+                    kp: 2.4,
+                    ki: 0.35,
+                    kd: 0.4,
+                }
+            } else {
+                ControllerSpec::Pid {
+                    kp: 3.0,
+                    ki: 0.5,
+                    kd: 0.5,
+                }
+            }
+        }
     }
 }
 
@@ -85,36 +169,83 @@ fn controller_label(kind: &str) -> &'static str {
     }
 }
 
+fn build_config(scenario: Scenario, controller: ControllerSpec) -> SimConfig {
+    match scenario {
+        Scenario::Winter => SimConfig {
+            t_target: 70.0,
+            band: Some(2.0),
+            duration_h: 24.0,
+            dt_min: 1.0,
+            controller,
+            house: None,
+            outdoor: None,
+            cost_per_kwh: 0.15,
+            comfort_penalty: 0.5,
+            sensor_noise_std: Some(0.2),
+            forecast_noise_std: Some(1.5),
+            forecast_horizon_h: Some(6.0),
+            seed: Some(42),
+        },
+        Scenario::HeatCool => SimConfig {
+            t_target: 70.0,
+            band: Some(2.0),
+            duration_h: 24.0,
+            dt_min: 1.0,
+            controller,
+            house: Some(HouseParamsPartial {
+                q_min: Some(-5.0),
+                q_max: Some(5.0),
+                t_init: Some(70.0),
+                ..Default::default()
+            }),
+            outdoor: Some(OutdoorPatternPartial {
+                mean: Some(70.0),
+                amp: Some(22.0),
+                phase: Some(9.0),
+                noise_std: Some(1.0),
+            }),
+            cost_per_kwh: 0.15,
+            comfort_penalty: 0.5,
+            sensor_noise_std: Some(0.2),
+            forecast_noise_std: Some(1.0),
+            forecast_horizon_h: Some(6.0),
+            seed: Some(84),
+        },
+    }
+}
+
 /// Entry point (`main()` in the TS source).
 pub fn run() {
     let args = parse_args();
-    let cfg = SimConfig {
-        t_target: 70.0,
-        band: Some(2.0),
-        duration_h: 24.0,
-        dt_min: 1.0,
-        controller: controller_spec(&args.controller),
-        house: None,
-        outdoor: None,
-        cost_per_kwh: 0.15,
-        comfort_penalty: 0.5,
-        sensor_noise_std: Some(0.2),
-        forecast_noise_std: Some(1.5),
-        forecast_horizon_h: Some(6.0),
-        seed: Some(42),
-    };
+    let cfg = build_config(
+        args.scenario,
+        controller_spec(&args.controller, args.scenario),
+    );
     let t_target = cfg.t_target;
     let band = cfg.band.unwrap_or(2.0);
     let duration_h = cfg.duration_h;
+    let q_min = cfg
+        .house
+        .as_ref()
+        .and_then(|h| h.q_min)
+        .unwrap_or(DEFAULT_HOUSE.q_min);
+    let q_max = cfg
+        .house
+        .as_ref()
+        .and_then(|h| h.q_max)
+        .unwrap_or(DEFAULT_HOUSE.q_max);
 
     let t0 = Instant::now();
     let r = run_temp_control(cfg);
     let elapsed = t0.elapsed().as_millis();
     println!(
-        "Simulated {}h with {} in {}ms",
-        duration_h, args.controller, elapsed
+        "Simulated {}h {} scenario with {} in {}ms",
+        duration_h,
+        args.scenario.as_str(),
+        args.controller,
+        elapsed
     );
-    println!("  energy = {:.2} kWh", r.energy_kwh);
+    println!("  HVAC energy = {:.2} kWh", r.energy_kwh);
     println!("  comfort = {:.1}%", 100.0 * r.comfort_pct);
     println!("  cost = ${:.2}", r.cost);
 
@@ -126,6 +257,8 @@ pub fn run() {
         cfg: SceneRunConfig {
             t_target,
             band: Some(band),
+            q_min,
+            q_max,
         },
         trace: r
             .trace
@@ -157,9 +290,14 @@ pub fn run() {
         width: STAGE_W,
         height: STAGE_H,
         fps: Some(12.0),
-        title: Some(format!("Temperature Control — {}", ctl_name)),
+        title: Some(format!(
+            "Temperature Control — {} ({})",
+            ctl_name,
+            args.scenario.title_suffix()
+        )),
         subtitle: Some(format!(
-            "24-hour winter scenario, target = {}°F ± {}°F   |   energy = {:.2} kWh, comfort = {:.1}%, cost = ${:.2}",
+            "{}, target = {}°F ± {}°F   |   energy = {:.2} kWh, comfort = {:.1}%, cost = ${:.2}",
+            args.scenario.subtitle(),
             jn(t_target),
             jn(band),
             r.energy_kwh,

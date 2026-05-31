@@ -10,8 +10,8 @@ mod tests {
     use crate::des::general::prng::mulberry32;
     use crate::des::general::temp_control::{
         controller_step, fuzzy_delta_controller, house_step, mdp_mpc_controller, run_temp_control,
-        true_outdoor_temp, ControllerSpec, ControllerState, HouseParams, OutdoorPattern,
-        OutdoorPatternPartial, SimConfig, TempObs, DEFAULT_HOUSE,
+        true_outdoor_temp, ControllerSpec, ControllerState, HouseParams, HouseParamsPartial,
+        OutdoorPattern, OutdoorPatternPartial, SimConfig, TempObs, DEFAULT_HOUSE,
     };
     use crate::des::shared::capabilities::RandomSource;
 
@@ -228,6 +228,7 @@ mod tests {
             t_in_meas: 0.0,
             forecast: vec![30.0],
             dt_h: 1.0 / 60.0,
+            q_min: 0.0,
             q_max: 5.0,
             house: DEFAULT_HOUSE,
         };
@@ -273,6 +274,43 @@ mod tests {
             r.energy_kwh,
             1e-9
         ));
+    }
+
+    #[test]
+    fn bidirectional_run_heats_and_cools() {
+        let cfg = SimConfig {
+            duration_h: 24.0,
+            controller: ControllerSpec::Pid {
+                kp: 2.4,
+                ki: 0.35,
+                kd: 0.4,
+            },
+            house: Some(HouseParamsPartial {
+                q_min: Some(-5.0),
+                q_max: Some(5.0),
+                t_init: Some(70.0),
+                ..Default::default()
+            }),
+            outdoor: Some(OutdoorPatternPartial {
+                mean: Some(70.0),
+                amp: Some(22.0),
+                phase: Some(9.0),
+                noise_std: Some(0.0),
+            }),
+            sensor_noise_std: Some(0.0),
+            forecast_noise_std: Some(0.0),
+            seed: Some(9),
+            ..base_cfg()
+        };
+        let r = run_temp_control(cfg.clone());
+        assert!(r.q.iter().any(|&q| q > 0.05), "never heated");
+        assert!(r.q.iter().any(|&q| q < -0.05), "never cooled");
+        for k in 1..r.energy.len() {
+            assert!(r.energy[k] >= r.energy[k - 1] - 1e-9);
+        }
+        let dt_h = cfg.dt_min / 60.0;
+        let expected_energy = r.q.iter().map(|q| q.abs() * dt_h).sum::<f64>();
+        assert!(close(r.energy_kwh, expected_energy, 1e-9));
     }
 
     // [9] Different controllers, same scenario, all stay in band

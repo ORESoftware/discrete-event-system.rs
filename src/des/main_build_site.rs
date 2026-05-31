@@ -56,6 +56,15 @@ impl SimulationSiteBuilder {
         self.run_script("src/des/main-empirical-control-report.ts", &[]);
         self.run_script("src/des/main-stochastic-sde-report.ts", &[]);
 
+        eprintln!("Generating traffic simulations...");
+        match crate::des::main_traffic::write_traffic_html_pages() {
+            Ok((traffic, smart)) => {
+                eprintln!("  • {traffic}");
+                eprintln!("  • {smart}");
+            }
+            Err(e) => eprintln!("  ! traffic HTML generation failed: {e}"),
+        }
+
         self.write_index();
     }
 
@@ -163,8 +172,34 @@ impl SimulationSiteBuilder {
                     "Kalman rank tests, MDP reachability, and POMDP distinguishability storyboard."
                         .into(),
             },
+            IndexEntry {
+                kind: "animation".into(),
+                title: "Empirical control — structured run".into(),
+                href: "empirical-control/player.html".into(),
+                description:
+                    "Playable frame stream for LTI Gramian, MDP reachability, and POMDP belief checks."
+                        .into(),
+            },
+            IndexEntry {
+                kind: "animation".into(),
+                title: "Temperature control — winter heat".into(),
+                href: "temp-control/animation.html".into(),
+                description:
+                    "Heating-only indoor temperature control over a cold 24-hour winter day."
+                        .into(),
+            },
+            IndexEntry {
+                kind: "animation".into(),
+                title: "Temperature control — heat/cool".into(),
+                href: "temp-control/animation-heat-cool.html".into(),
+                description:
+                    "Bidirectional heat-pump control with night heating and afternoon cooling."
+                        .into(),
+            },
         ];
         let runs: Vec<IndexEntry> = vec![
+            IndexEntry { kind: "simulation".into(), title: "Traffic flow — five intersection".into(), href: "traffic-flow-five-intersection.html".into(), description: "Signalized five-intersection road network with moving car snapshots and lane-phase highlights.".into() },
+            IndexEntry { kind: "simulation".into(), title: "Smart traffic flow".into(), href: "smart-traffic-flow.html".into(), description: "Smart movable cars with shuffled actor updates, accident instrumentation, and live traffic metrics.".into() },
             IndexEntry { kind: "run report".into(), title: "Empirical controllability & observability".into(), href: "empirical-control/report.html".into(), description: "Gramian degree (min/max directions) and Monte-Carlo trial estimates vs analytic Kalman tests.".into() },
             IndexEntry { kind: "run report".into(), title: "Stochastic SDEs + 3 ML algorithms".into(), href: "stochastic-sde/report.html".into(), description: "Euler–Maruyama engine with MLE system-id, Ensemble Kalman filtering, and a diffusion model.".into() },
         ];

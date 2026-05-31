@@ -584,6 +584,15 @@ mod tests {
     }
 
     #[test]
+    fn empty_cell_is_rejected() {
+        match RuntimeCell::new(vec![]) {
+            Err(StudioError::EmptyCell) => {}
+            Err(other) => panic!("expected EmptyCell, got {other:?}"),
+            Ok(_) => panic!("expected EmptyCell, got Ok"),
+        }
+    }
+
+    #[test]
     fn cell_rejects_mismatched_pipeline() {
         // Sum has 1 output port; Sum-then-Sum(2-in) cannot chain.
         let result = RuntimeCell::new(vec![

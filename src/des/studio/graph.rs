@@ -390,4 +390,50 @@ mod tests {
             Err(StudioError::PortOutOfRange { .. })
         ));
     }
+
+    #[test]
+    fn connect_to_unknown_node_is_rejected() {
+        let mut g = StudioGraph::new();
+        let s = g.add(src()).unwrap();
+        // Node index 99 was never added.
+        assert!(matches!(
+            g.connect(s, 0, 99, 0),
+            Err(StudioError::PortOutOfRange { .. })
+        ));
+        assert!(matches!(
+            g.connect(99, 0, s, 0),
+            Err(StudioError::PortOutOfRange { .. })
+        ));
+    }
+
+    #[test]
+    fn duplicate_id_is_rejected() {
+        let mut g = StudioGraph::new();
+        g.add(gain("dup")).unwrap();
+        assert!(matches!(g.add(gain("dup")), Err(StudioError::DuplicateId(_))));
+    }
+
+    #[test]
+    fn cycle_is_rejected() {
+        // g1 → g2 → g1 : every input driven exactly once, but no source — a
+        // feedback loop with no delay, which the acyclic executive must reject.
+        let mut g = StudioGraph::new();
+        let a = g.add(gain("g1")).unwrap();
+        let b = g.add(gain("g2")).unwrap();
+        g.connect(a, 0, b, 0).unwrap();
+        g.connect(b, 0, a, 0).unwrap();
+        match g.build() {
+            Err(StudioError::Cycle(nodes)) => assert!(!nodes.is_empty()),
+            Err(other) => panic!("expected Cycle, got {other:?}"),
+            Ok(_) => panic!("expected Cycle, got Ok"),
+        }
+    }
+
+    #[test]
+    fn self_loop_is_rejected_as_cycle() {
+        let mut g = StudioGraph::new();
+        let a = g.add(gain("g1")).unwrap();
+        g.connect(a, 0, a, 0).unwrap();
+        assert!(matches!(g.build(), Err(StudioError::Cycle(_))));
+    }
 }

@@ -243,4 +243,15 @@ mod tests {
         assert!(req.dataflow && req.discrete);
         assert_eq!(select(req).unwrap().kind, "studio");
     }
+
+    #[test]
+    fn stateless_studio_graph_requires_dataflow_only() {
+        // A purely stateless graph (gains/affines, no memory) needs dataflow but
+        // not discrete stepping — and still routes to studio.
+        let demo = crate::des::studio::signal_chain().unwrap();
+        let req = requirements_for_studio(&demo.compiled);
+        assert!(req.dataflow, "dataflow is always required");
+        assert!(!req.discrete, "a stateless graph must not demand discrete");
+        assert_eq!(select(req).unwrap().kind, "studio");
+    }
 }

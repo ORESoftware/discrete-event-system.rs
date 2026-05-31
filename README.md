@@ -1,12 +1,12 @@
-# des_engine
+# discrete-event-system.rs (`des_engine`)
 
 `des_engine` is a Rust library/SDK for modeling, simulating, solving, and
 rendering discrete, continuous, and mixed systems. It is the Rust port of the
-ORESoftware TypeScript discrete-event-system engine, with the SDK surface shaped
-for embedders: web servers, desktop apps, CLIs, workers, notebooks, and plugin
-hosts.
+ORESoftware TypeScript discrete-event-system engine, with a deliberately small,
+JSON-first SDK surface for embedders: web servers, desktop apps, CLIs, workers,
+notebooks, and plugin hosts.
 
-The crate is not only a collection of demo binaries. The important part is the
+The crate is not just a collection of demo binaries. The important part is the
 library surface:
 
 - Run models from JSON specs through one uniform API.
@@ -16,9 +16,57 @@ library surface:
 - Return frame streams as JSONL for playback, storage, or live streaming.
 - Render self-contained HTML players and report pages that can be served by any
   HTTP server.
-- Advertise the service surface through a machine-readable discovery descriptor.
+- Advertise an embedding service through a machine-readable discovery
+  descriptor.
 - Run external simulation plugins that emit JSON or JSONL and render them with
   the same built-in player.
+
+```text
+JSON spec / command stream
+        |
+        v
+des_engine runner / solver
+        |
+        v
+RunArtifact { frames, results, summary }
+        |
+        +--> report.html  (interactive HTML player)
+        +--> results.json (machine-readable result document)
+        +--> frames.jsonl (one frame/event per line)
+```
+
+## Contents
+
+- [Install](#install)
+- [What This SDK Is For](#what-this-sdk-is-for)
+- [The SDK Surface](#the-sdk-surface)
+- [Quickstart](#quickstart)
+- [Embedding In A Server](#embedding-in-a-server)
+- [Reports And Artifacts](#reports-and-artifacts)
+- [Running The Included Demos](#running-the-included-demos)
+- [Development](#development)
+- [Module Map](#module-map)
+
+## Install
+
+Add it as a git or path dependency:
+
+```toml
+[dependencies]
+des_engine = { git = "https://github.com/ORESoftware/discrete-event-system.rs" }
+
+# or, in a monorepo:
+# des_engine = { path = "../discrete-event-system.rs" }
+```
+
+Most embedders start with the curated prelude:
+
+```rust
+use des_engine::prelude::*;
+```
+
+The full engine is still available under `des_engine::des::*` when you need a
+specific model family or lower-level API.
 
 ## What This SDK Is For
 
@@ -27,10 +75,10 @@ run a simulation or solver, and serve the outcome back to another system.
 
 Typical use cases:
 
-- A backend API where clients submit simulation specs and receive `results.json`,
-  `frames.jsonl`, and `report.html`.
-- A dashboard that lets users compare traffic, elevator, epidemic, queueing,
-  control, optimization, or decision-process runs.
+- A backend API where clients submit simulation specs and receive
+  `results.json`, `frames.jsonl`, and `report.html`.
+- A dashboard that compares traffic, elevator, epidemic, queueing, control,
+  optimization, or decision-process runs.
 - A worker that runs a catalogue of simulations on a schedule and stores the
   artifacts.
 - An AI-assisted modeling service where an LLM emits a JSON spec, the engine
@@ -39,41 +87,77 @@ Typical use cases:
   that output into a standard result or player.
 
 The engine is JSON-first on purpose. JSON is the boundary for HTTP, IPC,
-plugins, and persistence. The core Rust APIs stay strongly typed internally,
-but embedders can treat runs as portable artifacts.
+plugins, and persistence. Internally the crate uses strongly typed Rust APIs;
+externally, embedders can treat runs as portable artifacts.
 
-## Main Concepts
+## The SDK Surface
 
-### First-class model citizens
+The stable embedding surface is gathered in `des_engine::prelude` and mirrored
+under `des_engine::sdk`.
 
-The `des::model` module defines the paradigm-neutral contract:
+| Seam | What it gives you | Key items |
+| --- | --- | --- |
+| Model contract | Describe a model as JSON, validate it, run it, and get one uniform artifact | `with_builtins`, `CitizenRegistry`, `ModelCitizen`, `ModelDescriptor`, `RunArtifact` |
+| Streaming solvers | Drive iterative solvers over JSONL | `run_named_jsonl`, `run_jsonl`, `streaming_contracts`, `StreamContract` |
+| Plugins | Run an external program and render its JSON/JSONL output | `PluginManifest`, `run_and_render`, `PluginTransport`, `ProcessTransport` |
+| Service discovery | Self-describe a server's routes and capabilities as JSON | `ServiceBuilder`, `ServiceDescriptor`, `DesExtension` |
+| Visual block dataflow | Build a flat block graph and run it as signal dataflow | `StudioGraph`, `RuntimeCell`, `RuntimeOp`, `Composite`, `CompiledStudio` |
+| Executive selection | Route a graph to the simplest engine that can run it | `select`, `requirements_for_studio`, `Executive`, `StudioExecutive`, `HybridExecutive` |
+
+`des_engine::sdk::surface()` returns the crate name, version, and the list of
+SDK modules. It is useful for `/info` or diagnostics endpoints in an embedding
+server.
+
+## Quickstart
+
+### Run a first-class model from a JSON spec
+
+The `des::model` module defines the paradigm-neutral model contract:
 
 - `ModelDescriptor`: discovery metadata for a model kind.
 - `ModelCitizen`: validates and runs a JSON spec.
 - `CitizenRegistry`: registry of runnable model kinds.
 - `RunArtifact`: the uniform output of a run.
 
-`RunArtifact` is the key server-facing type. It contains:
-
-- `results`: a JSON document for programmatic consumers.
-- `frames`: JSON values that can be serialized as JSONL.
-- `to_jsonl()`: frame stream text.
-- `to_player_html()`: a self-contained HTML player/report for browsers.
-
 The built-in registry currently includes MDP, POMDP, hybrid, and studio model
-citizens:
+citizens.
 
 ```rust
 use des_engine::prelude::*;
 
-let registry = with_builtins();
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let registry = with_builtins();
 
-for descriptor in registry.descriptors() {
-    println!("{}: {}", descriptor.kind, descriptor.description);
+    for descriptor in registry.descriptors() {
+        println!(
+            "{} - schema {} - methods {:?}",
+            descriptor.kind, descriptor.spec_schema, descriptor.methods
+        );
+    }
+
+    let descriptor = registry
+        .get("mdp")
+        .expect("built-in MDP citizen")
+        .descriptor();
+    let artifact = registry.run("mdp", &descriptor.example_spec)?;
+
+    let report_html = artifact.to_player_html();
+    let frames_jsonl = artifact.to_jsonl();
+    let results_json = artifact.results;
+
+    println!("summary: {}", artifact.summary);
+    println!("report bytes: {}", report_html.len());
+    println!("frame bytes: {}", frames_jsonl.len());
+    println!("result keys: {:?}", results_json.as_object().map(|o| o.len()));
+
+    Ok(())
 }
 ```
 
-### Streaming solvers
+Bad specs return `Err(CitizenError::InvalidSpec(msg))` with a recoverable error
+message instead of panicking out of the embedding application.
+
+### Stream an iterative solver over JSONL
 
 The `des::streaming` module exposes long-lived JSONL contracts for iterative
 solvers:
@@ -83,16 +167,16 @@ solvers:
 - `mdp`
 - `pomdp`
 
-These models consume one JSON command per line and emit one JSON frame per line.
-Malformed commands are converted into error frames where possible, so a stream
-can continue after bad input.
+Each model consumes one JSON command per line and emits one JSON frame per line.
+Malformed commands become error frames where possible, so a stream can continue
+after bad input.
 
 ```rust
 use des_engine::prelude::*;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let input = br#"{"op":"init","numStates":2,"gamma":0.9}
-    "#;
+"#;
 
     let mut output = Vec::new();
     let handled = run_named_jsonl("mdp", &input[..], &mut output)?;
@@ -103,43 +187,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-### Service discovery
-
-The `des::service` module builds a JSON service descriptor that an embedding
-server can expose at `/api/docs.json`. The descriptor advertises routes,
-capabilities, registered extensions, and canonical docs locations.
-
-```rust
-use des_engine::des::service::{
-    EndpointKind, EngineCatalogExtension, ServiceBuilder, ServiceInfo,
-};
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut builder = ServiceBuilder::new(ServiceInfo {
-        name: "simulation-api".to_string(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        description: "HTTP API backed by des_engine".to_string(),
-    });
-
-    builder
-        .endpoint("GET", "/health", "Health check", EndpointKind::Service)
-        .endpoint("POST", "/runs/{kind}", "Run a model spec", EndpointKind::Action)
-        .endpoint("GET", "/runs/{id}/results.json", "Run results", EndpointKind::Action)
-        .endpoint("GET", "/runs/{id}/frames.jsonl", "Run frame stream", EndpointKind::Action)
-        .endpoint("GET", "/runs/{id}/report.html", "HTML player/report", EndpointKind::Action);
-
-    builder.register(Box::new(EngineCatalogExtension))?;
-
-    let descriptor = builder.build();
-    let docs_json = descriptor.to_json_string();
-    let link_header = descriptor.link_header_relative();
-    println!("{docs_json}");
-    println!("{link_header}");
-    Ok(())
-}
-```
-
-### External plugins
+### Render an external plugin
 
 The `des::plugin` module lets a host run any program that writes JSON or JSONL
 to stdout. The SDK parses the output and renders it through the same HTML
@@ -176,7 +224,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 usually has four thin layers:
 
 1. Parse the request body into `serde_json::Value`.
-2. Route the request to a model citizen, streaming solver, built-in simulation,
+2. Route the request to a model citizen, streaming solver, catalogue simulation,
    or plugin.
 3. Store the returned artifact under a run id.
 4. Serve the artifact as JSON, JSONL, and/or HTML.
@@ -209,7 +257,7 @@ pub fn run_model(kind: &str, spec: Value) -> Result<StoredRun, CitizenError> {
 }
 ```
 
-An HTTP server can then expose routes like:
+An HTTP server can expose routes like:
 
 - `POST /runs/{kind}`: call `run_model(kind, body_json)`, assign a run id, store
   the artifact, and return `{ "id": "...", "summary": "..." }`.
@@ -217,11 +265,12 @@ An HTTP server can then expose routes like:
   `application/json`.
 - `GET /runs/{id}/frames.jsonl`: return `StoredRun.frames_jsonl` as
   `application/x-ndjson`.
-- `GET /runs/{id}/report.html`: return `StoredRun.report_html` as `text/html`.
+- `GET /runs/{id}/report.html`: return `StoredRun.report_html` as
+  `text/html; charset=utf-8`.
 - `GET /api/docs.json`: return `ServiceDescriptor::to_json_string()`.
 
-With Axum or another async Rust framework, the handlers stay small because the
-SDK already owns validation, solving, and rendering:
+With Axum or another async Rust framework, handlers stay small because the SDK
+owns validation, solving, and rendering:
 
 ```rust,ignore
 async fn create_run(
@@ -255,8 +304,8 @@ async fn get_report(
 }
 ```
 
-For streaming solvers, the route shape is similar, but the response body is
-JSONL:
+For streaming solvers, route the request body into `run_named_jsonl` and return
+the emitted bytes as `application/x-ndjson`:
 
 ```rust
 use des_engine::prelude::*;
@@ -273,16 +322,51 @@ pub fn solve_stream(model: &str, request_jsonl: &[u8]) -> std::io::Result<Option
 }
 ```
 
-For external simulation programs, store the manifest in your server database or
-configuration, run it on demand, and serve the returned HTML:
+### Service discovery
+
+The `des::service` module builds a JSON service descriptor that an embedding
+server can expose at `/api/docs.json`. The descriptor advertises routes,
+capabilities, registered extensions, and canonical docs locations.
 
 ```rust
-use des_engine::des::plugin::{run_and_render, PluginError, PluginManifest};
+use des_engine::des::service::{
+    EndpointKind, EngineCatalogExtension, ServiceBuilder, ServiceInfo,
+};
 
-pub fn run_plugin_report(manifest: &PluginManifest) -> Result<String, PluginError> {
-    run_and_render(manifest)
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut builder = ServiceBuilder::new(ServiceInfo {
+        name: "simulation-api".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        description: "HTTP API backed by des_engine".to_string(),
+    });
+
+    builder
+        .endpoint("GET", "/health", "Health check", EndpointKind::Service)
+        .endpoint("POST", "/runs/{kind}", "Run a model spec", EndpointKind::Action)
+        .endpoint("GET", "/runs/{id}/results.json", "Run results", EndpointKind::Action)
+        .endpoint("GET", "/runs/{id}/frames.jsonl", "Run frame stream", EndpointKind::Action)
+        .endpoint("GET", "/runs/{id}/report.html", "HTML player/report", EndpointKind::Action);
+
+    builder.register(Box::new(EngineCatalogExtension))?;
+
+    let descriptor = builder.build();
+    println!("{}", descriptor.to_json_string());
+    println!("Link: {}", descriptor.link_header_relative());
+    Ok(())
 }
 ```
+
+### Catalogue simulations
+
+The crate ships many runnable simulation binaries under `src/bin`, and the
+library exposes the same catalogue through `des::simulations`.
+
+Catalogue/report demos generally write HTML and JSON artifacts under `out/`
+relative to the current working directory. In a server, run them from a writable
+work directory and serve that `out/` directory as static content. Because
+catalogue demos may print to stdout and use process-local simulation state, run
+them serially from a server worker instead of launching multiple catalogue demos
+inside the same process at once.
 
 ## Reports And Artifacts
 
@@ -295,7 +379,7 @@ The SDK has two related output styles:
   `main_stochastic_sde_report` and `main_empirical_control_report`.
 
 For a server, prefer `RunArtifact` as the stable API return type. Use report
-pages when you want a curated, human-readable page for a specific simulation
+pages when you want a curated human-readable page for a specific simulation
 family.
 
 Recommended content types:
@@ -322,15 +406,16 @@ duration, summary, and any user/project identifiers from the host application.
 
 ## Running The Included Demos
 
-The crate ships many runnable binaries under `src/bin`. They are useful as
-examples and regression checks for the SDK, but they are not the only way to use
-the library.
+The crate ships runnable binaries under `src/bin`. They are useful as examples
+and regression checks for the SDK, but they are not the only way to use the
+library.
 
 ```sh
 cargo run --bin main_traffic
 cargo run --bin main_temp_control
 cargo run --bin main_stochastic_sde_report
 cargo run --bin main_empirical_control_report
+cargo run --bin main_build_site
 ```
 
 Report binaries write HTML artifacts under `out/`.
@@ -340,6 +425,7 @@ Report binaries write HTML artifacts under `out/`.
 Build and test:
 
 ```sh
+cargo build --release
 cargo test --all-targets --all-features
 cargo test --all-targets --all-features -- --ignored
 cargo test --doc --all-features
@@ -358,15 +444,23 @@ use des_engine::des::streaming::*;
 
 ## Module Map
 
-- `des::model`: first-class model contract and `RunArtifact`.
-- `des::streaming`: JSONL solver contracts for LP, MILP, MDP, and POMDP.
-- `des::plugin`: external process plugin contract and HTML player renderer.
-- `des::service`: HTTP service discovery descriptor and extension seam.
-- `des::studio`: visual block graph and runtime cell layer.
-- `des::hybrid`: mixed continuous/discrete/event simulation.
-- `des::fel`: future-event-list simulation primitives and examples.
-- `des::decision`: MDP/POMDP specs, solvers, rollouts, and visualization.
-- `des::animation`: frame types, HTML players, and report-page utilities.
+```text
+des_engine
+|-- prelude       # curated SDK import: use des_engine::prelude::*
+|-- sdk           # crate name/version + SDK module list for diagnostics
+`-- des
+    |-- model     # ModelCitizen, RunArtifact, CitizenRegistry
+    |-- streaming # JSONL solver contracts for LP, MILP, MDP, POMDP
+    |-- plugin    # external process plugin contract and HTML player renderer
+    |-- service   # HTTP service descriptor and extension seam
+    |-- studio    # visual block graph and runtime cell layer
+    |-- hybrid    # mixed continuous/discrete/event simulation
+    |-- fel       # future-event-list simulation primitives and examples
+    |-- decision  # MDP/POMDP specs, solvers, rollouts, visualization
+    |-- animation # frame types, HTML players, report-page utilities
+    |-- general   # broad model/solver library
+    `-- main_*    # runnable simulation demos, not the primary SDK surface
+```
 
 In short: use the deep `des::*` tree when you need a specific model family, and
 use `des_engine::prelude::*` when you are embedding the SDK in a server or app.

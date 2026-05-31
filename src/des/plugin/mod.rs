@@ -23,6 +23,17 @@
 //! [`run_and_render`] does both steps. The host stays thin: it only needs the
 //! manifest; running, parsing, and rendering all live here.
 //!
+//! # Transport & cross-language plugins
+//!
+//! *How* a plugin runs is abstracted behind [`runner::PluginTransport`].
+//! [`runner::ProcessTransport`] (the default) spawns a child process, can stream
+//! a JSON spec to its stdin ([`run_plugin_with_input`]), and enforces
+//! `run.timeout_ms`. Plugins are written in Rust today, but the contract is just
+//! "a program that reads an optional JSON spec and writes JSON/JSONL" — so a
+//! Python or C++ plugin (over IPC, or behind a C-ABI shim) is simply another
+//! `PluginTransport` impl with the *same* manifest, protocol
+//! ([`PLUGIN_PROTOCOL_SCHEMA`]), and player.
+//!
 //! # Discovery
 //!
 //! A [`PluginRegistry`] holds installed manifests and, via
@@ -79,11 +90,14 @@ pub mod runner;
 
 pub use manifest::{
     ControlKind, OutputKind, PlayerKind, PluginManifest, PluginRuntimeKind, PluginTransportKind,
-    RunSpec, UiControl,
+    RunSpec, UiControl, PLUGIN_PROTOCOL_SCHEMA,
 };
 pub use player::render_player_html;
 pub use registry::{DuplicatePlugin, PluginCatalogExtension, PluginRegistry};
-pub use runner::{parse_output, run_plugin, PluginError, PluginOutput, PluginRun};
+pub use runner::{
+    parse_output, run_plugin, run_plugin_with_input, PluginError, PluginOutput, PluginRun,
+    PluginTransport, ProcessTransport,
+};
 
 /// Run a plugin program and render its player HTML in one call.
 pub fn run_and_render(manifest: &PluginManifest) -> Result<String, PluginError> {

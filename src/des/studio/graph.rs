@@ -302,6 +302,11 @@ impl CompiledStudio {
     pub fn wires(&self) -> &[Wire] {
         &self.wires
     }
+    /// Whether any block carries state across steps — i.e. the graph must be
+    /// advanced by a stepped (discrete) executive rather than evaluated once.
+    pub fn has_state(&self) -> bool {
+        self.nodes.iter().any(|n| n.cell.has_state())
+    }
 }
 
 #[cfg(test)]

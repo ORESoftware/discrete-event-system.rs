@@ -2,7 +2,16 @@
 name = "des_engine"
 version = "0.0.1"
 edition = "2021"
-description = "Discrete-event system engine (Rust port of the TypeScript des-engine)."
+description = "Library/SDK for modeling, simulating, solving, and rendering discrete, continuous, and mixed systems (Rust port of the TypeScript des-engine)."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ores/discrete-event-system.rs"
+keywords = ["simulation", "discrete-event", "control-systems", "mdp", "solver"]
+categories = ["simulation", "science", "mathematics"]
+
+# `cargo doc` / docs.rs builds the library only; the 90+ demo bins under
+# src/bin/ are runnable simulations, not part of the SDK API surface.
+[package.metadata.docs.rs]
+no-default-features = false
 
 # The TypeScript source maps 1:1 onto this crate:
 #   src/des/<path>.ts  ->  src/des/<path>.rs

@@ -280,6 +280,26 @@ mod tests {
     }
 
     #[test]
+    fn finer_time_steps_track_the_exact_fel_more_closely() {
+        // The "compete" claim made concrete: the time-step bias is O(Δt), so a
+        // finer Δt should land closer to the exact (FEL) utilization than a
+        // coarse one. Same seed family, same horizon — only Δt changes.
+        let report = compare_mm1(0.7, 1.0, 60_000.0, &[1.0, 0.1], 20_260_530);
+        let fel_rho = report.fel.rho;
+        let coarse = &report.time_stepped[0]; // Δt = 1.0
+        let fine = &report.time_stepped[1]; // Δt = 0.1
+        assert!(coarse.dt > fine.dt);
+        let coarse_err = (coarse.rho - fel_rho).abs();
+        let fine_err = (fine.rho - fel_rho).abs();
+        assert!(
+            fine_err <= coarse_err + 1e-6,
+            "finer Δt should be at least as accurate: fine_err={fine_err} coarse_err={coarse_err}"
+        );
+        // And the fine step does strictly more work to get there.
+        assert!(fine.station_updates > coarse.station_updates);
+    }
+
+    #[test]
     fn fel_does_far_less_work_than_time_stepping() {
         // The headline efficiency contrast: covering the same horizon, the
         // fixed-step engine performs many more operations than the FEL, which

@@ -63,9 +63,11 @@ pub mod simulations;
 // HTTP servers that embed this engine as a library (JSON-first contract).
 pub mod service;
 
-// JSONL streaming contract for the iterative solvers (LP / MIP / MDP). A stream
-// of problem edits in, a stream of solution frames out. Additive: wraps the
-// existing solvers without modifying them.
+// JSONL streaming contract for the iterative solvers (LP, MILP/MIP/IP, MDP,
+// POMDP). A stream of problem edits in, a stream of solution frames out, with a
+// name-keyed model registry (`build_streaming_model` / `run_named_jsonl`) and
+// per-command panic isolation. Additive: wraps the existing solvers without
+// modifying them.
 pub mod streaming;
 
 // Future-event-list (next-event) discrete-event engine, plus an M/M/1 harness
@@ -102,6 +104,11 @@ pub mod decision;
 // graph (Layer 1) over runtime cells of one-or-more `Transform` elements
 // (Layer 2), with a dataflow executive. Additive.
 pub mod studio;
+
+// The executive-selection seam: a small `Executive` trait the studio and hybrid
+// engines implement, plus capability profiles and a `select` that routes a
+// VisualBlock subgraph to the executive it needs. Additive.
+pub mod exec;
 
 // Top-level simulation entry points (each TS `main-*.ts` becomes a module with
 // a `pub fn run()`), plus the cluster/process scaffolding scripts. These mirror

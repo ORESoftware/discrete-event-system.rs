@@ -11,6 +11,14 @@
 //!   or more** [`cell::RuntimeOp`] elements built from the `Transform` /
 //!   `StatefulTransform` primitives. This is where the calculations happen.
 //!
+//! The two nesting rules are deliberate and complementary:
+//!
+//! * **Visual blocks cannot nest** — they are visual, so they stay visually
+//!   separate; a node holds a cell, never another node/graph.
+//! * **Runtime elements *can* nest** — a [`cell::Composite`] op wraps a whole
+//!   sub-cell of further ops, so the runtime tree inside a single block composes
+//!   recursively to any depth without ever nesting a visual block.
+//!
 //! [`run`] is the dataflow executive (acyclic signal flow), a peer of the DES
 //! run-loop and the hybrid signal-flow executive. [`citizen::StudioCitizen`]
 //! exposes a studio graph through the [`crate::des::model`] contract so it
@@ -26,10 +34,10 @@ pub mod graph;
 pub mod run;
 
 pub use cell::{
-    Affine, Gain, Integrator, Map, RuntimeCell, RuntimeOp, Saturation, Scalar, Source, SourceKind,
-    Sum,
+    Affine, Composite, Gain, Integrator, Map, Queue, RuntimeCell, RuntimeOp, Saturation, Scalar,
+    Source, SourceKind, Sum, TransportDelay,
 };
 pub use citizen::{StudioCitizen, STUDIO_SCHEMA};
-pub use demos::{mixer, signal_chain, StudioDemo};
+pub use demos::{mixer, queue_line, signal_chain, StudioDemo};
 pub use graph::{CompiledStudio, NodeRole, StudioError, StudioGraph, VisualNode, Wire};
 pub use run::{run, StudioRun};

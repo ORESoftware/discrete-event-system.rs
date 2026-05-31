@@ -10,8 +10,9 @@
 //!
 //!   * The request-handling LOGIC ([`render_index`]) is ported verbatim: build
 //!     the formation list, `JSON.stringify` it, and `index.replace('{{∆∆∆}}',
-//!     json)`. JSON is assembled by hand ([`json_quote`]) since `serde` is not a
-//!     dependency of this crate (matching the rest of the engine port).
+//!     json)`. JSON here is assembled by hand ([`json_quote`]) to keep this
+//!     ported handler dependency-free; the crate does use `serde`/`serde_json`
+//!     elsewhere, strictly at the I/O boundary (artifacts, contracts, plugins).
 //!   * `program: any` (read only for `.stepSize`) → the concrete [`Program`].
 //!   * The reassignable module-level `let server` cache → a process-wide
 //!     [`HttpServer`] singleton behind a `OnceLock` ([`get_http_server`]).

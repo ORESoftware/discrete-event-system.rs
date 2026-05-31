@@ -13,7 +13,12 @@
 use serde_json::{json, Value};
 
 use des_engine::des::decision::{machine_maintenance_mdp, tiger_pomdp};
+use des_engine::des::exec::{
+    requirements_for_studio, select, ExecCapabilities, Executive, HybridExecutive, StudioExecutive,
+};
+use des_engine::des::hybrid::demos as hybrid_demos;
 use des_engine::des::model::with_builtins;
+use des_engine::des::studio::queue_line;
 
 /// Merge extra run options (start/steps/method/…) into a spec value.
 fn with_opts(mut spec: Value, opts: Value) -> Value {
@@ -56,7 +61,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 4) Visual-block studio — the two-layer core (flat VisualBlocks over runtime
     //    cells of one-or-more Layer-2 elements), rendered as a live wiring diagram.
-    for demo in ["signal-chain", "mixer"] {
+    //    `queue-line` uses the DES station/movable primitives as Layer-2 ops.
+    for demo in ["signal-chain", "mixer", "queue-line"] {
         let studio = registry.run("studio", &json!({ "demo": demo }))?;
         std::fs::write(
             format!("out/decision/studio-{demo}.html"),
@@ -64,6 +70,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
         println!("studio: {} — {}", demo, studio.summary);
     }
+
+    // 5) The executive-selection seam: ask which executive a studio subgraph
+    //    needs, then run it through the `Executive` trait (not the citizen path).
+    let demo = queue_line()?;
+    let req = requirements_for_studio(&demo.compiled);
+    let chosen = select(req).expect("an executive for a dataflow graph");
+    println!(
+        "\nexec: queue-line requires {:?} → routed to `{}` ({})",
+        req, chosen.kind, chosen.title
+    );
+    let mut studio_exec = StudioExecutive::from_demo(demo);
+    let routed = studio_exec.run();
+    std::fs::write("out/decision/exec-routed.html", routed.to_player_html())?;
+
+    // The same seam routes a continuous/event workload to the hybrid executive.
+    let (compiled, opts) = hybrid_demos::closed_loop()?;
+    let mut hybrid_exec =
+        HybridExecutive::new(compiled, opts, "closed-loop", "Hybrid Block Diagram", "Closed-loop control.");
+    println!(
+        "exec: a continuous+events workload → routed to `{}`",
+        select(ExecCapabilities { continuous: true, events: true, ..Default::default() })
+            .unwrap()
+            .kind
+    );
+    let _ = hybrid_exec.run();
 
     // Discovery: the registry advertises every first-class kind as JSON.
     let descriptors: Vec<Value> = registry

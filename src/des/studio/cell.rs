@@ -11,6 +11,8 @@
 //! signals through its stages and validates that the stages chain (each stage's
 //! output-port count equals the next stage's input-port count).
 
+use std::collections::VecDeque;
+
 use crate::des::shared::transform::{StatefulTransform, Transform};
 
 use super::graph::StudioError;
@@ -28,6 +30,18 @@ pub trait RuntimeOp {
     fn step(&mut self, t: f64, inputs: &[Scalar]) -> Vec<Scalar>;
     /// Reset any internal state (for re-runs).
     fn reset(&mut self) {}
+    /// Whether this op carries state across steps (a `StatefulTransform`). The
+    /// executive seam reads this to decide a graph needs a stepped (discrete)
+    /// executive rather than a pure stateless evaluation.
+    fn is_stateful(&self) -> bool {
+        false
+    }
+    /// Nesting depth of this op: a leaf op is `0`; a [`Composite`] reports how
+    /// deeply runtime elements are nested inside it. Visual blocks never nest,
+    /// but runtime ops may, so this is measured here rather than on the graph.
+    fn nested_depth(&self) -> usize {
+        0
+    }
 }
 
 // ── Source ───────────────────────────────────────────────────────────────────
@@ -265,6 +279,103 @@ impl RuntimeOp for Integrator {
         self.state = 0.0;
         self.last_t = 0.0;
     }
+    fn is_stateful(&self) -> bool {
+        true
+    }
+}
+
+// ── Runtime-layer station / movable ops ───────────────────────────────────────
+//
+// These bring the DES runtime primitives — a queueing `StationEntity` and a
+// `Movable` in transit — into the dataflow studio as Layer-2 elements, expressed
+// at the per-tick signal level (a `StatefulTransform`). The full token run-loop
+// `DESStation` remains reachable via the DES-run-loop executive (see
+// `crate::des::exec`); these ops model the same semantics inside a signal graph.
+
+/// Single-server queue (a `StationEntity` at the signal level): backlog absorbs
+/// arrivals, the server drains up to `service_rate` per tick, and departures are
+/// emitted. `arrivals -> departures`, with backlog as internal state.
+pub struct Queue {
+    name: String,
+    service_rate: f64,
+    backlog: f64,
+}
+impl Queue {
+    pub fn new(name: &str, service_rate: f64) -> Self {
+        Queue { name: name.to_string(), service_rate: service_rate.max(0.0), backlog: 0.0 }
+    }
+    pub fn backlog(&self) -> f64 {
+        self.backlog
+    }
+}
+impl StatefulTransform<f64, f64> for Queue {
+    /// `arrivals -> departures`.
+    fn transform(&mut self, arrivals: f64) -> f64 {
+        self.backlog += arrivals.max(0.0);
+        let served = self.backlog.min(self.service_rate);
+        self.backlog -= served;
+        served
+    }
+}
+impl RuntimeOp for Queue {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn n_in(&self) -> usize {
+        1
+    }
+    fn n_out(&self) -> usize {
+        1
+    }
+    fn step(&mut self, _t: f64, inputs: &[Scalar]) -> Vec<Scalar> {
+        vec![self.transform(inputs.first().copied().unwrap_or(0.0))]
+    }
+    fn reset(&mut self) {
+        self.backlog = 0.0;
+    }
+    fn is_stateful(&self) -> bool {
+        true
+    }
+}
+
+/// Transport delay (a `Movable` in transit): a fixed-length conveyor that emits
+/// the value it received `delay` ticks ago. `x(k) -> x(k − delay)`.
+pub struct TransportDelay {
+    name: String,
+    delay: usize,
+    buf: VecDeque<f64>,
+}
+impl TransportDelay {
+    pub fn new(name: &str, delay: usize) -> Self {
+        let delay = delay.max(1);
+        TransportDelay { name: name.to_string(), delay, buf: VecDeque::from(vec![0.0; delay]) }
+    }
+}
+impl StatefulTransform<f64, f64> for TransportDelay {
+    fn transform(&mut self, x: f64) -> f64 {
+        self.buf.push_back(x);
+        self.buf.pop_front().unwrap_or(0.0)
+    }
+}
+impl RuntimeOp for TransportDelay {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn n_in(&self) -> usize {
+        1
+    }
+    fn n_out(&self) -> usize {
+        1
+    }
+    fn step(&mut self, _t: f64, inputs: &[Scalar]) -> Vec<Scalar> {
+        vec![self.transform(inputs.first().copied().unwrap_or(0.0))]
+    }
+    fn reset(&mut self) {
+        self.buf = VecDeque::from(vec![0.0; self.delay]);
+    }
+    fn is_stateful(&self) -> bool {
+        true
+    }
 }
 
 // ── Closure map (1→1) ─────────────────────────────────────────────────────────
@@ -294,6 +405,61 @@ impl RuntimeOp for Map {
     }
     fn step(&mut self, _t: f64, inputs: &[Scalar]) -> Vec<Scalar> {
         vec![(self.f)(inputs.first().copied().unwrap_or(0.0))]
+    }
+}
+
+// ── Composite (nested runtime elements) ──────────────────────────────────────
+//
+// The architecture has two distinct nesting rules:
+//   * **Visual blocks cannot nest** — a `VisualNode` owns a `RuntimeCell`, never
+//     another node/graph (enforced structurally in `super::graph`).
+//   * **Runtime elements CAN nest** — a Layer-2 op may itself contain a whole
+//     sub-cell of further Layer-2 ops. `Composite` is that recursion: it wraps a
+//     `RuntimeCell` and presents it as a single op, so a block's cell can hold a
+//     `Composite` that holds a cell that holds ops, to any depth, all inside one
+//     visual block.
+
+/// A Layer-2 op that is itself a [`RuntimeCell`] of nested ops. Lets runtime
+/// elements compose recursively while the visual block stays flat.
+pub struct Composite {
+    name: String,
+    inner: RuntimeCell,
+}
+impl Composite {
+    pub fn new(name: &str, inner: RuntimeCell) -> Self {
+        Composite { name: name.to_string(), inner }
+    }
+    /// How many Layer-2 elements are nested directly inside this composite.
+    pub fn inner_len(&self) -> usize {
+        self.inner.len()
+    }
+    /// Maximum nesting depth: a flat composite is depth 1; one wrapping another
+    /// composite is depth 2; and so on.
+    pub fn depth(&self) -> usize {
+        1 + self.inner.max_child_depth()
+    }
+}
+impl RuntimeOp for Composite {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn n_in(&self) -> usize {
+        self.inner.n_in()
+    }
+    fn n_out(&self) -> usize {
+        self.inner.n_out()
+    }
+    fn step(&mut self, t: f64, inputs: &[Scalar]) -> Vec<Scalar> {
+        self.inner.step(t, inputs)
+    }
+    fn reset(&mut self) {
+        self.inner.reset();
+    }
+    fn is_stateful(&self) -> bool {
+        self.inner.has_state()
+    }
+    fn nested_depth(&self) -> usize {
+        self.depth()
     }
 }
 
@@ -353,6 +519,18 @@ impl RuntimeCell {
         self.stages.iter().map(|s| s.name().to_string()).collect()
     }
 
+    /// Whether any Layer-2 element in this cell carries state across steps.
+    pub fn has_state(&self) -> bool {
+        self.stages.iter().any(|s| s.is_stateful())
+    }
+
+    /// The deepest runtime-element nesting under this cell (0 if every stage is
+    /// a leaf op). Each nested [`Composite`] adds a level. Visual blocks are
+    /// always flat; this measures only the runtime-element tree inside a block.
+    pub fn max_child_depth(&self) -> usize {
+        self.stages.iter().map(|s| s.nested_depth()).max().unwrap_or(0)
+    }
+
     /// Thread the block's `inputs` through every stage and return its outputs.
     pub fn step(&mut self, t: f64, inputs: &[Scalar]) -> Vec<Scalar> {
         let mut signal = inputs.to_vec();
@@ -409,5 +587,63 @@ mod tests {
         let mut cell = RuntimeCell::single(Box::new(Integrator::new("int", 0.0)));
         assert_eq!(cell.step(1.0, &[2.0]), vec![2.0]); // dt=1, +2
         assert_eq!(cell.step(2.0, &[3.0]), vec![5.0]); // dt=1, +3
+    }
+
+    #[test]
+    fn queue_caps_departures_at_service_rate_and_tracks_state() {
+        let mut q = Queue::new("server", 5.0);
+        assert_eq!(q.transform(8.0), 5.0); // 8 arrive, serve 5
+        assert_eq!(q.backlog(), 3.0); // 3 wait
+        assert_eq!(q.transform(8.0), 5.0); // 3+8=11, serve 5
+        assert_eq!(q.backlog(), 6.0);
+        let cell = RuntimeCell::single(Box::new(Queue::new("server", 5.0)));
+        assert!(cell.has_state(), "a queue is stateful");
+    }
+
+    #[test]
+    fn runtime_elements_nest_inside_one_block_cell() {
+        // A composite wraps a sub-cell (gain ▸ saturation); another composite
+        // wraps THAT — runtime elements nesting two levels deep, all of which is
+        // still the contents of a *single* (flat) visual block's cell.
+        let inner = RuntimeCell::new(vec![
+            Box::new(Gain::new("gain", 2.0)),
+            Box::new(Saturation::new("sat", -10.0, 10.0)),
+        ])
+        .unwrap();
+        let lvl1 = Composite::new("shaper", inner);
+        assert_eq!(lvl1.depth(), 1);
+        assert_eq!(lvl1.inner_len(), 2);
+
+        let lvl2 = Composite::new("outer", RuntimeCell::single(Box::new(lvl1)));
+        assert_eq!(lvl2.depth(), 2, "two levels of nested runtime elements");
+
+        // The whole nested tree is one stage of a block cell and runs normally.
+        let mut cell = RuntimeCell::new(vec![
+            Box::new(Affine::new("bias", 1.0, 1.0)),
+            Box::new(lvl2),
+        ])
+        .unwrap();
+        assert_eq!(cell.max_child_depth(), 2);
+        // x=3 → affine 3+1=4 → composite(gain 2 =8, sat=8) = 8.
+        assert_eq!(cell.step(0.0, &[3.0]), vec![8.0]);
+    }
+
+    #[test]
+    fn composite_reports_state_from_nested_ops() {
+        // A composite wrapping a stateful op is itself stateful.
+        let inner = RuntimeCell::single(Box::new(Integrator::new("int", 0.0)));
+        let comp = Composite::new("wrapped-int", inner);
+        let cell = RuntimeCell::single(Box::new(comp));
+        assert!(cell.has_state(), "nested integrator makes the cell stateful");
+    }
+
+    #[test]
+    fn transport_delay_shifts_signal_by_n() {
+        let mut cell = RuntimeCell::single(Box::new(TransportDelay::new("belt", 3)));
+        assert_eq!(cell.step(0.0, &[1.0]), vec![0.0]); // buffer warming up
+        assert_eq!(cell.step(0.0, &[2.0]), vec![0.0]);
+        assert_eq!(cell.step(0.0, &[3.0]), vec![0.0]);
+        assert_eq!(cell.step(0.0, &[4.0]), vec![1.0]); // 1.0 arrives 3 ticks later
+        assert_eq!(cell.step(0.0, &[5.0]), vec![2.0]);
     }
 }

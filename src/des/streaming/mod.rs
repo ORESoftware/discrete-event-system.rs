@@ -40,6 +40,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 
 pub mod lp;
 pub mod mdp;
@@ -311,12 +312,26 @@ pub fn error_frame(message: impl Into<String>) -> Value {
     json!({ "event": "error", "message": message.into() })
 }
 
+/// Apply one command with panic isolation: if the underlying solver `panic!`s on
+/// malformed input (several numeric backends do), the panic is caught and turned
+/// into an [`error_frame`] so one bad command never tears down a long-lived
+/// stream. Well-behaved models that already return error frames are unaffected.
+pub fn apply_safe(model: &mut dyn StreamingModel, command: &Value) -> Vec<Value> {
+    match catch_unwind(AssertUnwindSafe(|| model.apply(command))) {
+        Ok(frames) => frames,
+        Err(_) => vec![error_frame(
+            "the solver rejected this command (internal error); the stream continues",
+        )],
+    }
+}
+
 /// Apply a batch of commands and collect every emitted frame. Pure (no I/O) —
 /// handy for embedding a streaming model in another program and for tests.
+/// Panic-isolated per command (see [`apply_safe`]).
 pub fn drive(model: &mut dyn StreamingModel, commands: &[Value]) -> Vec<Value> {
     let mut out = Vec::new();
     for command in commands {
-        out.extend(model.apply(command));
+        out.extend(apply_safe(model, command));
     }
     out
 }
@@ -336,7 +351,7 @@ pub fn run_jsonl<R: BufRead, W: Write>(
             continue;
         }
         let frames = match serde_json::from_str::<Value>(trimmed) {
-            Ok(command) => model.apply(&command),
+            Ok(command) => apply_safe(model, &command),
             Err(err) => vec![error_frame(format!("invalid JSON line: {err}"))],
         };
         for frame in frames {
@@ -346,6 +361,56 @@ pub fn run_jsonl<R: BufRead, W: Write>(
         output.flush()?;
     }
     Ok(())
+}
+
+// =============================================================================
+// Model registry — pick a streaming model by name (the seam a CLI / HTTP layer
+// uses to route a request to the right solver).
+// =============================================================================
+
+/// The streaming models the engine ships, by stable name.
+pub fn streaming_model_names() -> &'static [&'static str] {
+    &["lp", "milp", "mdp", "pomdp"]
+}
+
+/// Construct a boxed streaming model by name. Aliases `mip`/`ip` to the MILP
+/// branch-and-bound streamer (integer/mixed-integer programs are solved there).
+/// Returns `None` for an unknown name so the caller can report it cleanly.
+pub fn build_streaming_model(name: &str) -> Option<Box<dyn StreamingModel>> {
+    match name {
+        "lp" => Some(Box::new(lp::StreamingLp::new())),
+        "milp" | "mip" | "ip" => Some(Box::new(milp::StreamingMilp::new())),
+        "mdp" => Some(Box::new(mdp::StreamingMdp::new())),
+        "pomdp" => Some(Box::new(pomdp::StreamingPomdp::new())),
+        _ => None,
+    }
+}
+
+/// Every shipped model's self-describing contract — for a server to advertise
+/// the streaming catalogue (e.g. in its `/api/docs.json`) without instantiating.
+pub fn streaming_contracts() -> Vec<StreamContract> {
+    streaming_model_names()
+        .iter()
+        .filter_map(|name| build_streaming_model(name).map(|m| m.contract()))
+        .collect()
+}
+
+/// Run a named streaming model over JSONL (the end-to-end "pick model + stream"
+/// entry point a CLI or request handler calls). Returns `Ok(false)` if `name` is
+/// unknown (so the caller can 404), `Ok(true)` after a completed stream. Per-line
+/// JSON and per-command solver panics are isolated (see [`run_jsonl`]).
+pub fn run_named_jsonl<R: BufRead, W: Write>(
+    name: &str,
+    input: R,
+    output: &mut W,
+) -> io::Result<bool> {
+    match build_streaming_model(name) {
+        Some(mut model) => {
+            run_jsonl(model.as_mut(), input, output)?;
+            Ok(true)
+        }
+        None => Ok(false),
+    }
 }
 
 // =============================================================================
@@ -500,6 +565,68 @@ mod tests {
         assert_eq!(v["kind"], json!("iterative-solver"));
         assert_eq!(v["modelStreamKind"], json!("generic-iterative"));
         assert_eq!(v["inputMediaType"], json!(JSONL_MEDIA_TYPE));
+    }
+
+    /// A model whose `apply` panics — used to prove panic isolation.
+    struct PanicModel;
+    impl StreamingModel for PanicModel {
+        fn kind(&self) -> SolverKind {
+            SolverKind::IterativeSolver
+        }
+        fn contract(&self) -> StreamContract {
+            StreamContract::new("panic", SolverKind::IterativeSolver, "panics", vec![], vec![])
+        }
+        fn apply(&mut self, _command: &Value) -> Vec<Value> {
+            panic!("boom");
+        }
+    }
+
+    #[test]
+    fn apply_safe_converts_a_solver_panic_into_an_error_frame() {
+        // Silence the default panic hook so the caught panic doesn't spam stderr.
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let mut m = PanicModel;
+        let frames = drive(&mut m, &[json!({ "op": "anything" })]);
+        std::panic::set_hook(prev);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0]["event"], json!("error"));
+    }
+
+    #[test]
+    fn registry_builds_every_shipped_model_and_round_trips_its_contract() {
+        for name in streaming_model_names() {
+            let model = build_streaming_model(name).expect("shipped model builds");
+            let contract = model.contract();
+            // Round-trip the contract through JSON and back.
+            let json_str = contract.to_json_string();
+            let back: Value = serde_json::from_str(&json_str).expect("contract round-trips");
+            assert_eq!(back["kind"], json!("iterative-solver"));
+            assert!(back["model"].as_str().is_some());
+            assert!(back["inputOps"].as_array().map(|a| !a.is_empty()).unwrap_or(false));
+        }
+        // Aliases route integer/mixed-integer programs to the MILP streamer.
+        assert!(build_streaming_model("mip").is_some());
+        assert!(build_streaming_model("ip").is_some());
+        assert!(build_streaming_model("nope").is_none());
+        assert_eq!(streaming_contracts().len(), streaming_model_names().len());
+    }
+
+    #[test]
+    fn run_named_jsonl_routes_known_models_and_rejects_unknown() {
+        // Known model: initialise an MDP and confirm a frame comes back.
+        let input = "{\"op\":\"init\",\"numStates\":2,\"gamma\":0.9}\n";
+        let mut out: Vec<u8> = Vec::new();
+        let handled = run_named_jsonl("mdp", input.as_bytes(), &mut out).unwrap();
+        assert!(handled, "mdp is a known model");
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("\"event\""), "got a frame: {text}");
+
+        // Unknown model: Ok(false), nothing written.
+        let mut out2: Vec<u8> = Vec::new();
+        let handled = run_named_jsonl("does-not-exist", "{}\n".as_bytes(), &mut out2).unwrap();
+        assert!(!handled);
+        assert!(out2.is_empty());
     }
 
     #[test]

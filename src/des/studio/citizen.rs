@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 
 use crate::des::model::{CitizenError, ModelCitizen, ModelDescriptor, RunArtifact};
 
-use super::demos::{mixer, signal_chain, StudioDemo};
+use super::demos::{mixer, queue_line, signal_chain, StudioDemo};
 use super::run::run;
 
 pub const STUDIO_SCHEMA: &str = "des/studio-demo/v1";
@@ -24,7 +24,11 @@ impl ModelCitizen for StudioCitizen {
                           Blocks never nest. Selects a demo and renders the live wiring diagram."
                 .to_string(),
             spec_schema: STUDIO_SCHEMA.to_string(),
-            methods: vec!["signal-chain".to_string(), "mixer".to_string()],
+            methods: vec![
+                "signal-chain".to_string(),
+                "mixer".to_string(),
+                "queue-line".to_string(),
+            ],
             example_spec: json!({ "$schema": STUDIO_SCHEMA, "demo": "signal-chain" }),
         }
     }
@@ -37,9 +41,10 @@ impl ModelCitizen for StudioCitizen {
         let demo: StudioDemo = match demo_name {
             "signal-chain" => signal_chain(),
             "mixer" => mixer(),
+            "queue-line" => queue_line(),
             other => {
                 return Err(CitizenError::InvalidSpec(format!(
-                    "unknown studio demo `{other}` (expected `signal-chain` or `mixer`)"
+                    "unknown studio demo `{other}` (expected `signal-chain`, `mixer` or `queue-line`)"
                 )))
             }
         }

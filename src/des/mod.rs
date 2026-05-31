@@ -59,6 +59,50 @@ pub mod runners;
 // Serial driver that runs every simulation entry point one after another.
 pub mod simulations;
 
+// Service self-description, plugin/extension system, and machine discovery for
+// HTTP servers that embed this engine as a library (JSON-first contract).
+pub mod service;
+
+// JSONL streaming contract for the iterative solvers (LP / MIP / MDP). A stream
+// of problem edits in, a stream of solution frames out. Additive: wraps the
+// existing solvers without modifying them.
+pub mod streaming;
+
+// Future-event-list (next-event) discrete-event engine, plus an M/M/1 harness
+// that compares it against the existing fixed-time-step entity network.
+// Additive: wraps the existing engine without modifying it.
+pub mod fel;
+
+// External-program plugin system: run third-party programs (Rust for now) that
+// emit JSON / JSONL and render the result as an interactive HTML player (sim or
+// results), with plugin-declared UI controls. Bridges into `service` for
+// discovery. Additive: spawns external processes, never modifies the engine.
+pub mod plugin;
+
+// Hybrid block-diagram engine — the Simulink-style spine: one connectable
+// `Block` type (typed ports, continuous + discrete state, zero-crossings) and a
+// single executive that integrates continuous dynamics, runs discrete blocks at
+// their own multirate sample times, and bisects zero-crossing state events.
+// Additive: a new unified modeling layer that does not modify the existing
+// engine.
+pub mod hybrid;
+
+// First-class-model contract — the paradigm-neutral seam every modeling kind
+// plugs into as a peer (descriptor + validate-and-run-from-JSON + uniform
+// `RunArtifact`), plus a registry of built-in citizens. Additive: composes
+// `plugin`, `decision` and `hybrid` without modifying them.
+pub mod model;
+
+// Decision processes (MDP / POMDP) as a first-class model under `model`: a
+// canonical serde spec, unified solve/rollout reusing the existing solvers, and
+// an animated artifact. Additive.
+pub mod decision;
+
+// The two-layer visual-block + runtime core: a flat, non-nesting VisualBlock
+// graph (Layer 1) over runtime cells of one-or-more `Transform` elements
+// (Layer 2), with a dataflow executive. Additive.
+pub mod studio;
+
 // Top-level simulation entry points (each TS `main-*.ts` becomes a module with
 // a `pub fn run()`), plus the cluster/process scaffolding scripts. These mirror
 // the executable scripts under the TS `src/des/` root.

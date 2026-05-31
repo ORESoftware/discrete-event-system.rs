@@ -459,6 +459,198 @@ where
     }
 }
 
+// -----------------------------------------------------------------------------
+// Additional distributions: continuous, discrete, and mixed continuous–discrete.
+//
+// These extend the sampler family above. Each `sample_*` injects a
+// `&mut impl RandomSource` (so draws are reproducible under a seed) and follows
+// the module convention of panicking on invalid parameters. Integer-valued
+// draws are returned as `f64` (like [`sample_poisson`]) unless the support is a
+// bounded integer range, where an `i64` is the natural type
+// ([`sample_discrete_uniform`]).
+//
+// "Mixed continuous–discrete" means the distribution places positive
+// probability on one or more discrete *atoms* and spreads the rest over a
+// continuous density — see [`sample_zero_inflated_exponential`] and
+// [`sample_censored_normal`].
+// -----------------------------------------------------------------------------
+
+// ---- Gaussian helpers (useful on their own; also back the samplers below). ---
+
+/// Standard-normal PDF `φ(x) = e^{−x²/2} / √(2π)`.
+pub fn std_normal_pdf(x: f64) -> f64 {
+    (-(0.5 * x * x)).exp() / (2.0 * std::f64::consts::PI).sqrt()
+}
+
+/// Standard-normal CDF `Φ(x)`, via the Abramowitz–Stegun 7.1.26 `erf`
+/// approximation (absolute error < 1.5e-7). Handy for the atom masses of the
+/// censored-normal distribution below.
+pub fn std_normal_cdf(x: f64) -> f64 {
+    0.5 * (1.0 + erf(x / std::f64::consts::SQRT_2))
+}
+
+/// `erf(x)` — Abramowitz & Stegun 7.1.26 rational approximation.
+fn erf(x: f64) -> f64 {
+    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+    let ax = x.abs();
+    let t = 1.0 / (1.0 + 0.3275911 * ax);
+    let y = 1.0
+        - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t
+            + 0.254829592)
+            * t
+            * (-(ax * ax)).exp();
+    sign * y
+}
+
+// ---- Continuous ------------------------------------------------------------
+
+/// Normal(μ, σ) (Gaussian). Support ℝ; mean `μ`, variance `σ²`. Uses the
+/// Box–Muller draw exposed by [`RandomSource::next_gaussian`].
+///
+/// # Panics
+/// Panics if `sigma < 0`.
+pub fn sample_normal(rng: &mut impl RandomSource, mu: f64, sigma: f64) -> f64 {
+    if sigma < 0.0 {
+        panic!("bad sigma {sigma}");
+    }
+    mu + sigma * rng.next_gaussian()
+}
+
+/// Continuous Uniform(a, b). Support `[a, b)`; mean `(a+b)/2`, variance
+/// `(b−a)²/12`.
+///
+/// # Panics
+/// Panics unless `b > a`.
+pub fn sample_uniform(rng: &mut impl RandomSource, a: f64, b: f64) -> f64 {
+    if !(b > a) {
+        panic!("bad interval [{a}, {b})");
+    }
+    a + (b - a) * rng.next_float()
+}
+
+/// Weibull(shape `k`, scale `λ`) by inverse CDF: `λ · (−ln U)^{1/k}`,
+/// `U ~ (0, 1]`. Support `[0, ∞)`; mean `λ · Γ(1 + 1/k)`. With `k = 1` this is
+/// Exponential with mean `λ`.
+///
+/// # Panics
+/// Panics unless `shape > 0` and `scale > 0`.
+pub fn sample_weibull(rng: &mut impl RandomSource, shape: f64, scale: f64) -> f64 {
+    if !(shape > 0.0) || !(scale > 0.0) {
+        panic!("bad shape/scale {shape}/{scale}");
+    }
+    let u = 1.0 - rng.next_float(); // (0, 1] avoids ln(0)
+    scale * (-u.ln()).powf(1.0 / shape)
+}
+
+/// Lognormal(μ, σ): `exp(Normal(μ, σ))`. Support `(0, ∞)`; mean
+/// `exp(μ + σ²/2)`.
+///
+/// # Panics
+/// Panics if `sigma < 0`.
+pub fn sample_lognormal(rng: &mut impl RandomSource, mu: f64, sigma: f64) -> f64 {
+    sample_normal(rng, mu, sigma).exp()
+}
+
+// ---- Discrete --------------------------------------------------------------
+
+/// Geometric(p) — number of *failures before the first success*. Support
+/// `{0, 1, 2, …}`; mean `(1−p)/p`, variance `(1−p)/p²`. Inverse-CDF:
+/// `⌊ln(U) / ln(1−p)⌋`. Returned as `f64` (like [`sample_poisson`]).
+///
+/// # Panics
+/// Panics unless `0 < p ≤ 1`.
+pub fn sample_geometric(rng: &mut impl RandomSource, p: f64) -> f64 {
+    if !(p > 0.0 && p <= 1.0) {
+        panic!("bad p {p}");
+    }
+    if p >= 1.0 {
+        return 0.0;
+    }
+    let u = 1.0 - rng.next_float(); // (0, 1]
+    (u.ln() / (1.0 - p).ln()).floor()
+}
+
+/// Discrete Uniform over the inclusive integer range `{lo, …, hi}`. Mean
+/// `(lo+hi)/2`.
+///
+/// # Panics
+/// Panics unless `hi >= lo`.
+pub fn sample_discrete_uniform(rng: &mut impl RandomSource, lo: i64, hi: i64) -> i64 {
+    if hi < lo {
+        panic!("bad range [{lo}, {hi}]");
+    }
+    rng.next_int(lo, hi + 1) // next_int is half-open [min, max)
+}
+
+/// Negative Binomial(r, p) — number of *failures before the r-th success*,
+/// drawn as a Gamma–Poisson mixture: `λ ~ Gamma(r, (1−p)/p)`, then
+/// `Poisson(λ)` (so `r` may be any positive real). Support `{0, 1, 2, …}`;
+/// mean `r(1−p)/p`. Returned as `f64`.
+///
+/// # Panics
+/// Panics unless `r > 0` and `0 < p ≤ 1`.
+pub fn sample_negative_binomial(rng: &mut impl RandomSource, r: f64, p: f64) -> f64 {
+    if !(r > 0.0) {
+        panic!("bad r {r}");
+    }
+    if !(p > 0.0 && p <= 1.0) {
+        panic!("bad p {p}");
+    }
+    if p >= 1.0 {
+        return 0.0;
+    }
+    let lambda = sample_gamma(rng, r, (1.0 - p) / p);
+    sample_poisson(rng, lambda)
+}
+
+// ---- Mixed continuous–discrete ---------------------------------------------
+
+/// Zero-inflated Exponential — a **mixed continuous–discrete** distribution:
+/// with probability `pi` the value is exactly `0` (a discrete atom), otherwise
+/// it is a continuous `Exponential(rate)` draw on `(0, ∞)`. Mean
+/// `(1 − pi)/rate`. Models e.g. service times where a fraction of jobs are
+/// served instantly.
+///
+/// # Panics
+/// Panics unless `0 ≤ pi ≤ 1` and `rate > 0`.
+pub fn sample_zero_inflated_exponential(rng: &mut impl RandomSource, pi: f64, rate: f64) -> f64 {
+    if !(0.0..=1.0).contains(&pi) {
+        panic!("bad pi {pi}");
+    }
+    if !(rate > 0.0) {
+        panic!("bad rate {rate}");
+    }
+    if rng.next_float() < pi {
+        0.0 // discrete atom at 0
+    } else {
+        sample_exponential(rng, rate) // continuous part
+    }
+}
+
+/// Censored (Tobit) Normal — a **mixed continuous–discrete** distribution:
+/// `Normal(μ, σ)` clamped to `[lo, hi]`. Clamping puts a discrete atom at `lo`
+/// (mass `Φ((lo−μ)/σ)`) and at `hi` (mass `1 − Φ((hi−μ)/σ)`), with a continuous
+/// density in between. See [`std_normal_cdf`] for the atom masses. Models a
+/// sensor that saturates outside its measurement range.
+///
+/// # Panics
+/// Panics unless `sigma > 0` and `hi > lo`.
+pub fn sample_censored_normal(
+    rng: &mut impl RandomSource,
+    mu: f64,
+    sigma: f64,
+    lo: f64,
+    hi: f64,
+) -> f64 {
+    if !(sigma > 0.0) {
+        panic!("bad sigma {sigma}");
+    }
+    if !(hi > lo) {
+        panic!("bad bounds [{lo}, {hi}]");
+    }
+    sample_normal(rng, mu, sigma).clamp(lo, hi)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -533,5 +725,196 @@ mod tests {
         for (a, b) in pb.iter().zip(bin.iter()) {
             assert!((a - b).abs() < 1e-12);
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // New distributions: continuous, discrete, and mixed continuous–discrete.
+    // -------------------------------------------------------------------------
+
+    /// Monte-Carlo mean of `f` over `n` draws from a fresh-seeded stream.
+    fn mc_mean(seed: u32, n: usize, mut f: impl FnMut(&mut SeededRandom) -> f64) -> f64 {
+        let mut rng = SeededRandom::new(seed);
+        let mut sum = 0.0;
+        for _ in 0..n {
+            sum += f(&mut rng);
+        }
+        sum / n as f64
+    }
+
+    #[test]
+    fn new_samplers_are_deterministic_for_a_fixed_seed() {
+        let draw = |r: &mut SeededRandom| {
+            (
+                sample_normal(r, 1.0, 2.0),
+                sample_uniform(r, -3.0, 5.0),
+                sample_weibull(r, 1.5, 2.0),
+                sample_lognormal(r, 0.0, 0.5),
+                sample_geometric(r, 0.25),
+                sample_discrete_uniform(r, 2, 9) as f64,
+                sample_negative_binomial(r, 3.0, 0.4),
+                sample_zero_inflated_exponential(r, 0.3, 0.5),
+                sample_censored_normal(r, 0.0, 1.0, -1.0, 1.0),
+            )
+        };
+        let mut a = SeededRandom::new(2024);
+        let mut b = SeededRandom::new(2024);
+        assert_eq!(draw(&mut a), draw(&mut b));
+    }
+
+    // ---- continuous ----
+
+    #[test]
+    fn normal_mean_and_variance_match_theory() {
+        let (mu, sigma, n) = (3.0, 2.0, 200_000);
+        let mut rng = SeededRandom::new(11);
+        let (mut s, mut s2) = (0.0, 0.0);
+        for _ in 0..n {
+            let x = sample_normal(&mut rng, mu, sigma);
+            s += x;
+            s2 += x * x;
+        }
+        let m = s / n as f64;
+        let var = s2 / n as f64 - m * m;
+        assert!((m - mu).abs() < 0.03, "normal mean {m} vs {mu}");
+        assert!((var - sigma * sigma).abs() < 0.15, "normal var {var} vs 4.0");
+    }
+
+    #[test]
+    fn uniform_stays_in_range_with_correct_mean() {
+        let (a, b, n) = (-2.0, 6.0, 100_000);
+        let mut rng = SeededRandom::new(5);
+        let mut s = 0.0;
+        for _ in 0..n {
+            let x = sample_uniform(&mut rng, a, b);
+            assert!(x >= a && x < b, "uniform out of range: {x}");
+            s += x;
+        }
+        assert!((s / n as f64 - (a + b) / 2.0).abs() < 0.05);
+    }
+
+    #[test]
+    fn weibull_k1_reduces_to_exponential_mean() {
+        // Weibull(k = 1, λ) is Exponential with mean λ.
+        let lambda = 2.5;
+        let m = mc_mean(99, 200_000, |r| sample_weibull(r, 1.0, lambda));
+        assert!((m - lambda).abs() < 0.05, "weibull mean {m} vs {lambda}");
+        // Support is non-negative for any shape.
+        let mut r2 = SeededRandom::new(1);
+        for _ in 0..1000 {
+            assert!(sample_weibull(&mut r2, 2.0, 1.5) >= 0.0);
+        }
+    }
+
+    #[test]
+    fn lognormal_mean_matches_theory_and_is_positive() {
+        let (mu, sigma) = (0.0_f64, 0.5_f64);
+        let theory = (mu + 0.5 * sigma * sigma).exp();
+        let m = mc_mean(77, 300_000, |r| sample_lognormal(r, mu, sigma));
+        assert!((m - theory).abs() < 0.05, "lognormal mean {m} vs {theory}");
+        let mut r2 = SeededRandom::new(2);
+        for _ in 0..1000 {
+            assert!(sample_lognormal(&mut r2, 0.0, 1.0) > 0.0);
+        }
+    }
+
+    // ---- discrete ----
+
+    #[test]
+    fn geometric_is_nonneg_integer_with_correct_mean() {
+        let p = 0.25;
+        let m = mc_mean(3, 200_000, |r| sample_geometric(r, p));
+        assert!((m - (1.0 - p) / p).abs() < 0.1, "geometric mean {m}");
+        let mut r2 = SeededRandom::new(2);
+        for _ in 0..1000 {
+            let g = sample_geometric(&mut r2, 0.4);
+            assert!(g >= 0.0 && g.fract() == 0.0, "geometric not a count: {g}");
+        }
+    }
+
+    #[test]
+    fn discrete_uniform_covers_inclusive_range() {
+        let (lo, hi, n) = (2_i64, 9_i64, 100_000);
+        let mut rng = SeededRandom::new(8);
+        let (mut seen_lo, mut seen_hi, mut s) = (false, false, 0.0);
+        for _ in 0..n {
+            let x = sample_discrete_uniform(&mut rng, lo, hi);
+            assert!(x >= lo && x <= hi, "discrete-uniform out of range: {x}");
+            seen_lo |= x == lo;
+            seen_hi |= x == hi;
+            s += x as f64;
+        }
+        assert!(seen_lo && seen_hi, "both inclusive endpoints must be reachable");
+        assert!((s / n as f64 - (lo + hi) as f64 / 2.0).abs() < 0.05);
+    }
+
+    #[test]
+    fn negative_binomial_mean_matches_theory() {
+        let (r, p) = (4.0, 0.4);
+        let theory = r * (1.0 - p) / p;
+        let m = mc_mean(444, 100_000, |g| sample_negative_binomial(g, r, p));
+        assert!((m - theory).abs() < 0.2, "neg-binomial mean {m} vs {theory}");
+    }
+
+    // ---- mixed continuous–discrete ----
+
+    #[test]
+    fn zero_inflated_exponential_has_atom_and_correct_mean() {
+        let (pi, rate, n) = (0.4, 0.5, 300_000);
+        let mut rng = SeededRandom::new(20);
+        let (mut zeros, mut s) = (0usize, 0.0);
+        for _ in 0..n {
+            let x = sample_zero_inflated_exponential(&mut rng, pi, rate);
+            assert!(x >= 0.0);
+            if x == 0.0 {
+                zeros += 1;
+            }
+            s += x;
+        }
+        let zero_frac = zeros as f64 / n as f64;
+        assert!((zero_frac - pi).abs() < 0.02, "atom mass {zero_frac} vs {pi}");
+        assert!(
+            (s / n as f64 - (1.0 - pi) / rate).abs() < 0.05,
+            "mean vs (1-pi)/rate"
+        );
+    }
+
+    #[test]
+    fn censored_normal_is_bounded_with_atoms_at_both_ends() {
+        let (mu, sigma, lo, hi, n) = (0.0, 1.0, -0.5, 0.5, 300_000);
+        let mut rng = SeededRandom::new(31);
+        let (mut at_lo, mut at_hi) = (0usize, 0usize);
+        for _ in 0..n {
+            let x = sample_censored_normal(&mut rng, mu, sigma, lo, hi);
+            assert!(x >= lo && x <= hi, "censored-normal out of range: {x}");
+            if x == lo {
+                at_lo += 1;
+            }
+            if x == hi {
+                at_hi += 1;
+            }
+        }
+        // Atom masses: P(X = lo) = Φ((lo−μ)/σ); P(X = hi) = 1 − Φ((hi−μ)/σ).
+        let mass_lo = std_normal_cdf((lo - mu) / sigma);
+        let mass_hi = 1.0 - std_normal_cdf((hi - mu) / sigma);
+        assert!(at_lo > 0 && at_hi > 0, "both atoms must be present");
+        assert!((at_lo as f64 / n as f64 - mass_lo).abs() < 0.02, "lo atom mass");
+        assert!((at_hi as f64 / n as f64 - mass_hi).abs() < 0.02, "hi atom mass");
+    }
+
+    #[test]
+    fn std_normal_cdf_matches_known_values() {
+        assert!((std_normal_cdf(0.0) - 0.5).abs() < 1e-6);
+        assert!((std_normal_cdf(1.96) - 0.975).abs() < 1e-3);
+        assert!((std_normal_cdf(-1.0) - 0.158_655).abs() < 1e-3);
+        // PDF integrates (peak at 0) and is symmetric.
+        assert!((std_normal_pdf(0.0) - 0.398_942).abs() < 1e-5);
+        assert!((std_normal_pdf(1.0) - std_normal_pdf(-1.0)).abs() < 1e-12);
+    }
+
+    #[test]
+    #[should_panic(expected = "bad pi")]
+    fn zero_inflated_rejects_bad_pi() {
+        let mut rng = SeededRandom::new(1);
+        let _ = sample_zero_inflated_exponential(&mut rng, 1.5, 1.0);
     }
 }

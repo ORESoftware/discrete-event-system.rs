@@ -68,11 +68,14 @@
 //!
 //! Register it and render:
 //!
-//! ```ignore
+//! ```no_run
 //! use des_engine::des::plugin::*;
 //! let manifest = PluginManifest {
 //!     id: "mm1".into(), name: "M/M/1".into(), version: "1.0.0".into(),
 //!     description: "queue length".into(),
+//!     runtime: PluginRuntimeKind::Rust,
+//!     transport: PluginTransportKind::Stdio,
+//!     language: None,
 //!     run: RunSpec::new("./target/release/mm1-plugin", &[]),
 //!     output: OutputKind::Jsonl, player: PlayerKind::Sim,
 //!     controls: vec![UiControl::range("speed", "Speed (fps)", 1.0, 30.0, 1.0, 8.0)],
@@ -80,7 +83,7 @@
 //! };
 //! let html = run_and_render(&manifest)?;
 //! std::fs::write("out/mm1.html", html)?;
-//! # Ok::<(), PluginError>(())
+//! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
 pub mod manifest;

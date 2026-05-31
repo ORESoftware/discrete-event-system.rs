@@ -48,14 +48,10 @@ impl StochasticSdeReport {
         let out = std::path::Path::new("out")
             .join("stochastic-sde")
             .join("report.html");
-        if let Some(dir) = out.parent() {
-            let _ = std::fs::create_dir_all(dir);
+        match write_report_html(&out, &data, &log) {
+            Ok(abs) => println!("Stochastic-SDE report: {}", abs),
+            Err(e) => eprintln!("Stochastic-SDE report write failed: {e}"),
         }
-        let _ = std::fs::write(&out, render_report_html(&data, &log));
-        let abs = std::fs::canonicalize(&out)
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| out.to_string_lossy().into_owned());
-        println!("Stochastic-SDE report: {}", abs);
     }
 }
 
@@ -454,6 +450,20 @@ fn render_report_html(data: &ReportData, log: &str) -> String {
         .replace("__JS__", REPORT_JS)
 }
 
+fn write_report_html(
+    out: &std::path::Path,
+    data: &ReportData,
+    log: &str,
+) -> std::io::Result<String> {
+    if let Some(dir) = out.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(out, render_report_html(data, log))?;
+    Ok(std::fs::canonicalize(out)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| out.to_string_lossy().into_owned()))
+}
+
 fn render_metrics(data: &ReportData) -> String {
     let rows = [
         (
@@ -727,4 +737,67 @@ const REPORT_JS: &str = r#"(function () {
 /// Entry point (TS top-level script).
 pub fn run() {
     StochasticSdeReport.run();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_data() -> ReportData {
+        ReportData {
+            gbm: GbmEngineReport {
+                horizon: 1.0,
+                empirical_mean: 1.1,
+                analytic_mean: 1.1,
+                empirical_var: 0.2,
+                analytic_var: 0.2,
+                paths: 2,
+                trace: vec![GbmTracePoint {
+                    t: 0.0,
+                    representative_path: 1.0,
+                    empirical_mean: 1.0,
+                    analytic_mean: 1.0,
+                }],
+            },
+            mle: MleReport {
+                true_mu: 0.1,
+                true_sigma: 0.3,
+                learned_mu: 0.1,
+                learned_sigma: 0.3,
+                final_neg_log_lik: 12.0,
+                iterations: 4,
+            },
+            enkf: EnkfReport {
+                current_rmse: 0.2,
+                speed_rmse: 0.3,
+                baseline_current_rmse: 1.0,
+                trace: vec![EnkfTracePoint {
+                    t: 0.0,
+                    true_current: 0.0,
+                    estimated_current: 0.0,
+                    true_speed: 0.0,
+                    estimated_speed: 0.0,
+                }],
+            },
+            diffusion: DiffusionReport {
+                data_mean: 0.0,
+                data_std: 1.0,
+                sample_mean: 0.0,
+                sample_std: 1.0,
+                final_loss: 0.1,
+                near_negative_mode: 0.5,
+                histogram: vec![HistogramBin {
+                    center: 0.0,
+                    target_density: 0.5,
+                    learned_density: 0.5,
+                }],
+            },
+        }
+    }
+
+    #[test]
+    fn report_html_escapes_run_output() {
+        let html = render_report_html(&sample_data(), "</script><b>x");
+        assert!(html.contains("&lt;/script&gt;&lt;b&gt;x"));
+    }
 }

@@ -8,8 +8,31 @@
 //! desktop app, a CLI — only need the **first-class seams**, which are gathered
 //! in [`prelude`]:
 //!
-//! ```ignore
+//! ```no_run
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! use des_engine::prelude::*;
+//! # use des_engine::des::plugin::{
+//! #     OutputKind, PlayerKind, PluginRuntimeKind, PluginTransportKind, UiControl,
+//! # };
+//! # let spec_json = with_builtins()
+//! #     .get("mdp")
+//! #     .expect("built-in MDP citizen")
+//! #     .descriptor()
+//! #     .example_spec;
+//! # let manifest = PluginManifest {
+//! #     id: "mm1".into(),
+//! #     name: "M/M/1".into(),
+//! #     version: "1.0.0".into(),
+//! #     description: "queue length".into(),
+//! #     runtime: PluginRuntimeKind::Rust,
+//! #     transport: PluginTransportKind::Stdio,
+//! #     language: None,
+//! #     run: RunSpec::new("./target/release/mm1-plugin", &[]),
+//! #     output: OutputKind::Jsonl,
+//! #     player: PlayerKind::Sim,
+//! #     controls: vec![UiControl::range("speed", "Speed (fps)", 1.0, 30.0, 1.0, 8.0)],
+//! #     title: None,
+//! # };
 //!
 //! // 1. Run any first-class model from a JSON spec → a uniform RunArtifact.
 //! let registry = with_builtins();
@@ -21,6 +44,8 @@
 //!
 //! // 3. Run an external plugin program and render its player.
 //! let html = run_and_render(&manifest)?;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! The seams are intentionally JSON-first so the same contracts work across an

@@ -213,7 +213,7 @@ pub struct TempObs {
     pub house: HouseParams,
 }
 
-/// Compute heater command Q ∈ [0, Q_max] given the current observation context.
+/// Compute HVAC command Q ∈ [Q_min, Q_max] given the current observation context.
 pub fn controller_step(spec: &ControllerSpec, state: &mut ControllerState, ctx: &TempObs) -> f64 {
     let e = ctx.t_target - ctx.t_in_meas;
     match *spec {
@@ -504,7 +504,31 @@ pub fn mdp_mpc_controller_with_bounds(
     cost_per_kwh: f64,
     track_weight: f64,
 ) -> f64 {
+    if !t_in_now.is_finite()
+        || !t_target.is_finite()
+        || !horizon_h.is_finite()
+        || !dt_h.is_finite()
+        || !q_min.is_finite()
+        || !q_max.is_finite()
+        || !house.tau.is_finite()
+        || !house.g.is_finite()
+        || !comfort_penalty.is_finite()
+        || !cost_per_kwh.is_finite()
+        || !track_weight.is_finite()
+        || horizon_h <= 0.0
+        || dt_h <= 0.0
+        || n_levels < 2
+        || q_min > 0.0
+        || q_max <= 0.0
+        || q_min >= q_max
+        || house.tau <= 0.0
+    {
+        return 0.0;
+    }
     let h = forecast.len().min((horizon_h / dt_h).round() as usize);
+    if h == 0 || forecast.iter().take(h).any(|v| !v.is_finite()) {
+        return 0.0;
+    }
     // T_in grid covering [T_target − 10, T_target + 10] in fine 0.1°F steps.
     let t_lo = t_target - 10.0;
     let t_hi = t_target + 10.0;
@@ -628,7 +652,7 @@ impl TempControllerBase {
                 }
                 true
             },
-            Some("0 ≤ u ≤ Q_max".to_string()),
+            Some("Q_min ≤ u ≤ Q_max".to_string()),
             Some(Box::new(|s: &dyn DESStation| {
                 let st = s.as_any().downcast_ref::<TempControllerBase>().unwrap();
                 format!(
@@ -826,18 +850,74 @@ pub fn run_temp_control(cfg: SimConfig) -> RunResult {
     Preconditions::non_negative(cls, "cfg.comfort_penalty", cfg.comfort_penalty)
         .expect("cfg.comfort_penalty");
     if let Some(h) = &cfg.house {
+        if let Some(g) = h.g {
+            Preconditions::non_negative(cls, "cfg.house.G", g).expect("cfg.house.G");
+        }
         if let Some(q) = h.q_max {
             Preconditions::positive(cls, "cfg.house.Q_max", q).expect("cfg.house.Q_max");
         }
         if let Some(q) = h.q_min {
             Preconditions::finite(cls, "cfg.house.Q_min", q).expect("cfg.house.Q_min");
         }
+        if let Some(t) = h.t_init {
+            Preconditions::finite(cls, "cfg.house.T_init", t).expect("cfg.house.T_init");
+        }
         if let Some(t) = h.tau {
             Preconditions::positive(cls, "cfg.house.tau", t).expect("cfg.house.tau");
         }
     }
+    if let Some(o) = &cfg.outdoor {
+        if let Some(mean) = o.mean {
+            Preconditions::finite(cls, "cfg.outdoor.mean", mean).expect("cfg.outdoor.mean");
+        }
+        if let Some(amp) = o.amp {
+            Preconditions::non_negative(cls, "cfg.outdoor.amp", amp).expect("cfg.outdoor.amp");
+        }
+        if let Some(phase) = o.phase {
+            Preconditions::finite(cls, "cfg.outdoor.phase", phase).expect("cfg.outdoor.phase");
+        }
+        if let Some(noise_std) = o.noise_std {
+            Preconditions::non_negative(cls, "cfg.outdoor.noiseStd", noise_std)
+                .expect("cfg.outdoor.noiseStd");
+        }
+    }
+    if let ControllerSpec::MdpMpc {
+        horizon_h,
+        n_levels,
+        comfort_penalty,
+        cost_per_kwh,
+        track_weight,
+    } = cfg.controller
+    {
+        Preconditions::positive(cls, "cfg.controller.horizon_h", horizon_h)
+            .expect("cfg.controller.horizon_h");
+        Preconditions::check(
+            cls,
+            "cfg.controller.nLevels",
+            "be >= 2",
+            n_levels >= 2,
+            Some(n_levels.to_string()),
+        )
+        .expect("cfg.controller.nLevels");
+        Preconditions::non_negative(cls, "cfg.controller.comfort_penalty", comfort_penalty)
+            .expect("cfg.controller.comfort_penalty");
+        Preconditions::non_negative(cls, "cfg.controller.cost_per_kWh", cost_per_kwh)
+            .expect("cfg.controller.cost_per_kWh");
+        if let Some(w) = track_weight {
+            Preconditions::non_negative(cls, "cfg.controller.trackWeight", w)
+                .expect("cfg.controller.trackWeight");
+        }
+    }
 
     let house = DEFAULT_HOUSE.merged(&cfg.house.unwrap_or_default());
+    Preconditions::check(
+        cls,
+        "cfg.house.Q_min",
+        "be <= 0 (negative for cooling, zero for heating-only)",
+        house.q_min <= 0.0,
+        Some(house.q_min.to_string()),
+    )
+    .expect("cfg.house.Q_min");
     Preconditions::check(
         cls,
         "cfg.house.Q_min/Q_max",
@@ -848,13 +928,13 @@ pub fn run_temp_control(cfg: SimConfig) -> RunResult {
     .expect("cfg.house.Q_min/Q_max");
     let outdoor = DEFAULT_OUTDOOR.merged(&cfg.outdoor.unwrap_or_default());
     let dt_h = cfg.dt_min / 60.0;
-    let n = (cfg.duration_h / dt_h).round() as usize;
+    let n = (cfg.duration_h / dt_h).round().max(1.0) as usize;
     let t_target = cfg.t_target;
     let band = cfg.band.unwrap_or(2.0);
     let sensor_std = cfg.sensor_noise_std.unwrap_or(0.0);
     let forecast_std = cfg.forecast_noise_std.unwrap_or(0.0);
     let horizon_h = cfg.forecast_horizon_h.unwrap_or(6.0);
-    let horizon_ticks = (horizon_h / dt_h).round() as usize;
+    let horizon_ticks = (horizon_h / dt_h).round().max(1.0) as usize;
     let cost_per_kwh = cfg.cost_per_kwh;
     let comfort_penalty = cfg.comfort_penalty;
     let seed = cfg.seed.unwrap_or(12345);
@@ -1023,6 +1103,62 @@ mod tests {
                 rec.q
             );
         }
+    }
+
+    #[test]
+    fn mdp_mpc_degenerate_inputs_return_neutral_command() {
+        let q = mdp_mpc_controller_with_bounds(
+            70.0,
+            &[30.0],
+            1.0,
+            1,
+            70.0,
+            1.0 / 60.0,
+            -5.0,
+            5.0,
+            &DEFAULT_HOUSE,
+            0.5,
+            0.15,
+            1.0,
+        );
+        assert_eq!(q, 0.0);
+
+        let q = mdp_mpc_controller_with_bounds(
+            70.0,
+            &[f64::NAN],
+            1.0,
+            6,
+            70.0,
+            1.0 / 60.0,
+            -5.0,
+            5.0,
+            &DEFAULT_HOUSE,
+            0.5,
+            0.15,
+            1.0,
+        );
+        assert_eq!(q, 0.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "cfg.house.Q_min")]
+    fn run_rejects_positive_q_min() {
+        let mut cfg = base_cfg(ControllerSpec::BangBang);
+        cfg.house = Some(HouseParamsPartial {
+            q_min: Some(1.0),
+            ..Default::default()
+        });
+        let _ = run_temp_control(cfg);
+    }
+
+    #[test]
+    fn tiny_positive_duration_runs_one_finite_tick() {
+        let mut cfg = base_cfg(ControllerSpec::BangBang);
+        cfg.duration_h = 0.001;
+        let res = run_temp_control(cfg);
+        assert_eq!(res.trace.len(), 1);
+        assert!(res.comfort_pct.is_finite());
+        assert!(res.cost.is_finite());
     }
 
     #[test]

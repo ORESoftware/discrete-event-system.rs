@@ -305,10 +305,16 @@ pub struct MathBlockCore {
 impl MathBlockCore {
     /// `super(id, {kind: 'math-block', ports: …, style: …})` + field init.
     pub fn new(id: &str, opts: MathBlockOptions) -> Self {
+        Self::new_with_kind(id, opts, "math-block")
+    }
+
+    /// Build a math block with a concrete visual kind. The runtime behavior is
+    /// still supplied by the concrete block; this only improves block diagrams.
+    pub fn new_with_kind(id: &str, opts: MathBlockOptions, visual_kind: &str) -> Self {
         let visual = VisualBlock::new(
             id,
             VisualBlockOptions {
-                kind: Some("math-block".to_string()),
+                kind: Some(visual_kind.to_string()),
                 ports: Some(VisualBlockPortSpec {
                     inputs: vec![VisualPortInput::Opts(VisualPortOptions {
                         id: MATH_IN.to_string(),
@@ -549,7 +555,7 @@ pub struct ConstantSourceBlock {
 impl ConstantSourceBlock {
     pub fn new(id: &str, value: f64, opts: MathBlockOptions, output_channel: &str) -> Self {
         ConstantSourceBlock {
-            m: MathBlockCore::new(id, opts),
+            m: MathBlockCore::new_with_kind(id, opts, "constant-source"),
             value,
             output_channel: output_channel.to_string(),
         }
@@ -594,7 +600,7 @@ impl FunctionSourceBlock {
         output_channel: &str,
     ) -> Self {
         FunctionSourceBlock {
-            m: MathBlockCore::new(id, opts),
+            m: MathBlockCore::new_with_kind(id, opts, "function-source"),
             f,
             output_channel: output_channel.to_string(),
         }
@@ -640,7 +646,7 @@ impl ExpressionSourceBlock {
             constants,
         );
         ExpressionSourceBlock {
-            m: MathBlockCore::new(id, opts),
+            m: MathBlockCore::new_with_kind(id, opts, "expression-source"),
             expression: expression.to_string(),
             ast,
             constants,
@@ -677,7 +683,7 @@ pub struct SinkBlock {
 impl SinkBlock {
     pub fn new(id: &str, opts: MathBlockOptions, input_channels: Vec<String>) -> Self {
         SinkBlock {
-            m: MathBlockCore::new(id, opts),
+            m: MathBlockCore::new_with_kind(id, opts, "sink"),
             input_channels,
             received: Vec::new(),
         }
@@ -744,7 +750,7 @@ impl SumBlock {
     ) -> Self {
         let weights = weights.unwrap_or_else(|| input_channels.iter().map(|_| 1.0).collect());
         SumBlock {
-            m: MathBlockCore::new(id, opts),
+            m: MathBlockCore::new_with_kind(id, opts, "sum"),
             input_channels,
             weights,
             hold_last,
@@ -815,16 +821,16 @@ impl SubtractBlock {
         hold_last: bool,
         output_channel: &str,
     ) -> Self {
-        SubtractBlock {
-            inner: SumBlock::new(
-                id,
-                vec![positive_input.to_string(), negative_input.to_string()],
-                opts,
-                Some(vec![1.0, -1.0]),
-                hold_last,
-                output_channel,
-            ),
-        }
+        let mut inner = SumBlock::new(
+            id,
+            vec![positive_input.to_string(), negative_input.to_string()],
+            opts,
+            Some(vec![1.0, -1.0]),
+            hold_last,
+            output_channel,
+        );
+        inner.m.visual.set_visual_kind("subtract");
+        SubtractBlock { inner }
     }
 }
 
@@ -861,7 +867,7 @@ impl ProductBlock {
         output_channel: &str,
     ) -> Self {
         ProductBlock {
-            m: MathBlockCore::new(id, opts),
+            m: MathBlockCore::new_with_kind(id, opts, "product"),
             input_channels,
             hold_last,
             output_channel: output_channel.to_string(),
@@ -921,7 +927,7 @@ impl GainBlock {
         output_channel: &str,
     ) -> Self {
         GainBlock {
-            m: MathBlockCore::new(id, opts),
+            m: MathBlockCore::new_with_kind(id, opts, "gain"),
             gain,
             input_channel: input_channel.to_string(),
             hold_last,
@@ -979,7 +985,7 @@ impl SaturationBlock {
         output_channel: &str,
     ) -> Self {
         SaturationBlock {
-            m: MathBlockCore::new(id, opts),
+            m: MathBlockCore::new_with_kind(id, opts, "saturation"),
             min,
             max,
             input_channel: input_channel.to_string(),
@@ -1053,7 +1059,7 @@ impl IntegratorBlock {
         output_channel: &str,
     ) -> Self {
         IntegratorBlock {
-            m: MathBlockCore::new(id, opts),
+            m: MathBlockCore::new_with_kind(id, opts, "integrator"),
             state: initial_state,
             state_tick: 0,
             last_input: None,
@@ -1168,7 +1174,7 @@ impl DerivativeBlock {
         output_channel: &str,
     ) -> Self {
         DerivativeBlock {
-            m: MathBlockCore::new(id, opts),
+            m: MathBlockCore::new_with_kind(id, opts, "derivative"),
             previous: None,
             input_channel: input_channel.to_string(),
             hold_last,
@@ -1184,6 +1190,14 @@ impl MathBlock for DerivativeBlock {
     }
     fn m_mut(&mut self) -> &mut MathBlockCore {
         &mut self.m
+    }
+    fn assert_block_preconditions(&self) {
+        self.m.assert_base_preconditions();
+        require(Preconditions::finite(
+            "DerivativeBlock",
+            &format!("{}.initialOutput", self.m.id),
+            self.initial_output,
+        ));
     }
     fn step(&mut self, tick: usize, time: f64, dt: f64) {
         let ch = self.input_channel.clone();
@@ -1246,7 +1260,7 @@ impl FirstOrderFilterBlock {
         output_channel: &str,
     ) -> Self {
         FirstOrderFilterBlock {
-            m: MathBlockCore::new(id, opts),
+            m: MathBlockCore::new_with_kind(id, opts, "first-order-filter"),
             tau,
             y: initial,
             input_channel: input_channel.to_string(),
@@ -1316,7 +1330,7 @@ impl ComparatorBlock {
         output_channel: &str,
     ) -> Self {
         ComparatorBlock {
-            m: MathBlockCore::new(id, opts),
+            m: MathBlockCore::new_with_kind(id, opts, "comparator"),
             op,
             left_channel: left_channel.to_string(),
             right_channel: right_channel.map(|s| s.to_string()),
@@ -1409,7 +1423,7 @@ impl LogicBlock {
         output_channel: &str,
     ) -> Self {
         LogicBlock {
-            m: MathBlockCore::new(id, opts),
+            m: MathBlockCore::new_with_kind(id, opts, "logic"),
             op,
             input_channels,
             threshold,
@@ -1500,7 +1514,7 @@ impl ExpressionBlock {
         let ast = parse(expression);
         let constants = finite_record("ExpressionBlock", &format!("{id}.constants"), constants);
         ExpressionBlock {
-            m: MathBlockCore::new(id, opts),
+            m: MathBlockCore::new_with_kind(id, opts, "expression"),
             expression: expression.to_string(),
             variable_channels,
             ast,
@@ -1598,7 +1612,7 @@ impl Laplacian1DBlock {
         output_channel: &str,
     ) -> Self {
         Laplacian1DBlock {
-            m: MathBlockCore::new(id, opts),
+            m: MathBlockCore::new_with_kind(id, opts, "laplacian-1d"),
             coefficient,
             left_channel: left_channel.to_string(),
             center_channel: center_channel.to_string(),
@@ -2596,6 +2610,45 @@ mod tests {
             "validation: {:?}",
             result.validation
         );
+    }
+
+    #[test]
+    fn calculus_blocks_emit_specific_visual_kinds() {
+        let params = ODEBlockSystemParams {
+            states: vec![ODEStateSpec {
+                name: "x".to_string(),
+                initial: 0.0,
+                derivative: "1".to_string(),
+            }],
+            t0: Some(0.0),
+            t1: 1.0,
+            dt: 0.5,
+            method: Some(IntegratorMethod::Euler),
+            constants: None,
+        };
+        let result = run_ode_block_system(params, None);
+        assert!(result
+            .visual_blocks
+            .iter()
+            .any(|b| b.id == "integrator:x" && b.kind == "integrator"));
+        assert!(result
+            .visual_blocks
+            .iter()
+            .any(|b| b.id == "rhs:x" && b.kind == "expression"));
+
+        let opts = MathBlockOptions {
+            dt: 0.1,
+            ticks: 2,
+            t0: Some(0.0),
+        };
+        let derivative = Rc::new(RefCell::new(DerivativeBlock::new(
+            "dx", opts, MATH_IN, false, 0.0, MATH_OUT,
+        )));
+        let run = run_math_block_diagram(
+            vec![MathBlockHandle::new(derivative)],
+            RunDiagramOptions::default(),
+        );
+        assert_eq!(run.visual_blocks[0].kind, "derivative");
     }
 
     #[test]

@@ -38,7 +38,9 @@
 
 use std::any::{Any, TypeId};
 
-use crate::des::animation::types::{Anchor, CircleShape, FontWeight, RectShape, Shape, TextShape};
+use crate::des::animation::types::{
+    Anchor, CircleShape, FontWeight, LineShape, PathShape, RectShape, Shape, TextShape,
+};
 use crate::des::general::des_base::composite_station::CompositeDESStation;
 use crate::des::general::des_base::station::{DESStation, StationCore};
 use crate::des::general::des_spec::JsonObject;
@@ -536,6 +538,18 @@ impl VisualBlock {
         self
     }
 
+    /// Override the block kind shown in visual specs and render badges.
+    pub fn set_visual_kind(&mut self, kind: impl Into<String>) -> &mut Self {
+        self.visual_options.kind = kind.into();
+        self
+    }
+
+    /// Override the block label shown in visual specs.
+    pub fn set_visual_label(&mut self, label: impl Into<String>) -> &mut Self {
+        self.visual_options.label = label.into();
+        self
+    }
+
     /// `visualBlockSpec(overrides)`.
     pub fn visual_block_spec(&self, layout_override: Option<VisualBlockLayout>) -> VisualBlockSpec {
         let layout = match layout_override {
@@ -772,6 +786,8 @@ pub fn render_visual_block_spec(spec: &VisualBlockSpec) -> Vec<Shape> {
         }),
     ];
 
+    shapes.extend(render_kind_glyph(spec));
+
     let n_in = spec.ports.inputs.len();
     for (i, port) in spec.ports.inputs.iter().enumerate() {
         shapes.push(Shape::Circle(CircleShape {
@@ -803,6 +819,344 @@ pub fn render_visual_block_spec(spec: &VisualBlockSpec) -> Vec<Shape> {
         }));
     }
 
+    shapes
+}
+
+fn render_kind_glyph(spec: &VisualBlockSpec) -> Vec<Shape> {
+    let ResolvedLayout { x, y, w, .. } = spec.layout;
+    let size = 34.0_f64.min((w * 0.24).max(24.0));
+    let gx = x + 12.0;
+    let gy = y + 10.0;
+    let color = spec.style.stroke.clone();
+    let id = Some(spec.id.clone());
+    let kind = spec.kind.as_str();
+    match kind {
+        "constant-source" => constant_source_glyph(gx, gy, size, &color, id),
+        "function-source" | "expression-source" | "expression" => {
+            waveform_glyph(gx, gy, size, &color, id)
+        }
+        "sink" => sink_glyph(gx, gy, size, &color, id),
+        "sum" => text_glyph(gx, gy, size, "+", &color, id),
+        "subtract" => text_glyph(gx, gy, size, "+/-", &color, id),
+        "product" => text_glyph(gx, gy, size, "x", &color, id),
+        "gain" => gain_glyph(gx, gy, size, &color, id),
+        "saturation" => saturation_glyph(gx, gy, size, &color, id),
+        "integrator" => integrator_glyph(gx, gy, size, &color, id),
+        "derivative" => derivative_glyph(gx, gy, size, &color, id),
+        "first-order-filter" => filter_glyph(gx, gy, size, &color, id),
+        "comparator" => text_glyph(gx, gy, size, ">", &color, id),
+        "logic" => text_glyph(gx, gy, size, "AND", &color, id),
+        "laplacian-1d" => laplacian_glyph(gx, gy, size, &color, id),
+        _ => Vec::new(),
+    }
+}
+
+fn constant_source_glyph(x: f64, y: f64, s: f64, color: &str, id: Option<String>) -> Vec<Shape> {
+    vec![
+        Shape::Line(LineShape {
+            x1: x,
+            y1: y + s * 0.58,
+            x2: x + s,
+            y2: y + s * 0.58,
+            stroke: color.to_string(),
+            stroke_width: Some(2.0),
+            opacity: Some(0.9),
+            dasharray: None,
+            visual_block_id: id.clone(),
+        }),
+        Shape::Circle(CircleShape {
+            x: x + s * 0.76,
+            y: y + s * 0.58,
+            r: 2.6,
+            fill: color.to_string(),
+            stroke: Some("#ffffff".to_string()),
+            stroke_width: Some(1.0),
+            opacity: Some(0.95),
+            label: None,
+            title: Some("constant source".to_string()),
+            visual_block_id: id,
+        }),
+    ]
+}
+
+fn waveform_glyph(x: f64, y: f64, s: f64, color: &str, id: Option<String>) -> Vec<Shape> {
+    vec![Shape::Path(PathShape {
+        d: format!(
+            "M {} {} C {} {}, {} {}, {} {} S {} {}, {} {}",
+            x,
+            y + s * 0.58,
+            x + s * 0.16,
+            y + s * 0.16,
+            x + s * 0.34,
+            y + s * 0.16,
+            x + s * 0.50,
+            y + s * 0.58,
+            x + s * 0.82,
+            y + s,
+            x + s,
+            y + s * 0.42
+        ),
+        stroke: Some(color.to_string()),
+        stroke_width: Some(2.0),
+        fill: None,
+        opacity: Some(0.9),
+        visual_block_id: id,
+    })]
+}
+
+fn sink_glyph(x: f64, y: f64, s: f64, color: &str, id: Option<String>) -> Vec<Shape> {
+    vec![
+        Shape::Path(PathShape {
+            d: format!(
+                "M {} {} L {} {} L {} {} L {} {}",
+                x + s * 0.15,
+                y + s * 0.28,
+                x + s * 0.30,
+                y + s * 0.82,
+                x + s * 0.70,
+                y + s * 0.82,
+                x + s * 0.85,
+                y + s * 0.28
+            ),
+            stroke: Some(color.to_string()),
+            stroke_width: Some(2.0),
+            fill: Some("#ffffff".to_string()),
+            opacity: Some(0.9),
+            visual_block_id: id.clone(),
+        }),
+        Shape::Line(LineShape {
+            x1: x + s * 0.22,
+            y1: y + s * 0.52,
+            x2: x + s * 0.78,
+            y2: y + s * 0.52,
+            stroke: color.to_string(),
+            stroke_width: Some(1.5),
+            opacity: Some(0.55),
+            dasharray: None,
+            visual_block_id: id,
+        }),
+    ]
+}
+
+fn text_glyph(x: f64, y: f64, s: f64, text: &str, color: &str, id: Option<String>) -> Vec<Shape> {
+    vec![Shape::Text(TextShape {
+        x: x + s * 0.5,
+        y: y + s * 0.72,
+        text: text.to_string(),
+        font_size: Some(if text.len() > 2 { 9.0 } else { 18.0 }),
+        fill: Some(color.to_string()),
+        anchor: Some(Anchor::Middle),
+        font_weight: Some(FontWeight::Bold),
+        font_family: None,
+        visual_block_id: id,
+    })]
+}
+
+fn gain_glyph(x: f64, y: f64, s: f64, color: &str, id: Option<String>) -> Vec<Shape> {
+    vec![Shape::Path(PathShape {
+        d: format!(
+            "M {} {} L {} {} L {} {} Z",
+            x + s * 0.18,
+            y + s * 0.18,
+            x + s * 0.18,
+            y + s * 0.86,
+            x + s * 0.88,
+            y + s * 0.52
+        ),
+        stroke: Some(color.to_string()),
+        stroke_width: Some(2.0),
+        fill: Some("#ffffff".to_string()),
+        opacity: Some(0.9),
+        visual_block_id: id,
+    })]
+}
+
+fn saturation_glyph(x: f64, y: f64, s: f64, color: &str, id: Option<String>) -> Vec<Shape> {
+    vec![Shape::Path(PathShape {
+        d: format!(
+            "M {} {} L {} {} L {} {} L {} {}",
+            x + s * 0.10,
+            y + s * 0.78,
+            x + s * 0.34,
+            y + s * 0.78,
+            x + s * 0.66,
+            y + s * 0.26,
+            x + s * 0.90,
+            y + s * 0.26
+        ),
+        stroke: Some(color.to_string()),
+        stroke_width: Some(2.0),
+        fill: None,
+        opacity: Some(0.9),
+        visual_block_id: id,
+    })]
+}
+
+fn integrator_glyph(x: f64, y: f64, s: f64, color: &str, id: Option<String>) -> Vec<Shape> {
+    let mut shapes = Vec::new();
+    for (i, h) in [0.30, 0.48, 0.68].iter().enumerate() {
+        let bw = s * 0.16;
+        let bx = x + s * (0.15 + i as f64 * 0.22);
+        let by = y + s * (0.86 - h);
+        shapes.push(Shape::Rect(RectShape {
+            x: bx,
+            y: by,
+            w: bw,
+            h: s * h,
+            fill: color.to_string(),
+            stroke: None,
+            stroke_width: None,
+            opacity: Some(0.22 + i as f64 * 0.12),
+            label: None,
+            rx: Some(1.5),
+            title: Some("integrator accumulation".to_string()),
+            visual_block_id: id.clone(),
+        }));
+    }
+    shapes.push(Shape::Path(PathShape {
+        d: format!(
+            "M {} {} C {} {}, {} {}, {} {}",
+            x + s * 0.12,
+            y + s * 0.84,
+            x + s * 0.42,
+            y + s * 0.74,
+            x + s * 0.62,
+            y + s * 0.42,
+            x + s * 0.88,
+            y + s * 0.22
+        ),
+        stroke: Some(color.to_string()),
+        stroke_width: Some(2.0),
+        fill: None,
+        opacity: Some(0.95),
+        visual_block_id: id,
+    }));
+    shapes
+}
+
+fn derivative_glyph(x: f64, y: f64, s: f64, color: &str, id: Option<String>) -> Vec<Shape> {
+    let p1 = (x + s * 0.20, y + s * 0.76);
+    let p2 = (x + s * 0.78, y + s * 0.24);
+    vec![
+        Shape::Line(LineShape {
+            x1: p1.0,
+            y1: p1.1,
+            x2: p2.0,
+            y2: p2.1,
+            stroke: color.to_string(),
+            stroke_width: Some(2.0),
+            opacity: Some(0.95),
+            dasharray: None,
+            visual_block_id: id.clone(),
+        }),
+        Shape::Line(LineShape {
+            x1: p1.0,
+            y1: p1.1,
+            x2: p2.0,
+            y2: p1.1,
+            stroke: color.to_string(),
+            stroke_width: Some(1.3),
+            opacity: Some(0.55),
+            dasharray: Some("3,3".to_string()),
+            visual_block_id: id.clone(),
+        }),
+        Shape::Line(LineShape {
+            x1: p2.0,
+            y1: p1.1,
+            x2: p2.0,
+            y2: p2.1,
+            stroke: color.to_string(),
+            stroke_width: Some(1.3),
+            opacity: Some(0.55),
+            dasharray: Some("3,3".to_string()),
+            visual_block_id: id.clone(),
+        }),
+        Shape::Circle(CircleShape {
+            x: p1.0,
+            y: p1.1,
+            r: 2.8,
+            fill: "#ffffff".to_string(),
+            stroke: Some(color.to_string()),
+            stroke_width: Some(1.5),
+            opacity: Some(0.95),
+            label: None,
+            title: Some("derivative sample point".to_string()),
+            visual_block_id: id.clone(),
+        }),
+        Shape::Circle(CircleShape {
+            x: p2.0,
+            y: p2.1,
+            r: 2.8,
+            fill: color.to_string(),
+            stroke: Some("#ffffff".to_string()),
+            stroke_width: Some(1.0),
+            opacity: Some(0.95),
+            label: None,
+            title: Some("derivative sample point".to_string()),
+            visual_block_id: id,
+        }),
+    ]
+}
+
+fn filter_glyph(x: f64, y: f64, s: f64, color: &str, id: Option<String>) -> Vec<Shape> {
+    vec![Shape::Path(PathShape {
+        d: format!(
+            "M {} {} C {} {}, {} {}, {} {}",
+            x + s * 0.12,
+            y + s * 0.80,
+            x + s * 0.32,
+            y + s * 0.78,
+            x + s * 0.46,
+            y + s * 0.38,
+            x + s * 0.88,
+            y + s * 0.30
+        ),
+        stroke: Some(color.to_string()),
+        stroke_width: Some(2.0),
+        fill: None,
+        opacity: Some(0.9),
+        visual_block_id: id,
+    })]
+}
+
+fn laplacian_glyph(x: f64, y: f64, s: f64, color: &str, id: Option<String>) -> Vec<Shape> {
+    let mut shapes = Vec::new();
+    let pts = [
+        (x + s * 0.18, y + s * 0.62),
+        (x + s * 0.50, y + s * 0.32),
+        (x + s * 0.82, y + s * 0.62),
+    ];
+    for pair in pts.windows(2) {
+        shapes.push(Shape::Line(LineShape {
+            x1: pair[0].0,
+            y1: pair[0].1,
+            x2: pair[1].0,
+            y2: pair[1].1,
+            stroke: color.to_string(),
+            stroke_width: Some(1.7),
+            opacity: Some(0.7),
+            dasharray: None,
+            visual_block_id: id.clone(),
+        }));
+    }
+    for (i, (px, py)) in pts.iter().enumerate() {
+        shapes.push(Shape::Circle(CircleShape {
+            x: *px,
+            y: *py,
+            r: if i == 1 { 3.5 } else { 2.7 },
+            fill: if i == 1 {
+                color.to_string()
+            } else {
+                "#ffffff".to_string()
+            },
+            stroke: Some(color.to_string()),
+            stroke_width: Some(1.4),
+            opacity: Some(0.95),
+            label: None,
+            title: Some("1D stencil".to_string()),
+            visual_block_id: id.clone(),
+        }));
+    }
     shapes
 }
 
@@ -941,6 +1295,37 @@ mod tests {
         // rect + 2 text + 2 output port circles.
         assert_eq!(shapes.len(), 5);
         assert!(matches!(shapes[0], Shape::Rect(_)));
+    }
+
+    #[test]
+    fn renders_calculus_glyphs_for_integrator_and_derivative() {
+        let integrator = VisualBlock::new(
+            "int",
+            VisualBlockOptions {
+                kind: Some("integrator".to_string()),
+                ..Default::default()
+            },
+        );
+        let int_shapes = integrator.render_visual_block(VisualBlockRenderContext::default());
+        assert!(int_shapes.iter().any(|s| {
+            matches!(
+                s,
+                Shape::Rect(r) if r.title.as_deref() == Some("integrator accumulation")
+            )
+        }));
+
+        let derivative = VisualBlock::new(
+            "diff",
+            VisualBlockOptions {
+                kind: Some("derivative".to_string()),
+                ..Default::default()
+            },
+        );
+        let diff_shapes = derivative.render_visual_block(VisualBlockRenderContext::default());
+        assert!(diff_shapes
+            .iter()
+            .any(|s| matches!(s, Shape::Line(l) if l.dasharray.as_deref() == Some("3,3"))));
+        assert!(diff_shapes.iter().filter(|s| matches!(s, Shape::Circle(c) if c.title.as_deref() == Some("derivative sample point"))).count() >= 2);
     }
 
     #[test]

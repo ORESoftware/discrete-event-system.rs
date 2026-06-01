@@ -33,6 +33,7 @@ pub fn delivery_response_to_json(resp: &DeliveryPlannerResponse) -> Value {
         "objectiveMode": resp.objective_mode.as_str(),
         "objectiveValue": resp.objective_value,
         "objectiveDistance": resp.objective_distance,
+        "windowEdgePenalty": resp.window_edge_penalty,
         "windowCenterPenalty": resp.window_center_penalty,
         "totalDistance": resp.total_distance,
         "totalTravelMinutes": resp.total_travel_minutes,
@@ -76,6 +77,8 @@ mod tests {
         assert!(html.contains("objectiveMode"));
         assert!(html.contains("loadManifestBtn"));
         assert!(html.contains("stopList"));
-        assert!(html.contains("lockOrderBtn"));
+        assert!(html.contains("stop-position-lock"));
+        assert!(html.contains("lockedPositions"));
+        assert!(html.contains("windowEdgePenalty"));
     }
 }

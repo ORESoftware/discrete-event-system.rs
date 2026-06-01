@@ -23,7 +23,11 @@ use super::model::{
 const EARTH_RADIUS_MILES: f64 = 3958.7613;
 const STAGE_W: f64 = 1160.0;
 const STAGE_H: f64 = 680.0;
-const WINDOW_CENTER_EDGE_PENALTY: f64 = 12.0;
+const WINDOW_CENTER_EDGE_PENALTY: f64 = 48.0;
+const EDGE_SOFT_THRESHOLD_MINUTES: f64 = 30.0;
+const EDGE_HARD_THRESHOLD_MINUTES: f64 = 10.0;
+const EDGE_SOFT_PENALTY: f64 = 8.0;
+const EDGE_HARD_PENALTY: f64 = 48.0;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -81,6 +85,7 @@ pub struct DeliveryPlannerResponse {
     pub objective_mode: DeliveryObjectiveMode,
     pub objective_value: f64,
     pub objective_distance: f64,
+    pub window_edge_penalty: f64,
     pub window_center_penalty: f64,
     pub total_distance: f64,
     pub total_travel_minutes: f64,
@@ -134,15 +139,15 @@ fn solve_delivery_planner_inner(
     let nodes = build_nodes(&req);
     let build = build_ip_model(&req, &nodes);
     let t0 = Instant::now();
-    if req.route_rules.locked_order {
-        return match locked_order_route(&req) {
-            Ok(route) => response_from_route(
+    match position_locked_route(&req, &nodes, &build) {
+        Ok(Some(route)) => {
+            return response_from_route(
                 &req,
                 &nodes,
                 &build,
                 route,
-                "locked-order".to_string(),
-                "rule-constrained-route".to_string(),
+                "position-locked".to_string(),
+                "position-locked-route-search".to_string(),
                 false,
                 None,
                 true,
@@ -154,22 +159,24 @@ fn solve_delivery_planner_inner(
                 build.num_constraints,
                 0.0,
                 vec![DeliverySolverTrace {
-                    node_id: "locked-order".to_string(),
+                    node_id: "position-locked".to_string(),
                     depth: 0,
                     action: "incumbent".to_string(),
                     lp_z: None,
                     reason: Some(
-                        "vertical stop list was locked, so the route order is fixed".to_string(),
+                        "locked stop rows were fixed while unlocked rows were optimized"
+                            .to_string(),
                     ),
                     fractional: Vec::new(),
                 }],
                 render_animation,
             )
             .unwrap_or_else(|| {
-                error_response("locked stop order violates one or more time windows".to_string())
-            }),
-            Err(err) => error_response(err),
-        };
+                error_response("locked stop positions leave no feasible route".to_string())
+            });
+        }
+        Ok(None) => {}
+        Err(err) => return error_response(err),
     }
     let mip_result = catch_unwind(AssertUnwindSafe(|| {
         solve_ipmip_with_des(
@@ -294,6 +301,222 @@ fn locked_order_route(req: &DeliveryPlannerRequest) -> Result<Vec<usize>, String
     }
 }
 
+fn position_locked_route(
+    req: &DeliveryPlannerRequest,
+    nodes: &[StopNode],
+    build: &ModelBuild,
+) -> Result<Option<Vec<usize>>, String> {
+    if req.route_rules.locked_order {
+        return locked_order_route(req).map(Some);
+    }
+    if req.route_rules.locked_positions.is_empty() {
+        return Ok(None);
+    }
+    let locked_slots = locked_slots(req)?;
+    let route = if req.stops.len() <= 9 {
+        exact_position_locked_route(req, nodes, build, &locked_slots)
+    } else {
+        greedy_position_locked_route(req, nodes, build, &locked_slots)
+    };
+    route
+        .ok_or_else(|| "locked stop positions leave no feasible route".to_string())
+        .map(Some)
+}
+
+fn locked_slots(req: &DeliveryPlannerRequest) -> Result<Vec<Option<usize>>, String> {
+    let mut slots: Vec<Option<usize>> = vec![None; req.stops.len()];
+    let mut seen_stops = HashSet::new();
+    for lock in &req.route_rules.locked_positions {
+        if lock.position >= req.stops.len() {
+            return Err(format!(
+                "locked position {} is outside the {}-stop route",
+                lock.position + 1,
+                req.stops.len()
+            ));
+        }
+        let stop_idx = req
+            .stops
+            .iter()
+            .position(|stop| stop.id == lock.stop_id)
+            .ok_or_else(|| format!("locked position references unknown stop `{}`", lock.stop_id))?;
+        if !seen_stops.insert(stop_idx) {
+            return Err(format!(
+                "{} is locked more than once",
+                req.stops[stop_idx].label
+            ));
+        }
+        if let Some(existing) = slots[lock.position] {
+            return Err(format!(
+                "route position {} locks both {} and {}",
+                lock.position + 1,
+                req.stops[existing].label,
+                req.stops[stop_idx].label
+            ));
+        }
+        slots[lock.position] = Some(stop_idx);
+    }
+    Ok(slots)
+}
+
+fn exact_position_locked_route(
+    req: &DeliveryPlannerRequest,
+    nodes: &[StopNode],
+    build: &ModelBuild,
+    locked_slots: &[Option<usize>],
+) -> Option<Vec<usize>> {
+    let mut best_route = None;
+    let mut best_score = f64::INFINITY;
+    let mut used = vec![false; req.stops.len()];
+    let mut route = Vec::new();
+    dfs_position_locked_route(
+        req,
+        nodes,
+        build,
+        locked_slots,
+        0,
+        req.depart_time as f64,
+        &mut used,
+        &mut route,
+        &mut best_route,
+        &mut best_score,
+    );
+    best_route
+}
+
+#[allow(clippy::too_many_arguments)]
+fn dfs_position_locked_route(
+    req: &DeliveryPlannerRequest,
+    nodes: &[StopNode],
+    build: &ModelBuild,
+    locked_slots: &[Option<usize>],
+    cur_node: usize,
+    clock: f64,
+    used: &mut [bool],
+    route: &mut Vec<usize>,
+    best_route: &mut Option<Vec<usize>>,
+    best_score: &mut f64,
+) {
+    if route.len() == req.stops.len() {
+        if let Some(score) = route_score(req, nodes, build, route) {
+            if score < *best_score {
+                *best_score = score;
+                *best_route = Some(route.clone());
+            }
+        }
+        return;
+    }
+    let position = route.len();
+    if let Some(stop_idx) = locked_slots[position] {
+        if !used[stop_idx] {
+            try_position_locked_step(
+                req,
+                nodes,
+                build,
+                locked_slots,
+                cur_node,
+                clock,
+                stop_idx,
+                used,
+                route,
+                best_route,
+                best_score,
+            );
+        }
+        return;
+    }
+    for stop_idx in 0..req.stops.len() {
+        if used[stop_idx] {
+            continue;
+        }
+        try_position_locked_step(
+            req,
+            nodes,
+            build,
+            locked_slots,
+            cur_node,
+            clock,
+            stop_idx,
+            used,
+            route,
+            best_route,
+            best_score,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_position_locked_step(
+    req: &DeliveryPlannerRequest,
+    nodes: &[StopNode],
+    build: &ModelBuild,
+    locked_slots: &[Option<usize>],
+    cur_node: usize,
+    clock: f64,
+    stop_idx: usize,
+    used: &mut [bool],
+    route: &mut Vec<usize>,
+    best_route: &mut Option<Vec<usize>>,
+    best_score: &mut f64,
+) {
+    let next_node = stop_idx + 1;
+    let stop = &nodes[next_node];
+    let raw_arrival = clock + build.travel_minutes[cur_node][next_node];
+    let arrival = raw_arrival.max(stop.window_start as f64);
+    if arrival > stop.window_end as f64 + 1e-6 {
+        return;
+    }
+    used[stop_idx] = true;
+    route.push(stop_idx);
+    dfs_position_locked_route(
+        req,
+        nodes,
+        build,
+        locked_slots,
+        next_node,
+        arrival + stop.service_minutes,
+        used,
+        route,
+        best_route,
+        best_score,
+    );
+    route.pop();
+    used[stop_idx] = false;
+}
+
+fn greedy_position_locked_route(
+    req: &DeliveryPlannerRequest,
+    nodes: &[StopNode],
+    build: &ModelBuild,
+    locked_slots: &[Option<usize>],
+) -> Option<Vec<usize>> {
+    let mut remaining: HashSet<usize> = (0..req.stops.len()).collect();
+    let mut route = Vec::new();
+    let mut cur_node = 0usize;
+    let mut clock = req.depart_time as f64;
+    for &locked in locked_slots.iter().take(req.stops.len()) {
+        let next = match locked {
+            Some(stop_idx) => {
+                if !remaining.contains(&stop_idx) {
+                    return None;
+                }
+                stop_idx
+            }
+            None => pick_greedy_stop(req, nodes, build, cur_node, clock, &remaining)?,
+        };
+        let next_node = next + 1;
+        let arrival = (clock + build.travel_minutes[cur_node][next_node])
+            .max(nodes[next_node].window_start as f64);
+        if arrival > nodes[next_node].window_end as f64 {
+            return None;
+        }
+        remaining.remove(&next);
+        route.push(next);
+        clock = arrival + nodes[next_node].service_minutes;
+        cur_node = next_node;
+    }
+    Some(route)
+}
+
 fn error_response(message: String) -> DeliveryPlannerResponse {
     DeliveryPlannerResponse {
         ok: false,
@@ -312,6 +535,7 @@ fn error_response(message: String) -> DeliveryPlannerResponse {
         objective_mode: DeliveryObjectiveMode::Distance,
         objective_value: 0.0,
         objective_distance: 0.0,
+        window_edge_penalty: 0.0,
         window_center_penalty: 0.0,
         total_distance: 0.0,
         total_travel_minutes: 0.0,
@@ -357,6 +581,17 @@ fn window_center_node_penalty(node: &StopNode, arrival: f64) -> f64 {
     let midpoint = (node.window_start as f64 + node.window_end as f64) / 2.0;
     let half_width = ((node.window_end.saturating_sub(node.window_start)) as f64 / 2.0).max(1.0);
     (arrival - midpoint).abs() / half_width * WINDOW_CENTER_EDGE_PENALTY
+}
+
+fn window_edge_penalty_for_arrival(node: &StopNode, arrival: f64) -> f64 {
+    let start_slack = arrival - node.window_start as f64;
+    let end_slack = node.window_end as f64 - arrival;
+    let edge_slack = start_slack.min(end_slack).max(0.0);
+    let soft = ((EDGE_SOFT_THRESHOLD_MINUTES - edge_slack).max(0.0) / EDGE_SOFT_THRESHOLD_MINUTES)
+        * EDGE_SOFT_PENALTY;
+    let hard = ((EDGE_HARD_THRESHOLD_MINUTES - edge_slack).max(0.0) / EDGE_HARD_THRESHOLD_MINUTES)
+        * EDGE_HARD_PENALTY;
+    soft + hard
 }
 
 fn build_ip_model(req: &DeliveryPlannerRequest, nodes: &[StopNode]) -> ModelBuild {
@@ -423,6 +658,10 @@ fn build_ip_model(req: &DeliveryPlannerRequest, nodes: &[StopNode]) -> ModelBuil
         var_names.push(format!("arrival_{}", node));
     }
     let mut center_dev_index = vec![None; n_nodes];
+    let mut edge_start_soft_index = vec![None; n_nodes];
+    let mut edge_end_soft_index = vec![None; n_nodes];
+    let mut edge_start_hard_index = vec![None; n_nodes];
+    let mut edge_end_hard_index = vec![None; n_nodes];
     if req.objective_mode == DeliveryObjectiveMode::WindowCenter {
         for (node, slot) in center_dev_index.iter_mut().enumerate().skip(1) {
             let idx = c.len();
@@ -431,6 +670,36 @@ fn build_ip_model(req: &DeliveryPlannerRequest, nodes: &[StopNode]) -> ModelBuil
             integer_vars.push(false);
             ub.push(horizon);
             var_names.push(format!("center_deviation_{}", node));
+        }
+    } else {
+        for node in 1..n_nodes {
+            let idx = c.len();
+            edge_start_soft_index[node] = Some(idx);
+            c.push(EDGE_SOFT_PENALTY / EDGE_SOFT_THRESHOLD_MINUTES);
+            integer_vars.push(false);
+            ub.push(EDGE_SOFT_THRESHOLD_MINUTES);
+            var_names.push(format!("edge_start_soft_{}", node));
+
+            let idx = c.len();
+            edge_end_soft_index[node] = Some(idx);
+            c.push(EDGE_SOFT_PENALTY / EDGE_SOFT_THRESHOLD_MINUTES);
+            integer_vars.push(false);
+            ub.push(EDGE_SOFT_THRESHOLD_MINUTES);
+            var_names.push(format!("edge_end_soft_{}", node));
+
+            let idx = c.len();
+            edge_start_hard_index[node] = Some(idx);
+            c.push(EDGE_HARD_PENALTY / EDGE_HARD_THRESHOLD_MINUTES);
+            integer_vars.push(false);
+            ub.push(EDGE_HARD_THRESHOLD_MINUTES);
+            var_names.push(format!("edge_start_hard_{}", node));
+
+            let idx = c.len();
+            edge_end_hard_index[node] = Some(idx);
+            c.push(EDGE_HARD_PENALTY / EDGE_HARD_THRESHOLD_MINUTES);
+            integer_vars.push(false);
+            ub.push(EDGE_HARD_THRESHOLD_MINUTES);
+            var_names.push(format!("edge_end_hard_{}", node));
         }
     }
 
@@ -538,6 +807,39 @@ fn build_ip_model(req: &DeliveryPlannerRequest, nodes: &[StopNode]) -> ModelBuil
                 format!("center_lo_{customer}"),
             );
         }
+        if let (Some(start_soft), Some(end_soft), Some(start_hard), Some(end_hard)) = (
+            edge_start_soft_index[customer],
+            edge_end_soft_index[customer],
+            edge_start_hard_index[customer],
+            edge_end_hard_index[customer],
+        ) {
+            add_edge_penalty_rows(
+                &mut a,
+                &mut b,
+                &mut con_names,
+                var_count,
+                t,
+                start_soft,
+                end_soft,
+                nodes[customer].window_start as f64,
+                nodes[customer].window_end as f64,
+                EDGE_SOFT_THRESHOLD_MINUTES,
+                format!("edge_soft_{customer}"),
+            );
+            add_edge_penalty_rows(
+                &mut a,
+                &mut b,
+                &mut con_names,
+                var_count,
+                t,
+                start_hard,
+                end_hard,
+                nodes[customer].window_start as f64,
+                nodes[customer].window_end as f64,
+                EDGE_HARD_THRESHOLD_MINUTES,
+                format!("edge_hard_{customer}"),
+            );
+        }
     }
 
     let big_m = horizon + max_travel + 24.0 * 60.0;
@@ -628,6 +930,45 @@ fn add_eq_rows(
     add_le_row(a, b, con_names, row, -rhs, format!("{name}_ge"));
 }
 
+#[allow(clippy::too_many_arguments)]
+fn add_edge_penalty_rows(
+    a: &mut Vec<Vec<f64>>,
+    b: &mut Vec<f64>,
+    con_names: &mut Vec<String>,
+    var_count: usize,
+    t_idx: usize,
+    start_var: usize,
+    end_var: usize,
+    window_start: f64,
+    window_end: f64,
+    threshold: f64,
+    name: String,
+) {
+    let mut row = vec![0.0; var_count];
+    row[start_var] = -1.0;
+    row[t_idx] = -1.0;
+    add_le_row(
+        a,
+        b,
+        con_names,
+        row,
+        -(window_start + threshold),
+        format!("{name}_start"),
+    );
+
+    let mut row = vec![0.0; var_count];
+    row[end_var] = -1.0;
+    row[t_idx] = 1.0;
+    add_le_row(
+        a,
+        b,
+        con_names,
+        row,
+        window_end - threshold,
+        format!("{name}_end"),
+    );
+}
+
 fn extract_route(build: &ModelBuild, x: &[f64], n_customers: usize) -> Option<Vec<usize>> {
     let mut route = Vec::with_capacity(n_customers);
     let mut seen: HashSet<usize> = HashSet::new();
@@ -678,10 +1019,12 @@ fn response_from_route(
         used_fallback,
         fallback_reason.as_deref(),
         req.route_rules.locked_order,
+        req.route_rules.locked_positions.len(),
         num_variables,
         num_constraints,
         itinerary.total_distance,
         objective_value,
+        itinerary.window_edge_penalty,
         itinerary.window_center_penalty,
     );
     let animation = if render_animation {
@@ -706,6 +1049,7 @@ fn response_from_route(
         objective_mode: req.objective_mode,
         objective_value,
         objective_distance: itinerary.total_distance,
+        window_edge_penalty: itinerary.window_edge_penalty,
         window_center_penalty: itinerary.window_center_penalty,
         total_distance: itinerary.total_distance,
         total_travel_minutes: itinerary.total_travel_minutes,
@@ -727,6 +1071,7 @@ struct ItineraryBuild {
     total_distance: f64,
     total_travel_minutes: f64,
     total_wait_minutes: f64,
+    window_edge_penalty: f64,
     window_center_penalty: f64,
 }
 
@@ -797,6 +1142,7 @@ fn build_itinerary(
         travel_minutes: back_travel,
     });
     let return_time = clock + back_travel;
+    let edge_penalty = window_edge_penalty(&visits);
     let center_penalty = window_center_penalty(&visits);
     let text = itinerary_text(
         req,
@@ -814,18 +1160,39 @@ fn build_itinerary(
         total_distance,
         total_travel_minutes,
         total_wait_minutes,
+        window_edge_penalty: edge_penalty,
         window_center_penalty: center_penalty,
     })
 }
 
 fn objective_score(mode: DeliveryObjectiveMode, itinerary: &ItineraryBuild) -> f64 {
     match mode {
-        DeliveryObjectiveMode::Distance => itinerary.total_distance,
-        DeliveryObjectiveMode::TravelTime => itinerary.total_travel_minutes,
+        DeliveryObjectiveMode::Distance => itinerary.total_distance + itinerary.window_edge_penalty,
+        DeliveryObjectiveMode::TravelTime => {
+            itinerary.total_travel_minutes + itinerary.window_edge_penalty
+        }
         DeliveryObjectiveMode::WindowCenter => {
             itinerary.total_travel_minutes + itinerary.window_center_penalty
         }
     }
+}
+
+fn window_edge_penalty(visits: &[DeliveryVisit]) -> f64 {
+    visits
+        .iter()
+        .map(|visit| {
+            let node = StopNode {
+                label: visit.label.clone(),
+                address: visit.address.clone(),
+                lat: 0.0,
+                lon: 0.0,
+                window_start: visit.window_start,
+                window_end: visit.window_end,
+                service_minutes: 0.0,
+            };
+            window_edge_penalty_for_arrival(&node, visit.arrival as f64)
+        })
+        .sum()
 }
 
 fn window_center_penalty(visits: &[DeliveryVisit]) -> f64 {
@@ -1017,8 +1384,14 @@ fn greedy_leg_score(
     arrival: f64,
 ) -> f64 {
     match mode {
-        DeliveryObjectiveMode::Distance => build.distance[cur_node][next_node],
-        DeliveryObjectiveMode::TravelTime => build.travel_minutes[cur_node][next_node],
+        DeliveryObjectiveMode::Distance => {
+            build.distance[cur_node][next_node]
+                + window_edge_penalty_for_arrival(&nodes[next_node], arrival)
+        }
+        DeliveryObjectiveMode::TravelTime => {
+            build.travel_minutes[cur_node][next_node]
+                + window_edge_penalty_for_arrival(&nodes[next_node], arrival)
+        }
         DeliveryObjectiveMode::WindowCenter => {
             build.travel_minutes[cur_node][next_node]
                 + window_center_node_penalty(&nodes[next_node], arrival)
@@ -1037,13 +1410,13 @@ fn objective_label(mode: DeliveryObjectiveMode) -> &'static str {
 fn objective_note(mode: DeliveryObjectiveMode) -> &'static str {
     match mode {
         DeliveryObjectiveMode::Distance => {
-            "Objective minimized route miles; arrival-time rows enforce every customer delivery window."
+            "Objective minimized route miles plus edge-window penalties; arrival-time rows enforce every customer delivery window."
         }
         DeliveryObjectiveMode::TravelTime => {
-            "Objective minimized computed drive minutes at the selected average speed; arrival-time rows enforce every customer delivery window."
+            "Objective minimized computed drive minutes plus edge-window penalties; arrival-time rows enforce every customer delivery window."
         }
         DeliveryObjectiveMode::WindowCenter => {
-            "Objective minimized computed drive minutes plus a normalized penalty for arriving away from each delivery-window midpoint."
+            "Objective minimized computed drive minutes plus a strong linear penalty for arriving away from each delivery-window midpoint."
         }
     }
 }
@@ -1055,10 +1428,12 @@ fn delivery_notes(
     used_fallback: bool,
     fallback_reason: Option<&str>,
     locked_order: bool,
+    locked_position_count: usize,
     num_variables: usize,
     num_constraints: usize,
     total_distance: f64,
     objective_value: f64,
+    window_edge_penalty: f64,
     window_center_penalty: f64,
 ) -> Vec<String> {
     let mut notes = vec![
@@ -1069,9 +1444,15 @@ fn delivery_notes(
         format!("Optimized {} = {:.2}.", objective_label(mode), objective_value),
         format!("Planned total route distance is {:.2} miles.", total_distance),
     ];
+    if mode != DeliveryObjectiveMode::WindowCenter {
+        notes.push(format!(
+            "Edge-window penalty contribution is {:.2}; arrivals inside 10 minutes of either edge receive the largest penalty, and arrivals inside 30 minutes receive a smaller penalty.",
+            window_edge_penalty
+        ));
+    }
     if mode == DeliveryObjectiveMode::WindowCenter {
         notes.push(format!(
-            "Window-center edge penalty contribution is {:.2}; zero is centered in every availability window.",
+            "Window-center penalty contribution is {:.2}; zero is centered in every availability window.",
             window_center_penalty
         ));
     }
@@ -1080,6 +1461,11 @@ fn delivery_notes(
             "Locked stop order was treated as a hard rule, so the vertical list order fixed the route sequence."
                 .to_string(),
         );
+    }
+    if locked_position_count > 0 {
+        notes.push(format!(
+            "{locked_position_count} stop position lock(s) were treated as hard row constraints; unlocked rows remained optimizable."
+        ));
     }
     if used_fallback {
         notes.push(
@@ -1105,20 +1491,7 @@ fn greedy_route(
     let mut cur_node = 0usize;
     let mut clock = req.depart_time as f64;
     while !remaining.is_empty() {
-        let next = remaining.iter().copied().min_by(|&a, &b| {
-            let score = |idx: usize| {
-                let node = idx + 1;
-                let raw_arrival = clock + build.travel_minutes[cur_node][node];
-                let arrival = raw_arrival.max(nodes[node].window_start as f64);
-                if arrival > nodes[node].window_end as f64 {
-                    f64::INFINITY
-                } else {
-                    greedy_leg_score(req.objective_mode, build, nodes, cur_node, node, arrival)
-                        + (nodes[node].window_end as f64 - arrival) * 0.001
-                }
-            };
-            score(a).total_cmp(&score(b))
-        })?;
+        let next = pick_greedy_stop(req, nodes, build, cur_node, clock, &remaining)?;
         let next_node = next + 1;
         let arrival = (clock + build.travel_minutes[cur_node][next_node])
             .max(nodes[next_node].window_start as f64);
@@ -1131,6 +1504,30 @@ fn greedy_route(
         cur_node = next_node;
     }
     Some(route)
+}
+
+fn pick_greedy_stop(
+    req: &DeliveryPlannerRequest,
+    nodes: &[StopNode],
+    build: &ModelBuild,
+    cur_node: usize,
+    clock: f64,
+    remaining: &HashSet<usize>,
+) -> Option<usize> {
+    remaining.iter().copied().min_by(|&a, &b| {
+        let score = |idx: usize| {
+            let node = idx + 1;
+            let raw_arrival = clock + build.travel_minutes[cur_node][node];
+            let arrival = raw_arrival.max(nodes[node].window_start as f64);
+            if arrival > nodes[node].window_end as f64 {
+                f64::INFINITY
+            } else {
+                greedy_leg_score(req.objective_mode, build, nodes, cur_node, node, arrival)
+                    + (nodes[node].window_end as f64 - arrival) * 0.001
+            }
+        };
+        score(a).total_cmp(&score(b))
+    })
 }
 
 fn trace_from_ipmip(
@@ -1487,7 +1884,9 @@ pub fn empty_animation() -> Animation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::des::delivery_planner::model::{default_delivery_request, DeliveryObjectiveMode};
+    use crate::des::delivery_planner::model::{
+        default_delivery_request, DeliveryLockedPosition, DeliveryObjectiveMode,
+    };
     use crate::des::general::ip_mip_des::IPMIPStatus;
 
     #[test]
@@ -1542,11 +1941,36 @@ mod tests {
 
         assert!(resp.ok, "{:?}", resp.error);
         assert_eq!(resp.route, vec![2, 0, 1]);
-        assert_eq!(resp.solver_kind, "rule-constrained-route");
+        assert_eq!(resp.solver_kind, "position-locked-route-search");
         assert!(resp
             .solver_notes
             .iter()
             .any(|n| n.contains("Locked stop order")));
+    }
+
+    #[test]
+    fn locked_position_fixes_only_that_route_slot() {
+        let mut req = default_delivery_request();
+        req.stops.truncate(3);
+        for stop in &mut req.stops {
+            stop.window_start = 8 * 60;
+            stop.window_end = 18 * 60;
+        }
+        req.route_rules.locked_positions = vec![DeliveryLockedPosition {
+            stop_id: "S3".to_string(),
+            position: 1,
+        }];
+
+        let resp = solve_delivery_planner_summary(&req);
+
+        assert!(resp.ok, "{:?}", resp.error);
+        assert_eq!(resp.route.len(), 3);
+        assert_eq!(resp.route[1], 2);
+        assert_eq!(resp.solver_kind, "position-locked-route-search");
+        assert!(resp
+            .solver_notes
+            .iter()
+            .any(|n| n.contains("unlocked rows remained optimizable")));
     }
 
     #[test]
@@ -1562,7 +1986,11 @@ mod tests {
         let travel = solve_delivery_planner_summary(&req);
         assert!(travel.ok, "{:?}", travel.error);
         assert_eq!(travel.objective_mode, DeliveryObjectiveMode::TravelTime);
-        assert!((travel.objective_value - travel.total_travel_minutes).abs() < 1e-6);
+        assert!(
+            (travel.objective_value - (travel.total_travel_minutes + travel.window_edge_penalty))
+                .abs()
+                < 1e-6
+        );
 
         req.objective_mode = DeliveryObjectiveMode::WindowCenter;
         let centered = solve_delivery_planner_summary(&req);

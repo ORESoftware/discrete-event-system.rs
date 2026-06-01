@@ -7,8 +7,8 @@ pub mod ui;
 
 pub use model::{
     default_delivery_manifest, default_delivery_request, normalize_delivery_request,
-    parse_manifest, DeliveryObjectiveMode, DeliveryPlannerRequest, DeliveryRouteRules,
-    DeliveryStopInput,
+    parse_manifest, DeliveryLockedPosition, DeliveryObjectiveMode, DeliveryPlannerRequest,
+    DeliveryRouteRules, DeliveryStopInput,
 };
 pub use solve::{solve_delivery_planner, solve_delivery_planner_summary, DeliveryPlannerResponse};
 pub use ui::{

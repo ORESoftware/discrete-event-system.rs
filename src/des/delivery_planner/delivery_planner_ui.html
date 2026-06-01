@@ -50,15 +50,18 @@ label{display:block;color:var(--muted);font-size:12px;margin:0 0 4px}
 .stop-count{color:var(--muted);font-size:12px;white-space:nowrap}
 .stop-list{display:grid;gap:7px;min-height:42px}
 .stop-empty{border:1px dashed var(--line);border-radius:6px;color:var(--muted);background:#fff;padding:10px;font-size:12px}
-.stop-item{display:grid;grid-template-columns:30px minmax(0,1fr);gap:8px;align-items:center;border:1px solid var(--line);border-radius:6px;background:#fff;padding:8px;cursor:grab}
+.stop-item{display:grid;grid-template-columns:30px minmax(0,1fr) 54px;gap:8px;align-items:center;border:1px solid var(--line);border-radius:6px;background:#fff;padding:8px;cursor:grab}
+.stop-item.locked{border-color:#8ba9c6;background:#f8fbff}
 .stop-item:active{cursor:grabbing}
 .stop-item.dragging{opacity:.55}
 .stop-item.drop-target{border-color:var(--blue);box-shadow:0 0 0 2px #d8e8ff}
 .drag-handle{width:26px;height:30px;display:grid;place-items:center;border:1px solid #dce5eb;border-radius:6px;background:#f8fafc;color:#6c7c89;font-weight:800}
+.stop-lock{width:50px;height:30px;padding:0;font-size:11px;font-weight:800}
+.stop-lock.active{border-color:var(--blue);background:#eef5ff;color:var(--blue)}
 .stop-main{min-width:0}
 .stop-title{font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .stop-meta{margin-top:2px;color:var(--muted);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.lock-row{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px;color:var(--muted);font-size:12px}
+.lock-hint{margin-top:8px;color:var(--muted);font-size:12px}
 .metrics{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));border-bottom:1px solid var(--line);background:var(--line);gap:1px}
 .metric{background:#fbfcfd;padding:9px 11px;min-width:0}
 .metric span{display:block;color:var(--muted);font-size:11px;text-transform:uppercase;white-space:nowrap}
@@ -148,10 +151,7 @@ label{display:block;color:var(--muted);font-size:12px;margin:0 0 4px}
         <div class="stop-list" id="stopList" data-testid="stop-list">
           <div class="stop-empty">Load a manifest to edit stop order.</div>
         </div>
-        <div class="lock-row">
-          <button type="button" class="toggle" id="lockOrderBtn" data-testid="lock-order">Lock order</button>
-          <span id="lockOrderState">Optimizer may reorder stops.</span>
-        </div>
+        <div class="lock-hint" id="lockOrderState">Lock a row to pin that stop to that exact list position.</div>
       </div>
       <div class="section">
         <h2>Solver</h2>
@@ -235,13 +235,30 @@ function validObjectiveMode(mode){
 }
 function ensureRouteOptions(){
   state.objectiveMode = validObjectiveMode(state.objectiveMode);
-  if(!state.routeRules)state.routeRules={lockedOrder:false,orderedStopIds:[]};
-  state.routeRules.lockedOrder=!!state.routeRules.lockedOrder;
+  if(!state.routeRules)state.routeRules={lockedOrder:false,orderedStopIds:[],lockedPositions:[]};
+  if(!Array.isArray(state.routeRules.orderedStopIds))state.routeRules.orderedStopIds=[];
+  if(!Array.isArray(state.routeRules.lockedPositions))state.routeRules.lockedPositions=[];
   const seen=new Set();
   state.routeRules.orderedStopIds=(state.routeRules.orderedStopIds||[]).filter(id=>{
     id=String(id||'').trim();
     if(!id||seen.has(id))return false;
     seen.add(id);
+    return true;
+  });
+  if(state.routeRules.lockedOrder && !state.routeRules.lockedPositions.length){
+    state.routeRules.lockedPositions=state.routeRules.orderedStopIds.map((stopId,position)=>({stopId,position}));
+  }
+  state.routeRules.lockedOrder=false;
+  const stopIds=new Set((state.stops||[]).map(s=>s.id));
+  const seenLocks=new Set(), seenPositions=new Set();
+  state.routeRules.lockedPositions=state.routeRules.lockedPositions.filter(lock=>{
+    const stopId=String(lock?.stopId||'').trim();
+    const position=Number(lock?.position);
+    if(!stopId||!Number.isInteger(position)||position<0||position>=(state.stops||[]).length)return false;
+    if(stopIds.size&&!stopIds.has(stopId))return false;
+    if(seenLocks.has(stopId)||seenPositions.has(position))return false;
+    lock.stopId=stopId;lock.position=position;
+    seenLocks.add(stopId);seenPositions.add(position);
     return true;
   });
 }
@@ -397,6 +414,25 @@ function orderedStops(){
   const byId=new Map((state.stops||[]).map(s=>[s.id,s]));
   return orderedStopIdsFor(state.stops||[]).map(id=>byId.get(id)).filter(Boolean);
 }
+function lockedPositionMap(){
+  ensureRouteOptions();
+  return new Map((state.routeRules.lockedPositions||[]).map(lock=>[lock.stopId,lock.position]));
+}
+function enforceLockedOrder(){
+  ensureRouteOptions();
+  const stops=state.stops||[];
+  const ids=orderedStopIdsFor(stops);
+  const locked=state.routeRules.lockedPositions||[];
+  const lockedIds=new Set(locked.map(lock=>lock.stopId));
+  const slots=Array(stops.length).fill(null);
+  locked.forEach(lock=>{if(lock.position<slots.length)slots[lock.position]=lock.stopId});
+  const freeIds=ids.filter(id=>!lockedIds.has(id));
+  let freeIdx=0;
+  for(let i=0;i<slots.length;i++){
+    if(!slots[i])slots[i]=freeIds[freeIdx++];
+  }
+  state.routeRules.orderedStopIds=slots.filter(Boolean);
+}
 function syncStateFromControls(opts={}){
   const parsed=parseManifest($('manifestText').value);
   const previousOrder=state.routeRules?.orderedStopIds||[];
@@ -419,7 +455,9 @@ function syncStateFromControls(opts={}){
   state.rawManifest = $('manifestText').value;
   ensureRouteOptions();
   state.routeRules.orderedStopIds = opts.resetOrder ? state.stops.map(s=>s.id) : orderedStopIdsFor(state.stops);
+  if(opts.resetOrder)state.routeRules.lockedPositions=[];
   if(!opts.resetOrder && previousOrder.length)state.routeRules.orderedStopIds=orderedStopIdsFor(state.stops);
+  enforceLockedOrder();
   $('userChip').textContent = state.userId || 'dispatcher@local';
 }
 function saveLoadedState(){
@@ -454,13 +492,16 @@ function renderObjectiveControls(){
 }
 function renderStopList(){
   ensureRouteOptions();
+  enforceLockedOrder();
   const list=$('stopList');
   const stops=orderedStops();
+  const locks=lockedPositionMap();
   list.replaceChildren();
   $('stopCount').textContent=`${stops.length} stop${stops.length===1?'':'s'}`;
-  $('lockOrderBtn').classList.toggle('active',state.routeRules.lockedOrder);
-  $('lockOrderBtn').textContent=state.routeRules.lockedOrder?'Unlock order':'Lock order';
-  $('lockOrderState').textContent=state.routeRules.lockedOrder?'Vertical order is a hard route rule.':'Optimizer may reorder stops.';
+  const lockedCount=state.routeRules.lockedPositions.length;
+  $('lockOrderState').textContent=lockedCount
+    ? `${lockedCount} stop${lockedCount===1?'':'s'} pinned to exact list position${lockedCount===1?'':'s'}; unlocked rows remain optimizable.`
+    : 'Lock a row to pin that stop to that exact list position.';
   if(!stops.length){
     const empty=document.createElement('div');
     empty.className='stop-empty';
@@ -469,9 +510,10 @@ function renderStopList(){
     return;
   }
   stops.forEach((s,i)=>{
+    const locked=locks.get(s.id)===i;
     const item=document.createElement('div');
-    item.className='stop-item';
-    item.draggable=true;
+    item.className='stop-item'+(locked?' locked':'');
+    item.draggable=!locked;
     item.dataset.stopId=s.id;
     if(s.id===draggingStopId)item.classList.add('dragging');
     const handle=document.createElement('div');
@@ -484,10 +526,21 @@ function renderStopList(){
     title.textContent=s.label||s.id;
     const meta=document.createElement('div');
     meta.className='stop-meta';
-    meta.textContent=`${fmt(s.windowStart)}-${fmt(s.windowEnd)} · ${s.address||coordText(s)}`;
+    meta.textContent=`${fmt(s.windowStart)}-${fmt(s.windowEnd)} · ${locked?'pinned here · ':''}${s.address||coordText(s)}`;
     main.append(title,meta);
-    item.append(handle,main);
-    item.addEventListener('dragstart',e=>{draggingStopId=s.id;e.dataTransfer.effectAllowed='move';item.classList.add('dragging')});
+    const lockBtn=document.createElement('button');
+    lockBtn.type='button';
+    lockBtn.className='stop-lock'+(locked?' active':'');
+    lockBtn.dataset.stopId=s.id;
+    lockBtn.dataset.testid='stop-position-lock';
+    lockBtn.textContent=locked?'Pinned':'Pin';
+    lockBtn.title=locked?'Unlock this stop position':'Pin this stop to this list position';
+    lockBtn.addEventListener('click',e=>{e.stopPropagation();togglePositionLock(s.id,i)});
+    item.append(handle,main,lockBtn);
+    item.addEventListener('dragstart',e=>{
+      if(locked){e.preventDefault();return}
+      draggingStopId=s.id;e.dataTransfer.effectAllowed='move';item.classList.add('dragging')
+    });
     item.addEventListener('dragend',()=>{draggingStopId=null;renderStopList()});
     item.addEventListener('dragover',e=>{e.preventDefault();item.classList.add('drop-target')});
     item.addEventListener('dragleave',()=>item.classList.remove('drop-target'));
@@ -501,13 +554,34 @@ function renderStopList(){
 }
 function moveStop(dragId,targetId,after){
   if(!dragId||!targetId||dragId===targetId)return;
+  const locks=lockedPositionMap();
+  if(locks.has(dragId))return;
   const ids=orderedStops().map(s=>s.id).filter(id=>id!==dragId);
   const targetIndex=ids.indexOf(targetId);
   if(targetIndex<0)return;
   ids.splice(targetIndex+(after?1:0),0,dragId);
   state.routeRules.orderedStopIds=ids;
+  enforceLockedOrder();
   renderStopList();
   saveLoadedState();
+}
+function togglePositionLock(stopId,position){
+  ensureRouteOptions();
+  const locks=state.routeRules.lockedPositions||[];
+  const existing=locks.findIndex(lock=>lock.stopId===stopId);
+  if(existing>=0){
+    locks.splice(existing,1);
+  } else {
+    for(let i=locks.length-1;i>=0;i--){
+      if(locks[i].position===position)locks.splice(i,1);
+    }
+    locks.push({stopId,position});
+  }
+  state.routeRules.lockedPositions=locks;
+  enforceLockedOrder();
+  renderStopList();
+  saveLoadedState();
+  setStatus('ok',existing>=0?'Stop position unlocked.':'Stop pinned to this position.');
 }
 function renderControls(){
   ensureRouteOptions();
@@ -546,12 +620,13 @@ function matrices(){
   return {nodes,dist,travel};
 }
 function routeFeasible(route,m){
-  let clock=state.departTime, cur=0, visits=[], legs=[], totalDistance=0,totalTravel=0,totalWait=0,windowCenterPenalty=0;
+  let clock=state.departTime, cur=0, visits=[], legs=[], totalDistance=0,totalTravel=0,totalWait=0,windowEdgePenalty=0,windowCenterPenalty=0;
   for(const stopIdx of route){
     const next=stopIdx+1, stop=m.nodes[next], tr=m.travel[cur][next], d=m.dist[cur][next];
     const raw=clock+tr, arrival=Math.max(raw,stop.windowStart), wait=Math.max(0,arrival-raw);
     if(arrival>stop.windowEnd+1e-6)return null;
     const depart=arrival+(stop.serviceMinutes!=null?stop.serviceMinutes:(state.defaultServiceMinutes!=null?state.defaultServiceMinutes:0));
+    windowEdgePenalty+=windowEdgePenaltyForArrival(stop,arrival);
     windowCenterPenalty+=windowCenterStopPenalty(stop,arrival);
     legs.push({from:m.nodes[cur].label,to:stop.label,distance:d,travelMinutes:tr});
     visits.push({stopIndex:stopIdx,label:stop.label,address:stop.address,arrival:Math.round(arrival),depart:Math.round(depart),windowStart:stop.windowStart,windowEnd:stop.windowEnd,arrivalText:fmt(arrival),departText:fmt(depart),windowText:fmt(stop.windowStart)+'-'+fmt(stop.windowEnd),distanceFromPrevious:d,travelMinutesFromPrevious:tr,waitMinutes:wait});
@@ -559,8 +634,16 @@ function routeFeasible(route,m){
   }
   legs.push({from:m.nodes[cur].label,to:m.nodes[0].label,distance:m.dist[cur][0],travelMinutes:m.travel[cur][0]});
   totalDistance+=m.dist[cur][0];totalTravel+=m.travel[cur][0];
-  const objectiveValue=objectiveScore({totalDistance,totalTravelMinutes:totalTravel,windowCenterPenalty});
-  return {visits,legs,totalDistance,totalTravelMinutes:totalTravel,totalWaitMinutes:totalWait,windowCenterPenalty,objectiveValue,returnTime:clock+m.travel[cur][0]};
+  const objectiveValue=objectiveScore({totalDistance,totalTravelMinutes:totalTravel,windowEdgePenalty,windowCenterPenalty});
+  return {visits,legs,totalDistance,totalTravelMinutes:totalTravel,totalWaitMinutes:totalWait,windowEdgePenalty,windowCenterPenalty,objectiveValue,returnTime:clock+m.travel[cur][0]};
+}
+function windowEdgePenaltyForArrival(stop,arrival){
+  const startSlack=arrival-Number(stop.windowStart);
+  const endSlack=Number(stop.windowEnd)-arrival;
+  const edgeSlack=Math.max(0,Math.min(startSlack,endSlack));
+  const soft=Math.max(0,30-edgeSlack)/30*8;
+  const hard=Math.max(0,10-edgeSlack)/10*48;
+  return soft+hard;
 }
 function windowCenterStopPenalty(stop,arrival){
   const midpoint=(Number(stop.windowStart)+Number(stop.windowEnd))/2;
@@ -569,40 +652,49 @@ function windowCenterStopPenalty(stop,arrival){
 }
 function objectiveScore(itin){
   const mode=validObjectiveMode(state.objectiveMode);
-  if(mode==='travelTime')return itin.totalTravelMinutes;
+  if(mode==='travelTime')return itin.totalTravelMinutes+(itin.windowEdgePenalty||0);
   if(mode==='windowCenter')return itin.totalTravelMinutes+(itin.windowCenterPenalty||0);
-  return itin.totalDistance;
+  return itin.totalDistance+(itin.windowEdgePenalty||0);
 }
 function objectiveLabel(){
   const mode=validObjectiveMode(state.objectiveMode);
-  if(mode==='travelTime')return 'drive minutes';
+  if(mode==='travelTime')return 'drive minutes plus edge penalty';
   if(mode==='windowCenter')return 'drive minutes plus window-center penalty';
-  return 'route miles';
+  return 'route miles plus edge penalty';
 }
-function lockedRouteFromList(){
+function lockedSlots(){
+  ensureRouteOptions();
   const byId=new Map((state.stops||[]).map((s,i)=>[s.id,i]));
-  const route=[];
-  for(const id of orderedStopIdsFor(state.stops||[])){
-    if(byId.has(id))route.push(byId.get(id));
+  const slots=Array((state.stops||[]).length).fill(null);
+  for(const lock of state.routeRules.lockedPositions||[]){
+    if(lock.position>=slots.length||!byId.has(lock.stopId))return null;
+    const stopIdx=byId.get(lock.stopId);
+    if(slots[lock.position]!=null)return null;
+    slots[lock.position]=stopIdx;
   }
-  return route.length===state.stops.length?route:null;
+  return slots;
 }
 function localSolve(){
   ensureRouteOptions();
   const m=matrices(), n=state.stops.length;
+  const slots=lockedSlots();
+  if(!slots)throw new Error('Locked stop positions are inconsistent');
+  const hasPositionLocks=slots.some(v=>v!=null);
   let bestRoute=null,bestScore=Infinity;
-  if(state.routeRules.lockedOrder){
-    bestRoute=lockedRouteFromList();
-    if(!bestRoute)throw new Error('Locked order does not cover every stop');
-    const locked=routeFeasible(bestRoute,m);
-    if(!locked)throw new Error('Locked stop order violates one or more time windows');
-    bestScore=locked.objectiveValue;
-  } else if(n<=9){
+  if(n<=9){
     const used=Array(n).fill(false), route=[];
     function dfs(cur,clock){
       if(route.length===n){
         const itin=routeFeasible(route,m);
         if(itin&&itin.objectiveValue<bestScore){bestScore=itin.objectiveValue;bestRoute=route.slice()}
+        return;
+      }
+      const forced=slots[route.length];
+      if(forced!=null){
+        if(used[forced])return;
+        const next=forced+1, stop=m.nodes[next], raw=clock+m.travel[cur][next], arrival=Math.max(raw,stop.windowStart);
+        if(arrival>stop.windowEnd+1e-6)return;
+        used[forced]=true;route.push(forced);dfs(next,arrival+(stop.serviceMinutes||0));route.pop();used[forced]=false;
         return;
       }
       for(let s=0;s<n;s++){
@@ -615,15 +707,22 @@ function localSolve(){
     dfs(0,state.departTime);
   } else {
     const remaining=new Set(Array.from({length:n},(_,i)=>i));let cur=0,clock=state.departTime;bestRoute=[];
-    while(remaining.size){
+    while(bestRoute.length<n){
       let pick=null,pickScore=Infinity;
-      for(const s of remaining){
-        const node=s+1, raw=clock+m.travel[cur][node], arrival=Math.max(raw,m.nodes[node].windowStart);
-        if(arrival>m.nodes[node].windowEnd)continue;
-        let score=state.objectiveMode==='distance'?m.dist[cur][node]:m.travel[cur][node];
-        if(state.objectiveMode==='windowCenter')score+=windowCenterStopPenalty(m.nodes[node],arrival);
-        score+=(m.nodes[node].windowEnd-arrival)*.001;
-        if(score<pickScore){pick=s;pickScore=score}
+      const forced=slots[bestRoute.length];
+      if(forced!=null){
+        if(!remaining.has(forced)){bestRoute=null;break}
+        pick=forced;
+      } else {
+        for(const s of remaining){
+          const node=s+1, raw=clock+m.travel[cur][node], arrival=Math.max(raw,m.nodes[node].windowStart);
+          if(arrival>m.nodes[node].windowEnd)continue;
+          let score=state.objectiveMode==='distance'?m.dist[cur][node]:m.travel[cur][node];
+          if(state.objectiveMode==='windowCenter')score+=windowCenterStopPenalty(m.nodes[node],arrival);
+          else score+=windowEdgePenaltyForArrival(m.nodes[node],arrival);
+          score+=(m.nodes[node].windowEnd-arrival)*.001;
+          if(score<pickScore){pick=s;pickScore=score}
+        }
       }
       if(pick==null){bestRoute=null;break}
       const node=pick+1, arrival=Math.max(clock+m.travel[cur][node],m.nodes[node].windowStart);
@@ -632,24 +731,24 @@ function localSolve(){
   }
   if(!bestRoute)throw new Error('No route can satisfy these time windows');
   const itin=routeFeasible(bestRoute,m);if(!itin)throw new Error('No route can satisfy these time windows');
-  const variables=n*(n+1)+n+(state.objectiveMode==='windowCenter'?n:0);
-  const constraints=n*4+4+n*2+n+n*(n-1)+(state.objectiveMode==='windowCenter'?n*2:0);
+  const variables=n*(n+1)+n+(state.objectiveMode==='windowCenter'?n:n*4);
+  const constraints=n*4+4+n*2+n+n*(n-1)+(state.objectiveMode==='windowCenter'?n*2:n*4);
   const itineraryText=buildItineraryText(itin,m);
   return {
-    ok:true,error:null,solverStatus:state.routeRules.lockedOrder?'locked-order':'local-preview',solverKind:state.routeRules.lockedOrder?'rule-constrained-route':'browser-exact-route',
-    usedFallback:!state.routeRules.lockedOrder,fallbackReason:state.routeRules.lockedOrder?null:'Browser-side preview; serve the Rust endpoint for the in-house IP/MIP solve.',
+    ok:true,error:null,solverStatus:hasPositionLocks?'position-locked':'local-preview',solverKind:hasPositionLocks?'browser-position-locked-route':'browser-exact-route',
+    usedFallback:true,fallbackReason:'Browser-side preview; serve the Rust endpoint for the in-house IP/MIP solve.',
     inHouseOnly:true,usesExternalSolvers:false,elapsedMs:0,nodesExplored:0,lpSolves:0,
-    numVariables:variables,numConstraints:constraints,objectiveMode:state.objectiveMode,objectiveValue:itin.objectiveValue,objectiveDistance:itin.totalDistance,windowCenterPenalty:itin.windowCenterPenalty,
+    numVariables:variables,numConstraints:constraints,objectiveMode:state.objectiveMode,objectiveValue:itin.objectiveValue,objectiveDistance:itin.totalDistance,windowEdgePenalty:itin.windowEdgePenalty,windowCenterPenalty:itin.windowCenterPenalty,
     totalDistance:itin.totalDistance,totalTravelMinutes:itin.totalTravelMinutes,totalWaitMinutes:itin.totalWaitMinutes,
     route:bestRoute,visits:itin.visits,legs:itin.legs,itineraryText,
     solverNotes:[
       `Built a directed binary route model with ${variables} variables and ${constraints} constraint rows.`,
       `Objective minimized ${objectiveLabel()}; arrival-time rows enforce every customer delivery window.`,
       `Optimized ${objectiveLabel()} = ${itin.objectiveValue.toFixed(2)}.`,
-      state.routeRules.lockedOrder?'Locked stop order was treated as a hard rule.':'Stop order was optimized by the browser preview.',
-      state.routeRules.lockedOrder?'Locked route was checked directly against every delivery window.':'Browser preview used exact enumeration for small manifests or greedy repair for larger manifests.'
+      hasPositionLocks?'Pinned stop rows were treated as hard position constraints.':'Stop order was optimized by the browser preview.',
+      'Browser preview used exact enumeration for small manifests or greedy repair for larger manifests.'
     ],
-    solverTrace:[{nodeId:state.routeRules.lockedOrder?'locked-order':'preview',depth:0,action:'incumbent',lpZ:itin.objectiveValue,reason:'feasible delivery route accepted',fractional:[]}],
+    solverTrace:[{nodeId:hasPositionLocks?'position-locked':'preview',depth:0,action:'incumbent',lpZ:itin.objectiveValue,reason:'feasible delivery route accepted',fractional:[]}],
     routeAnimation:buildRouteAnimation(m,bestRoute,itin)
   };
 }
@@ -900,14 +999,6 @@ document.querySelectorAll('#objectiveMode button').forEach(btn=>btn.onclick=()=>
   saveLoadedState();
   if(lastResponse)solve();
 });
-$('lockOrderBtn').onclick=()=>{
-  ensureRouteOptions();
-  state.routeRules.lockedOrder=!state.routeRules.lockedOrder;
-  state.routeRules.orderedStopIds=orderedStops().map(s=>s.id);
-  renderStopList();
-  saveLoadedState();
-  setStatus('ok',state.routeRules.lockedOrder?'Stop order locked.':'Stop order unlocked.');
-};
 restoreLoadedState();
 renderControls();
 try{syncStateFromControls();renderStopList();receiveSolution(localSolve());setStatus('ok','Sample route ready.')}catch(e){setStatus('err',e.message)}

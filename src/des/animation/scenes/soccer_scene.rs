@@ -1,12 +1,18 @@
-//! Port of `src/des/animation/scenes/soccer-scene.ts`.
+//! Pitch + bench animation for the soccer rotation showcase.
 //!
-//! Builds frames + companion charts for the 7v7 soccer pitch animation: a side
-//! panel (scoreboard, period, affinity bar), the pitch with on-field players,
-//! and a bench list. Substitutions animate naturally as players teleport
-//! between frames.
+//! Renders a vertical pitch with the on-field players laid out in a real
+//! **formation** (rows from the keeper up to the attack), a bench column of the
+//! resting players, a scoreboard/affinity panel, and a substitution log. Each
+//! player is a numbered jersey with their `PlayerN` name; at every period
+//! boundary the players who come **on** glide from the bench onto their slot
+//! (highlighted green) and the players who come **off** glide to the bench
+//! (highlighted red) — the substitution motion is produced by the caller
+//! feeding a handful of interpolation frames (`transition` 0→1) before the
+//! settled period frames.
 //!
 //! PORT NOTE: only the subset of `crate::des::general::soccer_rotation::
-//! SoccerProblem` the scene reads is mirrored locally in [`SoccerProblem`].
+//! SoccerProblem` the scene reads is mirrored locally in [`SoccerProblem`],
+//! plus the `formation` row sizes used for the pitch layout.
 
 #![allow(dead_code)]
 
@@ -15,40 +21,40 @@ use crate::des::animation::types::{
     LineShape, RectShape, Shape, TextShape,
 };
 
-pub const STAGE_W: f64 = 1100.0;
-pub const STAGE_H: f64 = 640.0;
+pub const STAGE_W: f64 = 1200.0;
+pub const STAGE_H: f64 = 760.0;
 
-const PITCH_X: f64 = 320.0;
-const PITCH_Y: f64 = 60.0;
-const PITCH_W: f64 = 580.0;
-const PITCH_H: f64 = 460.0;
+// Left column: scoreboard / affinity (top) + substitution log (bottom).
+const META_X: f64 = 24.0;
+const META_Y: f64 = 56.0;
+const META_W: f64 = 250.0;
+const META_H: f64 = 300.0;
 
-const BENCH_X: f64 = 920.0;
-const BENCH_Y: f64 = 60.0;
-const BENCH_W: f64 = 160.0;
-const BENCH_ROW_H: f64 = 56.0;
+const SUB_X: f64 = 24.0;
+const SUB_Y: f64 = 372.0;
+const SUB_W: f64 = 250.0;
+const SUB_H: f64 = 300.0;
 
-const META_X: f64 = 30.0;
-const META_Y: f64 = 60.0;
-const META_W: f64 = 270.0;
-const META_H: f64 = 460.0;
+// Centre: the pitch (vertical, our goal at the bottom).
+const PITCH_X: f64 = 300.0;
+const PITCH_Y: f64 = 56.0;
+const PITCH_W: f64 = 540.0;
+const PITCH_H: f64 = 616.0;
 
-// 7 position layout on the pitch (4-2-1 / 2-3-1 youth diamond-ish).
-// Coordinates relative to PITCH origin in [0, 1].
-const POSITION_RELATIVE: [(f64, f64); 7] = [
-    (0.5, 0.95),  // A: GK (back)
-    (0.18, 0.72), // B: LB
-    (0.82, 0.72), // C: RB
-    (0.5, 0.55),  // D: CB / sweeper
-    (0.27, 0.30), // E: LM
-    (0.73, 0.30), // F: RM
-    (0.5, 0.10),  // G: ST
-];
+// Right: the bench (resting players).
+const BENCH_X: f64 = 864.0;
+const BENCH_Y: f64 = 56.0;
+const BENCH_W: f64 = 312.0;
+const BENCH_H: f64 = 616.0;
 
-const COLOR_PITCH: &str = "#16a34a"; // grass
-const COLOR_LINE: &str = "#ffffff";
-const COLOR_PLAYER_FIELD: &str = "#1d4ed8";
-const COLOR_PLAYER_BENCH: &str = "#94a3b8";
+const COLOR_PITCH: &str = "#15803d"; // grass
+const COLOR_PITCH_STRIPE: &str = "#16a34a";
+const COLOR_LINE: &str = "#e8fff0";
+const COLOR_PLAYER_FIELD: &str = "#2563eb";
+const COLOR_PLAYER_GK: &str = "#f59e0b";
+const COLOR_PLAYER_BENCH: &str = "#64748b";
+const COLOR_IN: &str = "#22c55e"; // subbed on
+const COLOR_OUT: &str = "#ef4444"; // subbed off
 const COLOR_GOAL_US: &str = "#facc15";
 const COLOR_GOAL_THEM: &str = "#dc2626";
 
@@ -57,6 +63,9 @@ const COLOR_GOAL_THEM: &str = "#dc2626";
 pub struct SoccerProblem {
     pub num_positions: usize,
     pub num_periods: f64,
+    /// Full formation row sizes, GK row first (`[1, 3, 2, 1]`); sums to
+    /// `num_positions`. Empty falls back to a single centred line.
+    pub formation: Vec<usize>,
     pub player_names: Option<Vec<String>>,
     pub position_names: Option<Vec<String>>,
 }
@@ -73,10 +82,24 @@ pub struct SoccerFrameInput<'a> {
     pub t: f64,
     /// Period index (0-based).
     pub period: f64,
-    /// `positions[pos] = playerId`.
+    /// Total game minutes (for the minute display).
+    pub total_minutes: f64,
+    /// `positions[pos] = playerId` for the current period.
     pub positions: Vec<usize>,
-    /// `bench[i] = playerId`.
+    /// `bench[i] = playerId` for the current period.
     pub bench: Vec<usize>,
+    /// The previous arrangement, used as the start point for substitution
+    /// motion. Equal to the current arrangement on settled frames.
+    pub prev_positions: Vec<usize>,
+    pub prev_bench: Vec<usize>,
+    /// 0 → at the previous arrangement, 1 → settled at the current one.
+    pub transition: f64,
+    /// Player ids that came on at this period's boundary (highlight green).
+    pub entered: Vec<usize>,
+    /// Player ids that went off at this period's boundary (highlight red).
+    pub left: Vec<usize>,
+    /// `(out, in)` swap pairs at the most recent boundary, for the sub log.
+    pub recent_subs: Vec<(usize, usize)>,
     pub goals_for: f64,
     pub goals_against: f64,
     /// Average affinity in [0, 1].
@@ -87,20 +110,124 @@ pub struct SoccerFrameInput<'a> {
 }
 
 fn player_name(names: &Option<Vec<String>>, player_id: usize) -> String {
-    // `playerNames[playerId] ?? `P${playerId}``.
     names
         .as_ref()
         .and_then(|n| n.get(player_id))
         .cloned()
-        .unwrap_or_else(|| format!("P{player_id}"))
+        .unwrap_or_else(|| format!("Player{}", player_id + 1))
+}
+
+fn lerp(a: f64, b: f64, alpha: f64) -> f64 {
+    a + (b - a) * alpha
+}
+
+/// Absolute pitch coordinate for position index `pos` under `formation`
+/// (GK row first). GK sits near the bottom touchline, the attack near the top.
+fn field_slot(formation: &[usize], pos: usize) -> (f64, f64) {
+    if formation.is_empty() {
+        return (PITCH_X + PITCH_W * 0.5, PITCH_Y + PITCH_H * 0.5);
+    }
+    let mut idx = pos;
+    let mut row = 0usize;
+    let mut col = 0usize;
+    let mut row_len = formation[0];
+    for (r, &n) in formation.iter().enumerate() {
+        if idx < n {
+            row = r;
+            col = idx;
+            row_len = n;
+            break;
+        }
+        idx -= n;
+    }
+    let rows = formation.len();
+    let yf = if rows <= 1 {
+        0.5
+    } else {
+        0.90 - (row as f64 / (rows as f64 - 1.0)) * 0.80
+    };
+    let xf = (col as f64 + 1.0) / (row_len as f64 + 1.0);
+    (PITCH_X + xf * PITCH_W, PITCH_Y + yf * PITCH_H)
+}
+
+/// Absolute coordinate for the `i`-th bench player when `count` are benched.
+/// Up to six in one column, more spill into a second column.
+fn bench_slot(i: usize, count: usize) -> (f64, f64) {
+    let count = count.max(1);
+    let cols = if count > 6 { 2 } else { 1 };
+    let per_col = (count + cols - 1) / cols;
+    let per_col = per_col.max(1);
+    let col = i / per_col;
+    let row = i % per_col;
+    let cell_w = BENCH_W / cols as f64;
+    let x = BENCH_X + cell_w * col as f64 + cell_w * 0.5 - 36.0;
+    let top = BENCH_Y + 50.0;
+    let avail = BENCH_H - 64.0;
+    let step = avail / per_col as f64;
+    let y = top + step * row as f64 + step * 0.5;
+    (x, y)
+}
+
+/// `coords[playerId] = (x, y, is_on_field)` for an arrangement.
+fn arrangement_coords(
+    formation: &[usize],
+    positions: &[usize],
+    bench: &[usize],
+) -> Vec<(f64, f64, bool)> {
+    let total = positions.len() + bench.len();
+    let mut out = vec![(PITCH_X + PITCH_W * 0.5, PITCH_Y + PITCH_H * 0.5, false); total];
+    for (pos, &pid) in positions.iter().enumerate() {
+        if pid < total {
+            let (x, y) = field_slot(formation, pos);
+            out[pid] = (x, y, true);
+        }
+    }
+    let bn = bench.len();
+    for (i, &pid) in bench.iter().enumerate() {
+        if pid < total {
+            let (x, y) = bench_slot(i, bn);
+            out[pid] = (x, y, false);
+        }
+    }
+    out
+}
+
+fn text(x: f64, y: f64, s: impl Into<String>, size: f64, fill: &str, anchor: Anchor) -> Shape {
+    Shape::Text(TextShape {
+        x,
+        y,
+        text: s.into(),
+        font_size: Some(size),
+        fill: Some(fill.to_string()),
+        anchor: Some(anchor),
+        ..Default::default()
+    })
+}
+
+fn text_bold(x: f64, y: f64, s: impl Into<String>, size: f64, fill: &str, anchor: Anchor) -> Shape {
+    Shape::Text(TextShape {
+        x,
+        y,
+        text: s.into(),
+        font_size: Some(size),
+        fill: Some(fill.to_string()),
+        anchor: Some(anchor),
+        font_weight: Some(FontWeight::Bold),
+        ..Default::default()
+    })
 }
 
 pub fn build_soccer_frame(_t: f64, _tick: f64, input: &SoccerFrameInput) -> FrameParts {
     let mut shapes: Vec<Shape> = Vec::new();
     let player_names = &input.problem.player_names;
     let position_names = &input.problem.position_names;
+    let formation = if input.problem.formation.is_empty() {
+        vec![input.problem.num_positions]
+    } else {
+        input.problem.formation.clone()
+    };
 
-    // Side panel: scoreboard, period, affinity bar.
+    // ── Left panel: scoreboard / period / affinity. ─────────────────────────
     shapes.push(Shape::Rect(RectShape {
         x: META_X,
         y: META_Y,
@@ -109,117 +236,107 @@ pub fn build_soccer_frame(_t: f64, _tick: f64, input: &SoccerFrameInput) -> Fram
         fill: "#0f172a".to_string(),
         stroke: Some("#334155".to_string()),
         stroke_width: Some(1.0),
+        rx: Some(8.0),
         ..Default::default()
     }));
-    shapes.push(Shape::Text(TextShape {
-        x: META_X + META_W / 2.0,
-        y: META_Y + 36.0,
-        text: "7v7 Match".to_string(),
-        font_size: Some(22.0),
-        fill: Some("#f1f5f9".to_string()),
-        anchor: Some(Anchor::Middle),
-        font_weight: Some(FontWeight::Bold),
-        ..Default::default()
-    }));
-    shapes.push(Shape::Text(TextShape {
-        x: META_X + META_W / 2.0,
-        y: META_Y + 70.0,
-        text: format!(
+    shapes.push(text_bold(
+        META_X + META_W / 2.0,
+        META_Y + 34.0,
+        format!("{}-a-side", input.problem.num_positions),
+        22.0,
+        "#f1f5f9",
+        Anchor::Middle,
+    ));
+    shapes.push(text(
+        META_X + META_W / 2.0,
+        META_Y + 62.0,
+        format!(
             "Period {} / {}",
             js_num(input.period + 1.0),
             js_num(input.problem.num_periods)
         ),
-        font_size: Some(16.0),
-        fill: Some("#cbd5e1".to_string()),
-        anchor: Some(Anchor::Middle),
-        ..Default::default()
-    }));
-    shapes.push(Shape::Text(TextShape {
-        x: META_X + META_W / 2.0,
-        y: META_Y + 110.0,
-        text: format!(
+        15.0,
+        "#cbd5e1",
+        Anchor::Middle,
+    ));
+    shapes.push(text(
+        META_X + META_W / 2.0,
+        META_Y + 84.0,
+        format!(
             "Minute {} / {}",
             js_num(input.t),
-            js_num(input.problem.num_periods * 20.0)
+            js_num(input.total_minutes)
         ),
-        font_size: Some(14.0),
-        fill: Some("#94a3b8".to_string()),
-        anchor: Some(Anchor::Middle),
-        ..Default::default()
-    }));
+        13.0,
+        "#94a3b8",
+        Anchor::Middle,
+    ));
     // Score.
-    shapes.push(Shape::Text(TextShape {
-        x: META_X + META_W / 2.0,
-        y: META_Y + 170.0,
-        text: format!(
+    shapes.push(text_bold(
+        META_X + META_W / 2.0,
+        META_Y + 134.0,
+        format!(
             "Us  {}  \u{2014}  {}  Them",
             js_num(input.goals_for),
             js_num(input.goals_against)
         ),
-        font_size: Some(26.0),
-        fill: Some("#fde68a".to_string()),
-        anchor: Some(Anchor::Middle),
-        font_weight: Some(FontWeight::Bold),
-        ..Default::default()
-    }));
-    // Goal flash (last-tick event).
+        24.0,
+        "#fde68a",
+        Anchor::Middle,
+    ));
     if input.goal_this_tick == Some(GoalSide::Us) {
         shapes.push(Shape::Rect(RectShape {
-            x: META_X + 30.0,
-            y: META_Y + 200.0,
-            w: META_W - 60.0,
-            h: 30.0,
+            x: META_X + 40.0,
+            y: META_Y + 150.0,
+            w: META_W - 80.0,
+            h: 28.0,
             fill: COLOR_GOAL_US.to_string(),
-            opacity: Some(0.9),
+            opacity: Some(0.95),
             rx: Some(6.0),
             ..Default::default()
         }));
-        shapes.push(Shape::Text(TextShape {
-            x: META_X + META_W / 2.0,
-            y: META_Y + 222.0,
-            text: "GOAL!".to_string(),
-            font_size: Some(18.0),
-            fill: Some("#000".to_string()),
-            anchor: Some(Anchor::Middle),
-            font_weight: Some(FontWeight::Bold),
-            ..Default::default()
-        }));
+        shapes.push(text_bold(
+            META_X + META_W / 2.0,
+            META_Y + 170.0,
+            "GOAL!",
+            17.0,
+            "#1f2937",
+            Anchor::Middle,
+        ));
     } else if input.goal_this_tick == Some(GoalSide::Them) {
         shapes.push(Shape::Rect(RectShape {
-            x: META_X + 30.0,
-            y: META_Y + 200.0,
-            w: META_W - 60.0,
-            h: 30.0,
+            x: META_X + 40.0,
+            y: META_Y + 150.0,
+            w: META_W - 80.0,
+            h: 28.0,
             fill: COLOR_GOAL_THEM.to_string(),
-            opacity: Some(0.9),
+            opacity: Some(0.95),
             rx: Some(6.0),
             ..Default::default()
         }));
-        shapes.push(Shape::Text(TextShape {
-            x: META_X + META_W / 2.0,
-            y: META_Y + 222.0,
-            text: "CONCEDED".to_string(),
-            font_size: Some(16.0),
-            fill: Some("#fff".to_string()),
-            anchor: Some(Anchor::Middle),
-            font_weight: Some(FontWeight::Bold),
-            ..Default::default()
-        }));
+        shapes.push(text_bold(
+            META_X + META_W / 2.0,
+            META_Y + 170.0,
+            "CONCEDED",
+            15.0,
+            "#fff",
+            Anchor::Middle,
+        ));
     }
     // Affinity bar.
-    shapes.push(Shape::Text(TextShape {
-        x: META_X + 16.0,
-        y: META_Y + 280.0,
-        text: "On-field avg affinity".to_string(),
-        font_size: Some(12.0),
-        fill: Some("#94a3b8".to_string()),
-        ..Default::default()
-    }));
+    shapes.push(text(
+        META_X + 16.0,
+        META_Y + 214.0,
+        "On-field avg affinity",
+        12.0,
+        "#94a3b8",
+        Anchor::Start,
+    ));
     shapes.push(Shape::Rect(RectShape {
         x: META_X + 16.0,
-        y: META_Y + 290.0,
+        y: META_Y + 224.0,
         w: META_W - 32.0,
-        h: 14.0,
+        h: 16.0,
         fill: "#334155".to_string(),
         stroke: Some("#475569".to_string()),
         stroke_width: Some(1.0),
@@ -228,38 +345,90 @@ pub fn build_soccer_frame(_t: f64, _tick: f64, input: &SoccerFrameInput) -> Fram
     }));
     shapes.push(Shape::Rect(RectShape {
         x: META_X + 16.0,
-        y: META_Y + 290.0,
-        w: (META_W - 32.0) * 0.0_f64.max(1.0_f64.min(input.affinity_now)),
-        h: 14.0,
+        y: META_Y + 224.0,
+        w: (META_W - 32.0) * input.affinity_now.clamp(0.0, 1.0),
+        h: 16.0,
         fill: "#22d3ee".to_string(),
         rx: Some(3.0),
         ..Default::default()
     }));
-    shapes.push(Shape::Text(TextShape {
-        x: META_X + META_W - 16.0,
-        y: META_Y + 320.0,
-        text: format!("{}%", to_fixed(input.affinity_now * 100.0, 0)),
-        font_size: Some(11.0),
-        fill: Some("#94a3b8".to_string()),
-        anchor: Some(Anchor::End),
+    shapes.push(text(
+        META_X + META_W - 16.0,
+        META_Y + 262.0,
+        format!("{}%", to_fixed(input.affinity_now * 100.0, 0)),
+        12.0,
+        "#cbd5e1",
+        Anchor::End,
+    ));
+
+    // ── Left panel (bottom): substitution log. ──────────────────────────────
+    shapes.push(Shape::Rect(RectShape {
+        x: SUB_X,
+        y: SUB_Y,
+        w: SUB_W,
+        h: SUB_H,
+        fill: "#0f172a".to_string(),
+        stroke: Some("#334155".to_string()),
+        stroke_width: Some(1.0),
+        rx: Some(8.0),
         ..Default::default()
     }));
-
-    // Period boundary watermark.
-    if input.t % 20.0 == 0.0 && input.t > 0.0 {
-        shapes.push(Shape::Text(TextShape {
-            x: META_X + META_W / 2.0,
-            y: META_Y + 380.0,
-            text: "\u{27f3} SUB WINDOW".to_string(),
-            font_size: Some(18.0),
-            fill: Some("#fbbf24".to_string()),
-            anchor: Some(Anchor::Middle),
-            font_weight: Some(FontWeight::Bold),
-            ..Default::default()
-        }));
+    shapes.push(text_bold(
+        SUB_X + SUB_W / 2.0,
+        SUB_Y + 28.0,
+        "SUBSTITUTIONS",
+        14.0,
+        "#fde68a",
+        Anchor::Middle,
+    ));
+    shapes.push(text(
+        SUB_X + SUB_W / 2.0,
+        SUB_Y + 48.0,
+        format!("period {}", js_num(input.period + 1.0)),
+        12.0,
+        "#94a3b8",
+        Anchor::Middle,
+    ));
+    if input.recent_subs.is_empty() {
+        shapes.push(text(
+            SUB_X + SUB_W / 2.0,
+            SUB_Y + 96.0,
+            "kick-off lineup",
+            13.0,
+            "#cbd5e1",
+            Anchor::Middle,
+        ));
+    } else {
+        for (i, &(out_p, in_p)) in input.recent_subs.iter().take(8).enumerate() {
+            let y = SUB_Y + 78.0 + i as f64 * 26.0;
+            shapes.push(text(
+                SUB_X + 16.0,
+                y,
+                player_name(player_names, out_p),
+                12.0,
+                COLOR_OUT,
+                Anchor::Start,
+            ));
+            shapes.push(text(
+                SUB_X + SUB_W / 2.0 + 6.0,
+                y,
+                "\u{2192}",
+                12.0,
+                "#cbd5e1",
+                Anchor::Middle,
+            ));
+            shapes.push(text(
+                SUB_X + SUB_W - 16.0,
+                y,
+                player_name(player_names, in_p),
+                12.0,
+                COLOR_IN,
+                Anchor::End,
+            ));
+        }
     }
 
-    // Pitch.
+    // ── Pitch. ───────────────────────────────────────────────────────────────
     shapes.push(Shape::Rect(RectShape {
         x: PITCH_X,
         y: PITCH_Y,
@@ -270,7 +439,22 @@ pub fn build_soccer_frame(_t: f64, _tick: f64, input: &SoccerFrameInput) -> Fram
         stroke_width: Some(2.0),
         ..Default::default()
     }));
-    // Halfway line.
+    // Mowing stripes.
+    let stripes = 8;
+    for s in 0..stripes {
+        if s % 2 == 1 {
+            shapes.push(Shape::Rect(RectShape {
+                x: PITCH_X,
+                y: PITCH_Y + PITCH_H / stripes as f64 * s as f64,
+                w: PITCH_W,
+                h: PITCH_H / stripes as f64,
+                fill: COLOR_PITCH_STRIPE.to_string(),
+                opacity: Some(0.55),
+                ..Default::default()
+            }));
+        }
+    }
+    // Halfway line + centre circle.
     shapes.push(Shape::Line(LineShape {
         x1: PITCH_X,
         y1: PITCH_Y + PITCH_H / 2.0,
@@ -280,150 +464,167 @@ pub fn build_soccer_frame(_t: f64, _tick: f64, input: &SoccerFrameInput) -> Fram
         stroke_width: Some(2.0),
         ..Default::default()
     }));
-    // Centre circle.
     shapes.push(Shape::Circle(CircleShape {
         x: PITCH_X + PITCH_W / 2.0,
         y: PITCH_Y + PITCH_H / 2.0,
-        r: 50.0,
+        r: 54.0,
         fill: "none".to_string(),
         stroke: Some(COLOR_LINE.to_string()),
         stroke_width: Some(2.0),
         ..Default::default()
     }));
-    // Penalty boxes (top + bottom).
-    shapes.push(Shape::Rect(RectShape {
-        x: PITCH_X + PITCH_W / 2.0 - 90.0,
-        y: PITCH_Y,
-        w: 180.0,
-        h: 70.0,
-        fill: "none".to_string(),
-        stroke: Some(COLOR_LINE.to_string()),
-        stroke_width: Some(2.0),
-        ..Default::default()
-    }));
-    shapes.push(Shape::Rect(RectShape {
-        x: PITCH_X + PITCH_W / 2.0 - 90.0,
-        y: PITCH_Y + PITCH_H - 70.0,
-        w: 180.0,
-        h: 70.0,
-        fill: "none".to_string(),
-        stroke: Some(COLOR_LINE.to_string()),
-        stroke_width: Some(2.0),
-        ..Default::default()
-    }));
-    // Goals.
-    shapes.push(Shape::Rect(RectShape {
-        x: PITCH_X + PITCH_W / 2.0 - 30.0,
-        y: PITCH_Y - 8.0,
-        w: 60.0,
-        h: 8.0,
-        fill: COLOR_LINE.to_string(),
-        ..Default::default()
-    }));
-    shapes.push(Shape::Rect(RectShape {
-        x: PITCH_X + PITCH_W / 2.0 - 30.0,
-        y: PITCH_Y + PITCH_H,
-        w: 60.0,
-        h: 8.0,
-        fill: COLOR_LINE.to_string(),
-        ..Default::default()
-    }));
-
-    // Players on the pitch.
-    for pos in 0..input.problem.num_positions {
-        let slot = POSITION_RELATIVE
-            .get(pos)
-            .copied()
-            .unwrap_or(POSITION_RELATIVE[0]);
-        let cx = PITCH_X + slot.0 * PITCH_W;
-        let cy = PITCH_Y + slot.1 * PITCH_H;
-        let player_id = input.positions[pos];
-        let name = player_name(player_names, player_id);
-        let pos_name = position_names
-            .as_ref()
-            .and_then(|p| p.get(pos))
-            .cloned()
-            .unwrap_or_else(|| pos.to_string());
-        shapes.push(Shape::Circle(CircleShape {
-            x: cx,
-            y: cy,
-            r: 22.0,
-            fill: COLOR_PLAYER_FIELD.to_string(),
-            stroke: Some("#fff".to_string()),
+    // Penalty boxes + goals (top = opponent, bottom = ours).
+    for (by, gy) in [
+        (PITCH_Y, PITCH_Y - 8.0),
+        (PITCH_Y + PITCH_H - 80.0, PITCH_Y + PITCH_H),
+    ] {
+        shapes.push(Shape::Rect(RectShape {
+            x: PITCH_X + PITCH_W / 2.0 - 100.0,
+            y: by,
+            w: 200.0,
+            h: 80.0,
+            fill: "none".to_string(),
+            stroke: Some(COLOR_LINE.to_string()),
             stroke_width: Some(2.0),
-            title: Some(format!("{name}  @  position {pos_name}")),
             ..Default::default()
         }));
-        shapes.push(Shape::Text(TextShape {
-            x: cx,
-            y: cy + 5.0,
-            text: name,
-            font_size: Some(12.0),
-            fill: Some("#fff".to_string()),
-            anchor: Some(Anchor::Middle),
-            font_weight: Some(FontWeight::Bold),
-            ..Default::default()
-        }));
-        let pos_label = position_names
-            .as_ref()
-            .and_then(|p| p.get(pos))
-            .cloned()
-            .unwrap_or_else(|| "?".to_string());
-        shapes.push(Shape::Text(TextShape {
-            x: cx,
-            y: cy - 28.0,
-            text: pos_label,
-            font_size: Some(11.0),
-            fill: Some("#fde68a".to_string()),
-            anchor: Some(Anchor::Middle),
-            font_weight: Some(FontWeight::Bold),
+        shapes.push(Shape::Rect(RectShape {
+            x: PITCH_X + PITCH_W / 2.0 - 34.0,
+            y: gy,
+            w: 68.0,
+            h: 8.0,
+            fill: COLOR_LINE.to_string(),
             ..Default::default()
         }));
     }
 
-    // Bench.
+    // ── Bench zone. ───────────────────────────────────────────────────────────
     shapes.push(Shape::Rect(RectShape {
         x: BENCH_X,
         y: BENCH_Y,
         w: BENCH_W,
-        h: BENCH_ROW_H * input.bench.len() as f64 + 40.0,
+        h: BENCH_H,
         fill: "#0f172a".to_string(),
         stroke: Some("#334155".to_string()),
         stroke_width: Some(1.0),
-        rx: Some(6.0),
+        rx: Some(8.0),
         ..Default::default()
     }));
-    shapes.push(Shape::Text(TextShape {
-        x: BENCH_X + BENCH_W / 2.0,
-        y: BENCH_Y + 26.0,
-        text: "BENCH".to_string(),
-        font_size: Some(14.0),
-        fill: Some("#fde68a".to_string()),
-        anchor: Some(Anchor::Middle),
-        font_weight: Some(FontWeight::Bold),
-        ..Default::default()
-    }));
-    for (i, &player_id) in input.bench.iter().enumerate() {
-        let name = player_name(player_names, player_id);
-        let y = BENCH_Y + 40.0 + i as f64 * BENCH_ROW_H;
+    shapes.push(text_bold(
+        BENCH_X + BENCH_W / 2.0,
+        BENCH_Y + 28.0,
+        format!("BENCH  ({} resting)", input.bench.len()),
+        14.0,
+        "#fde68a",
+        Anchor::Middle,
+    ));
+
+    // ── Players (one circle each, interpolated between arrangements). ─────────
+    let alpha = input.transition.clamp(0.0, 1.0);
+    let cur = arrangement_coords(&formation, &input.positions, &input.bench);
+    let prev = if alpha >= 1.0 {
+        cur.clone()
+    } else {
+        arrangement_coords(&formation, &input.prev_positions, &input.prev_bench)
+    };
+    let gk_player = input.positions.first().copied();
+    let total = cur.len();
+
+    for pid in 0..total {
+        let (cx, cy, on_field) = cur[pid];
+        let (px, py, _) = prev.get(pid).copied().unwrap_or((cx, cy, on_field));
+        let x = lerp(px, cx, alpha);
+        let y = lerp(py, cy, alpha);
+        let is_entering = input.entered.contains(&pid);
+        let is_leaving = input.left.contains(&pid);
+
+        let (base_fill, r) = if on_field {
+            if gk_player == Some(pid) {
+                (COLOR_PLAYER_GK, 21.0)
+            } else {
+                (COLOR_PLAYER_FIELD, 21.0)
+            }
+        } else {
+            (COLOR_PLAYER_BENCH, 16.0)
+        };
+        let (stroke, sw) = if is_entering {
+            (COLOR_IN, 4.0)
+        } else if is_leaving {
+            (COLOR_OUT, 4.0)
+        } else {
+            ("#ffffff", 2.0)
+        };
+
         shapes.push(Shape::Circle(CircleShape {
-            x: BENCH_X + BENCH_W / 2.0 - 30.0,
-            y: y + BENCH_ROW_H / 2.0,
-            r: 18.0,
-            fill: COLOR_PLAYER_BENCH.to_string(),
-            stroke: Some("#94a3b8".to_string()),
+            x,
+            y,
+            r,
+            fill: base_fill.to_string(),
+            stroke: Some(stroke.to_string()),
+            stroke_width: Some(sw),
+            title: Some(player_name(player_names, pid)),
             ..Default::default()
         }));
-        shapes.push(Shape::Text(TextShape {
-            x: BENCH_X + BENCH_W / 2.0 - 30.0,
-            y: y + BENCH_ROW_H / 2.0 + 4.0,
-            text: name,
-            font_size: Some(11.0),
-            fill: Some("#0f172a".to_string()),
-            anchor: Some(Anchor::Middle),
-            font_weight: Some(FontWeight::Bold),
-            ..Default::default()
-        }));
+        // Jersey number.
+        shapes.push(text_bold(
+            x,
+            y + 5.0,
+            format!("{}", pid + 1),
+            if on_field { 15.0 } else { 12.0 },
+            "#ffffff",
+            Anchor::Middle,
+        ));
+
+        if on_field {
+            // Position label above, name below.
+            let pos_idx = input.positions.iter().position(|&q| q == pid);
+            if let Some(pi) = pos_idx {
+                let label = position_names
+                    .as_ref()
+                    .and_then(|p| p.get(pi))
+                    .cloned()
+                    .unwrap_or_else(|| pi.to_string());
+                shapes.push(text_bold(
+                    x,
+                    y - r - 6.0,
+                    label,
+                    11.0,
+                    "#fde68a",
+                    Anchor::Middle,
+                ));
+            }
+            shapes.push(text_bold(
+                x,
+                y + r + 14.0,
+                player_name(player_names, pid),
+                10.0,
+                "#f8fafc",
+                Anchor::Middle,
+            ));
+            if is_entering {
+                shapes.push(text_bold(x + r + 4.0, y - r, "\u{25B2} IN", 10.0, COLOR_IN, Anchor::Start));
+            }
+        } else {
+            // Name to the right of the bench jersey.
+            shapes.push(text(
+                x + r + 8.0,
+                y - 2.0,
+                player_name(player_names, pid),
+                12.0,
+                "#e2e8f0",
+                Anchor::Start,
+            ));
+            if is_leaving {
+                shapes.push(text_bold(
+                    x + r + 8.0,
+                    y + 13.0,
+                    "OUT",
+                    10.0,
+                    COLOR_OUT,
+                    Anchor::Start,
+                ));
+            }
+        }
     }
 
     let caption = format!(
@@ -437,19 +638,22 @@ pub fn build_soccer_frame(_t: f64, _tick: f64, input: &SoccerFrameInput) -> Fram
     FrameParts::with_caption(shapes, caption)
 }
 
-/// Build companion charts: per-tick affinity and cumulative goal differential.
+/// Build companion charts: per-tick affinity and cumulative goal differential,
+/// laid out along the bottom of the stage.
 pub fn build_soccer_charts(
     ts: &[f64],
     affinity: &[f64],
     goals_for: &[f64],
     goals_against: &[f64],
 ) -> Vec<ChartSpec> {
+    let chart_y = 688.0;
+    let chart_h = 60.0;
     vec![
         ChartSpec {
             x: META_X,
-            y: META_Y + META_H + 20.0,
-            w: META_W,
-            h: 100.0,
+            y: chart_y,
+            w: 560.0,
+            h: chart_h,
             title: Some("On-field avg affinity".to_string()),
             y_min: Some(0.0),
             y_max: Some(1.0),
@@ -462,10 +666,10 @@ pub fn build_soccer_charts(
             ..Default::default()
         },
         ChartSpec {
-            x: PITCH_X,
-            y: PITCH_Y + PITCH_H + 20.0,
-            w: PITCH_W,
-            h: 100.0,
+            x: 616.0,
+            y: chart_y,
+            w: 560.0,
+            h: chart_h,
             title: Some("Cumulative goals".to_string()),
             series: vec![
                 ChartSeries {
@@ -490,46 +694,91 @@ pub fn build_soccer_charts(
 mod tests {
     use super::*;
 
-    #[test]
-    fn frame_caption_shows_score_and_affinity() {
-        let problem = SoccerProblem {
+    fn problem() -> SoccerProblem {
+        SoccerProblem {
             num_positions: 7,
             num_periods: 4.0,
-            player_names: Some((0..14).map(|i| format!("Kid{i}")).collect()),
-            position_names: Some(vec![
-                "GK".into(),
-                "LB".into(),
-                "RB".into(),
-                "CB".into(),
-                "LM".into(),
-                "RM".into(),
-                "ST".into(),
-            ]),
-        };
+            formation: vec![1, 2, 3, 1],
+            player_names: Some((0..13).map(|i| format!("Player{}", i + 1)).collect()),
+            position_names: Some(
+                ["GK", "LB", "RB", "LM", "CM", "RM", "ST"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            ),
+        }
+    }
+
+    #[test]
+    fn frame_caption_shows_score_and_affinity() {
         let input = SoccerFrameInput {
             t: 20.0,
             period: 0.0,
+            total_minutes: 40.0,
             positions: vec![0, 1, 2, 3, 4, 5, 6],
-            bench: vec![7, 8, 9],
+            bench: vec![7, 8, 9, 10, 11, 12],
+            prev_positions: vec![0, 1, 2, 3, 4, 5, 6],
+            prev_bench: vec![7, 8, 9, 10, 11, 12],
+            transition: 1.0,
+            entered: vec![],
+            left: vec![],
+            recent_subs: vec![],
             goals_for: 2.0,
             goals_against: 1.0,
             affinity_now: 0.75,
             goal_this_tick: Some(GoalSide::Us),
-            problem: &problem,
+            problem: &problem(),
         };
         let fp = build_soccer_frame(0.0, 0.0, &input);
         assert_eq!(
             fp.caption.as_deref(),
             Some("t=20min  P1  Us 2-1 Them  affinity 75%")
         );
-        // Goal flash + sub-window watermark present.
         assert!(fp
             .shapes
             .iter()
             .any(|s| matches!(s, Shape::Text(t) if t.text == "GOAL!")));
+        // Every player (on field + bench) is drawn with their name.
         assert!(fp
             .shapes
             .iter()
-            .any(|s| matches!(s, Shape::Text(t) if t.text.contains("SUB WINDOW"))));
+            .any(|s| matches!(s, Shape::Text(t) if t.text == "Player1")));
+        assert!(fp
+            .shapes
+            .iter()
+            .any(|s| matches!(s, Shape::Text(t) if t.text == "Player13")));
+    }
+
+    #[test]
+    fn entering_player_is_highlighted_green() {
+        let p = problem();
+        let input = SoccerFrameInput {
+            t: 10.0,
+            period: 1.0,
+            total_minutes: 40.0,
+            positions: vec![0, 7, 2, 3, 4, 5, 6],
+            bench: vec![1, 8, 9, 10, 11, 12],
+            prev_positions: vec![0, 1, 2, 3, 4, 5, 6],
+            prev_bench: vec![7, 8, 9, 10, 11, 12],
+            transition: 0.5,
+            entered: vec![7],
+            left: vec![1],
+            recent_subs: vec![(1, 7)],
+            goals_for: 0.0,
+            goals_against: 0.0,
+            affinity_now: 0.5,
+            goal_this_tick: None,
+            problem: &p,
+        };
+        let fp = build_soccer_frame(0.0, 0.0, &input);
+        // The incoming player gets a green-stroked jersey.
+        assert!(fp.shapes.iter().any(
+            |s| matches!(s, Shape::Circle(c) if c.stroke.as_deref() == Some(COLOR_IN))
+        ));
+        // The sub log shows the swap arrow.
+        assert!(fp
+            .shapes
+            .iter()
+            .any(|s| matches!(s, Shape::Text(t) if t.text == "\u{2192}")));
     }
 }

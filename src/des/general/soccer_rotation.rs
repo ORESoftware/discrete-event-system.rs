@@ -122,7 +122,7 @@ pub fn build_sample_soccer_problem(opts: &AffinityBuilderOptions) -> SoccerProbl
 
     let mut player_names: Vec<String> = Vec::new();
     for p in 0..num_players {
-        player_names.push(format!("P{}", p + 1));
+        player_names.push(format!("Player{}", p + 1));
     }
     let mut position_names: Vec<String> = Vec::new();
     let letters: Vec<char> = "ABCDEFGHIJKLMN".chars().collect();
@@ -188,6 +188,121 @@ pub fn build_sample_soccer_problem(opts: &AffinityBuilderOptions) -> SoccerProbl
         player_names: Some(player_names),
         position_names: Some(position_names),
     }
+}
+
+// =============================================================================
+// FORMATIONS
+// =============================================================================
+//
+// A formation is the list of *outfield* lines from defence to attack (e.g.
+// `[3, 2, 1]` for "3-2-1"), excluding the keeper. The full on-field shape used
+// by the animation/labels is the formation with a 1-slot GK row prepended
+// (`[1, 3, 2, 1]`), whose row sizes sum to `num_positions`. These helpers are
+// shared by `main_soccer_rotation` (to pick `num_positions` + label positions)
+// and the pitch scene (to lay players out in rows).
+
+/// Parse a `"3-2-1"` / `"4-4-2"` style outfield formation (GK excluded). Returns
+/// `None` if the string is empty, has a zero/garbage line, or no lines.
+pub fn parse_outfield_formation(s: &str) -> Option<Vec<usize>> {
+    let rows: Vec<usize> = s
+        .split(['-', ',', ' '])
+        .filter(|p| !p.trim().is_empty())
+        .map(|p| p.trim().parse::<usize>().ok())
+        .collect::<Option<Vec<usize>>>()?;
+    if rows.is_empty() || rows.iter().any(|&n| n == 0) {
+        return None;
+    }
+    Some(rows)
+}
+
+/// A sensible default outfield formation (GK excluded) for a given on-field size
+/// (the *total* number of positions including the keeper). Real youth/adult
+/// shapes where they exist, otherwise an even defence/mid/attack split.
+pub fn default_outfield_formation(num_positions: usize) -> Vec<usize> {
+    match num_positions {
+        0 | 1 => vec![],          // GK only (degenerate)
+        2 => vec![1],             // GK + 1
+        3 => vec![1, 1],          // 3v3
+        4 => vec![2, 1],          // 4v4
+        5 => vec![2, 2],          // 5v5
+        6 => vec![2, 2, 1],       // 6v6
+        7 => vec![2, 3, 1],       // 7v7 (classic 2-3-1)
+        8 => vec![3, 3, 1],       // 8v8
+        9 => vec![3, 4, 1],       // 9v9 (this is where a literal 3-4-1 lives)
+        10 => vec![4, 4, 1],      // 10-a-side
+        11 => vec![4, 4, 2],      // 11v11
+        n => {
+            // Generic: split the outfield (n-1) into D/M/F as evenly as
+            // possible, attack getting the remainder-light line.
+            let out = n - 1;
+            let d = (out + 1) / 3;
+            let f = out / 3;
+            let m = out - d - f;
+            vec![d, m, f].into_iter().filter(|&x| x > 0).collect()
+        }
+    }
+}
+
+/// Prepend the 1-slot GK row to an outfield formation. The result's row sizes
+/// sum to `num_positions`.
+pub fn formation_with_gk(outfield: &[usize]) -> Vec<usize> {
+    let mut rows = Vec::with_capacity(outfield.len() + 1);
+    rows.push(1);
+    rows.extend_from_slice(outfield);
+    rows
+}
+
+/// Human-readable position labels (`GK`, `LB`, `CM`, `ST`, …) for a full
+/// formation (GK row first). `formation` row sizes must sum to the number of
+/// positions; the returned vector has exactly that many labels, in position
+/// order (GK, then each line left→right).
+pub fn formation_position_names(formation: &[usize]) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    let outfield_rows = formation.len().saturating_sub(1);
+    for (r, &n) in formation.iter().enumerate() {
+        if r == 0 {
+            names.push("GK".to_string());
+            continue;
+        }
+        // Role suffix by line depth: first outfield line = defence (B),
+        // last = forward (F), the rest = midfield (M).
+        let role = if outfield_rows == 1 {
+            'M'
+        } else if r == 1 {
+            'B'
+        } else if r == outfield_rows {
+            'F'
+        } else {
+            'M'
+        };
+        for c in 0..n {
+            names.push(position_label(side_prefix(c, n), role, n));
+        }
+    }
+    names
+}
+
+/// Left/centre/right (or numbered) prefix for column `c` of a line of width `n`.
+fn side_prefix(c: usize, n: usize) -> &'static str {
+    match n {
+        1 => "C",
+        2 => ["L", "R"][c.min(1)],
+        3 => ["L", "C", "R"][c.min(2)],
+        4 => ["L", "LC", "RC", "R"][c.min(3)],
+        _ => match c {
+            0 => "L",
+            x if x + 1 == n => "R",
+            _ => "C",
+        },
+    }
+}
+
+fn position_label(side: &str, role: char, n: usize) -> String {
+    // Lone forward reads "ST"; lone defender/mid keep their role letter.
+    if role == 'F' && n == 1 {
+        return "ST".to_string();
+    }
+    format!("{side}{role}")
 }
 
 // =============================================================================
@@ -1008,7 +1123,7 @@ pub fn build_soccer_ipmip(problem: &SoccerProblem) -> SoccerIPMIPModel {
             .as_ref()
             .and_then(|v| v.get(p))
             .cloned()
-            .unwrap_or_else(|| format!("P{}", p + 1))
+            .unwrap_or_else(|| format!("Player{}", p + 1))
     };
     let position_name = |pos: usize| {
         problem

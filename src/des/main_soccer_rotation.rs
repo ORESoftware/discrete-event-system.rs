@@ -22,12 +22,13 @@ use crate::des::animation::scenes::soccer_ipmip_solver_scene as solver_scene;
 use crate::des::animation::scenes::soccer_scene as scene;
 use crate::des::general::ip_mip_des::{ConcreteLpRelaxationAlgorithm, LpRelaxationAlgorithm};
 use crate::des::general::soccer_rotation::{
-    build_sample_soccer_problem, evaluate_schedule, evaluate_soccer_pomdp_features,
-    policy_greedy_hungarian, policy_ipmip_feasible, policy_lp_relaxed, policy_mdp_vi,
-    policy_mdp_vi_memoryless, policy_random_schedule, run_many_matches, simulate_match_des,
-    validate_schedule_structure, welch_t, AffinityBuilderOptions, GoalSide, GreedyHungarianOptions,
-    MatchAggregate, MatchSimOptions, Schedule, SoccerIPMIPPolicyOptions, SoccerIPMIPPolicyResult,
-    SoccerPOMDPFeatureOptions, SoccerProblem,
+    build_sample_soccer_problem, default_outfield_formation, evaluate_schedule,
+    evaluate_soccer_pomdp_features, formation_position_names, formation_with_gk,
+    parse_outfield_formation, policy_greedy_hungarian, policy_ipmip_feasible, policy_lp_relaxed,
+    policy_mdp_vi, policy_mdp_vi_memoryless, policy_random_schedule, run_many_matches,
+    simulate_match_des, validate_schedule_structure, welch_t, AffinityBuilderOptions, GoalSide,
+    GreedyHungarianOptions, MatchAggregate, MatchSimOptions, Schedule, SoccerIPMIPPolicyOptions,
+    SoccerIPMIPPolicyResult, SoccerPOMDPFeatureOptions, SoccerProblem,
 };
 
 // -----------------------------------------------------------------------------
@@ -221,6 +222,9 @@ struct SoccerRunDefaults {
     minutes_per_period: usize,
     max_consec_on_field: usize,
     policy: &'static str,
+    /// Default outfield formation (GK excluded), e.g. `"3-2-1"`. Empty → derive
+    /// a sensible default from `num_positions`. Overridden by `FORMATION` env.
+    formation: &'static str,
 }
 
 impl Default for SoccerRunDefaults {
@@ -233,6 +237,7 @@ impl Default for SoccerRunDefaults {
             minutes_per_period: 20,
             max_consec_on_field: 3,
             policy: "",
+            formation: "",
         }
     }
 }
@@ -256,6 +261,9 @@ pub fn run_anim() {
         minutes_per_period: 10,
         max_consec_on_field: 3,
         policy: "IP/MIP",
+        // 7-a-side with 3 at the back (GK + 3-2-1). Override with FORMATION=...
+        // (e.g. FORMATION=3-4-1 renders a 9-a-side shape).
+        formation: "3-2-1",
         ..SoccerRunDefaults::default()
     });
 }
@@ -277,8 +285,29 @@ fn run_with_defaults(defaults: &SoccerRunDefaults) {
     );
 
     // Roster / match shape (all overridable so the same model serves 11-, 12-,
-    // or 13-player squads, different match lengths, and a tunable stamina cap).
-    let num_positions = env_usize("NUM_POSITIONS", defaults.num_positions);
+    // or 13-player squads, different match lengths, formations, and a tunable
+    // stamina cap).
+    //
+    // Formation drives the on-field size: a `FORMATION` env (e.g. "3-4-1") or
+    // the per-run default is the *outfield* line-up (GK excluded); we prepend
+    // the keeper, and `num_positions` is the row-size sum. With neither set we
+    // derive a default formation for `NUM_POSITIONS` on-field players.
+    let formation_str = std::env::var("FORMATION")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| defaults.formation.to_string());
+    let outfield = if formation_str.trim().is_empty() {
+        let on_field = env_usize("NUM_POSITIONS", defaults.num_positions).max(2);
+        default_outfield_formation(on_field)
+    } else {
+        parse_outfield_formation(&formation_str).unwrap_or_else(|| {
+            default_outfield_formation(env_usize("NUM_POSITIONS", defaults.num_positions).max(2))
+        })
+    };
+    let formation = formation_with_gk(&outfield);
+    let num_positions = formation.iter().sum::<usize>();
+    let position_names = formation_position_names(&formation);
+
     let num_players = env_usize("NUM_PLAYERS", defaults.num_players).max(num_positions + 1);
     let num_periods = env_usize("NUM_PERIODS", defaults.num_periods).max(1);
     let minutes_per_period = env_usize("MINUTES_PER_PERIOD", defaults.minutes_per_period).max(1);
@@ -288,13 +317,16 @@ fn run_with_defaults(defaults: &SoccerRunDefaults) {
         m => Some(m),
     };
 
-    let problem = build_sample_soccer_problem(&AffinityBuilderOptions {
+    let mut problem = build_sample_soccer_problem(&AffinityBuilderOptions {
         num_players: Some(num_players),
         num_positions: Some(num_positions),
         num_periods: Some(num_periods),
         max_consecutive_on_field,
         seed: Some(seed),
     });
+    // Relabel positions with formation roles (GK / LB / CM / ST …) so the
+    // banner, audit and pitch all agree on what each slot is.
+    problem.position_names = Some(position_names);
     let match_opts = MatchSimOptions {
         minutes_per_period: Some(minutes_per_period),
         ..Default::default()
@@ -320,6 +352,19 @@ fn run_with_defaults(defaults: &SoccerRunDefaults) {
         problem.bench_size,
         problem.num_periods,
         minutes_per_period
+    );
+    println!(
+        "# formation: GK + {} ({})",
+        outfield
+            .iter()
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join("-"),
+        problem
+            .position_names
+            .as_ref()
+            .map(|n| n.join(" "))
+            .unwrap_or_default()
     );
     println!("# fairness constraint: no player benched two consecutive periods");
     match problem.max_consecutive_on_field {
@@ -664,10 +709,19 @@ fn run_with_defaults(defaults: &SoccerRunDefaults) {
             width: scene::STAGE_W,
             height: scene::STAGE_H,
             fps: Some(6.0),
-            title: Some(format!("7v7 — {}", best.policy_name)),
+            title: Some(format!(
+                "{}-a-side rotation — {}",
+                problem.num_positions, best.policy_name
+            )),
             subtitle: Some(format!(
-                "affinity {:.2}, goal diff {:.2}",
-                best.affinity_sum_deterministic, best.mean_goal_diff
+                "GK + {} · affinity {:.2}, goal diff {:.2}",
+                outfield
+                    .iter()
+                    .map(|n| n.to_string())
+                    .collect::<Vec<_>>()
+                    .join("-"),
+                best.affinity_sum_deterministic,
+                best.mean_goal_diff
             )),
             background: Some("#0b1220".to_string()),
             ..Default::default()
@@ -677,6 +731,7 @@ fn run_with_defaults(defaults: &SoccerRunDefaults) {
         let scene_problem = scene::SoccerProblem {
             num_positions: problem.num_positions,
             num_periods: problem.num_periods as f64,
+            formation: formation.clone(),
             player_names: problem.player_names.clone(),
             position_names: problem.position_names.clone(),
         };
@@ -689,14 +744,123 @@ fn run_with_defaults(defaults: &SoccerRunDefaults) {
                 ..Default::default()
             },
         );
+        // Per-period arrangements (who is on the field, who is on the bench).
+        let n_periods = problem.num_periods;
+        let mpp = minutes_per_period;
+        let total_minutes = (n_periods * mpp) as f64;
+        let arrangements: Vec<(Vec<usize>, Vec<usize>)> = (0..n_periods)
+            .map(|t| {
+                let pos: Vec<usize> = best.schedule.assignment[t]
+                    .iter()
+                    .map(|&x| x as usize)
+                    .collect();
+                (pos, best.schedule.bench[t].clone())
+            })
+            .collect();
+
+        // Per-period substitution deltas (vs the previous period). Period 0 is
+        // the kick-off lineup (everyone "enters" from the bench).
+        let mut entered_p: Vec<Vec<usize>> = vec![Vec::new(); n_periods];
+        let mut left_p: Vec<Vec<usize>> = vec![Vec::new(); n_periods];
+        let mut subs_p: Vec<Vec<(usize, usize)>> = vec![Vec::new(); n_periods];
+        if n_periods > 0 {
+            entered_p[0] = arrangements[0].0.clone();
+        }
+        for t in 1..n_periods {
+            let prev_on: std::collections::HashSet<usize> =
+                arrangements[t - 1].0.iter().copied().collect();
+            let cur_on: std::collections::HashSet<usize> =
+                arrangements[t].0.iter().copied().collect();
+            let entered: Vec<usize> = arrangements[t]
+                .0
+                .iter()
+                .copied()
+                .filter(|p| !prev_on.contains(p))
+                .collect();
+            let left: Vec<usize> = arrangements[t - 1]
+                .0
+                .iter()
+                .copied()
+                .filter(|p| !cur_on.contains(p))
+                .collect();
+            subs_p[t] = left
+                .iter()
+                .zip(entered.iter())
+                .map(|(&o, &i)| (o, i))
+                .collect();
+            entered_p[t] = entered;
+            left_p[t] = left;
+        }
+
+        let all_on_bench: Vec<usize> = (0..problem.num_players).collect();
+        let trans_steps = 5usize; // walk-on/off interpolation frames per boundary
+
         let mut ts: Vec<f64> = Vec::new();
         let mut affs: Vec<f64> = Vec::new();
         let mut g_fs: Vec<f64> = Vec::new();
         let mut g_as: Vec<f64> = Vec::new();
-        for (i, tr) in m.trace.iter().enumerate() {
+        let mut tick = 0.0_f64;
+        let sp = &scene_problem;
+
+        for tr in m.trace.iter() {
+            let minute = tr.t;
+            let period = tr.period;
+            let (cur_pos, cur_bench) = &arrangements[period];
+
+            // Substitution / kick-off walk-on frames at each period boundary.
+            if minute % mpp == 0 {
+                let (prev_pos, prev_bench) = if period == 0 {
+                    (Vec::new(), all_on_bench.clone())
+                } else {
+                    arrangements[period - 1].clone()
+                };
+                for k in 0..trans_steps {
+                    let alpha = (k as f64 + 1.0) / (trans_steps as f64 + 1.0);
+                    let i_f = tick;
+                    tick += 1.0;
+                    let cur_pos_c = cur_pos.clone();
+                    let cur_bench_c = cur_bench.clone();
+                    let prev_pos_c = prev_pos.clone();
+                    let prev_bench_c = prev_bench.clone();
+                    let entered_c = entered_p[period].clone();
+                    let left_c = left_p[period].clone();
+                    let subs_c = subs_p[period].clone();
+                    let gf = tr.goals_for_cum as f64;
+                    let ga = tr.goals_against_cum as f64;
+                    let aff = tr.affinity_now;
+                    let t_f = minute as f64;
+                    let period_f = period as f64;
+                    rec.frame(t_f, i_f, || {
+                        scene::build_soccer_frame(
+                            t_f,
+                            i_f,
+                            &scene::SoccerFrameInput {
+                                t: t_f,
+                                period: period_f,
+                                total_minutes,
+                                positions: cur_pos_c,
+                                bench: cur_bench_c,
+                                prev_positions: prev_pos_c,
+                                prev_bench: prev_bench_c,
+                                transition: alpha,
+                                entered: entered_c,
+                                left: left_c,
+                                recent_subs: subs_c,
+                                goals_for: gf,
+                                goals_against: ga,
+                                affinity_now: aff,
+                                goal_this_tick: None,
+                                problem: sp,
+                            },
+                        )
+                    });
+                }
+            }
+
+            // Settled minute frame.
             let mut goal_this_tick: Option<scene::GoalSide> = None;
             for ev in &m.goal_events {
-                if ev.t == tr.t {
+                if ev.t == minute {
                     goal_this_tick = Some(match ev.side {
                         GoalSide::Us => scene::GoalSide::Us,
                         GoalSide::Them => scene::GoalSide::Them,
@@ -704,19 +868,23 @@ fn run_with_defaults(defaults: &SoccerRunDefaults) {
                     break;
                 }
             }
-            ts.push(tr.t as f64);
+            ts.push(minute as f64);
             affs.push(tr.affinity_now);
             g_fs.push(tr.goals_for_cum as f64);
             g_as.push(tr.goals_against_cum as f64);
-            let positions: Vec<usize> = tr.positions.iter().map(|&x| x as usize).collect();
-            let bench: Vec<usize> = tr.bench.clone();
-            let t_f = tr.t as f64;
-            let i_f = i as f64;
-            let period_f = tr.period as f64;
+
+            let i_f = tick;
+            tick += 1.0;
+            let cur_pos_c = cur_pos.clone();
+            let cur_bench_c = cur_bench.clone();
+            let entered_c = entered_p[period].clone();
+            let left_c = left_p[period].clone();
+            let subs_c = subs_p[period].clone();
             let gf = tr.goals_for_cum as f64;
             let ga = tr.goals_against_cum as f64;
             let aff = tr.affinity_now;
-            let sp = &scene_problem;
+            let t_f = minute as f64;
+            let period_f = period as f64;
             rec.frame(t_f, i_f, || {
                 scene::build_soccer_frame(
                     t_f,
@@ -724,8 +892,15 @@ fn run_with_defaults(defaults: &SoccerRunDefaults) {
                     &scene::SoccerFrameInput {
                         t: t_f,
                         period: period_f,
-                        positions,
-                        bench,
+                        total_minutes,
+                        positions: cur_pos_c.clone(),
+                        bench: cur_bench_c.clone(),
+                        prev_positions: cur_pos_c,
+                        prev_bench: cur_bench_c,
+                        transition: 1.0,
+                        entered: entered_c,
+                        left: left_c,
+                        recent_subs: subs_c,
                         goals_for: gf,
                         goals_against: ga,
                         affinity_now: aff,

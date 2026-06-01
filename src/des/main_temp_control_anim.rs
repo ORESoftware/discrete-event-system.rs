@@ -25,7 +25,7 @@ use crate::des::general::temp_control::{
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Scenario {
+pub enum Scenario {
     Winter,
     HeatCool,
 }
@@ -216,7 +216,19 @@ fn build_config(scenario: Scenario, controller: ControllerSpec) -> SimConfig {
 
 /// Entry point (`main()` in the TS source).
 pub fn run() {
-    let args = parse_args();
+    run_with(parse_args());
+}
+
+/// Run a preset scenario to a fixed output path (used by the site builder).
+pub fn run_preset(scenario: Scenario, out: &str) {
+    run_with(Args {
+        controller: "pid".to_string(),
+        out: out.to_string(),
+        scenario,
+    });
+}
+
+fn run_with(args: Args) {
     let cfg = build_config(
         args.scenario,
         controller_spec(&args.controller, args.scenario),

@@ -28,7 +28,8 @@ Two layers:
   `runner.rs` (`run_iterative_des`), `visual_block.rs` (`VisualBlock`, a visual
   wrapper over `CompositeDESStation` that renders SVG specs), `transform_entity.rs`
   (`PureTransformEntity`/`MemoryTransformEntity` — functions as graph nodes),
-  and the template-method optimizer bases `single_state_optimizer.rs`,
+  `visual_solver.rs` (**shared `IterativeSolver` trait** + `source → solver → sink`
+  scaffold), and the template-method optimizer bases `single_state_optimizer.rs`,
   `population_optimizer.rs`, `learning_optimization.rs`.
 - **Model collections** (files in this folder) — each exposes `run_*` entry
   points returning a result with a trace + station topology (and often
@@ -37,12 +38,14 @@ Two layers:
   `learning_optimization_models.rs`, `math_blocks.rs` (calculus/control block
   diagrams as `VisualBlock`s), and `numerical_solver_models.rs`.
 
-`numerical_solver_models.rs` is the canonical example of the full pattern: a
-reusable `IterativeSolver` trait + a `VisualBlock`-composing `source → solver →
-sink` scaffold, with one model per family — `run_lbfgs` (L-BFGS), `run_sequence_alignment`
-(Needleman–Wunsch DP), `run_metropolis_hastings` (MCMC), `run_differential_evolution`,
-`run_prim_mst` (graph MST), `run_backprop_mlp`, `run_gaussian_mixture_em` (EM),
-and `run_mean_field_vi` (variational inference).
+`numerical_solver_models.rs` implements eight concrete solvers on the shared
+[`IterativeSolver`](des_base/visual_solver.rs) base in `des_base/visual_solver.rs`:
+a `VisualBlock`-composing `source → solver → sink` pipeline, one model per family —
+`run_lbfgs` (L-BFGS), `run_sequence_alignment` (Needleman–Wunsch DP),
+`run_metropolis_hastings` (MCMC), `run_differential_evolution`, `run_prim_mst`
+(graph MST), `run_backprop_mlp`, `run_gaussian_mixture_em` (EM), and
+`run_mean_field_vi` (variational inference). Animations and index cards are
+registered in `src/des/html_index.rs`; run `cargo run --bin main_build_site`.
 
 ## When to use
 
@@ -61,6 +64,8 @@ and `run_mean_field_vi` (variational inference).
 - `des_base/runner.rs` — `run_iterative_des`, `IterativeRunOptions`, `RunReason`.
 - `des_base/visual_block.rs` — `VisualBlock`, `visual_block_specs`, `VisualBlockSpec`.
 - `des_base/transform_entity.rs`, `../shared/transform.rs` — function-as-node.
+- `des_base/visual_solver.rs` — `IterativeSolver`, `SolverStation`, `run_visual_solver`,
+  `VisualSolverRun` (shared base for one-iter-per-tick algorithms).
 - `des_base/single_state_optimizer.rs`, `des_base/population_optimizer.rs`,
   `des_base/learning_optimization.rs` — reusable solver bases.
 - `numerical_solver_models.rs`, `*_optimization_models.rs`, `math_blocks.rs` —

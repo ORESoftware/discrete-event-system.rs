@@ -602,7 +602,14 @@ pub fn build_soccer_frame(_t: f64, _tick: f64, input: &SoccerFrameInput) -> Fram
                 Anchor::Middle,
             ));
             if is_entering {
-                shapes.push(text_bold(x + r + 4.0, y - r, "\u{25B2} IN", 10.0, COLOR_IN, Anchor::Start));
+                shapes.push(text_bold(
+                    x + r + 4.0,
+                    y - r,
+                    "\u{25B2} IN",
+                    10.0,
+                    COLOR_IN,
+                    Anchor::Start,
+                ));
             }
         } else {
             // Name to the right of the bench jersey.
@@ -772,9 +779,10 @@ mod tests {
         };
         let fp = build_soccer_frame(0.0, 0.0, &input);
         // The incoming player gets a green-stroked jersey.
-        assert!(fp.shapes.iter().any(
-            |s| matches!(s, Shape::Circle(c) if c.stroke.as_deref() == Some(COLOR_IN))
-        ));
+        assert!(fp
+            .shapes
+            .iter()
+            .any(|s| matches!(s, Shape::Circle(c) if c.stroke.as_deref() == Some(COLOR_IN))));
         // The sub log shows the swap arrow.
         assert!(fp
             .shapes

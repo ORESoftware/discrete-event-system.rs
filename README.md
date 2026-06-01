@@ -368,6 +368,22 @@ catalogue demos may print to stdout and use process-local simulation state, run
 them serially from a server worker instead of launching multiple catalogue demos
 inside the same process at once.
 
+### Supply-chain optimization coverage
+
+The supply-chain stack is represented across the `des::general` modules rather
+than as one monolithic planner:
+
+| Technique | Crate coverage |
+| --- | --- |
+| Inventory control and dynamic programming | `inventory_dp`, `multistage_stochastic`, `main_inventory_mdp`, `main_newsvendor` |
+| Forecasting and state estimation | `nonlinear_forecasting_model`, `kalman_filter`, stochastic SDE/control reports |
+| LP and interior-point methods | `lp`, `lp_des`, `des_lp_bridge`; use `LP_SOLVER=internal-ipm` for the native primal-dual IPM or `scipy:highs-ipm` for SciPy HiGHS IPM |
+| Mixed-integer optimization | `milp_bnb`, `ip_mip_des` |
+| Network flow and transportation | `max_flow`, `network_flow`, `traffic_flow`, `stochastic_flow_mdp` |
+| Vehicle routing and routing heuristics | `classical_optimization_models` VRP savings and nearest-neighbor runs |
+| Stochastic optimization and simulation | `stochastic_lp`, `statistical_optimization`, `fel`, `hybrid`, catalogue simulations |
+| Model predictive control and reinforcement learning | `mpc_double_integrator`, `temp_control` MPC, `qlearning_des`, `ppo_des`, `actor_critic_gridworld` |
+
 ## Reports And Artifacts
 
 The SDK has two related output styles:

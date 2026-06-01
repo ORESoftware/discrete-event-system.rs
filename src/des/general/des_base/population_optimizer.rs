@@ -240,6 +240,11 @@ pub trait PopulationOptimizer<I: Clone + 'static>: DESStation {
 
     fn initial_population(&self, size: usize, rng: &mut dyn RandomSource) -> Vec<I>;
     fn evaluate(&self, individual: &I) -> f64;
+    /// Score a batch of individuals. The default preserves scalar semantics,
+    /// while algorithms with shared matrix/GPU work can override this hook.
+    fn evaluate_population(&self, population: &[I]) -> Vec<f64> {
+        population.iter().map(|x| self.evaluate(x)).collect()
+    }
     /// Pick parents (≥ 1) for one offspring.
     fn select(&self, pop: &[I], fitness: &[f64], rng: &mut dyn RandomSource) -> Vec<I>;
     /// Combine parents into a child (GA crossover / PSO or DE update / …).
@@ -304,7 +309,15 @@ pub trait PopulationOptimizer<I: Clone + 'static>: DESStation {
                 pop_size
             );
         }
-        let fitness: Vec<f64> = population.iter().map(|x| self.evaluate(x)).collect();
+        let fitness: Vec<f64> = self.evaluate_population(&population);
+        if fitness.len() != population.len() {
+            panic!(
+                "{}: evaluate_population returned {} fitnesses for {} individuals",
+                self.id(),
+                fitness.len(),
+                population.len()
+            );
+        }
         for (i, f) in fitness.iter().enumerate() {
             if !f.is_finite() {
                 panic!(
@@ -383,6 +396,7 @@ pub trait PopulationOptimizer<I: Clone + 'static>: DESStation {
                 new_fit.push(entry.0);
             }
         }
+        let first_child_index = new_pop.len();
         let retry_budget = self.child_retry_limit().max(1);
         let mut rng = self.opt_state_mut().rng.take().expect("rng already in use");
         while new_pop.len() < pop_size {
@@ -408,11 +422,19 @@ pub trait PopulationOptimizer<I: Clone + 'static>: DESStation {
             if !accepted {
                 self.on_child_rejected(&child, retry_budget);
             }
-            let fit = self.evaluate(&child);
             new_pop.push(child);
-            new_fit.push(fit);
         }
         self.opt_state_mut().rng = Some(rng);
+        let child_fit = self.evaluate_population(&new_pop[first_child_index..]);
+        if child_fit.len() != new_pop.len() - first_child_index {
+            panic!(
+                "{}: evaluate_population returned {} child fitnesses for {} children",
+                self.id(),
+                child_fit.len(),
+                new_pop.len() - first_child_index
+            );
+        }
+        new_fit.extend(child_fit);
         {
             let st = self.opt_state_mut();
             st.population = new_pop;

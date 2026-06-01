@@ -36,348 +36,21 @@
 
 #![allow(dead_code)]
 
-use std::any::Any;
-use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::rc::Rc;
 
 use super::des_base::preconditions::{Check, Preconditions};
-use super::des_base::runner::{run_iterative_des, IterativeRunOptions};
-use super::des_base::station::{AnyToken, DESStation, StationCore, StationRef};
-use super::des_base::visual_block::{
-    visual_block_specs, VisualBlock, VisualBlockOptions, VisualBlockPortSpec, VisualBlockRole,
-    VisualBlockSpec, VisualBlockStyle, VisualPortInput,
-};
+use super::des_base::visual_block::VisualBlockSpec;
+use super::des_base::visual_solver::run_visual_solver;
+
+pub use super::des_base::visual_solver::{IterativeSolver, VisualSolverRun};
 use super::prng::mulberry32;
 use crate::des::shared::capabilities::RandomSource;
 use crate::des::shared::transform::Transform;
-
-/// Channel carrying the one-shot solve-start token.
-const CH_START: &str = "start";
-/// Channel carrying the terminal result token.
-const CH_RESULT: &str = "result";
 
 /// `throw` on a failed precondition (fatal invariant violation).
 fn require(check: Check) {
     if let Err(e) = check {
         panic!("{e}");
-    }
-}
-
-// =============================================================================
-// Visual solver scaffold
-// =============================================================================
-
-/// The one required hook for a model: advance the algorithm by one iteration.
-///
-/// The owning [`SolverStation`] calls [`step`](IterativeSolver::step) once per
-/// tick until it returns `false` (converged / done) or `max_iters` is reached,
-/// then snapshots [`result`](IterativeSolver::result).
-pub trait IterativeSolver {
-    /// The reduced result this solver produces.
-    type Output: Clone + 'static;
-
-    /// Hard cap on iterations (also bounds the DES tick budget).
-    fn max_iters(&self) -> usize;
-
-    /// Run a single iteration. Return `true` to keep iterating, `false` to stop
-    /// early (converged). `iter` is the 0-based iteration index.
-    fn step(&mut self, iter: usize) -> bool;
-
-    /// Reduce the terminal solver state to its public result.
-    fn result(&self) -> Self::Output;
-}
-
-/// Marker token emitted by the source to kick off a solve.
-struct SolverStartToken;
-
-/// Terminal token carrying the solver's reduced result.
-struct SolverResultToken<R> {
-    result: R,
-}
-
-/// Build the standard light-blue solver style.
-fn solver_style() -> VisualBlockStyle {
-    VisualBlockStyle {
-        fill: Some("#eff6ff".to_string()),
-        stroke: Some("#1d4ed8".to_string()),
-        text: Some("#0f172a".to_string()),
-    }
-}
-
-/// A source [`VisualBlock`] that emits a single [`SolverStartToken`] once.
-struct SolverSourceBlock {
-    visual: VisualBlock,
-    emitted: bool,
-}
-
-impl SolverSourceBlock {
-    fn new(id: &str) -> Self {
-        let visual = VisualBlock::source(
-            id,
-            vec![VisualPortInput::from(CH_START)],
-            VisualBlockOptions {
-                kind: Some("solver-source".to_string()),
-                label: Some("start".to_string()),
-                style: Some(solver_style()),
-                ..Default::default()
-            },
-        );
-        SolverSourceBlock {
-            visual,
-            emitted: false,
-        }
-    }
-
-    fn visual(&self) -> &VisualBlock {
-        &self.visual
-    }
-}
-
-impl DESStation for SolverSourceBlock {
-    fn core(&self) -> &StationCore {
-        self.visual.core()
-    }
-    fn core_mut(&mut self) -> &mut StationCore {
-        self.visual.core_mut()
-    }
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-    fn has_work(&self) -> bool {
-        !self.emitted
-    }
-    fn run_time_step(&mut self) {
-        if self.emitted {
-            return;
-        }
-        let token: AnyToken = Rc::new(SolverStartToken);
-        self.visual.core_mut().emit(token, CH_START);
-        self.emitted = true;
-    }
-}
-
-/// The iterative solver station: composes a [`VisualBlock`] and runs one
-/// [`IterativeSolver::step`] per tick once a start token arrives.
-struct SolverStation<S: IterativeSolver> {
-    visual: VisualBlock,
-    solver: S,
-    started: bool,
-    iter: usize,
-    finished: bool,
-    result_emitted: bool,
-}
-
-impl<S: IterativeSolver + 'static> SolverStation<S> {
-    fn new(id: &str, kind: &str, label: &str, solver: S) -> Self {
-        let visual = VisualBlock::new(
-            id,
-            VisualBlockOptions {
-                kind: Some(kind.to_string()),
-                role: Some(VisualBlockRole::Transform),
-                label: Some(label.to_string()),
-                ports: Some(VisualBlockPortSpec {
-                    inputs: vec![VisualPortInput::from(CH_START)],
-                    outputs: vec![VisualPortInput::from(CH_RESULT)],
-                }),
-                style: Some(solver_style()),
-                ..Default::default()
-            },
-        );
-        SolverStation {
-            visual,
-            solver,
-            started: false,
-            iter: 0,
-            finished: false,
-            result_emitted: false,
-        }
-    }
-
-    fn visual(&self) -> &VisualBlock {
-        &self.visual
-    }
-}
-
-impl<S: IterativeSolver + 'static> DESStation for SolverStation<S> {
-    fn core(&self) -> &StationCore {
-        self.visual.core()
-    }
-    fn core_mut(&mut self) -> &mut StationCore {
-        self.visual.core_mut()
-    }
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-    fn has_work(&self) -> bool {
-        if !self.started {
-            return self.visual.core().inbox_size(CH_START) > 0;
-        }
-        !self.result_emitted
-    }
-    fn run_time_step(&mut self) {
-        if !self.started {
-            let starts = self.visual.core_mut().drain::<SolverStartToken>(CH_START);
-            if starts.is_empty() {
-                return;
-            }
-            self.started = true;
-            return;
-        }
-        if !self.finished {
-            if self.iter >= self.solver.max_iters() {
-                self.finished = true;
-            } else {
-                let keep_going = self.solver.step(self.iter);
-                self.iter += 1;
-                if !keep_going || self.iter >= self.solver.max_iters() {
-                    self.finished = true;
-                }
-            }
-        }
-        if self.finished && !self.result_emitted {
-            let result = self.solver.result();
-            let token: AnyToken = Rc::new(SolverResultToken { result });
-            self.visual.core_mut().emit(token, CH_RESULT);
-            self.result_emitted = true;
-        }
-    }
-}
-
-/// A sink [`VisualBlock`] that keeps the latest [`SolverResultToken`].
-struct SolverSinkBlock<R: Clone + 'static> {
-    visual: VisualBlock,
-    latest: Option<R>,
-}
-
-impl<R: Clone + 'static> SolverSinkBlock<R> {
-    fn new(id: &str) -> Self {
-        let visual = VisualBlock::sink(
-            id,
-            vec![VisualPortInput::from(CH_RESULT)],
-            VisualBlockOptions {
-                kind: Some("solver-sink".to_string()),
-                label: Some("result".to_string()),
-                style: Some(solver_style()),
-                ..Default::default()
-            },
-        );
-        SolverSinkBlock {
-            visual,
-            latest: None,
-        }
-    }
-
-    fn visual(&self) -> &VisualBlock {
-        &self.visual
-    }
-}
-
-impl<R: Clone + 'static> DESStation for SolverSinkBlock<R> {
-    fn core(&self) -> &StationCore {
-        self.visual.core()
-    }
-    fn core_mut(&mut self) -> &mut StationCore {
-        self.visual.core_mut()
-    }
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-    fn has_work(&self) -> bool {
-        self.visual.core().inbox_size(CH_RESULT) > 0
-    }
-    fn run_time_step(&mut self) {
-        let tokens = self.visual.core_mut().drain::<SolverResultToken<R>>(CH_RESULT);
-        if let Some(last) = tokens.last() {
-            self.latest = Some(last.result.clone());
-        }
-    }
-}
-
-/// The outcome of driving a [`SolverStation`] through the visual DES pipeline.
-pub struct VisualSolverRun<R> {
-    /// The solver's reduced result.
-    pub result: R,
-    /// The three pipeline blocks rendered as visual-editor specs.
-    pub visual_blocks: Vec<VisualBlockSpec>,
-    /// Station ids, in `source → solver → sink` order.
-    pub topology: Vec<String>,
-    /// Iterations the solver actually executed.
-    pub iterations: usize,
-    /// Total DES ticks the run consumed.
-    pub ticks: usize,
-}
-
-/// Wire `source → solver → sink` (each a [`VisualBlock`]), drive the time-step
-/// loop, and harvest the result plus the visual specs.
-fn run_visual_solver<S>(base: &str, kind: &str, label: &str, solver: S) -> VisualSolverRun<S::Output>
-where
-    S: IterativeSolver + 'static,
-{
-    let max_iters = solver.max_iters();
-    let source = Rc::new(RefCell::new(SolverSourceBlock::new(&format!("{base}-source"))));
-    let station = Rc::new(RefCell::new(SolverStation::new(
-        &format!("{base}-solver"),
-        kind,
-        label,
-        solver,
-    )));
-    let sink = Rc::new(RefCell::new(SolverSinkBlock::<S::Output>::new(&format!(
-        "{base}-sink"
-    ))));
-
-    source
-        .borrow_mut()
-        .core_mut()
-        .pipe(station.clone() as StationRef, CH_START, CH_START);
-    station
-        .borrow_mut()
-        .core_mut()
-        .pipe(sink.clone() as StationRef, CH_RESULT, CH_RESULT);
-
-    // Budget: one tick to emit the start token, one to consume it, one per
-    // iteration, one to emit the result, plus slack for the sink to drain.
-    let summary = run_iterative_des(
-        vec![
-            source.clone() as StationRef,
-            station.clone() as StationRef,
-            sink.clone() as StationRef,
-        ],
-        IterativeRunOptions {
-            shuffle: false,
-            max_ticks: Some(max_iters + 8),
-            run_validators: false,
-            ..Default::default()
-        },
-    );
-
-    let result = sink
-        .borrow()
-        .latest
-        .clone()
-        .unwrap_or_else(|| panic!("{base}: solver produced no result"));
-    let iterations = station.borrow().iter;
-
-    let source_guard = source.borrow();
-    let station_guard = station.borrow();
-    let sink_guard = sink.borrow();
-    let visual_blocks = visual_block_specs(&[
-        source_guard.visual(),
-        station_guard.visual(),
-        sink_guard.visual(),
-    ]);
-    let topology = vec![
-        source_guard.visual().id(),
-        station_guard.visual().id(),
-        sink_guard.visual().id(),
-    ];
-
-    VisualSolverRun {
-        result,
-        visual_blocks,
-        topology,
-        iterations,
-        ticks: summary.ticks,
     }
 }
 
@@ -496,7 +169,13 @@ struct LbfgsSolver {
 }
 
 impl LbfgsSolver {
-    fn new(objective: SmoothObjective, x0: Vec<f64>, memory: usize, max_iters: usize, tol: f64) -> Self {
+    fn new(
+        objective: SmoothObjective,
+        x0: Vec<f64>,
+        memory: usize,
+        max_iters: usize,
+        tol: f64,
+    ) -> Self {
         let g = smooth_gradient(objective, &x0);
         let fval = smooth_value(objective, &x0);
         let gnorm = l2_norm(&g);
@@ -793,7 +472,10 @@ impl SequenceAlignmentSolver {
             let here = self.table[i][j];
             if i > 0
                 && j > 0
-                && (here - (self.table[i - 1][j - 1] + self.sub.transform((self.a[i - 1], self.b[j - 1])))).abs()
+                && (here
+                    - (self.table[i - 1][j - 1]
+                        + self.sub.transform((self.a[i - 1], self.b[j - 1]))))
+                .abs()
                     < 1e-9
             {
                 if self.a[i - 1] == self.b[j - 1] {
@@ -816,7 +498,12 @@ impl SequenceAlignmentSolver {
         out_a.reverse();
         out_b.reverse();
         let score = self.table[self.a.len()][self.b.len()];
-        (out_a.into_iter().collect(), out_b.into_iter().collect(), score, matches)
+        (
+            out_a.into_iter().collect(),
+            out_b.into_iter().collect(),
+            score,
+            matches,
+        )
     }
 }
 
@@ -836,7 +523,8 @@ impl IterativeSolver for SequenceAlignmentSolver {
         self.table[i][0] = i as f64 * self.gap;
         let mut row_best = self.table[i][0];
         for j in 1..=m {
-            let diag = self.table[i - 1][j - 1] + self.sub.transform((self.a[i - 1], self.b[j - 1]));
+            let diag =
+                self.table[i - 1][j - 1] + self.sub.transform((self.a[i - 1], self.b[j - 1]));
             let up = self.table[i - 1][j] + self.gap;
             let left = self.table[i][j - 1] + self.gap;
             let best = diag.max(up).max(left);
@@ -886,8 +574,16 @@ pub fn run_sequence_alignment(params: SequenceAlignmentParams) -> SequenceAlignm
     let b: Vec<char> = seq_b.chars().collect();
     require(Preconditions::non_empty("runSequenceAlignment", "seqA", &a));
     require(Preconditions::non_empty("runSequenceAlignment", "seqB", &b));
-    require(Preconditions::finite("runSequenceAlignment", "matchScore", match_score));
-    require(Preconditions::finite("runSequenceAlignment", "mismatch", mismatch));
+    require(Preconditions::finite(
+        "runSequenceAlignment",
+        "matchScore",
+        match_score,
+    ));
+    require(Preconditions::finite(
+        "runSequenceAlignment",
+        "mismatch",
+        mismatch,
+    ));
     require(Preconditions::finite("runSequenceAlignment", "gap", gap));
 
     let solver = SequenceAlignmentSolver::new(
@@ -899,7 +595,12 @@ pub fn run_sequence_alignment(params: SequenceAlignmentParams) -> SequenceAlignm
         },
         gap,
     );
-    let run = run_visual_solver("sequence-alignment", "needleman-wunsch", "Needleman–Wunsch", solver);
+    let run = run_visual_solver(
+        "sequence-alignment",
+        "needleman-wunsch",
+        "Needleman–Wunsch",
+        solver,
+    );
     let mut result = run.result;
     result.visual_blocks = run.visual_blocks;
     result.topology = run.topology;
@@ -1119,7 +820,12 @@ pub fn run_metropolis_hastings(params: MetropolisParams) -> MetropolisResult {
         burn_in,
         Box::new(mulberry32(seed)),
     );
-    let run = run_visual_solver("metropolis", "metropolis-hastings", "Metropolis–Hastings", solver);
+    let run = run_visual_solver(
+        "metropolis",
+        "metropolis-hastings",
+        "Metropolis–Hastings",
+        solver,
+    );
     let mut result = run.result;
     result.visual_blocks = run.visual_blocks;
     result.topology = run.topology;
@@ -1198,7 +904,10 @@ impl DifferentialEvolutionSolver {
                     .collect()
             })
             .collect();
-        let fitness: Vec<f64> = population.iter().map(|x| smooth_value(objective, x)).collect();
+        let fitness: Vec<f64> = population
+            .iter()
+            .map(|x| smooth_value(objective, x))
+            .collect();
         let (best_i, best_value) = argmin(&fitness);
         let best_x = population[best_i].clone();
         let mut solver = DifferentialEvolutionSolver {
@@ -1566,13 +1275,41 @@ pub fn run_prim_mst(params: PrimMSTParams) -> PrimMSTResult {
 
 fn default_graph_edges() -> Vec<GraphEdge> {
     vec![
-        GraphEdge { u: 0, v: 1, weight: 2.0 },
-        GraphEdge { u: 0, v: 3, weight: 6.0 },
-        GraphEdge { u: 1, v: 2, weight: 3.0 },
-        GraphEdge { u: 1, v: 3, weight: 8.0 },
-        GraphEdge { u: 1, v: 4, weight: 5.0 },
-        GraphEdge { u: 2, v: 4, weight: 7.0 },
-        GraphEdge { u: 3, v: 4, weight: 9.0 },
+        GraphEdge {
+            u: 0,
+            v: 1,
+            weight: 2.0,
+        },
+        GraphEdge {
+            u: 0,
+            v: 3,
+            weight: 6.0,
+        },
+        GraphEdge {
+            u: 1,
+            v: 2,
+            weight: 3.0,
+        },
+        GraphEdge {
+            u: 1,
+            v: 3,
+            weight: 8.0,
+        },
+        GraphEdge {
+            u: 1,
+            v: 4,
+            weight: 5.0,
+        },
+        GraphEdge {
+            u: 2,
+            v: 4,
+            weight: 7.0,
+        },
+        GraphEdge {
+            u: 3,
+            v: 4,
+            weight: 9.0,
+        },
     ]
 }
 
@@ -1781,7 +1518,13 @@ pub fn run_backprop_mlp(params: BackpropMlpParams) -> BackpropMlpResult {
             &s.x,
             input_dim,
         ));
-        require(Preconditions::in_range("runBackpropMlp", "y", s.y, 0.0, 1.0));
+        require(Preconditions::in_range(
+            "runBackpropMlp",
+            "y",
+            s.y,
+            0.0,
+            1.0,
+        ));
     }
     require(Preconditions::positive(
         "runBackpropMlp",
@@ -1813,10 +1556,22 @@ pub fn run_backprop_mlp(params: BackpropMlpParams) -> BackpropMlpResult {
 
 fn default_xor_samples() -> Vec<MlpSample> {
     vec![
-        MlpSample { x: vec![0.0, 0.0], y: 0.0 },
-        MlpSample { x: vec![0.0, 1.0], y: 1.0 },
-        MlpSample { x: vec![1.0, 0.0], y: 1.0 },
-        MlpSample { x: vec![1.0, 1.0], y: 0.0 },
+        MlpSample {
+            x: vec![0.0, 0.0],
+            y: 0.0,
+        },
+        MlpSample {
+            x: vec![0.0, 1.0],
+            y: 1.0,
+        },
+        MlpSample {
+            x: vec![1.0, 0.0],
+            y: 1.0,
+        },
+        MlpSample {
+            x: vec![1.0, 1.0],
+            y: 0.0,
+        },
     ]
 }
 
@@ -1977,7 +1732,11 @@ impl IterativeSolver for GaussianMixtureEMSolver {
             weights: self.weights.clone(),
             means: self.means.clone(),
             variances: self.variances.clone(),
-            log_likelihood: self.trace.last().map(|r| r.log_likelihood).unwrap_or(f64::NAN),
+            log_likelihood: self
+                .trace
+                .last()
+                .map(|r| r.log_likelihood)
+                .unwrap_or(f64::NAN),
             iterations: self.trace.len(),
             converged: self.converged,
             trace: self.trace.clone(),
@@ -1998,7 +1757,11 @@ pub fn run_gaussian_mixture_em(params: GaussianMixtureEMParams) -> GaussianMixtu
     let max_iters = params.max_iters.unwrap_or(200);
     let tolerance = params.tolerance.unwrap_or(1e-6);
 
-    require(Preconditions::all_finite("runGaussianMixtureEM", "data", &data));
+    require(Preconditions::all_finite(
+        "runGaussianMixtureEM",
+        "data",
+        &data,
+    ));
     require(Preconditions::integer_in_range(
         "runGaussianMixtureEM",
         "components",
@@ -2013,7 +1776,12 @@ pub fn run_gaussian_mixture_em(params: GaussianMixtureEMParams) -> GaussianMixtu
     ));
 
     let solver = GaussianMixtureEMSolver::new(data, components, max_iters, tolerance);
-    let run = run_visual_solver("gmm-em", "gaussian-mixture-em", "Gaussian Mixture EM", solver);
+    let run = run_visual_solver(
+        "gmm-em",
+        "gaussian-mixture-em",
+        "Gaussian Mixture EM",
+        solver,
+    );
     let mut result = run.result;
     result.visual_blocks = run.visual_blocks;
     result.topology = run.topology;
@@ -2196,7 +1964,11 @@ pub fn run_mean_field_vi(params: MeanFieldVIParams) -> MeanFieldVIResult {
     let tolerance = params.tolerance.unwrap_or(1e-9);
 
     require(Preconditions::all_finite("runMeanFieldVI", "data", &data));
-    require(Preconditions::positive("runMeanFieldVI", "priorPrecisionScale", lambda0));
+    require(Preconditions::positive(
+        "runMeanFieldVI",
+        "priorPrecisionScale",
+        lambda0,
+    ));
     require(Preconditions::positive("runMeanFieldVI", "priorShape", a0));
     require(Preconditions::positive("runMeanFieldVI", "priorRate", b0));
 
@@ -2333,7 +2105,11 @@ mod tests {
         let result = run_prim_mst(PrimMSTParams::default());
         assert!(result.connected);
         assert_eq!(result.mst_edges.len(), 4);
-        assert!((result.total_weight - 16.0).abs() < 1e-9, "weight = {}", result.total_weight);
+        assert!(
+            (result.total_weight - 16.0).abs() < 1e-9,
+            "weight = {}",
+            result.total_weight
+        );
         // Cumulative weight in the trace is non-decreasing and ends at the total.
         assert!((result.trace.last().unwrap().total_weight - 16.0).abs() < 1e-9);
         assert_eq!(result.visual_blocks.len(), 3);
@@ -2344,8 +2120,16 @@ mod tests {
         let result = run_prim_mst(PrimMSTParams {
             nodes: Some(4),
             edges: Some(vec![
-                GraphEdge { u: 0, v: 1, weight: 1.0 },
-                GraphEdge { u: 2, v: 3, weight: 1.0 },
+                GraphEdge {
+                    u: 0,
+                    v: 1,
+                    weight: 1.0,
+                },
+                GraphEdge {
+                    u: 2,
+                    v: 3,
+                    weight: 1.0,
+                },
             ]),
         });
         assert!(!result.connected);

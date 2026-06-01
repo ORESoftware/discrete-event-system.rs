@@ -4,6 +4,7 @@
 //! order (foundation first).
 
 pub mod general;
+pub mod html_index;
 pub mod shared;
 
 // Entity framework (queueing-network model). `abstract` is a reserved keyword,
@@ -114,6 +115,17 @@ pub mod exec;
 // a `pub fn run()`), plus the cluster/process scaffolding scripts. These mirror
 // the executable scripts under the TS `src/des/` root.
 pub mod child;
+// Checkpoint-precedence ordering: a token-level ordering enforcer. Tokens carry
+// a UUID stamp + monotonic seq and declare (by UUID reference) which other tokens
+// must clear a checkpoint before them; a gate station holds them in a BST keyed
+// by seq and releases them in the deterministic constraint-satisfying order.
+// Complements `fibonacci_scheduled` (node order). Additive (see its README).
+pub mod checkpoint_precedence;
+// Scheduler-enforced Fibonacci: an independent variant of
+// `main_fibonacci_recursion` whose per-tick execution order is derived from the
+// declared graph topology and validated by a `DeterministicScheduler`, instead
+// of resting on an implicit hand-ordered node list. Additive (see its README).
+pub mod fibonacci_scheduled;
 pub mod main;
 pub mod main_backpropagation;
 pub mod main_build_site;
@@ -132,6 +144,7 @@ pub mod main_empirical_control;
 pub mod main_empirical_control_report;
 pub mod main_epidemic;
 pub mod main_epidemic_improved;
+pub mod main_evolution_lab;
 pub mod main_factmachine;
 pub mod main_factmachine_markets;
 pub mod main_factory_floor_track3t;
@@ -152,6 +165,7 @@ pub mod main_monte_carlo_sim;
 pub mod main_network_mutex;
 pub mod main_neural_net;
 pub mod main_newsvendor;
+pub mod main_numerical_solver_anim;
 pub mod main_observability_controllability;
 pub mod main_observability_controllability_anim;
 pub mod main_optimization_as_des;

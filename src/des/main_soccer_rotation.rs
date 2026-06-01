@@ -312,10 +312,11 @@ fn run_with_defaults(defaults: &SoccerRunDefaults) {
     let num_periods = env_usize("NUM_PERIODS", defaults.num_periods).max(1);
     let minutes_per_period = env_usize("MINUTES_PER_PERIOD", defaults.minutes_per_period).max(1);
     // 0 (or unset-to-0) disables the stamina cap; default caps on-field runs at 3.
-    let max_consecutive_on_field = match env_usize("MAX_CONSEC_ON_FIELD", defaults.max_consec_on_field) {
-        0 => None,
-        m => Some(m),
-    };
+    let max_consecutive_on_field =
+        match env_usize("MAX_CONSEC_ON_FIELD", defaults.max_consec_on_field) {
+            0 => None,
+            m => Some(m),
+        };
 
     let mut problem = build_sample_soccer_problem(&AffinityBuilderOptions {
         num_players: Some(num_players),
@@ -645,9 +646,7 @@ fn run_with_defaults(defaults: &SoccerRunDefaults) {
                 flag
             );
         }
-        println!(
-            "#   (only the LP-relaxation and IP/MIP encode this rolling-window constraint;"
-        );
+        println!("#   (only the LP-relaxation and IP/MIP encode this rolling-window constraint;");
         println!(
             "#    the memoryless/greedy/1-step-MDP baselines cannot express it and may exceed it.)"
         );

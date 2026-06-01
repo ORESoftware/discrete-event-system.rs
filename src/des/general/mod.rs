@@ -21,6 +21,7 @@ pub mod quadrature;
 pub mod random_variables;
 pub mod value_iteration;
 
+pub mod evolution;
 pub mod genetic_tsp;
 pub mod incremental_lp;
 pub mod lp;

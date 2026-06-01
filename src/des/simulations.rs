@@ -79,7 +79,20 @@ pub fn simulation_catalogue() -> Vec<(&'static str, fn())> {
             "main_fibonacci_recursion",
             crate::des::main_fibonacci_recursion::run,
         ),
+        (
+            "main_fibonacci_scheduled",
+            crate::des::fibonacci_scheduled::run,
+        ),
+        (
+            "main_checkpoint_precedence",
+            crate::des::checkpoint_precedence::run,
+        ),
+        (
+            "main_task_build_order",
+            crate::des::checkpoint_precedence::task_dag::run,
+        ),
         ("main_from_json", crate::des::main_from_json::run),
+        ("main_evolution_lab", crate::des::main_evolution_lab::run),
         ("main_genetic_tsp", crate::des::main_genetic_tsp::run),
         (
             "main_hazard_function_survival_analysis",
@@ -104,6 +117,10 @@ pub fn simulation_catalogue() -> Vec<(&'static str, fn())> {
         ("main_network_mutex", crate::des::main_network_mutex::run),
         ("main_neural_net", crate::des::main_neural_net::run),
         ("main_newsvendor", crate::des::main_newsvendor::run),
+        (
+            "main_numerical_solver_anim",
+            crate::des::main_numerical_solver_anim::run,
+        ),
         (
             "main_observability_controllability",
             crate::des::main_observability_controllability::run,

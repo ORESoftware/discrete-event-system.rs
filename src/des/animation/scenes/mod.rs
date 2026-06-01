@@ -11,6 +11,7 @@ pub mod genetic_tsp_scene;
 pub mod incremental_lp_scene;
 pub mod neural_network_scene;
 pub mod newsvendor_scene;
+pub mod numerical_solver_scene;
 pub mod obs_ctrl_scene;
 pub mod shortest_path_scene;
 pub mod soccer_ipmip_solver_scene;

@@ -17,6 +17,7 @@ pub mod dispatch_test;
 pub mod domain_application_test;
 pub mod elevator_invariants_test;
 pub mod empirical_control_test;
+pub mod evolution_test;
 pub mod external_module_test;
 pub mod factmachine_markets_test;
 pub mod factmachine_math_test;

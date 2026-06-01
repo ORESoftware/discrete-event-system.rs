@@ -5,12 +5,15 @@
 //!   1. JSON-describable LP types (`LPProblem`, `LPSolution`, `LPStatus`).
 //!   2. A small in-process two-phase simplex (`InternalSimplexSolver` /
 //!      `solve_lp_internal`) — an educational fallback, NOT for large problems.
-//!   3. An external scipy.optimize.linprog dispatcher (`ExternalSolver` /
+//!   3. A small in-process primal-dual interior-point method
+//!      (`InternalInteriorPointSolver` / `solve_lp_internal_ipm`) for smooth
+//!      educational solves on medium-small dense LPs.
+//!   4. An external scipy.optimize.linprog dispatcher (`ExternalSolver` /
 //!      `solve_lp_external`) that shells out via `std::process::Command`.
-//!   4. `LPSolver` / `solve_lp`: selects a solver via the `LP_SOLVER` env var,
+//!   5. `LPSolver` / `solve_lp`: selects a solver via the `LP_SOLVER` env var,
 //!      falling back to the internal simplex if the external bridge is
 //!      unavailable (no python / no scipy / parse failure).
-//!   5. `LpPrinter` / `lp_to_string`: a human-readable pretty-printer.
+//!   6. `LpPrinter` / `lp_to_string`: a human-readable pretty-printer.
 //!
 //! Mapping notes vs. the TypeScript source:
 //!   * `class X extends PureTransform<I,O>` -> struct + `impl Transform`.
@@ -34,7 +37,7 @@
 
 use std::time::Instant;
 
-use crate::des::shared::linalg::{Matrix, Vector};
+use crate::des::shared::linalg::{LinearSystem, Matrix, Vector};
 use crate::des::shared::transform::Transform;
 
 // -----------------------------------------------------------------------------
@@ -540,6 +543,594 @@ pub fn solve_lp_internal(p: &LPProblem, opts: &InternalSimplexOptions) -> LPSolu
     run_internal_simplex(p, opts)
 }
 
+// -----------------------------------------------------------------------------
+// In-process primal-dual interior-point method.
+// -----------------------------------------------------------------------------
+
+/// Configuration for the dense internal primal-dual interior-point method.
+///
+/// This is intentionally small and dependency-free: it is useful for DES-native
+/// demos, parity checks, and modest LPs where shelling out to SciPy would be
+/// awkward. Large production LPs should still use a dedicated solver.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct InternalInteriorPointOptions {
+    /// Maximum Newton iterations. Default 100.
+    pub max_iter: Option<usize>,
+    /// KKT residual / complementarity tolerance. Default 1e-8.
+    pub tol: Option<f64>,
+    /// Fraction-to-boundary multiplier for primal/dual steps. Default 0.995.
+    pub step_fraction: Option<f64>,
+    /// Diagonal regularization added to the normal equations. Default 1e-10.
+    pub regularization: Option<f64>,
+}
+
+#[derive(Clone, Debug)]
+struct StandardInteriorLp {
+    q: Vec<f64>,
+    a: Matrix,
+    b: Vector,
+    shifts: Vec<f64>,
+    y_index_of_pos: Vec<usize>,
+    free_neg: Vec<isize>,
+    original_c: Vec<f64>,
+    original_n: usize,
+    ny: usize,
+}
+
+fn empty_lp_solution(
+    status: LPStatus,
+    solver: &str,
+    t0: Instant,
+    message: impl Into<Option<String>>,
+) -> LPSolution {
+    LPSolution {
+        status,
+        x: Vec::new(),
+        objective: if status == LPStatus::Unbounded {
+            f64::INFINITY
+        } else {
+            f64::NAN
+        },
+        dual_ub: None,
+        dual_eq: None,
+        reduced_costs: None,
+        iters: None,
+        solver: solver.to_string(),
+        elapsed_ms: ms_since(t0),
+        message: message.into(),
+    }
+}
+
+fn standardize_for_interior_point(
+    p: &LPProblem,
+    tol: f64,
+    t0: Instant,
+) -> Result<StandardInteriorLp, LPSolution> {
+    let n = p.c.len();
+    let a_ub: &[Vec<f64>] = p.a_ub.as_deref().unwrap_or(&[]);
+    let b_ub: &[f64] = p.b_ub.as_deref().unwrap_or(&[]);
+    let a_eq: &[Vec<f64>] = p.a_eq.as_deref().unwrap_or(&[]);
+    let b_eq: &[f64] = p.b_eq.as_deref().unwrap_or(&[]);
+    if a_ub.len() != b_ub.len() {
+        panic!("A_ub / b_ub length mismatch");
+    }
+    if a_eq.len() != b_eq.len() {
+        panic!("A_eq / b_eq length mismatch");
+    }
+    for (r, row) in a_ub.iter().enumerate() {
+        if row.len() != n {
+            panic!("A_ub row {r} has length {}, expected {n}", row.len());
+        }
+    }
+    for (r, row) in a_eq.iter().enumerate() {
+        if row.len() != n {
+            panic!("A_eq row {r} has length {}, expected {n}", row.len());
+        }
+    }
+
+    let lb: Vec<Option<f64>> = p.lb.clone().unwrap_or_else(|| vec![Some(0.0); n]);
+    let ub: Vec<Option<f64>> = p.ub.clone().unwrap_or_else(|| vec![None; n]);
+    if lb.len() != n {
+        panic!("lb length mismatch: got {}, expected {n}", lb.len());
+    }
+    if ub.len() != n {
+        panic!("ub length mismatch: got {}, expected {n}", ub.len());
+    }
+
+    let mut shifts = vec![0.0; n];
+    let mut free_neg: Vec<isize> = Vec::with_capacity(n);
+    let mut y_index_of_pos: Vec<usize> = Vec::with_capacity(n);
+    let mut y_count = 0usize;
+    for i in 0..n {
+        match lb[i] {
+            None => {
+                let pos = y_count;
+                y_count += 1;
+                let neg = y_count;
+                y_count += 1;
+                y_index_of_pos.push(pos);
+                free_neg.push(neg as isize);
+            }
+            Some(l) => {
+                let pos = y_count;
+                y_count += 1;
+                y_index_of_pos.push(pos);
+                free_neg.push(-1);
+                shifts[i] = l;
+                if let Some(u) = ub[i] {
+                    if u < l - tol {
+                        return Err(empty_lp_solution(
+                            LPStatus::Infeasible,
+                            "internal-ipm",
+                            t0,
+                            Some(format!("inconsistent bounds for x{i}: lb={l}, ub={u}")),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    let ny = y_count;
+    let mut q_y = vec![0.0; ny];
+    for i in 0..n {
+        let coeff = if p.sense == Sense::Max {
+            -p.c[i]
+        } else {
+            p.c[i]
+        };
+        q_y[y_index_of_pos[i]] += coeff;
+        if free_neg[i] >= 0 {
+            q_y[free_neg[i] as usize] -= coeff;
+        }
+    }
+
+    let mut ineq_rows: Vec<Vec<f64>> = Vec::new();
+    let mut ineq_rhs: Vec<f64> = Vec::new();
+    let mut eq_rows: Vec<Vec<f64>> = Vec::new();
+    let mut eq_rhs: Vec<f64> = Vec::new();
+
+    let lift_row = |row_x: &[f64], rhs_x: f64| -> (Vec<f64>, f64) {
+        let mut row = vec![0.0; ny];
+        let mut rhs = rhs_x;
+        for i in 0..n {
+            row[y_index_of_pos[i]] += row_x[i];
+            if free_neg[i] >= 0 {
+                row[free_neg[i] as usize] -= row_x[i];
+            }
+            rhs -= row_x[i] * shifts[i];
+        }
+        (row, rhs)
+    };
+
+    for r in 0..a_ub.len() {
+        let (row, rhs) = lift_row(&a_ub[r], b_ub[r]);
+        ineq_rows.push(row);
+        ineq_rhs.push(rhs);
+    }
+    for r in 0..a_eq.len() {
+        let (row, rhs) = lift_row(&a_eq[r], b_eq[r]);
+        eq_rows.push(row);
+        eq_rhs.push(rhs);
+    }
+    for i in 0..n {
+        if let Some(u) = ub[i] {
+            let mut row = vec![0.0; ny];
+            row[y_index_of_pos[i]] = 1.0;
+            if free_neg[i] >= 0 {
+                row[free_neg[i] as usize] = -1.0;
+            }
+            ineq_rows.push(row);
+            ineq_rhs.push(u - shifts[i]);
+        }
+    }
+
+    let n_slack = ineq_rows.len();
+    let n_std = ny + n_slack;
+    let mut q = vec![0.0; n_std];
+    q[..ny].copy_from_slice(&q_y);
+
+    let mut a: Matrix = Vec::with_capacity(ineq_rows.len() + eq_rows.len());
+    let mut b: Vector = Vec::with_capacity(ineq_rows.len() + eq_rows.len());
+    for (r, row_y) in ineq_rows.into_iter().enumerate() {
+        let mut row = vec![0.0; n_std];
+        row[..ny].copy_from_slice(&row_y);
+        row[ny + r] = 1.0;
+        a.push(row);
+        b.push(ineq_rhs[r]);
+    }
+    for (r, row_y) in eq_rows.into_iter().enumerate() {
+        let mut row = vec![0.0; n_std];
+        row[..ny].copy_from_slice(&row_y);
+        a.push(row);
+        b.push(eq_rhs[r]);
+    }
+
+    Ok(StandardInteriorLp {
+        q,
+        a,
+        b,
+        shifts,
+        y_index_of_pos,
+        free_neg,
+        original_c: p.c.clone(),
+        original_n: n,
+        ny,
+    })
+}
+
+fn reconstruct_original_x(std: &StandardInteriorLp, x_std: &[f64]) -> Vec<f64> {
+    let mut x = vec![0.0; std.original_n];
+    for i in 0..std.original_n {
+        let yp = x_std[std.y_index_of_pos[i]];
+        let yn = if std.free_neg[i] >= 0 {
+            x_std[std.free_neg[i] as usize]
+        } else {
+            0.0
+        };
+        x[i] = yp - yn + std.shifts[i];
+    }
+    x
+}
+
+fn original_objective(std: &StandardInteriorLp, x: &[f64]) -> f64 {
+    std.original_c.iter().zip(x).map(|(c, xi)| c * xi).sum()
+}
+
+fn vec_inf_norm(v: &[f64]) -> f64 {
+    v.iter().fold(0.0, |acc, x| acc.max(x.abs()))
+}
+
+fn mat_vec_local(a: &Matrix, x: &[f64]) -> Vec<f64> {
+    let mut out = vec![0.0; a.len()];
+    for r in 0..a.len() {
+        let mut s = 0.0;
+        for (j, &xj) in x.iter().enumerate() {
+            s += a[r][j] * xj;
+        }
+        out[r] = s;
+    }
+    out
+}
+
+fn trans_mat_vec_local(a: &Matrix, y: &[f64], n: usize) -> Vec<f64> {
+    let mut out = vec![0.0; n];
+    for r in 0..a.len() {
+        let yr = y[r];
+        if yr == 0.0 {
+            continue;
+        }
+        for j in 0..n {
+            out[j] += a[r][j] * yr;
+        }
+    }
+    out
+}
+
+fn dot_local(a: &[f64], b: &[f64]) -> f64 {
+    a.iter().zip(b).map(|(x, y)| x * y).sum()
+}
+
+fn fraction_to_boundary(x: &[f64], dx: &[f64], fraction: f64) -> f64 {
+    let mut alpha = 1.0_f64;
+    for i in 0..x.len() {
+        if dx[i] < 0.0 {
+            alpha = alpha.min(-x[i] / dx[i]);
+        }
+    }
+    if !alpha.is_finite() || alpha <= 0.0 {
+        1e-6
+    } else {
+        (fraction * alpha).min(1.0)
+    }
+}
+
+fn solve_ipm_direction(
+    a: &Matrix,
+    rp: &[f64],
+    rd: &[f64],
+    x: &[f64],
+    z: &[f64],
+    rc: &[f64],
+    regularization: f64,
+    tol: f64,
+) -> Option<(Vec<f64>, Vec<f64>, Vec<f64>)> {
+    let m = a.len();
+    let n = x.len();
+    if m == 0 {
+        let mut dx = vec![0.0; n];
+        let mut dz = vec![0.0; n];
+        for i in 0..n {
+            dx[i] = (-rc[i] + x[i] * rd[i]) / z[i].max(1e-300);
+            dz[i] = -rd[i];
+        }
+        return Some((dx, Vec::new(), dz));
+    }
+
+    let mut normal = vec![vec![0.0; m]; m];
+    let mut rhs = vec![0.0; m];
+    for i in 0..n {
+        let zi = z[i].abs().max(1e-300);
+        let d = (x[i] / zi).clamp(1e-14, 1e14);
+        let v = (rc[i] - x[i] * rd[i]) / zi;
+        for r in 0..m {
+            let ari = a[r][i];
+            if ari == 0.0 {
+                continue;
+            }
+            rhs[r] += ari * v;
+            for c in 0..m {
+                let aci = a[c][i];
+                if aci != 0.0 {
+                    normal[r][c] += ari * d * aci;
+                }
+            }
+        }
+    }
+    for r in 0..m {
+        rhs[r] -= rp[r];
+    }
+
+    let base_reg = regularization.max(0.0);
+    let scale = normal
+        .iter()
+        .flat_map(|row| row.iter())
+        .fold(1.0_f64, |acc, v| acc.max(v.abs()));
+    for k in 0..8 {
+        let reg = scale * (base_reg * 10f64.powi(k)).max(1e-14);
+        let mut work = normal.clone();
+        for (i, row) in work.iter_mut().enumerate() {
+            row[i] += reg;
+        }
+        if let Some(dy) = LinearSystem::new(&work, &rhs, tol.max(1e-12)).try_solve() {
+            let at_dy = trans_mat_vec_local(a, &dy, n);
+            let mut dx = vec![0.0; n];
+            let mut dz = vec![0.0; n];
+            for i in 0..n {
+                dx[i] = (-rc[i] + x[i] * rd[i] + x[i] * at_dy[i]) / z[i].max(1e-300);
+                dz[i] = -rd[i] - at_dy[i];
+            }
+            return Some((dx, dy, dz));
+        }
+    }
+    None
+}
+
+fn run_internal_ipm(p: &LPProblem, opts: &InternalInteriorPointOptions) -> LPSolution {
+    let t0 = Instant::now();
+    let max_iter = opts.max_iter.unwrap_or(100);
+    let tol = opts.tol.unwrap_or(1e-8);
+    let step_fraction = opts.step_fraction.unwrap_or(0.995).clamp(0.5, 0.999_999);
+    let regularization = opts.regularization.unwrap_or(1e-10);
+
+    let std = match standardize_for_interior_point(p, tol, t0) {
+        Ok(std) => std,
+        Err(sol) => return sol,
+    };
+    let n = std.q.len();
+    let m = std.a.len();
+
+    if n == 0 {
+        let feasible = std.b.iter().all(|&bi| bi.abs() <= tol);
+        return if feasible {
+            LPSolution {
+                status: LPStatus::Optimal,
+                x: Vec::new(),
+                objective: 0.0,
+                dual_ub: None,
+                dual_eq: None,
+                reduced_costs: None,
+                iters: Some(0),
+                solver: "internal-ipm".to_string(),
+                elapsed_ms: ms_since(t0),
+                message: Some("internal primal-dual IPM: empty feasible LP".to_string()),
+            }
+        } else {
+            empty_lp_solution(
+                LPStatus::Infeasible,
+                "internal-ipm",
+                t0,
+                Some("empty LP violates equality/inequality constraints".to_string()),
+            )
+        };
+    }
+
+    if m == 0 {
+        if std.q.iter().any(|&qi| qi < -tol) {
+            let mut sol = empty_lp_solution(
+                LPStatus::Unbounded,
+                "internal-ipm",
+                t0,
+                Some("unconstrained LP has an improving nonnegative ray".to_string()),
+            );
+            sol.objective = if p.sense == Sense::Max {
+                f64::INFINITY
+            } else {
+                f64::NEG_INFINITY
+            };
+            return sol;
+        }
+        let x_std = vec![0.0; n];
+        let x = reconstruct_original_x(&std, &x_std);
+        let objective = original_objective(&std, &x);
+        return LPSolution {
+            status: LPStatus::Optimal,
+            x,
+            objective,
+            dual_ub: None,
+            dual_eq: None,
+            reduced_costs: None,
+            iters: Some(0),
+            solver: "internal-ipm".to_string(),
+            elapsed_ms: ms_since(t0),
+            message: Some("internal primal-dual IPM: unconstrained optimum".to_string()),
+        };
+    }
+
+    let mut x = vec![1.0; n];
+    for j in std.ny..n {
+        let row = j - std.ny;
+        if row < std.b.len() {
+            x[j] = std.b[row].abs().max(1.0);
+        }
+    }
+    let mut y = vec![0.0; m];
+    let mut z = vec![1.0; n];
+
+    let b_scale = 1.0 + vec_inf_norm(&std.b);
+    let q_scale = 1.0 + vec_inf_norm(&std.q);
+
+    for iter in 0..=max_iter {
+        let ax = mat_vec_local(&std.a, &x);
+        let rp: Vec<f64> = ax.iter().zip(&std.b).map(|(axi, bi)| axi - bi).collect();
+        let aty = trans_mat_vec_local(&std.a, &y, n);
+        let rd: Vec<f64> = aty
+            .iter()
+            .zip(&z)
+            .zip(&std.q)
+            .map(|((ati, zi), qi)| ati + zi - qi)
+            .collect();
+        let mu = dot_local(&x, &z) / n as f64;
+        let min_obj = dot_local(&std.q, &x);
+        let primal_ok = vec_inf_norm(&rp) <= tol * b_scale;
+        let dual_ok = vec_inf_norm(&rd) <= tol * q_scale;
+        let gap_ok = mu <= tol * (1.0 + min_obj.abs());
+        if primal_ok && dual_ok && gap_ok {
+            let x_orig = reconstruct_original_x(&std, &x);
+            let objective = original_objective(&std, &x_orig);
+            return LPSolution {
+                status: LPStatus::Optimal,
+                x: x_orig,
+                objective,
+                dual_ub: None,
+                dual_eq: None,
+                reduced_costs: None,
+                iters: Some(iter),
+                solver: "internal-ipm".to_string(),
+                elapsed_ms: ms_since(t0),
+                message: Some(format!(
+                    "internal primal-dual IPM: converged in {iter} iterations"
+                )),
+            };
+        }
+        if iter == max_iter {
+            break;
+        }
+
+        let rc_aff: Vec<f64> = x.iter().zip(&z).map(|(xi, zi)| xi * zi).collect();
+        let (dx_aff, _dy_aff, dz_aff) =
+            match solve_ipm_direction(&std.a, &rp, &rd, &x, &z, &rc_aff, regularization, tol) {
+                Some(dir) => dir,
+                None => {
+                    return empty_lp_solution(
+                        LPStatus::NumericalError,
+                        "internal-ipm",
+                        t0,
+                        Some("normal equations became singular in affine step".to_string()),
+                    )
+                }
+            };
+
+        let alpha_pri_aff = fraction_to_boundary(&x, &dx_aff, 1.0);
+        let alpha_dual_aff = fraction_to_boundary(&z, &dz_aff, 1.0);
+        let mut mu_aff = 0.0;
+        for i in 0..n {
+            let xp = (x[i] + alpha_pri_aff * dx_aff[i]).max(0.0);
+            let zp = (z[i] + alpha_dual_aff * dz_aff[i]).max(0.0);
+            mu_aff += xp * zp;
+        }
+        mu_aff /= n as f64;
+        let sigma = if mu > 0.0 {
+            (mu_aff / mu).clamp(0.0, 1.0).powi(3)
+        } else {
+            0.0
+        };
+        let rc_corr: Vec<f64> = (0..n)
+            .map(|i| x[i] * z[i] + dx_aff[i] * dz_aff[i] - sigma * mu)
+            .collect();
+        let (dx, dy_step, dz) =
+            match solve_ipm_direction(&std.a, &rp, &rd, &x, &z, &rc_corr, regularization, tol) {
+                Some(dir) => dir,
+                None => {
+                    let rc_centered: Vec<f64> = (0..n).map(|i| x[i] * z[i] - 0.1 * mu).collect();
+                    match solve_ipm_direction(
+                        &std.a,
+                        &rp,
+                        &rd,
+                        &x,
+                        &z,
+                        &rc_centered,
+                        regularization,
+                        tol,
+                    ) {
+                        Some(dir) => dir,
+                        None => {
+                            return empty_lp_solution(
+                                LPStatus::NumericalError,
+                                "internal-ipm",
+                                t0,
+                                Some(
+                                    "normal equations became singular in corrector step"
+                                        .to_string(),
+                                ),
+                            )
+                        }
+                    }
+                }
+            };
+
+        let alpha_pri = fraction_to_boundary(&x, &dx, step_fraction);
+        let alpha_dual = fraction_to_boundary(&z, &dz, step_fraction);
+        for i in 0..n {
+            x[i] = (x[i] + alpha_pri * dx[i]).max(1e-300);
+            z[i] = (z[i] + alpha_dual * dz[i]).max(1e-300);
+        }
+        for r in 0..m {
+            y[r] += alpha_dual * dy_step[r];
+        }
+    }
+
+    let x_orig = reconstruct_original_x(&std, &x);
+    let objective = original_objective(&std, &x_orig);
+    LPSolution {
+        status: LPStatus::IterLimit,
+        x: x_orig,
+        objective,
+        dual_ub: None,
+        dual_eq: None,
+        reduced_costs: None,
+        iters: Some(max_iter),
+        solver: "internal-ipm".to_string(),
+        elapsed_ms: ms_since(t0),
+        message: Some(format!(
+            "internal primal-dual IPM hit max_iter={max_iter} before KKT residuals reached tol={tol}"
+        )),
+    }
+}
+
+/// Dense in-process primal-dual interior-point solver as a transform.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct InternalInteriorPointSolver {
+    pub opts: InternalInteriorPointOptions,
+}
+
+impl InternalInteriorPointSolver {
+    pub fn new(opts: InternalInteriorPointOptions) -> Self {
+        InternalInteriorPointSolver { opts }
+    }
+}
+
+impl Transform<LPProblem, LPSolution> for InternalInteriorPointSolver {
+    fn transform(&self, input: LPProblem) -> LPSolution {
+        run_internal_ipm(&input, &self.opts)
+    }
+}
+
+/// Solve an LP with the native dense primal-dual interior-point method.
+pub fn solve_lp_internal_ipm(p: &LPProblem, opts: &InternalInteriorPointOptions) -> LPSolution {
+    run_internal_ipm(p, opts)
+}
+
 // Pivoting machinery. Bland's rule for entering / leaving to guarantee
 // finite termination on small problems.
 struct SimplexResult {
@@ -843,6 +1434,15 @@ impl LpSolverOptions {
         }
     }
 
+    fn internal_ipm(&self) -> InternalInteriorPointOptions {
+        InternalInteriorPointOptions {
+            max_iter: self.max_iter,
+            tol: self.tol,
+            step_fraction: None,
+            regularization: None,
+        }
+    }
+
     fn external(&self, method: Option<String>) -> ExternalSolverOptions {
         ExternalSolverOptions {
             method,
@@ -858,6 +1458,7 @@ impl LpSolverOptions {
 ///
 /// ```text
 ///   LP_SOLVER=internal              in-process two-phase simplex
+///   LP_SOLVER=internal-ipm          in-process primal-dual interior-point method
 ///   LP_SOLVER=scipy:highs           scipy linprog method=highs (DEFAULT)
 ///   LP_SOLVER=scipy:highs-ipm       scipy interior-point HiGHS
 ///   LP_SOLVER=scipy:highs-ds        scipy dual simplex HiGHS
@@ -881,6 +1482,9 @@ impl Transform<LPProblem, LPSolution> for LPSolver {
         let choice = choice.trim();
         if choice == "internal" {
             return run_internal_simplex(&input, &self.opts.internal());
+        }
+        if choice == "internal-ipm" || choice == "internal-interior-point" {
+            return run_internal_ipm(&input, &self.opts.internal_ipm());
         }
         if let Some(method) = choice.strip_prefix("scipy:") {
             let ext = ExternalSolver::new(self.opts.external(Some(method.to_string()))).run(&input);
@@ -1437,6 +2041,123 @@ mod tests {
         assert!((sol.objective - 11.0).abs() < TOL, "obj={}", sol.objective);
         assert!((sol.x[0] - 3.0).abs() < TOL, "x0={}", sol.x[0]);
         assert!((sol.x[1] - 1.0).abs() < TOL, "x1={}", sol.x[1]);
+    }
+
+    #[test]
+    fn interior_point_maximize_box() {
+        // Same geometry as `maximize_box`, but through the native primal-dual IPM.
+        let p = LPProblem {
+            sense: Sense::Max,
+            c: vec![1.0, 1.0],
+            a_ub: Some(vec![vec![1.0, 0.0], vec![0.0, 1.0]]),
+            b_ub: Some(vec![4.0, 3.0]),
+            ..Default::default()
+        };
+        let sol = solve_lp_internal_ipm(&p, &InternalInteriorPointOptions::default());
+        assert_eq!(sol.status, LPStatus::Optimal, "{:?}", sol.message);
+        assert!((sol.objective - 7.0).abs() < 1e-5, "obj={}", sol.objective);
+        assert!((sol.x[0] - 4.0).abs() < 1e-5, "x0={}", sol.x[0]);
+        assert!((sol.x[1] - 3.0).abs() < 1e-5, "x1={}", sol.x[1]);
+    }
+
+    #[test]
+    fn interior_point_handles_equalities_and_active_bounds() {
+        // max 3x + 2y  s.t.  x + y = 4, x ≤ 3, x,y ≥ 0  ->  11 at (3,1).
+        let p = LPProblem {
+            sense: Sense::Max,
+            c: vec![3.0, 2.0],
+            a_ub: Some(vec![vec![1.0, 0.0]]),
+            b_ub: Some(vec![3.0]),
+            a_eq: Some(vec![vec![1.0, 1.0]]),
+            b_eq: Some(vec![4.0]),
+            ..Default::default()
+        };
+        let sol = solve_lp_internal_ipm(&p, &InternalInteriorPointOptions::default());
+        assert_eq!(sol.status, LPStatus::Optimal, "{:?}", sol.message);
+        assert!((sol.objective - 11.0).abs() < 1e-5, "obj={}", sol.objective);
+        assert!((sol.x[0] - 3.0).abs() < 1e-5, "x0={}", sol.x[0]);
+        assert!((sol.x[1] - 1.0).abs() < 1e-5, "x1={}", sol.x[1]);
+    }
+
+    #[test]
+    fn interior_point_min_with_negative_rhs() {
+        // min x + y  s.t.  x + y ≥ 2, x,y ≥ 0  -> objective 2.
+        let p = LPProblem {
+            sense: Sense::Min,
+            c: vec![1.0, 1.0],
+            a_ub: Some(vec![vec![-1.0, -1.0]]),
+            b_ub: Some(vec![-2.0]),
+            ..Default::default()
+        };
+        let sol = solve_lp_internal_ipm(&p, &InternalInteriorPointOptions::default());
+        assert_eq!(sol.status, LPStatus::Optimal, "{:?}", sol.message);
+        assert!((sol.objective - 2.0).abs() < 1e-5, "obj={}", sol.objective);
+        assert!(sol.x[0] >= -1e-6 && sol.x[1] >= -1e-6, "x={:?}", sol.x);
+        assert!((sol.x[0] + sol.x[1] - 2.0).abs() < 1e-5, "x={:?}", sol.x);
+    }
+
+    #[test]
+    fn interior_point_finite_lower_and_upper_bounds() {
+        // max 2x + y, with x in [1,4], y in [0,2], x+y≤5 -> (4,1), obj 9.
+        let p = LPProblem {
+            sense: Sense::Max,
+            c: vec![2.0, 1.0],
+            a_ub: Some(vec![vec![1.0, 1.0]]),
+            b_ub: Some(vec![5.0]),
+            lb: Some(vec![Some(1.0), Some(0.0)]),
+            ub: Some(vec![Some(4.0), Some(2.0)]),
+            ..Default::default()
+        };
+        let sol = solve_lp_internal_ipm(&p, &InternalInteriorPointOptions::default());
+        assert_eq!(sol.status, LPStatus::Optimal, "{:?}", sol.message);
+        assert!((sol.objective - 9.0).abs() < 1e-5, "obj={}", sol.objective);
+        assert!((sol.x[0] - 4.0).abs() < 1e-5, "x0={}", sol.x[0]);
+        assert!((sol.x[1] - 1.0).abs() < 1e-5, "x1={}", sol.x[1]);
+    }
+
+    #[test]
+    fn interior_point_free_variable_with_two_sided_constraints() {
+        // min x, with -2≤x≤3 and x free in the model bounds -> x*=-2.
+        let p = LPProblem {
+            sense: Sense::Min,
+            c: vec![1.0],
+            a_ub: Some(vec![vec![1.0], vec![-1.0]]),
+            b_ub: Some(vec![3.0, 2.0]),
+            lb: Some(vec![None]),
+            ..Default::default()
+        };
+        let sol = solve_lp_internal_ipm(&p, &InternalInteriorPointOptions::default());
+        assert_eq!(sol.status, LPStatus::Optimal, "{:?}", sol.message);
+        assert!((sol.objective + 2.0).abs() < 1e-5, "obj={}", sol.objective);
+        assert!((sol.x[0] + 2.0).abs() < 1e-5, "x0={}", sol.x[0]);
+    }
+
+    #[test]
+    fn interior_point_transportation_style_lp() {
+        // Two plants, two customers. Omit one redundant demand equality so the
+        // dense normal equations stay full-row-rank.
+        //
+        // min 2x11 + 4x12 + 5x21 + x22
+        // s.t. x11+x12=20, x21+x22=30, x11+x21=25, x≥0
+        // -> x=(20,0,5,25), cost 90.
+        let p = LPProblem {
+            sense: Sense::Min,
+            c: vec![2.0, 4.0, 5.0, 1.0],
+            a_eq: Some(vec![
+                vec![1.0, 1.0, 0.0, 0.0],
+                vec![0.0, 0.0, 1.0, 1.0],
+                vec![1.0, 0.0, 1.0, 0.0],
+            ]),
+            b_eq: Some(vec![20.0, 30.0, 25.0]),
+            ..Default::default()
+        };
+        let sol = solve_lp_internal_ipm(&p, &InternalInteriorPointOptions::default());
+        assert_eq!(sol.status, LPStatus::Optimal, "{:?}", sol.message);
+        assert!((sol.objective - 90.0).abs() < 1e-5, "obj={}", sol.objective);
+        let expected = [20.0, 0.0, 5.0, 25.0];
+        for (i, &want) in expected.iter().enumerate() {
+            assert!((sol.x[i] - want).abs() < 1e-5, "x{i}={}", sol.x[i]);
+        }
     }
 
     #[test]

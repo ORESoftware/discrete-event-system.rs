@@ -46,6 +46,14 @@ fn validate_joint(joint: &Matrix) {
     ));
 }
 
+fn clean_bits(x: f64) -> f64 {
+    if x.abs() < 1e-12 {
+        0.0
+    } else {
+        x
+    }
+}
+
 /// Summary of a finite source distribution.
 #[derive(Clone, Debug, PartialEq)]
 pub struct EntropySummary {
@@ -155,10 +163,12 @@ pub fn shannon_entropy_bits(pmf: &[f64]) -> f64 {
         pmf,
         1e-9,
     ));
-    pmf.iter()
-        .filter(|&&p| p > 0.0)
-        .map(|&p| -p * p.log2())
-        .sum()
+    clean_bits(
+        pmf.iter()
+            .filter(|&&p| p > 0.0)
+            .map(|&p| -p * p.log2())
+            .sum(),
+    )
 }
 
 /// One-shot entropy summary for a source distribution.
@@ -191,7 +201,7 @@ pub fn kl_divergence_bits(p: &[f64], q: &[f64]) -> f64 {
     if ce.is_infinite() {
         ce
     } else {
-        (ce - shannon_entropy_bits(p)).max(0.0)
+        clean_bits((ce - shannon_entropy_bits(p)).max(0.0))
     }
 }
 
@@ -209,12 +219,14 @@ pub fn jensen_shannon_divergence_bits(p: &[f64], q: &[f64]) -> f64 {
 /// Joint entropy H(X,Y), in bits, for a joint pmf matrix P(x,y).
 pub fn joint_entropy_bits(joint: &Matrix) -> f64 {
     validate_joint(joint);
-    joint
-        .iter()
-        .flat_map(|row| row.iter())
-        .filter(|&&p| p > 0.0)
-        .map(|&p| -p * p.log2())
-        .sum()
+    clean_bits(
+        joint
+            .iter()
+            .flat_map(|row| row.iter())
+            .filter(|&&p| p > 0.0)
+            .map(|&p| -p * p.log2())
+            .sum(),
+    )
 }
 
 /// Marginal distribution P(X) from a joint pmf P(X,Y).
@@ -240,14 +252,14 @@ pub fn marginal_y(joint: &Matrix) -> Vec<f64> {
 pub fn conditional_entropy_y_given_x_bits(joint: &Matrix) -> f64 {
     let hxy = joint_entropy_bits(joint);
     let hx = shannon_entropy_bits(&marginal_x(joint));
-    (hxy - hx).max(0.0)
+    clean_bits((hxy - hx).max(0.0))
 }
 
 /// Conditional entropy H(X|Y), in bits, for a joint pmf P(X,Y).
 pub fn conditional_entropy_x_given_y_bits(joint: &Matrix) -> f64 {
     let hxy = joint_entropy_bits(joint);
     let hy = shannon_entropy_bits(&marginal_y(joint));
-    (hxy - hy).max(0.0)
+    clean_bits((hxy - hy).max(0.0))
 }
 
 /// Mutual information I(X;Y), in bits, for a joint pmf P(X,Y).
@@ -255,7 +267,7 @@ pub fn mutual_information_bits(joint: &Matrix) -> f64 {
     let hx = shannon_entropy_bits(&marginal_x(joint));
     let hy = shannon_entropy_bits(&marginal_y(joint));
     let hxy = joint_entropy_bits(joint);
-    (hx + hy - hxy).max(0.0)
+    clean_bits((hx + hy - hxy).max(0.0))
 }
 
 /// Build the joint pmf P(X,Y) = P(X) P(Y|X) for a discrete channel.

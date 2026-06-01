@@ -49,6 +49,7 @@ impl StreamingSoccerPlanner {
                     "variables": model.ip.c.len(),
                     "constraints": model.ip.a.len(),
                     "synergies": self.request.synergies.len(),
+                    "minSubsPerGame": self.request.min_subs_per_game,
                     "maxSubsPerGame": self.request.max_subs_per_game,
                     "maxConsecutiveOnField": self.request.max_consecutive_on_field
                 })

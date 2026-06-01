@@ -29,6 +29,7 @@ button.danger{border-color:#6c3131;color:#ffd2d2;background:#2a1719}
 button:disabled{opacity:.55;cursor:wait}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}
+.grid4{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px}
 .row{display:flex;gap:8px;align-items:center}
 .row>*{min-width:0}
 .row .grow{flex:1}
@@ -59,7 +60,13 @@ summary{cursor:pointer;color:var(--muted);font-size:12px}
 .pane{display:none;min-height:100%;height:100%}
 .pane.active{display:block}
 #animationPane{position:relative;overflow:hidden;background:#071019}
-#viewFrame{position:absolute;inset:0;width:100%;height:100%;border:0;background:#071019}
+#solverPane{grid-template-rows:minmax(0,1fr) auto;overflow:hidden;background:#071019}
+#solverPane.active{display:grid}
+#viewFrame,#solverFrame{position:absolute;inset:0;width:100%;height:100%;border:0;background:#071019}
+#solverPane #solverFrame{position:relative;height:100%;min-height:0}
+.solver-insights{max-height:168px;overflow:auto;border-top:1px solid var(--line);background:#0b141d;padding:10px 14px;font-size:12px;color:var(--muted)}
+.solver-insights b{color:var(--ink)}
+.solver-insights .alt{display:inline-block;margin:4px 8px 0 0;padding:4px 7px;border:1px solid var(--line);border-radius:6px;background:#071019;color:var(--ink)}
 #schedulePane,#streamPane{padding:14px;overflow:auto}
 .schedule-table{width:100%;border-collapse:collapse;font-size:13px}
 .schedule-table th,.schedule-table td{border-bottom:1px solid var(--line);padding:7px;text-align:left;vertical-align:top}
@@ -71,7 +78,7 @@ summary{cursor:pointer;color:var(--muted);font-size:12px}
 #status.ok{color:var(--green)}
 #status.err{color:#ffb4b4}
 .stream-log{margin-top:10px;max-height:160px;overflow:auto;border:1px solid var(--line);border-radius:6px;background:#071019;padding:8px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;color:var(--muted);white-space:pre-wrap}
-@media (max-width:960px){.layout{grid-template-columns:1fr}aside{max-height:46vh;border-right:0;border-bottom:1px solid var(--line)}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.scores{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media (max-width:960px){.layout{grid-template-columns:1fr}aside{max-height:46vh;border-right:0;border-bottom:1px solid var(--line)}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.scores{grid-template-columns:repeat(3,minmax(0,1fr))}.grid4{grid-template-columns:1fr 1fr}}
 </style>
 </head>
 <body>
@@ -99,7 +106,8 @@ summary{cursor:pointer;color:var(--muted);font-size:12px}
         <div><label>Periods</label><input type="number" id="numPeriods" min="1" max="8" value="2"></div>
         <div><label>Min/period</label><input type="number" id="minutesPerPeriod" min="1" max="60" value="45"></div>
       </div>
-      <div class="grid3" style="margin-top:8px">
+      <div class="grid4" style="margin-top:8px">
+        <div><label>Min subs</label><input type="number" id="minSubs" min="0" max="40" value="0"></div>
         <div><label>Max subs</label><input type="number" id="maxSubs" min="0" max="40" value="7"></div>
         <div><label>Max run</label><input type="number" id="maxStamina" min="1" max="8" value="3"></div>
         <div><label>Seed</label><input type="number" id="seed" min="1" value="4242"></div>
@@ -170,6 +178,10 @@ summary{cursor:pointer;color:var(--muted);font-size:12px}
       <div class="pane active" id="animationPane">
         <div class="loading hidden" id="loading">Solving...</div>
         <iframe id="viewFrame" title="animation"></iframe>
+      </div>
+      <div class="pane" id="solverPane">
+        <iframe id="solverFrame" title="solver animation"></iframe>
+        <div class="solver-insights" id="solverInsights">No solve yet.</div>
       </div>
       <div class="pane" id="schedulePane">
         <table class="schedule-table" id="scheduleTable"></table>

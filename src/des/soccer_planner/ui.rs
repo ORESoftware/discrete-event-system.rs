@@ -38,6 +38,14 @@ pub fn planner_response_to_json(resp: &PlannerResponse) -> Value {
         "fallbackReason": resp.fallback_reason,
         "assignment": resp.assignment,
         "bench": resp.bench,
+        "solverNotes": resp.solver_notes,
+        "alternatives": resp.alternatives.iter().map(|alt| serde_json::json!({
+            "rank": alt.rank,
+            "affinity": alt.affinity,
+            "totalSubs": alt.total_subs,
+            "assignment": alt.assignment,
+            "bench": alt.bench,
+        })).collect::<Vec<_>>(),
         "pitchAnimation": pitch,
         "solverAnimation": solver,
     })

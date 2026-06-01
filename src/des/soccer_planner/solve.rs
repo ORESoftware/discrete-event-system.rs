@@ -83,6 +83,12 @@ pub fn build_problem_from_request(req: &PlannerRequest) -> Result<SoccerProblem,
             "need at least {num_positions} available/guest players; only {fieldable_count} are fieldable"
         ));
     }
+    if req.min_subs_per_game > req.max_subs_per_game {
+        return Err(format!(
+            "min subs ({}) cannot exceed max subs ({})",
+            req.min_subs_per_game, req.max_subs_per_game
+        ));
+    }
     let position_names = crate::des::general::soccer_rotation::formation_position_names(&formation);
     let t_count = req.num_periods.max(1);
 
@@ -421,10 +427,7 @@ fn ranked_alternatives(
             }
         }
     }
-    candidates.sort_by(|a, b| {
-        b.0.partial_cmp(&a.0)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    candidates.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     candidates
         .into_iter()
         .take(limit)
@@ -580,6 +583,16 @@ fn response_from_schedule(
     fallback_reason: Option<String>,
 ) -> PlannerResponse {
     let eval = evaluate_schedule(problem, &schedule);
+    let alternatives = ranked_alternatives(problem, &schedule, 3);
+    let solver_notes = notes_for_solution(
+        &mip_status,
+        num_variables,
+        num_constraints,
+        eval.total_subs,
+        used_fallback,
+        fallback_reason.as_deref(),
+        &alternatives,
+    );
     if validate_schedule_structure(problem, &schedule).is_some()
         || !eval.fairness_ok
         || !eval.stamina_ok
@@ -604,6 +617,8 @@ fn response_from_schedule(
             fallback_reason,
             assignment: schedule.assignment,
             bench: schedule.bench,
+            solver_notes,
+            alternatives,
             pitch_animation: empty_animation(),
             solver_animation: empty_animation(),
         };
@@ -616,6 +631,16 @@ fn response_from_schedule(
             formation,
             req.minutes_per_period,
             req.seed,
+        )
+    } else {
+        empty_animation()
+    };
+    let solver = if render_animations {
+        render_fast_solver_animation(
+            eval.affinity_sum,
+            elapsed_ms,
+            &alternatives,
+            fallback_reason.as_deref(),
         )
     } else {
         empty_animation()
@@ -639,8 +664,10 @@ fn response_from_schedule(
         fallback_reason,
         assignment: schedule.assignment,
         bench: schedule.bench,
+        solver_notes,
+        alternatives,
         pitch_animation: pitch,
-        solver_animation: empty_animation(),
+        solver_animation: solver,
     }
 }
 
@@ -666,6 +693,8 @@ fn solve_planner_inner(req: &PlannerRequest, render_animations: bool) -> Planner
             fallback_reason: None,
             assignment: vec![],
             bench: vec![],
+            solver_notes: vec![],
+            alternatives: vec![],
             pitch_animation: empty_animation(),
             solver_animation: empty_animation(),
         },
@@ -729,6 +758,8 @@ fn solve_planner_inner(req: &PlannerRequest, render_animations: bool) -> Planner
                         fallback_reason: None,
                         assignment: vec![],
                         bench: vec![],
+                        solver_notes: vec![],
+                        alternatives: vec![],
                         pitch_animation: empty_animation(),
                         solver_animation: empty_animation(),
                     };
@@ -737,6 +768,16 @@ fn solve_planner_inner(req: &PlannerRequest, render_animations: bool) -> Planner
             let num_variables = result.model.ip.c.len();
             let num_constraints = result.model.ip.a.len();
             let eval = evaluate_schedule(&problem, &result.schedule);
+            let alternatives = ranked_alternatives(&problem, &result.schedule, 3);
+            let solver_notes = notes_for_solution(
+                result.mip.status.as_str(),
+                num_variables,
+                num_constraints,
+                eval.total_subs,
+                result.used_fallback,
+                result.fallback_reason.as_deref(),
+                &alternatives,
+            );
             if validate_schedule_structure(&problem, &result.schedule).is_some() {
                 return PlannerResponse {
                     ok: false,
@@ -757,6 +798,8 @@ fn solve_planner_inner(req: &PlannerRequest, render_animations: bool) -> Planner
                     fallback_reason: result.fallback_reason,
                     assignment: result.schedule.assignment.clone(),
                     bench: result.schedule.bench.clone(),
+                    solver_notes,
+                    alternatives,
                     pitch_animation: empty_animation(),
                     solver_animation: empty_animation(),
                 };
@@ -794,6 +837,8 @@ fn solve_planner_inner(req: &PlannerRequest, render_animations: bool) -> Planner
                 fallback_reason: result.fallback_reason,
                 assignment: result.schedule.assignment,
                 bench: result.schedule.bench,
+                solver_notes,
+                alternatives,
                 pitch_animation: pitch,
                 solver_animation: solver,
             }

@@ -51,9 +51,26 @@ label{display:block;color:var(--muted);font-size:12px;margin:0 0 4px}
 .view{position:relative;min-height:0;overflow:hidden;background:#fff}
 .pane{display:none;height:100%;min-height:0}
 .pane.active{display:block}
-#routePane{position:relative}
-#routeFrame{width:100%;height:100%;border:0;display:block;background:#eef3f6}
-#itineraryPane{padding:14px;display:none;grid-template-rows:auto minmax(0,1fr)}
+#routePane{position:relative;min-height:0;overflow:hidden}
+#routePane.active{display:grid;grid-template-rows:auto minmax(260px,1fr) minmax(148px,30vh)}
+.route-tools{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;border-bottom:1px solid var(--line);background:#fbfcfd;min-width:0}
+.route-tools .toolbar{flex:0 0 auto}
+.map-toggle.active{border-color:var(--blue);color:var(--blue);background:#eef5ff;font-weight:700}
+.route-totals{min-width:0;color:var(--muted);font-size:12px;text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.route-map-stack{position:relative;min-height:0;background:#eef3f6}
+.route-map-stack iframe{width:100%;height:100%;border:0;display:block;background:#eef3f6}
+#routeFrame,#osmFrame{position:absolute;inset:0}
+.route-table-wrap{min-height:0;overflow:auto;border-top:1px solid var(--line);background:#fff}
+.route-table{width:100%;border-collapse:collapse;font-size:12px}
+.route-table th,.route-table td{padding:7px 8px;border-bottom:1px solid #e3e9ee;text-align:left;vertical-align:top}
+.route-table th{position:sticky;top:0;background:#f7fafc;color:#4d5f70;font-weight:700;z-index:1}
+.route-table td.num,.route-table th.num{text-align:right;white-space:nowrap}
+.route-table .leg-title{font-weight:700;color:#223242}
+.route-table .leg-sub{margin-top:2px;color:var(--muted);font-size:11px}
+.row-actions{display:flex;gap:6px;flex-wrap:wrap}
+.row-actions a{display:inline-flex;align-items:center;min-height:28px;border:1px solid var(--line);border-radius:6px;background:#fff;color:#174ea6;text-decoration:none;padding:4px 7px;font-weight:700}
+.row-actions a:hover{background:#f8fbfd;border-color:#8ca1b2}
+#itineraryPane{padding:14px;display:none;grid-template-rows:minmax(0,1fr);min-height:0}
 #itineraryPane.active{display:grid}
 #itineraryText{min-height:0;height:100%;resize:none;font-size:13px}
 #solverPane{padding:14px;overflow:auto}
@@ -62,7 +79,7 @@ label{display:block;color:var(--muted);font-size:12px;margin:0 0 4px}
 .hidden{display:none!important}
 #status{min-height:38px;border-top:1px solid var(--line);background:#fbfcfd;color:var(--muted);padding:9px 14px;font-size:13px}
 #status.ok{color:var(--green)}#status.err{color:var(--red)}
-@media (max-width:980px){.layout{grid-template-columns:1fr}aside{max-height:48vh;border-right:0;border-bottom:1px solid var(--line)}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.solver-grid{grid-template-columns:1fr}.topbar{height:auto;align-items:flex-start;flex-direction:column}.top-actions{width:100%;justify-content:space-between}.user-chip{max-width:55vw}}
+@media (max-width:980px){.layout{grid-template-columns:1fr}aside{max-height:48vh;border-right:0;border-bottom:1px solid var(--line)}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.solver-grid{grid-template-columns:1fr}.topbar{height:auto;align-items:flex-start;flex-direction:column}.top-actions{width:100%;justify-content:space-between}.user-chip{max-width:55vw}#routePane.active{grid-template-rows:auto minmax(240px,48vh) minmax(150px,28vh)}.route-tools{align-items:flex-start;flex-direction:column}.route-totals{text-align:left;white-space:normal}.route-table{min-width:760px}}
 </style>
 </head>
 <body>
@@ -127,7 +144,28 @@ label{display:block;color:var(--muted);font-size:12px;margin:0 0 4px}
         <button type="button" class="tab" data-tab="solver">Solver</button>
       </div>
       <div class="view">
-        <div class="pane active" id="routePane"><iframe id="routeFrame" title="route animation"></iframe></div>
+        <div class="pane active" id="routePane">
+          <div class="route-tools">
+            <div class="toolbar">
+              <button type="button" class="map-toggle active" id="showAnimationBtn">Animation</button>
+              <button type="button" class="map-toggle" id="showOsmBtn">OSM map</button>
+              <button type="button" id="openGoogleMaps">Google Maps</button>
+              <button type="button" id="openOsmMap">Open OSM</button>
+              <button type="button" id="openWazeNext">Waze next</button>
+            </div>
+            <div class="route-totals" id="routeTotals">No route yet.</div>
+          </div>
+          <div class="route-map-stack">
+            <iframe id="routeFrame" title="route animation"></iframe>
+            <iframe id="osmFrame" class="hidden" title="OpenStreetMap route area"></iframe>
+          </div>
+          <div class="route-table-wrap">
+            <table class="route-table" id="routeTable">
+              <thead><tr><th>Leg</th><th class="num">Drive</th><th class="num">Miles</th><th>Schedule</th><th>Map</th></tr></thead>
+              <tbody id="routeTableBody"><tr><td colspan="5">No route yet.</td></tr></tbody>
+            </table>
+          </div>
+        </div>
         <div class="pane" id="itineraryPane"><textarea id="itineraryText" readonly></textarea></div>
         <div class="pane" id="solverPane">
           <div class="solver-grid">
@@ -150,6 +188,11 @@ let activeTab = 'route';
 
 function pad(n){return String(n).padStart(2,'0')}
 function fmt(min){min=Math.max(0,Math.round(min));return pad(Math.floor(min/60)%24)+':'+pad(min%60)}
+function fmtDuration(min){
+  min=Math.max(0,Math.round(min));
+  const h=Math.floor(min/60), m=min%60;
+  return h?`${h}h ${pad(m)}m`:`${m}m`;
+}
 function parseTime(raw){
   let s=String(raw||'').trim().toLowerCase();
   if(!s)return null;
@@ -161,6 +204,63 @@ function parseTime(raw){
   if(pm&&h<12)h+=12;if(am&&h===12)h=0;
   if(h<0||h>=24)return null;
   return h*60+m;
+}
+function coordText(p){
+  return `${Number(p.lat).toFixed(6)},${Number(p.lon).toFixed(6)}`;
+}
+function pointLabel(p){
+  return p?.label || p?.address || coordText(p);
+}
+function orderedRoutePoints(data=lastResponse){
+  if(!data)return [];
+  const depot={label:state.depotLabel||'Depot',address:state.depotAddress||state.depotLabel||'Depot',lat:state.depotLat,lon:state.depotLon};
+  const points=[depot];
+  (data.route||[]).forEach(idx=>{
+    const s=(state.stops||[])[idx];
+    if(s)points.push({label:s.label,address:s.address||s.label,lat:s.lat,lon:s.lon});
+  });
+  points.push(depot);
+  return points.filter(p=>Number.isFinite(Number(p.lat))&&Number.isFinite(Number(p.lon)));
+}
+function googleDirectionsUrl(points){
+  if(points.length<2)return '';
+  const params=new URLSearchParams({api:'1',travelmode:'driving'});
+  params.set('origin',coordText(points[0]));
+  params.set('destination',coordText(points[points.length-1]));
+  const waypoints=points.slice(1,-1).map(coordText);
+  if(waypoints.length)params.set('waypoints',waypoints.join('|'));
+  return 'https://www.google.com/maps/dir/?'+params.toString();
+}
+function googleLegUrl(from,to){
+  return googleDirectionsUrl([from,to]);
+}
+function wazeUrl(to){
+  const params=new URLSearchParams({ll:coordText(to),navigate:'yes',utm_source:'delivery_scheduler'});
+  if(to.address)params.set('q',to.address);
+  return 'https://waze.com/ul?'+params.toString();
+}
+function osmDirectionsUrl(points){
+  if(points.length<2)return '';
+  const route=points.map(coordText).join(';');
+  return 'https://www.openstreetmap.org/directions?engine=fossgis_osrm_car&route='+encodeURIComponent(route);
+}
+function routeBoundsForMap(points){
+  const lats=points.map(p=>Number(p.lat)), lons=points.map(p=>Number(p.lon));
+  const minLat=Math.min(...lats),maxLat=Math.max(...lats),minLon=Math.min(...lons),maxLon=Math.max(...lons);
+  const latPad=Math.max(.01,(maxLat-minLat)*.18),lonPad=Math.max(.01,(maxLon-minLon)*.18);
+  return {minLat:minLat-latPad,maxLat:maxLat+latPad,minLon:minLon-lonPad,maxLon:maxLon+lonPad};
+}
+function osmEmbedUrl(points){
+  if(!points.length)return '';
+  const b=routeBoundsForMap(points);
+  const marker=points[Math.min(1,points.length-1)];
+  return `https://www.openstreetmap.org/export/embed.html?bbox=${b.minLon},${b.minLat},${b.maxLon},${b.maxLat}&layer=mapnik&marker=${marker.lat},${marker.lon}`;
+}
+function openMapUrl(url,label){
+  if(!url){setStatus('err',`${label||'Map'} is not available until a route is solved.`);return}
+  const win=window.open(url,'_blank');
+  if(win)win.opener=null;
+  if(!win)setStatus('err',`Popup blocked while opening ${label||'map'}.`);
 }
 function parseWindow(raw){
   const s=String(raw||'').replace(/[–—]/g,'-').replace(/\s+to\s+/i,'-');
@@ -347,6 +447,104 @@ function buildItineraryText(itin,m){
   lines.push(`Totals: ${itin.totalDistance.toFixed(2)} mi, ${itin.totalTravelMinutes.toFixed(0)} min drive, ${itin.totalWaitMinutes.toFixed(0)} min wait`);
   return lines.join('\n');
 }
+function routeScheduleRows(data){
+  const points=orderedRoutePoints(data), legs=data?.legs||[], visits=data?.visits||[];
+  let clock=state.departTime||480, cumulativeDrive=0, cumulativeWait=0, serviceMinutes=0;
+  const rows=[];
+  legs.forEach((leg,i)=>{
+    const from=points[i]||{label:leg.from,lat:0,lon:0};
+    const to=points[i+1]||{label:leg.to,lat:0,lon:0};
+    const drive=Number(leg.travelMinutes)||0;
+    const visit=i<visits.length?visits[i]:null;
+    cumulativeDrive+=drive;
+    let arrival=Math.round(clock+drive), depart=arrival, wait=0, window='', kind='return';
+    if(visit){
+      arrival=Number(visit.arrival);
+      depart=Number(visit.depart);
+      wait=Number(visit.waitMinutes)||0;
+      window=visit.windowText||`${fmt(visit.windowStart)}-${fmt(visit.windowEnd)}`;
+      serviceMinutes+=Math.max(0,depart-arrival);
+      cumulativeWait+=wait;
+      kind='stop';
+    }
+    rows.push({idx:i+1,from,to,leg,visit,kind,arrival,depart,wait,window,cumulativeDrive,cumulativeWait,serviceMinutes});
+    clock=depart;
+  });
+  const returnTime=rows.length?rows[rows.length-1].arrival:(state.departTime||480);
+  return {points,rows,returnTime,serviceMinutes,cumulativeDrive,cumulativeWait};
+}
+function addCell(row,text,cls){
+  const td=document.createElement('td');
+  if(cls)td.className=cls;
+  td.textContent=text;
+  row.appendChild(td);
+  return td;
+}
+function addLink(parent,text,url){
+  const a=document.createElement('a');
+  a.href=url;
+  a.target='_blank';
+  a.rel='noopener noreferrer';
+  a.textContent=text;
+  parent.appendChild(a);
+  return a;
+}
+function renderRouteDetails(data){
+  const tbody=$('routeTableBody');
+  tbody.replaceChildren();
+  if(!data||!data.ok){
+    const tr=document.createElement('tr');
+    addCell(tr,'No route yet.');
+    tr.firstChild.colSpan=5;
+    tbody.appendChild(tr);
+    $('routeTotals').textContent='No route yet.';
+    $('osmFrame').removeAttribute('src');
+    return;
+  }
+  const sched=routeScheduleRows(data);
+  const totalDuration=Math.max(0,sched.returnTime-(state.departTime||480));
+  $('routeTotals').textContent=`${sched.rows.length} legs · ${(data.totalDistance||0).toFixed(1)} mi · ${fmtDuration(data.totalTravelMinutes||0)} drive · ${fmtDuration(data.totalWaitMinutes||0)} wait · ${fmtDuration(sched.serviceMinutes)} service · return ${fmt(sched.returnTime)} (${fmtDuration(totalDuration)} route)`;
+  $('osmFrame').src=osmEmbedUrl(sched.points);
+  sched.rows.forEach(r=>{
+    const tr=document.createElement('tr');
+    const legTd=document.createElement('td');
+    const title=document.createElement('div');
+    title.className='leg-title';
+    title.textContent=`${r.idx}. ${pointLabel(r.from)} -> ${pointLabel(r.to)}`;
+    const sub=document.createElement('div');
+    sub.className='leg-sub';
+    sub.textContent=r.to.address||coordText(r.to);
+    legTd.append(title,sub);
+    tr.appendChild(legTd);
+    addCell(tr,fmtDuration(r.leg.travelMinutes||0),'num');
+    addCell(tr,(Number(r.leg.distance)||0).toFixed(2),'num');
+    const scheduleTd=document.createElement('td');
+    const schedule=document.createElement('div');
+    schedule.textContent=r.kind==='return'?`Return ${fmt(r.arrival)}`:`Arrive ${fmt(r.arrival)} · depart ${fmt(r.depart)}`;
+    const detail=document.createElement('div');
+    detail.className='leg-sub';
+    detail.textContent=r.kind==='return'
+      ? `Cumulative drive ${fmtDuration(r.cumulativeDrive)}`
+      : `Window ${r.window} · wait ${fmtDuration(r.wait)} · cumulative drive ${fmtDuration(r.cumulativeDrive)}`;
+    scheduleTd.append(schedule,detail);
+    tr.appendChild(scheduleTd);
+    const mapTd=document.createElement('td');
+    const actions=document.createElement('div');
+    actions.className='row-actions';
+    addLink(actions,'Google',googleLegUrl(r.from,r.to));
+    addLink(actions,'Waze',wazeUrl(r.to));
+    mapTd.appendChild(actions);
+    tr.appendChild(mapTd);
+    tbody.appendChild(tr);
+  });
+}
+function setMapMode(mode){
+  const osm=mode==='osm';
+  $('routeFrame').classList.toggle('hidden',osm);
+  $('osmFrame').classList.toggle('hidden',!osm);
+  $('showAnimationBtn').classList.toggle('active',!osm);
+  $('showOsmBtn').classList.toggle('active',osm);
+}
 function bounds(nodes){
   const lats=nodes.map(n=>n.lat), lons=nodes.map(n=>n.lon);
   const minLat=Math.min(...lats),maxLat=Math.max(...lats),minLon=Math.min(...lons),maxLon=Math.max(...lons);
@@ -401,6 +599,7 @@ function receiveSolution(data){
   $('solverNotes').textContent=(data.solverNotes||[]).join('\n');
   $('solverTrace').textContent=(data.solverTrace||[]).map(e=>`${e.action} node=${e.nodeId} depth=${e.depth} z=${e.lpZ==null?'':e.lpZ} ${e.reason||''}`).join('\n')||'No trace.';
   showAnimation(data.routeAnimation);
+  renderRouteDetails(data);
 }
 async function solve(){
   try{syncStateFromControls()}catch(e){setStatus('err',e.message);return}
@@ -457,6 +656,14 @@ function parseOnly(){try{syncStateFromControls();$('mStops').textContent=String(
 document.querySelectorAll('.tab').forEach(btn=>btn.onclick=()=>{activeTab=btn.dataset.tab;document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('active',b===btn));$('routePane').classList.toggle('active',activeTab==='route');$('itineraryPane').classList.toggle('active',activeTab==='itinerary');$('solverPane').classList.toggle('active',activeTab==='solver')});
 $('solveBtn').onclick=solve;
 $('copyItinerary').onclick=copyItinerary;
+$('showAnimationBtn').onclick=()=>setMapMode('animation');
+$('showOsmBtn').onclick=()=>setMapMode('osm');
+$('openGoogleMaps').onclick=()=>openMapUrl(googleDirectionsUrl(orderedRoutePoints()),'Google Maps');
+$('openOsmMap').onclick=()=>openMapUrl(osmDirectionsUrl(orderedRoutePoints()),'OpenStreetMap');
+$('openWazeNext').onclick=()=>{
+  const points=orderedRoutePoints();
+  openMapUrl(points.length>1?wazeUrl(points[1]):'', 'Waze');
+};
 $('sampleBtn').onclick=()=>{state=structuredClone(defaultConfig);renderControls();setStatus('', 'Sample loaded.')};
 $('parseBtn').onclick=parseOnly;
 $('geocodeBtn').onclick=geocodeMissing;

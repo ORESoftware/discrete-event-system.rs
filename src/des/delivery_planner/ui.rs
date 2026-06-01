@@ -66,5 +66,9 @@ mod tests {
         assert!(html.contains("Delivery Scheduler"));
         assert!(html.contains("copyItinerary"));
         assert!(html.contains("routeFrame"));
+        assert!(html.contains("routeTable"));
+        assert!(html.contains("openGoogleMaps"));
+        assert!(html.contains("openWazeNext"));
+        assert!(html.contains("osmFrame"));
     }
 }

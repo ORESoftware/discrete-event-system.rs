@@ -46,11 +46,13 @@ pub mod lp;
 pub mod mdp;
 pub mod milp;
 pub mod pomdp;
+pub mod soccer;
 
 pub use lp::StreamingLp;
 pub use mdp::StreamingMdp;
 pub use milp::{StreamingIp, StreamingMilp, StreamingMip};
 pub use pomdp::StreamingPomdp;
+pub use soccer::StreamingSoccerPlanner;
 
 /// Newline-delimited JSON media type the streaming contract speaks in both
 /// directions (a.k.a. JSON Lines / `jsonl`).
@@ -82,13 +84,16 @@ pub enum ModelStreamKind {
     Mip,
     Mdp,
     Pomdp,
+    SoccerPlanner,
     GenericIterative,
 }
 
 impl ModelStreamKind {
     pub fn from_model_name(model: &str) -> Self {
         let m = model.to_ascii_lowercase();
-        if m.contains("pomdp") {
+        if m.contains("soccer") {
+            ModelStreamKind::SoccerPlanner
+        } else if m.contains("pomdp") {
             ModelStreamKind::Pomdp
         } else if m.contains("mdp") {
             ModelStreamKind::Mdp
@@ -370,7 +375,7 @@ pub fn run_jsonl<R: BufRead, W: Write>(
 
 /// The streaming models the engine ships, by stable name.
 pub fn streaming_model_names() -> &'static [&'static str] {
-    &["lp", "milp", "mdp", "pomdp"]
+    &["lp", "milp", "mdp", "pomdp", "soccer-planner"]
 }
 
 /// Construct a boxed streaming model by name. Aliases `mip`/`ip` to the MILP
@@ -382,6 +387,9 @@ pub fn build_streaming_model(name: &str) -> Option<Box<dyn StreamingModel>> {
         "milp" | "mip" | "ip" => Some(Box::new(milp::StreamingMilp::new())),
         "mdp" => Some(Box::new(mdp::StreamingMdp::new())),
         "pomdp" => Some(Box::new(pomdp::StreamingPomdp::new())),
+        "soccer" | "soccer-planner" | "soccer_rotation" | "soccer-rotation" => {
+            Some(Box::new(soccer::StreamingSoccerPlanner::new()))
+        }
         _ => None,
     }
 }

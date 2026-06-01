@@ -48,6 +48,32 @@ use crate::des::shared::transform::Transform;
 // PROBLEM DEFINITION
 // =============================================================================
 
+/// Player availability / roster status for the interactive planner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum PlayerStatus {
+    #[default]
+    Available,
+    /// Not present — cannot be fielded in any period.
+    Awol,
+    /// Cannot be fielded (stays off the pitch all match).
+    Injured,
+    /// Temporary roster addition (eligible to play).
+    Guest,
+}
+
+/// Position-conditional score: player `player` at `position` earns `score_with`
+/// when `partner_player` occupies `partner_position` in the same period, else
+/// `score_without`. Used by the interactive planner for chemistry rules.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PositionSynergyRule {
+    pub player: usize,
+    pub position: usize,
+    pub partner_player: usize,
+    pub partner_position: usize,
+    pub score_with: f64,
+    pub score_without: f64,
+}
+
 /// A multi-period soccer rotation problem instance.
 #[derive(Clone, Debug)]
 pub struct SoccerProblem {
@@ -58,10 +84,20 @@ pub struct SoccerProblem {
     /// Max consecutive periods any single player may stay on the field. `None`
     /// disables the stamina constraint (the historical behaviour).
     pub max_consecutive_on_field: Option<usize>,
+    /// Max substitution events (players subbed off) across the whole match.
+    pub max_subs_per_game: Option<usize>,
     /// `affinity[p][pos][t]` in `[0, 1]`.
     pub affinity: Vec<Vec<Vec<f64>>>,
     pub player_names: Option<Vec<String>>,
     pub position_names: Option<Vec<String>>,
+    /// Per-player roster status (planner UI). AWOL/Injured → never fielded.
+    pub player_status: Option<Vec<PlayerStatus>>,
+    /// Lock player `p` to position index `pos` for every period (`None` = free).
+    pub fixed_position: Option<Vec<Option<usize>>>,
+    /// `banned_positions[p][pos]` → player `p` may never play position `pos`.
+    pub banned_positions: Option<Vec<Vec<bool>>>,
+    /// Chemistry / conditional position scores (see [`PositionSynergyRule`]).
+    pub synergy_rules: Option<Vec<PositionSynergyRule>>,
 }
 
 /// A chosen rotation schedule.
@@ -184,9 +220,14 @@ pub fn build_sample_soccer_problem(opts: &AffinityBuilderOptions) -> SoccerProbl
         num_periods,
         bench_size,
         max_consecutive_on_field,
+        max_subs_per_game: None,
         affinity: aff,
         player_names: Some(player_names),
         position_names: Some(position_names),
+        player_status: None,
+        fixed_position: None,
+        banned_positions: None,
+        synergy_rules: None,
     }
 }
 
@@ -220,17 +261,17 @@ pub fn parse_outfield_formation(s: &str) -> Option<Vec<usize>> {
 /// shapes where they exist, otherwise an even defence/mid/attack split.
 pub fn default_outfield_formation(num_positions: usize) -> Vec<usize> {
     match num_positions {
-        0 | 1 => vec![],          // GK only (degenerate)
-        2 => vec![1],             // GK + 1
-        3 => vec![1, 1],          // 3v3
-        4 => vec![2, 1],          // 4v4
-        5 => vec![2, 2],          // 5v5
-        6 => vec![2, 2, 1],       // 6v6
-        7 => vec![2, 3, 1],       // 7v7 (classic 2-3-1)
-        8 => vec![3, 3, 1],       // 8v8
-        9 => vec![3, 4, 1],       // 9v9 (this is where a literal 3-4-1 lives)
-        10 => vec![4, 4, 1],      // 10-a-side
-        11 => vec![4, 4, 2],      // 11v11
+        0 | 1 => vec![],     // GK only (degenerate)
+        2 => vec![1],        // GK + 1
+        3 => vec![1, 1],     // 3v3
+        4 => vec![2, 1],     // 4v4
+        5 => vec![2, 2],     // 5v5
+        6 => vec![2, 2, 1],  // 6v6
+        7 => vec![2, 3, 1],  // 7v7 (classic 2-3-1)
+        8 => vec![3, 3, 1],  // 8v8
+        9 => vec![3, 4, 1],  // 9v9 (this is where a literal 3-4-1 lives)
+        10 => vec![4, 4, 1], // 10-a-side
+        11 => vec![4, 4, 2], // 11v11
         n => {
             // Generic: split the outfield (n-1) into D/M/F as evenly as
             // possible, attack getting the remainder-light line.
@@ -338,6 +379,9 @@ pub struct ScheduleEvaluation {
     /// `true` when there is no stamina cap, or no run exceeds it.
     pub stamina_ok: bool,
     pub consecutive_on_field_violations: Vec<ConsecutiveOnFieldViolation>,
+    /// `true` when there is no sub cap, or total subs ≤ cap.
+    pub subs_ok: bool,
+    pub total_subs: usize,
     pub bench_counts: Vec<usize>,
 }
 
@@ -356,6 +400,64 @@ impl<'a> Transform<ProblemScheduleInput<'a>, ScheduleEvaluation> for EvaluateSch
     }
 }
 
+/// Whether player `p` may appear on the field (not AWOL / injured).
+pub fn player_is_fieldable(problem: &SoccerProblem, p: usize) -> bool {
+    match problem.player_status.as_ref().and_then(|s| s.get(p)) {
+        Some(PlayerStatus::Awol) | Some(PlayerStatus::Injured) => false,
+        _ => true,
+    }
+}
+
+/// Effective score for `(player, position)` in period `t` given the full lineup
+/// (applies synergy overrides on top of the base affinity tensor).
+pub fn effective_cell_affinity(
+    problem: &SoccerProblem,
+    assignment: &[i64],
+    player: usize,
+    position: usize,
+    period: usize,
+) -> f64 {
+    let mut aff = problem.affinity[player][position][period];
+    if let Some(rules) = &problem.synergy_rules {
+        for rule in rules {
+            if rule.player == player && rule.position == position {
+                let partner_on = assignment.get(rule.partner_position).copied().unwrap_or(-1)
+                    == rule.partner_player as i64;
+                aff = if partner_on {
+                    rule.score_with
+                } else {
+                    rule.score_without
+                };
+            }
+        }
+    }
+    aff
+}
+
+/// Count substitution events: players who leave the field at a period boundary.
+pub fn count_subs(problem: &SoccerProblem, schedule: &Schedule) -> usize {
+    let t_count = problem.num_periods;
+    if t_count <= 1 {
+        return 0;
+    }
+    let mut total = 0usize;
+    for t in 1..t_count {
+        let prev: HashSet<i64> = schedule.assignment[t - 1].iter().copied().collect();
+        for &p in &schedule.assignment[t] {
+            if !prev.contains(&p) {
+                // player came on — count the corresponding off elsewhere
+                continue;
+            }
+        }
+        for &p in &schedule.assignment[t - 1] {
+            if !schedule.assignment[t].contains(&p) {
+                total += 1;
+            }
+        }
+    }
+    total
+}
+
 /// Score a schedule and check the fairness constraint.
 pub fn evaluate_schedule(problem: &SoccerProblem, schedule: &Schedule) -> ScheduleEvaluation {
     let t_count = problem.num_periods;
@@ -364,8 +466,8 @@ pub fn evaluate_schedule(problem: &SoccerProblem, schedule: &Schedule) -> Schedu
     for t in 0..t_count {
         let mut s = 0.0;
         for pos in 0..problem.num_positions {
-            let p = schedule.assignment[t][pos];
-            s += problem.affinity[p as usize][pos][t];
+            let p = schedule.assignment[t][pos] as usize;
+            s += effective_cell_affinity(problem, &schedule.assignment[t], p, pos, t);
         }
         per_period.push(s);
         total += s;
@@ -373,6 +475,9 @@ pub fn evaluate_schedule(problem: &SoccerProblem, schedule: &Schedule) -> Schedu
     let mut fairness_violations: Vec<FairnessViolation> = Vec::new();
     for t in 0..t_count.saturating_sub(1) {
         for &p in &schedule.bench[t] {
+            if !player_is_fieldable(problem, p) {
+                continue;
+            }
             if schedule.bench[t + 1].contains(&p) {
                 fairness_violations.push(FairnessViolation {
                     player_id: p,
@@ -388,8 +493,12 @@ pub fn evaluate_schedule(problem: &SoccerProblem, schedule: &Schedule) -> Schedu
             bench_counts[p] += 1;
         }
     }
-    let consecutive_on_field_violations =
-        consecutive_on_field_violations(problem, schedule);
+    let consecutive_on_field_violations = consecutive_on_field_violations(problem, schedule);
+    let total_subs = count_subs(problem, schedule);
+    let subs_ok = problem
+        .max_subs_per_game
+        .map(|cap| total_subs <= cap)
+        .unwrap_or(true);
     ScheduleEvaluation {
         affinity_sum: total,
         per_period_affinity: per_period,
@@ -397,6 +506,8 @@ pub fn evaluate_schedule(problem: &SoccerProblem, schedule: &Schedule) -> Schedu
         fairness_violations,
         stamina_ok: consecutive_on_field_violations.is_empty(),
         consecutive_on_field_violations,
+        subs_ok,
+        total_subs,
         bench_counts,
     }
 }
@@ -505,6 +616,34 @@ pub fn validate_schedule_structure(problem: &SoccerProblem, schedule: &Schedule)
         }
         if seen.len() != num_players {
             return Some(format!("period {t}: total players != {num_players}"));
+        }
+        // Planner constraints.
+        for pos in 0..num_positions {
+            let p = schedule.assignment[t][pos] as usize;
+            if !player_is_fieldable(problem, p) {
+                return Some(format!("player {p} (AWOL/injured) on field in period {t}"));
+            }
+            if let Some(fixed) = problem.fixed_position.as_ref().and_then(|f| f.get(p)) {
+                if let Some(fp) = fixed {
+                    if *fp != pos {
+                        return Some(format!(
+                            "player {p} fixed at position {fp} but assigned {pos} in period {t}"
+                        ));
+                    }
+                }
+            }
+            if problem
+                .banned_positions
+                .as_ref()
+                .and_then(|b| b.get(p))
+                .and_then(|row| row.get(pos))
+                .copied()
+                .unwrap_or(false)
+            {
+                return Some(format!(
+                    "player {p} banned from position {pos} but assigned in period {t}"
+                ));
+            }
         }
     }
     None
@@ -945,6 +1084,9 @@ pub fn build_soccer_lp(problem: &SoccerProblem) -> LPProblem {
     }
     // (3) Σ_pos x_{p,pos,t} + Σ_pos x_{p,pos,t+1} ≥ 1  ->  ≤ form with negative RHS.
     for p in 0..p_count {
+        if !player_is_fieldable(problem, p) {
+            continue;
+        }
         for t in 0..t_count.saturating_sub(1) {
             let mut row = vec![0.0; n];
             for pos in 0..k {
@@ -1090,6 +1232,9 @@ pub struct SoccerIPMIPModel {
     pub ip: IPMIPProblem,
     num_positions: usize,
     num_periods: usize,
+    /// Number of `x[p,pos,t]` assignment variables at the front of the vector
+    /// (auxiliary synergy / on-field / sub variables follow).
+    pub num_x_vars: usize,
 }
 
 impl SoccerIPMIPModel {
@@ -1238,6 +1383,9 @@ pub fn build_soccer_ipmip(problem: &SoccerProblem) -> SoccerIPMIPModel {
 
     // (3) Fairness: a player may not be benched in two consecutive periods.
     for p in 0..p_count {
+        if !player_is_fieldable(problem, p) {
+            continue;
+        }
         for t in 0..t_count.saturating_sub(1) {
             let mut row = vec![0.0; n];
             for pos in 0..k {
@@ -1309,14 +1457,274 @@ pub fn build_soccer_ipmip(problem: &SoccerProblem) -> SoccerIPMIPModel {
         }
     }
 
+    // (5) Planner: unavailable players never fielded.
+    for p in 0..p_count {
+        if !player_is_fieldable(problem, p) {
+            for t in 0..t_count {
+                let mut row = vec![0.0; c.len()];
+                for pos in 0..k {
+                    row[idx(p, pos, t)] = 1.0;
+                }
+                let row_index = a.len();
+                a.push(row);
+                b.push(0.0);
+                con_names.push(format!("unavailable_{}_T{}", player_name(p), t + 1));
+                constraint_nodes.push(ConstraintNode {
+                    row_index,
+                    node_id: format!("station:unavailable:{}:T{}", player_name(p), t + 1),
+                    label: Some(format!(
+                        "{} unavailable in period {}",
+                        player_name(p),
+                        t + 1
+                    )),
+                });
+            }
+        }
+    }
+
+    // (6) Fixed position: player locked to one role all match.
+    if let Some(fixed) = &problem.fixed_position {
+        for p in 0..p_count.min(fixed.len()) {
+            if let Some(fp) = fixed[p] {
+                if fp >= k {
+                    continue;
+                }
+                for t in 0..t_count {
+                    // x[p,fp,t] = 1
+                    let mut eq = vec![0.0; c.len()];
+                    eq[idx(p, fp, t)] = 1.0;
+                    let row_index = a.len();
+                    a.push(eq);
+                    b.push(1.0);
+                    con_names.push(format!("fixed_{}_pos{}_T{}", player_name(p), fp, t + 1));
+                    constraint_nodes.push(ConstraintNode {
+                        row_index,
+                        node_id: format!(
+                            "station:fixed:{}:{}:T{}",
+                            player_name(p),
+                            position_name(fp),
+                            t + 1
+                        ),
+                        label: Some(format!(
+                            "{} fixed at {} in period {}",
+                            player_name(p),
+                            position_name(fp),
+                            t + 1
+                        )),
+                    });
+                    for pos in 0..k {
+                        if pos != fp {
+                            let mut zrow = vec![0.0; c.len()];
+                            zrow[idx(p, pos, t)] = 1.0;
+                            a.push(zrow);
+                            b.push(0.0);
+                            con_names.push(format!(
+                                "fixed_ban_{}_pos{}_T{}",
+                                player_name(p),
+                                pos,
+                                t + 1
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // (7) Banned (player, position) pairs.
+    if let Some(banned) = &problem.banned_positions {
+        for p in 0..p_count.min(banned.len()) {
+            for pos in 0..k.min(banned[p].len()) {
+                if !banned[p][pos] {
+                    continue;
+                }
+                for t in 0..t_count {
+                    let mut row = vec![0.0; c.len()];
+                    row[idx(p, pos, t)] = 1.0;
+                    let row_index = a.len();
+                    a.push(row);
+                    b.push(0.0);
+                    con_names.push(format!("banned_{}_pos{}_T{}", player_name(p), pos, t + 1));
+                    constraint_nodes.push(ConstraintNode {
+                        row_index,
+                        node_id: format!(
+                            "station:banned:{}:{}:T{}",
+                            player_name(p),
+                            position_name(pos),
+                            t + 1
+                        ),
+                        label: Some(format!(
+                            "{} banned from {} in period {}",
+                            player_name(p),
+                            position_name(pos),
+                            t + 1
+                        )),
+                    });
+                }
+            }
+        }
+    }
+
+    let n_x = n;
+
+    // Synergy overrides on the linear objective for subject cells.
+    let rules = problem.synergy_rules.clone().unwrap_or_default();
+    if !rules.is_empty() {
+        for rule in &rules {
+            for t in 0..t_count {
+                let j = idx(rule.player, rule.position, t);
+                c[j] = rule.score_without;
+            }
+        }
+    }
+
+    let need_synergy = !rules.is_empty();
+    let need_subs = problem.max_subs_per_game.is_some() && t_count > 1;
+    let n_synergy = if need_synergy {
+        rules.len() * t_count
+    } else {
+        0
+    };
+    let n_on = if need_subs { p_count * t_count } else { 0 };
+    let n_sub = if need_subs {
+        p_count * (t_count - 1)
+    } else {
+        0
+    };
+    let n_total = n_x + n_synergy + n_on + n_sub;
+
+    if n_total > n_x {
+        c.resize(n_total, 0.0);
+        var_names.resize(n_total, String::new());
+
+        let synergy_index = |rule_i: usize, t: usize| -> usize { n_x + rule_i * t_count + t };
+        let on_index = |p: usize, t: usize| -> usize { n_x + n_synergy + p * t_count + t };
+        let sub_index =
+            |p: usize, t: usize| -> usize { n_x + n_synergy + n_on + p * (t_count - 1) + (t - 1) };
+
+        if need_synergy {
+            for (ri, rule) in rules.iter().enumerate() {
+                for t in 0..t_count {
+                    let zj = synergy_index(ri, t);
+                    c[zj] = rule.score_with - rule.score_without;
+                    var_names[zj] = format!(
+                        "synergy_{}_{}_T{}",
+                        player_name(rule.player),
+                        position_name(rule.position),
+                        t + 1
+                    );
+                    variable_nodes.push(VariableNode {
+                        var_index: zj,
+                        node_id: format!(
+                            "synergy:{}:{}:T{}",
+                            player_name(rule.player),
+                            position_name(rule.position),
+                            t + 1
+                        ),
+                        label: Some(format!(
+                            "synergy {}@{} if {}@{}",
+                            player_name(rule.player),
+                            position_name(rule.position),
+                            player_name(rule.partner_player),
+                            position_name(rule.partner_position)
+                        )),
+                    });
+                    let x_sub = idx(rule.player, rule.position, t);
+                    let x_part = idx(rule.partner_player, rule.partner_position, t);
+                    let synergy_rows: Vec<(Vec<(usize, f64)>, f64)> = vec![
+                        (vec![(zj, 1.0), (x_sub, -1.0)], 0.0),
+                        (vec![(zj, 1.0), (x_part, -1.0)], 0.0),
+                        (vec![(zj, -1.0), (x_sub, 1.0), (x_part, 1.0)], 1.0),
+                    ];
+                    for (coeffs, rhs) in synergy_rows {
+                        let mut row = vec![0.0; n_total];
+                        for (j, v) in coeffs {
+                            row[j] = v;
+                        }
+                        a.push(row);
+                        b.push(rhs);
+                    }
+                }
+            }
+        }
+
+        if need_subs {
+            for p in 0..p_count {
+                for t in 0..t_count {
+                    let oj = on_index(p, t);
+                    var_names[oj] = format!("on_{}_T{}", player_name(p), t + 1);
+                    let mut link = vec![0.0; n_total];
+                    for pos in 0..k {
+                        link[idx(p, pos, t)] = 1.0;
+                    }
+                    link[oj] = -1.0;
+                    a.push(link);
+                    b.push(0.0);
+                }
+            }
+            for p in 0..p_count {
+                for t in 1..t_count {
+                    let sj = sub_index(p, t);
+                    var_names[sj] = format!("sub_off_{}_T{}", player_name(p), t + 1);
+                    let o_prev = on_index(p, t - 1);
+                    let o_cur = on_index(p, t);
+                    let sub_rows: Vec<(Vec<(usize, f64)>, f64)> = vec![
+                        (vec![(sj, 1.0), (o_prev, -1.0)], 0.0),
+                        (vec![(sj, 1.0), (o_cur, 1.0)], 1.0),
+                        (vec![(sj, 1.0), (o_prev, -1.0), (o_cur, 1.0)], 0.0),
+                    ];
+                    for (coeffs, rhs) in sub_rows {
+                        let mut row = vec![0.0; n_total];
+                        for (j, v) in coeffs {
+                            row[j] = v;
+                        }
+                        a.push(row);
+                        b.push(rhs);
+                    }
+                }
+            }
+            if let Some(max_subs) = problem.max_subs_per_game {
+                let mut row = vec![0.0; n_total];
+                for p in 0..p_count {
+                    for t in 1..t_count {
+                        row[sub_index(p, t)] = 1.0;
+                    }
+                }
+                let row_index = a.len();
+                a.push(row);
+                b.push(max_subs as f64);
+                con_names.push(format!("max_subs_{max_subs}"));
+                constraint_nodes.push(ConstraintNode {
+                    row_index,
+                    node_id: "station:max-subs".to_string(),
+                    label: Some(format!("at most {max_subs} substitutions per match")),
+                });
+            }
+        }
+
+        for row in &mut a {
+            if row.len() < n_total {
+                row.resize(n_total, 0.0);
+            }
+        }
+    }
+
+    let n_vars = if n_total > n_x { n_total } else { n_x };
+
     SoccerIPMIPModel {
         ip: IPMIPProblem {
             sense: Sense::Max,
-            c,
+            c: if c.len() == n_vars {
+                c
+            } else {
+                let mut c2 = c;
+                c2.resize(n_vars, 0.0);
+                c2
+            },
             a,
             b,
-            integer_vars: vec![true; n],
-            ub: Some(vec![1.0; n]),
+            integer_vars: vec![true; n_vars],
+            ub: Some(vec![1.0; n_vars]),
             var_names: Some(var_names),
             con_names: Some(con_names),
             variable_nodes: Some(variable_nodes),
@@ -1324,6 +1732,7 @@ pub fn build_soccer_ipmip(problem: &SoccerProblem) -> SoccerIPMIPModel {
         },
         num_positions: k,
         num_periods: t_count,
+        num_x_vars: n_x,
     }
 }
 
@@ -1402,7 +1811,7 @@ pub fn schedule_from_soccer_ipmip_vector(
         return None;
     }
     let eval = evaluate_schedule(problem, &schedule);
-    if !eval.fairness_ok || !eval.stamina_ok {
+    if !eval.fairness_ok || !eval.stamina_ok || !eval.subs_ok {
         return None;
     }
     Some(schedule)
@@ -2008,9 +2417,14 @@ mod tests {
             num_periods: 3,
             bench_size: 1,
             max_consecutive_on_field: Some(1),
+            max_subs_per_game: None,
             affinity: vec![vec![vec![0.0; 3]; 1]; 2],
             player_names: None,
             position_names: None,
+            player_status: None,
+            fixed_position: None,
+            banned_positions: None,
+            synergy_rules: None,
         };
         let schedule = Schedule {
             assignment: vec![vec![0], vec![0], vec![1]],
@@ -2051,7 +2465,10 @@ mod tests {
         );
         let ip_base = build_soccer_ipmip(&base);
         let ip_capped = build_soccer_ipmip(&capped);
-        assert_eq!(ip_capped.ip.a.len(), ip_base.ip.a.len() + capped.num_players);
+        assert_eq!(
+            ip_capped.ip.a.len(),
+            ip_base.ip.a.len() + capped.num_players
+        );
 
         let opts = SoccerIPMIPPolicyOptions {
             time_limit_ms: Some(15_000.0),

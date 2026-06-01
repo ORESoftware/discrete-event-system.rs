@@ -2,16 +2,17 @@
 //! VisualBlock diagram is discoverable and runnable-from-JSON like every other
 //! paradigm, rendering through the same uniform artifact.
 
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::des::model::{CitizenError, ModelCitizen, ModelDescriptor, RunArtifact};
 
 use super::analysis::analyze_model_spec;
 use super::demos::{mixer, queue_line, signal_chain, StudioDemo};
+use super::design::run_design_study;
 use super::run::run;
 use super::spec::{
-    compile_model_spec, generate_rust_code, starter_model_spec, studio_model_json_schema,
-    StudioModelSpec, STUDIO_GRAPH_SCHEMA,
+    compile_model_spec, demo_from_spec, example_spec, generate_rust_code, starter_model_spec,
+    studio_model_json_schema, StudioModelSpec, STUDIO_GRAPH_SCHEMA, STUDIO_SPEC_SCHEMA,
 };
 
 pub const STUDIO_SCHEMA: &str = STUDIO_GRAPH_SCHEMA;
@@ -29,25 +30,34 @@ impl ModelCitizen for StudioCitizen {
                 "A JSON-authored graph of visual blocks (Layer 1) wired by typed ports; each \
                           block runs a cell of one or more Layer-2 runtime elements (Layer 2). \
                           Blocks never nest. Saved specs derive JSON Schema from Rust types and \
-                          can emit a Rust runner."
+                          can emit a Rust runner; free-form Studio JSON specs can run design studies."
                     .to_string(),
             spec_schema: STUDIO_SCHEMA.to_string(),
             methods: vec![
                 "model-spec".to_string(),
+                "json-spec".to_string(),
+                "rust-codegen".to_string(),
                 "signal-chain".to_string(),
                 "mixer".to_string(),
                 "queue-line".to_string(),
             ],
             example_spec: {
-                serde_json::to_value(starter_model_spec()).unwrap_or_else(
-                    |_| json!({ "$schema": STUDIO_DEMO_SCHEMA, "demo": "signal-chain" }),
-                )
+                serde_json::to_value(starter_model_spec()).unwrap_or_else(|_| example_spec())
             },
         }
     }
 
     fn run_json(&self, spec: &Value) -> Result<RunArtifact, CitizenError> {
-        if spec.get("blocks").is_some() {
+        let schema = spec.get("$schema").and_then(Value::as_str);
+        let looks_like_typed_graph = schema == Some(STUDIO_GRAPH_SCHEMA)
+            || spec
+                .get("blocks")
+                .and_then(Value::as_array)
+                .and_then(|blocks| blocks.first())
+                .and_then(|block| block.get("kind"))
+                .is_some();
+
+        if looks_like_typed_graph {
             let model: StudioModelSpec = serde_json::from_value(spec.clone()).map_err(|e| {
                 CitizenError::InvalidSpec(format!("invalid studio model spec: {e}"))
             })?;
@@ -79,6 +89,28 @@ impl ModelCitizen for StudioCitizen {
             return Ok(artifact);
         }
 
+        if schema == Some(STUDIO_SPEC_SCHEMA) || spec.get("blocks").is_some() {
+            let design_run =
+                run_design_study(spec).map_err(|e| CitizenError::InvalidSpec(e.to_string()))?;
+            let runnable_spec = design_run.as_ref().map(|d| &d.final_spec).unwrap_or(spec);
+            let mut demo = demo_from_spec(runnable_spec)
+                .map_err(|e| CitizenError::InvalidSpec(e.to_string()))?;
+            let run_out = run(&mut demo.compiled, demo.steps, demo.dt);
+            let mut artifact =
+                run_out.to_artifact("studio", &demo.title, &demo.description, demo.blocks);
+            if let Some(design) = design_run {
+                if let Value::Object(results) = &mut artifact.results {
+                    results.insert("designStudy".to_string(), design.to_json());
+                    results.insert("finalSpec".to_string(), design.final_spec.clone());
+                }
+                artifact.summary = format!(
+                    "{} Optimized objective {:.6} -> {:.6}.",
+                    artifact.summary, design.initial_objective, design.final_objective
+                );
+            }
+            return Ok(artifact);
+        }
+
         let demo_name = spec
             .get("demo")
             .and_then(Value::as_str)
@@ -88,7 +120,7 @@ impl ModelCitizen for StudioCitizen {
             "mixer" => mixer().map_err(|e| CitizenError::Run(e.to_string())),
             "queue-line" => queue_line().map_err(|e| CitizenError::Run(e.to_string())),
             other => Err(CitizenError::InvalidSpec(format!(
-                "unknown studio demo `{other}` (expected `signal-chain`, `mixer` or `queue-line`)"
+                "unknown studio demo `{other}` (expected `signal-chain`, `mixer`, `queue-line`, `{STUDIO_GRAPH_SCHEMA}`, or `{STUDIO_SPEC_SCHEMA}`)"
             ))),
         }?;
 
@@ -101,6 +133,7 @@ impl ModelCitizen for StudioCitizen {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn studio_citizen_runs_its_example() {

@@ -31,12 +31,14 @@ pub mod analysis;
 pub mod cell;
 pub mod citizen;
 pub mod demos;
+pub mod design;
 pub mod editor;
 pub mod graph;
 pub mod run;
 pub mod spec;
 pub mod sweep;
 pub mod ui;
+pub mod workbench;
 
 pub use analysis::{
     analyze_model_spec, StudioAnalysis, StudioComponentAnalysis, StudioConnectionAnalysis,
@@ -48,18 +50,23 @@ pub use cell::{
 };
 pub use citizen::{StudioCitizen, STUDIO_DEMO_SCHEMA, STUDIO_SCHEMA};
 pub use demos::{mixer, queue_line, signal_chain, StudioDemo};
+pub use design::{
+    run_design_study, StudioDesignDriver, StudioDesignObjective, StudioDesignRun,
+    StudioDesignStudy, StudioDesignVariable,
+};
 pub use editor::{studio_editor_html, write_studio_editor_html, STUDIO_EDITOR_REL_PATH};
 pub use graph::{CompiledStudio, NodeRole, StudioError, StudioGraph, VisualNode, Wire};
 pub use run::{run, StudioRun};
 pub use spec::{
-    compile_model_spec, generate_rust_code, starter_model_spec, studio_block_io,
-    studio_model_json_schema, studio_palette, PaletteItem, PaletteParam, PaletteParamKind,
-    StudioBlockIo, StudioBlockKind, StudioBlockSpec, StudioConstraintSpec,
+    compile_model_spec, demo_from_spec, example_spec, generate_rust_code, starter_model_spec,
+    studio_block_io, studio_model_json_schema, studio_palette, PaletteItem, PaletteParam,
+    PaletteParamKind, StudioBlockIo, StudioBlockKind, StudioBlockSpec, StudioConstraintSpec,
     StudioDesignVariableSpec, StudioModelSpec, StudioObjectiveSense, StudioObjectiveSpec,
-    StudioSpecError, StudioWireSpec, STUDIO_GRAPH_SCHEMA,
+    StudioSpecError, StudioWireSpec, STUDIO_GRAPH_SCHEMA, STUDIO_SPEC_SCHEMA,
 };
 pub use sweep::{
     run_design_sweep, run_first_design_sweep, StudioConstraintValue, StudioObjectiveValue,
     StudioSweepCase, StudioSweepError, StudioSweepResult,
 };
 pub use ui::{render_starter_workbench_html, render_workbench_html, write_workbench_html};
+pub use workbench::{workbench_html, workbench_html_for_spec, write_workbench};

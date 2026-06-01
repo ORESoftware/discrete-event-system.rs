@@ -99,12 +99,15 @@ under `des_engine::sdk`.
 | --- | --- | --- |
 | Model contract | Describe a model as JSON, validate it, run it, and get one uniform artifact | `with_builtins`, `CitizenRegistry`, `ModelCitizen`, `ModelDescriptor`, `RunArtifact` |
 | Acausal equations | Compile ModelingToolkit-style explicit ODE/algebraic specs with alias elimination, diagnostics, UI metadata, and RK4/Euler simulation | `AcausalModelSpec`, `compile_acausal_model`, `simulate_acausal_model`, `acausal_workbench_descriptor` |
+| Schema-backed authoring | Validate, simulate, inspect, and generate Rust from typed model-graph specs | `AuthoringSpec`, `authoring_json_schema`, `compile_hybrid_graph`, `generate_rust` |
 | Graph specs and codegen | Save/load Studio and Hybrid diagrams as schema-derived JSON, validate them through typed Rust specs, and emit Rust runner source | `ModelGraphSpec`, `StudioModelSpec`, `HybridModelSpec`, `model_graph_json_schema`, `studio_model_json_schema`, `hybrid_model_json_schema`, `studio::generate_rust_code`, `hybrid::generate_rust_code` |
 | Streaming solvers | Drive iterative solvers over JSONL | `run_named_jsonl`, `run_jsonl`, `streaming_contracts`, `StreamContract` |
 | Plugins | Run an external program and render its JSON/JSONL output | `PluginManifest`, `run_and_render`, `PluginTransport`, `ProcessTransport` |
 | Service discovery | Self-describe a server's routes and capabilities as JSON | `ServiceBuilder`, `ServiceDescriptor`, `DesExtension` |
-| Visual block dataflow | Build a flat block graph and run it as signal dataflow | `StudioGraph`, `RuntimeCell`, `RuntimeOp`, `Composite`, `CompiledStudio` |
+| Equation-based modeling | Run JSON/LaTeX/XML equation specs as first-class Modelica-style citizens | `EquationCitizen`, `EQUATION_SCHEMA` |
+| Visual block dataflow | Build or load a flat block graph and run it as signal dataflow | `StudioGraph`, `RuntimeCell`, `RuntimeOp`, `Composite`, `CompiledStudio`, `demo_from_spec`, `STUDIO_SPEC_SCHEMA` |
 | Studio analysis and UI | Inspect Studio specs with N2 dependency data, design variables/objectives/constraints, sweep drivers, and a self-contained workbench | `analyze_model_spec`, `run_design_sweep`, `render_workbench_html`, `write_workbench_html` |
+| Design studies | Tune studio-spec parameters against final signal objectives | `run_design_study`, `StudioDesignStudy`, `StudioDesignVariable` |
 | Executive selection | Route a graph to the simplest engine that can run it | `select`, `requirements_for_studio`, `Executive`, `StudioExecutive`, `HybridExecutive` |
 
 `des_engine::sdk::surface()` returns the crate name, version, and the list of
@@ -129,10 +132,11 @@ The `des::model` module defines the paradigm-neutral model contract:
 - `CitizenRegistry`: registry of runnable model kinds.
 - `RunArtifact`: the uniform output of a run.
 
-The built-in registry currently includes acausal, MDP, POMDP, hybrid, and
-studio model citizens. Studio and Hybrid specs are graph documents whose JSON
-Schema is generated from Rust types with `schemars`, so editor payloads,
-saved files, and generated Rust runners share the same contract.
+The built-in registry currently includes acausal, MDP, POMDP, authoring,
+hybrid, equation, and studio model citizens. Studio and Hybrid specs are graph
+documents whose JSON Schema is generated from Rust types with `schemars`, so
+editor payloads, saved files, and generated Rust runners share the same
+contract.
 
 ```rust
 use des_engine::prelude::*;
@@ -396,6 +400,25 @@ than as one monolithic planner:
 | Stochastic optimization and simulation | `stochastic_lp`, `statistical_optimization`, `fel`, `hybrid`, catalogue simulations |
 | Model predictive control and reinforcement learning | `mpc_double_integrator`, `temp_control` MPC, `qlearning_des`, `ppo_des`, `actor_critic_gridworld` |
 
+### PyDy / OpenMDAO-style coverage
+
+The crate is moving toward an open, Rust-native modeling workbench that spans
+PyDy-style dynamics workflows and OpenMDAO-style system optimization:
+
+| Capability | Current coverage |
+| --- | --- |
+| Model specification | JSON-first `ModelCitizen` specs, studio block diagrams, hybrid demos, plugin manifests |
+| Simulation | FEL, hybrid continuous/discrete/event runs, studio dataflow, MDP/POMDP rollout, catalogue simulations |
+| Visualization | Uniform `RunArtifact` HTML player, report pages, frame JSONL, studio workbench |
+| Parameter reruns | Studio workbench edits the JSON spec, reruns in-browser, and exports the updated model |
+| Components and connections | Studio `VisualNode` blocks with typed scalar ports and an N2-style connection matrix |
+| Design variables/objectives/drivers | Studio `design` specs with variables, objective targets, finite-difference sensitivities, gradient-descent traces, and an Optimize UI |
+| Recording | Run artifacts preserve results JSON, frame streams, summaries, and design traces |
+
+The next high-impact gaps are symbolic multibody equation generation and 3D
+body/camera/light visualization on the PyDy side, plus richer OpenMDAO-like
+groups, analytic derivatives, constraints, nonlinear solvers, and case readers.
+
 ## Reports And Artifacts
 
 The SDK has two related output styles:
@@ -447,9 +470,14 @@ cargo run --bin main_temp_control
 cargo run --bin main_stochastic_sde_report
 cargo run --bin main_empirical_control_report
 cargo run --bin main_build_site
+cargo run --bin main_studio_workbench
 ```
 
 Report binaries write HTML artifacts under `out/`.
+`main_studio_workbench` writes `out/studio/workbench.html`, a static browser
+tool for inspecting, running, sweeping, and exporting `des/studio-graph/v1`
+model specs. The full site build also writes `out/studio/spec-workbench.html`
+for editing and dragging `des/studio/v1` JSON block diagrams.
 
 ## Development
 
@@ -482,9 +510,11 @@ des_engine
 `-- des
     |-- acausal  # equation-based models, structural diagnostics, UI metadata
     |-- model     # ModelCitizen, RunArtifact, CitizenRegistry
+    |-- authoring # JSON Schema-backed model graph authoring and codegen
     |-- streaming # JSONL solver contracts for LP, MILP, MDP, POMDP
     |-- plugin    # external process plugin contract and HTML player renderer
     |-- service   # HTTP service descriptor and extension seam
+    |-- equation  # JSON/LaTeX/XML equation specs as first-class model citizens
     |-- studio    # visual block graph and runtime cell layer
     |-- hybrid    # mixed continuous/discrete/event simulation
     |-- fel       # future-event-list simulation primitives and examples

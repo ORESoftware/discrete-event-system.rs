@@ -9,6 +9,8 @@
 //!   [`ModelCitizen`], [`ModelDescriptor`], [`RunArtifact`].
 //! * **Compile equation-based models** — [`compile_acausal_model`],
 //!   [`simulate_acausal_model`], [`acausal_workbench_descriptor`].
+//! * **Author schema-backed models** — [`AuthoringSpec`],
+//!   [`authoring_json_schema`], [`compile_hybrid_graph`], [`generate_rust`].
 //! * **Pick an executive for a graph** — [`Executive`], [`ExecCapabilities`],
 //!   [`select`], [`requirements_for_studio`], [`StudioExecutive`],
 //!   [`HybridExecutive`].
@@ -29,8 +31,9 @@
 // First-class model contract (English → JSON spec → run → artifact).
 pub use crate::des::model::{
     generate_model_graph_rust_code, model_authoring_json_schema, model_graph_json_schema,
-    with_builtins, CitizenError, CitizenRegistry, ModelAuthoringSpec, ModelCitizen,
-    ModelDescriptor, ModelGraphKind, ModelGraphSpec, RunArtifact, MODEL_GRAPH_SCHEMA,
+    with_builtins, CitizenError, CitizenRegistry, EquationCitizen, ModelAuthoringSpec,
+    ModelCitizen, ModelDescriptor, ModelGraphKind, ModelGraphSpec, RunArtifact, EQUATION_SCHEMA,
+    MODEL_GRAPH_SCHEMA,
 };
 
 // Acausal/equation-based modeling surface.
@@ -40,6 +43,13 @@ pub use crate::des::acausal::{
     AcausalEquationSpec, AcausalError, AcausalModelSpec, AcausalPaletteItem, AcausalVariableKind,
     AcausalVariableSpec, AcausalWorkbenchDescriptor, CompiledAcausalModel, StructuralDiagnostics,
     ACAUSAL_SCHEMA,
+};
+
+// Schema-backed model authoring + Rust code generation.
+pub use crate::des::authoring::{
+    authoring_json_schema, compile_hybrid_graph, dependency_graph, example_spec,
+    flatten_physical_networks, generate_rust, library_catalog, model_browser, parse_authoring_spec,
+    AuthoringCitizen, AuthoringSpec, AUTHORING_SCHEMA,
 };
 
 // Executive-selection seam.

@@ -41,6 +41,13 @@ const MODELING_TOOLS: &[HtmlIndexSpec] = &[
         description:
             "OpenMDAO-style N2 dependency view, objective/constraint metadata, local run controls, and a parameter-sweep driver.",
     },
+    HtmlIndexSpec {
+        kind: "workbench",
+        title: "Studio JSON Workbench",
+        href: "studio/spec-workbench.html",
+        description:
+            "Author, inspect, run, drag, and export JSON block diagrams with nested runtime cells.",
+    },
 ];
 
 const CONTROL_ANIMATIONS: &[HtmlIndexSpec] = &[
@@ -96,6 +103,14 @@ const CONTROL_ANIMATIONS: &[HtmlIndexSpec] = &[
         description: "Bidirectional heat-pump control with night heating and afternoon cooling.",
     },
 ];
+
+const STUDIO_TOOLS: &[HtmlIndexSpec] = &[HtmlIndexSpec {
+    kind: "workbench",
+    title: "DES Studio Workbench",
+    href: "studio/workbench.html",
+    description:
+        "Author, inspect, run, drag, and export JSON block diagrams with the visual-block studio.",
+}];
 
 const NUMERICAL_SOLVERS: &[HtmlIndexSpec] = &[
     HtmlIndexSpec {
@@ -291,6 +306,10 @@ pub fn generate_html_artifacts() {
         eprintln!("  ! Modeling Workbench generation failed: {e}");
     } else {
         eprintln!("  • out/studio/workbench.html");
+    }
+    match crate::des::studio::write_workbench("out/studio/spec-workbench.html") {
+        Ok(path) => eprintln!("  • {}", path.display()),
+        Err(e) => eprintln!("  ! Studio JSON Workbench generation failed: {e}"),
     }
 
     eprintln!("Regenerating control-system animations...");

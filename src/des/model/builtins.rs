@@ -8,7 +8,9 @@
 use serde_json::{json, Value};
 
 use crate::des::acausal::AcausalCitizen;
+use crate::des::authoring::AuthoringCitizen;
 use crate::des::decision::{MdpCitizen, PomdpCitizen};
+use crate::des::equation::EquationCitizen;
 use crate::des::hybrid::{
     demos as hybrid_demos, executive::simulate, spec as hybrid_spec, HYBRID_GRAPH_SCHEMA,
 };
@@ -148,14 +150,17 @@ impl ModelCitizen for HybridCitizen {
 }
 
 /// A registry pre-loaded with the built-in first-class citizens: acausal
-/// equation models, MDP, POMDP, the hybrid block-diagram engine, and the
-/// visual-block studio - peers under one contract.
+/// equation models, MDP, POMDP, schema-backed authoring, the hybrid
+/// block-diagram engine, equation specs, and the visual-block studio - peers
+/// under one contract.
 pub fn with_builtins() -> CitizenRegistry {
     let mut reg = CitizenRegistry::new();
     reg.register(Box::new(AcausalCitizen));
     reg.register(Box::new(MdpCitizen));
     reg.register(Box::new(PomdpCitizen));
+    reg.register(Box::new(AuthoringCitizen));
     reg.register(Box::new(HybridCitizen));
+    reg.register(Box::new(EquationCitizen));
     reg.register(Box::new(StudioCitizen));
     reg
 }
@@ -171,7 +176,9 @@ mod tests {
         assert!(kinds.contains(&"acausal".to_string()));
         assert!(kinds.contains(&"mdp".to_string()));
         assert!(kinds.contains(&"pomdp".to_string()));
+        assert!(kinds.contains(&"model-graph".to_string()));
         assert!(kinds.contains(&"hybrid".to_string()));
+        assert!(kinds.contains(&"equation".to_string()));
         assert!(kinds.contains(&"studio".to_string()));
     }
 

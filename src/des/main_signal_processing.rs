@@ -275,7 +275,7 @@ fn radon_frames(result: &RadonRunResult, tick_start: usize) -> Vec<Value> {
     let max_value = result
         .outputs
         .iter()
-        .map(|o| o.value.abs())
+        .map(|o| o.value.re.abs())
         .fold(1.0_f64, f64::max);
     result
         .outputs
@@ -301,13 +301,13 @@ fn radon_frames(result: &RadonRunResult, tick_start: usize) -> Vec<Value> {
             let dx = 150.0 * (-theta.sin());
             let dy = 150.0 * (-theta.cos());
             shapes.push(shape_line(cx - dx, cy - dy, cx + dx, cy + dy, "#dc2626", 3.0));
-            let bar_h = 220.0 * output.value.abs() / max_value;
+            let bar_h = 220.0 * output.value.re.abs() / max_value;
             shapes.push(shape_rect(475.0, 330.0 - bar_h, 70.0, bar_h, "#60a5fa", "#1d4ed8"));
             shapes.push(shape_text(455.0, 360.0, output.label.clone(), 12.0, "#0f172a"));
             shapes.push(shape_text(
                 455.0,
                 382.0,
-                format!("value={}", to_precision(output.value, 5)),
+                format!("value={}", to_precision(output.value.re, 5)),
                 12.0,
                 "#475569",
             ));
@@ -317,9 +317,9 @@ fn radon_frames(result: &RadonRunResult, tick_start: usize) -> Vec<Value> {
                 "transform": "radon",
                 "sampleIndex": output.cells_used as f64,
                 "pointIndex": output.point_index as f64,
-                "real": output.value,
-                "imag": 0.0,
-                "magnitude": output.value.abs(),
+                "real": output.value.re,
+                "imag": output.value.im,
+                "magnitude": output.value.re.abs(),
                 "shapes": shapes,
                 "caption": format!("radon: projection {} integrates {} grid cells", output.label, output.cells_used),
             })
@@ -339,7 +339,8 @@ fn radon_result_json(result: &RadonRunResult) -> Value {
             "label": &o.label,
             "theta": o.theta,
             "rho": o.rho,
-            "value": o.value,
+            "value": o.value.re,
+            "imag": o.value.im,
             "cellsUsed": o.cells_used,
             "absoluteError": o.absolute_error,
         })).collect::<Vec<_>>(),
@@ -748,7 +749,7 @@ pub fn run() {
         println!(
             "  {:<12} value={} cells={}",
             output.label,
-            to_precision(output.value, 6),
+            to_precision(output.value.re, 6),
             output.cells_used
         );
     }

@@ -166,7 +166,7 @@ fn longest_on_field_run(problem: &SoccerProblem, schedule: &Schedule) -> usize {
     for p in 0..problem.num_players {
         let mut run = 0usize;
         for t in 0..problem.num_periods {
-            let on_field = schedule.assignment[t].iter().any(|&q| q == p as i64);
+            let on_field = schedule.assignment[t].contains(&(p as i64));
             if on_field {
                 run += 1;
                 longest = longest.max(run);

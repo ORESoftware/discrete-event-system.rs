@@ -367,7 +367,7 @@ fn normalize_omega_points(values: Option<&[f64]>) -> Vec<ComplexPoint> {
         .collect()
 }
 
-fn normalize_bin_points(values: Option<&[usize]>, n: usize) -> Vec<ComplexPoint> {
+fn normalize_bin_points(values: Option<&[usize]>, n: usize, inverse: bool) -> Vec<ComplexPoint> {
     require(Preconditions::integer_in_range(
         "dft-transform",
         "sample count",
@@ -391,7 +391,7 @@ fn normalize_bin_points(values: Option<&[usize]>, n: usize) -> Vec<ComplexPoint>
             ));
             ComplexPoint {
                 re: k as f64,
-                im: n as f64,
+                im: if inverse { -(n as f64) } else { n as f64 },
                 label: format!("k={k}"),
             }
         })
@@ -438,6 +438,48 @@ fn normalize_wavelet_points(values: Option<&[WaveletPointInput]>) -> Vec<Complex
         .collect()
 }
 
+fn normalize_wavelet_grid_points(
+    scales: Option<&[f64]>,
+    translations: Option<&[f64]>,
+) -> Vec<ComplexPoint> {
+    let default_scales = [1.0];
+    let default_translations = [0.0];
+    let scale_values = match scales {
+        Some(v) if !v.is_empty() => v,
+        _ => &default_scales,
+    };
+    let translation_values = match translations {
+        Some(v) if !v.is_empty() => v,
+        _ => &default_translations,
+    };
+    let mut points = Vec::new();
+    for &scale in scale_values {
+        require(Preconditions::positive("wavelet-transform", "scale", scale));
+        for &translation in translation_values {
+            require(Preconditions::finite(
+                "wavelet-transform",
+                "translation",
+                translation,
+            ));
+            points.push(ComplexPoint {
+                re: scale,
+                im: translation,
+                label: format!("a={scale},b={translation}"),
+            });
+        }
+    }
+    points
+}
+
+fn wavelet_points_from_params(params: &WaveletTransformParams) -> Vec<ComplexPoint> {
+    if let Some(points) = params.scale_shift_values.as_deref() {
+        if !points.is_empty() {
+            return normalize_wavelet_points(Some(points));
+        }
+    }
+    normalize_wavelet_grid_points(params.scales.as_deref(), params.translations.as_deref())
+}
+
 // ── Records / result shapes ───────────────────────────────────────────────────
 
 #[derive(Clone, Debug)]
@@ -445,6 +487,7 @@ pub struct TransformSampleRecord {
     pub sample_index: usize,
     pub abscissa_name: AbscissaName,
     pub abscissa: f64,
+    pub ordinate: Option<f64>,
     pub value: f64,
     pub weight: f64,
 }
@@ -551,6 +594,8 @@ pub struct DiscreteFourierTransformParams {
     pub constants: Option<HashMap<String, f64>>,
     pub terms: Option<usize>,
     pub k_values: Option<Vec<usize>>,
+    pub inverse: Option<bool>,
+    pub normalize: Option<bool>,
     pub tolerance: Option<f64>,
 }
 
@@ -560,13 +605,20 @@ pub struct FastFourierTransformParams {
     pub expression: Option<String>,
     pub constants: Option<HashMap<String, f64>>,
     pub terms: Option<usize>,
+    pub k_values: Option<Vec<usize>>,
+    pub inverse: Option<bool>,
+    pub normalize: Option<bool>,
     pub tolerance: Option<f64>,
 }
+
+pub type DftTransformParams = DiscreteFourierTransformParams;
+pub type FftTransformParams = FastFourierTransformParams;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WaveletMother {
     Haar,
     MexicanHat,
+    Morlet,
     MorletReal,
 }
 
@@ -581,10 +633,13 @@ impl WaveletMother {
         match self {
             WaveletMother::Haar => "haar",
             WaveletMother::MexicanHat => "mexican-hat",
+            WaveletMother::Morlet => "morlet",
             WaveletMother::MorletReal => "morlet-real",
         }
     }
 }
+
+pub type WaveletKind = WaveletMother;
 
 #[derive(Clone, Debug)]
 pub struct WaveletPointInput {
@@ -603,6 +658,8 @@ pub struct WaveletTransformParams {
     pub dt: Option<f64>,
     pub quadrature: Option<QuadratureRule>,
     pub scale_shift_values: Option<Vec<WaveletPointInput>>,
+    pub scales: Option<Vec<f64>>,
+    pub translations: Option<Vec<f64>>,
     pub mother: Option<WaveletMother>,
     pub tolerance: Option<f64>,
 }
@@ -615,6 +672,9 @@ pub struct MellinTransformParams {
     pub t0: Option<f64>,
     pub t1: Option<f64>,
     pub dt: Option<f64>,
+    pub x0: Option<f64>,
+    pub x1: Option<f64>,
+    pub dx: Option<f64>,
     pub quadrature: Option<QuadratureRule>,
     pub s_values: Option<Vec<ComplexPointInput>>,
     pub tolerance: Option<f64>,
@@ -630,6 +690,7 @@ pub struct RadonProjectionInput {
 #[derive(Clone, Debug, Default)]
 pub struct RadonTransformParams {
     pub grid: Vec<Vec<f64>>,
+    pub image: Option<Vec<Vec<f64>>>,
     /// x-coordinate of the first cell center. Defaults to a centered grid.
     pub x0: Option<f64>,
     /// y-coordinate of the first cell center. Defaults to a centered grid.
@@ -637,6 +698,8 @@ pub struct RadonTransformParams {
     pub dx: Option<f64>,
     pub dy: Option<f64>,
     pub projections: Option<Vec<RadonProjectionInput>>,
+    pub theta_values: Option<Vec<f64>>,
+    pub rho_values: Option<Vec<f64>>,
     /// Full acceptance width around a line. Defaults to one grid-cell diagonal.
     pub line_width: Option<f64>,
     pub tolerance: Option<f64>,
@@ -648,8 +711,8 @@ pub struct RadonOutputPoint {
     pub label: String,
     pub theta: f64,
     pub rho: f64,
-    pub value: f64,
-    pub direct_reference: f64,
+    pub value: ComplexValue,
+    pub direct_reference: ComplexValue,
     pub absolute_error: f64,
     pub cells_used: usize,
 }
@@ -1264,6 +1327,7 @@ fn build_z_samples(params: &ZTransformParams) -> Vec<TransformSampleRecord> {
             sample_index,
             abscissa_name: AbscissaName::N,
             abscissa: (start_index + sample_index as i64) as f64,
+            ordinate: None,
             value,
             weight: 1.0,
         })
@@ -1308,8 +1372,13 @@ fn build_dft_samples(params: &DiscreteFourierTransformParams) -> Vec<TransformSa
             sample_index,
             abscissa_name: AbscissaName::N,
             abscissa: sample_index as f64,
+            ordinate: None,
             value,
-            weight: 1.0,
+            weight: if params.normalize.unwrap_or(false) {
+                1.0 / sequence.len() as f64
+            } else {
+                1.0
+            },
         })
         .collect()
 }
@@ -1321,6 +1390,8 @@ fn build_fft_samples(params: &FastFourierTransformParams) -> Vec<TransformSample
         constants: params.constants.clone(),
         terms: params.terms,
         k_values: None,
+        inverse: params.inverse,
+        normalize: params.normalize,
         tolerance: params.tolerance,
     })
 }
@@ -1394,6 +1465,7 @@ fn build_continuous_samples(model: &str, params: &ContinuousParams) -> Vec<Trans
             sample_index,
             abscissa_name: AbscissaName::T,
             abscissa: t0 + sample_index as f64 * dt,
+            ordinate: None,
             value,
             weight: quadrature_weight(sample_index, n, dt, quadrature),
         })
@@ -1444,6 +1516,7 @@ fn build_expression_samples(
         let t = t0 + i as f64 * dt;
         let mut env: Env = constants.clone();
         env.insert("t".to_string(), t);
+        env.insert("x".to_string(), t);
         env.insert("time".to_string(), t);
         env.insert("tick".to_string(), i as f64);
         let value = evaluate(&ast, &env);
@@ -1493,7 +1566,7 @@ fn dft_kernel(sample: &TransformSampleRecord, point: &ComplexPoint) -> ComplexVa
     let n = point.im;
     let k = point.re;
     let angle = -std::f64::consts::TAU * k * sample.sample_index as f64 / n;
-    complex_scale(complex_exp(0.0, angle), sample.value)
+    complex_scale(complex_exp(0.0, angle), sample.value * sample.weight)
 }
 
 fn haar_wavelet_kernel(sample: &TransformSampleRecord, point: &ComplexPoint) -> ComplexValue {
@@ -1579,7 +1652,7 @@ fn bit_reverse(mut x: usize, bits: usize) -> usize {
     y
 }
 
-fn fft_radix2(input: &[ComplexValue]) -> Vec<ComplexValue> {
+fn fft_radix2(input: &[ComplexValue], inverse: bool, normalize: bool) -> Vec<ComplexValue> {
     let n = input.len();
     if !is_power_of_two(n) {
         panic!("fft-transform requires a non-empty power-of-two sample count");
@@ -1592,7 +1665,7 @@ fn fft_radix2(input: &[ComplexValue]) -> Vec<ComplexValue> {
     let mut len = 2usize;
     while len <= n {
         let half = len / 2;
-        let theta = -std::f64::consts::TAU / len as f64;
+        let theta = if inverse { 1.0 } else { -1.0 } * std::f64::consts::TAU / len as f64;
         let w_len = complex_exp(0.0, theta);
         let mut start = 0usize;
         while start < n {
@@ -1608,6 +1681,10 @@ fn fft_radix2(input: &[ComplexValue]) -> Vec<ComplexValue> {
         }
         len *= 2;
     }
+    if normalize {
+        let scale = 1.0 / n as f64;
+        out.iter_mut().for_each(|z| *z = complex_scale(*z, scale));
+    }
     out
 }
 
@@ -1615,9 +1692,10 @@ fn fft_reference_outputs(
     kind: TransformKind,
     samples: &[TransformSampleRecord],
     values: &[ComplexValue],
+    inverse: bool,
     tolerance: f64,
 ) -> (Vec<TransformOutputPoint>, Vec<ValidationCheck>) {
-    let points = normalize_bin_points(None, samples.len());
+    let points = normalize_bin_points(None, samples.len(), inverse);
     let direct = direct_transform(samples, &points, dft_kernel);
     let outputs: Vec<TransformOutputPoint> = values
         .iter()
@@ -1642,20 +1720,25 @@ fn fft_reference_outputs(
     (outputs, validation)
 }
 
+fn radon_grid(params: &RadonTransformParams) -> &[Vec<f64>] {
+    if !params.grid.is_empty() {
+        &params.grid
+    } else {
+        params.image.as_deref().unwrap_or(&[])
+    }
+}
+
 fn validate_grid(params: &RadonTransformParams) -> (usize, usize, f64, f64, f64, f64, f64) {
-    require(Preconditions::non_empty(
-        "radon-transform",
-        "grid",
-        &params.grid,
-    ));
-    let height = params.grid.len();
-    let width = params.grid[0].len();
+    let grid = radon_grid(params);
+    require(Preconditions::non_empty("radon-transform", "grid", grid));
+    let height = grid.len();
+    let width = grid[0].len();
     require(Preconditions::non_empty(
         "radon-transform",
         "grid[0]",
-        &params.grid[0],
+        &grid[0],
     ));
-    for (row, values) in params.grid.iter().enumerate() {
+    for (row, values) in grid.iter().enumerate() {
         require(Preconditions::length_eq(
             "radon-transform",
             &format!("grid[{row}]"),
@@ -1731,6 +1814,44 @@ fn normalize_radon_projections(
             }
         })
         .collect()
+}
+
+fn normalize_radon_projection_grid(
+    theta_values: Option<&[f64]>,
+    rho_values: Option<&[f64]>,
+) -> Vec<RadonProjectionInput> {
+    let default_theta = [0.0];
+    let default_rho = [0.0];
+    let theta_values = match theta_values {
+        Some(v) if !v.is_empty() => v,
+        _ => &default_theta,
+    };
+    let rho_values = match rho_values {
+        Some(v) if !v.is_empty() => v,
+        _ => &default_rho,
+    };
+    let mut projections = Vec::new();
+    for &theta in theta_values {
+        require(Preconditions::finite("radon-transform", "theta", theta));
+        for &rho in rho_values {
+            require(Preconditions::finite("radon-transform", "rho", rho));
+            projections.push(RadonProjectionInput {
+                label: Some(format!("theta={theta},rho={rho}")),
+                theta,
+                rho,
+            });
+        }
+    }
+    projections
+}
+
+fn radon_projections_from_params(params: &RadonTransformParams) -> Vec<RadonProjectionInput> {
+    if let Some(projections) = params.projections.as_deref() {
+        if !projections.is_empty() {
+            return normalize_radon_projections(Some(projections));
+        }
+    }
+    normalize_radon_projection_grid(params.theta_values.as_deref(), params.rho_values.as_deref())
 }
 
 fn radon_projection_value(
@@ -1859,11 +1980,19 @@ pub fn run_fourier_transform(params: FourierTransformParams) -> TransformRunResu
 
 pub fn run_dft_transform(params: DiscreteFourierTransformParams) -> TransformRunResult {
     let samples = build_dft_samples(&params);
-    let points = normalize_bin_points(params.k_values.as_deref(), samples.len());
+    let inverse = params.inverse.unwrap_or(false);
+    let normalize = params.normalize.unwrap_or(false);
+    let points = normalize_bin_points(params.k_values.as_deref(), samples.len(), inverse);
+    let convention = if inverse {
+        "X[k] = sum_n x[n] exp(+i 2*pi*k*n/N), with optional 1/N normalization."
+    } else if normalize {
+        "X[k] = (1/N) sum_n x[n] exp(-i 2*pi*k*n/N), evaluated over supplied DFT bins."
+    } else {
+        "X[k] = sum_n x[n] exp(-i 2*pi*k*n/N), evaluated over supplied DFT bins."
+    };
     run_transform_pipeline(TransformPipelineArgs {
         kind: TransformKind::Dft,
-        convention: "X[k] = sum_n x[n] exp(-i 2*pi*k*n/N), evaluated over supplied DFT bins."
-            .to_string(),
+        convention: convention.to_string(),
         samples,
         points,
         kernel: dft_kernel,
@@ -1883,10 +2012,17 @@ pub fn run_fft_transform(params: FastFourierTransformParams) -> TransformRunResu
         .iter()
         .map(|sample| complex(sample.value, 0.0))
         .collect();
-    let fft_values = fft_radix2(&values);
+    let inverse = params.inverse.unwrap_or(false);
+    let normalize = params.normalize.unwrap_or(false);
+    let fft_values = fft_radix2(&values, inverse, normalize);
     let tolerance = params.tolerance.unwrap_or(1e-9);
-    let (outputs, validation) =
-        fft_reference_outputs(TransformKind::Fft, &samples, &fft_values, tolerance);
+    let (outputs, validation) = fft_reference_outputs(
+        TransformKind::Fft,
+        &samples,
+        &fft_values,
+        inverse,
+        tolerance,
+    );
     let n = samples.len();
     let stage_count = n.trailing_zeros() as usize;
     let stations = vec!["fft-butterfly-network".to_string()];
@@ -1929,11 +2065,12 @@ pub fn run_wavelet_transform(params: WaveletTransformParams) -> TransformRunResu
         quadrature: params.quadrature,
     };
     let samples = build_continuous_samples("wavelet-transform", &continuous);
-    let points = normalize_wavelet_points(params.scale_shift_values.as_deref());
+    let points = wavelet_points_from_params(&params);
     let mother = params.mother.unwrap_or_default();
     let kernel: KernelFn = match mother {
         WaveletMother::Haar => haar_wavelet_kernel,
         WaveletMother::MexicanHat => mexican_hat_wavelet_kernel,
+        WaveletMother::Morlet => morlet_real_wavelet_kernel,
         WaveletMother::MorletReal => morlet_real_wavelet_kernel,
     };
     run_transform_pipeline(TransformPipelineArgs {
@@ -1954,9 +2091,9 @@ pub fn run_mellin_transform(params: MellinTransformParams) -> TransformRunResult
         samples: &params.samples,
         expression: &params.expression,
         constants: &params.constants,
-        t0: params.t0,
-        t1: params.t1,
-        dt: params.dt,
+        t0: params.x0.or(params.t0),
+        t1: params.x1.or(params.t1),
+        dt: params.dx.or(params.dt),
         quadrature: params.quadrature,
     };
     let samples = build_continuous_samples("mellin-transform", &continuous);
@@ -1984,14 +2121,16 @@ pub fn run_mellin_transform(params: MellinTransformParams) -> TransformRunResult
 
 pub fn run_radon_transform(params: RadonTransformParams) -> RadonRunResult {
     let (width, height, dx, dy, x0, y0, line_width) = validate_grid(&params);
-    let projections = normalize_radon_projections(params.projections.as_deref());
+    let grid = radon_grid(&params);
+    let projections = radon_projections_from_params(&params);
     let tolerance = params.tolerance.unwrap_or(1e-12);
     let outputs: Vec<RadonOutputPoint> = projections
         .iter()
         .enumerate()
         .map(|(point_index, p)| {
             let (value, cells_used) =
-                radon_projection_value(&params.grid, p.theta, p.rho, dx, dy, x0, y0, line_width);
+                radon_projection_value(grid, p.theta, p.rho, dx, dy, x0, y0, line_width);
+            let value = complex(value, 0.0);
             let direct_reference = value;
             RadonOutputPoint {
                 point_index,
@@ -2003,7 +2142,7 @@ pub fn run_radon_transform(params: RadonTransformParams) -> RadonRunResult {
                 rho: p.rho,
                 value,
                 direct_reference,
-                absolute_error: (value - direct_reference).abs(),
+                absolute_error: complex_abs_diff(value, direct_reference),
                 cells_used,
             }
         })
@@ -2014,8 +2153,8 @@ pub fn run_radon_transform(params: RadonTransformParams) -> RadonRunResult {
             name: format!("radon-transform.reference.{}", output.label),
             group: Some("signal-transform-reference".to_string()),
             passed: output.absolute_error <= tolerance,
-            observed: Some(to_precision(output.value, 6)),
-            expected: Some(to_precision(output.direct_reference, 6)),
+            observed: Some(format_complex(output.value, 6)),
+            expected: Some(format_complex(output.direct_reference, 6)),
             details: None,
         })
         .collect();

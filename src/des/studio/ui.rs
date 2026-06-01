@@ -17,7 +17,11 @@ use super::sweep::run_first_design_sweep;
 fn script_json(value: &Value) -> String {
     serde_json::to_string(value)
         .unwrap_or_else(|_| "null".to_string())
-        .replace("</script", "<\\/script")
+        .replace('&', "\\u0026")
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
 }
 
 /// Render the Studio workbench as a single HTML document.
@@ -49,7 +53,7 @@ pub fn write_workbench_html(path: impl AsRef<Path>, spec: &StudioModelSpec) -> i
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let html = render_workbench_html(spec).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let html = render_workbench_html(spec).map_err(io::Error::other)?;
     fs::write(path, html)
 }
 
@@ -388,6 +392,10 @@ let selectedId = model.blocks[0] ? model.blocks[0].id : "";
 let activeView = "canvas";
 let lastRun = null;
 let lastSweep = INITIAL_SWEEP && INITIAL_SWEEP.cases ? INITIAL_SWEEP : null;
+const MAX_MODEL_BLOCKS = 128;
+const MAX_MODEL_WIRES = 512;
+const MAX_RUN_STEPS = 5000;
+const MAX_SWEEP_SAMPLES = 200;
 
 const byKind = new Map(PALETTE.map(item => [item.kind, item]));
 const stage = document.getElementById("stage");
@@ -414,6 +422,30 @@ function svg(name, attrs = {}) {
 }
 function fmt(n) {
   return Number.isFinite(n) ? Number(n).toFixed(Math.abs(n) >= 10 ? 2 : 3) : "n/a";
+}
+function finiteNumber(value, label, fallback) {
+  const raw = value === undefined || value === null || value === "" ? fallback : value;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) throw new Error(`${label} must be finite`);
+  return n;
+}
+function positiveNumber(value, label, fallback) {
+  const n = finiteNumber(value, label, fallback);
+  if (!(n > 0)) throw new Error(`${label} must be positive`);
+  return n;
+}
+function boundedInteger(value, label, min, max, fallback) {
+  const n = Math.round(finiteNumber(value, label, fallback));
+  if (n < min || n > max) throw new Error(`${label} must be between ${min} and ${max}`);
+  return n;
+}
+function requireModelShape(spec) {
+  if (!spec || typeof spec !== "object" || Array.isArray(spec)) throw new Error("Model spec must be an object");
+  if (!Array.isArray(spec.blocks)) throw new Error("Model spec blocks must be an array");
+  if (!Array.isArray(spec.wires)) spec.wires = [];
+  if (spec.blocks.length > MAX_MODEL_BLOCKS) throw new Error(`Model is limited to ${MAX_MODEL_BLOCKS} blocks`);
+  if (spec.wires.length > MAX_MODEL_WIRES) throw new Error(`Model is limited to ${MAX_MODEL_WIRES} wires`);
+  return spec;
 }
 function blockById(id) {
   return model.blocks.find(block => block.id === id);
@@ -462,6 +494,10 @@ function nextId(kind) {
 function addBlock(kind) {
   const item = byKind.get(kind);
   if (!item) return;
+  if (model.blocks.length >= MAX_MODEL_BLOCKS) {
+    bottom.replaceChildren(el("div", { class: "error", text: `Model is limited to ${MAX_MODEL_BLOCKS} blocks` }));
+    return;
+  }
   const id = nextId(kind);
   model.blocks.push({
     id,
@@ -700,6 +736,7 @@ function smallTable(rows) {
   return table;
 }
 function compileModel() {
+  requireModelShape(model);
   const index = new Map(model.blocks.map((block, idx) => [block.id, idx]));
   const driver = new Map();
   const adj = model.blocks.map(() => []);
@@ -786,13 +823,13 @@ function stepBlock(block, t, inputs, state) {
 }
 function runLocal(specModel = model) {
   const original = model;
-  model = specModel;
+  model = requireModelShape(specModel);
   try {
     const compiled = compileModel();
     const state = {};
     const series = Object.fromEntries(model.blocks.map(block => [block.id, []]));
-    const dt = Number(model.dt || 0.1);
-    const steps = Math.max(1, Math.round(Number(model.steps || 1)));
+    const dt = positiveNumber(model.dt, "model.dt", 0.1);
+    const steps = boundedInteger(model.steps, "model.steps", 1, MAX_RUN_STEPS, 1);
     for (let k = 0; k < steps; k++) {
       const t = k * dt;
       const outs = model.blocks.map(() => []);
@@ -894,7 +931,7 @@ function renderN2() {
 function runSweepLocal() {
   const dv = model.designVariables && model.designVariables[0];
   if (!dv) return null;
-  const samples = Math.max(1, Math.round(Number(dv.samples || 1)));
+  const samples = boundedInteger(dv.samples, "design variable samples", 1, MAX_SWEEP_SAMPLES, 1);
   const values = samples === 1 ? [Number(dv.lower)] : Array.from({ length: samples }, (_, i) => Number(dv.lower) + (Number(dv.upper) - Number(dv.lower)) * i / (samples - 1));
   const cases = [];
   for (const value of values) {
@@ -997,7 +1034,7 @@ function renderJsonView() {
   const message = el("span", { class: "status", text: "" });
   const apply = el("button", { type: "button", class: "primary", text: "Apply", onclick: () => {
     try {
-      model = JSON.parse(area.value);
+      model = requireModelShape(JSON.parse(area.value));
       selectedId = model.blocks[0] ? model.blocks[0].id : "";
       lastRun = null;
       refresh();
@@ -1022,6 +1059,7 @@ function showView(view) {
   if (view === "json") renderJsonView();
 }
 function refresh() {
+  requireModelShape(model);
   analysis = analyzeLocal();
   document.getElementById("model-subtitle").textContent = `${model.name || "untitled"} / ${model.blocks.length} blocks / ${model.wires.length} wires`;
   renderTopbarControls();
@@ -1046,6 +1084,7 @@ runAndRender();
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn workbench_embeds_model_palette_and_views() {
@@ -1054,5 +1093,16 @@ mod tests {
         assert!(html.contains("const PALETTE = ["));
         assert!(html.contains("view-tabs"));
         assert!(html.contains("gain.k"));
+        assert!(html.contains("MAX_RUN_STEPS"));
+    }
+
+    #[test]
+    fn script_json_escapes_script_breakout() {
+        let encoded = script_json(&json!({
+            "payload": "</script><script>alert(1)</script>"
+        }));
+        assert!(!encoded.contains("</script"));
+        assert!(encoded.contains("\\u003c/script"));
+        assert!(encoded.contains("\\u003cscript"));
     }
 }

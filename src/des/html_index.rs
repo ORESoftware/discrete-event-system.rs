@@ -8,6 +8,7 @@
 #![allow(dead_code)]
 
 use crate::des::animation::run_report::{IndexEntry, IndexGroup};
+use serde_json::{json, Value};
 
 /// Metadata for one HTML page on the landing index.
 #[derive(Clone, Copy, Debug)]
@@ -395,6 +396,20 @@ pub fn generate_html_artifacts() {
     eprintln!("Generating Delivery Scheduler...");
     crate::des::delivery_planner::write_delivery_planner_artifacts();
 
+    eprintln!("Generating decision, hybrid, and plugin players...");
+    match generate_decision_pages() {
+        Ok(()) => eprintln!("  • out/decision/*.html"),
+        Err(e) => eprintln!("  ! decision player generation failed: {e}"),
+    }
+    match generate_hybrid_pages() {
+        Ok(()) => eprintln!("  • out/hybrid/*.html"),
+        Err(e) => eprintln!("  ! hybrid player generation failed: {e}"),
+    }
+    match generate_plugin_pages() {
+        Ok(()) => eprintln!("  • out/plugin/*.html"),
+        Err(e) => eprintln!("  ! plugin player generation failed: {e}"),
+    }
+
     eprintln!("Regenerating control-system animations...");
     generate_wind_mppt_pages();
     generate_dc_motor_pages();
@@ -439,30 +454,383 @@ pub fn generate_html_artifacts() {
         Err(e) => eprintln!("  ! vehicle jump planner generation failed: {e}"),
     }
 
-    eprintln!("Generating two-disease epidemic animation...");
+    eprintln!("Generating extended simulation players...");
+    crate::des::main_elevator_highrise::run();
+    crate::des::main_factmachine_markets::run();
     generate_two_disease_page();
+    crate::des::main_shadow_eval::run();
+    crate::des::main_soccer_rotation::run_anim();
+}
+
+fn with_opts(mut spec: Value, opts: Value) -> Value {
+    if let (Value::Object(map), Value::Object(extra)) = (&mut spec, opts) {
+        for (key, value) in extra {
+            map.insert(key, value);
+        }
+    }
+    spec
+}
+
+fn generate_decision_pages() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::des::decision::{machine_maintenance_mdp, tiger_pomdp};
+    use crate::des::exec::{
+        requirements_for_studio, select, ExecCapabilities, Executive, HybridExecutive,
+        StudioExecutive,
+    };
+    use crate::des::hybrid::demos as hybrid_demos;
+    use crate::des::model::with_builtins;
+    use crate::des::studio::queue_line;
+
+    std::fs::create_dir_all("out/decision")?;
+    let registry = with_builtins();
+
+    let mdp_spec = with_opts(
+        serde_json::to_value(machine_maintenance_mdp())?,
+        json!({ "start": 0, "steps": 24, "seed": 7 }),
+    );
+    let mdp = registry.run("mdp", &mdp_spec)?;
+    std::fs::write("out/decision/mdp.html", mdp.to_player_html())?;
+    std::fs::write("out/decision/mdp.frames.jsonl", mdp.to_jsonl())?;
+
+    let pomdp_spec = with_opts(
+        serde_json::to_value(tiger_pomdp())?,
+        json!({ "method": "lookahead", "horizon": 3, "steps": 18, "seed": 5 }),
+    );
+    let pomdp = registry.run("pomdp", &pomdp_spec)?;
+    std::fs::write("out/decision/pomdp.html", pomdp.to_player_html())?;
+    std::fs::write("out/decision/pomdp.frames.jsonl", pomdp.to_jsonl())?;
+
+    let hybrid = registry.run("hybrid", &json!({ "demo": "bouncing-ball" }))?;
+    std::fs::write("out/decision/hybrid.html", hybrid.to_player_html())?;
+
+    for demo in ["signal-chain", "mixer", "queue-line"] {
+        let studio = registry.run("studio", &json!({ "demo": demo }))?;
+        std::fs::write(
+            format!("out/decision/studio-{demo}.html"),
+            studio.to_player_html(),
+        )?;
+    }
+
+    let demo = queue_line()?;
+    let req = requirements_for_studio(&demo.compiled);
+    let _chosen = select(req).expect("an executive for a dataflow graph");
+    let mut studio_exec = StudioExecutive::from_demo(demo);
+    let routed = studio_exec.run();
+    std::fs::write("out/decision/exec-routed.html", routed.to_player_html())?;
+
+    let (compiled, opts) = hybrid_demos::closed_loop()?;
+    let mut hybrid_exec = HybridExecutive::new(
+        compiled,
+        opts,
+        "closed-loop",
+        "Hybrid Block Diagram",
+        "Closed-loop control.",
+    );
+    let _ = select(ExecCapabilities {
+        continuous: true,
+        events: true,
+        ..Default::default()
+    });
+    let _ = hybrid_exec.run();
+
+    let descriptors: Vec<Value> = registry
+        .descriptors()
+        .iter()
+        .map(|d| serde_json::to_value(d).unwrap())
+        .collect();
+    std::fs::write(
+        "out/decision/citizens.json",
+        serde_json::to_string_pretty(&json!({ "citizens": descriptors }))?,
+    )?;
+    Ok(())
+}
+
+fn generate_hybrid_pages() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::des::hybrid::{demos, executive::simulate, Trace};
+    use crate::des::plugin::{
+        render_player_html, OutputKind, PlayerKind, PluginManifest, PluginOutput, PluginRun,
+        PluginRuntimeKind, PluginTransportKind, RunSpec, UiControl,
+    };
+
+    fn manifest(id: &str, name: &str, desc: &str, controls: Vec<UiControl>) -> PluginManifest {
+        PluginManifest {
+            id: id.to_string(),
+            name: name.to_string(),
+            version: "1.0.0".to_string(),
+            description: desc.to_string(),
+            runtime: PluginRuntimeKind::Rust,
+            transport: PluginTransportKind::Stdio,
+            language: None,
+            run: RunSpec::new("hybrid-internal", &[]),
+            output: OutputKind::Jsonl,
+            player: PlayerKind::Sim,
+            controls,
+            title: Some(name.to_string()),
+        }
+    }
+
+    fn render(manifest: &PluginManifest, frames: Vec<Value>) -> String {
+        let run = PluginRun {
+            plugin_id: manifest.id.clone(),
+            output: PluginOutput::Jsonl(frames),
+            exit_code: Some(0),
+            stderr: String::new(),
+        };
+        render_player_html(manifest, &run)
+    }
+
+    fn ball_frames(trace: &Trace) -> Vec<Value> {
+        let (ts, hs) = trace.series("ball.p0[0]").expect("height channel");
+        let (_, vs) = trace.series("ball.p0[1]").expect("velocity channel");
+        ts.iter()
+            .enumerate()
+            .map(|(k, &t)| {
+                let h = hs[k];
+                let cy = 222.0 - h.max(0.0) * 180.0;
+                json!({
+                    "t": t,
+                    "height": h,
+                    "velocity": vs[k],
+                    "shapes": [
+                        { "kind": "line", "x1": 20.0, "y1": 224.0, "x2": 180.0, "y2": 224.0,
+                          "stroke": "#475569", "strokeWidth": 2.0 },
+                        { "kind": "circle", "x": 100.0, "y": cy, "r": 12.0, "fill": "#2563eb" },
+                        { "kind": "text", "x": 100.0, "y": 18.0, "text": format!("h = {h:.3}"),
+                          "anchor": "middle", "fontSize": 12.0, "fill": "#0f172a" }
+                    ]
+                })
+            })
+            .collect()
+    }
+
+    std::fs::create_dir_all("out/hybrid")?;
+
+    let (compiled, opts) = demos::closed_loop()?;
+    let trace = simulate(&compiled, &opts);
+    let m = manifest(
+        "hybrid-closed-loop",
+        "Hybrid: multirate closed loop",
+        "Continuous first-order plant regulated to a setpoint by a discrete-time PI controller.",
+        vec![
+            UiControl::range("speed", "Speed (fps)", 1.0, 60.0, 1.0, 20.0),
+            UiControl::select(
+                "metric",
+                "Feature signal",
+                &["all", "plant.p0", "pi.p0", "error.p0", "reference.p0"],
+                "all",
+                Some("metric"),
+            ),
+        ],
+    );
+    std::fs::write(
+        "out/hybrid/closed-loop.html",
+        render(&m, trace.to_jsonl_frames()),
+    )?;
+
+    let (compiled, opts) = demos::bouncing_ball()?;
+    let trace = simulate(&compiled, &opts);
+    let m = manifest(
+        "hybrid-bouncing-ball",
+        "Hybrid: bouncing ball",
+        "A continuous plant with a floor zero-crossing and an energy-losing reflection event.",
+        vec![UiControl::range(
+            "speed",
+            "Speed (fps)",
+            1.0,
+            60.0,
+            1.0,
+            30.0,
+        )],
+    );
+    std::fs::write(
+        "out/hybrid/bouncing-ball.html",
+        render(&m, ball_frames(&trace)),
+    )?;
+    Ok(())
+}
+
+fn generate_plugin_pages() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::des::plugin::{
+        render_player_html, OutputKind, PlayerKind, PluginManifest, PluginOutput, PluginRun,
+        PluginRuntimeKind, PluginTransportKind, RunSpec, UiControl,
+    };
+
+    fn run_with(plugin_id: &str, output: PluginOutput) -> PluginRun {
+        PluginRun {
+            plugin_id: plugin_id.to_string(),
+            output,
+            exit_code: Some(0),
+            stderr: String::new(),
+        }
+    }
+
+    std::fs::create_dir_all("out/plugin")?;
+
+    let queue = PluginManifest {
+        id: "queue".to_string(),
+        name: "M/M/1 Queue (embedded Rust plugin demo)".to_string(),
+        version: "1.0.0".to_string(),
+        description:
+            "A deterministic M/M/1-style queue emits JSONL frames; the core renders a sim player."
+                .to_string(),
+        runtime: PluginRuntimeKind::Rust,
+        transport: PluginTransportKind::Stdio,
+        language: None,
+        run: RunSpec::new("embedded-plugin-queue", &[]),
+        output: OutputKind::Jsonl,
+        player: PlayerKind::Sim,
+        controls: vec![
+            UiControl::range("speed", "Speed (fps)", 1.0, 30.0, 1.0, 8.0),
+            UiControl::toggle("show_n", "Show n(t)", true, Some("n")),
+            UiControl::toggle("show_busy", "Show server busy", true, Some("serverBusy")),
+        ],
+        title: None,
+    };
+    let queue_frames = queue_demo_frames();
+    std::fs::write(
+        "out/plugin/queue.html",
+        render_player_html(
+            &queue,
+            &run_with("queue", PluginOutput::Jsonl(queue_frames)),
+        ),
+    )?;
+
+    let lp = PluginManifest {
+        id: "lp".to_string(),
+        name: "LP Solver (embedded Rust plugin demo)".to_string(),
+        version: "1.0.0".to_string(),
+        description: "A single JSON LP result rendered with the plugin results player.".to_string(),
+        runtime: PluginRuntimeKind::Rust,
+        transport: PluginTransportKind::Stdio,
+        language: None,
+        run: RunSpec::new("embedded-plugin-lp", &[]),
+        output: OutputKind::Json,
+        player: PlayerKind::Results,
+        controls: vec![
+            UiControl::toggle("show_vars", "Variables", true, Some("variables")),
+            UiControl::toggle("show_cons", "Constraints", true, Some("constraints")),
+            UiControl::toggle("raw", "Show raw JSON", false, Some("rawJson")),
+        ],
+        title: None,
+    };
+    std::fs::write(
+        "out/plugin/lp.html",
+        render_player_html(&lp, &run_with("lp", PluginOutput::Json(lp_demo_result()))),
+    )?;
+    Ok(())
+}
+
+fn queue_demo_frames() -> Vec<Value> {
+    let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+    let mut next = || {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        ((state >> 32) as u32) as f64 / u32::MAX as f64
+    };
+
+    let lambda = 0.55;
+    let mu = 0.70;
+    let steps = 160;
+    let mut n: i64 = 0;
+    let mut frames = Vec::with_capacity(steps);
+
+    for tick in 0..steps {
+        if next() < lambda {
+            n += 1;
+        }
+        if n > 0 && next() < mu {
+            n -= 1;
+        }
+        let busy = if n > 0 { 1 } else { 0 };
+        let mut shapes = vec![json!({
+            "kind": "rect",
+            "x": 40,
+            "y": 150,
+            "w": 80,
+            "h": 80,
+            "rx": 10,
+            "fill": if busy == 1 { "#16a34a" } else { "#cbd5e1" },
+            "stroke": "#0f172a",
+            "strokeWidth": 2,
+            "label": "server"
+        })];
+        for i in 0..n.min(12) {
+            shapes.push(json!({
+                "kind": "circle",
+                "x": 170 + i * 36,
+                "y": 190,
+                "r": 14,
+                "fill": "#2563eb",
+                "stroke": "#1e3a8a",
+                "strokeWidth": 1.5
+            }));
+        }
+        if n > 12 {
+            shapes.push(json!({
+                "kind": "text",
+                "x": 620,
+                "y": 196,
+                "text": format!("+{} more", n - 12),
+                "fontSize": 13,
+                "fill": "#475569"
+            }));
+        }
+        frames.push(json!({
+            "t": tick as f64,
+            "tick": tick,
+            "n": n,
+            "serverBusy": busy,
+            "shapes": shapes,
+            "caption": format!(
+                "tick {tick} - {n} in system, server {}",
+                if busy == 1 { "busy" } else { "idle" }
+            )
+        }));
+    }
+    frames
+}
+
+fn lp_demo_result() -> Value {
+    let variables = json!([
+        { "name": "pumps", "value": 12.0, "objective": 44.0, "reducedCost": 0.0, "lower": 0.0, "upper": 24.0, "basis": "basic" },
+        { "name": "valves", "value": 18.0, "objective": 31.0, "reducedCost": 0.0, "lower": 0.0, "upper": 30.0, "basis": "basic" },
+        { "name": "motors", "value": 7.0, "objective": 86.0, "reducedCost": 0.0, "lower": 0.0, "upper": 12.0, "basis": "basic" },
+        { "name": "controllers", "value": 5.0, "objective": 73.0, "reducedCost": 0.0, "lower": 0.0, "upper": 10.0, "basis": "basic" },
+        { "name": "frames", "value": 10.0, "objective": 22.0, "reducedCost": 0.0, "lower": 0.0, "upper": 18.0, "basis": "basic" },
+        { "name": "sensors", "value": 14.0, "objective": 18.0, "reducedCost": 0.0, "lower": 0.0, "upper": 25.0, "basis": "basic" },
+        { "name": "premium_kits", "value": 0.0, "objective": 105.0, "reducedCost": -8.25, "lower": 0.0, "upper": 8.0, "basis": "nonbasic" },
+        { "name": "rush_service", "value": 9.0, "objective": 16.0, "reducedCost": 0.0, "lower": 0.0, "upper": null, "basis": "basic" }
+    ]);
+    let constraints = json!([
+        { "name": "labor_hours", "sense": "<=", "activity": 620.0, "rhs": 620.0, "residual": 0.0, "dual": 1.50, "binding": true },
+        { "name": "cnc_hours", "sense": "<=", "activity": 360.0, "rhs": 360.0, "residual": 0.0, "dual": 2.25, "binding": true },
+        { "name": "assembly_slots", "sense": "<=", "activity": 392.0, "rhs": 410.0, "residual": 18.0, "dual": 0.0, "binding": false },
+        { "name": "steel_kg", "sense": "<=", "activity": 900.0, "rhs": 900.0, "residual": 0.0, "dual": 0.42, "binding": true },
+        { "name": "electronics_units", "sense": "<=", "activity": 480.0, "rhs": 480.0, "residual": 0.0, "dual": 1.10, "binding": true },
+        { "name": "packaging_units", "sense": "<=", "activity": 211.0, "rhs": 260.0, "residual": 49.0, "dual": 0.0, "binding": false },
+        { "name": "min_pumps_contract", "sense": ">=", "activity": 12.0, "rhs": 10.0, "residual": 2.0, "dual": 0.0, "binding": false },
+        { "name": "min_valves_contract", "sense": ">=", "activity": 18.0, "rhs": 15.0, "residual": 3.0, "dual": 0.0, "binding": false },
+        { "name": "shipping_pallets", "sense": "<=", "activity": 180.0, "rhs": 180.0, "residual": 0.0, "dual": 0.35, "binding": true },
+        { "name": "quality_budget", "sense": "<=", "activity": 87.0, "rhs": 95.0, "residual": 8.0, "dual": 0.0, "binding": false }
+    ]);
+    json!({
+        "status": "optimal",
+        "objectiveSense": "max",
+        "objective": 2665.0,
+        "iterations": 18,
+        "solveMs": 3.84,
+        "algorithm": "revised-simplex",
+        "variableCount": 8,
+        "constraintCount": 10,
+        "variables": variables,
+        "constraints": constraints
+    })
 }
 
 fn generate_wind_mppt_pages() {
-    let original_controller = std::env::var("CONTROLLER").ok();
-    std::env::remove_var("CONTROLLER");
-    crate::des::main_wind_mppt_anim::run();
-    std::env::set_var("CONTROLLER", "pi");
-    crate::des::main_wind_mppt_anim::run();
-    match original_controller {
-        Some(value) => std::env::set_var("CONTROLLER", value),
-        None => std::env::remove_var("CONTROLLER"),
-    }
-}
-
-fn generate_two_disease_page() {
-    let original_animate = std::env::var("ANIMATE").ok();
-    std::env::set_var("ANIMATE", "1");
-    crate::des::main_two_disease::run();
-    match original_animate {
-        Some(value) => std::env::set_var("ANIMATE", value),
-        None => std::env::remove_var("ANIMATE"),
-    }
+    crate::des::main_wind_mppt_anim::run_controller("optimal-torque");
+    crate::des::main_wind_mppt_anim::run_controller("pi");
 }
 
 fn generate_dc_motor_pages() {
@@ -474,6 +842,16 @@ fn generate_dc_motor_pages() {
     match original_mode {
         Some(value) => std::env::set_var("MODE", value),
         None => std::env::remove_var("MODE"),
+    }
+}
+
+fn generate_two_disease_page() {
+    let original_animate = std::env::var("ANIMATE").ok();
+    std::env::set_var("ANIMATE", "1");
+    crate::des::main_two_disease::run();
+    match original_animate {
+        Some(value) => std::env::set_var("ANIMATE", value),
+        None => std::env::remove_var("ANIMATE"),
     }
 }
 
@@ -505,25 +883,31 @@ mod tests {
     }
 
     #[test]
-    fn registry_covers_calculus_of_variations_players() {
-        let hrefs: HashSet<&str> = CALCULUS_OF_VARIATIONS.iter().map(|s| s.href).collect();
-        for slug in [
-            "shortest-curve",
-            "brachistochrone",
-            "minimal-surface-catenoid",
+    fn registry_covers_featured_control_players() {
+        let hrefs: HashSet<&str> = CONTROL_ANIMATIONS.iter().map(|s| s.href).collect();
+        for expected in [
+            "wind-mppt/animation-optimal-torque.html",
+            "wind-mppt/animation-pi.html",
+            "dc-motor/animation-closed.html",
+            "dc-motor/animation-open.html",
+            "obs-ctrl/animation.html",
+            "empirical-control/player.html",
+            "temp-control/animation.html",
+            "temp-control/animation-heat-cool.html",
         ] {
-            let expected = format!("calculus-of-variations/{slug}.html");
             assert!(
-                hrefs.contains(expected.as_str()),
-                "missing calculus-of-variations index entry for {slug}"
+                hrefs.contains(expected),
+                "missing index entry for {expected}"
             );
         }
     }
 
     #[test]
-    fn registry_includes_signal_processing_player() {
-        let href = crate::des::main_signal_processing::SIGNAL_PROCESSING_PLAYER_REL_PATH;
-        assert!(CONTROL_ANIMATIONS.iter().any(|entry| entry.href == href));
+    fn embedded_plugin_demo_payloads_are_nonempty() {
+        assert_eq!(queue_demo_frames().len(), 160);
+        let lp = lp_demo_result();
+        assert_eq!(lp["status"].as_str(), Some("optimal"));
+        assert_eq!(lp["variableCount"].as_u64(), Some(8));
     }
 
     #[test]

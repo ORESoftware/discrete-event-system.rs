@@ -240,7 +240,7 @@ mod tests {
             ..Default::default()
         });
         assert!(radon.validation.iter().all(|c| c.passed));
-        assert!(close(radon.outputs[0].value, 1.0, 1e-12));
+        assert!(close(radon.outputs[0].value.re, 1.0, 1e-12));
         assert_eq!(radon.outputs[0].cells_used, 3);
     }
 

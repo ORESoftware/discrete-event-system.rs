@@ -12,15 +12,20 @@ use serde_json::{json, Value};
 
 use crate::des::general::des_spec::{JsonObject, JsonValue};
 use crate::des::general::math_equation_input::{
-    run_math_equation_problem, EquationInputFormat, EquationProblemKind, EquationValidationCheck,
-    Heat1DBlockResult, IntegratorMethod, MathEquationInputParams, MathEquationNetwork,
-    MathEquationResult, Normalized, ODEBlockSystemResult,
+    normalize_math_equation_problem, run_math_equation_problem, EquationInputFormat,
+    EquationProblemKind, EquationValidationCheck, Heat1DBlockResult, IntegratorMethod,
+    MathEquationInputParams, MathEquationNetwork, MathEquationResult, Normalized,
+    ODEBlockSystemResult,
 };
 use crate::des::model::{CitizenError, ModelCitizen, ModelDescriptor, RunArtifact};
 use crate::des::plugin::UiControl;
 
 /// Schema id for equation-based model specs.
 pub const EQUATION_SCHEMA: &str = "des/equation/v1";
+const MAX_ODE_STATES: usize = 64;
+const MAX_TRACE_STEPS: usize = 50_000;
+const MAX_HEAT_CELLS: usize = 1_000;
+const MAX_HEAT_CELL_STEPS: usize = 250_000;
 
 /// Equation-based ODE / PDE citizen.
 pub struct EquationCitizen;
@@ -47,6 +52,9 @@ impl ModelCitizen for EquationCitizen {
 
     fn run_json(&self, spec: &Value) -> Result<RunArtifact, CitizenError> {
         let params = params_from_spec(spec)?;
+        let normalized = normalize_math_equation_problem(&params)
+            .map_err(|e| CitizenError::InvalidSpec(e.to_string()))?;
+        validate_normalized(&normalized)?;
         let title = spec
             .get("title")
             .and_then(Value::as_str)
@@ -108,6 +116,19 @@ fn params_from_spec(spec: &Value) -> Result<MathEquationInputParams, CitizenErro
             "equation spec must be a JSON object".into(),
         ));
     }
+    if let Some(schema) = read_str(spec, "$schema") {
+        if schema != EQUATION_SCHEMA {
+            return Err(CitizenError::InvalidSpec(format!(
+                "unsupported equation schema `{schema}` (expected `{EQUATION_SCHEMA}`)"
+            )));
+        }
+    }
+    require_object_field(spec, "simulation")?;
+    require_object_field(spec, "constants")?;
+    require_object_field(spec, "initial")?;
+    require_array_field(spec, "states")?;
+    require_object_field(spec, "ode")?;
+    require_object_field(spec, "heat1d")?;
 
     let format = match read_str(spec, "format").unwrap_or("json") {
         "json" => EquationInputFormat::Json,
@@ -178,6 +199,81 @@ fn params_from_spec(spec: &Value) -> Result<MathEquationInputParams, CitizenErro
     }
 
     Ok(params)
+}
+
+fn validate_normalized(normalized: &Normalized) -> Result<(), CitizenError> {
+    match normalized {
+        Normalized::Ode(p) => {
+            if p.states.len() > MAX_ODE_STATES {
+                return Err(CitizenError::InvalidSpec(format!(
+                    "equation ODE state count {} exceeds the artifact cap of {MAX_ODE_STATES}",
+                    p.states.len()
+                )));
+            }
+            checked_steps("equation ODE", p.t0, p.t1, p.dt, MAX_TRACE_STEPS)?;
+        }
+        Normalized::Heat1d(p) => {
+            let steps = checked_steps("equation heat1d", p.t0, p.t1, p.dt, MAX_TRACE_STEPS)?;
+            if p.cells > MAX_HEAT_CELLS as f64 {
+                return Err(CitizenError::InvalidSpec(format!(
+                    "equation heat1d cell count {} exceeds the artifact cap of {MAX_HEAT_CELLS}",
+                    p.cells as usize
+                )));
+            }
+            let cells = p.cells.max(0.0) as usize;
+            let samples = cells.saturating_mul(steps.saturating_add(1));
+            if samples > MAX_HEAT_CELL_STEPS {
+                return Err(CitizenError::InvalidSpec(format!(
+                    "equation heat1d grid has {samples} cell-step samples, above the artifact cap of {MAX_HEAT_CELL_STEPS}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn checked_steps(
+    label: &str,
+    t0: f64,
+    t1: f64,
+    dt: f64,
+    max_steps: usize,
+) -> Result<usize, CitizenError> {
+    if !t0.is_finite() || !t1.is_finite() || !dt.is_finite() {
+        return Err(CitizenError::InvalidSpec(format!(
+            "{label} time grid must be finite"
+        )));
+    }
+    if dt <= 0.0 {
+        return Err(CitizenError::InvalidSpec(format!(
+            "{label} dt must be positive"
+        )));
+    }
+    if t1 <= t0 {
+        return Err(CitizenError::InvalidSpec(format!(
+            "{label} must satisfy t1 > t0"
+        )));
+    }
+    let exact = (t1 - t0) / dt;
+    if !exact.is_finite() {
+        return Err(CitizenError::InvalidSpec(format!(
+            "{label} step count must be finite"
+        )));
+    }
+    let steps = exact.round();
+    let tolerance = 1e-9 * exact.abs().max(1.0);
+    if (exact - steps).abs() > tolerance {
+        return Err(CitizenError::InvalidSpec(format!(
+            "{label} duration/dt must be an integer number of steps"
+        )));
+    }
+    if steps < 1.0 || steps > max_steps as f64 {
+        return Err(CitizenError::InvalidSpec(format!(
+            "{label} step count {} is outside the supported range 1..={max_steps}",
+            steps as usize
+        )));
+    }
+    Ok(steps as usize)
 }
 
 fn parse_method(value: &str) -> Result<IntegratorMethod, CitizenError> {
@@ -444,6 +540,28 @@ fn method_str(method: IntegratorMethod) -> &'static str {
     }
 }
 
+fn require_object_field(spec: &Value, key: &str) -> Result<(), CitizenError> {
+    if let Some(value) = spec.get(key) {
+        if !value.is_object() && !value.is_null() {
+            return Err(CitizenError::InvalidSpec(format!(
+                "equation field `{key}` must be an object"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn require_array_field(spec: &Value, key: &str) -> Result<(), CitizenError> {
+    if let Some(value) = spec.get(key) {
+        if !value.is_array() && !value.is_null() {
+            return Err(CitizenError::InvalidSpec(format!(
+                "equation field `{key}` must be an array"
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -482,6 +600,40 @@ mod tests {
         let c = EquationCitizen;
         match c.run_json(&json!({ "format": "spreadsheet" })) {
             Err(CitizenError::InvalidSpec(_)) => {}
+            other => panic!("expected InvalidSpec, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wrong_schema_is_invalid_spec() {
+        let c = EquationCitizen;
+        match c.run_json(&json!({ "$schema": "des/other/v1" })) {
+            Err(CitizenError::InvalidSpec(msg)) => assert!(msg.contains("unsupported")),
+            other => panic!("expected InvalidSpec, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn oversized_trace_is_rejected_before_run() {
+        let c = EquationCitizen;
+        let spec = json!({
+            "$schema": EQUATION_SCHEMA,
+            "format": "json",
+            "kind": "ode",
+            "simulation": { "t0": 0.0, "t1": 100.0, "dt": 0.001 },
+            "states": [{ "name": "x", "initial": 1.0, "derivative": "-x" }]
+        });
+        match c.run_json(&spec) {
+            Err(CitizenError::InvalidSpec(msg)) => assert!(msg.contains("step count")),
+            other => panic!("expected InvalidSpec, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn malformed_sections_are_invalid_spec() {
+        let c = EquationCitizen;
+        match c.run_json(&json!({ "kind": "ode", "constants": ["k"], "states": [] })) {
+            Err(CitizenError::InvalidSpec(msg)) => assert!(msg.contains("constants")),
             other => panic!("expected InvalidSpec, got {other:?}"),
         }
     }

@@ -89,6 +89,18 @@ pub fn build_problem_from_request(req: &PlannerRequest) -> Result<SoccerProblem,
             req.min_subs_per_game, req.max_subs_per_game
         ));
     }
+    let max_possible_subs =
+        max_substitution_capacity(req.num_periods.max(1), num_positions, fieldable_count);
+    if req.min_subs_per_game > max_possible_subs {
+        return Err(format!(
+            "min subs ({}) is infeasible for this match: with {} period(s), {} fieldable player(s), and {} on-field slot(s), this model can count at most {} substitutions. Add periods or lower Min subs.",
+            req.min_subs_per_game,
+            req.num_periods.max(1),
+            fieldable_count,
+            num_positions,
+            max_possible_subs
+        ));
+    }
     let position_names = crate::des::general::soccer_rotation::formation_position_names(&formation);
     let t_count = req.num_periods.max(1);
 
@@ -187,6 +199,18 @@ pub fn build_problem_from_request(req: &PlannerRequest) -> Result<SoccerProblem,
             Some(synergy_rules)
         },
     })
+}
+
+fn max_substitution_capacity(
+    num_periods: usize,
+    num_positions: usize,
+    fieldable_count: usize,
+) -> usize {
+    if num_periods <= 1 || fieldable_count <= num_positions {
+        return 0;
+    }
+    let available_bench = fieldable_count - num_positions;
+    (num_periods - 1) * num_positions.min(available_bench)
 }
 
 fn to_scene_solution(
@@ -933,5 +957,14 @@ mod tests {
         let problem = build_problem_from_request(&req).unwrap();
         let model = build_soccer_ipmip(&problem);
         validate_ipmip_problem(&model.ip);
+    }
+
+    #[test]
+    fn impossible_min_subs_fails_before_mip_search() {
+        let mut req = default_planner_request();
+        req.min_subs_per_game = 14;
+        req.max_subs_per_game = 16;
+        let err = build_problem_from_request(&req).unwrap_err();
+        assert!(err.contains("can count at most 7 substitutions"), "{err}");
     }
 }

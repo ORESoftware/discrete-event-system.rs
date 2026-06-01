@@ -60,11 +60,11 @@ summary{cursor:pointer;color:var(--muted);font-size:12px}
 .pane{display:none;min-height:100%;height:100%}
 .pane.active{display:block}
 #animationPane{position:relative;overflow:hidden;background:#071019}
-#solverPane{grid-template-rows:minmax(0,1fr) auto;overflow:hidden;background:#071019}
+#solverPane{grid-template-rows:minmax(0,1fr) minmax(170px,32%);overflow:hidden;background:#071019}
 #solverPane.active{display:grid}
 #viewFrame,#solverFrame{position:absolute;inset:0;width:100%;height:100%;border:0;background:#071019}
 #solverPane #solverFrame{position:relative;height:100%;min-height:0}
-.solver-insights{max-height:168px;overflow:auto;border-top:1px solid var(--line);background:#0b141d;padding:10px 14px;font-size:12px;color:var(--muted)}
+.solver-insights{overflow:auto;border-top:1px solid var(--line);background:#0b141d;padding:10px 14px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.45;color:var(--muted);white-space:pre-wrap}
 .solver-insights b{color:var(--ink)}
 .solver-insights .alt{display:inline-block;margin:4px 8px 0 0;padding:4px 7px;border:1px solid var(--line);border-radius:6px;background:#071019;color:var(--ink)}
 #schedulePane,#streamPane{padding:14px;overflow:auto}
@@ -255,6 +255,9 @@ let activeTab = 'pitch';
 let lastPitchAnim = null;
 let lastSolverAnim = null;
 let lastResponse = null;
+let solverStartedAt = 0;
+let solverProgressTimer = null;
+let solverProgressTick = 0;
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -547,6 +550,86 @@ function logStream(s) {
   $('streamLog').scrollTop = $('streamLog').scrollHeight;
 }
 
+function solverElapsed() {
+  if (!solverStartedAt) return '00.0s';
+  return ((performance.now() - solverStartedAt) / 1000).toFixed(1).padStart(4, '0') + 's';
+}
+
+function logSolver(s) {
+  const line = `[${solverElapsed()}] ${s}`;
+  $('solverInsights').textContent += line + '\n';
+  $('solverInsights').scrollTop = $('solverInsights').scrollHeight;
+  logStream('solver ' + line);
+}
+
+function resetSolverLog(label) {
+  stopSolverProgress();
+  solverStartedAt = performance.now();
+  solverProgressTick = 0;
+  $('solverInsights').textContent = '';
+  logSolver(label || 'solver log opened');
+}
+
+function stopSolverProgress() {
+  if (solverProgressTimer) clearInterval(solverProgressTimer);
+  solverProgressTimer = null;
+}
+
+function maxSubstitutionCapacity() {
+  normalizeState();
+  const fieldable = state.players.filter(p => p.status !== 'awol' && p.status !== 'injured').length;
+  const slots = posNames.length;
+  if (state.numPeriods <= 1 || fieldable <= slots) return 0;
+  return (state.numPeriods - 1) * Math.min(slots, fieldable - slots);
+}
+
+function preflightSolverRequest(mode) {
+  normalizeState();
+  const shape = estimateModelShape();
+  const fieldable = state.players.filter(p => p.status !== 'awol' && p.status !== 'injured').length;
+  const cap = maxSubstitutionCapacity();
+  logSolver(`${mode}: ${posNames.length} on-field slots, ${fieldable}/${state.players.length} fieldable players, ${state.numPeriods} periods`);
+  logSolver(`model build estimate: ${shape.variables} binary variables, ${shape.constraints} constraint rows`);
+  logSolver(`substitution bounds: min ${state.minSubsPerGame}, max ${state.maxSubsPerGame}; maximum possible under current substitution counting is ${cap}`);
+  if (state.minSubsPerGame > cap) {
+    logSolver(`preflight infeasible: Min subs ${state.minSubsPerGame} exceeds the ${cap} substitutions possible with this roster/period setup`);
+    logSolver('current model counts one substitution when a player comes off at a period boundary; add periods or lower Min subs');
+    setStatus('err', `Min subs ${state.minSubsPerGame} is infeasible here; max possible is ${cap}.`);
+    return false;
+  }
+  if (state.minSubsPerGame > state.maxSubsPerGame) {
+    logSolver(`preflight infeasible: Min subs ${state.minSubsPerGame} exceeds Max subs ${state.maxSubsPerGame}`);
+    setStatus('err', 'Min subs cannot exceed Max subs.');
+    return false;
+  }
+  return true;
+}
+
+function startSolverProgress(mode) {
+  const phases = [
+    'queued behind the serialized DES engine lock',
+    'building assignment, eligibility, stamina, substitution, and chemistry rows',
+    'root LP relaxation / feasibility repair station active',
+    'branch-and-bound/cut stations running; server-side incumbent and bound are pending',
+    'still solving; final incumbent, bound, and trace will append when the backend returns'
+  ];
+  solverProgressTimer = setInterval(() => {
+    const shape = estimateModelShape();
+    const phase = phases[Math.min(solverProgressTick, phases.length - 1)];
+    solverProgressTick += 1;
+    logSolver(`${mode} progress: ${phase}; ${shape.variables} vars/${shape.constraints} rows; incumbent=pending; bound=pending`);
+    $('mStatus').textContent = 'solving';
+  }, 1200);
+}
+
+function appendSolutionLog(data) {
+  if (!data) return;
+  logSolver(`final status=${data.mipStatus || '?'} ok=${!!data.ok} affinity=${Number(data.affinity || 0).toFixed(2)} subs=${data.totalSubs}/${subsLimitLabel()} elapsed=${Number(data.elapsedMs || 0).toFixed(0)}ms nodes=${data.nodesExplored || 0}`);
+  if (data.usedFallback) logSolver(`fallback: ${data.fallbackReason || 'used fallback schedule'}`);
+  (data.solverNotes || []).forEach(note => logSolver('note: ' + note));
+  (data.alternatives || []).forEach(alt => logSolver(`alt #${alt.rank}: affinity=${Number(alt.affinity || 0).toFixed(2)} subs=${alt.totalSubs}`));
+}
+
 function updateRequestJson() {
   normalizeState();
   $('requestJson').value = JSON.stringify(state, null, 2);
@@ -623,13 +706,18 @@ function tick(ts){if(playing&&ts-last>1000/(ANIM.fps||6)){render(fi+1>=(ANIM.fra
 <\/script></body></html>`;
 }
 
-function showAnimation(anim) {
-  if (!anim || !anim.frames || !anim.frames.length) return;
-  $('viewFrame').src = URL.createObjectURL(new Blob([buildMinimalPlayer(anim)], {type:'text/html'}));
+function showAnimation(anim, frameId) {
+  const frame = $(frameId || 'viewFrame');
+  if (!anim || !anim.frames || !anim.frames.length) {
+    frame.removeAttribute('src');
+    return;
+  }
+  frame.src = URL.createObjectURL(new Blob([buildMinimalPlayer(anim)], {type:'text/html'}));
 }
 
 function showActiveAnimation() {
-  showAnimation(activeTab === 'solver' ? lastSolverAnim : lastPitchAnim);
+  if (activeTab === 'solver') showAnimation(lastSolverAnim, 'solverFrame');
+  else showAnimation(lastPitchAnim, 'viewFrame');
 }
 
 function renderSchedule(data) {
@@ -755,24 +843,35 @@ function localPreviewSolve() {
 
 async function solveViaJson() {
   syncStateFromControls();
+  document.querySelector('.tab[data-tab="solver"]').click();
+  resetSolverLog('Solve requested from planner UI');
+  if (!preflightSolverRequest('json solve')) return;
   if (!canUsePlannerApi()) {
     try {
+      startSolverProgress('local preview');
       const data = localPreviewSolve();
+      stopSolverProgress();
       receiveSolution(data);
       setStatus('ok', `Local preview: affinity ${data.affinity.toFixed(2)}, subs ${data.totalSubs}/${subsLimitLabel()}. Serve the page for the Rust IP/MIP solve.`);
     } catch (e) {
+      stopSolverProgress();
+      logSolver('preview failed: ' + e.message);
       setStatus('err', 'Preview failed: ' + e.message);
     }
     return;
   }
   setBusy(true, 'Solving via JSON endpoint...');
+  startSolverProgress('json solve');
   try {
     const r = await fetch(apiPath('solve'), {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(state)});
     const data = await r.json();
+    stopSolverProgress();
     if (!data.ok) throw new Error(data.error || 'solve failed');
     receiveSolution(data);
     setStatus('ok', `Solved: affinity ${data.affinity.toFixed(2)}, subs ${data.totalSubs}/${subsLimitLabel()}, ${data.numVariables} vars, ${data.numConstraints} constraints.`);
   } catch (e) {
+    stopSolverProgress();
+    logSolver('solve failed: ' + e.message);
     setStatus('err', 'Solve failed: ' + e.message);
   } finally {
     setBusy(false);
@@ -781,23 +880,32 @@ async function solveViaJson() {
 
 async function solveViaStream() {
   syncStateFromControls();
+  document.querySelector('.tab[data-tab="solver"]').click();
+  resetSolverLog('Stream solve requested from planner UI');
+  if (!preflightSolverRequest('jsonl stream solve')) return;
   const lines = $('commandStream').value.split(/\n+/).map(x => x.trim()).filter(Boolean);
   if (!canUsePlannerApi()) {
     try {
+      startSolverProgress('stream preview');
       applyStreamText();
       const data = localPreviewSolve();
+      stopSolverProgress();
       receiveSolution(data);
       setStatus('ok', `Stream preview: ${data.numVariables} vars, ${data.numConstraints} constraints.`);
     } catch (e) {
+      stopSolverProgress();
+      logSolver('stream preview failed: ' + e.message);
       setStatus('err', 'Stream preview failed: ' + e.message);
     }
     return;
   }
   const body = ['{"op":"init","request":' + JSON.stringify(state) + '}'].concat(lines, ['{"op":"solve","includeAnimations":true}']).join('\n') + '\n';
   setBusy(true, 'Solving via JSONL stream...');
+  startSolverProgress('jsonl stream solve');
   try {
     const r = await fetch(apiPath('stream'), {method:'POST', headers:{'Content-Type':'application/x-ndjson'}, body});
     const text = await r.text();
+    stopSolverProgress();
     logStream(text.trim() || '(empty stream response)');
     const frames = text.split(/\n+/).filter(Boolean).map(line => JSON.parse(line));
     const sol = frames.reverse().find(f => f.event === 'solution');
@@ -805,6 +913,8 @@ async function solveViaStream() {
     receiveSolution(sol.response);
     setStatus('ok', `Stream solved: ${sol.variables} vars, ${sol.constraints} constraints.`);
   } catch (e) {
+    stopSolverProgress();
+    logSolver('stream solve failed: ' + e.message);
     setStatus('err', 'Stream solve failed: ' + e.message);
   } finally {
     setBusy(false);
@@ -815,9 +925,10 @@ function receiveSolution(data) {
   lastResponse = data;
   lastPitchAnim = data.pitchAnimation;
   lastSolverAnim = data.solverAnimation;
+  appendSolutionLog(data);
   renderSchedule(data);
   updateRequestJson();
-  if (!data.pitchAnimation?.frames?.length && activeTab !== 'stream') {
+  if (!data.pitchAnimation?.frames?.length && !data.solverAnimation?.frames?.length && activeTab !== 'stream') {
     document.querySelector('.tab[data-tab="schedule"]').click();
     return;
   }
@@ -840,7 +951,8 @@ document.querySelectorAll('.tab').forEach(btn => btn.onclick = () => {
   document.querySelectorAll('.tab').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
   activeTab = btn.dataset.tab;
-  $('animationPane').classList.toggle('active', activeTab === 'pitch' || activeTab === 'solver');
+  $('animationPane').classList.toggle('active', activeTab === 'pitch');
+  $('solverPane').classList.toggle('active', activeTab === 'solver');
   $('schedulePane').classList.toggle('active', activeTab === 'schedule');
   $('streamPane').classList.toggle('active', activeTab === 'stream');
   if (activeTab === 'pitch' || activeTab === 'solver') showActiveAnimation();

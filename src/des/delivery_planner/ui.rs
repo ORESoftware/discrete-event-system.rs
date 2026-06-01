@@ -30,7 +30,10 @@ pub fn delivery_response_to_json(resp: &DeliveryPlannerResponse) -> Value {
         "lpSolves": resp.lp_solves,
         "numVariables": resp.num_variables,
         "numConstraints": resp.num_constraints,
+        "objectiveMode": resp.objective_mode.as_str(),
+        "objectiveValue": resp.objective_value,
         "objectiveDistance": resp.objective_distance,
+        "windowCenterPenalty": resp.window_center_penalty,
         "totalDistance": resp.total_distance,
         "totalTravelMinutes": resp.total_travel_minutes,
         "totalWaitMinutes": resp.total_wait_minutes,
@@ -70,5 +73,9 @@ mod tests {
         assert!(html.contains("openGoogleMaps"));
         assert!(html.contains("openWazeNext"));
         assert!(html.contains("osmFrame"));
+        assert!(html.contains("objectiveMode"));
+        assert!(html.contains("loadManifestBtn"));
+        assert!(html.contains("stopList"));
+        assert!(html.contains("lockOrderBtn"));
     }
 }

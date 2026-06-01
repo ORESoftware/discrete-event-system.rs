@@ -502,11 +502,10 @@ mod tests {
             "expected the engine catalogue to be surfaced as capabilities"
         );
         assert!(d.capabilities.iter().any(|c| c.name == "main_build_site"));
-        assert!(
-            d.capabilities
-                .iter()
-                .any(|c| c.name == "main_delivery_planner")
-        );
+        assert!(d
+            .capabilities
+            .iter()
+            .any(|c| c.name == "main_delivery_planner"));
     }
 
     #[test]

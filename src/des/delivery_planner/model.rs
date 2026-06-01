@@ -18,6 +18,39 @@ pub struct DeliveryStopInput {
     pub service_minutes: f64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DeliveryObjectiveMode {
+    Distance,
+    TravelTime,
+    WindowCenter,
+}
+
+impl Default for DeliveryObjectiveMode {
+    fn default() -> Self {
+        Self::Distance
+    }
+}
+
+impl DeliveryObjectiveMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Distance => "distance",
+            Self::TravelTime => "travelTime",
+            Self::WindowCenter => "windowCenter",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeliveryRouteRules {
+    #[serde(default)]
+    pub locked_order: bool,
+    #[serde(default)]
+    pub ordered_stop_ids: Vec<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeliveryPlannerRequest {
@@ -33,6 +66,10 @@ pub struct DeliveryPlannerRequest {
     pub solver_max_nodes: usize,
     pub solver_max_ticks: usize,
     pub solver_lp_max_iters: usize,
+    #[serde(default)]
+    pub objective_mode: DeliveryObjectiveMode,
+    #[serde(default)]
+    pub route_rules: DeliveryRouteRules,
     pub stops: Vec<DeliveryStopInput>,
     pub raw_manifest: String,
 }
@@ -88,6 +125,8 @@ pub fn default_delivery_request() -> DeliveryPlannerRequest {
         solver_max_nodes: 30_000,
         solver_max_ticks: 120_000,
         solver_lp_max_iters: 8_000,
+        objective_mode: DeliveryObjectiveMode::Distance,
+        route_rules: DeliveryRouteRules::default(),
         stops: parsed.stops,
         raw_manifest,
     }
@@ -101,6 +140,7 @@ pub fn normalize_delivery_request(req: &mut DeliveryPlannerRequest) {
     req.solver_max_nodes = req.solver_max_nodes.max(1);
     req.solver_max_ticks = req.solver_max_ticks.max(1);
     req.solver_lp_max_iters = req.solver_lp_max_iters.max(1);
+    req.route_rules.ordered_stop_ids = dedupe_ordered_stop_ids(&req.route_rules.ordered_stop_ids);
     if req.user_id.trim().is_empty() {
         req.user_id = "dispatcher@local".to_string();
     }
@@ -120,6 +160,17 @@ pub fn normalize_delivery_request(req: &mut DeliveryPlannerRequest) {
             std::mem::swap(&mut stop.window_start, &mut stop.window_end);
         }
     }
+}
+
+fn dedupe_ordered_stop_ids(ids: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for id in ids {
+        let trimmed = id.trim();
+        if !trimmed.is_empty() && !out.iter().any(|seen: &String| seen == trimmed) {
+            out.push(trimmed.to_string());
+        }
+    }
+    out
 }
 
 fn finite_or(x: f64, fallback: f64) -> f64 {

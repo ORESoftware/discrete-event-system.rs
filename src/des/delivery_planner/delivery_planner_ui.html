@@ -17,6 +17,7 @@ button,input,textarea{font:inherit}
 button{border:1px solid var(--line);border-radius:6px;background:#fff;color:var(--ink);padding:7px 10px;cursor:pointer}
 button:hover{border-color:#8ca1b2;background:#f8fbfd}
 button.primary{background:var(--blue);border-color:var(--blue);color:white;font-weight:700}
+button.toggle.active{border-color:var(--blue);background:#eef5ff;color:var(--blue);font-weight:700}
 button.icon{width:34px;height:34px;padding:0;display:inline-grid;place-items:center;font-weight:800}
 button:disabled{opacity:.55;cursor:wait}
 input,textarea{width:100%;border:1px solid var(--line);border-radius:6px;background:#fff;color:var(--ink);padding:7px 8px}
@@ -40,7 +41,24 @@ label{display:block;color:var(--muted);font-size:12px;margin:0 0 4px}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}
 .manifest{min-height:258px}
+.manifest-actions{margin-top:8px}
 .toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.segmented{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1px;border:1px solid var(--line);border-radius:6px;overflow:hidden;background:var(--line)}
+.segmented button{border:0;border-radius:0;background:#fff;min-height:36px;padding:7px 8px}
+.segmented button.active{background:#eef5ff;color:var(--blue);font-weight:800}
+.stop-list-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}
+.stop-count{color:var(--muted);font-size:12px;white-space:nowrap}
+.stop-list{display:grid;gap:7px;min-height:42px}
+.stop-empty{border:1px dashed var(--line);border-radius:6px;color:var(--muted);background:#fff;padding:10px;font-size:12px}
+.stop-item{display:grid;grid-template-columns:30px minmax(0,1fr);gap:8px;align-items:center;border:1px solid var(--line);border-radius:6px;background:#fff;padding:8px;cursor:grab}
+.stop-item:active{cursor:grabbing}
+.stop-item.dragging{opacity:.55}
+.stop-item.drop-target{border-color:var(--blue);box-shadow:0 0 0 2px #d8e8ff}
+.drag-handle{width:26px;height:30px;display:grid;place-items:center;border:1px solid #dce5eb;border-radius:6px;background:#f8fafc;color:#6c7c89;font-weight:800}
+.stop-main{min-width:0}
+.stop-title{font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.stop-meta{margin-top:2px;color:var(--muted);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lock-row{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px;color:var(--muted);font-size:12px}
 .metrics{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));border-bottom:1px solid var(--line);background:var(--line);gap:1px}
 .metric{background:#fbfcfd;padding:9px 11px;min-width:0}
 .metric span{display:block;color:var(--muted);font-size:11px;text-transform:uppercase;white-space:nowrap}
@@ -100,6 +118,11 @@ label{display:block;color:var(--muted);font-size:12px;margin:0 0 4px}
       <div class="section">
         <h2>Manifest</h2>
         <textarea class="manifest" id="manifestText" data-testid="manifest-input" spellcheck="false"></textarea>
+        <div class="toolbar manifest-actions">
+          <button type="button" class="primary" id="loadManifestBtn" data-testid="load-manifest">Load</button>
+          <button type="button" id="sampleBtn">Sample</button>
+          <button type="button" id="parseBtn">Parse</button>
+        </div>
       </div>
       <div class="section">
         <h2>Route Settings</h2>
@@ -107,6 +130,27 @@ label{display:block;color:var(--muted);font-size:12px;margin:0 0 4px}
           <div><label>Depart</label><input id="departTime" value="08:00"></div>
           <div><label>Speed mph</label><input id="speedMph" type="number" min="1" step="1" value="28"></div>
           <div><label>Service min</label><input id="serviceMinutes" type="number" min="0" step="1" value="6"></div>
+        </div>
+      </div>
+      <div class="section">
+        <h2>Objective</h2>
+        <div class="segmented" id="objectiveMode" role="group" aria-label="objective mode">
+          <button type="button" data-objective="distance">Miles</button>
+          <button type="button" data-objective="travelTime">Drive time</button>
+          <button type="button" data-objective="windowCenter">Window center</button>
+        </div>
+      </div>
+      <div class="section">
+        <div class="stop-list-head">
+          <h2 style="margin:0">Stop Order</h2>
+          <span class="stop-count" id="stopCount">0 stops</span>
+        </div>
+        <div class="stop-list" id="stopList" data-testid="stop-list">
+          <div class="stop-empty">Load a manifest to edit stop order.</div>
+        </div>
+        <div class="lock-row">
+          <button type="button" class="toggle" id="lockOrderBtn" data-testid="lock-order">Lock order</button>
+          <span id="lockOrderState">Optimizer may reorder stops.</span>
         </div>
       </div>
       <div class="section">
@@ -123,8 +167,6 @@ label{display:block;color:var(--muted);font-size:12px;margin:0 0 4px}
       <div class="section">
         <h2>Address Tools</h2>
         <div class="toolbar">
-          <button type="button" id="sampleBtn">Sample</button>
-          <button type="button" id="parseBtn">Parse</button>
           <button type="button" id="geocodeBtn">Geocode</button>
         </div>
       </div>
@@ -182,9 +224,27 @@ label{display:block;color:var(--muted);font-size:12px;margin:0 0 4px}
 <script>
 const $ = id => document.getElementById(id);
 const defaultConfig = JSON.parse($('default-config').textContent);
+const STORAGE_KEY = 'deliveryScheduler.loadedManifest.v1';
 let state = structuredClone(defaultConfig);
 let lastResponse = null;
 let activeTab = 'route';
+let draggingStopId = null;
+
+function validObjectiveMode(mode){
+  return ['distance','travelTime','windowCenter'].includes(mode) ? mode : 'distance';
+}
+function ensureRouteOptions(){
+  state.objectiveMode = validObjectiveMode(state.objectiveMode);
+  if(!state.routeRules)state.routeRules={lockedOrder:false,orderedStopIds:[]};
+  state.routeRules.lockedOrder=!!state.routeRules.lockedOrder;
+  const seen=new Set();
+  state.routeRules.orderedStopIds=(state.routeRules.orderedStopIds||[]).filter(id=>{
+    id=String(id||'').trim();
+    if(!id||seen.has(id))return false;
+    seen.add(id);
+    return true;
+  });
+}
 
 function pad(n){return String(n).padStart(2,'0')}
 function fmt(min){min=Math.max(0,Math.round(min));return pad(Math.floor(min/60)%24)+':'+pad(min%60)}
@@ -326,8 +386,20 @@ function parseManifest(text){
   if(!stops.length)throw new Error('At least one customer stop is required');
   return {depot,stops};
 }
-function syncStateFromControls(){
+function orderedStopIdsFor(stops){
+  ensureRouteOptions();
+  const ids=new Set((stops||[]).map(s=>s.id));
+  const ordered=(state.routeRules.orderedStopIds||[]).filter(id=>ids.has(id));
+  stops.forEach(s=>{if(!ordered.includes(s.id))ordered.push(s.id)});
+  return ordered;
+}
+function orderedStops(){
+  const byId=new Map((state.stops||[]).map(s=>[s.id,s]));
+  return orderedStopIdsFor(state.stops||[]).map(id=>byId.get(id)).filter(Boolean);
+}
+function syncStateFromControls(opts={}){
   const parsed=parseManifest($('manifestText').value);
+  const previousOrder=state.routeRules?.orderedStopIds||[];
   state.userId = state.userId || 'dispatcher@local';
   state.depotLabel = parsed.depot.label || 'Depot';
   state.depotAddress = parsed.depot.address || parsed.depot.label || 'Depot';
@@ -342,11 +414,103 @@ function syncStateFromControls(){
   state.solverMaxNodes = Math.max(1, Number($('solverNodes').value)||30000);
   state.solverMaxTicks = Math.max(1, Number($('solverTicks').value)||120000);
   state.solverLpMaxIters = Math.max(1, Number($('solverLpIters').value)||8000);
+  state.objectiveMode = validObjectiveMode(state.objectiveMode);
   state.stops = parsed.stops;
   state.rawManifest = $('manifestText').value;
+  ensureRouteOptions();
+  state.routeRules.orderedStopIds = opts.resetOrder ? state.stops.map(s=>s.id) : orderedStopIdsFor(state.stops);
+  if(!opts.resetOrder && previousOrder.length)state.routeRules.orderedStopIds=orderedStopIdsFor(state.stops);
   $('userChip').textContent = state.userId || 'dispatcher@local';
 }
+function saveLoadedState(){
+  ensureRouteOptions();
+  localStorage.setItem(STORAGE_KEY, JSON.stringify({
+    rawManifest: state.rawManifest,
+    departTime: state.departTime,
+    averageSpeedMph: state.averageSpeedMph,
+    defaultServiceMinutes: state.defaultServiceMinutes,
+    solverTimeLimitMs: state.solverTimeLimitMs,
+    solverMaxNodes: state.solverMaxNodes,
+    solverMaxTicks: state.solverMaxTicks,
+    solverLpMaxIters: state.solverLpMaxIters,
+    objectiveMode: state.objectiveMode,
+    routeRules: state.routeRules
+  }));
+}
+function restoreLoadedState(){
+  try{
+    const saved=JSON.parse(localStorage.getItem(STORAGE_KEY)||'null');
+    if(!saved||!saved.rawManifest)return false;
+    state={...structuredClone(defaultConfig),...saved,routeRules:saved.routeRules||defaultConfig.routeRules};
+    ensureRouteOptions();
+    return true;
+  }catch(_){return false}
+}
+function renderObjectiveControls(){
+  ensureRouteOptions();
+  document.querySelectorAll('#objectiveMode button').forEach(btn=>{
+    btn.classList.toggle('active',btn.dataset.objective===state.objectiveMode);
+  });
+}
+function renderStopList(){
+  ensureRouteOptions();
+  const list=$('stopList');
+  const stops=orderedStops();
+  list.replaceChildren();
+  $('stopCount').textContent=`${stops.length} stop${stops.length===1?'':'s'}`;
+  $('lockOrderBtn').classList.toggle('active',state.routeRules.lockedOrder);
+  $('lockOrderBtn').textContent=state.routeRules.lockedOrder?'Unlock order':'Lock order';
+  $('lockOrderState').textContent=state.routeRules.lockedOrder?'Vertical order is a hard route rule.':'Optimizer may reorder stops.';
+  if(!stops.length){
+    const empty=document.createElement('div');
+    empty.className='stop-empty';
+    empty.textContent='Load a manifest to edit stop order.';
+    list.appendChild(empty);
+    return;
+  }
+  stops.forEach((s,i)=>{
+    const item=document.createElement('div');
+    item.className='stop-item';
+    item.draggable=true;
+    item.dataset.stopId=s.id;
+    if(s.id===draggingStopId)item.classList.add('dragging');
+    const handle=document.createElement('div');
+    handle.className='drag-handle';
+    handle.textContent=String(i+1);
+    const main=document.createElement('div');
+    main.className='stop-main';
+    const title=document.createElement('div');
+    title.className='stop-title';
+    title.textContent=s.label||s.id;
+    const meta=document.createElement('div');
+    meta.className='stop-meta';
+    meta.textContent=`${fmt(s.windowStart)}-${fmt(s.windowEnd)} · ${s.address||coordText(s)}`;
+    main.append(title,meta);
+    item.append(handle,main);
+    item.addEventListener('dragstart',e=>{draggingStopId=s.id;e.dataTransfer.effectAllowed='move';item.classList.add('dragging')});
+    item.addEventListener('dragend',()=>{draggingStopId=null;renderStopList()});
+    item.addEventListener('dragover',e=>{e.preventDefault();item.classList.add('drop-target')});
+    item.addEventListener('dragleave',()=>item.classList.remove('drop-target'));
+    item.addEventListener('drop',e=>{
+      e.preventDefault();
+      item.classList.remove('drop-target');
+      moveStop(draggingStopId,s.id,e.offsetY>item.clientHeight/2);
+    });
+    list.appendChild(item);
+  });
+}
+function moveStop(dragId,targetId,after){
+  if(!dragId||!targetId||dragId===targetId)return;
+  const ids=orderedStops().map(s=>s.id).filter(id=>id!==dragId);
+  const targetIndex=ids.indexOf(targetId);
+  if(targetIndex<0)return;
+  ids.splice(targetIndex+(after?1:0),0,dragId);
+  state.routeRules.orderedStopIds=ids;
+  renderStopList();
+  saveLoadedState();
+}
 function renderControls(){
+  ensureRouteOptions();
   $('manifestText').value = state.rawManifest || '';
   $('departTime').value = fmt(state.departTime || 480);
   $('speedMph').value = Math.round(state.averageSpeedMph || 28);
@@ -356,6 +520,8 @@ function renderControls(){
   $('solverTicks').value = state.solverMaxTicks || 120000;
   $('solverLpIters').value = state.solverLpMaxIters || 8000;
   $('userChip').textContent = state.userId || 'dispatcher@local';
+  renderObjectiveControls();
+  renderStopList();
 }
 function stateToManifest(){
   const lines=[`${state.depotLabel||'Depot'} | ${state.depotAddress||state.depotLabel||'Depot'} | ${Number(state.depotLat).toFixed(6)},${Number(state.depotLon).toFixed(6)} | ${fmt(state.departTime||480)}`];
@@ -380,41 +546,85 @@ function matrices(){
   return {nodes,dist,travel};
 }
 function routeFeasible(route,m){
-  let clock=state.departTime, cur=0, visits=[], legs=[], totalDistance=0,totalTravel=0,totalWait=0;
+  let clock=state.departTime, cur=0, visits=[], legs=[], totalDistance=0,totalTravel=0,totalWait=0,windowCenterPenalty=0;
   for(const stopIdx of route){
     const next=stopIdx+1, stop=m.nodes[next], tr=m.travel[cur][next], d=m.dist[cur][next];
     const raw=clock+tr, arrival=Math.max(raw,stop.windowStart), wait=Math.max(0,arrival-raw);
     if(arrival>stop.windowEnd+1e-6)return null;
     const depart=arrival+(stop.serviceMinutes!=null?stop.serviceMinutes:(state.defaultServiceMinutes!=null?state.defaultServiceMinutes:0));
+    windowCenterPenalty+=windowCenterStopPenalty(stop,arrival);
     legs.push({from:m.nodes[cur].label,to:stop.label,distance:d,travelMinutes:tr});
     visits.push({stopIndex:stopIdx,label:stop.label,address:stop.address,arrival:Math.round(arrival),depart:Math.round(depart),windowStart:stop.windowStart,windowEnd:stop.windowEnd,arrivalText:fmt(arrival),departText:fmt(depart),windowText:fmt(stop.windowStart)+'-'+fmt(stop.windowEnd),distanceFromPrevious:d,travelMinutesFromPrevious:tr,waitMinutes:wait});
     totalDistance+=d;totalTravel+=tr;totalWait+=wait;clock=depart;cur=next;
   }
   legs.push({from:m.nodes[cur].label,to:m.nodes[0].label,distance:m.dist[cur][0],travelMinutes:m.travel[cur][0]});
   totalDistance+=m.dist[cur][0];totalTravel+=m.travel[cur][0];
-  return {visits,legs,totalDistance,totalTravelMinutes:totalTravel,totalWaitMinutes:totalWait,returnTime:clock+m.travel[cur][0]};
+  const objectiveValue=objectiveScore({totalDistance,totalTravelMinutes:totalTravel,windowCenterPenalty});
+  return {visits,legs,totalDistance,totalTravelMinutes:totalTravel,totalWaitMinutes:totalWait,windowCenterPenalty,objectiveValue,returnTime:clock+m.travel[cur][0]};
+}
+function windowCenterStopPenalty(stop,arrival){
+  const midpoint=(Number(stop.windowStart)+Number(stop.windowEnd))/2;
+  const halfWidth=Math.max(1,(Number(stop.windowEnd)-Number(stop.windowStart))/2);
+  return Math.abs(arrival-midpoint)/halfWidth*12;
+}
+function objectiveScore(itin){
+  const mode=validObjectiveMode(state.objectiveMode);
+  if(mode==='travelTime')return itin.totalTravelMinutes;
+  if(mode==='windowCenter')return itin.totalTravelMinutes+(itin.windowCenterPenalty||0);
+  return itin.totalDistance;
+}
+function objectiveLabel(){
+  const mode=validObjectiveMode(state.objectiveMode);
+  if(mode==='travelTime')return 'drive minutes';
+  if(mode==='windowCenter')return 'drive minutes plus window-center penalty';
+  return 'route miles';
+}
+function lockedRouteFromList(){
+  const byId=new Map((state.stops||[]).map((s,i)=>[s.id,i]));
+  const route=[];
+  for(const id of orderedStopIdsFor(state.stops||[])){
+    if(byId.has(id))route.push(byId.get(id));
+  }
+  return route.length===state.stops.length?route:null;
 }
 function localSolve(){
+  ensureRouteOptions();
   const m=matrices(), n=state.stops.length;
-  let bestRoute=null,bestDistance=Infinity;
-  if(n<=9){
+  let bestRoute=null,bestScore=Infinity;
+  if(state.routeRules.lockedOrder){
+    bestRoute=lockedRouteFromList();
+    if(!bestRoute)throw new Error('Locked order does not cover every stop');
+    const locked=routeFeasible(bestRoute,m);
+    if(!locked)throw new Error('Locked stop order violates one or more time windows');
+    bestScore=locked.objectiveValue;
+  } else if(n<=9){
     const used=Array(n).fill(false), route=[];
-    function dfs(cur,clock,distSoFar){
-      if(route.length===n){const total=distSoFar+m.dist[cur][0];if(total<bestDistance){bestDistance=total;bestRoute=route.slice()}return}
+    function dfs(cur,clock){
+      if(route.length===n){
+        const itin=routeFeasible(route,m);
+        if(itin&&itin.objectiveValue<bestScore){bestScore=itin.objectiveValue;bestRoute=route.slice()}
+        return;
+      }
       for(let s=0;s<n;s++){
         if(used[s])continue;
         const next=s+1, stop=m.nodes[next], raw=clock+m.travel[cur][next], arrival=Math.max(raw,stop.windowStart);
         if(arrival>stop.windowEnd+1e-6)continue;
-        const nd=distSoFar+m.dist[cur][next];if(nd>=bestDistance)continue;
-        used[s]=true;route.push(s);dfs(next,arrival+(stop.serviceMinutes||0),nd);route.pop();used[s]=false;
+        used[s]=true;route.push(s);dfs(next,arrival+(stop.serviceMinutes||0));route.pop();used[s]=false;
       }
     }
-    dfs(0,state.departTime,0);
+    dfs(0,state.departTime);
   } else {
     const remaining=new Set(Array.from({length:n},(_,i)=>i));let cur=0,clock=state.departTime;bestRoute=[];
     while(remaining.size){
       let pick=null,pickScore=Infinity;
-      for(const s of remaining){const node=s+1, raw=clock+m.travel[cur][node], arrival=Math.max(raw,m.nodes[node].windowStart);if(arrival>m.nodes[node].windowEnd)continue;const score=m.dist[cur][node]+(m.nodes[node].windowEnd-arrival)*.001;if(score<pickScore){pick=s;pickScore=score}}
+      for(const s of remaining){
+        const node=s+1, raw=clock+m.travel[cur][node], arrival=Math.max(raw,m.nodes[node].windowStart);
+        if(arrival>m.nodes[node].windowEnd)continue;
+        let score=state.objectiveMode==='distance'?m.dist[cur][node]:m.travel[cur][node];
+        if(state.objectiveMode==='windowCenter')score+=windowCenterStopPenalty(m.nodes[node],arrival);
+        score+=(m.nodes[node].windowEnd-arrival)*.001;
+        if(score<pickScore){pick=s;pickScore=score}
+      }
       if(pick==null){bestRoute=null;break}
       const node=pick+1, arrival=Math.max(clock+m.travel[cur][node],m.nodes[node].windowStart);
       bestRoute.push(pick);remaining.delete(pick);clock=arrival+(m.nodes[node].serviceMinutes||0);cur=node;
@@ -422,21 +632,24 @@ function localSolve(){
   }
   if(!bestRoute)throw new Error('No route can satisfy these time windows');
   const itin=routeFeasible(bestRoute,m);if(!itin)throw new Error('No route can satisfy these time windows');
-  const variables=n*(n+1)+n, constraints=n*4+4+n*2+n+n*(n-1);
+  const variables=n*(n+1)+n+(state.objectiveMode==='windowCenter'?n:0);
+  const constraints=n*4+4+n*2+n+n*(n-1)+(state.objectiveMode==='windowCenter'?n*2:0);
   const itineraryText=buildItineraryText(itin,m);
   return {
-    ok:true,error:null,solverStatus:'local-preview',solverKind:'browser-exact-route',
-    usedFallback:true,fallbackReason:'Browser-side preview; serve the Rust endpoint for the in-house IP/MIP solve.',
+    ok:true,error:null,solverStatus:state.routeRules.lockedOrder?'locked-order':'local-preview',solverKind:state.routeRules.lockedOrder?'rule-constrained-route':'browser-exact-route',
+    usedFallback:!state.routeRules.lockedOrder,fallbackReason:state.routeRules.lockedOrder?null:'Browser-side preview; serve the Rust endpoint for the in-house IP/MIP solve.',
     inHouseOnly:true,usesExternalSolvers:false,elapsedMs:0,nodesExplored:0,lpSolves:0,
-    numVariables:variables,numConstraints:constraints,objectiveDistance:itin.totalDistance,
+    numVariables:variables,numConstraints:constraints,objectiveMode:state.objectiveMode,objectiveValue:itin.objectiveValue,objectiveDistance:itin.totalDistance,windowCenterPenalty:itin.windowCenterPenalty,
     totalDistance:itin.totalDistance,totalTravelMinutes:itin.totalTravelMinutes,totalWaitMinutes:itin.totalWaitMinutes,
     route:bestRoute,visits:itin.visits,legs:itin.legs,itineraryText,
     solverNotes:[
       `Built a directed binary route model with ${variables} variables and ${constraints} constraint rows.`,
-      'Objective minimized route miles; arrival-time rows enforce every customer delivery window.',
-      'Browser preview used exact enumeration for small manifests or greedy repair for larger manifests.'
+      `Objective minimized ${objectiveLabel()}; arrival-time rows enforce every customer delivery window.`,
+      `Optimized ${objectiveLabel()} = ${itin.objectiveValue.toFixed(2)}.`,
+      state.routeRules.lockedOrder?'Locked stop order was treated as a hard rule.':'Stop order was optimized by the browser preview.',
+      state.routeRules.lockedOrder?'Locked route was checked directly against every delivery window.':'Browser preview used exact enumeration for small manifests or greedy repair for larger manifests.'
     ],
-    solverTrace:[{nodeId:'preview',depth:0,action:'incumbent',lpZ:itin.totalDistance,reason:'feasible delivery route accepted',fractional:[]}],
+    solverTrace:[{nodeId:state.routeRules.lockedOrder?'locked-order':'preview',depth:0,action:'incumbent',lpZ:itin.objectiveValue,reason:'feasible delivery route accepted',fractional:[]}],
     routeAnimation:buildRouteAnimation(m,bestRoute,itin)
   };
 }
@@ -445,6 +658,7 @@ function buildItineraryText(itin,m){
   itin.visits.forEach((v,i)=>{lines.push(`${i+1}. ${v.label} arrive ${v.arrivalText} depart ${v.departText} window ${v.windowText}  (${v.distanceFromPrevious.toFixed(2)} mi, ${v.travelMinutesFromPrevious.toFixed(0)} min travel, ${v.waitMinutes.toFixed(0)} min wait)`);lines.push('   '+v.address)});
   lines.push(`Return to ${state.depotLabel} at ${fmt(itin.returnTime)}`);
   lines.push(`Totals: ${itin.totalDistance.toFixed(2)} mi, ${itin.totalTravelMinutes.toFixed(0)} min drive, ${itin.totalWaitMinutes.toFixed(0)} min wait`);
+  lines.push(`Objective: ${objectiveLabel()} = ${itin.objectiveValue.toFixed(2)}`);
   return lines.join('\n');
 }
 function routeScheduleRows(data){
@@ -589,17 +803,19 @@ document.getElementById('play').onclick=()=>{playing=!playing;document.getElemen
 function showAnimation(anim){$('routeFrame').src=URL.createObjectURL(new Blob([buildMinimalPlayer(anim)],{type:'text/html'}))}
 function receiveSolution(data){
   lastResponse=data;
+  if(data.objectiveMode)state.objectiveMode=validObjectiveMode(data.objectiveMode);
   $('mStops').textContent=String((data.route||[]).length);
   $('mMiles').textContent=(data.totalDistance||0).toFixed(1);
   $('mDrive').textContent=(data.totalTravelMinutes||0).toFixed(0)+'m';
   $('mWait').textContent=(data.totalWaitMinutes||0).toFixed(0)+'m';
   $('mVars').textContent=String(data.numVariables||'-');
-  $('routeSummary').textContent=`${(data.route||[]).length} stops · ${(data.totalDistance||0).toFixed(1)} mi · ${data.solverStatus||'ready'}`;
+  $('routeSummary').textContent=`${(data.route||[]).length} stops · ${(data.totalDistance||0).toFixed(1)} mi · ${objectiveLabel()} ${(data.objectiveValue||0).toFixed(2)} · ${data.solverStatus||'ready'}`;
   $('itineraryText').value=data.itineraryText||'';
   $('solverNotes').textContent=(data.solverNotes||[]).join('\n');
   $('solverTrace').textContent=(data.solverTrace||[]).map(e=>`${e.action} node=${e.nodeId} depth=${e.depth} z=${e.lpZ==null?'':e.lpZ} ${e.reason||''}`).join('\n')||'No trace.';
   showAnimation(data.routeAnimation);
   renderRouteDetails(data);
+  renderObjectiveControls();
 }
 async function solve(){
   try{syncStateFromControls()}catch(e){setStatus('err',e.message);return}
@@ -614,7 +830,7 @@ async function solve(){
     }
     if(!data.ok)throw new Error(data.error||'solve failed');
     receiveSolution(data);
-    setStatus('ok', `${data.solverStatus}: ${(data.totalDistance||0).toFixed(1)} mi, ${(data.totalTravelMinutes||0).toFixed(0)} min drive.`);
+    setStatus('ok', `${data.solverStatus}: ${objectiveLabel()} ${(data.objectiveValue||0).toFixed(2)}, ${(data.totalDistance||0).toFixed(1)} mi.`);
   }catch(e){setStatus('err','Solve failed: '+e.message)}
   finally{setBusy(false)}
 }
@@ -652,10 +868,20 @@ async function geocodeMissing(){
   $('manifestText').value=state.rawManifest;
   setStatus(changed?'ok':'err',changed?`Geocoded ${changed} address${changed===1?'':'es'}.`:'No geocoding matches found.');
 }
-function parseOnly(){try{syncStateFromControls();$('mStops').textContent=String(state.stops.length);setStatus('ok',`${state.stops.length} stops parsed.`)}catch(e){setStatus('err',e.message)}}
+function parseOnly(){try{syncStateFromControls();renderStopList();$('mStops').textContent=String(state.stops.length);setStatus('ok',`${state.stops.length} stops parsed.`)}catch(e){setStatus('err',e.message)}}
+function loadManifest(){
+  try{
+    syncStateFromControls({resetOrder:true});
+    saveLoadedState();
+    renderControls();
+    $('mStops').textContent=String(state.stops.length);
+    setStatus('ok',`${state.stops.length} stops loaded.`);
+  }catch(e){setStatus('err',e.message)}
+}
 document.querySelectorAll('.tab').forEach(btn=>btn.onclick=()=>{activeTab=btn.dataset.tab;document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('active',b===btn));$('routePane').classList.toggle('active',activeTab==='route');$('itineraryPane').classList.toggle('active',activeTab==='itinerary');$('solverPane').classList.toggle('active',activeTab==='solver')});
 $('solveBtn').onclick=solve;
 $('copyItinerary').onclick=copyItinerary;
+$('loadManifestBtn').onclick=loadManifest;
 $('showAnimationBtn').onclick=()=>setMapMode('animation');
 $('showOsmBtn').onclick=()=>setMapMode('osm');
 $('openGoogleMaps').onclick=()=>openMapUrl(googleDirectionsUrl(orderedRoutePoints()),'Google Maps');
@@ -668,8 +894,23 @@ $('sampleBtn').onclick=()=>{state=structuredClone(defaultConfig);renderControls(
 $('parseBtn').onclick=parseOnly;
 $('geocodeBtn').onclick=geocodeMissing;
 ['departTime','speedMph','serviceMinutes','solverSeconds','solverNodes','solverTicks','solverLpIters'].forEach(id=>$(id).onchange=parseOnly);
+document.querySelectorAll('#objectiveMode button').forEach(btn=>btn.onclick=()=>{
+  state.objectiveMode=validObjectiveMode(btn.dataset.objective);
+  renderObjectiveControls();
+  saveLoadedState();
+  if(lastResponse)solve();
+});
+$('lockOrderBtn').onclick=()=>{
+  ensureRouteOptions();
+  state.routeRules.lockedOrder=!state.routeRules.lockedOrder;
+  state.routeRules.orderedStopIds=orderedStops().map(s=>s.id);
+  renderStopList();
+  saveLoadedState();
+  setStatus('ok',state.routeRules.lockedOrder?'Stop order locked.':'Stop order unlocked.');
+};
+restoreLoadedState();
 renderControls();
-try{syncStateFromControls();receiveSolution(localSolve());setStatus('ok','Sample route ready.')}catch(e){setStatus('err',e.message)}
+try{syncStateFromControls();renderStopList();receiveSolution(localSolve());setStatus('ok','Sample route ready.')}catch(e){setStatus('err',e.message)}
 </script>
 </body>
 </html>

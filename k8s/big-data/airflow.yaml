@@ -96,8 +96,6 @@ spec:
             - name: web
               containerPort: 8080
           volumeMounts:
-            - name: airflow-home
-              mountPath: /opt/airflow
             - name: dags
               mountPath: /opt/airflow/dags
           resources:
@@ -115,8 +113,6 @@ spec:
             periodSeconds: 15
             failureThreshold: 8
       volumes:
-        - name: airflow-home
-          emptyDir: {}
         - name: dags
           configMap:
             name: airflow-dags
@@ -135,4 +131,3 @@ spec:
     - name: web
       port: 8080
       targetPort: web
-

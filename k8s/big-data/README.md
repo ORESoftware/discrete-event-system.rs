@@ -14,10 +14,12 @@ or external control plane, not deployed as a plain in-cluster Kubernetes
 
 Authenticate to the Kubernetes cluster first, then apply the kustomization.
 The configured non-local context in this workspace is currently
-`factmachine-devnet`.
+`factmachine-devnet`. Its kubeconfig user sets `AWS_PROFILE=factmachine-devnet`,
+so that profile must exist locally and be authorized in the EKS cluster.
 
 ```bash
-aws sso login
+aws sso login --profile factmachine-devnet
+aws sts get-caller-identity --profile factmachine-devnet
 kubectl --context factmachine-devnet apply -k k8s/big-data
 kubectl --context factmachine-devnet -n big-data get pods,svc
 ```
@@ -38,7 +40,8 @@ kubectl --context factmachine-devnet -n big-data port-forward svc/minio 9001:900
 
 These manifests favor local development over production hardening:
 
-- Airflow and MinIO use `emptyDir`, so data is ephemeral.
+- Airflow uses its pod filesystem and MinIO uses `emptyDir`, so data is
+  ephemeral.
 - Credentials are dev defaults and should be replaced before shared use.
 - Airflow runs the webserver and scheduler in one pod.
 - For production, prefer the official Airflow Helm chart, a Spark Operator or

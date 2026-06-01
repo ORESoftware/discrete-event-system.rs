@@ -8,7 +8,7 @@
 //! the audio boundary.
 
 use std::f64::consts::TAU;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use crate::des::general::prng::mulberry32;
@@ -17,6 +17,7 @@ use crate::des::shared::capabilities::RandomSource;
 
 pub const DEFAULT_SAMPLE_RATE: u32 = 44_100;
 pub const DEFAULT_SONG_SECONDS: f64 = 180.0;
+pub const MAX_MUSIC_SAMPLE_SEED_BYTES: u64 = 96 * 1024 * 1024;
 
 fn require_finite(name: &str, value: f64) {
     assert!(value.is_finite(), "{name} must be finite");
@@ -2098,8 +2099,30 @@ pub fn generate_track_structure_plan(
 }
 
 pub fn derive_music_sample_seed_from_mp4(path: impl AsRef<Path>) -> io::Result<MusicSampleSeed> {
+    derive_music_sample_seed_from_mp4_with_limit(path, MAX_MUSIC_SAMPLE_SEED_BYTES)
+}
+
+pub fn derive_music_sample_seed_from_mp4_with_limit(
+    path: impl AsRef<Path>,
+    max_bytes: u64,
+) -> io::Result<MusicSampleSeed> {
     let path = path.as_ref();
-    let bytes = std::fs::read(path)?;
+    if max_bytes < 8 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "music-sample-seed byte limit is too small for an MP4 header",
+        ));
+    }
+    let mut file = std::fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    let mut limited = (&mut file).take(max_bytes.saturating_add(1));
+    limited.read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("music-sample-seed file exceeds {max_bytes} bytes"),
+        ));
+    }
     let duration_seconds = parse_mp4_duration_seconds(&bytes).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidData,
@@ -2720,41 +2743,95 @@ fn json_escape(value: &str) -> String {
 }
 
 fn parse_mp4_duration_seconds(bytes: &[u8]) -> Option<f64> {
-    let mut search_from = 0usize;
-    while search_from + 8 < bytes.len() {
-        let rel = bytes[search_from..].windows(4).position(|w| w == b"mvhd")?;
-        let typ = search_from + rel;
-        if typ < 4 || typ + 24 >= bytes.len() {
+    find_mvhd_duration_in_boxes(bytes, 0, bytes.len(), 0)
+}
+
+fn find_mvhd_duration_in_boxes(
+    bytes: &[u8],
+    start: usize,
+    end: usize,
+    depth: usize,
+) -> Option<f64> {
+    if depth > 8 || start > end || end > bytes.len() {
+        return None;
+    }
+    let mut pos = start;
+    while pos.checked_add(8)? <= end {
+        let size32 = u32::from_be_bytes(bytes[pos..pos + 4].try_into().ok()?) as u64;
+        let box_type: [u8; 4] = bytes[pos + 4..pos + 8].try_into().ok()?;
+        let mut header_len = 8usize;
+        let box_end = if size32 == 1 {
+            if pos.checked_add(16)? > end {
+                return None;
+            }
+            header_len = 16;
+            let size64 = u64::from_be_bytes(bytes[pos + 8..pos + 16].try_into().ok()?);
+            pos.checked_add(usize::try_from(size64).ok()?)?
+        } else if size32 == 0 {
+            end
+        } else {
+            pos.checked_add(usize::try_from(size32).ok()?)?
+        };
+        if box_end > end || box_end < pos + header_len {
             return None;
         }
-        let box_start = typ - 4;
-        let size = u32::from_be_bytes(bytes[box_start..box_start + 4].try_into().ok()?) as usize;
-        let content = typ + 4;
-        if size >= 24 && box_start + size <= bytes.len() {
-            let version = bytes[content];
-            if version == 1 {
-                if content + 32 <= bytes.len() {
-                    let timescale =
-                        u32::from_be_bytes(bytes[content + 20..content + 24].try_into().ok()?);
-                    let duration =
-                        u64::from_be_bytes(bytes[content + 24..content + 32].try_into().ok()?);
-                    if timescale > 0 {
-                        return Some(duration as f64 / timescale as f64);
-                    }
-                }
-            } else if content + 20 <= bytes.len() {
-                let timescale =
-                    u32::from_be_bytes(bytes[content + 12..content + 16].try_into().ok()?);
-                let duration =
-                    u32::from_be_bytes(bytes[content + 16..content + 20].try_into().ok()?);
-                if timescale > 0 {
-                    return Some(duration as f64 / timescale as f64);
-                }
+        let content_start = pos + header_len;
+        if &box_type == b"mvhd" {
+            if let Some(duration) = parse_mvhd_duration_seconds(&bytes[content_start..box_end]) {
+                return Some(duration);
+            }
+        } else if is_mp4_container_box(&box_type) {
+            if let Some(duration) =
+                find_mvhd_duration_in_boxes(bytes, content_start, box_end, depth + 1)
+            {
+                return Some(duration);
             }
         }
-        search_from = typ + 4;
+        if box_end == pos {
+            return None;
+        }
+        pos = box_end;
     }
     None
+}
+
+fn is_mp4_container_box(box_type: &[u8; 4]) -> bool {
+    matches!(
+        box_type,
+        b"moov"
+            | b"trak"
+            | b"mdia"
+            | b"minf"
+            | b"stbl"
+            | b"edts"
+            | b"meta"
+            | b"udta"
+            | b"moof"
+            | b"traf"
+    )
+}
+
+fn parse_mvhd_duration_seconds(content: &[u8]) -> Option<f64> {
+    let version = *content.first()?;
+    match version {
+        0 => {
+            if content.len() < 20 {
+                return None;
+            }
+            let timescale = u32::from_be_bytes(content[12..16].try_into().ok()?);
+            let duration = u32::from_be_bytes(content[16..20].try_into().ok()?);
+            (timescale > 0).then_some(duration as f64 / timescale as f64)
+        }
+        1 => {
+            if content.len() < 32 {
+                return None;
+            }
+            let timescale = u32::from_be_bytes(content[20..24].try_into().ok()?);
+            let duration = u64::from_be_bytes(content[24..32].try_into().ok()?);
+            (timescale > 0).then_some(duration as f64 / timescale as f64)
+        }
+        _ => None,
+    }
 }
 
 fn hash_bytes_to_seed(bytes: &[u8]) -> u32 {
@@ -3283,6 +3360,28 @@ mod tests {
         (a - b).abs() <= tol * 1.0_f64.max(a.abs()).max(b.abs())
     }
 
+    fn mp4_with_mvhd(duration: u32, timescale: u32) -> Vec<u8> {
+        fn mp4_box(name: &[u8; 4], content: &[u8]) -> Vec<u8> {
+            let size = (8 + content.len()) as u32;
+            let mut out = Vec::with_capacity(size as usize);
+            out.extend_from_slice(&size.to_be_bytes());
+            out.extend_from_slice(name);
+            out.extend_from_slice(content);
+            out
+        }
+
+        let ftyp = mp4_box(b"ftyp", b"isom\0\0\0\x01isom");
+        let mut mvhd_content = Vec::new();
+        mvhd_content.extend_from_slice(&[0, 0, 0, 0]);
+        mvhd_content.extend_from_slice(&0u32.to_be_bytes());
+        mvhd_content.extend_from_slice(&0u32.to_be_bytes());
+        mvhd_content.extend_from_slice(&timescale.to_be_bytes());
+        mvhd_content.extend_from_slice(&duration.to_be_bytes());
+        let mvhd = mp4_box(b"mvhd", &mvhd_content);
+        let moov = mp4_box(b"moov", &mvhd);
+        [ftyp, moov].concat()
+    }
+
     #[test]
     fn microtonal_scale_reaches_octave() {
         let scale = MicrotonalScale::rave_collage_19_edo();
@@ -3405,6 +3504,32 @@ mod tests {
                 .any(|w| lower.contains(w))
         }));
         assert_eq!(a.audio.len(), 32_000);
+    }
+
+    #[test]
+    fn mp4_duration_parser_uses_box_structure() {
+        let bytes = mp4_with_mvhd(20_000, 1_000);
+        assert_eq!(parse_mp4_duration_seconds(&bytes), Some(20.0));
+
+        let stray = b"\0\0\0\x18ftypisomnot-a-box-mvhd\0\0\0\0\0".to_vec();
+        assert_eq!(parse_mp4_duration_seconds(&stray), None);
+    }
+
+    #[test]
+    fn sample_seed_read_respects_byte_limit() {
+        let path = std::env::temp_dir().join(format!(
+            "music-seed-limit-{}-{}.mp4",
+            std::process::id(),
+            42
+        ));
+        std::fs::write(&path, mp4_with_mvhd(20_000, 1_000)).expect("write mp4 fixture");
+        let err = derive_music_sample_seed_from_mp4_with_limit(&path, 12)
+            .expect_err("tiny byte limit should reject fixture");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        let sample = derive_music_sample_seed_from_mp4_with_limit(&path, 4096)
+            .expect("fixture stays under larger byte limit");
+        assert_eq!(sample.duration_seconds, 20.0);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

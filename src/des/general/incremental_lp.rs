@@ -61,6 +61,17 @@ pub enum SolverStatus {
     Unbounded,
 }
 
+/// Pivot rule for the warm-startable simplex tableau.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum IncrementalPivotRule {
+    /// Most-negative reduced cost / most-negative RHS. Fast on typical demos.
+    #[default]
+    Dantzig,
+    /// Bland-style lowest-index choices on entering/leaving ties. Slower, but
+    /// finite on degenerate tableaus that can cycle under Dantzig's rule.
+    Bland,
+}
+
 // -----------------------------------------------------------------------------
 // MOVABLES — modification events flowing into the LP tableau.
 // -----------------------------------------------------------------------------
@@ -196,6 +207,8 @@ pub struct IncrementalLP {
     pub con_names: Vec<String>,
     /// Detected status.
     pub status: SolverStatus,
+    /// Pivot selection rule used by primal and dual simplex steps.
+    pub pivot_rule: IncrementalPivotRule,
     /// Current tick counter; advances by exactly one each `step()`.
     pub tick: usize,
 }
@@ -262,6 +275,7 @@ impl IncrementalLP {
             var_names,
             con_names,
             status: SolverStatus::Primal,
+            pivot_rule: IncrementalPivotRule::Dantzig,
             tick: 0,
         };
         lp.refresh_status();
@@ -278,13 +292,26 @@ impl IncrementalLP {
         let m = self.tab.len() - 1;
         let total_cols = self.tab[0].len();
         let rhs_col = total_cols - 1;
-        // Entering: most negative reduced cost (Dantzig's rule).
         let mut entering: Option<usize> = None;
-        let mut most_neg = -EPS;
-        for j in 0..rhs_col {
-            if self.tab[0][j] < most_neg {
-                most_neg = self.tab[0][j];
-                entering = Some(j);
+        match self.pivot_rule {
+            IncrementalPivotRule::Dantzig => {
+                // Entering: most negative reduced cost.
+                let mut most_neg = -EPS;
+                for j in 0..rhs_col {
+                    if self.tab[0][j] < most_neg {
+                        most_neg = self.tab[0][j];
+                        entering = Some(j);
+                    }
+                }
+            }
+            IncrementalPivotRule::Bland => {
+                // Entering: first improving column by index.
+                for j in 0..rhs_col {
+                    if self.tab[0][j] < -EPS {
+                        entering = Some(j);
+                        break;
+                    }
+                }
             }
         }
         let entering = match entering {
@@ -297,7 +324,7 @@ impl IncrementalLP {
         for i in 1..=m {
             if self.tab[i][entering] > EPS {
                 let ratio = self.tab[i][rhs_col] / self.tab[i][entering];
-                let tie_better = (ratio - min_ratio).abs() < EPS
+                let tie_better = (ratio - min_ratio).abs() <= EPS
                     && match leaving {
                         None => true,
                         Some(l) => self.basis[i - 1] < self.basis[l - 1],
@@ -332,13 +359,39 @@ impl IncrementalLP {
         let m = self.tab.len() - 1;
         let total_cols = self.tab[0].len();
         let rhs_col = total_cols - 1;
-        // Leaving: most negative basic value.
         let mut leaving: Option<usize> = None;
-        let mut most_neg = -EPS;
-        for i in 1..=m {
-            if self.tab[i][rhs_col] < most_neg {
-                most_neg = self.tab[i][rhs_col];
-                leaving = Some(i);
+        match self.pivot_rule {
+            IncrementalPivotRule::Dantzig => {
+                // Leaving: most negative basic value.
+                let mut most_neg = -EPS;
+                for i in 1..=m {
+                    let rhs = self.tab[i][rhs_col];
+                    if rhs >= -EPS {
+                        continue;
+                    }
+                    let tie_better = (rhs - most_neg).abs() <= EPS
+                        && match leaving {
+                            None => true,
+                            Some(l) => self.basis[i - 1] < self.basis[l - 1],
+                        };
+                    if rhs < most_neg - EPS || tie_better {
+                        most_neg = rhs;
+                        leaving = Some(i);
+                    }
+                }
+            }
+            IncrementalPivotRule::Bland => {
+                // Leaving: lowest-index infeasible basic variable.
+                for i in 1..=m {
+                    if self.tab[i][rhs_col] < -EPS
+                        && match leaving {
+                            None => true,
+                            Some(l) => self.basis[i - 1] < self.basis[l - 1],
+                        }
+                    {
+                        leaving = Some(i);
+                    }
+                }
             }
         }
         let leaving = match leaving {
@@ -351,7 +404,9 @@ impl IncrementalLP {
         for j in 0..rhs_col {
             if self.tab[leaving][j] < -EPS {
                 let ratio = self.tab[0][j] / -self.tab[leaving][j];
-                if ratio < min_ratio - EPS {
+                if ratio < min_ratio - EPS
+                    || ((ratio - min_ratio).abs() <= EPS && entering.map_or(true, |e| j < e))
+                {
                     min_ratio = ratio;
                     entering = Some(j);
                 }
@@ -461,6 +516,12 @@ impl IncrementalLP {
     // ---------------------------------------------------------------------
     // MODIFICATION OPERATIONS
     // ---------------------------------------------------------------------
+
+    /// Select the simplex pivot rule. Branch-and-bound callers should prefer
+    /// [`IncrementalPivotRule::Bland`] for anti-cycling robustness.
+    pub fn set_pivot_rule(&mut self, rule: IncrementalPivotRule) {
+        self.pivot_rule = rule;
+    }
 
     /// Add `coefs · x ≤ rhs`. After the call the system is dual-feasible; if the
     /// new slack is negative (primal infeasible) the next `step()`s run dual simplex.

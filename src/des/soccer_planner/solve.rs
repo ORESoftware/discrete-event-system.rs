@@ -11,9 +11,9 @@ use crate::des::animation::scenes::soccer_scene as pitch_scene;
 use crate::des::animation::types::Animation;
 use crate::des::general::ip_mip_des::TraceAction;
 use crate::des::general::soccer_rotation::{
-    evaluate_schedule, formation_with_gk, policy_ipmip_feasible, simulate_match_des,
-    validate_schedule_structure, MatchSimOptions, Schedule, SoccerIPMIPPolicyOptions,
-    SoccerIPMIPPolicyResult, SoccerProblem,
+    build_soccer_ipmip, evaluate_schedule, formation_with_gk, policy_greedy_feasible_schedule,
+    policy_ipmip_feasible, simulate_match_des, validate_schedule_structure, MatchSimOptions,
+    Schedule, SoccerIPMIPPolicyOptions, SoccerIPMIPPolicyResult, SoccerProblem,
 };
 
 use super::model::{parse_player_status, synergy_to_rule, PlannerRequest};
@@ -390,6 +390,85 @@ pub fn solve_planner_summary(req: &PlannerRequest) -> PlannerResponse {
     solve_planner_inner(req, false)
 }
 
+fn response_from_schedule(
+    problem: &SoccerProblem,
+    schedule: Schedule,
+    formation: &[usize],
+    req: &PlannerRequest,
+    render_animations: bool,
+    mip_status: String,
+    elapsed_ms: f64,
+    nodes_explored: u64,
+    num_variables: usize,
+    num_constraints: usize,
+    used_fallback: bool,
+    fallback_reason: Option<String>,
+) -> PlannerResponse {
+    let eval = evaluate_schedule(problem, &schedule);
+    if validate_schedule_structure(problem, &schedule).is_some()
+        || !eval.fairness_ok
+        || !eval.stamina_ok
+        || !eval.subs_ok
+    {
+        return PlannerResponse {
+            ok: false,
+            error: Some("solver returned structurally invalid schedule".into()),
+            affinity: eval.affinity_sum,
+            total_subs: eval.total_subs,
+            fairness_ok: eval.fairness_ok,
+            stamina_ok: eval.stamina_ok,
+            subs_ok: eval.subs_ok,
+            mip_status,
+            elapsed_ms,
+            nodes_explored,
+            num_players: problem.num_players,
+            num_positions: problem.num_positions,
+            num_variables,
+            num_constraints,
+            used_fallback,
+            fallback_reason,
+            assignment: schedule.assignment,
+            bench: schedule.bench,
+            pitch_animation: empty_animation(),
+            solver_animation: empty_animation(),
+        };
+    }
+
+    let pitch = if render_animations {
+        render_pitch_animation(
+            problem,
+            &schedule,
+            formation,
+            req.minutes_per_period,
+            req.seed,
+        )
+    } else {
+        empty_animation()
+    };
+    PlannerResponse {
+        ok: true,
+        error: None,
+        affinity: eval.affinity_sum,
+        total_subs: eval.total_subs,
+        fairness_ok: eval.fairness_ok,
+        stamina_ok: eval.stamina_ok,
+        subs_ok: eval.subs_ok,
+        mip_status,
+        elapsed_ms,
+        nodes_explored,
+        num_players: problem.num_players,
+        num_positions: problem.num_positions,
+        num_variables,
+        num_constraints,
+        used_fallback,
+        fallback_reason,
+        assignment: schedule.assignment,
+        bench: schedule.bench,
+        pitch_animation: pitch,
+        solver_animation: empty_animation(),
+    }
+}
+
 fn solve_planner_inner(req: &PlannerRequest, render_animations: bool) -> PlannerResponse {
     let formation = formation_with_gk(&req.outfield_formation);
     match build_problem_from_request(req) {
@@ -417,6 +496,28 @@ fn solve_planner_inner(req: &PlannerRequest, render_animations: bool) -> Planner
         },
         Ok(problem) => {
             let t0 = Instant::now();
+            if req.fallback_to_mdp {
+                let model = build_soccer_ipmip(&problem);
+                if let Some(schedule) = policy_greedy_feasible_schedule(&problem) {
+                    return response_from_schedule(
+                        &problem,
+                        schedule,
+                        &formation,
+                        req,
+                        render_animations,
+                        "fast-fallback".into(),
+                        t0.elapsed().as_secs_f64() * 1000.0,
+                        0,
+                        model.ip.c.len(),
+                        model.ip.a.len(),
+                        true,
+                        Some(
+                            "used fast feasible planner fallback; turn off Fallback to force branch-and-cut"
+                                .into(),
+                        ),
+                    );
+                }
+            }
             let mip_opts = SoccerIPMIPPolicyOptions {
                 time_limit_ms: Some(req.solver_time_limit_ms),
                 max_nodes: Some(req.solver_max_nodes),
@@ -579,5 +680,38 @@ pub fn run_default_export() {
     let path = out_dir.join("soccer-planner.html");
     if std::fs::write(&path, html).is_ok() {
         println!("# Soccer planner UI written to {}", path.display());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_problem_from_request, solve_planner_summary, PlannerResponse};
+    use crate::des::general::ip_mip_des::validate_ipmip_problem;
+    use crate::des::general::soccer_rotation::build_soccer_ipmip;
+    use crate::des::soccer_planner::default_planner_request;
+
+    fn assert_solved(resp: &PlannerResponse) {
+        assert!(resp.ok, "default planner solve failed: {:?}", resp.error);
+        assert_eq!(resp.num_players, 18);
+        assert_eq!(resp.num_positions, 11);
+        assert!(resp.fairness_ok, "fairness check failed");
+        assert!(resp.stamina_ok, "stamina check failed");
+        assert!(resp.subs_ok, "substitution check failed");
+        assert_eq!(resp.assignment.len(), 2);
+        assert_eq!(resp.bench.len(), 2);
+    }
+
+    #[test]
+    fn default_planner_request_solves() {
+        let req = default_planner_request();
+        assert_solved(&solve_planner_summary(&req));
+    }
+
+    #[test]
+    fn default_planner_ipmip_model_validates() {
+        let req = default_planner_request();
+        let problem = build_problem_from_request(&req).unwrap();
+        let model = build_soccer_ipmip(&problem);
+        validate_ipmip_problem(&model.ip);
     }
 }

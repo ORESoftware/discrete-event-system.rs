@@ -153,6 +153,8 @@ fn response_schema() -> ParamSchema {
             ("itemIds", arr(string_field(), Some(0))),
             ("ratings", obj(vec![], vec![])),
             ("ranking", arr(string_field(), Some(0))),
+            ("exposureOrder", arr(string_field(), Some(0))),
+            ("ratingAges", obj(vec![], vec![])),
             ("age", num(Some(0.0), None, None, None)),
             ("experienceYears", obj(vec![], vec![])),
             ("weight", num(Some(0.0), None, None, Some(1.0))),
@@ -172,6 +174,10 @@ fn collaborative_schema() -> ParamSchema {
                         "programming-languages",
                         "model-validation",
                         "learning-resources",
+                        "movies",
+                        "travel-spots",
+                        "books",
+                        "songs",
                         "custom",
                     ],
                     Some("programming-languages"),
@@ -216,6 +222,14 @@ fn collaborative_schema() -> ParamSchema {
             (
                 "experienceWeightStrength",
                 num(Some(0.0), None, None, Some(0.6)),
+            ),
+            (
+                "exposureOrderWeightStrength",
+                num(Some(0.0), None, None, Some(0.3)),
+            ),
+            (
+                "ratingAgeWeightStrength",
+                num(Some(0.0), None, None, Some(0.35)),
             ),
             (
                 "highRatedBreadthStrength",
@@ -292,12 +306,14 @@ impl DESModelRegistration<CollaborativeInferenceParams, CollaborativeInferenceRe
     ) -> String {
         let credibility = if result.credibility.enabled {
             format!(
-                "{} pass(es), mean weight={:.3}, max={:.3}, capped claims={}, breadth bonuses={}",
+                "{} pass(es), mean weight={:.3}, max={:.3}, capped claims={}, breadth bonuses={}, order strength={:.2}, rating-age strength={:.2}",
                 result.credibility.passes,
                 result.credibility.mean_respondent_weight,
                 result.credibility.max_respondent_weight,
                 result.credibility.capped_experience_claims,
-                result.credibility.high_rated_bonus_respondents
+                result.credibility.high_rated_bonus_respondents,
+                result.credibility.exposure_order_weight_strength,
+                result.credibility.rating_age_weight_strength
             )
         } else {
             "disabled".to_string()
@@ -433,6 +449,58 @@ impl DESModelRegistration<CollaborativeInferenceParams, CollaborativeInferenceRe
                     max_items_per_respondent: Some(4),
                     seed: Some(5),
                     top_k: Some(8),
+                    ..Default::default()
+                },
+            ),
+            example(
+                "movies",
+                "Rank movies from sparse watch histories, ratings, chronological exposure order, and age-at-rating evidence.",
+                CollaborativeInferenceParams {
+                    scenario: Some(CollaborativeInferenceScenario::Movies),
+                    respondent_count: Some(5000),
+                    min_items_per_respondent: Some(4),
+                    max_items_per_respondent: Some(7),
+                    seed: Some(17),
+                    top_k: Some(12),
+                    ..Default::default()
+                },
+            ),
+            example(
+                "travel-spots",
+                "Rank travel spots from sparse trip histories where later trips and adult ratings can carry more item-specific credibility.",
+                CollaborativeInferenceParams {
+                    scenario: Some(CollaborativeInferenceScenario::TravelSpots),
+                    respondent_count: Some(3500),
+                    min_items_per_respondent: Some(3),
+                    max_items_per_respondent: Some(6),
+                    seed: Some(19),
+                    top_k: Some(10),
+                    ..Default::default()
+                },
+            ),
+            example(
+                "books",
+                "Rank books from sparse reading histories with temporal exposure and rating-age weighting.",
+                CollaborativeInferenceParams {
+                    scenario: Some(CollaborativeInferenceScenario::Books),
+                    respondent_count: Some(4200),
+                    min_items_per_respondent: Some(3),
+                    max_items_per_respondent: Some(6),
+                    seed: Some(23),
+                    top_k: Some(10),
+                    ..Default::default()
+                },
+            ),
+            example(
+                "songs",
+                "Rank songs from sparse listening histories and subjective ratings.",
+                CollaborativeInferenceParams {
+                    scenario: Some(CollaborativeInferenceScenario::Songs),
+                    respondent_count: Some(6000),
+                    min_items_per_respondent: Some(4),
+                    max_items_per_respondent: Some(8),
+                    seed: Some(29),
+                    top_k: Some(12),
                     ..Default::default()
                 },
             ),

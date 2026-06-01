@@ -28,6 +28,7 @@ fn status_str(s: MILPStatus) -> &'static str {
         MILPStatus::Optimal => "optimal",
         MILPStatus::Infeasible => "infeasible",
         MILPStatus::Unbounded => "unbounded",
+        MILPStatus::IterLimit => "iter-limit",
         MILPStatus::MaxNodes => "max-nodes",
     }
 }

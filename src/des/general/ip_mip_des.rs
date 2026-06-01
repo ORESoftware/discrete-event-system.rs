@@ -57,11 +57,12 @@ use crate::des::general::des_base::stateful_token::{
 use crate::des::general::des_base::station::{DESStation, StationCore, StationRef};
 use crate::des::general::des_base::validation::intrinsic_check;
 use crate::des::general::incremental_lp::{
-    IncrementalLP, IncrementalLPInit, PivotMode, Sense as IncSense, SolverStatus,
+    IncrementalLP, IncrementalLPInit, IncrementalPivotRule, PivotMode, Sense as IncSense,
+    SolverStatus,
 };
 use crate::des::general::lp::{
-    solve_lp_external, solve_lp_internal, ExternalSolverOptions, InternalSimplexOptions, LPProblem,
-    LPStatus, Sense,
+    solve_lp_external, solve_lp_internal, solve_lp_internal_ipm, ExternalSolverOptions,
+    InternalInteriorPointOptions, InternalSimplexOptions, LPProblem, LPStatus, Sense,
 };
 use crate::des::general::lp_des::{solve_lp_via_des, DESSimplexOptions, PivotRule};
 
@@ -76,6 +77,7 @@ pub enum ConcreteLpRelaxationAlgorithm {
     DesSimplexDantzig,
     DesSimplexBland,
     InternalSimplex,
+    InternalInteriorPoint,
     ExternalHighs,
     ExternalHighsDs,
     ExternalHighsIpm,
@@ -88,6 +90,7 @@ impl ConcreteLpRelaxationAlgorithm {
             ConcreteLpRelaxationAlgorithm::DesSimplexDantzig => "des-simplex-dantzig",
             ConcreteLpRelaxationAlgorithm::DesSimplexBland => "des-simplex-bland",
             ConcreteLpRelaxationAlgorithm::InternalSimplex => "internal-simplex",
+            ConcreteLpRelaxationAlgorithm::InternalInteriorPoint => "internal-ipm",
             ConcreteLpRelaxationAlgorithm::ExternalHighs => "external-highs",
             ConcreteLpRelaxationAlgorithm::ExternalHighsDs => "external-highs-ds",
             ConcreteLpRelaxationAlgorithm::ExternalHighsIpm => "external-highs-ipm",
@@ -1806,6 +1809,26 @@ fn solve_node_relaxation(
                 message: s.message,
             }
         }
+        InternalInteriorPoint => {
+            let s = solve_lp_internal_ipm(
+                &lp,
+                &InternalInteriorPointOptions {
+                    max_iter: Some(lp_max_iters),
+                    tol: None,
+                    step_fraction: None,
+                    regularization: None,
+                },
+            );
+            NodeLPResult {
+                status: s.status,
+                x: s.x,
+                objective: s.objective,
+                solver: s.solver,
+                elapsed_ms: s.elapsed_ms,
+                iters: s.iters,
+                message: s.message,
+            }
+        }
         DesSimplexDantzig => {
             let s = solve_lp_via_des(
                 &lp,
@@ -2169,6 +2192,7 @@ fn solve_incremental_relaxation(
         var_names: p.var_names.clone(),
         con_names: Some(root.names),
     });
+    lp.set_pivot_rule(IncrementalPivotRule::Bland);
     for c in &node.constraints {
         lp.apply_add_constraint(&c.coefs, c.rhs, Some(c.name.clone()));
     }

@@ -132,6 +132,9 @@ fn parse_lp_algorithm(s: &str) -> LpRelaxationAlgorithm {
         "incremental-primal-dual" => LpRelaxationAlgorithm::Concrete(C::IncrementalPrimalDual),
         "des-simplex-dantzig" => LpRelaxationAlgorithm::Concrete(C::DesSimplexDantzig),
         "des-simplex-bland" => LpRelaxationAlgorithm::Concrete(C::DesSimplexBland),
+        "internal-ipm" | "internal-interior-point" => {
+            LpRelaxationAlgorithm::Concrete(C::InternalInteriorPoint)
+        }
         "external-highs" => LpRelaxationAlgorithm::Concrete(C::ExternalHighs),
         "external-highs-ds" => LpRelaxationAlgorithm::Concrete(C::ExternalHighsDs),
         "external-highs-ipm" => LpRelaxationAlgorithm::Concrete(C::ExternalHighsIpm),

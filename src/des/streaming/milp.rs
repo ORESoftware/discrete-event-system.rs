@@ -80,6 +80,7 @@ impl StreamingMilp {
             MILPStatus::Optimal => "optimal",
             MILPStatus::Infeasible => "infeasible",
             MILPStatus::Unbounded => "unbounded",
+            MILPStatus::IterLimit => "iter-limit",
             MILPStatus::MaxNodes => "max-nodes",
         }
     }
@@ -89,6 +90,7 @@ impl StreamingMilp {
             LpStatus::Optimal => "optimal",
             LpStatus::Infeasible => "infeasible",
             LpStatus::Unbounded => "unbounded",
+            LpStatus::IterLimit => "iter-limit",
         }
     }
 
@@ -105,6 +107,7 @@ impl StreamingMilp {
             PrunedReason::Unbounded => "unbounded",
             PrunedReason::Bound => "bound",
             PrunedReason::IntegerFeasible => "integer-feasible",
+            PrunedReason::IterLimit => "iter-limit",
         }
     }
 
@@ -162,6 +165,7 @@ impl StreamingMilp {
             verbose: Some(false),
             initial_incumbent_z: None,
             branch_seed: None,
+            lp_pivot_rule: None,
         };
         let problem = self.problem.clone();
         let result = catch_unwind(AssertUnwindSafe(|| solve_milp(&problem, opts)));

@@ -408,6 +408,33 @@ pub fn player_is_fieldable(problem: &SoccerProblem, p: usize) -> bool {
     }
 }
 
+fn player_fixed_position(problem: &SoccerProblem, p: usize) -> Option<usize> {
+    problem
+        .fixed_position
+        .as_ref()
+        .and_then(|fixed| fixed.get(p))
+        .copied()
+        .flatten()
+}
+
+fn player_banned_from_position(problem: &SoccerProblem, p: usize, pos: usize) -> bool {
+    problem
+        .banned_positions
+        .as_ref()
+        .and_then(|banned| banned.get(p))
+        .and_then(|row| row.get(pos))
+        .copied()
+        .unwrap_or(false)
+}
+
+fn player_can_play_position(problem: &SoccerProblem, p: usize, pos: usize) -> bool {
+    player_is_fieldable(problem, p)
+        && player_fixed_position(problem, p)
+            .map(|fixed| fixed == pos)
+            .unwrap_or(true)
+        && !player_banned_from_position(problem, p, pos)
+}
+
 /// Effective score for `(player, position)` in period `t` given the full lineup
 /// (applies synergy overrides on top of the base affinity tensor).
 pub fn effective_cell_affinity(
@@ -775,6 +802,196 @@ pub fn policy_greedy_hungarian(problem: &SoccerProblem, opts: &GreedyHungarianOp
         prev_bench = tbench;
     }
     Schedule { assignment, bench }
+}
+
+fn best_eligible_position_score(problem: &SoccerProblem, p: usize, t: usize) -> Option<f64> {
+    let mut best = f64::NEG_INFINITY;
+    let mut found = false;
+    for pos in 0..problem.num_positions {
+        if player_can_play_position(problem, p, pos) {
+            best = best.max(problem.affinity[p][pos][t]);
+            found = true;
+        }
+    }
+    found.then_some(best)
+}
+
+fn hungarian_assign_period_constrained(
+    problem: &SoccerProblem,
+    t: usize,
+    on_field: &[usize],
+) -> Option<Vec<i64>> {
+    if on_field.len() != problem.num_positions {
+        return None;
+    }
+    let invalid = -1.0e9;
+    let mut w_matrix: Vec<Vec<f64>> = Vec::new();
+    for &p in on_field {
+        let mut row: Vec<f64> = Vec::new();
+        for pos in 0..problem.num_positions {
+            row.push(if player_can_play_position(problem, p, pos) {
+                problem.affinity[p][pos][t]
+            } else {
+                invalid
+            });
+        }
+        if row.iter().all(|&w| w <= invalid / 2.0) {
+            return None;
+        }
+        w_matrix.push(row);
+    }
+    for pos in 0..problem.num_positions {
+        if w_matrix.iter().all(|row| row[pos] <= invalid / 2.0) {
+            return None;
+        }
+    }
+    let res = hungarian(&w_matrix, AssignmentDirection::Max);
+    let mut period_assign = vec![-1i64; problem.num_positions];
+    for (i, &p) in on_field.iter().enumerate() {
+        let pos = *res.rows.get(i)?;
+        if pos < 0 {
+            return None;
+        }
+        let pos = pos as usize;
+        if pos >= problem.num_positions || w_matrix[i][pos] <= invalid / 2.0 {
+            return None;
+        }
+        if period_assign[pos] >= 0 {
+            return None;
+        }
+        period_assign[pos] = p as i64;
+    }
+    if period_assign.iter().any(|&p| p < 0) {
+        return None;
+    }
+    Some(period_assign)
+}
+
+/// Fast constructive schedule for the interactive planner fallback.
+///
+/// It respects fieldability, fixed-position and banned-position constraints,
+/// the no-consecutive-bench fairness rule, the stamina cap, and max subs.
+pub fn policy_greedy_feasible_schedule(problem: &SoccerProblem) -> Option<Schedule> {
+    let fieldable = (0..problem.num_players)
+        .filter(|&p| player_is_fieldable(problem, p))
+        .count();
+    if fieldable < problem.num_positions {
+        return None;
+    }
+
+    let mut assignment: Vec<Vec<i64>> = Vec::new();
+    let mut bench: Vec<Vec<usize>> = Vec::new();
+    let mut prev_bench: HashSet<usize> = HashSet::new();
+    let mut prev_on: HashSet<usize> = HashSet::new();
+    let mut consecutive_on = vec![0usize; problem.num_players];
+
+    for t in 0..problem.num_periods {
+        let mut selected: Vec<usize> = Vec::new();
+        let mut selected_set: HashSet<usize> = HashSet::new();
+
+        for p in 0..problem.num_players {
+            if let Some(pos) = player_fixed_position(problem, p) {
+                if pos >= problem.num_positions || !player_can_play_position(problem, p, pos) {
+                    return None;
+                }
+                selected.push(p);
+                selected_set.insert(p);
+            }
+        }
+        if selected.len() > problem.num_positions {
+            return None;
+        }
+
+        let mut must_play: Vec<usize> = prev_bench
+            .iter()
+            .copied()
+            .filter(|&p| player_is_fieldable(problem, p) && !selected_set.contains(&p))
+            .collect();
+        must_play.sort_by(|&a, &b| {
+            best_eligible_position_score(problem, b, t)
+                .unwrap_or(f64::NEG_INFINITY)
+                .partial_cmp(
+                    &best_eligible_position_score(problem, a, t).unwrap_or(f64::NEG_INFINITY),
+                )
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.cmp(&b))
+        });
+        for p in must_play {
+            if selected.len() >= problem.num_positions {
+                return None;
+            }
+            if best_eligible_position_score(problem, p, t).is_some() {
+                selected.push(p);
+                selected_set.insert(p);
+            } else {
+                return None;
+            }
+        }
+
+        let mut candidates: Vec<(usize, f64)> = Vec::new();
+        for p in 0..problem.num_players {
+            if selected_set.contains(&p) {
+                continue;
+            }
+            let Some(best) = best_eligible_position_score(problem, p, t) else {
+                continue;
+            };
+            if problem
+                .max_consecutive_on_field
+                .map(|limit| consecutive_on[p] >= limit)
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let continuity = if prev_on.contains(&p) { 0.05 } else { 0.0 };
+            candidates.push((p, best + continuity));
+        }
+        candidates.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.0.cmp(&b.0))
+        });
+        for (p, _) in candidates {
+            if selected.len() >= problem.num_positions {
+                break;
+            }
+            selected.push(p);
+            selected_set.insert(p);
+        }
+        if selected.len() != problem.num_positions {
+            return None;
+        }
+
+        let row = hungarian_assign_period_constrained(problem, t, &selected)?;
+        let used: HashSet<usize> = row.iter().map(|&p| p as usize).collect();
+        let mut tbench: Vec<usize> = (0..problem.num_players)
+            .filter(|p| !used.contains(p))
+            .collect();
+        tbench.sort_unstable();
+
+        for p in 0..problem.num_players {
+            if used.contains(&p) {
+                consecutive_on[p] += 1;
+            } else {
+                consecutive_on[p] = 0;
+            }
+        }
+        prev_on = used;
+        prev_bench = tbench.iter().copied().collect();
+        assignment.push(row);
+        bench.push(tbench);
+    }
+
+    let schedule = Schedule { assignment, bench };
+    if validate_schedule_structure(problem, &schedule).is_some() {
+        return None;
+    }
+    let eval = evaluate_schedule(problem, &schedule);
+    if eval.fairness_ok && eval.stamina_ok && eval.subs_ok {
+        Some(schedule)
+    } else {
+        None
+    }
 }
 
 /// Hungarian-assign the chosen on-field players to positions for period `t`.
@@ -1631,18 +1848,29 @@ pub fn build_soccer_ipmip(problem: &SoccerProblem) -> SoccerIPMIPModel {
                     });
                     let x_sub = idx(rule.player, rule.position, t);
                     let x_part = idx(rule.partner_player, rule.partner_position, t);
-                    let synergy_rows: Vec<(Vec<(usize, f64)>, f64)> = vec![
-                        (vec![(zj, 1.0), (x_sub, -1.0)], 0.0),
-                        (vec![(zj, 1.0), (x_part, -1.0)], 0.0),
-                        (vec![(zj, -1.0), (x_sub, 1.0), (x_part, 1.0)], 1.0),
+                    let synergy_rows: Vec<(&str, Vec<(usize, f64)>, f64)> = vec![
+                        ("subject", vec![(zj, 1.0), (x_sub, -1.0)], 0.0),
+                        ("partner", vec![(zj, 1.0), (x_part, -1.0)], 0.0),
+                        (
+                            "activation",
+                            vec![(zj, -1.0), (x_sub, 1.0), (x_part, 1.0)],
+                            1.0,
+                        ),
                     ];
-                    for (coeffs, rhs) in synergy_rows {
+                    for (kind, coeffs, rhs) in synergy_rows {
                         let mut row = vec![0.0; n_total];
                         for (j, v) in coeffs {
                             row[j] = v;
                         }
                         a.push(row);
                         b.push(rhs);
+                        con_names.push(format!(
+                            "synergy_{}_{}_{}_T{}",
+                            kind,
+                            player_name(rule.player),
+                            position_name(rule.position),
+                            t + 1
+                        ));
                     }
                 }
             }
@@ -1660,6 +1888,7 @@ pub fn build_soccer_ipmip(problem: &SoccerProblem) -> SoccerIPMIPModel {
                     link[oj] = -1.0;
                     a.push(link);
                     b.push(0.0);
+                    con_names.push(format!("on_link_{}_T{}", player_name(p), t + 1));
                 }
             }
             for p in 0..p_count {
@@ -1673,13 +1902,19 @@ pub fn build_soccer_ipmip(problem: &SoccerProblem) -> SoccerIPMIPModel {
                         (vec![(sj, 1.0), (o_cur, 1.0)], 1.0),
                         (vec![(sj, 1.0), (o_prev, -1.0), (o_cur, 1.0)], 0.0),
                     ];
-                    for (coeffs, rhs) in sub_rows {
+                    for (sub_row_i, (coeffs, rhs)) in sub_rows.into_iter().enumerate() {
                         let mut row = vec![0.0; n_total];
                         for (j, v) in coeffs {
                             row[j] = v;
                         }
                         a.push(row);
                         b.push(rhs);
+                        con_names.push(format!(
+                            "sub_off_link_{}_T{}_{}",
+                            player_name(p),
+                            t + 1,
+                            sub_row_i + 1
+                        ));
                     }
                 }
             }

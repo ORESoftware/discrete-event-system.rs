@@ -8,7 +8,7 @@
 #[cfg(test)]
 mod tests {
     use crate::des::general::incremental_lp::{
-        IncrementalLP, IncrementalLPInit, Sense as IncSense, SolverStatus,
+        IncrementalLP, IncrementalLPInit, IncrementalPivotRule, Sense as IncSense, SolverStatus,
     };
     use crate::des::general::lp::{
         solve_lp_internal, InternalSimplexOptions, LPProblem, Sense as LpSense,
@@ -291,5 +291,36 @@ mod tests {
             }
         }
         assert_eq!(ok_count, total, "{ok_count}/{total}");
+    }
+
+    #[test]
+    fn bland_rule_solves_degenerate_cycling_example() {
+        // Beale's classic cycling tableau: Dantzig's rule can revisit bases at
+        // the origin, while Bland's lowest-index rule must terminate.
+        let c = vec![10.0, -57.0, -9.0, -24.0];
+        let a = vec![
+            vec![0.5, -5.5, -2.5, 9.0],
+            vec![0.5, -1.5, -0.5, 1.0],
+            vec![1.0, 0.0, 0.0, 0.0],
+        ];
+        let b = vec![0.0, 0.0, 1.0];
+        let mut inc = IncrementalLP::new(IncrementalLPInit {
+            sense: IncSense::Max,
+            c: c.clone(),
+            a: a.clone(),
+            b: b.clone(),
+            var_names: None,
+            con_names: None,
+        });
+        inc.set_pivot_rule(IncrementalPivotRule::Bland);
+        inc.solve_to_optimum(100);
+
+        let stat = solve_lp_internal(
+            &solve_internal_max(c, a, b),
+            &InternalSimplexOptions::default(),
+        );
+        assert_eq!(inc.status, SolverStatus::Optimal);
+        assert!(close_tol(inc.get_z(), stat.objective, 1e-7));
+        assert!(arr_close(&inc.get_x(), &stat.x));
     }
 }

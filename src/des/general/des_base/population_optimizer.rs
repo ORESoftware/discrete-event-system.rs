@@ -434,6 +434,16 @@ pub trait PopulationOptimizer<I: Clone + 'static>: DESStation {
                 new_pop.len() - first_child_index
             );
         }
+        for (i, f) in child_fit.iter().enumerate() {
+            if !f.is_finite() {
+                panic!(
+                    "{}: child population fitness[{}] must be finite; got {}",
+                    self.id(),
+                    i,
+                    f
+                );
+            }
+        }
         new_fit.extend(child_fit);
         {
             let st = self.opt_state_mut();

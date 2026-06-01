@@ -119,6 +119,7 @@ mod tests {
             build_binary_knapsack_ip(vec![10.0, 40.0, 30.0, 50.0], vec![5.0, 4.0, 6.0, 3.0], 10.0);
         for alg in [
             ConcreteLpRelaxationAlgorithm::InternalSimplex,
+            ConcreteLpRelaxationAlgorithm::InternalInteriorPoint,
             ConcreteLpRelaxationAlgorithm::DesSimplexDantzig,
             ConcreteLpRelaxationAlgorithm::DesSimplexBland,
         ] {

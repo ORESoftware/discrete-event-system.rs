@@ -7,8 +7,8 @@
 #[cfg(test)]
 mod tests {
     use crate::des::general::milp_bnb::{
-        build_knapsack_milp, solve_milp, BranchRule, MILPProblem, MILPSolveOptions, MILPStatus,
-        Sense,
+        build_knapsack_milp, solve_milp, BranchRule, LpStatus, MILPProblem, MILPSolveOptions,
+        MILPStatus, Sense,
     };
 
     fn close(a: f64, b: f64) -> bool {
@@ -206,5 +206,45 @@ mod tests {
         );
         assert!(r.nodes_explored <= 5);
         assert!(r.status == MILPStatus::Optimal || r.status == MILPStatus::MaxNodes);
+    }
+
+    #[test]
+    fn unbounded_relaxation_reports_unbounded() {
+        let milp = MILPProblem {
+            sense: Sense::Max,
+            c: vec![1.0],
+            a: Vec::new(),
+            b: Vec::new(),
+            integer_vars: vec![false],
+            ub: None,
+            var_names: None,
+            con_names: None,
+        };
+        let r = solve_milp(&milp, MILPSolveOptions::default());
+        assert_eq!(r.status, MILPStatus::Unbounded);
+        assert_eq!(r.trace[0].lp_status, LpStatus::Unbounded);
+    }
+
+    #[test]
+    fn lp_iteration_limit_is_not_reported_as_optimal() {
+        let milp = MILPProblem {
+            sense: Sense::Max,
+            c: vec![1.0],
+            a: vec![vec![1.0]],
+            b: vec![1.0],
+            integer_vars: vec![false],
+            ub: None,
+            var_names: None,
+            con_names: None,
+        };
+        let r = solve_milp(
+            &milp,
+            MILPSolveOptions {
+                lp_max_iters: Some(0),
+                ..Default::default()
+            },
+        );
+        assert_eq!(r.status, MILPStatus::IterLimit);
+        assert_eq!(r.trace[0].lp_status, LpStatus::IterLimit);
     }
 }

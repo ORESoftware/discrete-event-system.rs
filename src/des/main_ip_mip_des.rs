@@ -31,6 +31,9 @@ fn parse_lp_algo(s: &str) -> LpRelaxationAlgorithm {
         "des-simplex-dantzig" => LpRelaxationAlgorithm::Concrete(DesSimplexDantzig),
         "des-simplex-bland" => LpRelaxationAlgorithm::Concrete(DesSimplexBland),
         "internal-simplex" => LpRelaxationAlgorithm::Concrete(InternalSimplex),
+        "internal-ipm" | "internal-interior-point" => {
+            LpRelaxationAlgorithm::Concrete(InternalInteriorPoint)
+        }
         "external-highs" => LpRelaxationAlgorithm::Concrete(ExternalHighs),
         "external-highs-ds" => LpRelaxationAlgorithm::Concrete(ExternalHighsDs),
         "external-highs-ipm" => LpRelaxationAlgorithm::Concrete(ExternalHighsIpm),

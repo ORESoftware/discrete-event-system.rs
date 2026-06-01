@@ -304,6 +304,7 @@ fn milp_status_str(s: crate::des::general::milp_bnb::MILPStatus) -> &'static str
         MILPStatus::Optimal => "optimal",
         MILPStatus::Infeasible => "infeasible",
         MILPStatus::Unbounded => "unbounded",
+        MILPStatus::IterLimit => "iter-limit",
         MILPStatus::MaxNodes => "maxnodes",
     }
 }
@@ -313,6 +314,7 @@ fn milp_lp_status_str(s: LpStatus) -> &'static str {
         LpStatus::Optimal => "optimal",
         LpStatus::Infeasible => "infeasible",
         LpStatus::Unbounded => "unbounded",
+        LpStatus::IterLimit => "iter-limit",
     }
 }
 
@@ -329,6 +331,7 @@ fn pruned_reason_str(r: PrunedReason) -> &'static str {
         PrunedReason::Unbounded => "unbounded",
         PrunedReason::Bound => "bound",
         PrunedReason::IntegerFeasible => "integer-feasible",
+        PrunedReason::IterLimit => "iter-limit",
     }
 }
 
@@ -385,6 +388,7 @@ impl DESModelRegistration<MILPParams, MILPSolution> for MilpBnbAdapter {
                 verbose: None,
                 initial_incumbent_z: o.initial_incumbent_z,
                 branch_seed: None,
+                lp_pivot_rule: None,
             })
             .unwrap_or_default();
 
@@ -546,6 +550,7 @@ pub fn ip_mip_des_schema() -> ParamSchema {
                                 "des-simplex-dantzig",
                                 "des-simplex-bland",
                                 "internal-simplex",
+                                "internal-ipm",
                                 "external-highs",
                                 "external-highs-ds",
                                 "external-highs-ipm",

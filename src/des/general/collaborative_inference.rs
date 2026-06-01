@@ -9,6 +9,13 @@
 //! empirical-Bayes shrinkage so lightly observed items do not jump to the top
 //! on one lucky vote.
 //!
+//! Optional per-response `exposure_order` and `rating_ages` fields model the
+//! temporal context of a judgment: an item tried later in a respondent's history
+//! or rated at an older age can receive more item-specific credibility, while
+//! all such multipliers remain capped. Presets cover programming languages,
+//! movies, travel spots, books, songs, model-validation workflows, and learning
+//! resources.
+//!
 //! ## DES mapping
 //!
 //!   * `RespondentSource` -> [`RespondentSourceStation`]
@@ -75,6 +82,10 @@ pub enum CollaborativeInferenceScenario {
     ProgrammingLanguages,
     ModelValidation,
     LearningResources,
+    Movies,
+    TravelSpots,
+    Books,
+    Songs,
     Custom,
 }
 
@@ -94,6 +105,8 @@ pub struct CollaborativeInferenceResponse {
     pub item_ids: Option<Vec<String>>,
     pub ratings: Option<HashMap<String, f64>>,
     pub ranking: Option<Vec<String>>,
+    pub exposure_order: Option<Vec<String>>,
+    pub rating_ages: Option<HashMap<String, f64>>,
     pub age: Option<f64>,
     pub experience_years: Option<HashMap<String, f64>>,
     pub weight: Option<f64>,
@@ -125,6 +138,8 @@ pub struct CollaborativeInferenceParams {
     pub reference_experience_years: Option<f64>,
     pub age_weight_strength: Option<f64>,
     pub experience_weight_strength: Option<f64>,
+    pub exposure_order_weight_strength: Option<f64>,
+    pub rating_age_weight_strength: Option<f64>,
     pub high_rated_breadth_strength: Option<f64>,
     pub high_rated_score_threshold: Option<f64>,
     pub min_high_rated_items: Option<usize>,
@@ -138,6 +153,8 @@ pub struct CredibilityWeightSummary {
     pub min_credible_age: f64,
     pub high_rated_score_threshold: f64,
     pub min_high_rated_items: usize,
+    pub exposure_order_weight_strength: f64,
+    pub rating_age_weight_strength: f64,
     pub mean_respondent_weight: f64,
     pub max_respondent_weight: f64,
     pub capped_experience_claims: usize,
@@ -225,6 +242,8 @@ struct CredibilityWeightingConfig {
     reference_experience_years: f64,
     age_weight_strength: f64,
     experience_weight_strength: f64,
+    exposure_order_weight_strength: f64,
+    rating_age_weight_strength: f64,
     high_rated_breadth_strength: f64,
     high_rated_score_threshold: f64,
     min_high_rated_items: usize,
@@ -427,6 +446,17 @@ impl SurveyEncoderStation {
             for item_id in ranking {
                 if self.valid_item_ids.contains(item_id) {
                     seen.insert(item_id.clone());
+                }
+            }
+        }
+        if let Some(exposure_order) = &response.exposure_order {
+            for item_id in exposure_order {
+                if self.valid_item_ids.contains(item_id) {
+                    seen.insert(item_id.clone());
+                } else {
+                    self.invalid_evidence.push(format!(
+                        "{respondent_id}: exposure order references unknown item {item_id}"
+                    ));
                 }
             }
         }
@@ -1125,6 +1155,8 @@ fn pass_to_result(
             min_credible_age: cfg.credibility.min_credible_age,
             high_rated_score_threshold: cfg.credibility.high_rated_score_threshold,
             min_high_rated_items: cfg.credibility.min_high_rated_items,
+            exposure_order_weight_strength: cfg.credibility.exposure_order_weight_strength,
+            rating_age_weight_strength: cfg.credibility.rating_age_weight_strength,
             mean_respondent_weight,
             max_respondent_weight: pass.max_respondent_weight,
             capped_experience_claims: pass.capped_experience_claims,
@@ -1328,10 +1360,16 @@ fn normalize_response(
         .as_ref()
         .map(sorted_keys)
         .unwrap_or_default();
+    let exposure_ids: Vec<String> = response
+        .exposure_order
+        .as_ref()
+        .map(|r| unique(r))
+        .unwrap_or_default();
     let item_ids: Vec<String> = match &response.item_ids {
         Some(ids) if !ids.is_empty() => ids.clone(),
         _ => match &response.ranking {
             Some(r) if !r.is_empty() => r.clone(),
+            _ if !exposure_ids.is_empty() => exposure_ids.clone(),
             _ => rating_ids,
         },
     };
@@ -1345,6 +1383,8 @@ fn normalize_response(
         item_ids: Some(unique(&item_ids)),
         ratings: response.ratings.clone(),
         ranking: response.ranking.as_ref().map(|r| unique(r)),
+        exposure_order: response.exposure_order.as_ref().map(|r| unique(r)),
+        rating_ages: response.rating_ages.clone(),
         age: response.age,
         experience_years: response.experience_years.clone(),
         weight: Some(finite_positive(response.weight, 1.0)),
@@ -1363,6 +1403,11 @@ fn normalize_credibility_config(
         reference_experience_years: params.reference_experience_years.unwrap_or(15.0).max(1.0),
         age_weight_strength: params.age_weight_strength.unwrap_or(0.35).max(0.0),
         experience_weight_strength: params.experience_weight_strength.unwrap_or(0.60).max(0.0),
+        exposure_order_weight_strength: params
+            .exposure_order_weight_strength
+            .unwrap_or(0.30)
+            .max(0.0),
+        rating_age_weight_strength: params.rating_age_weight_strength.unwrap_or(0.35).max(0.0),
         high_rated_breadth_strength: params.high_rated_breadth_strength.unwrap_or(0.40).max(0.0),
         high_rated_score_threshold: params
             .high_rated_score_threshold
@@ -1425,6 +1470,8 @@ fn respondent_weight_profile(
     } else {
         1.0
     };
+    let exposure_positions = exposure_order_positions(response, seen_items);
+    let exposure_count = exposure_positions.len();
 
     let base = cap_multiplier(
         explicit_weight * age_multiplier * breadth_multiplier,
@@ -1448,10 +1495,15 @@ fn respondent_weight_profile(
         let experience_multiplier = 1.0
             + cfg.experience_weight_strength
                 * normalized_log(capped_years, cfg.reference_experience_years);
+        let exposure_multiplier = exposure_positions
+            .get(item_id)
+            .map(|&pos| exposure_order_multiplier(pos, exposure_count, cfg))
+            .unwrap_or(1.0);
+        let rating_age_multiplier = rating_age_multiplier(response, item_id, age, cfg);
         item_weights.insert(
             item_id.clone(),
             cap_multiplier(
-                base * experience_multiplier,
+                base * experience_multiplier * exposure_multiplier * rating_age_multiplier,
                 explicit_weight,
                 cfg.max_multiplier,
             ),
@@ -1465,6 +1517,62 @@ fn respondent_weight_profile(
         breadth_multiplier,
         capped_experience_claims,
     }
+}
+
+fn exposure_order_positions(
+    response: &CollaborativeInferenceResponse,
+    seen_items: &HashSet<String>,
+) -> HashMap<String, usize> {
+    let mut positions = HashMap::new();
+    if let Some(order) = &response.exposure_order {
+        for item_id in order {
+            if seen_items.contains(item_id) && !positions.contains_key(item_id) {
+                let pos = positions.len();
+                positions.insert(item_id.clone(), pos);
+            }
+        }
+    }
+    positions
+}
+
+fn exposure_order_multiplier(
+    position: usize,
+    exposure_count: usize,
+    cfg: &CredibilityWeightingConfig,
+) -> f64 {
+    if exposure_count <= 1 || cfg.exposure_order_weight_strength <= 0.0 {
+        return 1.0;
+    }
+    let maturity = position as f64 / (exposure_count - 1) as f64;
+    (1.0 + cfg.exposure_order_weight_strength * (2.0 * maturity - 1.0)).max(0.05)
+}
+
+fn rating_age_multiplier(
+    response: &CollaborativeInferenceResponse,
+    item_id: &str,
+    respondent_age: Option<f64>,
+    cfg: &CredibilityWeightingConfig,
+) -> f64 {
+    if cfg.rating_age_weight_strength <= 0.0 {
+        return 1.0;
+    }
+    let Some(raw_age) = response
+        .rating_ages
+        .as_ref()
+        .and_then(|m| m.get(item_id).copied())
+        .and_then(|v| finite_non_negative(Some(v)))
+    else {
+        return 1.0;
+    };
+    let age = match respondent_age {
+        Some(current_age) => raw_age.min(current_age),
+        None => raw_age,
+    };
+    1.0 + cfg.rating_age_weight_strength
+        * normalized_log(
+            (age - cfg.min_credible_age).max(0.0),
+            (cfg.reference_age - cfg.min_credible_age).max(1.0),
+        )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1487,9 +1595,15 @@ fn generate_synthetic_responses(
         let age = synthetic_age(&mut rng);
         let max_credible_years = (age - min_credible_age).max(0.0);
         let personal_offset = normal01(&mut rng) * 0.12;
+        let histories = synthetic_item_histories(&selected, age, min_credible_age, &mut rng);
+        let exposure_order: Vec<String> = histories
+            .iter()
+            .map(|(item, _start_age, _rating_age)| item.id.clone())
+            .collect();
         let mut ratings: HashMap<String, f64> = HashMap::new();
         let mut experience_years: HashMap<String, f64> = HashMap::new();
-        for item in &selected {
+        let mut rating_ages: HashMap<String, f64> = HashMap::new();
+        for (item, start_age, rating_age) in &histories {
             let latent = item.latent_utility.unwrap_or(0.5);
             let noisy_utility =
                 clamp01(latent + personal_offset + normal01(&mut rng) * noise_std / 10.0);
@@ -1497,9 +1611,11 @@ fn generate_synthetic_responses(
                 item.id.clone(),
                 round_to(rating_min + noisy_utility * (rating_max - rating_min), 2),
             );
-            let seniority = 0.35 + 0.65 * rng.next_float();
-            let inner = seniority * 18.0_f64.min(max_credible_years);
-            experience_years.insert(item.id.clone(), round_to(max_credible_years.min(inner), 1));
+            experience_years.insert(
+                item.id.clone(),
+                round_to((age - *start_age).max(0.0).min(max_credible_years), 1),
+            );
+            rating_ages.insert(item.id.clone(), round_to(*rating_age, 1));
         }
         let mut ranking: Vec<String> = selected.iter().map(|item| item.id.clone()).collect();
         ranking.sort_by(|a, b| {
@@ -1517,11 +1633,38 @@ fn generate_synthetic_responses(
             experience_years: Some(experience_years),
             ratings: Some(ratings),
             ranking: Some(ranking),
+            exposure_order: Some(exposure_order),
+            rating_ages: Some(rating_ages),
             weight: None,
             segment: None,
         });
     }
     out
+}
+
+fn synthetic_item_histories(
+    selected: &[CollaborativeInferenceItem],
+    age: f64,
+    min_credible_age: f64,
+    rng: &mut dyn RandomSource,
+) -> Vec<(CollaborativeInferenceItem, f64, f64)> {
+    let span = (age - min_credible_age).max(0.0);
+    let mut histories: Vec<(CollaborativeInferenceItem, f64, f64)> = selected
+        .iter()
+        .map(|item| {
+            let exposure = item.exposure.unwrap_or(1.0).max(0.0);
+            let early_bias = 1.0 + 0.35 * exposure.min(4.0);
+            let start_age = min_credible_age + span * rng.next_float().powf(early_bias);
+            let assessment_gap = (age - start_age).max(0.0) * (0.25 + 0.65 * rng.next_float());
+            let rating_age = (start_age + assessment_gap).min(age);
+            (item.clone(), start_age, rating_age)
+        })
+        .collect();
+    histories.sort_by(|a, b| match a.1.partial_cmp(&b.1) {
+        Some(Ordering::Equal) | None => a.0.id.cmp(&b.0.id),
+        Some(o) => o,
+    });
+    histories
 }
 
 // =============================================================================
@@ -1533,6 +1676,10 @@ fn scenario_preset(scenario: CollaborativeInferenceScenario) -> ScenarioPreset {
         CollaborativeInferenceScenario::ProgrammingLanguages => programming_language_preset(),
         CollaborativeInferenceScenario::ModelValidation => model_validation_preset(),
         CollaborativeInferenceScenario::LearningResources => learning_resources_preset(),
+        CollaborativeInferenceScenario::Movies => movies_preset(),
+        CollaborativeInferenceScenario::TravelSpots => travel_spots_preset(),
+        CollaborativeInferenceScenario::Books => books_preset(),
+        CollaborativeInferenceScenario::Songs => songs_preset(),
         CollaborativeInferenceScenario::Custom => ScenarioPreset {
             scenario,
             label: "Custom collaborative inference scenario".to_string(),
@@ -1792,6 +1939,316 @@ fn learning_resources_preset() -> ScenarioPreset {
     }
 }
 
+fn movies_preset() -> ScenarioPreset {
+    let rows = [
+        ("seven-samurai", "Seven Samurai", 0.90, 0.32, "world-cinema"),
+        ("the-godfather", "The Godfather", 0.89, 0.86, "crime"),
+        ("casablanca", "Casablanca", 0.88, 0.70, "classic"),
+        ("spirited-away", "Spirited Away", 0.87, 0.74, "animation"),
+        (
+            "in-the-mood-for-love",
+            "In the Mood for Love",
+            0.86,
+            0.38,
+            "world-cinema",
+        ),
+        ("parasite", "Parasite", 0.85, 0.76, "thriller"),
+        (
+            "mad-max-fury-road",
+            "Mad Max: Fury Road",
+            0.84,
+            0.84,
+            "action",
+        ),
+        (
+            "into-the-spider-verse",
+            "Into the Spider-Verse",
+            0.83,
+            0.78,
+            "animation",
+        ),
+        ("the-matrix", "The Matrix", 0.82, 0.95, "sci-fi"),
+        (
+            "2001-space-odyssey",
+            "2001: A Space Odyssey",
+            0.81,
+            0.58,
+            "sci-fi",
+        ),
+        ("arrival", "Arrival", 0.80, 0.70, "sci-fi"),
+        ("moonlight", "Moonlight", 0.79, 0.54, "drama"),
+        (
+            "portrait-lady-fire",
+            "Portrait of a Lady on Fire",
+            0.78,
+            0.40,
+            "drama",
+        ),
+        ("whiplash", "Whiplash", 0.77, 0.66, "drama"),
+        ("get-out", "Get Out", 0.76, 0.78, "horror"),
+        (
+            "lord-of-the-rings",
+            "The Lord of the Rings",
+            0.75,
+            1.05,
+            "fantasy",
+        ),
+        ("alien", "Alien", 0.74, 0.82, "horror"),
+        ("jaws", "Jaws", 0.73, 0.80, "thriller"),
+        ("paddington-2", "Paddington 2", 0.72, 0.62, "family"),
+        (
+            "the-social-network",
+            "The Social Network",
+            0.71,
+            0.68,
+            "drama",
+        ),
+        (
+            "the-princess-bride",
+            "The Princess Bride",
+            0.70,
+            0.78,
+            "comedy",
+        ),
+        ("toy-story", "Toy Story", 0.69, 0.92, "animation"),
+        ("before-sunrise", "Before Sunrise", 0.68, 0.42, "romance"),
+        (
+            "blade-runner-2049",
+            "Blade Runner 2049",
+            0.67,
+            0.56,
+            "sci-fi",
+        ),
+    ];
+    ScenarioPreset {
+        scenario: CollaborativeInferenceScenario::Movies,
+        label: "Movies ranked from sparse watch histories and ratings".to_string(),
+        default_respondents: 5000,
+        min_items_per_respondent: 4,
+        max_items_per_respondent: 7,
+        rating_min: 1.0,
+        rating_max: 10.0,
+        noise_std: 1.0,
+        items: rows
+            .iter()
+            .map(|(id, label, latent, exposure, group)| {
+                grouped_item(id, label, *latent, *exposure, group)
+            })
+            .collect(),
+    }
+}
+
+fn travel_spots_preset() -> ScenarioPreset {
+    let rows = [
+        ("kyoto", "Kyoto", 0.88, 0.72, "city"),
+        ("patagonia", "Patagonia", 0.87, 0.38, "nature"),
+        (
+            "new-zealand-south-island",
+            "New Zealand South Island",
+            0.86,
+            0.45,
+            "nature",
+        ),
+        (
+            "iceland-ring-road",
+            "Iceland Ring Road",
+            0.84,
+            0.58,
+            "road-trip",
+        ),
+        ("tokyo", "Tokyo", 0.83, 0.92, "city"),
+        ("rome", "Rome", 0.82, 0.90, "history"),
+        ("paris", "Paris", 0.81, 1.10, "city"),
+        ("machu-picchu", "Machu Picchu", 0.80, 0.54, "history"),
+        ("banff", "Banff", 0.79, 0.56, "nature"),
+        ("cape-town", "Cape Town", 0.78, 0.42, "city"),
+        ("lisbon", "Lisbon", 0.77, 0.72, "city"),
+        ("istanbul", "Istanbul", 0.76, 0.60, "history"),
+        ("yosemite", "Yosemite", 0.75, 0.68, "nature"),
+        ("costa-rica", "Costa Rica", 0.74, 0.64, "nature"),
+        ("santorini", "Santorini", 0.73, 0.70, "coast"),
+        ("amalfi-coast", "Amalfi Coast", 0.72, 0.62, "coast"),
+        ("marrakesh", "Marrakesh", 0.71, 0.46, "culture"),
+        ("vietnam-north", "Northern Vietnam", 0.70, 0.50, "culture"),
+        ("galapagos", "Galapagos Islands", 0.69, 0.26, "nature"),
+        ("barcelona", "Barcelona", 0.68, 0.88, "city"),
+        ("prague", "Prague", 0.67, 0.76, "city"),
+        ("sedona", "Sedona", 0.66, 0.42, "nature"),
+        ("tasmania", "Tasmania", 0.65, 0.24, "nature"),
+        (
+            "alaska-inside-passage",
+            "Alaska Inside Passage",
+            0.64,
+            0.32,
+            "nature",
+        ),
+    ];
+    ScenarioPreset {
+        scenario: CollaborativeInferenceScenario::TravelSpots,
+        label: "Travel spots ranked from sparse trip histories and ratings".to_string(),
+        default_respondents: 3500,
+        min_items_per_respondent: 3,
+        max_items_per_respondent: 6,
+        rating_min: 1.0,
+        rating_max: 10.0,
+        noise_std: 1.15,
+        items: rows
+            .iter()
+            .map(|(id, label, latent, exposure, group)| {
+                grouped_item(id, label, *latent, *exposure, group)
+            })
+            .collect(),
+    }
+}
+
+fn books_preset() -> ScenarioPreset {
+    let rows = [
+        (
+            "pride-and-prejudice",
+            "Pride and Prejudice",
+            0.88,
+            0.82,
+            "classic",
+        ),
+        ("beloved", "Beloved", 0.87, 0.50, "literary"),
+        (
+            "one-hundred-years-solitude",
+            "One Hundred Years of Solitude",
+            0.86,
+            0.48,
+            "literary",
+        ),
+        (
+            "left-hand-darkness",
+            "The Left Hand of Darkness",
+            0.85,
+            0.36,
+            "sci-fi",
+        ),
+        ("dune", "Dune", 0.84, 0.86, "sci-fi"),
+        (
+            "lord-of-the-rings-book",
+            "The Lord of the Rings",
+            0.83,
+            0.94,
+            "fantasy",
+        ),
+        ("east-of-eden", "East of Eden", 0.82, 0.46, "literary"),
+        ("kindred", "Kindred", 0.81, 0.44, "sci-fi"),
+        ("the-dispossessed", "The Dispossessed", 0.80, 0.30, "sci-fi"),
+        ("circe", "Circe", 0.79, 0.58, "fantasy"),
+        ("educated", "Educated", 0.78, 0.68, "memoir"),
+        (
+            "godel-escher-bach",
+            "Godel, Escher, Bach",
+            0.77,
+            0.34,
+            "nonfiction",
+        ),
+        (
+            "thinking-fast-and-slow",
+            "Thinking, Fast and Slow",
+            0.76,
+            0.76,
+            "nonfiction",
+        ),
+        (
+            "remains-of-the-day",
+            "The Remains of the Day",
+            0.75,
+            0.38,
+            "literary",
+        ),
+        ("the-hobbit", "The Hobbit", 0.74, 0.98, "fantasy"),
+        ("neuromancer", "Neuromancer", 0.73, 0.52, "sci-fi"),
+        ("lonesome-dove", "Lonesome Dove", 0.72, 0.36, "western"),
+        (
+            "slaughterhouse-five",
+            "Slaughterhouse-Five",
+            0.71,
+            0.62,
+            "literary",
+        ),
+        ("the-overstory", "The Overstory", 0.70, 0.42, "literary"),
+        ("sapiens", "Sapiens", 0.69, 0.88, "nonfiction"),
+    ];
+    ScenarioPreset {
+        scenario: CollaborativeInferenceScenario::Books,
+        label: "Books ranked from sparse reading histories and ratings".to_string(),
+        default_respondents: 4200,
+        min_items_per_respondent: 3,
+        max_items_per_respondent: 6,
+        rating_min: 1.0,
+        rating_max: 10.0,
+        noise_std: 1.05,
+        items: rows
+            .iter()
+            .map(|(id, label, latent, exposure, group)| {
+                grouped_item(id, label, *latent, *exposure, group)
+            })
+            .collect(),
+    }
+}
+
+fn songs_preset() -> ScenarioPreset {
+    let rows = [
+        (
+            "a-change-is-gonna-come",
+            "A Change Is Gonna Come",
+            0.89,
+            0.58,
+            "soul",
+        ),
+        ("bohemian-rhapsody", "Bohemian Rhapsody", 0.88, 1.02, "rock"),
+        ("respect", "Respect", 0.87, 0.86, "soul"),
+        ("purple-rain", "Purple Rain", 0.86, 0.84, "pop-rock"),
+        (
+            "like-a-rolling-stone",
+            "Like a Rolling Stone",
+            0.85,
+            0.70,
+            "rock",
+        ),
+        ("superstition", "Superstition", 0.84, 0.82, "funk"),
+        ("whats-going-on", "What's Going On", 0.83, 0.64, "soul"),
+        ("billie-jean", "Billie Jean", 0.82, 1.08, "pop"),
+        ("fast-car", "Fast Car", 0.81, 0.70, "folk-pop"),
+        ("hallelujah", "Hallelujah", 0.80, 0.74, "folk-rock"),
+        ("dreams", "Dreams", 0.79, 0.84, "rock"),
+        (
+            "smells-like-teen-spirit",
+            "Smells Like Teen Spirit",
+            0.78,
+            0.96,
+            "rock",
+        ),
+        ("juicy", "Juicy", 0.77, 0.64, "hip-hop"),
+        ("hey-ya", "Hey Ya!", 0.76, 0.92, "pop"),
+        ("crazy-in-love", "Crazy in Love", 0.75, 0.90, "pop"),
+        ("no-woman-no-cry", "No Woman No Cry", 0.74, 0.74, "reggae"),
+        ("paper-planes", "Paper Planes", 0.73, 0.62, "pop"),
+        ("mr-brightside", "Mr. Brightside", 0.72, 0.98, "rock"),
+        ("bad-guy", "Bad Guy", 0.71, 0.76, "pop"),
+        ("all-too-well", "All Too Well", 0.70, 0.72, "pop"),
+    ];
+    ScenarioPreset {
+        scenario: CollaborativeInferenceScenario::Songs,
+        label: "Songs ranked from sparse listening histories and ratings".to_string(),
+        default_respondents: 6000,
+        min_items_per_respondent: 4,
+        max_items_per_respondent: 8,
+        rating_min: 1.0,
+        rating_max: 10.0,
+        noise_std: 1.20,
+        items: rows
+            .iter()
+            .map(|(id, label, latent, exposure, group)| {
+                grouped_item(id, label, *latent, *exposure, group)
+            })
+            .collect(),
+    }
+}
+
 // =============================================================================
 // Free helpers
 // =============================================================================
@@ -2012,6 +2469,32 @@ mod tests {
         }
     }
 
+    fn response_with_history(
+        id: &str,
+        ratings: &[(&str, f64)],
+        exposure_order: &[&str],
+        rating_ages: &[(&str, f64)],
+    ) -> CollaborativeInferenceResponse {
+        let mut response = response(id, ratings);
+        response.age = Some(36.0);
+        response.exposure_order = Some(exposure_order.iter().map(|s| s.to_string()).collect());
+        let mut ages = HashMap::new();
+        for (item_id, age) in rating_ages {
+            ages.insert(item_id.to_string(), *age);
+        }
+        response.rating_ages = Some(ages);
+        response
+    }
+
+    fn score_for(result: &CollaborativeInferenceResult, item_id: &str) -> f64 {
+        result
+            .rankings
+            .iter()
+            .find(|row| row.item_id == item_id)
+            .map(|row| row.score)
+            .unwrap_or_else(|| panic!("missing score for {item_id}"))
+    }
+
     #[test]
     fn explicit_responses_are_processed() {
         let params = CollaborativeInferenceParams {
@@ -2031,5 +2514,51 @@ mod tests {
         // 'a' is rated highest by both respondents, so it should rank first.
         assert_eq!(result.rankings[0].item_id, "a");
         assert!(result.invalid_evidence.is_empty());
+    }
+
+    #[test]
+    fn later_and_older_item_history_increases_item_specific_credibility() {
+        let make_result = |target_exposure: &[&str], target_ages: &[(&str, f64)]| {
+            run_collaborative_inference(CollaborativeInferenceParams {
+                scenario: Some(CollaborativeInferenceScenario::Custom),
+                items: Some(vec![
+                    item("rust", 0.6),
+                    item("python", 0.6),
+                    item("java", 0.6),
+                ]),
+                responses: Some(vec![
+                    response_with_history(
+                        "target",
+                        &[("rust", 9.0), ("python", 5.0), ("java", 6.0)],
+                        target_exposure,
+                        target_ages,
+                    ),
+                    response("counter", &[("rust", 5.0), ("python", 8.0), ("java", 6.0)]),
+                ]),
+                credibility_passes: Some(1),
+                age_weight_strength: Some(0.0),
+                experience_weight_strength: Some(0.0),
+                high_rated_breadth_strength: Some(0.0),
+                exposure_order_weight_strength: Some(0.8),
+                rating_age_weight_strength: Some(0.8),
+                max_credibility_multiplier: Some(5.0),
+                shrinkage: Some(2.0),
+                ..Default::default()
+            })
+        };
+
+        let rust_last = make_result(
+            &["python", "java", "rust"],
+            &[("python", 18.0), ("java", 25.0), ("rust", 36.0)],
+        );
+        let rust_first = make_result(
+            &["rust", "python", "java"],
+            &[("rust", 18.0), ("python", 25.0), ("java", 36.0)],
+        );
+
+        assert!(
+            score_for(&rust_last, "rust") > score_for(&rust_first, "rust") + 0.03,
+            "Rust should carry more evidence when it was learned and rated later"
+        );
     }
 }

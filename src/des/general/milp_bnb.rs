@@ -42,7 +42,7 @@ use crate::des::general::des_base::tree_search::{
 };
 use crate::des::general::des_base::validation::intrinsic_check;
 use crate::des::general::incremental_lp::{
-    IncrementalLP, IncrementalLPInit, PivotMode, SolverStatus,
+    IncrementalLP, IncrementalLPInit, IncrementalPivotRule, PivotMode, SolverStatus,
 };
 use crate::des::general::prng::mulberry32;
 use crate::des::shared::capabilities::{RandomSource, SeededRandom};
@@ -75,6 +75,7 @@ pub enum LpStatus {
     Optimal,
     Infeasible,
     Unbounded,
+    IterLimit,
 }
 
 /// Why a node was pruned. (TS `'infeasible' | 'unbounded' | 'bound' |
@@ -85,6 +86,7 @@ pub enum PrunedReason {
     Unbounded,
     Bound,
     IntegerFeasible,
+    IterLimit,
 }
 
 /// Overall solver outcome. (TS `MILPSolution['status']`.)
@@ -93,6 +95,7 @@ pub enum MILPStatus {
     Optimal,
     Infeasible,
     Unbounded,
+    IterLimit,
     MaxNodes,
 }
 
@@ -132,6 +135,8 @@ pub struct MILPSolveOptions {
     pub initial_incumbent_z: Option<f64>,
     /// Seed for the random-tie-break PRNG in [`pick_branch_var`]. Default 1.
     pub branch_seed: Option<u32>,
+    /// LP relaxation pivot rule. Default `Bland` for anti-cycling robustness.
+    pub lp_pivot_rule: Option<IncrementalPivotRule>,
 }
 
 /// A single node-processing event in the B&B trace. (TS `interface NodeEvent`.)
@@ -213,6 +218,7 @@ struct FilledOpts {
     verbose: bool,
     initial_incumbent_z: f64,
     branch_seed: u32,
+    lp_pivot_rule: IncrementalPivotRule,
 }
 
 // =============================================================================
@@ -243,6 +249,8 @@ pub struct MILPBnBStation {
     integer_vars: Vec<bool>,
     n: usize,
     node_counter: usize,
+    lp_iter_limit_hit: bool,
+    saw_unbounded_relaxation: bool,
     /// Latest LP_z observed at the frontier's deepest unfathomed open subtree.
     latest_open_lpz: f64,
 }
@@ -297,6 +305,7 @@ impl MILPBnBStation {
             var_names: p.var_names.clone(),
             con_names: Some(con_names),
         });
+        lp.set_pivot_rule(opts.lp_pivot_rule);
 
         // Solve root LP up front, counting genuine (primal/dual) pivots.
         let root_pivots = lp
@@ -328,6 +337,8 @@ impl MILPBnBStation {
             integer_vars: p.integer_vars.clone(),
             n,
             node_counter: 0,
+            lp_iter_limit_hit: false,
+            saw_unbounded_relaxation: false,
             latest_open_lpz,
         };
 
@@ -493,6 +504,12 @@ impl TreeSearchStation<MILPNode> for MILPBnBStation {
         self.total_pivots += pivots;
 
         let maximise = self.get_objective() == SearchObjective::Maximise;
+        let lp_status = match self.lp.status {
+            SolverStatus::Optimal => LpStatus::Optimal,
+            SolverStatus::Infeasible => LpStatus::Infeasible,
+            SolverStatus::Unbounded => LpStatus::Unbounded,
+            SolverStatus::Primal | SolverStatus::Dual => LpStatus::IterLimit,
+        };
         let mut ev = NodeEvent {
             node_id: node.node_id,
             parent_id: node.parent_id,
@@ -500,11 +517,7 @@ impl TreeSearchStation<MILPNode> for MILPBnBStation {
             branch_var: node.branch_var,
             branch_type: node.branch_type,
             branch_value: node.branch_value,
-            lp_status: match self.lp.status {
-                SolverStatus::Infeasible => LpStatus::Infeasible,
-                SolverStatus::Unbounded => LpStatus::Unbounded,
-                _ => LpStatus::Optimal,
-            },
+            lp_status,
             lp_z: None,
             fractional: Vec::new(),
             pruned: false,
@@ -538,6 +551,7 @@ impl TreeSearchStation<MILPNode> for MILPBnBStation {
             );
         }
         if self.lp.status == SolverStatus::Unbounded {
+            self.saw_unbounded_relaxation = true;
             ev.pruned = true;
             ev.pruned_reason = Some(PrunedReason::Unbounded);
             if self.verbose {
@@ -555,9 +569,35 @@ impl TreeSearchStation<MILPNode> for MILPBnBStation {
             );
             return NodeEvaluation::new(
                 if maximise {
-                    f64::INFINITY
-                } else {
                     f64::NEG_INFINITY
+                } else {
+                    f64::INFINITY
+                },
+                true,
+            );
+        }
+        if self.lp.status != SolverStatus::Optimal {
+            self.lp_iter_limit_hit = true;
+            ev.pruned = true;
+            ev.pruned_reason = Some(PrunedReason::IterLimit);
+            if self.verbose {
+                eprintln!("{}", format_node(&ev));
+            }
+            self.trace.push(ev);
+            self.node_evals.insert(
+                node.node_id,
+                NodeEvalData {
+                    lp_status: LpStatus::IterLimit,
+                    lp_z: None,
+                    x: Vec::new(),
+                    fractional: Vec::new(),
+                },
+            );
+            return NodeEvaluation::new(
+                if maximise {
+                    f64::NEG_INFINITY
+                } else {
+                    f64::INFINITY
                 },
                 true,
             );
@@ -760,6 +800,7 @@ pub fn solve_milp(p: &MILPProblem, opts: MILPSolveOptions) -> MILPSolution {
                 f64::INFINITY
             }),
         branch_seed: opts.branch_seed.unwrap_or(1),
+        lp_pivot_rule: opts.lp_pivot_rule.unwrap_or(IncrementalPivotRule::Bland),
     };
     validate_problem(p);
 
@@ -775,14 +816,20 @@ pub fn solve_milp(p: &MILPProblem, opts: MILPSolveOptions) -> MILPSolution {
     // just `nodes >= max` — simplified here, preserving the original semantics.
     let stopped_early = nodes >= filled.max_nodes;
     let has_incumbent = st.get_incumbent().is_some();
-    let is_optimal = !stopped_early && has_incumbent;
-    let status = if stopped_early {
+    let hit_lp_iter_limit = st.lp_iter_limit_hit;
+    let saw_unbounded = st.saw_unbounded_relaxation;
+    let status = if hit_lp_iter_limit {
+        MILPStatus::IterLimit
+    } else if stopped_early {
         MILPStatus::MaxNodes
+    } else if saw_unbounded {
+        MILPStatus::Unbounded
     } else if !has_incumbent {
         MILPStatus::Infeasible
     } else {
         MILPStatus::Optimal
     };
+    let is_optimal = status == MILPStatus::Optimal;
 
     let z = if !has_incumbent {
         if p.sense == Sense::Max {
@@ -795,6 +842,12 @@ pub fn solve_milp(p: &MILPProblem, opts: MILPSolveOptions) -> MILPSolution {
     };
     let final_best_bound = if is_optimal {
         z
+    } else if status == MILPStatus::Unbounded {
+        if p.sense == Sense::Max {
+            f64::INFINITY
+        } else {
+            f64::NEG_INFINITY
+        }
     } else {
         st.root_bound.unwrap_or(if p.sense == Sense::Max {
             f64::INFINITY

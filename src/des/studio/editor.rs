@@ -16,7 +16,11 @@ pub const STUDIO_EDITOR_REL_PATH: &str = "studio/modeling-studio.html";
 fn script_json<T: Serialize>(value: &T) -> String {
     serde_json::to_string(value)
         .expect("studio editor bootstrap JSON should serialize")
-        .replace("</", "<\\/")
+        .replace('&', "\\u0026")
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
 }
 
 pub fn studio_editor_html() -> String {
@@ -42,6 +46,7 @@ const STUDIO_EDITOR_TEMPLATE: &str = r##"<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
 <title>Modeling Studio</title>
 <style>
 :root {
@@ -424,7 +429,13 @@ window.STUDIO_STARTER_MODEL = __STARTER_MODEL_JSON__;
 (function () {
   const svgNS = "http://www.w3.org/2000/svg";
   const palette = window.STUDIO_PALETTE;
-  let model = clone(window.STUDIO_STARTER_MODEL);
+  const MAX_MODEL_BLOCKS = 128;
+  const MAX_MODEL_WIRES = 512;
+  const MAX_RUN_STEPS = 5000;
+  const MAX_ID_LEN = 96;
+  const MAX_LABEL_LEN = 160;
+  const MAX_PARAM_ARRAY_LEN = 256;
+  let model = normalizeModel(clone(window.STUDIO_STARTER_MODEL));
   let selectedId = model.blocks[0] ? model.blocks[0].id : null;
   let pendingWire = null;
   let drag = null;
@@ -493,6 +504,85 @@ window.STUDIO_STARTER_MODEL = __STARTER_MODEL_JSON__;
     return params;
   }
 
+  function normalizeModel(raw) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("model must be an object");
+    if (!Array.isArray(raw.blocks)) throw new Error("model.blocks must be an array");
+    if (!Array.isArray(raw.wires)) raw.wires = [];
+    if (raw.blocks.length > MAX_MODEL_BLOCKS) throw new Error("model is limited to " + MAX_MODEL_BLOCKS + " blocks");
+    if (raw.wires.length > MAX_MODEL_WIRES) throw new Error("model is limited to " + MAX_MODEL_WIRES + " wires");
+    raw.name = checkedText(raw.name == null ? "untitled" : String(raw.name), "model name", MAX_LABEL_LEN, false);
+    raw.dt = readFinite(raw.dt == null ? 0.1 : raw.dt, "model.dt");
+    if (!(raw.dt > 0)) throw new Error("model.dt must be positive");
+    raw.steps = readInteger(raw.steps == null ? 80 : raw.steps, "model.steps", 1, MAX_RUN_STEPS);
+    const ids = new Set();
+    for (const block of raw.blocks) {
+      if (!block || typeof block !== "object" || Array.isArray(block)) throw new Error("blocks must be objects");
+      block.id = checkedText(block.id == null ? "" : String(block.id), "block id", MAX_ID_LEN, false);
+      if (ids.has(block.id)) throw new Error("duplicate block id: " + block.id);
+      ids.add(block.id);
+      if (!itemFor(block.kind)) throw new Error("unknown block kind: " + String(block.kind));
+      if (block.label != null) block.label = checkedText(String(block.label), "block label", MAX_LABEL_LEN, true);
+      block.params = block.params && typeof block.params === "object" && !Array.isArray(block.params) ? block.params : {};
+      block.x = readFinite(block.x == null ? 0 : block.x, block.id + ".x");
+      block.y = readFinite(block.y == null ? 0 : block.y, block.id + ".y");
+      normalizeParams(block);
+    }
+    for (const wire of raw.wires) {
+      if (!wire || typeof wire !== "object" || Array.isArray(wire)) throw new Error("wires must be objects");
+      wire.from = checkedText(wire.from == null ? "" : String(wire.from), "wire.from", MAX_ID_LEN, false);
+      wire.to = checkedText(wire.to == null ? "" : String(wire.to), "wire.to", MAX_ID_LEN, false);
+      if (!ids.has(wire.from)) throw new Error("wire references unknown block: " + wire.from);
+      if (!ids.has(wire.to)) throw new Error("wire references unknown block: " + wire.to);
+      wire.fromPort = readInteger(wire.fromPort == null ? 0 : wire.fromPort, "wire.fromPort", 0, 255);
+      wire.toPort = readInteger(wire.toPort == null ? 0 : wire.toPort, "wire.toPort", 0, 255);
+    }
+    return raw;
+  }
+
+  function normalizeParams(block) {
+    const item = itemFor(block.kind);
+    const allowed = new Set(item.params.map((param) => param.name));
+    for (const key of Object.keys(block.params)) {
+      if (!allowed.has(key)) throw new Error(block.id + " has unknown parameter " + key);
+    }
+    for (const param of item.params) {
+      if (block.params[param.name] === undefined) block.params[param.name] = clone(param.defaultValue);
+      if (param.kind === "number-array") {
+        if (!Array.isArray(block.params[param.name])) throw new Error(block.id + "." + param.name + " must be an array");
+        if (!block.params[param.name].length) throw new Error(block.id + "." + param.name + " must not be empty");
+        if (block.params[param.name].length > MAX_PARAM_ARRAY_LEN) throw new Error(block.id + "." + param.name + " is too long");
+        block.params[param.name] = block.params[param.name].map((value) => readFinite(value, block.id + "." + param.name));
+      } else if (param.kind === "integer") {
+        block.params[param.name] = readInteger(block.params[param.name], block.id + "." + param.name, Math.max(0, param.min || 0), 1000000);
+      } else {
+        block.params[param.name] = readFinite(block.params[param.name], block.id + "." + param.name);
+      }
+    }
+    if (block.kind === "queue" && block.params.serviceRate < 0) throw new Error(block.id + ".serviceRate must be non-negative");
+    if (block.kind === "saturation" && block.params.lo > block.params.hi) throw new Error(block.id + ".lo must be <= hi");
+  }
+
+  function checkedText(value, label, maxLen, allowEmpty) {
+    if (!allowEmpty && !value.trim()) throw new Error(label + " must be non-empty");
+    if (value.length > maxLen) throw new Error(label + " is too long");
+    if (/[\x00-\x1f\x7f]/.test(value)) throw new Error(label + " must not contain control characters");
+    return value;
+  }
+
+  function readFinite(value, label) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) throw new Error(label + " must be a finite number");
+    return n;
+  }
+
+  function readInteger(value, label, min, max) {
+    const n = Number(value);
+    if (!Number.isInteger(n) || n < min || n > max) {
+      throw new Error(label + " must be an integer in " + min + ".." + max);
+    }
+    return n;
+  }
+
   function uniqueId(kind) {
     const base = kind.replace(/[^a-z0-9]+/g, "_");
     let i = 1;
@@ -533,6 +623,10 @@ window.STUDIO_STARTER_MODEL = __STARTER_MODEL_JSON__;
   }
 
   function addBlock(kind) {
+    if (model.blocks.length >= MAX_MODEL_BLOCKS) {
+      setStatus("Model is limited to " + MAX_MODEL_BLOCKS + " blocks", "bad");
+      return;
+    }
     const id = uniqueId(kind);
     const offset = model.blocks.length * 24;
     const block = {
@@ -813,10 +907,7 @@ window.STUDIO_STARTER_MODEL = __STARTER_MODEL_JSON__;
 
   function loadJson() {
     try {
-      const next = JSON.parse(jsonBox.value);
-      if (!Array.isArray(next.blocks) || !Array.isArray(next.wires)) {
-        throw new Error("missing blocks or wires");
-      }
+      const next = normalizeModel(JSON.parse(jsonBox.value));
       model = next;
       selectedId = model.blocks[0] ? model.blocks[0].id : null;
       pendingWire = null;
@@ -829,6 +920,11 @@ window.STUDIO_STARTER_MODEL = __STARTER_MODEL_JSON__;
   }
 
   function validateModel() {
+    try {
+      normalizeModel(clone(model));
+    } catch (err) {
+      return err.message;
+    }
     if (!Number.isFinite(Number(model.dt)) || Number(model.dt) <= 0) return "dt must be positive";
     if (!Number.isInteger(Number(model.steps)) || Number(model.steps) <= 0) return "steps must be a positive integer";
     const ids = new Set();
@@ -961,8 +1057,10 @@ window.STUDIO_STARTER_MODEL = __STARTER_MODEL_JSON__;
           }
           case "queue": {
             const state = states.get(block.id);
-            state.q = Math.max(0, state.q + Math.max(0, inputs[0]) - Math.max(0, finite(block.params.serviceRate, 1)));
-            out = [state.q];
+            state.q = Math.max(0, state.q + Math.max(0, inputs[0]));
+            const served = Math.min(state.q, Math.max(0, finite(block.params.serviceRate, 1)));
+            state.q -= served;
+            out = [served];
             break;
           }
           case "transport-delay": {
@@ -1027,7 +1125,7 @@ window.STUDIO_STARTER_MODEL = __STARTER_MODEL_JSON__;
   el("exportBtn").addEventListener("click", () => exportJson(true));
   el("loadBtn").addEventListener("click", loadJson);
   el("resetBtn").addEventListener("click", () => {
-    model = clone(window.STUDIO_STARTER_MODEL);
+    model = normalizeModel(clone(window.STUDIO_STARTER_MODEL));
     selectedId = model.blocks[0] ? model.blocks[0].id : null;
     pendingWire = null;
     lastSeries = [];
@@ -1060,6 +1158,7 @@ window.STUDIO_STARTER_MODEL = __STARTER_MODEL_JSON__;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -1068,8 +1167,24 @@ mod tests {
         assert!(html.contains("window.STUDIO_PALETTE"));
         assert!(html.contains("\"integrator\""));
         assert!(html.contains("window.STUDIO_STARTER_MODEL"));
+        assert!(html.contains("Content-Security-Policy"));
+        assert!(html.contains("MAX_MODEL_BLOCKS"));
+        assert!(html.contains("normalizeModel"));
         assert!(!html.contains("__PALETTE_JSON__"));
         assert!(!html.contains("__STARTER_MODEL_JSON__"));
+    }
+
+    #[test]
+    fn editor_bootstrap_json_escapes_script_breakout() {
+        let encoded = script_json(&json!({
+            "text": "</script><script>alert(1)</script>",
+            "line": "\u{2028}\u{2029}",
+            "amp": "&"
+        }));
+        assert!(!encoded.contains("</script>"));
+        assert!(encoded.contains("\\u003c/script\\u003e"));
+        assert!(encoded.contains("\\u2028\\u2029"));
+        assert!(encoded.contains("\\u0026"));
     }
 
     #[test]

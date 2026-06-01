@@ -25,6 +25,14 @@ use super::graph::{CompiledStudio, NodeRole, StudioError, StudioGraph, VisualNod
 
 pub const STUDIO_GRAPH_SCHEMA: &str = "des/studio-graph/v1";
 pub const STUDIO_SPEC_SCHEMA: &str = "des/studio/v1";
+pub const MAX_MODEL_BLOCKS: usize = 1_024;
+pub const MAX_MODEL_WIRES: usize = 4_096;
+pub const MAX_RUN_STEPS: usize = 100_000;
+pub const MAX_BLOCK_ID_LEN: usize = 96;
+pub const MAX_LABEL_LEN: usize = 160;
+pub const MAX_PARAM_VECTOR_LEN: usize = 256;
+pub const MAX_RUNTIME_CELL_OPS: usize = 128;
+pub const MAX_RUNTIME_NESTING: usize = 16;
 pub const MAX_SWEEP_SAMPLES: usize = 10_000;
 
 fn studio_graph_schema() -> String {
@@ -466,6 +474,48 @@ fn block_param_kind(kind: StudioBlockKind, param: &str) -> Option<PaletteParamKi
         })
 }
 
+fn allowed_param_names(kind: StudioBlockKind) -> HashSet<String> {
+    studio_palette()
+        .into_iter()
+        .find(|item| item.kind == kind)
+        .map(|item| item.params.into_iter().map(|p| p.name).collect())
+        .unwrap_or_default()
+}
+
+fn validate_user_text(
+    value: &str,
+    field: &str,
+    max_len: usize,
+    allow_empty: bool,
+) -> Result<(), StudioSpecError> {
+    if !allow_empty && value.trim().is_empty() {
+        return Err(StudioSpecError::new(format!("{field} must be non-empty")));
+    }
+    if value.len() > max_len {
+        return Err(StudioSpecError::new(format!(
+            "{field} is too long; limit is {max_len} bytes"
+        )));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(StudioSpecError::new(format!(
+            "{field} must not contain control characters"
+        )));
+    }
+    Ok(())
+}
+
+fn invalid_param(
+    block: &StudioBlockSpec,
+    param: &str,
+    message: impl Into<String>,
+) -> StudioSpecError {
+    StudioSpecError::InvalidParam {
+        block: block.id.clone(),
+        param: param.to_string(),
+        message: message.into(),
+    }
+}
+
 /// User-facing spec/compile errors.
 #[derive(Clone, Debug, PartialEq)]
 pub enum StudioSpecError {
@@ -516,20 +566,11 @@ impl From<StudioError> for StudioSpecError {
 fn param_f64(block: &StudioBlockSpec, name: &str, default: f64) -> Result<f64, StudioSpecError> {
     match block.params.get(name) {
         None => Ok(default),
-        Some(Value::Number(n)) => {
-            n.as_f64()
-                .filter(|v| v.is_finite())
-                .ok_or_else(|| StudioSpecError::InvalidParam {
-                    block: block.id.clone(),
-                    param: name.to_string(),
-                    message: "expected a finite number".to_string(),
-                })
-        }
-        Some(_) => Err(StudioSpecError::InvalidParam {
-            block: block.id.clone(),
-            param: name.to_string(),
-            message: "expected a number".to_string(),
-        }),
+        Some(Value::Number(n)) => n
+            .as_f64()
+            .filter(|v| v.is_finite())
+            .ok_or_else(|| invalid_param(block, name, "expected a finite number")),
+        Some(_) => Err(invalid_param(block, name, "expected a number")),
     }
 }
 
@@ -544,16 +585,8 @@ fn param_usize(
             .as_u64()
             .and_then(|v| usize::try_from(v).ok())
             .filter(|v| *v > 0)
-            .ok_or_else(|| StudioSpecError::InvalidParam {
-                block: block.id.clone(),
-                param: name.to_string(),
-                message: "expected a positive integer".to_string(),
-            }),
-        Some(_) => Err(StudioSpecError::InvalidParam {
-            block: block.id.clone(),
-            param: name.to_string(),
-            message: "expected an integer".to_string(),
-        }),
+            .ok_or_else(|| invalid_param(block, name, "expected a positive integer")),
+        Some(_) => Err(invalid_param(block, name, "expected an integer")),
     }
 }
 
@@ -568,28 +601,27 @@ fn param_vec(
             let mut out = Vec::with_capacity(xs.len());
             for x in xs {
                 let Some(v) = x.as_f64().filter(|v| v.is_finite()) else {
-                    return Err(StudioSpecError::InvalidParam {
-                        block: block.id.clone(),
-                        param: name.to_string(),
-                        message: "expected an array of finite numbers".to_string(),
-                    });
+                    return Err(invalid_param(
+                        block,
+                        name,
+                        "expected an array of finite numbers",
+                    ));
                 };
                 out.push(v);
             }
             if out.is_empty() {
-                return Err(StudioSpecError::InvalidParam {
-                    block: block.id.clone(),
-                    param: name.to_string(),
-                    message: "expected at least one weight".to_string(),
-                });
+                return Err(invalid_param(block, name, "expected at least one weight"));
+            }
+            if out.len() > MAX_PARAM_VECTOR_LEN {
+                return Err(invalid_param(
+                    block,
+                    name,
+                    format!("expected at most {MAX_PARAM_VECTOR_LEN} entries"),
+                ));
             }
             Ok(out)
         }
-        Some(_) => Err(StudioSpecError::InvalidParam {
-            block: block.id.clone(),
-            param: name.to_string(),
-            message: "expected an array".to_string(),
-        }),
+        Some(_) => Err(invalid_param(block, name, "expected an array")),
     }
 }
 
@@ -626,11 +658,18 @@ fn runtime_cell(block: &StudioBlockSpec) -> Result<RuntimeCell, StudioSpecError>
         StudioBlockKind::Sum => {
             Box::new(Sum::new("sum", param_vec(block, "weights", &[1.0, 1.0])?))
         }
-        StudioBlockKind::Saturation => Box::new(Saturation::new(
-            "saturation",
-            param_f64(block, "lo", -1.0)?,
-            param_f64(block, "hi", 1.0)?,
-        )),
+        StudioBlockKind::Saturation => {
+            let lo = param_f64(block, "lo", -1.0)?;
+            let hi = param_f64(block, "hi", 1.0)?;
+            if lo > hi {
+                return Err(invalid_param(
+                    block,
+                    "lo",
+                    "expected lower bound to be <= upper bound",
+                ));
+            }
+            Box::new(Saturation::new("saturation", lo, hi))
+        }
         StudioBlockKind::Affine => Box::new(Affine::new(
             "affine",
             param_f64(block, "m", 1.0)?,
@@ -641,7 +680,15 @@ fn runtime_cell(block: &StudioBlockSpec) -> Result<RuntimeCell, StudioSpecError>
             param_f64(block, "initial", 0.0)?,
         )),
         StudioBlockKind::Queue => {
-            Box::new(Queue::new("queue", param_f64(block, "serviceRate", 1.0)?))
+            let service_rate = param_f64(block, "serviceRate", 1.0)?;
+            if service_rate < 0.0 {
+                return Err(invalid_param(
+                    block,
+                    "serviceRate",
+                    "expected a non-negative service rate",
+                ));
+            }
+            Box::new(Queue::new("queue", service_rate))
         }
         StudioBlockKind::TransportDelay => Box::new(TransportDelay::new(
             "transport-delay",
@@ -696,10 +743,47 @@ fn validate_scalar_design_param(
 }
 
 fn validate_model_metadata_pre_graph(spec: &StudioModelSpec) -> Result<(), StudioSpecError> {
+    if spec.schema != STUDIO_GRAPH_SCHEMA {
+        return Err(StudioSpecError::new(format!(
+            "unsupported studio schema `{}`; expected `{STUDIO_GRAPH_SCHEMA}`",
+            spec.schema
+        )));
+    }
+    validate_user_text(&spec.name, "model name", MAX_LABEL_LEN, false)?;
+    if spec.steps == 0 || spec.steps > MAX_RUN_STEPS {
+        return Err(StudioSpecError::InvalidParam {
+            block: spec.name.clone(),
+            param: "steps".to_string(),
+            message: format!("expected steps in 1..={MAX_RUN_STEPS}"),
+        });
+    }
+    if spec.blocks.is_empty() {
+        return Err(StudioSpecError::new(
+            "studio model requires at least one block",
+        ));
+    }
+    if spec.blocks.len() > MAX_MODEL_BLOCKS {
+        return Err(StudioSpecError::new(format!(
+            "studio model is limited to {MAX_MODEL_BLOCKS} blocks"
+        )));
+    }
+    if spec.wires.len() > MAX_MODEL_WIRES {
+        return Err(StudioSpecError::new(format!(
+            "studio model is limited to {MAX_MODEL_WIRES} wires"
+        )));
+    }
+
     let mut block_ids = HashSet::new();
     for block in &spec.blocks {
-        if block.id.trim().is_empty() {
-            return Err(StudioSpecError::new("block ids must be non-empty"));
+        validate_user_text(&block.id, "block id", MAX_BLOCK_ID_LEN, false)?;
+        if !block_ids.insert(block.id.as_str()) {
+            return Err(StudioSpecError::new(format!(
+                "duplicate block id `{}`",
+                block.id
+            )));
+        }
+        if let Some(label) = &block.label {
+            validate_user_text(label, "block label", MAX_LABEL_LEN, true)?;
         }
         if !block.x.is_finite() || !block.y.is_finite() {
             return Err(StudioSpecError::InvalidParam {
@@ -708,7 +792,17 @@ fn validate_model_metadata_pre_graph(spec: &StudioModelSpec) -> Result<(), Studi
                 message: "expected finite x/y coordinates".to_string(),
             });
         }
-        block_ids.insert(block.id.as_str());
+        let allowed = allowed_param_names(block.kind);
+        for param in block.params.keys() {
+            validate_user_text(param, "parameter name", MAX_BLOCK_ID_LEN, false)?;
+            if !allowed.contains(param) {
+                return Err(StudioSpecError::InvalidParam {
+                    block: block.id.clone(),
+                    param: param.clone(),
+                    message: "unknown parameter for this block kind".to_string(),
+                });
+            }
+        }
     }
 
     let mut design_names = HashSet::new();
@@ -1125,14 +1219,36 @@ pub fn demo_from_spec(spec: &Value) -> Result<StudioDemo, StudioSpecError> {
             "studio spec requires at least one block in `blocks`",
         ));
     }
+    if blocks.len() > MAX_MODEL_BLOCKS {
+        return Err(StudioSpecError::new(format!(
+            "studio spec is limited to {MAX_MODEL_BLOCKS} blocks"
+        )));
+    }
 
     let sim = root.get("simulation").unwrap_or(&Value::Null);
-    let steps = read_usize(sim, "steps").unwrap_or(80).max(1);
-    let dt = read_f64(sim, "dt").unwrap_or(0.1).max(f64::EPSILON);
+    let steps = read_usize(sim, "steps").unwrap_or(80);
+    if steps == 0 || steps > MAX_RUN_STEPS {
+        return Err(StudioSpecError::new(format!(
+            "simulation.steps must be in 1..={MAX_RUN_STEPS}"
+        )));
+    }
+    let dt = read_f64(sim, "dt").unwrap_or(0.1);
+    if !dt.is_finite() || dt <= 0.0 {
+        return Err(StudioSpecError::new(
+            "simulation.dt must be a positive finite number",
+        ));
+    }
     let title = read_str(root, "title").unwrap_or("Studio Block Diagram");
     let description = read_str(root, "description").unwrap_or(
         "A JSON-authored flat visual block diagram running on the studio dataflow executive.",
     );
+    validate_user_text(title, "studio spec title", MAX_LABEL_LEN, false)?;
+    validate_user_text(
+        description,
+        "studio spec description",
+        MAX_LABEL_LEN * 4,
+        true,
+    )?;
 
     let mut graph = StudioGraph::new();
     let mut ids: HashMap<String, usize> = HashMap::new();
@@ -1143,18 +1259,19 @@ pub fn demo_from_spec(spec: &Value) -> Result<StudioDemo, StudioSpecError> {
             .ok_or_else(|| StudioSpecError::new(format!("blocks[{idx}] must be an object")))?;
         let id = read_str(obj, "id")
             .ok_or_else(|| StudioSpecError::new(format!("blocks[{idx}] requires string `id`")))?;
+        validate_user_text(id, "block id", MAX_BLOCK_ID_LEN, false)?;
         let role = parse_role(read_str(obj, "role").unwrap_or("transform"))?;
         let cell_value = obj
             .get("cell")
             .ok_or_else(|| StudioSpecError::new(format!("block `{id}` requires `cell`")))?;
         let cell = parse_cell(cell_value, &format!("block `{id}` cell"))?;
+        let label = read_str(obj, "label").unwrap_or(id);
+        validate_user_text(label, "block label", MAX_LABEL_LEN, true)?;
 
-        let mut node = VisualNode::new(id, role, cell)
-            .with_label(read_str(obj, "label").unwrap_or(id))
-            .at(
-                read_f64_obj(obj, "x").unwrap_or(40.0 + idx as f64 * 190.0),
-                read_f64_obj(obj, "y").unwrap_or(120.0),
-            );
+        let mut node = VisualNode::new(id, role, cell).with_label(label).at(
+            read_f64_obj(obj, "x").unwrap_or(40.0 + idx as f64 * 190.0),
+            read_f64_obj(obj, "y").unwrap_or(120.0),
+        );
         if let Some(w) = read_f64_obj(obj, "w") {
             node.w = w.max(56.0);
         }
@@ -1170,6 +1287,11 @@ pub fn demo_from_spec(spec: &Value) -> Result<StudioDemo, StudioSpecError> {
         .get("wires")
         .and_then(Value::as_array)
         .ok_or_else(|| StudioSpecError::new("studio spec requires a `wires` array"))?;
+    if wires.len() > MAX_MODEL_WIRES {
+        return Err(StudioSpecError::new(format!(
+            "studio spec is limited to {MAX_MODEL_WIRES} wires"
+        )));
+    }
     for (idx, wire) in wires.iter().enumerate() {
         let obj = wire
             .as_object()
@@ -1207,6 +1329,19 @@ pub fn demo_from_spec(spec: &Value) -> Result<StudioDemo, StudioSpecError> {
 }
 
 fn parse_cell(value: &Value, path: &str) -> Result<RuntimeCell, StudioSpecError> {
+    parse_cell_at_depth(value, path, 0)
+}
+
+fn parse_cell_at_depth(
+    value: &Value,
+    path: &str,
+    depth: usize,
+) -> Result<RuntimeCell, StudioSpecError> {
+    if depth > MAX_RUNTIME_NESTING {
+        return Err(StudioSpecError::new(format!(
+            "{path} exceeds maximum runtime nesting depth {MAX_RUNTIME_NESTING}"
+        )));
+    }
     let stages = value
         .as_array()
         .ok_or_else(|| StudioSpecError::new(format!("{path} must be an array of ops")))?;
@@ -1215,14 +1350,23 @@ fn parse_cell(value: &Value, path: &str) -> Result<RuntimeCell, StudioSpecError>
             "{path} must contain at least one op"
         )));
     }
+    if stages.len() > MAX_RUNTIME_CELL_OPS {
+        return Err(StudioSpecError::new(format!(
+            "{path} is limited to {MAX_RUNTIME_CELL_OPS} ops"
+        )));
+    }
     let mut ops: Vec<Box<dyn RuntimeOp>> = Vec::with_capacity(stages.len());
     for (idx, stage) in stages.iter().enumerate() {
-        ops.push(parse_op(stage, &format!("{path}[{idx}]"))?);
+        ops.push(parse_op(stage, &format!("{path}[{idx}]"), depth)?);
     }
     RuntimeCell::new(ops).map_err(StudioSpecError::from)
 }
 
-fn parse_op(value: &Value, path: &str) -> Result<Box<dyn RuntimeOp>, StudioSpecError> {
+fn parse_op(
+    value: &Value,
+    path: &str,
+    depth: usize,
+) -> Result<Box<dyn RuntimeOp>, StudioSpecError> {
     let obj = value
         .as_object()
         .ok_or_else(|| StudioSpecError::new(format!("{path} must be an object")))?;
@@ -1236,15 +1380,20 @@ fn parse_op(value: &Value, path: &str) -> Result<Box<dyn RuntimeOp>, StudioSpecE
             read_f64_obj(obj, "k")
                 .ok_or_else(|| StudioSpecError::new(format!("{path} gain requires numeric `k`")))?,
         ))),
-        "saturation" => Ok(Box::new(Saturation::new(
-            name,
-            read_f64_obj(obj, "lo").ok_or_else(|| {
+        "saturation" => {
+            let lo = read_f64_obj(obj, "lo").ok_or_else(|| {
                 StudioSpecError::new(format!("{path} saturation requires numeric `lo`"))
-            })?,
-            read_f64_obj(obj, "hi").ok_or_else(|| {
+            })?;
+            let hi = read_f64_obj(obj, "hi").ok_or_else(|| {
                 StudioSpecError::new(format!("{path} saturation requires numeric `hi`"))
-            })?,
-        ))),
+            })?;
+            if lo > hi {
+                return Err(StudioSpecError::new(format!(
+                    "{path} saturation lower bound exceeds upper bound"
+                )));
+            }
+            Ok(Box::new(Saturation::new(name, lo, hi)))
+        }
         "affine" => Ok(Box::new(Affine::new(
             name,
             read_f64_obj(obj, "m").unwrap_or(1.0),
@@ -1260,7 +1409,7 @@ fn parse_op(value: &Value, path: &str) -> Result<Box<dyn RuntimeOp>, StudioSpecE
                 .iter()
                 .enumerate()
                 .map(|(i, v)| {
-                    v.as_f64().ok_or_else(|| {
+                    v.as_f64().filter(|v| v.is_finite()).ok_or_else(|| {
                         StudioSpecError::new(format!("{path} weights[{i}] must be numeric"))
                     })
                 })
@@ -1270,29 +1419,47 @@ fn parse_op(value: &Value, path: &str) -> Result<Box<dyn RuntimeOp>, StudioSpecE
                     "{path} sum requires at least one weight"
                 )));
             }
+            if weights.len() > MAX_PARAM_VECTOR_LEN {
+                return Err(StudioSpecError::new(format!(
+                    "{path} sum is limited to {MAX_PARAM_VECTOR_LEN} weights"
+                )));
+            }
             Ok(Box::new(Sum::new(name, weights)))
         }
         "integrator" => Ok(Box::new(Integrator::new(
             name,
             read_f64_obj(obj, "initial").unwrap_or(0.0),
         ))),
-        "queue" => Ok(Box::new(Queue::new(
-            name,
-            read_f64_obj(obj, "serviceRate").ok_or_else(|| {
+        "queue" => {
+            let service_rate = read_f64_obj(obj, "serviceRate").ok_or_else(|| {
                 StudioSpecError::new(format!("{path} queue requires numeric `serviceRate`"))
-            })?,
-        ))),
-        "delay" => Ok(Box::new(TransportDelay::new(
-            name,
-            read_usize_obj(obj, "ticks").ok_or_else(|| {
+            })?;
+            if service_rate < 0.0 {
+                return Err(StudioSpecError::new(format!(
+                    "{path} queue requires non-negative `serviceRate`"
+                )));
+            }
+            Ok(Box::new(Queue::new(name, service_rate)))
+        }
+        "delay" => {
+            let ticks = read_usize_obj(obj, "ticks").ok_or_else(|| {
                 StudioSpecError::new(format!("{path} delay requires integer `ticks`"))
-            })?,
-        ))),
+            })?;
+            if ticks == 0 {
+                return Err(StudioSpecError::new(format!(
+                    "{path} delay requires positive integer `ticks`"
+                )));
+            }
+            Ok(Box::new(TransportDelay::new(name, ticks)))
+        }
         "composite" => {
             let inner = obj
                 .get("cell")
                 .ok_or_else(|| StudioSpecError::new(format!("{path} composite requires `cell`")))?;
-            Ok(Box::new(Composite::new(name, parse_cell(inner, path)?)))
+            Ok(Box::new(Composite::new(
+                name,
+                parse_cell_at_depth(inner, path, depth + 1)?,
+            )))
         }
         other => Err(StudioSpecError::new(format!(
             "{path} has unknown op `{other}`"
@@ -1347,7 +1514,9 @@ fn read_f64(value: &Value, key: &str) -> Option<f64> {
 }
 
 fn read_f64_obj(obj: &serde_json::Map<String, Value>, key: &str) -> Option<f64> {
-    obj.get(key).and_then(Value::as_f64)
+    obj.get(key)
+        .and_then(Value::as_f64)
+        .filter(|v| v.is_finite())
 }
 
 fn read_usize(value: &Value, key: &str) -> Option<usize> {
@@ -1438,6 +1607,54 @@ mod tests {
         assert!(matches!(
             compile_model_spec(&spec),
             Err(StudioSpecError::InvalidParam { param, .. }) if param == "dt"
+        ));
+    }
+
+    #[test]
+    fn compile_rejects_wrong_schema_and_excessive_steps() {
+        let mut spec = starter_model_spec();
+        spec.schema = "des/studio-graph/v0".to_string();
+        let err = compile_model_spec(&spec).unwrap_err();
+        assert!(err.to_string().contains("unsupported studio schema"));
+
+        let mut spec = starter_model_spec();
+        spec.steps = MAX_RUN_STEPS + 1;
+        assert!(matches!(
+            compile_model_spec(&spec),
+            Err(StudioSpecError::InvalidParam { param, .. }) if param == "steps"
+        ));
+    }
+
+    #[test]
+    fn compile_rejects_unknown_and_unsafe_block_params() {
+        let mut spec = starter_model_spec();
+        spec.blocks[1]
+            .params
+            .insert("surprise".to_string(), Value::from(1.0));
+        assert!(matches!(
+            compile_model_spec(&spec),
+            Err(StudioSpecError::InvalidParam { param, .. }) if param == "surprise"
+        ));
+
+        let mut spec = starter_model_spec();
+        spec.design_variables.clear();
+        spec.blocks[1].kind = StudioBlockKind::Queue;
+        spec.blocks[1].params = Map::from_iter([("serviceRate".to_string(), Value::from(-1.0))]);
+        assert!(matches!(
+            compile_model_spec(&spec),
+            Err(StudioSpecError::InvalidParam { param, .. }) if param == "serviceRate"
+        ));
+
+        let mut spec = starter_model_spec();
+        spec.design_variables.clear();
+        spec.blocks[1].kind = StudioBlockKind::Saturation;
+        spec.blocks[1].params = Map::from_iter([
+            ("lo".to_string(), Value::from(2.0)),
+            ("hi".to_string(), Value::from(1.0)),
+        ]);
+        assert!(matches!(
+            compile_model_spec(&spec),
+            Err(StudioSpecError::InvalidParam { param, .. }) if param == "lo"
         ));
     }
 
@@ -1546,6 +1763,37 @@ mod tests {
             Err(err) => err,
         };
         assert!(err.to_string().contains("unknown `from` block `missing`"));
+    }
+
+    #[test]
+    fn parser_rejects_unbounded_legacy_specs() {
+        let spec = json!({
+            "$schema": STUDIO_SPEC_SCHEMA,
+            "simulation": { "steps": MAX_RUN_STEPS + 1, "dt": 1.0 },
+            "blocks": [
+                { "id": "a", "role": "source", "cell": [{ "op": "source", "value": 1.0 }] }
+            ],
+            "wires": []
+        });
+        let err = match demo_from_spec(&spec) {
+            Ok(_) => panic!("expected excessive steps error"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("simulation.steps"));
+
+        let spec = json!({
+            "$schema": STUDIO_SPEC_SCHEMA,
+            "simulation": { "steps": 1, "dt": 1.0 },
+            "blocks": [
+                { "id": "a", "role": "source", "cell": [{ "op": "queue", "serviceRate": -1.0 }] }
+            ],
+            "wires": []
+        });
+        let err = match demo_from_spec(&spec) {
+            Ok(_) => panic!("expected negative queue service rate error"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("non-negative"));
     }
 
     #[test]

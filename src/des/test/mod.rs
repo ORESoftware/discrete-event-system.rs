@@ -8,6 +8,7 @@
 pub mod advanced_optimization_control_test;
 pub mod animation_test;
 pub mod argmax_tiebreak_test;
+pub mod big_data_test;
 pub mod calculus_of_variations_test;
 pub mod calculus_test;
 pub mod classical_optimization_test;

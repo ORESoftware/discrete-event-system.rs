@@ -77,6 +77,13 @@ const MODELING_TOOLS: &[HtmlIndexSpec] = &[
         description:
             "Paste delivery addresses with drop-off windows, solve a time-window route, copy the itinerary, and play the route animation.",
     },
+    HtmlIndexSpec {
+        kind: "workbench",
+        title: "Music URL Seed Workbench",
+        href: "music/url-source-inputs.html",
+        description:
+            "Use YouTube, Facebook, Instagram, S3, CloudFront, Cloudflare, static asset, or direct audio/video URLs as inspiration for generated music.",
+    },
 ];
 
 const CONTROL_ANIMATIONS: &[HtmlIndexSpec] = &[
@@ -395,6 +402,21 @@ pub fn generate_html_artifacts() {
     }
     eprintln!("Generating Delivery Scheduler...");
     crate::des::delivery_planner::write_delivery_planner_artifacts();
+    eprintln!("Generating Music URL Seed Workbench...");
+    match crate::des::general::music_production::write_music_url_seed_form_html(
+        "out/music/url-source-inputs.html",
+        crate::des::service::MUSIC_URL_SEED_WORKBENCH_ENDPOINT,
+    ) {
+        Ok(path) => eprintln!("  • {}", path.display()),
+        Err(e) => eprintln!("  ! Music URL Seed Workbench generation failed: {e}"),
+    }
+    match crate::des::general::music_production::write_music_url_seed_contract_json(
+        "out/music/url-source-contract.json",
+        crate::des::service::MUSIC_URL_SEED_WORKBENCH_ENDPOINT,
+    ) {
+        Ok(path) => eprintln!("  • {}", path.display()),
+        Err(e) => eprintln!("  ! Music URL Seed contract generation failed: {e}"),
+    }
 
     eprintln!("Generating decision, hybrid, and plugin players...");
     match generate_decision_pages() {
@@ -900,6 +922,12 @@ mod tests {
                 "missing index entry for {expected}"
             );
         }
+    }
+
+    #[test]
+    fn registry_covers_music_url_seed_workbench() {
+        let hrefs: HashSet<&str> = MODELING_TOOLS.iter().map(|s| s.href).collect();
+        assert!(hrefs.contains("music/url-source-inputs.html"));
     }
 
     #[test]

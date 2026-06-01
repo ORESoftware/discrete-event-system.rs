@@ -9,6 +9,7 @@
 
 use std::f64::consts::TAU;
 use std::io::{self, Read, Write};
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 
 use crate::des::general::prng::mulberry32;
@@ -1476,6 +1477,751 @@ impl SampleManifest {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MusicUrlSourceKind {
+    YouTube,
+    Facebook,
+    Instagram,
+    S3,
+    CloudFront,
+    Cloudflare,
+    StaticAssetHost,
+    DirectAudio,
+    DirectVideo,
+    OtherUrl,
+}
+
+impl MusicUrlSourceKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MusicUrlSourceKind::YouTube => "youtube",
+            MusicUrlSourceKind::Facebook => "facebook",
+            MusicUrlSourceKind::Instagram => "instagram",
+            MusicUrlSourceKind::S3 => "s3",
+            MusicUrlSourceKind::CloudFront => "cloudfront",
+            MusicUrlSourceKind::Cloudflare => "cloudflare",
+            MusicUrlSourceKind::StaticAssetHost => "static-asset-host",
+            MusicUrlSourceKind::DirectAudio => "direct-audio",
+            MusicUrlSourceKind::DirectVideo => "direct-video",
+            MusicUrlSourceKind::OtherUrl => "other-url",
+        }
+    }
+
+    pub fn prefers_external_downloader(self) -> bool {
+        matches!(
+            self,
+            MusicUrlSourceKind::YouTube
+                | MusicUrlSourceKind::Facebook
+                | MusicUrlSourceKind::Instagram
+                | MusicUrlSourceKind::OtherUrl
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MusicUrlInputField {
+    pub id: String,
+    pub label: String,
+    pub placeholder: String,
+    pub source_kinds: Vec<MusicUrlSourceKind>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MusicUrlSourceExample {
+    pub field_id: &'static str,
+    pub source_kind: MusicUrlSourceKind,
+    pub source_url: &'static str,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MusicUrlSourceSpec {
+    pub raw_url: String,
+    pub host: String,
+    pub path: String,
+    pub kind: MusicUrlSourceKind,
+    pub input_field_id: String,
+    pub downloader_hint: String,
+    pub direct_media_hint: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SelectedMusicUrlSource {
+    pub submitted_field_id: String,
+    pub spec: MusicUrlSourceSpec,
+}
+
+pub fn music_url_input_fields() -> Vec<MusicUrlInputField> {
+    vec![
+        MusicUrlInputField {
+            id: "youtube_url".to_string(),
+            label: "YouTube URL".to_string(),
+            placeholder: "https://www.youtube.com/watch?v=...".to_string(),
+            source_kinds: vec![MusicUrlSourceKind::YouTube],
+        },
+        MusicUrlInputField {
+            id: "facebook_url".to_string(),
+            label: "Facebook URL".to_string(),
+            placeholder: "https://www.facebook.com/reel/...".to_string(),
+            source_kinds: vec![MusicUrlSourceKind::Facebook],
+        },
+        MusicUrlInputField {
+            id: "instagram_url".to_string(),
+            label: "Instagram URL".to_string(),
+            placeholder: "https://www.instagram.com/reel/...".to_string(),
+            source_kinds: vec![MusicUrlSourceKind::Instagram],
+        },
+        MusicUrlInputField {
+            id: "s3_url".to_string(),
+            label: "S3 URL".to_string(),
+            placeholder: "https://bucket.s3.amazonaws.com/audio.mp3".to_string(),
+            source_kinds: vec![MusicUrlSourceKind::S3],
+        },
+        MusicUrlInputField {
+            id: "cloudfront_url".to_string(),
+            label: "CloudFront URL".to_string(),
+            placeholder: "https://d111111abcdef8.cloudfront.net/seed.mp4".to_string(),
+            source_kinds: vec![MusicUrlSourceKind::CloudFront],
+        },
+        MusicUrlInputField {
+            id: "cloudflare_url".to_string(),
+            label: "Cloudflare URL".to_string(),
+            placeholder: "https://example.r2.cloudflarestorage.com/sample.wav".to_string(),
+            source_kinds: vec![MusicUrlSourceKind::Cloudflare],
+        },
+        MusicUrlInputField {
+            id: "static_asset_url".to_string(),
+            label: "Static asset URL".to_string(),
+            placeholder: "https://static.example.com/music/loop.wav".to_string(),
+            source_kinds: vec![MusicUrlSourceKind::StaticAssetHost],
+        },
+        MusicUrlInputField {
+            id: "any_audio_url".to_string(),
+            label: "Any audio or media URL".to_string(),
+            placeholder: "https://media.example.net/beat.flac".to_string(),
+            source_kinds: vec![
+                MusicUrlSourceKind::DirectAudio,
+                MusicUrlSourceKind::DirectVideo,
+                MusicUrlSourceKind::OtherUrl,
+            ],
+        },
+    ]
+}
+
+pub fn music_url_source_examples() -> Vec<MusicUrlSourceExample> {
+    vec![
+        MusicUrlSourceExample {
+            field_id: "youtube_url",
+            source_kind: MusicUrlSourceKind::YouTube,
+            source_url: "https://www.youtube.com/watch?v=abc123",
+        },
+        MusicUrlSourceExample {
+            field_id: "facebook_url",
+            source_kind: MusicUrlSourceKind::Facebook,
+            source_url: "https://www.facebook.com/reel/123456789",
+        },
+        MusicUrlSourceExample {
+            field_id: "instagram_url",
+            source_kind: MusicUrlSourceKind::Instagram,
+            source_url: "https://www.instagram.com/reel/ABC123/",
+        },
+        MusicUrlSourceExample {
+            field_id: "s3_url",
+            source_kind: MusicUrlSourceKind::S3,
+            source_url: "https://bucket.s3.amazonaws.com/audio/loop.mp3",
+        },
+        MusicUrlSourceExample {
+            field_id: "cloudfront_url",
+            source_kind: MusicUrlSourceKind::CloudFront,
+            source_url: "https://d111111abcdef8.cloudfront.net/audio/seed.mp4",
+        },
+        MusicUrlSourceExample {
+            field_id: "cloudflare_url",
+            source_kind: MusicUrlSourceKind::Cloudflare,
+            source_url: "https://example.r2.cloudflarestorage.com/sample.wav",
+        },
+        MusicUrlSourceExample {
+            field_id: "static_asset_url",
+            source_kind: MusicUrlSourceKind::StaticAssetHost,
+            source_url: "https://static.example.com/music/loop.wav",
+        },
+        MusicUrlSourceExample {
+            field_id: "any_audio_url",
+            source_kind: MusicUrlSourceKind::DirectAudio,
+            source_url: "https://media.example.net/beat.flac",
+        },
+        MusicUrlSourceExample {
+            field_id: "any_audio_url",
+            source_kind: MusicUrlSourceKind::DirectVideo,
+            source_url: "https://media.example.net/clip.webm",
+        },
+        MusicUrlSourceExample {
+            field_id: "any_audio_url",
+            source_kind: MusicUrlSourceKind::OtherUrl,
+            source_url: "https://example.net/share/opaque-id",
+        },
+    ]
+}
+
+pub fn select_music_url_input(
+    fields: &[(&str, &str)],
+) -> Result<Option<SelectedMusicUrlSource>, String> {
+    let input_fields = music_url_input_fields();
+    for input_field in &input_fields {
+        if let Some(value) = nonempty_music_form_value(fields, &input_field.id) {
+            let spec = classify_music_source_url(value)
+                .map_err(|err| format!("{}: {err}", input_field.id))?;
+            return Ok(Some(SelectedMusicUrlSource {
+                submitted_field_id: input_field.id.clone(),
+                spec,
+            }));
+        }
+    }
+
+    let Some(source_url) = nonempty_music_form_value(fields, "source_url")
+        .or_else(|| nonempty_music_form_value(fields, "sourceUrl"))
+    else {
+        return Ok(None);
+    };
+    let spec = classify_music_source_url(source_url).map_err(|err| format!("source_url: {err}"))?;
+    let submitted_field_id = nonempty_music_form_value(fields, "source_input_field")
+        .or_else(|| nonempty_music_form_value(fields, "sourceInputField"))
+        .filter(|field_id| input_fields.iter().any(|field| field.id == *field_id))
+        .map(str::to_string)
+        .unwrap_or_else(|| spec.input_field_id.clone());
+    Ok(Some(SelectedMusicUrlSource {
+        submitted_field_id,
+        spec,
+    }))
+}
+
+pub fn classify_music_source_url(raw_url: &str) -> Result<MusicUrlSourceSpec, String> {
+    let parsed = ParsedMusicUrl::parse(raw_url)?;
+    let kind = classify_music_source_host_path(&parsed.host, &parsed.path);
+    let direct_media_hint = looks_like_audio_download_path(&parsed.path)
+        || looks_like_video_download_path(&parsed.path);
+    let input_field_id = music_input_field_for_kind(kind).to_string();
+    let downloader_hint = if kind.prefers_external_downloader() && !direct_media_hint {
+        "yt-dlp-or-platform-extractor"
+    } else {
+        "direct-http"
+    };
+    Ok(MusicUrlSourceSpec {
+        raw_url: parsed.raw_url,
+        host: parsed.host,
+        path: parsed.path,
+        kind,
+        input_field_id,
+        downloader_hint: downloader_hint.to_string(),
+        direct_media_hint,
+    })
+}
+
+pub fn render_music_url_seed_form_html(endpoint: &str) -> String {
+    let endpoint = html_escape(endpoint);
+    let fields = music_url_input_fields();
+    let source_field_ids_json = format!(
+        "[{}]",
+        fields
+            .iter()
+            .map(|field| format!("\"{}\"", json_escape(&field.id)))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let mut html = String::new();
+    html.push_str(r#"<section id="music-url-seed-panel" class="music-url-seed-panel">"#);
+    html.push_str(r#"<div class="music-url-grid">"#);
+    for field in &fields {
+        let kinds = field
+            .source_kinds
+            .iter()
+            .map(|kind| kind.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        html.push_str(&format!(
+            r#"<label for="{id}">{label}</label><input id="{id}" name="{id}" type="url" inputmode="url" autocomplete="off" data-source-kinds="{kinds}" placeholder="{placeholder}">"#,
+            id = html_escape(&field.id),
+            label = html_escape(&field.label),
+            kinds = html_escape(&kinds),
+            placeholder = html_escape(&field.placeholder),
+        ));
+    }
+    html.push_str(r#"</div>"#);
+    html.push_str(
+        r#"<label for="music_url_title">Title</label><input id="music_url_title" name="title" type="text" value="music-url-source variation">"#,
+    );
+    html.push_str(
+        r#"<label for="music_url_prompt">Prompt / direction</label><textarea id="music_url_prompt" name="prompt" placeholder="Use the linked audio as inspiration, alter the rhythm, expand the melody, and generate a new piece."></textarea>"#,
+    );
+    html.push_str(
+        r#"<label for="music_url_duration_seconds">Duration seconds</label><input id="music_url_duration_seconds" name="duration_seconds" type="number" min="15" max="240" value="180">"#,
+    );
+    html.push_str(
+        r#"<button id="render_music_url_seed" type="button">Render URL-inspired audio</button><output id="music_url_seed_result" role="status"></output><a id="music_url_seed_download" hidden>Download generated WAV</a>"#,
+    );
+    html.push_str(&format!(
+        r#"<script>
+const MUSIC_URL_SEED_ENDPOINT = "{endpoint}";
+function collectMusicUrlSeedInput() {{
+  const fields = {source_field_ids_json};
+  for (const id of fields) {{
+    const el = document.getElementById(id);
+    const value = el && el.value.trim();
+    if (value) return {{ id, value, kinds: el.dataset.sourceKinds || "" }};
+  }}
+  return null;
+}}
+async function renderMusicUrlSeed() {{
+  const selected = collectMusicUrlSeedInput();
+  const result = document.getElementById("music_url_seed_result");
+  const download = document.getElementById("music_url_seed_download");
+  download.hidden = true;
+  download.removeAttribute("href");
+  if (!selected) {{
+    result.textContent = "Add a YouTube, Facebook, Instagram, S3, CloudFront, Cloudflare, static asset, or direct audio/video URL.";
+    return;
+  }}
+  const fd = new FormData();
+  fd.append("source_url", selected.value);
+  fd.append("source_input_field", selected.id);
+  fd.append("source_platform", selected.kinds.split(",")[0] || "auto");
+  fd.append("prompt", document.getElementById("music_url_prompt").value);
+  fd.append("duration_seconds", document.getElementById("music_url_duration_seconds").value || "180");
+  fd.append("title", document.getElementById("music_url_title").value.trim() || "music-url-source variation");
+  const response = await fetch(MUSIC_URL_SEED_ENDPOINT, {{ method: "POST", body: fd }});
+  const data = await response.json().catch(() => ({{ ok: false, error: response.statusText }}));
+  if (!data.ok) {{
+    result.textContent = data.error || response.statusText || "render failed";
+    return;
+  }}
+  const wavUrl = data.wav_url || data.wavUrl || "";
+  const details = [
+    data.source_kind && `source ${{data.source_kind}}`,
+    data.host && `host ${{data.host}}`,
+    data.genre && `genre ${{data.genre}}`,
+    data.bpm && `bpm ${{Number(data.bpm).toFixed(1)}}`,
+    data.duration_seconds && `${{Number(data.duration_seconds).toFixed(1)}}s`,
+  ].filter(Boolean).join(" | ");
+  result.textContent = details || "render complete";
+  if (wavUrl) {{
+    download.href = wavUrl;
+    download.hidden = false;
+  }}
+}}
+document.getElementById("render_music_url_seed").addEventListener("click", renderMusicUrlSeed);
+</script>"#,
+        endpoint = endpoint,
+        source_field_ids_json = source_field_ids_json
+    ));
+    html.push_str("</section>");
+    html
+}
+
+pub fn write_music_url_seed_form_html(
+    path: impl AsRef<Path>,
+    endpoint: &str,
+) -> io::Result<PathBuf> {
+    let path = path.as_ref();
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    let html = render_music_url_seed_form_document_html(endpoint);
+    std::fs::write(path, html)?;
+    Ok(path.to_path_buf())
+}
+
+pub fn render_music_url_seed_form_document_html(endpoint: &str) -> String {
+    format!(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Music URL Seed Inputs</title><style>{}</style></head><body>{}</body></html>",
+        music_url_seed_form_css(),
+        render_music_url_seed_form_html(endpoint)
+    )
+}
+
+pub fn music_url_seed_endpoint_contract_json(endpoint: &str) -> String {
+    let mut lines = Vec::new();
+    lines.push("{".to_string());
+    lines.push("  \"schema\": \"des/music-url-seed-endpoint/v1\",".to_string());
+    lines.push(format!("  \"endpoint\": \"{}\",", json_escape(endpoint)));
+    lines.push("  \"method\": \"POST\",".to_string());
+    lines.push("  \"content_type\": \"multipart/form-data\",".to_string());
+    lines.push(
+        "  \"host_policy\": \"public-http-only-no-credentials-no-localhost-private-or-internal\","
+            .to_string(),
+    );
+    lines.push("  \"url_input_fields\": [".to_string());
+    let input_fields = music_url_input_fields();
+    for (index, field) in input_fields.iter().enumerate() {
+        let comma = if index + 1 == input_fields.len() {
+            ""
+        } else {
+            ","
+        };
+        let kinds = field
+            .source_kinds
+            .iter()
+            .map(|kind| format!("\"{}\"", json_escape(kind.as_str())))
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(format!(
+            "    {{ \"id\": \"{}\", \"label\": \"{}\", \"source_kinds\": [{}] }}{comma}",
+            json_escape(&field.id),
+            json_escape(&field.label),
+            kinds
+        ));
+    }
+    lines.push("  ],".to_string());
+    lines.push("  \"examples\": [".to_string());
+    let examples = music_url_source_examples();
+    for (index, example) in examples.iter().enumerate() {
+        let comma = if index + 1 == examples.len() { "" } else { "," };
+        lines.push(format!(
+            "    {{ \"field_id\": \"{}\", \"source_kind\": \"{}\", \"source_url\": \"{}\" }}{comma}",
+            json_escape(example.field_id),
+            json_escape(example.source_kind.as_str()),
+            json_escape(example.source_url),
+        ));
+    }
+    lines.push("  ],".to_string());
+    lines.push("  \"request_fields\": [".to_string());
+    for (index, field) in [
+        "source_url",
+        "source_input_field",
+        "source_platform",
+        "prompt",
+        "duration_seconds",
+        "title",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let comma = if index == 5 { "" } else { "," };
+        lines.push(format!("    \"{}\"{comma}", json_escape(field)));
+    }
+    lines.push("  ],".to_string());
+    lines.push("  \"response_fields\": [".to_string());
+    for (index, field) in [
+        "ok",
+        "wav_url",
+        "source_url",
+        "source_input_field",
+        "submitted_field",
+        "source_kind",
+        "host",
+        "downloader",
+        "direct_media_hint",
+        "seed",
+        "title",
+        "genre",
+        "duration_seconds",
+        "bpm",
+        "wav_bytes",
+        "error_code",
+        "error",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let comma = if index == 16 { "" } else { "," };
+        lines.push(format!("    \"{}\"{comma}", json_escape(field)));
+    }
+    lines.push("  ]".to_string());
+    lines.push("}".to_string());
+    lines.join("\n")
+}
+
+pub fn write_music_url_seed_contract_json(
+    path: impl AsRef<Path>,
+    endpoint: &str,
+) -> io::Result<PathBuf> {
+    let path = path.as_ref();
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, music_url_seed_endpoint_contract_json(endpoint))?;
+    Ok(path.to_path_buf())
+}
+
+fn music_url_seed_form_css() -> &'static str {
+    r#"body{margin:0;font:16px/1.45 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f7f7f4;color:#171717}.music-url-seed-panel{box-sizing:border-box;max-width:980px;margin:0 auto;padding:24px}.music-url-grid,.music-url-seed-panel{display:grid;gap:12px}.music-url-grid{grid-template-columns:minmax(170px,220px) minmax(0,1fr);align-items:center}label{font-weight:650}input,textarea,button{box-sizing:border-box;width:100%;font:inherit;border:1px solid #b8b8af;background:#fff;color:#171717;border-radius:6px;padding:10px 12px}textarea{min-height:96px;resize:vertical}button{width:max-content;max-width:100%;background:#18212f;color:#fff;border-color:#18212f;cursor:pointer}output{white-space:pre-wrap;min-height:1.5em}a{color:#084c8d;font-weight:650}@media(max-width:680px){.music-url-grid{grid-template-columns:1fr}.music-url-seed-panel{padding:16px}button{width:100%}}"#
+}
+
+fn music_input_field_for_kind(kind: MusicUrlSourceKind) -> &'static str {
+    match kind {
+        MusicUrlSourceKind::YouTube => "youtube_url",
+        MusicUrlSourceKind::Facebook => "facebook_url",
+        MusicUrlSourceKind::Instagram => "instagram_url",
+        MusicUrlSourceKind::S3 => "s3_url",
+        MusicUrlSourceKind::CloudFront => "cloudfront_url",
+        MusicUrlSourceKind::Cloudflare => "cloudflare_url",
+        MusicUrlSourceKind::StaticAssetHost => "static_asset_url",
+        MusicUrlSourceKind::DirectAudio
+        | MusicUrlSourceKind::DirectVideo
+        | MusicUrlSourceKind::OtherUrl => "any_audio_url",
+    }
+}
+
+fn nonempty_music_form_value<'a>(fields: &'a [(&str, &str)], field_id: &str) -> Option<&'a str> {
+    fields.iter().find_map(|(id, value)| {
+        if *id == field_id {
+            let value = value.trim();
+            if value.is_empty() {
+                None
+            } else {
+                Some(value)
+            }
+        } else {
+            None
+        }
+    })
+}
+
+fn music_form_duration_seconds(fields: &[(&str, &str)], default: f64) -> Result<f64, String> {
+    let Some(raw) = nonempty_music_form_value(fields, "duration_seconds")
+        .or_else(|| nonempty_music_form_value(fields, "durationSeconds"))
+        .or_else(|| nonempty_music_form_value(fields, "music_url_duration_seconds"))
+    else {
+        return Ok(default);
+    };
+    let duration_seconds = raw
+        .parse::<f64>()
+        .map_err(|_| format!("duration_seconds must be a number, got {raw:?}"))?;
+    if !duration_seconds.is_finite() || duration_seconds <= 0.0 {
+        return Err("duration_seconds must be positive and finite".to_string());
+    }
+    if duration_seconds > 600.0 {
+        return Err("duration_seconds must be at most 600 seconds".to_string());
+    }
+    Ok(duration_seconds)
+}
+
+fn classify_music_source_host_path(host: &str, path: &str) -> MusicUrlSourceKind {
+    if host_matches(host, &["youtube.com", "youtu.be", "youtube-nocookie.com"]) {
+        MusicUrlSourceKind::YouTube
+    } else if host_matches(host, &["facebook.com", "fb.watch"]) {
+        MusicUrlSourceKind::Facebook
+    } else if host_matches(host, &["instagram.com"]) {
+        MusicUrlSourceKind::Instagram
+    } else if is_s3_host(host) {
+        MusicUrlSourceKind::S3
+    } else if host.ends_with(".cloudfront.net") {
+        MusicUrlSourceKind::CloudFront
+    } else if is_cloudflare_host(host) {
+        MusicUrlSourceKind::Cloudflare
+    } else if is_static_asset_host(host) {
+        MusicUrlSourceKind::StaticAssetHost
+    } else if looks_like_audio_download_path(path) {
+        MusicUrlSourceKind::DirectAudio
+    } else if looks_like_video_download_path(path) {
+        MusicUrlSourceKind::DirectVideo
+    } else {
+        MusicUrlSourceKind::OtherUrl
+    }
+}
+
+fn host_matches(host: &str, domains: &[&str]) -> bool {
+    domains
+        .iter()
+        .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
+}
+
+fn is_s3_host(host: &str) -> bool {
+    host == "s3.amazonaws.com"
+        || host.starts_with("s3.")
+        || host.starts_with("s3-")
+        || host.contains(".s3.")
+        || host.contains(".s3-")
+        || host.ends_with(".s3.amazonaws.com")
+        || host.ends_with(".s3-website.amazonaws.com")
+        || host.contains(".s3-website-")
+}
+
+fn is_cloudflare_host(host: &str) -> bool {
+    host.ends_with(".r2.cloudflarestorage.com")
+        || host.ends_with(".pages.dev")
+        || host.ends_with(".workers.dev")
+        || host.ends_with(".cloudflarestream.com")
+}
+
+fn is_static_asset_host(host: &str) -> bool {
+    host.starts_with("static.")
+        || host.starts_with("assets.")
+        || host.starts_with("cdn.")
+        || host.contains(".static.")
+        || host.contains(".assets.")
+        || host.contains(".cdn.")
+        || host.ends_with(".storage.googleapis.com")
+        || host == "storage.googleapis.com"
+        || host.ends_with(".blob.core.windows.net")
+        || host.ends_with(".githubusercontent.com")
+        || host == "raw.githubusercontent.com"
+}
+
+fn looks_like_audio_download_path(path: &str) -> bool {
+    has_any_path_extension(
+        path,
+        &[
+            ".mp3", ".m4a", ".aac", ".wav", ".flac", ".ogg", ".oga", ".opus", ".aif", ".aiff",
+        ],
+    )
+}
+
+fn looks_like_video_download_path(path: &str) -> bool {
+    has_any_path_extension(path, &[".mp4", ".m4v", ".mov", ".webm", ".mkv"])
+}
+
+fn has_any_path_extension(path: &str, extensions: &[&str]) -> bool {
+    let lower = path.to_ascii_lowercase();
+    let without_fragment = lower.split('#').next().unwrap_or(&lower);
+    let without_query = without_fragment
+        .split('?')
+        .next()
+        .unwrap_or(without_fragment);
+    extensions
+        .iter()
+        .any(|extension| without_query.ends_with(extension))
+}
+
+fn html_escape(value: &str) -> String {
+    let mut out = String::new();
+    for ch in value.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            ch => out.push(ch),
+        }
+    }
+    out
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ParsedMusicUrl {
+    raw_url: String,
+    host: String,
+    path: String,
+}
+
+impl ParsedMusicUrl {
+    fn parse(raw_url: &str) -> Result<Self, String> {
+        let raw_url = raw_url.trim();
+        if raw_url.is_empty() {
+            return Err("music source URL must not be empty".to_string());
+        }
+        if raw_url.chars().count() > 4096 {
+            return Err("music source URL must be at most 4096 characters".to_string());
+        }
+        let (scheme, rest) = raw_url
+            .split_once("://")
+            .ok_or_else(|| "music source URL must include http:// or https://".to_string())?;
+        match scheme.to_ascii_lowercase().as_str() {
+            "http" | "https" => {}
+            _ => return Err("music source URL must use http or https".to_string()),
+        }
+        let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+        let authority = &rest[..authority_end];
+        if authority.is_empty() {
+            return Err("music source URL must include a host".to_string());
+        }
+        if authority.contains('@') {
+            return Err(
+                "music source URL must not embed credentials; use dedicated auth fields"
+                    .to_string(),
+            );
+        }
+        let host = extract_url_host(authority)?;
+        if is_disallowed_music_url_host(&host) {
+            return Err(
+                "music source URL must use a public host, not localhost/private/internal network"
+                    .to_string(),
+            );
+        }
+        let path = rest[authority_end..].to_string();
+        Ok(Self {
+            raw_url: raw_url.to_string(),
+            host,
+            path,
+        })
+    }
+}
+
+fn extract_url_host(authority: &str) -> Result<String, String> {
+    let host = if let Some(without_open) = authority.strip_prefix('[') {
+        let (host, _) = without_open
+            .split_once(']')
+            .ok_or_else(|| "music source URL has an unterminated IPv6 host".to_string())?;
+        host
+    } else {
+        authority.split(':').next().unwrap_or(authority)
+    };
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    if host.is_empty() {
+        return Err("music source URL must include a host".to_string());
+    }
+    Ok(host)
+}
+
+fn is_disallowed_music_url_host(host: &str) -> bool {
+    if host == "localhost" || host.ends_with(".localhost") {
+        return true;
+    }
+    if let Ok(ipv4) = host.parse::<Ipv4Addr>() {
+        return is_disallowed_ipv4_music_host(ipv4);
+    }
+    if let Ok(ipv6) = host.parse::<Ipv6Addr>() {
+        return is_disallowed_ipv6_music_host(ipv6);
+    }
+    if !host.contains('.') {
+        return true;
+    }
+    host.ends_with(".local")
+        || host.ends_with(".lan")
+        || host.ends_with(".internal")
+        || host.ends_with(".home")
+        || host.ends_with(".corp")
+}
+
+fn is_disallowed_ipv4_music_host(ip: Ipv4Addr) -> bool {
+    let octets = ip.octets();
+    ip.is_private()
+        || ip.is_loopback()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || ip.is_broadcast()
+        || octets[0] == 0
+        || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+        || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
+        || (octets[0] == 198 && (18..=19).contains(&octets[1]))
+        || (octets[0] == 203 && octets[1] == 0 && octets[2] == 113)
+}
+
+fn is_disallowed_ipv6_music_host(ip: Ipv6Addr) -> bool {
+    let segments = ip.segments();
+    let unique_local = (segments[0] & 0xfe00) == 0xfc00;
+    let link_local = (segments[0] & 0xffc0) == 0xfe80;
+    let documentation = segments[0] == 0x2001 && segments[1] == 0x0db8;
+    let ipv4_mapped = segments[0] == 0
+        && segments[1] == 0
+        && segments[2] == 0
+        && segments[3] == 0
+        && segments[4] == 0
+        && segments[5] == 0xffff;
+    let mapped_private = if ipv4_mapped {
+        let high = segments[6].to_be_bytes();
+        let low = segments[7].to_be_bytes();
+        is_disallowed_ipv4_music_host(Ipv4Addr::new(high[0], high[1], low[0], low[1]))
+    } else {
+        false
+    };
+    ip.is_loopback()
+        || ip.is_unspecified()
+        || unique_local
+        || link_local
+        || documentation
+        || mapped_private
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StylePalette {
     RaveCollage,
     BrokenBeatDream,
@@ -1859,6 +2605,15 @@ pub struct MusicSamplePromptInfluence {
     pub feature_tags: Vec<String>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct MusicUrlSeedRenderResult {
+    pub selected_source: SelectedMusicUrlSource,
+    pub sample_seed: MusicSampleSeed,
+    pub output_path: PathBuf,
+    pub wav_bytes: u64,
+    pub summary: ArrangementSummary,
+}
+
 pub fn generate_three_minute_song(seed: u32) -> SongRender {
     generate_microtonal_song(SongSpec {
         seed,
@@ -2172,6 +2927,156 @@ pub fn derive_music_sample_seed_from_mp4_with_limit(
         meter_bias,
         descriptors,
     })
+}
+
+pub fn derive_music_sample_seed_from_url(raw_url: &str) -> Result<MusicSampleSeed, String> {
+    let spec = classify_music_source_url(raw_url)?;
+    Ok(derive_music_sample_seed_from_url_source(&spec))
+}
+
+pub fn derive_music_sample_seed_from_url_source(spec: &MusicUrlSourceSpec) -> MusicSampleSeed {
+    let seed_material = format!(
+        "music-url-seed\0{}\0{}\0{}\0{}\0{}\0{}",
+        spec.raw_url,
+        spec.host,
+        spec.path,
+        spec.kind.as_str(),
+        spec.downloader_hint,
+        spec.direct_media_hint
+    );
+    let bytes = seed_material.as_bytes();
+    let seed = hash_bytes_to_seed(bytes);
+    let entropy = byte_entropy(bytes);
+    let suggested_genre = music_url_genre_hint(spec.kind, seed, spec.direct_media_hint);
+    let suggested_bpm =
+        (suggested_genre.default_bpm() + ((seed >> 3) % 15) as f64 - 7.0).clamp(68.0, 188.0);
+    let key_bias_steps = ((seed >> 9) % 13) as i32 - 6;
+    let meter_options = [(4, 4), (7, 8), (9, 8), (11, 8), (13, 16), (15, 16)];
+    let meter_bias = meter_options[((seed >> 17) as usize) % meter_options.len()];
+    let duration_seconds = 10.0 + (seed % 4000) as f64 / 100.0;
+    MusicSampleSeed {
+        source_path: spec.raw_url.clone(),
+        duration_seconds,
+        seed,
+        byte_entropy: entropy,
+        suggested_genre,
+        suggested_bpm,
+        key_bias_steps,
+        meter_bias,
+        descriptors: vec![
+            "music-url-seed".to_string(),
+            format!("source-kind={}", spec.kind.as_str()),
+            format!("host={}", spec.host),
+            format!("downloader={}", spec.downloader_hint),
+            format!("direct-media={}", spec.direct_media_hint),
+            format!("url-entropy={:.3}", entropy),
+        ],
+    }
+}
+
+pub fn song_spec_from_music_url_source(
+    source: &MusicUrlSourceSpec,
+    title: impl Into<String>,
+    duration_seconds: f64,
+) -> SongSpec {
+    song_spec_from_music_url_source_with_prompt(source, title, duration_seconds, None)
+}
+
+pub fn song_spec_from_music_url_source_with_prompt(
+    source: &MusicUrlSourceSpec,
+    title: impl Into<String>,
+    duration_seconds: f64,
+    prompt: Option<&str>,
+) -> SongSpec {
+    let sample = derive_music_sample_seed_from_url_source(source);
+    song_spec_from_music_sample_seed_with_prompt(&sample, title, duration_seconds, prompt)
+}
+
+pub fn render_music_url_seed_wav(
+    fields: &[(&str, &str)],
+    out_path: impl AsRef<Path>,
+) -> Result<MusicUrlSeedRenderResult, String> {
+    let selected_source = select_music_url_input(fields)?
+        .ok_or_else(|| "music URL seed form needs at least one source URL".to_string())?;
+    let duration_seconds = music_form_duration_seconds(fields, DEFAULT_SONG_SECONDS)?;
+    let title = nonempty_music_form_value(fields, "title")
+        .or_else(|| nonempty_music_form_value(fields, "music_url_title"))
+        .unwrap_or("music-url-source variation");
+    let prompt = nonempty_music_form_value(fields, "prompt")
+        .or_else(|| nonempty_music_form_value(fields, "music_url_prompt"));
+
+    let sample_seed = derive_music_sample_seed_from_url_source(&selected_source.spec);
+    let spec =
+        song_spec_from_music_sample_seed_with_prompt(&sample_seed, title, duration_seconds, prompt);
+    let render = generate_microtonal_song(spec);
+    let out_path = out_path.as_ref();
+    if let Some(parent) = out_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)
+            .map_err(|err| format!("failed to create {}: {err}", parent.display()))?;
+    }
+    render
+        .audio
+        .write_wav16(out_path)
+        .map_err(|err| format!("failed to write {}: {err}", out_path.display()))?;
+    let wav_bytes = std::fs::metadata(out_path)
+        .map_err(|err| format!("failed to inspect {}: {err}", out_path.display()))?
+        .len();
+    Ok(MusicUrlSeedRenderResult {
+        selected_source,
+        sample_seed,
+        output_path: canonical_or_original(out_path.to_path_buf()),
+        wav_bytes,
+        summary: render.summary,
+    })
+}
+
+pub fn music_url_seed_render_result_json(
+    result: &MusicUrlSeedRenderResult,
+    wav_url: &str,
+) -> String {
+    format!(
+        concat!(
+            "{{",
+            "\"ok\":true,",
+            "\"wav_url\":\"{wav_url}\",",
+            "\"source_url\":\"{source_url}\",",
+            "\"source_input_field\":\"{source_input_field}\",",
+            "\"submitted_field\":\"{submitted_field}\",",
+            "\"source_kind\":\"{source_kind}\",",
+            "\"host\":\"{host}\",",
+            "\"downloader\":\"{downloader}\",",
+            "\"direct_media_hint\":{direct_media_hint},",
+            "\"seed\":{seed},",
+            "\"title\":\"{title}\",",
+            "\"genre\":\"{genre}\",",
+            "\"duration_seconds\":{duration_seconds:.3},",
+            "\"bpm\":{bpm:.3},",
+            "\"wav_bytes\":{wav_bytes}",
+            "}}"
+        ),
+        wav_url = json_escape(wav_url),
+        source_url = json_escape(&result.selected_source.spec.raw_url),
+        source_input_field = json_escape(&result.selected_source.spec.input_field_id),
+        submitted_field = json_escape(&result.selected_source.submitted_field_id),
+        source_kind = json_escape(result.selected_source.spec.kind.as_str()),
+        host = json_escape(&result.selected_source.spec.host),
+        downloader = json_escape(&result.selected_source.spec.downloader_hint),
+        direct_media_hint = result.selected_source.spec.direct_media_hint,
+        seed = result.sample_seed.seed,
+        title = json_escape(&result.summary.title),
+        genre = json_escape(result.summary.genre.as_str()),
+        duration_seconds = result.summary.duration_seconds,
+        bpm = result.summary.bpm,
+        wav_bytes = result.wav_bytes,
+    )
+}
+
+pub fn music_url_seed_error_json(error_code: &str, error: &str) -> String {
+    format!(
+        "{{\"ok\":false,\"error_code\":\"{}\",\"error\":\"{}\"}}",
+        json_escape(error_code),
+        json_escape(error)
+    )
 }
 
 pub fn song_spec_from_music_sample_seed(
@@ -2832,6 +3737,66 @@ fn parse_mvhd_duration_seconds(content: &[u8]) -> Option<f64> {
         }
         _ => None,
     }
+}
+
+fn music_url_genre_hint(
+    kind: MusicUrlSourceKind,
+    seed: u32,
+    direct_media_hint: bool,
+) -> MusicGenre {
+    let options: &[MusicGenre] = match kind {
+        MusicUrlSourceKind::YouTube => &[
+            MusicGenre::Breakbeat,
+            MusicGenre::DrumAndBass,
+            MusicGenre::FutureGarage,
+            MusicGenre::TripHop,
+        ],
+        MusicUrlSourceKind::Facebook | MusicUrlSourceKind::Instagram => &[
+            MusicGenre::Dance,
+            MusicGenre::House,
+            MusicGenre::Breakbeat,
+            MusicGenre::GlitchHop,
+        ],
+        MusicUrlSourceKind::S3
+        | MusicUrlSourceKind::CloudFront
+        | MusicUrlSourceKind::Cloudflare
+        | MusicUrlSourceKind::StaticAssetHost => {
+            if direct_media_hint {
+                &[
+                    MusicGenre::DrumAndBass,
+                    MusicGenre::Dubstep,
+                    MusicGenre::FutureGarage,
+                    MusicGenre::Breakbeat,
+                ]
+            } else {
+                &[
+                    MusicGenre::Electronica,
+                    MusicGenre::AmbientTechno,
+                    MusicGenre::Idm,
+                    MusicGenre::Downtempo,
+                ]
+            }
+        }
+        MusicUrlSourceKind::DirectAudio => &[
+            MusicGenre::Breakbeat,
+            MusicGenre::DrumAndBass,
+            MusicGenre::TripHop,
+            MusicGenre::DubTechno,
+        ],
+        MusicUrlSourceKind::DirectVideo => &[
+            MusicGenre::Jungle,
+            MusicGenre::Breakcore,
+            MusicGenre::GlitchHop,
+            MusicGenre::FutureGarage,
+        ],
+        MusicUrlSourceKind::OtherUrl => &[
+            MusicGenre::ExperimentalElectronic,
+            MusicGenre::PostMinimalElectronic,
+            MusicGenre::Soundscape,
+            MusicGenre::Downtempo,
+        ],
+    };
+    options[(seed as usize) % options.len()]
 }
 
 fn hash_bytes_to_seed(bytes: &[u8]) -> u32 {
@@ -3530,6 +4495,468 @@ mod tests {
             .expect("fixture stays under larger byte limit");
         assert_eq!(sample.duration_seconds, 20.0);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn url_input_fields_cover_requested_source_classes() {
+        let fields = music_url_input_fields();
+        let ids: Vec<&str> = fields.iter().map(|field| field.id.as_str()).collect();
+        for expected in [
+            "youtube_url",
+            "facebook_url",
+            "instagram_url",
+            "s3_url",
+            "cloudfront_url",
+            "cloudflare_url",
+            "static_asset_url",
+            "any_audio_url",
+        ] {
+            assert!(ids.contains(&expected), "missing input field {expected}");
+        }
+
+        let all_kinds: Vec<MusicUrlSourceKind> = fields
+            .iter()
+            .flat_map(|field| field.source_kinds.iter().copied())
+            .collect();
+        for expected in [
+            MusicUrlSourceKind::YouTube,
+            MusicUrlSourceKind::Facebook,
+            MusicUrlSourceKind::Instagram,
+            MusicUrlSourceKind::S3,
+            MusicUrlSourceKind::CloudFront,
+            MusicUrlSourceKind::Cloudflare,
+            MusicUrlSourceKind::StaticAssetHost,
+            MusicUrlSourceKind::DirectAudio,
+            MusicUrlSourceKind::DirectVideo,
+            MusicUrlSourceKind::OtherUrl,
+        ] {
+            assert!(all_kinds.contains(&expected), "missing kind {expected:?}");
+        }
+    }
+
+    #[test]
+    fn classify_music_urls_for_platform_storage_cdn_and_static_sources() {
+        let cases = [
+            (
+                "https://www.youtube.com/watch?v=abc",
+                MusicUrlSourceKind::YouTube,
+                "youtube_url",
+                "yt-dlp-or-platform-extractor",
+            ),
+            (
+                "https://fb.watch/example",
+                MusicUrlSourceKind::Facebook,
+                "facebook_url",
+                "yt-dlp-or-platform-extractor",
+            ),
+            (
+                "https://www.instagram.com/reel/example/",
+                MusicUrlSourceKind::Instagram,
+                "instagram_url",
+                "yt-dlp-or-platform-extractor",
+            ),
+            (
+                "https://bucket.s3.amazonaws.com/folder/loop.mp3",
+                MusicUrlSourceKind::S3,
+                "s3_url",
+                "direct-http",
+            ),
+            (
+                "https://d111111abcdef8.cloudfront.net/audio/seed.mp4",
+                MusicUrlSourceKind::CloudFront,
+                "cloudfront_url",
+                "direct-http",
+            ),
+            (
+                "https://example.r2.cloudflarestorage.com/sample.wav",
+                MusicUrlSourceKind::Cloudflare,
+                "cloudflare_url",
+                "direct-http",
+            ),
+            (
+                "https://static.example.com/music/loop.wav?download=1",
+                MusicUrlSourceKind::StaticAssetHost,
+                "static_asset_url",
+                "direct-http",
+            ),
+            (
+                "https://media.example.net/beat.flac",
+                MusicUrlSourceKind::DirectAudio,
+                "any_audio_url",
+                "direct-http",
+            ),
+            (
+                "https://media.example.net/clip.webm#part",
+                MusicUrlSourceKind::DirectVideo,
+                "any_audio_url",
+                "direct-http",
+            ),
+            (
+                "https://example.net/share/opaque-id",
+                MusicUrlSourceKind::OtherUrl,
+                "any_audio_url",
+                "yt-dlp-or-platform-extractor",
+            ),
+        ];
+
+        for (url, kind, field, downloader) in cases {
+            let spec = classify_music_source_url(url).expect("URL should classify");
+            assert_eq!(spec.kind, kind, "{url}");
+            assert_eq!(spec.input_field_id, field, "{url}");
+            assert_eq!(spec.downloader_hint, downloader, "{url}");
+        }
+    }
+
+    #[test]
+    fn url_source_examples_match_classifier_and_selection() {
+        let examples = music_url_source_examples();
+        let covered_kinds: Vec<MusicUrlSourceKind> =
+            examples.iter().map(|example| example.source_kind).collect();
+        for expected in [
+            MusicUrlSourceKind::YouTube,
+            MusicUrlSourceKind::Facebook,
+            MusicUrlSourceKind::Instagram,
+            MusicUrlSourceKind::S3,
+            MusicUrlSourceKind::CloudFront,
+            MusicUrlSourceKind::Cloudflare,
+            MusicUrlSourceKind::StaticAssetHost,
+            MusicUrlSourceKind::DirectAudio,
+            MusicUrlSourceKind::DirectVideo,
+            MusicUrlSourceKind::OtherUrl,
+        ] {
+            assert!(
+                covered_kinds.contains(&expected),
+                "missing example {expected:?}"
+            );
+        }
+
+        for example in examples {
+            let spec =
+                classify_music_source_url(example.source_url).expect("example URL should classify");
+            assert_eq!(spec.kind, example.source_kind, "{}", example.source_url);
+            assert_eq!(
+                spec.input_field_id, example.field_id,
+                "{}",
+                example.source_url
+            );
+
+            let selected = select_music_url_input(&[(example.field_id, example.source_url)])
+                .expect("example form should select")
+                .expect("example form has a URL");
+            assert_eq!(selected.submitted_field_id, example.field_id);
+            assert_eq!(selected.spec.kind, example.source_kind);
+        }
+    }
+
+    #[test]
+    fn select_music_url_input_uses_ui_order_for_named_fields() {
+        let selected = select_music_url_input(&[
+            ("any_audio_url", "https://media.example.net/beat.flac"),
+            ("youtube_url", "https://www.youtube.com/watch?v=abc"),
+        ])
+        .expect("selection should succeed")
+        .expect("a source should be selected");
+
+        assert_eq!(selected.submitted_field_id, "youtube_url");
+        assert_eq!(selected.spec.kind, MusicUrlSourceKind::YouTube);
+        assert_eq!(selected.spec.input_field_id, "youtube_url");
+    }
+
+    #[test]
+    fn select_music_url_input_accepts_normalized_source_url_payload() {
+        let selected = select_music_url_input(&[
+            ("source_url", " https://media.example.net/beat.flac "),
+            ("source_input_field", "any_audio_url"),
+        ])
+        .expect("selection should succeed")
+        .expect("a source should be selected");
+
+        assert_eq!(selected.submitted_field_id, "any_audio_url");
+        assert_eq!(selected.spec.raw_url, "https://media.example.net/beat.flac");
+        assert_eq!(selected.spec.kind, MusicUrlSourceKind::DirectAudio);
+        assert_eq!(selected.spec.input_field_id, "any_audio_url");
+    }
+
+    #[test]
+    fn select_music_url_input_ignores_unrelated_fields_without_url() {
+        let selected =
+            select_music_url_input(&[("prompt", "make it brighter"), ("duration_seconds", "180")])
+                .expect("selection should not fail");
+
+        assert_eq!(selected, None);
+    }
+
+    #[test]
+    fn select_music_url_input_rejects_first_nonempty_known_field() {
+        let err = select_music_url_input(&[
+            ("facebook_url", "file:///tmp/song.mp3"),
+            ("any_audio_url", "https://media.example.net/beat.flac"),
+        ])
+        .expect_err("invalid earlier UI field should reject the form");
+
+        assert!(err.contains("facebook_url:"), "{err}");
+        assert!(err.contains("http"), "{err}");
+    }
+
+    #[test]
+    fn derive_music_sample_seed_from_url_source_is_deterministic() {
+        let source = classify_music_source_url("https://media.example.net/audio/beat.flac")
+            .expect("URL should classify");
+        let first = derive_music_sample_seed_from_url_source(&source);
+        let second = derive_music_sample_seed_from_url_source(&source);
+
+        assert_eq!(first, second);
+        assert_eq!(first.source_path, source.raw_url);
+        assert!((10.0..=50.0).contains(&first.duration_seconds));
+        assert!(first.byte_entropy > 0.0);
+        assert!(
+            first.descriptors.contains(&"music-url-seed".to_string()),
+            "{:?}",
+            first.descriptors
+        );
+        assert!(
+            first
+                .descriptors
+                .contains(&"source-kind=direct-audio".to_string()),
+            "{:?}",
+            first.descriptors
+        );
+        assert!(
+            first.descriptors.contains(&"direct-media=true".to_string()),
+            "{:?}",
+            first.descriptors
+        );
+    }
+
+    #[test]
+    fn url_source_song_spec_uses_url_seed_and_prompt_influence() {
+        let source = classify_music_source_url("https://www.youtube.com/watch?v=abc")
+            .expect("URL should classify");
+        let sample = derive_music_sample_seed_from_url_source(&source);
+        let spec = song_spec_from_music_url_source_with_prompt(
+            &source,
+            "url inspiration test",
+            24.0,
+            Some("faster jungle amen breaks with massive bass"),
+        );
+
+        assert_eq!(spec.title, "url inspiration test");
+        assert_eq!(spec.duration_seconds, 24.0);
+        assert_eq!(spec.genre, MusicGenre::Jungle);
+        assert_ne!(spec.seed, sample.seed);
+        let plan = spec.structure_plan.expect("URL spec has a plan");
+        assert!(plan.italian_features.contains(&"campionamento".to_string()));
+        assert!(plan.italian_features.contains(&"direzione".to_string()));
+    }
+
+    #[test]
+    fn render_music_url_seed_wav_accepts_form_fields_and_writes_audio() {
+        let path = std::env::temp_dir().join(format!(
+            "music-url-seed-handler-{}-{}.wav",
+            std::process::id(),
+            7
+        ));
+        let result = render_music_url_seed_wav(
+            &[
+                ("s3_url", "https://bucket.s3.amazonaws.com/audio/loop.mp3"),
+                ("duration_seconds", "4"),
+                ("title", "URL handler render"),
+                ("prompt", "ambient slower wide space"),
+            ],
+            &path,
+        )
+        .expect("URL seed form should render a wav");
+
+        assert_eq!(result.selected_source.submitted_field_id, "s3_url");
+        assert_eq!(result.selected_source.spec.kind, MusicUrlSourceKind::S3);
+        assert_eq!(result.selected_source.spec.input_field_id, "s3_url");
+        assert_eq!(result.summary.title, "URL handler render");
+        assert_eq!(result.summary.genre, MusicGenre::Ambient);
+        assert!((result.summary.duration_seconds - 4.0).abs() < 0.001);
+        assert!(result.wav_bytes > 44);
+        assert_eq!(
+            std::fs::metadata(&path).expect("wav exists").len(),
+            result.wav_bytes
+        );
+
+        let json = music_url_seed_render_result_json(&result, "/music/generated/url.wav");
+        assert!(json.contains(r#""ok":true"#), "{json}");
+        assert!(
+            json.contains(r#""wav_url":"/music/generated/url.wav""#),
+            "{json}"
+        );
+        assert!(json.contains(r#""source_kind":"s3""#), "{json}");
+        assert!(json.contains(r#""submitted_field":"s3_url""#), "{json}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn music_url_seed_error_json_reports_endpoint_failures() {
+        let json = music_url_seed_error_json(
+            "validation_error",
+            "music source URL must include \"http\" & a public host",
+        );
+
+        assert_eq!(
+            json,
+            r#"{"ok":false,"error_code":"validation_error","error":"music source URL must include \"http\" & a public host"}"#
+        );
+    }
+
+    #[test]
+    fn render_music_url_seed_wav_rejects_missing_or_invalid_form_input() {
+        let path = std::env::temp_dir().join(format!(
+            "music-url-seed-handler-error-{}-{}.wav",
+            std::process::id(),
+            11
+        ));
+        let missing = render_music_url_seed_wav(&[("prompt", "make it move")], &path)
+            .expect_err("missing URL should reject");
+        assert!(missing.contains("at least one source URL"), "{missing}");
+
+        let invalid_duration = render_music_url_seed_wav(
+            &[
+                ("any_audio_url", "https://media.example.net/beat.flac"),
+                ("duration_seconds", "-2"),
+            ],
+            &path,
+        )
+        .expect_err("invalid duration should reject");
+        assert!(
+            invalid_duration.contains("duration_seconds must be positive"),
+            "{invalid_duration}"
+        );
+        assert!(!path.exists(), "invalid form should not write a wav");
+    }
+
+    #[test]
+    fn rendered_url_seed_form_has_all_requested_inputs_and_posts_source_url() {
+        let html = render_music_url_seed_form_html("music/sample-seed");
+        for expected in [
+            r#"id="youtube_url""#,
+            r#"id="facebook_url""#,
+            r#"id="instagram_url""#,
+            r#"id="s3_url""#,
+            r#"id="cloudfront_url""#,
+            r#"id="cloudflare_url""#,
+            r#"id="static_asset_url""#,
+            r#"id="any_audio_url""#,
+            r#"id="music_url_title""#,
+            r#"id="music_url_seed_download""#,
+            r#"role="status""#,
+            "CloudFront URL",
+            "Cloudflare URL",
+            "Static asset URL",
+            "Any audio or media URL",
+            "direct-audio,direct-video,other-url",
+        ] {
+            assert!(
+                html.contains(expected),
+                "missing rendered UI token {expected}"
+            );
+        }
+        for expected in [
+            r#"fd.append("source_url", selected.value)"#,
+            r#"fd.append("source_input_field", selected.id)"#,
+            r#"fd.append("source_platform", selected.kinds.split(",")[0] || "auto")"#,
+            r#"fd.append("prompt""#,
+            r#"fd.append("duration_seconds""#,
+            r#"fd.append("title", document.getElementById("music_url_title").value.trim()"#,
+            "data.source_kind",
+            "data.host",
+            "data.genre",
+            "data.bpm",
+            "data.wavUrl",
+            "download.href = wavUrl",
+            "music/sample-seed",
+        ] {
+            assert!(
+                html.contains(expected),
+                "missing endpoint mapping token {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn url_seed_endpoint_contract_covers_ui_and_handler_fields() {
+        let contract = music_url_seed_endpoint_contract_json("sample-seed");
+        for expected in [
+            r#""schema": "des/music-url-seed-endpoint/v1""#,
+            r#""endpoint": "sample-seed""#,
+            r#""method": "POST""#,
+            r#""content_type": "multipart/form-data""#,
+            r#""host_policy": "public-http-only-no-credentials-no-localhost-private-or-internal""#,
+            r#""examples""#,
+            r#""id": "youtube_url""#,
+            r#""id": "facebook_url""#,
+            r#""id": "instagram_url""#,
+            r#""id": "s3_url""#,
+            r#""id": "cloudfront_url""#,
+            r#""id": "cloudflare_url""#,
+            r#""id": "static_asset_url""#,
+            r#""id": "any_audio_url""#,
+            r#""source_url""#,
+            r#""source_input_field""#,
+            r#""source_platform""#,
+            r#""prompt""#,
+            r#""duration_seconds""#,
+            r#""title""#,
+            r#""wav_url""#,
+            r#""source_kind""#,
+            r#""host""#,
+            r#""downloader""#,
+            r#""genre""#,
+            r#""bpm""#,
+            r#""wav_bytes""#,
+            r#""error_code""#,
+            r#""error""#,
+            r#""source_url": "https://www.youtube.com/watch?v=abc123""#,
+            r#""source_url": "https://example.r2.cloudflarestorage.com/sample.wav""#,
+            r#""source_kind": "other-url""#,
+        ] {
+            assert!(
+                contract.contains(expected),
+                "missing contract token {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn rendered_url_seed_form_escapes_endpoint_text() {
+        let html = render_music_url_seed_form_html("music/sample-seed?x=\"<&");
+        assert!(html.contains("music/sample-seed?x=&quot;&lt;&amp;"));
+        assert!(!html.contains("music/sample-seed?x=\"<&"));
+    }
+
+    #[test]
+    fn music_url_parser_rejects_unsupported_or_secret_bearing_urls() {
+        for url in [
+            "",
+            "file:///tmp/seed.mp3",
+            "ftp://example.com/seed.mp3",
+            "https://user:pass@example.com/seed.mp3",
+            "https:///missing-host.mp3",
+            "http://localhost/seed.mp3",
+            "http://127.0.0.1/seed.mp3",
+            "http://10.0.0.5/seed.mp3",
+            "http://172.16.4.2/seed.mp3",
+            "http://192.168.1.10/seed.mp3",
+            "http://169.254.1.2/seed.mp3",
+            "http://100.64.1.2/seed.mp3",
+            "http://[::1]/seed.mp3",
+            "http://[fd00::1]/seed.mp3",
+            "http://printer.local/seed.mp3",
+            "http://intranet/seed.mp3",
+        ] {
+            assert!(
+                classify_music_source_url(url).is_err(),
+                "expected rejection for {url:?}"
+            );
+        }
+
+        let public_ip = classify_music_source_url("https://93.184.216.34/seed.mp3")
+            .expect("public IP media URL should classify");
+        assert_eq!(public_ip.kind, MusicUrlSourceKind::DirectAudio);
     }
 
     #[test]

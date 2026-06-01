@@ -67,6 +67,7 @@ mod tests {
         assert_eq!(req.outfield_formation, vec![4, 4, 2]);
         assert_eq!(req.players.len(), 18);
         assert_eq!(req.max_subs_per_game, 7);
+        assert_eq!(req.min_subs_per_game, 0);
         assert_eq!(req.solver_max_nodes, 20_000);
     }
 

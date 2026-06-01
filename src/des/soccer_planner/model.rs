@@ -50,6 +50,8 @@ pub struct PlannerRequest {
     pub minutes_per_period: usize,
     #[serde(default = "default_max_subs")]
     pub max_subs_per_game: usize,
+    #[serde(default = "default_min_subs")]
+    pub min_subs_per_game: usize,
     #[serde(default = "default_stamina")]
     pub max_consecutive_on_field: usize,
     pub players: Vec<PlannerPlayer>,
@@ -82,6 +84,9 @@ fn default_minutes() -> usize {
 }
 fn default_max_subs() -> usize {
     7
+}
+fn default_min_subs() -> usize {
+    0
 }
 fn default_stamina() -> usize {
     3
@@ -170,6 +175,7 @@ pub fn default_planner_request() -> PlannerRequest {
         num_periods: 2,
         minutes_per_period: 45,
         max_subs_per_game: 7,
+        min_subs_per_game: 0,
         max_consecutive_on_field: 3,
         players,
         synergies,
@@ -213,6 +219,9 @@ pub fn normalize_planner_request(req: &mut PlannerRequest) {
     }
     req.num_periods = req.num_periods.max(1);
     req.minutes_per_period = req.minutes_per_period.max(1);
+    if req.min_subs_per_game > req.max_subs_per_game {
+        req.min_subs_per_game = req.max_subs_per_game;
+    }
     req.max_consecutive_on_field = req.max_consecutive_on_field.max(1);
     req.solver_time_limit_ms = req.solver_time_limit_ms.max(250.0);
     req.solver_max_nodes = req.solver_max_nodes.max(1);
@@ -347,6 +356,9 @@ pub fn apply_planner_stream_command(
             }
             if let Some(v) = value_usize(command, "maxSubsPerGame") {
                 req.max_subs_per_game = v;
+            }
+            if let Some(v) = value_usize(command, "minSubsPerGame") {
+                req.min_subs_per_game = v;
             }
             if let Some(v) = value_usize(command, "maxConsecutiveOnField") {
                 req.max_consecutive_on_field = v;

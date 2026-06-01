@@ -86,6 +86,8 @@ pub struct SoccerProblem {
     pub max_consecutive_on_field: Option<usize>,
     /// Max substitution events (players subbed off) across the whole match.
     pub max_subs_per_game: Option<usize>,
+    /// Min substitution events (players subbed off) across the whole match.
+    pub min_subs_per_game: Option<usize>,
     /// `affinity[p][pos][t]` in `[0, 1]`.
     pub affinity: Vec<Vec<Vec<f64>>>,
     pub player_names: Option<Vec<String>>,
@@ -221,6 +223,7 @@ pub fn build_sample_soccer_problem(opts: &AffinityBuilderOptions) -> SoccerProbl
         bench_size,
         max_consecutive_on_field,
         max_subs_per_game: None,
+        min_subs_per_game: None,
         affinity: aff,
         player_names: Some(player_names),
         position_names: Some(position_names),
@@ -379,7 +382,7 @@ pub struct ScheduleEvaluation {
     /// `true` when there is no stamina cap, or no run exceeds it.
     pub stamina_ok: bool,
     pub consecutive_on_field_violations: Vec<ConsecutiveOnFieldViolation>,
-    /// `true` when there is no sub cap, or total subs ≤ cap.
+    /// `true` when there is no substitution bound violation.
     pub subs_ok: bool,
     pub total_subs: usize,
     pub bench_counts: Vec<usize>,
@@ -523,9 +526,13 @@ pub fn evaluate_schedule(problem: &SoccerProblem, schedule: &Schedule) -> Schedu
     let consecutive_on_field_violations = consecutive_on_field_violations(problem, schedule);
     let total_subs = count_subs(problem, schedule);
     let subs_ok = problem
-        .max_subs_per_game
-        .map(|cap| total_subs <= cap)
-        .unwrap_or(true);
+        .min_subs_per_game
+        .map(|floor| total_subs >= floor)
+        .unwrap_or(true)
+        && problem
+            .max_subs_per_game
+            .map(|cap| total_subs <= cap)
+            .unwrap_or(true);
     ScheduleEvaluation {
         affinity_sum: total,
         per_period_affinity: per_period,
@@ -1796,7 +1803,8 @@ pub fn build_soccer_ipmip(problem: &SoccerProblem) -> SoccerIPMIPModel {
     }
 
     let need_synergy = !rules.is_empty();
-    let need_subs = problem.max_subs_per_game.is_some() && t_count > 1;
+    let need_subs =
+        (problem.max_subs_per_game.is_some() || problem.min_subs_per_game.is_some()) && t_count > 1;
     let n_synergy = if need_synergy {
         rules.len() * t_count
     } else {
@@ -1933,6 +1941,23 @@ pub fn build_soccer_ipmip(problem: &SoccerProblem) -> SoccerIPMIPModel {
                     row_index,
                     node_id: "station:max-subs".to_string(),
                     label: Some(format!("at most {max_subs} substitutions per match")),
+                });
+            }
+            if let Some(min_subs) = problem.min_subs_per_game {
+                let mut row = vec![0.0; n_total];
+                for p in 0..p_count {
+                    for t in 1..t_count {
+                        row[sub_index(p, t)] = -1.0;
+                    }
+                }
+                let row_index = a.len();
+                a.push(row);
+                b.push(-(min_subs as f64));
+                con_names.push(format!("min_subs_{min_subs}"));
+                constraint_nodes.push(ConstraintNode {
+                    row_index,
+                    node_id: "station:min-subs".to_string(),
+                    label: Some(format!("at least {min_subs} substitutions per match")),
                 });
             }
         }
@@ -2653,6 +2678,7 @@ mod tests {
             bench_size: 1,
             max_consecutive_on_field: Some(1),
             max_subs_per_game: None,
+            min_subs_per_game: None,
             affinity: vec![vec![vec![0.0; 3]; 1]; 2],
             player_names: None,
             position_names: None,

@@ -135,7 +135,7 @@ fn build_frame(
         };
         shapes.push(json!({
             "kind": "rect", "x": node.x, "y": node.y, "w": node.w, "h": node.h, "rx": 8.0,
-            "fill": fill, "stroke": "#64748b", "strokeWidth": 1.5
+            "fill": fill, "stroke": "#64748b", "strokeWidth": 1.5, "title": node.kind.clone()
         }));
         // Title + the Layer-2 elements stacked inside the block.
         shapes.push(json!({
@@ -192,6 +192,9 @@ impl StudioRun {
             "blocks": blocks,
             "finalSignals": self.node_ids.iter().enumerate()
                 .map(|(i, id)| json!({ "block": id, "value": self.node_series[i].last().copied().unwrap_or(0.0) }))
+                .collect::<Vec<_>>(),
+            "timeSeries": self.node_ids.iter().enumerate()
+                .map(|(i, id)| json!({ "block": id, "values": self.node_series[i] }))
                 .collect::<Vec<_>>(),
         });
         let summary = format!(

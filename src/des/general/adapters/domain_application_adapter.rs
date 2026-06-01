@@ -1,9 +1,9 @@
 //! Port of `src/des/general/adapters/domain-application-adapter.ts`
 //! (module `des::general::adapters::domain_application_adapter`).
 //!
-//! Registers 11 domain-application JSON adapters (fuzzy control, logistics,
+//! Registers 12 domain-application JSON adapters (fuzzy control, logistics,
 //! manufacturing, supply chain, ops, finance, pricing, energy, active learning,
-//! decision science) sharing one summarize / CSV factory set.
+//! decision science, vehicle jump planning) sharing one summarize / CSV factory set.
 //!
 //! ## Conversion notes
 //!
@@ -87,7 +87,7 @@ pub use engine::DecisionScienceParams;
 pub use engine::{
     ActiveLearningParams, AdaptiveFuzzyControlParams, BuyerAwareDynamicPricingParams, EnergyParams,
     FinancialControlParams, LogisticsRoutingParams, ManufacturingParams, OperationsParams,
-    RevenueManagementParams, SupplyChainParams,
+    RevenueManagementParams, SupplyChainParams, VehicleJumpParams,
 };
 
 // All result aliases collapse onto the erased `DomainModelResult`.
@@ -102,6 +102,7 @@ pub type BuyerAwareDynamicPricingResult = DomainModelResult;
 pub type EnergyResult = DomainModelResult;
 pub type ActiveLearningResult = DomainModelResult;
 pub type DecisionScienceResult = DomainModelResult;
+pub type VehicleJumpPlanningResult = DomainModelResult;
 
 // =============================================================================
 // Engine bridge: call the real `domain_application_models` kernels and erase the
@@ -188,6 +189,9 @@ pub fn run_active_learning_acquisition(params: ActiveLearningParams) -> ActiveLe
 }
 pub fn run_visual_decision_frontier(params: DecisionScienceParams) -> DecisionScienceResult {
     erase(engine::run_visual_decision_frontier(params))
+}
+pub fn run_vehicle_jump_planning(params: VehicleJumpParams) -> VehicleJumpPlanningResult {
+    erase(engine::run_vehicle_jump_planning(params))
 }
 
 // =============================================================================
@@ -586,6 +590,36 @@ domain_adapter!(
     obj(vec![("riskWeight", num(Some(0.0), None, Some(0.35)))])
 );
 
+domain_adapter!(
+    VehicleJumpPlanningAdapter,
+    adapter_vehicle_jump_planning,
+    VehicleJumpParams,
+    VehicleJumpPlanningResult,
+    "vehicle-jump-planning",
+    "VEHICLE JUMP PLANNING",
+    "Vehicle dynamics: solve ramp jump takeoff speed and landing downslope under wind and aerodynamic drag.",
+    run_vehicle_jump_planning,
+    obj(vec![
+        ("distanceM", num(Some(1e-9), None, Some(28.0))),
+        ("takeoffAngleDeg", num(Some(1.0), None, Some(18.0))),
+        ("landingHeightDeltaM", num(None, None, Some(0.0))),
+        ("bikeMassKg", num(Some(1e-9), None, Some(190.0))),
+        ("riderMassKg", num(Some(1e-9), None, Some(85.0))),
+        ("dragCoefficient", num(Some(1e-9), None, Some(0.90))),
+        ("frontalAreaM2", num(Some(1e-9), None, Some(0.75))),
+        ("airDensityKgM3", num(Some(1e-9), None, Some(1.225))),
+        ("windForwardMps", num(None, None, Some(0.0))),
+        ("windVerticalMps", num(None, None, Some(0.0))),
+        ("windCrossMps", num(None, None, Some(0.0))),
+        ("dt", num(Some(1e-9), None, Some(0.005))),
+        ("maxFlightTimeS", num(Some(1e-9), None, Some(8.0))),
+        ("landingToleranceM", num(Some(1e-9), None, Some(0.15))),
+        ("maxLandingDownslopeDeg", num(Some(1.0), None, Some(45.0))),
+        ("maxTransitionAccelG", num(Some(1e-9), None, Some(1.0))),
+        ("profileSamples", num(Some(2.0), Some(true), Some(11.0))),
+    ])
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -628,6 +662,22 @@ mod tests {
         match &result.best.plan {
             JsonValue::Object(o) => {
                 assert!(o.contains_key("heuristic") && o.contains_key("routes"));
+            }
+            other => panic!("expected object plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vehicle_jump_adapter_serializes_recommendation() {
+        let adapter = adapter_vehicle_jump_planning();
+        let result = adapter.run(VehicleJumpParams::default(), &DESRuntimeConfig::default());
+        assert!(result.best.feasible);
+        match &result.best.plan {
+            JsonValue::Object(o) => {
+                assert!(o.contains_key("takeoffSpeedMps"));
+                assert!(o.contains_key("landingDownslopeDeg"));
+                assert!(o.contains_key("takeoffCurve"));
+                assert!(o.contains_key("landingCurve"));
             }
             other => panic!("expected object plan, got {other:?}"),
         }

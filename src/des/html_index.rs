@@ -26,6 +26,23 @@ pub struct HtmlIndexGroupSpec {
     pub entries: &'static [HtmlIndexSpec],
 }
 
+const MODELING_TOOLS: &[HtmlIndexSpec] = &[
+    HtmlIndexSpec {
+        kind: "tool",
+        title: "Modeling Studio",
+        href: "studio/modeling-studio.html",
+        description:
+            "Block-diagram editor with palette metadata, wiring, inspector fields, JSON save/load, and a local scalar run plot.",
+    },
+    HtmlIndexSpec {
+        kind: "workbench",
+        title: "Modeling Workbench",
+        href: "studio/workbench.html",
+        description:
+            "OpenMDAO-style N2 dependency view, objective/constraint metadata, local run controls, and a parameter-sweep driver.",
+    },
+];
+
 const CONTROL_ANIMATIONS: &[HtmlIndexSpec] = &[
     HtmlIndexSpec {
         kind: "animation",
@@ -207,6 +224,11 @@ const EXTENDED_SIMULATIONS: &[HtmlIndexSpec] = &[
 pub fn html_index_groups() -> &'static [HtmlIndexGroupSpec] {
     static GROUPS: &[HtmlIndexGroupSpec] = &[
         HtmlIndexGroupSpec {
+            heading: "Modeling tools",
+            blurb: "Browser-based block diagram authoring and analysis for the emerging PyDy/OpenMDAO-style studio.",
+            entries: MODELING_TOOLS,
+        },
+        HtmlIndexGroupSpec {
             heading: "Control-system animations",
             blurb: "Interactive HTML players (play / pause / scrub / speed) built on the DES animation engine.",
             entries: CONTROL_ANIMATIONS,
@@ -257,6 +279,20 @@ pub fn index_groups_from_registry() -> Vec<IndexGroup> {
 
 /// Regenerate every Rust-native HTML artifact the site builder knows about.
 pub fn generate_html_artifacts() {
+    eprintln!("Generating Modeling Studio...");
+    match crate::des::studio::write_studio_editor_html("out") {
+        Ok(path) => eprintln!("  • {}", path.display()),
+        Err(e) => eprintln!("  ! Modeling Studio generation failed: {e}"),
+    }
+    if let Err(e) = crate::des::studio::write_workbench_html(
+        "out/studio/workbench.html",
+        &crate::des::studio::starter_model_spec(),
+    ) {
+        eprintln!("  ! Modeling Workbench generation failed: {e}");
+    } else {
+        eprintln!("  • out/studio/workbench.html");
+    }
+
     eprintln!("Regenerating control-system animations...");
     // Wind MPPT scene not yet ported to FrameRecorder — skip until scene exists.
     generate_dc_motor_pages();

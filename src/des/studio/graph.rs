@@ -92,6 +92,9 @@ impl NodeRole {
 pub struct VisualNode {
     pub id: String,
     pub label: String,
+    /// Stable UI/palette kind (for inspector panels, block icons, and saved
+    /// model specs). Runtime semantics still live in [`RuntimeCell`].
+    pub kind: String,
     pub role: NodeRole,
     pub cell: RuntimeCell,
     pub x: f64,
@@ -105,6 +108,7 @@ impl VisualNode {
         VisualNode {
             id: id.to_string(),
             label: id.to_string(),
+            kind: role.as_str().to_string(),
             role,
             cell,
             x: 0.0,
@@ -115,6 +119,10 @@ impl VisualNode {
     }
     pub fn with_label(mut self, label: &str) -> Self {
         self.label = label.to_string();
+        self
+    }
+    pub fn with_kind(mut self, kind: &str) -> Self {
+        self.kind = kind.to_string();
         self
     }
     pub fn at(mut self, x: f64, y: f64) -> Self {
@@ -301,6 +309,9 @@ impl CompiledStudio {
     }
     pub fn wires(&self) -> &[Wire] {
         &self.wires
+    }
+    pub fn order(&self) -> &[usize] {
+        &self.order
     }
     /// Whether any block carries state across steps — i.e. the graph must be
     /// advanced by a stepped (discrete) executive rather than evaluated once.

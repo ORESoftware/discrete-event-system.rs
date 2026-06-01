@@ -4,7 +4,9 @@
 
 use serde_json::{json, Value};
 
-use super::cell::{Gain, Queue, RuntimeCell, Saturation, Source, SourceKind, Sum, TransportDelay};
+use super::cell::{
+    Gain, Probe, Queue, RuntimeCell, Saturation, Source, SourceKind, Sum, TransportDelay,
+};
 use super::graph::{CompiledStudio, NodeRole, StudioError, VisualNode};
 
 /// A built demo ready to run + render.
@@ -24,6 +26,7 @@ pub fn blocks_doc(c: &CompiledStudio) -> Value {
         .iter()
         .map(|nd| json!({
             "id": nd.id,
+            "kind": nd.kind,
             "role": nd.role.as_str(),
             "elements": nd.cell.element_names(),
             "inPorts": nd.n_in(),
@@ -67,7 +70,7 @@ pub fn signal_chain() -> Result<StudioDemo, StudioError> {
         VisualNode::new(
             "output",
             NodeRole::Sink,
-            RuntimeCell::single(Box::new(Gain::new("probe", 1.0))),
+            RuntimeCell::single(Box::new(Probe::new("probe"))),
         )
         .with_label("output")
         .at(470.0, 130.0),
@@ -133,7 +136,7 @@ pub fn mixer() -> Result<StudioDemo, StudioError> {
         VisualNode::new(
             "output",
             NodeRole::Sink,
-            RuntimeCell::single(Box::new(Gain::new("probe", 1.0))),
+            RuntimeCell::single(Box::new(Probe::new("probe"))),
         )
         .with_label("output")
         .at(480.0, 135.0),
@@ -199,7 +202,7 @@ pub fn queue_line() -> Result<StudioDemo, StudioError> {
         VisualNode::new(
             "departures",
             NodeRole::Sink,
-            RuntimeCell::single(Box::new(Gain::new("probe", 1.0))),
+            RuntimeCell::single(Box::new(Probe::new("probe"))),
         )
         .with_label("departures")
         .at(650.0, 130.0),

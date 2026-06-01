@@ -2696,6 +2696,591 @@ fn evaluate_decision_plan(
     }
 }
 
+// =============================================================================
+// 12. Vehicle jump planning: ramp-to-landing projectile model
+// =============================================================================
+
+const JUMP_GRAVITY_MPS2: f64 = 9.80665;
+const MPH_PER_MPS: f64 = 2.236_936_292_054_4;
+
+/// Parameters for a 2D/3D jump-planning simulation.
+///
+/// This is an engineering simulation primitive, not a certification tool for
+/// real stunts. It models ballistic flight with quadratic aerodynamic drag and
+/// wind, then recommends a takeoff speed and landing downslope for the supplied
+/// geometry. It intentionally leaves out suspension dynamics, tire/ramp contact
+/// limits, rider/driver control inputs, rotation, structural design, and field
+/// safety margins.
+#[derive(Clone, Debug, Default)]
+pub struct VehicleJumpParams {
+    /// Horizontal distance from takeoff lip to the target touchdown station.
+    pub distance_m: Option<f64>,
+    /// Ramp lip angle above horizontal.
+    pub takeoff_angle_deg: Option<f64>,
+    /// Landing target height relative to the takeoff lip.
+    pub landing_height_delta_m: Option<f64>,
+    /// Motorcycle, car, or vehicle mass. Kept as `bike` for the original use case.
+    pub bike_mass_kg: Option<f64>,
+    pub rider_mass_kg: Option<f64>,
+    pub drag_coefficient: Option<f64>,
+    pub frontal_area_m2: Option<f64>,
+    pub air_density_kg_m3: Option<f64>,
+    /// Positive is tailwind in the jump direction; negative is headwind.
+    pub wind_forward_mps: Option<f64>,
+    /// Positive is updraft.
+    pub wind_vertical_mps: Option<f64>,
+    /// Positive is lateral wind; this creates lateral drift and extra drag.
+    pub wind_cross_mps: Option<f64>,
+    pub dt: Option<f64>,
+    pub max_flight_time_s: Option<f64>,
+    pub landing_tolerance_m: Option<f64>,
+    pub max_landing_downslope_deg: Option<f64>,
+    /// Maximum added normal acceleration used to size the curved ramp transitions.
+    pub max_transition_accel_g: Option<f64>,
+    pub profile_samples: Option<usize>,
+}
+
+#[derive(Clone, Debug)]
+pub struct VehicleJumpScenario {
+    pub distance_m: f64,
+    pub takeoff_angle_rad: f64,
+    pub landing_height_m: f64,
+    pub total_mass_kg: f64,
+    pub drag_coefficient: f64,
+    pub frontal_area_m2: f64,
+    pub air_density_kg_m3: f64,
+    pub wind_forward_mps: f64,
+    pub wind_vertical_mps: f64,
+    pub wind_cross_mps: f64,
+    pub dt: f64,
+    pub max_flight_time_s: f64,
+    pub landing_tolerance_m: f64,
+    pub max_landing_downslope_deg: f64,
+    pub max_transition_accel_g: f64,
+    pub profile_samples: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RampProfilePoint {
+    pub s_m: f64,
+    pub x_m: f64,
+    pub y_m: f64,
+    pub slope_deg: f64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VehicleJumpPlan {
+    pub takeoff_speed_mps: f64,
+    pub takeoff_speed_mph: f64,
+    pub landing_downslope_deg: f64,
+    pub landing_speed_mps: f64,
+    pub landing_speed_mph: f64,
+    pub flight_time_s: f64,
+    pub takeoff_transition_length_m: f64,
+    pub landing_transition_length_m: f64,
+    pub takeoff_curve: Vec<RampProfilePoint>,
+    pub landing_curve: Vec<RampProfilePoint>,
+}
+
+pub type VehicleJumpPlanningResult = DomainModelResult<VehicleJumpPlan>;
+
+pub fn run_vehicle_jump_planning(params: VehicleJumpParams) -> VehicleJumpPlanningResult {
+    let model = "runVehicleJumpPlanning";
+    let bike_mass = params.bike_mass_kg.unwrap_or(190.0);
+    let rider_mass = params.rider_mass_kg.unwrap_or(85.0);
+    let profile_samples = params.profile_samples.unwrap_or(11);
+    let scenario = VehicleJumpScenario {
+        distance_m: params.distance_m.unwrap_or(28.0),
+        takeoff_angle_rad: params.takeoff_angle_deg.unwrap_or(18.0).to_radians(),
+        landing_height_m: params.landing_height_delta_m.unwrap_or(0.0),
+        total_mass_kg: bike_mass + rider_mass,
+        drag_coefficient: params.drag_coefficient.unwrap_or(0.90),
+        frontal_area_m2: params.frontal_area_m2.unwrap_or(0.75),
+        air_density_kg_m3: params.air_density_kg_m3.unwrap_or(1.225),
+        wind_forward_mps: params.wind_forward_mps.unwrap_or(0.0),
+        wind_vertical_mps: params.wind_vertical_mps.unwrap_or(0.0),
+        wind_cross_mps: params.wind_cross_mps.unwrap_or(0.0),
+        dt: params.dt.unwrap_or(0.005),
+        max_flight_time_s: params.max_flight_time_s.unwrap_or(8.0),
+        landing_tolerance_m: params.landing_tolerance_m.unwrap_or(0.15),
+        max_landing_downslope_deg: params.max_landing_downslope_deg.unwrap_or(45.0),
+        max_transition_accel_g: params.max_transition_accel_g.unwrap_or(1.0),
+        profile_samples,
+    };
+
+    require(Preconditions::positive(
+        model,
+        "distanceM",
+        scenario.distance_m,
+    ));
+    require(Preconditions::positive(model, "bikeMassKg", bike_mass));
+    require(Preconditions::positive(model, "riderMassKg", rider_mass));
+    require(Preconditions::positive(
+        model,
+        "dragCoefficient",
+        scenario.drag_coefficient,
+    ));
+    require(Preconditions::positive(
+        model,
+        "frontalAreaM2",
+        scenario.frontal_area_m2,
+    ));
+    require(Preconditions::positive(
+        model,
+        "airDensityKgM3",
+        scenario.air_density_kg_m3,
+    ));
+    require(Preconditions::positive(model, "dt", scenario.dt));
+    require(Preconditions::positive(
+        model,
+        "maxFlightTimeS",
+        scenario.max_flight_time_s,
+    ));
+    require(Preconditions::positive(
+        model,
+        "landingToleranceM",
+        scenario.landing_tolerance_m,
+    ));
+    require(Preconditions::in_range(
+        model,
+        "takeoffAngleDeg",
+        scenario.takeoff_angle_rad.to_degrees(),
+        1.0,
+        70.0,
+    ));
+    require(Preconditions::in_range(
+        model,
+        "maxLandingDownslopeDeg",
+        scenario.max_landing_downslope_deg,
+        1.0,
+        70.0,
+    ));
+    require(Preconditions::positive(
+        model,
+        "maxTransitionAccelG",
+        scenario.max_transition_accel_g,
+    ));
+    check_positive_int(model, "profileSamples", scenario.profile_samples as f64);
+
+    run_domain_pipeline(
+        "vehicle-jump-planning",
+        "Vehicle dynamics (motorcycle/car ramp jump planning)",
+        scenario,
+        Box::new(vehicle_jump_candidates),
+        Box::new(evaluate_vehicle_jump_plan),
+    )
+}
+
+fn vehicle_jump_candidates(
+    scenario: &VehicleJumpScenario,
+) -> Vec<DomainCandidate<VehicleJumpPlan>> {
+    let base_speed =
+        solve_takeoff_speed(scenario).unwrap_or_else(|| ballistic_speed_guess(scenario));
+    let variants = [
+        ("trim-speed", 1.0),
+        ("slower-check", 0.97),
+        ("wind-margin", 1.03),
+        ("long-landing-check", 1.06),
+    ];
+    variants
+        .iter()
+        .map(|(id, multiplier)| {
+            cand(
+                id,
+                build_vehicle_jump_plan(scenario, base_speed * multiplier),
+            )
+        })
+        .collect()
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct JumpState {
+    x: f64,
+    y: f64,
+    z: f64,
+    vx: f64,
+    vy: f64,
+    vz: f64,
+}
+
+#[derive(Clone, Debug)]
+struct JumpSimulation {
+    reached_target: bool,
+    target_time_s: f64,
+    target_state: JumpState,
+    landing_error_m: f64,
+    trajectory: Vec<(f64, JumpState)>,
+}
+
+fn build_vehicle_jump_plan(
+    scenario: &VehicleJumpScenario,
+    takeoff_speed_mps: f64,
+) -> VehicleJumpPlan {
+    let sim = simulate_jump_to_target(scenario, takeoff_speed_mps, false);
+    let target = sim.target_state;
+    let landing_downslope_rad = recommended_landing_downslope_rad(target);
+    let landing_speed_mps = state_speed(target);
+    let takeoff_transition_length_m = min_transition_length_m(
+        scenario.takeoff_angle_rad,
+        takeoff_speed_mps,
+        scenario.max_transition_accel_g,
+    );
+    let landing_transition_length_m = min_transition_length_m(
+        landing_downslope_rad,
+        landing_speed_mps,
+        scenario.max_transition_accel_g,
+    );
+    VehicleJumpPlan {
+        takeoff_speed_mps,
+        takeoff_speed_mph: takeoff_speed_mps * MPH_PER_MPS,
+        landing_downslope_deg: landing_downslope_rad.to_degrees(),
+        landing_speed_mps,
+        landing_speed_mph: landing_speed_mps * MPH_PER_MPS,
+        flight_time_s: sim.target_time_s,
+        takeoff_transition_length_m,
+        landing_transition_length_m,
+        takeoff_curve: ramp_transition_profile(
+            takeoff_transition_length_m,
+            0.0,
+            scenario.takeoff_angle_rad,
+            scenario.profile_samples,
+        ),
+        landing_curve: ramp_transition_profile(
+            landing_transition_length_m,
+            -landing_downslope_rad,
+            0.0,
+            scenario.profile_samples,
+        ),
+    }
+}
+
+fn evaluate_vehicle_jump_plan(
+    scenario: &VehicleJumpScenario,
+    plan: &VehicleJumpPlan,
+    candidate_id: &str,
+) -> DomainEvaluation<VehicleJumpPlan> {
+    let sim = simulate_jump_to_target(scenario, plan.takeoff_speed_mps, true);
+    let target = sim.target_state;
+    let landing_surface_angle = -plan.landing_downslope_deg.to_radians();
+    let normal_speed_mps = landing_normal_speed_mps(target, landing_surface_angle);
+    let slope_excess_deg =
+        (plan.landing_downslope_deg - scenario.max_landing_downslope_deg).max(0.0);
+    let descending_at_target = target.vy < 0.0;
+    let feasible = sim.reached_target
+        && sim.landing_error_m.abs() <= scenario.landing_tolerance_m
+        && slope_excess_deg == 0.0
+        && descending_at_target;
+    let objective = -100.0 * sim.landing_error_m.abs()
+        - 10.0 * normal_speed_mps
+        - 5.0 * slope_excess_deg
+        - 0.05 * plan.takeoff_speed_mps
+        - 0.01 * (plan.takeoff_transition_length_m + plan.landing_transition_length_m)
+        - 0.5 * target.z.abs()
+        - if sim.reached_target { 0.0 } else { 10_000.0 }
+        - if descending_at_target { 0.0 } else { 1_000.0 };
+
+    DomainEvaluation {
+        candidate_id: candidate_id.to_string(),
+        plan: plan.clone(),
+        objective,
+        feasible,
+        metrics: vec![
+            m_num("takeoffSpeedMps", plan.takeoff_speed_mps),
+            m_num("takeoffSpeedMph", plan.takeoff_speed_mph),
+            m_num("landingDownslopeDeg", plan.landing_downslope_deg),
+            m_num("landingErrorM", sim.landing_error_m),
+            m_num("flightTimeS", sim.target_time_s),
+            m_num("landingSpeedMps", plan.landing_speed_mps),
+            m_num("lateralDriftM", target.z),
+            m_num("normalImpactSpeedMps", normal_speed_mps),
+            m_num("takeoffTransitionLengthM", plan.takeoff_transition_length_m),
+            m_num("landingTransitionLengthM", plan.landing_transition_length_m),
+            m_bool("targetReached", sim.reached_target),
+            m_bool("descendingAtTarget", descending_at_target),
+            m_str(
+                "scope",
+                "simulation-only: excludes rotation, suspension, traction, structure, and field safety margins"
+                    .to_string(),
+            ),
+        ],
+        trace: Some(jump_trace(sim)),
+    }
+}
+
+fn solve_takeoff_speed(scenario: &VehicleJumpScenario) -> Option<f64> {
+    let guess = ballistic_speed_guess(scenario);
+    let mut lo = (0.35 * guess).max(0.5);
+    let mut hi = (1.65 * guess).max(lo + 1.0);
+
+    let mut f_lo = landing_error_for_speed(scenario, lo);
+    for _ in 0..12 {
+        if f_lo <= 0.0 {
+            break;
+        }
+        lo *= 0.65;
+        f_lo = landing_error_for_speed(scenario, lo);
+    }
+
+    let mut f_hi = landing_error_for_speed(scenario, hi);
+    for _ in 0..16 {
+        if f_hi >= 0.0 {
+            break;
+        }
+        hi *= 1.35;
+        f_hi = landing_error_for_speed(scenario, hi);
+    }
+
+    if !(f_lo <= 0.0 && f_hi >= 0.0) {
+        return None;
+    }
+
+    for _ in 0..70 {
+        let mid = 0.5 * (lo + hi);
+        let f_mid = landing_error_for_speed(scenario, mid);
+        if f_mid >= 0.0 {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    Some(0.5 * (lo + hi))
+}
+
+fn landing_error_for_speed(scenario: &VehicleJumpScenario, takeoff_speed_mps: f64) -> f64 {
+    let sim = simulate_jump_to_target(scenario, takeoff_speed_mps, false);
+    if sim.reached_target {
+        sim.landing_error_m
+    } else {
+        -1.0e6
+    }
+}
+
+fn ballistic_speed_guess(scenario: &VehicleJumpScenario) -> f64 {
+    let dx = scenario.distance_m;
+    let dy = scenario.landing_height_m;
+    let theta = scenario.takeoff_angle_rad;
+    let cos_t = theta.cos();
+    let denom = 2.0 * cos_t * cos_t * (dx * theta.tan() - dy);
+    if denom > 1.0e-9 {
+        (JUMP_GRAVITY_MPS2 * dx * dx / denom).sqrt()
+    } else {
+        (JUMP_GRAVITY_MPS2 * dx).sqrt() / cos_t.max(0.2)
+    }
+}
+
+fn simulate_jump_to_target(
+    scenario: &VehicleJumpScenario,
+    takeoff_speed_mps: f64,
+    collect_trace: bool,
+) -> JumpSimulation {
+    let mut state = JumpState {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+        vx: takeoff_speed_mps * scenario.takeoff_angle_rad.cos(),
+        vy: takeoff_speed_mps * scenario.takeoff_angle_rad.sin(),
+        vz: 0.0,
+    };
+    let mut t = 0.0;
+    let max_steps = (scenario.max_flight_time_s / scenario.dt).ceil().max(1.0) as usize;
+    let mut trajectory = if collect_trace {
+        vec![(t, state)]
+    } else {
+        Vec::new()
+    };
+
+    for _ in 0..max_steps {
+        let prev = state;
+        let prev_t = t;
+        state = rk4_jump_step(scenario, state, scenario.dt);
+        t += scenario.dt;
+        if collect_trace {
+            trajectory.push((t, state));
+        }
+        if prev.x <= scenario.distance_m && state.x >= scenario.distance_m {
+            let frac = if (state.x - prev.x).abs() <= 1.0e-12 {
+                0.0
+            } else {
+                clamp(
+                    (scenario.distance_m - prev.x) / (state.x - prev.x),
+                    0.0,
+                    1.0,
+                )
+            };
+            let target = lerp_jump_state(prev, state, frac);
+            let target_time_s = prev_t + frac * scenario.dt;
+            return JumpSimulation {
+                reached_target: true,
+                target_time_s,
+                target_state: target,
+                landing_error_m: target.y - scenario.landing_height_m,
+                trajectory,
+            };
+        }
+    }
+
+    JumpSimulation {
+        reached_target: false,
+        target_time_s: t,
+        target_state: state,
+        landing_error_m: state.y - scenario.landing_height_m,
+        trajectory,
+    }
+}
+
+fn rk4_jump_step(scenario: &VehicleJumpScenario, state: JumpState, dt: f64) -> JumpState {
+    let k1 = jump_derivative(scenario, state);
+    let k2 = jump_derivative(scenario, add_jump_state(state, k1, 0.5 * dt));
+    let k3 = jump_derivative(scenario, add_jump_state(state, k2, 0.5 * dt));
+    let k4 = jump_derivative(scenario, add_jump_state(state, k3, dt));
+    JumpState {
+        x: state.x + dt * (k1.x + 2.0 * k2.x + 2.0 * k3.x + k4.x) / 6.0,
+        y: state.y + dt * (k1.y + 2.0 * k2.y + 2.0 * k3.y + k4.y) / 6.0,
+        z: state.z + dt * (k1.z + 2.0 * k2.z + 2.0 * k3.z + k4.z) / 6.0,
+        vx: state.vx + dt * (k1.vx + 2.0 * k2.vx + 2.0 * k3.vx + k4.vx) / 6.0,
+        vy: state.vy + dt * (k1.vy + 2.0 * k2.vy + 2.0 * k3.vy + k4.vy) / 6.0,
+        vz: state.vz + dt * (k1.vz + 2.0 * k2.vz + 2.0 * k3.vz + k4.vz) / 6.0,
+    }
+}
+
+fn jump_derivative(scenario: &VehicleJumpScenario, state: JumpState) -> JumpState {
+    let rel_vx = state.vx - scenario.wind_forward_mps;
+    let rel_vy = state.vy - scenario.wind_vertical_mps;
+    let rel_vz = state.vz - scenario.wind_cross_mps;
+    let rel_speed = (rel_vx * rel_vx + rel_vy * rel_vy + rel_vz * rel_vz).sqrt();
+    let drag_gain =
+        0.5 * scenario.air_density_kg_m3 * scenario.drag_coefficient * scenario.frontal_area_m2
+            / scenario.total_mass_kg;
+    JumpState {
+        x: state.vx,
+        y: state.vy,
+        z: state.vz,
+        vx: -drag_gain * rel_speed * rel_vx,
+        vy: -JUMP_GRAVITY_MPS2 - drag_gain * rel_speed * rel_vy,
+        vz: -drag_gain * rel_speed * rel_vz,
+    }
+}
+
+fn add_jump_state(a: JumpState, b: JumpState, scale: f64) -> JumpState {
+    JumpState {
+        x: a.x + scale * b.x,
+        y: a.y + scale * b.y,
+        z: a.z + scale * b.z,
+        vx: a.vx + scale * b.vx,
+        vy: a.vy + scale * b.vy,
+        vz: a.vz + scale * b.vz,
+    }
+}
+
+fn lerp_jump_state(a: JumpState, b: JumpState, u: f64) -> JumpState {
+    JumpState {
+        x: a.x + (b.x - a.x) * u,
+        y: a.y + (b.y - a.y) * u,
+        z: a.z + (b.z - a.z) * u,
+        vx: a.vx + (b.vx - a.vx) * u,
+        vy: a.vy + (b.vy - a.vy) * u,
+        vz: a.vz + (b.vz - a.vz) * u,
+    }
+}
+
+fn state_speed(state: JumpState) -> f64 {
+    (state.vx * state.vx + state.vy * state.vy + state.vz * state.vz).sqrt()
+}
+
+fn recommended_landing_downslope_rad(state: JumpState) -> f64 {
+    if state.vy >= 0.0 {
+        0.0
+    } else {
+        (-state.vy).atan2(state.vx.max(1.0e-9))
+    }
+}
+
+fn landing_normal_speed_mps(state: JumpState, landing_surface_angle_rad: f64) -> f64 {
+    let nx = -landing_surface_angle_rad.sin();
+    let ny = landing_surface_angle_rad.cos();
+    (state.vx * nx + state.vy * ny).abs()
+}
+
+fn min_transition_length_m(
+    angle_delta_rad: f64,
+    speed_mps: f64,
+    max_transition_accel_g: f64,
+) -> f64 {
+    let max_added_accel = (max_transition_accel_g * JUMP_GRAVITY_MPS2).max(1.0e-9);
+    // Quintic smoothstep has max derivative 1.875, so max curvature is
+    // 1.875 * angle_delta / length when angle is parameterised by arc length.
+    (1.875 * angle_delta_rad.abs() * speed_mps * speed_mps / max_added_accel).max(0.25)
+}
+
+fn smoothstep5(u: f64) -> f64 {
+    let u = clamp(u, 0.0, 1.0);
+    10.0 * u.powi(3) - 15.0 * u.powi(4) + 6.0 * u.powi(5)
+}
+
+fn ramp_transition_profile(
+    length_m: f64,
+    start_angle_rad: f64,
+    end_angle_rad: f64,
+    samples: usize,
+) -> Vec<RampProfilePoint> {
+    let n = samples.max(2);
+    let mut points = Vec::with_capacity(n);
+    let mut x = 0.0;
+    let mut y = 0.0;
+    for i in 0..n {
+        let u = i as f64 / (n - 1) as f64;
+        if i > 0 {
+            let prev_u = (i - 1) as f64 / (n - 1) as f64;
+            let mid_u = 0.5 * (prev_u + u);
+            let mid_angle =
+                start_angle_rad + (end_angle_rad - start_angle_rad) * smoothstep5(mid_u);
+            let ds = length_m / (n - 1) as f64;
+            x += ds * mid_angle.cos();
+            y += ds * mid_angle.sin();
+        }
+        let angle = start_angle_rad + (end_angle_rad - start_angle_rad) * smoothstep5(u);
+        points.push(RampProfilePoint {
+            s_m: length_m * u,
+            x_m: x,
+            y_m: y,
+            slope_deg: angle.to_degrees(),
+        });
+    }
+    points
+}
+
+fn jump_trace(sim: JumpSimulation) -> DomainTrace {
+    let mut t = Vec::with_capacity(sim.trajectory.len());
+    let mut x = Vec::with_capacity(sim.trajectory.len());
+    let mut y = Vec::with_capacity(sim.trajectory.len());
+    let mut z = Vec::with_capacity(sim.trajectory.len());
+    let mut vx = Vec::with_capacity(sim.trajectory.len());
+    let mut vy = Vec::with_capacity(sim.trajectory.len());
+    for (time, state) in sim.trajectory {
+        t.push(time);
+        x.push(state.x);
+        y.push(state.y);
+        z.push(state.z);
+        vx.push(state.vx);
+        vy.push(state.vy);
+    }
+    DomainTrace {
+        t,
+        series: vec![
+            ("xM".to_string(), x),
+            ("yM".to_string(), y),
+            ("zM".to_string(), z),
+            ("vxMps".to_string(), vx),
+            ("vyMps".to_string(), vy),
+        ],
+        captions: Some(vec![
+            "Vehicle jump trajectory under wind and quadratic drag".to_string(),
+        ]),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2762,5 +3347,29 @@ mod tests {
         let _ = run_active_learning_acquisition(ActiveLearningParams::default());
         let result = run_visual_decision_frontier(DecisionScienceParams::default());
         assert!(result.best.feasible);
+    }
+
+    #[test]
+    fn vehicle_jump_recommends_speed_slope_and_curves() {
+        let result = run_vehicle_jump_planning(VehicleJumpParams::default());
+        assert_eq!(result.model_id, "vehicle-jump-planning");
+        assert!(result.best.feasible);
+        assert_eq!(result.candidates.len(), 4);
+        let best = &result.best.plan;
+        assert!(best.takeoff_speed_mps > 0.0);
+        assert!(best.takeoff_speed_mph > best.takeoff_speed_mps);
+        assert!(best.landing_downslope_deg > 0.0);
+        assert!(best.takeoff_transition_length_m > 0.0);
+        assert!(best.landing_transition_length_m > 0.0);
+        assert_eq!(best.takeoff_curve.len(), 11);
+        assert_eq!(best.landing_curve.len(), 11);
+        let landing_error_ok = result
+            .best
+            .metrics
+            .iter()
+            .find(|(k, _)| k == "landingErrorM")
+            .map(|(_, v)| matches!(v, MetricValue::Num(x) if x.abs() <= 0.15))
+            .unwrap_or(false);
+        assert!(landing_error_ok);
     }
 }

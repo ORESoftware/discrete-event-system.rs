@@ -3,13 +3,16 @@
 //! Unit tests for general/control-systems/observability-controllability and the
 //! shared LinAlg helpers. Groups [1]-[5] are ported faithfully.
 //!
-//! PORT NOTE: group [6] (the DES evaluator pipeline driven by
+//! PORT NOTE: the original group [6] (the DES evaluator pipeline driven by
 //! `run_iterative_des` over source/evaluator/sink stations) is deferred; the
 //! evaluator verdicts are equivalent to the direct model queries in [2]-[5].
 #![allow(dead_code)]
 
 #[cfg(test)]
 mod tests {
+    use crate::des::general::control_systems::information_theory::{
+        channel_information, entropy_summary, jensen_shannon_divergence_bits,
+    };
     use crate::des::general::control_systems::observability_controllability::{
         MarkovDecisionProcess, MdpSpec, PartiallyObservableProcess, PomdpSpec, StateSpaceModel,
         StateSpaceSpec,
@@ -18,6 +21,10 @@ mod tests {
 
     fn ss(a: Vec<Vec<f64>>, b: Vec<Vec<f64>>, c: Vec<Vec<f64>>) -> StateSpaceModel {
         StateSpaceModel::new(StateSpaceSpec { a, b, c, d: None })
+    }
+
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-9
     }
 
     // [1] LinAlg — rank, products, stacking
@@ -150,5 +157,66 @@ mod tests {
         });
         assert!(multi_step.is_structurally_observable());
         assert!(multi_step.indistinguishable_pairs().is_empty());
+    }
+
+    // [6] Shannon information theory — source entropy and channel information.
+    #[test]
+    fn information_theory_entropy_and_channel_metrics() {
+        let source = entropy_summary(&[0.25, 0.25, 0.25, 0.25]);
+        assert!(close(source.entropy_bits, 2.0));
+        assert!(close(source.effective_symbols, 4.0));
+        assert!(jensen_shannon_divergence_bits(&[1.0, 0.0], &[0.0, 1.0]) > 0.99);
+
+        let perfect = channel_information(&[0.5, 0.5], &vec![vec![1.0, 0.0], vec![0.0, 1.0]]);
+        assert!(close(perfect.mutual_information_bits, 1.0));
+        assert!(close(perfect.equivocation_bits, 0.0));
+
+        let aliased = channel_information(&[0.5, 0.5], &vec![vec![0.5, 0.5], vec![0.5, 0.5]]);
+        assert!(close(aliased.mutual_information_bits, 0.0));
+        assert!(close(aliased.equivocation_bits, 1.0));
+    }
+
+    // [7] Model-level information summaries — MDP transition entropy and POMDP
+    // sensor information.
+    #[test]
+    fn model_information_summaries() {
+        let deterministic = MarkovDecisionProcess::new(MdpSpec {
+            num_states: 2,
+            num_actions: 1,
+            transition: vec![vec![vec![0.0, 1.0], vec![1.0, 0.0]]],
+        });
+        assert!(close(
+            deterministic
+                .transition_information_summary()
+                .mean_entropy_bits,
+            0.0,
+        ));
+
+        let noisy = MarkovDecisionProcess::new(MdpSpec {
+            num_states: 2,
+            num_actions: 1,
+            transition: vec![vec![vec![0.5, 0.5], vec![0.5, 0.5]]],
+        });
+        assert!(close(
+            noisy
+                .transition_information_summary()
+                .normalized_mean_entropy,
+            1.0,
+        ));
+
+        let pomdp = PartiallyObservableProcess::new(PomdpSpec {
+            num_states: 2,
+            num_actions: 1,
+            transition: vec![vec![vec![0.5, 0.5], vec![0.5, 0.5]]],
+            num_observations: 2,
+            observation: vec![vec![1.0, 0.0], vec![0.0, 1.0]],
+        });
+        let sensor = pomdp.observation_information(None);
+        assert!(close(sensor.input_entropy_bits, 1.0));
+        assert!(close(sensor.mutual_information_bits, 1.0));
+        assert!(pomdp
+            .observation_entropy_bits()
+            .iter()
+            .all(|&h| close(h, 0.0)));
     }
 }

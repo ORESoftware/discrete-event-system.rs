@@ -4,6 +4,7 @@
 
 pub mod dc_motor;
 pub mod empirical_control;
+pub mod information_theory;
 pub mod linear_algebra;
 pub mod numerical_solvers;
 pub mod observability_controllability;

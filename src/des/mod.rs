@@ -106,6 +106,10 @@ pub mod decision;
 // (Layer 2), with a dataflow executive. Additive.
 pub mod studio;
 
+// Equation-based acausal modeling: JSON variables/equations, structural
+// diagnostics, alias/connect elimination, and generated simulation artifacts.
+pub mod acausal;
+
 // The executive-selection seam: a small `Executive` trait the studio and hybrid
 // engines implement, plus capability profiles and a `select` that routes a
 // VisualBlock subgraph to the executive it needs. Additive.
@@ -161,6 +165,7 @@ pub mod main_lp_factory;
 pub mod main_markov;
 pub mod main_mdp_lp;
 pub mod main_milp_bnb;
+pub mod main_modeling_studio;
 pub mod main_monte_carlo_sim;
 pub mod main_network_mutex;
 pub mod main_neural_net;

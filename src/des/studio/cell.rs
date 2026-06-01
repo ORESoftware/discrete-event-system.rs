@@ -235,12 +235,44 @@ impl RuntimeOp for Sum {
     }
 }
 
+// ── Sink probe (1→0) ─────────────────────────────────────────────────────────
+
+/// Terminal probe: consumes one input and emits no output ports. The studio
+/// executive records the driven input as the block's primary signal.
+pub struct Probe {
+    name: String,
+}
+
+impl Probe {
+    pub fn new(name: &str) -> Self {
+        Probe {
+            name: name.to_string(),
+        }
+    }
+}
+
+impl RuntimeOp for Probe {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn n_in(&self) -> usize {
+        1
+    }
+    fn n_out(&self) -> usize {
+        0
+    }
+    fn step(&mut self, _t: f64, _inputs: &[Scalar]) -> Vec<Scalar> {
+        Vec::new()
+    }
+}
+
 // ── Integrator (stateful 1→1, a `StatefulTransform`) ──────────────────────────
 
 /// Forward-Euler integrator `s += (t − t_prev)·x` — a [`StatefulTransform`].
 pub struct Integrator {
     name: String,
     state: f64,
+    initial: f64,
     last_t: f64,
 }
 impl Integrator {
@@ -248,6 +280,7 @@ impl Integrator {
         Integrator {
             name: name.to_string(),
             state: x0,
+            initial: x0,
             last_t: 0.0,
         }
     }
@@ -276,7 +309,7 @@ impl RuntimeOp for Integrator {
         vec![self.transform((t, inputs.first().copied().unwrap_or(0.0)))]
     }
     fn reset(&mut self) {
-        self.state = 0.0;
+        self.state = self.initial;
         self.last_t = 0.0;
     }
     fn is_stateful(&self) -> bool {
@@ -672,5 +705,13 @@ mod tests {
         assert_eq!(cell.step(0.0, &[3.0]), vec![0.0]);
         assert_eq!(cell.step(0.0, &[4.0]), vec![1.0]); // 1.0 arrives 3 ticks later
         assert_eq!(cell.step(0.0, &[5.0]), vec![2.0]);
+    }
+
+    #[test]
+    fn probe_is_terminal() {
+        let mut cell = RuntimeCell::single(Box::new(Probe::new("probe")));
+        assert_eq!(cell.n_in(), 1);
+        assert_eq!(cell.n_out(), 0);
+        assert!(cell.step(0.0, &[42.0]).is_empty());
     }
 }

@@ -39,7 +39,12 @@ pub mod blocks;
 pub mod demos;
 pub mod diagram;
 pub mod executive;
+pub mod spec;
 
 pub use block::{Block, PortSpec, SampleTime, Signal};
 pub use diagram::{BlockHandle, Compiled, Diagram, HybridError, Wire};
 pub use executive::{simulate, SimOptions, Trace};
+pub use spec::{
+    compile_hybrid_spec, generate_rust_code, hybrid_model_json_schema, starter_hybrid_model_spec,
+    HybridBlockSpec, HybridModelSpec, HybridSpecError, HybridWireSpec, HYBRID_GRAPH_SCHEMA,
+};

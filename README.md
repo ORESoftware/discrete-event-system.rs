@@ -98,15 +98,25 @@ under `des_engine::sdk`.
 | Seam | What it gives you | Key items |
 | --- | --- | --- |
 | Model contract | Describe a model as JSON, validate it, run it, and get one uniform artifact | `with_builtins`, `CitizenRegistry`, `ModelCitizen`, `ModelDescriptor`, `RunArtifact` |
+| Acausal equations | Compile ModelingToolkit-style explicit ODE/algebraic specs with alias elimination, diagnostics, UI metadata, and RK4/Euler simulation | `AcausalModelSpec`, `compile_acausal_model`, `simulate_acausal_model`, `acausal_workbench_descriptor` |
+| Graph specs and codegen | Save/load Studio and Hybrid diagrams as schema-derived JSON, validate them through typed Rust specs, and emit Rust runner source | `ModelGraphSpec`, `StudioModelSpec`, `HybridModelSpec`, `model_graph_json_schema`, `studio_model_json_schema`, `hybrid_model_json_schema`, `studio::generate_rust_code`, `hybrid::generate_rust_code` |
 | Streaming solvers | Drive iterative solvers over JSONL | `run_named_jsonl`, `run_jsonl`, `streaming_contracts`, `StreamContract` |
 | Plugins | Run an external program and render its JSON/JSONL output | `PluginManifest`, `run_and_render`, `PluginTransport`, `ProcessTransport` |
 | Service discovery | Self-describe a server's routes and capabilities as JSON | `ServiceBuilder`, `ServiceDescriptor`, `DesExtension` |
 | Visual block dataflow | Build a flat block graph and run it as signal dataflow | `StudioGraph`, `RuntimeCell`, `RuntimeOp`, `Composite`, `CompiledStudio` |
+| Studio analysis and UI | Inspect Studio specs with N2 dependency data, design variables/objectives/constraints, sweep drivers, and a self-contained workbench | `analyze_model_spec`, `run_design_sweep`, `render_workbench_html`, `write_workbench_html` |
 | Executive selection | Route a graph to the simplest engine that can run it | `select`, `requirements_for_studio`, `Executive`, `StudioExecutive`, `HybridExecutive` |
 
 `des_engine::sdk::surface()` returns the crate name, version, and the list of
 SDK modules. It is useful for `/info` or diagnostics endpoints in an embedding
 server.
+
+The acausal equation surface is the first open-source JuliaSim/ModelingToolkit
+directional slice in this crate: model documents carry variables, parameters,
+units, explicit derivative equations, algebraic assignments, and alias/connect
+equations. The compiler eliminates aliases, orders algebraics, rejects algebraic
+loops, emits structural diagnostics, and returns the same `RunArtifact` +
+HTML-player output as the rest of the SDK.
 
 ## Quickstart
 
@@ -119,8 +129,10 @@ The `des::model` module defines the paradigm-neutral model contract:
 - `CitizenRegistry`: registry of runnable model kinds.
 - `RunArtifact`: the uniform output of a run.
 
-The built-in registry currently includes MDP, POMDP, hybrid, and studio model
-citizens.
+The built-in registry currently includes acausal, MDP, POMDP, hybrid, and
+studio model citizens. Studio and Hybrid specs are graph documents whose JSON
+Schema is generated from Rust types with `schemars`, so editor payloads,
+saved files, and generated Rust runners share the same contract.
 
 ```rust
 use des_engine::prelude::*;
@@ -390,6 +402,9 @@ The SDK has two related output styles:
 
 - `RunArtifact` player output: lightweight, uniform output for model citizens
   and plugin runs. Use `to_player_html()`, `to_jsonl()`, and `results`.
+- Studio workbench output: `write_workbench_html("out/studio/workbench.html",
+  &starter_model_spec())` emits a browser UI with palette, canvas, inspector,
+  N2 matrix, JSON editor, local run, and design-variable sweep views.
 - Report pages: richer narrative pages used by demo/report binaries. These are
   built with `des::animation::run_report` and written by binaries such as
   `main_stochastic_sde_report` and `main_empirical_control_report`.
@@ -465,6 +480,7 @@ des_engine
 |-- prelude       # curated SDK import: use des_engine::prelude::*
 |-- sdk           # crate name/version + SDK module list for diagnostics
 `-- des
+    |-- acausal  # equation-based models, structural diagnostics, UI metadata
     |-- model     # ModelCitizen, RunArtifact, CitizenRegistry
     |-- streaming # JSONL solver contracts for LP, MILP, MDP, POMDP
     |-- plugin    # external process plugin contract and HTML player renderer

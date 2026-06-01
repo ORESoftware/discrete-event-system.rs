@@ -13,6 +13,7 @@ pub mod general;
 
 pub mod expr;
 pub mod optim;
+pub mod optimization_methodologies;
 
 pub mod factmachine_math;
 pub mod hungarian;

@@ -7,6 +7,8 @@
 //!
 //! * **Run a model from a JSON spec** — [`with_builtins`], [`CitizenRegistry`],
 //!   [`ModelCitizen`], [`ModelDescriptor`], [`RunArtifact`].
+//! * **Compile equation-based models** — [`compile_acausal_model`],
+//!   [`simulate_acausal_model`], [`acausal_workbench_descriptor`].
 //! * **Pick an executive for a graph** — [`Executive`], [`ExecCapabilities`],
 //!   [`select`], [`requirements_for_studio`], [`StudioExecutive`],
 //!   [`HybridExecutive`].
@@ -26,7 +28,18 @@
 
 // First-class model contract (English → JSON spec → run → artifact).
 pub use crate::des::model::{
-    with_builtins, CitizenError, CitizenRegistry, ModelCitizen, ModelDescriptor, RunArtifact,
+    generate_model_graph_rust_code, model_authoring_json_schema, model_graph_json_schema,
+    with_builtins, CitizenError, CitizenRegistry, ModelAuthoringSpec, ModelCitizen,
+    ModelDescriptor, ModelGraphKind, ModelGraphSpec, RunArtifact, MODEL_GRAPH_SCHEMA,
+};
+
+// Acausal/equation-based modeling surface.
+pub use crate::des::acausal::{
+    acausal_palette, acausal_workbench_descriptor, compile_acausal_model, run_acausal_model,
+    simulate_acausal_model, starter_acausal_model_spec, AcausalCitizen, AcausalEquationKind,
+    AcausalEquationSpec, AcausalError, AcausalModelSpec, AcausalPaletteItem, AcausalVariableKind,
+    AcausalVariableSpec, AcausalWorkbenchDescriptor, CompiledAcausalModel, StructuralDiagnostics,
+    ACAUSAL_SCHEMA,
 };
 
 // Executive-selection seam.
@@ -35,8 +48,12 @@ pub use crate::des::exec::{
 };
 
 // Two-layer visual-block + runtime core.
+pub use crate::des::hybrid::{
+    hybrid_model_json_schema, HybridBlockSpec, HybridModelSpec, HybridWireSpec, HYBRID_GRAPH_SCHEMA,
+};
 pub use crate::des::studio::{
-    CompiledStudio, Composite, RuntimeCell, RuntimeOp, StudioGraph, VisualNode, Wire,
+    studio_model_json_schema, CompiledStudio, Composite, RuntimeCell, RuntimeOp, StudioGraph,
+    StudioModelSpec, VisualNode, Wire, STUDIO_GRAPH_SCHEMA,
 };
 
 // JSONL streaming solver contract + registry.

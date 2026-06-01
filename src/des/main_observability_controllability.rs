@@ -15,10 +15,11 @@ use std::rc::Rc;
 use crate::des::general::control_systems::dc_motor::{DcMotorDynamics, DcMotorParams};
 use crate::des::general::control_systems::observability_controllability::{
     ControllabilityEvaluatorStation, EvaluationKind, EvaluationSinkStation, MarkovDecisionProcess,
-    MdpControllabilityEvaluatorStation, MdpSourceStation, MdpSpec, MdpToken, ObsCtrlChannels,
-    ObservabilityEvaluatorStation, PartiallyObservableProcess, PomdpObservabilityEvaluatorStation,
-    PomdpSourceStation, PomdpSpec, PomdpToken, StateSpaceModel, StateSpaceSourceStation,
-    StateSpaceSpec, StateSpaceToken,
+    MdpControllabilityEvaluatorStation, MdpInformationEvaluatorStation, MdpSourceStation, MdpSpec,
+    MdpToken, ObsCtrlChannels, ObservabilityEvaluatorStation, PartiallyObservableProcess,
+    PomdpInformationEvaluatorStation, PomdpObservabilityEvaluatorStation, PomdpSourceStation,
+    PomdpSpec, PomdpToken, StateSpaceModel, StateSpaceSourceStation, StateSpaceSpec,
+    StateSpaceToken,
 };
 use crate::des::general::des_base::runner::{run_iterative_des, IterativeRunOptions};
 use crate::des::general::des_base::station::{DESStation, StationRef};
@@ -51,8 +52,14 @@ impl ObsCtrlDemo {
         let mdp_eval = Rc::new(RefCell::new(MdpControllabilityEvaluatorStation::new(
             "mdp-eval",
         )));
+        let mdp_info = Rc::new(RefCell::new(MdpInformationEvaluatorStation::new(
+            "mdp-info",
+        )));
         let pomdp_eval = Rc::new(RefCell::new(PomdpObservabilityEvaluatorStation::new(
             "pomdp-eval",
+        )));
+        let pomdp_info = Rc::new(RefCell::new(PomdpInformationEvaluatorStation::new(
+            "pomdp-info",
         )));
         let sink = Rc::new(RefCell::new(EvaluationSinkStation::new("sink")));
 
@@ -62,7 +69,9 @@ impl ObsCtrlDemo {
         let ctrl_ref: StationRef = ctrl_eval;
         let obs_ref: StationRef = obs_eval;
         let mdp_eval_ref: StationRef = mdp_eval;
+        let mdp_info_ref: StationRef = mdp_info;
         let pomdp_eval_ref: StationRef = pomdp_eval;
+        let pomdp_info_ref: StationRef = pomdp_info;
         let sink_ref: StationRef = sink.clone();
 
         lti_source.borrow_mut().core_mut().pipe(
@@ -80,12 +89,29 @@ impl ObsCtrlDemo {
             ObsCtrlChannels::MODEL_MDP,
             ObsCtrlChannels::MODEL_MDP,
         );
+        mdp_source.borrow_mut().core_mut().pipe(
+            mdp_info_ref.clone(),
+            ObsCtrlChannels::MODEL_MDP,
+            ObsCtrlChannels::MODEL_MDP,
+        );
         pomdp_source.borrow_mut().core_mut().pipe(
             pomdp_eval_ref.clone(),
             ObsCtrlChannels::MODEL_POMDP,
             ObsCtrlChannels::MODEL_POMDP,
         );
-        for ev in [&ctrl_ref, &obs_ref, &mdp_eval_ref, &pomdp_eval_ref] {
+        pomdp_source.borrow_mut().core_mut().pipe(
+            pomdp_info_ref.clone(),
+            ObsCtrlChannels::MODEL_POMDP,
+            ObsCtrlChannels::MODEL_POMDP,
+        );
+        for ev in [
+            &ctrl_ref,
+            &obs_ref,
+            &mdp_eval_ref,
+            &mdp_info_ref,
+            &pomdp_eval_ref,
+            &pomdp_info_ref,
+        ] {
             ev.borrow_mut().core_mut().pipe(
                 sink_ref.clone(),
                 ObsCtrlChannels::RESULT,
@@ -101,7 +127,9 @@ impl ObsCtrlDemo {
                 ctrl_ref,
                 obs_ref,
                 mdp_eval_ref,
+                mdp_info_ref,
                 pomdp_eval_ref,
+                pomdp_info_ref,
                 sink_ref,
             ],
             IterativeRunOptions {
@@ -274,12 +302,17 @@ impl ObsCtrlDemo {
                 .iter()
                 .find(|x| x.kind == EvaluationKind::MdpControllability)
                 .expect("mdp-controllability verdict");
+            let info = rs
+                .iter()
+                .find(|x| x.kind == EvaluationKind::MdpTransitionEntropy)
+                .expect("mdp-transition entropy verdict");
             println!("   {}", t.label);
             println!(
                 "      controllable : {}   ({})",
                 self.verdict(r.full),
                 r.detail
             );
+            println!("      transition H :       ({})", info.detail);
         }
 
         println!();
@@ -293,6 +326,10 @@ impl ObsCtrlDemo {
                 .iter()
                 .find(|x| x.kind == EvaluationKind::PomdpObservability)
                 .expect("pomdp-observability verdict");
+            let info = rs
+                .iter()
+                .find(|x| x.kind == EvaluationKind::PomdpObservationInformation)
+                .expect("pomdp-observation information verdict");
             let aliasing = t.pomdp.indistinguishable_pairs();
             println!("   {}", t.label);
             println!(
@@ -300,6 +337,7 @@ impl ObsCtrlDemo {
                 self.verdict(r.full),
                 r.detail
             );
+            println!("      sensor info  :       ({})", info.detail);
             if !aliasing.is_empty() {
                 let pairs: Vec<String> = aliasing
                     .iter()

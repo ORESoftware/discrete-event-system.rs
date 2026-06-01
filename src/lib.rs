@@ -116,16 +116,17 @@
 pub mod des;
 pub mod prelude;
 
-pub use des::{decision, fel, hybrid, model, plugin, service, streaming, studio};
+pub use des::{acausal, decision, fel, hybrid, model, plugin, service, streaming, studio};
 
 /// Stable SDK-facing exports for embedders (servers, desktop apps, CLIs).
 pub mod sdk {
-    pub use crate::{decision, fel, hybrid, model, plugin, service, streaming, studio};
+    pub use crate::{acausal, decision, fel, hybrid, model, plugin, service, streaming, studio};
 
     /// Modules intended to be treated as the public SDK surface.
     pub const SDK_MODULES: &[&str] = &[
         "service",
         "model",
+        "acausal",
         "streaming",
         "studio",
         "hybrid",

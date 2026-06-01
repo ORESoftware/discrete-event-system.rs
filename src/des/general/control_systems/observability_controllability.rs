@@ -25,6 +25,7 @@ use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+use super::information_theory::{channel_information, entropy_summary, ChannelInformationSummary};
 use super::linear_algebra::{LinAlg, Matrix, MatrixRank};
 use crate::des::general::des_base::preconditions::{Check, Preconditions};
 use crate::des::general::des_base::station::{DESStation, StationCore};
@@ -161,6 +162,23 @@ pub struct MdpSpec {
     pub transition: Vec<Vec<Vec<f64>>>,
 }
 
+/// Shannon summary of an MDP's stochastic transition surface.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MdpTransitionInformationSummary {
+    /// Entropy H(S' | s,a) for each action/state row, in bits.
+    pub state_action_entropy_bits: Vec<Vec<f64>>,
+    /// Mean H(S' | s,a) across all action/state rows.
+    pub mean_entropy_bits: f64,
+    /// Least transition uncertainty among all action/state rows.
+    pub min_entropy_bits: f64,
+    /// Greatest transition uncertainty among all action/state rows.
+    pub max_entropy_bits: f64,
+    /// The maximum possible row entropy, log2(S).
+    pub row_capacity_bits: f64,
+    /// Mean row entropy divided by log2(S), or 0 when S <= 1.
+    pub normalized_mean_entropy: f64,
+}
+
 /// A finite MDP whose structural-controllability test is reachability of the
 /// controlled transition graph (transitive closure).
 #[derive(Clone, Debug)]
@@ -279,6 +297,57 @@ impl MarkovDecisionProcess {
             }
         }
         c
+    }
+
+    /// Shannon entropy H(S' | s,a) for each transition row, in bits.
+    pub fn transition_entropy_bits(&self) -> Vec<Vec<f64>> {
+        let mut out = vec![vec![0.0; self.num_states]; self.num_actions];
+        for a in 0..self.num_actions {
+            for s in 0..self.num_states {
+                out[a][s] = entropy_summary(&self.transition[a][s]).entropy_bits;
+            }
+        }
+        out
+    }
+
+    /// Aggregate transition uncertainty across the controlled dynamics.
+    ///
+    /// Structural controllability asks which states are reachable at all. This
+    /// summary asks how many bits of next-state uncertainty each controlled
+    /// transition leaves behind.
+    pub fn transition_information_summary(&self) -> MdpTransitionInformationSummary {
+        let rows = self.transition_entropy_bits();
+        let mut sum = 0.0;
+        let mut min_h = f64::INFINITY;
+        let mut max_h = 0.0_f64;
+        let mut count = 0usize;
+        for action_rows in &rows {
+            for &h in action_rows {
+                sum += h;
+                min_h = min_h.min(h);
+                max_h = max_h.max(h);
+                count += 1;
+            }
+        }
+        let mean_entropy_bits = sum / count as f64;
+        let row_capacity_bits = if self.num_states <= 1 {
+            0.0
+        } else {
+            (self.num_states as f64).log2()
+        };
+        let normalized_mean_entropy = if row_capacity_bits > 0.0 {
+            mean_entropy_bits / row_capacity_bits
+        } else {
+            0.0
+        };
+        MdpTransitionInformationSummary {
+            state_action_entropy_bits: rows,
+            mean_entropy_bits,
+            min_entropy_bits: min_h,
+            max_entropy_bits: max_h,
+            row_capacity_bits,
+            normalized_mean_entropy,
+        }
     }
 }
 
@@ -404,6 +473,32 @@ impl PartiallyObservableProcess {
             .len()
     }
 
+    /// Uniform prior over hidden states, useful for state/sensor information.
+    pub fn uniform_state_prior(&self) -> Vec<f64> {
+        vec![1.0 / self.mdp.num_states as f64; self.mdp.num_states]
+    }
+
+    /// Shannon entropy H(O | s) for each state's observation row, in bits.
+    pub fn observation_entropy_bits(&self) -> Vec<f64> {
+        self.observation
+            .iter()
+            .map(|row| entropy_summary(row).entropy_bits)
+            .collect()
+    }
+
+    /// Information carried by the observation channel O ~ P(.|S).
+    ///
+    /// With the default uniform prior, `mutual_information_bits` is how many
+    /// bits a single observation reveals about the hidden state and
+    /// `equivocation_bits` is the residual state uncertainty H(S|O).
+    pub fn observation_information(&self, prior: Option<&[f64]>) -> ChannelInformationSummary {
+        let p = match prior {
+            Some(p) => p.to_vec(),
+            None => self.uniform_state_prior(),
+        };
+        channel_information(&p, &self.observation)
+    }
+
     fn quantise(v: &[f64], tol: f64) -> String {
         let digits = (0.0_f64).max((-(tol.log10())).round()) as usize;
         v.iter()
@@ -518,7 +613,9 @@ pub enum EvaluationKind {
     Controllability,
     Observability,
     MdpControllability,
+    MdpTransitionEntropy,
     PomdpObservability,
+    PomdpObservationInformation,
 }
 
 /// A single structural verdict produced by an evaluator station.
@@ -888,6 +985,80 @@ impl DESStation for MdpControllabilityEvaluatorStation {
     }
 }
 
+/// MDP transition-entropy evaluator: how stochastic are the controlled edges?
+pub struct MdpInformationEvaluatorStation {
+    tcore: TransformEntityCore<MdpToken, EvaluationToken>,
+}
+
+impl MdpInformationEvaluatorStation {
+    pub fn new(id: &str) -> Self {
+        MdpInformationEvaluatorStation {
+            tcore: TransformEntityCore::new(
+                id,
+                TransformEntityOptions {
+                    input_channels: vec![ObsCtrlChannels::MODEL_MDP.to_string()],
+                    output_channel: OutputChannel::Fixed(ObsCtrlChannels::RESULT.to_string()),
+                    ..Default::default()
+                },
+            ),
+        }
+    }
+}
+
+impl TransformEntity<MdpToken, EvaluationToken> for MdpInformationEvaluatorStation {
+    fn tcore(&self) -> &TransformEntityCore<MdpToken, EvaluationToken> {
+        &self.tcore
+    }
+    fn tcore_mut(&mut self) -> &mut TransformEntityCore<MdpToken, EvaluationToken> {
+        &mut self.tcore
+    }
+}
+
+impl PureTransformEntity<MdpToken, EvaluationToken> for MdpInformationEvaluatorStation {
+    fn transform(
+        &mut self,
+        token: &MdpToken,
+        _ctx: &mut TransformContext<EvaluationToken>,
+    ) -> TransformResult<EvaluationToken> {
+        let summary = token.mdp.transition_information_summary();
+        TransformResult::One(EvaluationToken::new(
+            token.label.clone(),
+            EvaluationKind::MdpTransitionEntropy,
+            summary.mean_entropy_bits,
+            summary.row_capacity_bits,
+            summary.mean_entropy_bits <= 1e-12,
+            format!(
+                "mean H(S'|s,a) = {:.4} bits (min {:.4}, max {:.4}, normalized {:.3})",
+                summary.mean_entropy_bits,
+                summary.min_entropy_bits,
+                summary.max_entropy_bits,
+                summary.normalized_mean_entropy
+            ),
+        ))
+    }
+}
+
+impl DESStation for MdpInformationEvaluatorStation {
+    fn core(&self) -> &StationCore {
+        &self.tcore.station
+    }
+    fn core_mut(&mut self) -> &mut StationCore {
+        &mut self.tcore.station
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn run_time_step(&mut self) {
+        self.run_pure();
+    }
+    fn has_work(&self) -> bool {
+        false
+    }
+    fn assert_preconditions(&mut self) {
+        self.assert_transform_preconditions();
+    }
+}
+
 /// POMDP distinguishability ("observability") test as a zero-backlog transform.
 pub struct PomdpObservabilityEvaluatorStation {
     tcore: TransformEntityCore<PomdpToken, EvaluationToken>,
@@ -937,6 +1108,77 @@ impl PureTransformEntity<PomdpToken, EvaluationToken> for PomdpObservabilityEval
 }
 
 impl DESStation for PomdpObservabilityEvaluatorStation {
+    fn core(&self) -> &StationCore {
+        &self.tcore.station
+    }
+    fn core_mut(&mut self) -> &mut StationCore {
+        &mut self.tcore.station
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn run_time_step(&mut self) {
+        self.run_pure();
+    }
+    fn has_work(&self) -> bool {
+        false
+    }
+    fn assert_preconditions(&mut self) {
+        self.assert_transform_preconditions();
+    }
+}
+
+/// POMDP sensor-information evaluator using a uniform hidden-state prior.
+pub struct PomdpInformationEvaluatorStation {
+    tcore: TransformEntityCore<PomdpToken, EvaluationToken>,
+}
+
+impl PomdpInformationEvaluatorStation {
+    pub fn new(id: &str) -> Self {
+        PomdpInformationEvaluatorStation {
+            tcore: TransformEntityCore::new(
+                id,
+                TransformEntityOptions {
+                    input_channels: vec![ObsCtrlChannels::MODEL_POMDP.to_string()],
+                    output_channel: OutputChannel::Fixed(ObsCtrlChannels::RESULT.to_string()),
+                    ..Default::default()
+                },
+            ),
+        }
+    }
+}
+
+impl TransformEntity<PomdpToken, EvaluationToken> for PomdpInformationEvaluatorStation {
+    fn tcore(&self) -> &TransformEntityCore<PomdpToken, EvaluationToken> {
+        &self.tcore
+    }
+    fn tcore_mut(&mut self) -> &mut TransformEntityCore<PomdpToken, EvaluationToken> {
+        &mut self.tcore
+    }
+}
+
+impl PureTransformEntity<PomdpToken, EvaluationToken> for PomdpInformationEvaluatorStation {
+    fn transform(
+        &mut self,
+        token: &PomdpToken,
+        _ctx: &mut TransformContext<EvaluationToken>,
+    ) -> TransformResult<EvaluationToken> {
+        let info = token.pomdp.observation_information(None);
+        TransformResult::One(EvaluationToken::new(
+            token.label.clone(),
+            EvaluationKind::PomdpObservationInformation,
+            info.mutual_information_bits,
+            info.input_entropy_bits,
+            info.equivocation_bits <= 1e-12,
+            format!(
+                "I(S;O) = {:.4} / H(S) {:.4} bits, residual H(S|O) = {:.4} bits",
+                info.mutual_information_bits, info.input_entropy_bits, info.equivocation_bits
+            ),
+        ))
+    }
+}
+
+impl DESStation for PomdpInformationEvaluatorStation {
     fn core(&self) -> &StationCore {
         &self.tcore.station
     }
@@ -1018,6 +1260,10 @@ mod tests {
         })
     }
 
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-9
+    }
+
     #[test]
     fn lti_controllability_and_observability() {
         let m = double_integrator();
@@ -1062,6 +1308,28 @@ mod tests {
     }
 
     #[test]
+    fn mdp_transition_entropy_quantifies_stochasticity() {
+        let deterministic = MarkovDecisionProcess::new(MdpSpec {
+            num_states: 2,
+            num_actions: 1,
+            transition: vec![vec![vec![0.0, 1.0], vec![1.0, 0.0]]],
+        });
+        let det = deterministic.transition_information_summary();
+        assert!(close(det.mean_entropy_bits, 0.0));
+        assert!(close(det.normalized_mean_entropy, 0.0));
+
+        let coin_flip = MarkovDecisionProcess::new(MdpSpec {
+            num_states: 2,
+            num_actions: 1,
+            transition: vec![vec![vec![0.5, 0.5], vec![0.5, 0.5]]],
+        });
+        let info = coin_flip.transition_information_summary();
+        assert!(close(info.mean_entropy_bits, 1.0));
+        assert!(close(info.row_capacity_bits, 1.0));
+        assert!(close(info.normalized_mean_entropy, 1.0));
+    }
+
+    #[test]
     fn pomdp_distinguishability() {
         // Distinct, deterministic observations per state -> fully observable.
         let pomdp = PartiallyObservableProcess::new(PomdpSpec {
@@ -1084,6 +1352,33 @@ mod tests {
         });
         assert!(!pomdp2.is_structurally_observable());
         assert_eq!(pomdp2.indistinguishable_pairs(), vec![(0, 1)]);
+    }
+
+    #[test]
+    fn pomdp_observation_information_quantifies_sensor() {
+        let distinct = PartiallyObservableProcess::new(PomdpSpec {
+            num_states: 2,
+            num_actions: 1,
+            transition: vec![vec![vec![0.5, 0.5], vec![0.5, 0.5]]],
+            num_observations: 2,
+            observation: vec![vec![1.0, 0.0], vec![0.0, 1.0]],
+        });
+        let info = distinct.observation_information(None);
+        assert!(close(info.input_entropy_bits, 1.0));
+        assert!(close(info.mutual_information_bits, 1.0));
+        assert!(close(info.equivocation_bits, 0.0));
+        assert!(close(info.normalized_mutual_information, 1.0));
+
+        let aliased = PartiallyObservableProcess::new(PomdpSpec {
+            num_states: 2,
+            num_actions: 1,
+            transition: vec![vec![vec![1.0, 0.0], vec![0.0, 1.0]]],
+            num_observations: 2,
+            observation: vec![vec![0.5, 0.5], vec![0.5, 0.5]],
+        });
+        let aliased_info = aliased.observation_information(None);
+        assert!(close(aliased_info.mutual_information_bits, 0.0));
+        assert!(close(aliased_info.equivocation_bits, 1.0));
     }
 
     struct EvalCollect {

@@ -27,17 +27,39 @@
 //! Purely additive: it composes the shared `transform` primitives, `plugin`
 //! player and `model` contract without modifying them.
 
+pub mod analysis;
 pub mod cell;
 pub mod citizen;
 pub mod demos;
+pub mod editor;
 pub mod graph;
 pub mod run;
+pub mod spec;
+pub mod sweep;
+pub mod ui;
 
-pub use cell::{
-    Affine, Composite, Gain, Integrator, Map, Queue, RuntimeCell, RuntimeOp, Saturation, Scalar,
-    Source, SourceKind, Sum, TransportDelay,
+pub use analysis::{
+    analyze_model_spec, StudioAnalysis, StudioComponentAnalysis, StudioConnectionAnalysis,
+    StudioN2Cell, StudioValidationAnalysis,
 };
-pub use citizen::{StudioCitizen, STUDIO_SCHEMA};
+pub use cell::{
+    Affine, Composite, Gain, Integrator, Map, Probe, Queue, RuntimeCell, RuntimeOp, Saturation,
+    Scalar, Source, SourceKind, Sum, TransportDelay,
+};
+pub use citizen::{StudioCitizen, STUDIO_DEMO_SCHEMA, STUDIO_SCHEMA};
 pub use demos::{mixer, queue_line, signal_chain, StudioDemo};
+pub use editor::{studio_editor_html, write_studio_editor_html, STUDIO_EDITOR_REL_PATH};
 pub use graph::{CompiledStudio, NodeRole, StudioError, StudioGraph, VisualNode, Wire};
 pub use run::{run, StudioRun};
+pub use spec::{
+    compile_model_spec, generate_rust_code, starter_model_spec, studio_block_io,
+    studio_model_json_schema, studio_palette, PaletteItem, PaletteParam, PaletteParamKind,
+    StudioBlockIo, StudioBlockKind, StudioBlockSpec, StudioConstraintSpec,
+    StudioDesignVariableSpec, StudioModelSpec, StudioObjectiveSense, StudioObjectiveSpec,
+    StudioSpecError, StudioWireSpec, STUDIO_GRAPH_SCHEMA,
+};
+pub use sweep::{
+    run_design_sweep, run_first_design_sweep, StudioConstraintValue, StudioObjectiveValue,
+    StudioSweepCase, StudioSweepError, StudioSweepResult,
+};
+pub use ui::{render_starter_workbench_html, render_workbench_html, write_workbench_html};

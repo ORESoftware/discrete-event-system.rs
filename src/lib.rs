@@ -116,17 +116,23 @@
 pub mod des;
 pub mod prelude;
 
-pub use des::{decision, fel, hybrid, model, plugin, service, streaming, studio};
+pub use des::{
+    authoring, decision, equation, fel, hybrid, model, plugin, service, streaming, studio,
+};
 
 /// Stable SDK-facing exports for embedders (servers, desktop apps, CLIs).
 pub mod sdk {
-    pub use crate::{decision, fel, hybrid, model, plugin, service, streaming, studio};
+    pub use crate::{
+        authoring, decision, equation, fel, hybrid, model, plugin, service, streaming, studio,
+    };
 
     /// Modules intended to be treated as the public SDK surface.
     pub const SDK_MODULES: &[&str] = &[
         "service",
         "model",
+        "authoring",
         "streaming",
+        "equation",
         "studio",
         "hybrid",
         "fel",
@@ -157,7 +163,9 @@ mod tests {
     fn sdk_surface_lists_embedding_modules() {
         let surface = crate::sdk::surface();
         assert!(surface.modules.contains(&"service"));
+        assert!(surface.modules.contains(&"authoring"));
         assert!(surface.modules.contains(&"streaming"));
+        assert!(surface.modules.contains(&"equation"));
         assert!(surface.modules.contains(&"plugin"));
     }
 }

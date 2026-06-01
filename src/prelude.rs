@@ -7,6 +7,8 @@
 //!
 //! * **Run a model from a JSON spec** — [`with_builtins`], [`CitizenRegistry`],
 //!   [`ModelCitizen`], [`ModelDescriptor`], [`RunArtifact`].
+//! * **Author schema-backed models** — [`AuthoringSpec`],
+//!   [`authoring_json_schema`], [`compile_hybrid_graph`], [`generate_rust`].
 //! * **Pick an executive for a graph** — [`Executive`], [`ExecCapabilities`],
 //!   [`select`], [`requirements_for_studio`], [`StudioExecutive`],
 //!   [`HybridExecutive`].
@@ -26,7 +28,15 @@
 
 // First-class model contract (English → JSON spec → run → artifact).
 pub use crate::des::model::{
-    with_builtins, CitizenError, CitizenRegistry, ModelCitizen, ModelDescriptor, RunArtifact,
+    with_builtins, CitizenError, CitizenRegistry, EquationCitizen, ModelCitizen, ModelDescriptor,
+    RunArtifact, EQUATION_SCHEMA,
+};
+
+// Schema-backed model authoring + Rust code generation.
+pub use crate::des::authoring::{
+    authoring_json_schema, compile_hybrid_graph, dependency_graph, example_spec,
+    flatten_physical_networks, generate_rust, library_catalog, model_browser, parse_authoring_spec,
+    AuthoringCitizen, AuthoringSpec, AUTHORING_SCHEMA,
 };
 
 // Executive-selection seam.

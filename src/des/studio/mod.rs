@@ -30,8 +30,11 @@
 pub mod cell;
 pub mod citizen;
 pub mod demos;
+pub mod design;
 pub mod graph;
 pub mod run;
+pub mod spec;
+pub mod workbench;
 
 pub use cell::{
     Affine, Composite, Gain, Integrator, Map, Queue, RuntimeCell, RuntimeOp, Saturation, Scalar,
@@ -39,5 +42,11 @@ pub use cell::{
 };
 pub use citizen::{StudioCitizen, STUDIO_SCHEMA};
 pub use demos::{mixer, queue_line, signal_chain, StudioDemo};
+pub use design::{
+    run_design_study, StudioDesignDriver, StudioDesignObjective, StudioDesignRun,
+    StudioDesignStudy, StudioDesignVariable,
+};
 pub use graph::{CompiledStudio, NodeRole, StudioError, StudioGraph, VisualNode, Wire};
 pub use run::{run, StudioRun};
+pub use spec::{demo_from_spec, example_spec, StudioSpecError, STUDIO_SPEC_SCHEMA};
+pub use workbench::{workbench_html, workbench_html_for_spec, write_workbench};

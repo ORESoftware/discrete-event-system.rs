@@ -7,7 +7,9 @@
 
 use serde_json::{json, Value};
 
+use crate::des::authoring::AuthoringCitizen;
 use crate::des::decision::{MdpCitizen, PomdpCitizen};
+use crate::des::equation::EquationCitizen;
 use crate::des::hybrid::{demos as hybrid_demos, executive::simulate};
 use crate::des::plugin::UiControl;
 use crate::des::studio::StudioCitizen;
@@ -96,7 +98,9 @@ pub fn with_builtins() -> CitizenRegistry {
     let mut reg = CitizenRegistry::new();
     reg.register(Box::new(MdpCitizen));
     reg.register(Box::new(PomdpCitizen));
+    reg.register(Box::new(AuthoringCitizen));
     reg.register(Box::new(HybridCitizen));
+    reg.register(Box::new(EquationCitizen));
     reg.register(Box::new(StudioCitizen));
     reg
 }
@@ -111,7 +115,9 @@ mod tests {
         let kinds = reg.kinds();
         assert!(kinds.contains(&"mdp".to_string()));
         assert!(kinds.contains(&"pomdp".to_string()));
+        assert!(kinds.contains(&"model-graph".to_string()));
         assert!(kinds.contains(&"hybrid".to_string()));
+        assert!(kinds.contains(&"equation".to_string()));
         assert!(kinds.contains(&"studio".to_string()));
     }
 

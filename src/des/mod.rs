@@ -90,6 +90,11 @@ pub mod plugin;
 // engine.
 pub mod hybrid;
 
+// Schema-backed model authoring layer: arbitrary JSON graph specs, variants,
+// hierarchy metadata, acausal physical-network IR, state-machine blocks,
+// verification metadata, tool descriptors, and Rust code generation.
+pub mod authoring;
+
 // First-class-model contract — the paradigm-neutral seam every modeling kind
 // plugs into as a peer (descriptor + validate-and-run-from-JSON + uniform
 // `RunArtifact`), plus a registry of built-in citizens. Additive: composes
@@ -100,6 +105,10 @@ pub mod model;
 // canonical serde spec, unified solve/rollout reusing the existing solvers, and
 // an animated artifact. Additive.
 pub mod decision;
+
+// Equation-based modeling citizen: JSON/LaTeX/XML equations normalize into
+// runnable ODE/PDE traces under the first-class model contract.
+pub mod equation;
 
 // The two-layer visual-block + runtime core: a flat, non-nesting VisualBlock
 // graph (Layer 1) over runtime cells of one-or-more `Transform` elements

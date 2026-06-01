@@ -12,8 +12,9 @@
 //!   results document, rendered through the existing plugin player.
 //! * [`CitizenRegistry`] — discovery + run-from-JSON across all citizens.
 //!
-//! [`with_builtins`] returns a registry pre-loaded with the MDP, POMDP and
-//! hybrid citizens, demonstrating the contract across three paradigms.
+//! [`with_builtins`] returns a registry pre-loaded with MDP, POMDP, authoring,
+//! hybrid, equation, and studio citizens, demonstrating the contract across
+//! paradigms.
 //!
 //! Purely additive: it composes [`crate::des::plugin`], [`crate::des::decision`]
 //! and [`crate::des::hybrid`] without modifying any of them.
@@ -22,6 +23,7 @@ pub mod artifact;
 pub mod builtins;
 pub mod registry;
 
+pub use crate::des::equation::{EquationCitizen, EQUATION_SCHEMA};
 pub use artifact::RunArtifact;
 pub use builtins::{with_builtins, HybridCitizen, HYBRID_SCHEMA};
 pub use registry::{CitizenError, CitizenRegistry, ModelCitizen, ModelDescriptor};

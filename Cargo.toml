@@ -37,6 +37,7 @@ uuid = { version = "1", features = ["v4"] }
 # `JsonValue`; serde is used only at the I/O boundary, bridged to `JsonValue`.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+schemars = { version = "0.8", features = ["derive"] }
 
 [features]
 # Enables the GpuBatchBackend registration hook (no external GPU crate bundled).

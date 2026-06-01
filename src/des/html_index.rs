@@ -80,6 +80,14 @@ const CONTROL_ANIMATIONS: &[HtmlIndexSpec] = &[
     },
 ];
 
+const STUDIO_TOOLS: &[HtmlIndexSpec] = &[HtmlIndexSpec {
+    kind: "workbench",
+    title: "DES Studio Workbench",
+    href: "studio/workbench.html",
+    description:
+        "Author, inspect, run, drag, and export JSON block diagrams with the visual-block studio.",
+}];
+
 const NUMERICAL_SOLVERS: &[HtmlIndexSpec] = &[
     HtmlIndexSpec {
         kind: "animation",
@@ -207,6 +215,11 @@ const EXTENDED_SIMULATIONS: &[HtmlIndexSpec] = &[
 pub fn html_index_groups() -> &'static [HtmlIndexGroupSpec] {
     static GROUPS: &[HtmlIndexGroupSpec] = &[
         HtmlIndexGroupSpec {
+            heading: "Studio authoring tools",
+            blurb: "Browser-native tools for building flat block diagrams with nested runtime cells.",
+            entries: STUDIO_TOOLS,
+        },
+        HtmlIndexGroupSpec {
             heading: "Control-system animations",
             blurb: "Interactive HTML players (play / pause / scrub / speed) built on the DES animation engine.",
             entries: CONTROL_ANIMATIONS,
@@ -257,6 +270,11 @@ pub fn index_groups_from_registry() -> Vec<IndexGroup> {
 
 /// Regenerate every Rust-native HTML artifact the site builder knows about.
 pub fn generate_html_artifacts() {
+    eprintln!("Generating studio workbench...");
+    if let Err(e) = crate::des::studio::write_workbench("out/studio/workbench.html") {
+        eprintln!("  ! studio workbench generation failed: {e}");
+    }
+
     eprintln!("Regenerating control-system animations...");
     // Wind MPPT scene not yet ported to FrameRecorder — skip until scene exists.
     generate_dc_motor_pages();

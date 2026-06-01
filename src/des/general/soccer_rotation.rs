@@ -253,7 +253,7 @@ pub fn parse_outfield_formation(s: &str) -> Option<Vec<usize>> {
         .filter(|p| !p.trim().is_empty())
         .map(|p| p.trim().parse::<usize>().ok())
         .collect::<Option<Vec<usize>>>()?;
-    if rows.is_empty() || rows.iter().any(|&n| n == 0) {
+    if rows.is_empty() || rows.contains(&0) {
         return None;
     }
     Some(rows)
@@ -405,10 +405,10 @@ impl<'a> Transform<ProblemScheduleInput<'a>, ScheduleEvaluation> for EvaluateSch
 
 /// Whether player `p` may appear on the field (not AWOL / injured).
 pub fn player_is_fieldable(problem: &SoccerProblem, p: usize) -> bool {
-    match problem.player_status.as_ref().and_then(|s| s.get(p)) {
-        Some(PlayerStatus::Awol) | Some(PlayerStatus::Injured) => false,
-        _ => true,
-    }
+    !matches!(
+        problem.player_status.as_ref().and_then(|s| s.get(p)),
+        Some(PlayerStatus::Awol) | Some(PlayerStatus::Injured)
+    )
 }
 
 fn player_fixed_position(problem: &SoccerProblem, p: usize) -> Option<usize> {

@@ -2,27 +2,27 @@
 //!
 //! Generates an HTML animation of the wind-MPPT DES. Wires the self-clocking
 //! turbine plant to an MPPT controller (optimal-torque or PI speed-loop) and a
-//! trajectory sink — identical to `main_wind_mppt` — then would render the
-//! captured samples via `FrameRecorder` + `WindMpptScene`.
+//! trajectory sink — identical to `main_wind_mppt` — then renders the captured
+//! samples via `FrameRecorder` + `WindMpptScene`.
 //!
 //! Conversion notes:
 //!   - `class WindMpptAnimator` → struct + impl; async `run()` → [`run`].
 //!   - `process.env.CONTROLLER` → `std::env`.
 //!
-//! PORT NOTE: the HTML render uses `animation/scenes/wind-mppt-scene`, which is
-//! NOT yet ported (`animation::scenes` has no `wind_mppt_scene.rs`). As with
-//! `main_dc_motor_anim`, the rendering step is stubbed: the DES is run faithfully
-//! and the trajectory that would have been drawn is reported. Wire
-//! `WindMpptScene` + `crate::des::animation::frame_recorder::FrameRecorder` once
-//! the scene exists.
-
 use std::cell::RefCell;
+use std::io;
+use std::path::Path;
 use std::rc::Rc;
 
+use crate::des::animation::frame_recorder::{FrameRecorder, FrameRecorderOpts};
+use crate::des::animation::scenes::wind_mppt_scene::{
+    self as scene, WindMpptScene, WindSceneOpts, WIND_STAGE_H, WIND_STAGE_W,
+};
 use crate::des::general::control_systems::wind_mppt::{
-    OptimalTorqueMpptController, SpeedPiMpptController, SpeedPiMpptOpts, WindMpptChannels,
-    WindMpptSinkStation, WindProfile, WindProfileSegment, WindTurbineAeroOpts,
-    WindTurbineAerodynamics, WindTurbinePlantOpts, WindTurbinePlantStation,
+    OptimalTorqueMpptController, SpeedPiMpptController, SpeedPiMpptOpts,
+    TurbineStateToken as ModelTurbineStateToken, WindMpptChannels, WindMpptSinkStation,
+    WindProfile, WindProfileSegment, WindTurbineAeroOpts, WindTurbineAerodynamics,
+    WindTurbinePlantOpts, WindTurbinePlantStation,
 };
 use crate::des::general::des_base::runner::{run_iterative_des, IterativeRunOptions};
 use crate::des::general::des_base::station::{DESStation, StationRef};
@@ -128,29 +128,97 @@ impl WindMpptAnimator {
         } else {
             "optimal torque"
         };
-        self.record(kind, controller_name, &sink.borrow());
+        self.record(kind, controller_name, &sink.borrow())
+            .expect("write Wind MPPT animation");
     }
 
-    /// PORT NOTE: stands in for `FrameRecorder` + `WindMpptScene`. Reports the
-    /// trajectory that would have been rendered.
-    fn record(&self, kind: &str, controller_name: &str, sink: &WindMpptSinkStation) {
-        let stride = 3usize; // 1200 samples → ~400 frames @ 30 fps
-        let sample_count = sink.samples.len();
-        let frames = sample_count.div_ceil(stride.max(1));
-        let out = std::path::Path::new("out")
-            .join("wind-mppt")
-            .join(format!("animation-{}.html", kind));
-        println!(
-            "Wind-MPPT animation ({}): omitted in Rust port — {} samples, ~{} frames @ stride {} (λ*={:.2}, C_p,max={:.3}); would write {} (see PORT NOTE)",
-            controller_name,
-            sample_count,
-            frames,
-            stride,
-            self.aero.optimal_tip_speed_ratio(),
-            self.aero.max_power_coefficient(),
-            out.display()
-        );
+    fn to_scene_samples(samples: &[Rc<ModelTurbineStateToken>]) -> Vec<scene::TurbineStateToken> {
+        samples
+            .iter()
+            .map(|s| scene::TurbineStateToken {
+                time: s.time,
+                omega: s.omega,
+                wind_speed: s.wind_speed,
+                lambda: s.lambda,
+                cp: s.cp,
+                mech_power: s.mech_power,
+                gen_torque: s.gen_torque,
+            })
+            .collect()
     }
+
+    fn animation_paths(kind: &str) -> (String, String) {
+        let dir = Path::new("out").join("wind-mppt");
+        let frames = dir.join(format!("animation-{kind}.frames.jsonl"));
+        let html = dir.join(format!("animation-{kind}.html"));
+        (
+            frames.to_string_lossy().into_owned(),
+            html.to_string_lossy().into_owned(),
+        )
+    }
+
+    fn record(
+        &self,
+        kind: &str,
+        controller_name: &str,
+        sink: &WindMpptSinkStation,
+    ) -> io::Result<()> {
+        if sink.samples.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Wind MPPT animation has no samples to render",
+            ));
+        }
+        let stride = 3usize; // 1200 samples -> ~400 frames @ 30 fps
+        let (frames_path, html_path) = Self::animation_paths(kind);
+        let scene = WindMpptScene::new(WindSceneOpts {
+            samples: Self::to_scene_samples(&sink.samples),
+            dt: self.dt,
+            lambda_star: self.aero.optimal_tip_speed_ratio(),
+            cp_max: self.aero.max_power_coefficient(),
+            k_opt: self.aero.optimal_torque_gain(),
+            controller_name: controller_name.to_string(),
+        });
+        let mut recorder = FrameRecorder::new(FrameRecorderOpts {
+            frames_path: frames_path.clone(),
+            html_path: Some(html_path.clone()),
+            width: WIND_STAGE_W,
+            height: WIND_STAGE_H,
+            fps: Some(30.0),
+            title: Some(format!("Wind MPPT — {controller_name}")),
+            subtitle: Some(
+                "Variable-speed PMSG turbine with wind steps, tip-speed ratio tracking, C_p capture, and generator torque."
+                    .to_string(),
+            ),
+            background: Some("#0b1021".to_string()),
+            live_tick_line: Some(false),
+            record_every_ticks: Some(stride.max(1) as f64),
+            visual_blocks: None,
+        })?;
+        recorder.set_charts(scene.charts());
+        for i in 0..scene.frame_count() {
+            recorder.frame(scene.time_at(i), i as f64, || scene.frame_at(i));
+        }
+        let recorded = recorder.get_frame_count();
+        let anim = recorder.finish()?;
+        println!(
+            "Wind-MPPT animation ({}): {} samples, {} recorded frames -> {}",
+            controller_name,
+            sink.samples.len(),
+            anim.frames.len().max(recorded as usize),
+            html_path
+        );
+        Ok(())
+    }
+}
+
+pub fn run_controller(kind: &str) {
+    let normalized = if kind.eq_ignore_ascii_case("pi") {
+        "pi"
+    } else {
+        "optimal-torque"
+    };
+    WindMpptAnimator::new().run(normalized);
 }
 
 /// Entry point (TS top-level script).
@@ -164,5 +232,18 @@ pub fn run() {
     } else {
         "optimal-torque"
     };
-    WindMpptAnimator::new().run(kind);
+    run_controller(kind);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn animation_paths_match_site_links() {
+        let (_, opt_html) = WindMpptAnimator::animation_paths("optimal-torque");
+        let (_, pi_html) = WindMpptAnimator::animation_paths("pi");
+        assert!(opt_html.ends_with("out/wind-mppt/animation-optimal-torque.html"));
+        assert!(pi_html.ends_with("out/wind-mppt/animation-pi.html"));
+    }
 }

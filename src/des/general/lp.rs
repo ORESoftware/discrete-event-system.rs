@@ -605,7 +605,7 @@ fn standardize_for_interior_point(
     p: &LPProblem,
     tol: f64,
     t0: Instant,
-) -> Result<StandardInteriorLp, LPSolution> {
+) -> Result<StandardInteriorLp, Box<LPSolution>> {
     let n = p.c.len();
     let a_ub: &[Vec<f64>] = p.a_ub.as_deref().unwrap_or(&[]);
     let b_ub: &[f64] = p.b_ub.as_deref().unwrap_or(&[]);
@@ -659,12 +659,12 @@ fn standardize_for_interior_point(
                 shifts[i] = l;
                 if let Some(u) = ub[i] {
                     if u < l - tol {
-                        return Err(empty_lp_solution(
+                        return Err(Box::new(empty_lp_solution(
                             LPStatus::Infeasible,
                             "internal-ipm",
                             t0,
                             Some(format!("inconsistent bounds for x{i}: lb={l}, ub={u}")),
-                        ));
+                        )));
                     }
                 }
             }
@@ -905,7 +905,7 @@ fn run_internal_ipm(p: &LPProblem, opts: &InternalInteriorPointOptions) -> LPSol
 
     let std = match standardize_for_interior_point(p, tol, t0) {
         Ok(std) => std,
-        Err(sol) => return sol,
+        Err(sol) => return *sol,
     };
     let n = std.q.len();
     let m = std.a.len();

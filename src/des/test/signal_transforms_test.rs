@@ -13,8 +13,11 @@
 #[cfg(test)]
 mod tests {
     use crate::des::general::signal_transforms::{
-        run_fourier_transform, run_laplace_transform, run_z_transform, ComplexPointInput,
-        FourierTransformParams, LaplaceTransformParams, QuadratureRule, ZTransformParams,
+        run_dft_transform, run_fft_transform, run_fourier_transform, run_laplace_transform,
+        run_mellin_transform, run_radon_transform, run_wavelet_transform, run_z_transform,
+        ComplexPointInput, DftTransformParams, FftTransformParams, FourierTransformParams,
+        LaplaceTransformParams, MellinTransformParams, QuadratureRule, RadonTransformParams,
+        WaveletKind, WaveletTransformParams, ZTransformParams,
     };
     use std::collections::HashMap;
 
@@ -153,6 +156,78 @@ mod tests {
             std::f64::consts::PI,
             1e-6
         ));
+    }
+
+    #[test]
+    fn dft_and_fft_transform_bins() {
+        let params = DftTransformParams {
+            sequence: Some(vec![1.0, 0.0, -1.0, 0.0]),
+            k_values: Some(vec![0, 1, 2, 3]),
+            ..Default::default()
+        };
+        let dft = run_dft_transform(params);
+        assert!(dft.validation.iter().all(|c| c.passed));
+        assert!(close(dft.outputs[0].value.re, 0.0, 1e-12));
+        assert!(close(dft.outputs[1].value.re, 2.0, 1e-12));
+        assert!(close(dft.outputs[2].value.re, 0.0, 1e-12));
+        assert!(close(dft.outputs[3].value.re, 2.0, 1e-12));
+        assert!(dft.outputs.iter().all(|o| o.value.im.abs() < 1e-12));
+
+        let fft = run_fft_transform(FftTransformParams {
+            sequence: Some(vec![1.0, 0.0, -1.0, 0.0]),
+            ..Default::default()
+        });
+        assert!(fft.validation.iter().all(|c| c.passed));
+        assert_eq!(fft.outputs.len(), 4);
+        assert!(close(
+            fft.outputs[1].value.re,
+            dft.outputs[1].value.re,
+            1e-12
+        ));
+        assert_eq!(fft.kind.as_str(), "fft");
+    }
+
+    #[test]
+    fn wavelet_mellin_and_radon_station_graphs() {
+        let wavelet = run_wavelet_transform(WaveletTransformParams {
+            expression: Some("1".to_string()),
+            t0: Some(0.0),
+            t1: Some(1.0),
+            dt: Some(0.001),
+            quadrature: Some(QuadratureRule::Trapezoid),
+            scales: Some(vec![1.0]),
+            translations: Some(vec![0.0]),
+            mother: Some(WaveletKind::Haar),
+            ..Default::default()
+        });
+        assert!(wavelet.validation.iter().all(|c| c.passed));
+        assert!(wavelet.outputs[0].value.re.abs() < 1e-3);
+
+        let mellin = run_mellin_transform(MellinTransformParams {
+            expression: Some("1".to_string()),
+            x0: Some(1.0),
+            x1: Some(3.0),
+            dx: Some(0.001),
+            quadrature: Some(QuadratureRule::Trapezoid),
+            s_values: Some(vec![point("s=1", 1.0)]),
+            ..Default::default()
+        });
+        assert!(mellin.validation.iter().all(|c| c.passed));
+        assert!(close(mellin.outputs[0].value.re, 2.0, 1e-6));
+
+        let radon = run_radon_transform(RadonTransformParams {
+            image: Some(vec![
+                vec![0.0, 1.0, 0.0],
+                vec![0.0, 1.0, 0.0],
+                vec![0.0, 1.0, 0.0],
+            ]),
+            theta_values: Some(vec![0.0]),
+            rho_values: Some(vec![0.0]),
+            line_width: Some(1.0),
+            ..Default::default()
+        });
+        assert!(radon.validation.iter().all(|c| c.passed));
+        assert!(close(radon.outputs[0].value.re, 3.0, 1e-12));
     }
 
     // [5] Input validation (direct-call cases 5.1–5.3)

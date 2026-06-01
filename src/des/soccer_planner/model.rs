@@ -214,7 +214,7 @@ pub fn planner_position_count(req: &PlannerRequest) -> usize {
 }
 
 pub fn normalize_planner_request(req: &mut PlannerRequest) {
-    if req.outfield_formation.is_empty() || req.outfield_formation.iter().any(|&n| n == 0) {
+    if req.outfield_formation.is_empty() || req.outfield_formation.contains(&0) {
         req.outfield_formation = default_outfield_formation(11);
     }
     req.num_periods = req.num_periods.max(1);

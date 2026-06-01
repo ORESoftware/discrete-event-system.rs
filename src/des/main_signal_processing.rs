@@ -11,8 +11,11 @@
 use std::collections::HashMap;
 
 use crate::des::general::signal_transforms::{
-    format_complex, run_fourier_transform, run_laplace_transform, run_z_transform,
-    ComplexPointInput, FourierTransformParams, LaplaceTransformParams, TransformRunResult,
+    format_complex, run_dft_transform, run_fft_transform, run_fourier_transform,
+    run_laplace_transform, run_mellin_transform, run_radon_transform, run_wavelet_transform,
+    run_z_transform, ComplexPointInput, DftTransformParams, FftTransformParams,
+    FourierTransformParams, LaplaceTransformParams, MellinTransformParams, QuadratureRule,
+    RadonTransformParams, TransformRunResult, WaveletKind, WaveletTransformParams,
     ZTransformParams,
 };
 
@@ -105,6 +108,54 @@ pub fn run() {
         t1: Some(2.0 * std::f64::consts::PI),
         dt: Some(2.0 * std::f64::consts::PI / 2000.0),
         omega_values: Some(vec![0.0, 2.0, -2.0]),
+        ..Default::default()
+    }));
+
+    print_result(&run_dft_transform(DftTransformParams {
+        sequence: Some(vec![1.0, 0.0, -1.0, 0.0]),
+        k_values: Some(vec![0, 1, 2, 3]),
+        ..Default::default()
+    }));
+
+    print_result(&run_fft_transform(FftTransformParams {
+        sequence: Some(vec![1.0, 0.0, -1.0, 0.0]),
+        ..Default::default()
+    }));
+
+    print_result(&run_wavelet_transform(WaveletTransformParams {
+        expression: Some("sin(8*t)".to_string()),
+        t0: Some(0.0),
+        t1: Some(1.0),
+        dt: Some(0.002),
+        quadrature: Some(QuadratureRule::Trapezoid),
+        scales: Some(vec![0.25, 0.5]),
+        translations: Some(vec![0.25, 0.5, 0.75]),
+        mother: Some(WaveletKind::Morlet),
+        ..Default::default()
+    }));
+
+    print_result(&run_mellin_transform(MellinTransformParams {
+        expression: Some("x".to_string()),
+        x0: Some(1.0),
+        x1: Some(3.0),
+        dx: Some(0.002),
+        s_values: Some(vec![ComplexPointInput {
+            label: Some("s=1".to_string()),
+            re: 1.0,
+            im: None,
+        }]),
+        ..Default::default()
+    }));
+
+    print_result(&run_radon_transform(RadonTransformParams {
+        image: Some(vec![
+            vec![0.0, 1.0, 0.0],
+            vec![0.0, 1.0, 0.0],
+            vec![0.0, 1.0, 0.0],
+        ]),
+        theta_values: Some(vec![0.0, std::f64::consts::FRAC_PI_2]),
+        rho_values: Some(vec![0.0]),
+        line_width: Some(1.0),
         ..Default::default()
     }));
 }

@@ -687,9 +687,11 @@ pub fn validate_authoring_spec(spec: &AuthoringSpec) -> Vec<ValidationIssue> {
             format!("expected `{AUTHORING_SCHEMA}`, got `{}`", spec.schema),
         ));
     }
+    validate_solver_spec(&spec.solver, &mut issues);
 
     let mut variant_ids = HashSet::new();
     for v in &spec.variants {
+        validate_nonempty_id(&v.id, format!("variants.{}", v.id), &mut issues);
         if !variant_ids.insert(v.id.clone()) {
             issues.push(err(
                 format!("variants.{}", v.id),
@@ -706,14 +708,39 @@ pub fn validate_authoring_spec(spec: &AuthoringSpec) -> Vec<ValidationIssue> {
         }
     }
 
+    validate_unique_named(
+        spec.units.iter().map(|u| u.name.as_str()),
+        "units",
+        &mut issues,
+    );
+    validate_unique_named(
+        spec.data_dictionary.iter().map(|d| d.name.as_str()),
+        "dataDictionary",
+        &mut issues,
+    );
+    validate_unique_named(
+        spec.submodels.iter().map(|s| s.id.as_str()),
+        "submodels",
+        &mut issues,
+    );
+    validate_unique_named(
+        spec.model_references.iter().map(|m| m.id.as_str()),
+        "modelReferences",
+        &mut issues,
+    );
+
     let mut block_ids = HashSet::new();
+    let mut block_map = HashMap::new();
     for b in &spec.blocks {
+        validate_nonempty_id(&b.id, format!("blocks.{}", b.id), &mut issues);
         if !block_ids.insert(b.id.clone()) {
             issues.push(err(
                 format!("blocks.{}", b.id),
                 "duplicate block id".to_string(),
             ));
         }
+        block_map.insert(b.id.as_str(), b);
+        validate_block_kind(&b.id, &b.kind, &mut issues);
         if let Some(v) = &b.variant {
             if !variant_ids.contains(v) {
                 issues.push(err(
@@ -745,24 +772,104 @@ pub fn validate_authoring_spec(spec: &AuthoringSpec) -> Vec<ValidationIssue> {
                 ));
             }
         }
+        if let Some(src) = block_map.get(c.from.block.as_str()) {
+            let ports = block_ports(&src.kind);
+            if c.from.port >= ports.outputs.len() {
+                issues.push(err(
+                    format!("connections.{idx}.from.port"),
+                    format!(
+                        "source block `{}` has {} output port(s), cannot use port {}",
+                        c.from.block,
+                        ports.outputs.len(),
+                        c.from.port
+                    ),
+                ));
+            }
+        }
+        if let Some(dst) = block_map.get(c.to.block.as_str()) {
+            let ports = block_ports(&dst.kind);
+            if c.to.port >= ports.inputs.len() {
+                issues.push(err(
+                    format!("connections.{idx}.to.port"),
+                    format!(
+                        "destination block `{}` has {} input port(s), cannot use port {}",
+                        c.to.block,
+                        ports.inputs.len(),
+                        c.to.port
+                    ),
+                ));
+            }
+        }
+        if let (Some(src), Some(dst)) = (
+            block_map.get(c.from.block.as_str()),
+            block_map.get(c.to.block.as_str()),
+        ) {
+            let src_ports = block_ports(&src.kind);
+            let dst_ports = block_ports(&dst.kind);
+            if let (Some(src_width), Some(dst_width)) = (
+                src_ports.outputs.get(c.from.port),
+                dst_ports.inputs.get(c.to.port),
+            ) {
+                if src_width != dst_width {
+                    issues.push(err(
+                        format!("connections.{idx}"),
+                        format!(
+                            "width mismatch: `{}` port {} has width {}, `{}` port {} expects width {}",
+                            c.from.block,
+                            c.from.port,
+                            src_width,
+                            c.to.block,
+                            c.to.port,
+                            dst_width
+                        ),
+                    ));
+                }
+            }
+        }
     }
 
+    let requirement_ids: HashSet<_> = spec
+        .verification
+        .requirements
+        .iter()
+        .map(|r| r.id.clone())
+        .collect();
+    validate_unique_named(
+        spec.verification.requirements.iter().map(|r| r.id.as_str()),
+        "verification.requirements",
+        &mut issues,
+    );
+
     let mut machine_ids = HashSet::new();
+    let mut machine_map = HashMap::new();
     for sm in &spec.state_machines {
+        validate_nonempty_id(&sm.id, format!("stateMachines.{}", sm.id), &mut issues);
         if !machine_ids.insert(sm.id.clone()) {
             issues.push(err(
                 format!("stateMachines.{}", sm.id),
                 "duplicate state machine id".to_string(),
             ));
         }
+        machine_map.insert(sm.id.as_str(), sm);
         let mut states = HashSet::new();
         for s in &sm.states {
+            validate_nonempty_id(
+                &s.id,
+                format!("stateMachines.{}.states.{}", sm.id, s.id),
+                &mut issues,
+            );
             if !states.insert(s.id.clone()) {
                 issues.push(err(
                     format!("stateMachines.{}.states.{}", sm.id, s.id),
                     "duplicate state id".to_string(),
                 ));
             }
+        }
+        if sm.states.is_empty() {
+            issues.push(err(
+                format!("stateMachines.{}.states", sm.id),
+                "state machine must declare at least one state".to_string(),
+            ));
         }
         if let Some(initial) = &sm.initial {
             if !states.contains(initial) {
@@ -785,6 +892,14 @@ pub fn validate_authoring_spec(spec: &AuthoringSpec) -> Vec<ValidationIssue> {
                     format!("unknown transition target `{}`", t.to),
                 ));
             }
+            if let Some(req) = &t.requirement {
+                if !requirement_ids.contains(req) {
+                    issues.push(err(
+                        format!("stateMachines.{}.transitions.{idx}.requirement", sm.id),
+                        format!("unknown requirement `{req}`"),
+                    ));
+                }
+            }
         }
     }
     for b in &spec.blocks {
@@ -796,11 +911,42 @@ pub fn validate_authoring_spec(spec: &AuthoringSpec) -> Vec<ValidationIssue> {
                 ));
             }
         }
+        if let BlockKindSpec::StateMachine {
+            machine,
+            input_width,
+            ..
+        } = &b.kind
+        {
+            if let Some(sm) = machine_map.get(machine.as_str()) {
+                validate_state_machine_guards(&b.id, sm, *input_width, &mut issues);
+            }
+        }
     }
 
+    validate_unique_named(
+        spec.physical_networks.iter().map(|n| n.id.as_str()),
+        "physicalNetworks",
+        &mut issues,
+    );
     for pn in &spec.physical_networks {
+        validate_unique_named(
+            pn.nodes.iter().map(|n| n.id.as_str()),
+            format!("physicalNetworks.{}.nodes", pn.id),
+            &mut issues,
+        );
+        validate_unique_named(
+            pn.components.iter().map(|c| c.id.as_str()),
+            format!("physicalNetworks.{}.components", pn.id),
+            &mut issues,
+        );
+        for component in &pn.components {
+            validate_physical_component(&pn.id, component, &mut issues);
+        }
+        let component_map: HashMap<_, _> =
+            pn.components.iter().map(|c| (c.id.as_str(), c)).collect();
         let component_ids: HashSet<_> = pn.components.iter().map(|c| c.id.clone()).collect();
         let node_ids: HashSet<_> = pn.nodes.iter().map(|n| n.id.clone()).collect();
+        let mut bound_connectors = HashSet::new();
         for (idx, c) in pn.connections.iter().enumerate() {
             if !component_ids.contains(&c.component) {
                 issues.push(err(
@@ -814,20 +960,43 @@ pub fn validate_authoring_spec(spec: &AuthoringSpec) -> Vec<ValidationIssue> {
                     format!("unknown node `{}`", c.node),
                 ));
             }
+            if let Some(component) = component_map.get(c.component.as_str()) {
+                let connectors = component_connectors(&component.kind);
+                if !connectors.contains(&c.connector.as_str()) {
+                    issues.push(err(
+                        format!("physicalNetworks.{}.connections.{idx}.connector", pn.id),
+                        format!(
+                            "component `{}` has connector(s) {}, not `{}`",
+                            c.component,
+                            connectors.join(", "),
+                            c.connector
+                        ),
+                    ));
+                }
+                if !bound_connectors.insert((c.component.as_str(), c.connector.as_str())) {
+                    issues.push(err(
+                        format!("physicalNetworks.{}.connections.{idx}.connector", pn.id),
+                        format!(
+                            "connector `{}.{}` is connected to more than one node",
+                            c.component, c.connector
+                        ),
+                    ));
+                }
+            }
         }
     }
 
-    let requirement_ids: HashSet<_> = spec
-        .verification
-        .requirements
-        .iter()
-        .map(|r| r.id.clone())
-        .collect();
     for (idx, link) in spec.verification.trace_links.iter().enumerate() {
         if !requirement_ids.contains(&link.requirement) {
             issues.push(err(
                 format!("verification.traceLinks.{idx}.requirement"),
                 format!("unknown requirement `{}`", link.requirement),
+            ));
+        }
+        if !model_element_exists(spec, &link.element) {
+            issues.push(err(
+                format!("verification.traceLinks.{idx}.element"),
+                format!("unknown model element `{}`", link.element),
             ));
         }
     }
@@ -840,6 +1009,405 @@ fn err(path: impl Into<String>, message: String) -> ValidationIssue {
         severity: ValidationSeverity::Error,
         path: path.into(),
         message,
+    }
+}
+
+fn validate_nonempty_id(id: &str, path: impl Into<String>, issues: &mut Vec<ValidationIssue>) {
+    if id.trim().is_empty() {
+        issues.push(err(path, "id must not be empty".to_string()));
+    }
+}
+
+fn validate_unique_named<'a>(
+    ids: impl Iterator<Item = &'a str>,
+    path: impl Into<String>,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let path = path.into();
+    let mut seen = HashSet::new();
+    for id in ids {
+        if id.trim().is_empty() {
+            issues.push(err(
+                format!("{path}.{id}"),
+                "id must not be empty".to_string(),
+            ));
+        }
+        if !seen.insert(id.to_string()) {
+            issues.push(err(format!("{path}.{id}"), "duplicate id".to_string()));
+        }
+    }
+}
+
+fn validate_solver_spec(solver: &SolverSpec, issues: &mut Vec<ValidationIssue>) {
+    validate_positive_finite("solver.tEnd", solver.t_end, issues);
+    validate_positive_finite("solver.maxStep", solver.max_step, issues);
+    validate_positive_finite("solver.relTol", solver.rel_tol, issues);
+    validate_positive_finite("solver.absTol", solver.abs_tol, issues);
+    if solver.max_step > solver.t_end {
+        issues.push(err(
+            "solver.maxStep",
+            "maxStep must not exceed tEnd".to_string(),
+        ));
+    }
+}
+
+fn validate_block_kind(id: &str, kind: &BlockKindSpec, issues: &mut Vec<ValidationIssue>) {
+    match kind {
+        BlockKindSpec::Constant { value } => {
+            if value.is_empty() {
+                issues.push(err(
+                    format!("blocks.{id}.kind.value"),
+                    "constant value must contain at least one scalar".to_string(),
+                ));
+            }
+            validate_finite_slice(format!("blocks.{id}.kind.value"), value, issues);
+        }
+        BlockKindSpec::Gain { width, k } => {
+            validate_positive_usize(format!("blocks.{id}.kind.width"), *width, issues);
+            validate_finite(format!("blocks.{id}.kind.k"), *k, issues);
+        }
+        BlockKindSpec::Sum { width, signs } => {
+            validate_positive_usize(format!("blocks.{id}.kind.width"), *width, issues);
+            if signs.is_empty() {
+                issues.push(err(
+                    format!("blocks.{id}.kind.signs"),
+                    "sum must have at least one input sign".to_string(),
+                ));
+            }
+            validate_finite_slice(format!("blocks.{id}.kind.signs"), signs, issues);
+        }
+        BlockKindSpec::Saturation { lo, hi } => {
+            validate_finite(format!("blocks.{id}.kind.lo"), *lo, issues);
+            validate_finite(format!("blocks.{id}.kind.hi"), *hi, issues);
+            if lo > hi {
+                issues.push(err(
+                    format!("blocks.{id}.kind"),
+                    "saturation lower bound must be <= upper bound".to_string(),
+                ));
+            }
+        }
+        BlockKindSpec::Integrator { initial } => {
+            if initial.is_empty() {
+                issues.push(err(
+                    format!("blocks.{id}.kind.initial"),
+                    "integrator initial state must not be empty".to_string(),
+                ));
+            }
+            validate_finite_slice(format!("blocks.{id}.kind.initial"), initial, issues);
+        }
+        BlockKindSpec::StateSpace { a, b, c, d, x0 } => {
+            validate_state_space(id, a, b, c, d, x0.as_deref(), issues);
+        }
+        BlockKindSpec::BouncingBall {
+            height,
+            velocity,
+            restitution,
+        } => {
+            validate_finite(format!("blocks.{id}.kind.height"), *height, issues);
+            validate_finite(format!("blocks.{id}.kind.velocity"), *velocity, issues);
+            validate_finite(
+                format!("blocks.{id}.kind.restitution"),
+                *restitution,
+                issues,
+            );
+            if *restitution < 0.0 {
+                issues.push(err(
+                    format!("blocks.{id}.kind.restitution"),
+                    "restitution must be non-negative".to_string(),
+                ));
+            }
+        }
+        BlockKindSpec::DiscretePi { kp, ki, period } => {
+            validate_finite(format!("blocks.{id}.kind.kp"), *kp, issues);
+            validate_finite(format!("blocks.{id}.kind.ki"), *ki, issues);
+            validate_positive_finite(format!("blocks.{id}.kind.period"), *period, issues);
+        }
+        BlockKindSpec::Counter { period } => {
+            validate_positive_finite(format!("blocks.{id}.kind.period"), *period, issues);
+        }
+        BlockKindSpec::StateMachine {
+            period,
+            input_width,
+            ..
+        } => {
+            validate_positive_finite(format!("blocks.{id}.kind.period"), *period, issues);
+            if *input_width > 100_000 {
+                issues.push(err(
+                    format!("blocks.{id}.kind.inputWidth"),
+                    "inputWidth is unreasonably large".to_string(),
+                ));
+            }
+        }
+        BlockKindSpec::Terminator { width } => {
+            validate_positive_usize(format!("blocks.{id}.kind.width"), *width, issues);
+        }
+    }
+}
+
+fn validate_state_space(
+    id: &str,
+    a: &[Vec<f64>],
+    b: &[Vec<f64>],
+    c: &[Vec<f64>],
+    d: &[Vec<f64>],
+    x0: Option<&[f64]>,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let n = a.len();
+    if n == 0 {
+        issues.push(err(
+            format!("blocks.{id}.kind.a"),
+            "state-space matrix A must not be empty".to_string(),
+        ));
+        return;
+    }
+    validate_matrix_shape(format!("blocks.{id}.kind.a"), a, n, n, issues);
+    let m = b.first().map_or(0, Vec::len);
+    validate_matrix_shape(format!("blocks.{id}.kind.b"), b, n, m, issues);
+    let p = c.len();
+    if p == 0 {
+        issues.push(err(
+            format!("blocks.{id}.kind.c"),
+            "state-space matrix C must not be empty".to_string(),
+        ));
+    }
+    validate_matrix_shape(format!("blocks.{id}.kind.c"), c, p, n, issues);
+    validate_matrix_shape(format!("blocks.{id}.kind.d"), d, p, m, issues);
+    if let Some(x0) = x0 {
+        if x0.len() != n {
+            issues.push(err(
+                format!("blocks.{id}.kind.x0"),
+                format!("x0 length must be {n}, got {}", x0.len()),
+            ));
+        }
+        validate_finite_slice(format!("blocks.{id}.kind.x0"), x0, issues);
+    }
+}
+
+fn validate_matrix_shape(
+    path: impl Into<String>,
+    matrix: &[Vec<f64>],
+    rows: usize,
+    cols: usize,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let path = path.into();
+    if matrix.len() != rows {
+        issues.push(err(
+            path.clone(),
+            format!("expected {rows} row(s), got {}", matrix.len()),
+        ));
+        return;
+    }
+    for (idx, row) in matrix.iter().enumerate() {
+        if row.len() != cols {
+            issues.push(err(
+                format!("{path}.{idx}"),
+                format!("expected {cols} column(s), got {}", row.len()),
+            ));
+        }
+        validate_finite_slice(format!("{path}.{idx}"), row, issues);
+    }
+}
+
+fn validate_state_machine_guards(
+    block_id: &str,
+    machine: &StateMachineSpec,
+    input_width: usize,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    for (idx, transition) in machine.transitions.iter().enumerate() {
+        let guard_index = match &transition.guard {
+            GuardSpec::InputGreater { index, .. } | GuardSpec::InputLess { index, .. } => {
+                Some(*index)
+            }
+            _ => None,
+        };
+        if let Some(index) = guard_index {
+            if input_width == 0 || index >= input_width {
+                issues.push(err(
+                    format!("blocks.{block_id}.kind.machine"),
+                    format!(
+                        "transition {idx} guard reads input {index}, but block inputWidth is {input_width}"
+                    ),
+                ));
+            }
+        }
+    }
+}
+
+fn validate_physical_component(
+    network_id: &str,
+    component: &PhysicalComponentSpec,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let base = format!("physicalNetworks.{network_id}.components.{}", component.id);
+    match &component.kind {
+        PhysicalComponentKind::ElectricalResistor { resistance } => {
+            validate_positive_finite(format!("{base}.resistance"), *resistance, issues);
+        }
+        PhysicalComponentKind::ElectricalCapacitor {
+            capacitance,
+            initial_voltage,
+        } => {
+            validate_positive_finite(format!("{base}.capacitance"), *capacitance, issues);
+            validate_finite(format!("{base}.initialVoltage"), *initial_voltage, issues);
+        }
+        PhysicalComponentKind::ElectricalInductor {
+            inductance,
+            initial_current,
+        } => {
+            validate_positive_finite(format!("{base}.inductance"), *inductance, issues);
+            validate_finite(format!("{base}.initialCurrent"), *initial_current, issues);
+        }
+        PhysicalComponentKind::ElectricalVoltageSource { voltage } => {
+            validate_finite(format!("{base}.voltage"), *voltage, issues);
+        }
+        PhysicalComponentKind::ElectricalCurrentSource { current } => {
+            validate_finite(format!("{base}.current"), *current, issues);
+        }
+        PhysicalComponentKind::ElectricalGround => {}
+        PhysicalComponentKind::TranslationalMass { mass } => {
+            validate_positive_finite(format!("{base}.mass"), *mass, issues);
+        }
+        PhysicalComponentKind::TranslationalSpring { stiffness } => {
+            validate_positive_finite(format!("{base}.stiffness"), *stiffness, issues);
+        }
+        PhysicalComponentKind::TranslationalDamper { damping } => {
+            validate_positive_finite(format!("{base}.damping"), *damping, issues);
+        }
+        PhysicalComponentKind::ThermalCapacitor { heat_capacity } => {
+            validate_positive_finite(format!("{base}.heatCapacity"), *heat_capacity, issues);
+        }
+        PhysicalComponentKind::ThermalConductor { conductance } => {
+            validate_positive_finite(format!("{base}.conductance"), *conductance, issues);
+        }
+        PhysicalComponentKind::FluidReservoir { pressure } => {
+            validate_finite(format!("{base}.pressure"), *pressure, issues);
+        }
+        PhysicalComponentKind::FluidResistance { resistance } => {
+            validate_positive_finite(format!("{base}.resistance"), *resistance, issues);
+        }
+    }
+}
+
+fn validate_positive_usize(
+    path: impl Into<String>,
+    value: usize,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    if value == 0 {
+        issues.push(err(path, "value must be positive".to_string()));
+    }
+}
+
+fn validate_positive_finite(
+    path: impl Into<String>,
+    value: f64,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let path = path.into();
+    if !value.is_finite() || value <= 0.0 {
+        issues.push(err(path, "value must be finite and positive".to_string()));
+    }
+}
+
+fn validate_finite(path: impl Into<String>, value: f64, issues: &mut Vec<ValidationIssue>) {
+    if !value.is_finite() {
+        issues.push(err(path, "value must be finite".to_string()));
+    }
+}
+
+fn validate_finite_slice(
+    path: impl Into<String>,
+    values: &[f64],
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let path = path.into();
+    for (idx, value) in values.iter().enumerate() {
+        if !value.is_finite() {
+            issues.push(err(
+                format!("{path}.{idx}"),
+                "value must be finite".to_string(),
+            ));
+        }
+    }
+}
+
+fn model_element_exists(spec: &AuthoringSpec, element: &str) -> bool {
+    spec.blocks.iter().any(|b| b.id == element)
+        || spec.state_machines.iter().any(|m| m.id == element)
+        || spec.physical_networks.iter().any(|n| n.id == element)
+        || spec.submodels.iter().any(|s| s.id == element)
+        || spec.model_references.iter().any(|m| m.id == element)
+}
+
+#[derive(Clone, Debug)]
+struct BlockPorts {
+    inputs: Vec<usize>,
+    outputs: Vec<usize>,
+}
+
+fn block_ports(kind: &BlockKindSpec) -> BlockPorts {
+    match kind {
+        BlockKindSpec::Constant { value } => BlockPorts {
+            inputs: Vec::new(),
+            outputs: vec![value.len()],
+        },
+        BlockKindSpec::Gain { width, .. } => BlockPorts {
+            inputs: vec![*width],
+            outputs: vec![*width],
+        },
+        BlockKindSpec::Sum { width, signs } => BlockPorts {
+            inputs: vec![*width; signs.len()],
+            outputs: vec![*width],
+        },
+        BlockKindSpec::Saturation { .. } => BlockPorts {
+            inputs: vec![1],
+            outputs: vec![1],
+        },
+        BlockKindSpec::Integrator { initial } => BlockPorts {
+            inputs: vec![initial.len()],
+            outputs: vec![initial.len()],
+        },
+        BlockKindSpec::StateSpace { b, c, d, .. } => {
+            let m = b
+                .first()
+                .map_or_else(|| d.first().map_or(0, Vec::len), Vec::len);
+            BlockPorts {
+                inputs: vec![m],
+                outputs: vec![c.len()],
+            }
+        }
+        BlockKindSpec::BouncingBall { .. } => BlockPorts {
+            inputs: Vec::new(),
+            outputs: vec![2],
+        },
+        BlockKindSpec::DiscretePi { .. } => BlockPorts {
+            inputs: vec![1],
+            outputs: vec![1],
+        },
+        BlockKindSpec::Counter { .. } => BlockPorts {
+            inputs: Vec::new(),
+            outputs: vec![1],
+        },
+        BlockKindSpec::StateMachine { input_width, .. } => {
+            if *input_width == 0 {
+                BlockPorts {
+                    inputs: Vec::new(),
+                    outputs: vec![1],
+                }
+            } else {
+                BlockPorts {
+                    inputs: vec![*input_width],
+                    outputs: vec![1],
+                }
+            }
+        }
+        BlockKindSpec::Terminator { width } => BlockPorts {
+            inputs: vec![*width],
+            outputs: Vec::new(),
+        },
     }
 }
 
@@ -867,6 +1435,30 @@ fn variant_allowed(active: &HashSet<String>, variant: &Option<String>) -> bool {
 pub fn compile_hybrid_graph(
     spec: &AuthoringSpec,
 ) -> Result<(Compiled, SimOptions), AuthoringError> {
+    let failures: Vec<String> = validate_authoring_spec(spec)
+        .into_iter()
+        .filter(|i| i.severity == ValidationSeverity::Error)
+        .map(|i| format!("{}: {}", i.path, i.message))
+        .collect();
+    if !failures.is_empty() {
+        return Err(AuthoringError::InvalidSpec(failures.join("; ")));
+    }
+    match &spec.solver.mode {
+        SolverMode::FixedStepRk4 | SolverMode::DiscreteOnly => {}
+        SolverMode::VariableStepRk45 | SolverMode::BackwardEuler | SolverMode::DaeResidual => {
+            return Err(AuthoringError::Compile(format!(
+                "solver mode `{:?}` is declared but the causal hybrid compiler currently executes only fixed-step RK4/discrete graphs",
+                spec.solver.mode
+            )));
+        }
+    }
+    if !matches!(&spec.solver.algebraic_loops, AlgebraicLoopPolicy::Reject) {
+        return Err(AuthoringError::Compile(format!(
+            "algebraic loop policy `{:?}` is declared but the causal hybrid compiler currently supports only `reject`",
+            spec.solver.algebraic_loops
+        )));
+    }
+
     let active = effective_active_variants(spec);
     let mut d = Diagram::new();
     let machines: HashMap<String, StateMachineSpec> = spec
@@ -875,6 +1467,8 @@ pub fn compile_hybrid_graph(
         .map(|m| (m.id.clone(), m.clone()))
         .collect();
     let mut handles = HashMap::new();
+    let mut active_blocks = HashSet::new();
+    let mut driven_inputs = HashSet::new();
 
     for block in &spec.blocks {
         if !variant_allowed(&active, &block.variant) {
@@ -882,6 +1476,7 @@ pub fn compile_hybrid_graph(
         }
         let handle = d.add(build_block(block, &machines)?);
         handles.insert(block.id.clone(), handle);
+        active_blocks.insert(block.id.clone());
     }
 
     for conn in &spec.connections {
@@ -889,12 +1484,35 @@ pub fn compile_hybrid_graph(
             continue;
         }
         let Some(src) = handles.get(&conn.from.block).copied() else {
-            continue;
+            return Err(AuthoringError::Compile(format!(
+                "active connection references missing or inactive source block `{}`",
+                conn.from.block
+            )));
         };
         let Some(dst) = handles.get(&conn.to.block).copied() else {
-            continue;
+            return Err(AuthoringError::Compile(format!(
+                "active connection references missing or inactive destination block `{}`",
+                conn.to.block
+            )));
         };
         d.connect((src, conn.from.port), (dst, conn.to.port))?;
+        driven_inputs.insert((conn.to.block.clone(), conn.to.port));
+    }
+
+    for block in spec
+        .blocks
+        .iter()
+        .filter(|b| active_blocks.contains(b.id.as_str()))
+    {
+        let ports = block_ports(&block.kind);
+        for (port, width) in ports.inputs.iter().enumerate() {
+            if *width > 0 && !driven_inputs.contains(&(block.id.clone(), port)) {
+                return Err(AuthoringError::Compile(format!(
+                    "active block `{}` input port {port} is not connected",
+                    block.id
+                )));
+            }
+        }
     }
 
     let compiled = d.build()?;
@@ -1328,11 +1946,7 @@ pub struct RustCodegenResult {
 /// Generate Rust source that embeds this JSON spec, type-checks it through
 /// [`AuthoringSpec`], compiles the supported subset, and runs the hybrid engine.
 pub fn generate_rust(spec: &AuthoringSpec) -> Result<RustCodegenResult, AuthoringError> {
-    let module_name = spec
-        .codegen
-        .module_name
-        .clone()
-        .unwrap_or_else(|| sanitize_ident(&spec.name));
+    let module_name = sanitize_ident(spec.codegen.module_name.as_deref().unwrap_or(&spec.name));
     let spec_text =
         serde_json::to_string_pretty(spec).map_err(|e| AuthoringError::Codegen(e.to_string()))?;
     let schema_text = if spec.codegen.include_schema {
@@ -1341,10 +1955,12 @@ pub fn generate_rust(spec: &AuthoringSpec) -> Result<RustCodegenResult, Authorin
     } else {
         "{}".to_string()
     };
+    let spec_literal = rust_string_literal(&spec_text);
+    let schema_literal = rust_string_literal(&schema_text);
     let source = format!(
         r####"pub mod {module_name} {{
-    pub const SPEC_JSON: &str = r##"{spec_text}"##;
-    pub const JSON_SCHEMA: &str = r##"{schema_text}"##;
+    pub const SPEC_JSON: &str = {spec_literal};
+    pub const JSON_SCHEMA: &str = {schema_literal};
 
     pub fn run() -> Result<des_engine::des::hybrid::Trace, Box<dyn std::error::Error>> {{
         let value: serde_json::Value = serde_json::from_str(SPEC_JSON)?;
@@ -1377,7 +1993,57 @@ fn sanitize_ident(value: &str) -> String {
     if out.is_empty() || out.as_bytes().first().is_some_and(|b| b.is_ascii_digit()) {
         out.insert_str(0, "model_");
     }
+    if is_rust_keyword(&out) {
+        out.insert_str(0, "model_");
+    }
     out
+}
+
+fn rust_string_literal(value: &str) -> String {
+    format!("{value:?}")
+}
+
+fn is_rust_keyword(value: &str) -> bool {
+    matches!(
+        value,
+        "as" | "break"
+            | "const"
+            | "continue"
+            | "crate"
+            | "else"
+            | "enum"
+            | "extern"
+            | "false"
+            | "fn"
+            | "for"
+            | "if"
+            | "impl"
+            | "in"
+            | "let"
+            | "loop"
+            | "match"
+            | "mod"
+            | "move"
+            | "mut"
+            | "pub"
+            | "ref"
+            | "return"
+            | "self"
+            | "Self"
+            | "static"
+            | "struct"
+            | "super"
+            | "trait"
+            | "true"
+            | "type"
+            | "unsafe"
+            | "use"
+            | "where"
+            | "while"
+            | "async"
+            | "await"
+            | "dyn"
+    )
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -1609,6 +2275,23 @@ pub fn compare_traces(
         .enumerate()
         .filter_map(|(li, name)| rhs.column_index(name).map(|ri| (li, ri, name.clone())))
         .collect();
+    for name in &lhs.columns {
+        if rhs.column_index(name).is_none() {
+            mismatches.push(structural_mismatch(format!("missing rhs column `{name}`")));
+        }
+    }
+    for name in &rhs.columns {
+        if lhs.column_index(name).is_none() {
+            mismatches.push(structural_mismatch(format!("missing lhs column `{name}`")));
+        }
+    }
+    if lhs.times.len() != rhs.times.len() {
+        mismatches.push(structural_mismatch(format!(
+            "sample count differs: lhs={}, rhs={}",
+            lhs.times.len(),
+            rhs.times.len()
+        )));
+    }
     for k in 0..n {
         if (lhs.times[k] - rhs.times[k]).abs() > opts.time_tol {
             mismatches.push(TraceMismatch {
@@ -1646,6 +2329,17 @@ pub fn compare_traces(
         max_abs_error,
         max_rel_error,
         mismatches,
+    }
+}
+
+fn structural_mismatch(message: String) -> TraceMismatch {
+    TraceMismatch {
+        sample: 0,
+        column: message,
+        lhs: 0.0,
+        rhs: 0.0,
+        abs_error: 1.0,
+        rel_error: 1.0,
     }
 }
 
@@ -2097,22 +2791,64 @@ mod tests {
     }
 
     #[test]
-    fn inactive_variant_blocks_are_excluded() {
+    fn inactive_variant_cannot_leave_required_inputs_unconnected() {
         let mut spec = example_spec();
         spec.variants[0].default = false;
         spec.active_variants.clear();
-        let (compiled, opts) = compile_hybrid_graph(&spec).unwrap();
-        let trace = simulate(&compiled, &opts);
-        assert!(trace.column_index("controller.p0").is_none());
+        let err = match compile_hybrid_graph(&spec) {
+            Ok(_) => panic!("expected compile to reject unconnected input"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("input port 0 is not connected"));
+    }
+
+    #[test]
+    fn validation_rejects_bad_numbers_and_shapes() {
+        let mut spec = example_spec();
+        spec.solver.max_step = 0.0;
+        if let BlockKindSpec::StateSpace { a, .. } = &mut spec.blocks[3].kind {
+            a[0].push(2.0);
+        }
+        let issues = validate_authoring_spec(&spec);
+        let text = serde_json::to_string(&issues).unwrap();
+        assert!(text.contains("solver.maxStep"));
+        assert!(text.contains("expected 1 column"));
+    }
+
+    #[test]
+    fn validation_rejects_bad_physical_connector_and_duplicate_binding() {
+        let mut spec = example_spec();
+        spec.physical_networks[0].connections[0].connector = "bad".to_string();
+        let duplicate = spec.physical_networks[0].connections[1].clone();
+        spec.physical_networks[0].connections.push(duplicate);
+        let issues = validate_authoring_spec(&spec);
+        let text = serde_json::to_string(&issues).unwrap();
+        assert!(text.contains("has connector"));
+        assert!(text.contains("connected to more than one node"));
+    }
+
+    #[test]
+    fn unsupported_solver_modes_fail_before_simulation() {
+        let mut spec = example_spec();
+        spec.solver.mode = SolverMode::VariableStepRk45;
+        let err = match compile_hybrid_graph(&spec) {
+            Ok(_) => panic!("expected compile to reject unsupported solver"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("fixed-step RK4"));
     }
 
     #[test]
     fn rust_codegen_embeds_checked_spec() {
-        let spec = example_spec();
+        let mut spec = example_spec();
+        spec.name = "mod".to_string();
+        spec.codegen.module_name = Some("fn".to_string());
+        spec.description = Some("contains raw delimiter \"## safely".to_string());
         let generated = generate_rust(&spec).unwrap();
         assert!(generated.source.contains("parse_authoring_spec"));
         assert!(generated.source.contains("compile_hybrid_graph"));
-        assert_eq!(generated.module_name, "closed_loop_authoring_demo");
+        assert!(generated.source.contains("\\\"##"));
+        assert_eq!(generated.module_name, "model_fn");
     }
 
     #[test]
@@ -2125,5 +2861,24 @@ mod tests {
         let report = compare_traces(&a, &b, TraceCompareOptions::default());
         assert!(report.passed);
         assert_eq!(report.max_abs_error, 0.0);
+    }
+
+    #[test]
+    fn trace_compare_fails_on_missing_columns() {
+        let spec = example_spec();
+        let (compiled_a, opts_a) = compile_hybrid_graph(&spec).unwrap();
+        let (compiled_b, opts_b) = compile_hybrid_graph(&spec).unwrap();
+        let a = simulate(&compiled_a, &opts_a);
+        let mut b = simulate(&compiled_b, &opts_b);
+        b.columns.pop();
+        for row in &mut b.rows {
+            row.pop();
+        }
+        let report = compare_traces(&a, &b, TraceCompareOptions::default());
+        assert!(!report.passed);
+        assert!(report
+            .mismatches
+            .iter()
+            .any(|m| m.column.contains("missing rhs column")));
     }
 }

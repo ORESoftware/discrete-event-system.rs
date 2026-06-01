@@ -1,14 +1,14 @@
 //! Port of `src/des/general/signal-transforms.ts`
 //! (module `des::general::signal_transforms`).
 //!
-//! Z, Laplace, and Fourier transforms expressed as DES station graphs. A run is
-//! not a monolithic numerical helper: it is built from the entity vocabulary
-//! used across the project. A sample-source station emits one token per input
-//! sample, a kernel station turns each sample into a per-evaluation-point
-//! contribution token, an accumulator station sums contributions per point, and
-//! a result sink keeps the final totals. Samples, contributions, and totals are
-//! movable tokens; the stations own only local state and talk over named
-//! channels.
+//! Z, Laplace, Fourier, DFT/FFT, wavelet, Mellin, and Radon transforms expressed
+//! as DES station graphs. A run is not a monolithic numerical helper: it is
+//! built from the entity vocabulary used across the project. A sample-source
+//! station emits one token per input sample, a kernel station turns each sample
+//! into a per-evaluation-point contribution token, an accumulator station sums
+//! contributions per point, and a result sink keeps the final totals. Samples,
+//! contributions, and totals are movable tokens; the stations own only local
+//! state and talk over named channels.
 //!
 //! ## Conversion notes (per the TS "RUST MIGRATION" header)
 //!
@@ -63,12 +63,17 @@ fn require(check: Check) {
 
 // ── Enums (string unions) ─────────────────────────────────────────────────────
 
-/// `'z' | 'laplace' | 'fourier'`.
+/// Transform family identifier.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TransformKind {
     Z,
     Laplace,
     Fourier,
+    Dft,
+    Fft,
+    Wavelet,
+    Mellin,
+    Radon,
 }
 
 impl TransformKind {
@@ -77,6 +82,11 @@ impl TransformKind {
             TransformKind::Z => "z",
             TransformKind::Laplace => "laplace",
             TransformKind::Fourier => "fourier",
+            TransformKind::Dft => "dft",
+            TransformKind::Fft => "fft",
+            TransformKind::Wavelet => "wavelet",
+            TransformKind::Mellin => "mellin",
+            TransformKind::Radon => "radon",
         }
     }
 }
@@ -86,6 +96,30 @@ impl TransformKind {
 pub enum QuadratureRule {
     Rectangular,
     Trapezoid,
+}
+
+/// Mother wavelet used by [`run_wavelet_transform`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaveletKind {
+    Haar,
+    MexicanHat,
+    Morlet,
+}
+
+impl Default for WaveletKind {
+    fn default() -> Self {
+        WaveletKind::Haar
+    }
+}
+
+impl WaveletKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WaveletKind::Haar => "haar",
+            WaveletKind::MexicanHat => "mexican-hat",
+            WaveletKind::Morlet => "morlet",
+        }
+    }
 }
 
 /// `'n' | 't'` abscissa tag.
@@ -344,6 +378,9 @@ pub struct TransformSampleRecord {
     pub sample_index: usize,
     pub abscissa_name: AbscissaName,
     pub abscissa: f64,
+    /// Optional second coordinate. One-dimensional transforms leave this empty;
+    /// Radon uses `abscissa=x` and `ordinate=y`.
+    pub ordinate: Option<f64>,
     pub value: f64,
     pub weight: f64,
 }
@@ -443,13 +480,93 @@ pub struct FourierTransformParams {
     pub tolerance: Option<f64>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct DftTransformParams {
+    pub sequence: Option<Vec<f64>>,
+    pub k_values: Option<Vec<usize>>,
+    pub inverse: Option<bool>,
+    pub normalize: Option<bool>,
+    pub tolerance: Option<f64>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct FftTransformParams {
+    pub sequence: Option<Vec<f64>>,
+    pub k_values: Option<Vec<usize>>,
+    pub inverse: Option<bool>,
+    pub normalize: Option<bool>,
+    pub tolerance: Option<f64>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct WaveletTransformParams {
+    pub samples: Option<Vec<f64>>,
+    pub expression: Option<String>,
+    pub constants: Option<HashMap<String, f64>>,
+    pub t0: Option<f64>,
+    pub t1: Option<f64>,
+    pub dt: Option<f64>,
+    pub quadrature: Option<QuadratureRule>,
+    pub scales: Option<Vec<f64>>,
+    pub translations: Option<Vec<f64>>,
+    pub mother: Option<WaveletKind>,
+    pub tolerance: Option<f64>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct MellinTransformParams {
+    pub samples: Option<Vec<f64>>,
+    pub expression: Option<String>,
+    pub constants: Option<HashMap<String, f64>>,
+    pub x0: Option<f64>,
+    pub x1: Option<f64>,
+    pub dx: Option<f64>,
+    pub quadrature: Option<QuadratureRule>,
+    pub s_values: Option<Vec<ComplexPointInput>>,
+    pub tolerance: Option<f64>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct RadonTransformParams {
+    pub image: Option<Vec<Vec<f64>>>,
+    pub x0: Option<f64>,
+    pub y0: Option<f64>,
+    pub dx: Option<f64>,
+    pub dy: Option<f64>,
+    pub theta_values: Option<Vec<f64>>,
+    pub rho_values: Option<Vec<f64>>,
+    pub line_width: Option<f64>,
+    pub tolerance: Option<f64>,
+}
+
 const SAMPLE_CHANNEL: &str = "transform-sample";
 const CONTRIBUTION_CHANNEL: &str = "transform-contribution";
 const RESULT_CHANNEL: &str = "transform-result";
 
+#[derive(Clone, Copy, Debug)]
+struct KernelContext {
+    sample_count: usize,
+    inverse: bool,
+    normalize: bool,
+    wavelet: WaveletKind,
+    radon_line_width: f64,
+}
+
+impl Default for KernelContext {
+    fn default() -> Self {
+        KernelContext {
+            sample_count: 0,
+            inverse: false,
+            normalize: false,
+            wavelet: WaveletKind::Haar,
+            radon_line_width: 1.0,
+        }
+    }
+}
+
 /// A per-point kernel: `(sample, point) -> contribution`. Every kernel here is
 /// a free fn, so a plain `fn` pointer (which is `Copy`) suffices.
-type KernelFn = fn(&TransformSampleRecord, &ComplexPoint) -> ComplexValue;
+type KernelFn = fn(&TransformSampleRecord, &ComplexPoint, &KernelContext) -> ComplexValue;
 
 // ── Tokens ────────────────────────────────────────────────────────────────────
 
@@ -544,6 +661,9 @@ impl DESStation for TransformSampleSourceStation {
                 1e9,
             ));
             require(Preconditions::finite(model, "abscissa", sample.abscissa));
+            if let Some(ordinate) = sample.ordinate {
+                require(Preconditions::finite(model, "ordinate", ordinate));
+            }
             require(Preconditions::finite(model, "value", sample.value));
             require(Preconditions::finite(model, "weight", sample.weight));
         }
@@ -568,17 +688,24 @@ pub struct TransformKernelStation {
     core: StationCore,
     points: Vec<ComplexPoint>,
     kernel: KernelFn,
+    context: KernelContext,
 }
 
 impl TransformKernelStation {
     pub const CH_SAMPLE: &'static str = SAMPLE_CHANNEL;
     pub const CH_CONTRIBUTION: &'static str = CONTRIBUTION_CHANNEL;
 
-    pub fn new(id: impl Into<String>, points: Vec<ComplexPoint>, kernel: KernelFn) -> Self {
+    fn new(
+        id: impl Into<String>,
+        points: Vec<ComplexPoint>,
+        kernel: KernelFn,
+        context: KernelContext,
+    ) -> Self {
         TransformKernelStation {
             core: StationCore::new(id),
             points,
             kernel,
+            context,
         }
     }
 }
@@ -601,7 +728,7 @@ impl DESStation for TransformKernelStation {
         let id = self.core.id.clone();
         for token in tokens {
             for (point_index, point) in self.points.iter().enumerate() {
-                let contribution = (self.kernel)(&token.sample, point);
+                let contribution = (self.kernel)(&token.sample, point, &self.context);
                 finite_complex(
                     "TransformKernelStation",
                     &format!("{id}.contribution"),
@@ -856,11 +983,12 @@ fn direct_transform(
     samples: &[TransformSampleRecord],
     points: &[ComplexPoint],
     kernel: KernelFn,
+    context: &KernelContext,
 ) -> Vec<ComplexValue> {
     let mut sums = vec![complex(0.0, 0.0); points.len()];
     for sample in samples {
         for (i, point) in points.iter().enumerate() {
-            sums[i] = complex_add(sums[i], kernel(sample, point));
+            sums[i] = complex_add(sums[i], kernel(sample, point, context));
         }
     }
     sums
@@ -900,6 +1028,7 @@ struct TransformPipelineArgs {
     samples: Vec<TransformSampleRecord>,
     points: Vec<ComplexPoint>,
     kernel: KernelFn,
+    kernel_context: KernelContext,
     tolerance: f64,
 }
 
@@ -910,6 +1039,11 @@ fn run_transform_pipeline(args: TransformPipelineArgs) -> TransformRunResult {
     let accumulator_id = format!("{kind_str}-accumulator-station");
     let sink_id = format!("{kind_str}-result-sink");
 
+    let mut kernel_context = args.kernel_context;
+    if kernel_context.sample_count == 0 {
+        kernel_context.sample_count = args.samples.len();
+    }
+
     let source = Rc::new(RefCell::new(TransformSampleSourceStation::new(
         source_id.clone(),
         args.samples.clone(),
@@ -918,6 +1052,7 @@ fn run_transform_pipeline(args: TransformPipelineArgs) -> TransformRunResult {
         kernel_id.clone(),
         args.points.clone(),
         args.kernel,
+        kernel_context,
     )));
     let accumulator = Rc::new(RefCell::new(TransformAccumulatorStation::new(
         accumulator_id.clone(),
@@ -964,7 +1099,7 @@ fn run_transform_pipeline(args: TransformPipelineArgs) -> TransformRunResult {
         .clone()
         .unwrap_or_else(|| panic!("{kind_str}-transform did not produce a result"));
 
-    let direct = direct_transform(&args.samples, &args.points, args.kernel);
+    let direct = direct_transform(&args.samples, &args.points, args.kernel, &kernel_context);
     let outputs: Vec<TransformOutputPoint> = latest
         .outputs
         .iter()
@@ -1043,6 +1178,28 @@ fn build_z_samples(params: &ZTransformParams) -> Vec<TransformSampleRecord> {
             sample_index,
             abscissa_name: AbscissaName::N,
             abscissa: (start_index + sample_index as i64) as f64,
+            ordinate: None,
+            value,
+            weight: 1.0,
+        })
+        .collect()
+}
+
+fn build_dft_samples(model: &str, sequence: &Option<Vec<f64>>) -> Vec<TransformSampleRecord> {
+    let values = match sequence {
+        Some(s) if !s.is_empty() => s.clone(),
+        _ => panic!("{model} requires a finite sequence"),
+    };
+    require(Preconditions::non_empty(model, "sequence", &values));
+    require(Preconditions::all_finite(model, "sequence", &values));
+    values
+        .iter()
+        .enumerate()
+        .map(|(sample_index, &value)| TransformSampleRecord {
+            sample_index,
+            abscissa_name: AbscissaName::N,
+            abscissa: sample_index as f64,
+            ordinate: None,
             value,
             weight: 1.0,
         })
@@ -1113,10 +1270,72 @@ fn build_continuous_samples(model: &str, params: &ContinuousParams) -> Vec<Trans
             sample_index,
             abscissa_name: AbscissaName::T,
             abscissa: t0 + sample_index as f64 * dt,
+            ordinate: None,
             value,
             weight: quadrature_weight(sample_index, n, dt, quadrature),
         })
         .collect()
+}
+
+fn build_radon_samples(params: &RadonTransformParams) -> Vec<TransformSampleRecord> {
+    let model = "radon-transform";
+    let image = match &params.image {
+        Some(image) if !image.is_empty() => image.clone(),
+        _ => panic!("radon-transform requires a non-empty image grid"),
+    };
+    require(Preconditions::rectangular_matrix(model, "image", &image));
+    let rows = image.len();
+    let cols = image[0].len();
+    require(Preconditions::integer_in_range(
+        model,
+        "image.rows",
+        rows as f64,
+        1.0,
+        1_000_000.0,
+    ));
+    require(Preconditions::integer_in_range(
+        model,
+        "image.cols",
+        cols as f64,
+        1.0,
+        1_000_000.0,
+    ));
+    for (r, row) in image.iter().enumerate() {
+        require(Preconditions::all_finite(
+            model,
+            &format!("image[{r}]"),
+            row,
+        ));
+    }
+    let dx = params.dx.unwrap_or(1.0);
+    let dy = params.dy.unwrap_or(1.0);
+    require(Preconditions::positive(model, "dx", dx));
+    require(Preconditions::positive(model, "dy", dy));
+    let line_width = params.line_width.unwrap_or(dx.max(dy));
+    require(Preconditions::positive(model, "lineWidth", line_width));
+    let x0 = params
+        .x0
+        .unwrap_or(-0.5 * (cols.saturating_sub(1)) as f64 * dx);
+    let y0 = params
+        .y0
+        .unwrap_or(-0.5 * (rows.saturating_sub(1)) as f64 * dy);
+    require(Preconditions::finite(model, "x0", x0));
+    require(Preconditions::finite(model, "y0", y0));
+
+    let mut samples = Vec::with_capacity(rows * cols);
+    for (r, row) in image.iter().enumerate() {
+        for (c, &value) in row.iter().enumerate() {
+            samples.push(TransformSampleRecord {
+                sample_index: r * cols + c,
+                abscissa_name: AbscissaName::T,
+                abscissa: x0 + c as f64 * dx,
+                ordinate: Some(y0 + r as f64 * dy),
+                value,
+                weight: dx * dy / line_width,
+            });
+        }
+    }
+    samples
 }
 
 fn build_expression_samples(
@@ -1163,6 +1382,7 @@ fn build_expression_samples(
         let t = t0 + i as f64 * dt;
         let mut env: Env = constants.clone();
         env.insert("t".to_string(), t);
+        env.insert("x".to_string(), t);
         env.insert("time".to_string(), t);
         env.insert("tick".to_string(), i as f64);
         let value = evaluate(&ast, &env);
@@ -1189,23 +1409,115 @@ fn quadrature_weight(i: usize, n: usize, dt: f64, rule: QuadratureRule) -> f64 {
 
 // ── Kernels ───────────────────────────────────────────────────────────────────
 
-fn z_kernel(sample: &TransformSampleRecord, point: &ComplexPoint) -> ComplexValue {
+fn z_kernel(
+    sample: &TransformSampleRecord,
+    point: &ComplexPoint,
+    _context: &KernelContext,
+) -> ComplexValue {
     let z_to_minus_n = complex_pow_integer(point.as_complex(), -sample.abscissa);
     complex_scale(z_to_minus_n, sample.value)
 }
 
-fn laplace_kernel(sample: &TransformSampleRecord, point: &ComplexPoint) -> ComplexValue {
+fn laplace_kernel(
+    sample: &TransformSampleRecord,
+    point: &ComplexPoint,
+    _context: &KernelContext,
+) -> ComplexValue {
     complex_scale(
         complex_exp(-point.re * sample.abscissa, -point.im * sample.abscissa),
         sample.value * sample.weight,
     )
 }
 
-fn fourier_kernel(sample: &TransformSampleRecord, point: &ComplexPoint) -> ComplexValue {
+fn fourier_kernel(
+    sample: &TransformSampleRecord,
+    point: &ComplexPoint,
+    _context: &KernelContext,
+) -> ComplexValue {
     complex_scale(
         complex_exp(0.0, -point.re * sample.abscissa),
         sample.value * sample.weight,
     )
+}
+
+fn dft_kernel(
+    sample: &TransformSampleRecord,
+    point: &ComplexPoint,
+    context: &KernelContext,
+) -> ComplexValue {
+    let n = context.sample_count as f64;
+    let sign = if context.inverse { 1.0 } else { -1.0 };
+    let scale = if context.normalize { 1.0 / n } else { 1.0 };
+    complex_scale(
+        complex_exp(
+            0.0,
+            sign * std::f64::consts::TAU * point.re * sample.abscissa / n,
+        ),
+        sample.value * scale,
+    )
+}
+
+fn mother_wavelet(kind: WaveletKind, u: f64) -> f64 {
+    match kind {
+        WaveletKind::Haar => {
+            if (0.0..0.5).contains(&u) {
+                1.0
+            } else if (0.5..1.0).contains(&u) {
+                -1.0
+            } else {
+                0.0
+            }
+        }
+        WaveletKind::MexicanHat => (1.0 - u * u) * (-0.5 * u * u).exp(),
+        WaveletKind::Morlet => (5.0 * u).cos() * (-0.5 * u * u).exp(),
+    }
+}
+
+fn wavelet_kernel(
+    sample: &TransformSampleRecord,
+    point: &ComplexPoint,
+    context: &KernelContext,
+) -> ComplexValue {
+    let scale = point.re;
+    let translation = point.im;
+    let u = (sample.abscissa - translation) / scale;
+    complex(
+        sample.value * sample.weight * mother_wavelet(context.wavelet, u) / scale.sqrt(),
+        0.0,
+    )
+}
+
+fn mellin_kernel(
+    sample: &TransformSampleRecord,
+    point: &ComplexPoint,
+    _context: &KernelContext,
+) -> ComplexValue {
+    let x = sample.abscissa;
+    if x <= 0.0 {
+        panic!("mellin-transform requires positive abscissas");
+    }
+    let log_x = x.ln();
+    complex_scale(
+        complex_exp((point.re - 1.0) * log_x, point.im * log_x),
+        sample.value * sample.weight,
+    )
+}
+
+fn radon_kernel(
+    sample: &TransformSampleRecord,
+    point: &ComplexPoint,
+    context: &KernelContext,
+) -> ComplexValue {
+    let x = sample.abscissa;
+    let y = sample.ordinate.unwrap_or(0.0);
+    let theta = point.re;
+    let rho = point.im;
+    let distance = x * theta.cos() + y * theta.sin() - rho;
+    if distance.abs() <= 0.5 * context.radon_line_width {
+        complex(sample.value * sample.weight, 0.0)
+    } else {
+        complex(0.0, 0.0)
+    }
 }
 
 fn validate_z_points(samples: &[TransformSampleRecord], points: &[ComplexPoint]) {
@@ -1239,6 +1551,120 @@ struct ContinuousParams<'a> {
     quadrature: Option<QuadratureRule>,
 }
 
+fn normalize_dft_points(values: Option<&[usize]>, sample_count: usize) -> Vec<ComplexPoint> {
+    let raw: Vec<usize> = match values {
+        Some(v) if !v.is_empty() => v.to_vec(),
+        _ => (0..sample_count).collect(),
+    };
+    raw.iter()
+        .map(|&k| ComplexPoint {
+            re: k as f64,
+            im: 0.0,
+            label: format!("k={k}"),
+        })
+        .collect()
+}
+
+fn normalize_wavelet_points(
+    scales: Option<&[f64]>,
+    translations: Option<&[f64]>,
+) -> Vec<ComplexPoint> {
+    let default_scales = [1.0];
+    let default_translations = [0.0];
+    let scale_values = match scales {
+        Some(v) if !v.is_empty() => v,
+        _ => &default_scales,
+    };
+    let translation_values = match translations {
+        Some(v) if !v.is_empty() => v,
+        _ => &default_translations,
+    };
+    let mut points = Vec::new();
+    for &scale in scale_values {
+        require(Preconditions::positive("wavelet-transform", "scale", scale));
+        for &translation in translation_values {
+            require(Preconditions::finite(
+                "wavelet-transform",
+                "translation",
+                translation,
+            ));
+            points.push(ComplexPoint {
+                re: scale,
+                im: translation,
+                label: format!("a={scale}, b={translation}"),
+            });
+        }
+    }
+    points
+}
+
+fn normalize_radon_points(
+    theta_values: Option<&[f64]>,
+    rho_values: Option<&[f64]>,
+) -> Vec<ComplexPoint> {
+    let default_theta = [0.0];
+    let default_rho = [0.0];
+    let theta_values = match theta_values {
+        Some(v) if !v.is_empty() => v,
+        _ => &default_theta,
+    };
+    let rho_values = match rho_values {
+        Some(v) if !v.is_empty() => v,
+        _ => &default_rho,
+    };
+    let mut points = Vec::new();
+    for &theta in theta_values {
+        require(Preconditions::finite("radon-transform", "theta", theta));
+        for &rho in rho_values {
+            require(Preconditions::finite("radon-transform", "rho", rho));
+            points.push(ComplexPoint {
+                re: theta,
+                im: rho,
+                label: format!("theta={theta}, rho={rho}"),
+            });
+        }
+    }
+    points
+}
+
+fn run_dft_family(
+    kind: TransformKind,
+    sequence: Option<Vec<f64>>,
+    k_values: Option<Vec<usize>>,
+    inverse: Option<bool>,
+    normalize: Option<bool>,
+    tolerance: Option<f64>,
+) -> TransformRunResult {
+    let model = match kind {
+        TransformKind::Fft => "fft-transform",
+        _ => "dft-transform",
+    };
+    let samples = build_dft_samples(model, &sequence);
+    let points = normalize_dft_points(k_values.as_deref(), samples.len());
+    let inverse = inverse.unwrap_or(false);
+    let normalize = normalize.unwrap_or(false);
+    let convention = if kind == TransformKind::Fft {
+        "FFT computes the DFT bins X[k] = sum_n x[n] exp(-i 2pi k n / N); the DES trace keeps each butterfly-equivalent bin contribution visible."
+    } else if inverse {
+        "Inverse DFT-style sum x[n] exp(+i 2pi k n / N), with optional 1/N normalization."
+    } else {
+        "DFT X[k] = sum_n x[n] exp(-i 2pi k n / N), evaluated over finite sample tokens."
+    };
+    run_transform_pipeline(TransformPipelineArgs {
+        kind,
+        convention: convention.to_string(),
+        samples,
+        points,
+        kernel: dft_kernel,
+        kernel_context: KernelContext {
+            inverse,
+            normalize,
+            ..Default::default()
+        },
+        tolerance: tolerance.unwrap_or(1e-9),
+    })
+}
+
 // ── Public entry points ───────────────────────────────────────────────────────
 
 pub fn run_z_transform(params: ZTransformParams) -> TransformRunResult {
@@ -1260,6 +1686,7 @@ pub fn run_z_transform(params: ZTransformParams) -> TransformRunResult {
         samples,
         points,
         kernel: z_kernel,
+        kernel_context: KernelContext::default(),
         tolerance: params.tolerance.unwrap_or(1e-9),
     })
 }
@@ -1291,6 +1718,7 @@ pub fn run_laplace_transform(params: LaplaceTransformParams) -> TransformRunResu
         samples,
         points,
         kernel: laplace_kernel,
+        kernel_context: KernelContext::default(),
         tolerance: params.tolerance.unwrap_or(1e-9),
     })
 }
@@ -1315,6 +1743,123 @@ pub fn run_fourier_transform(params: FourierTransformParams) -> TransformRunResu
         samples,
         points,
         kernel: fourier_kernel,
+        kernel_context: KernelContext::default(),
+        tolerance: params.tolerance.unwrap_or(1e-9),
+    })
+}
+
+pub fn run_dft_transform(params: DftTransformParams) -> TransformRunResult {
+    run_dft_family(
+        TransformKind::Dft,
+        params.sequence,
+        params.k_values,
+        params.inverse,
+        params.normalize,
+        params.tolerance,
+    )
+}
+
+pub fn run_fft_transform(params: FftTransformParams) -> TransformRunResult {
+    run_dft_family(
+        TransformKind::Fft,
+        params.sequence,
+        params.k_values,
+        params.inverse,
+        params.normalize,
+        params.tolerance,
+    )
+}
+
+pub fn run_wavelet_transform(params: WaveletTransformParams) -> TransformRunResult {
+    let continuous = ContinuousParams {
+        samples: &params.samples,
+        expression: &params.expression,
+        constants: &params.constants,
+        t0: params.t0,
+        t1: params.t1,
+        dt: params.dt,
+        quadrature: params.quadrature,
+    };
+    let samples = build_continuous_samples("wavelet-transform", &continuous);
+    let points = normalize_wavelet_points(params.scales.as_deref(), params.translations.as_deref());
+    let mother = params.mother.unwrap_or_default();
+    run_transform_pipeline(TransformPipelineArgs {
+        kind: TransformKind::Wavelet,
+        convention: format!(
+            "W(a,b) = integral f(t) psi((t-b)/a) dt / sqrt(a), mother={}.",
+            mother.as_str()
+        ),
+        samples,
+        points,
+        kernel: wavelet_kernel,
+        kernel_context: KernelContext {
+            wavelet: mother,
+            ..Default::default()
+        },
+        tolerance: params.tolerance.unwrap_or(1e-9),
+    })
+}
+
+pub fn run_mellin_transform(params: MellinTransformParams) -> TransformRunResult {
+    let continuous = ContinuousParams {
+        samples: &params.samples,
+        expression: &params.expression,
+        constants: &params.constants,
+        t0: params.x0,
+        t1: params.x1,
+        dt: params.dx,
+        quadrature: params.quadrature,
+    };
+    let samples = build_continuous_samples("mellin-transform", &continuous);
+    for sample in &samples {
+        require(Preconditions::positive(
+            "mellin-transform",
+            "sample abscissa",
+            sample.abscissa,
+        ));
+    }
+    let points = normalize_complex_points(
+        params.s_values.as_deref(),
+        &[ComplexPointInput {
+            label: Some("s=1".to_string()),
+            re: 1.0,
+            im: Some(0.0),
+        }],
+        "sValues",
+    );
+    run_transform_pipeline(TransformPipelineArgs {
+        kind: TransformKind::Mellin,
+        convention:
+            "M(s) = integral_0^infty x^(s-1) f(x) dx, evaluated over a finite positive window."
+                .to_string(),
+        samples,
+        points,
+        kernel: mellin_kernel,
+        kernel_context: KernelContext::default(),
+        tolerance: params.tolerance.unwrap_or(1e-9),
+    })
+}
+
+pub fn run_radon_transform(params: RadonTransformParams) -> TransformRunResult {
+    let line_width = params.line_width.unwrap_or_else(|| {
+        let dx = params.dx.unwrap_or(1.0);
+        let dy = params.dy.unwrap_or(1.0);
+        dx.max(dy)
+    });
+    let samples = build_radon_samples(&params);
+    let points =
+        normalize_radon_points(params.theta_values.as_deref(), params.rho_values.as_deref());
+    run_transform_pipeline(TransformPipelineArgs {
+        kind: TransformKind::Radon,
+        convention: "R(theta,rho) approximates line integrals by summing image samples inside a finite-width strip."
+            .to_string(),
+        samples,
+        points,
+        kernel: radon_kernel,
+        kernel_context: KernelContext {
+            radon_line_width: line_width,
+            ..Default::default()
+        },
         tolerance: params.tolerance.unwrap_or(1e-9),
     })
 }

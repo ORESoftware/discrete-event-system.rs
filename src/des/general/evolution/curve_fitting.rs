@@ -250,7 +250,7 @@ pub fn hybrid_refine(
 ) -> (Vec<f64>, f64) {
     let shape = decode_shape_genes(genes);
     let (xmat, coeffs) = fit_parametric_coefficients(family, data, &shape, constraints);
-    let residuals = residuals_with_backend(&xmat, &data.y, &[coeffs.clone()]);
+    let residuals = residuals_with_backend(&xmat, &data.y, std::slice::from_ref(&coeffs));
     let mse = residual_loss(&residuals[0], data, FitMetric::Mse, constraints);
     (coeffs, mse)
 }

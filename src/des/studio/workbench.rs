@@ -363,6 +363,19 @@ const TEMPLATE: &str = r####"<!DOCTYPE html>
   var equationSeriesKeys = [];
   var designTrace = [];
   var drag = null;
+  var MAX_EQUATION_STATES = 16;
+  var MAX_EQUATION_STEPS = 5000;
+  var MAX_EQUATION_EXPR = 240;
+  var EQUATION_FUNCTIONS = {
+    sin: Math.sin, cos: Math.cos, tan: Math.tan,
+    asin: Math.asin, acos: Math.acos, atan: Math.atan,
+    sinh: Math.sinh, cosh: Math.cosh, tanh: Math.tanh,
+    exp: Math.exp, log: Math.log, ln: Math.log,
+    sqrt: Math.sqrt, abs: Math.abs, min: Math.min, max: Math.max,
+    pow: Math.pow, floor: Math.floor, ceil: Math.ceil, round: Math.round
+  };
+  var RESERVED_EQUATION_NAMES = { t: true, tick: true, pi: true, e: true };
+  Object.keys(EQUATION_FUNCTIONS).forEach(function (name) { RESERVED_EQUATION_NAMES[name] = true; });
 
   var diagram = document.getElementById("diagram");
   var chart = document.getElementById("chart");
@@ -505,31 +518,49 @@ const TEMPLATE: &str = r####"<!DOCTYPE html>
   }
 
   function simulateEquation(model) {
+    if (!model || typeof model !== "object" || Array.isArray(model)) throw new Error("equation spec must be an object");
+    if (model.kind && model.kind !== "ode") throw new Error("browser preview currently supports kind=ode");
+    if (model.format && model.format !== "json") throw new Error("browser preview currently supports format=json");
     var sim = model.simulation || {};
+    if (!sim || typeof sim !== "object" || Array.isArray(sim)) throw new Error("simulation must be an object");
     var states = model.states || [];
     if (!states.length) throw new Error("states must contain at least one ODE state");
+    if (states.length > MAX_EQUATION_STATES) throw new Error("states is limited to " + MAX_EQUATION_STATES + " entries in the browser preview");
+    var seen = {};
     var names = states.map(function (s, i) {
+      if (!s || typeof s !== "object" || Array.isArray(s)) throw new Error("states[" + i + "] must be an object");
       if (!s.name) throw new Error("states[" + i + "].name is required");
+      assertEquationName(s.name, "states[" + i + "].name");
+      if (seen[s.name]) throw new Error("duplicate state name " + s.name);
+      if (RESERVED_EQUATION_NAMES[s.name]) throw new Error("state name " + s.name + " is reserved");
+      seen[s.name] = true;
       return s.name;
     });
-    var constants = model.constants || {};
-    var t0 = Number(sim.t0 == null ? 0 : sim.t0);
-    var t1 = Number(sim.t1 == null ? 1 : sim.t1);
-    var dt = Math.max(0.000001, Number(sim.dt == null ? 0.1 : sim.dt));
+    var constants = readEquationConstants(model.constants || {}, seen);
+    var t0 = readFiniteNumber(sim.t0 == null ? 0 : sim.t0, "simulation.t0");
+    var t1 = readFiniteNumber(sim.t1 == null ? 1 : sim.t1, "simulation.t1");
+    var dt = readPositiveNumber(sim.dt == null ? 0.1 : sim.dt, "simulation.dt");
     if (!(t1 > t0)) throw new Error("simulation.t1 must be greater than simulation.t0");
     var method = sim.method || "euler";
-    var y = states.map(function (s) { return Number(s.initial || 0); });
+    if (method !== "euler" && method !== "trapezoid") throw new Error("simulation.method must be euler or trapezoid");
+    var y = states.map(function (s, i) { return readFiniteNumber(s.initial == null ? 0 : s.initial, "states[" + i + "].initial"); });
     var funcs = states.map(function (s, i) {
       return compileExpression(s.derivative || s.rhs || "0", "states[" + i + "].derivative");
     });
     var steps = Math.floor((t1 - t0) / dt) + 1;
+    if (!isFinite(steps) || steps < 2) throw new Error("simulation horizon produced no integration steps");
+    if (steps > MAX_EQUATION_STEPS) throw new Error("browser preview is limited to " + MAX_EQUATION_STEPS + " equation steps");
     var framesOut = [];
     function derivAt(t, yy) {
-      var env = {};
+      var env = Object.create(null);
       Object.keys(constants).forEach(function (k) { env[k] = Number(constants[k]); });
       env.t = t;
       names.forEach(function (name, i) { env[name] = yy[i]; });
-      return funcs.map(function (fn) { return Number(fn(env)); });
+      return funcs.map(function (fn, i) {
+        var value = Number(fn(env));
+        if (!isFinite(value)) throw new Error("derivative for " + names[i] + " produced a non-finite value");
+        return value;
+      });
     }
     for (var k = 0; k < steps; k++) {
       var t = t0 + k * dt;
@@ -548,18 +579,174 @@ const TEMPLATE: &str = r####"<!DOCTYPE html>
         } else {
           y = y.map(function (v, i) { return v + dt * dy[i]; });
         }
+        y.forEach(function (v, i) {
+          if (!isFinite(v)) throw new Error("state " + names[i] + " produced a non-finite value");
+        });
       }
     }
     return { frames: framesOut, keys: names, steps: steps, finalState: y, method: method };
   }
 
   function compileExpression(src, label) {
-    var text = String(src || "0");
-    if (!/^[0-9A-Za-z_+\-*/%^().,\s]+$/.test(text)) {
-      throw new Error(label + " contains unsupported characters");
+    var ast = parseEquationExpression(src, label);
+    return function (env) { return evaluateEquationAst(ast, env, label); };
+  }
+  function readFiniteNumber(value, label) {
+    var n = Number(value);
+    if (!isFinite(n)) throw new Error(label + " must be a finite number");
+    return n;
+  }
+  function readPositiveNumber(value, label) {
+    var n = readFiniteNumber(value, label);
+    if (!(n > 0)) throw new Error(label + " must be positive");
+    return n;
+  }
+  function assertEquationName(name, label) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) throw new Error(label + " must be an identifier");
+    if (name === "__proto__" || name === "constructor" || name === "prototype") throw new Error(label + " is reserved");
+  }
+  function readEquationConstants(raw, stateNames) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("constants must be an object");
+    var out = Object.create(null);
+    Object.keys(raw).forEach(function (name) {
+      assertEquationName(name, "constants." + name);
+      if (stateNames[name]) throw new Error("constant " + name + " collides with a state name");
+      if (RESERVED_EQUATION_NAMES[name]) throw new Error("constant " + name + " is reserved");
+      out[name] = readFiniteNumber(raw[name], "constants." + name);
+    });
+    return out;
+  }
+  function parseEquationExpression(src, label) {
+    var text = String(src == null ? "0" : src).trim();
+    if (!text) throw new Error(label + " must be a non-empty expression");
+    if (text.length > MAX_EQUATION_EXPR) throw new Error(label + " is too long for browser preview");
+    var tokens = tokenizeEquation(text, label);
+    var pos = 0;
+    function peek() { return tokens[pos]; }
+    function take(type, value) {
+      var tok = peek();
+      if (tok && tok.type === type && (value == null || tok.value === value)) { pos++; return tok; }
+      return null;
     }
-    var js = text.replace(/\^/g, "**");
-    return new Function("env", "with (Math) { with (env) { return (" + js + "); } }");
+    function expect(type, value) {
+      var tok = take(type, value);
+      if (!tok) throw new Error(label + " has invalid syntax near " + (peek() ? peek().value : "end"));
+      return tok;
+    }
+    function parseAdd() {
+      var node = parseMul();
+      while (peek() && peek().type === "op" && (peek().value === "+" || peek().value === "-")) {
+        var op = take("op").value;
+        node = { type: "binary", op: op, left: node, right: parseMul() };
+      }
+      return node;
+    }
+    function parseMul() {
+      var node = parsePow();
+      while (peek() && peek().type === "op" && (peek().value === "*" || peek().value === "/" || peek().value === "%")) {
+        var op = take("op").value;
+        node = { type: "binary", op: op, left: node, right: parsePow() };
+      }
+      return node;
+    }
+    function parsePow() {
+      var node = parseUnary();
+      if (peek() && peek().type === "op" && peek().value === "^") {
+        take("op", "^");
+        node = { type: "binary", op: "^", left: node, right: parsePow() };
+      }
+      return node;
+    }
+    function parseUnary() {
+      if (peek() && peek().type === "op" && (peek().value === "+" || peek().value === "-")) {
+        return { type: "unary", op: take("op").value, expr: parseUnary() };
+      }
+      return parsePrimary();
+    }
+    function parsePrimary() {
+      var tok = peek();
+      if (!tok) throw new Error(label + " ended unexpectedly");
+      if (take("number")) return { type: "number", value: tok.value };
+      if (take("ident")) {
+        if (take("paren", "(")) {
+          var args = [];
+          if (!take("paren", ")")) {
+            do { args.push(parseAdd()); } while (take("comma", ","));
+            expect("paren", ")");
+          }
+          if (!EQUATION_FUNCTIONS[tok.value]) throw new Error(label + " uses unknown function " + tok.value);
+          return { type: "call", name: tok.value, args: args };
+        }
+        return { type: "var", name: tok.value };
+      }
+      if (take("paren", "(")) {
+        var inner = parseAdd();
+        expect("paren", ")");
+        return inner;
+      }
+      throw new Error(label + " has invalid token " + tok.value);
+    }
+    var ast = parseAdd();
+    if (pos !== tokens.length) throw new Error(label + " has trailing input near " + tokens[pos].value);
+    return ast;
+  }
+  function tokenizeEquation(text, label) {
+    var tokens = [];
+    var i = 0;
+    while (i < text.length) {
+      var ch = text.charAt(i);
+      if (/\s/.test(ch)) { i++; continue; }
+      var number = text.slice(i).match(/^(?:\d+\.?\d*|\.\d+)(?:[eE][+\-]?\d+)?/);
+      if (number) {
+        tokens.push({ type: "number", value: Number(number[0]) });
+        i += number[0].length;
+        continue;
+      }
+      var ident = text.slice(i).match(/^[A-Za-z_][A-Za-z0-9_]*/);
+      if (ident) {
+        tokens.push({ type: "ident", value: ident[0] });
+        i += ident[0].length;
+        continue;
+      }
+      if ("+-*/%^".indexOf(ch) >= 0) { tokens.push({ type: "op", value: ch }); i++; continue; }
+      if (ch === "(" || ch === ")") { tokens.push({ type: "paren", value: ch }); i++; continue; }
+      if (ch === ",") { tokens.push({ type: "comma", value: ch }); i++; continue; }
+      throw new Error(label + " contains unsupported character " + ch);
+    }
+    return tokens;
+  }
+  function evaluateEquationAst(node, env, label) {
+    var value;
+    if (node.type === "number") return node.value;
+    if (node.type === "var") {
+      if (node.name === "pi") return Math.PI;
+      if (node.name === "e") return Math.E;
+      if (Object.prototype.hasOwnProperty.call(env, node.name)) return env[node.name];
+      throw new Error(label + " uses unknown symbol " + node.name);
+    }
+    if (node.type === "unary") {
+      value = evaluateEquationAst(node.expr, env, label);
+      return node.op === "-" ? -value : value;
+    }
+    if (node.type === "binary") {
+      var a = evaluateEquationAst(node.left, env, label);
+      var b = evaluateEquationAst(node.right, env, label);
+      if (node.op === "+") value = a + b;
+      else if (node.op === "-") value = a - b;
+      else if (node.op === "*") value = a * b;
+      else if (node.op === "/") value = a / b;
+      else if (node.op === "%") value = a % b;
+      else value = Math.pow(a, b);
+      if (!isFinite(value)) throw new Error(label + " produced a non-finite value");
+      return value;
+    }
+    if (node.type === "call") {
+      var args = node.args.map(function (arg) { return evaluateEquationAst(arg, env, label); });
+      value = EQUATION_FUNCTIONS[node.name].apply(null, args);
+      if (!isFinite(value)) throw new Error(label + " function " + node.name + " produced a non-finite value");
+      return value;
+    }
+    throw new Error(label + " could not be evaluated");
   }
 
   function optimize() {
@@ -1071,6 +1258,8 @@ mod tests {
         assert!(html.contains("function simulate"));
         assert!(html.contains("id=\"equationEditor\""));
         assert!(html.contains("function simulateEquation"));
+        assert!(html.contains("function parseEquationExpression"));
+        assert!(!html.contains("new Function"));
         assert!(html.contains("id=\"optimizeBtn\""));
         assert!(html.contains("function optimize"));
         assert!(html.contains("id=\"n2Matrix\""));

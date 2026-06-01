@@ -43,6 +43,10 @@ pub fn simulation_catalogue() -> Vec<(&'static str, fn())> {
         ("main_court_mdp", crate::des::main_court_mdp::run),
         ("main_dc_motor", crate::des::main_dc_motor::run),
         ("main_dc_motor_anim", crate::des::main_dc_motor_anim::run),
+        (
+            "main_delivery_planner",
+            crate::des::main_delivery_planner::run,
+        ),
         ("main_dispatch_combo", crate::des::main_dispatch_combo::run),
         (
             "main_electric_circuit",

@@ -2,6 +2,7 @@
 //! (port of `src/des/animation/scenes/`).
 
 pub mod calculus_scene;
+pub mod calculus_of_variations_scene;
 pub mod computer_network_scene;
 pub mod contact_seir_scene;
 pub mod dc_motor_scene;

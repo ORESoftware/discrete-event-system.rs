@@ -1,0 +1,468 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Delivery Scheduler</title>
+<style>
+:root{
+  color-scheme:light;
+  --bg:#e8edf1;--surface:#ffffff;--panel:#f6f8fa;--ink:#172331;--muted:#627282;
+  --line:#c9d4dc;--blue:#1f6feb;--green:#287d55;--amber:#b56b12;--red:#b9473f;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.35 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+button,input,textarea{font:inherit}
+button{border:1px solid var(--line);border-radius:6px;background:#fff;color:var(--ink);padding:7px 10px;cursor:pointer}
+button:hover{border-color:#8ca1b2;background:#f8fbfd}
+button.primary{background:var(--blue);border-color:var(--blue);color:white;font-weight:700}
+button.icon{width:34px;height:34px;padding:0;display:inline-grid;place-items:center;font-weight:800}
+button:disabled{opacity:.55;cursor:wait}
+input,textarea{width:100%;border:1px solid var(--line);border-radius:6px;background:#fff;color:var(--ink);padding:7px 8px}
+textarea{resize:vertical;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.38}
+.shell{min-height:100%;display:grid;grid-template-rows:auto minmax(0,1fr)}
+.topbar{height:58px;display:flex;align-items:center;justify-content:space-between;gap:14px;padding:10px 14px;background:#fbfcfd;border-bottom:1px solid var(--line)}
+.brand{min-width:0}
+.brand h1{font-size:18px;line-height:1;margin:0;letter-spacing:0}
+.brand p{margin:5px 0 0;color:var(--muted);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.top-actions{display:flex;gap:8px;align-items:center;min-width:0}
+.user-chip{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--line);background:#fff;border-radius:999px;padding:6px 9px;color:var(--muted);font-size:12px;max-width:260px}
+.user-dot{width:8px;height:8px;border-radius:50%;background:var(--green);flex:0 0 auto}
+.user-chip span:last-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.layout{min-height:0;display:grid;grid-template-columns:390px minmax(0,1fr)}
+aside{min-height:0;overflow:auto;background:var(--panel);border-right:1px solid var(--line);padding:12px}
+main{min-height:0;display:grid;grid-template-rows:auto auto minmax(0,1fr) auto;background:#fff}
+.section{border-bottom:1px solid var(--line);padding:0 0 14px;margin-bottom:14px}
+.section:last-child{border-bottom:0;margin-bottom:0}
+h2{margin:0 0 9px;color:#3b4c5e;font-size:12px;text-transform:uppercase;letter-spacing:.06em}
+label{display:block;color:var(--muted);font-size:12px;margin:0 0 4px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}
+.manifest{min-height:258px}
+.toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.metrics{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));border-bottom:1px solid var(--line);background:var(--line);gap:1px}
+.metric{background:#fbfcfd;padding:9px 11px;min-width:0}
+.metric span{display:block;color:var(--muted);font-size:11px;text-transform:uppercase;white-space:nowrap}
+.metric b{display:block;margin-top:2px;font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tabs{display:flex;border-bottom:1px solid var(--line);background:#f7fafc}
+.tab{border:0;border-right:1px solid var(--line);border-radius:0;background:transparent;color:var(--muted);padding:10px 14px}
+.tab.active{background:#fff;color:var(--ink);box-shadow:inset 0 -2px 0 var(--blue)}
+.view{position:relative;min-height:0;overflow:hidden;background:#fff}
+.pane{display:none;height:100%;min-height:0}
+.pane.active{display:block}
+#routePane{position:relative}
+#routeFrame{width:100%;height:100%;border:0;display:block;background:#eef3f6}
+#itineraryPane{padding:14px;display:none;grid-template-rows:auto minmax(0,1fr)}
+#itineraryPane.active{display:grid}
+#itineraryText{min-height:0;height:100%;resize:none;font-size:13px}
+#solverPane{padding:14px;overflow:auto}
+.solver-grid{display:grid;grid-template-columns:minmax(220px,1fr) minmax(260px,1.2fr);gap:12px}
+.trace,.notes{border:1px solid var(--line);border-radius:6px;background:#fbfcfd;padding:10px;min-height:180px;white-space:pre-wrap;color:#435467;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
+.hidden{display:none!important}
+#status{min-height:38px;border-top:1px solid var(--line);background:#fbfcfd;color:var(--muted);padding:9px 14px;font-size:13px}
+#status.ok{color:var(--green)}#status.err{color:var(--red)}
+@media (max-width:980px){.layout{grid-template-columns:1fr}aside{max-height:48vh;border-right:0;border-bottom:1px solid var(--line)}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.solver-grid{grid-template-columns:1fr}.topbar{height:auto;align-items:flex-start;flex-direction:column}.top-actions{width:100%;justify-content:space-between}.user-chip{max-width:55vw}}
+</style>
+</head>
+<body>
+<div class="shell">
+  <header class="topbar">
+    <div class="brand">
+      <h1>Delivery Scheduler</h1>
+      <p id="routeSummary">Time-window route planning</p>
+    </div>
+    <div class="top-actions">
+      <div class="user-chip"><span class="user-dot"></span><span id="userChip">dispatcher@local</span></div>
+      <button type="button" id="copyItinerary" data-testid="copy-itinerary">Copy</button>
+      <button type="button" class="primary" id="solveBtn" data-testid="solve-delivery">Solve</button>
+    </div>
+  </header>
+  <div class="layout">
+    <aside>
+      <div class="section">
+        <h2>Manifest</h2>
+        <textarea class="manifest" id="manifestText" data-testid="manifest-input" spellcheck="false"></textarea>
+      </div>
+      <div class="section">
+        <h2>Route Settings</h2>
+        <div class="grid3">
+          <div><label>Depart</label><input id="departTime" value="08:00"></div>
+          <div><label>Speed mph</label><input id="speedMph" type="number" min="1" step="1" value="28"></div>
+          <div><label>Service min</label><input id="serviceMinutes" type="number" min="0" step="1" value="6"></div>
+        </div>
+      </div>
+      <div class="section">
+        <h2>Solver</h2>
+        <div class="grid2">
+          <div><label>Time limit s</label><input id="solverSeconds" type="number" min="1" value="10"></div>
+          <div><label>Max nodes</label><input id="solverNodes" type="number" min="1" value="30000"></div>
+        </div>
+        <div class="grid2" style="margin-top:8px">
+          <div><label>Max ticks</label><input id="solverTicks" type="number" min="1" value="120000"></div>
+          <div><label>LP iters</label><input id="solverLpIters" type="number" min="1" value="8000"></div>
+        </div>
+      </div>
+      <div class="section">
+        <h2>Address Tools</h2>
+        <div class="toolbar">
+          <button type="button" id="sampleBtn">Sample</button>
+          <button type="button" id="parseBtn">Parse</button>
+          <button type="button" id="geocodeBtn">Geocode</button>
+        </div>
+      </div>
+    </aside>
+    <main>
+      <div class="metrics">
+        <div class="metric"><span>Stops</span><b id="mStops">-</b></div>
+        <div class="metric"><span>Miles</span><b id="mMiles">-</b></div>
+        <div class="metric"><span>Drive</span><b id="mDrive">-</b></div>
+        <div class="metric"><span>Wait</span><b id="mWait">-</b></div>
+        <div class="metric"><span>Vars</span><b id="mVars">-</b></div>
+        <div class="metric"><span>Status</span><b id="mStatus">ready</b></div>
+      </div>
+      <div class="tabs">
+        <button type="button" class="tab active" data-tab="route">Route</button>
+        <button type="button" class="tab" data-tab="itinerary">Itinerary</button>
+        <button type="button" class="tab" data-tab="solver">Solver</button>
+      </div>
+      <div class="view">
+        <div class="pane active" id="routePane"><iframe id="routeFrame" title="route animation"></iframe></div>
+        <div class="pane" id="itineraryPane"><textarea id="itineraryText" readonly></textarea></div>
+        <div class="pane" id="solverPane">
+          <div class="solver-grid">
+            <div class="notes" id="solverNotes">No solve yet.</div>
+            <div class="trace" id="solverTrace">No trace yet.</div>
+          </div>
+        </div>
+      </div>
+      <div id="status">Ready.</div>
+    </main>
+  </div>
+</div>
+<script type="application/json" id="default-config">__DEFAULT_DELIVERY_CONFIG__</script>
+<script>
+const $ = id => document.getElementById(id);
+const defaultConfig = JSON.parse($('default-config').textContent);
+let state = structuredClone(defaultConfig);
+let lastResponse = null;
+let activeTab = 'route';
+
+function pad(n){return String(n).padStart(2,'0')}
+function fmt(min){min=Math.max(0,Math.round(min));return pad(Math.floor(min/60)%24)+':'+pad(min%60)}
+function parseTime(raw){
+  let s=String(raw||'').trim().toLowerCase();
+  if(!s)return null;
+  const pm=s.endsWith('pm'), am=s.endsWith('am');
+  if(pm||am)s=s.slice(0,-2).trim();
+  const parts=s.split(':');
+  let h=Number(parts[0]), m=parts.length>1?Number(parts[1]):0;
+  if(!Number.isFinite(h)||!Number.isFinite(m)||m<0||m>=60)return null;
+  if(pm&&h<12)h+=12;if(am&&h===12)h=0;
+  if(h<0||h>=24)return null;
+  return h*60+m;
+}
+function parseWindow(raw){
+  const s=String(raw||'').replace(/[–—]/g,'-').replace(/\s+to\s+/i,'-');
+  if(!s.includes('-'))return null;
+  const [a,b]=s.split('-');
+  const start=parseTime(a), end=parseTime(b);
+  if(start==null||end==null)return null;
+  return [start,end];
+}
+function coordFromText(text){
+  const m=String(text).match(/(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)/);
+  if(!m)return null;
+  const lat=Number(m[1]), lon=Number(m[2]);
+  if(Math.abs(lat)>90||Math.abs(lon)>180)return null;
+  return {lat,lon};
+}
+function serviceFromText(text){
+  const m=String(text).toLowerCase().match(/\b(?:service|svc)\s*=?\s*(\d+(?:\.\d+)?)/);
+  return m?Number(m[1]):null;
+}
+function splitLine(line){
+  if(line.includes('|'))return line.split('|').map(s=>s.trim()).filter(Boolean);
+  if((line.match(/;/g)||[]).length>=2)return line.split(';').map(s=>s.trim()).filter(Boolean);
+  return line.split(',').map(s=>s.trim()).filter(Boolean);
+}
+function hashText(s){
+  let h=2166136261;
+  for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,16777619)}
+  return h>>>0;
+}
+function pseudoCoord(seed, depot, idx){
+  const h=hashText(seed+'#'+idx), a=(h%360)*Math.PI/180, r=0.018+((h>>>8)%1000)/1000*0.045;
+  return {lat:depot.lat+Math.sin(a)*r, lon:depot.lon+Math.cos(a)*r};
+}
+function cleanAddress(parts){
+  return parts.slice(1).filter(p=>!coordFromText(p)&&!parseWindow(p)&&parseTime(p)==null&&serviceFromText(p)==null).join(', ');
+}
+function parseManifest(text){
+  const lines=String(text||'').split(/\n+/).map(s=>s.trim()).filter(s=>s&&!s.startsWith('#'));
+  let depot=null, stops=[];
+  for(const line of lines){
+    const parts=splitLine(line);
+    const label=parts[0]||('Stop '+(stops.length+1));
+    const isDepot=/^depot\b/i.test(label);
+    const coords=parts.map(coordFromText).find(Boolean);
+    if(isDepot){
+      const partDepart=parts.map(parseTime).find(v=>v!=null);
+      const controlDepart=parseTime($('departTime').value);
+      depot={label,address:cleanAddress(parts),lat:coords?coords.lat:30.2747,lon:coords?coords.lon:-97.7404,depart:partDepart!=null?partDepart:(controlDepart!=null?controlDepart:480),synthetic:!coords};
+      continue;
+    }
+    const win=parts.map(parseWindow).find(Boolean);
+    if(!win)throw new Error(label+' is missing a time window');
+    const baseDepot=depot||{lat:30.2747,lon:-97.7404};
+    const pc=coords||pseudoCoord(line,baseDepot,stops.length);
+    stops.push({
+      id:'S'+(stops.length+1),label,address:cleanAddress(parts)||label,lat:pc.lat,lon:pc.lon,
+      windowStart:win[0],windowEnd:win[1],synthetic:!coords,
+      serviceMinutes:serviceFromText(line)!=null?serviceFromText(line):(Number($('serviceMinutes').value)||6)
+    });
+  }
+  if(!depot)throw new Error('Depot line is required');
+  if(!stops.length)throw new Error('At least one customer stop is required');
+  return {depot,stops};
+}
+function syncStateFromControls(){
+  const parsed=parseManifest($('manifestText').value);
+  state.userId = state.userId || 'dispatcher@local';
+  state.depotLabel = parsed.depot.label || 'Depot';
+  state.depotAddress = parsed.depot.address || parsed.depot.label || 'Depot';
+  state.depotLat = parsed.depot.lat;
+  state.depotLon = parsed.depot.lon;
+  state.depotSynthetic = !!parsed.depot.synthetic;
+  const controlDepart=parseTime($('departTime').value);
+  state.departTime = controlDepart!=null?controlDepart:(parsed.depot.depart!=null?parsed.depot.depart:480);
+  state.averageSpeedMph = Math.max(1, Number($('speedMph').value)||28);
+  state.defaultServiceMinutes = Math.max(0, Number($('serviceMinutes').value)||6);
+  state.solverTimeLimitMs = Math.max(100, (Number($('solverSeconds').value)||10)*1000);
+  state.solverMaxNodes = Math.max(1, Number($('solverNodes').value)||30000);
+  state.solverMaxTicks = Math.max(1, Number($('solverTicks').value)||120000);
+  state.solverLpMaxIters = Math.max(1, Number($('solverLpIters').value)||8000);
+  state.stops = parsed.stops;
+  state.rawManifest = $('manifestText').value;
+  $('userChip').textContent = state.userId || 'dispatcher@local';
+}
+function renderControls(){
+  $('manifestText').value = state.rawManifest || '';
+  $('departTime').value = fmt(state.departTime || 480);
+  $('speedMph').value = Math.round(state.averageSpeedMph || 28);
+  $('serviceMinutes').value = Math.round(state.defaultServiceMinutes || 6);
+  $('solverSeconds').value = Math.round((state.solverTimeLimitMs || 10000)/1000);
+  $('solverNodes').value = state.solverMaxNodes || 30000;
+  $('solverTicks').value = state.solverMaxTicks || 120000;
+  $('solverLpIters').value = state.solverLpMaxIters || 8000;
+  $('userChip').textContent = state.userId || 'dispatcher@local';
+}
+function stateToManifest(){
+  const lines=[`${state.depotLabel||'Depot'} | ${state.depotAddress||state.depotLabel||'Depot'} | ${Number(state.depotLat).toFixed(6)},${Number(state.depotLon).toFixed(6)} | ${fmt(state.departTime||480)}`];
+  (state.stops||[]).forEach(s=>lines.push(`${s.label} | ${s.address||s.label} | ${fmt(s.windowStart)}-${fmt(s.windowEnd)} | ${Number(s.lat).toFixed(6)},${Number(s.lon).toFixed(6)} | service=${s.serviceMinutes||state.defaultServiceMinutes||0}`));
+  return lines.join('\n');
+}
+function setStatus(kind,msg){const el=$('status');el.className=kind||'';el.textContent=msg;$('mStatus').textContent=kind==='err'?'error':(kind==='ok'?'ok':'ready')}
+function setBusy(on){$('solveBtn').disabled=on}
+function canUseApi(){return /^https?:/.test(location.protocol)&&location.pathname.includes('/delivery/planner')}
+function apiPath(suffix){return location.pathname.replace(/\/delivery\/planner.*$/,'')+'/delivery/planner/'+suffix}
+
+function hav(a,b){
+  const R=3958.7613, dLat=(b.lat-a.lat)*Math.PI/180, dLon=(b.lon-a.lon)*Math.PI/180;
+  const lat1=a.lat*Math.PI/180, lat2=b.lat*Math.PI/180;
+  const h=Math.sin(dLat/2)**2+Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLon/2)**2;
+  return 2*R*Math.asin(Math.sqrt(h));
+}
+function matrices(){
+  const nodes=[{label:state.depotLabel,address:state.depotAddress,lat:state.depotLat,lon:state.depotLon,serviceMinutes:0,windowStart:state.departTime,windowEnd:1440}].concat(state.stops);
+  const n=nodes.length, dist=Array.from({length:n},()=>Array(n).fill(0)), travel=Array.from({length:n},()=>Array(n).fill(0));
+  for(let i=0;i<n;i++)for(let j=0;j<n;j++)if(i!==j){dist[i][j]=hav(nodes[i],nodes[j]);travel[i][j]=dist[i][j]/Math.max(1,state.averageSpeedMph)*60}
+  return {nodes,dist,travel};
+}
+function routeFeasible(route,m){
+  let clock=state.departTime, cur=0, visits=[], legs=[], totalDistance=0,totalTravel=0,totalWait=0;
+  for(const stopIdx of route){
+    const next=stopIdx+1, stop=m.nodes[next], tr=m.travel[cur][next], d=m.dist[cur][next];
+    const raw=clock+tr, arrival=Math.max(raw,stop.windowStart), wait=Math.max(0,arrival-raw);
+    if(arrival>stop.windowEnd+1e-6)return null;
+    const depart=arrival+(stop.serviceMinutes!=null?stop.serviceMinutes:(state.defaultServiceMinutes!=null?state.defaultServiceMinutes:0));
+    legs.push({from:m.nodes[cur].label,to:stop.label,distance:d,travelMinutes:tr});
+    visits.push({stopIndex:stopIdx,label:stop.label,address:stop.address,arrival:Math.round(arrival),depart:Math.round(depart),windowStart:stop.windowStart,windowEnd:stop.windowEnd,arrivalText:fmt(arrival),departText:fmt(depart),windowText:fmt(stop.windowStart)+'-'+fmt(stop.windowEnd),distanceFromPrevious:d,travelMinutesFromPrevious:tr,waitMinutes:wait});
+    totalDistance+=d;totalTravel+=tr;totalWait+=wait;clock=depart;cur=next;
+  }
+  legs.push({from:m.nodes[cur].label,to:m.nodes[0].label,distance:m.dist[cur][0],travelMinutes:m.travel[cur][0]});
+  totalDistance+=m.dist[cur][0];totalTravel+=m.travel[cur][0];
+  return {visits,legs,totalDistance,totalTravelMinutes:totalTravel,totalWaitMinutes:totalWait,returnTime:clock+m.travel[cur][0]};
+}
+function localSolve(){
+  const m=matrices(), n=state.stops.length;
+  let bestRoute=null,bestDistance=Infinity;
+  if(n<=9){
+    const used=Array(n).fill(false), route=[];
+    function dfs(cur,clock,distSoFar){
+      if(route.length===n){const total=distSoFar+m.dist[cur][0];if(total<bestDistance){bestDistance=total;bestRoute=route.slice()}return}
+      for(let s=0;s<n;s++){
+        if(used[s])continue;
+        const next=s+1, stop=m.nodes[next], raw=clock+m.travel[cur][next], arrival=Math.max(raw,stop.windowStart);
+        if(arrival>stop.windowEnd+1e-6)continue;
+        const nd=distSoFar+m.dist[cur][next];if(nd>=bestDistance)continue;
+        used[s]=true;route.push(s);dfs(next,arrival+(stop.serviceMinutes||0),nd);route.pop();used[s]=false;
+      }
+    }
+    dfs(0,state.departTime,0);
+  } else {
+    const remaining=new Set(Array.from({length:n},(_,i)=>i));let cur=0,clock=state.departTime;bestRoute=[];
+    while(remaining.size){
+      let pick=null,pickScore=Infinity;
+      for(const s of remaining){const node=s+1, raw=clock+m.travel[cur][node], arrival=Math.max(raw,m.nodes[node].windowStart);if(arrival>m.nodes[node].windowEnd)continue;const score=m.dist[cur][node]+(m.nodes[node].windowEnd-arrival)*.001;if(score<pickScore){pick=s;pickScore=score}}
+      if(pick==null){bestRoute=null;break}
+      const node=pick+1, arrival=Math.max(clock+m.travel[cur][node],m.nodes[node].windowStart);
+      bestRoute.push(pick);remaining.delete(pick);clock=arrival+(m.nodes[node].serviceMinutes||0);cur=node;
+    }
+  }
+  if(!bestRoute)throw new Error('No route can satisfy these time windows');
+  const itin=routeFeasible(bestRoute,m);if(!itin)throw new Error('No route can satisfy these time windows');
+  const variables=n*(n+1)+n, constraints=n*4+4+n*2+n+n*(n-1);
+  const itineraryText=buildItineraryText(itin,m);
+  return {
+    ok:true,error:null,solverStatus:'local-preview',solverKind:'browser-exact-route',
+    usedFallback:true,fallbackReason:'Browser-side preview; serve the Rust endpoint for the in-house IP/MIP solve.',
+    inHouseOnly:true,usesExternalSolvers:false,elapsedMs:0,nodesExplored:0,lpSolves:0,
+    numVariables:variables,numConstraints:constraints,objectiveDistance:itin.totalDistance,
+    totalDistance:itin.totalDistance,totalTravelMinutes:itin.totalTravelMinutes,totalWaitMinutes:itin.totalWaitMinutes,
+    route:bestRoute,visits:itin.visits,legs:itin.legs,itineraryText,
+    solverNotes:[
+      `Built a directed binary route model with ${variables} variables and ${constraints} constraint rows.`,
+      'Objective minimized route miles; arrival-time rows enforce every customer delivery window.',
+      'Browser preview used exact enumeration for small manifests or greedy repair for larger manifests.'
+    ],
+    solverTrace:[{nodeId:'preview',depth:0,action:'incumbent',lpZ:itin.totalDistance,reason:'feasible delivery route accepted',fractional:[]}],
+    routeAnimation:buildRouteAnimation(m,bestRoute,itin)
+  };
+}
+function buildItineraryText(itin,m){
+  const lines=[`Delivery itinerary for ${state.userId||'dispatcher@local'}`,`Depart ${state.depotLabel} at ${fmt(state.departTime)}`];
+  itin.visits.forEach((v,i)=>{lines.push(`${i+1}. ${v.label} arrive ${v.arrivalText} depart ${v.departText} window ${v.windowText}  (${v.distanceFromPrevious.toFixed(2)} mi, ${v.travelMinutesFromPrevious.toFixed(0)} min travel, ${v.waitMinutes.toFixed(0)} min wait)`);lines.push('   '+v.address)});
+  lines.push(`Return to ${state.depotLabel} at ${fmt(itin.returnTime)}`);
+  lines.push(`Totals: ${itin.totalDistance.toFixed(2)} mi, ${itin.totalTravelMinutes.toFixed(0)} min drive, ${itin.totalWaitMinutes.toFixed(0)} min wait`);
+  return lines.join('\n');
+}
+function bounds(nodes){
+  const lats=nodes.map(n=>n.lat), lons=nodes.map(n=>n.lon);
+  const minLat=Math.min(...lats),maxLat=Math.max(...lats),minLon=Math.min(...lons),maxLon=Math.max(...lons);
+  const latPad=Math.max(.01,(maxLat-minLat)*.16),lonPad=Math.max(.01,(maxLon-minLon)*.16);
+  return {minLat:minLat-latPad,maxLat:maxLat+latPad,minLon:minLon-lonPad,maxLon:maxLon+lonPad};
+}
+function project(n,b){return {x:64+(n.lon-b.minLon)/Math.max(1e-9,b.maxLon-b.minLon)*688,y:612-(n.lat-b.minLat)/Math.max(1e-9,b.maxLat-b.minLat)*512}}
+function routeFrame(m,route,itin,activeLeg,veh,caption){
+  const b=bounds(m.nodes), shapes=[];
+  shapes.push({kind:'rect',x:0,y:0,w:1160,h:680,fill:'#eef3f6'});
+  shapes.push({kind:'rect',x:28,y:28,w:760,h:624,rx:8,fill:'#fbfdff',stroke:'#c6d3dd',strokeWidth:1});
+  shapes.push({kind:'rect',x:812,y:28,w:320,h:624,rx:8,fill:'#ffffff',stroke:'#c6d3dd',strokeWidth:1});
+  const order=[0].concat(route.map(i=>i+1),[0]);
+  for(let i=0;i<order.length-1;i++){const a=project(m.nodes[order[i]],b),c=project(m.nodes[order[i+1]],b);shapes.push({kind:'line',x1:a.x,y1:a.y,x2:c.x,y2:c.y,stroke:i<activeLeg?'#2e7d59':(i===activeLeg?'#1f6feb':'#99a9b5'),strokeWidth:i===activeLeg?4:2.2,opacity:i<=activeLeg?.95:.55,dasharray:i>activeLeg?'7,5':undefined})}
+  m.nodes.forEach((node,idx)=>{const p=project(node,b),done=idx>0&&route.findIndex(r=>r+1===idx)<activeLeg&&route.findIndex(r=>r+1===idx)>=0;shapes.push({kind:'circle',x:p.x,y:p.y,r:idx===0?12:9,fill:idx===0?'#243447':(done?'#2e7d59':'#f3a712'),stroke:'#fff',strokeWidth:2,title:node.label});shapes.push({kind:'text',x:p.x+13,y:p.y-10,text:node.label,fontSize:12,fill:'#243447',fontWeight:'bold'})});
+  const vp=project(veh,b);shapes.push({kind:'circle',x:vp.x,y:vp.y,r:13,fill:'#1f6feb',stroke:'#fff',strokeWidth:3,title:'vehicle'});
+  shapes.push({kind:'text',x:50,y:58,text:`Depart ${fmt(state.departTime)} · ${state.averageSpeedMph.toFixed(0)} mph · ${route.length} stops`,fontSize:16,fill:'#243447',fontWeight:'bold'});
+  shapes.push({kind:'text',x:832,y:60,text:'Itinerary',fontSize:16,fill:'#243447',fontWeight:'bold'});
+  let y=92;itin.visits.slice(0,10).forEach((v,i)=>{const active=i===activeLeg&&activeLeg<itin.visits.length;shapes.push({kind:'rect',x:832,y:y-18,w:280,h:44,rx:6,fill:active?'#eaf2ff':'#f7fafc',stroke:active?'#1f6feb':'#d8e1e8',strokeWidth:1});shapes.push({kind:'text',x:846,y,text:`${i+1}. ${v.label}  ${v.arrivalText}`,fontSize:12,fill:'#243447',fontWeight:'bold'});shapes.push({kind:'text',x:846,y:y+17,text:`${v.windowText}  ${v.distanceFromPrevious.toFixed(1)} mi`,fontSize:11,fill:'#62727f'});y+=54});
+  const leg=itin.legs[activeLeg];if(leg)shapes.push({kind:'text',x:50,y:626,text:`${leg.from} -> ${leg.to}   ${leg.distance.toFixed(2)} mi / ${leg.travelMinutes.toFixed(0)} min`,fontSize:13,fill:'#334456'});
+  shapes.push({kind:'text',x:1112,y:632,text:caption,fontSize:11,fill:'#62727f',anchor:'end'});
+  return {t:activeLeg,tick:activeLeg,caption,shapes};
+}
+function buildRouteAnimation(m,route,itin){
+  const order=[0].concat(route.map(i=>i+1),[0]), frames=[];let tick=0;
+  for(let leg=0;leg<order.length-1;leg++){
+    const a=m.nodes[order[leg]], c=m.nodes[order[leg+1]];
+    for(let step=0;step<8;step++){const alpha=step/8, veh={lat:a.lat+(c.lat-a.lat)*alpha,lon:a.lon+(c.lon-a.lon)*alpha};const caption=order[leg+1]===0?`returning to ${m.nodes[0].label}`:`leg ${leg+1}: ${a.label} -> ${c.label}`;const f=routeFrame(m,route,itin,leg,veh,caption);f.t=tick;f.tick=tick;frames.push(f);tick++}
+  }
+  return {width:1160,height:680,fps:6,title:'Delivery time-window route',subtitle:`${route.length} stops · ${state.userId||'dispatcher@local'}`,background:'#eef3f6',frames};
+}
+function buildMinimalPlayer(anim){
+  const safe=JSON.stringify(anim||{}).replace(/</g,'\\u003c');
+  return `<!doctype html><html><head><meta charset="utf-8"><style>body{margin:0;background:${anim.background||'#eef3f6'};font-family:system-ui,sans-serif;color:#172331}svg{width:100%;height:calc(100vh - 52px);display:block}.ctrl{height:52px;display:flex;align-items:center;gap:8px;padding:8px 12px;background:#fbfcfd;border-top:1px solid #c9d4dc}button{border:1px solid #c9d4dc;border-radius:6px;background:#fff;padding:6px 10px;cursor:pointer}input{flex:1;min-width:120px}.info{min-width:190px;color:#627282;font-size:12px}</style></head><body><svg id="stage" viewBox="0 0 ${anim.width||100} ${anim.height||100}" preserveAspectRatio="xMidYMid meet"></svg><div class="ctrl"><button id="play">Play</button><button id="back">Back</button><button id="next">Next</button><input id="scrub" type="range" min="0" max="${Math.max(0,(anim.frames||[]).length-1)}" value="0"><span class="info" id="info"></span></div><script type="application/json" id="anim">${safe}<\/script><script>
+const ANIM=JSON.parse(document.getElementById('anim').textContent),NS='http://www.w3.org/2000/svg',stage=document.getElementById('stage');let fi=0,playing=false,last=0;
+function attr(el,k,v){if(v!==undefined&&v!==null)el.setAttribute(k,v)}
+function addTitle(el,t){if(!t)return;const n=document.createElementNS(NS,'title');n.textContent=t;el.appendChild(n)}
+function render(i){fi=Math.max(0,Math.min((ANIM.frames||[]).length-1,i|0));stage.replaceChildren();const f=(ANIM.frames||[])[fi]||{};(f.shapes||[]).forEach(sh=>{let el;if(sh.kind==='circle'){el=document.createElementNS(NS,'circle');attr(el,'cx',sh.x);attr(el,'cy',sh.y);attr(el,'r',sh.r);attr(el,'fill',sh.fill||'none')}else if(sh.kind==='rect'){el=document.createElementNS(NS,'rect');attr(el,'x',sh.x);attr(el,'y',sh.y);attr(el,'width',sh.w);attr(el,'height',sh.h);attr(el,'rx',sh.rx);attr(el,'fill',sh.fill||'none')}else if(sh.kind==='line'){el=document.createElementNS(NS,'line');attr(el,'x1',sh.x1);attr(el,'y1',sh.y1);attr(el,'x2',sh.x2);attr(el,'y2',sh.y2);attr(el,'fill','none')}else if(sh.kind==='path'){el=document.createElementNS(NS,'path');attr(el,'d',sh.d);attr(el,'fill',sh.fill||'none')}else if(sh.kind==='text'){el=document.createElementNS(NS,'text');attr(el,'x',sh.x);attr(el,'y',sh.y);attr(el,'fill',sh.fill||'#172331');attr(el,'font-size',sh.fontSize||12);attr(el,'text-anchor',sh.anchor||'start');attr(el,'font-weight',sh.fontWeight);el.textContent=sh.text||''}else{return}attr(el,'stroke',sh.stroke);attr(el,'stroke-width',sh.strokeWidth);attr(el,'stroke-dasharray',sh.dasharray);attr(el,'opacity',sh.opacity);addTitle(el,sh.title);stage.appendChild(el)});document.getElementById('scrub').value=fi;document.getElementById('info').textContent=(fi+1)+'/'+((ANIM.frames||[]).length||1)+(f.caption?' - '+f.caption:'')}
+document.getElementById('play').onclick=()=>{playing=!playing;document.getElementById('play').textContent=playing?'Pause':'Play'};document.getElementById('back').onclick=()=>render(fi-1);document.getElementById('next').onclick=()=>render(fi+1);document.getElementById('scrub').oninput=e=>render(+e.target.value);function tick(ts){if(playing&&ts-last>1000/(ANIM.fps||6)){render(fi+1>=(ANIM.frames||[]).length?0:fi+1);last=ts}requestAnimationFrame(tick)}render(0);requestAnimationFrame(tick);
+<\/script></body></html>`;
+}
+function showAnimation(anim){$('routeFrame').src=URL.createObjectURL(new Blob([buildMinimalPlayer(anim)],{type:'text/html'}))}
+function receiveSolution(data){
+  lastResponse=data;
+  $('mStops').textContent=String((data.route||[]).length);
+  $('mMiles').textContent=(data.totalDistance||0).toFixed(1);
+  $('mDrive').textContent=(data.totalTravelMinutes||0).toFixed(0)+'m';
+  $('mWait').textContent=(data.totalWaitMinutes||0).toFixed(0)+'m';
+  $('mVars').textContent=String(data.numVariables||'-');
+  $('routeSummary').textContent=`${(data.route||[]).length} stops · ${(data.totalDistance||0).toFixed(1)} mi · ${data.solverStatus||'ready'}`;
+  $('itineraryText').value=data.itineraryText||'';
+  $('solverNotes').textContent=(data.solverNotes||[]).join('\n');
+  $('solverTrace').textContent=(data.solverTrace||[]).map(e=>`${e.action} node=${e.nodeId} depth=${e.depth} z=${e.lpZ==null?'':e.lpZ} ${e.reason||''}`).join('\n')||'No trace.';
+  showAnimation(data.routeAnimation);
+}
+async function solve(){
+  try{syncStateFromControls()}catch(e){setStatus('err',e.message);return}
+  setBusy(true);setStatus('', 'Solving...');
+  try{
+    let data;
+    if(canUseApi()){
+      const r=await fetch(apiPath('solve'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(state)});
+      data=await r.json();
+    } else {
+      data=localSolve();
+    }
+    if(!data.ok)throw new Error(data.error||'solve failed');
+    receiveSolution(data);
+    setStatus('ok', `${data.solverStatus}: ${(data.totalDistance||0).toFixed(1)} mi, ${(data.totalTravelMinutes||0).toFixed(0)} min drive.`);
+  }catch(e){setStatus('err','Solve failed: '+e.message)}
+  finally{setBusy(false)}
+}
+async function copyItinerary(){
+  const text=$('itineraryText').value || lastResponse?.itineraryText || '';
+  if(!text){setStatus('err','No itinerary to copy.');return}
+  try{await navigator.clipboard.writeText(text);setStatus('ok','Itinerary copied.')}
+  catch(_){$('itineraryText').focus();$('itineraryText').select();document.execCommand('copy');setStatus('ok','Itinerary copied.')}
+}
+async function geocodeOne(address){
+  const url='https://nominatim.openstreetmap.org/search?format=json&limit=1&q='+encodeURIComponent(address);
+  const rows=await fetch(url,{headers:{'Accept':'application/json'}}).then(r=>r.json());
+  if(!Array.isArray(rows)||!rows.length)return null;
+  const lat=Number(rows[0].lat), lon=Number(rows[0].lon);
+  return Number.isFinite(lat)&&Number.isFinite(lon)?{lat,lon}:null;
+}
+async function geocodeMissing(){
+  try{syncStateFromControls()}catch(e){setStatus('err',e.message);return}
+  if(!confirm('Geocode pasted addresses with OpenStreetMap Nominatim?'))return;
+  setStatus('', 'Geocoding addresses...');
+  let changed=0;
+  if(state.depotSynthetic){
+    const depotGeo=await geocodeOne(state.depotAddress||state.depotLabel);
+    if(depotGeo){state.depotLat=depotGeo.lat;state.depotLon=depotGeo.lon;state.depotSynthetic=false;changed++}
+    await new Promise(r=>setTimeout(r,1100));
+  }
+  for(let i=0;i<state.stops.length;i++){
+    const s=state.stops[i];
+    if(!s.synthetic)continue;
+    const geo=await geocodeOne(s.address||s.label);
+    if(geo){s.lat=geo.lat;s.lon=geo.lon;s.synthetic=false;changed++}
+    if(i+1<state.stops.length)await new Promise(r=>setTimeout(r,1100));
+  }
+  state.rawManifest=stateToManifest();
+  $('manifestText').value=state.rawManifest;
+  setStatus(changed?'ok':'err',changed?`Geocoded ${changed} address${changed===1?'':'es'}.`:'No geocoding matches found.');
+}
+function parseOnly(){try{syncStateFromControls();$('mStops').textContent=String(state.stops.length);setStatus('ok',`${state.stops.length} stops parsed.`)}catch(e){setStatus('err',e.message)}}
+document.querySelectorAll('.tab').forEach(btn=>btn.onclick=()=>{activeTab=btn.dataset.tab;document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('active',b===btn));$('routePane').classList.toggle('active',activeTab==='route');$('itineraryPane').classList.toggle('active',activeTab==='itinerary');$('solverPane').classList.toggle('active',activeTab==='solver')});
+$('solveBtn').onclick=solve;
+$('copyItinerary').onclick=copyItinerary;
+$('sampleBtn').onclick=()=>{state=structuredClone(defaultConfig);renderControls();setStatus('', 'Sample loaded.')};
+$('parseBtn').onclick=parseOnly;
+$('geocodeBtn').onclick=geocodeMissing;
+['departTime','speedMph','serviceMinutes','solverSeconds','solverNodes','solverTicks','solverLpIters'].forEach(id=>$(id).onchange=parseOnly);
+renderControls();
+try{syncStateFromControls();receiveSolution(localSolve());setStatus('ok','Sample route ready.')}catch(e){setStatus('err',e.message)}
+</script>
+</body>
+</html>

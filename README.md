@@ -106,7 +106,7 @@ under `des_engine::sdk`.
 | Service discovery | Self-describe a server's routes and capabilities as JSON | `ServiceBuilder`, `ServiceDescriptor`, `DesExtension` |
 | Equation-based modeling | Run JSON/LaTeX/XML equation specs as first-class Modelica-style citizens | `EquationCitizen`, `EQUATION_SCHEMA` |
 | Visual block dataflow | Build or load a flat block graph and run it as signal dataflow | `StudioGraph`, `RuntimeCell`, `RuntimeOp`, `Composite`, `CompiledStudio`, `demo_from_spec`, `STUDIO_SPEC_SCHEMA` |
-| Studio analysis and UI | Inspect Studio specs with N2 dependency data, design variables/objectives/constraints, sweep drivers, and a self-contained workbench | `analyze_model_spec`, `run_design_sweep`, `render_workbench_html`, `write_workbench_html` |
+| Studio analysis and UI | Inspect Studio specs with N2 dependency data, design variables/objectives/constraints, sweep drivers, self-contained workbench pages, and generated run/N2/sweep players | `analyze_model_spec`, `run_design_sweep`, `render_workbench_html`, `write_workbench_html`, `write_studio_player_html` |
 | Design studies | Tune studio-spec parameters against final signal objectives | `run_design_study`, `StudioDesignStudy`, `StudioDesignVariable` |
 | Executive selection | Route a graph to the simplest engine that can run it | `select`, `requirements_for_studio`, `Executive`, `StudioExecutive`, `HybridExecutive` |
 
@@ -428,6 +428,9 @@ The SDK has two related output styles:
 - Studio workbench output: `write_workbench_html("out/studio/workbench.html",
   &starter_model_spec())` emits a browser UI with palette, canvas, inspector,
   N2 matrix, JSON editor, local run, and design-variable sweep views.
+- Studio player output: `write_studio_player_html("out", &starter_model_spec())`
+  emits `run-player.html`, `n2-player.html`, and `sweep-player.html` under
+  `out/studio/` for catalog-ready animation playback.
 - Report pages: richer narrative pages used by demo/report binaries. These are
   built with `des::animation::run_report` and written by binaries such as
   `main_stochastic_sde_report` and `main_empirical_control_report`.

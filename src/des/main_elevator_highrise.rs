@@ -31,6 +31,7 @@ use crate::des::animation::types::{
     js_num, to_fixed, Anchor, Animation, ChartSeries, ChartSpec, CircleShape, FontWeight, Frame,
     FrameParts, LineShape, RectShape, Shape, TextShape,
 };
+use crate::des::general::pomdp::{mdp_value_iteration, MDPVIOptions, POMDPSpec};
 use crate::des::general::prng::{mulberry32, with_seed};
 use crate::des::general::value_iteration::{value_iteration, MDPSpec, Outcome, VIOptions};
 use crate::des::observability::logger::JsonValue;
@@ -52,6 +53,7 @@ pub enum HighrisePolicy {
     ZonedService,
     MdpCallOnly,
     MdpTuned,
+    PomdpBelief,
 }
 impl HighrisePolicy {
     fn slug(self) -> &'static str {
@@ -63,6 +65,7 @@ impl HighrisePolicy {
             HighrisePolicy::ZonedService => "zoned-service",
             HighrisePolicy::MdpCallOnly => "mdp-call-only",
             HighrisePolicy::MdpTuned => "mdp-tuned",
+            HighrisePolicy::PomdpBelief => "pomdp-belief",
         }
     }
     fn from_slug(s: &str) -> Option<Self> {
@@ -74,6 +77,7 @@ impl HighrisePolicy {
             "zoned-service" => HighrisePolicy::ZonedService,
             "mdp-call-only" => HighrisePolicy::MdpCallOnly,
             "mdp-tuned" => HighrisePolicy::MdpTuned,
+            "pomdp-belief" => HighrisePolicy::PomdpBelief,
             _ => return None,
         })
     }
@@ -86,6 +90,7 @@ impl HighrisePolicy {
             HighrisePolicy::ZonedService => "Zoned / even-odd service",
             HighrisePolicy::MdpCallOnly => "MDP no queue info",
             HighrisePolicy::MdpTuned => "MDP destination dispatch",
+            HighrisePolicy::PomdpBelief => "POMDP belief dispatch",
         }
     }
     fn summary(self) -> &'static str {
@@ -97,11 +102,12 @@ impl HighrisePolicy {
             HighrisePolicy::ZonedService => "Constrains shafts to all, low, mid, high, even, and odd service patterns.",
             HighrisePolicy::MdpCallOnly => "Uses value iteration with only binary hall-call, age, direction, and car-distance observations.",
             HighrisePolicy::MdpTuned => "Uses value iteration with destination-dispatch counts and destination-group estimates.",
+            HighrisePolicy::PomdpBelief => "Tracks a belief over hidden demand classes from call-only observations, then dispatches by expected value.",
         }
     }
 }
 
-pub const HIGHRISE_POLICIES: [HighrisePolicy; 7] = [
+pub const HIGHRISE_POLICIES: [HighrisePolicy; 8] = [
     HighrisePolicy::FewestStops,
     HighrisePolicy::LowestTotalTime,
     HighrisePolicy::EnergyEfficient,
@@ -109,6 +115,7 @@ pub const HIGHRISE_POLICIES: [HighrisePolicy; 7] = [
     HighrisePolicy::ZonedService,
     HighrisePolicy::MdpCallOnly,
     HighrisePolicy::MdpTuned,
+    HighrisePolicy::PomdpBelief,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -293,6 +300,7 @@ struct DispatchScoreWeights {
     destination_group: f64,
 }
 
+#[derive(Clone)]
 struct PickupFeatures {
     distance: f64,
     oldest_wait: f64,
@@ -308,8 +316,40 @@ struct MDPActionProfile {
     weights: DispatchScoreWeights,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DispatchDecisionModel {
+    Mdp,
+    Pomdp,
+}
+impl DispatchDecisionModel {
+    fn slug(self) -> &'static str {
+        match self {
+            DispatchDecisionModel::Mdp => "mdp",
+            DispatchDecisionModel::Pomdp => "pomdp",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct HiddenDemandFeatures {
+    queue_len: f64,
+    trip: f64,
+    destination_group: f64,
+}
+
+#[derive(Clone)]
+struct POMDPDispatchTuning {
+    hidden_state_labels: Vec<String>,
+    observation_labels: Vec<String>,
+    initial_belief: Vec<f64>,
+    observation_likelihood: Vec<Vec<f64>>,
+    q: Vec<Vec<f64>>,
+    hidden_features: Vec<HiddenDemandFeatures>,
+}
+
 #[derive(Clone)]
 struct MDPDispatchTuning {
+    model: DispatchDecisionModel,
     observability: MDPObservability,
     num_states: usize,
     actions: Vec<MDPActionProfile>,
@@ -320,6 +360,7 @@ struct MDPDispatchTuning {
     learned_weights: DispatchScoreWeights,
     state_labels: Vec<String>,
     action_labels: Vec<String>,
+    pomdp: Option<POMDPDispatchTuning>,
 }
 
 #[derive(Clone)]
@@ -330,8 +371,10 @@ struct StatePolicyRow {
 
 #[derive(Clone)]
 struct MDPDispatchTuningSummary {
+    model: DispatchDecisionModel,
     observability: MDPObservability,
     num_states: usize,
+    hidden_states: Option<usize>,
     gamma: f64,
     iterations: usize,
     final_delta: f64,
@@ -369,6 +412,8 @@ struct MDPRunDiagnostics {
     action_counts: Vec<ActionCount>,
     top_states: Vec<TopState>,
     marginals: Vec<MarginalRow>,
+    mean_belief_entropy: Option<f64>,
+    dominant_hidden_states: Vec<ActionCount>,
 }
 
 #[derive(Clone)]
@@ -386,6 +431,8 @@ struct MDPDecisionLogEntry {
     state: String,
     action: String,
     bins: Vec<(String, String)>,
+    belief: Option<Vec<(String, f64)>>,
+    belief_entropy: Option<f64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1103,12 +1150,13 @@ fn score_pickup(
     policy: HighrisePolicy,
     mdp_tuning: Option<&MDPDispatchTuning>,
 ) -> f64 {
+    let scored = features_for_dispatch_score(features, policy, mdp_tuning);
     let w = weights_for(features, policy, mdp_tuning);
-    features.distance * w.distance + features.trip * w.trip
-        - features.queue_len * w.queue
-        - features.oldest_wait * w.wait
-        - features.same_side * w.same_direction
-        - features.max_group * w.destination_group
+    scored.distance * w.distance + scored.trip * w.trip
+        - scored.queue_len * w.queue
+        - scored.oldest_wait * w.wait
+        - scored.same_side * w.same_direction
+        - scored.max_group * w.destination_group
 }
 
 fn weights_for(
@@ -1132,12 +1180,20 @@ fn mdp_decision_for(
     policy: HighrisePolicy,
     mdp_tuning: Option<&MDPDispatchTuning>,
 ) -> Option<(usize, usize, String)> {
-    if !is_mdp_policy(policy) {
+    if !is_decision_process_policy(policy) {
         return None;
     }
     let tuning = mdp_tuning?;
     let state_id = encode_mdp_dispatch_state(features, tuning.observability);
-    let action_idx = tuning.policy[state_id].max(0) as usize;
+    let action_idx = if tuning.model == DispatchDecisionModel::Pomdp {
+        tuning
+            .pomdp
+            .as_ref()
+            .map(|p| pomdp_action_for_observation(p, state_id))
+            .unwrap_or_else(|| tuning.policy[state_id].max(0) as usize)
+    } else {
+        tuning.policy[state_id].max(0) as usize
+    };
     let action = tuning
         .action_labels
         .get(action_idx)
@@ -1161,6 +1217,19 @@ fn record_mdp_decision(
         None => return,
     };
     let (state_id, _action_idx, action) = decision;
+    let (belief, belief_entropy) = match &tuning.pomdp {
+        Some(pomdp) => {
+            let b = pomdp_belief_for_observation(pomdp, state_id);
+            let rows = pomdp
+                .hidden_state_labels
+                .iter()
+                .cloned()
+                .zip(b.iter().copied())
+                .collect::<Vec<_>>();
+            (Some(rows), Some(entropy_bits(&b)))
+        }
+        None => (None, None),
+    };
     log.push(MDPDecisionLogEntry {
         state_id,
         state: tuning
@@ -1170,6 +1239,8 @@ fn record_mdp_decision(
             .unwrap_or_else(|| format!("s{state_id}")),
         action,
         bins: mdp_bin_labels(&decode_mdp_dispatch_state(state_id, tuning.observability)),
+        belief,
+        belief_entropy,
     });
 }
 
@@ -1178,7 +1249,7 @@ fn home_floor(
     config: &HighriseElevatorConfig,
     policy: HighrisePolicy,
 ) -> Option<f64> {
-    if policy == HighrisePolicy::CenterPreposition || is_mdp_policy(policy) {
+    if policy == HighrisePolicy::CenterPreposition || is_decision_process_policy(policy) {
         let center = (config.n_floors - 1) as f64 / 2.0;
         let spacing = 3.0;
         return Some(clamp(
@@ -1832,6 +1903,7 @@ fn policy_score_weights(policy: HighrisePolicy) -> DispatchScoreWeights {
         HighrisePolicy::ZonedService => dsw(1.35, 0.15, 0.8, 0.05, 0.4, 0.25),
         HighrisePolicy::MdpCallOnly => dsw(1.25, 0.2, 1.1, 0.08, 0.25, 0.2),
         HighrisePolicy::MdpTuned => dsw(1.25, 0.2, 1.1, 0.08, 0.25, 0.2),
+        HighrisePolicy::PomdpBelief => dsw(1.25, 0.2, 1.1, 0.08, 0.25, 0.2),
     }
 }
 
@@ -1893,6 +1965,10 @@ struct MDPDispatchStateBins {
 
 fn is_mdp_policy(policy: HighrisePolicy) -> bool {
     policy == HighrisePolicy::MdpCallOnly || policy == HighrisePolicy::MdpTuned
+}
+
+fn is_decision_process_policy(policy: HighrisePolicy) -> bool {
+    is_mdp_policy(policy) || policy == HighrisePolicy::PomdpBelief
 }
 
 fn observability_for_policy(policy: HighrisePolicy) -> MDPObservability {
@@ -1957,6 +2033,7 @@ fn optimize_highrise_dispatch_mdp(observability: MDPObservability) -> MDPDispatc
     let vi = value_iteration(spec, opts);
     let learned_weights = average_mdp_weights(&vi.policy, observability);
     MDPDispatchTuning {
+        model: DispatchDecisionModel::Mdp,
         observability,
         num_states,
         actions: profiles,
@@ -1967,7 +2044,219 @@ fn optimize_highrise_dispatch_mdp(observability: MDPObservability) -> MDPDispatc
         learned_weights,
         state_labels,
         action_labels,
+        pomdp: None,
     }
+}
+
+fn optimize_highrise_dispatch_pomdp() -> MDPDispatchTuning {
+    let observability = MDPObservability::CallOnly;
+    let num_observations = mdp_num_states(observability);
+    let observation_labels: Vec<String> = (0..num_observations)
+        .map(|s| label_mdp_dispatch_state(&decode_mdp_dispatch_state(s, observability)))
+        .collect();
+    let profiles = mdp_action_profiles();
+    let action_labels: Vec<String> = profiles.iter().map(|a| a.label.to_string()).collect();
+    let hidden_state_labels = pomdp_hidden_state_labels();
+    let hidden_features = pomdp_hidden_features();
+    let initial_belief = vec![0.34, 0.24, 0.27, 0.15];
+    let observation_likelihood = pomdp_observation_likelihood(num_observations);
+    let transition = pomdp_hidden_transition(&profiles);
+    let reward = pomdp_hidden_reward(&profiles);
+    let gamma = env_f64_opt("POMDP_GAMMA", env_f64_opt("MDP_GAMMA", 0.92));
+
+    let transition_rc = Rc::new(transition);
+    let observation_rc = Rc::new(observation_likelihood.clone());
+    let reward_rc = Rc::new(reward);
+    let spec = POMDPSpec {
+        states: (0..hidden_state_labels.len()).collect(),
+        actions: (0..profiles.len()).collect(),
+        observations: (0..num_observations).collect(),
+        transition: {
+            let t = transition_rc.clone();
+            Box::new(move |s: usize, a: usize| t[s][a].clone())
+        },
+        observation: {
+            let o = observation_rc.clone();
+            Box::new(move |sp: usize, _a: usize| o[sp].clone())
+        },
+        reward: {
+            let r = reward_rc.clone();
+            Box::new(move |s: usize, a: usize| r[s][a])
+        },
+        discount: gamma,
+        initial_belief: Some(initial_belief.clone()),
+        is_terminal: None,
+    };
+    let vi = mdp_value_iteration(
+        &spec,
+        &MDPVIOptions {
+            tol: env_f64_opt("POMDP_TOL", env_f64_opt("MDP_TOL", 1e-8)),
+            max_iter: env_f64_opt("POMDP_MAX_ITER", env_f64_opt("MDP_MAX_ITER", 10000.0)) as usize,
+        },
+    );
+
+    let pomdp = POMDPDispatchTuning {
+        hidden_state_labels,
+        observation_labels: observation_labels.clone(),
+        initial_belief,
+        observation_likelihood,
+        q: vi.q,
+        hidden_features,
+    };
+    let policy: Vec<i32> = (0..num_observations)
+        .map(|obs| pomdp_action_for_observation(&pomdp, obs) as i32)
+        .collect();
+    let learned_weights = average_mdp_weights(&policy, observability);
+
+    MDPDispatchTuning {
+        model: DispatchDecisionModel::Pomdp,
+        observability,
+        num_states: num_observations,
+        actions: profiles,
+        policy,
+        gamma,
+        iterations: vi.iterations,
+        final_delta: vi.final_delta,
+        learned_weights,
+        state_labels: observation_labels,
+        action_labels,
+        pomdp: Some(pomdp),
+    }
+}
+
+fn pomdp_hidden_state_labels() -> Vec<String> {
+    vec![
+        "light-local".to_string(),
+        "urgent-aging".to_string(),
+        "dense-batch".to_string(),
+        "long-haul-batch".to_string(),
+    ]
+}
+
+fn pomdp_hidden_features() -> Vec<HiddenDemandFeatures> {
+    vec![
+        HiddenDemandFeatures {
+            queue_len: 1.0,
+            trip: 7.0,
+            destination_group: 1.0,
+        },
+        HiddenDemandFeatures {
+            queue_len: 2.0,
+            trip: 14.0,
+            destination_group: 1.0,
+        },
+        HiddenDemandFeatures {
+            queue_len: 5.0,
+            trip: 18.0,
+            destination_group: 3.0,
+        },
+        HiddenDemandFeatures {
+            queue_len: 6.0,
+            trip: 32.0,
+            destination_group: 4.0,
+        },
+    ]
+}
+
+fn pomdp_observation_likelihood(num_observations: usize) -> Vec<Vec<f64>> {
+    let distance = [
+        [0.40, 0.35, 0.18, 0.07],
+        [0.25, 0.35, 0.28, 0.12],
+        [0.45, 0.35, 0.15, 0.05],
+        [0.08, 0.22, 0.42, 0.28],
+    ];
+    let wait = [
+        [0.70, 0.23, 0.07],
+        [0.12, 0.42, 0.46],
+        [0.25, 0.45, 0.30],
+        [0.18, 0.38, 0.44],
+    ];
+    let side = [[0.45, 0.55], [0.50, 0.50], [0.35, 0.65], [0.55, 0.45]];
+    let mut out = vec![vec![0.0; num_observations]; 4];
+    for hidden in 0..4 {
+        let mut z = 0.0;
+        for obs in 0..num_observations {
+            let st = decode_mdp_dispatch_state(obs, MDPObservability::CallOnly);
+            let p = distance[hidden][st.distance_bin]
+                * wait[hidden][st.wait_bin]
+                * side[hidden][st.same_side];
+            out[hidden][obs] = p;
+            z += p;
+        }
+        if z > 0.0 {
+            for obs in 0..num_observations {
+                out[hidden][obs] /= z;
+            }
+        }
+    }
+    out
+}
+
+fn pomdp_hidden_transition(profiles: &[MDPActionProfile]) -> Vec<Vec<Vec<f64>>> {
+    let mut t = vec![vec![vec![0.0; 4]; profiles.len()]; 4];
+    for (a, profile) in profiles.iter().enumerate() {
+        for s in 0..4 {
+            t[s][a] = match profile.label {
+                "direct-batch" => match s {
+                    0 => vec![0.64, 0.14, 0.17, 0.05],
+                    1 => vec![0.28, 0.38, 0.26, 0.08],
+                    2 => vec![0.22, 0.18, 0.50, 0.10],
+                    _ => vec![0.12, 0.18, 0.42, 0.28],
+                },
+                "latency" | "oldest-first" => match s {
+                    0 => vec![0.58, 0.27, 0.12, 0.03],
+                    1 => vec![0.38, 0.44, 0.14, 0.04],
+                    2 => vec![0.24, 0.34, 0.32, 0.10],
+                    _ => vec![0.12, 0.30, 0.36, 0.22],
+                },
+                "energy" => match s {
+                    0 => vec![0.70, 0.20, 0.08, 0.02],
+                    1 => vec![0.14, 0.52, 0.24, 0.10],
+                    2 => vec![0.10, 0.25, 0.46, 0.19],
+                    _ => vec![0.05, 0.18, 0.36, 0.41],
+                },
+                _ => match s {
+                    0 => vec![0.62, 0.23, 0.12, 0.03],
+                    1 => vec![0.30, 0.44, 0.20, 0.06],
+                    2 => vec![0.18, 0.28, 0.42, 0.12],
+                    _ => vec![0.08, 0.24, 0.42, 0.26],
+                },
+            };
+        }
+    }
+    t
+}
+
+fn pomdp_hidden_reward(profiles: &[MDPActionProfile]) -> Vec<Vec<f64>> {
+    let mut reward = vec![vec![0.0; profiles.len()]; 4];
+    for (a, profile) in profiles.iter().enumerate() {
+        for hidden in 0..4 {
+            reward[hidden][a] = match (hidden, profile.label) {
+                (0, "energy") => 5.0,
+                (0, "balanced") => 2.0,
+                (0, "latency") => 0.5,
+                (0, "oldest-first") => 0.0,
+                (0, "direct-batch") => -1.5,
+                (1, "oldest-first") => 6.0,
+                (1, "latency") => 5.5,
+                (1, "balanced") => 2.0,
+                (1, "direct-batch") => -0.5,
+                (1, "energy") => -2.0,
+                (2, "direct-batch") => 7.0,
+                (2, "balanced") => 3.0,
+                (2, "latency") => 2.0,
+                (2, "oldest-first") => 1.0,
+                (2, "energy") => -1.0,
+                (3, "direct-batch") => 5.0,
+                (3, "balanced") => 4.0,
+                (3, "energy") => 1.0,
+                (3, "latency") => 0.5,
+                (3, "oldest-first") => 0.0,
+                _ => 0.0,
+            };
+        }
+    }
+    reward
 }
 
 fn abstract_dispatch_outcomes(
@@ -2221,6 +2510,100 @@ fn mdp_bin_labels(st: &MDPDispatchStateBins) -> Vec<(String, String)> {
     out
 }
 
+fn features_for_dispatch_score(
+    features: &PickupFeatures,
+    policy: HighrisePolicy,
+    mdp_tuning: Option<&MDPDispatchTuning>,
+) -> PickupFeatures {
+    let Some(tuning) = mdp_tuning else {
+        return features.clone();
+    };
+    if !is_decision_process_policy(policy) {
+        return features.clone();
+    }
+    if let Some(pomdp) = &tuning.pomdp {
+        let obs = encode_mdp_dispatch_state(features, MDPObservability::CallOnly);
+        let belief = pomdp_belief_for_observation(pomdp, obs);
+        let hidden = pomdp_expected_hidden_features(pomdp, &belief);
+        return PickupFeatures {
+            queue_len: hidden.queue_len,
+            trip: hidden.trip,
+            max_group: hidden.destination_group,
+            ..features.clone()
+        };
+    }
+    if tuning.observability == MDPObservability::CallOnly {
+        return PickupFeatures {
+            queue_len: 1.0,
+            trip: CALL_ONLY_EXPECTED_TRIP,
+            max_group: 1.0,
+            ..features.clone()
+        };
+    }
+    features.clone()
+}
+
+fn pomdp_belief_for_observation(pomdp: &POMDPDispatchTuning, obs_id: usize) -> Vec<f64> {
+    let mut b = vec![0.0; pomdp.initial_belief.len()];
+    let mut z = 0.0;
+    for s in 0..b.len() {
+        let likelihood = pomdp
+            .observation_likelihood
+            .get(s)
+            .and_then(|row| row.get(obs_id))
+            .copied()
+            .unwrap_or(0.0);
+        b[s] = pomdp.initial_belief[s] * likelihood;
+        z += b[s];
+    }
+    if z <= 0.0 || !z.is_finite() {
+        return pomdp.initial_belief.clone();
+    }
+    for p in &mut b {
+        *p /= z;
+    }
+    b
+}
+
+fn pomdp_expected_hidden_features(
+    pomdp: &POMDPDispatchTuning,
+    belief: &[f64],
+) -> HiddenDemandFeatures {
+    let mut out = HiddenDemandFeatures {
+        queue_len: 0.0,
+        trip: 0.0,
+        destination_group: 0.0,
+    };
+    for (s, &p) in belief.iter().enumerate() {
+        let f = pomdp.hidden_features[s];
+        out.queue_len += p * f.queue_len;
+        out.trip += p * f.trip;
+        out.destination_group += p * f.destination_group;
+    }
+    out
+}
+
+fn pomdp_action_for_observation(pomdp: &POMDPDispatchTuning, obs_id: usize) -> usize {
+    let belief = pomdp_belief_for_observation(pomdp, obs_id);
+    let mut best_a = 0usize;
+    let mut best_q = f64::NEG_INFINITY;
+    for a in 0..pomdp.q.first().map(|r| r.len()).unwrap_or(0) {
+        let mut q = 0.0;
+        for (s, &p) in belief.iter().enumerate() {
+            q += p * pomdp.q[s][a];
+        }
+        if q > best_q {
+            best_q = q;
+            best_a = a;
+        }
+    }
+    best_a
+}
+
+fn entropy_bits(p: &[f64]) -> f64 {
+    p.iter().filter(|&&x| x > 0.0).map(|&x| -x * x.log2()).sum()
+}
+
 fn bin_index(x: f64, thresholds: &[f64]) -> usize {
     for (i, &t) in thresholds.iter().enumerate() {
         if x <= t {
@@ -2280,8 +2663,10 @@ fn summarize_mdp_tuning(tuning: &MDPDispatchTuning) -> MDPDispatchTuningSummary 
         }
     }
     MDPDispatchTuningSummary {
+        model: tuning.model,
         observability: tuning.observability,
         num_states: tuning.num_states,
+        hidden_states: tuning.pomdp.as_ref().map(|p| p.hidden_state_labels.len()),
         gamma: tuning.gamma,
         iterations: tuning.iterations,
         final_delta: tuning.final_delta,
@@ -2300,11 +2685,23 @@ fn summarize_mdp_run(log: &[MDPDecisionLogEntry]) -> MDPRunDiagnostics {
     let total = log.len();
     let mut action_counts: Vec<(String, usize)> = Vec::new();
     let mut state_counts: Vec<(String, TopState)> = Vec::new();
+    let mut belief_entropy_sum = 0.0;
+    let mut belief_entropy_count = 0usize;
+    let mut hidden_counts: Vec<(String, usize)> = Vec::new();
     // marginal: variable -> bin -> action -> count, preserving insertion order.
     let mut marginal: Vec<(String, Vec<(String, Vec<(String, usize)>)>)> = Vec::new();
 
     for row in log {
         bump(&mut action_counts, &row.action);
+        if let Some(h) = row.belief_entropy {
+            belief_entropy_sum += h;
+            belief_entropy_count += 1;
+        }
+        if let Some(belief) = &row.belief {
+            if let Some((label, _)) = belief.iter().max_by(|a, b| a.1.partial_cmp(&b.1).unwrap()) {
+                bump(&mut hidden_counts, label);
+            }
+        }
         let state_key = format!("{}|{}", row.state, row.action);
         match state_counts.iter_mut().find(|(k, _)| *k == state_key) {
             Some((_, ts)) => ts.count += 1,
@@ -2387,11 +2784,31 @@ fn summarize_mdp_run(log: &[MDPDecisionLogEntry]) -> MDPRunDiagnostics {
         .collect();
     marginals.sort_by(|a, b| a.variable.cmp(&b.variable));
 
+    let mut dominant_hidden_states: Vec<ActionCount> = hidden_counts
+        .into_iter()
+        .map(|(action, count)| ActionCount {
+            action,
+            count,
+            share: if belief_entropy_count > 0 {
+                count as f64 / belief_entropy_count as f64
+            } else {
+                0.0
+            },
+        })
+        .collect();
+    dominant_hidden_states.sort_by(|a, b| b.count.cmp(&a.count));
+
     MDPRunDiagnostics {
         total_decisions: total,
         action_counts: action_count_rows,
         top_states,
         marginals,
+        mean_belief_entropy: if belief_entropy_count > 0 {
+            Some(belief_entropy_sum / belief_entropy_count as f64)
+        } else {
+            None
+        },
+        dominant_hidden_states,
     }
 }
 
@@ -2437,19 +2854,41 @@ fn variant_summary(result: &HighriseElevatorResult) -> String {
         } else {
             "wait"
         };
-        out += &format!(
-            " MDP is pre-solved by value iteration ({} states, {} sweeps, observability={}), then this run exercised {} learned pickup decisions. Observed actions: {}. {} marginal: {}. Learned weights favor destination grouping={:.2}, distance={:.2}, wait={:.2}.",
-            tuning.num_states,
-            tuning.iterations,
-            tuning.observability.slug(),
-            run.total_decisions,
-            format_action_shares(run, 3),
-            marginal_name,
-            format_marginal(run, marginal_name),
-            w.destination_group,
-            w.distance,
-            w.wait
-        );
+        if tuning.model == DispatchDecisionModel::Pomdp {
+            let hidden = run
+                .dominant_hidden_states
+                .iter()
+                .take(2)
+                .map(|r| format!("{} {:.0}%", r.action, 100.0 * r.share))
+                .collect::<Vec<_>>()
+                .join(", ");
+            out += &format!(
+                " POMDP uses QMDP over {} hidden demand states and {} call-only observations, then this run exercised {} belief decisions. Observed actions: {}. Mean belief entropy {:.2} bits; dominant hidden beliefs: {}. Learned weights favor destination grouping={:.2}, distance={:.2}, wait={:.2}.",
+                tuning.hidden_states.unwrap_or(0),
+                tuning.num_states,
+                run.total_decisions,
+                format_action_shares(run, 3),
+                run.mean_belief_entropy.unwrap_or(0.0),
+                if hidden.is_empty() { "none".to_string() } else { hidden },
+                w.destination_group,
+                w.distance,
+                w.wait
+            );
+        } else {
+            out += &format!(
+                " MDP is pre-solved by value iteration ({} states, {} sweeps, observability={}), then this run exercised {} learned pickup decisions. Observed actions: {}. {} marginal: {}. Learned weights favor destination grouping={:.2}, distance={:.2}, wait={:.2}.",
+                tuning.num_states,
+                tuning.iterations,
+                tuning.observability.slug(),
+                run.total_decisions,
+                format_action_shares(run, 3),
+                marginal_name,
+                format_marginal(run, marginal_name),
+                w.destination_group,
+                w.distance,
+                w.wait
+            );
+        }
     }
     if let Some(m) = &result.marginal_vs_lowest_time {
         out += &format!(
@@ -2758,7 +3197,8 @@ fn aggregates_json(a: &HighriseAggregates) -> JsonValue {
 }
 
 fn tuning_summary_json(t: &MDPDispatchTuningSummary) -> JsonValue {
-    jobj(vec![
+    let mut fields = vec![
+        ("model", jstr(t.model.slug())),
         ("observability", jstr(t.observability.slug())),
         ("numStates", jnum(t.num_states as f64)),
         ("gamma", jnum(t.gamma)),
@@ -2774,11 +3214,15 @@ fn tuning_summary_json(t: &MDPDispatchTuningSummary) -> JsonValue {
                     .collect(),
             ),
         ),
-    ])
+    ];
+    if let Some(n) = t.hidden_states {
+        fields.push(("hiddenStates", jnum(n as f64)));
+    }
+    jobj(fields)
 }
 
 fn run_diag_json(r: &MDPRunDiagnostics) -> JsonValue {
-    jobj(vec![
+    let mut fields = vec![
         ("totalDecisions", jnum(r.total_decisions as f64)),
         (
             "actionCounts",
@@ -2839,7 +3283,26 @@ fn run_diag_json(r: &MDPRunDiagnostics) -> JsonValue {
                     .collect(),
             ),
         ),
-    ])
+    ];
+    if let Some(h) = r.mean_belief_entropy {
+        fields.push(("meanBeliefEntropy", jnum(h)));
+        fields.push((
+            "dominantHiddenStates",
+            JsonValue::Array(
+                r.dominant_hidden_states
+                    .iter()
+                    .map(|c| {
+                        jobj(vec![
+                            ("state", jstr(&c.action)),
+                            ("count", jnum(c.count as f64)),
+                            ("share", jnum(c.share)),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ));
+    }
+    jobj(fields)
 }
 
 fn marginal_json(m: &MarginalComparison) -> JsonValue {
@@ -2941,11 +3404,13 @@ pub fn run() {
 
     let mut mdp_tunings: Vec<(HighrisePolicy, MDPDispatchTuning)> = Vec::new();
     for &policy in &policies {
-        if is_mdp_policy(policy) && !mdp_tunings.iter().any(|(p, _)| *p == policy) {
-            mdp_tunings.push((
-                policy,
-                optimize_highrise_dispatch_mdp(observability_for_policy(policy)),
-            ));
+        if is_decision_process_policy(policy) && !mdp_tunings.iter().any(|(p, _)| *p == policy) {
+            let tuning = if policy == HighrisePolicy::PomdpBelief {
+                optimize_highrise_dispatch_pomdp()
+            } else {
+                optimize_highrise_dispatch_mdp(observability_for_policy(policy))
+            };
+            mdp_tunings.push((policy, tuning));
         }
     }
 
@@ -2966,16 +3431,29 @@ pub fn run() {
     );
     for (policy, tuning) in &mdp_tunings {
         let w = &tuning.learned_weights;
+        if tuning.model == DispatchDecisionModel::Pomdp {
+            println!(
+                "#   {} QMDP: {} hidden states, {} observations, {} actions, {} sweeps, max|ΔV|={:e}",
+                policy.label(),
+                tuning.pomdp.as_ref().map(|p| p.hidden_state_labels.len()).unwrap_or(0),
+                tuning.num_states,
+                tuning.actions.len(),
+                tuning.iterations,
+                tuning.final_delta
+            );
+        } else {
+            println!(
+                "#   {} VI: {} abstract states, {} actions, {} sweeps, max|ΔV|={:e}",
+                policy.label(),
+                tuning.num_states,
+                tuning.actions.len(),
+                tuning.iterations,
+                tuning.final_delta
+            );
+        }
         println!(
-            "#   {} VI: {} abstract states, {} actions, {} sweeps, max|ΔV|={:e}",
-            policy.label(),
-            tuning.num_states,
-            tuning.actions.len(),
-            tuning.iterations,
-            tuning.final_delta
-        );
-        println!(
-            "#   MDP learned weights: distance={:.3}, trip={:.3}, queue={:.3}, wait={:.3}, sameDir={:.3}, destGroup={:.3}",
+            "#   {} learned weights: distance={:.3}, trip={:.3}, queue={:.3}, wait={:.3}, sameDir={:.3}, destGroup={:.3}",
+            tuning.model.slug().to_uppercase(),
             w.distance, w.trip, w.queue, w.wait, w.same_direction, w.destination_group
         );
     }
@@ -2998,7 +3476,7 @@ pub fn run() {
                     record_every_ticks: record_every,
                 },
             );
-            if is_mdp_policy(policy) {
+            if is_decision_process_policy(policy) {
                 if let Some(baseline) = results.iter().find(|r| {
                     r.authority == authority && r.policy == HighrisePolicy::LowestTotalTime
                 }) {
@@ -3021,12 +3499,37 @@ pub fn run() {
                     Some(t) if t.observability == MDPObservability::DestinationDispatch => "batch",
                     _ => "wait",
                 };
-                println!("#   MDP observed actions: {}", format_action_shares(run, 3));
+                let model = result
+                    .mdp_tuning
+                    .as_ref()
+                    .map(|t| t.model.slug().to_uppercase())
+                    .unwrap_or_else(|| "MDP".to_string());
                 println!(
-                    "#   MDP {} marginal: {}",
+                    "#   {model} observed actions: {}",
+                    format_action_shares(run, 3)
+                );
+                println!(
+                    "#   {model} {} marginal: {}",
                     marginal_name,
                     format_marginal(run, marginal_name)
                 );
+                if let Some(h) = run.mean_belief_entropy {
+                    println!(
+                        "#   POMDP mean belief entropy {:.3} bits; dominant beliefs: {}",
+                        h,
+                        format_action_shares(
+                            &MDPRunDiagnostics {
+                                total_decisions: run.total_decisions,
+                                action_counts: run.dominant_hidden_states.clone(),
+                                top_states: Vec::new(),
+                                marginals: Vec::new(),
+                                mean_belief_entropy: None,
+                                dominant_hidden_states: Vec::new(),
+                            },
+                            3
+                        )
+                    );
+                }
             }
             let mut controls = HashMap::new();
             controls.insert("policy".to_string(), policy.label().to_string());
@@ -3136,5 +3639,78 @@ mod tests {
         assert_eq!(bin_index(5.0, &bins), 0);
         assert_eq!(bin_index(30.0, &bins), 1);
         assert_eq!(bin_index(1000.0, &bins), 2);
+    }
+
+    #[test]
+    fn call_only_models_do_not_score_hidden_destination_features() {
+        let mdp = optimize_highrise_dispatch_mdp(MDPObservability::CallOnly);
+        let pomdp = optimize_highrise_dispatch_pomdp();
+        let sparse = PickupFeatures {
+            distance: 6.0,
+            oldest_wait: 20.0,
+            queue_len: 1.0,
+            trip: 5.0,
+            same_side: 1.0,
+            max_group: 1.0,
+        };
+        let dense = PickupFeatures {
+            queue_len: 12.0,
+            trip: 42.0,
+            max_group: 9.0,
+            ..sparse.clone()
+        };
+        let mdp_sparse = score_pickup(&sparse, HighrisePolicy::MdpCallOnly, Some(&mdp));
+        let mdp_dense = score_pickup(&dense, HighrisePolicy::MdpCallOnly, Some(&mdp));
+        assert!(
+            (mdp_sparse - mdp_dense).abs() < 1e-12,
+            "call-only MDP leaked hidden queue/destination features"
+        );
+        let pomdp_sparse = score_pickup(&sparse, HighrisePolicy::PomdpBelief, Some(&pomdp));
+        let pomdp_dense = score_pickup(&dense, HighrisePolicy::PomdpBelief, Some(&pomdp));
+        assert!(
+            (pomdp_sparse - pomdp_dense).abs() < 1e-12,
+            "POMDP score should use belief expectations, not hidden features"
+        );
+    }
+
+    #[test]
+    fn pomdp_beliefs_normalize_and_policy_uses_legal_actions() {
+        let tuning = optimize_highrise_dispatch_pomdp();
+        let pomdp = tuning.pomdp.as_ref().expect("POMDP tuning");
+        let mut actions = HashSet::new();
+        for obs in 0..tuning.num_states {
+            let b = pomdp_belief_for_observation(pomdp, obs);
+            let sum: f64 = b.iter().sum();
+            assert!((sum - 1.0).abs() < 1e-12, "belief sum={sum}");
+            assert!(b.iter().all(|p| *p >= 0.0 && p.is_finite()));
+            let a = pomdp_action_for_observation(pomdp, obs);
+            assert!(a < tuning.actions.len());
+            actions.insert(a);
+        }
+        assert!(
+            actions.len() >= 2,
+            "POMDP policy should react to different call-only observations"
+        );
+    }
+
+    #[test]
+    fn abstract_mdp_outcomes_are_valid_distributions() {
+        for obs in [
+            MDPObservability::CallOnly,
+            MDPObservability::DestinationDispatch,
+        ] {
+            for s in 0..mdp_num_states(obs) {
+                for a in 0..mdp_action_profiles().len() {
+                    let outcomes = abstract_dispatch_outcomes(s, a, obs);
+                    let total: f64 = outcomes.iter().map(|o| o.prob).sum();
+                    assert!((total - 1.0).abs() < 1e-12, "s={s} a={a} total={total}");
+                    for o in outcomes {
+                        assert!(o.prob >= 0.0 && o.prob <= 1.0);
+                        assert!(o.next_state < mdp_num_states(obs));
+                        assert!(o.reward.is_finite());
+                    }
+                }
+            }
+        }
     }
 }

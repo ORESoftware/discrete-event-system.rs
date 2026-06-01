@@ -13,8 +13,12 @@
 #[cfg(test)]
 mod tests {
     use crate::des::general::signal_transforms::{
-        run_fourier_transform, run_laplace_transform, run_z_transform, ComplexPointInput,
-        FourierTransformParams, LaplaceTransformParams, QuadratureRule, ZTransformParams,
+        run_dft_transform, run_fft_transform, run_fourier_transform, run_laplace_transform,
+        run_mellin_transform, run_radon_transform, run_wavelet_transform, run_z_transform,
+        ComplexPointInput, DiscreteFourierTransformParams, FastFourierTransformParams,
+        FourierTransformParams, LaplaceTransformParams, MellinTransformParams, QuadratureRule,
+        RadonProjectionInput, RadonTransformParams, WaveletMother, WaveletPointInput,
+        WaveletTransformParams, ZTransformParams,
     };
     use std::collections::HashMap;
 
@@ -153,6 +157,91 @@ mod tests {
             std::f64::consts::PI,
             1e-6
         ));
+    }
+
+    #[test]
+    fn dft_and_fft_match_expected_bins() {
+        let dft = run_dft_transform(DiscreteFourierTransformParams {
+            sequence: Some(vec![1.0, 0.0, -1.0, 0.0]),
+            k_values: Some(vec![0, 1, 2, 3]),
+            ..Default::default()
+        });
+        assert!(dft.validation.iter().all(|c| c.passed));
+        assert!(close(dft.outputs[0].value.re, 0.0, 1e-12));
+        assert!(close(dft.outputs[1].value.re, 2.0, 1e-12));
+        assert!(close(dft.outputs[1].value.im, 0.0, 1e-12));
+        assert!(close(dft.outputs[2].value.re, 0.0, 1e-12));
+        assert!(close(dft.outputs[3].value.re, 2.0, 1e-12));
+
+        let fft = run_fft_transform(FastFourierTransformParams {
+            sequence: Some(vec![1.0, 0.0, -1.0, 0.0]),
+            ..Default::default()
+        });
+        assert!(fft.validation.iter().all(|c| c.passed));
+        assert_eq!(fft.outputs.len(), 4);
+        for i in 0..4 {
+            assert!(close(
+                fft.outputs[i].value.re,
+                dft.outputs[i].value.re,
+                1e-12
+            ));
+            assert!(close(
+                fft.outputs[i].value.im,
+                dft.outputs[i].value.im,
+                1e-12
+            ));
+        }
+        assert_eq!(fft.run_summary.ticks, 2);
+    }
+
+    #[test]
+    fn wavelet_mellin_and_radon_transforms() {
+        let wavelet = run_wavelet_transform(WaveletTransformParams {
+            expression: Some("t".to_string()),
+            t0: Some(0.0),
+            t1: Some(1.0),
+            dt: Some(0.25),
+            quadrature: Some(QuadratureRule::Rectangular),
+            mother: Some(WaveletMother::Haar),
+            scale_shift_values: Some(vec![WaveletPointInput {
+                label: Some("haar-a1-b0".to_string()),
+                scale: 1.0,
+                shift: 0.0,
+            }]),
+            ..Default::default()
+        });
+        assert!(wavelet.validation.iter().all(|c| c.passed));
+        assert!(close(wavelet.outputs[0].value.re, -0.25, 1e-12));
+
+        let mellin = run_mellin_transform(MellinTransformParams {
+            expression: Some("1".to_string()),
+            t0: Some(1.0),
+            t1: Some(3.0),
+            dt: Some(0.001),
+            quadrature: Some(QuadratureRule::Trapezoid),
+            s_values: Some(vec![point("s=1", 1.0)]),
+            ..Default::default()
+        });
+        assert!(mellin.validation.iter().all(|c| c.passed));
+        assert!(close(mellin.outputs[0].value.re, 2.0, 1e-9));
+
+        let radon = run_radon_transform(RadonTransformParams {
+            grid: vec![
+                vec![0.0, 0.0, 0.0],
+                vec![0.0, 1.0, 0.0],
+                vec![0.0, 0.0, 0.0],
+            ],
+            projections: Some(vec![RadonProjectionInput {
+                label: Some("vertical-center".to_string()),
+                theta: 0.0,
+                rho: 0.0,
+            }]),
+            line_width: Some(1.1),
+            ..Default::default()
+        });
+        assert!(radon.validation.iter().all(|c| c.passed));
+        assert!(close(radon.outputs[0].value, 1.0, 1e-12));
+        assert_eq!(radon.outputs[0].cells_used, 3);
     }
 
     // [5] Input validation (direct-call cases 5.1–5.3)

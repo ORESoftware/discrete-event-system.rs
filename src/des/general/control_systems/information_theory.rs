@@ -12,6 +12,8 @@ use crate::des::shared::linalg::Matrix;
 
 /// Exact SI value, in joules per kelvin.
 pub const BOLTZMANN_CONSTANT_J_PER_K: f64 = 1.380_649e-23;
+/// Largest explicit uniform distribution returned by [`hartley_information`].
+pub const MAX_EXPLICIT_HARTLEY_SYMBOLS: usize = 1_000_000;
 
 fn require(check: Check) {
     if let Err(e) = check {
@@ -65,6 +67,14 @@ fn clean_near_zero(x: f64) -> f64 {
     }
 }
 
+fn unit_ratio(numerator: f64, denominator: f64) -> f64 {
+    if denominator <= 0.0 {
+        0.0
+    } else {
+        clean_near_zero((numerator / denominator).clamp(0.0, 1.0))
+    }
+}
+
 fn validate_energy_levels(model: &str, energies: &[f64]) {
     require(Preconditions::non_empty(model, "energy_levels", energies));
     require(Preconditions::all_finite(model, "energy_levels", energies));
@@ -106,8 +116,8 @@ fn log_sum_exp(values: &[f64]) -> f64 {
         require(Preconditions::check(
             "InformationTheory",
             &format!("values[{i}]"),
-            "not be NaN",
-            !v.is_nan(),
+            "be finite or -Infinity",
+            v.is_finite() || v == f64::NEG_INFINITY,
             Some(v.to_string()),
         ));
     }
@@ -296,7 +306,7 @@ pub fn hartley_information(symbols: usize) -> HartleyInformationSummary {
         "symbols",
         symbols as f64,
         1.0,
-        f64::MAX,
+        MAX_EXPLICIT_HARTLEY_SYMBOLS as f64,
     ));
     let information_bits = (symbols as f64).log2();
     HartleyInformationSummary {
@@ -537,6 +547,13 @@ pub fn channel_capacity_blahut_arimoto_bits(
             .zip(d.iter())
             .map(|(&q, &dx)| q * dx.exp())
             .sum();
+        require(Preconditions::check(
+            cls,
+            "normalizer",
+            "be finite and positive",
+            z.is_finite() && z > 0.0,
+            Some(z.to_string()),
+        ));
         let mut next = vec![0.0; inputs];
         for x in 0..inputs {
             next[x] = prior[x] * d[x].exp() / z;
@@ -687,15 +704,11 @@ impl ChannelInformationSummary {
         let input_entropy_bits = shannon_entropy_bits(&px);
         let output_entropy_bits = shannon_entropy_bits(&py);
         let joint_entropy_bits = joint_entropy_bits(joint);
-        let noise_entropy_bits = (joint_entropy_bits - input_entropy_bits).max(0.0);
-        let equivocation_bits = (joint_entropy_bits - output_entropy_bits).max(0.0);
+        let noise_entropy_bits = clean_bits((joint_entropy_bits - input_entropy_bits).max(0.0));
+        let equivocation_bits = clean_bits((joint_entropy_bits - output_entropy_bits).max(0.0));
         let mutual_information_bits =
-            (input_entropy_bits + output_entropy_bits - joint_entropy_bits).max(0.0);
-        let normalized_mutual_information = if input_entropy_bits > 0.0 {
-            mutual_information_bits / input_entropy_bits
-        } else {
-            0.0
-        };
+            clean_bits((input_entropy_bits + output_entropy_bits - joint_entropy_bits).max(0.0));
+        let normalized_mutual_information = unit_ratio(mutual_information_bits, input_entropy_bits);
         ChannelInformationSummary {
             input_entropy_bits,
             output_entropy_bits,
@@ -722,7 +735,7 @@ pub fn self_information_bits(probability: f64) -> f64 {
     if probability == 0.0 {
         f64::INFINITY
     } else {
-        -probability.log2()
+        clean_bits(-probability.log2())
     }
 }
 
@@ -763,7 +776,7 @@ pub fn cross_entropy_bits(p: &[f64], q: &[f64]) -> f64 {
         }
         h -= p[i] * q[i].log2();
     }
-    h
+    clean_bits(h)
 }
 
 /// Kullback-Leibler divergence D_KL(P || Q), in bits.
@@ -784,7 +797,7 @@ pub fn jensen_shannon_divergence_bits(p: &[f64], q: &[f64]) -> f64 {
         .zip(q.iter())
         .map(|(&a, &b)| 0.5 * (a + b))
         .collect();
-    0.5 * kl_divergence_bits(p, &mix) + 0.5 * kl_divergence_bits(q, &mix)
+    clean_bits(0.5 * kl_divergence_bits(p, &mix) + 0.5 * kl_divergence_bits(q, &mix))
 }
 
 /// Joint entropy H(X,Y), in bits, for a joint pmf matrix P(x,y).
@@ -909,6 +922,19 @@ mod tests {
         assert!(close(aliased.input_entropy_bits, 1.0));
         assert!(close(aliased.mutual_information_bits, 0.0));
         assert!(close(aliased.equivocation_bits, 1.0));
+
+        let deterministic_prior =
+            channel_information(&[1.0, 0.0], &vec![vec![1.0, 0.0], vec![0.0, 1.0]]);
+        assert!(close(deterministic_prior.input_entropy_bits, 0.0));
+        assert!(close(
+            deterministic_prior.normalized_mutual_information,
+            0.0
+        ));
+        assert_eq!(self_information_bits(1.0).to_bits(), 0.0_f64.to_bits());
+        assert_eq!(
+            cross_entropy_bits(&[1.0, 0.0], &[1.0, 0.0]).to_bits(),
+            0.0_f64.to_bits()
+        );
     }
 
     #[test]

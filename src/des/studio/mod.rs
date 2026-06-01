@@ -34,6 +34,7 @@ pub mod demos;
 pub mod design;
 pub mod editor;
 pub mod graph;
+pub mod players;
 pub mod run;
 pub mod spec;
 pub mod sweep;
@@ -41,8 +42,8 @@ pub mod ui;
 pub mod workbench;
 
 pub use analysis::{
-    analyze_model_spec, StudioAnalysis, StudioComponentAnalysis, StudioConnectionAnalysis,
-    StudioN2Cell, StudioValidationAnalysis,
+    analyze_model_spec, analyze_model_spec_artifact, StudioAnalysis, StudioComponentAnalysis,
+    StudioConnectionAnalysis, StudioN2Cell, StudioValidationAnalysis,
 };
 pub use cell::{
     Affine, Composite, Gain, Integrator, Map, Probe, Queue, RuntimeCell, RuntimeOp, Saturation,
@@ -56,17 +57,22 @@ pub use design::{
 };
 pub use editor::{studio_editor_html, write_studio_editor_html, STUDIO_EDITOR_REL_PATH};
 pub use graph::{CompiledStudio, NodeRole, StudioError, StudioGraph, VisualNode, Wire};
+pub use players::{
+    design_sweep_artifact, first_design_sweep_artifact, n2_analysis_artifact, studio_run_artifact,
+    write_studio_player_html, StudioPlayerError,
+};
 pub use run::{run, StudioRun};
 pub use spec::{
     compile_model_spec, demo_from_spec, example_spec, generate_rust_code, starter_model_spec,
     studio_block_io, studio_model_json_schema, studio_palette, PaletteItem, PaletteParam,
     PaletteParamKind, StudioBlockIo, StudioBlockKind, StudioBlockSpec, StudioConstraintSpec,
     StudioDesignVariableSpec, StudioModelSpec, StudioObjectiveSense, StudioObjectiveSpec,
-    StudioSpecError, StudioWireSpec, STUDIO_GRAPH_SCHEMA, STUDIO_SPEC_SCHEMA,
+    StudioSpecError, StudioWireSpec, MAX_SWEEP_SAMPLES, STUDIO_GRAPH_SCHEMA, STUDIO_SPEC_SCHEMA,
 };
 pub use sweep::{
-    run_design_sweep, run_first_design_sweep, StudioConstraintValue, StudioObjectiveValue,
-    StudioSweepCase, StudioSweepError, StudioSweepResult,
+    run_design_sweep, run_design_sweep_artifact, run_first_design_sweep,
+    run_first_design_sweep_artifact, StudioConstraintValue, StudioObjectiveValue, StudioSweepCase,
+    StudioSweepError, StudioSweepResult,
 };
 pub use ui::{render_starter_workbench_html, render_workbench_html, write_workbench_html};
 pub use workbench::{workbench_html, workbench_html_for_spec, write_workbench};

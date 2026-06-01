@@ -300,6 +300,17 @@ pub struct CompiledStudio {
     pub(crate) driver: HashMap<(usize, usize), (usize, usize)>,
 }
 
+impl std::fmt::Debug for CompiledStudio {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompiledStudio")
+            .field("node_count", &self.nodes.len())
+            .field("wire_count", &self.wires.len())
+            .field("order", &self.order)
+            .field("driver_edge_count", &self.driver.len())
+            .finish()
+    }
+}
+
 impl CompiledStudio {
     pub fn node_count(&self) -> usize {
         self.nodes.len()

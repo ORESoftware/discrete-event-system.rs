@@ -30,6 +30,7 @@ pub mod statistical_optimization;
 
 pub mod advanced_control_models;
 pub mod belief;
+pub mod calculus_of_variations;
 pub mod cartesian_state_space;
 pub mod des_spec;
 pub mod double_integrator_lqr;
@@ -91,6 +92,7 @@ pub mod feasibility_pipeline;
 pub mod internal_solver_network;
 pub mod ip_mip_des;
 pub mod multistage_stochastic;
+pub mod music_production;
 pub mod nonlinear_forecasting_model;
 pub mod signal_transforms;
 pub mod soccer_rotation;
@@ -105,6 +107,7 @@ pub mod dispatch;
 pub mod factory_floor_track3t;
 pub mod math_blocks;
 pub mod math_equation_input;
+pub mod partial_differential_equations;
 pub mod smart_traffic_flow;
 pub mod traffic_flow;
 

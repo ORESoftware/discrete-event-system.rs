@@ -38,6 +38,7 @@ const COL_B: &str = "#38bdf8";
 const COL_C: &str = "#f59e0b";
 const COL_OK: &str = "#22c55e";
 const COL_BAD: &str = "#ef4444";
+const COL_INFO: &str = "#a78bfa";
 const COL_NODE: &str = "#334155";
 const COL_REACH: &str = "#22c55e";
 
@@ -154,6 +155,63 @@ impl ObsCtrlScene {
                 COL_BAD.to_string()
             }),
             text: format!("{}: {}", label, if ok { "YES" } else { "NO" }),
+            ..Default::default()
+        }));
+    }
+
+    fn metric_bar(
+        &self,
+        shapes: &mut Vec<Shape>,
+        x: f64,
+        y: f64,
+        w: f64,
+        label: &str,
+        value: f64,
+        max_value: f64,
+        color: &str,
+    ) {
+        let ratio = if max_value > 0.0 {
+            (value / max_value).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        shapes.push(Shape::Text(TextShape {
+            x,
+            y,
+            anchor: Some(Anchor::Start),
+            font_size: Some(12.0),
+            fill: Some(COL_DIM.to_string()),
+            text: label.to_string(),
+            ..Default::default()
+        }));
+        shapes.push(Shape::Rect(RectShape {
+            x,
+            y: y + 9.0,
+            w,
+            h: 16.0,
+            rx: Some(4.0),
+            fill: "#0f172a".to_string(),
+            stroke: Some("#334155".to_string()),
+            ..Default::default()
+        }));
+        shapes.push(Shape::Rect(RectShape {
+            x,
+            y: y + 9.0,
+            w: w * ratio,
+            h: 16.0,
+            rx: Some(4.0),
+            fill: color.to_string(),
+            opacity: Some(0.78),
+            ..Default::default()
+        }));
+        shapes.push(Shape::Text(TextShape {
+            x: x + w + 12.0,
+            y: y + 22.0,
+            anchor: Some(Anchor::Start),
+            font_size: Some(12.0),
+            font_weight: Some(FontWeight::Bold),
+            fill: Some(color.to_string()),
+            text: format!("{} bits", to_fixed(value, 3)),
             ..Default::default()
         }));
     }
@@ -326,9 +384,19 @@ impl ObsCtrlScene {
             }));
         }
         shapes.push(Shape::Text(TextShape { x: OC_STAGE_W / 2.0, y: 470.0, anchor: Some(Anchor::Middle), font_size: Some(14.0), fill: Some(COL_DIM.to_string()), text: "Linear state-space  \u{00b7}  MDP (reachability)  \u{00b7}  POMDP (distinguishability)".to_string(), ..Default::default() }));
+        shapes.push(Shape::Text(TextShape {
+            x: OC_STAGE_W / 2.0,
+            y: 500.0,
+            anchor: Some(Anchor::Middle),
+            font_size: Some(14.0),
+            fill: Some(COL_INFO.to_string()),
+            text: "Shannon layer: transition uncertainty and sensor information in bits"
+                .to_string(),
+            ..Default::default()
+        }));
         self.steps_.push(FrameParts::with_caption(
             shapes,
-            "Two fundamental structural properties of dynamical systems.",
+            "Structural properties plus Shannon information measures for stochastic models.",
         ));
     }
 
@@ -460,6 +528,15 @@ impl ObsCtrlScene {
                 vec![0.0, 0.0, 1.0],
             ]],
         });
+        let noisy = MarkovDecisionProcess::new(MdpSpec {
+            num_states: 3,
+            num_actions: 1,
+            transition: vec![vec![
+                vec![0.0, 0.5, 0.5],
+                vec![0.2, 0.6, 0.2],
+                vec![1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0],
+            ]],
+        });
         self.mdp_step(
             "MDP controllability \u{2248} reachability — ring (s\u{2192}s+1)",
             &ring,
@@ -468,6 +545,7 @@ impl ObsCtrlScene {
             "MDP controllability \u{2248} reachability — trap (state 2 absorbing)",
             &trap,
         );
+        self.mdp_information_step("MDP information — stochastic transition rows", &noisy);
     }
 
     fn mdp_step(&mut self, title: &str, mdp: &MarkovDecisionProcess) {
@@ -571,6 +649,7 @@ impl ObsCtrlScene {
             ..Default::default()
         }));
         let ok = mdp.is_structurally_controllable();
+        let info = mdp.transition_information_summary();
         shapes.push(Shape::Text(TextShape {
             x: 640.0,
             y: 220.0,
@@ -584,15 +663,131 @@ impl ObsCtrlScene {
             ..Default::default()
         }));
         self.badge(&mut shapes, 640.0, 250.0, "Controllable", ok);
+        shapes.push(Shape::Text(TextShape {
+            x: 640.0,
+            y: 330.0,
+            anchor: Some(Anchor::Start),
+            font_size: Some(13.0),
+            fill: Some(COL_INFO.to_string()),
+            font_weight: Some(FontWeight::Bold),
+            text: "transition uncertainty".to_string(),
+            ..Default::default()
+        }));
+        self.metric_bar(
+            &mut shapes,
+            640.0,
+            350.0,
+            210.0,
+            "mean H(S' | s,a)",
+            info.mean_entropy_bits,
+            info.row_capacity_bits.max(1.0),
+            COL_INFO,
+        );
+        shapes.push(Shape::Text(TextShape {
+            x: 640.0,
+            y: 404.0,
+            anchor: Some(Anchor::Start),
+            font_size: Some(12.0),
+            fill: Some(COL_DIM.to_string()),
+            text: format!(
+                "row capacity log2(S) = {} bits",
+                to_fixed(info.row_capacity_bits, 3)
+            ),
+            ..Default::default()
+        }));
         self.steps_.push(FrameParts::with_caption(
             shapes,
             format!(
-                "{title}: {}.",
+                "{title}: {}; mean transition entropy {:.3} bits.",
                 if ok {
                     "strongly connected \u{2192} controllable"
                 } else {
                     "cannot leave the trap \u{2192} NOT controllable"
-                }
+                },
+                info.mean_entropy_bits
+            ),
+        ));
+    }
+
+    fn mdp_information_step(&mut self, title: &str, mdp: &MarkovDecisionProcess) {
+        let mut shapes = self.base(title);
+        let info = mdp.transition_information_summary();
+        let max_h = info.row_capacity_bits.max(1.0);
+
+        shapes.push(Shape::Text(TextShape {
+            x: 130.0,
+            y: 125.0,
+            anchor: Some(Anchor::Start),
+            font_size: Some(14.0),
+            fill: Some(COL_TEXT.to_string()),
+            text: "Each row is a source distribution for the next state.".to_string(),
+            ..Default::default()
+        }));
+        for s in 0..mdp.num_states {
+            let y = 170.0 + s as f64 * 105.0;
+            shapes.push(Shape::Text(TextShape {
+                x: 130.0,
+                y,
+                anchor: Some(Anchor::Start),
+                font_size: Some(14.0),
+                font_weight: Some(FontWeight::Bold),
+                fill: Some(COL_TEXT.to_string()),
+                text: format!("from s{s}"),
+                ..Default::default()
+            }));
+            for t in 0..mdp.num_states {
+                let p = mdp.transition[0][s][t];
+                let x = 230.0 + t as f64 * 82.0;
+                shapes.push(Shape::Rect(RectShape {
+                    x,
+                    y: y - 19.0,
+                    w: 58.0,
+                    h: 32.0,
+                    rx: Some(5.0),
+                    fill: if p > 0.0 {
+                        "#172554".to_string()
+                    } else {
+                        "#111827".to_string()
+                    },
+                    stroke: Some("#334155".to_string()),
+                    ..Default::default()
+                }));
+                shapes.push(Shape::Text(TextShape {
+                    x: x + 29.0,
+                    y: y + 2.0,
+                    anchor: Some(Anchor::Middle),
+                    font_size: Some(12.0),
+                    fill: Some(COL_TEXT.to_string()),
+                    text: format!("p{}={}", t, to_fixed(p, 2)),
+                    ..Default::default()
+                }));
+            }
+            self.metric_bar(
+                &mut shapes,
+                520.0,
+                y - 16.0,
+                230.0,
+                &format!("H(S' | s{s},a0)"),
+                info.state_action_entropy_bits[0][s],
+                max_h,
+                COL_INFO,
+            );
+        }
+        self.metric_bar(
+            &mut shapes,
+            130.0,
+            515.0,
+            620.0,
+            "mean transition entropy",
+            info.mean_entropy_bits,
+            max_h,
+            COL_INFO,
+        );
+        self.steps_.push(FrameParts::with_caption(
+            shapes,
+            format!(
+                "{title}: mean H(S' | s,a) = {:.3} bits, normalized {:.3}.",
+                info.mean_entropy_bits, info.normalized_mean_entropy
             ),
         ));
     }
@@ -629,6 +824,38 @@ impl ObsCtrlScene {
         let labels = pomdp.distinguishability_classes();
         let palette = ["#38bdf8", "#f59e0b", "#a78bfa", "#34d399"];
         let n = pomdp.mdp.num_states;
+        let info = pomdp.observation_information(None);
+        let max_h = info.input_entropy_bits.max(1.0);
+        shapes.push(Shape::Text(TextShape {
+            x: 190.0,
+            y: 116.0,
+            anchor: Some(Anchor::Start),
+            font_size: Some(13.0),
+            font_weight: Some(FontWeight::Bold),
+            fill: Some(COL_INFO.to_string()),
+            text: "sensor information under a uniform hidden-state prior".to_string(),
+            ..Default::default()
+        }));
+        self.metric_bar(
+            &mut shapes,
+            190.0,
+            138.0,
+            250.0,
+            "I(S;O)",
+            info.mutual_information_bits,
+            max_h,
+            COL_INFO,
+        );
+        self.metric_bar(
+            &mut shapes,
+            560.0,
+            138.0,
+            250.0,
+            "residual H(S | O)",
+            info.equivocation_bits,
+            max_h,
+            COL_BAD,
+        );
         for s in 0..n {
             let x = 220.0 + s as f64 * 280.0;
             let y = 240.0;
@@ -719,12 +946,14 @@ impl ObsCtrlScene {
         self.steps_.push(FrameParts::with_caption(
             shapes,
             format!(
-                "{title}: {}.",
+                "{title}: {}; I(S;O) = {:.3} bits, residual H(S|O) = {:.3} bits.",
                 if ok {
                     "every state has its own class \u{2192} observable"
                 } else {
                     "states collapse to one class \u{2192} NOT observable"
-                }
+                },
+                info.mutual_information_bits,
+                info.equivocation_bits
             ),
         ));
     }
@@ -828,7 +1057,7 @@ impl ObsCtrlScene {
         }
         self.steps_.push(FrameParts::with_caption(
             shapes,
-            "Controllability = can I move the states?   Observability = can I infer the states?",
+            "Controllability = can I move the states? Observability = can I infer the states? Information = how many bits are removed or left behind.",
         ));
     }
 }
@@ -840,8 +1069,9 @@ mod tests {
     #[test]
     fn storyboard_has_expected_step_count() {
         let scene = ObsCtrlScene::new();
-        // title + 2 LTI examples (3 steps each) + 2 MDP + 2 POMDP + recap.
-        assert_eq!(scene.steps().len(), 1 + 6 + 2 + 2 + 1);
+        // title + 2 LTI examples (3 steps each) + 2 MDP reachability
+        // + 1 MDP entropy frame + 2 POMDP info/observability frames + recap.
+        assert_eq!(scene.steps().len(), 1 + 6 + 2 + 1 + 2 + 1);
     }
 
     #[test]
@@ -851,5 +1081,25 @@ mod tests {
         let cap = scene.steps()[2].caption.clone().unwrap();
         assert!(cap.contains("controllable"), "{cap}");
         assert!(!cap.contains("NOT controllable"), "{cap}");
+    }
+
+    #[test]
+    fn storyboard_includes_information_frames() {
+        let scene = ObsCtrlScene::new();
+        assert!(
+            scene.steps().iter().any(|s| s
+                .caption
+                .as_deref()
+                .unwrap_or("")
+                .contains("mean H(S' | s,a)")),
+            "missing MDP transition entropy frame"
+        );
+        assert!(
+            scene
+                .steps()
+                .iter()
+                .any(|s| s.caption.as_deref().unwrap_or("").contains("I(S;O)")),
+            "missing POMDP sensor information frame"
+        );
     }
 }

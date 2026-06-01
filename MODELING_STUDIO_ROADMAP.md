@@ -86,6 +86,8 @@ Reference points:
 - `studio::ui` renders `out/studio/workbench.html`, a self-contained workbench
   with palette, inspector, canvas, N2 view, JSON view, local run, and sweep
   driver.
+- `studio::players` writes catalog-ready Studio run, N2, and sweep-driver HTML
+  players through the uniform `RunArtifact` renderer.
 - `acausal::compile_acausal_model()` adds the first ModelingToolkit-style
   structural pass: alias elimination, algebraic ordering, missing-equation
   checks, and generated simulation traces.

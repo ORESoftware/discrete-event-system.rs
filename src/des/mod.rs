@@ -105,6 +105,7 @@ pub mod model;
 // canonical serde spec, unified solve/rollout reusing the existing solvers, and
 // an animated artifact. Additive.
 pub mod decision;
+pub mod delivery_planner;
 
 // Equation-based modeling citizen: JSON/LaTeX/XML equations normalize into
 // runnable ODE/PDE traces under the first-class model contract.
@@ -143,12 +144,14 @@ pub mod main;
 pub mod main_backpropagation;
 pub mod main_build_site;
 pub mod main_calculus;
+pub mod main_calculus_of_variations_anim;
 pub mod main_computer_network;
 pub mod main_contact_seir;
 pub mod main_convolution;
 pub mod main_court_mdp;
 pub mod main_dc_motor;
 pub mod main_dc_motor_anim;
+pub mod main_delivery_planner;
 pub mod main_dispatch_combo;
 pub mod main_electric_circuit;
 pub mod main_elevator;
@@ -176,6 +179,7 @@ pub mod main_mdp_lp;
 pub mod main_milp_bnb;
 pub mod main_modeling_studio;
 pub mod main_monte_carlo_sim;
+pub mod main_music_production;
 pub mod main_network_mutex;
 pub mod main_neural_net;
 pub mod main_newsvendor;
@@ -200,6 +204,7 @@ pub mod main_temp_control;
 pub mod main_temp_control_anim;
 pub mod main_traffic;
 pub mod main_two_disease;
+pub mod main_vehicle_jump;
 pub mod main_wind_mppt;
 pub mod main_wind_mppt_anim;
 pub mod max_flow;

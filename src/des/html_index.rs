@@ -48,6 +48,34 @@ const MODELING_TOOLS: &[HtmlIndexSpec] = &[
         description:
             "Author, inspect, run, drag, and export JSON block diagrams with nested runtime cells.",
     },
+    HtmlIndexSpec {
+        kind: "animation",
+        title: "Studio Run Player",
+        href: "studio/run-player.html",
+        description:
+            "Playable Studio model execution with live block values, animated wires, and signal timelines.",
+    },
+    HtmlIndexSpec {
+        kind: "animation",
+        title: "Studio N2 Player",
+        href: "studio/n2-player.html",
+        description:
+            "OpenMDAO-style N2 dependency matrix player that reveals component coupling and validation status.",
+    },
+    HtmlIndexSpec {
+        kind: "animation",
+        title: "Studio Sweep Player",
+        href: "studio/sweep-player.html",
+        description:
+            "Parameter-sweep driver player for design variables, objectives, constraints, and best feasible cases.",
+    },
+    HtmlIndexSpec {
+        kind: "tool",
+        title: "Delivery Scheduler",
+        href: "delivery-planner.html",
+        description:
+            "Paste delivery addresses with drop-off windows, solve a time-window route, copy the itinerary, and play the route animation.",
+    },
 ];
 
 const CONTROL_ANIMATIONS: &[HtmlIndexSpec] = &[
@@ -89,6 +117,13 @@ const CONTROL_ANIMATIONS: &[HtmlIndexSpec] = &[
         href: "empirical-control/player.html",
         description:
             "Playable frame stream for LTI Gramian, MDP reachability, and POMDP belief checks.",
+    },
+    HtmlIndexSpec {
+        kind: "animation",
+        title: "Signal & control analysis methods",
+        href: "signal-processing/player.html",
+        description:
+            "Animated Z, Laplace, Fourier, DFT/FFT, wavelet, Mellin, Radon, and Lagrange state-space analysis.",
     },
     HtmlIndexSpec {
         kind: "animation",
@@ -163,6 +198,30 @@ const NUMERICAL_SOLVERS: &[HtmlIndexSpec] = &[
     },
 ];
 
+const CALCULUS_OF_VARIATIONS: &[HtmlIndexSpec] = &[
+    HtmlIndexSpec {
+        kind: "animation",
+        title: "Shortest curve - Euler-Lagrange line",
+        href: "calculus-of-variations/shortest-curve.html",
+        description:
+            "Fixed-endpoint arc-length minimization with the stationary straight-line solution and first-integral diagnostics.",
+    },
+    HtmlIndexSpec {
+        kind: "animation",
+        title: "Brachistochrone - cycloid",
+        href: "calculus-of-variations/brachistochrone.html",
+        description:
+            "Classical minimum-time descent problem rendered as a cycloid with endpoint and Beltrami first-integral checks.",
+    },
+    HtmlIndexSpec {
+        kind: "animation",
+        title: "Minimal surface - catenoid",
+        href: "calculus-of-variations/minimal-surface-catenoid.html",
+        description:
+            "Surface-area variational problem between equal coaxial rings, animated as the catenoid stationary surface.",
+    },
+];
+
 const RUN_REPORTS: &[HtmlIndexSpec] = &[
     HtmlIndexSpec {
         kind: "simulation",
@@ -175,6 +234,12 @@ const RUN_REPORTS: &[HtmlIndexSpec] = &[
         title: "Smart traffic flow",
         href: "smart-traffic-flow.html",
         description: "Smart movable cars with shuffled actor updates, accident instrumentation, and live traffic metrics.",
+    },
+    HtmlIndexSpec {
+        kind: "interactive model",
+        title: "Vehicle jump planner",
+        href: "vehicle-jump/player.html",
+        description: "Non-linear ramp-jump trajectory planner with wind vector, atmospheric density, ramp angle, distance, and landing slope controls.",
     },
     HtmlIndexSpec {
         kind: "run report",
@@ -254,6 +319,11 @@ pub fn html_index_groups() -> &'static [HtmlIndexGroupSpec] {
             entries: NUMERICAL_SOLVERS,
         },
         HtmlIndexGroupSpec {
+            heading: "Calculus of variations",
+            blurb: "Analytic variational problem models with playable stationary curves, Euler-Lagrange equations, first integrals, and diagnostics.",
+            entries: CALCULUS_OF_VARIATIONS,
+        },
+        HtmlIndexGroupSpec {
             heading: "Numerical & machine-learning runs",
             blurb: "Reproducible run reports with the full console output of each simulation.",
             entries: RUN_REPORTS,
@@ -311,11 +381,28 @@ pub fn generate_html_artifacts() {
         Ok(path) => eprintln!("  • {}", path.display()),
         Err(e) => eprintln!("  ! Studio JSON Workbench generation failed: {e}"),
     }
+    match crate::des::studio::write_studio_player_html(
+        "out",
+        &crate::des::studio::starter_model_spec(),
+    ) {
+        Ok(paths) => {
+            for path in paths {
+                eprintln!("  • {}", path.display());
+            }
+        }
+        Err(e) => eprintln!("  ! Studio player generation failed: {e}"),
+    }
+    eprintln!("Generating Delivery Scheduler...");
+    crate::des::delivery_planner::write_delivery_planner_artifacts();
 
     eprintln!("Regenerating control-system animations...");
-    // Wind MPPT scene not yet ported to FrameRecorder — skip until scene exists.
+    generate_wind_mppt_pages();
     generate_dc_motor_pages();
     crate::des::main_observability_controllability_anim::run();
+    match crate::des::main_signal_processing::write_signal_processing_player_html("out") {
+        Ok(path) => eprintln!("  • {}", path.display()),
+        Err(e) => eprintln!("  ! signal-processing player generation failed: {e}"),
+    }
 
     eprintln!("Regenerating temperature-control animations...");
     crate::des::main_temp_control_anim::run_preset(
@@ -330,6 +417,9 @@ pub fn generate_html_artifacts() {
     eprintln!("Regenerating numerical / ML solver animations...");
     crate::des::main_numerical_solver_anim::run();
 
+    eprintln!("Regenerating calculus-of-variations animations...");
+    crate::des::main_calculus_of_variations_anim::run();
+
     eprintln!("Generating run reports...");
     crate::des::main_empirical_control_report::run();
     crate::des::main_stochastic_sde_report::run();
@@ -341,6 +431,37 @@ pub fn generate_html_artifacts() {
             eprintln!("  • {smart}");
         }
         Err(e) => eprintln!("  ! traffic HTML generation failed: {e}"),
+    }
+
+    eprintln!("Generating vehicle jump planner...");
+    match crate::des::main_vehicle_jump::write_vehicle_jump_player_html("out") {
+        Ok(path) => eprintln!("  • {}", path.display()),
+        Err(e) => eprintln!("  ! vehicle jump planner generation failed: {e}"),
+    }
+
+    eprintln!("Generating two-disease epidemic animation...");
+    generate_two_disease_page();
+}
+
+fn generate_wind_mppt_pages() {
+    let original_controller = std::env::var("CONTROLLER").ok();
+    std::env::remove_var("CONTROLLER");
+    crate::des::main_wind_mppt_anim::run();
+    std::env::set_var("CONTROLLER", "pi");
+    crate::des::main_wind_mppt_anim::run();
+    match original_controller {
+        Some(value) => std::env::set_var("CONTROLLER", value),
+        None => std::env::remove_var("CONTROLLER"),
+    }
+}
+
+fn generate_two_disease_page() {
+    let original_animate = std::env::var("ANIMATE").ok();
+    std::env::set_var("ANIMATE", "1");
+    crate::des::main_two_disease::run();
+    match original_animate {
+        Some(value) => std::env::set_var("ANIMATE", value),
+        None => std::env::remove_var("ANIMATE"),
     }
 }
 
@@ -381,6 +502,28 @@ mod tests {
                 "missing index entry for {slug}"
             );
         }
+    }
+
+    #[test]
+    fn registry_covers_calculus_of_variations_players() {
+        let hrefs: HashSet<&str> = CALCULUS_OF_VARIATIONS.iter().map(|s| s.href).collect();
+        for slug in [
+            "shortest-curve",
+            "brachistochrone",
+            "minimal-surface-catenoid",
+        ] {
+            let expected = format!("calculus-of-variations/{slug}.html");
+            assert!(
+                hrefs.contains(expected.as_str()),
+                "missing calculus-of-variations index entry for {slug}"
+            );
+        }
+    }
+
+    #[test]
+    fn registry_includes_signal_processing_player() {
+        let href = crate::des::main_signal_processing::SIGNAL_PROCESSING_PLAYER_REL_PATH;
+        assert!(CONTROL_ANIMATIONS.iter().any(|entry| entry.href == href));
     }
 
     #[test]

@@ -1,14 +1,19 @@
 //! Port of `src/des/general/signal-transforms.ts`
 //! (module `des::general::signal_transforms`).
 //!
-//! Z, Laplace, and Fourier transforms expressed as DES station graphs. A run is
-//! not a monolithic numerical helper: it is built from the entity vocabulary
-//! used across the project. A sample-source station emits one token per input
-//! sample, a kernel station turns each sample into a per-evaluation-point
-//! contribution token, an accumulator station sums contributions per point, and
-//! a result sink keeps the final totals. Samples, contributions, and totals are
-//! movable tokens; the stations own only local state and talk over named
-//! channels.
+//! Z, Laplace, Fourier, DFT, wavelet, and Mellin transforms expressed as DES
+//! station graphs. A run is not a monolithic numerical helper: it is built from
+//! the entity vocabulary used across the project. A sample-source station emits
+//! one token per input sample, a kernel station turns each sample into a
+//! per-evaluation-point contribution token, an accumulator station sums
+//! contributions per point, and a result sink keeps the final totals. Samples,
+//! contributions, and totals are movable tokens; the stations own only local
+//! state and talk over named channels.
+//!
+//! Radix-2 FFT and Radon transforms are exposed from the same module as
+//! transform engines with the same output vocabulary, but they are not forced
+//! through the contribution-token graph: FFT is a butterfly computation, while
+//! Radon consumes 2-D grid cells rather than scalar 1-D samples.
 //!
 //! ## Conversion notes (per the TS "RUST MIGRATION" header)
 //!
@@ -63,12 +68,18 @@ fn require(check: Check) {
 
 // ── Enums (string unions) ─────────────────────────────────────────────────────
 
-/// `'z' | 'laplace' | 'fourier'`.
+/// Transform family identifier used by summaries, adapters, and control-system
+/// descriptors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TransformKind {
     Z,
     Laplace,
     Fourier,
+    Dft,
+    Fft,
+    Wavelet,
+    Mellin,
+    Radon,
 }
 
 impl TransformKind {
@@ -77,6 +88,11 @@ impl TransformKind {
             TransformKind::Z => "z",
             TransformKind::Laplace => "laplace",
             TransformKind::Fourier => "fourier",
+            TransformKind::Dft => "dft",
+            TransformKind::Fft => "fft",
+            TransformKind::Wavelet => "wavelet",
+            TransformKind::Mellin => "mellin",
+            TransformKind::Radon => "radon",
         }
     }
 }
@@ -146,6 +162,20 @@ fn complex_add(a: ComplexValue, b: ComplexValue) -> ComplexValue {
     ComplexValue {
         re: a.re + b.re,
         im: a.im + b.im,
+    }
+}
+
+fn complex_sub(a: ComplexValue, b: ComplexValue) -> ComplexValue {
+    ComplexValue {
+        re: a.re - b.re,
+        im: a.im - b.im,
+    }
+}
+
+fn complex_mul(a: ComplexValue, b: ComplexValue) -> ComplexValue {
+    ComplexValue {
+        re: a.re * b.re - a.im * b.im,
+        im: a.re * b.im + a.im * b.re,
     }
 }
 
@@ -337,6 +367,77 @@ fn normalize_omega_points(values: Option<&[f64]>) -> Vec<ComplexPoint> {
         .collect()
 }
 
+fn normalize_bin_points(values: Option<&[usize]>, n: usize) -> Vec<ComplexPoint> {
+    require(Preconditions::integer_in_range(
+        "dft-transform",
+        "sample count",
+        n as f64,
+        1.0,
+        1_000_000.0,
+    ));
+    let default: Vec<usize> = (0..n).collect();
+    let raw: &[usize] = match values {
+        Some(v) if !v.is_empty() => v,
+        _ => &default,
+    };
+    raw.iter()
+        .map(|&k| {
+            require(Preconditions::integer_in_range(
+                "dft-transform",
+                "kValues",
+                k as f64,
+                0.0,
+                (n - 1) as f64,
+            ));
+            ComplexPoint {
+                re: k as f64,
+                im: n as f64,
+                label: format!("k={k}"),
+            }
+        })
+        .collect()
+}
+
+fn normalize_wavelet_points(values: Option<&[WaveletPointInput]>) -> Vec<ComplexPoint> {
+    let default = [WaveletPointInput {
+        label: None,
+        scale: 1.0,
+        shift: 0.0,
+    }];
+    let raw: &[WaveletPointInput] = match values {
+        Some(v) if !v.is_empty() => v,
+        _ => &default,
+    };
+    require(Preconditions::non_empty(
+        "wavelet-transform",
+        "scaleShiftValues",
+        raw,
+    ));
+    raw.iter()
+        .enumerate()
+        .map(|(i, p)| {
+            require(Preconditions::positive(
+                "wavelet-transform",
+                &format!("scaleShiftValues[{i}].scale"),
+                p.scale,
+            ));
+            require(Preconditions::finite(
+                "wavelet-transform",
+                &format!("scaleShiftValues[{i}].shift"),
+                p.shift,
+            ));
+            ComplexPoint {
+                re: p.scale,
+                im: p.shift,
+                label: p
+                    .label
+                    .clone()
+                    .unwrap_or_else(|| format!("a={},b={}", p.scale, p.shift)),
+            }
+        })
+        .collect()
+}
+
 // ── Records / result shapes ───────────────────────────────────────────────────
 
 #[derive(Clone, Debug)]
@@ -441,6 +542,126 @@ pub struct FourierTransformParams {
     pub quadrature: Option<QuadratureRule>,
     pub omega_values: Option<Vec<f64>>,
     pub tolerance: Option<f64>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct DiscreteFourierTransformParams {
+    pub sequence: Option<Vec<f64>>,
+    pub expression: Option<String>,
+    pub constants: Option<HashMap<String, f64>>,
+    pub terms: Option<usize>,
+    pub k_values: Option<Vec<usize>>,
+    pub tolerance: Option<f64>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct FastFourierTransformParams {
+    pub sequence: Option<Vec<f64>>,
+    pub expression: Option<String>,
+    pub constants: Option<HashMap<String, f64>>,
+    pub terms: Option<usize>,
+    pub tolerance: Option<f64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaveletMother {
+    Haar,
+    MexicanHat,
+    MorletReal,
+}
+
+impl Default for WaveletMother {
+    fn default() -> Self {
+        WaveletMother::Haar
+    }
+}
+
+impl WaveletMother {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WaveletMother::Haar => "haar",
+            WaveletMother::MexicanHat => "mexican-hat",
+            WaveletMother::MorletReal => "morlet-real",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct WaveletPointInput {
+    pub label: Option<String>,
+    pub scale: f64,
+    pub shift: f64,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct WaveletTransformParams {
+    pub samples: Option<Vec<f64>>,
+    pub expression: Option<String>,
+    pub constants: Option<HashMap<String, f64>>,
+    pub t0: Option<f64>,
+    pub t1: Option<f64>,
+    pub dt: Option<f64>,
+    pub quadrature: Option<QuadratureRule>,
+    pub scale_shift_values: Option<Vec<WaveletPointInput>>,
+    pub mother: Option<WaveletMother>,
+    pub tolerance: Option<f64>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct MellinTransformParams {
+    pub samples: Option<Vec<f64>>,
+    pub expression: Option<String>,
+    pub constants: Option<HashMap<String, f64>>,
+    pub t0: Option<f64>,
+    pub t1: Option<f64>,
+    pub dt: Option<f64>,
+    pub quadrature: Option<QuadratureRule>,
+    pub s_values: Option<Vec<ComplexPointInput>>,
+    pub tolerance: Option<f64>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RadonProjectionInput {
+    pub label: Option<String>,
+    pub theta: f64,
+    pub rho: f64,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct RadonTransformParams {
+    pub grid: Vec<Vec<f64>>,
+    /// x-coordinate of the first cell center. Defaults to a centered grid.
+    pub x0: Option<f64>,
+    /// y-coordinate of the first cell center. Defaults to a centered grid.
+    pub y0: Option<f64>,
+    pub dx: Option<f64>,
+    pub dy: Option<f64>,
+    pub projections: Option<Vec<RadonProjectionInput>>,
+    /// Full acceptance width around a line. Defaults to one grid-cell diagonal.
+    pub line_width: Option<f64>,
+    pub tolerance: Option<f64>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RadonOutputPoint {
+    pub point_index: usize,
+    pub label: String,
+    pub theta: f64,
+    pub rho: f64,
+    pub value: f64,
+    pub direct_reference: f64,
+    pub absolute_error: f64,
+    pub cells_used: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct RadonRunResult {
+    pub kind: TransformKind,
+    pub convention: String,
+    pub width: usize,
+    pub height: usize,
+    pub outputs: Vec<RadonOutputPoint>,
+    pub validation: Vec<ValidationCheck>,
 }
 
 const SAMPLE_CHANNEL: &str = "transform-sample";
@@ -1050,20 +1271,80 @@ fn build_z_samples(params: &ZTransformParams) -> Vec<TransformSampleRecord> {
 }
 
 fn build_expression_sequence(params: &ZTransformParams) -> Vec<f64> {
-    let Some(expression) = &params.expression else {
-        panic!("z-transform requires either a finite sequence or a sequence expression");
-    };
-    let terms = params.terms.unwrap_or(8);
-    let start_index = params.start_index.unwrap_or(0);
-    require(Preconditions::integer_in_range(
+    build_discrete_expression_sequence(
         "z-transform",
+        params.expression.as_deref(),
+        params.constants.as_ref(),
+        params.terms,
+        params.start_index.unwrap_or(0),
+    )
+}
+
+fn build_dft_samples(params: &DiscreteFourierTransformParams) -> Vec<TransformSampleRecord> {
+    let sequence = match &params.sequence {
+        Some(s) if !s.is_empty() => s.clone(),
+        _ => build_discrete_expression_sequence(
+            "dft-transform",
+            params.expression.as_deref(),
+            params.constants.as_ref(),
+            params.terms,
+            0,
+        ),
+    };
+    require(Preconditions::non_empty(
+        "dft-transform",
+        "sequence",
+        &sequence,
+    ));
+    require(Preconditions::all_finite(
+        "dft-transform",
+        "sequence",
+        &sequence,
+    ));
+    sequence
+        .iter()
+        .enumerate()
+        .map(|(sample_index, &value)| TransformSampleRecord {
+            sample_index,
+            abscissa_name: AbscissaName::N,
+            abscissa: sample_index as f64,
+            value,
+            weight: 1.0,
+        })
+        .collect()
+}
+
+fn build_fft_samples(params: &FastFourierTransformParams) -> Vec<TransformSampleRecord> {
+    build_dft_samples(&DiscreteFourierTransformParams {
+        sequence: params.sequence.clone(),
+        expression: params.expression.clone(),
+        constants: params.constants.clone(),
+        terms: params.terms,
+        k_values: None,
+        tolerance: params.tolerance,
+    })
+}
+
+fn build_discrete_expression_sequence(
+    model: &str,
+    expression: Option<&str>,
+    constants: Option<&HashMap<String, f64>>,
+    terms: Option<usize>,
+    start_index: i64,
+) -> Vec<f64> {
+    let Some(expression) = expression else {
+        panic!("{model} requires either a finite sequence or a sequence expression");
+    };
+    let terms = terms.unwrap_or(8);
+    require(Preconditions::integer_in_range(
+        model,
         "terms",
         terms as f64,
         1.0,
         1000000.0,
     ));
     let ast = parse(expression);
-    let constants = finite_constants(params.constants.as_ref());
+    let constants = finite_constants(constants);
     let mut values: Vec<f64> = Vec::new();
     for i in 0..terms {
         let n = start_index + i as i64;
@@ -1073,7 +1354,7 @@ fn build_expression_sequence(params: &ZTransformParams) -> Vec<f64> {
         env.insert("tick".to_string(), i as f64);
         let value = evaluate(&ast, &env);
         require(Preconditions::finite(
-            "z-transform",
+            model,
             &format!("expression[{i}]"),
             value,
         ));
@@ -1208,6 +1489,57 @@ fn fourier_kernel(sample: &TransformSampleRecord, point: &ComplexPoint) -> Compl
     )
 }
 
+fn dft_kernel(sample: &TransformSampleRecord, point: &ComplexPoint) -> ComplexValue {
+    let n = point.im;
+    let k = point.re;
+    let angle = -std::f64::consts::TAU * k * sample.sample_index as f64 / n;
+    complex_scale(complex_exp(0.0, angle), sample.value)
+}
+
+fn haar_wavelet_kernel(sample: &TransformSampleRecord, point: &ComplexPoint) -> ComplexValue {
+    let scale = point.re;
+    let shift = point.im;
+    let u = (sample.abscissa - shift) / scale;
+    let psi = if (0.0..0.5).contains(&u) {
+        1.0
+    } else if (0.5..1.0).contains(&u) {
+        -1.0
+    } else {
+        0.0
+    };
+    complex(sample.value * sample.weight * psi / scale.sqrt(), 0.0)
+}
+
+fn mexican_hat_wavelet_kernel(
+    sample: &TransformSampleRecord,
+    point: &ComplexPoint,
+) -> ComplexValue {
+    let scale = point.re;
+    let shift = point.im;
+    let u = (sample.abscissa - shift) / scale;
+    let psi = (1.0 - u * u) * (-0.5 * u * u).exp();
+    complex(sample.value * sample.weight * psi / scale.sqrt(), 0.0)
+}
+
+fn morlet_real_wavelet_kernel(
+    sample: &TransformSampleRecord,
+    point: &ComplexPoint,
+) -> ComplexValue {
+    let scale = point.re;
+    let shift = point.im;
+    let u = (sample.abscissa - shift) / scale;
+    let psi = (5.0 * u).cos() * (-0.5 * u * u).exp();
+    complex(sample.value * sample.weight * psi / scale.sqrt(), 0.0)
+}
+
+fn mellin_kernel(sample: &TransformSampleRecord, point: &ComplexPoint) -> ComplexValue {
+    let t = sample.abscissa;
+    require(Preconditions::positive("mellin-transform", "sample.t", t));
+    let mag = t.powf(point.re - 1.0);
+    let phase = point.im * t.ln();
+    complex_scale(complex_exp(0.0, phase), sample.value * sample.weight * mag)
+}
+
 fn validate_z_points(samples: &[TransformSampleRecord], points: &[ComplexPoint]) {
     let has_positive_index = samples.iter().any(|sample| sample.abscissa > 0.0);
     if !has_positive_index {
@@ -1222,6 +1554,212 @@ fn validate_z_points(samples: &[TransformSampleRecord], points: &[ComplexPoint])
             Some(format!("{{re: {}, im: {}}}", point.re, point.im)),
         ));
     }
+}
+
+fn validate_positive_time_samples(model: &str, samples: &[TransformSampleRecord]) {
+    for sample in samples {
+        require(Preconditions::positive(
+            model,
+            "sample abscissa",
+            sample.abscissa,
+        ));
+    }
+}
+
+fn is_power_of_two(n: usize) -> bool {
+    n != 0 && (n & (n - 1)) == 0
+}
+
+fn bit_reverse(mut x: usize, bits: usize) -> usize {
+    let mut y = 0usize;
+    for _ in 0..bits {
+        y = (y << 1) | (x & 1);
+        x >>= 1;
+    }
+    y
+}
+
+fn fft_radix2(input: &[ComplexValue]) -> Vec<ComplexValue> {
+    let n = input.len();
+    if !is_power_of_two(n) {
+        panic!("fft-transform requires a non-empty power-of-two sample count");
+    }
+    let bits = n.trailing_zeros() as usize;
+    let mut out = vec![complex(0.0, 0.0); n];
+    for (i, &value) in input.iter().enumerate() {
+        out[bit_reverse(i, bits)] = value;
+    }
+    let mut len = 2usize;
+    while len <= n {
+        let half = len / 2;
+        let theta = -std::f64::consts::TAU / len as f64;
+        let w_len = complex_exp(0.0, theta);
+        let mut start = 0usize;
+        while start < n {
+            let mut w = complex(1.0, 0.0);
+            for j in 0..half {
+                let u = out[start + j];
+                let v = complex_mul(out[start + j + half], w);
+                out[start + j] = complex_add(u, v);
+                out[start + j + half] = complex_sub(u, v);
+                w = complex_mul(w, w_len);
+            }
+            start += len;
+        }
+        len *= 2;
+    }
+    out
+}
+
+fn fft_reference_outputs(
+    kind: TransformKind,
+    samples: &[TransformSampleRecord],
+    values: &[ComplexValue],
+    tolerance: f64,
+) -> (Vec<TransformOutputPoint>, Vec<ValidationCheck>) {
+    let points = normalize_bin_points(None, samples.len());
+    let direct = direct_transform(samples, &points, dft_kernel);
+    let outputs: Vec<TransformOutputPoint> = values
+        .iter()
+        .enumerate()
+        .map(|(i, &value)| {
+            let direct_reference = direct[i];
+            let absolute_error = complex_abs_diff(value, direct_reference);
+            TransformOutputPoint {
+                point_index: i,
+                label: points[i].label.clone(),
+                point: points[i].as_complex(),
+                value,
+                magnitude: complex_magnitude(value),
+                phase: value.im.atan2(value.re),
+                samples_used: samples.len(),
+                direct_reference,
+                absolute_error,
+            }
+        })
+        .collect();
+    let validation = reference_checks(&outputs, tolerance, kind);
+    (outputs, validation)
+}
+
+fn validate_grid(params: &RadonTransformParams) -> (usize, usize, f64, f64, f64, f64, f64) {
+    require(Preconditions::non_empty(
+        "radon-transform",
+        "grid",
+        &params.grid,
+    ));
+    let height = params.grid.len();
+    let width = params.grid[0].len();
+    require(Preconditions::non_empty(
+        "radon-transform",
+        "grid[0]",
+        &params.grid[0],
+    ));
+    for (row, values) in params.grid.iter().enumerate() {
+        require(Preconditions::length_eq(
+            "radon-transform",
+            &format!("grid[{row}]"),
+            values,
+            width,
+        ));
+        require(Preconditions::all_finite(
+            "radon-transform",
+            &format!("grid[{row}]"),
+            values,
+        ));
+    }
+    let dx = params.dx.unwrap_or(1.0);
+    let dy = params.dy.unwrap_or(1.0);
+    require(Preconditions::positive("radon-transform", "dx", dx));
+    require(Preconditions::positive("radon-transform", "dy", dy));
+    let x0 = params
+        .x0
+        .unwrap_or_else(|| -0.5 * (width.saturating_sub(1)) as f64 * dx);
+    let y0 = params
+        .y0
+        .unwrap_or_else(|| -0.5 * (height.saturating_sub(1)) as f64 * dy);
+    require(Preconditions::finite("radon-transform", "x0", x0));
+    require(Preconditions::finite("radon-transform", "y0", y0));
+    let line_width = params
+        .line_width
+        .unwrap_or_else(|| (dx * dx + dy * dy).sqrt());
+    require(Preconditions::positive(
+        "radon-transform",
+        "lineWidth",
+        line_width,
+    ));
+    (width, height, dx, dy, x0, y0, line_width)
+}
+
+fn normalize_radon_projections(
+    values: Option<&[RadonProjectionInput]>,
+) -> Vec<RadonProjectionInput> {
+    let default = [RadonProjectionInput {
+        label: Some("theta=0,rho=0".to_string()),
+        theta: 0.0,
+        rho: 0.0,
+    }];
+    let raw: &[RadonProjectionInput] = match values {
+        Some(v) if !v.is_empty() => v,
+        _ => &default,
+    };
+    require(Preconditions::non_empty(
+        "radon-transform",
+        "projections",
+        raw,
+    ));
+    raw.iter()
+        .enumerate()
+        .map(|(i, p)| {
+            require(Preconditions::finite(
+                "radon-transform",
+                &format!("projections[{i}].theta"),
+                p.theta,
+            ));
+            require(Preconditions::finite(
+                "radon-transform",
+                &format!("projections[{i}].rho"),
+                p.rho,
+            ));
+            RadonProjectionInput {
+                label: p
+                    .label
+                    .clone()
+                    .or_else(|| Some(format!("theta={},rho={}", p.theta, p.rho))),
+                theta: p.theta,
+                rho: p.rho,
+            }
+        })
+        .collect()
+}
+
+fn radon_projection_value(
+    grid: &[Vec<f64>],
+    theta: f64,
+    rho: f64,
+    dx: f64,
+    dy: f64,
+    x0: f64,
+    y0: f64,
+    line_width: f64,
+) -> (f64, usize) {
+    let c = theta.cos();
+    let s = theta.sin();
+    let half_width = 0.5 * line_width;
+    let mut value = 0.0;
+    let mut used = 0usize;
+    for (row, values) in grid.iter().enumerate() {
+        let y = y0 + row as f64 * dy;
+        for (col, &cell) in values.iter().enumerate() {
+            let x = x0 + col as f64 * dx;
+            let distance = (x * c + y * s - rho).abs();
+            if distance <= half_width {
+                value += cell * dx * dy;
+                used += 1;
+            }
+        }
+    }
+    (value, used)
 }
 
 // ── A small shared view over the continuous-transform params ──────────────────
@@ -1317,4 +1855,176 @@ pub fn run_fourier_transform(params: FourierTransformParams) -> TransformRunResu
         kernel: fourier_kernel,
         tolerance: params.tolerance.unwrap_or(1e-9),
     })
+}
+
+pub fn run_dft_transform(params: DiscreteFourierTransformParams) -> TransformRunResult {
+    let samples = build_dft_samples(&params);
+    let points = normalize_bin_points(params.k_values.as_deref(), samples.len());
+    run_transform_pipeline(TransformPipelineArgs {
+        kind: TransformKind::Dft,
+        convention: "X[k] = sum_n x[n] exp(-i 2*pi*k*n/N), evaluated over supplied DFT bins."
+            .to_string(),
+        samples,
+        points,
+        kernel: dft_kernel,
+        tolerance: params.tolerance.unwrap_or(1e-9),
+    })
+}
+
+pub fn run_discrete_fourier_transform(
+    params: DiscreteFourierTransformParams,
+) -> TransformRunResult {
+    run_dft_transform(params)
+}
+
+pub fn run_fft_transform(params: FastFourierTransformParams) -> TransformRunResult {
+    let samples = build_fft_samples(&params);
+    let values: Vec<ComplexValue> = samples
+        .iter()
+        .map(|sample| complex(sample.value, 0.0))
+        .collect();
+    let fft_values = fft_radix2(&values);
+    let tolerance = params.tolerance.unwrap_or(1e-9);
+    let (outputs, validation) =
+        fft_reference_outputs(TransformKind::Fft, &samples, &fft_values, tolerance);
+    let n = samples.len();
+    let stage_count = n.trailing_zeros() as usize;
+    let stations = vec!["fft-butterfly-network".to_string()];
+    let movables = vec!["FftButterflyStage".to_string()];
+    let topology = station_graph(
+        &[StationOrId::Id(stations[0].clone())],
+        &movables,
+        &Vec::<String>::new(),
+    );
+    TransformRunResult {
+        kind: TransformKind::Fft,
+        convention: "Radix-2 Cooley-Tukey FFT computing the DFT bins X[k].".to_string(),
+        samples,
+        outputs,
+        trace: Vec::new(),
+        topology,
+        entity_framework: TransformEntityFrameworkSummary {
+            sources: vec!["fft-input-vector".to_string()],
+            stations,
+            sinks: vec!["fft-output-vector".to_string()],
+            movable_entities: movables,
+            edges: Vec::new(),
+        },
+        run_summary: IterativeRunSummary {
+            ticks: stage_count,
+            ..Default::default()
+        },
+        validation,
+    }
+}
+
+pub fn run_wavelet_transform(params: WaveletTransformParams) -> TransformRunResult {
+    let continuous = ContinuousParams {
+        samples: &params.samples,
+        expression: &params.expression,
+        constants: &params.constants,
+        t0: params.t0,
+        t1: params.t1,
+        dt: params.dt,
+        quadrature: params.quadrature,
+    };
+    let samples = build_continuous_samples("wavelet-transform", &continuous);
+    let points = normalize_wavelet_points(params.scale_shift_values.as_deref());
+    let mother = params.mother.unwrap_or_default();
+    let kernel: KernelFn = match mother {
+        WaveletMother::Haar => haar_wavelet_kernel,
+        WaveletMother::MexicanHat => mexican_hat_wavelet_kernel,
+        WaveletMother::MorletReal => morlet_real_wavelet_kernel,
+    };
+    run_transform_pipeline(TransformPipelineArgs {
+        kind: TransformKind::Wavelet,
+        convention: format!(
+            "W(a,b) = integral f(t) psi((t-b)/a) dt / sqrt(a), mother={}.",
+            mother.as_str()
+        ),
+        samples,
+        points,
+        kernel,
+        tolerance: params.tolerance.unwrap_or(1e-9),
+    })
+}
+
+pub fn run_mellin_transform(params: MellinTransformParams) -> TransformRunResult {
+    let continuous = ContinuousParams {
+        samples: &params.samples,
+        expression: &params.expression,
+        constants: &params.constants,
+        t0: params.t0,
+        t1: params.t1,
+        dt: params.dt,
+        quadrature: params.quadrature,
+    };
+    let samples = build_continuous_samples("mellin-transform", &continuous);
+    validate_positive_time_samples("mellin-transform", &samples);
+    let points = normalize_complex_points(
+        params.s_values.as_deref(),
+        &[ComplexPointInput {
+            label: Some("s=1".to_string()),
+            re: 1.0,
+            im: Some(0.0),
+        }],
+        "sValues",
+    );
+    run_transform_pipeline(TransformPipelineArgs {
+        kind: TransformKind::Mellin,
+        convention:
+            "M(s) = integral_0^infinity t^(s-1) f(t) dt, evaluated on a positive finite window."
+                .to_string(),
+        samples,
+        points,
+        kernel: mellin_kernel,
+        tolerance: params.tolerance.unwrap_or(1e-9),
+    })
+}
+
+pub fn run_radon_transform(params: RadonTransformParams) -> RadonRunResult {
+    let (width, height, dx, dy, x0, y0, line_width) = validate_grid(&params);
+    let projections = normalize_radon_projections(params.projections.as_deref());
+    let tolerance = params.tolerance.unwrap_or(1e-12);
+    let outputs: Vec<RadonOutputPoint> = projections
+        .iter()
+        .enumerate()
+        .map(|(point_index, p)| {
+            let (value, cells_used) =
+                radon_projection_value(&params.grid, p.theta, p.rho, dx, dy, x0, y0, line_width);
+            let direct_reference = value;
+            RadonOutputPoint {
+                point_index,
+                label: p
+                    .label
+                    .clone()
+                    .unwrap_or_else(|| format!("projection[{point_index}]")),
+                theta: p.theta,
+                rho: p.rho,
+                value,
+                direct_reference,
+                absolute_error: (value - direct_reference).abs(),
+                cells_used,
+            }
+        })
+        .collect();
+    let validation = outputs
+        .iter()
+        .map(|output| ValidationCheck {
+            name: format!("radon-transform.reference.{}", output.label),
+            group: Some("signal-transform-reference".to_string()),
+            passed: output.absolute_error <= tolerance,
+            observed: Some(to_precision(output.value, 6)),
+            expected: Some(to_precision(output.direct_reference, 6)),
+            details: None,
+        })
+        .collect();
+    RadonRunResult {
+        kind: TransformKind::Radon,
+        convention: "R(theta,rho) = integral over x*cos(theta)+y*sin(theta)=rho; approximated by finite grid-line accumulation.".to_string(),
+        width,
+        height,
+        outputs,
+        validation,
+    }
 }

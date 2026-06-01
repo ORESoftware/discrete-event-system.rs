@@ -2724,7 +2724,17 @@ pub struct VehicleJumpParams {
     pub rider_mass_kg: Option<f64>,
     pub drag_coefficient: Option<f64>,
     pub frontal_area_m2: Option<f64>,
+    /// Override for local air density. If omitted, density is computed from
+    /// altitude, temperature, and pressure using the ideal gas law.
     pub air_density_kg_m3: Option<f64>,
+    pub air_density_scale: Option<f64>,
+    pub altitude_m: Option<f64>,
+    pub air_temperature_c: Option<f64>,
+    pub pressure_hpa: Option<f64>,
+    /// Wind vector magnitude in the horizontal plane.
+    pub wind_speed_mps: Option<f64>,
+    /// Direction in degrees: 0 = tailwind, 180/-180 = headwind, +90 = crosswind.
+    pub wind_direction_deg: Option<f64>,
     /// Positive is tailwind in the jump direction; negative is headwind.
     pub wind_forward_mps: Option<f64>,
     /// Positive is updraft.
@@ -2749,6 +2759,12 @@ pub struct VehicleJumpScenario {
     pub drag_coefficient: f64,
     pub frontal_area_m2: f64,
     pub air_density_kg_m3: f64,
+    pub air_density_scale: f64,
+    pub altitude_m: f64,
+    pub air_temperature_c: f64,
+    pub pressure_hpa: f64,
+    pub wind_speed_mps: f64,
+    pub wind_direction_deg: f64,
     pub wind_forward_mps: f64,
     pub wind_vertical_mps: f64,
     pub wind_cross_mps: f64,
@@ -2791,6 +2807,41 @@ pub fn run_vehicle_jump_planning(params: VehicleJumpParams) -> VehicleJumpPlanni
     let bike_mass = params.bike_mass_kg.unwrap_or(190.0);
     let rider_mass = params.rider_mass_kg.unwrap_or(85.0);
     let profile_samples = params.profile_samples.unwrap_or(11);
+    let altitude_m = params.altitude_m.unwrap_or(0.0);
+    let air_temperature_c = params.air_temperature_c.unwrap_or(15.0);
+    let pressure_hpa = params
+        .pressure_hpa
+        .unwrap_or_else(|| standard_pressure_hpa(altitude_m));
+    let air_density_scale = params.air_density_scale.unwrap_or(1.0);
+    let air_density_kg_m3 = params
+        .air_density_kg_m3
+        .unwrap_or_else(|| air_density_kg_m3(altitude_m, air_temperature_c, pressure_hpa))
+        * air_density_scale;
+    let wind_speed_mps = params.wind_speed_mps.unwrap_or_else(|| {
+        let fw = params.wind_forward_mps.unwrap_or(0.0);
+        let cw = params.wind_cross_mps.unwrap_or(0.0);
+        (fw * fw + cw * cw).sqrt()
+    });
+    let wind_direction_deg = params.wind_direction_deg.unwrap_or_else(|| {
+        let fw = params.wind_forward_mps.unwrap_or(0.0);
+        let cw = params.wind_cross_mps.unwrap_or(0.0);
+        if fw == 0.0 && cw == 0.0 {
+            0.0
+        } else {
+            cw.atan2(fw).to_degrees()
+        }
+    });
+    let wind_forward_mps = if params.wind_speed_mps.is_some() || params.wind_direction_deg.is_some()
+    {
+        wind_speed_mps * wind_direction_deg.to_radians().cos()
+    } else {
+        params.wind_forward_mps.unwrap_or(0.0)
+    };
+    let wind_cross_mps = if params.wind_speed_mps.is_some() || params.wind_direction_deg.is_some() {
+        wind_speed_mps * wind_direction_deg.to_radians().sin()
+    } else {
+        params.wind_cross_mps.unwrap_or(0.0)
+    };
     let scenario = VehicleJumpScenario {
         distance_m: params.distance_m.unwrap_or(28.0),
         takeoff_angle_rad: params.takeoff_angle_deg.unwrap_or(18.0).to_radians(),
@@ -2798,10 +2849,16 @@ pub fn run_vehicle_jump_planning(params: VehicleJumpParams) -> VehicleJumpPlanni
         total_mass_kg: bike_mass + rider_mass,
         drag_coefficient: params.drag_coefficient.unwrap_or(0.90),
         frontal_area_m2: params.frontal_area_m2.unwrap_or(0.75),
-        air_density_kg_m3: params.air_density_kg_m3.unwrap_or(1.225),
-        wind_forward_mps: params.wind_forward_mps.unwrap_or(0.0),
+        air_density_kg_m3,
+        air_density_scale,
+        altitude_m,
+        air_temperature_c,
+        pressure_hpa,
+        wind_speed_mps,
+        wind_direction_deg,
+        wind_forward_mps,
         wind_vertical_mps: params.wind_vertical_mps.unwrap_or(0.0),
-        wind_cross_mps: params.wind_cross_mps.unwrap_or(0.0),
+        wind_cross_mps,
         dt: params.dt.unwrap_or(0.005),
         max_flight_time_s: params.max_flight_time_s.unwrap_or(8.0),
         landing_tolerance_m: params.landing_tolerance_m.unwrap_or(0.15),
@@ -2831,6 +2888,57 @@ pub fn run_vehicle_jump_planning(params: VehicleJumpParams) -> VehicleJumpPlanni
         model,
         "airDensityKgM3",
         scenario.air_density_kg_m3,
+    ));
+    require(Preconditions::positive(
+        model,
+        "airDensityScale",
+        scenario.air_density_scale,
+    ));
+    require(Preconditions::in_range(
+        model,
+        "altitudeM",
+        scenario.altitude_m,
+        -500.0,
+        6000.0,
+    ));
+    require(Preconditions::in_range(
+        model,
+        "airTemperatureC",
+        scenario.air_temperature_c,
+        -50.0,
+        60.0,
+    ));
+    require(Preconditions::positive(
+        model,
+        "pressureHpa",
+        scenario.pressure_hpa,
+    ));
+    require(Preconditions::non_negative(
+        model,
+        "windSpeedMps",
+        scenario.wind_speed_mps,
+    ));
+    require(Preconditions::in_range(
+        model,
+        "windDirectionDeg",
+        scenario.wind_direction_deg,
+        -180.0,
+        180.0,
+    ));
+    require(Preconditions::finite(
+        model,
+        "windForwardMps",
+        scenario.wind_forward_mps,
+    ));
+    require(Preconditions::finite(
+        model,
+        "windVerticalMps",
+        scenario.wind_vertical_mps,
+    ));
+    require(Preconditions::finite(
+        model,
+        "windCrossMps",
+        scenario.wind_cross_mps,
     ));
     require(Preconditions::positive(model, "dt", scenario.dt));
     require(Preconditions::positive(
@@ -2993,6 +3101,14 @@ fn evaluate_vehicle_jump_plan(
             m_num("landingErrorM", sim.landing_error_m),
             m_num("flightTimeS", sim.target_time_s),
             m_num("landingSpeedMps", plan.landing_speed_mps),
+            m_num("airDensityKgM3", scenario.air_density_kg_m3),
+            m_num("altitudeM", scenario.altitude_m),
+            m_num("airTemperatureC", scenario.air_temperature_c),
+            m_num("pressureHpa", scenario.pressure_hpa),
+            m_num("windSpeedMps", scenario.wind_speed_mps),
+            m_num("windDirectionDeg", scenario.wind_direction_deg),
+            m_num("windForwardMps", scenario.wind_forward_mps),
+            m_num("windCrossMps", scenario.wind_cross_mps),
             m_num("lateralDriftM", target.z),
             m_num("normalImpactSpeedMps", normal_speed_mps),
             m_num("takeoffTransitionLengthM", plan.takeoff_transition_length_m),
@@ -3007,6 +3123,18 @@ fn evaluate_vehicle_jump_plan(
         ],
         trace: Some(jump_trace(sim)),
     }
+}
+
+fn standard_pressure_hpa(altitude_m: f64) -> f64 {
+    let lapse_base = 1.0 - 2.25577e-5 * altitude_m;
+    1013.25 * lapse_base.max(0.1).powf(5.25588)
+}
+
+fn air_density_kg_m3(altitude_m: f64, air_temperature_c: f64, pressure_hpa: f64) -> f64 {
+    let _ = altitude_m;
+    let temperature_k = air_temperature_c + 273.15;
+    let pressure_pa = pressure_hpa * 100.0;
+    pressure_pa / (287.05 * temperature_k.max(1.0))
 }
 
 fn solve_takeoff_speed(scenario: &VehicleJumpScenario) -> Option<f64> {
@@ -3371,5 +3499,39 @@ mod tests {
             .map(|(_, v)| matches!(v, MetricValue::Num(x) if x.abs() <= 0.15))
             .unwrap_or(false);
         assert!(landing_error_ok);
+    }
+
+    #[test]
+    fn vehicle_jump_uses_atmosphere_and_wind_direction() {
+        let result = run_vehicle_jump_planning(VehicleJumpParams {
+            altitude_m: Some(1800.0),
+            air_temperature_c: Some(30.0),
+            wind_speed_mps: Some(8.0),
+            wind_direction_deg: Some(90.0),
+            ..VehicleJumpParams::default()
+        });
+        assert!(result.best.feasible);
+        let density = result
+            .best
+            .metrics
+            .iter()
+            .find(|(k, _)| k == "airDensityKgM3")
+            .and_then(|(_, v)| match v {
+                MetricValue::Num(n) => Some(*n),
+                _ => None,
+            })
+            .unwrap();
+        let cross = result
+            .best
+            .metrics
+            .iter()
+            .find(|(k, _)| k == "windCrossMps")
+            .and_then(|(_, v)| match v {
+                MetricValue::Num(n) => Some(*n),
+                _ => None,
+            })
+            .unwrap();
+        assert!(density < 1.225, "hot high-altitude air should be thinner");
+        assert!((cross - 8.0).abs() < 1.0e-9, "90° wind should be crosswind");
     }
 }

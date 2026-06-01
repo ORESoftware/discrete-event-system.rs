@@ -25,6 +25,8 @@ pub mod authoring;
 pub mod builtins;
 pub mod codegen;
 pub mod graph;
+pub mod information_physics;
+pub mod partial_differential_equations;
 pub mod registry;
 
 pub use crate::des::equation::{EquationCitizen, EQUATION_SCHEMA};
@@ -34,5 +36,12 @@ pub use builtins::{with_builtins, HybridCitizen, HYBRID_DEMO_SCHEMA, HYBRID_SCHE
 pub use graph::{
     generate_model_graph_rust_code, model_graph_json_schema, ModelGraphKind, ModelGraphSpec,
     MODEL_GRAPH_SCHEMA,
+};
+pub use information_physics::{
+    starter_information_physics_spec, InformationPhysicsCitizen, INFORMATION_PHYSICS_SCHEMA,
+};
+pub use partial_differential_equations::{
+    starter_partial_differential_equations_spec, PartialDifferentialEquationsCitizen,
+    PARTIAL_DIFFERENTIAL_EQUATIONS_SCHEMA,
 };
 pub use registry::{CitizenError, CitizenRegistry, ModelCitizen, ModelDescriptor};

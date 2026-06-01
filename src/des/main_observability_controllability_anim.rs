@@ -42,7 +42,8 @@ impl ObsCtrlAnimator {
             fps: Some(0.8),
             title: Some("Controllability & Observability".to_string()),
             subtitle: Some(
-                "Kalman rank tests, MDP reachability, and POMDP distinguishability.".to_string(),
+                "Kalman ranks, MDP reachability/entropy, and POMDP distinguishability/information."
+                    .to_string(),
             ),
             background: Some("#0b1021".to_string()),
             live_tick_line: Some(false),

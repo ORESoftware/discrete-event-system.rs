@@ -2,8 +2,11 @@
 //! tables, N2 matrix cells, validation status, and executive selection.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::des::exec::{requirements_for_studio, select};
+use crate::des::model::RunArtifact;
+use crate::des::plugin::UiControl;
 
 use super::spec::{
     compile_model_spec, studio_block_io, StudioBlockKind, StudioConstraintSpec,
@@ -175,6 +178,32 @@ pub fn analyze_model_spec(spec: &StudioModelSpec) -> StudioAnalysis {
     }
 }
 
+impl StudioAnalysis {
+    /// Render N2/dependency analysis through the standard results player.
+    pub fn to_artifact(&self) -> RunArtifact {
+        let results = serde_json::to_value(self).unwrap_or(Value::Null);
+        let summary = format!(
+            "Analyzed {} component(s), {} connection(s), and {} N2 link cell(s).",
+            self.components.len(),
+            self.connections.len(),
+            self.n2.len()
+        );
+        RunArtifact::results(
+            "studio-n2",
+            &format!("{} N2 Analysis", self.name),
+            "OpenMDAO-style Studio component dependency matrix, validation status, and design metadata.",
+            results,
+            vec![UiControl::toggle("rawJson", "Raw JSON", false, Some("rawJson"))],
+            &summary,
+        )
+    }
+}
+
+/// Analyze a Studio spec and return an immediately renderable N2 player artifact.
+pub fn analyze_model_spec_artifact(spec: &StudioModelSpec) -> RunArtifact {
+    analyze_model_spec(spec).to_artifact()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,5 +222,16 @@ mod tests {
             .iter()
             .any(|cell| cell.connections[0].from == "gain" && cell.connections[0].to == "out"));
         assert_eq!(analysis.design_variables[0].name, "gain.k");
+    }
+
+    #[test]
+    fn analysis_renders_as_results_player_artifact() {
+        let artifact = analyze_model_spec_artifact(&starter_model_spec());
+        assert_eq!(artifact.kind, "studio-n2");
+        assert!(artifact.frames.is_empty());
+        assert_eq!(artifact.results["validation"]["ok"], true);
+        assert!(artifact
+            .to_player_html()
+            .contains("ramp-gain-sink N2 Analysis"));
     }
 }

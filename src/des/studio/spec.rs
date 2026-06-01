@@ -5,7 +5,7 @@
 //! [`studio_palette`] as a block palette + property inspector, persist a
 //! [`StudioModelSpec`] as JSON, and call [`compile_model_spec`] before running.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use schemars::{schema_for, JsonSchema};
 use serde::{Deserialize, Serialize};
@@ -25,6 +25,7 @@ use super::graph::{CompiledStudio, NodeRole, StudioError, StudioGraph, VisualNod
 
 pub const STUDIO_GRAPH_SCHEMA: &str = "des/studio-graph/v1";
 pub const STUDIO_SPEC_SCHEMA: &str = "des/studio/v1";
+pub const MAX_SWEEP_SAMPLES: usize = 10_000;
 
 fn studio_graph_schema() -> String {
     STUDIO_GRAPH_SCHEMA.to_string()
@@ -453,6 +454,18 @@ fn default_sweep_samples() -> usize {
     9
 }
 
+fn block_param_kind(kind: StudioBlockKind, param: &str) -> Option<PaletteParamKind> {
+    studio_palette()
+        .into_iter()
+        .find(|item| item.kind == kind)
+        .and_then(|item| {
+            item.params
+                .into_iter()
+                .find(|p| p.name == param)
+                .map(|p| p.kind)
+        })
+}
+
 /// User-facing spec/compile errors.
 #[derive(Clone, Debug, PartialEq)]
 pub enum StudioSpecError {
@@ -639,6 +652,196 @@ fn runtime_cell(block: &StudioBlockSpec) -> Result<RuntimeCell, StudioSpecError>
     Ok(RuntimeCell::single(op))
 }
 
+fn validate_scalar_design_param(
+    block: &StudioBlockSpec,
+    param: &str,
+) -> Result<(), StudioSpecError> {
+    match block_param_kind(block.kind, param) {
+        Some(PaletteParamKind::Number) => {}
+        Some(PaletteParamKind::Integer) => {
+            return Err(StudioSpecError::InvalidParam {
+                block: block.id.clone(),
+                param: param.to_string(),
+                message: "integer parameters are not sweepable by the scalar driver yet"
+                    .to_string(),
+            });
+        }
+        Some(PaletteParamKind::NumberArray) => {
+            return Err(StudioSpecError::InvalidParam {
+                block: block.id.clone(),
+                param: param.to_string(),
+                message: "expected a scalar number parameter".to_string(),
+            });
+        }
+        None => {
+            return Err(StudioSpecError::InvalidParam {
+                block: block.id.clone(),
+                param: param.to_string(),
+                message: "unknown parameter for this block kind".to_string(),
+            });
+        }
+    }
+
+    if let Some(value) = block.params.get(param) {
+        value
+            .as_f64()
+            .filter(|v| v.is_finite())
+            .ok_or_else(|| StudioSpecError::InvalidParam {
+                block: block.id.clone(),
+                param: param.to_string(),
+                message: "expected an existing finite number before sweeping".to_string(),
+            })?;
+    }
+    Ok(())
+}
+
+fn validate_model_metadata_pre_graph(spec: &StudioModelSpec) -> Result<(), StudioSpecError> {
+    let mut block_ids = HashSet::new();
+    for block in &spec.blocks {
+        if block.id.trim().is_empty() {
+            return Err(StudioSpecError::new("block ids must be non-empty"));
+        }
+        if !block.x.is_finite() || !block.y.is_finite() {
+            return Err(StudioSpecError::InvalidParam {
+                block: block.id.clone(),
+                param: "position".to_string(),
+                message: "expected finite x/y coordinates".to_string(),
+            });
+        }
+        block_ids.insert(block.id.as_str());
+    }
+
+    let mut design_names = HashSet::new();
+    for dv in &spec.design_variables {
+        if dv.name.trim().is_empty() {
+            return Err(StudioSpecError::new(
+                "design variable names must be non-empty",
+            ));
+        }
+        if !design_names.insert(dv.name.as_str()) {
+            return Err(StudioSpecError::new(format!(
+                "duplicate design variable `{}`",
+                dv.name
+            )));
+        }
+        if dv.block.trim().is_empty() || dv.param.trim().is_empty() {
+            return Err(StudioSpecError::new(format!(
+                "design variable `{}` requires block and param",
+                dv.name
+            )));
+        }
+        let block = spec
+            .blocks
+            .iter()
+            .find(|block| block.id == dv.block)
+            .ok_or_else(|| {
+                StudioSpecError::new(format!(
+                    "design variable `{}` references unknown block `{}`",
+                    dv.name, dv.block
+                ))
+            })?;
+        validate_scalar_design_param(block, &dv.param)?;
+        if !dv.lower.is_finite() || !dv.upper.is_finite() {
+            return Err(StudioSpecError::new(format!(
+                "design variable `{}` bounds must be finite",
+                dv.name
+            )));
+        }
+        if dv.lower > dv.upper {
+            return Err(StudioSpecError::new(format!(
+                "design variable `{}` lower bound exceeds upper bound",
+                dv.name
+            )));
+        }
+        if dv.samples == 0 || dv.samples > MAX_SWEEP_SAMPLES {
+            return Err(StudioSpecError::new(format!(
+                "design variable `{}` samples must be in 1..={}",
+                dv.name, MAX_SWEEP_SAMPLES
+            )));
+        }
+    }
+
+    let mut objective_names = HashSet::new();
+    for objective in &spec.objectives {
+        if objective.name.trim().is_empty() {
+            return Err(StudioSpecError::new("objective names must be non-empty"));
+        }
+        if !objective_names.insert(objective.name.as_str()) {
+            return Err(StudioSpecError::new(format!(
+                "duplicate objective `{}`",
+                objective.name
+            )));
+        }
+        if !block_ids.contains(objective.block.as_str()) {
+            return Err(StudioSpecError::new(format!(
+                "objective `{}` references unknown block `{}`",
+                objective.name, objective.block
+            )));
+        }
+        if objective.port != 0 {
+            return Err(StudioSpecError::new(format!(
+                "objective `{}` uses unsupported port {}; only primary port 0 is recorded",
+                objective.name, objective.port
+            )));
+        }
+        if objective.target.is_some_and(|target| !target.is_finite()) {
+            return Err(StudioSpecError::new(format!(
+                "objective `{}` target must be finite",
+                objective.name
+            )));
+        }
+    }
+
+    let mut constraint_names = HashSet::new();
+    for constraint in &spec.constraints {
+        if constraint.name.trim().is_empty() {
+            return Err(StudioSpecError::new("constraint names must be non-empty"));
+        }
+        if !constraint_names.insert(constraint.name.as_str()) {
+            return Err(StudioSpecError::new(format!(
+                "duplicate constraint `{}`",
+                constraint.name
+            )));
+        }
+        if !block_ids.contains(constraint.block.as_str()) {
+            return Err(StudioSpecError::new(format!(
+                "constraint `{}` references unknown block `{}`",
+                constraint.name, constraint.block
+            )));
+        }
+        if constraint.port != 0 {
+            return Err(StudioSpecError::new(format!(
+                "constraint `{}` uses unsupported port {}; only primary port 0 is recorded",
+                constraint.name, constraint.port
+            )));
+        }
+        if constraint.lower.is_none() && constraint.upper.is_none() {
+            return Err(StudioSpecError::new(format!(
+                "constraint `{}` requires at least one finite bound",
+                constraint.name
+            )));
+        }
+        if constraint.lower.is_some_and(|lower| !lower.is_finite())
+            || constraint.upper.is_some_and(|upper| !upper.is_finite())
+        {
+            return Err(StudioSpecError::new(format!(
+                "constraint `{}` bounds must be finite",
+                constraint.name
+            )));
+        }
+        if let (Some(lower), Some(upper)) = (constraint.lower, constraint.upper) {
+            if lower > upper {
+                return Err(StudioSpecError::new(format!(
+                    "constraint `{}` lower bound exceeds upper bound",
+                    constraint.name
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Port/state metadata for a block after its parameters are applied.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -676,6 +879,7 @@ pub fn compile_model_spec(spec: &StudioModelSpec) -> Result<CompiledStudio, Stud
             message: "expected at least one step".to_string(),
         });
     }
+    validate_model_metadata_pre_graph(spec)?;
 
     let mut graph = StudioGraph::new();
     let mut ids: HashMap<String, usize> = HashMap::new();
@@ -1235,6 +1439,56 @@ mod tests {
             compile_model_spec(&spec),
             Err(StudioSpecError::InvalidParam { param, .. }) if param == "dt"
         ));
+    }
+
+    #[test]
+    fn compile_rejects_bad_design_variable_reference() {
+        let mut spec = starter_model_spec();
+        spec.design_variables[0].block = "missing".to_string();
+        let err = compile_model_spec(&spec).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("design variable `gain.k` references unknown block `missing`"));
+    }
+
+    #[test]
+    fn compile_rejects_non_scalar_design_variable_param() {
+        let mut spec = starter_model_spec();
+        spec.blocks.push(StudioBlockSpec {
+            id: "sum".to_string(),
+            kind: StudioBlockKind::Sum,
+            label: None,
+            params: Map::from_iter([(
+                "weights".to_string(),
+                Value::Array(vec![Value::from(1.0), Value::from(-1.0)]),
+            )]),
+            x: 0.0,
+            y: 260.0,
+        });
+        spec.design_variables[0].block = "sum".to_string();
+        spec.design_variables[0].param = "weights".to_string();
+        let err = compile_model_spec(&spec).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("expected a scalar number parameter"));
+    }
+
+    #[test]
+    fn compile_rejects_bad_metric_metadata() {
+        let mut spec = starter_model_spec();
+        spec.objectives[0].port = 1;
+        let err = compile_model_spec(&spec).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("objective `final output` uses unsupported port 1"));
+
+        spec.objectives[0].port = 0;
+        spec.constraints[0].lower = Some(9.0);
+        spec.constraints[0].upper = Some(8.0);
+        let err = compile_model_spec(&spec).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("constraint `output ceiling` lower bound exceeds upper bound"));
     }
 
     #[test]

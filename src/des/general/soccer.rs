@@ -646,18 +646,35 @@ impl SoccerQStateKey {
             Team::Home => state.score_diff_for_home,
             Team::Away => -state.score_diff_for_home,
         };
+        let player_grid = if state.player_grid.fine.level == PitchGridLevel::WholePitch
+            && observation.player_grid.fine.level != PitchGridLevel::WholePitch
+        {
+            observation.player_grid
+        } else {
+            state.player_grid
+        };
+        let receive_facing = if state.receive_facing == FacingBucket::Unknown {
+            observation.receive_facing
+        } else {
+            state.receive_facing
+        };
+        let action_facing = if state.action_facing == FacingBucket::Unknown {
+            observation.action_facing
+        } else {
+            state.action_facing
+        };
         SoccerQStateKey {
             phase: state.phase,
             role,
             possession_relative,
             ball_zone_x: state.ball_zone_x,
             ball_zone_y: state.ball_zone_y,
-            player_fine_cell_id: state.player_grid.fine.id,
-            player_tactical_cell_id: state.player_grid.tactical.id,
-            player_macro_cell_id: state.player_grid.macro_zone.id,
-            player_root_cell_id: state.player_grid.whole_pitch.id,
-            receive_facing: state.receive_facing,
-            action_facing: state.action_facing,
+            player_fine_cell_id: player_grid.fine.id,
+            player_tactical_cell_id: player_grid.tactical.id,
+            player_macro_cell_id: player_grid.macro_zone.id,
+            player_root_cell_id: player_grid.whole_pitch.id,
+            receive_facing,
+            action_facing,
             score_diff_bucket: score_diff_for_team.clamp(-2, 2) as i8,
             has_ball: observation.has_ball,
             visible_ball: observation.visible_ball,
@@ -806,7 +823,7 @@ impl SoccerQPolicy {
     ) -> Option<String> {
         let player = snapshot.players.iter().find(|p| p.id == player_id)?;
         let state = SoccerQStateKey::from_parts(
-            &snapshot.mdp_state(),
+            &snapshot.mdp_state_for_player(player_id),
             &snapshot.observation_for(player_id),
             player.team,
             player.role,
@@ -852,7 +869,7 @@ impl SoccerQPolicy {
             return false;
         };
         let state = SoccerQStateKey::from_parts(
-            &snapshot.mdp_state(),
+            &snapshot.mdp_state_for_player(player_id),
             &snapshot.observation_for(player_id),
             player.team,
             player.role,
@@ -1068,6 +1085,10 @@ pub struct PlayerAgent {
     #[serde(default)]
     pub movement_gait: MovementGait,
     pub position_history: VecDeque<Vec2>,
+    #[serde(default)]
+    pub receive_facing: FacingBucket,
+    #[serde(default)]
+    pub action_facing: FacingBucket,
     pub skills: SkillProfile,
     pub fatigue: f64,
     pub controller_slot: Option<usize>,
@@ -1200,7 +1221,7 @@ impl PlayerAgent {
         learned_action: Option<&str>,
         rng: &mut SeededRandom,
     ) -> PlayerIntent {
-        let mdp_state = snapshot.mdp_state();
+        let mdp_state = snapshot.mdp_state_for_player(self.id);
         let observation = snapshot.observation_for(self.id);
         let belief = belief_from_observation(&observation);
         let directive = snapshot.tactical_directive(self.team);
@@ -3270,6 +3291,10 @@ pub struct PlayerSnapshot {
     #[serde(default)]
     pub movement_gait: MovementGait,
     #[serde(default)]
+    pub receive_facing: FacingBucket,
+    #[serde(default)]
+    pub action_facing: FacingBucket,
+    #[serde(default)]
     pub skills: SkillProfile,
     #[serde(default)]
     pub fatigue: f64,
@@ -3326,6 +3351,8 @@ impl WorldSnapshot {
                 position_history: p.position_history.iter().cloned().collect(),
                 velocity: p.velocity,
                 movement_gait: p.movement_gait,
+                receive_facing: p.receive_facing,
+                action_facing: p.action_facing,
                 skills: p.skills.clone(),
                 fatigue: p.fatigue,
                 home_position: p.home_position,
@@ -3438,16 +3465,42 @@ impl WorldSnapshot {
             tick: self.tick,
             ball_zone_x: zone(self.ball.position.x, self.field_width, 6),
             ball_zone_y: zone(self.ball.position.y, self.field_length, 8),
+            player_grid: PitchGridAddress::default(),
+            receive_facing: FacingBucket::Unknown,
+            action_facing: FacingBucket::Unknown,
             possession_team: self.possession_team(),
             score_diff_for_home: self.score_home as i32 - self.score_away as i32,
             phase: self.phase,
         }
     }
 
+    pub fn mdp_state_for_player(&self, player_id: usize) -> SoccerMdpState {
+        let mut state = self.mdp_state();
+        let Some(me) = self.players.iter().find(|p| p.id == player_id) else {
+            return state;
+        };
+        let position = self.player_position(me.id).unwrap_or(me.position);
+        state.player_grid = pitch_grid_address(position, self.field_width, self.field_length);
+        state.receive_facing = me.receive_facing;
+        let facing = self
+            .player_facing_direction(me)
+            .map(facing_bucket_from_vector)
+            .unwrap_or(me.action_facing);
+        state.action_facing = if facing == FacingBucket::Unknown {
+            me.action_facing
+        } else {
+            facing
+        };
+        state
+    }
+
     pub fn observation_for(&self, player_id: usize) -> SoccerPomdpObservation {
         let Some(me) = self.players.iter().find(|p| p.id == player_id) else {
             return SoccerPomdpObservation {
                 player_id,
+                player_grid: PitchGridAddress::default(),
+                receive_facing: FacingBucket::Unknown,
+                action_facing: FacingBucket::Unknown,
                 has_ball: false,
                 visible_ball: false,
                 visible_teammates: 0,
@@ -3504,8 +3557,20 @@ impl WorldSnapshot {
         let goal = Vec2::new(self.field_width * 0.5, me.team.goal_y(self.field_length));
         let has_ball = self.ball.holder == Some(player_id);
         let visible_ball = has_ball || self.player_can_see_point(me.id, self.ball.position);
+        let player_grid = pitch_grid_address(me_position, self.field_width, self.field_length);
+        let action_facing = self
+            .player_facing_direction(me)
+            .map(facing_bucket_from_vector)
+            .unwrap_or(me.action_facing);
         SoccerPomdpObservation {
             player_id,
+            player_grid,
+            receive_facing: me.receive_facing,
+            action_facing: if action_facing == FacingBucket::Unknown {
+                me.action_facing
+            } else {
+                action_facing
+            },
             has_ball,
             visible_ball,
             visible_teammates,
@@ -4702,7 +4767,7 @@ pub struct SoccerMatch {
 impl SoccerMatch {
     pub fn default_11v11(config: MatchConfig) -> Self {
         let mut rng = mulberry32(config.seed);
-        let players = default_players(&config, &mut rng);
+        let mut players = default_players(&config, &mut rng);
         let officials = vec![
             OfficialAgent::new(
                 22,
@@ -4730,6 +4795,9 @@ impl SoccerMatch {
             .iter()
             .find(|p| p.team == Team::Home && p.role == PlayerRole::Midfielder)
             .map(|p| p.id);
+        if let Some(holder_id) = kickoff {
+            mark_player_receive_facing(&mut players, holder_id);
+        }
         let shared_positions = SharedPlayerPositions::default();
         shared_positions.sync_from_players(&players, 0, 0.0);
         SoccerMatch {
@@ -5180,11 +5248,45 @@ impl SoccerMatch {
             .collect()
     }
 
+    fn mark_ball_received(&mut self, holder_id: usize) {
+        mark_player_receive_facing(&mut self.players, holder_id);
+    }
+
+    fn facing_for_player_action(&self, player_id: usize, action: &SoccerAction) -> FacingBucket {
+        let Some(player) = self.players.get(player_id) else {
+            return FacingBucket::Unknown;
+        };
+        let target = match action {
+            SoccerAction::HoldShape => Some(player.home_position),
+            SoccerAction::MoveTo(target) | SoccerAction::Dribble(target) => Some(*target),
+            SoccerAction::Pass { target_player, .. } => target_player
+                .and_then(|target_id| self.players.get(target_id).map(|target| target.position)),
+            SoccerAction::Shoot { .. } => Some(Vec2::new(
+                self.config.field_width_yards * 0.5,
+                player.team.goal_y(self.config.field_length_yards),
+            )),
+            SoccerAction::Tackle { target_player } => self
+                .players
+                .get(*target_player)
+                .map(|target| target.position),
+        };
+        let facing = target
+            .map(|target| facing_bucket_from_vector(target - player.position))
+            .unwrap_or(FacingBucket::Unknown);
+        if facing == FacingBucket::Unknown {
+            player.action_facing
+        } else {
+            facing
+        }
+    }
+
     fn apply_player_intent(&mut self, intent: PlayerIntent) {
         if intent.player_id >= self.players.len() {
             return;
         }
         let player_id = intent.player_id;
+        let action_facing = self.facing_for_player_action(player_id, &intent.action);
+        self.players[player_id].action_facing = action_facing;
         let player_pos = self.players[player_id].position;
         let player_team = self.players[player_id].team;
         match intent.action {
@@ -5362,6 +5464,7 @@ impl SoccerMatch {
                     if self.rng.next_float() < success_probability {
                         self.ball.holder = Some(player_id);
                         self.ball.last_touch_team = Some(player_team);
+                        self.mark_ball_received(player_id);
                         self.events.push(MatchEvent {
                             tick: self.tick,
                             clock_seconds: self.clock_seconds,
@@ -5389,6 +5492,10 @@ impl SoccerMatch {
         let speed = p.skills.top_speed_yps * fatigue_factor * gait.speed_multiplier();
         let desired = to_target.normalized() * speed;
         p.velocity = approach_velocity(p.velocity, desired, p.skills.acceleration_yps2, dt);
+        let movement_facing = facing_bucket_from_vector(p.velocity);
+        if movement_facing != FacingBucket::Unknown {
+            p.action_facing = movement_facing;
+        }
         p.acceleration = if dt > 0.0 {
             (p.velocity - previous_velocity) / dt
         } else {
@@ -5494,6 +5601,8 @@ impl SoccerMatch {
                 holder_team,
                 possession_result,
             } => {
+                self.ball.holder = Some(holder);
+                self.ball.last_touch_team = Some(holder_team);
                 if let Some(offside) = self
                     .pending_pass
                     .as_ref()
@@ -5505,6 +5614,7 @@ impl SoccerMatch {
                         return;
                     }
                 }
+                self.mark_ball_received(holder);
                 match possession_result {
                     BallPossessionResult::PassCompleted(team) => {
                         self.pending_pass = None;
@@ -5528,6 +5638,7 @@ impl SoccerMatch {
                 self.pending_shot = None;
                 self.stat_shot_on_target(shot.team);
                 self.stat_save(defending_team);
+                self.mark_ball_received(keeper_id);
                 if let Some(keeper) = self
                     .players
                     .iter_mut()
@@ -5660,6 +5771,9 @@ impl SoccerMatch {
         self.ball.velocity = Vec2::zero();
         self.ball.holder = restart_holder;
         self.ball.last_touch_team = Some(restart.awarded_team);
+        if let Some(holder_id) = restart_holder {
+            self.mark_ball_received(holder_id);
+        }
         self.ball
             .record_decision(self.tick, restart_kind_action(restart.kind));
         self.shared_positions
@@ -5752,6 +5866,9 @@ impl SoccerMatch {
         self.ball.velocity = Vec2::zero();
         self.ball.holder = restart_holder;
         self.ball.last_touch_team = Some(defending_team);
+        if let Some(holder_id) = restart_holder {
+            self.mark_ball_received(holder_id);
+        }
         self.ball.record_decision(self.tick, "offside");
         self.pending_shot = None;
         self.shared_positions
@@ -5822,6 +5939,8 @@ impl SoccerMatch {
             p.acceleration = Vec2::zero();
             p.jerk = Vec2::zero();
             p.movement_gait = MovementGait::Stand;
+            p.receive_facing = FacingBucket::Unknown;
+            p.action_facing = default_team_facing(p.team);
             p.record_position_history();
         }
         let kickoff = self
@@ -5849,6 +5968,9 @@ impl SoccerMatch {
         self.ball.velocity = Vec2::zero();
         self.ball.holder = kickoff;
         self.ball.last_touch_team = Some(kickoff_team);
+        if let Some(holder_id) = kickoff {
+            self.mark_ball_received(holder_id);
+        }
         self.ball.record_decision(self.tick, "kickoff");
         self.pending_pass = None;
         self.pending_shot = None;
@@ -5980,7 +6102,7 @@ impl SoccerMatch {
                 belief: decision.belief.clone(),
                 action: decision.action.clone(),
                 reward,
-                next_state: after.mdp_state(),
+                next_state: after.mdp_state_for_player(player.id),
                 next_observation: after.observation_for(player.id),
                 done,
             });
@@ -7011,7 +7133,7 @@ pub fn soccer_tracking_dataset_to_learning_dataset(
             let action = infer_tracking_action(player, &before, &after);
             let observation = before.observation_for(player.id);
             let decision = AgentDecisionTrace {
-                mdp_state: before.mdp_state(),
+                mdp_state: before.mdp_state_for_player(player.id),
                 observation: observation.clone(),
                 belief: belief_from_observation(&observation),
                 operation_order: vec!["tracking-imitation".to_string()],
@@ -7039,7 +7161,7 @@ pub fn soccer_tracking_dataset_to_learning_dataset(
                 belief: decision.belief,
                 action: decision.action,
                 reward,
-                next_state: after.mdp_state(),
+                next_state: after.mdp_state_for_player(player.id),
                 next_observation: after.observation_for(player.id),
                 done: pair[1].tick
                     == tracking
@@ -7453,6 +7575,15 @@ fn tracking_frame_to_world_snapshot(
             position_history: vec![p.position],
             velocity: p.velocity.unwrap_or_default(),
             movement_gait: MovementGait::Stand,
+            receive_facing: FacingBucket::Unknown,
+            action_facing: {
+                let facing = facing_bucket_from_vector(p.velocity.unwrap_or_default());
+                if facing == FacingBucket::Unknown {
+                    default_team_facing(p.team)
+                } else {
+                    facing
+                }
+            },
             skills: neutral_tracking_skill_profile(p.role),
             fatigue: 0.0,
             home_position: home_positions
@@ -7694,6 +7825,8 @@ fn player_agent_from_snapshot(player: &PlayerSnapshot) -> PlayerAgent {
         jerk: player.jerk,
         movement_gait: player.movement_gait,
         position_history,
+        receive_facing: player.receive_facing,
+        action_facing: player.action_facing,
         skills: player.skills.clone(),
         fatigue: player.fatigue.clamp(0.0, 1.0),
         controller_slot: None,
@@ -8061,6 +8194,110 @@ fn zone(v: f64, max: f64, buckets: usize) -> usize {
     ((v / max).clamp(0.0, 0.999_999) * buckets as f64).floor() as usize
 }
 
+fn pitch_grid_cell(
+    position: Vec2,
+    field_width: f64,
+    field_length: f64,
+    columns: usize,
+    rows: usize,
+    level: PitchGridLevel,
+    parent_id: Option<usize>,
+) -> PitchGridCell {
+    let columns = columns.max(1);
+    let rows = rows.max(1);
+    let x = zone(position.x, field_width, columns);
+    let y = zone(position.y, field_length, rows);
+    PitchGridCell {
+        level,
+        columns,
+        rows,
+        x,
+        y,
+        id: y * columns + x,
+        parent_id,
+    }
+}
+
+fn pitch_grid_address(position: Vec2, field_width: f64, field_length: f64) -> PitchGridAddress {
+    let whole_pitch = PitchGridCell::default();
+    let macro_zone = pitch_grid_cell(
+        position,
+        field_width,
+        field_length,
+        PITCH_MACRO_GRID_COLUMNS,
+        PITCH_MACRO_GRID_ROWS,
+        PitchGridLevel::Macro,
+        Some(whole_pitch.id),
+    );
+    let tactical = pitch_grid_cell(
+        position,
+        field_width,
+        field_length,
+        PITCH_TACTICAL_GRID_COLUMNS,
+        PITCH_TACTICAL_GRID_ROWS,
+        PitchGridLevel::Tactical,
+        Some(macro_zone.id),
+    );
+    let fine = pitch_grid_cell(
+        position,
+        field_width,
+        field_length,
+        PITCH_FINE_GRID_COLUMNS,
+        PITCH_FINE_GRID_ROWS,
+        PitchGridLevel::Fine,
+        Some(tactical.id),
+    );
+    PitchGridAddress {
+        fine,
+        tactical,
+        macro_zone,
+        whole_pitch,
+    }
+}
+
+fn facing_bucket_from_vector(v: Vec2) -> FacingBucket {
+    if v.len() <= 1e-6 {
+        return FacingBucket::Unknown;
+    }
+    let mut degrees = v.y.atan2(v.x).to_degrees();
+    if degrees < 0.0 {
+        degrees += 360.0;
+    }
+    let idx = ((degrees + 22.5) / 45.0).floor() as usize % 8;
+    match idx {
+        0 => FacingBucket::East,
+        1 => FacingBucket::SouthEast,
+        2 => FacingBucket::South,
+        3 => FacingBucket::SouthWest,
+        4 => FacingBucket::West,
+        5 => FacingBucket::NorthWest,
+        6 => FacingBucket::North,
+        _ => FacingBucket::NorthEast,
+    }
+}
+
+fn default_team_facing(team: Team) -> FacingBucket {
+    facing_bucket_from_vector(Vec2::new(0.0, team.attack_dir()))
+}
+
+fn facing_bucket_for_player_motion(player: &PlayerAgent) -> FacingBucket {
+    let facing = facing_bucket_from_vector(player.velocity);
+    if facing == FacingBucket::Unknown {
+        default_team_facing(player.team)
+    } else {
+        facing
+    }
+}
+
+fn mark_player_receive_facing(players: &mut [PlayerAgent], holder_id: usize) {
+    let Some(player) = players.iter_mut().find(|player| player.id == holder_id) else {
+        return;
+    };
+    let facing = facing_bucket_for_player_motion(player);
+    player.receive_facing = facing;
+    player.action_facing = facing;
+}
+
 fn distance_bucket(value: f64, edges: &[f64]) -> u8 {
     edges
         .iter()
@@ -8184,6 +8421,8 @@ fn default_players(config: &MatchConfig, rng: &mut SeededRandom) -> Vec<PlayerAg
                 jerk: Vec2::zero(),
                 movement_gait: MovementGait::Stand,
                 position_history: VecDeque::from([pos]),
+                receive_facing: FacingBucket::Unknown,
+                action_facing: default_team_facing(team),
                 skills: SkillProfile::blended(id, role, rng),
                 fatigue: 0.0,
                 controller_slot,
@@ -9509,6 +9748,102 @@ mod tests {
             .expect("transition q-value")
             .is_finite());
         assert_eq!(policy.entries().len(), policy.q_values.len());
+    }
+
+    #[test]
+    fn player_mdp_state_includes_hierarchical_pitch_grid_and_facing() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 141,
+            ..Default::default()
+        });
+        sim.players[5].position = Vec2::new(22.0, 66.0);
+        sim.players[5].velocity = Vec2::new(2.0, 0.0);
+        sim.players[5].receive_facing = FacingBucket::NorthWest;
+        sim.players[5].action_facing = FacingBucket::West;
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let state = snapshot.mdp_state_for_player(5);
+        let observation = snapshot.observation_for(5);
+
+        assert_eq!(state.player_grid.fine.x, 3);
+        assert_eq!(state.player_grid.fine.y, 8);
+        assert_eq!(state.player_grid.fine.id, 99);
+        assert_eq!(state.player_grid.fine.parent_id, Some(25));
+        assert_eq!(state.player_grid.tactical.id, 25);
+        assert_eq!(state.player_grid.tactical.parent_id, Some(6));
+        assert_eq!(state.player_grid.macro_zone.id, 6);
+        assert_eq!(state.player_grid.macro_zone.parent_id, Some(0));
+        assert_eq!(state.player_grid.whole_pitch.id, 0);
+        assert_eq!(state.receive_facing, FacingBucket::NorthWest);
+        assert_eq!(state.action_facing, FacingBucket::East);
+        assert_eq!(observation.player_grid.fine.id, state.player_grid.fine.id);
+        assert_eq!(observation.action_facing, FacingBucket::East);
+    }
+
+    #[test]
+    fn q_policy_keys_separate_same_action_by_player_grid_cell() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 142,
+            ..Default::default()
+        });
+        sim.ball.holder = Some(5);
+        sim.players[5].position = Vec2::new(18.0, 68.0);
+        let snapshot_left = WorldSnapshot::from_match(&sim);
+
+        let mut policy = SoccerQPolicy::default();
+        assert!(policy.set_action_value_for_snapshot(&snapshot_left, 5, "dribble", 4.0));
+        let left_state = SoccerQStateKey::from_parts(
+            &snapshot_left.mdp_state_for_player(5),
+            &snapshot_left.observation_for(5),
+            Team::Home,
+            sim.players[5].role,
+        );
+        assert_eq!(
+            policy
+                .best_action_for_snapshot(&snapshot_left, 5)
+                .as_deref(),
+            Some("dribble")
+        );
+
+        sim.players[5].position = Vec2::new(62.0, 68.0);
+        let snapshot_right = WorldSnapshot::from_match(&sim);
+        let right_state = SoccerQStateKey::from_parts(
+            &snapshot_right.mdp_state_for_player(5),
+            &snapshot_right.observation_for(5),
+            Team::Home,
+            sim.players[5].role,
+        );
+
+        assert_ne!(
+            left_state.player_fine_cell_id,
+            right_state.player_fine_cell_id
+        );
+        assert_ne!(
+            left_state.player_tactical_cell_id,
+            right_state.player_tactical_cell_id
+        );
+        assert_eq!(policy.best_action_for_snapshot(&snapshot_right, 5), None);
+    }
+
+    #[test]
+    fn player_receive_facing_is_recorded_when_possession_changes() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 143,
+            ..Default::default()
+        });
+        sim.players[8].velocity = Vec2::new(-3.0, 0.0);
+        sim.apply_ball_outcome(BallStepOutcome::Controlled {
+            holder: 8,
+            holder_team: Team::Home,
+            possession_result: BallPossessionResult::LooseBallRecovery(Team::Home),
+        });
+
+        assert_eq!(sim.ball.holder, Some(8));
+        assert_eq!(sim.players[8].receive_facing, FacingBucket::West);
+        assert_eq!(sim.players[8].action_facing, FacingBucket::West);
     }
 
     #[test]

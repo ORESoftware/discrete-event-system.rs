@@ -912,11 +912,21 @@ def run_solver(
     model_path: str,
     solution_path: str,
     time_limit: float,
+    node_limit: Optional[int] = None,
+    relative_gap: Optional[float] = None,
 ) -> tuple[str, str]:
     command = solver_command(solver)
     if command is None:
         raise ValueError(f"{solver} executable not found")
     if solver == "highs":
+        options_path = None
+        if kind == "mip" and (node_limit is not None or relative_gap is not None):
+            options_path = solution_path + ".options"
+            with open(options_path, "w", encoding="utf-8") as f:
+                if node_limit is not None:
+                    f.write(f"mip_max_nodes = {int(node_limit)}\n")
+                if relative_gap is not None:
+                    f.write(f"mip_rel_gap = {float(relative_gap):.17g}\n")
         cmd = [
             command,
             "--model_file",
@@ -926,6 +936,8 @@ def run_solver(
             "--time_limit",
             str(time_limit),
         ]
+        if options_path is not None:
+            cmd.extend(["--options_file", options_path])
     elif solver == "glpk":
         if kind == "lp":
             cmd = [
@@ -949,8 +961,15 @@ def run_solver(
                 "--tmlim",
                 str(max(1, int(math.ceil(time_limit)))),
             ]
+            if relative_gap is not None:
+                cmd.extend(["--mipgap", f"{float(relative_gap):.17g}"])
     elif solver == "scip":
         cmd = [command]
+        if kind == "mip":
+            if node_limit is not None:
+                cmd.extend(["-c", f"set limits nodes {int(node_limit)}"])
+            if relative_gap is not None:
+                cmd.extend(["-c", f"set limits gap {float(relative_gap):.17g}"])
         if kind == "lp":
             cmd.append("-q")
         cmd.extend([
@@ -981,6 +1000,10 @@ def run_solver(
         ]
         if kind == "lp":
             cmd.extend(["-printingOptions", "all"])
+        elif node_limit is not None:
+            cmd.extend(["-maxNodes", str(int(node_limit))])
+        if kind == "mip" and relative_gap is not None:
+            cmd.extend(["-ratioGap", f"{float(relative_gap):.17g}"])
         cmd.extend([
             "-solve",
             "-solution",
@@ -1007,6 +1030,8 @@ def run_solver(
             command,
             f"ResultFile={solution_path}",
             f"TimeLimit={time_limit}",
+            *([f"NodeLimit={int(node_limit)}"] if kind == "mip" and node_limit is not None else []),
+            *([f"MIPGap={float(relative_gap):.17g}"] if kind == "mip" and relative_gap is not None else []),
             model_path,
         ]
     elif solver == "cplex":
@@ -1015,6 +1040,8 @@ def run_solver(
             "-c",
             f"read {model_path}",
             f"set timelimit {time_limit}",
+            *([f"set mip limits nodes {int(node_limit)}"] if kind == "mip" and node_limit is not None else []),
+            *([f"set mip tolerances mipgap {float(relative_gap):.17g}"] if kind == "mip" and relative_gap is not None else []),
             "optimize",
             f"write {solution_path}",
             "quit",

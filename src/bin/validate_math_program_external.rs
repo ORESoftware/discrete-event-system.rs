@@ -8,7 +8,7 @@ use des_engine::des::general::math_program::{
     cross_check_math_program_conflict_with_external,
     cross_check_math_program_feas_relaxation_with_external,
     cross_check_math_program_solution_pool_with_external, cross_check_math_program_with_external,
-    ExternalMathProgramOptions, MathProgram, MathProgramConflictCrossCheck,
+    AffineTerm, ExternalMathProgramOptions, MathProgram, MathProgramConflictCrossCheck,
     MathProgramConflictOptions, MathProgramCrossCheck, MathProgramFeasRelaxCrossCheck,
     MathProgramFeasRelaxOptions, MathProgramFeasRelaxViolation, MathProgramLpBackend,
     MathProgramSolution, MathProgramSolutionPoolCrossCheck, MathProgramSolutionPoolOptions,
@@ -90,6 +90,7 @@ fn main() {
         ),
         ("cumulative", build_cumulative_case()),
         ("variable-cumulative", build_variable_cumulative_case()),
+        ("affine-cumulative", build_affine_cumulative_case()),
         ("optional-cumulative", build_optional_cumulative_case()),
         ("reservoir", build_reservoir_case()),
         ("optional-reservoir", build_optional_reservoir_case()),
@@ -500,7 +501,7 @@ fn run_mip_start_case() -> Result<bool, String> {
                 .internal
                 .message
                 .as_deref()
-                .is_some_and(|message| message.contains("incumbent_source=mip-start"));
+                .is_some_and(|message| message.contains("incumbent_source=user-mip-start"));
     }
     Ok(ok)
 }
@@ -1955,6 +1956,55 @@ fn build_variable_cumulative_case() -> MathProgram {
         ],
         vec![2.0, 2.0],
         3.0,
+    )
+    .unwrap();
+    p
+}
+
+fn build_affine_cumulative_case() -> MathProgram {
+    let mut p = MathProgram::new(ObjectiveSense::Min);
+    let a_start = p
+        .add_integer_var("a_start", 0.0, Some(0.0), Some(0.0))
+        .unwrap();
+    let a_end = p
+        .add_integer_var("a_end", 0.0, Some(0.0), Some(2.0))
+        .unwrap();
+    let b_start = p
+        .add_integer_var("b_start", 1.0, Some(0.0), Some(2.0))
+        .unwrap();
+    let b_end = p
+        .add_integer_var("b_end", 0.0, Some(0.0), Some(4.0))
+        .unwrap();
+    let a_demand = p
+        .add_integer_var("a_demand", 0.0, Some(1.0), Some(2.0))
+        .unwrap();
+    let capacity = p
+        .add_integer_var("capacity", 0.0, Some(3.0), Some(4.0))
+        .unwrap();
+    p.add_constraint("force-a-demand", vec![(a_demand, 1.0)], RowSense::Ge, 2.0)
+        .unwrap();
+    p.add_constraint("force-capacity", vec![(capacity, 1.0)], RowSense::Le, 3.0)
+        .unwrap();
+    p.add_cumulative_affine(
+        "shared-resource",
+        vec![
+            MathProgram::interval(a_start, 2.0, a_end),
+            MathProgram::interval(b_start, 2.0, b_end),
+        ],
+        vec![
+            AffineTerm {
+                coeffs: vec![(a_demand, 1.0)],
+                constant: 0.0,
+            },
+            AffineTerm {
+                coeffs: Vec::new(),
+                constant: 2.0,
+            },
+        ],
+        AffineTerm {
+            coeffs: vec![(capacity, 1.0)],
+            constant: 0.0,
+        },
     )
     .unwrap();
     p

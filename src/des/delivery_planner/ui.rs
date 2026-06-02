@@ -77,8 +77,14 @@ mod tests {
         assert!(html.contains("objectiveMode"));
         assert!(html.contains("loadManifestBtn"));
         assert!(html.contains("stopList"));
-        assert!(html.contains("stop-position-lock"));
-        assert!(html.contains("lockedPositions"));
         assert!(html.contains("windowEdgePenalty"));
+        assert!(html.contains("pinnedPositions"));
+        assert!(html.contains("lockOrderBtn"));
+        assert!(html.contains("pin-btn"));
+        assert!(html.contains("busyScreen"));
+        assert!(html.contains("warningBanner"));
+        assert!(html.contains("Previous Runs"));
+        assert!(html.contains("runHistoryList"));
+        assert!(html.contains("clearRunsBtn"));
     }
 }

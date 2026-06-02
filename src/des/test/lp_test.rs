@@ -11,7 +11,8 @@
 mod tests {
     use crate::des::general::des_lp_bridge::{build_mdp_lp, solve_mdp_as_lp, MdpAsLpOptions};
     use crate::des::general::lp::{
-        lp_to_string, solve_lp_internal, InternalSimplexOptions, LPProblem, LPStatus, Sense,
+        lp_to_string, solve_lp_external, solve_lp_internal, ExternalSolverOptions,
+        InternalSimplexOptions, LPProblem, LPStatus, Sense,
     };
     use crate::des::general::lp_des::{solve_lp_via_des, DESSimplexOptions, PivotRule};
     use crate::des::general::value_iteration::{value_iteration, MDPSpec, Outcome, VIOptions};
@@ -129,6 +130,28 @@ mod tests {
         let r = solve_lp_internal(&lp, &iopts());
         assert_eq!(r.status, LPStatus::Optimal);
         assert!(approx7(r.x[0], 2.0));
+    }
+
+    #[test]
+    fn external_lp_bridge_matches_internal_on_small_lp() {
+        let lp = LPProblem {
+            sense: Sense::Max,
+            c: vec![3.0, 2.0],
+            a_ub: Some(vec![vec![1.0, 1.0], vec![1.0, 3.0]]),
+            b_ub: Some(vec![4.0, 6.0]),
+            ..Default::default()
+        };
+        let internal = solve_lp_internal(&lp, &iopts());
+        let external = solve_lp_external(
+            &lp,
+            &ExternalSolverOptions {
+                method: Some("highs".to_string()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(external.status, LPStatus::Optimal, "{:?}", external.message);
+        assert!(approx(external.objective, internal.objective, 1e-9));
+        assert!(max_abs(&external.x, &internal.x) < 1e-9);
     }
 
     // =========================================================================

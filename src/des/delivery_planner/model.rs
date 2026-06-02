@@ -44,24 +44,20 @@ impl DeliveryObjectiveMode {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DeliveryLockedPosition {
-    #[serde(default)]
-    pub stop_id: String,
-    #[serde(default)]
-    pub position: usize,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct DeliveryRouteRules {
-    // Backward-compatible with the previous UI. New requests should use
-    // locked_positions so the optimizer can still order unlocked stops.
     #[serde(default)]
     pub locked_order: bool,
     #[serde(default)]
     pub ordered_stop_ids: Vec<String>,
     #[serde(default)]
-    pub locked_positions: Vec<DeliveryLockedPosition>,
+    pub pinned_positions: Vec<DeliveryPinnedStop>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeliveryPinnedStop {
+    pub stop_id: String,
+    pub position: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -154,8 +150,7 @@ pub fn normalize_delivery_request(req: &mut DeliveryPlannerRequest) {
     req.solver_max_ticks = req.solver_max_ticks.max(1);
     req.solver_lp_max_iters = req.solver_lp_max_iters.max(1);
     req.route_rules.ordered_stop_ids = dedupe_ordered_stop_ids(&req.route_rules.ordered_stop_ids);
-    req.route_rules.locked_positions =
-        normalize_locked_positions(&req.route_rules.locked_positions);
+    normalize_pinned_positions(&mut req.route_rules.pinned_positions);
     if req.user_id.trim().is_empty() {
         req.user_id = "dispatcher@local".to_string();
     }
@@ -188,25 +183,11 @@ fn dedupe_ordered_stop_ids(ids: &[String]) -> Vec<String> {
     out
 }
 
-fn normalize_locked_positions(locks: &[DeliveryLockedPosition]) -> Vec<DeliveryLockedPosition> {
-    let mut out = Vec::new();
-    for lock in locks {
-        let stop_id = lock.stop_id.trim();
-        if stop_id.is_empty() {
-            continue;
-        }
-        if out
-            .iter()
-            .any(|seen: &DeliveryLockedPosition| seen.stop_id == stop_id)
-        {
-            continue;
-        }
-        out.push(DeliveryLockedPosition {
-            stop_id: stop_id.to_string(),
-            position: lock.position,
-        });
-    }
-    out
+fn normalize_pinned_positions(pins: &mut Vec<DeliveryPinnedStop>) {
+    pins.retain_mut(|pin| {
+        pin.stop_id = pin.stop_id.trim().to_string();
+        !pin.stop_id.is_empty() && pin.position > 0
+    });
 }
 
 fn finite_or(x: f64, fallback: f64) -> f64 {

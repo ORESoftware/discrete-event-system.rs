@@ -95,6 +95,178 @@ pub struct LPProblem {
     pub con_names: Option<Vec<String>>,
 }
 
+/// A source-level LP row bound: `lower <= coefs·x <= upper`.
+///
+/// Commercial LP/MIP solvers expose this as a natural modelling primitive. The
+/// native LP layer compiles it into equality and/or `<=` rows before solving.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct LPRowConstraint {
+    pub coefs: Vec<f64>,
+    pub lower: Option<f64>,
+    pub upper: Option<f64>,
+    pub name: Option<String>,
+}
+
+/// LP model with source-level lower/upper row bounds.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct GeneralLinearLPProblem {
+    pub base: LPProblem,
+    pub linear_constraints: Vec<LPRowConstraint>,
+}
+
+/// LP model with a constant objective offset: `objective_offset + c^T x`.
+///
+/// The optimizer argmin/argmax is unchanged by the offset, but reporting the
+/// true objective value matters for parity with LP/MPS-style solver surfaces.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct ObjectiveOffsetLPProblem {
+    pub base: LPProblem,
+    pub objective_offset: f64,
+}
+
+/// One member of an LP infeasibility conflict.
+///
+/// This mirrors the row/bound-level IIS surfaces exposed by production LP/MIP
+/// solvers: a conflict may include ordinary `<=` rows, equality rows, lower
+/// variable bounds, and upper variable bounds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LPConflictMember {
+    UpperRow(usize),
+    EqualityRow(usize),
+    LowerBound(usize),
+    UpperBound(usize),
+}
+
+impl LPConflictMember {
+    pub fn kind(self) -> &'static str {
+        match self {
+            LPConflictMember::UpperRow(_) => "upper-row",
+            LPConflictMember::EqualityRow(_) => "equality-row",
+            LPConflictMember::LowerBound(_) => "lower-bound",
+            LPConflictMember::UpperBound(_) => "upper-bound",
+        }
+    }
+
+    pub fn index(self) -> usize {
+        match self {
+            LPConflictMember::UpperRow(idx)
+            | LPConflictMember::EqualityRow(idx)
+            | LPConflictMember::LowerBound(idx)
+            | LPConflictMember::UpperBound(idx) => idx,
+        }
+    }
+}
+
+/// Options for the deletion-filter conflict finder.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LPConflictOptions {
+    pub lp_max_iter: Option<usize>,
+    pub tol: Option<f64>,
+}
+
+/// A row/bound-level infeasibility conflict.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LPInfeasibilityConflict {
+    /// True when the original model is infeasible and `members` is a conflict.
+    pub infeasible: bool,
+    /// The row/bound members retained by the deletion filter.
+    pub members: Vec<LPConflictMember>,
+    /// True when removing any one retained member makes the subsystem feasible.
+    pub minimal: bool,
+    /// Number of LP feasibility subproblems solved while refining/checking.
+    pub checks: usize,
+    pub solver: String,
+    pub message: Option<String>,
+}
+
+/// One relaxable member in a weighted LP feasibility relaxation.
+///
+/// Equality rows can be violated above or below the target, so they are split
+/// into two one-sided members with independent slack variables but the same
+/// source-level penalty.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LPFeasRelaxMember {
+    UpperRow(usize),
+    EqualityUpper(usize),
+    EqualityLower(usize),
+    LowerBound(usize),
+    UpperBound(usize),
+}
+
+impl LPFeasRelaxMember {
+    pub fn kind(self) -> &'static str {
+        match self {
+            LPFeasRelaxMember::UpperRow(_) => "upper-row",
+            LPFeasRelaxMember::EqualityUpper(_) => "equality-upper",
+            LPFeasRelaxMember::EqualityLower(_) => "equality-lower",
+            LPFeasRelaxMember::LowerBound(_) => "lower-bound",
+            LPFeasRelaxMember::UpperBound(_) => "upper-bound",
+        }
+    }
+
+    pub fn index(self) -> usize {
+        match self {
+            LPFeasRelaxMember::UpperRow(idx)
+            | LPFeasRelaxMember::EqualityUpper(idx)
+            | LPFeasRelaxMember::EqualityLower(idx)
+            | LPFeasRelaxMember::LowerBound(idx)
+            | LPFeasRelaxMember::UpperBound(idx) => idx,
+        }
+    }
+}
+
+/// Options for weighted L1 LP feasibility relaxation.
+///
+/// Missing penalty vectors default to unit penalties. The objective of the
+/// generated relaxation LP is the weighted sum of row and bound violation
+/// magnitudes, matching the common FeasRelax/FeasOpt L1 mode.
+#[derive(Clone, Debug, Default)]
+pub struct LPFeasRelaxOptions {
+    pub upper_row_penalties: Option<Vec<f64>>,
+    pub equality_row_penalties: Option<Vec<f64>>,
+    pub lower_bound_penalties: Option<Vec<f64>>,
+    pub upper_bound_penalties: Option<Vec<f64>>,
+    pub lp_max_iter: Option<usize>,
+    pub tol: Option<f64>,
+}
+
+/// One slack variable created by [`build_lp_feasibility_relaxation_problem`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct LPFeasRelaxSlack {
+    pub member: LPFeasRelaxMember,
+    pub slack_var: usize,
+    pub penalty: f64,
+}
+
+/// The ordinary LP generated for a weighted feasibility relaxation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LPFeasRelaxModel {
+    pub problem: LPProblem,
+    pub original_var_count: usize,
+    pub slacks: Vec<LPFeasRelaxSlack>,
+}
+
+/// One positive violation in a weighted LP feasibility relaxation result.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LPFeasRelaxViolation {
+    pub member: LPFeasRelaxMember,
+    pub amount: f64,
+    pub penalty: f64,
+    pub cost: f64,
+}
+
+/// Result of solving a weighted LP feasibility relaxation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LPFeasRelaxResult {
+    pub status: LPStatus,
+    pub x: Vec<f64>,
+    pub relaxation_cost: f64,
+    pub violations: Vec<LPFeasRelaxViolation>,
+    pub relaxation_solution: LPSolution,
+    pub solver: String,
+    pub message: Option<String>,
+}
+
 /// Solve outcome. TS `type LPStatus = 'optimal' | ...`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LPStatus {
@@ -287,6 +459,50 @@ fn run_internal_simplex(p: &LPProblem, opts: &InternalSimplexOptions) -> LPSolut
 
     // ---- Solve  max c_Y^T y  s.t.  Ay · y ≤ by, y ≥ 0  via Big-M two-phase. ----
     let m = ay.len();
+    if m == 0 {
+        if c_y.iter().any(|&coef| coef > tol) {
+            eprintln!(
+                "[lp.internal] objective is unbounded in the '{}' direction; no constraints bound an improving ray.",
+                p.sense.as_str()
+            );
+            return LPSolution {
+                status: LPStatus::Unbounded,
+                x: Vec::new(),
+                objective: if p.sense == Sense::Max {
+                    f64::INFINITY
+                } else {
+                    f64::NEG_INFINITY
+                },
+                dual_ub: None,
+                dual_eq: None,
+                reduced_costs: None,
+                var_basis: None,
+                row_basis: None,
+                iters: Some(0),
+                solver: "internal".to_string(),
+                elapsed_ms: ms_since(t0),
+                message: Some("no constraints bound an improving ray".to_string()),
+            };
+        }
+
+        let x = shifts.clone();
+        let objective = p.c.iter().zip(&x).map(|(ci, xi)| ci * xi).sum();
+        let (dual_ub, dual_eq, reduced_costs) = recover_lp_certificate(p, &x, tol);
+        return LPSolution {
+            status: LPStatus::Optimal,
+            x,
+            objective,
+            dual_ub,
+            dual_eq,
+            reduced_costs,
+            var_basis: None,
+            row_basis: None,
+            iters: Some(0),
+            solver: "internal".to_string(),
+            elapsed_ms: ms_since(t0),
+            message: Some("internal simplex: empty constraint system".to_string()),
+        };
+    }
     let mut acopy: Vec<Vec<f64>> = ay.iter().cloned().collect();
     let mut bcopy: Vec<f64> = by.clone();
     let total_cols = ny + m;
@@ -692,6 +908,618 @@ pub fn solve_lp_internal(p: &LPProblem, opts: &InternalSimplexOptions) -> LPSolu
     run_internal_simplex(p, opts)
 }
 
+fn add_lp_objective_offset(mut sol: LPSolution, offset: f64) -> LPSolution {
+    if offset != 0.0 && sol.objective.is_finite() {
+        sol.objective += offset;
+    }
+    sol
+}
+
+/// Solve an LP with a constant objective offset using the internal simplex
+/// backend.
+pub fn solve_objective_offset_lp_internal(
+    problem: &ObjectiveOffsetLPProblem,
+    opts: &InternalSimplexOptions,
+) -> LPSolution {
+    let sol = solve_lp_internal(&problem.base, opts);
+    add_lp_objective_offset(sol, problem.objective_offset)
+}
+
+fn validate_lp_row_constraint(base: &LPProblem, row: &LPRowConstraint, idx: usize) {
+    let n = base.c.len();
+    if row.coefs.len() != n {
+        panic!(
+            "lp row bound {idx}: coefficient length {} != variable count {n}",
+            row.coefs.len()
+        );
+    }
+    if row.lower.is_none() && row.upper.is_none() {
+        panic!("lp row bound {idx}: at least one side must be finite");
+    }
+    for (j, &coef) in row.coefs.iter().enumerate() {
+        if !coef.is_finite() {
+            panic!("lp row bound {idx}: coefficient {j} must be finite");
+        }
+    }
+    if let Some(lower) = row.lower {
+        if !lower.is_finite() {
+            panic!("lp row bound {idx}: lower bound must be finite");
+        }
+    }
+    if let Some(upper) = row.upper {
+        if !upper.is_finite() {
+            panic!("lp row bound {idx}: upper bound must be finite");
+        }
+    }
+    if let (Some(lower), Some(upper)) = (row.lower, row.upper) {
+        if lower > upper + 1e-9 {
+            panic!("lp row bound {idx}: lower bound exceeds upper bound");
+        }
+    }
+}
+
+fn append_lp_ub_row(out: &mut LPProblem, row: Vec<f64>, rhs: f64, name: String) {
+    out.a_ub.get_or_insert_with(Vec::new).push(row);
+    out.b_ub.get_or_insert_with(Vec::new).push(rhs);
+    if let Some(names) = &mut out.con_names {
+        names.push(name);
+    }
+}
+
+fn append_lp_eq_row(out: &mut LPProblem, row: Vec<f64>, rhs: f64, name: String) {
+    out.a_eq.get_or_insert_with(Vec::new).push(row);
+    out.b_eq.get_or_insert_with(Vec::new).push(rhs);
+    if let Some(names) = &mut out.con_names {
+        names.push(name);
+    }
+}
+
+/// Compile source-level LP row bounds into ordinary equality / `<=` rows.
+pub fn linearize_general_linear_lp_problem(problem: &GeneralLinearLPProblem) -> LPProblem {
+    let mut out = problem.base.clone();
+    if out.con_names.is_none() {
+        let base_rows = out.a_ub.as_ref().map(|rows| rows.len()).unwrap_or(0)
+            + out.a_eq.as_ref().map(|rows| rows.len()).unwrap_or(0);
+        out.con_names = Some((0..base_rows).map(|idx| format!("c{idx}")).collect());
+    }
+    for (idx, row) in problem.linear_constraints.iter().enumerate() {
+        validate_lp_row_constraint(&problem.base, row, idx);
+        let name = row
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("lp_row_bound_{idx}"));
+        match (row.lower, row.upper) {
+            (Some(lower), Some(upper)) if (lower - upper).abs() <= 1e-9 => {
+                append_lp_eq_row(&mut out, row.coefs.clone(), upper, name);
+            }
+            (lower, upper) => {
+                if let Some(upper) = upper {
+                    append_lp_ub_row(&mut out, row.coefs.clone(), upper, format!("{name}_upper"));
+                }
+                if let Some(lower) = lower {
+                    append_lp_ub_row(
+                        &mut out,
+                        row.coefs.iter().map(|v| -v).collect(),
+                        -lower,
+                        format!("{name}_lower"),
+                    );
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Solve a source-level LP with arbitrary lower/upper row bounds using the
+/// internal simplex backend.
+pub fn solve_general_linear_lp_internal(
+    problem: &GeneralLinearLPProblem,
+    opts: &InternalSimplexOptions,
+) -> LPSolution {
+    let linearized = linearize_general_linear_lp_problem(problem);
+    solve_lp_internal(&linearized, opts)
+}
+
+fn normalized_lp_bounds(p: &LPProblem) -> (Vec<Option<f64>>, Vec<Option<f64>>) {
+    let n = p.c.len();
+    let lb = p.lb.clone().unwrap_or_else(|| vec![Some(0.0); n]);
+    let ub = p.ub.clone().unwrap_or_else(|| vec![None; n]);
+    if lb.len() != n {
+        panic!("lb length mismatch: got {}, expected {n}", lb.len());
+    }
+    if ub.len() != n {
+        panic!("ub length mismatch: got {}, expected {n}", ub.len());
+    }
+    (lb, ub)
+}
+
+fn validate_lp_dimensions(p: &LPProblem) {
+    let n = p.c.len();
+    let a_ub = p.a_ub.as_deref().unwrap_or(&[]);
+    let b_ub = p.b_ub.as_deref().unwrap_or(&[]);
+    let a_eq = p.a_eq.as_deref().unwrap_or(&[]);
+    let b_eq = p.b_eq.as_deref().unwrap_or(&[]);
+    if a_ub.len() != b_ub.len() {
+        panic!("A_ub / b_ub length mismatch");
+    }
+    if a_eq.len() != b_eq.len() {
+        panic!("A_eq / b_eq length mismatch");
+    }
+    for (r, row) in a_ub.iter().enumerate() {
+        if row.len() != n {
+            panic!("A_ub row {r} has length {}, expected {n}", row.len());
+        }
+    }
+    for (r, row) in a_eq.iter().enumerate() {
+        if row.len() != n {
+            panic!("A_eq row {r} has length {}, expected {n}", row.len());
+        }
+    }
+    normalized_lp_bounds(p);
+}
+
+fn validate_lp_feas_relax_penalties(name: &str, penalties: &Option<Vec<f64>>, expected: usize) {
+    if let Some(penalties) = penalties {
+        if penalties.len() != expected {
+            panic!(
+                "{name} length mismatch: got {}, expected {expected}",
+                penalties.len()
+            );
+        }
+        for (idx, &penalty) in penalties.iter().enumerate() {
+            if !penalty.is_finite() || penalty < 0.0 {
+                panic!("{name}[{idx}] must be a finite non-negative penalty");
+            }
+        }
+    }
+}
+
+fn lp_feas_relax_penalty(penalties: &Option<Vec<f64>>, idx: usize) -> f64 {
+    penalties
+        .as_ref()
+        .and_then(|values| values.get(idx))
+        .copied()
+        .unwrap_or(1.0)
+}
+
+fn lp_source_var_name(p: &LPProblem, j: usize) -> String {
+    p.var_names
+        .as_ref()
+        .and_then(|names| names.get(j))
+        .cloned()
+        .unwrap_or_else(|| format!("x{j}"))
+}
+
+fn lp_source_row_name(p: &LPProblem, offset: usize, fallback: String) -> String {
+    p.con_names
+        .as_ref()
+        .and_then(|names| names.get(offset))
+        .cloned()
+        .unwrap_or(fallback)
+}
+
+fn add_lp_feas_relax_slack(
+    c: &mut Vec<f64>,
+    lb: &mut Vec<Option<f64>>,
+    ub: &mut Vec<Option<f64>>,
+    var_names: &mut Vec<String>,
+    rows: &mut [Vec<f64>],
+    slacks: &mut Vec<LPFeasRelaxSlack>,
+    member: LPFeasRelaxMember,
+    penalty: f64,
+    name: String,
+) -> usize {
+    let idx = c.len();
+    c.push(penalty);
+    lb.push(Some(0.0));
+    ub.push(None);
+    var_names.push(name);
+    for row in rows {
+        row.push(0.0);
+    }
+    slacks.push(LPFeasRelaxSlack {
+        member,
+        slack_var: idx,
+        penalty,
+    });
+    idx
+}
+
+fn lp_feas_relax_row(coefs: &[f64], len: usize) -> Vec<f64> {
+    let mut row = vec![0.0; len];
+    row[..coefs.len()].copy_from_slice(coefs);
+    row
+}
+
+/// Build an ordinary LP whose optimum is the weighted L1 feasibility relaxation
+/// of `p`.
+pub fn build_lp_feasibility_relaxation_problem(
+    p: &LPProblem,
+    opts: &LPFeasRelaxOptions,
+) -> LPFeasRelaxModel {
+    validate_lp_dimensions(p);
+    let n = p.c.len();
+    let a_ub = p.a_ub.as_deref().unwrap_or(&[]);
+    let b_ub = p.b_ub.as_deref().unwrap_or(&[]);
+    let a_eq = p.a_eq.as_deref().unwrap_or(&[]);
+    let b_eq = p.b_eq.as_deref().unwrap_or(&[]);
+    let (base_lb, base_ub) = normalized_lp_bounds(p);
+    validate_lp_feas_relax_penalties("upper_row_penalties", &opts.upper_row_penalties, a_ub.len());
+    validate_lp_feas_relax_penalties(
+        "equality_row_penalties",
+        &opts.equality_row_penalties,
+        a_eq.len(),
+    );
+    validate_lp_feas_relax_penalties("lower_bound_penalties", &opts.lower_bound_penalties, n);
+    validate_lp_feas_relax_penalties("upper_bound_penalties", &opts.upper_bound_penalties, n);
+
+    let mut c = vec![0.0; n];
+    let mut lb = vec![None; n];
+    let mut ub = vec![None; n];
+    let mut var_names: Vec<String> = (0..n).map(|j| lp_source_var_name(p, j)).collect();
+    let mut rows = Vec::new();
+    let mut rhs = Vec::new();
+    let mut con_names = Vec::new();
+    let mut slacks = Vec::new();
+
+    for (row_idx, (coefs, &bound)) in a_ub.iter().zip(b_ub).enumerate() {
+        let penalty = lp_feas_relax_penalty(&opts.upper_row_penalties, row_idx);
+        let slack = add_lp_feas_relax_slack(
+            &mut c,
+            &mut lb,
+            &mut ub,
+            &mut var_names,
+            &mut rows,
+            &mut slacks,
+            LPFeasRelaxMember::UpperRow(row_idx),
+            penalty,
+            format!("fr_ub_row_{row_idx}"),
+        );
+        let mut row = lp_feas_relax_row(coefs, c.len());
+        row[slack] = -1.0;
+        rows.push(row);
+        rhs.push(bound);
+        con_names.push(format!(
+            "feasrelax_{}",
+            lp_source_row_name(p, row_idx, format!("ub_row_{row_idx}"))
+        ));
+    }
+
+    for (row_idx, (coefs, &bound)) in a_eq.iter().zip(b_eq).enumerate() {
+        let penalty = lp_feas_relax_penalty(&opts.equality_row_penalties, row_idx);
+        let source_name = lp_source_row_name(p, a_ub.len() + row_idx, format!("eq_row_{row_idx}"));
+        let above_slack = add_lp_feas_relax_slack(
+            &mut c,
+            &mut lb,
+            &mut ub,
+            &mut var_names,
+            &mut rows,
+            &mut slacks,
+            LPFeasRelaxMember::EqualityUpper(row_idx),
+            penalty,
+            format!("fr_eq_row_{row_idx}_above"),
+        );
+        let mut above = lp_feas_relax_row(coefs, c.len());
+        above[above_slack] = -1.0;
+        rows.push(above);
+        rhs.push(bound);
+        con_names.push(format!("feasrelax_{source_name}_above"));
+
+        let below_slack = add_lp_feas_relax_slack(
+            &mut c,
+            &mut lb,
+            &mut ub,
+            &mut var_names,
+            &mut rows,
+            &mut slacks,
+            LPFeasRelaxMember::EqualityLower(row_idx),
+            penalty,
+            format!("fr_eq_row_{row_idx}_below"),
+        );
+        let neg_coefs: Vec<f64> = coefs.iter().map(|v| -*v).collect();
+        let mut below = lp_feas_relax_row(&neg_coefs, c.len());
+        below[below_slack] = -1.0;
+        rows.push(below);
+        rhs.push(-bound);
+        con_names.push(format!("feasrelax_{source_name}_below"));
+    }
+
+    for j in 0..n {
+        let source_name = lp_source_var_name(p, j);
+        if let Some(lower) = base_lb[j] {
+            let penalty = lp_feas_relax_penalty(&opts.lower_bound_penalties, j);
+            let slack = add_lp_feas_relax_slack(
+                &mut c,
+                &mut lb,
+                &mut ub,
+                &mut var_names,
+                &mut rows,
+                &mut slacks,
+                LPFeasRelaxMember::LowerBound(j),
+                penalty,
+                format!("fr_lb_{source_name}"),
+            );
+            let mut row = vec![0.0; c.len()];
+            row[j] = -1.0;
+            row[slack] = -1.0;
+            rows.push(row);
+            rhs.push(-lower);
+            con_names.push(format!("feasrelax_lb_{source_name}"));
+        }
+        if let Some(upper) = base_ub[j] {
+            let penalty = lp_feas_relax_penalty(&opts.upper_bound_penalties, j);
+            let slack = add_lp_feas_relax_slack(
+                &mut c,
+                &mut lb,
+                &mut ub,
+                &mut var_names,
+                &mut rows,
+                &mut slacks,
+                LPFeasRelaxMember::UpperBound(j),
+                penalty,
+                format!("fr_ub_{source_name}"),
+            );
+            let mut row = vec![0.0; c.len()];
+            row[j] = 1.0;
+            row[slack] = -1.0;
+            rows.push(row);
+            rhs.push(upper);
+            con_names.push(format!("feasrelax_ub_{source_name}"));
+        }
+    }
+
+    LPFeasRelaxModel {
+        problem: LPProblem {
+            sense: Sense::Min,
+            c,
+            a_ub: Some(rows),
+            b_ub: Some(rhs),
+            a_eq: None,
+            b_eq: None,
+            lb: Some(lb),
+            ub: Some(ub),
+            var_names: Some(var_names),
+            con_names: Some(con_names),
+        },
+        original_var_count: n,
+        slacks,
+    }
+}
+
+/// Solve a weighted L1 LP feasibility relaxation with the internal simplex
+/// backend and decode the positive row/bound violations.
+pub fn solve_lp_feasibility_relaxation_internal(
+    p: &LPProblem,
+    opts: &LPFeasRelaxOptions,
+) -> LPFeasRelaxResult {
+    let model = build_lp_feasibility_relaxation_problem(p, opts);
+    let simplex_opts = InternalSimplexOptions {
+        max_iter: opts.lp_max_iter,
+        tol: opts.tol,
+    };
+    let solution = solve_lp_internal(&model.problem, &simplex_opts);
+    let status = solution.status;
+    let solver = solution.solver.clone();
+    let message = solution.message.clone();
+    if status != LPStatus::Optimal {
+        return LPFeasRelaxResult {
+            status,
+            x: Vec::new(),
+            relaxation_cost: f64::NAN,
+            violations: Vec::new(),
+            relaxation_solution: solution,
+            solver,
+            message,
+        };
+    }
+
+    let tol = opts.tol.unwrap_or(1e-9);
+    let x = solution.x[..model.original_var_count].to_vec();
+    let mut violations = Vec::new();
+    for slack in &model.slacks {
+        let amount = solution.x.get(slack.slack_var).copied().unwrap_or(0.0);
+        if amount > 10.0 * tol {
+            violations.push(LPFeasRelaxViolation {
+                member: slack.member,
+                amount,
+                penalty: slack.penalty,
+                cost: amount * slack.penalty,
+            });
+        }
+    }
+
+    LPFeasRelaxResult {
+        status,
+        x,
+        relaxation_cost: solution.objective,
+        violations,
+        relaxation_solution: solution,
+        solver,
+        message,
+    }
+}
+
+/// Return every row and finite variable bound that may participate in an LP
+/// infeasibility conflict.
+pub fn collect_lp_conflict_members(p: &LPProblem) -> Vec<LPConflictMember> {
+    validate_lp_dimensions(p);
+    let mut members = Vec::new();
+    for r in 0..p.a_ub.as_ref().map(|rows| rows.len()).unwrap_or(0) {
+        members.push(LPConflictMember::UpperRow(r));
+    }
+    for r in 0..p.a_eq.as_ref().map(|rows| rows.len()).unwrap_or(0) {
+        members.push(LPConflictMember::EqualityRow(r));
+    }
+    let (lb, ub) = normalized_lp_bounds(p);
+    for i in 0..p.c.len() {
+        if lb[i].is_some() {
+            members.push(LPConflictMember::LowerBound(i));
+        }
+        if ub[i].is_some() {
+            members.push(LPConflictMember::UpperBound(i));
+        }
+    }
+    members
+}
+
+/// Build the feasibility LP induced by a selected row/bound conflict subset.
+///
+/// The objective is zeroed; only feasibility status is meaningful.
+pub fn lp_feasibility_problem_from_conflict_members(
+    p: &LPProblem,
+    members: &[LPConflictMember],
+) -> LPProblem {
+    validate_lp_dimensions(p);
+    let n = p.c.len();
+    let a_ub = p.a_ub.as_deref().unwrap_or(&[]);
+    let b_ub = p.b_ub.as_deref().unwrap_or(&[]);
+    let a_eq = p.a_eq.as_deref().unwrap_or(&[]);
+    let b_eq = p.b_eq.as_deref().unwrap_or(&[]);
+    let (base_lb, base_ub) = normalized_lp_bounds(p);
+
+    let mut selected_ub_rows = Vec::new();
+    let mut selected_ub_rhs = Vec::new();
+    let mut selected_eq_rows = Vec::new();
+    let mut selected_eq_rhs = Vec::new();
+    let mut lb = vec![None; n];
+    let mut ub = vec![None; n];
+    let mut con_names = Vec::new();
+
+    for &member in members {
+        match member {
+            LPConflictMember::UpperRow(row) => {
+                if row >= a_ub.len() {
+                    panic!("LP conflict upper row {row} out of range");
+                }
+                selected_ub_rows.push(a_ub[row].clone());
+                selected_ub_rhs.push(b_ub[row]);
+                con_names.push(
+                    p.con_names
+                        .as_ref()
+                        .and_then(|names| names.get(row))
+                        .cloned()
+                        .unwrap_or_else(|| format!("ub_row_{row}")),
+                );
+            }
+            LPConflictMember::EqualityRow(row) => {
+                if row >= a_eq.len() {
+                    panic!("LP conflict equality row {row} out of range");
+                }
+                selected_eq_rows.push(a_eq[row].clone());
+                selected_eq_rhs.push(b_eq[row]);
+                con_names.push(
+                    p.con_names
+                        .as_ref()
+                        .and_then(|names| names.get(a_ub.len() + row))
+                        .cloned()
+                        .unwrap_or_else(|| format!("eq_row_{row}")),
+                );
+            }
+            LPConflictMember::LowerBound(var) => {
+                if var >= n {
+                    panic!("LP conflict lower bound {var} out of range");
+                }
+                lb[var] = base_lb[var];
+            }
+            LPConflictMember::UpperBound(var) => {
+                if var >= n {
+                    panic!("LP conflict upper bound {var} out of range");
+                }
+                ub[var] = base_ub[var];
+            }
+        }
+    }
+
+    LPProblem {
+        sense: Sense::Min,
+        c: vec![0.0; n],
+        a_ub: Some(selected_ub_rows),
+        b_ub: Some(selected_ub_rhs),
+        a_eq: Some(selected_eq_rows),
+        b_eq: Some(selected_eq_rhs),
+        lb: Some(lb),
+        ub: Some(ub),
+        var_names: p.var_names.clone(),
+        con_names: Some(con_names),
+    }
+}
+
+fn lp_conflict_subset_status(
+    p: &LPProblem,
+    members: &[LPConflictMember],
+    opts: &LPConflictOptions,
+) -> LPStatus {
+    let subproblem = lp_feasibility_problem_from_conflict_members(p, members);
+    solve_lp_internal(
+        &subproblem,
+        &InternalSimplexOptions {
+            max_iter: opts.lp_max_iter,
+            tol: opts.tol,
+        },
+    )
+    .status
+}
+
+/// Find a minimal row/bound-level infeasibility conflict for a small LP.
+///
+/// The algorithm is the standard deletion filter used by many IIS/conflict
+/// explainers: repeatedly remove a row or bound when the remaining subsystem is
+/// still infeasible. The returned conflict is minimal by single deletion, not
+/// guaranteed minimum-cardinality.
+pub fn find_lp_infeasibility_conflict(
+    p: &LPProblem,
+    opts: &LPConflictOptions,
+) -> LPInfeasibilityConflict {
+    let mut members = collect_lp_conflict_members(p);
+    let mut checks = 1usize;
+    let full_status = lp_conflict_subset_status(p, &members, opts);
+    if full_status != LPStatus::Infeasible {
+        return LPInfeasibilityConflict {
+            infeasible: false,
+            members: Vec::new(),
+            minimal: false,
+            checks,
+            solver: "internal-conflict-deletion-filter".to_string(),
+            message: Some(format!(
+                "model is not infeasible; feasibility status is {}",
+                full_status.as_str()
+            )),
+        };
+    }
+
+    let mut idx = 0usize;
+    while idx < members.len() {
+        let mut trial = members.clone();
+        trial.remove(idx);
+        checks += 1;
+        if lp_conflict_subset_status(p, &trial, opts) == LPStatus::Infeasible {
+            members = trial;
+        } else {
+            idx += 1;
+        }
+    }
+
+    let mut minimal = true;
+    for idx in 0..members.len() {
+        let mut trial = members.clone();
+        trial.remove(idx);
+        checks += 1;
+        if lp_conflict_subset_status(p, &trial, opts) == LPStatus::Infeasible {
+            minimal = false;
+            break;
+        }
+    }
+
+    LPInfeasibilityConflict {
+        infeasible: true,
+        members,
+        minimal,
+        checks,
+        solver: "internal-conflict-deletion-filter".to_string(),
+        message: Some("minimal infeasible row/bound subsystem".to_string()),
+    }
+}
+
 // -----------------------------------------------------------------------------
 // In-process primal-dual interior-point method.
 // -----------------------------------------------------------------------------
@@ -926,6 +1754,134 @@ fn reconstruct_original_x(std: &StandardInteriorLp, x_std: &[f64]) -> Vec<f64> {
 
 fn original_objective(std: &StandardInteriorLp, x: &[f64]) -> f64 {
     std.original_c.iter().zip(x).map(|(c, xi)| c * xi).sum()
+}
+
+fn recover_lp_certificate(
+    p: &LPProblem,
+    x: &[f64],
+    tol: f64,
+) -> (Option<Vec<f64>>, Option<Vec<f64>>, Option<Vec<f64>>) {
+    let n = p.c.len();
+    if x.len() != n {
+        return (None, None, None);
+    }
+    let a_ub: &[Vec<f64>] = p.a_ub.as_deref().unwrap_or(&[]);
+    let b_ub: &[f64] = p.b_ub.as_deref().unwrap_or(&[]);
+    let a_eq: &[Vec<f64>] = p.a_eq.as_deref().unwrap_or(&[]);
+    let b_eq: &[f64] = p.b_eq.as_deref().unwrap_or(&[]);
+    let lb: Vec<Option<f64>> = p.lb.clone().unwrap_or_else(|| vec![Some(0.0); n]);
+    let ub: Vec<Option<f64>> = p.ub.clone().unwrap_or_else(|| vec![None; n]);
+    if a_ub.len() != b_ub.len() || a_eq.len() != b_eq.len() || lb.len() != n || ub.len() != n {
+        return (None, None, None);
+    }
+    let mut bound_state = vec![0_i8; n];
+    for (j, &xj) in x.iter().enumerate() {
+        if let Some(lower) = lb[j] {
+            if xj < lower - 10.0 * tol {
+                return (None, None, None);
+            }
+            if (xj - lower).abs() <= 10.0 * tol {
+                bound_state[j] = -1;
+            }
+        }
+        if let Some(upper) = ub[j] {
+            if xj > upper + 10.0 * tol {
+                return (None, None, None);
+            }
+            if (xj - upper).abs() <= 10.0 * tol {
+                bound_state[j] = if bound_state[j] == -1 { 2 } else { 1 };
+            }
+        }
+    }
+
+    let mut active_ub = Vec::new();
+    for (i, (row, rhs)) in a_ub.iter().zip(b_ub).enumerate() {
+        if row.len() != n {
+            return (None, None, None);
+        }
+        let lhs: f64 = row.iter().zip(x).map(|(a, xj)| a * xj).sum();
+        if lhs > rhs + 10.0 * tol {
+            return (None, None, None);
+        }
+        if (lhs - rhs).abs() <= 10.0 * tol {
+            active_ub.push(i);
+        }
+    }
+    for (row, rhs) in a_eq.iter().zip(b_eq) {
+        if row.len() != n {
+            return (None, None, None);
+        }
+        let lhs: f64 = row.iter().zip(x).map(|(a, xj)| a * xj).sum();
+        if (lhs - rhs).abs() > 10.0 * tol {
+            return (None, None, None);
+        }
+    }
+
+    let interior_vars: Vec<usize> = bound_state
+        .iter()
+        .enumerate()
+        .filter_map(|(j, &state)| if state == 0 { Some(j) } else { None })
+        .collect();
+    let unknowns = active_ub.len() + a_eq.len();
+    if unknowns != interior_vars.len() {
+        return (None, None, None);
+    }
+    let mut system = vec![vec![0.0; unknowns]; interior_vars.len()];
+    for (col, &row_idx) in active_ub.iter().enumerate() {
+        for (eq_row, &j) in interior_vars.iter().enumerate() {
+            system[eq_row][col] = a_ub[row_idx][j];
+        }
+    }
+    for (eq_idx, row) in a_eq.iter().enumerate() {
+        let col = active_ub.len() + eq_idx;
+        for (eq_row, &j) in interior_vars.iter().enumerate() {
+            system[eq_row][col] = row[j];
+        }
+    }
+    let gradient: Vec<f64> =
+        p.c.iter()
+            .map(|&c| if p.sense == Sense::Max { c } else { -c })
+            .collect();
+    let rhs: Vec<f64> = interior_vars.iter().map(|&j| gradient[j]).collect();
+    let solution = if unknowns == 0 {
+        Vec::new()
+    } else {
+        let Some(solution) = LinearSystem::new(&system, &rhs, tol.max(1e-10)).try_solve() else {
+            return (None, None, None);
+        };
+        solution
+    };
+    let mut dual_ub = vec![0.0; a_ub.len()];
+    for (col, &row_idx) in active_ub.iter().enumerate() {
+        if solution[col] < -1e-7 {
+            return (None, None, None);
+        }
+        dual_ub[row_idx] = solution[col].max(0.0);
+    }
+    let dual_eq = solution[active_ub.len()..].to_vec();
+    let mut reduced_costs = gradient;
+    for (row, &dual) in a_ub.iter().zip(&dual_ub) {
+        if dual == 0.0 {
+            continue;
+        }
+        for j in 0..n {
+            reduced_costs[j] -= dual * row[j];
+        }
+    }
+    for (row, &dual) in a_eq.iter().zip(&dual_eq) {
+        for j in 0..n {
+            reduced_costs[j] -= dual * row[j];
+        }
+    }
+    for (j, &state) in bound_state.iter().enumerate() {
+        match state {
+            0 if reduced_costs[j].abs() > 1e-7 => return (None, None, None),
+            -1 if reduced_costs[j] > 1e-7 => return (None, None, None),
+            1 if reduced_costs[j] < -1e-7 => return (None, None, None),
+            _ => {}
+        }
+    }
+    (Some(dual_ub), Some(dual_eq), Some(reduced_costs))
 }
 
 fn vec_inf_norm(v: &[f64]) -> f64 {
@@ -1400,30 +2356,43 @@ fn pivot(t: &mut Vec<Vec<f64>>, basis: &mut [usize], pivot_row: usize, pivot_col
 // External-solver dispatcher.
 // -----------------------------------------------------------------------------
 
-/// Default path to the scipy wrapper script (mirrors the TS default, which
-/// resolved `<repo>/external-references/lp/lp_solve.py` from the source file).
-const DEFAULT_SCRIPT: &str = "external-references/lp/lp_solve.py";
+/// Default path to the repository-local Python LP bridge. The bridge supports
+/// SciPy/HiGHS and OR-Tools GLOP, and falls back to dependency-free vertex
+/// enumeration for small validation models.
+const DEFAULT_SCRIPT: &str = "scripts/lp_solve.py";
 
-/// Configuration for the external scipy bridge. TS `interface ExternalSolverOptions`.
+fn external_solver_label(method: &str) -> String {
+    let normalized = method.to_ascii_lowercase().replace('_', "-");
+    if matches!(
+        normalized.as_str(),
+        "glop" | "ortools-glop" | "ortools:glop"
+    ) {
+        "ortools:glop".to_string()
+    } else {
+        format!("scipy:{method}")
+    }
+}
+
+/// Configuration for the external Python LP bridge. TS `interface ExternalSolverOptions`.
 ///
 /// `method` is modelled as a free `String` (rather than a closed enum) to
-/// faithfully reproduce the TS behaviour where `LP_SOLVER=scipy:<anything>`
-/// passes `<anything>` straight through to scipy. `max_buffer` is accepted for
-/// API parity but unused: `std::process::Command` captures the full output.
+/// faithfully reproduce the TS behaviour where external methods can be passed
+/// through to the bridge. `max_buffer` is accepted for API parity but unused:
+/// `std::process::Command` captures the full output.
 #[derive(Clone, Debug, Default)]
 pub struct ExternalSolverOptions {
-    /// scipy linprog method: `"highs"`, `"highs-ds"`, `"highs-ipm"`, `"simplex"`, `"interior-point"`. Default `"highs"`.
+    /// External LP method: SciPy linprog methods (`"highs"`, `"highs-ds"`, `"highs-ipm"`) or OR-Tools `"glop"`. Default `"highs"`.
     pub method: Option<String>,
-    /// Override the python executable. Defaults to `PYTHON` env var or `"python3"`.
+    /// Override the python executable. Defaults to `PYTHON`, then `PYTHON_BIN`, then `"python3"`.
     pub python: Option<String>,
-    /// Override the script path. Defaults to `external-references/lp/lp_solve.py`.
+    /// Override the script path. Defaults to `scripts/lp_solve.py`.
     pub script: Option<String>,
     /// Accepted for parity with the TS `maxBuffer`; unused in the Rust port.
     pub max_buffer: Option<usize>,
 }
 
-/// External scipy.optimize.linprog dispatcher as a transform. Returns status
-/// `NumericalError` if scipy / python is unavailable (or the process fails /
+/// External Python LP dispatcher as a transform. Returns status
+/// `NumericalError` if the requested solver / python is unavailable (or the process fails /
 /// emits unparseable output) — use `LPSolver` for graceful fallback.
 #[derive(Clone, Debug, Default)]
 pub struct ExternalSolver {
@@ -1445,11 +2414,13 @@ impl ExternalSolver {
             .method
             .clone()
             .unwrap_or_else(|| "highs".to_string());
+        let requested_solver = external_solver_label(&method);
         let python = self
             .opts
             .python
             .clone()
             .or_else(|| std::env::var("PYTHON").ok())
+            .or_else(|| std::env::var("PYTHON_BIN").ok())
             .unwrap_or_else(|| "python3".to_string());
         let script = self
             .opts
@@ -1467,7 +2438,7 @@ impl ExternalSolver {
             var_basis: None,
             row_basis: None,
             iters: None,
-            solver: format!("scipy:{method}"),
+            solver: requested_solver.clone(),
             elapsed_ms: ms_since(t0),
             message: Some(msg),
         };
@@ -1485,7 +2456,7 @@ impl ExternalSolver {
         {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("[lp.external] scipy:{method} could not start ({python}): {e}");
+                eprintln!("[lp.external] {requested_solver} could not start ({python}): {e}");
                 return numerical_error(format!("external solver could not start: {e}"), t0);
             }
         };
@@ -1498,7 +2469,7 @@ impl ExternalSolver {
         let out = match child.wait_with_output() {
             Ok(o) => o,
             Err(e) => {
-                eprintln!("[lp.external] scipy:{method} wait failed: {e}");
+                eprintln!("[lp.external] {requested_solver} wait failed: {e}");
                 return numerical_error(format!("external solver wait failed: {e}"), t0);
             }
         };
@@ -1515,7 +2486,7 @@ impl ExternalSolver {
             } else {
                 stderr.to_string()
             };
-            eprintln!("[lp.external] scipy:{method} process exited with code {code}: {stderr}");
+            eprintln!("[lp.external] {requested_solver} process exited with code {code}: {stderr}");
             return numerical_error(format!("external solver exited with {code}: {stderr}"), t0);
         }
 
@@ -1525,7 +2496,7 @@ impl ExternalSolver {
             Err(e) => {
                 let head: String = stdout.chars().take(120).collect();
                 eprintln!(
-                    "[lp.external] could not parse scipy:{method} stdout as JSON: {e}; stdout head=\"{head}\""
+                    "[lp.external] could not parse {requested_solver} stdout as JSON: {e}; stdout head=\"{head}\""
                 );
                 return numerical_error(
                     format!("failed to parse external solver stdout as JSON: {e}"),
@@ -1544,6 +2515,10 @@ impl ExternalSolver {
         let objective = json_get(&parsed, "objective")
             .and_then(json_as_f64)
             .unwrap_or(f64::NAN);
+        let solver = json_get(&parsed, "solver")
+            .and_then(json_as_str)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| requested_solver.clone());
 
         LPSolution {
             status,
@@ -1557,7 +2532,7 @@ impl ExternalSolver {
             iters: json_get(&parsed, "iters")
                 .and_then(json_as_f64)
                 .map(|f| f as usize),
-            solver: format!("scipy:{method}"),
+            solver,
             elapsed_ms: ms_since(t0),
             message: json_get(&parsed, "message")
                 .and_then(json_as_str)
@@ -1576,6 +2551,25 @@ impl Transform<LPProblem, LPSolution> for ExternalSolver {
 /// public free-function API; prefer `ExternalSolver` for new code.)
 pub fn solve_lp_external(p: &LPProblem, opts: &ExternalSolverOptions) -> LPSolution {
     ExternalSolver::new(opts.clone()).run(p)
+}
+
+/// Solve an LP with a constant objective offset using the external LP bridge.
+pub fn solve_objective_offset_lp_external(
+    problem: &ObjectiveOffsetLPProblem,
+    opts: &ExternalSolverOptions,
+) -> LPSolution {
+    let sol = solve_lp_external(&problem.base, opts);
+    add_lp_objective_offset(sol, problem.objective_offset)
+}
+
+/// Solve a source-level LP with arbitrary lower/upper row bounds using the
+/// external LP bridge after compiling row bounds.
+pub fn solve_general_linear_lp_external(
+    problem: &GeneralLinearLPProblem,
+    opts: &ExternalSolverOptions,
+) -> LPSolution {
+    let linearized = linearize_general_linear_lp_problem(problem);
+    solve_lp_external(&linearized, opts)
 }
 
 /// Combined options for `LPSolver` (TS `ExternalSolverOptions & InternalSimplexOptions`).
@@ -1627,6 +2621,7 @@ impl LpSolverOptions {
 ///   LP_SOLVER=scipy:highs-ds        scipy dual simplex HiGHS
 ///   LP_SOLVER=scipy:simplex         legacy scipy simplex
 ///   LP_SOLVER=scipy:interior-point  legacy scipy interior-point
+///   LP_SOLVER=ortools:glop          OR-Tools GLOP linear solver
 /// ```
 #[derive(Clone, Debug, Default)]
 pub struct LPSolver {
@@ -1655,6 +2650,26 @@ impl Transform<LPProblem, LPSolution> for LPSolver {
                 return ext;
             }
             // Fall back to internal if the external bridge failed (no scipy / no python / etc).
+            eprintln!(
+                "[lp.solveLP] external solver '{choice}' unavailable/failed ({}); falling back to internal simplex.",
+                ext.message.as_deref().unwrap_or("unknown")
+            );
+            let mut fallback = run_internal_simplex(&input, &self.opts.internal());
+            let prefix = match &fallback.message {
+                Some(m) => format!("{m} | "),
+                None => String::new(),
+            };
+            fallback.message = Some(format!(
+                "{prefix}external solver unavailable, fell back to internal: {}",
+                ext.message.as_deref().unwrap_or("")
+            ));
+            return fallback;
+        }
+        if choice == "ortools:glop" || choice == "glop" {
+            let ext = ExternalSolver::new(self.opts.external(Some("glop".to_string()))).run(&input);
+            if ext.status != LPStatus::NumericalError {
+                return ext;
+            }
             eprintln!(
                 "[lp.solveLP] external solver '{choice}' unavailable/failed ({}); falling back to internal simplex.",
                 ext.message.as_deref().unwrap_or("unknown")
@@ -2170,6 +3185,97 @@ mod tests {
     }
 
     #[test]
+    fn finds_minimal_lp_infeasibility_conflict() {
+        let p = LPProblem {
+            sense: Sense::Min,
+            c: vec![0.0],
+            a_ub: Some(vec![vec![1.0], vec![-1.0], vec![1.0]]),
+            b_ub: Some(vec![0.0, -1.0, 5.0]),
+            lb: Some(vec![Some(0.0)]),
+            var_names: Some(vec!["x".to_string()]),
+            con_names: Some(vec![
+                "x_at_most_zero".to_string(),
+                "x_at_least_one".to_string(),
+                "redundant_cap".to_string(),
+            ]),
+            ..Default::default()
+        };
+
+        let conflict = find_lp_infeasibility_conflict(&p, &LPConflictOptions::default());
+
+        assert!(conflict.infeasible, "{:?}", conflict.message);
+        assert!(conflict.minimal, "{:?}", conflict.message);
+        assert_eq!(
+            conflict.members,
+            vec![LPConflictMember::UpperRow(0), LPConflictMember::UpperRow(1)]
+        );
+        let subsystem = lp_feasibility_problem_from_conflict_members(&p, &conflict.members);
+        assert_eq!(
+            solve_lp_internal(&subsystem, &opts()).status,
+            LPStatus::Infeasible
+        );
+
+        for idx in 0..conflict.members.len() {
+            let mut trial = conflict.members.clone();
+            trial.remove(idx);
+            let subsystem = lp_feasibility_problem_from_conflict_members(&p, &trial);
+            assert_eq!(
+                solve_lp_internal(&subsystem, &opts()).status,
+                LPStatus::Optimal
+            );
+        }
+    }
+
+    #[test]
+    fn conflict_finder_reports_feasible_models() {
+        let p = LPProblem {
+            sense: Sense::Min,
+            c: vec![0.0],
+            a_ub: Some(vec![vec![1.0]]),
+            b_ub: Some(vec![5.0]),
+            ..Default::default()
+        };
+
+        let conflict = find_lp_infeasibility_conflict(&p, &LPConflictOptions::default());
+
+        assert!(!conflict.infeasible);
+        assert!(!conflict.minimal);
+        assert!(conflict.members.is_empty());
+    }
+
+    #[test]
+    fn feasibility_relaxation_finds_weighted_minimum_violation() {
+        let p = LPProblem {
+            sense: Sense::Min,
+            c: vec![0.0],
+            a_ub: Some(vec![vec![1.0], vec![-1.0]]),
+            b_ub: Some(vec![0.0, -1.0]),
+            lb: Some(vec![None]),
+            ub: Some(vec![None]),
+            var_names: Some(vec!["x".to_string()]),
+            con_names: Some(vec![
+                "x_at_most_zero".to_string(),
+                "x_at_least_one".to_string(),
+            ]),
+            ..Default::default()
+        };
+        let relax = solve_lp_feasibility_relaxation_internal(
+            &p,
+            &LPFeasRelaxOptions {
+                upper_row_penalties: Some(vec![3.0, 1.0]),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(relax.status, LPStatus::Optimal, "{:?}", relax.message);
+        assert!((relax.relaxation_cost - 1.0).abs() < TOL);
+        assert!((relax.x[0] - 0.0).abs() < TOL, "x={:?}", relax.x);
+        assert_eq!(relax.violations.len(), 1);
+        assert_eq!(relax.violations[0].member, LPFeasRelaxMember::UpperRow(1));
+        assert!((relax.violations[0].amount - 1.0).abs() < TOL);
+    }
+
+    #[test]
     fn maximize_box() {
         // max x + y  s.t.  x ≤ 4, y ≤ 3, x,y ≥ 0  ->  7 at (4,3).
         let p = LPProblem {
@@ -2284,6 +3390,70 @@ mod tests {
     }
 
     #[test]
+    fn solves_source_level_lp_range_rows() {
+        let p = GeneralLinearLPProblem {
+            base: LPProblem {
+                sense: Sense::Max,
+                c: vec![3.0, 2.0],
+                a_ub: Some(vec![vec![1.0, 0.0]]),
+                b_ub: Some(vec![10.0]),
+                lb: Some(vec![Some(0.0), Some(0.0)]),
+                ub: Some(vec![Some(10.0), Some(10.0)]),
+                var_names: Some(vec!["x".to_string(), "y".to_string()]),
+                con_names: Some(vec!["x_cap".to_string()]),
+                ..Default::default()
+            },
+            linear_constraints: vec![
+                LPRowConstraint {
+                    coefs: vec![1.0, 2.0],
+                    lower: Some(8.0),
+                    upper: Some(8.0),
+                    name: Some("balance_eq".to_string()),
+                },
+                LPRowConstraint {
+                    coefs: vec![1.0, -1.0],
+                    lower: Some(1.0),
+                    upper: None,
+                    name: Some("dominance_ge".to_string()),
+                },
+                LPRowConstraint {
+                    coefs: vec![1.0, 1.0],
+                    lower: Some(5.0),
+                    upper: Some(7.0),
+                    name: Some("throughput_range".to_string()),
+                },
+            ],
+        };
+        let linearized = linearize_general_linear_lp_problem(&p);
+        assert_eq!(linearized.a_eq.as_ref().unwrap().len(), 1);
+        assert_eq!(linearized.a_ub.as_ref().unwrap().len(), 4);
+        let sol = solve_general_linear_lp_internal(&p, &opts());
+        assert_eq!(sol.status, LPStatus::Optimal, "{sol:?}");
+        assert!((sol.objective - 20.0).abs() < TOL, "{sol:?}");
+        assert!((sol.x[0] - 6.0).abs() < TOL, "{sol:?}");
+        assert!((sol.x[1] - 1.0).abs() < TOL, "{sol:?}");
+    }
+
+    #[test]
+    fn solves_lp_with_objective_offset() {
+        let p = ObjectiveOffsetLPProblem {
+            base: LPProblem {
+                sense: Sense::Max,
+                c: vec![1.0, 1.0],
+                a_ub: Some(vec![vec![1.0, 0.0], vec![0.0, 1.0]]),
+                b_ub: Some(vec![4.0, 3.0]),
+                ..Default::default()
+            },
+            objective_offset: 5.5,
+        };
+        let sol = solve_objective_offset_lp_internal(&p, &opts());
+        assert_eq!(sol.status, LPStatus::Optimal);
+        assert!((sol.objective - 12.5).abs() < TOL, "{sol:?}");
+        assert!((sol.x[0] - 4.0).abs() < TOL, "{sol:?}");
+        assert!((sol.x[1] - 3.0).abs() < TOL, "{sol:?}");
+    }
+
+    #[test]
     fn standard_form_min() {
         // min x + y  s.t.  x + y ≥ 2  (encoded as −x − y ≤ −2), x,y ≥ 0  ->  2.
         // Exercises the b < 0 flip / phase-1 artificial path.
@@ -2299,6 +3469,18 @@ mod tests {
         assert!((sol.objective - 2.0).abs() < TOL, "obj={}", sol.objective);
         assert!(sol.x[0] >= -TOL && sol.x[1] >= -TOL);
         assert!((sol.x[0] + sol.x[1] - 2.0).abs() < TOL);
+    }
+
+    #[test]
+    fn unconstrained_improving_ray_is_unbounded() {
+        let p = LPProblem {
+            sense: Sense::Max,
+            c: vec![1.0],
+            ..Default::default()
+        };
+        let sol = solve_lp_internal(&p, &opts());
+        assert_eq!(sol.status, LPStatus::Unbounded, "{:?}", sol.message);
+        assert!(sol.objective.is_infinite() && sol.objective.is_sign_positive());
     }
 
     #[test]

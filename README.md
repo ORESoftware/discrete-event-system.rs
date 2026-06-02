@@ -45,6 +45,7 @@ RunArtifact { frames, results, summary }
 - [Reports And Artifacts](#reports-and-artifacts)
 - [Running The Included Demos](#running-the-included-demos)
 - [Development](#development)
+- [Module And Build Performance Plan](#module-and-build-performance-plan)
 - [Module Map](#module-map)
 
 ## Install
@@ -393,12 +394,31 @@ than as one monolithic planner:
 | --- | --- |
 | Inventory control and dynamic programming | `inventory_dp`, `multistage_stochastic`, `main_inventory_mdp`, `main_newsvendor` |
 | Forecasting and state estimation | `nonlinear_forecasting_model`, `kalman_filter`, stochastic SDE/control reports |
-| LP and interior-point methods | `lp`, `lp_des`, `des_lp_bridge`; use `LP_SOLVER=internal-ipm` for the native primal-dual IPM or `scipy:highs-ipm` for SciPy HiGHS IPM |
-| Mixed-integer optimization | `milp_bnb`, `ip_mip_des` |
+| LP and interior-point methods | `lp`, `lp_des`, `des_lp_bridge`, `external_linear_cli`; use `LP_SOLVER=internal-ipm` for the native primal-dual IPM or `scipy:highs-ipm` for SciPy HiGHS IPM; local CLI adapters can call installed HiGHS, GLPK, SCIP, CBC, CLP, and optional commercial solvers without vendoring executables; source-level range rows and objective offsets compile to equality/inequality rows; weighted L1 feasibility relaxation identifies minimum-cost row/bound repairs for infeasible models; simplex runs recover dual row prices and reduced costs when the active set is certifiable; infeasibility conflict extraction finds minimal row/bound subsystems for IIS-style diagnostics |
+| Convex QP, MIQP, SOCP, and QCP | `qp`; dense active-set QP returns row, equality, lower-bound, upper-bound, and reduced-gradient KKT certificates; bounded MIQP enumerates integer assignments and solves convex QP subproblems |
+| Constraint programming / CP-SAT | `cp_sat`; finite-domain search covers Boolean logic, tables, automata, circuits/multiple-circuit routing, element constraints, resource scheduling, optional and variable-size intervals, alternative mode intervals, fixed and variable-size 2D packing, variable-demand/capacity cumulative resources, reservoir constraints, solution hints/search starts, fixed-search decision strategies, bounded solution enumeration, assumptions, and infeasible assumption cores |
+| Mixed-integer optimization | `milp_bnb`, `ip_mip_des`, `external_linear_cli`; branch-and-cut covers solution pools, MIP starts, branch priorities, relative/absolute MIP gap limits, infeasibility conflict refinement, weighted feasibility relaxation, lower bounds, ranged rows, indicators, SOS1/SOS2, semi-continuous/semi-integer variables, piecewise-linear rewards, absolute-value, maximum, minimum, binary-logic, L1/Linf norm, exact binary-binary/binary-continuous bounded-product general constraints, exact binary/bounded quadratic objective terms, and lexicographic objectives |
 | Network flow and transportation | `max_flow`, `network_flow`, `traffic_flow`, `stochastic_flow_mdp` |
 | Vehicle routing and routing heuristics | `classical_optimization_models` VRP savings and nearest-neighbor runs |
 | Stochastic optimization and simulation | `stochastic_lp`, `statistical_optimization`, `fel`, `hybrid`, catalogue simulations |
 | Model predictive control and reinforcement learning | `mpc_double_integrator`, `temp_control` MPC, `qlearning_des`, `ppo_des`, `actor_critic_gridworld` |
+
+Solver parity checks live in `validate_optimization_suite`; scale-envelope
+checks live in `validate_optimization_scale`. The suite cross-checks HiGHS,
+GLPK, SCIP, CBC, CLP, OR-Tools GLOP, and OR-Tools CP-SAT when available, and
+keeps optional hooks for commercial CLIs such as Gurobi, CPLEX, Xpress, and
+LINDO. The public `des::general::external_linear_cli` module exposes the same
+local CLI path to library callers while keeping all solver executables out of
+version control; use `probe_external_linear_cli_solver` to distinguish
+not-installed tools from bridge-unsupported tools and ready smoke-tested
+solvers. The scale runner compares native LP/MIP solvers with installed
+open-source engines and writes `out/external/optimization-scale/scale-report.json`:
+
+```sh
+PYTHON_BIN=/path/to/python cargo run --bin validate_optimization_scale
+SCALE_LP_SIZES=8,16,24 SCALE_MIP_SIZES=8,12,16 cargo run --bin validate_optimization_scale
+SCALE_MIP_SOLVERS=highs,cbc,gurobi,cplex cargo run --bin validate_optimization_scale
+```
 
 ### PyDy / OpenMDAO-style coverage
 
@@ -503,6 +523,115 @@ use des_engine::des::service::*;
 use des_engine::des::plugin::*;
 use des_engine::des::streaming::*;
 ```
+
+## Module And Build Performance Plan
+
+The current package is intentionally organized as one public SDK crate,
+`des_engine`, with a deep `des::*` module tree and many demo/validation
+binaries under `src/bin`. Rust modules keep the source tree understandable, but
+they are not strong compilation boundaries. Cargo's main rebuild unit is the
+crate/package, while `rustc` incremental compilation reuses work inside that
+crate where it can.
+
+After `git pull`, `cargo build` evaluates the Cargo dependency graph:
+
+- Unchanged dependency crates are reused from the build cache.
+- Changed crates are rebuilt.
+- Crates that depend on a changed crate are rebuilt as needed.
+- Changes inside this single `des_engine` crate can still cause a broad rebuild
+  of the crate, even when the edit was made in one source module.
+
+For better compile-time isolation, the long-term direction is to keep the
+existing `des_engine::prelude` and `des_engine::sdk` surface stable while
+gradually moving internally coherent areas into a Cargo workspace.
+
+Recommended workspace shape:
+
+```text
+discrete-event-system.rs/
+  Cargo.toml                  # workspace root
+  crates/
+    des-core/                 # shared types, errors, time, ids, JSON value helpers
+    des-model/                # ModelCitizen, RunArtifact, registry, SDK contracts
+    des-fel/                  # future-event-list engine and queueing primitives
+    des-decision/             # MDP/POMDP specs, solvers, rollout, visualization data
+    des-hybrid/               # hybrid block runtime and executive
+    des-studio/               # visual block graph, authoring/runtime cells
+    des-animation/            # frame types, HTML players, reports
+    des-plugin/               # external process/plugin contract
+    des-service/              # service discovery descriptors
+    des-engine/               # facade crate preserving today's public imports
+    des-demos/                # optional demo/validation binaries
+```
+
+The facade crate should re-export the stable SDK modules so embedders can keep
+using:
+
+```rust
+use des_engine::prelude::*;
+use des_engine::des::plugin::*;
+use des_engine::des::streaming::*;
+```
+
+Good crate boundaries for this project:
+
+- Put small, stable, dependency-light primitives in `des-core`.
+- Keep JSON-facing SDK contracts in `des-model` so embedders and model families
+  share one artifact shape.
+- Let each major model family (`fel`, `decision`, `hybrid`, `studio`,
+  `acausal`, `equation`) depend inward on contracts instead of sideways on one
+  another.
+- Keep HTML rendering, reports, and animation output outside the numerical core
+  where practical.
+- Move demo and validation binaries into a separate package once they no longer
+  need private internals.
+- Use feature flags for optional heavy surfaces, especially plugins, HTML
+  rendering, schemas, service integration, or future GPU/back-end adapters.
+
+Things to avoid:
+
+- Splitting every source directory into a crate. Crate boundaries should
+  represent stable APIs and real dependency cuts, not just file organization.
+- Letting the facade crate pull every optional dependency by default.
+- Exposing large generic or macro-heavy internals across crate boundaries unless
+  that is part of the intended public API.
+- Using FFI only for compile speed. FFI is valuable for C/Python/JS/external
+  plugin boundaries, but it adds ABI, linking, `unsafe`, and testing overhead.
+  Rust-to-Rust modularity should use workspace crates first.
+
+Suggested migration order:
+
+1. Measure current build behavior with `cargo build --timings`.
+2. Move dependency-light shared primitives into `des-core`.
+3. Move the first-class model contract into `des-model`.
+4. Move one mostly self-contained family, such as `des-fel` or `des-decision`,
+   and keep compatibility re-exports in `des_engine`.
+5. Move animation/reporting and demo binaries later, after the core crates have
+   settled.
+6. Add CI checks with package-scoped commands such as `cargo test -p des-core`
+   and `cargo test -p des-engine --all-features`.
+
+Day-to-day build guidance:
+
+```sh
+cargo check
+cargo test -p des_engine
+cargo build --timings
+CARGO_INCREMENTAL=1 cargo build
+```
+
+Once the workspace split exists, prefer package-scoped commands while
+developing a narrow area:
+
+```sh
+cargo check -p des-fel
+cargo test -p des-decision
+cargo run -p des-demos --bin main_traffic
+```
+
+If rebuilds are still slow after crate boundaries are in place, consider adding
+`sccache` for shared compiler artifact caching and reviewing dependency
+features to keep default builds lean.
 
 ## Module Map
 

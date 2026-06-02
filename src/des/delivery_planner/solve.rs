@@ -119,6 +119,12 @@ struct ModelBuild {
     travel_minutes: Vec<Vec<f64>>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PinnedStopConstraint {
+    stop_idx: usize,
+    position: usize,
+}
+
 pub fn solve_delivery_planner(req: &DeliveryPlannerRequest) -> DeliveryPlannerResponse {
     solve_delivery_planner_inner(req, true)
 }
@@ -139,14 +145,17 @@ fn solve_delivery_planner_inner(
     let nodes = build_nodes(&req);
     let build = build_ip_model(&req, &nodes);
     let t0 = Instant::now();
-    match position_locked_route(&req, &nodes, &build) {
-        Ok(Some(route)) => {
-            return response_from_route(
+    if req.route_rules.locked_order {
+        return match locked_order_route(&req) {
+            Ok(route) if !route_satisfies_pins(&req, &route) => {
+                error_response("locked stop order violates pinned stop positions".to_string())
+            }
+            Ok(route) => response_from_route(
                 &req,
                 &nodes,
                 &build,
                 route,
-                "position-locked".to_string(),
+                "locked-order".to_string(),
                 "position-locked-route-search".to_string(),
                 false,
                 None,
@@ -159,12 +168,12 @@ fn solve_delivery_planner_inner(
                 build.num_constraints,
                 0.0,
                 vec![DeliverySolverTrace {
-                    node_id: "position-locked".to_string(),
+                    node_id: "locked-order".to_string(),
                     depth: 0,
                     action: "incumbent".to_string(),
                     lp_z: None,
                     reason: Some(
-                        "locked stop rows were fixed while unlocked rows were optimized"
+                        "locked stop order was checked directly against every delivery window"
                             .to_string(),
                     ),
                     fractional: Vec::new(),
@@ -172,11 +181,10 @@ fn solve_delivery_planner_inner(
                 render_animation,
             )
             .unwrap_or_else(|| {
-                error_response("locked stop positions leave no feasible route".to_string())
-            });
-        }
-        Ok(None) => {}
-        Err(err) => return error_response(err),
+                error_response("locked stop order violates one or more time windows".to_string())
+            }),
+            Err(err) => error_response(err),
+        };
     }
     let mip_result = catch_unwind(AssertUnwindSafe(|| {
         solve_ipmip_with_des(
@@ -188,12 +196,15 @@ fn solve_delivery_planner_inner(
                 lp_max_iters: Some(req.solver_lp_max_iters),
                 int_tol: Some(1e-6),
                 branch_rule: Some(BranchRule::MostFractional),
+                branch_priorities: None,
                 node_selection: Some(NodeSelection::BestBound),
                 lp_algorithm: Some(LpRelaxationAlgorithm::Auto),
                 allow_external_solvers: Some(false),
                 max_cut_rounds: Some(3),
                 max_cuts_per_node: Some(16),
                 heuristic_passes: Some(32),
+                mip_gap_rel: None,
+                mip_gap_abs: None,
                 verbose: Some(false),
                 mip_start: None,
             },
@@ -265,6 +276,7 @@ fn validate_request(req: &DeliveryPlannerRequest) -> Result<(), String> {
             return Err(format!("{} has an inverted time window", stop.label));
         }
     }
+    pinned_stop_constraints(req)?;
     Ok(())
 }
 
@@ -302,220 +314,77 @@ fn locked_order_route(req: &DeliveryPlannerRequest) -> Result<Vec<usize>, String
     }
 }
 
-fn position_locked_route(
+fn pinned_stop_constraints(
     req: &DeliveryPlannerRequest,
-    nodes: &[StopNode],
-    build: &ModelBuild,
-) -> Result<Option<Vec<usize>>, String> {
-    if req.route_rules.locked_order {
-        return locked_order_route(req).map(Some);
-    }
-    if req.route_rules.locked_positions.is_empty() {
-        return Ok(None);
-    }
-    let locked_slots = locked_slots(req)?;
-    let route = if req.stops.len() <= 9 {
-        exact_position_locked_route(req, nodes, build, &locked_slots)
-    } else {
-        greedy_position_locked_route(req, nodes, build, &locked_slots)
-    };
-    route
-        .ok_or_else(|| "locked stop positions leave no feasible route".to_string())
-        .map(Some)
-}
-
-fn locked_slots(req: &DeliveryPlannerRequest) -> Result<Vec<Option<usize>>, String> {
-    let mut slots: Vec<Option<usize>> = vec![None; req.stops.len()];
-    let mut seen_stops = HashSet::new();
-    for lock in &req.route_rules.locked_positions {
-        if lock.position >= req.stops.len() {
+) -> Result<Vec<PinnedStopConstraint>, String> {
+    let mut seen_stops: HashSet<String> = HashSet::new();
+    let mut seen_positions: HashSet<usize> = HashSet::new();
+    let mut pins = Vec::new();
+    let stop_count = req.stops.len();
+    for pin in &req.route_rules.pinned_positions {
+        let stop_id = pin.stop_id.trim();
+        if stop_id.is_empty() || pin.position == 0 {
+            continue;
+        }
+        if pin.position > stop_count {
             return Err(format!(
-                "locked position {} is outside the {}-stop route",
-                lock.position + 1,
-                req.stops.len()
+                "pinned stop `{stop_id}` uses position {}, but the route has only {stop_count} stops",
+                pin.position
+            ));
+        }
+        if !seen_stops.insert(stop_id.to_string()) {
+            return Err(format!("stop `{stop_id}` is pinned more than once"));
+        }
+        if !seen_positions.insert(pin.position) {
+            return Err(format!(
+                "more than one stop is pinned to position {}",
+                pin.position
             ));
         }
         let stop_idx = req
             .stops
             .iter()
-            .position(|stop| stop.id == lock.stop_id)
-            .ok_or_else(|| format!("locked position references unknown stop `{}`", lock.stop_id))?;
-        if !seen_stops.insert(stop_idx) {
-            return Err(format!(
-                "{} is locked more than once",
-                req.stops[stop_idx].label
-            ));
-        }
-        if let Some(existing) = slots[lock.position] {
-            return Err(format!(
-                "route position {} locks both {} and {}",
-                lock.position + 1,
-                req.stops[existing].label,
-                req.stops[stop_idx].label
-            ));
-        }
-        slots[lock.position] = Some(stop_idx);
-    }
-    Ok(slots)
-}
-
-fn exact_position_locked_route(
-    req: &DeliveryPlannerRequest,
-    nodes: &[StopNode],
-    build: &ModelBuild,
-    locked_slots: &[Option<usize>],
-) -> Option<Vec<usize>> {
-    let mut best_route = None;
-    let mut best_score = f64::INFINITY;
-    let mut used = vec![false; req.stops.len()];
-    let mut route = Vec::new();
-    dfs_position_locked_route(
-        req,
-        nodes,
-        build,
-        locked_slots,
-        0,
-        req.depart_time as f64,
-        &mut used,
-        &mut route,
-        &mut best_route,
-        &mut best_score,
-    );
-    best_route
-}
-
-#[allow(clippy::too_many_arguments)]
-fn dfs_position_locked_route(
-    req: &DeliveryPlannerRequest,
-    nodes: &[StopNode],
-    build: &ModelBuild,
-    locked_slots: &[Option<usize>],
-    cur_node: usize,
-    clock: f64,
-    used: &mut [bool],
-    route: &mut Vec<usize>,
-    best_route: &mut Option<Vec<usize>>,
-    best_score: &mut f64,
-) {
-    if route.len() == req.stops.len() {
-        if let Some(score) = route_score(req, nodes, build, route) {
-            if score < *best_score {
-                *best_score = score;
-                *best_route = Some(route.clone());
-            }
-        }
-        return;
-    }
-    let position = route.len();
-    if let Some(stop_idx) = locked_slots[position] {
-        if !used[stop_idx] {
-            try_position_locked_step(
-                req,
-                nodes,
-                build,
-                locked_slots,
-                cur_node,
-                clock,
-                stop_idx,
-                used,
-                route,
-                best_route,
-                best_score,
-            );
-        }
-        return;
-    }
-    for stop_idx in 0..req.stops.len() {
-        if used[stop_idx] {
-            continue;
-        }
-        try_position_locked_step(
-            req,
-            nodes,
-            build,
-            locked_slots,
-            cur_node,
-            clock,
+            .position(|stop| stop.id == stop_id)
+            .ok_or_else(|| format!("pinned route references unknown stop `{stop_id}`"))?;
+        pins.push(PinnedStopConstraint {
             stop_idx,
-            used,
-            route,
-            best_route,
-            best_score,
-        );
+            position: pin.position,
+        });
     }
+    Ok(pins)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn try_position_locked_step(
-    req: &DeliveryPlannerRequest,
-    nodes: &[StopNode],
-    build: &ModelBuild,
-    locked_slots: &[Option<usize>],
-    cur_node: usize,
-    clock: f64,
+fn route_satisfies_pins(req: &DeliveryPlannerRequest, route: &[usize]) -> bool {
+    pinned_stop_constraints(req)
+        .map(|pins| route_satisfies_pin_constraints(&pins, route))
+        .unwrap_or(false)
+}
+
+fn route_satisfies_pin_constraints(pins: &[PinnedStopConstraint], route: &[usize]) -> bool {
+    pins.iter()
+        .all(|pin| route.get(pin.position.saturating_sub(1)).copied() == Some(pin.stop_idx))
+}
+
+fn pin_allows_stop_at_position(
+    pins: &[PinnedStopConstraint],
     stop_idx: usize,
-    used: &mut [bool],
-    route: &mut Vec<usize>,
-    best_route: &mut Option<Vec<usize>>,
-    best_score: &mut f64,
-) {
-    let next_node = stop_idx + 1;
-    let stop = &nodes[next_node];
-    let raw_arrival = clock + build.travel_minutes[cur_node][next_node];
-    let arrival = raw_arrival.max(stop.window_start as f64);
-    if arrival > stop.window_end as f64 + 1e-6 {
-        return;
+    position: usize,
+) -> bool {
+    for pin in pins {
+        if pin.position == position && pin.stop_idx != stop_idx {
+            return false;
+        }
+        if pin.stop_idx == stop_idx && pin.position != position {
+            return false;
+        }
     }
-    used[stop_idx] = true;
-    route.push(stop_idx);
-    dfs_position_locked_route(
-        req,
-        nodes,
-        build,
-        locked_slots,
-        next_node,
-        arrival + stop.service_minutes,
-        used,
-        route,
-        best_route,
-        best_score,
-    );
-    route.pop();
-    used[stop_idx] = false;
+    true
 }
 
-fn greedy_position_locked_route(
-    req: &DeliveryPlannerRequest,
-    nodes: &[StopNode],
-    build: &ModelBuild,
-    locked_slots: &[Option<usize>],
-) -> Option<Vec<usize>> {
-    let mut remaining: HashSet<usize> = (0..req.stops.len()).collect();
-    let mut route = Vec::new();
-    let mut cur_node = 0usize;
-    let mut clock = req.depart_time as f64;
-    for &locked in locked_slots.iter().take(req.stops.len()) {
-        let next = match locked {
-            Some(stop_idx) => {
-                if !remaining.contains(&stop_idx) {
-                    return None;
-                }
-                stop_idx
-            }
-            None => pick_greedy_stop(req, nodes, build, cur_node, clock, &remaining)?,
-        };
-        let next_node = next + 1;
-        let arrival = (clock + build.travel_minutes[cur_node][next_node])
-            .max(nodes[next_node].window_start as f64);
-        if arrival > nodes[next_node].window_end as f64 {
-            return None;
-        }
-        remaining.remove(&next);
-        route.push(next);
-        clock = arrival + nodes[next_node].service_minutes;
-        cur_node = next_node;
-    }
-    Some(route)
+fn pinned_stop_at_position(pins: &[PinnedStopConstraint], position: usize) -> Option<usize> {
+    pins.iter()
+        .find(|pin| pin.position == position)
+        .map(|pin| pin.stop_idx)
 }
 
 fn error_response(message: String) -> DeliveryPlannerResponse {
@@ -597,6 +466,8 @@ fn window_edge_penalty_for_arrival(node: &StopNode, arrival: f64) -> f64 {
 
 fn build_ip_model(req: &DeliveryPlannerRequest, nodes: &[StopNode]) -> ModelBuild {
     let n_nodes = nodes.len();
+    let n_customers = n_nodes.saturating_sub(1);
+    let pinned = pinned_stop_constraints(req).unwrap_or_default();
     let mut distance = vec![vec![0.0; n_nodes]; n_nodes];
     let mut travel_minutes = vec![vec![0.0; n_nodes]; n_nodes];
     for i in 0..n_nodes {
@@ -703,6 +574,19 @@ fn build_ip_model(req: &DeliveryPlannerRequest, nodes: &[StopNode]) -> ModelBuil
             var_names.push(format!("edge_end_hard_{}", node));
         }
     }
+    let mut position_index = vec![vec![None; n_customers]; n_nodes];
+    if !pinned.is_empty() {
+        for (customer, slots) in position_index.iter_mut().enumerate().skip(1) {
+            for (slot, idx_slot) in slots.iter_mut().enumerate() {
+                let idx = c.len();
+                *idx_slot = Some(idx);
+                c.push(0.0);
+                integer_vars.push(true);
+                ub.push(1.0);
+                var_names.push(format!("position_{}_{}", customer, slot + 1));
+            }
+        }
+    }
 
     let mut a = Vec::new();
     let mut b = Vec::new();
@@ -759,6 +643,96 @@ fn build_ip_model(req: &DeliveryPlannerRequest, nodes: &[StopNode]) -> ModelBuil
         1.0,
         "depot_in",
     );
+
+    if !pinned.is_empty() {
+        for customer in 1..n_nodes {
+            add_eq_rows(
+                &mut a,
+                &mut b,
+                &mut con_names,
+                var_count,
+                (0..n_customers)
+                    .map(|slot| (position_index[customer][slot].unwrap(), 1.0))
+                    .collect(),
+                1.0,
+                &format!("position_customer_{customer}"),
+            );
+        }
+        for slot in 0..n_customers {
+            add_eq_rows(
+                &mut a,
+                &mut b,
+                &mut con_names,
+                var_count,
+                (1..n_nodes)
+                    .map(|customer| (position_index[customer][slot].unwrap(), 1.0))
+                    .collect(),
+                1.0,
+                &format!("position_slot_{}", slot + 1),
+            );
+        }
+        for customer in 1..n_nodes {
+            add_eq_rows(
+                &mut a,
+                &mut b,
+                &mut con_names,
+                var_count,
+                vec![
+                    (position_index[customer][0].unwrap(), 1.0),
+                    (x_index[0][customer].unwrap(), -1.0),
+                ],
+                0.0,
+                &format!("position_first_{customer}"),
+            );
+            add_eq_rows(
+                &mut a,
+                &mut b,
+                &mut con_names,
+                var_count,
+                vec![
+                    (position_index[customer][n_customers - 1].unwrap(), 1.0),
+                    (x_index[customer][0].unwrap(), -1.0),
+                ],
+                0.0,
+                &format!("position_last_{customer}"),
+            );
+        }
+        for slot in 0..n_customers.saturating_sub(1) {
+            for i in 1..n_nodes {
+                for j in 1..n_nodes {
+                    if i == j {
+                        continue;
+                    }
+                    let mut row = vec![0.0; var_count];
+                    row[position_index[i][slot].unwrap()] = 1.0;
+                    row[position_index[j][slot + 1].unwrap()] = 1.0;
+                    row[x_index[i][j].unwrap()] = -1.0;
+                    add_le_row(
+                        &mut a,
+                        &mut b,
+                        &mut con_names,
+                        row,
+                        1.0,
+                        format!("position_arc_{}_{}_{}", i, j, slot + 1),
+                    );
+                }
+            }
+        }
+        for pin in &pinned {
+            add_eq_rows(
+                &mut a,
+                &mut b,
+                &mut con_names,
+                var_count,
+                vec![(
+                    position_index[pin.stop_idx + 1][pin.position - 1].unwrap(),
+                    1.0,
+                )],
+                1.0,
+                &format!("pinned_{}_{}", pin.stop_idx + 1, pin.position),
+            );
+        }
+    }
 
     for customer in 1..n_nodes {
         let t = t_index[customer].unwrap();
@@ -1012,8 +986,14 @@ fn response_from_route(
     solver_trace: Vec<DeliverySolverTrace>,
     render_animation: bool,
 ) -> Option<DeliveryPlannerResponse> {
+    if !route_satisfies_pins(req, &route) {
+        return None;
+    }
     let itinerary = build_itinerary(req, nodes, build, &route)?;
     let objective_value = objective_score(req.objective_mode, &itinerary);
+    let pinned_count = pinned_stop_constraints(req)
+        .ok()
+        .map_or(0, |pins| pins.len());
     let notes = delivery_notes(
         req.objective_mode,
         &solver_status,
@@ -1021,7 +1001,7 @@ fn response_from_route(
         used_fallback,
         fallback_reason.as_deref(),
         req.route_rules.locked_order,
-        req.route_rules.locked_positions.len(),
+        pinned_count,
         num_variables,
         num_constraints,
         itinerary.total_distance,
@@ -1286,8 +1266,19 @@ fn fallback_response(
             }],
             render_animation,
         )
-        .unwrap_or_else(|| error_response("no route can satisfy these time windows".to_string())),
-        None => error_response("no route can satisfy these time windows".to_string()),
+        .unwrap_or_else(|| error_response(no_feasible_route_message(req))),
+        None => error_response(no_feasible_route_message(req)),
+    }
+}
+
+fn no_feasible_route_message(req: &DeliveryPlannerRequest) -> String {
+    if pinned_stop_constraints(req)
+        .map(|pins| !pins.is_empty())
+        .unwrap_or(false)
+    {
+        "no route can satisfy pinned stop positions and time windows".to_string()
+    } else {
+        "no route can satisfy these time windows".to_string()
     }
 }
 
@@ -1296,6 +1287,7 @@ fn fallback_route(
     nodes: &[StopNode],
     build: &ModelBuild,
 ) -> Option<Vec<usize>> {
+    let pins = pinned_stop_constraints(req).ok()?;
     if req.stops.len() <= 9 {
         let mut best_route = None;
         let mut best_score = f64::INFINITY;
@@ -1309,12 +1301,13 @@ fn fallback_route(
             req.depart_time as f64,
             &mut used,
             &mut route,
+            &pins,
             &mut best_route,
             &mut best_score,
         );
         return best_route;
     }
-    greedy_route(req, nodes, build)
+    greedy_route(req, nodes, build, &pins)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1326,20 +1319,24 @@ fn dfs_route(
     clock: f64,
     used: &mut [bool],
     route: &mut Vec<usize>,
+    pins: &[PinnedStopConstraint],
     best_route: &mut Option<Vec<usize>>,
     best_score: &mut f64,
 ) {
     if route.len() == req.stops.len() {
-        if let Some(score) = route_score(req, nodes, build, route) {
-            if score < *best_score {
-                *best_score = score;
-                *best_route = Some(route.clone());
+        if route_satisfies_pin_constraints(pins, route) {
+            if let Some(score) = route_score(req, nodes, build, route) {
+                if score < *best_score {
+                    *best_score = score;
+                    *best_route = Some(route.clone());
+                }
             }
         }
         return;
     }
+    let position = route.len() + 1;
     for stop_idx in 0..req.stops.len() {
-        if used[stop_idx] {
+        if used[stop_idx] || !pin_allows_stop_at_position(pins, stop_idx, position) {
             continue;
         }
         let next_node = stop_idx + 1;
@@ -1359,6 +1356,7 @@ fn dfs_route(
             arrival + stop.service_minutes,
             used,
             route,
+            pins,
             best_route,
             best_score,
         );
@@ -1373,6 +1371,9 @@ fn route_score(
     build: &ModelBuild,
     route: &[usize],
 ) -> Option<f64> {
+    if !route_satisfies_pins(req, route) {
+        return None;
+    }
     build_itinerary(req, nodes, build, route)
         .map(|itinerary| objective_score(req.objective_mode, &itinerary))
 }
@@ -1430,7 +1431,7 @@ fn delivery_notes(
     used_fallback: bool,
     fallback_reason: Option<&str>,
     locked_order: bool,
-    locked_position_count: usize,
+    pinned_count: usize,
     num_variables: usize,
     num_constraints: usize,
     total_distance: f64,
@@ -1464,9 +1465,11 @@ fn delivery_notes(
                 .to_string(),
         );
     }
-    if locked_position_count > 0 {
+    if pinned_count > 0 {
         notes.push(format!(
-            "{locked_position_count} stop position lock(s) were treated as hard row constraints; unlocked rows remained optimizable."
+            "{pinned_count} pinned stop position{} enforced as hard route constraint{}; unlocked rows remained optimizable.",
+            if pinned_count == 1 { " was" } else { "s were" },
+            if pinned_count == 1 { "" } else { "s" }
         ));
     }
     if used_fallback {
@@ -1487,13 +1490,37 @@ fn greedy_route(
     req: &DeliveryPlannerRequest,
     nodes: &[StopNode],
     build: &ModelBuild,
+    pins: &[PinnedStopConstraint],
 ) -> Option<Vec<usize>> {
     let mut remaining: HashSet<usize> = (0..req.stops.len()).collect();
     let mut route = Vec::new();
     let mut cur_node = 0usize;
     let mut clock = req.depart_time as f64;
     while !remaining.is_empty() {
-        let next = pick_greedy_stop(req, nodes, build, cur_node, clock, &remaining)?;
+        let position = route.len() + 1;
+        let forced = pinned_stop_at_position(pins, position);
+        let candidates = remaining
+            .iter()
+            .copied()
+            .filter(|idx| pin_allows_stop_at_position(pins, *idx, position));
+        let next = if let Some(stop_idx) = forced {
+            remaining.contains(&stop_idx).then_some(stop_idx)?
+        } else {
+            candidates.min_by(|&a, &b| {
+                let score = |idx: usize| {
+                    let node = idx + 1;
+                    let raw_arrival = clock + build.travel_minutes[cur_node][node];
+                    let arrival = raw_arrival.max(nodes[node].window_start as f64);
+                    if arrival > nodes[node].window_end as f64 {
+                        f64::INFINITY
+                    } else {
+                        greedy_leg_score(req.objective_mode, build, nodes, cur_node, node, arrival)
+                            + (nodes[node].window_end as f64 - arrival) * 0.001
+                    }
+                };
+                score(a).total_cmp(&score(b))
+            })?
+        };
         let next_node = next + 1;
         let arrival = (clock + build.travel_minutes[cur_node][next_node])
             .max(nodes[next_node].window_start as f64);
@@ -1505,31 +1532,7 @@ fn greedy_route(
         clock = arrival + nodes[next_node].service_minutes;
         cur_node = next_node;
     }
-    Some(route)
-}
-
-fn pick_greedy_stop(
-    req: &DeliveryPlannerRequest,
-    nodes: &[StopNode],
-    build: &ModelBuild,
-    cur_node: usize,
-    clock: f64,
-    remaining: &HashSet<usize>,
-) -> Option<usize> {
-    remaining.iter().copied().min_by(|&a, &b| {
-        let score = |idx: usize| {
-            let node = idx + 1;
-            let raw_arrival = clock + build.travel_minutes[cur_node][node];
-            let arrival = raw_arrival.max(nodes[node].window_start as f64);
-            if arrival > nodes[node].window_end as f64 {
-                f64::INFINITY
-            } else {
-                greedy_leg_score(req.objective_mode, build, nodes, cur_node, node, arrival)
-                    + (nodes[node].window_end as f64 - arrival) * 0.001
-            }
-        };
-        score(a).total_cmp(&score(b))
-    })
+    route_satisfies_pin_constraints(pins, &route).then_some(route)
 }
 
 fn trace_from_ipmip(
@@ -1887,7 +1890,7 @@ pub fn empty_animation() -> Animation {
 mod tests {
     use super::*;
     use crate::des::delivery_planner::model::{
-        default_delivery_request, DeliveryLockedPosition, DeliveryObjectiveMode,
+        default_delivery_request, DeliveryObjectiveMode, DeliveryPinnedStop,
     };
     use crate::des::general::ip_mip_des::IPMIPStatus;
 
@@ -1951,16 +1954,16 @@ mod tests {
     }
 
     #[test]
-    fn locked_position_fixes_only_that_route_slot() {
+    fn pinned_position_fixes_only_that_route_slot() {
         let mut req = default_delivery_request();
         req.stops.truncate(3);
         for stop in &mut req.stops {
             stop.window_start = 8 * 60;
             stop.window_end = 18 * 60;
         }
-        req.route_rules.locked_positions = vec![DeliveryLockedPosition {
+        req.route_rules.pinned_positions = vec![DeliveryPinnedStop {
             stop_id: "S3".to_string(),
-            position: 1,
+            position: 2,
         }];
 
         let resp = solve_delivery_planner_summary(&req);
@@ -1968,11 +1971,103 @@ mod tests {
         assert!(resp.ok, "{:?}", resp.error);
         assert_eq!(resp.route.len(), 3);
         assert_eq!(resp.route[1], 2);
-        assert_eq!(resp.solver_kind, "position-locked-route-search");
         assert!(resp
             .solver_notes
             .iter()
             .any(|n| n.contains("unlocked rows remained optimizable")));
+    }
+
+    #[test]
+    fn pinned_positions_enforce_first_and_last_without_locking_middle() {
+        let mut req = default_delivery_request();
+        for stop in &mut req.stops {
+            stop.window_start = 8 * 60;
+            stop.window_end = 18 * 60;
+        }
+        req.objective_mode = DeliveryObjectiveMode::WindowCenter;
+        req.route_rules.ordered_stop_ids = vec![
+            "S5".to_string(),
+            "S1".to_string(),
+            "S2".to_string(),
+            "S3".to_string(),
+            "S4".to_string(),
+        ];
+        req.route_rules.pinned_positions = vec![
+            DeliveryPinnedStop {
+                stop_id: "S5".to_string(),
+                position: 1,
+            },
+            DeliveryPinnedStop {
+                stop_id: "S4".to_string(),
+                position: 5,
+            },
+        ];
+
+        let resp = solve_delivery_planner_summary(&req);
+
+        assert!(resp.ok, "{:?}", resp.error);
+        assert_eq!(resp.route.first().copied(), Some(4));
+        assert_eq!(resp.route.last().copied(), Some(3));
+        assert!(resp
+            .solver_notes
+            .iter()
+            .any(|n| n.contains("pinned stop positions were enforced")));
+    }
+
+    #[test]
+    fn pinned_positions_are_not_relaxed_when_windows_conflict() {
+        let mut req = default_delivery_request();
+        req.route_rules.pinned_positions = vec![
+            DeliveryPinnedStop {
+                stop_id: "S5".to_string(),
+                position: 1,
+            },
+            DeliveryPinnedStop {
+                stop_id: "S4".to_string(),
+                position: req.stops.len(),
+            },
+        ];
+
+        let resp = solve_delivery_planner_summary(&req);
+
+        assert!(!resp.ok, "route should not relax pins: {:?}", resp.route);
+        assert!(resp
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("time windows"));
+    }
+
+    #[test]
+    fn customer_c_cannot_be_first_in_default_manifest_for_any_objective() {
+        for mode in [
+            DeliveryObjectiveMode::Distance,
+            DeliveryObjectiveMode::TravelTime,
+            DeliveryObjectiveMode::WindowCenter,
+        ] {
+            let mut req = default_delivery_request();
+            req.objective_mode = mode;
+            req.route_rules.ordered_stop_ids = vec![
+                "S3".to_string(),
+                "S1".to_string(),
+                "S2".to_string(),
+                "S4".to_string(),
+                "S5".to_string(),
+            ];
+            req.route_rules.pinned_positions = vec![DeliveryPinnedStop {
+                stop_id: "S3".to_string(),
+                position: 1,
+            }];
+
+            let resp = solve_delivery_planner_summary(&req);
+
+            assert!(!resp.ok, "{mode:?} should reject C first: {:?}", resp.route);
+            let err = resp.error.as_deref().unwrap_or_default();
+            assert!(
+                err.contains("pinned stop positions") && err.contains("time windows"),
+                "{mode:?} returned unclear error: {err}"
+            );
+        }
     }
 
     #[test]

@@ -46,6 +46,8 @@ pub mod validate_milp_bnb;
 pub mod validate_neural_network;
 pub mod validate_newsvendor;
 pub mod validate_optimization_as_des;
+pub mod validate_optimization_scale;
+pub mod validate_optimization_suite;
 pub mod validate_references;
 pub mod validate_shortest_path;
 pub mod validate_simulated_annealing;

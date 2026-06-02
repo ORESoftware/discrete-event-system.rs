@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Soccer Simulation</title>
+<style>
+  :root {
+    --bg: #eef1f4;
+    --ink: #172026;
+    --muted: #64717b;
+    --line: #cad2d8;
+    --panel: #ffffff;
+    --home: #1f6feb;
+    --away: #d64545;
+    --official: #111827;
+    --field: #238547;
+    --field2: #2f9b57;
+    --gold: #c58a13;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    color: var(--ink);
+    background: var(--bg);
+  }
+  .app {
+    min-height: 100vh;
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+  header {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: center;
+    gap: 16px;
+    padding: 12px 18px;
+    border-bottom: 1px solid var(--line);
+    background: #f8fafb;
+  }
+  h1 {
+    margin: 0;
+    font-size: 18px;
+    line-height: 1.2;
+    letter-spacing: 0;
+  }
+  .score {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+  }
+  .score span {
+    display: inline-flex;
+    align-items: center;
+    min-width: 34px;
+    justify-content: center;
+    padding: 4px 8px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: #fff;
+  }
+  .main {
+    min-height: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 320px;
+  }
+  .stage {
+    min-height: 0;
+    padding: 16px;
+  }
+  canvas {
+    width: 100%;
+    height: 100%;
+    min-height: 520px;
+    display: block;
+    background: var(--field);
+    border: 1px solid #126233;
+    border-radius: 6px;
+  }
+  aside {
+    border-left: 1px solid var(--line);
+    background: var(--panel);
+    padding: 14px;
+    overflow: auto;
+  }
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 10px;
+    flex-wrap: wrap;
+  }
+  button, select {
+    min-height: 32px;
+    border: 1px solid var(--line);
+    background: #fff;
+    color: var(--ink);
+    border-radius: 6px;
+    font-size: 13px;
+  }
+  button {
+    min-width: 38px;
+    padding: 0 10px;
+    cursor: pointer;
+  }
+  button:hover { background: #f0f4f7; }
+  select { padding: 0 8px; }
+  input[type="range"] {
+    width: 100%;
+    accent-color: var(--home);
+  }
+  .metric {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 8px;
+    padding: 7px 0;
+    border-bottom: 1px solid #eef1f4;
+    font-size: 13px;
+  }
+  .metric b { font-variant-numeric: tabular-nums; }
+  .section {
+    margin: 14px 0 6px;
+    font-size: 12px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: .04em;
+  }
+  .events {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    font-size: 12px;
+  }
+  .events li {
+    padding: 6px 0;
+    border-bottom: 1px solid #eef1f4;
+  }
+  .slot {
+    display: grid;
+    grid-template-columns: 52px 1fr;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 8px;
+    font-size: 12px;
+  }
+  .slot label { color: var(--muted); }
+  .legend {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex-wrap: wrap;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .swatch {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    display: inline-block;
+    margin-right: 4px;
+  }
+  @media (max-width: 860px) {
+    header { grid-template-columns: 1fr; }
+    .main { grid-template-columns: 1fr; }
+    aside { border-left: 0; border-top: 1px solid var(--line); }
+    canvas { min-height: 460px; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>Soccer Simulation</h1>
+    <div class="score">
+      <span id="homeScore">0</span>
+      <strong id="clock">0:00.0</strong>
+      <span id="awayScore">0</span>
+    </div>
+  </header>
+  <div class="main">
+    <div class="stage"><canvas id="pitch" width="1280" height="820"></canvas></div>
+    <aside>
+      <div class="row">
+        <button id="play">Play</button>
+        <button id="prev">-1</button>
+        <button id="next">+1</button>
+        <select id="speed">
+          <option value="0.5">0.5x</option>
+          <option value="1" selected>1x</option>
+          <option value="2">2x</option>
+          <option value="4">4x</option>
+        </select>
+      </div>
+      <input id="scrub" type="range" min="0" max="0" value="0">
+      <div class="section">Match</div>
+      <div class="metric"><span>Phase</span><b id="phase">Kickoff</b></div>
+      <div class="metric"><span>Home Brain</span><b id="homeBrain">P0.00 R0.00</b></div>
+      <div class="metric"><span>Away Brain</span><b id="awayBrain">P0.00 R0.00</b></div>
+      <div class="metric"><span>Shots</span><b id="shots">0 - 0</b></div>
+      <div class="metric"><span>On Target</span><b id="onTarget">0 - 0</b></div>
+      <div class="metric"><span>Saves</span><b id="saves">0 - 0</b></div>
+      <div class="metric"><span>Passes</span><b id="passes">0 / 0</b></div>
+      <div class="metric"><span>Recoveries</span><b id="recoveries">0 - 0</b></div>
+      <div class="metric"><span>Offside</span><b id="offsides">0 - 0</b></div>
+      <div class="metric"><span>Restarts</span><b id="restarts">0 - 0</b></div>
+      <div class="metric"><span>Fouls</span><b id="fouls">0 - 0</b></div>
+      <div class="metric"><span>Ticks</span><b id="ticks">0</b></div>
+      <div class="section">Controller Slots</div>
+      <div id="slots"></div>
+      <div class="row">
+        <button id="capture">Capture</button>
+        <button id="pass">Pass</button>
+        <button id="shoot">Shoot</button>
+      </div>
+      <div class="legend">
+        <span><i class="swatch" style="background:var(--home)"></i>Home</span>
+        <span><i class="swatch" style="background:var(--away)"></i>Away</span>
+        <span><i class="swatch" style="background:var(--official)"></i>Official</span>
+        <span><i class="swatch" style="background:var(--gold)"></i>Ball</span>
+      </div>
+      <div class="section">Events</div>
+      <ul class="events" id="events"></ul>
+    </aside>
+  </div>
+</div>
+<script>
+const trace = __SOCCER_TRACE__;
+const canvas = document.getElementById("pitch");
+const ctx = canvas.getContext("2d");
+const homeScore = document.getElementById("homeScore");
+const awayScore = document.getElementById("awayScore");
+const clock = document.getElementById("clock");
+const phase = document.getElementById("phase");
+const homeBrain = document.getElementById("homeBrain");
+const awayBrain = document.getElementById("awayBrain");
+const shots = document.getElementById("shots");
+const onTarget = document.getElementById("onTarget");
+const saves = document.getElementById("saves");
+const passes = document.getElementById("passes");
+const recoveries = document.getElementById("recoveries");
+const offsides = document.getElementById("offsides");
+const restarts = document.getElementById("restarts");
+const fouls = document.getElementById("fouls");
+const ticks = document.getElementById("ticks");
+const scrub = document.getElementById("scrub");
+const play = document.getElementById("play");
+const speed = document.getElementById("speed");
+const events = document.getElementById("events");
+const slots = document.getElementById("slots");
+const keys = new Set();
+let frameIndex = 0;
+let playing = false;
+let lastTs = 0;
+let inputSeq = 0;
+let activeSlot = 0;
+window.__humanInputQueue = [];
+window.dispatchHumanInput = (frame) => {
+  window.__humanInputQueue.push(frame);
+  if (window.__humanInputQueue.length > 64) window.__humanInputQueue.shift();
+};
+
+function phaseLabel(v) {
+  return String(v || "").replace(/([a-z])([A-Z])/g, "$1 $2");
+}
+function directiveLabel(d) {
+  if (!d) return "P0.00 R0.00";
+  return `P${Number(d.pressIntensity ?? 0).toFixed(2)} R${Number(d.riskTolerance ?? 0).toFixed(2)}`;
+}
+function fmtClock(s) {
+  const m = Math.floor(s / 60);
+  const sec = (s - m * 60).toFixed(1).padStart(4, "0");
+  return `${m}:${sec}`;
+}
+function pitchRect() {
+  const pad = 34;
+  const w = canvas.width - pad * 2;
+  const h = canvas.height - pad * 2;
+  const fieldAspect = trace.config.fieldWidthYards / trace.config.fieldLengthYards;
+  let drawH = h;
+  let drawW = drawH * fieldAspect;
+  if (drawW > w) {
+    drawW = w;
+    drawH = drawW / fieldAspect;
+  }
+  return {
+    x: (canvas.width - drawW) / 2,
+    y: (canvas.height - drawH) / 2,
+    w: drawW,
+    h: drawH
+  };
+}
+function mapPoint(p, r) {
+  return {
+    x: r.x + p.x / trace.config.fieldWidthYards * r.w,
+    y: r.y + (1 - p.y / trace.config.fieldLengthYards) * r.h
+  };
+}
+function drawPitch(r) {
+  ctx.fillStyle = "#238547";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  for (let i = 0; i < 8; i++) {
+    ctx.fillStyle = i % 2 ? "#2f9b57" : "#238547";
+    ctx.fillRect(r.x, r.y + (r.h / 8) * i, r.w, r.h / 8);
+  }
+  ctx.strokeStyle = "rgba(255,255,255,.88)";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(r.x, r.y, r.w, r.h);
+  ctx.beginPath();
+  ctx.moveTo(r.x, r.y + r.h / 2);
+  ctx.lineTo(r.x + r.w, r.y + r.h / 2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(r.x + r.w / 2, r.y + r.h / 2, r.h * 0.085, 0, Math.PI * 2);
+  ctx.stroke();
+  const boxW = r.w * 0.44;
+  const boxH = r.h * 0.14;
+  ctx.strokeRect(r.x + (r.w - boxW) / 2, r.y, boxW, boxH);
+  ctx.strokeRect(r.x + (r.w - boxW) / 2, r.y + r.h - boxH, boxW, boxH);
+}
+function drawPlayer(p, r) {
+  const pt = mapPoint(p.position, r);
+  const color = p.team === "Home" ? "#1f6feb" : "#d64545";
+  ctx.beginPath();
+  ctx.arc(pt.x, pt.y, 12, 0, Math.PI * 2);
+  ctx.fillStyle = color;
+  ctx.fill();
+  ctx.lineWidth = p.controllerSlot === activeSlot ? 4 : 1.5;
+  ctx.strokeStyle = p.controllerSlot === activeSlot ? "#f6c944" : "rgba(255,255,255,.9)";
+  ctx.stroke();
+  ctx.fillStyle = "#fff";
+  ctx.font = "700 10px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(String(p.shirt), pt.x, pt.y);
+}
+function drawOfficial(o, r) {
+  const pt = mapPoint(o.position, r);
+  ctx.beginPath();
+  ctx.arc(pt.x, pt.y, 8, 0, Math.PI * 2);
+  ctx.fillStyle = "#111827";
+  ctx.fill();
+  ctx.strokeStyle = "#fff";
+  ctx.lineWidth = 1;
+  ctx.stroke();
+}
+function drawBall(ball, r) {
+  const pt = mapPoint(ball.position, r);
+  ctx.beginPath();
+  ctx.arc(pt.x, pt.y, 6.5, 0, Math.PI * 2);
+  ctx.fillStyle = "#c58a13";
+  ctx.fill();
+  ctx.strokeStyle = "#4b3306";
+  ctx.lineWidth = 1;
+  ctx.stroke();
+}
+function render() {
+  const f = trace.frames[frameIndex];
+  const r = pitchRect();
+  drawPitch(r);
+  for (const o of f.officials) drawOfficial(o, r);
+  for (const p of f.players) drawPlayer(p, r);
+  drawBall(f.ball, r);
+  homeScore.textContent = f.scoreHome;
+  awayScore.textContent = f.scoreAway;
+  clock.textContent = fmtClock(f.clockSeconds);
+  phase.textContent = phaseLabel(f.phase);
+  homeBrain.textContent = directiveLabel(f.homeDirective);
+  awayBrain.textContent = directiveLabel(f.awayDirective);
+  ticks.textContent = `${f.tick} / ${trace.summary.ticks}`;
+  scrub.value = frameIndex;
+}
+function updateMetrics() {
+  const s = trace.summary.stats;
+  shots.textContent = `${s.shotsHome} - ${s.shotsAway}`;
+  onTarget.textContent = `${s.shotsOnTargetHome ?? 0} - ${s.shotsOnTargetAway ?? 0}`;
+  saves.textContent = `${s.savesHome ?? 0} - ${s.savesAway ?? 0}`;
+  passes.textContent = `${s.passesCompletedHome + s.passesCompletedAway} / ${s.passesAttemptedHome + s.passesAttemptedAway}`;
+  recoveries.textContent = `${s.looseBallRecoveriesHome ?? 0} - ${s.looseBallRecoveriesAway ?? 0}`;
+  offsides.textContent = `${s.offsidesHome ?? 0} - ${s.offsidesAway ?? 0}`;
+  const homeRestarts = (s.throwInsHome ?? 0) + (s.goalKicksHome ?? 0) + (s.cornerKicksHome ?? 0) + (s.freeKicksHome ?? 0);
+  const awayRestarts = (s.throwInsAway ?? 0) + (s.goalKicksAway ?? 0) + (s.cornerKicksAway ?? 0) + (s.freeKicksAway ?? 0);
+  restarts.textContent = `${homeRestarts} - ${awayRestarts}`;
+  fouls.textContent = `${s.foulsHome ?? 0} - ${s.foulsAway ?? 0}`;
+  events.innerHTML = trace.events.slice(-12).reverse().map(e => `<li>${fmtClock(e.clockSeconds)} ${e.description}</li>`).join("");
+}
+function tick(ts) {
+  if (!lastTs) lastTs = ts;
+  const elapsed = ts - lastTs;
+  const fps = 10 * Number(speed.value);
+  if (playing && elapsed > 1000 / fps) {
+    frameIndex = Math.min(trace.frames.length - 1, frameIndex + 1);
+    if (frameIndex >= trace.frames.length - 1) playing = false;
+    play.textContent = playing ? "Pause" : "Play";
+    lastTs = ts;
+    render();
+  }
+  requestAnimationFrame(tick);
+}
+function selectedPlayer(slot) {
+  const sel = document.getElementById(`slot-${slot}`);
+  return sel ? Number(sel.value) : null;
+}
+function pushInput(pass = false, shoot = false) {
+  const axis = {x: 0, y: 0};
+  if (keys.has("ArrowLeft") || keys.has("KeyA")) axis.x -= 1;
+  if (keys.has("ArrowRight") || keys.has("KeyD")) axis.x += 1;
+  if (keys.has("ArrowUp") || keys.has("KeyW")) axis.y += 1;
+  if (keys.has("ArrowDown") || keys.has("KeyS")) axis.y -= 1;
+  window.dispatchHumanInput({
+    controllerSlot: activeSlot,
+    playerId: selectedPlayer(activeSlot),
+    seq: ++inputSeq,
+    axis,
+    sprint: keys.has("ShiftLeft") || keys.has("ShiftRight"),
+    pass,
+    shoot,
+    targetPlayer: null
+  });
+}
+function buildSlots() {
+  const players = trace.frames[0].players.filter(p => p.team === "Home");
+  slots.innerHTML = "";
+  for (let i = 0; i < trace.config.maxHumanPlayers; i++) {
+    const row = document.createElement("div");
+    row.className = "slot";
+    const label = document.createElement("label");
+    label.textContent = `Slot ${i + 1}`;
+    const select = document.createElement("select");
+    select.id = `slot-${i}`;
+    for (const p of players) {
+      const opt = document.createElement("option");
+      opt.value = p.id;
+      opt.textContent = `${p.shirt} ${p.name}`;
+      if (p.controllerSlot === i) opt.selected = true;
+      select.appendChild(opt);
+    }
+    select.addEventListener("focus", () => activeSlot = i);
+    select.addEventListener("change", () => { activeSlot = i; render(); });
+    row.append(label, select);
+    slots.appendChild(row);
+  }
+}
+scrub.max = Math.max(0, trace.frames.length - 1);
+scrub.addEventListener("input", () => { frameIndex = Number(scrub.value); render(); });
+play.addEventListener("click", () => {
+  playing = !playing;
+  play.textContent = playing ? "Pause" : "Play";
+});
+document.getElementById("prev").addEventListener("click", () => {
+  frameIndex = Math.max(0, frameIndex - 1);
+  render();
+});
+document.getElementById("next").addEventListener("click", () => {
+  frameIndex = Math.min(trace.frames.length - 1, frameIndex + 1);
+  render();
+});
+document.getElementById("capture").addEventListener("click", () => pushInput(false, false));
+document.getElementById("pass").addEventListener("click", () => pushInput(true, false));
+document.getElementById("shoot").addEventListener("click", () => pushInput(false, true));
+window.addEventListener("keydown", e => {
+  keys.add(e.code);
+  if (["ArrowLeft","ArrowRight","ArrowUp","ArrowDown","KeyW","KeyA","KeyS","KeyD","ShiftLeft","ShiftRight"].includes(e.code)) {
+    e.preventDefault();
+    pushInput(false, false);
+  }
+});
+window.addEventListener("keyup", e => {
+  keys.delete(e.code);
+  pushInput(false, false);
+});
+buildSlots();
+updateMetrics();
+render();
+requestAnimationFrame(tick);
+</script>
+</body>
+</html>

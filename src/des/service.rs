@@ -58,6 +58,15 @@ pub const REL_SERVICE_DESC: &str = "service-desc";
 /// First-party discovery header naming the machine-readable docs location.
 pub const DD_API_DOCS_HEADER: &str = "dd-server-api-docs";
 
+/// Generated workbench for URL-inspired music rendering.
+pub const MUSIC_URL_SEED_WORKBENCH_ROUTE: &str = "/music/url-source-inputs.html";
+/// Machine-readable contract for the URL-inspired music render endpoint.
+pub const MUSIC_URL_SEED_CONTRACT_ROUTE: &str = "/music/url-source-contract.json";
+/// Multipart endpoint that accepts URL-source form fields and renders a WAV.
+pub const MUSIC_URL_SEED_ROUTE: &str = "/music/sample-seed";
+/// Endpoint URL used by the generated workbench when served from `/music/`.
+pub const MUSIC_URL_SEED_WORKBENCH_ENDPOINT: &str = "sample-seed";
+
 // =============================================================================
 // Descriptor value types (the JSON contract).
 // =============================================================================
@@ -289,6 +298,14 @@ impl ServiceBuilder {
         }
     }
 
+    /// Construct a builder with the engine's standard built-in extensions
+    /// already registered.
+    pub fn with_builtin_extensions(info: ServiceInfo) -> Result<Self, ServiceError> {
+        let mut builder = Self::new(info);
+        builder.register_builtin_extensions()?;
+        Ok(builder)
+    }
+
     /// Add one of the service's own endpoints (not contributed by a plugin).
     pub fn endpoint(
         &mut self,
@@ -312,6 +329,14 @@ impl ServiceBuilder {
         self.extension_names.push(name);
         self.extensions.push(ext);
         Ok(())
+    }
+
+    /// Register the built-in extensions every embedding server should normally
+    /// advertise: the simulation catalogue plus URL-inspired music generation.
+    pub fn register_builtin_extensions(&mut self) -> Result<&mut Self, ServiceError> {
+        self.register(Box::new(EngineCatalogExtension))?;
+        self.register(Box::new(MusicUrlSeedExtension))?;
+        Ok(self)
     }
 
     /// Aggregate core endpoints, every extension's contributions, and the
@@ -405,6 +430,52 @@ impl DesExtension for EngineCatalogExtension {
                 provided_by: "des-engine-catalogue".to_string(),
             })
             .collect()
+    }
+}
+
+/// Built-in extension that advertises the URL-inspired music workbench and
+/// render endpoint. Embedding servers still mount the actual handlers/static
+/// artifacts, but can use this descriptor contribution as the shared contract.
+pub struct MusicUrlSeedExtension;
+
+impl DesExtension for MusicUrlSeedExtension {
+    fn name(&self) -> &str {
+        "des-music-url-seed"
+    }
+
+    fn version(&self) -> &str {
+        env!("CARGO_PKG_VERSION")
+    }
+
+    fn endpoints(&self) -> Vec<EndpointDoc> {
+        vec![
+            EndpointDoc::new(
+                "GET",
+                MUSIC_URL_SEED_WORKBENCH_ROUTE,
+                "HTML workbench with YouTube, Facebook, Instagram, S3, CloudFront, Cloudflare, static asset, and direct audio/media URL fields.",
+                EndpointKind::Service,
+            ),
+            EndpointDoc::new(
+                "GET",
+                MUSIC_URL_SEED_CONTRACT_ROUTE,
+                "Machine-readable request/response contract for URL-inspired music rendering.",
+                EndpointKind::Service,
+            ),
+            EndpointDoc::new(
+                "POST",
+                MUSIC_URL_SEED_ROUTE,
+                "Accepts public URL-source form fields and renders a new URL-inspired WAV.",
+                EndpointKind::Action,
+            ),
+        ]
+    }
+
+    fn capabilities(&self) -> Vec<Capability> {
+        vec![Capability {
+            name: "music_url_seed_generation".to_string(),
+            description: "Generate new music from public YouTube, Facebook, Instagram, S3, CloudFront, Cloudflare, static asset, or direct audio/media URLs.".to_string(),
+            provided_by: "des-music-url-seed".to_string(),
+        }]
     }
 }
 
@@ -506,6 +577,83 @@ mod tests {
             .capabilities
             .iter()
             .any(|c| c.name == "main_delivery_planner"));
+    }
+
+    #[test]
+    fn music_url_seed_extension_advertises_workbench_contract_and_render_endpoint() {
+        let mut b = ServiceBuilder::new(info());
+        b.register(Box::new(MusicUrlSeedExtension)).unwrap();
+        let d = b.build();
+
+        let workbench = d
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.path == MUSIC_URL_SEED_WORKBENCH_ROUTE)
+            .expect("workbench route should be advertised");
+        assert_eq!(workbench.method, "GET");
+        assert_eq!(workbench.kind, EndpointKind::Service);
+        assert_eq!(workbench.provided_by.as_deref(), Some("des-music-url-seed"));
+        assert!(workbench.description.contains("YouTube"));
+        assert!(workbench.description.contains("Cloudflare"));
+
+        let contract = d
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.path == MUSIC_URL_SEED_CONTRACT_ROUTE)
+            .expect("contract route should be advertised");
+        assert_eq!(contract.method, "GET");
+
+        let render = d
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.path == MUSIC_URL_SEED_ROUTE)
+            .expect("render route should be advertised");
+        assert_eq!(render.method, "POST");
+        assert_eq!(render.kind, EndpointKind::Action);
+        assert!(render.description.contains("public URL-source"));
+
+        assert!(d
+            .capabilities
+            .iter()
+            .any(|capability| capability.name == "music_url_seed_generation"
+                && capability.description.contains("Instagram")
+                && capability.description.contains("direct audio/media")));
+        assert_eq!(d.extensions[0].name, "des-music-url-seed");
+        assert_eq!(d.extensions[0].endpoint_count, 3);
+        assert_eq!(d.extensions[0].capability_count, 1);
+    }
+
+    #[test]
+    fn builtin_extensions_include_catalogue_and_music_url_seed_flow() {
+        let d = ServiceBuilder::with_builtin_extensions(info())
+            .expect("built-in extensions should register")
+            .build();
+
+        assert!(d.capabilities.iter().any(|c| c.name == "main_build_site"));
+        assert!(d
+            .capabilities
+            .iter()
+            .any(|c| c.name == "music_url_seed_generation"));
+        assert!(d
+            .endpoints
+            .iter()
+            .any(|endpoint| endpoint.path == MUSIC_URL_SEED_WORKBENCH_ROUTE));
+        assert!(d
+            .endpoints
+            .iter()
+            .any(|endpoint| endpoint.path == MUSIC_URL_SEED_CONTRACT_ROUTE));
+        assert!(d
+            .endpoints
+            .iter()
+            .any(|endpoint| endpoint.path == MUSIC_URL_SEED_ROUTE && endpoint.method == "POST"));
+        assert!(d
+            .extensions
+            .iter()
+            .any(|extension| extension.name == "des-engine-catalogue"));
+        assert!(d
+            .extensions
+            .iter()
+            .any(|extension| extension.name == "des-music-url-seed"));
     }
 
     #[test]

@@ -1726,7 +1726,7 @@ impl MathProgram {
                     demands,
                     capacity,
                     ..
-                } => self.validate_cumulative_args(intervals, demands, *capacity)?,
+                } => self.validate_cumulative_args(intervals, demands, capacity)?,
                 GeneralConstraint::Reservoir {
                     events,
                     min_level,
@@ -2845,8 +2845,8 @@ impl MathProgram {
     fn validate_cumulative_args(
         &self,
         intervals: &[IntervalTerm],
-        demands: &[f64],
-        capacity: f64,
+        demands: &[AffineTerm],
+        capacity: &AffineTerm,
     ) -> Result<(), MathProgramError> {
         self.validate_interval_args("cumulative", intervals)?;
         if intervals.len() != demands.len() {
@@ -2856,17 +2856,11 @@ impl MathProgram {
                 demands.len()
             )));
         }
-        if !capacity.is_finite() || capacity < 0.0 {
-            return Err(MathProgramError::InvalidBound(format!(
-                "cumulative capacity must be finite and non-negative, got {capacity}"
-            )));
+        self.validate_nonnegative_bounded_affine("cumulative capacity", capacity)?;
+        for (i, demand) in demands.iter().enumerate() {
+            self.validate_nonnegative_bounded_affine(&format!("cumulative demand {i}"), demand)?;
         }
-        for (i, (&demand, interval)) in demands.iter().zip(intervals).enumerate() {
-            if !demand.is_finite() || demand < 0.0 {
-                return Err(MathProgramError::InvalidBound(format!(
-                    "cumulative demand {i} must be finite and non-negative, got {demand}"
-                )));
-            }
+        for (i, interval) in intervals.iter().enumerate() {
             if !is_integer_time_var(&self.variables[interval.start_var])
                 || !is_integer_time_var(&self.variables[interval.end_var])
             {
@@ -2894,6 +2888,31 @@ impl MathProgram {
                     ))
                 })?;
             }
+        }
+        Ok(())
+    }
+
+    fn validate_nonnegative_bounded_affine(
+        &self,
+        kind: &str,
+        term: &AffineTerm,
+    ) -> Result<(), MathProgramError> {
+        validate_coeffs(self.variables.len(), &term.coeffs)?;
+        if !term.constant.is_finite() {
+            return Err(MathProgramError::InvalidBound(format!(
+                "{kind} constant must be finite, got {}",
+                term.constant
+            )));
+        }
+        let (lower, _upper) = affine_bounds(self, term).ok_or_else(|| {
+            MathProgramError::UnboundedBigM(format!(
+                "{kind} requires finite bounds for every referenced variable"
+            ))
+        })?;
+        if lower < -1e-9 {
+            return Err(MathProgramError::InvalidBound(format!(
+                "{kind} can be negative over its variable bounds; lower bound is {lower}"
+            )));
         }
         Ok(())
     }
@@ -5471,6 +5490,7 @@ fn from_ipmip_status(status: IPMIPStatus) -> MathProgramStatus {
         IPMIPStatus::Infeasible => MathProgramStatus::Infeasible,
         IPMIPStatus::Unbounded => MathProgramStatus::Unbounded,
         IPMIPStatus::MaxNodes | IPMIPStatus::TickLimit => MathProgramStatus::NodeLimit,
+        IPMIPStatus::GapLimit => MathProgramStatus::IterLimit,
         IPMIPStatus::TimeLimit => MathProgramStatus::TimeLimit,
     }
 }
@@ -6628,7 +6648,7 @@ fn add_general_constraint_rows(
             name,
             intervals,
             demands,
-            *capacity,
+            capacity,
         )?,
         GeneralConstraint::Reservoir {
             name,
@@ -8407,6 +8427,61 @@ fn add_no_overlap_2d_rows(
     Ok(())
 }
 
+struct CumulativeChoice {
+    start: i64,
+    duration: i64,
+    load_terms: Vec<(usize, f64)>,
+}
+
+fn add_binary_times_canonical_var_rows(
+    names: &mut Vec<String>,
+    integer_vars: &mut Vec<bool>,
+    ub: &mut Vec<f64>,
+    rows: &mut Vec<SparseRow>,
+    name: String,
+    binary_var: usize,
+    value_var: usize,
+) -> Result<usize, MathProgramError> {
+    let upper = ub.get(value_var).copied().ok_or_else(|| {
+        MathProgramError::BadIndex(format!(
+            "{name} references missing canonical variable {value_var}"
+        ))
+    })?;
+    if !upper.is_finite() {
+        return Err(MathProgramError::UnboundedBigM(format!(
+            "{name} requires a finite upper bound for canonical variable {value_var}"
+        )));
+    }
+    let product = push_canonical_var(
+        &name,
+        integer_vars.get(value_var).copied().ok_or_else(|| {
+            MathProgramError::BadIndex(format!(
+                "{name} references missing canonical variable {value_var}"
+            ))
+        })?,
+        upper,
+        names,
+        integer_vars,
+        ub,
+    );
+    rows.push(SparseRow {
+        coeffs: vec![(product, 1.0), (value_var, -1.0)],
+        rhs: 0.0,
+        name: format!("{name}__upper_value"),
+    });
+    rows.push(SparseRow {
+        coeffs: vec![(product, 1.0), (binary_var, -upper)],
+        rhs: 0.0,
+        name: format!("{name}__upper_active"),
+    });
+    rows.push(SparseRow {
+        coeffs: vec![(value_var, 1.0), (product, -1.0), (binary_var, upper)],
+        rhs: upper,
+        name: format!("{name}__lower_active"),
+    });
+    Ok(product)
+}
+
 fn add_cumulative_rows(
     program: &MathProgram,
     names: &mut Vec<String>,
@@ -8416,8 +8491,8 @@ fn add_cumulative_rows(
     expansions: &[LinearExpansion],
     name: &str,
     intervals: &[IntervalTerm],
-    demands: &[f64],
-    capacity: f64,
+    demands: &[AffineTerm],
+    capacity: &AffineTerm,
 ) -> Result<(), MathProgramError> {
     let mut interval_choices = Vec::new();
     let mut min_time = i64::MAX;
@@ -8594,25 +8669,52 @@ fn add_cumulative_rows(
         {
             max_time = max_time.max(start_ub + max_duration);
         }
-        interval_choices.push(choices);
+        let (demand_coeffs, demand_constant) = expand_affine_term(expansions, &demands[i]);
+        let mut cumulative_choices = Vec::with_capacity(choices.len());
+        for &(start, _, total_duration, choice) in &choices {
+            let mut load_terms = Vec::new();
+            if demand_constant.abs() > 1e-12 {
+                load_terms.push((choice, demand_constant));
+            }
+            for &(demand_var, coef) in &demand_coeffs {
+                if coef.abs() <= 1e-12 {
+                    continue;
+                }
+                let product = add_binary_times_canonical_var_rows(
+                    names,
+                    integer_vars,
+                    ub,
+                    rows,
+                    format!("{name}__interval_{i}__choice_{choice}__demand_{demand_var}"),
+                    choice,
+                    demand_var,
+                )?;
+                load_terms.push((product, coef));
+            }
+            cumulative_choices.push(CumulativeChoice {
+                start,
+                duration: total_duration,
+                load_terms,
+            });
+        }
+        interval_choices.push(cumulative_choices);
     }
 
+    let (capacity_coeffs, capacity_constant) = expand_affine_term(expansions, capacity);
     for t in min_time..max_time {
         let mut coeffs = Vec::new();
-        for (i, choices) in interval_choices.iter().enumerate() {
-            if demands[i].abs() <= 1e-12 {
-                continue;
-            }
-            for &(start_time, _, duration, choice) in choices {
-                if start_time <= t && t < start_time + duration {
-                    coeffs.push((choice, demands[i]));
+        for choices in &interval_choices {
+            for choice in choices {
+                if choice.start <= t && t < choice.start + choice.duration {
+                    coeffs.extend(choice.load_terms.iter().copied());
                 }
             }
         }
         if !coeffs.is_empty() {
+            coeffs.extend(capacity_coeffs.iter().map(|&(idx, coef)| (idx, -coef)));
             rows.push(SparseRow {
                 coeffs: combine_terms(&coeffs),
-                rhs: capacity,
+                rhs: capacity_constant,
                 name: format!("{name}__capacity_at_{t}"),
             });
         }
@@ -9048,6 +9150,26 @@ fn expand_row(
     (sparse, rhs - constant)
 }
 
+fn expand_affine_term(
+    expansions: &[LinearExpansion],
+    term: &AffineTerm,
+) -> (Vec<(usize, f64)>, f64) {
+    let mut constant = term.constant;
+    let mut terms = BTreeMap::<usize, f64>::new();
+    for &(var_idx, coef) in &term.coeffs {
+        let expansion = &expansions[var_idx];
+        constant += coef * expansion.constant;
+        for &(canon_idx, canon_coef) in &expansion.terms {
+            *terms.entry(canon_idx).or_insert(0.0) += coef * canon_coef;
+        }
+    }
+    let sparse = terms
+        .into_iter()
+        .filter(|(_, coef)| coef.abs() > 1e-12)
+        .collect();
+    (sparse, constant)
+}
+
 fn dense_row(n: usize, coeffs: &[(usize, f64)]) -> Vec<f64> {
     let mut row = vec![0.0; n];
     for &(i, value) in coeffs {
@@ -9399,7 +9521,7 @@ fn general_constraint_violation(constraint: &GeneralConstraint, x: &[f64], tol: 
             demands,
             capacity,
             ..
-        } => cumulative_violation(intervals, demands, *capacity, x, tol),
+        } => cumulative_violation(intervals, demands, capacity, x, tol),
         GeneralConstraint::Reservoir {
             events,
             min_level,
@@ -9848,8 +9970,8 @@ fn no_overlap_2d_violation(
 
 fn cumulative_violation(
     intervals: &[IntervalTerm],
-    demands: &[f64],
-    capacity: f64,
+    demands: &[AffineTerm],
+    capacity: &AffineTerm,
     x: &[f64],
     tol: f64,
 ) -> f64 {
@@ -9882,8 +10004,9 @@ fn cumulative_violation(
             .filter(|(interval, _)| {
                 x[interval.start_var] <= time + tol && time < x[interval.end_var] - tol
             })
-            .map(|(_, &demand)| demand)
+            .map(|(_, demand)| eval_affine_term(demand, x))
             .sum::<f64>();
+        let capacity = eval_affine_term(capacity, x);
         violation = violation.max((load - capacity).max(0.0));
     }
     violation
@@ -10301,6 +10424,17 @@ fn linear_bounds(program: &MathProgram, coeffs: &[(usize, f64)]) -> Option<(f64,
         }
     }
     Some((lo, hi))
+}
+
+fn affine_bounds(program: &MathProgram, term: &AffineTerm) -> Option<(f64, f64)> {
+    let (lower, upper) = linear_bounds(program, &term.coeffs)?;
+    let lower = lower + term.constant;
+    let upper = upper + term.constant;
+    if lower.is_finite() && upper.is_finite() {
+        Some((lower, upper))
+    } else {
+        None
+    }
 }
 
 fn eval_expansion(expansion: &LinearExpansion, canonical_x: &[f64]) -> f64 {
@@ -10727,7 +10861,7 @@ mod tests {
         assert!(sol
             .message
             .as_deref()
-            .is_some_and(|message| message.contains("incumbent_source=mip-start")));
+            .is_some_and(|message| message.contains("incumbent_source=user-mip-start")));
     }
 
     #[test]
@@ -11522,6 +11656,65 @@ mod tests {
         assert_close(sol.x[b_start], 3.0);
         assert_close(sol.x[b_end], 5.0);
         assert_close(sol.objective, 3.0);
+    }
+
+    #[test]
+    fn cumulative_accepts_affine_demand_and_capacity() {
+        let mut p = MathProgram::new(ObjectiveSense::Min);
+        let a_start = p
+            .add_integer_var("a_start", 0.0, Some(0.0), Some(0.0))
+            .unwrap();
+        let a_end = p
+            .add_integer_var("a_end", 0.0, Some(0.0), Some(2.0))
+            .unwrap();
+        let b_start = p
+            .add_integer_var("b_start", 1.0, Some(0.0), Some(2.0))
+            .unwrap();
+        let b_end = p
+            .add_integer_var("b_end", 0.0, Some(0.0), Some(4.0))
+            .unwrap();
+        let a_demand = p
+            .add_integer_var("a_demand", 0.0, Some(1.0), Some(2.0))
+            .unwrap();
+        let capacity = p
+            .add_integer_var("capacity", 0.0, Some(3.0), Some(4.0))
+            .unwrap();
+        p.add_constraint("force-a-demand", vec![(a_demand, 1.0)], RowSense::Ge, 2.0)
+            .unwrap();
+        p.add_constraint("force-capacity", vec![(capacity, 1.0)], RowSense::Le, 3.0)
+            .unwrap();
+        p.add_cumulative_affine(
+            "shared-resource",
+            vec![
+                MathProgram::interval(a_start, 2.0, a_end),
+                MathProgram::interval(b_start, 2.0, b_end),
+            ],
+            vec![
+                AffineTerm {
+                    coeffs: vec![(a_demand, 1.0)],
+                    constant: 0.0,
+                },
+                AffineTerm {
+                    coeffs: Vec::new(),
+                    constant: 2.0,
+                },
+            ],
+            AffineTerm {
+                coeffs: vec![(capacity, 1.0)],
+                constant: 0.0,
+            },
+        )
+        .unwrap();
+
+        let sol = solve_math_program(&p, &MathProgramSolveOptions::default()).unwrap();
+        assert_eq!(sol.status, MathProgramStatus::Optimal);
+        assert_close(sol.x[a_start], 0.0);
+        assert_close(sol.x[a_end], 2.0);
+        assert_close(sol.x[b_start], 2.0);
+        assert_close(sol.x[b_end], 4.0);
+        assert_close(sol.x[a_demand], 2.0);
+        assert_close(sol.x[capacity], 3.0);
+        assert_close(sol.objective, 2.0);
     }
 
     #[test]

@@ -1,0 +1,257 @@
+#!/usr/bin/env python3
+"""Small LP bridge used by the Rust validation harness.
+
+Input is JSON on stdin:
+  {"lp": {...}, "method": "highs"}
+
+The bridge prefers scipy.optimize.linprog when SciPy is installed. When it is
+not installed, it falls back to dependency-free vertex enumeration, which is
+intended for small validation models rather than production-scale LPs.
+"""
+
+from __future__ import annotations
+
+import argparse
+import itertools
+import json
+import math
+import sys
+from typing import List, Optional, Sequence, Tuple
+
+
+def status_payload(status: str, solver: str, message: str = "") -> dict:
+    return {
+        "status": status,
+        "x": [],
+        "objective": None,
+        "iters": None,
+        "solver": solver,
+        "message": message,
+    }
+
+
+def dot(a: Sequence[float], b: Sequence[float]) -> float:
+    return sum(x * y for x, y in zip(a, b))
+
+
+def solve_square(a: Sequence[Sequence[float]], b: Sequence[float]) -> Optional[List[float]]:
+    n = len(b)
+    if n == 0:
+        return []
+    aug = [list(map(float, row)) + [float(bi)] for row, bi in zip(a, b)]
+    for col in range(n):
+        pivot = max(range(col, n), key=lambda r: abs(aug[r][col]))
+        if abs(aug[pivot][col]) <= 1e-10:
+            return None
+        aug[col], aug[pivot] = aug[pivot], aug[col]
+        pv = aug[col][col]
+        for j in range(col, n + 1):
+            aug[col][j] /= pv
+        for r in range(n):
+            if r == col:
+                continue
+            factor = aug[r][col]
+            if factor == 0:
+                continue
+            for j in range(col, n + 1):
+                aug[r][j] -= factor * aug[col][j]
+    return [aug[i][n] for i in range(n)]
+
+
+def normalize_lp(lp: dict) -> Tuple[str, List[float], List[List[float]], List[float], List[List[float]], List[float], List[Optional[float]], List[Optional[float]]]:
+    c = [float(v) for v in lp.get("c", [])]
+    n = len(c)
+    sense = lp.get("sense", "max")
+    a_ub = [list(map(float, row)) for row in lp.get("A_ub", lp.get("a_ub", [])) or []]
+    b_ub = [float(v) for v in (lp.get("b_ub", []) or [])]
+    a_eq = [list(map(float, row)) for row in lp.get("A_eq", lp.get("a_eq", [])) or []]
+    b_eq = [float(v) for v in (lp.get("b_eq", []) or [])]
+    lb = lp.get("lb")
+    ub = lp.get("ub")
+    lbs = [0.0] * n if lb is None else [None if v is None else float(v) for v in lb]
+    ubs = [None] * n if ub is None else [None if v is None else float(v) for v in ub]
+    if len(lbs) != n or len(ubs) != n:
+        raise ValueError("bound vector length mismatch")
+    if len(a_ub) != len(b_ub) or len(a_eq) != len(b_eq):
+        raise ValueError("constraint matrix/vector length mismatch")
+    for row in a_ub + a_eq:
+        if len(row) != n:
+            raise ValueError("constraint row length mismatch")
+    return sense, c, a_ub, b_ub, a_eq, b_eq, lbs, ubs
+
+
+def with_bound_inequalities(
+    n: int,
+    a_ub: List[List[float]],
+    b_ub: List[float],
+    lb: Sequence[Optional[float]],
+    ub: Sequence[Optional[float]],
+) -> Tuple[List[List[float]], List[float]]:
+    rows = [row[:] for row in a_ub]
+    rhs = b_ub[:]
+    for j in range(n):
+        if ub[j] is not None:
+            row = [0.0] * n
+            row[j] = 1.0
+            rows.append(row)
+            rhs.append(float(ub[j]))
+        if lb[j] is not None:
+            row = [0.0] * n
+            row[j] = -1.0
+            rows.append(row)
+            rhs.append(-float(lb[j]))
+    return rows, rhs
+
+
+def feasible(
+    x: Sequence[float],
+    a_ub: Sequence[Sequence[float]],
+    b_ub: Sequence[float],
+    a_eq: Sequence[Sequence[float]],
+    b_eq: Sequence[float],
+) -> bool:
+    for row, rhs in zip(a_ub, b_ub):
+        if dot(row, x) > rhs + 1e-7:
+            return False
+    for row, rhs in zip(a_eq, b_eq):
+        if abs(dot(row, x) - rhs) > 1e-7:
+            return False
+    return True
+
+
+def rank(rows: Sequence[Sequence[float]]) -> int:
+    if not rows:
+        return 0
+    work = [list(map(float, row)) for row in rows]
+    m, n = len(work), len(work[0])
+    r = 0
+    for c in range(n):
+        pivot = max(range(r, m), key=lambda i: abs(work[i][c]), default=r)
+        if pivot >= m or abs(work[pivot][c]) <= 1e-10:
+            continue
+        work[r], work[pivot] = work[pivot], work[r]
+        pv = work[r][c]
+        for j in range(c, n):
+            work[r][j] /= pv
+        for i in range(m):
+            if i == r:
+                continue
+            factor = work[i][c]
+            for j in range(c, n):
+                work[i][j] -= factor * work[r][j]
+        r += 1
+        if r == m:
+            break
+    return r
+
+
+def vertex_enumeration(lp: dict) -> dict:
+    sense, c, raw_a_ub, raw_b_ub, a_eq, b_eq, lb, ub = normalize_lp(lp)
+    n = len(c)
+    solver = "python:vertex-enumeration"
+    a_ub, b_ub = with_bound_inequalities(n, raw_a_ub, raw_b_ub, lb, ub)
+    if n == 0:
+        if feasible([], a_ub, b_ub, a_eq, b_eq):
+            return {"status": "optimal", "x": [], "objective": 0.0, "iters": 0, "solver": solver}
+        return status_payload("infeasible", solver, "empty LP violates constraints")
+
+    eq_rank = rank(a_eq)
+    if eq_rank > n:
+        return status_payload("infeasible", solver, "equality system rank exceeds variable count")
+    need = n - eq_rank
+    candidates: List[List[float]] = []
+    if need < 0:
+        return status_payload("infeasible", solver, "too many independent equalities")
+    if need == 0:
+        x = solve_square(a_eq[:n], b_eq[:n]) if len(a_eq) >= n else None
+        if x is not None and feasible(x, a_ub, b_ub, a_eq, b_eq):
+            candidates.append(x)
+    else:
+        if need > len(a_ub):
+            return status_payload(
+                "numerical-error",
+                solver,
+                "not enough finite active constraints for dependency-free vertex enumeration",
+            )
+        for active in itertools.combinations(range(len(a_ub)), need):
+            mat = [row[:] for row in a_eq] + [a_ub[i][:] for i in active]
+            rhs = b_eq[:] + [b_ub[i] for i in active]
+            if len(mat) != n:
+                continue
+            x = solve_square(mat, rhs)
+            if x is not None and feasible(x, a_ub, b_ub, a_eq, b_eq):
+                candidates.append(x)
+    if not candidates:
+        return status_payload("infeasible", solver, "no feasible vertex found")
+
+    sign = 1.0 if sense == "max" else -1.0
+    best = max(candidates, key=lambda x: sign * dot(c, x))
+    return {
+        "status": "optimal",
+        "x": best,
+        "objective": dot(c, best),
+        "iters": len(candidates),
+        "solver": solver,
+        "message": "dependency-free vertex enumeration fallback",
+    }
+
+
+def scipy_linprog(lp: dict, method: str) -> Optional[dict]:
+    try:
+        from scipy.optimize import linprog  # type: ignore
+    except Exception:
+        return None
+    sense, c, a_ub, b_ub, a_eq, b_eq, lb, ub = normalize_lp(lp)
+    scipy_c = [-v for v in c] if sense == "max" else c[:]
+    bounds = [
+        (
+            None if l is None else float(l),
+            None if u is None else float(u),
+        )
+        for l, u in zip(lb, ub)
+    ]
+    result = linprog(
+        scipy_c,
+        A_ub=a_ub or None,
+        b_ub=b_ub or None,
+        A_eq=a_eq or None,
+        b_eq=b_eq or None,
+        bounds=bounds,
+        method=method,
+    )
+    status_map = {0: "optimal", 2: "infeasible", 3: "unbounded", 1: "iter-limit"}
+    status = status_map.get(int(result.status), "numerical-error")
+    x = [] if result.x is None else [float(v) for v in result.x]
+    objective = None
+    if status == "optimal":
+        objective = dot(c, x)
+    return {
+        "status": status,
+        "x": x,
+        "objective": objective,
+        "iters": int(getattr(result, "nit", 0) or 0),
+        "solver": f"scipy:{method}",
+        "message": str(result.message),
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--method", default="highs")
+    args = parser.parse_args()
+    try:
+        payload = json.load(sys.stdin)
+        lp = payload.get("lp", payload)
+        method = payload.get("method", args.method)
+        result = scipy_linprog(lp, method)
+        if result is None:
+            result = vertex_enumeration(lp)
+        print(json.dumps(result, allow_nan=True))
+        return 0
+    except Exception as exc:
+        print(json.dumps(status_payload("numerical-error", "python:lp-bridge", str(exc)), allow_nan=True))
+        return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

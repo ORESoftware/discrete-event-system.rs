@@ -10,8 +10,16 @@
 #[cfg(test)]
 mod tests {
     use crate::des::general::ip_mip_des::{
-        build_binary_knapsack_ip, build_ipmip_solver_technique_plan, build_small_mixed_ip,
-        solve_ipmip_with_des, ConcreteLpRelaxationAlgorithm, IPMIPProblem, IPMIPSolveOptions,
+        build_binary_knapsack_ip, build_fixed_charge_indicator_ip, build_general_linear_rows_ip,
+        build_ipmip_solver_technique_plan, build_lexicographic_choice_ip,
+        build_lower_bounded_production_ip, build_piecewise_linear_reward_ip,
+        build_semi_continuous_gate_ip, build_semi_integer_lot_ip, build_small_mixed_ip,
+        build_sos1_choice_ip, build_sos2_adjacency_ip, linearize_general_linear_problem,
+        linearize_indicator_problem, linearize_lower_bounds_problem, linearize_pwl_problem,
+        linearize_semi_problem, linearize_sos_problem, solve_general_linear_ipmip_with_des,
+        solve_indicator_ipmip_with_des, solve_ipmip_with_des, solve_lower_bounded_ipmip_with_des,
+        solve_multi_objective_ipmip_with_des, solve_pwl_ipmip_with_des, solve_semi_ipmip_with_des,
+        solve_sos_ipmip_with_des, ConcreteLpRelaxationAlgorithm, IPMIPProblem, IPMIPSolveOptions,
         IPMIPStatus, LpRelaxationAlgorithm,
     };
     use crate::des::general::lp::Sense;
@@ -156,6 +164,203 @@ mod tests {
         assert!(close(r.z, 13.0), "z={}", r.z);
         assert!(feasible(&p, &r.x));
         assert!(close(r.x[2], 10.0), "x2={}", r.x[2]);
+    }
+
+    #[test]
+    fn lower_bounded_variables_map_back_to_source_coordinates() {
+        let p = build_lower_bounded_production_ip();
+        let (linearized, offset) = linearize_lower_bounds_problem(&p);
+        assert!(close(offset, 3.0), "offset={offset}");
+        assert_eq!(linearized.b, vec![5.0]);
+        assert_eq!(linearized.ub.as_ref().unwrap(), &vec![3.0, 10.0]);
+
+        let r = solve_lower_bounded_ipmip_with_des(p.clone(), incremental());
+        assert_eq!(r.status, IPMIPStatus::Optimal);
+        assert!(close(r.z, 13.0), "z={}", r.z);
+        assert!(feasible(&p.base, &r.x));
+        assert!(r.x[0] >= p.lb[0] - 1e-7, "x={}", r.x[0]);
+        assert!(close(r.x[0], 3.0), "x={}", r.x[0]);
+        assert!(close(r.x[1], 5.0), "y={}", r.x[1]);
+    }
+
+    #[test]
+    fn general_linear_row_bounds_compile_to_le_rows() {
+        let p = build_general_linear_rows_ip();
+        let linearized = linearize_general_linear_problem(&p);
+        assert_eq!(linearized.a.len(), p.base.a.len() + 5);
+        assert!(feasible(&linearized, &[6.0, 1.0]));
+
+        let r = solve_general_linear_ipmip_with_des(
+            p,
+            IPMIPSolveOptions {
+                lp_algorithm: Some(LpRelaxationAlgorithm::Concrete(
+                    ConcreteLpRelaxationAlgorithm::InternalSimplex,
+                )),
+                max_cut_rounds: Some(0),
+                ..Default::default()
+            },
+        );
+        assert_eq!(r.status, IPMIPStatus::Optimal);
+        assert!(close(r.z, 20.0), "z={}", r.z);
+        assert!(feasible(&linearized, &r.x));
+        assert!(close(r.x[0], 6.0), "x={}", r.x[0]);
+        assert!(close(r.x[1], 1.0), "y={}", r.x[1]);
+    }
+
+    #[test]
+    fn fixed_charge_indicator_constraint() {
+        let p = build_fixed_charge_indicator_ip();
+        let linearized = linearize_indicator_problem(&p);
+        let r = solve_indicator_ipmip_with_des(
+            p,
+            IPMIPSolveOptions {
+                lp_algorithm: Some(LpRelaxationAlgorithm::Concrete(
+                    ConcreteLpRelaxationAlgorithm::IncrementalPrimalDual,
+                )),
+                max_cut_rounds: Some(0),
+                ..Default::default()
+            },
+        );
+        assert_eq!(r.status, IPMIPStatus::Optimal);
+        assert!(close(r.z, 17.0), "z={}", r.z);
+        assert!(feasible(&linearized, &r.x));
+        assert!(close(r.x[0], 1.0), "use={}", r.x[0]);
+        assert!(close(r.x[1], 4.0), "production={}", r.x[1]);
+    }
+
+    #[test]
+    fn sos1_choice_constraint() {
+        let p = build_sos1_choice_ip();
+        let linearized = linearize_sos_problem(&p);
+        let r = solve_sos_ipmip_with_des(
+            p,
+            IPMIPSolveOptions {
+                lp_algorithm: Some(LpRelaxationAlgorithm::Concrete(
+                    ConcreteLpRelaxationAlgorithm::IncrementalPrimalDual,
+                )),
+                max_cut_rounds: Some(0),
+                ..Default::default()
+            },
+        );
+        assert_eq!(r.status, IPMIPStatus::Optimal);
+        assert!(close(r.z, 40.0), "z={}", r.z);
+        assert!(feasible(&linearized, &r.x));
+        assert!(close(r.x[0], 4.0), "activity_a={}", r.x[0]);
+        assert!(r.x[1].abs() < 1e-6, "activity_b={}", r.x[1]);
+        assert!(r.x[2].abs() < 1e-6, "activity_c={}", r.x[2]);
+    }
+
+    #[test]
+    fn sos2_adjacency_constraint() {
+        let p = build_sos2_adjacency_ip();
+        let linearized = linearize_sos_problem(&p);
+        let r = solve_sos_ipmip_with_des(
+            p,
+            IPMIPSolveOptions {
+                lp_algorithm: Some(LpRelaxationAlgorithm::Concrete(
+                    ConcreteLpRelaxationAlgorithm::IncrementalPrimalDual,
+                )),
+                max_cut_rounds: Some(0),
+                ..Default::default()
+            },
+        );
+        assert_eq!(r.status, IPMIPStatus::Optimal);
+        assert!(close(r.z, 10.0), "z={}", r.z);
+        assert!(feasible(&linearized, &r.x));
+        let positive: Vec<usize> =
+            r.x.iter()
+                .take(4)
+                .enumerate()
+                .filter_map(|(i, &v)| if v > 1e-6 { Some(i) } else { None })
+                .collect();
+        assert!(
+            positive.len() <= 2 && positive.windows(2).all(|window| window[1] == window[0] + 1),
+            "positive={positive:?} x={:?}",
+            r.x
+        );
+    }
+
+    #[test]
+    fn semi_continuous_gate_constraint() {
+        let p = build_semi_continuous_gate_ip();
+        let linearized = linearize_semi_problem(&p);
+        let r = solve_semi_ipmip_with_des(
+            p,
+            IPMIPSolveOptions {
+                lp_algorithm: Some(LpRelaxationAlgorithm::Concrete(
+                    ConcreteLpRelaxationAlgorithm::IncrementalPrimalDual,
+                )),
+                max_cut_rounds: Some(0),
+                ..Default::default()
+            },
+        );
+        assert_eq!(r.status, IPMIPStatus::Optimal);
+        assert!(close(r.z, 0.0), "z={}", r.z);
+        assert!(feasible(&linearized, &r.x));
+        assert!(close(r.x[0], 0.0), "production={}", r.x[0]);
+        assert!(close(r.x[1], 0.0), "active={}", r.x[1]);
+    }
+
+    #[test]
+    fn semi_integer_lot_constraint() {
+        let p = build_semi_integer_lot_ip();
+        let linearized = linearize_semi_problem(&p);
+        let r = solve_semi_ipmip_with_des(
+            p,
+            IPMIPSolveOptions {
+                lp_algorithm: Some(LpRelaxationAlgorithm::Concrete(
+                    ConcreteLpRelaxationAlgorithm::IncrementalPrimalDual,
+                )),
+                max_cut_rounds: Some(0),
+                ..Default::default()
+            },
+        );
+        assert_eq!(r.status, IPMIPStatus::Optimal);
+        assert!(close(r.z, 8.0), "z={}", r.z);
+        assert!(feasible(&linearized, &r.x));
+        assert!(close(r.x[0], 4.0), "lot_size={}", r.x[0]);
+        assert!(close(r.x[1], 1.0), "active={}", r.x[1]);
+    }
+
+    #[test]
+    fn piecewise_linear_reward_constraint() {
+        let p = build_piecewise_linear_reward_ip();
+        let linearized = linearize_pwl_problem(&p);
+        let r = solve_pwl_ipmip_with_des(
+            p,
+            IPMIPSolveOptions {
+                lp_algorithm: Some(LpRelaxationAlgorithm::Concrete(
+                    ConcreteLpRelaxationAlgorithm::InternalSimplex,
+                )),
+                max_cut_rounds: Some(0),
+                ..Default::default()
+            },
+        );
+        assert_eq!(r.status, IPMIPStatus::Optimal);
+        assert!(close(r.z, 4.0), "z={}", r.z);
+        assert!(feasible(&linearized, &r.x));
+        assert!(close(r.x[0], 1.0), "activity={}", r.x[0]);
+        assert!(close(r.x[1], 4.0), "reward={}", r.x[1]);
+    }
+
+    #[test]
+    fn lexicographic_multi_objective_choice() {
+        let p = build_lexicographic_choice_ip();
+        let r = solve_multi_objective_ipmip_with_des(
+            p,
+            IPMIPSolveOptions {
+                lp_algorithm: Some(LpRelaxationAlgorithm::Concrete(
+                    ConcreteLpRelaxationAlgorithm::InternalSimplex,
+                )),
+                max_cut_rounds: Some(0),
+                ..Default::default()
+            },
+        );
+        assert_eq!(r.status, IPMIPStatus::Optimal);
+        assert_eq!(r.objective_values, vec![1.0, 3.0]);
+        assert!(close(r.x[0], 1.0), "choice_a={}", r.x[0]);
+        assert!(close(r.x[1], 0.0), "choice_b={}", r.x[1]);
+        assert_eq!(r.stage_solutions.len(), 2);
     }
 
     // Group 4 — Cover cut strengthens binary relaxation.

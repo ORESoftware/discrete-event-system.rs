@@ -177,6 +177,180 @@ pub struct IPMIPProblem {
     pub constraint_nodes: Option<Vec<ConstraintNode>>,
 }
 
+/// MIP model with source-level variable lower bounds. The underlying branch-and
+/// cut solver still receives a non-negative model by substituting `x = y + lb`.
+#[derive(Clone, Debug)]
+pub struct LowerBoundedIPMIPProblem {
+    pub base: IPMIPProblem,
+    pub lb: Vec<f64>,
+}
+
+/// A source-level linear row bound, matching the row-bound surface exposed by
+/// full-featured MIP solvers. `lower <= coefs·x <= upper`; omit one side for a
+/// one-sided row, or set both sides equal for equality.
+#[derive(Clone, Debug)]
+pub struct LinearRowConstraint {
+    pub coefs: Vec<f64>,
+    pub lower: Option<f64>,
+    pub upper: Option<f64>,
+    pub name: Option<String>,
+}
+
+/// MIP model with source-level linear rows using arbitrary lower/upper row
+/// bounds.
+#[derive(Clone, Debug)]
+pub struct GeneralLinearIPMIPProblem {
+    pub base: IPMIPProblem,
+    pub linear_constraints: Vec<LinearRowConstraint>,
+}
+
+/// Linear row sense used by source-level indicator constraints.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IndicatorSense {
+    Le,
+    Ge,
+    Eq,
+}
+
+impl IndicatorSense {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            IndicatorSense::Le => "le",
+            IndicatorSense::Ge => "ge",
+            IndicatorSense::Eq => "eq",
+        }
+    }
+}
+
+/// A source-level indicator constraint:
+/// `binary_var == active_value => coefs·x sense rhs`.
+#[derive(Clone, Debug)]
+pub struct IndicatorConstraint {
+    pub binary_var: usize,
+    pub active_value: bool,
+    pub coefs: Vec<f64>,
+    pub sense: IndicatorSense,
+    pub rhs: f64,
+    pub name: Option<String>,
+}
+
+/// MIP model with source-level indicator constraints.
+#[derive(Clone, Debug)]
+pub struct IndicatorIPMIPProblem {
+    pub base: IPMIPProblem,
+    pub indicators: Vec<IndicatorConstraint>,
+}
+
+/// Special ordered set kind, matching common MIP solver modelling surfaces.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpecialOrderedSetKind {
+    Sos1,
+    Sos2,
+}
+
+impl SpecialOrderedSetKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SpecialOrderedSetKind::Sos1 => "sos1",
+            SpecialOrderedSetKind::Sos2 => "sos2",
+        }
+    }
+}
+
+/// A source-level special ordered set. If weights are present, they define the
+/// order; otherwise the given variable order is used.
+#[derive(Clone, Debug)]
+pub struct SpecialOrderedSet {
+    pub kind: SpecialOrderedSetKind,
+    pub vars: Vec<usize>,
+    pub weights: Option<Vec<f64>>,
+    pub name: Option<String>,
+}
+
+/// MIP model with source-level special ordered sets.
+#[derive(Clone, Debug)]
+pub struct SosIPMIPProblem {
+    pub base: IPMIPProblem,
+    pub sos: Vec<SpecialOrderedSet>,
+}
+
+/// Semi-variable kind, matching the common MIP solver domains:
+/// semi-continuous `x in {0} U [L, U]` and semi-integer
+/// `x in {0} U ([L, U] cap Z)`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SemiVariableKind {
+    SemiContinuous,
+    SemiInteger,
+}
+
+impl SemiVariableKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SemiVariableKind::SemiContinuous => "semi_continuous",
+            SemiVariableKind::SemiInteger => "semi_integer",
+        }
+    }
+}
+
+/// A source-level semi-continuous or semi-integer variable. The upper bound is
+/// read from [`IPMIPProblem::ub`], so source models keep one authoritative upper
+/// bound.
+#[derive(Clone, Debug)]
+pub struct SemiVariable {
+    pub kind: SemiVariableKind,
+    pub var: usize,
+    pub lower: f64,
+    pub name: Option<String>,
+}
+
+/// MIP model with source-level semi-continuous / semi-integer variables.
+#[derive(Clone, Debug)]
+pub struct SemiIPMIPProblem {
+    pub base: IPMIPProblem,
+    pub semi_variables: Vec<SemiVariable>,
+}
+
+/// A breakpoint in a piecewise-linear function.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PiecewiseLinearPoint {
+    pub x: f64,
+    pub y: f64,
+}
+
+/// A source-level piecewise-linear constraint `y_var = f(x_var)`.
+/// The compiler uses the standard SOS2 convex-combination formulation, so this
+/// supports non-convex PWL functions as long as the breakpoint x-values are
+/// strictly increasing.
+#[derive(Clone, Debug)]
+pub struct PiecewiseLinearConstraint {
+    pub x_var: usize,
+    pub y_var: usize,
+    pub points: Vec<PiecewiseLinearPoint>,
+    pub name: Option<String>,
+}
+
+/// MIP model with source-level piecewise-linear constraints.
+#[derive(Clone, Debug)]
+pub struct PwlIPMIPProblem {
+    pub base: IPMIPProblem,
+    pub pwl: Vec<PiecewiseLinearConstraint>,
+}
+
+/// One objective in a lexicographic multi-objective MIP.
+#[derive(Clone, Debug)]
+pub struct LexicographicObjective {
+    pub sense: Sense,
+    pub c: Vec<f64>,
+    pub name: Option<String>,
+}
+
+/// MIP model with source-level lexicographic objectives.
+#[derive(Clone, Debug)]
+pub struct MultiObjectiveIPMIPProblem {
+    pub base: IPMIPProblem,
+    pub objectives: Vec<LexicographicObjective>,
+}
+
 /// Options for [`solve_ipmip_with_des`]. `None` fields take the TS defaults.
 #[derive(Clone, Debug, Default)]
 pub struct IPMIPSolveOptions {
@@ -338,6 +512,17 @@ pub struct IPMIPSolution {
     pub token_stats: SolverTokenStats,
     pub trace: Vec<IPMIPTraceEvent>,
     pub topology: Vec<SolverTopologyNode>,
+}
+
+/// Result of a lexicographic multi-objective MIP solve.
+#[derive(Clone, Debug)]
+pub struct MultiObjectiveIPMIPSolution {
+    pub status: IPMIPStatus,
+    pub x: Vec<f64>,
+    pub objective_values: Vec<f64>,
+    pub stage_solutions: Vec<IPMIPSolution>,
+    pub elapsed_ms: f64,
+    pub solver_kind: &'static str,
 }
 
 /// A branching or cutting constraint `coefs·x <= rhs`.
@@ -1763,6 +1948,780 @@ pub fn solve_ipmip_with_des(p: IPMIPProblem, opts: IPMIPSolveOptions) -> IPMIPSo
     solution
 }
 
+/// Compile source-level lower bounds into an ordinary non-negative MIP.
+///
+/// If `x` is the source variable and `lb` is its lower bound, the compiled
+/// variable is `y = x - lb`. Linear rows become `A y <= b - A lb`, upper bounds
+/// become `ub - lb`, and the source objective is the compiled objective plus
+/// `c·lb`.
+pub fn linearize_lower_bounds_problem(problem: &LowerBoundedIPMIPProblem) -> (IPMIPProblem, f64) {
+    validate_lower_bounded_ipmip_problem(problem);
+    let n = problem.base.c.len();
+    let lb = &problem.lb;
+    let mut shifted = problem.base.clone();
+
+    for (row, rhs) in shifted.a.iter().zip(shifted.b.iter_mut()) {
+        let row_shift: f64 = row.iter().zip(lb).map(|(a, l)| a * l).sum();
+        *rhs -= row_shift;
+    }
+
+    let source_ub = problem.base.ub.as_ref();
+    shifted.ub = Some(
+        (0..n)
+            .map(|j| {
+                let upper = source_ub
+                    .and_then(|ub| ub.get(j))
+                    .copied()
+                    .unwrap_or(f64::INFINITY);
+                if upper.is_finite() {
+                    upper - lb[j]
+                } else {
+                    f64::INFINITY
+                }
+            })
+            .collect(),
+    );
+    shifted.variable_nodes = None;
+    shifted.constraint_nodes = None;
+    let objective_offset = linear_objective_value(&problem.base.c, lb);
+    validate_ipmip_problem(&shifted);
+    (shifted, objective_offset)
+}
+
+/// Solve a source-level lower-bounded MIP and map the incumbent and objective
+/// back into the original source coordinates.
+pub fn solve_lower_bounded_ipmip_with_des(
+    problem: LowerBoundedIPMIPProblem,
+    opts: IPMIPSolveOptions,
+) -> IPMIPSolution {
+    let lb = problem.lb.clone();
+    let (shifted, objective_offset) = linearize_lower_bounds_problem(&problem);
+    let mut sol = solve_ipmip_with_des(shifted, opts);
+    if !sol.x.is_empty() {
+        for (x, lower) in sol.x.iter_mut().zip(lb.iter()) {
+            *x += lower;
+        }
+    }
+    sol.z = add_objective_offset(sol.z, objective_offset);
+    sol.best_bound = add_objective_offset(sol.best_bound, objective_offset);
+    for event in &mut sol.trace {
+        if let Some(z) = event.lp_z.as_mut() {
+            *z = add_objective_offset(*z, objective_offset);
+        }
+    }
+    sol.gap = if sol.status == IPMIPStatus::Optimal {
+        0.0
+    } else if sol.x.is_empty() || !sol.best_bound.is_finite() || !sol.z.is_finite() {
+        f64::INFINITY
+    } else {
+        (sol.best_bound - sol.z).abs() / 1.0_f64.max(sol.z.abs())
+    };
+    sol.solver_kind = "in-house-lower-bound-branch-and-cut";
+    sol
+}
+
+/// Compile source-level row bounds into ordinary `<=` rows. A row upper bound
+/// appends `a·x <= upper`; a row lower bound appends `-a·x <= -lower`.
+pub fn linearize_general_linear_constraints(
+    base: &IPMIPProblem,
+    constraints: &[LinearRowConstraint],
+) -> IPMIPProblem {
+    validate_ipmip_problem(base);
+    let mut out = base.clone();
+    ensure_compilation_metadata(&mut out);
+    for (idx, constraint) in constraints.iter().enumerate() {
+        validate_linear_row_constraint(base, constraint, idx);
+        let name = constraint
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("linear_row_{idx}"));
+        if let Some(upper) = constraint.upper {
+            append_compiled_row(
+                &mut out,
+                constraint.coefs.clone(),
+                upper,
+                format!("{name}_upper"),
+            );
+        }
+        if let Some(lower) = constraint.lower {
+            append_compiled_row(
+                &mut out,
+                constraint.coefs.iter().map(|v| -v).collect(),
+                -lower,
+                format!("{name}_lower"),
+            );
+        }
+    }
+    out
+}
+
+/// Linearise a [`GeneralLinearIPMIPProblem`] into an ordinary `<=`-row MIP.
+pub fn linearize_general_linear_problem(problem: &GeneralLinearIPMIPProblem) -> IPMIPProblem {
+    linearize_general_linear_constraints(&problem.base, &problem.linear_constraints)
+}
+
+/// Solve a source-level MIP with arbitrary lower/upper linear row bounds.
+pub fn solve_general_linear_ipmip_with_des(
+    problem: GeneralLinearIPMIPProblem,
+    opts: IPMIPSolveOptions,
+) -> IPMIPSolution {
+    let linearized = linearize_general_linear_problem(&problem);
+    solve_ipmip_with_des(linearized, opts)
+}
+
+/// Linearise source-level indicator constraints with finite-bound big-M rows.
+///
+/// The base solver assumes non-negative variables. For a row `a·x <= b`, the
+/// compiler computes the smallest M implied by the declared upper bounds and
+/// adds either `a·x + M z <= b + M` for `z = 1 => a·x <= b`, or
+/// `a·x - M z <= b` for `z = 0 => a·x <= b`.
+pub fn linearize_indicator_constraints(
+    base: &IPMIPProblem,
+    indicators: &[IndicatorConstraint],
+) -> IPMIPProblem {
+    validate_ipmip_problem(base);
+    let mut out = base.clone();
+    for (idx, indicator) in indicators.iter().enumerate() {
+        validate_indicator_constraint(base, indicator, idx);
+        match indicator.sense {
+            IndicatorSense::Le => append_indicator_le_row(
+                base,
+                &mut out,
+                indicator,
+                indicator.coefs.clone(),
+                indicator.rhs,
+                None,
+            ),
+            IndicatorSense::Ge => append_indicator_le_row(
+                base,
+                &mut out,
+                indicator,
+                indicator.coefs.iter().map(|v| -v).collect(),
+                -indicator.rhs,
+                None,
+            ),
+            IndicatorSense::Eq => {
+                append_indicator_le_row(
+                    base,
+                    &mut out,
+                    indicator,
+                    indicator.coefs.clone(),
+                    indicator.rhs,
+                    Some("le"),
+                );
+                append_indicator_le_row(
+                    base,
+                    &mut out,
+                    indicator,
+                    indicator.coefs.iter().map(|v| -v).collect(),
+                    -indicator.rhs,
+                    Some("ge"),
+                );
+            }
+        }
+    }
+    out
+}
+
+/// Linearise an [`IndicatorIPMIPProblem`] into an ordinary MIP.
+pub fn linearize_indicator_problem(problem: &IndicatorIPMIPProblem) -> IPMIPProblem {
+    linearize_indicator_constraints(&problem.base, &problem.indicators)
+}
+
+/// Solve a source-level indicator MIP through the existing branch-and-cut DES.
+pub fn solve_indicator_ipmip_with_des(
+    problem: IndicatorIPMIPProblem,
+    opts: IPMIPSolveOptions,
+) -> IPMIPSolution {
+    let linearized = linearize_indicator_problem(&problem);
+    solve_ipmip_with_des(linearized, opts)
+}
+
+/// Linearise source-level SOS1/SOS2 constraints with finite-bound helper
+/// binaries.
+pub fn linearize_sos_constraints(base: &IPMIPProblem, sets: &[SpecialOrderedSet]) -> IPMIPProblem {
+    validate_ipmip_problem(base);
+    let mut out = base.clone();
+    ensure_compilation_metadata(&mut out);
+    for (idx, set) in sets.iter().enumerate() {
+        let ordered = ordered_sos_vars(base, set, idx);
+        match set.kind {
+            SpecialOrderedSetKind::Sos1 => append_sos1_rows(base, &mut out, set, idx, &ordered),
+            SpecialOrderedSetKind::Sos2 => append_sos2_rows(base, &mut out, set, idx, &ordered),
+        }
+    }
+    out
+}
+
+/// Linearise an [`SosIPMIPProblem`] into an ordinary MIP.
+pub fn linearize_sos_problem(problem: &SosIPMIPProblem) -> IPMIPProblem {
+    linearize_sos_constraints(&problem.base, &problem.sos)
+}
+
+/// Solve a source-level SOS MIP through the existing branch-and-cut DES.
+pub fn solve_sos_ipmip_with_des(
+    problem: SosIPMIPProblem,
+    opts: IPMIPSolveOptions,
+) -> IPMIPSolution {
+    let linearized = linearize_sos_problem(&problem);
+    solve_ipmip_with_des(linearized, opts)
+}
+
+/// Linearise source-level semi-continuous / semi-integer variables with a
+/// binary activation variable per semi variable.
+pub fn linearize_semi_variables(base: &IPMIPProblem, semis: &[SemiVariable]) -> IPMIPProblem {
+    validate_ipmip_problem(base);
+    let mut out = base.clone();
+    ensure_compilation_metadata(&mut out);
+    for (idx, semi) in semis.iter().enumerate() {
+        validate_semi_variable(base, semi, idx);
+        append_semi_variable_rows(base, &mut out, semi, idx);
+    }
+    out
+}
+
+/// Linearise a [`SemiIPMIPProblem`] into an ordinary MIP.
+pub fn linearize_semi_problem(problem: &SemiIPMIPProblem) -> IPMIPProblem {
+    linearize_semi_variables(&problem.base, &problem.semi_variables)
+}
+
+/// Solve a source-level semi-variable MIP through the existing branch-and-cut
+/// DES.
+pub fn solve_semi_ipmip_with_des(
+    problem: SemiIPMIPProblem,
+    opts: IPMIPSolveOptions,
+) -> IPMIPSolution {
+    let linearized = linearize_semi_problem(&problem);
+    solve_ipmip_with_des(linearized, opts)
+}
+
+/// Linearise source-level piecewise-linear constraints with SOS2 lambda
+/// variables.
+pub fn linearize_pwl_constraints(
+    base: &IPMIPProblem,
+    pwl: &[PiecewiseLinearConstraint],
+) -> IPMIPProblem {
+    validate_ipmip_problem(base);
+    let mut out = base.clone();
+    ensure_compilation_metadata(&mut out);
+    for (idx, constraint) in pwl.iter().enumerate() {
+        validate_pwl_constraint(base, constraint, idx);
+        append_pwl_constraint_rows(&mut out, constraint, idx);
+    }
+    out
+}
+
+/// Linearise a [`PwlIPMIPProblem`] into an ordinary MIP.
+pub fn linearize_pwl_problem(problem: &PwlIPMIPProblem) -> IPMIPProblem {
+    linearize_pwl_constraints(&problem.base, &problem.pwl)
+}
+
+/// Solve a source-level PWL MIP through the existing branch-and-cut DES.
+pub fn solve_pwl_ipmip_with_des(
+    problem: PwlIPMIPProblem,
+    opts: IPMIPSolveOptions,
+) -> IPMIPSolution {
+    let linearized = linearize_pwl_problem(&problem);
+    solve_ipmip_with_des(linearized, opts)
+}
+
+/// Solve lexicographic multi-objective MIPs by optimizing each objective in
+/// priority order and fixing each proven optimum before moving to the next.
+pub fn solve_multi_objective_ipmip_with_des(
+    problem: MultiObjectiveIPMIPProblem,
+    opts: IPMIPSolveOptions,
+) -> MultiObjectiveIPMIPSolution {
+    validate_multi_objective_problem(&problem);
+    let t0 = Instant::now();
+    let mut working = problem.base.clone();
+    ensure_compilation_metadata(&mut working);
+    let mut stage_solutions = Vec::with_capacity(problem.objectives.len());
+
+    for (idx, objective) in problem.objectives.iter().enumerate() {
+        working.sense = objective.sense;
+        working.c = objective.c.clone();
+        let sol = solve_ipmip_with_des(working.clone(), opts.clone());
+        let status = sol.status;
+        stage_solutions.push(sol.clone());
+        if status != IPMIPStatus::Optimal {
+            return MultiObjectiveIPMIPSolution {
+                status,
+                x: sol.x,
+                objective_values: Vec::new(),
+                stage_solutions,
+                elapsed_ms: t0.elapsed().as_secs_f64() * 1000.0,
+                solver_kind: "in-house-lexicographic-branch-and-cut",
+            };
+        }
+        let optimum = linear_objective_value(&objective.c, &sol.x);
+        append_compiled_equality(
+            &mut working,
+            objective.c.clone(),
+            optimum,
+            objective
+                .name
+                .clone()
+                .unwrap_or_else(|| format!("multi_objective_{idx}")),
+        );
+    }
+
+    let x = stage_solutions
+        .last()
+        .map(|sol| sol.x.clone())
+        .unwrap_or_default();
+    let objective_values = problem
+        .objectives
+        .iter()
+        .map(|objective| linear_objective_value(&objective.c, &x))
+        .collect();
+    MultiObjectiveIPMIPSolution {
+        status: IPMIPStatus::Optimal,
+        x,
+        objective_values,
+        stage_solutions,
+        elapsed_ms: t0.elapsed().as_secs_f64() * 1000.0,
+        solver_kind: "in-house-lexicographic-branch-and-cut",
+    }
+}
+
+fn validate_indicator_constraint(base: &IPMIPProblem, indicator: &IndicatorConstraint, idx: usize) {
+    let n = base.c.len();
+    if indicator.binary_var >= n {
+        panic!(
+            "{MODEL}: indicator {idx} binary_var {} out of range {n}",
+            indicator.binary_var
+        );
+    }
+    if !base.integer_vars[indicator.binary_var] {
+        panic!(
+            "{MODEL}: indicator {idx} trigger variable {} must be integer/binary",
+            indicator.binary_var
+        );
+    }
+    let trigger_ub = base
+        .ub
+        .as_ref()
+        .and_then(|ub| ub.get(indicator.binary_var))
+        .copied()
+        .unwrap_or(f64::INFINITY);
+    if !trigger_ub.is_finite() || trigger_ub > 1.0 + 1e-9 {
+        panic!(
+            "{MODEL}: indicator {idx} trigger variable {} must have finite binary upper bound <= 1",
+            indicator.binary_var
+        );
+    }
+    if indicator.coefs.len() != n {
+        panic!(
+            "{MODEL}: indicator {idx} coefficient length {} does not match variable count {n}",
+            indicator.coefs.len()
+        );
+    }
+    if !indicator.rhs.is_finite() {
+        panic!("{MODEL}: indicator {idx} rhs must be finite");
+    }
+    for (j, &coef) in indicator.coefs.iter().enumerate() {
+        if !coef.is_finite() {
+            panic!("{MODEL}: indicator {idx} coefficient {j} must be finite");
+        }
+    }
+}
+
+fn append_indicator_le_row(
+    base: &IPMIPProblem,
+    out: &mut IPMIPProblem,
+    indicator: &IndicatorConstraint,
+    mut row: Vec<f64>,
+    rhs: f64,
+    suffix: Option<&str>,
+) {
+    let m = indicator_big_m(base, &row, rhs, indicator.name.as_deref());
+    let compiled_rhs = if indicator.active_value {
+        row[indicator.binary_var] += m;
+        rhs + m
+    } else {
+        row[indicator.binary_var] -= m;
+        rhs
+    };
+    out.a.push(row);
+    out.b.push(compiled_rhs);
+    if let Some(names) = &mut out.con_names {
+        let mut name = indicator
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("indicator_{}", out.a.len() - 1));
+        if let Some(suffix) = suffix {
+            name.push('_');
+            name.push_str(suffix);
+        }
+        names.push(name);
+    }
+}
+
+fn indicator_big_m(base: &IPMIPProblem, row: &[f64], rhs: f64, name: Option<&str>) -> f64 {
+    let ub = base.ub.as_ref();
+    let mut max_lhs = 0.0;
+    for (j, &coef) in row.iter().enumerate() {
+        if coef > 0.0 {
+            let Some(upper) = ub.and_then(|u| u.get(j)).copied() else {
+                panic!(
+                    "{MODEL}: indicator {} needs a finite upper bound for positive coefficient variable {}",
+                    name.unwrap_or("<unnamed>"),
+                    j
+                );
+            };
+            if !upper.is_finite() {
+                panic!(
+                    "{MODEL}: indicator {} needs a finite upper bound for positive coefficient variable {}",
+                    name.unwrap_or("<unnamed>"),
+                    j
+                );
+            }
+            max_lhs += coef * upper;
+        }
+    }
+    0.0_f64.max(max_lhs - rhs)
+}
+
+fn ensure_compilation_metadata(p: &mut IPMIPProblem) {
+    let n = p.c.len();
+    if p.ub.is_none() {
+        p.ub = Some(vec![f64::INFINITY; n]);
+    }
+    if p.var_names.is_none() {
+        p.var_names = Some((0..n).map(|j| format!("x{j}")).collect());
+    }
+    if p.con_names.is_none() {
+        p.con_names = Some((0..p.a.len()).map(|i| format!("c{i}")).collect());
+    }
+    p.variable_nodes = None;
+    p.constraint_nodes = None;
+}
+
+fn ordered_sos_vars(base: &IPMIPProblem, set: &SpecialOrderedSet, idx: usize) -> Vec<usize> {
+    if set.vars.is_empty() {
+        panic!("{MODEL}: sos {idx} has no variables");
+    }
+    if let Some(weights) = &set.weights {
+        if weights.len() != set.vars.len() {
+            panic!(
+                "{MODEL}: sos {idx} weight length {} does not match variable count {}",
+                weights.len(),
+                set.vars.len()
+            );
+        }
+        let mut pairs: Vec<(f64, usize)> = weights
+            .iter()
+            .copied()
+            .zip(set.vars.iter().copied())
+            .collect();
+        for (w, _) in &pairs {
+            if !w.is_finite() {
+                panic!("{MODEL}: sos {idx} weights must be finite");
+            }
+        }
+        pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        for w in pairs.windows(2) {
+            if (w[0].0 - w[1].0).abs() <= 1e-12 {
+                panic!("{MODEL}: sos {idx} weights must be unique");
+            }
+        }
+        validate_sos_vars(base, idx, pairs.iter().map(|(_, v)| *v));
+        pairs.into_iter().map(|(_, v)| v).collect()
+    } else {
+        validate_sos_vars(base, idx, set.vars.iter().copied());
+        set.vars.clone()
+    }
+}
+
+fn validate_sos_vars<I>(base: &IPMIPProblem, idx: usize, vars: I)
+where
+    I: IntoIterator<Item = usize>,
+{
+    let n = base.c.len();
+    let mut seen = HashSet::new();
+    for v in vars {
+        if v >= n {
+            panic!("{MODEL}: sos {idx} variable {v} out of range {n}");
+        }
+        if !seen.insert(v) {
+            panic!("{MODEL}: sos {idx} contains duplicate variable {v}");
+        }
+        finite_upper_bound(base, v, "sos", idx);
+    }
+}
+
+fn append_sos1_rows(
+    base: &IPMIPProblem,
+    out: &mut IPMIPProblem,
+    set: &SpecialOrderedSet,
+    idx: usize,
+    ordered: &[usize],
+) {
+    let name = set.name.as_deref().unwrap_or("sos1");
+    let mut selectors = Vec::with_capacity(ordered.len());
+    for (pos, &var) in ordered.iter().enumerate() {
+        let y = append_binary_helper_var(out, format!("{name}_sel_{pos}"));
+        selectors.push(y);
+        let ub = finite_upper_bound(base, var, "sos", idx);
+        let mut row = vec![0.0; out.c.len()];
+        row[var] = 1.0;
+        row[y] = -ub;
+        append_compiled_row(out, row, 0.0, format!("{name}_link_{pos}"));
+    }
+    let mut row = vec![0.0; out.c.len()];
+    for y in selectors {
+        row[y] = 1.0;
+    }
+    append_compiled_row(out, row, 1.0, format!("{name}_at_most_one"));
+}
+
+fn append_sos2_rows(
+    base: &IPMIPProblem,
+    out: &mut IPMIPProblem,
+    set: &SpecialOrderedSet,
+    idx: usize,
+    ordered: &[usize],
+) {
+    if ordered.len() <= 2 {
+        return;
+    }
+    let name = set.name.as_deref().unwrap_or("sos2");
+    let mut segments = Vec::with_capacity(ordered.len() - 1);
+    for pos in 0..(ordered.len() - 1) {
+        segments.push(append_binary_helper_var(out, format!("{name}_seg_{pos}")));
+    }
+    let mut sum_row = vec![0.0; out.c.len()];
+    for &segment in &segments {
+        sum_row[segment] = 1.0;
+    }
+    append_compiled_row(out, sum_row, 1.0, format!("{name}_one_segment"));
+
+    for (pos, &var) in ordered.iter().enumerate() {
+        let ub = finite_upper_bound(base, var, "sos", idx);
+        let mut row = vec![0.0; out.c.len()];
+        row[var] = 1.0;
+        if pos > 0 {
+            row[segments[pos - 1]] -= ub;
+        }
+        if pos + 1 < ordered.len() {
+            row[segments[pos]] -= ub;
+        }
+        append_compiled_row(out, row, 0.0, format!("{name}_link_{pos}"));
+    }
+}
+
+fn append_binary_helper_var(out: &mut IPMIPProblem, name: String) -> usize {
+    for row in &mut out.a {
+        row.push(0.0);
+    }
+    let idx = out.c.len();
+    out.c.push(0.0);
+    out.integer_vars.push(true);
+    out.ub
+        .as_mut()
+        .expect("compiler metadata initialized")
+        .push(1.0);
+    out.var_names
+        .as_mut()
+        .expect("compiler metadata initialized")
+        .push(name);
+    idx
+}
+
+fn append_continuous_helper_var(out: &mut IPMIPProblem, name: String, upper: f64) -> usize {
+    for row in &mut out.a {
+        row.push(0.0);
+    }
+    let idx = out.c.len();
+    out.c.push(0.0);
+    out.integer_vars.push(false);
+    out.ub
+        .as_mut()
+        .expect("compiler metadata initialized")
+        .push(upper);
+    out.var_names
+        .as_mut()
+        .expect("compiler metadata initialized")
+        .push(name);
+    idx
+}
+
+fn append_compiled_row(out: &mut IPMIPProblem, row: Vec<f64>, rhs: f64, name: String) {
+    out.a.push(row);
+    out.b.push(rhs);
+    out.con_names
+        .as_mut()
+        .expect("compiler metadata initialized")
+        .push(name);
+}
+
+fn append_compiled_equality(out: &mut IPMIPProblem, row: Vec<f64>, rhs: f64, name: String) {
+    append_compiled_row(out, row.clone(), rhs, format!("{name}_le"));
+    append_compiled_row(
+        out,
+        row.into_iter().map(|v| -v).collect(),
+        -rhs,
+        format!("{name}_ge"),
+    );
+}
+
+fn finite_upper_bound(base: &IPMIPProblem, var: usize, kind: &str, idx: usize) -> f64 {
+    let upper = base
+        .ub
+        .as_ref()
+        .and_then(|ub| ub.get(var))
+        .copied()
+        .unwrap_or(f64::INFINITY);
+    if !upper.is_finite() {
+        panic!("{MODEL}: {kind} {idx} variable {var} needs a finite upper bound");
+    }
+    if upper < 0.0 {
+        panic!("{MODEL}: {kind} {idx} variable {var} has a negative upper bound");
+    }
+    upper
+}
+
+fn validate_semi_variable(base: &IPMIPProblem, semi: &SemiVariable, idx: usize) {
+    let n = base.c.len();
+    if semi.var >= n {
+        panic!(
+            "{MODEL}: semi variable {idx} index {} out of range {n}",
+            semi.var
+        );
+    }
+    if !semi.lower.is_finite() || semi.lower <= 0.0 {
+        panic!("{MODEL}: semi variable {idx} lower bound must be finite and positive");
+    }
+    let upper = finite_upper_bound(base, semi.var, "semi", idx);
+    if upper + 1e-9 < semi.lower {
+        panic!(
+            "{MODEL}: semi variable {idx} lower bound {} exceeds upper bound {}",
+            semi.lower, upper
+        );
+    }
+    if semi.kind == SemiVariableKind::SemiContinuous && base.integer_vars[semi.var] {
+        panic!(
+            "{MODEL}: semi-continuous variable {} must not already be marked integer",
+            semi.var
+        );
+    }
+}
+
+fn append_semi_variable_rows(
+    base: &IPMIPProblem,
+    out: &mut IPMIPProblem,
+    semi: &SemiVariable,
+    idx: usize,
+) {
+    let name = semi
+        .name
+        .clone()
+        .unwrap_or_else(|| format!("semi_{}", semi.var));
+    let upper = finite_upper_bound(base, semi.var, "semi", idx);
+    out.integer_vars[semi.var] = semi.kind == SemiVariableKind::SemiInteger;
+    let y = append_binary_helper_var(out, format!("{name}_active"));
+
+    let mut upper_row = vec![0.0; out.c.len()];
+    upper_row[semi.var] = 1.0;
+    upper_row[y] = -upper;
+    append_compiled_row(out, upper_row, 0.0, format!("{name}_upper_link"));
+
+    let mut lower_row = vec![0.0; out.c.len()];
+    lower_row[semi.var] = -1.0;
+    lower_row[y] = semi.lower;
+    append_compiled_row(out, lower_row, 0.0, format!("{name}_lower_link"));
+}
+
+fn validate_pwl_constraint(base: &IPMIPProblem, pwl: &PiecewiseLinearConstraint, idx: usize) {
+    let n = base.c.len();
+    if pwl.x_var >= n {
+        panic!("{MODEL}: pwl {idx} x_var {} out of range {n}", pwl.x_var);
+    }
+    if pwl.y_var >= n {
+        panic!("{MODEL}: pwl {idx} y_var {} out of range {n}", pwl.y_var);
+    }
+    if pwl.x_var == pwl.y_var {
+        panic!("{MODEL}: pwl {idx} x_var and y_var must be distinct");
+    }
+    if base.integer_vars[pwl.x_var] || base.integer_vars[pwl.y_var] {
+        panic!("{MODEL}: pwl {idx} x_var and y_var must be continuous variables");
+    }
+    if pwl.points.len() < 2 {
+        panic!("{MODEL}: pwl {idx} needs at least two breakpoints");
+    }
+    for (pos, point) in pwl.points.iter().enumerate() {
+        if !point.x.is_finite() || !point.y.is_finite() {
+            panic!("{MODEL}: pwl {idx} breakpoint {pos} must be finite");
+        }
+        if point.x < -1e-12 || point.y < -1e-12 {
+            panic!("{MODEL}: pwl {idx} breakpoint {pos} must be non-negative for this MIP backend");
+        }
+        if pos > 0 && point.x <= pwl.points[pos - 1].x + 1e-12 {
+            panic!("{MODEL}: pwl {idx} breakpoint x values must be strictly increasing");
+        }
+    }
+}
+
+fn append_pwl_constraint_rows(out: &mut IPMIPProblem, pwl: &PiecewiseLinearConstraint, idx: usize) {
+    let name = pwl.name.clone().unwrap_or_else(|| format!("pwl_{idx}"));
+    let lambdas: Vec<usize> = pwl
+        .points
+        .iter()
+        .enumerate()
+        .map(|(pos, _)| append_continuous_helper_var(out, format!("{name}_lambda_{pos}"), 1.0))
+        .collect();
+
+    let mut sum_row = vec![0.0; out.c.len()];
+    for &lambda in &lambdas {
+        sum_row[lambda] = 1.0;
+    }
+    append_compiled_equality(out, sum_row, 1.0, format!("{name}_lambda_sum"));
+
+    let mut x_row = vec![0.0; out.c.len()];
+    x_row[pwl.x_var] = 1.0;
+    for (&lambda, point) in lambdas.iter().zip(&pwl.points) {
+        x_row[lambda] -= point.x;
+    }
+    append_compiled_equality(out, x_row, 0.0, format!("{name}_x_interp"));
+
+    let mut y_row = vec![0.0; out.c.len()];
+    y_row[pwl.y_var] = 1.0;
+    for (&lambda, point) in lambdas.iter().zip(&pwl.points) {
+        y_row[lambda] -= point.y;
+    }
+    append_compiled_equality(out, y_row, 0.0, format!("{name}_y_interp"));
+
+    let set = SpecialOrderedSet {
+        kind: SpecialOrderedSetKind::Sos2,
+        vars: lambdas.clone(),
+        weights: Some(pwl.points.iter().map(|p| p.x).collect()),
+        name: Some(format!("{name}_sos2")),
+    };
+    let sos_base = out.clone();
+    append_sos2_rows(&sos_base, out, &set, idx, &lambdas);
+}
+
+fn validate_multi_objective_problem(problem: &MultiObjectiveIPMIPProblem) {
+    validate_ipmip_problem(&problem.base);
+    if problem.objectives.is_empty() {
+        panic!("{MODEL}: multi-objective problem needs at least one objective");
+    }
+    let n = problem.base.c.len();
+    for (idx, objective) in problem.objectives.iter().enumerate() {
+        if objective.c.len() != n {
+            panic!(
+                "{MODEL}: multi-objective {idx} coefficient length {} does not match variable count {n}",
+                objective.c.len()
+            );
+        }
+        for (j, &coef) in objective.c.iter().enumerate() {
+            if !coef.is_finite() {
+                panic!("{MODEL}: multi-objective {idx} coefficient {j} must be finite");
+            }
+        }
+    }
+}
+
 // -----------------------------------------------------------------------------
 // LP backend selection
 // -----------------------------------------------------------------------------
@@ -2597,6 +3556,68 @@ pub fn validate_ipmip_problem(p: &IPMIPProblem) {
     }
 }
 
+fn validate_lower_bounded_ipmip_problem(problem: &LowerBoundedIPMIPProblem) {
+    validate_ipmip_problem(&problem.base);
+    let n = problem.base.c.len();
+    if problem.lb.len() != n {
+        panic!(
+            "{MODEL}: lb length {} does not match variable count {n}",
+            problem.lb.len()
+        );
+    }
+    for (j, &lower) in problem.lb.iter().enumerate() {
+        if !lower.is_finite() {
+            panic!("{MODEL}: lb[{j}] must be finite");
+        }
+        if problem.base.integer_vars[j] && (lower - lower.round()).abs() > 1e-9 {
+            panic!("{MODEL}: lb[{j}] for integer variable must be integral");
+        }
+        if let Some(ub) = &problem.base.ub {
+            let upper = ub[j];
+            if upper.is_finite() && upper + 1e-9 < lower {
+                panic!("{MODEL}: lb[{j}] {lower} exceeds ub[{j}] {upper}");
+            }
+        }
+    }
+}
+
+fn validate_linear_row_constraint(
+    base: &IPMIPProblem,
+    constraint: &LinearRowConstraint,
+    idx: usize,
+) {
+    let n = base.c.len();
+    if constraint.coefs.len() != n {
+        panic!(
+            "{MODEL}: linear row {idx} coefficient length {} does not match variable count {n}",
+            constraint.coefs.len()
+        );
+    }
+    for (j, &coef) in constraint.coefs.iter().enumerate() {
+        if !coef.is_finite() {
+            panic!("{MODEL}: linear row {idx} coefficient {j} must be finite");
+        }
+    }
+    if constraint.lower.is_none() && constraint.upper.is_none() {
+        panic!("{MODEL}: linear row {idx} needs at least one finite bound");
+    }
+    if let Some(lower) = constraint.lower {
+        if !lower.is_finite() {
+            panic!("{MODEL}: linear row {idx} lower bound must be finite");
+        }
+    }
+    if let Some(upper) = constraint.upper {
+        if !upper.is_finite() {
+            panic!("{MODEL}: linear row {idx} upper bound must be finite");
+        }
+    }
+    if let (Some(lower), Some(upper)) = (constraint.lower, constraint.upper) {
+        if lower > upper + 1e-9 {
+            panic!("{MODEL}: linear row {idx} lower bound {lower} exceeds upper bound {upper}");
+        }
+    }
+}
+
 fn is_integer_feasible(p: &IPMIPProblem, x: &[f64], tol: f64) -> bool {
     if !bounds_ok(p, x, tol) || !satisfies_linear_rows(p, x, tol) {
         return false;
@@ -2607,6 +3628,14 @@ fn is_integer_feasible(p: &IPMIPProblem, x: &[f64], tol: f64) -> bool {
         }
     }
     true
+}
+
+fn add_objective_offset(value: f64, offset: f64) -> f64 {
+    if value.is_finite() {
+        value + offset
+    } else {
+        value
+    }
 }
 
 fn satisfies_linear_rows(p: &IPMIPProblem, x: &[f64], tol: f64) -> bool {
@@ -2669,12 +3698,12 @@ fn clamp_bounds(p: &IPMIPProblem, x: &[f64]) -> Vec<f64> {
     y
 }
 
+fn linear_objective_value(c: &[f64], x: &[f64]) -> f64 {
+    c.iter().zip(x).map(|(&cj, &xj)| cj * xj).sum()
+}
+
 fn objective(p: &IPMIPProblem, x: &[f64]) -> f64 {
-    let mut z = 0.0;
-    for j in 0..p.c.len() {
-        z += p.c[j] * x[j];
-    }
-    z
+    linear_objective_value(&p.c, x)
 }
 
 fn bound_dominated(p: &IPMIPProblem, bound: f64, incumbent: f64, has_incumbent: bool) -> bool {
@@ -2834,6 +3863,273 @@ pub fn build_small_mixed_ip() -> IPMIPProblem {
     }
 }
 
+/// Build a lower-bounded production mix model:
+/// `max x + 2y`, `x + y <= 8`, `3 <= x <= 6`, `0 <= y <= 10`.
+/// The lower bound forces the unique optimum to `x = 3, y = 5`.
+pub fn build_lower_bounded_production_ip() -> LowerBoundedIPMIPProblem {
+    LowerBoundedIPMIPProblem {
+        base: IPMIPProblem {
+            sense: Sense::Max,
+            c: vec![1.0, 2.0],
+            a: vec![vec![1.0, 1.0]],
+            b: vec![8.0],
+            integer_vars: vec![false, false],
+            ub: Some(vec![6.0, 10.0]),
+            var_names: Some(vec!["base_load".to_string(), "premium_load".to_string()]),
+            con_names: Some(vec!["total_capacity".to_string()]),
+            variable_nodes: None,
+            constraint_nodes: None,
+        },
+        lb: vec![3.0, 0.0],
+    }
+}
+
+/// Build a model with source-level equality, greater-than, and ranged rows:
+/// `max 3x + 2y`, `x + 2y = 8`, `x - y >= 1`, `5 <= x + y <= 7`.
+/// The unique optimum is `x = 6, y = 1`.
+pub fn build_general_linear_rows_ip() -> GeneralLinearIPMIPProblem {
+    GeneralLinearIPMIPProblem {
+        base: IPMIPProblem {
+            sense: Sense::Max,
+            c: vec![3.0, 2.0],
+            a: vec![vec![1.0, 0.0]],
+            b: vec![10.0],
+            integer_vars: vec![false, false],
+            ub: Some(vec![10.0, 10.0]),
+            var_names: Some(vec!["x".to_string(), "y".to_string()]),
+            con_names: Some(vec!["x_cap".to_string()]),
+            variable_nodes: None,
+            constraint_nodes: None,
+        },
+        linear_constraints: vec![
+            LinearRowConstraint {
+                coefs: vec![1.0, 2.0],
+                lower: Some(8.0),
+                upper: Some(8.0),
+                name: Some("balance_eq".to_string()),
+            },
+            LinearRowConstraint {
+                coefs: vec![1.0, -1.0],
+                lower: Some(1.0),
+                upper: None,
+                name: Some("dominance_ge".to_string()),
+            },
+            LinearRowConstraint {
+                coefs: vec![1.0, 1.0],
+                lower: Some(5.0),
+                upper: Some(7.0),
+                name: Some("throughput_range".to_string()),
+            },
+        ],
+    }
+}
+
+/// Build a fixed-charge indicator MIP:
+/// `use = 0 => production <= 0`, max `5 production - 3 use`.
+pub fn build_fixed_charge_indicator_ip() -> IndicatorIPMIPProblem {
+    let base = IPMIPProblem {
+        sense: Sense::Max,
+        c: vec![-3.0, 5.0],
+        a: vec![vec![0.0, 1.0]],
+        b: vec![4.0],
+        integer_vars: vec![true, false],
+        ub: Some(vec![1.0, 4.0]),
+        var_names: Some(vec!["use_line".to_string(), "production".to_string()]),
+        con_names: Some(vec!["production_cap".to_string()]),
+        variable_nodes: None,
+        constraint_nodes: None,
+    };
+    IndicatorIPMIPProblem {
+        base,
+        indicators: vec![IndicatorConstraint {
+            binary_var: 0,
+            active_value: false,
+            coefs: vec![0.0, 1.0],
+            sense: IndicatorSense::Le,
+            rhs: 0.0,
+            name: Some("closed_line_no_production".to_string()),
+        }],
+    }
+}
+
+/// Build an SOS1 choice model:
+/// at most one activity in the set may be positive.
+pub fn build_sos1_choice_ip() -> SosIPMIPProblem {
+    let base = IPMIPProblem {
+        sense: Sense::Max,
+        c: vec![10.0, 9.0, 1.0],
+        a: vec![vec![1.0, 1.0, 1.0]],
+        b: vec![8.0],
+        integer_vars: vec![false, false, false],
+        ub: Some(vec![4.0, 4.0, 4.0]),
+        var_names: Some(vec![
+            "activity_a".to_string(),
+            "activity_b".to_string(),
+            "activity_c".to_string(),
+        ]),
+        con_names: Some(vec!["budget".to_string()]),
+        variable_nodes: None,
+        constraint_nodes: None,
+    };
+    SosIPMIPProblem {
+        base,
+        sos: vec![SpecialOrderedSet {
+            kind: SpecialOrderedSetKind::Sos1,
+            vars: vec![0, 1, 2],
+            weights: Some(vec![1.0, 2.0, 3.0]),
+            name: Some("activity_choice".to_string()),
+        }],
+    }
+}
+
+/// Build an SOS2 adjacency model where the two best variables are nonadjacent.
+pub fn build_sos2_adjacency_ip() -> SosIPMIPProblem {
+    let base = IPMIPProblem {
+        sense: Sense::Max,
+        c: vec![10.0, 0.0, 0.0, 10.0],
+        a: vec![vec![1.0, 1.0, 1.0, 1.0]],
+        b: vec![2.0],
+        integer_vars: vec![false, false, false, false],
+        ub: Some(vec![1.0, 1.0, 1.0, 1.0]),
+        var_names: Some(vec![
+            "lambda_0".to_string(),
+            "lambda_1".to_string(),
+            "lambda_2".to_string(),
+            "lambda_3".to_string(),
+        ]),
+        con_names: Some(vec!["mass".to_string()]),
+        variable_nodes: None,
+        constraint_nodes: None,
+    };
+    SosIPMIPProblem {
+        base,
+        sos: vec![SpecialOrderedSet {
+            kind: SpecialOrderedSetKind::Sos2,
+            vars: vec![0, 1, 2, 3],
+            weights: Some(vec![0.0, 1.0, 2.0, 3.0]),
+            name: Some("piecewise_lambdas".to_string()),
+        }],
+    }
+}
+
+/// Build a semi-continuous model where the ordinary LP optimum would choose
+/// `0 < x < lower`, so the semi domain forces the machine off.
+pub fn build_semi_continuous_gate_ip() -> SemiIPMIPProblem {
+    let base = IPMIPProblem {
+        sense: Sense::Max,
+        c: vec![1.0],
+        a: vec![vec![1.0]],
+        b: vec![2.0],
+        integer_vars: vec![false],
+        ub: Some(vec![5.0]),
+        var_names: Some(vec!["production".to_string()]),
+        con_names: Some(vec!["small_order_cap".to_string()]),
+        variable_nodes: None,
+        constraint_nodes: None,
+    };
+    SemiIPMIPProblem {
+        base,
+        semi_variables: vec![SemiVariable {
+            kind: SemiVariableKind::SemiContinuous,
+            var: 0,
+            lower: 3.0,
+            name: Some("production".to_string()),
+        }],
+    }
+}
+
+/// Build a semi-integer lot-size model with a fractional resource cap. The
+/// source variable starts continuous, and the semi-integer compiler makes it
+/// integral in the ordinary MIP.
+pub fn build_semi_integer_lot_ip() -> SemiIPMIPProblem {
+    let base = IPMIPProblem {
+        sense: Sense::Max,
+        c: vec![2.0],
+        a: vec![vec![1.0]],
+        b: vec![4.5],
+        integer_vars: vec![false],
+        ub: Some(vec![5.0]),
+        var_names: Some(vec!["lot_size".to_string()]),
+        con_names: Some(vec!["resource_cap".to_string()]),
+        variable_nodes: None,
+        constraint_nodes: None,
+    };
+    SemiIPMIPProblem {
+        base,
+        semi_variables: vec![SemiVariable {
+            kind: SemiVariableKind::SemiInteger,
+            var: 0,
+            lower: 3.0,
+            name: Some("lot_size".to_string()),
+        }],
+    }
+}
+
+/// Build a non-convex PWL reward model:
+/// `reward = f(activity)`, max reward, with the best breakpoint at
+/// `activity = 1`.
+pub fn build_piecewise_linear_reward_ip() -> PwlIPMIPProblem {
+    let base = IPMIPProblem {
+        sense: Sense::Max,
+        c: vec![0.0, 1.0],
+        a: vec![vec![1.0, 0.0]],
+        b: vec![3.0],
+        integer_vars: vec![false, false],
+        ub: Some(vec![3.0, 4.0]),
+        var_names: Some(vec!["activity".to_string(), "reward".to_string()]),
+        con_names: Some(vec!["activity_cap".to_string()]),
+        variable_nodes: None,
+        constraint_nodes: None,
+    };
+    PwlIPMIPProblem {
+        base,
+        pwl: vec![PiecewiseLinearConstraint {
+            x_var: 0,
+            y_var: 1,
+            points: vec![
+                PiecewiseLinearPoint { x: 0.0, y: 0.0 },
+                PiecewiseLinearPoint { x: 1.0, y: 4.0 },
+                PiecewiseLinearPoint { x: 2.0, y: 1.0 },
+                PiecewiseLinearPoint { x: 3.0, y: 3.0 },
+            ],
+            name: Some("activity_reward".to_string()),
+        }],
+    }
+}
+
+/// Build a lexicographic MIP:
+/// first select as many choices as possible, then prefer choice A over B among
+/// equal-cardinality selections.
+pub fn build_lexicographic_choice_ip() -> MultiObjectiveIPMIPProblem {
+    let base = IPMIPProblem {
+        sense: Sense::Max,
+        c: vec![0.0, 0.0],
+        a: vec![vec![1.0, 1.0]],
+        b: vec![1.0],
+        integer_vars: vec![true, true],
+        ub: Some(vec![1.0, 1.0]),
+        var_names: Some(vec!["choice_a".to_string(), "choice_b".to_string()]),
+        con_names: Some(vec!["choose_at_most_one".to_string()]),
+        variable_nodes: None,
+        constraint_nodes: None,
+    };
+    MultiObjectiveIPMIPProblem {
+        base,
+        objectives: vec![
+            LexicographicObjective {
+                sense: Sense::Max,
+                c: vec![1.0, 1.0],
+                name: Some("maximize_cardinality".to_string()),
+            },
+            LexicographicObjective {
+                sense: Sense::Max,
+                c: vec![3.0, 1.0],
+                name: Some("prefer_choice_a".to_string()),
+            },
+        ],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! The branch-and-cut DES recovers the known optima of a small binary
@@ -2859,6 +4155,157 @@ mod tests {
         assert_eq!(sol.status, IPMIPStatus::Optimal);
         // max x_a + x_b + y with x_a + x_b <= 3, all <= 10. Optimum = 3 + 10 = 13.
         assert!((sol.z - 13.0).abs() < 1e-6, "z={}", sol.z);
+    }
+
+    #[test]
+    fn solves_lower_bounded_ip() {
+        let p = build_lower_bounded_production_ip();
+        let (linearized, offset) = linearize_lower_bounds_problem(&p);
+        assert_eq!(linearized.b, vec![5.0]);
+        assert_eq!(linearized.ub.as_ref().unwrap(), &vec![3.0, 10.0]);
+        assert!((offset - 3.0).abs() < 1e-9, "offset={offset}");
+        let sol = solve_lower_bounded_ipmip_with_des(p, IPMIPSolveOptions::default());
+        assert_eq!(sol.status, IPMIPStatus::Optimal);
+        assert!((sol.z - 13.0).abs() < 1e-6, "z={}", sol.z);
+        assert!((sol.x[0] - 3.0).abs() < 1e-6, "x={}", sol.x[0]);
+        assert!((sol.x[1] - 5.0).abs() < 1e-6, "y={}", sol.x[1]);
+    }
+
+    #[test]
+    fn solves_general_linear_rows_ip() {
+        let p = build_general_linear_rows_ip();
+        let linearized = linearize_general_linear_problem(&p);
+        assert_eq!(linearized.a.len(), p.base.a.len() + 5);
+        let sol = solve_general_linear_ipmip_with_des(
+            p,
+            IPMIPSolveOptions {
+                lp_algorithm: Some(LpRelaxationAlgorithm::Concrete(
+                    ConcreteLpRelaxationAlgorithm::InternalSimplex,
+                )),
+                max_cut_rounds: Some(0),
+                ..Default::default()
+            },
+        );
+        assert_eq!(sol.status, IPMIPStatus::Optimal);
+        assert!((sol.z - 20.0).abs() < 1e-6, "z={}", sol.z);
+        assert!((sol.x[0] - 6.0).abs() < 1e-6, "x={}", sol.x[0]);
+        assert!((sol.x[1] - 1.0).abs() < 1e-6, "y={}", sol.x[1]);
+    }
+
+    #[test]
+    fn solves_fixed_charge_indicator_ip() {
+        let p = build_fixed_charge_indicator_ip();
+        let linearized = linearize_indicator_problem(&p);
+        assert_eq!(linearized.a.len(), p.base.a.len() + 1);
+        let sol = solve_indicator_ipmip_with_des(p, IPMIPSolveOptions::default());
+        assert_eq!(sol.status, IPMIPStatus::Optimal);
+        assert!((sol.z - 17.0).abs() < 1e-6, "z={}", sol.z);
+        assert!((sol.x[0] - 1.0).abs() < 1e-6, "use={}", sol.x[0]);
+        assert!((sol.x[1] - 4.0).abs() < 1e-6, "prod={}", sol.x[1]);
+    }
+
+    #[test]
+    fn solves_sos1_choice_ip() {
+        let p = build_sos1_choice_ip();
+        let linearized = linearize_sos_problem(&p);
+        assert!(linearized.c.len() > p.base.c.len());
+        let sol = solve_sos_ipmip_with_des(p, IPMIPSolveOptions::default());
+        assert_eq!(sol.status, IPMIPStatus::Optimal);
+        assert!((sol.z - 40.0).abs() < 1e-6, "z={}", sol.z);
+        assert!((sol.x[0] - 4.0).abs() < 1e-6, "x0={}", sol.x[0]);
+        assert!(sol.x[1].abs() < 1e-6, "x1={}", sol.x[1]);
+        assert!(sol.x[2].abs() < 1e-6, "x2={}", sol.x[2]);
+    }
+
+    #[test]
+    fn solves_sos2_adjacency_ip() {
+        let p = build_sos2_adjacency_ip();
+        let linearized = linearize_sos_problem(&p);
+        assert_eq!(linearized.c.len(), p.base.c.len() + p.base.c.len() - 1);
+        let sol = solve_sos_ipmip_with_des(p, IPMIPSolveOptions::default());
+        assert_eq!(sol.status, IPMIPStatus::Optimal);
+        assert!((sol.z - 10.0).abs() < 1e-6, "z={}", sol.z);
+        let positive: Vec<usize> = sol
+            .x
+            .iter()
+            .take(4)
+            .enumerate()
+            .filter_map(|(i, &v)| if v > 1e-6 { Some(i) } else { None })
+            .collect();
+        assert!(
+            positive.len() <= 2 && positive.windows(2).all(|window| window[1] == window[0] + 1),
+            "positive={positive:?} x={:?}",
+            sol.x
+        );
+    }
+
+    #[test]
+    fn solves_semi_continuous_gate_ip() {
+        let p = build_semi_continuous_gate_ip();
+        let linearized = linearize_semi_problem(&p);
+        assert_eq!(linearized.c.len(), p.base.c.len() + 1);
+        assert_eq!(linearized.a.len(), p.base.a.len() + 2);
+        assert!(!linearized.integer_vars[0]);
+        assert!(linearized.integer_vars[1]);
+        let sol = solve_semi_ipmip_with_des(p, IPMIPSolveOptions::default());
+        assert_eq!(sol.status, IPMIPStatus::Optimal);
+        assert!(sol.z.abs() < 1e-6, "z={}", sol.z);
+        assert!(sol.x[0].abs() < 1e-6, "x={}", sol.x[0]);
+    }
+
+    #[test]
+    fn solves_semi_integer_lot_ip() {
+        let p = build_semi_integer_lot_ip();
+        let linearized = linearize_semi_problem(&p);
+        assert_eq!(linearized.c.len(), p.base.c.len() + 1);
+        assert!(linearized.integer_vars[0]);
+        assert!(linearized.integer_vars[1]);
+        let sol = solve_semi_ipmip_with_des(p, IPMIPSolveOptions::default());
+        assert_eq!(sol.status, IPMIPStatus::Optimal);
+        assert!((sol.z - 8.0).abs() < 1e-6, "z={}", sol.z);
+        assert!((sol.x[0] - 4.0).abs() < 1e-6, "lot={}", sol.x[0]);
+    }
+
+    #[test]
+    fn solves_piecewise_linear_reward_ip() {
+        let p = build_piecewise_linear_reward_ip();
+        let linearized = linearize_pwl_problem(&p);
+        assert_eq!(linearized.c.len(), p.base.c.len() + 7);
+        assert_eq!(linearized.a.len(), p.base.a.len() + 11);
+        let sol = solve_pwl_ipmip_with_des(
+            p,
+            IPMIPSolveOptions {
+                lp_algorithm: Some(LpRelaxationAlgorithm::Concrete(
+                    ConcreteLpRelaxationAlgorithm::InternalSimplex,
+                )),
+                max_cut_rounds: Some(0),
+                ..Default::default()
+            },
+        );
+        assert_eq!(sol.status, IPMIPStatus::Optimal);
+        assert!((sol.z - 4.0).abs() < 1e-6, "z={}", sol.z);
+        assert!((sol.x[0] - 1.0).abs() < 1e-6, "activity={}", sol.x[0]);
+        assert!((sol.x[1] - 4.0).abs() < 1e-6, "reward={}", sol.x[1]);
+    }
+
+    #[test]
+    fn solves_lexicographic_choice_ip() {
+        let p = build_lexicographic_choice_ip();
+        let sol = solve_multi_objective_ipmip_with_des(
+            p,
+            IPMIPSolveOptions {
+                lp_algorithm: Some(LpRelaxationAlgorithm::Concrete(
+                    ConcreteLpRelaxationAlgorithm::InternalSimplex,
+                )),
+                max_cut_rounds: Some(0),
+                ..Default::default()
+            },
+        );
+        assert_eq!(sol.status, IPMIPStatus::Optimal);
+        assert_eq!(sol.stage_solutions.len(), 2);
+        assert_eq!(sol.objective_values, vec![1.0, 3.0]);
+        assert!((sol.x[0] - 1.0).abs() < 1e-6, "choice_a={}", sol.x[0]);
+        assert!(sol.x[1].abs() < 1e-6, "choice_b={}", sol.x[1]);
     }
 
     #[test]

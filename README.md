@@ -45,6 +45,7 @@ RunArtifact { frames, results, summary }
 - [Reports And Artifacts](#reports-and-artifacts)
 - [Running The Included Demos](#running-the-included-demos)
 - [Development](#development)
+- [Module And Build Performance Plan](#module-and-build-performance-plan)
 - [Module Map](#module-map)
 
 ## Install
@@ -503,6 +504,115 @@ use des_engine::des::service::*;
 use des_engine::des::plugin::*;
 use des_engine::des::streaming::*;
 ```
+
+## Module And Build Performance Plan
+
+The current package is intentionally organized as one public SDK crate,
+`des_engine`, with a deep `des::*` module tree and many demo/validation
+binaries under `src/bin`. Rust modules keep the source tree understandable, but
+they are not strong compilation boundaries. Cargo's main rebuild unit is the
+crate/package, while `rustc` incremental compilation reuses work inside that
+crate where it can.
+
+After `git pull`, `cargo build` evaluates the Cargo dependency graph:
+
+- Unchanged dependency crates are reused from the build cache.
+- Changed crates are rebuilt.
+- Crates that depend on a changed crate are rebuilt as needed.
+- Changes inside this single `des_engine` crate can still cause a broad rebuild
+  of the crate, even when the edit was made in one source module.
+
+For better compile-time isolation, the long-term direction is to keep the
+existing `des_engine::prelude` and `des_engine::sdk` surface stable while
+gradually moving internally coherent areas into a Cargo workspace.
+
+Recommended workspace shape:
+
+```text
+discrete-event-system.rs/
+  Cargo.toml                  # workspace root
+  crates/
+    des-core/                 # shared types, errors, time, ids, JSON value helpers
+    des-model/                # ModelCitizen, RunArtifact, registry, SDK contracts
+    des-fel/                  # future-event-list engine and queueing primitives
+    des-decision/             # MDP/POMDP specs, solvers, rollout, visualization data
+    des-hybrid/               # hybrid block runtime and executive
+    des-studio/               # visual block graph, authoring/runtime cells
+    des-animation/            # frame types, HTML players, reports
+    des-plugin/               # external process/plugin contract
+    des-service/              # service discovery descriptors
+    des-engine/               # facade crate preserving today's public imports
+    des-demos/                # optional demo/validation binaries
+```
+
+The facade crate should re-export the stable SDK modules so embedders can keep
+using:
+
+```rust
+use des_engine::prelude::*;
+use des_engine::des::plugin::*;
+use des_engine::des::streaming::*;
+```
+
+Good crate boundaries for this project:
+
+- Put small, stable, dependency-light primitives in `des-core`.
+- Keep JSON-facing SDK contracts in `des-model` so embedders and model families
+  share one artifact shape.
+- Let each major model family (`fel`, `decision`, `hybrid`, `studio`,
+  `acausal`, `equation`) depend inward on contracts instead of sideways on one
+  another.
+- Keep HTML rendering, reports, and animation output outside the numerical core
+  where practical.
+- Move demo and validation binaries into a separate package once they no longer
+  need private internals.
+- Use feature flags for optional heavy surfaces, especially plugins, HTML
+  rendering, schemas, service integration, or future GPU/back-end adapters.
+
+Things to avoid:
+
+- Splitting every source directory into a crate. Crate boundaries should
+  represent stable APIs and real dependency cuts, not just file organization.
+- Letting the facade crate pull every optional dependency by default.
+- Exposing large generic or macro-heavy internals across crate boundaries unless
+  that is part of the intended public API.
+- Using FFI only for compile speed. FFI is valuable for C/Python/JS/external
+  plugin boundaries, but it adds ABI, linking, `unsafe`, and testing overhead.
+  Rust-to-Rust modularity should use workspace crates first.
+
+Suggested migration order:
+
+1. Measure current build behavior with `cargo build --timings`.
+2. Move dependency-light shared primitives into `des-core`.
+3. Move the first-class model contract into `des-model`.
+4. Move one mostly self-contained family, such as `des-fel` or `des-decision`,
+   and keep compatibility re-exports in `des_engine`.
+5. Move animation/reporting and demo binaries later, after the core crates have
+   settled.
+6. Add CI checks with package-scoped commands such as `cargo test -p des-core`
+   and `cargo test -p des-engine --all-features`.
+
+Day-to-day build guidance:
+
+```sh
+cargo check
+cargo test -p des_engine
+cargo build --timings
+CARGO_INCREMENTAL=1 cargo build
+```
+
+Once the workspace split exists, prefer package-scoped commands while
+developing a narrow area:
+
+```sh
+cargo check -p des-fel
+cargo test -p des-decision
+cargo run -p des-demos --bin main_traffic
+```
+
+If rebuilds are still slow after crate boundaries are in place, consider adding
+`sccache` for shared compiler artifact caching and reviewing dependency
+features to keep default builds lean.
 
 ## Module Map
 

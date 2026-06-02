@@ -1241,9 +1241,10 @@ fn pivot(t: &mut Vec<Vec<f64>>, basis: &mut [usize], pivot_row: usize, pivot_col
 // External-solver dispatcher.
 // -----------------------------------------------------------------------------
 
-/// Default path to the scipy wrapper script (mirrors the TS default, which
-/// resolved `<repo>/external-references/lp/lp_solve.py` from the source file).
-const DEFAULT_SCRIPT: &str = "external-references/lp/lp_solve.py";
+/// Default path to the repository-local Python LP bridge. The bridge prefers
+/// SciPy/HiGHS when installed and falls back to dependency-free vertex
+/// enumeration for small validation models.
+const DEFAULT_SCRIPT: &str = "scripts/lp_solve.py";
 
 /// Configuration for the external scipy bridge. TS `interface ExternalSolverOptions`.
 ///
@@ -1257,7 +1258,7 @@ pub struct ExternalSolverOptions {
     pub method: Option<String>,
     /// Override the python executable. Defaults to `PYTHON` env var or `"python3"`.
     pub python: Option<String>,
-    /// Override the script path. Defaults to `external-references/lp/lp_solve.py`.
+    /// Override the script path. Defaults to `scripts/lp_solve.py`.
     pub script: Option<String>,
     /// Accepted for parity with the TS `maxBuffer`; unused in the Rust port.
     pub max_buffer: Option<usize>,

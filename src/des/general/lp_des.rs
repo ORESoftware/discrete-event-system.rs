@@ -132,8 +132,12 @@ struct SimplexState {
     n_orig: usize,
     shifts: Vec<f64>,
     y_index_of_pos: Vec<usize>,
+    y_cols: usize,
     /// `-1` if the variable has no negative twin (matches `lp.rs`).
     free_neg: Vec<isize>,
+    slack_sign: Vec<f64>,
+    row_sign: Vec<f64>,
+    art_col: Vec<isize>,
     sense: Sense,
     trace: DESSimplexTrace,
     snapshot_version: i64,
@@ -155,7 +159,11 @@ impl SimplexState {
         n_orig: usize,
         shifts: Vec<f64>,
         y_index_of_pos: Vec<usize>,
+        y_cols: usize,
         free_neg: Vec<isize>,
+        slack_sign: Vec<f64>,
+        row_sign: Vec<f64>,
+        art_col: Vec<isize>,
         sense: Sense,
         pivot_rule: PivotRule,
     ) -> Self {
@@ -180,7 +188,11 @@ impl SimplexState {
             n_orig,
             shifts,
             y_index_of_pos,
+            y_cols,
             free_neg,
+            slack_sign,
+            row_sign,
+            art_col,
             sense,
             trace: DESSimplexTrace::default(),
             snapshot_version: 0,
@@ -221,8 +233,64 @@ impl SimplexState {
         }
     }
 
+    fn certificates(
+        &self,
+        p: &LPProblem,
+    ) -> (Option<Vec<f64>>, Option<Vec<f64>>, Option<Vec<f64>>) {
+        let a_ub: &[Vec<f64>] = p.a_ub.as_deref().unwrap_or(&[]);
+        let a_eq: &[Vec<f64>] = p.a_eq.as_deref().unwrap_or(&[]);
+        let sense_sign = if p.sense == Sense::Max { 1.0 } else { -1.0 };
+        let cost_row = &self.t[self.m];
+        let mut row_duals = Vec::with_capacity(self.m);
+
+        for r in 0..self.m {
+            let dual = if self.slack_sign[r] != 0.0 {
+                let slack_col = self.y_cols + r;
+                sense_sign * self.slack_sign[r] * cost_row[slack_col]
+            } else {
+                let art_col = self.art_col[r];
+                if art_col < 0 {
+                    return (None, None, None);
+                }
+                sense_sign * self.row_sign[r] * cost_row[art_col as usize]
+            };
+            row_duals.push(clean_certificate_value(dual));
+        }
+
+        let dual_ub: Vec<f64> = row_duals.iter().take(a_ub.len()).copied().collect();
+        let eq_start = a_ub.len();
+        let dual_eq: Vec<f64> = row_duals
+            .iter()
+            .skip(eq_start)
+            .take(a_eq.len())
+            .copied()
+            .collect();
+
+        let mut reduced_costs = Vec::with_capacity(p.c.len());
+        for (j, &coef) in p.c.iter().enumerate() {
+            let mut reduced = coef;
+            for (row, &dual) in a_ub.iter().zip(&dual_ub) {
+                reduced -= dual * row[j];
+            }
+            for (row, &dual) in a_eq.iter().zip(&dual_eq) {
+                reduced -= dual * row[j];
+            }
+            reduced_costs.push(clean_certificate_value(reduced));
+        }
+
+        (Some(dual_ub), Some(dual_eq), Some(reduced_costs))
+    }
+
     fn mark_snapshot(&mut self) {
         self.snapshot_version += 1;
+    }
+}
+
+fn clean_certificate_value(value: f64) -> f64 {
+    if value.abs() <= 1e-8 {
+        0.0
+    } else {
+        value
     }
 }
 
@@ -565,7 +633,11 @@ struct Preprocessed {
     n_orig: usize,
     shifts: Vec<f64>,
     y_index_of_pos: Vec<usize>,
+    y_cols: usize,
     free_neg: Vec<isize>,
+    slack_sign: Vec<f64>,
+    row_sign: Vec<f64>,
+    art_col: Vec<isize>,
 }
 
 fn preprocess(p: &LPProblem) -> Preprocessed {
@@ -658,16 +730,19 @@ fn preprocess(p: &LPProblem) -> Preprocessed {
     let m = ay.len();
 
     // Sign-fix b ≥ 0 by flipping rows. slackSign: +1 ≤ row, −1 ≥ row, 0 equality.
-    let mut slack_sign: Vec<isize> = Vec::with_capacity(m);
+    let mut slack_sign: Vec<f64> = Vec::with_capacity(m);
+    let mut row_sign: Vec<f64> = Vec::with_capacity(m);
     for r in 0..m {
         if by[r] < 0.0 {
             for j in 0..ny {
                 ay[r][j] = -ay[r][j];
             }
             by[r] = -by[r];
-            slack_sign.push(if eq_rows[r] { 0 } else { -1 });
+            row_sign.push(-1.0);
+            slack_sign.push(if eq_rows[r] { 0.0 } else { -1.0 });
         } else {
-            slack_sign.push(if eq_rows[r] { 0 } else { 1 });
+            row_sign.push(1.0);
+            slack_sign.push(if eq_rows[r] { 0.0 } else { 1.0 });
         }
     }
 
@@ -677,7 +752,7 @@ fn preprocess(p: &LPProblem) -> Preprocessed {
     let mut art_count = 0usize;
     let mut art_col: Vec<isize> = Vec::with_capacity(m); // -1 if no artificial
     for r in 0..m {
-        if slack_sign[r] == 1 {
+        if slack_sign[r] == 1.0 {
             art_col.push(-1);
         } else {
             let c = ny_total + art_count;
@@ -695,9 +770,9 @@ fn preprocess(p: &LPProblem) -> Preprocessed {
         for j in 0..ny {
             row[j] = ay[r][j];
         }
-        if slack_sign[r] == 1 {
+        if slack_sign[r] == 1.0 {
             row[ny + r] = 1.0;
-        } else if slack_sign[r] == -1 {
+        } else if slack_sign[r] == -1.0 {
             row[ny + r] = -1.0; // surplus
         }
         if art_col[r] >= 0 {
@@ -754,7 +829,11 @@ fn preprocess(p: &LPProblem) -> Preprocessed {
         n_orig: n,
         shifts,
         y_index_of_pos,
+        y_cols: ny,
         free_neg,
+        slack_sign,
+        row_sign,
+        art_col,
     }
 }
 
@@ -826,7 +905,11 @@ pub fn solve_lp_via_des(p: &LPProblem, opts: &DESSimplexOptions) -> DESSimplexSo
         pp.n_orig,
         pp.shifts,
         pp.y_index_of_pos,
+        pp.y_cols,
         pp.free_neg,
+        pp.slack_sign,
+        pp.row_sign,
+        pp.art_col,
         sense,
         pivot_rule,
     )));
@@ -920,6 +1003,7 @@ pub fn solve_lp_via_des(p: &LPProblem, opts: &DESSimplexOptions) -> DESSimplexSo
     for i in 0..p.c.len() {
         obj += p.c[i] * x[i];
     }
+    let (dual_ub, dual_eq, reduced_costs) = s.certificates(p);
     let message = format!(
         "DES simplex: {} pivots across {}",
         s.trace.pivot_history.len(),
@@ -933,9 +1017,9 @@ pub fn solve_lp_via_des(p: &LPProblem, opts: &DESSimplexOptions) -> DESSimplexSo
         status: LPStatus::Optimal,
         x,
         objective: obj,
-        dual_ub: None,
-        dual_eq: None,
-        reduced_costs: None,
+        dual_ub,
+        dual_eq,
+        reduced_costs,
         iters: Some(s.iters),
         solver,
         elapsed_ms: ms_since(t0),
@@ -977,6 +1061,25 @@ mod tests {
     use crate::des::general::lp::{solve_lp_internal, InternalSimplexOptions};
 
     const TOL: f64 = 1e-6;
+
+    fn assert_vec_close(label: &str, actual: &[f64], expected: &[f64]) {
+        assert_eq!(actual.len(), expected.len(), "{label} length");
+        for (i, (&a, &e)) in actual.iter().zip(expected).enumerate() {
+            assert!((a - e).abs() < TOL, "{label}[{i}] expected {e}, got {a}");
+        }
+    }
+
+    fn assert_certificate_vec_close(
+        label: &str,
+        actual: &Option<Vec<f64>>,
+        expected: &Option<Vec<f64>>,
+    ) {
+        let actual = actual.as_ref().unwrap_or_else(|| panic!("{label} missing"));
+        let expected = expected
+            .as_ref()
+            .unwrap_or_else(|| panic!("{label} expected missing"));
+        assert_vec_close(label, actual, expected);
+    }
 
     #[test]
     fn maximize_box_matches_known_optimum() {
@@ -1020,6 +1123,8 @@ mod tests {
             direct.objective
         );
         assert!((des.x[0] + des.x[1] - 2.0).abs() < TOL);
+        assert_certificate_vec_close("dual_ub", &des.dual_ub, &direct.dual_ub);
+        assert_certificate_vec_close("reduced_costs", &des.reduced_costs, &direct.reduced_costs);
     }
 
     #[test]
@@ -1047,5 +1152,8 @@ mod tests {
         assert!((des.objective - direct.objective).abs() < TOL);
         assert!((des.x[0] - 3.0).abs() < TOL, "x0={}", des.x[0]);
         assert!((des.x[1] - 1.0).abs() < TOL, "x1={}", des.x[1]);
+        assert_certificate_vec_close("dual_ub", &des.dual_ub, &direct.dual_ub);
+        assert_certificate_vec_close("dual_eq", &des.dual_eq, &direct.dual_eq);
+        assert_certificate_vec_close("reduced_costs", &des.reduced_costs, &direct.reduced_costs);
     }
 }

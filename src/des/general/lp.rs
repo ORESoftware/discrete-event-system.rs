@@ -288,6 +288,7 @@ fn run_internal_simplex(p: &LPProblem, opts: &InternalSimplexOptions) -> LPSolut
     let slack_start = ny;
     // Marker convention for artificials: -1 = none, -2 = needs one (resolved below).
     let mut artificial_cols: Vec<isize> = Vec::with_capacity(m);
+    let mut slack_sign: Vec<f64> = Vec::with_capacity(m);
     for r in 0..m {
         if bcopy[r] < 0.0 {
             for j in 0..ny {
@@ -295,8 +296,10 @@ fn run_internal_simplex(p: &LPProblem, opts: &InternalSimplexOptions) -> LPSolut
             }
             bcopy[r] = -bcopy[r];
             artificial_cols.push(-2);
+            slack_sign.push(-1.0);
         } else {
             artificial_cols.push(-1);
+            slack_sign.push(1.0);
         }
     }
     // Allocate artificial column indices.
@@ -502,18 +505,92 @@ fn run_internal_simplex(p: &LPProblem, opts: &InternalSimplexOptions) -> LPSolut
     for i in 0..n {
         obj += p.c[i] * x[i];
     }
+    let (dual_ub, dual_eq, reduced_costs) =
+        simplex_certificates(p, &basis, &t, &phase2_cost, ny, full_cols, &slack_sign);
 
     LPSolution {
         status: LPStatus::Optimal,
         x,
         objective: obj,
-        dual_ub: None,
-        dual_eq: None,
-        reduced_costs: None,
+        dual_ub,
+        dual_eq,
+        reduced_costs,
         iters: Some(iters),
         solver: "internal".to_string(),
         elapsed_ms: ms_since(t0),
         message: Some(format!("internal simplex: phase1+phase2, {iters} iters")),
+    }
+}
+
+fn simplex_certificates(
+    p: &LPProblem,
+    basis: &[usize],
+    t: &[Vec<f64>],
+    cost: &[f64],
+    ny: usize,
+    full_cols: usize,
+    slack_sign: &[f64],
+) -> (Option<Vec<f64>>, Option<Vec<f64>>, Option<Vec<f64>>) {
+    let a_ub: &[Vec<f64>] = p.a_ub.as_deref().unwrap_or(&[]);
+    let a_eq: &[Vec<f64>] = p.a_eq.as_deref().unwrap_or(&[]);
+    let sense_sign = if p.sense == Sense::Max { 1.0 } else { -1.0 };
+    let row_duals: Vec<f64> = slack_sign
+        .iter()
+        .enumerate()
+        .map(|(r, &sign)| {
+            let slack_col = ny + r;
+            let rc = simplex_reduced_cost(t, basis, cost, slack_col, full_cols);
+            clean_certificate_value(sense_sign * -sign * rc)
+        })
+        .collect();
+
+    let dual_ub: Vec<f64> = row_duals.iter().take(a_ub.len()).copied().collect();
+    let eq_start = a_ub.len();
+    let mut dual_eq = Vec::with_capacity(a_eq.len());
+    for r in 0..a_eq.len() {
+        let pos = row_duals[eq_start + 2 * r];
+        let neg = row_duals[eq_start + 2 * r + 1];
+        dual_eq.push(clean_certificate_value(pos - neg));
+    }
+
+    let mut reduced_costs = Vec::with_capacity(p.c.len());
+    for (j, &coef) in p.c.iter().enumerate() {
+        let mut reduced = coef;
+        for (row, &dual) in a_ub.iter().zip(&dual_ub) {
+            reduced -= dual * row[j];
+        }
+        for (row, &dual) in a_eq.iter().zip(&dual_eq) {
+            reduced -= dual * row[j];
+        }
+        reduced_costs.push(clean_certificate_value(reduced));
+    }
+
+    (Some(dual_ub), Some(dual_eq), Some(reduced_costs))
+}
+
+fn simplex_reduced_cost(
+    t: &[Vec<f64>],
+    basis: &[usize],
+    cost: &[f64],
+    col: usize,
+    rhs_col: usize,
+) -> f64 {
+    if col >= rhs_col {
+        return 0.0;
+    }
+    let mut rc = cost.get(col).copied().unwrap_or(0.0);
+    for (r, &basic_col) in basis.iter().enumerate() {
+        let basic_cost = cost.get(basic_col).copied().unwrap_or(0.0);
+        rc -= basic_cost * t[r][col];
+    }
+    rc
+}
+
+fn clean_certificate_value(value: f64) -> f64 {
+    if value.abs() <= 1e-8 {
+        0.0
+    } else {
+        value
     }
 }
 
@@ -1989,6 +2066,13 @@ mod tests {
         InternalSimplexOptions::default()
     }
 
+    fn assert_close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() < TOL,
+            "actual={actual}, expected={expected}"
+        );
+    }
+
     #[test]
     fn maximize_box() {
         // max x + y  s.t.  x ≤ 4, y ≤ 3, x,y ≥ 0  ->  7 at (4,3).
@@ -2004,6 +2088,76 @@ mod tests {
         assert!((sol.objective - 7.0).abs() < TOL, "obj={}", sol.objective);
         assert!((sol.x[0] - 4.0).abs() < TOL, "x0={}", sol.x[0]);
         assert!((sol.x[1] - 3.0).abs() < TOL, "x1={}", sol.x[1]);
+    }
+
+    #[test]
+    fn internal_simplex_reports_lp_certificates() {
+        // max 3x + 4y
+        // s.t. x + 2y <= 14, 3x - y >= 0, x - y <= 2
+        // has optimum (6, 4). Active rows c0/c2 have duals 7/3 and 2/3.
+        let p = LPProblem {
+            sense: Sense::Max,
+            c: vec![3.0, 4.0],
+            a_ub: Some(vec![vec![1.0, 2.0], vec![-3.0, 1.0], vec![1.0, -1.0]]),
+            b_ub: Some(vec![14.0, 0.0, 2.0]),
+            ..Default::default()
+        };
+        let sol = solve_lp_internal(&p, &opts());
+        assert_eq!(sol.status, LPStatus::Optimal);
+        let dual_ub = sol.dual_ub.as_ref().expect("dual_ub");
+        let reduced = sol.reduced_costs.as_ref().expect("reduced_costs");
+        assert_close(dual_ub[0], 7.0 / 3.0);
+        assert_close(dual_ub[1], 0.0);
+        assert_close(dual_ub[2], 2.0 / 3.0);
+        assert_close(reduced[0], 0.0);
+        assert_close(reduced[1], 0.0);
+    }
+
+    #[test]
+    fn internal_simplex_reports_equality_dual() {
+        let p = LPProblem {
+            sense: Sense::Max,
+            c: vec![1.0],
+            a_eq: Some(vec![vec![1.0]]),
+            b_eq: Some(vec![2.0]),
+            ..Default::default()
+        };
+        let sol = solve_lp_internal(&p, &opts());
+        assert_eq!(sol.status, LPStatus::Optimal);
+        assert_close(sol.dual_eq.as_ref().expect("dual_eq")[0], 1.0);
+        assert_close(sol.reduced_costs.as_ref().expect("reduced_costs")[0], 0.0);
+    }
+
+    #[test]
+    fn internal_simplex_reports_bound_reduced_costs() {
+        let lower_active = LPProblem {
+            sense: Sense::Max,
+            c: vec![-1.0],
+            a_ub: Some(vec![vec![0.0]]),
+            b_ub: Some(vec![0.0]),
+            ..Default::default()
+        };
+        let lower_sol = solve_lp_internal(&lower_active, &opts());
+        assert_eq!(lower_sol.status, LPStatus::Optimal);
+        assert_close(
+            lower_sol.reduced_costs.as_ref().expect("reduced_costs")[0],
+            -1.0,
+        );
+
+        let upper_active = LPProblem {
+            sense: Sense::Max,
+            c: vec![1.0],
+            a_ub: Some(vec![vec![0.0]]),
+            b_ub: Some(vec![0.0]),
+            ub: Some(vec![Some(1.0)]),
+            ..Default::default()
+        };
+        let upper_sol = solve_lp_internal(&upper_active, &opts());
+        assert_eq!(upper_sol.status, LPStatus::Optimal);
+        assert_close(
+            upper_sol.reduced_costs.as_ref().expect("reduced_costs")[0],
+            1.0,
+        );
     }
 
     #[test]

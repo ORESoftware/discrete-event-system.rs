@@ -10,14 +10,18 @@ use des_engine::des::general::math_program::{
     cross_check_math_program_solution_pool_with_external, cross_check_math_program_with_external,
     ExternalMathProgramOptions, MathProgram, MathProgramConflictCrossCheck,
     MathProgramConflictOptions, MathProgramCrossCheck, MathProgramFeasRelaxCrossCheck,
-    MathProgramFeasRelaxOptions, MathProgramFeasRelaxViolation, MathProgramSolutionPoolCrossCheck,
-    MathProgramSolutionPoolOptions, MathProgramSolveOptions, MathProgramStatus, ObjectiveSense,
-    RowSense,
+    MathProgramFeasRelaxOptions, MathProgramFeasRelaxViolation, MathProgramLpBackend,
+    MathProgramSolutionPoolCrossCheck, MathProgramSolutionPoolOptions, MathProgramSolveOptions,
+    MathProgramStatus, ObjectiveSense, RowSense,
 };
 
 fn main() {
     let cases = vec![
         ("lp-row-senses", build_lp_case()),
+        (
+            "lp-equality-certificates",
+            build_lp_equality_certificate_case(),
+        ),
         ("multi-objective", build_multi_objective_case()),
         ("continuous-qp", build_continuous_qp_case()),
         ("continuous-qcp", build_continuous_qcp_case()),
@@ -30,6 +34,7 @@ fn main() {
         ("mixed-integer-qcp", build_mixed_integer_qcp_case()),
         ("mixed-integer-soc", build_mixed_integer_soc_case()),
         ("binary-mip", build_binary_mip_case()),
+        ("lazy-constraint", build_lazy_constraint_case()),
         ("binary-quadratic", build_binary_quadratic_case()),
         ("semi-continuous", build_semi_continuous_case()),
         ("semi-integer", build_semi_integer_case()),
@@ -126,6 +131,8 @@ fn run_case(name: &str, program: &MathProgram) -> Result<bool, String> {
     } else {
         vec![
             ("scipy-highs", None),
+            ("highs-cli", Some("highs-cli:default".to_string())),
+            ("cbc-cli", Some("cbc-cli:default".to_string())),
             ("ortools", Some(ortools_method.to_string())),
             ("glpk", Some("glpk:default".to_string())),
             ("glpk-cli", Some("glpk-cli:default".to_string())),
@@ -145,7 +152,7 @@ fn run_case(name: &str, program: &MathProgram) -> Result<bool, String> {
             program,
             &MathProgramSolveOptions::default(),
             &ExternalMathProgramOptions {
-                method,
+                method: method.clone(),
                 ..Default::default()
             },
             1e-6,
@@ -155,9 +162,136 @@ fn run_case(name: &str, program: &MathProgram) -> Result<bool, String> {
         print_report(name, label, &report);
         if report.external.status != MathProgramStatus::NumericalError {
             ok &= report.within_tolerance;
+            if let Some(expectation) = lp_certificate_expectation(name) {
+                ok &= lp_certificate_case_ok(name, label, &report, expectation);
+            }
+        }
+        if report.external.status != MathProgramStatus::NumericalError {
+            if let Some(expectation) = lp_certificate_expectation(name) {
+                let des_label = format!("{label}/des-simplex");
+                let des_report = cross_check_math_program_with_external(
+                    program,
+                    &MathProgramSolveOptions {
+                        lp_backend: MathProgramLpBackend::DESSimplex,
+                        ..Default::default()
+                    },
+                    &ExternalMathProgramOptions {
+                        method,
+                        ..Default::default()
+                    },
+                    1e-6,
+                )
+                .map_err(|err| format!("{err:?}"))?;
+
+                print_report(name, &des_label, &des_report);
+                if des_report.external.status != MathProgramStatus::NumericalError {
+                    ok &= des_report.within_tolerance;
+                    ok &= lp_certificate_case_ok(name, &des_label, &des_report, expectation);
+                }
+            }
         }
     }
     Ok(ok)
+}
+
+#[derive(Clone, Copy)]
+struct LPCertificateExpectation {
+    dual_ub: Option<&'static [f64]>,
+    dual_eq: Option<&'static [f64]>,
+    reduced_costs: &'static [f64],
+}
+
+const LP_ROW_SENSES_DUAL_UB: [f64; 3] = [7.0 / 3.0, 0.0, 2.0 / 3.0];
+const LP_ROW_SENSES_REDUCED_COSTS: [f64; 2] = [0.0, 0.0];
+const LP_EQUALITY_DUAL_EQ: [f64; 1] = [1.0];
+const LP_EQUALITY_REDUCED_COSTS: [f64; 1] = [0.0];
+
+fn lp_certificate_expectation(name: &str) -> Option<LPCertificateExpectation> {
+    match name {
+        "lp-row-senses" => Some(LPCertificateExpectation {
+            dual_ub: Some(&LP_ROW_SENSES_DUAL_UB),
+            dual_eq: None,
+            reduced_costs: &LP_ROW_SENSES_REDUCED_COSTS,
+        }),
+        "lp-equality-certificates" => Some(LPCertificateExpectation {
+            dual_ub: None,
+            dual_eq: Some(&LP_EQUALITY_DUAL_EQ),
+            reduced_costs: &LP_EQUALITY_REDUCED_COSTS,
+        }),
+        _ => None,
+    }
+}
+
+fn lp_certificate_case_ok(
+    name: &str,
+    label: &str,
+    report: &MathProgramCrossCheck,
+    expectation: LPCertificateExpectation,
+) -> bool {
+    let internal_ok = certificate_field_ok(report.internal.dual_ub.as_deref(), expectation.dual_ub)
+        && certificate_field_ok(report.internal.dual_eq.as_deref(), expectation.dual_eq)
+        && certificate_vectors_close(
+            report.internal.reduced_costs.as_deref(),
+            expectation.reduced_costs,
+            1e-6,
+        );
+    let external_ok = certificate_field_ok(report.external.dual_ub.as_deref(), expectation.dual_ub)
+        && certificate_field_ok(report.external.dual_eq.as_deref(), expectation.dual_eq)
+        && certificate_vectors_close(
+            report.external.reduced_costs.as_deref(),
+            expectation.reduced_costs,
+            1e-6,
+        );
+    if internal_ok && external_ok {
+        println!("PASS  {name} [{label}] certificates: duals/reduced-costs");
+        true
+    } else if !external_ok && !external_certificates_required(label) {
+        println!("SKIP  {name} [{label}] certificates: external certificate fields unavailable");
+        internal_ok
+    } else {
+        println!(
+            "FAIL  {name} [{label}] certificates: internal_dual_ub={:?} external_dual_ub={:?} internal_dual_eq={:?} external_dual_eq={:?} internal_reduced={:?} external_reduced={:?}",
+            report.internal.dual_ub,
+            report.external.dual_ub,
+            report.internal.dual_eq,
+            report.external.dual_eq,
+            report.internal.reduced_costs,
+            report.external.reduced_costs
+        );
+        false
+    }
+}
+
+fn external_certificates_required(label: &str) -> bool {
+    let base = label.strip_suffix("/des-simplex").unwrap_or(label);
+    matches!(
+        base,
+        "scipy-highs"
+            | "highs-cli"
+            | "ortools"
+            | "glpk"
+            | "glpk-cli"
+            | "gurobi"
+            | "cplex"
+            | "xpress"
+    )
+}
+
+fn certificate_field_ok(actual: Option<&[f64]>, expected: Option<&[f64]>) -> bool {
+    match expected {
+        Some(expected) => certificate_vectors_close(actual, expected, 1e-6),
+        None => true,
+    }
+}
+
+fn certificate_vectors_close(actual: Option<&[f64]>, expected: &[f64], tol: f64) -> bool {
+    actual.is_some_and(|actual| {
+        actual.len() == expected.len()
+            && actual
+                .iter()
+                .zip(expected)
+                .all(|(a, e)| (a - e).abs() <= tol)
+    })
 }
 
 fn run_mip_start_case() -> Result<bool, String> {
@@ -166,6 +300,8 @@ fn run_mip_start_case() -> Result<bool, String> {
     let start = vec![0.0, 1.0, 1.0];
     let methods = vec![
         ("scipy-highs", None),
+        ("highs-cli", Some("highs-cli:default".to_string())),
+        ("cbc-cli", Some("cbc-cli:default".to_string())),
         ("ortools", Some("ortools:SCIP".to_string())),
         ("glpk", Some("glpk:default".to_string())),
         ("glpk-cli", Some("glpk-cli:default".to_string())),
@@ -212,6 +348,8 @@ fn run_conflict_case() -> Result<bool, String> {
     let program = build_conflict_case();
     let methods = vec![
         ("scipy-highs", None),
+        ("highs-cli", Some("highs-cli:default".to_string())),
+        ("cbc-cli", Some("cbc-cli:default".to_string())),
         ("ortools", Some("ortools:SCIP".to_string())),
         ("glpk", Some("glpk:default".to_string())),
         ("glpk-cli", Some("glpk-cli:default".to_string())),
@@ -251,6 +389,8 @@ fn run_feas_relax_case() -> Result<bool, String> {
     let program = build_feas_relax_case();
     let methods = vec![
         ("scipy-highs", None),
+        ("highs-cli", Some("highs-cli:default".to_string())),
+        ("cbc-cli", Some("cbc-cli:default".to_string())),
         ("ortools", Some("ortools:GLOP".to_string())),
         ("glpk", Some("glpk:default".to_string())),
         ("glpk-cli", Some("glpk-cli:default".to_string())),
@@ -303,6 +443,8 @@ fn run_solution_pool_case() -> Result<bool, String> {
     let program = build_solution_pool_case();
     let methods = vec![
         ("scipy-highs", None),
+        ("highs-cli", Some("highs-cli:default".to_string())),
+        ("cbc-cli", Some("cbc-cli:default".to_string())),
         ("ortools", Some("ortools:SCIP".to_string())),
         ("glpk", Some("glpk:default".to_string())),
         ("glpk-cli", Some("glpk-cli:default".to_string())),
@@ -518,6 +660,14 @@ fn build_lp_case() -> MathProgram {
     p
 }
 
+fn build_lp_equality_certificate_case() -> MathProgram {
+    let mut p = MathProgram::new(ObjectiveSense::Max);
+    let x = p.add_continuous_var("x", 1.0, Some(0.0), None).unwrap();
+    p.add_constraint("fixed", vec![(x, 1.0)], RowSense::Eq, 2.0)
+        .unwrap();
+    p
+}
+
 fn build_multi_objective_case() -> MathProgram {
     let mut p = MathProgram::new(ObjectiveSense::Max);
     let x = p
@@ -722,6 +872,20 @@ fn build_binary_mip_case() -> MathProgram {
     let b = p.add_binary_var("b", 6.0).unwrap();
     p.add_constraint("packing", vec![(a, 2.0), (b, 1.0)], RowSense::Le, 2.0)
         .unwrap();
+    p
+}
+
+fn build_lazy_constraint_case() -> MathProgram {
+    let mut p = MathProgram::new(ObjectiveSense::Max);
+    let x = p.add_binary_var("x", 1.0).unwrap();
+    let y = p.add_binary_var("y", 1.0).unwrap();
+    p.add_lazy_constraint(
+        "lazy-at-most-one",
+        vec![(x, 1.0), (y, 1.0)],
+        RowSense::Le,
+        1.0,
+    )
+    .unwrap();
     p
 }
 

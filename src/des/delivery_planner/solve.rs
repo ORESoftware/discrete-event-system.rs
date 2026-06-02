@@ -888,6 +888,7 @@ fn build_ip_model(req: &DeliveryPlannerRequest, nodes: &[StopNode]) -> ModelBuil
             ub: Some(ub),
             var_names: Some(var_names),
             con_names: Some(con_names),
+            lazy_constraints: None,
             variable_nodes: None,
             constraint_nodes: None,
         },

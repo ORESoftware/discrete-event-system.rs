@@ -1154,6 +1154,7 @@ pub struct NodeDecisionStation {
     verbose: bool,
     pub trace: Vec<IPMIPTraceEvent>,
     cuts_by_node: HashMap<usize, Vec<BranchOrCutConstraint>>,
+    pub lazy_cuts_added: usize,
     pub saw_unbounded: bool,
     tick: usize,
     registry: Registry,
@@ -1179,6 +1180,7 @@ impl NodeDecisionStation {
             verbose: opts.verbose,
             trace: Vec::new(),
             cuts_by_node: HashMap::new(),
+            lazy_cuts_added: 0,
             saw_unbounded: false,
             tick: 0,
             registry,
@@ -1238,7 +1240,8 @@ impl NodeDecisionStation {
             return;
         }
         if r.fractional.is_empty() && is_integer_base_feasible(&self.p, &r.x, self.int_tol) {
-            let lazy_cuts = violated_lazy_constraints(&self.p, &r.x, self.int_tol, &node.constraints);
+            let lazy_cuts =
+                violated_lazy_constraints(&self.p, &r.x, self.int_tol, &node.constraints);
             if !lazy_cuts.is_empty() {
                 let child_id = self.controller.borrow_mut().allocate_node_id();
                 let mut constraints = node.constraints.clone();
@@ -1267,6 +1270,7 @@ impl NodeDecisionStation {
                 );
                 self.registry.borrow_mut().track(child_tok.base.clone());
                 self.core.emit(Rc::new(child_tok), "nodes");
+                self.lazy_cuts_added += lazy_cuts.len();
                 self.record(
                     tok,
                     TraceAction::Cut,
@@ -1777,7 +1781,8 @@ pub fn solve_ipmip_with_des(p: IPMIPProblem, opts: IPMIPSolveOptions) -> IPMIPSo
     let lp_solves = solver_ref.lp.borrow().lp_solves;
     let total_lp_iterations = solver_ref.lp.borrow().total_iterations;
     let total_lp_solver_ms = solver_ref.lp.borrow().total_solver_elapsed_ms;
-    let cuts_added = solver_ref.cuts.borrow().cuts_generated;
+    let cuts_added =
+        solver_ref.cuts.borrow().cuts_generated + solver_ref.decision.borrow().lazy_cuts_added;
     let candidates_tried = solver_ref.heuristic.borrow().candidates_tried;
     let algorithm_usage = solver_ref.lp.borrow().algorithm_usage.clone();
     let uses_external_solvers = did_use_external_lp(&algorithm_usage);
@@ -2681,8 +2686,7 @@ pub fn validate_ipmip_problem(p: &IPMIPProblem) {
 }
 
 fn is_integer_feasible(p: &IPMIPProblem, x: &[f64], tol: f64) -> bool {
-    is_integer_base_feasible(p, x, tol)
-        && violated_lazy_constraints(p, x, tol, &[]).is_empty()
+    is_integer_base_feasible(p, x, tol) && violated_lazy_constraints(p, x, tol, &[]).is_empty()
 }
 
 fn is_integer_base_feasible(p: &IPMIPProblem, x: &[f64], tol: f64) -> bool {
@@ -2712,8 +2716,7 @@ fn violated_lazy_constraints(
         .collect::<HashSet<_>>();
     rows.iter()
         .filter(|row| {
-            !existing_names.contains(row.name.as_str())
-                && branch_or_cut_lhs(row, x) > row.rhs + tol
+            !existing_names.contains(row.name.as_str()) && branch_or_cut_lhs(row, x) > row.rhs + tol
         })
         .cloned()
         .collect()

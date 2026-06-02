@@ -232,6 +232,7 @@ mod tests {
             ub: Some(vec![10.0; 80]),
             var_names: None,
             con_names: None,
+            lazy_constraints: None,
             variable_nodes: None,
             constraint_nodes: None,
         }
@@ -276,6 +277,7 @@ mod tests {
             ub: Some(vec![1.0, 1.0, 1.0, 1.0]),
             var_names: None,
             con_names: None,
+            lazy_constraints: None,
             variable_nodes: None,
             constraint_nodes: None,
         };
@@ -297,6 +299,7 @@ mod tests {
             ub: None,
             var_names: None,
             con_names: None,
+            lazy_constraints: None,
             variable_nodes: None,
             constraint_nodes: None,
         };

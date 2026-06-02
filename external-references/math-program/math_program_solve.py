@@ -49,6 +49,45 @@ def _lp_bounds(lp: dict[str, Any]) -> list[tuple[float | None, float | None]]:
     return bounds
 
 
+def _marginals(section: Any) -> list[float] | None:
+    if section is None:
+        return None
+    values = getattr(section, "marginals", None)
+    if values is None:
+        return None
+    return [float(v) for v in values]
+
+
+def _clean_certificate_value(value: float) -> float:
+    return 0.0 if abs(value) <= 1e-8 else float(value)
+
+
+def _lp_row_counts(problem: dict[str, Any]) -> tuple[int, int]:
+    return len(problem.get("A_ub") or []), len(problem.get("A_eq") or [])
+
+
+def _lp_certificate_fields(
+    row_duals: list[float] | None,
+    reduced_costs: list[float] | None,
+    ub_count: int,
+    eq_count: int,
+) -> dict[str, Any]:
+    fields: dict[str, Any] = {}
+    if row_duals is not None and len(row_duals) >= ub_count + eq_count:
+        fields["dualUB"] = [
+            _clean_certificate_value(value) for value in row_duals[:ub_count]
+        ]
+        fields["dualEQ"] = [
+            _clean_certificate_value(value)
+            for value in row_duals[ub_count : ub_count + eq_count]
+        ]
+    if reduced_costs is not None:
+        fields["reducedCosts"] = [
+            _clean_certificate_value(value) for value in reduced_costs
+        ]
+    return fields
+
+
 def _solver_backend(method: str) -> tuple[str, str]:
     if ":" in method:
         family, backend = method.split(":", 1)
@@ -75,10 +114,32 @@ def _mip_start(problem: dict[str, Any]) -> list[float] | None:
     return values
 
 
+def _mip_rows(problem: dict[str, Any]) -> list[tuple[list[float], float]]:
+    rows = [
+        ([float(v) for v in row], float(bound))
+        for row, bound in zip(problem.get("A", []), problem.get("b", []))
+    ]
+    for lazy in problem.get("lazyConstraints") or []:
+        rows.append((
+            [float(v) for v in lazy.get("coefs", [])],
+            float(lazy.get("rhs", 0.0)),
+        ))
+    return rows
+
+
+def _mip_row_arrays(problem: dict[str, Any]) -> tuple[list[list[float]], list[float]]:
+    rows = _mip_rows(problem)
+    return [row for row, _ in rows], [bound for _, bound in rows]
+
+
 def solve_lp(payload: dict[str, Any], method: str) -> dict[str, Any]:
     family, backend = _solver_backend(method)
     if family == "ortools":
         return solve_ortools(payload, backend, integer=False)
+    if family in {"highs-cli", "highs"}:
+        return solve_highs_cli(payload["lp"], integer=False)
+    if family in {"cbc-cli", "cbc"}:
+        return solve_cbc_cli(payload["lp"], integer=False)
     if family in {"glpk-cli", "glpsol"}:
         return solve_glpsol_cli(payload["lp"], integer=False)
     if family in {"scip-cli", "scip"}:
@@ -110,10 +171,25 @@ def solve_lp(payload: dict[str, Any], method: str) -> dict[str, Any]:
     objective = None
     if result.fun is not None and math.isfinite(float(result.fun)):
         objective = -float(result.fun) if sense == "max" else float(result.fun)
+    sign = -1.0 if sense == "max" else 1.0
+    dual_ub = _marginals(getattr(result, "ineqlin", None))
+    dual_eq = _marginals(getattr(result, "eqlin", None))
+    if dual_ub is not None:
+        dual_ub = [sign * v for v in dual_ub]
+    if dual_eq is not None:
+        dual_eq = [sign * v for v in dual_eq]
+    lower = _marginals(getattr(result, "lower", None))
+    upper = _marginals(getattr(result, "upper", None))
+    reduced_costs = None
+    if lower is not None and upper is not None:
+        reduced_costs = [sign * (lo + hi) for lo, hi in zip(lower, upper)]
     return {
         "status": _status(int(result.status)),
         "x": [float(v) for v in result.x] if result.x is not None else [],
         "objective": objective,
+        "dualUB": dual_ub,
+        "dualEQ": dual_eq,
+        "reducedCosts": reduced_costs,
         "message": str(result.message),
     }
 
@@ -393,6 +469,10 @@ def solve_mip(payload: dict[str, Any], method: str) -> dict[str, Any]:
         if normalized_backend in {"CP-SAT", "CPSAT"}:
             return solve_ortools_cp_sat(payload)
         return solve_ortools(payload, backend, integer=True)
+    if family in {"highs-cli", "highs"}:
+        return solve_highs_cli(payload["mip"], integer=True)
+    if family in {"cbc-cli", "cbc"}:
+        return solve_cbc_cli(payload["mip"], integer=True)
     if family in {"glpk-cli", "glpsol"}:
         return solve_glpsol_cli(payload["mip"], integer=True)
     if family in {"scip-cli", "scip"}:
@@ -416,8 +496,9 @@ def solve_mip(payload: dict[str, Any], method: str) -> dict[str, Any]:
     sense = mip.get("sense", "max")
     c = np.array([float(v) for v in mip.get("c", [])], dtype=float)
     scipy_c = -c if sense == "max" else c
-    a = np.array(mip.get("A", []), dtype=float)
-    b = np.array(mip.get("b", []), dtype=float)
+    rows, bounds = _mip_row_arrays(mip)
+    a = np.array(rows, dtype=float)
+    b = np.array(bounds, dtype=float)
     lower = np.zeros(len(c), dtype=float)
     upper = np.array(
         [
@@ -468,7 +549,7 @@ def solve_ortools_cp_sat(payload: dict[str, Any]) -> dict[str, Any]:
             raise RuntimeError(f"CP-SAT oracle requires non-negative upper bound for variable {i}")
         variables.append(model.NewIntVar(0, hi, f"x{i}"))
 
-    for row_index, (row, bound) in enumerate(zip(mip.get("A", []), mip.get("b", []))):
+    for row_index, (row, bound) in enumerate(_mip_rows(mip)):
         terms = []
         for var_index, (var, coef) in enumerate(zip(variables, row)):
             coef_i = _integer_value(coef, f"row {row_index} coefficient {var_index}")
@@ -541,7 +622,7 @@ def _write_lp_file(problem: dict[str, Any], integer: bool, path: str) -> list[st
     names = [f"x{i}" for i in range(len(c))]
     rows: list[tuple[list[float], str, float]] = []
     if problem.get("A") is not None:
-        for row, bound in zip(problem.get("A") or [], problem.get("b") or []):
+        for row, bound in _mip_rows(problem):
             rows.append(([float(v) for v in row], "<=", float(bound)))
     else:
         for row, bound in zip(problem.get("A_ub") or [], problem.get("b_ub") or []):
@@ -601,10 +682,18 @@ def _glpk_status_from_tokens(tokens: list[str]) -> str:
     return "numerical-error"
 
 
-def _parse_glpk_solution(path: str, n: int) -> dict[str, Any]:
+def _parse_glpk_solution(
+    path: str,
+    n: int,
+    ub_count: int = 0,
+    eq_count: int = 0,
+    include_certificates: bool = False,
+) -> dict[str, Any]:
     status = "numerical-error"
     objective = None
     x = [0.0] * n
+    row_duals = [0.0] * (ub_count + eq_count)
+    reduced_costs = [0.0] * n
     with open(path, encoding="utf-8") as handle:
         for line in handle:
             tokens = line.split()
@@ -619,7 +708,20 @@ def _parse_glpk_solution(path: str, n: int) -> dict[str, Any]:
                     value = _parse_first_float(tokens[2:])
                     if value is not None:
                         x[idx] = value
-    return {"status": status, "x": x, "objective": objective, "solver": "glpk-cli"}
+                    if include_certificates:
+                        dual = _parse_first_float(tokens[4:] if len(tokens) >= 5 else tokens[3:])
+                        if dual is not None:
+                            reduced_costs[idx] = dual
+            elif tokens[0] == "i" and len(tokens) >= 5 and include_certificates:
+                idx = int(tokens[1]) - 1
+                if 0 <= idx < len(row_duals):
+                    dual = _parse_first_float(tokens[4:])
+                    if dual is not None:
+                        row_duals[idx] = dual
+    parsed = {"status": status, "x": x, "objective": objective, "solver": "glpk-cli"}
+    if include_certificates and status == "optimal":
+        parsed.update(_lp_certificate_fields(row_duals, reduced_costs, ub_count, eq_count))
+    return parsed
 
 
 def _parse_glpk_report(path: str, names: list[str]) -> dict[str, Any]:
@@ -687,9 +789,21 @@ def solve_glpsol_cli(problem: dict[str, Any], integer: bool) -> dict[str, Any]:
                 "solver": "glpk-cli",
                 "message": result.stderr or result.stdout,
             }
+        ub_count, eq_count = _lp_row_counts(problem) if not integer else (0, 0)
+        solution = _parse_glpk_solution(
+            solution_path,
+            len(names),
+            ub_count,
+            eq_count,
+            include_certificates=not integer,
+        )
         parsed = _parse_glpk_report(report_path, names)
         if parsed["status"] == "numerical-error":
-            parsed = _parse_glpk_solution(solution_path, len(names))
+            parsed = solution
+        else:
+            for key in ("dualUB", "dualEQ", "reducedCosts"):
+                if key in solution:
+                    parsed[key] = solution[key]
         parsed["message"] = result.stderr or result.stdout
         return parsed
 
@@ -756,6 +870,213 @@ def solve_scip_cli(problem: dict[str, Any], integer: bool) -> dict[str, Any]:
                 "message": result.stderr or result.stdout,
             }
         parsed = _parse_scip_solution(solution_path, names)
+        parsed["message"] = result.stderr or result.stdout
+        return parsed
+
+
+def _highs_status_from_text(text: str) -> str:
+    upper = text.upper()
+    if "OPTIMAL" in upper:
+        return "optimal"
+    if "INFEASIBLE" in upper:
+        return "infeasible"
+    if "UNBOUNDED" in upper:
+        return "unbounded"
+    if "TIME LIMIT" in upper or "TIME-LIMIT" in upper:
+        return "iter-limit"
+    return "numerical-error"
+
+
+def _parse_highs_solution(
+    path: str,
+    names: list[str],
+    output: str,
+    problem: dict[str, Any],
+    integer: bool,
+) -> dict[str, Any]:
+    name_to_index = {name: idx for idx, name in enumerate(names)}
+    ub_count, eq_count = _lp_row_counts(problem) if not integer else (0, 0)
+    status = "numerical-error"
+    objective = None
+    x = [0.0] * len(names)
+    row_duals = [0.0] * (ub_count + eq_count)
+    reduced_costs = [0.0] * len(names)
+    section: str | None = None
+    in_columns = False
+    in_rows = False
+    pending_model_status = False
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if pending_model_status:
+                status = _highs_status_from_text(stripped)
+                pending_model_status = False
+                continue
+            if stripped == "Model status":
+                pending_model_status = True
+            elif stripped == "# Primal solution values":
+                section = "primal"
+                in_columns = False
+                in_rows = False
+            elif stripped.startswith("# Dual solution values") or stripped.startswith("# Basis"):
+                section = "dual" if stripped.startswith("# Dual solution values") else "basis"
+                in_columns = False
+                in_rows = False
+            elif stripped.startswith("Objective "):
+                objective = _parse_first_float(stripped.split()[1:])
+            elif section in {"primal", "dual"} and stripped.startswith("# Columns"):
+                in_columns = True
+                in_rows = False
+            elif section in {"primal", "dual"} and stripped.startswith("# Rows"):
+                in_columns = False
+                in_rows = True
+            elif in_columns:
+                tokens = stripped.split()
+                if len(tokens) >= 2 and tokens[0] in name_to_index:
+                    value = _parse_first_float(tokens[1:])
+                    if value is not None:
+                        if section == "primal":
+                            x[name_to_index[tokens[0]]] = value
+                        elif section == "dual" and not integer:
+                            reduced_costs[name_to_index[tokens[0]]] = value
+            elif in_rows and section == "dual" and not integer:
+                tokens = stripped.split()
+                if len(tokens) >= 2 and tokens[0].startswith("c"):
+                    try:
+                        idx = int(tokens[0][1:])
+                    except ValueError:
+                        idx = -1
+                    if 0 <= idx < len(row_duals):
+                        value = _parse_first_float(tokens[1:])
+                        if value is not None:
+                            row_duals[idx] = value
+    if status == "numerical-error":
+        status = _highs_status_from_text(output)
+    parsed = {"status": status, "x": x, "objective": objective, "solver": "highs-cli"}
+    if not integer and status == "optimal":
+        parsed.update(_lp_certificate_fields(row_duals, reduced_costs, ub_count, eq_count))
+    return parsed
+
+
+def solve_highs_cli(problem: dict[str, Any], integer: bool) -> dict[str, Any]:
+    with tempfile.TemporaryDirectory(prefix="des-highs-cli-") as tmp:
+        model_path = f"{tmp}/model.lp"
+        solution_path = f"{tmp}/solution.txt"
+        names = _write_lp_file(problem, integer, model_path)
+        result = subprocess.run(
+            [
+                "highs",
+                "--model_file",
+                model_path,
+                "--solution_file",
+                solution_path,
+                "--time_limit",
+                "60",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        output = f"{result.stdout}\n{result.stderr}"
+        if result.returncode != 0:
+            return {
+                "status": "numerical-error",
+                "x": [],
+                "objective": None,
+                "solver": "highs-cli",
+                "message": result.stderr or result.stdout,
+            }
+        try:
+            parsed = _parse_highs_solution(solution_path, names, output, problem, integer)
+        except FileNotFoundError:
+            parsed = {
+                "status": _highs_status_from_text(output),
+                "x": [],
+                "objective": None,
+                "solver": "highs-cli",
+            }
+        parsed["message"] = result.stderr or result.stdout
+        return parsed
+
+
+def _cbc_status_from_text(text: str) -> str:
+    lowered = text.lower()
+    if "optimal" in lowered:
+        return "optimal"
+    if "infeasible" in lowered:
+        return "infeasible"
+    if "unbounded" in lowered:
+        return "unbounded"
+    if "stopped on time" in lowered or "time limit" in lowered:
+        return "iter-limit"
+    return "numerical-error"
+
+
+def _parse_cbc_solution(path: str, names: list[str], output: str) -> dict[str, Any]:
+    name_to_index = {name: idx for idx, name in enumerate(names)}
+    status = "numerical-error"
+    objective = None
+    x = [0.0] * len(names)
+    with open(path, encoding="utf-8") as handle:
+        for line_idx, line in enumerate(handle):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if line_idx == 0:
+                status = _cbc_status_from_text(stripped)
+                if "objective value" in stripped:
+                    objective = _parse_first_float(stripped.split("objective value", 1)[1].split())
+                continue
+            tokens = stripped.split()
+            if len(tokens) >= 3 and tokens[1] in name_to_index:
+                value = _parse_first_float(tokens[2:])
+                if value is not None:
+                    x[name_to_index[tokens[1]]] = value
+    if status == "numerical-error":
+        status = _cbc_status_from_text(output)
+    return {"status": status, "x": x, "objective": objective, "solver": "cbc-cli"}
+
+
+def solve_cbc_cli(problem: dict[str, Any], integer: bool) -> dict[str, Any]:
+    with tempfile.TemporaryDirectory(prefix="des-cbc-cli-") as tmp:
+        model_path = f"{tmp}/model.lp"
+        solution_path = f"{tmp}/solution.txt"
+        names = _write_lp_file(problem, integer, model_path)
+        result = subprocess.run(
+            [
+                "cbc",
+                model_path,
+                "sec",
+                "60",
+                "solve",
+                "solution",
+                solution_path,
+                "quit",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        output = f"{result.stdout}\n{result.stderr}"
+        if result.returncode != 0:
+            return {
+                "status": "numerical-error",
+                "x": [],
+                "objective": None,
+                "solver": "cbc-cli",
+                "message": result.stderr or result.stdout,
+            }
+        try:
+            parsed = _parse_cbc_solution(solution_path, names, output)
+        except FileNotFoundError:
+            parsed = {
+                "status": _cbc_status_from_text(output),
+                "x": [],
+                "objective": None,
+                "solver": "cbc-cli",
+            }
         parsed["message"] = result.stderr or result.stdout
         return parsed
 
@@ -862,7 +1183,7 @@ def _cplex_add_dense_linear_rows(cplex_mod: Any, cpx: Any, problem: dict[str, An
 
 
 def _cplex_add_mip_rows(cplex_mod: Any, cpx: Any, mip: dict[str, Any]) -> None:
-    for row, bound in zip(mip.get("A", []), mip.get("b", [])):
+    for row, bound in _mip_rows(mip):
         coeffs = {i: float(coef) for i, coef in enumerate(row) if coef}
         cpx.linear_constraints.add(
             lin_expr=[_cplex_sparse_pair(cplex_mod, coeffs)],
@@ -893,20 +1214,30 @@ def _cplex_set_quadratic_objective(cpx: Any, problem: dict[str, Any]) -> None:
         cpx.objective.set_quadratic_coefficients(i, j, coeff)
 
 
-def _cplex_finish(cpx: Any, solver_name: str) -> dict[str, Any]:
+def _cplex_finish(
+    cpx: Any,
+    solver_name: str,
+    lp_problem: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     cpx.solve()
     status_code = int(cpx.solution.get_status())
     status = _cplex_status(cpx, status_code)
     has_solution = status in {"optimal", "iter-limit", "time-limit"}
     x = [float(v) for v in cpx.solution.get_values()] if has_solution else []
     objective = float(cpx.solution.get_objective_value()) if has_solution else None
-    return {
+    parsed = {
         "status": status,
         "x": x,
         "objective": objective,
         "solver": solver_name,
         "message": f"{solver_name} status={status_code}",
     }
+    if lp_problem is not None and status == "optimal":
+        ub_count, eq_count = _lp_row_counts(lp_problem)
+        row_duals = [float(v) for v in cpx.solution.get_dual_values()]
+        reduced_costs = [float(v) for v in cpx.solution.get_reduced_costs()]
+        parsed.update(_lp_certificate_fields(row_duals, reduced_costs, ub_count, eq_count))
+    return parsed
 
 
 def solve_cplex_lp(payload: dict[str, Any]) -> dict[str, Any]:
@@ -917,7 +1248,8 @@ def solve_cplex_lp(payload: dict[str, Any]) -> dict[str, Any]:
     _cplex_variables(cplex_mod, cpx, lp, integer=False)
     _cplex_add_dense_linear_rows(cplex_mod, cpx, lp)
     _cplex_set_objective(cpx, lp)
-    return _cplex_finish(cpx, "cplex:lp")
+    cpx.set_problem_type(cpx.problem_type.LP)
+    return _cplex_finish(cpx, "cplex:lp", lp)
 
 
 def solve_cplex_mip(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1177,15 +1509,29 @@ def solve_glpk_lp(payload: dict[str, Any]) -> dict[str, Any]:
             lp.get("b_eq") or [],
         )
         status = _glpk_simplex(glp, model)
-        x = [glp.glp_get_col_prim(model, i) for i in range(1, len(lp.get("c", [])) + 1)] if status == "optimal" else []
+        n = len(lp.get("c", []))
+        x = [glp.glp_get_col_prim(model, i) for i in range(1, n + 1)] if status == "optimal" else []
         objective = float(glp.glp_get_obj_val(model)) if x else None
-        return {
+        parsed = {
             "status": status,
             "x": [float(value) for value in x],
             "objective": objective,
             "solver": "glpk:lp",
             "message": f"glpk:lp status={glp.glp_get_status(model)}",
         }
+        if status == "optimal":
+            ub_count, eq_count = _lp_row_counts(lp)
+            row_duals = [
+                float(glp.glp_get_row_dual(model, i))
+                for i in range(1, ub_count + eq_count + 1)
+            ]
+            reduced_costs = [
+                float(glp.glp_get_col_dual(model, i)) for i in range(1, n + 1)
+            ]
+            parsed.update(
+                _lp_certificate_fields(row_duals, reduced_costs, ub_count, eq_count)
+            )
+        return parsed
     finally:
         glp.glp_delete_prob(model)
 
@@ -1195,7 +1541,8 @@ def solve_glpk_mip(payload: dict[str, Any]) -> dict[str, Any]:
     mip = payload["mip"]
     model = _glpk_create_problem(glp, mip, integer=True)
     try:
-        _glpk_load_rows(glp, model, mip.get("A") or [], mip.get("b") or [])
+        rows, bounds = _mip_row_arrays(mip)
+        _glpk_load_rows(glp, model, rows, bounds)
         relaxation_status = _glpk_simplex(glp, model)
         if relaxation_status != "optimal":
             return {
@@ -1301,7 +1648,7 @@ def _xpress_add_linear_rows(xp: Any, model: Any, variables: Any, problem: dict[s
 
 
 def _xpress_add_mip_rows(xp: Any, model: Any, variables: Any, mip: dict[str, Any]) -> None:
-    for row, bound in zip(mip.get("A", []), mip.get("b", [])):
+    for row, bound in _mip_rows(mip):
         expr = 0.0
         for var, coef in zip(variables, row):
             value = float(coef)
@@ -1325,12 +1672,17 @@ def _xpress_objective(_xp: Any, variables: Any, problem: dict[str, Any]) -> Any:
     return objective
 
 
-def _xpress_finish(model: Any, variables: Any, solver_name: str) -> dict[str, Any]:
+def _xpress_finish(
+    model: Any,
+    variables: Any,
+    solver_name: str,
+    lp_problem: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     model.solve()
     status = _xpress_status(model)
     x = model.getSolution(variables) if status == "optimal" else []
     objective = float(model.attributes.objval) if x else None
-    return {
+    parsed = {
         "status": status,
         "x": [float(value) for value in x],
         "objective": objective,
@@ -1340,6 +1692,12 @@ def _xpress_finish(model: Any, variables: Any, solver_name: str) -> dict[str, An
             f"solstatus={model.attributes.solstatus}"
         ),
     }
+    if lp_problem is not None and status == "optimal":
+        ub_count, eq_count = _lp_row_counts(lp_problem)
+        row_duals = [float(value) for value in model.getDuals()]
+        reduced_costs = [float(value) for value in model.getRCost()]
+        parsed.update(_lp_certificate_fields(row_duals, reduced_costs, ub_count, eq_count))
+    return parsed
 
 
 def solve_xpress_lp(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1354,7 +1712,7 @@ def solve_xpress_lp(payload: dict[str, Any]) -> dict[str, Any]:
             _xpress_objective(xp, variables, lp),
             sense=xp.maximize if lp.get("sense", "max") == "max" else xp.minimize,
         )
-        return _xpress_finish(model, variables, "xpress:lp")
+        return _xpress_finish(model, variables, "xpress:lp", lp)
 
 
 def solve_xpress_mip(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1490,25 +1848,27 @@ def _gurobi_linear_expr(gp: Any, variables: Any, coeffs: Any, constant: float = 
     return expr
 
 
-def _gurobi_add_linear_rows(gp: Any, model: Any, variables: Any, problem: dict[str, Any]) -> None:
+def _gurobi_add_linear_rows(gp: Any, model: Any, variables: Any, problem: dict[str, Any]) -> list[Any]:
+    constraints = []
     for row, bound in zip(problem.get("A_ub") or [], problem.get("b_ub") or []):
         expr = gp.LinExpr()
         for var, coef in zip(variables, row):
             value = float(coef)
             if value:
                 expr.addTerms(value, var)
-        model.addConstr(expr <= float(bound))
+        constraints.append(model.addConstr(expr <= float(bound)))
     for row, bound in zip(problem.get("A_eq") or [], problem.get("b_eq") or []):
         expr = gp.LinExpr()
         for var, coef in zip(variables, row):
             value = float(coef)
             if value:
                 expr.addTerms(value, var)
-        model.addConstr(expr == float(bound))
+        constraints.append(model.addConstr(expr == float(bound)))
+    return constraints
 
 
 def _gurobi_add_mip_rows(gp: Any, model: Any, variables: Any, mip: dict[str, Any]) -> None:
-    for row, bound in zip(mip.get("A", []), mip.get("b", [])):
+    for row, bound in _mip_rows(mip):
         expr = gp.LinExpr()
         for var, coef in zip(variables, row):
             value = float(coef)
@@ -1548,18 +1908,31 @@ def _gurobi_objective(gp: Any, variables: Any, problem: dict[str, Any]) -> Any:
     return objective
 
 
-def _gurobi_finish(gp: Any, model: Any, variables: Any, solver_name: str) -> dict[str, Any]:
+def _gurobi_finish(
+    gp: Any,
+    model: Any,
+    variables: Any,
+    solver_name: str,
+    lp_problem: dict[str, Any] | None = None,
+    linear_constraints: list[Any] | None = None,
+) -> dict[str, Any]:
     model.optimize()
     status = _gurobi_status(gp, int(model.Status))
     x = [float(var.X) for var in variables] if status in {"optimal", "iter-limit", "time-limit"} and model.SolCount else []
     objective = float(model.ObjVal) if x else None
-    return {
+    parsed = {
         "status": status,
         "x": x,
         "objective": objective,
         "solver": solver_name,
         "message": f"{solver_name} status={model.Status}",
     }
+    if lp_problem is not None and linear_constraints is not None and status == "optimal":
+        ub_count, eq_count = _lp_row_counts(lp_problem)
+        row_duals = [float(constraint.Pi) for constraint in linear_constraints]
+        reduced_costs = [float(var.RC) for var in variables]
+        parsed.update(_lp_certificate_fields(row_duals, reduced_costs, ub_count, eq_count))
+    return parsed
 
 
 def solve_gurobi_lp(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1569,12 +1942,12 @@ def solve_gurobi_lp(payload: dict[str, Any]) -> dict[str, Any]:
         model = gp.Model()
         model.Params.OutputFlag = 0
         variables = _gurobi_variables(gp, model, lp, integer=False)
-        _gurobi_add_linear_rows(gp, model, variables, lp)
+        linear_constraints = _gurobi_add_linear_rows(gp, model, variables, lp)
         model.setObjective(
             _gurobi_objective(gp, variables, lp),
             gp.GRB.MAXIMIZE if lp.get("sense", "max") == "max" else gp.GRB.MINIMIZE,
         )
-        return _gurobi_finish(gp, model, variables, "gurobi:lp")
+        return _gurobi_finish(gp, model, variables, "gurobi:lp", lp, linear_constraints)
 
 
 def solve_gurobi_mip(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1706,10 +2079,9 @@ def solve_ortools(payload: dict[str, Any], backend: str, integer: bool) -> dict[
         else:
             variables.append(solver.NumVar(lo, hi, f"x{i}"))
 
+    linear_constraints = []
     if integer:
-        rows = problem.get("A", [])
-        rhs = problem.get("b", [])
-        for row, bound in zip(rows, rhs):
+        for row, bound in _mip_rows(problem):
             constraint = solver.RowConstraint(-solver.infinity(), float(bound), "")
             for var, coef in zip(variables, row):
                 if coef:
@@ -1717,11 +2089,13 @@ def solve_ortools(payload: dict[str, Any], backend: str, integer: bool) -> dict[
     else:
         for row, bound in zip(problem.get("A_ub") or [], problem.get("b_ub") or []):
             constraint = solver.RowConstraint(-solver.infinity(), float(bound), "")
+            linear_constraints.append(constraint)
             for var, coef in zip(variables, row):
                 if coef:
                     constraint.SetCoefficient(var, float(coef))
         for row, bound in zip(problem.get("A_eq") or [], problem.get("b_eq") or []):
             constraint = solver.RowConstraint(float(bound), float(bound), "")
+            linear_constraints.append(constraint)
             for var, coef in zip(variables, row):
                 if coef:
                     constraint.SetCoefficient(var, float(coef))
@@ -1748,12 +2122,23 @@ def solve_ortools(payload: dict[str, Any], backend: str, integer: bool) -> dict[
     }.get(status_code, "numerical-error")
     x = [var.solution_value() for var in variables] if status in {"optimal", "iter-limit"} else []
     objective_value = objective.Value() if status in {"optimal", "iter-limit"} else None
-    return {
+    parsed = {
         "status": status,
         "x": x,
         "objective": objective_value,
         "message": f"ortools:{backend} status={status_code}",
     }
+    if not integer and status == "optimal":
+        try:
+            ub_count, eq_count = _lp_row_counts(problem)
+            row_duals = [float(constraint.dual_value()) for constraint in linear_constraints]
+            reduced_costs = [float(var.reduced_cost()) for var in variables]
+            parsed.update(
+                _lp_certificate_fields(row_duals, reduced_costs, ub_count, eq_count)
+            )
+        except Exception as exc:
+            parsed["message"] = f"{parsed['message']}; certificate extraction failed: {exc}"
+    return parsed
 
 
 def main() -> int:

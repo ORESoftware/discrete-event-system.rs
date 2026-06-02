@@ -195,6 +195,7 @@ fn solve_delivery_planner_inner(
                 max_cuts_per_node: Some(16),
                 heuristic_passes: Some(32),
                 verbose: Some(false),
+                mip_start: None,
             },
         )
     }));

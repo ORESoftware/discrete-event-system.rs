@@ -653,6 +653,7 @@ impl DESModelRegistration<IPMIPDESParams, IPMIPSolution> for IpMipDesAdapter {
                 max_cuts_per_node: o.max_cuts_per_node,
                 heuristic_passes: o.heuristic_passes,
                 verbose: None,
+                mip_start: None,
             })
             .unwrap_or_default();
 

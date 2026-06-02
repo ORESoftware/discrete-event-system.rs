@@ -173,6 +173,7 @@ pub struct IPMIPProblem {
     pub ub: Option<Vec<f64>>,
     pub var_names: Option<Vec<String>>,
     pub con_names: Option<Vec<String>>,
+    pub lazy_constraints: Option<Vec<BranchOrCutConstraint>>,
     pub variable_nodes: Option<Vec<VariableNode>>,
     pub constraint_nodes: Option<Vec<ConstraintNode>>,
 }
@@ -193,6 +194,9 @@ pub struct IPMIPSolveOptions {
     pub max_cuts_per_node: Option<usize>,
     pub heuristic_passes: Option<usize>,
     pub verbose: Option<bool>,
+    /// Optional incumbent seed in the compiled non-negative variable space.
+    /// Invalid or infeasible starts are ignored.
+    pub mip_start: Option<Vec<f64>>,
 }
 
 /// Branching rule (TS `'most-fractional' | 'first-fractional'`).
@@ -224,6 +228,7 @@ struct FilledIPMIPSolveOptions {
     max_cuts_per_node: usize,
     heuristic_passes: usize,
     verbose: bool,
+    mip_start: Option<Vec<f64>>,
 }
 
 /// Overall solve status (TS `IPMIPSolution['status']`).
@@ -354,6 +359,7 @@ pub struct BranchOrCutConstraint {
 pub enum ConstraintKind {
     Branch,
     Cut,
+    Lazy,
 }
 
 /// Branch direction (TS `'le' | 'ge'`).
@@ -1010,6 +1016,20 @@ impl IncumbentStation {
             z < self.best_z - 1e-9
         }
     }
+
+    fn seed_mip_start(&mut self, x: &[f64]) -> bool {
+        if x.len() != self.p.c.len() || x.iter().any(|v| !v.is_finite()) {
+            return false;
+        }
+        if !is_integer_feasible(&self.p, x, self.int_tol) {
+            return false;
+        }
+        self.best_x = x.to_vec();
+        self.best_z = objective(&self.p, x);
+        self.source = Some("mip-start".to_string());
+        self.updates += 1;
+        true
+    }
 }
 
 impl DESStation for IncumbentStation {
@@ -1217,7 +1237,46 @@ impl NodeDecisionStation {
             );
             return;
         }
-        if r.fractional.is_empty() && is_integer_feasible(&self.p, &r.x, self.int_tol) {
+        if r.fractional.is_empty() && is_integer_base_feasible(&self.p, &r.x, self.int_tol) {
+            let lazy_cuts = violated_lazy_constraints(&self.p, &r.x, self.int_tol, &node.constraints);
+            if !lazy_cuts.is_empty() {
+                let child_id = self.controller.borrow_mut().allocate_node_id();
+                let mut constraints = node.constraints.clone();
+                constraints.extend(lazy_cuts.iter().cloned());
+                let child = IpNode {
+                    node_id: child_id,
+                    parent_id: Some(node.node_id),
+                    depth: node.depth,
+                    constraints,
+                    cut_rounds: node.cut_rounds,
+                    branch_var: node.branch_var,
+                    branch_type: node.branch_type,
+                    branch_value: node.branch_value,
+                    bound_guess: Some(r.z),
+                };
+                let child_tok = new_node_token(
+                    child,
+                    TokenOpts {
+                        token_id: format!("ip-node-{child_id}"),
+                        tick: self.tick as f64,
+                        station_id: self.core.id.clone(),
+                        parent: Some(tok.base.clone()),
+                        event: Some("lazy-child-created".to_string()),
+                        detail: Some(format!("{} lazy constraint(s)", lazy_cuts.len())),
+                    },
+                );
+                self.registry.borrow_mut().track(child_tok.base.clone());
+                self.core.emit(Rc::new(child_tok), "nodes");
+                self.record(
+                    tok,
+                    TraceAction::Cut,
+                    Some(format!("added {} lazy constraint(s)", lazy_cuts.len())),
+                    None,
+                    Some(vec![child_id]),
+                    Some(lazy_cuts.len()),
+                );
+                return;
+            }
             let cand = new_candidate_token(
                 CandidatePayload {
                     node_id: node.node_id,
@@ -1522,6 +1581,9 @@ impl BranchAndCutSolverStation {
             opts.int_tol,
             registry.clone(),
         )));
+        if let Some(start) = &opts.mip_start {
+            incumbent.borrow_mut().seed_mip_start(start);
+        }
         composite.add_substation(incumbent.clone());
         let cuts = Rc::new(RefCell::new(CutGeneratorStation::new(
             p.clone(),
@@ -1645,6 +1707,7 @@ fn fill_ipmip_options(opts: &IPMIPSolveOptions) -> FilledIPMIPSolveOptions {
         max_cuts_per_node: opts.max_cuts_per_node.unwrap_or(2),
         heuristic_passes: opts.heuristic_passes.unwrap_or(60),
         verbose: opts.verbose.unwrap_or(false),
+        mip_start: opts.mip_start.clone(),
     }
 }
 
@@ -2595,9 +2658,34 @@ pub fn validate_ipmip_problem(p: &IPMIPProblem) {
     if let Some(cn) = &p.con_names {
         req(P::length_eq(model, "conNames", cn, p.a.len()));
     }
+    if let Some(rows) = &p.lazy_constraints {
+        for (i, row) in rows.iter().enumerate() {
+            req(P::length_eq(
+                model,
+                &format!("lazyConstraints[{i}].coefs"),
+                &row.coefs,
+                p.c.len(),
+            ));
+            req(P::all_finite(
+                model,
+                &format!("lazyConstraints[{i}].coefs"),
+                &row.coefs,
+            ));
+            req(P::finite(
+                model,
+                &format!("lazyConstraints[{i}].rhs"),
+                row.rhs,
+            ));
+        }
+    }
 }
 
 fn is_integer_feasible(p: &IPMIPProblem, x: &[f64], tol: f64) -> bool {
+    is_integer_base_feasible(p, x, tol)
+        && violated_lazy_constraints(p, x, tol, &[]).is_empty()
+}
+
+fn is_integer_base_feasible(p: &IPMIPProblem, x: &[f64], tol: f64) -> bool {
     if !bounds_ok(p, x, tol) || !satisfies_linear_rows(p, x, tol) {
         return false;
     }
@@ -2607,6 +2695,36 @@ fn is_integer_feasible(p: &IPMIPProblem, x: &[f64], tol: f64) -> bool {
         }
     }
     true
+}
+
+fn violated_lazy_constraints(
+    p: &IPMIPProblem,
+    x: &[f64],
+    tol: f64,
+    existing: &[BranchOrCutConstraint],
+) -> Vec<BranchOrCutConstraint> {
+    let Some(rows) = &p.lazy_constraints else {
+        return Vec::new();
+    };
+    let existing_names = existing
+        .iter()
+        .map(|row| row.name.as_str())
+        .collect::<HashSet<_>>();
+    rows.iter()
+        .filter(|row| {
+            !existing_names.contains(row.name.as_str())
+                && branch_or_cut_lhs(row, x) > row.rhs + tol
+        })
+        .cloned()
+        .collect()
+}
+
+fn branch_or_cut_lhs(row: &BranchOrCutConstraint, x: &[f64]) -> f64 {
+    row.coefs
+        .iter()
+        .zip(x)
+        .map(|(coef, value)| coef * value)
+        .sum()
 }
 
 fn satisfies_linear_rows(p: &IPMIPProblem, x: &[f64], tol: f64) -> bool {
@@ -2644,6 +2762,11 @@ fn total_violation(p: &IPMIPProblem, x: &[f64]) -> f64 {
             lhs += p.a[i][j] * x[j];
         }
         v += 0.0_f64.max(lhs - p.b[i]);
+    }
+    if let Some(rows) = &p.lazy_constraints {
+        for row in rows {
+            v += 0.0_f64.max(branch_or_cut_lhs(row, x) - row.rhs);
+        }
     }
     for j in 0..x.len() {
         v += 0.0_f64.max(-x[j]);
@@ -2797,6 +2920,7 @@ pub fn build_binary_knapsack_ip(
         ub: Some(vec![1.0; n]),
         var_names: Some((0..n).map(|i| format!("item_{i}")).collect()),
         con_names: Some(vec!["capacity".to_string()]),
+        lazy_constraints: None,
         variable_nodes: Some(
             (0..n)
                 .map(|i| VariableNode {
@@ -2829,6 +2953,7 @@ pub fn build_small_mixed_ip() -> IPMIPProblem {
             "y_cont".to_string(),
         ]),
         con_names: Some(vec!["integer_sum".to_string()]),
+        lazy_constraints: None,
         variable_nodes: None,
         constraint_nodes: None,
     }
@@ -2850,6 +2975,60 @@ mod tests {
         assert!((sol.z - 220.0).abs() < 1e-6, "z={}", sol.z);
         assert!(sol.in_house_only);
         assert!(sol.lp_solves >= 1);
+    }
+
+    #[test]
+    fn mip_start_seeds_incumbent_when_feasible() {
+        let p = build_binary_knapsack_ip(vec![60.0, 100.0, 120.0], vec![10.0, 20.0, 30.0], 50.0);
+        let sol = solve_ipmip_with_des(
+            p,
+            IPMIPSolveOptions {
+                mip_start: Some(vec![0.0, 1.0, 1.0]),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(sol.status, IPMIPStatus::Optimal);
+        assert_eq!(sol.incumbent_source.as_deref(), Some("mip-start"));
+        assert_eq!(
+            sol.x.iter().map(|v| v.round() as i32).collect::<Vec<_>>(),
+            vec![0, 1, 1]
+        );
+    }
+
+    #[test]
+    fn lazy_constraint_cuts_integer_candidate_before_incumbent() {
+        let p = IPMIPProblem {
+            sense: Sense::Max,
+            c: vec![1.0, 1.0],
+            a: vec![vec![1.0, 1.0]],
+            b: vec![2.0],
+            integer_vars: vec![true, true],
+            ub: Some(vec![1.0, 1.0]),
+            var_names: Some(vec!["x".to_string(), "y".to_string()]),
+            con_names: Some(vec!["loose-capacity".to_string()]),
+            lazy_constraints: Some(vec![BranchOrCutConstraint {
+                coefs: vec![1.0, 1.0],
+                rhs: 1.0,
+                name: "lazy-at-most-one".to_string(),
+                kind: ConstraintKind::Lazy,
+            }]),
+            variable_nodes: None,
+            constraint_nodes: None,
+        };
+
+        let sol = solve_ipmip_with_des(p, IPMIPSolveOptions::default());
+
+        assert_eq!(sol.status, IPMIPStatus::Optimal);
+        assert!((sol.z - 1.0).abs() < 1e-6, "z={}", sol.z);
+        assert!(sol.cuts_added >= 1);
+        assert!(sol.trace.iter().any(|event| {
+            event.action == TraceAction::Cut
+                && event
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("lazy constraint"))
+        }));
     }
 
     #[test]

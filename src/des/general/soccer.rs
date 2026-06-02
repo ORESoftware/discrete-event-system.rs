@@ -47,6 +47,12 @@ const PITCH_TACTICAL_GRID_COLUMNS: usize = 6;
 const PITCH_TACTICAL_GRID_ROWS: usize = 8;
 const PITCH_MACRO_GRID_COLUMNS: usize = 3;
 const PITCH_MACRO_GRID_ROWS: usize = 4;
+const PITCH_GRID_BACKOFF_LEVELS: [PitchGridLevel; 4] = [
+    PitchGridLevel::Fine,
+    PitchGridLevel::Tactical,
+    PitchGridLevel::Macro,
+    PitchGridLevel::WholePitch,
+];
 const PLAYER_BASE_VISION_RANGE_YARDS: f64 = 28.0;
 const PLAYER_VISION_RANGE_BONUS_YARDS: f64 = 28.0;
 const PLAYER_BASE_FIELD_OF_VIEW_DEGREES: f64 = 168.0;
@@ -707,6 +713,37 @@ impl SoccerQStateKey {
             transition.role,
         )
     }
+
+    fn matches_learning_context(&self, other: &Self) -> bool {
+        self.phase == other.phase
+            && self.role == other.role
+            && self.possession_relative == other.possession_relative
+            && self.ball_zone_x == other.ball_zone_x
+            && self.ball_zone_y == other.ball_zone_y
+            && self.score_diff_bucket == other.score_diff_bucket
+            && self.has_ball == other.has_ball
+            && self.visible_ball == other.visible_ball
+            && self.shot_lane_open == other.shot_lane_open
+            && self.visible_pass_options_bin == other.visible_pass_options_bin
+            && self.ball_distance_bin == other.ball_distance_bin
+            && self.yards_to_goal_bin == other.yards_to_goal_bin
+            && self.pressure_bin == other.pressure_bin
+            && self.open_space_bin == other.open_space_bin
+            && facing_bucket_matches(self.receive_facing, other.receive_facing)
+            && facing_bucket_matches(self.action_facing, other.action_facing)
+    }
+
+    fn matches_spatial_level(&self, other: &Self, level: PitchGridLevel) -> bool {
+        self.matches_learning_context(other)
+            && match level {
+                PitchGridLevel::Fine => self.player_fine_cell_id == other.player_fine_cell_id,
+                PitchGridLevel::Tactical => {
+                    self.player_tactical_cell_id == other.player_tactical_cell_id
+                }
+                PitchGridLevel::Macro => self.player_macro_cell_id == other.player_macro_cell_id,
+                PitchGridLevel::WholePitch => self.player_root_cell_id == other.player_root_cell_id,
+            }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -802,7 +839,7 @@ impl SoccerQPolicy {
         let max_next = if transition.done {
             0.0
         } else {
-            self.best_value(&next_state).unwrap_or(0.0)
+            self.best_value_hierarchical(&next_state).unwrap_or(0.0)
         };
         let alpha = self.options.alpha.clamp(0.0, 1.0);
         let gamma = self.options.gamma.clamp(0.0, 0.999);
@@ -814,6 +851,10 @@ impl SoccerQPolicy {
 
     pub fn best_action(&self, state: &SoccerQStateKey) -> Option<String> {
         self.best_action_filtered(state, |_| true)
+    }
+
+    pub fn best_action_hierarchical(&self, state: &SoccerQStateKey) -> Option<String> {
+        self.best_action_filtered_hierarchical(state, |_| true)
     }
 
     pub fn best_action_for_snapshot(
@@ -828,7 +869,7 @@ impl SoccerQPolicy {
             player.team,
             player.role,
         );
-        self.best_action_filtered(&state, |action| {
+        self.best_action_filtered_hierarchical(&state, |action| {
             learned_action_label_is_legal(action, snapshot, player_id)
         })
     }
@@ -839,6 +880,12 @@ impl SoccerQPolicy {
             .filter(|(key, _)| &key.state == state)
             .map(|(_, value)| *value)
             .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+    }
+
+    pub fn best_value_hierarchical(&self, state: &SoccerQStateKey) -> Option<f64> {
+        PITCH_GRID_BACKOFF_LEVELS
+            .iter()
+            .find_map(|level| self.best_value_at_spatial_level(state, *level))
     }
 
     pub fn q_value(&self, state: &SoccerQStateKey, action: &str) -> Option<f64> {
@@ -926,6 +973,59 @@ impl SoccerQPolicy {
                     })
             })
             .map(|(key, _)| key.action.clone())
+    }
+
+    fn best_action_filtered_hierarchical<F>(
+        &self,
+        state: &SoccerQStateKey,
+        is_legal: F,
+    ) -> Option<String>
+    where
+        F: Fn(&str) -> bool,
+    {
+        PITCH_GRID_BACKOFF_LEVELS
+            .iter()
+            .find_map(|level| self.best_action_filtered_at_spatial_level(state, *level, &is_legal))
+    }
+
+    fn best_action_filtered_at_spatial_level<F>(
+        &self,
+        state: &SoccerQStateKey,
+        level: PitchGridLevel,
+        is_legal: &F,
+    ) -> Option<String>
+    where
+        F: Fn(&str) -> bool,
+    {
+        self.q_values
+            .iter()
+            .filter(|(key, _)| key.state.matches_spatial_level(state, level))
+            .filter(|(key, _)| is_legal(&key.action))
+            .max_by(|(a_key, a_value), (b_key, b_value)| {
+                a_value
+                    .partial_cmp(b_value)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| {
+                        self.visits
+                            .get(a_key)
+                            .copied()
+                            .unwrap_or(0)
+                            .cmp(&self.visits.get(b_key).copied().unwrap_or(0))
+                    })
+            })
+            .map(|(key, _)| key.action.clone())
+    }
+
+    fn best_value_at_spatial_level(
+        &self,
+        state: &SoccerQStateKey,
+        level: PitchGridLevel,
+    ) -> Option<f64> {
+        self.q_values
+            .iter()
+            .filter(|(key, _)| key.state.matches_spatial_level(state, level))
+            .map(|(_, value)| *value)
+            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
     }
 }
 
@@ -8276,6 +8376,10 @@ fn facing_bucket_from_vector(v: Vec2) -> FacingBucket {
     }
 }
 
+fn facing_bucket_matches(a: FacingBucket, b: FacingBucket) -> bool {
+    a == b || a == FacingBucket::Unknown || b == FacingBucket::Unknown
+}
+
 fn default_team_facing(team: Team) -> FacingBucket {
     facing_bucket_from_vector(Vec2::new(0.0, team.attack_dir()))
 }
@@ -9824,7 +9928,67 @@ mod tests {
             left_state.player_tactical_cell_id,
             right_state.player_tactical_cell_id
         );
-        assert_eq!(policy.best_action_for_snapshot(&snapshot_right, 5), None);
+        assert!(policy.q_value(&right_state, "dribble").is_none());
+    }
+
+    #[test]
+    fn q_policy_uses_parent_grid_backoff_for_spatial_correlation() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 1421,
+            ..Default::default()
+        });
+        sim.ball.holder = Some(5);
+        sim.ball.position = Vec2::new(21.0, 68.0);
+        sim.players[5].position = Vec2::new(18.0, 68.0);
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let mut base_state = SoccerQStateKey::from_parts(
+            &snapshot.mdp_state_for_player(5),
+            &snapshot.observation_for(5),
+            Team::Home,
+            sim.players[5].role,
+        );
+
+        let mut policy = SoccerQPolicy::default();
+        policy.set_action_value(base_state.clone(), "dribble", 4.0);
+        assert_eq!(
+            policy.best_action_hierarchical(&base_state).as_deref(),
+            Some("dribble")
+        );
+
+        let mut tactical_sibling = base_state.clone();
+        tactical_sibling.player_fine_cell_id += 1;
+        assert!(policy.q_value(&tactical_sibling, "dribble").is_none());
+        assert_eq!(
+            policy
+                .best_action_hierarchical(&tactical_sibling)
+                .as_deref(),
+            Some("dribble")
+        );
+
+        let mut macro_sibling = base_state.clone();
+        macro_sibling.player_fine_cell_id += 7;
+        macro_sibling.player_tactical_cell_id += 1;
+        assert!(policy.q_value(&macro_sibling, "dribble").is_none());
+        assert_eq!(
+            policy.best_action_hierarchical(&macro_sibling).as_deref(),
+            Some("dribble")
+        );
+
+        let mut whole_pitch_sibling = base_state.clone();
+        whole_pitch_sibling.player_fine_cell_id += 80;
+        whole_pitch_sibling.player_tactical_cell_id += 20;
+        whole_pitch_sibling.player_macro_cell_id += 2;
+        assert!(policy.q_value(&whole_pitch_sibling, "dribble").is_none());
+        assert_eq!(
+            policy
+                .best_action_hierarchical(&whole_pitch_sibling)
+                .as_deref(),
+            Some("dribble")
+        );
+
+        base_state.action_facing = FacingBucket::North;
+        assert_eq!(policy.best_action_hierarchical(&base_state), None);
     }
 
     #[test]

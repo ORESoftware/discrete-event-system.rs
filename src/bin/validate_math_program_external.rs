@@ -11,8 +11,8 @@ use des_engine::des::general::math_program::{
     ExternalMathProgramOptions, MathProgram, MathProgramConflictCrossCheck,
     MathProgramConflictOptions, MathProgramCrossCheck, MathProgramFeasRelaxCrossCheck,
     MathProgramFeasRelaxOptions, MathProgramFeasRelaxViolation, MathProgramLpBackend,
-    MathProgramSolutionPoolCrossCheck, MathProgramSolutionPoolOptions, MathProgramSolveOptions,
-    MathProgramStatus, ObjectiveSense, RowSense,
+    MathProgramSolution, MathProgramSolutionPoolCrossCheck, MathProgramSolutionPoolOptions,
+    MathProgramSolveOptions, MathProgramStatus, ObjectiveSense, RowSense,
 };
 
 fn main() {
@@ -40,14 +40,22 @@ fn main() {
         ("semi-integer", build_semi_integer_case()),
         ("indicator-row", build_indicator_case()),
         ("sos1", build_sos1_case()),
+        ("integer-sos1", build_integer_sos1_case()),
         ("sos2", build_sos2_case()),
+        ("integer-sos2", build_integer_sos2_case()),
         ("binary-general", build_binary_general_case()),
         ("absolute-value", build_abs_case()),
+        ("integer-absolute-value", build_integer_abs_case()),
         ("maximum", build_max_case()),
+        ("integer-maximum", build_integer_max_case()),
         ("minimum", build_min_case()),
+        ("integer-minimum", build_integer_min_case()),
         ("piecewise-linear", build_piecewise_linear_case()),
         ("all-different", build_all_different_case()),
         ("allowed-assignments", build_allowed_assignments_case()),
+        ("forbidden-assignments", build_forbidden_assignments_case()),
+        ("element", build_element_case()),
+        ("automaton", build_automaton_case()),
         ("no-overlap", build_no_overlap_case()),
         ("no-overlap-2d", build_no_overlap_2d_case()),
         ("cumulative", build_cumulative_case()),
@@ -70,6 +78,14 @@ fn main() {
         Err(err) => {
             failed += 1;
             println!("FAIL  mip-start: {err:?}");
+        }
+    }
+    match run_external_mip_options_case() {
+        Ok(true) => {}
+        Ok(false) => failed += 1,
+        Err(err) => {
+            failed += 1;
+            println!("FAIL  external-mip-options: {err:?}");
         }
     }
     match run_solution_pool_case() {
@@ -162,8 +178,12 @@ fn run_case(name: &str, program: &MathProgram) -> Result<bool, String> {
         print_report(name, label, &report);
         if report.external.status != MathProgramStatus::NumericalError {
             ok &= report.within_tolerance;
+            if program.has_discrete_features() {
+                ok &= mip_quality_case_ok(name, label, &report);
+            }
             if let Some(expectation) = lp_certificate_expectation(name) {
                 ok &= lp_certificate_case_ok(name, label, &report, expectation);
+                ok &= lp_basis_case_ok(name, label, &report);
             }
         }
         if report.external.status != MathProgramStatus::NumericalError {
@@ -187,6 +207,7 @@ fn run_case(name: &str, program: &MathProgram) -> Result<bool, String> {
                 if des_report.external.status != MathProgramStatus::NumericalError {
                     ok &= des_report.within_tolerance;
                     ok &= lp_certificate_case_ok(name, &des_label, &des_report, expectation);
+                    ok &= lp_basis_case_ok(name, &des_label, &des_report);
                 }
             }
         }
@@ -245,7 +266,7 @@ fn lp_certificate_case_ok(
     if internal_ok && external_ok {
         println!("PASS  {name} [{label}] certificates: duals/reduced-costs");
         true
-    } else if !external_ok && !external_certificates_required(label) {
+    } else if !external_ok && !external_certificates_required(name, label) {
         println!("SKIP  {name} [{label}] certificates: external certificate fields unavailable");
         internal_ok
     } else {
@@ -262,19 +283,116 @@ fn lp_certificate_case_ok(
     }
 }
 
-fn external_certificates_required(label: &str) -> bool {
+fn lp_basis_case_ok(name: &str, label: &str, report: &MathProgramCrossCheck) -> bool {
+    if name != "lp-row-senses" {
+        return true;
+    }
+    let expected_var = ["basic", "basic"];
+    let expected_row = ["at_upper", "basic", "at_upper"];
+    let internal_ok = basis_vectors_equal(report.internal.var_basis.as_deref(), &expected_var)
+        && basis_vectors_equal(report.internal.row_basis.as_deref(), &expected_row);
+    let external_ok = basis_vectors_equal(report.external.var_basis.as_deref(), &expected_var)
+        && basis_vectors_equal(report.external.row_basis.as_deref(), &expected_row);
+    if internal_ok && external_ok {
+        println!("PASS  {name} [{label}] basis: var/row statuses");
+        true
+    } else if !external_ok && !external_basis_required(label) {
+        println!("SKIP  {name} [{label}] basis: external basis fields unavailable");
+        internal_ok
+    } else {
+        println!(
+            "FAIL  {name} [{label}] basis: internal_var={:?} external_var={:?} internal_row={:?} external_row={:?}",
+            report.internal.var_basis,
+            report.external.var_basis,
+            report.internal.row_basis,
+            report.external.row_basis
+        );
+        false
+    }
+}
+
+fn external_certificates_required(name: &str, label: &str) -> bool {
     let base = label.strip_suffix("/des-simplex").unwrap_or(label);
     matches!(
         base,
         "scipy-highs"
             | "highs-cli"
+            | "cbc-cli"
             | "ortools"
             | "glpk"
             | "glpk-cli"
             | "gurobi"
             | "cplex"
             | "xpress"
+    ) || (name == "lp-row-senses" && base == "scip-cli")
+}
+
+fn external_basis_required(label: &str) -> bool {
+    let base = label.strip_suffix("/des-simplex").unwrap_or(label);
+    matches!(
+        base,
+        "highs-cli" | "cbc-cli" | "ortools" | "glpk" | "glpk-cli" | "gurobi" | "cplex" | "xpress"
     )
+}
+
+fn mip_quality_case_ok(name: &str, label: &str, report: &MathProgramCrossCheck) -> bool {
+    let internal_ok = report.internal.best_bound.is_some()
+        && report
+            .internal
+            .mip_gap
+            .is_some_and(|gap| gap.is_finite() && gap >= -1e-9)
+        && report.internal.nodes_explored.is_some();
+    let external_has_quality = report.external.best_bound.is_some()
+        || report.external.mip_gap.is_some()
+        || report.external.nodes_explored.is_some();
+    let external_ok = external_has_quality && quality_metadata_consistent(&report.external);
+    if internal_ok && external_ok {
+        println!(
+            "PASS  {name} [{label}] quality: internal_bound={:?} external_bound={:?} external_gap={:?} external_nodes={:?}",
+            report.internal.best_bound,
+            report.external.best_bound,
+            report.external.mip_gap,
+            report.external.nodes_explored
+        );
+        true
+    } else if internal_ok && !external_has_quality && !external_quality_required(label) {
+        println!("SKIP  {name} [{label}] quality: external MIP quality fields unavailable");
+        true
+    } else {
+        println!(
+            "FAIL  {name} [{label}] quality: internal_bound={:?} internal_gap={:?} internal_nodes={:?} external_bound={:?} external_gap={:?} external_nodes={:?}",
+            report.internal.best_bound,
+            report.internal.mip_gap,
+            report.internal.nodes_explored,
+            report.external.best_bound,
+            report.external.mip_gap,
+            report.external.nodes_explored
+        );
+        false
+    }
+}
+
+fn external_quality_required(label: &str) -> bool {
+    let base = label.strip_suffix("/des-simplex").unwrap_or(label);
+    matches!(base, "scipy-highs" | "ortools-cp-sat" | "gurobi" | "cplex")
+}
+
+fn quality_metadata_consistent(solution: &MathProgramSolution) -> bool {
+    if let Some(gap) = solution.mip_gap {
+        if !gap.is_finite() || gap < -1e-9 {
+            return false;
+        }
+    }
+    if let (Some(best_bound), Some(gap)) = (solution.best_bound, solution.mip_gap) {
+        if solution.objective.is_finite() {
+            let implied_gap =
+                (best_bound - solution.objective).abs() / 1.0_f64.max(solution.objective.abs());
+            if implied_gap > gap.max(1e-6) + 1e-6 {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 fn certificate_field_ok(actual: Option<&[f64]>, expected: Option<&[f64]>) -> bool {
@@ -291,6 +409,16 @@ fn certificate_vectors_close(actual: Option<&[f64]>, expected: &[f64], tol: f64)
                 .iter()
                 .zip(expected)
                 .all(|(a, e)| (a - e).abs() <= tol)
+    })
+}
+
+fn basis_vectors_equal(actual: Option<&[String]>, expected: &[&str]) -> bool {
+    actual.is_some_and(|actual| {
+        actual.len() == expected.len()
+            && actual
+                .iter()
+                .zip(expected)
+                .all(|(actual, expected)| actual == expected)
     })
 }
 
@@ -339,6 +467,64 @@ fn run_mip_start_case() -> Result<bool, String> {
                 .message
                 .as_deref()
                 .is_some_and(|message| message.contains("incumbent_source=mip-start"));
+    }
+    Ok(ok)
+}
+
+fn run_external_mip_options_case() -> Result<bool, String> {
+    let name = "external-mip-options";
+    let program = build_mip_start_case();
+    let node_limit = 3usize;
+    let methods = vec![
+        ("scipy-highs", None),
+        ("highs-cli", Some("highs-cli:default".to_string())),
+        ("cbc-cli", Some("cbc-cli:default".to_string())),
+        ("ortools", Some("ortools:SCIP".to_string())),
+        ("glpk", Some("glpk:default".to_string())),
+        ("glpk-cli", Some("glpk-cli:default".to_string())),
+        ("scip-cli", Some("scip-cli:default".to_string())),
+        ("gurobi", Some("gurobi:default".to_string())),
+        ("cplex", Some("cplex:default".to_string())),
+        ("xpress", Some("xpress:default".to_string())),
+        ("ortools-cp-sat", Some("ortools:CP-SAT".to_string())),
+    ];
+
+    let mut ok = true;
+    for (label, method) in methods {
+        let report = cross_check_math_program_with_external(
+            &program,
+            &MathProgramSolveOptions::default(),
+            &ExternalMathProgramOptions {
+                method,
+                time_limit_ms: Some(60_000.0),
+                node_limit: Some(node_limit),
+                relative_gap: Some(0.25),
+                ..Default::default()
+            },
+            1e-6,
+        )
+        .map_err(|err| format!("{err:?}"))?;
+
+        print_report(name, label, &report);
+        if report.external.status == MathProgramStatus::NumericalError {
+            continue;
+        }
+        let node_limit_ok = match report.external.nodes_explored {
+            Some(nodes) => nodes <= node_limit,
+            None => true,
+        };
+        if node_limit_ok {
+            println!(
+                "PASS  {name} [{label}] options: external_nodes={:?}",
+                report.external.nodes_explored
+            );
+        } else {
+            println!(
+                "FAIL  {name} [{label}] options: external_nodes={:?} node_limit={node_limit}",
+                report.external.nodes_explored
+            );
+        }
+        ok &= report.within_tolerance && node_limit_ok;
     }
     Ok(ok)
 }
@@ -947,6 +1133,16 @@ fn build_sos1_case() -> MathProgram {
     p
 }
 
+fn build_integer_sos1_case() -> MathProgram {
+    let mut p = MathProgram::new(ObjectiveSense::Max);
+    let x0 = p.add_integer_var("x0", 5.0, Some(0.0), Some(1.0)).unwrap();
+    let x1 = p.add_integer_var("x1", 7.0, Some(0.0), Some(1.0)).unwrap();
+    let x2 = p.add_integer_var("x2", 3.0, Some(0.0), Some(1.0)).unwrap();
+    p.add_sos1("choose-one-integer", vec![(x0, 1.0), (x1, 2.0), (x2, 3.0)])
+        .unwrap();
+    p
+}
+
 fn build_sos2_case() -> MathProgram {
     let mut p = MathProgram::new(ObjectiveSense::Max);
     let x0 = p
@@ -967,6 +1163,26 @@ fn build_sos2_case() -> MathProgram {
     .unwrap();
     p.add_sos2("adjacent-pair", vec![(x0, 1.0), (x1, 2.0), (x2, 3.0)])
         .unwrap();
+    p
+}
+
+fn build_integer_sos2_case() -> MathProgram {
+    let mut p = MathProgram::new(ObjectiveSense::Max);
+    let x0 = p.add_integer_var("x0", 7.0, Some(0.0), Some(1.0)).unwrap();
+    let x1 = p.add_integer_var("x1", 1.0, Some(0.0), Some(1.0)).unwrap();
+    let x2 = p.add_integer_var("x2", 6.0, Some(0.0), Some(1.0)).unwrap();
+    p.add_constraint(
+        "pick-two-integers",
+        vec![(x0, 1.0), (x1, 1.0), (x2, 1.0)],
+        RowSense::Eq,
+        2.0,
+    )
+    .unwrap();
+    p.add_sos2(
+        "adjacent-integer-pair",
+        vec![(x0, 1.0), (x1, 2.0), (x2, 3.0)],
+    )
+    .unwrap();
     p
 }
 
@@ -1000,6 +1216,18 @@ fn build_abs_case() -> MathProgram {
     p
 }
 
+fn build_integer_abs_case() -> MathProgram {
+    let mut p = MathProgram::new(ObjectiveSense::Min);
+    let x = p.add_integer_var("x", 0.0, Some(-5.0), Some(4.0)).unwrap();
+    let r = p
+        .add_integer_var("abs_x", 1.0, Some(0.0), Some(5.0))
+        .unwrap();
+    p.add_constraint("fix-x-integer", vec![(x, 1.0)], RowSense::Eq, -3.0)
+        .unwrap();
+    p.add_abs("integer-absolute-value", r, x).unwrap();
+    p
+}
+
 fn build_max_case() -> MathProgram {
     let mut p = MathProgram::new(ObjectiveSense::Min);
     let a = p
@@ -1019,6 +1247,21 @@ fn build_max_case() -> MathProgram {
     p
 }
 
+fn build_integer_max_case() -> MathProgram {
+    let mut p = MathProgram::new(ObjectiveSense::Min);
+    let a = p.add_integer_var("a", 0.0, Some(-2.0), Some(5.0)).unwrap();
+    let b = p.add_integer_var("b", 0.0, Some(-2.0), Some(5.0)).unwrap();
+    let r = p
+        .add_integer_var("max_ab", 1.0, Some(-2.0), Some(5.0))
+        .unwrap();
+    p.add_constraint("fix-a-integer", vec![(a, 1.0)], RowSense::Eq, 2.0)
+        .unwrap();
+    p.add_constraint("fix-b-integer", vec![(b, 1.0)], RowSense::Eq, -1.0)
+        .unwrap();
+    p.add_max("integer-maximum", r, vec![a, b]).unwrap();
+    p
+}
+
 fn build_min_case() -> MathProgram {
     let mut p = MathProgram::new(ObjectiveSense::Max);
     let a = p
@@ -1035,6 +1278,21 @@ fn build_min_case() -> MathProgram {
     p.add_constraint("fix-b", vec![(b, 1.0)], RowSense::Eq, 1.0)
         .unwrap();
     p.add_min("minimum", r, vec![a, b]).unwrap();
+    p
+}
+
+fn build_integer_min_case() -> MathProgram {
+    let mut p = MathProgram::new(ObjectiveSense::Max);
+    let a = p.add_integer_var("a", 0.0, Some(-2.0), Some(5.0)).unwrap();
+    let b = p.add_integer_var("b", 0.0, Some(-2.0), Some(5.0)).unwrap();
+    let r = p
+        .add_integer_var("min_ab", 1.0, Some(-2.0), Some(5.0))
+        .unwrap();
+    p.add_constraint("fix-a-integer", vec![(a, 1.0)], RowSense::Eq, 4.0)
+        .unwrap();
+    p.add_constraint("fix-b-integer", vec![(b, 1.0)], RowSense::Eq, 1.0)
+        .unwrap();
+    p.add_min("integer-minimum", r, vec![a, b]).unwrap();
     p
 }
 
@@ -1070,6 +1328,44 @@ fn build_allowed_assignments_case() -> MathProgram {
     let y = p.add_integer_var("y", 1.0, Some(0.0), Some(2.0)).unwrap();
     p.add_allowed_assignments("allowed-pairs", vec![x, y], vec![vec![0, 2], vec![1, 1]])
         .unwrap();
+    p
+}
+
+fn build_forbidden_assignments_case() -> MathProgram {
+    let mut p = MathProgram::new(ObjectiveSense::Max);
+    let x = p.add_integer_var("x", 10.0, Some(0.0), Some(2.0)).unwrap();
+    let y = p.add_integer_var("y", 1.0, Some(0.0), Some(2.0)).unwrap();
+    p.add_forbidden_assignments("forbidden-pairs", vec![x, y], vec![vec![2, 2]])
+        .unwrap();
+    p
+}
+
+fn build_element_case() -> MathProgram {
+    let mut p = MathProgram::new(ObjectiveSense::Max);
+    let index = p
+        .add_integer_var("index", 0.0, Some(0.0), Some(3.0))
+        .unwrap();
+    let picked = p
+        .add_integer_var("picked", 1.0, Some(0.0), Some(9.0))
+        .unwrap();
+    p.add_element("lookup", index, picked, vec![1.0, 7.0, 4.0, 9.0])
+        .unwrap();
+    p
+}
+
+fn build_automaton_case() -> MathProgram {
+    let mut p = MathProgram::new(ObjectiveSense::Max);
+    let x0 = p.add_binary_var("x0", 4.0).unwrap();
+    let x1 = p.add_binary_var("x1", 3.0).unwrap();
+    let x2 = p.add_binary_var("x2", 2.0).unwrap();
+    p.add_automaton(
+        "no-consecutive-ones",
+        vec![x0, x1, x2],
+        0,
+        vec![0, 1],
+        vec![(0, 0, 0), (0, 1, 1), (1, 0, 0)],
+    )
+    .unwrap();
     p
 }
 

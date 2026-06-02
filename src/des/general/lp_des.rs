@@ -46,7 +46,7 @@ use std::time::Instant;
 
 use super::des_base::runner::{run_iterative_des, IterativeRunOptions};
 use super::des_base::station::{DESStation, StationCore, StationRef};
-use super::lp::{LPProblem, LPStatus, Sense};
+use super::lp::{lp_basis_statuses_from_basis, LPProblem, LPStatus, Sense};
 use crate::des::shared::transform::Transform;
 
 // -----------------------------------------------------------------------------
@@ -279,6 +279,22 @@ impl SimplexState {
         }
 
         (Some(dual_ub), Some(dual_eq), Some(reduced_costs))
+    }
+
+    fn basis_statuses(
+        &self,
+        p: &LPProblem,
+        x: &[f64],
+    ) -> (Option<Vec<String>>, Option<Vec<String>>) {
+        lp_basis_statuses_from_basis(
+            p,
+            &self.basis,
+            x,
+            &self.y_index_of_pos,
+            &self.free_neg,
+            self.y_cols,
+            self.tol,
+        )
     }
 
     fn mark_snapshot(&mut self) {
@@ -860,6 +876,8 @@ pub struct DESSimplexSolution {
     pub dual_ub: Option<Vec<f64>>,
     pub dual_eq: Option<Vec<f64>>,
     pub reduced_costs: Option<Vec<f64>>,
+    pub var_basis: Option<Vec<String>>,
+    pub row_basis: Option<Vec<String>>,
     pub iters: Option<usize>,
     pub solver: String,
     pub elapsed_ms: f64,
@@ -990,6 +1008,8 @@ pub fn solve_lp_via_des(p: &LPProblem, opts: &DESSimplexOptions) -> DESSimplexSo
             dual_ub: None,
             dual_eq: None,
             reduced_costs: None,
+            var_basis: None,
+            row_basis: None,
             iters: Some(s.iters),
             solver,
             elapsed_ms: ms_since(t0),
@@ -1004,6 +1024,7 @@ pub fn solve_lp_via_des(p: &LPProblem, opts: &DESSimplexOptions) -> DESSimplexSo
         obj += p.c[i] * x[i];
     }
     let (dual_ub, dual_eq, reduced_costs) = s.certificates(p);
+    let (var_basis, row_basis) = s.basis_statuses(p, &x);
     let message = format!(
         "DES simplex: {} pivots across {}",
         s.trace.pivot_history.len(),
@@ -1020,6 +1041,8 @@ pub fn solve_lp_via_des(p: &LPProblem, opts: &DESSimplexOptions) -> DESSimplexSo
         dual_ub,
         dual_eq,
         reduced_costs,
+        var_basis,
+        row_basis,
         iters: Some(s.iters),
         solver,
         elapsed_ms: ms_since(t0),

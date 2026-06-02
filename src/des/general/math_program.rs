@@ -153,6 +153,14 @@ pub struct IntervalTerm {
     pub presence_var: Option<usize>,
 }
 
+/// A transition for a finite-state automaton constraint.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AutomatonTransition {
+    pub tail: i64,
+    pub label: i64,
+    pub head: i64,
+}
+
 /// Affine expression used inside second-order cone constraints.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AffineTerm {
@@ -211,6 +219,24 @@ pub enum GeneralConstraint {
         name: String,
         variables: Vec<usize>,
         tuples: Vec<Vec<i64>>,
+    },
+    ForbiddenAssignments {
+        name: String,
+        variables: Vec<usize>,
+        tuples: Vec<Vec<i64>>,
+    },
+    Element {
+        name: String,
+        index_var: usize,
+        target_var: usize,
+        values: Vec<f64>,
+    },
+    Automaton {
+        name: String,
+        variables: Vec<usize>,
+        starting_state: i64,
+        final_states: Vec<i64>,
+        transitions: Vec<AutomatonTransition>,
     },
     NoOverlap {
         name: String,
@@ -720,13 +746,74 @@ impl MathProgram {
         variables: Vec<usize>,
         tuples: Vec<Vec<i64>>,
     ) -> Result<usize, MathProgramError> {
-        self.validate_allowed_assignments_args(&variables, &tuples)?;
+        self.validate_table_assignments_args("allowed-assignments", &variables, &tuples)?;
         self.general_constraints
             .push(GeneralConstraint::AllowedAssignments {
                 name: name.into(),
                 variables,
                 tuples,
             });
+        Ok(self.general_constraints.len() - 1)
+    }
+
+    pub fn add_forbidden_assignments(
+        &mut self,
+        name: impl Into<String>,
+        variables: Vec<usize>,
+        tuples: Vec<Vec<i64>>,
+    ) -> Result<usize, MathProgramError> {
+        self.validate_table_assignments_args("forbidden-assignments", &variables, &tuples)?;
+        self.general_constraints
+            .push(GeneralConstraint::ForbiddenAssignments {
+                name: name.into(),
+                variables,
+                tuples,
+            });
+        Ok(self.general_constraints.len() - 1)
+    }
+
+    pub fn add_element(
+        &mut self,
+        name: impl Into<String>,
+        index_var: usize,
+        target_var: usize,
+        values: Vec<f64>,
+    ) -> Result<usize, MathProgramError> {
+        self.validate_element_args(index_var, target_var, values.as_slice())?;
+        self.general_constraints.push(GeneralConstraint::Element {
+            name: name.into(),
+            index_var,
+            target_var,
+            values,
+        });
+        Ok(self.general_constraints.len() - 1)
+    }
+
+    pub fn add_automaton(
+        &mut self,
+        name: impl Into<String>,
+        variables: Vec<usize>,
+        starting_state: i64,
+        final_states: Vec<i64>,
+        transitions: Vec<(i64, i64, i64)>,
+    ) -> Result<usize, MathProgramError> {
+        let transitions = transitions
+            .into_iter()
+            .map(|(tail, label, head)| AutomatonTransition { tail, label, head })
+            .collect::<Vec<_>>();
+        self.validate_automaton_args(
+            &variables,
+            starting_state,
+            final_states.as_slice(),
+            transitions.as_slice(),
+        )?;
+        self.general_constraints.push(GeneralConstraint::Automaton {
+            name: name.into(),
+            variables,
+            starting_state,
+            final_states,
+            transitions,
+        });
         Ok(self.general_constraints.len() - 1)
     }
 
@@ -1010,7 +1097,34 @@ impl MathProgram {
                 }
                 GeneralConstraint::AllowedAssignments {
                     variables, tuples, ..
-                } => self.validate_allowed_assignments_args(variables, tuples)?,
+                } => {
+                    self.validate_table_assignments_args("allowed-assignments", variables, tuples)?
+                }
+                GeneralConstraint::ForbiddenAssignments {
+                    variables, tuples, ..
+                } => self.validate_table_assignments_args(
+                    "forbidden-assignments",
+                    variables,
+                    tuples,
+                )?,
+                GeneralConstraint::Element {
+                    index_var,
+                    target_var,
+                    values,
+                    ..
+                } => self.validate_element_args(*index_var, *target_var, values)?,
+                GeneralConstraint::Automaton {
+                    variables,
+                    starting_state,
+                    final_states,
+                    transitions,
+                    ..
+                } => self.validate_automaton_args(
+                    variables,
+                    *starting_state,
+                    final_states,
+                    transitions,
+                )?,
                 GeneralConstraint::NoOverlap { intervals, .. } => {
                     self.validate_interval_args("no-overlap", intervals)?
                 }
@@ -1100,33 +1214,35 @@ impl MathProgram {
         Ok(())
     }
 
-    fn validate_allowed_assignments_args(
+    fn validate_table_assignments_args(
         &self,
+        kind: &str,
         variables: &[usize],
         tuples: &[Vec<i64>],
     ) -> Result<(), MathProgramError> {
         if variables.is_empty() {
-            return Err(MathProgramError::Unsupported(
-                "allowed-assignments requires at least one variable".to_string(),
-            ));
+            return Err(MathProgramError::Unsupported(format!(
+                "{kind} requires at least one variable"
+            )));
         }
         if tuples.is_empty() {
-            return Err(MathProgramError::Unsupported(
-                "allowed-assignments requires at least one tuple".to_string(),
-            ));
+            return Err(MathProgramError::Unsupported(format!(
+                "{kind} requires at least one tuple"
+            )));
         }
         if tuples.len() > 512 {
             return Err(MathProgramError::Unsupported(format!(
-                "allowed-assignments exact MIP lowering is limited to 512 tuples, got {}",
-                tuples.len()
+                "{kind} exact MIP lowering is limited to 512 tuples, got {}",
+                tuples.len(),
             )));
         }
 
         let mut bounds = Vec::with_capacity(variables.len());
+        let mut value_literal_count = 0usize;
         for &idx in variables {
             if idx >= self.variables.len() {
                 return Err(MathProgramError::BadIndex(format!(
-                    "allowed-assignments variable index {idx} out of bounds"
+                    "{kind} variable index {idx} out of bounds"
                 )));
             }
             if !matches!(
@@ -1134,22 +1250,33 @@ impl MathProgram {
                 VariableType::Binary | VariableType::Integer
             ) {
                 return Err(MathProgramError::Unsupported(format!(
-                    "allowed-assignments variable `{}` must be binary or integer",
+                    "{kind} variable `{}` must be binary or integer",
                     self.variables[idx].name
                 )));
             }
-            bounds.push(integer_bounds(&self.variables[idx]).ok_or_else(|| {
+            let (lower, upper) = integer_bounds(&self.variables[idx]).ok_or_else(|| {
                 MathProgramError::UnboundedBigM(format!(
-                    "allowed-assignments variable `{}` requires finite integer bounds",
+                    "{kind} variable `{}` requires finite integer bounds",
                     self.variables[idx].name
                 ))
-            })?);
+            })?;
+            value_literal_count = value_literal_count
+                .checked_add((upper - lower + 1) as usize)
+                .ok_or_else(|| {
+                    MathProgramError::Unsupported(format!("{kind} value literal count overflowed"))
+                })?;
+            bounds.push((lower, upper));
+        }
+        if value_literal_count > 4096 {
+            return Err(MathProgramError::Unsupported(format!(
+                "{kind} exact MIP lowering is limited to 4096 value literals, got {value_literal_count}"
+            )));
         }
 
         for (row, tuple) in tuples.iter().enumerate() {
             if tuple.len() != variables.len() {
                 return Err(MathProgramError::Unsupported(format!(
-                    "allowed-assignments tuple {row} has length {}, expected {}",
+                    "{kind} tuple {row} has length {}, expected {}",
                     tuple.len(),
                     variables.len()
                 )));
@@ -1158,11 +1285,169 @@ impl MathProgram {
                 let (lower, upper) = bounds[col];
                 if value < lower || value > upper {
                     return Err(MathProgramError::InvalidBound(format!(
-                        "allowed-assignments tuple {row} value {value} is outside bounds [{lower}, {upper}] for `{}`",
+                        "{kind} tuple {row} value {value} is outside bounds [{lower}, {upper}] for `{}`",
                         self.variables[variables[col]].name
                     )));
                 }
             }
+        }
+
+        Ok(())
+    }
+
+    fn validate_element_args(
+        &self,
+        index_var: usize,
+        target_var: usize,
+        values: &[f64],
+    ) -> Result<(), MathProgramError> {
+        if values.is_empty() {
+            return Err(MathProgramError::Unsupported(
+                "element requires at least one value".to_string(),
+            ));
+        }
+        if values.len() > i64::MAX as usize {
+            return Err(MathProgramError::Unsupported(format!(
+                "element value array is too large: {} values",
+                values.len()
+            )));
+        }
+        for (pos, &value) in values.iter().enumerate() {
+            if !value.is_finite() {
+                return Err(MathProgramError::NonFinite(format!(
+                    "element value at index {pos}"
+                )));
+            }
+        }
+        if index_var >= self.variables.len() {
+            return Err(MathProgramError::BadIndex(format!(
+                "element index variable {index_var} out of bounds"
+            )));
+        }
+        if target_var >= self.variables.len() {
+            return Err(MathProgramError::BadIndex(format!(
+                "element target variable {target_var} out of bounds"
+            )));
+        }
+
+        let index = &self.variables[index_var];
+        if !matches!(index.var_type, VariableType::Binary | VariableType::Integer) {
+            return Err(MathProgramError::Unsupported(format!(
+                "element index variable `{}` must be binary or integer",
+                index.name
+            )));
+        }
+        let (lower, upper) = integer_bounds(index).ok_or_else(|| {
+            MathProgramError::UnboundedBigM(format!(
+                "element index variable `{}` requires finite integer bounds",
+                index.name
+            ))
+        })?;
+        let max_index = i64::try_from(values.len() - 1).map_err(|_| {
+            MathProgramError::Unsupported(format!(
+                "element value array is too large: {} values",
+                values.len()
+            ))
+        })?;
+        if lower < 0 || upper > max_index {
+            return Err(MathProgramError::InvalidBound(format!(
+                "element index variable `{}` bounds [{lower}, {upper}] must fit value indices [0, {max_index}]",
+                index.name
+            )));
+        }
+        let domain_size = upper
+            .checked_sub(lower)
+            .and_then(|span| span.checked_add(1))
+            .ok_or_else(|| {
+                MathProgramError::Unsupported(
+                    "element index variable domain size overflowed".to_string(),
+                )
+            })?;
+        if domain_size > 512 {
+            return Err(MathProgramError::Unsupported(format!(
+                "element exact MIP lowering is limited to 512 index literals, got {domain_size}"
+            )));
+        }
+
+        let target = &self.variables[target_var];
+        for idx in lower..=upper {
+            let value = values[idx as usize];
+            if variable_domain_violation(target, value) > 1e-9 {
+                return Err(MathProgramError::InvalidBound(format!(
+                    "element value {value} at index {idx} is outside target variable `{}` domain",
+                    target.name
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn validate_automaton_args(
+        &self,
+        variables: &[usize],
+        starting_state: i64,
+        final_states: &[i64],
+        transitions: &[AutomatonTransition],
+    ) -> Result<(), MathProgramError> {
+        if variables.is_empty() {
+            return Err(MathProgramError::Unsupported(
+                "automaton requires at least one transition variable".to_string(),
+            ));
+        }
+        if final_states.is_empty() {
+            return Err(MathProgramError::Unsupported(
+                "automaton requires at least one final state".to_string(),
+            ));
+        }
+        if transitions.is_empty() {
+            return Err(MathProgramError::Unsupported(
+                "automaton requires at least one transition".to_string(),
+            ));
+        }
+        if transitions.len() > 1024 {
+            return Err(MathProgramError::Unsupported(format!(
+                "automaton exact MIP lowering is limited to 1024 transitions, got {}",
+                transitions.len()
+            )));
+        }
+
+        for &idx in variables {
+            if idx >= self.variables.len() {
+                return Err(MathProgramError::BadIndex(format!(
+                    "automaton variable index {idx} out of bounds"
+                )));
+            }
+            if !matches!(
+                self.variables[idx].var_type,
+                VariableType::Binary | VariableType::Integer
+            ) {
+                return Err(MathProgramError::Unsupported(format!(
+                    "automaton variable `{}` must be binary or integer",
+                    self.variables[idx].name
+                )));
+            }
+            integer_bounds(&self.variables[idx]).ok_or_else(|| {
+                MathProgramError::UnboundedBigM(format!(
+                    "automaton variable `{}` requires finite integer bounds",
+                    self.variables[idx].name
+                ))
+            })?;
+        }
+
+        let states = automaton_states(starting_state, final_states, transitions);
+        let literal_count = (variables.len() + 1)
+            .checked_mul(states.len())
+            .and_then(|count| count.checked_add(variables.len() * transitions.len()))
+            .ok_or_else(|| {
+                MathProgramError::Unsupported(
+                    "automaton exact MIP lowering literal count overflowed".to_string(),
+                )
+            })?;
+        if literal_count > 4096 {
+            return Err(MathProgramError::Unsupported(format!(
+                "automaton exact MIP lowering is limited to 4096 literals, got {literal_count}"
+            )));
         }
 
         Ok(())
@@ -1603,6 +1888,12 @@ pub struct ExternalMathProgramOptions {
     pub script: Option<String>,
     /// Optional MIP start in the original math-program variable space.
     pub mip_start: Option<Vec<f64>>,
+    /// Optional external solver wall-clock limit in milliseconds.
+    pub time_limit_ms: Option<f64>,
+    /// Optional external MIP search node limit.
+    pub node_limit: Option<usize>,
+    /// Optional external relative MIP optimality gap.
+    pub relative_gap: Option<f64>,
 }
 
 /// Facade status normalized across LP and IP/MIP solvers.
@@ -1623,12 +1914,22 @@ pub struct MathProgramSolution {
     pub status: MathProgramStatus,
     pub x: Vec<f64>,
     pub objective: f64,
+    /// Best known objective bound for MIP-style solves, in the original objective direction.
+    pub best_bound: Option<f64>,
+    /// Relative optimality gap for MIP-style solves when the backend reports one.
+    pub mip_gap: Option<f64>,
+    /// Number of explored MIP search nodes when the backend reports one.
+    pub nodes_explored: Option<usize>,
     /// LP row shadow prices for the `LPProblem` inequality rows generated by the facade.
     pub dual_ub: Option<Vec<f64>>,
     /// LP row shadow prices for the `LPProblem` equality rows generated by the facade.
     pub dual_eq: Option<Vec<f64>>,
     /// LP bound reduced costs in the original objective direction.
     pub reduced_costs: Option<Vec<f64>>,
+    /// LP basis status for original variables when reported by the backend.
+    pub var_basis: Option<Vec<String>>,
+    /// LP basis status for generated LP rows when reported by the backend.
+    pub row_basis: Option<Vec<String>>,
     pub solver: String,
     pub message: Option<String>,
 }
@@ -2014,6 +2315,7 @@ fn solve_mixed_integer_linear(
     opts: &MathProgramSolveOptions,
 ) -> Result<MathProgramSolution, MathProgramError> {
     let compiled = compile_mip(program)?;
+    let objective_offset = compiled_objective_offset(program, &compiled);
     let mut mip_opts = opts.mip.clone();
     if let Some(start) = &opts.mip_start {
         mip_opts.mip_start = Some(canonical_mip_start(program, &compiled, start)?);
@@ -2021,6 +2323,8 @@ fn solve_mixed_integer_linear(
     let mip = solve_ipmip_with_des(compiled.problem.clone(), mip_opts);
     let x = compiled.original_x(&mip.x);
     let objective = objective_value(program, &x);
+    let best_bound = original_mip_best_bound(mip.best_bound, objective_offset);
+    let mip_gap = original_mip_gap(best_bound, objective);
     let incumbent_source = mip
         .incumbent_source
         .as_deref()
@@ -2030,9 +2334,14 @@ fn solve_mixed_integer_linear(
         status: from_ipmip_status(mip.status),
         x,
         objective,
+        best_bound,
+        mip_gap,
+        nodes_explored: Some(mip.nodes_explored),
         dual_ub: None,
         dual_eq: None,
         reduced_costs: None,
+        var_basis: None,
+        row_basis: None,
         solver: "des-ipmip".to_string(),
         message: Some(format!(
             "nodes={}, gap={:.3e}, lp_solves={}{}",
@@ -2090,18 +2399,26 @@ fn solve_mixed_integer_conic(
         "des-mip-soc-cutting-plane"
     };
     let mut compiled = compile_mip(&relaxation)?;
+    let objective_offset = compiled_objective_offset(&relaxation, &compiled);
     let mut best = None;
     for cut in 0..=opts.conic.max_cuts {
         let mip = solve_ipmip_with_des(compiled.problem.clone(), opts.mip.clone());
         let x = compiled.original_x(&mip.x);
         let objective = objective_value(program, &x);
+        let best_bound = original_mip_best_bound(mip.best_bound, objective_offset);
+        let mip_gap = original_mip_gap(best_bound, objective);
         let mut solution = MathProgramSolution {
             status: from_ipmip_status(mip.status),
             x,
             objective,
+            best_bound,
+            mip_gap,
+            nodes_explored: Some(mip.nodes_explored),
             dual_ub: None,
             dual_eq: None,
             reduced_costs: None,
+            var_basis: None,
+            row_basis: None,
             solver: solver_name.to_string(),
             message: Some(format!(
                 "cuts={}, nodes={}, gap={:.3e}, lp_solves={}",
@@ -2168,9 +2485,14 @@ fn solve_mixed_integer_conic(
         status: MathProgramStatus::NumericalError,
         x: Vec::new(),
         objective: f64::NAN,
+        best_bound: None,
+        mip_gap: None,
+        nodes_explored: None,
         dual_ub: None,
         dual_eq: None,
         reduced_costs: None,
+        var_basis: None,
+        row_basis: None,
         solver: solver_name.to_string(),
         message: Some("no relaxation solve was attempted".to_string()),
     });
@@ -3269,6 +3591,7 @@ fn solve_math_program_external_scipy_single_objective(
         .script
         .clone()
         .unwrap_or_else(|| "external-references/math-program/math_program_solve.py".to_string());
+    let external_options = encode_external_math_program_options(opts)?;
 
     let (payload, compiled) = if program.has_discrete_features()
         && (program.has_conic_constraints() || program.has_quadratic_constraints())
@@ -3278,9 +3601,14 @@ fn solve_math_program_external_scipy_single_objective(
                 status: MathProgramStatus::NumericalError,
                 x: Vec::new(),
                 objective: f64::NAN,
+                best_bound: None,
+                mip_gap: None,
+                nodes_explored: None,
                 dual_ub: None,
                 dual_eq: None,
                 reduced_costs: None,
+                var_basis: None,
+                row_basis: None,
                 solver: method,
                 message: Some(
                     "external mixed-integer conic/quadratic oracle requires direct continuous/integer/binary variables without lowered discrete constraints"
@@ -3293,6 +3621,7 @@ fn solve_math_program_external_scipy_single_objective(
                 "kind": "conic",
                 "conic": encode_conic_problem(program)?,
                 "method": method,
+                "options": external_options.clone(),
             }),
             None,
         )
@@ -3305,9 +3634,14 @@ fn solve_math_program_external_scipy_single_objective(
                 status: MathProgramStatus::NumericalError,
                 x: Vec::new(),
                 objective: f64::NAN,
+                best_bound: None,
+                mip_gap: None,
+                nodes_explored: None,
                 dual_ub: None,
                 dual_eq: None,
                 reduced_costs: None,
+                var_basis: None,
+                row_basis: None,
                 solver: method,
                 message: Some(
                     "external mixed-integer quadratic objective oracle requires direct continuous/integer/binary variables without lowered discrete constraints"
@@ -3320,6 +3654,7 @@ fn solve_math_program_external_scipy_single_objective(
                 "kind": "qp",
                 "qp": encode_qp_problem(program)?,
                 "method": method,
+                "options": external_options.clone(),
             }),
             None,
         )
@@ -3344,6 +3679,7 @@ fn solve_math_program_external_scipy_single_objective(
                 "kind": "mip",
                 "mip": mip_payload,
                 "method": method,
+                "options": external_options.clone(),
             }),
             Some(compiled),
         )
@@ -3353,6 +3689,7 @@ fn solve_math_program_external_scipy_single_objective(
                 "kind": "conic",
                 "conic": encode_conic_problem(program)?,
                 "method": method,
+                "options": external_options.clone(),
             }),
             None,
         )
@@ -3362,6 +3699,7 @@ fn solve_math_program_external_scipy_single_objective(
                 "kind": "qp",
                 "qp": encode_qp_problem(program)?,
                 "method": method,
+                "options": external_options.clone(),
             }),
             None,
         )
@@ -3371,6 +3709,7 @@ fn solve_math_program_external_scipy_single_objective(
                 "kind": "lp",
                 "lp": encode_lp_problem(&program.to_lp_problem()?),
                 "method": method,
+                "options": external_options,
             }),
             None,
         )
@@ -3384,24 +3723,42 @@ fn solve_math_program_external_scipy_single_objective(
         .map(|items| items.iter().filter_map(Value::as_f64).collect::<Vec<_>>())
         .unwrap_or_default();
     let x = match &compiled {
-        Some(compiled) if status == MathProgramStatus::Optimal => compiled.original_x(&raw_x),
+        Some(compiled) if raw_x.len() == compiled.problem.c.len() => compiled.original_x(&raw_x),
         _ => raw_x,
     };
-    let objective = if status == MathProgramStatus::Optimal && x.len() == program.variables.len() {
+    let objective = if x.len() == program.variables.len() {
         objective_value(program, &x)
     } else {
         raw.get("objective")
             .and_then(Value::as_f64)
             .unwrap_or(f64::NAN)
     };
+    let raw_best_bound = raw.get("bestBound").and_then(Value::as_f64);
+    let best_bound = raw_best_bound.and_then(|bound| match &compiled {
+        Some(compiled) => {
+            original_mip_best_bound(bound, compiled_objective_offset(program, compiled))
+        }
+        None => finite_option(bound),
+    });
+    let raw_mip_gap = raw.get("mipGap").and_then(Value::as_f64);
+    let mip_gap = original_mip_gap(best_bound, objective)
+        .or_else(|| raw_mip_gap.and_then(|gap| gap.is_finite().then_some(gap.max(0.0))));
 
     Ok(MathProgramSolution {
         status,
         x,
         objective,
+        best_bound,
+        mip_gap,
+        nodes_explored: raw
+            .get("nodesExplored")
+            .and_then(Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok()),
         dual_ub: parse_external_f64_array(&raw, "dualUB"),
         dual_eq: parse_external_f64_array(&raw, "dualEQ"),
         reduced_costs: parse_external_f64_array(&raw, "reducedCosts"),
+        var_basis: parse_external_string_array(&raw, "varBasis"),
+        row_basis: parse_external_string_array(&raw, "rowBasis"),
         solver: if let Some(solver) = raw.get("solver").and_then(Value::as_str) {
             solver.to_string()
         } else if method.starts_with("ortools:") {
@@ -3430,6 +3787,8 @@ fn solve_lp_with_backend(lp: &LPProblem, opts: &MathProgramSolveOptions) -> LPSo
                 dual_ub: sol.dual_ub,
                 dual_eq: sol.dual_eq,
                 reduced_costs: sol.reduced_costs,
+                var_basis: sol.var_basis,
+                row_basis: sol.row_basis,
                 iters: sol.iters,
                 solver: sol.solver,
                 elapsed_ms: sol.elapsed_ms,
@@ -3504,9 +3863,14 @@ fn solve_continuous_qp(
             status: from_lp_status(feasibility.status),
             x: feasibility.x,
             objective: f64::NAN,
+            best_bound: None,
+            mip_gap: None,
+            nodes_explored: None,
             dual_ub: None,
             dual_eq: None,
             reduced_costs: None,
+            var_basis: None,
+            row_basis: None,
             solver: "des-frank-wolfe-qp".to_string(),
             message: feasibility.message,
         });
@@ -3528,9 +3892,14 @@ fn solve_continuous_qp(
                 status: from_lp_status(linear.status),
                 x,
                 objective,
+                best_bound: None,
+                mip_gap: None,
+                nodes_explored: None,
                 dual_ub: None,
                 dual_eq: None,
                 reduced_costs: None,
+                var_basis: None,
+                row_basis: None,
                 solver: "des-frank-wolfe-qp".to_string(),
                 message: linear.message,
             });
@@ -3573,9 +3942,14 @@ fn solve_continuous_qp(
         },
         x,
         objective,
+        best_bound: None,
+        mip_gap: None,
+        nodes_explored: None,
         dual_ub: None,
         dual_eq: None,
         reduced_costs: None,
+        var_basis: None,
+        row_basis: None,
         solver: "des-frank-wolfe-qp".to_string(),
         message: Some(format!(
             "iterations={}, tolerance={:.3e}",
@@ -3685,9 +4059,14 @@ fn solve_continuous_conic(
         status: MathProgramStatus::NumericalError,
         x: Vec::new(),
         objective: f64::NAN,
+        best_bound: None,
+        mip_gap: None,
+        nodes_explored: None,
         dual_ub: None,
         dual_eq: None,
         reduced_costs: None,
+        var_basis: None,
+        row_basis: None,
         solver: solver_name.to_string(),
         message: Some("no relaxation solve was attempted".to_string()),
     });
@@ -3885,9 +4264,66 @@ fn parse_external_status(raw: &Value) -> MathProgramStatus {
         Some("infeasible") => MathProgramStatus::Infeasible,
         Some("unbounded") => MathProgramStatus::Unbounded,
         Some("iter-limit") => MathProgramStatus::IterLimit,
+        Some("node-limit") => MathProgramStatus::NodeLimit,
         Some("time-limit") => MathProgramStatus::TimeLimit,
         _ => MathProgramStatus::NumericalError,
     }
+}
+
+fn finite_option(value: f64) -> Option<f64> {
+    value.is_finite().then_some(value)
+}
+
+fn encode_external_math_program_options(
+    opts: &ExternalMathProgramOptions,
+) -> Result<Value, MathProgramError> {
+    let mut object = serde_json::Map::new();
+    if let Some(time_limit_ms) = opts.time_limit_ms {
+        if !time_limit_ms.is_finite() || time_limit_ms <= 0.0 {
+            return Err(MathProgramError::InvalidBound(
+                "external time_limit_ms must be finite and positive".to_string(),
+            ));
+        }
+        object.insert("timeLimitMs".to_string(), Value::from(time_limit_ms));
+    }
+    if let Some(node_limit) = opts.node_limit {
+        if node_limit == 0 {
+            return Err(MathProgramError::InvalidBound(
+                "external node_limit must be positive".to_string(),
+            ));
+        }
+        object.insert("nodeLimit".to_string(), Value::from(node_limit));
+    }
+    if let Some(relative_gap) = opts.relative_gap {
+        if !relative_gap.is_finite() || relative_gap < 0.0 {
+            return Err(MathProgramError::InvalidBound(
+                "external relative_gap must be finite and non-negative".to_string(),
+            ));
+        }
+        object.insert("relativeGap".to_string(), Value::from(relative_gap));
+    }
+    Ok(Value::Object(object))
+}
+
+fn compiled_objective_offset(program: &MathProgram, compiled: &CompiledMip) -> f64 {
+    program
+        .variables
+        .iter()
+        .zip(&compiled.expansions)
+        .map(|(var, expansion)| var.obj * expansion.constant)
+        .sum()
+}
+
+fn original_mip_best_bound(best_bound: f64, objective_offset: f64) -> Option<f64> {
+    finite_option(best_bound + objective_offset)
+}
+
+fn original_mip_gap(best_bound: Option<f64>, objective: f64) -> Option<f64> {
+    best_bound.and_then(|bound| {
+        objective
+            .is_finite()
+            .then_some((bound - objective).abs() / 1.0_f64.max(objective.abs()))
+    })
 }
 
 fn parse_external_f64_array(raw: &Value, key: &str) -> Option<Vec<f64>> {
@@ -3896,14 +4332,29 @@ fn parse_external_f64_array(raw: &Value, key: &str) -> Option<Vec<f64>> {
         .map(|items| items.iter().filter_map(Value::as_f64).collect::<Vec<_>>())
 }
 
+fn parse_external_string_array(raw: &Value, key: &str) -> Option<Vec<String>> {
+    raw.get(key).and_then(Value::as_array).map(|items| {
+        items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    })
+}
+
 fn from_lp_solution(sol: LPSolution) -> MathProgramSolution {
     MathProgramSolution {
         status: from_lp_status(sol.status),
         x: sol.x,
         objective: sol.objective,
+        best_bound: None,
+        mip_gap: None,
+        nodes_explored: None,
         dual_ub: sol.dual_ub,
         dual_eq: sol.dual_eq,
         reduced_costs: sol.reduced_costs,
+        var_basis: sol.var_basis,
+        row_basis: sol.row_basis,
         solver: sol.solver,
         message: sol.message,
     }
@@ -4804,6 +5255,56 @@ fn add_general_constraint_rows(
             variables,
             tuples,
         )?,
+        GeneralConstraint::ForbiddenAssignments {
+            name,
+            variables,
+            tuples,
+        } => add_forbidden_assignment_rows(
+            program,
+            names,
+            integer_vars,
+            ub,
+            rows,
+            expansions,
+            name,
+            variables,
+            tuples,
+        )?,
+        GeneralConstraint::Element {
+            name,
+            index_var,
+            target_var,
+            values,
+        } => add_element_rows(
+            program,
+            names,
+            integer_vars,
+            ub,
+            rows,
+            expansions,
+            name,
+            *index_var,
+            *target_var,
+            values,
+        )?,
+        GeneralConstraint::Automaton {
+            name,
+            variables,
+            starting_state,
+            final_states,
+            transitions,
+        } => add_automaton_rows(
+            names,
+            integer_vars,
+            ub,
+            rows,
+            expansions,
+            name,
+            variables,
+            *starting_state,
+            final_states,
+            transitions,
+        )?,
         GeneralConstraint::NoOverlap { name, intervals } => {
             add_no_overlap_rows(names, integer_vars, ub, rows, expansions, name, intervals)?
         }
@@ -4976,6 +5477,323 @@ fn add_allowed_assignment_rows(
             rhs: -link_rhs,
             name: format!("{name}__var_{col}__link_tuple_ge"),
         });
+    }
+
+    Ok(())
+}
+
+fn add_forbidden_assignment_rows(
+    program: &MathProgram,
+    names: &mut Vec<String>,
+    integer_vars: &mut Vec<bool>,
+    ub: &mut Vec<f64>,
+    rows: &mut Vec<SparseRow>,
+    expansions: &[LinearExpansion],
+    name: &str,
+    variables: &[usize],
+    tuples: &[Vec<i64>],
+) -> Result<(), MathProgramError> {
+    let mut value_literals_by_var = Vec::with_capacity(variables.len());
+
+    for (col, &var_idx) in variables.iter().enumerate() {
+        let var = &program.variables[var_idx];
+        let (lower, upper) = integer_bounds(var).ok_or_else(|| {
+            MathProgramError::UnboundedBigM(format!(
+                "forbidden-assignments variable `{}` requires finite integer bounds",
+                var.name
+            ))
+        })?;
+        let mut literals = BTreeMap::new();
+        for value in lower..=upper {
+            let lit = push_canonical_var(
+                &format!("{name}__var_{col}__eq_{value}"),
+                true,
+                1.0,
+                names,
+                integer_vars,
+                ub,
+            );
+            literals.insert(value, lit);
+        }
+
+        let choose_coeffs = literals.values().map(|&lit| (lit, 1.0)).collect::<Vec<_>>();
+        rows.push(SparseRow {
+            coeffs: choose_coeffs.clone(),
+            rhs: 1.0,
+            name: format!("{name}__var_{col}__choose_one_value"),
+        });
+        rows.push(SparseRow {
+            coeffs: negate_sparse(&choose_coeffs),
+            rhs: -1.0,
+            name: format!("{name}__var_{col}__choose_one_value_ge"),
+        });
+
+        let mut link_coeffs = expansions[var_idx].terms.clone();
+        link_coeffs.extend(literals.iter().map(|(&value, &lit)| (lit, -(value as f64))));
+        let link_rhs = -expansions[var_idx].constant;
+        let link_coeffs = combine_terms(&link_coeffs);
+        rows.push(SparseRow {
+            coeffs: link_coeffs.clone(),
+            rhs: link_rhs,
+            name: format!("{name}__var_{col}__link_value"),
+        });
+        rows.push(SparseRow {
+            coeffs: negate_sparse(&link_coeffs),
+            rhs: -link_rhs,
+            name: format!("{name}__var_{col}__link_value_ge"),
+        });
+
+        value_literals_by_var.push(literals);
+    }
+
+    for (row, tuple) in tuples.iter().enumerate() {
+        let coeffs = tuple
+            .iter()
+            .enumerate()
+            .map(|(col, &value)| (value_literals_by_var[col][&value], 1.0))
+            .collect::<Vec<_>>();
+        rows.push(SparseRow {
+            coeffs,
+            rhs: variables.len().saturating_sub(1) as f64,
+            name: format!("{name}__forbid_tuple_{row}"),
+        });
+    }
+
+    Ok(())
+}
+
+fn add_element_rows(
+    program: &MathProgram,
+    names: &mut Vec<String>,
+    integer_vars: &mut Vec<bool>,
+    ub: &mut Vec<f64>,
+    rows: &mut Vec<SparseRow>,
+    expansions: &[LinearExpansion],
+    name: &str,
+    index_var: usize,
+    target_var: usize,
+    values: &[f64],
+) -> Result<(), MathProgramError> {
+    if values.is_empty() {
+        return Err(MathProgramError::Unsupported(
+            "element requires at least one value".to_string(),
+        ));
+    }
+    let index = &program.variables[index_var];
+    let (lower, upper) = integer_bounds(index).ok_or_else(|| {
+        MathProgramError::UnboundedBigM(format!(
+            "element index variable `{}` requires finite integer bounds",
+            index.name
+        ))
+    })?;
+    let max_index = i64::try_from(values.len() - 1).map_err(|_| {
+        MathProgramError::Unsupported(format!(
+            "element value array is too large: {} values",
+            values.len()
+        ))
+    })?;
+    if lower < 0 || upper > max_index {
+        return Err(MathProgramError::InvalidBound(format!(
+            "element index variable `{}` bounds [{lower}, {upper}] must fit value indices [0, {max_index}]",
+            index.name
+        )));
+    }
+
+    let selectors = (lower..=upper)
+        .map(|idx| {
+            let lit = push_canonical_var(
+                &format!("{name}__index_{idx}"),
+                true,
+                1.0,
+                names,
+                integer_vars,
+                ub,
+            );
+            (idx, lit)
+        })
+        .collect::<Vec<_>>();
+    let choose_coeffs = selectors
+        .iter()
+        .map(|&(_, lit)| (lit, 1.0))
+        .collect::<Vec<_>>();
+    rows.push(SparseRow {
+        coeffs: choose_coeffs.clone(),
+        rhs: 1.0,
+        name: format!("{name}__choose_index"),
+    });
+    rows.push(SparseRow {
+        coeffs: negate_sparse(&choose_coeffs),
+        rhs: -1.0,
+        name: format!("{name}__choose_index_ge"),
+    });
+
+    let index_coeffs = selectors
+        .iter()
+        .map(|&(idx, lit)| (lit, -(idx as f64)))
+        .collect::<Vec<_>>();
+    add_mixed_row(
+        rows,
+        format!("{name}__link_index"),
+        expansions,
+        &[(index_var, 1.0)],
+        &index_coeffs,
+        RowSense::Eq,
+        0.0,
+    );
+
+    let target_coeffs = selectors
+        .iter()
+        .map(|&(idx, lit)| (lit, -values[idx as usize]))
+        .collect::<Vec<_>>();
+    add_mixed_row(
+        rows,
+        format!("{name}__link_target"),
+        expansions,
+        &[(target_var, 1.0)],
+        &target_coeffs,
+        RowSense::Eq,
+        0.0,
+    );
+
+    Ok(())
+}
+
+fn add_automaton_rows(
+    names: &mut Vec<String>,
+    integer_vars: &mut Vec<bool>,
+    ub: &mut Vec<f64>,
+    rows: &mut Vec<SparseRow>,
+    expansions: &[LinearExpansion],
+    name: &str,
+    variables: &[usize],
+    starting_state: i64,
+    final_states: &[i64],
+    transitions: &[AutomatonTransition],
+) -> Result<(), MathProgramError> {
+    let states = automaton_states(starting_state, final_states, transitions);
+    let state_index = states
+        .iter()
+        .enumerate()
+        .map(|(idx, &state)| (state, idx))
+        .collect::<BTreeMap<_, _>>();
+    let mut state_literals = Vec::with_capacity(variables.len() + 1);
+    for stage in 0..=variables.len() {
+        let mut stage_literals = Vec::with_capacity(states.len());
+        for &state in &states {
+            stage_literals.push(push_canonical_var(
+                &format!("{name}__stage_{stage}__state_{state}"),
+                true,
+                1.0,
+                names,
+                integer_vars,
+                ub,
+            ));
+        }
+        state_literals.push(stage_literals);
+    }
+
+    for (stage, literals) in state_literals.iter().enumerate() {
+        let coeffs = literals.iter().map(|&lit| (lit, 1.0)).collect::<Vec<_>>();
+        rows.push(SparseRow {
+            coeffs: coeffs.clone(),
+            rhs: 1.0,
+            name: format!("{name}__stage_{stage}__one_state"),
+        });
+        rows.push(SparseRow {
+            coeffs: negate_sparse(&coeffs),
+            rhs: -1.0,
+            name: format!("{name}__stage_{stage}__one_state_ge"),
+        });
+    }
+
+    let start_idx = state_index[&starting_state];
+    rows.push(SparseRow {
+        coeffs: vec![(state_literals[0][start_idx], -1.0)],
+        rhs: -1.0,
+        name: format!("{name}__start_state"),
+    });
+    let final_coeffs = unique_i64(final_states)
+        .iter()
+        .map(|state| (state_literals[variables.len()][state_index[state]], -1.0))
+        .collect::<Vec<_>>();
+    rows.push(SparseRow {
+        coeffs: final_coeffs,
+        rhs: -1.0,
+        name: format!("{name}__final_state"),
+    });
+
+    for (stage, &var_idx) in variables.iter().enumerate() {
+        let arcs = transitions
+            .iter()
+            .enumerate()
+            .map(|(transition_idx, _)| {
+                push_canonical_var(
+                    &format!("{name}__stage_{stage}__transition_{transition_idx}"),
+                    true,
+                    1.0,
+                    names,
+                    integer_vars,
+                    ub,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        for (state_pos, &state) in states.iter().enumerate() {
+            let outgoing = transitions
+                .iter()
+                .enumerate()
+                .filter_map(|(transition_idx, transition)| {
+                    (transition.tail == state).then_some((arcs[transition_idx], 1.0))
+                })
+                .collect::<Vec<_>>();
+            let mut outgoing_link = outgoing;
+            outgoing_link.push((state_literals[stage][state_pos], -1.0));
+            rows.push(SparseRow {
+                coeffs: outgoing_link.clone(),
+                rhs: 0.0,
+                name: format!("{name}__stage_{stage}__state_{state}__outflow"),
+            });
+            rows.push(SparseRow {
+                coeffs: negate_sparse(&outgoing_link),
+                rhs: 0.0,
+                name: format!("{name}__stage_{stage}__state_{state}__outflow_ge"),
+            });
+
+            let incoming = transitions
+                .iter()
+                .enumerate()
+                .filter_map(|(transition_idx, transition)| {
+                    (transition.head == state).then_some((arcs[transition_idx], 1.0))
+                })
+                .collect::<Vec<_>>();
+            let mut incoming_link = incoming;
+            incoming_link.push((state_literals[stage + 1][state_pos], -1.0));
+            rows.push(SparseRow {
+                coeffs: incoming_link.clone(),
+                rhs: 0.0,
+                name: format!("{name}__stage_{stage}__state_{state}__inflow"),
+            });
+            rows.push(SparseRow {
+                coeffs: negate_sparse(&incoming_link),
+                rhs: 0.0,
+                name: format!("{name}__stage_{stage}__state_{state}__inflow_ge"),
+            });
+        }
+
+        let canonical_value = transitions
+            .iter()
+            .zip(&arcs)
+            .map(|(transition, &arc)| (arc, -(transition.label as f64)))
+            .collect::<Vec<_>>();
+        add_mixed_row(
+            rows,
+            format!("{name}__stage_{stage}__label"),
+            expansions,
+            &[(var_idx, 1.0)],
+            &canonical_value,
+            RowSense::Eq,
+            0.0,
+        );
     }
 
     Ok(())
@@ -6072,6 +6890,22 @@ fn general_constraint_violation(constraint: &GeneralConstraint, x: &[f64], tol: 
         GeneralConstraint::AllowedAssignments {
             variables, tuples, ..
         } => allowed_assignments_violation(variables, tuples, x),
+        GeneralConstraint::ForbiddenAssignments {
+            variables, tuples, ..
+        } => forbidden_assignments_violation(variables, tuples, x),
+        GeneralConstraint::Element {
+            index_var,
+            target_var,
+            values,
+            ..
+        } => element_violation(*index_var, *target_var, values, x),
+        GeneralConstraint::Automaton {
+            variables,
+            starting_state,
+            final_states,
+            transitions,
+            ..
+        } => automaton_violation(variables, *starting_state, final_states, transitions, x),
         GeneralConstraint::NoOverlap { intervals, .. } => no_overlap_violation(intervals, x, tol),
         GeneralConstraint::NoOverlap2D {
             x_intervals,
@@ -6127,6 +6961,87 @@ fn allowed_assignments_violation(variables: &[usize], tuples: &[Vec<i64>], x: &[
                 .fold(0.0_f64, f64::max)
         })
         .fold(f64::INFINITY, f64::min)
+}
+
+fn forbidden_assignments_violation(variables: &[usize], tuples: &[Vec<i64>], x: &[f64]) -> f64 {
+    let matches_forbidden = tuples.iter().any(|tuple| {
+        variables
+            .iter()
+            .zip(tuple)
+            .all(|(&idx, &target)| (x[idx] - target as f64).abs() <= 1e-6)
+    });
+    if matches_forbidden {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+fn element_violation(index_var: usize, target_var: usize, values: &[f64], x: &[f64]) -> f64 {
+    let index_value = x[index_var];
+    let rounded = index_value.round();
+    let integrality = integrality_violation(index_value);
+    if rounded < 0.0 || rounded >= values.len() as f64 {
+        return integrality.max(1.0);
+    }
+    let expected = values[rounded as usize];
+    integrality.max((x[target_var] - expected).abs())
+}
+
+fn automaton_violation(
+    variables: &[usize],
+    starting_state: i64,
+    final_states: &[i64],
+    transitions: &[AutomatonTransition],
+    x: &[f64],
+) -> f64 {
+    let mut current_states = vec![starting_state];
+    for &var_idx in variables {
+        let label = x[var_idx].round() as i64;
+        let mut next_states = transitions
+            .iter()
+            .filter_map(|transition| {
+                (transition.label == label && current_states.contains(&transition.tail))
+                    .then_some(transition.head)
+            })
+            .collect::<Vec<_>>();
+        next_states.sort_unstable();
+        next_states.dedup();
+        if next_states.is_empty() {
+            return 1.0;
+        }
+        current_states = next_states;
+    }
+    if current_states
+        .iter()
+        .any(|state| final_states.contains(state))
+    {
+        0.0
+    } else {
+        1.0
+    }
+}
+
+fn automaton_states(
+    starting_state: i64,
+    final_states: &[i64],
+    transitions: &[AutomatonTransition],
+) -> Vec<i64> {
+    let mut states = Vec::with_capacity(1 + final_states.len() + transitions.len() * 2);
+    states.push(starting_state);
+    states.extend_from_slice(final_states);
+    for transition in transitions {
+        states.push(transition.tail);
+        states.push(transition.head);
+    }
+    unique_i64(&states)
+}
+
+fn unique_i64(values: &[i64]) -> Vec<i64> {
+    let mut values = values.to_vec();
+    values.sort_unstable();
+    values.dedup();
+    values
 }
 
 fn rectangle_active(x_interval: &IntervalTerm, y_interval: &IntervalTerm, x: &[f64]) -> bool {
@@ -7323,6 +8238,25 @@ mod tests {
     }
 
     #[test]
+    fn element_general_constraint_selects_value_by_index() {
+        let mut p = MathProgram::new(ObjectiveSense::Max);
+        let index = p
+            .add_integer_var("index", 0.0, Some(0.0), Some(3.0))
+            .unwrap();
+        let picked = p
+            .add_integer_var("picked", 1.0, Some(0.0), Some(9.0))
+            .unwrap();
+        p.add_element("lookup", index, picked, vec![1.0, 7.0, 4.0, 9.0])
+            .unwrap();
+
+        let sol = solve_math_program(&p, &MathProgramSolveOptions::default()).unwrap();
+        assert_eq!(sol.status, MathProgramStatus::Optimal);
+        assert_close(sol.x[index], 3.0);
+        assert_close(sol.x[picked], 9.0);
+        assert_close(sol.objective, 9.0);
+    }
+
+    #[test]
     fn no_overlap_orders_fixed_size_intervals() {
         let mut p = MathProgram::new(ObjectiveSense::Min);
         let a_start = p
@@ -7700,9 +8634,14 @@ mod tests {
             status: MathProgramStatus::Optimal,
             x: vec![1.0, 0.0],
             objective: 1.0,
+            best_bound: None,
+            mip_gap: None,
+            nodes_explored: None,
             dual_ub: None,
             dual_eq: None,
             reduced_costs: None,
+            var_basis: None,
+            row_basis: None,
             solver: "internal".to_string(),
             message: None,
         };
@@ -7710,9 +8649,14 @@ mod tests {
             status: MathProgramStatus::Optimal,
             x: vec![0.0, 1.0],
             objective: 1.0,
+            best_bound: None,
+            mip_gap: None,
+            nodes_explored: None,
             dual_ub: None,
             dual_eq: None,
             reduced_costs: None,
+            var_basis: None,
+            row_basis: None,
             solver: "external".to_string(),
             message: None,
         };

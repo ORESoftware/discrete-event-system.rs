@@ -88,11 +88,265 @@ def _lp_certificate_fields(
     return fields
 
 
+def _lp_basis_fields(
+    var_basis: list[str | None] | None,
+    row_basis: list[str | None] | None,
+) -> dict[str, Any]:
+    fields: dict[str, Any] = {}
+    if var_basis is not None and all(status is not None for status in var_basis):
+        fields["varBasis"] = list(var_basis)
+    if row_basis is not None and all(status is not None for status in row_basis):
+        fields["rowBasis"] = list(row_basis)
+    return fields
+
+
+def _finite_float_or_none(value: Any) -> float | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return numeric if math.isfinite(numeric) else None
+
+
+def _nonnegative_int_or_none(value: Any) -> int | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(numeric) or numeric < 0:
+        return None
+    return int(round(numeric))
+
+
+def _relative_gap(best_bound: Any, objective: Any) -> float | None:
+    bound = _finite_float_or_none(best_bound)
+    incumbent = _finite_float_or_none(objective)
+    if bound is None or incumbent is None:
+        return None
+    return abs(bound - incumbent) / max(1.0, abs(incumbent))
+
+
+def _quality_fields(
+    best_bound: Any = None,
+    mip_gap: Any = None,
+    nodes_explored: Any = None,
+) -> dict[str, Any]:
+    fields: dict[str, Any] = {}
+    bound = _finite_float_or_none(best_bound)
+    gap = _finite_float_or_none(mip_gap)
+    nodes = _nonnegative_int_or_none(nodes_explored)
+    if bound is not None:
+        fields["bestBound"] = bound
+    if gap is not None:
+        fields["mipGap"] = gap
+    if nodes is not None:
+        fields["nodesExplored"] = nodes
+    return fields
+
+
+def _first_attr(obj: Any, names: tuple[str, ...]) -> Any:
+    for name in names:
+        try:
+            return getattr(obj, name)
+        except Exception:
+            continue
+    return None
+
+
+def _lp_reduced_costs_from_row_duals(
+    problem: dict[str, Any], row_duals: list[float]
+) -> list[float] | None:
+    if problem.get("sense", "max") != "max":
+        return None
+    rows = [
+        [float(value) for value in row]
+        for row in (problem.get("A_ub") or []) + (problem.get("A_eq") or [])
+    ]
+    if len(row_duals) < len(rows):
+        return None
+    reduced_costs = []
+    for col, coeff in enumerate(problem.get("c", [])):
+        row_part = 0.0
+        for row, dual in zip(rows, row_duals):
+            if col < len(row):
+                row_part += row[col] * dual
+        reduced_costs.append(float(coeff) - row_part)
+    return reduced_costs
+
+
+def _basis_status_from_token(token: Any) -> str | None:
+    text = str(token).strip().lower()
+    highs_codes = {
+        "0": "at_lower",
+        "1": "basic",
+        "2": "at_upper",
+        "3": "zero",
+        "4": "nonbasic",
+    }
+    glpk_codes = {
+        "b": "basic",
+        "bs": "basic",
+        "l": "at_lower",
+        "nl": "at_lower",
+        "u": "at_upper",
+        "nu": "at_upper",
+        "f": "free",
+        "nf": "free",
+        "s": "fixed",
+        "ns": "fixed",
+    }
+    named = {
+        "basic": "basic",
+        "lower": "at_lower",
+        "at_lower": "at_lower",
+        "upper": "at_upper",
+        "at_upper": "at_upper",
+        "zero": "zero",
+        "nonbasic": "nonbasic",
+        "free": "free",
+        "fixed": "fixed",
+        "superbasic": "superbasic",
+    }
+    return highs_codes.get(text) or glpk_codes.get(text) or named.get(text)
+
+
+def _glpk_basis_status_from_code(glp: Any, code: int) -> str | None:
+    return {
+        glp.GLP_BS: "basic",
+        glp.GLP_NL: "at_lower",
+        glp.GLP_NU: "at_upper",
+        glp.GLP_NF: "free",
+        glp.GLP_NS: "fixed",
+    }.get(code)
+
+
+def _ortools_basis_status(pywraplp: Any, code: int) -> str | None:
+    return {
+        int(pywraplp.Solver.FREE): "free",
+        int(pywraplp.Solver.AT_LOWER_BOUND): "at_lower",
+        int(pywraplp.Solver.AT_UPPER_BOUND): "at_upper",
+        int(pywraplp.Solver.FIXED_VALUE): "fixed",
+        int(pywraplp.Solver.BASIC): "basic",
+    }.get(code)
+
+
+def _gurobi_var_basis_status(code: int) -> str | None:
+    return {0: "basic", -1: "at_lower", -2: "at_upper", -3: "superbasic"}.get(
+        code
+    )
+
+
+def _gurobi_row_basis_status(code: int) -> str | None:
+    return {0: "basic", -1: "at_upper"}.get(code)
+
+
+def _cplex_var_basis_status(status: Any, code: int) -> str | None:
+    return {
+        int(status.basic): "basic",
+        int(status.at_lower_bound): "at_lower",
+        int(status.at_upper_bound): "at_upper",
+        int(status.free_nonbasic): "free",
+    }.get(code)
+
+
+def _cplex_row_basis_status(status: Any, code: int) -> str | None:
+    return {
+        int(status.basic): "basic",
+        int(status.at_lower_bound): "at_upper",
+        int(status.at_upper_bound): "at_lower",
+        int(status.free_nonbasic): "free",
+    }.get(code)
+
+
+def _xpress_var_basis_status(code: int) -> str | None:
+    return {1: "basic", 0: "at_lower", 2: "at_upper", 3: "superbasic"}.get(code)
+
+
+def _xpress_row_basis_status(code: int) -> str | None:
+    return {1: "basic", 0: "at_upper", 2: "at_lower", 3: "superbasic"}.get(code)
+
+
+def _lp_row_basis_with_fixed_equalities(
+    ub_statuses: list[str | None], eq_count: int
+) -> list[str | None]:
+    return ub_statuses + ["fixed"] * eq_count
+
+
 def _solver_backend(method: str) -> tuple[str, str]:
     if ":" in method:
         family, backend = method.split(":", 1)
         return family.lower(), backend
     return "scipy", method
+
+
+def _external_options(payload: dict[str, Any]) -> dict[str, Any]:
+    options = payload.get("options")
+    return options if isinstance(options, dict) else {}
+
+
+def _time_limit_seconds(options: dict[str, Any], default: float | None = None) -> float | None:
+    value = _finite_float_or_none(options.get("timeLimitMs"))
+    if value is None:
+        return default
+    return max(value / 1000.0, 1e-9)
+
+
+def _time_limit_seconds_text(options: dict[str, Any], default: float = 60.0) -> str:
+    return f"{_time_limit_seconds(options, default):.17g}"
+
+
+def _time_limit_integer_seconds_text(options: dict[str, Any], default: int = 60) -> str:
+    seconds = _time_limit_seconds(options)
+    if seconds is None:
+        return str(default)
+    return str(max(1, int(math.ceil(seconds))))
+
+
+def _node_limit(options: dict[str, Any]) -> int | None:
+    value = _nonnegative_int_or_none(options.get("nodeLimit"))
+    if value is None or value <= 0:
+        return None
+    return value
+
+
+def _relative_gap_limit(options: dict[str, Any]) -> float | None:
+    value = _finite_float_or_none(options.get("relativeGap"))
+    if value is None or value < 0.0:
+        return None
+    return value
+
+
+def _scipy_milp_options(options: dict[str, Any]) -> dict[str, Any]:
+    scipy_options: dict[str, Any] = {}
+    time_limit = _time_limit_seconds(options)
+    node_limit = _node_limit(options)
+    relative_gap = _relative_gap_limit(options)
+    if time_limit is not None:
+        scipy_options["time_limit"] = time_limit
+    if node_limit is not None:
+        scipy_options["node_limit"] = node_limit
+    if relative_gap is not None:
+        scipy_options["mip_rel_gap"] = relative_gap
+    return scipy_options
+
+
+def _scipy_mip_status(code: int, options: dict[str, Any]) -> str:
+    status = _status(code)
+    if code == 1:
+        if _time_limit_seconds(options) is not None:
+            return "time-limit"
+        if _node_limit(options) is not None:
+            return "node-limit"
+    return status
+
+
+def _limited_status(status: str, options: dict[str, Any]) -> str:
+    if status == "iter-limit":
+        if _time_limit_seconds(options) is not None:
+            return "time-limit"
+        if _node_limit(options) is not None:
+            return "node-limit"
+    return status
 
 
 def _integer_value(value: Any, name: str) -> int:
@@ -137,13 +391,13 @@ def solve_lp(payload: dict[str, Any], method: str) -> dict[str, Any]:
     if family == "ortools":
         return solve_ortools(payload, backend, integer=False)
     if family in {"highs-cli", "highs"}:
-        return solve_highs_cli(payload["lp"], integer=False)
+        return solve_highs_cli(payload["lp"], integer=False, options=_external_options(payload))
     if family in {"cbc-cli", "cbc"}:
-        return solve_cbc_cli(payload["lp"], integer=False)
+        return solve_cbc_cli(payload["lp"], integer=False, options=_external_options(payload))
     if family in {"glpk-cli", "glpsol"}:
-        return solve_glpsol_cli(payload["lp"], integer=False)
+        return solve_glpsol_cli(payload["lp"], integer=False, options=_external_options(payload))
     if family in {"scip-cli", "scip"}:
-        return solve_scip_cli(payload["lp"], integer=False)
+        return solve_scip_cli(payload["lp"], integer=False, options=_external_options(payload))
     if family == "gurobi":
         return solve_gurobi_lp(payload)
     if family == "cplex":
@@ -470,13 +724,13 @@ def solve_mip(payload: dict[str, Any], method: str) -> dict[str, Any]:
             return solve_ortools_cp_sat(payload)
         return solve_ortools(payload, backend, integer=True)
     if family in {"highs-cli", "highs"}:
-        return solve_highs_cli(payload["mip"], integer=True)
+        return solve_highs_cli(payload["mip"], integer=True, options=_external_options(payload))
     if family in {"cbc-cli", "cbc"}:
-        return solve_cbc_cli(payload["mip"], integer=True)
+        return solve_cbc_cli(payload["mip"], integer=True, options=_external_options(payload))
     if family in {"glpk-cli", "glpsol"}:
-        return solve_glpsol_cli(payload["mip"], integer=True)
+        return solve_glpsol_cli(payload["mip"], integer=True, options=_external_options(payload))
     if family in {"scip-cli", "scip"}:
-        return solve_scip_cli(payload["mip"], integer=True)
+        return solve_scip_cli(payload["mip"], integer=True, options=_external_options(payload))
     if family == "gurobi":
         return solve_gurobi_mip(payload)
     if family == "cplex":
@@ -509,21 +763,35 @@ def solve_mip(payload: dict[str, Any], method: str) -> dict[str, Any]:
     )
     constraints = LinearConstraint(a, -math.inf * np.ones(len(b)), b)
     integrality = np.array([1 if v else 0 for v in mip.get("integerVars", [])], dtype=int)
+    external_options = _external_options(payload)
+    milp_options = _scipy_milp_options(external_options)
     result = milp(
         c=scipy_c,
         integrality=integrality,
         bounds=Bounds(lower, upper),
         constraints=constraints,
+        options=milp_options or None,
     )
     objective = None
     if result.fun is not None and math.isfinite(float(result.fun)):
         objective = -float(result.fun) if sense == "max" else float(result.fun)
-    return {
-        "status": _status(int(result.status)),
+    best_bound = getattr(result, "mip_dual_bound", None)
+    if best_bound is not None and sense == "max":
+        best_bound = -float(best_bound)
+    parsed = {
+        "status": _scipy_mip_status(int(result.status), external_options),
         "x": [float(v) for v in result.x] if result.x is not None else [],
         "objective": objective,
         "message": str(result.message),
     }
+    parsed.update(
+        _quality_fields(
+            best_bound=best_bound,
+            mip_gap=getattr(result, "mip_gap", None),
+            nodes_explored=getattr(result, "mip_node_count", None),
+        )
+    )
+    return parsed
 
 
 def solve_ortools_cp_sat(payload: dict[str, Any]) -> dict[str, Any]:
@@ -568,6 +836,16 @@ def solve_ortools_cp_sat(payload: dict[str, Any]) -> dict[str, Any]:
             model.AddHint(var, _integer_value(value, f"MIP start {i}"))
 
     solver = cp_model.CpSolver()
+    options = _external_options(payload)
+    time_limit = _time_limit_seconds(options)
+    node_limit = _node_limit(options)
+    relative_gap = _relative_gap_limit(options)
+    if time_limit is not None:
+        solver.parameters.max_time_in_seconds = time_limit
+    if node_limit is not None:
+        solver.parameters.max_number_of_conflicts = node_limit
+    if relative_gap is not None:
+        solver.parameters.relative_gap_limit = relative_gap
     status_code = solver.Solve(model)
     status = {
         cp_model.OPTIMAL: "optimal",
@@ -576,14 +854,25 @@ def solve_ortools_cp_sat(payload: dict[str, Any]) -> dict[str, Any]:
         cp_model.MODEL_INVALID: "numerical-error",
         cp_model.UNKNOWN: "numerical-error",
     }.get(status_code, "numerical-error")
+    status = _limited_status(status, options)
     x = [float(solver.Value(var)) for var in variables] if status in {"optimal", "iter-limit"} else []
     objective_value = float(solver.ObjectiveValue()) if status in {"optimal", "iter-limit"} else None
-    return {
+    parsed = {
         "status": status,
         "x": x,
         "objective": objective_value,
         "message": f"ortools:CP-SAT status={status_code}",
     }
+    if status in {"optimal", "iter-limit"}:
+        best_bound = float(solver.BestObjectiveBound())
+        parsed.update(
+            _quality_fields(
+                best_bound=best_bound,
+                mip_gap=_relative_gap(best_bound, objective_value),
+                nodes_explored=solver.NumBranches(),
+            )
+        )
+    return parsed
 
 
 def _cli_bounds(problem: dict[str, Any], n: int) -> list[tuple[float | None, float | None]]:
@@ -694,6 +983,8 @@ def _parse_glpk_solution(
     x = [0.0] * n
     row_duals = [0.0] * (ub_count + eq_count)
     reduced_costs = [0.0] * n
+    var_basis: list[str | None] = [None] * n
+    row_basis: list[str | None] = [None] * (ub_count + eq_count)
     with open(path, encoding="utf-8") as handle:
         for line in handle:
             tokens = line.split()
@@ -705,6 +996,10 @@ def _parse_glpk_solution(
             elif tokens[0] == "j" and len(tokens) >= 3:
                 idx = int(tokens[1]) - 1
                 if 0 <= idx < n:
+                    if include_certificates:
+                        status_token = _basis_status_from_token(tokens[2])
+                        if status_token is not None:
+                            var_basis[idx] = status_token
                     value = _parse_first_float(tokens[2:])
                     if value is not None:
                         x[idx] = value
@@ -715,12 +1010,16 @@ def _parse_glpk_solution(
             elif tokens[0] == "i" and len(tokens) >= 5 and include_certificates:
                 idx = int(tokens[1]) - 1
                 if 0 <= idx < len(row_duals):
+                    status_token = _basis_status_from_token(tokens[2])
+                    if status_token is not None:
+                        row_basis[idx] = status_token
                     dual = _parse_first_float(tokens[4:])
                     if dual is not None:
                         row_duals[idx] = dual
     parsed = {"status": status, "x": x, "objective": objective, "solver": "glpk-cli"}
     if include_certificates and status == "optimal":
         parsed.update(_lp_certificate_fields(row_duals, reduced_costs, ub_count, eq_count))
+        parsed.update(_lp_basis_fields(var_basis, row_basis))
     return parsed
 
 
@@ -741,6 +1040,8 @@ def _parse_glpk_report(path: str, names: list[str]) -> dict[str, Any]:
                     status = "infeasible"
                 elif "UNBOUNDED" in upper:
                     status = "unbounded"
+                elif "TIME LIMIT" in upper:
+                    status = "time-limit"
             elif upper.startswith("OBJECTIVE:"):
                 objective = _parse_first_float(
                     stripped.replace("=", " = ").split("=")[1].split()
@@ -759,28 +1060,30 @@ def _parse_glpk_report(path: str, names: list[str]) -> dict[str, Any]:
     return {"status": status, "x": x, "objective": objective, "solver": "glpk-cli"}
 
 
-def solve_glpsol_cli(problem: dict[str, Any], integer: bool) -> dict[str, Any]:
+def solve_glpsol_cli(
+    problem: dict[str, Any], integer: bool, options: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    options = options or {}
     with tempfile.TemporaryDirectory(prefix="des-glpk-cli-") as tmp:
         model_path = f"{tmp}/model.lp"
         solution_path = f"{tmp}/solution.txt"
         report_path = f"{tmp}/report.txt"
         names = _write_lp_file(problem, integer, model_path)
-        result = subprocess.run(
-            [
-                "glpsol",
-                "--lp",
-                model_path,
-                "--tmlim",
-                "60",
-                "--output",
-                report_path,
-                "--write",
-                solution_path,
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
+        commands = [
+            "glpsol",
+            "--lp",
+            model_path,
+            "--tmlim",
+            _time_limit_integer_seconds_text(options),
+            "--output",
+            report_path,
+            "--write",
+            solution_path,
+        ]
+        relative_gap = _relative_gap_limit(options)
+        if integer and relative_gap is not None:
+            commands.extend(["--mipgap", f"{relative_gap:.17g}"])
+        result = subprocess.run(commands, check=False, capture_output=True, text=True)
         if result.returncode != 0:
             return {
                 "status": "numerical-error",
@@ -801,9 +1104,10 @@ def solve_glpsol_cli(problem: dict[str, Any], integer: bool) -> dict[str, Any]:
         if parsed["status"] == "numerical-error":
             parsed = solution
         else:
-            for key in ("dualUB", "dualEQ", "reducedCosts"):
+            for key in ("dualUB", "dualEQ", "reducedCosts", "varBasis", "rowBasis"):
                 if key in solution:
                     parsed[key] = solution[key]
+        parsed["status"] = _limited_status(parsed["status"], options)
         parsed["message"] = result.stderr or result.stdout
         return parsed
 
@@ -826,6 +1130,12 @@ def _parse_scip_solution(path: str, names: list[str]) -> dict[str, Any]:
                     status = "infeasible"
                 elif "unbounded" in lowered:
                     status = "unbounded"
+                elif "time limit" in lowered:
+                    status = "time-limit"
+                elif "node limit" in lowered:
+                    status = "node-limit"
+                elif "gap limit" in lowered:
+                    status = "iter-limit"
             elif stripped.startswith("objective value:"):
                 objective = _parse_first_float(stripped.split()[2:])
             else:
@@ -837,26 +1147,73 @@ def _parse_scip_solution(path: str, names: list[str]) -> dict[str, Any]:
     return {"status": status, "x": x, "objective": objective, "solver": "scip-cli"}
 
 
-def solve_scip_cli(problem: dict[str, Any], integer: bool) -> dict[str, Any]:
+def _parse_scip_dual_fields(output: str, problem: dict[str, Any]) -> dict[str, Any]:
+    ub_count, eq_count = _lp_row_counts(problem)
+    row_count = ub_count + eq_count
+    if row_count == 0:
+        return {}
+    row_duals = [0.0] * row_count
+    saw_finite_dual = False
+    saw_bad_dual = False
+    for line in output.splitlines():
+        tokens = line.split()
+        if len(tokens) != 2 or not tokens[0].startswith("c"):
+            continue
+        try:
+            row_idx = int(tokens[0][1:])
+        except ValueError:
+            continue
+        if not 0 <= row_idx < row_count:
+            continue
+        try:
+            value = float(tokens[1])
+        except ValueError:
+            saw_bad_dual = True
+            continue
+        if not math.isfinite(value):
+            saw_bad_dual = True
+            continue
+        row_duals[row_idx] = value
+        saw_finite_dual = True
+    if not saw_finite_dual or saw_bad_dual:
+        return {}
+    reduced_costs = _lp_reduced_costs_from_row_duals(problem, row_duals)
+    return _lp_certificate_fields(row_duals, reduced_costs, ub_count, eq_count)
+
+
+def solve_scip_cli(
+    problem: dict[str, Any], integer: bool, options: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    options = options or {}
     with tempfile.TemporaryDirectory(prefix="des-scip-cli-") as tmp:
         model_path = f"{tmp}/model.lp"
         solution_path = f"{tmp}/solution.txt"
         names = _write_lp_file(problem, integer, model_path)
-        result = subprocess.run(
+        commands = [
+            f"set limits time {_time_limit_seconds_text(options)}",
+            f"read {model_path}",
+            "optimize",
+        ]
+        node_limit = _node_limit(options)
+        relative_gap = _relative_gap_limit(options)
+        if integer and node_limit is not None:
+            commands.insert(1, f"set limits nodes {node_limit}")
+        if integer and relative_gap is not None:
+            commands.insert(1, f"set limits gap {relative_gap:.17g}")
+        if not integer:
+            commands.insert(0, "set presolving maxrounds 0")
+            commands.append("display dualsolution")
+        commands.extend(
             [
-                "scip",
-                "-q",
-                "-c",
-                "set limits time 60",
-                "-c",
-                f"read {model_path}",
-                "-c",
-                "optimize",
-                "-c",
                 f"write solution {solution_path}",
-                "-c",
                 "quit",
-            ],
+            ]
+        )
+        scip_cmd = ["scip"] if not integer else ["scip", "-q"]
+        for command in commands:
+            scip_cmd.extend(["-c", command])
+        result = subprocess.run(
+            scip_cmd,
             check=False,
             capture_output=True,
             text=True,
@@ -870,8 +1227,34 @@ def solve_scip_cli(problem: dict[str, Any], integer: bool) -> dict[str, Any]:
                 "message": result.stderr or result.stdout,
             }
         parsed = _parse_scip_solution(solution_path, names)
-        parsed["message"] = result.stderr or result.stdout
+        if not integer and parsed["status"] == "optimal":
+            parsed.update(_parse_scip_dual_fields(result.stdout, problem))
+        parsed["status"] = _limited_status(parsed["status"], options)
+        parsed["message"] = (
+            result.stderr
+            or ("scip-cli status=optimal" if parsed["status"] == "optimal" else result.stdout)
+        )
+        if integer:
+            parsed.update(_scip_quality_fields(result.stdout))
         return parsed
+
+
+def _scip_quality_fields(output: str) -> dict[str, Any]:
+    best_bound = None
+    mip_gap = None
+    nodes_explored = None
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        lowered = line.lower()
+        if "dual bound" in lowered and ":" in line:
+            best_bound = _last_float_token(line)
+        elif lowered.startswith("gap") and ":" in line:
+            value = _last_float_token(line)
+            if value is not None:
+                mip_gap = value / 100.0 if "%" in line else value
+        elif "solving nodes" in lowered and ":" in line:
+            nodes_explored = _last_float_token(line)
+    return _quality_fields(best_bound, mip_gap, nodes_explored)
 
 
 def _highs_status_from_text(text: str) -> str:
@@ -883,7 +1266,9 @@ def _highs_status_from_text(text: str) -> str:
     if "UNBOUNDED" in upper:
         return "unbounded"
     if "TIME LIMIT" in upper or "TIME-LIMIT" in upper:
-        return "iter-limit"
+        return "time-limit"
+    if "NODE LIMIT" in upper or "NODE-LIMIT" in upper:
+        return "node-limit"
     return "numerical-error"
 
 
@@ -901,6 +1286,8 @@ def _parse_highs_solution(
     x = [0.0] * len(names)
     row_duals = [0.0] * (ub_count + eq_count)
     reduced_costs = [0.0] * len(names)
+    var_basis: list[str | None] = [None] * len(names)
+    row_basis: list[str | None] = [None] * (ub_count + eq_count)
     section: str | None = None
     in_columns = False
     in_rows = False
@@ -926,10 +1313,10 @@ def _parse_highs_solution(
                 in_rows = False
             elif stripped.startswith("Objective "):
                 objective = _parse_first_float(stripped.split()[1:])
-            elif section in {"primal", "dual"} and stripped.startswith("# Columns"):
+            elif section in {"primal", "dual", "basis"} and stripped.startswith("# Columns"):
                 in_columns = True
                 in_rows = False
-            elif section in {"primal", "dual"} and stripped.startswith("# Rows"):
+            elif section in {"primal", "dual", "basis"} and stripped.startswith("# Rows"):
                 in_columns = False
                 in_rows = True
             elif in_columns:
@@ -941,7 +1328,11 @@ def _parse_highs_solution(
                             x[name_to_index[tokens[0]]] = value
                         elif section == "dual" and not integer:
                             reduced_costs[name_to_index[tokens[0]]] = value
-            elif in_rows and section == "dual" and not integer:
+                    if section == "basis" and not integer:
+                        basis_status = _basis_status_from_token(tokens[1])
+                        if basis_status is not None:
+                            var_basis[name_to_index[tokens[0]]] = basis_status
+            elif in_rows and section in {"dual", "basis"} and not integer:
                 tokens = stripped.split()
                 if len(tokens) >= 2 and tokens[0].startswith("c"):
                     try:
@@ -949,36 +1340,70 @@ def _parse_highs_solution(
                     except ValueError:
                         idx = -1
                     if 0 <= idx < len(row_duals):
-                        value = _parse_first_float(tokens[1:])
-                        if value is not None:
-                            row_duals[idx] = value
+                        if section == "dual":
+                            value = _parse_first_float(tokens[1:])
+                            if value is not None:
+                                row_duals[idx] = value
+                        else:
+                            basis_status = _basis_status_from_token(tokens[1])
+                            if basis_status is not None:
+                                row_basis[idx] = basis_status
     if status == "numerical-error":
         status = _highs_status_from_text(output)
     parsed = {"status": status, "x": x, "objective": objective, "solver": "highs-cli"}
     if not integer and status == "optimal":
         parsed.update(_lp_certificate_fields(row_duals, reduced_costs, ub_count, eq_count))
+        parsed.update(_lp_basis_fields(var_basis, row_basis))
+    if integer:
+        parsed.update(_highs_quality_fields(output))
     return parsed
 
 
-def solve_highs_cli(problem: dict[str, Any], integer: bool) -> dict[str, Any]:
+def _highs_quality_fields(output: str) -> dict[str, Any]:
+    best_bound = None
+    mip_gap = None
+    nodes_explored = None
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        lowered = line.lower()
+        if lowered.startswith(("dual bound", "best bound")):
+            best_bound = _last_float_token(line)
+        elif lowered.startswith("gap"):
+            value = _last_float_token(line)
+            if value is not None:
+                mip_gap = value / 100.0 if "%" in line else value
+        elif lowered.startswith("nodes"):
+            nodes_explored = _last_float_token(line)
+    return _quality_fields(best_bound, mip_gap, nodes_explored)
+
+
+def solve_highs_cli(
+    problem: dict[str, Any], integer: bool, options: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    options = options or {}
     with tempfile.TemporaryDirectory(prefix="des-highs-cli-") as tmp:
         model_path = f"{tmp}/model.lp"
         solution_path = f"{tmp}/solution.txt"
+        options_path = f"{tmp}/options.txt"
         names = _write_lp_file(problem, integer, model_path)
-        result = subprocess.run(
-            [
-                "highs",
-                "--model_file",
-                model_path,
-                "--solution_file",
-                solution_path,
-                "--time_limit",
-                "60",
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
+        node_limit = _node_limit(options)
+        relative_gap = _relative_gap_limit(options)
+        with open(options_path, "w", encoding="utf-8") as handle:
+            handle.write(f"time_limit = {_time_limit_seconds_text(options)}\n")
+            if integer and node_limit is not None:
+                handle.write(f"mip_max_nodes = {node_limit}\n")
+            if integer and relative_gap is not None:
+                handle.write(f"mip_rel_gap = {relative_gap:.17g}\n")
+        commands = [
+            "highs",
+            "--model_file",
+            model_path,
+            "--solution_file",
+            solution_path,
+            "--options_file",
+            options_path,
+        ]
+        result = subprocess.run(commands, check=False, capture_output=True, text=True)
         output = f"{result.stdout}\n{result.stderr}"
         if result.returncode != 0:
             return {
@@ -997,6 +1422,7 @@ def solve_highs_cli(problem: dict[str, Any], integer: bool) -> dict[str, Any]:
                 "objective": None,
                 "solver": "highs-cli",
             }
+        parsed["status"] = _limited_status(parsed["status"], options)
         parsed["message"] = result.stderr or result.stdout
         return parsed
 
@@ -1009,16 +1435,89 @@ def _cbc_status_from_text(text: str) -> str:
         return "infeasible"
     if "unbounded" in lowered:
         return "unbounded"
+    if "node limit" in lowered or "stopped on nodes" in lowered:
+        return "node-limit"
     if "stopped on time" in lowered or "time limit" in lowered:
-        return "iter-limit"
+        return "time-limit"
     return "numerical-error"
 
 
-def _parse_cbc_solution(path: str, names: list[str], output: str) -> dict[str, Any]:
+def _last_float_token(text: str) -> float | None:
+    for token in reversed(text.replace(",", "").split()):
+        token = token.strip().strip("%")
+        value = _finite_float_or_none(token)
+        if value is not None:
+            return value
+    return None
+
+
+def _cbc_quality_fields(output: str) -> dict[str, Any]:
+    best_bound = None
+    mip_gap = None
+    nodes_explored = None
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        lowered = line.lower()
+        if lowered.startswith(("lower bound:", "upper bound:")):
+            best_bound = _last_float_token(line)
+        elif lowered.startswith("gap:"):
+            value = _last_float_token(line)
+            if value is not None:
+                mip_gap = value / 100.0 if "%" in line else value
+        elif lowered.startswith("enumerated nodes:"):
+            nodes_explored = _last_float_token(line)
+    return _quality_fields(best_bound, mip_gap, nodes_explored)
+
+
+def _parse_cbc_basis(
+    path: str, names: list[str], ub_count: int, eq_count: int
+) -> dict[str, Any]:
+    name_to_index = {name: idx for idx, name in enumerate(names)}
+    var_basis: list[str | None] = [None] * len(names)
+    row_basis: list[str | None] = ["basic"] * ub_count + ["fixed"] * eq_count
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            tokens = line.split()
+            if not tokens or tokens[0] in {"NAME", "ENDATA"}:
+                continue
+            code = tokens[0].upper()
+            if len(tokens) >= 2 and tokens[1] in name_to_index:
+                idx = name_to_index[tokens[1]]
+                if code in {"BS", "XL", "XU"}:
+                    var_basis[idx] = "basic"
+                elif code == "LL":
+                    var_basis[idx] = "at_lower"
+                elif code == "UL":
+                    var_basis[idx] = "at_upper"
+                elif code == "FX":
+                    var_basis[idx] = "fixed"
+                elif code == "FR":
+                    var_basis[idx] = "free"
+            if code in {"XL", "XU"} and len(tokens) >= 3 and tokens[2].startswith("c"):
+                try:
+                    row_idx = int(tokens[2][1:])
+                except ValueError:
+                    continue
+                if 0 <= row_idx < ub_count:
+                    row_basis[row_idx] = "at_lower" if code == "XL" else "at_upper"
+    return _lp_basis_fields(var_basis, row_basis)
+
+
+def _parse_cbc_solution(
+    path: str,
+    names: list[str],
+    output: str,
+    ub_count: int = 0,
+    eq_count: int = 0,
+    include_certificates: bool = False,
+    basis_path: str | None = None,
+) -> dict[str, Any]:
     name_to_index = {name: idx for idx, name in enumerate(names)}
     status = "numerical-error"
     objective = None
     x = [0.0] * len(names)
+    row_duals = [0.0] * (ub_count + eq_count)
+    reduced_costs = [0.0] * len(names)
     with open(path, encoding="utf-8") as handle:
         for line_idx, line in enumerate(handle):
             stripped = line.strip()
@@ -1031,30 +1530,62 @@ def _parse_cbc_solution(path: str, names: list[str], output: str) -> dict[str, A
                 continue
             tokens = stripped.split()
             if len(tokens) >= 3 and tokens[1] in name_to_index:
+                idx = name_to_index[tokens[1]]
                 value = _parse_first_float(tokens[2:])
                 if value is not None:
-                    x[name_to_index[tokens[1]]] = value
+                    x[idx] = value
+                if include_certificates and len(tokens) >= 4:
+                    reduced_cost = _parse_first_float(tokens[3:])
+                    if reduced_cost is not None:
+                        reduced_costs[idx] = reduced_cost
+            elif include_certificates and len(tokens) >= 4 and tokens[1].startswith("c"):
+                try:
+                    row_idx = int(tokens[1][1:])
+                except ValueError:
+                    continue
+                if 0 <= row_idx < len(row_duals):
+                    dual = _parse_first_float(tokens[3:])
+                    if dual is not None:
+                        row_duals[row_idx] = dual
     if status == "numerical-error":
         status = _cbc_status_from_text(output)
-    return {"status": status, "x": x, "objective": objective, "solver": "cbc-cli"}
+    parsed = {"status": status, "x": x, "objective": objective, "solver": "cbc-cli"}
+    if include_certificates and status == "optimal":
+        parsed.update(_lp_certificate_fields(row_duals, reduced_costs, ub_count, eq_count))
+        if basis_path is not None:
+            try:
+                parsed.update(_parse_cbc_basis(basis_path, names, ub_count, eq_count))
+            except FileNotFoundError:
+                pass
+    return parsed
 
 
-def solve_cbc_cli(problem: dict[str, Any], integer: bool) -> dict[str, Any]:
+def solve_cbc_cli(
+    problem: dict[str, Any], integer: bool, options: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    options = options or {}
     with tempfile.TemporaryDirectory(prefix="des-cbc-cli-") as tmp:
         model_path = f"{tmp}/model.lp"
         solution_path = f"{tmp}/solution.txt"
+        basis_path = f"{tmp}/basis.bas"
         names = _write_lp_file(problem, integer, model_path)
+        ub_count = len(problem.get("A_ub") or [])
+        eq_count = len(problem.get("A_eq") or [])
+        commands = ["cbc", model_path, "sec", _time_limit_seconds_text(options)]
+        node_limit = _node_limit(options)
+        relative_gap = _relative_gap_limit(options)
+        if integer and node_limit is not None:
+            commands.extend(["maxNodes", str(node_limit)])
+        if integer and relative_gap is not None:
+            commands.extend(["ratioGap", f"{relative_gap:.17g}"])
+        if not integer:
+            commands.extend(["printingOptions", "all"])
+        commands.extend(["solve", "solution", solution_path])
+        if not integer:
+            commands.extend(["basisOut", basis_path])
+        commands.append("quit")
         result = subprocess.run(
-            [
-                "cbc",
-                model_path,
-                "sec",
-                "60",
-                "solve",
-                "solution",
-                solution_path,
-                "quit",
-            ],
+            commands,
             check=False,
             capture_output=True,
             text=True,
@@ -1069,7 +1600,15 @@ def solve_cbc_cli(problem: dict[str, Any], integer: bool) -> dict[str, Any]:
                 "message": result.stderr or result.stdout,
             }
         try:
-            parsed = _parse_cbc_solution(solution_path, names, output)
+            parsed = _parse_cbc_solution(
+                solution_path,
+                names,
+                output,
+                ub_count,
+                eq_count,
+                include_certificates=not integer,
+                basis_path=basis_path if not integer else None,
+            )
         except FileNotFoundError:
             parsed = {
                 "status": _cbc_status_from_text(output),
@@ -1077,6 +1616,9 @@ def solve_cbc_cli(problem: dict[str, Any], integer: bool) -> dict[str, Any]:
                 "objective": None,
                 "solver": "cbc-cli",
             }
+        if integer:
+            parsed.update(_cbc_quality_fields(output))
+        parsed["status"] = _limited_status(parsed["status"], options)
         parsed["message"] = result.stderr or result.stdout
         return parsed
 
@@ -1111,10 +1653,13 @@ def _cplex_status(cpx: Any, status_code: int) -> str:
         return "unbounded"
     if status_code in {
         status.abort_iteration_limit,
+    }:
+        return "iter-limit"
+    if status_code in {
         status.node_limit_feasible,
         status.node_limit_infeasible,
     }:
-        return "iter-limit"
+        return "node-limit"
     if status_code in {
         status.abort_time_limit,
         status.MIP_time_limit_feasible,
@@ -1214,15 +1759,39 @@ def _cplex_set_quadratic_objective(cpx: Any, problem: dict[str, Any]) -> None:
         cpx.objective.set_quadratic_coefficients(i, j, coeff)
 
 
+def _cplex_apply_options(cpx: Any, options: dict[str, Any], integer: bool = False) -> None:
+    time_limit = _time_limit_seconds(options)
+    if time_limit is not None:
+        try:
+            cpx.parameters.timelimit.set(time_limit)
+        except Exception:
+            pass
+    if not integer:
+        return
+    node_limit = _node_limit(options)
+    relative_gap = _relative_gap_limit(options)
+    if node_limit is not None:
+        try:
+            cpx.parameters.mip.limits.nodes.set(node_limit)
+        except Exception:
+            pass
+    if relative_gap is not None:
+        try:
+            cpx.parameters.mip.tolerances.mipgap.set(relative_gap)
+        except Exception:
+            pass
+
+
 def _cplex_finish(
     cpx: Any,
     solver_name: str,
     lp_problem: dict[str, Any] | None = None,
+    include_quality: bool = False,
 ) -> dict[str, Any]:
     cpx.solve()
     status_code = int(cpx.solution.get_status())
     status = _cplex_status(cpx, status_code)
-    has_solution = status in {"optimal", "iter-limit", "time-limit"}
+    has_solution = status in {"optimal", "iter-limit", "time-limit", "node-limit"}
     x = [float(v) for v in cpx.solution.get_values()] if has_solution else []
     objective = float(cpx.solution.get_objective_value()) if has_solution else None
     parsed = {
@@ -1237,6 +1806,42 @@ def _cplex_finish(
         row_duals = [float(v) for v in cpx.solution.get_dual_values()]
         reduced_costs = [float(v) for v in cpx.solution.get_reduced_costs()]
         parsed.update(_lp_certificate_fields(row_duals, reduced_costs, ub_count, eq_count))
+        basis_status = cpx.solution.basis.status
+        col_basis, row_basis = cpx.solution.basis.get_basis()
+        parsed.update(
+            _lp_basis_fields(
+                [
+                    _cplex_var_basis_status(basis_status, int(code))
+                    for code in col_basis
+                ],
+                _lp_row_basis_with_fixed_equalities(
+                    [
+                        _cplex_row_basis_status(basis_status, int(code))
+                        for code in row_basis[:ub_count]
+                    ],
+                    eq_count,
+                ),
+            )
+        )
+    if include_quality:
+        best_bound = None
+        mip_gap = None
+        nodes_explored = None
+        try:
+            best_bound = cpx.solution.MIP.get_best_objective()
+        except Exception:
+            pass
+        try:
+            mip_gap = cpx.solution.MIP.get_mip_relative_gap()
+        except Exception:
+            pass
+        progress = _first_attr(cpx.solution, ("progress",))
+        if progress is not None:
+            try:
+                nodes_explored = progress.get_num_nodes_processed()
+            except Exception:
+                pass
+        parsed.update(_quality_fields(best_bound, mip_gap, nodes_explored))
     return parsed
 
 
@@ -1249,6 +1854,7 @@ def solve_cplex_lp(payload: dict[str, Any]) -> dict[str, Any]:
     _cplex_add_dense_linear_rows(cplex_mod, cpx, lp)
     _cplex_set_objective(cpx, lp)
     cpx.set_problem_type(cpx.problem_type.LP)
+    _cplex_apply_options(cpx, _external_options(payload), integer=False)
     return _cplex_finish(cpx, "cplex:lp", lp)
 
 
@@ -1260,6 +1866,7 @@ def solve_cplex_mip(payload: dict[str, Any]) -> dict[str, Any]:
     _cplex_variables(cplex_mod, cpx, mip, integer=True)
     _cplex_add_mip_rows(cplex_mod, cpx, mip)
     _cplex_set_objective(cpx, mip)
+    _cplex_apply_options(cpx, _external_options(payload), integer=True)
     start = _mip_start(mip)
     if start is not None:
         try:
@@ -1270,7 +1877,7 @@ def solve_cplex_mip(payload: dict[str, Any]) -> dict[str, Any]:
             )
         except Exception:
             pass
-    return _cplex_finish(cpx, "cplex:mip")
+    return _cplex_finish(cpx, "cplex:mip", include_quality=True)
 
 
 def solve_cplex_qp(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1287,7 +1894,16 @@ def solve_cplex_qp(payload: dict[str, Any]) -> dict[str, Any]:
     _cplex_add_dense_linear_rows(cplex_mod, cpx, qp)
     _cplex_set_objective(cpx, qp)
     _cplex_set_quadratic_objective(cpx, qp)
-    return _cplex_finish(cpx, "cplex:qp")
+    _cplex_apply_options(
+        cpx,
+        _external_options(payload),
+        integer=any(bool(value) for value in qp.get("integerVars", [])),
+    )
+    return _cplex_finish(
+        cpx,
+        "cplex:qp",
+        include_quality=any(bool(value) for value in qp.get("integerVars", [])),
+    )
 
 
 def _cplex_affine_square(
@@ -1385,7 +2001,16 @@ def solve_cplex_conic(payload: dict[str, Any]) -> dict[str, Any]:
     _cplex_set_quadratic_objective(cpx, conic)
     _cplex_add_quadratic_constraints(cplex_mod, cpx, conic)
     _cplex_add_soc_constraints(cplex_mod, cpx, conic)
-    return _cplex_finish(cpx, "cplex:conic")
+    _cplex_apply_options(
+        cpx,
+        _external_options(payload),
+        integer=any(bool(value) for value in conic.get("integerVars", [])),
+    )
+    return _cplex_finish(
+        cpx,
+        "cplex:conic",
+        include_quality=any(bool(value) for value in conic.get("integerVars", [])),
+    )
 
 
 def _import_glpk() -> Any:
@@ -1411,6 +2036,8 @@ def _glpk_bound_type(glp: Any, lo: float | None, hi: float | None) -> tuple[int,
 def _glpk_status(glp: Any, status_code: int) -> str:
     if status_code == glp.GLP_OPT:
         return "optimal"
+    if status_code == glp.GLP_FEAS:
+        return "iter-limit"
     if status_code in {glp.GLP_NOFEAS, glp.GLP_INFEAS}:
         return "infeasible"
     if status_code == glp.GLP_UNBND:
@@ -1446,7 +2073,9 @@ def _glpk_add_matrix_rows(
     rows: list[list[float]],
     bounds: list[float],
     equality: bool,
-) -> None:
+) -> list[tuple[int, int, float]]:
+    if not rows:
+        return []
     offset = glp.glp_get_num_rows(model)
     glp.glp_add_rows(model, len(rows))
     triplets = []
@@ -1531,6 +2160,15 @@ def solve_glpk_lp(payload: dict[str, Any]) -> dict[str, Any]:
             parsed.update(
                 _lp_certificate_fields(row_duals, reduced_costs, ub_count, eq_count)
             )
+            var_basis = [
+                _glpk_basis_status_from_code(glp, glp.glp_get_col_stat(model, i))
+                for i in range(1, n + 1)
+            ]
+            row_basis = [
+                _glpk_basis_status_from_code(glp, glp.glp_get_row_stat(model, i))
+                for i in range(1, ub_count + eq_count + 1)
+            ]
+            parsed.update(_lp_basis_fields(var_basis, row_basis))
         return parsed
     finally:
         glp.glp_delete_prob(model)
@@ -1539,6 +2177,7 @@ def solve_glpk_lp(payload: dict[str, Any]) -> dict[str, Any]:
 def solve_glpk_mip(payload: dict[str, Any]) -> dict[str, Any]:
     glp = _import_glpk()
     mip = payload["mip"]
+    options = _external_options(payload)
     model = _glpk_create_problem(glp, mip, integer=True)
     try:
         rows, bounds = _mip_row_arrays(mip)
@@ -1555,17 +2194,31 @@ def solve_glpk_mip(payload: dict[str, Any]) -> dict[str, Any]:
         params = glp.glp_iocp()
         glp.glp_init_iocp(params)
         params.msg_lev = glp.GLP_MSG_OFF
+        time_limit = _time_limit_seconds(options)
+        relative_gap = _relative_gap_limit(options)
+        if time_limit is not None:
+            params.tm_lim = max(1, int(math.ceil(time_limit * 1000.0)))
+        if relative_gap is not None:
+            params.mip_gap = relative_gap
         ret = glp.glp_intopt(model, params)
-        status = "numerical-error" if ret != 0 else _glpk_status(glp, glp.glp_mip_status(model))
-        x = [glp.glp_mip_col_val(model, i) for i in range(1, len(mip.get("c", [])) + 1)] if status == "optimal" else []
+        status = _glpk_status(glp, glp.glp_mip_status(model))
+        if ret != 0 and status == "numerical-error" and time_limit is not None:
+            status = "time-limit"
+        status = _limited_status(status, options)
+        x = [glp.glp_mip_col_val(model, i) for i in range(1, len(mip.get("c", [])) + 1)] if status in {"optimal", "iter-limit", "time-limit"} else []
         objective = float(glp.glp_mip_obj_val(model)) if x else None
-        return {
+        parsed = {
             "status": status,
             "x": [float(value) for value in x],
             "objective": objective,
             "solver": "glpk:mip",
             "message": f"glpk:mip status={glp.glp_mip_status(model)}",
         }
+        try:
+            parsed.update(_quality_fields(mip_gap=glp.glp_mip_gap(model)))
+        except Exception:
+            pass
+        return parsed
     finally:
         glp.glp_delete_prob(model)
 
@@ -1592,10 +2245,13 @@ def _import_xpress() -> Any:
     return xp
 
 
-def _xpress_status(model: Any) -> str:
+def _xpress_status(model: Any, options: dict[str, Any] | None = None) -> str:
+    options = options or {}
     solstatus = int(model.attributes.solstatus)
     if solstatus == 1:
         return "optimal"
+    if solstatus == 2:
+        return _limited_status("iter-limit", options)
     if solstatus == 3:
         return "infeasible"
     if solstatus == 4:
@@ -1672,15 +2328,47 @@ def _xpress_objective(_xp: Any, variables: Any, problem: dict[str, Any]) -> Any:
     return objective
 
 
+def _xpress_apply_options(model: Any, options: dict[str, Any], integer: bool = False) -> None:
+    time_limit = _time_limit_seconds(options)
+    if time_limit is not None:
+        try:
+            model.controls.maxtime = time_limit
+        except Exception:
+            pass
+    if not integer:
+        return
+    node_limit = _node_limit(options)
+    relative_gap = _relative_gap_limit(options)
+    if node_limit is not None:
+        try:
+            model.controls.maxnode = node_limit
+        except Exception:
+            pass
+    if relative_gap is not None:
+        try:
+            model.controls.miprelstop = relative_gap
+        except Exception:
+            pass
+
+
 def _xpress_finish(
     model: Any,
     variables: Any,
     solver_name: str,
     lp_problem: dict[str, Any] | None = None,
+    include_quality: bool = False,
+    options: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     model.solve()
-    status = _xpress_status(model)
-    x = model.getSolution(variables) if status == "optimal" else []
+    status = _xpress_status(model, options)
+    try:
+        x = (
+            model.getSolution(variables)
+            if status in {"optimal", "iter-limit", "time-limit", "node-limit"}
+            else []
+        )
+    except Exception:
+        x = []
     objective = float(model.attributes.objval) if x else None
     parsed = {
         "status": status,
@@ -1697,6 +2385,29 @@ def _xpress_finish(
         row_duals = [float(value) for value in model.getDuals()]
         reduced_costs = [float(value) for value in model.getRCost()]
         parsed.update(_lp_certificate_fields(row_duals, reduced_costs, ub_count, eq_count))
+        row_basis_raw, col_basis_raw = model.getBasis()
+        parsed.update(
+            _lp_basis_fields(
+                [_xpress_var_basis_status(int(code)) for code in col_basis_raw],
+                _lp_row_basis_with_fixed_equalities(
+                    [
+                        _xpress_row_basis_status(int(code))
+                        for code in row_basis_raw[:ub_count]
+                    ],
+                    eq_count,
+                ),
+            )
+        )
+    if include_quality:
+        attrs = _first_attr(model, ("attributes",))
+        if attrs is not None:
+            parsed.update(
+                _quality_fields(
+                    _first_attr(attrs, ("bestbound", "mipbestbound", "best_bound")),
+                    _first_attr(attrs, ("mipgap", "relmipgap", "gap")),
+                    _first_attr(attrs, ("nodes", "nodesprocessed", "mipnodes")),
+                )
+            )
     return parsed
 
 
@@ -1712,7 +2423,10 @@ def solve_xpress_lp(payload: dict[str, Any]) -> dict[str, Any]:
             _xpress_objective(xp, variables, lp),
             sense=xp.maximize if lp.get("sense", "max") == "max" else xp.minimize,
         )
-        return _xpress_finish(model, variables, "xpress:lp", lp)
+        _xpress_apply_options(model, _external_options(payload), integer=False)
+        return _xpress_finish(
+            model, variables, "xpress:lp", lp, options=_external_options(payload)
+        )
 
 
 def solve_xpress_mip(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1727,13 +2441,20 @@ def solve_xpress_mip(payload: dict[str, Any]) -> dict[str, Any]:
             _xpress_objective(xp, variables, mip),
             sense=xp.maximize if mip.get("sense", "max") == "max" else xp.minimize,
         )
+        _xpress_apply_options(model, _external_options(payload), integer=True)
         start = _mip_start(mip)
         if start is not None and hasattr(model, "addmipsol"):
             try:
                 model.addmipsol(start, variables)
             except Exception:
                 pass
-        return _xpress_finish(model, variables, "xpress:mip")
+        return _xpress_finish(
+            model,
+            variables,
+            "xpress:mip",
+            include_quality=True,
+            options=_external_options(payload),
+        )
 
 
 def solve_xpress_qp(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1753,7 +2474,18 @@ def solve_xpress_qp(payload: dict[str, Any]) -> dict[str, Any]:
             _xpress_objective(xp, variables, qp),
             sense=xp.maximize if qp.get("sense", "max") == "max" else xp.minimize,
         )
-        return _xpress_finish(model, variables, "xpress:qp")
+        _xpress_apply_options(
+            model,
+            _external_options(payload),
+            integer=any(bool(value) for value in qp.get("integerVars", [])),
+        )
+        return _xpress_finish(
+            model,
+            variables,
+            "xpress:qp",
+            include_quality=any(bool(value) for value in qp.get("integerVars", [])),
+            options=_external_options(payload),
+        )
 
 
 def _xpress_add_quadratic_constraints(xp: Any, model: Any, variables: Any, problem: dict[str, Any]) -> None:
@@ -1816,7 +2548,18 @@ def solve_xpress_conic(payload: dict[str, Any]) -> dict[str, Any]:
             _xpress_objective(xp, variables, conic),
             sense=xp.maximize if conic.get("sense", "max") == "max" else xp.minimize,
         )
-        return _xpress_finish(model, variables, "xpress:conic")
+        _xpress_apply_options(
+            model,
+            _external_options(payload),
+            integer=any(bool(value) for value in conic.get("integerVars", [])),
+        )
+        return _xpress_finish(
+            model,
+            variables,
+            "xpress:conic",
+            include_quality=any(bool(value) for value in conic.get("integerVars", [])),
+            options=_external_options(payload),
+        )
 
 
 def _import_gurobi() -> Any:
@@ -1834,7 +2577,7 @@ def _gurobi_status(gp: Any, status_code: int) -> str:
         gp.GRB.UNBOUNDED: "unbounded",
         gp.GRB.TIME_LIMIT: "time-limit",
         gp.GRB.ITERATION_LIMIT: "iter-limit",
-        gp.GRB.NODE_LIMIT: "iter-limit",
+        gp.GRB.NODE_LIMIT: "node-limit",
     }
     return status_map.get(status_code, "numerical-error")
 
@@ -1908,6 +2651,20 @@ def _gurobi_objective(gp: Any, variables: Any, problem: dict[str, Any]) -> Any:
     return objective
 
 
+def _gurobi_apply_options(model: Any, options: dict[str, Any], integer: bool = False) -> None:
+    time_limit = _time_limit_seconds(options)
+    if time_limit is not None:
+        model.Params.TimeLimit = time_limit
+    if not integer:
+        return
+    node_limit = _node_limit(options)
+    relative_gap = _relative_gap_limit(options)
+    if node_limit is not None:
+        model.Params.NodeLimit = node_limit
+    if relative_gap is not None:
+        model.Params.MIPGap = relative_gap
+
+
 def _gurobi_finish(
     gp: Any,
     model: Any,
@@ -1915,10 +2672,13 @@ def _gurobi_finish(
     solver_name: str,
     lp_problem: dict[str, Any] | None = None,
     linear_constraints: list[Any] | None = None,
+    include_quality: bool = False,
 ) -> dict[str, Any]:
     model.optimize()
     status = _gurobi_status(gp, int(model.Status))
-    x = [float(var.X) for var in variables] if status in {"optimal", "iter-limit", "time-limit"} and model.SolCount else []
+    x = [
+        float(var.X) for var in variables
+    ] if status in {"optimal", "iter-limit", "time-limit", "node-limit"} and model.SolCount else []
     objective = float(model.ObjVal) if x else None
     parsed = {
         "status": status,
@@ -1932,6 +2692,26 @@ def _gurobi_finish(
         row_duals = [float(constraint.Pi) for constraint in linear_constraints]
         reduced_costs = [float(var.RC) for var in variables]
         parsed.update(_lp_certificate_fields(row_duals, reduced_costs, ub_count, eq_count))
+        parsed.update(
+            _lp_basis_fields(
+                [_gurobi_var_basis_status(int(var.VBasis)) for var in variables],
+                _lp_row_basis_with_fixed_equalities(
+                    [
+                        _gurobi_row_basis_status(int(constraint.CBasis))
+                        for constraint in linear_constraints[:ub_count]
+                    ],
+                    eq_count,
+                ),
+            )
+        )
+    if include_quality:
+        parsed.update(
+            _quality_fields(
+                _first_attr(model, ("ObjBound",)),
+                _first_attr(model, ("MIPGap",)),
+                _first_attr(model, ("NodeCount",)),
+            )
+        )
     return parsed
 
 
@@ -1947,6 +2727,7 @@ def solve_gurobi_lp(payload: dict[str, Any]) -> dict[str, Any]:
             _gurobi_objective(gp, variables, lp),
             gp.GRB.MAXIMIZE if lp.get("sense", "max") == "max" else gp.GRB.MINIMIZE,
         )
+        _gurobi_apply_options(model, _external_options(payload), integer=False)
         return _gurobi_finish(gp, model, variables, "gurobi:lp", lp, linear_constraints)
 
 
@@ -1962,11 +2743,12 @@ def solve_gurobi_mip(payload: dict[str, Any]) -> dict[str, Any]:
             _gurobi_objective(gp, variables, mip),
             gp.GRB.MAXIMIZE if mip.get("sense", "max") == "max" else gp.GRB.MINIMIZE,
         )
+        _gurobi_apply_options(model, _external_options(payload), integer=True)
         start = _mip_start(mip)
         if start is not None:
             for var, value in zip(variables, start):
                 var.Start = value
-        return _gurobi_finish(gp, model, variables, "gurobi:mip")
+        return _gurobi_finish(gp, model, variables, "gurobi:mip", include_quality=True)
 
 
 def solve_gurobi_qp(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1986,7 +2768,18 @@ def solve_gurobi_qp(payload: dict[str, Any]) -> dict[str, Any]:
             _gurobi_objective(gp, variables, qp),
             gp.GRB.MAXIMIZE if qp.get("sense", "max") == "max" else gp.GRB.MINIMIZE,
         )
-        return _gurobi_finish(gp, model, variables, "gurobi:qp")
+        _gurobi_apply_options(
+            model,
+            _external_options(payload),
+            integer=any(bool(value) for value in qp.get("integerVars", [])),
+        )
+        return _gurobi_finish(
+            gp,
+            model,
+            variables,
+            "gurobi:qp",
+            include_quality=any(bool(value) for value in qp.get("integerVars", [])),
+        )
 
 
 def _gurobi_add_quadratic_constraints(gp: Any, model: Any, variables: Any, problem: dict[str, Any]) -> None:
@@ -2050,7 +2843,18 @@ def solve_gurobi_conic(payload: dict[str, Any]) -> dict[str, Any]:
             _gurobi_objective(gp, variables, conic),
             gp.GRB.MAXIMIZE if conic.get("sense", "max") == "max" else gp.GRB.MINIMIZE,
         )
-        return _gurobi_finish(gp, model, variables, "gurobi:conic")
+        _gurobi_apply_options(
+            model,
+            _external_options(payload),
+            integer=any(bool(value) for value in conic.get("integerVars", [])),
+        )
+        return _gurobi_finish(
+            gp,
+            model,
+            variables,
+            "gurobi:conic",
+            include_quality=any(bool(value) for value in conic.get("integerVars", [])),
+        )
 
 
 def solve_ortools(payload: dict[str, Any], backend: str, integer: bool) -> dict[str, Any]:
@@ -2110,6 +2914,23 @@ def solve_ortools(payload: dict[str, Any], backend: str, integer: bool) -> dict[
     start = _mip_start(problem) if integer else None
     if start is not None and hasattr(solver, "SetHint"):
         solver.SetHint(variables, start)
+    options = _external_options(payload)
+    time_limit = _time_limit_seconds(options)
+    if time_limit is not None and hasattr(solver, "SetTimeLimit"):
+        solver.SetTimeLimit(int(math.ceil(time_limit * 1000.0)))
+    if integer:
+        specific = []
+        relative_gap = _relative_gap_limit(options)
+        node_limit = _node_limit(options)
+        if relative_gap is not None:
+            specific.append(f"limits/gap = {relative_gap:.17g}")
+        if node_limit is not None:
+            specific.append(f"limits/nodes = {node_limit}")
+        if specific and hasattr(solver, "SetSolverSpecificParametersAsString"):
+            try:
+                solver.SetSolverSpecificParametersAsString("\n".join(specific))
+            except Exception:
+                pass
 
     status_code = solver.Solve()
     status = {
@@ -2120,6 +2941,7 @@ def solve_ortools(payload: dict[str, Any], backend: str, integer: bool) -> dict[
         pywraplp.Solver.ABNORMAL: "numerical-error",
         pywraplp.Solver.NOT_SOLVED: "numerical-error",
     }.get(status_code, "numerical-error")
+    status = _limited_status(status, options)
     x = [var.solution_value() for var in variables] if status in {"optimal", "iter-limit"} else []
     objective_value = objective.Value() if status in {"optimal", "iter-limit"} else None
     parsed = {
@@ -2136,8 +2958,40 @@ def solve_ortools(payload: dict[str, Any], backend: str, integer: bool) -> dict[
             parsed.update(
                 _lp_certificate_fields(row_duals, reduced_costs, ub_count, eq_count)
             )
+            parsed.update(
+                _lp_basis_fields(
+                    [
+                        _ortools_basis_status(pywraplp, int(var.basis_status()))
+                        for var in variables
+                    ],
+                    [
+                        _ortools_basis_status(
+                            pywraplp, int(constraint.basis_status())
+                        )
+                        for constraint in linear_constraints
+                    ],
+                )
+            )
         except Exception as exc:
             parsed["message"] = f"{parsed['message']}; certificate extraction failed: {exc}"
+    if integer and status in {"optimal", "iter-limit"}:
+        best_bound = None
+        nodes_explored = None
+        try:
+            best_bound = objective.BestBound()
+        except Exception:
+            pass
+        try:
+            nodes_explored = solver.nodes()
+        except Exception:
+            pass
+        parsed.update(
+            _quality_fields(
+                best_bound,
+                _relative_gap(best_bound, objective_value),
+                nodes_explored,
+            )
+        )
     return parsed
 
 

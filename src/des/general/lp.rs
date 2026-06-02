@@ -145,6 +145,11 @@ pub struct LPSolution {
     pub dual_eq: Option<Vec<f64>>,
     /// Reduced costs (for primal variable bounds). May be `None`.
     pub reduced_costs: Option<Vec<f64>>,
+    /// Basis status for original variables. Uses normalized labels such as
+    /// `basic`, `at_lower`, `at_upper`, `fixed`, `free`, and `nonbasic`.
+    pub var_basis: Option<Vec<String>>,
+    /// Basis status for original LP rows (`A_ub` rows followed by `A_eq` rows).
+    pub row_basis: Option<Vec<String>>,
     /// Iteration count if reported by the solver.
     pub iters: Option<usize>,
     /// Solver name (e.g. `"internal"`, `"scipy:highs"`).
@@ -373,6 +378,8 @@ fn run_internal_simplex(p: &LPProblem, opts: &InternalSimplexOptions) -> LPSolut
                 dual_ub: None,
                 dual_eq: None,
                 reduced_costs: None,
+                var_basis: None,
+                row_basis: None,
                 iters: Some(iters),
                 solver: "internal".to_string(),
                 elapsed_ms: ms_since(t0),
@@ -401,6 +408,8 @@ fn run_internal_simplex(p: &LPProblem, opts: &InternalSimplexOptions) -> LPSolut
                 dual_ub: None,
                 dual_eq: None,
                 reduced_costs: None,
+                var_basis: None,
+                row_basis: None,
                 iters: Some(iters),
                 solver: "internal".to_string(),
                 elapsed_ms: ms_since(t0),
@@ -457,6 +466,8 @@ fn run_internal_simplex(p: &LPProblem, opts: &InternalSimplexOptions) -> LPSolut
             dual_ub: None,
             dual_eq: None,
             reduced_costs: None,
+            var_basis: None,
+            row_basis: None,
             iters: Some(iters),
             solver: "internal".to_string(),
             elapsed_ms: ms_since(t0),
@@ -477,6 +488,8 @@ fn run_internal_simplex(p: &LPProblem, opts: &InternalSimplexOptions) -> LPSolut
             dual_ub: None,
             dual_eq: None,
             reduced_costs: None,
+            var_basis: None,
+            row_basis: None,
             iters: Some(iters),
             solver: "internal".to_string(),
             elapsed_ms: ms_since(t0),
@@ -507,6 +520,8 @@ fn run_internal_simplex(p: &LPProblem, opts: &InternalSimplexOptions) -> LPSolut
     }
     let (dual_ub, dual_eq, reduced_costs) =
         simplex_certificates(p, &basis, &t, &phase2_cost, ny, full_cols, &slack_sign);
+    let (var_basis, row_basis) =
+        lp_basis_statuses_from_basis(p, &basis, &x, &y_index_of_pos, &free_neg, ny, tol);
 
     LPSolution {
         status: LPStatus::Optimal,
@@ -515,6 +530,8 @@ fn run_internal_simplex(p: &LPProblem, opts: &InternalSimplexOptions) -> LPSolut
         dual_ub,
         dual_eq,
         reduced_costs,
+        var_basis,
+        row_basis,
         iters: Some(iters),
         solver: "internal".to_string(),
         elapsed_ms: ms_since(t0),
@@ -566,6 +583,61 @@ fn simplex_certificates(
     }
 
     (Some(dual_ub), Some(dual_eq), Some(reduced_costs))
+}
+
+pub(crate) fn lp_basis_statuses_from_basis(
+    p: &LPProblem,
+    basis: &[usize],
+    x: &[f64],
+    y_index_of_pos: &[usize],
+    free_neg: &[isize],
+    y_cols: usize,
+    tol: f64,
+) -> (Option<Vec<String>>, Option<Vec<String>>) {
+    let n = p.c.len();
+    if x.len() != n || y_index_of_pos.len() != n || free_neg.len() != n {
+        return (None, None);
+    }
+    let lb: Vec<Option<f64>> = p.lb.clone().unwrap_or_else(|| vec![Some(0.0); n]);
+    let ub: Vec<Option<f64>> = p.ub.clone().unwrap_or_else(|| vec![None; n]);
+    let a_ub: &[Vec<f64>] = p.a_ub.as_deref().unwrap_or(&[]);
+    let b_ub: &[f64] = p.b_ub.as_deref().unwrap_or(&[]);
+    let a_eq: &[Vec<f64>] = p.a_eq.as_deref().unwrap_or(&[]);
+
+    let mut var_basis = Vec::with_capacity(n);
+    for i in 0..n {
+        let pos_basic = basis.iter().any(|&col| col == y_index_of_pos[i]);
+        let neg_basic = free_neg[i] >= 0 && basis.iter().any(|&col| col == free_neg[i] as usize);
+        let status = if pos_basic || neg_basic {
+            "basic"
+        } else if ub[i].is_some_and(|upper| (x[i] - upper).abs() <= tol) {
+            "at_upper"
+        } else if lb[i].is_some_and(|lower| (x[i] - lower).abs() <= tol) {
+            "at_lower"
+        } else if lb[i].is_none() && x[i].abs() <= tol {
+            "free"
+        } else {
+            "nonbasic"
+        };
+        var_basis.push(status.to_string());
+    }
+
+    let mut row_basis = Vec::with_capacity(a_ub.len() + a_eq.len());
+    for (r, (row, rhs)) in a_ub.iter().zip(b_ub).enumerate() {
+        let slack_col = y_cols + r;
+        let activity = dot_local(row, x);
+        let status = if basis.iter().any(|&col| col == slack_col) {
+            "basic"
+        } else if (activity - rhs).abs() <= tol {
+            "at_upper"
+        } else {
+            "nonbasic"
+        };
+        row_basis.push(status.to_string());
+    }
+    row_basis.extend((0..a_eq.len()).map(|_| "fixed".to_string()));
+
+    (Some(var_basis), Some(row_basis))
 }
 
 fn simplex_reduced_cost(
@@ -671,6 +743,8 @@ fn empty_lp_solution(
         dual_ub: None,
         dual_eq: None,
         reduced_costs: None,
+        var_basis: None,
+        row_basis: None,
         iters: None,
         solver: solver.to_string(),
         elapsed_ms: ms_since(t0),
@@ -997,6 +1071,8 @@ fn run_internal_ipm(p: &LPProblem, opts: &InternalInteriorPointOptions) -> LPSol
                 dual_ub: None,
                 dual_eq: None,
                 reduced_costs: None,
+                var_basis: None,
+                row_basis: None,
                 iters: Some(0),
                 solver: "internal-ipm".to_string(),
                 elapsed_ms: ms_since(t0),
@@ -1037,6 +1113,8 @@ fn run_internal_ipm(p: &LPProblem, opts: &InternalInteriorPointOptions) -> LPSol
             dual_ub: None,
             dual_eq: None,
             reduced_costs: None,
+            var_basis: None,
+            row_basis: None,
             iters: Some(0),
             solver: "internal-ipm".to_string(),
             elapsed_ms: ms_since(t0),
@@ -1082,6 +1160,8 @@ fn run_internal_ipm(p: &LPProblem, opts: &InternalInteriorPointOptions) -> LPSol
                 dual_ub: None,
                 dual_eq: None,
                 reduced_costs: None,
+                var_basis: None,
+                row_basis: None,
                 iters: Some(iter),
                 solver: "internal-ipm".to_string(),
                 elapsed_ms: ms_since(t0),
@@ -1176,6 +1256,8 @@ fn run_internal_ipm(p: &LPProblem, opts: &InternalInteriorPointOptions) -> LPSol
         dual_ub: None,
         dual_eq: None,
         reduced_costs: None,
+        var_basis: None,
+        row_basis: None,
         iters: Some(max_iter),
         solver: "internal-ipm".to_string(),
         elapsed_ms: ms_since(t0),
@@ -1382,6 +1464,8 @@ impl ExternalSolver {
             dual_ub: None,
             dual_eq: None,
             reduced_costs: None,
+            var_basis: None,
+            row_basis: None,
             iters: None,
             solver: format!("scipy:{method}"),
             elapsed_ms: ms_since(t0),
@@ -1468,6 +1552,8 @@ impl ExternalSolver {
             dual_ub: json_get(&parsed, "dualUB").and_then(json_as_f64_array),
             dual_eq: json_get(&parsed, "dualEQ").and_then(json_as_f64_array),
             reduced_costs: json_get(&parsed, "reducedCosts").and_then(json_as_f64_array),
+            var_basis: json_get(&parsed, "varBasis").and_then(json_as_string_array),
+            row_basis: json_get(&parsed, "rowBasis").and_then(json_as_string_array),
             iters: json_get(&parsed, "iters")
                 .and_then(json_as_f64)
                 .map(|f| f as usize),
@@ -1751,6 +1837,16 @@ fn json_as_str(v: &Json) -> Option<&str> {
 fn json_as_f64_array(v: &Json) -> Option<Vec<f64>> {
     match v {
         Json::Arr(items) => items.iter().map(json_as_f64).collect(),
+        _ => None,
+    }
+}
+
+fn json_as_string_array(v: &Json) -> Option<Vec<String>> {
+    match v {
+        Json::Arr(items) => items
+            .iter()
+            .map(|item| json_as_str(item).map(str::to_string))
+            .collect(),
         _ => None,
     }
 }
@@ -2111,6 +2207,33 @@ mod tests {
         assert_close(dual_ub[2], 2.0 / 3.0);
         assert_close(reduced[0], 0.0);
         assert_close(reduced[1], 0.0);
+    }
+
+    #[test]
+    fn internal_simplex_reports_basis_statuses() {
+        let p = LPProblem {
+            sense: Sense::Max,
+            c: vec![3.0, 4.0],
+            a_ub: Some(vec![vec![1.0, 2.0], vec![-3.0, 1.0], vec![1.0, -1.0]]),
+            b_ub: Some(vec![14.0, 0.0, 2.0]),
+            ..Default::default()
+        };
+        let sol = solve_lp_internal(&p, &opts());
+        assert_eq!(sol.status, LPStatus::Optimal);
+        assert_eq!(
+            sol.var_basis.as_deref(),
+            Some(&["basic".to_string(), "basic".to_string()][..])
+        );
+        assert_eq!(
+            sol.row_basis.as_deref(),
+            Some(
+                &[
+                    "at_upper".to_string(),
+                    "basic".to_string(),
+                    "at_upper".to_string()
+                ][..]
+            )
+        );
     }
 
     #[test]

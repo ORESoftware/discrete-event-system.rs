@@ -70,6 +70,10 @@ pub mod service;
 // modifying them.
 pub mod streaming;
 
+// Interactive 11-a-side soccer rotation planner: roster constraints, chemistry
+// rules, IP/MIP re-solve, pitch + solver tabbed UI.
+pub mod soccer_planner;
+
 // Future-event-list (next-event) discrete-event engine, plus an M/M/1 harness
 // that compares it against the existing fixed-time-step entity network.
 // Additive: wraps the existing engine without modifying it.
@@ -149,6 +153,7 @@ pub mod main_markov;
 pub mod main_mdp_lp;
 pub mod main_milp_bnb;
 pub mod main_monte_carlo_sim;
+pub mod main_music_production;
 pub mod main_network_mutex;
 pub mod main_neural_net;
 pub mod main_newsvendor;

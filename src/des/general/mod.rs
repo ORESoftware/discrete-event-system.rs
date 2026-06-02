@@ -89,6 +89,7 @@ pub mod feasibility_pipeline;
 pub mod internal_solver_network;
 pub mod ip_mip_des;
 pub mod multistage_stochastic;
+pub mod music_production;
 pub mod nonlinear_forecasting_model;
 pub mod signal_transforms;
 pub mod soccer_rotation;

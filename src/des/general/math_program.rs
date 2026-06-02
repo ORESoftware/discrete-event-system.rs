@@ -127,6 +127,16 @@ pub struct IndicatorConstraint {
     pub rhs: f64,
 }
 
+/// Linear row enforced only when every Boolean literal is satisfied.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EnforcedLinearConstraint {
+    pub name: String,
+    pub literals: Vec<BoolLiteral>,
+    pub coeffs: Vec<(usize, f64)>,
+    pub sense: RowSense,
+    pub rhs: f64,
+}
+
 /// Boolean literal over a binary variable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BoolLiteral {
@@ -297,11 +307,23 @@ pub enum GeneralConstraint {
         variables: Vec<usize>,
         tuples: Vec<Vec<i64>>,
     },
+    BinPacking {
+        name: String,
+        item_bin_vars: Vec<usize>,
+        load_vars: Vec<usize>,
+        item_sizes: Vec<f64>,
+    },
     Element {
         name: String,
         index_var: usize,
         target_var: usize,
         values: Vec<f64>,
+    },
+    VariableElement {
+        name: String,
+        index_var: usize,
+        target_var: usize,
+        variables: Vec<usize>,
     },
     Inverse {
         name: String,
@@ -324,6 +346,11 @@ pub enum GeneralConstraint {
         starting_state: i64,
         final_states: Vec<i64>,
         transitions: Vec<AutomatonTransition>,
+    },
+    Alternative {
+        name: String,
+        master: IntervalTerm,
+        alternatives: Vec<IntervalTerm>,
     },
     NoOverlap {
         name: String,
@@ -372,6 +399,7 @@ pub struct MathProgram {
     pub lazy_constraints: Vec<LinearConstraint>,
     pub second_order_cones: Vec<SecondOrderConeConstraint>,
     pub indicators: Vec<IndicatorConstraint>,
+    pub enforced_constraints: Vec<EnforcedLinearConstraint>,
     pub sos: Vec<SOSConstraint>,
     pub general_constraints: Vec<GeneralConstraint>,
 }
@@ -388,6 +416,7 @@ impl MathProgram {
             lazy_constraints: Vec::new(),
             second_order_cones: Vec::new(),
             indicators: Vec::new(),
+            enforced_constraints: Vec::new(),
             sos: Vec::new(),
             general_constraints: Vec::new(),
         }
@@ -640,6 +669,25 @@ impl MathProgram {
             rhs,
         });
         Ok(self.indicators.len() - 1)
+    }
+
+    pub fn add_enforced_constraint(
+        &mut self,
+        name: impl Into<String>,
+        literals: Vec<BoolLiteral>,
+        coeffs: Vec<(usize, f64)>,
+        sense: RowSense,
+        rhs: f64,
+    ) -> Result<usize, MathProgramError> {
+        self.validate_enforced_linear_args(&literals, &coeffs, rhs)?;
+        self.enforced_constraints.push(EnforcedLinearConstraint {
+            name: name.into(),
+            literals,
+            coeffs,
+            sense,
+            rhs,
+        });
+        Ok(self.enforced_constraints.len() - 1)
     }
 
     pub fn add_sos1(
@@ -1147,6 +1195,24 @@ impl MathProgram {
         Ok(self.general_constraints.len() - 1)
     }
 
+    pub fn add_bin_packing(
+        &mut self,
+        name: impl Into<String>,
+        item_bin_vars: Vec<usize>,
+        load_vars: Vec<usize>,
+        item_sizes: Vec<f64>,
+    ) -> Result<usize, MathProgramError> {
+        self.validate_bin_packing_args(&item_bin_vars, &load_vars, &item_sizes)?;
+        self.general_constraints
+            .push(GeneralConstraint::BinPacking {
+                name: name.into(),
+                item_bin_vars,
+                load_vars,
+                item_sizes,
+            });
+        Ok(self.general_constraints.len() - 1)
+    }
+
     pub fn add_element(
         &mut self,
         name: impl Into<String>,
@@ -1161,6 +1227,24 @@ impl MathProgram {
             target_var,
             values,
         });
+        Ok(self.general_constraints.len() - 1)
+    }
+
+    pub fn add_variable_element(
+        &mut self,
+        name: impl Into<String>,
+        index_var: usize,
+        target_var: usize,
+        variables: Vec<usize>,
+    ) -> Result<usize, MathProgramError> {
+        self.validate_variable_element_args(index_var, target_var, variables.as_slice())?;
+        self.general_constraints
+            .push(GeneralConstraint::VariableElement {
+                name: name.into(),
+                index_var,
+                target_var,
+                variables,
+            });
         Ok(self.general_constraints.len() - 1)
     }
 
@@ -1308,6 +1392,22 @@ impl MathProgram {
         }
     }
 
+    pub fn add_alternative(
+        &mut self,
+        name: impl Into<String>,
+        master: IntervalTerm,
+        alternatives: Vec<IntervalTerm>,
+    ) -> Result<usize, MathProgramError> {
+        self.validate_alternative_args(&master, &alternatives)?;
+        self.general_constraints
+            .push(GeneralConstraint::Alternative {
+                name: name.into(),
+                master,
+                alternatives,
+            });
+        Ok(self.general_constraints.len() - 1)
+    }
+
     pub fn reservoir_event(time_var: usize, demand: f64) -> ReservoirEvent {
         ReservoirEvent {
             time_var,
@@ -1418,6 +1518,7 @@ impl MathProgram {
             .iter()
             .any(|v| v.var_type != VariableType::Continuous)
             || !self.indicators.is_empty()
+            || !self.enforced_constraints.is_empty()
             || !self.sos.is_empty()
             || !self.general_constraints.is_empty()
             || !self.lazy_constraints.is_empty()
@@ -1556,6 +1657,9 @@ impl MathProgram {
             }
             validate_coeffs(self.variables.len(), &indicator.coeffs)?;
         }
+        for enforced in &self.enforced_constraints {
+            self.validate_enforced_linear_args(&enforced.literals, &enforced.coeffs, enforced.rhs)?;
+        }
         for sos in &self.sos {
             validate_sos_members(self.variables.len(), sos.sos_type, &sos.members)?;
             for &(idx, _) in &sos.members {
@@ -1684,12 +1788,24 @@ impl MathProgram {
                     variables,
                     tuples,
                 )?,
+                GeneralConstraint::BinPacking {
+                    item_bin_vars,
+                    load_vars,
+                    item_sizes,
+                    ..
+                } => self.validate_bin_packing_args(item_bin_vars, load_vars, item_sizes)?,
                 GeneralConstraint::Element {
                     index_var,
                     target_var,
                     values,
                     ..
                 } => self.validate_element_args(*index_var, *target_var, values)?,
+                GeneralConstraint::VariableElement {
+                    index_var,
+                    target_var,
+                    variables,
+                    ..
+                } => self.validate_variable_element_args(*index_var, *target_var, variables)?,
                 GeneralConstraint::Inverse {
                     variables,
                     inverse_variables,
@@ -1713,6 +1829,11 @@ impl MathProgram {
                     final_states,
                     transitions,
                 )?,
+                GeneralConstraint::Alternative {
+                    master,
+                    alternatives,
+                    ..
+                } => self.validate_alternative_args(master, alternatives)?,
                 GeneralConstraint::NoOverlap { intervals, .. } => {
                     self.validate_interval_args("no-overlap", intervals)?
                 }
@@ -2169,6 +2290,102 @@ impl MathProgram {
         Ok(())
     }
 
+    fn validate_bin_packing_args(
+        &self,
+        item_bin_vars: &[usize],
+        load_vars: &[usize],
+        item_sizes: &[f64],
+    ) -> Result<(), MathProgramError> {
+        if item_bin_vars.is_empty() {
+            return Err(MathProgramError::Unsupported(
+                "bin-packing requires at least one item".to_string(),
+            ));
+        }
+        if load_vars.is_empty() {
+            return Err(MathProgramError::Unsupported(
+                "bin-packing requires at least one bin load variable".to_string(),
+            ));
+        }
+        if item_bin_vars.len() != item_sizes.len() {
+            return Err(MathProgramError::Unsupported(format!(
+                "bin-packing requires one size per item, got {} items and {} sizes",
+                item_bin_vars.len(),
+                item_sizes.len()
+            )));
+        }
+
+        for &load_var in load_vars {
+            if load_var >= self.variables.len() {
+                return Err(MathProgramError::BadIndex(format!(
+                    "bin-packing load variable index {load_var} out of bounds"
+                )));
+            }
+        }
+
+        let max_bin = i64::try_from(load_vars.len() - 1).map_err(|_| {
+            MathProgramError::Unsupported(format!(
+                "bin-packing bin count is too large: {} bins",
+                load_vars.len()
+            ))
+        })?;
+        let mut selector_count = 0usize;
+        for (item, (&item_bin_var, &size)) in item_bin_vars.iter().zip(item_sizes).enumerate() {
+            if !size.is_finite() || size < 0.0 {
+                return Err(MathProgramError::InvalidBound(format!(
+                    "bin-packing item {item} has invalid size {size}"
+                )));
+            }
+            if item_bin_var >= self.variables.len() {
+                return Err(MathProgramError::BadIndex(format!(
+                    "bin-packing item {item} bin variable index {item_bin_var} out of bounds"
+                )));
+            }
+            if !matches!(
+                self.variables[item_bin_var].var_type,
+                VariableType::Binary | VariableType::Integer
+            ) {
+                return Err(MathProgramError::Unsupported(format!(
+                    "bin-packing item {item} variable `{}` must be binary or integer",
+                    self.variables[item_bin_var].name
+                )));
+            }
+            let (lower, upper) =
+                integer_bounds(&self.variables[item_bin_var]).ok_or_else(|| {
+                    MathProgramError::UnboundedBigM(format!(
+                        "bin-packing item {item} variable `{}` requires finite integer bounds",
+                        self.variables[item_bin_var].name
+                    ))
+                })?;
+            if lower < 0 || upper > max_bin {
+                return Err(MathProgramError::InvalidBound(format!(
+                    "bin-packing item {item} variable `{}` bounds [{lower}, {upper}] must fit bin indices [0, {max_bin}]",
+                    self.variables[item_bin_var].name
+                )));
+            }
+            let domain_size = upper
+                .checked_sub(lower)
+                .and_then(|span| span.checked_add(1))
+                .ok_or_else(|| {
+                    MathProgramError::Unsupported(format!(
+                        "bin-packing item {item} domain size overflowed"
+                    ))
+                })?;
+            selector_count = selector_count
+                .checked_add(domain_size as usize)
+                .ok_or_else(|| {
+                    MathProgramError::Unsupported(
+                        "bin-packing selector count overflowed".to_string(),
+                    )
+                })?;
+            if selector_count > 4096 {
+                return Err(MathProgramError::Unsupported(format!(
+                    "bin-packing exact MIP lowering is limited to 4096 selectors, got {selector_count}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     fn validate_element_args(
         &self,
         index_var: usize,
@@ -2252,6 +2469,100 @@ impl MathProgram {
                     target.name
                 )));
             }
+        }
+
+        Ok(())
+    }
+
+    fn validate_variable_element_args(
+        &self,
+        index_var: usize,
+        target_var: usize,
+        variables: &[usize],
+    ) -> Result<(), MathProgramError> {
+        if variables.is_empty() {
+            return Err(MathProgramError::Unsupported(
+                "variable-element requires at least one variable".to_string(),
+            ));
+        }
+        if variables.len() > i64::MAX as usize {
+            return Err(MathProgramError::Unsupported(format!(
+                "variable-element array is too large: {} variables",
+                variables.len()
+            )));
+        }
+        if index_var >= self.variables.len() {
+            return Err(MathProgramError::BadIndex(format!(
+                "variable-element index variable {index_var} out of bounds"
+            )));
+        }
+        if target_var >= self.variables.len() {
+            return Err(MathProgramError::BadIndex(format!(
+                "variable-element target variable {target_var} out of bounds"
+            )));
+        }
+        for (pos, &var_idx) in variables.iter().enumerate() {
+            if var_idx >= self.variables.len() {
+                return Err(MathProgramError::BadIndex(format!(
+                    "variable-element source variable at index {pos} ({var_idx}) out of bounds"
+                )));
+            }
+        }
+
+        let index = &self.variables[index_var];
+        if !matches!(index.var_type, VariableType::Binary | VariableType::Integer) {
+            return Err(MathProgramError::Unsupported(format!(
+                "variable-element index variable `{}` must be binary or integer",
+                index.name
+            )));
+        }
+        let (lower, upper) = integer_bounds(index).ok_or_else(|| {
+            MathProgramError::UnboundedBigM(format!(
+                "variable-element index variable `{}` requires finite integer bounds",
+                index.name
+            ))
+        })?;
+        let max_index = i64::try_from(variables.len() - 1).map_err(|_| {
+            MathProgramError::Unsupported(format!(
+                "variable-element array is too large: {} variables",
+                variables.len()
+            ))
+        })?;
+        if lower < 0 || upper > max_index {
+            return Err(MathProgramError::InvalidBound(format!(
+                "variable-element index variable `{}` bounds [{lower}, {upper}] must fit variable indices [0, {max_index}]",
+                index.name
+            )));
+        }
+        let domain_size = upper
+            .checked_sub(lower)
+            .and_then(|span| span.checked_add(1))
+            .ok_or_else(|| {
+                MathProgramError::Unsupported(
+                    "variable-element index variable domain size overflowed".to_string(),
+                )
+            })?;
+        if domain_size > 512 {
+            return Err(MathProgramError::Unsupported(format!(
+                "variable-element exact MIP lowering is limited to 512 index literals, got {domain_size}"
+            )));
+        }
+
+        let target = &self.variables[target_var];
+        variable_bounds(target).ok_or_else(|| {
+            MathProgramError::UnboundedBigM(format!(
+                "variable-element target variable `{}` requires finite bounds",
+                target.name
+            ))
+        })?;
+        for idx in lower..=upper {
+            let source = &self.variables[variables[idx as usize]];
+            variable_bounds(source).ok_or_else(|| {
+                MathProgramError::UnboundedBigM(format!(
+                    "variable-element source variable `{}` at index {idx} requires finite bounds",
+                    source.name
+                ))
+            })?;
         }
 
         Ok(())
@@ -2672,6 +2983,27 @@ impl MathProgram {
         Ok(())
     }
 
+    fn validate_enforced_linear_args(
+        &self,
+        literals: &[BoolLiteral],
+        coeffs: &[(usize, f64)],
+        rhs: f64,
+    ) -> Result<(), MathProgramError> {
+        if literals.is_empty() {
+            return Err(MathProgramError::Unsupported(
+                "enforced linear constraints require at least one literal".to_string(),
+            ));
+        }
+        self.validate_boolean_clause_args(literals)?;
+        validate_coeffs(self.variables.len(), coeffs)?;
+        if !rhs.is_finite() {
+            return Err(MathProgramError::NonFinite(
+                "enforced linear rhs".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     fn validate_integer_product_args(
         &self,
         target_var: usize,
@@ -2842,6 +3174,29 @@ impl MathProgram {
         Ok(())
     }
 
+    fn validate_alternative_args(
+        &self,
+        master: &IntervalTerm,
+        alternatives: &[IntervalTerm],
+    ) -> Result<(), MathProgramError> {
+        self.validate_interval_args("alternative master", std::slice::from_ref(master))?;
+        self.validate_interval_args("alternative", alternatives)?;
+        let mut seen_presence = Vec::new();
+        for (i, alternative) in alternatives.iter().enumerate() {
+            let presence = alternative.presence_var.ok_or_else(|| {
+                MathProgramError::Unsupported(format!("alternative interval {i} must be optional"))
+            })?;
+            if seen_presence.contains(&presence) {
+                return Err(MathProgramError::Unsupported(format!(
+                    "alternative interval {i} reuses presence variable `{}`",
+                    self.variables[presence].name
+                )));
+            }
+            seen_presence.push(presence);
+        }
+        Ok(())
+    }
+
     fn validate_cumulative_args(
         &self,
         intervals: &[IntervalTerm],
@@ -2972,6 +3327,11 @@ pub struct MathProgramSolveOptions {
     pub mip: IPMIPSolveOptions,
     /// Optional MIP start in the original math-program variable space.
     pub mip_start: Option<Vec<f64>>,
+    /// Optional branching priorities in the original math-program variable space.
+    /// Higher values branch before lower values in the native MIP backend. When
+    /// set, these are mapped through the math-program compiler and override
+    /// `mip.branch_priorities`, which remains available for canonical variables.
+    pub branch_priorities: Option<Vec<i32>>,
 }
 
 impl Default for MathProgramSolveOptions {
@@ -2986,6 +3346,7 @@ impl Default for MathProgramSolveOptions {
             conic: MathProgramConicOptions::default(),
             mip: IPMIPSolveOptions::default(),
             mip_start: None,
+            branch_priorities: None,
         }
     }
 }
@@ -3430,10 +3791,7 @@ fn solve_mixed_integer_linear(
 ) -> Result<MathProgramSolution, MathProgramError> {
     let compiled = compile_mip(program)?;
     let objective_offset = compiled_objective_offset(program, &compiled);
-    let mut mip_opts = opts.mip.clone();
-    if let Some(start) = &opts.mip_start {
-        mip_opts.mip_start = Some(canonical_mip_start(program, &compiled, start)?);
-    }
+    let mip_opts = compiled_mip_options(program, &compiled, opts, true)?;
     let mip = solve_ipmip_with_des(compiled.problem.clone(), mip_opts);
     let x = compiled.original_x(&mip.x);
     let objective = objective_value(program, &x);
@@ -3470,7 +3828,15 @@ fn solve_mixed_integer_quadratic_objective(
 ) -> Result<MathProgramSolution, MathProgramError> {
     let original_vars = program.variables.len();
     let transformed = quadratic_objective_epigraph_program(program)?;
-    let mut solution = solve_mixed_integer_conic(&transformed, opts)?;
+    let mut transformed_opts = opts.clone();
+    if let Some(priorities) = &opts.branch_priorities {
+        transformed_opts.branch_priorities = Some(extend_branch_priorities_for_added_variables(
+            original_vars,
+            transformed.variables.len(),
+            priorities,
+        )?);
+    }
+    let mut solution = solve_mixed_integer_conic(&transformed, &transformed_opts)?;
     if solution.x.len() >= original_vars {
         solution.x.truncate(original_vars);
         solution.objective = objective_value(program, &solution.x);
@@ -3514,9 +3880,10 @@ fn solve_mixed_integer_conic(
     };
     let mut compiled = compile_mip(&relaxation)?;
     let objective_offset = compiled_objective_offset(&relaxation, &compiled);
+    let mip_opts = compiled_mip_options(&relaxation, &compiled, opts, false)?;
     let mut best = None;
     for cut in 0..=opts.conic.max_cuts {
-        let mip = solve_ipmip_with_des(compiled.problem.clone(), opts.mip.clone());
+        let mip = solve_ipmip_with_des(compiled.problem.clone(), mip_opts.clone());
         let x = compiled.original_x(&mip.x);
         let objective = objective_value(program, &x);
         let best_bound = original_mip_best_bound(mip.best_bound, objective_offset);
@@ -3729,6 +4096,13 @@ pub fn solve_math_program_feas_relaxation(
     if let Some(start) = &solve_opts.mip_start {
         relaxed_solve_opts.mip_start = Some(extend_feas_relax_mip_start(program, &slacks, start)?);
     }
+    if let Some(priorities) = &solve_opts.branch_priorities {
+        relaxed_solve_opts.branch_priorities = Some(extend_branch_priorities_for_added_variables(
+            program.variables.len(),
+            relaxed_program.variables.len(),
+            priorities,
+        )?);
+    }
     let solution = solve_math_program(&relaxed_program, &relaxed_solve_opts)?;
     let original_len = program.variables.len();
     let original_x = if solution.x.len() >= original_len {
@@ -3788,8 +4162,17 @@ pub fn solve_math_program_solution_pool(
     solve_opts: &MathProgramSolveOptions,
     pool_opts: &MathProgramSolutionPoolOptions,
 ) -> Result<MathProgramSolutionPool, MathProgramError> {
+    let original_vars = program.variables.len();
     solve_math_program_solution_pool_with(program, pool_opts, "des-solution-pool", |candidate| {
-        solve_math_program(candidate, solve_opts)
+        let mut candidate_opts = solve_opts.clone();
+        if let Some(priorities) = &solve_opts.branch_priorities {
+            candidate_opts.branch_priorities = Some(extend_branch_priorities_for_added_variables(
+                original_vars,
+                candidate.variables.len(),
+                priorities,
+            )?);
+        }
+        solve_math_program(candidate, &candidate_opts)
     })
 }
 
@@ -5558,6 +5941,95 @@ fn canonical_mip_start(
     Ok(canonical)
 }
 
+fn compiled_mip_options(
+    program: &MathProgram,
+    compiled: &CompiledMip,
+    opts: &MathProgramSolveOptions,
+    include_original_mip_start: bool,
+) -> Result<IPMIPSolveOptions, MathProgramError> {
+    let mut mip_opts = opts.mip.clone();
+    if include_original_mip_start {
+        if let Some(start) = &opts.mip_start {
+            mip_opts.mip_start = Some(canonical_mip_start(program, compiled, start)?);
+        }
+    }
+    if let Some(priorities) = &opts.branch_priorities {
+        mip_opts.branch_priorities =
+            Some(canonical_branch_priorities(program, compiled, priorities)?);
+    } else if let Some(priorities) = mip_opts.branch_priorities.as_deref() {
+        validate_canonical_branch_priorities(compiled, priorities)?;
+    }
+    Ok(mip_opts)
+}
+
+fn canonical_branch_priorities(
+    program: &MathProgram,
+    compiled: &CompiledMip,
+    priorities: &[i32],
+) -> Result<Vec<i32>, MathProgramError> {
+    if priorities.len() != program.variables.len() {
+        return Err(MathProgramError::BadIndex(format!(
+            "branch priorities length {} does not match {} variables",
+            priorities.len(),
+            program.variables.len()
+        )));
+    }
+
+    let mut canonical = vec![0; compiled.problem.c.len()];
+    for (i, priority) in priorities.iter().copied().enumerate() {
+        for &(j, _) in &compiled.expansions[i].terms {
+            canonical[j] = priority;
+        }
+        if matches!(
+            program.variables[i].var_type,
+            VariableType::SemiContinuous | VariableType::SemiInteger
+        ) {
+            if let Some(active_idx) =
+                compiled_var_index(compiled, &format!("{}__active", program.variables[i].name))
+            {
+                canonical[active_idx] = priority;
+            }
+        }
+    }
+    Ok(canonical)
+}
+
+fn validate_canonical_branch_priorities(
+    compiled: &CompiledMip,
+    priorities: &[i32],
+) -> Result<(), MathProgramError> {
+    if priorities.len() != compiled.problem.c.len() {
+        return Err(MathProgramError::BadIndex(format!(
+            "canonical branch priorities length {} does not match {} compiled variables",
+            priorities.len(),
+            compiled.problem.c.len()
+        )));
+    }
+    Ok(())
+}
+
+fn extend_branch_priorities_for_added_variables(
+    original_len: usize,
+    target_len: usize,
+    priorities: &[i32],
+) -> Result<Vec<i32>, MathProgramError> {
+    if priorities.len() != original_len {
+        return Err(MathProgramError::BadIndex(format!(
+            "branch priorities length {} does not match {} variables",
+            priorities.len(),
+            original_len
+        )));
+    }
+    if target_len < original_len {
+        return Err(MathProgramError::BadIndex(format!(
+            "cannot map branch priorities from {original_len} variables to {target_len} variables"
+        )));
+    }
+    let mut extended = priorities.to_vec();
+    extended.resize(target_len, 0);
+    Ok(extended)
+}
+
 fn set_expansion_start_value(
     canonical: &mut [f64],
     expansion: &LinearExpansion,
@@ -5627,6 +6099,9 @@ fn compile_mip(program: &MathProgram) -> Result<CompiledMip, MathProgramError> {
     }
     for indicator in &program.indicators {
         add_indicator_rows(program, &mut rows, &expansions, indicator)?;
+    }
+    for enforced in &program.enforced_constraints {
+        add_enforced_linear_rows(program, &mut rows, &expansions, enforced)?;
     }
     for sos in &program.sos {
         add_sos_rows(
@@ -6026,6 +6501,84 @@ fn add_indicator_le(
             rhs,
         );
     }
+    Ok(())
+}
+
+fn add_enforced_linear_rows(
+    program: &MathProgram,
+    rows: &mut Vec<SparseRow>,
+    expansions: &[LinearExpansion],
+    enforced: &EnforcedLinearConstraint,
+) -> Result<(), MathProgramError> {
+    match enforced.sense {
+        RowSense::Le => add_enforced_linear_le(
+            program,
+            rows,
+            expansions,
+            enforced,
+            &enforced.coeffs,
+            enforced.rhs,
+        ),
+        RowSense::Ge => {
+            let coeffs = enforced
+                .coeffs
+                .iter()
+                .map(|&(i, v)| (i, -v))
+                .collect::<Vec<_>>();
+            add_enforced_linear_le(program, rows, expansions, enforced, &coeffs, -enforced.rhs)
+        }
+        RowSense::Eq => {
+            add_enforced_linear_le(
+                program,
+                rows,
+                expansions,
+                enforced,
+                &enforced.coeffs,
+                enforced.rhs,
+            )?;
+            let coeffs = enforced
+                .coeffs
+                .iter()
+                .map(|&(i, v)| (i, -v))
+                .collect::<Vec<_>>();
+            add_enforced_linear_le(program, rows, expansions, enforced, &coeffs, -enforced.rhs)
+        }
+    }
+}
+
+fn add_enforced_linear_le(
+    program: &MathProgram,
+    rows: &mut Vec<SparseRow>,
+    expansions: &[LinearExpansion],
+    enforced: &EnforcedLinearConstraint,
+    coeffs: &[(usize, f64)],
+    rhs: f64,
+) -> Result<(), MathProgramError> {
+    let (_, max_lhs) = linear_bounds(program, coeffs).ok_or_else(|| {
+        MathProgramError::UnboundedBigM(format!(
+            "enforced linear constraint `{}` needs finite variable bounds for big-M lowering",
+            enforced.name
+        ))
+    })?;
+    let big_m = 0.0_f64.max(max_lhs - rhs);
+    let mut lifted = coeffs.to_vec();
+    let mut shifted_rhs = rhs;
+    for literal in &enforced.literals {
+        if literal.value {
+            lifted.push((literal.var, big_m));
+            shifted_rhs += big_m;
+        } else {
+            lifted.push((literal.var, -big_m));
+        }
+    }
+    add_program_row(
+        rows,
+        format!("{}__enforced", enforced.name),
+        expansions,
+        &lifted,
+        RowSense::Le,
+        shifted_rhs,
+    );
     Ok(())
 }
 
@@ -6539,6 +7092,23 @@ fn add_general_constraint_rows(
             variables,
             tuples,
         )?,
+        GeneralConstraint::BinPacking {
+            name,
+            item_bin_vars,
+            load_vars,
+            item_sizes,
+        } => add_bin_packing_rows(
+            program,
+            names,
+            integer_vars,
+            ub,
+            rows,
+            expansions,
+            name,
+            item_bin_vars,
+            load_vars,
+            item_sizes,
+        )?,
         GeneralConstraint::Element {
             name,
             index_var,
@@ -6555,6 +7125,23 @@ fn add_general_constraint_rows(
             *index_var,
             *target_var,
             values,
+        )?,
+        GeneralConstraint::VariableElement {
+            name,
+            index_var,
+            target_var,
+            variables,
+        } => add_variable_element_rows(
+            program,
+            names,
+            integer_vars,
+            ub,
+            rows,
+            expansions,
+            name,
+            *index_var,
+            *target_var,
+            variables,
         )?,
         GeneralConstraint::Inverse {
             name,
@@ -6616,6 +7203,11 @@ fn add_general_constraint_rows(
             final_states,
             transitions,
         )?,
+        GeneralConstraint::Alternative {
+            name,
+            master,
+            alternatives,
+        } => add_alternative_rows(ub, rows, expansions, name, master, alternatives)?,
         GeneralConstraint::NoOverlap { name, intervals } => {
             add_no_overlap_rows(names, integer_vars, ub, rows, expansions, name, intervals)?
         }
@@ -7772,6 +8364,88 @@ fn add_abs_canonical_rows(
     Ok(())
 }
 
+fn add_bin_packing_rows(
+    program: &MathProgram,
+    names: &mut Vec<String>,
+    integer_vars: &mut Vec<bool>,
+    ub: &mut Vec<f64>,
+    rows: &mut Vec<SparseRow>,
+    expansions: &[LinearExpansion],
+    name: &str,
+    item_bin_vars: &[usize],
+    load_vars: &[usize],
+    item_sizes: &[f64],
+) -> Result<(), MathProgramError> {
+    let mut load_terms = vec![Vec::<(usize, f64)>::new(); load_vars.len()];
+    for (item, (&item_bin_var, &size)) in item_bin_vars.iter().zip(item_sizes).enumerate() {
+        let (lower, upper) = integer_bounds(&program.variables[item_bin_var]).ok_or_else(|| {
+            MathProgramError::UnboundedBigM(format!(
+                "bin-packing item {item} variable `{}` requires finite integer bounds",
+                program.variables[item_bin_var].name
+            ))
+        })?;
+        let selectors = (lower..=upper)
+            .map(|bin| {
+                let lit = push_canonical_var(
+                    &format!("{name}__item_{item}__bin_{bin}"),
+                    true,
+                    1.0,
+                    names,
+                    integer_vars,
+                    ub,
+                );
+                (bin, lit)
+            })
+            .collect::<Vec<_>>();
+        let choose_coeffs = selectors
+            .iter()
+            .map(|&(_, lit)| (lit, 1.0))
+            .collect::<Vec<_>>();
+        rows.push(SparseRow {
+            coeffs: choose_coeffs.clone(),
+            rhs: 1.0,
+            name: format!("{name}__item_{item}__choose_bin"),
+        });
+        rows.push(SparseRow {
+            coeffs: negate_sparse(&choose_coeffs),
+            rhs: -1.0,
+            name: format!("{name}__item_{item}__choose_bin_ge"),
+        });
+
+        let item_bin_coeffs = selectors
+            .iter()
+            .map(|&(bin, lit)| (lit, -(bin as f64)))
+            .collect::<Vec<_>>();
+        add_mixed_row(
+            rows,
+            format!("{name}__item_{item}__link_bin"),
+            expansions,
+            &[(item_bin_var, 1.0)],
+            &item_bin_coeffs,
+            RowSense::Eq,
+            0.0,
+        );
+
+        for (bin, lit) in selectors {
+            load_terms[bin as usize].push((lit, -size));
+        }
+    }
+
+    for (bin, &load_var) in load_vars.iter().enumerate() {
+        add_mixed_row(
+            rows,
+            format!("{name}__bin_{bin}__load"),
+            expansions,
+            &[(load_var, 1.0)],
+            &load_terms[bin],
+            RowSense::Eq,
+            0.0,
+        );
+    }
+
+    Ok(())
+}
+
 fn add_element_rows(
     program: &MathProgram,
     names: &mut Vec<String>,
@@ -7864,6 +8538,126 @@ fn add_element_rows(
         RowSense::Eq,
         0.0,
     );
+
+    Ok(())
+}
+
+fn add_variable_element_rows(
+    program: &MathProgram,
+    names: &mut Vec<String>,
+    integer_vars: &mut Vec<bool>,
+    ub: &mut Vec<f64>,
+    rows: &mut Vec<SparseRow>,
+    expansions: &[LinearExpansion],
+    name: &str,
+    index_var: usize,
+    target_var: usize,
+    variables: &[usize],
+) -> Result<(), MathProgramError> {
+    if variables.is_empty() {
+        return Err(MathProgramError::Unsupported(
+            "variable-element requires at least one variable".to_string(),
+        ));
+    }
+    let index = &program.variables[index_var];
+    let (lower, upper) = integer_bounds(index).ok_or_else(|| {
+        MathProgramError::UnboundedBigM(format!(
+            "variable-element index variable `{}` requires finite integer bounds",
+            index.name
+        ))
+    })?;
+    let max_index = i64::try_from(variables.len() - 1).map_err(|_| {
+        MathProgramError::Unsupported(format!(
+            "variable-element array is too large: {} variables",
+            variables.len()
+        ))
+    })?;
+    if lower < 0 || upper > max_index {
+        return Err(MathProgramError::InvalidBound(format!(
+            "variable-element index variable `{}` bounds [{lower}, {upper}] must fit variable indices [0, {max_index}]",
+            index.name
+        )));
+    }
+
+    let selectors = (lower..=upper)
+        .map(|idx| {
+            let lit = push_canonical_var(
+                &format!("{name}__index_{idx}"),
+                true,
+                1.0,
+                names,
+                integer_vars,
+                ub,
+            );
+            (idx, lit)
+        })
+        .collect::<Vec<_>>();
+    let choose_coeffs = selectors
+        .iter()
+        .map(|&(_, lit)| (lit, 1.0))
+        .collect::<Vec<_>>();
+    rows.push(SparseRow {
+        coeffs: choose_coeffs.clone(),
+        rhs: 1.0,
+        name: format!("{name}__choose_index"),
+    });
+    rows.push(SparseRow {
+        coeffs: negate_sparse(&choose_coeffs),
+        rhs: -1.0,
+        name: format!("{name}__choose_index_ge"),
+    });
+
+    let index_coeffs = selectors
+        .iter()
+        .map(|&(idx, lit)| (lit, -(idx as f64)))
+        .collect::<Vec<_>>();
+    add_mixed_row(
+        rows,
+        format!("{name}__link_index"),
+        expansions,
+        &[(index_var, 1.0)],
+        &index_coeffs,
+        RowSense::Eq,
+        0.0,
+    );
+
+    let (target_lb, target_ub) =
+        variable_bounds(&program.variables[target_var]).ok_or_else(|| {
+            MathProgramError::UnboundedBigM(format!(
+                "variable-element target variable `{}` requires finite bounds",
+                program.variables[target_var].name
+            ))
+        })?;
+    for &(idx, lit) in &selectors {
+        let source_var = variables[idx as usize];
+        let (source_lb, source_ub) =
+            variable_bounds(&program.variables[source_var]).ok_or_else(|| {
+                MathProgramError::UnboundedBigM(format!(
+                    "variable-element source variable `{}` at index {idx} requires finite bounds",
+                    program.variables[source_var].name
+                ))
+            })?;
+        let delta_lower = target_lb - source_ub;
+        let delta_upper = target_ub - source_lb;
+        add_mixed_row(
+            rows,
+            format!("{name}__index_{idx}__target_le_source"),
+            expansions,
+            &[(target_var, 1.0), (source_var, -1.0)],
+            &[(lit, delta_upper)],
+            RowSense::Le,
+            delta_upper,
+        );
+        add_mixed_row(
+            rows,
+            format!("{name}__index_{idx}__target_ge_source"),
+            expansions,
+            &[(target_var, -1.0), (source_var, 1.0)],
+            &[(lit, -delta_lower)],
+            RowSense::Le,
+            -delta_lower,
+        );
+    }
 
     Ok(())
 }
@@ -8188,6 +8982,91 @@ fn add_piecewise_linear_rows(
             name: format!("{name}__lambda_adjacent_{i}"),
         });
     }
+    Ok(())
+}
+
+fn add_alternative_rows(
+    ub: &mut Vec<f64>,
+    rows: &mut Vec<SparseRow>,
+    expansions: &[LinearExpansion],
+    name: &str,
+    master: &IntervalTerm,
+    alternatives: &[IntervalTerm],
+) -> Result<(), MathProgramError> {
+    add_interval_link_rows(ub, rows, expansions, &format!("{name}__master"), master)?;
+    for (i, alternative) in alternatives.iter().enumerate() {
+        add_interval_link_rows(
+            ub,
+            rows,
+            expansions,
+            &format!("{name}__alternative_{i}"),
+            alternative,
+        )?;
+    }
+
+    let mut choose_coeffs = alternatives
+        .iter()
+        .map(|alternative| (alternative.presence_var.unwrap(), 1.0))
+        .collect::<Vec<_>>();
+    let rhs = if let Some(master_presence) = master.presence_var {
+        choose_coeffs.push((master_presence, -1.0));
+        0.0
+    } else {
+        1.0
+    };
+    add_program_row(
+        rows,
+        format!("{name}__choose_alternative"),
+        expansions,
+        &choose_coeffs,
+        RowSense::Eq,
+        rhs,
+    );
+
+    for (i, alternative) in alternatives.iter().enumerate() {
+        let presence = alternative.presence_var.unwrap();
+        add_implied_le_row(
+            rows,
+            expansions,
+            format!("{name}__alternative_{i}__start_le_master"),
+            &[(alternative.start_var, 1.0), (master.start_var, -1.0)],
+            0.0,
+            &[(presence, true)],
+            &[],
+            ub,
+        )?;
+        add_implied_le_row(
+            rows,
+            expansions,
+            format!("{name}__alternative_{i}__master_le_start"),
+            &[(master.start_var, 1.0), (alternative.start_var, -1.0)],
+            0.0,
+            &[(presence, true)],
+            &[],
+            ub,
+        )?;
+        add_implied_le_row(
+            rows,
+            expansions,
+            format!("{name}__alternative_{i}__end_le_master"),
+            &[(alternative.end_var, 1.0), (master.end_var, -1.0)],
+            0.0,
+            &[(presence, true)],
+            &[],
+            ub,
+        )?;
+        add_implied_le_row(
+            rows,
+            expansions,
+            format!("{name}__alternative_{i}__master_le_end"),
+            &[(master.end_var, 1.0), (alternative.end_var, -1.0)],
+            0.0,
+            &[(presence, true)],
+            &[],
+            ub,
+        )?;
+    }
+
     Ok(())
 }
 
@@ -9295,6 +10174,17 @@ fn solution_max_violation(program: &MathProgram, x: &[f64], tol: f64) -> Option<
                 max_violation.max(row_sense_violation(lhs, indicator.sense, indicator.rhs));
         }
     }
+    for enforced in &program.enforced_constraints {
+        if enforced
+            .literals
+            .iter()
+            .all(|literal| binary_truth(x[literal.var]) == literal.value)
+        {
+            let lhs = eval_sparse_affine(&enforced.coeffs, 0.0, x);
+            max_violation =
+                max_violation.max(row_sense_violation(lhs, enforced.sense, enforced.rhs));
+        }
+    }
     for sos in &program.sos {
         max_violation = max_violation.max(sos_violation(sos, x, semantic_tol));
     }
@@ -9486,12 +10376,24 @@ fn general_constraint_violation(constraint: &GeneralConstraint, x: &[f64], tol: 
         GeneralConstraint::ForbiddenAssignments {
             variables, tuples, ..
         } => forbidden_assignments_violation(variables, tuples, x),
+        GeneralConstraint::BinPacking {
+            item_bin_vars,
+            load_vars,
+            item_sizes,
+            ..
+        } => bin_packing_violation(item_bin_vars, load_vars, item_sizes, x),
         GeneralConstraint::Element {
             index_var,
             target_var,
             values,
             ..
         } => element_violation(*index_var, *target_var, values, x),
+        GeneralConstraint::VariableElement {
+            index_var,
+            target_var,
+            variables,
+            ..
+        } => variable_element_violation(*index_var, *target_var, variables, x),
         GeneralConstraint::Inverse {
             variables,
             inverse_variables,
@@ -9510,6 +10412,11 @@ fn general_constraint_violation(constraint: &GeneralConstraint, x: &[f64], tol: 
             transitions,
             ..
         } => automaton_violation(variables, *starting_state, final_states, transitions, x),
+        GeneralConstraint::Alternative {
+            master,
+            alternatives,
+            ..
+        } => alternative_violation(master, alternatives, x),
         GeneralConstraint::NoOverlap { intervals, .. } => no_overlap_violation(intervals, x, tol),
         GeneralConstraint::NoOverlap2D {
             x_intervals,
@@ -9653,6 +10560,30 @@ fn forbidden_assignments_violation(variables: &[usize], tuples: &[Vec<i64>], x: 
     }
 }
 
+fn bin_packing_violation(
+    item_bin_vars: &[usize],
+    load_vars: &[usize],
+    item_sizes: &[f64],
+    x: &[f64],
+) -> f64 {
+    let mut violation: f64 = 0.0;
+    let mut loads = vec![0.0; load_vars.len()];
+    for (&item_bin_var, &size) in item_bin_vars.iter().zip(item_sizes) {
+        let value = x[item_bin_var];
+        let rounded = value.round();
+        violation = violation.max((value - rounded).abs());
+        if rounded < 0.0 || rounded >= load_vars.len() as f64 {
+            violation = violation.max(1.0);
+        } else {
+            loads[rounded as usize] += size;
+        }
+    }
+    for (bin, &load_var) in load_vars.iter().enumerate() {
+        violation = violation.max((x[load_var] - loads[bin]).abs());
+    }
+    violation
+}
+
 fn element_violation(index_var: usize, target_var: usize, values: &[f64], x: &[f64]) -> f64 {
     let index_value = x[index_var];
     let rounded = index_value.round();
@@ -9662,6 +10593,22 @@ fn element_violation(index_var: usize, target_var: usize, values: &[f64], x: &[f
     }
     let expected = values[rounded as usize];
     integrality.max((x[target_var] - expected).abs())
+}
+
+fn variable_element_violation(
+    index_var: usize,
+    target_var: usize,
+    variables: &[usize],
+    x: &[f64],
+) -> f64 {
+    let index_value = x[index_var];
+    let rounded = index_value.round();
+    let integrality = integrality_violation(index_value);
+    if rounded < 0.0 || rounded >= variables.len() as f64 {
+        return integrality.max(1.0);
+    }
+    let source_var = variables[rounded as usize];
+    integrality.max((x[target_var] - x[source_var]).abs())
 }
 
 fn inverse_violation(variables: &[usize], inverse_variables: &[usize], x: &[f64]) -> f64 {
@@ -9868,6 +10815,34 @@ fn unique_i64(values: &[i64]) -> Vec<i64> {
     values.sort_unstable();
     values.dedup();
     values
+}
+
+fn alternative_violation(master: &IntervalTerm, alternatives: &[IntervalTerm], x: &[f64]) -> f64 {
+    let mut violation: f64 = 0.0;
+    let master_presence = master.presence_var.map_or(1.0, |presence| {
+        violation = violation.max(integrality_violation(x[presence]));
+        x[presence]
+    });
+    if binary_truth(master_presence) {
+        violation = violation.max(interval_end_violation(master, x));
+    }
+
+    let mut selected = 0.0;
+    for alternative in alternatives {
+        let Some(presence) = alternative.presence_var else {
+            return 1.0;
+        };
+        let presence_value = x[presence];
+        violation = violation.max(integrality_violation(presence_value));
+        selected += presence_value;
+        if binary_truth(presence_value) {
+            violation = violation.max(interval_end_violation(alternative, x));
+            violation = violation.max((x[alternative.start_var] - x[master.start_var]).abs());
+            violation = violation.max((x[alternative.end_var] - x[master.end_var]).abs());
+        }
+    }
+
+    violation.max((selected - master_presence).abs())
 }
 
 fn rectangle_active(x_interval: &IntervalTerm, y_interval: &IntervalTerm, x: &[f64]) -> bool {
@@ -10275,6 +11250,7 @@ fn supports_native_nonlinear_var(var_type: VariableType) -> bool {
 
 fn can_encode_direct_mixed_integer_nonlinear(program: &MathProgram) -> bool {
     program.indicators.is_empty()
+        && program.enforced_constraints.is_empty()
         && program.sos.is_empty()
         && program.general_constraints.is_empty()
         && program
@@ -10643,6 +11619,9 @@ fn validate_sos_members(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::des::general::ip_mip_des::{
+        BranchRule, ConcreteLpRelaxationAlgorithm, LpRelaxationAlgorithm, TraceAction,
+    };
 
     fn assert_close(a: f64, b: f64) {
         assert!((a - b).abs() <= 1e-6, "left={a}, right={b}");
@@ -10865,6 +11844,94 @@ mod tests {
     }
 
     #[test]
+    fn branch_priorities_map_from_original_variable_space() {
+        let mut p = MathProgram::new(ObjectiveSense::Max);
+        p.add_binary_var("binary", 0.0).unwrap();
+        p.add_integer_var("free", 0.0, None, None).unwrap();
+        p.add_semi_integer_var("semi", 0.0, 3.0, 7.0).unwrap();
+
+        let compiled = compile_mip(&p).unwrap();
+        let priorities = canonical_branch_priorities(&p, &compiled, &[1, 7, 4]).unwrap();
+        let names = compiled.problem.var_names.as_ref().unwrap();
+        let var_idx = |name: &str| {
+            names
+                .iter()
+                .position(|candidate| candidate == name)
+                .unwrap()
+        };
+
+        assert_eq!(priorities[var_idx("binary")], 1);
+        assert_eq!(priorities[var_idx("free__pos")], 7);
+        assert_eq!(priorities[var_idx("free__neg")], 7);
+        assert_eq!(priorities[var_idx("semi")], 4);
+        assert_eq!(priorities[var_idx("semi__active")], 4);
+    }
+
+    #[test]
+    fn branch_priorities_reach_native_first_branch_rule() {
+        let mut p = MathProgram::new(ObjectiveSense::Max);
+        let low = p.add_binary_var("low_priority", 1.0).unwrap();
+        let high = p.add_binary_var("high_priority", 1.0).unwrap();
+        p.add_constraint("cap_low", vec![(low, 1.0)], RowSense::Le, 0.5)
+            .unwrap();
+        p.add_constraint("cap_high", vec![(high, 1.0)], RowSense::Le, 0.5)
+            .unwrap();
+
+        let compiled = compile_mip(&p).unwrap();
+        let high_compiled = compiled_var_index(&compiled, "high_priority").unwrap();
+        let mip_opts = compiled_mip_options(
+            &p,
+            &compiled,
+            &MathProgramSolveOptions {
+                branch_priorities: Some(vec![0, 10]),
+                mip: IPMIPSolveOptions {
+                    branch_rule: Some(BranchRule::FirstFractional),
+                    max_cut_rounds: Some(0),
+                    lp_algorithm: Some(LpRelaxationAlgorithm::Concrete(
+                        ConcreteLpRelaxationAlgorithm::InternalSimplex,
+                    )),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            true,
+        )
+        .unwrap();
+
+        let sol = solve_ipmip_with_des(compiled.problem, mip_opts);
+        let first_branch = sol
+            .trace
+            .iter()
+            .find(|event| event.action == TraceAction::Branch)
+            .expect("branch event");
+
+        assert_eq!(from_ipmip_status(sol.status), MathProgramStatus::Optimal);
+        assert_eq!(first_branch.branch_var, Some(high_compiled));
+    }
+
+    #[test]
+    fn branch_priorities_reject_bad_original_length() {
+        let mut p = MathProgram::new(ObjectiveSense::Max);
+        p.add_binary_var("x", 1.0).unwrap();
+        p.add_binary_var("y", 1.0).unwrap();
+
+        let err = solve_math_program(
+            &p,
+            &MathProgramSolveOptions {
+                branch_priorities: Some(vec![10]),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            MathProgramError::BadIndex(message)
+                if message.contains("branch priorities length 1 does not match 2 variables")
+        ));
+    }
+
+    #[test]
     fn lazy_constraint_cuts_integer_candidate() {
         let mut p = MathProgram::new(ObjectiveSense::Max);
         let x = p.add_binary_var("x", 1.0).unwrap();
@@ -10902,6 +11969,42 @@ mod tests {
         assert_eq!(sol.status, MathProgramStatus::Optimal);
         assert_close(sol.x[b], 1.0);
         assert_close(sol.x[x], 2.0);
+    }
+
+    #[test]
+    fn enforced_linear_constraint_uses_literal_conjunction() {
+        let mut p = MathProgram::new(ObjectiveSense::Max);
+        let x = p
+            .add_continuous_var("x", 1.0, Some(0.0), Some(10.0))
+            .unwrap();
+        let a = p.add_binary_var("a", 0.0).unwrap();
+        let b = p.add_binary_var("b", 0.0).unwrap();
+        p.add_constraint("force-a", vec![(a, 1.0)], RowSense::Eq, 1.0)
+            .unwrap();
+        p.add_constraint("force-b", vec![(b, 1.0)], RowSense::Eq, 1.0)
+            .unwrap();
+        p.add_enforced_constraint(
+            "missed-literal-does-not-cap",
+            vec![MathProgram::bool_lit(a), MathProgram::not_lit(b)],
+            vec![(x, 1.0)],
+            RowSense::Le,
+            2.0,
+        )
+        .unwrap();
+        p.add_enforced_constraint(
+            "all-literals-cap",
+            vec![MathProgram::bool_lit(a), MathProgram::bool_lit(b)],
+            vec![(x, 1.0)],
+            RowSense::Le,
+            7.0,
+        )
+        .unwrap();
+
+        let sol = solve_math_program(&p, &MathProgramSolveOptions::default()).unwrap();
+        assert_eq!(sol.status, MathProgramStatus::Optimal);
+        assert_close(sol.x[a], 1.0);
+        assert_close(sol.x[b], 1.0);
+        assert_close(sol.x[x], 7.0);
     }
 
     #[test]
@@ -11352,6 +12455,28 @@ mod tests {
     }
 
     #[test]
+    fn variable_element_general_constraint_selects_variable_by_index() {
+        let mut p = MathProgram::new(ObjectiveSense::Max);
+        let index = p
+            .add_integer_var("index", 0.0, Some(0.0), Some(2.0))
+            .unwrap();
+        let a = p.add_integer_var("a", 0.0, Some(2.0), Some(2.0)).unwrap();
+        let b = p.add_integer_var("b", 0.0, Some(8.0), Some(8.0)).unwrap();
+        let c = p.add_integer_var("c", 0.0, Some(5.0), Some(5.0)).unwrap();
+        let picked = p
+            .add_integer_var("picked", 1.0, Some(0.0), Some(10.0))
+            .unwrap();
+        p.add_variable_element("variable-lookup", index, picked, vec![a, b, c])
+            .unwrap();
+
+        let sol = solve_math_program(&p, &MathProgramSolveOptions::default()).unwrap();
+        assert_eq!(sol.status, MathProgramStatus::Optimal);
+        assert_close(sol.x[index], 1.0);
+        assert_close(sol.x[picked], 8.0);
+        assert_close(sol.objective, 8.0);
+    }
+
+    #[test]
     fn inverse_general_constraint_links_permutation_arrays() {
         let mut p = MathProgram::new(ObjectiveSense::Max);
         let x0 = p.add_integer_var("x0", 0.0, Some(0.0), Some(2.0)).unwrap();
@@ -11436,6 +12561,54 @@ mod tests {
         assert_close(sol.x[second_to_first], 0.0);
         assert_close(sol.x[skipped], 1.0);
         assert_close(sol.objective, 12.0);
+    }
+
+    #[test]
+    fn alternative_interval_selects_one_mode() {
+        let mut p = MathProgram::new(ObjectiveSense::Min);
+        let start = p
+            .add_integer_var("task_start", 0.0, Some(0.0), Some(0.0))
+            .unwrap();
+        let size = p
+            .add_integer_var("task_size", 0.0, Some(0.0), Some(5.0))
+            .unwrap();
+        let end = p
+            .add_integer_var("task_end", 1.0, Some(0.0), Some(5.0))
+            .unwrap();
+        let slow_start = p
+            .add_integer_var("slow_start", 0.0, Some(0.0), Some(5.0))
+            .unwrap();
+        let slow_end = p
+            .add_integer_var("slow_end", 0.0, Some(0.0), Some(5.0))
+            .unwrap();
+        let fast_start = p
+            .add_integer_var("fast_start", 0.0, Some(0.0), Some(5.0))
+            .unwrap();
+        let fast_end = p
+            .add_integer_var("fast_end", 0.0, Some(0.0), Some(5.0))
+            .unwrap();
+        let slow_present = p.add_binary_var("slow_present", 0.0).unwrap();
+        let fast_present = p.add_binary_var("fast_present", 0.0).unwrap();
+        p.add_alternative(
+            "choose-mode",
+            MathProgram::variable_interval(start, size, end),
+            vec![
+                MathProgram::optional_interval(slow_start, 4.0, slow_end, slow_present),
+                MathProgram::optional_interval(fast_start, 2.0, fast_end, fast_present),
+            ],
+        )
+        .unwrap();
+
+        let sol = solve_math_program(&p, &MathProgramSolveOptions::default()).unwrap();
+        assert_eq!(sol.status, MathProgramStatus::Optimal);
+        assert_close(sol.x[start], 0.0);
+        assert_close(sol.x[size], 2.0);
+        assert_close(sol.x[end], 2.0);
+        assert_close(sol.x[slow_present], 0.0);
+        assert_close(sol.x[fast_present], 1.0);
+        assert_close(sol.x[fast_start], 0.0);
+        assert_close(sol.x[fast_end], 2.0);
+        assert_close(sol.objective, 2.0);
     }
 
     #[test]
@@ -11715,6 +12888,42 @@ mod tests {
         assert_close(sol.x[a_demand], 2.0);
         assert_close(sol.x[capacity], 3.0);
         assert_close(sol.objective, 2.0);
+    }
+
+    #[test]
+    fn bin_packing_links_assignments_and_loads() {
+        let mut p = MathProgram::new(ObjectiveSense::Min);
+        let item0 = p
+            .add_integer_var("item0_bin", 0.0, Some(0.0), Some(1.0))
+            .unwrap();
+        let item1 = p
+            .add_integer_var("item1_bin", 0.0, Some(0.0), Some(1.0))
+            .unwrap();
+        let item2 = p
+            .add_integer_var("item2_bin", 0.0, Some(0.0), Some(1.0))
+            .unwrap();
+        let load0 = p
+            .add_integer_var("load0", 0.0, Some(0.0), Some(5.0))
+            .unwrap();
+        let load1 = p
+            .add_integer_var("load1", 1.0, Some(0.0), Some(9.0))
+            .unwrap();
+        p.add_bin_packing(
+            "packing",
+            vec![item0, item1, item2],
+            vec![load0, load1],
+            vec![2.0, 3.0, 4.0],
+        )
+        .unwrap();
+
+        let sol = solve_math_program(&p, &MathProgramSolveOptions::default()).unwrap();
+        assert_eq!(sol.status, MathProgramStatus::Optimal);
+        assert_close(sol.x[item0], 0.0);
+        assert_close(sol.x[item1], 0.0);
+        assert_close(sol.x[item2], 1.0);
+        assert_close(sol.x[load0], 5.0);
+        assert_close(sol.x[load1], 4.0);
+        assert_close(sol.objective, 4.0);
     }
 
     #[test]

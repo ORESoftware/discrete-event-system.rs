@@ -94,6 +94,8 @@ pub mod control_systems;
 pub mod do_audit;
 pub mod equation_to_stations;
 pub mod external_linear_cli;
+pub mod external_optimization_tools;
+pub mod external_validation_tools;
 pub mod feasibility_pipeline;
 pub mod internal_solver_network;
 pub mod ip_mip_des;

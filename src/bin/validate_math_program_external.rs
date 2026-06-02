@@ -39,6 +39,7 @@ fn main() {
         ("semi-continuous", build_semi_continuous_case()),
         ("semi-integer", build_semi_integer_case()),
         ("indicator-row", build_indicator_case()),
+        ("multi-literal-enforced-row", build_enforced_row_case()),
         ("sos1", build_sos1_case()),
         ("integer-sos1", build_integer_sos1_case()),
         ("sos2", build_sos2_case()),
@@ -71,11 +72,14 @@ fn main() {
         ("all-different", build_all_different_case()),
         ("allowed-assignments", build_allowed_assignments_case()),
         ("forbidden-assignments", build_forbidden_assignments_case()),
+        ("bin-packing", build_bin_packing_case()),
         ("element", build_element_case()),
+        ("variable-element", build_variable_element_case()),
         ("inverse", build_inverse_case()),
         ("circuit", build_circuit_case()),
         ("multiple-circuit", build_multiple_circuit_case()),
         ("automaton", build_automaton_case()),
+        ("alternative-interval", build_alternative_interval_case()),
         ("no-overlap", build_no_overlap_case()),
         ("variable-no-overlap", build_variable_no_overlap_case()),
         ("optional-no-overlap", build_optional_no_overlap_case()),
@@ -1152,6 +1156,34 @@ fn build_indicator_case() -> MathProgram {
     p
 }
 
+fn build_enforced_row_case() -> MathProgram {
+    let mut p = MathProgram::new(ObjectiveSense::Max);
+    let x = p.add_integer_var("x", 1.0, Some(0.0), Some(10.0)).unwrap();
+    let a = p.add_binary_var("a", 0.0).unwrap();
+    let b = p.add_binary_var("b", 0.0).unwrap();
+    p.add_constraint("force-a", vec![(a, 1.0)], RowSense::Eq, 1.0)
+        .unwrap();
+    p.add_constraint("force-b", vec![(b, 1.0)], RowSense::Eq, 1.0)
+        .unwrap();
+    p.add_enforced_constraint(
+        "missed-literal-does-not-cap",
+        vec![MathProgram::bool_lit(a), MathProgram::not_lit(b)],
+        vec![(x, 1.0)],
+        RowSense::Le,
+        2.0,
+    )
+    .unwrap();
+    p.add_enforced_constraint(
+        "all-literals-cap",
+        vec![MathProgram::bool_lit(a), MathProgram::bool_lit(b)],
+        vec![(x, 1.0)],
+        RowSense::Le,
+        7.0,
+    )
+    .unwrap();
+    p
+}
+
 fn build_sos1_case() -> MathProgram {
     let mut p = MathProgram::new(ObjectiveSense::Max);
     let x0 = p
@@ -1578,6 +1610,33 @@ fn build_forbidden_assignments_case() -> MathProgram {
     p
 }
 
+fn build_bin_packing_case() -> MathProgram {
+    let mut p = MathProgram::new(ObjectiveSense::Min);
+    let item0 = p
+        .add_integer_var("item0_bin", 0.0, Some(0.0), Some(1.0))
+        .unwrap();
+    let item1 = p
+        .add_integer_var("item1_bin", 0.0, Some(0.0), Some(1.0))
+        .unwrap();
+    let item2 = p
+        .add_integer_var("item2_bin", 0.0, Some(0.0), Some(1.0))
+        .unwrap();
+    let load0 = p
+        .add_integer_var("load0", 0.0, Some(0.0), Some(5.0))
+        .unwrap();
+    let load1 = p
+        .add_integer_var("load1", 1.0, Some(0.0), Some(9.0))
+        .unwrap();
+    p.add_bin_packing(
+        "packing",
+        vec![item0, item1, item2],
+        vec![load0, load1],
+        vec![2.0, 3.0, 4.0],
+    )
+    .unwrap();
+    p
+}
+
 fn build_element_case() -> MathProgram {
     let mut p = MathProgram::new(ObjectiveSense::Max);
     let index = p
@@ -1587,6 +1646,22 @@ fn build_element_case() -> MathProgram {
         .add_integer_var("picked", 1.0, Some(0.0), Some(9.0))
         .unwrap();
     p.add_element("lookup", index, picked, vec![1.0, 7.0, 4.0, 9.0])
+        .unwrap();
+    p
+}
+
+fn build_variable_element_case() -> MathProgram {
+    let mut p = MathProgram::new(ObjectiveSense::Max);
+    let index = p
+        .add_integer_var("index", 0.0, Some(0.0), Some(2.0))
+        .unwrap();
+    let a = p.add_integer_var("a", 0.0, Some(2.0), Some(2.0)).unwrap();
+    let b = p.add_integer_var("b", 0.0, Some(8.0), Some(8.0)).unwrap();
+    let c = p.add_integer_var("c", 0.0, Some(5.0), Some(5.0)).unwrap();
+    let picked = p
+        .add_integer_var("picked", 1.0, Some(0.0), Some(10.0))
+        .unwrap();
+    p.add_variable_element("variable-lookup", index, picked, vec![a, b, c])
         .unwrap();
     p
 }
@@ -1659,6 +1734,43 @@ fn build_automaton_case() -> MathProgram {
         0,
         vec![0, 1],
         vec![(0, 0, 0), (0, 1, 1), (1, 0, 0)],
+    )
+    .unwrap();
+    p
+}
+
+fn build_alternative_interval_case() -> MathProgram {
+    let mut p = MathProgram::new(ObjectiveSense::Min);
+    let start = p
+        .add_integer_var("task_start", 0.0, Some(0.0), Some(0.0))
+        .unwrap();
+    let size = p
+        .add_integer_var("task_size", 0.0, Some(0.0), Some(5.0))
+        .unwrap();
+    let end = p
+        .add_integer_var("task_end", 1.0, Some(0.0), Some(5.0))
+        .unwrap();
+    let slow_start = p
+        .add_integer_var("slow_start", 0.0, Some(0.0), Some(5.0))
+        .unwrap();
+    let slow_end = p
+        .add_integer_var("slow_end", 0.0, Some(0.0), Some(5.0))
+        .unwrap();
+    let fast_start = p
+        .add_integer_var("fast_start", 0.0, Some(0.0), Some(5.0))
+        .unwrap();
+    let fast_end = p
+        .add_integer_var("fast_end", 0.0, Some(0.0), Some(5.0))
+        .unwrap();
+    let slow_present = p.add_binary_var("slow_present", 0.0).unwrap();
+    let fast_present = p.add_binary_var("fast_present", 0.0).unwrap();
+    p.add_alternative(
+        "choose-mode",
+        MathProgram::variable_interval(start, size, end),
+        vec![
+            MathProgram::optional_interval(slow_start, 4.0, slow_end, slow_present),
+            MathProgram::optional_interval(fast_start, 2.0, fast_end, fast_present),
+        ],
     )
     .unwrap();
     p

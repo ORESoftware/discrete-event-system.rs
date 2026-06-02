@@ -180,6 +180,81 @@ def circuit_complete_ok(selected: Sequence[dict], nodes: Sequence[int]) -> bool:
         current = out[current]
 
 
+def multiple_circuit_complete_ok(selected: Sequence[dict], nodes: Sequence[int]) -> bool:
+    node_set = set(nodes)
+    incoming = {node: 0 for node in nodes}
+    outgoing = {node: 0 for node in nodes}
+    next_node = {}
+
+    for arc in selected:
+        tail = int(arc["tail"])
+        head = int(arc["head"])
+        if tail not in node_set or head not in node_set or (tail == 0 and head == 0):
+            return False
+        outgoing[tail] += 1
+        incoming[head] += 1
+        if tail != 0 and tail != head:
+            if tail in next_node:
+                return False
+            next_node[tail] = head
+
+    if outgoing.get(0, 0) != incoming.get(0, 0):
+        return False
+    for node in nodes:
+        if node == 0:
+            continue
+        if outgoing[node] != 1 or incoming[node] != 1:
+            return False
+
+    for start in nodes:
+        if start == 0:
+            continue
+        seen = set()
+        current = start
+        while current in next_node:
+            if current == 0:
+                break
+            if current in seen:
+                return False
+            seen.add(current)
+            current = next_node[current]
+            if current not in node_set:
+                return False
+
+    return True
+
+
+def multiple_circuit_has_closed_subtour(selected: Sequence[dict], nodes: Sequence[int]) -> bool:
+    node_set = set(nodes)
+    next_node = {}
+    for arc in selected:
+        tail = int(arc["tail"])
+        head = int(arc["head"])
+        if tail not in node_set or head not in node_set or (tail == 0 and head == 0):
+            return True
+        if tail == 0 or tail == head:
+            continue
+        if tail in next_node:
+            return True
+        next_node[tail] = head
+
+    for start in nodes:
+        if start == 0:
+            continue
+        seen = set()
+        current = start
+        while current in next_node:
+            if current == 0:
+                break
+            if current in seen:
+                return True
+            seen.add(current)
+            current = next_node[current]
+            if current not in node_set:
+                return True
+    return False
+
+
 def reservoir_complete_ok(events: Sequence[tuple[int, int]], min_level: int, max_level: int) -> bool:
     if not (min_level <= 0 <= max_level):
         return False
@@ -486,6 +561,54 @@ def partial_ok(model: dict, partial: Sequence[Optional[int]]) -> bool:
                 elif truth is None:
                     all_bound = False
             if all_bound and not circuit_complete_ok(selected, nodes):
+                return False
+        elif kind == "multiple_circuit":
+            arcs = c["arcs"]
+            nodes = sorted({int(arc["tail"]) for arc in arcs} | {int(arc["head"]) for arc in arcs})
+            for node in nodes:
+                true_out = sum(
+                    1
+                    for arc in arcs
+                    if int(arc["tail"]) == node and literal_truth(partial, arc["literal"]) is True
+                )
+                true_in = sum(
+                    1
+                    for arc in arcs
+                    if int(arc["head"]) == node and literal_truth(partial, arc["literal"]) is True
+                )
+                if node == 0:
+                    if any(
+                        int(arc["tail"]) == 0
+                        and int(arc["head"]) == 0
+                        and literal_truth(partial, arc["literal"]) is True
+                        for arc in arcs
+                    ):
+                        return False
+                elif true_out > 1 or true_in > 1:
+                    return False
+                possible_out = sum(
+                    1
+                    for arc in arcs
+                    if int(arc["tail"]) == node and literal_truth(partial, arc["literal"]) is not False
+                )
+                possible_in = sum(
+                    1
+                    for arc in arcs
+                    if int(arc["head"]) == node and literal_truth(partial, arc["literal"]) is not False
+                )
+                if node != 0 and (possible_out == 0 or possible_in == 0):
+                    return False
+            all_bound = True
+            selected = []
+            for arc in arcs:
+                truth = literal_truth(partial, arc["literal"])
+                if truth is True:
+                    selected.append(arc)
+                elif truth is None:
+                    all_bound = False
+            if multiple_circuit_has_closed_subtour(selected, nodes):
+                return False
+            if all_bound and not multiple_circuit_complete_ok(selected, nodes):
                 return False
         elif kind == "allowed_assignments":
             vars_ = [int(v) for v in c["vars"]]

@@ -6,6 +6,7 @@
 
 #![allow(dead_code)]
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
@@ -22,8 +23,35 @@ use crate::des::general::cp_sat::{
 };
 use crate::des::general::external_linear_cli::{
     probe_external_linear_cli_solver, solve_ipmip_with_external_cli, solve_lp_with_external_cli,
-    ExternalLinearCliKind, ExternalLinearCliOptions, ExternalLinearCliProbeStatus,
-    ExternalLinearCliSolver, ExternalLinearCliStatus,
+    ExternalLinearCliKind, ExternalLinearCliModelFormat, ExternalLinearCliOptions,
+    ExternalLinearCliProbeStatus, ExternalLinearCliSolver, ExternalLinearCliStatus,
+};
+use crate::des::general::external_optimization_tools::{
+    external_optimization_comparison_report_to_json, external_optimization_tool_specs,
+    external_optimization_tools, probe_external_optimization_tool,
+    run_external_optimization_comparison, ExternalOptimizationAdapterInvocation,
+    ExternalOptimizationAdapterOptions, ExternalOptimizationExactness, ExternalOptimizationFamily,
+    ExternalOptimizationLanguage, ExternalOptimizationProbeStatus, ExternalOptimizationTool,
+};
+use crate::des::general::external_validation_tools::{
+    dimacs_cnf_to_string, external_benchmark_manifest_to_json,
+    external_validation_artifact_cli_args, external_validation_consensus_report_to_json,
+    external_validation_default_artifact_cli_args, external_validation_default_file_cli_args,
+    external_validation_default_text_cli_args, external_validation_tool_specs,
+    infer_external_validation_text_verdict, json_schema_validation_request_to_json,
+    minizinc_validation_request_to_json, prism_validation_model_to_string,
+    prism_validation_properties_to_string, probe_external_validation_tool,
+    run_external_validation_artifact_cli, run_external_validation_consensus,
+    run_external_validation_file_cli, run_external_validation_text_cli,
+    simulation_validation_request_to_json, smtlib_validation_script_to_string,
+    tla_validation_module_to_string, DimacsCnf, ExternalBenchmarkManifest,
+    ExternalBenchmarkManifestEntry, ExternalValidationArtifact,
+    ExternalValidationArtifactCliOptions, ExternalValidationCliInvocation,
+    ExternalValidationFamily, ExternalValidationFileCliOptions, ExternalValidationProbeStatus,
+    ExternalValidationRunStatus, ExternalValidationTextCliOptions, ExternalValidationTextFormat,
+    ExternalValidationTextVerdict, JsonSchemaValidationRequest, MiniZincValidationRequest,
+    PrismModule, PrismValidationModel, SimulationMetricExpectation, SimulationValidationRequest,
+    SmtDeclaration, SmtLibValidationScript, SmtSort, TlaValidationModule,
 };
 use crate::des::general::ip_mip_des::{
     build_absolute_value_penalty_ip, build_binary_knapsack_ip, build_binary_product_gate_ip,
@@ -267,6 +295,45 @@ impl Driver {
         }
         serde_json::from_slice(&out.stdout)
             .unwrap_or_else(|e| panic!("parse {script} stdout as JSON: {e}"))
+    }
+
+    fn run_python_json_lenient(
+        &self,
+        script: &str,
+        args: &[&str],
+        stdin_json: &str,
+    ) -> serde_json::Value {
+        let path = self.root.join("scripts").join(script);
+        let python = std::env::var("PYTHON_BIN").unwrap_or_else(|_| "python3".to_string());
+        let mut child = Command::new(&python)
+            .arg(&path)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|e| panic!("failed to start {script}: {e}"));
+        {
+            use std::io::Write;
+            child
+                .stdin
+                .as_mut()
+                .expect("python stdin")
+                .write_all(stdin_json.as_bytes())
+                .expect("write python stdin");
+        }
+        let out = child
+            .wait_with_output()
+            .unwrap_or_else(|e| panic!("failed to wait for {script}: {e}"));
+        match serde_json::from_slice(&out.stdout) {
+            Ok(value) => value,
+            Err(err) => panic!(
+                "parse {script} stdout as JSON after exit {:?}: {err}; stdout={} stderr={}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            ),
+        }
     }
 
     fn validate_lp(&mut self) {
@@ -827,6 +894,7 @@ impl Driver {
         );
         let lp_solvers = ["highs", "glpk", "scip", "cbc", "clp"];
         let mip_solvers = ["highs", "glpk", "scip", "cbc"];
+        let commercial_lp_solvers = ["gurobi", "cplex", "xpress", "lindo"];
         let commercial_mip_solvers = ["gurobi", "cplex", "xpress", "lindo"];
 
         for solver in ExternalLinearCliSolver::open_source_lp().iter().copied() {
@@ -861,6 +929,10 @@ impl Driver {
                 &ExternalLinearCliOptions {
                     solver,
                     time_limit_secs: Some(2.0),
+                    node_limit: Some(128),
+                    relative_gap: Some(0.0),
+                    threads: Some(1),
+                    random_seed: Some(7),
                     ..Default::default()
                 },
             );
@@ -870,6 +942,43 @@ impl Driver {
             }
             self.check(
                 format!("IP/MIP {}:rust-cli probe ready", solver.as_str()),
+                probe.status == ExternalLinearCliProbeStatus::Ready,
+                format!(
+                    "status={} command={:?} smoke={:?} message={}",
+                    probe.status.as_str(),
+                    probe.command,
+                    probe.smoke_status.map(|status| status.as_str()),
+                    probe.message
+                ),
+            );
+        }
+
+        for solver in ExternalLinearCliSolver::optional_commercial_mip()
+            .iter()
+            .copied()
+        {
+            let probe = probe_external_linear_cli_solver(
+                ExternalLinearCliKind::Lp,
+                &ExternalLinearCliOptions {
+                    solver,
+                    time_limit_secs: Some(2.0),
+                    ..Default::default()
+                },
+            );
+            if matches!(
+                probe.status,
+                ExternalLinearCliProbeStatus::NotInstalled
+                    | ExternalLinearCliProbeStatus::BridgeUnsupported
+            ) {
+                println!(
+                    "  SKIP  LP commercial {} probe: {}",
+                    solver.as_str(),
+                    probe.message
+                );
+                continue;
+            }
+            self.check(
+                format!("LP commercial {}:rust-cli probe ready", solver.as_str()),
                 probe.status == ExternalLinearCliProbeStatus::Ready,
                 format!(
                     "status={} command={:?} smoke={:?} message={}",
@@ -968,12 +1077,41 @@ impl Driver {
             );
         }
 
+        for solver in commercial_lp_solvers.iter().copied() {
+            let reference = self.run_linear_cli_reference("lp", solver, &lp_json);
+            if reference.status == "unavailable" {
+                println!("  SKIP  LP commercial {solver}: {}", reference.message);
+                continue;
+            }
+            self.check(
+                format!("LP commercial {solver}:cli status optimal"),
+                lp_internal.status == LPStatus::Optimal && reference.status == "optimal",
+                format!(
+                    "internal={:?} external={} solver={}",
+                    lp_internal.status, reference.status, reference.solver
+                ),
+            );
+            self.close(
+                &format!("LP commercial {solver}:cli objective"),
+                lp_internal.objective,
+                reference.objective.unwrap_or(f64::NAN),
+                1e-9,
+            );
+            self.max_abs_close(
+                &format!("LP commercial {solver}:cli x"),
+                &lp_internal.x,
+                &reference.x,
+                1e-8,
+            );
+        }
+
         for solver in ExternalLinearCliSolver::open_source_lp().iter().copied() {
             let solver_name = solver.as_str();
             let reference = solve_lp_with_external_cli(
                 &lp,
                 &ExternalLinearCliOptions {
                     solver,
+                    time_limit_secs: Some(2.0),
                     ..Default::default()
                 },
             );
@@ -1004,6 +1142,112 @@ impl Driver {
                 &format!("LP {solver_name}:rust-cli x"),
                 &lp_internal.x,
                 &reference.x,
+                1e-8,
+            );
+            let mps_reference = solve_lp_with_external_cli(
+                &lp,
+                &ExternalLinearCliOptions {
+                    solver,
+                    time_limit_secs: Some(2.0),
+                    model_format: ExternalLinearCliModelFormat::Mps,
+                    ..Default::default()
+                },
+            );
+            self.check(
+                format!("LP {solver_name}:rust-cli MPS status optimal"),
+                lp_internal.status == LPStatus::Optimal
+                    && mps_reference.status == ExternalLinearCliStatus::Optimal,
+                format!(
+                    "internal={:?} external={} solver={}",
+                    lp_internal.status,
+                    mps_reference.status.as_str(),
+                    mps_reference.solver
+                ),
+            );
+            self.close(
+                &format!("LP {solver_name}:rust-cli MPS objective"),
+                lp_internal.objective,
+                mps_reference.objective.unwrap_or(f64::NAN),
+                1e-9,
+            );
+            self.max_abs_close(
+                &format!("LP {solver_name}:rust-cli MPS x"),
+                &lp_internal.x,
+                &mps_reference.x,
+                1e-8,
+            );
+        }
+
+        for solver in ExternalLinearCliSolver::optional_commercial_mip()
+            .iter()
+            .copied()
+        {
+            let solver_name = solver.as_str();
+            let reference = solve_lp_with_external_cli(
+                &lp,
+                &ExternalLinearCliOptions {
+                    solver,
+                    time_limit_secs: Some(2.0),
+                    ..Default::default()
+                },
+            );
+            if reference.status == ExternalLinearCliStatus::Unavailable {
+                println!("  SKIP  LP commercial {solver_name}: {}", reference.message);
+                continue;
+            }
+            self.check(
+                format!("LP commercial {solver_name}:rust-cli status optimal"),
+                lp_internal.status == LPStatus::Optimal
+                    && reference.status == ExternalLinearCliStatus::Optimal,
+                format!(
+                    "internal={:?} external={} solver={}",
+                    lp_internal.status,
+                    reference.status.as_str(),
+                    reference.solver
+                ),
+            );
+            self.close(
+                &format!("LP commercial {solver_name}:rust-cli objective"),
+                lp_internal.objective,
+                reference.objective.unwrap_or(f64::NAN),
+                1e-9,
+            );
+            self.max_abs_close(
+                &format!("LP commercial {solver_name}:rust-cli x"),
+                &lp_internal.x,
+                &reference.x,
+                1e-8,
+            );
+            let mps_reference = solve_lp_with_external_cli(
+                &lp,
+                &ExternalLinearCliOptions {
+                    solver,
+                    time_limit_secs: Some(2.0),
+                    model_format: ExternalLinearCliModelFormat::Mps,
+                    ..Default::default()
+                },
+            );
+            self.check(
+                format!("LP commercial {solver_name}:rust-cli MPS status optimal"),
+                lp_internal.status == LPStatus::Optimal
+                    && mps_reference.status == ExternalLinearCliStatus::Optimal,
+                format!(
+                    "internal={:?} external={} solver={}",
+                    lp_internal.status,
+                    mps_reference.status.as_str(),
+                    mps_reference.solver
+                ),
+            );
+            self.close(
+                &format!("LP commercial {solver_name}:rust-cli MPS objective"),
+                lp_internal.objective,
+                mps_reference.objective.unwrap_or(f64::NAN),
+                1e-9,
+            );
+            self.max_abs_close(
+                &format!("LP commercial {solver_name}:rust-cli MPS x"),
+                &lp_internal.x,
+                &mps_reference.x,
                 1e-8,
             );
         }
@@ -1063,6 +1307,26 @@ impl Driver {
                 }
                 self.check(
                     format!("LP {case_name} {solver}:cli status"),
+                    reference.status == expected_status.as_str(),
+                    format!(
+                        "external={} expected={} solver={}",
+                        reference.status,
+                        expected_status.as_str(),
+                        reference.solver
+                    ),
+                );
+            }
+            for solver in commercial_lp_solvers.iter().copied() {
+                let reference = self.run_linear_cli_reference("lp", solver, &status_json);
+                if reference.status == "unavailable" {
+                    println!(
+                        "  SKIP  LP commercial {case_name} {solver}: {}",
+                        reference.message
+                    );
+                    continue;
+                }
+                self.check(
+                    format!("LP commercial {case_name} {solver}:cli status"),
                     reference.status == expected_status.as_str(),
                     format!(
                         "external={} expected={} solver={}",
@@ -1134,6 +1398,11 @@ impl Driver {
                 &mip,
                 &ExternalLinearCliOptions {
                     solver,
+                    time_limit_secs: Some(2.0),
+                    node_limit: Some(128),
+                    relative_gap: Some(0.0),
+                    threads: Some(1),
+                    random_seed: Some(7),
                     ..Default::default()
                 },
             );
@@ -1164,6 +1433,42 @@ impl Driver {
                 &format!("IP/MIP {solver_name}:rust-cli x"),
                 &mip_internal.x,
                 &reference.x,
+                1e-8,
+            );
+            let mps_reference = solve_ipmip_with_external_cli(
+                &mip,
+                &ExternalLinearCliOptions {
+                    solver,
+                    time_limit_secs: Some(2.0),
+                    node_limit: Some(128),
+                    relative_gap: Some(0.0),
+                    threads: Some(1),
+                    random_seed: Some(7),
+                    model_format: ExternalLinearCliModelFormat::Mps,
+                    ..Default::default()
+                },
+            );
+            self.check(
+                format!("IP/MIP {solver_name}:rust-cli MPS status optimal"),
+                mip_internal.status == IPMIPStatus::Optimal
+                    && mps_reference.status == ExternalLinearCliStatus::Optimal,
+                format!(
+                    "internal={} external={} solver={}",
+                    mip_internal.status.as_str(),
+                    mps_reference.status.as_str(),
+                    mps_reference.solver
+                ),
+            );
+            self.close(
+                &format!("IP/MIP {solver_name}:rust-cli MPS objective"),
+                mip_internal.z,
+                mps_reference.objective.unwrap_or(f64::NAN),
+                1e-9,
+            );
+            self.max_abs_close(
+                &format!("IP/MIP {solver_name}:rust-cli MPS x"),
+                &mip_internal.x,
+                &mps_reference.x,
                 1e-8,
             );
         }
@@ -2249,6 +2554,1919 @@ impl Driver {
                     &reference.x[..source_original_vars],
                     1e-8,
                 );
+            }
+        }
+    }
+
+    fn validate_external_optimization_ecosystem_adapters(&mut self) {
+        println!("\n-- External Java/Rust optimization adapters --");
+        let specs = external_optimization_tool_specs();
+        self.check(
+            "External optimization ecosystem registry covers requested tools",
+            external_optimization_tools().len() == 17 && specs.len() == 17,
+            format!(
+                "tools={} specs={}",
+                external_optimization_tools().len(),
+                specs.len()
+            ),
+        );
+        let java_count = specs
+            .iter()
+            .filter(|spec| spec.language == ExternalOptimizationLanguage::Java)
+            .count();
+        let rust_count = specs
+            .iter()
+            .filter(|spec| spec.language == ExternalOptimizationLanguage::Rust)
+            .count();
+        self.check(
+            "External optimization ecosystem registry Java/Rust split",
+            java_count == 9 && rust_count == 8,
+            format!("java={java_count} rust={rust_count}"),
+        );
+        self.check(
+            "External optimization ecosystem registry CP/metaheuristic/numerical coverage",
+            specs.iter().any(|spec| {
+                spec.tool == ExternalOptimizationTool::ChocoSolver
+                    && spec.family == ExternalOptimizationFamily::ConstraintProgramming
+                    && spec.exactness == ExternalOptimizationExactness::Exact
+            }) && specs.iter().any(|spec| {
+                spec.tool == ExternalOptimizationTool::OptaPlanner
+                    && spec.family == ExternalOptimizationFamily::PlanningMetaheuristic
+                    && spec.exactness == ExternalOptimizationExactness::Heuristic
+            }) && specs.iter().any(|spec| {
+                spec.tool == ExternalOptimizationTool::Argmin
+                    && spec.family == ExternalOptimizationFamily::NonlinearOptimization
+                    && spec.exactness == ExternalOptimizationExactness::Numerical
+            }),
+            "checked Choco, OptaPlanner, and argmin classifications".to_string(),
+        );
+        let comparison_input = serde_json::json!({
+            "status": "optimal",
+            "objective": 7.25,
+            "x": [1.0, 2.0, 3.0]
+        });
+        let comparison = run_external_optimization_comparison(
+            &comparison_input,
+            &[
+                ExternalOptimizationAdapterInvocation {
+                    label: "good-lp-echo".to_string(),
+                    options: ExternalOptimizationAdapterOptions {
+                        tool: ExternalOptimizationTool::GoodLp,
+                        command_path: Some(PathBuf::from("/bin/cat")),
+                        ..Default::default()
+                    },
+                },
+                ExternalOptimizationAdapterInvocation {
+                    label: "lp-modeler-echo".to_string(),
+                    options: ExternalOptimizationAdapterOptions {
+                        tool: ExternalOptimizationTool::LpModeler,
+                        command_path: Some(PathBuf::from("/bin/cat")),
+                        ..Default::default()
+                    },
+                },
+            ],
+            1e-9,
+            1e-9,
+        );
+        let comparison_json = external_optimization_comparison_report_to_json(&comparison);
+        self.check(
+            "External optimization adapter comparison report",
+            comparison.agreement
+                && comparison.runs.len() == 2
+                && comparison_json["agreement"].as_bool() == Some(true)
+                && comparison_json["reference_objective"].as_f64() == Some(7.25),
+            format!(
+                "agreement={} runs={} json_kind={}",
+                comparison.agreement,
+                comparison.runs.len(),
+                comparison_json["kind"].as_str().unwrap_or("")
+            ),
+        );
+
+        let python = std::env::var("PYTHON_BIN").unwrap_or_else(|_| "python3".to_string());
+        let ecosystem_script = self
+            .root
+            .join("scripts")
+            .join("optimization_ecosystem_reference.py");
+        let ecosystem_working_dir = self.root.clone();
+        let ecosystem_invocation =
+            |label: &str, tool: ExternalOptimizationTool| ExternalOptimizationAdapterInvocation {
+                label: label.to_string(),
+                options: ExternalOptimizationAdapterOptions {
+                    tool,
+                    command_path: Some(PathBuf::from(&python)),
+                    working_dir: Some(ecosystem_working_dir.clone()),
+                    extra_args: vec![
+                        ecosystem_script.to_string_lossy().to_string(),
+                        "--tool".to_string(),
+                        tool.as_str().to_string(),
+                    ],
+                    ..Default::default()
+                },
+            };
+
+        let cp_payload = serde_json::json!({
+            "kind": "ecosystem-cp-assignment",
+            "costs": [[9, 2, 7], [6, 4, 3], [5, 8, 1]],
+            "all_different": true
+        });
+        let cp_report = run_external_optimization_comparison(
+            &cp_payload,
+            &[
+                ecosystem_invocation("choco-reference", ExternalOptimizationTool::ChocoSolver),
+                ecosystem_invocation("jacop-reference", ExternalOptimizationTool::Jacop),
+            ],
+            1e-9,
+            1e-9,
+        );
+        self.check(
+            "External optimization ecosystem CP reference bridge",
+            cp_report.agreement
+                && cp_report.reference_objective == Some(9.0)
+                && cp_report.reference_solution.as_deref() == Some(&[1.0, 0.0, 2.0]),
+            format!(
+                "agreement={} objective={:?} solution={:?}",
+                cp_report.agreement, cp_report.reference_objective, cp_report.reference_solution
+            ),
+        );
+
+        let linear_payload = serde_json::json!({
+            "kind": "ecosystem-linear-binary",
+            "sense": "max",
+            "objective": [5, 4, 3],
+            "constraints": [{"coefs": [2, 3, 1], "sense": "<=", "rhs": 4}],
+            "domains": [[0, 1], [0, 1], [0, 1]]
+        });
+        let linear_report = run_external_optimization_comparison(
+            &linear_payload,
+            &[
+                ecosystem_invocation("good-lp-reference", ExternalOptimizationTool::GoodLp),
+                ecosystem_invocation("ojalgo-reference", ExternalOptimizationTool::OjAlgo),
+            ],
+            1e-9,
+            1e-9,
+        );
+        self.check(
+            "External optimization ecosystem LP/MIP reference bridge",
+            linear_report.agreement
+                && linear_report.reference_objective == Some(8.0)
+                && linear_report.reference_solution.as_deref() == Some(&[1.0, 0.0, 1.0]),
+            format!(
+                "agreement={} objective={:?} solution={:?}",
+                linear_report.agreement,
+                linear_report.reference_objective,
+                linear_report.reference_solution
+            ),
+        );
+
+        let multiobjective_payload = serde_json::json!({
+            "kind": "ecosystem-multiobjective",
+            "senses": ["min", "min"],
+            "weights": [0.5, 0.5],
+            "candidates": [
+                {"x": [0], "objectives": [4, 1]},
+                {"x": [1], "objectives": [2, 2]},
+                {"x": [2], "objectives": [1, 4]},
+                {"x": [3], "objectives": [5, 5]}
+            ]
+        });
+        let multiobjective_report = run_external_optimization_comparison(
+            &multiobjective_payload,
+            &[
+                ecosystem_invocation("jmetal-reference", ExternalOptimizationTool::JMetal),
+                ecosystem_invocation(
+                    "moea-framework-reference",
+                    ExternalOptimizationTool::MoeaFramework,
+                ),
+            ],
+            1e-9,
+            1e-9,
+        );
+        self.check(
+            "External optimization ecosystem multi-objective reference bridge",
+            multiobjective_report.agreement
+                && multiobjective_report.reference_objective == Some(2.0)
+                && multiobjective_report.reference_solution.as_deref() == Some(&[1.0]),
+            format!(
+                "agreement={} objective={:?} solution={:?}",
+                multiobjective_report.agreement,
+                multiobjective_report.reference_objective,
+                multiobjective_report.reference_solution
+            ),
+        );
+
+        let nonlinear_payload = serde_json::json!({
+            "kind": "ecosystem-nonlinear",
+            "variables": [
+                {"name": "x", "lb": 0.0, "ub": 2.0, "start": 1.0},
+                {"name": "y", "lb": 0.0, "ub": 4.0, "start": 2.0}
+            ],
+            "objective": "(x - 1)**2 + (y - 2)**2",
+            "constraints": [{"expr": "x + y", "sense": ">=", "rhs": 1.0}]
+        });
+        let nonlinear_report = run_external_optimization_comparison(
+            &nonlinear_payload,
+            &[
+                ecosystem_invocation("argmin-reference", ExternalOptimizationTool::Argmin),
+                ecosystem_invocation("nlopt-reference", ExternalOptimizationTool::Nlopt),
+            ],
+            1e-9,
+            1e-9,
+        );
+        self.check(
+            "External optimization ecosystem nonlinear reference bridge",
+            nonlinear_report.agreement
+                && nonlinear_report
+                    .reference_objective
+                    .is_some_and(|objective| objective.abs() <= 1e-9)
+                && nonlinear_report.reference_solution.as_deref() == Some(&[1.0, 2.0]),
+            format!(
+                "agreement={} objective={:?} solution={:?}",
+                nonlinear_report.agreement,
+                nonlinear_report.reference_objective,
+                nonlinear_report.reference_solution
+            ),
+        );
+
+        for spec in specs {
+            let probe = probe_external_optimization_tool(&ExternalOptimizationAdapterOptions {
+                tool: spec.tool,
+                cargo_manifest_dir: Some(self.root.clone()),
+                time_limit_secs: Some(2.0),
+                ..Default::default()
+            });
+            match probe.status {
+                ExternalOptimizationProbeStatus::Ready => self.check(
+                    format!("External {} adapter probe ready", spec.display_name),
+                    true,
+                    format!(
+                        "language={} family={} exactness={} command={:?} message={}",
+                        spec.language.as_str(),
+                        spec.family.as_str(),
+                        spec.exactness.as_str(),
+                        probe.command,
+                        probe.message
+                    ),
+                ),
+                ExternalOptimizationProbeStatus::NotConfigured => {
+                    println!("  SKIP  {}: {}", spec.display_name, probe.message);
+                }
+                ExternalOptimizationProbeStatus::RuntimeMissing
+                | ExternalOptimizationProbeStatus::AdapterMissing => self.check(
+                    format!("External {} adapter probe usable", spec.display_name),
+                    false,
+                    format!("status={} message={}", probe.status.as_str(), probe.message),
+                ),
+            }
+        }
+    }
+
+    fn validate_external_validation_tool_adapters(&mut self) {
+        println!("\n-- External model/output validation adapters --");
+        let specs = external_validation_tool_specs();
+        self.check(
+            "External validation registry covers recommended tools",
+            specs.len() == 87,
+            format!("tools={}", specs.len()),
+        );
+        for (family, expected_at_least) in [
+            (ExternalValidationFamily::ConstraintModeling, 5),
+            (ExternalValidationFamily::SmtSolver, 5),
+            (ExternalValidationFamily::SatSolver, 3),
+            (ExternalValidationFamily::ProofChecker, 2),
+            (ExternalValidationFamily::FormalModelChecker, 11),
+            (ExternalValidationFamily::BenchmarkLibrary, 9),
+            (ExternalValidationFamily::NonlinearGlobalSolver, 9),
+            (ExternalValidationFamily::ConvexConicSolver, 8),
+            (ExternalValidationFamily::SimulationEngine, 23),
+            (ExternalValidationFamily::OutputDataValidator, 12),
+        ] {
+            let count = specs.iter().filter(|spec| spec.family == family).count();
+            self.check(
+                format!("External validation registry family {}", family.as_str()),
+                count >= expected_at_least,
+                format!("count={count} expected_at_least={expected_at_least}"),
+            );
+        }
+        self.check(
+            "External validation registry representative coverage",
+            specs.iter().any(|spec| spec.id == "minizinc")
+                && specs.iter().any(|spec| spec.id == "z3")
+                && specs.iter().any(|spec| spec.id == "drat-trim")
+                && specs.iter().any(|spec| spec.id == "tlc")
+                && specs.iter().any(|spec| spec.id == "miplib")
+                && specs.iter().any(|spec| spec.id == "ipopt")
+                && specs.iter().any(|spec| spec.id == "osqp")
+                && specs.iter().any(|spec| spec.id == "cbmc")
+                && specs.iter().any(|spec| spec.id == "simpy")
+                && specs.iter().any(|spec| spec.id == "energyplus")
+                && specs.iter().any(|spec| spec.id == "anylogic")
+                && specs.iter().any(|spec| spec.id == "great-expectations")
+                && specs.iter().any(|spec| spec.id == "frictionless"),
+            "checked MiniZinc, Z3, DRAT, TLC, MIPLIB, Ipopt, OSQP, CBMC, SimPy, EnergyPlus, AnyLogic, GX, and Frictionless".to_string(),
+        );
+
+        let minizinc_payload = minizinc_validation_request_to_json(&MiniZincValidationRequest {
+            model: "var 0..5: x; constraint x >= 1; solve satisfy;".to_string(),
+            data: Some("limit = 5;".to_string()),
+            solver: Some("chuffed".to_string()),
+            checker_model: Some("constraint x >= 1;".to_string()),
+        });
+        self.check(
+            "External validation MiniZinc request builder",
+            minizinc_payload["kind"].as_str() == Some("minizinc-validation")
+                && minizinc_payload["model"]
+                    .as_str()
+                    .is_some_and(|model| model.contains("solve satisfy"))
+                && minizinc_payload["solver"].as_str() == Some("chuffed"),
+            format!("payload={minizinc_payload}"),
+        );
+
+        let smtlib = smtlib_validation_script_to_string(&SmtLibValidationScript {
+            logic: Some("QF_LIA".to_string()),
+            declarations: vec![SmtDeclaration {
+                name: "x".to_string(),
+                sort: SmtSort::Int,
+            }],
+            assertions: vec![">= x 0".to_string()],
+            check_sat_assumptions: Vec::new(),
+            get_model: true,
+        });
+        let dimacs = dimacs_cnf_to_string(&DimacsCnf {
+            num_vars: 2,
+            clauses: vec![vec![1, -2], vec![2]],
+            comments: vec!["suite smoke".to_string()],
+        });
+        self.check(
+            "External validation SMT-LIB and DIMACS exporters",
+            smtlib.contains("(set-logic QF_LIA)")
+                && smtlib.contains("(assert (>= x 0))")
+                && smtlib.contains("(get-model)")
+                && dimacs.contains("p cnf 2 2")
+                && dimacs.contains("1 -2 0"),
+            format!("smtlib={} dimacs={}", smtlib.trim(), dimacs.trim()),
+        );
+
+        let minizinc_bridge_payload =
+            minizinc_validation_request_to_json(&MiniZincValidationRequest {
+                model: "var 0..5: x; constraint x >= 1; solve satisfy;".to_string(),
+                data: None,
+                solver: None,
+                checker_model: None,
+            });
+        let minizinc_bridge_run = self.run_python_json(
+            "model_validation_reference.py",
+            &["--tool", "minizinc"],
+            &minizinc_bridge_payload.to_string(),
+        );
+        self.check(
+            "External validation MiniZinc bridge sat payload",
+            minizinc_bridge_run["status"].as_str() == Some("ok")
+                && minizinc_bridge_run["verdict"].as_str() == Some("sat")
+                && minizinc_bridge_run["stdout"]
+                    .as_str()
+                    .is_some_and(|stdout| stdout.contains("x =")),
+            format!(
+                "status={} verdict={} validator={}",
+                minizinc_bridge_run["status"].as_str().unwrap_or(""),
+                minizinc_bridge_run["verdict"].as_str().unwrap_or(""),
+                minizinc_bridge_run["validator"].as_str().unwrap_or("")
+            ),
+        );
+
+        let smt_bridge_payload = serde_json::json!({
+            "kind": "smtlib-validation",
+            "script": smtlib,
+        });
+        let smt_bridge_run = self.run_python_json(
+            "model_validation_reference.py",
+            &["--tool", "z3"],
+            &smt_bridge_payload.to_string(),
+        );
+        self.check(
+            "External validation SMT-LIB bridge sat payload",
+            smt_bridge_run["status"].as_str() == Some("ok")
+                && smt_bridge_run["verdict"].as_str() == Some("sat"),
+            format!(
+                "status={} verdict={} validator={}",
+                smt_bridge_run["status"].as_str().unwrap_or(""),
+                smt_bridge_run["verdict"].as_str().unwrap_or(""),
+                smt_bridge_run["validator"].as_str().unwrap_or("")
+            ),
+        );
+
+        let dimacs_bridge_payload = serde_json::json!({
+            "kind": "dimacs-cnf-validation",
+            "dimacs": dimacs,
+        });
+        let dimacs_bridge_run = self.run_python_json(
+            "model_validation_reference.py",
+            &["--tool", "kissat"],
+            &dimacs_bridge_payload.to_string(),
+        );
+        self.check(
+            "External validation DIMACS bridge sat payload",
+            dimacs_bridge_run["status"].as_str() == Some("ok")
+                && dimacs_bridge_run["verdict"].as_str() == Some("sat"),
+            format!(
+                "status={} verdict={} validator={}",
+                dimacs_bridge_run["status"].as_str().unwrap_or(""),
+                dimacs_bridge_run["verdict"].as_str().unwrap_or(""),
+                dimacs_bridge_run["validator"].as_str().unwrap_or("")
+            ),
+        );
+
+        let unsat_dimacs_bridge_payload = serde_json::json!({
+            "kind": "dimacs-cnf-validation",
+            "dimacs": "p cnf 1 2\n1 0\n-1 0\n",
+        });
+        let unsat_dimacs_bridge_run = self.run_python_json(
+            "model_validation_reference.py",
+            &["--tool", "kissat"],
+            &unsat_dimacs_bridge_payload.to_string(),
+        );
+        self.check(
+            "External validation DIMACS bridge unsat payload",
+            unsat_dimacs_bridge_run["status"].as_str() == Some("ok")
+                && unsat_dimacs_bridge_run["verdict"].as_str() == Some("unsat"),
+            format!(
+                "status={} verdict={} validator={}",
+                unsat_dimacs_bridge_run["status"].as_str().unwrap_or(""),
+                unsat_dimacs_bridge_run["verdict"].as_str().unwrap_or(""),
+                unsat_dimacs_bridge_run["validator"].as_str().unwrap_or("")
+            ),
+        );
+
+        let proof_bridge_payload = serde_json::json!({
+            "kind": "proof-validation",
+            "format": "drat",
+            "cnf": "p cnf 1 2\n1 0\n-1 0\n",
+            "proof": "0\n",
+        });
+        let proof_bridge_run = self.run_python_json(
+            "proof_validation_reference.py",
+            &["--tool", "drat"],
+            &proof_bridge_payload.to_string(),
+        );
+        self.check(
+            "External validation DRAT proof bridge valid payload",
+            proof_bridge_run["status"].as_str() == Some("ok")
+                && proof_bridge_run["verdict"].as_str() == Some("valid")
+                && proof_bridge_run["cnf_status"].as_str() == Some("unsat"),
+            format!(
+                "status={} verdict={} validator={}",
+                proof_bridge_run["status"].as_str().unwrap_or(""),
+                proof_bridge_run["verdict"].as_str().unwrap_or(""),
+                proof_bridge_run["validator"].as_str().unwrap_or("")
+            ),
+        );
+
+        let invalid_proof_bridge_payload = serde_json::json!({
+            "kind": "proof-validation",
+            "format": "lrat",
+            "cnf": "p cnf 1 1\n1 0\n",
+            "proof": "2 0 1 0\n",
+        });
+        let invalid_proof_bridge_run = self.run_python_json(
+            "proof_validation_reference.py",
+            &["--tool", "lrat"],
+            &invalid_proof_bridge_payload.to_string(),
+        );
+        self.check(
+            "External validation LRAT proof bridge invalid payload",
+            invalid_proof_bridge_run["status"].as_str() == Some("ok")
+                && invalid_proof_bridge_run["verdict"].as_str() == Some("invalid")
+                && invalid_proof_bridge_run["cnf_status"].as_str() == Some("sat"),
+            format!(
+                "status={} verdict={} message={}",
+                invalid_proof_bridge_run["status"].as_str().unwrap_or(""),
+                invalid_proof_bridge_run["verdict"].as_str().unwrap_or(""),
+                invalid_proof_bridge_run["message"].as_str().unwrap_or("")
+            ),
+        );
+
+        let tla = tla_validation_module_to_string(&TlaValidationModule {
+            module_name: "Counter".to_string(),
+            extends: vec!["Naturals".to_string(), "TLC".to_string()],
+            constants: vec!["Limit".to_string()],
+            variables: vec!["x".to_string()],
+            init: "x = 0".to_string(),
+            next: "x' = x + 1".to_string(),
+            invariants: vec!["x <= Limit".to_string()],
+            temporal_properties: vec!["[]Invariant1".to_string()],
+        });
+        let prism_model = PrismValidationModel {
+            model_type: "dtmc".to_string(),
+            declarations: vec!["const double p = 0.5;".to_string()],
+            modules: vec![PrismModule {
+                name: "coin".to_string(),
+                variables: vec!["s : [0..1] init 0;".to_string()],
+                commands: vec!["[] s=0 -> p:(s'=0) + (1-p):(s'=1);".to_string()],
+            }],
+            labels: vec!["label \"done\" = s=1;".to_string()],
+            properties: vec!["P>=0.4 [ F \"done\" ]".to_string()],
+        };
+        let prism = prism_validation_model_to_string(&prism_model);
+        let prism_props = prism_validation_properties_to_string(&prism_model);
+        self.check(
+            "External validation formal-model text exporters",
+            tla.contains("---- MODULE Counter ----")
+                && tla.contains("Spec == Init /\\ [][Next]_x")
+                && prism.contains("module coin")
+                && prism.contains("endmodule")
+                && prism_props.contains("P>=0.4"),
+            format!(
+                "tla_lines={} prism_lines={} props={}",
+                tla.lines().count(),
+                prism.lines().count(),
+                prism_props.trim()
+            ),
+        );
+
+        let tla_bridge_payload = serde_json::json!({
+            "kind": "tla-validation",
+            "module": tla,
+            "expected_invariants": ["Invariant1"],
+            "expected_temporal_properties": ["TemporalProperty1"],
+        });
+        let tla_bridge_run = self.run_python_json(
+            "formal_benchmark_validation_reference.py",
+            &["--tool", "tla"],
+            &tla_bridge_payload.to_string(),
+        );
+        self.check(
+            "External validation TLA bridge valid payload",
+            tla_bridge_run["status"].as_str() == Some("ok")
+                && tla_bridge_run["verdict"].as_str() == Some("valid")
+                && tla_bridge_run["message"].as_str() == Some("module=Counter"),
+            format!(
+                "status={} verdict={} validator={}",
+                tla_bridge_run["status"].as_str().unwrap_or(""),
+                tla_bridge_run["verdict"].as_str().unwrap_or(""),
+                tla_bridge_run["validator"].as_str().unwrap_or("")
+            ),
+        );
+
+        let prism_bridge_payload = serde_json::json!({
+            "kind": "prism-validation",
+            "model": prism,
+            "properties": prism_props,
+        });
+        let prism_bridge_run = self.run_python_json(
+            "formal_benchmark_validation_reference.py",
+            &["--tool", "prism"],
+            &prism_bridge_payload.to_string(),
+        );
+        self.check(
+            "External validation PRISM bridge valid payload",
+            prism_bridge_run["status"].as_str() == Some("ok")
+                && prism_bridge_run["verdict"].as_str() == Some("valid")
+                && prism_bridge_run["checks"]
+                    .as_array()
+                    .is_some_and(|checks| !checks.is_empty()),
+            format!(
+                "status={} verdict={} validator={}",
+                prism_bridge_run["status"].as_str().unwrap_or(""),
+                prism_bridge_run["verdict"].as_str().unwrap_or(""),
+                prism_bridge_run["validator"].as_str().unwrap_or("")
+            ),
+        );
+
+        let promela_bridge_payload = serde_json::json!({
+            "kind": "promela-validation",
+            "model": "bool done = false;\ninit {\n  done = true;\n}\nltl eventually_done { <> done }\n",
+            "properties": ["ltl eventually_done { <> done }"],
+            "expected_ltl_properties": ["eventually_done"],
+        });
+        let promela_bridge_run = self.run_python_json(
+            "formal_benchmark_validation_reference.py",
+            &["--tool", "spin"],
+            &promela_bridge_payload.to_string(),
+        );
+        self.check(
+            "External validation SPIN/Promela bridge valid payload",
+            promela_bridge_run["status"].as_str() == Some("ok")
+                && promela_bridge_run["verdict"].as_str() == Some("valid")
+                && promela_bridge_run["validator"].as_str() == Some("builtin:promela-structural"),
+            format!(
+                "status={} verdict={} validator={}",
+                promela_bridge_run["status"].as_str().unwrap_or(""),
+                promela_bridge_run["verdict"].as_str().unwrap_or(""),
+                promela_bridge_run["validator"].as_str().unwrap_or("")
+            ),
+        );
+
+        let smv_bridge_payload = serde_json::json!({
+            "kind": "smv-validation",
+            "model": "MODULE main\nVAR\n  s : boolean;\nASSIGN\n  init(s) := FALSE;\n  next(s) := TRUE;\n",
+            "properties": ["INVARSPEC s"],
+        });
+        let smv_bridge_run = self.run_python_json(
+            "formal_benchmark_validation_reference.py",
+            &["--tool", "nuxmv"],
+            &smv_bridge_payload.to_string(),
+        );
+        self.check(
+            "External validation nuXmv/SMV bridge valid payload",
+            smv_bridge_run["status"].as_str() == Some("ok")
+                && smv_bridge_run["verdict"].as_str() == Some("valid")
+                && smv_bridge_run["validator"].as_str() == Some("builtin:smv-structural"),
+            format!(
+                "status={} verdict={} validator={}",
+                smv_bridge_run["status"].as_str().unwrap_or(""),
+                smv_bridge_run["verdict"].as_str().unwrap_or(""),
+                smv_bridge_run["validator"].as_str().unwrap_or("")
+            ),
+        );
+
+        let cbmc_bridge_payload = serde_json::json!({
+            "kind": "cbmc-validation",
+            "source": "#include <assert.h>\nint main() {\n  int x = 1;\n  assert(x >= 0);\n  return 0;\n}\n",
+            "expected_assertions": ["x >= 0"],
+        });
+        let cbmc_bridge_run = self.run_python_json(
+            "formal_benchmark_validation_reference.py",
+            &["--tool", "cbmc"],
+            &cbmc_bridge_payload.to_string(),
+        );
+        self.check(
+            "External validation CBMC bridge valid payload",
+            cbmc_bridge_run["status"].as_str() == Some("ok")
+                && cbmc_bridge_run["verdict"].as_str() == Some("valid")
+                && cbmc_bridge_run["validator"].as_str() == Some("builtin:cbmc-structural"),
+            format!(
+                "status={} verdict={} validator={}",
+                cbmc_bridge_run["status"].as_str().unwrap_or(""),
+                cbmc_bridge_run["verdict"].as_str().unwrap_or(""),
+                cbmc_bridge_run["validator"].as_str().unwrap_or("")
+            ),
+        );
+
+        let alloy_bridge_payload = serde_json::json!({
+            "kind": "alloy-validation",
+            "model": "module smoke\nsig Node { next: lone Node }\npred someNode { some Node }\n",
+            "commands": ["run someNode for 3"],
+        });
+        let alloy_bridge_run = self.run_python_json(
+            "formal_benchmark_validation_reference.py",
+            &["--tool", "alloy"],
+            &alloy_bridge_payload.to_string(),
+        );
+        self.check(
+            "External validation Alloy bridge valid payload",
+            alloy_bridge_run["status"].as_str() == Some("ok")
+                && alloy_bridge_run["verdict"].as_str() == Some("valid")
+                && alloy_bridge_run["validator"].as_str() == Some("builtin:alloy-structural"),
+            format!(
+                "status={} verdict={} validator={}",
+                alloy_bridge_run["status"].as_str().unwrap_or(""),
+                alloy_bridge_run["verdict"].as_str().unwrap_or(""),
+                alloy_bridge_run["validator"].as_str().unwrap_or("")
+            ),
+        );
+
+        let uppaal_bridge_payload = serde_json::json!({
+            "kind": "uppaal-validation",
+            "model": "<nta><template><name>P</name><location id=\"id0\"/><init ref=\"id0\"/><transition><source ref=\"id0\"/><target ref=\"id0\"/></transition></template></nta>",
+            "queries": ["A[] not deadlock"],
+        });
+        let uppaal_bridge_run = self.run_python_json(
+            "formal_benchmark_validation_reference.py",
+            &["--tool", "uppaal"],
+            &uppaal_bridge_payload.to_string(),
+        );
+        self.check(
+            "External validation UPPAAL bridge valid payload",
+            uppaal_bridge_run["status"].as_str() == Some("ok")
+                && uppaal_bridge_run["verdict"].as_str() == Some("valid")
+                && uppaal_bridge_run["validator"].as_str() == Some("builtin:uppaal-structural"),
+            format!(
+                "status={} verdict={} validator={}",
+                uppaal_bridge_run["status"].as_str().unwrap_or(""),
+                uppaal_bridge_run["verdict"].as_str().unwrap_or(""),
+                uppaal_bridge_run["validator"].as_str().unwrap_or("")
+            ),
+        );
+
+        let mcrl2_bridge_payload = serde_json::json!({
+            "kind": "mcrl2-validation",
+            "model": "act a;\nproc P = a . P;\ninit P;\n",
+            "properties": ["[true*]<a>true"],
+        });
+        let mcrl2_bridge_run = self.run_python_json(
+            "formal_benchmark_validation_reference.py",
+            &["--tool", "mcrl2"],
+            &mcrl2_bridge_payload.to_string(),
+        );
+        self.check(
+            "External validation mCRL2 bridge valid payload",
+            mcrl2_bridge_run["status"].as_str() == Some("ok")
+                && mcrl2_bridge_run["verdict"].as_str() == Some("valid")
+                && mcrl2_bridge_run["validator"].as_str() == Some("builtin:mcrl2-structural"),
+            format!(
+                "status={} verdict={} validator={}",
+                mcrl2_bridge_run["status"].as_str().unwrap_or(""),
+                mcrl2_bridge_run["verdict"].as_str().unwrap_or(""),
+                mcrl2_bridge_run["validator"].as_str().unwrap_or("")
+            ),
+        );
+
+        let maude_bridge_payload = serde_json::json!({
+            "kind": "maude-validation",
+            "model": "mod COUNTER is\n  sort Nat .\n  op zero : -> Nat .\n  eq zero = zero .\nendm\n",
+            "commands": ["red zero ."],
+        });
+        let maude_bridge_run = self.run_python_json(
+            "formal_benchmark_validation_reference.py",
+            &["--tool", "maude"],
+            &maude_bridge_payload.to_string(),
+        );
+        self.check(
+            "External validation Maude bridge valid payload",
+            maude_bridge_run["status"].as_str() == Some("ok")
+                && maude_bridge_run["verdict"].as_str() == Some("valid")
+                && maude_bridge_run["validator"].as_str() == Some("builtin:maude-structural"),
+            format!(
+                "status={} verdict={} validator={}",
+                maude_bridge_run["status"].as_str().unwrap_or(""),
+                maude_bridge_run["verdict"].as_str().unwrap_or(""),
+                maude_bridge_run["validator"].as_str().unwrap_or("")
+            ),
+        );
+
+        let program_verifier_payload = serde_json::json!({
+            "kind": "program-verifier-validation",
+            "language": "dafny",
+            "source": "method Inc(x: int) returns (y: int)\n  ensures y > x\n{\n  y := x + 1;\n  assert y > x;\n}\n",
+        });
+        let program_verifier_run = self.run_python_json(
+            "formal_benchmark_validation_reference.py",
+            &["--tool", "dafny"],
+            &program_verifier_payload.to_string(),
+        );
+        self.check(
+            "External validation program-verifier bridge valid payload",
+            program_verifier_run["status"].as_str() == Some("ok")
+                && program_verifier_run["verdict"].as_str() == Some("valid")
+                && program_verifier_run["validator"].as_str()
+                    == Some("builtin:program-verifier-structural"),
+            format!(
+                "status={} verdict={} validator={}",
+                program_verifier_run["status"].as_str().unwrap_or(""),
+                program_verifier_run["verdict"].as_str().unwrap_or(""),
+                program_verifier_run["validator"].as_str().unwrap_or("")
+            ),
+        );
+
+        let security_protocol_payload = serde_json::json!({
+            "kind": "security-protocol-validation",
+            "model": "theory Smoke begin\nrule Send:\n  [ Fr(~n) ] --[ Secret(~n) ]-> [ Out(~n) ]\nlemma secrecy: all-traces \"All n #i. Secret(n) @ #i ==> not (Ex #j. K(n) @ #j)\"\nend\n",
+        });
+        let security_protocol_run = self.run_python_json(
+            "formal_benchmark_validation_reference.py",
+            &["--tool", "tamarin"],
+            &security_protocol_payload.to_string(),
+        );
+        self.check(
+            "External validation security-protocol bridge valid payload",
+            security_protocol_run["status"].as_str() == Some("ok")
+                && security_protocol_run["verdict"].as_str() == Some("valid")
+                && security_protocol_run["validator"].as_str()
+                    == Some("builtin:security-protocol-structural"),
+            format!(
+                "status={} verdict={} validator={}",
+                security_protocol_run["status"].as_str().unwrap_or(""),
+                security_protocol_run["verdict"].as_str().unwrap_or(""),
+                security_protocol_run["validator"].as_str().unwrap_or("")
+            ),
+        );
+
+        let schema_payload = json_schema_validation_request_to_json(&JsonSchemaValidationRequest {
+            schema: serde_json::json!({
+                "type": "object",
+                "required": ["objective"],
+                "properties": {"objective": {"type": "number"}}
+            }),
+            instance: serde_json::json!({"objective": 3.5}),
+            draft: Some("2020-12".to_string()),
+        });
+        let simulation_payload =
+            simulation_validation_request_to_json(&SimulationValidationRequest {
+                engine_id: "simpy".to_string(),
+                model_format: "json-event-network".to_string(),
+                model: serde_json::json!({"servers": 1, "arrival_rate": 0.75}),
+                scenario: Some(serde_json::json!({"seed": 11, "horizon": 100.0})),
+                expected_trace_properties: vec!["queue_length_never_negative".to_string()],
+                metric_expectations: vec![SimulationMetricExpectation {
+                    name: "mean_wait".to_string(),
+                    target: 2.0,
+                    tolerance: 0.5,
+                    comparison: "within-absolute".to_string(),
+                }],
+            });
+        let benchmark_payload = external_benchmark_manifest_to_json(&ExternalBenchmarkManifest {
+            suite: "miplib".to_string(),
+            version: Some("2017".to_string()),
+            entries: vec![ExternalBenchmarkManifestEntry {
+                name: "sample".to_string(),
+                family: "mip".to_string(),
+                format: "mps".to_string(),
+                path: PathBuf::from("MIPLIB/sample.mps"),
+                objective_sense: Some("min".to_string()),
+                tags: vec!["smoke".to_string()],
+            }],
+        });
+        self.check(
+            "External validation JSON, simulation, and benchmark request builders",
+            schema_payload["draft"].as_str() == Some("2020-12")
+                && schema_payload["instance"]["objective"].as_f64() == Some(3.5)
+                && simulation_payload["engine"].as_str() == Some("simpy")
+                && simulation_payload["metric_expectations"][0]["target"].as_f64() == Some(2.0)
+                && benchmark_payload["suite"].as_str() == Some("miplib")
+                && benchmark_payload["entries"][0]["path"].as_str() == Some("MIPLIB/sample.mps"),
+            format!(
+                "schema={} simulation={} benchmark={}",
+                schema_payload["kind"], simulation_payload["kind"], benchmark_payload["kind"]
+            ),
+        );
+        let benchmark_bridge_run = self.run_python_json(
+            "formal_benchmark_validation_reference.py",
+            &["--tool", "benchmark"],
+            &benchmark_payload.to_string(),
+        );
+        self.check(
+            "External validation benchmark manifest bridge valid payload",
+            benchmark_bridge_run["status"].as_str() == Some("ok")
+                && benchmark_bridge_run["verdict"].as_str() == Some("valid")
+                && benchmark_bridge_run["checks"]
+                    .as_array()
+                    .is_some_and(|checks| !checks.is_empty()),
+            format!(
+                "status={} verdict={} validator={}",
+                benchmark_bridge_run["status"].as_str().unwrap_or(""),
+                benchmark_bridge_run["verdict"].as_str().unwrap_or(""),
+                benchmark_bridge_run["validator"].as_str().unwrap_or("")
+            ),
+        );
+        let invalid_benchmark_bridge_payload = serde_json::json!({
+            "kind": "external-benchmark-manifest",
+            "suite": "miplib",
+            "entries": [
+                {"name": "duplicate", "family": "mip", "format": "mps", "path": "a.mps"},
+                {"name": "duplicate", "family": "mip", "format": "bogus", "path": "b.foo"}
+            ],
+        });
+        let invalid_benchmark_bridge_run = self.run_python_json(
+            "formal_benchmark_validation_reference.py",
+            &["--tool", "benchmark"],
+            &invalid_benchmark_bridge_payload.to_string(),
+        );
+        self.check(
+            "External validation benchmark manifest bridge invalid payload",
+            invalid_benchmark_bridge_run["status"].as_str() == Some("ok")
+                && invalid_benchmark_bridge_run["verdict"].as_str() == Some("invalid")
+                && invalid_benchmark_bridge_run["checks"]
+                    .as_array()
+                    .is_some_and(|checks| {
+                        checks.iter().any(|check| {
+                            check["name"].as_str() == Some("entry:1:unique")
+                                && check["passed"].as_bool() == Some(false)
+                        })
+                    }),
+            format!(
+                "status={} verdict={} validator={}",
+                invalid_benchmark_bridge_run["status"]
+                    .as_str()
+                    .unwrap_or(""),
+                invalid_benchmark_bridge_run["verdict"]
+                    .as_str()
+                    .unwrap_or(""),
+                invalid_benchmark_bridge_run["validator"]
+                    .as_str()
+                    .unwrap_or("")
+            ),
+        );
+        let nonlinear_payload = serde_json::json!({
+            "kind": "nonlinear-validation",
+            "variables": [
+                {"name": "x", "lb": 0.0, "ub": 3.0, "start": 0.2},
+                {"name": "y", "lb": 0.0, "ub": 3.0, "start": 0.2}
+            ],
+            "objective": "(x - 1)**2 + (y - 2)**2",
+            "constraints": [
+                {"name": "demand", "expr": "x + y", "sense": ">=", "rhs": 1.0}
+            ]
+        });
+        let nonlinear_run = self.run_python_json(
+            "nonlinear_validation_reference.py",
+            &["--solver", "auto"],
+            &nonlinear_payload.to_string(),
+        );
+        self.check(
+            "External validation nonlinear bridge optimal payload",
+            nonlinear_run["status"].as_str() == Some("optimal")
+                && nonlinear_run["objective"]
+                    .as_f64()
+                    .is_some_and(|objective| objective.abs() <= 1e-6)
+                && nonlinear_run["x"].as_array().is_some_and(|x| x.len() == 2),
+            format!(
+                "status={} objective={} solver={}",
+                nonlinear_run["status"].as_str().unwrap_or(""),
+                nonlinear_run["objective"].as_f64().unwrap_or(f64::NAN),
+                nonlinear_run["solver"].as_str().unwrap_or("")
+            ),
+        );
+        let infeasible_nonlinear_payload = serde_json::json!({
+            "kind": "nonlinear-validation",
+            "variables": [
+                {"name": "x0", "lb": 0.0, "ub": 1.0},
+                {"name": "x1", "lb": 0.0, "ub": 1.0}
+            ],
+            "objective": "x0**2 + x1**2",
+            "constraints": [
+                {"name": "impossible", "expr": "x0 + x1", "sense": ">=", "rhs": 3.0}
+            ]
+        });
+        let infeasible_nonlinear_run = self.run_python_json(
+            "nonlinear_validation_reference.py",
+            &["--solver", "nlopt"],
+            &infeasible_nonlinear_payload.to_string(),
+        );
+        self.check(
+            "External validation nonlinear bridge infeasible payload",
+            infeasible_nonlinear_run["status"].as_str() == Some("infeasible")
+                && infeasible_nonlinear_run["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("constraint violation")),
+            format!(
+                "status={} solver={} message={}",
+                infeasible_nonlinear_run["status"].as_str().unwrap_or(""),
+                infeasible_nonlinear_run["solver"].as_str().unwrap_or(""),
+                infeasible_nonlinear_run["message"].as_str().unwrap_or("")
+            ),
+        );
+        let schema_run = self.run_python_json(
+            "output_validation_reference.py",
+            &["--tool", "json-schema"],
+            &schema_payload.to_string(),
+        );
+        self.check(
+            "External validation JSON Schema bridge valid payload",
+            schema_run["status"].as_str() == Some("ok")
+                && schema_run["verdict"].as_str() == Some("valid"),
+            format!(
+                "status={} verdict={} validator={}",
+                schema_run["status"].as_str().unwrap_or(""),
+                schema_run["verdict"].as_str().unwrap_or(""),
+                schema_run["validator"].as_str().unwrap_or("")
+            ),
+        );
+        let invalid_schema_payload =
+            json_schema_validation_request_to_json(&JsonSchemaValidationRequest {
+                schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["objective"],
+                    "properties": {"objective": {"type": "number"}}
+                }),
+                instance: serde_json::json!({"objective": "bad"}),
+                draft: Some("2020-12".to_string()),
+            });
+        let invalid_schema_run = self.run_python_json(
+            "output_validation_reference.py",
+            &["--tool", "json-schema"],
+            &invalid_schema_payload.to_string(),
+        );
+        self.check(
+            "External validation JSON Schema bridge invalid payload",
+            invalid_schema_run["status"].as_str() == Some("ok")
+                && invalid_schema_run["verdict"].as_str() == Some("invalid")
+                && invalid_schema_run["errors"]
+                    .as_array()
+                    .is_some_and(|errors| !errors.is_empty()),
+            format!(
+                "status={} verdict={} message={}",
+                invalid_schema_run["status"].as_str().unwrap_or(""),
+                invalid_schema_run["verdict"].as_str().unwrap_or(""),
+                invalid_schema_run["message"].as_str().unwrap_or("")
+            ),
+        );
+
+        let table_payload = serde_json::json!({
+            "kind": "table-validation",
+            "rows": [
+                {"id": 1, "score": 3.5, "status": "ok"},
+                {"id": 2, "score": 7.0, "status": "warn"}
+            ],
+            "schema": {
+                "min_rows": 2,
+                "columns": {
+                    "id": {"type": "integer", "required": true, "unique": true},
+                    "score": {"type": "number", "minimum": 0, "maximum": 10},
+                    "status": {"type": "string", "enum": ["ok", "warn"]}
+                },
+                "additionalColumns": false
+            }
+        });
+        let table_run = self.run_python_json(
+            "output_validation_reference.py",
+            &["--tool", "great-expectations"],
+            &table_payload.to_string(),
+        );
+        self.check(
+            "External validation table bridge valid payload",
+            table_run["status"].as_str() == Some("ok")
+                && table_run["verdict"].as_str() == Some("valid")
+                && table_run["validator"].as_str()
+                    == Some("builtin:table-schema-subset-for-great-expectations"),
+            format!(
+                "status={} verdict={} validator={}",
+                table_run["status"].as_str().unwrap_or(""),
+                table_run["verdict"].as_str().unwrap_or(""),
+                table_run["validator"].as_str().unwrap_or("")
+            ),
+        );
+
+        let invalid_table_payload = serde_json::json!({
+            "kind": "table-validation",
+            "rows": [
+                {"id": 1, "score": 3.5, "status": "ok"},
+                {"id": 1, "score": 12.0, "status": "bad"}
+            ],
+            "schema": {
+                "columns": {
+                    "id": {"type": "integer", "required": true, "unique": true},
+                    "score": {"type": "number", "minimum": 0, "maximum": 10},
+                    "status": {"type": "string", "enum": ["ok", "warn"]}
+                }
+            }
+        });
+        let invalid_table_run = self.run_python_json(
+            "output_validation_reference.py",
+            &["--tool", "pandera"],
+            &invalid_table_payload.to_string(),
+        );
+        self.check(
+            "External validation table bridge invalid payload",
+            invalid_table_run["status"].as_str() == Some("ok")
+                && invalid_table_run["verdict"].as_str() == Some("invalid")
+                && invalid_table_run["errors"]
+                    .as_array()
+                    .is_some_and(|errors| errors.len() >= 3),
+            format!(
+                "status={} verdict={} message={}",
+                invalid_table_run["status"].as_str().unwrap_or(""),
+                invalid_table_run["verdict"].as_str().unwrap_or(""),
+                invalid_table_run["message"].as_str().unwrap_or("")
+            ),
+        );
+
+        let ajv_payload = serde_json::json!({
+            "kind": "json-schema-validation",
+            "schema": {
+                "type": "object",
+                "required": ["objective"],
+                "properties": {"objective": {"type": "number"}}
+            },
+            "instance": {"objective": 3.5}
+        });
+        let ajv_run = self.run_python_json(
+            "output_validation_reference.py",
+            &["--tool", "ajv"],
+            &ajv_payload.to_string(),
+        );
+        self.check(
+            "External validation AJV bridge valid payload",
+            ajv_run["status"].as_str() == Some("ok")
+                && ajv_run["verdict"].as_str() == Some("valid")
+                && ajv_run["validator"].as_str() == Some("builtin:json-schema-subset-for-ajv"),
+            format!(
+                "status={} verdict={} validator={}",
+                ajv_run["status"].as_str().unwrap_or(""),
+                ajv_run["verdict"].as_str().unwrap_or(""),
+                ajv_run["validator"].as_str().unwrap_or("")
+            ),
+        );
+
+        let openapi_payload = serde_json::json!({
+            "kind": "openapi-validation",
+            "spec": {
+                "openapi": "3.1.0",
+                "info": {"title": "Smoke", "version": "1.0.0"},
+                "paths": {
+                    "/runs": {
+                        "get": {"responses": {"200": {"description": "ok"}}}
+                    }
+                }
+            }
+        });
+        let openapi_run = self.run_python_json(
+            "output_validation_reference.py",
+            &["--tool", "spectral"],
+            &openapi_payload.to_string(),
+        );
+        self.check(
+            "External validation OpenAPI/Spectral bridge valid payload",
+            openapi_run["status"].as_str() == Some("ok")
+                && openapi_run["verdict"].as_str() == Some("valid")
+                && openapi_run["validator"].as_str()
+                    == Some("builtin:openapi-structural-for-spectral"),
+            format!(
+                "status={} verdict={} validator={}",
+                openapi_run["status"].as_str().unwrap_or(""),
+                openapi_run["verdict"].as_str().unwrap_or(""),
+                openapi_run["validator"].as_str().unwrap_or("")
+            ),
+        );
+
+        let schematron_payload = serde_json::json!({
+            "kind": "schematron-validation",
+            "xml": "<run><objective>3.5</objective></run>",
+            "schematron": "<schema><pattern><rule context='run'><assert test='objective'>objective required</assert></rule></pattern></schema>",
+            "required_elements": ["objective"]
+        });
+        let schematron_run = self.run_python_json(
+            "output_validation_reference.py",
+            &["--tool", "schematron"],
+            &schematron_payload.to_string(),
+        );
+        self.check(
+            "External validation Schematron bridge valid payload",
+            schematron_run["status"].as_str() == Some("ok")
+                && schematron_run["verdict"].as_str() == Some("valid")
+                && schematron_run["validator"].as_str() == Some("builtin:schematron-structural"),
+            format!(
+                "status={} verdict={} validator={}",
+                schematron_run["status"].as_str().unwrap_or(""),
+                schematron_run["verdict"].as_str().unwrap_or(""),
+                schematron_run["validator"].as_str().unwrap_or("")
+            ),
+        );
+
+        let pydantic_payload = serde_json::json!({
+            "kind": "pydantic-validation",
+            "model": {
+                "fields": {
+                    "objective": {"type": "float", "required": true},
+                    "status": {"type": "string", "required": true}
+                }
+            },
+            "instance": {"objective": 3.5, "status": "optimal"}
+        });
+        let pydantic_run = self.run_python_json(
+            "output_validation_reference.py",
+            &["--tool", "pydantic"],
+            &pydantic_payload.to_string(),
+        );
+        self.check(
+            "External validation Pydantic bridge valid payload",
+            pydantic_run["status"].as_str() == Some("ok")
+                && pydantic_run["verdict"].as_str() == Some("valid")
+                && pydantic_run["validator"].as_str() == Some("builtin:pydantic-model-subset"),
+            format!(
+                "status={} verdict={} validator={}",
+                pydantic_run["status"].as_str().unwrap_or(""),
+                pydantic_run["verdict"].as_str().unwrap_or(""),
+                pydantic_run["validator"].as_str().unwrap_or("")
+            ),
+        );
+
+        let protobuf_payload = serde_json::json!({
+            "kind": "protobuf-validation",
+            "schema": {
+                "fields": {
+                    "id": {"type": "int64", "required": true},
+                    "status": {"type": "string", "enum": ["ok", "warn"]},
+                    "scores": {"type": "double", "repeated": true}
+                },
+                "additionalFields": false
+            },
+            "message": {"id": 42, "status": "ok", "scores": [1.5, 2.0]}
+        });
+        let protobuf_run = self.run_python_json(
+            "output_validation_reference.py",
+            &["--tool", "protobuf-conformance"],
+            &protobuf_payload.to_string(),
+        );
+        self.check(
+            "External validation Protobuf bridge valid payload",
+            protobuf_run["status"].as_str() == Some("ok")
+                && protobuf_run["verdict"].as_str() == Some("valid")
+                && protobuf_run["validator"].as_str()
+                    == Some("builtin:protobuf-conformance-subset"),
+            format!(
+                "status={} verdict={} validator={}",
+                protobuf_run["status"].as_str().unwrap_or(""),
+                protobuf_run["verdict"].as_str().unwrap_or(""),
+                protobuf_run["validator"].as_str().unwrap_or("")
+            ),
+        );
+
+        let invalid_protobuf_payload = serde_json::json!({
+            "kind": "protobuf-validation",
+            "schema": {
+                "fields": {
+                    "id": {"type": "int64", "required": true},
+                    "status": {"type": "string", "enum": ["ok", "warn"]}
+                },
+                "additionalFields": false
+            },
+            "message": {"id": "bad", "status": "bad", "extra": 1}
+        });
+        let invalid_protobuf_run = self.run_python_json(
+            "output_validation_reference.py",
+            &["--tool", "protobuf-conformance"],
+            &invalid_protobuf_payload.to_string(),
+        );
+        self.check(
+            "External validation Protobuf bridge invalid payload",
+            invalid_protobuf_run["status"].as_str() == Some("ok")
+                && invalid_protobuf_run["verdict"].as_str() == Some("invalid")
+                && invalid_protobuf_run["errors"]
+                    .as_array()
+                    .is_some_and(|errors| errors.len() >= 3),
+            format!(
+                "status={} verdict={} message={}",
+                invalid_protobuf_run["status"].as_str().unwrap_or(""),
+                invalid_protobuf_run["verdict"].as_str().unwrap_or(""),
+                invalid_protobuf_run["message"].as_str().unwrap_or("")
+            ),
+        );
+
+        let avro_payload = serde_json::json!({
+            "kind": "avro-validation",
+            "schema": {
+                "type": "record",
+                "name": "RunResult",
+                "fields": [
+                    {"name": "id", "type": "long"},
+                    {"name": "objective", "type": "double"},
+                    {
+                        "name": "status",
+                        "type": {"type": "enum", "name": "Status", "symbols": ["ok", "warn"]}
+                    },
+                    {"name": "tags", "type": {"type": "array", "items": "string"}}
+                ],
+                "additionalFields": false
+            },
+            "record": {"id": 7, "objective": 3.5, "status": "ok", "tags": ["smoke"]}
+        });
+        let avro_run = self.run_python_json(
+            "output_validation_reference.py",
+            &["--tool", "avro-tools"],
+            &avro_payload.to_string(),
+        );
+        self.check(
+            "External validation Avro bridge valid payload",
+            avro_run["status"].as_str() == Some("ok")
+                && avro_run["verdict"].as_str() == Some("valid")
+                && avro_run["validator"].as_str() == Some("builtin:avro-schema-subset"),
+            format!(
+                "status={} verdict={} validator={}",
+                avro_run["status"].as_str().unwrap_or(""),
+                avro_run["verdict"].as_str().unwrap_or(""),
+                avro_run["validator"].as_str().unwrap_or("")
+            ),
+        );
+
+        let invalid_avro_payload = serde_json::json!({
+            "kind": "avro-validation",
+            "schema": {
+                "type": "record",
+                "name": "RunResult",
+                "fields": [
+                    {"name": "id", "type": "long"},
+                    {"name": "objective", "type": "double"}
+                ],
+                "additionalFields": false
+            },
+            "record": {"id": "bad", "extra": 1}
+        });
+        let invalid_avro_run = self.run_python_json(
+            "output_validation_reference.py",
+            &["--tool", "avro-tools"],
+            &invalid_avro_payload.to_string(),
+        );
+        self.check(
+            "External validation Avro bridge invalid payload",
+            invalid_avro_run["status"].as_str() == Some("ok")
+                && invalid_avro_run["verdict"].as_str() == Some("invalid")
+                && invalid_avro_run["errors"]
+                    .as_array()
+                    .is_some_and(|errors| errors.len() >= 3),
+            format!(
+                "status={} verdict={} message={}",
+                invalid_avro_run["status"].as_str().unwrap_or(""),
+                invalid_avro_run["verdict"].as_str().unwrap_or(""),
+                invalid_avro_run["message"].as_str().unwrap_or("")
+            ),
+        );
+
+        let simulation_bridge_payload =
+            simulation_validation_request_to_json(&SimulationValidationRequest {
+                engine_id: "simpy".to_string(),
+                model_format: "json-event-network".to_string(),
+                model: serde_json::json!({
+                    "servers": 1,
+                    "arrival_times": [0.0, 1.0, 2.0],
+                    "service_times": [1.0, 1.0, 1.0]
+                }),
+                scenario: Some(serde_json::json!({"horizon": 10.0})),
+                expected_trace_properties: vec![
+                    "queue_length_never_negative".to_string(),
+                    "departures_after_arrivals".to_string(),
+                ],
+                metric_expectations: vec![
+                    SimulationMetricExpectation {
+                        name: "mean_wait".to_string(),
+                        target: 0.0,
+                        tolerance: 1e-9,
+                        comparison: "within-absolute".to_string(),
+                    },
+                    SimulationMetricExpectation {
+                        name: "jobs_completed".to_string(),
+                        target: 3.0,
+                        tolerance: 1e-9,
+                        comparison: "equal".to_string(),
+                    },
+                ],
+            });
+        let simulation_bridge_run = self.run_python_json(
+            "simulation_validation_reference.py",
+            &["--engine", "simpy"],
+            &simulation_bridge_payload.to_string(),
+        );
+        self.check(
+            "External validation simulation bridge valid payload",
+            simulation_bridge_run["status"].as_str() == Some("ok")
+                && simulation_bridge_run["verdict"].as_str() == Some("valid")
+                && simulation_bridge_run["metrics"]["mean_wait"].as_f64() == Some(0.0)
+                && simulation_bridge_run["trace"]
+                    .as_array()
+                    .is_some_and(|trace| trace.len() == 9),
+            format!(
+                "status={} verdict={} simulator={}",
+                simulation_bridge_run["status"].as_str().unwrap_or(""),
+                simulation_bridge_run["verdict"].as_str().unwrap_or(""),
+                simulation_bridge_run["simulator"].as_str().unwrap_or("")
+            ),
+        );
+
+        let invalid_simulation_bridge_payload =
+            simulation_validation_request_to_json(&SimulationValidationRequest {
+                engine_id: "simpy".to_string(),
+                model_format: "json-event-network".to_string(),
+                model: serde_json::json!({
+                    "servers": 1,
+                    "arrival_times": [0.0, 1.0, 2.0],
+                    "service_times": [1.0, 1.0, 1.0]
+                }),
+                scenario: Some(serde_json::json!({"horizon": 10.0})),
+                expected_trace_properties: vec!["queue_length_never_negative".to_string()],
+                metric_expectations: vec![SimulationMetricExpectation {
+                    name: "mean_wait".to_string(),
+                    target: 2.0,
+                    tolerance: 0.1,
+                    comparison: "within-absolute".to_string(),
+                }],
+            });
+        let invalid_simulation_bridge_run = self.run_python_json(
+            "simulation_validation_reference.py",
+            &["--engine", "simpy"],
+            &invalid_simulation_bridge_payload.to_string(),
+        );
+        self.check(
+            "External validation simulation bridge invalid payload",
+            invalid_simulation_bridge_run["status"].as_str() == Some("ok")
+                && invalid_simulation_bridge_run["verdict"].as_str() == Some("invalid")
+                && invalid_simulation_bridge_run["checks"]
+                    .as_array()
+                    .is_some_and(|checks| {
+                        checks.iter().any(|check| {
+                            check["name"].as_str() == Some("mean_wait")
+                                && check["passed"].as_bool() == Some(false)
+                        })
+                    }),
+            format!(
+                "status={} verdict={} message={}",
+                invalid_simulation_bridge_run["status"]
+                    .as_str()
+                    .unwrap_or(""),
+                invalid_simulation_bridge_run["verdict"]
+                    .as_str()
+                    .unwrap_or(""),
+                invalid_simulation_bridge_run["message"]
+                    .as_str()
+                    .unwrap_or("")
+            ),
+        );
+
+        let mobility_simulation_payload = serde_json::json!({
+            "kind": "simulation-validation",
+            "engine": "sumo",
+            "model_format": "json-mobility-network",
+            "model": {
+                "routes": [
+                    {"depart": 0.0, "travel_times": [2.0, 3.0]},
+                    {"depart": 1.0, "segments": [{"travel_time": 1.5}, {"travel_time": 2.5}]}
+                ]
+            },
+            "expected_trace_properties": [
+                "departures_before_arrivals",
+                "travel_times_nonnegative",
+                "vehicles_complete"
+            ],
+            "metric_expectations": [
+                {"name": "vehicles_completed", "target": 2.0, "tolerance": 1e-9, "comparison": "equal"},
+                {"name": "mean_travel_time", "target": 4.5, "tolerance": 1e-9, "comparison": "within-absolute"}
+            ]
+        });
+        let mobility_simulation_run = self.run_python_json(
+            "simulation_validation_reference.py",
+            &["--engine", "sumo"],
+            &mobility_simulation_payload.to_string(),
+        );
+        self.check(
+            "External validation mobility simulation bridge valid payload",
+            mobility_simulation_run["status"].as_str() == Some("ok")
+                && mobility_simulation_run["verdict"].as_str() == Some("valid")
+                && mobility_simulation_run["metrics"]["mean_travel_time"].as_f64() == Some(4.5)
+                && mobility_simulation_run["simulator"]
+                    .as_str()
+                    .is_some_and(|simulator| simulator.contains("sumo")),
+            format!(
+                "status={} verdict={} simulator={}",
+                mobility_simulation_run["status"].as_str().unwrap_or(""),
+                mobility_simulation_run["verdict"].as_str().unwrap_or(""),
+                mobility_simulation_run["simulator"].as_str().unwrap_or("")
+            ),
+        );
+
+        let energy_simulation_payload = serde_json::json!({
+            "kind": "simulation-validation",
+            "engine": "energyplus",
+            "model_format": "json-energy-balance",
+            "model": {
+                "initial_temp": 20.0,
+                "setpoint": 21.0,
+                "outdoor_temp": 10.0,
+                "ua": 0.1,
+                "heat_capacity": 10.0,
+                "hvac_power": 2.0,
+                "internal_gain": 0.1
+            },
+            "scenario": {"horizon": 2.0, "step": 1.0},
+            "expected_trace_properties": [
+                "energy_nonnegative",
+                "temperatures_finite",
+                "temperature_within_bounds"
+            ],
+            "metric_expectations": [
+                {"name": "zones", "target": 1.0, "tolerance": 1e-9, "comparison": "equal"},
+                {"name": "energy_kwh", "target": 0.0, "tolerance": 10.0, "comparison": "greater-equal"}
+            ]
+        });
+        let energy_simulation_run = self.run_python_json(
+            "simulation_validation_reference.py",
+            &["--engine", "energyplus"],
+            &energy_simulation_payload.to_string(),
+        );
+        self.check(
+            "External validation energy simulation bridge valid payload",
+            energy_simulation_run["status"].as_str() == Some("ok")
+                && energy_simulation_run["verdict"].as_str() == Some("valid")
+                && energy_simulation_run["metrics"]["zones"].as_f64() == Some(1.0)
+                && energy_simulation_run["simulator"]
+                    .as_str()
+                    .is_some_and(|simulator| simulator.contains("energyplus")),
+            format!(
+                "status={} verdict={} energy={:?}",
+                energy_simulation_run["status"].as_str().unwrap_or(""),
+                energy_simulation_run["verdict"].as_str().unwrap_or(""),
+                energy_simulation_run["metrics"]["energy_kwh"].as_f64()
+            ),
+        );
+
+        let physics_simulation_payload = serde_json::json!({
+            "kind": "simulation-validation",
+            "engine": "mujoco",
+            "model_format": "json-physics-trajectory",
+            "model": {
+                "initial_position": 0.0,
+                "initial_velocity": 0.0,
+                "acceleration": 1.0,
+                "floor": 0.0
+            },
+            "scenario": {"dt": 0.5, "steps": 4},
+            "expected_trace_properties": [
+                "positions_finite",
+                "velocities_finite",
+                "path_length_nonnegative",
+                "stays_above_floor"
+            ],
+            "metric_expectations": [
+                {"name": "final_position", "target": 2.5, "tolerance": 1e-9, "comparison": "within-absolute"},
+                {"name": "final_velocity", "target": 2.0, "tolerance": 1e-9, "comparison": "within-absolute"}
+            ]
+        });
+        let physics_simulation_run = self.run_python_json(
+            "simulation_validation_reference.py",
+            &["--engine", "mujoco"],
+            &physics_simulation_payload.to_string(),
+        );
+        self.check(
+            "External validation physics simulation bridge valid payload",
+            physics_simulation_run["status"].as_str() == Some("ok")
+                && physics_simulation_run["verdict"].as_str() == Some("valid")
+                && physics_simulation_run["metrics"]["final_position"].as_f64() == Some(2.5)
+                && physics_simulation_run["simulator"]
+                    .as_str()
+                    .is_some_and(|simulator| simulator.contains("mujoco")),
+            format!(
+                "status={} verdict={} final_position={:?}",
+                physics_simulation_run["status"].as_str().unwrap_or(""),
+                physics_simulation_run["verdict"].as_str().unwrap_or(""),
+                physics_simulation_run["metrics"]["final_position"].as_f64()
+            ),
+        );
+
+        let agent_simulation_payload = serde_json::json!({
+            "kind": "simulation-validation",
+            "engine": "mesa",
+            "model_format": "json-agent-based",
+            "model": {
+                "agents": [{"state": "idle"}, {"state": "busy"}],
+                "interactions": [{"source": 0, "target": 1}]
+            },
+            "scenario": {"steps": 2},
+            "expected_trace_properties": [
+                "agents_nonempty",
+                "states_present",
+                "interactions_reference_agents"
+            ]
+        });
+        let agent_simulation_run = self.run_python_json(
+            "simulation_validation_reference.py",
+            &["--engine", "mesa"],
+            &agent_simulation_payload.to_string(),
+        );
+        self.check(
+            "External validation agent simulation bridge valid payload",
+            agent_simulation_run["status"].as_str() == Some("ok")
+                && agent_simulation_run["verdict"].as_str() == Some("valid")
+                && agent_simulation_run["metrics"]["agents"].as_f64() == Some(2.0)
+                && agent_simulation_run["simulator"]
+                    .as_str()
+                    .is_some_and(|simulator| simulator.contains("mesa")),
+            format!(
+                "status={} verdict={} agents={:?}",
+                agent_simulation_run["status"].as_str().unwrap_or(""),
+                agent_simulation_run["verdict"].as_str().unwrap_or(""),
+                agent_simulation_run["metrics"]["agents"].as_f64()
+            ),
+        );
+
+        let distributed_simulation_payload = serde_json::json!({
+            "kind": "simulation-validation",
+            "engine": "simgrid",
+            "model_format": "json-distributed-system",
+            "model": {
+                "hosts": [{"capacity": 4}],
+                "links": [{"bandwidth": 10}],
+                "tasks": [{"work": 3}]
+            },
+            "expected_trace_properties": [
+                "hosts_have_capacity",
+                "links_nonnegative",
+                "tasks_schedulable"
+            ]
+        });
+        let distributed_simulation_run = self.run_python_json(
+            "simulation_validation_reference.py",
+            &["--engine", "simgrid"],
+            &distributed_simulation_payload.to_string(),
+        );
+        self.check(
+            "External validation distributed simulation bridge valid payload",
+            distributed_simulation_run["status"].as_str() == Some("ok")
+                && distributed_simulation_run["verdict"].as_str() == Some("valid")
+                && distributed_simulation_run["metrics"]["hosts"].as_f64() == Some(1.0)
+                && distributed_simulation_run["simulator"]
+                    .as_str()
+                    .is_some_and(|simulator| simulator.contains("simgrid")),
+            format!(
+                "status={} verdict={} hosts={:?}",
+                distributed_simulation_run["status"].as_str().unwrap_or(""),
+                distributed_simulation_run["verdict"].as_str().unwrap_or(""),
+                distributed_simulation_run["metrics"]["hosts"].as_f64()
+            ),
+        );
+
+        let process_simulation_payload = serde_json::json!({
+            "kind": "simulation-validation",
+            "engine": "neqsim",
+            "model_format": "json-process-flow",
+            "model": {
+                "units": [{"name": "mixer"}],
+                "streams": [
+                    {"from": "source", "to": "mixer", "flow": 5},
+                    {"from": "mixer", "to": "sink", "flow": 5}
+                ]
+            },
+            "expected_trace_properties": [
+                "units_present",
+                "streams_nonnegative",
+                "mass_balance_closed"
+            ]
+        });
+        let process_simulation_run = self.run_python_json(
+            "simulation_validation_reference.py",
+            &["--engine", "neqsim"],
+            &process_simulation_payload.to_string(),
+        );
+        self.check(
+            "External validation process simulation bridge valid payload",
+            process_simulation_run["status"].as_str() == Some("ok")
+                && process_simulation_run["verdict"].as_str() == Some("valid")
+                && process_simulation_run["metrics"]["mass_balance_error"].as_f64() == Some(0.0)
+                && process_simulation_run["simulator"]
+                    .as_str()
+                    .is_some_and(|simulator| simulator.contains("neqsim")),
+            format!(
+                "status={} verdict={} mass_balance_error={:?}",
+                process_simulation_run["status"].as_str().unwrap_or(""),
+                process_simulation_run["verdict"].as_str().unwrap_or(""),
+                process_simulation_run["metrics"]["mass_balance_error"].as_f64()
+            ),
+        );
+
+        self.check(
+            "External validation text CLI defaults and verdict inference",
+            external_validation_default_text_cli_args("z3", ExternalValidationTextFormat::SmtLib2)
+                == &["-in", "-smt2"]
+                && external_validation_default_text_cli_args(
+                    "kissat",
+                    ExternalValidationTextFormat::DimacsCnf,
+                ) == &["-"]
+                && infer_external_validation_text_verdict(
+                    ExternalValidationTextFormat::SmtLib2,
+                    "unsat\n",
+                    "",
+                    true,
+                ) == ExternalValidationTextVerdict::Unsat
+                && infer_external_validation_text_verdict(
+                    ExternalValidationTextFormat::TlaPlus,
+                    "Invariant violated: counterexample follows",
+                    "",
+                    true,
+                ) == ExternalValidationTextVerdict::Invalid,
+            "checked default stdin profiles and normalized verdicts".to_string(),
+        );
+
+        let smt_path = PathBuf::from("model.smt2");
+        self.check(
+            "External validation file CLI defaults",
+            external_validation_default_file_cli_args(
+                "z3",
+                ExternalValidationTextFormat::SmtLib2,
+                &smt_path,
+            ) == vec!["-smt2".to_string(), "model.smt2".to_string()]
+                && external_validation_default_file_cli_args(
+                    "kissat",
+                    ExternalValidationTextFormat::DimacsCnf,
+                    &smt_path,
+                ) == vec!["model.smt2".to_string()]
+                && ExternalValidationTextFormat::PrismModel.file_extension() == "pm",
+            "checked default file-path profiles and extensions".to_string(),
+        );
+
+        let mut artifact_paths = BTreeMap::new();
+        artifact_paths.insert("model".to_string(), PathBuf::from("model.pm"));
+        artifact_paths.insert("properties".to_string(), PathBuf::from("model.pctl"));
+        artifact_paths.insert("cnf".to_string(), PathBuf::from("problem.cnf"));
+        artifact_paths.insert("proof".to_string(), PathBuf::from("proof.drat"));
+        let artifact_placeholder_args = external_validation_artifact_cli_args(
+            &ExternalValidationArtifactCliOptions {
+                tool_id: "prism".to_string(),
+                input_format: ExternalValidationTextFormat::PrismModel,
+                command_path: None,
+                working_dir: None,
+                extra_args: vec![
+                    "--model={model}".to_string(),
+                    "--props={properties}".to_string(),
+                ],
+                use_default_args: false,
+            },
+            &artifact_paths,
+        );
+        self.check(
+            "External validation artifact CLI defaults and placeholders",
+            external_validation_default_artifact_cli_args(
+                "prism",
+                ExternalValidationTextFormat::PrismModel,
+                &artifact_paths,
+            ) == vec!["model.pm".to_string(), "model.pctl".to_string()]
+                && external_validation_default_artifact_cli_args(
+                    "drat-trim",
+                    ExternalValidationTextFormat::DimacsCnf,
+                    &artifact_paths,
+                ) == vec!["problem.cnf".to_string(), "proof.drat".to_string()]
+                && artifact_placeholder_args
+                    == vec![
+                        "--model=model.pm".to_string(),
+                        "--props=model.pctl".to_string(),
+                    ],
+            "checked multi-artifact defaults for PRISM/DRAT and named placeholders".to_string(),
+        );
+
+        if let Some(z3) = specs.iter().find(|spec| spec.id == "z3") {
+            let z3_probe = probe_external_validation_tool(z3);
+            if z3_probe.status == ExternalValidationProbeStatus::Ready {
+                let z3_run = run_external_validation_text_cli(
+                    &smtlib,
+                    &ExternalValidationTextCliOptions {
+                        tool_id: "z3".to_string(),
+                        input_format: ExternalValidationTextFormat::SmtLib2,
+                        command_path: z3_probe.command.clone(),
+                        working_dir: None,
+                        extra_args: Vec::new(),
+                        use_default_args: true,
+                    },
+                );
+                let verdict = z3_run
+                    .output
+                    .as_ref()
+                    .and_then(|output| output["verdict"].as_str())
+                    .unwrap_or("");
+                self.check(
+                    "External validation Z3 direct SMT-LIB text CLI",
+                    z3_run.status == ExternalValidationRunStatus::Ok && verdict == "sat",
+                    format!(
+                        "status={} verdict={} message={}",
+                        z3_run.status.as_str(),
+                        verdict,
+                        z3_run.message
+                    ),
+                );
+                let z3_file_run = run_external_validation_file_cli(
+                    &smtlib,
+                    &ExternalValidationFileCliOptions {
+                        tool_id: "z3".to_string(),
+                        input_format: ExternalValidationTextFormat::SmtLib2,
+                        command_path: z3_probe.command.clone(),
+                        working_dir: None,
+                        extra_args: Vec::new(),
+                        use_default_args: true,
+                        append_input_path: true,
+                        file_extension: None,
+                    },
+                );
+                let file_verdict = z3_file_run
+                    .output
+                    .as_ref()
+                    .and_then(|output| output["verdict"].as_str())
+                    .unwrap_or("");
+                let temp_removed = z3_file_run
+                    .output
+                    .as_ref()
+                    .and_then(|output| output["temp_file_removed"].as_bool())
+                    .unwrap_or(false);
+                self.check(
+                    "External validation Z3 direct SMT-LIB file CLI",
+                    z3_file_run.status == ExternalValidationRunStatus::Ok
+                        && file_verdict == "sat"
+                        && temp_removed,
+                    format!(
+                        "status={} verdict={} temp_removed={} message={}",
+                        z3_file_run.status.as_str(),
+                        file_verdict,
+                        temp_removed,
+                        z3_file_run.message
+                    ),
+                );
+                let z3_artifact = ExternalValidationArtifact {
+                    key: "model".to_string(),
+                    contents: smtlib.clone(),
+                    file_name: Some("model.smt2".to_string()),
+                    file_extension: None,
+                };
+                let z3_artifact_run = run_external_validation_artifact_cli(
+                    &[z3_artifact.clone()],
+                    &ExternalValidationArtifactCliOptions {
+                        tool_id: "z3".to_string(),
+                        input_format: ExternalValidationTextFormat::SmtLib2,
+                        command_path: z3_probe.command.clone(),
+                        working_dir: None,
+                        extra_args: vec!["{model}".to_string()],
+                        use_default_args: false,
+                    },
+                );
+                let artifact_verdict = z3_artifact_run
+                    .output
+                    .as_ref()
+                    .and_then(|output| output["verdict"].as_str())
+                    .unwrap_or("");
+                let artifact_temp_removed = z3_artifact_run
+                    .output
+                    .as_ref()
+                    .and_then(|output| output["temp_dir_removed"].as_bool())
+                    .unwrap_or(false);
+                self.check(
+                    "External validation Z3 direct SMT-LIB artifact CLI",
+                    z3_artifact_run.status == ExternalValidationRunStatus::Ok
+                        && artifact_verdict == "sat"
+                        && artifact_temp_removed,
+                    format!(
+                        "status={} verdict={} temp_removed={} message={}",
+                        z3_artifact_run.status.as_str(),
+                        artifact_verdict,
+                        artifact_temp_removed,
+                        z3_artifact_run.message
+                    ),
+                );
+                let consensus = run_external_validation_consensus(
+                    &smtlib,
+                    &[
+                        ExternalValidationCliInvocation::Text {
+                            label: "z3-stdin".to_string(),
+                            options: ExternalValidationTextCliOptions {
+                                tool_id: "z3".to_string(),
+                                input_format: ExternalValidationTextFormat::SmtLib2,
+                                command_path: z3_probe.command.clone(),
+                                working_dir: None,
+                                extra_args: Vec::new(),
+                                use_default_args: true,
+                            },
+                        },
+                        ExternalValidationCliInvocation::File {
+                            label: "z3-file".to_string(),
+                            options: ExternalValidationFileCliOptions {
+                                tool_id: "z3".to_string(),
+                                input_format: ExternalValidationTextFormat::SmtLib2,
+                                command_path: z3_probe.command.clone(),
+                                working_dir: None,
+                                extra_args: Vec::new(),
+                                use_default_args: true,
+                                append_input_path: true,
+                                file_extension: None,
+                            },
+                        },
+                        ExternalValidationCliInvocation::Artifact {
+                            label: "z3-artifact".to_string(),
+                            artifacts: vec![z3_artifact],
+                            options: ExternalValidationArtifactCliOptions {
+                                tool_id: "z3".to_string(),
+                                input_format: ExternalValidationTextFormat::SmtLib2,
+                                command_path: z3_probe.command.clone(),
+                                working_dir: None,
+                                extra_args: vec!["{model}".to_string()],
+                                use_default_args: false,
+                            },
+                        },
+                    ],
+                    Some(ExternalValidationTextVerdict::Sat),
+                );
+                let consensus_json = external_validation_consensus_report_to_json(&consensus);
+                self.check(
+                    "External validation Z3 SMT-LIB consensus report",
+                    consensus.agreement
+                        && consensus.agreed_verdict == Some(ExternalValidationTextVerdict::Sat)
+                        && consensus_json["agreement"].as_bool() == Some(true)
+                        && consensus_json["runs"].as_array().map(Vec::len) == Some(3),
+                    format!(
+                        "agreement={} agreed={:?} runs={}",
+                        consensus.agreement,
+                        consensus.agreed_verdict,
+                        consensus.runs.len()
+                    ),
+                );
+            } else {
+                println!("  SKIP  Z3 direct SMT-LIB text CLI: {}", z3_probe.message);
+            }
+        }
+
+        for spec in specs {
+            let probe = probe_external_validation_tool(spec);
+            match probe.status {
+                ExternalValidationProbeStatus::Ready => self.check(
+                    format!("External validation {} probe ready", spec.display_name),
+                    true,
+                    format!(
+                        "family={} command={:?} message={}",
+                        spec.family.as_str(),
+                        probe.command,
+                        probe.message
+                    ),
+                ),
+                ExternalValidationProbeStatus::NotConfigured => {
+                    println!("  SKIP  {}: {}", spec.display_name, probe.message);
+                }
+                ExternalValidationProbeStatus::RuntimeMissing
+                | ExternalValidationProbeStatus::AdapterMissing
+                | ExternalValidationProbeStatus::ArtifactMissing => self.check(
+                    format!("External validation {} probe usable", spec.display_name),
+                    false,
+                    format!("status={} message={}", probe.status.as_str(), probe.message),
+                ),
             }
         }
     }
@@ -4529,6 +6747,38 @@ impl Driver {
             1e-8,
         );
         self.max_abs_close("QP x", &internal.x, &reference.x, 1e-7);
+        for solver in ["osqp", "cvxpy", "scs", "clarabel", "ecos"] {
+            let value =
+                self.run_python_json_lenient("qp_reference.py", &["--solver", solver], &qp_json);
+            let optional_reference: QPReference =
+                serde_json::from_value(value).expect("parse optional QP reference");
+            let recognized = optional_reference.status == "optimal"
+                || optional_reference.status == "unavailable";
+            self.check(
+                format!("QP optional {solver} bridge recognized"),
+                recognized,
+                format!(
+                    "status={} solver={}",
+                    optional_reference.status, optional_reference.solver
+                ),
+            );
+            if optional_reference.status == "optimal" {
+                let objective_check = format!("QP optional {solver} objective");
+                self.close(
+                    &objective_check,
+                    internal.objective,
+                    optional_reference.objective.unwrap_or(f64::NAN),
+                    1e-4,
+                );
+                let x_check = format!("QP optional {solver} x");
+                self.max_abs_close(&x_check, &internal.x, &optional_reference.x, 1e-4);
+            } else {
+                println!(
+                    "  SKIP  QP optional {solver}: {}",
+                    optional_reference.solver
+                );
+            }
+        }
         self.max_abs_close_optional(
             "QP dual_ub internal expected",
             Some(internal.dual_ub.as_slice()),
@@ -7044,6 +9294,8 @@ impl Driver {
         self.validate_lp();
         self.validate_ip_mip();
         self.validate_external_solver_clis();
+        self.validate_external_optimization_ecosystem_adapters();
+        self.validate_external_validation_tool_adapters();
         self.validate_min_cost_flow();
         self.validate_qp();
         self.validate_cp_sat();

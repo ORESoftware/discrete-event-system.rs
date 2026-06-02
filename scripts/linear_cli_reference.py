@@ -34,10 +34,29 @@ COMMAND_ALIASES = {
     "gurobi": ["gurobi_cl"],
     "cplex": ["cplex"],
     "xpress": ["optimizer", "xpress"],
-    "lindo": ["lindo", "lindoapi"],
+    "lindo": ["runlindo", "lindo", "lindoapi"],
 }
 
-SUPPORTED_SOLVERS = {"glpk", "highs", "scip", "cbc", "clp", "gurobi", "cplex"}
+SUPPORTED_SOLVERS = {
+    "glpk",
+    "highs",
+    "scip",
+    "cbc",
+    "clp",
+    "gurobi",
+    "cplex",
+    "xpress",
+    "lindo",
+}
+
+
+def solver_env_names(solver: str) -> list[str]:
+    upper = solver.upper().replace("-", "_")
+    return [
+        f"ORES_{upper}_BIN",
+        f"DES_{upper}_BIN",
+        f"{upper}_BIN",
+    ]
 
 
 def status_payload(status: str, solver: str, message: str = "") -> dict:
@@ -155,6 +174,106 @@ def write_cplex_lp(
             f.write("Binary\n")
             f.write(" " + " ".join(names[i] for i in binary_vars) + "\n")
         f.write("End\n")
+    return names
+
+
+def mps_number(value: float) -> str:
+    return f"{float(value):.12g}"
+
+
+def is_binary_var(
+    index: int,
+    lbs: Sequence[Optional[float]],
+    ubs: Sequence[Optional[float]],
+    integer_vars: Sequence[bool],
+) -> bool:
+    return (
+        bool(integer_vars[index])
+        and (lbs[index] is None or abs(float(lbs[index])) <= 1e-12)
+        and ubs[index] is not None
+        and abs(float(ubs[index]) - 1.0) <= 1e-12
+    )
+
+
+def write_mps(
+    path: str,
+    sense: str,
+    c: Sequence[float],
+    le_rows: Sequence[Sequence[float]],
+    le_rhs: Sequence[float],
+    eq_rows: Sequence[Sequence[float]],
+    eq_rhs: Sequence[float],
+    lbs: Sequence[Optional[float]],
+    ubs: Sequence[Optional[float]],
+    integer_vars: Sequence[bool],
+) -> list[str]:
+    n = len(c)
+    names = [var_name(i) for i in range(n)]
+    le_names = [f"c{i}" for i in range(len(le_rows))]
+    eq_names = [f"e{i}" for i in range(len(eq_rows))]
+    objective = [float(v) if sense == "min" else -float(v) for v in c]
+    integer_indices = [i for i, is_int in enumerate(integer_vars) if is_int]
+    integer_set = set(integer_indices)
+
+    def write_column(f, index: int) -> None:
+        name = names[index]
+        obj = objective[index]
+        if abs(obj) > 1e-12:
+            f.write(f"    {name:<8}  OBJ       {mps_number(obj)}\n")
+        for row_name, row in zip(le_names, le_rows):
+            coef = float(row[index])
+            if abs(coef) > 1e-12:
+                f.write(f"    {name:<8}  {row_name:<8}  {mps_number(coef)}\n")
+        for row_name, row in zip(eq_names, eq_rows):
+            coef = float(row[index])
+            if abs(coef) > 1e-12:
+                f.write(f"    {name:<8}  {row_name:<8}  {mps_number(coef)}\n")
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("NAME          ORES\n")
+        f.write("ROWS\n")
+        f.write(" N  OBJ\n")
+        for row_name in le_names:
+            f.write(f" L  {row_name}\n")
+        for row_name in eq_names:
+            f.write(f" E  {row_name}\n")
+        f.write("COLUMNS\n")
+        for i in range(n):
+            if i not in integer_set:
+                write_column(f, i)
+        if integer_indices:
+            f.write("    MARK0000  'MARKER'                 'INTORG'\n")
+            for i in integer_indices:
+                write_column(f, i)
+            f.write("    MARK0001  'MARKER'                 'INTEND'\n")
+        if le_rows or eq_rows:
+            f.write("RHS\n")
+            for row_name, rhs in zip(le_names, le_rhs):
+                f.write(f"    RHS1      {row_name:<8}  {mps_number(rhs)}\n")
+            for row_name, rhs in zip(eq_names, eq_rhs):
+                f.write(f"    RHS1      {row_name:<8}  {mps_number(rhs)}\n")
+        f.write("BOUNDS\n")
+        for i, name in enumerate(names):
+            lb = lbs[i]
+            ub = ubs[i]
+            if is_binary_var(i, lbs, ubs, integer_vars):
+                f.write(f" BV BND1      {name}\n")
+                continue
+            if lb is None and ub is None:
+                f.write(f" FR BND1      {name}\n")
+            elif lb is None:
+                f.write(f" MI BND1      {name}\n")
+                f.write(f" UP BND1      {name:<8}  {mps_number(ub)}\n")
+            elif ub is None:
+                if abs(float(lb)) > 1e-12:
+                    f.write(f" LO BND1      {name:<8}  {mps_number(lb)}\n")
+            elif abs(float(lb) - float(ub)) <= 1e-12:
+                f.write(f" FX BND1      {name:<8}  {mps_number(lb)}\n")
+            else:
+                if abs(float(lb)) > 1e-12:
+                    f.write(f" LO BND1      {name:<8}  {mps_number(lb)}\n")
+                f.write(f" UP BND1      {name:<8}  {mps_number(ub)}\n")
+        f.write("ENDATA\n")
     return names
 
 
@@ -282,6 +401,41 @@ def parse_named_solution(path: str, n: int, default_status: str = "optimal") -> 
     return status, x
 
 
+def parse_report_solution(path: str, n: int, default_status: str = "optimal") -> tuple[str, list[float]]:
+    x = [0.0] * n
+    status = default_status
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            stripped = line.strip()
+            lower = stripped.lower()
+            if not stripped:
+                continue
+            if "infeasible" in lower and "not infeasible" not in lower:
+                status = "infeasible"
+            elif "unbounded" in lower:
+                status = "unbounded"
+            elif "optimal" in lower or "global optimum" in lower:
+                status = default_status
+
+            parts = stripped.replace(":", " ").split()
+            for pos, token in enumerate(parts):
+                name = token.rstrip(",;")
+                if not (name.startswith("x") and name[1:].isdigit()):
+                    continue
+                idx = int(name[1:])
+                if not 0 <= idx < n:
+                    break
+                for value_token in parts[pos + 1 :]:
+                    value = value_token.strip(",;")
+                    if value == "*" or value in ("=", ":"):
+                        continue
+                    if _is_number(value):
+                        x[idx] = float(value)
+                        break
+                break
+    return status, x
+
+
 def parse_cplex_solution(path: str, n: int) -> tuple[str, list[float]]:
     try:
         root = ET.parse(path).getroot()
@@ -358,6 +512,19 @@ def solver_available(solver: str) -> bool:
 
 
 def solver_command(solver: str) -> Optional[str]:
+    saw_configured = False
+    for env_name in solver_env_names(solver):
+        configured = os.environ.get(env_name)
+        if configured:
+            saw_configured = True
+            expanded = os.path.expanduser(configured)
+            if os.path.isfile(expanded) and os.access(expanded, os.X_OK):
+                return expanded
+            resolved = shutil.which(configured)
+            if resolved is not None:
+                return resolved
+    if saw_configured:
+        return None
     for command in COMMAND_ALIASES.get(solver, [solver]):
         resolved = shutil.which(command)
         if resolved is not None:
@@ -365,10 +532,58 @@ def solver_command(solver: str) -> Optional[str]:
     return None
 
 
-def run_solver(solver: str, model_path: str, solution_path: str, time_limit: float) -> tuple[str, str]:
+def format_float(value: float) -> str:
+    return f"{value:.17g}"
+
+
+def normalize_node_limit(value: Optional[int]) -> Optional[int]:
+    if value is None:
+        return None
+    if value <= 0:
+        raise ValueError("node limit must be positive")
+    return value
+
+
+def normalize_relative_gap(value: Optional[float]) -> Optional[float]:
+    if value is None:
+        return None
+    if not math.isfinite(value) or value < 0.0:
+        raise ValueError("relative gap must be finite and non-negative")
+    return value
+
+
+def normalize_threads(value: Optional[int]) -> Optional[int]:
+    if value is None:
+        return None
+    if value <= 0:
+        raise ValueError("thread count must be positive")
+    return value
+
+
+def normalize_random_seed(value: Optional[int]) -> Optional[int]:
+    if value is None:
+        return None
+    if value < 0 or value > 2_147_483_647:
+        raise ValueError("random seed must be in [0, 2147483647]")
+    return value
+
+
+def run_solver(
+    kind: str,
+    solver: str,
+    model_path: str,
+    solution_path: str,
+    time_limit: float,
+    model_format: str,
+    node_limit: Optional[int] = None,
+    relative_gap: Optional[float] = None,
+    threads: Optional[int] = None,
+    random_seed: Optional[int] = None,
+) -> tuple[str, str]:
     command = solver_command(solver)
     if command is None:
         raise ValueError(f"{solver} executable not found")
+    input_text = None
     if solver == "highs":
         cmd = [
             command,
@@ -379,33 +594,70 @@ def run_solver(solver: str, model_path: str, solution_path: str, time_limit: flo
             "--time_limit",
             str(time_limit),
         ]
+        if (
+            node_limit is not None
+            or relative_gap is not None
+            or threads is not None
+            or random_seed is not None
+        ):
+            options_path = os.path.join(os.path.dirname(model_path), "highs.options")
+            with open(options_path, "w", encoding="utf-8") as f:
+                if node_limit is not None:
+                    f.write(f"mip_max_nodes = {node_limit}\n")
+                if relative_gap is not None:
+                    f.write(f"mip_rel_gap = {format_float(relative_gap)}\n")
+                if threads is not None:
+                    f.write(f"threads = {threads}\n")
+                if random_seed is not None:
+                    f.write(f"random_seed = {random_seed}\n")
+            cmd.extend(["--options_file", options_path])
     elif solver == "glpk":
-        cmd = [command, "--lp", model_path, "-o", solution_path, "--tmlim", str(max(1, int(math.ceil(time_limit))))]
-    elif solver == "scip":
+        format_arg = "--freemps" if model_format == "mps" else "--lp"
+        solution_arg = "--write" if kind == "lp" else "-o"
         cmd = [
             command,
-            "-q",
-            "-c",
-            f"read {model_path}",
-            "-c",
-            f"set limits time {time_limit}",
-            "-c",
-            "optimize",
-            "-c",
-            f"write solution {solution_path}",
-            "-c",
-            "quit",
+            format_arg,
+            model_path,
+            solution_arg,
+            solution_path,
+            "--tmlim",
+            str(max(1, int(math.ceil(time_limit)))),
         ]
+        if relative_gap is not None:
+            cmd.extend(["--mipgap", format_float(relative_gap)])
+    elif solver == "scip":
+        commands = [
+            f"read {model_path}",
+            f"set limits time {time_limit}",
+        ]
+        if node_limit is not None:
+            commands.append(f"set limits nodes {node_limit}")
+        if relative_gap is not None:
+            commands.append(f"set limits gap {format_float(relative_gap)}")
+        if threads is not None:
+            commands.append(f"set parallel maxnthreads {threads}")
+        if random_seed is not None:
+            commands.append(f"set randomization randomseedshift {random_seed}")
+        commands.extend(["optimize", f"write solution {solution_path}", "quit"])
+        cmd = [command, "-q"]
+        for scip_command in commands:
+            cmd.extend(["-c", scip_command])
     elif solver == "cbc":
         cmd = [
             command,
             model_path,
             "-seconds",
             str(time_limit),
-            "-solve",
-            "-solution",
-            solution_path,
         ]
+        if node_limit is not None:
+            cmd.extend(["-maxNodes", str(node_limit)])
+        if relative_gap is not None:
+            cmd.extend(["-ratioGap", format_float(relative_gap)])
+        if threads is not None:
+            cmd.extend(["-threads", str(threads)])
+        if random_seed is not None:
+            cmd.extend(["-randomSeed", str(random_seed), "-randomCbcSeed", str(random_seed)])
+        cmd.extend(["-solve", "-solution", solution_path])
     elif solver == "clp":
         cmd = [
             command,
@@ -421,31 +673,79 @@ def run_solver(solver: str, model_path: str, solution_path: str, time_limit: flo
             command,
             f"ResultFile={solution_path}",
             f"TimeLimit={time_limit}",
-            model_path,
         ]
+        if node_limit is not None:
+            cmd.append(f"NodeLimit={node_limit}")
+        if relative_gap is not None:
+            cmd.append(f"MIPGap={format_float(relative_gap)}")
+        if threads is not None:
+            cmd.append(f"Threads={threads}")
+        if random_seed is not None:
+            cmd.append(f"Seed={random_seed}")
+        cmd.append(model_path)
     elif solver == "cplex":
-        cmd = [
-            command,
-            "-c",
+        commands = [
             f"read {model_path}",
             f"set timelimit {time_limit}",
-            "optimize",
-            f"write {solution_path}",
-            "quit",
         ]
+        if node_limit is not None:
+            commands.append(f"set mip limits nodes {node_limit}")
+        if relative_gap is not None:
+            commands.append(f"set mip tolerances mipgap {format_float(relative_gap)}")
+        if threads is not None:
+            commands.append(f"set threads {threads}")
+        if random_seed is not None:
+            commands.append(f"set randomseed {random_seed}")
+        commands.extend(["optimize", f"write {solution_path}", "quit"])
+        cmd = [command, "-c", *commands]
+    elif solver == "xpress":
+        solve_command = "mipoptimize" if kind == "mip" else "lpoptimize"
+        commands = [
+            f"readprob {model_path}",
+            f"setparam MAXTIME {format_float(time_limit)}",
+        ]
+        if node_limit is not None:
+            commands.append(f"setparam MAXNODE {node_limit}")
+        if relative_gap is not None:
+            commands.append(f"setparam MIPRELSTOP {format_float(relative_gap)}")
+        if threads is not None:
+            commands.append(f"setparam THREADS {threads}")
+        if random_seed is not None:
+            commands.append(f"setparam RANDOMSEED {random_seed}")
+        commands.extend([solve_command, f"writeprtsol {solution_path}", "quit"])
+        cmd = [command]
+        input_text = "\n".join(commands) + "\n"
+    elif solver == "lindo":
+        cmd = [command, model_path, "-sol"]
     else:
         raise ValueError(f"unknown CLI solver '{solver}'")
     run = subprocess.run(
         cmd,
         text=True,
+        input=input_text,
         capture_output=True,
         check=False,
         cwd=os.path.dirname(model_path),
+        timeout=max(5.0, float(time_limit) + 5.0),
     )
+    if solver == "lindo" and not os.path.exists(solution_path):
+        automatic_solution_path = os.path.splitext(model_path)[0] + ".sol"
+        if os.path.exists(automatic_solution_path):
+            shutil.copyfile(automatic_solution_path, solution_path)
     return run.stdout, run.stderr
 
 
-def solve(kind: str, solver: str, raw: dict, time_limit: float) -> dict:
+def solve(
+    kind: str,
+    solver: str,
+    raw: dict,
+    time_limit: float,
+    model_format: str,
+    node_limit: Optional[int] = None,
+    relative_gap: Optional[float] = None,
+    threads: Optional[int] = None,
+    random_seed: Optional[int] = None,
+) -> dict:
     if not solver_available(solver):
         return status_payload("unavailable", f"{solver}:cli", f"{solver} executable not found")
     if solver not in SUPPORTED_SOLVERS:
@@ -455,6 +755,10 @@ def solve(kind: str, solver: str, raw: dict, time_limit: float) -> dict:
             f"{solver} executable found, but this bridge does not yet know the non-interactive solve command",
         )
 
+    solver_node_limit = None
+    solver_relative_gap = None
+    solver_threads = normalize_threads(threads)
+    solver_random_seed = normalize_random_seed(random_seed)
     if kind == "lp":
         lp = raw.get("lp", raw)
         sense, c, a_ub, b_ub, a_eq, b_eq, lbs, ubs = normalize_lp(lp)
@@ -462,16 +766,33 @@ def solve(kind: str, solver: str, raw: dict, time_limit: float) -> dict:
     elif kind == "mip":
         if solver == "clp":
             return status_payload("unavailable", "clp:cli", "CLP is LP-only")
+        solver_node_limit = normalize_node_limit(node_limit)
+        solver_relative_gap = normalize_relative_gap(relative_gap)
         sense, c, a_ub, b_ub, lbs, ubs, integer_vars = normalize_mip(raw)
         a_eq, b_eq = [], []
     else:
         raise ValueError("kind must be 'lp' or 'mip'")
 
     with tempfile.TemporaryDirectory(prefix="ores-linear-cli-") as tmp:
-        model_path = os.path.join(tmp, "model.lp")
+        extension = "mps" if model_format == "mps" else "lp"
+        model_path = os.path.join(tmp, f"model.{extension}")
         solution_path = os.path.join(tmp, f"{solver}.sol")
-        write_cplex_lp(model_path, sense, c, a_ub, b_ub, a_eq, b_eq, lbs, ubs, integer_vars)
-        stdout, stderr = run_solver(solver, model_path, solution_path, time_limit)
+        if model_format == "mps":
+            write_mps(model_path, sense, c, a_ub, b_ub, a_eq, b_eq, lbs, ubs, integer_vars)
+        else:
+            write_cplex_lp(model_path, sense, c, a_ub, b_ub, a_eq, b_eq, lbs, ubs, integer_vars)
+        stdout, stderr = run_solver(
+            kind,
+            solver,
+            model_path,
+            solution_path,
+            time_limit,
+            model_format,
+            solver_node_limit,
+            solver_relative_gap,
+            solver_threads,
+            solver_random_seed,
+        )
         if not os.path.exists(solution_path):
             return status_payload("unavailable", f"{solver}:cli", (stderr or stdout).strip())
         if solver == "highs":
@@ -484,6 +805,8 @@ def solve(kind: str, solver: str, raw: dict, time_limit: float) -> dict:
             status, x = parse_named_solution(solution_path, len(c))
         elif solver == "cplex":
             status, x = parse_cplex_solution(solution_path, len(c))
+        elif solver in ("xpress", "lindo"):
+            status, x = parse_report_solution(solution_path, len(c))
         else:
             status, x = parse_cbc_solution(solution_path, len(c))
 
@@ -508,7 +831,12 @@ def main() -> int:
     parser.add_argument("--kind", choices=["lp", "mip"], required=True)
     parser.add_argument("--solver", choices=sorted(COMMAND_ALIASES.keys()), required=True)
     parser.add_argument("--problem")
+    parser.add_argument("--model-format", choices=["lp", "mps"], default="lp")
     parser.add_argument("--time-limit", type=float, default=10.0)
+    parser.add_argument("--node-limit", type=int)
+    parser.add_argument("--relative-gap", type=float)
+    parser.add_argument("--threads", type=int)
+    parser.add_argument("--random-seed", type=int)
     args = parser.parse_args()
     try:
         if args.problem:
@@ -516,7 +844,22 @@ def main() -> int:
                 raw = json.load(f)
         else:
             raw = json.load(sys.stdin)
-        print(json.dumps(solve(args.kind, args.solver, raw, args.time_limit), allow_nan=True))
+        print(
+            json.dumps(
+                solve(
+                    args.kind,
+                    args.solver,
+                    raw,
+                    args.time_limit,
+                    args.model_format,
+                    args.node_limit,
+                    args.relative_gap,
+                    args.threads,
+                    args.random_seed,
+                ),
+                allow_nan=True,
+            )
+        )
         return 0
     except Exception as exc:
         print(json.dumps(status_payload("numerical-error", f"{args.solver}:cli", str(exc)), allow_nan=True))

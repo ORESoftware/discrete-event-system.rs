@@ -874,6 +874,161 @@ def scipy_reference(qp_raw: dict) -> Optional[dict]:
     return with_qp_certificate({"status": "optimal", "solver": "scipy:SLSQP", "x": x, "objective": objective(qp, x), "iterations": int(result.nit), "message": str(result.message)}, qp)
 
 
+def unavailable_reference(solver: str, message: str) -> dict:
+    return {
+        "status": "unavailable",
+        "solver": solver,
+        "x": [],
+        "objective": None,
+        "message": message,
+    }
+
+
+def osqp_reference(qp_raw: dict) -> Optional[dict]:
+    try:
+        import numpy as np  # type: ignore
+        import osqp  # type: ignore
+        from scipy import sparse  # type: ignore
+    except Exception:
+        return None
+
+    qp = normalize(qp_raw)
+    n = len(qp["c"])
+    rows = []
+    lower = []
+    upper = []
+    inf = float("inf")
+    for row, rhs in zip(qp["A_ub"], qp["b_ub"]):
+        rows.append(row)
+        lower.append(-inf)
+        upper.append(float(rhs))
+    for row, rhs in zip(qp["A_eq"], qp["b_eq"]):
+        rows.append(row)
+        lower.append(float(rhs))
+        upper.append(float(rhs))
+    for idx in range(n):
+        row = [0.0] * n
+        row[idx] = 1.0
+        rows.append(row)
+        lower.append(-inf if qp["lb"][idx] is None else float(qp["lb"][idx]))
+        upper.append(inf if qp["ub"][idx] is None else float(qp["ub"][idx]))
+
+    p = sparse.csc_matrix(np.array(qp["Q"], dtype=float))
+    q = np.array(qp["c"], dtype=float)
+    a = sparse.csc_matrix(np.array(rows, dtype=float)) if rows else sparse.csc_matrix((0, n))
+    l = np.array(lower, dtype=float)
+    u = np.array(upper, dtype=float)
+    solver = osqp.OSQP()
+    try:
+        solver.setup(P=p, q=q, A=a, l=l, u=u, verbose=False, polish=True, eps_abs=1e-9, eps_rel=1e-9)
+        result = solver.solve()
+    except Exception as exc:
+        return {
+            "status": "numerical-error",
+            "solver": "osqp",
+            "x": [],
+            "objective": None,
+            "message": str(exc),
+        }
+
+    status = str(result.info.status).lower()
+    if "solved" in status:
+        x = [float(v) for v in result.x]
+        return with_qp_certificate({
+            "status": "optimal",
+            "solver": "osqp",
+            "x": x,
+            "objective": objective(qp, x),
+            "iterations": int(result.info.iter),
+            "message": result.info.status,
+        }, qp)
+    if "primal infeasible" in status:
+        return {"status": "infeasible", "solver": "osqp", "x": [], "objective": None, "message": result.info.status}
+    if "dual infeasible" in status:
+        return {"status": "unbounded", "solver": "osqp", "x": [], "objective": None, "message": result.info.status}
+    return {"status": "numerical-error", "solver": "osqp", "x": [], "objective": None, "message": result.info.status}
+
+
+def cvxpy_solver_name(requested: str, installed: Sequence[str]) -> Optional[str]:
+    if requested == "cvxpy":
+        for candidate in ("CLARABEL", "OSQP", "SCS", "ECOS"):
+            if candidate in installed:
+                return candidate
+        return None
+    mapping = {
+        "osqp": "OSQP",
+        "scs": "SCS",
+        "clarabel": "CLARABEL",
+        "ecos": "ECOS",
+    }
+    return mapping.get(requested)
+
+
+def cvxpy_status_payload(problem, solver_label: str, x_value) -> dict:
+    status = str(problem.status).lower()
+    if status in ("optimal", "optimal_inaccurate"):
+        x = [float(v) for v in x_value]
+        return {
+            "status": "optimal",
+            "solver": solver_label,
+            "x": x,
+            "objective": float(problem.value),
+            "message": str(problem.status),
+        }
+    if "infeasible" in status:
+        return {"status": "infeasible", "solver": solver_label, "x": [], "objective": None, "message": str(problem.status)}
+    if "unbounded" in status:
+        return {"status": "unbounded", "solver": solver_label, "x": [], "objective": None, "message": str(problem.status)}
+    return {"status": "numerical-error", "solver": solver_label, "x": [], "objective": None, "message": str(problem.status)}
+
+
+def cvxpy_reference(qp_raw: dict, requested_solver: str) -> Optional[dict]:
+    try:
+        import cvxpy as cp  # type: ignore
+        import numpy as np  # type: ignore
+    except Exception:
+        return None
+
+    qp = normalize(qp_raw)
+    installed = set(cp.installed_solvers())
+    solver_name = cvxpy_solver_name(requested_solver, installed)
+    if solver_name is None or solver_name not in installed:
+        return unavailable_reference(
+            f"cvxpy:{requested_solver}",
+            f"cvxpy solver '{requested_solver}' is not installed",
+        )
+    x = cp.Variable(len(qp["c"]))
+    q = np.array(qp["Q"], dtype=float)
+    c = np.array(qp["c"], dtype=float)
+    constraints = []
+    if qp["A_ub"]:
+        constraints.append(np.array(qp["A_ub"], dtype=float) @ x <= np.array(qp["b_ub"], dtype=float))
+    if qp["A_eq"]:
+        constraints.append(np.array(qp["A_eq"], dtype=float) @ x == np.array(qp["b_eq"], dtype=float))
+    for idx, value in enumerate(qp["lb"]):
+        if value is not None:
+            constraints.append(x[idx] >= float(value))
+    for idx, value in enumerate(qp["ub"]):
+        if value is not None:
+            constraints.append(x[idx] <= float(value))
+    problem = cp.Problem(cp.Minimize(0.5 * cp.quad_form(x, q) + c @ x), constraints)
+    try:
+        problem.solve(solver=solver_name, verbose=False)
+    except Exception as exc:
+        return {
+            "status": "numerical-error",
+            "solver": f"cvxpy:{solver_name.lower()}",
+            "x": [],
+            "objective": None,
+            "message": str(exc),
+        }
+    result = cvxpy_status_payload(problem, f"cvxpy:{solver_name.lower()}", x.value)
+    if result.get("status") == "optimal":
+        result["objective"] = objective(qp, result["x"])
+        result = with_qp_certificate(result, qp)
+    return result
+
+
 def scipy_socp_reference(raw: dict) -> Optional[dict]:
     try:
         import numpy as np  # type: ignore
@@ -915,6 +1070,55 @@ def scipy_socp_reference(raw: dict) -> Optional[dict]:
         return {"status": "numerical-error", "solver": "scipy:SLSQP-socp", "x": [], "objective": None, "message": str(result.message)}
     x = [float(v) for v in result.x]
     return {"status": "optimal", "solver": "scipy:SLSQP-socp", "x": x, "objective": socp_objective(p, x), "iterations": int(result.nit), "message": str(result.message)}
+
+
+def cvxpy_socp_reference(raw: dict, requested_solver: str) -> Optional[dict]:
+    try:
+        import cvxpy as cp  # type: ignore
+        import numpy as np  # type: ignore
+    except Exception:
+        return None
+
+    p = normalize_socp(raw)
+    installed = set(cp.installed_solvers())
+    solver_name = cvxpy_solver_name(requested_solver, installed)
+    if solver_name is None or solver_name not in installed:
+        return unavailable_reference(
+            f"cvxpy:{requested_solver}",
+            f"cvxpy solver '{requested_solver}' is not installed",
+        )
+    x = cp.Variable(len(p["c"]))
+    constraints = []
+    if p["A_ub"]:
+        constraints.append(np.array(p["A_ub"], dtype=float) @ x <= np.array(p["b_ub"], dtype=float))
+    if p["A_eq"]:
+        constraints.append(np.array(p["A_eq"], dtype=float) @ x == np.array(p["b_eq"], dtype=float))
+    for idx, value in enumerate(p["lb"]):
+        if value is not None:
+            constraints.append(x[idx] >= float(value))
+    for idx, value in enumerate(p["ub"]):
+        if value is not None:
+            constraints.append(x[idx] <= float(value))
+    for cone in p["cones"]:
+        constraints.append(
+            cp.norm(np.array(cone["A"], dtype=float) @ x + np.array(cone["b"], dtype=float))
+            <= np.array(cone["c"], dtype=float) @ x + float(cone["d"])
+        )
+    problem = cp.Problem(cp.Minimize(np.array(p["c"], dtype=float) @ x), constraints)
+    try:
+        problem.solve(solver=solver_name, verbose=False)
+    except Exception as exc:
+        return {
+            "status": "numerical-error",
+            "solver": f"cvxpy:{solver_name.lower()}",
+            "x": [],
+            "objective": None,
+            "message": str(exc),
+        }
+    result = cvxpy_status_payload(problem, f"cvxpy:{solver_name.lower()}", x.value)
+    if result.get("status") == "optimal":
+        result["objective"] = socp_objective(p, result["x"])
+    return result
 
 
 def scipy_qcp_reference(raw: dict) -> Optional[dict]:
@@ -959,6 +1163,59 @@ def scipy_qcp_reference(raw: dict) -> Optional[dict]:
     return {"status": "optimal", "solver": "scipy:SLSQP-qcp", "x": x, "objective": qcp_objective(p, x), "iterations": int(result.nit), "message": str(result.message)}
 
 
+def cvxpy_qcp_reference(raw: dict, requested_solver: str) -> Optional[dict]:
+    try:
+        import cvxpy as cp  # type: ignore
+        import numpy as np  # type: ignore
+    except Exception:
+        return None
+
+    p = normalize_qcp(raw)
+    installed = set(cp.installed_solvers())
+    solver_name = cvxpy_solver_name(requested_solver, installed)
+    if solver_name is None or solver_name not in installed:
+        return unavailable_reference(
+            f"cvxpy:{requested_solver}",
+            f"cvxpy solver '{requested_solver}' is not installed",
+        )
+    x = cp.Variable(len(p["c"]))
+    constraints = []
+    if p["A_ub"]:
+        constraints.append(np.array(p["A_ub"], dtype=float) @ x <= np.array(p["b_ub"], dtype=float))
+    if p["A_eq"]:
+        constraints.append(np.array(p["A_eq"], dtype=float) @ x == np.array(p["b_eq"], dtype=float))
+    for idx, value in enumerate(p["lb"]):
+        if value is not None:
+            constraints.append(x[idx] >= float(value))
+    for idx, value in enumerate(p["ub"]):
+        if value is not None:
+            constraints.append(x[idx] <= float(value))
+    for qc in p["quadratic_constraints"]:
+        constraints.append(
+            cp.quad_form(x, np.array(qc["Q"], dtype=float))
+            + np.array(qc["c"], dtype=float) @ x
+            <= float(qc["rhs"])
+        )
+    problem = cp.Problem(
+        cp.Minimize(0.5 * cp.quad_form(x, np.array(p["Q"], dtype=float)) + np.array(p["c"], dtype=float) @ x),
+        constraints,
+    )
+    try:
+        problem.solve(solver=solver_name, verbose=False)
+    except Exception as exc:
+        return {
+            "status": "numerical-error",
+            "solver": f"cvxpy:{solver_name.lower()}",
+            "x": [],
+            "objective": None,
+            "message": str(exc),
+        }
+    result = cvxpy_status_payload(problem, f"cvxpy:{solver_name.lower()}", x.value)
+    if result.get("status") == "optimal":
+        result["objective"] = qcp_objective(p, result["x"])
+    return result
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--solver", default="auto")
@@ -975,6 +1232,10 @@ def main() -> int:
             result = scipy_socp_reference(qp)
             if args.solver != "auto" and result is None:
                 result = {"status": "unavailable", "solver": "scipy:SLSQP-socp", "x": [], "objective": None, "message": "scipy is not installed"}
+        if result is None and args.solver in ("auto", "cvxpy", "scs", "clarabel", "ecos"):
+            result = cvxpy_socp_reference(qp, args.solver if args.solver != "auto" else "cvxpy")
+            if args.solver != "auto" and result is None:
+                result = unavailable_reference(f"cvxpy:{args.solver}", "cvxpy is not installed")
         if result is None:
             result = socp_pattern_reference(qp)
         print(json.dumps(result))
@@ -984,6 +1245,10 @@ def main() -> int:
             result = scipy_qcp_reference(qp)
             if args.solver != "auto" and result is None:
                 result = {"status": "unavailable", "solver": "scipy:SLSQP-qcp", "x": [], "objective": None, "message": "scipy is not installed"}
+        if result is None and args.solver in ("auto", "cvxpy", "scs", "clarabel", "ecos"):
+            result = cvxpy_qcp_reference(qp, args.solver if args.solver != "auto" else "cvxpy")
+            if args.solver != "auto" and result is None:
+                result = unavailable_reference(f"cvxpy:{args.solver}", "cvxpy is not installed")
         if result is None:
             result = qcp_pattern_reference(qp)
         print(json.dumps(result))
@@ -996,6 +1261,14 @@ def main() -> int:
         result = scipy_reference(qp)
         if args.solver != "auto" and result is None:
             result = {"status": "unavailable", "solver": "scipy:SLSQP", "x": [], "objective": None, "message": "scipy is not installed"}
+    if result is None and args.solver in ("auto", "osqp"):
+        result = osqp_reference(qp)
+        if args.solver != "auto" and result is None:
+            result = unavailable_reference("osqp", "osqp is not installed")
+    if result is None and args.solver in ("auto", "cvxpy", "scs", "clarabel", "ecos"):
+        result = cvxpy_reference(qp, args.solver if args.solver != "auto" else "cvxpy")
+        if args.solver != "auto" and result is None:
+            result = unavailable_reference(f"cvxpy:{args.solver}", "cvxpy is not installed")
     if result is None:
         result = enumerate_active_sets(qp)
     print(json.dumps(result))

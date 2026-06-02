@@ -44,21 +44,55 @@ fn main() {
         ("sos2", build_sos2_case()),
         ("integer-sos2", build_integer_sos2_case()),
         ("binary-general", build_binary_general_case()),
+        ("binary-xor", build_binary_xor_case()),
+        ("binary-cardinality", build_binary_cardinality_case()),
+        ("boolean-clause", build_boolean_clause_case()),
+        ("integer-product", build_integer_product_case()),
+        (
+            "integer-division-modulo",
+            build_integer_division_modulo_case(),
+        ),
         ("absolute-value", build_abs_case()),
         ("integer-absolute-value", build_integer_abs_case()),
         ("maximum", build_max_case()),
         ("integer-maximum", build_integer_max_case()),
         ("minimum", build_min_case()),
         ("integer-minimum", build_integer_min_case()),
+        ("l1-norm", build_l1_norm_case()),
+        ("integer-l1-norm", build_integer_l1_norm_case()),
+        ("l-infinity-norm", build_l_infinity_norm_case()),
+        (
+            "integer-l-infinity-norm",
+            build_integer_l_infinity_norm_case(),
+        ),
+        ("l2-norm", build_l2_norm_case()),
+        ("integer-l2-norm", build_integer_l2_norm_case()),
         ("piecewise-linear", build_piecewise_linear_case()),
         ("all-different", build_all_different_case()),
         ("allowed-assignments", build_allowed_assignments_case()),
         ("forbidden-assignments", build_forbidden_assignments_case()),
         ("element", build_element_case()),
+        ("inverse", build_inverse_case()),
+        ("circuit", build_circuit_case()),
+        ("multiple-circuit", build_multiple_circuit_case()),
         ("automaton", build_automaton_case()),
         ("no-overlap", build_no_overlap_case()),
+        ("variable-no-overlap", build_variable_no_overlap_case()),
+        ("optional-no-overlap", build_optional_no_overlap_case()),
         ("no-overlap-2d", build_no_overlap_2d_case()),
+        (
+            "variable-no-overlap-2d",
+            build_variable_no_overlap_2d_case(),
+        ),
+        (
+            "optional-no-overlap-2d",
+            build_optional_no_overlap_2d_case(),
+        ),
         ("cumulative", build_cumulative_case()),
+        ("variable-cumulative", build_variable_cumulative_case()),
+        ("optional-cumulative", build_optional_cumulative_case()),
+        ("reservoir", build_reservoir_case()),
+        ("optional-reservoir", build_optional_reservoir_case()),
     ];
 
     let mut failed = 0usize;
@@ -1202,6 +1236,106 @@ fn build_binary_general_case() -> MathProgram {
     p
 }
 
+fn build_binary_xor_case() -> MathProgram {
+    let mut p = MathProgram::new(ObjectiveSense::Max);
+    let a = p.add_binary_var("a", 0.0).unwrap();
+    let b = p.add_binary_var("b", 0.0).unwrap();
+    let c = p.add_binary_var("c", 0.0).unwrap();
+    let d = p.add_binary_var("d", 0.0).unwrap();
+    let even = p.add_binary_var("even", 1.0).unwrap();
+    let odd = p.add_binary_var("odd", 2.0).unwrap();
+    p.add_constraint("force-a", vec![(a, 1.0)], RowSense::Eq, 1.0)
+        .unwrap();
+    p.add_constraint("force-b", vec![(b, 1.0)], RowSense::Eq, 1.0)
+        .unwrap();
+    p.add_constraint("force-c-off", vec![(c, 1.0)], RowSense::Eq, 0.0)
+        .unwrap();
+    p.add_constraint("force-d-off", vec![(d, 1.0)], RowSense::Eq, 0.0)
+        .unwrap();
+    p.add_binary_xor("even-parity", even, vec![a, b, c])
+        .unwrap();
+    p.add_binary_xor("odd-parity", odd, vec![a, c, d]).unwrap();
+    p
+}
+
+fn build_binary_cardinality_case() -> MathProgram {
+    let mut p = MathProgram::new(ObjectiveSense::Max);
+    let a = p.add_binary_var("a", 5.0).unwrap();
+    let b = p.add_binary_var("b", 4.0).unwrap();
+    let c = p.add_binary_var("c", 3.0).unwrap();
+    let d = p.add_binary_var("d", 2.0).unwrap();
+    p.add_at_most_one("at-most-one-ab", vec![a, b]).unwrap();
+    p.add_at_least_one("at-least-one-cd", vec![c, d]).unwrap();
+    p.add_exactly_k("exactly-two-total", vec![a, b, c, d], 2)
+        .unwrap();
+    p
+}
+
+fn build_boolean_clause_case() -> MathProgram {
+    let mut p = MathProgram::new(ObjectiveSense::Max);
+    let a = p.add_binary_var("a", 4.0).unwrap();
+    let b = p.add_binary_var("b", 3.0).unwrap();
+    let c = p.add_binary_var("c", 2.0).unwrap();
+    p.add_binary_implication("a-implies-b", a, b).unwrap();
+    p.add_binary_implication("b-implies-c", b, c).unwrap();
+    p.add_boolean_clause(
+        "choose-something",
+        vec![
+            MathProgram::bool_lit(a),
+            MathProgram::bool_lit(b),
+            MathProgram::bool_lit(c),
+        ],
+    )
+    .unwrap();
+    p
+}
+
+fn build_integer_product_case() -> MathProgram {
+    let mut p = MathProgram::new(ObjectiveSense::Min);
+    let x = p.add_integer_var("x", 0.0, Some(0.0), Some(3.0)).unwrap();
+    let y = p.add_integer_var("y", 0.0, Some(0.0), Some(3.0)).unwrap();
+    let product = p
+        .add_integer_var("product", 1.0, Some(0.0), Some(9.0))
+        .unwrap();
+    p.add_constraint("fix-x", vec![(x, 1.0)], RowSense::Eq, 2.0)
+        .unwrap();
+    p.add_constraint("fix-y", vec![(y, 1.0)], RowSense::Eq, 3.0)
+        .unwrap();
+    p.add_multiplication_equality("x-times-y", product, vec![x, y])
+        .unwrap();
+    p
+}
+
+fn build_integer_division_modulo_case() -> MathProgram {
+    let mut p = MathProgram::new(ObjectiveSense::Min);
+    let numerator = p
+        .add_integer_var("numerator", 0.0, Some(-8.0), Some(8.0))
+        .unwrap();
+    let denominator = p
+        .add_integer_var("denominator", 0.0, Some(1.0), Some(4.0))
+        .unwrap();
+    let quotient = p
+        .add_integer_var("quotient", 1.0, Some(-8.0), Some(8.0))
+        .unwrap();
+    let remainder = p
+        .add_integer_var("remainder", 1.0, Some(-4.0), Some(4.0))
+        .unwrap();
+    p.add_constraint("fix-numerator", vec![(numerator, 1.0)], RowSense::Eq, -7.0)
+        .unwrap();
+    p.add_constraint(
+        "fix-denominator",
+        vec![(denominator, 1.0)],
+        RowSense::Eq,
+        3.0,
+    )
+    .unwrap();
+    p.add_division_equality("division", quotient, numerator, denominator)
+        .unwrap();
+    p.add_modulo_equality("modulo", remainder, numerator, denominator)
+        .unwrap();
+    p
+}
+
 fn build_abs_case() -> MathProgram {
     let mut p = MathProgram::new(ObjectiveSense::Min);
     let x = p
@@ -1296,6 +1430,109 @@ fn build_integer_min_case() -> MathProgram {
     p
 }
 
+fn build_l1_norm_case() -> MathProgram {
+    let mut p = MathProgram::new(ObjectiveSense::Min);
+    let x = p
+        .add_continuous_var("x", 0.0, Some(-4.0), Some(4.0))
+        .unwrap();
+    let y = p
+        .add_continuous_var("y", 0.0, Some(-4.0), Some(4.0))
+        .unwrap();
+    let norm = p
+        .add_continuous_var("norm", 1.0, Some(0.0), Some(8.0))
+        .unwrap();
+    p.add_constraint("fix-x", vec![(x, 1.0)], RowSense::Eq, -2.0)
+        .unwrap();
+    p.add_constraint("fix-y", vec![(y, 1.0)], RowSense::Eq, 3.0)
+        .unwrap();
+    p.add_l1_norm("l1", norm, vec![x, y]).unwrap();
+    p
+}
+
+fn build_integer_l1_norm_case() -> MathProgram {
+    let mut p = MathProgram::new(ObjectiveSense::Min);
+    let x = p.add_integer_var("x", 0.0, Some(-4.0), Some(4.0)).unwrap();
+    let y = p.add_integer_var("y", 0.0, Some(-4.0), Some(4.0)).unwrap();
+    let norm = p
+        .add_integer_var("norm", 1.0, Some(0.0), Some(8.0))
+        .unwrap();
+    p.add_constraint("fix-x-integer", vec![(x, 1.0)], RowSense::Eq, -2.0)
+        .unwrap();
+    p.add_constraint("fix-y-integer", vec![(y, 1.0)], RowSense::Eq, 3.0)
+        .unwrap();
+    p.add_l1_norm("integer-l1", norm, vec![x, y]).unwrap();
+    p
+}
+
+fn build_l_infinity_norm_case() -> MathProgram {
+    let mut p = MathProgram::new(ObjectiveSense::Min);
+    let x = p
+        .add_continuous_var("x", 0.0, Some(-4.0), Some(4.0))
+        .unwrap();
+    let y = p
+        .add_continuous_var("y", 0.0, Some(-4.0), Some(4.0))
+        .unwrap();
+    let norm = p
+        .add_continuous_var("norm", 1.0, Some(0.0), Some(4.0))
+        .unwrap();
+    p.add_constraint("fix-x", vec![(x, 1.0)], RowSense::Eq, -2.0)
+        .unwrap();
+    p.add_constraint("fix-y", vec![(y, 1.0)], RowSense::Eq, 3.0)
+        .unwrap();
+    p.add_l_infinity_norm("linf", norm, vec![x, y]).unwrap();
+    p
+}
+
+fn build_integer_l_infinity_norm_case() -> MathProgram {
+    let mut p = MathProgram::new(ObjectiveSense::Min);
+    let x = p.add_integer_var("x", 0.0, Some(-4.0), Some(4.0)).unwrap();
+    let y = p.add_integer_var("y", 0.0, Some(-4.0), Some(4.0)).unwrap();
+    let norm = p
+        .add_integer_var("norm", 1.0, Some(0.0), Some(4.0))
+        .unwrap();
+    p.add_constraint("fix-x-integer", vec![(x, 1.0)], RowSense::Eq, -2.0)
+        .unwrap();
+    p.add_constraint("fix-y-integer", vec![(y, 1.0)], RowSense::Eq, 3.0)
+        .unwrap();
+    p.add_l_infinity_norm("integer-linf", norm, vec![x, y])
+        .unwrap();
+    p
+}
+
+fn build_l2_norm_case() -> MathProgram {
+    let mut p = MathProgram::new(ObjectiveSense::Min);
+    let x = p
+        .add_continuous_var("x", 0.0, Some(-5.0), Some(5.0))
+        .unwrap();
+    let y = p
+        .add_continuous_var("y", 0.0, Some(-5.0), Some(5.0))
+        .unwrap();
+    let norm = p
+        .add_continuous_var("norm", 1.0, Some(0.0), Some(10.0))
+        .unwrap();
+    p.add_constraint("fix-x", vec![(x, 1.0)], RowSense::Eq, 3.0)
+        .unwrap();
+    p.add_constraint("fix-y", vec![(y, 1.0)], RowSense::Eq, 4.0)
+        .unwrap();
+    p.add_l2_norm("l2", norm, vec![x, y]).unwrap();
+    p
+}
+
+fn build_integer_l2_norm_case() -> MathProgram {
+    let mut p = MathProgram::new(ObjectiveSense::Min);
+    let x = p.add_integer_var("x", 0.0, Some(-5.0), Some(5.0)).unwrap();
+    let y = p.add_integer_var("y", 0.0, Some(-5.0), Some(5.0)).unwrap();
+    let norm = p
+        .add_integer_var("norm", 1.0, Some(0.0), Some(10.0))
+        .unwrap();
+    p.add_constraint("fix-x-integer", vec![(x, 1.0)], RowSense::Eq, 3.0)
+        .unwrap();
+    p.add_constraint("fix-y-integer", vec![(y, 1.0)], RowSense::Eq, 4.0)
+        .unwrap();
+    p.add_l2_norm("integer-l2", norm, vec![x, y]).unwrap();
+    p
+}
+
 fn build_piecewise_linear_case() -> MathProgram {
     let mut p = MathProgram::new(ObjectiveSense::Min);
     let x = p
@@ -1353,6 +1590,63 @@ fn build_element_case() -> MathProgram {
     p
 }
 
+fn build_inverse_case() -> MathProgram {
+    let mut p = MathProgram::new(ObjectiveSense::Max);
+    let x0 = p.add_integer_var("x0", 0.0, Some(0.0), Some(2.0)).unwrap();
+    let x1 = p.add_integer_var("x1", 1.0, Some(0.0), Some(2.0)).unwrap();
+    let x2 = p.add_integer_var("x2", 0.0, Some(0.0), Some(2.0)).unwrap();
+    let y0 = p.add_integer_var("y0", 0.0, Some(0.0), Some(2.0)).unwrap();
+    let y1 = p.add_integer_var("y1", 0.0, Some(0.0), Some(2.0)).unwrap();
+    let y2 = p.add_integer_var("y2", 0.0, Some(0.0), Some(2.0)).unwrap();
+    p.add_constraint("force-x0", vec![(x0, 1.0)], RowSense::Eq, 1.0)
+        .unwrap();
+    p.add_inverse("inverse-permutation", vec![x0, x1, x2], vec![y0, y1, y2])
+        .unwrap();
+    p
+}
+
+fn build_circuit_case() -> MathProgram {
+    let mut p = MathProgram::new(ObjectiveSense::Max);
+    let mut arcs = Vec::new();
+    for tail in 0..4 {
+        for head in 0..4 {
+            if tail == head {
+                continue;
+            }
+            let obj = match (tail, head) {
+                (0, 1) | (1, 2) | (2, 3) | (3, 0) => 10.0,
+                _ => 0.0,
+            };
+            let var = p.add_binary_var(format!("x_{tail}_{head}"), obj).unwrap();
+            arcs.push((tail, head, var));
+        }
+    }
+    p.add_circuit("tour", 4, arcs).unwrap();
+    p
+}
+
+fn build_multiple_circuit_case() -> MathProgram {
+    let mut p = MathProgram::new(ObjectiveSense::Max);
+    let depot_to_first = p.add_binary_var("x_0_1", 1.0).unwrap();
+    let first_to_second = p.add_binary_var("x_1_2", 10.0).unwrap();
+    let second_to_depot = p.add_binary_var("x_2_0", 1.0).unwrap();
+    let second_to_first = p.add_binary_var("x_2_1", 10.0).unwrap();
+    let skipped = p.add_binary_var("x_3_3", 0.0).unwrap();
+    p.add_multiple_circuit(
+        "routes",
+        4,
+        vec![
+            (0, 1, depot_to_first),
+            (1, 2, first_to_second),
+            (2, 0, second_to_depot),
+            (2, 1, second_to_first),
+            (3, 3, skipped),
+        ],
+    )
+    .unwrap();
+    p
+}
+
 fn build_automaton_case() -> MathProgram {
     let mut p = MathProgram::new(ObjectiveSense::Max);
     let x0 = p.add_binary_var("x0", 4.0).unwrap();
@@ -1390,6 +1684,69 @@ fn build_no_overlap_case() -> MathProgram {
         vec![
             MathProgram::interval(a_start, 3.0, a_end),
             MathProgram::interval(b_start, 2.0, b_end),
+        ],
+    )
+    .unwrap();
+    p
+}
+
+fn build_variable_no_overlap_case() -> MathProgram {
+    let mut p = MathProgram::new(ObjectiveSense::Min);
+    let a_start = p
+        .add_integer_var("a_start", 0.0, Some(0.0), Some(5.0))
+        .unwrap();
+    let a_size = p
+        .add_integer_var("a_size", 0.0, Some(2.0), Some(4.0))
+        .unwrap();
+    let a_end = p
+        .add_integer_var("a_end", 0.0, Some(0.0), Some(8.0))
+        .unwrap();
+    let b_start = p
+        .add_integer_var("b_start", 1.0, Some(0.0), Some(8.0))
+        .unwrap();
+    let b_end = p
+        .add_integer_var("b_end", 0.0, Some(0.0), Some(8.0))
+        .unwrap();
+    p.add_constraint("fix-a-start", vec![(a_start, 1.0)], RowSense::Eq, 0.0)
+        .unwrap();
+    p.add_constraint(
+        "force-a-size-through-end",
+        vec![(a_end, 1.0)],
+        RowSense::Ge,
+        4.0,
+    )
+    .unwrap();
+    p.add_no_overlap(
+        "variable-single-machine",
+        vec![
+            MathProgram::variable_interval(a_start, a_size, a_end),
+            MathProgram::interval(b_start, 2.0, b_end),
+        ],
+    )
+    .unwrap();
+    p
+}
+
+fn build_optional_no_overlap_case() -> MathProgram {
+    let mut p = MathProgram::new(ObjectiveSense::Max);
+    let a_start = p
+        .add_integer_var("a_start", 0.0, Some(0.0), Some(0.0))
+        .unwrap();
+    let a_end = p
+        .add_integer_var("a_end", 0.0, Some(3.0), Some(3.0))
+        .unwrap();
+    let b_start = p
+        .add_integer_var("b_start", 0.0, Some(1.0), Some(1.0))
+        .unwrap();
+    let b_end = p
+        .add_integer_var("b_end", 0.0, Some(0.0), Some(0.0))
+        .unwrap();
+    let b_present = p.add_binary_var("b_present", 1.0).unwrap();
+    p.add_no_overlap(
+        "optional-single-machine",
+        vec![
+            MathProgram::interval(a_start, 3.0, a_end),
+            MathProgram::optional_interval(b_start, 2.0, b_end, b_present),
         ],
     )
     .unwrap();
@@ -1444,6 +1801,104 @@ fn build_no_overlap_2d_case() -> MathProgram {
     p
 }
 
+fn build_variable_no_overlap_2d_case() -> MathProgram {
+    let mut p = MathProgram::new(ObjectiveSense::Min);
+    let a_x_start = p
+        .add_integer_var("a_x_start", 0.0, Some(0.0), Some(0.0))
+        .unwrap();
+    let a_x_size = p
+        .add_integer_var("a_x_size", 0.0, Some(2.0), Some(2.0))
+        .unwrap();
+    let a_x_end = p
+        .add_integer_var("a_x_end", 0.0, Some(0.0), Some(2.0))
+        .unwrap();
+    let a_y_start = p
+        .add_integer_var("a_y_start", 0.0, Some(0.0), Some(0.0))
+        .unwrap();
+    let a_y_size = p
+        .add_integer_var("a_y_size", 0.0, Some(2.0), Some(3.0))
+        .unwrap();
+    let a_y_end = p
+        .add_integer_var("a_y_end", 0.0, Some(0.0), Some(5.0))
+        .unwrap();
+    let b_x_start = p
+        .add_integer_var("b_x_start", 0.0, Some(0.0), Some(0.0))
+        .unwrap();
+    let b_x_end = p
+        .add_integer_var("b_x_end", 0.0, Some(0.0), Some(2.0))
+        .unwrap();
+    let b_y_start = p
+        .add_integer_var("b_y_start", 1.0, Some(0.0), Some(5.0))
+        .unwrap();
+    let b_y_end = p
+        .add_integer_var("b_y_end", 0.0, Some(0.0), Some(7.0))
+        .unwrap();
+
+    p.add_constraint(
+        "force-a-y-size-through-end",
+        vec![(a_y_end, 1.0)],
+        RowSense::Ge,
+        3.0,
+    )
+    .unwrap();
+    p.add_no_overlap_2d(
+        "variable-packing",
+        vec![
+            MathProgram::variable_interval(a_x_start, a_x_size, a_x_end),
+            MathProgram::interval(b_x_start, 2.0, b_x_end),
+        ],
+        vec![
+            MathProgram::variable_interval(a_y_start, a_y_size, a_y_end),
+            MathProgram::interval(b_y_start, 2.0, b_y_end),
+        ],
+    )
+    .unwrap();
+    p
+}
+
+fn build_optional_no_overlap_2d_case() -> MathProgram {
+    let mut p = MathProgram::new(ObjectiveSense::Max);
+    let a_x_start = p
+        .add_integer_var("a_x_start", 0.0, Some(0.0), Some(0.0))
+        .unwrap();
+    let a_x_end = p
+        .add_integer_var("a_x_end", 0.0, Some(2.0), Some(2.0))
+        .unwrap();
+    let a_y_start = p
+        .add_integer_var("a_y_start", 0.0, Some(0.0), Some(0.0))
+        .unwrap();
+    let a_y_end = p
+        .add_integer_var("a_y_end", 0.0, Some(2.0), Some(2.0))
+        .unwrap();
+    let b_x_start = p
+        .add_integer_var("b_x_start", 0.0, Some(0.0), Some(0.0))
+        .unwrap();
+    let b_x_end = p
+        .add_integer_var("b_x_end", 0.0, Some(0.0), Some(0.0))
+        .unwrap();
+    let b_y_start = p
+        .add_integer_var("b_y_start", 0.0, Some(0.0), Some(0.0))
+        .unwrap();
+    let b_y_end = p
+        .add_integer_var("b_y_end", 0.0, Some(0.0), Some(0.0))
+        .unwrap();
+    let b_present = p.add_binary_var("b_present", 1.0).unwrap();
+
+    p.add_no_overlap_2d(
+        "optional-packing",
+        vec![
+            MathProgram::interval(a_x_start, 2.0, a_x_end),
+            MathProgram::optional_interval(b_x_start, 2.0, b_x_end, b_present),
+        ],
+        vec![
+            MathProgram::interval(a_y_start, 2.0, a_y_end),
+            MathProgram::optional_interval(b_y_start, 2.0, b_y_end, b_present),
+        ],
+    )
+    .unwrap();
+    p
+}
+
 fn build_cumulative_case() -> MathProgram {
     let mut p = MathProgram::new(ObjectiveSense::Min);
     let a_start = p
@@ -1468,6 +1923,107 @@ fn build_cumulative_case() -> MathProgram {
         ],
         vec![2.0, 2.0],
         3.0,
+    )
+    .unwrap();
+    p
+}
+
+fn build_variable_cumulative_case() -> MathProgram {
+    let mut p = MathProgram::new(ObjectiveSense::Min);
+    let a_start = p
+        .add_integer_var("a_start", 0.0, Some(0.0), Some(0.0))
+        .unwrap();
+    let a_size = p
+        .add_integer_var("a_size", 0.0, Some(1.0), Some(3.0))
+        .unwrap();
+    let a_end = p
+        .add_integer_var("a_end", 0.0, Some(0.0), Some(3.0))
+        .unwrap();
+    let b_start = p
+        .add_integer_var("b_start", 1.0, Some(0.0), Some(3.0))
+        .unwrap();
+    let b_end = p
+        .add_integer_var("b_end", 0.0, Some(0.0), Some(5.0))
+        .unwrap();
+    p.add_constraint("force-a-size", vec![(a_end, 1.0)], RowSense::Ge, 3.0)
+        .unwrap();
+    p.add_cumulative(
+        "shared-resource",
+        vec![
+            MathProgram::variable_interval(a_start, a_size, a_end),
+            MathProgram::interval(b_start, 2.0, b_end),
+        ],
+        vec![2.0, 2.0],
+        3.0,
+    )
+    .unwrap();
+    p
+}
+
+fn build_optional_cumulative_case() -> MathProgram {
+    let mut p = MathProgram::new(ObjectiveSense::Max);
+    let a_start = p
+        .add_integer_var("a_start", 0.0, Some(0.0), Some(0.0))
+        .unwrap();
+    let a_end = p
+        .add_integer_var("a_end", 0.0, Some(2.0), Some(2.0))
+        .unwrap();
+    let b_start = p
+        .add_integer_var("b_start", 0.0, Some(0.0), Some(0.0))
+        .unwrap();
+    let b_end = p
+        .add_integer_var("b_end", 0.0, Some(0.0), Some(0.0))
+        .unwrap();
+    let b_present = p.add_binary_var("b_present", 1.0).unwrap();
+    p.add_cumulative(
+        "optional-cumulative",
+        vec![
+            MathProgram::interval(a_start, 2.0, a_end),
+            MathProgram::optional_interval(b_start, 2.0, b_end, b_present),
+        ],
+        vec![3.0, 2.0],
+        3.0,
+    )
+    .unwrap();
+    p
+}
+
+fn build_reservoir_case() -> MathProgram {
+    let mut p = MathProgram::new(ObjectiveSense::Max);
+    let supply_time = p
+        .add_integer_var("supply_time", 1.0, Some(0.0), Some(2.0))
+        .unwrap();
+    let drain_time = p
+        .add_integer_var("drain_time", 0.0, Some(0.0), Some(0.0))
+        .unwrap();
+    p.add_reservoir(
+        "tank",
+        vec![
+            MathProgram::reservoir_event(supply_time, 2.0),
+            MathProgram::reservoir_event(drain_time, -2.0),
+        ],
+        0.0,
+        2.0,
+    )
+    .unwrap();
+    p
+}
+
+fn build_optional_reservoir_case() -> MathProgram {
+    let mut p = MathProgram::new(ObjectiveSense::Max);
+    let surge_time = p
+        .add_integer_var("surge_time", 0.0, Some(0.0), Some(0.0))
+        .unwrap();
+    let surge_active = p.add_binary_var("surge_active", 1.0).unwrap();
+    p.add_reservoir(
+        "optional-reservoir",
+        vec![MathProgram::optional_reservoir_event(
+            surge_time,
+            3.0,
+            surge_active,
+        )],
+        0.0,
+        2.0,
     )
     .unwrap();
     p

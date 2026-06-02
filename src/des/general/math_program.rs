@@ -127,6 +127,13 @@ pub struct IndicatorConstraint {
     pub rhs: f64,
 }
 
+/// Boolean literal over a binary variable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BoolLiteral {
+    pub var: usize,
+    pub value: bool,
+}
+
 /// Special ordered set type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SOSType {
@@ -134,6 +141,13 @@ pub enum SOSType {
     Sos1,
     /// At most two non-zero members, and those members must be adjacent by weight.
     Sos2,
+}
+
+/// Exact linear norm general constraints supported by the native MIP lowering.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NormType {
+    L1,
+    LInfinity,
 }
 
 /// Special ordered set constraint. Members are sorted by `weight` for SOS2.
@@ -144,13 +158,25 @@ pub struct SOSConstraint {
     pub members: Vec<(usize, f64)>,
 }
 
-/// Fixed-size interval used by CP-SAT-style scheduling constraints.
+/// Fixed-size or variable-size interval used by CP-SAT-style scheduling constraints.
 #[derive(Clone, Debug, PartialEq)]
 pub struct IntervalTerm {
     pub start_var: usize,
+    /// Constant duration offset. For fixed-size intervals this is the full size.
     pub duration: f64,
+    /// Optional variable duration term. When present, the interval size is
+    /// `duration + duration_var`.
+    pub duration_var: Option<usize>,
     pub end_var: usize,
     pub presence_var: Option<usize>,
+}
+
+/// A signed level-change event for a reservoir constraint.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReservoirEvent {
+    pub time_var: usize,
+    pub demand: f64,
+    pub active_var: Option<usize>,
 }
 
 /// A transition for a finite-state automaton constraint.
@@ -159,6 +185,14 @@ pub struct AutomatonTransition {
     pub tail: i64,
     pub label: i64,
     pub head: i64,
+}
+
+/// Directed arc literal for circuit and route constraints.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CircuitArc {
+    pub tail: usize,
+    pub head: usize,
+    pub literal_var: usize,
 }
 
 /// Affine expression used inside second-order cone constraints.
@@ -190,6 +224,38 @@ pub enum GeneralConstraint {
         result_var: usize,
         operands: Vec<usize>,
     },
+    BinaryXor {
+        name: String,
+        result_var: usize,
+        operands: Vec<usize>,
+    },
+    BinaryCardinality {
+        name: String,
+        operands: Vec<usize>,
+        min_count: Option<usize>,
+        max_count: Option<usize>,
+    },
+    BooleanClause {
+        name: String,
+        literals: Vec<BoolLiteral>,
+    },
+    IntegerProduct {
+        name: String,
+        target_var: usize,
+        operands: Vec<usize>,
+    },
+    IntegerDivision {
+        name: String,
+        target_var: usize,
+        numerator_var: usize,
+        denominator_var: usize,
+    },
+    IntegerModulo {
+        name: String,
+        target_var: usize,
+        numerator_var: usize,
+        denominator_var: usize,
+    },
     Abs {
         name: String,
         result_var: usize,
@@ -204,6 +270,12 @@ pub enum GeneralConstraint {
         name: String,
         result_var: usize,
         operands: Vec<usize>,
+    },
+    Norm {
+        name: String,
+        result_var: usize,
+        operands: Vec<usize>,
+        norm_type: NormType,
     },
     PiecewiseLinear {
         name: String,
@@ -231,6 +303,21 @@ pub enum GeneralConstraint {
         target_var: usize,
         values: Vec<f64>,
     },
+    Inverse {
+        name: String,
+        variables: Vec<usize>,
+        inverse_variables: Vec<usize>,
+    },
+    Circuit {
+        name: String,
+        node_count: usize,
+        arcs: Vec<CircuitArc>,
+    },
+    MultipleCircuit {
+        name: String,
+        node_count: usize,
+        arcs: Vec<CircuitArc>,
+    },
     Automaton {
         name: String,
         variables: Vec<usize>,
@@ -250,8 +337,14 @@ pub enum GeneralConstraint {
     Cumulative {
         name: String,
         intervals: Vec<IntervalTerm>,
-        demands: Vec<f64>,
-        capacity: f64,
+        demands: Vec<AffineTerm>,
+        capacity: AffineTerm,
+    },
+    Reservoir {
+        name: String,
+        events: Vec<ReservoirEvent>,
+        min_level: f64,
+        max_level: f64,
     },
 }
 
@@ -646,6 +739,217 @@ impl MathProgram {
         Ok(self.general_constraints.len() - 1)
     }
 
+    pub fn add_binary_xor(
+        &mut self,
+        name: impl Into<String>,
+        result_var: usize,
+        operands: Vec<usize>,
+    ) -> Result<usize, MathProgramError> {
+        self.validate_binary_general_args(result_var, &operands)?;
+        self.general_constraints.push(GeneralConstraint::BinaryXor {
+            name: name.into(),
+            result_var,
+            operands,
+        });
+        Ok(self.general_constraints.len() - 1)
+    }
+
+    pub fn bool_lit(var: usize) -> BoolLiteral {
+        BoolLiteral { var, value: true }
+    }
+
+    pub fn not_lit(var: usize) -> BoolLiteral {
+        BoolLiteral { var, value: false }
+    }
+
+    pub fn add_binary_cardinality(
+        &mut self,
+        name: impl Into<String>,
+        operands: Vec<usize>,
+        min_count: Option<usize>,
+        max_count: Option<usize>,
+    ) -> Result<usize, MathProgramError> {
+        self.validate_binary_cardinality_args(&operands, min_count, max_count)?;
+        self.general_constraints
+            .push(GeneralConstraint::BinaryCardinality {
+                name: name.into(),
+                operands,
+                min_count,
+                max_count,
+            });
+        Ok(self.general_constraints.len() - 1)
+    }
+
+    pub fn add_at_most_k(
+        &mut self,
+        name: impl Into<String>,
+        operands: Vec<usize>,
+        max_count: usize,
+    ) -> Result<usize, MathProgramError> {
+        self.add_binary_cardinality(name, operands, None, Some(max_count))
+    }
+
+    pub fn add_at_least_k(
+        &mut self,
+        name: impl Into<String>,
+        operands: Vec<usize>,
+        min_count: usize,
+    ) -> Result<usize, MathProgramError> {
+        self.add_binary_cardinality(name, operands, Some(min_count), None)
+    }
+
+    pub fn add_exactly_k(
+        &mut self,
+        name: impl Into<String>,
+        operands: Vec<usize>,
+        count: usize,
+    ) -> Result<usize, MathProgramError> {
+        self.add_binary_cardinality(name, operands, Some(count), Some(count))
+    }
+
+    pub fn add_at_most_one(
+        &mut self,
+        name: impl Into<String>,
+        operands: Vec<usize>,
+    ) -> Result<usize, MathProgramError> {
+        self.add_at_most_k(name, operands, 1)
+    }
+
+    pub fn add_at_least_one(
+        &mut self,
+        name: impl Into<String>,
+        operands: Vec<usize>,
+    ) -> Result<usize, MathProgramError> {
+        self.add_at_least_k(name, operands, 1)
+    }
+
+    pub fn add_exactly_one(
+        &mut self,
+        name: impl Into<String>,
+        operands: Vec<usize>,
+    ) -> Result<usize, MathProgramError> {
+        self.add_exactly_k(name, operands, 1)
+    }
+
+    pub fn add_boolean_clause(
+        &mut self,
+        name: impl Into<String>,
+        literals: Vec<BoolLiteral>,
+    ) -> Result<usize, MathProgramError> {
+        self.validate_boolean_clause_args(&literals)?;
+        self.general_constraints
+            .push(GeneralConstraint::BooleanClause {
+                name: name.into(),
+                literals,
+            });
+        Ok(self.general_constraints.len() - 1)
+    }
+
+    pub fn add_binary_implication(
+        &mut self,
+        name: impl Into<String>,
+        antecedent: usize,
+        consequent: usize,
+    ) -> Result<usize, MathProgramError> {
+        self.add_boolean_clause(
+            name,
+            vec![Self::not_lit(antecedent), Self::bool_lit(consequent)],
+        )
+    }
+
+    pub fn add_integer_product(
+        &mut self,
+        name: impl Into<String>,
+        target_var: usize,
+        operands: Vec<usize>,
+    ) -> Result<usize, MathProgramError> {
+        self.validate_integer_product_args(target_var, &operands)?;
+        self.general_constraints
+            .push(GeneralConstraint::IntegerProduct {
+                name: name.into(),
+                target_var,
+                operands,
+            });
+        Ok(self.general_constraints.len() - 1)
+    }
+
+    pub fn add_multiplication_equality(
+        &mut self,
+        name: impl Into<String>,
+        target_var: usize,
+        operands: Vec<usize>,
+    ) -> Result<usize, MathProgramError> {
+        self.add_integer_product(name, target_var, operands)
+    }
+
+    pub fn add_integer_division(
+        &mut self,
+        name: impl Into<String>,
+        target_var: usize,
+        numerator_var: usize,
+        denominator_var: usize,
+    ) -> Result<usize, MathProgramError> {
+        self.validate_integer_binary_operation_args(
+            "integer division",
+            target_var,
+            numerator_var,
+            denominator_var,
+            i64::checked_div,
+        )?;
+        self.general_constraints
+            .push(GeneralConstraint::IntegerDivision {
+                name: name.into(),
+                target_var,
+                numerator_var,
+                denominator_var,
+            });
+        Ok(self.general_constraints.len() - 1)
+    }
+
+    pub fn add_division_equality(
+        &mut self,
+        name: impl Into<String>,
+        target_var: usize,
+        numerator_var: usize,
+        denominator_var: usize,
+    ) -> Result<usize, MathProgramError> {
+        self.add_integer_division(name, target_var, numerator_var, denominator_var)
+    }
+
+    pub fn add_integer_modulo(
+        &mut self,
+        name: impl Into<String>,
+        target_var: usize,
+        numerator_var: usize,
+        denominator_var: usize,
+    ) -> Result<usize, MathProgramError> {
+        self.validate_integer_binary_operation_args(
+            "integer modulo",
+            target_var,
+            numerator_var,
+            denominator_var,
+            i64::checked_rem,
+        )?;
+        self.general_constraints
+            .push(GeneralConstraint::IntegerModulo {
+                name: name.into(),
+                target_var,
+                numerator_var,
+                denominator_var,
+            });
+        Ok(self.general_constraints.len() - 1)
+    }
+
+    pub fn add_modulo_equality(
+        &mut self,
+        name: impl Into<String>,
+        target_var: usize,
+        numerator_var: usize,
+        denominator_var: usize,
+    ) -> Result<usize, MathProgramError> {
+        self.add_integer_modulo(name, target_var, numerator_var, denominator_var)
+    }
+
     pub fn add_abs(
         &mut self,
         name: impl Into<String>,
@@ -706,6 +1010,77 @@ impl MathProgram {
             operands,
         });
         Ok(self.general_constraints.len() - 1)
+    }
+
+    pub fn add_norm(
+        &mut self,
+        name: impl Into<String>,
+        result_var: usize,
+        operands: Vec<usize>,
+        norm_type: NormType,
+    ) -> Result<usize, MathProgramError> {
+        self.validate_norm_args(result_var, &operands, norm_type)?;
+        self.general_constraints.push(GeneralConstraint::Norm {
+            name: name.into(),
+            result_var,
+            operands,
+            norm_type,
+        });
+        Ok(self.general_constraints.len() - 1)
+    }
+
+    pub fn add_l1_norm(
+        &mut self,
+        name: impl Into<String>,
+        result_var: usize,
+        operands: Vec<usize>,
+    ) -> Result<usize, MathProgramError> {
+        self.add_norm(name, result_var, operands, NormType::L1)
+    }
+
+    pub fn add_l_infinity_norm(
+        &mut self,
+        name: impl Into<String>,
+        result_var: usize,
+        operands: Vec<usize>,
+    ) -> Result<usize, MathProgramError> {
+        self.add_norm(name, result_var, operands, NormType::LInfinity)
+    }
+
+    /// Add the convex Euclidean norm epigraph `sqrt(sum_i operand_i^2) <= result`.
+    ///
+    /// This mirrors the common L2 norm modeling pattern used by commercial solvers:
+    /// minimizing `result` makes the epigraph tight while preserving a convex
+    /// second-order-cone formulation.
+    pub fn add_l2_norm(
+        &mut self,
+        name: impl Into<String>,
+        result_var: usize,
+        operands: Vec<usize>,
+    ) -> Result<usize, MathProgramError> {
+        let name = name.into();
+        let terms = operands
+            .into_iter()
+            .map(|var| AffineTerm {
+                coeffs: vec![(var, 1.0)],
+                constant: 0.0,
+            })
+            .collect::<Vec<_>>();
+        let rhs_coeffs = vec![(result_var, 1.0)];
+        self.validate_second_order_cone_args(&terms, &rhs_coeffs, 0.0)?;
+        self.add_constraint(
+            format!("{name}__result_nonnegative"),
+            rhs_coeffs.clone(),
+            RowSense::Ge,
+            0.0,
+        )?;
+        self.second_order_cones.push(SecondOrderConeConstraint {
+            name,
+            terms,
+            rhs_coeffs,
+            rhs_constant: 0.0,
+        });
+        Ok(self.second_order_cones.len() - 1)
     }
 
     pub fn add_piecewise_linear(
@@ -789,6 +1164,68 @@ impl MathProgram {
         Ok(self.general_constraints.len() - 1)
     }
 
+    pub fn add_inverse(
+        &mut self,
+        name: impl Into<String>,
+        variables: Vec<usize>,
+        inverse_variables: Vec<usize>,
+    ) -> Result<usize, MathProgramError> {
+        self.validate_inverse_args(&variables, &inverse_variables)?;
+        self.general_constraints.push(GeneralConstraint::Inverse {
+            name: name.into(),
+            variables,
+            inverse_variables,
+        });
+        Ok(self.general_constraints.len() - 1)
+    }
+
+    pub fn add_circuit(
+        &mut self,
+        name: impl Into<String>,
+        node_count: usize,
+        arcs: Vec<(usize, usize, usize)>,
+    ) -> Result<usize, MathProgramError> {
+        let arcs = arcs
+            .into_iter()
+            .map(|(tail, head, literal_var)| CircuitArc {
+                tail,
+                head,
+                literal_var,
+            })
+            .collect::<Vec<_>>();
+        self.validate_circuit_args(node_count, arcs.as_slice())?;
+        self.general_constraints.push(GeneralConstraint::Circuit {
+            name: name.into(),
+            node_count,
+            arcs,
+        });
+        Ok(self.general_constraints.len() - 1)
+    }
+
+    pub fn add_multiple_circuit(
+        &mut self,
+        name: impl Into<String>,
+        node_count: usize,
+        arcs: Vec<(usize, usize, usize)>,
+    ) -> Result<usize, MathProgramError> {
+        let arcs = arcs
+            .into_iter()
+            .map(|(tail, head, literal_var)| CircuitArc {
+                tail,
+                head,
+                literal_var,
+            })
+            .collect::<Vec<_>>();
+        self.validate_multiple_circuit_args(node_count, arcs.as_slice())?;
+        self.general_constraints
+            .push(GeneralConstraint::MultipleCircuit {
+                name: name.into(),
+                node_count,
+                arcs,
+            });
+        Ok(self.general_constraints.len() - 1)
+    }
+
     pub fn add_automaton(
         &mut self,
         name: impl Into<String>,
@@ -821,6 +1258,21 @@ impl MathProgram {
         IntervalTerm {
             start_var,
             duration,
+            duration_var: None,
+            end_var,
+            presence_var: None,
+        }
+    }
+
+    pub fn variable_interval(
+        start_var: usize,
+        duration_var: usize,
+        end_var: usize,
+    ) -> IntervalTerm {
+        IntervalTerm {
+            start_var,
+            duration: 0.0,
+            duration_var: Some(duration_var),
             end_var,
             presence_var: None,
         }
@@ -835,8 +1287,44 @@ impl MathProgram {
         IntervalTerm {
             start_var,
             duration,
+            duration_var: None,
             end_var,
             presence_var: Some(presence_var),
+        }
+    }
+
+    pub fn optional_variable_interval(
+        start_var: usize,
+        duration_var: usize,
+        end_var: usize,
+        presence_var: usize,
+    ) -> IntervalTerm {
+        IntervalTerm {
+            start_var,
+            duration: 0.0,
+            duration_var: Some(duration_var),
+            end_var,
+            presence_var: Some(presence_var),
+        }
+    }
+
+    pub fn reservoir_event(time_var: usize, demand: f64) -> ReservoirEvent {
+        ReservoirEvent {
+            time_var,
+            demand,
+            active_var: None,
+        }
+    }
+
+    pub fn optional_reservoir_event(
+        time_var: usize,
+        demand: f64,
+        active_var: usize,
+    ) -> ReservoirEvent {
+        ReservoirEvent {
+            time_var,
+            demand,
+            active_var: Some(active_var),
         }
     }
 
@@ -869,6 +1357,23 @@ impl MathProgram {
         Ok(self.general_constraints.len() - 1)
     }
 
+    pub fn add_reservoir(
+        &mut self,
+        name: impl Into<String>,
+        events: Vec<ReservoirEvent>,
+        min_level: f64,
+        max_level: f64,
+    ) -> Result<usize, MathProgramError> {
+        self.validate_reservoir_args(&events, min_level, max_level)?;
+        self.general_constraints.push(GeneralConstraint::Reservoir {
+            name: name.into(),
+            events,
+            min_level,
+            max_level,
+        });
+        Ok(self.general_constraints.len() - 1)
+    }
+
     pub fn add_cumulative(
         &mut self,
         name: impl Into<String>,
@@ -876,7 +1381,28 @@ impl MathProgram {
         demands: Vec<f64>,
         capacity: f64,
     ) -> Result<usize, MathProgramError> {
-        self.validate_cumulative_args(&intervals, &demands, capacity)?;
+        let demands = demands
+            .into_iter()
+            .map(|constant| AffineTerm {
+                coeffs: Vec::new(),
+                constant,
+            })
+            .collect::<Vec<_>>();
+        let capacity = AffineTerm {
+            coeffs: Vec::new(),
+            constant: capacity,
+        };
+        self.add_cumulative_affine(name, intervals, demands, capacity)
+    }
+
+    pub fn add_cumulative_affine(
+        &mut self,
+        name: impl Into<String>,
+        intervals: Vec<IntervalTerm>,
+        demands: Vec<AffineTerm>,
+        capacity: AffineTerm,
+    ) -> Result<usize, MathProgramError> {
+        self.validate_cumulative_args(&intervals, &demands, &capacity)?;
         self.general_constraints
             .push(GeneralConstraint::Cumulative {
                 name: name.into(),
@@ -1052,7 +1578,52 @@ impl MathProgram {
                     result_var,
                     operands,
                     ..
+                }
+                | GeneralConstraint::BinaryXor {
+                    result_var,
+                    operands,
+                    ..
                 } => self.validate_binary_general_args(*result_var, operands)?,
+                GeneralConstraint::BinaryCardinality {
+                    operands,
+                    min_count,
+                    max_count,
+                    ..
+                } => {
+                    self.validate_binary_cardinality_args(operands, *min_count, *max_count)?;
+                }
+                GeneralConstraint::BooleanClause { literals, .. } => {
+                    self.validate_boolean_clause_args(literals)?;
+                }
+                GeneralConstraint::IntegerProduct {
+                    target_var,
+                    operands,
+                    ..
+                } => self.validate_integer_product_args(*target_var, operands)?,
+                GeneralConstraint::IntegerDivision {
+                    target_var,
+                    numerator_var,
+                    denominator_var,
+                    ..
+                } => self.validate_integer_binary_operation_args(
+                    "integer division",
+                    *target_var,
+                    *numerator_var,
+                    *denominator_var,
+                    i64::checked_div,
+                )?,
+                GeneralConstraint::IntegerModulo {
+                    target_var,
+                    numerator_var,
+                    denominator_var,
+                    ..
+                } => self.validate_integer_binary_operation_args(
+                    "integer modulo",
+                    *target_var,
+                    *numerator_var,
+                    *denominator_var,
+                    i64::checked_rem,
+                )?,
                 GeneralConstraint::Abs {
                     result_var,
                     operand_var,
@@ -1086,6 +1657,12 @@ impl MathProgram {
                     operands,
                     ..
                 } => self.validate_extreme_general_args("min", *result_var, operands)?,
+                GeneralConstraint::Norm {
+                    result_var,
+                    operands,
+                    norm_type,
+                    ..
+                } => self.validate_norm_args(*result_var, operands, *norm_type)?,
                 GeneralConstraint::PiecewiseLinear {
                     x_var,
                     y_var,
@@ -1113,6 +1690,17 @@ impl MathProgram {
                     values,
                     ..
                 } => self.validate_element_args(*index_var, *target_var, values)?,
+                GeneralConstraint::Inverse {
+                    variables,
+                    inverse_variables,
+                    ..
+                } => self.validate_inverse_args(variables, inverse_variables)?,
+                GeneralConstraint::Circuit {
+                    node_count, arcs, ..
+                } => self.validate_circuit_args(*node_count, arcs)?,
+                GeneralConstraint::MultipleCircuit {
+                    node_count, arcs, ..
+                } => self.validate_multiple_circuit_args(*node_count, arcs)?,
                 GeneralConstraint::Automaton {
                     variables,
                     starting_state,
@@ -1139,8 +1727,294 @@ impl MathProgram {
                     capacity,
                     ..
                 } => self.validate_cumulative_args(intervals, demands, *capacity)?,
+                GeneralConstraint::Reservoir {
+                    events,
+                    min_level,
+                    max_level,
+                    ..
+                } => self.validate_reservoir_args(events, *min_level, *max_level)?,
             }
         }
+        Ok(())
+    }
+
+    fn validate_norm_args(
+        &self,
+        result_var: usize,
+        operands: &[usize],
+        norm_type: NormType,
+    ) -> Result<(), MathProgramError> {
+        let kind = match norm_type {
+            NormType::L1 => "l1-norm",
+            NormType::LInfinity => "l-infinity-norm",
+        };
+        self.validate_extreme_general_args(kind, result_var, operands)?;
+        if self.variables[result_var].lb.is_some_and(|lb| lb < 0.0) {
+            return Err(MathProgramError::InvalidBound(format!(
+                "{kind} result `{}` must have non-negative lower bound",
+                self.variables[result_var].name
+            )));
+        }
+        Ok(())
+    }
+
+    fn validate_circuit_args(
+        &self,
+        node_count: usize,
+        arcs: &[CircuitArc],
+    ) -> Result<(), MathProgramError> {
+        if node_count < 2 {
+            return Err(MathProgramError::Unsupported(
+                "circuit requires at least two nodes".to_string(),
+            ));
+        }
+        if arcs.is_empty() {
+            return Err(MathProgramError::Unsupported(
+                "circuit requires at least one directed arc".to_string(),
+            ));
+        }
+        if arcs.len() > 4096 {
+            return Err(MathProgramError::Unsupported(format!(
+                "circuit exact MIP lowering is limited to 4096 arcs, got {}",
+                arcs.len()
+            )));
+        }
+
+        let mut incoming = vec![0usize; node_count];
+        let mut outgoing = vec![0usize; node_count];
+        let mut seen_arcs = Vec::with_capacity(arcs.len());
+        let mut seen_literals = Vec::with_capacity(arcs.len());
+
+        for arc in arcs {
+            if arc.tail >= node_count || arc.head >= node_count {
+                return Err(MathProgramError::BadIndex(format!(
+                    "circuit arc {} -> {} is outside node range [0, {})",
+                    arc.tail, arc.head, node_count
+                )));
+            }
+            if arc.tail == arc.head {
+                return Err(MathProgramError::Unsupported(format!(
+                    "circuit arc {} -> {} is a self-loop; this Hamiltonian circuit lowering requires distinct endpoints",
+                    arc.tail, arc.head
+                )));
+            }
+            if arc.literal_var >= self.variables.len() {
+                return Err(MathProgramError::BadIndex(format!(
+                    "circuit arc {} -> {} literal variable index {} out of bounds",
+                    arc.tail, arc.head, arc.literal_var
+                )));
+            }
+            let literal = &self.variables[arc.literal_var];
+            if literal.var_type != VariableType::Binary {
+                return Err(MathProgramError::Unsupported(format!(
+                    "circuit arc {} -> {} literal `{}` must be binary",
+                    arc.tail, arc.head, literal.name
+                )));
+            }
+            if seen_arcs.contains(&(arc.tail, arc.head)) {
+                return Err(MathProgramError::Unsupported(format!(
+                    "circuit has duplicate directed arc {} -> {}",
+                    arc.tail, arc.head
+                )));
+            }
+            if seen_literals.contains(&arc.literal_var) {
+                return Err(MathProgramError::Unsupported(format!(
+                    "circuit literal `{}` is used by more than one arc",
+                    literal.name
+                )));
+            }
+            seen_arcs.push((arc.tail, arc.head));
+            seen_literals.push(arc.literal_var);
+            outgoing[arc.tail] += 1;
+            incoming[arc.head] += 1;
+        }
+
+        for node in 0..node_count {
+            if outgoing[node] == 0 {
+                return Err(MathProgramError::Unsupported(format!(
+                    "circuit node {node} has no outgoing candidate arcs"
+                )));
+            }
+            if incoming[node] == 0 {
+                return Err(MathProgramError::Unsupported(format!(
+                    "circuit node {node} has no incoming candidate arcs"
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn validate_multiple_circuit_args(
+        &self,
+        node_count: usize,
+        arcs: &[CircuitArc],
+    ) -> Result<(), MathProgramError> {
+        if node_count < 2 {
+            return Err(MathProgramError::Unsupported(
+                "multiple-circuit requires at least two nodes".to_string(),
+            ));
+        }
+        if arcs.is_empty() {
+            return Err(MathProgramError::Unsupported(
+                "multiple-circuit requires at least one directed arc".to_string(),
+            ));
+        }
+        if arcs.len() > 4096 {
+            return Err(MathProgramError::Unsupported(format!(
+                "multiple-circuit exact MIP lowering is limited to 4096 arcs, got {}",
+                arcs.len()
+            )));
+        }
+
+        let mut incoming = vec![0usize; node_count];
+        let mut outgoing = vec![0usize; node_count];
+        let mut seen_arcs = Vec::with_capacity(arcs.len());
+        let mut seen_literals = Vec::with_capacity(arcs.len());
+
+        for arc in arcs {
+            if arc.tail >= node_count || arc.head >= node_count {
+                return Err(MathProgramError::BadIndex(format!(
+                    "multiple-circuit arc {} -> {} is outside node range [0, {})",
+                    arc.tail, arc.head, node_count
+                )));
+            }
+            if arc.tail == 0 && arc.head == 0 {
+                return Err(MathProgramError::Unsupported(
+                    "multiple-circuit does not allow a depot self-loop".to_string(),
+                ));
+            }
+            if arc.literal_var >= self.variables.len() {
+                return Err(MathProgramError::BadIndex(format!(
+                    "multiple-circuit arc {} -> {} literal variable index {} out of bounds",
+                    arc.tail, arc.head, arc.literal_var
+                )));
+            }
+            let literal = &self.variables[arc.literal_var];
+            if literal.var_type != VariableType::Binary {
+                return Err(MathProgramError::Unsupported(format!(
+                    "multiple-circuit arc {} -> {} literal `{}` must be binary",
+                    arc.tail, arc.head, literal.name
+                )));
+            }
+            if seen_arcs.contains(&(arc.tail, arc.head)) {
+                return Err(MathProgramError::Unsupported(format!(
+                    "multiple-circuit has duplicate directed arc {} -> {}",
+                    arc.tail, arc.head
+                )));
+            }
+            if seen_literals.contains(&arc.literal_var) {
+                return Err(MathProgramError::Unsupported(format!(
+                    "multiple-circuit literal `{}` is used by more than one arc",
+                    literal.name
+                )));
+            }
+            seen_arcs.push((arc.tail, arc.head));
+            seen_literals.push(arc.literal_var);
+            outgoing[arc.tail] += 1;
+            incoming[arc.head] += 1;
+        }
+
+        for node in 1..node_count {
+            if outgoing[node] == 0 {
+                return Err(MathProgramError::Unsupported(format!(
+                    "multiple-circuit node {node} has no outgoing candidate arcs"
+                )));
+            }
+            if incoming[node] == 0 {
+                return Err(MathProgramError::Unsupported(format!(
+                    "multiple-circuit node {node} has no incoming candidate arcs"
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn validate_reservoir_args(
+        &self,
+        events: &[ReservoirEvent],
+        min_level: f64,
+        max_level: f64,
+    ) -> Result<(), MathProgramError> {
+        if events.is_empty() {
+            return Err(MathProgramError::Unsupported(
+                "reservoir requires at least one event".to_string(),
+            ));
+        }
+        if !min_level.is_finite() || !max_level.is_finite() || min_level > max_level {
+            return Err(MathProgramError::InvalidBound(format!(
+                "reservoir levels must be finite with min <= max, got [{min_level}, {max_level}]"
+            )));
+        }
+        if min_level > 0.0 || max_level < 0.0 {
+            return Err(MathProgramError::InvalidBound(format!(
+                "reservoir initial level 0 must fit [{min_level}, {max_level}]"
+            )));
+        }
+
+        let mut selector_count = 0usize;
+        for (i, event) in events.iter().enumerate() {
+            if event.time_var >= self.variables.len() {
+                return Err(MathProgramError::BadIndex(format!(
+                    "reservoir event {i} time index {} out of bounds",
+                    event.time_var
+                )));
+            }
+            if !event.demand.is_finite() {
+                return Err(MathProgramError::NonFinite(format!(
+                    "reservoir event {i} demand"
+                )));
+            }
+            let time_var = &self.variables[event.time_var];
+            if !is_integer_time_var(time_var) {
+                return Err(MathProgramError::Unsupported(format!(
+                    "reservoir event {i} time `{}` must be binary or integer",
+                    time_var.name
+                )));
+            }
+            let (lower, upper) = integer_bounds(time_var).ok_or_else(|| {
+                MathProgramError::UnboundedBigM(format!(
+                    "reservoir event {i} time `{}` requires finite integer bounds",
+                    time_var.name
+                ))
+            })?;
+            let domain_size = upper
+                .checked_sub(lower)
+                .and_then(|span| span.checked_add(1))
+                .ok_or_else(|| {
+                    MathProgramError::Unsupported(format!(
+                        "reservoir event {i} time `{}` has an oversized domain",
+                        time_var.name
+                    ))
+                })?;
+            selector_count = selector_count
+                .checked_add(domain_size as usize)
+                .ok_or_else(|| {
+                    MathProgramError::Unsupported("reservoir selector count overflowed".to_string())
+                })?;
+
+            if let Some(active_var) = event.active_var {
+                if active_var >= self.variables.len() {
+                    return Err(MathProgramError::BadIndex(format!(
+                        "reservoir event {i} active index {active_var} out of bounds"
+                    )));
+                }
+                if self.variables[active_var].var_type != VariableType::Binary {
+                    return Err(MathProgramError::Unsupported(format!(
+                        "reservoir event {i} active literal `{}` must be binary",
+                        self.variables[active_var].name
+                    )));
+                }
+            }
+        }
+
+        if selector_count > 4096 {
+            return Err(MathProgramError::Unsupported(format!(
+                "reservoir exact MIP lowering is limited to 4096 time selectors, got {selector_count}"
+            )));
+        }
+
         Ok(())
     }
 
@@ -1380,6 +2254,85 @@ impl MathProgram {
             }
         }
 
+        Ok(())
+    }
+
+    fn validate_inverse_args(
+        &self,
+        variables: &[usize],
+        inverse_variables: &[usize],
+    ) -> Result<(), MathProgramError> {
+        if variables.is_empty() {
+            return Err(MathProgramError::Unsupported(
+                "inverse requires at least one variable".to_string(),
+            ));
+        }
+        if variables.len() != inverse_variables.len() {
+            return Err(MathProgramError::Unsupported(format!(
+                "inverse requires equally-sized variable arrays, got {} and {}",
+                variables.len(),
+                inverse_variables.len()
+            )));
+        }
+        let literal_count = variables
+            .len()
+            .checked_mul(variables.len())
+            .ok_or_else(|| {
+                MathProgramError::Unsupported("inverse literal count overflowed".to_string())
+            })?;
+        if literal_count > 4096 {
+            return Err(MathProgramError::Unsupported(format!(
+                "inverse exact MIP lowering is limited to 4096 literals, got {literal_count}"
+            )));
+        }
+
+        self.validate_inverse_side("inverse variable", variables)?;
+        self.validate_inverse_side("inverse mirror variable", inverse_variables)?;
+        Ok(())
+    }
+
+    fn validate_inverse_side(
+        &self,
+        kind: &str,
+        variables: &[usize],
+    ) -> Result<(), MathProgramError> {
+        let mut seen = Vec::with_capacity(variables.len());
+        let max_value = variables.len() as i64 - 1;
+        for &idx in variables {
+            if idx >= self.variables.len() {
+                return Err(MathProgramError::BadIndex(format!(
+                    "{kind} index {idx} out of bounds"
+                )));
+            }
+            if seen.contains(&idx) {
+                return Err(MathProgramError::Unsupported(format!(
+                    "inverse does not support duplicate {kind} `{}`",
+                    self.variables[idx].name
+                )));
+            }
+            seen.push(idx);
+            if !matches!(
+                self.variables[idx].var_type,
+                VariableType::Binary | VariableType::Integer
+            ) {
+                return Err(MathProgramError::Unsupported(format!(
+                    "{kind} `{}` must be binary or integer",
+                    self.variables[idx].name
+                )));
+            }
+            let (lower, upper) = integer_bounds(&self.variables[idx]).ok_or_else(|| {
+                MathProgramError::UnboundedBigM(format!(
+                    "{kind} `{}` requires finite integer bounds",
+                    self.variables[idx].name
+                ))
+            })?;
+            if lower < 0 || upper > max_value {
+                return Err(MathProgramError::InvalidBound(format!(
+                    "{kind} `{}` bounds [{lower}, {upper}] must fit inverse values [0, {max_value}]",
+                    self.variables[idx].name
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -1638,6 +2591,114 @@ impl MathProgram {
         Ok(())
     }
 
+    fn validate_binary_cardinality_args(
+        &self,
+        operands: &[usize],
+        min_count: Option<usize>,
+        max_count: Option<usize>,
+    ) -> Result<(), MathProgramError> {
+        if operands.is_empty() {
+            return Err(MathProgramError::Unsupported(
+                "binary cardinality constraints require at least one operand".to_string(),
+            ));
+        }
+        if min_count.is_none() && max_count.is_none() {
+            return Err(MathProgramError::Unsupported(
+                "binary cardinality constraints require at least one count bound".to_string(),
+            ));
+        }
+        if let Some(min_count) = min_count {
+            if min_count > operands.len() {
+                return Err(MathProgramError::Unsupported(format!(
+                    "binary cardinality minimum {min_count} exceeds {} operands",
+                    operands.len()
+                )));
+            }
+        }
+        if let Some(max_count) = max_count {
+            if max_count > operands.len() {
+                return Err(MathProgramError::Unsupported(format!(
+                    "binary cardinality maximum {max_count} exceeds {} operands",
+                    operands.len()
+                )));
+            }
+        }
+        if let (Some(min_count), Some(max_count)) = (min_count, max_count) {
+            if min_count > max_count {
+                return Err(MathProgramError::Unsupported(format!(
+                    "binary cardinality minimum {min_count} exceeds maximum {max_count}"
+                )));
+            }
+        }
+        for &operand in operands {
+            if operand >= self.variables.len() {
+                return Err(MathProgramError::BadIndex(format!(
+                    "binary cardinality operand index {operand} out of bounds"
+                )));
+            }
+            if self.variables[operand].var_type != VariableType::Binary {
+                return Err(MathProgramError::Unsupported(format!(
+                    "binary cardinality operand `{}` must be binary",
+                    self.variables[operand].name
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_boolean_clause_args(
+        &self,
+        literals: &[BoolLiteral],
+    ) -> Result<(), MathProgramError> {
+        if literals.is_empty() {
+            return Err(MathProgramError::Unsupported(
+                "boolean clauses require at least one literal".to_string(),
+            ));
+        }
+        for literal in literals {
+            if literal.var >= self.variables.len() {
+                return Err(MathProgramError::BadIndex(format!(
+                    "boolean clause literal variable index {} out of bounds",
+                    literal.var
+                )));
+            }
+            if self.variables[literal.var].var_type != VariableType::Binary {
+                return Err(MathProgramError::Unsupported(format!(
+                    "boolean clause literal `{}` must be binary",
+                    self.variables[literal.var].name
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_integer_product_args(
+        &self,
+        target_var: usize,
+        operands: &[usize],
+    ) -> Result<(), MathProgramError> {
+        integer_product_variables_and_tuples(self, target_var, operands).map(|_| ())
+    }
+
+    fn validate_integer_binary_operation_args(
+        &self,
+        kind: &str,
+        target_var: usize,
+        numerator_var: usize,
+        denominator_var: usize,
+        operation: fn(i64, i64) -> Option<i64>,
+    ) -> Result<(), MathProgramError> {
+        integer_binary_operation_variables_and_tuples(
+            self,
+            kind,
+            target_var,
+            numerator_var,
+            denominator_var,
+            operation,
+        )
+        .map(|_| ())
+    }
+
     fn validate_extreme_general_args(
         &self,
         kind: &str,
@@ -1744,6 +2805,26 @@ impl MathProgram {
                     "{kind} interval {i} requires finite start/end bounds"
                 )));
             }
+            if let Some(duration_var) = interval.duration_var {
+                if duration_var >= self.variables.len() {
+                    return Err(MathProgramError::BadIndex(format!(
+                        "{kind} interval {i} duration index {duration_var} out of bounds"
+                    )));
+                }
+                let (duration_lb, _) =
+                    variable_bounds(&self.variables[duration_var]).ok_or_else(|| {
+                        MathProgramError::UnboundedBigM(format!(
+                            "{kind} interval {i} duration `{}` requires finite bounds",
+                            self.variables[duration_var].name
+                        ))
+                    })?;
+                if duration_lb + interval.duration < -1e-9 {
+                    return Err(MathProgramError::InvalidBound(format!(
+                        "{kind} interval {i} duration `{}` can be negative",
+                        self.variables[duration_var].name
+                    )));
+                }
+            }
             if let Some(presence) = interval.presence_var {
                 if presence >= self.variables.len() {
                     return Err(MathProgramError::BadIndex(format!(
@@ -1795,9 +2876,23 @@ impl MathProgram {
             }
             if !is_integer_value(interval.duration) {
                 return Err(MathProgramError::Unsupported(format!(
-                    "cumulative interval {i} duration {} must be an integer",
+                    "cumulative interval {i} fixed duration offset {} must be an integer",
                     interval.duration
                 )));
+            }
+            if let Some(duration_var) = interval.duration_var {
+                if !is_integer_time_var(&self.variables[duration_var]) {
+                    return Err(MathProgramError::Unsupported(format!(
+                        "cumulative interval {i} duration variable `{}` must be an integer-time variable",
+                        self.variables[duration_var].name
+                    )));
+                }
+                integer_bounds(&self.variables[duration_var]).ok_or_else(|| {
+                    MathProgramError::UnboundedBigM(format!(
+                        "cumulative interval {i} duration variable `{}` requires finite integer bounds",
+                        self.variables[duration_var].name
+                    ))
+                })?;
             }
         }
         Ok(())
@@ -5166,6 +6261,143 @@ fn add_general_constraint_rows(
                 0.0,
             );
         }
+        GeneralConstraint::BinaryXor {
+            name,
+            result_var,
+            operands,
+        } => {
+            let mut coeffs = operands.iter().map(|&idx| (idx, 1.0)).collect::<Vec<_>>();
+            coeffs.push((*result_var, -1.0));
+            if operands.len() == 1 {
+                add_program_row(
+                    rows,
+                    format!("{name}__xor_parity"),
+                    expansions,
+                    &coeffs,
+                    RowSense::Eq,
+                    0.0,
+                );
+            } else {
+                let quotient = push_canonical_var(
+                    &format!("{name}__xor_quotient"),
+                    true,
+                    (operands.len() / 2) as f64,
+                    names,
+                    integer_vars,
+                    ub,
+                );
+                add_mixed_row(
+                    rows,
+                    format!("{name}__xor_parity"),
+                    expansions,
+                    &coeffs,
+                    &[(quotient, -2.0)],
+                    RowSense::Eq,
+                    0.0,
+                );
+            }
+        }
+        GeneralConstraint::BinaryCardinality {
+            name,
+            operands,
+            min_count,
+            max_count,
+        } => {
+            let coeffs = operands.iter().map(|&idx| (idx, 1.0)).collect::<Vec<_>>();
+            if let Some(max_count) = max_count {
+                add_program_row(
+                    rows,
+                    format!("{name}__cardinality_at_most"),
+                    expansions,
+                    &coeffs,
+                    RowSense::Le,
+                    *max_count as f64,
+                );
+            }
+            if let Some(min_count) = min_count {
+                add_program_row(
+                    rows,
+                    format!("{name}__cardinality_at_least"),
+                    expansions,
+                    &coeffs,
+                    RowSense::Ge,
+                    *min_count as f64,
+                );
+            }
+        }
+        GeneralConstraint::BooleanClause { name, literals } => {
+            let mut coeffs = Vec::with_capacity(literals.len());
+            let mut negated_count = 0usize;
+            for literal in literals {
+                if literal.value {
+                    coeffs.push((literal.var, 1.0));
+                } else {
+                    coeffs.push((literal.var, -1.0));
+                    negated_count += 1;
+                }
+            }
+            add_program_row(
+                rows,
+                format!("{name}__boolean_clause"),
+                expansions,
+                &coeffs,
+                RowSense::Ge,
+                1.0 - negated_count as f64,
+            );
+        }
+        GeneralConstraint::IntegerProduct {
+            name,
+            target_var,
+            operands,
+        } => add_integer_product_rows(
+            program,
+            names,
+            integer_vars,
+            ub,
+            rows,
+            expansions,
+            name,
+            *target_var,
+            operands,
+        )?,
+        GeneralConstraint::IntegerDivision {
+            name,
+            target_var,
+            numerator_var,
+            denominator_var,
+        } => add_integer_binary_operation_rows(
+            program,
+            names,
+            integer_vars,
+            ub,
+            rows,
+            expansions,
+            name,
+            "integer division",
+            *target_var,
+            *numerator_var,
+            *denominator_var,
+            i64::checked_div,
+        )?,
+        GeneralConstraint::IntegerModulo {
+            name,
+            target_var,
+            numerator_var,
+            denominator_var,
+        } => add_integer_binary_operation_rows(
+            program,
+            names,
+            integer_vars,
+            ub,
+            rows,
+            expansions,
+            name,
+            "integer modulo",
+            *target_var,
+            *numerator_var,
+            *denominator_var,
+            i64::checked_rem,
+        )?,
         GeneralConstraint::Abs {
             name,
             result_var,
@@ -5214,6 +6446,23 @@ fn add_general_constraint_rows(
             *result_var,
             operands,
             false,
+        )?,
+        GeneralConstraint::Norm {
+            name,
+            result_var,
+            operands,
+            norm_type,
+        } => add_norm_rows(
+            program,
+            names,
+            integer_vars,
+            ub,
+            rows,
+            expansions,
+            name,
+            *result_var,
+            operands,
+            *norm_type,
         )?,
         GeneralConstraint::PiecewiseLinear {
             name,
@@ -5287,6 +6536,48 @@ fn add_general_constraint_rows(
             *target_var,
             values,
         )?,
+        GeneralConstraint::Inverse {
+            name,
+            variables,
+            inverse_variables,
+        } => add_inverse_rows(
+            names,
+            integer_vars,
+            ub,
+            rows,
+            expansions,
+            name,
+            variables,
+            inverse_variables,
+        )?,
+        GeneralConstraint::Circuit {
+            name,
+            node_count,
+            arcs,
+        } => add_circuit_rows(
+            names,
+            integer_vars,
+            ub,
+            rows,
+            expansions,
+            name,
+            *node_count,
+            arcs,
+        )?,
+        GeneralConstraint::MultipleCircuit {
+            name,
+            node_count,
+            arcs,
+        } => add_multiple_circuit_rows(
+            names,
+            integer_vars,
+            ub,
+            rows,
+            expansions,
+            name,
+            *node_count,
+            arcs,
+        )?,
         GeneralConstraint::Automaton {
             name,
             variables,
@@ -5338,6 +6629,23 @@ fn add_general_constraint_rows(
             intervals,
             demands,
             *capacity,
+        )?,
+        GeneralConstraint::Reservoir {
+            name,
+            events,
+            min_level,
+            max_level,
+        } => add_reservoir_rows(
+            program,
+            names,
+            integer_vars,
+            ub,
+            rows,
+            expansions,
+            name,
+            events,
+            *min_level,
+            *max_level,
         )?,
     }
     Ok(())
@@ -5418,6 +6726,381 @@ fn add_all_different_rows(
     }
 
     Ok(())
+}
+
+fn add_integer_product_rows(
+    program: &MathProgram,
+    names: &mut Vec<String>,
+    integer_vars: &mut Vec<bool>,
+    ub: &mut Vec<f64>,
+    rows: &mut Vec<SparseRow>,
+    expansions: &[LinearExpansion],
+    name: &str,
+    target_var: usize,
+    operands: &[usize],
+) -> Result<(), MathProgramError> {
+    let (variables, tuples) = integer_product_variables_and_tuples(program, target_var, operands)?;
+    add_allowed_assignment_rows(
+        names,
+        integer_vars,
+        ub,
+        rows,
+        expansions,
+        name,
+        &variables,
+        &tuples,
+    )
+}
+
+fn integer_product_variables_and_tuples(
+    program: &MathProgram,
+    target_var: usize,
+    operands: &[usize],
+) -> Result<(Vec<usize>, Vec<Vec<i64>>), MathProgramError> {
+    if operands.is_empty() {
+        return Err(MathProgramError::Unsupported(
+            "integer product requires at least one operand".to_string(),
+        ));
+    }
+    if target_var >= program.variables.len() {
+        return Err(MathProgramError::BadIndex(format!(
+            "integer product target variable index {target_var} out of bounds"
+        )));
+    }
+    if !matches!(
+        program.variables[target_var].var_type,
+        VariableType::Binary | VariableType::Integer
+    ) {
+        return Err(MathProgramError::Unsupported(format!(
+            "integer product target `{}` must be binary or integer",
+            program.variables[target_var].name
+        )));
+    }
+    let (target_lb, target_ub) =
+        integer_bounds(&program.variables[target_var]).ok_or_else(|| {
+            MathProgramError::UnboundedBigM(format!(
+                "integer product target `{}` requires finite integer bounds",
+                program.variables[target_var].name
+            ))
+        })?;
+
+    let mut unique_operands = Vec::new();
+    let mut seen = BTreeMap::<usize, ()>::new();
+    for &operand in operands {
+        if operand >= program.variables.len() {
+            return Err(MathProgramError::BadIndex(format!(
+                "integer product operand index {operand} out of bounds"
+            )));
+        }
+        if operand == target_var {
+            return Err(MathProgramError::Unsupported(format!(
+                "integer product target `{}` must be distinct from its operands",
+                program.variables[target_var].name
+            )));
+        }
+        if !matches!(
+            program.variables[operand].var_type,
+            VariableType::Binary | VariableType::Integer
+        ) {
+            return Err(MathProgramError::Unsupported(format!(
+                "integer product operand `{}` must be binary or integer",
+                program.variables[operand].name
+            )));
+        }
+        integer_bounds(&program.variables[operand]).ok_or_else(|| {
+            MathProgramError::UnboundedBigM(format!(
+                "integer product operand `{}` requires finite integer bounds",
+                program.variables[operand].name
+            ))
+        })?;
+        if seen.insert(operand, ()).is_none() {
+            unique_operands.push(operand);
+        }
+    }
+
+    let mut tuple_count = 1usize;
+    let mut domains = Vec::with_capacity(unique_operands.len());
+    for &operand in &unique_operands {
+        let (lower, upper) = integer_bounds(&program.variables[operand]).ok_or_else(|| {
+            MathProgramError::UnboundedBigM(format!(
+                "integer product operand `{}` requires finite integer bounds",
+                program.variables[operand].name
+            ))
+        })?;
+        let domain_size = upper
+            .checked_sub(lower)
+            .and_then(|span| span.checked_add(1))
+            .ok_or_else(|| {
+                MathProgramError::Unsupported(format!(
+                    "integer product operand `{}` has an oversized domain",
+                    program.variables[operand].name
+                ))
+            })? as usize;
+        tuple_count = tuple_count.checked_mul(domain_size).ok_or_else(|| {
+            MathProgramError::Unsupported("integer product tuple count overflowed".to_string())
+        })?;
+        if tuple_count > 512 {
+            return Err(MathProgramError::Unsupported(format!(
+                "integer product exact MIP lowering is limited to 512 operand assignments, got {tuple_count}"
+            )));
+        }
+        domains.push((operand, lower, upper));
+    }
+
+    let mut tuples = Vec::new();
+    let mut assignment = BTreeMap::<usize, i64>::new();
+    enumerate_integer_product_tuples(
+        &domains,
+        0,
+        operands,
+        target_lb,
+        target_ub,
+        &mut assignment,
+        &mut tuples,
+    )?;
+
+    let mut variables = unique_operands;
+    variables.push(target_var);
+    Ok((variables, tuples))
+}
+
+fn enumerate_integer_product_tuples(
+    domains: &[(usize, i64, i64)],
+    pos: usize,
+    operands: &[usize],
+    target_lb: i64,
+    target_ub: i64,
+    assignment: &mut BTreeMap<usize, i64>,
+    tuples: &mut Vec<Vec<i64>>,
+) -> Result<(), MathProgramError> {
+    if pos == domains.len() {
+        let mut product = 1i64;
+        for &operand in operands {
+            let value = assignment[&operand];
+            product = product.checked_mul(value).ok_or_else(|| {
+                MathProgramError::Unsupported(
+                    "integer product value overflowed during exact lowering".to_string(),
+                )
+            })?;
+        }
+        if product >= target_lb && product <= target_ub {
+            let mut tuple = domains
+                .iter()
+                .map(|(operand, _, _)| assignment[operand])
+                .collect::<Vec<_>>();
+            tuple.push(product);
+            tuples.push(tuple);
+        }
+        return Ok(());
+    }
+
+    let (operand, lower, upper) = domains[pos];
+    for value in lower..=upper {
+        assignment.insert(operand, value);
+        enumerate_integer_product_tuples(
+            domains,
+            pos + 1,
+            operands,
+            target_lb,
+            target_ub,
+            assignment,
+            tuples,
+        )?;
+    }
+    assignment.remove(&operand);
+    Ok(())
+}
+
+fn add_integer_binary_operation_rows(
+    program: &MathProgram,
+    names: &mut Vec<String>,
+    integer_vars: &mut Vec<bool>,
+    ub: &mut Vec<f64>,
+    rows: &mut Vec<SparseRow>,
+    expansions: &[LinearExpansion],
+    name: &str,
+    kind: &str,
+    target_var: usize,
+    numerator_var: usize,
+    denominator_var: usize,
+    operation: fn(i64, i64) -> Option<i64>,
+) -> Result<(), MathProgramError> {
+    let (variables, tuples) = integer_binary_operation_variables_and_tuples(
+        program,
+        kind,
+        target_var,
+        numerator_var,
+        denominator_var,
+        operation,
+    )?;
+    add_allowed_assignment_rows(
+        names,
+        integer_vars,
+        ub,
+        rows,
+        expansions,
+        name,
+        &variables,
+        &tuples,
+    )
+}
+
+fn integer_binary_operation_variables_and_tuples(
+    program: &MathProgram,
+    kind: &str,
+    target_var: usize,
+    numerator_var: usize,
+    denominator_var: usize,
+    operation: fn(i64, i64) -> Option<i64>,
+) -> Result<(Vec<usize>, Vec<Vec<i64>>), MathProgramError> {
+    if target_var >= program.variables.len() {
+        return Err(MathProgramError::BadIndex(format!(
+            "{kind} target variable index {target_var} out of bounds"
+        )));
+    }
+    if !matches!(
+        program.variables[target_var].var_type,
+        VariableType::Binary | VariableType::Integer
+    ) {
+        return Err(MathProgramError::Unsupported(format!(
+            "{kind} target `{}` must be binary or integer",
+            program.variables[target_var].name
+        )));
+    }
+    let (target_lb, target_ub) =
+        integer_bounds(&program.variables[target_var]).ok_or_else(|| {
+            MathProgramError::UnboundedBigM(format!(
+                "{kind} target `{}` requires finite integer bounds",
+                program.variables[target_var].name
+            ))
+        })?;
+
+    let mut unique_operands = Vec::new();
+    let mut seen = BTreeMap::<usize, ()>::new();
+    for &(role, operand) in &[
+        ("numerator", numerator_var),
+        ("denominator", denominator_var),
+    ] {
+        if operand >= program.variables.len() {
+            return Err(MathProgramError::BadIndex(format!(
+                "{kind} {role} variable index {operand} out of bounds"
+            )));
+        }
+        if operand == target_var {
+            return Err(MathProgramError::Unsupported(format!(
+                "{kind} target `{}` must be distinct from its operands",
+                program.variables[target_var].name
+            )));
+        }
+        if !matches!(
+            program.variables[operand].var_type,
+            VariableType::Binary | VariableType::Integer
+        ) {
+            return Err(MathProgramError::Unsupported(format!(
+                "{kind} {role} `{}` must be binary or integer",
+                program.variables[operand].name
+            )));
+        }
+        integer_bounds(&program.variables[operand]).ok_or_else(|| {
+            MathProgramError::UnboundedBigM(format!(
+                "{kind} {role} `{}` requires finite integer bounds",
+                program.variables[operand].name
+            ))
+        })?;
+        if seen.insert(operand, ()).is_none() {
+            unique_operands.push(operand);
+        }
+    }
+
+    let mut tuple_count = 1usize;
+    let mut domains = Vec::with_capacity(unique_operands.len());
+    for &operand in &unique_operands {
+        let (lower, upper) = integer_bounds(&program.variables[operand]).ok_or_else(|| {
+            MathProgramError::UnboundedBigM(format!(
+                "{kind} operand `{}` requires finite integer bounds",
+                program.variables[operand].name
+            ))
+        })?;
+        let domain_size = upper
+            .checked_sub(lower)
+            .and_then(|span| span.checked_add(1))
+            .ok_or_else(|| {
+                MathProgramError::Unsupported(format!(
+                    "{kind} operand `{}` has an oversized domain",
+                    program.variables[operand].name
+                ))
+            })? as usize;
+        tuple_count = tuple_count.checked_mul(domain_size).ok_or_else(|| {
+            MathProgramError::Unsupported(format!("{kind} tuple count overflowed"))
+        })?;
+        if tuple_count > 512 {
+            return Err(MathProgramError::Unsupported(format!(
+                "{kind} exact MIP lowering is limited to 512 operand assignments, got {tuple_count}"
+            )));
+        }
+        domains.push((operand, lower, upper));
+    }
+
+    let mut tuples = Vec::new();
+    let mut assignment = BTreeMap::<usize, i64>::new();
+    enumerate_integer_binary_operation_tuples(
+        &domains,
+        0,
+        numerator_var,
+        denominator_var,
+        target_lb,
+        target_ub,
+        &mut assignment,
+        &mut tuples,
+        operation,
+    );
+
+    let mut variables = unique_operands;
+    variables.push(target_var);
+    Ok((variables, tuples))
+}
+
+fn enumerate_integer_binary_operation_tuples(
+    domains: &[(usize, i64, i64)],
+    pos: usize,
+    numerator_var: usize,
+    denominator_var: usize,
+    target_lb: i64,
+    target_ub: i64,
+    assignment: &mut BTreeMap<usize, i64>,
+    tuples: &mut Vec<Vec<i64>>,
+    operation: fn(i64, i64) -> Option<i64>,
+) {
+    if pos == domains.len() {
+        if let Some(result) = operation(assignment[&numerator_var], assignment[&denominator_var]) {
+            if result >= target_lb && result <= target_ub {
+                let mut tuple = domains
+                    .iter()
+                    .map(|(operand, _, _)| assignment[operand])
+                    .collect::<Vec<_>>();
+                tuple.push(result);
+                tuples.push(tuple);
+            }
+        }
+        return;
+    }
+
+    let (operand, lower, upper) = domains[pos];
+    for value in lower..=upper {
+        assignment.insert(operand, value);
+        enumerate_integer_binary_operation_tuples(
+            domains,
+            pos + 1,
+            numerator_var,
+            denominator_var,
+            target_lb,
+            target_ub,
+            assignment,
+            tuples,
+            operation,
+        );
+    }
+    assignment.remove(&operand);
 }
 
 fn add_allowed_assignment_rows(
@@ -5559,6 +7242,513 @@ fn add_forbidden_assignment_rows(
         });
     }
 
+    Ok(())
+}
+
+fn add_inverse_rows(
+    names: &mut Vec<String>,
+    integer_vars: &mut Vec<bool>,
+    ub: &mut Vec<f64>,
+    rows: &mut Vec<SparseRow>,
+    expansions: &[LinearExpansion],
+    name: &str,
+    variables: &[usize],
+    inverse_variables: &[usize],
+) -> Result<(), MathProgramError> {
+    if variables.len() != inverse_variables.len() {
+        return Err(MathProgramError::Unsupported(format!(
+            "inverse requires equally-sized variable arrays, got {} and {}",
+            variables.len(),
+            inverse_variables.len()
+        )));
+    }
+    let n = variables.len();
+    let mut literals = Vec::with_capacity(n);
+    for (i, &var_idx) in variables.iter().enumerate() {
+        let mut row_literals = Vec::with_capacity(n);
+        for j in 0..n {
+            row_literals.push(push_canonical_var(
+                &format!("{name}__x_{i}_eq_{j}"),
+                true,
+                1.0,
+                names,
+                integer_vars,
+                ub,
+            ));
+        }
+        let choose_coeffs = row_literals
+            .iter()
+            .map(|&lit| (lit, 1.0))
+            .collect::<Vec<_>>();
+        rows.push(SparseRow {
+            coeffs: choose_coeffs.clone(),
+            rhs: 1.0,
+            name: format!("{name}__x_{i}__choose_one"),
+        });
+        rows.push(SparseRow {
+            coeffs: negate_sparse(&choose_coeffs),
+            rhs: -1.0,
+            name: format!("{name}__x_{i}__choose_one_ge"),
+        });
+
+        let value_coeffs = row_literals
+            .iter()
+            .enumerate()
+            .map(|(j, &lit)| (lit, -(j as f64)))
+            .collect::<Vec<_>>();
+        add_mixed_row(
+            rows,
+            format!("{name}__x_{i}__link_value"),
+            expansions,
+            &[(var_idx, 1.0)],
+            &value_coeffs,
+            RowSense::Eq,
+            0.0,
+        );
+        literals.push(row_literals);
+    }
+
+    for (j, &inverse_var_idx) in inverse_variables.iter().enumerate() {
+        let choose_coeffs = (0..n).map(|i| (literals[i][j], 1.0)).collect::<Vec<_>>();
+        rows.push(SparseRow {
+            coeffs: choose_coeffs.clone(),
+            rhs: 1.0,
+            name: format!("{name}__inverse_{j}__choose_one"),
+        });
+        rows.push(SparseRow {
+            coeffs: negate_sparse(&choose_coeffs),
+            rhs: -1.0,
+            name: format!("{name}__inverse_{j}__choose_one_ge"),
+        });
+
+        let value_coeffs = (0..n)
+            .map(|i| (literals[i][j], -(i as f64)))
+            .collect::<Vec<_>>();
+        add_mixed_row(
+            rows,
+            format!("{name}__inverse_{j}__link_value"),
+            expansions,
+            &[(inverse_var_idx, 1.0)],
+            &value_coeffs,
+            RowSense::Eq,
+            0.0,
+        );
+    }
+
+    Ok(())
+}
+
+fn add_circuit_rows(
+    names: &mut Vec<String>,
+    integer_vars: &mut Vec<bool>,
+    ub: &mut Vec<f64>,
+    rows: &mut Vec<SparseRow>,
+    expansions: &[LinearExpansion],
+    name: &str,
+    node_count: usize,
+    arcs: &[CircuitArc],
+) -> Result<(), MathProgramError> {
+    if node_count < 2 {
+        return Err(MathProgramError::Unsupported(
+            "circuit requires at least two nodes".to_string(),
+        ));
+    }
+
+    let mut outgoing = vec![Vec::<(usize, f64)>::new(); node_count];
+    let mut incoming = vec![Vec::<(usize, f64)>::new(); node_count];
+    for arc in arcs {
+        if arc.tail >= node_count || arc.head >= node_count {
+            return Err(MathProgramError::BadIndex(format!(
+                "circuit arc {} -> {} is outside node range [0, {})",
+                arc.tail, arc.head, node_count
+            )));
+        }
+        outgoing[arc.tail].push((arc.literal_var, 1.0));
+        incoming[arc.head].push((arc.literal_var, 1.0));
+    }
+
+    for node in 0..node_count {
+        if outgoing[node].is_empty() || incoming[node].is_empty() {
+            return Err(MathProgramError::Unsupported(format!(
+                "circuit node {node} requires at least one incoming and outgoing arc"
+            )));
+        }
+        add_program_row(
+            rows,
+            format!("{name}__node_{node}__out_degree"),
+            expansions,
+            &outgoing[node],
+            RowSense::Eq,
+            1.0,
+        );
+        add_program_row(
+            rows,
+            format!("{name}__node_{node}__in_degree"),
+            expansions,
+            &incoming[node],
+            RowSense::Eq,
+            1.0,
+        );
+    }
+
+    let order_upper = node_count.saturating_sub(2) as f64;
+    let mut order_vars = vec![None; node_count];
+    for (node, slot) in order_vars.iter_mut().enumerate().skip(1) {
+        *slot = Some(push_canonical_var(
+            &format!("{name}__node_{node}__order"),
+            true,
+            order_upper,
+            names,
+            integer_vars,
+            ub,
+        ));
+    }
+
+    let big_m = (node_count - 1) as f64;
+    let rhs = (node_count - 2) as f64;
+    for arc in arcs {
+        if arc.tail == 0 || arc.head == 0 {
+            continue;
+        }
+        let tail_order = order_vars[arc.tail].expect("non-depot node has order variable");
+        let head_order = order_vars[arc.head].expect("non-depot node has order variable");
+        add_mixed_row(
+            rows,
+            format!("{name}__mtz_{}_{}", arc.tail, arc.head),
+            expansions,
+            &[(arc.literal_var, big_m)],
+            &[(tail_order, 1.0), (head_order, -1.0)],
+            RowSense::Le,
+            rhs,
+        );
+    }
+
+    Ok(())
+}
+
+fn add_multiple_circuit_rows(
+    names: &mut Vec<String>,
+    integer_vars: &mut Vec<bool>,
+    ub: &mut Vec<f64>,
+    rows: &mut Vec<SparseRow>,
+    expansions: &[LinearExpansion],
+    name: &str,
+    node_count: usize,
+    arcs: &[CircuitArc],
+) -> Result<(), MathProgramError> {
+    if node_count < 2 {
+        return Err(MathProgramError::Unsupported(
+            "multiple-circuit requires at least two nodes".to_string(),
+        ));
+    }
+
+    let mut outgoing = vec![Vec::<(usize, f64)>::new(); node_count];
+    let mut incoming = vec![Vec::<(usize, f64)>::new(); node_count];
+    for arc in arcs {
+        if arc.tail >= node_count || arc.head >= node_count {
+            return Err(MathProgramError::BadIndex(format!(
+                "multiple-circuit arc {} -> {} is outside node range [0, {})",
+                arc.tail, arc.head, node_count
+            )));
+        }
+        outgoing[arc.tail].push((arc.literal_var, 1.0));
+        incoming[arc.head].push((arc.literal_var, 1.0));
+    }
+
+    for node in 1..node_count {
+        if outgoing[node].is_empty() || incoming[node].is_empty() {
+            return Err(MathProgramError::Unsupported(format!(
+                "multiple-circuit node {node} requires at least one incoming and outgoing arc"
+            )));
+        }
+        add_program_row(
+            rows,
+            format!("{name}__node_{node}__out_degree"),
+            expansions,
+            &outgoing[node],
+            RowSense::Eq,
+            1.0,
+        );
+        add_program_row(
+            rows,
+            format!("{name}__node_{node}__in_degree"),
+            expansions,
+            &incoming[node],
+            RowSense::Eq,
+            1.0,
+        );
+    }
+
+    let mut depot_balance = outgoing[0].clone();
+    depot_balance.extend(incoming[0].iter().map(|&(idx, coeff)| (idx, -coeff)));
+    if !depot_balance.is_empty() {
+        add_program_row(
+            rows,
+            format!("{name}__depot_balance"),
+            expansions,
+            &depot_balance,
+            RowSense::Eq,
+            0.0,
+        );
+    }
+
+    let order_upper = node_count.saturating_sub(1) as f64;
+    let mut order_vars = vec![None; node_count];
+    for (node, slot) in order_vars.iter_mut().enumerate().skip(1) {
+        *slot = Some(push_canonical_var(
+            &format!("{name}__node_{node}__route_order"),
+            true,
+            order_upper,
+            names,
+            integer_vars,
+            ub,
+        ));
+    }
+
+    let big_m = node_count as f64;
+    let rhs = (node_count - 1) as f64;
+    for arc in arcs {
+        if arc.tail == 0 || arc.head == 0 || arc.tail == arc.head {
+            continue;
+        }
+        let tail_order = order_vars[arc.tail].expect("non-depot node has order variable");
+        let head_order = order_vars[arc.head].expect("non-depot node has order variable");
+        add_mixed_row(
+            rows,
+            format!("{name}__route_mtz_{}_{}", arc.tail, arc.head),
+            expansions,
+            &[(arc.literal_var, big_m)],
+            &[(tail_order, 1.0), (head_order, -1.0)],
+            RowSense::Le,
+            rhs,
+        );
+    }
+
+    Ok(())
+}
+
+fn add_norm_rows(
+    program: &MathProgram,
+    names: &mut Vec<String>,
+    integer_vars: &mut Vec<bool>,
+    ub: &mut Vec<f64>,
+    rows: &mut Vec<SparseRow>,
+    expansions: &[LinearExpansion],
+    name: &str,
+    result_var: usize,
+    operands: &[usize],
+    norm_type: NormType,
+) -> Result<(), MathProgramError> {
+    let result_bounds = variable_bounds(&program.variables[result_var]).ok_or_else(|| {
+        MathProgramError::UnboundedBigM(format!(
+            "norm result `{}` requires finite bounds",
+            program.variables[result_var].name
+        ))
+    })?;
+    let abs_vars = operands
+        .iter()
+        .enumerate()
+        .map(|(k, &operand)| {
+            let (lower, upper) = variable_bounds(&program.variables[operand]).ok_or_else(|| {
+                MathProgramError::UnboundedBigM(format!(
+                    "norm operand `{}` requires finite bounds",
+                    program.variables[operand].name
+                ))
+            })?;
+            let abs_upper = lower.abs().max(upper.abs());
+            let abs_integer = matches!(
+                program.variables[operand].var_type,
+                VariableType::Binary | VariableType::Integer | VariableType::SemiInteger
+            );
+            let abs_var = push_canonical_var(
+                &format!("{name}__abs_operand_{k}"),
+                abs_integer,
+                abs_upper,
+                names,
+                integer_vars,
+                ub,
+            );
+            add_abs_canonical_rows(
+                program,
+                names,
+                integer_vars,
+                ub,
+                rows,
+                expansions,
+                &format!("{name}__abs_operand_{k}"),
+                abs_var,
+                operand,
+            )?;
+            Ok((abs_var, abs_upper))
+        })
+        .collect::<Result<Vec<_>, MathProgramError>>()?;
+
+    match norm_type {
+        NormType::L1 => {
+            let abs_terms = abs_vars
+                .iter()
+                .map(|&(abs_var, _)| (abs_var, -1.0))
+                .collect::<Vec<_>>();
+            add_mixed_row(
+                rows,
+                format!("{name}__l1_sum"),
+                expansions,
+                &[(result_var, 1.0)],
+                &abs_terms,
+                RowSense::Eq,
+                0.0,
+            );
+        }
+        NormType::LInfinity => {
+            let selectors = abs_vars
+                .iter()
+                .enumerate()
+                .map(|(k, _)| {
+                    push_canonical_var(
+                        &format!("{name}__linf_choice_{k}"),
+                        true,
+                        1.0,
+                        names,
+                        integer_vars,
+                        ub,
+                    )
+                })
+                .collect::<Vec<_>>();
+            rows.push(SparseRow {
+                coeffs: selectors.iter().map(|&z| (z, 1.0)).collect(),
+                rhs: 1.0,
+                name: format!("{name}__linf_choose_one"),
+            });
+            for (k, &(abs_var, _)) in abs_vars.iter().enumerate() {
+                add_mixed_row(
+                    rows,
+                    format!("{name}__linf_ge_{k}"),
+                    expansions,
+                    &[(result_var, -1.0)],
+                    &[(abs_var, 1.0)],
+                    RowSense::Le,
+                    0.0,
+                );
+                let big_m = 0.0_f64.max(result_bounds.1);
+                add_mixed_row(
+                    rows,
+                    format!("{name}__linf_select_{k}"),
+                    expansions,
+                    &[(result_var, 1.0)],
+                    &[(abs_var, -1.0), (selectors[k], big_m)],
+                    RowSense::Le,
+                    big_m,
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn add_abs_canonical_rows(
+    program: &MathProgram,
+    names: &mut Vec<String>,
+    integer_vars: &mut Vec<bool>,
+    ub: &mut Vec<f64>,
+    rows: &mut Vec<SparseRow>,
+    expansions: &[LinearExpansion],
+    name: &str,
+    abs_var: usize,
+    operand_var: usize,
+) -> Result<(), MathProgramError> {
+    let (lower, upper) = variable_bounds(&program.variables[operand_var]).ok_or_else(|| {
+        MathProgramError::UnboundedBigM(format!(
+            "abs `{name}` operand `{}` requires finite bounds",
+            program.variables[operand_var].name
+        ))
+    })?;
+    if lower >= 0.0 {
+        add_mixed_row(
+            rows,
+            format!("{name}__abs_nonnegative"),
+            expansions,
+            &[(operand_var, -1.0)],
+            &[(abs_var, 1.0)],
+            RowSense::Eq,
+            0.0,
+        );
+        return Ok(());
+    }
+    if upper <= 0.0 {
+        add_mixed_row(
+            rows,
+            format!("{name}__abs_nonpositive"),
+            expansions,
+            &[(operand_var, 1.0)],
+            &[(abs_var, 1.0)],
+            RowSense::Eq,
+            0.0,
+        );
+        return Ok(());
+    }
+
+    let z = push_canonical_var(
+        &format!("{name}__abs_positive"),
+        true,
+        1.0,
+        names,
+        integer_vars,
+        ub,
+    );
+    add_mixed_row(
+        rows,
+        format!("{name}__abs_ge_x"),
+        expansions,
+        &[(operand_var, 1.0)],
+        &[(abs_var, -1.0)],
+        RowSense::Le,
+        0.0,
+    );
+    add_mixed_row(
+        rows,
+        format!("{name}__abs_ge_neg_x"),
+        expansions,
+        &[(operand_var, -1.0)],
+        &[(abs_var, -1.0)],
+        RowSense::Le,
+        0.0,
+    );
+    add_mixed_row(
+        rows,
+        format!("{name}__abs_x_upper_branch"),
+        expansions,
+        &[(operand_var, 1.0)],
+        &[(z, -upper)],
+        RowSense::Le,
+        0.0,
+    );
+    add_mixed_row(
+        rows,
+        format!("{name}__abs_x_lower_branch"),
+        expansions,
+        &[(operand_var, -1.0)],
+        &[(z, -lower)],
+        RowSense::Le,
+        -lower,
+    );
+    add_mixed_row(
+        rows,
+        format!("{name}__abs_result_pos_branch"),
+        expansions,
+        &[(operand_var, -1.0)],
+        &[(abs_var, 1.0), (z, -2.0 * lower)],
+        RowSense::Le,
+        -2.0 * lower,
+    );
+    add_mixed_row(
+        rows,
+        format!("{name}__abs_result_neg_branch"),
+        expansions,
+        &[(operand_var, 1.0)],
+        &[(abs_var, 1.0), (z, -2.0 * upper)],
+        RowSense::Le,
+        0.0,
+    );
     Ok(())
 }
 
@@ -6019,22 +8209,26 @@ fn add_no_overlap_rows(
             if let Some(presence) = right.presence_var {
                 presence_literals.push((presence, true));
             }
+            let (left_before_right, left_before_right_rhs) =
+                interval_precedence_row(left, right.start_var);
             add_implied_le_row(
                 rows,
                 expansions,
                 format!("{name}__no_overlap_{i}_before_{j}"),
-                &[(left.start_var, 1.0), (right.start_var, -1.0)],
-                -left.duration,
+                &left_before_right,
+                left_before_right_rhs,
                 &presence_literals,
                 &[(order, true)],
                 ub,
             )?;
+            let (right_before_left, right_before_left_rhs) =
+                interval_precedence_row(right, left.start_var);
             add_implied_le_row(
                 rows,
                 expansions,
                 format!("{name}__no_overlap_{j}_before_{i}"),
-                &[(right.start_var, 1.0), (left.start_var, -1.0)],
-                -right.duration,
+                &right_before_left,
+                right_before_left_rhs,
                 &presence_literals,
                 &[(order, false)],
                 ub,
@@ -6042,6 +8236,17 @@ fn add_no_overlap_rows(
         }
     }
     Ok(())
+}
+
+fn interval_precedence_row(
+    interval: &IntervalTerm,
+    other_start_var: usize,
+) -> (Vec<(usize, f64)>, f64) {
+    let mut coeffs = vec![(interval.start_var, 1.0), (other_start_var, -1.0)];
+    if let Some(duration_var) = interval.duration_var {
+        coeffs.push((duration_var, 1.0));
+    }
+    (coeffs, -interval.duration)
 }
 
 fn rectangle_presence_literals(
@@ -6149,54 +8354,50 @@ fn add_no_overlap_2d_rows(
                 1.0 - active_literals.len() as f64,
             );
 
+            let (i_left_of_j, i_left_of_j_rhs) =
+                interval_precedence_row(&x_intervals[i], x_intervals[j].start_var);
             add_implied_le_row(
                 rows,
                 expansions,
                 format!("{name}__rect_{i}_left_of_{j}__enforce"),
-                &[
-                    (x_intervals[i].start_var, 1.0),
-                    (x_intervals[j].start_var, -1.0),
-                ],
-                -x_intervals[i].duration,
+                &i_left_of_j,
+                i_left_of_j_rhs,
                 &active_literals,
                 &[(separators[0], true)],
                 ub,
             )?;
+            let (j_left_of_i, j_left_of_i_rhs) =
+                interval_precedence_row(&x_intervals[j], x_intervals[i].start_var);
             add_implied_le_row(
                 rows,
                 expansions,
                 format!("{name}__rect_{j}_left_of_{i}__enforce"),
-                &[
-                    (x_intervals[j].start_var, 1.0),
-                    (x_intervals[i].start_var, -1.0),
-                ],
-                -x_intervals[j].duration,
+                &j_left_of_i,
+                j_left_of_i_rhs,
                 &active_literals,
                 &[(separators[1], true)],
                 ub,
             )?;
+            let (i_below_j, i_below_j_rhs) =
+                interval_precedence_row(&y_intervals[i], y_intervals[j].start_var);
             add_implied_le_row(
                 rows,
                 expansions,
                 format!("{name}__rect_{i}_below_{j}__enforce"),
-                &[
-                    (y_intervals[i].start_var, 1.0),
-                    (y_intervals[j].start_var, -1.0),
-                ],
-                -y_intervals[i].duration,
+                &i_below_j,
+                i_below_j_rhs,
                 &active_literals,
                 &[(separators[2], true)],
                 ub,
             )?;
+            let (j_below_i, j_below_i_rhs) =
+                interval_precedence_row(&y_intervals[j], y_intervals[i].start_var);
             add_implied_le_row(
                 rows,
                 expansions,
                 format!("{name}__rect_{j}_below_{i}__enforce"),
-                &[
-                    (y_intervals[j].start_var, 1.0),
-                    (y_intervals[i].start_var, -1.0),
-                ],
-                -y_intervals[j].duration,
+                &j_below_i,
+                j_below_i_rhs,
                 &active_literals,
                 &[(separators[3], true)],
                 ub,
@@ -6218,7 +8419,7 @@ fn add_cumulative_rows(
     demands: &[f64],
     capacity: f64,
 ) -> Result<(), MathProgramError> {
-    let mut start_choices = Vec::new();
+    let mut interval_choices = Vec::new();
     let mut min_time = i64::MAX;
     let mut max_time = i64::MIN;
 
@@ -6236,23 +8437,36 @@ fn add_cumulative_rows(
                     "cumulative interval {i} start requires finite integer bounds"
                 ))
             })?;
-        let duration = interval.duration.round() as i64;
-        let choices = (start_lb..=start_ub)
-            .map(|t| {
-                push_canonical_var(
-                    &format!("{name}__interval_{i}__starts_at_{t}"),
-                    true,
-                    1.0,
-                    names,
-                    integer_vars,
-                    ub,
-                )
-            })
-            .collect::<Vec<_>>();
+        let duration_offset = interval.duration.round() as i64;
+        let duration_values = if let Some(duration_var) = interval.duration_var {
+            let (duration_lb, duration_ub) = integer_bounds(&program.variables[duration_var])
+                .ok_or_else(|| {
+                    MathProgramError::UnboundedBigM(format!(
+                        "cumulative interval {i} duration requires finite integer bounds"
+                    ))
+                })?;
+            (duration_lb..=duration_ub)
+                .map(|duration_value| (duration_value, duration_offset + duration_value))
+                .collect::<Vec<_>>()
+        } else {
+            vec![(0, duration_offset)]
+        };
+        let mut choices = Vec::new();
+        for start in start_lb..=start_ub {
+            for &(duration_value, total_duration) in &duration_values {
+                let choice_name = if interval.duration_var.is_some() {
+                    format!("{name}__interval_{i}__starts_at_{start}__duration_{duration_value}")
+                } else {
+                    format!("{name}__interval_{i}__starts_at_{start}")
+                };
+                let choice = push_canonical_var(&choice_name, true, 1.0, names, integer_vars, ub);
+                choices.push((start, duration_value, total_duration, choice));
+            }
+        }
 
         let choose_terms = choices
             .iter()
-            .map(|&choice| (choice, 1.0))
+            .map(|&(_, _, _, choice)| (choice, 1.0))
             .collect::<Vec<_>>();
         if let Some(presence) = interval.presence_var {
             add_mixed_row(
@@ -6276,9 +8490,9 @@ fn add_cumulative_rows(
             );
         }
 
-        let start_sum = (start_lb..=start_ub)
-            .zip(&choices)
-            .map(|(t, &choice)| (choice, t as f64))
+        let start_sum = choices
+            .iter()
+            .map(|&(start, _, _, choice)| (choice, start as f64))
             .collect::<Vec<_>>();
         let canonical_start_sum = start_sum
             .iter()
@@ -6323,20 +8537,74 @@ fn add_cumulative_rows(
             );
         }
 
+        if let Some(duration_var) = interval.duration_var {
+            let duration_sum = choices
+                .iter()
+                .map(|&(_, duration_value, _, choice)| (choice, duration_value as f64))
+                .collect::<Vec<_>>();
+            let canonical_duration_sum = duration_sum
+                .iter()
+                .map(|&(idx, coef)| (idx, -coef))
+                .collect::<Vec<_>>();
+            if let Some(presence) = interval.presence_var {
+                add_implied_mixed_le_row(
+                    rows,
+                    expansions,
+                    format!("{name}__interval_{i}__duration_link_upper"),
+                    &[(duration_var, 1.0)],
+                    &canonical_duration_sum,
+                    0.0,
+                    &[(presence, true)],
+                    &[],
+                    ub,
+                )?;
+                let reverse_duration_sum = duration_sum
+                    .iter()
+                    .map(|&(idx, coef)| (idx, coef))
+                    .collect::<Vec<_>>();
+                add_implied_mixed_le_row(
+                    rows,
+                    expansions,
+                    format!("{name}__interval_{i}__duration_link_lower"),
+                    &[(duration_var, -1.0)],
+                    &reverse_duration_sum,
+                    0.0,
+                    &[(presence, true)],
+                    &[],
+                    ub,
+                )?;
+            } else {
+                add_mixed_row(
+                    rows,
+                    format!("{name}__interval_{i}__duration_link"),
+                    expansions,
+                    &[(duration_var, 1.0)],
+                    &canonical_duration_sum,
+                    RowSense::Eq,
+                    0.0,
+                );
+            }
+        }
+
         min_time = min_time.min(start_lb);
-        max_time = max_time.max(start_ub + duration);
-        start_choices.push((start_lb, duration, choices));
+        if let Some(max_duration) = duration_values
+            .iter()
+            .map(|&(_, total_duration)| total_duration)
+            .max()
+        {
+            max_time = max_time.max(start_ub + max_duration);
+        }
+        interval_choices.push(choices);
     }
 
     for t in min_time..max_time {
         let mut coeffs = Vec::new();
-        for (i, (start_lb, duration, choices)) in start_choices.iter().enumerate() {
+        for (i, choices) in interval_choices.iter().enumerate() {
             if demands[i].abs() <= 1e-12 {
                 continue;
             }
-            for (offset, &choice) in choices.iter().enumerate() {
-                let start_time = *start_lb + offset as i64;
-                if start_time <= t && t < start_time + *duration {
+            for &(start_time, _, duration, choice) in choices {
+                if start_time <= t && t < start_time + duration {
                     coeffs.push((choice, demands[i]));
                 }
             }
@@ -6352,6 +8620,151 @@ fn add_cumulative_rows(
     Ok(())
 }
 
+fn add_reservoir_rows(
+    program: &MathProgram,
+    names: &mut Vec<String>,
+    integer_vars: &mut Vec<bool>,
+    ub: &mut Vec<f64>,
+    rows: &mut Vec<SparseRow>,
+    expansions: &[LinearExpansion],
+    name: &str,
+    events: &[ReservoirEvent],
+    min_level: f64,
+    max_level: f64,
+) -> Result<(), MathProgramError> {
+    let mut event_choices = Vec::with_capacity(events.len());
+    let mut min_time = i64::MAX;
+    let mut max_time = i64::MIN;
+
+    for (i, event) in events.iter().enumerate() {
+        let (time_lb, time_ub) =
+            integer_bounds(&program.variables[event.time_var]).ok_or_else(|| {
+                MathProgramError::UnboundedBigM(format!(
+                    "reservoir event {i} time requires finite integer bounds"
+                ))
+            })?;
+        let choices = (time_lb..=time_ub)
+            .map(|time| {
+                push_canonical_var(
+                    &format!("{name}__event_{i}__at_{time}"),
+                    true,
+                    1.0,
+                    names,
+                    integer_vars,
+                    ub,
+                )
+            })
+            .collect::<Vec<_>>();
+        let choose_terms = choices
+            .iter()
+            .map(|&choice| (choice, 1.0))
+            .collect::<Vec<_>>();
+
+        if let Some(active_var) = event.active_var {
+            add_mixed_row(
+                rows,
+                format!("{name}__event_{i}__choose_if_active"),
+                expansions,
+                &[(active_var, -1.0)],
+                &choose_terms,
+                RowSense::Eq,
+                0.0,
+            );
+        } else {
+            add_mixed_row(
+                rows,
+                format!("{name}__event_{i}__choose_one_time"),
+                expansions,
+                &[],
+                &choose_terms,
+                RowSense::Eq,
+                1.0,
+            );
+        }
+
+        let time_sum = (time_lb..=time_ub)
+            .zip(&choices)
+            .map(|(time, &choice)| (choice, time as f64))
+            .collect::<Vec<_>>();
+        let canonical_time_sum = time_sum
+            .iter()
+            .map(|&(idx, coef)| (idx, -coef))
+            .collect::<Vec<_>>();
+        if let Some(active_var) = event.active_var {
+            add_implied_mixed_le_row(
+                rows,
+                expansions,
+                format!("{name}__event_{i}__time_link_upper"),
+                &[(event.time_var, 1.0)],
+                &canonical_time_sum,
+                0.0,
+                &[(active_var, true)],
+                &[],
+                ub,
+            )?;
+            let reverse_time_sum = time_sum
+                .iter()
+                .map(|&(idx, coef)| (idx, coef))
+                .collect::<Vec<_>>();
+            add_implied_mixed_le_row(
+                rows,
+                expansions,
+                format!("{name}__event_{i}__time_link_lower"),
+                &[(event.time_var, -1.0)],
+                &reverse_time_sum,
+                0.0,
+                &[(active_var, true)],
+                &[],
+                ub,
+            )?;
+        } else {
+            add_mixed_row(
+                rows,
+                format!("{name}__event_{i}__time_link"),
+                expansions,
+                &[(event.time_var, 1.0)],
+                &canonical_time_sum,
+                RowSense::Eq,
+                0.0,
+            );
+        }
+
+        min_time = min_time.min(time_lb);
+        max_time = max_time.max(time_ub);
+        event_choices.push((time_lb, event.demand, choices));
+    }
+
+    for time in min_time..=max_time {
+        let mut coeffs = Vec::new();
+        for (time_lb, demand, choices) in &event_choices {
+            if demand.abs() <= 1e-12 {
+                continue;
+            }
+            for (offset, &choice) in choices.iter().enumerate() {
+                if *time_lb + offset as i64 <= time {
+                    coeffs.push((choice, *demand));
+                }
+            }
+        }
+        if coeffs.is_empty() {
+            continue;
+        }
+        let coeffs = combine_terms(&coeffs);
+        rows.push(SparseRow {
+            coeffs: coeffs.clone(),
+            rhs: max_level,
+            name: format!("{name}__level_max_at_{time}"),
+        });
+        rows.push(SparseRow {
+            coeffs: negate_sparse(&coeffs),
+            rhs: -min_level,
+            name: format!("{name}__level_min_at_{time}"),
+        });
+    }
+
+    Ok(())
+}
+
 fn add_interval_link_rows(
     ub: &[f64],
     rows: &mut Vec<SparseRow>,
@@ -6359,13 +8772,20 @@ fn add_interval_link_rows(
     name: &str,
     interval: &IntervalTerm,
 ) -> Result<(), MathProgramError> {
-    let upper_terms = &[(interval.end_var, 1.0), (interval.start_var, -1.0)];
+    let mut upper_terms = vec![(interval.end_var, 1.0), (interval.start_var, -1.0)];
+    if let Some(duration_var) = interval.duration_var {
+        upper_terms.push((duration_var, -1.0));
+    }
+    let mut lower_terms = vec![(interval.start_var, 1.0), (interval.end_var, -1.0)];
+    if let Some(duration_var) = interval.duration_var {
+        lower_terms.push((duration_var, 1.0));
+    }
     if let Some(presence) = interval.presence_var {
         add_implied_le_row(
             rows,
             expansions,
             format!("{name}__end_after_start_upper"),
-            upper_terms,
+            &upper_terms,
             interval.duration,
             &[(presence, true)],
             &[],
@@ -6375,7 +8795,7 @@ fn add_interval_link_rows(
             rows,
             expansions,
             format!("{name}__end_after_start_lower"),
-            &[(interval.start_var, 1.0), (interval.end_var, -1.0)],
+            &lower_terms,
             -interval.duration,
             &[(presence, true)],
             &[],
@@ -6386,7 +8806,7 @@ fn add_interval_link_rows(
             rows,
             format!("{name}__end_after_start"),
             expansions,
-            upper_terms,
+            &upper_terms,
             RowSense::Eq,
             interval.duration,
         );
@@ -6853,6 +9273,51 @@ fn general_constraint_violation(constraint: &GeneralConstraint, x: &[f64], tol: 
             let expected = operands.iter().any(|&idx| binary_truth(x[idx])) as u8 as f64;
             (x[*result_var] - expected).abs()
         }
+        GeneralConstraint::BinaryXor {
+            result_var,
+            operands,
+            ..
+        } => {
+            let expected =
+                (operands.iter().filter(|&&idx| binary_truth(x[idx])).count() % 2) as f64;
+            (x[*result_var] - expected).abs()
+        }
+        GeneralConstraint::BinaryCardinality {
+            operands,
+            min_count,
+            max_count,
+            ..
+        } => binary_cardinality_violation(operands, *min_count, *max_count, x),
+        GeneralConstraint::BooleanClause { literals, .. } => boolean_clause_violation(literals, x),
+        GeneralConstraint::IntegerProduct {
+            target_var,
+            operands,
+            ..
+        } => integer_product_violation(*target_var, operands, x),
+        GeneralConstraint::IntegerDivision {
+            target_var,
+            numerator_var,
+            denominator_var,
+            ..
+        } => integer_binary_operation_violation(
+            *target_var,
+            *numerator_var,
+            *denominator_var,
+            x,
+            i64::checked_div,
+        ),
+        GeneralConstraint::IntegerModulo {
+            target_var,
+            numerator_var,
+            denominator_var,
+            ..
+        } => integer_binary_operation_violation(
+            *target_var,
+            *numerator_var,
+            *denominator_var,
+            x,
+            i64::checked_rem,
+        ),
         GeneralConstraint::Abs {
             result_var,
             operand_var,
@@ -6880,6 +9345,12 @@ fn general_constraint_violation(constraint: &GeneralConstraint, x: &[f64], tol: 
                 .fold(f64::INFINITY, f64::min);
             (x[*result_var] - expected).abs()
         }
+        GeneralConstraint::Norm {
+            result_var,
+            operands,
+            norm_type,
+            ..
+        } => norm_violation(*result_var, operands, *norm_type, x),
         GeneralConstraint::PiecewiseLinear {
             x_var,
             y_var,
@@ -6899,6 +9370,17 @@ fn general_constraint_violation(constraint: &GeneralConstraint, x: &[f64], tol: 
             values,
             ..
         } => element_violation(*index_var, *target_var, values, x),
+        GeneralConstraint::Inverse {
+            variables,
+            inverse_variables,
+            ..
+        } => inverse_violation(variables, inverse_variables, x),
+        GeneralConstraint::Circuit {
+            node_count, arcs, ..
+        } => circuit_violation(*node_count, arcs, x),
+        GeneralConstraint::MultipleCircuit {
+            node_count, arcs, ..
+        } => multiple_circuit_violation(*node_count, arcs, x),
         GeneralConstraint::Automaton {
             variables,
             starting_state,
@@ -6918,7 +9400,79 @@ fn general_constraint_violation(constraint: &GeneralConstraint, x: &[f64], tol: 
             capacity,
             ..
         } => cumulative_violation(intervals, demands, *capacity, x, tol),
+        GeneralConstraint::Reservoir {
+            events,
+            min_level,
+            max_level,
+            ..
+        } => reservoir_violation(events, *min_level, *max_level, x),
     }
+}
+
+fn binary_cardinality_violation(
+    operands: &[usize],
+    min_count: Option<usize>,
+    max_count: Option<usize>,
+    x: &[f64],
+) -> f64 {
+    let count = operands.iter().filter(|&&idx| binary_truth(x[idx])).count() as f64;
+    let lower_violation = min_count
+        .map(|min_count| (min_count as f64 - count).max(0.0))
+        .unwrap_or(0.0);
+    let upper_violation = max_count
+        .map(|max_count| (count - max_count as f64).max(0.0))
+        .unwrap_or(0.0);
+    lower_violation.max(upper_violation)
+}
+
+fn boolean_clause_violation(literals: &[BoolLiteral], x: &[f64]) -> f64 {
+    if literals
+        .iter()
+        .any(|literal| binary_truth(x[literal.var]) == literal.value)
+    {
+        0.0
+    } else {
+        1.0
+    }
+}
+
+fn integer_product_violation(target_var: usize, operands: &[usize], x: &[f64]) -> f64 {
+    let mut product = 1.0;
+    let mut violation = integrality_violation(x[target_var]);
+    for &operand in operands {
+        violation = violation.max(integrality_violation(x[operand]));
+        product *= x[operand].round();
+    }
+    violation.max((x[target_var] - product).abs())
+}
+
+fn integer_binary_operation_violation(
+    target_var: usize,
+    numerator_var: usize,
+    denominator_var: usize,
+    x: &[f64],
+    operation: fn(i64, i64) -> Option<i64>,
+) -> f64 {
+    let violation = integrality_violation(x[target_var])
+        .max(integrality_violation(x[numerator_var]))
+        .max(integrality_violation(x[denominator_var]));
+    let numerator = x[numerator_var].round() as i64;
+    let denominator = x[denominator_var].round() as i64;
+    let Some(expected) = operation(numerator, denominator) else {
+        return violation.max(1.0);
+    };
+    violation.max((x[target_var] - expected as f64).abs())
+}
+
+fn norm_violation(result_var: usize, operands: &[usize], norm_type: NormType, x: &[f64]) -> f64 {
+    let expected = match norm_type {
+        NormType::L1 => operands.iter().map(|&idx| x[idx].abs()).sum::<f64>(),
+        NormType::LInfinity => operands
+            .iter()
+            .map(|&idx| x[idx].abs())
+            .fold(0.0_f64, f64::max),
+    };
+    (x[result_var] - expected).abs()
 }
 
 fn piecewise_violation(points: &[(f64, f64)], x_value: f64, y_value: f64, tol: f64) -> f64 {
@@ -6988,6 +9542,156 @@ fn element_violation(index_var: usize, target_var: usize, values: &[f64], x: &[f
     integrality.max((x[target_var] - expected).abs())
 }
 
+fn inverse_violation(variables: &[usize], inverse_variables: &[usize], x: &[f64]) -> f64 {
+    if variables.len() != inverse_variables.len() {
+        return 1.0;
+    }
+    let n = variables.len();
+    let mut violation: f64 = 0.0;
+    let mut seen_values = vec![false; n];
+    for (i, &var_idx) in variables.iter().enumerate() {
+        let value = x[var_idx];
+        let rounded = value.round();
+        violation = violation.max(integrality_violation(value));
+        if rounded < 0.0 || rounded >= n as f64 {
+            return violation.max(1.0);
+        }
+        let j = rounded as usize;
+        if seen_values[j] {
+            violation = violation.max(1.0);
+        }
+        seen_values[j] = true;
+        violation = violation.max((x[inverse_variables[j]] - i as f64).abs());
+    }
+
+    let mut seen_inverse_values = vec![false; n];
+    for (j, &inverse_var_idx) in inverse_variables.iter().enumerate() {
+        let value = x[inverse_var_idx];
+        let rounded = value.round();
+        violation = violation.max(integrality_violation(value));
+        if rounded < 0.0 || rounded >= n as f64 {
+            return violation.max(1.0);
+        }
+        let i = rounded as usize;
+        if seen_inverse_values[i] {
+            violation = violation.max(1.0);
+        }
+        seen_inverse_values[i] = true;
+        violation = violation.max((x[variables[i]] - j as f64).abs());
+    }
+
+    violation
+}
+
+fn circuit_violation(node_count: usize, arcs: &[CircuitArc], x: &[f64]) -> f64 {
+    if node_count < 2 {
+        return 1.0;
+    }
+
+    let mut violation: f64 = 0.0;
+    let mut incoming = vec![0usize; node_count];
+    let mut outgoing = vec![0usize; node_count];
+    let mut next = vec![None; node_count];
+
+    for arc in arcs {
+        if arc.tail >= node_count || arc.head >= node_count || arc.tail == arc.head {
+            return 1.0;
+        }
+        let value = x[arc.literal_var];
+        violation = violation.max(integrality_violation(value));
+        if binary_truth(value) {
+            outgoing[arc.tail] += 1;
+            incoming[arc.head] += 1;
+            if next[arc.tail].replace(arc.head).is_some() {
+                violation = violation.max(1.0);
+            }
+        }
+    }
+
+    for node in 0..node_count {
+        violation = violation
+            .max((outgoing[node] as f64 - 1.0).abs())
+            .max((incoming[node] as f64 - 1.0).abs());
+    }
+    if violation > 0.0 {
+        return violation;
+    }
+
+    let mut seen = vec![false; node_count];
+    let mut current = 0usize;
+    for _ in 0..node_count {
+        if seen[current] {
+            return 1.0;
+        }
+        seen[current] = true;
+        current = match next[current] {
+            Some(head) => head,
+            None => return 1.0,
+        };
+    }
+    if current != 0 || seen.iter().any(|&visited| !visited) {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+fn multiple_circuit_violation(node_count: usize, arcs: &[CircuitArc], x: &[f64]) -> f64 {
+    if node_count < 2 {
+        return 1.0;
+    }
+
+    let mut violation: f64 = 0.0;
+    let mut incoming = vec![0usize; node_count];
+    let mut outgoing = vec![0usize; node_count];
+    let mut next = vec![None; node_count];
+
+    for arc in arcs {
+        if arc.tail >= node_count || arc.head >= node_count || (arc.tail == 0 && arc.head == 0) {
+            return 1.0;
+        }
+        let value = x[arc.literal_var];
+        violation = violation.max(integrality_violation(value));
+        if binary_truth(value) {
+            outgoing[arc.tail] += 1;
+            incoming[arc.head] += 1;
+            if arc.tail != arc.head && next[arc.tail].replace(arc.head).is_some() {
+                violation = violation.max(1.0);
+            }
+        }
+    }
+
+    violation = violation.max((outgoing[0] as f64 - incoming[0] as f64).abs());
+    for node in 1..node_count {
+        violation = violation
+            .max((outgoing[node] as f64 - 1.0).abs())
+            .max((incoming[node] as f64 - 1.0).abs());
+    }
+    if violation > 0.0 {
+        return violation;
+    }
+
+    for start in 1..node_count {
+        let mut seen = vec![false; node_count];
+        let mut current = start;
+        loop {
+            if current == 0 {
+                break;
+            }
+            if seen[current] {
+                return 1.0;
+            }
+            seen[current] = true;
+            current = match next[current] {
+                Some(head) => head,
+                None => break,
+            };
+        }
+    }
+
+    0.0
+}
+
 fn automaton_violation(
     variables: &[usize],
     starting_state: i64,
@@ -7054,8 +9758,15 @@ fn interval_active(interval: &IntervalTerm, x: &[f64]) -> bool {
         .map_or(true, |presence| binary_truth(x[presence]))
 }
 
+fn interval_duration_value(interval: &IntervalTerm, x: &[f64]) -> f64 {
+    interval.duration
+        + interval
+            .duration_var
+            .map_or(0.0, |duration_var| x[duration_var])
+}
+
 fn interval_end_violation(interval: &IntervalTerm, x: &[f64]) -> f64 {
-    (x[interval.end_var] - x[interval.start_var] - interval.duration).abs()
+    (x[interval.end_var] - x[interval.start_var] - interval_duration_value(interval, x)).abs()
 }
 
 fn no_overlap_violation(intervals: &[IntervalTerm], x: &[f64], tol: f64) -> f64 {
@@ -7175,6 +9886,52 @@ fn cumulative_violation(
             .sum::<f64>();
         violation = violation.max((load - capacity).max(0.0));
     }
+    violation
+}
+
+fn reservoir_violation(
+    events: &[ReservoirEvent],
+    min_level: f64,
+    max_level: f64,
+    x: &[f64],
+) -> f64 {
+    let mut violation = (min_level - 0.0).max(0.0).max((0.0 - max_level).max(0.0));
+    let mut active_events = Vec::new();
+
+    for event in events {
+        if let Some(active_var) = event.active_var {
+            violation = violation.max(integrality_violation(x[active_var]));
+            if !binary_truth(x[active_var]) {
+                continue;
+            }
+        }
+        let time_value = x[event.time_var];
+        violation = violation.max(integrality_violation(time_value));
+        active_events.push((time_value.round() as i64, event.demand));
+    }
+
+    if active_events.is_empty() {
+        return violation;
+    }
+
+    let mut checkpoints = active_events
+        .iter()
+        .map(|&(time, _)| time)
+        .collect::<Vec<_>>();
+    checkpoints.sort_unstable();
+    checkpoints.dedup();
+
+    for checkpoint in checkpoints {
+        let level = active_events
+            .iter()
+            .filter(|&&(time, _)| time <= checkpoint)
+            .map(|&(_, demand)| demand)
+            .sum::<f64>();
+        violation = violation
+            .max((level - max_level).max(0.0))
+            .max((min_level - level).max(0.0));
+    }
+
     violation
 }
 
@@ -8116,6 +10873,138 @@ mod tests {
     }
 
     #[test]
+    fn binary_xor_general_constraint_tracks_parity() {
+        let mut p = MathProgram::new(ObjectiveSense::Max);
+        let a = p.add_binary_var("a", 0.0).unwrap();
+        let b = p.add_binary_var("b", 0.0).unwrap();
+        let c = p.add_binary_var("c", 0.0).unwrap();
+        let odd = p.add_binary_var("odd", 1.0).unwrap();
+        p.add_constraint("force-a", vec![(a, 1.0)], RowSense::Eq, 1.0)
+            .unwrap();
+        p.add_constraint("force-b", vec![(b, 1.0)], RowSense::Eq, 1.0)
+            .unwrap();
+        p.add_constraint("force-c-off", vec![(c, 1.0)], RowSense::Eq, 0.0)
+            .unwrap();
+        p.add_binary_xor("odd-count", odd, vec![a, b, c]).unwrap();
+
+        let sol = solve_math_program(&p, &MathProgramSolveOptions::default()).unwrap();
+        assert_eq!(sol.status, MathProgramStatus::Optimal);
+        assert_close(sol.x[a], 1.0);
+        assert_close(sol.x[b], 1.0);
+        assert_close(sol.x[c], 0.0);
+        assert_close(sol.x[odd], 0.0);
+        assert_close(sol.objective, 0.0);
+    }
+
+    #[test]
+    fn binary_cardinality_constraints_bound_selected_count() {
+        let mut p = MathProgram::new(ObjectiveSense::Max);
+        let a = p.add_binary_var("a", 5.0).unwrap();
+        let b = p.add_binary_var("b", 4.0).unwrap();
+        let c = p.add_binary_var("c", 3.0).unwrap();
+        let d = p.add_binary_var("d", 2.0).unwrap();
+        p.add_at_most_one("at-most-one-ab", vec![a, b]).unwrap();
+        p.add_at_least_one("at-least-one-cd", vec![c, d]).unwrap();
+        p.add_exactly_k("exactly-two-total", vec![a, b, c, d], 2)
+            .unwrap();
+
+        let sol = solve_math_program(&p, &MathProgramSolveOptions::default()).unwrap();
+        assert_eq!(sol.status, MathProgramStatus::Optimal);
+        assert_close(sol.x[a], 1.0);
+        assert_close(sol.x[b], 0.0);
+        assert_close(sol.x[c], 1.0);
+        assert_close(sol.x[d], 0.0);
+        assert_close(sol.objective, 8.0);
+    }
+
+    #[test]
+    fn boolean_clause_allows_negated_literals() {
+        let mut p = MathProgram::new(ObjectiveSense::Max);
+        let a = p.add_binary_var("a", 4.0).unwrap();
+        let b = p.add_binary_var("b", 3.0).unwrap();
+        let c = p.add_binary_var("c", 2.0).unwrap();
+        p.add_binary_implication("a-implies-b", a, b).unwrap();
+        p.add_binary_implication("b-implies-c", b, c).unwrap();
+        p.add_boolean_clause(
+            "choose-something",
+            vec![
+                MathProgram::bool_lit(a),
+                MathProgram::bool_lit(b),
+                MathProgram::bool_lit(c),
+            ],
+        )
+        .unwrap();
+
+        let sol = solve_math_program(&p, &MathProgramSolveOptions::default()).unwrap();
+        assert_eq!(sol.status, MathProgramStatus::Optimal);
+        assert_close(sol.x[a], 1.0);
+        assert_close(sol.x[b], 1.0);
+        assert_close(sol.x[c], 1.0);
+        assert_close(sol.objective, 9.0);
+    }
+
+    #[test]
+    fn integer_product_matches_finite_domain_operands() {
+        let mut p = MathProgram::new(ObjectiveSense::Min);
+        let x = p.add_integer_var("x", 0.0, Some(0.0), Some(3.0)).unwrap();
+        let y = p.add_integer_var("y", 0.0, Some(0.0), Some(3.0)).unwrap();
+        let product = p
+            .add_integer_var("product", 1.0, Some(0.0), Some(9.0))
+            .unwrap();
+        p.add_constraint("fix-x", vec![(x, 1.0)], RowSense::Eq, 2.0)
+            .unwrap();
+        p.add_constraint("fix-y", vec![(y, 1.0)], RowSense::Eq, 3.0)
+            .unwrap();
+        p.add_multiplication_equality("x-times-y", product, vec![x, y])
+            .unwrap();
+
+        let sol = solve_math_program(&p, &MathProgramSolveOptions::default()).unwrap();
+        assert_eq!(sol.status, MathProgramStatus::Optimal);
+        assert_close(sol.x[x], 2.0);
+        assert_close(sol.x[y], 3.0);
+        assert_close(sol.x[product], 6.0);
+        assert_close(sol.objective, 6.0);
+    }
+
+    #[test]
+    fn integer_division_and_modulo_use_truncating_semantics() {
+        let mut p = MathProgram::new(ObjectiveSense::Min);
+        let numerator = p
+            .add_integer_var("numerator", 0.0, Some(-8.0), Some(8.0))
+            .unwrap();
+        let denominator = p
+            .add_integer_var("denominator", 0.0, Some(1.0), Some(4.0))
+            .unwrap();
+        let quotient = p
+            .add_integer_var("quotient", 1.0, Some(-8.0), Some(8.0))
+            .unwrap();
+        let remainder = p
+            .add_integer_var("remainder", 1.0, Some(-4.0), Some(4.0))
+            .unwrap();
+        p.add_constraint("fix-numerator", vec![(numerator, 1.0)], RowSense::Eq, -7.0)
+            .unwrap();
+        p.add_constraint(
+            "fix-denominator",
+            vec![(denominator, 1.0)],
+            RowSense::Eq,
+            3.0,
+        )
+        .unwrap();
+        p.add_division_equality("divide", quotient, numerator, denominator)
+            .unwrap();
+        p.add_modulo_equality("modulo", remainder, numerator, denominator)
+            .unwrap();
+
+        let sol = solve_math_program(&p, &MathProgramSolveOptions::default()).unwrap();
+        assert_eq!(sol.status, MathProgramStatus::Optimal);
+        assert_close(sol.x[numerator], -7.0);
+        assert_close(sol.x[denominator], 3.0);
+        assert_close(sol.x[quotient], -2.0);
+        assert_close(sol.x[remainder], -1.0);
+        assert_close(sol.objective, -3.0);
+    }
+
+    #[test]
     fn abs_general_constraint_lowers_with_binary_split() {
         let mut p = MathProgram::new(ObjectiveSense::Min);
         let x = p
@@ -8181,6 +11070,78 @@ mod tests {
         assert_eq!(sol.status, MathProgramStatus::Optimal);
         assert_close(sol.x[r], 1.0);
         assert_close(sol.objective, 1.0);
+    }
+
+    #[test]
+    fn l1_norm_general_constraint_sums_absolute_values() {
+        let mut p = MathProgram::new(ObjectiveSense::Min);
+        let x = p
+            .add_continuous_var("x", 0.0, Some(-4.0), Some(4.0))
+            .unwrap();
+        let y = p
+            .add_continuous_var("y", 0.0, Some(-4.0), Some(4.0))
+            .unwrap();
+        let norm = p
+            .add_continuous_var("norm", 1.0, Some(0.0), Some(8.0))
+            .unwrap();
+        p.add_constraint("fix-x", vec![(x, 1.0)], RowSense::Eq, -2.0)
+            .unwrap();
+        p.add_constraint("fix-y", vec![(y, 1.0)], RowSense::Eq, 3.0)
+            .unwrap();
+        p.add_l1_norm("l1", norm, vec![x, y]).unwrap();
+
+        let sol = solve_math_program(&p, &MathProgramSolveOptions::default()).unwrap();
+        assert_eq!(sol.status, MathProgramStatus::Optimal);
+        assert_close(sol.x[norm], 5.0);
+        assert_close(sol.objective, 5.0);
+    }
+
+    #[test]
+    fn l_infinity_norm_general_constraint_takes_largest_absolute_value() {
+        let mut p = MathProgram::new(ObjectiveSense::Min);
+        let x = p
+            .add_continuous_var("x", 0.0, Some(-4.0), Some(4.0))
+            .unwrap();
+        let y = p
+            .add_continuous_var("y", 0.0, Some(-4.0), Some(4.0))
+            .unwrap();
+        let norm = p
+            .add_continuous_var("norm", 1.0, Some(0.0), Some(4.0))
+            .unwrap();
+        p.add_constraint("fix-x", vec![(x, 1.0)], RowSense::Eq, -2.0)
+            .unwrap();
+        p.add_constraint("fix-y", vec![(y, 1.0)], RowSense::Eq, 3.0)
+            .unwrap();
+        p.add_l_infinity_norm("linf", norm, vec![x, y]).unwrap();
+
+        let sol = solve_math_program(&p, &MathProgramSolveOptions::default()).unwrap();
+        assert_eq!(sol.status, MathProgramStatus::Optimal);
+        assert_close(sol.x[norm], 3.0);
+        assert_close(sol.objective, 3.0);
+    }
+
+    #[test]
+    fn l2_norm_epigraph_is_tight_when_minimized() {
+        let mut p = MathProgram::new(ObjectiveSense::Min);
+        let x = p
+            .add_continuous_var("x", 0.0, Some(-5.0), Some(5.0))
+            .unwrap();
+        let y = p
+            .add_continuous_var("y", 0.0, Some(-5.0), Some(5.0))
+            .unwrap();
+        let norm = p
+            .add_continuous_var("norm", 1.0, Some(0.0), Some(10.0))
+            .unwrap();
+        p.add_constraint("fix-x", vec![(x, 1.0)], RowSense::Eq, 3.0)
+            .unwrap();
+        p.add_constraint("fix-y", vec![(y, 1.0)], RowSense::Eq, 4.0)
+            .unwrap();
+        p.add_l2_norm("l2", norm, vec![x, y]).unwrap();
+
+        let sol = solve_math_program(&p, &MathProgramSolveOptions::default()).unwrap();
+        assert_eq!(sol.status, MathProgramStatus::Optimal);
+        assert_close(sol.x[norm], 5.0);
+        assert_close(sol.objective, 5.0);
     }
 
     #[test]
@@ -8257,6 +11218,93 @@ mod tests {
     }
 
     #[test]
+    fn inverse_general_constraint_links_permutation_arrays() {
+        let mut p = MathProgram::new(ObjectiveSense::Max);
+        let x0 = p.add_integer_var("x0", 0.0, Some(0.0), Some(2.0)).unwrap();
+        let x1 = p.add_integer_var("x1", 1.0, Some(0.0), Some(2.0)).unwrap();
+        let x2 = p.add_integer_var("x2", 0.0, Some(0.0), Some(2.0)).unwrap();
+        let y0 = p.add_integer_var("y0", 0.0, Some(0.0), Some(2.0)).unwrap();
+        let y1 = p.add_integer_var("y1", 0.0, Some(0.0), Some(2.0)).unwrap();
+        let y2 = p.add_integer_var("y2", 0.0, Some(0.0), Some(2.0)).unwrap();
+        p.add_constraint("force-x0", vec![(x0, 1.0)], RowSense::Eq, 1.0)
+            .unwrap();
+        p.add_inverse("inverse-permutation", vec![x0, x1, x2], vec![y0, y1, y2])
+            .unwrap();
+
+        let sol = solve_math_program(&p, &MathProgramSolveOptions::default()).unwrap();
+        assert_eq!(sol.status, MathProgramStatus::Optimal);
+        assert_close(sol.x[x0], 1.0);
+        assert_close(sol.x[x1], 2.0);
+        assert_close(sol.x[x2], 0.0);
+        assert_close(sol.x[y0], 2.0);
+        assert_close(sol.x[y1], 0.0);
+        assert_close(sol.x[y2], 1.0);
+        assert_close(sol.objective, 2.0);
+    }
+
+    #[test]
+    fn circuit_general_constraint_selects_hamiltonian_cycle() {
+        let mut p = MathProgram::new(ObjectiveSense::Max);
+        let mut arcs = Vec::new();
+        let mut arc_vars = vec![vec![None; 4]; 4];
+        for tail in 0..4 {
+            for head in 0..4 {
+                if tail == head {
+                    continue;
+                }
+                let obj = match (tail, head) {
+                    (0, 1) | (1, 2) | (2, 3) | (3, 0) => 10.0,
+                    _ => 0.0,
+                };
+                let var = p.add_binary_var(format!("x_{tail}_{head}"), obj).unwrap();
+                arcs.push((tail, head, var));
+                arc_vars[tail][head] = Some(var);
+            }
+        }
+        p.add_circuit("tour", 4, arcs).unwrap();
+
+        let sol = solve_math_program(&p, &MathProgramSolveOptions::default()).unwrap();
+        assert_eq!(sol.status, MathProgramStatus::Optimal);
+        for (tail, head) in [(0, 1), (1, 2), (2, 3), (3, 0)] {
+            let var = arc_vars[tail][head].unwrap();
+            assert_close(sol.x[var], 1.0);
+        }
+        assert_close(sol.objective, 40.0);
+    }
+
+    #[test]
+    fn multiple_circuit_general_constraint_rejects_disconnected_subtours() {
+        let mut p = MathProgram::new(ObjectiveSense::Max);
+        let depot_to_first = p.add_binary_var("x_0_1", 1.0).unwrap();
+        let first_to_second = p.add_binary_var("x_1_2", 10.0).unwrap();
+        let second_to_depot = p.add_binary_var("x_2_0", 1.0).unwrap();
+        let second_to_first = p.add_binary_var("x_2_1", 10.0).unwrap();
+        let skipped = p.add_binary_var("x_3_3", 0.0).unwrap();
+
+        p.add_multiple_circuit(
+            "routes",
+            4,
+            vec![
+                (0, 1, depot_to_first),
+                (1, 2, first_to_second),
+                (2, 0, second_to_depot),
+                (2, 1, second_to_first),
+                (3, 3, skipped),
+            ],
+        )
+        .unwrap();
+
+        let sol = solve_math_program(&p, &MathProgramSolveOptions::default()).unwrap();
+        assert_eq!(sol.status, MathProgramStatus::Optimal);
+        assert_close(sol.x[depot_to_first], 1.0);
+        assert_close(sol.x[first_to_second], 1.0);
+        assert_close(sol.x[second_to_depot], 1.0);
+        assert_close(sol.x[second_to_first], 0.0);
+        assert_close(sol.x[skipped], 1.0);
+        assert_close(sol.objective, 12.0);
+    }
+
+    #[test]
     fn no_overlap_orders_fixed_size_intervals() {
         let mut p = MathProgram::new(ObjectiveSense::Min);
         let a_start = p
@@ -8289,6 +11337,53 @@ mod tests {
         assert_close(sol.x[b_start], 3.0);
         assert_close(sol.x[b_end], 5.0);
         assert_close(sol.objective, 3.0);
+    }
+
+    #[test]
+    fn no_overlap_orders_variable_size_intervals() {
+        let mut p = MathProgram::new(ObjectiveSense::Min);
+        let a_start = p
+            .add_integer_var("a_start", 0.0, Some(0.0), Some(5.0))
+            .unwrap();
+        let a_size = p
+            .add_integer_var("a_size", 0.0, Some(2.0), Some(4.0))
+            .unwrap();
+        let a_end = p
+            .add_integer_var("a_end", 0.0, Some(0.0), Some(8.0))
+            .unwrap();
+        let b_start = p
+            .add_integer_var("b_start", 1.0, Some(0.0), Some(8.0))
+            .unwrap();
+        let b_end = p
+            .add_integer_var("b_end", 0.0, Some(0.0), Some(8.0))
+            .unwrap();
+
+        p.add_constraint("fix-a-start", vec![(a_start, 1.0)], RowSense::Eq, 0.0)
+            .unwrap();
+        p.add_constraint(
+            "force-a-size-through-end",
+            vec![(a_end, 1.0)],
+            RowSense::Ge,
+            4.0,
+        )
+        .unwrap();
+        p.add_no_overlap(
+            "variable-machine",
+            vec![
+                MathProgram::variable_interval(a_start, a_size, a_end),
+                MathProgram::interval(b_start, 2.0, b_end),
+            ],
+        )
+        .unwrap();
+
+        let sol = solve_math_program(&p, &MathProgramSolveOptions::default()).unwrap();
+        assert_eq!(sol.status, MathProgramStatus::Optimal);
+        assert_close(sol.x[a_start], 0.0);
+        assert_close(sol.x[a_size], 4.0);
+        assert_close(sol.x[a_end], 4.0);
+        assert_close(sol.x[b_start], 4.0);
+        assert_close(sol.x[b_end], 6.0);
+        assert_close(sol.objective, 4.0);
     }
 
     #[test]
@@ -8386,6 +11481,74 @@ mod tests {
         assert_close(sol.x[b_start], 2.0);
         assert_close(sol.x[b_end], 4.0);
         assert_close(sol.objective, 2.0);
+    }
+
+    #[test]
+    fn cumulative_orders_variable_size_interval() {
+        let mut p = MathProgram::new(ObjectiveSense::Min);
+        let a_start = p
+            .add_integer_var("a_start", 0.0, Some(0.0), Some(0.0))
+            .unwrap();
+        let a_size = p
+            .add_integer_var("a_size", 0.0, Some(1.0), Some(3.0))
+            .unwrap();
+        let a_end = p
+            .add_integer_var("a_end", 0.0, Some(0.0), Some(3.0))
+            .unwrap();
+        let b_start = p
+            .add_integer_var("b_start", 1.0, Some(0.0), Some(3.0))
+            .unwrap();
+        let b_end = p
+            .add_integer_var("b_end", 0.0, Some(0.0), Some(5.0))
+            .unwrap();
+        p.add_constraint("force-a-size", vec![(a_end, 1.0)], RowSense::Ge, 3.0)
+            .unwrap();
+        p.add_cumulative(
+            "shared-resource",
+            vec![
+                MathProgram::variable_interval(a_start, a_size, a_end),
+                MathProgram::interval(b_start, 2.0, b_end),
+            ],
+            vec![2.0, 2.0],
+            3.0,
+        )
+        .unwrap();
+
+        let sol = solve_math_program(&p, &MathProgramSolveOptions::default()).unwrap();
+        assert_eq!(sol.status, MathProgramStatus::Optimal);
+        assert_close(sol.x[a_start], 0.0);
+        assert_close(sol.x[a_size], 3.0);
+        assert_close(sol.x[a_end], 3.0);
+        assert_close(sol.x[b_start], 3.0);
+        assert_close(sol.x[b_end], 5.0);
+        assert_close(sol.objective, 3.0);
+    }
+
+    #[test]
+    fn reservoir_general_constraint_enforces_prefix_level_bounds() {
+        let mut p = MathProgram::new(ObjectiveSense::Max);
+        let supply_time = p
+            .add_integer_var("supply_time", 1.0, Some(0.0), Some(2.0))
+            .unwrap();
+        let drain_time = p
+            .add_integer_var("drain_time", 0.0, Some(0.0), Some(0.0))
+            .unwrap();
+        p.add_reservoir(
+            "tank",
+            vec![
+                MathProgram::reservoir_event(supply_time, 2.0),
+                MathProgram::reservoir_event(drain_time, -2.0),
+            ],
+            0.0,
+            2.0,
+        )
+        .unwrap();
+
+        let sol = solve_math_program(&p, &MathProgramSolveOptions::default()).unwrap();
+        assert_eq!(sol.status, MathProgramStatus::Optimal);
+        assert_close(sol.x[supply_time], 0.0);
+        assert_close(sol.x[drain_time], 0.0);
+        assert_close(sol.objective, 0.0);
     }
 
     #[test]

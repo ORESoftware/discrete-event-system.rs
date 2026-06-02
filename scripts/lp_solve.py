@@ -30,6 +30,16 @@ def status_payload(status: str, solver: str, message: str = "") -> dict:
     }
 
 
+def objective_offset(lp: dict) -> float:
+    return float(lp.get("objective_offset", lp.get("objectiveOffset", 0.0)) or 0.0)
+
+
+def apply_objective_offset(lp: dict, result: dict) -> dict:
+    if result.get("objective") is not None:
+        result["objective"] = float(result["objective"]) + objective_offset(lp)
+    return result
+
+
 def dot(a: Sequence[float], b: Sequence[float]) -> float:
     return sum(x * y for x, y in zip(a, b))
 
@@ -66,6 +76,28 @@ def normalize_lp(lp: dict) -> Tuple[str, List[float], List[List[float]], List[fl
     b_ub = [float(v) for v in (lp.get("b_ub", []) or [])]
     a_eq = [list(map(float, row)) for row in lp.get("A_eq", lp.get("a_eq", [])) or []]
     b_eq = [float(v) for v in (lp.get("b_eq", []) or [])]
+    for idx, row_bound in enumerate(lp.get("linear_constraints", []) or []):
+        row = [float(v) for v in row_bound["coefs"]]
+        if len(row) != n:
+            raise ValueError(f"linear constraint {idx} row length mismatch")
+        lower_raw = row_bound.get("lower")
+        upper_raw = row_bound.get("upper")
+        lower = None if lower_raw is None else float(lower_raw)
+        upper = None if upper_raw is None else float(upper_raw)
+        if lower is None and upper is None:
+            raise ValueError(f"linear constraint {idx} needs lower or upper bound")
+        if lower is not None and upper is not None and lower > upper + 1e-9:
+            raise ValueError(f"linear constraint {idx} lower exceeds upper")
+        if lower is not None and upper is not None and abs(lower - upper) <= 1e-9:
+            a_eq.append(row)
+            b_eq.append(upper)
+            continue
+        if upper is not None:
+            a_ub.append(row[:])
+            b_ub.append(upper)
+        if lower is not None:
+            a_ub.append([-v for v in row])
+            b_ub.append(-lower)
     lb = lp.get("lb")
     ub = lp.get("ub")
     lbs = [0.0] * n if lb is None else [None if v is None else float(v) for v in lb]
@@ -234,7 +266,7 @@ def vertex_enumeration(lp: dict) -> dict:
     a_ub, b_ub = with_bound_inequalities(n, raw_a_ub, raw_b_ub, lb, ub)
     if n == 0:
         if feasible([], a_ub, b_ub, a_eq, b_eq):
-            return {"status": "optimal", "x": [], "objective": 0.0, "iters": 0, "solver": solver}
+            return apply_objective_offset(lp, {"status": "optimal", "x": [], "objective": 0.0, "iters": 0, "solver": solver})
         return status_payload("infeasible", solver, "empty LP violates constraints")
 
     eq_rank = rank(a_eq)
@@ -277,7 +309,7 @@ def vertex_enumeration(lp: dict) -> dict:
         "message": "dependency-free vertex enumeration fallback",
     }
     result.update(recover_certificate(lp, best))
-    return result
+    return apply_objective_offset(lp, result)
 
 
 def scipy_linprog(lp: dict, method: str) -> Optional[dict]:
@@ -319,7 +351,7 @@ def scipy_linprog(lp: dict, method: str) -> Optional[dict]:
     }
     if status == "optimal":
         result_payload.update(recover_certificate(lp, x))
-    return result_payload
+    return apply_objective_offset(lp, result_payload)
 
 
 def ortools_glop(lp: dict) -> Optional[dict]:
@@ -387,7 +419,7 @@ def ortools_glop(lp: dict) -> Optional[dict]:
     }
     if status == "optimal":
         result_payload.update(recover_certificate(lp, x))
-    return result_payload
+    return apply_objective_offset(lp, result_payload)
 
 
 def solve_external(lp: dict, method: str) -> Optional[dict]:

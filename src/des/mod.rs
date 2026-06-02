@@ -194,6 +194,8 @@ pub mod main_shortest_path_algo;
 pub mod main_signal_processing;
 pub mod main_simulated_annealing;
 pub mod main_snowball;
+pub mod main_soccer;
+pub mod main_soccer_live;
 pub mod main_soccer_planner;
 pub mod main_soccer_rotation;
 pub mod main_stochastic_flow_mdp;

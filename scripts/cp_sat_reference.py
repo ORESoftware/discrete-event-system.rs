@@ -8,6 +8,7 @@ enumeration with the same JSON model contract.
 from __future__ import annotations
 
 import argparse
+import copy
 import itertools
 import json
 import sys
@@ -51,6 +52,105 @@ def literal_truth(partial: Sequence[Optional[int]], lit: dict) -> Optional[bool]
     if value is None:
         return None
     return (int(value) == 1) if bool(lit.get("positive", True)) else (int(value) == 0)
+
+
+def optional_presence_truth(partial: Sequence[Optional[int]], item: dict) -> Optional[bool]:
+    presence = item.get("presence")
+    if presence is None:
+        return True
+    return literal_truth(partial, presence)
+
+
+def variable_interval_span(
+    partial: Sequence[Optional[int]],
+    item: dict,
+) -> tuple[Optional[tuple[int, int]], bool]:
+    if optional_presence_truth(partial, item) is not True:
+        return None, True
+    start = partial[int(item["start"])]
+    duration = partial[int(item["duration"])]
+    if start is None or duration is None:
+        return None, True
+    computed_end = int(start) + int(duration)
+    end = partial[int(item["end"])]
+    if end is not None and int(end) != computed_end:
+        return None, False
+    return (int(start), computed_end), True
+
+
+def variable_demand_interval_span(
+    partial: Sequence[Optional[int]],
+    item: dict,
+) -> tuple[Optional[tuple[int, int, int]], bool]:
+    span, ok = variable_interval_span(partial, item)
+    if not ok or span is None:
+        return None, ok
+    demand = partial[int(item["demand"])]
+    if demand is None:
+        return None, True
+    return (span[0], span[1], int(demand)), True
+
+
+def variable_axis_span(
+    partial: Sequence[Optional[int]],
+    item: dict,
+    start_key: str,
+    size_key: str,
+    end_key: str,
+) -> tuple[Optional[tuple[int, int]], bool]:
+    if optional_presence_truth(partial, item) is not True:
+        return None, True
+    start = partial[int(item[start_key])]
+    size = partial[int(item[size_key])]
+    if start is None or size is None:
+        return None, True
+    computed_end = int(start) + int(size)
+    end = partial[int(item[end_key])]
+    if end is not None and int(end) != computed_end:
+        return None, False
+    return (int(start), computed_end), True
+
+
+def variable_rectangle_span(
+    partial: Sequence[Optional[int]],
+    item: dict,
+) -> tuple[Optional[tuple[int, int, int, int]], bool]:
+    x_span, x_ok = variable_axis_span(partial, item, "x_start", "x_size", "x_end")
+    if not x_ok:
+        return None, False
+    y_span, y_ok = variable_axis_span(partial, item, "y_start", "y_size", "y_end")
+    if not y_ok:
+        return None, False
+    if x_span is None or y_span is None:
+        return None, True
+    return (x_span[0], x_span[1], y_span[0], y_span[1]), True
+
+
+def interval_triplet_consistent(
+    partial: Sequence[Optional[int]],
+    start_key: int,
+    duration_key: int,
+    end_key: int,
+    active: Optional[bool],
+) -> bool:
+    if active is not True:
+        return True
+    start = partial[start_key]
+    duration = partial[duration_key]
+    end = partial[end_key]
+    if start is not None and duration is not None and end is not None:
+        return int(start) + int(duration) == int(end)
+    return True
+
+
+def assigned_equal_or_unknown(
+    partial: Sequence[Optional[int]],
+    lhs: int,
+    rhs: int,
+) -> bool:
+    if partial[lhs] is None or partial[rhs] is None:
+        return True
+    return int(partial[lhs]) == int(partial[rhs])
 
 
 def circuit_complete_ok(selected: Sequence[dict], nodes: Sequence[int]) -> bool:
@@ -138,6 +238,113 @@ def product_range(bounds: Sequence[tuple[int, int]]) -> tuple[int, int]:
         lo = min(candidates)
         hi = max(candidates)
     return lo, hi
+
+
+def solution_hint_values(model: dict) -> list[Optional[int]]:
+    values: list[Optional[int]] = [None] * len(model["variables"])
+    seen = set()
+    for hint in model.get("solution_hint", []):
+        var = int(hint["var"])
+        value = int(hint["value"])
+        if var < 0 or var >= len(values):
+            raise ValueError(f"solution hint variable {var} out of range")
+        if var in seen:
+            raise ValueError(f"duplicate solution hint for variable {var}")
+        seen.add(var)
+        domain = [int(v) for v in model["variables"][var]["domain"]]
+        if value not in domain:
+            raise ValueError(f"solution hint value {value} is outside variable {var} domain")
+        values[var] = value
+    return values
+
+
+def choose_search_var(
+    model: dict,
+    partial: Sequence[Optional[int]],
+    hints: Sequence[Optional[int]],
+    strategies: Sequence[dict],
+) -> int:
+    for i, value in enumerate(hints):
+        if value is not None and partial[i] is None:
+            return i
+    for strategy in strategies:
+        chosen = choose_strategy_var(model, partial, strategy)
+        if chosen is not None:
+            return chosen
+    return min(
+        (i for i, v in enumerate(partial) if v is None),
+        key=lambda i: len(model["variables"][i]["domain"]),
+    )
+
+
+def choose_strategy_var(
+    model: dict,
+    partial: Sequence[Optional[int]],
+    strategy: dict,
+) -> Optional[int]:
+    vars_ = [int(v) for v in strategy["vars"]]
+    candidates = [var for var in vars_ if partial[var] is None]
+    if not candidates:
+        return None
+    variable_strategy = strategy.get("variable_strategy", "first")
+    if variable_strategy == "first":
+        return candidates[0]
+    if variable_strategy == "min_domain_size":
+        return min(candidates, key=lambda var: len(model["variables"][var]["domain"]))
+    if variable_strategy == "max_domain_size":
+        return max(candidates, key=lambda var: len(model["variables"][var]["domain"]))
+    if variable_strategy == "lowest_min":
+        return min(candidates, key=lambda var: min(int(v) for v in model["variables"][var]["domain"]))
+    if variable_strategy == "highest_max":
+        return max(candidates, key=lambda var: max(int(v) for v in model["variables"][var]["domain"]))
+    raise ValueError(f"unknown decision variable strategy {variable_strategy}")
+
+
+def validate_decision_strategies(model: dict) -> list[dict]:
+    strategies = list(model.get("decision_strategies") or [])
+    seen = set()
+    for strategy in strategies:
+        vars_ = [int(v) for v in strategy["vars"]]
+        if not vars_:
+            raise ValueError("decision strategy has no variables")
+        for var in vars_:
+            if var < 0 or var >= len(model["variables"]):
+                raise ValueError(f"decision strategy variable {var} out of range")
+            if var in seen:
+                raise ValueError(f"duplicate decision strategy for variable {var}")
+            seen.add(var)
+    return strategies
+
+
+def strategy_for_var(strategies: Sequence[dict], var: int) -> Optional[dict]:
+    for strategy in strategies:
+        if var in [int(v) for v in strategy["vars"]]:
+            return strategy
+    return None
+
+
+def ordered_domain_values(
+    model: dict,
+    var: int,
+    hints: Sequence[Optional[int]],
+    strategies: Sequence[dict],
+) -> list[int]:
+    values = [int(v) for v in model["variables"][var]["domain"]]
+    hint = hints[var]
+    if hint is not None and hint in values:
+        values.remove(hint)
+        values.insert(0, hint)
+    else:
+        strategy = strategy_for_var(strategies, var)
+        if strategy is not None:
+            domain_strategy = strategy.get("domain_strategy", "min_value")
+            if domain_strategy == "min_value":
+                values.sort()
+            elif domain_strategy == "max_value":
+                values.sort(reverse=True)
+            else:
+                raise ValueError(f"unknown decision domain strategy {domain_strategy}")
+    return values
 
 
 def partial_ok(model: dict, partial: Sequence[Optional[int]]) -> bool:
@@ -497,23 +704,85 @@ def partial_ok(model: dict, partial: Sequence[Optional[int]]) -> bool:
                     return False
             elif not any(0 <= int(index) < len(values) for index in model["variables"][index_var]["domain"]):
                 return False
+        elif kind == "alternative":
+            parent_active = optional_presence_truth(partial, c)
+            true_modes = 0
+            unknown_modes = 0
+            for mode in c["alternatives"]:
+                active = optional_presence_truth(partial, mode)
+                if active is True:
+                    true_modes += 1
+                elif active is None:
+                    unknown_modes += 1
+            if true_modes > 1:
+                return False
+            if parent_active is True and true_modes == 0 and unknown_modes == 0:
+                return False
+            if parent_active is False and true_modes > 0:
+                return False
+            if not interval_triplet_consistent(
+                partial,
+                int(c["start"]),
+                int(c["duration"]),
+                int(c["end"]),
+                parent_active,
+            ):
+                return False
+            for mode in c["alternatives"]:
+                active = optional_presence_truth(partial, mode)
+                if not interval_triplet_consistent(
+                    partial,
+                    int(mode["start"]),
+                    int(mode["duration"]),
+                    int(mode["end"]),
+                    active,
+                ):
+                    return False
+                if active is not True:
+                    continue
+                if parent_active is False:
+                    return False
+                if not (
+                    assigned_equal_or_unknown(partial, int(c["start"]), int(mode["start"]))
+                    and assigned_equal_or_unknown(partial, int(c["duration"]), int(mode["duration"]))
+                    and assigned_equal_or_unknown(partial, int(c["end"]), int(mode["end"]))
+                ):
+                    return False
         elif kind == "no_overlap":
             intervals = c["intervals"]
             for i, a in enumerate(intervals):
+                if optional_presence_truth(partial, a) is not True:
+                    continue
                 start_a = partial[int(a["start"])]
                 if start_a is None:
                     continue
                 end_a = int(start_a) + int(a["duration"])
                 for b in intervals[i + 1:]:
+                    if optional_presence_truth(partial, b) is not True:
+                        continue
                     start_b = partial[int(b["start"])]
                     if start_b is None:
                         continue
                     end_b = int(start_b) + int(b["duration"])
                     if not (end_a <= int(start_b) or end_b <= int(start_a)):
                         return False
+        elif kind == "no_overlap_variable":
+            spans = []
+            for interval in c["intervals"]:
+                span, ok = variable_interval_span(partial, interval)
+                if not ok:
+                    return False
+                if span is not None:
+                    spans.append(span)
+            for i, (start_a, end_a) in enumerate(spans):
+                for start_b, end_b in spans[i + 1:]:
+                    if not (end_a <= start_b or end_b <= start_a):
+                        return False
         elif kind == "no_overlap_2d":
             rectangles = c["rectangles"]
             for i, a in enumerate(rectangles):
+                if optional_presence_truth(partial, a) is not True:
+                    continue
                 x_a = partial[int(a["x_start"])]
                 y_a = partial[int(a["y_start"])]
                 if x_a is None or y_a is None:
@@ -521,6 +790,8 @@ def partial_ok(model: dict, partial: Sequence[Optional[int]]) -> bool:
                 x_end_a = int(x_a) + int(a["width"])
                 y_end_a = int(y_a) + int(a["height"])
                 for b in rectangles[i + 1:]:
+                    if optional_presence_truth(partial, b) is not True:
+                        continue
                     x_b = partial[int(b["x_start"])]
                     y_b = partial[int(b["y_start"])]
                     if x_b is None or y_b is None:
@@ -531,9 +802,25 @@ def partial_ok(model: dict, partial: Sequence[Optional[int]]) -> bool:
                     y_disjoint = y_end_a <= int(y_b) or y_end_b <= int(y_a)
                     if not (x_disjoint or y_disjoint):
                         return False
+        elif kind == "no_overlap_2d_variable":
+            spans = []
+            for rectangle in c["rectangles"]:
+                span, ok = variable_rectangle_span(partial, rectangle)
+                if not ok:
+                    return False
+                if span is not None:
+                    spans.append(span)
+            for i, (x_start_a, x_end_a, y_start_a, y_end_a) in enumerate(spans):
+                for x_start_b, x_end_b, y_start_b, y_end_b in spans[i + 1:]:
+                    x_disjoint = x_end_a <= x_start_b or x_end_b <= x_start_a
+                    y_disjoint = y_end_a <= y_start_b or y_end_b <= y_start_a
+                    if not (x_disjoint or y_disjoint):
+                        return False
         elif kind == "cumulative":
             assigned = []
             for interval in c["intervals"]:
+                if optional_presence_truth(partial, interval) is not True:
+                    continue
                 start = partial[int(interval["start"])]
                 if start is None:
                     continue
@@ -544,6 +831,21 @@ def partial_ok(model: dict, partial: Sequence[Optional[int]]) -> bool:
                 load = sum(demand for start, end, demand in assigned if start <= t < end)
                 if load > capacity:
                     return False
+        elif kind == "cumulative_variable":
+            assigned = []
+            for interval in c["intervals"]:
+                span, ok = variable_demand_interval_span(partial, interval)
+                if not ok:
+                    return False
+                if span is not None:
+                    assigned.append(span)
+            capacity = partial[int(c["capacity"])]
+            if capacity is not None:
+                points = sorted({point for start, end, _ in assigned for point in (start, end)})
+                for t in points:
+                    load = sum(demand for start, end, demand in assigned if start <= t < end)
+                    if load > int(capacity):
+                        return False
         elif kind == "reservoir":
             all_bound = True
             active_events = []
@@ -575,6 +877,8 @@ def partial_ok(model: dict, partial: Sequence[Optional[int]]) -> bool:
 def enumerate_reference(model: dict) -> dict:
     n = len(model["variables"])
     partial: List[Optional[int]] = [None] * n
+    hints = solution_hint_values(model)
+    strategies = validate_decision_strategies(model)
     best = None
     best_obj = None
     nodes = 0
@@ -589,10 +893,7 @@ def enumerate_reference(model: dict) -> dict:
         if not partial_ok(model, partial):
             return
         try:
-            var = min(
-                (i for i, v in enumerate(partial) if v is None),
-                key=lambda i: len(model["variables"][i]["domain"]),
-            )
+            var = choose_search_var(model, partial, hints, strategies)
         except ValueError:
             full = [int(v) for v in partial]  # type: ignore[arg-type]
             obj = objective_value(model, full)
@@ -603,7 +904,7 @@ def enumerate_reference(model: dict) -> dict:
                 best = full
                 best_obj = obj
             return
-        for value in model["variables"][var]["domain"]:
+        for value in ordered_domain_values(model, var, hints, strategies):
             partial[var] = int(value)
             dfs()
             partial[var] = None
@@ -621,6 +922,139 @@ def enumerate_reference(model: dict) -> dict:
     }
 
 
+def enumerate_pool_reference(model: dict, max_solutions: int) -> dict:
+    if max_solutions <= 0:
+        raise ValueError("max_solutions must be positive")
+
+    n = len(model["variables"])
+    partial: List[Optional[int]] = [None] * n
+    hints = solution_hint_values(model)
+    strategies = validate_decision_strategies(model)
+    solutions = []
+    nodes = 0
+    hit_solution_limit = False
+
+    def dfs() -> None:
+        nonlocal nodes, hit_solution_limit
+        if hit_solution_limit:
+            return
+        nodes += 1
+        if not partial_ok(model, partial):
+            return
+        try:
+            var = choose_search_var(model, partial, hints, strategies)
+        except ValueError:
+            full = [int(v) for v in partial]  # type: ignore[arg-type]
+            solutions.append(
+                {
+                    "assignment": full,
+                    "objective": objective_value(model, full),
+                }
+            )
+            if not model.get("objective") and len(solutions) >= max_solutions:
+                hit_solution_limit = True
+            return
+        for value in ordered_domain_values(model, var, hints, strategies):
+            partial[var] = int(value)
+            dfs()
+            partial[var] = None
+            if hit_solution_limit:
+                break
+
+    dfs()
+    if model.get("objective"):
+        reverse = model["objective"].get("sense", "min") == "max"
+        solutions.sort(
+            key=lambda item: item["objective"] if item["objective"] is not None else 0,
+            reverse=reverse,
+        )
+        if len(solutions) > max_solutions:
+            solutions = solutions[:max_solutions]
+            hit_solution_limit = True
+
+    if not solutions:
+        return {
+            "status": "infeasible",
+            "assignment": [],
+            "objective": None,
+            "solutions": [],
+            "exhausted": not hit_solution_limit,
+            "nodes": nodes,
+            "solver": "python:cp-solution-enumeration",
+        }
+
+    first = solutions[0]
+    return {
+        "status": "optimal" if model.get("objective") else "feasible",
+        "assignment": first["assignment"],
+        "objective": first["objective"],
+        "solutions": solutions,
+        "exhausted": not hit_solution_limit,
+        "nodes": nodes,
+        "solver": "python:cp-solution-enumeration",
+        "message": "dependency-free exact solution enumeration fallback",
+    }
+
+
+def model_with_assumptions(model: dict, assumptions: Sequence[dict]) -> dict:
+    assumed = copy.deepcopy(model)
+    constraints = assumed.setdefault("constraints", [])
+    for lit in assumptions:
+        constraints.append(
+            {
+                "kind": "linear",
+                "terms": [{"var": int(lit["var"]), "coeff": 1}],
+                "sense": "eq",
+                "rhs": 1 if bool(lit.get("positive", True)) else 0,
+            }
+        )
+    return assumed
+
+
+def assumption_core_reference(model: dict) -> dict:
+    assumptions = list(model.get("assumptions", []))
+    core = list(assumptions)
+    checks = 1
+    full = enumerate_reference(model_with_assumptions(model, core))
+    if full["status"] != "infeasible":
+        return {
+            "status": full["status"],
+            "assumptions": [],
+            "minimal": False,
+            "checks": checks,
+            "solver": "python:cp-assumption-core",
+            "message": f"assumptions are not infeasible; status is {full['status']}",
+        }
+
+    idx = 0
+    while idx < len(core):
+        trial = list(core)
+        del trial[idx]
+        checks += 1
+        if enumerate_reference(model_with_assumptions(model, trial))["status"] == "infeasible":
+            core = trial
+        else:
+            idx += 1
+
+    minimal = True
+    for idx in range(len(core)):
+        trial = list(core)
+        del trial[idx]
+        checks += 1
+        if enumerate_reference(model_with_assumptions(model, trial))["status"] == "infeasible":
+            minimal = False
+            break
+
+    return {
+        "status": "infeasible",
+        "assumptions": core,
+        "minimal": minimal,
+        "checks": checks,
+        "solver": "python:cp-assumption-core",
+        "message": "dependency-free exact assumption core fallback",
+    }
+
+
 def ortools_reference(model: dict) -> Optional[dict]:
     try:
         from ortools.sat.python import cp_model  # type: ignore
@@ -631,6 +1065,92 @@ def ortools_reference(model: dict) -> Optional[dict]:
     for var in model["variables"]:
         dom = cp_model.Domain.FromValues([int(v) for v in var["domain"]])
         xs.append(cp.NewIntVarFromDomain(dom, var.get("name", f"x{len(xs)}")))
+    for hint in model.get("solution_hint", []):
+        cp.AddHint(xs[int(hint["var"])], int(hint["value"]))
+
+    def variable_strategy_constant(name: str):
+        mapping = {
+            "first": cp_model.CHOOSE_FIRST,
+            "min_domain_size": cp_model.CHOOSE_MIN_DOMAIN_SIZE,
+            "max_domain_size": cp_model.CHOOSE_MAX_DOMAIN_SIZE,
+            "lowest_min": cp_model.CHOOSE_LOWEST_MIN,
+            "highest_max": cp_model.CHOOSE_HIGHEST_MAX,
+        }
+        if name not in mapping:
+            raise ValueError(f"unknown decision variable strategy {name}")
+        return mapping[name]
+
+    def domain_strategy_constant(name: str):
+        mapping = {
+            "min_value": cp_model.SELECT_MIN_VALUE,
+            "max_value": cp_model.SELECT_MAX_VALUE,
+        }
+        if name not in mapping:
+            raise ValueError(f"unknown decision domain strategy {name}")
+        return mapping[name]
+
+    decision_strategies = validate_decision_strategies(model)
+    covered_strategy_vars = set()
+    for strategy in decision_strategies:
+        vars_ = [int(v) for v in strategy["vars"]]
+        covered_strategy_vars.update(vars_)
+        cp.AddDecisionStrategy(
+            [xs[var] for var in vars_],
+            variable_strategy_constant(strategy.get("variable_strategy", "first")),
+            domain_strategy_constant(strategy.get("domain_strategy", "min_value")),
+        )
+    if decision_strategies:
+        uncovered = [idx for idx in range(len(xs)) if idx not in covered_strategy_vars]
+        if uncovered:
+            cp.AddDecisionStrategy(
+                [xs[idx] for idx in uncovered],
+                cp_model.CHOOSE_MIN_DOMAIN_SIZE,
+                cp_model.SELECT_MIN_VALUE,
+            )
+
+    def cp_literal(lit: dict):
+        var = xs[int(lit["var"])]
+        return var if bool(lit.get("positive", True)) else var.Not()
+
+    def literal_expr(lit: dict):
+        var = xs[int(lit["var"])]
+        return var if bool(lit.get("positive", True)) else 1 - var
+
+    def fixed_size_interval(start_var, duration: int, name: str, item: dict):
+        presence = item.get("presence")
+        if presence is None:
+            return cp.NewFixedSizeIntervalVar(start_var, duration, name)
+        return cp.NewOptionalFixedSizeIntervalVar(
+            start_var,
+            duration,
+            cp_literal(presence),
+            name,
+        )
+
+    def variable_size_interval(item: dict, name: str):
+        start = xs[int(item["start"])]
+        size = xs[int(item["duration"])]
+        end = xs[int(item["end"])]
+        presence = item.get("presence")
+        if presence is None:
+            return cp.NewIntervalVar(start, size, end, name)
+        return cp.NewOptionalIntervalVar(start, size, end, cp_literal(presence), name)
+
+    def variable_axis_interval(
+        item: dict,
+        start_key: str,
+        size_key: str,
+        end_key: str,
+        name: str,
+    ):
+        start = xs[int(item[start_key])]
+        size = xs[int(item[size_key])]
+        end = xs[int(item[end_key])]
+        presence = item.get("presence")
+        if presence is None:
+            return cp.NewIntervalVar(start, size, end, name)
+        return cp.NewOptionalIntervalVar(start, size, end, cp_literal(presence), name)
+
     for c in model.get("constraints", []):
         kind = c["kind"]
         if kind == "linear":
@@ -671,48 +1191,32 @@ def ortools_reference(model: dict) -> Optional[dict]:
         elif kind == "all_different":
             cp.AddAllDifferent([xs[int(v)] for v in c["vars"]])
         elif kind == "bool_or":
-            lits = []
-            for lit in c["literals"]:
-                x = xs[int(lit["var"])]
-                lits.append(x if bool(lit.get("positive", True)) else x.Not())
+            lits = [cp_literal(lit) for lit in c["literals"]]
             cp.AddBoolOr(lits)
         elif kind == "bool_and":
-            lits = []
-            for lit in c["literals"]:
-                x = xs[int(lit["var"])]
-                lits.append(x if bool(lit.get("positive", True)) else x.Not())
+            lits = [cp_literal(lit) for lit in c["literals"]]
             cp.AddBoolAnd(lits)
         elif kind == "bool_xor":
-            lits = []
-            for lit in c["literals"]:
-                x = xs[int(lit["var"])]
-                lits.append(x if bool(lit.get("positive", True)) else x.Not())
+            lits = [cp_literal(lit) for lit in c["literals"]]
             cp.AddBoolXOr(lits)
         elif kind == "at_most_one":
-            lits = []
-            for lit in c["literals"]:
-                x = xs[int(lit["var"])]
-                lits.append(x if bool(lit.get("positive", True)) else x.Not())
+            lits = [cp_literal(lit) for lit in c["literals"]]
             cp.AddAtMostOne(lits)
         elif kind == "exactly_one":
-            lits = []
-            for lit in c["literals"]:
-                x = xs[int(lit["var"])]
-                lits.append(x if bool(lit.get("positive", True)) else x.Not())
+            lits = [cp_literal(lit) for lit in c["literals"]]
             cp.AddExactlyOne(lits)
         elif kind == "implication":
-            antecedent_var = xs[int(c["antecedent"]["var"])]
-            consequent_var = xs[int(c["consequent"]["var"])]
-            antecedent = antecedent_var if bool(c["antecedent"].get("positive", True)) else antecedent_var.Not()
-            consequent = consequent_var if bool(c["consequent"].get("positive", True)) else consequent_var.Not()
-            cp.AddImplication(antecedent, consequent)
+            cp.AddImplication(cp_literal(c["antecedent"]), cp_literal(c["consequent"]))
         elif kind == "circuit":
             arcs = []
             for arc in c["arcs"]:
-                x = xs[int(arc["literal"]["var"])]
-                lit = x if bool(arc["literal"].get("positive", True)) else x.Not()
-                arcs.append((int(arc["tail"]), int(arc["head"]), lit))
+                arcs.append((int(arc["tail"]), int(arc["head"]), cp_literal(arc["literal"])))
             cp.AddCircuit(arcs)
+        elif kind == "multiple_circuit":
+            arcs = []
+            for arc in c["arcs"]:
+                arcs.append((int(arc["tail"]), int(arc["head"]), cp_literal(arc["literal"])))
+            cp.AddMultipleCircuit(arcs)
         elif kind == "allowed_assignments":
             cp.AddAllowedAssignments(
                 [xs[int(v)] for v in c["vars"]],
@@ -776,17 +1280,62 @@ def ortools_reference(model: dict) -> Optional[dict]:
                 [int(v) for v in c["values"]],
                 xs[int(c["target"])],
             )
+        elif kind == "alternative":
+            name = c.get("name", "alternative")
+            parent_start = xs[int(c["start"])]
+            parent_size = xs[int(c["duration"])]
+            parent_end = xs[int(c["end"])]
+            parent_presence = c.get("presence")
+            if parent_presence is None:
+                cp.NewIntervalVar(parent_start, parent_size, parent_end, f"{name}_parent")
+            else:
+                cp.NewOptionalIntervalVar(
+                    parent_start,
+                    parent_size,
+                    parent_end,
+                    cp_literal(parent_presence),
+                    f"{name}_parent",
+                )
+            mode_literals = []
+            mode_literal_exprs = []
+            for i, mode in enumerate(c["alternatives"]):
+                mode_name = mode.get("name", f"{name}_mode_{i}")
+                presence = mode["presence"]
+                active = cp_literal(presence)
+                mode_literals.append(active)
+                mode_literal_exprs.append(literal_expr(presence))
+                cp.NewOptionalIntervalVar(
+                    xs[int(mode["start"])],
+                    xs[int(mode["duration"])],
+                    xs[int(mode["end"])],
+                    active,
+                    mode_name,
+                )
+                cp.Add(parent_start == xs[int(mode["start"])]).OnlyEnforceIf(active)
+                cp.Add(parent_size == xs[int(mode["duration"])]).OnlyEnforceIf(active)
+                cp.Add(parent_end == xs[int(mode["end"])]).OnlyEnforceIf(active)
+            if parent_presence is None:
+                cp.AddExactlyOne(mode_literals)
+            else:
+                cp.Add(sum(mode_literal_exprs) == literal_expr(parent_presence))
         elif kind == "no_overlap":
             intervals = []
             for i, interval in enumerate(c["intervals"]):
                 name = interval.get("name", f"interval_{i}")
                 intervals.append(
-                    cp.NewFixedSizeIntervalVar(
+                    fixed_size_interval(
                         xs[int(interval["start"])],
                         int(interval["duration"]),
                         name,
+                        interval,
                     )
                 )
+            cp.AddNoOverlap(intervals)
+        elif kind == "no_overlap_variable":
+            intervals = []
+            for i, interval in enumerate(c["intervals"]):
+                name = interval.get("name", f"interval_{i}")
+                intervals.append(variable_size_interval(interval, name))
             cp.AddNoOverlap(intervals)
         elif kind == "no_overlap_2d":
             x_intervals = []
@@ -794,16 +1343,42 @@ def ortools_reference(model: dict) -> Optional[dict]:
             for i, rectangle in enumerate(c["rectangles"]):
                 name = rectangle.get("name", f"rectangle_{i}")
                 x_intervals.append(
-                    cp.NewFixedSizeIntervalVar(
+                    fixed_size_interval(
                         xs[int(rectangle["x_start"])],
                         int(rectangle["width"]),
+                        f"{name}_x",
+                        rectangle,
+                    )
+                )
+                y_intervals.append(
+                    fixed_size_interval(
+                        xs[int(rectangle["y_start"])],
+                        int(rectangle["height"]),
+                        f"{name}_y",
+                        rectangle,
+                    )
+                )
+            cp.AddNoOverlap2D(x_intervals, y_intervals)
+        elif kind == "no_overlap_2d_variable":
+            x_intervals = []
+            y_intervals = []
+            for i, rectangle in enumerate(c["rectangles"]):
+                name = rectangle.get("name", f"rectangle_{i}")
+                x_intervals.append(
+                    variable_axis_interval(
+                        rectangle,
+                        "x_start",
+                        "x_size",
+                        "x_end",
                         f"{name}_x",
                     )
                 )
                 y_intervals.append(
-                    cp.NewFixedSizeIntervalVar(
-                        xs[int(rectangle["y_start"])],
-                        int(rectangle["height"]),
+                    variable_axis_interval(
+                        rectangle,
+                        "y_start",
+                        "y_size",
+                        "y_end",
                         f"{name}_y",
                     )
                 )
@@ -814,14 +1389,23 @@ def ortools_reference(model: dict) -> Optional[dict]:
             for i, interval in enumerate(c["intervals"]):
                 name = interval.get("name", f"interval_{i}")
                 intervals.append(
-                    cp.NewFixedSizeIntervalVar(
+                    fixed_size_interval(
                         xs[int(interval["start"])],
                         int(interval["duration"]),
                         name,
+                        interval,
                     )
                 )
                 demands.append(int(interval["demand"]))
             cp.AddCumulative(intervals, demands, int(c["capacity"]))
+        elif kind == "cumulative_variable":
+            intervals = []
+            demands = []
+            for i, interval in enumerate(c["intervals"]):
+                name = interval.get("name", f"interval_{i}")
+                intervals.append(variable_size_interval(interval, name))
+                demands.append(xs[int(interval["demand"])])
+            cp.AddCumulative(intervals, demands, xs[int(c["capacity"])])
         elif kind == "reservoir":
             times = [xs[int(event["time"])] for event in c["events"]]
             level_changes = [int(event["level_change"]) for event in c["events"]]
@@ -857,11 +1441,14 @@ def ortools_reference(model: dict) -> Optional[dict]:
             cp.Maximize(expr)
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = 10.0
+    if decision_strategies:
+        solver.parameters.search_branching = cp_model.FIXED_SEARCH
     status = solver.Solve(cp)
     if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         assignment = [int(solver.Value(x)) for x in xs]
+        status_label = "optimal" if model.get("objective") and status == cp_model.OPTIMAL else "feasible"
         return {
-            "status": "optimal" if status == cp_model.OPTIMAL else "feasible",
+            "status": status_label,
             "assignment": assignment,
             "objective": objective_value(model, assignment),
             "nodes": int(solver.NumBranches()),
@@ -875,8 +1462,20 @@ def ortools_reference(model: dict) -> Optional[dict]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--solver", default="auto")
+    parser.add_argument("--enumerate-solutions", type=int)
+    parser.add_argument("--assumption-core", action="store_true")
     args = parser.parse_args()
     model = json.load(sys.stdin)
+    if args.assumption_core:
+        result = assumption_core_reference(model)
+        print(json.dumps(result))
+        return 0
+
+    if args.enumerate_solutions is not None:
+        result = enumerate_pool_reference(model, args.enumerate_solutions)
+        print(json.dumps(result))
+        return 0
+
     result = None
     if args.solver in ("auto", "ortools", "ortools-cp-sat"):
         result = ortools_reference(model)

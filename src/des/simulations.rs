@@ -161,6 +161,7 @@ pub fn simulation_catalogue() -> Vec<(&'static str, fn())> {
             "main_soccer_rotation_anim",
             crate::des::main_soccer_rotation::run_anim,
         ),
+        ("main_soccer", crate::des::main_soccer::run),
         ("main_soccer_planner", crate::des::main_soccer_planner::run),
         (
             "main_stochastic_flow_mdp",

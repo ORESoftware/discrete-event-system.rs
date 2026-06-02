@@ -92,6 +92,7 @@ pub mod control_systems;
 // Standalone optimisation/forecasting/LP models built on des-base + general kernels.
 pub mod do_audit;
 pub mod equation_to_stations;
+pub mod external_linear_cli;
 pub mod feasibility_pipeline;
 pub mod internal_solver_network;
 pub mod ip_mip_des;
@@ -99,6 +100,7 @@ pub mod multistage_stochastic;
 pub mod music_production;
 pub mod nonlinear_forecasting_model;
 pub mod signal_transforms;
+pub mod soccer;
 pub mod soccer_rotation;
 pub mod stochastic_flow_mdp;
 pub mod stochastic_lp;

@@ -394,8 +394,10 @@ than as one monolithic planner:
 | --- | --- |
 | Inventory control and dynamic programming | `inventory_dp`, `multistage_stochastic`, `main_inventory_mdp`, `main_newsvendor` |
 | Forecasting and state estimation | `nonlinear_forecasting_model`, `kalman_filter`, stochastic SDE/control reports |
-| LP and interior-point methods | `lp`, `lp_des`, `des_lp_bridge`; use `LP_SOLVER=internal-ipm` for the native primal-dual IPM or `scipy:highs-ipm` for SciPy HiGHS IPM; simplex runs recover dual row prices and reduced costs when the active set is certifiable |
-| Mixed-integer optimization | `milp_bnb`, `ip_mip_des` |
+| LP and interior-point methods | `lp`, `lp_des`, `des_lp_bridge`, `external_linear_cli`; use `LP_SOLVER=internal-ipm` for the native primal-dual IPM or `scipy:highs-ipm` for SciPy HiGHS IPM; local CLI adapters can call installed HiGHS, GLPK, SCIP, CBC, CLP, and optional commercial solvers without vendoring executables; source-level range rows and objective offsets compile to equality/inequality rows; weighted L1 feasibility relaxation identifies minimum-cost row/bound repairs for infeasible models; simplex runs recover dual row prices and reduced costs when the active set is certifiable; infeasibility conflict extraction finds minimal row/bound subsystems for IIS-style diagnostics |
+| Convex QP, MIQP, SOCP, and QCP | `qp`; dense active-set QP returns row, equality, lower-bound, upper-bound, and reduced-gradient KKT certificates; bounded MIQP enumerates integer assignments and solves convex QP subproblems |
+| Constraint programming / CP-SAT | `cp_sat`; finite-domain search covers Boolean logic, tables, automata, circuits/multiple-circuit routing, element constraints, resource scheduling, optional and variable-size intervals, alternative mode intervals, fixed and variable-size 2D packing, variable-demand/capacity cumulative resources, reservoir constraints, solution hints/search starts, fixed-search decision strategies, bounded solution enumeration, assumptions, and infeasible assumption cores |
+| Mixed-integer optimization | `milp_bnb`, `ip_mip_des`, `external_linear_cli`; branch-and-cut covers solution pools, MIP starts, branch priorities, relative/absolute MIP gap limits, infeasibility conflict refinement, weighted feasibility relaxation, lower bounds, ranged rows, indicators, SOS1/SOS2, semi-continuous/semi-integer variables, piecewise-linear rewards, absolute-value, maximum, minimum, binary-logic, L1/Linf norm, exact binary-binary/binary-continuous bounded-product general constraints, exact binary/bounded quadratic objective terms, and lexicographic objectives |
 | Network flow and transportation | `max_flow`, `network_flow`, `traffic_flow`, `stochastic_flow_mdp` |
 | Vehicle routing and routing heuristics | `classical_optimization_models` VRP savings and nearest-neighbor runs |
 | Stochastic optimization and simulation | `stochastic_lp`, `statistical_optimization`, `fel`, `hybrid`, catalogue simulations |
@@ -405,7 +407,11 @@ Solver parity checks live in `validate_optimization_suite`; scale-envelope
 checks live in `validate_optimization_scale`. The suite cross-checks HiGHS,
 GLPK, SCIP, CBC, CLP, OR-Tools GLOP, and OR-Tools CP-SAT when available, and
 keeps optional hooks for commercial CLIs such as Gurobi, CPLEX, Xpress, and
-LINDO. The scale runner compares native LP/MIP solvers with installed
+LINDO. The public `des::general::external_linear_cli` module exposes the same
+local CLI path to library callers while keeping all solver executables out of
+version control; use `probe_external_linear_cli_solver` to distinguish
+not-installed tools from bridge-unsupported tools and ready smoke-tested
+solvers. The scale runner compares native LP/MIP solvers with installed
 open-source engines and writes `out/external/optimization-scale/scale-report.json`:
 
 ```sh

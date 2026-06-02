@@ -30,6 +30,12 @@ pub struct QuadraticProgram {
     pub var_names: Option<Vec<String>>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MixedIntegerQuadraticProgram {
+    pub qp: QuadraticProgram,
+    pub integer_vars: Vec<bool>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QPStatus {
     Optimal,
@@ -61,6 +67,17 @@ pub struct QPSolution {
     pub active_lower_bounds: Vec<usize>,
     pub active_upper_bounds: Vec<usize>,
     pub iterations: usize,
+    pub solver: String,
+    pub message: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MIQPSolution {
+    pub status: QPStatus,
+    pub x: Vector,
+    pub objective: f64,
+    pub enumerated: usize,
+    pub qp_subproblems: usize,
     pub solver: String,
     pub message: Option<String>,
 }
@@ -174,6 +191,21 @@ impl Default for QPOptions {
         QPOptions {
             tol: 1e-8,
             max_active_sets: 1_000_000,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct MIQPOptions {
+    pub qp_options: QPOptions,
+    pub max_enumerations: usize,
+}
+
+impl Default for MIQPOptions {
+    fn default() -> Self {
+        MIQPOptions {
+            qp_options: QPOptions::default(),
+            max_enumerations: 1_000_000,
         }
     }
 }
@@ -601,6 +633,194 @@ pub fn solve_qp_active_set(p: &QuadraticProgram, opts: QPOptions) -> QPSolution 
         iterations,
         solver: "internal-active-set-enumeration".to_string(),
         message: Some("convex QP active-set enumeration".to_string()),
+    }
+}
+
+fn validate_miqp(p: &MixedIntegerQuadraticProgram) {
+    validate_qp(&p.qp);
+    let n = p.qp.c.len();
+    if p.integer_vars.len() != n {
+        panic!(
+            "miqp: integer_vars length {} != variable count {n}",
+            p.integer_vars.len()
+        );
+    }
+    let (lb, ub) = bounds(&p.qp);
+    for i in 0..n {
+        if !p.integer_vars[i] {
+            continue;
+        }
+        let Some(lower) = lb[i] else {
+            panic!("miqp: integer variable {i} needs a finite lower bound");
+        };
+        let Some(upper) = ub[i] else {
+            panic!("miqp: integer variable {i} needs a finite upper bound");
+        };
+        if lower.ceil() > upper.floor() {
+            panic!("miqp: integer variable {i} has no integer value in its bounds");
+        }
+    }
+}
+
+fn fixed_integer_subproblem(
+    p: &MixedIntegerQuadraticProgram,
+    assignment: &[(usize, f64)],
+) -> QuadraticProgram {
+    let n = p.qp.c.len();
+    let mut sub = p.qp.clone();
+    let mut a_eq = sub.a_eq.clone().unwrap_or_default();
+    let mut b_eq = sub.b_eq.clone().unwrap_or_default();
+    for &(var, value) in assignment {
+        let mut row = vec![0.0; n];
+        row[var] = 1.0;
+        a_eq.push(row);
+        b_eq.push(value);
+    }
+    sub.a_eq = Some(a_eq);
+    sub.b_eq = Some(b_eq);
+    sub
+}
+
+/// Solve a bounded small-model mixed-integer convex QP by enumerating integer
+/// assignments and solving each remaining continuous QP with the active-set
+/// engine. This gives the crate a native MIQP modelling surface comparable to
+/// commercial solvers for modest models; scale remains limited by enumeration.
+pub fn solve_miqp_enumeration(p: &MixedIntegerQuadraticProgram, opts: MIQPOptions) -> MIQPSolution {
+    validate_miqp(p);
+    let integer_indices: Vec<usize> = p
+        .integer_vars
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, &is_integer)| is_integer.then_some(idx))
+        .collect();
+    if integer_indices.is_empty() {
+        let sol = solve_qp_active_set(&p.qp, opts.qp_options);
+        return MIQPSolution {
+            status: sol.status,
+            x: sol.x,
+            objective: sol.objective,
+            enumerated: 1,
+            qp_subproblems: 1,
+            solver: "internal-miqp-enumeration".to_string(),
+            message: Some("no integer variables; delegated to continuous QP".to_string()),
+        };
+    }
+
+    let (lb, ub) = bounds(&p.qp);
+    let mut domains = Vec::with_capacity(integer_indices.len());
+    for &idx in &integer_indices {
+        let lower = lb[idx].expect("validated finite lower bound").ceil() as i64;
+        let upper = ub[idx].expect("validated finite upper bound").floor() as i64;
+        domains.push((lower, upper));
+    }
+
+    let mut current = Vec::with_capacity(integer_indices.len());
+    let mut best_x = Vec::new();
+    let mut best_obj = f64::INFINITY;
+    let mut enumerated = 0usize;
+    let mut qp_subproblems = 0usize;
+    let mut hit_limit = false;
+
+    fn dfs(
+        depth: usize,
+        integer_indices: &[usize],
+        domains: &[(i64, i64)],
+        current: &mut Vec<(usize, f64)>,
+        p: &MixedIntegerQuadraticProgram,
+        opts: MIQPOptions,
+        enumerated: &mut usize,
+        qp_subproblems: &mut usize,
+        best_x: &mut Vector,
+        best_obj: &mut f64,
+        hit_limit: &mut bool,
+    ) {
+        if *hit_limit {
+            return;
+        }
+        if depth == integer_indices.len() {
+            *enumerated += 1;
+            if *enumerated > opts.max_enumerations {
+                *hit_limit = true;
+                return;
+            }
+            let sub = fixed_integer_subproblem(p, current);
+            *qp_subproblems += 1;
+            let sol = solve_qp_active_set(&sub, opts.qp_options);
+            if sol.status == QPStatus::Optimal && sol.objective < *best_obj - opts.qp_options.tol {
+                *best_obj = sol.objective;
+                *best_x = sol.x;
+            }
+            return;
+        }
+
+        let var = integer_indices[depth];
+        let (lower, upper) = domains[depth];
+        for value in lower..=upper {
+            current.push((var, value as f64));
+            dfs(
+                depth + 1,
+                integer_indices,
+                domains,
+                current,
+                p,
+                opts,
+                enumerated,
+                qp_subproblems,
+                best_x,
+                best_obj,
+                hit_limit,
+            );
+            current.pop();
+            if *hit_limit {
+                return;
+            }
+        }
+    }
+
+    dfs(
+        0,
+        &integer_indices,
+        &domains,
+        &mut current,
+        p,
+        opts,
+        &mut enumerated,
+        &mut qp_subproblems,
+        &mut best_x,
+        &mut best_obj,
+        &mut hit_limit,
+    );
+
+    if hit_limit {
+        return MIQPSolution {
+            status: QPStatus::NumericalError,
+            x: best_x,
+            objective: best_obj,
+            enumerated,
+            qp_subproblems,
+            solver: "internal-miqp-enumeration".to_string(),
+            message: Some("MIQP enumeration limit reached".to_string()),
+        };
+    }
+    if best_x.is_empty() {
+        return MIQPSolution {
+            status: QPStatus::Infeasible,
+            x: Vec::new(),
+            objective: f64::NAN,
+            enumerated,
+            qp_subproblems,
+            solver: "internal-miqp-enumeration".to_string(),
+            message: Some("no feasible integer assignment found".to_string()),
+        };
+    }
+    MIQPSolution {
+        status: QPStatus::Optimal,
+        x: best_x,
+        objective: best_obj,
+        enumerated,
+        qp_subproblems,
+        solver: "internal-miqp-enumeration".to_string(),
+        message: Some("bounded MIQP enumeration over integer variables".to_string()),
     }
 }
 
@@ -1224,6 +1444,31 @@ mod tests {
         assert!((sol.x[0] - 0.0).abs() < 1e-8, "{sol:?}");
         assert!((sol.x[1] - 1.0).abs() < 1e-8, "{sol:?}");
         assert!((sol.objective + 4.0).abs() < 1e-8, "{sol:?}");
+    }
+
+    #[test]
+    fn solves_bounded_mixed_integer_qp() {
+        // min (x - 1.4)^2 + (y - 0.6)^2, x integer, x + y >= 1.5.
+        // Continuous optimum has fractional x; bounded MIQP chooses x=1,y=0.6.
+        let miqp = MixedIntegerQuadraticProgram {
+            qp: QuadraticProgram {
+                q: vec![vec![2.0, 0.0], vec![0.0, 2.0]],
+                c: vec![-2.8, -1.2],
+                a_ub: Some(vec![vec![-1.0, -1.0]]),
+                b_ub: Some(vec![-1.5]),
+                lb: Some(vec![Some(0.0), Some(0.0)]),
+                ub: Some(vec![Some(3.0), Some(3.0)]),
+                var_names: Some(vec!["x".to_string(), "y".to_string()]),
+                ..Default::default()
+            },
+            integer_vars: vec![true, false],
+        };
+        let sol = solve_miqp_enumeration(&miqp, MIQPOptions::default());
+        assert_eq!(sol.status, QPStatus::Optimal, "{sol:?}");
+        assert!((sol.x[0] - 1.0).abs() < 1e-8, "{sol:?}");
+        assert!((sol.x[1] - 0.6).abs() < 1e-8, "{sol:?}");
+        assert!((sol.objective + 2.16).abs() < 1e-8, "{sol:?}");
+        assert_eq!(sol.enumerated, 4);
     }
 
     #[test]

@@ -19,6 +19,55 @@ pub struct LinearTerm {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CpSolutionHint {
+    pub var: usize,
+    pub value: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CpVariableSelectionStrategy {
+    First,
+    MinDomainSize,
+    MaxDomainSize,
+    LowestMin,
+    HighestMax,
+}
+
+impl CpVariableSelectionStrategy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CpVariableSelectionStrategy::First => "first",
+            CpVariableSelectionStrategy::MinDomainSize => "min_domain_size",
+            CpVariableSelectionStrategy::MaxDomainSize => "max_domain_size",
+            CpVariableSelectionStrategy::LowestMin => "lowest_min",
+            CpVariableSelectionStrategy::HighestMax => "highest_max",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CpDomainValueStrategy {
+    MinValue,
+    MaxValue,
+}
+
+impl CpDomainValueStrategy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CpDomainValueStrategy::MinValue => "min_value",
+            CpDomainValueStrategy::MaxValue => "max_value",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CpDecisionStrategy {
+    pub vars: Vec<usize>,
+    pub variable_strategy: CpVariableSelectionStrategy,
+    pub domain_strategy: CpDomainValueStrategy,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CpDomainInterval {
     pub lb: i64,
     pub ub: i64,
@@ -51,6 +100,26 @@ pub struct BoolLiteral {
 pub struct CpInterval {
     pub start: usize,
     pub duration: i64,
+    pub presence: Option<BoolLiteral>,
+    pub name: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CpVariableInterval {
+    pub start: usize,
+    pub duration: usize,
+    pub end: usize,
+    pub presence: Option<BoolLiteral>,
+    pub name: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CpAlternative {
+    pub start: usize,
+    pub duration: usize,
+    pub end: usize,
+    pub presence: Option<BoolLiteral>,
+    pub alternatives: Vec<CpVariableInterval>,
     pub name: Option<String>,
 }
 
@@ -59,6 +128,17 @@ pub struct CpDemandInterval {
     pub start: usize,
     pub duration: i64,
     pub demand: i64,
+    pub presence: Option<BoolLiteral>,
+    pub name: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CpVariableDemandInterval {
+    pub start: usize,
+    pub duration: usize,
+    pub end: usize,
+    pub demand: usize,
+    pub presence: Option<BoolLiteral>,
     pub name: Option<String>,
 }
 
@@ -75,6 +155,19 @@ pub struct CpRectangle {
     pub y_start: usize,
     pub width: i64,
     pub height: i64,
+    pub presence: Option<BoolLiteral>,
+    pub name: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CpVariableRectangle {
+    pub x_start: usize,
+    pub x_size: usize,
+    pub x_end: usize,
+    pub y_start: usize,
+    pub y_size: usize,
+    pub y_end: usize,
+    pub presence: Option<BoolLiteral>,
     pub name: Option<String>,
 }
 
@@ -179,12 +272,20 @@ pub enum CpConstraint {
     },
     Automaton(CpAutomaton),
     Circuit(Vec<CpCircuitArc>),
+    MultipleCircuit(Vec<CpCircuitArc>),
     Element(CpElement),
+    Alternative(CpAlternative),
     NoOverlap(Vec<CpInterval>),
+    NoOverlapVariable(Vec<CpVariableInterval>),
     NoOverlap2D(Vec<CpRectangle>),
+    NoOverlap2DVariable(Vec<CpVariableRectangle>),
     Cumulative {
         intervals: Vec<CpDemandInterval>,
         capacity: i64,
+    },
+    CumulativeVariable {
+        intervals: Vec<CpVariableDemandInterval>,
+        capacity: usize,
     },
     Reservoir {
         events: Vec<CpReservoirEvent>,
@@ -248,15 +349,73 @@ pub struct CpSolution {
     pub message: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CpSolutionPoolEntry {
+    pub assignment: Vec<i64>,
+    pub objective: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CpSolutionPool {
+    pub status: CpStatus,
+    pub solutions: Vec<CpSolutionPoolEntry>,
+    pub nodes: usize,
+    pub exhausted: bool,
+    pub solver: String,
+    pub message: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CpAssumptionCore {
+    pub status: CpStatus,
+    pub assumptions: Vec<BoolLiteral>,
+    pub minimal: bool,
+    pub checks: usize,
+    pub solver: String,
+    pub message: Option<String>,
+}
+
+#[derive(Clone, Debug)]
 pub struct CpSolveOptions {
     pub max_nodes: usize,
+    pub solution_hint: Vec<CpSolutionHint>,
+    pub decision_strategies: Vec<CpDecisionStrategy>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CpEnumerateOptions {
+    pub max_nodes: usize,
+    pub max_solutions: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct CpAssumptionCoreOptions {
+    pub solve_options: CpSolveOptions,
 }
 
 impl Default for CpSolveOptions {
     fn default() -> Self {
         CpSolveOptions {
             max_nodes: 1_000_000,
+            solution_hint: Vec::new(),
+            decision_strategies: Vec::new(),
+        }
+    }
+}
+
+impl Default for CpEnumerateOptions {
+    fn default() -> Self {
+        CpEnumerateOptions {
+            max_nodes: 1_000_000,
+            max_solutions: 100,
+        }
+    }
+}
+
+impl Default for CpAssumptionCoreOptions {
+    fn default() -> Self {
+        CpAssumptionCoreOptions {
+            solve_options: CpSolveOptions::default(),
         }
     }
 }
@@ -565,11 +724,72 @@ fn validate_model(model: &CpModel) {
                     check_bool_literal(&arc.literal);
                 }
             }
+            CpConstraint::MultipleCircuit(arcs) => {
+                if arcs.is_empty() {
+                    panic!("cp-sat: multiple_circuit has no arcs");
+                }
+                let mut has_depot = false;
+                for arc in arcs {
+                    if arc.tail < 0 || arc.head < 0 {
+                        panic!("cp-sat: multiple_circuit node ids must be non-negative");
+                    }
+                    if arc.tail == 0 || arc.head == 0 {
+                        has_depot = true;
+                    }
+                    if arc.tail == 0 && arc.head == 0 {
+                        panic!("cp-sat: multiple_circuit depot self-loop is not allowed");
+                    }
+                    check_bool_literal(&arc.literal);
+                }
+                if !has_depot {
+                    panic!("cp-sat: multiple_circuit requires depot node 0");
+                }
+            }
             CpConstraint::Element(element) => {
                 check_var(element.index);
                 check_var(element.target);
                 if element.values.is_empty() {
                     panic!("cp-sat: element has no values");
+                }
+            }
+            CpConstraint::Alternative(alternative) => {
+                check_var(alternative.start);
+                check_var(alternative.duration);
+                check_var(alternative.end);
+                if let Some(presence) = &alternative.presence {
+                    check_bool_literal(presence);
+                }
+                if model.variables[alternative.duration]
+                    .domain
+                    .iter()
+                    .any(|&value| value <= 0)
+                {
+                    panic!(
+                        "cp-sat: alternative duration variable {} must be positive",
+                        alternative.duration
+                    );
+                }
+                if alternative.alternatives.is_empty() {
+                    panic!("cp-sat: alternative has no mode intervals");
+                }
+                for interval in &alternative.alternatives {
+                    check_var(interval.start);
+                    check_var(interval.duration);
+                    check_var(interval.end);
+                    let Some(presence) = &interval.presence else {
+                        panic!("cp-sat: alternative mode interval must have a presence literal");
+                    };
+                    check_bool_literal(presence);
+                    if model.variables[interval.duration]
+                        .domain
+                        .iter()
+                        .any(|&value| value <= 0)
+                    {
+                        panic!(
+                            "cp-sat: alternative mode duration variable {} must be positive",
+                            interval.duration
+                        );
+                    }
                 }
             }
             CpConstraint::NoOverlap(intervals) => {
@@ -578,8 +798,34 @@ fn validate_model(model: &CpModel) {
                 }
                 for interval in intervals {
                     check_var(interval.start);
+                    if let Some(presence) = &interval.presence {
+                        check_bool_literal(presence);
+                    }
                     if interval.duration <= 0 {
                         panic!("cp-sat: interval duration must be positive");
+                    }
+                }
+            }
+            CpConstraint::NoOverlapVariable(intervals) => {
+                if intervals.is_empty() {
+                    panic!("cp-sat: no_overlap_variable has no intervals");
+                }
+                for interval in intervals {
+                    check_var(interval.start);
+                    check_var(interval.duration);
+                    check_var(interval.end);
+                    if let Some(presence) = &interval.presence {
+                        check_bool_literal(presence);
+                    }
+                    if model.variables[interval.duration]
+                        .domain
+                        .iter()
+                        .any(|&value| value <= 0)
+                    {
+                        panic!(
+                            "cp-sat: variable interval duration variable {} must be positive",
+                            interval.duration
+                        );
                     }
                 }
             }
@@ -590,8 +836,47 @@ fn validate_model(model: &CpModel) {
                 for rectangle in rectangles {
                     check_var(rectangle.x_start);
                     check_var(rectangle.y_start);
+                    if let Some(presence) = &rectangle.presence {
+                        check_bool_literal(presence);
+                    }
                     if rectangle.width <= 0 || rectangle.height <= 0 {
                         panic!("cp-sat: rectangle dimensions must be positive");
+                    }
+                }
+            }
+            CpConstraint::NoOverlap2DVariable(rectangles) => {
+                if rectangles.is_empty() {
+                    panic!("cp-sat: no_overlap_2d_variable has no rectangles");
+                }
+                for rectangle in rectangles {
+                    check_var(rectangle.x_start);
+                    check_var(rectangle.x_size);
+                    check_var(rectangle.x_end);
+                    check_var(rectangle.y_start);
+                    check_var(rectangle.y_size);
+                    check_var(rectangle.y_end);
+                    if let Some(presence) = &rectangle.presence {
+                        check_bool_literal(presence);
+                    }
+                    if model.variables[rectangle.x_size]
+                        .domain
+                        .iter()
+                        .any(|&value| value <= 0)
+                    {
+                        panic!(
+                            "cp-sat: no_overlap_2d_variable x_size variable {} must be positive",
+                            rectangle.x_size
+                        );
+                    }
+                    if model.variables[rectangle.y_size]
+                        .domain
+                        .iter()
+                        .any(|&value| value <= 0)
+                    {
+                        panic!(
+                            "cp-sat: no_overlap_2d_variable y_size variable {} must be positive",
+                            rectangle.y_size
+                        );
                     }
                 }
             }
@@ -607,11 +892,59 @@ fn validate_model(model: &CpModel) {
                 }
                 for interval in intervals {
                     check_var(interval.start);
+                    if let Some(presence) = &interval.presence {
+                        check_bool_literal(presence);
+                    }
                     if interval.duration <= 0 {
                         panic!("cp-sat: cumulative interval duration must be positive");
                     }
                     if interval.demand <= 0 {
                         panic!("cp-sat: cumulative interval demand must be positive");
+                    }
+                }
+            }
+            CpConstraint::CumulativeVariable {
+                intervals,
+                capacity,
+            } => {
+                check_var(*capacity);
+                if model.variables[*capacity]
+                    .domain
+                    .iter()
+                    .any(|&value| value < 0)
+                {
+                    panic!("cp-sat: cumulative_variable capacity domain must be non-negative");
+                }
+                if intervals.is_empty() {
+                    panic!("cp-sat: cumulative_variable has no intervals");
+                }
+                for interval in intervals {
+                    check_var(interval.start);
+                    check_var(interval.duration);
+                    check_var(interval.end);
+                    check_var(interval.demand);
+                    if let Some(presence) = &interval.presence {
+                        check_bool_literal(presence);
+                    }
+                    if model.variables[interval.duration]
+                        .domain
+                        .iter()
+                        .any(|&value| value <= 0)
+                    {
+                        panic!(
+                            "cp-sat: cumulative_variable duration variable {} must be positive",
+                            interval.duration
+                        );
+                    }
+                    if model.variables[interval.demand]
+                        .domain
+                        .iter()
+                        .any(|&value| value <= 0)
+                    {
+                        panic!(
+                            "cp-sat: cumulative_variable demand variable {} must be positive",
+                            interval.demand
+                        );
                     }
                 }
             }
@@ -771,6 +1104,15 @@ fn partial_all_different_ok(assignment: &[Option<i64>], vars: &[usize]) -> bool 
 
 fn literal_value(assignment: &[Option<i64>], lit: &BoolLiteral) -> Option<bool> {
     assignment[lit.var].map(|v| if lit.positive { v == 1 } else { v == 0 })
+}
+
+fn optional_presence_value(
+    assignment: &[Option<i64>],
+    presence: &Option<BoolLiteral>,
+) -> Option<bool> {
+    presence
+        .as_ref()
+        .map_or(Some(true), |lit| literal_value(assignment, lit))
 }
 
 fn enforcement_literals_active(
@@ -1259,6 +1601,106 @@ fn partial_circuit_ok(assignment: &[Option<i64>], arcs: &[CpCircuitArc]) -> bool
     !all_bound || circuit_complete_ok(&selected, &nodes)
 }
 
+fn multiple_circuit_complete_ok(selected: &[&CpCircuitArc], nodes: &[i64]) -> bool {
+    if !nodes.contains(&0) {
+        return false;
+    }
+    let depot_out = selected.iter().filter(|arc| arc.tail == 0).count();
+    let depot_in = selected.iter().filter(|arc| arc.head == 0).count();
+    if depot_out != depot_in {
+        return false;
+    }
+
+    for &node in nodes {
+        if node == 0 {
+            continue;
+        }
+        let outgoing: Vec<_> = selected.iter().filter(|arc| arc.tail == node).collect();
+        let inbound: Vec<_> = selected.iter().filter(|arc| arc.head == node).collect();
+        if outgoing.len() != 1 || inbound.len() != 1 {
+            return false;
+        }
+    }
+
+    for &start in nodes {
+        if start == 0 {
+            continue;
+        }
+        let Some(first) = selected.iter().find(|arc| arc.tail == start) else {
+            return false;
+        };
+        if first.head == start {
+            continue;
+        }
+        let mut current = start;
+        let mut seen = Vec::new();
+        loop {
+            if current == 0 {
+                break;
+            }
+            if seen.contains(&current) {
+                return false;
+            }
+            seen.push(current);
+            let Some(next_arc) = selected.iter().find(|arc| arc.tail == current) else {
+                return false;
+            };
+            current = next_arc.head;
+        }
+    }
+    true
+}
+
+fn partial_multiple_circuit_ok(assignment: &[Option<i64>], arcs: &[CpCircuitArc]) -> bool {
+    let nodes = circuit_nodes(arcs);
+    if !nodes.contains(&0) {
+        return false;
+    }
+    for &node in &nodes {
+        let true_out = arcs
+            .iter()
+            .filter(|arc| arc.tail == node && literal_value(assignment, &arc.literal) == Some(true))
+            .count();
+        let true_in = arcs
+            .iter()
+            .filter(|arc| arc.head == node && literal_value(assignment, &arc.literal) == Some(true))
+            .count();
+        let possible_out = arcs
+            .iter()
+            .filter(|arc| {
+                arc.tail == node && literal_value(assignment, &arc.literal) != Some(false)
+            })
+            .count();
+        let possible_in = arcs
+            .iter()
+            .filter(|arc| {
+                arc.head == node && literal_value(assignment, &arc.literal) != Some(false)
+            })
+            .count();
+
+        if node == 0 {
+            if true_out > possible_in || true_in > possible_out {
+                return false;
+            }
+            continue;
+        }
+        if true_out > 1 || true_in > 1 || possible_out == 0 || possible_in == 0 {
+            return false;
+        }
+    }
+
+    let mut all_bound = true;
+    let mut selected = Vec::new();
+    for arc in arcs {
+        match literal_value(assignment, &arc.literal) {
+            Some(true) => selected.push(arc),
+            Some(false) => {}
+            None => all_bound = false,
+        }
+    }
+    !all_bound || multiple_circuit_complete_ok(&selected, &nodes)
+}
+
 fn partial_element_ok(model: &CpModel, assignment: &[Option<i64>], element: &CpElement) -> bool {
     match (assignment[element.index], assignment[element.target]) {
         (Some(index), Some(target)) => {
@@ -1291,13 +1733,98 @@ fn partial_element_ok(model: &CpModel, assignment: &[Option<i64>], element: &CpE
     }
 }
 
+fn active_interval_consistent(
+    assignment: &[Option<i64>],
+    start: usize,
+    duration: usize,
+    end: usize,
+    active: Option<bool>,
+) -> bool {
+    if active != Some(true) {
+        return true;
+    }
+    match (assignment[start], assignment[duration], assignment[end]) {
+        (Some(start), Some(duration), Some(end)) => start + duration == end,
+        (Some(start), Some(duration), None) => start.checked_add(duration).is_some(),
+        _ => true,
+    }
+}
+
+fn assigned_equal_or_unknown(assignment: &[Option<i64>], lhs: usize, rhs: usize) -> bool {
+    match (assignment[lhs], assignment[rhs]) {
+        (Some(left), Some(right)) => left == right,
+        _ => true,
+    }
+}
+
+fn partial_alternative_ok(assignment: &[Option<i64>], alternative: &CpAlternative) -> bool {
+    let parent_active = optional_presence_value(assignment, &alternative.presence);
+    let mut true_modes = 0usize;
+    let mut unknown_modes = 0usize;
+
+    for mode in &alternative.alternatives {
+        match optional_presence_value(assignment, &mode.presence) {
+            Some(true) => true_modes += 1,
+            Some(false) => {}
+            None => unknown_modes += 1,
+        }
+    }
+
+    if true_modes > 1 {
+        return false;
+    }
+    match parent_active {
+        Some(true) if true_modes == 0 && unknown_modes == 0 => return false,
+        Some(false) if true_modes > 0 => return false,
+        _ => {}
+    }
+
+    if !active_interval_consistent(
+        assignment,
+        alternative.start,
+        alternative.duration,
+        alternative.end,
+        parent_active,
+    ) {
+        return false;
+    }
+
+    for mode in &alternative.alternatives {
+        let mode_active = optional_presence_value(assignment, &mode.presence);
+        if !active_interval_consistent(assignment, mode.start, mode.duration, mode.end, mode_active)
+        {
+            return false;
+        }
+        if mode_active != Some(true) {
+            continue;
+        }
+        if parent_active == Some(false) {
+            return false;
+        }
+        if !assigned_equal_or_unknown(assignment, alternative.start, mode.start)
+            || !assigned_equal_or_unknown(assignment, alternative.duration, mode.duration)
+            || !assigned_equal_or_unknown(assignment, alternative.end, mode.end)
+        {
+            return false;
+        }
+    }
+
+    true
+}
+
 fn partial_no_overlap_ok(assignment: &[Option<i64>], intervals: &[CpInterval]) -> bool {
     for i in 0..intervals.len() {
+        if optional_presence_value(assignment, &intervals[i].presence) != Some(true) {
+            continue;
+        }
         let Some(start_i) = assignment[intervals[i].start] else {
             continue;
         };
         let end_i = start_i + intervals[i].duration;
         for j in (i + 1)..intervals.len() {
+            if optional_presence_value(assignment, &intervals[j].presence) != Some(true) {
+                continue;
+            }
             let Some(start_j) = assignment[intervals[j].start] else {
                 continue;
             };
@@ -1310,8 +1837,56 @@ fn partial_no_overlap_ok(assignment: &[Option<i64>], intervals: &[CpInterval]) -
     true
 }
 
+fn variable_interval_span(
+    assignment: &[Option<i64>],
+    interval: &CpVariableInterval,
+) -> Result<Option<(i64, i64)>, ()> {
+    if optional_presence_value(assignment, &interval.presence) != Some(true) {
+        return Ok(None);
+    }
+    let Some(start) = assignment[interval.start] else {
+        return Ok(None);
+    };
+    let Some(duration) = assignment[interval.duration] else {
+        return Ok(None);
+    };
+    let computed_end = start + duration;
+    if let Some(end) = assignment[interval.end] {
+        if end != computed_end {
+            return Err(());
+        }
+    }
+    Ok(Some((start, computed_end)))
+}
+
+fn partial_no_overlap_variable_ok(
+    assignment: &[Option<i64>],
+    intervals: &[CpVariableInterval],
+) -> bool {
+    let mut spans = Vec::new();
+    for interval in intervals {
+        match variable_interval_span(assignment, interval) {
+            Ok(Some(span)) => spans.push(span),
+            Ok(None) => {}
+            Err(()) => return false,
+        }
+    }
+    for i in 0..spans.len() {
+        let (start_i, end_i) = spans[i];
+        for &(start_j, end_j) in spans.iter().skip(i + 1) {
+            if !(end_i <= start_j || end_j <= start_i) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 fn partial_no_overlap_2d_ok(assignment: &[Option<i64>], rectangles: &[CpRectangle]) -> bool {
     for i in 0..rectangles.len() {
+        if optional_presence_value(assignment, &rectangles[i].presence) != Some(true) {
+            continue;
+        }
         let Some(x_i) = assignment[rectangles[i].x_start] else {
             continue;
         };
@@ -1321,6 +1896,9 @@ fn partial_no_overlap_2d_ok(assignment: &[Option<i64>], rectangles: &[CpRectangl
         let x_end_i = x_i + rectangles[i].width;
         let y_end_i = y_i + rectangles[i].height;
         for j in (i + 1)..rectangles.len() {
+            if optional_presence_value(assignment, &rectangles[j].presence) != Some(true) {
+                continue;
+            }
             let Some(x_j) = assignment[rectangles[j].x_start] else {
                 continue;
             };
@@ -1346,10 +1924,138 @@ fn partial_cumulative_ok(
 ) -> bool {
     let mut assigned = Vec::new();
     for interval in intervals {
+        if optional_presence_value(assignment, &interval.presence) != Some(true) {
+            continue;
+        }
         let Some(start) = assignment[interval.start] else {
             continue;
         };
         assigned.push((start, start + interval.duration, interval.demand));
+    }
+    if assigned.is_empty() {
+        return true;
+    }
+    let mut time_points = Vec::with_capacity(assigned.len() * 2);
+    for &(start, end, _) in &assigned {
+        time_points.push(start);
+        time_points.push(end);
+    }
+    time_points.sort_unstable();
+    time_points.dedup();
+    for t in time_points {
+        let load: i64 = assigned
+            .iter()
+            .filter(|&&(start, end, _)| start <= t && t < end)
+            .map(|&(_, _, demand)| demand)
+            .sum();
+        if load > capacity {
+            return false;
+        }
+    }
+    true
+}
+
+fn variable_rectangle_span(
+    assignment: &[Option<i64>],
+    rectangle: &CpVariableRectangle,
+) -> Result<Option<(i64, i64, i64, i64)>, ()> {
+    if optional_presence_value(assignment, &rectangle.presence) != Some(true) {
+        return Ok(None);
+    }
+    let Some(x_start) = assignment[rectangle.x_start] else {
+        return Ok(None);
+    };
+    let Some(x_size) = assignment[rectangle.x_size] else {
+        return Ok(None);
+    };
+    let Some(y_start) = assignment[rectangle.y_start] else {
+        return Ok(None);
+    };
+    let Some(y_size) = assignment[rectangle.y_size] else {
+        return Ok(None);
+    };
+    let x_end = x_start + x_size;
+    let y_end = y_start + y_size;
+    if let Some(bound_x_end) = assignment[rectangle.x_end] {
+        if bound_x_end != x_end {
+            return Err(());
+        }
+    }
+    if let Some(bound_y_end) = assignment[rectangle.y_end] {
+        if bound_y_end != y_end {
+            return Err(());
+        }
+    }
+    Ok(Some((x_start, x_end, y_start, y_end)))
+}
+
+fn partial_no_overlap_2d_variable_ok(
+    assignment: &[Option<i64>],
+    rectangles: &[CpVariableRectangle],
+) -> bool {
+    let mut spans = Vec::new();
+    for rectangle in rectangles {
+        match variable_rectangle_span(assignment, rectangle) {
+            Ok(Some(span)) => spans.push(span),
+            Ok(None) => {}
+            Err(()) => return false,
+        }
+    }
+    for i in 0..spans.len() {
+        let (x_start_i, x_end_i, y_start_i, y_end_i) = spans[i];
+        for &(x_start_j, x_end_j, y_start_j, y_end_j) in spans.iter().skip(i + 1) {
+            let x_disjoint = x_end_i <= x_start_j || x_end_j <= x_start_i;
+            let y_disjoint = y_end_i <= y_start_j || y_end_j <= y_start_i;
+            if !(x_disjoint || y_disjoint) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn variable_demand_interval_span(
+    assignment: &[Option<i64>],
+    interval: &CpVariableDemandInterval,
+) -> Result<Option<(i64, i64, i64)>, ()> {
+    if optional_presence_value(assignment, &interval.presence) != Some(true) {
+        return Ok(None);
+    }
+    let Some(start) = assignment[interval.start] else {
+        return Ok(None);
+    };
+    let Some(duration) = assignment[interval.duration] else {
+        return Ok(None);
+    };
+    let computed_end = start + duration;
+    if let Some(end) = assignment[interval.end] {
+        if end != computed_end {
+            return Err(());
+        }
+    }
+    let Some(demand) = assignment[interval.demand] else {
+        return Ok(None);
+    };
+    Ok(Some((start, computed_end, demand)))
+}
+
+fn partial_cumulative_variable_ok(
+    assignment: &[Option<i64>],
+    intervals: &[CpVariableDemandInterval],
+    capacity: usize,
+) -> bool {
+    let Some(capacity) = assignment[capacity] else {
+        return intervals
+            .iter()
+            .all(|interval| variable_demand_interval_span(assignment, interval).is_ok());
+    };
+    let mut assigned = Vec::new();
+    for interval in intervals {
+        match variable_demand_interval_span(assignment, interval) {
+            Ok(Some(span)) => assigned.push(span),
+            Ok(None) => {}
+            Err(()) => return false,
+        }
     }
     if assigned.is_empty() {
         return true;
@@ -1490,15 +2196,29 @@ fn partial_constraints_ok(model: &CpModel, assignment: &[Option<i64>]) -> bool {
                 partial_automaton_ok(model, assignment, automaton)
             }
             CpConstraint::Circuit(arcs) => partial_circuit_ok(assignment, arcs),
+            CpConstraint::MultipleCircuit(arcs) => partial_multiple_circuit_ok(assignment, arcs),
             CpConstraint::Element(element) => partial_element_ok(model, assignment, element),
+            CpConstraint::Alternative(alternative) => {
+                partial_alternative_ok(assignment, alternative)
+            }
             CpConstraint::NoOverlap(intervals) => partial_no_overlap_ok(assignment, intervals),
+            CpConstraint::NoOverlapVariable(intervals) => {
+                partial_no_overlap_variable_ok(assignment, intervals)
+            }
             CpConstraint::NoOverlap2D(rectangles) => {
                 partial_no_overlap_2d_ok(assignment, rectangles)
+            }
+            CpConstraint::NoOverlap2DVariable(rectangles) => {
+                partial_no_overlap_2d_variable_ok(assignment, rectangles)
             }
             CpConstraint::Cumulative {
                 intervals,
                 capacity,
             } => partial_cumulative_ok(assignment, intervals, *capacity),
+            CpConstraint::CumulativeVariable {
+                intervals,
+                capacity,
+            } => partial_cumulative_variable_ok(assignment, intervals, *capacity),
             CpConstraint::Reservoir {
                 events,
                 min_level,
@@ -1543,7 +2263,138 @@ fn bound_dominated(obj: &CpObjective, bound: i64, incumbent: i64) -> bool {
     }
 }
 
-fn choose_variable(model: &CpModel, assignment: &[Option<i64>]) -> Option<usize> {
+fn validate_solution_hints(model: &CpModel, hints: &[CpSolutionHint]) {
+    let n = model.variables.len();
+    let mut seen = Vec::new();
+    for hint in hints {
+        if hint.var >= n {
+            panic!(
+                "cp-sat: solution hint variable index {} out of range {n}",
+                hint.var
+            );
+        }
+        if seen.contains(&hint.var) {
+            panic!("cp-sat: duplicate solution hint for variable {}", hint.var);
+        }
+        seen.push(hint.var);
+        if !model.variables[hint.var].domain.contains(&hint.value) {
+            panic!(
+                "cp-sat: solution hint value {} is outside variable {} domain",
+                hint.value, hint.var
+            );
+        }
+    }
+}
+
+fn hint_values(model: &CpModel, hints: &[CpSolutionHint]) -> Vec<Option<i64>> {
+    validate_solution_hints(model, hints);
+    let mut values = vec![None; model.variables.len()];
+    for hint in hints {
+        values[hint.var] = Some(hint.value);
+    }
+    values
+}
+
+fn validate_decision_strategies(model: &CpModel, strategies: &[CpDecisionStrategy]) {
+    let n = model.variables.len();
+    let mut seen = Vec::new();
+    for strategy in strategies {
+        if strategy.vars.is_empty() {
+            panic!("cp-sat: decision strategy has no variables");
+        }
+        for &var in &strategy.vars {
+            if var >= n {
+                panic!("cp-sat: decision strategy variable index {var} out of range {n}");
+            }
+            if seen.contains(&var) {
+                panic!("cp-sat: duplicate decision strategy for variable {var}");
+            }
+            seen.push(var);
+        }
+    }
+}
+
+fn domain_min(model: &CpModel, var: usize) -> i64 {
+    *model.variables[var].domain.iter().min().unwrap()
+}
+
+fn domain_max(model: &CpModel, var: usize) -> i64 {
+    *model.variables[var].domain.iter().max().unwrap()
+}
+
+fn strategy_better_var(
+    model: &CpModel,
+    strategy: CpVariableSelectionStrategy,
+    candidate: usize,
+    incumbent: usize,
+) -> bool {
+    match strategy {
+        CpVariableSelectionStrategy::First => false,
+        CpVariableSelectionStrategy::MinDomainSize => {
+            model.variables[candidate].domain.len() < model.variables[incumbent].domain.len()
+        }
+        CpVariableSelectionStrategy::MaxDomainSize => {
+            model.variables[candidate].domain.len() > model.variables[incumbent].domain.len()
+        }
+        CpVariableSelectionStrategy::LowestMin => {
+            domain_min(model, candidate) < domain_min(model, incumbent)
+        }
+        CpVariableSelectionStrategy::HighestMax => {
+            domain_max(model, candidate) > domain_max(model, incumbent)
+        }
+    }
+}
+
+fn choose_strategy_variable(
+    model: &CpModel,
+    assignment: &[Option<i64>],
+    strategy: &CpDecisionStrategy,
+) -> Option<usize> {
+    let mut best = None;
+    for &var in &strategy.vars {
+        if assignment[var].is_some() {
+            continue;
+        }
+        if best.is_some_and(|incumbent| {
+            strategy_better_var(model, strategy.variable_strategy, var, incumbent)
+        }) {
+            best = Some(var);
+        } else if best.is_none() {
+            best = Some(var);
+        }
+    }
+    best
+}
+
+fn decision_strategy_for_var<'a>(
+    strategies: &'a [CpDecisionStrategy],
+    var: usize,
+) -> Option<&'a CpDecisionStrategy> {
+    strategies
+        .iter()
+        .find(|strategy| strategy.vars.contains(&var))
+}
+
+fn choose_variable(
+    model: &CpModel,
+    assignment: &[Option<i64>],
+    hints: &[Option<i64>],
+    strategies: &[CpDecisionStrategy],
+) -> Option<usize> {
+    if let Some(hinted) = hints
+        .iter()
+        .enumerate()
+        .find_map(|(idx, value)| value.and_then(|_| assignment[idx].is_none().then_some(idx)))
+    {
+        return Some(hinted);
+    }
+
+    for strategy in strategies {
+        if let Some(var) = choose_strategy_variable(model, assignment, strategy) {
+            return Some(var);
+        }
+    }
+
     model
         .variables
         .iter()
@@ -1553,9 +2404,32 @@ fn choose_variable(model: &CpModel, assignment: &[Option<i64>]) -> Option<usize>
         .map(|(i, _)| i)
 }
 
+fn ordered_domain(
+    model: &CpModel,
+    var: usize,
+    hints: &[Option<i64>],
+    strategies: &[CpDecisionStrategy],
+) -> Vec<i64> {
+    let mut values = model.variables[var].domain.clone();
+    if let Some(hint) = hints[var] {
+        if let Some(pos) = values.iter().position(|&value| value == hint) {
+            values.remove(pos);
+            values.insert(0, hint);
+        }
+    } else if let Some(strategy) = decision_strategy_for_var(strategies, var) {
+        match strategy.domain_strategy {
+            CpDomainValueStrategy::MinValue => values.sort_unstable(),
+            CpDomainValueStrategy::MaxValue => values.sort_unstable_by(|a, b| b.cmp(a)),
+        }
+    }
+    values
+}
+
 /// Solve a small finite-domain CP-SAT-style model exactly.
 pub fn solve_cp_model(model: &CpModel, opts: CpSolveOptions) -> CpSolution {
     validate_model(model);
+    let hints = hint_values(model, &opts.solution_hint);
+    validate_decision_strategies(model, &opts.decision_strategies);
     let n = model.variables.len();
     let mut assignment = vec![None; n];
     let mut best_assignment = Vec::new();
@@ -1565,8 +2439,10 @@ pub fn solve_cp_model(model: &CpModel, opts: CpSolveOptions) -> CpSolution {
 
     fn dfs(
         model: &CpModel,
-        opts: CpSolveOptions,
+        opts: &CpSolveOptions,
         assignment: &mut [Option<i64>],
+        hints: &[Option<i64>],
+        strategies: &[CpDecisionStrategy],
         best_assignment: &mut Vec<i64>,
         best_objective: &mut Option<i64>,
         nodes: &mut usize,
@@ -1589,7 +2465,7 @@ pub fn solve_cp_model(model: &CpModel, opts: CpSolveOptions) -> CpSolution {
                 return;
             }
         }
-        let Some(var) = choose_variable(model, assignment) else {
+        let Some(var) = choose_variable(model, assignment, hints, strategies) else {
             let full: Vec<i64> = assignment.iter().map(|v| v.unwrap()).collect();
             let candidate_objective = model
                 .objective
@@ -1607,12 +2483,14 @@ pub fn solve_cp_model(model: &CpModel, opts: CpSolveOptions) -> CpSolution {
             }
             return;
         };
-        for value in model.variables[var].domain.clone() {
+        for value in ordered_domain(model, var, hints, strategies) {
             assignment[var] = Some(value);
             dfs(
                 model,
                 opts,
                 assignment,
+                hints,
+                strategies,
                 best_assignment,
                 best_objective,
                 nodes,
@@ -1624,8 +2502,10 @@ pub fn solve_cp_model(model: &CpModel, opts: CpSolveOptions) -> CpSolution {
 
     dfs(
         model,
-        opts,
+        &opts,
         &mut assignment,
+        &hints,
+        &opts.decision_strategies,
         &mut best_assignment,
         &mut best_objective,
         &mut nodes,
@@ -1661,6 +2541,243 @@ pub fn solve_cp_model(model: &CpModel, opts: CpSolveOptions) -> CpSolution {
     }
 }
 
+/// Enumerate feasible assignments for a finite-domain CP-SAT-style model.
+///
+/// For satisfaction models this returns assignments in search order. For
+/// objective models it performs exact bounded traversal, sorts by objective, and
+/// returns the best `max_solutions` assignments.
+pub fn enumerate_cp_solutions(model: &CpModel, opts: CpEnumerateOptions) -> CpSolutionPool {
+    validate_model(model);
+    if opts.max_solutions == 0 {
+        panic!("cp-sat: max_solutions must be positive");
+    }
+    let n = model.variables.len();
+    let mut assignment = vec![None; n];
+    let hints = vec![None; n];
+    let strategies = Vec::new();
+    let mut solutions = Vec::new();
+    let mut nodes = 0usize;
+    let mut hit_node_limit = false;
+    let mut hit_solution_limit = false;
+
+    fn dfs(
+        model: &CpModel,
+        opts: CpEnumerateOptions,
+        assignment: &mut [Option<i64>],
+        hints: &[Option<i64>],
+        strategies: &[CpDecisionStrategy],
+        solutions: &mut Vec<CpSolutionPoolEntry>,
+        nodes: &mut usize,
+        hit_node_limit: &mut bool,
+        hit_solution_limit: &mut bool,
+    ) {
+        if *hit_node_limit || *hit_solution_limit {
+            return;
+        }
+        *nodes += 1;
+        if *nodes > opts.max_nodes {
+            *hit_node_limit = true;
+            return;
+        }
+        if !partial_constraints_ok(model, assignment) {
+            return;
+        }
+        let Some(var) = choose_variable(model, assignment, hints, strategies) else {
+            let full: Vec<i64> = assignment.iter().map(|v| v.unwrap()).collect();
+            let objective = model
+                .objective
+                .as_ref()
+                .map(|obj| objective_value(obj, &full));
+            solutions.push(CpSolutionPoolEntry {
+                assignment: full,
+                objective,
+            });
+            if model.objective.is_none() && solutions.len() >= opts.max_solutions {
+                *hit_solution_limit = true;
+            }
+            return;
+        };
+
+        for value in ordered_domain(model, var, hints, strategies) {
+            assignment[var] = Some(value);
+            dfs(
+                model,
+                opts,
+                assignment,
+                hints,
+                strategies,
+                solutions,
+                nodes,
+                hit_node_limit,
+                hit_solution_limit,
+            );
+            assignment[var] = None;
+            if *hit_node_limit || *hit_solution_limit {
+                break;
+            }
+        }
+    }
+
+    dfs(
+        model,
+        opts,
+        &mut assignment,
+        &hints,
+        &strategies,
+        &mut solutions,
+        &mut nodes,
+        &mut hit_node_limit,
+        &mut hit_solution_limit,
+    );
+
+    if let Some(obj) = &model.objective {
+        solutions.sort_by(|a, b| match obj.sense {
+            ObjectiveSense::Min => a.objective.cmp(&b.objective),
+            ObjectiveSense::Max => b.objective.cmp(&a.objective),
+        });
+        if solutions.len() > opts.max_solutions {
+            solutions.truncate(opts.max_solutions);
+            hit_solution_limit = true;
+        }
+    }
+
+    let status = if solutions.is_empty() {
+        CpStatus::Infeasible
+    } else if model.objective.is_some() && !hit_node_limit {
+        CpStatus::Optimal
+    } else {
+        CpStatus::Feasible
+    };
+    let exhausted = !hit_node_limit && !hit_solution_limit;
+    CpSolutionPool {
+        status,
+        solutions,
+        nodes,
+        exhausted,
+        solver: "internal-cp-solution-enumeration".to_string(),
+        message: Some(if exhausted {
+            "exact finite-domain solution enumeration".to_string()
+        } else if hit_node_limit {
+            "node limit reached during solution enumeration".to_string()
+        } else {
+            "solution limit reached during solution enumeration".to_string()
+        }),
+    }
+}
+
+fn validate_assumptions(model: &CpModel, assumptions: &[BoolLiteral]) {
+    let n = model.variables.len();
+    for lit in assumptions {
+        if lit.var >= n {
+            panic!(
+                "cp-sat: assumption variable index {} out of range {n}",
+                lit.var
+            );
+        }
+        if model.variables[lit.var]
+            .domain
+            .iter()
+            .any(|&value| value != 0 && value != 1)
+        {
+            panic!("cp-sat: assumption variable {} is not boolean", lit.var);
+        }
+    }
+}
+
+fn model_with_assumptions(model: &CpModel, assumptions: &[BoolLiteral]) -> CpModel {
+    validate_model(model);
+    validate_assumptions(model, assumptions);
+    let mut out = model.clone();
+    out.constraints
+        .extend(assumptions.iter().map(|lit| CpConstraint::Linear {
+            terms: vec![LinearTerm {
+                var: lit.var,
+                coeff: 1,
+            }],
+            sense: LinearSense::Eq,
+            rhs: if lit.positive { 1 } else { 0 },
+        }));
+    out
+}
+
+/// Solve a model under CP-SAT-style assumption literals.
+pub fn solve_cp_model_with_assumptions(
+    model: &CpModel,
+    assumptions: &[BoolLiteral],
+    opts: CpSolveOptions,
+) -> CpSolution {
+    let assumed = model_with_assumptions(model, assumptions);
+    let mut sol = solve_cp_model(&assumed, opts);
+    sol.solver = "internal-cp-assumption-enumeration".to_string();
+    sol
+}
+
+/// Find a minimal infeasible core over CP-SAT-style assumption literals.
+///
+/// This mirrors OR-Tools CP-SAT's assumption-core surface for small finite
+/// models. The result is minimal by single deletion, not guaranteed
+/// minimum-cardinality.
+pub fn find_cp_assumption_unsat_core(
+    model: &CpModel,
+    assumptions: &[BoolLiteral],
+    opts: CpAssumptionCoreOptions,
+) -> CpAssumptionCore {
+    validate_model(model);
+    validate_assumptions(model, assumptions);
+    let mut core = assumptions.to_vec();
+    let mut checks = 1usize;
+    let full = solve_cp_model_with_assumptions(model, &core, opts.solve_options.clone());
+    if full.status != CpStatus::Infeasible {
+        return CpAssumptionCore {
+            status: full.status,
+            assumptions: Vec::new(),
+            minimal: false,
+            checks,
+            solver: "internal-cp-assumption-core".to_string(),
+            message: Some(format!(
+                "assumptions are not infeasible; status is {}",
+                full.status.as_str()
+            )),
+        };
+    }
+
+    let mut idx = 0usize;
+    while idx < core.len() {
+        let mut trial = core.clone();
+        trial.remove(idx);
+        checks += 1;
+        if solve_cp_model_with_assumptions(model, &trial, opts.solve_options.clone()).status
+            == CpStatus::Infeasible
+        {
+            core = trial;
+        } else {
+            idx += 1;
+        }
+    }
+
+    let mut minimal = true;
+    for idx in 0..core.len() {
+        let mut trial = core.clone();
+        trial.remove(idx);
+        checks += 1;
+        if solve_cp_model_with_assumptions(model, &trial, opts.solve_options.clone()).status
+            == CpStatus::Infeasible
+        {
+            minimal = false;
+            break;
+        }
+    }
+
+    CpAssumptionCore {
+        status: CpStatus::Infeasible,
+        assumptions: core,
+        minimal,
+        checks,
+        solver: "internal-cp-assumption-core".to_string(),
+        message: Some("minimal infeasible assumption core".to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1688,6 +2805,208 @@ mod tests {
         assert_eq!(sol.status, CpStatus::Optimal);
         assert_eq!(sol.assignment, vec![0, 2, 1]);
         assert_eq!(sol.objective, Some(9));
+    }
+
+    #[test]
+    fn solution_hint_guides_search_before_node_limit() {
+        let model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "x".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "y".to_string(),
+                    domain: vec![0, 1],
+                },
+            ],
+            constraints: vec![CpConstraint::Linear {
+                terms: vec![
+                    LinearTerm { var: 0, coeff: 1 },
+                    LinearTerm { var: 1, coeff: 1 },
+                ],
+                sense: LinearSense::Eq,
+                rhs: 2,
+            }],
+            objective: None,
+        };
+        let hinted = solve_cp_model(
+            &model,
+            CpSolveOptions {
+                max_nodes: 3,
+                solution_hint: vec![
+                    CpSolutionHint { var: 0, value: 1 },
+                    CpSolutionHint { var: 1, value: 1 },
+                ],
+                decision_strategies: Vec::new(),
+            },
+        );
+        let unhinted = solve_cp_model(
+            &model,
+            CpSolveOptions {
+                max_nodes: 3,
+                solution_hint: Vec::new(),
+                decision_strategies: Vec::new(),
+            },
+        );
+        assert_eq!(hinted.status, CpStatus::Feasible);
+        assert_eq!(hinted.assignment, vec![1, 1]);
+        assert_eq!(unhinted.status, CpStatus::Infeasible);
+    }
+
+    #[test]
+    fn decision_strategy_guides_search_before_node_limit() {
+        let model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "x".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "y".to_string(),
+                    domain: vec![0, 1],
+                },
+            ],
+            constraints: vec![CpConstraint::Linear {
+                terms: vec![
+                    LinearTerm { var: 0, coeff: 1 },
+                    LinearTerm { var: 1, coeff: 1 },
+                ],
+                sense: LinearSense::Eq,
+                rhs: 2,
+            }],
+            objective: None,
+        };
+        let strategic = solve_cp_model(
+            &model,
+            CpSolveOptions {
+                max_nodes: 3,
+                solution_hint: Vec::new(),
+                decision_strategies: vec![CpDecisionStrategy {
+                    vars: vec![1, 0],
+                    variable_strategy: CpVariableSelectionStrategy::First,
+                    domain_strategy: CpDomainValueStrategy::MaxValue,
+                }],
+            },
+        );
+        let unstrategic = solve_cp_model(
+            &model,
+            CpSolveOptions {
+                max_nodes: 3,
+                solution_hint: Vec::new(),
+                decision_strategies: Vec::new(),
+            },
+        );
+        assert_eq!(strategic.status, CpStatus::Feasible);
+        assert_eq!(strategic.assignment, vec![1, 1]);
+        assert_eq!(unstrategic.status, CpStatus::Infeasible);
+    }
+
+    #[test]
+    fn enumerates_satisfaction_solution_pool() {
+        let model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "x".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "y".to_string(),
+                    domain: vec![0, 1],
+                },
+            ],
+            constraints: vec![CpConstraint::Linear {
+                terms: vec![
+                    LinearTerm { var: 0, coeff: 1 },
+                    LinearTerm { var: 1, coeff: 1 },
+                ],
+                sense: LinearSense::Le,
+                rhs: 1,
+            }],
+            objective: None,
+        };
+
+        let pool = enumerate_cp_solutions(
+            &model,
+            CpEnumerateOptions {
+                max_nodes: 100,
+                max_solutions: 4,
+            },
+        );
+        let assignments: Vec<Vec<i64>> = pool
+            .solutions
+            .iter()
+            .map(|solution| solution.assignment.clone())
+            .collect();
+
+        assert_eq!(pool.status, CpStatus::Feasible);
+        assert!(pool.exhausted);
+        assert_eq!(assignments, vec![vec![0, 0], vec![0, 1], vec![1, 0]]);
+    }
+
+    #[test]
+    fn finds_assumption_unsat_core() {
+        let model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "a".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "b".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "irrelevant".to_string(),
+                    domain: vec![0, 1],
+                },
+            ],
+            constraints: vec![CpConstraint::BoolOr(vec![
+                BoolLiteral {
+                    var: 0,
+                    positive: false,
+                },
+                BoolLiteral {
+                    var: 1,
+                    positive: false,
+                },
+            ])],
+            objective: None,
+        };
+        let assumptions = vec![
+            BoolLiteral {
+                var: 0,
+                positive: true,
+            },
+            BoolLiteral {
+                var: 1,
+                positive: true,
+            },
+            BoolLiteral {
+                var: 2,
+                positive: true,
+            },
+        ];
+
+        let core =
+            find_cp_assumption_unsat_core(&model, &assumptions, CpAssumptionCoreOptions::default());
+
+        assert_eq!(core.status, CpStatus::Infeasible);
+        assert!(core.minimal);
+        assert_eq!(core.assumptions, assumptions[..2].to_vec());
+        assert_eq!(
+            solve_cp_model_with_assumptions(&model, &core.assumptions, CpSolveOptions::default())
+                .status,
+            CpStatus::Infeasible
+        );
+        for idx in 0..core.assumptions.len() {
+            let mut trial = core.assumptions.clone();
+            trial.remove(idx);
+            assert_eq!(
+                solve_cp_model_with_assumptions(&model, &trial, CpSolveOptions::default()).status,
+                CpStatus::Feasible
+            );
+        }
     }
 
     #[test]
@@ -1787,11 +3106,13 @@ mod tests {
                 CpInterval {
                     start: 0,
                     duration: 3,
+                    presence: None,
                     name: Some("task_a".to_string()),
                 },
                 CpInterval {
                     start: 1,
                     duration: 2,
+                    presence: None,
                     name: Some("task_b".to_string()),
                 },
             ])],
@@ -1807,6 +3128,202 @@ mod tests {
         assert_eq!(sol.status, CpStatus::Optimal);
         assert_eq!(sol.assignment, vec![2, 0]);
         assert_eq!(sol.objective, Some(2));
+    }
+
+    #[test]
+    fn skips_absent_optional_interval_in_no_overlap() {
+        let model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "required_start".to_string(),
+                    domain: vec![0],
+                },
+                CpVariable {
+                    name: "optional_start".to_string(),
+                    domain: vec![0],
+                },
+                CpVariable {
+                    name: "use_optional".to_string(),
+                    domain: vec![0, 1],
+                },
+            ],
+            constraints: vec![CpConstraint::NoOverlap(vec![
+                CpInterval {
+                    start: 0,
+                    duration: 3,
+                    presence: None,
+                    name: Some("required".to_string()),
+                },
+                CpInterval {
+                    start: 1,
+                    duration: 2,
+                    presence: Some(BoolLiteral {
+                        var: 2,
+                        positive: true,
+                    }),
+                    name: Some("optional".to_string()),
+                },
+            ])],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![LinearTerm { var: 2, coeff: 1 }],
+            }),
+        };
+        let sol = solve_cp_model(&model, CpSolveOptions::default());
+        assert_eq!(sol.status, CpStatus::Optimal);
+        assert_eq!(sol.assignment, vec![0, 0, 0]);
+        assert_eq!(sol.objective, Some(0));
+    }
+
+    #[test]
+    fn variable_size_no_overlap_uses_duration_and_end() {
+        let model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "task_a_start".to_string(),
+                    domain: vec![0],
+                },
+                CpVariable {
+                    name: "task_a_duration".to_string(),
+                    domain: vec![2],
+                },
+                CpVariable {
+                    name: "task_a_end".to_string(),
+                    domain: vec![2],
+                },
+                CpVariable {
+                    name: "task_b_start".to_string(),
+                    domain: vec![0, 1, 2],
+                },
+                CpVariable {
+                    name: "task_b_duration".to_string(),
+                    domain: vec![1, 2],
+                },
+                CpVariable {
+                    name: "task_b_end".to_string(),
+                    domain: vec![1, 2, 3, 4],
+                },
+            ],
+            constraints: vec![CpConstraint::NoOverlapVariable(vec![
+                CpVariableInterval {
+                    start: 0,
+                    duration: 1,
+                    end: 2,
+                    presence: None,
+                    name: Some("task_a".to_string()),
+                },
+                CpVariableInterval {
+                    start: 3,
+                    duration: 4,
+                    end: 5,
+                    presence: None,
+                    name: Some("task_b".to_string()),
+                },
+            ])],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![
+                    LinearTerm { var: 3, coeff: 1 },
+                    LinearTerm { var: 4, coeff: 1 },
+                ],
+            }),
+        };
+        let sol = solve_cp_model(&model, CpSolveOptions::default());
+        assert_eq!(sol.status, CpStatus::Optimal);
+        assert_eq!(sol.assignment, vec![0, 2, 2, 2, 1, 3]);
+        assert_eq!(sol.objective, Some(3));
+    }
+
+    #[test]
+    fn alternative_interval_selects_one_mode_and_syncs_parent() {
+        let model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "job_start".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "job_duration".to_string(),
+                    domain: vec![2, 3],
+                },
+                CpVariable {
+                    name: "job_end".to_string(),
+                    domain: vec![2, 3, 4],
+                },
+                CpVariable {
+                    name: "fast_start".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "fast_duration".to_string(),
+                    domain: vec![2],
+                },
+                CpVariable {
+                    name: "fast_end".to_string(),
+                    domain: vec![2, 3],
+                },
+                CpVariable {
+                    name: "use_fast".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "slow_start".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "slow_duration".to_string(),
+                    domain: vec![3],
+                },
+                CpVariable {
+                    name: "slow_end".to_string(),
+                    domain: vec![3, 4],
+                },
+                CpVariable {
+                    name: "use_slow".to_string(),
+                    domain: vec![0, 1],
+                },
+            ],
+            constraints: vec![CpConstraint::Alternative(CpAlternative {
+                start: 0,
+                duration: 1,
+                end: 2,
+                presence: None,
+                alternatives: vec![
+                    CpVariableInterval {
+                        start: 3,
+                        duration: 4,
+                        end: 5,
+                        presence: Some(BoolLiteral {
+                            var: 6,
+                            positive: true,
+                        }),
+                        name: Some("fast".to_string()),
+                    },
+                    CpVariableInterval {
+                        start: 7,
+                        duration: 8,
+                        end: 9,
+                        presence: Some(BoolLiteral {
+                            var: 10,
+                            positive: true,
+                        }),
+                        name: Some("slow".to_string()),
+                    },
+                ],
+                name: Some("job_modes".to_string()),
+            })],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![
+                    LinearTerm { var: 1, coeff: 10 },
+                    LinearTerm { var: 0, coeff: 1 },
+                ],
+            }),
+        };
+        let sol = solve_cp_model(&model, CpSolveOptions::default());
+        assert_eq!(sol.status, CpStatus::Optimal);
+        assert_eq!(sol.assignment, vec![0, 2, 2, 0, 2, 2, 1, 0, 3, 3, 0]);
+        assert_eq!(sol.objective, Some(20));
     }
 
     #[test]
@@ -1836,6 +3353,7 @@ mod tests {
                     y_start: 1,
                     width: 2,
                     height: 2,
+                    presence: None,
                     name: Some("box_a".to_string()),
                 },
                 CpRectangle {
@@ -1843,6 +3361,7 @@ mod tests {
                     y_start: 3,
                     width: 2,
                     height: 2,
+                    presence: None,
                     name: Some("box_b".to_string()),
                 },
             ])],
@@ -1855,6 +3374,97 @@ mod tests {
         assert_eq!(sol.status, CpStatus::Optimal);
         assert_eq!(sol.assignment, vec![0, 0, 2, 0]);
         assert_eq!(sol.objective, Some(2));
+    }
+
+    #[test]
+    fn variable_size_no_overlap_2d_uses_axis_sizes_and_ends() {
+        let model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "box_a_x_start".to_string(),
+                    domain: vec![0],
+                },
+                CpVariable {
+                    name: "box_a_x_size".to_string(),
+                    domain: vec![2],
+                },
+                CpVariable {
+                    name: "box_a_x_end".to_string(),
+                    domain: vec![2],
+                },
+                CpVariable {
+                    name: "box_a_y_start".to_string(),
+                    domain: vec![0],
+                },
+                CpVariable {
+                    name: "box_a_y_size".to_string(),
+                    domain: vec![2],
+                },
+                CpVariable {
+                    name: "box_a_y_end".to_string(),
+                    domain: vec![2],
+                },
+                CpVariable {
+                    name: "box_b_x_start".to_string(),
+                    domain: vec![0, 1, 2],
+                },
+                CpVariable {
+                    name: "box_b_x_size".to_string(),
+                    domain: vec![1, 2],
+                },
+                CpVariable {
+                    name: "box_b_x_end".to_string(),
+                    domain: vec![1, 2, 3, 4],
+                },
+                CpVariable {
+                    name: "box_b_y_start".to_string(),
+                    domain: vec![0, 1, 2],
+                },
+                CpVariable {
+                    name: "box_b_y_size".to_string(),
+                    domain: vec![1, 2],
+                },
+                CpVariable {
+                    name: "box_b_y_end".to_string(),
+                    domain: vec![1, 2, 3, 4],
+                },
+            ],
+            constraints: vec![CpConstraint::NoOverlap2DVariable(vec![
+                CpVariableRectangle {
+                    x_start: 0,
+                    x_size: 1,
+                    x_end: 2,
+                    y_start: 3,
+                    y_size: 4,
+                    y_end: 5,
+                    presence: None,
+                    name: Some("box_a".to_string()),
+                },
+                CpVariableRectangle {
+                    x_start: 6,
+                    x_size: 7,
+                    x_end: 8,
+                    y_start: 9,
+                    y_size: 10,
+                    y_end: 11,
+                    presence: None,
+                    name: Some("box_b".to_string()),
+                },
+            ])],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![
+                    LinearTerm { var: 6, coeff: 10 },
+                    LinearTerm { var: 9, coeff: 1 },
+                    LinearTerm { var: 7, coeff: 1 },
+                    LinearTerm { var: 10, coeff: 1 },
+                ],
+            }),
+        };
+        let sol = solve_cp_model(&model, CpSolveOptions::default());
+        assert_eq!(sol.status, CpStatus::Optimal);
+        assert_eq!(sol.assignment, vec![0, 2, 2, 0, 2, 2, 0, 1, 1, 2, 1, 3]);
+        assert_eq!(sol.objective, Some(4));
     }
 
     #[test]
@@ -1880,18 +3490,21 @@ mod tests {
                         start: 0,
                         duration: 3,
                         demand: 2,
+                        presence: None,
                         name: Some("machine_a".to_string()),
                     },
                     CpDemandInterval {
                         start: 1,
                         duration: 2,
                         demand: 2,
+                        presence: None,
                         name: Some("machine_b".to_string()),
                     },
                     CpDemandInterval {
                         start: 2,
                         duration: 2,
                         demand: 1,
+                        presence: None,
                         name: Some("machine_c".to_string()),
                     },
                 ],
@@ -1910,6 +3523,84 @@ mod tests {
         assert_eq!(sol.status, CpStatus::Optimal);
         assert_eq!(sol.assignment, vec![2, 0, 0]);
         assert_eq!(sol.objective, Some(2));
+    }
+
+    #[test]
+    fn variable_cumulative_uses_duration_demand_and_capacity_vars() {
+        let model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "task_a_start".to_string(),
+                    domain: vec![0],
+                },
+                CpVariable {
+                    name: "task_a_duration".to_string(),
+                    domain: vec![3],
+                },
+                CpVariable {
+                    name: "task_a_end".to_string(),
+                    domain: vec![3],
+                },
+                CpVariable {
+                    name: "task_a_demand".to_string(),
+                    domain: vec![2],
+                },
+                CpVariable {
+                    name: "task_b_start".to_string(),
+                    domain: vec![0, 1, 2, 3],
+                },
+                CpVariable {
+                    name: "task_b_duration".to_string(),
+                    domain: vec![1, 2],
+                },
+                CpVariable {
+                    name: "task_b_end".to_string(),
+                    domain: vec![1, 2, 3, 4, 5],
+                },
+                CpVariable {
+                    name: "task_b_demand".to_string(),
+                    domain: vec![1, 2],
+                },
+                CpVariable {
+                    name: "capacity".to_string(),
+                    domain: vec![3, 4],
+                },
+            ],
+            constraints: vec![CpConstraint::CumulativeVariable {
+                intervals: vec![
+                    CpVariableDemandInterval {
+                        start: 0,
+                        duration: 1,
+                        end: 2,
+                        demand: 3,
+                        presence: None,
+                        name: Some("task_a".to_string()),
+                    },
+                    CpVariableDemandInterval {
+                        start: 4,
+                        duration: 5,
+                        end: 6,
+                        demand: 7,
+                        presence: None,
+                        name: Some("task_b".to_string()),
+                    },
+                ],
+                capacity: 8,
+            }],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![
+                    LinearTerm { var: 8, coeff: 100 },
+                    LinearTerm { var: 4, coeff: 1 },
+                    LinearTerm { var: 5, coeff: 1 },
+                    LinearTerm { var: 7, coeff: 1 },
+                ],
+            }),
+        };
+        let sol = solve_cp_model(&model, CpSolveOptions::default());
+        assert_eq!(sol.status, CpStatus::Optimal);
+        assert_eq!(sol.assignment, vec![0, 3, 3, 2, 0, 1, 1, 1, 3]);
+        assert_eq!(sol.objective, Some(302));
     }
 
     #[test]
@@ -2380,6 +4071,65 @@ mod tests {
         assert_eq!(sol.status, CpStatus::Optimal);
         assert_eq!(sol.assignment, vec![1, 1, 1]);
         assert_eq!(sol.objective, Some(6));
+    }
+
+    #[test]
+    fn solves_multiple_circuit_routes() {
+        let model = CpModel {
+            variables: (0..4)
+                .map(|i| CpVariable {
+                    name: format!("route_arc_{i}"),
+                    domain: vec![0, 1],
+                })
+                .collect(),
+            constraints: vec![CpConstraint::MultipleCircuit(vec![
+                CpCircuitArc {
+                    tail: 0,
+                    head: 1,
+                    literal: BoolLiteral {
+                        var: 0,
+                        positive: true,
+                    },
+                },
+                CpCircuitArc {
+                    tail: 1,
+                    head: 0,
+                    literal: BoolLiteral {
+                        var: 1,
+                        positive: true,
+                    },
+                },
+                CpCircuitArc {
+                    tail: 0,
+                    head: 2,
+                    literal: BoolLiteral {
+                        var: 2,
+                        positive: true,
+                    },
+                },
+                CpCircuitArc {
+                    tail: 2,
+                    head: 0,
+                    literal: BoolLiteral {
+                        var: 3,
+                        positive: true,
+                    },
+                },
+            ])],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![
+                    LinearTerm { var: 0, coeff: 1 },
+                    LinearTerm { var: 1, coeff: 1 },
+                    LinearTerm { var: 2, coeff: 1 },
+                    LinearTerm { var: 3, coeff: 1 },
+                ],
+            }),
+        };
+        let sol = solve_cp_model(&model, CpSolveOptions::default());
+        assert_eq!(sol.status, CpStatus::Optimal);
+        assert_eq!(sol.assignment, vec![1, 1, 1, 1]);
+        assert_eq!(sol.objective, Some(4));
     }
 
     #[test]

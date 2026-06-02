@@ -165,6 +165,18 @@ def add_continuous_helper(rows: list, c: list, integer_vars: list, lbs: list, ub
     return idx
 
 
+def add_bounded_continuous_helper(rows: list, c: list, integer_vars: list, lbs: list, ubs: list, var_names: list, name: str, lower: float, upper: float) -> int:
+    for row in rows:
+        row.append(0.0)
+    idx = len(c)
+    c.append(0.0)
+    integer_vars.append(False)
+    lbs.append(float(lower))
+    ubs.append(float(upper))
+    var_names.append(name)
+    return idx
+
+
 def add_compiled_row(rows: list, rhs_values: list, names: list, row: list[float], rhs: float, name: str) -> None:
     rows.append(row)
     rhs_values.append(rhs)
@@ -174,6 +186,932 @@ def add_compiled_row(rows: list, rhs_values: list, names: list, row: list[float]
 def add_compiled_equality(rows: list, rhs_values: list, names: list, row: list[float], rhs: float, name: str) -> None:
     add_compiled_row(rows, rhs_values, names, list(row), rhs, f"{name}_le")
     add_compiled_row(rows, rhs_values, names, [-v for v in row], -rhs, f"{name}_ge")
+
+
+def expand_abs_constraints(p: dict) -> dict:
+    constraints = p.get("abs") or p.get("absolute_values") or []
+    if not constraints:
+        return p
+    expanded = dict(p)
+    rows = [[float(v) for v in row] for row in p.get("a", [])]
+    rhs_values = [float(v) for v in p.get("b", [])]
+    c = [float(v) for v in p["c"]]
+    integer_vars = [bool(v) for v in p["integer_vars"]]
+    lbs, ubs = bounds(p)
+    ubs = [None if ub is None or not math.isfinite(float(ub)) else float(ub) for ub in ubs]
+    var_names = list(p.get("var_names") or [f"x{i}" for i in range(len(c))])
+    row_names = list(p.get("con_names") or [f"c{i}" for i in range(len(rows))])
+
+    for idx, constraint in enumerate(constraints):
+        arg = int(constraint["arg_var"])
+        target = int(constraint["target_var"])
+        if arg < 0 or arg >= len(c):
+            raise ValueError(f"abs {idx} arg_var out of range")
+        if target < 0 or target >= len(c):
+            raise ValueError(f"abs {idx} target_var out of range")
+        if arg == target:
+            raise ValueError(f"abs {idx} arg_var and target_var must be distinct")
+        lower = float(lbs[arg])
+        upper = ubs[arg]
+        if upper is not None and float(upper) + 1e-9 < lower:
+            raise ValueError(f"abs {idx} argument lower bound exceeds upper bound")
+        name = constraint.get("name", f"abs_{idx}")
+
+        if lower >= -1e-12:
+            row = [0.0] * len(c)
+            row[target] = 1.0
+            row[arg] = -1.0
+            add_compiled_equality(rows, rhs_values, row_names, row, 0.0, f"{name}_nonnegative")
+            continue
+        if upper is not None and float(upper) <= 1e-12:
+            row = [0.0] * len(c)
+            row[target] = 1.0
+            row[arg] = 1.0
+            add_compiled_equality(rows, rhs_values, row_names, row, 0.0, f"{name}_nonpositive")
+            continue
+        if upper is None:
+            raise ValueError(f"abs {idx} mixed-sign argument needs a finite upper bound")
+        upper = float(upper)
+
+        selector = add_binary_helper(rows, c, integer_vars, lbs, ubs, var_names, f"{name}_sign")
+
+        row = [0.0] * len(c)
+        row[arg] = 1.0
+        row[target] = -1.0
+        add_compiled_row(rows, rhs_values, row_names, row, 0.0, f"{name}_target_ge_arg")
+
+        row = [0.0] * len(c)
+        row[arg] = -1.0
+        row[target] = -1.0
+        add_compiled_row(rows, rhs_values, row_names, row, 0.0, f"{name}_target_ge_neg_arg")
+
+        row = [0.0] * len(c)
+        row[target] = 1.0
+        row[arg] = -1.0
+        row[selector] = -2.0 * lower
+        add_compiled_row(
+            rows,
+            rhs_values,
+            row_names,
+            row,
+            -2.0 * lower,
+            f"{name}_target_le_positive_branch",
+        )
+
+        row = [0.0] * len(c)
+        row[target] = 1.0
+        row[arg] = 1.0
+        row[selector] = -2.0 * upper
+        add_compiled_row(
+            rows,
+            rhs_values,
+            row_names,
+            row,
+            0.0,
+            f"{name}_target_le_negative_branch",
+        )
+
+    expanded["c"] = c
+    expanded["a"] = rows
+    expanded["b"] = rhs_values
+    expanded["integer_vars"] = integer_vars
+    expanded["lb"] = lbs
+    expanded["ub"] = ubs
+    expanded["var_names"] = var_names
+    expanded["con_names"] = row_names
+    expanded.pop("abs", None)
+    expanded.pop("absolute_values", None)
+    return expanded
+
+
+def max_constraint_candidates(constraint: dict) -> list[tuple[str, float | int]]:
+    candidates: list[tuple[str, float | int]] = [("var", int(v)) for v in constraint.get("arg_vars", [])]
+    if constraint.get("constant") is not None:
+        candidates.append(("constant", float(constraint["constant"])))
+    return candidates
+
+
+def expand_maximum_constraints(p: dict) -> dict:
+    constraints = p.get("maximums") or p.get("max_constraints") or []
+    if not constraints:
+        return p
+    expanded = dict(p)
+    rows = [[float(v) for v in row] for row in p.get("a", [])]
+    rhs_values = [float(v) for v in p.get("b", [])]
+    c = [float(v) for v in p["c"]]
+    integer_vars = [bool(v) for v in p["integer_vars"]]
+    lbs, ubs = bounds(p)
+    ubs = [None if ub is None or not math.isfinite(float(ub)) else float(ub) for ub in ubs]
+    var_names = list(p.get("var_names") or [f"x{i}" for i in range(len(c))])
+    row_names = list(p.get("con_names") or [f"c{i}" for i in range(len(rows))])
+
+    for idx, constraint in enumerate(constraints):
+        target = int(constraint["target_var"])
+        if target < 0 or target >= len(c):
+            raise ValueError(f"maximum {idx} target_var out of range")
+        candidates = max_constraint_candidates(constraint)
+        if not candidates:
+            raise ValueError(f"maximum {idx} needs at least one argument or a constant")
+        seen_vars: set[int] = set()
+        for kind, value in candidates:
+            if kind == "var":
+                var = int(value)
+                if var < 0 or var >= len(c):
+                    raise ValueError(f"maximum {idx} argument variable out of range")
+                if var == target:
+                    raise ValueError(f"maximum {idx} target_var must be distinct from argument variables")
+                if var in seen_vars:
+                    raise ValueError(f"maximum {idx} duplicate argument variable {var}")
+                seen_vars.add(var)
+            elif not math.isfinite(float(value)):
+                raise ValueError(f"maximum {idx} constant must be finite")
+        name = constraint.get("name", f"maximum_{idx}")
+
+        def candidate_lower(candidate: tuple[str, float | int]) -> float:
+            kind, value = candidate
+            return lbs[int(value)] if kind == "var" else float(value)
+
+        def candidate_upper(candidate: tuple[str, float | int]) -> Optional[float]:
+            kind, value = candidate
+            return ubs[int(value)] if kind == "var" else float(value)
+
+        if len(candidates) == 1:
+            kind, value = candidates[0]
+            row = [0.0] * len(c)
+            row[target] = 1.0
+            if kind == "var":
+                row[int(value)] = -1.0
+                add_compiled_equality(rows, rhs_values, row_names, row, 0.0, f"{name}_single_arg")
+            else:
+                add_compiled_equality(rows, rhs_values, row_names, row, float(value), f"{name}_constant")
+            continue
+
+        target_upper = ubs[target]
+        if target_upper is not None:
+            max_upper = float(target_upper)
+        else:
+            uppers = [candidate_upper(candidate) for candidate in candidates]
+            if any(upper is None for upper in uppers):
+                raise ValueError(f"maximum {idx} needs finite argument uppers or a finite target upper bound")
+            max_upper = max(float(upper) for upper in uppers if upper is not None)
+
+        selectors = [
+            add_binary_helper(rows, c, integer_vars, lbs, ubs, var_names, f"{name}_select_{pos}")
+            for pos, _ in enumerate(candidates)
+        ]
+
+        for pos, candidate in enumerate(candidates):
+            kind, value = candidate
+            row = [0.0] * len(c)
+            row[target] = -1.0
+            if kind == "var":
+                row[int(value)] = 1.0
+                add_compiled_row(rows, rhs_values, row_names, row, 0.0, f"{name}_target_ge_arg_{pos}")
+            else:
+                add_compiled_row(rows, rhs_values, row_names, row, -float(value), f"{name}_target_ge_constant")
+
+            big_m = max(0.0, max_upper - candidate_lower(candidate))
+            row = [0.0] * len(c)
+            row[target] = 1.0
+            row[selectors[pos]] = big_m
+            if kind == "var":
+                row[int(value)] = -1.0
+                rhs = big_m
+            else:
+                rhs = float(value) + big_m
+            add_compiled_row(rows, rhs_values, row_names, row, rhs, f"{name}_target_le_candidate_{pos}")
+
+        row = [0.0] * len(c)
+        for selector in selectors:
+            row[selector] = 1.0
+        add_compiled_equality(rows, rhs_values, row_names, row, 1.0, f"{name}_one_active")
+
+    expanded["c"] = c
+    expanded["a"] = rows
+    expanded["b"] = rhs_values
+    expanded["integer_vars"] = integer_vars
+    expanded["lb"] = lbs
+    expanded["ub"] = ubs
+    expanded["var_names"] = var_names
+    expanded["con_names"] = row_names
+    expanded.pop("maximums", None)
+    expanded.pop("max_constraints", None)
+    return expanded
+
+
+def min_constraint_candidates(constraint: dict) -> list[tuple[str, float | int]]:
+    candidates: list[tuple[str, float | int]] = [("var", int(v)) for v in constraint.get("arg_vars", [])]
+    if constraint.get("constant") is not None:
+        candidates.append(("constant", float(constraint["constant"])))
+    return candidates
+
+
+def expand_minimum_constraints(p: dict) -> dict:
+    constraints = p.get("minimums") or p.get("min_constraints") or []
+    if not constraints:
+        return p
+    expanded = dict(p)
+    rows = [[float(v) for v in row] for row in p.get("a", [])]
+    rhs_values = [float(v) for v in p.get("b", [])]
+    c = [float(v) for v in p["c"]]
+    integer_vars = [bool(v) for v in p["integer_vars"]]
+    lbs, ubs = bounds(p)
+    ubs = [None if ub is None or not math.isfinite(float(ub)) else float(ub) for ub in ubs]
+    var_names = list(p.get("var_names") or [f"x{i}" for i in range(len(c))])
+    row_names = list(p.get("con_names") or [f"c{i}" for i in range(len(rows))])
+
+    for idx, constraint in enumerate(constraints):
+        target = int(constraint["target_var"])
+        if target < 0 or target >= len(c):
+            raise ValueError(f"minimum {idx} target_var out of range")
+        candidates = min_constraint_candidates(constraint)
+        if not candidates:
+            raise ValueError(f"minimum {idx} needs at least one argument or a constant")
+        seen_vars: set[int] = set()
+        for kind, value in candidates:
+            if kind == "var":
+                var = int(value)
+                if var < 0 or var >= len(c):
+                    raise ValueError(f"minimum {idx} argument variable out of range")
+                if var == target:
+                    raise ValueError(f"minimum {idx} target_var must be distinct from argument variables")
+                if var in seen_vars:
+                    raise ValueError(f"minimum {idx} duplicate argument variable {var}")
+                seen_vars.add(var)
+            elif not math.isfinite(float(value)):
+                raise ValueError(f"minimum {idx} constant must be finite")
+        name = constraint.get("name", f"minimum_{idx}")
+
+        def candidate_upper(candidate: tuple[str, float | int]) -> float:
+            kind, value = candidate
+            if kind == "constant":
+                return float(value)
+            upper = ubs[int(value)]
+            if upper is None:
+                raise ValueError(f"minimum {idx} argument variable {int(value)} needs a finite upper bound")
+            return float(upper)
+
+        if len(candidates) == 1:
+            kind, value = candidates[0]
+            row = [0.0] * len(c)
+            row[target] = 1.0
+            if kind == "var":
+                row[int(value)] = -1.0
+                add_compiled_equality(rows, rhs_values, row_names, row, 0.0, f"{name}_single_arg")
+            else:
+                add_compiled_equality(rows, rhs_values, row_names, row, float(value), f"{name}_constant")
+            continue
+
+        selectors = [
+            add_binary_helper(rows, c, integer_vars, lbs, ubs, var_names, f"{name}_select_{pos}")
+            for pos, _ in enumerate(candidates)
+        ]
+
+        for pos, candidate in enumerate(candidates):
+            kind, value = candidate
+            row = [0.0] * len(c)
+            row[target] = 1.0
+            if kind == "var":
+                row[int(value)] = -1.0
+                add_compiled_row(rows, rhs_values, row_names, row, 0.0, f"{name}_target_le_arg_{pos}")
+            else:
+                add_compiled_row(rows, rhs_values, row_names, row, float(value), f"{name}_target_le_constant")
+
+            big_m = max(0.0, candidate_upper(candidate) - lbs[target])
+            row = [0.0] * len(c)
+            row[target] = -1.0
+            row[selectors[pos]] = big_m
+            if kind == "var":
+                row[int(value)] = 1.0
+                rhs = big_m
+            else:
+                rhs = -float(value) + big_m
+            add_compiled_row(rows, rhs_values, row_names, row, rhs, f"{name}_target_ge_candidate_{pos}")
+
+        row = [0.0] * len(c)
+        for selector in selectors:
+            row[selector] = 1.0
+        add_compiled_equality(rows, rhs_values, row_names, row, 1.0, f"{name}_one_active")
+
+    expanded["c"] = c
+    expanded["a"] = rows
+    expanded["b"] = rhs_values
+    expanded["integer_vars"] = integer_vars
+    expanded["lb"] = lbs
+    expanded["ub"] = ubs
+    expanded["var_names"] = var_names
+    expanded["con_names"] = row_names
+    expanded.pop("minimums", None)
+    expanded.pop("min_constraints", None)
+    return expanded
+
+
+def expand_logical_constraints(p: dict) -> dict:
+    constraints = p.get("logical") or p.get("logic_constraints") or []
+    if not constraints:
+        return p
+    expanded = dict(p)
+    rows = [[float(v) for v in row] for row in p.get("a", [])]
+    rhs_values = [float(v) for v in p.get("b", [])]
+    c = [float(v) for v in p["c"]]
+    integer_vars = [bool(v) for v in p["integer_vars"]]
+    lbs, ubs = bounds(p)
+    ubs = [None if ub is None or not math.isfinite(float(ub)) else float(ub) for ub in ubs]
+    row_names = list(p.get("con_names") or [f"c{i}" for i in range(len(rows))])
+
+    def validate_binary(var: int, idx: int, role: str) -> None:
+        if var < 0 or var >= len(c):
+            raise ValueError(f"logical {idx} {role} variable out of range")
+        if abs(lbs[var]) > 1e-12:
+            raise ValueError(f"logical {idx} {role} variable must have lower bound 0")
+        if not integer_vars[var]:
+            raise ValueError(f"logical {idx} {role} variable must be integer/binary")
+        upper = ubs[var]
+        if upper is None or float(upper) > 1.0 + 1e-9:
+            raise ValueError(f"logical {idx} {role} variable must have finite binary upper bound <= 1")
+
+    for idx, constraint in enumerate(constraints):
+        target = int(constraint["target_var"])
+        validate_binary(target, idx, "target")
+        args = [int(v) for v in constraint.get("arg_vars", [])]
+        if not args:
+            raise ValueError(f"logical {idx} needs at least one argument")
+        seen: set[int] = set()
+        for var in args:
+            validate_binary(var, idx, "argument")
+            if var == target:
+                raise ValueError(f"logical {idx} target_var must be distinct from argument variables")
+            if var in seen:
+                raise ValueError(f"logical {idx} duplicate argument variable {var}")
+            seen.add(var)
+        name = constraint.get("name", f"logical_{idx}")
+        kind = constraint.get("kind", "and")
+
+        if kind == "and":
+            for pos, var in enumerate(args):
+                row = [0.0] * len(c)
+                row[target] = 1.0
+                row[var] = -1.0
+                add_compiled_row(rows, rhs_values, row_names, row, 0.0, f"{name}_target_le_arg_{pos}")
+            row = [0.0] * len(c)
+            for var in args:
+                row[var] = 1.0
+            row[target] = -1.0
+            add_compiled_row(rows, rhs_values, row_names, row, float(len(args) - 1), f"{name}_target_ge_all_args")
+        elif kind == "or":
+            for pos, var in enumerate(args):
+                row = [0.0] * len(c)
+                row[var] = 1.0
+                row[target] = -1.0
+                add_compiled_row(rows, rhs_values, row_names, row, 0.0, f"{name}_target_ge_arg_{pos}")
+            row = [0.0] * len(c)
+            row[target] = 1.0
+            for var in args:
+                row[var] = -1.0
+            add_compiled_row(rows, rhs_values, row_names, row, 0.0, f"{name}_target_le_any_arg")
+        else:
+            raise ValueError(f"logical {idx} has unknown kind {kind}")
+
+    expanded["a"] = rows
+    expanded["b"] = rhs_values
+    expanded["con_names"] = row_names
+    expanded.pop("logical", None)
+    expanded.pop("logic_constraints", None)
+    return expanded
+
+
+def l1_abs_helper_upper(lower: float, upper: Optional[float], idx: int, pos: int) -> float:
+    if not math.isfinite(lower):
+        raise ValueError(f"l1_norm {idx} argument {pos} lower bound must be finite")
+    if upper is not None and float(upper) + 1e-9 < lower:
+        raise ValueError(f"l1_norm {idx} argument {pos} lower bound exceeds upper bound")
+    if lower >= -1e-12:
+        return math.inf if upper is None else max(0.0, float(upper))
+    if upper is not None and float(upper) <= 1e-12:
+        return max(0.0, -lower)
+    if upper is None:
+        raise ValueError(f"l1_norm {idx} mixed-sign argument {pos} needs a finite upper bound")
+    return max(0.0, -lower, float(upper))
+
+
+def expand_l1_norm_constraints(p: dict) -> dict:
+    constraints = p.get("l1_norms") or p.get("l1_norm_constraints") or []
+    if not constraints:
+        return p
+    expanded = dict(p)
+    rows = [[float(v) for v in row] for row in p.get("a", [])]
+    rhs_values = [float(v) for v in p.get("b", [])]
+    c = [float(v) for v in p["c"]]
+    integer_vars = [bool(v) for v in p["integer_vars"]]
+    lbs, ubs = bounds(p)
+    ubs = [None if ub is None or not math.isfinite(float(ub)) else float(ub) for ub in ubs]
+    var_names = list(p.get("var_names") or [f"x{i}" for i in range(len(c))])
+    row_names = list(p.get("con_names") or [f"c{i}" for i in range(len(rows))])
+
+    for idx, constraint in enumerate(constraints):
+        target = int(constraint["target_var"])
+        if target < 0 or target >= len(c):
+            raise ValueError(f"l1_norm {idx} target_var out of range")
+        if not math.isfinite(lbs[target]):
+            raise ValueError(f"l1_norm {idx} target lower bound must be finite")
+        args = [int(v) for v in constraint.get("arg_vars", [])]
+        if not args:
+            raise ValueError(f"l1_norm {idx} needs at least one argument")
+        seen: set[int] = set()
+        for pos, var in enumerate(args):
+            if var < 0 or var >= len(c):
+                raise ValueError(f"l1_norm {idx} argument variable {var} out of range")
+            if var == target:
+                raise ValueError(f"l1_norm {idx} target_var must be distinct from argument variables")
+            if var in seen:
+                raise ValueError(f"l1_norm {idx} duplicate argument variable {var}")
+            seen.add(var)
+            l1_abs_helper_upper(float(lbs[var]), ubs[var], idx, pos)
+
+        name = constraint.get("name", f"l1_norm_{idx}")
+        helpers: list[int] = []
+        for pos, arg in enumerate(args):
+            lower = float(lbs[arg])
+            upper = ubs[arg]
+            helper_upper = l1_abs_helper_upper(lower, upper, idx, pos)
+            helper = add_continuous_helper(
+                rows,
+                c,
+                integer_vars,
+                lbs,
+                ubs,
+                var_names,
+                f"{name}_abs_{pos}",
+                helper_upper,
+            )
+            helpers.append(helper)
+
+            if lower >= -1e-12:
+                row = [0.0] * len(c)
+                row[helper] = 1.0
+                row[arg] = -1.0
+                add_compiled_equality(rows, rhs_values, row_names, row, 0.0, f"{name}_abs_{pos}_nonnegative")
+                continue
+            if upper is not None and float(upper) <= 1e-12:
+                row = [0.0] * len(c)
+                row[helper] = 1.0
+                row[arg] = 1.0
+                add_compiled_equality(rows, rhs_values, row_names, row, 0.0, f"{name}_abs_{pos}_nonpositive")
+                continue
+            if upper is None:
+                raise ValueError(f"l1_norm {idx} mixed-sign argument {pos} needs a finite upper bound")
+            upper = float(upper)
+            selector = add_binary_helper(rows, c, integer_vars, lbs, ubs, var_names, f"{name}_abs_{pos}_sign")
+
+            row = [0.0] * len(c)
+            row[arg] = 1.0
+            row[helper] = -1.0
+            add_compiled_row(rows, rhs_values, row_names, row, 0.0, f"{name}_abs_{pos}_target_ge_arg")
+
+            row = [0.0] * len(c)
+            row[arg] = -1.0
+            row[helper] = -1.0
+            add_compiled_row(rows, rhs_values, row_names, row, 0.0, f"{name}_abs_{pos}_target_ge_neg_arg")
+
+            row = [0.0] * len(c)
+            row[helper] = 1.0
+            row[arg] = -1.0
+            row[selector] = -2.0 * lower
+            add_compiled_row(
+                rows,
+                rhs_values,
+                row_names,
+                row,
+                -2.0 * lower,
+                f"{name}_abs_{pos}_target_le_positive_branch",
+            )
+
+            row = [0.0] * len(c)
+            row[helper] = 1.0
+            row[arg] = 1.0
+            row[selector] = -2.0 * upper
+            add_compiled_row(
+                rows,
+                rhs_values,
+                row_names,
+                row,
+                0.0,
+                f"{name}_abs_{pos}_target_le_negative_branch",
+            )
+
+        row = [0.0] * len(c)
+        row[target] = 1.0
+        for helper in helpers:
+            row[helper] = -1.0
+        add_compiled_equality(rows, rhs_values, row_names, row, 0.0, f"{name}_target_sum")
+
+    expanded["c"] = c
+    expanded["a"] = rows
+    expanded["b"] = rhs_values
+    expanded["integer_vars"] = integer_vars
+    expanded["lb"] = lbs
+    expanded["ub"] = ubs
+    expanded["var_names"] = var_names
+    expanded["con_names"] = row_names
+    expanded.pop("l1_norms", None)
+    expanded.pop("l1_norm_constraints", None)
+    return expanded
+
+
+def linf_abs_helper_upper(lower: float, upper: Optional[float], idx: int, pos: int) -> float:
+    if not math.isfinite(lower):
+        raise ValueError(f"linf_norm {idx} argument {pos} lower bound must be finite")
+    if upper is not None and float(upper) + 1e-9 < lower:
+        raise ValueError(f"linf_norm {idx} argument {pos} lower bound exceeds upper bound")
+    if lower >= -1e-12:
+        return math.inf if upper is None else max(0.0, float(upper))
+    if upper is not None and float(upper) <= 1e-12:
+        return max(0.0, -lower)
+    if upper is None:
+        raise ValueError(f"linf_norm {idx} mixed-sign argument {pos} needs a finite upper bound")
+    return max(0.0, -lower, float(upper))
+
+
+def finite_optional(value: Optional[float]) -> Optional[float]:
+    if value is None:
+        return None
+    value = float(value)
+    return value if math.isfinite(value) else None
+
+
+def expand_linf_norm_constraints(p: dict) -> dict:
+    constraints = p.get("linf_norms") or p.get("linf_norm_constraints") or []
+    if not constraints:
+        return p
+    expanded = dict(p)
+    rows = [[float(v) for v in row] for row in p.get("a", [])]
+    rhs_values = [float(v) for v in p.get("b", [])]
+    c = [float(v) for v in p["c"]]
+    integer_vars = [bool(v) for v in p["integer_vars"]]
+    lbs, ubs = bounds(p)
+    ubs = [None if ub is None or not math.isfinite(float(ub)) else float(ub) for ub in ubs]
+    var_names = list(p.get("var_names") or [f"x{i}" for i in range(len(c))])
+    row_names = list(p.get("con_names") or [f"c{i}" for i in range(len(rows))])
+
+    for idx, constraint in enumerate(constraints):
+        target = int(constraint["target_var"])
+        if target < 0 or target >= len(c):
+            raise ValueError(f"linf_norm {idx} target_var out of range")
+        if not math.isfinite(lbs[target]):
+            raise ValueError(f"linf_norm {idx} target lower bound must be finite")
+        args = [int(v) for v in constraint.get("arg_vars", [])]
+        if not args:
+            raise ValueError(f"linf_norm {idx} needs at least one argument")
+        seen: set[int] = set()
+        for pos, var in enumerate(args):
+            if var < 0 or var >= len(c):
+                raise ValueError(f"linf_norm {idx} argument variable {var} out of range")
+            if var == target:
+                raise ValueError(f"linf_norm {idx} target_var must be distinct from argument variables")
+            if var in seen:
+                raise ValueError(f"linf_norm {idx} duplicate argument variable {var}")
+            seen.add(var)
+            linf_abs_helper_upper(float(lbs[var]), ubs[var], idx, pos)
+
+        name = constraint.get("name", f"linf_norm_{idx}")
+        helpers: list[int] = []
+        for pos, arg in enumerate(args):
+            lower = float(lbs[arg])
+            upper = ubs[arg]
+            helper_upper = linf_abs_helper_upper(lower, upper, idx, pos)
+            helper = add_continuous_helper(
+                rows,
+                c,
+                integer_vars,
+                lbs,
+                ubs,
+                var_names,
+                f"{name}_abs_{pos}",
+                helper_upper,
+            )
+            helpers.append(helper)
+
+            if lower >= -1e-12:
+                row = [0.0] * len(c)
+                row[helper] = 1.0
+                row[arg] = -1.0
+                add_compiled_equality(rows, rhs_values, row_names, row, 0.0, f"{name}_abs_{pos}_nonnegative")
+                continue
+            if upper is not None and float(upper) <= 1e-12:
+                row = [0.0] * len(c)
+                row[helper] = 1.0
+                row[arg] = 1.0
+                add_compiled_equality(rows, rhs_values, row_names, row, 0.0, f"{name}_abs_{pos}_nonpositive")
+                continue
+            if upper is None:
+                raise ValueError(f"linf_norm {idx} mixed-sign argument {pos} needs a finite upper bound")
+            upper = float(upper)
+            selector = add_binary_helper(rows, c, integer_vars, lbs, ubs, var_names, f"{name}_abs_{pos}_sign")
+
+            row = [0.0] * len(c)
+            row[arg] = 1.0
+            row[helper] = -1.0
+            add_compiled_row(rows, rhs_values, row_names, row, 0.0, f"{name}_abs_{pos}_target_ge_arg")
+
+            row = [0.0] * len(c)
+            row[arg] = -1.0
+            row[helper] = -1.0
+            add_compiled_row(rows, rhs_values, row_names, row, 0.0, f"{name}_abs_{pos}_target_ge_neg_arg")
+
+            row = [0.0] * len(c)
+            row[helper] = 1.0
+            row[arg] = -1.0
+            row[selector] = -2.0 * lower
+            add_compiled_row(
+                rows,
+                rhs_values,
+                row_names,
+                row,
+                -2.0 * lower,
+                f"{name}_abs_{pos}_target_le_positive_branch",
+            )
+
+            row = [0.0] * len(c)
+            row[helper] = 1.0
+            row[arg] = 1.0
+            row[selector] = -2.0 * upper
+            add_compiled_row(
+                rows,
+                rhs_values,
+                row_names,
+                row,
+                0.0,
+                f"{name}_abs_{pos}_target_le_negative_branch",
+            )
+
+        if len(helpers) == 1:
+            row = [0.0] * len(c)
+            row[target] = 1.0
+            row[helpers[0]] = -1.0
+            add_compiled_equality(rows, rhs_values, row_names, row, 0.0, f"{name}_max_abs_single_arg")
+            continue
+
+        target_upper = finite_optional(ubs[target])
+        if target_upper is not None:
+            max_upper = target_upper
+        else:
+            helper_uppers = [finite_optional(ubs[helper]) for helper in helpers]
+            if any(upper is None for upper in helper_uppers):
+                raise ValueError(f"linf_norm {idx} needs finite helper uppers or a finite target upper bound")
+            max_upper = max(float(upper) for upper in helper_uppers if upper is not None)
+
+        selectors = [
+            add_binary_helper(rows, c, integer_vars, lbs, ubs, var_names, f"{name}_max_abs_select_{pos}")
+            for pos, _ in enumerate(helpers)
+        ]
+
+        for pos, helper in enumerate(helpers):
+            row = [0.0] * len(c)
+            row[target] = -1.0
+            row[helper] = 1.0
+            add_compiled_row(rows, rhs_values, row_names, row, 0.0, f"{name}_max_abs_target_ge_arg_{pos}")
+
+            row = [0.0] * len(c)
+            row[target] = 1.0
+            row[helper] = -1.0
+            row[selectors[pos]] = max_upper
+            add_compiled_row(
+                rows,
+                rhs_values,
+                row_names,
+                row,
+                max_upper,
+                f"{name}_max_abs_target_le_candidate_{pos}",
+            )
+
+        row = [0.0] * len(c)
+        for selector in selectors:
+            row[selector] = 1.0
+        add_compiled_equality(rows, rhs_values, row_names, row, 1.0, f"{name}_max_abs_one_active")
+
+    expanded["c"] = c
+    expanded["a"] = rows
+    expanded["b"] = rhs_values
+    expanded["integer_vars"] = integer_vars
+    expanded["lb"] = lbs
+    expanded["ub"] = ubs
+    expanded["var_names"] = var_names
+    expanded["con_names"] = row_names
+    expanded.pop("linf_norms", None)
+    expanded.pop("linf_norm_constraints", None)
+    return expanded
+
+
+def expand_quadratic_objective_terms(p: dict) -> dict:
+    terms = p.get("quadratic_objective") or p.get("quadratic_objective_terms") or []
+    if not terms:
+        return p
+    expanded = dict(p)
+    rows = [[float(v) for v in row] for row in p.get("a", [])]
+    c = [float(v) for v in p["c"]]
+    integer_vars = [bool(v) for v in p["integer_vars"]]
+    lbs, ubs = bounds(p)
+    ubs = [None if ub is None or not math.isfinite(float(ub)) else float(ub) for ub in ubs]
+    var_names = list(p.get("var_names") or [f"x{i}" for i in range(len(c))])
+    products = list(p.get("products") or p.get("product_constraints") or [])
+
+    def is_binary(var: int) -> bool:
+        upper = ubs[var]
+        return (
+            abs(lbs[var]) <= 1e-12
+            and integer_vars[var]
+            and upper is not None
+            and float(upper) <= 1.0 + 1e-9
+        )
+
+    def finite_factor_bounds(var: int, idx: int) -> tuple[float, float]:
+        lower = float(lbs[var])
+        upper = ubs[var]
+        if not math.isfinite(lower):
+            raise ValueError(f"quadratic objective term {idx} continuous factor {var} lower bound must be finite")
+        if upper is None:
+            raise ValueError(f"quadratic objective term {idx} continuous factor {var} needs a finite upper bound")
+        upper = float(upper)
+        if upper + 1e-9 < lower:
+            raise ValueError(
+                f"quadratic objective term {idx} continuous factor {var} lower bound exceeds upper bound"
+            )
+        return lower, upper
+
+    for idx, term in enumerate(terms):
+        x_var = int(term["x_var"])
+        y_var = int(term["y_var"])
+        for role, var in (("x_var", x_var), ("y_var", y_var)):
+            if var < 0 or var >= len(c):
+                raise ValueError(f"quadratic objective term {idx} {role} out of range")
+        coeff = float(term["coeff"])
+        if not math.isfinite(coeff):
+            raise ValueError(f"quadratic objective term {idx} coeff must be finite")
+
+        x_binary = is_binary(x_var)
+        y_binary = is_binary(y_var)
+        if x_var == y_var:
+            if not x_binary:
+                raise ValueError(f"quadratic objective term {idx} square is exact only for binary variables")
+            c[x_var] += coeff
+            continue
+        if not x_binary and not y_binary:
+            raise ValueError(
+                f"quadratic objective term {idx} exact linearization needs at least one binary factor; continuous-continuous products are nonconvex"
+            )
+
+        if x_binary and y_binary:
+            product_lb, product_ub = 0.0, 1.0
+        else:
+            continuous = y_var if x_binary else x_var
+            lower, upper = finite_factor_bounds(continuous, idx)
+            product_lb, product_ub = min(0.0, lower), max(0.0, upper)
+
+        name = term.get("name") or f"quadratic_objective_{idx}"
+        helper = add_bounded_continuous_helper(
+            rows,
+            c,
+            integer_vars,
+            lbs,
+            ubs,
+            var_names,
+            name,
+            product_lb,
+            product_ub,
+        )
+        c[helper] = coeff
+        products.append(
+            {
+                "target_var": helper,
+                "x_var": x_var,
+                "y_var": y_var,
+                "name": name,
+            }
+        )
+
+    expanded["c"] = c
+    expanded["a"] = rows
+    expanded["integer_vars"] = integer_vars
+    expanded["lb"] = lbs
+    expanded["ub"] = ubs
+    expanded["var_names"] = var_names
+    expanded["products"] = products
+    expanded.pop("quadratic_objective", None)
+    expanded.pop("quadratic_objective_terms", None)
+    expanded.pop("product_constraints", None)
+    return expanded
+
+
+def expand_product_constraints(p: dict) -> dict:
+    constraints = p.get("products") or p.get("product_constraints") or []
+    if not constraints:
+        return p
+    expanded = dict(p)
+    rows = [[float(v) for v in row] for row in p.get("a", [])]
+    rhs_values = [float(v) for v in p.get("b", [])]
+    c = [float(v) for v in p["c"]]
+    integer_vars = [bool(v) for v in p["integer_vars"]]
+    lbs, ubs = bounds(p)
+    ubs = [None if ub is None or not math.isfinite(float(ub)) else float(ub) for ub in ubs]
+    row_names = list(p.get("con_names") or [f"c{i}" for i in range(len(rows))])
+
+    def is_binary(var: int) -> bool:
+        upper = ubs[var]
+        return (
+            abs(lbs[var]) <= 1e-12
+            and integer_vars[var]
+            and upper is not None
+            and float(upper) <= 1.0 + 1e-9
+        )
+
+    def finite_factor_bounds(var: int, idx: int) -> tuple[float, float]:
+        lower = float(lbs[var])
+        upper = ubs[var]
+        if not math.isfinite(lower):
+            raise ValueError(f"product {idx} continuous factor {var} lower bound must be finite")
+        if upper is None:
+            raise ValueError(f"product {idx} continuous factor {var} needs a finite upper bound")
+        upper = float(upper)
+        if upper + 1e-9 < lower:
+            raise ValueError(f"product {idx} continuous factor {var} lower bound exceeds upper bound")
+        return lower, upper
+
+    for idx, constraint in enumerate(constraints):
+        target = int(constraint["target_var"])
+        x_var = int(constraint["x_var"])
+        y_var = int(constraint["y_var"])
+        for role, var in (("target_var", target), ("x_var", x_var), ("y_var", y_var)):
+            if var < 0 or var >= len(c):
+                raise ValueError(f"product {idx} {role} out of range")
+        if target == x_var or target == y_var:
+            raise ValueError(f"product {idx} target_var must be distinct from factor variables")
+        if x_var == y_var:
+            raise ValueError(f"product {idx} x_var and y_var must be distinct")
+        if not math.isfinite(float(lbs[target])):
+            raise ValueError(f"product {idx} target lower bound must be finite")
+
+        x_binary = is_binary(x_var)
+        y_binary = is_binary(y_var)
+        if not x_binary and not y_binary:
+            raise ValueError(
+                f"product {idx} exact linearization needs at least one binary factor; continuous-continuous products are nonconvex"
+            )
+
+        name = constraint.get("name", f"product_{idx}")
+        if x_binary and y_binary:
+            row = [0.0] * len(c)
+            row[target] = 1.0
+            row[x_var] = -1.0
+            add_compiled_row(rows, rhs_values, row_names, row, 0.0, f"{name}_target_le_x")
+
+            row = [0.0] * len(c)
+            row[target] = 1.0
+            row[y_var] = -1.0
+            add_compiled_row(rows, rhs_values, row_names, row, 0.0, f"{name}_target_le_y")
+
+            row = [0.0] * len(c)
+            row[target] = -1.0
+            add_compiled_row(rows, rhs_values, row_names, row, 0.0, f"{name}_target_ge_zero")
+
+            row = [0.0] * len(c)
+            row[target] = -1.0
+            row[x_var] = 1.0
+            row[y_var] = 1.0
+            add_compiled_row(rows, rhs_values, row_names, row, 1.0, f"{name}_target_ge_xy")
+            continue
+
+        binary = x_var if x_binary else y_var
+        continuous = y_var if x_binary else x_var
+        lower, upper = finite_factor_bounds(continuous, idx)
+
+        row = [0.0] * len(c)
+        row[target] = 1.0
+        row[binary] = -upper
+        add_compiled_row(rows, rhs_values, row_names, row, 0.0, f"{name}_target_le_ub_binary")
+
+        row = [0.0] * len(c)
+        row[target] = -1.0
+        row[binary] = lower
+        add_compiled_row(rows, rhs_values, row_names, row, 0.0, f"{name}_target_ge_lb_binary")
+
+        row = [0.0] * len(c)
+        row[target] = 1.0
+        row[continuous] = -1.0
+        row[binary] = -lower
+        add_compiled_row(rows, rhs_values, row_names, row, -lower, f"{name}_target_le_active")
+
+        row = [0.0] * len(c)
+        row[target] = -1.0
+        row[continuous] = 1.0
+        row[binary] = upper
+        add_compiled_row(rows, rhs_values, row_names, row, upper, f"{name}_target_ge_active")
+
+    expanded["a"] = rows
+    expanded["b"] = rhs_values
+    expanded["con_names"] = row_names
+    expanded.pop("products", None)
+    expanded.pop("product_constraints", None)
+    return expanded
 
 
 def expand_linear_constraints(p: dict) -> dict:
@@ -531,6 +1469,50 @@ def brute_force(p: dict, max_enumerations: int) -> dict:
     return payload("optimal", "python:bounded-enumeration", best_x, best_obj, "exact bounded enumeration", enumerated)
 
 
+def brute_force_pool(p: dict, pool_size: int, max_enumerations: int) -> dict:
+    int_vars = [j for j, is_int in enumerate(p["integer_vars"]) if is_int]
+    if not int_vars:
+        return payload("unavailable", "python:bounded-enumeration-pool", message="solution pool requires integer variables")
+    lbs, ubs = bounds(p)
+    domains = []
+    for j in int_vars:
+        if ubs[j] is None:
+            return payload("unavailable", "python:bounded-enumeration-pool", message=f"x{j} has no finite upper bound")
+        lo = math.ceil(lbs[j])
+        hi = math.floor(float(ubs[j]))
+        if hi < lo:
+            return payload("infeasible", "python:bounded-enumeration-pool", enumerated=0, solutions=[], exhausted=True)
+        domains.append(range(lo, hi + 1))
+
+    candidates = []
+    enumerated = 0
+    for values in itertools.product(*domains):
+        enumerated += 1
+        if enumerated > max_enumerations:
+            return payload("unavailable", "python:bounded-enumeration-pool", message="enumeration cap reached", enumerated=enumerated)
+        fixed = {j: float(v) for j, v in zip(int_vars, values)}
+        candidate = solve_continuous_remainder(p, fixed)
+        if candidate is not None:
+            candidates.append(candidate)
+    if not candidates:
+        return payload("infeasible", "python:bounded-enumeration-pool", enumerated=enumerated, solutions=[], exhausted=True)
+
+    reverse = p.get("sense", "max") == "max"
+    candidates.sort(key=lambda item: item[1], reverse=reverse)
+    chosen = candidates[:pool_size]
+    solutions = [{"x": x, "objective": obj} for x, obj in chosen]
+    return payload(
+        "optimal",
+        "python:bounded-enumeration-pool",
+        chosen[0][0],
+        chosen[0][1],
+        "exact bounded solution-pool enumeration",
+        enumerated,
+        solutions=solutions,
+        exhausted=len(chosen) == len(candidates),
+    )
+
+
 def try_ortools_cp_sat(p: dict) -> Optional[dict]:
     try:
         from ortools.sat.python import cp_model  # type: ignore
@@ -599,6 +1581,8 @@ def try_scipy_milp(p: dict) -> Optional[dict]:
             return payload("optimal", "scipy:milp", x, objective(p, x), str(result.message))
         if int(result.status) == 2:
             return payload("infeasible", "scipy:milp", message=str(result.message))
+        if int(result.status) == 3:
+            return payload("unbounded", "scipy:milp", message=str(result.message))
         return payload("unavailable", "scipy:milp", message=str(result.message))
     except Exception as exc:
         return payload("unavailable", "scipy:milp", message=str(exc))
@@ -607,6 +1591,14 @@ def try_scipy_milp(p: dict) -> Optional[dict]:
 def expand_source_features(p: dict) -> dict:
     p = expand_linear_constraints(p)
     p = expand_indicators(p)
+    p = expand_abs_constraints(p)
+    p = expand_maximum_constraints(p)
+    p = expand_minimum_constraints(p)
+    p = expand_logical_constraints(p)
+    p = expand_l1_norm_constraints(p)
+    p = expand_linf_norm_constraints(p)
+    p = expand_quadratic_objective_terms(p)
+    p = expand_product_constraints(p)
     p = expand_pwl(p)
     p = expand_sos(p)
     p = expand_semi_variables(p)
@@ -622,7 +1614,7 @@ def solve_expanded(p: dict, solver: str, max_enumerations: int) -> dict:
             return r or payload("unavailable", "ortools:cp-sat", message="ortools is not installed")
     if solver in ("auto", "scipy", "scipy-milp"):
         r = try_scipy_milp(p)
-        if r and r["result"]["status"] in ("optimal", "infeasible"):
+        if r and r["result"]["status"] in ("optimal", "infeasible", "unbounded"):
             return r
         if solver in ("scipy", "scipy-milp"):
             return r or payload("unavailable", "scipy:milp", message="scipy is not installed")
@@ -694,14 +1686,18 @@ def solve_multi_objective(p: dict, objectives: list[dict], solver: str, max_enum
     )
 
 
-def solve(p: dict, solver: str, max_enumerations: int) -> dict:
+def solve(p: dict, solver: str, max_enumerations: int, pool_size: int | None = None) -> dict:
     try:
         p = expand_source_features(p)
     except Exception as exc:
         return payload("unavailable", "source-linearization", message=str(exc))
     objectives = p.get("multi_objectives") or []
     if objectives:
+        if pool_size is not None:
+            return payload("unavailable", "python:bounded-enumeration-pool", message="solution pools for multi-objective MIPs are not supported")
         return solve_multi_objective(p, objectives, solver, max_enumerations)
+    if pool_size is not None:
+        return brute_force_pool(p, pool_size, max_enumerations)
     return solve_expanded(p, solver, max_enumerations)
 
 
@@ -711,9 +1707,10 @@ def main() -> int:
     parser.add_argument("--out", required=True)
     parser.add_argument("--solver", default="auto")
     parser.add_argument("--max-enumerations", type=int, default=1_000_000)
+    parser.add_argument("--pool-size", type=int)
     args = parser.parse_args()
     p = load_problem(args.problem)
-    result = solve(p, args.solver, args.max_enumerations)
+    result = solve(p, args.solver, args.max_enumerations, args.pool_size)
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(result, f, indent=2, allow_nan=True)

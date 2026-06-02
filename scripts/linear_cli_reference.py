@@ -321,6 +321,38 @@ def stripped_starts(text: str, prefixes: Sequence[str]) -> bool:
     return any(stripped.startswith(prefix) for prefix in prefixes)
 
 
+def classify_status(status: str, stdout: str, stderr: str) -> str:
+    parsed = status.lower()
+    if "primal infeasible" in parsed or ("infeasible" in parsed and "dual" not in parsed):
+        return "infeasible"
+    if "dual infeasible" in parsed or "unbounded" in parsed:
+        return "unbounded"
+    if "optimal" in parsed:
+        return "optimal"
+
+    text = f"{stdout}\n{stderr}".lower()
+    infeasible_markers = (
+        "no primal feasible",
+        "primal infeasible",
+        "linear relaxation infeasible",
+        "no feasible solution",
+        "no solution exists",
+        "integer infeasible",
+        "problem has no feasible",
+    )
+    if any(marker in text for marker in infeasible_markers):
+        return "infeasible"
+    unbounded_markers = (
+        "has unbounded solution",
+        "linear relaxation unbounded",
+        "dual infeasible",
+        "unbounded",
+    )
+    if any(marker in text for marker in unbounded_markers):
+        return "unbounded"
+    return "unknown"
+
+
 def solver_available(solver: str) -> bool:
     return solver_command(solver) is not None
 
@@ -455,9 +487,13 @@ def solve(kind: str, solver: str, raw: dict, time_limit: float) -> dict:
         else:
             status, x = parse_cbc_solution(solution_path, len(c))
 
-    optimal = "optimal" in status
-    if not optimal:
-        return status_payload("infeasible" if "infeasible" in status else "unavailable", f"{solver}:cli", status)
+    classified = classify_status(status, stdout, stderr)
+    if classified != "optimal":
+        return status_payload(
+            classified if classified in ("infeasible", "unbounded") else "unavailable",
+            f"{solver}:cli",
+            status,
+        )
     return {
         "status": "optimal",
         "solver": f"{solver}:cli",

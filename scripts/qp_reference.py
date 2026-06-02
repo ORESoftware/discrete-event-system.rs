@@ -9,8 +9,9 @@ Input JSON:
     "lb": [0, null], "ub": [1, null]
   }
 
-The bridge prefers scipy.optimize.minimize when SciPy is installed, and falls
-back to dependency-free active-set enumeration for small dense QPs.
+The bridge prefers HiGHS through highspy for plain convex QPs, then
+scipy.optimize.minimize when SciPy is installed, and falls back to
+dependency-free active-set enumeration for small dense QPs.
 """
 
 from __future__ import annotations
@@ -223,6 +224,115 @@ def with_qp_certificate(result: dict, qp_raw: dict) -> dict:
     if result.get("status") == "optimal" and result.get("x") is not None:
         result.update(recover_qp_certificate(qp_raw, result["x"]))
     return result
+
+
+def integer_domains(qp: dict, integer_vars: Sequence[bool]) -> list[tuple[int, int]]:
+    domains = []
+    for idx, is_integer in enumerate(integer_vars):
+        if not is_integer:
+            continue
+        lower = qp["lb"][idx]
+        upper = qp["ub"][idx]
+        if lower is None or upper is None:
+            raise ValueError(f"MIQP integer variable {idx} needs finite bounds")
+        lo = math.ceil(float(lower))
+        hi = math.floor(float(upper))
+        if lo > hi:
+            raise ValueError(f"MIQP integer variable {idx} has no integer value in its bounds")
+        domains.append((lo, hi))
+    return domains
+
+
+def fixed_integer_qp(qp: dict, fixed: Sequence[tuple[int, int]]) -> dict:
+    sub = {
+        "Q": [row[:] for row in qp["Q"]],
+        "c": qp["c"][:],
+        "A_ub": [row[:] for row in qp["A_ub"]],
+        "b_ub": qp["b_ub"][:],
+        "A_eq": [row[:] for row in qp["A_eq"]],
+        "b_eq": qp["b_eq"][:],
+        "lb": qp["lb"][:],
+        "ub": qp["ub"][:],
+    }
+    n = len(qp["c"])
+    for var, value in fixed:
+        row = [0.0] * n
+        row[var] = 1.0
+        sub["A_eq"].append(row)
+        sub["b_eq"].append(float(value))
+    return sub
+
+
+def solve_miqp_reference(raw: dict, solver: str, max_enumerations: int = 1_000_000) -> dict:
+    qp = normalize(raw)
+    integer_vars = [bool(v) for v in raw.get("integer_vars", [])]
+    if len(integer_vars) != len(qp["c"]):
+        return {
+            "status": "numerical-error",
+            "solver": "python:miqp-enumeration",
+            "x": [],
+            "objective": None,
+            "message": "integer_vars length mismatch",
+        }
+    try:
+        domains = integer_domains(qp, integer_vars)
+    except ValueError as exc:
+        return {
+            "status": "numerical-error",
+            "solver": "python:miqp-enumeration",
+            "x": [],
+            "objective": None,
+            "message": str(exc),
+        }
+    integer_indices = [idx for idx, is_integer in enumerate(integer_vars) if is_integer]
+    if not integer_indices:
+        result = highs_qp_reference(raw) if solver in ("auto", "highs", "highspy", "highs-qp") else None
+        if result is None:
+            result = scipy_reference(raw) if solver in ("auto", "scipy", "scipy-slsqp") else None
+        return result or enumerate_active_sets(raw)
+
+    best = None
+    best_obj = math.inf
+    enumerated = 0
+    for values in itertools.product(*(range(lo, hi + 1) for lo, hi in domains)):
+        enumerated += 1
+        if enumerated > max_enumerations:
+            return {
+                "status": "numerical-error",
+                "solver": "python:miqp-enumeration",
+                "x": [] if best is None else best,
+                "objective": None if best is None else best_obj,
+                "enumerated": enumerated,
+                "message": "MIQP enumeration limit reached",
+            }
+        sub = fixed_integer_qp(qp, list(zip(integer_indices, values)))
+        result = highs_qp_reference(sub) if solver in ("auto", "highs", "highspy", "highs-qp") else None
+        if result is None:
+            result = scipy_reference(sub) if solver in ("auto", "scipy", "scipy-slsqp") else None
+        if result is None or result.get("status") != "optimal":
+            result = enumerate_active_sets(sub)
+        if result.get("status") != "optimal":
+            continue
+        obj = float(result["objective"])
+        if obj < best_obj - 1e-8:
+            best_obj = obj
+            best = [float(v) for v in result["x"]]
+    if best is None:
+        return {
+            "status": "infeasible",
+            "solver": "python:miqp-enumeration",
+            "x": [],
+            "objective": None,
+            "enumerated": enumerated,
+        }
+    return {
+        "status": "optimal",
+        "solver": "python:miqp-enumeration",
+        "x": best,
+        "objective": best_obj,
+        "enumerated": enumerated,
+        "message": "bounded MIQP enumeration over integer variables",
+    }
 
 
 def normalize_socp(raw: dict) -> dict:
@@ -572,6 +682,158 @@ def enumerate_active_sets(qp: dict) -> dict:
     }, qp)
 
 
+def highs_qp_reference(qp_raw: dict) -> Optional[dict]:
+    try:
+        import highspy  # type: ignore
+    except Exception:
+        return None
+
+    qp = normalize(qp_raw)
+    n = len(qp["c"])
+    highs = highspy.Highs()
+    highs.setOptionValue("output_flag", False)
+    highs.setOptionValue("primal_feasibility_tolerance", 1e-10)
+    highs.setOptionValue("dual_feasibility_tolerance", 1e-10)
+    highs.setOptionValue("ipm_optimality_tolerance", 1e-12)
+    inf = highs.getInfinity()
+
+    lower = [-inf if v is None else float(v) for v in qp["lb"]]
+    upper = [inf if v is None else float(v) for v in qp["ub"]]
+    status = highs.addCols(
+        n,
+        qp["c"],
+        lower,
+        upper,
+        0,
+        [0] * (n + 1),
+        [],
+        [],
+    )
+    if status != highspy.HighsStatus.kOk:
+        return {
+            "status": "numerical-error",
+            "solver": "highs:qp",
+            "x": [],
+            "objective": None,
+            "message": f"Highs.addCols returned {status}",
+        }
+
+    rows = []
+    row_lower = []
+    row_upper = []
+    for row, rhs in zip(qp["A_ub"], qp["b_ub"]):
+        rows.append(row)
+        row_lower.append(-inf)
+        row_upper.append(float(rhs))
+    for row, rhs in zip(qp["A_eq"], qp["b_eq"]):
+        rows.append(row)
+        row_lower.append(float(rhs))
+        row_upper.append(float(rhs))
+    if rows:
+        starts = [0]
+        indices = []
+        values = []
+        for row in rows:
+            for j, value in enumerate(row):
+                if abs(value) > 0.0:
+                    indices.append(j)
+                    values.append(float(value))
+            starts.append(len(indices))
+        status = highs.addRows(
+            len(rows),
+            row_lower,
+            row_upper,
+            len(indices),
+            starts,
+            indices,
+            values,
+        )
+        if status != highspy.HighsStatus.kOk:
+            return {
+                "status": "numerical-error",
+                "solver": "highs:qp",
+                "x": [],
+                "objective": None,
+                "message": f"Highs.addRows returned {status}",
+            }
+
+    h_starts = [0]
+    h_indices = []
+    h_values = []
+    for col in range(n):
+        for row in range(col + 1):
+            value = float(qp["Q"][row][col])
+            if abs(value) > 0.0:
+                h_indices.append(row)
+                h_values.append(value)
+        h_starts.append(len(h_indices))
+    if h_values:
+        status = highs.passHessian(
+            n,
+            len(h_indices),
+            highspy.HessianFormat.kTriangular,
+            h_starts,
+            h_indices,
+            h_values,
+        )
+        if status != highspy.HighsStatus.kOk:
+            return {
+                "status": "numerical-error",
+                "solver": "highs:qp",
+                "x": [],
+                "objective": None,
+                "message": f"Highs.passHessian returned {status}",
+            }
+
+    status = highs.run()
+    if status != highspy.HighsStatus.kOk:
+        return {
+            "status": "numerical-error",
+            "solver": "highs:qp",
+            "x": [],
+            "objective": None,
+            "message": f"Highs.run returned {status}",
+        }
+
+    model_status = highs.getModelStatus()
+    if model_status == highspy.HighsModelStatus.kOptimal:
+        solution = highs.getSolution()
+        x = [float(v) for v in solution.col_value]
+        return with_qp_certificate({
+            "status": "optimal",
+            "solver": "highs:qp",
+            "x": x,
+            "objective": objective(qp, x),
+            "message": highs.modelStatusToString(model_status),
+        }, qp)
+    if model_status == highspy.HighsModelStatus.kInfeasible:
+        return {
+            "status": "infeasible",
+            "solver": "highs:qp",
+            "x": [],
+            "objective": None,
+            "message": highs.modelStatusToString(model_status),
+        }
+    if model_status in (
+        highspy.HighsModelStatus.kUnbounded,
+        highspy.HighsModelStatus.kUnboundedOrInfeasible,
+    ):
+        return {
+            "status": "unbounded",
+            "solver": "highs:qp",
+            "x": [],
+            "objective": None,
+            "message": highs.modelStatusToString(model_status),
+        }
+    return {
+        "status": "numerical-error",
+        "solver": "highs:qp",
+        "x": [],
+        "objective": None,
+        "message": highs.modelStatusToString(model_status),
+    }
+
+
 def scipy_reference(qp_raw: dict) -> Optional[dict]:
     try:
         import numpy as np  # type: ignore
@@ -700,9 +962,14 @@ def scipy_qcp_reference(raw: dict) -> Optional[dict]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--solver", default="auto")
+    parser.add_argument("--max-enumerations", type=int, default=1_000_000)
     args = parser.parse_args()
     qp = json.load(sys.stdin)
     result = None
+    if qp.get("integer_vars"):
+        result = solve_miqp_reference(qp, args.solver, args.max_enumerations)
+        print(json.dumps(result))
+        return 0 if result.get("status") != "unavailable" else 2
     if qp.get("cones"):
         if args.solver in ("auto", "scipy", "scipy-slsqp"):
             result = scipy_socp_reference(qp)
@@ -721,7 +988,11 @@ def main() -> int:
             result = qcp_pattern_reference(qp)
         print(json.dumps(result))
         return 0 if result.get("status") != "unavailable" else 2
-    if args.solver in ("auto", "scipy", "scipy-slsqp"):
+    if args.solver in ("auto", "highs", "highspy", "highs-qp"):
+        result = highs_qp_reference(qp)
+        if args.solver != "auto" and result is None:
+            result = {"status": "unavailable", "solver": "highs:qp", "x": [], "objective": None, "message": "highspy is not installed"}
+    if result is None and args.solver in ("auto", "scipy", "scipy-slsqp"):
         result = scipy_reference(qp)
         if args.solver != "auto" and result is None:
             result = {"status": "unavailable", "solver": "scipy:SLSQP", "x": [], "objective": None, "message": "scipy is not installed"}

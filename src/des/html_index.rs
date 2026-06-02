@@ -306,6 +306,12 @@ const EXTENDED_SIMULATIONS: &[HtmlIndexSpec] = &[
         href: "soccer-IP-MIP-feasible.html",
         description: "Full soccer rotation feasibility simulation with player movement snapshots.",
     },
+    HtmlIndexSpec {
+        kind: "simulation",
+        title: "Soccer 2D live match",
+        href: "soccer-sim.html",
+        description: "Single-threaded 11v11 soccer prototype with 0.1-second ticks, shuffled agents, ball physics, officials, and controller slots.",
+    },
 ];
 
 /// All featured index groups, in display order.
@@ -482,6 +488,7 @@ pub fn generate_html_artifacts() {
     generate_two_disease_page();
     crate::des::main_shadow_eval::run();
     crate::des::main_soccer_rotation::run_anim();
+    crate::des::main_soccer::run();
 }
 
 fn with_opts(mut spec: Value, opts: Value) -> Value {

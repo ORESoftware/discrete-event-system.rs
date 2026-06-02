@@ -257,6 +257,22 @@ mod tests {
                     name: "mapped_is_seven".to_string(),
                     domain: vec![0, 1],
                 },
+                CpVariable {
+                    name: "route_0_1".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "route_1_0".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "route_0_2".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "route_2_0".to_string(),
+                    domain: vec![0, 1],
+                },
             ],
             constraints: vec![
                 CpConstraint::AllDifferent(vec![0, 1, 2]),
@@ -276,11 +292,13 @@ mod tests {
                     CpInterval {
                         start: 4,
                         duration: 3,
+                        presence: None,
                         name: Some("task_a".to_string()),
                     },
                     CpInterval {
                         start: 5,
                         duration: 2,
+                        presence: None,
                         name: Some("task_b".to_string()),
                     },
                 ]),
@@ -290,18 +308,21 @@ mod tests {
                             start: 6,
                             duration: 3,
                             demand: 2,
+                            presence: None,
                             name: Some("machine_a".to_string()),
                         },
                         CpDemandInterval {
                             start: 7,
                             duration: 2,
                             demand: 2,
+                            presence: None,
                             name: Some("machine_b".to_string()),
                         },
                         CpDemandInterval {
                             start: 8,
                             duration: 2,
                             demand: 1,
+                            presence: None,
                             name: Some("machine_c".to_string()),
                         },
                     ],
@@ -423,6 +444,7 @@ mod tests {
                         y_start: 36,
                         width: 2,
                         height: 2,
+                        presence: None,
                         name: Some("pack_a".to_string()),
                     },
                     CpRectangle {
@@ -430,6 +452,7 @@ mod tests {
                         y_start: 38,
                         width: 2,
                         height: 2,
+                        presence: None,
                         name: Some("pack_b".to_string()),
                     },
                 ]),
@@ -545,6 +568,40 @@ mod tests {
                     bools: vec![55, 56, 57],
                     offset: 5,
                 },
+                CpConstraint::MultipleCircuit(vec![
+                    CpCircuitArc {
+                        tail: 0,
+                        head: 1,
+                        literal: BoolLiteral {
+                            var: 58,
+                            positive: true,
+                        },
+                    },
+                    CpCircuitArc {
+                        tail: 1,
+                        head: 0,
+                        literal: BoolLiteral {
+                            var: 59,
+                            positive: true,
+                        },
+                    },
+                    CpCircuitArc {
+                        tail: 0,
+                        head: 2,
+                        literal: BoolLiteral {
+                            var: 60,
+                            positive: true,
+                        },
+                    },
+                    CpCircuitArc {
+                        tail: 2,
+                        head: 0,
+                        literal: BoolLiteral {
+                            var: 61,
+                            positive: true,
+                        },
+                    },
+                ]),
             ],
             objective: Some(CpObjective {
                 sense: ObjectiveSense::Min,
@@ -586,6 +643,10 @@ mod tests {
                     LinearTerm { var: 52, coeff: 1 },
                     LinearTerm { var: 53, coeff: 1 },
                     LinearTerm { var: 54, coeff: 1 },
+                    LinearTerm { var: 58, coeff: 1 },
+                    LinearTerm { var: 59, coeff: 1 },
+                    LinearTerm { var: 60, coeff: 1 },
+                    LinearTerm { var: 61, coeff: 1 },
                 ],
             }),
         }
@@ -676,6 +737,14 @@ mod tests {
                         "literal": {"var": arc.literal.var, "positive": arc.literal.positive},
                     })).collect::<Vec<_>>(),
                 }),
+                CpConstraint::MultipleCircuit(arcs) => serde_json::json!({
+                    "kind": "multiple_circuit",
+                    "arcs": arcs.iter().map(|arc| serde_json::json!({
+                        "tail": arc.tail,
+                        "head": arc.head,
+                        "literal": {"var": arc.literal.var, "positive": arc.literal.positive},
+                    })).collect::<Vec<_>>(),
+                }),
                 CpConstraint::AllowedAssignments { vars, tuples } => serde_json::json!({
                     "kind": "allowed_assignments",
                     "vars": vars,
@@ -748,11 +817,41 @@ mod tests {
                     "values": &element.values,
                     "target": element.target,
                 }),
+                CpConstraint::Alternative(alternative) => serde_json::json!({
+                    "kind": "alternative",
+                    "start": alternative.start,
+                    "duration": alternative.duration,
+                    "end": alternative.end,
+                    "presence": alternative.presence.as_ref().map(|lit| serde_json::json!({
+                        "var": lit.var,
+                        "positive": lit.positive,
+                    })),
+                    "alternatives": alternative.alternatives.iter().map(|interval| serde_json::json!({
+                        "start": interval.start,
+                        "duration": interval.duration,
+                        "end": interval.end,
+                        "presence": interval.presence.as_ref().map(|lit| serde_json::json!({
+                            "var": lit.var,
+                            "positive": lit.positive,
+                        })),
+                        "name": interval.name,
+                    })).collect::<Vec<_>>(),
+                    "name": alternative.name,
+                }),
                 CpConstraint::NoOverlap(intervals) => serde_json::json!({
                     "kind": "no_overlap",
                     "intervals": intervals.iter().map(|interval| serde_json::json!({
                         "start": interval.start,
                         "duration": interval.duration,
+                        "name": interval.name,
+                    })).collect::<Vec<_>>(),
+                }),
+                CpConstraint::NoOverlapVariable(intervals) => serde_json::json!({
+                    "kind": "no_overlap_variable",
+                    "intervals": intervals.iter().map(|interval| serde_json::json!({
+                        "start": interval.start,
+                        "duration": interval.duration,
+                        "end": interval.end,
                         "name": interval.name,
                     })).collect::<Vec<_>>(),
                 }),
@@ -766,6 +865,18 @@ mod tests {
                         "name": rectangle.name,
                     })).collect::<Vec<_>>(),
                 }),
+                CpConstraint::NoOverlap2DVariable(rectangles) => serde_json::json!({
+                    "kind": "no_overlap_2d_variable",
+                    "rectangles": rectangles.iter().map(|rectangle| serde_json::json!({
+                        "x_start": rectangle.x_start,
+                        "x_size": rectangle.x_size,
+                        "x_end": rectangle.x_end,
+                        "y_start": rectangle.y_start,
+                        "y_size": rectangle.y_size,
+                        "y_end": rectangle.y_end,
+                        "name": rectangle.name,
+                    })).collect::<Vec<_>>(),
+                }),
                 CpConstraint::Cumulative {
                     intervals,
                     capacity,
@@ -775,6 +886,20 @@ mod tests {
                     "intervals": intervals.iter().map(|interval| serde_json::json!({
                         "start": interval.start,
                         "duration": interval.duration,
+                        "demand": interval.demand,
+                        "name": interval.name,
+                    })).collect::<Vec<_>>(),
+                }),
+                CpConstraint::CumulativeVariable {
+                    intervals,
+                    capacity,
+                } => serde_json::json!({
+                    "kind": "cumulative_variable",
+                    "capacity": capacity,
+                    "intervals": intervals.iter().map(|interval| serde_json::json!({
+                        "start": interval.start,
+                        "duration": interval.duration,
+                        "end": interval.end,
                         "demand": interval.demand,
                         "name": interval.name,
                     })).collect::<Vec<_>>(),

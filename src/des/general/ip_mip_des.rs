@@ -336,6 +336,20 @@ pub struct PwlIPMIPProblem {
     pub pwl: Vec<PiecewiseLinearConstraint>,
 }
 
+/// MIP model that can combine the source-level modeling features exposed by
+/// full-featured MIP solvers before compiling them into the ordinary
+/// non-negative branch-and-cut backend.
+#[derive(Clone, Debug)]
+pub struct SourceIPMIPProblem {
+    pub base: IPMIPProblem,
+    pub lb: Option<Vec<f64>>,
+    pub linear_constraints: Vec<LinearRowConstraint>,
+    pub indicators: Vec<IndicatorConstraint>,
+    pub sos: Vec<SpecialOrderedSet>,
+    pub semi_variables: Vec<SemiVariable>,
+    pub pwl: Vec<PiecewiseLinearConstraint>,
+}
+
 /// One objective in a lexicographic multi-objective MIP.
 #[derive(Clone, Debug)]
 pub struct LexicographicObjective {
@@ -2225,6 +2239,85 @@ pub fn solve_pwl_ipmip_with_des(
     solve_ipmip_with_des(linearized, opts)
 }
 
+/// Compile a feature-rich source MIP into the ordinary non-negative MIP
+/// accepted by the branch-and-cut backend. Source lower bounds are shifted
+/// first, and every source-level row that references original variables is
+/// translated into those shifted coordinates before feature linearization.
+pub fn linearize_source_ipmip_problem(problem: &SourceIPMIPProblem) -> (IPMIPProblem, f64, usize) {
+    validate_source_ipmip_problem(problem);
+    let original_var_count = problem.base.c.len();
+    let lb = source_lower_bounds(problem);
+    validate_zero_source_lbs_for_zero_sensitive_features(problem, &lb);
+
+    let (mut working, objective_offset) = if problem.lb.is_some() {
+        linearize_lower_bounds_problem(&LowerBoundedIPMIPProblem {
+            base: problem.base.clone(),
+            lb: lb.clone(),
+        })
+    } else {
+        (problem.base.clone(), 0.0)
+    };
+
+    let shifted_rows = shift_linear_row_constraints(&problem.linear_constraints, &lb);
+    if !shifted_rows.is_empty() {
+        working = linearize_general_linear_constraints(&working, &shifted_rows);
+    }
+
+    let shifted_indicators = shift_indicator_constraints(&problem.indicators, &lb);
+    if !shifted_indicators.is_empty() {
+        working = linearize_indicator_constraints(&working, &shifted_indicators);
+    }
+
+    if !problem.sos.is_empty() {
+        working = linearize_sos_constraints(&working, &problem.sos);
+    }
+
+    if !problem.semi_variables.is_empty() {
+        working = linearize_semi_variables(&working, &problem.semi_variables);
+    }
+
+    let shifted_pwl = shift_pwl_constraints(&problem.pwl, &lb);
+    if !shifted_pwl.is_empty() {
+        working = linearize_pwl_constraints(&working, &shifted_pwl);
+    }
+
+    (working, objective_offset, original_var_count)
+}
+
+/// Solve a feature-rich source MIP and map the original variables and objective
+/// back into source coordinates. Helper variables introduced by linearization
+/// remain in the returned `x` vector after the original variables.
+pub fn solve_source_ipmip_with_des(
+    problem: SourceIPMIPProblem,
+    opts: IPMIPSolveOptions,
+) -> IPMIPSolution {
+    let lb = source_lower_bounds(&problem);
+    let (linearized, objective_offset, original_var_count) =
+        linearize_source_ipmip_problem(&problem);
+    let mut sol = solve_ipmip_with_des(linearized, opts);
+    if !sol.x.is_empty() {
+        for (x, lower) in sol.x.iter_mut().take(original_var_count).zip(lb.iter()) {
+            *x += lower;
+        }
+    }
+    sol.z = add_objective_offset(sol.z, objective_offset);
+    sol.best_bound = add_objective_offset(sol.best_bound, objective_offset);
+    for event in &mut sol.trace {
+        if let Some(z) = event.lp_z.as_mut() {
+            *z = add_objective_offset(*z, objective_offset);
+        }
+    }
+    sol.gap = if sol.status == IPMIPStatus::Optimal {
+        0.0
+    } else if sol.x.is_empty() || !sol.best_bound.is_finite() || !sol.z.is_finite() {
+        f64::INFINITY
+    } else {
+        (sol.best_bound - sol.z).abs() / 1.0_f64.max(sol.z.abs())
+    };
+    sol.solver_kind = "in-house-source-feature-branch-and-cut";
+    sol
+}
+
 /// Solve lexicographic multi-objective MIPs by optimizing each objective in
 /// priority order and fixing each proven optimum before moving to the next.
 pub fn solve_multi_objective_ipmip_with_des(
@@ -2324,6 +2417,134 @@ fn validate_indicator_constraint(base: &IPMIPProblem, indicator: &IndicatorConst
             panic!("{MODEL}: indicator {idx} coefficient {j} must be finite");
         }
     }
+}
+
+fn validate_source_ipmip_problem(problem: &SourceIPMIPProblem) {
+    if let Some(lb) = &problem.lb {
+        validate_lower_bounded_ipmip_problem(&LowerBoundedIPMIPProblem {
+            base: problem.base.clone(),
+            lb: lb.clone(),
+        });
+    } else {
+        validate_ipmip_problem(&problem.base);
+    }
+}
+
+fn source_lower_bounds(problem: &SourceIPMIPProblem) -> Vec<f64> {
+    problem
+        .lb
+        .clone()
+        .unwrap_or_else(|| vec![0.0; problem.base.c.len()])
+}
+
+fn validate_zero_source_lbs_for_zero_sensitive_features(problem: &SourceIPMIPProblem, lb: &[f64]) {
+    for (idx, indicator) in problem.indicators.iter().enumerate() {
+        validate_zero_source_lb(lb, indicator.binary_var, "indicator trigger", idx);
+    }
+    for (idx, set) in problem.sos.iter().enumerate() {
+        for &var in &set.vars {
+            validate_zero_source_lb(lb, var, "sos variable", idx);
+        }
+    }
+    for (idx, semi) in problem.semi_variables.iter().enumerate() {
+        validate_zero_source_lb(lb, semi.var, "semi variable", idx);
+    }
+}
+
+fn validate_zero_source_lb(lb: &[f64], var: usize, kind: &str, idx: usize) {
+    if var >= lb.len() {
+        panic!("{MODEL}: {kind} {idx} variable {var} out of range");
+    }
+    if lb[var].abs() > 1e-12 {
+        panic!(
+            "{MODEL}: {kind} {idx} variable {var} must have source lower bound 0 before compilation"
+        );
+    }
+}
+
+fn shift_linear_row_constraints(
+    constraints: &[LinearRowConstraint],
+    lb: &[f64],
+) -> Vec<LinearRowConstraint> {
+    constraints
+        .iter()
+        .enumerate()
+        .map(|(idx, constraint)| {
+            if constraint.coefs.len() != lb.len() {
+                panic!(
+                    "{MODEL}: linear constraint {idx} coefficient length {} does not match variable count {}",
+                    constraint.coefs.len(),
+                    lb.len()
+                );
+            }
+            let shift = linear_objective_value(&constraint.coefs, lb);
+            LinearRowConstraint {
+                coefs: constraint.coefs.clone(),
+                lower: constraint.lower.map(|v| v - shift),
+                upper: constraint.upper.map(|v| v - shift),
+                name: constraint.name.clone(),
+            }
+        })
+        .collect()
+}
+
+fn shift_indicator_constraints(
+    indicators: &[IndicatorConstraint],
+    lb: &[f64],
+) -> Vec<IndicatorConstraint> {
+    indicators
+        .iter()
+        .enumerate()
+        .map(|(idx, indicator)| {
+            if indicator.coefs.len() != lb.len() {
+                panic!(
+                    "{MODEL}: indicator {idx} coefficient length {} does not match variable count {}",
+                    indicator.coefs.len(),
+                    lb.len()
+                );
+            }
+            let shift = linear_objective_value(&indicator.coefs, lb);
+            IndicatorConstraint {
+                binary_var: indicator.binary_var,
+                active_value: indicator.active_value,
+                coefs: indicator.coefs.clone(),
+                sense: indicator.sense,
+                rhs: indicator.rhs - shift,
+                name: indicator.name.clone(),
+            }
+        })
+        .collect()
+}
+
+fn shift_pwl_constraints(
+    constraints: &[PiecewiseLinearConstraint],
+    lb: &[f64],
+) -> Vec<PiecewiseLinearConstraint> {
+    constraints
+        .iter()
+        .enumerate()
+        .map(|(idx, pwl)| {
+            if pwl.x_var >= lb.len() {
+                panic!("{MODEL}: pwl {idx} x_var {} out of range", pwl.x_var);
+            }
+            if pwl.y_var >= lb.len() {
+                panic!("{MODEL}: pwl {idx} y_var {} out of range", pwl.y_var);
+            }
+            PiecewiseLinearConstraint {
+                x_var: pwl.x_var,
+                y_var: pwl.y_var,
+                points: pwl
+                    .points
+                    .iter()
+                    .map(|point| PiecewiseLinearPoint {
+                        x: point.x - lb[pwl.x_var],
+                        y: point.y - lb[pwl.y_var],
+                    })
+                    .collect(),
+                name: pwl.name.clone(),
+            }
+        })
+        .collect()
 }
 
 fn append_indicator_le_row(
@@ -4097,6 +4318,58 @@ pub fn build_piecewise_linear_reward_ip() -> PwlIPMIPProblem {
     }
 }
 
+/// Build a source-level model that combines several commercial-solver-style
+/// features before compilation: nonzero variable lower bounds, a ranged linear
+/// row, an indicator row, and a non-convex PWL reward curve.
+pub fn build_source_feature_mix_ip() -> SourceIPMIPProblem {
+    SourceIPMIPProblem {
+        base: IPMIPProblem {
+            sense: Sense::Max,
+            c: vec![0.0, 1.0, -1.0],
+            a: vec![vec![1.0, 0.0, 0.0]],
+            b: vec![4.0],
+            integer_vars: vec![false, false, true],
+            ub: Some(vec![4.0, 6.0, 1.0]),
+            var_names: Some(vec![
+                "activity".to_string(),
+                "reward".to_string(),
+                "use_upgrade".to_string(),
+            ]),
+            con_names: Some(vec!["activity_cap".to_string()]),
+            variable_nodes: None,
+            constraint_nodes: None,
+        },
+        lb: Some(vec![1.0, 0.0, 0.0]),
+        linear_constraints: vec![LinearRowConstraint {
+            coefs: vec![1.0, 1.0, 0.0],
+            lower: None,
+            upper: Some(7.0),
+            name: Some("activity_reward_budget".to_string()),
+        }],
+        indicators: vec![IndicatorConstraint {
+            binary_var: 2,
+            active_value: false,
+            coefs: vec![1.0, 0.0, 0.0],
+            sense: IndicatorSense::Le,
+            rhs: 1.0,
+            name: Some("upgrade_needed_above_baseline".to_string()),
+        }],
+        sos: Vec::new(),
+        semi_variables: Vec::new(),
+        pwl: vec![PiecewiseLinearConstraint {
+            x_var: 0,
+            y_var: 1,
+            points: vec![
+                PiecewiseLinearPoint { x: 1.0, y: 0.0 },
+                PiecewiseLinearPoint { x: 2.0, y: 5.0 },
+                PiecewiseLinearPoint { x: 3.0, y: 1.0 },
+                PiecewiseLinearPoint { x: 4.0, y: 3.0 },
+            ],
+            name: Some("upgrade_reward".to_string()),
+        }],
+    }
+}
+
 /// Build a lexicographic MIP:
 /// first select as many choices as possible, then prefer choice A over B among
 /// equal-cardinality selections.
@@ -4286,6 +4559,30 @@ mod tests {
         assert!((sol.z - 4.0).abs() < 1e-6, "z={}", sol.z);
         assert!((sol.x[0] - 1.0).abs() < 1e-6, "activity={}", sol.x[0]);
         assert!((sol.x[1] - 4.0).abs() < 1e-6, "reward={}", sol.x[1]);
+    }
+
+    #[test]
+    fn solves_source_feature_mix_ip() {
+        let p = build_source_feature_mix_ip();
+        let (linearized, offset, original_vars) = linearize_source_ipmip_problem(&p);
+        assert_eq!(original_vars, p.base.c.len());
+        assert_eq!(linearized.c.len(), p.base.c.len() + 7);
+        assert!((offset - 0.0).abs() < 1e-9, "offset={offset}");
+        let sol = solve_source_ipmip_with_des(
+            p,
+            IPMIPSolveOptions {
+                lp_algorithm: Some(LpRelaxationAlgorithm::Concrete(
+                    ConcreteLpRelaxationAlgorithm::InternalSimplex,
+                )),
+                max_cut_rounds: Some(0),
+                ..Default::default()
+            },
+        );
+        assert_eq!(sol.status, IPMIPStatus::Optimal);
+        assert!((sol.z - 4.0).abs() < 1e-6, "z={}", sol.z);
+        assert!((sol.x[0] - 2.0).abs() < 1e-6, "activity={}", sol.x[0]);
+        assert!((sol.x[1] - 5.0).abs() < 1e-6, "reward={}", sol.x[1]);
+        assert!((sol.x[2] - 1.0).abs() < 1e-6, "use={}", sol.x[2]);
     }
 
     #[test]

@@ -1241,22 +1241,34 @@ fn pivot(t: &mut Vec<Vec<f64>>, basis: &mut [usize], pivot_row: usize, pivot_col
 // External-solver dispatcher.
 // -----------------------------------------------------------------------------
 
-/// Default path to the repository-local Python LP bridge. The bridge prefers
-/// SciPy/HiGHS when installed and falls back to dependency-free vertex
+/// Default path to the repository-local Python LP bridge. The bridge supports
+/// SciPy/HiGHS and OR-Tools GLOP, and falls back to dependency-free vertex
 /// enumeration for small validation models.
 const DEFAULT_SCRIPT: &str = "scripts/lp_solve.py";
 
-/// Configuration for the external scipy bridge. TS `interface ExternalSolverOptions`.
+fn external_solver_label(method: &str) -> String {
+    let normalized = method.to_ascii_lowercase().replace('_', "-");
+    if matches!(
+        normalized.as_str(),
+        "glop" | "ortools-glop" | "ortools:glop"
+    ) {
+        "ortools:glop".to_string()
+    } else {
+        format!("scipy:{method}")
+    }
+}
+
+/// Configuration for the external Python LP bridge. TS `interface ExternalSolverOptions`.
 ///
 /// `method` is modelled as a free `String` (rather than a closed enum) to
-/// faithfully reproduce the TS behaviour where `LP_SOLVER=scipy:<anything>`
-/// passes `<anything>` straight through to scipy. `max_buffer` is accepted for
-/// API parity but unused: `std::process::Command` captures the full output.
+/// faithfully reproduce the TS behaviour where external methods can be passed
+/// through to the bridge. `max_buffer` is accepted for API parity but unused:
+/// `std::process::Command` captures the full output.
 #[derive(Clone, Debug, Default)]
 pub struct ExternalSolverOptions {
-    /// scipy linprog method: `"highs"`, `"highs-ds"`, `"highs-ipm"`, `"simplex"`, `"interior-point"`. Default `"highs"`.
+    /// External LP method: SciPy linprog methods (`"highs"`, `"highs-ds"`, `"highs-ipm"`) or OR-Tools `"glop"`. Default `"highs"`.
     pub method: Option<String>,
-    /// Override the python executable. Defaults to `PYTHON` env var or `"python3"`.
+    /// Override the python executable. Defaults to `PYTHON`, then `PYTHON_BIN`, then `"python3"`.
     pub python: Option<String>,
     /// Override the script path. Defaults to `scripts/lp_solve.py`.
     pub script: Option<String>,
@@ -1264,8 +1276,8 @@ pub struct ExternalSolverOptions {
     pub max_buffer: Option<usize>,
 }
 
-/// External scipy.optimize.linprog dispatcher as a transform. Returns status
-/// `NumericalError` if scipy / python is unavailable (or the process fails /
+/// External Python LP dispatcher as a transform. Returns status
+/// `NumericalError` if the requested solver / python is unavailable (or the process fails /
 /// emits unparseable output) — use `LPSolver` for graceful fallback.
 #[derive(Clone, Debug, Default)]
 pub struct ExternalSolver {
@@ -1287,11 +1299,13 @@ impl ExternalSolver {
             .method
             .clone()
             .unwrap_or_else(|| "highs".to_string());
+        let requested_solver = external_solver_label(&method);
         let python = self
             .opts
             .python
             .clone()
             .or_else(|| std::env::var("PYTHON").ok())
+            .or_else(|| std::env::var("PYTHON_BIN").ok())
             .unwrap_or_else(|| "python3".to_string());
         let script = self
             .opts
@@ -1307,7 +1321,7 @@ impl ExternalSolver {
             dual_eq: None,
             reduced_costs: None,
             iters: None,
-            solver: format!("scipy:{method}"),
+            solver: requested_solver.clone(),
             elapsed_ms: ms_since(t0),
             message: Some(msg),
         };
@@ -1325,7 +1339,7 @@ impl ExternalSolver {
         {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("[lp.external] scipy:{method} could not start ({python}): {e}");
+                eprintln!("[lp.external] {requested_solver} could not start ({python}): {e}");
                 return numerical_error(format!("external solver could not start: {e}"), t0);
             }
         };
@@ -1338,7 +1352,7 @@ impl ExternalSolver {
         let out = match child.wait_with_output() {
             Ok(o) => o,
             Err(e) => {
-                eprintln!("[lp.external] scipy:{method} wait failed: {e}");
+                eprintln!("[lp.external] {requested_solver} wait failed: {e}");
                 return numerical_error(format!("external solver wait failed: {e}"), t0);
             }
         };
@@ -1355,7 +1369,7 @@ impl ExternalSolver {
             } else {
                 stderr.to_string()
             };
-            eprintln!("[lp.external] scipy:{method} process exited with code {code}: {stderr}");
+            eprintln!("[lp.external] {requested_solver} process exited with code {code}: {stderr}");
             return numerical_error(format!("external solver exited with {code}: {stderr}"), t0);
         }
 
@@ -1365,7 +1379,7 @@ impl ExternalSolver {
             Err(e) => {
                 let head: String = stdout.chars().take(120).collect();
                 eprintln!(
-                    "[lp.external] could not parse scipy:{method} stdout as JSON: {e}; stdout head=\"{head}\""
+                    "[lp.external] could not parse {requested_solver} stdout as JSON: {e}; stdout head=\"{head}\""
                 );
                 return numerical_error(
                     format!("failed to parse external solver stdout as JSON: {e}"),
@@ -1384,6 +1398,10 @@ impl ExternalSolver {
         let objective = json_get(&parsed, "objective")
             .and_then(json_as_f64)
             .unwrap_or(f64::NAN);
+        let solver = json_get(&parsed, "solver")
+            .and_then(json_as_str)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| requested_solver.clone());
 
         LPSolution {
             status,
@@ -1395,7 +1413,7 @@ impl ExternalSolver {
             iters: json_get(&parsed, "iters")
                 .and_then(json_as_f64)
                 .map(|f| f as usize),
-            solver: format!("scipy:{method}"),
+            solver,
             elapsed_ms: ms_since(t0),
             message: json_get(&parsed, "message")
                 .and_then(json_as_str)
@@ -1465,6 +1483,7 @@ impl LpSolverOptions {
 ///   LP_SOLVER=scipy:highs-ds        scipy dual simplex HiGHS
 ///   LP_SOLVER=scipy:simplex         legacy scipy simplex
 ///   LP_SOLVER=scipy:interior-point  legacy scipy interior-point
+///   LP_SOLVER=ortools:glop          OR-Tools GLOP linear solver
 /// ```
 #[derive(Clone, Debug, Default)]
 pub struct LPSolver {
@@ -1493,6 +1512,26 @@ impl Transform<LPProblem, LPSolution> for LPSolver {
                 return ext;
             }
             // Fall back to internal if the external bridge failed (no scipy / no python / etc).
+            eprintln!(
+                "[lp.solveLP] external solver '{choice}' unavailable/failed ({}); falling back to internal simplex.",
+                ext.message.as_deref().unwrap_or("unknown")
+            );
+            let mut fallback = run_internal_simplex(&input, &self.opts.internal());
+            let prefix = match &fallback.message {
+                Some(m) => format!("{m} | "),
+                None => String::new(),
+            };
+            fallback.message = Some(format!(
+                "{prefix}external solver unavailable, fell back to internal: {}",
+                ext.message.as_deref().unwrap_or("")
+            ));
+            return fallback;
+        }
+        if choice == "ortools:glop" || choice == "glop" {
+            let ext = ExternalSolver::new(self.opts.external(Some("glop".to_string()))).run(&input);
+            if ext.status != LPStatus::NumericalError {
+                return ext;
+            }
             eprintln!(
                 "[lp.solveLP] external solver '{choice}' unavailable/failed ({}); falling back to internal simplex.",
                 ext.message.as_deref().unwrap_or("unknown")

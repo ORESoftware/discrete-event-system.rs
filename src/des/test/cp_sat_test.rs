@@ -8,9 +8,10 @@ mod tests {
     use serde::Deserialize;
 
     use crate::des::general::cp_sat::{
-        solve_cp_model, BoolLiteral, CpConstraint, CpDemandInterval, CpElement, CpInterval,
-        CpModel, CpObjective, CpSolveOptions, CpStatus, CpVariable, LinearSense, LinearTerm,
-        ObjectiveSense,
+        solve_cp_model, BoolLiteral, CpAutomaton, CpCircuitArc, CpConstraint, CpDemandInterval,
+        CpDomainInterval, CpElement, CpInterval, CpModel, CpObjective, CpRectangle,
+        CpReservoirEvent, CpSolveOptions, CpStatus, CpTransition, CpVariable, LinearSense,
+        LinearTerm, ObjectiveSense,
     };
 
     #[derive(Debug, Deserialize)]
@@ -163,6 +164,98 @@ mod tests {
                 CpVariable {
                     name: "score_product".to_string(),
                     domain: vec![6, 10, 12, 20],
+                },
+                CpVariable {
+                    name: "pack_a_x".to_string(),
+                    domain: vec![0],
+                },
+                CpVariable {
+                    name: "pack_a_y".to_string(),
+                    domain: vec![0],
+                },
+                CpVariable {
+                    name: "pack_b_x".to_string(),
+                    domain: vec![0, 1, 2],
+                },
+                CpVariable {
+                    name: "pack_b_y".to_string(),
+                    domain: vec![0],
+                },
+                CpVariable {
+                    name: "automaton_0".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "automaton_1".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "automaton_2".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "circuit_0_1".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "circuit_1_2".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "circuit_2_0".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "arith_value".to_string(),
+                    domain: vec![5, 6, 7],
+                },
+                CpVariable {
+                    name: "arith_divisor".to_string(),
+                    domain: vec![2],
+                },
+                CpVariable {
+                    name: "arith_quotient".to_string(),
+                    domain: vec![2, 3],
+                },
+                CpVariable {
+                    name: "arith_remainder".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "reservoir_fill_time".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "reservoir_drain_time".to_string(),
+                    domain: vec![0],
+                },
+                CpVariable {
+                    name: "reservoir_overfill_active".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "linear_domain_x".to_string(),
+                    domain: vec![0, 1, 2],
+                },
+                CpVariable {
+                    name: "linear_domain_y".to_string(),
+                    domain: vec![0, 1, 2],
+                },
+                CpVariable {
+                    name: "mapped_mode".to_string(),
+                    domain: vec![5],
+                },
+                CpVariable {
+                    name: "mapped_is_five".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "mapped_is_six".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "mapped_is_seven".to_string(),
+                    domain: vec![0, 1],
                 },
             ],
             constraints: vec![
@@ -324,6 +417,134 @@ mod tests {
                     target: 34,
                     vars: vec![24, 25],
                 },
+                CpConstraint::NoOverlap2D(vec![
+                    CpRectangle {
+                        x_start: 35,
+                        y_start: 36,
+                        width: 2,
+                        height: 2,
+                        name: Some("pack_a".to_string()),
+                    },
+                    CpRectangle {
+                        x_start: 37,
+                        y_start: 38,
+                        width: 2,
+                        height: 2,
+                        name: Some("pack_b".to_string()),
+                    },
+                ]),
+                CpConstraint::Automaton(CpAutomaton {
+                    vars: vec![39, 40, 41],
+                    starting_state: 0,
+                    final_states: vec![1],
+                    transitions: vec![
+                        CpTransition {
+                            tail: 0,
+                            label: 0,
+                            head: 0,
+                        },
+                        CpTransition {
+                            tail: 0,
+                            label: 1,
+                            head: 1,
+                        },
+                        CpTransition {
+                            tail: 1,
+                            label: 0,
+                            head: 1,
+                        },
+                        CpTransition {
+                            tail: 1,
+                            label: 1,
+                            head: 2,
+                        },
+                        CpTransition {
+                            tail: 2,
+                            label: 0,
+                            head: 2,
+                        },
+                        CpTransition {
+                            tail: 2,
+                            label: 1,
+                            head: 2,
+                        },
+                    ],
+                }),
+                CpConstraint::Circuit(vec![
+                    CpCircuitArc {
+                        tail: 0,
+                        head: 1,
+                        literal: BoolLiteral {
+                            var: 42,
+                            positive: true,
+                        },
+                    },
+                    CpCircuitArc {
+                        tail: 1,
+                        head: 2,
+                        literal: BoolLiteral {
+                            var: 43,
+                            positive: true,
+                        },
+                    },
+                    CpCircuitArc {
+                        tail: 2,
+                        head: 0,
+                        literal: BoolLiteral {
+                            var: 44,
+                            positive: true,
+                        },
+                    },
+                ]),
+                CpConstraint::DivisionEquality {
+                    target: 47,
+                    numerator: 45,
+                    denominator: 46,
+                },
+                CpConstraint::ModuloEquality {
+                    target: 48,
+                    var: 45,
+                    modulus: 46,
+                },
+                CpConstraint::Reservoir {
+                    events: vec![
+                        CpReservoirEvent {
+                            time: 49,
+                            level_change: 4,
+                            active: None,
+                        },
+                        CpReservoirEvent {
+                            time: 50,
+                            level_change: -3,
+                            active: None,
+                        },
+                        CpReservoirEvent {
+                            time: 50,
+                            level_change: 10,
+                            active: Some(BoolLiteral {
+                                var: 51,
+                                positive: true,
+                            }),
+                        },
+                    ],
+                    min_level: 0,
+                    max_level: 4,
+                },
+                CpConstraint::LinearDomain {
+                    terms: vec![
+                        LinearTerm { var: 52, coeff: 1 },
+                        LinearTerm { var: 53, coeff: 2 },
+                    ],
+                    intervals: vec![
+                        CpDomainInterval { lb: 1, ub: 1 },
+                        CpDomainInterval { lb: 4, ub: 4 },
+                    ],
+                },
+                CpConstraint::MapDomain {
+                    var: 54,
+                    bools: vec![55, 56, 57],
+                    offset: 5,
+                },
             ],
             objective: Some(CpObjective {
                 sense: ObjectiveSense::Min,
@@ -345,6 +566,7 @@ mod tests {
                     LinearTerm { var: 16, coeff: 5 },
                     LinearTerm { var: 17, coeff: 4 },
                     LinearTerm { var: 18, coeff: 1 },
+                    LinearTerm { var: 19, coeff: 1 },
                     LinearTerm { var: 20, coeff: 1 },
                     LinearTerm { var: 21, coeff: 2 },
                     LinearTerm { var: 26, coeff: 1 },
@@ -353,6 +575,17 @@ mod tests {
                     LinearTerm { var: 32, coeff: 1 },
                     LinearTerm { var: 33, coeff: 2 },
                     LinearTerm { var: 34, coeff: 1 },
+                    LinearTerm { var: 39, coeff: 4 },
+                    LinearTerm { var: 40, coeff: 2 },
+                    LinearTerm { var: 41, coeff: 1 },
+                    LinearTerm { var: 45, coeff: 1 },
+                    LinearTerm { var: 47, coeff: 10 },
+                    LinearTerm { var: 48, coeff: 1 },
+                    LinearTerm { var: 49, coeff: 1 },
+                    LinearTerm { var: 51, coeff: -1 },
+                    LinearTerm { var: 52, coeff: 1 },
+                    LinearTerm { var: 53, coeff: 1 },
+                    LinearTerm { var: 54, coeff: 1 },
                 ],
             }),
         }
@@ -373,6 +606,24 @@ mod tests {
                     "terms": terms.iter().map(|t| serde_json::json!({"var": t.var, "coeff": t.coeff})).collect::<Vec<_>>(),
                     "sense": sense.as_str(),
                     "rhs": rhs,
+                }),
+                CpConstraint::LinearDomain { terms, intervals } => serde_json::json!({
+                    "kind": "linear_domain",
+                    "terms": terms.iter().map(|t| serde_json::json!({"var": t.var, "coeff": t.coeff})).collect::<Vec<_>>(),
+                    "intervals": intervals.iter().map(|interval| serde_json::json!({
+                        "lb": interval.lb,
+                        "ub": interval.ub,
+                    })).collect::<Vec<_>>(),
+                }),
+                CpConstraint::MapDomain {
+                    var,
+                    bools,
+                    offset,
+                } => serde_json::json!({
+                    "kind": "map_domain",
+                    "var": var,
+                    "bools": bools,
+                    "offset": offset,
                 }),
                 CpConstraint::EnforcedLinear {
                     enforcement,
@@ -417,6 +668,14 @@ mod tests {
                     "antecedent": {"var": antecedent.var, "positive": antecedent.positive},
                     "consequent": {"var": consequent.var, "positive": consequent.positive},
                 }),
+                CpConstraint::Circuit(arcs) => serde_json::json!({
+                    "kind": "circuit",
+                    "arcs": arcs.iter().map(|arc| serde_json::json!({
+                        "tail": arc.tail,
+                        "head": arc.head,
+                        "literal": {"var": arc.literal.var, "positive": arc.literal.positive},
+                    })).collect::<Vec<_>>(),
+                }),
                 CpConstraint::AllowedAssignments { vars, tuples } => serde_json::json!({
                     "kind": "allowed_assignments",
                     "vars": vars,
@@ -452,6 +711,37 @@ mod tests {
                     "target": target,
                     "vars": vars,
                 }),
+                CpConstraint::DivisionEquality {
+                    target,
+                    numerator,
+                    denominator,
+                } => serde_json::json!({
+                    "kind": "division_equality",
+                    "target": target,
+                    "numerator": numerator,
+                    "denominator": denominator,
+                }),
+                CpConstraint::ModuloEquality {
+                    target,
+                    var,
+                    modulus,
+                } => serde_json::json!({
+                    "kind": "modulo_equality",
+                    "target": target,
+                    "var": var,
+                    "modulus": modulus,
+                }),
+                CpConstraint::Automaton(automaton) => serde_json::json!({
+                    "kind": "automaton",
+                    "vars": automaton.vars,
+                    "starting_state": automaton.starting_state,
+                    "final_states": automaton.final_states,
+                    "transitions": automaton.transitions.iter().map(|transition| serde_json::json!({
+                        "tail": transition.tail,
+                        "label": transition.label,
+                        "head": transition.head,
+                    })).collect::<Vec<_>>(),
+                }),
                 CpConstraint::Element(element) => serde_json::json!({
                     "kind": "element",
                     "index": element.index,
@@ -466,6 +756,16 @@ mod tests {
                         "name": interval.name,
                     })).collect::<Vec<_>>(),
                 }),
+                CpConstraint::NoOverlap2D(rectangles) => serde_json::json!({
+                    "kind": "no_overlap_2d",
+                    "rectangles": rectangles.iter().map(|rectangle| serde_json::json!({
+                        "x_start": rectangle.x_start,
+                        "y_start": rectangle.y_start,
+                        "width": rectangle.width,
+                        "height": rectangle.height,
+                        "name": rectangle.name,
+                    })).collect::<Vec<_>>(),
+                }),
                 CpConstraint::Cumulative {
                     intervals,
                     capacity,
@@ -477,6 +777,23 @@ mod tests {
                         "duration": interval.duration,
                         "demand": interval.demand,
                         "name": interval.name,
+                    })).collect::<Vec<_>>(),
+                }),
+                CpConstraint::Reservoir {
+                    events,
+                    min_level,
+                    max_level,
+                } => serde_json::json!({
+                    "kind": "reservoir",
+                    "min_level": min_level,
+                    "max_level": max_level,
+                    "events": events.iter().map(|event| serde_json::json!({
+                        "time": event.time,
+                        "level_change": event.level_change,
+                        "active": event.active.as_ref().map(|lit| serde_json::json!({
+                            "var": lit.var,
+                            "positive": lit.positive,
+                        })),
                     })).collect::<Vec<_>>(),
                 }),
             })
@@ -498,7 +815,8 @@ mod tests {
     fn run_reference(model: &CpModel) -> CpReference {
         let root = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
         let script = format!("{root}/scripts/cp_sat_reference.py");
-        let mut child = Command::new("python3")
+        let python = std::env::var("PYTHON_BIN").unwrap_or_else(|_| "python3".to_string());
+        let mut child = Command::new(python)
             .arg(script)
             .arg("--solver")
             .arg("auto")

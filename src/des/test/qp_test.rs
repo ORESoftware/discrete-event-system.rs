@@ -126,7 +126,8 @@ mod tests {
     fn run_reference_json(input: String) -> QPReference {
         let root = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
         let script = format!("{root}/scripts/qp_reference.py");
-        let mut child = Command::new("python3")
+        let python = std::env::var("PYTHON_BIN").unwrap_or_else(|_| "python3".to_string());
+        let mut child = Command::new(python)
             .arg(script)
             .arg("--solver")
             .arg("auto")

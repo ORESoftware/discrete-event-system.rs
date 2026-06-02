@@ -21,6 +21,11 @@ def objective_value(model: dict, assignment: Sequence[int]) -> Optional[int]:
     return sum(int(t["coeff"]) * int(assignment[int(t["var"])]) for t in obj.get("terms", []))
 
 
+def trunc_div(num: int, den: int) -> int:
+    quotient = abs(num) // abs(den)
+    return quotient if (num >= 0) == (den >= 0) else -quotient
+
+
 def linear_bounds(model: dict, partial: Sequence[Optional[int]], terms: Sequence[dict]) -> tuple[int, int]:
     lo = hi = 0
     for term in terms:
@@ -48,6 +53,49 @@ def literal_truth(partial: Sequence[Optional[int]], lit: dict) -> Optional[bool]
     return (int(value) == 1) if bool(lit.get("positive", True)) else (int(value) == 0)
 
 
+def circuit_complete_ok(selected: Sequence[dict], nodes: Sequence[int]) -> bool:
+    out = {}
+    incoming = {}
+    for node in nodes:
+        outgoing = [arc for arc in selected if int(arc["tail"]) == node]
+        inbound = [arc for arc in selected if int(arc["head"]) == node]
+        if len(outgoing) != 1 or len(inbound) != 1:
+            return False
+        out[node] = int(outgoing[0]["head"])
+        incoming[node] = int(inbound[0]["tail"])
+
+    active_nodes = [node for node in nodes if out[node] != node]
+    if not active_nodes:
+        return True
+
+    start = active_nodes[0]
+    current = start
+    seen = []
+    while True:
+        if current in seen:
+            return current == start and len(seen) == len(active_nodes)
+        if current not in active_nodes:
+            return False
+        seen.append(current)
+        current = out[current]
+
+
+def reservoir_complete_ok(events: Sequence[tuple[int, int]], min_level: int, max_level: int) -> bool:
+    if not (min_level <= 0 <= max_level):
+        return False
+    level = 0
+    sorted_events = sorted(events)
+    i = 0
+    while i < len(sorted_events):
+        time = sorted_events[i][0]
+        while i < len(sorted_events) and sorted_events[i][0] == time:
+            level += sorted_events[i][1]
+            i += 1
+        if level < min_level or level > max_level:
+            return False
+    return True
+
+
 def enforcement_state(partial: Sequence[Optional[int]], literals: Sequence[dict]) -> Optional[bool]:
     unknown = False
     for lit in literals:
@@ -72,6 +120,11 @@ def linear_partial_ok(model: dict, partial: Sequence[Optional[int]], c: dict) ->
     return True
 
 
+def linear_domain_partial_ok(model: dict, partial: Sequence[Optional[int]], c: dict) -> bool:
+    lo, hi = linear_bounds(model, partial, c["terms"])
+    return any(int(interval["lb"]) <= hi and lo <= int(interval["ub"]) for interval in c["intervals"])
+
+
 def product_range(bounds: Sequence[tuple[int, int]]) -> tuple[int, int]:
     lo = 1
     hi = 1
@@ -93,6 +146,39 @@ def partial_ok(model: dict, partial: Sequence[Optional[int]]) -> bool:
         if kind == "linear":
             if not linear_partial_ok(model, partial, c):
                 return False
+        elif kind == "linear_domain":
+            if not linear_domain_partial_ok(model, partial, c):
+                return False
+        elif kind == "map_domain":
+            var = int(c["var"])
+            bools = [int(v) for v in c["bools"]]
+            offset = int(c.get("offset", 0))
+            var_value = partial[var]
+            true_target = None
+            for i, bool_var in enumerate(bools):
+                target = offset + i
+                bool_value = partial[bool_var]
+                if bool_value == 1:
+                    if true_target is not None and true_target != target:
+                        return False
+                    if var_value is not None and int(var_value) != target:
+                        return False
+                    true_target = target
+                elif bool_value == 0:
+                    if var_value is not None and int(var_value) == target:
+                        return False
+                elif bool_value is not None:
+                    return False
+            if true_target is not None:
+                if true_target not in [int(value) for value in model["variables"][var]["domain"]]:
+                    return False
+            elif var_value is None:
+                domain = [int(value) for value in model["variables"][var]["domain"]]
+                if not any(
+                    all(candidate != offset + i or partial[bool_var] != 0 for i, bool_var in enumerate(bools))
+                    for candidate in domain
+                ):
+                    return False
         elif kind == "enforced_linear":
             active = enforcement_state(partial, c["enforcement"])
             if active is True and not linear_partial_ok(model, partial, c):
@@ -155,6 +241,44 @@ def partial_ok(model: dict, partial: Sequence[Optional[int]]) -> bool:
             antecedent = literal_truth(partial, c["antecedent"])
             consequent = literal_truth(partial, c["consequent"])
             if antecedent is True and consequent is False:
+                return False
+        elif kind == "circuit":
+            arcs = c["arcs"]
+            nodes = sorted({int(arc["tail"]) for arc in arcs} | {int(arc["head"]) for arc in arcs})
+            for node in nodes:
+                true_out = sum(
+                    1
+                    for arc in arcs
+                    if int(arc["tail"]) == node and literal_truth(partial, arc["literal"]) is True
+                )
+                true_in = sum(
+                    1
+                    for arc in arcs
+                    if int(arc["head"]) == node and literal_truth(partial, arc["literal"]) is True
+                )
+                if true_out > 1 or true_in > 1:
+                    return False
+                possible_out = sum(
+                    1
+                    for arc in arcs
+                    if int(arc["tail"]) == node and literal_truth(partial, arc["literal"]) is not False
+                )
+                possible_in = sum(
+                    1
+                    for arc in arcs
+                    if int(arc["head"]) == node and literal_truth(partial, arc["literal"]) is not False
+                )
+                if possible_out == 0 or possible_in == 0:
+                    return False
+            all_bound = True
+            selected = []
+            for arc in arcs:
+                truth = literal_truth(partial, arc["literal"])
+                if truth is True:
+                    selected.append(arc)
+                elif truth is None:
+                    all_bound = False
+            if all_bound and not circuit_complete_ok(selected, nodes):
                 return False
         elif kind == "allowed_assignments":
             vars_ = [int(v) for v in c["vars"]]
@@ -277,6 +401,80 @@ def partial_ok(model: dict, partial: Sequence[Optional[int]]) -> bool:
                     dom = [int(v) for v in model["variables"][target]["domain"]]
                     if max(dom) < product_lo or min(dom) > product_hi:
                         return False
+        elif kind == "division_equality":
+            target = int(c["target"])
+            numerator = int(c["numerator"])
+            denominator = int(c["denominator"])
+            target_values = (
+                [int(partial[target])]
+                if partial[target] is not None
+                else [int(v) for v in model["variables"][target]["domain"]]
+            )
+            numerator_values = (
+                [int(partial[numerator])]
+                if partial[numerator] is not None
+                else [int(v) for v in model["variables"][numerator]["domain"]]
+            )
+            denominator_values = (
+                [int(partial[denominator])]
+                if partial[denominator] is not None
+                else [int(v) for v in model["variables"][denominator]["domain"]]
+            )
+            if not any(
+                den != 0 and trunc_div(num, den) in target_values
+                for num in numerator_values
+                for den in denominator_values
+            ):
+                return False
+        elif kind == "modulo_equality":
+            target = int(c["target"])
+            var = int(c["var"])
+            modulus = int(c["modulus"])
+            target_values = (
+                [int(partial[target])]
+                if partial[target] is not None
+                else [int(v) for v in model["variables"][target]["domain"]]
+            )
+            var_values = (
+                [int(partial[var])]
+                if partial[var] is not None
+                else [int(v) for v in model["variables"][var]["domain"]]
+            )
+            modulus_values = (
+                [int(partial[modulus])]
+                if partial[modulus] is not None
+                else [int(v) for v in model["variables"][modulus]["domain"]]
+            )
+            if not any(
+                mod != 0 and value % mod in target_values
+                for value in var_values
+                for mod in modulus_values
+            ):
+                return False
+        elif kind == "automaton":
+            states = {int(c["starting_state"])}
+            transitions = [
+                (int(t["tail"]), int(t["label"]), int(t["head"]))
+                for t in c["transitions"]
+            ]
+            for var in [int(v) for v in c["vars"]]:
+                value = partial[var]
+                labels = (
+                    [int(value)]
+                    if value is not None
+                    else [int(v) for v in model["variables"][var]["domain"]]
+                )
+                next_states = {
+                    head
+                    for tail, label, head in transitions
+                    if tail in states and label in labels
+                }
+                if not next_states:
+                    return False
+                states = next_states
+            final_states = {int(s) for s in c["final_states"]}
+            if not (states & final_states):
+                return False
         elif kind == "element":
             index_var = int(c["index"])
             target_var = int(c["target"])
@@ -313,6 +511,26 @@ def partial_ok(model: dict, partial: Sequence[Optional[int]]) -> bool:
                     end_b = int(start_b) + int(b["duration"])
                     if not (end_a <= int(start_b) or end_b <= int(start_a)):
                         return False
+        elif kind == "no_overlap_2d":
+            rectangles = c["rectangles"]
+            for i, a in enumerate(rectangles):
+                x_a = partial[int(a["x_start"])]
+                y_a = partial[int(a["y_start"])]
+                if x_a is None or y_a is None:
+                    continue
+                x_end_a = int(x_a) + int(a["width"])
+                y_end_a = int(y_a) + int(a["height"])
+                for b in rectangles[i + 1:]:
+                    x_b = partial[int(b["x_start"])]
+                    y_b = partial[int(b["y_start"])]
+                    if x_b is None or y_b is None:
+                        continue
+                    x_end_b = int(x_b) + int(b["width"])
+                    y_end_b = int(y_b) + int(b["height"])
+                    x_disjoint = x_end_a <= int(x_b) or x_end_b <= int(x_a)
+                    y_disjoint = y_end_a <= int(y_b) or y_end_b <= int(y_a)
+                    if not (x_disjoint or y_disjoint):
+                        return False
         elif kind == "cumulative":
             assigned = []
             for interval in c["intervals"]:
@@ -326,6 +544,29 @@ def partial_ok(model: dict, partial: Sequence[Optional[int]]) -> bool:
                 load = sum(demand for start, end, demand in assigned if start <= t < end)
                 if load > capacity:
                     return False
+        elif kind == "reservoir":
+            all_bound = True
+            active_events = []
+            for event in c["events"]:
+                active = True
+                if event.get("active") is not None:
+                    active = literal_truth(partial, event["active"])
+                if active is False:
+                    continue
+                if active is None:
+                    all_bound = False
+                    continue
+                time = partial[int(event["time"])]
+                if time is None:
+                    all_bound = False
+                    continue
+                active_events.append((int(time), int(event["level_change"])))
+            if all_bound and not reservoir_complete_ok(
+                active_events,
+                int(c["min_level"]),
+                int(c["max_level"]),
+            ):
+                return False
         else:
             raise ValueError(f"unknown constraint kind {kind}")
     return True
@@ -400,6 +641,20 @@ def ortools_reference(model: dict) -> Optional[dict]:
                 cp.Add(expr >= int(c["rhs"]))
             else:
                 cp.Add(expr == int(c["rhs"]))
+        elif kind == "linear_domain":
+            expr = sum(int(t["coeff"]) * xs[int(t["var"])] for t in c["terms"])
+            cp.AddLinearExpressionInDomain(
+                expr,
+                cp_model.Domain.FromIntervals(
+                    [[int(interval["lb"]), int(interval["ub"])] for interval in c["intervals"]]
+                ),
+            )
+        elif kind == "map_domain":
+            cp.AddMapDomain(
+                xs[int(c["var"])],
+                [xs[int(v)] for v in c["bools"]],
+                int(c.get("offset", 0)),
+            )
         elif kind == "enforced_linear":
             expr = sum(int(t["coeff"]) * xs[int(t["var"])] for t in c["terms"])
             if c["sense"] == "le":
@@ -451,6 +706,13 @@ def ortools_reference(model: dict) -> Optional[dict]:
             antecedent = antecedent_var if bool(c["antecedent"].get("positive", True)) else antecedent_var.Not()
             consequent = consequent_var if bool(c["consequent"].get("positive", True)) else consequent_var.Not()
             cp.AddImplication(antecedent, consequent)
+        elif kind == "circuit":
+            arcs = []
+            for arc in c["arcs"]:
+                x = xs[int(arc["literal"]["var"])]
+                lit = x if bool(arc["literal"].get("positive", True)) else x.Not()
+                arcs.append((int(arc["tail"]), int(arc["head"]), lit))
+            cp.AddCircuit(arcs)
         elif kind == "allowed_assignments":
             cp.AddAllowedAssignments(
                 [xs[int(v)] for v in c["vars"]],
@@ -486,6 +748,28 @@ def ortools_reference(model: dict) -> Optional[dict]:
                 xs[int(c["target"])],
                 [xs[int(v)] for v in c["vars"]],
             )
+        elif kind == "division_equality":
+            cp.AddDivisionEquality(
+                xs[int(c["target"])],
+                xs[int(c["numerator"])],
+                xs[int(c["denominator"])],
+            )
+        elif kind == "modulo_equality":
+            cp.AddModuloEquality(
+                xs[int(c["target"])],
+                xs[int(c["var"])],
+                xs[int(c["modulus"])],
+            )
+        elif kind == "automaton":
+            cp.AddAutomaton(
+                [xs[int(v)] for v in c["vars"]],
+                int(c["starting_state"]),
+                [int(s) for s in c["final_states"]],
+                [
+                    (int(t["tail"]), int(t["label"]), int(t["head"]))
+                    for t in c["transitions"]
+                ],
+            )
         elif kind == "element":
             cp.AddElement(
                 xs[int(c["index"])],
@@ -504,6 +788,26 @@ def ortools_reference(model: dict) -> Optional[dict]:
                     )
                 )
             cp.AddNoOverlap(intervals)
+        elif kind == "no_overlap_2d":
+            x_intervals = []
+            y_intervals = []
+            for i, rectangle in enumerate(c["rectangles"]):
+                name = rectangle.get("name", f"rectangle_{i}")
+                x_intervals.append(
+                    cp.NewFixedSizeIntervalVar(
+                        xs[int(rectangle["x_start"])],
+                        int(rectangle["width"]),
+                        f"{name}_x",
+                    )
+                )
+                y_intervals.append(
+                    cp.NewFixedSizeIntervalVar(
+                        xs[int(rectangle["y_start"])],
+                        int(rectangle["height"]),
+                        f"{name}_y",
+                    )
+                )
+            cp.AddNoOverlap2D(x_intervals, y_intervals)
         elif kind == "cumulative":
             intervals = []
             demands = []
@@ -518,6 +822,33 @@ def ortools_reference(model: dict) -> Optional[dict]:
                 )
                 demands.append(int(interval["demand"]))
             cp.AddCumulative(intervals, demands, int(c["capacity"]))
+        elif kind == "reservoir":
+            times = [xs[int(event["time"])] for event in c["events"]]
+            level_changes = [int(event["level_change"]) for event in c["events"]]
+            if any(event.get("active") is not None for event in c["events"]):
+                actives = []
+                for event in c["events"]:
+                    active = event.get("active")
+                    if active is None:
+                        literal = cp.NewConstant(1)
+                    else:
+                        var = xs[int(active["var"])]
+                        literal = var if bool(active.get("positive", True)) else var.Not()
+                    actives.append(literal)
+                cp.AddReservoirConstraintWithActive(
+                    times,
+                    level_changes,
+                    actives,
+                    int(c["min_level"]),
+                    int(c["max_level"]),
+                )
+            else:
+                cp.AddReservoirConstraint(
+                    times,
+                    level_changes,
+                    int(c["min_level"]),
+                    int(c["max_level"]),
+                )
     if model.get("objective"):
         expr = sum(int(t["coeff"]) * xs[int(t["var"])] for t in model["objective"]["terms"])
         if model["objective"].get("sense", "min") == "min":

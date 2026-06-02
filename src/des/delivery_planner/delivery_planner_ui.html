@@ -17,6 +17,7 @@ button,input,textarea{font:inherit}
 button{border:1px solid var(--line);border-radius:6px;background:#fff;color:var(--ink);padding:7px 10px;cursor:pointer}
 button:hover{border-color:#8ca1b2;background:#f8fbfd}
 button.primary{background:var(--blue);border-color:var(--blue);color:white;font-weight:700}
+button.primary.solving{animation:solvePulse .7s ease-in-out infinite alternate}
 button.toggle.active{border-color:var(--blue);background:#eef5ff;color:var(--blue);font-weight:700}
 button.icon{width:34px;height:34px;padding:0;display:inline-grid;place-items:center;font-weight:800}
 button:disabled{opacity:.55;cursor:wait}
@@ -31,7 +32,7 @@ textarea{resize:vertical;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,
 .user-chip{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--line);background:#fff;border-radius:999px;padding:6px 9px;color:var(--muted);font-size:12px;max-width:260px}
 .user-dot{width:8px;height:8px;border-radius:50%;background:var(--green);flex:0 0 auto}
 .user-chip span:last-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.layout{min-height:0;display:grid;grid-template-columns:390px minmax(0,1fr)}
+.layout{min-height:0;display:grid;grid-template-columns:390px minmax(0,1fr) 286px}
 aside{min-height:0;overflow:auto;background:var(--panel);border-right:1px solid var(--line);padding:12px}
 main{min-height:0;display:grid;grid-template-rows:auto auto minmax(0,1fr) auto;background:#fff}
 .section{border-bottom:1px solid var(--line);padding:0 0 14px;margin-bottom:14px}
@@ -66,6 +67,10 @@ label{display:block;color:var(--muted);font-size:12px;margin:0 0 4px}
 .metric{background:#fbfcfd;padding:9px 11px;min-width:0}
 .metric span{display:block;color:var(--muted);font-size:11px;text-transform:uppercase;white-space:nowrap}
 .metric b{display:block;margin-top:2px;font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.warning-banner{display:flex;gap:10px;align-items:flex-start;padding:10px 14px;border-bottom:1px solid #edc79c;background:#fff8ed;color:#7a3d10}
+.warning-banner b{display:block;font-size:13px}
+.warning-banner span:last-child{display:block;margin-top:2px;color:#8a541f;font-size:12px}
+.warning-mark{width:22px;height:22px;display:grid;place-items:center;flex:0 0 auto;border-radius:50%;background:#b56b12;color:#fff;font-weight:900;font-size:14px}
 .tabs{display:flex;border-bottom:1px solid var(--line);background:#f7fafc}
 .tab{border:0;border-right:1px solid var(--line);border-radius:0;background:transparent;color:var(--muted);padding:10px 14px}
 .tab.active{background:#fff;color:var(--ink);box-shadow:inset 0 -2px 0 var(--blue)}
@@ -108,9 +113,23 @@ label{display:block;color:var(--muted);font-size:12px;margin:0 0 4px}
 .route-loader i:nth-child(2){animation-delay:.18s;background:#287d55;box-shadow:0 0 0 4px #ddf0e7}
 .route-loader i:nth-child(3){animation-delay:.36s;background:#f3a712;box-shadow:0 0 0 4px #fff1cf}
 @keyframes drive{0%{left:8px;opacity:.3;transform:scale(.82)}45%{opacity:1;transform:scale(1)}100%{left:194px;opacity:.3;transform:scale(.82)}}
+@keyframes solvePulse{from{box-shadow:0 0 0 0 rgba(31,111,235,.24)}to{box-shadow:0 0 0 5px rgba(31,111,235,.08)}}
+.history-panel{min-height:0;overflow:auto;background:#fbfcfd;border-left:1px solid var(--line);border-right:0;padding:12px}
+.history-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:9px}
+.history-head h2{margin:0}
+.history-head button{padding:5px 8px;font-size:12px}
+.run-list{display:grid;gap:8px}
+.run-item{border:1px solid var(--line);border-radius:6px;background:#fff;padding:9px;display:grid;gap:7px}
+.run-item.failed{border-color:#edc0ba;background:#fffafa}
+.run-title{font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.run-meta{color:var(--muted);font-size:11px;line-height:1.35}
+.run-actions{display:flex;gap:6px;align-items:center;justify-content:space-between}
+.run-actions button{min-height:28px;padding:4px 7px;font-size:12px}
+.run-status{font-size:11px;color:var(--muted);white-space:nowrap}
 #status{min-height:38px;border-top:1px solid var(--line);background:#fbfcfd;color:var(--muted);padding:9px 14px;font-size:13px}
 #status.ok{color:var(--green)}#status.err{color:var(--red)}
-@media (max-width:980px){.layout{grid-template-columns:1fr}aside{max-height:48vh;border-right:0;border-bottom:1px solid var(--line)}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.solver-grid{grid-template-columns:1fr}.topbar{height:auto;align-items:flex-start;flex-direction:column}.top-actions{width:100%;justify-content:space-between}.user-chip{max-width:55vw}#routePane.active{grid-template-rows:auto minmax(240px,48vh) minmax(150px,28vh)}.route-tools{align-items:flex-start;flex-direction:column}.route-totals{text-align:left;white-space:normal}.route-table{min-width:760px}}
+@media (max-width:1180px){.layout{grid-template-columns:360px minmax(0,1fr)}.history-panel{grid-column:1/-1;max-height:34vh;border-left:0;border-top:1px solid var(--line)}}
+@media (max-width:980px){.layout{grid-template-columns:1fr}aside{max-height:48vh;border-right:0;border-bottom:1px solid var(--line)}.history-panel{max-height:34vh}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.solver-grid{grid-template-columns:1fr}.topbar{height:auto;align-items:flex-start;flex-direction:column}.top-actions{width:100%;justify-content:space-between}.user-chip{max-width:55vw}#routePane.active{grid-template-rows:auto minmax(240px,48vh) minmax(150px,28vh)}.route-tools{align-items:flex-start;flex-direction:column}.route-totals{text-align:left;white-space:normal}.route-table{min-width:760px}}
 </style>
 </head>
 <body>
@@ -193,6 +212,10 @@ label{display:block;color:var(--muted);font-size:12px;margin:0 0 4px}
         <div class="metric"><span>Vars</span><b id="mVars">-</b></div>
         <div class="metric"><span>Status</span><b id="mStatus">ready</b></div>
       </div>
+      <div class="warning-banner hidden" id="warningBanner" role="alert">
+        <span class="warning-mark">!</span>
+        <span><b id="warningTitle">Route warning</b><span id="warningMessage"></span></span>
+      </div>
       <div class="tabs">
         <button type="button" class="tab active" data-tab="route">Route</button>
         <button type="button" class="tab" data-tab="itinerary">Itinerary</button>
@@ -238,6 +261,15 @@ label{display:block;color:var(--muted);font-size:12px;margin:0 0 4px}
       </div>
       <div id="status">Ready.</div>
     </main>
+    <aside class="history-panel" aria-label="previous runs">
+      <div class="history-head">
+        <h2>Previous Runs</h2>
+        <button type="button" id="clearRunsBtn">Clear</button>
+      </div>
+      <div class="run-list" id="runHistoryList">
+        <div class="stop-empty">No previous runs.</div>
+      </div>
+    </aside>
   </div>
 </div>
 <script type="application/json" id="default-config">__DEFAULT_DELIVERY_CONFIG__</script>
@@ -245,10 +277,16 @@ label{display:block;color:var(--muted);font-size:12px;margin:0 0 4px}
 const $ = id => document.getElementById(id);
 const defaultConfig = JSON.parse($('default-config').textContent);
 const STORAGE_KEY = 'deliveryScheduler.loadedManifest.v1';
+const RUN_HISTORY_KEY = 'deliveryScheduler.runHistory.v1';
+const MAX_RUN_HISTORY = 16;
+const MIN_SOLVE_DWELL_MS = 700;
 let state = structuredClone(defaultConfig);
 let lastResponse = null;
 let activeTab = 'route';
 let draggingStopId = null;
+let runHistory = [];
+let busyInterval = null;
+let busyStartedAt = 0;
 
 function validObjectiveMode(mode){
   return ['distance','travelTime','windowCenter'].includes(mode) ? mode : 'distance';
@@ -516,6 +554,118 @@ function restoreLoadedState(){
     return true;
   }catch(_){return false}
 }
+function cloneForHistory(value){
+  try{return structuredClone(value)}catch(_){return JSON.parse(JSON.stringify(value))}
+}
+function readRunHistory(){
+  try{
+    const rows=JSON.parse(localStorage.getItem(RUN_HISTORY_KEY)||'[]');
+    runHistory=Array.isArray(rows)?rows.filter(r=>r&&r.id&&r.createdAt).slice(0,MAX_RUN_HISTORY):[];
+  }catch(_){runHistory=[]}
+}
+function saveRunHistory(){
+  try{
+    localStorage.setItem(RUN_HISTORY_KEY, JSON.stringify(runHistory.slice(0,MAX_RUN_HISTORY)));
+  }catch(_){
+    runHistory=runHistory.slice(0,Math.max(4,Math.floor(MAX_RUN_HISTORY/2)));
+    try{localStorage.setItem(RUN_HISTORY_KEY, JSON.stringify(runHistory))}catch(_){}
+  }
+}
+function objectiveName(mode){
+  if(mode==='travelTime')return 'Drive time';
+  if(mode==='windowCenter')return 'Window center';
+  return 'Miles';
+}
+function routeLabelSummary(data){
+  const labels=(data?.route||[]).map(idx=>state.stops?.[idx]?.label||`Stop ${idx+1}`);
+  return labels.length?labels.join(' -> '):'No route';
+}
+function recordRun(data,errorMessage=''){
+  const ok=!!data?.ok;
+  const run={
+    id:`run-${Date.now()}-${Math.random().toString(36).slice(2,8)}`,
+    createdAt:new Date().toISOString(),
+    ok,
+    title:ok?routeLabelSummary(data):'Failed solve',
+    objectiveMode:state.objectiveMode,
+    status:ok?(data.solverStatus||'solved'):'failed',
+    totalDistance:ok?Number(data.totalDistance)||0:0,
+    totalTravelMinutes:ok?Number(data.totalTravelMinutes)||0:0,
+    totalWaitMinutes:ok?Number(data.totalWaitMinutes)||0:0,
+    error:errorMessage||null,
+    request:cloneForHistory(state),
+    response:ok?cloneForHistory(data):null
+  };
+  runHistory=[run,...runHistory.filter(r=>r.id!==run.id)].slice(0,MAX_RUN_HISTORY);
+  saveRunHistory();
+  renderRunHistory();
+}
+function renderRunHistory(){
+  const list=$('runHistoryList');
+  if(!list)return;
+  list.replaceChildren();
+  if(!runHistory.length){
+    const empty=document.createElement('div');
+    empty.className='stop-empty';
+    empty.textContent='No previous runs.';
+    list.appendChild(empty);
+    return;
+  }
+  runHistory.forEach(run=>{
+    const item=document.createElement('div');
+    item.className='run-item'+(run.ok?'':' failed');
+    const title=document.createElement('div');
+    title.className='run-title';
+    title.textContent=run.title||'Route run';
+    const meta=document.createElement('div');
+    meta.className='run-meta';
+    const when=new Date(run.createdAt);
+    const stamp=Number.isNaN(when.getTime())?'Saved run':when.toLocaleString([], {hour:'2-digit',minute:'2-digit',month:'short',day:'numeric'});
+    meta.textContent=run.ok
+      ? `${stamp} · ${objectiveName(run.objectiveMode)} · ${run.totalDistance.toFixed(1)} mi · ${fmtDuration(run.totalTravelMinutes)} drive`
+      : `${stamp} · ${objectiveName(run.objectiveMode)} · ${run.error||'Solve failed'}`;
+    const actions=document.createElement('div');
+    actions.className='run-actions';
+    const status=document.createElement('span');
+    status.className='run-status';
+    status.textContent=run.status||'saved';
+    actions.appendChild(status);
+    if(run.ok){
+      const open=document.createElement('button');
+      open.type='button';
+      open.textContent='Open';
+      open.addEventListener('click',()=>openRunInNewTab(run.id));
+      actions.appendChild(open);
+    }
+    item.append(title,meta,actions);
+    list.appendChild(item);
+  });
+}
+function openRunInNewTab(runId){
+  const run=runHistory.find(r=>r.id===runId);
+  if(!run||!run.ok){setStatus('err','Only solved previous runs can be opened.');return}
+  const url=new URL(location.href);
+  url.searchParams.set('run',runId);
+  const win=window.open(url.toString(),'_blank');
+  if(win)win.opener=null;
+  else setStatus('err','Popup blocked while opening the previous run.');
+}
+function restoreRunFromUrl(){
+  const runId=new URLSearchParams(location.search).get('run');
+  if(!runId)return false;
+  const run=runHistory.find(r=>r.id===runId);
+  if(!run||!run.ok||!run.request||!run.response){
+    showWarning('Previous run unavailable','The selected saved solution is no longer in browser storage.');
+    return false;
+  }
+  state={...structuredClone(defaultConfig),...cloneForHistory(run.request)};
+  ensureRouteOptions();
+  renderControls();
+  receiveSolution(cloneForHistory(run.response));
+  hideWarning();
+  setStatus('ok','Previous solution opened in this tab.');
+  return true;
+}
 function renderObjectiveControls(){
   ensureRouteOptions();
   document.querySelectorAll('#objectiveMode button').forEach(btn=>{
@@ -615,6 +765,15 @@ function stateToManifest(){
   return lines.join('\n');
 }
 function setStatus(kind,msg){const el=$('status');el.className=kind||'';el.textContent=msg;$('mStatus').textContent=kind==='err'?'error':(kind==='ok'?'ok':'ready')}
+function showWarning(title,message){
+  $('warningTitle').textContent=title||'Route warning';
+  $('warningMessage').textContent=message||'';
+  $('warningBanner').classList.remove('hidden');
+}
+function hideWarning(){
+  $('warningBanner').classList.add('hidden');
+  $('warningMessage').textContent='';
+}
 function clearRouteState(message='No route yet.'){
   lastResponse=null;
   $('mStops').textContent='-';
@@ -628,12 +787,33 @@ function clearRouteState(message='No route yet.'){
   $('solverTrace').textContent='No trace.';
   renderRouteDetails(null);
 }
-function setBusy(on,message='Solving the route model.'){
+function updateBusyElapsed(){
+  if(!busyStartedAt)return;
+  const elapsed=Math.floor((performance.now()-busyStartedAt)/1000);
+  const suffix=elapsed>0?` ${elapsed}s elapsed.`:'';
+  $('busyMessage').textContent=($('busyMessage').dataset.base||'Working.')+suffix;
+}
+function sleep(ms){return new Promise(resolve=>setTimeout(resolve,ms))}
+async function waitForMinimumBusy(startedAt){
+  const remaining=MIN_SOLVE_DWELL_MS-(performance.now()-startedAt);
+  if(remaining>0)await sleep(remaining);
+}
+function setBusy(on,message='Working.',buttonText='Working...'){
   $('solveBtn').disabled=on;
   $('geocodeBtn').disabled=on;
   $('loadManifestBtn').disabled=on;
+  $('solveBtn').classList.toggle('solving',on);
+  $('solveBtn').textContent=on?buttonText:'Solve';
+  $('busyMessage').dataset.base=message;
   $('busyMessage').textContent=message;
   $('busyScreen').classList.toggle('hidden',!on);
+  if(busyInterval){clearInterval(busyInterval);busyInterval=null}
+  if(on){
+    busyStartedAt=performance.now();
+    busyInterval=setInterval(updateBusyElapsed,1000);
+  }else{
+    busyStartedAt=0;
+  }
 }
 function canUseApi(){return /^https?:/.test(location.protocol)&&location.pathname.includes('/delivery/planner')}
 function apiPath(suffix){return location.pathname.replace(/\/delivery\/planner.*$/,'')+'/delivery/planner/'+suffix}
@@ -949,8 +1129,12 @@ function receiveSolution(data){
 }
 async function solve(){
   try{syncStateFromControls()}catch(e){setStatus('err',e.message);return}
-  setBusy(true,'Solving the route model and rendering the simulation.');
+  const startedAt=performance.now();
+  setBusy(true,'Solving the route model and rendering the simulation.','Solving...');
   setStatus('', 'Solving...');
+  $('mStatus').textContent='solving';
+  hideWarning();
+  let solvedData=null, failureMessage='';
   try{
     await new Promise(requestAnimationFrame);
     let data;
@@ -961,14 +1145,23 @@ async function solve(){
       data=localSolve();
     }
     if(!data.ok)throw new Error(data.error||'solve failed');
-    receiveSolution(data);
-    setStatus('ok', `${data.solverStatus}: ${objectiveLabel()} ${(data.objectiveValue||0).toFixed(2)}, ${(data.totalDistance||0).toFixed(1)} mi.`);
+    solvedData=data;
   }catch(e){
-    const message='Solve failed: '+e.message;
-    clearRouteState(message);
-    setStatus('err',message);
+    failureMessage='Solve failed: '+e.message;
   }
-  finally{setBusy(false)}
+  await waitForMinimumBusy(startedAt);
+  if(solvedData){
+    receiveSolution(solvedData);
+    recordRun(solvedData);
+    hideWarning();
+    setStatus('ok', `${solvedData.solverStatus}: ${objectiveLabel()} ${(solvedData.objectiveValue||0).toFixed(2)}, ${(solvedData.totalDistance||0).toFixed(1)} mi.`);
+  }else{
+    clearRouteState(failureMessage);
+    showWarning('Route cannot be solved',failureMessage.replace(/^Solve failed:\s*/,''));
+    recordRun(null,failureMessage);
+    setStatus('err',failureMessage);
+  }
+  setBusy(false);
 }
 async function copyItinerary(){
   const text=$('itineraryText').value || lastResponse?.itineraryText || '';
@@ -1011,7 +1204,7 @@ async function geocodeMissing(){
     setBusy(false);
   }
 }
-function parseOnly(){try{syncStateFromControls();renderStopList();$('mStops').textContent=String(state.stops.length);setStatus('ok',`${state.stops.length} stops parsed.`)}catch(e){setStatus('err',e.message)}}
+function parseOnly(){try{syncStateFromControls();renderStopList();$('mStops').textContent=String(state.stops.length);hideWarning();setStatus('ok',`${state.stops.length} stops parsed.`)}catch(e){setStatus('err',e.message)}}
 function loadManifest(){
   try{
     syncStateFromControls({resetOrder:true});
@@ -1020,6 +1213,7 @@ function loadManifest(){
     $('mStops').textContent=String(state.stops.length);
     clearRouteState(`${state.stops.length} stops loaded. Solve to plan route.`);
     $('mStops').textContent=String(state.stops.length);
+    hideWarning();
     setStatus('ok',`${state.stops.length} stops loaded.`);
   }catch(e){setStatus('err',e.message)}
 }
@@ -1035,9 +1229,15 @@ $('openWazeNext').onclick=()=>{
   const points=orderedRoutePoints();
   openMapUrl(points.length>1?wazeUrl(points[1]):'', 'Waze');
 };
-$('sampleBtn').onclick=()=>{state=structuredClone(defaultConfig);renderControls();setStatus('', 'Sample loaded.')};
+$('sampleBtn').onclick=()=>{state=structuredClone(defaultConfig);renderControls();hideWarning();clearRouteState('Sample loaded. Solve to plan route.');setStatus('', 'Sample loaded.')};
 $('parseBtn').onclick=parseOnly;
 $('geocodeBtn').onclick=geocodeMissing;
+$('clearRunsBtn').onclick=()=>{
+  runHistory=[];
+  saveRunHistory();
+  renderRunHistory();
+  setStatus('', 'Previous runs cleared.');
+};
 ['departTime','speedMph','serviceMinutes','solverSeconds','solverNodes','solverTicks','solverLpIters'].forEach(id=>$(id).onchange=parseOnly);
 document.querySelectorAll('#objectiveMode button').forEach(btn=>btn.onclick=()=>{
   state.objectiveMode=validObjectiveMode(btn.dataset.objective);
@@ -1053,9 +1253,13 @@ $('lockOrderBtn').onclick=()=>{
   saveLoadedState();
   setStatus('ok',state.routeRules.lockedOrder?'Stop order locked.':'Stop order unlocked.');
 };
-restoreLoadedState();
-renderControls();
-try{syncStateFromControls();renderStopList();receiveSolution(localSolve());setStatus('ok','Sample route ready.')}catch(e){setStatus('err',e.message)}
+readRunHistory();
+renderRunHistory();
+if(!restoreRunFromUrl()){
+  restoreLoadedState();
+  renderControls();
+  try{syncStateFromControls();renderStopList();receiveSolution(localSolve());hideWarning();setStatus('ok','Sample route ready.')}catch(e){showWarning('Route cannot be solved',e.message);setStatus('err',e.message)}
+}
 </script>
 </body>
 </html>

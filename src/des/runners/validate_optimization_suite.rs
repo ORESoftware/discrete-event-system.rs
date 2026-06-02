@@ -12,19 +12,21 @@ use std::process::{Command, Stdio};
 use serde::Deserialize;
 
 use crate::des::general::cp_sat::{
-    solve_cp_model, BoolLiteral, CpConstraint, CpDemandInterval, CpElement, CpInterval, CpModel,
-    CpObjective, CpSolveOptions, CpStatus, CpVariable, LinearSense, LinearTerm, ObjectiveSense,
+    solve_cp_model, BoolLiteral, CpAutomaton, CpCircuitArc, CpConstraint, CpDemandInterval,
+    CpDomainInterval, CpElement, CpInterval, CpModel, CpObjective, CpRectangle, CpReservoirEvent,
+    CpSolveOptions, CpStatus, CpTransition, CpVariable, LinearSense, LinearTerm, ObjectiveSense,
 };
 use crate::des::general::ip_mip_des::{
     build_binary_knapsack_ip, build_fixed_charge_indicator_ip, build_general_linear_rows_ip,
     build_lexicographic_choice_ip, build_lower_bounded_production_ip,
     build_piecewise_linear_reward_ip, build_semi_continuous_gate_ip, build_semi_integer_lot_ip,
-    build_sos1_choice_ip, build_sos2_adjacency_ip, linearize_indicator_problem,
-    linearize_pwl_problem, linearize_semi_problem, linearize_sos_problem,
-    solve_general_linear_ipmip_with_des, solve_indicator_ipmip_with_des, solve_ipmip_with_des,
-    solve_lower_bounded_ipmip_with_des, solve_multi_objective_ipmip_with_des,
-    solve_pwl_ipmip_with_des, solve_semi_ipmip_with_des, solve_sos_ipmip_with_des,
-    ConcreteLpRelaxationAlgorithm, IPMIPSolveOptions, IPMIPStatus, LpRelaxationAlgorithm,
+    build_sos1_choice_ip, build_sos2_adjacency_ip, build_source_feature_mix_ip,
+    linearize_indicator_problem, linearize_pwl_problem, linearize_semi_problem,
+    linearize_sos_problem, linearize_source_ipmip_problem, solve_general_linear_ipmip_with_des,
+    solve_indicator_ipmip_with_des, solve_ipmip_with_des, solve_lower_bounded_ipmip_with_des,
+    solve_multi_objective_ipmip_with_des, solve_pwl_ipmip_with_des, solve_semi_ipmip_with_des,
+    solve_sos_ipmip_with_des, solve_source_ipmip_with_des, ConcreteLpRelaxationAlgorithm,
+    IPMIPSolveOptions, IPMIPStatus, LpRelaxationAlgorithm,
 };
 use crate::des::general::lp::{
     solve_lp_external, solve_lp_internal, ExternalSolverOptions, InternalSimplexOptions, LPProblem,
@@ -80,6 +82,15 @@ struct CpReference {
     solver: String,
     assignment: Vec<i64>,
     objective: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LinearCliReference {
+    status: String,
+    solver: String,
+    x: Vec<f64>,
+    objective: Option<f64>,
+    message: String,
 }
 
 impl Driver {
@@ -195,6 +206,523 @@ impl Driver {
         );
         self.close("LP objective", internal.objective, external.objective, 1e-9);
         self.max_abs_close("LP x", &internal.x, &external.x, 1e-8);
+
+        let glop = solve_lp_external(
+            &lp,
+            &ExternalSolverOptions {
+                method: Some("glop".to_string()),
+                ..Default::default()
+            },
+        );
+        self.check(
+            "LP OR-Tools GLOP status optimal",
+            internal.status == LPStatus::Optimal
+                && glop.status == LPStatus::Optimal
+                && glop.solver == "ortools:glop",
+            format!(
+                "internal={:?} external={:?} solver={}",
+                internal.status, glop.status, glop.solver
+            ),
+        );
+        self.close(
+            "LP OR-Tools GLOP objective",
+            internal.objective,
+            glop.objective,
+            1e-9,
+        );
+        self.max_abs_close("LP OR-Tools GLOP x", &internal.x, &glop.x, 1e-8);
+    }
+
+    fn run_linear_cli_reference(
+        &self,
+        kind: &str,
+        solver: &str,
+        stdin_json: &str,
+    ) -> LinearCliReference {
+        let value = self.run_python_json(
+            "linear_cli_reference.py",
+            &["--kind", kind, "--solver", solver],
+            stdin_json,
+        );
+        serde_json::from_value(value).expect("parse linear CLI reference")
+    }
+
+    fn validate_external_solver_clis(&mut self) {
+        println!(
+            "\n-- External solver CLIs: GLPK/HiGHS/SCIP/CBC/CLP + optional commercial checks --"
+        );
+        let lp_solvers = ["highs", "glpk", "scip", "cbc", "clp"];
+        let mip_solvers = ["highs", "glpk", "scip", "cbc"];
+        let commercial_mip_solvers = ["gurobi", "cplex", "xpress", "lindo"];
+
+        let lp = LPProblem {
+            sense: Sense::Max,
+            c: vec![3.0, 2.0],
+            a_ub: Some(vec![vec![1.0, 1.0], vec![1.0, 3.0]]),
+            b_ub: Some(vec![4.0, 6.0]),
+            ..Default::default()
+        };
+        let lp_internal = solve_lp_internal(&lp, &InternalSimplexOptions::default());
+        let lp_json = serde_json::json!({
+            "lp": {
+                "sense": lp.sense.as_str(),
+                "c": &lp.c,
+                "a_ub": &lp.a_ub,
+                "b_ub": &lp.b_ub,
+                "a_eq": &lp.a_eq,
+                "b_eq": &lp.b_eq,
+                "lb": &lp.lb,
+                "ub": &lp.ub,
+            }
+        })
+        .to_string();
+
+        for solver in lp_solvers.iter().copied() {
+            let reference = self.run_linear_cli_reference("lp", solver, &lp_json);
+            if reference.status == "unavailable" && reference.message.contains("not found") {
+                println!("  SKIP  LP {solver}: executable not found");
+                continue;
+            }
+            self.check(
+                format!("LP {solver}:cli status optimal"),
+                lp_internal.status == LPStatus::Optimal && reference.status == "optimal",
+                format!(
+                    "internal={:?} external={} solver={}",
+                    lp_internal.status, reference.status, reference.solver
+                ),
+            );
+            self.close(
+                &format!("LP {solver}:cli objective"),
+                lp_internal.objective,
+                reference.objective.unwrap_or(f64::NAN),
+                1e-9,
+            );
+            self.max_abs_close(
+                &format!("LP {solver}:cli x"),
+                &lp_internal.x,
+                &reference.x,
+                1e-8,
+            );
+        }
+
+        let mip =
+            build_binary_knapsack_ip(vec![10.0, 40.0, 30.0, 50.0], vec![5.0, 4.0, 6.0, 3.0], 10.0);
+        let mip_internal = solve_ipmip_with_des(
+            mip.clone(),
+            IPMIPSolveOptions {
+                lp_algorithm: Some(LpRelaxationAlgorithm::Concrete(
+                    ConcreteLpRelaxationAlgorithm::IncrementalPrimalDual,
+                )),
+                max_cut_rounds: Some(1),
+                ..Default::default()
+            },
+        );
+        let mip_json = serde_json::json!({
+            "sense": mip.sense.as_str(),
+            "c": mip.c,
+            "a": mip.a,
+            "b": mip.b,
+            "integer_vars": mip.integer_vars,
+            "ub": mip.ub,
+            "var_names": mip.var_names,
+            "con_names": mip.con_names,
+        })
+        .to_string();
+
+        for solver in mip_solvers.iter().copied() {
+            let reference = self.run_linear_cli_reference("mip", solver, &mip_json);
+            if reference.status == "unavailable" && reference.message.contains("not found") {
+                println!("  SKIP  IP/MIP {solver}: executable not found");
+                continue;
+            }
+            self.check(
+                format!("IP/MIP {solver}:cli status optimal"),
+                mip_internal.status == IPMIPStatus::Optimal && reference.status == "optimal",
+                format!(
+                    "internal={} external={} solver={}",
+                    mip_internal.status.as_str(),
+                    reference.status,
+                    reference.solver
+                ),
+            );
+            self.close(
+                &format!("IP/MIP {solver}:cli objective"),
+                mip_internal.z,
+                reference.objective.unwrap_or(f64::NAN),
+                1e-9,
+            );
+            self.max_abs_close(
+                &format!("IP/MIP {solver}:cli x"),
+                &mip_internal.x,
+                &reference.x,
+                1e-8,
+            );
+        }
+
+        for solver in commercial_mip_solvers.iter().copied() {
+            let reference = self.run_linear_cli_reference("mip", solver, &mip_json);
+            if reference.status == "unavailable" {
+                println!("  SKIP  IP/MIP commercial {solver}: {}", reference.message);
+                continue;
+            }
+            self.check(
+                format!("IP/MIP commercial {solver}:cli status optimal"),
+                mip_internal.status == IPMIPStatus::Optimal && reference.status == "optimal",
+                format!(
+                    "internal={} external={} solver={}",
+                    mip_internal.status.as_str(),
+                    reference.status,
+                    reference.solver
+                ),
+            );
+            self.close(
+                &format!("IP/MIP commercial {solver}:cli objective"),
+                mip_internal.z,
+                reference.objective.unwrap_or(f64::NAN),
+                1e-9,
+            );
+            self.max_abs_close(
+                &format!("IP/MIP commercial {solver}:cli x"),
+                &mip_internal.x,
+                &reference.x,
+                1e-8,
+            );
+        }
+
+        let lower_problem = build_lower_bounded_production_ip();
+        let lower_internal = solve_lower_bounded_ipmip_with_des(
+            lower_problem.clone(),
+            IPMIPSolveOptions {
+                lp_algorithm: Some(LpRelaxationAlgorithm::Concrete(
+                    ConcreteLpRelaxationAlgorithm::IncrementalPrimalDual,
+                )),
+                max_cut_rounds: Some(1),
+                ..Default::default()
+            },
+        );
+        let lower_base = &lower_problem.base;
+        let lower_json = serde_json::json!({
+            "sense": lower_base.sense.as_str(),
+            "c": &lower_base.c,
+            "a": &lower_base.a,
+            "b": &lower_base.b,
+            "integer_vars": &lower_base.integer_vars,
+            "lb": &lower_problem.lb,
+            "ub": &lower_base.ub,
+            "var_names": &lower_base.var_names,
+            "con_names": &lower_base.con_names,
+        })
+        .to_string();
+
+        for solver in mip_solvers.iter().copied() {
+            let reference = self.run_linear_cli_reference("mip", solver, &lower_json);
+            if reference.status == "unavailable" && reference.message.contains("not found") {
+                println!("  SKIP  IP/MIP lower-bounded {solver}: executable not found");
+                continue;
+            }
+            self.check(
+                format!("IP/MIP lower-bounded {solver}:cli status optimal"),
+                lower_internal.status == IPMIPStatus::Optimal && reference.status == "optimal",
+                format!(
+                    "internal={} external={} solver={}",
+                    lower_internal.status.as_str(),
+                    reference.status,
+                    reference.solver
+                ),
+            );
+            self.close(
+                &format!("IP/MIP lower-bounded {solver}:cli objective"),
+                lower_internal.z,
+                reference.objective.unwrap_or(f64::NAN),
+                1e-9,
+            );
+            self.max_abs_close(
+                &format!("IP/MIP lower-bounded {solver}:cli x"),
+                &lower_internal.x,
+                &reference.x,
+                1e-8,
+            );
+        }
+
+        let general_problem = build_general_linear_rows_ip();
+        let general_internal = solve_general_linear_ipmip_with_des(
+            general_problem.clone(),
+            IPMIPSolveOptions {
+                lp_algorithm: Some(LpRelaxationAlgorithm::Concrete(
+                    ConcreteLpRelaxationAlgorithm::InternalSimplex,
+                )),
+                max_cut_rounds: Some(0),
+                ..Default::default()
+            },
+        );
+        let general_base = &general_problem.base;
+        let general_json = serde_json::json!({
+            "sense": general_base.sense.as_str(),
+            "c": &general_base.c,
+            "a": &general_base.a,
+            "b": &general_base.b,
+            "integer_vars": &general_base.integer_vars,
+            "ub": &general_base.ub,
+            "var_names": &general_base.var_names,
+            "con_names": &general_base.con_names,
+            "linear_constraints": general_problem.linear_constraints.iter().map(|constraint| serde_json::json!({
+                "coefs": &constraint.coefs,
+                "lower": constraint.lower,
+                "upper": constraint.upper,
+                "name": &constraint.name,
+            })).collect::<Vec<_>>(),
+        })
+        .to_string();
+
+        for solver in mip_solvers.iter().copied() {
+            let reference = self.run_linear_cli_reference("mip", solver, &general_json);
+            if reference.status == "unavailable" && reference.message.contains("not found") {
+                println!("  SKIP  IP/MIP general-linear {solver}: executable not found");
+                continue;
+            }
+            self.check(
+                format!("IP/MIP general-linear {solver}:cli status optimal"),
+                general_internal.status == IPMIPStatus::Optimal && reference.status == "optimal",
+                format!(
+                    "internal={} external={} solver={}",
+                    general_internal.status.as_str(),
+                    reference.status,
+                    reference.solver
+                ),
+            );
+            self.close(
+                &format!("IP/MIP general-linear {solver}:cli objective"),
+                general_internal.z,
+                reference.objective.unwrap_or(f64::NAN),
+                1e-9,
+            );
+            self.max_abs_close(
+                &format!("IP/MIP general-linear {solver}:cli x"),
+                &general_internal.x,
+                &reference.x,
+                1e-8,
+            );
+        }
+
+        let indicator_problem = build_fixed_charge_indicator_ip();
+        let indicator_internal = solve_indicator_ipmip_with_des(
+            indicator_problem.clone(),
+            IPMIPSolveOptions {
+                lp_algorithm: Some(LpRelaxationAlgorithm::Concrete(
+                    ConcreteLpRelaxationAlgorithm::IncrementalPrimalDual,
+                )),
+                max_cut_rounds: Some(1),
+                ..Default::default()
+            },
+        );
+        let indicator_base = &indicator_problem.base;
+        let indicator_json = serde_json::json!({
+            "sense": indicator_base.sense.as_str(),
+            "c": &indicator_base.c,
+            "a": &indicator_base.a,
+            "b": &indicator_base.b,
+            "integer_vars": &indicator_base.integer_vars,
+            "ub": &indicator_base.ub,
+            "var_names": &indicator_base.var_names,
+            "con_names": &indicator_base.con_names,
+            "indicators": indicator_problem.indicators.iter().map(|indicator| serde_json::json!({
+                "binary_var": indicator.binary_var,
+                "active_value": indicator.active_value,
+                "coefs": &indicator.coefs,
+                "sense": indicator.sense.as_str(),
+                "rhs": indicator.rhs,
+                "name": &indicator.name,
+            })).collect::<Vec<_>>(),
+        })
+        .to_string();
+
+        for solver in mip_solvers.iter().copied() {
+            let reference = self.run_linear_cli_reference("mip", solver, &indicator_json);
+            if reference.status == "unavailable" && reference.message.contains("not found") {
+                println!("  SKIP  IP/MIP indicator {solver}: executable not found");
+                continue;
+            }
+            self.check(
+                format!("IP/MIP indicator {solver}:cli status optimal"),
+                indicator_internal.status == IPMIPStatus::Optimal && reference.status == "optimal",
+                format!(
+                    "internal={} external={} solver={}",
+                    indicator_internal.status.as_str(),
+                    reference.status,
+                    reference.solver
+                ),
+            );
+            self.close(
+                &format!("IP/MIP indicator {solver}:cli objective"),
+                indicator_internal.z,
+                reference.objective.unwrap_or(f64::NAN),
+                1e-9,
+            );
+            self.max_abs_close(
+                &format!("IP/MIP indicator {solver}:cli x"),
+                &indicator_internal.x,
+                &reference.x,
+                1e-8,
+            );
+        }
+
+        let pwl_problem = build_piecewise_linear_reward_ip();
+        let linearized_pwl = linearize_pwl_problem(&pwl_problem);
+        let pwl_internal = solve_pwl_ipmip_with_des(
+            pwl_problem.clone(),
+            IPMIPSolveOptions {
+                lp_algorithm: Some(LpRelaxationAlgorithm::Concrete(
+                    ConcreteLpRelaxationAlgorithm::InternalSimplex,
+                )),
+                max_cut_rounds: Some(1),
+                ..Default::default()
+            },
+        );
+        let pwl_base = &pwl_problem.base;
+        let pwl_json = serde_json::json!({
+            "sense": pwl_base.sense.as_str(),
+            "c": &pwl_base.c,
+            "a": &pwl_base.a,
+            "b": &pwl_base.b,
+            "integer_vars": &pwl_base.integer_vars,
+            "ub": &pwl_base.ub,
+            "var_names": &pwl_base.var_names,
+            "con_names": &pwl_base.con_names,
+            "pwl": pwl_problem.pwl.iter().map(|pwl| serde_json::json!({
+                "x_var": pwl.x_var,
+                "y_var": pwl.y_var,
+                "points": pwl.points.iter().map(|point| serde_json::json!({
+                    "x": point.x,
+                    "y": point.y,
+                })).collect::<Vec<_>>(),
+                "name": &pwl.name,
+            })).collect::<Vec<_>>(),
+        })
+        .to_string();
+
+        for solver in mip_solvers.iter().copied() {
+            let reference = self.run_linear_cli_reference("mip", solver, &pwl_json);
+            if reference.status == "unavailable" && reference.message.contains("not found") {
+                println!("  SKIP  IP/MIP piecewise-linear {solver}: executable not found");
+                continue;
+            }
+            self.check(
+                format!("IP/MIP piecewise-linear {solver}:cli status optimal"),
+                pwl_internal.status == IPMIPStatus::Optimal && reference.status == "optimal",
+                format!(
+                    "internal={} external={} solver={}",
+                    pwl_internal.status.as_str(),
+                    reference.status,
+                    reference.solver
+                ),
+            );
+            self.close(
+                &format!("IP/MIP piecewise-linear {solver}:cli objective"),
+                pwl_internal.z,
+                reference.objective.unwrap_or(f64::NAN),
+                1e-9,
+            );
+            self.check(
+                format!("IP/MIP piecewise-linear {solver}:cli expanded x length"),
+                reference.x.len() == linearized_pwl.c.len(),
+                format!(
+                    "expected={} actual={}",
+                    linearized_pwl.c.len(),
+                    reference.x.len()
+                ),
+            );
+        }
+
+        let source_problem = build_source_feature_mix_ip();
+        let (linearized_source, _, source_original_vars) =
+            linearize_source_ipmip_problem(&source_problem);
+        let source_internal = solve_source_ipmip_with_des(
+            source_problem.clone(),
+            IPMIPSolveOptions {
+                lp_algorithm: Some(LpRelaxationAlgorithm::Concrete(
+                    ConcreteLpRelaxationAlgorithm::InternalSimplex,
+                )),
+                max_cut_rounds: Some(0),
+                ..Default::default()
+            },
+        );
+        let source_base = &source_problem.base;
+        let source_json = serde_json::json!({
+            "sense": source_base.sense.as_str(),
+            "c": &source_base.c,
+            "a": &source_base.a,
+            "b": &source_base.b,
+            "integer_vars": &source_base.integer_vars,
+            "lb": &source_problem.lb,
+            "ub": &source_base.ub,
+            "var_names": &source_base.var_names,
+            "con_names": &source_base.con_names,
+            "linear_constraints": source_problem.linear_constraints.iter().map(|constraint| serde_json::json!({
+                "coefs": &constraint.coefs,
+                "lower": constraint.lower,
+                "upper": constraint.upper,
+                "name": &constraint.name,
+            })).collect::<Vec<_>>(),
+            "indicators": source_problem.indicators.iter().map(|indicator| serde_json::json!({
+                "binary_var": indicator.binary_var,
+                "active_value": indicator.active_value,
+                "coefs": &indicator.coefs,
+                "sense": indicator.sense.as_str(),
+                "rhs": indicator.rhs,
+                "name": &indicator.name,
+            })).collect::<Vec<_>>(),
+            "pwl": source_problem.pwl.iter().map(|pwl| serde_json::json!({
+                "x_var": pwl.x_var,
+                "y_var": pwl.y_var,
+                "points": pwl.points.iter().map(|point| serde_json::json!({
+                    "x": point.x,
+                    "y": point.y,
+                })).collect::<Vec<_>>(),
+                "name": &pwl.name,
+            })).collect::<Vec<_>>(),
+        })
+        .to_string();
+
+        for solver in mip_solvers.iter().copied() {
+            let reference = self.run_linear_cli_reference("mip", solver, &source_json);
+            if reference.status == "unavailable" && reference.message.contains("not found") {
+                println!("  SKIP  IP/MIP source-feature-mix {solver}: executable not found");
+                continue;
+            }
+            self.check(
+                format!("IP/MIP source-feature-mix {solver}:cli status optimal"),
+                source_internal.status == IPMIPStatus::Optimal && reference.status == "optimal",
+                format!(
+                    "internal={} external={} solver={}",
+                    source_internal.status.as_str(),
+                    reference.status,
+                    reference.solver
+                ),
+            );
+            self.close(
+                &format!("IP/MIP source-feature-mix {solver}:cli objective"),
+                source_internal.z,
+                reference.objective.unwrap_or(f64::NAN),
+                1e-9,
+            );
+            self.check(
+                format!("IP/MIP source-feature-mix {solver}:cli expanded x length"),
+                reference.x.len() == linearized_source.c.len(),
+                format!(
+                    "expected={} actual={}",
+                    linearized_source.c.len(),
+                    reference.x.len()
+                ),
+            );
+            if reference.x.len() >= source_original_vars {
+                self.max_abs_close(
+                    &format!("IP/MIP source-feature-mix {solver}:cli original x"),
+                    &source_internal.x[..source_original_vars],
+                    &reference.x[..source_original_vars],
+                    1e-8,
+                );
+            }
+        }
     }
 
     fn validate_ip_mip(&mut self) {
@@ -763,6 +1291,115 @@ impl Driver {
             );
         }
 
+        let source_problem = build_source_feature_mix_ip();
+        let (linearized_source, _, source_original_vars) =
+            linearize_source_ipmip_problem(&source_problem);
+        let source_internal = solve_source_ipmip_with_des(
+            source_problem.clone(),
+            IPMIPSolveOptions {
+                lp_algorithm: Some(LpRelaxationAlgorithm::Concrete(
+                    ConcreteLpRelaxationAlgorithm::InternalSimplex,
+                )),
+                max_cut_rounds: Some(0),
+                ..Default::default()
+            },
+        );
+        let source_problem_path = out_dir.join("source-feature-mix-problem.json");
+        let source_reference_path = out_dir.join("source-feature-mix-reference.json");
+        let base = &source_problem.base;
+        let source_json = serde_json::json!({
+            "sense": base.sense.as_str(),
+            "c": &base.c,
+            "a": &base.a,
+            "b": &base.b,
+            "integer_vars": &base.integer_vars,
+            "lb": &source_problem.lb,
+            "ub": &base.ub,
+            "var_names": &base.var_names,
+            "con_names": &base.con_names,
+            "linear_constraints": source_problem.linear_constraints.iter().map(|constraint| serde_json::json!({
+                "coefs": &constraint.coefs,
+                "lower": constraint.lower,
+                "upper": constraint.upper,
+                "name": &constraint.name,
+            })).collect::<Vec<_>>(),
+            "indicators": source_problem.indicators.iter().map(|indicator| serde_json::json!({
+                "binary_var": indicator.binary_var,
+                "active_value": indicator.active_value,
+                "coefs": &indicator.coefs,
+                "sense": indicator.sense.as_str(),
+                "rhs": indicator.rhs,
+                "name": &indicator.name,
+            })).collect::<Vec<_>>(),
+            "pwl": source_problem.pwl.iter().map(|pwl| serde_json::json!({
+                "x_var": pwl.x_var,
+                "y_var": pwl.y_var,
+                "points": pwl.points.iter().map(|point| serde_json::json!({
+                    "x": point.x,
+                    "y": point.y,
+                })).collect::<Vec<_>>(),
+                "name": &pwl.name,
+            })).collect::<Vec<_>>(),
+        });
+        std::fs::write(
+            &source_problem_path,
+            serde_json::to_string_pretty(&source_json)
+                .expect("serialize source-feature MIP problem"),
+        )
+        .expect("write source-feature MIP problem");
+        let output = Command::new(&python)
+            .arg(&script)
+            .arg("--problem")
+            .arg(&source_problem_path)
+            .arg("--out")
+            .arg(&source_reference_path)
+            .arg("--solver")
+            .arg("auto")
+            .output()
+            .expect("run source-feature MIP reference");
+        if !output.status.success() {
+            panic!(
+                "source-feature ip_mip_reference failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let source_reference: MipReference = serde_json::from_slice(
+            &std::fs::read(&source_reference_path).expect("read source-feature MIP reference JSON"),
+        )
+        .expect("parse source-feature MIP reference JSON");
+        self.check(
+            "IP/MIP source-feature-mix statuses optimal",
+            source_internal.status == IPMIPStatus::Optimal
+                && source_reference.result.status == "optimal",
+            format!(
+                "internal={} external={} solver={}",
+                source_internal.status.as_str(),
+                source_reference.result.status,
+                source_reference.result.solver
+            ),
+        );
+        self.close(
+            "IP/MIP source-feature-mix objective",
+            source_internal.z,
+            source_reference.result.objective.unwrap_or(f64::NAN),
+            1e-9,
+        );
+        if let Some(x) = source_reference.result.x.as_deref() {
+            self.check(
+                "IP/MIP source-feature-mix external x length",
+                x.len() == linearized_source.c.len(),
+                "",
+            );
+            if x.len() >= source_original_vars {
+                self.max_abs_close(
+                    "IP/MIP source-feature-mix original x",
+                    &source_internal.x[..source_original_vars],
+                    &x[..source_original_vars],
+                    1e-8,
+                );
+            }
+        }
+
         let multi_problem = build_lexicographic_choice_ip();
         let multi_internal = solve_multi_objective_ipmip_with_des(
             multi_problem.clone(),
@@ -1224,6 +1861,98 @@ impl Driver {
                     name: "score_product".to_string(),
                     domain: vec![6, 10, 12, 20],
                 },
+                CpVariable {
+                    name: "pack_a_x".to_string(),
+                    domain: vec![0],
+                },
+                CpVariable {
+                    name: "pack_a_y".to_string(),
+                    domain: vec![0],
+                },
+                CpVariable {
+                    name: "pack_b_x".to_string(),
+                    domain: vec![0, 1, 2],
+                },
+                CpVariable {
+                    name: "pack_b_y".to_string(),
+                    domain: vec![0],
+                },
+                CpVariable {
+                    name: "automaton_0".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "automaton_1".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "automaton_2".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "circuit_0_1".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "circuit_1_2".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "circuit_2_0".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "arith_value".to_string(),
+                    domain: vec![5, 6, 7],
+                },
+                CpVariable {
+                    name: "arith_divisor".to_string(),
+                    domain: vec![2],
+                },
+                CpVariable {
+                    name: "arith_quotient".to_string(),
+                    domain: vec![2, 3],
+                },
+                CpVariable {
+                    name: "arith_remainder".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "reservoir_fill_time".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "reservoir_drain_time".to_string(),
+                    domain: vec![0],
+                },
+                CpVariable {
+                    name: "reservoir_overfill_active".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "linear_domain_x".to_string(),
+                    domain: vec![0, 1, 2],
+                },
+                CpVariable {
+                    name: "linear_domain_y".to_string(),
+                    domain: vec![0, 1, 2],
+                },
+                CpVariable {
+                    name: "mapped_mode".to_string(),
+                    domain: vec![5],
+                },
+                CpVariable {
+                    name: "mapped_is_five".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "mapped_is_six".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "mapped_is_seven".to_string(),
+                    domain: vec![0, 1],
+                },
             ],
             constraints: vec![
                 CpConstraint::AllDifferent(vec![0, 1, 2]),
@@ -1384,6 +2113,134 @@ impl Driver {
                     target: 34,
                     vars: vec![24, 25],
                 },
+                CpConstraint::NoOverlap2D(vec![
+                    CpRectangle {
+                        x_start: 35,
+                        y_start: 36,
+                        width: 2,
+                        height: 2,
+                        name: Some("pack_a".to_string()),
+                    },
+                    CpRectangle {
+                        x_start: 37,
+                        y_start: 38,
+                        width: 2,
+                        height: 2,
+                        name: Some("pack_b".to_string()),
+                    },
+                ]),
+                CpConstraint::Automaton(CpAutomaton {
+                    vars: vec![39, 40, 41],
+                    starting_state: 0,
+                    final_states: vec![1],
+                    transitions: vec![
+                        CpTransition {
+                            tail: 0,
+                            label: 0,
+                            head: 0,
+                        },
+                        CpTransition {
+                            tail: 0,
+                            label: 1,
+                            head: 1,
+                        },
+                        CpTransition {
+                            tail: 1,
+                            label: 0,
+                            head: 1,
+                        },
+                        CpTransition {
+                            tail: 1,
+                            label: 1,
+                            head: 2,
+                        },
+                        CpTransition {
+                            tail: 2,
+                            label: 0,
+                            head: 2,
+                        },
+                        CpTransition {
+                            tail: 2,
+                            label: 1,
+                            head: 2,
+                        },
+                    ],
+                }),
+                CpConstraint::Circuit(vec![
+                    CpCircuitArc {
+                        tail: 0,
+                        head: 1,
+                        literal: BoolLiteral {
+                            var: 42,
+                            positive: true,
+                        },
+                    },
+                    CpCircuitArc {
+                        tail: 1,
+                        head: 2,
+                        literal: BoolLiteral {
+                            var: 43,
+                            positive: true,
+                        },
+                    },
+                    CpCircuitArc {
+                        tail: 2,
+                        head: 0,
+                        literal: BoolLiteral {
+                            var: 44,
+                            positive: true,
+                        },
+                    },
+                ]),
+                CpConstraint::DivisionEquality {
+                    target: 47,
+                    numerator: 45,
+                    denominator: 46,
+                },
+                CpConstraint::ModuloEquality {
+                    target: 48,
+                    var: 45,
+                    modulus: 46,
+                },
+                CpConstraint::Reservoir {
+                    events: vec![
+                        CpReservoirEvent {
+                            time: 49,
+                            level_change: 4,
+                            active: None,
+                        },
+                        CpReservoirEvent {
+                            time: 50,
+                            level_change: -3,
+                            active: None,
+                        },
+                        CpReservoirEvent {
+                            time: 50,
+                            level_change: 10,
+                            active: Some(BoolLiteral {
+                                var: 51,
+                                positive: true,
+                            }),
+                        },
+                    ],
+                    min_level: 0,
+                    max_level: 4,
+                },
+                CpConstraint::LinearDomain {
+                    terms: vec![
+                        LinearTerm { var: 52, coeff: 1 },
+                        LinearTerm { var: 53, coeff: 2 },
+                    ],
+                    intervals: vec![
+                        CpDomainInterval { lb: 1, ub: 1 },
+                        CpDomainInterval { lb: 4, ub: 4 },
+                    ],
+                },
+                CpConstraint::MapDomain {
+                    var: 54,
+                    bools: vec![55, 56, 57],
+                    offset: 5,
+                },
             ],
             objective: Some(CpObjective {
                 sense: ObjectiveSense::Min,
@@ -1405,6 +2262,7 @@ impl Driver {
                     LinearTerm { var: 16, coeff: 5 },
                     LinearTerm { var: 17, coeff: 4 },
                     LinearTerm { var: 18, coeff: 1 },
+                    LinearTerm { var: 19, coeff: 1 },
                     LinearTerm { var: 20, coeff: 1 },
                     LinearTerm { var: 21, coeff: 2 },
                     LinearTerm { var: 26, coeff: 1 },
@@ -1413,6 +2271,17 @@ impl Driver {
                     LinearTerm { var: 32, coeff: 1 },
                     LinearTerm { var: 33, coeff: 2 },
                     LinearTerm { var: 34, coeff: 1 },
+                    LinearTerm { var: 39, coeff: 4 },
+                    LinearTerm { var: 40, coeff: 2 },
+                    LinearTerm { var: 41, coeff: 1 },
+                    LinearTerm { var: 45, coeff: 1 },
+                    LinearTerm { var: 47, coeff: 10 },
+                    LinearTerm { var: 48, coeff: 1 },
+                    LinearTerm { var: 49, coeff: 1 },
+                    LinearTerm { var: 51, coeff: -1 },
+                    LinearTerm { var: 52, coeff: 1 },
+                    LinearTerm { var: 53, coeff: 1 },
+                    LinearTerm { var: 54, coeff: 1 },
                 ],
             }),
         }
@@ -1436,6 +2305,24 @@ impl Driver {
                     "terms": terms.iter().map(|t| serde_json::json!({"var": t.var, "coeff": t.coeff})).collect::<Vec<_>>(),
                     "sense": sense.as_str(),
                     "rhs": rhs,
+                }),
+                CpConstraint::LinearDomain { terms, intervals } => serde_json::json!({
+                    "kind": "linear_domain",
+                    "terms": terms.iter().map(|t| serde_json::json!({"var": t.var, "coeff": t.coeff})).collect::<Vec<_>>(),
+                    "intervals": intervals.iter().map(|interval| serde_json::json!({
+                        "lb": interval.lb,
+                        "ub": interval.ub,
+                    })).collect::<Vec<_>>(),
+                }),
+                CpConstraint::MapDomain {
+                    var,
+                    bools,
+                    offset,
+                } => serde_json::json!({
+                    "kind": "map_domain",
+                    "var": var,
+                    "bools": bools,
+                    "offset": offset,
                 }),
                 CpConstraint::EnforcedLinear {
                     enforcement,
@@ -1480,6 +2367,14 @@ impl Driver {
                     "antecedent": {"var": antecedent.var, "positive": antecedent.positive},
                     "consequent": {"var": consequent.var, "positive": consequent.positive},
                 }),
+                CpConstraint::Circuit(arcs) => serde_json::json!({
+                    "kind": "circuit",
+                    "arcs": arcs.iter().map(|arc| serde_json::json!({
+                        "tail": arc.tail,
+                        "head": arc.head,
+                        "literal": {"var": arc.literal.var, "positive": arc.literal.positive},
+                    })).collect::<Vec<_>>(),
+                }),
                 CpConstraint::AllowedAssignments { vars, tuples } => serde_json::json!({
                     "kind": "allowed_assignments",
                     "vars": vars,
@@ -1515,6 +2410,37 @@ impl Driver {
                     "target": target,
                     "vars": vars,
                 }),
+                CpConstraint::DivisionEquality {
+                    target,
+                    numerator,
+                    denominator,
+                } => serde_json::json!({
+                    "kind": "division_equality",
+                    "target": target,
+                    "numerator": numerator,
+                    "denominator": denominator,
+                }),
+                CpConstraint::ModuloEquality {
+                    target,
+                    var,
+                    modulus,
+                } => serde_json::json!({
+                    "kind": "modulo_equality",
+                    "target": target,
+                    "var": var,
+                    "modulus": modulus,
+                }),
+                CpConstraint::Automaton(automaton) => serde_json::json!({
+                    "kind": "automaton",
+                    "vars": automaton.vars,
+                    "starting_state": automaton.starting_state,
+                    "final_states": automaton.final_states,
+                    "transitions": automaton.transitions.iter().map(|transition| serde_json::json!({
+                        "tail": transition.tail,
+                        "label": transition.label,
+                        "head": transition.head,
+                    })).collect::<Vec<_>>(),
+                }),
                 CpConstraint::Element(element) => serde_json::json!({
                     "kind": "element",
                     "index": element.index,
@@ -1529,6 +2455,16 @@ impl Driver {
                         "name": interval.name,
                     })).collect::<Vec<_>>(),
                 }),
+                CpConstraint::NoOverlap2D(rectangles) => serde_json::json!({
+                    "kind": "no_overlap_2d",
+                    "rectangles": rectangles.iter().map(|rectangle| serde_json::json!({
+                        "x_start": rectangle.x_start,
+                        "y_start": rectangle.y_start,
+                        "width": rectangle.width,
+                        "height": rectangle.height,
+                        "name": rectangle.name,
+                    })).collect::<Vec<_>>(),
+                }),
                 CpConstraint::Cumulative {
                     intervals,
                     capacity,
@@ -1540,6 +2476,23 @@ impl Driver {
                         "duration": interval.duration,
                         "demand": interval.demand,
                         "name": interval.name,
+                    })).collect::<Vec<_>>(),
+                }),
+                CpConstraint::Reservoir {
+                    events,
+                    min_level,
+                    max_level,
+                } => serde_json::json!({
+                    "kind": "reservoir",
+                    "min_level": min_level,
+                    "max_level": max_level,
+                    "events": events.iter().map(|event| serde_json::json!({
+                        "time": event.time,
+                        "level_change": event.level_change,
+                        "active": event.active.as_ref().map(|lit| serde_json::json!({
+                            "var": lit.var,
+                            "positive": lit.positive,
+                        })),
                     })).collect::<Vec<_>>(),
                 }),
             })
@@ -1589,6 +2542,7 @@ impl Driver {
     fn run_all(&mut self) {
         self.validate_lp();
         self.validate_ip_mip();
+        self.validate_external_solver_clis();
         self.validate_min_cost_flow();
         self.validate_qp();
         self.validate_cp_sat();

@@ -18,6 +18,12 @@ pub struct LinearTerm {
     pub coeff: i64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CpDomainInterval {
+    pub lb: i64,
+    pub ub: i64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LinearSense {
     Le,
@@ -57,10 +63,48 @@ pub struct CpDemandInterval {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CpReservoirEvent {
+    pub time: usize,
+    pub level_change: i64,
+    pub active: Option<BoolLiteral>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CpRectangle {
+    pub x_start: usize,
+    pub y_start: usize,
+    pub width: i64,
+    pub height: i64,
+    pub name: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CpElement {
     pub index: usize,
     pub values: Vec<i64>,
     pub target: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CpTransition {
+    pub tail: i64,
+    pub label: i64,
+    pub head: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CpAutomaton {
+    pub vars: Vec<usize>,
+    pub starting_state: i64,
+    pub final_states: Vec<i64>,
+    pub transitions: Vec<CpTransition>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CpCircuitArc {
+    pub tail: i64,
+    pub head: i64,
+    pub literal: BoolLiteral,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -69,6 +113,15 @@ pub enum CpConstraint {
         terms: Vec<LinearTerm>,
         sense: LinearSense,
         rhs: i64,
+    },
+    LinearDomain {
+        terms: Vec<LinearTerm>,
+        intervals: Vec<CpDomainInterval>,
+    },
+    MapDomain {
+        var: usize,
+        bools: Vec<usize>,
+        offset: i64,
     },
     EnforcedLinear {
         enforcement: Vec<BoolLiteral>,
@@ -114,11 +167,29 @@ pub enum CpConstraint {
         target: usize,
         vars: Vec<usize>,
     },
+    DivisionEquality {
+        target: usize,
+        numerator: usize,
+        denominator: usize,
+    },
+    ModuloEquality {
+        target: usize,
+        var: usize,
+        modulus: usize,
+    },
+    Automaton(CpAutomaton),
+    Circuit(Vec<CpCircuitArc>),
     Element(CpElement),
     NoOverlap(Vec<CpInterval>),
+    NoOverlap2D(Vec<CpRectangle>),
     Cumulative {
         intervals: Vec<CpDemandInterval>,
         capacity: i64,
+    },
+    Reservoir {
+        events: Vec<CpReservoirEvent>,
+        min_level: i64,
+        max_level: i64,
     },
 }
 
@@ -232,6 +303,34 @@ fn validate_model(model: &CpModel) {
                 }
                 for t in terms {
                     check_var(t.var);
+                }
+            }
+            CpConstraint::LinearDomain { terms, intervals } => {
+                if terms.is_empty() {
+                    panic!("cp-sat: linear_domain constraint has no terms");
+                }
+                if intervals.is_empty() {
+                    panic!("cp-sat: linear_domain has no intervals");
+                }
+                for t in terms {
+                    check_var(t.var);
+                }
+                for interval in intervals {
+                    if interval.ub < interval.lb {
+                        panic!("cp-sat: linear_domain interval ub must be >= lb");
+                    }
+                }
+            }
+            CpConstraint::MapDomain { var, bools, .. } => {
+                check_var(*var);
+                if bools.is_empty() {
+                    panic!("cp-sat: map_domain has no selector variables");
+                }
+                for &b in bools {
+                    check_var(b);
+                    if model.variables[b].domain.iter().any(|&v| v != 0 && v != 1) {
+                        panic!("cp-sat: map_domain selector variable {b} is not boolean");
+                    }
                 }
             }
             CpConstraint::EnforcedLinear {
@@ -409,6 +508,63 @@ fn validate_model(model: &CpModel) {
                     check_var(v);
                 }
             }
+            CpConstraint::DivisionEquality {
+                target,
+                numerator,
+                denominator,
+            } => {
+                check_var(*target);
+                check_var(*numerator);
+                check_var(*denominator);
+                if model.variables[*denominator]
+                    .domain
+                    .iter()
+                    .any(|&value| value <= 0)
+                {
+                    panic!("cp-sat: division_equality denominator domain must be positive");
+                }
+            }
+            CpConstraint::ModuloEquality {
+                target,
+                var,
+                modulus,
+            } => {
+                check_var(*target);
+                check_var(*var);
+                check_var(*modulus);
+                if model.variables[*modulus]
+                    .domain
+                    .iter()
+                    .any(|&value| value <= 0)
+                {
+                    panic!("cp-sat: modulo_equality modulus domain must be positive");
+                }
+            }
+            CpConstraint::Automaton(automaton) => {
+                if automaton.vars.is_empty() {
+                    panic!("cp-sat: automaton has no variables");
+                }
+                if automaton.final_states.is_empty() {
+                    panic!("cp-sat: automaton has no final states");
+                }
+                if automaton.transitions.is_empty() {
+                    panic!("cp-sat: automaton has no transitions");
+                }
+                for &v in &automaton.vars {
+                    check_var(v);
+                }
+            }
+            CpConstraint::Circuit(arcs) => {
+                if arcs.is_empty() {
+                    panic!("cp-sat: circuit has no arcs");
+                }
+                for arc in arcs {
+                    if arc.tail < 0 || arc.head < 0 {
+                        panic!("cp-sat: circuit node ids must be non-negative");
+                    }
+                    check_bool_literal(&arc.literal);
+                }
+            }
             CpConstraint::Element(element) => {
                 check_var(element.index);
                 check_var(element.target);
@@ -424,6 +580,18 @@ fn validate_model(model: &CpModel) {
                     check_var(interval.start);
                     if interval.duration <= 0 {
                         panic!("cp-sat: interval duration must be positive");
+                    }
+                }
+            }
+            CpConstraint::NoOverlap2D(rectangles) => {
+                if rectangles.is_empty() {
+                    panic!("cp-sat: no_overlap_2d has no rectangles");
+                }
+                for rectangle in rectangles {
+                    check_var(rectangle.x_start);
+                    check_var(rectangle.y_start);
+                    if rectangle.width <= 0 || rectangle.height <= 0 {
+                        panic!("cp-sat: rectangle dimensions must be positive");
                     }
                 }
             }
@@ -444,6 +612,30 @@ fn validate_model(model: &CpModel) {
                     }
                     if interval.demand <= 0 {
                         panic!("cp-sat: cumulative interval demand must be positive");
+                    }
+                }
+            }
+            CpConstraint::Reservoir {
+                events,
+                min_level,
+                max_level,
+            } => {
+                if *max_level < *min_level {
+                    panic!("cp-sat: reservoir max_level must be >= min_level");
+                }
+                if *min_level > 0 {
+                    panic!("cp-sat: reservoir min_level must be <= 0");
+                }
+                if *max_level < 0 {
+                    panic!("cp-sat: reservoir max_level must be >= 0");
+                }
+                if events.is_empty() {
+                    panic!("cp-sat: reservoir has no events");
+                }
+                for event in events {
+                    check_var(event.time);
+                    if let Some(active) = &event.active {
+                        check_bool_literal(active);
                     }
                 }
             }
@@ -493,6 +685,75 @@ fn partial_linear_ok(
         LinearSense::Ge => max_lhs >= rhs,
         LinearSense::Eq => min_lhs <= rhs && rhs <= max_lhs,
     }
+}
+
+fn linear_min_max(model: &CpModel, assignment: &[Option<i64>], terms: &[LinearTerm]) -> (i64, i64) {
+    let mut min_lhs = 0i64;
+    let mut max_lhs = 0i64;
+    for term in terms {
+        let (lo, hi) = term_min_max(model, assignment, term);
+        min_lhs += lo;
+        max_lhs += hi;
+    }
+    (min_lhs, max_lhs)
+}
+
+fn partial_linear_domain_ok(
+    model: &CpModel,
+    assignment: &[Option<i64>],
+    terms: &[LinearTerm],
+    intervals: &[CpDomainInterval],
+) -> bool {
+    let (min_lhs, max_lhs) = linear_min_max(model, assignment, terms);
+    intervals
+        .iter()
+        .any(|interval| interval.lb <= max_lhs && min_lhs <= interval.ub)
+}
+
+fn partial_map_domain_ok(
+    model: &CpModel,
+    assignment: &[Option<i64>],
+    var: usize,
+    bools: &[usize],
+    offset: i64,
+) -> bool {
+    let var_value = assignment[var];
+    let mut true_target = None;
+    for (i, &bool_var) in bools.iter().enumerate() {
+        let target = offset + i as i64;
+        match assignment[bool_var] {
+            Some(1) => {
+                if true_target.is_some_and(|existing| existing != target) {
+                    return false;
+                }
+                if var_value.is_some_and(|value| value != target) {
+                    return false;
+                }
+                true_target = Some(target);
+            }
+            Some(0) => {
+                if var_value == Some(target) {
+                    return false;
+                }
+            }
+            Some(_) => return false,
+            None => {}
+        }
+    }
+
+    if let Some(target) = true_target {
+        return model.variables[var].domain.contains(&target);
+    }
+    if var_value.is_some() {
+        return true;
+    }
+
+    model.variables[var].domain.iter().any(|&candidate| {
+        bools
+            .iter()
+            .enumerate()
+            .all(|(i, &bool_var)| candidate != offset + i as i64 || assignment[bool_var] != Some(0))
+    })
 }
 
 fn partial_all_different_ok(assignment: &[Option<i64>], vars: &[usize]) -> bool {
@@ -827,6 +1088,177 @@ fn partial_multiplication_equality_ok(
     i128::from(target_hi) >= product_lo && i128::from(target_lo) <= product_hi
 }
 
+fn possible_values(model: &CpModel, assignment: &[Option<i64>], var: usize) -> Vec<i64> {
+    match assignment[var] {
+        Some(value) => vec![value],
+        None => model.variables[var].domain.clone(),
+    }
+}
+
+fn partial_division_equality_ok(
+    model: &CpModel,
+    assignment: &[Option<i64>],
+    target: usize,
+    numerator: usize,
+    denominator: usize,
+) -> bool {
+    let target_values = possible_values(model, assignment, target);
+    let numerator_values = possible_values(model, assignment, numerator);
+    let denominator_values = possible_values(model, assignment, denominator);
+    numerator_values.iter().any(|&num| {
+        denominator_values
+            .iter()
+            .filter(|&&den| den != 0)
+            .any(|&den| target_values.contains(&(num / den)))
+    })
+}
+
+fn partial_modulo_equality_ok(
+    model: &CpModel,
+    assignment: &[Option<i64>],
+    target: usize,
+    var: usize,
+    modulus: usize,
+) -> bool {
+    let target_values = possible_values(model, assignment, target);
+    let var_values = possible_values(model, assignment, var);
+    let modulus_values = possible_values(model, assignment, modulus);
+    var_values.iter().any(|&value| {
+        modulus_values
+            .iter()
+            .filter(|&&modulus| modulus != 0)
+            .any(|&modulus| target_values.contains(&(value % modulus)))
+    })
+}
+
+fn partial_automaton_ok(
+    model: &CpModel,
+    assignment: &[Option<i64>],
+    automaton: &CpAutomaton,
+) -> bool {
+    let mut states = vec![automaton.starting_state];
+    for &var in &automaton.vars {
+        let labels: Vec<i64> = match assignment[var] {
+            Some(value) => vec![value],
+            None => model.variables[var].domain.clone(),
+        };
+        let mut next_states = Vec::new();
+        for &state in &states {
+            for transition in &automaton.transitions {
+                if transition.tail == state
+                    && labels.contains(&transition.label)
+                    && !next_states.contains(&transition.head)
+                {
+                    next_states.push(transition.head);
+                }
+            }
+        }
+        if next_states.is_empty() {
+            return false;
+        }
+        states = next_states;
+    }
+    states
+        .iter()
+        .any(|state| automaton.final_states.contains(state))
+}
+
+fn circuit_nodes(arcs: &[CpCircuitArc]) -> Vec<i64> {
+    let mut nodes = Vec::new();
+    for arc in arcs {
+        if !nodes.contains(&arc.tail) {
+            nodes.push(arc.tail);
+        }
+        if !nodes.contains(&arc.head) {
+            nodes.push(arc.head);
+        }
+    }
+    nodes
+}
+
+fn circuit_complete_ok(selected: &[&CpCircuitArc], nodes: &[i64]) -> bool {
+    let mut out = Vec::new();
+    let mut incoming = Vec::new();
+    for &node in nodes {
+        let outgoing: Vec<_> = selected.iter().filter(|arc| arc.tail == node).collect();
+        let inbound: Vec<_> = selected.iter().filter(|arc| arc.head == node).collect();
+        if outgoing.len() != 1 || inbound.len() != 1 {
+            return false;
+        }
+        out.push((node, outgoing[0].head));
+        incoming.push((node, inbound[0].tail));
+    }
+
+    let active_nodes: Vec<i64> = out
+        .iter()
+        .filter_map(|&(tail, head)| if tail != head { Some(tail) } else { None })
+        .collect();
+    if active_nodes.is_empty() {
+        return true;
+    }
+
+    let start = active_nodes[0];
+    let mut current = start;
+    let mut seen = Vec::new();
+    loop {
+        if seen.contains(&current) {
+            return current == start && seen.len() == active_nodes.len();
+        }
+        if !active_nodes.contains(&current) {
+            return false;
+        }
+        seen.push(current);
+        let Some((_, next)) = out.iter().find(|&&(tail, _)| tail == current) else {
+            return false;
+        };
+        current = *next;
+    }
+}
+
+fn partial_circuit_ok(assignment: &[Option<i64>], arcs: &[CpCircuitArc]) -> bool {
+    let nodes = circuit_nodes(arcs);
+    for &node in &nodes {
+        let true_out = arcs
+            .iter()
+            .filter(|arc| arc.tail == node && literal_value(assignment, &arc.literal) == Some(true))
+            .count();
+        let true_in = arcs
+            .iter()
+            .filter(|arc| arc.head == node && literal_value(assignment, &arc.literal) == Some(true))
+            .count();
+        if true_out > 1 || true_in > 1 {
+            return false;
+        }
+
+        let possible_out = arcs
+            .iter()
+            .filter(|arc| {
+                arc.tail == node && literal_value(assignment, &arc.literal) != Some(false)
+            })
+            .count();
+        let possible_in = arcs
+            .iter()
+            .filter(|arc| {
+                arc.head == node && literal_value(assignment, &arc.literal) != Some(false)
+            })
+            .count();
+        if possible_out == 0 || possible_in == 0 {
+            return false;
+        }
+    }
+
+    let mut all_bound = true;
+    let mut selected = Vec::new();
+    for arc in arcs {
+        match literal_value(assignment, &arc.literal) {
+            Some(true) => selected.push(arc),
+            Some(false) => {}
+            None => all_bound = false,
+        }
+    }
+    !all_bound || circuit_complete_ok(&selected, &nodes)
+}
+
 fn partial_element_ok(model: &CpModel, assignment: &[Option<i64>], element: &CpElement) -> bool {
     match (assignment[element.index], assignment[element.target]) {
         (Some(index), Some(target)) => {
@@ -878,6 +1310,35 @@ fn partial_no_overlap_ok(assignment: &[Option<i64>], intervals: &[CpInterval]) -
     true
 }
 
+fn partial_no_overlap_2d_ok(assignment: &[Option<i64>], rectangles: &[CpRectangle]) -> bool {
+    for i in 0..rectangles.len() {
+        let Some(x_i) = assignment[rectangles[i].x_start] else {
+            continue;
+        };
+        let Some(y_i) = assignment[rectangles[i].y_start] else {
+            continue;
+        };
+        let x_end_i = x_i + rectangles[i].width;
+        let y_end_i = y_i + rectangles[i].height;
+        for j in (i + 1)..rectangles.len() {
+            let Some(x_j) = assignment[rectangles[j].x_start] else {
+                continue;
+            };
+            let Some(y_j) = assignment[rectangles[j].y_start] else {
+                continue;
+            };
+            let x_end_j = x_j + rectangles[j].width;
+            let y_end_j = y_j + rectangles[j].height;
+            let x_disjoint = x_end_i <= x_j || x_end_j <= x_i;
+            let y_disjoint = y_end_i <= y_j || y_end_j <= y_i;
+            if !(x_disjoint || y_disjoint) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 fn partial_cumulative_ok(
     assignment: &[Option<i64>],
     intervals: &[CpDemandInterval],
@@ -913,11 +1374,66 @@ fn partial_cumulative_ok(
     true
 }
 
+fn reservoir_complete_ok(events: &[(i64, i64)], min_level: i64, max_level: i64) -> bool {
+    if !(min_level <= 0 && 0 <= max_level) {
+        return false;
+    }
+    let mut sorted = events.to_vec();
+    sorted.sort_unstable_by_key(|&(time, _)| time);
+    let mut level = 0i64;
+    let mut i = 0usize;
+    while i < sorted.len() {
+        let time = sorted[i].0;
+        while i < sorted.len() && sorted[i].0 == time {
+            level += sorted[i].1;
+            i += 1;
+        }
+        if level < min_level || level > max_level {
+            return false;
+        }
+    }
+    true
+}
+
+fn partial_reservoir_ok(
+    assignment: &[Option<i64>],
+    events: &[CpReservoirEvent],
+    min_level: i64,
+    max_level: i64,
+) -> bool {
+    let mut all_bound = true;
+    let mut active_events = Vec::new();
+    for event in events {
+        if let Some(active) = &event.active {
+            match literal_value(assignment, active) {
+                Some(false) => continue,
+                Some(true) => {}
+                None => {
+                    all_bound = false;
+                    continue;
+                }
+            }
+        }
+        let Some(time) = assignment[event.time] else {
+            all_bound = false;
+            continue;
+        };
+        active_events.push((time, event.level_change));
+    }
+    !all_bound || reservoir_complete_ok(&active_events, min_level, max_level)
+}
+
 fn partial_constraints_ok(model: &CpModel, assignment: &[Option<i64>]) -> bool {
     for constraint in &model.constraints {
         let ok = match constraint {
             CpConstraint::Linear { terms, sense, rhs } => {
                 partial_linear_ok(model, assignment, terms, *sense, *rhs)
+            }
+            CpConstraint::LinearDomain { terms, intervals } => {
+                partial_linear_domain_ok(model, assignment, terms, intervals)
+            }
+            CpConstraint::MapDomain { var, bools, offset } => {
+                partial_map_domain_ok(model, assignment, *var, bools, *offset)
             }
             CpConstraint::EnforcedLinear {
                 enforcement,
@@ -960,12 +1476,34 @@ fn partial_constraints_ok(model: &CpModel, assignment: &[Option<i64>]) -> bool {
             CpConstraint::MultiplicationEquality { target, vars } => {
                 partial_multiplication_equality_ok(model, assignment, *target, vars)
             }
+            CpConstraint::DivisionEquality {
+                target,
+                numerator,
+                denominator,
+            } => partial_division_equality_ok(model, assignment, *target, *numerator, *denominator),
+            CpConstraint::ModuloEquality {
+                target,
+                var,
+                modulus,
+            } => partial_modulo_equality_ok(model, assignment, *target, *var, *modulus),
+            CpConstraint::Automaton(automaton) => {
+                partial_automaton_ok(model, assignment, automaton)
+            }
+            CpConstraint::Circuit(arcs) => partial_circuit_ok(assignment, arcs),
             CpConstraint::Element(element) => partial_element_ok(model, assignment, element),
             CpConstraint::NoOverlap(intervals) => partial_no_overlap_ok(assignment, intervals),
+            CpConstraint::NoOverlap2D(rectangles) => {
+                partial_no_overlap_2d_ok(assignment, rectangles)
+            }
             CpConstraint::Cumulative {
                 intervals,
                 capacity,
             } => partial_cumulative_ok(assignment, intervals, *capacity),
+            CpConstraint::Reservoir {
+                events,
+                min_level,
+                max_level,
+            } => partial_reservoir_ok(assignment, events, *min_level, *max_level),
         };
         if !ok {
             return false;
@@ -1153,6 +1691,86 @@ mod tests {
     }
 
     #[test]
+    fn solves_linear_domain_constraint() {
+        let model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "x".to_string(),
+                    domain: vec![0, 1, 2],
+                },
+                CpVariable {
+                    name: "y".to_string(),
+                    domain: vec![0, 1, 2],
+                },
+            ],
+            constraints: vec![CpConstraint::LinearDomain {
+                terms: vec![
+                    LinearTerm { var: 0, coeff: 1 },
+                    LinearTerm { var: 1, coeff: 2 },
+                ],
+                intervals: vec![
+                    CpDomainInterval { lb: 1, ub: 1 },
+                    CpDomainInterval { lb: 4, ub: 4 },
+                ],
+            }],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![
+                    LinearTerm { var: 0, coeff: 1 },
+                    LinearTerm { var: 1, coeff: 1 },
+                ],
+            }),
+        };
+        let sol = solve_cp_model(&model, CpSolveOptions::default());
+        assert_eq!(sol.status, CpStatus::Optimal);
+        assert_eq!(sol.assignment, vec![1, 0]);
+        assert_eq!(sol.objective, Some(1));
+    }
+
+    #[test]
+    fn solves_map_domain_constraint() {
+        let model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "mode".to_string(),
+                    domain: vec![5, 6, 7],
+                },
+                CpVariable {
+                    name: "is_five".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "is_six".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "is_seven".to_string(),
+                    domain: vec![0, 1],
+                },
+            ],
+            constraints: vec![
+                CpConstraint::MapDomain {
+                    var: 0,
+                    bools: vec![1, 2, 3],
+                    offset: 5,
+                },
+                CpConstraint::BoolOr(vec![BoolLiteral {
+                    var: 2,
+                    positive: true,
+                }]),
+            ],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![LinearTerm { var: 0, coeff: 1 }],
+            }),
+        };
+        let sol = solve_cp_model(&model, CpSolveOptions::default());
+        assert_eq!(sol.status, CpStatus::Optimal);
+        assert_eq!(sol.assignment, vec![6, 0, 1, 0]);
+        assert_eq!(sol.objective, Some(6));
+    }
+
+    #[test]
     fn solves_no_overlap_schedule() {
         let model = CpModel {
             variables: vec![
@@ -1188,6 +1806,54 @@ mod tests {
         let sol = solve_cp_model(&model, CpSolveOptions::default());
         assert_eq!(sol.status, CpStatus::Optimal);
         assert_eq!(sol.assignment, vec![2, 0]);
+        assert_eq!(sol.objective, Some(2));
+    }
+
+    #[test]
+    fn solves_no_overlap_2d_packing() {
+        let model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "box_a_x".to_string(),
+                    domain: vec![0],
+                },
+                CpVariable {
+                    name: "box_a_y".to_string(),
+                    domain: vec![0],
+                },
+                CpVariable {
+                    name: "box_b_x".to_string(),
+                    domain: vec![0, 1, 2],
+                },
+                CpVariable {
+                    name: "box_b_y".to_string(),
+                    domain: vec![0],
+                },
+            ],
+            constraints: vec![CpConstraint::NoOverlap2D(vec![
+                CpRectangle {
+                    x_start: 0,
+                    y_start: 1,
+                    width: 2,
+                    height: 2,
+                    name: Some("box_a".to_string()),
+                },
+                CpRectangle {
+                    x_start: 2,
+                    y_start: 3,
+                    width: 2,
+                    height: 2,
+                    name: Some("box_b".to_string()),
+                },
+            ])],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![LinearTerm { var: 2, coeff: 1 }],
+            }),
+        };
+        let sol = solve_cp_model(&model, CpSolveOptions::default());
+        assert_eq!(sol.status, CpStatus::Optimal);
+        assert_eq!(sol.assignment, vec![0, 0, 2, 0]);
         assert_eq!(sol.objective, Some(2));
     }
 
@@ -1244,6 +1910,61 @@ mod tests {
         assert_eq!(sol.status, CpStatus::Optimal);
         assert_eq!(sol.assignment, vec![2, 0, 0]);
         assert_eq!(sol.objective, Some(2));
+    }
+
+    #[test]
+    fn solves_reservoir_schedule() {
+        let model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "fill_time".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "drain_time".to_string(),
+                    domain: vec![0],
+                },
+                CpVariable {
+                    name: "overfill_active".to_string(),
+                    domain: vec![0, 1],
+                },
+            ],
+            constraints: vec![CpConstraint::Reservoir {
+                events: vec![
+                    CpReservoirEvent {
+                        time: 0,
+                        level_change: 4,
+                        active: None,
+                    },
+                    CpReservoirEvent {
+                        time: 1,
+                        level_change: -3,
+                        active: None,
+                    },
+                    CpReservoirEvent {
+                        time: 1,
+                        level_change: 10,
+                        active: Some(BoolLiteral {
+                            var: 2,
+                            positive: true,
+                        }),
+                    },
+                ],
+                min_level: 0,
+                max_level: 4,
+            }],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![
+                    LinearTerm { var: 0, coeff: 1 },
+                    LinearTerm { var: 2, coeff: -1 },
+                ],
+            }),
+        };
+        let sol = solve_cp_model(&model, CpSolveOptions::default());
+        assert_eq!(sol.status, CpStatus::Optimal);
+        assert_eq!(sol.assignment, vec![0, 0, 0]);
+        assert_eq!(sol.objective, Some(0));
     }
 
     #[test]
@@ -1476,6 +2197,189 @@ mod tests {
         assert_eq!(sol.status, CpStatus::Optimal);
         assert_eq!(sol.assignment, vec![3, -3, -9]);
         assert_eq!(sol.objective, Some(-9));
+    }
+
+    #[test]
+    fn solves_division_equality_constraint() {
+        let model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "numerator".to_string(),
+                    domain: vec![5, 6, 7],
+                },
+                CpVariable {
+                    name: "denominator".to_string(),
+                    domain: vec![2],
+                },
+                CpVariable {
+                    name: "quotient".to_string(),
+                    domain: vec![2, 3],
+                },
+            ],
+            constraints: vec![CpConstraint::DivisionEquality {
+                target: 2,
+                numerator: 0,
+                denominator: 1,
+            }],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![
+                    LinearTerm { var: 0, coeff: 1 },
+                    LinearTerm { var: 2, coeff: 10 },
+                ],
+            }),
+        };
+        let sol = solve_cp_model(&model, CpSolveOptions::default());
+        assert_eq!(sol.status, CpStatus::Optimal);
+        assert_eq!(sol.assignment, vec![5, 2, 2]);
+        assert_eq!(sol.objective, Some(25));
+    }
+
+    #[test]
+    fn solves_modulo_equality_constraint() {
+        let model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "value".to_string(),
+                    domain: vec![5, 6, 7],
+                },
+                CpVariable {
+                    name: "modulus".to_string(),
+                    domain: vec![3],
+                },
+                CpVariable {
+                    name: "remainder".to_string(),
+                    domain: vec![0, 1, 2],
+                },
+            ],
+            constraints: vec![CpConstraint::ModuloEquality {
+                target: 2,
+                var: 0,
+                modulus: 1,
+            }],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![
+                    LinearTerm { var: 0, coeff: 1 },
+                    LinearTerm { var: 2, coeff: 10 },
+                ],
+            }),
+        };
+        let sol = solve_cp_model(&model, CpSolveOptions::default());
+        assert_eq!(sol.status, CpStatus::Optimal);
+        assert_eq!(sol.assignment, vec![6, 3, 0]);
+        assert_eq!(sol.objective, Some(6));
+    }
+
+    #[test]
+    fn solves_automaton_constraint() {
+        let model = CpModel {
+            variables: (0..3)
+                .map(|i| CpVariable {
+                    name: format!("bit_{i}"),
+                    domain: vec![0, 1],
+                })
+                .collect(),
+            constraints: vec![CpConstraint::Automaton(CpAutomaton {
+                vars: vec![0, 1, 2],
+                starting_state: 0,
+                final_states: vec![1],
+                transitions: vec![
+                    CpTransition {
+                        tail: 0,
+                        label: 0,
+                        head: 0,
+                    },
+                    CpTransition {
+                        tail: 0,
+                        label: 1,
+                        head: 1,
+                    },
+                    CpTransition {
+                        tail: 1,
+                        label: 0,
+                        head: 1,
+                    },
+                    CpTransition {
+                        tail: 1,
+                        label: 1,
+                        head: 2,
+                    },
+                    CpTransition {
+                        tail: 2,
+                        label: 0,
+                        head: 2,
+                    },
+                    CpTransition {
+                        tail: 2,
+                        label: 1,
+                        head: 2,
+                    },
+                ],
+            })],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![
+                    LinearTerm { var: 0, coeff: 4 },
+                    LinearTerm { var: 1, coeff: 2 },
+                    LinearTerm { var: 2, coeff: 1 },
+                ],
+            }),
+        };
+        let sol = solve_cp_model(&model, CpSolveOptions::default());
+        assert_eq!(sol.status, CpStatus::Optimal);
+        assert_eq!(sol.assignment, vec![0, 0, 1]);
+        assert_eq!(sol.objective, Some(1));
+    }
+
+    #[test]
+    fn solves_circuit_constraint() {
+        let model = CpModel {
+            variables: (0..3)
+                .map(|i| CpVariable {
+                    name: format!("arc_{i}"),
+                    domain: vec![0, 1],
+                })
+                .collect(),
+            constraints: vec![CpConstraint::Circuit(vec![
+                CpCircuitArc {
+                    tail: 0,
+                    head: 1,
+                    literal: BoolLiteral {
+                        var: 0,
+                        positive: true,
+                    },
+                },
+                CpCircuitArc {
+                    tail: 1,
+                    head: 2,
+                    literal: BoolLiteral {
+                        var: 1,
+                        positive: true,
+                    },
+                },
+                CpCircuitArc {
+                    tail: 2,
+                    head: 0,
+                    literal: BoolLiteral {
+                        var: 2,
+                        positive: true,
+                    },
+                },
+            ])],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![
+                    LinearTerm { var: 0, coeff: 1 },
+                    LinearTerm { var: 1, coeff: 2 },
+                    LinearTerm { var: 2, coeff: 3 },
+                ],
+            }),
+        };
+        let sol = solve_cp_model(&model, CpSolveOptions::default());
+        assert_eq!(sol.status, CpStatus::Optimal);
+        assert_eq!(sol.assignment, vec![1, 1, 1]);
+        assert_eq!(sol.objective, Some(6));
     }
 
     #[test]

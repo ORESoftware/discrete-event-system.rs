@@ -4,9 +4,9 @@
 Input is JSON on stdin:
   {"lp": {...}, "method": "highs"}
 
-The bridge prefers scipy.optimize.linprog when SciPy is installed. When it is
-not installed, it falls back to dependency-free vertex enumeration, which is
-intended for small validation models rather than production-scale LPs.
+The bridge supports SciPy/HiGHS methods plus OR-Tools GLOP. If the requested
+solver is unavailable, it falls back to dependency-free vertex enumeration,
+which is intended for small validation models rather than production-scale LPs.
 """
 
 from __future__ import annotations
@@ -235,6 +235,78 @@ def scipy_linprog(lp: dict, method: str) -> Optional[dict]:
     }
 
 
+def ortools_glop(lp: dict) -> Optional[dict]:
+    try:
+        from ortools.linear_solver import pywraplp  # type: ignore
+    except Exception:
+        return None
+
+    solver = pywraplp.Solver.CreateSolver("GLOP")
+    if solver is None:
+        return None
+
+    sense, c, a_ub, b_ub, a_eq, b_eq, lb, ub = normalize_lp(lp)
+    inf = solver.infinity()
+    xs = []
+    for j, (lower, upper) in enumerate(zip(lb, ub)):
+        xs.append(
+            solver.NumVar(
+                -inf if lower is None else float(lower),
+                inf if upper is None else float(upper),
+                f"x{j}",
+            )
+        )
+
+    for i, (row, rhs) in enumerate(zip(a_ub, b_ub)):
+        constraint = solver.RowConstraint(-inf, float(rhs), f"ub{i}")
+        for coef, var in zip(row, xs):
+            if abs(coef) > 1e-12:
+                constraint.SetCoefficient(var, float(coef))
+
+    for i, (row, rhs) in enumerate(zip(a_eq, b_eq)):
+        constraint = solver.RowConstraint(float(rhs), float(rhs), f"eq{i}")
+        for coef, var in zip(row, xs):
+            if abs(coef) > 1e-12:
+                constraint.SetCoefficient(var, float(coef))
+
+    objective = solver.Objective()
+    for coef, var in zip(c, xs):
+        if abs(coef) > 1e-12:
+            objective.SetCoefficient(var, float(coef))
+    if sense == "max":
+        objective.SetMaximization()
+    else:
+        objective.SetMinimization()
+
+    status_code = solver.Solve()
+    status_map = {
+        pywraplp.Solver.OPTIMAL: "optimal",
+        pywraplp.Solver.FEASIBLE: "feasible",
+        pywraplp.Solver.INFEASIBLE: "infeasible",
+        pywraplp.Solver.UNBOUNDED: "unbounded",
+        pywraplp.Solver.ABNORMAL: "numerical-error",
+        pywraplp.Solver.NOT_SOLVED: "iter-limit",
+    }
+    status = status_map.get(status_code, "numerical-error")
+    x = [float(var.solution_value()) for var in xs] if status in ("optimal", "feasible") else []
+    iters = solver.iterations() if hasattr(solver, "iterations") else 0
+    return {
+        "status": status,
+        "x": x,
+        "objective": dot(c, x) if status in ("optimal", "feasible") else None,
+        "iters": int(iters or 0),
+        "solver": "ortools:glop",
+        "message": f"GLOP status code {status_code}",
+    }
+
+
+def solve_external(lp: dict, method: str) -> Optional[dict]:
+    normalized = method.lower().replace("_", "-")
+    if normalized in ("glop", "ortools-glop", "ortools:glop"):
+        return ortools_glop(lp)
+    return scipy_linprog(lp, method)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--method", default="highs")
@@ -243,7 +315,7 @@ def main() -> int:
         payload = json.load(sys.stdin)
         lp = payload.get("lp", payload)
         method = payload.get("method", args.method)
-        result = scipy_linprog(lp, method)
+        result = solve_external(lp, method)
         if result is None:
             result = vertex_enumeration(lp)
         print(json.dumps(result, allow_nan=True))

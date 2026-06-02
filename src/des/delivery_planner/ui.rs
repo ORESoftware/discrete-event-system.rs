@@ -79,5 +79,9 @@ mod tests {
         assert!(html.contains("lockOrderBtn"));
         assert!(html.contains("pin-btn"));
         assert!(html.contains("busyScreen"));
+        assert!(html.contains("warningBanner"));
+        assert!(html.contains("Previous Runs"));
+        assert!(html.contains("runHistoryList"));
+        assert!(html.contains("clearRunsBtn"));
     }
 }

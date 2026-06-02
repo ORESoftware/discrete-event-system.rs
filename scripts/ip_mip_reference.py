@@ -141,23 +141,25 @@ def sos_ordered_vars(sos: dict) -> list[int]:
     return [v for _, v in pairs]
 
 
-def add_binary_helper(rows: list, c: list, integer_vars: list, ubs: list, var_names: list, name: str) -> int:
+def add_binary_helper(rows: list, c: list, integer_vars: list, lbs: list, ubs: list, var_names: list, name: str) -> int:
     for row in rows:
         row.append(0.0)
     idx = len(c)
     c.append(0.0)
     integer_vars.append(True)
+    lbs.append(0.0)
     ubs.append(1.0)
     var_names.append(name)
     return idx
 
 
-def add_continuous_helper(rows: list, c: list, integer_vars: list, ubs: list, var_names: list, name: str, upper: float) -> int:
+def add_continuous_helper(rows: list, c: list, integer_vars: list, lbs: list, ubs: list, var_names: list, name: str, upper: float) -> int:
     for row in rows:
         row.append(0.0)
     idx = len(c)
     c.append(0.0)
     integer_vars.append(False)
+    lbs.append(0.0)
     ubs.append(float(upper))
     var_names.append(name)
     return idx
@@ -236,8 +238,6 @@ def expand_sos(p: dict) -> dict:
     c = [float(v) for v in p["c"]]
     integer_vars = [bool(v) for v in p["integer_vars"]]
     lbs, ubs = bounds(p)
-    if any(abs(lb) > 1e-12 for lb in lbs):
-        raise ValueError("sos bridge currently expects non-negative variables")
     ubs = [None if ub is None else float(ub) for ub in ubs]
     var_names = list(p.get("var_names") or [f"x{i}" for i in range(len(c))])
     row_names = list(p.get("con_names") or [f"c{i}" for i in range(len(rows))])
@@ -250,11 +250,14 @@ def expand_sos(p: dict) -> dict:
             raise ValueError(f"sos {idx} contains duplicate variables")
         kind = sos.get("kind", "sos1")
         name = sos.get("name", kind)
+        for var in ordered:
+            if abs(lbs[var]) > 1e-12:
+                raise ValueError(f"sos {idx} variable x{var} must have lower bound 0")
         if kind == "sos1":
             selectors = []
             for pos, var in enumerate(ordered):
                 upper = finite_sos_ub(ubs, var, idx)
-                y = add_binary_helper(rows, c, integer_vars, ubs, var_names, f"{name}_sel_{pos}")
+                y = add_binary_helper(rows, c, integer_vars, lbs, ubs, var_names, f"{name}_sel_{pos}")
                 selectors.append(y)
                 row = [0.0] * len(c)
                 row[var] = 1.0
@@ -270,7 +273,7 @@ def expand_sos(p: dict) -> dict:
             if len(ordered) <= 2:
                 continue
             segments = [
-                add_binary_helper(rows, c, integer_vars, ubs, var_names, f"{name}_seg_{pos}")
+                add_binary_helper(rows, c, integer_vars, lbs, ubs, var_names, f"{name}_seg_{pos}")
                 for pos in range(len(ordered) - 1)
             ]
             row = [0.0] * len(c)
@@ -292,6 +295,7 @@ def expand_sos(p: dict) -> dict:
     expanded["a"] = rows
     expanded["b"] = rhs_values
     expanded["integer_vars"] = integer_vars
+    expanded["lb"] = lbs
     expanded["ub"] = ubs
     expanded["var_names"] = var_names
     expanded["con_names"] = row_names
@@ -309,8 +313,6 @@ def expand_pwl(p: dict) -> dict:
     c = [float(v) for v in p["c"]]
     integer_vars = [bool(v) for v in p["integer_vars"]]
     lbs, ubs = bounds(p)
-    if any(abs(lb) > 1e-12 for lb in lbs):
-        raise ValueError("pwl bridge currently expects non-negative variables")
     ubs = [None if ub is None else float(ub) for ub in ubs]
     var_names = list(p.get("var_names") or [f"x{i}" for i in range(len(c))])
     row_names = list(p.get("con_names") or [f"c{i}" for i in range(len(rows))])
@@ -339,7 +341,7 @@ def expand_pwl(p: dict) -> dict:
                 raise ValueError(f"pwl {idx} breakpoint x values must be strictly increasing")
         name = pwl.get("name", f"pwl_{idx}")
         lambdas = [
-            add_continuous_helper(rows, c, integer_vars, ubs, var_names, f"{name}_lambda_{pos}", 1.0)
+            add_continuous_helper(rows, c, integer_vars, lbs, ubs, var_names, f"{name}_lambda_{pos}", 1.0)
             for pos, _ in enumerate(points)
         ]
 
@@ -373,6 +375,7 @@ def expand_pwl(p: dict) -> dict:
     expanded["a"] = rows
     expanded["b"] = rhs_values
     expanded["integer_vars"] = integer_vars
+    expanded["lb"] = lbs
     expanded["ub"] = ubs
     expanded["var_names"] = var_names
     expanded["con_names"] = row_names
@@ -418,7 +421,7 @@ def expand_semi_variables(p: dict) -> dict:
         else:
             raise ValueError(f"semi variable {idx} has unknown kind {kind}")
         name = semi.get("name", f"semi_{var}")
-        y = add_binary_helper(rows, c, integer_vars, ubs, var_names, f"{name}_active")
+        y = add_binary_helper(rows, c, integer_vars, lbs, ubs, var_names, f"{name}_active")
 
         row = [0.0] * len(c)
         row[var] = 1.0
@@ -434,6 +437,7 @@ def expand_semi_variables(p: dict) -> dict:
     expanded["a"] = rows
     expanded["b"] = rhs_values
     expanded["integer_vars"] = integer_vars
+    expanded["lb"] = lbs
     expanded["ub"] = ubs
     expanded["var_names"] = var_names
     expanded["con_names"] = row_names

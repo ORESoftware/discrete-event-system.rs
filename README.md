@@ -401,6 +401,17 @@ than as one monolithic planner:
 | Stochastic optimization and simulation | `stochastic_lp`, `statistical_optimization`, `fel`, `hybrid`, catalogue simulations |
 | Model predictive control and reinforcement learning | `mpc_double_integrator`, `temp_control` MPC, `qlearning_des`, `ppo_des`, `actor_critic_gridworld` |
 
+Solver parity checks live in `validate_optimization_suite`; scale-envelope
+checks live in `validate_optimization_scale`. The scale runner compares native
+LP/MIP solvers with installed open-source engines and writes
+`out/external/optimization-scale/scale-report.json`:
+
+```sh
+PYTHON_BIN=/path/to/python cargo run --bin validate_optimization_scale
+SCALE_LP_SIZES=8,16,24 SCALE_MIP_SIZES=8,12,16 cargo run --bin validate_optimization_scale
+SCALE_MIP_SOLVERS=highs,cbc,gurobi,cplex cargo run --bin validate_optimization_scale
+```
+
 ### PyDy / OpenMDAO-style coverage
 
 The crate is moving toward an open, Rust-native modeling workbench that spans

@@ -13,7 +13,7 @@ use crate::des::general::ip_mip_des::TraceAction;
 use crate::des::general::soccer_rotation::{
     build_soccer_ipmip, evaluate_schedule, formation_with_gk, policy_greedy_feasible_schedule,
     policy_ipmip_feasible, simulate_match_des, validate_schedule_structure, MatchSimOptions,
-    Schedule, SoccerIPMIPPolicyOptions, SoccerIPMIPPolicyResult, SoccerProblem,
+    Schedule, ScheduleEvaluation, SoccerIPMIPPolicyOptions, SoccerIPMIPPolicyResult, SoccerProblem,
 };
 
 use super::model::{parse_player_status, synergy_to_rule, PlannerRequest};
@@ -23,6 +23,8 @@ use super::model::{parse_player_status, synergy_to_rule, PlannerRequest};
 pub struct PlannerResponse {
     pub ok: bool,
     pub error: Option<String>,
+    pub constraint_violations: Vec<PlannerConstraintViolation>,
+    pub suggested_fix: Option<String>,
     pub affinity: f64,
     pub total_subs: usize,
     pub fairness_ok: bool,
@@ -46,12 +48,218 @@ pub struct PlannerResponse {
 }
 
 #[derive(Clone, Debug)]
+pub struct PlannerConstraintViolation {
+    pub kind: String,
+    pub constraint: String,
+    pub message: String,
+    pub suggestion: String,
+}
+
+#[derive(Clone, Debug)]
 pub struct PlannerAlternative {
     pub rank: usize,
     pub affinity: f64,
     pub total_subs: usize,
     pub assignment: Vec<Vec<i64>>,
     pub bench: Vec<Vec<usize>>,
+}
+
+#[derive(Clone, Debug)]
+struct PlannerScheduleDiagnostics {
+    eval: Option<ScheduleEvaluation>,
+    violations: Vec<PlannerConstraintViolation>,
+    suggested_fix: Option<String>,
+}
+
+impl PlannerScheduleDiagnostics {
+    fn has_violations(&self) -> bool {
+        !self.violations.is_empty()
+    }
+}
+
+fn violation(
+    kind: &str,
+    constraint: &str,
+    message: impl Into<String>,
+    suggestion: impl Into<String>,
+) -> PlannerConstraintViolation {
+    PlannerConstraintViolation {
+        kind: kind.to_string(),
+        constraint: constraint.to_string(),
+        message: message.into(),
+        suggestion: suggestion.into(),
+    }
+}
+
+fn player_label(problem: &SoccerProblem, player_id: usize) -> String {
+    problem
+        .player_names
+        .as_ref()
+        .and_then(|names| names.get(player_id))
+        .filter(|name| !name.is_empty())
+        .cloned()
+        .unwrap_or_else(|| format!("Player{}", player_id + 1))
+}
+
+fn structure_suggestion(reason: &str) -> &'static str {
+    if reason.contains("AWOL/injured") {
+        "Mark that player available/guest, remove their fixed slot, or add another eligible player."
+    } else if reason.contains("fixed at position") {
+        "Clear or change the fixed-position lock so the player can match the assigned slot."
+    } else if reason.contains("banned from position") {
+        "Allow that position for the player, change the fixed slot, or add another eligible player for the slot."
+    } else if reason.contains("both on field and bench") || reason.contains("appears twice") {
+        "Remove duplicate player assignments or rerun with the fast fallback enabled."
+    } else if reason.contains("bench[") || reason.contains("total players") {
+        "Check roster size and unavailable-player statuses; every rostered player must be either on field or listed on the bench each period."
+    } else if reason.contains("invalid player") || reason.contains("length") {
+        "Regenerate the lineup from the current roster so assignment and bench dimensions match the formation."
+    } else {
+        "Review fixed positions, banned positions, roster availability, and formation size."
+    }
+}
+
+fn build_error_diagnostics(error: &str) -> (Vec<PlannerConstraintViolation>, Option<String>) {
+    let (constraint, suggestion) = if error.contains("need more players")
+        || error.contains("need at least")
+    {
+        (
+            "Roster availability",
+            "Add available/guest players, mark injured/AWOL players available, or reduce the formation size.",
+        )
+    } else if error.contains("min subs") {
+        (
+            "Substitution bounds",
+            "Lower Min subs, raise Max subs, add more periods, or add enough bench depth for additional substitutions.",
+        )
+    } else if error.contains("unavailable and cannot also be fixed") {
+        (
+            "Availability and fixed-position locks",
+            "Clear the fixed slot or mark the player available/guest before solving.",
+        )
+    } else if error.contains("fixed to invalid position") {
+        (
+            "Fixed-position locks",
+            "Clear the invalid fixed slot or pick a position that exists in the current formation.",
+        )
+    } else if error.contains("duplicate player id") || error.contains("missing player id") {
+        (
+            "Roster ids",
+            "Refresh the roster or use the Set/Add/remove controls so player ids are rewritten sequentially.",
+        )
+    } else {
+        (
+            "Planner input",
+            "Review roster availability, fixed positions, banned positions, formation size, and substitution limits.",
+        )
+    };
+    let v = violation("input", constraint, error.to_string(), suggestion);
+    (vec![v], Some(suggestion.to_string()))
+}
+
+fn solver_error_diagnostics(error: &str) -> (Vec<PlannerConstraintViolation>, Option<String>) {
+    let suggestion = if error.contains("constructive planner fallback") {
+        "Relax one hard planner constraint: clear conflicting fixed/banned positions, add fieldable players, increase Max run, or adjust substitution bounds."
+    } else {
+        "Try enabling Fallback, raising the solver time/node limits, or relaxing fixed-position, banned-position, stamina, and substitution constraints."
+    };
+    let v = violation(
+        "solver",
+        "Feasible incumbent",
+        error.to_string(),
+        suggestion,
+    );
+    (vec![v], Some(suggestion.to_string()))
+}
+
+fn schedule_diagnostics(
+    problem: &SoccerProblem,
+    schedule: &Schedule,
+) -> PlannerScheduleDiagnostics {
+    let mut violations = Vec::new();
+    if let Some(reason) = validate_schedule_structure(problem, schedule) {
+        let suggestion = structure_suggestion(&reason).to_string();
+        violations.push(violation(
+            "schedule_structure",
+            "Roster coverage and eligibility",
+            format!("Invalid schedule structure: {reason}"),
+            suggestion.clone(),
+        ));
+        return PlannerScheduleDiagnostics {
+            eval: None,
+            violations,
+            suggested_fix: Some(suggestion),
+        };
+    }
+
+    let eval = evaluate_schedule(problem, schedule);
+    for f in &eval.fairness_violations {
+        violations.push(violation(
+            "fairness",
+            "No consecutive bench periods",
+            format!(
+                "{} is benched in both period {} and period {}.",
+                player_label(problem, f.player_id),
+                f.period_a + 1,
+                f.period_b + 1
+            ),
+            "Rotate the player onto the field next period, reduce bench depth, add on-field slots, or relax the fairness rule.",
+        ));
+    }
+    for s in &eval.consecutive_on_field_violations {
+        let limit = problem.max_consecutive_on_field.unwrap_or(0);
+        violations.push(violation(
+            "stamina",
+            "Max consecutive on-field periods",
+            format!(
+                "{} is on field for {} consecutive period(s) starting at period {}, above the Max run of {}.",
+                player_label(problem, s.player_id),
+                s.length,
+                s.start_period + 1,
+                limit
+            ),
+            "Increase Max run, add bench depth, add periods with rest opportunities, or clear fixed-position locks that force this player to stay on.",
+        ));
+    }
+    if !eval.subs_ok {
+        let min = problem.min_subs_per_game.unwrap_or(0);
+        let max = problem.max_subs_per_game.unwrap_or(usize::MAX);
+        let suggestion = if eval.total_subs < min {
+            "Lower Min subs, add more periods, add bench depth, or reduce fixed-position locks that keep the same lineup on."
+        } else {
+            "Raise Max subs, reduce periods, relax fairness/stamina constraints, or allow more lineup continuity."
+        };
+        violations.push(violation(
+            "substitutions",
+            "Substitution bounds",
+            format!(
+                "Schedule uses {} substitution(s), outside the active {}-{} bound.",
+                eval.total_subs,
+                min,
+                if max == usize::MAX { min } else { max }
+            ),
+            suggestion,
+        ));
+    }
+
+    let suggested_fix = best_schedule_fix(&violations);
+    PlannerScheduleDiagnostics {
+        eval: Some(eval),
+        violations,
+        suggested_fix,
+    }
+}
+
+fn best_schedule_fix(violations: &[PlannerConstraintViolation]) -> Option<String> {
+    violations.first().map(|v| v.suggestion.clone())
+}
+
+fn diagnostic_error_message(fallback: &str, diagnostics: &PlannerScheduleDiagnostics) -> String {
+    diagnostics
+        .violations
+        .first()
+        .map(|v| format!("schedule violates {}: {}", v.constraint, v.message))
+        .unwrap_or_else(|| fallback.to_string())
 }
 
 pub fn build_problem_from_request(req: &PlannerRequest) -> Result<SoccerProblem, String> {
@@ -582,6 +790,52 @@ fn render_fast_solver_animation(
     render_solver_scene_animation(&sol, "fast feasible solve with solver-step trace")
 }
 
+fn render_error_solver_animation(error: &str, elapsed_ms: f64) -> Animation {
+    let sol = solver_scene::IPMIPSolution {
+        trace: vec![
+            solver_scene::IPMIPTraceEvent {
+                node_id: "root".to_string(),
+                depth: 0.0,
+                action: "branch".to_string(),
+                lp_z: None,
+                fractional: vec![0.5, 0.5],
+                reason: Some("planner request entered the model builder".to_string()),
+            },
+            solver_scene::IPMIPTraceEvent {
+                node_id: "diagnostics".to_string(),
+                depth: 0.0,
+                action: "cut".to_string(),
+                lp_z: None,
+                fractional: vec![],
+                reason: Some(error.to_string()),
+            },
+            solver_scene::IPMIPTraceEvent {
+                node_id: "no-incumbent".to_string(),
+                depth: 1.0,
+                action: "prune".to_string(),
+                lp_z: None,
+                fractional: vec![],
+                reason: Some(
+                    "no feasible incumbent accepted for the active constraints".to_string(),
+                ),
+            },
+        ],
+        status: "diagnostic".to_string(),
+        z: 0.0,
+        gap: 1.0,
+        best_bound: 0.0,
+        lp_algorithm: "diagnostic".to_string(),
+        lp_solves: 0.0,
+        elapsed_ms,
+        nodes_explored: 3.0,
+        cuts_added: 1.0,
+        candidates_tried: 0.0,
+        lp_algorithm_usage: vec![("diagnostics".to_string(), 1.0)],
+        incumbent_source: None,
+    };
+    render_solver_scene_animation(&sol, "solver diagnostics")
+}
+
 /// Solve the planner request and render both animations.
 pub fn solve_planner(req: &PlannerRequest) -> PlannerResponse {
     solve_planner_inner(req, true)
@@ -606,30 +860,43 @@ fn response_from_schedule(
     used_fallback: bool,
     fallback_reason: Option<String>,
 ) -> PlannerResponse {
-    let eval = evaluate_schedule(problem, &schedule);
-    let alternatives = ranked_alternatives(problem, &schedule, 3);
+    let diagnostics = schedule_diagnostics(problem, &schedule);
+    let eval = diagnostics.eval.as_ref();
+    let total_subs = eval.map(|e| e.total_subs).unwrap_or(0);
+    let alternatives = if eval.is_some() {
+        ranked_alternatives(problem, &schedule, 3)
+    } else {
+        Vec::new()
+    };
     let solver_notes = notes_for_solution(
         &mip_status,
         num_variables,
         num_constraints,
-        eval.total_subs,
+        total_subs,
         used_fallback,
         fallback_reason.as_deref(),
         &alternatives,
     );
-    if validate_schedule_structure(problem, &schedule).is_some()
-        || !eval.fairness_ok
-        || !eval.stamina_ok
-        || !eval.subs_ok
-    {
+    if diagnostics.has_violations() {
+        let error = diagnostic_error_message(
+            "solver returned a schedule that violates active constraints",
+            &diagnostics,
+        );
+        let solver_animation = if render_animations {
+            render_error_solver_animation(&error, elapsed_ms)
+        } else {
+            empty_animation()
+        };
         return PlannerResponse {
             ok: false,
-            error: Some("solver returned structurally invalid schedule".into()),
-            affinity: eval.affinity_sum,
-            total_subs: eval.total_subs,
-            fairness_ok: eval.fairness_ok,
-            stamina_ok: eval.stamina_ok,
-            subs_ok: eval.subs_ok,
+            error: Some(error),
+            constraint_violations: diagnostics.violations,
+            suggested_fix: diagnostics.suggested_fix,
+            affinity: eval.map(|e| e.affinity_sum).unwrap_or(0.0),
+            total_subs,
+            fairness_ok: eval.map(|e| e.fairness_ok).unwrap_or(false),
+            stamina_ok: eval.map(|e| e.stamina_ok).unwrap_or(false),
+            subs_ok: eval.map(|e| e.subs_ok).unwrap_or(false),
             mip_status,
             elapsed_ms,
             nodes_explored,
@@ -644,9 +911,10 @@ fn response_from_schedule(
             solver_notes,
             alternatives,
             pitch_animation: empty_animation(),
-            solver_animation: empty_animation(),
+            solver_animation,
         };
     }
+    let eval = eval.expect("valid diagnostics should include schedule evaluation");
 
     let pitch = if render_animations {
         render_pitch_animation(
@@ -672,6 +940,8 @@ fn response_from_schedule(
     PlannerResponse {
         ok: true,
         error: None,
+        constraint_violations: Vec::new(),
+        suggested_fix: None,
         affinity: eval.affinity_sum,
         total_subs: eval.total_subs,
         fairness_ok: eval.fairness_ok,
@@ -698,30 +968,40 @@ fn response_from_schedule(
 fn solve_planner_inner(req: &PlannerRequest, render_animations: bool) -> PlannerResponse {
     let formation = formation_with_gk(&req.outfield_formation);
     match build_problem_from_request(req) {
-        Err(e) => PlannerResponse {
-            ok: false,
-            error: Some(e),
-            affinity: 0.0,
-            total_subs: 0,
-            fairness_ok: false,
-            stamina_ok: false,
-            subs_ok: false,
-            mip_status: "error".into(),
-            elapsed_ms: 0.0,
-            nodes_explored: 0,
-            num_players: 0,
-            num_positions: 0,
-            num_variables: 0,
-            num_constraints: 0,
-            used_fallback: false,
-            fallback_reason: None,
-            assignment: vec![],
-            bench: vec![],
-            solver_notes: vec![],
-            alternatives: vec![],
-            pitch_animation: empty_animation(),
-            solver_animation: empty_animation(),
-        },
+        Err(e) => {
+            let (constraint_violations, suggested_fix) = build_error_diagnostics(&e);
+            let solver_animation = if render_animations {
+                render_error_solver_animation(&e, 0.0)
+            } else {
+                empty_animation()
+            };
+            PlannerResponse {
+                ok: false,
+                error: Some(e.clone()),
+                constraint_violations,
+                suggested_fix,
+                affinity: 0.0,
+                total_subs: 0,
+                fairness_ok: false,
+                stamina_ok: false,
+                subs_ok: false,
+                mip_status: "error".into(),
+                elapsed_ms: 0.0,
+                nodes_explored: 0,
+                num_players: req.players.len(),
+                num_positions: formation.iter().sum(),
+                num_variables: 0,
+                num_constraints: 0,
+                used_fallback: false,
+                fallback_reason: None,
+                assignment: vec![],
+                bench: vec![],
+                solver_notes: vec![e],
+                alternatives: vec![],
+                pitch_animation: empty_animation(),
+                solver_animation,
+            }
+        }
         Ok(problem) => {
             let t0 = Instant::now();
             if req.fallback_to_mdp {
@@ -759,20 +1039,34 @@ fn solve_planner_inner(req: &PlannerRequest, render_animations: bool) -> Planner
                 policy_ipmip_feasible(&problem, &mip_opts)
             })) {
                 Ok(result) => result,
-                Err(_) => {
+                Err(panic_payload) => {
+                    let error = panic_payload
+                        .downcast_ref::<String>()
+                        .cloned()
+                        .or_else(|| panic_payload.downcast_ref::<&str>().map(|s| s.to_string()))
+                        .unwrap_or_else(|| {
+                            "solver could not find a feasible planner schedule for these constraints"
+                                .to_string()
+                        });
+                    let (constraint_violations, suggested_fix) = solver_error_diagnostics(&error);
+                    let elapsed_ms = t0.elapsed().as_millis() as f64;
+                    let solver_animation = if render_animations {
+                        render_error_solver_animation(&error, elapsed_ms)
+                    } else {
+                        empty_animation()
+                    };
                     return PlannerResponse {
                         ok: false,
-                        error: Some(
-                            "solver could not find a feasible planner schedule for these constraints"
-                                .into(),
-                        ),
+                        error: Some(error.clone()),
+                        constraint_violations,
+                        suggested_fix,
                         affinity: 0.0,
                         total_subs: 0,
                         fairness_ok: false,
                         stamina_ok: false,
                         subs_ok: false,
                         mip_status: "error".into(),
-                        elapsed_ms: t0.elapsed().as_millis() as f64,
+                        elapsed_ms,
                         nodes_explored: 0,
                         num_players: problem.num_players,
                         num_positions: problem.num_positions,
@@ -782,37 +1076,55 @@ fn solve_planner_inner(req: &PlannerRequest, render_animations: bool) -> Planner
                         fallback_reason: None,
                         assignment: vec![],
                         bench: vec![],
-                        solver_notes: vec![],
+                        solver_notes: vec![error],
                         alternatives: vec![],
                         pitch_animation: empty_animation(),
-                        solver_animation: empty_animation(),
+                        solver_animation,
                     };
                 }
             };
             let num_variables = result.model.ip.c.len();
             let num_constraints = result.model.ip.a.len();
-            let eval = evaluate_schedule(&problem, &result.schedule);
-            let alternatives = ranked_alternatives(&problem, &result.schedule, 3);
+            let diagnostics = schedule_diagnostics(&problem, &result.schedule);
+            let eval = diagnostics.eval.as_ref();
+            let total_subs = eval.map(|e| e.total_subs).unwrap_or(0);
+            let alternatives = if eval.is_some() {
+                ranked_alternatives(&problem, &result.schedule, 3)
+            } else {
+                Vec::new()
+            };
             let solver_notes = notes_for_solution(
                 result.mip.status.as_str(),
                 num_variables,
                 num_constraints,
-                eval.total_subs,
+                total_subs,
                 result.used_fallback,
                 result.fallback_reason.as_deref(),
                 &alternatives,
             );
-            if validate_schedule_structure(&problem, &result.schedule).is_some() {
+            if diagnostics.has_violations() {
+                let elapsed_ms = t0.elapsed().as_millis() as f64;
+                let error = diagnostic_error_message(
+                    "solver returned a schedule that violates active constraints",
+                    &diagnostics,
+                );
+                let solver_animation = if render_animations {
+                    render_error_solver_animation(&error, elapsed_ms)
+                } else {
+                    empty_animation()
+                };
                 return PlannerResponse {
                     ok: false,
-                    error: Some("solver returned structurally invalid schedule".into()),
-                    affinity: eval.affinity_sum,
-                    total_subs: eval.total_subs,
-                    fairness_ok: eval.fairness_ok,
-                    stamina_ok: eval.stamina_ok,
-                    subs_ok: eval.subs_ok,
+                    error: Some(error),
+                    constraint_violations: diagnostics.violations,
+                    suggested_fix: diagnostics.suggested_fix,
+                    affinity: eval.map(|e| e.affinity_sum).unwrap_or(0.0),
+                    total_subs,
+                    fairness_ok: eval.map(|e| e.fairness_ok).unwrap_or(false),
+                    stamina_ok: eval.map(|e| e.stamina_ok).unwrap_or(false),
+                    subs_ok: eval.map(|e| e.subs_ok).unwrap_or(false),
                     mip_status: result.mip.status.as_str().to_string(),
-                    elapsed_ms: t0.elapsed().as_millis() as f64,
+                    elapsed_ms,
                     nodes_explored: result.mip.nodes_explored as u64,
                     num_players: problem.num_players,
                     num_positions: problem.num_positions,
@@ -825,10 +1137,22 @@ fn solve_planner_inner(req: &PlannerRequest, render_animations: bool) -> Planner
                     solver_notes,
                     alternatives,
                     pitch_animation: empty_animation(),
-                    solver_animation: empty_animation(),
+                    solver_animation,
                 };
             }
+            let eval = eval.expect("valid diagnostics should include schedule evaluation");
             let (pitch, solver) = if render_animations {
+                let solver = render_solver_animation(&result);
+                let solver = if solver.frames.is_empty() {
+                    render_fast_solver_animation(
+                        eval.affinity_sum,
+                        t0.elapsed().as_millis() as f64,
+                        &alternatives,
+                        result.fallback_reason.as_deref(),
+                    )
+                } else {
+                    solver
+                };
                 (
                     render_pitch_animation(
                         &problem,
@@ -837,7 +1161,7 @@ fn solve_planner_inner(req: &PlannerRequest, render_animations: bool) -> Planner
                         req.minutes_per_period,
                         req.seed,
                     ),
-                    render_solver_animation(&result),
+                    solver,
                 )
             } else {
                 (empty_animation(), empty_animation())
@@ -845,6 +1169,8 @@ fn solve_planner_inner(req: &PlannerRequest, render_animations: bool) -> Planner
             PlannerResponse {
                 ok: true,
                 error: None,
+                constraint_violations: Vec::new(),
+                suggested_fix: None,
                 affinity: eval.affinity_sum,
                 total_subs: eval.total_subs,
                 fairness_ok: eval.fairness_ok,
@@ -929,7 +1255,9 @@ pub fn run_default_export() {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_problem_from_request, solve_planner_summary, PlannerResponse};
+    use super::{
+        build_problem_from_request, solve_planner, solve_planner_summary, PlannerResponse,
+    };
     use crate::des::general::ip_mip_des::validate_ipmip_problem;
     use crate::des::general::soccer_rotation::build_soccer_ipmip;
     use crate::des::soccer_planner::default_planner_request;
@@ -949,6 +1277,17 @@ mod tests {
     fn default_planner_request_solves() {
         let req = default_planner_request();
         assert_solved(&solve_planner_summary(&req));
+    }
+
+    #[test]
+    fn default_planner_request_renders_solver_animation() {
+        let req = default_planner_request();
+        let resp = solve_planner(&req);
+        assert_solved(&resp);
+        assert!(
+            !resp.solver_animation.frames.is_empty(),
+            "solver tab should always receive solver animation frames"
+        );
     }
 
     #[test]

@@ -22,6 +22,13 @@ pub fn planner_response_to_json(resp: &PlannerResponse) -> Value {
     serde_json::json!({
         "ok": resp.ok,
         "error": resp.error,
+        "constraintViolations": resp.constraint_violations.iter().map(|v| serde_json::json!({
+            "kind": v.kind,
+            "constraint": v.constraint,
+            "message": v.message,
+            "suggestion": v.suggestion,
+        })).collect::<Vec<_>>(),
+        "suggestedFix": resp.suggested_fix,
         "affinity": resp.affinity,
         "totalSubs": resp.total_subs,
         "fairnessOk": resp.fairness_ok,

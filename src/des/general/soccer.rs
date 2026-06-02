@@ -11,10 +11,10 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::{mpsc, Arc, Condvar, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -32,6 +32,7 @@ pub const DEFAULT_BALL_AIR_RESISTANCE: f64 = 0.006;
 pub const DEFAULT_BALL_GRASS_RESISTANCE_YPS2: f64 = 0.45;
 pub const DEFAULT_BALL_STOP_SPEED_YPS: f64 = 0.35;
 pub const DEFAULT_PLAYER_VISION_SKILL: f64 = 0.76;
+pub const DEFAULT_CONTROLLER_DEBOUNCE_MS: u64 = 4;
 const PLAYER_CONTROL_RADIUS_YARDS: f64 = 1.55;
 const PLAYER_BODY_RADIUS_YARDS: f64 = 0.78;
 const PLAYER_COLLISION_DAMPING: f64 = 0.34;
@@ -39,7 +40,13 @@ const SHOT_SAVE_DEPTH_YARDS: f64 = 1.6;
 const BALL_AGENT_ID: usize = 25;
 const PLAYER_POSITION_HISTORY_LIMIT: usize = 50;
 const BALL_POSITION_HISTORY_LIMIT: usize = 50;
-const CONTROLLER_INPUT_YIELD_MS: u64 = 1;
+const CONTROLLER_INPUT_YIELD_MS: u64 = DEFAULT_CONTROLLER_DEBOUNCE_MS + 2;
+const PITCH_FINE_GRID_COLUMNS: usize = 12;
+const PITCH_FINE_GRID_ROWS: usize = 16;
+const PITCH_TACTICAL_GRID_COLUMNS: usize = 6;
+const PITCH_TACTICAL_GRID_ROWS: usize = 8;
+const PITCH_MACRO_GRID_COLUMNS: usize = 3;
+const PITCH_MACRO_GRID_ROWS: usize = 4;
 const PLAYER_BASE_VISION_RANGE_YARDS: f64 = 28.0;
 const PLAYER_VISION_RANGE_BONUS_YARDS: f64 = 28.0;
 const PLAYER_BASE_FIELD_OF_VIEW_DEGREES: f64 = 168.0;
@@ -342,12 +349,88 @@ impl Default for AgentPreferences {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PitchGridLevel {
+    #[default]
+    WholePitch,
+    Macro,
+    Tactical,
+    Fine,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PitchGridCell {
+    pub level: PitchGridLevel,
+    pub columns: usize,
+    pub rows: usize,
+    pub x: usize,
+    pub y: usize,
+    pub id: usize,
+    pub parent_id: Option<usize>,
+}
+
+impl Default for PitchGridCell {
+    fn default() -> Self {
+        PitchGridCell {
+            level: PitchGridLevel::WholePitch,
+            columns: 1,
+            rows: 1,
+            x: 0,
+            y: 0,
+            id: 0,
+            parent_id: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PitchGridAddress {
+    pub fine: PitchGridCell,
+    pub tactical: PitchGridCell,
+    pub macro_zone: PitchGridCell,
+    pub whole_pitch: PitchGridCell,
+}
+
+impl Default for PitchGridAddress {
+    fn default() -> Self {
+        let whole_pitch = PitchGridCell::default();
+        PitchGridAddress {
+            fine: whole_pitch,
+            tactical: whole_pitch,
+            macro_zone: whole_pitch,
+            whole_pitch,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum FacingBucket {
+    #[default]
+    Unknown,
+    North,
+    NorthEast,
+    East,
+    SouthEast,
+    South,
+    SouthWest,
+    West,
+    NorthWest,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SoccerMdpState {
     pub tick: u64,
     pub ball_zone_x: usize,
     pub ball_zone_y: usize,
+    #[serde(default)]
+    pub player_grid: PitchGridAddress,
+    #[serde(default)]
+    pub receive_facing: FacingBucket,
+    #[serde(default)]
+    pub action_facing: FacingBucket,
     pub possession_team: Option<Team>,
     pub score_diff_for_home: i32,
     pub phase: TacticalPhase,
@@ -367,6 +450,12 @@ pub enum TacticalPhase {
 #[serde(rename_all = "camelCase")]
 pub struct SoccerPomdpObservation {
     pub player_id: usize,
+    #[serde(default)]
+    pub player_grid: PitchGridAddress,
+    #[serde(default)]
+    pub receive_facing: FacingBucket,
+    #[serde(default)]
+    pub action_facing: FacingBucket,
     pub has_ball: bool,
     #[serde(default)]
     pub visible_ball: bool,
@@ -518,6 +607,18 @@ pub struct SoccerQStateKey {
     pub possession_relative: i8,
     pub ball_zone_x: usize,
     pub ball_zone_y: usize,
+    #[serde(default)]
+    pub player_fine_cell_id: usize,
+    #[serde(default)]
+    pub player_tactical_cell_id: usize,
+    #[serde(default)]
+    pub player_macro_cell_id: usize,
+    #[serde(default)]
+    pub player_root_cell_id: usize,
+    #[serde(default)]
+    pub receive_facing: FacingBucket,
+    #[serde(default)]
+    pub action_facing: FacingBucket,
     pub score_diff_bucket: i8,
     pub has_ball: bool,
     pub visible_ball: bool,
@@ -551,6 +652,12 @@ impl SoccerQStateKey {
             possession_relative,
             ball_zone_x: state.ball_zone_x,
             ball_zone_y: state.ball_zone_y,
+            player_fine_cell_id: state.player_grid.fine.id,
+            player_tactical_cell_id: state.player_grid.tactical.id,
+            player_macro_cell_id: state.player_grid.macro_zone.id,
+            player_root_cell_id: state.player_grid.whole_pitch.id,
+            receive_facing: state.receive_facing,
+            action_facing: state.action_facing,
             score_diff_bucket: score_diff_for_team.clamp(-2, 2) as i8,
             has_ball: observation.has_ball,
             visible_ball: observation.visible_ball,
@@ -1727,9 +1834,122 @@ impl SharedHumanInputs {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HumanControllerThreadStats {
+    pub controller_slot: usize,
+    pub pending: bool,
+    pub closed: bool,
+    pub accepted_frames: u64,
+    pub pushed_frames: u64,
+    pub overwritten_frames: u64,
+    pub rejected_stale_frames: u64,
+    pub latest_seq_seen: Option<u64>,
+}
+
+#[derive(Default)]
+struct HumanControllerMailboxState {
+    latest: Option<HumanInputFrame>,
+    closed: bool,
+    accepted_frames: u64,
+    pushed_frames: u64,
+    overwritten_frames: u64,
+    rejected_stale_frames: u64,
+    latest_seq_seen: Option<u64>,
+}
+
+#[derive(Clone, Default)]
+struct HumanControllerMailbox {
+    inner: Arc<(Mutex<HumanControllerMailboxState>, Condvar)>,
+}
+
+impl HumanControllerMailbox {
+    fn send(&self, input: HumanInputFrame) -> Result<bool, String> {
+        let (lock, condvar) = &*self.inner;
+        let mut state = lock.lock().expect("human controller mailbox lock poisoned");
+        if state.closed {
+            return Err("controller mailbox is closed".to_string());
+        }
+        if state
+            .latest_seq_seen
+            .is_some_and(|latest_seq| input.seq <= latest_seq)
+        {
+            state.rejected_stale_frames = state.rejected_stale_frames.saturating_add(1);
+            return Ok(false);
+        }
+
+        state.latest_seq_seen = Some(input.seq);
+        state.accepted_frames = state.accepted_frames.saturating_add(1);
+        if state.latest.is_some() {
+            state.overwritten_frames = state.overwritten_frames.saturating_add(1);
+        }
+        state.latest = Some(input);
+        condvar.notify_one();
+        Ok(true)
+    }
+
+    fn close(&self) {
+        let (lock, condvar) = &*self.inner;
+        let mut state = lock.lock().expect("human controller mailbox lock poisoned");
+        state.closed = true;
+        condvar.notify_all();
+    }
+
+    fn wait_for_debounced_input(&self, debounce_interval: Duration) -> Option<HumanInputFrame> {
+        let (lock, condvar) = &*self.inner;
+        let mut state = lock.lock().expect("human controller mailbox lock poisoned");
+        while state.latest.is_none() && !state.closed {
+            state = condvar
+                .wait(state)
+                .expect("human controller mailbox wait poisoned");
+        }
+        state.latest.as_ref()?;
+
+        if debounce_interval > Duration::from_millis(0) && !state.closed {
+            let deadline = Instant::now() + debounce_interval;
+            loop {
+                let now = Instant::now();
+                if now >= deadline || state.closed {
+                    break;
+                }
+                let wait_for = deadline.saturating_duration_since(now);
+                let (next_state, _) = condvar
+                    .wait_timeout(state, wait_for)
+                    .expect("human controller mailbox debounce wait poisoned");
+                state = next_state;
+            }
+        }
+
+        state.latest.take()
+    }
+
+    fn record_push(&self, accepted: bool) {
+        if !accepted {
+            return;
+        }
+        let (lock, _) = &*self.inner;
+        let mut state = lock.lock().expect("human controller mailbox lock poisoned");
+        state.pushed_frames = state.pushed_frames.saturating_add(1);
+    }
+
+    fn stats(&self, controller_slot: usize) -> HumanControllerThreadStats {
+        let (lock, _) = &*self.inner;
+        let state = lock.lock().expect("human controller mailbox lock poisoned");
+        HumanControllerThreadStats {
+            controller_slot,
+            pending: state.latest.is_some(),
+            closed: state.closed,
+            accepted_frames: state.accepted_frames,
+            pushed_frames: state.pushed_frames,
+            overwritten_frames: state.overwritten_frames,
+            rejected_stale_frames: state.rejected_stale_frames,
+            latest_seq_seen: state.latest_seq_seen,
+        }
+    }
+}
+
 pub struct HumanControllerThread {
     controller_slot: usize,
-    sender: Option<mpsc::Sender<HumanInputFrame>>,
+    mailbox: HumanControllerMailbox,
     handle: Option<JoinHandle<()>>,
 }
 
@@ -1739,7 +1959,8 @@ impl HumanControllerThread {
         controller_slot: usize,
         debounce_interval: Duration,
     ) -> Result<Self, String> {
-        let (sender, receiver) = mpsc::channel();
+        let mailbox = HumanControllerMailbox::default();
+        let worker_mailbox = mailbox.clone();
         let handle = thread::Builder::new()
             .name(format!("soccer-human-controller-{controller_slot}"))
             .spawn(move || {
@@ -1747,13 +1968,13 @@ impl HumanControllerThread {
                     input_queue,
                     controller_slot,
                     debounce_interval,
-                    receiver,
+                    worker_mailbox,
                 );
             })
             .map_err(|err| format!("failed to spawn controller thread {controller_slot}: {err}"))?;
         Ok(HumanControllerThread {
             controller_slot,
-            sender: Some(sender),
+            mailbox,
             handle: Some(handle),
         })
     }
@@ -1762,17 +1983,22 @@ impl HumanControllerThread {
         self.controller_slot
     }
 
-    pub fn send_input(&self, mut input: HumanInputFrame) -> Result<(), String> {
+    pub fn send_input(&self, mut input: HumanInputFrame) -> Result<bool, String> {
         input.controller_slot = self.controller_slot;
-        self.sender
-            .as_ref()
-            .ok_or_else(|| format!("controller thread {} is stopped", self.controller_slot))?
-            .send(input)
-            .map_err(|err| format!("controller thread {} send failed: {err}", self.controller_slot))
+        self.mailbox.send(input).map_err(|err| {
+            format!(
+                "controller thread {} send failed: {err}",
+                self.controller_slot
+            )
+        })
+    }
+
+    pub fn stats(&self) -> HumanControllerThreadStats {
+        self.mailbox.stats(self.controller_slot)
     }
 
     pub fn stop(mut self) -> Result<(), String> {
-        self.sender.take();
+        self.mailbox.close();
         if let Some(handle) = self.handle.take() {
             handle
                 .join()
@@ -1784,7 +2010,7 @@ impl HumanControllerThread {
 
 impl Drop for HumanControllerThread {
     fn drop(&mut self) {
-        self.sender.take();
+        self.mailbox.close();
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
@@ -1805,32 +2031,12 @@ fn run_human_controller_thread(
     input_queue: SharedHumanInputs,
     controller_slot: usize,
     debounce_interval: Duration,
-    receiver: mpsc::Receiver<HumanInputFrame>,
+    mailbox: HumanControllerMailbox,
 ) {
-    let mut pending = None;
-    loop {
-        let mut input = if let Some(input) = pending.take() {
-            input
-        } else {
-            match receiver.recv() {
-                Ok(input) => input,
-                Err(_) => break,
-            }
-        };
-        while let Ok(next) = receiver.try_recv() {
-            input = next;
-        }
+    while let Some(mut input) = mailbox.wait_for_debounced_input(debounce_interval) {
         input.controller_slot = controller_slot;
-        input_queue.push(input);
-
-        if debounce_interval == Duration::from_millis(0) {
-            continue;
-        }
-        match receiver.recv_timeout(debounce_interval) {
-            Ok(next) => pending = Some(next),
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-        }
+        let accepted = input_queue.push(input);
+        mailbox.record_push(accepted);
     }
 }
 
@@ -2610,7 +2816,11 @@ fn assistant_offside_line_snapshot(
         .players
         .iter()
         .filter(|player| player.team == defending_team)
-        .filter_map(|player| snapshot.player_position(player.id).map(|position| position.y))
+        .filter_map(|player| {
+            snapshot
+                .player_position(player.id)
+                .map(|position| position.y)
+        })
         .collect::<Vec<_>>();
     if defender_ys.len() < 2 {
         return None;
@@ -4821,7 +5031,11 @@ impl SoccerMatch {
     }
 
     fn yield_for_controller_threads(&self) {
-        if !self.players.iter().any(|player| player.controller_slot.is_some()) {
+        if !self
+            .players
+            .iter()
+            .any(|player| player.controller_slot.is_some())
+        {
             return;
         }
         let _ = self
@@ -5777,6 +5991,7 @@ impl SoccerMatch {
 pub struct SoccerRealtimeSession {
     sim: SoccerMatch,
     input_queue: SharedHumanInputs,
+    controller_threads: Vec<HumanControllerThread>,
     emitted_event_cursor: usize,
     emitted_learning_cursor: usize,
     tracking_frames: Vec<SoccerTrackingFrame>,
@@ -5784,7 +5999,25 @@ pub struct SoccerRealtimeSession {
 
 impl SoccerRealtimeSession {
     pub fn new(config: MatchConfig) -> Self {
+        Self::new_with_controller_threads(config, true)
+    }
+
+    pub fn new_without_controller_threads(config: MatchConfig) -> Self {
+        Self::new_with_controller_threads(config, false)
+    }
+
+    fn new_with_controller_threads(config: MatchConfig, threaded_controllers: bool) -> Self {
         let input_queue = SharedHumanInputs::new();
+        let controller_threads = if threaded_controllers {
+            spawn_human_controller_threads(
+                input_queue.clone(),
+                config.human_slots(),
+                Duration::from_millis(DEFAULT_CONTROLLER_DEBOUNCE_MS),
+            )
+            .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         let mut sim = SoccerMatch::default_11v11(config)
             .with_human_inputs(input_queue.clone())
             .with_team_policies(SoccerTeamQPolicies::new(SoccerQPolicyOptions::default()));
@@ -5793,6 +6026,7 @@ impl SoccerRealtimeSession {
         SoccerRealtimeSession {
             sim,
             input_queue,
+            controller_threads,
             emitted_event_cursor: 0,
             emitted_learning_cursor: 0,
             tracking_frames,
@@ -5800,11 +6034,30 @@ impl SoccerRealtimeSession {
     }
 
     pub fn from_match(sim: SoccerMatch) -> Self {
+        Self::from_match_with_controller_threads(sim, true)
+    }
+
+    pub fn from_match_without_controller_threads(sim: SoccerMatch) -> Self {
+        Self::from_match_with_controller_threads(sim, false)
+    }
+
+    fn from_match_with_controller_threads(sim: SoccerMatch, threaded_controllers: bool) -> Self {
         let input_queue = sim.human_inputs.clone();
+        let controller_threads = if threaded_controllers {
+            spawn_human_controller_threads(
+                input_queue.clone(),
+                sim.config.human_slots(),
+                Duration::from_millis(DEFAULT_CONTROLLER_DEBOUNCE_MS),
+            )
+            .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         let tracking_frames = vec![tracking_frame_from_match(&sim)];
         SoccerRealtimeSession {
             sim,
             input_queue,
+            controller_threads,
             emitted_event_cursor: 0,
             emitted_learning_cursor: 0,
             tracking_frames,
@@ -5826,12 +6079,56 @@ impl SoccerRealtimeSession {
         )
     }
 
+    pub fn owned_controller_thread_count(&self) -> usize {
+        self.controller_threads.len()
+    }
+
     pub fn shared_positions(&self) -> SharedPlayerPositions {
         self.sim.shared_positions.clone()
     }
 
     pub fn push_human_input(&self, input: HumanInputFrame) -> bool {
-        self.input_queue.push(input)
+        self.dispatch_human_input(input)
+    }
+
+    pub fn push_human_inputs<I>(&self, inputs: I) -> usize
+    where
+        I: IntoIterator<Item = HumanInputFrame>,
+    {
+        let mut latest_by_slot = HashMap::<usize, HumanInputFrame>::new();
+        for input in inputs {
+            if self
+                .input_queue
+                .last_seq_for_slot(input.controller_slot)
+                .is_some_and(|last_seq| input.seq <= last_seq)
+            {
+                continue;
+            }
+            latest_by_slot
+                .entry(input.controller_slot)
+                .and_modify(|current| {
+                    if input.seq > current.seq {
+                        *current = input.clone();
+                    }
+                })
+                .or_insert(input);
+        }
+        latest_by_slot
+            .into_values()
+            .filter(|input| self.dispatch_human_input(input.clone()))
+            .count()
+    }
+
+    fn dispatch_human_input(&self, input: HumanInputFrame) -> bool {
+        if let Some(controller) = self
+            .controller_threads
+            .iter()
+            .find(|controller| controller.controller_slot() == input.controller_slot)
+        {
+            controller.send_input(input).unwrap_or(false)
+        } else {
+            self.input_queue.push(input)
+        }
     }
 
     pub fn match_ref(&self) -> &SoccerMatch {
@@ -5855,12 +6152,7 @@ impl SoccerRealtimeSession {
     }
 
     pub fn step(&mut self, request: SoccerStepRequest) -> SoccerStepResponse {
-        let mut accepted_inputs = 0;
-        for input in request.inputs {
-            if self.input_queue.push(input) {
-                accepted_inputs += 1;
-            }
-        }
+        let accepted_inputs = self.push_human_inputs(request.inputs);
 
         let ticks = request.ticks.max(1);
         let record_every = request.record_every_ticks.unwrap_or(1).max(1);
@@ -6180,7 +6472,7 @@ impl LiveHttpResponse {
 fn handle_live_soccer_request(
     raw: &str,
     session: &Arc<Mutex<SoccerRealtimeSession>>,
-    input_queue: &SharedHumanInputs,
+    _input_queue: &SharedHumanInputs,
 ) -> LiveHttpResponse {
     let req = match parse_live_http_request(raw) {
         Ok(req) => req,
@@ -6296,12 +6588,17 @@ fn handle_live_soccer_request(
         }
         ("POST", "/api/input") => match parse_human_input_payload(req.body) {
             Ok(inputs) => {
-                let mut count = 0;
-                for input in inputs {
-                    if input_queue.push(input) {
-                        count += 1;
+                let guard = match session.lock() {
+                    Ok(guard) => guard,
+                    Err(_) => {
+                        return LiveHttpResponse::error(
+                            500,
+                            "Internal Server Error",
+                            "soccer session lock poisoned",
+                        )
                     }
-                }
+                };
+                let count = guard.push_human_inputs(inputs);
                 LiveHttpResponse::json(&SoccerInputAck {
                     accepted_inputs: count,
                     queued: true,
@@ -8638,9 +8935,8 @@ mod tests {
     #[test]
     fn native_controller_threads_debounce_and_cap_at_four_slots() {
         let q = SharedHumanInputs::new();
-        let controllers =
-            spawn_human_controller_threads(q.clone(), 6, Duration::from_millis(1))
-                .expect("spawn controller threads");
+        let controllers = spawn_human_controller_threads(q.clone(), 6, Duration::from_millis(1))
+            .expect("spawn controller threads");
         assert_eq!(controllers.len(), 4);
         assert_eq!(
             controllers
@@ -8685,6 +8981,72 @@ mod tests {
         for controller in controllers {
             controller.stop().expect("controller stops");
         }
+    }
+
+    #[test]
+    fn controller_mailbox_overwrites_pending_input_without_queue_growth() {
+        let q = SharedHumanInputs::new();
+        let controller = HumanControllerThread::spawn(q.clone(), 0, Duration::from_millis(50))
+            .expect("spawn controller thread");
+
+        for seq in 1..=20 {
+            assert!(controller
+                .send_input(HumanInputFrame {
+                    controller_slot: 99,
+                    player_id: Some(0),
+                    seq,
+                    axis: Vec2::new(seq as f64, 0.0),
+                    sprint: seq == 20,
+                    pass: false,
+                    shoot: false,
+                    target_player: None,
+                })
+                .expect("send input"));
+        }
+        assert!(!controller
+            .send_input(HumanInputFrame {
+                controller_slot: 99,
+                player_id: Some(0),
+                seq: 19,
+                axis: Vec2::new(-1.0, 0.0),
+                sprint: false,
+                pass: false,
+                shoot: false,
+                target_player: None,
+            })
+            .expect("stale input is rejected without stopping controller"));
+
+        let pending_stats = controller.stats();
+        assert_eq!(pending_stats.accepted_frames, 20);
+        assert_eq!(pending_stats.rejected_stale_frames, 1);
+        assert!(pending_stats.overwritten_frames > 0);
+        assert!(pending_stats.pending);
+
+        assert!(q.wait_for_pending_input(Duration::from_millis(300)));
+        let input = q.drain_latest_for_slot(0).expect("slot 0 latest input");
+        assert_eq!(input.controller_slot, 0);
+        assert_eq!(input.seq, 20);
+        assert!(input.sprint);
+        assert_eq!(q.queued_len(), 0);
+
+        let pushed_stats = controller.stats();
+        assert_eq!(pushed_stats.pushed_frames, 1);
+        assert!(!pushed_stats.pending);
+
+        controller.stop().expect("controller stops");
+    }
+
+    #[test]
+    fn realtime_session_owns_default_controller_threads() {
+        let session = SoccerRealtimeSession::new(MatchConfig {
+            duration_seconds: 1.0,
+            max_human_players: 8,
+            seed: 781,
+            ..Default::default()
+        });
+
+        assert_eq!(session.owned_controller_thread_count(), 4);
+        assert_eq!(session.match_ref().config.human_slots(), 4);
     }
 
     #[test]
@@ -9657,11 +10019,9 @@ mod tests {
         sim.ball.last_touch_team = Some(Team::Home);
 
         let snapshot = WorldSnapshot::from_match(&sim);
-        let near_line = assistant_offside_line_snapshot(
-            &snapshot,
-            OfficialKind::AssistantRefereeNear,
-        )
-        .expect("near assistant line");
+        let near_line =
+            assistant_offside_line_snapshot(&snapshot, OfficialKind::AssistantRefereeNear)
+                .expect("near assistant line");
         assert_eq!(near_line.flank, AssistantFlank::Near);
         assert_eq!(near_line.attacking_team, Team::Home);
         assert_eq!(near_line.defending_team, Team::Away);
@@ -9671,11 +10031,9 @@ mod tests {
         assert_eq!(near_line.effective_line_y, 96.0);
         assert!(near_line.players_beyond_line.contains(&9));
 
-        let far_line = assistant_offside_line_snapshot(
-            &snapshot,
-            OfficialKind::AssistantRefereeFar,
-        )
-        .expect("far assistant line");
+        let far_line =
+            assistant_offside_line_snapshot(&snapshot, OfficialKind::AssistantRefereeFar)
+                .expect("far assistant line");
         assert_eq!(far_line.flank, AssistantFlank::Far);
         assert!(!far_line.players_beyond_line.contains(&9));
 
@@ -10255,6 +10613,13 @@ mod tests {
         assert_eq!(agent_schedule.len(), 26);
         assert_eq!(agent_schedule.last().unwrap()["kind"], "ball");
         assert_eq!(agent_schedule.last().unwrap()["id"], BALL_AGENT_ID);
+        let official_offside_lines = value["frame"]["officials"]
+            .as_array()
+            .expect("officials array")
+            .iter()
+            .filter(|official| official["offsideLine"].is_object())
+            .count();
+        assert_eq!(official_offside_lines, 2);
         assert!(value["frame"]["homeDirective"]
             .get("pressIntensity")
             .is_some());
@@ -10532,6 +10897,7 @@ mod tests {
         assert_eq!(ack.status, 200);
         let value: serde_json::Value = serde_json::from_str(&ack.body).expect("ack json");
         assert_eq!(value["acceptedInputs"], 1);
+        assert!(input_queue.wait_for_pending_input(Duration::from_millis(200)));
         assert_eq!(input_queue.last_seq_for_slot(0), Some(2));
 
         let latest = input_queue.drain_latest_by_slot();

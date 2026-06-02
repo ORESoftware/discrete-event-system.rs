@@ -194,6 +194,7 @@ struct LinearCliReference {
     var_basis: Option<Vec<String>>,
     #[serde(rename = "rowBasis")]
     row_basis: Option<Vec<String>>,
+    iterations: Option<u64>,
     message: String,
 }
 
@@ -1040,6 +1041,13 @@ impl Driver {
                 &reference.x,
                 1e-8,
             );
+            if matches!(solver, "highs" | "glpk" | "cbc" | "clp") {
+                self.check(
+                    format!("LP {solver}:cli iteration metadata"),
+                    reference.iterations.is_some(),
+                    format!("iterations={:?}", reference.iterations),
+                );
+            }
         }
 
         for solver in ExternalLinearCliSolver::open_source_lp().iter().copied() {
@@ -1080,6 +1088,19 @@ impl Driver {
                 &reference.x,
                 1e-8,
             );
+            if matches!(
+                solver,
+                ExternalLinearCliSolver::Highs
+                    | ExternalLinearCliSolver::Glpk
+                    | ExternalLinearCliSolver::Cbc
+                    | ExternalLinearCliSolver::Clp
+            ) {
+                self.check(
+                    format!("LP {solver_name}:rust-cli iteration metadata"),
+                    reference.iterations.is_some(),
+                    format!("iterations={:?}", reference.iterations),
+                );
+            }
         }
 
         let cli_certificate_lp = LPProblem {
@@ -1318,6 +1339,230 @@ impl Driver {
                 ),
             );
         }
+        let cbc_cli_certificate_reference =
+            self.run_linear_cli_reference("lp", "cbc", &cli_certificate_json);
+        if cbc_cli_certificate_reference.status == "unavailable"
+            && cbc_cli_certificate_reference.message.contains("not found")
+        {
+            println!("  SKIP  LP cbc:cli certificate executable not found");
+        } else {
+            self.check(
+                "LP cbc:cli certificate status optimal",
+                cbc_cli_certificate_reference.status == "optimal",
+                format!(
+                    "external={} solver={}",
+                    cbc_cli_certificate_reference.status, cbc_cli_certificate_reference.solver
+                ),
+            );
+            self.max_abs_close_optional(
+                "LP cbc:cli certificate dual_ub",
+                cbc_cli_certificate_reference.dual_ub.as_deref(),
+                Some(&[1.0, 1.0]),
+                1e-8,
+            );
+            self.max_abs_close_optional(
+                "LP cbc:cli certificate reduced_costs",
+                cbc_cli_certificate_reference.reduced_costs.as_deref(),
+                Some(&[0.0, 0.0]),
+                1e-8,
+            );
+            self.check(
+                "LP cbc:cli basis var statuses",
+                cbc_cli_certificate_reference
+                    .var_basis
+                    .as_ref()
+                    .is_some_and(|basis| basis.iter().map(String::as_str).eq(["basic", "basic"])),
+                format!("var_basis={:?}", cbc_cli_certificate_reference.var_basis),
+            );
+            self.check(
+                "LP cbc:cli basis row statuses",
+                cbc_cli_certificate_reference
+                    .row_basis
+                    .as_ref()
+                    .is_some_and(|basis| {
+                        basis
+                            .iter()
+                            .map(String::as_str)
+                            .eq(["at_upper", "at_upper"])
+                    }),
+                format!("row_basis={:?}", cbc_cli_certificate_reference.row_basis),
+            );
+        }
+        let cbc_rust_cli_certificate_reference = solve_lp_with_external_cli(
+            &cli_certificate_lp,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Cbc,
+                ..Default::default()
+            },
+        );
+        if cbc_rust_cli_certificate_reference.status == ExternalLinearCliStatus::Unavailable
+            && cbc_rust_cli_certificate_reference
+                .message
+                .contains("not found")
+        {
+            println!("  SKIP  LP cbc:rust-cli certificate executable not found");
+        } else {
+            self.check(
+                "LP cbc:rust-cli certificate status optimal",
+                cbc_rust_cli_certificate_reference.status == ExternalLinearCliStatus::Optimal,
+                format!(
+                    "external={} solver={}",
+                    cbc_rust_cli_certificate_reference.status.as_str(),
+                    cbc_rust_cli_certificate_reference.solver
+                ),
+            );
+            self.max_abs_close_optional(
+                "LP cbc:rust-cli certificate dual_ub",
+                cbc_rust_cli_certificate_reference.dual_ub.as_deref(),
+                Some(&[1.0, 1.0]),
+                1e-8,
+            );
+            self.max_abs_close_optional(
+                "LP cbc:rust-cli certificate reduced_costs",
+                cbc_rust_cli_certificate_reference.reduced_costs.as_deref(),
+                Some(&[0.0, 0.0]),
+                1e-8,
+            );
+            self.check(
+                "LP cbc:rust-cli basis var statuses",
+                cbc_rust_cli_certificate_reference
+                    .var_basis
+                    .as_ref()
+                    .is_some_and(|basis| basis.iter().map(String::as_str).eq(["basic", "basic"])),
+                format!(
+                    "var_basis={:?}",
+                    cbc_rust_cli_certificate_reference.var_basis
+                ),
+            );
+            self.check(
+                "LP cbc:rust-cli basis row statuses",
+                cbc_rust_cli_certificate_reference
+                    .row_basis
+                    .as_ref()
+                    .is_some_and(|basis| {
+                        basis
+                            .iter()
+                            .map(String::as_str)
+                            .eq(["at_upper", "at_upper"])
+                    }),
+                format!(
+                    "row_basis={:?}",
+                    cbc_rust_cli_certificate_reference.row_basis
+                ),
+            );
+        }
+        let clp_cli_certificate_reference =
+            self.run_linear_cli_reference("lp", "clp", &cli_certificate_json);
+        if clp_cli_certificate_reference.status == "unavailable"
+            && clp_cli_certificate_reference.message.contains("not found")
+        {
+            println!("  SKIP  LP clp:cli certificate executable not found");
+        } else {
+            self.check(
+                "LP clp:cli certificate status optimal",
+                clp_cli_certificate_reference.status == "optimal",
+                format!(
+                    "external={} solver={}",
+                    clp_cli_certificate_reference.status, clp_cli_certificate_reference.solver
+                ),
+            );
+            self.max_abs_close_optional(
+                "LP clp:cli certificate dual_ub",
+                clp_cli_certificate_reference.dual_ub.as_deref(),
+                Some(&[1.0, 1.0]),
+                1e-8,
+            );
+            self.max_abs_close_optional(
+                "LP clp:cli certificate reduced_costs",
+                clp_cli_certificate_reference.reduced_costs.as_deref(),
+                Some(&[0.0, 0.0]),
+                1e-8,
+            );
+            self.check(
+                "LP clp:cli basis var statuses",
+                clp_cli_certificate_reference
+                    .var_basis
+                    .as_ref()
+                    .is_some_and(|basis| basis.iter().map(String::as_str).eq(["basic", "basic"])),
+                format!("var_basis={:?}", clp_cli_certificate_reference.var_basis),
+            );
+            self.check(
+                "LP clp:cli basis row statuses",
+                clp_cli_certificate_reference
+                    .row_basis
+                    .as_ref()
+                    .is_some_and(|basis| {
+                        basis
+                            .iter()
+                            .map(String::as_str)
+                            .eq(["at_upper", "at_upper"])
+                    }),
+                format!("row_basis={:?}", clp_cli_certificate_reference.row_basis),
+            );
+        }
+        let clp_rust_cli_certificate_reference = solve_lp_with_external_cli(
+            &cli_certificate_lp,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Clp,
+                ..Default::default()
+            },
+        );
+        if clp_rust_cli_certificate_reference.status == ExternalLinearCliStatus::Unavailable
+            && clp_rust_cli_certificate_reference
+                .message
+                .contains("not found")
+        {
+            println!("  SKIP  LP clp:rust-cli certificate executable not found");
+        } else {
+            self.check(
+                "LP clp:rust-cli certificate status optimal",
+                clp_rust_cli_certificate_reference.status == ExternalLinearCliStatus::Optimal,
+                format!(
+                    "external={} solver={}",
+                    clp_rust_cli_certificate_reference.status.as_str(),
+                    clp_rust_cli_certificate_reference.solver
+                ),
+            );
+            self.max_abs_close_optional(
+                "LP clp:rust-cli certificate dual_ub",
+                clp_rust_cli_certificate_reference.dual_ub.as_deref(),
+                Some(&[1.0, 1.0]),
+                1e-8,
+            );
+            self.max_abs_close_optional(
+                "LP clp:rust-cli certificate reduced_costs",
+                clp_rust_cli_certificate_reference.reduced_costs.as_deref(),
+                Some(&[0.0, 0.0]),
+                1e-8,
+            );
+            self.check(
+                "LP clp:rust-cli basis var statuses",
+                clp_rust_cli_certificate_reference
+                    .var_basis
+                    .as_ref()
+                    .is_some_and(|basis| basis.iter().map(String::as_str).eq(["basic", "basic"])),
+                format!(
+                    "var_basis={:?}",
+                    clp_rust_cli_certificate_reference.var_basis
+                ),
+            );
+            self.check(
+                "LP clp:rust-cli basis row statuses",
+                clp_rust_cli_certificate_reference
+                    .row_basis
+                    .as_ref()
+                    .is_some_and(|basis| {
+                        basis
+                            .iter()
+                            .map(String::as_str)
+                            .eq(["at_upper", "at_upper"])
+                    }),
+                format!(
+                    "row_basis={:?}",
+                    clp_rust_cli_certificate_reference.row_basis
+                ),
+            );
+        }
 
         let lp_status_cases = vec![
             (
@@ -1437,6 +1682,24 @@ impl Driver {
                 &reference.x,
                 1e-8,
             );
+            if solver == "scip" {
+                self.check(
+                    "IP/MIP scip:cli quality metadata",
+                    reference
+                        .best_bound
+                        .zip(reference.objective)
+                        .is_some_and(|(bound, objective)| (bound - objective).abs() <= 1e-9)
+                        && reference.mip_gap.is_some_and(|gap| gap <= 1e-9)
+                        && reference.nodes_explored.is_some(),
+                    format!(
+                        "best_bound={:?} objective={:?} gap={:?} nodes={:?}",
+                        reference.best_bound,
+                        reference.objective,
+                        reference.mip_gap,
+                        reference.nodes_explored
+                    ),
+                );
+            }
         }
 
         for solver in ExternalLinearCliSolver::open_source_mip().iter().copied() {
@@ -1480,6 +1743,24 @@ impl Driver {
             if solver == ExternalLinearCliSolver::Highs {
                 self.check(
                     "IP/MIP highs:rust-cli quality metadata",
+                    reference
+                        .best_bound
+                        .zip(reference.objective)
+                        .is_some_and(|(bound, objective)| (bound - objective).abs() <= 1e-9)
+                        && reference.mip_gap.is_some_and(|gap| gap <= 1e-9)
+                        && reference.nodes_explored.is_some(),
+                    format!(
+                        "best_bound={:?} objective={:?} gap={:?} nodes={:?}",
+                        reference.best_bound,
+                        reference.objective,
+                        reference.mip_gap,
+                        reference.nodes_explored
+                    ),
+                );
+            }
+            if solver == ExternalLinearCliSolver::Scip {
+                self.check(
+                    "IP/MIP scip:rust-cli quality metadata",
                     reference
                         .best_bound
                         .zip(reference.objective)

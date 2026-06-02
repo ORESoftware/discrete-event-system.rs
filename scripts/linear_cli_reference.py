@@ -485,9 +485,59 @@ def parse_scip_solution(path: str, n: int) -> tuple[str, list[float]]:
     return status, x
 
 
-def parse_cbc_solution(path: str, n: int) -> tuple[str, list[float]]:
+def parse_cbc_basis(
+    path: str,
+    n: int,
+    le_count: int,
+    eq_count: int,
+) -> dict[str, object]:
+    var_basis: list[Optional[str]] = [None] * n
+    row_basis: list[Optional[str]] = ["basic"] * le_count + ["fixed"] * eq_count
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            parts = line.split()
+            if not parts or parts[0] in {"NAME", "ENDATA"}:
+                continue
+            code = parts[0].upper()
+            if len(parts) >= 2 and parts[1].startswith("x") and parts[1][1:].isdigit():
+                idx = int(parts[1][1:])
+                if 0 <= idx < n:
+                    if code in {"BS", "XL", "XU"}:
+                        var_basis[idx] = "basic"
+                    elif code == "LL":
+                        var_basis[idx] = "at_lower"
+                    elif code == "UL":
+                        var_basis[idx] = "at_upper"
+                    elif code == "FX":
+                        var_basis[idx] = "fixed"
+                    elif code == "FR":
+                        var_basis[idx] = "free"
+            if code in {"XL", "XU"} and len(parts) >= 3 and parts[2].startswith("c"):
+                suffix = parts[2][1:]
+                if suffix.isdigit():
+                    row_idx = int(suffix)
+                    if 0 <= row_idx < le_count:
+                        row_basis[row_idx] = "at_lower" if code == "XL" else "at_upper"
+
+    fields: dict[str, object] = {}
+    if all(value is not None for value in var_basis):
+        fields["varBasis"] = [str(value) for value in var_basis if value is not None]
+    if all(value is not None for value in row_basis):
+        fields["rowBasis"] = [str(value) for value in row_basis if value is not None]
+    return fields
+
+
+def parse_cbc_solution(
+    path: str,
+    n: int,
+    le_count: int = 0,
+    eq_count: int = 0,
+    basis_path: Optional[str] = None,
+) -> tuple[str, list[float], dict[str, object]]:
     x = [0.0] * n
     status = "unknown"
+    row_duals: list[Optional[float]] = [None] * (le_count + eq_count)
+    reduced_costs: list[Optional[float]] = [None] * n
     with open(path, "r", encoding="utf-8") as f:
         for line_no, line in enumerate(f):
             stripped = line.strip()
@@ -503,7 +553,33 @@ def parse_cbc_solution(path: str, n: int) -> tuple[str, list[float]]:
                     idx = int(suffix)
                     if 0 <= idx < n:
                         x[idx] = float(parts[2])
-    return status, x
+                        if len(parts) >= 4 and _is_number(parts[3]):
+                            reduced_costs[idx] = float(parts[3])
+            elif len(parts) >= 4 and parts[0].lstrip("-").isdigit():
+                row_name = parts[1]
+                if row_name.startswith("c") and row_name[1:].isdigit():
+                    idx = int(row_name[1:])
+                elif row_name.startswith("e") and row_name[1:].isdigit():
+                    idx = le_count + int(row_name[1:])
+                else:
+                    idx = -1
+                if 0 <= idx < len(row_duals) and _is_number(parts[3]):
+                    row_duals[idx] = float(parts[3])
+
+    fields: dict[str, object] = {}
+    if all(value is not None for value in reduced_costs):
+        fields["reducedCosts"] = [
+            float(value) for value in reduced_costs if value is not None
+        ]
+    dual_ub = row_duals[:le_count]
+    dual_eq = row_duals[le_count:]
+    if all(value is not None for value in dual_ub):
+        fields["dualUB"] = [float(value) for value in dual_ub if value is not None]
+    if all(value is not None for value in dual_eq):
+        fields["dualEQ"] = [float(value) for value in dual_eq if value is not None]
+    if basis_path is not None and os.path.exists(basis_path):
+        fields.update(parse_cbc_basis(basis_path, n, le_count, eq_count))
+    return status, x, fields
 
 
 def parse_named_solution(path: str, n: int, default_status: str = "optimal") -> tuple[str, list[float]]:
@@ -707,6 +783,35 @@ def _first_float(text: str) -> Optional[float]:
     return None
 
 
+def parse_lp_iterations(solver: str, kind: str, stdout: str, stderr: str) -> dict:
+    if kind != "lp":
+        return {}
+    text = f"{stdout}\n{stderr}"
+    iterations: Optional[int] = None
+
+    if solver == "highs":
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.lower().startswith("simplex") and "iterations" in stripped.lower():
+                value = _first_float_after_colon(stripped)
+                if value is not None:
+                    iterations = int(round(value))
+    elif solver == "glpk":
+        for line in text.splitlines():
+            match = re.match(r"^\*?\s*(\d+):\s+obj\b", line.strip())
+            if match is not None:
+                iterations = int(match.group(1))
+    elif solver in {"cbc", "clp"}:
+        for line in text.splitlines():
+            match = re.search(r"-\s+(\d+)\s+iterations\b", line.strip(), flags=re.IGNORECASE)
+            if match is not None:
+                iterations = int(match.group(1))
+
+    if iterations is not None and iterations >= 0:
+        return {"iterations": iterations}
+    return {}
+
+
 def parse_mip_quality(
     solver: str,
     kind: str,
@@ -845,9 +950,10 @@ def run_solver(
                 str(max(1, int(math.ceil(time_limit)))),
             ]
     elif solver == "scip":
-        cmd = [
-            command,
-            "-q",
+        cmd = [command]
+        if kind == "lp":
+            cmd.append("-q")
+        cmd.extend([
             "-c",
             f"read {model_path}",
             "-c",
@@ -856,28 +962,45 @@ def run_solver(
             "optimize",
             "-c",
             f"write solution {solution_path}",
+        ])
+        if kind == "mip":
+            cmd.extend([
+                "-c",
+                "display statistics",
+            ])
+        cmd.extend([
             "-c",
             "quit",
-        ]
+        ])
     elif solver == "cbc":
         cmd = [
             command,
             model_path,
             "-seconds",
             str(time_limit),
+        ]
+        if kind == "lp":
+            cmd.extend(["-printingOptions", "all"])
+        cmd.extend([
             "-solve",
             "-solution",
             solution_path,
-        ]
+        ])
+        if kind == "lp":
+            cmd.extend(["-basisOut", solution_path + ".basis"])
     elif solver == "clp":
         cmd = [
             command,
             model_path,
             "-seconds",
             str(time_limit),
+            "-printingOptions",
+            "all",
             "-solve",
             "-solution",
             solution_path,
+            "-basisOut",
+            solution_path + ".basis",
         ]
     elif solver == "gurobi":
         cmd = [
@@ -1003,7 +1126,13 @@ def solve(kind: str, solver: str, raw: dict, time_limit: float) -> dict:
         elif solver == "lindo":
             status, x = parse_lindo_solution(solution_path, len(c))
         else:
-            status, x = parse_cbc_solution(solution_path, len(c))
+            status, x, certificate_fields = parse_cbc_solution(
+                solution_path,
+                len(c),
+                len(a_ub),
+                len(a_eq),
+                solution_path + ".basis" if kind == "lp" else None,
+            )
 
     classified = classify_status(status, stdout, stderr)
     if classified != "optimal":
@@ -1022,6 +1151,7 @@ def solve(kind: str, solver: str, raw: dict, time_limit: float) -> dict:
     }
     if kind == "lp":
         result.update(certificate_fields)
+        result.update(parse_lp_iterations(solver, kind, stdout, stderr))
     result.update(parse_mip_quality(solver, kind, objective, stdout, stderr))
     return result
 

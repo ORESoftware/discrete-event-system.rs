@@ -268,6 +268,8 @@ pub struct ExternalLinearCliSolution {
     pub var_basis: Option<Vec<String>>,
     /// LP basis status for rows (`A_ub` rows followed by `A_eq` rows), when reported by a CLI.
     pub row_basis: Option<Vec<String>>,
+    /// LP simplex iterations reported by a CLI, when available.
+    pub iterations: Option<u64>,
     pub elapsed_ms: f64,
     pub message: String,
 }
@@ -306,6 +308,7 @@ struct RawExternalLinearCliSolution {
     var_basis: Option<Vec<String>>,
     #[serde(rename = "rowBasis")]
     row_basis: Option<Vec<String>>,
+    iterations: Option<u64>,
     message: String,
 }
 
@@ -582,6 +585,7 @@ pub fn solve_linear_cli_json(
             reduced_costs: raw.reduced_costs,
             var_basis: raw.var_basis,
             row_basis: raw.row_basis,
+            iterations: raw.iterations,
             elapsed_ms: elapsed,
             message: raw.message,
         },
@@ -617,6 +621,7 @@ fn external_cli_failure(
         reduced_costs: None,
         var_basis: None,
         row_basis: None,
+        iterations: None,
         elapsed_ms,
         message,
     }

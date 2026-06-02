@@ -22,8 +22,10 @@ use crate::des::general::cp_sat::{
 };
 use crate::des::general::external_linear_cli::{
     external_linear_cli_command, probe_external_linear_cli_solver, solve_ipmip_with_external_cli,
-    solve_lp_with_external_cli, ExternalLinearCliKind, ExternalLinearCliOptions,
-    ExternalLinearCliProbeStatus, ExternalLinearCliSolver, ExternalLinearCliStatus,
+    solve_lp_with_external_cli, ExternalLinearCliBranchRule, ExternalLinearCliKind,
+    ExternalLinearCliLpAlgorithm, ExternalLinearCliMipSwitch, ExternalLinearCliNodeSelection,
+    ExternalLinearCliOptions, ExternalLinearCliPresolve, ExternalLinearCliProbeStatus,
+    ExternalLinearCliSolver, ExternalLinearCliStatus,
 };
 use crate::des::general::external_optimization_ecosystem::{
     probe_external_optimization_tool, ExternalOptimizationProbeStatus, ExternalOptimizationTool,
@@ -44,10 +46,10 @@ use crate::des::general::ip_mip_des::{
     solve_ipmip_feasibility_relaxation_with_des, solve_ipmip_solution_pool_with_des,
     solve_ipmip_with_des, solve_lower_bounded_ipmip_with_des, solve_multi_objective_ipmip_with_des,
     solve_pwl_ipmip_with_des, solve_quadratic_objective_ipmip_with_des, solve_semi_ipmip_with_des,
-    solve_sos_ipmip_with_des, solve_source_ipmip_with_des, BranchRule,
-    ConcreteLpRelaxationAlgorithm, IPMIPConflictMember, IPMIPConflictOptions, IPMIPFeasRelaxMember,
-    IPMIPFeasRelaxOptions, IPMIPProblem, IPMIPSolutionPoolOptions, IPMIPSolveOptions, IPMIPStatus,
-    LpRelaxationAlgorithm, TraceAction,
+    solve_sos_ipmip_with_des, solve_source_ipmip_with_des, BranchOrCutConstraint, BranchRule,
+    ConcreteLpRelaxationAlgorithm, ConstraintKind, IPMIPConflictMember, IPMIPConflictOptions,
+    IPMIPFeasRelaxMember, IPMIPFeasRelaxOptions, IPMIPProblem, IPMIPSolutionPoolOptions,
+    IPMIPSolveOptions, IPMIPStatus, LpRelaxationAlgorithm, TraceAction,
 };
 use crate::des::general::lp::{
     build_lp_feasibility_relaxation_problem, find_lp_infeasibility_conflict,
@@ -176,14 +178,52 @@ struct CpLiteralReference {
 struct LinearCliReference {
     status: String,
     solver: String,
+    #[serde(rename = "solverVersion")]
+    solver_version: Option<String>,
     x: Vec<f64>,
     objective: Option<f64>,
+    #[serde(rename = "lpAlgorithm")]
+    lp_algorithm: Option<String>,
     #[serde(rename = "bestBound")]
     best_bound: Option<f64>,
+    #[serde(rename = "solutionLimit")]
+    solution_limit: Option<u64>,
+    #[serde(rename = "solutionPoolSize")]
+    solution_pool_size: Option<u64>,
+    solutions: Option<Vec<LinearCliPoolMember>>,
+    exhausted: Option<bool>,
     #[serde(rename = "mipGap")]
     mip_gap: Option<f64>,
+    #[serde(rename = "absoluteGap")]
+    absolute_gap: Option<f64>,
+    #[serde(rename = "objectiveLimit")]
+    objective_limit: Option<f64>,
+    #[serde(rename = "primalFeasibilityTolerance")]
+    primal_feasibility_tolerance: Option<f64>,
+    #[serde(rename = "dualFeasibilityTolerance")]
+    dual_feasibility_tolerance: Option<f64>,
+    #[serde(rename = "integerFeasibilityTolerance")]
+    integer_feasibility_tolerance: Option<f64>,
     #[serde(rename = "nodesExplored")]
     nodes_explored: Option<u64>,
+    threads: Option<u32>,
+    #[serde(rename = "randomSeed")]
+    random_seed: Option<u64>,
+    presolve: Option<String>,
+    cuts: Option<String>,
+    heuristics: Option<String>,
+    #[serde(rename = "branchRule")]
+    branch_rule: Option<String>,
+    #[serde(rename = "branchPrioritiesAccepted")]
+    branch_priorities_accepted: Option<bool>,
+    #[serde(rename = "branchPriorityCount")]
+    branch_priority_count: Option<u64>,
+    #[serde(rename = "nodeSelection")]
+    node_selection: Option<String>,
+    #[serde(rename = "mipStartAccepted")]
+    mip_start_accepted: Option<bool>,
+    #[serde(rename = "mipStartObjective")]
+    mip_start_objective: Option<f64>,
     #[serde(rename = "dualUB")]
     dual_ub: Option<Vec<f64>>,
     #[serde(rename = "dualEQ")]
@@ -196,6 +236,12 @@ struct LinearCliReference {
     row_basis: Option<Vec<String>>,
     iterations: Option<u64>,
     message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LinearCliPoolMember {
+    x: Vec<f64>,
+    objective: f64,
 }
 
 fn one_line_preview(text: &str, max_chars: usize) -> String {
@@ -888,11 +934,19 @@ impl Driver {
         solver: &str,
         stdin_json: &str,
     ) -> LinearCliReference {
-        let value = self.run_python_json(
-            "linear_cli_reference.py",
-            &["--kind", kind, "--solver", solver],
-            stdin_json,
-        );
+        self.run_linear_cli_reference_with_args(kind, solver, stdin_json, &[])
+    }
+
+    fn run_linear_cli_reference_with_args(
+        &self,
+        kind: &str,
+        solver: &str,
+        stdin_json: &str,
+        extra_args: &[&str],
+    ) -> LinearCliReference {
+        let mut args = vec!["--kind", kind, "--solver", solver];
+        args.extend_from_slice(extra_args);
+        let value = self.run_python_json("linear_cli_reference.py", &args, stdin_json);
         serde_json::from_value(value).expect("parse linear CLI reference")
     }
 
@@ -919,12 +973,14 @@ impl Driver {
             }
             self.check(
                 format!("LP {}:rust-cli probe ready", solver.as_str()),
-                probe.status == ExternalLinearCliProbeStatus::Ready,
+                probe.status == ExternalLinearCliProbeStatus::Ready
+                    && probe.solver_version.is_some(),
                 format!(
-                    "status={} command={:?} smoke={:?} message={}",
+                    "status={} command={:?} smoke={:?} version={:?} message={}",
                     probe.status.as_str(),
                     probe.command,
                     probe.smoke_status.map(|status| status.as_str()),
+                    probe.solver_version,
                     probe.message
                 ),
             );
@@ -945,12 +1001,14 @@ impl Driver {
             }
             self.check(
                 format!("IP/MIP {}:rust-cli probe ready", solver.as_str()),
-                probe.status == ExternalLinearCliProbeStatus::Ready,
+                probe.status == ExternalLinearCliProbeStatus::Ready
+                    && probe.solver_version.is_some(),
                 format!(
-                    "status={} command={:?} smoke={:?} message={}",
+                    "status={} command={:?} smoke={:?} version={:?} message={}",
                     probe.status.as_str(),
                     probe.command,
                     probe.smoke_status.map(|status| status.as_str()),
+                    probe.solver_version,
                     probe.message
                 ),
             );
@@ -1050,6 +1108,94 @@ impl Driver {
             }
         }
 
+        for (solver, algorithm) in [
+            ("highs", "simplex"),
+            ("highs", "ipm"),
+            ("glpk", "simplex"),
+            ("glpk", "ipm"),
+        ] {
+            let reference = self.run_linear_cli_reference_with_args(
+                "lp",
+                solver,
+                &lp_json,
+                &["--time-limit", "5", "--lp-algorithm", algorithm],
+            );
+            if reference.status == "unavailable" && reference.message.contains("not found") {
+                println!("  SKIP  LP {solver}:cli {algorithm} executable not found");
+                continue;
+            }
+            self.check(
+                format!("LP {solver}:cli {algorithm} algorithm control"),
+                reference.status == "optimal"
+                    && reference.lp_algorithm.as_deref() == Some(algorithm),
+                format!(
+                    "status={} lp_algorithm={:?} objective={:?} message={}",
+                    reference.status,
+                    reference.lp_algorithm,
+                    reference.objective,
+                    reference.message
+                ),
+            );
+            self.close(
+                &format!("LP {solver}:cli {algorithm} objective"),
+                lp_internal.objective,
+                reference.objective.unwrap_or(f64::NAN),
+                1e-6,
+            );
+            self.max_abs_close(
+                &format!("LP {solver}:cli {algorithm} x"),
+                &lp_internal.x,
+                &reference.x,
+                1e-6,
+            );
+        }
+
+        let lp_primal_tolerance = 1e-7;
+        let lp_dual_tolerance = 2e-7;
+        for solver in ["highs", "scip", "cbc", "clp"] {
+            let reference = self.run_linear_cli_reference_with_args(
+                "lp",
+                solver,
+                &lp_json,
+                &[
+                    "--time-limit",
+                    "5",
+                    "--primal-feasibility-tolerance",
+                    "1e-7",
+                    "--dual-feasibility-tolerance",
+                    "2e-7",
+                ],
+            );
+            if reference.status == "unavailable" && reference.message.contains("not found") {
+                println!("  SKIP  LP {solver}:cli tolerance controls executable not found");
+                continue;
+            }
+            self.check(
+                format!("LP {solver}:cli tolerance controls"),
+                reference.status == "optimal"
+                    && reference
+                        .primal_feasibility_tolerance
+                        .is_some_and(|tol| (tol - lp_primal_tolerance).abs() <= 1e-12)
+                    && reference
+                        .dual_feasibility_tolerance
+                        .is_some_and(|tol| (tol - lp_dual_tolerance).abs() <= 1e-12),
+                format!(
+                    "status={} primal={:?} dual={:?} objective={:?} message={}",
+                    reference.status,
+                    reference.primal_feasibility_tolerance,
+                    reference.dual_feasibility_tolerance,
+                    reference.objective,
+                    reference.message
+                ),
+            );
+            self.close(
+                &format!("LP {solver}:cli tolerance objective"),
+                lp_internal.objective,
+                reference.objective.unwrap_or(f64::NAN),
+                1e-6,
+            );
+        }
+
         for solver in ExternalLinearCliSolver::open_source_lp().iter().copied() {
             let solver_name = solver.as_str();
             let reference = solve_lp_with_external_cli(
@@ -1101,6 +1247,121 @@ impl Driver {
                     format!("iterations={:?}", reference.iterations),
                 );
             }
+        }
+
+        for (solver, algorithm, algorithm_name) in [
+            (
+                ExternalLinearCliSolver::Highs,
+                ExternalLinearCliLpAlgorithm::Simplex,
+                "simplex",
+            ),
+            (
+                ExternalLinearCliSolver::Highs,
+                ExternalLinearCliLpAlgorithm::Ipm,
+                "ipm",
+            ),
+            (
+                ExternalLinearCliSolver::Glpk,
+                ExternalLinearCliLpAlgorithm::Simplex,
+                "simplex",
+            ),
+            (
+                ExternalLinearCliSolver::Glpk,
+                ExternalLinearCliLpAlgorithm::Ipm,
+                "ipm",
+            ),
+        ] {
+            let solver_name = solver.as_str();
+            let reference = solve_lp_with_external_cli(
+                &lp,
+                &ExternalLinearCliOptions {
+                    solver,
+                    time_limit_secs: Some(5.0),
+                    lp_algorithm: Some(algorithm),
+                    ..Default::default()
+                },
+            );
+            if reference.status == ExternalLinearCliStatus::Unavailable
+                && reference.message.contains("not found")
+            {
+                println!("  SKIP  LP {solver_name}:rust-cli {algorithm_name} executable not found");
+                continue;
+            }
+            self.check(
+                format!("LP {solver_name}:rust-cli {algorithm_name} algorithm control"),
+                reference.status == ExternalLinearCliStatus::Optimal
+                    && reference.lp_algorithm.as_deref() == Some(algorithm_name),
+                format!(
+                    "status={} lp_algorithm={:?} objective={:?} message={}",
+                    reference.status.as_str(),
+                    reference.lp_algorithm,
+                    reference.objective,
+                    reference.message
+                ),
+            );
+            self.close(
+                &format!("LP {solver_name}:rust-cli {algorithm_name} objective"),
+                lp_internal.objective,
+                reference.objective.unwrap_or(f64::NAN),
+                1e-6,
+            );
+            self.max_abs_close(
+                &format!("LP {solver_name}:rust-cli {algorithm_name} x"),
+                &lp_internal.x,
+                &reference.x,
+                1e-6,
+            );
+        }
+
+        for solver in [
+            ExternalLinearCliSolver::Highs,
+            ExternalLinearCliSolver::Scip,
+            ExternalLinearCliSolver::Cbc,
+            ExternalLinearCliSolver::Clp,
+        ] {
+            let solver_name = solver.as_str();
+            let reference = solve_lp_with_external_cli(
+                &lp,
+                &ExternalLinearCliOptions {
+                    solver,
+                    time_limit_secs: Some(5.0),
+                    primal_feasibility_tolerance: Some(lp_primal_tolerance),
+                    dual_feasibility_tolerance: Some(lp_dual_tolerance),
+                    ..Default::default()
+                },
+            );
+            if reference.status == ExternalLinearCliStatus::Unavailable
+                && reference.message.contains("not found")
+            {
+                println!(
+                    "  SKIP  LP {solver_name}:rust-cli tolerance controls executable not found"
+                );
+                continue;
+            }
+            self.check(
+                format!("LP {solver_name}:rust-cli tolerance controls"),
+                reference.status == ExternalLinearCliStatus::Optimal
+                    && reference
+                        .primal_feasibility_tolerance
+                        .is_some_and(|tol| (tol - lp_primal_tolerance).abs() <= 1e-12)
+                    && reference
+                        .dual_feasibility_tolerance
+                        .is_some_and(|tol| (tol - lp_dual_tolerance).abs() <= 1e-12),
+                format!(
+                    "status={} primal={:?} dual={:?} objective={:?} message={}",
+                    reference.status.as_str(),
+                    reference.primal_feasibility_tolerance,
+                    reference.dual_feasibility_tolerance,
+                    reference.objective,
+                    reference.message
+                ),
+            );
+            self.close(
+                &format!("LP {solver_name}:rust-cli tolerance objective"),
+                lp_internal.objective,
+                reference.objective.unwrap_or(f64::NAN),
+                1e-6,
+            );
         }
 
         let cli_certificate_lp = LPProblem {
@@ -1653,6 +1914,68 @@ impl Driver {
             "con_names": mip.con_names,
         })
         .to_string();
+        let pool_mip = build_binary_knapsack_ip(vec![3.0, 2.0], vec![1.0, 1.0], 1.0);
+        let pool_json = serde_json::json!({
+            "sense": pool_mip.sense.as_str(),
+            "c": pool_mip.c,
+            "a": pool_mip.a,
+            "b": pool_mip.b,
+            "integer_vars": pool_mip.integer_vars,
+            "ub": pool_mip.ub,
+            "var_names": pool_mip.var_names,
+            "con_names": pool_mip.con_names,
+        })
+        .to_string();
+        let expected_pool_x = [vec![1.0, 0.0], vec![0.0, 1.0], vec![0.0, 0.0]];
+        let expected_pool_objectives = [3.0, 2.0, 0.0];
+        let lazy_mip = IPMIPProblem {
+            sense: Sense::Max,
+            c: vec![1.0, 1.0],
+            a: vec![vec![1.0, 1.0]],
+            b: vec![2.0],
+            integer_vars: vec![true, true],
+            ub: Some(vec![1.0, 1.0]),
+            var_names: Some(vec!["x".to_string(), "y".to_string()]),
+            con_names: Some(vec!["loose-capacity".to_string()]),
+            lazy_constraints: Some(vec![BranchOrCutConstraint {
+                coefs: vec![1.0, 1.0],
+                rhs: 1.0,
+                name: "lazy-at-most-one".to_string(),
+                kind: ConstraintKind::Lazy,
+            }]),
+            variable_nodes: None,
+            constraint_nodes: None,
+        };
+        let lazy_internal = solve_ipmip_with_des(
+            lazy_mip.clone(),
+            IPMIPSolveOptions {
+                lp_algorithm: Some(LpRelaxationAlgorithm::Concrete(
+                    ConcreteLpRelaxationAlgorithm::InternalSimplex,
+                )),
+                ..Default::default()
+            },
+        );
+        let lazy_json = serde_json::json!({
+            "sense": lazy_mip.sense.as_str(),
+            "c": lazy_mip.c,
+            "a": lazy_mip.a,
+            "b": lazy_mip.b,
+            "integer_vars": lazy_mip.integer_vars,
+            "ub": lazy_mip.ub,
+            "var_names": lazy_mip.var_names,
+            "con_names": lazy_mip.con_names,
+            "lazy_constraints": lazy_mip.lazy_constraints.as_ref().map(|rows| rows.iter().map(|row| serde_json::json!({
+                "coefs": &row.coefs,
+                "rhs": row.rhs,
+                "name": &row.name,
+                "kind": match row.kind {
+                    ConstraintKind::Branch => "branch",
+                    ConstraintKind::Cut => "cut",
+                    ConstraintKind::Lazy => "lazy",
+                },
+            })).collect::<Vec<_>>()),
+        })
+        .to_string();
 
         for solver in mip_solvers.iter().copied() {
             let reference = self.run_linear_cli_reference("mip", solver, &mip_json);
@@ -1682,6 +2005,14 @@ impl Driver {
                 &reference.x,
                 1e-8,
             );
+            self.check(
+                format!("IP/MIP {solver}:cli solver version metadata"),
+                reference.solver_version.is_some(),
+                format!(
+                    "solver={} version={:?} message={}",
+                    reference.solver, reference.solver_version, reference.message
+                ),
+            );
             if solver == "scip" {
                 self.check(
                     "IP/MIP scip:cli quality metadata",
@@ -1700,6 +2031,521 @@ impl Driver {
                     ),
                 );
             }
+        }
+
+        for solver in ["highs", "scip", "cbc"] {
+            let reference = self.run_linear_cli_reference("mip", solver, &lazy_json);
+            if reference.status == "unavailable" && reference.message.contains("not found") {
+                println!("  SKIP  IP/MIP {solver}:cli lazy constraints executable not found");
+                continue;
+            }
+            self.check(
+                format!("IP/MIP {solver}:cli lazy constraints status"),
+                lazy_internal.status == IPMIPStatus::Optimal && reference.status == "optimal",
+                format!(
+                    "internal={} external={} solver={} message={}",
+                    lazy_internal.status.as_str(),
+                    reference.status,
+                    reference.solver,
+                    reference.message
+                ),
+            );
+            self.close(
+                &format!("IP/MIP {solver}:cli lazy constraints objective"),
+                lazy_internal.z,
+                reference.objective.unwrap_or(f64::NAN),
+                1e-9,
+            );
+            self.check(
+                format!("IP/MIP {solver}:cli lazy constraints cut changed optimum"),
+                reference
+                    .objective
+                    .is_some_and(|objective| objective < 2.0 - 1e-9),
+                format!("objective={:?} x={:?}", reference.objective, reference.x),
+            );
+        }
+
+        for solver in ["highs", "scip", "cbc"] {
+            let reference = self.run_linear_cli_reference_with_args(
+                "mip",
+                solver,
+                &mip_json,
+                &[
+                    "--time-limit",
+                    "5",
+                    "--node-limit",
+                    "0",
+                    "--relative-gap",
+                    "0.25",
+                ],
+            );
+            if reference.status == "unavailable" && reference.message.contains("not found") {
+                println!("  SKIP  IP/MIP {solver}:cli node/gap controls executable not found");
+                continue;
+            }
+            self.check(
+                format!("IP/MIP {solver}:cli node/gap controls"),
+                reference.status == "optimal"
+                    && reference.nodes_explored.is_some()
+                    && reference.mip_gap.is_some(),
+                format!(
+                    "status={} best_bound={:?} objective={:?} gap={:?} nodes={:?} message={}",
+                    reference.status,
+                    reference.best_bound,
+                    reference.objective,
+                    reference.mip_gap,
+                    reference.nodes_explored,
+                    reference.message
+                ),
+            );
+        }
+        let glpk_gap_reference = self.run_linear_cli_reference_with_args(
+            "mip",
+            "glpk",
+            &mip_json,
+            &["--time-limit", "5", "--relative-gap", "0.25"],
+        );
+        if glpk_gap_reference.status == "unavailable"
+            && glpk_gap_reference.message.contains("not found")
+        {
+            println!("  SKIP  IP/MIP glpk:cli relative-gap control executable not found");
+        } else {
+            self.check(
+                "IP/MIP glpk:cli relative-gap control",
+                glpk_gap_reference.status == "optimal",
+                format!(
+                    "status={} objective={:?} message={}",
+                    glpk_gap_reference.status,
+                    glpk_gap_reference.objective,
+                    glpk_gap_reference.message
+                ),
+            );
+        }
+
+        let glpk_search_reference = self.run_linear_cli_reference_with_args(
+            "mip",
+            "glpk",
+            &mip_json,
+            &[
+                "--time-limit",
+                "5",
+                "--branch-rule",
+                "first-fractional",
+                "--node-selection",
+                "dfs",
+            ],
+        );
+        if glpk_search_reference.status == "unavailable"
+            && glpk_search_reference.message.contains("not found")
+        {
+            println!("  SKIP  IP/MIP glpk:cli search controls executable not found");
+        } else {
+            self.check(
+                "IP/MIP glpk:cli search controls",
+                glpk_search_reference.status == "optimal"
+                    && glpk_search_reference.branch_rule.as_deref() == Some("first-fractional")
+                    && glpk_search_reference.node_selection.as_deref() == Some("dfs"),
+                format!(
+                    "status={} branch_rule={:?} node_selection={:?} objective={:?} message={}",
+                    glpk_search_reference.status,
+                    glpk_search_reference.branch_rule,
+                    glpk_search_reference.node_selection,
+                    glpk_search_reference.objective,
+                    glpk_search_reference.message
+                ),
+            );
+        }
+        let cbc_search_reference = self.run_linear_cli_reference_with_args(
+            "mip",
+            "cbc",
+            &mip_json,
+            &[
+                "--time-limit",
+                "5",
+                "--node-limit",
+                "0",
+                "--node-selection",
+                "dfs",
+            ],
+        );
+        if cbc_search_reference.status == "unavailable"
+            && cbc_search_reference.message.contains("not found")
+        {
+            println!("  SKIP  IP/MIP cbc:cli search controls executable not found");
+        } else {
+            self.check(
+                "IP/MIP cbc:cli search controls",
+                cbc_search_reference.status == "optimal"
+                    && cbc_search_reference.node_selection.as_deref() == Some("dfs"),
+                format!(
+                    "status={} branch_rule={:?} node_selection={:?} objective={:?} message={}",
+                    cbc_search_reference.status,
+                    cbc_search_reference.branch_rule,
+                    cbc_search_reference.node_selection,
+                    cbc_search_reference.objective,
+                    cbc_search_reference.message
+                ),
+            );
+        }
+
+        for solver in ["scip", "cbc"] {
+            let reference = self.run_linear_cli_reference_with_args(
+                "mip",
+                solver,
+                &mip_json,
+                &["--time-limit", "5", "--branch-priorities", "[0,10,0,0]"],
+            );
+            if reference.status == "unavailable" && reference.message.contains("not found") {
+                println!(
+                    "  SKIP  IP/MIP {solver}:cli branch-priority control executable not found"
+                );
+                continue;
+            }
+            self.check(
+                format!("IP/MIP {solver}:cli branch-priority control"),
+                reference.status == "optimal"
+                    && reference.branch_priorities_accepted == Some(true)
+                    && reference.branch_priority_count == Some(1),
+                format!(
+                    "status={} accepted={:?} count={:?} objective={:?} message={}",
+                    reference.status,
+                    reference.branch_priorities_accepted,
+                    reference.branch_priority_count,
+                    reference.objective,
+                    reference.message
+                ),
+            );
+        }
+
+        for solver in ["highs", "glpk", "scip", "cbc"] {
+            let reference = self.run_linear_cli_reference_with_args(
+                "mip",
+                solver,
+                &mip_json,
+                &[
+                    "--time-limit",
+                    "5",
+                    "--threads",
+                    "1",
+                    "--random-seed",
+                    "7",
+                    "--presolve",
+                    "off",
+                ],
+            );
+            if reference.status == "unavailable" && reference.message.contains("not found") {
+                println!("  SKIP  IP/MIP {solver}:cli operational controls executable not found");
+                continue;
+            }
+            let reports_threads = matches!(solver, "highs" | "scip" | "cbc");
+            self.check(
+                format!("IP/MIP {solver}:cli operational controls"),
+                reference.status == "optimal"
+                    && (!reports_threads || reference.threads == Some(1))
+                    && reference.random_seed == Some(7)
+                    && reference.presolve.as_deref() == Some("off"),
+                format!(
+                    "status={} threads={:?} random_seed={:?} presolve={:?} objective={:?} message={}",
+                    reference.status,
+                    reference.threads,
+                    reference.random_seed,
+                    reference.presolve,
+                    reference.objective,
+                    reference.message
+                ),
+            );
+        }
+
+        let mip_primal_tolerance = 1e-7;
+        let mip_dual_tolerance = 2e-7;
+        let mip_integer_tolerance = 1e-6;
+        for solver in ["highs", "scip", "cbc"] {
+            let reference = self.run_linear_cli_reference_with_args(
+                "mip",
+                solver,
+                &mip_json,
+                &[
+                    "--time-limit",
+                    "5",
+                    "--primal-feasibility-tolerance",
+                    "1e-7",
+                    "--dual-feasibility-tolerance",
+                    "2e-7",
+                    "--integer-feasibility-tolerance",
+                    "1e-6",
+                ],
+            );
+            if reference.status == "unavailable" && reference.message.contains("not found") {
+                println!("  SKIP  IP/MIP {solver}:cli tolerance controls executable not found");
+                continue;
+            }
+            let reports_integer = matches!(solver, "highs" | "cbc");
+            self.check(
+                format!("IP/MIP {solver}:cli tolerance controls"),
+                reference.status == "optimal"
+                    && reference
+                        .primal_feasibility_tolerance
+                        .is_some_and(|tol| (tol - mip_primal_tolerance).abs() <= 1e-12)
+                    && reference
+                        .dual_feasibility_tolerance
+                        .is_some_and(|tol| (tol - mip_dual_tolerance).abs() <= 1e-12)
+                    && (!reports_integer
+                        || reference
+                            .integer_feasibility_tolerance
+                            .is_some_and(|tol| (tol - mip_integer_tolerance).abs() <= 1e-12)),
+                format!(
+                    "status={} primal={:?} dual={:?} integer={:?} objective={:?} message={}",
+                    reference.status,
+                    reference.primal_feasibility_tolerance,
+                    reference.dual_feasibility_tolerance,
+                    reference.integer_feasibility_tolerance,
+                    reference.objective,
+                    reference.message
+                ),
+            );
+            self.close(
+                &format!("IP/MIP {solver}:cli tolerance objective"),
+                mip_internal.z,
+                reference.objective.unwrap_or(f64::NAN),
+                1e-6,
+            );
+        }
+
+        for solver in ["scip", "cbc"] {
+            let reference = self.run_linear_cli_reference_with_args(
+                "mip",
+                solver,
+                &mip_json,
+                &["--time-limit", "5", "--cuts", "off", "--heuristics", "off"],
+            );
+            if reference.status == "unavailable" && reference.message.contains("not found") {
+                println!("  SKIP  IP/MIP {solver}:cli strategy controls executable not found");
+                continue;
+            }
+            self.check(
+                format!("IP/MIP {solver}:cli strategy controls"),
+                reference.status == "optimal"
+                    && reference.cuts.as_deref() == Some("off")
+                    && reference.heuristics.as_deref() == Some("off"),
+                format!(
+                    "status={} cuts={:?} heuristics={:?} objective={:?} message={}",
+                    reference.status,
+                    reference.cuts,
+                    reference.heuristics,
+                    reference.objective,
+                    reference.message
+                ),
+            );
+        }
+        let glpk_cuts_reference = self.run_linear_cli_reference_with_args(
+            "mip",
+            "glpk",
+            &mip_json,
+            &["--time-limit", "5", "--cuts", "on"],
+        );
+        if glpk_cuts_reference.status == "unavailable"
+            && glpk_cuts_reference.message.contains("not found")
+        {
+            println!("  SKIP  IP/MIP glpk:cli cut controls executable not found");
+        } else {
+            self.check(
+                "IP/MIP glpk:cli cut controls",
+                glpk_cuts_reference.status == "optimal"
+                    && glpk_cuts_reference.cuts.as_deref() == Some("on"),
+                format!(
+                    "status={} cuts={:?} objective={:?} message={}",
+                    glpk_cuts_reference.status,
+                    glpk_cuts_reference.cuts,
+                    glpk_cuts_reference.objective,
+                    glpk_cuts_reference.message
+                ),
+            );
+        }
+
+        for (solver, expected_objective) in [("cbc", 90.0), ("scip", 0.0)] {
+            let reference = self.run_linear_cli_reference_with_args(
+                "mip",
+                solver,
+                &mip_json,
+                &["--time-limit", "5", "--solution-limit", "1"],
+            );
+            if reference.status == "unavailable" && reference.message.contains("not found") {
+                println!("  SKIP  IP/MIP {solver}:cli solution-limit executable not found");
+                continue;
+            }
+            self.check(
+                format!("IP/MIP {solver}:cli solution-limit feasible"),
+                reference.status == "feasible" && reference.solution_limit == Some(1),
+                format!(
+                    "status={} solution_limit={:?} objective={:?} best_bound={:?} message={}",
+                    reference.status,
+                    reference.solution_limit,
+                    reference.objective,
+                    reference.best_bound,
+                    reference.message
+                ),
+            );
+            self.close(
+                &format!("IP/MIP {solver}:cli solution-limit incumbent objective"),
+                expected_objective,
+                reference.objective.unwrap_or(f64::NAN),
+                1e-9,
+            );
+        }
+
+        for solver in ["highs", "scip"] {
+            let reference = self.run_linear_cli_reference_with_args(
+                "mip",
+                solver,
+                &mip_json,
+                &["--time-limit", "5", "--objective-limit", "80"],
+            );
+            if reference.status == "unavailable" && reference.message.contains("not found") {
+                println!("  SKIP  IP/MIP {solver}:cli objective-limit executable not found");
+                continue;
+            }
+            self.check(
+                format!("IP/MIP {solver}:cli objective-limit accepted"),
+                reference.status == "optimal"
+                    && reference
+                        .objective_limit
+                        .is_some_and(|limit| (limit - 80.0).abs() <= 1e-9),
+                format!(
+                    "status={} objective_limit={:?} objective={:?} message={}",
+                    reference.status,
+                    reference.objective_limit,
+                    reference.objective,
+                    reference.message
+                ),
+            );
+            self.close(
+                &format!("IP/MIP {solver}:cli objective-limit objective"),
+                mip_internal.z,
+                reference.objective.unwrap_or(f64::NAN),
+                1e-9,
+            );
+        }
+
+        for solver in ["cbc", "scip"] {
+            let reference = self.run_linear_cli_reference_with_args(
+                "mip",
+                solver,
+                &pool_json,
+                &["--time-limit", "5", "--solution-pool-size", "3"],
+            );
+            if reference.status == "unavailable" && reference.message.contains("not found") {
+                println!("  SKIP  IP/MIP {solver}:cli solution-pool executable not found");
+                continue;
+            }
+            let solutions = reference.solutions.as_deref().unwrap_or(&[]);
+            self.check(
+                format!("IP/MIP {solver}:cli solution-pool metadata"),
+                reference.status == "optimal"
+                    && reference.solution_pool_size == Some(3)
+                    && solutions.len() == expected_pool_x.len()
+                    && reference.exhausted == Some(false),
+                format!(
+                    "status={} pool_size={:?} len={} exhausted={:?} message={}",
+                    reference.status,
+                    reference.solution_pool_size,
+                    solutions.len(),
+                    reference.exhausted,
+                    reference.message
+                ),
+            );
+            for (idx, expected_x) in expected_pool_x.iter().enumerate() {
+                let Some(solution) = solutions.get(idx) else {
+                    continue;
+                };
+                self.close(
+                    &format!("IP/MIP {solver}:cli solution-pool objective[{idx}]"),
+                    expected_pool_objectives[idx],
+                    solution.objective,
+                    1e-9,
+                );
+                self.max_abs_close(
+                    &format!("IP/MIP {solver}:cli solution-pool x[{idx}]"),
+                    expected_x,
+                    &solution.x,
+                    1e-9,
+                );
+            }
+        }
+
+        for solver in ["highs", "scip", "cbc"] {
+            let reference = self.run_linear_cli_reference_with_args(
+                "mip",
+                solver,
+                &mip_json,
+                &[
+                    "--time-limit",
+                    "5",
+                    "--node-limit",
+                    "0",
+                    "--absolute-gap",
+                    "1",
+                ],
+            );
+            if reference.status == "unavailable" && reference.message.contains("not found") {
+                println!("  SKIP  IP/MIP {solver}:cli absolute-gap control executable not found");
+                continue;
+            }
+            let reports_absolute_gap = matches!(solver, "highs" | "scip");
+            self.check(
+                format!("IP/MIP {solver}:cli absolute-gap control"),
+                reference.status == "optimal"
+                    && reference.nodes_explored.is_some()
+                    && (!reports_absolute_gap
+                        || reference.absolute_gap.is_some_and(|gap| gap <= 1e-9)),
+                format!(
+                    "status={} best_bound={:?} objective={:?} absolute_gap={:?} nodes={:?} message={}",
+                    reference.status,
+                    reference.best_bound,
+                    reference.objective,
+                    reference.absolute_gap,
+                    reference.nodes_explored,
+                    reference.message
+                ),
+            );
+        }
+
+        let mip_start_json = "[1,0,0,0]";
+        for solver in ["highs", "scip", "cbc"] {
+            let reference = self.run_linear_cli_reference_with_args(
+                "mip",
+                solver,
+                &mip_json,
+                &[
+                    "--time-limit",
+                    "5",
+                    "--node-limit",
+                    "0",
+                    "--mip-start",
+                    mip_start_json,
+                ],
+            );
+            if reference.status == "unavailable" && reference.message.contains("not found") {
+                println!("  SKIP  IP/MIP {solver}:cli mip-start executable not found");
+                continue;
+            }
+            self.check(
+                format!("IP/MIP {solver}:cli mip-start accepted"),
+                reference.status == "optimal" && reference.mip_start_accepted == Some(true),
+                format!(
+                    "status={} accepted={:?} start_objective={:?} objective={:?} message={}",
+                    reference.status,
+                    reference.mip_start_accepted,
+                    reference.mip_start_objective,
+                    reference.objective,
+                    reference.message
+                ),
+            );
+            self.close(
+                &format!("IP/MIP {solver}:cli mip-start objective"),
+                10.0,
+                reference.mip_start_objective.unwrap_or(f64::NAN),
+                1e-9,
+            );
         }
 
         for solver in ExternalLinearCliSolver::open_source_mip().iter().copied() {
@@ -1776,6 +2622,618 @@ impl Driver {
                     ),
                 );
             }
+        }
+
+        for solver in [
+            ExternalLinearCliSolver::Highs,
+            ExternalLinearCliSolver::Scip,
+            ExternalLinearCliSolver::Cbc,
+        ] {
+            let solver_name = solver.as_str();
+            let reference = solve_ipmip_with_external_cli(
+                &lazy_mip,
+                &ExternalLinearCliOptions {
+                    solver,
+                    ..Default::default()
+                },
+            );
+            if reference.status == ExternalLinearCliStatus::Unavailable
+                && reference.message.contains("not found")
+            {
+                println!(
+                    "  SKIP  IP/MIP {solver_name}:rust-cli lazy constraints executable not found"
+                );
+                continue;
+            }
+            self.check(
+                format!("IP/MIP {solver_name}:rust-cli lazy constraints status"),
+                lazy_internal.status == IPMIPStatus::Optimal
+                    && reference.status == ExternalLinearCliStatus::Optimal,
+                format!(
+                    "internal={} external={} solver={} message={}",
+                    lazy_internal.status.as_str(),
+                    reference.status.as_str(),
+                    reference.solver,
+                    reference.message
+                ),
+            );
+            self.close(
+                &format!("IP/MIP {solver_name}:rust-cli lazy constraints objective"),
+                lazy_internal.z,
+                reference.objective.unwrap_or(f64::NAN),
+                1e-9,
+            );
+            self.check(
+                format!("IP/MIP {solver_name}:rust-cli lazy constraints cut changed optimum"),
+                reference
+                    .objective
+                    .is_some_and(|objective| objective < 2.0 - 1e-9),
+                format!("objective={:?} x={:?}", reference.objective, reference.x),
+            );
+        }
+
+        let glpk_search_reference = solve_ipmip_with_external_cli(
+            &mip,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Glpk,
+                time_limit_secs: Some(5.0),
+                branch_rule: Some(ExternalLinearCliBranchRule::FirstFractional),
+                node_selection: Some(ExternalLinearCliNodeSelection::Dfs),
+                ..Default::default()
+            },
+        );
+        if glpk_search_reference.status == ExternalLinearCliStatus::Unavailable
+            && glpk_search_reference.message.contains("not found")
+        {
+            println!("  SKIP  IP/MIP glpk:rust-cli search controls executable not found");
+        } else {
+            self.check(
+                "IP/MIP glpk:rust-cli search controls",
+                glpk_search_reference.status == ExternalLinearCliStatus::Optimal
+                    && glpk_search_reference.branch_rule.as_deref() == Some("first-fractional")
+                    && glpk_search_reference.node_selection.as_deref() == Some("dfs"),
+                format!(
+                    "status={} branch_rule={:?} node_selection={:?} objective={:?} message={}",
+                    glpk_search_reference.status.as_str(),
+                    glpk_search_reference.branch_rule,
+                    glpk_search_reference.node_selection,
+                    glpk_search_reference.objective,
+                    glpk_search_reference.message
+                ),
+            );
+        }
+        let cbc_search_reference = solve_ipmip_with_external_cli(
+            &mip,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Cbc,
+                time_limit_secs: Some(5.0),
+                max_nodes: Some(0),
+                node_selection: Some(ExternalLinearCliNodeSelection::Dfs),
+                ..Default::default()
+            },
+        );
+        if cbc_search_reference.status == ExternalLinearCliStatus::Unavailable
+            && cbc_search_reference.message.contains("not found")
+        {
+            println!("  SKIP  IP/MIP cbc:rust-cli search controls executable not found");
+        } else {
+            self.check(
+                "IP/MIP cbc:rust-cli search controls",
+                cbc_search_reference.status == ExternalLinearCliStatus::Optimal
+                    && cbc_search_reference.node_selection.as_deref() == Some("dfs"),
+                format!(
+                    "status={} branch_rule={:?} node_selection={:?} objective={:?} message={}",
+                    cbc_search_reference.status.as_str(),
+                    cbc_search_reference.branch_rule,
+                    cbc_search_reference.node_selection,
+                    cbc_search_reference.objective,
+                    cbc_search_reference.message
+                ),
+            );
+        }
+
+        for solver in [ExternalLinearCliSolver::Scip, ExternalLinearCliSolver::Cbc] {
+            let solver_name = solver.as_str();
+            let reference = solve_ipmip_with_external_cli(
+                &mip,
+                &ExternalLinearCliOptions {
+                    solver,
+                    time_limit_secs: Some(5.0),
+                    branch_priorities: Some(vec![0, 10, 0, 0]),
+                    ..Default::default()
+                },
+            );
+            if reference.status == ExternalLinearCliStatus::Unavailable
+                && reference.message.contains("not found")
+            {
+                println!(
+                    "  SKIP  IP/MIP {solver_name}:rust-cli branch-priority control executable not found"
+                );
+                continue;
+            }
+            self.check(
+                format!("IP/MIP {solver_name}:rust-cli branch-priority control"),
+                reference.status == ExternalLinearCliStatus::Optimal
+                    && reference.branch_priorities_accepted == Some(true)
+                    && reference.branch_priority_count == Some(1),
+                format!(
+                    "status={} accepted={:?} count={:?} objective={:?} message={}",
+                    reference.status.as_str(),
+                    reference.branch_priorities_accepted,
+                    reference.branch_priority_count,
+                    reference.objective,
+                    reference.message
+                ),
+            );
+        }
+
+        for solver in [
+            ExternalLinearCliSolver::Highs,
+            ExternalLinearCliSolver::Glpk,
+            ExternalLinearCliSolver::Scip,
+            ExternalLinearCliSolver::Cbc,
+        ] {
+            let solver_name = solver.as_str();
+            let reference = solve_ipmip_with_external_cli(
+                &mip,
+                &ExternalLinearCliOptions {
+                    solver,
+                    time_limit_secs: Some(5.0),
+                    threads: Some(1),
+                    random_seed: Some(7),
+                    presolve: Some(ExternalLinearCliPresolve::Off),
+                    ..Default::default()
+                },
+            );
+            if reference.status == ExternalLinearCliStatus::Unavailable
+                && reference.message.contains("not found")
+            {
+                println!(
+                    "  SKIP  IP/MIP {solver_name}:rust-cli operational controls executable not found"
+                );
+                continue;
+            }
+            let reports_threads = matches!(
+                solver,
+                ExternalLinearCliSolver::Highs
+                    | ExternalLinearCliSolver::Scip
+                    | ExternalLinearCliSolver::Cbc
+            );
+            self.check(
+                format!("IP/MIP {solver_name}:rust-cli operational controls"),
+                reference.status == ExternalLinearCliStatus::Optimal
+                    && (!reports_threads || reference.threads == Some(1))
+                    && reference.random_seed == Some(7)
+                    && reference.presolve.as_deref() == Some("off"),
+                format!(
+                    "status={} threads={:?} random_seed={:?} presolve={:?} objective={:?} message={}",
+                    reference.status.as_str(),
+                    reference.threads,
+                    reference.random_seed,
+                    reference.presolve,
+                    reference.objective,
+                    reference.message
+                ),
+            );
+        }
+
+        for solver in [
+            ExternalLinearCliSolver::Highs,
+            ExternalLinearCliSolver::Scip,
+            ExternalLinearCliSolver::Cbc,
+        ] {
+            let solver_name = solver.as_str();
+            let reference = solve_ipmip_with_external_cli(
+                &mip,
+                &ExternalLinearCliOptions {
+                    solver,
+                    time_limit_secs: Some(5.0),
+                    primal_feasibility_tolerance: Some(mip_primal_tolerance),
+                    dual_feasibility_tolerance: Some(mip_dual_tolerance),
+                    integer_feasibility_tolerance: Some(mip_integer_tolerance),
+                    ..Default::default()
+                },
+            );
+            if reference.status == ExternalLinearCliStatus::Unavailable
+                && reference.message.contains("not found")
+            {
+                println!(
+                    "  SKIP  IP/MIP {solver_name}:rust-cli tolerance controls executable not found"
+                );
+                continue;
+            }
+            let reports_integer = matches!(
+                solver,
+                ExternalLinearCliSolver::Highs | ExternalLinearCliSolver::Cbc
+            );
+            self.check(
+                format!("IP/MIP {solver_name}:rust-cli tolerance controls"),
+                reference.status == ExternalLinearCliStatus::Optimal
+                    && reference
+                        .primal_feasibility_tolerance
+                        .is_some_and(|tol| (tol - mip_primal_tolerance).abs() <= 1e-12)
+                    && reference
+                        .dual_feasibility_tolerance
+                        .is_some_and(|tol| (tol - mip_dual_tolerance).abs() <= 1e-12)
+                    && (!reports_integer
+                        || reference
+                            .integer_feasibility_tolerance
+                            .is_some_and(|tol| (tol - mip_integer_tolerance).abs() <= 1e-12)),
+                format!(
+                    "status={} primal={:?} dual={:?} integer={:?} objective={:?} message={}",
+                    reference.status.as_str(),
+                    reference.primal_feasibility_tolerance,
+                    reference.dual_feasibility_tolerance,
+                    reference.integer_feasibility_tolerance,
+                    reference.objective,
+                    reference.message
+                ),
+            );
+            self.close(
+                &format!("IP/MIP {solver_name}:rust-cli tolerance objective"),
+                mip_internal.z,
+                reference.objective.unwrap_or(f64::NAN),
+                1e-6,
+            );
+        }
+
+        for solver in [ExternalLinearCliSolver::Scip, ExternalLinearCliSolver::Cbc] {
+            let solver_name = solver.as_str();
+            let reference = solve_ipmip_with_external_cli(
+                &mip,
+                &ExternalLinearCliOptions {
+                    solver,
+                    time_limit_secs: Some(5.0),
+                    cuts: Some(ExternalLinearCliMipSwitch::Off),
+                    heuristics: Some(ExternalLinearCliMipSwitch::Off),
+                    ..Default::default()
+                },
+            );
+            if reference.status == ExternalLinearCliStatus::Unavailable
+                && reference.message.contains("not found")
+            {
+                println!(
+                    "  SKIP  IP/MIP {solver_name}:rust-cli strategy controls executable not found"
+                );
+                continue;
+            }
+            self.check(
+                format!("IP/MIP {solver_name}:rust-cli strategy controls"),
+                reference.status == ExternalLinearCliStatus::Optimal
+                    && reference.cuts.as_deref() == Some("off")
+                    && reference.heuristics.as_deref() == Some("off"),
+                format!(
+                    "status={} cuts={:?} heuristics={:?} objective={:?} message={}",
+                    reference.status.as_str(),
+                    reference.cuts,
+                    reference.heuristics,
+                    reference.objective,
+                    reference.message
+                ),
+            );
+        }
+        let glpk_cuts_reference = solve_ipmip_with_external_cli(
+            &mip,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Glpk,
+                time_limit_secs: Some(5.0),
+                cuts: Some(ExternalLinearCliMipSwitch::On),
+                ..Default::default()
+            },
+        );
+        if glpk_cuts_reference.status == ExternalLinearCliStatus::Unavailable
+            && glpk_cuts_reference.message.contains("not found")
+        {
+            println!("  SKIP  IP/MIP glpk:rust-cli cut controls executable not found");
+        } else {
+            self.check(
+                "IP/MIP glpk:rust-cli cut controls",
+                glpk_cuts_reference.status == ExternalLinearCliStatus::Optimal
+                    && glpk_cuts_reference.cuts.as_deref() == Some("on"),
+                format!(
+                    "status={} cuts={:?} objective={:?} message={}",
+                    glpk_cuts_reference.status.as_str(),
+                    glpk_cuts_reference.cuts,
+                    glpk_cuts_reference.objective,
+                    glpk_cuts_reference.message
+                ),
+            );
+        }
+
+        for (solver, expected_objective) in [
+            (ExternalLinearCliSolver::Cbc, 90.0),
+            (ExternalLinearCliSolver::Scip, 0.0),
+        ] {
+            let solver_name = solver.as_str();
+            let reference = solve_ipmip_with_external_cli(
+                &mip,
+                &ExternalLinearCliOptions {
+                    solver,
+                    time_limit_secs: Some(5.0),
+                    solution_limit: Some(1),
+                    ..Default::default()
+                },
+            );
+            if reference.status == ExternalLinearCliStatus::Unavailable
+                && reference.message.contains("not found")
+            {
+                println!(
+                    "  SKIP  IP/MIP {solver_name}:rust-cli solution-limit executable not found"
+                );
+                continue;
+            }
+            self.check(
+                format!("IP/MIP {solver_name}:rust-cli solution-limit feasible"),
+                reference.status == ExternalLinearCliStatus::Feasible
+                    && reference.solution_limit == Some(1),
+                format!(
+                    "status={} solution_limit={:?} objective={:?} best_bound={:?} message={}",
+                    reference.status.as_str(),
+                    reference.solution_limit,
+                    reference.objective,
+                    reference.best_bound,
+                    reference.message
+                ),
+            );
+            self.close(
+                &format!("IP/MIP {solver_name}:rust-cli solution-limit incumbent objective"),
+                expected_objective,
+                reference.objective.unwrap_or(f64::NAN),
+                1e-9,
+            );
+        }
+
+        for solver in [
+            ExternalLinearCliSolver::Highs,
+            ExternalLinearCliSolver::Scip,
+        ] {
+            let solver_name = solver.as_str();
+            let reference = solve_ipmip_with_external_cli(
+                &mip,
+                &ExternalLinearCliOptions {
+                    solver,
+                    time_limit_secs: Some(5.0),
+                    objective_limit: Some(80.0),
+                    ..Default::default()
+                },
+            );
+            if reference.status == ExternalLinearCliStatus::Unavailable
+                && reference.message.contains("not found")
+            {
+                println!(
+                    "  SKIP  IP/MIP {solver_name}:rust-cli objective-limit executable not found"
+                );
+                continue;
+            }
+            self.check(
+                format!("IP/MIP {solver_name}:rust-cli objective-limit accepted"),
+                reference.status == ExternalLinearCliStatus::Optimal
+                    && reference
+                        .objective_limit
+                        .is_some_and(|limit| (limit - 80.0).abs() <= 1e-9),
+                format!(
+                    "status={} objective_limit={:?} objective={:?} message={}",
+                    reference.status.as_str(),
+                    reference.objective_limit,
+                    reference.objective,
+                    reference.message
+                ),
+            );
+            self.close(
+                &format!("IP/MIP {solver_name}:rust-cli objective-limit objective"),
+                mip_internal.z,
+                reference.objective.unwrap_or(f64::NAN),
+                1e-9,
+            );
+        }
+
+        for solver in [ExternalLinearCliSolver::Cbc, ExternalLinearCliSolver::Scip] {
+            let solver_name = solver.as_str();
+            let reference = solve_ipmip_with_external_cli(
+                &pool_mip,
+                &ExternalLinearCliOptions {
+                    solver,
+                    time_limit_secs: Some(5.0),
+                    solution_pool_size: Some(3),
+                    ..Default::default()
+                },
+            );
+            if reference.status == ExternalLinearCliStatus::Unavailable
+                && reference.message.contains("not found")
+            {
+                println!(
+                    "  SKIP  IP/MIP {solver_name}:rust-cli solution-pool executable not found"
+                );
+                continue;
+            }
+            let solutions = reference.solutions.as_deref().unwrap_or(&[]);
+            self.check(
+                format!("IP/MIP {solver_name}:rust-cli solution-pool metadata"),
+                reference.status == ExternalLinearCliStatus::Optimal
+                    && reference.solution_pool_size == Some(3)
+                    && solutions.len() == expected_pool_x.len()
+                    && reference.exhausted == Some(false),
+                format!(
+                    "status={} pool_size={:?} len={} exhausted={:?} message={}",
+                    reference.status.as_str(),
+                    reference.solution_pool_size,
+                    solutions.len(),
+                    reference.exhausted,
+                    reference.message
+                ),
+            );
+            for (idx, expected_x) in expected_pool_x.iter().enumerate() {
+                let Some(solution) = solutions.get(idx) else {
+                    continue;
+                };
+                self.close(
+                    &format!("IP/MIP {solver_name}:rust-cli solution-pool objective[{idx}]"),
+                    expected_pool_objectives[idx],
+                    solution.objective,
+                    1e-9,
+                );
+                self.max_abs_close(
+                    &format!("IP/MIP {solver_name}:rust-cli solution-pool x[{idx}]"),
+                    expected_x,
+                    &solution.x,
+                    1e-9,
+                );
+            }
+        }
+
+        for solver in [
+            ExternalLinearCliSolver::Highs,
+            ExternalLinearCliSolver::Scip,
+            ExternalLinearCliSolver::Cbc,
+        ] {
+            let solver_name = solver.as_str();
+            let reference = solve_ipmip_with_external_cli(
+                &mip,
+                &ExternalLinearCliOptions {
+                    solver,
+                    time_limit_secs: Some(5.0),
+                    max_nodes: Some(0),
+                    absolute_gap: Some(1.0),
+                    ..Default::default()
+                },
+            );
+            if reference.status == ExternalLinearCliStatus::Unavailable
+                && reference.message.contains("not found")
+            {
+                println!(
+                    "  SKIP  IP/MIP {solver_name}:rust-cli absolute-gap control executable not found"
+                );
+                continue;
+            }
+            let reports_absolute_gap = matches!(
+                solver,
+                ExternalLinearCliSolver::Highs | ExternalLinearCliSolver::Scip
+            );
+            self.check(
+                format!("IP/MIP {solver_name}:rust-cli absolute-gap control"),
+                reference.status == ExternalLinearCliStatus::Optimal
+                    && reference.nodes_explored.is_some()
+                    && (!reports_absolute_gap
+                        || reference.absolute_gap.is_some_and(|gap| gap <= 1e-9)),
+                format!(
+                    "status={} best_bound={:?} objective={:?} absolute_gap={:?} nodes={:?} message={}",
+                    reference.status.as_str(),
+                    reference.best_bound,
+                    reference.objective,
+                    reference.absolute_gap,
+                    reference.nodes_explored,
+                    reference.message
+                ),
+            );
+        }
+
+        for solver in [
+            ExternalLinearCliSolver::Highs,
+            ExternalLinearCliSolver::Scip,
+            ExternalLinearCliSolver::Cbc,
+        ] {
+            let solver_name = solver.as_str();
+            let reference = solve_ipmip_with_external_cli(
+                &mip,
+                &ExternalLinearCliOptions {
+                    solver,
+                    time_limit_secs: Some(5.0),
+                    max_nodes: Some(0),
+                    mip_start: Some(vec![1.0, 0.0, 0.0, 0.0]),
+                    ..Default::default()
+                },
+            );
+            if reference.status == ExternalLinearCliStatus::Unavailable
+                && reference.message.contains("not found")
+            {
+                println!("  SKIP  IP/MIP {solver_name}:rust-cli mip-start executable not found");
+                continue;
+            }
+            self.check(
+                format!("IP/MIP {solver_name}:rust-cli mip-start accepted"),
+                reference.status == ExternalLinearCliStatus::Optimal
+                    && reference.mip_start_accepted == Some(true),
+                format!(
+                    "status={} accepted={:?} start_objective={:?} objective={:?} message={}",
+                    reference.status.as_str(),
+                    reference.mip_start_accepted,
+                    reference.mip_start_objective,
+                    reference.objective,
+                    reference.message
+                ),
+            );
+            self.close(
+                &format!("IP/MIP {solver_name}:rust-cli mip-start objective"),
+                10.0,
+                reference.mip_start_objective.unwrap_or(f64::NAN),
+                1e-9,
+            );
+        }
+
+        for solver in [
+            ExternalLinearCliSolver::Highs,
+            ExternalLinearCliSolver::Scip,
+            ExternalLinearCliSolver::Cbc,
+        ] {
+            let solver_name = solver.as_str();
+            let reference = solve_ipmip_with_external_cli(
+                &mip,
+                &ExternalLinearCliOptions {
+                    solver,
+                    time_limit_secs: Some(5.0),
+                    max_nodes: Some(0),
+                    relative_gap: Some(0.25),
+                    ..Default::default()
+                },
+            );
+            if reference.status == ExternalLinearCliStatus::Unavailable
+                && reference.message.contains("not found")
+            {
+                println!(
+                    "  SKIP  IP/MIP {solver_name}:rust-cli node/gap controls executable not found"
+                );
+                continue;
+            }
+            self.check(
+                format!("IP/MIP {solver_name}:rust-cli node/gap controls"),
+                reference.status == ExternalLinearCliStatus::Optimal
+                    && reference.nodes_explored.is_some()
+                    && reference.mip_gap.is_some(),
+                format!(
+                    "status={} best_bound={:?} objective={:?} gap={:?} nodes={:?} message={}",
+                    reference.status.as_str(),
+                    reference.best_bound,
+                    reference.objective,
+                    reference.mip_gap,
+                    reference.nodes_explored,
+                    reference.message
+                ),
+            );
+        }
+        let glpk_gap_reference = solve_ipmip_with_external_cli(
+            &mip,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Glpk,
+                time_limit_secs: Some(5.0),
+                relative_gap: Some(0.25),
+                ..Default::default()
+            },
+        );
+        if glpk_gap_reference.status == ExternalLinearCliStatus::Unavailable
+            && glpk_gap_reference.message.contains("not found")
+        {
+            println!("  SKIP  IP/MIP glpk:rust-cli relative-gap control executable not found");
+        } else {
+            self.check(
+                "IP/MIP glpk:rust-cli relative-gap control",
+                glpk_gap_reference.status == ExternalLinearCliStatus::Optimal,
+                format!(
+                    "status={} objective={:?} message={}",
+                    glpk_gap_reference.status.as_str(),
+                    glpk_gap_reference.objective,
+                    glpk_gap_reference.message
+                ),
+            );
         }
 
         let mip_status_cases = vec![

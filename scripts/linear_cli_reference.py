@@ -101,14 +101,22 @@ def basis_status_from_token(token: object) -> Optional[str]:
     return highs_codes.get(text) or glpk_codes.get(text) or named.get(text)
 
 
-def status_payload(status: str, solver: str, message: str = "") -> dict:
-    return {
+def status_payload(
+    status: str,
+    solver: str,
+    message: str = "",
+    solver_version: Optional[str] = None,
+) -> dict:
+    payload = {
         "status": status,
         "solver": solver,
         "x": [],
         "objective": None,
         "message": message,
     }
+    if solver_version is not None:
+        payload["solverVersion"] = solver_version
+    return payload
 
 
 def var_name(index: int) -> str:
@@ -120,6 +128,208 @@ def finite(value: Optional[float]) -> Optional[float]:
         return None
     value = float(value)
     return value if math.isfinite(value) else None
+
+
+def normalized_node_limit(value: Optional[int]) -> Optional[int]:
+    if value is None:
+        return None
+    return max(0, int(value))
+
+
+def normalized_solution_limit(value: Optional[int]) -> Optional[int]:
+    if value is None:
+        return None
+    return max(1, int(value))
+
+
+def normalized_solution_pool_size(value: Optional[int]) -> Optional[int]:
+    if value is None:
+        return None
+    return max(1, int(value))
+
+
+def normalized_relative_gap(value: Optional[float]) -> Optional[float]:
+    if value is None:
+        return None
+    value = float(value)
+    return value if math.isfinite(value) and value >= 0.0 else None
+
+
+def normalized_absolute_gap(value: Optional[float]) -> Optional[float]:
+    if value is None:
+        return None
+    value = float(value)
+    return value if math.isfinite(value) and value >= 0.0 else None
+
+
+def normalized_objective_limit(value: Optional[float]) -> Optional[float]:
+    if value is None:
+        return None
+    value = float(value)
+    return value if math.isfinite(value) else None
+
+
+def normalized_tolerance(value: Optional[float]) -> Optional[float]:
+    if value is None:
+        return None
+    value = float(value)
+    return value if math.isfinite(value) and value > 0.0 else None
+
+
+def normalized_threads(value: Optional[int]) -> Optional[int]:
+    if value is None:
+        return None
+    return max(1, int(value))
+
+
+def normalized_random_seed(value: Optional[int]) -> Optional[int]:
+    if value is None:
+        return None
+    return max(0, int(value))
+
+
+def normalized_presolve(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    aliases = {
+        "auto": "auto",
+        "default": "auto",
+        "choose": "auto",
+        "on": "on",
+        "true": "on",
+        "1": "on",
+        "off": "off",
+        "false": "off",
+        "0": "off",
+    }
+    normalized = aliases.get(value.strip().lower())
+    if normalized is None:
+        raise ValueError(f"unknown presolve setting '{value}'")
+    return normalized
+
+
+def normalized_mip_switch(value: Optional[str], name: str) -> Optional[str]:
+    if value is None:
+        return None
+    aliases = {
+        "auto": "auto",
+        "default": "auto",
+        "on": "on",
+        "true": "on",
+        "1": "on",
+        "off": "off",
+        "false": "off",
+        "0": "off",
+    }
+    normalized = aliases.get(value.strip().lower())
+    if normalized is None:
+        raise ValueError(f"unknown {name} setting '{value}'")
+    return normalized
+
+
+def normalized_lp_algorithm(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    aliases = {
+        "simplex": "simplex",
+        "dual-simplex": "simplex",
+        "primal-simplex": "simplex",
+        "ipm": "ipm",
+        "interior": "ipm",
+        "interior-point": "ipm",
+        "barrier": "ipm",
+    }
+    normalized = aliases.get(value.strip().lower())
+    if normalized is None:
+        raise ValueError(f"unknown lp_algorithm '{value}'")
+    return normalized
+
+
+def normalized_branch_rule(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    aliases = {
+        "first": "first-fractional",
+        "first-fractional": "first-fractional",
+        "most": "most-fractional",
+        "most-fractional": "most-fractional",
+    }
+    normalized = aliases.get(value.strip().lower())
+    if normalized is None:
+        raise ValueError(f"unknown branch_rule '{value}'")
+    return normalized
+
+
+def normalized_branch_priorities(value: Optional[Sequence[int]], n: int) -> Optional[list[int]]:
+    if value is None:
+        return None
+    if len(value) != n:
+        raise ValueError(
+            f"branch_priorities length {len(value)} does not match variable count {n}"
+        )
+    return [int(v) for v in value]
+
+
+def normalized_node_selection(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    aliases = {
+        "dfs": "dfs",
+        "depth": "dfs",
+        "best-bound": "best-bound",
+        "best_bound": "best-bound",
+        "bestb": "best-bound",
+    }
+    normalized = aliases.get(value.strip().lower())
+    if normalized is None:
+        raise ValueError(f"unknown node_selection '{value}'")
+    return normalized
+
+
+def normalized_mip_start(value: Optional[Sequence[float]], n: int) -> Optional[list[float]]:
+    if value is None:
+        return None
+    if len(value) != n:
+        raise ValueError(f"mip_start length {len(value)} does not match variable count {n}")
+    start = [float(v) for v in value]
+    if any(not math.isfinite(v) for v in start):
+        raise ValueError("mip_start values must be finite")
+    return start
+
+
+def parse_mip_start_arg(text: Optional[str]) -> Optional[list[float]]:
+    if text is None:
+        return None
+    stripped = text.strip()
+    if not stripped:
+        return None
+    if stripped[0] == "[":
+        value = json.loads(stripped)
+        if not isinstance(value, list):
+            raise ValueError("--mip-start JSON must be a list")
+        return [float(v) for v in value]
+    return [float(part.strip()) for part in stripped.split(",") if part.strip()]
+
+
+def parse_int_list_arg(text: Optional[str], name: str) -> Optional[list[int]]:
+    if text is None:
+        return None
+    stripped = text.strip()
+    if not stripped:
+        return None
+    if stripped[0] == "[":
+        value = json.loads(stripped)
+        if not isinstance(value, list):
+            raise ValueError(f"--{name} JSON must be a list")
+        return [int(v) for v in value]
+    return [int(part.strip()) for part in stripped.split(",") if part.strip()]
+
+
+def payload_solution(x: Sequence[float], objective: float) -> dict:
+    return {
+        "x": [float(value) for value in x],
+        "objective": float(objective),
+    }
 
 
 def term_expr(coefs: Sequence[float], names: Sequence[str]) -> str:
@@ -144,6 +354,13 @@ def normalize_mip(raw: dict) -> tuple[str, list[float], list[list[float]], list[
     n = len(c)
     rows = [[float(v) for v in row] for row in p.get("a", [])]
     rhs = [float(v) for v in p.get("b", [])]
+    lazy_constraints = p.get("lazy_constraints") or p.get("lazyConstraints") or []
+    for idx, constraint in enumerate(lazy_constraints):
+        row = [float(v) for v in constraint["coefs"]]
+        if len(row) != n:
+            raise ValueError(f"lazy constraint {idx} coefficient length does not match variable count")
+        rows.append(row)
+        rhs.append(float(constraint["rhs"]))
     if len(rows) != len(rhs):
         raise ValueError("MIP row/RHS length mismatch")
     for row in rows:
@@ -157,6 +374,131 @@ def normalize_mip(raw: dict) -> tuple[str, list[float], list[list[float]], list[
     if len(lbs) != n or len(ubs) != n or len(ints) != n:
         raise ValueError("MIP bound/integrality vector length mismatch")
     return p.get("sense", "max"), c, rows, rhs, lbs, ubs, ints
+
+
+def plain_mip_payload(
+    sense: str,
+    c: Sequence[float],
+    rows: Sequence[Sequence[float]],
+    rhs: Sequence[float],
+    lbs: Sequence[Optional[float]],
+    ubs: Sequence[Optional[float]],
+    integer_vars: Sequence[bool],
+) -> dict:
+    return {
+        "sense": sense,
+        "c": [float(value) for value in c],
+        "a": [[float(value) for value in row] for row in rows],
+        "b": [float(value) for value in rhs],
+        "lb": [None if value is None else float(value) for value in lbs],
+        "ub": [None if value is None else float(value) for value in ubs],
+        "integer_vars": [bool(value) for value in integer_vars],
+    }
+
+
+def solution_pool_integer_indices(integer_vars: Sequence[bool]) -> list[int]:
+    return [idx for idx, is_integer in enumerate(integer_vars) if is_integer]
+
+
+def validate_solution_pool_bounds(
+    lbs: Sequence[Optional[float]],
+    ubs: Sequence[Optional[float]],
+    integer_indices: Sequence[int],
+) -> Optional[str]:
+    if not integer_indices:
+        return "solution pool requires at least one integer variable"
+    for idx in integer_indices:
+        lb = 0.0 if lbs[idx] is None else float(lbs[idx])
+        ub = ubs[idx]
+        if ub is None or not math.isfinite(float(ub)):
+            return f"solution pool requires finite upper bound for integer variable x{idx}"
+        if not math.isfinite(lb):
+            return f"solution pool requires finite lower bound for integer variable x{idx}"
+        if abs(lb - round(lb)) > 1e-9 or abs(float(ub) - round(float(ub))) > 1e-9:
+            return f"solution pool requires integral bounds for integer variable x{idx}"
+    return None
+
+
+def solution_pool_assignment_key(
+    x: Sequence[float],
+    integer_indices: Sequence[int],
+) -> tuple[int, ...]:
+    return tuple(int(round(float(x[idx]))) for idx in integer_indices)
+
+
+def add_solution_pool_no_good_cut(
+    working: dict,
+    integer_indices: Sequence[int],
+    assignment: Sequence[float],
+) -> Optional[str]:
+    c = [float(value) for value in working["c"]]
+    rows = [[float(value) for value in row] for row in working.get("a", [])]
+    rhs = [float(value) for value in working.get("b", [])]
+    lbs = [0.0 if value is None else float(value) for value in working.get("lb", [])]
+    ubs = [None if value is None else float(value) for value in working.get("ub", [])]
+    integer_vars = [bool(value) for value in working.get("integer_vars", [])]
+    n = len(c)
+    if len(lbs) != n or len(ubs) != n or len(integer_vars) != n:
+        return "solution pool no-good cut saw inconsistent working model dimensions"
+
+    deviation_vars: list[int] = []
+    for idx in integer_indices:
+        if idx >= len(assignment):
+            return f"solution pool assignment is missing integer variable x{idx}"
+        value = round(float(assignment[idx]))
+        lb = lbs[idx]
+        ub = ubs[idx]
+        if ub is None:
+            return f"solution pool requires finite upper bound for integer variable x{idx}"
+        if value < lb - 1e-9 or value > ub + 1e-9:
+            return f"solution pool assignment for x{idx} is outside its bounds"
+
+        if value > lb + 1e-9:
+            deviation = len(c)
+            c.append(0.0)
+            lbs.append(0.0)
+            ubs.append(1.0)
+            integer_vars.append(True)
+            for row in rows:
+                row.append(0.0)
+            row = [0.0] * len(c)
+            row[idx] = 1.0
+            row[deviation] = float(ub - value + 1.0)
+            rows.append(row)
+            rhs.append(float(ub))
+            deviation_vars.append(deviation)
+
+        if value < ub - 1e-9:
+            deviation = len(c)
+            c.append(0.0)
+            lbs.append(0.0)
+            ubs.append(1.0)
+            integer_vars.append(True)
+            for row in rows:
+                row.append(0.0)
+            row = [0.0] * len(c)
+            row[idx] = -1.0
+            row[deviation] = float(value + 1.0 - lb)
+            rows.append(row)
+            rhs.append(float(-lb))
+            deviation_vars.append(deviation)
+
+    if not deviation_vars:
+        return "solution pool could not create a no-good cut for a singleton integer domain"
+
+    row = [0.0] * len(c)
+    for deviation in deviation_vars:
+        row[deviation] = -1.0
+    rows.append(row)
+    rhs.append(-1.0)
+
+    working["c"] = c
+    working["a"] = rows
+    working["b"] = rhs
+    working["lb"] = lbs
+    working["ub"] = ubs
+    working["integer_vars"] = integer_vars
+    return None
 
 
 def write_cplex_lp(
@@ -734,6 +1076,60 @@ def stripped_starts(text: str, prefixes: Sequence[str]) -> bool:
     return any(stripped.startswith(prefix) for prefix in prefixes)
 
 
+def parse_solver_version(solver: str, stdout: str, stderr: str) -> Optional[str]:
+    text = f"{stdout}\n{stderr}"
+    patterns = {
+        "highs": [
+            (r"\bRunning HiGHS\s+([0-9][^\s,]*)", "HiGHS"),
+            (r"\bHiGHS version\s+([0-9][^\s,]*)", "HiGHS"),
+        ],
+        "glpk": [(r"GLPSOL--GLPK LP/MIP Solver\s+([0-9][^\s,]*)", "GLPK")],
+        "scip": [(r"\bSCIP version\s+([0-9][^\s\[]*)", "SCIP")],
+        "cbc": [(r"\bVersion:\s+([0-9][^\s,]*)", "CBC")],
+        "clp": [(r"\bCoin LP version\s+([0-9][^\s,]*)", "CLP")],
+        "gurobi": [(r"\bGurobi Optimizer version\s+([0-9][^\s,]*)", "Gurobi")],
+        "cplex": [(r"\b(?:IBM ILOG )?CPLEX(?: Optimizer)?(?: Interactive Optimizer)?\s+([0-9][^\s,]*)", "CPLEX")],
+        "xpress": [(r"\bXpress(?: Optimizer)?\s+([0-9][^\s,]*)", "Xpress")],
+        "lindo": [(r"\bLINDO(?: API| Optimizer)?\s+([0-9][^\s,]*)", "LINDO")],
+    }
+    for pattern, label in patterns.get(solver, []):
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match is not None:
+            return f"{label} {match.group(1)}"
+    return None
+
+
+def probe_solver_version(solver: str) -> Optional[str]:
+    command = solver_command(solver)
+    if command is None:
+        return None
+    version_args = {
+        "highs": ["--version"],
+        "glpk": ["--version"],
+        "scip": ["--version"],
+        "cbc": ["-version"],
+        "clp": ["-version"],
+        "gurobi": ["--version"],
+    }.get(solver)
+    if version_args is None:
+        return None
+    try:
+        run = subprocess.run(
+            [command, *version_args],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=3.0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return parse_solver_version(solver, run.stdout, run.stderr)
+
+
+def solver_version_from_output(solver: str, stdout: str, stderr: str) -> Optional[str]:
+    return parse_solver_version(solver, stdout, stderr) or probe_solver_version(solver)
+
+
 def classify_status(status: str, stdout: str, stderr: str) -> str:
     parsed = status.lower()
     if "primal infeasible" in parsed or ("infeasible" in parsed and "dual" not in parsed):
@@ -742,6 +1138,8 @@ def classify_status(status: str, stdout: str, stderr: str) -> str:
         return "unbounded"
     if "optimal" in parsed:
         return "optimal"
+    if "feasible" in parsed or "solution limit" in parsed:
+        return "feasible"
 
     text = f"{stdout}\n{stderr}".lower()
     infeasible_markers = (
@@ -763,6 +1161,16 @@ def classify_status(status: str, stdout: str, stderr: str) -> str:
     )
     if any(marker in text for marker in unbounded_markers):
         return "unbounded"
+    feasible_markers = (
+        "stopped on solution limit",
+        "solution limit reached",
+        "exiting on maximum solutions",
+        "partial search - best objective",
+        "integer solution of",
+        "feasibility pump exiting with objective",
+    )
+    if any(marker in text for marker in feasible_markers):
+        return "feasible"
     return "unknown"
 
 
@@ -827,6 +1235,7 @@ def parse_mip_quality(
 
     best_bound = None
     mip_gap = None
+    absolute_gap = None
     nodes_explored = None
 
     if solver == "highs":
@@ -874,12 +1283,419 @@ def parse_mip_quality(
 
     if best_bound is not None and math.isfinite(best_bound):
         fields["bestBound"] = best_bound
+    if best_bound is not None and objective is not None:
+        absolute_gap = abs(best_bound - objective)
+    if absolute_gap is not None and math.isfinite(absolute_gap):
+        fields["absoluteGap"] = max(0.0, absolute_gap)
     if mip_gap is None and best_bound is not None and objective is not None:
         mip_gap = abs(best_bound - objective) / max(1.0, abs(objective))
     if mip_gap is not None and math.isfinite(mip_gap):
         fields["mipGap"] = max(0.0, mip_gap)
     if nodes_explored is not None and nodes_explored >= 0:
         fields["nodesExplored"] = nodes_explored
+    return fields
+
+
+def write_highs_mip_start(path: str, start: Sequence[float], objective: float) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("Model status\n")
+        f.write("Unknown\n\n")
+        f.write("# Primal solution values\n")
+        f.write("Feasible\n")
+        f.write(f"Objective {objective:.17g}\n")
+        f.write(f"# Columns {len(start)}\n")
+        for idx, value in enumerate(start):
+            f.write(f"{var_name(idx)} {float(value):.17g}\n")
+        f.write("# Rows 0\n\n")
+        f.write("# Dual solution values\n")
+        f.write("None\n\n")
+        f.write("# Basis\n")
+        f.write("HiGHS_basis_file v2\n")
+        f.write("None\n")
+
+
+def write_scip_mip_start(path: str, start: Sequence[float], objective: float) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("solution status: feasible\n")
+        f.write(f"objective value: {objective:.17g}\n")
+        for idx, value in enumerate(start):
+            f.write(f"{var_name(idx)} {float(value):.17g}\n")
+
+
+def write_cbc_mip_start(path: str, start: Sequence[float]) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        for idx, value in enumerate(start):
+            f.write(f"{idx} {var_name(idx)} {float(value):.17g}\n")
+
+
+def active_branch_priorities(
+    branch_priorities: Optional[Sequence[int]],
+    integer_vars: Optional[Sequence[bool]],
+) -> list[tuple[int, int]]:
+    if branch_priorities is None:
+        return []
+    active: list[tuple[int, int]] = []
+    for idx, priority in enumerate(branch_priorities):
+        if priority == 0:
+            continue
+        if integer_vars is not None and idx < len(integer_vars) and not integer_vars[idx]:
+            continue
+        active.append((idx, int(priority)))
+    return active
+
+
+def write_cbc_branch_priorities(
+    path: str,
+    branch_priorities: Sequence[int],
+    integer_vars: Optional[Sequence[bool]],
+) -> int:
+    active = active_branch_priorities(branch_priorities, integer_vars)
+    if not active:
+        return 0
+    highest = max(priority for _, priority in active)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("name,priority\n")
+        for idx, priority in active:
+            # CBC treats lower numeric priority as more important. The bridge
+            # API follows the native DES convention: larger is more important.
+            cbc_priority = highest - priority + 1
+            f.write(f"{var_name(idx)},{int(cbc_priority)}\n")
+    return len(active)
+
+
+def mip_start_infeasibility_values(text: str) -> list[float]:
+    values: list[float] = []
+    for line in text.splitlines():
+        if "infeasibilities" not in line.lower():
+            continue
+        numbers = re.findall(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?", line)
+        if numbers:
+            values.append(float(numbers[0]))
+    return values
+
+
+def parse_mip_start_feedback(
+    solver: str,
+    kind: str,
+    mip_start: Optional[Sequence[float]],
+    start_objective: Optional[float],
+    stdout: str,
+    stderr: str,
+) -> dict:
+    if kind != "mip" or mip_start is None:
+        return {}
+    text = f"{stdout}\n{stderr}"
+    lowered = text.lower()
+    accepted = False
+
+    if solver == "highs" and "assessing feasibility of mip" in lowered:
+        infeasibilities = mip_start_infeasibility_values(text)
+        accepted = len(infeasibilities) >= 3 and all(
+            abs(value) <= 1e-9 for value in infeasibilities[:3]
+        )
+    elif solver == "scip":
+        accepted = "accepted as candidate" in lowered or "solution candidate storage" in lowered
+    elif solver == "cbc":
+        accepted = (
+            "mipstart values read" in lowered
+            and ("mipstart provided solution" in lowered or "integer solution" in lowered)
+        )
+
+    fields = {"mipStartAccepted": accepted}
+    if start_objective is not None and math.isfinite(start_objective):
+        fields["mipStartObjective"] = start_objective
+    return fields
+
+
+def parse_search_control_feedback(
+    solver: str,
+    kind: str,
+    branch_rule: Optional[str],
+    node_selection: Optional[str],
+    stdout: str,
+    stderr: str,
+) -> dict:
+    if kind != "mip":
+        return {}
+    text = f"{stdout}\n{stderr}"
+    fields = {}
+
+    if branch_rule is not None and solver == "glpk":
+        flag = "--first" if branch_rule == "first-fractional" else "--mostf"
+        if flag in text:
+            fields["branchRule"] = branch_rule
+
+    if node_selection is not None:
+        if solver == "glpk":
+            flag = "--dfs" if node_selection == "dfs" else "--bestb"
+            if flag in text:
+                fields["nodeSelection"] = node_selection
+        elif solver == "cbc":
+            cbc_name = "depth" if node_selection == "dfs" else "fewest"
+            if f"-nodeStrategy {cbc_name}" in text or f"to {cbc_name}" in text:
+                fields["nodeSelection"] = node_selection
+
+    return fields
+
+
+def parse_branch_priority_feedback(
+    solver: str,
+    kind: str,
+    branch_priorities: Optional[Sequence[int]],
+    integer_vars: Optional[Sequence[bool]],
+    stdout: str,
+    stderr: str,
+) -> dict:
+    if kind != "mip":
+        return {}
+    active_count = len(active_branch_priorities(branch_priorities, integer_vars))
+    if active_count == 0:
+        return {}
+    text = f"{stdout}\n{stderr}".lower()
+    if solver == "cbc" and "priorityin" in text:
+        return {
+            "branchPrioritiesAccepted": True,
+            "branchPriorityCount": active_count,
+        }
+    if solver == "scip" and "branching priority of variable" in text:
+        return {
+            "branchPrioritiesAccepted": True,
+            "branchPriorityCount": active_count,
+        }
+    if solver in {"gurobi", "cplex", "xpress"}:
+        return {
+            "branchPrioritiesAccepted": True,
+            "branchPriorityCount": active_count,
+        }
+    return {}
+
+
+def parse_operational_control_feedback(
+    solver: str,
+    kind: str,
+    threads: Optional[int],
+    random_seed: Optional[int],
+    presolve: Optional[str],
+    stdout: str,
+    stderr: str,
+) -> dict:
+    text = f"{stdout}\n{stderr}"
+    lowered = text.lower()
+    fields: dict[str, object] = {}
+
+    if threads is not None:
+        if solver == "highs" and f"set option threads to {threads}" in lowered:
+            fields["threads"] = threads
+        elif solver == "scip" and f"parallel/maxnthreads = {threads}" in text:
+            fields["threads"] = threads
+        elif solver == "cbc" and (
+            f"threads was changed" in lowered or f"-threads {threads}" in text
+        ):
+            fields["threads"] = threads
+        elif solver in {"gurobi", "cplex", "xpress"}:
+            fields["threads"] = threads
+
+    if random_seed is not None:
+        if solver == "highs" and f"set option random_seed to {random_seed}" in lowered:
+            fields["randomSeed"] = random_seed
+        elif solver == "glpk" and f"--seed {random_seed}" in text:
+            fields["randomSeed"] = random_seed
+        elif solver == "scip" and f"randomization/randomseedshift = {random_seed}" in text:
+            fields["randomSeed"] = random_seed
+        elif solver == "cbc" and (
+            f"randomseed was changed" in lowered
+            or f"randomcbcseed was changed" in lowered
+            or f"-randomS {random_seed}" in text
+        ):
+            fields["randomSeed"] = random_seed
+        elif solver in {"gurobi", "cplex", "xpress"}:
+            fields["randomSeed"] = random_seed
+
+    if presolve is not None:
+        highs_presolve = "choose" if presolve == "auto" else presolve
+        if solver == "highs" and f"set option presolve to \"{highs_presolve}\"" in lowered:
+            fields["presolve"] = presolve
+        elif solver == "glpk":
+            if kind == "mip" and (
+                (presolve == "off" and "--nointopt" in text)
+                or (presolve == "on" and "--intopt" in text)
+            ):
+                fields["presolve"] = presolve
+            elif kind == "lp" and (
+                (presolve == "off" and "--nopresol" in text)
+                or (presolve == "on" and "--presol" in text)
+            ):
+                fields["presolve"] = presolve
+        elif solver == "scip" and (
+            (presolve == "off" and "presolving/maxrounds = 0" in text)
+            or (presolve == "on" and "presolving/maxrounds = -1" in text)
+        ):
+            fields["presolve"] = presolve
+        elif solver == "cbc" and (
+            (presolve == "off" and "changed from" in lowered and "to off" in lowered)
+            or (presolve == "on" and ("to on" in lowered or "-presolve on" in text))
+        ):
+            fields["presolve"] = presolve
+        elif solver == "clp" and (
+            (presolve == "off" and "-presolve off" in text)
+            or (presolve == "on" and "-presolve on" in text)
+        ):
+            fields["presolve"] = presolve
+        elif solver in {"gurobi", "cplex", "xpress"}:
+            fields["presolve"] = presolve
+
+    return fields
+
+
+def parse_lp_algorithm_feedback(
+    solver: str,
+    kind: str,
+    lp_algorithm: Optional[str],
+    stdout: str,
+    stderr: str,
+) -> dict:
+    if kind != "lp" or lp_algorithm is None:
+        return {}
+    text = f"{stdout}\n{stderr}"
+    lowered = text.lower()
+
+    if solver == "highs":
+        if f"set option solver to \"{lp_algorithm}\"" in lowered:
+            return {"lpAlgorithm": lp_algorithm}
+    elif solver == "glpk":
+        flag = "--simplex" if lp_algorithm == "simplex" else "--interior"
+        if flag in text:
+            return {"lpAlgorithm": lp_algorithm}
+
+    return {}
+
+
+def parse_mip_strategy_feedback(
+    solver: str,
+    kind: str,
+    cuts: Optional[str],
+    heuristics: Optional[str],
+    stdout: str,
+    stderr: str,
+) -> dict:
+    if kind != "mip":
+        return {}
+    text = f"{stdout}\n{stderr}"
+    lowered = text.lower()
+    fields: dict[str, object] = {}
+
+    if cuts is not None:
+        if solver == "cbc" and (
+            f"-cuts {cuts}" in text
+            or (
+                "option for cutsonoff changed" in lowered
+                and f"to {cuts}" in lowered
+            )
+        ):
+            fields["cuts"] = cuts
+        elif solver == "scip" and (
+            (cuts == "off" and "separating/maxrounds = 0" in text and "separating/maxroundsroot = 0" in text)
+            or (cuts == "on" and "separating/maxrounds = -1" in text and "separating/maxroundsroot = -1" in text)
+        ):
+            fields["cuts"] = cuts
+        elif solver == "glpk" and cuts == "on" and "--cuts" in text:
+            fields["cuts"] = cuts
+
+    if heuristics is not None:
+        if solver == "cbc" and (
+            f"-heuristicsOnOff {heuristics}" in text
+            or (
+                "option for heuristicsonoff changed" in lowered
+                and f"to {heuristics}" in lowered
+            )
+        ):
+            fields["heuristics"] = heuristics
+        elif solver == "scip" and heuristics == "off" and "heuristics/feaspump/freq = -1" in text:
+            fields["heuristics"] = heuristics
+
+    return fields
+
+
+def parse_solution_limit_feedback(
+    solver: str,
+    kind: str,
+    solution_limit: Optional[int],
+    stdout: str,
+    stderr: str,
+) -> dict:
+    if kind != "mip" or solution_limit is None:
+        return {}
+    text = f"{stdout}\n{stderr}"
+    lowered = text.lower()
+    if solver == "cbc" and (
+        f"-maxSolutions {solution_limit}" in text
+        or f"maxsolutions was changed" in lowered
+    ):
+        return {"solutionLimit": solution_limit}
+    if solver == "scip" and f"limits/solutions = {solution_limit}" in text:
+        return {"solutionLimit": solution_limit}
+    if solver in {"gurobi", "cplex", "xpress"}:
+        return {"solutionLimit": solution_limit}
+    return {}
+
+
+def parse_objective_limit_feedback(
+    solver: str,
+    kind: str,
+    objective_limit: Optional[float],
+    stdout: str,
+    stderr: str,
+) -> dict:
+    if kind != "mip" or objective_limit is None:
+        return {}
+    text = f"{stdout}\n{stderr}"
+    lowered = text.lower()
+    if solver == "highs" and "set option objective_target to" in lowered:
+        return {"objectiveLimit": objective_limit}
+    if solver == "scip" and f"limits/primal = {objective_limit:.12g}" in text:
+        return {"objectiveLimit": objective_limit}
+    if solver == "gurobi":
+        return {"objectiveLimit": objective_limit}
+    return {}
+
+
+def parse_tolerance_feedback(
+    solver: str,
+    kind: str,
+    primal_feasibility_tolerance: Optional[float],
+    dual_feasibility_tolerance: Optional[float],
+    integer_feasibility_tolerance: Optional[float],
+    stdout: str,
+    stderr: str,
+) -> dict:
+    _ = stdout, stderr
+    fields: dict[str, object] = {}
+    if primal_feasibility_tolerance is not None and solver in {
+        "highs",
+        "scip",
+        "cbc",
+        "clp",
+        "gurobi",
+        "cplex",
+        "xpress",
+    }:
+        fields["primalFeasibilityTolerance"] = primal_feasibility_tolerance
+    if dual_feasibility_tolerance is not None and solver in {
+        "highs",
+        "scip",
+        "cbc",
+        "clp",
+        "gurobi",
+        "cplex",
+        "xpress",
+    }:
+        fields["dualFeasibilityTolerance"] = dual_feasibility_tolerance
+    if (
+        kind == "mip"
+        and integer_feasibility_tolerance is not None
+        and solver in {"highs", "cbc", "gurobi", "cplex", "xpress"}
+    ):
+        fields["integerFeasibilityTolerance"] = integer_feasibility_tolerance
     return fields
 
 
@@ -913,20 +1729,74 @@ def run_solver(
     solution_path: str,
     time_limit: float,
     node_limit: Optional[int] = None,
+    solution_limit: Optional[int] = None,
     relative_gap: Optional[float] = None,
+    absolute_gap: Optional[float] = None,
+    objective_limit: Optional[float] = None,
+    primal_feasibility_tolerance: Optional[float] = None,
+    dual_feasibility_tolerance: Optional[float] = None,
+    integer_feasibility_tolerance: Optional[float] = None,
+    lp_algorithm: Optional[str] = None,
+    threads: Optional[int] = None,
+    random_seed: Optional[int] = None,
+    presolve: Optional[str] = None,
+    cuts: Optional[str] = None,
+    heuristics: Optional[str] = None,
+    branch_rule: Optional[str] = None,
+    branch_priorities: Optional[Sequence[int]] = None,
+    node_selection: Optional[str] = None,
+    mip_start: Optional[Sequence[float]] = None,
+    mip_start_objective: Optional[float] = None,
+    integer_vars: Optional[Sequence[bool]] = None,
 ) -> tuple[str, str]:
     command = solver_command(solver)
     if command is None:
         raise ValueError(f"{solver} executable not found")
     if solver == "highs":
+        start_path = None
+        if kind == "mip" and mip_start is not None and mip_start_objective is not None:
+            start_path = solution_path + ".start.sol"
+            write_highs_mip_start(start_path, mip_start, mip_start_objective)
         options_path = None
-        if kind == "mip" and (node_limit is not None or relative_gap is not None):
+        if (
+            threads is not None
+            or primal_feasibility_tolerance is not None
+            or dual_feasibility_tolerance is not None
+            or (
+                kind == "mip"
+                and (
+                    node_limit is not None
+                    or relative_gap is not None
+                    or absolute_gap is not None
+                    or objective_limit is not None
+                    or integer_feasibility_tolerance is not None
+                )
+            )
+        ):
             options_path = solution_path + ".options"
             with open(options_path, "w", encoding="utf-8") as f:
-                if node_limit is not None:
+                if threads is not None:
+                    f.write(f"threads = {int(threads)}\n")
+                if primal_feasibility_tolerance is not None:
+                    f.write(
+                        f"primal_feasibility_tolerance = {float(primal_feasibility_tolerance):.17g}\n"
+                    )
+                if dual_feasibility_tolerance is not None:
+                    f.write(
+                        f"dual_feasibility_tolerance = {float(dual_feasibility_tolerance):.17g}\n"
+                    )
+                if kind == "mip" and node_limit is not None:
                     f.write(f"mip_max_nodes = {int(node_limit)}\n")
-                if relative_gap is not None:
+                if kind == "mip" and relative_gap is not None:
                     f.write(f"mip_rel_gap = {float(relative_gap):.17g}\n")
+                if kind == "mip" and absolute_gap is not None:
+                    f.write(f"mip_abs_gap = {float(absolute_gap):.17g}\n")
+                if kind == "mip" and objective_limit is not None:
+                    f.write(f"objective_target = {float(objective_limit):.17g}\n")
+                if kind == "mip" and integer_feasibility_tolerance is not None:
+                    f.write(
+                        f"mip_feasibility_tolerance = {float(integer_feasibility_tolerance):.17g}\n"
+                    )
         cmd = [
             command,
             "--model_file",
@@ -936,8 +1806,16 @@ def run_solver(
             "--time_limit",
             str(time_limit),
         ]
+        if start_path is not None:
+            cmd.extend(["--read_solution_file", start_path])
         if options_path is not None:
             cmd.extend(["--options_file", options_path])
+        if kind == "lp" and lp_algorithm is not None:
+            cmd.extend(["--solver", lp_algorithm])
+        if random_seed is not None:
+            cmd.extend(["--random_seed", str(int(random_seed))])
+        if presolve is not None:
+            cmd.extend(["--presolve", "choose" if presolve == "auto" else presolve])
     elif solver == "glpk":
         if kind == "lp":
             cmd = [
@@ -951,6 +1829,14 @@ def run_solver(
                 "--tmlim",
                 str(max(1, int(math.ceil(time_limit)))),
             ]
+            if presolve == "off":
+                cmd.append("--nopresol")
+            elif presolve == "on":
+                cmd.append("--presol")
+            if lp_algorithm == "simplex":
+                cmd.append("--simplex")
+            elif lp_algorithm == "ipm":
+                cmd.append("--interior")
         else:
             cmd = [
                 command,
@@ -961,20 +1847,102 @@ def run_solver(
                 "--tmlim",
                 str(max(1, int(math.ceil(time_limit)))),
             ]
+            if presolve == "off":
+                cmd.append("--nointopt")
+            elif presolve == "on":
+                cmd.append("--intopt")
+            if branch_rule == "first-fractional":
+                cmd.append("--first")
+            elif branch_rule == "most-fractional":
+                cmd.append("--mostf")
+            if node_selection == "dfs":
+                cmd.append("--dfs")
+            elif node_selection == "best-bound":
+                cmd.append("--bestb")
             if relative_gap is not None:
                 cmd.extend(["--mipgap", f"{float(relative_gap):.17g}"])
+            if cuts == "on":
+                cmd.append("--cuts")
+        if random_seed is not None:
+            cmd.extend(["--seed", str(int(random_seed))])
     elif solver == "scip":
         cmd = [command]
+        if presolve == "off":
+            cmd.extend(["-c", "set presolving maxrounds 0"])
+        elif presolve == "on":
+            cmd.extend(["-c", "set presolving maxrounds -1"])
+        if random_seed is not None:
+            cmd.extend(["-c", f"set randomization randomseedshift {int(random_seed)}"])
+        if threads is not None:
+            cmd.extend(["-c", f"set parallel maxnthreads {int(threads)}"])
+        if primal_feasibility_tolerance is not None:
+            cmd.extend([
+                "-c",
+                f"set numerics feastol {float(primal_feasibility_tolerance):.17g}",
+            ])
+        if dual_feasibility_tolerance is not None:
+            cmd.extend([
+                "-c",
+                f"set numerics dualfeastol {float(dual_feasibility_tolerance):.17g}",
+            ])
+        if kind == "mip":
+            if cuts == "off":
+                cmd.extend([
+                    "-c",
+                    "set separating maxrounds 0",
+                    "-c",
+                    "set separating maxroundsroot 0",
+                ])
+            elif cuts == "on":
+                cmd.extend([
+                    "-c",
+                    "set separating maxrounds -1",
+                    "-c",
+                    "set separating maxroundsroot -1",
+                ])
+            if heuristics == "off":
+                cmd.extend(["-c", "set heuristics emphasis off"])
         if kind == "mip":
             if node_limit is not None:
                 cmd.extend(["-c", f"set limits nodes {int(node_limit)}"])
+            if solution_limit is not None:
+                cmd.extend(["-c", f"set limits solutions {int(solution_limit)}"])
             if relative_gap is not None:
                 cmd.extend(["-c", f"set limits gap {float(relative_gap):.17g}"])
+            if absolute_gap is not None:
+                cmd.extend(["-c", f"set limits absgap {float(absolute_gap):.17g}"])
+            if objective_limit is not None:
+                cmd.extend(["-c", f"set limits primal {float(objective_limit):.17g}"])
+            if mip_start is not None and mip_start_objective is not None:
+                start_path = solution_path + ".start.sol"
+                write_scip_mip_start(start_path, mip_start, mip_start_objective)
+            else:
+                start_path = None
         if kind == "lp":
             cmd.append("-q")
         cmd.extend([
             "-c",
             f"read {model_path}",
+        ])
+        if kind == "mip" and branch_priorities is not None:
+            for idx, priority in active_branch_priorities(
+                branch_priorities,
+                integer_vars,
+            ):
+                cmd.extend([
+                    "-c",
+                    "set branching priority",
+                    "-c",
+                    var_name(idx),
+                    "-c",
+                    str(int(priority)),
+                ])
+        if kind == "mip" and start_path is not None:
+            cmd.extend([
+                "-c",
+                f"read {start_path}",
+            ])
+        cmd.extend([
             "-c",
             f"set limits time {time_limit}",
             "-c",
@@ -998,12 +1966,53 @@ def run_solver(
             "-seconds",
             str(time_limit),
         ]
+        if random_seed is not None:
+            cmd.extend(["-randomS", str(int(random_seed)), "-randomC", str(int(random_seed))])
+        if threads is not None:
+            cmd.extend(["-threads", str(int(threads))])
+        if primal_feasibility_tolerance is not None:
+            cmd.extend(["-primalT", f"{float(primal_feasibility_tolerance):.17g}"])
+        if dual_feasibility_tolerance is not None:
+            cmd.extend(["-dualT", f"{float(dual_feasibility_tolerance):.17g}"])
+        if presolve == "off":
+            cmd.extend(["-presolve", "off"])
+            if kind == "mip":
+                cmd.extend(["-preprocess", "off"])
+        elif presolve == "on":
+            cmd.extend(["-presolve", "on"])
         if kind == "lp":
             cmd.extend(["-printingOptions", "all"])
-        elif node_limit is not None:
-            cmd.extend(["-maxNodes", str(int(node_limit))])
+        else:
+            if cuts in {"on", "off"}:
+                cmd.extend(["-cuts", cuts])
+            if heuristics in {"on", "off"}:
+                cmd.extend(["-heuristicsOnOff", heuristics])
+            if branch_priorities is not None:
+                priority_path = solution_path + ".priority.csv"
+                if write_cbc_branch_priorities(
+                    priority_path,
+                    branch_priorities,
+                    integer_vars,
+                ) > 0:
+                    cmd.extend(["-priorityIn", priority_path])
+            if mip_start is not None:
+                start_path = solution_path + ".start.sol"
+                write_cbc_mip_start(start_path, mip_start)
+                cmd.extend(["-mipstart", start_path])
+            if node_limit is not None:
+                cmd.extend(["-maxNodes", str(int(node_limit))])
+            if solution_limit is not None:
+                cmd.extend(["-maxSolutions", str(int(solution_limit))])
+            if node_selection == "dfs":
+                cmd.extend(["-nodeStrategy", "depth"])
+            elif node_selection == "best-bound":
+                cmd.extend(["-nodeStrategy", "fewest"])
+            if integer_feasibility_tolerance is not None:
+                cmd.extend(["-integerT", f"{float(integer_feasibility_tolerance):.17g}"])
         if kind == "mip" and relative_gap is not None:
             cmd.extend(["-ratioGap", f"{float(relative_gap):.17g}"])
+        if kind == "mip" and absolute_gap is not None:
+            cmd.extend(["-allowableGap", f"{float(absolute_gap):.17g}"])
         cmd.extend([
             "-solve",
             "-solution",
@@ -1019,6 +2028,17 @@ def run_solver(
             str(time_limit),
             "-printingOptions",
             "all",
+            *(["-presolve", presolve] if presolve in {"on", "off"} else []),
+            *(
+                ["-primalT", f"{float(primal_feasibility_tolerance):.17g}"]
+                if primal_feasibility_tolerance is not None
+                else []
+            ),
+            *(
+                ["-dualT", f"{float(dual_feasibility_tolerance):.17g}"]
+                if dual_feasibility_tolerance is not None
+                else []
+            ),
             "-solve",
             "-solution",
             solution_path,
@@ -1031,7 +2051,16 @@ def run_solver(
             f"ResultFile={solution_path}",
             f"TimeLimit={time_limit}",
             *([f"NodeLimit={int(node_limit)}"] if kind == "mip" and node_limit is not None else []),
+            *([f"SolutionLimit={int(solution_limit)}"] if kind == "mip" and solution_limit is not None else []),
             *([f"MIPGap={float(relative_gap):.17g}"] if kind == "mip" and relative_gap is not None else []),
+            *([f"MIPGapAbs={float(absolute_gap):.17g}"] if kind == "mip" and absolute_gap is not None else []),
+            *([f"BestObjStop={float(objective_limit):.17g}"] if kind == "mip" and objective_limit is not None else []),
+            *([f"FeasibilityTol={float(primal_feasibility_tolerance):.17g}"] if primal_feasibility_tolerance is not None else []),
+            *([f"OptimalityTol={float(dual_feasibility_tolerance):.17g}"] if dual_feasibility_tolerance is not None else []),
+            *([f"IntFeasTol={float(integer_feasibility_tolerance):.17g}"] if kind == "mip" and integer_feasibility_tolerance is not None else []),
+            *([f"Threads={int(threads)}"] if threads is not None else []),
+            *([f"Seed={int(random_seed)}"] if random_seed is not None else []),
+            *([f"Presolve={-1 if presolve == 'auto' else 1 if presolve == 'on' else 0}"] if presolve is not None else []),
             model_path,
         ]
     elif solver == "cplex":
@@ -1041,7 +2070,15 @@ def run_solver(
             f"read {model_path}",
             f"set timelimit {time_limit}",
             *([f"set mip limits nodes {int(node_limit)}"] if kind == "mip" and node_limit is not None else []),
+            *([f"set mip limits solutions {int(solution_limit)}"] if kind == "mip" and solution_limit is not None else []),
             *([f"set mip tolerances mipgap {float(relative_gap):.17g}"] if kind == "mip" and relative_gap is not None else []),
+            *([f"set mip tolerances absmipgap {float(absolute_gap):.17g}"] if kind == "mip" and absolute_gap is not None else []),
+            *([f"set simplex tolerances feasibility {float(primal_feasibility_tolerance):.17g}"] if primal_feasibility_tolerance is not None else []),
+            *([f"set simplex tolerances optimality {float(dual_feasibility_tolerance):.17g}"] if dual_feasibility_tolerance is not None else []),
+            *([f"set mip tolerances integrality {float(integer_feasibility_tolerance):.17g}"] if kind == "mip" and integer_feasibility_tolerance is not None else []),
+            *([f"set threads {int(threads)}"] if threads is not None else []),
+            *([f"set randomseed {int(random_seed)}"] if random_seed is not None else []),
+            *([f"set preprocessing presolve {'-1' if presolve == 'auto' else '1' if presolve == 'on' else '0'}"] if presolve is not None else []),
             "optimize",
             f"write {solution_path}",
             "quit",
@@ -1050,6 +2087,20 @@ def run_solver(
         script_path = os.path.join(os.path.dirname(model_path), "xpress_commands.txt")
         with open(script_path, "w", encoding="utf-8") as f:
             f.write(f"MAXTIME = -{max(1, int(math.ceil(time_limit)))}\n")
+            if kind == "mip" and solution_limit is not None:
+                f.write(f"MAXSOLS = {int(solution_limit)}\n")
+            if primal_feasibility_tolerance is not None:
+                f.write(f"FEASTOL = {float(primal_feasibility_tolerance):.17g}\n")
+            if dual_feasibility_tolerance is not None:
+                f.write(f"OPTTOL = {float(dual_feasibility_tolerance):.17g}\n")
+            if kind == "mip" and integer_feasibility_tolerance is not None:
+                f.write(f"MIPTOL = {float(integer_feasibility_tolerance):.17g}\n")
+            if threads is not None:
+                f.write(f"THREADS = {int(threads)}\n")
+            if random_seed is not None:
+                f.write(f"RANDOMSEED = {int(random_seed)}\n")
+            if presolve is not None:
+                f.write(f"PRESOLVE = {-1 if presolve == 'auto' else 1 if presolve == 'on' else 0}\n")
             f.write(f"readprob -l {model_path}\n")
             f.write("mipoptimize\n" if kind == "mip" else "lpoptimize\n")
             f.write(f"writesol {solution_path} -npa\n")
@@ -1078,7 +2129,165 @@ def run_solver(
     return run.stdout, run.stderr
 
 
-def solve(kind: str, solver: str, raw: dict, time_limit: float) -> dict:
+def solve_solution_pool(
+    solver: str,
+    raw: dict,
+    time_limit: float,
+    solution_pool_size: int,
+    node_limit: Optional[int] = None,
+    solution_limit: Optional[int] = None,
+    relative_gap: Optional[float] = None,
+    absolute_gap: Optional[float] = None,
+    objective_limit: Optional[float] = None,
+    primal_feasibility_tolerance: Optional[float] = None,
+    dual_feasibility_tolerance: Optional[float] = None,
+    integer_feasibility_tolerance: Optional[float] = None,
+    threads: Optional[int] = None,
+    random_seed: Optional[int] = None,
+    presolve: Optional[str] = None,
+    cuts: Optional[str] = None,
+    heuristics: Optional[str] = None,
+    branch_rule: Optional[str] = None,
+    branch_priorities: Optional[Sequence[int]] = None,
+    node_selection: Optional[str] = None,
+    mip_start: Optional[Sequence[float]] = None,
+) -> dict:
+    sense, c, rows, rhs, lbs, ubs, integer_vars = normalize_mip(raw)
+    integer_indices = solution_pool_integer_indices(integer_vars)
+    bound_error = validate_solution_pool_bounds(lbs, ubs, integer_indices)
+    if bound_error is not None:
+        return status_payload("unavailable", f"{solver}:cli", bound_error)
+
+    original_n = len(c)
+    working = plain_mip_payload(sense, c, rows, rhs, lbs, ubs, integer_vars)
+    solutions: list[dict] = []
+    seen: set[tuple[int, ...]] = set()
+    exhausted = False
+    message = ""
+    overall_status = "optimal"
+
+    for pool_idx in range(solution_pool_size):
+        working_branch_priorities = None
+        if branch_priorities is not None:
+            working_n = len(working["c"])
+            working_branch_priorities = list(branch_priorities[:working_n])
+            working_branch_priorities.extend([0] * (working_n - len(working_branch_priorities)))
+        working_mip_start = mip_start if pool_idx == 0 else None
+        result = solve(
+            "mip",
+            solver,
+            working,
+            time_limit,
+            node_limit=node_limit,
+            solution_limit=solution_limit,
+            relative_gap=relative_gap,
+            absolute_gap=absolute_gap,
+            objective_limit=objective_limit,
+            primal_feasibility_tolerance=primal_feasibility_tolerance,
+            dual_feasibility_tolerance=dual_feasibility_tolerance,
+            integer_feasibility_tolerance=integer_feasibility_tolerance,
+            threads=threads,
+            random_seed=random_seed,
+            presolve=presolve,
+            cuts=cuts,
+            heuristics=heuristics,
+            branch_rule=branch_rule,
+            branch_priorities=working_branch_priorities,
+            node_selection=node_selection,
+            mip_start=working_mip_start,
+        )
+        if result["status"] in {"infeasible", "unbounded"}:
+            exhausted = result["status"] == "infeasible"
+            message = "pool exhausted by no-good cuts" if exhausted else result.get("message", "")
+            break
+        if result["status"] not in {"optimal", "feasible"}:
+            overall_status = "feasible" if solutions else result["status"]
+            message = result.get("message", "")
+            break
+        if result["status"] == "feasible":
+            overall_status = "feasible"
+
+        x = [float(value) for value in result["x"][:original_n]]
+        key = solution_pool_assignment_key(x, integer_indices)
+        if key in seen:
+            overall_status = "feasible"
+            message = "pool search stopped after duplicate integer assignment"
+            break
+        seen.add(key)
+
+        objective = dot(c, x)
+        solutions.append(payload_solution(x, objective))
+        cut_error = add_solution_pool_no_good_cut(working, integer_indices, x)
+        if cut_error is not None:
+            message = cut_error
+            exhausted = True
+            break
+        mip_start = None
+
+    if len(solutions) == solution_pool_size and not exhausted:
+        message = "pool reached solution_pool_size"
+    if not solutions:
+        return {
+            **status_payload(
+                "infeasible" if exhausted else overall_status,
+                f"{solver}:cli",
+                message,
+                result.get("solverVersion") if "result" in locals() else None,
+            ),
+            "solutions": [],
+            "solutionPoolSize": solution_pool_size,
+            "exhausted": exhausted,
+        }
+
+    payload = {
+        "status": overall_status,
+        "solver": f"{solver}:cli",
+        "x": solutions[0]["x"],
+        "objective": solutions[0]["objective"],
+        "message": message,
+        "solutions": solutions,
+        "solutionPoolSize": solution_pool_size,
+        "exhausted": exhausted,
+    }
+    if "result" in locals() and result.get("solverVersion") is not None:
+        payload["solverVersion"] = result["solverVersion"]
+    for key in (
+        "primalFeasibilityTolerance",
+        "dualFeasibilityTolerance",
+        "integerFeasibilityTolerance",
+        "branchPrioritiesAccepted",
+        "branchPriorityCount",
+    ):
+        if "result" in locals() and result.get(key) is not None:
+            payload[key] = result[key]
+    return payload
+
+
+def solve(
+    kind: str,
+    solver: str,
+    raw: dict,
+    time_limit: float,
+    node_limit: Optional[int] = None,
+    solution_limit: Optional[int] = None,
+    relative_gap: Optional[float] = None,
+    absolute_gap: Optional[float] = None,
+    objective_limit: Optional[float] = None,
+    primal_feasibility_tolerance: Optional[float] = None,
+    dual_feasibility_tolerance: Optional[float] = None,
+    integer_feasibility_tolerance: Optional[float] = None,
+    lp_algorithm: Optional[str] = None,
+    threads: Optional[int] = None,
+    random_seed: Optional[int] = None,
+    presolve: Optional[str] = None,
+    cuts: Optional[str] = None,
+    heuristics: Optional[str] = None,
+    branch_rule: Optional[str] = None,
+    branch_priorities: Optional[Sequence[int]] = None,
+    node_selection: Optional[str] = None,
+    mip_start: Optional[Sequence[float]] = None,
+    solution_pool_size: Optional[int] = None,
+) -> dict:
     if not solver_available(solver):
         return status_payload("unavailable", f"{solver}:cli", f"{solver} executable not found")
     if solver not in SUPPORTED_SOLVERS:
@@ -1092,13 +2301,65 @@ def solve(kind: str, solver: str, raw: dict, time_limit: float) -> dict:
         lp = raw.get("lp", raw)
         sense, c, a_ub, b_ub, a_eq, b_eq, lbs, ubs = normalize_lp(lp)
         integer_vars = [False] * len(c)
+        lp_algorithm = normalized_lp_algorithm(lp_algorithm)
+        presolve = normalized_presolve(presolve)
+        primal_feasibility_tolerance = normalized_tolerance(primal_feasibility_tolerance)
+        dual_feasibility_tolerance = normalized_tolerance(dual_feasibility_tolerance)
+        integer_feasibility_tolerance = None
     elif kind == "mip":
         if solver == "clp":
             return status_payload("unavailable", "clp:cli", "CLP is LP-only")
         sense, c, a_ub, b_ub, lbs, ubs, integer_vars = normalize_mip(raw)
         a_eq, b_eq = [], []
+        node_limit = normalized_node_limit(node_limit)
+        solution_limit = normalized_solution_limit(solution_limit)
+        solution_pool_size = normalized_solution_pool_size(solution_pool_size)
+        relative_gap = normalized_relative_gap(relative_gap)
+        absolute_gap = normalized_absolute_gap(absolute_gap)
+        objective_limit = normalized_objective_limit(objective_limit)
+        primal_feasibility_tolerance = normalized_tolerance(primal_feasibility_tolerance)
+        dual_feasibility_tolerance = normalized_tolerance(dual_feasibility_tolerance)
+        integer_feasibility_tolerance = normalized_tolerance(integer_feasibility_tolerance)
+        presolve = normalized_presolve(presolve)
+        cuts = normalized_mip_switch(cuts, "cuts")
+        heuristics = normalized_mip_switch(heuristics, "heuristics")
+        branch_rule = normalized_branch_rule(branch_rule)
+        if branch_priorities is None:
+            branch_priorities = raw.get("branch_priorities") or raw.get("branchPriorities")
+        branch_priorities = normalized_branch_priorities(branch_priorities, len(c))
+        node_selection = normalized_node_selection(node_selection)
+        if mip_start is None:
+            mip_start = raw.get("mip_start") or raw.get("mipStart")
+        mip_start = normalized_mip_start(mip_start, len(c))
+        if solution_pool_size is not None:
+            return solve_solution_pool(
+                solver,
+                raw,
+                time_limit,
+                solution_pool_size,
+                node_limit,
+                solution_limit,
+                relative_gap,
+                absolute_gap,
+                objective_limit,
+                primal_feasibility_tolerance,
+                dual_feasibility_tolerance,
+                integer_feasibility_tolerance,
+                threads,
+                random_seed,
+                presolve,
+                cuts,
+                heuristics,
+                branch_rule,
+                branch_priorities,
+                node_selection,
+                mip_start,
+            )
     else:
         raise ValueError("kind must be 'lp' or 'mip'")
+    threads = normalized_threads(threads)
+    random_seed = normalized_random_seed(random_seed)
+    mip_start_objective = dot(c, mip_start) if kind == "mip" and mip_start is not None else None
 
     with tempfile.TemporaryDirectory(prefix="ores-linear-cli-") as tmp:
         if solver == "lindo":
@@ -1113,7 +2374,34 @@ def solve(kind: str, solver: str, raw: dict, time_limit: float) -> dict:
                 else os.path.join(tmp, f"{solver}.sol")
             )
             write_cplex_lp(model_path, sense, c, a_ub, b_ub, a_eq, b_eq, lbs, ubs, integer_vars)
-        stdout, stderr = run_solver(solver, kind, sense, model_path, solution_path, time_limit)
+        stdout, stderr = run_solver(
+            solver,
+            kind,
+            sense,
+            model_path,
+            solution_path,
+            time_limit,
+            node_limit,
+            solution_limit,
+            relative_gap,
+            absolute_gap,
+            objective_limit,
+            primal_feasibility_tolerance,
+            dual_feasibility_tolerance,
+            integer_feasibility_tolerance,
+            lp_algorithm,
+            threads,
+            random_seed,
+            presolve,
+            cuts,
+            heuristics,
+            branch_rule,
+            branch_priorities,
+            node_selection,
+            mip_start,
+            mip_start_objective,
+            integer_vars,
+        )
         if solver == "xpress":
             solution_path = _first_existing_path(
                 [solution_path + ".asc", solution_path, solution_path + ".sol"]
@@ -1124,9 +2412,20 @@ def solve(kind: str, solver: str, raw: dict, time_limit: float) -> dict:
             ) or solution_path
         if not os.path.exists(solution_path):
             classified = classify_status("", stdout, stderr)
+            solver_version = solver_version_from_output(solver, stdout, stderr)
             if classified in ("infeasible", "unbounded"):
-                return status_payload(classified, f"{solver}:cli", (stderr or stdout).strip())
-            return status_payload("unavailable", f"{solver}:cli", (stderr or stdout).strip())
+                return status_payload(
+                    classified,
+                    f"{solver}:cli",
+                    (stderr or stdout).strip(),
+                    solver_version,
+                )
+            return status_payload(
+                "unavailable",
+                f"{solver}:cli",
+                (stderr or stdout).strip(),
+                solver_version,
+            )
         certificate_fields: dict[str, object] = {}
         if solver == "highs":
             status, x, certificate_fields = parse_highs_solution(
@@ -1162,23 +2461,116 @@ def solve(kind: str, solver: str, raw: dict, time_limit: float) -> dict:
             )
 
     classified = classify_status(status, stdout, stderr)
-    if classified != "optimal":
+    solver_version = solver_version_from_output(solver, stdout, stderr)
+    if classified not in {"optimal", "feasible"}:
         return status_payload(
             classified if classified in ("infeasible", "unbounded") else "unavailable",
             f"{solver}:cli",
             status,
+            solver_version,
         )
     objective = dot(c, x)
     result = {
-        "status": "optimal",
+        "status": classified,
         "solver": f"{solver}:cli",
         "x": x,
         "objective": objective,
         "message": status,
     }
+    if solver_version is not None:
+        result["solverVersion"] = solver_version
     if kind == "lp":
         result.update(certificate_fields)
         result.update(parse_lp_iterations(solver, kind, stdout, stderr))
+    result.update(
+        parse_lp_algorithm_feedback(
+            solver,
+            kind,
+            lp_algorithm,
+            stdout,
+            stderr,
+        )
+    )
+    result.update(
+        parse_operational_control_feedback(
+            solver,
+            kind,
+            threads,
+            random_seed,
+            presolve,
+            stdout,
+            stderr,
+        )
+    )
+    result.update(
+        parse_mip_strategy_feedback(
+            solver,
+            kind,
+            cuts,
+            heuristics,
+            stdout,
+            stderr,
+        )
+    )
+    result.update(
+        parse_solution_limit_feedback(
+            solver,
+            kind,
+            solution_limit,
+            stdout,
+            stderr,
+        )
+    )
+    result.update(
+        parse_objective_limit_feedback(
+            solver,
+            kind,
+            objective_limit,
+            stdout,
+            stderr,
+        )
+    )
+    result.update(
+        parse_tolerance_feedback(
+            solver,
+            kind,
+            primal_feasibility_tolerance,
+            dual_feasibility_tolerance,
+            integer_feasibility_tolerance,
+            stdout,
+            stderr,
+        )
+    )
+    result.update(
+        parse_mip_start_feedback(
+            solver,
+            kind,
+            mip_start,
+            mip_start_objective,
+            stdout,
+            stderr,
+        )
+    )
+    result.update(
+        parse_search_control_feedback(
+            solver,
+            kind,
+            branch_rule,
+            node_selection,
+            stdout,
+            stderr,
+        )
+    )
+    result.update(
+        parse_branch_priority_feedback(
+            solver,
+            kind,
+            branch_priorities,
+            integer_vars,
+            stdout,
+            stderr,
+        )
+    )
     result.update(parse_mip_quality(solver, kind, objective, stdout, stderr))
     return result
 
@@ -1196,6 +2588,25 @@ def main() -> int:
     parser.add_argument("--solver", choices=sorted(COMMAND_ALIASES.keys()), required=True)
     parser.add_argument("--problem")
     parser.add_argument("--time-limit", type=float, default=10.0)
+    parser.add_argument("--node-limit", type=int)
+    parser.add_argument("--solution-limit", type=int)
+    parser.add_argument("--solution-pool-size", type=int)
+    parser.add_argument("--relative-gap", type=float)
+    parser.add_argument("--absolute-gap", type=float)
+    parser.add_argument("--objective-limit", type=float)
+    parser.add_argument("--primal-feasibility-tolerance", type=float)
+    parser.add_argument("--dual-feasibility-tolerance", type=float)
+    parser.add_argument("--integer-feasibility-tolerance", type=float)
+    parser.add_argument("--lp-algorithm", choices=["simplex", "ipm"])
+    parser.add_argument("--threads", type=int)
+    parser.add_argument("--random-seed", type=int)
+    parser.add_argument("--presolve", choices=["auto", "on", "off"])
+    parser.add_argument("--cuts", choices=["auto", "on", "off"])
+    parser.add_argument("--heuristics", choices=["auto", "on", "off"])
+    parser.add_argument("--branch-rule", choices=["first-fractional", "most-fractional"])
+    parser.add_argument("--branch-priorities")
+    parser.add_argument("--node-selection", choices=["dfs", "best-bound"])
+    parser.add_argument("--mip-start")
     args = parser.parse_args()
     try:
         if args.problem:
@@ -1203,7 +2614,36 @@ def main() -> int:
                 raw = json.load(f)
         else:
             raw = json.load(sys.stdin)
-        print(json.dumps(solve(args.kind, args.solver, raw, args.time_limit), allow_nan=True))
+        print(
+            json.dumps(
+                solve(
+                    args.kind,
+                    args.solver,
+                    raw,
+                    args.time_limit,
+                    args.node_limit,
+                    args.solution_limit,
+                    args.relative_gap,
+                    args.absolute_gap,
+                    args.objective_limit,
+                    args.primal_feasibility_tolerance,
+                    args.dual_feasibility_tolerance,
+                    args.integer_feasibility_tolerance,
+                    args.lp_algorithm,
+                    args.threads,
+                    args.random_seed,
+                    args.presolve,
+                    args.cuts,
+                    args.heuristics,
+                    args.branch_rule,
+                    parse_int_list_arg(args.branch_priorities, "branch-priorities"),
+                    args.node_selection,
+                    parse_mip_start_arg(args.mip_start),
+                    args.solution_pool_size,
+                ),
+                allow_nan=True,
+            )
+        )
         return 0
     except Exception as exc:
         print(json.dumps(status_payload("numerical-error", f"{args.solver}:cli", str(exc)), allow_nan=True))

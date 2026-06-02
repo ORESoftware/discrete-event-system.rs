@@ -147,6 +147,25 @@
     font-size: 12px;
   }
   .surface-control label { color: var(--muted); }
+  .toggle-control {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    margin-bottom: 8px;
+    font-size: 12px;
+  }
+  .toggle-control label {
+    display: inline-flex;
+    gap: 5px;
+    align-items: center;
+    color: var(--muted);
+  }
+  .toggle-control input {
+    min-height: 0;
+    width: 14px;
+    height: 14px;
+    accent-color: #238547;
+  }
   .events {
     margin: 0;
     padding: 0;
@@ -227,6 +246,10 @@
       <div class="metric"><span>Fouls</span><b id="fouls">0 - 0</b></div>
       <div class="metric"><span>Ticks</span><b id="ticks">0</b></div>
       <div class="metric"><span>Learning</span><b id="learning">T0 H0 A0</b></div>
+      <div class="toggle-control">
+        <label for="learningEnabled"><input id="learningEnabled" type="checkbox" checked>Learn</label>
+        <label for="learningLoggingEnabled"><input id="learningLoggingEnabled" type="checkbox" checked>Log</label>
+      </div>
       <div class="section">Surface</div>
       <div class="row">
         <select id="surfacePreset">
@@ -261,6 +284,10 @@
       <div class="section">Human Controller</div>
       <div id="slots"></div>
       <div class="row">
+        <select id="passFlight" aria-label="Pass flight">
+          <option value="floor">Floor pass</option>
+          <option value="aerial">Aerial pass</option>
+        </select>
         <button id="pass">Pass</button>
         <button id="shoot">Shoot</button>
       </div>
@@ -309,6 +336,8 @@ const restarts = document.getElementById("restarts");
 const fouls = document.getElementById("fouls");
 const ticks = document.getElementById("ticks");
 const learning = document.getElementById("learning");
+const learningEnabled = document.getElementById("learningEnabled");
+const learningLoggingEnabled = document.getElementById("learningLoggingEnabled");
 const agentSelected = document.getElementById("agentSelected");
 const agentMotion = document.getElementById("agentMotion");
 const agentEnergy = document.getElementById("agentEnergy");
@@ -321,6 +350,7 @@ const agentBelief = document.getElementById("agentBelief");
 const slots = document.getElementById("slots");
 const slotPick = document.getElementById("slotPick");
 const targetPick = document.getElementById("targetPick");
+const passFlight = document.getElementById("passFlight");
 const surfacePreset = document.getElementById("surfacePreset");
 const dragRange = document.getElementById("dragRange");
 const dragNumber = document.getElementById("dragNumber");
@@ -349,6 +379,7 @@ let queuedInputs = [];
 let eventLog = [];
 let surfaceTimer = null;
 let syncingSurface = false;
+let syncingLearning = false;
 let hoverPlayerId = null;
 const SLOT_COLORS = ["#f6c944", "#37d688", "#61a5ff", "#ef7ad3"];
 const SURFACE_PRESETS = {
@@ -422,8 +453,11 @@ function learningLabel(l) {
   const total = Number(l.totalTransitions ?? 0);
   const home = Number(l.homePolicyEntries ?? 0);
   const away = Number(l.awayPolicyEntries ?? 0);
-  const mode = l.adversarialLearningEnabled ? "Adv" : "Solo";
-  return `${mode} T${total} H${home} A${away}`;
+  const homeTargets = Number(l.homePolicyTargetEntries ?? 0);
+  const awayTargets = Number(l.awayPolicyTargetEntries ?? 0);
+  const mode = l.learningEnabled === false ? "Off" : l.adversarialLearningEnabled ? "Adv" : "Solo";
+  const log = l.learningLoggingEnabled === false ? " NL" : "";
+  return `${mode}${log} T${total} H${home}/${homeTargets} A${away}/${awayTargets}`;
 }
 function fullTimeLabel() {
   if (!state?.frame) return "full time";
@@ -576,7 +610,23 @@ function rotate(v, radians) {
   const s = Math.sin(radians);
   return {x: v.x * c - v.y * s, y: v.x * s + v.y * c};
 }
+function facingVectorFromBucket(bucket) {
+  const d = Math.SQRT1_2;
+  switch (bucket) {
+    case "East": return {x: 1, y: 0};
+    case "SouthEast": return {x: d, y: d};
+    case "South": return {x: 0, y: 1};
+    case "SouthWest": return {x: -d, y: d};
+    case "West": return {x: -1, y: 0};
+    case "NorthWest": return {x: -d, y: -d};
+    case "North": return {x: 0, y: -1};
+    case "NorthEast": return {x: d, y: -d};
+    default: return null;
+  }
+}
 function playerFacing(p) {
+  const bucketFacing = facingVectorFromBucket(p?.actionFacing || p?.receiveFacing);
+  if (bucketFacing) return bucketFacing;
   if (vecLen(p.velocity) > 0.35) return norm(p.velocity);
   const toBall = {
     x: Number(state?.frame?.ball?.position?.x || 0) - Number(p.position?.x || 0),
@@ -755,6 +805,27 @@ function drawMovementTrails(r) {
   const selected = controlledPlayer();
   if (selected) drawTrail(selected.positionHistory, r, "rgba(246,201,68,.86)", 3);
 }
+function drawFacingIndicator(p, pt, r) {
+  const facing = norm(fieldDirToCanvas(playerFacing(p), r));
+  if (facing.x === 0 && facing.y === 0) return;
+  const angle = Math.atan2(facing.y, facing.x);
+  ctx.save();
+  ctx.translate(pt.x, pt.y);
+  ctx.rotate(angle);
+  ctx.beginPath();
+  ctx.arc(0, 0, 10, -Math.PI / 2, Math.PI / 2);
+  ctx.lineTo(0, -10);
+  ctx.closePath();
+  ctx.fillStyle = "rgba(255,255,255,.24)";
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(6, -7);
+  ctx.lineTo(6, 7);
+  ctx.strokeStyle = "rgba(255,255,255,.86)";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.restore();
+}
 function drawPlayer(p, r) {
   const pt = mapPoint(p.position, r);
   const color = p.team === "Home" ? "#1f6feb" : "#d64545";
@@ -766,6 +837,7 @@ function drawPlayer(p, r) {
   ctx.arc(pt.x, pt.y, 12, 0, Math.PI * 2);
   ctx.fillStyle = color;
   ctx.fill();
+  drawFacingIndicator(p, pt, r);
   ctx.lineWidth = controlled ? 4.5 : assigned ? 3 : hovered ? 3 : 1.5;
   ctx.strokeStyle = controlled || assigned ? slotColor : hovered ? "#e5edf7" : "rgba(255,255,255,.9)";
   ctx.stroke();
@@ -837,6 +909,7 @@ function render() {
   fouls.textContent = `${s.foulsHome ?? 0} - ${s.foulsAway ?? 0}`;
   ticks.textContent = `${state.summary.ticks} / ${Math.round(state.config.durationSeconds / state.config.dtSeconds)}`;
   learning.textContent = learningLabel(state.learning);
+  syncLearningControls();
   updateAgentStatePanel();
   updateRunButton();
   events.innerHTML = eventLog.slice(-12).reverse().map(e => `<li>${fmtClock(e.clockSeconds)} ${e.description}</li>`).join("");
@@ -939,6 +1012,13 @@ function scheduleSurfaceUpdate() {
   surfaceTimer = setTimeout(() => {
     updateSurface(surfaceValues()).catch(e => statusEl.textContent = e.message);
   }, 140);
+}
+function syncLearningControls() {
+  if (!state?.config) return;
+  syncingLearning = true;
+  learningEnabled.checked = state.config.learningEnabled !== false;
+  learningLoggingEnabled.checked = state.config.learningLoggingEnabled !== false;
+  syncingLearning = false;
 }
 function rebuildControls(assignments) {
   const existing = slotPick.value;
@@ -1056,6 +1136,7 @@ function queueInput(pass = false, shoot = false) {
     axis: axisFromKeys(),
     sprint: keys.has("ShiftLeft") || keys.has("ShiftRight"),
     pass,
+    passFlight: pass ? passFlight.value : "floor",
     shoot,
     targetPlayer: pass ? selectedPassTargetId() : null
   });
@@ -1129,6 +1210,17 @@ async function updateSurface(values) {
   state.config = response.config;
   syncSurfaceControls();
   statusEl.textContent = "surface updated";
+  render();
+}
+async function updateLearningRuntime() {
+  if (syncingLearning) return;
+  const response = await postJson("/api/learning", {
+    learningEnabled: learningEnabled.checked,
+    learningLoggingEnabled: learningLoggingEnabled.checked
+  });
+  state.config = response.config;
+  state.learning = response.learning;
+  statusEl.textContent = learningEnabled.checked ? "learning updated" : "learning paused";
   render();
 }
 async function exportTeamPolicy() {
@@ -1309,6 +1401,11 @@ surfacePreset.addEventListener("change", () => {
   el.addEventListener("change", () => {
     syncSurfacePair(el);
     updateSurface(surfaceValues()).catch(e => statusEl.textContent = e.message);
+  });
+});
+[learningEnabled, learningLoggingEnabled].forEach(el => {
+  el.addEventListener("change", () => {
+    updateLearningRuntime().catch(e => statusEl.textContent = e.message);
   });
 });
 window.addEventListener("keydown", e => {

@@ -129,7 +129,7 @@
   }
   .slot {
     display: grid;
-    grid-template-columns: 52px minmax(0, 1fr);
+    grid-template-columns: 44px minmax(0, 1fr) 46px;
     gap: 8px;
     align-items: center;
     margin-bottom: 8px;
@@ -137,6 +137,7 @@
   }
   .slot label { color: var(--muted); }
   .slot select { width: 100%; max-width: none; }
+  .slot button { min-width: 0; padding: 0 8px; }
   .surface-control {
     display: grid;
     grid-template-columns: 42px minmax(0, 1fr) 78px;
@@ -199,6 +200,10 @@
         <button id="exportPolicy">Export Policy</button>
         <button id="importPolicy">Import Policy</button>
         <input id="policyFile" class="hidden-file" type="file" accept="application/json,.json">
+        <button id="exportTracking">Export Tracking</button>
+        <button id="importTracking">Import Tracking</button>
+        <button id="sampleTracking">Sample Tracking</button>
+        <input id="trackingFile" class="hidden-file" type="file" accept=".json,.csv,text/csv,application/json">
         <select id="slotPick"></select>
         <select id="targetPick"></select>
       </div>
@@ -206,6 +211,7 @@
       <div class="section">Match</div>
       <div class="metric"><span>Phase</span><b id="phase">Kickoff</b></div>
       <div class="metric"><span>Central Brain</span><b id="centralBrain">22p 3o Loose</b></div>
+      <div class="metric"><span>Agent Order</span><b id="agentOrder">shuffle pending</b></div>
       <div class="metric"><span>Home Brain</span><b id="homeBrain">P0.00 R0.00</b></div>
       <div class="metric"><span>Away Brain</span><b id="awayBrain">P0.00 R0.00</b></div>
       <div class="metric"><span>Ball</span><b id="ballPhysics">0.0y/s 0.0y/s2</b></div>
@@ -216,6 +222,7 @@
       <div class="metric"><span>Passes</span><b id="passes">0 / 0</b></div>
       <div class="metric"><span>Recoveries</span><b id="recoveries">0 - 0</b></div>
       <div class="metric"><span>Offside</span><b id="offsides">0 - 0</b></div>
+      <div class="metric"><span>Offside Line</span><b id="offsideLine">none</b></div>
       <div class="metric"><span>Restarts</span><b id="restarts">0 - 0</b></div>
       <div class="metric"><span>Fouls</span><b id="fouls">0 - 0</b></div>
       <div class="metric"><span>Ticks</span><b id="ticks">0</b></div>
@@ -259,7 +266,11 @@
       </div>
       <div class="section">Agent State</div>
       <div class="metric"><span>Selected</span><b id="agentSelected">Autonomous</b></div>
+      <div class="metric"><span>Motion</span><b id="agentMotion">-</b></div>
+      <div class="metric"><span>Energy</span><b id="agentEnergy">-</b></div>
+      <div class="metric"><span>Skills</span><b id="agentSkills">-</b></div>
       <div class="metric"><span>Decision</span><b id="agentDecision">-</b></div>
+      <div class="metric"><span>Options</span><b id="agentOptions">-</b></div>
       <div class="metric"><span>MDP</span><b id="agentMdp">-</b></div>
       <div class="metric"><span>POMDP</span><b id="agentPomdp">-</b></div>
       <div class="metric"><span>Belief</span><b id="agentBelief">-</b></div>
@@ -282,6 +293,7 @@ const awayScore = document.getElementById("awayScore");
 const clock = document.getElementById("clock");
 const phase = document.getElementById("phase");
 const centralBrain = document.getElementById("centralBrain");
+const agentOrder = document.getElementById("agentOrder");
 const homeBrain = document.getElementById("homeBrain");
 const awayBrain = document.getElementById("awayBrain");
 const ballPhysics = document.getElementById("ballPhysics");
@@ -292,12 +304,17 @@ const saves = document.getElementById("saves");
 const passes = document.getElementById("passes");
 const recoveries = document.getElementById("recoveries");
 const offsides = document.getElementById("offsides");
+const offsideLine = document.getElementById("offsideLine");
 const restarts = document.getElementById("restarts");
 const fouls = document.getElementById("fouls");
 const ticks = document.getElementById("ticks");
 const learning = document.getElementById("learning");
 const agentSelected = document.getElementById("agentSelected");
+const agentMotion = document.getElementById("agentMotion");
+const agentEnergy = document.getElementById("agentEnergy");
+const agentSkills = document.getElementById("agentSkills");
 const agentDecision = document.getElementById("agentDecision");
+const agentOptions = document.getElementById("agentOptions");
 const agentMdp = document.getElementById("agentMdp");
 const agentPomdp = document.getElementById("agentPomdp");
 const agentBelief = document.getElementById("agentBelief");
@@ -319,6 +336,10 @@ const runButton = document.getElementById("run");
 const exportPolicyButton = document.getElementById("exportPolicy");
 const importPolicyButton = document.getElementById("importPolicy");
 const policyFile = document.getElementById("policyFile");
+const exportTrackingButton = document.getElementById("exportTracking");
+const importTrackingButton = document.getElementById("importTracking");
+const sampleTrackingButton = document.getElementById("sampleTracking");
+const trackingFile = document.getElementById("trackingFile");
 const keys = new Set();
 let state = null;
 let running = true;
@@ -328,6 +349,8 @@ let queuedInputs = [];
 let eventLog = [];
 let surfaceTimer = null;
 let syncingSurface = false;
+let hoverPlayerId = null;
+const SLOT_COLORS = ["#f6c944", "#37d688", "#61a5ff", "#ef7ad3"];
 const SURFACE_PRESETS = {
   short: {ballDragPerTick: 0.008, ballAirResistance: 0.004, ballGrassResistanceYps2: 0.28, ballStopSpeedYps: 0.25},
   standard: {ballDragPerTick: 0.015, ballAirResistance: 0.006, ballGrassResistanceYps2: 0.45, ballStopSpeedYps: 0.35},
@@ -359,6 +382,41 @@ function centralBrainLabel(b) {
   const holder = b.ballHolder == null ? "" : ` #${b.ballHolder}`;
   return `${players}p ${officials}o ${possession}${holder}`;
 }
+function agentScheduleGlyph(entry) {
+  if (!entry) return "?";
+  if (entry.kind === "player") return `P${entry.id}`;
+  if (entry.kind === "official") return `O${entry.id}`;
+  if (entry.kind === "ball") return "B";
+  return String(entry.id ?? "?");
+}
+function agentScheduleLabel(schedule) {
+  if (!Array.isArray(schedule) || schedule.length === 0) return "shuffle pending";
+  const prefix = schedule.slice(0, 6).map(agentScheduleGlyph).join(" ");
+  const ball = schedule.find(entry => entry.kind === "ball");
+  const suffix = ball ? ` ... ${agentScheduleGlyph(ball)}` : "";
+  return `${prefix}${suffix}`;
+}
+function assistantOffsideLines() {
+  if (!state?.frame?.officials) return [];
+  const seen = new Set();
+  const lines = [];
+  for (const official of state.frame.officials) {
+    const line = official.offsideLine;
+    if (!line) continue;
+    const key = `${line.attackingTeam}:${Number(line.effectiveLineY ?? 0).toFixed(3)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    lines.push(line);
+  }
+  return lines;
+}
+function offsideLineLabel(lines = assistantOffsideLines()) {
+  if (!lines.length) return "none";
+  const line = lines[0];
+  const beyond = lines.reduce((sum, item) => sum + (Array.isArray(item.playersBeyondLine) ? item.playersBeyondLine.length : 0), 0);
+  const suffix = beyond ? ` ${beyond} beyond` : " clear";
+  return `${line.attackingTeam} ${Number(line.effectiveLineY ?? 0).toFixed(1)}y${suffix}`;
+}
 function learningLabel(l) {
   if (!l) return "T0 H0 A0";
   const total = Number(l.totalTransitions ?? 0);
@@ -367,13 +425,43 @@ function learningLabel(l) {
   const mode = l.adversarialLearningEnabled ? "Adv" : "Solo";
   return `${mode} T${total} H${home} A${away}`;
 }
+function fullTimeLabel() {
+  if (!state?.frame) return "full time";
+  return `full time ${state.frame.scoreHome}-${state.frame.scoreAway}`;
+}
+function updateRunButton() {
+  if (state?.done) {
+    running = false;
+    runButton.classList.remove("active");
+    runButton.textContent = "Full Time";
+    statusEl.textContent = fullTimeLabel();
+    return;
+  }
+  runButton.classList.toggle("active", running);
+  runButton.textContent = running ? "Run" : "Paused";
+}
 function shortTeam(v) {
   return v === "Home" ? "H" : v === "Away" ? "A" : "-";
+}
+function gaitLabel(v) {
+  return String(v || "stand")
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .toLowerCase();
 }
 function agentDecisionLabel(d) {
   if (!d) return "Waiting";
   const order = Array.isArray(d.operationOrder) && d.operationOrder.length ? ` ${d.operationOrder.join(">")}` : "";
   return `${d.action || "-"}${order}`;
+}
+function agentOptionsLabel(d) {
+  const options = Array.isArray(d?.actionOptions) ? d.actionOptions : [];
+  if (!options.length) return "-";
+  return options
+    .slice()
+    .sort((a, b) => Number(b.probability || 0) - Number(a.probability || 0))
+    .slice(0, 5)
+    .map(o => `${o.label || "-"}${o.legal === false ? "x" : ""}${(Number(o.probability || 0) * 100).toFixed(0)}%`)
+    .join(" ");
 }
 function agentMdpLabel(d) {
   const s = d?.mdpState;
@@ -384,26 +472,49 @@ function agentPomdpLabel(d) {
   const o = d?.observation;
   if (!o) return "-";
   const lane = o.shotLaneOpen ? "lane" : "blocked";
-  return `B${Number(o.ballDistance ?? 0).toFixed(1)} O${Number(o.nearestOpponentDistance ?? 0).toFixed(1)} G${Number(o.yardsToGoal ?? 0).toFixed(1)} ${lane}`;
+  const ball = o.visibleBall ? "see" : "blind";
+  const options = Number(o.visiblePassOptions ?? 0);
+  return `${ball} P${options} B${Number(o.ballDistance ?? 0).toFixed(1)} O${Number(o.nearestOpponentDistance ?? 0).toFixed(1)} G${Number(o.yardsToGoal ?? 0).toFixed(1)} ${lane}`;
 }
 function agentBeliefLabel(d) {
   const b = d?.belief;
   if (!b) return "-";
   return `pos${Number(b.possessionConfidence ?? 0).toFixed(2)} pr${Number(b.pressure ?? 0).toFixed(2)} lane${Number(b.passLaneOpen ?? 0).toFixed(2)} shot${Number(b.shotQuality ?? 0).toFixed(2)}`;
 }
+function agentMotionLabel(p) {
+  return `${vecLen(p.velocity).toFixed(1)}y/s ${vecLen(p.acceleration).toFixed(1)}y/s2`;
+}
+function agentEnergyLabel(p) {
+  const stamina = Number(p.skills?.stamina ?? 0);
+  const fatigue = Number(p.fatigue ?? 0);
+  const available = clamp(stamina * (1 - fatigue * 0.42), 0, 1);
+  return `S${stamina.toFixed(2)} F${fatigue.toFixed(2)} A${available.toFixed(2)}`;
+}
+function agentSkillLabel(p) {
+  const s = p.skills || {};
+  return `Sp${Number(s.topSpeedYps ?? 0).toFixed(1)} Ac${Number(s.accelerationYps2 ?? 0).toFixed(1)} Sh${Number(s.shooting ?? 0).toFixed(2)} Pa${Number(s.passing ?? 0).toFixed(2)} Dr${Number(s.dribbling ?? 0).toFixed(2)} Df${Number(s.defending ?? 0).toFixed(2)}`;
+}
 function updateAgentStatePanel() {
   const p = controlledPlayer();
   if (!p) {
     agentSelected.textContent = "Autonomous";
+    agentMotion.textContent = "-";
+    agentEnergy.textContent = "-";
+    agentSkills.textContent = "-";
     agentDecision.textContent = "-";
+    agentOptions.textContent = "-";
     agentMdp.textContent = "-";
     agentPomdp.textContent = "-";
     agentBelief.textContent = "-";
     return;
   }
   const d = p.lastDecision;
-  agentSelected.textContent = `${p.team} ${p.shirt} ${p.name}`;
+  agentSelected.textContent = `${p.team} ${p.shirt} ${p.name} / ${gaitLabel(p.movementGait)}`;
+  agentMotion.textContent = agentMotionLabel(p);
+  agentEnergy.textContent = agentEnergyLabel(p);
+  agentSkills.textContent = agentSkillLabel(p);
   agentDecision.textContent = agentDecisionLabel(d);
+  agentOptions.textContent = agentOptionsLabel(d);
   agentMdp.textContent = agentMdpLabel(d);
   agentPomdp.textContent = agentPomdpLabel(d);
   agentBelief.textContent = agentBeliefLabel(d);
@@ -428,6 +539,113 @@ function pitchRect() {
 function mapPoint(p, r) {
   return {x: r.x + p.x / state.config.fieldWidthYards * r.w, y: r.y + (1 - p.y / state.config.fieldLengthYards) * r.h};
 }
+function canvasPointFromEvent(e) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: (e.clientX - rect.left) * canvas.width / rect.width,
+    y: (e.clientY - rect.top) * canvas.height / rect.height
+  };
+}
+function fieldPointFromCanvas(pt, r = pitchRect()) {
+  return {
+    x: clamp((pt.x - r.x) / r.w * Number(state.config.fieldWidthYards || 80), 0, Number(state.config.fieldWidthYards || 80)),
+    y: clamp((1 - (pt.y - r.y) / r.h) * Number(state.config.fieldLengthYards || 120), 0, Number(state.config.fieldLengthYards || 120))
+  };
+}
+function nearestPlayerAtCanvas(pt, r = pitchRect(), maxPx = 18) {
+  if (!state?.frame?.players) return null;
+  let best = null;
+  for (const player of state.frame.players) {
+    const playerPt = mapPoint(player.position, r);
+    const distance = Math.hypot(pt.x - playerPt.x, pt.y - playerPt.y);
+    if (distance <= maxPx && (!best || distance < best.distance)) {
+      best = {player, distance};
+    }
+  }
+  return best;
+}
+function fieldDirToCanvas(dir, r) {
+  return {x: dir.x / state.config.fieldWidthYards * r.w, y: -dir.y / state.config.fieldLengthYards * r.h};
+}
+function norm(v) {
+  const len = Math.hypot(Number(v?.x || 0), Number(v?.y || 0));
+  return len <= 1e-9 ? {x: 0, y: 0} : {x: Number(v.x || 0) / len, y: Number(v.y || 0) / len};
+}
+function rotate(v, radians) {
+  const c = Math.cos(radians);
+  const s = Math.sin(radians);
+  return {x: v.x * c - v.y * s, y: v.x * s + v.y * c};
+}
+function playerFacing(p) {
+  if (vecLen(p.velocity) > 0.35) return norm(p.velocity);
+  const toBall = {
+    x: Number(state?.frame?.ball?.position?.x || 0) - Number(p.position?.x || 0),
+    y: Number(state?.frame?.ball?.position?.y || 0) - Number(p.position?.y || 0)
+  };
+  if (Math.hypot(toBall.x, toBall.y) > 1.5) return norm(toBall);
+  return {x: 0, y: p.team === "Home" ? 1 : -1};
+}
+function playerCanSeePoint(p, point) {
+  if (!p || !point) return false;
+  const dx = Number(point.x || 0) - Number(p.position?.x || 0);
+  const dy = Number(point.y || 0) - Number(p.position?.y || 0);
+  const dist = Math.hypot(dx, dy);
+  if (dist <= 4.65) return true;
+  const range = Number(p.visionRangeYards || 0);
+  if (range <= 0 || dist > range) return false;
+  const facing = playerFacing(p);
+  const halfFov = Number(p.fieldOfViewDegrees || 0) * Math.PI / 360;
+  const dot = facing.x * (dx / dist) + facing.y * (dy / dist);
+  return dot >= Math.cos(halfFov);
+}
+function playerCanSeePlayer(p, other) {
+  return (p && other && p.id === other.id) || playerCanSeePoint(p, other?.position);
+}
+function segmentDistance(a, b, p) {
+  const abx = b.x - a.x;
+  const aby = b.y - a.y;
+  const denom = abx * abx + aby * aby;
+  const t = denom <= 1e-9 ? 0 : Math.max(0, Math.min(1, ((p.x - a.x) * abx + (p.y - a.y) * aby) / denom));
+  return Math.hypot(p.x - (a.x + abx * t), p.y - (a.y + aby * t));
+}
+function lineClear(from, to, defendingTeam, radius) {
+  return state.frame.players
+    .filter(p => p.team === defendingTeam)
+    .every(p => segmentDistance(from, to, p.position) > radius);
+}
+function positionWouldBeOffside(team, position) {
+  const length = Number(state.config.fieldLengthYards || 120);
+  const half = length * 0.5;
+  if (team === "Home" && position.y <= half) return false;
+  if (team === "Away" && position.y >= half) return false;
+  const defenders = state.frame.players
+    .filter(p => p.team !== team)
+    .map(p => Number(p.position?.y || 0));
+  if (defenders.length < 2) return false;
+  if (team === "Home") {
+    defenders.sort((a, b) => b - a);
+    return position.y > Number(state.frame.ball.position.y || 0) && position.y > defenders[1];
+  }
+  defenders.sort((a, b) => a - b);
+  return position.y < Number(state.frame.ball.position.y || 0) && position.y < defenders[1];
+}
+function visiblePassOptions(p, limit = 3) {
+  if (!p || !state?.frame?.players) return [];
+  const dir = p.team === "Home" ? 1 : -1;
+  return state.frame.players
+    .filter(other => other.team === p.team && other.id !== p.id)
+    .filter(other => playerCanSeePlayer(p, other))
+    .filter(other => lineClear(p.position, other.position, p.team === "Home" ? "Away" : "Home", 2.5))
+    .filter(other => !positionWouldBeOffside(p.team, other.position))
+    .map(other => {
+      const forward = (Number(other.position.y || 0) - Number(p.position.y || 0)) * dir;
+      const dist = Math.hypot(Number(other.position.x || 0) - Number(p.position.x || 0), Number(other.position.y || 0) - Number(p.position.y || 0));
+      return {player: other, score: forward * 0.20 - dist * 0.018 + (other.role === "Forward" ? 1.4 : other.role === "Midfielder" ? 0.8 : 0.1)};
+    })
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+    .map(item => item.player);
+}
 function drawPitch(r) {
   ctx.fillStyle = "#238547";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -450,16 +668,114 @@ function drawPitch(r) {
   ctx.strokeRect(r.x + (r.w - boxW) / 2, r.y, boxW, boxH);
   ctx.strokeRect(r.x + (r.w - boxW) / 2, r.y + r.h - boxH, boxW, boxH);
 }
+function drawAssistantOffsideLines(r) {
+  for (const line of assistantOffsideLines()) {
+    const y = mapPoint({x: 0, y: Number(line.effectiveLineY || 0)}, r).y;
+    ctx.beginPath();
+    ctx.moveTo(r.x, y);
+    ctx.lineTo(r.x + r.w, y);
+    ctx.strokeStyle = line.attackingTeam === "Home" ? "rgba(31,111,235,.72)" : "rgba(214,69,69,.72)";
+    ctx.lineWidth = 2;
+    ctx.setLineDash([9, 7]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+}
+function drawSelectedVision(p, r) {
+  if (!p) return;
+  const origin = mapPoint(p.position, r);
+  const facing = playerFacing(p);
+  const range = Number(p.visionRangeYards || 0);
+  const halfFov = Number(p.fieldOfViewDegrees || 0) * Math.PI / 360;
+  if (range > 0 && halfFov > 0) {
+    ctx.beginPath();
+    ctx.moveTo(origin.x, origin.y);
+    for (let i = 0; i <= 28; i++) {
+      const a = -halfFov + (halfFov * 2 * i / 28);
+      const dir = rotate(facing, a);
+      const end = {
+        x: p.position.x + dir.x * range,
+        y: p.position.y + dir.y * range
+      };
+      const pt = mapPoint(end, r);
+      ctx.lineTo(pt.x, pt.y);
+    }
+    ctx.closePath();
+    ctx.fillStyle = "rgba(246, 201, 68, .14)";
+    ctx.fill();
+    ctx.strokeStyle = "rgba(246, 201, 68, .36)";
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+
+  if (playerCanSeePoint(p, state.frame.ball.position)) {
+    const ball = mapPoint(state.frame.ball.position, r);
+    ctx.beginPath();
+    ctx.moveTo(origin.x, origin.y);
+    ctx.lineTo(ball.x, ball.y);
+    ctx.strokeStyle = "rgba(255,255,255,.36)";
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([5, 5]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  visiblePassOptions(p).forEach((target, idx) => {
+    const pt = mapPoint(target.position, r);
+    ctx.beginPath();
+    ctx.moveTo(origin.x, origin.y);
+    ctx.lineTo(pt.x, pt.y);
+    ctx.strokeStyle = idx === 0 ? "rgba(55, 214, 136, .88)" : "rgba(55, 214, 136, .48)";
+    ctx.lineWidth = idx === 0 ? 3 : 2;
+    ctx.stroke();
+  });
+}
+function drawTrail(points, r, color, width) {
+  if (!Array.isArray(points) || points.length < 2) return;
+  ctx.beginPath();
+  points.forEach((point, idx) => {
+    const pt = mapPoint(point, r);
+    if (idx === 0) ctx.moveTo(pt.x, pt.y);
+    else ctx.lineTo(pt.x, pt.y);
+  });
+  ctx.strokeStyle = color;
+  ctx.lineWidth = width;
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
+  ctx.stroke();
+}
+function drawMovementTrails(r) {
+  const ballPoints = (state.frame.ballHistory || []).map(sample => sample.position || sample);
+  drawTrail(ballPoints, r, "rgba(197,138,19,.36)", 2);
+  for (const official of state.frame.officials || []) {
+    drawTrail(official.positionHistory, r, "rgba(17,24,39,.30)", 1.5);
+  }
+  const hover = state.frame.players.find(p => p.id === hoverPlayerId);
+  if (hover) drawTrail(hover.positionHistory, r, "rgba(255,255,255,.48)", 2);
+  const selected = controlledPlayer();
+  if (selected) drawTrail(selected.positionHistory, r, "rgba(246,201,68,.86)", 3);
+}
 function drawPlayer(p, r) {
   const pt = mapPoint(p.position, r);
   const color = p.team === "Home" ? "#1f6feb" : "#d64545";
+  const assigned = p.controllerSlot != null;
+  const controlled = assigned && p.controllerSlot === activeSlot;
+  const hovered = p.id === hoverPlayerId;
+  const slotColor = assigned ? SLOT_COLORS[p.controllerSlot % SLOT_COLORS.length] : null;
   ctx.beginPath();
   ctx.arc(pt.x, pt.y, 12, 0, Math.PI * 2);
   ctx.fillStyle = color;
   ctx.fill();
-  ctx.lineWidth = p.controllerSlot === activeSlot ? 4 : 1.5;
-  ctx.strokeStyle = p.controllerSlot === activeSlot ? "#f6c944" : "rgba(255,255,255,.9)";
+  ctx.lineWidth = controlled ? 4.5 : assigned ? 3 : hovered ? 3 : 1.5;
+  ctx.strokeStyle = controlled || assigned ? slotColor : hovered ? "#e5edf7" : "rgba(255,255,255,.9)";
   ctx.stroke();
+  if (assigned) {
+    ctx.fillStyle = slotColor;
+    ctx.fillRect(pt.x - 10, pt.y - 24, 20, 13);
+    ctx.fillStyle = "#172026";
+    ctx.font = "700 9px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif";
+    ctx.fillText(`S${p.controllerSlot + 1}`, pt.x, pt.y - 17);
+  }
   ctx.fillStyle = "#fff";
   ctx.font = "700 10px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif";
   ctx.textAlign = "center";
@@ -491,6 +807,9 @@ function render() {
   const f = state.frame;
   const r = pitchRect();
   drawPitch(r);
+  drawAssistantOffsideLines(r);
+  drawMovementTrails(r);
+  drawSelectedVision(controlledPlayer(), r);
   for (const o of f.officials) drawOfficial(o, r);
   for (const p of f.players) drawPlayer(p, r);
   drawBall(f.ball, r);
@@ -499,6 +818,7 @@ function render() {
   clock.textContent = fmtClock(f.clockSeconds);
   phase.textContent = phaseLabel(f.phase);
   centralBrain.textContent = centralBrainLabel(f.centralBrain);
+  agentOrder.textContent = agentScheduleLabel(f.agentSchedule);
   homeBrain.textContent = directiveLabel(f.homeDirective);
   awayBrain.textContent = directiveLabel(f.awayDirective);
   ballPhysics.textContent = `${vecLen(f.ball.velocity).toFixed(1)}y/s ${vecLen(f.ball.acceleration).toFixed(1)}y/s2`;
@@ -510,6 +830,7 @@ function render() {
   passes.textContent = `${s.passesCompletedHome + s.passesCompletedAway} / ${s.passesAttemptedHome + s.passesAttemptedAway}`;
   recoveries.textContent = `${s.looseBallRecoveriesHome ?? 0} - ${s.looseBallRecoveriesAway ?? 0}`;
   offsides.textContent = `${s.offsidesHome ?? 0} - ${s.offsidesAway ?? 0}`;
+  offsideLine.textContent = offsideLineLabel();
   const homeRestarts = (s.throwInsHome ?? 0) + (s.goalKicksHome ?? 0) + (s.cornerKicksHome ?? 0) + (s.freeKicksHome ?? 0);
   const awayRestarts = (s.throwInsAway ?? 0) + (s.goalKicksAway ?? 0) + (s.cornerKicksAway ?? 0) + (s.freeKicksAway ?? 0);
   restarts.textContent = `${homeRestarts} - ${awayRestarts}`;
@@ -517,14 +838,31 @@ function render() {
   ticks.textContent = `${state.summary.ticks} / ${Math.round(state.config.durationSeconds / state.config.dtSeconds)}`;
   learning.textContent = learningLabel(state.learning);
   updateAgentStatePanel();
+  updateRunButton();
   events.innerHTML = eventLog.slice(-12).reverse().map(e => `<li>${fmtClock(e.clockSeconds)} ${e.description}</li>`).join("");
 }
 function humanSlotCount() {
   if (!state || !state.config) return 0;
-  return Math.min(Number(state.config.maxHumanPlayers || 0), 1);
+  return Math.max(0, Math.min(Number(state.config.maxHumanPlayers || 0), 4));
 }
 function assignmentForSlot(slot) {
   return (state?.controllerAssignments || []).find(a => a.controllerSlot === slot) || null;
+}
+function slotLabel(slot, assignment) {
+  return assignment ? `Slot ${slot + 1}: ${assignment.playerName}` : `Slot ${slot + 1}: autonomous`;
+}
+function setActiveSlot(slot) {
+  const count = humanSlotCount();
+  if (count <= 0) {
+    activeSlot = 0;
+    return;
+  }
+  activeSlot = Math.max(0, Math.min(Number(slot || 0), count - 1));
+  if (Array.from(slotPick.options).some(o => o.value === String(activeSlot))) {
+    slotPick.value = String(activeSlot);
+  }
+  rebuildControls();
+  render();
 }
 function assignmentKey(assignments) {
   return (assignments || [])
@@ -554,9 +892,7 @@ function clamp(v, lo, hi) {
   if (!Number.isFinite(v)) return lo;
   return Math.min(hi, Math.max(lo, v));
 }
-function presetForSurface(drag, stop) {
-  const air = Number(state?.config?.ballAirResistance ?? 0);
-  const grass = Number(state?.config?.ballGrassResistanceYps2 ?? 0);
+function presetForSurface(drag, air, grass, stop) {
   for (const [name, preset] of Object.entries(SURFACE_PRESETS)) {
     if (Math.abs(preset.ballDragPerTick - drag) < 0.0005
         && Math.abs(preset.ballAirResistance - air) < 0.0005
@@ -582,7 +918,7 @@ function syncSurfaceControls() {
   grassNumber.value = grass.toFixed(2);
   stopRange.value = String(clamp(stop, Number(stopRange.min), Number(stopRange.max)));
   stopNumber.value = stop.toFixed(2);
-  surfacePreset.value = presetForSurface(drag, stop);
+  surfacePreset.value = presetForSurface(drag, air, grass, stop);
   syncingSurface = false;
 }
 function syncSurfacePair(source) {
@@ -595,7 +931,7 @@ function syncSurfacePair(source) {
   if (source === stopRange) stopNumber.value = Number(stopRange.value).toFixed(2);
   if (source === stopNumber) stopRange.value = String(clamp(Number(stopNumber.value), Number(stopRange.min), Number(stopRange.max)));
   const v = surfaceValues();
-  surfacePreset.value = presetForSurface(v.ballDragPerTick, v.ballStopSpeedYps);
+  surfacePreset.value = presetForSurface(v.ballDragPerTick, v.ballAirResistance, v.ballGrassResistanceYps2, v.ballStopSpeedYps);
 }
 function scheduleSurfaceUpdate() {
   if (syncingSurface) return;
@@ -616,13 +952,13 @@ function rebuildControls(assignments) {
     const assignment = assignmentForSlot(slot);
     const opt = document.createElement("option");
     opt.value = slot;
-    opt.textContent = assignment ? `Human: ${assignment.playerName}` : "Human: autonomous";
+    opt.textContent = slotLabel(slot, assignment);
     slotPick.appendChild(opt);
 
     const row = document.createElement("div");
     row.className = "slot";
     const label = document.createElement("label");
-    label.textContent = "Control";
+    label.textContent = `Slot ${slot + 1}`;
     const pick = document.createElement("select");
     const empty = document.createElement("option");
     empty.value = "";
@@ -639,12 +975,20 @@ function rebuildControls(assignments) {
       const playerId = pick.value === "" ? null : Number(pick.value);
       assignSlot(slot, playerId).catch(e => statusEl.textContent = e.message);
     });
+    const activeButton = document.createElement("button");
+    activeButton.type = "button";
+    activeButton.textContent = "Use";
+    activeButton.className = slot === activeSlot ? "active" : "";
+    activeButton.addEventListener("click", () => setActiveSlot(slot));
     row.appendChild(label);
     row.appendChild(pick);
+    row.appendChild(activeButton);
     slots.appendChild(row);
   }
   if (Array.from(slotPick.options).some(o => o.value === existing)) {
     slotPick.value = existing;
+  } else if (humanSlotCount() > 0) {
+    slotPick.value = String(Math.max(0, Math.min(activeSlot, humanSlotCount() - 1)));
   }
   activeSlot = Number(slotPick.value || 0);
   rebuildTargetPick();
@@ -693,6 +1037,15 @@ function controlledPlayer() {
 function selectedPassTargetId() {
   return targetPick.value === "" ? null : Number(targetPick.value);
 }
+function setPassTarget(playerId) {
+  const value = String(playerId);
+  if (!Array.from(targetPick.options).some(o => o.value === value)) return false;
+  targetPick.value = value;
+  const p = state.frame.players.find(p => p.id === playerId);
+  statusEl.textContent = p ? `target ${p.shirt} ${p.name}` : "target set";
+  render();
+  return true;
+}
 function queueInput(pass = false, shoot = false) {
   const playerId = selectedPlayerId();
   if (playerId == null) return false;
@@ -720,6 +1073,10 @@ function queueEnterAction() {
   const shoot = keys.has("ShiftLeft") || keys.has("ShiftRight") || (isHolder && playerCanShoot(p));
   return queueInput(!shoot, shoot);
 }
+function isFormEditingTarget(target) {
+  const tag = String(target?.tagName || "").toLowerCase();
+  return tag === "input" || tag === "select" || tag === "textarea" || tag === "button";
+}
 async function postJson(path, body) {
   const res = await fetch(path, {
     method: "POST",
@@ -736,6 +1093,36 @@ async function assignSlot(slot, playerId) {
   rebuildControls(response.controllerAssignments);
   statusEl.textContent = "controller assigned";
   render();
+}
+async function handlePitchClick(e) {
+  if (!state?.frame?.players?.length || humanSlotCount() <= 0) return;
+  const hit = nearestPlayerAtCanvas(canvasPointFromEvent(e));
+  if (!hit) return;
+  const clicked = hit.player;
+  const selected = controlledPlayer();
+  if (selected
+      && clicked.id !== selected.id
+      && clicked.team === selected.team
+      && state?.frame?.ball?.holder === selected.id
+      && setPassTarget(clicked.id)) {
+    return;
+  }
+  if (selected?.id === clicked.id) {
+    statusEl.textContent = "controller active";
+    render();
+    return;
+  }
+  await assignSlot(activeSlot, clicked.id);
+}
+function handlePitchHover(e) {
+  if (!state?.frame?.players?.length) return;
+  const hit = nearestPlayerAtCanvas(canvasPointFromEvent(e));
+  const next = hit ? hit.player.id : null;
+  canvas.style.cursor = hit ? "pointer" : "default";
+  if (next !== hoverPlayerId) {
+    hoverPlayerId = next;
+    render();
+  }
 }
 async function updateSurface(values) {
   const response = await postJson("/api/surface", values);
@@ -760,6 +1147,40 @@ async function exportTeamPolicy() {
   URL.revokeObjectURL(url);
   statusEl.textContent = "policy exported";
 }
+async function exportTrackingDataset() {
+  const res = await fetch("/api/tracking-dataset");
+  if (!res.ok) throw new Error(await res.text());
+  const dataset = await res.json();
+  const lastFrame = Array.isArray(dataset.frames) && dataset.frames.length
+    ? dataset.frames[dataset.frames.length - 1]
+    : null;
+  const tick = Number(lastFrame?.tick ?? state?.summary?.ticks ?? 0);
+  const blob = new Blob([JSON.stringify(dataset, null, 2)], {type: "application/json"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `soccer-tracking-t${tick}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  statusEl.textContent = `tracking exported ${dataset.frames?.length ?? 0} frames`;
+}
+async function exportTrackingTemplate() {
+  const res = await fetch("/api/tracking-template");
+  if (!res.ok) throw new Error(await res.text());
+  const dataset = await res.json();
+  const blob = new Blob([JSON.stringify(dataset, null, 2)], {type: "application/json"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "soccer-tracking-template.json";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  statusEl.textContent = `tracking template ${dataset.frames?.length ?? 0} frames`;
+}
 async function importTeamPolicyFile(file) {
   const text = await file.text();
   const artifact = JSON.parse(text);
@@ -768,17 +1189,35 @@ async function importTeamPolicyFile(file) {
   statusEl.textContent = `policy imported H${response.importedHomeEntries} A${response.importedAwayEntries}`;
   render();
 }
+async function importTrackingFile(file) {
+  const content = await file.text();
+  const name = file.name || "tracking-upload";
+  const lower = name.toLowerCase();
+  const format = lower.endsWith(".json") ? "json" : "csv";
+  const response = await postJson("/api/tracking-policy", {
+    source: name,
+    format,
+    content
+  });
+  if (state) state.learning = response.learning;
+  statusEl.textContent = `tracking trained ${response.importedTransitions} transitions`;
+  render();
+}
 async function loadState() {
   const res = await fetch("/api/state");
   state = await res.json();
   applyAssignmentsToFrame(state.controllerAssignments);
   syncSurfaceControls();
   rebuildControls(state.controllerAssignments);
-  statusEl.textContent = "connected";
+  statusEl.textContent = state.done ? fullTimeLabel() : "connected";
   render();
 }
 async function stepOnce() {
-  if (!state || state.done) return;
+  if (!state) return;
+  if (state.done) {
+    updateRunButton();
+    return;
+  }
   const inputs = queuedInputs.splice(0, queuedInputs.length);
   const beforeAssignments = assignmentKey(state.controllerAssignments);
   const response = await postJson("/api/step", {ticks: 1, recordEveryTicks: 1, inputs});
@@ -808,15 +1247,20 @@ async function submitInputOnly(pass = false, shoot = false) {
   await postJson("/api/input", inputs);
 }
 runButton.addEventListener("click", () => {
+  if (state?.done) {
+    updateRunButton();
+    return;
+  }
   running = !running;
-  runButton.classList.toggle("active", running);
-  runButton.textContent = running ? "Run" : "Paused";
+  updateRunButton();
 });
 document.getElementById("step").addEventListener("click", () => stepOnce().catch(e => statusEl.textContent = e.message));
 document.getElementById("pass").addEventListener("click", () => submitInputOnly(true, false).catch(e => statusEl.textContent = e.message));
 document.getElementById("shoot").addEventListener("click", () => submitInputOnly(false, true).catch(e => statusEl.textContent = e.message));
 exportPolicyButton.addEventListener("click", () => exportTeamPolicy().catch(e => statusEl.textContent = e.message));
 importPolicyButton.addEventListener("click", () => policyFile.click());
+exportTrackingButton.addEventListener("click", () => exportTrackingDataset().catch(e => statusEl.textContent = e.message));
+sampleTrackingButton.addEventListener("click", () => exportTrackingTemplate().catch(e => statusEl.textContent = e.message));
 policyFile.addEventListener("change", () => {
   const file = policyFile.files && policyFile.files[0];
   if (!file) return;
@@ -824,17 +1268,40 @@ policyFile.addEventListener("change", () => {
     policyFile.value = "";
   });
 });
-slotPick.addEventListener("change", () => { activeSlot = Number(slotPick.value || 0); rebuildTargetPick(); render(); });
+importTrackingButton.addEventListener("click", () => trackingFile.click());
+trackingFile.addEventListener("change", () => {
+  const file = trackingFile.files && trackingFile.files[0];
+  if (!file) return;
+  importTrackingFile(file).catch(e => statusEl.textContent = e.message).finally(() => {
+    trackingFile.value = "";
+  });
+});
+slotPick.addEventListener("change", () => setActiveSlot(Number(slotPick.value || 0)));
+canvas.addEventListener("click", e => {
+  handlePitchClick(e).catch(err => statusEl.textContent = err.message);
+});
+canvas.addEventListener("mousemove", handlePitchHover);
+canvas.addEventListener("mouseleave", () => {
+  canvas.style.cursor = "default";
+  if (hoverPlayerId != null) {
+    hoverPlayerId = null;
+    render();
+  }
+});
 surfacePreset.addEventListener("change", () => {
   const preset = SURFACE_PRESETS[surfacePreset.value];
   if (!preset) return;
   dragNumber.value = preset.ballDragPerTick.toFixed(3);
+  airNumber.value = preset.ballAirResistance.toFixed(3);
+  grassNumber.value = preset.ballGrassResistanceYps2.toFixed(2);
   stopNumber.value = preset.ballStopSpeedYps.toFixed(2);
   syncSurfacePair(dragNumber);
+  syncSurfacePair(airNumber);
+  syncSurfacePair(grassNumber);
   syncSurfacePair(stopNumber);
   updateSurface(preset).catch(e => statusEl.textContent = e.message);
 });
-[dragRange, dragNumber, stopRange, stopNumber].forEach(el => {
+[dragRange, dragNumber, airRange, airNumber, grassRange, grassNumber, stopRange, stopNumber].forEach(el => {
   el.addEventListener("input", () => {
     syncSurfacePair(el);
     scheduleSurfaceUpdate();
@@ -845,6 +1312,15 @@ surfacePreset.addEventListener("change", () => {
   });
 });
 window.addEventListener("keydown", e => {
+  if (!isFormEditingTarget(e.target) && /^Digit[1-4]$/.test(e.code)) {
+    const slot = Number(e.code.slice(-1)) - 1;
+    if (slot < humanSlotCount()) {
+      e.preventDefault();
+      setActiveSlot(slot);
+      statusEl.textContent = `active slot ${slot + 1}`;
+    }
+    return;
+  }
   keys.add(e.code);
   if (e.code === "Enter") {
     e.preventDefault();

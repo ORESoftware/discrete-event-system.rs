@@ -394,11 +394,11 @@ than as one monolithic planner:
 | --- | --- |
 | Inventory control and dynamic programming | `inventory_dp`, `multistage_stochastic`, `main_inventory_mdp`, `main_newsvendor` |
 | Forecasting and state estimation | `nonlinear_forecasting_model`, `kalman_filter`, stochastic SDE/control reports |
-| LP and interior-point methods | `lp`, `lp_des`, `des_lp_bridge`, `external_linear_cli`; use `LP_SOLVER=internal-ipm` for the native primal-dual IPM or `scipy:highs-ipm` for SciPy HiGHS IPM; local CLI adapters can call installed HiGHS, GLPK, SCIP, CBC, CLP, and optional commercial solvers without vendoring executables; source-level range rows and objective offsets compile to equality/inequality rows; weighted L1 feasibility relaxation identifies minimum-cost row/bound repairs for infeasible models; simplex runs recover dual row prices and reduced costs when the active set is certifiable; infeasibility conflict extraction finds minimal row/bound subsystems for IIS-style diagnostics |
+| LP and interior-point methods | `lp`, `lp_des`, `des_lp_bridge`, `external_linear_cli`; use `LP_SOLVER=internal-ipm` for the native primal-dual IPM or `scipy:highs-ipm` for SciPy HiGHS IPM; local CLI adapters can call installed HiGHS, GLPK, SCIP, CBC, CLP, Gurobi, CPLEX, Xpress, and LINDO/RunLindo without vendoring executables; source-level range rows and objective offsets compile to equality/inequality rows; weighted L1 feasibility relaxation identifies minimum-cost row/bound repairs for infeasible models; simplex runs recover dual row prices and reduced costs when the active set is certifiable; HiGHS/GLPK CLI bridges surface reported LP dual row prices, reduced costs, and basis statuses when available; infeasibility conflict extraction finds minimal row/bound subsystems for IIS-style diagnostics |
 | Convex QP, MIQP, SOCP, and QCP | `qp`; dense active-set QP returns row, equality, lower-bound, upper-bound, and reduced-gradient KKT certificates; bounded MIQP enumerates integer assignments and solves convex QP subproblems |
 | Constraint programming / CP-SAT | `cp_sat`; finite-domain search covers Boolean logic, at-least/at-most/exactly-one cardinality, enforced linear/linear-domain/Boolean/cardinality/table constraints, automata, circuits/multiple-circuit routing, constant-array and variable-array element constraints, resource scheduling, optional and variable-size intervals, alternative mode intervals, fixed and variable-size 2D packing, variable-demand/capacity cumulative resources, reservoir constraints, solution hints/search starts, fixed-search decision strategies with min/max/lower-half/upper-half/median domain reductions, bounded solution enumeration, assumptions, and infeasible assumption cores |
-| Mixed-integer optimization | `milp_bnb`, `ip_mip_des`, `external_linear_cli`; branch-and-cut covers solution pools, MIP starts, branch priorities, relative/absolute MIP gap limits, infeasibility conflict refinement, weighted feasibility relaxation, lower bounds, ranged rows, indicators, SOS1/SOS2, semi-continuous/semi-integer variables, piecewise-linear rewards, absolute-value, maximum, minimum, binary-logic, L1/Linf norm, exact binary-binary/binary-continuous bounded-product general constraints, exact binary/bounded quadratic objective terms, and lexicographic objectives |
-| Solver-style modeling facade | `math_program`; named-variable LP/MIP facade cross-checked against external HiGHS, GLPK, SCIP, and CBC oracles, with CPLEX-LP text export for local solver CLIs, including `<=`/`>=`/`=` rows, bounds, integer/binary domains, indicator lowering, max/general-constraint lowering, conflict refinement, feasibility relaxation, and solution pools |
+| Mixed-integer optimization | `milp_bnb`, `ip_mip_des`, `external_linear_cli`; branch-and-cut covers solution pools, MIP starts, branch priorities, relative/absolute MIP gap limits, infeasibility conflict refinement, weighted feasibility relaxation, lower bounds, ranged rows, indicators, SOS1/SOS2, semi-continuous/semi-integer variables, piecewise-linear rewards, absolute-value, maximum, minimum, binary-logic, L1/Linf norm, exact binary-binary/binary-continuous bounded-product general constraints, exact binary/bounded quadratic objective terms, and lexicographic objectives; CLI bridges surface reported best bound, relative gap, and node counts when available |
+| Solver-style modeling facade | `math_program`; named-variable LP/MIP facade cross-checked against external HiGHS, GLPK, SCIP, CBC, OR-Tools GLOP/CP-SAT, optional commercial Gurobi/CPLEX/Xpress API oracles, and optional commercial Gurobi/CPLEX/Xpress/LINDO CLI oracles when locally available, with CPLEX-LP and MPS text export for local solver CLIs, including `<=`/`>=`/`=` rows, bounds, integer/binary domains, indicator lowering, max/general-constraint lowering, conflict refinement, feasibility relaxation, and solution pools |
 | Network flow and transportation | `max_flow`, `network_flow`, `traffic_flow`, `stochastic_flow_mdp` |
 | Vehicle routing and routing heuristics | `classical_optimization_models` VRP savings and nearest-neighbor runs |
 | Stochastic optimization and simulation | `stochastic_lp`, `statistical_optimization`, `fel`, `hybrid`, catalogue simulations |
@@ -408,8 +408,9 @@ than as one monolithic planner:
 Solver parity checks live in `validate_optimization_suite`; scale-envelope
 checks live in `validate_optimization_scale`. The suite cross-checks the
 high-level `math_program` facade, HiGHS, GLPK, SCIP, CBC, CLP, OR-Tools GLOP,
-and OR-Tools CP-SAT when available, and keeps optional hooks for commercial CLIs
-such as Gurobi, CPLEX, Xpress, and LINDO. The public
+and OR-Tools CP-SAT when available, and keeps optional hooks for commercial
+Gurobi, CPLEX, and Xpress APIs plus commercial CLI solves for Gurobi, CPLEX,
+Xpress, and LINDO/RunLindo. The public
 `des::general::external_linear_cli` module exposes the same local CLI path to
 library callers while keeping all solver executables out of version control;
 use `probe_external_linear_cli_solver` to distinguish
@@ -417,7 +418,7 @@ not-installed tools from bridge-unsupported tools and ready smoke-tested
 solvers. The CLI bridge and `math_program` oracle both discover solver commands
 on `PATH` or from local env vars: `HIGHS_CMD`, `GLPSOL_CMD`/`GLPK_CMD`,
 `SCIP_CMD`, `CBC_CMD`, `CLP_CMD`, `GUROBI_CL_CMD`/`GUROBI_CMD`, `CPLEX_CMD`,
-`XPRESS_CMD`, or `LINDO_CMD` (each also has an `ORES_*_CMD` form for
+`XPRESS_CMD`, or `RUNLINDO_CMD`/`LINDO_CMD` (each also has an `ORES_*_CMD` form for
 project-specific overrides). The companion
 `des::general::external_optimization_ecosystem` module
 keeps Java/Rust ecosystem integrations non-vendored too: set

@@ -21,9 +21,9 @@ use crate::des::general::cp_sat::{
     ObjectiveSense,
 };
 use crate::des::general::external_linear_cli::{
-    probe_external_linear_cli_solver, solve_ipmip_with_external_cli, solve_lp_with_external_cli,
-    ExternalLinearCliKind, ExternalLinearCliOptions, ExternalLinearCliProbeStatus,
-    ExternalLinearCliSolver, ExternalLinearCliStatus,
+    external_linear_cli_command, probe_external_linear_cli_solver, solve_ipmip_with_external_cli,
+    solve_lp_with_external_cli, ExternalLinearCliKind, ExternalLinearCliOptions,
+    ExternalLinearCliProbeStatus, ExternalLinearCliSolver, ExternalLinearCliStatus,
 };
 use crate::des::general::external_optimization_ecosystem::{
     probe_external_optimization_tool, ExternalOptimizationProbeStatus, ExternalOptimizationTool,
@@ -61,7 +61,7 @@ use crate::des::general::math_program::{
     cross_check_math_program_conflict_with_external,
     cross_check_math_program_feas_relaxation_with_external,
     cross_check_math_program_solution_pool_with_external, cross_check_math_program_with_external,
-    export_math_program_cplex_lp, ExternalMathProgramOptions, MathProgram,
+    export_math_program_cplex_lp, export_math_program_mps, ExternalMathProgramOptions, MathProgram,
     MathProgramConflictOptions, MathProgramFeasRelaxOptions, MathProgramSolutionPoolOptions,
     MathProgramSolveOptions, MathProgramStatus, ObjectiveSense as MathObjectiveSense, RowSense,
 };
@@ -178,7 +178,70 @@ struct LinearCliReference {
     solver: String,
     x: Vec<f64>,
     objective: Option<f64>,
+    #[serde(rename = "bestBound")]
+    best_bound: Option<f64>,
+    #[serde(rename = "mipGap")]
+    mip_gap: Option<f64>,
+    #[serde(rename = "nodesExplored")]
+    nodes_explored: Option<u64>,
+    #[serde(rename = "dualUB")]
+    dual_ub: Option<Vec<f64>>,
+    #[serde(rename = "dualEQ")]
+    dual_eq: Option<Vec<f64>>,
+    #[serde(rename = "reducedCosts")]
+    reduced_costs: Option<Vec<f64>>,
+    #[serde(rename = "varBasis")]
+    var_basis: Option<Vec<String>>,
+    #[serde(rename = "rowBasis")]
+    row_basis: Option<Vec<String>>,
     message: String,
+}
+
+fn one_line_preview(text: &str, max_chars: usize) -> String {
+    let mut preview = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if preview.len() > max_chars {
+        preview.truncate(max_chars);
+        preview.push_str("...");
+    }
+    preview
+}
+
+fn first_float_token(text: &str) -> Option<f64> {
+    text.split_whitespace()
+        .find_map(|token| token.parse::<f64>().ok())
+}
+
+fn highs_objective_from_text(text: &str) -> Option<f64> {
+    text.lines().find_map(|line| {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("Objective ") {
+            first_float_token(rest)
+        } else if trimmed.to_ascii_lowercase().starts_with("objective value") {
+            first_float_token(trimmed)
+        } else {
+            None
+        }
+    })
+}
+
+fn optional_math_program_external_unavailable(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    [
+        "unavailable",
+        "not installed",
+        "not found",
+        "no module named",
+        "module not found",
+        "could not import",
+        "importerror",
+        "license",
+        "licence",
+        "not configured",
+        "cannot find",
+        "failed to load",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
 }
 
 impl Driver {
@@ -1019,6 +1082,243 @@ impl Driver {
             );
         }
 
+        let cli_certificate_lp = LPProblem {
+            sense: Sense::Max,
+            c: vec![3.0, 2.0],
+            a_ub: Some(vec![vec![1.0, 1.0], vec![2.0, 1.0]]),
+            b_ub: Some(vec![4.0, 5.0]),
+            ..Default::default()
+        };
+        let cli_certificate_json = serde_json::json!({
+            "lp": {
+                "sense": cli_certificate_lp.sense.as_str(),
+                "c": &cli_certificate_lp.c,
+                "a_ub": &cli_certificate_lp.a_ub,
+                "b_ub": &cli_certificate_lp.b_ub,
+                "a_eq": &cli_certificate_lp.a_eq,
+                "b_eq": &cli_certificate_lp.b_eq,
+                "lb": &cli_certificate_lp.lb,
+                "ub": &cli_certificate_lp.ub,
+            }
+        })
+        .to_string();
+        let cli_certificate_reference =
+            self.run_linear_cli_reference("lp", "highs", &cli_certificate_json);
+        if cli_certificate_reference.status == "unavailable"
+            && cli_certificate_reference.message.contains("not found")
+        {
+            println!("  SKIP  LP highs:cli certificate executable not found");
+        } else {
+            self.check(
+                "LP highs:cli certificate status optimal",
+                cli_certificate_reference.status == "optimal",
+                format!(
+                    "external={} solver={}",
+                    cli_certificate_reference.status, cli_certificate_reference.solver
+                ),
+            );
+            self.max_abs_close_optional(
+                "LP highs:cli certificate dual_ub",
+                cli_certificate_reference.dual_ub.as_deref(),
+                Some(&[1.0, 1.0]),
+                1e-8,
+            );
+            self.max_abs_close_optional(
+                "LP highs:cli certificate reduced_costs",
+                cli_certificate_reference.reduced_costs.as_deref(),
+                Some(&[0.0, 0.0]),
+                1e-8,
+            );
+            self.check(
+                "LP highs:cli basis var statuses",
+                cli_certificate_reference
+                    .var_basis
+                    .as_ref()
+                    .is_some_and(|basis| basis.iter().map(String::as_str).eq(["basic", "basic"])),
+                format!("var_basis={:?}", cli_certificate_reference.var_basis),
+            );
+            self.check(
+                "LP highs:cli basis row statuses",
+                cli_certificate_reference
+                    .row_basis
+                    .as_ref()
+                    .is_some_and(|basis| {
+                        basis
+                            .iter()
+                            .map(String::as_str)
+                            .eq(["at_upper", "at_upper"])
+                    }),
+                format!("row_basis={:?}", cli_certificate_reference.row_basis),
+            );
+        }
+        let rust_cli_certificate_reference = solve_lp_with_external_cli(
+            &cli_certificate_lp,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Highs,
+                ..Default::default()
+            },
+        );
+        if rust_cli_certificate_reference.status == ExternalLinearCliStatus::Unavailable
+            && rust_cli_certificate_reference.message.contains("not found")
+        {
+            println!("  SKIP  LP highs:rust-cli certificate executable not found");
+        } else {
+            self.check(
+                "LP highs:rust-cli certificate status optimal",
+                rust_cli_certificate_reference.status == ExternalLinearCliStatus::Optimal,
+                format!(
+                    "external={} solver={}",
+                    rust_cli_certificate_reference.status.as_str(),
+                    rust_cli_certificate_reference.solver
+                ),
+            );
+            self.max_abs_close_optional(
+                "LP highs:rust-cli certificate dual_ub",
+                rust_cli_certificate_reference.dual_ub.as_deref(),
+                Some(&[1.0, 1.0]),
+                1e-8,
+            );
+            self.max_abs_close_optional(
+                "LP highs:rust-cli certificate reduced_costs",
+                rust_cli_certificate_reference.reduced_costs.as_deref(),
+                Some(&[0.0, 0.0]),
+                1e-8,
+            );
+            self.check(
+                "LP highs:rust-cli basis var statuses",
+                rust_cli_certificate_reference
+                    .var_basis
+                    .as_ref()
+                    .is_some_and(|basis| basis.iter().map(String::as_str).eq(["basic", "basic"])),
+                format!("var_basis={:?}", rust_cli_certificate_reference.var_basis),
+            );
+            self.check(
+                "LP highs:rust-cli basis row statuses",
+                rust_cli_certificate_reference
+                    .row_basis
+                    .as_ref()
+                    .is_some_and(|basis| {
+                        basis
+                            .iter()
+                            .map(String::as_str)
+                            .eq(["at_upper", "at_upper"])
+                    }),
+                format!("row_basis={:?}", rust_cli_certificate_reference.row_basis),
+            );
+        }
+        let glpk_cli_certificate_reference =
+            self.run_linear_cli_reference("lp", "glpk", &cli_certificate_json);
+        if glpk_cli_certificate_reference.status == "unavailable"
+            && glpk_cli_certificate_reference.message.contains("not found")
+        {
+            println!("  SKIP  LP glpk:cli certificate executable not found");
+        } else {
+            self.check(
+                "LP glpk:cli certificate status optimal",
+                glpk_cli_certificate_reference.status == "optimal",
+                format!(
+                    "external={} solver={}",
+                    glpk_cli_certificate_reference.status, glpk_cli_certificate_reference.solver
+                ),
+            );
+            self.max_abs_close_optional(
+                "LP glpk:cli certificate dual_ub",
+                glpk_cli_certificate_reference.dual_ub.as_deref(),
+                Some(&[1.0, 1.0]),
+                1e-8,
+            );
+            self.max_abs_close_optional(
+                "LP glpk:cli certificate reduced_costs",
+                glpk_cli_certificate_reference.reduced_costs.as_deref(),
+                Some(&[0.0, 0.0]),
+                1e-8,
+            );
+            self.check(
+                "LP glpk:cli basis var statuses",
+                glpk_cli_certificate_reference
+                    .var_basis
+                    .as_ref()
+                    .is_some_and(|basis| basis.iter().map(String::as_str).eq(["basic", "basic"])),
+                format!("var_basis={:?}", glpk_cli_certificate_reference.var_basis),
+            );
+            self.check(
+                "LP glpk:cli basis row statuses",
+                glpk_cli_certificate_reference
+                    .row_basis
+                    .as_ref()
+                    .is_some_and(|basis| {
+                        basis
+                            .iter()
+                            .map(String::as_str)
+                            .eq(["at_upper", "at_upper"])
+                    }),
+                format!("row_basis={:?}", glpk_cli_certificate_reference.row_basis),
+            );
+        }
+        let glpk_rust_cli_certificate_reference = solve_lp_with_external_cli(
+            &cli_certificate_lp,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Glpk,
+                ..Default::default()
+            },
+        );
+        if glpk_rust_cli_certificate_reference.status == ExternalLinearCliStatus::Unavailable
+            && glpk_rust_cli_certificate_reference
+                .message
+                .contains("not found")
+        {
+            println!("  SKIP  LP glpk:rust-cli certificate executable not found");
+        } else {
+            self.check(
+                "LP glpk:rust-cli certificate status optimal",
+                glpk_rust_cli_certificate_reference.status == ExternalLinearCliStatus::Optimal,
+                format!(
+                    "external={} solver={}",
+                    glpk_rust_cli_certificate_reference.status.as_str(),
+                    glpk_rust_cli_certificate_reference.solver
+                ),
+            );
+            self.max_abs_close_optional(
+                "LP glpk:rust-cli certificate dual_ub",
+                glpk_rust_cli_certificate_reference.dual_ub.as_deref(),
+                Some(&[1.0, 1.0]),
+                1e-8,
+            );
+            self.max_abs_close_optional(
+                "LP glpk:rust-cli certificate reduced_costs",
+                glpk_rust_cli_certificate_reference.reduced_costs.as_deref(),
+                Some(&[0.0, 0.0]),
+                1e-8,
+            );
+            self.check(
+                "LP glpk:rust-cli basis var statuses",
+                glpk_rust_cli_certificate_reference
+                    .var_basis
+                    .as_ref()
+                    .is_some_and(|basis| basis.iter().map(String::as_str).eq(["basic", "basic"])),
+                format!(
+                    "var_basis={:?}",
+                    glpk_rust_cli_certificate_reference.var_basis
+                ),
+            );
+            self.check(
+                "LP glpk:rust-cli basis row statuses",
+                glpk_rust_cli_certificate_reference
+                    .row_basis
+                    .as_ref()
+                    .is_some_and(|basis| {
+                        basis
+                            .iter()
+                            .map(String::as_str)
+                            .eq(["at_upper", "at_upper"])
+                    }),
+                format!(
+                    "row_basis={:?}",
+                    glpk_rust_cli_certificate_reference.row_basis
+                ),
+            );
+        }
+
         let lp_status_cases = vec![
             (
                 "infeasible",
@@ -1177,6 +1477,24 @@ impl Driver {
                 &reference.x,
                 1e-8,
             );
+            if solver == ExternalLinearCliSolver::Highs {
+                self.check(
+                    "IP/MIP highs:rust-cli quality metadata",
+                    reference
+                        .best_bound
+                        .zip(reference.objective)
+                        .is_some_and(|(bound, objective)| (bound - objective).abs() <= 1e-9)
+                        && reference.mip_gap.is_some_and(|gap| gap <= 1e-9)
+                        && reference.nodes_explored.is_some(),
+                    format!(
+                        "best_bound={:?} objective={:?} gap={:?} nodes={:?}",
+                        reference.best_bound,
+                        reference.objective,
+                        reference.mip_gap,
+                        reference.nodes_explored
+                    ),
+                );
+            }
         }
 
         let mip_status_cases = vec![
@@ -2380,6 +2698,153 @@ impl Driver {
         }
     }
 
+    fn check_optional_math_program_external_cross_check(
+        &mut self,
+        name: &str,
+        program: &MathProgram,
+        solve_opts: &MathProgramSolveOptions,
+        method: &str,
+        tol: f64,
+    ) {
+        let external_opts = ExternalMathProgramOptions {
+            method: Some(method.to_string()),
+            time_limit_ms: Some(5_000.0),
+            ..Default::default()
+        };
+        match cross_check_math_program_with_external(program, solve_opts, &external_opts, tol) {
+            Ok(report) => {
+                let message = report.external.message.as_deref().unwrap_or("");
+                if report.external.status == MathProgramStatus::NumericalError
+                    && optional_math_program_external_unavailable(message)
+                {
+                    println!("  SKIP  {name}: {message}");
+                    return;
+                }
+                self.check(
+                    name,
+                    report.within_tolerance
+                        && report.internal.status == MathProgramStatus::Optimal
+                        && report.external.status == MathProgramStatus::Optimal
+                        && report.objective_abs_diff.is_some_and(|diff| diff <= tol)
+                        && report.max_x_abs_diff.is_some_and(|diff| diff <= tol),
+                    format!(
+                        "method={} internal={:?} external={:?} obj_diff={:?} x_diff={:?} violations=({:?},{:?}) message={:?}",
+                        method,
+                        report.internal.status,
+                        report.external.status,
+                        report.objective_abs_diff,
+                        report.max_x_abs_diff,
+                        report.internal_max_violation,
+                        report.external_max_violation,
+                        report.external.message
+                    ),
+                );
+            }
+            Err(err) => {
+                let message = format!("{err:?}");
+                if optional_math_program_external_unavailable(&message) {
+                    println!("  SKIP  {name}: {message}");
+                } else {
+                    self.check(name, false, message);
+                }
+            }
+        }
+    }
+
+    fn check_math_program_export_highs_file_solve(
+        &mut self,
+        name: &str,
+        model_text: &str,
+        extension: &str,
+        expected_objective: Option<f64>,
+    ) {
+        let Some(highs) = external_linear_cli_command(ExternalLinearCliSolver::Highs) else {
+            println!("  SKIP  {name}: highs executable not found");
+            return;
+        };
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let work_dir = std::env::temp_dir().join(format!(
+            "des-math-program-export-{}-{stamp}",
+            std::process::id()
+        ));
+        if let Err(err) = std::fs::create_dir_all(&work_dir) {
+            self.check(name, false, format!("create temp dir failed: {err}"));
+            return;
+        }
+
+        let model_path = work_dir.join(format!("model.{}", extension.trim_start_matches('.')));
+        let solution_path = work_dir.join("solution.txt");
+        let options_path = work_dir.join("options.txt");
+        let log_path = work_dir.join("highs.log");
+        let write_result = std::fs::write(&model_path, model_text).and_then(|_| {
+            std::fs::write(
+                &options_path,
+                format!("time_limit = 5\nlog_file = {}\n", log_path.display()),
+            )
+        });
+        if let Err(err) = write_result {
+            let _ = std::fs::remove_dir_all(&work_dir);
+            self.check(
+                name,
+                false,
+                format!("write exported model solve files failed: {err}"),
+            );
+            return;
+        }
+
+        let output = Command::new(&highs)
+            .arg("--model_file")
+            .arg(&model_path)
+            .arg("--solution_file")
+            .arg(&solution_path)
+            .arg("--options_file")
+            .arg(&options_path)
+            .output();
+        let result = match output {
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let solution = std::fs::read_to_string(&solution_path).unwrap_or_default();
+                let combined = format!("{stdout}\n{stderr}\n{solution}");
+                let normalized = combined.to_ascii_lowercase();
+                let objective = highs_objective_from_text(&combined);
+                let objective_ok = match expected_objective {
+                    Some(expected) => {
+                        objective.is_some_and(|actual| (actual - expected).abs() <= 1e-7)
+                    }
+                    None => true,
+                };
+                let passed =
+                    output.status.success() && normalized.contains("optimal") && objective_ok;
+                let detail = if passed {
+                    format!(
+                        "command={:?} objective={:?} expected={:?} bytes={}",
+                        highs,
+                        objective,
+                        expected_objective,
+                        model_text.len()
+                    )
+                } else {
+                    format!(
+                        "command={:?} status={} objective={:?} expected={:?} output={}",
+                        highs,
+                        output.status,
+                        objective,
+                        expected_objective,
+                        one_line_preview(&combined, 240)
+                    )
+                };
+                (passed, detail)
+            }
+            Err(err) => (false, format!("command={:?} failed: {err}", highs)),
+        };
+        let _ = std::fs::remove_dir_all(&work_dir);
+        self.check(name, result.0, result.1);
+    }
+
     fn validate_math_program_facade(&mut self) {
         println!("\n-- Math-program facade: native lowering vs external solver oracles --");
         let solve_opts = MathProgramSolveOptions::default();
@@ -2414,9 +2879,42 @@ impl Driver {
         )
         .expect("LP preference");
 
+        let mut lp_expected_objective = None;
         match cross_check_math_program_with_external(&lp, &solve_opts, &external_opts, 1e-7) {
-            Ok(report) => self.check(
+            Ok(report) => {
+                lp_expected_objective = Some(report.internal.objective);
+                self.check(
+                    "MathProgram LP facade same-input HiGHS cross-check",
+                    report.within_tolerance
+                        && report.internal.status == MathProgramStatus::Optimal
+                        && report.external.status == MathProgramStatus::Optimal
+                        && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7),
+                    format!(
+                        "internal={:?} external={:?} obj_diff={:?} x_diff={:?} violations=({:?},{:?})",
+                        report.internal.status,
+                        report.external.status,
+                        report.objective_abs_diff,
+                        report.max_x_abs_diff,
+                        report.internal_max_violation,
+                        report.external_max_violation
+                    ),
+                );
+            }
+            Err(err) => self.check(
                 "MathProgram LP facade same-input HiGHS cross-check",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        let ortools_glop_opts = ExternalMathProgramOptions {
+            method: Some("ortools:GLOP".to_string()),
+            time_limit_ms: Some(5_000.0),
+            ..Default::default()
+        };
+        match cross_check_math_program_with_external(&lp, &solve_opts, &ortools_glop_opts, 1e-7) {
+            Ok(report) => self.check(
+                "MathProgram LP facade same-input OR-Tools GLOP cross-check",
                 report.within_tolerance
                     && report.internal.status == MathProgramStatus::Optimal
                     && report.external.status == MathProgramStatus::Optimal
@@ -2432,31 +2930,92 @@ impl Driver {
                 ),
             ),
             Err(err) => self.check(
-                "MathProgram LP facade same-input HiGHS cross-check",
+                "MathProgram LP facade same-input OR-Tools GLOP cross-check",
                 false,
                 format!("{err:?}"),
             ),
         }
 
+        for (solver, method) in [
+            ("Gurobi", "gurobi:default"),
+            ("CPLEX", "cplex:default"),
+            ("Xpress", "xpress:default"),
+        ] {
+            self.check_optional_math_program_external_cross_check(
+                &format!("MathProgram LP facade optional {solver} API same-input cross-check"),
+                &lp,
+                &solve_opts,
+                method,
+                1e-7,
+            );
+        }
+
         match export_math_program_cplex_lp(&lp) {
-            Ok(export) => self.check(
-                "MathProgram LP facade CPLEX-LP export",
-                !export.is_mip
+            Ok(export) => {
+                let passed = !export.is_mip
                     && export.original_variable_count == 3
                     && export.variable_names.len() == 3
                     && export.text.contains("Maximize\n")
                     && export.text.contains("Subject To\n")
                     && export.text.contains("Bounds\n")
-                    && export.text.ends_with("End\n"),
-                format!(
-                    "vars={} rows={} bytes={}",
-                    export.variable_names.len(),
-                    export.constraint_names.len(),
-                    export.text.len()
-                ),
-            ),
+                    && export.text.ends_with("End\n");
+                self.check(
+                    "MathProgram LP facade CPLEX-LP export",
+                    passed,
+                    format!(
+                        "vars={} rows={} bytes={}",
+                        export.variable_names.len(),
+                        export.constraint_names.len(),
+                        export.text.len()
+                    ),
+                );
+                if passed {
+                    self.check_math_program_export_highs_file_solve(
+                        "MathProgram LP facade CPLEX-LP HiGHS file solve",
+                        &export.text,
+                        "lp",
+                        lp_expected_objective,
+                    );
+                }
+            }
             Err(err) => self.check(
                 "MathProgram LP facade CPLEX-LP export",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        match export_math_program_mps(&lp) {
+            Ok(export) => {
+                let passed = !export.is_mip
+                    && export.original_variable_count == 3
+                    && export.variable_names.len() == 3
+                    && export.text.contains("OBJSENSE\n MAX\n")
+                    && export.text.contains("ROWS\n N  OBJ\n")
+                    && export.text.contains("COLUMNS\n")
+                    && export.text.contains("BOUNDS\n")
+                    && export.text.ends_with("ENDATA\n");
+                self.check(
+                    "MathProgram LP facade MPS export",
+                    passed,
+                    format!(
+                        "vars={} rows={} bytes={}",
+                        export.variable_names.len(),
+                        export.constraint_names.len(),
+                        export.text.len()
+                    ),
+                );
+                if passed {
+                    self.check_math_program_export_highs_file_solve(
+                        "MathProgram LP facade MPS HiGHS file solve",
+                        &export.text,
+                        "mps",
+                        lp_expected_objective,
+                    );
+                }
+            }
+            Err(err) => self.check(
+                "MathProgram LP facade MPS export",
                 false,
                 format!("{err:?}"),
             ),
@@ -2467,6 +3026,10 @@ impl Driver {
             (ExternalLinearCliSolver::Glpk, "glpsol:cli"),
             (ExternalLinearCliSolver::Scip, "scip:cli"),
             (ExternalLinearCliSolver::Cbc, "cbc:cli"),
+            (ExternalLinearCliSolver::Gurobi, "gurobi:cli"),
+            (ExternalLinearCliSolver::Cplex, "cplex:cli"),
+            (ExternalLinearCliSolver::Xpress, "xpress:cli"),
+            (ExternalLinearCliSolver::Lindo, "lindo:cli"),
         ] {
             self.check_math_program_cli_cross_check(
                 "LP",
@@ -2520,12 +3083,96 @@ impl Driver {
         mip.add_max("peak-load", peak, vec![load, reserve])
             .expect("peak max");
 
+        let mut mip_expected_objective = None;
         match cross_check_math_program_with_external(&mip, &solve_opts, &external_opts, 1e-7) {
-            Ok(report) => self.check(
+            Ok(report) => {
+                mip_expected_objective = Some(report.internal.objective);
+                self.check(
+                    "MathProgram MIP facade indicator/general-constraint cross-check",
+                    report.within_tolerance
+                        && report.internal.status == MathProgramStatus::Optimal
+                        && report.external.status == MathProgramStatus::Optimal
+                        && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7),
+                    format!(
+                        "internal={:?} external={:?} obj_diff={:?} x_diff={:?} violations=({:?},{:?})",
+                        report.internal.status,
+                        report.external.status,
+                        report.objective_abs_diff,
+                        report.max_x_abs_diff,
+                        report.internal_max_violation,
+                        report.external_max_violation
+                    ),
+                );
+            }
+            Err(err) => self.check(
                 "MathProgram MIP facade indicator/general-constraint cross-check",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        for (solver, method) in [
+            ("Gurobi", "gurobi:default"),
+            ("CPLEX", "cplex:default"),
+            ("Xpress", "xpress:default"),
+        ] {
+            self.check_optional_math_program_external_cross_check(
+                &format!("MathProgram MIP facade optional {solver} API same-input cross-check"),
+                &mip,
+                &solve_opts,
+                method,
+                1e-7,
+            );
+        }
+
+        let mut cp_sat_mip = MathProgram::new(MathObjectiveSense::Max);
+        let cp_a = cp_sat_mip.add_binary_var("select-a", 5.0).expect("cp a");
+        let cp_b = cp_sat_mip.add_binary_var("select-b", 4.0).expect("cp b");
+        let cp_load = cp_sat_mip
+            .add_integer_var("integer-load", 2.0, Some(0.0), Some(3.0))
+            .expect("cp load");
+        cp_sat_mip
+            .add_constraint(
+                "choose-at-most-one",
+                vec![(cp_a, 1.0), (cp_b, 1.0)],
+                RowSense::Le,
+                1.0,
+            )
+            .expect("cp choose");
+        cp_sat_mip
+            .add_constraint(
+                "capacity",
+                vec![(cp_load, 1.0), (cp_a, 2.0), (cp_b, 1.0)],
+                RowSense::Le,
+                3.0,
+            )
+            .expect("cp capacity");
+        cp_sat_mip
+            .add_constraint(
+                "b-requires-load",
+                vec![(cp_load, 1.0), (cp_b, -2.0)],
+                RowSense::Ge,
+                0.0,
+            )
+            .expect("cp load lower");
+
+        let ortools_cp_sat_opts = ExternalMathProgramOptions {
+            method: Some("ortools:CP-SAT".to_string()),
+            time_limit_ms: Some(5_000.0),
+            ..Default::default()
+        };
+        match cross_check_math_program_with_external(
+            &cp_sat_mip,
+            &solve_opts,
+            &ortools_cp_sat_opts,
+            1e-7,
+        ) {
+            Ok(report) => self.check(
+                "MathProgram integer facade same-input OR-Tools CP-SAT cross-check",
                 report.within_tolerance
                     && report.internal.status == MathProgramStatus::Optimal
                     && report.external.status == MathProgramStatus::Optimal
+                    && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
                     && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7),
                 format!(
                     "internal={:?} external={:?} obj_diff={:?} x_diff={:?} violations=({:?},{:?})",
@@ -2538,33 +3185,83 @@ impl Driver {
                 ),
             ),
             Err(err) => self.check(
-                "MathProgram MIP facade indicator/general-constraint cross-check",
+                "MathProgram integer facade same-input OR-Tools CP-SAT cross-check",
                 false,
                 format!("{err:?}"),
             ),
         }
 
         match export_math_program_cplex_lp(&mip) {
-            Ok(export) => self.check(
-                "MathProgram MIP facade compiled CPLEX-LP export",
-                export.is_mip
+            Ok(export) => {
+                let passed = export.is_mip
                     && export.original_variable_count == 5
                     && export.variable_names.len() > export.original_variable_count
                     && export.text.contains("Maximize\n")
                     && export.text.contains("Subject To\n")
                     && export.text.contains("Bounds\n")
                     && export.text.contains("Binaries\n")
-                    && export.text.ends_with("End\n"),
-                format!(
-                    "original_vars={} exported_vars={} rows={} bytes={}",
-                    export.original_variable_count,
-                    export.variable_names.len(),
-                    export.constraint_names.len(),
-                    export.text.len()
-                ),
-            ),
+                    && export.text.ends_with("End\n");
+                self.check(
+                    "MathProgram MIP facade compiled CPLEX-LP export",
+                    passed,
+                    format!(
+                        "original_vars={} exported_vars={} rows={} bytes={}",
+                        export.original_variable_count,
+                        export.variable_names.len(),
+                        export.constraint_names.len(),
+                        export.text.len()
+                    ),
+                );
+                if passed {
+                    self.check_math_program_export_highs_file_solve(
+                        "MathProgram MIP facade CPLEX-LP HiGHS file solve",
+                        &export.text,
+                        "lp",
+                        mip_expected_objective,
+                    );
+                }
+            }
             Err(err) => self.check(
                 "MathProgram MIP facade compiled CPLEX-LP export",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        match export_math_program_mps(&mip) {
+            Ok(export) => {
+                let passed = export.is_mip
+                    && export.original_variable_count == 5
+                    && export.variable_names.len() > export.original_variable_count
+                    && export.text.contains("OBJSENSE\n MAX\n")
+                    && export.text.contains("ROWS\n N  OBJ\n")
+                    && export.text.contains("COLUMNS\n")
+                    && export.text.contains("'INTORG'")
+                    && export.text.contains("'INTEND'")
+                    && export.text.contains("BOUNDS\n")
+                    && export.text.ends_with("ENDATA\n");
+                self.check(
+                    "MathProgram MIP facade compiled MPS export",
+                    passed,
+                    format!(
+                        "original_vars={} exported_vars={} rows={} bytes={}",
+                        export.original_variable_count,
+                        export.variable_names.len(),
+                        export.constraint_names.len(),
+                        export.text.len()
+                    ),
+                );
+                if passed {
+                    self.check_math_program_export_highs_file_solve(
+                        "MathProgram MIP facade MPS HiGHS file solve",
+                        &export.text,
+                        "mps",
+                        mip_expected_objective,
+                    );
+                }
+            }
+            Err(err) => self.check(
+                "MathProgram MIP facade compiled MPS export",
                 false,
                 format!("{err:?}"),
             ),
@@ -2575,6 +3272,10 @@ impl Driver {
             (ExternalLinearCliSolver::Glpk, "glpsol:cli"),
             (ExternalLinearCliSolver::Scip, "scip:cli"),
             (ExternalLinearCliSolver::Cbc, "cbc:cli"),
+            (ExternalLinearCliSolver::Gurobi, "gurobi:cli"),
+            (ExternalLinearCliSolver::Cplex, "cplex:cli"),
+            (ExternalLinearCliSolver::Xpress, "xpress:cli"),
+            (ExternalLinearCliSolver::Lindo, "lindo:cli"),
         ] {
             self.check_math_program_cli_cross_check(
                 "MIP",
@@ -3252,6 +3953,22 @@ impl Driver {
             mip_gap_internal.z,
             mip_gap_reference.objective.unwrap_or(f64::NAN),
             1e-9,
+        );
+        self.check(
+            "IP/MIP HiGHS CLI quality metadata",
+            mip_gap_reference
+                .best_bound
+                .zip(mip_gap_reference.objective)
+                .is_some_and(|(bound, objective)| (bound - objective).abs() <= 1e-9)
+                && mip_gap_reference.mip_gap.is_some_and(|gap| gap <= 1e-9)
+                && mip_gap_reference.nodes_explored.is_some(),
+            format!(
+                "best_bound={:?} objective={:?} gap={:?} nodes={:?}",
+                mip_gap_reference.best_bound,
+                mip_gap_reference.objective,
+                mip_gap_reference.mip_gap,
+                mip_gap_reference.nodes_explored
+            ),
         );
 
         let start_internal = solve_ipmip_with_des(

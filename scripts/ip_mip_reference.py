@@ -1398,14 +1398,86 @@ def feasible(p: dict, x: Sequence[float], tol: float = 1e-7) -> bool:
     return True
 
 
-def solve_continuous_remainder(p: dict, fixed: dict[int, float]) -> Optional[Tuple[List[float], float]]:
+def default_continuous_point(p: dict, fixed: dict[int, float]) -> Optional[List[float]]:
+    lbs, ubs = bounds(p)
+    x = [0.0] * len(p["c"])
+    for j, value in fixed.items():
+        x[j] = value
+    for j in range(len(x)):
+        if j in fixed:
+            continue
+        value = 0.0
+        if value < lbs[j]:
+            value = lbs[j]
+        if ubs[j] is not None and value > float(ubs[j]):
+            value = float(ubs[j])
+        x[j] = value
+    return x if feasible(p, x) else None
+
+
+def continuous_remainder_unbounded(p: dict, fixed: dict[int, float]) -> bool:
+    n = len(p["c"])
+    _, ubs = bounds(p)
+    objective_direction = [float(v) for v in p["c"]]
+    if p.get("sense", "max") != "max":
+        objective_direction = [-v for v in objective_direction]
+    movable = [
+        j
+        for j in range(n)
+        if j not in fixed and ubs[j] is None and objective_direction[j] > 1e-9
+    ]
+    if not movable:
+        return False
+
+    rows = [[float(v) for v in row] for row in p.get("a", [])]
+    if any(all(row[j] <= 1e-12 for row in rows) for j in movable):
+        return True
+
+    direction_lb = []
+    direction_ub = []
+    for j in range(n):
+        direction_lb.append(0.0)
+        direction_ub.append(0.0 if j in fixed or ubs[j] is not None else 1.0)
+
+    try:
+        import numpy as np  # type: ignore
+        from scipy.optimize import linprog  # type: ignore
+
+        result = linprog(
+            [-v for v in objective_direction],
+            A_ub=np.array(rows, dtype=float) if rows else None,
+            b_ub=np.zeros(len(rows), dtype=float) if rows else None,
+            bounds=list(zip(direction_lb, direction_ub)),
+            method="highs",
+        )
+        if result.success and result.fun is not None:
+            return -float(result.fun) > 1e-9
+        return False
+    except Exception:
+        pass
+
+    if n > 8:
+        return False
+    direction_lp = {
+        "sense": "max",
+        "c": objective_direction,
+        "A_ub": rows,
+        "b_ub": [0.0 for _ in rows],
+        "lb": direction_lb,
+        "ub": direction_ub,
+    }
+    result = vertex_enumeration(direction_lp)
+    return result["status"] == "optimal" and float(result.get("objective") or 0.0) > 1e-9
+
+
+def solve_continuous_remainder(p: dict, fixed: dict[int, float]) -> Tuple[str, Optional[List[float]], Optional[float]]:
     n = len(p["c"])
     cont = [j for j in range(n) if j not in fixed]
     x = [0.0] * n
     for j, v in fixed.items():
         x[j] = v
     if not cont:
-        return (x, objective(p, x)) if feasible(p, x) else None
+        return ("optimal", x, objective(p, x)) if feasible(p, x) else ("infeasible", None, None)
 
     c_cont = [float(p["c"][j]) for j in cont]
     a_ub = []
@@ -1425,12 +1497,17 @@ def solve_continuous_remainder(p: dict, fixed: dict[int, float]) -> Optional[Tup
     }
     result = vertex_enumeration(lp)
     if result["status"] != "optimal":
-        return None
+        x = default_continuous_point(p, fixed)
+        if x is not None and continuous_remainder_unbounded(p, fixed):
+            return "unbounded", x, None
+        return "infeasible", None, None
     for k, j in enumerate(cont):
         x[j] = float(result["x"][k])
     if not feasible(p, x):
-        return None
-    return x, objective(p, x)
+        return "infeasible", None, None
+    if continuous_remainder_unbounded(p, fixed):
+        return "unbounded", x, None
+    return "optimal", x, objective(p, x)
 
 
 def brute_force(p: dict, max_enumerations: int) -> dict:
@@ -1454,10 +1531,11 @@ def brute_force(p: dict, max_enumerations: int) -> dict:
         if enumerated > max_enumerations:
             return payload("unavailable", "python:bounded-enumeration", message="enumeration cap reached", enumerated=enumerated)
         fixed = {j: float(v) for j, v in zip(int_vars, values)}
-        candidate = solve_continuous_remainder(p, fixed)
-        if candidate is None:
+        status, x, obj = solve_continuous_remainder(p, fixed)
+        if status == "unbounded":
+            return payload("unbounded", "python:bounded-enumeration", enumerated=enumerated)
+        if status != "optimal" or x is None or obj is None:
             continue
-        x, obj = candidate
         if p.get("sense", "max") == "max":
             better = obj > best_obj + 1e-9
         else:
@@ -1491,9 +1569,11 @@ def brute_force_pool(p: dict, pool_size: int, max_enumerations: int) -> dict:
         if enumerated > max_enumerations:
             return payload("unavailable", "python:bounded-enumeration-pool", message="enumeration cap reached", enumerated=enumerated)
         fixed = {j: float(v) for j, v in zip(int_vars, values)}
-        candidate = solve_continuous_remainder(p, fixed)
-        if candidate is not None:
-            candidates.append(candidate)
+        status, x, obj = solve_continuous_remainder(p, fixed)
+        if status == "unbounded":
+            return payload("unbounded", "python:bounded-enumeration-pool", enumerated=enumerated, solutions=[], exhausted=False)
+        if status == "optimal" and x is not None and obj is not None:
+            candidates.append((x, obj))
     if not candidates:
         return payload("infeasible", "python:bounded-enumeration-pool", enumerated=enumerated, solutions=[], exhausted=True)
 

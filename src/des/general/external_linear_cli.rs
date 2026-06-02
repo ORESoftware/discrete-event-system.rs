@@ -74,7 +74,7 @@ impl ExternalLinearCliSolver {
             ExternalLinearCliSolver::Gurobi => &["gurobi_cl"],
             ExternalLinearCliSolver::Cplex => &["cplex"],
             ExternalLinearCliSolver::Xpress => &["optimizer", "xpress"],
-            ExternalLinearCliSolver::Lindo => &["lindo", "lindoapi"],
+            ExternalLinearCliSolver::Lindo => &["runlindo", "lindo", "lindoapi"],
         }
     }
 
@@ -95,7 +95,12 @@ impl ExternalLinearCliSolver {
             ExternalLinearCliSolver::Xpress => {
                 &["XPRESS_CMD", "XPRESS_OPTIMIZER_CMD", "ORES_XPRESS_CMD"]
             }
-            ExternalLinearCliSolver::Lindo => &["LINDO_CMD", "LINDOAPI_CMD", "ORES_LINDO_CMD"],
+            ExternalLinearCliSolver::Lindo => &[
+                "RUNLINDO_CMD",
+                "LINDO_CMD",
+                "LINDOAPI_CMD",
+                "ORES_LINDO_CMD",
+            ],
         }
     }
 
@@ -112,6 +117,8 @@ impl ExternalLinearCliSolver {
                     | ExternalLinearCliSolver::Clp
                     | ExternalLinearCliSolver::Gurobi
                     | ExternalLinearCliSolver::Cplex
+                    | ExternalLinearCliSolver::Xpress
+                    | ExternalLinearCliSolver::Lindo
             ),
             ExternalLinearCliKind::Mip => matches!(
                 self,
@@ -121,6 +128,8 @@ impl ExternalLinearCliSolver {
                     | ExternalLinearCliSolver::Cbc
                     | ExternalLinearCliSolver::Gurobi
                     | ExternalLinearCliSolver::Cplex
+                    | ExternalLinearCliSolver::Xpress
+                    | ExternalLinearCliSolver::Lindo
             ),
         }
     }
@@ -243,6 +252,22 @@ pub struct ExternalLinearCliSolution {
     pub solver: String,
     pub x: Vec<f64>,
     pub objective: Option<f64>,
+    /// Best known dual bound reported by a MIP-capable CLI, when available.
+    pub best_bound: Option<f64>,
+    /// Relative MIP gap reported by a MIP-capable CLI, when available.
+    pub mip_gap: Option<f64>,
+    /// Branch-and-bound nodes explored by a MIP-capable CLI, when available.
+    pub nodes_explored: Option<u64>,
+    /// LP inequality row dual prices reported by a CLI, when available.
+    pub dual_ub: Option<Vec<f64>>,
+    /// LP equality row dual prices reported by a CLI, when available.
+    pub dual_eq: Option<Vec<f64>>,
+    /// LP reduced costs reported by a CLI, when available.
+    pub reduced_costs: Option<Vec<f64>>,
+    /// LP basis status for original variables, when reported by a CLI.
+    pub var_basis: Option<Vec<String>>,
+    /// LP basis status for rows (`A_ub` rows followed by `A_eq` rows), when reported by a CLI.
+    pub row_basis: Option<Vec<String>>,
     pub elapsed_ms: f64,
     pub message: String,
 }
@@ -265,6 +290,22 @@ struct RawExternalLinearCliSolution {
     solver: String,
     x: Vec<f64>,
     objective: Option<f64>,
+    #[serde(rename = "bestBound")]
+    best_bound: Option<f64>,
+    #[serde(rename = "mipGap")]
+    mip_gap: Option<f64>,
+    #[serde(rename = "nodesExplored")]
+    nodes_explored: Option<u64>,
+    #[serde(rename = "dualUB")]
+    dual_ub: Option<Vec<f64>>,
+    #[serde(rename = "dualEQ")]
+    dual_eq: Option<Vec<f64>>,
+    #[serde(rename = "reducedCosts")]
+    reduced_costs: Option<Vec<f64>>,
+    #[serde(rename = "varBasis")]
+    var_basis: Option<Vec<String>>,
+    #[serde(rename = "rowBasis")]
+    row_basis: Option<Vec<String>>,
     message: String,
 }
 
@@ -533,6 +574,14 @@ pub fn solve_linear_cli_json(
             solver: raw.solver,
             x: raw.x,
             objective: raw.objective,
+            best_bound: raw.best_bound,
+            mip_gap: raw.mip_gap,
+            nodes_explored: raw.nodes_explored,
+            dual_ub: raw.dual_ub,
+            dual_eq: raw.dual_eq,
+            reduced_costs: raw.reduced_costs,
+            var_basis: raw.var_basis,
+            row_basis: raw.row_basis,
             elapsed_ms: elapsed,
             message: raw.message,
         },
@@ -560,6 +609,14 @@ fn external_cli_failure(
         solver,
         x: Vec::new(),
         objective: None,
+        best_bound: None,
+        mip_gap: None,
+        nodes_explored: None,
+        dual_ub: None,
+        dual_eq: None,
+        reduced_costs: None,
+        var_basis: None,
+        row_basis: None,
         elapsed_ms,
         message,
     }
@@ -777,7 +834,12 @@ mod tests {
         );
         assert_eq!(
             ExternalLinearCliSolver::Lindo.command_env_vars(),
-            &["LINDO_CMD", "LINDOAPI_CMD", "ORES_LINDO_CMD"]
+            &[
+                "RUNLINDO_CMD",
+                "LINDO_CMD",
+                "LINDOAPI_CMD",
+                "ORES_LINDO_CMD"
+            ]
         );
         assert_eq!(
             ExternalLinearCliSolver::Xpress.command_aliases(),
@@ -787,8 +849,10 @@ mod tests {
         assert!(ExternalLinearCliSolver::Highs.supports_kind(ExternalLinearCliKind::Mip));
         assert!(ExternalLinearCliSolver::Clp.supports_kind(ExternalLinearCliKind::Lp));
         assert!(!ExternalLinearCliSolver::Clp.supports_kind(ExternalLinearCliKind::Mip));
-        assert!(!ExternalLinearCliSolver::Lindo.supports_kind(ExternalLinearCliKind::Lp));
-        assert!(!ExternalLinearCliSolver::Xpress.supports_kind(ExternalLinearCliKind::Mip));
+        assert!(ExternalLinearCliSolver::Lindo.supports_kind(ExternalLinearCliKind::Lp));
+        assert!(ExternalLinearCliSolver::Lindo.supports_kind(ExternalLinearCliKind::Mip));
+        assert!(ExternalLinearCliSolver::Xpress.supports_kind(ExternalLinearCliKind::Lp));
+        assert!(ExternalLinearCliSolver::Xpress.supports_kind(ExternalLinearCliKind::Mip));
     }
 
     #[test]

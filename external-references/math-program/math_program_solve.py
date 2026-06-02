@@ -29,6 +29,8 @@ COMMAND_ENV_VARS = {
     "cbc": ["CBC_CMD", "ORES_CBC_CMD"],
 }
 
+COMMERCIAL_LINEAR_CLI_SOLVERS = {"gurobi", "cplex", "xpress", "lindo"}
+
 
 def _command_for(solver: str) -> str:
     for env_var in COMMAND_ENV_VARS.get(solver, []):
@@ -313,6 +315,16 @@ def _external_options(payload: dict[str, Any]) -> dict[str, Any]:
     return options if isinstance(options, dict) else {}
 
 
+def _linear_cli_reference_script() -> str:
+    here = os.path.dirname(os.path.abspath(__file__))
+    repo_relative = os.path.abspath(
+        os.path.join(here, "..", "..", "scripts", "linear_cli_reference.py")
+    )
+    if os.path.exists(repo_relative):
+        return repo_relative
+    return os.path.abspath(os.path.join(os.getcwd(), "scripts", "linear_cli_reference.py"))
+
+
 def _time_limit_seconds(options: dict[str, Any], default: float | None = None) -> float | None:
     value = _finite_float_or_none(options.get("timeLimitMs"))
     if value is None:
@@ -415,10 +427,88 @@ def _mip_row_arrays(problem: dict[str, Any]) -> tuple[list[list[float]], list[fl
     return [row for row, _ in rows], [bound for _, bound in rows]
 
 
+def _mip_for_linear_cli_bridge(problem: dict[str, Any]) -> dict[str, Any]:
+    bridge_problem = dict(problem)
+    if "A" in problem and "a" not in bridge_problem:
+        bridge_problem["a"] = problem["A"]
+    if "integerVars" in problem and "integer_vars" not in bridge_problem:
+        bridge_problem["integer_vars"] = problem["integerVars"]
+
+    rows = list(bridge_problem.get("a") or [])
+    rhs = list(bridge_problem.get("b") or [])
+    for lazy in problem.get("lazyConstraints") or []:
+        rows.append(lazy.get("coefs", []))
+        rhs.append(lazy.get("rhs", 0.0))
+    bridge_problem["a"] = rows
+    bridge_problem["b"] = rhs
+    return bridge_problem
+
+
+def solve_linear_cli_bridge(
+    problem: dict[str, Any],
+    kind: str,
+    solver: str,
+    options: dict[str, Any],
+) -> dict[str, Any]:
+    raw = {"lp": problem} if kind == "lp" else _mip_for_linear_cli_bridge(problem)
+    time_limit = _time_limit_seconds(options, 60.0) or 60.0
+    try:
+        run = subprocess.run(
+            [
+                sys.executable,
+                _linear_cli_reference_script(),
+                "--kind",
+                kind,
+                "--solver",
+                solver,
+                "--time-limit",
+                f"{time_limit:.17g}",
+            ],
+            input=json.dumps(raw, allow_nan=True),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=max(time_limit + 15.0, 20.0),
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "status": "time-limit",
+            "x": [],
+            "objective": None,
+            "message": f"{solver}:cli bridge timed out: {exc}",
+        }
+
+    if run.returncode != 0:
+        return {
+            "status": "numerical-error",
+            "x": [],
+            "objective": None,
+            "message": f"{solver}:cli bridge exited with {run.returncode}: {run.stderr.strip()}",
+        }
+
+    lines = [line for line in run.stdout.splitlines() if line.strip()]
+    if not lines:
+        return {
+            "status": "numerical-error",
+            "x": [],
+            "objective": None,
+            "message": f"{solver}:cli bridge produced no JSON: {run.stderr.strip()}",
+        }
+    result = json.loads(lines[-1])
+    if result.get("status") == "unavailable":
+        result["status"] = "numerical-error"
+    return result
+
+
 def solve_lp(payload: dict[str, Any], method: str) -> dict[str, Any]:
     family, backend = _solver_backend(method)
     if family == "ortools":
         return solve_ortools(payload, backend, integer=False)
+    if backend == "cli" and family in COMMERCIAL_LINEAR_CLI_SOLVERS:
+        return solve_linear_cli_bridge(
+            payload["lp"], "lp", family, _external_options(payload)
+        )
     if family in {"highs-cli", "highs"}:
         return solve_highs_cli(payload["lp"], integer=False, options=_external_options(payload))
     if family in {"cbc-cli", "cbc"}:
@@ -752,6 +842,10 @@ def solve_mip(payload: dict[str, Any], method: str) -> dict[str, Any]:
         if normalized_backend in {"CP-SAT", "CPSAT"}:
             return solve_ortools_cp_sat(payload)
         return solve_ortools(payload, backend, integer=True)
+    if backend == "cli" and family in COMMERCIAL_LINEAR_CLI_SOLVERS:
+        return solve_linear_cli_bridge(
+            payload["mip"], "mip", family, _external_options(payload)
+        )
     if family in {"highs-cli", "highs"}:
         return solve_highs_cli(payload["mip"], integer=True, options=_external_options(payload))
     if family in {"cbc-cli", "cbc"}:

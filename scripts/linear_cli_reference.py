@@ -4,16 +4,19 @@
 The Rust optimization suite already cross-checks through Python APIs such as
 SciPy and OR-Tools. This bridge exercises actual command-line solvers
 (`highs`, `glpsol`, `scip`, `cbc`, LP-only `clp`, and optional commercial
-CLIs such as `gurobi_cl` and `cplex`) on the same small validation models by
-writing a CPLEX LP file, invoking the solver, and parsing the primal solution.
+CLIs such as `gurobi_cl`, `cplex`, FICO Xpress `optimizer`, and LINDO
+`runlindo`) on the same small validation models by writing a solver-readable
+LP/MPS file, invoking the solver, and parsing the primal solution.
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -34,7 +37,7 @@ COMMAND_ALIASES = {
     "gurobi": ["gurobi_cl"],
     "cplex": ["cplex"],
     "xpress": ["optimizer", "xpress"],
-    "lindo": ["lindo", "lindoapi"],
+    "lindo": ["runlindo", "lindo", "lindoapi"],
 }
 
 COMMAND_ENV_VARS = {
@@ -46,10 +49,56 @@ COMMAND_ENV_VARS = {
     "gurobi": ["GUROBI_CL_CMD", "GUROBI_CMD", "ORES_GUROBI_CMD"],
     "cplex": ["CPLEX_CMD", "ORES_CPLEX_CMD"],
     "xpress": ["XPRESS_CMD", "XPRESS_OPTIMIZER_CMD", "ORES_XPRESS_CMD"],
-    "lindo": ["LINDO_CMD", "LINDOAPI_CMD", "ORES_LINDO_CMD"],
+    "lindo": ["RUNLINDO_CMD", "LINDO_CMD", "LINDOAPI_CMD", "ORES_LINDO_CMD"],
 }
 
-SUPPORTED_SOLVERS = {"glpk", "highs", "scip", "cbc", "clp", "gurobi", "cplex"}
+SUPPORTED_SOLVERS = {
+    "glpk",
+    "highs",
+    "scip",
+    "cbc",
+    "clp",
+    "gurobi",
+    "cplex",
+    "xpress",
+    "lindo",
+}
+
+
+def basis_status_from_token(token: object) -> Optional[str]:
+    text = str(token).strip().lower()
+    highs_codes = {
+        "0": "at_lower",
+        "1": "basic",
+        "2": "at_upper",
+        "3": "zero",
+        "4": "nonbasic",
+    }
+    glpk_codes = {
+        "b": "basic",
+        "bs": "basic",
+        "l": "at_lower",
+        "nl": "at_lower",
+        "u": "at_upper",
+        "nu": "at_upper",
+        "f": "free",
+        "nf": "free",
+        "s": "fixed",
+        "ns": "fixed",
+    }
+    named = {
+        "basic": "basic",
+        "lower": "at_lower",
+        "at_lower": "at_lower",
+        "upper": "at_upper",
+        "at_upper": "at_upper",
+        "zero": "zero",
+        "nonbasic": "nonbasic",
+        "free": "free",
+        "fixed": "fixed",
+        "superbasic": "superbasic",
+    }
+    return highs_codes.get(text) or glpk_codes.get(text) or named.get(text)
 
 
 def status_payload(status: str, solver: str, message: str = "") -> dict:
@@ -170,11 +219,110 @@ def write_cplex_lp(
     return names
 
 
-def parse_highs_solution(path: str, n: int) -> tuple[str, list[float]]:
+def write_free_mps(
+    path: str,
+    sense: str,
+    c: Sequence[float],
+    le_rows: Sequence[Sequence[float]],
+    le_rhs: Sequence[float],
+    eq_rows: Sequence[Sequence[float]],
+    eq_rhs: Sequence[float],
+    lbs: Sequence[Optional[float]],
+    ubs: Sequence[Optional[float]],
+    integer_vars: Sequence[bool],
+) -> list[str]:
+    n = len(c)
+    names = [var_name(i) for i in range(n)]
+    rows = [("L", f"c{i}", row, rhs) for i, (row, rhs) in enumerate(zip(le_rows, le_rhs))]
+    rows.extend(("E", f"e{i}", row, rhs) for i, (row, rhs) in enumerate(zip(eq_rows, eq_rhs)))
+    if not rows:
+        rows = [("L", "c0", [0.0] * n, 0.0)]
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("NAME          ORESCLI\n")
+        f.write("OBJSENSE\n")
+        f.write(" MAX\n" if sense == "max" else " MIN\n")
+        f.write("ROWS\n")
+        f.write(" N  OBJ\n")
+        for row_sense, row_name, _, _ in rows:
+            f.write(f" {row_sense}  {row_name}\n")
+
+        f.write("COLUMNS\n")
+        in_integer = False
+        marker = 0
+        for idx, name in enumerate(names):
+            if integer_vars[idx] and not in_integer:
+                f.write(f"    MARK{marker:04d}  'MARKER'                 'INTORG'\n")
+                marker += 1
+                in_integer = True
+            elif not integer_vars[idx] and in_integer:
+                f.write(f"    MARK{marker:04d}  'MARKER'                 'INTEND'\n")
+                marker += 1
+                in_integer = False
+
+            entries: list[tuple[str, float]] = []
+            if abs(float(c[idx])) > 1e-12:
+                entries.append(("OBJ", float(c[idx])))
+            for _, row_name, row, _ in rows:
+                value = float(row[idx])
+                if abs(value) > 1e-12:
+                    entries.append((row_name, value))
+            if not entries:
+                entries.append(("OBJ", 0.0))
+            for pos in range(0, len(entries), 2):
+                first_name, first_value = entries[pos]
+                line = f"    {name}  {first_name}  {first_value:.17g}"
+                if pos + 1 < len(entries):
+                    second_name, second_value = entries[pos + 1]
+                    line += f"  {second_name}  {second_value:.17g}"
+                f.write(line + "\n")
+        if in_integer:
+            f.write(f"    MARK{marker:04d}  'MARKER'                 'INTEND'\n")
+
+        f.write("RHS\n")
+        for _, row_name, _, rhs in rows:
+            f.write(f"    RHS1  {row_name}  {float(rhs):.17g}\n")
+
+        f.write("BOUNDS\n")
+        for idx, name in enumerate(names):
+            lb = lbs[idx]
+            ub = ubs[idx]
+            is_binary = (
+                integer_vars[idx]
+                and lb is not None
+                and abs(float(lb)) <= 1e-12
+                and ub is not None
+                and abs(float(ub) - 1.0) <= 1e-12
+            )
+            if is_binary:
+                f.write(f" BV BND1  {name}\n")
+                continue
+            if lb is None and ub is None:
+                f.write(f" FR BND1  {name}\n")
+            elif lb is None:
+                f.write(f" MI BND1  {name}\n")
+            elif abs(float(lb)) > 1e-12:
+                f.write(f" LO BND1  {name}  {float(lb):.17g}\n")
+            if ub is not None:
+                f.write(f" UP BND1  {name}  {float(ub):.17g}\n")
+        f.write("ENDATA\n")
+    return names
+
+
+def parse_highs_solution(
+    path: str,
+    n: int,
+    le_count: int = 0,
+    eq_count: int = 0,
+) -> tuple[str, list[float], dict[str, object]]:
     x = [0.0] * n
     status = "unknown"
-    in_primal = False
-    in_columns = False
+    dual_columns: list[Optional[float]] = [None] * n
+    dual_rows: dict[str, float] = {}
+    var_basis: list[Optional[str]] = [None] * n
+    row_basis: dict[str, str] = {}
+    section: Optional[str] = None
+    block: Optional[str] = None
     remaining = 0
     with open(path, "r", encoding="utf-8") as f:
         lines = [line.strip() for line in f]
@@ -182,30 +330,84 @@ def parse_highs_solution(path: str, n: int) -> tuple[str, list[float]]:
         if line == "Model status" and i + 1 < len(lines):
             status = lines[i + 1].lower()
         if line == "# Primal solution values":
-            in_primal = True
+            section = "primal"
+            block = None
             continue
-        if in_primal and line.startswith("# Columns"):
-            in_columns = True
+        if line == "# Dual solution values":
+            section = "dual"
+            block = None
+            continue
+        if line.startswith("# Basis"):
+            section = "basis"
+            block = None
+            continue
+        if section is None:
+            continue
+        if line.startswith("# Columns"):
+            block = "columns"
             remaining = int(line.split()[2])
             continue
-        if in_columns:
-            if remaining <= 0 or line.startswith("# Rows"):
-                break
-            if line.startswith("#"):
-                in_columns = False
-                continue
-            parts = line.split()
-            if len(parts) >= 2 and parts[0].startswith("x"):
+        if line.startswith("# Rows"):
+            block = "rows"
+            remaining = int(line.split()[2])
+            continue
+        if not line or line.startswith("#") or block is None:
+            continue
+        parts = line.split()
+        if len(parts) >= 2:
+            value = float(parts[1]) if _is_number(parts[1]) else None
+            if block == "columns" and parts[0].startswith("x") and parts[0][1:].isdigit():
                 idx = int(parts[0][1:])
                 if 0 <= idx < n:
-                    x[idx] = float(parts[1])
-            remaining -= 1
-    return status, x
+                    if value is not None and section == "primal":
+                        x[idx] = value
+                    elif value is not None and section == "dual":
+                        dual_columns[idx] = value
+                    elif section == "basis":
+                        basis_status = basis_status_from_token(parts[1])
+                        if basis_status is not None:
+                            var_basis[idx] = basis_status
+            elif section == "dual" and block == "rows":
+                if value is not None:
+                    dual_rows[parts[0]] = value
+            elif section == "basis" and block == "rows":
+                basis_status = basis_status_from_token(parts[1])
+                if basis_status is not None:
+                    row_basis[parts[0]] = basis_status
+        remaining -= 1
+        if remaining <= 0:
+            block = None
+
+    fields: dict[str, object] = {}
+    if all(value is not None for value in dual_columns):
+        fields["reducedCosts"] = [float(value) for value in dual_columns if value is not None]
+    dual_ub = [dual_rows.get(f"c{i}") for i in range(le_count)]
+    dual_eq = [dual_rows.get(f"e{i}") for i in range(eq_count)]
+    if all(value is not None for value in dual_ub):
+        fields["dualUB"] = [float(value) for value in dual_ub if value is not None]
+    if all(value is not None for value in dual_eq):
+        fields["dualEQ"] = [float(value) for value in dual_eq if value is not None]
+    if all(value is not None for value in var_basis):
+        fields["varBasis"] = [str(value) for value in var_basis if value is not None]
+    row_statuses = [row_basis.get(f"c{i}") for i in range(le_count)]
+    row_statuses.extend(row_basis.get(f"e{i}") for i in range(eq_count))
+    if all(value is not None for value in row_statuses):
+        fields["rowBasis"] = [str(value) for value in row_statuses if value is not None]
+    return status, x, fields
 
 
-def parse_glpk_solution(path: str, n: int) -> tuple[str, list[float]]:
+def parse_glpk_solution(
+    path: str,
+    n: int,
+    le_count: int = 0,
+    eq_count: int = 0,
+) -> tuple[str, list[float], dict[str, object]]:
     x = [0.0] * n
     status = "unknown"
+    row_duals: list[Optional[float]] = [None] * (le_count + eq_count)
+    reduced_costs: list[Optional[float]] = [None] * n
+    var_basis: list[Optional[str]] = [None] * n
+    row_basis: list[Optional[str]] = [None] * (le_count + eq_count)
     in_named_columns = False
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
@@ -232,9 +434,38 @@ def parse_glpk_solution(path: str, n: int) -> tuple[str, list[float]]:
                 if 0 <= idx < n:
                     if len(parts) >= 4 and not _is_number(parts[2]):
                         x[idx] = float(parts[3])
+                        status_token = basis_status_from_token(parts[2])
+                        if status_token is not None:
+                            var_basis[idx] = status_token
+                        if len(parts) >= 5 and _is_number(parts[4]):
+                            reduced_costs[idx] = float(parts[4])
                     else:
                         x[idx] = float(parts[2])
-    return status, x
+            elif len(parts) >= 5 and parts[0] == "i":
+                idx = int(parts[1]) - 1
+                if 0 <= idx < len(row_duals):
+                    status_token = basis_status_from_token(parts[2])
+                    if status_token is not None:
+                        row_basis[idx] = status_token
+                    if _is_number(parts[4]):
+                        row_duals[idx] = float(parts[4])
+
+    fields: dict[str, object] = {}
+    if all(value is not None for value in reduced_costs):
+        fields["reducedCosts"] = [
+            float(value) for value in reduced_costs if value is not None
+        ]
+    dual_ub = row_duals[:le_count]
+    dual_eq = row_duals[le_count:]
+    if all(value is not None for value in dual_ub):
+        fields["dualUB"] = [float(value) for value in dual_ub if value is not None]
+    if all(value is not None for value in dual_eq):
+        fields["dualEQ"] = [float(value) for value in dual_eq if value is not None]
+    if all(value is not None for value in var_basis):
+        fields["varBasis"] = [str(value) for value in var_basis if value is not None]
+    if all(value is not None for value in row_basis):
+        fields["rowBasis"] = [str(value) for value in row_basis if value is not None]
+    return status, x, fields
 
 
 def parse_scip_solution(path: str, n: int) -> tuple[str, list[float]]:
@@ -320,6 +551,100 @@ def parse_cplex_solution(path: str, n: int) -> tuple[str, list[float]]:
     return status, x
 
 
+def parse_xpress_solution(path: str, n: int) -> tuple[str, list[float]]:
+    x = [0.0] * n
+    status = "optimal"
+    header_path = os.path.splitext(path)[0] + ".hdr"
+    if os.path.exists(header_path):
+        with open(header_path, "r", encoding="utf-8", errors="replace") as f:
+            header = f.read().lower()
+        if "infeas" in header:
+            status = "infeasible"
+        elif "unbounded" in header:
+            status = "unbounded"
+        elif "optimal" in header:
+            status = "optimal"
+
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        text = f.read()
+    for line in text.splitlines():
+        fields = _split_xpress_solution_line(line)
+        if len(fields) < 2:
+            continue
+        for name_pos, name in enumerate(fields):
+            name = name.strip().strip('"')
+            if not (name.startswith("x") and name[1:].isdigit()):
+                continue
+            idx = int(name[1:])
+            if 0 <= idx < n:
+                for value in fields[name_pos + 1 :]:
+                    value = value.strip().strip('"')
+                    if _is_number(value):
+                        x[idx] = float(value)
+                        break
+                break
+    return status, x
+
+
+def parse_lindo_solution(path: str, n: int) -> tuple[str, list[float]]:
+    x = [0.0] * n
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        text = f.read()
+    lower = text.lower()
+    if "infeasible" in lower or "no feasible" in lower:
+        status = "infeasible"
+    elif "unbounded" in lower:
+        status = "unbounded"
+    elif "optimal" in lower or "objective" in lower:
+        status = "optimal"
+    else:
+        status = "unknown"
+
+    for line in text.splitlines():
+        parsed = _parse_named_value_line(line, n)
+        if parsed is not None:
+            idx, value = parsed
+            x[idx] = value
+    return status, x
+
+
+def _parse_named_value_line(line: str, n: int) -> Optional[tuple[int, float]]:
+    match = re.search(r"\bx(\d+)\b", line, flags=re.IGNORECASE)
+    if match is None:
+        return None
+    idx = int(match.group(1))
+    if not 0 <= idx < n:
+        return None
+    after = line[match.end() :]
+    for token in re.split(r"[\s,;:=]+", after):
+        token = token.strip()
+        if _is_number(token):
+            return idx, float(token)
+    before = line[: match.start()]
+    numeric_before = [
+        float(token)
+        for token in re.split(r"[\s,;:=]+", before)
+        if token.strip() and _is_number(token.strip())
+    ]
+    if numeric_before:
+        return idx, numeric_before[-1]
+    return None
+
+
+def _split_xpress_solution_line(line: str) -> list[str]:
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        return []
+    for delimiter in (";", ","):
+        if delimiter in stripped:
+            return [
+                field.strip()
+                for field in next(csv.reader([stripped], delimiter=delimiter))
+                if field.strip()
+            ]
+    return stripped.split()
+
+
 def _is_number(text: str) -> bool:
     try:
         float(text)
@@ -365,6 +690,94 @@ def classify_status(status: str, stdout: str, stderr: str) -> str:
     return "unknown"
 
 
+def _first_float_after_colon(line: str) -> Optional[float]:
+    text = line.split(":", 1)[1] if ":" in line else line
+    return _first_float(text)
+
+
+def _first_float(text: str) -> Optional[float]:
+    for token in re.split(r"[\s,()]+", text):
+        cleaned = token.strip().rstrip("%")
+        if not cleaned:
+            continue
+        try:
+            return float(cleaned)
+        except ValueError:
+            continue
+    return None
+
+
+def parse_mip_quality(
+    solver: str,
+    kind: str,
+    objective: Optional[float],
+    stdout: str,
+    stderr: str,
+) -> dict:
+    if kind != "mip":
+        return {}
+    text = f"{stdout}\n{stderr}"
+    lowered = text.lower()
+    fields = {}
+
+    best_bound = None
+    mip_gap = None
+    nodes_explored = None
+
+    if solver == "highs":
+        for line in text.splitlines():
+            stripped = line.strip()
+            lowered_line = stripped.lower()
+            if lowered_line.startswith("dual bound"):
+                best_bound = _first_float_after_colon(stripped)
+            elif lowered_line.startswith("gap"):
+                value = _first_float(stripped)
+                if value is not None:
+                    mip_gap = value / 100.0 if "%" in stripped else value
+            elif lowered_line.startswith("nodes"):
+                value = _first_float_after_colon(stripped)
+                if value is not None:
+                    nodes_explored = int(round(value))
+    elif solver == "cbc":
+        for line in text.splitlines():
+            stripped = line.strip()
+            lowered_line = stripped.lower()
+            if lowered_line.startswith("enumerated nodes:"):
+                value = _first_float_after_colon(stripped)
+                if value is not None:
+                    nodes_explored = int(round(value))
+            elif lowered_line.startswith("lower bound:"):
+                best_bound = _first_float_after_colon(stripped)
+            elif "gap:" in lowered_line:
+                value = _first_float_after_colon(stripped)
+                if value is not None:
+                    mip_gap = value / 100.0 if "%" in stripped else value
+    elif solver == "scip":
+        for line in text.splitlines():
+            stripped = line.strip()
+            lowered_line = stripped.lower()
+            if lowered_line.startswith("solving nodes"):
+                value = _first_float_after_colon(stripped)
+                if value is not None:
+                    nodes_explored = int(round(value))
+            elif lowered_line.startswith("dual bound"):
+                best_bound = _first_float_after_colon(stripped)
+            elif lowered_line.startswith("gap"):
+                value = _first_float_after_colon(stripped)
+                if value is not None:
+                    mip_gap = value / 100.0 if "%" in stripped else value
+
+    if best_bound is not None and math.isfinite(best_bound):
+        fields["bestBound"] = best_bound
+    if mip_gap is None and best_bound is not None and objective is not None:
+        mip_gap = abs(best_bound - objective) / max(1.0, abs(objective))
+    if mip_gap is not None and math.isfinite(mip_gap):
+        fields["mipGap"] = max(0.0, mip_gap)
+    if nodes_explored is not None and nodes_explored >= 0:
+        fields["nodesExplored"] = nodes_explored
+    return fields
+
+
 def solver_available(solver: str) -> bool:
     return solver_command(solver) is not None
 
@@ -387,7 +800,14 @@ def solver_command(solver: str) -> Optional[str]:
     return None
 
 
-def run_solver(solver: str, model_path: str, solution_path: str, time_limit: float) -> tuple[str, str]:
+def run_solver(
+    solver: str,
+    kind: str,
+    sense: str,
+    model_path: str,
+    solution_path: str,
+    time_limit: float,
+) -> tuple[str, str]:
     command = solver_command(solver)
     if command is None:
         raise ValueError(f"{solver} executable not found")
@@ -402,7 +822,28 @@ def run_solver(solver: str, model_path: str, solution_path: str, time_limit: flo
             str(time_limit),
         ]
     elif solver == "glpk":
-        cmd = [command, "--lp", model_path, "-o", solution_path, "--tmlim", str(max(1, int(math.ceil(time_limit))))]
+        if kind == "lp":
+            cmd = [
+                command,
+                "--lp",
+                model_path,
+                "--output",
+                solution_path + ".report",
+                "--write",
+                solution_path,
+                "--tmlim",
+                str(max(1, int(math.ceil(time_limit)))),
+            ]
+        else:
+            cmd = [
+                command,
+                "--lp",
+                model_path,
+                "-o",
+                solution_path,
+                "--tmlim",
+                str(max(1, int(math.ceil(time_limit)))),
+            ]
     elif solver == "scip":
         cmd = [
             command,
@@ -455,6 +896,26 @@ def run_solver(solver: str, model_path: str, solution_path: str, time_limit: flo
             f"write {solution_path}",
             "quit",
         ]
+    elif solver == "xpress":
+        script_path = os.path.join(os.path.dirname(model_path), "xpress_commands.txt")
+        with open(script_path, "w", encoding="utf-8") as f:
+            f.write(f"MAXTIME = -{max(1, int(math.ceil(time_limit)))}\n")
+            f.write(f"readprob -l {model_path}\n")
+            f.write("mipoptimize\n" if kind == "mip" else "lpoptimize\n")
+            f.write(f"writesol {solution_path} -npa\n")
+            f.write("quit\n")
+        cmd = [command, f"@{script_path}"]
+    elif solver == "lindo":
+        cmd = [
+            command,
+            model_path,
+            "-sol",
+            "-max" if sense == "max" else "-min",
+        ]
+        if kind == "mip":
+            cmd.append("-mip")
+        else:
+            cmd.append("-lp")
     else:
         raise ValueError(f"unknown CLI solver '{solver}'")
     run = subprocess.run(
@@ -490,22 +951,57 @@ def solve(kind: str, solver: str, raw: dict, time_limit: float) -> dict:
         raise ValueError("kind must be 'lp' or 'mip'")
 
     with tempfile.TemporaryDirectory(prefix="ores-linear-cli-") as tmp:
-        model_path = os.path.join(tmp, "model.lp")
-        solution_path = os.path.join(tmp, f"{solver}.sol")
-        write_cplex_lp(model_path, sense, c, a_ub, b_ub, a_eq, b_eq, lbs, ubs, integer_vars)
-        stdout, stderr = run_solver(solver, model_path, solution_path, time_limit)
+        if solver == "lindo":
+            model_path = os.path.join(tmp, "model.mps")
+            solution_path = os.path.join(tmp, "model.sol")
+            write_free_mps(model_path, sense, c, a_ub, b_ub, a_eq, b_eq, lbs, ubs, integer_vars)
+        else:
+            model_path = os.path.join(tmp, "model.lp")
+            solution_path = (
+                os.path.join(tmp, "xpress_solution")
+                if solver == "xpress"
+                else os.path.join(tmp, f"{solver}.sol")
+            )
+            write_cplex_lp(model_path, sense, c, a_ub, b_ub, a_eq, b_eq, lbs, ubs, integer_vars)
+        stdout, stderr = run_solver(solver, kind, sense, model_path, solution_path, time_limit)
+        if solver == "xpress":
+            solution_path = _first_existing_path(
+                [solution_path + ".asc", solution_path, solution_path + ".sol"]
+            ) or solution_path
+        elif solver == "lindo":
+            solution_path = _first_existing_path(
+                [solution_path, os.path.splitext(model_path)[0] + ".sol"]
+            ) or solution_path
         if not os.path.exists(solution_path):
+            classified = classify_status("", stdout, stderr)
+            if classified in ("infeasible", "unbounded"):
+                return status_payload(classified, f"{solver}:cli", (stderr or stdout).strip())
             return status_payload("unavailable", f"{solver}:cli", (stderr or stdout).strip())
+        certificate_fields: dict[str, object] = {}
         if solver == "highs":
-            status, x = parse_highs_solution(solution_path, len(c))
+            status, x, certificate_fields = parse_highs_solution(
+                solution_path,
+                len(c),
+                len(a_ub),
+                len(a_eq),
+            )
         elif solver == "glpk":
-            status, x = parse_glpk_solution(solution_path, len(c))
+            status, x, certificate_fields = parse_glpk_solution(
+                solution_path,
+                len(c),
+                len(a_ub),
+                len(a_eq),
+            )
         elif solver == "scip":
             status, x = parse_scip_solution(solution_path, len(c))
         elif solver == "gurobi":
             status, x = parse_named_solution(solution_path, len(c))
         elif solver == "cplex":
             status, x = parse_cplex_solution(solution_path, len(c))
+        elif solver == "xpress":
+            status, x = parse_xpress_solution(solution_path, len(c))
+        elif solver == "lindo":
+            status, x = parse_lindo_solution(solution_path, len(c))
         else:
             status, x = parse_cbc_solution(solution_path, len(c))
 
@@ -516,13 +1012,25 @@ def solve(kind: str, solver: str, raw: dict, time_limit: float) -> dict:
             f"{solver}:cli",
             status,
         )
-    return {
+    objective = dot(c, x)
+    result = {
         "status": "optimal",
         "solver": f"{solver}:cli",
         "x": x,
-        "objective": dot(c, x),
+        "objective": objective,
         "message": status,
     }
+    if kind == "lp":
+        result.update(certificate_fields)
+    result.update(parse_mip_quality(solver, kind, objective, stdout, stderr))
+    return result
+
+
+def _first_existing_path(paths: Sequence[str]) -> Optional[str]:
+    for path in paths:
+        if os.path.exists(path):
+            return path
+    return None
 
 
 def main() -> int:

@@ -3833,6 +3833,21 @@ pub struct MathProgramCplexLpExport {
     pub original_variable_count: usize,
 }
 
+/// An MPS text export suitable for local solver CLIs.
+///
+/// Continuous linear models are exported in the original named-variable space.
+/// Discrete models are first compiled through the same exact MIP lowering used
+/// by the native solver, so `variable_names` contains the exported compiled
+/// columns, including any generated auxiliaries.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MathProgramMpsExport {
+    pub text: String,
+    pub variable_names: Vec<String>,
+    pub constraint_names: Vec<String>,
+    pub is_mip: bool,
+    pub original_variable_count: usize,
+}
+
 /// Export a linear or exactly lowered MIP facade model as CPLEX LP text.
 ///
 /// The export intentionally does not attempt to serialize continuous quadratic,
@@ -3842,16 +3857,83 @@ pub struct MathProgramCplexLpExport {
 pub fn export_math_program_cplex_lp(
     program: &MathProgram,
 ) -> Result<MathProgramCplexLpExport, MathProgramError> {
+    let parts = math_program_linear_text_export_parts(program, "CPLEX LP export")?;
+    let text = render_cplex_lp(
+        parts.sense,
+        &parts.objective,
+        &parts.variable_names,
+        &parts.rows,
+        &parts.constraint_names,
+        parts.lower.as_deref(),
+        parts.upper.as_deref(),
+        parts.integer_vars.as_deref(),
+    )?;
+    Ok(MathProgramCplexLpExport {
+        text,
+        variable_names: parts.variable_names,
+        constraint_names: parts.constraint_names,
+        is_mip: parts.is_mip,
+        original_variable_count: parts.original_variable_count,
+    })
+}
+
+/// Export a linear or exactly lowered MIP facade model as free MPS text.
+///
+/// MPS is intentionally limited to the same linear/compiled-MIP surface as the
+/// CPLEX LP export. Continuous quadratic, quadratic-constraint, conic, and
+/// hierarchical multi-objective models should use the native solve APIs or
+/// solver-specific nonlinear file formats instead.
+pub fn export_math_program_mps(
+    program: &MathProgram,
+) -> Result<MathProgramMpsExport, MathProgramError> {
+    let parts = math_program_linear_text_export_parts(program, "MPS export")?;
+    let text = render_mps(
+        parts.sense,
+        &parts.objective,
+        &parts.variable_names,
+        &parts.rows,
+        &parts.constraint_names,
+        parts.lower.as_deref(),
+        parts.upper.as_deref(),
+        parts.integer_vars.as_deref(),
+    )?;
+    Ok(MathProgramMpsExport {
+        text,
+        variable_names: parts.variable_names,
+        constraint_names: parts.constraint_names,
+        is_mip: parts.is_mip,
+        original_variable_count: parts.original_variable_count,
+    })
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct LinearTextExportParts {
+    sense: LpSense,
+    objective: Vec<f64>,
+    variable_names: Vec<String>,
+    rows: Vec<CplexLpExportRow>,
+    constraint_names: Vec<String>,
+    lower: Option<Vec<Option<f64>>>,
+    upper: Option<Vec<Option<f64>>>,
+    integer_vars: Option<Vec<bool>>,
+    is_mip: bool,
+    original_variable_count: usize,
+}
+
+fn math_program_linear_text_export_parts(
+    program: &MathProgram,
+    format_name: &str,
+) -> Result<LinearTextExportParts, MathProgramError> {
     program.validate()?;
     if !program.secondary_objectives.is_empty() {
-        return Err(MathProgramError::Unsupported(
-            "CPLEX LP export does not support hierarchical multi-objective models".to_string(),
-        ));
+        return Err(MathProgramError::Unsupported(format!(
+            "{format_name} does not support hierarchical multi-objective models"
+        )));
     }
     if program.has_quadratic_constraints() || program.has_conic_constraints() {
-        return Err(MathProgramError::Unsupported(
-            "CPLEX LP export supports linear and exactly lowered MIP models only".to_string(),
-        ));
+        return Err(MathProgramError::Unsupported(format!(
+            "{format_name} supports linear and exactly lowered MIP models only"
+        )));
     }
 
     if program.has_discrete_features() {
@@ -3870,29 +3952,24 @@ pub fn export_math_program_cplex_lp(
             .ub
             .as_ref()
             .map(|upper| upper.iter().copied().map(Some).collect::<Vec<_>>());
-        let text = render_cplex_lp(
-            compiled.problem.sense,
-            &compiled.problem.c,
-            &variable_names,
-            &rows,
-            &constraint_names,
-            None,
-            compiled_upper.as_deref(),
-            Some(&compiled.problem.integer_vars),
-        )?;
-        return Ok(MathProgramCplexLpExport {
-            text,
+        return Ok(LinearTextExportParts {
+            sense: compiled.problem.sense,
+            objective: compiled.problem.c,
             variable_names,
+            rows,
             constraint_names,
+            lower: None,
+            upper: compiled_upper,
+            integer_vars: Some(compiled.problem.integer_vars),
             is_mip: true,
             original_variable_count: program.variables.len(),
         });
     }
 
     if program.has_quadratic_objective() {
-        return Err(MathProgramError::Unsupported(
-            "CPLEX LP export does not support continuous quadratic objectives".to_string(),
-        ));
+        return Err(MathProgramError::Unsupported(format!(
+            "{format_name} does not support continuous quadratic objectives"
+        )));
     }
 
     let raw_variable_names = program
@@ -3920,20 +3997,15 @@ pub fn export_math_program_cplex_lp(
         .iter()
         .map(|var| var.obj)
         .collect::<Vec<_>>();
-    let text = render_cplex_lp(
-        program.sense.to_lp(),
-        &objective,
-        &variable_names,
-        &rows,
-        &constraint_names,
-        Some(&lower),
-        Some(&upper),
-        None,
-    )?;
-    Ok(MathProgramCplexLpExport {
-        text,
+    Ok(LinearTextExportParts {
+        sense: program.sense.to_lp(),
+        objective,
         variable_names,
+        rows,
         constraint_names,
+        lower: Some(lower),
+        upper: Some(upper),
+        integer_vars: None,
         is_mip: false,
         original_variable_count: program.variables.len(),
     })
@@ -4104,7 +4176,7 @@ fn render_cplex_lp(
     }
     out.push_str("Bounds\n");
     for (idx, name) in variable_names.iter().enumerate() {
-        let lo = lower.and_then(|values| values[idx]).or(Some(0.0));
+        let lo = lower.map_or(Some(0.0), |values| values[idx]);
         let hi = upper.and_then(|values| values[idx]);
         out.push_str(" ");
         match (lo, hi) {
@@ -4175,6 +4247,265 @@ fn render_cplex_lp(
     }
     out.push_str("End\n");
     Ok(out)
+}
+
+fn render_mps(
+    sense: LpSense,
+    objective: &[f64],
+    variable_names: &[String],
+    rows: &[CplexLpExportRow],
+    constraint_names: &[String],
+    lower: Option<&[Option<f64>]>,
+    upper: Option<&[Option<f64>]>,
+    integer_vars: Option<&[bool]>,
+) -> Result<String, MathProgramError> {
+    validate_linear_text_export_inputs(
+        "MPS",
+        objective,
+        variable_names,
+        rows,
+        constraint_names,
+        lower,
+        upper,
+        integer_vars,
+    )?;
+
+    let effective_rows = if rows.is_empty() {
+        vec![CplexLpExportRow {
+            name: "c0".to_string(),
+            coeffs: vec![0.0; variable_names.len()],
+            sense: RowSense::Le,
+            rhs: 0.0,
+        }]
+    } else {
+        rows.to_vec()
+    };
+    let effective_constraint_names = if rows.is_empty() {
+        vec!["c0".to_string()]
+    } else {
+        constraint_names.to_vec()
+    };
+
+    let mut out = String::new();
+    out.push_str("NAME          DES_MODEL\n");
+    out.push_str("OBJSENSE\n");
+    out.push_str(match sense {
+        LpSense::Max => " MAX\n",
+        LpSense::Min => " MIN\n",
+    });
+    out.push_str("ROWS\n");
+    out.push_str(" N  OBJ\n");
+    for (row, name) in effective_rows.iter().zip(&effective_constraint_names) {
+        out.push(' ');
+        out.push(mps_row_type(row.sense));
+        out.push_str("  ");
+        out.push_str(name);
+        out.push('\n');
+    }
+
+    out.push_str("COLUMNS\n");
+    let mut inside_integer = false;
+    for (idx, name) in variable_names.iter().enumerate() {
+        let is_integer = integer_vars.is_some_and(|values| values[idx]);
+        if is_integer && !inside_integer {
+            out.push_str("    MARK0000  'MARKER'                 'INTORG'\n");
+            inside_integer = true;
+        } else if !is_integer && inside_integer {
+            out.push_str("    MARK0001  'MARKER'                 'INTEND'\n");
+            inside_integer = false;
+        }
+
+        let mut entries = Vec::new();
+        let obj = objective[idx];
+        if !obj.is_finite() {
+            return Err(MathProgramError::NonFinite(format!(
+                "MPS export objective coefficient for variable {idx}"
+            )));
+        }
+        if obj.abs() > 1e-12 {
+            entries.push(("OBJ".to_string(), obj));
+        }
+        for (row, row_name) in effective_rows.iter().zip(&effective_constraint_names) {
+            let coef = row.coeffs[idx];
+            if !coef.is_finite() {
+                return Err(MathProgramError::NonFinite(format!(
+                    "MPS export coefficient for variable {idx}"
+                )));
+            }
+            if coef.abs() > 1e-12 {
+                entries.push((row_name.clone(), coef));
+            }
+        }
+        for chunk in entries.chunks(2) {
+            out.push_str("    ");
+            out.push_str(name);
+            for (row_name, value) in chunk {
+                out.push_str("  ");
+                out.push_str(row_name);
+                out.push_str("  ");
+                out.push_str(&mps_number(*value)?);
+            }
+            out.push('\n');
+        }
+    }
+    if inside_integer {
+        out.push_str("    MARK0001  'MARKER'                 'INTEND'\n");
+    }
+
+    out.push_str("RHS\n");
+    for chunk in effective_rows
+        .iter()
+        .zip(&effective_constraint_names)
+        .collect::<Vec<_>>()
+        .chunks(2)
+    {
+        out.push_str("    RHS1");
+        for (row, name) in chunk {
+            out.push_str("  ");
+            out.push_str(name);
+            out.push_str("  ");
+            out.push_str(&mps_number(row.rhs)?);
+        }
+        out.push('\n');
+    }
+
+    out.push_str("BOUNDS\n");
+    for (idx, name) in variable_names.iter().enumerate() {
+        let lo = lower.map_or(Some(0.0), |values| values[idx]);
+        let hi = upper.and_then(|values| values[idx]);
+        append_mps_bound_rows(&mut out, name, lo, hi)?;
+    }
+    out.push_str("ENDATA\n");
+    Ok(out)
+}
+
+fn validate_linear_text_export_inputs(
+    format_name: &str,
+    objective: &[f64],
+    variable_names: &[String],
+    rows: &[CplexLpExportRow],
+    constraint_names: &[String],
+    lower: Option<&[Option<f64>]>,
+    upper: Option<&[Option<f64>]>,
+    integer_vars: Option<&[bool]>,
+) -> Result<(), MathProgramError> {
+    if objective.len() != variable_names.len() {
+        return Err(MathProgramError::BadIndex(format!(
+            "{format_name} objective length {} does not match {} export variable names",
+            objective.len(),
+            variable_names.len()
+        )));
+    }
+    if constraint_names.len() != rows.len() {
+        return Err(MathProgramError::BadIndex(format!(
+            "{format_name} constraint name length {} does not match {} rows",
+            constraint_names.len(),
+            rows.len()
+        )));
+    }
+    for row in rows {
+        if row.coeffs.len() != variable_names.len() {
+            return Err(MathProgramError::BadIndex(format!(
+                "{format_name} row `{}` has {} coefficients for {} variables",
+                row.name,
+                row.coeffs.len(),
+                variable_names.len()
+            )));
+        }
+    }
+    if let Some(lower) = lower {
+        if lower.len() != variable_names.len() {
+            return Err(MathProgramError::BadIndex(format!(
+                "{format_name} lower-bound length {} does not match {} export variable names",
+                lower.len(),
+                variable_names.len()
+            )));
+        }
+    }
+    if let Some(upper) = upper {
+        if upper.len() != variable_names.len() {
+            return Err(MathProgramError::BadIndex(format!(
+                "{format_name} upper-bound length {} does not match {} export variable names",
+                upper.len(),
+                variable_names.len()
+            )));
+        }
+    }
+    if let Some(integer_vars) = integer_vars {
+        if integer_vars.len() != variable_names.len() {
+            return Err(MathProgramError::BadIndex(format!(
+                "{format_name} integer marker length {} does not match {} export variable names",
+                integer_vars.len(),
+                variable_names.len()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn mps_row_type(sense: RowSense) -> char {
+    match sense {
+        RowSense::Le => 'L',
+        RowSense::Ge => 'G',
+        RowSense::Eq => 'E',
+    }
+}
+
+fn append_mps_bound_rows(
+    out: &mut String,
+    name: &str,
+    lower: Option<f64>,
+    upper: Option<f64>,
+) -> Result<(), MathProgramError> {
+    match (lower, upper) {
+        (None, None) => append_mps_bound_row(out, "FR", name, None)?,
+        (None, Some(hi)) => {
+            append_mps_bound_row(out, "MI", name, None)?;
+            append_mps_bound_row(out, "UP", name, Some(hi))?;
+        }
+        (Some(lo), None) => {
+            if lo.abs() > 1e-12 {
+                append_mps_bound_row(out, "LO", name, Some(lo))?;
+            }
+        }
+        (Some(lo), Some(hi)) if (lo - hi).abs() <= 1e-12 => {
+            append_mps_bound_row(out, "FX", name, Some(lo))?;
+        }
+        (Some(lo), Some(hi)) => {
+            if lo.abs() > 1e-12 {
+                append_mps_bound_row(out, "LO", name, Some(lo))?;
+            }
+            append_mps_bound_row(out, "UP", name, Some(hi))?;
+        }
+    }
+    Ok(())
+}
+
+fn append_mps_bound_row(
+    out: &mut String,
+    kind: &str,
+    name: &str,
+    value: Option<f64>,
+) -> Result<(), MathProgramError> {
+    out.push(' ');
+    out.push_str(kind);
+    out.push_str(" BND1  ");
+    out.push_str(name);
+    if let Some(value) = value {
+        out.push_str("  ");
+        out.push_str(&mps_number(value)?);
+    }
+    out.push('\n');
+    Ok(())
+}
+
+fn mps_number(value: f64) -> Result<String, MathProgramError> {
+    if !value.is_finite() {
+        return Err(MathProgramError::NonFinite(format!(
+            "MPS export cannot encode non-finite value {value}"
+        )));
+    }
+    Ok(format!("{value:.17e}"))
 }
 
 fn cplex_lp_expr(coeffs: &[f64], names: &[String]) -> Result<String, MathProgramError> {
@@ -4274,7 +4605,9 @@ fn sanitize_cplex_lp_name(raw: &str, prefix: &str, idx: usize) -> String {
             | "binaries"
             | "bound"
             | "bounds"
+            | "columns"
             | "end"
+            | "endata"
             | "free"
             | "general"
             | "generals"
@@ -4282,7 +4615,12 @@ fn sanitize_cplex_lp_name(raw: &str, prefix: &str, idx: usize) -> String {
             | "maximize"
             | "min"
             | "minimize"
+            | "name"
             | "obj"
+            | "objsense"
+            | "ranges"
+            | "rhs"
+            | "rows"
             | "subject"
             | "st"
             | "s.t."
@@ -11245,6 +11583,74 @@ mod tests {
         assert!(export.text.contains("open_a"));
         assert!(export.text.contains("peak_load"));
         assert!(export.text.ends_with("End\n"));
+    }
+
+    #[test]
+    fn mps_export_preserves_continuous_linear_facade() {
+        let mut p = MathProgram::new(ObjectiveSense::Max);
+        let x = p
+            .add_continuous_var("profit x", 3.0, Some(0.0), Some(3.0))
+            .unwrap();
+        let y = p.add_continuous_var("2-y", 2.0, None, None).unwrap();
+        p.add_constraint("demand >= row", vec![(x, 1.0), (y, 1.0)], RowSense::Ge, 2.0)
+            .unwrap();
+        p.add_constraint("balance=row", vec![(x, 1.0), (y, -1.0)], RowSense::Eq, 1.0)
+            .unwrap();
+
+        let export = export_math_program_mps(&p).unwrap();
+        assert!(!export.is_mip);
+        assert_eq!(export.original_variable_count, 2);
+        assert_eq!(export.variable_names, vec!["profit_x", "x_2_y"]);
+        assert!(export.text.starts_with("NAME"));
+        assert!(export.text.contains("OBJSENSE\n MAX\n"));
+        assert!(export
+            .text
+            .contains("ROWS\n N  OBJ\n G  demand_row\n E  balance_row\n"));
+        assert!(export.text.contains("COLUMNS\n"));
+        assert!(export.text.contains("RHS\n"));
+        assert!(export.text.contains("UP BND1  profit_x"));
+        assert!(export.text.contains("FR BND1  x_2_y"));
+        assert!(export.text.ends_with("ENDATA\n"));
+    }
+
+    #[test]
+    fn mps_export_emits_compiled_mip_with_integer_markers() {
+        let mut p = MathProgram::new(ObjectiveSense::Max);
+        let open = p.add_binary_var("open-a", 4.0).unwrap();
+        let closed = p.add_binary_var("open b", 3.0).unwrap();
+        let load = p
+            .add_integer_var("load", 2.0, Some(0.0), Some(4.0))
+            .unwrap();
+        let reserve = p
+            .add_integer_var("reserve", 0.0, Some(0.0), Some(2.0))
+            .unwrap();
+        let peak = p
+            .add_continuous_var("peak", -1.0, Some(0.0), Some(4.0))
+            .unwrap();
+        p.add_exactly_one("choose-one", vec![open, closed]).unwrap();
+        p.add_indicator(
+            "open-a-min-load",
+            open,
+            true,
+            vec![(load, 1.0)],
+            RowSense::Ge,
+            3.0,
+        )
+        .unwrap();
+        p.add_max("peak-load", peak, vec![load, reserve]).unwrap();
+
+        let export = export_math_program_mps(&p).unwrap();
+        assert!(export.is_mip);
+        assert_eq!(export.original_variable_count, 5);
+        assert!(export.variable_names.len() > export.original_variable_count);
+        assert!(export.text.contains("OBJSENSE\n MAX\n"));
+        assert!(export.text.contains("ROWS\n N  OBJ\n"));
+        assert!(export.text.contains("'INTORG'"));
+        assert!(export.text.contains("'INTEND'"));
+        assert!(export.text.contains("BOUNDS\n"));
+        assert!(export.text.contains("open_a"));
+        assert!(export.text.contains("peak_load"));
+        assert!(export.text.ends_with("ENDATA\n"));
     }
 
     #[test]

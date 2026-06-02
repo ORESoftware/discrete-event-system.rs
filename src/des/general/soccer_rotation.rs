@@ -1987,6 +1987,7 @@ pub fn build_soccer_ipmip(problem: &SoccerProblem) -> SoccerIPMIPModel {
             ub: Some(vec![1.0; n_vars]),
             var_names: Some(var_names),
             con_names: Some(con_names),
+            lazy_constraints: None,
             variable_nodes: Some(variable_nodes),
             constraint_nodes: Some(constraint_nodes),
         },

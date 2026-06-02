@@ -27,6 +27,7 @@ pub mod evolution;
 pub mod genetic_tsp;
 pub mod incremental_lp;
 pub mod lp;
+pub mod math_program;
 pub mod statistical_optimization;
 
 pub mod advanced_control_models;

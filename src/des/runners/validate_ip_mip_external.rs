@@ -740,6 +740,7 @@ pub fn run() {
             ub: Some(vec![6.0, 6.0]),
             var_names: Some(vec!["a".to_string(), "b".to_string()]),
             con_names: Some(vec!["resource".to_string()]),
+            lazy_constraints: None,
             variable_nodes: None,
             constraint_nodes: None,
         },

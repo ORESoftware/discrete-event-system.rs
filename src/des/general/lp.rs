@@ -317,6 +317,11 @@ pub struct LPSolution {
     pub dual_eq: Option<Vec<f64>>,
     /// Reduced costs (for primal variable bounds). May be `None`.
     pub reduced_costs: Option<Vec<f64>>,
+    /// Basis status for original variables. Uses normalized labels such as
+    /// `basic`, `at_lower`, `at_upper`, `fixed`, `free`, and `nonbasic`.
+    pub var_basis: Option<Vec<String>>,
+    /// Basis status for original LP rows (`A_ub` rows followed by `A_eq` rows).
+    pub row_basis: Option<Vec<String>>,
     /// Iteration count if reported by the solver.
     pub iters: Option<usize>,
     /// Solver name (e.g. `"internal"`, `"scipy:highs"`).
@@ -471,6 +476,8 @@ fn run_internal_simplex(p: &LPProblem, opts: &InternalSimplexOptions) -> LPSolut
                 dual_ub: None,
                 dual_eq: None,
                 reduced_costs: None,
+                var_basis: None,
+                row_basis: None,
                 iters: Some(0),
                 solver: "internal".to_string(),
                 elapsed_ms: ms_since(t0),
@@ -488,6 +495,8 @@ fn run_internal_simplex(p: &LPProblem, opts: &InternalSimplexOptions) -> LPSolut
             dual_ub,
             dual_eq,
             reduced_costs,
+            var_basis: None,
+            row_basis: None,
             iters: Some(0),
             solver: "internal".to_string(),
             elapsed_ms: ms_since(t0),
@@ -500,6 +509,7 @@ fn run_internal_simplex(p: &LPProblem, opts: &InternalSimplexOptions) -> LPSolut
     let slack_start = ny;
     // Marker convention for artificials: -1 = none, -2 = needs one (resolved below).
     let mut artificial_cols: Vec<isize> = Vec::with_capacity(m);
+    let mut slack_sign: Vec<f64> = Vec::with_capacity(m);
     for r in 0..m {
         if bcopy[r] < 0.0 {
             for j in 0..ny {
@@ -507,8 +517,10 @@ fn run_internal_simplex(p: &LPProblem, opts: &InternalSimplexOptions) -> LPSolut
             }
             bcopy[r] = -bcopy[r];
             artificial_cols.push(-2);
+            slack_sign.push(-1.0);
         } else {
             artificial_cols.push(-1);
+            slack_sign.push(1.0);
         }
     }
     // Allocate artificial column indices.
@@ -582,6 +594,8 @@ fn run_internal_simplex(p: &LPProblem, opts: &InternalSimplexOptions) -> LPSolut
                 dual_ub: None,
                 dual_eq: None,
                 reduced_costs: None,
+                var_basis: None,
+                row_basis: None,
                 iters: Some(iters),
                 solver: "internal".to_string(),
                 elapsed_ms: ms_since(t0),
@@ -610,6 +624,8 @@ fn run_internal_simplex(p: &LPProblem, opts: &InternalSimplexOptions) -> LPSolut
                 dual_ub: None,
                 dual_eq: None,
                 reduced_costs: None,
+                var_basis: None,
+                row_basis: None,
                 iters: Some(iters),
                 solver: "internal".to_string(),
                 elapsed_ms: ms_since(t0),
@@ -666,6 +682,8 @@ fn run_internal_simplex(p: &LPProblem, opts: &InternalSimplexOptions) -> LPSolut
             dual_ub: None,
             dual_eq: None,
             reduced_costs: None,
+            var_basis: None,
+            row_basis: None,
             iters: Some(iters),
             solver: "internal".to_string(),
             elapsed_ms: ms_since(t0),
@@ -686,6 +704,8 @@ fn run_internal_simplex(p: &LPProblem, opts: &InternalSimplexOptions) -> LPSolut
             dual_ub: None,
             dual_eq: None,
             reduced_costs: None,
+            var_basis: None,
+            row_basis: None,
             iters: Some(iters),
             solver: "internal".to_string(),
             elapsed_ms: ms_since(t0),
@@ -714,7 +734,10 @@ fn run_internal_simplex(p: &LPProblem, opts: &InternalSimplexOptions) -> LPSolut
     for i in 0..n {
         obj += p.c[i] * x[i];
     }
-    let (dual_ub, dual_eq, reduced_costs) = recover_lp_certificate(p, &x, tol);
+    let (dual_ub, dual_eq, reduced_costs) =
+        simplex_certificates(p, &basis, &t, &phase2_cost, ny, full_cols, &slack_sign);
+    let (var_basis, row_basis) =
+        lp_basis_statuses_from_basis(p, &basis, &x, &y_index_of_pos, &free_neg, ny, tol);
 
     LPSolution {
         status: LPStatus::Optimal,
@@ -723,10 +746,139 @@ fn run_internal_simplex(p: &LPProblem, opts: &InternalSimplexOptions) -> LPSolut
         dual_ub,
         dual_eq,
         reduced_costs,
+        var_basis,
+        row_basis,
         iters: Some(iters),
         solver: "internal".to_string(),
         elapsed_ms: ms_since(t0),
         message: Some(format!("internal simplex: phase1+phase2, {iters} iters")),
+    }
+}
+
+fn simplex_certificates(
+    p: &LPProblem,
+    basis: &[usize],
+    t: &[Vec<f64>],
+    cost: &[f64],
+    ny: usize,
+    full_cols: usize,
+    slack_sign: &[f64],
+) -> (Option<Vec<f64>>, Option<Vec<f64>>, Option<Vec<f64>>) {
+    let a_ub: &[Vec<f64>] = p.a_ub.as_deref().unwrap_or(&[]);
+    let a_eq: &[Vec<f64>] = p.a_eq.as_deref().unwrap_or(&[]);
+    let sense_sign = if p.sense == Sense::Max { 1.0 } else { -1.0 };
+    let row_duals: Vec<f64> = slack_sign
+        .iter()
+        .enumerate()
+        .map(|(r, &sign)| {
+            let slack_col = ny + r;
+            let rc = simplex_reduced_cost(t, basis, cost, slack_col, full_cols);
+            clean_certificate_value(sense_sign * -sign * rc)
+        })
+        .collect();
+
+    let dual_ub: Vec<f64> = row_duals.iter().take(a_ub.len()).copied().collect();
+    let eq_start = a_ub.len();
+    let mut dual_eq = Vec::with_capacity(a_eq.len());
+    for r in 0..a_eq.len() {
+        let pos = row_duals[eq_start + 2 * r];
+        let neg = row_duals[eq_start + 2 * r + 1];
+        dual_eq.push(clean_certificate_value(pos - neg));
+    }
+
+    let mut reduced_costs = Vec::with_capacity(p.c.len());
+    for (j, &coef) in p.c.iter().enumerate() {
+        let mut reduced = coef;
+        for (row, &dual) in a_ub.iter().zip(&dual_ub) {
+            reduced -= dual * row[j];
+        }
+        for (row, &dual) in a_eq.iter().zip(&dual_eq) {
+            reduced -= dual * row[j];
+        }
+        reduced_costs.push(clean_certificate_value(reduced));
+    }
+
+    (Some(dual_ub), Some(dual_eq), Some(reduced_costs))
+}
+
+pub(crate) fn lp_basis_statuses_from_basis(
+    p: &LPProblem,
+    basis: &[usize],
+    x: &[f64],
+    y_index_of_pos: &[usize],
+    free_neg: &[isize],
+    y_cols: usize,
+    tol: f64,
+) -> (Option<Vec<String>>, Option<Vec<String>>) {
+    let n = p.c.len();
+    if x.len() != n || y_index_of_pos.len() != n || free_neg.len() != n {
+        return (None, None);
+    }
+    let lb: Vec<Option<f64>> = p.lb.clone().unwrap_or_else(|| vec![Some(0.0); n]);
+    let ub: Vec<Option<f64>> = p.ub.clone().unwrap_or_else(|| vec![None; n]);
+    let a_ub: &[Vec<f64>] = p.a_ub.as_deref().unwrap_or(&[]);
+    let b_ub: &[f64] = p.b_ub.as_deref().unwrap_or(&[]);
+    let a_eq: &[Vec<f64>] = p.a_eq.as_deref().unwrap_or(&[]);
+
+    let mut var_basis = Vec::with_capacity(n);
+    for i in 0..n {
+        let pos_basic = basis.iter().any(|&col| col == y_index_of_pos[i]);
+        let neg_basic = free_neg[i] >= 0 && basis.iter().any(|&col| col == free_neg[i] as usize);
+        let status = if pos_basic || neg_basic {
+            "basic"
+        } else if ub[i].is_some_and(|upper| (x[i] - upper).abs() <= tol) {
+            "at_upper"
+        } else if lb[i].is_some_and(|lower| (x[i] - lower).abs() <= tol) {
+            "at_lower"
+        } else if lb[i].is_none() && x[i].abs() <= tol {
+            "free"
+        } else {
+            "nonbasic"
+        };
+        var_basis.push(status.to_string());
+    }
+
+    let mut row_basis = Vec::with_capacity(a_ub.len() + a_eq.len());
+    for (r, (row, rhs)) in a_ub.iter().zip(b_ub).enumerate() {
+        let slack_col = y_cols + r;
+        let activity = dot_local(row, x);
+        let status = if basis.iter().any(|&col| col == slack_col) {
+            "basic"
+        } else if (activity - rhs).abs() <= tol {
+            "at_upper"
+        } else {
+            "nonbasic"
+        };
+        row_basis.push(status.to_string());
+    }
+    row_basis.extend((0..a_eq.len()).map(|_| "fixed".to_string()));
+
+    (Some(var_basis), Some(row_basis))
+}
+
+fn simplex_reduced_cost(
+    t: &[Vec<f64>],
+    basis: &[usize],
+    cost: &[f64],
+    col: usize,
+    rhs_col: usize,
+) -> f64 {
+    if col >= rhs_col {
+        return 0.0;
+    }
+    let mut rc = cost.get(col).copied().unwrap_or(0.0);
+    for (r, &basic_col) in basis.iter().enumerate() {
+        let basic_cost = cost.get(basic_col).copied().unwrap_or(0.0);
+        rc -= basic_cost * t[r][col];
+    }
+    rc
+}
+
+fn clean_certificate_value(value: f64) -> f64 {
+    if value.abs() <= 1e-8 {
+        0.0
+    } else {
+        value
     }
 }
 
@@ -1419,6 +1571,8 @@ fn empty_lp_solution(
         dual_ub: None,
         dual_eq: None,
         reduced_costs: None,
+        var_basis: None,
+        row_basis: None,
         iters: None,
         solver: solver.to_string(),
         elapsed_ms: ms_since(t0),
@@ -1873,6 +2027,8 @@ fn run_internal_ipm(p: &LPProblem, opts: &InternalInteriorPointOptions) -> LPSol
                 dual_ub: None,
                 dual_eq: None,
                 reduced_costs: None,
+                var_basis: None,
+                row_basis: None,
                 iters: Some(0),
                 solver: "internal-ipm".to_string(),
                 elapsed_ms: ms_since(t0),
@@ -1913,6 +2069,8 @@ fn run_internal_ipm(p: &LPProblem, opts: &InternalInteriorPointOptions) -> LPSol
             dual_ub: None,
             dual_eq: None,
             reduced_costs: None,
+            var_basis: None,
+            row_basis: None,
             iters: Some(0),
             solver: "internal-ipm".to_string(),
             elapsed_ms: ms_since(t0),
@@ -1958,6 +2116,8 @@ fn run_internal_ipm(p: &LPProblem, opts: &InternalInteriorPointOptions) -> LPSol
                 dual_ub: None,
                 dual_eq: None,
                 reduced_costs: None,
+                var_basis: None,
+                row_basis: None,
                 iters: Some(iter),
                 solver: "internal-ipm".to_string(),
                 elapsed_ms: ms_since(t0),
@@ -2052,6 +2212,8 @@ fn run_internal_ipm(p: &LPProblem, opts: &InternalInteriorPointOptions) -> LPSol
         dual_ub: None,
         dual_eq: None,
         reduced_costs: None,
+        var_basis: None,
+        row_basis: None,
         iters: Some(max_iter),
         solver: "internal-ipm".to_string(),
         elapsed_ms: ms_since(t0),
@@ -2273,6 +2435,8 @@ impl ExternalSolver {
             dual_ub: None,
             dual_eq: None,
             reduced_costs: None,
+            var_basis: None,
+            row_basis: None,
             iters: None,
             solver: requested_solver.clone(),
             elapsed_ms: ms_since(t0),
@@ -2363,6 +2527,8 @@ impl ExternalSolver {
             dual_ub: json_get(&parsed, "dualUB").and_then(json_as_f64_array),
             dual_eq: json_get(&parsed, "dualEQ").and_then(json_as_f64_array),
             reduced_costs: json_get(&parsed, "reducedCosts").and_then(json_as_f64_array),
+            var_basis: json_get(&parsed, "varBasis").and_then(json_as_string_array),
+            row_basis: json_get(&parsed, "rowBasis").and_then(json_as_string_array),
             iters: json_get(&parsed, "iters")
                 .and_then(json_as_f64)
                 .map(|f| f as usize),
@@ -2690,6 +2856,16 @@ fn json_as_f64_array(v: &Json) -> Option<Vec<f64>> {
     }
 }
 
+fn json_as_string_array(v: &Json) -> Option<Vec<String>> {
+    match v {
+        Json::Arr(items) => items
+            .iter()
+            .map(|item| json_as_str(item).map(str::to_string))
+            .collect(),
+        _ => None,
+    }
+}
+
 struct JsonParser<'a> {
     bytes: &'a [u8],
     pos: usize,
@@ -3001,6 +3177,13 @@ mod tests {
         InternalSimplexOptions::default()
     }
 
+    fn assert_close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() < TOL,
+            "actual={actual}, expected={expected}"
+        );
+    }
+
     #[test]
     fn finds_minimal_lp_infeasibility_conflict() {
         let p = LPProblem {
@@ -3107,6 +3290,103 @@ mod tests {
         assert!((sol.objective - 7.0).abs() < TOL, "obj={}", sol.objective);
         assert!((sol.x[0] - 4.0).abs() < TOL, "x0={}", sol.x[0]);
         assert!((sol.x[1] - 3.0).abs() < TOL, "x1={}", sol.x[1]);
+    }
+
+    #[test]
+    fn internal_simplex_reports_lp_certificates() {
+        // max 3x + 4y
+        // s.t. x + 2y <= 14, 3x - y >= 0, x - y <= 2
+        // has optimum (6, 4). Active rows c0/c2 have duals 7/3 and 2/3.
+        let p = LPProblem {
+            sense: Sense::Max,
+            c: vec![3.0, 4.0],
+            a_ub: Some(vec![vec![1.0, 2.0], vec![-3.0, 1.0], vec![1.0, -1.0]]),
+            b_ub: Some(vec![14.0, 0.0, 2.0]),
+            ..Default::default()
+        };
+        let sol = solve_lp_internal(&p, &opts());
+        assert_eq!(sol.status, LPStatus::Optimal);
+        let dual_ub = sol.dual_ub.as_ref().expect("dual_ub");
+        let reduced = sol.reduced_costs.as_ref().expect("reduced_costs");
+        assert_close(dual_ub[0], 7.0 / 3.0);
+        assert_close(dual_ub[1], 0.0);
+        assert_close(dual_ub[2], 2.0 / 3.0);
+        assert_close(reduced[0], 0.0);
+        assert_close(reduced[1], 0.0);
+    }
+
+    #[test]
+    fn internal_simplex_reports_basis_statuses() {
+        let p = LPProblem {
+            sense: Sense::Max,
+            c: vec![3.0, 4.0],
+            a_ub: Some(vec![vec![1.0, 2.0], vec![-3.0, 1.0], vec![1.0, -1.0]]),
+            b_ub: Some(vec![14.0, 0.0, 2.0]),
+            ..Default::default()
+        };
+        let sol = solve_lp_internal(&p, &opts());
+        assert_eq!(sol.status, LPStatus::Optimal);
+        assert_eq!(
+            sol.var_basis.as_deref(),
+            Some(&["basic".to_string(), "basic".to_string()][..])
+        );
+        assert_eq!(
+            sol.row_basis.as_deref(),
+            Some(
+                &[
+                    "at_upper".to_string(),
+                    "basic".to_string(),
+                    "at_upper".to_string()
+                ][..]
+            )
+        );
+    }
+
+    #[test]
+    fn internal_simplex_reports_equality_dual() {
+        let p = LPProblem {
+            sense: Sense::Max,
+            c: vec![1.0],
+            a_eq: Some(vec![vec![1.0]]),
+            b_eq: Some(vec![2.0]),
+            ..Default::default()
+        };
+        let sol = solve_lp_internal(&p, &opts());
+        assert_eq!(sol.status, LPStatus::Optimal);
+        assert_close(sol.dual_eq.as_ref().expect("dual_eq")[0], 1.0);
+        assert_close(sol.reduced_costs.as_ref().expect("reduced_costs")[0], 0.0);
+    }
+
+    #[test]
+    fn internal_simplex_reports_bound_reduced_costs() {
+        let lower_active = LPProblem {
+            sense: Sense::Max,
+            c: vec![-1.0],
+            a_ub: Some(vec![vec![0.0]]),
+            b_ub: Some(vec![0.0]),
+            ..Default::default()
+        };
+        let lower_sol = solve_lp_internal(&lower_active, &opts());
+        assert_eq!(lower_sol.status, LPStatus::Optimal);
+        assert_close(
+            lower_sol.reduced_costs.as_ref().expect("reduced_costs")[0],
+            -1.0,
+        );
+
+        let upper_active = LPProblem {
+            sense: Sense::Max,
+            c: vec![1.0],
+            a_ub: Some(vec![vec![0.0]]),
+            b_ub: Some(vec![0.0]),
+            ub: Some(vec![Some(1.0)]),
+            ..Default::default()
+        };
+        let upper_sol = solve_lp_internal(&upper_active, &opts());
+        assert_eq!(upper_sol.status, LPStatus::Optimal);
+        assert_close(
+            upper_sol.reduced_costs.as_ref().expect("reduced_costs")[0],
+            1.0,
+        );
     }
 
     #[test]

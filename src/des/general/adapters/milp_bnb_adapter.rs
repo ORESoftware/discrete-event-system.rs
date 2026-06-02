@@ -37,9 +37,9 @@ use crate::des::general::des_spec::{
     DES_MODEL_SPEC_SCHEMA,
 };
 use crate::des::general::ip_mip_des::{
-    build_binary_knapsack_ip, solve_ipmip_with_des, BranchRule as IpBranchRule, ConstraintNode,
-    IPMIPProblem, IPMIPSolution, IPMIPSolveOptions, IPMIPTraceEvent, LpRelaxationAlgorithm,
-    NodeSelection, TraceAction, VariableNode,
+    build_binary_knapsack_ip, solve_ipmip_with_des, BranchOrCutConstraint,
+    BranchRule as IpBranchRule, ConstraintNode, IPMIPProblem, IPMIPSolution, IPMIPSolveOptions,
+    IPMIPTraceEvent, LpRelaxationAlgorithm, NodeSelection, TraceAction, VariableNode,
 };
 use crate::des::general::lp::Sense as LpSense;
 use crate::des::general::milp_bnb::{
@@ -494,6 +494,7 @@ pub struct IpMipRaw {
     pub ub: Option<Vec<f64>>,
     pub var_names: Option<Vec<String>>,
     pub con_names: Option<Vec<String>>,
+    pub lazy_constraints: Option<Vec<BranchOrCutConstraint>>,
     /// Optional graph metadata carried through from `IPMIPProblem`.
     pub variable_nodes: Option<Vec<VariableNode>>,
     pub constraint_nodes: Option<Vec<ConstraintNode>>,
@@ -637,6 +638,7 @@ impl DESModelRegistration<IPMIPDESParams, IPMIPSolution> for IpMipDesAdapter {
                 ub: raw.ub.as_ref().filter(|u| !u.is_empty()).cloned(),
                 var_names: raw.var_names.as_ref().filter(|v| !v.is_empty()).cloned(),
                 con_names: raw.con_names.as_ref().filter(|v| !v.is_empty()).cloned(),
+                lazy_constraints: raw.lazy_constraints.clone(),
                 variable_nodes: raw.variable_nodes.clone(),
                 constraint_nodes: raw.constraint_nodes.clone(),
             }

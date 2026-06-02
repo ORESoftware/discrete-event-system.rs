@@ -1180,6 +1180,7 @@ impl Driver {
                     ub: Some(vec![1.0]),
                     var_names: Some(vec!["x".to_string()]),
                     con_names: Some(vec!["x_le_0".to_string(), "x_ge_1".to_string()]),
+                    lazy_constraints: None,
                     variable_nodes: None,
                     constraint_nodes: None,
                 },
@@ -1196,6 +1197,7 @@ impl Driver {
                     ub: None,
                     var_names: Some(vec!["x".to_string()]),
                     con_names: Some(vec!["dummy".to_string()]),
+                    lazy_constraints: None,
                     variable_nodes: None,
                     constraint_nodes: None,
                 },
@@ -2339,6 +2341,7 @@ impl Driver {
             ub: Some(vec![1.0, 1.0]),
             var_names: Some(vec!["choose_a".to_string(), "choose_b".to_string()]),
             con_names: Some(vec!["choose_at_most_one".to_string()]),
+            lazy_constraints: None,
             variable_nodes: None,
             constraint_nodes: None,
         };
@@ -2455,6 +2458,7 @@ impl Driver {
                 "x_ge_half".to_string(),
                 "redundant_cap".to_string(),
             ]),
+            lazy_constraints: None,
             variable_nodes: None,
             constraint_nodes: None,
         };
@@ -2655,6 +2659,7 @@ impl Driver {
                 "high_priority".to_string(),
             ]),
             con_names: Some(vec!["cap_low".to_string(), "cap_high".to_string()]),
+            lazy_constraints: None,
             variable_nodes: None,
             constraint_nodes: None,
         };
@@ -2720,6 +2725,7 @@ impl Driver {
             ub: Some(vec![1.0, 1.0]),
             var_names: Some(vec!["fractional_bonus".to_string(), "accepted".to_string()]),
             con_names: Some(vec!["bonus_cap".to_string(), "accepted_cap".to_string()]),
+            lazy_constraints: None,
             variable_nodes: None,
             constraint_nodes: None,
         };
@@ -2822,6 +2828,7 @@ impl Driver {
                     ub: Some(vec![1.0]),
                     var_names: Some(vec!["x".to_string()]),
                     con_names: Some(vec!["x_le_0".to_string(), "x_ge_1".to_string()]),
+                    lazy_constraints: None,
                     variable_nodes: None,
                     constraint_nodes: None,
                 },
@@ -2838,6 +2845,7 @@ impl Driver {
                     ub: None,
                     var_names: Some(vec!["x".to_string()]),
                     con_names: Some(vec!["dummy".to_string()]),
+                    lazy_constraints: None,
                     variable_nodes: None,
                     constraint_nodes: None,
                 },

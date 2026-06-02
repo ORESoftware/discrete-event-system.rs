@@ -295,6 +295,8 @@ function ensureRouteOptions(){
   state.objectiveMode = validObjectiveMode(state.objectiveMode);
   if(!state.routeRules)state.routeRules={lockedOrder:false,orderedStopIds:[],pinnedPositions:[]};
   state.routeRules.lockedOrder=!!state.routeRules.lockedOrder;
+  if(!Array.isArray(state.routeRules.orderedStopIds))state.routeRules.orderedStopIds=[];
+  const legacyLocks=Array.isArray(state.routeRules.lockedPositions)?state.routeRules.lockedPositions:[];
   const seen=new Set();
   state.routeRules.orderedStopIds=(state.routeRules.orderedStopIds||[]).filter(id=>{
     id=String(id||'').trim();
@@ -302,15 +304,25 @@ function ensureRouteOptions(){
     seen.add(id);
     return true;
   });
-  const seenPinnedStops=new Set(),seenPinnedPositions=new Set();
-  state.routeRules.pinnedPositions=(state.routeRules.pinnedPositions||[]).map(pin=>({
+  const stopIds=new Set((state.stops||[]).map(s=>s.id));
+  let pins=(state.routeRules.pinnedPositions||[]).map(pin=>({
     stopId:String(pin?.stopId||pin?.stop_id||'').trim(),
     position:Math.max(0,Number(pin?.position)||0)
-  })).filter(pin=>{
+  }));
+  if(!pins.length&&legacyLocks.length){
+    pins=legacyLocks.map(lock=>({
+      stopId:String(lock?.stopId||lock?.stop_id||'').trim(),
+      position:Math.max(0,Number(lock?.position)||0)+1
+    }));
+  }
+  const seenPinnedStops=new Set(),seenPinnedPositions=new Set();
+  state.routeRules.pinnedPositions=pins.filter(pin=>{
     if(!pin.stopId||pin.position<1||seenPinnedStops.has(pin.stopId)||seenPinnedPositions.has(pin.position))return false;
+    if(stopIds.size&&(!stopIds.has(pin.stopId)||pin.position>(state.stops||[]).length))return false;
     seenPinnedStops.add(pin.stopId);seenPinnedPositions.add(pin.position);
     return true;
   });
+  delete state.routeRules.lockedPositions;
 }
 
 function pad(n){return String(n).padStart(2,'0')}
@@ -527,6 +539,7 @@ function syncStateFromControls(opts={}){
   state.rawManifest = $('manifestText').value;
   ensureRouteOptions();
   state.routeRules.orderedStopIds = opts.resetOrder ? state.stops.map(s=>s.id) : orderedStopIdsFor(state.stops);
+  if(opts.resetOrder)state.routeRules.pinnedPositions=[];
   if(!opts.resetOrder && previousOrder.length)state.routeRules.orderedStopIds=orderedStopIdsFor(state.stops);
   $('userChip').textContent = state.userId || 'dispatcher@local';
 }
@@ -831,12 +844,13 @@ function matrices(){
   return {nodes,dist,travel};
 }
 function routeFeasible(route,m){
-  let clock=state.departTime, cur=0, visits=[], legs=[], totalDistance=0,totalTravel=0,totalWait=0,windowCenterPenalty=0;
+  let clock=state.departTime, cur=0, visits=[], legs=[], totalDistance=0,totalTravel=0,totalWait=0,windowEdgePenalty=0,windowCenterPenalty=0;
   for(const stopIdx of route){
     const next=stopIdx+1, stop=m.nodes[next], tr=m.travel[cur][next], d=m.dist[cur][next];
     const raw=clock+tr, arrival=Math.max(raw,stop.windowStart), wait=Math.max(0,arrival-raw);
     if(arrival>stop.windowEnd+1e-6)return null;
     const depart=arrival+(stop.serviceMinutes!=null?stop.serviceMinutes:(state.defaultServiceMinutes!=null?state.defaultServiceMinutes:0));
+    windowEdgePenalty+=windowEdgePenaltyForArrival(stop,arrival);
     windowCenterPenalty+=windowCenterStopPenalty(stop,arrival);
     legs.push({from:m.nodes[cur].label,to:stop.label,distance:d,travelMinutes:tr});
     visits.push({stopIndex:stopIdx,label:stop.label,address:stop.address,arrival:Math.round(arrival),depart:Math.round(depart),windowStart:stop.windowStart,windowEnd:stop.windowEnd,arrivalText:fmt(arrival),departText:fmt(depart),windowText:fmt(stop.windowStart)+'-'+fmt(stop.windowEnd),distanceFromPrevious:d,travelMinutesFromPrevious:tr,waitMinutes:wait});
@@ -844,8 +858,16 @@ function routeFeasible(route,m){
   }
   legs.push({from:m.nodes[cur].label,to:m.nodes[0].label,distance:m.dist[cur][0],travelMinutes:m.travel[cur][0]});
   totalDistance+=m.dist[cur][0];totalTravel+=m.travel[cur][0];
-  const objectiveValue=objectiveScore({totalDistance,totalTravelMinutes:totalTravel,windowCenterPenalty});
-  return {visits,legs,totalDistance,totalTravelMinutes:totalTravel,totalWaitMinutes:totalWait,windowCenterPenalty,objectiveValue,returnTime:clock+m.travel[cur][0]};
+  const objectiveValue=objectiveScore({totalDistance,totalTravelMinutes:totalTravel,windowEdgePenalty,windowCenterPenalty});
+  return {visits,legs,totalDistance,totalTravelMinutes:totalTravel,totalWaitMinutes:totalWait,windowEdgePenalty,windowCenterPenalty,objectiveValue,returnTime:clock+m.travel[cur][0]};
+}
+function windowEdgePenaltyForArrival(stop,arrival){
+  const startSlack=arrival-Number(stop.windowStart);
+  const endSlack=Number(stop.windowEnd)-arrival;
+  const edgeSlack=Math.max(0,Math.min(startSlack,endSlack));
+  const soft=Math.max(0,30-edgeSlack)/30*8;
+  const hard=Math.max(0,10-edgeSlack)/10*48;
+  return soft+hard;
 }
 function windowCenterStopPenalty(stop,arrival){
   const midpoint=(Number(stop.windowStart)+Number(stop.windowEnd))/2;
@@ -854,15 +876,15 @@ function windowCenterStopPenalty(stop,arrival){
 }
 function objectiveScore(itin){
   const mode=validObjectiveMode(state.objectiveMode);
-  if(mode==='travelTime')return itin.totalTravelMinutes;
+  if(mode==='travelTime')return itin.totalTravelMinutes+(itin.windowEdgePenalty||0);
   if(mode==='windowCenter')return itin.totalTravelMinutes+(itin.windowCenterPenalty||0);
-  return itin.totalDistance;
+  return itin.totalDistance+(itin.windowEdgePenalty||0);
 }
 function objectiveLabel(){
   const mode=validObjectiveMode(state.objectiveMode);
-  if(mode==='travelTime')return 'drive minutes';
+  if(mode==='travelTime')return 'drive minutes plus edge penalty';
   if(mode==='windowCenter')return 'drive minutes plus window-center penalty';
-  return 'route miles';
+  return 'route miles plus edge penalty';
 }
 function lockedRouteFromList(){
   const byId=new Map((state.stops||[]).map((s,i)=>[s.id,i]));
@@ -890,6 +912,7 @@ function localSolve(){
   ensureRouteOptions();
   const m=matrices(), n=state.stops.length;
   const pins=activePinRules();
+  const hasPins=pins.length>0;
   const infeasibleMessage=()=>pins.length?'No route can satisfy pinned stop positions and time windows':'No route can satisfy these time windows';
   let bestRoute=null,bestScore=Infinity;
   if(state.routeRules.lockedOrder){
@@ -928,6 +951,7 @@ function localSolve(){
         if(arrival>m.nodes[node].windowEnd)continue;
         let score=state.objectiveMode==='distance'?m.dist[cur][node]:m.travel[cur][node];
         if(state.objectiveMode==='windowCenter')score+=windowCenterStopPenalty(m.nodes[node],arrival);
+        else score+=windowEdgePenaltyForArrival(m.nodes[node],arrival);
         score+=(m.nodes[node].windowEnd-arrival)*.001;
         if(score<pickScore){pick=s;pickScore=score}
       }
@@ -939,15 +963,17 @@ function localSolve(){
   if(!bestRoute)throw new Error(infeasibleMessage());
   if(!routeSatisfiesPins(bestRoute,pins))throw new Error('No route can satisfy pinned stop positions and time windows');
   const itin=routeFeasible(bestRoute,m);if(!itin)throw new Error(infeasibleMessage());
-  const variables=n*(n+1)+n+(state.objectiveMode==='windowCenter'?n:0)+(pins.length?n*n:0);
+  const edgeVariables=state.objectiveMode==='windowCenter'?n:n*4;
+  const variables=n*(n+1)+n+edgeVariables+(pins.length?n*n:0);
   const pinConstraints=pins.length?(8*n+n*(n-1)*(n-1)+pins.length*2):0;
-  const constraints=n*4+4+n*2+n+n*(n-1)+(state.objectiveMode==='windowCenter'?n*2:0)+pinConstraints;
+  const edgeConstraints=state.objectiveMode==='windowCenter'?n*2:n*4;
+  const constraints=n*4+4+n*2+n+n*(n-1)+edgeConstraints+pinConstraints;
   const itineraryText=buildItineraryText(itin,m);
   return {
-    ok:true,error:null,solverStatus:state.routeRules.lockedOrder?'locked-order':'local-preview',solverKind:state.routeRules.lockedOrder?'rule-constrained-route':'browser-exact-route',
+    ok:true,error:null,solverStatus:state.routeRules.lockedOrder?'locked-order':(hasPins?'pinned-preview':'local-preview'),solverKind:state.routeRules.lockedOrder?'rule-constrained-route':(hasPins?'browser-pinned-route':'browser-exact-route'),
     usedFallback:!state.routeRules.lockedOrder,fallbackReason:state.routeRules.lockedOrder?null:'Browser-side preview; serve the Rust endpoint for the in-house IP/MIP solve.',
     inHouseOnly:true,usesExternalSolvers:false,elapsedMs:0,nodesExplored:0,lpSolves:0,
-    numVariables:variables,numConstraints:constraints,objectiveMode:state.objectiveMode,objectiveValue:itin.objectiveValue,objectiveDistance:itin.totalDistance,windowCenterPenalty:itin.windowCenterPenalty,
+    numVariables:variables,numConstraints:constraints,objectiveMode:state.objectiveMode,objectiveValue:itin.objectiveValue,objectiveDistance:itin.totalDistance,windowEdgePenalty:itin.windowEdgePenalty,windowCenterPenalty:itin.windowCenterPenalty,
     totalDistance:itin.totalDistance,totalTravelMinutes:itin.totalTravelMinutes,totalWaitMinutes:itin.totalWaitMinutes,
     route:bestRoute,visits:itin.visits,legs:itin.legs,itineraryText,
     solverNotes:[
@@ -958,7 +984,7 @@ function localSolve(){
       pins.length?`${pins.length} pinned stop position${pins.length===1?' was':'s were'} enforced as hard route constraint${pins.length===1?'':'s'}; unlocked rows remained optimizable.`:'',
       state.routeRules.lockedOrder?'Locked route was checked directly against every delivery window.':'Browser preview used exact enumeration for small manifests or greedy repair for larger manifests.'
     ].filter(Boolean),
-    solverTrace:[{nodeId:state.routeRules.lockedOrder?'locked-order':'preview',depth:0,action:'incumbent',lpZ:itin.objectiveValue,reason:'feasible delivery route accepted',fractional:[]}],
+    solverTrace:[{nodeId:state.routeRules.lockedOrder?'locked-order':(hasPins?'pinned-preview':'preview'),depth:0,action:'incumbent',lpZ:itin.objectiveValue,reason:'feasible delivery route accepted',fractional:[]}],
     routeAnimation:buildRouteAnimation(m,bestRoute,itin)
   };
 }

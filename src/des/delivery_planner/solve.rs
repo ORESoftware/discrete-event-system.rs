@@ -23,7 +23,11 @@ use super::model::{
 const EARTH_RADIUS_MILES: f64 = 3958.7613;
 const STAGE_W: f64 = 1160.0;
 const STAGE_H: f64 = 680.0;
-const WINDOW_CENTER_EDGE_PENALTY: f64 = 12.0;
+const WINDOW_CENTER_EDGE_PENALTY: f64 = 48.0;
+const EDGE_SOFT_THRESHOLD_MINUTES: f64 = 30.0;
+const EDGE_HARD_THRESHOLD_MINUTES: f64 = 10.0;
+const EDGE_SOFT_PENALTY: f64 = 8.0;
+const EDGE_HARD_PENALTY: f64 = 48.0;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -81,6 +85,7 @@ pub struct DeliveryPlannerResponse {
     pub objective_mode: DeliveryObjectiveMode,
     pub objective_value: f64,
     pub objective_distance: f64,
+    pub window_edge_penalty: f64,
     pub window_center_penalty: f64,
     pub total_distance: f64,
     pub total_travel_minutes: f64,
@@ -151,7 +156,7 @@ fn solve_delivery_planner_inner(
                 &build,
                 route,
                 "locked-order".to_string(),
-                "rule-constrained-route".to_string(),
+                "position-locked-route-search".to_string(),
                 false,
                 None,
                 true,
@@ -168,7 +173,8 @@ fn solve_delivery_planner_inner(
                     action: "incumbent".to_string(),
                     lp_z: None,
                     reason: Some(
-                        "vertical stop list was locked, so the route order is fixed".to_string(),
+                        "locked stop order was checked directly against every delivery window"
+                            .to_string(),
                     ),
                     fractional: Vec::new(),
                 }],
@@ -189,7 +195,6 @@ fn solve_delivery_planner_inner(
                 time_limit_ms: Some(req.solver_time_limit_ms),
                 lp_max_iters: Some(req.solver_lp_max_iters),
                 int_tol: Some(1e-6),
-                mip_start: None,
                 branch_rule: Some(BranchRule::MostFractional),
                 branch_priorities: None,
                 node_selection: Some(NodeSelection::BestBound),
@@ -201,6 +206,7 @@ fn solve_delivery_planner_inner(
                 mip_gap_rel: None,
                 mip_gap_abs: None,
                 verbose: Some(false),
+                mip_start: None,
             },
         )
     }));
@@ -399,6 +405,7 @@ fn error_response(message: String) -> DeliveryPlannerResponse {
         objective_mode: DeliveryObjectiveMode::Distance,
         objective_value: 0.0,
         objective_distance: 0.0,
+        window_edge_penalty: 0.0,
         window_center_penalty: 0.0,
         total_distance: 0.0,
         total_travel_minutes: 0.0,
@@ -444,6 +451,17 @@ fn window_center_node_penalty(node: &StopNode, arrival: f64) -> f64 {
     let midpoint = (node.window_start as f64 + node.window_end as f64) / 2.0;
     let half_width = ((node.window_end.saturating_sub(node.window_start)) as f64 / 2.0).max(1.0);
     (arrival - midpoint).abs() / half_width * WINDOW_CENTER_EDGE_PENALTY
+}
+
+fn window_edge_penalty_for_arrival(node: &StopNode, arrival: f64) -> f64 {
+    let start_slack = arrival - node.window_start as f64;
+    let end_slack = node.window_end as f64 - arrival;
+    let edge_slack = start_slack.min(end_slack).max(0.0);
+    let soft = ((EDGE_SOFT_THRESHOLD_MINUTES - edge_slack).max(0.0) / EDGE_SOFT_THRESHOLD_MINUTES)
+        * EDGE_SOFT_PENALTY;
+    let hard = ((EDGE_HARD_THRESHOLD_MINUTES - edge_slack).max(0.0) / EDGE_HARD_THRESHOLD_MINUTES)
+        * EDGE_HARD_PENALTY;
+    soft + hard
 }
 
 fn build_ip_model(req: &DeliveryPlannerRequest, nodes: &[StopNode]) -> ModelBuild {
@@ -512,6 +530,10 @@ fn build_ip_model(req: &DeliveryPlannerRequest, nodes: &[StopNode]) -> ModelBuil
         var_names.push(format!("arrival_{}", node));
     }
     let mut center_dev_index = vec![None; n_nodes];
+    let mut edge_start_soft_index = vec![None; n_nodes];
+    let mut edge_end_soft_index = vec![None; n_nodes];
+    let mut edge_start_hard_index = vec![None; n_nodes];
+    let mut edge_end_hard_index = vec![None; n_nodes];
     if req.objective_mode == DeliveryObjectiveMode::WindowCenter {
         for (node, slot) in center_dev_index.iter_mut().enumerate().skip(1) {
             let idx = c.len();
@@ -520,6 +542,36 @@ fn build_ip_model(req: &DeliveryPlannerRequest, nodes: &[StopNode]) -> ModelBuil
             integer_vars.push(false);
             ub.push(horizon);
             var_names.push(format!("center_deviation_{}", node));
+        }
+    } else {
+        for node in 1..n_nodes {
+            let idx = c.len();
+            edge_start_soft_index[node] = Some(idx);
+            c.push(EDGE_SOFT_PENALTY / EDGE_SOFT_THRESHOLD_MINUTES);
+            integer_vars.push(false);
+            ub.push(EDGE_SOFT_THRESHOLD_MINUTES);
+            var_names.push(format!("edge_start_soft_{}", node));
+
+            let idx = c.len();
+            edge_end_soft_index[node] = Some(idx);
+            c.push(EDGE_SOFT_PENALTY / EDGE_SOFT_THRESHOLD_MINUTES);
+            integer_vars.push(false);
+            ub.push(EDGE_SOFT_THRESHOLD_MINUTES);
+            var_names.push(format!("edge_end_soft_{}", node));
+
+            let idx = c.len();
+            edge_start_hard_index[node] = Some(idx);
+            c.push(EDGE_HARD_PENALTY / EDGE_HARD_THRESHOLD_MINUTES);
+            integer_vars.push(false);
+            ub.push(EDGE_HARD_THRESHOLD_MINUTES);
+            var_names.push(format!("edge_start_hard_{}", node));
+
+            let idx = c.len();
+            edge_end_hard_index[node] = Some(idx);
+            c.push(EDGE_HARD_PENALTY / EDGE_HARD_THRESHOLD_MINUTES);
+            integer_vars.push(false);
+            ub.push(EDGE_HARD_THRESHOLD_MINUTES);
+            var_names.push(format!("edge_end_hard_{}", node));
         }
     }
     let mut position_index = vec![vec![None; n_customers]; n_nodes];
@@ -730,6 +782,39 @@ fn build_ip_model(req: &DeliveryPlannerRequest, nodes: &[StopNode]) -> ModelBuil
                 format!("center_lo_{customer}"),
             );
         }
+        if let (Some(start_soft), Some(end_soft), Some(start_hard), Some(end_hard)) = (
+            edge_start_soft_index[customer],
+            edge_end_soft_index[customer],
+            edge_start_hard_index[customer],
+            edge_end_hard_index[customer],
+        ) {
+            add_edge_penalty_rows(
+                &mut a,
+                &mut b,
+                &mut con_names,
+                var_count,
+                t,
+                start_soft,
+                end_soft,
+                nodes[customer].window_start as f64,
+                nodes[customer].window_end as f64,
+                EDGE_SOFT_THRESHOLD_MINUTES,
+                format!("edge_soft_{customer}"),
+            );
+            add_edge_penalty_rows(
+                &mut a,
+                &mut b,
+                &mut con_names,
+                var_count,
+                t,
+                start_hard,
+                end_hard,
+                nodes[customer].window_start as f64,
+                nodes[customer].window_end as f64,
+                EDGE_HARD_THRESHOLD_MINUTES,
+                format!("edge_hard_{customer}"),
+            );
+        }
     }
 
     let big_m = horizon + max_travel + 24.0 * 60.0;
@@ -777,6 +862,7 @@ fn build_ip_model(req: &DeliveryPlannerRequest, nodes: &[StopNode]) -> ModelBuil
             ub: Some(ub),
             var_names: Some(var_names),
             con_names: Some(con_names),
+            lazy_constraints: None,
             variable_nodes: None,
             constraint_nodes: None,
         },
@@ -818,6 +904,45 @@ fn add_eq_rows(
         *x = -*x;
     }
     add_le_row(a, b, con_names, row, -rhs, format!("{name}_ge"));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add_edge_penalty_rows(
+    a: &mut Vec<Vec<f64>>,
+    b: &mut Vec<f64>,
+    con_names: &mut Vec<String>,
+    var_count: usize,
+    t_idx: usize,
+    start_var: usize,
+    end_var: usize,
+    window_start: f64,
+    window_end: f64,
+    threshold: f64,
+    name: String,
+) {
+    let mut row = vec![0.0; var_count];
+    row[start_var] = -1.0;
+    row[t_idx] = -1.0;
+    add_le_row(
+        a,
+        b,
+        con_names,
+        row,
+        -(window_start + threshold),
+        format!("{name}_start"),
+    );
+
+    let mut row = vec![0.0; var_count];
+    row[end_var] = -1.0;
+    row[t_idx] = 1.0;
+    add_le_row(
+        a,
+        b,
+        con_names,
+        row,
+        window_end - threshold,
+        format!("{name}_end"),
+    );
 }
 
 fn extract_route(build: &ModelBuild, x: &[f64], n_customers: usize) -> Option<Vec<usize>> {
@@ -881,6 +1006,7 @@ fn response_from_route(
         num_constraints,
         itinerary.total_distance,
         objective_value,
+        itinerary.window_edge_penalty,
         itinerary.window_center_penalty,
     );
     let animation = if render_animation {
@@ -905,6 +1031,7 @@ fn response_from_route(
         objective_mode: req.objective_mode,
         objective_value,
         objective_distance: itinerary.total_distance,
+        window_edge_penalty: itinerary.window_edge_penalty,
         window_center_penalty: itinerary.window_center_penalty,
         total_distance: itinerary.total_distance,
         total_travel_minutes: itinerary.total_travel_minutes,
@@ -926,6 +1053,7 @@ struct ItineraryBuild {
     total_distance: f64,
     total_travel_minutes: f64,
     total_wait_minutes: f64,
+    window_edge_penalty: f64,
     window_center_penalty: f64,
 }
 
@@ -996,6 +1124,7 @@ fn build_itinerary(
         travel_minutes: back_travel,
     });
     let return_time = clock + back_travel;
+    let edge_penalty = window_edge_penalty(&visits);
     let center_penalty = window_center_penalty(&visits);
     let text = itinerary_text(
         req,
@@ -1013,18 +1142,39 @@ fn build_itinerary(
         total_distance,
         total_travel_minutes,
         total_wait_minutes,
+        window_edge_penalty: edge_penalty,
         window_center_penalty: center_penalty,
     })
 }
 
 fn objective_score(mode: DeliveryObjectiveMode, itinerary: &ItineraryBuild) -> f64 {
     match mode {
-        DeliveryObjectiveMode::Distance => itinerary.total_distance,
-        DeliveryObjectiveMode::TravelTime => itinerary.total_travel_minutes,
+        DeliveryObjectiveMode::Distance => itinerary.total_distance + itinerary.window_edge_penalty,
+        DeliveryObjectiveMode::TravelTime => {
+            itinerary.total_travel_minutes + itinerary.window_edge_penalty
+        }
         DeliveryObjectiveMode::WindowCenter => {
             itinerary.total_travel_minutes + itinerary.window_center_penalty
         }
     }
+}
+
+fn window_edge_penalty(visits: &[DeliveryVisit]) -> f64 {
+    visits
+        .iter()
+        .map(|visit| {
+            let node = StopNode {
+                label: visit.label.clone(),
+                address: visit.address.clone(),
+                lat: 0.0,
+                lon: 0.0,
+                window_start: visit.window_start,
+                window_end: visit.window_end,
+                service_minutes: 0.0,
+            };
+            window_edge_penalty_for_arrival(&node, visit.arrival as f64)
+        })
+        .sum()
 }
 
 fn window_center_penalty(visits: &[DeliveryVisit]) -> f64 {
@@ -1237,8 +1387,14 @@ fn greedy_leg_score(
     arrival: f64,
 ) -> f64 {
     match mode {
-        DeliveryObjectiveMode::Distance => build.distance[cur_node][next_node],
-        DeliveryObjectiveMode::TravelTime => build.travel_minutes[cur_node][next_node],
+        DeliveryObjectiveMode::Distance => {
+            build.distance[cur_node][next_node]
+                + window_edge_penalty_for_arrival(&nodes[next_node], arrival)
+        }
+        DeliveryObjectiveMode::TravelTime => {
+            build.travel_minutes[cur_node][next_node]
+                + window_edge_penalty_for_arrival(&nodes[next_node], arrival)
+        }
         DeliveryObjectiveMode::WindowCenter => {
             build.travel_minutes[cur_node][next_node]
                 + window_center_node_penalty(&nodes[next_node], arrival)
@@ -1257,13 +1413,13 @@ fn objective_label(mode: DeliveryObjectiveMode) -> &'static str {
 fn objective_note(mode: DeliveryObjectiveMode) -> &'static str {
     match mode {
         DeliveryObjectiveMode::Distance => {
-            "Objective minimized route miles; arrival-time rows enforce every customer delivery window."
+            "Objective minimized route miles plus edge-window penalties; arrival-time rows enforce every customer delivery window."
         }
         DeliveryObjectiveMode::TravelTime => {
-            "Objective minimized computed drive minutes at the selected average speed; arrival-time rows enforce every customer delivery window."
+            "Objective minimized computed drive minutes plus edge-window penalties; arrival-time rows enforce every customer delivery window."
         }
         DeliveryObjectiveMode::WindowCenter => {
-            "Objective minimized computed drive minutes plus a normalized penalty for arriving away from each delivery-window midpoint."
+            "Objective minimized computed drive minutes plus a strong linear penalty for arriving away from each delivery-window midpoint."
         }
     }
 }
@@ -1280,6 +1436,7 @@ fn delivery_notes(
     num_constraints: usize,
     total_distance: f64,
     objective_value: f64,
+    window_edge_penalty: f64,
     window_center_penalty: f64,
 ) -> Vec<String> {
     let mut notes = vec![
@@ -1290,9 +1447,15 @@ fn delivery_notes(
         format!("Optimized {} = {:.2}.", objective_label(mode), objective_value),
         format!("Planned total route distance is {:.2} miles.", total_distance),
     ];
+    if mode != DeliveryObjectiveMode::WindowCenter {
+        notes.push(format!(
+            "Edge-window penalty contribution is {:.2}; arrivals inside 10 minutes of either edge receive the largest penalty, and arrivals inside 30 minutes receive a smaller penalty.",
+            window_edge_penalty
+        ));
+    }
     if mode == DeliveryObjectiveMode::WindowCenter {
         notes.push(format!(
-            "Window-center edge penalty contribution is {:.2}; zero is centered in every availability window.",
+            "Window-center penalty contribution is {:.2}; zero is centered in every availability window.",
             window_center_penalty
         ));
     }
@@ -1783,11 +1946,35 @@ mod tests {
 
         assert!(resp.ok, "{:?}", resp.error);
         assert_eq!(resp.route, vec![2, 0, 1]);
-        assert_eq!(resp.solver_kind, "rule-constrained-route");
+        assert_eq!(resp.solver_kind, "position-locked-route-search");
         assert!(resp
             .solver_notes
             .iter()
             .any(|n| n.contains("Locked stop order")));
+    }
+
+    #[test]
+    fn pinned_position_fixes_only_that_route_slot() {
+        let mut req = default_delivery_request();
+        req.stops.truncate(3);
+        for stop in &mut req.stops {
+            stop.window_start = 8 * 60;
+            stop.window_end = 18 * 60;
+        }
+        req.route_rules.pinned_positions = vec![DeliveryPinnedStop {
+            stop_id: "S3".to_string(),
+            position: 2,
+        }];
+
+        let resp = solve_delivery_planner_summary(&req);
+
+        assert!(resp.ok, "{:?}", resp.error);
+        assert_eq!(resp.route.len(), 3);
+        assert_eq!(resp.route[1], 2);
+        assert!(resp
+            .solver_notes
+            .iter()
+            .any(|n| n.contains("unlocked rows remained optimizable")));
     }
 
     #[test]
@@ -1896,7 +2083,11 @@ mod tests {
         let travel = solve_delivery_planner_summary(&req);
         assert!(travel.ok, "{:?}", travel.error);
         assert_eq!(travel.objective_mode, DeliveryObjectiveMode::TravelTime);
-        assert!((travel.objective_value - travel.total_travel_minutes).abs() < 1e-6);
+        assert!(
+            (travel.objective_value - (travel.total_travel_minutes + travel.window_edge_penalty))
+                .abs()
+                < 1e-6
+        );
 
         req.objective_mode = DeliveryObjectiveMode::WindowCenter;
         let centered = solve_delivery_planner_summary(&req);

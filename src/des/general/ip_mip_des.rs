@@ -173,6 +173,7 @@ pub struct IPMIPProblem {
     pub ub: Option<Vec<f64>>,
     pub var_names: Option<Vec<String>>,
     pub con_names: Option<Vec<String>>,
+    pub lazy_constraints: Option<Vec<BranchOrCutConstraint>>,
     pub variable_nodes: Option<Vec<VariableNode>>,
     pub constraint_nodes: Option<Vec<ConstraintNode>>,
 }
@@ -923,6 +924,7 @@ pub struct BranchOrCutConstraint {
 pub enum ConstraintKind {
     Branch,
     Cut,
+    Lazy,
 }
 
 /// Branch direction (TS `'le' | 'ge'`).
@@ -1716,6 +1718,7 @@ pub struct NodeDecisionStation {
     verbose: bool,
     pub trace: Vec<IPMIPTraceEvent>,
     cuts_by_node: HashMap<usize, Vec<BranchOrCutConstraint>>,
+    pub lazy_cuts_added: usize,
     pub saw_unbounded: bool,
     tick: usize,
     registry: Registry,
@@ -1742,6 +1745,7 @@ impl NodeDecisionStation {
             verbose: opts.verbose,
             trace: Vec::new(),
             cuts_by_node: HashMap::new(),
+            lazy_cuts_added: 0,
             saw_unbounded: false,
             tick: 0,
             registry,
@@ -1800,7 +1804,48 @@ impl NodeDecisionStation {
             );
             return;
         }
-        if r.fractional.is_empty() && is_integer_feasible(&self.p, &r.x, self.int_tol) {
+        if r.fractional.is_empty() && is_integer_base_feasible(&self.p, &r.x, self.int_tol) {
+            let lazy_cuts =
+                violated_lazy_constraints(&self.p, &r.x, self.int_tol, &node.constraints);
+            if !lazy_cuts.is_empty() {
+                let child_id = self.controller.borrow_mut().allocate_node_id();
+                let mut constraints = node.constraints.clone();
+                constraints.extend(lazy_cuts.iter().cloned());
+                let child = IpNode {
+                    node_id: child_id,
+                    parent_id: Some(node.node_id),
+                    depth: node.depth,
+                    constraints,
+                    cut_rounds: node.cut_rounds,
+                    branch_var: node.branch_var,
+                    branch_type: node.branch_type,
+                    branch_value: node.branch_value,
+                    bound_guess: Some(r.z),
+                };
+                let child_tok = new_node_token(
+                    child,
+                    TokenOpts {
+                        token_id: format!("ip-node-{child_id}"),
+                        tick: self.tick as f64,
+                        station_id: self.core.id.clone(),
+                        parent: Some(tok.base.clone()),
+                        event: Some("lazy-child-created".to_string()),
+                        detail: Some(format!("{} lazy constraint(s)", lazy_cuts.len())),
+                    },
+                );
+                self.registry.borrow_mut().track(child_tok.base.clone());
+                self.core.emit(Rc::new(child_tok), "nodes");
+                self.lazy_cuts_added += lazy_cuts.len();
+                self.record(
+                    tok,
+                    TraceAction::Cut,
+                    Some(format!("added {} lazy constraint(s)", lazy_cuts.len())),
+                    None,
+                    Some(vec![child_id]),
+                    Some(lazy_cuts.len()),
+                );
+                return;
+            }
             let cand = new_candidate_token(
                 CandidatePayload {
                     node_id: node.node_id,
@@ -2397,7 +2442,8 @@ pub fn solve_ipmip_with_des(p: IPMIPProblem, opts: IPMIPSolveOptions) -> IPMIPSo
     let lp_solves = solver_ref.lp.borrow().lp_solves;
     let total_lp_iterations = solver_ref.lp.borrow().total_iterations;
     let total_lp_solver_ms = solver_ref.lp.borrow().total_solver_elapsed_ms;
-    let cuts_added = solver_ref.cuts.borrow().cuts_generated;
+    let cuts_added =
+        solver_ref.cuts.borrow().cuts_generated + solver_ref.decision.borrow().lazy_cuts_added;
     let candidates_tried = solver_ref.heuristic.borrow().candidates_tried;
     let algorithm_usage = solver_ref.lp.borrow().algorithm_usage.clone();
     let uses_external_solvers = did_use_external_lp(&algorithm_usage);
@@ -2658,6 +2704,7 @@ pub fn build_ipmip_feasibility_relaxation_problem(
             ub: Some(ub),
             var_names: Some(var_names),
             con_names: Some(con_names),
+            lazy_constraints: None,
             variable_nodes: None,
             constraint_nodes: None,
         },
@@ -2809,6 +2856,7 @@ pub fn ipmip_feasibility_problem_from_conflict_members(
         ub: if has_upper_bound { Some(ub) } else { None },
         var_names: p.var_names.clone(),
         con_names: Some(row_names),
+        lazy_constraints: None,
         variable_nodes: None,
         constraint_nodes: None,
     }
@@ -6732,6 +6780,26 @@ pub fn validate_ipmip_problem(p: &IPMIPProblem) {
     if let Some(cn) = &p.con_names {
         req(P::length_eq(model, "conNames", cn, p.a.len()));
     }
+    if let Some(rows) = &p.lazy_constraints {
+        for (i, row) in rows.iter().enumerate() {
+            req(P::length_eq(
+                model,
+                &format!("lazyConstraints[{i}].coefs"),
+                &row.coefs,
+                p.c.len(),
+            ));
+            req(P::all_finite(
+                model,
+                &format!("lazyConstraints[{i}].coefs"),
+                &row.coefs,
+            ));
+            req(P::finite(
+                model,
+                &format!("lazyConstraints[{i}].rhs"),
+                row.rhs,
+            ));
+        }
+    }
 }
 
 fn validate_lower_bounded_ipmip_problem(problem: &LowerBoundedIPMIPProblem) {
@@ -6927,6 +6995,10 @@ fn add_solution_pool_binary(p: &mut IPMIPProblem, ub: &mut Vec<f64>, name: Strin
 }
 
 fn is_integer_feasible(p: &IPMIPProblem, x: &[f64], tol: f64) -> bool {
+    is_integer_base_feasible(p, x, tol) && violated_lazy_constraints(p, x, tol, &[]).is_empty()
+}
+
+fn is_integer_base_feasible(p: &IPMIPProblem, x: &[f64], tol: f64) -> bool {
     if !bounds_ok(p, x, tol) || !satisfies_linear_rows(p, x, tol) {
         return false;
     }
@@ -6936,6 +7008,35 @@ fn is_integer_feasible(p: &IPMIPProblem, x: &[f64], tol: f64) -> bool {
         }
     }
     true
+}
+
+fn violated_lazy_constraints(
+    p: &IPMIPProblem,
+    x: &[f64],
+    tol: f64,
+    existing: &[BranchOrCutConstraint],
+) -> Vec<BranchOrCutConstraint> {
+    let Some(rows) = &p.lazy_constraints else {
+        return Vec::new();
+    };
+    let existing_names = existing
+        .iter()
+        .map(|row| row.name.as_str())
+        .collect::<HashSet<_>>();
+    rows.iter()
+        .filter(|row| {
+            !existing_names.contains(row.name.as_str()) && branch_or_cut_lhs(row, x) > row.rhs + tol
+        })
+        .cloned()
+        .collect()
+}
+
+fn branch_or_cut_lhs(row: &BranchOrCutConstraint, x: &[f64]) -> f64 {
+    row.coefs
+        .iter()
+        .zip(x)
+        .map(|(coef, value)| coef * value)
+        .sum()
 }
 
 fn add_objective_offset(value: f64, offset: f64) -> f64 {
@@ -6981,6 +7082,11 @@ fn total_violation(p: &IPMIPProblem, x: &[f64]) -> f64 {
             lhs += p.a[i][j] * x[j];
         }
         v += 0.0_f64.max(lhs - p.b[i]);
+    }
+    if let Some(rows) = &p.lazy_constraints {
+        for row in rows {
+            v += 0.0_f64.max(branch_or_cut_lhs(row, x) - row.rhs);
+        }
     }
     for j in 0..x.len() {
         v += 0.0_f64.max(-x[j]);
@@ -7134,6 +7240,7 @@ pub fn build_binary_knapsack_ip(
         ub: Some(vec![1.0; n]),
         var_names: Some((0..n).map(|i| format!("item_{i}")).collect()),
         con_names: Some(vec!["capacity".to_string()]),
+        lazy_constraints: None,
         variable_nodes: Some(
             (0..n)
                 .map(|i| VariableNode {
@@ -7166,6 +7273,7 @@ pub fn build_small_mixed_ip() -> IPMIPProblem {
             "y_cont".to_string(),
         ]),
         con_names: Some(vec!["integer_sum".to_string()]),
+        lazy_constraints: None,
         variable_nodes: None,
         constraint_nodes: None,
     }
@@ -7185,6 +7293,7 @@ pub fn build_lower_bounded_production_ip() -> LowerBoundedIPMIPProblem {
             ub: Some(vec![6.0, 10.0]),
             var_names: Some(vec!["base_load".to_string(), "premium_load".to_string()]),
             con_names: Some(vec!["total_capacity".to_string()]),
+            lazy_constraints: None,
             variable_nodes: None,
             constraint_nodes: None,
         },
@@ -7206,6 +7315,7 @@ pub fn build_general_linear_rows_ip() -> GeneralLinearIPMIPProblem {
             ub: Some(vec![10.0, 10.0]),
             var_names: Some(vec!["x".to_string(), "y".to_string()]),
             con_names: Some(vec!["x_cap".to_string()]),
+            lazy_constraints: None,
             variable_nodes: None,
             constraint_nodes: None,
         },
@@ -7244,6 +7354,7 @@ pub fn build_fixed_charge_indicator_ip() -> IndicatorIPMIPProblem {
         ub: Some(vec![1.0, 4.0]),
         var_names: Some(vec!["use_line".to_string(), "production".to_string()]),
         con_names: Some(vec!["production_cap".to_string()]),
+        lazy_constraints: None,
         variable_nodes: None,
         constraint_nodes: None,
     };
@@ -7276,6 +7387,7 @@ pub fn build_sos1_choice_ip() -> SosIPMIPProblem {
             "activity_c".to_string(),
         ]),
         con_names: Some(vec!["budget".to_string()]),
+        lazy_constraints: None,
         variable_nodes: None,
         constraint_nodes: None,
     };
@@ -7306,6 +7418,7 @@ pub fn build_sos2_adjacency_ip() -> SosIPMIPProblem {
             "lambda_3".to_string(),
         ]),
         con_names: Some(vec!["mass".to_string()]),
+        lazy_constraints: None,
         variable_nodes: None,
         constraint_nodes: None,
     };
@@ -7332,6 +7445,7 @@ pub fn build_semi_continuous_gate_ip() -> SemiIPMIPProblem {
         ub: Some(vec![5.0]),
         var_names: Some(vec!["production".to_string()]),
         con_names: Some(vec!["small_order_cap".to_string()]),
+        lazy_constraints: None,
         variable_nodes: None,
         constraint_nodes: None,
     };
@@ -7359,6 +7473,7 @@ pub fn build_semi_integer_lot_ip() -> SemiIPMIPProblem {
         ub: Some(vec![5.0]),
         var_names: Some(vec!["lot_size".to_string()]),
         con_names: Some(vec!["resource_cap".to_string()]),
+        lazy_constraints: None,
         variable_nodes: None,
         constraint_nodes: None,
     };
@@ -7386,6 +7501,7 @@ pub fn build_piecewise_linear_reward_ip() -> PwlIPMIPProblem {
         ub: Some(vec![3.0, 4.0]),
         var_names: Some(vec!["activity".to_string(), "reward".to_string()]),
         con_names: Some(vec!["activity_cap".to_string()]),
+        lazy_constraints: None,
         variable_nodes: None,
         constraint_nodes: None,
     };
@@ -7419,6 +7535,7 @@ pub fn build_absolute_value_penalty_ip() -> SourceIPMIPProblem {
             ub: Some(vec![4.0, 4.0]),
             var_names: Some(vec!["deviation".to_string(), "penalty".to_string()]),
             con_names: Some(vec!["negative_deviation_required".to_string()]),
+            lazy_constraints: None,
             variable_nodes: None,
             constraint_nodes: None,
         },
@@ -7461,6 +7578,7 @@ pub fn build_maximum_peak_ip() -> SourceIPMIPProblem {
                 "peak".to_string(),
             ]),
             con_names: Some(vec!["load_a_floor".to_string(), "load_b_floor".to_string()]),
+            lazy_constraints: None,
             variable_nodes: None,
             constraint_nodes: None,
         },
@@ -7505,6 +7623,7 @@ pub fn build_minimum_floor_ip() -> SourceIPMIPProblem {
                 "floor".to_string(),
             ]),
             con_names: Some(vec!["load_a_floor".to_string(), "load_b_floor".to_string()]),
+            lazy_constraints: None,
             variable_nodes: None,
             constraint_nodes: None,
         },
@@ -7550,6 +7669,7 @@ pub fn build_logical_gate_ip() -> SourceIPMIPProblem {
                 "either".to_string(),
             ]),
             con_names: Some(vec!["choose_at_most_one".to_string()]),
+            lazy_constraints: None,
             variable_nodes: None,
             constraint_nodes: None,
         },
@@ -7601,6 +7721,7 @@ pub fn build_l1_norm_deviation_ip() -> SourceIPMIPProblem {
                 "norm".to_string(),
             ]),
             con_names: Some(vec!["dev_a_floor".to_string(), "dev_b_cap".to_string()]),
+            lazy_constraints: None,
             variable_nodes: None,
             constraint_nodes: None,
         },
@@ -7644,6 +7765,7 @@ pub fn build_linf_norm_deviation_ip() -> SourceIPMIPProblem {
                 "radius".to_string(),
             ]),
             con_names: Some(vec!["dev_a_floor".to_string(), "dev_b_cap".to_string()]),
+            lazy_constraints: None,
             variable_nodes: None,
             constraint_nodes: None,
         },
@@ -7687,6 +7809,7 @@ pub fn build_product_activation_ip() -> SourceIPMIPProblem {
                 "served".to_string(),
             ]),
             con_names: Some(vec!["activity_cap".to_string()]),
+            lazy_constraints: None,
             variable_nodes: None,
             constraint_nodes: None,
         },
@@ -7730,6 +7853,7 @@ pub fn build_binary_product_gate_ip() -> SourceIPMIPProblem {
                 "accepted".to_string(),
             ]),
             con_names: Some(vec!["binary_cap".to_string()]),
+            lazy_constraints: None,
             variable_nodes: None,
             constraint_nodes: None,
         },
@@ -7775,6 +7899,7 @@ pub fn build_quadratic_objective_mix_ip() -> QuadraticObjectiveIPMIPProblem {
                 "activity".to_string(),
             ]),
             con_names: Some(vec!["activity_cap".to_string()]),
+            lazy_constraints: None,
             variable_nodes: None,
             constraint_nodes: None,
         },
@@ -7814,6 +7939,7 @@ pub fn build_source_feature_mix_ip() -> SourceIPMIPProblem {
                 "use_upgrade".to_string(),
             ]),
             con_names: Some(vec!["activity_cap".to_string()]),
+            lazy_constraints: None,
             variable_nodes: None,
             constraint_nodes: None,
         },
@@ -7868,6 +7994,7 @@ pub fn build_lexicographic_choice_ip() -> MultiObjectiveIPMIPProblem {
         ub: Some(vec![1.0, 1.0]),
         var_names: Some(vec!["choice_a".to_string(), "choice_b".to_string()]),
         con_names: Some(vec!["choose_at_most_one".to_string()]),
+        lazy_constraints: None,
         variable_nodes: None,
         constraint_nodes: None,
     };
@@ -7907,6 +8034,60 @@ mod tests {
     }
 
     #[test]
+    fn mip_start_seeds_incumbent_when_feasible() {
+        let p = build_binary_knapsack_ip(vec![60.0, 100.0, 120.0], vec![10.0, 20.0, 30.0], 50.0);
+        let sol = solve_ipmip_with_des(
+            p,
+            IPMIPSolveOptions {
+                mip_start: Some(vec![0.0, 1.0, 1.0]),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(sol.status, IPMIPStatus::Optimal);
+        assert_eq!(sol.incumbent_source.as_deref(), Some("user-mip-start"));
+        assert_eq!(
+            sol.x.iter().map(|v| v.round() as i32).collect::<Vec<_>>(),
+            vec![0, 1, 1]
+        );
+    }
+
+    #[test]
+    fn lazy_constraint_cuts_integer_candidate_before_incumbent() {
+        let p = IPMIPProblem {
+            sense: Sense::Max,
+            c: vec![1.0, 1.0],
+            a: vec![vec![1.0, 1.0]],
+            b: vec![2.0],
+            integer_vars: vec![true, true],
+            ub: Some(vec![1.0, 1.0]),
+            var_names: Some(vec!["x".to_string(), "y".to_string()]),
+            con_names: Some(vec!["loose-capacity".to_string()]),
+            lazy_constraints: Some(vec![BranchOrCutConstraint {
+                coefs: vec![1.0, 1.0],
+                rhs: 1.0,
+                name: "lazy-at-most-one".to_string(),
+                kind: ConstraintKind::Lazy,
+            }]),
+            variable_nodes: None,
+            constraint_nodes: None,
+        };
+
+        let sol = solve_ipmip_with_des(p, IPMIPSolveOptions::default());
+
+        assert_eq!(sol.status, IPMIPStatus::Optimal);
+        assert!((sol.z - 1.0).abs() < 1e-6, "z={}", sol.z);
+        assert!(sol.cuts_added >= 1);
+        assert!(sol.trace.iter().any(|event| {
+            event.action == TraceAction::Cut
+                && event
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("lazy constraint"))
+        }));
+    }
+
+    #[test]
     fn solves_small_mixed_ip() {
         let p = build_small_mixed_ip();
         let sol = solve_ipmip_with_des(p, IPMIPSolveOptions::default());
@@ -7929,6 +8110,7 @@ mod tests {
                 "high_priority".to_string(),
             ]),
             con_names: Some(vec!["cap_low".to_string(), "cap_high".to_string()]),
+            lazy_constraints: None,
             variable_nodes: None,
             constraint_nodes: None,
         };
@@ -7966,6 +8148,7 @@ mod tests {
             ub: Some(vec![1.0, 1.0]),
             var_names: Some(vec!["fractional_bonus".to_string(), "accepted".to_string()]),
             con_names: Some(vec!["bonus_cap".to_string(), "accepted_cap".to_string()]),
+            lazy_constraints: None,
             variable_nodes: None,
             constraint_nodes: None,
         };
@@ -8004,6 +8187,7 @@ mod tests {
             ub: Some(vec![1.0, 1.0]),
             var_names: Some(vec!["choose_a".to_string(), "choose_b".to_string()]),
             con_names: Some(vec!["choose_at_most_one".to_string()]),
+            lazy_constraints: None,
             variable_nodes: None,
             constraint_nodes: None,
         };
@@ -8043,6 +8227,7 @@ mod tests {
             ub: None,
             var_names: Some(vec!["x".to_string()]),
             con_names: Some(vec!["x_le_half".to_string(), "x_ge_half".to_string()]),
+            lazy_constraints: None,
             variable_nodes: None,
             constraint_nodes: None,
         };
@@ -8087,6 +8272,7 @@ mod tests {
                 "x_ge_half".to_string(),
                 "redundant_cap".to_string(),
             ]),
+            lazy_constraints: None,
             variable_nodes: None,
             constraint_nodes: None,
         };
@@ -8132,6 +8318,7 @@ mod tests {
             ub: Some(vec![1.0]),
             var_names: Some(vec!["x".to_string()]),
             con_names: Some(vec!["cap".to_string()]),
+            lazy_constraints: None,
             variable_nodes: None,
             constraint_nodes: None,
         };

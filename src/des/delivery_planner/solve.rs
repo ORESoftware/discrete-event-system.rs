@@ -1112,8 +1112,19 @@ fn fallback_response(
             }],
             render_animation,
         )
-        .unwrap_or_else(|| error_response("no route can satisfy these time windows".to_string())),
-        None => error_response("no route can satisfy these time windows".to_string()),
+        .unwrap_or_else(|| error_response(no_feasible_route_message(req))),
+        None => error_response(no_feasible_route_message(req)),
+    }
+}
+
+fn no_feasible_route_message(req: &DeliveryPlannerRequest) -> String {
+    if pinned_stop_constraints(req)
+        .map(|pins| !pins.is_empty())
+        .unwrap_or(false)
+    {
+        "no route can satisfy pinned stop positions and time windows".to_string()
+    } else {
+        "no route can satisfy these time windows".to_string()
     }
 }
 
@@ -1834,6 +1845,38 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("time windows"));
+    }
+
+    #[test]
+    fn customer_c_cannot_be_first_in_default_manifest_for_any_objective() {
+        for mode in [
+            DeliveryObjectiveMode::Distance,
+            DeliveryObjectiveMode::TravelTime,
+            DeliveryObjectiveMode::WindowCenter,
+        ] {
+            let mut req = default_delivery_request();
+            req.objective_mode = mode;
+            req.route_rules.ordered_stop_ids = vec![
+                "S3".to_string(),
+                "S1".to_string(),
+                "S2".to_string(),
+                "S4".to_string(),
+                "S5".to_string(),
+            ];
+            req.route_rules.pinned_positions = vec![DeliveryPinnedStop {
+                stop_id: "S3".to_string(),
+                position: 1,
+            }];
+
+            let resp = solve_delivery_planner_summary(&req);
+
+            assert!(!resp.ok, "{mode:?} should reject C first: {:?}", resp.route);
+            let err = resp.error.as_deref().unwrap_or_default();
+            assert!(
+                err.contains("pinned stop positions") && err.contains("time windows"),
+                "{mode:?} returned unclear error: {err}"
+            );
+        }
     }
 
     #[test]

@@ -1144,6 +1144,86 @@ impl Driver {
                     name: "service_level".to_string(),
                     domain: vec![0, 1, 2, 3],
                 },
+                CpVariable {
+                    name: "choice_a".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "choice_b".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "choice_c".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "gate".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "approved".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "direct_0".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "direct_1".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "inverse_0".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "inverse_1".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "score_a".to_string(),
+                    domain: vec![2, 4],
+                },
+                CpVariable {
+                    name: "score_b".to_string(),
+                    domain: vec![3, 5],
+                },
+                CpVariable {
+                    name: "max_score".to_string(),
+                    domain: vec![3, 4, 5],
+                },
+                CpVariable {
+                    name: "min_score".to_string(),
+                    domain: vec![2, 3, 4],
+                },
+                CpVariable {
+                    name: "deviation".to_string(),
+                    domain: vec![-3, -1, 2],
+                },
+                CpVariable {
+                    name: "absolute_deviation".to_string(),
+                    domain: vec![0, 1, 2, 3],
+                },
+                CpVariable {
+                    name: "mandatory_a".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "mandatory_b".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "xor_a".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "xor_b".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "score_product".to_string(),
+                    domain: vec![6, 10, 12, 20],
+                },
             ],
             constraints: vec![
                 CpConstraint::AllDifferent(vec![0, 1, 2]),
@@ -1203,6 +1283,10 @@ impl Driver {
                     vars: vec![11, 12],
                     tuples: vec![vec![0, 1], vec![1, 0]],
                 },
+                CpConstraint::ForbiddenAssignments {
+                    vars: vec![15, 18],
+                    tuples: vec![vec![1, 1]],
+                },
                 CpConstraint::BoolOr(vec![BoolLiteral {
                     var: 13,
                     positive: true,
@@ -1215,6 +1299,90 @@ impl Driver {
                     terms: vec![LinearTerm { var: 14, coeff: 1 }],
                     sense: LinearSense::Ge,
                     rhs: 2,
+                },
+                CpConstraint::ExactlyOne(vec![
+                    BoolLiteral {
+                        var: 15,
+                        positive: true,
+                    },
+                    BoolLiteral {
+                        var: 16,
+                        positive: true,
+                    },
+                    BoolLiteral {
+                        var: 17,
+                        positive: true,
+                    },
+                ]),
+                CpConstraint::AtMostOne(vec![
+                    BoolLiteral {
+                        var: 15,
+                        positive: true,
+                    },
+                    BoolLiteral {
+                        var: 17,
+                        positive: true,
+                    },
+                ]),
+                CpConstraint::Implication {
+                    antecedent: BoolLiteral {
+                        var: 15,
+                        positive: true,
+                    },
+                    consequent: BoolLiteral {
+                        var: 18,
+                        positive: true,
+                    },
+                },
+                CpConstraint::Implication {
+                    antecedent: BoolLiteral {
+                        var: 18,
+                        positive: true,
+                    },
+                    consequent: BoolLiteral {
+                        var: 19,
+                        positive: true,
+                    },
+                },
+                CpConstraint::Inverse {
+                    direct: vec![20, 21],
+                    inverse: vec![22, 23],
+                },
+                CpConstraint::MaxEquality {
+                    target: 26,
+                    vars: vec![24, 25],
+                },
+                CpConstraint::MinEquality {
+                    target: 27,
+                    vars: vec![24, 25],
+                },
+                CpConstraint::AbsEquality {
+                    target: 29,
+                    var: 28,
+                },
+                CpConstraint::BoolAnd(vec![
+                    BoolLiteral {
+                        var: 30,
+                        positive: true,
+                    },
+                    BoolLiteral {
+                        var: 31,
+                        positive: true,
+                    },
+                ]),
+                CpConstraint::BoolXor(vec![
+                    BoolLiteral {
+                        var: 32,
+                        positive: true,
+                    },
+                    BoolLiteral {
+                        var: 33,
+                        positive: true,
+                    },
+                ]),
+                CpConstraint::MultiplicationEquality {
+                    target: 34,
+                    vars: vec![24, 25],
                 },
             ],
             objective: Some(CpObjective {
@@ -1233,6 +1401,18 @@ impl Driver {
                     LinearTerm { var: 11, coeff: 2 },
                     LinearTerm { var: 12, coeff: 1 },
                     LinearTerm { var: 14, coeff: 1 },
+                    LinearTerm { var: 15, coeff: 1 },
+                    LinearTerm { var: 16, coeff: 5 },
+                    LinearTerm { var: 17, coeff: 4 },
+                    LinearTerm { var: 18, coeff: 1 },
+                    LinearTerm { var: 20, coeff: 1 },
+                    LinearTerm { var: 21, coeff: 2 },
+                    LinearTerm { var: 26, coeff: 1 },
+                    LinearTerm { var: 27, coeff: 1 },
+                    LinearTerm { var: 29, coeff: 1 },
+                    LinearTerm { var: 32, coeff: 1 },
+                    LinearTerm { var: 33, coeff: 2 },
+                    LinearTerm { var: 34, coeff: 1 },
                 ],
             }),
         }
@@ -1276,10 +1456,64 @@ impl Driver {
                     "kind": "bool_or",
                     "literals": lits.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
                 }),
+                CpConstraint::BoolAnd(lits) => serde_json::json!({
+                    "kind": "bool_and",
+                    "literals": lits.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                }),
+                CpConstraint::BoolXor(lits) => serde_json::json!({
+                    "kind": "bool_xor",
+                    "literals": lits.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                }),
+                CpConstraint::AtMostOne(lits) => serde_json::json!({
+                    "kind": "at_most_one",
+                    "literals": lits.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                }),
+                CpConstraint::ExactlyOne(lits) => serde_json::json!({
+                    "kind": "exactly_one",
+                    "literals": lits.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                }),
+                CpConstraint::Implication {
+                    antecedent,
+                    consequent,
+                } => serde_json::json!({
+                    "kind": "implication",
+                    "antecedent": {"var": antecedent.var, "positive": antecedent.positive},
+                    "consequent": {"var": consequent.var, "positive": consequent.positive},
+                }),
                 CpConstraint::AllowedAssignments { vars, tuples } => serde_json::json!({
                     "kind": "allowed_assignments",
                     "vars": vars,
                     "tuples": tuples,
+                }),
+                CpConstraint::ForbiddenAssignments { vars, tuples } => serde_json::json!({
+                    "kind": "forbidden_assignments",
+                    "vars": vars,
+                    "tuples": tuples,
+                }),
+                CpConstraint::Inverse { direct, inverse } => serde_json::json!({
+                    "kind": "inverse",
+                    "direct": direct,
+                    "inverse": inverse,
+                }),
+                CpConstraint::MaxEquality { target, vars } => serde_json::json!({
+                    "kind": "max_equality",
+                    "target": target,
+                    "vars": vars,
+                }),
+                CpConstraint::MinEquality { target, vars } => serde_json::json!({
+                    "kind": "min_equality",
+                    "target": target,
+                    "vars": vars,
+                }),
+                CpConstraint::AbsEquality { target, var } => serde_json::json!({
+                    "kind": "abs_equality",
+                    "target": target,
+                    "var": var,
+                }),
+                CpConstraint::MultiplicationEquality { target, vars } => serde_json::json!({
+                    "kind": "multiplication_equality",
+                    "target": target,
+                    "vars": vars,
                 }),
                 CpConstraint::Element(element) => serde_json::json!({
                     "kind": "element",

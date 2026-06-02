@@ -72,6 +72,21 @@ def linear_partial_ok(model: dict, partial: Sequence[Optional[int]], c: dict) ->
     return True
 
 
+def product_range(bounds: Sequence[tuple[int, int]]) -> tuple[int, int]:
+    lo = 1
+    hi = 1
+    for next_lo, next_hi in bounds:
+        candidates = [
+            lo * next_lo,
+            lo * next_hi,
+            hi * next_lo,
+            hi * next_hi,
+        ]
+        lo = min(candidates)
+        hi = max(candidates)
+    return lo, hi
+
+
 def partial_ok(model: dict, partial: Sequence[Optional[int]]) -> bool:
     for c in model.get("constraints", []):
         kind = c["kind"]
@@ -105,6 +120,42 @@ def partial_ok(model: dict, partial: Sequence[Optional[int]]) -> bool:
                     break
             if not satisfied and not unknown:
                 return False
+        elif kind == "bool_and":
+            for lit in c["literals"]:
+                truth = literal_truth(partial, lit)
+                if truth is False:
+                    return False
+        elif kind == "bool_xor":
+            true_count = 0
+            unknown = False
+            for lit in c["literals"]:
+                truth = literal_truth(partial, lit)
+                if truth is True:
+                    true_count += 1
+                elif truth is None:
+                    unknown = True
+            if not unknown and true_count % 2 == 0:
+                return False
+        elif kind == "at_most_one":
+            true_count = sum(1 for lit in c["literals"] if literal_truth(partial, lit) is True)
+            if true_count > 1:
+                return False
+        elif kind == "exactly_one":
+            true_count = 0
+            unknown = False
+            for lit in c["literals"]:
+                truth = literal_truth(partial, lit)
+                if truth is True:
+                    true_count += 1
+                elif truth is None:
+                    unknown = True
+            if true_count > 1 or (true_count == 0 and not unknown):
+                return False
+        elif kind == "implication":
+            antecedent = literal_truth(partial, c["antecedent"])
+            consequent = literal_truth(partial, c["consequent"])
+            if antecedent is True and consequent is False:
+                return False
         elif kind == "allowed_assignments":
             vars_ = [int(v) for v in c["vars"]]
             tuples = [[int(v) for v in row] for row in c["tuples"]]
@@ -115,6 +166,117 @@ def partial_ok(model: dict, partial: Sequence[Optional[int]]) -> bool:
                     break
             if not ok:
                 return False
+        elif kind == "forbidden_assignments":
+            vars_ = [int(v) for v in c["vars"]]
+            tuples = [[int(v) for v in row] for row in c["tuples"]]
+            for row in tuples:
+                if all(partial[var] is not None and int(partial[var]) == value for var, value in zip(vars_, row)):
+                    return False
+        elif kind == "inverse":
+            direct = [int(v) for v in c["direct"]]
+            inverse = [int(v) for v in c["inverse"]]
+            n = len(direct)
+            seen_direct = set()
+            for i, var in enumerate(direct):
+                value = partial[var]
+                if value is None:
+                    continue
+                j = int(value)
+                if j < 0 or j >= n or j in seen_direct:
+                    return False
+                seen_direct.add(j)
+                inverse_value = partial[inverse[j]]
+                if inverse_value is not None and int(inverse_value) != i:
+                    return False
+            seen_inverse = set()
+            for j, var in enumerate(inverse):
+                value = partial[var]
+                if value is None:
+                    continue
+                i = int(value)
+                if i < 0 or i >= n or i in seen_inverse:
+                    return False
+                seen_inverse.add(i)
+                direct_value = partial[direct[i]]
+                if direct_value is not None and int(direct_value) != j:
+                    return False
+        elif kind in ("max_equality", "min_equality"):
+            target = int(c["target"])
+            vars_ = [int(v) for v in c["vars"]]
+            target_value = partial[target]
+            if all(partial[var] is not None for var in vars_):
+                values = [int(partial[var]) for var in vars_]  # type: ignore[arg-type]
+                expected = max(values) if kind == "max_equality" else min(values)
+                if target_value is not None and int(target_value) != expected:
+                    return False
+                if target_value is None and expected not in model["variables"][target]["domain"]:
+                    return False
+            elif target_value is not None:
+                t = int(target_value)
+                ranges = []
+                for var in vars_:
+                    if partial[var] is None:
+                        dom = [int(v) for v in model["variables"][var]["domain"]]
+                        ranges.append((min(dom), max(dom)))
+                    else:
+                        v = int(partial[var])
+                        ranges.append((v, v))
+                if kind == "max_equality":
+                    if any(lo > t for lo, _ in ranges) or not any(lo <= t <= hi for lo, hi in ranges):
+                        return False
+                else:
+                    if any(hi < t for _, hi in ranges) or not any(lo <= t <= hi for lo, hi in ranges):
+                        return False
+        elif kind == "abs_equality":
+            target = int(c["target"])
+            var = int(c["var"])
+            target_value = partial[target]
+            var_value = partial[var]
+            if target_value is not None and int(target_value) < 0:
+                return False
+            if target_value is not None and var_value is not None:
+                if int(target_value) != abs(int(var_value)):
+                    return False
+            elif target_value is not None:
+                t = int(target_value)
+                if not any(abs(int(value)) == t for value in model["variables"][var]["domain"]):
+                    return False
+            elif var_value is not None:
+                expected = abs(int(var_value))
+                if expected not in model["variables"][target]["domain"]:
+                    return False
+        elif kind == "multiplication_equality":
+            target = int(c["target"])
+            vars_ = [int(v) for v in c["vars"]]
+            target_value = partial[target]
+            product = 1
+            all_assigned = True
+            bounds = []
+            for var in vars_:
+                value = partial[var]
+                if value is None:
+                    all_assigned = False
+                    dom = [int(v) for v in model["variables"][var]["domain"]]
+                    bounds.append((min(dom), max(dom)))
+                else:
+                    value = int(value)
+                    product *= value
+                    bounds.append((value, value))
+            if all_assigned:
+                if target_value is not None:
+                    if int(target_value) != product:
+                        return False
+                elif product not in [int(v) for v in model["variables"][target]["domain"]]:
+                    return False
+            else:
+                product_lo, product_hi = product_range(bounds)
+                if target_value is not None:
+                    if not (product_lo <= int(target_value) <= product_hi):
+                        return False
+                else:
+                    dom = [int(v) for v in model["variables"][target]["domain"]]
+                    if max(dom) < product_lo or min(dom) > product_hi:
+                        return False
         elif kind == "element":
             index_var = int(c["index"])
             target_var = int(c["target"])
@@ -259,10 +421,70 @@ def ortools_reference(model: dict) -> Optional[dict]:
                 x = xs[int(lit["var"])]
                 lits.append(x if bool(lit.get("positive", True)) else x.Not())
             cp.AddBoolOr(lits)
+        elif kind == "bool_and":
+            lits = []
+            for lit in c["literals"]:
+                x = xs[int(lit["var"])]
+                lits.append(x if bool(lit.get("positive", True)) else x.Not())
+            cp.AddBoolAnd(lits)
+        elif kind == "bool_xor":
+            lits = []
+            for lit in c["literals"]:
+                x = xs[int(lit["var"])]
+                lits.append(x if bool(lit.get("positive", True)) else x.Not())
+            cp.AddBoolXOr(lits)
+        elif kind == "at_most_one":
+            lits = []
+            for lit in c["literals"]:
+                x = xs[int(lit["var"])]
+                lits.append(x if bool(lit.get("positive", True)) else x.Not())
+            cp.AddAtMostOne(lits)
+        elif kind == "exactly_one":
+            lits = []
+            for lit in c["literals"]:
+                x = xs[int(lit["var"])]
+                lits.append(x if bool(lit.get("positive", True)) else x.Not())
+            cp.AddExactlyOne(lits)
+        elif kind == "implication":
+            antecedent_var = xs[int(c["antecedent"]["var"])]
+            consequent_var = xs[int(c["consequent"]["var"])]
+            antecedent = antecedent_var if bool(c["antecedent"].get("positive", True)) else antecedent_var.Not()
+            consequent = consequent_var if bool(c["consequent"].get("positive", True)) else consequent_var.Not()
+            cp.AddImplication(antecedent, consequent)
         elif kind == "allowed_assignments":
             cp.AddAllowedAssignments(
                 [xs[int(v)] for v in c["vars"]],
                 [[int(v) for v in row] for row in c["tuples"]],
+            )
+        elif kind == "forbidden_assignments":
+            cp.AddForbiddenAssignments(
+                [xs[int(v)] for v in c["vars"]],
+                [[int(v) for v in row] for row in c["tuples"]],
+            )
+        elif kind == "inverse":
+            cp.AddInverse(
+                [xs[int(v)] for v in c["direct"]],
+                [xs[int(v)] for v in c["inverse"]],
+            )
+        elif kind == "max_equality":
+            cp.AddMaxEquality(
+                xs[int(c["target"])],
+                [xs[int(v)] for v in c["vars"]],
+            )
+        elif kind == "min_equality":
+            cp.AddMinEquality(
+                xs[int(c["target"])],
+                [xs[int(v)] for v in c["vars"]],
+            )
+        elif kind == "abs_equality":
+            cp.AddAbsEquality(
+                xs[int(c["target"])],
+                xs[int(c["var"])],
+            )
+        elif kind == "multiplication_equality":
+            cp.AddMultiplicationEquality(
+                xs[int(c["target"])],
+                [xs[int(v)] for v in c["vars"]],
             )
         elif kind == "element":
             cp.AddElement(

@@ -78,6 +78,8 @@ pub enum CpConstraint {
     },
     AllDifferent(Vec<usize>),
     BoolOr(Vec<BoolLiteral>),
+    BoolAnd(Vec<BoolLiteral>),
+    BoolXor(Vec<BoolLiteral>),
     AtMostOne(Vec<BoolLiteral>),
     ExactlyOne(Vec<BoolLiteral>),
     Implication {
@@ -87,6 +89,30 @@ pub enum CpConstraint {
     AllowedAssignments {
         vars: Vec<usize>,
         tuples: Vec<Vec<i64>>,
+    },
+    ForbiddenAssignments {
+        vars: Vec<usize>,
+        tuples: Vec<Vec<i64>>,
+    },
+    Inverse {
+        direct: Vec<usize>,
+        inverse: Vec<usize>,
+    },
+    MaxEquality {
+        target: usize,
+        vars: Vec<usize>,
+    },
+    MinEquality {
+        target: usize,
+        vars: Vec<usize>,
+    },
+    AbsEquality {
+        target: usize,
+        var: usize,
+    },
+    MultiplicationEquality {
+        target: usize,
+        vars: Vec<usize>,
     },
     Element(CpElement),
     NoOverlap(Vec<CpInterval>),
@@ -240,6 +266,22 @@ fn validate_model(model: &CpModel) {
                     check_bool_literal(lit);
                 }
             }
+            CpConstraint::BoolAnd(lits) => {
+                if lits.is_empty() {
+                    panic!("cp-sat: bool_and has no literals");
+                }
+                for lit in lits {
+                    check_bool_literal(lit);
+                }
+            }
+            CpConstraint::BoolXor(lits) => {
+                if lits.is_empty() {
+                    panic!("cp-sat: bool_xor has no literals");
+                }
+                for lit in lits {
+                    check_bool_literal(lit);
+                }
+            }
             CpConstraint::AtMostOne(lits) => {
                 if lits.is_empty() {
                     panic!("cp-sat: at_most_one has no literals");
@@ -281,6 +323,90 @@ fn validate_model(model: &CpModel) {
                             vars.len()
                         );
                     }
+                }
+            }
+            CpConstraint::ForbiddenAssignments { vars, tuples } => {
+                if vars.is_empty() {
+                    panic!("cp-sat: forbidden_assignments has no variables");
+                }
+                if tuples.is_empty() {
+                    panic!("cp-sat: forbidden_assignments has no tuples");
+                }
+                for &v in vars {
+                    check_var(v);
+                }
+                for (i, tuple) in tuples.iter().enumerate() {
+                    if tuple.len() != vars.len() {
+                        panic!(
+                            "cp-sat: forbidden_assignments tuple {i} length {} != {}",
+                            tuple.len(),
+                            vars.len()
+                        );
+                    }
+                }
+            }
+            CpConstraint::Inverse { direct, inverse } => {
+                if direct.is_empty() {
+                    panic!("cp-sat: inverse has no variables");
+                }
+                if direct.len() != inverse.len() {
+                    panic!(
+                        "cp-sat: inverse direct length {} != inverse length {}",
+                        direct.len(),
+                        inverse.len()
+                    );
+                }
+                let n_values = direct.len() as i64;
+                for &v in direct.iter().chain(inverse.iter()) {
+                    check_var(v);
+                    if model.variables[v]
+                        .domain
+                        .iter()
+                        .any(|&value| value < 0 || value >= n_values)
+                    {
+                        panic!(
+                            "cp-sat: inverse variable {v} domain must be within 0..{}",
+                            n_values - 1
+                        );
+                    }
+                }
+            }
+            CpConstraint::MaxEquality { target, vars } => {
+                check_var(*target);
+                if vars.is_empty() {
+                    panic!("cp-sat: max_equality has no variables");
+                }
+                for &v in vars {
+                    check_var(v);
+                }
+            }
+            CpConstraint::MinEquality { target, vars } => {
+                check_var(*target);
+                if vars.is_empty() {
+                    panic!("cp-sat: min_equality has no variables");
+                }
+                for &v in vars {
+                    check_var(v);
+                }
+            }
+            CpConstraint::AbsEquality { target, var } => {
+                check_var(*target);
+                check_var(*var);
+                if model.variables[*target]
+                    .domain
+                    .iter()
+                    .any(|&value| value < 0)
+                {
+                    panic!("cp-sat: abs_equality target domain must be non-negative");
+                }
+            }
+            CpConstraint::MultiplicationEquality { target, vars } => {
+                check_var(*target);
+                if vars.is_empty() {
+                    panic!("cp-sat: multiplication_equality has no variables");
+                }
+                for &v in vars {
+                    check_var(v);
                 }
             }
             CpConstraint::Element(element) => {
@@ -417,6 +543,24 @@ fn partial_bool_or_ok(assignment: &[Option<i64>], lits: &[BoolLiteral]) -> bool 
     has_unknown
 }
 
+fn partial_bool_and_ok(assignment: &[Option<i64>], lits: &[BoolLiteral]) -> bool {
+    lits.iter()
+        .all(|lit| literal_value(assignment, lit) != Some(false))
+}
+
+fn partial_bool_xor_ok(assignment: &[Option<i64>], lits: &[BoolLiteral]) -> bool {
+    let mut has_unknown = false;
+    let mut true_count = 0;
+    for lit in lits {
+        match literal_value(assignment, lit) {
+            Some(true) => true_count += 1,
+            Some(false) => {}
+            None => has_unknown = true,
+        }
+    }
+    has_unknown || true_count % 2 == 1
+}
+
 fn partial_at_most_one_ok(assignment: &[Option<i64>], lits: &[BoolLiteral]) -> bool {
     lits.iter()
         .filter(|lit| literal_value(assignment, lit) == Some(true))
@@ -459,6 +603,228 @@ fn partial_allowed_assignments_ok(
                 .unwrap_or(true)
         })
     })
+}
+
+fn partial_forbidden_assignments_ok(
+    assignment: &[Option<i64>],
+    vars: &[usize],
+    tuples: &[Vec<i64>],
+) -> bool {
+    !tuples.iter().any(|tuple| {
+        vars.iter().zip(tuple).all(|(&var, &value)| {
+            assignment[var]
+                .map(|actual| actual == value)
+                .unwrap_or(false)
+        })
+    })
+}
+
+fn partial_inverse_ok(assignment: &[Option<i64>], direct: &[usize], inverse: &[usize]) -> bool {
+    let n = direct.len();
+    let mut direct_values = Vec::new();
+    for (i, &var) in direct.iter().enumerate() {
+        let Some(value) = assignment[var] else {
+            continue;
+        };
+        let Ok(j) = usize::try_from(value) else {
+            return false;
+        };
+        if j >= n || direct_values.contains(&j) {
+            return false;
+        }
+        direct_values.push(j);
+        if let Some(inverse_value) = assignment[inverse[j]] {
+            if inverse_value != i as i64 {
+                return false;
+            }
+        }
+    }
+
+    let mut inverse_values = Vec::new();
+    for (j, &var) in inverse.iter().enumerate() {
+        let Some(value) = assignment[var] else {
+            continue;
+        };
+        let Ok(i) = usize::try_from(value) else {
+            return false;
+        };
+        if i >= n || inverse_values.contains(&i) {
+            return false;
+        }
+        inverse_values.push(i);
+        if let Some(direct_value) = assignment[direct[i]] {
+            if direct_value != j as i64 {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn domain_min_max(domain: &[i64]) -> (i64, i64) {
+    (
+        *domain.iter().min().expect("validated non-empty domain"),
+        *domain.iter().max().expect("validated non-empty domain"),
+    )
+}
+
+fn variable_min_max(model: &CpModel, assignment: &[Option<i64>], var: usize) -> (i64, i64) {
+    if let Some(value) = assignment[var] {
+        (value, value)
+    } else {
+        domain_min_max(&model.variables[var].domain)
+    }
+}
+
+fn partial_max_equality_ok(
+    model: &CpModel,
+    assignment: &[Option<i64>],
+    target: usize,
+    vars: &[usize],
+) -> bool {
+    let (target_min, target_max) = variable_min_max(model, assignment, target);
+    let mut min_possible_max = i64::MIN;
+    let mut max_possible_max = i64::MIN;
+    for &var in vars {
+        let (lo, hi) = variable_min_max(model, assignment, var);
+        min_possible_max = min_possible_max.max(lo);
+        max_possible_max = max_possible_max.max(hi);
+    }
+    if target_max < min_possible_max || target_min > max_possible_max {
+        return false;
+    }
+    if let Some(target_value) = assignment[target] {
+        let mut can_attain_target = false;
+        for &var in vars {
+            let (lo, hi) = variable_min_max(model, assignment, var);
+            if lo > target_value {
+                return false;
+            }
+            if lo <= target_value && target_value <= hi {
+                can_attain_target = true;
+            }
+        }
+        can_attain_target
+    } else {
+        true
+    }
+}
+
+fn partial_min_equality_ok(
+    model: &CpModel,
+    assignment: &[Option<i64>],
+    target: usize,
+    vars: &[usize],
+) -> bool {
+    let (target_min, target_max) = variable_min_max(model, assignment, target);
+    let mut min_possible_min = i64::MAX;
+    let mut max_possible_min = i64::MAX;
+    for &var in vars {
+        let (lo, hi) = variable_min_max(model, assignment, var);
+        min_possible_min = min_possible_min.min(lo);
+        max_possible_min = max_possible_min.min(hi);
+    }
+    if target_max < min_possible_min || target_min > max_possible_min {
+        return false;
+    }
+    if let Some(target_value) = assignment[target] {
+        let mut can_attain_target = false;
+        for &var in vars {
+            let (lo, hi) = variable_min_max(model, assignment, var);
+            if hi < target_value {
+                return false;
+            }
+            if lo <= target_value && target_value <= hi {
+                can_attain_target = true;
+            }
+        }
+        can_attain_target
+    } else {
+        true
+    }
+}
+
+fn abs_range(lo: i64, hi: i64) -> (i64, i64) {
+    if lo <= 0 && 0 <= hi {
+        (0, lo.abs().max(hi.abs()))
+    } else {
+        (lo.abs().min(hi.abs()), lo.abs().max(hi.abs()))
+    }
+}
+
+fn partial_abs_equality_ok(
+    model: &CpModel,
+    assignment: &[Option<i64>],
+    target: usize,
+    var: usize,
+) -> bool {
+    let (var_lo, var_hi) = variable_min_max(model, assignment, var);
+    let (abs_lo, abs_hi) = abs_range(var_lo, var_hi);
+    let (target_lo, target_hi) = variable_min_max(model, assignment, target);
+    if target_hi < abs_lo || target_lo > abs_hi {
+        return false;
+    }
+    match (assignment[target], assignment[var]) {
+        (Some(t), Some(v)) => t == v.abs(),
+        (Some(t), None) => model.variables[var]
+            .domain
+            .iter()
+            .any(|&value| value.abs() == t),
+        (None, Some(v)) => model.variables[target]
+            .domain
+            .iter()
+            .any(|&value| value == v.abs()),
+        (None, None) => true,
+    }
+}
+
+fn product_range(bounds: &[(i64, i64)]) -> (i128, i128) {
+    let mut lo = 1_i128;
+    let mut hi = 1_i128;
+    for &(next_lo, next_hi) in bounds {
+        let candidates = [
+            lo * i128::from(next_lo),
+            lo * i128::from(next_hi),
+            hi * i128::from(next_lo),
+            hi * i128::from(next_hi),
+        ];
+        lo = *candidates.iter().min().expect("non-empty candidates");
+        hi = *candidates.iter().max().expect("non-empty candidates");
+    }
+    (lo, hi)
+}
+
+fn partial_multiplication_equality_ok(
+    model: &CpModel,
+    assignment: &[Option<i64>],
+    target: usize,
+    vars: &[usize],
+) -> bool {
+    let mut assigned_product = Some(1_i128);
+    let mut bounds = Vec::with_capacity(vars.len());
+    for &var in vars {
+        if let Some(value) = assignment[var] {
+            assigned_product = assigned_product.map(|product| product * i128::from(value));
+            bounds.push((value, value));
+        } else {
+            assigned_product = None;
+            bounds.push(variable_min_max(model, assignment, var));
+        }
+    }
+
+    if let Some(product) = assigned_product {
+        return match assignment[target] {
+            Some(target_value) => product == i128::from(target_value),
+            None => model.variables[target]
+                .domain
+                .iter()
+                .any(|&value| i128::from(value) == product),
+        };
+    }
+
+    let (product_lo, product_hi) = product_range(&bounds);
+    let (target_lo, target_hi) = variable_min_max(model, assignment, target);
+    i128::from(target_hi) >= product_lo && i128::from(target_lo) <= product_hi
 }
 
 fn partial_element_ok(model: &CpModel, assignment: &[Option<i64>], element: &CpElement) -> bool {
@@ -565,6 +931,8 @@ fn partial_constraints_ok(model: &CpModel, assignment: &[Option<i64>]) -> bool {
             },
             CpConstraint::AllDifferent(vars) => partial_all_different_ok(assignment, vars),
             CpConstraint::BoolOr(lits) => partial_bool_or_ok(assignment, lits),
+            CpConstraint::BoolAnd(lits) => partial_bool_and_ok(assignment, lits),
+            CpConstraint::BoolXor(lits) => partial_bool_xor_ok(assignment, lits),
             CpConstraint::AtMostOne(lits) => partial_at_most_one_ok(assignment, lits),
             CpConstraint::ExactlyOne(lits) => partial_exactly_one_ok(assignment, lits),
             CpConstraint::Implication {
@@ -573,6 +941,24 @@ fn partial_constraints_ok(model: &CpModel, assignment: &[Option<i64>]) -> bool {
             } => partial_implication_ok(assignment, antecedent, consequent),
             CpConstraint::AllowedAssignments { vars, tuples } => {
                 partial_allowed_assignments_ok(assignment, vars, tuples)
+            }
+            CpConstraint::ForbiddenAssignments { vars, tuples } => {
+                partial_forbidden_assignments_ok(assignment, vars, tuples)
+            }
+            CpConstraint::Inverse { direct, inverse } => {
+                partial_inverse_ok(assignment, direct, inverse)
+            }
+            CpConstraint::MaxEquality { target, vars } => {
+                partial_max_equality_ok(model, assignment, *target, vars)
+            }
+            CpConstraint::MinEquality { target, vars } => {
+                partial_min_equality_ok(model, assignment, *target, vars)
+            }
+            CpConstraint::AbsEquality { target, var } => {
+                partial_abs_equality_ok(model, assignment, *target, *var)
+            }
+            CpConstraint::MultiplicationEquality { target, vars } => {
+                partial_multiplication_equality_ok(model, assignment, *target, vars)
             }
             CpConstraint::Element(element) => partial_element_ok(model, assignment, element),
             CpConstraint::NoOverlap(intervals) => partial_no_overlap_ok(assignment, intervals),
@@ -918,6 +1304,289 @@ mod tests {
         assert_eq!(sol.status, CpStatus::Optimal);
         assert_eq!(sol.assignment, vec![0, 1]);
         assert_eq!(sol.objective, Some(1));
+    }
+
+    #[test]
+    fn solves_forbidden_assignments_constraint() {
+        let model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "mode".to_string(),
+                    domain: vec![0, 1, 2],
+                },
+                CpVariable {
+                    name: "handler".to_string(),
+                    domain: vec![0, 1],
+                },
+            ],
+            constraints: vec![CpConstraint::ForbiddenAssignments {
+                vars: vec![0, 1],
+                tuples: vec![vec![0, 0], vec![1, 0]],
+            }],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![
+                    LinearTerm { var: 0, coeff: 1 },
+                    LinearTerm { var: 1, coeff: 3 },
+                ],
+            }),
+        };
+        let sol = solve_cp_model(&model, CpSolveOptions::default());
+        assert_eq!(sol.status, CpStatus::Optimal);
+        assert_eq!(sol.assignment, vec![2, 0]);
+        assert_eq!(sol.objective, Some(2));
+    }
+
+    #[test]
+    fn solves_inverse_constraint() {
+        let model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "direct_0".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "direct_1".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "inverse_0".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "inverse_1".to_string(),
+                    domain: vec![0, 1],
+                },
+            ],
+            constraints: vec![CpConstraint::Inverse {
+                direct: vec![0, 1],
+                inverse: vec![2, 3],
+            }],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![
+                    LinearTerm { var: 0, coeff: 1 },
+                    LinearTerm { var: 1, coeff: 2 },
+                ],
+            }),
+        };
+        let sol = solve_cp_model(&model, CpSolveOptions::default());
+        assert_eq!(sol.status, CpStatus::Optimal);
+        assert_eq!(sol.assignment, vec![1, 0, 1, 0]);
+        assert_eq!(sol.objective, Some(1));
+    }
+
+    #[test]
+    fn solves_min_max_equality_constraints() {
+        let model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "score_a".to_string(),
+                    domain: vec![2, 4],
+                },
+                CpVariable {
+                    name: "score_b".to_string(),
+                    domain: vec![3, 5],
+                },
+                CpVariable {
+                    name: "max_score".to_string(),
+                    domain: vec![3, 4, 5],
+                },
+                CpVariable {
+                    name: "min_score".to_string(),
+                    domain: vec![2, 3, 4],
+                },
+            ],
+            constraints: vec![
+                CpConstraint::MaxEquality {
+                    target: 2,
+                    vars: vec![0, 1],
+                },
+                CpConstraint::MinEquality {
+                    target: 3,
+                    vars: vec![0, 1],
+                },
+            ],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![
+                    LinearTerm { var: 2, coeff: 1 },
+                    LinearTerm { var: 3, coeff: 1 },
+                ],
+            }),
+        };
+        let sol = solve_cp_model(&model, CpSolveOptions::default());
+        assert_eq!(sol.status, CpStatus::Optimal);
+        assert_eq!(sol.assignment, vec![2, 3, 3, 2]);
+        assert_eq!(sol.objective, Some(5));
+    }
+
+    #[test]
+    fn solves_abs_equality_constraint() {
+        let model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "deviation".to_string(),
+                    domain: vec![-3, -1, 2],
+                },
+                CpVariable {
+                    name: "absolute_deviation".to_string(),
+                    domain: vec![0, 1, 2, 3],
+                },
+            ],
+            constraints: vec![CpConstraint::AbsEquality { target: 1, var: 0 }],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![LinearTerm { var: 1, coeff: 1 }],
+            }),
+        };
+        let sol = solve_cp_model(&model, CpSolveOptions::default());
+        assert_eq!(sol.status, CpStatus::Optimal);
+        assert_eq!(sol.assignment, vec![-1, 1]);
+        assert_eq!(sol.objective, Some(1));
+    }
+
+    #[test]
+    fn solves_multiplication_equality_constraint() {
+        let model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "x".to_string(),
+                    domain: vec![-2, -1, 3],
+                },
+                CpVariable {
+                    name: "y".to_string(),
+                    domain: vec![-3, 2],
+                },
+                CpVariable {
+                    name: "product".to_string(),
+                    domain: vec![-9, -4, -3, 2, 6],
+                },
+            ],
+            constraints: vec![CpConstraint::MultiplicationEquality {
+                target: 2,
+                vars: vec![0, 1],
+            }],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![LinearTerm { var: 2, coeff: 1 }],
+            }),
+        };
+        let sol = solve_cp_model(&model, CpSolveOptions::default());
+        assert_eq!(sol.status, CpStatus::Optimal);
+        assert_eq!(sol.assignment, vec![3, -3, -9]);
+        assert_eq!(sol.objective, Some(-9));
+    }
+
+    #[test]
+    fn solves_common_boolean_logic_constraints() {
+        let model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "choice_a".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "choice_b".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "choice_c".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "gate".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "approved".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "exclusive_flag".to_string(),
+                    domain: vec![0, 1],
+                },
+            ],
+            constraints: vec![
+                CpConstraint::ExactlyOne(vec![
+                    BoolLiteral {
+                        var: 0,
+                        positive: true,
+                    },
+                    BoolLiteral {
+                        var: 1,
+                        positive: true,
+                    },
+                    BoolLiteral {
+                        var: 2,
+                        positive: true,
+                    },
+                ]),
+                CpConstraint::AtMostOne(vec![
+                    BoolLiteral {
+                        var: 0,
+                        positive: true,
+                    },
+                    BoolLiteral {
+                        var: 2,
+                        positive: true,
+                    },
+                ]),
+                CpConstraint::Implication {
+                    antecedent: BoolLiteral {
+                        var: 0,
+                        positive: true,
+                    },
+                    consequent: BoolLiteral {
+                        var: 3,
+                        positive: true,
+                    },
+                },
+                CpConstraint::Implication {
+                    antecedent: BoolLiteral {
+                        var: 3,
+                        positive: true,
+                    },
+                    consequent: BoolLiteral {
+                        var: 4,
+                        positive: true,
+                    },
+                },
+                CpConstraint::BoolAnd(vec![
+                    BoolLiteral {
+                        var: 3,
+                        positive: true,
+                    },
+                    BoolLiteral {
+                        var: 4,
+                        positive: true,
+                    },
+                ]),
+                CpConstraint::BoolXor(vec![
+                    BoolLiteral {
+                        var: 0,
+                        positive: true,
+                    },
+                    BoolLiteral {
+                        var: 5,
+                        positive: true,
+                    },
+                ]),
+            ],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![
+                    LinearTerm { var: 0, coeff: 1 },
+                    LinearTerm { var: 1, coeff: 5 },
+                    LinearTerm { var: 2, coeff: 4 },
+                    LinearTerm { var: 3, coeff: 1 },
+                ],
+            }),
+        };
+        let sol = solve_cp_model(&model, CpSolveOptions::default());
+        assert_eq!(sol.status, CpStatus::Optimal);
+        assert_eq!(sol.assignment, vec![1, 0, 0, 1, 1, 0]);
+        assert_eq!(sol.objective, Some(2));
     }
 
     #[test]

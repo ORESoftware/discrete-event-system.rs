@@ -615,6 +615,19 @@ function stateToManifest(){
   return lines.join('\n');
 }
 function setStatus(kind,msg){const el=$('status');el.className=kind||'';el.textContent=msg;$('mStatus').textContent=kind==='err'?'error':(kind==='ok'?'ok':'ready')}
+function clearRouteState(message='No route yet.'){
+  lastResponse=null;
+  $('mStops').textContent='-';
+  $('mMiles').textContent='-';
+  $('mDrive').textContent='-';
+  $('mWait').textContent='-';
+  $('mVars').textContent='-';
+  $('routeSummary').textContent=message;
+  $('itineraryText').value='';
+  $('solverNotes').textContent=message;
+  $('solverTrace').textContent='No trace.';
+  renderRouteDetails(null);
+}
 function setBusy(on,message='Solving the route model.'){
   $('solveBtn').disabled=on;
   $('geocodeBtn').disabled=on;
@@ -697,6 +710,7 @@ function localSolve(){
   ensureRouteOptions();
   const m=matrices(), n=state.stops.length;
   const pins=activePinRules();
+  const infeasibleMessage=()=>pins.length?'No route can satisfy pinned stop positions and time windows':'No route can satisfy these time windows';
   let bestRoute=null,bestScore=Infinity;
   if(state.routeRules.lockedOrder){
     bestRoute=lockedRouteFromList();
@@ -742,9 +756,9 @@ function localSolve(){
       bestRoute.push(pick);remaining.delete(pick);clock=arrival+(m.nodes[node].serviceMinutes||0);cur=node;
     }
   }
-  if(!bestRoute)throw new Error('No route can satisfy these time windows');
+  if(!bestRoute)throw new Error(infeasibleMessage());
   if(!routeSatisfiesPins(bestRoute,pins))throw new Error('No route can satisfy pinned stop positions and time windows');
-  const itin=routeFeasible(bestRoute,m);if(!itin)throw new Error('No route can satisfy these time windows');
+  const itin=routeFeasible(bestRoute,m);if(!itin)throw new Error(infeasibleMessage());
   const variables=n*(n+1)+n+(state.objectiveMode==='windowCenter'?n:0)+(pins.length?n*n:0);
   const pinConstraints=pins.length?(8*n+n*(n-1)*(n-1)+pins.length*2):0;
   const constraints=n*4+4+n*2+n+n*(n-1)+(state.objectiveMode==='windowCenter'?n*2:0)+pinConstraints;
@@ -827,6 +841,7 @@ function renderRouteDetails(data){
     tr.firstChild.colSpan=5;
     tbody.appendChild(tr);
     $('routeTotals').textContent='No route yet.';
+    $('routeFrame').removeAttribute('src');
     $('osmFrame').removeAttribute('src');
     return;
   }
@@ -948,7 +963,11 @@ async function solve(){
     if(!data.ok)throw new Error(data.error||'solve failed');
     receiveSolution(data);
     setStatus('ok', `${data.solverStatus}: ${objectiveLabel()} ${(data.objectiveValue||0).toFixed(2)}, ${(data.totalDistance||0).toFixed(1)} mi.`);
-  }catch(e){setStatus('err','Solve failed: '+e.message)}
+  }catch(e){
+    const message='Solve failed: '+e.message;
+    clearRouteState(message);
+    setStatus('err',message);
+  }
   finally{setBusy(false)}
 }
 async function copyItinerary(){
@@ -998,6 +1017,8 @@ function loadManifest(){
     syncStateFromControls({resetOrder:true});
     saveLoadedState();
     renderControls();
+    $('mStops').textContent=String(state.stops.length);
+    clearRouteState(`${state.stops.length} stops loaded. Solve to plan route.`);
     $('mStops').textContent=String(state.stops.length);
     setStatus('ok',`${state.stops.length} stops loaded.`);
   }catch(e){setStatus('err',e.message)}

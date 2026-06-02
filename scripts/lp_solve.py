@@ -119,6 +119,88 @@ def feasible(
     return True
 
 
+def recover_certificate(lp: dict, x: Sequence[float], tol: float = 1e-8) -> dict:
+    sense, c, a_ub, b_ub, a_eq, b_eq, lb, ub = normalize_lp(lp)
+    n = len(c)
+    if len(x) != n:
+        return {}
+    bound_state = [0] * n
+    for j, xj in enumerate(x):
+        xj = float(xj)
+        if lb[j] is not None:
+            lower = float(lb[j])
+            if xj < lower - 10.0 * tol:
+                return {}
+            if abs(xj - lower) <= 10.0 * tol:
+                bound_state[j] = -1
+        if ub[j] is not None:
+            upper = float(ub[j])
+            if xj > upper + 10.0 * tol:
+                return {}
+            if abs(xj - upper) <= 10.0 * tol:
+                bound_state[j] = 2 if bound_state[j] == -1 else 1
+
+    active = []
+    for i, (row, rhs) in enumerate(zip(a_ub, b_ub)):
+        lhs = dot(row, x)
+        if lhs > rhs + 10.0 * tol:
+            return {}
+        if abs(lhs - rhs) <= 10.0 * tol:
+            active.append(i)
+    for row, rhs in zip(a_eq, b_eq):
+        if abs(dot(row, x) - rhs) > 10.0 * tol:
+            return {}
+
+    interior = [j for j, state in enumerate(bound_state) if state == 0]
+    unknowns = len(active) + len(a_eq)
+    if unknowns != len(interior):
+        return {}
+    system = [[0.0 for _ in range(unknowns)] for _ in interior]
+    for col, row_idx in enumerate(active):
+        for eq_row, j in enumerate(interior):
+            system[eq_row][col] = a_ub[row_idx][j]
+    for eq_idx, row in enumerate(a_eq):
+        col = len(active) + eq_idx
+        for eq_row, j in enumerate(interior):
+            system[eq_row][col] = row[j]
+    gradient = [coef if sense == "max" else -coef for coef in c]
+    rhs = [gradient[j] for j in interior]
+    if unknowns == 0:
+        solution = []
+    else:
+        solution = solve_square(system, rhs)
+        if solution is None:
+            return {}
+
+    dual_ub = [0.0] * len(a_ub)
+    for col, row_idx in enumerate(active):
+        if solution[col] < -1e-7:
+            return {}
+        dual_ub[row_idx] = max(0.0, float(solution[col]))
+    dual_eq = [float(v) for v in solution[len(active):]]
+    reduced = gradient[:]
+    for row, dual in zip(a_ub, dual_ub):
+        if dual == 0.0:
+            continue
+        for j in range(n):
+            reduced[j] -= dual * row[j]
+    for row, dual in zip(a_eq, dual_eq):
+        for j in range(n):
+            reduced[j] -= dual * row[j]
+    for j, state in enumerate(bound_state):
+        if state == 0 and abs(reduced[j]) > 1e-7:
+            return {}
+        if state == -1 and reduced[j] > 1e-7:
+            return {}
+        if state == 1 and reduced[j] < -1e-7:
+            return {}
+    return {
+        "dualUB": dual_ub,
+        "dualEQ": dual_eq,
+        "reducedCosts": reduced,
+    }
+
+
 def rank(rows: Sequence[Sequence[float]]) -> int:
     if not rows:
         return 0
@@ -186,7 +268,7 @@ def vertex_enumeration(lp: dict) -> dict:
 
     sign = 1.0 if sense == "max" else -1.0
     best = max(candidates, key=lambda x: sign * dot(c, x))
-    return {
+    result = {
         "status": "optimal",
         "x": best,
         "objective": dot(c, best),
@@ -194,6 +276,8 @@ def vertex_enumeration(lp: dict) -> dict:
         "solver": solver,
         "message": "dependency-free vertex enumeration fallback",
     }
+    result.update(recover_certificate(lp, best))
+    return result
 
 
 def scipy_linprog(lp: dict, method: str) -> Optional[dict]:
@@ -225,7 +309,7 @@ def scipy_linprog(lp: dict, method: str) -> Optional[dict]:
     objective = None
     if status == "optimal":
         objective = dot(c, x)
-    return {
+    result_payload = {
         "status": status,
         "x": x,
         "objective": objective,
@@ -233,6 +317,9 @@ def scipy_linprog(lp: dict, method: str) -> Optional[dict]:
         "solver": f"scipy:{method}",
         "message": str(result.message),
     }
+    if status == "optimal":
+        result_payload.update(recover_certificate(lp, x))
+    return result_payload
 
 
 def ortools_glop(lp: dict) -> Optional[dict]:
@@ -290,7 +377,7 @@ def ortools_glop(lp: dict) -> Optional[dict]:
     status = status_map.get(status_code, "numerical-error")
     x = [float(var.solution_value()) for var in xs] if status in ("optimal", "feasible") else []
     iters = solver.iterations() if hasattr(solver, "iterations") else 0
-    return {
+    result_payload = {
         "status": status,
         "x": x,
         "objective": dot(c, x) if status in ("optimal", "feasible") else None,
@@ -298,6 +385,9 @@ def ortools_glop(lp: dict) -> Optional[dict]:
         "solver": "ortools:glop",
         "message": f"GLOP status code {status_code}",
     }
+    if status == "optimal":
+        result_payload.update(recover_certificate(lp, x))
+    return result_payload
 
 
 def solve_external(lp: dict, method: str) -> Optional[dict]:

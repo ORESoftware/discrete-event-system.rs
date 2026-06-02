@@ -394,7 +394,7 @@ than as one monolithic planner:
 | --- | --- |
 | Inventory control and dynamic programming | `inventory_dp`, `multistage_stochastic`, `main_inventory_mdp`, `main_newsvendor` |
 | Forecasting and state estimation | `nonlinear_forecasting_model`, `kalman_filter`, stochastic SDE/control reports |
-| LP and interior-point methods | `lp`, `lp_des`, `des_lp_bridge`; use `LP_SOLVER=internal-ipm` for the native primal-dual IPM or `scipy:highs-ipm` for SciPy HiGHS IPM |
+| LP and interior-point methods | `lp`, `lp_des`, `des_lp_bridge`; use `LP_SOLVER=internal-ipm` for the native primal-dual IPM or `scipy:highs-ipm` for SciPy HiGHS IPM; simplex runs recover dual row prices and reduced costs when the active set is certifiable |
 | Mixed-integer optimization | `milp_bnb`, `ip_mip_des` |
 | Network flow and transportation | `max_flow`, `network_flow`, `traffic_flow`, `stochastic_flow_mdp` |
 | Vehicle routing and routing heuristics | `classical_optimization_models` VRP savings and nearest-neighbor runs |
@@ -402,9 +402,11 @@ than as one monolithic planner:
 | Model predictive control and reinforcement learning | `mpc_double_integrator`, `temp_control` MPC, `qlearning_des`, `ppo_des`, `actor_critic_gridworld` |
 
 Solver parity checks live in `validate_optimization_suite`; scale-envelope
-checks live in `validate_optimization_scale`. The scale runner compares native
-LP/MIP solvers with installed open-source engines and writes
-`out/external/optimization-scale/scale-report.json`:
+checks live in `validate_optimization_scale`. The suite cross-checks HiGHS,
+GLPK, SCIP, CBC, CLP, OR-Tools GLOP, and OR-Tools CP-SAT when available, and
+keeps optional hooks for commercial CLIs such as Gurobi, CPLEX, Xpress, and
+LINDO. The scale runner compares native LP/MIP solvers with installed
+open-source engines and writes `out/external/optimization-scale/scale-report.json`:
 
 ```sh
 PYTHON_BIN=/path/to/python cargo run --bin validate_optimization_scale

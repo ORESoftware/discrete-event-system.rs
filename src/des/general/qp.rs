@@ -52,6 +52,11 @@ pub struct QPSolution {
     pub status: QPStatus,
     pub x: Vector,
     pub objective: f64,
+    pub dual_ub: Vector,
+    pub dual_eq: Vector,
+    pub dual_lower_bounds: Vector,
+    pub dual_upper_bounds: Vector,
+    pub reduced_gradient: Vector,
     pub active_ub_rows: Vec<usize>,
     pub active_lower_bounds: Vec<usize>,
     pub active_upper_bounds: Vec<usize>,
@@ -214,6 +219,12 @@ enum ActiveKind {
     Upper(usize),
 }
 
+#[derive(Clone, Debug)]
+struct KktSolution {
+    x: Vector,
+    multipliers: Vector,
+}
+
 fn validate_qp(p: &QuadraticProgram) {
     let n = p.c.len();
     if p.q.len() != n {
@@ -264,6 +275,11 @@ fn validate_qp(p: &QuadraticProgram) {
 fn objective(p: &QuadraticProgram, x: &[f64]) -> f64 {
     let qx = mat_vec(&p.q, x);
     0.5 * VecOps::dot(x, &qx) + VecOps::dot(&p.c, x)
+}
+
+fn qp_gradient(p: &QuadraticProgram, x: &[f64]) -> Vector {
+    let qx = mat_vec(&p.q, x);
+    qx.iter().zip(&p.c).map(|(qi, ci)| qi + ci).collect()
 }
 
 fn mat_vec(a: &Matrix, x: &[f64]) -> Vector {
@@ -322,7 +338,7 @@ fn active_row_rhs(p: &QuadraticProgram, kind: ActiveKind) -> (Vector, f64) {
     }
 }
 
-fn solve_kkt(p: &QuadraticProgram, active: &[ActiveKind], tol: f64) -> Option<Vector> {
+fn solve_kkt(p: &QuadraticProgram, active: &[ActiveKind], tol: f64) -> Option<KktSolution> {
     let n = p.c.len();
     let a_eq = p.a_eq.as_deref().unwrap_or(&[]);
     let b_eq = p.b_eq.as_deref().unwrap_or(&[]);
@@ -358,7 +374,10 @@ fn solve_kkt(p: &QuadraticProgram, active: &[ActiveKind], tol: f64) -> Option<Ve
     }
     LinearSystem::new(&kkt, &rhs, tol)
         .try_solve()
-        .map(|v| v[..n].to_vec())
+        .map(|v| KktSolution {
+            x: v[..n].to_vec(),
+            multipliers: v[n..].to_vec(),
+        })
 }
 
 fn feasible(p: &QuadraticProgram, x: &[f64], tol: f64) -> bool {
@@ -411,6 +430,81 @@ fn decode_active(active: &[ActiveKind]) -> (Vec<usize>, Vec<usize>, Vec<usize>) 
     (active_ub_rows, active_lower_bounds, active_upper_bounds)
 }
 
+type QPCertificate = (Vector, Vector, Vector, Vector, Vector);
+
+fn qp_certificate(
+    p: &QuadraticProgram,
+    x: &[f64],
+    active: &[ActiveKind],
+    multipliers: &[f64],
+    tol: f64,
+) -> Option<QPCertificate> {
+    let n = p.c.len();
+    let a_ub: &[Vec<f64>] = p.a_ub.as_deref().unwrap_or(&[]);
+    let a_eq: &[Vec<f64>] = p.a_eq.as_deref().unwrap_or(&[]);
+    if multipliers.len() != a_eq.len() + active.len() {
+        return None;
+    }
+
+    let dual_eq = multipliers[..a_eq.len()].to_vec();
+    let mut dual_ub = vec![0.0; a_ub.len()];
+    let mut dual_lower_bounds = vec![0.0; n];
+    let mut dual_upper_bounds = vec![0.0; n];
+    for (offset, &kind) in active.iter().enumerate() {
+        let lambda = multipliers[a_eq.len() + offset];
+        match kind {
+            ActiveKind::Inequality(row) => {
+                if lambda < -tol {
+                    return None;
+                }
+                dual_ub[row] = lambda.max(0.0);
+            }
+            ActiveKind::Lower(var) => {
+                let dual = -lambda;
+                if dual < -tol {
+                    return None;
+                }
+                dual_lower_bounds[var] = dual.max(0.0);
+            }
+            ActiveKind::Upper(var) => {
+                if lambda < -tol {
+                    return None;
+                }
+                dual_upper_bounds[var] = lambda.max(0.0);
+            }
+        }
+    }
+
+    let mut reduced_gradient = qp_gradient(p, x);
+    for (row, &dual) in a_ub.iter().zip(&dual_ub) {
+        if dual == 0.0 {
+            continue;
+        }
+        for j in 0..n {
+            reduced_gradient[j] += dual * row[j];
+        }
+    }
+    for (row, &dual) in a_eq.iter().zip(&dual_eq) {
+        for j in 0..n {
+            reduced_gradient[j] += dual * row[j];
+        }
+    }
+    for j in 0..n {
+        let stationarity = reduced_gradient[j] - dual_lower_bounds[j] + dual_upper_bounds[j];
+        if stationarity.abs() > 10.0 * tol {
+            return None;
+        }
+    }
+
+    Some((
+        dual_ub,
+        dual_eq,
+        dual_lower_bounds,
+        dual_upper_bounds,
+        reduced_gradient,
+    ))
+}
+
 /// Solve a small dense convex QP by active-set enumeration.
 pub fn solve_qp_active_set(p: &QuadraticProgram, opts: QPOptions) -> QPSolution {
     validate_qp(p);
@@ -419,6 +513,7 @@ pub fn solve_qp_active_set(p: &QuadraticProgram, opts: QPOptions) -> QPSolution 
     let mut best_x = Vec::new();
     let mut best_obj = f64::INFINITY;
     let mut best_active = Vec::new();
+    let mut best_certificate: Option<QPCertificate> = None;
     let mut iterations = 0usize;
 
     for mask in 0usize..(1usize << candidates.len()) {
@@ -428,6 +523,11 @@ pub fn solve_qp_active_set(p: &QuadraticProgram, opts: QPOptions) -> QPSolution 
                 status: QPStatus::NumericalError,
                 x: best_x,
                 objective: best_obj,
+                dual_ub: Vec::new(),
+                dual_eq: Vec::new(),
+                dual_lower_bounds: Vec::new(),
+                dual_upper_bounds: Vec::new(),
+                reduced_gradient: Vec::new(),
                 active_ub_rows: Vec::new(),
                 active_lower_bounds: Vec::new(),
                 active_upper_bounds: Vec::new(),
@@ -445,17 +545,23 @@ pub fn solve_qp_active_set(p: &QuadraticProgram, opts: QPOptions) -> QPSolution 
         if active.len() > n {
             continue;
         }
-        let Some(x) = solve_kkt(p, &active, opts.tol.max(1e-12)) else {
+        let Some(kkt) = solve_kkt(p, &active, opts.tol.max(1e-12)) else {
             continue;
         };
-        if !feasible(p, &x, opts.tol.max(1e-8)) {
+        if !feasible(p, &kkt.x, opts.tol.max(1e-8)) {
             continue;
         }
-        let obj = objective(p, &x);
+        let Some(certificate) =
+            qp_certificate(p, &kkt.x, &active, &kkt.multipliers, opts.tol.max(1e-8))
+        else {
+            continue;
+        };
+        let obj = objective(p, &kkt.x);
         if obj < best_obj - opts.tol {
             best_obj = obj;
-            best_x = x;
+            best_x = kkt.x;
             best_active = active;
+            best_certificate = Some(certificate);
         }
     }
 
@@ -464,6 +570,11 @@ pub fn solve_qp_active_set(p: &QuadraticProgram, opts: QPOptions) -> QPSolution 
             status: QPStatus::Infeasible,
             x: Vec::new(),
             objective: f64::NAN,
+            dual_ub: Vec::new(),
+            dual_eq: Vec::new(),
+            dual_lower_bounds: Vec::new(),
+            dual_upper_bounds: Vec::new(),
+            reduced_gradient: Vec::new(),
             active_ub_rows: Vec::new(),
             active_lower_bounds: Vec::new(),
             active_upper_bounds: Vec::new(),
@@ -473,10 +584,17 @@ pub fn solve_qp_active_set(p: &QuadraticProgram, opts: QPOptions) -> QPSolution 
         };
     }
     let (active_ub_rows, active_lower_bounds, active_upper_bounds) = decode_active(&best_active);
+    let (dual_ub, dual_eq, dual_lower_bounds, dual_upper_bounds, reduced_gradient) =
+        best_certificate.expect("optimal QP candidate has KKT certificate");
     QPSolution {
         status: QPStatus::Optimal,
         x: best_x,
         objective: best_obj,
+        dual_ub,
+        dual_eq,
+        dual_lower_bounds,
+        dual_upper_bounds,
+        reduced_gradient,
         active_ub_rows,
         active_lower_bounds,
         active_upper_bounds,

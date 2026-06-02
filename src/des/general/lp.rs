@@ -502,14 +502,15 @@ fn run_internal_simplex(p: &LPProblem, opts: &InternalSimplexOptions) -> LPSolut
     for i in 0..n {
         obj += p.c[i] * x[i];
     }
+    let (dual_ub, dual_eq, reduced_costs) = recover_lp_certificate(p, &x, tol);
 
     LPSolution {
         status: LPStatus::Optimal,
         x,
         objective: obj,
-        dual_ub: None,
-        dual_eq: None,
-        reduced_costs: None,
+        dual_ub,
+        dual_eq,
+        reduced_costs,
         iters: Some(iters),
         solver: "internal".to_string(),
         elapsed_ms: ms_since(t0),
@@ -775,6 +776,134 @@ fn reconstruct_original_x(std: &StandardInteriorLp, x_std: &[f64]) -> Vec<f64> {
 
 fn original_objective(std: &StandardInteriorLp, x: &[f64]) -> f64 {
     std.original_c.iter().zip(x).map(|(c, xi)| c * xi).sum()
+}
+
+fn recover_lp_certificate(
+    p: &LPProblem,
+    x: &[f64],
+    tol: f64,
+) -> (Option<Vec<f64>>, Option<Vec<f64>>, Option<Vec<f64>>) {
+    let n = p.c.len();
+    if x.len() != n {
+        return (None, None, None);
+    }
+    let a_ub: &[Vec<f64>] = p.a_ub.as_deref().unwrap_or(&[]);
+    let b_ub: &[f64] = p.b_ub.as_deref().unwrap_or(&[]);
+    let a_eq: &[Vec<f64>] = p.a_eq.as_deref().unwrap_or(&[]);
+    let b_eq: &[f64] = p.b_eq.as_deref().unwrap_or(&[]);
+    let lb: Vec<Option<f64>> = p.lb.clone().unwrap_or_else(|| vec![Some(0.0); n]);
+    let ub: Vec<Option<f64>> = p.ub.clone().unwrap_or_else(|| vec![None; n]);
+    if a_ub.len() != b_ub.len() || a_eq.len() != b_eq.len() || lb.len() != n || ub.len() != n {
+        return (None, None, None);
+    }
+    let mut bound_state = vec![0_i8; n];
+    for (j, &xj) in x.iter().enumerate() {
+        if let Some(lower) = lb[j] {
+            if xj < lower - 10.0 * tol {
+                return (None, None, None);
+            }
+            if (xj - lower).abs() <= 10.0 * tol {
+                bound_state[j] = -1;
+            }
+        }
+        if let Some(upper) = ub[j] {
+            if xj > upper + 10.0 * tol {
+                return (None, None, None);
+            }
+            if (xj - upper).abs() <= 10.0 * tol {
+                bound_state[j] = if bound_state[j] == -1 { 2 } else { 1 };
+            }
+        }
+    }
+
+    let mut active_ub = Vec::new();
+    for (i, (row, rhs)) in a_ub.iter().zip(b_ub).enumerate() {
+        if row.len() != n {
+            return (None, None, None);
+        }
+        let lhs: f64 = row.iter().zip(x).map(|(a, xj)| a * xj).sum();
+        if lhs > rhs + 10.0 * tol {
+            return (None, None, None);
+        }
+        if (lhs - rhs).abs() <= 10.0 * tol {
+            active_ub.push(i);
+        }
+    }
+    for (row, rhs) in a_eq.iter().zip(b_eq) {
+        if row.len() != n {
+            return (None, None, None);
+        }
+        let lhs: f64 = row.iter().zip(x).map(|(a, xj)| a * xj).sum();
+        if (lhs - rhs).abs() > 10.0 * tol {
+            return (None, None, None);
+        }
+    }
+
+    let interior_vars: Vec<usize> = bound_state
+        .iter()
+        .enumerate()
+        .filter_map(|(j, &state)| if state == 0 { Some(j) } else { None })
+        .collect();
+    let unknowns = active_ub.len() + a_eq.len();
+    if unknowns != interior_vars.len() {
+        return (None, None, None);
+    }
+    let mut system = vec![vec![0.0; unknowns]; interior_vars.len()];
+    for (col, &row_idx) in active_ub.iter().enumerate() {
+        for (eq_row, &j) in interior_vars.iter().enumerate() {
+            system[eq_row][col] = a_ub[row_idx][j];
+        }
+    }
+    for (eq_idx, row) in a_eq.iter().enumerate() {
+        let col = active_ub.len() + eq_idx;
+        for (eq_row, &j) in interior_vars.iter().enumerate() {
+            system[eq_row][col] = row[j];
+        }
+    }
+    let gradient: Vec<f64> =
+        p.c.iter()
+            .map(|&c| if p.sense == Sense::Max { c } else { -c })
+            .collect();
+    let rhs: Vec<f64> = interior_vars.iter().map(|&j| gradient[j]).collect();
+    let solution = if unknowns == 0 {
+        Vec::new()
+    } else {
+        let Some(solution) = LinearSystem::new(&system, &rhs, tol.max(1e-10)).try_solve() else {
+            return (None, None, None);
+        };
+        solution
+    };
+    let mut dual_ub = vec![0.0; a_ub.len()];
+    for (col, &row_idx) in active_ub.iter().enumerate() {
+        if solution[col] < -1e-7 {
+            return (None, None, None);
+        }
+        dual_ub[row_idx] = solution[col].max(0.0);
+    }
+    let dual_eq = solution[active_ub.len()..].to_vec();
+    let mut reduced_costs = gradient;
+    for (row, &dual) in a_ub.iter().zip(&dual_ub) {
+        if dual == 0.0 {
+            continue;
+        }
+        for j in 0..n {
+            reduced_costs[j] -= dual * row[j];
+        }
+    }
+    for (row, &dual) in a_eq.iter().zip(&dual_eq) {
+        for j in 0..n {
+            reduced_costs[j] -= dual * row[j];
+        }
+    }
+    for (j, &state) in bound_state.iter().enumerate() {
+        match state {
+            0 if reduced_costs[j].abs() > 1e-7 => return (None, None, None),
+            -1 if reduced_costs[j] > 1e-7 => return (None, None, None),
+            1 if reduced_costs[j] < -1e-7 => return (None, None, None),
+            _ => {}
+        }
+    }
+    (Some(dual_ub), Some(dual_eq), Some(reduced_costs))
 }
 
 fn vec_inf_norm(v: &[f64]) -> f64 {

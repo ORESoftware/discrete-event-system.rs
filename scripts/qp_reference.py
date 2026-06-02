@@ -36,6 +36,11 @@ def objective(qp: dict, x: Sequence[float]) -> float:
     return 0.5 * dot(x, qx) + dot(qp["c"], x)
 
 
+def qp_gradient(qp: dict, x: Sequence[float]) -> List[float]:
+    qx = mat_vec(qp["Q"], x)
+    return [qi + ci for qi, ci in zip(qx, qp["c"])]
+
+
 def solve_square(a: Sequence[Sequence[float]], b: Sequence[float], tol: float = 1e-10) -> Optional[List[float]]:
     n = len(b)
     aug = [list(map(float, row)) + [float(rhs)] for row, rhs in zip(a, b)]
@@ -111,6 +116,113 @@ def feasible(qp: dict, x: Sequence[float], tol: float = 1e-7) -> bool:
         if abs(dot(row, x) - rhs) > tol:
             return False
     return True
+
+
+def recover_qp_certificate(qp_raw: dict, x: Sequence[float], tol: float = 1e-8) -> dict:
+    qp = normalize(qp_raw)
+    n = len(qp["c"])
+    if len(x) != n:
+        return {}
+
+    active: List[Tuple[str, int]] = []
+    for i, value in enumerate(x):
+        if qp["lb"][i] is not None:
+            lower = float(qp["lb"][i])
+            if value < lower - 10.0 * tol:
+                return {}
+            if abs(value - lower) <= 10.0 * tol:
+                active.append(("lb", i))
+        if qp["ub"][i] is not None:
+            upper = float(qp["ub"][i])
+            if value > upper + 10.0 * tol:
+                return {}
+            if abs(value - upper) <= 10.0 * tol:
+                active.append(("ub", i))
+
+    for row, rhs in zip(qp["A_eq"], qp["b_eq"]):
+        if abs(dot(row, x) - rhs) > 10.0 * tol:
+            return {}
+    for i, (row, rhs) in enumerate(zip(qp["A_ub"], qp["b_ub"])):
+        lhs = dot(row, x)
+        if lhs > rhs + 10.0 * tol:
+            return {}
+        if abs(lhs - rhs) <= 10.0 * tol:
+            active.append(("ineq", i))
+
+    rows = [row[:] for row in qp["A_eq"]]
+    rows.extend(active_row(qp, item)[0] for item in active)
+    gradient = qp_gradient(qp, x)
+    unknowns = len(rows)
+    if unknowns == 0:
+        if any(abs(v) > 10.0 * tol for v in gradient):
+            return {}
+        solution: List[float] = []
+    else:
+        normal = [[0.0 for _ in range(unknowns)] for _ in range(unknowns)]
+        rhs = [0.0 for _ in range(unknowns)]
+        for col, row in enumerate(rows):
+            rhs[col] = -dot(row, gradient)
+            for other, other_row in enumerate(rows):
+                normal[col][other] = dot(row, other_row)
+        solved = solve_square(normal, rhs, tol=max(tol, 1e-10))
+        if solved is None:
+            return {}
+        residual = gradient[:]
+        for row, dual in zip(rows, solved):
+            for j in range(n):
+                residual[j] += dual * row[j]
+        if any(abs(v) > 1e-6 for v in residual):
+            return {}
+        solution = solved
+
+    dual_eq = [float(v) for v in solution[: len(qp["A_eq"])]]
+    dual_ub = [0.0] * len(qp["A_ub"])
+    dual_lower = [0.0] * n
+    dual_upper = [0.0] * n
+    for offset, item in enumerate(active):
+        kind, idx = item
+        multiplier = float(solution[len(qp["A_eq"]) + offset])
+        if kind == "ineq":
+            if multiplier < -1e-7:
+                return {}
+            dual_ub[idx] = max(0.0, multiplier)
+        elif kind == "lb":
+            dual = -multiplier
+            if dual < -1e-7:
+                return {}
+            dual_lower[idx] = max(0.0, dual)
+        elif kind == "ub":
+            if multiplier < -1e-7:
+                return {}
+            dual_upper[idx] = max(0.0, multiplier)
+
+    reduced = gradient[:]
+    for row, dual in zip(qp["A_ub"], dual_ub):
+        if dual == 0.0:
+            continue
+        for j in range(n):
+            reduced[j] += dual * row[j]
+    for row, dual in zip(qp["A_eq"], dual_eq):
+        for j in range(n):
+            reduced[j] += dual * row[j]
+    for j in range(n):
+        stationarity = reduced[j] - dual_lower[j] + dual_upper[j]
+        if abs(stationarity) > 1e-6:
+            return {}
+
+    return {
+        "dualUB": dual_ub,
+        "dualEQ": dual_eq,
+        "dualLowerBounds": dual_lower,
+        "dualUpperBounds": dual_upper,
+        "reducedGradient": reduced,
+    }
+
+
+def with_qp_certificate(result: dict, qp_raw: dict) -> dict:
+    if result.get("status") == "optimal" and result.get("x") is not None:
+        result.update(recover_qp_certificate(qp_raw, result["x"]))
+    return result
 
 
 def normalize_socp(raw: dict) -> dict:
@@ -450,14 +562,14 @@ def enumerate_active_sets(qp: dict) -> dict:
                 best_x = x
     if best_x is None:
         return {"status": "infeasible", "solver": "python:qp-active-set", "x": [], "objective": None, "iterations": iterations}
-    return {
+    return with_qp_certificate({
         "status": "optimal",
         "solver": "python:qp-active-set",
         "x": best_x,
         "objective": best_obj,
         "iterations": iterations,
         "message": "dependency-free active-set enumeration fallback",
-    }
+    }, qp)
 
 
 def scipy_reference(qp_raw: dict) -> Optional[dict]:
@@ -497,7 +609,7 @@ def scipy_reference(qp_raw: dict) -> Optional[dict]:
     if not result.success:
         return {"status": "numerical-error", "solver": "scipy:SLSQP", "x": [], "objective": None, "message": str(result.message)}
     x = [float(v) for v in result.x]
-    return {"status": "optimal", "solver": "scipy:SLSQP", "x": x, "objective": objective(qp, x), "iterations": int(result.nit), "message": str(result.message)}
+    return with_qp_certificate({"status": "optimal", "solver": "scipy:SLSQP", "x": x, "objective": objective(qp, x), "iterations": int(result.nit), "message": str(result.message)}, qp)
 
 
 def scipy_socp_reference(raw: dict) -> Optional[dict]:

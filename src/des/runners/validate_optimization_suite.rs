@@ -74,6 +74,16 @@ struct QPReference {
     solver: String,
     x: Vec<f64>,
     objective: Option<f64>,
+    #[serde(rename = "dualUB")]
+    dual_ub: Option<Vec<f64>>,
+    #[serde(rename = "dualEQ")]
+    dual_eq: Option<Vec<f64>>,
+    #[serde(rename = "dualLowerBounds")]
+    dual_lower_bounds: Option<Vec<f64>>,
+    #[serde(rename = "dualUpperBounds")]
+    dual_upper_bounds: Option<Vec<f64>>,
+    #[serde(rename = "reducedGradient")]
+    reduced_gradient: Option<Vec<f64>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -145,6 +155,19 @@ impl Driver {
         );
     }
 
+    fn max_abs_close_optional(
+        &mut self,
+        name: &str,
+        a: Option<&[f64]>,
+        b: Option<&[f64]>,
+        tol: f64,
+    ) {
+        match (a, b) {
+            (Some(a), Some(b)) => self.max_abs_close(name, a, b, tol),
+            _ => self.check(name, false, "missing certificate vector"),
+        }
+    }
+
     fn run_python_json(&self, script: &str, args: &[&str], stdin_json: &str) -> serde_json::Value {
         let path = self.root.join("scripts").join(script);
         let python = std::env::var("PYTHON_BIN").unwrap_or_else(|_| "python3".to_string());
@@ -206,6 +229,143 @@ impl Driver {
         );
         self.close("LP objective", internal.objective, external.objective, 1e-9);
         self.max_abs_close("LP x", &internal.x, &external.x, 1e-8);
+
+        let certificate_lp = LPProblem {
+            sense: Sense::Max,
+            c: vec![3.0, 2.0],
+            a_ub: Some(vec![vec![1.0, 1.0], vec![2.0, 1.0]]),
+            b_ub: Some(vec![4.0, 5.0]),
+            ..Default::default()
+        };
+        let certificate_internal =
+            solve_lp_internal(&certificate_lp, &InternalSimplexOptions::default());
+        let certificate_external = solve_lp_external(
+            &certificate_lp,
+            &ExternalSolverOptions {
+                method: Some("highs".to_string()),
+                ..Default::default()
+            },
+        );
+        self.check(
+            "LP certificate statuses optimal",
+            certificate_internal.status == LPStatus::Optimal
+                && certificate_external.status == LPStatus::Optimal,
+            format!(
+                "internal={:?} external={:?}",
+                certificate_internal.status, certificate_external.status
+            ),
+        );
+        self.close(
+            "LP certificate objective",
+            certificate_internal.objective,
+            certificate_external.objective,
+            1e-9,
+        );
+        self.max_abs_close(
+            "LP certificate x",
+            &certificate_internal.x,
+            &certificate_external.x,
+            1e-8,
+        );
+        self.max_abs_close_optional(
+            "LP certificate dual_ub internal expected",
+            certificate_internal.dual_ub.as_deref(),
+            Some(&[1.0, 1.0]),
+            1e-8,
+        );
+        self.max_abs_close_optional(
+            "LP certificate dual_ub external expected",
+            certificate_external.dual_ub.as_deref(),
+            Some(&[1.0, 1.0]),
+            1e-8,
+        );
+        self.max_abs_close_optional(
+            "LP certificate dual_ub internal/external",
+            certificate_internal.dual_ub.as_deref(),
+            certificate_external.dual_ub.as_deref(),
+            1e-8,
+        );
+        self.max_abs_close_optional(
+            "LP certificate reduced costs",
+            certificate_internal.reduced_costs.as_deref(),
+            certificate_external.reduced_costs.as_deref(),
+            1e-8,
+        );
+
+        let bound_certificate_lp = LPProblem {
+            sense: Sense::Max,
+            c: vec![-5.0, 2.0, 4.0],
+            a_ub: Some(vec![vec![0.0, 1.0, 0.0]]),
+            b_ub: Some(vec![2.0]),
+            ub: Some(vec![None, None, Some(1.0)]),
+            ..Default::default()
+        };
+        let bound_certificate_internal =
+            solve_lp_internal(&bound_certificate_lp, &InternalSimplexOptions::default());
+        let bound_certificate_external = solve_lp_external(
+            &bound_certificate_lp,
+            &ExternalSolverOptions {
+                method: Some("highs".to_string()),
+                ..Default::default()
+            },
+        );
+        self.check(
+            "LP bound certificate statuses optimal",
+            bound_certificate_internal.status == LPStatus::Optimal
+                && bound_certificate_external.status == LPStatus::Optimal,
+            format!(
+                "internal={:?} external={:?}",
+                bound_certificate_internal.status, bound_certificate_external.status
+            ),
+        );
+        self.close(
+            "LP bound certificate objective",
+            bound_certificate_internal.objective,
+            bound_certificate_external.objective,
+            1e-9,
+        );
+        self.max_abs_close(
+            "LP bound certificate x",
+            &bound_certificate_internal.x,
+            &bound_certificate_external.x,
+            1e-8,
+        );
+        self.max_abs_close_optional(
+            "LP bound certificate dual_ub internal expected",
+            bound_certificate_internal.dual_ub.as_deref(),
+            Some(&[2.0]),
+            1e-8,
+        );
+        self.max_abs_close_optional(
+            "LP bound certificate dual_ub external expected",
+            bound_certificate_external.dual_ub.as_deref(),
+            Some(&[2.0]),
+            1e-8,
+        );
+        self.max_abs_close_optional(
+            "LP bound certificate dual_ub internal/external",
+            bound_certificate_internal.dual_ub.as_deref(),
+            bound_certificate_external.dual_ub.as_deref(),
+            1e-8,
+        );
+        self.max_abs_close_optional(
+            "LP bound certificate reduced internal expected",
+            bound_certificate_internal.reduced_costs.as_deref(),
+            Some(&[-5.0, 0.0, 4.0]),
+            1e-8,
+        );
+        self.max_abs_close_optional(
+            "LP bound certificate reduced external expected",
+            bound_certificate_external.reduced_costs.as_deref(),
+            Some(&[-5.0, 0.0, 4.0]),
+            1e-8,
+        );
+        self.max_abs_close_optional(
+            "LP bound certificate reduced internal/external",
+            bound_certificate_internal.reduced_costs.as_deref(),
+            bound_certificate_external.reduced_costs.as_deref(),
+            1e-8,
+        );
 
         let glop = solve_lp_external(
             &lp,
@@ -1636,6 +1796,136 @@ impl Driver {
             1e-8,
         );
         self.max_abs_close("QP x", &internal.x, &reference.x, 1e-8);
+        self.max_abs_close_optional(
+            "QP dual_ub internal expected",
+            Some(internal.dual_ub.as_slice()),
+            Some(&[1.75]),
+            1e-8,
+        );
+        self.max_abs_close_optional(
+            "QP dual_ub external expected",
+            reference.dual_ub.as_deref(),
+            Some(&[1.75]),
+            1e-7,
+        );
+        self.max_abs_close_optional(
+            "QP dual_ub internal/external",
+            Some(internal.dual_ub.as_slice()),
+            reference.dual_ub.as_deref(),
+            1e-7,
+        );
+        self.max_abs_close_optional(
+            "QP reduced-gradient internal/external",
+            Some(internal.reduced_gradient.as_slice()),
+            reference.reduced_gradient.as_deref(),
+            1e-7,
+        );
+
+        let bound_qp = QuadraticProgram {
+            q: vec![
+                vec![1.0, 0.0, 0.0],
+                vec![0.0, 1.0, 0.0],
+                vec![0.0, 0.0, 1.0],
+            ],
+            c: vec![3.0, -2.0, -4.0],
+            a_ub: Some(vec![vec![0.0, 1.0, 0.0]]),
+            b_ub: Some(vec![1.0]),
+            lb: Some(vec![Some(0.0), Some(0.0), Some(0.0)]),
+            ub: Some(vec![None, None, Some(1.0)]),
+            var_names: Some(vec!["x".to_string(), "y".to_string(), "z".to_string()]),
+            ..Default::default()
+        };
+        let bound_internal = solve_qp_active_set(&bound_qp, QPOptions::default());
+        let bound_qp_json = serde_json::json!({
+            "Q": &bound_qp.q,
+            "c": &bound_qp.c,
+            "A_ub": &bound_qp.a_ub,
+            "b_ub": &bound_qp.b_ub,
+            "A_eq": &bound_qp.a_eq,
+            "b_eq": &bound_qp.b_eq,
+            "lb": &bound_qp.lb,
+            "ub": &bound_qp.ub,
+        })
+        .to_string();
+        let value = self.run_python_json("qp_reference.py", &["--solver", "auto"], &bound_qp_json);
+        let bound_reference: QPReference =
+            serde_json::from_value(value).expect("parse bound QP reference");
+        self.check(
+            "QP bound certificate statuses optimal",
+            bound_internal.status == QPStatus::Optimal && bound_reference.status == "optimal",
+            format!(
+                "internal={} external={} solver={}",
+                bound_internal.status.as_str(),
+                bound_reference.status,
+                bound_reference.solver
+            ),
+        );
+        self.close(
+            "QP bound certificate objective",
+            bound_internal.objective,
+            bound_reference.objective.unwrap_or(f64::NAN),
+            1e-8,
+        );
+        self.max_abs_close(
+            "QP bound certificate x",
+            &bound_internal.x,
+            &bound_reference.x,
+            1e-7,
+        );
+        self.max_abs_close_optional(
+            "QP bound certificate dual_ub internal expected",
+            Some(bound_internal.dual_ub.as_slice()),
+            Some(&[1.0]),
+            1e-8,
+        );
+        self.max_abs_close_optional(
+            "QP bound certificate dual_ub external expected",
+            bound_reference.dual_ub.as_deref(),
+            Some(&[1.0]),
+            1e-6,
+        );
+        self.max_abs_close_optional(
+            "QP bound certificate lower dual internal expected",
+            Some(bound_internal.dual_lower_bounds.as_slice()),
+            Some(&[3.0, 0.0, 0.0]),
+            1e-8,
+        );
+        self.max_abs_close_optional(
+            "QP bound certificate lower dual external expected",
+            bound_reference.dual_lower_bounds.as_deref(),
+            Some(&[3.0, 0.0, 0.0]),
+            1e-6,
+        );
+        self.max_abs_close_optional(
+            "QP bound certificate upper dual internal expected",
+            Some(bound_internal.dual_upper_bounds.as_slice()),
+            Some(&[0.0, 0.0, 3.0]),
+            1e-8,
+        );
+        self.max_abs_close_optional(
+            "QP bound certificate upper dual external expected",
+            bound_reference.dual_upper_bounds.as_deref(),
+            Some(&[0.0, 0.0, 3.0]),
+            1e-6,
+        );
+        self.max_abs_close_optional(
+            "QP bound certificate reduced-gradient internal expected",
+            Some(bound_internal.reduced_gradient.as_slice()),
+            Some(&[3.0, 0.0, -3.0]),
+            1e-8,
+        );
+        self.max_abs_close_optional(
+            "QP bound certificate reduced-gradient external expected",
+            bound_reference.reduced_gradient.as_deref(),
+            Some(&[3.0, 0.0, -3.0]),
+            1e-6,
+        );
+        self.max_abs_close_optional(
+            "QP bound certificate reduced-gradient internal/external",
+            Some(bound_internal.reduced_gradient.as_slice()),
+            bound_reference.reduced_gradient.as_deref(),
+            1e-6,
+        );
 
         let socp = self.sample_socp();
         let socp_internal = solve_socp_pattern_search(&socp, SocpOptions::default());

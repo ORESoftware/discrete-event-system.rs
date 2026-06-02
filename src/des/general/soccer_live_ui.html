@@ -91,7 +91,7 @@
     margin-bottom: 10px;
     flex-wrap: wrap;
   }
-  button, select {
+  button, select, input {
     min-height: 32px;
     border: 1px solid var(--line);
     background: #fff;
@@ -103,6 +103,9 @@
   button:hover { background: #f0f4f7; }
   button.active { background: #172026; color: #fff; }
   select { padding: 0 8px; max-width: 190px; }
+  input[type="number"] { width: 76px; padding: 0 7px; font-variant-numeric: tabular-nums; }
+  input[type="range"] { min-height: 24px; padding: 0; accent-color: #238547; }
+  .hidden-file { display: none; }
   .metric {
     display: grid;
     grid-template-columns: 1fr auto;
@@ -111,7 +114,12 @@
     border-bottom: 1px solid #eef1f4;
     font-size: 13px;
   }
-  .metric b { font-variant-numeric: tabular-nums; }
+  .metric b {
+    max-width: 188px;
+    text-align: right;
+    overflow-wrap: anywhere;
+    font-variant-numeric: tabular-nums;
+  }
   .section {
     margin: 14px 0 6px;
     font-size: 12px;
@@ -129,6 +137,15 @@
   }
   .slot label { color: var(--muted); }
   .slot select { width: 100%; max-width: none; }
+  .surface-control {
+    display: grid;
+    grid-template-columns: 42px minmax(0, 1fr) 78px;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 8px;
+    font-size: 12px;
+  }
+  .surface-control label { color: var(--muted); }
   .events {
     margin: 0;
     padding: 0;
@@ -179,15 +196,20 @@
       <div class="row">
         <button id="run" class="active">Run</button>
         <button id="step">Step</button>
+        <button id="exportPolicy">Export Policy</button>
+        <button id="importPolicy">Import Policy</button>
+        <input id="policyFile" class="hidden-file" type="file" accept="application/json,.json">
         <select id="slotPick"></select>
         <select id="targetPick"></select>
       </div>
       <div class="status" id="status">connecting</div>
       <div class="section">Match</div>
       <div class="metric"><span>Phase</span><b id="phase">Kickoff</b></div>
+      <div class="metric"><span>Central Brain</span><b id="centralBrain">22p 3o Loose</b></div>
       <div class="metric"><span>Home Brain</span><b id="homeBrain">P0.00 R0.00</b></div>
       <div class="metric"><span>Away Brain</span><b id="awayBrain">P0.00 R0.00</b></div>
       <div class="metric"><span>Ball</span><b id="ballPhysics">0.0y/s 0.0y/s2</b></div>
+      <div class="metric"><span>Surface</span><b id="surfaceReadout">D0.015 S0.35</b></div>
       <div class="metric"><span>Shots</span><b id="shots">0 - 0</b></div>
       <div class="metric"><span>On Target</span><b id="onTarget">0 - 0</b></div>
       <div class="metric"><span>Saves</span><b id="saves">0 - 0</b></div>
@@ -197,13 +219,40 @@
       <div class="metric"><span>Restarts</span><b id="restarts">0 - 0</b></div>
       <div class="metric"><span>Fouls</span><b id="fouls">0 - 0</b></div>
       <div class="metric"><span>Ticks</span><b id="ticks">0</b></div>
-      <div class="metric"><span>Learning</span><b id="learning">0</b></div>
-      <div class="section">Controller Slots</div>
+      <div class="metric"><span>Learning</span><b id="learning">T0 H0 A0</b></div>
+      <div class="section">Surface</div>
+      <div class="row">
+        <select id="surfacePreset">
+          <option value="standard">Standard</option>
+          <option value="short">Short grass</option>
+          <option value="long">Long grass</option>
+          <option value="wet">Wet turf</option>
+          <option value="heavy">Heavy pitch</option>
+          <option value="custom">Custom</option>
+        </select>
+      </div>
+      <div class="surface-control">
+        <label for="dragRange">Drag</label>
+        <input id="dragRange" type="range" min="0" max="0.08" step="0.001">
+        <input id="dragNumber" type="number" min="0" max="0.95" step="0.001">
+      </div>
+      <div class="surface-control">
+        <label for="stopRange">Stop</label>
+        <input id="stopRange" type="range" min="0" max="1.5" step="0.01">
+        <input id="stopNumber" type="number" min="0" max="20" step="0.01">
+      </div>
+      <div class="section">Human Controller</div>
       <div id="slots"></div>
       <div class="row">
         <button id="pass">Pass</button>
         <button id="shoot">Shoot</button>
       </div>
+      <div class="section">Agent State</div>
+      <div class="metric"><span>Selected</span><b id="agentSelected">Autonomous</b></div>
+      <div class="metric"><span>Decision</span><b id="agentDecision">-</b></div>
+      <div class="metric"><span>MDP</span><b id="agentMdp">-</b></div>
+      <div class="metric"><span>POMDP</span><b id="agentPomdp">-</b></div>
+      <div class="metric"><span>Belief</span><b id="agentBelief">-</b></div>
       <div class="legend">
         <span><i class="swatch" style="background:var(--home)"></i>Home</span>
         <span><i class="swatch" style="background:var(--away)"></i>Away</span>
@@ -222,9 +271,11 @@ const homeScore = document.getElementById("homeScore");
 const awayScore = document.getElementById("awayScore");
 const clock = document.getElementById("clock");
 const phase = document.getElementById("phase");
+const centralBrain = document.getElementById("centralBrain");
 const homeBrain = document.getElementById("homeBrain");
 const awayBrain = document.getElementById("awayBrain");
 const ballPhysics = document.getElementById("ballPhysics");
+const surfaceReadout = document.getElementById("surfaceReadout");
 const shots = document.getElementById("shots");
 const onTarget = document.getElementById("onTarget");
 const saves = document.getElementById("saves");
@@ -235,12 +286,25 @@ const restarts = document.getElementById("restarts");
 const fouls = document.getElementById("fouls");
 const ticks = document.getElementById("ticks");
 const learning = document.getElementById("learning");
+const agentSelected = document.getElementById("agentSelected");
+const agentDecision = document.getElementById("agentDecision");
+const agentMdp = document.getElementById("agentMdp");
+const agentPomdp = document.getElementById("agentPomdp");
+const agentBelief = document.getElementById("agentBelief");
 const slots = document.getElementById("slots");
 const slotPick = document.getElementById("slotPick");
 const targetPick = document.getElementById("targetPick");
+const surfacePreset = document.getElementById("surfacePreset");
+const dragRange = document.getElementById("dragRange");
+const dragNumber = document.getElementById("dragNumber");
+const stopRange = document.getElementById("stopRange");
+const stopNumber = document.getElementById("stopNumber");
 const events = document.getElementById("events");
 const statusEl = document.getElementById("status");
 const runButton = document.getElementById("run");
+const exportPolicyButton = document.getElementById("exportPolicy");
+const importPolicyButton = document.getElementById("importPolicy");
+const policyFile = document.getElementById("policyFile");
 const keys = new Set();
 let state = null;
 let running = true;
@@ -248,7 +312,15 @@ let activeSlot = 0;
 let inputSeq = 0;
 let queuedInputs = [];
 let eventLog = [];
-let learningCount = 0;
+let surfaceTimer = null;
+let syncingSurface = false;
+const SURFACE_PRESETS = {
+  short: {ballDragPerTick: 0.008, ballStopSpeedYps: 0.25},
+  standard: {ballDragPerTick: 0.015, ballStopSpeedYps: 0.35},
+  long: {ballDragPerTick: 0.03, ballStopSpeedYps: 0.55},
+  wet: {ballDragPerTick: 0.005, ballStopSpeedYps: 0.18},
+  heavy: {ballDragPerTick: 0.06, ballStopSpeedYps: 0.85}
+};
 
 function fmtClock(s) {
   const m = Math.floor(s / 60);
@@ -261,6 +333,63 @@ function phaseLabel(v) {
 function directiveLabel(d) {
   if (!d) return "P0.00 R0.00";
   return `P${Number(d.pressIntensity ?? 0).toFixed(2)} R${Number(d.riskTolerance ?? 0).toFixed(2)}`;
+}
+function centralBrainLabel(b) {
+  if (!b) return "22p 3o Loose";
+  const players = Array.isArray(b.trackedPlayers) ? b.trackedPlayers.length : 0;
+  const officials = Number(b.trackedOfficials ?? 0);
+  const possession = b.possessionTeam || "Loose";
+  const holder = b.ballHolder == null ? "" : ` #${b.ballHolder}`;
+  return `${players}p ${officials}o ${possession}${holder}`;
+}
+function learningLabel(l) {
+  if (!l) return "T0 H0 A0";
+  const total = Number(l.totalTransitions ?? 0);
+  const home = Number(l.homePolicyEntries ?? 0);
+  const away = Number(l.awayPolicyEntries ?? 0);
+  const mode = l.adversarialLearningEnabled ? "Adv" : "Solo";
+  return `${mode} T${total} H${home} A${away}`;
+}
+function shortTeam(v) {
+  return v === "Home" ? "H" : v === "Away" ? "A" : "-";
+}
+function agentDecisionLabel(d) {
+  if (!d) return "Waiting";
+  const order = Array.isArray(d.operationOrder) && d.operationOrder.length ? ` ${d.operationOrder.join(">")}` : "";
+  return `${d.action || "-"}${order}`;
+}
+function agentMdpLabel(d) {
+  const s = d?.mdpState;
+  if (!s) return "-";
+  return `${phaseLabel(s.phase)} z${s.ballZoneX},${s.ballZoneY} ${shortTeam(s.possessionTeam)} sd${s.scoreDiffForHome ?? 0}`;
+}
+function agentPomdpLabel(d) {
+  const o = d?.observation;
+  if (!o) return "-";
+  const lane = o.shotLaneOpen ? "lane" : "blocked";
+  return `B${Number(o.ballDistance ?? 0).toFixed(1)} O${Number(o.nearestOpponentDistance ?? 0).toFixed(1)} G${Number(o.yardsToGoal ?? 0).toFixed(1)} ${lane}`;
+}
+function agentBeliefLabel(d) {
+  const b = d?.belief;
+  if (!b) return "-";
+  return `pos${Number(b.possessionConfidence ?? 0).toFixed(2)} pr${Number(b.pressure ?? 0).toFixed(2)} lane${Number(b.passLaneOpen ?? 0).toFixed(2)} shot${Number(b.shotQuality ?? 0).toFixed(2)}`;
+}
+function updateAgentStatePanel() {
+  const p = controlledPlayer();
+  if (!p) {
+    agentSelected.textContent = "Autonomous";
+    agentDecision.textContent = "-";
+    agentMdp.textContent = "-";
+    agentPomdp.textContent = "-";
+    agentBelief.textContent = "-";
+    return;
+  }
+  const d = p.lastDecision;
+  agentSelected.textContent = `${p.team} ${p.shirt} ${p.name}`;
+  agentDecision.textContent = agentDecisionLabel(d);
+  agentMdp.textContent = agentMdpLabel(d);
+  agentPomdp.textContent = agentPomdpLabel(d);
+  agentBelief.textContent = agentBeliefLabel(d);
 }
 function vecLen(v) {
   if (!v) return 0;
@@ -352,9 +481,11 @@ function render() {
   awayScore.textContent = f.scoreAway;
   clock.textContent = fmtClock(f.clockSeconds);
   phase.textContent = phaseLabel(f.phase);
+  centralBrain.textContent = centralBrainLabel(f.centralBrain);
   homeBrain.textContent = directiveLabel(f.homeDirective);
   awayBrain.textContent = directiveLabel(f.awayDirective);
   ballPhysics.textContent = `${vecLen(f.ball.velocity).toFixed(1)}y/s ${vecLen(f.ball.acceleration).toFixed(1)}y/s2`;
+  surfaceReadout.textContent = `D${Number(state.config.ballDragPerTick ?? 0).toFixed(3)} S${Number(state.config.ballStopSpeedYps ?? 0).toFixed(2)}`;
   const s = state.summary.stats;
   shots.textContent = `${s.shotsHome} - ${s.shotsAway}`;
   onTarget.textContent = `${s.shotsOnTargetHome ?? 0} - ${s.shotsOnTargetAway ?? 0}`;
@@ -367,12 +498,13 @@ function render() {
   restarts.textContent = `${homeRestarts} - ${awayRestarts}`;
   fouls.textContent = `${s.foulsHome ?? 0} - ${s.foulsAway ?? 0}`;
   ticks.textContent = `${state.summary.ticks} / ${Math.round(state.config.durationSeconds / state.config.dtSeconds)}`;
-  learning.textContent = String(learningCount);
+  learning.textContent = learningLabel(state.learning);
+  updateAgentStatePanel();
   events.innerHTML = eventLog.slice(-12).reverse().map(e => `<li>${fmtClock(e.clockSeconds)} ${e.description}</li>`).join("");
 }
 function humanSlotCount() {
   if (!state || !state.config) return 0;
-  return Math.min(Number(state.config.maxHumanPlayers || 0), 4);
+  return Math.min(Number(state.config.maxHumanPlayers || 0), 1);
 }
 function assignmentForSlot(slot) {
   return (state?.controllerAssignments || []).find(a => a.controllerSlot === slot) || null;
@@ -393,6 +525,51 @@ function applyAssignmentsToFrame(assignments) {
     p.controllerSlot = byPlayer.has(p.id) ? byPlayer.get(p.id) : null;
   }
 }
+function surfaceValues() {
+  return {
+    ballDragPerTick: clamp(Number(dragNumber.value || dragRange.value || 0), 0, 0.95),
+    ballStopSpeedYps: clamp(Number(stopNumber.value || stopRange.value || 0), 0, 20)
+  };
+}
+function clamp(v, lo, hi) {
+  if (!Number.isFinite(v)) return lo;
+  return Math.min(hi, Math.max(lo, v));
+}
+function presetForSurface(drag, stop) {
+  for (const [name, preset] of Object.entries(SURFACE_PRESETS)) {
+    if (Math.abs(preset.ballDragPerTick - drag) < 0.0005 && Math.abs(preset.ballStopSpeedYps - stop) < 0.005) {
+      return name;
+    }
+  }
+  return "custom";
+}
+function syncSurfaceControls() {
+  if (!state?.config) return;
+  syncingSurface = true;
+  const drag = Number(state.config.ballDragPerTick ?? 0);
+  const stop = Number(state.config.ballStopSpeedYps ?? 0);
+  dragRange.value = String(clamp(drag, Number(dragRange.min), Number(dragRange.max)));
+  dragNumber.value = drag.toFixed(3);
+  stopRange.value = String(clamp(stop, Number(stopRange.min), Number(stopRange.max)));
+  stopNumber.value = stop.toFixed(2);
+  surfacePreset.value = presetForSurface(drag, stop);
+  syncingSurface = false;
+}
+function syncSurfacePair(source) {
+  if (source === dragRange) dragNumber.value = Number(dragRange.value).toFixed(3);
+  if (source === dragNumber) dragRange.value = String(clamp(Number(dragNumber.value), Number(dragRange.min), Number(dragRange.max)));
+  if (source === stopRange) stopNumber.value = Number(stopRange.value).toFixed(2);
+  if (source === stopNumber) stopRange.value = String(clamp(Number(stopNumber.value), Number(stopRange.min), Number(stopRange.max)));
+  const v = surfaceValues();
+  surfacePreset.value = presetForSurface(v.ballDragPerTick, v.ballStopSpeedYps);
+}
+function scheduleSurfaceUpdate() {
+  if (syncingSurface) return;
+  clearTimeout(surfaceTimer);
+  surfaceTimer = setTimeout(() => {
+    updateSurface(surfaceValues()).catch(e => statusEl.textContent = e.message);
+  }, 140);
+}
 function rebuildControls(assignments) {
   const existing = slotPick.value;
   if (assignments) {
@@ -405,17 +582,17 @@ function rebuildControls(assignments) {
     const assignment = assignmentForSlot(slot);
     const opt = document.createElement("option");
     opt.value = slot;
-    opt.textContent = `Slot ${slot + 1}: ${assignment ? assignment.playerName : "Unassigned"}`;
+    opt.textContent = assignment ? `Human: ${assignment.playerName}` : "Human: autonomous";
     slotPick.appendChild(opt);
 
     const row = document.createElement("div");
     row.className = "slot";
     const label = document.createElement("label");
-    label.textContent = `Slot ${slot + 1}`;
+    label.textContent = "Control";
     const pick = document.createElement("select");
     const empty = document.createElement("option");
     empty.value = "";
-    empty.textContent = "Unassigned";
+    empty.textContent = "Autonomous";
     pick.appendChild(empty);
     for (const p of state.frame.players) {
       const playerOpt = document.createElement("option");
@@ -475,13 +652,19 @@ function selectedPlayerId() {
   const assignment = state.controllerAssignments.find(a => a.controllerSlot === slot);
   return assignment ? assignment.playerId : null;
 }
+function controlledPlayer() {
+  const id = selectedPlayerId();
+  return id == null ? null : state?.frame?.players?.find(p => p.id === id) || null;
+}
 function selectedPassTargetId() {
   return targetPick.value === "" ? null : Number(targetPick.value);
 }
 function queueInput(pass = false, shoot = false) {
+  const playerId = selectedPlayerId();
+  if (playerId == null) return false;
   queuedInputs.push({
     controllerSlot: Number(slotPick.value || 0),
-    playerId: selectedPlayerId(),
+    playerId,
     seq: ++inputSeq,
     axis: axisFromKeys(),
     sprint: keys.has("ShiftLeft") || keys.has("ShiftRight"),
@@ -489,6 +672,19 @@ function queueInput(pass = false, shoot = false) {
     shoot,
     targetPlayer: pass ? selectedPassTargetId() : null
   });
+  return true;
+}
+function playerCanShoot(p) {
+  if (!p || !state?.config) return false;
+  const goalY = p.team === "Home" ? Number(state.config.fieldLengthYards || 120) : 0;
+  return Math.abs(goalY - Number(p.position?.y || 0)) <= 20;
+}
+function queueEnterAction() {
+  const p = controlledPlayer();
+  if (!p) return false;
+  const isHolder = state?.frame?.ball?.holder === p.id;
+  const shoot = keys.has("ShiftLeft") || keys.has("ShiftRight") || (isHolder && playerCanShoot(p));
+  return queueInput(!shoot, shoot);
 }
 async function postJson(path, body) {
   const res = await fetch(path, {
@@ -507,10 +703,42 @@ async function assignSlot(slot, playerId) {
   statusEl.textContent = "controller assigned";
   render();
 }
+async function updateSurface(values) {
+  const response = await postJson("/api/surface", values);
+  state.config = response.config;
+  syncSurfaceControls();
+  statusEl.textContent = "surface updated";
+  render();
+}
+async function exportTeamPolicy() {
+  const res = await fetch("/api/team-policy");
+  if (!res.ok) throw new Error(await res.text());
+  const artifact = await res.json();
+  const tick = Number(artifact.summary?.ticks ?? state?.summary?.ticks ?? 0);
+  const blob = new Blob([JSON.stringify(artifact, null, 2)], {type: "application/json"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `soccer-team-policy-t${tick}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  statusEl.textContent = "policy exported";
+}
+async function importTeamPolicyFile(file) {
+  const text = await file.text();
+  const artifact = JSON.parse(text);
+  const response = await postJson("/api/team-policy", artifact);
+  if (state) state.learning = response.learning;
+  statusEl.textContent = `policy imported H${response.importedHomeEntries} A${response.importedAwayEntries}`;
+  render();
+}
 async function loadState() {
   const res = await fetch("/api/state");
   state = await res.json();
   applyAssignmentsToFrame(state.controllerAssignments);
+  syncSurfaceControls();
   rebuildControls(state.controllerAssignments);
   statusEl.textContent = "connected";
   render();
@@ -523,12 +751,12 @@ async function stepOnce() {
   state = {
     config: state.config,
     frame: response.frame,
+    learning: response.learning,
     summary: response.summary,
     controllerAssignments: response.controllerAssignments,
     done: response.done
   };
   if (response.events.length) eventLog.push(...response.events);
-  if (response.learningTransitions) learningCount += response.learningTransitions.length;
   applyAssignmentsToFrame(state.controllerAssignments);
   if (assignmentKey(state.controllerAssignments) !== beforeAssignments) {
     rebuildControls(state.controllerAssignments);
@@ -538,7 +766,10 @@ async function stepOnce() {
   render();
 }
 async function submitInputOnly(pass = false, shoot = false) {
-  queueInput(pass, shoot);
+  if (!queueInput(pass, shoot)) {
+    statusEl.textContent = "autonomous";
+    return;
+  }
   const inputs = queuedInputs.splice(0, queuedInputs.length);
   await postJson("/api/input", inputs);
 }
@@ -550,9 +781,42 @@ runButton.addEventListener("click", () => {
 document.getElementById("step").addEventListener("click", () => stepOnce().catch(e => statusEl.textContent = e.message));
 document.getElementById("pass").addEventListener("click", () => submitInputOnly(true, false).catch(e => statusEl.textContent = e.message));
 document.getElementById("shoot").addEventListener("click", () => submitInputOnly(false, true).catch(e => statusEl.textContent = e.message));
+exportPolicyButton.addEventListener("click", () => exportTeamPolicy().catch(e => statusEl.textContent = e.message));
+importPolicyButton.addEventListener("click", () => policyFile.click());
+policyFile.addEventListener("change", () => {
+  const file = policyFile.files && policyFile.files[0];
+  if (!file) return;
+  importTeamPolicyFile(file).catch(e => statusEl.textContent = e.message).finally(() => {
+    policyFile.value = "";
+  });
+});
 slotPick.addEventListener("change", () => { activeSlot = Number(slotPick.value || 0); rebuildTargetPick(); render(); });
+surfacePreset.addEventListener("change", () => {
+  const preset = SURFACE_PRESETS[surfacePreset.value];
+  if (!preset) return;
+  dragNumber.value = preset.ballDragPerTick.toFixed(3);
+  stopNumber.value = preset.ballStopSpeedYps.toFixed(2);
+  syncSurfacePair(dragNumber);
+  syncSurfacePair(stopNumber);
+  updateSurface(preset).catch(e => statusEl.textContent = e.message);
+});
+[dragRange, dragNumber, stopRange, stopNumber].forEach(el => {
+  el.addEventListener("input", () => {
+    syncSurfacePair(el);
+    scheduleSurfaceUpdate();
+  });
+  el.addEventListener("change", () => {
+    syncSurfacePair(el);
+    updateSurface(surfaceValues()).catch(e => statusEl.textContent = e.message);
+  });
+});
 window.addEventListener("keydown", e => {
   keys.add(e.code);
+  if (e.code === "Enter") {
+    e.preventDefault();
+    if (!e.repeat && !queueEnterAction()) statusEl.textContent = "autonomous";
+    return;
+  }
   if (["ArrowLeft","ArrowRight","ArrowUp","ArrowDown","KeyW","KeyA","KeyS","KeyD","ShiftLeft","ShiftRight"].includes(e.code)) {
     e.preventDefault();
     queueInput(false, false);
@@ -560,7 +824,9 @@ window.addEventListener("keydown", e => {
 });
 window.addEventListener("keyup", e => {
   keys.delete(e.code);
-  queueInput(false, false);
+  if (["ArrowLeft","ArrowRight","ArrowUp","ArrowDown","KeyW","KeyA","KeyS","KeyD","ShiftLeft","ShiftRight"].includes(e.code)) {
+    queueInput(false, false);
+  }
 });
 setInterval(() => {
   if (running) stepOnce().catch(e => statusEl.textContent = e.message);

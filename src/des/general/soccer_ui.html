@@ -198,6 +198,7 @@
       <input id="scrub" type="range" min="0" max="0" value="0">
       <div class="section">Match</div>
       <div class="metric"><span>Phase</span><b id="phase">Kickoff</b></div>
+      <div class="metric"><span>Central Brain</span><b id="centralBrain">22p 3o Loose</b></div>
       <div class="metric"><span>Home Brain</span><b id="homeBrain">P0.00 R0.00</b></div>
       <div class="metric"><span>Away Brain</span><b id="awayBrain">P0.00 R0.00</b></div>
       <div class="metric"><span>Ball</span><b id="ballPhysics">0.0y/s 0.0y/s2</b></div>
@@ -239,6 +240,7 @@ const homeScore = document.getElementById("homeScore");
 const awayScore = document.getElementById("awayScore");
 const clock = document.getElementById("clock");
 const phase = document.getElementById("phase");
+const centralBrain = document.getElementById("centralBrain");
 const homeBrain = document.getElementById("homeBrain");
 const awayBrain = document.getElementById("awayBrain");
 const ballPhysics = document.getElementById("ballPhysics");
@@ -275,6 +277,14 @@ function phaseLabel(v) {
 function directiveLabel(d) {
   if (!d) return "P0.00 R0.00";
   return `P${Number(d.pressIntensity ?? 0).toFixed(2)} R${Number(d.riskTolerance ?? 0).toFixed(2)}`;
+}
+function centralBrainLabel(b) {
+  if (!b) return "22p 3o Loose";
+  const players = Array.isArray(b.trackedPlayers) ? b.trackedPlayers.length : 0;
+  const officials = Number(b.trackedOfficials ?? 0);
+  const possession = b.possessionTeam || "Loose";
+  const holder = b.ballHolder == null ? "" : ` #${b.ballHolder}`;
+  return `${players}p ${officials}o ${possession}${holder}`;
 }
 function vecLen(v) {
   if (!v) return 0;
@@ -378,6 +388,7 @@ function render() {
   awayScore.textContent = f.scoreAway;
   clock.textContent = fmtClock(f.clockSeconds);
   phase.textContent = phaseLabel(f.phase);
+  centralBrain.textContent = centralBrainLabel(f.centralBrain);
   homeBrain.textContent = directiveLabel(f.homeDirective);
   awayBrain.textContent = directiveLabel(f.awayDirective);
   ballPhysics.textContent = `${vecLen(f.ball.velocity).toFixed(1)}y/s ${vecLen(f.ball.acceleration).toFixed(1)}y/s2`;

@@ -49,6 +49,9 @@ impl CpVariableSelectionStrategy {
 pub enum CpDomainValueStrategy {
     MinValue,
     MaxValue,
+    LowerHalf,
+    UpperHalf,
+    MedianValue,
 }
 
 impl CpDomainValueStrategy {
@@ -56,6 +59,9 @@ impl CpDomainValueStrategy {
         match self {
             CpDomainValueStrategy::MinValue => "min_value",
             CpDomainValueStrategy::MaxValue => "max_value",
+            CpDomainValueStrategy::LowerHalf => "lower_half",
+            CpDomainValueStrategy::UpperHalf => "upper_half",
+            CpDomainValueStrategy::MedianValue => "median_value",
         }
     }
 }
@@ -218,6 +224,11 @@ pub enum CpConstraint {
         terms: Vec<LinearTerm>,
         intervals: Vec<CpDomainInterval>,
     },
+    EnforcedLinearDomain {
+        enforcement: Vec<BoolLiteral>,
+        terms: Vec<LinearTerm>,
+        intervals: Vec<CpDomainInterval>,
+    },
     MapDomain {
         var: usize,
         bools: Vec<usize>,
@@ -245,6 +256,10 @@ pub enum CpConstraint {
         enforcement: Vec<BoolLiteral>,
         literals: Vec<BoolLiteral>,
     },
+    EnforcedAtLeastOne {
+        enforcement: Vec<BoolLiteral>,
+        literals: Vec<BoolLiteral>,
+    },
     EnforcedExactlyOne {
         enforcement: Vec<BoolLiteral>,
         literals: Vec<BoolLiteral>,
@@ -254,6 +269,7 @@ pub enum CpConstraint {
     BoolAnd(Vec<BoolLiteral>),
     BoolXor(Vec<BoolLiteral>),
     AtMostOne(Vec<BoolLiteral>),
+    AtLeastOne(Vec<BoolLiteral>),
     ExactlyOne(Vec<BoolLiteral>),
     Implication {
         antecedent: BoolLiteral,
@@ -518,6 +534,32 @@ fn validate_model(model: &CpModel) {
                     }
                 }
             }
+            CpConstraint::EnforcedLinearDomain {
+                enforcement,
+                terms,
+                intervals,
+            } => {
+                if enforcement.is_empty() {
+                    panic!("cp-sat: enforced_linear_domain has no enforcement literals");
+                }
+                if terms.is_empty() {
+                    panic!("cp-sat: enforced_linear_domain constraint has no terms");
+                }
+                if intervals.is_empty() {
+                    panic!("cp-sat: enforced_linear_domain has no intervals");
+                }
+                for lit in enforcement {
+                    check_bool_literal(lit);
+                }
+                for t in terms {
+                    check_var(t.var);
+                }
+                for interval in intervals {
+                    if interval.ub < interval.lb {
+                        panic!("cp-sat: enforced_linear_domain interval ub must be >= lb");
+                    }
+                }
+            }
             CpConstraint::MapDomain { var, bools, .. } => {
                 check_var(*var);
                 if bools.is_empty() {
@@ -580,6 +622,74 @@ fn validate_model(model: &CpModel) {
                     check_bool_literal(lit);
                 }
             }
+            CpConstraint::EnforcedBoolXor {
+                enforcement,
+                literals,
+            } => {
+                if enforcement.is_empty() {
+                    panic!("cp-sat: enforced_bool_xor has no enforcement literals");
+                }
+                if literals.is_empty() {
+                    panic!("cp-sat: enforced_bool_xor has no literals");
+                }
+                for lit in enforcement {
+                    check_bool_literal(lit);
+                }
+                for lit in literals {
+                    check_bool_literal(lit);
+                }
+            }
+            CpConstraint::EnforcedAtMostOne {
+                enforcement,
+                literals,
+            } => {
+                if enforcement.is_empty() {
+                    panic!("cp-sat: enforced_at_most_one has no enforcement literals");
+                }
+                if literals.is_empty() {
+                    panic!("cp-sat: enforced_at_most_one has no literals");
+                }
+                for lit in enforcement {
+                    check_bool_literal(lit);
+                }
+                for lit in literals {
+                    check_bool_literal(lit);
+                }
+            }
+            CpConstraint::EnforcedAtLeastOne {
+                enforcement,
+                literals,
+            } => {
+                if enforcement.is_empty() {
+                    panic!("cp-sat: enforced_at_least_one has no enforcement literals");
+                }
+                if literals.is_empty() {
+                    panic!("cp-sat: enforced_at_least_one has no literals");
+                }
+                for lit in enforcement {
+                    check_bool_literal(lit);
+                }
+                for lit in literals {
+                    check_bool_literal(lit);
+                }
+            }
+            CpConstraint::EnforcedExactlyOne {
+                enforcement,
+                literals,
+            } => {
+                if enforcement.is_empty() {
+                    panic!("cp-sat: enforced_exactly_one has no enforcement literals");
+                }
+                if literals.is_empty() {
+                    panic!("cp-sat: enforced_exactly_one has no literals");
+                }
+                for lit in enforcement {
+                    check_bool_literal(lit);
+                }
+                for lit in literals {
+                    check_bool_literal(lit);
+                }
+            }
             CpConstraint::AllDifferent(vars) => {
                 if vars.is_empty() {
                     panic!("cp-sat: all_different has no variables");
@@ -615,6 +725,14 @@ fn validate_model(model: &CpModel) {
             CpConstraint::AtMostOne(lits) => {
                 if lits.is_empty() {
                     panic!("cp-sat: at_most_one has no literals");
+                }
+                for lit in lits {
+                    check_bool_literal(lit);
+                }
+            }
+            CpConstraint::AtLeastOne(lits) => {
+                if lits.is_empty() {
+                    panic!("cp-sat: at_least_one has no literals");
                 }
                 for lit in lits {
                     check_bool_literal(lit);
@@ -2315,6 +2433,15 @@ fn partial_constraints_ok(model: &CpModel, assignment: &[Option<i64>]) -> bool {
             CpConstraint::LinearDomain { terms, intervals } => {
                 partial_linear_domain_ok(model, assignment, terms, intervals)
             }
+            CpConstraint::EnforcedLinearDomain {
+                enforcement,
+                terms,
+                intervals,
+            } => match enforcement_literals_active(assignment, enforcement) {
+                Some(false) => true,
+                Some(true) => partial_linear_domain_ok(model, assignment, terms, intervals),
+                None => true,
+            },
             CpConstraint::MapDomain { var, bools, offset } => {
                 partial_map_domain_ok(model, assignment, *var, bools, *offset)
             }
@@ -2344,11 +2471,44 @@ fn partial_constraints_ok(model: &CpModel, assignment: &[Option<i64>]) -> bool {
                 Some(true) => partial_bool_and_ok(assignment, literals),
                 None => true,
             },
+            CpConstraint::EnforcedBoolXor {
+                enforcement,
+                literals,
+            } => match enforcement_literals_active(assignment, enforcement) {
+                Some(false) => true,
+                Some(true) => partial_bool_xor_ok(assignment, literals),
+                None => true,
+            },
+            CpConstraint::EnforcedAtMostOne {
+                enforcement,
+                literals,
+            } => match enforcement_literals_active(assignment, enforcement) {
+                Some(false) => true,
+                Some(true) => partial_at_most_one_ok(assignment, literals),
+                None => true,
+            },
+            CpConstraint::EnforcedAtLeastOne {
+                enforcement,
+                literals,
+            } => match enforcement_literals_active(assignment, enforcement) {
+                Some(false) => true,
+                Some(true) => partial_bool_or_ok(assignment, literals),
+                None => true,
+            },
+            CpConstraint::EnforcedExactlyOne {
+                enforcement,
+                literals,
+            } => match enforcement_literals_active(assignment, enforcement) {
+                Some(false) => true,
+                Some(true) => partial_exactly_one_ok(assignment, literals),
+                None => true,
+            },
             CpConstraint::AllDifferent(vars) => partial_all_different_ok(assignment, vars),
             CpConstraint::BoolOr(lits) => partial_bool_or_ok(assignment, lits),
             CpConstraint::BoolAnd(lits) => partial_bool_and_ok(assignment, lits),
             CpConstraint::BoolXor(lits) => partial_bool_xor_ok(assignment, lits),
             CpConstraint::AtMostOne(lits) => partial_at_most_one_ok(assignment, lits),
+            CpConstraint::AtLeastOne(lits) => partial_bool_or_ok(assignment, lits),
             CpConstraint::ExactlyOne(lits) => partial_exactly_one_ok(assignment, lits),
             CpConstraint::Implication {
                 antecedent,
@@ -2634,6 +2794,13 @@ fn ordered_domain(
         match strategy.domain_strategy {
             CpDomainValueStrategy::MinValue => values.sort_unstable(),
             CpDomainValueStrategy::MaxValue => values.sort_unstable_by(|a, b| b.cmp(a)),
+            CpDomainValueStrategy::LowerHalf => values.sort_unstable(),
+            CpDomainValueStrategy::UpperHalf => values.sort_unstable_by(|a, b| b.cmp(a)),
+            CpDomainValueStrategy::MedianValue => {
+                values.sort_unstable();
+                let median = values.remove(values.len() / 2);
+                values.insert(0, median);
+            }
         }
     }
     values
@@ -3117,6 +3284,51 @@ mod tests {
     }
 
     #[test]
+    fn decision_domain_reduction_strategies_pick_expected_first_solution() {
+        let model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "x".to_string(),
+                    domain: vec![0, 1, 2, 3, 4],
+                },
+                CpVariable {
+                    name: "y".to_string(),
+                    domain: vec![0, 1, 2, 3, 4],
+                },
+            ],
+            constraints: vec![CpConstraint::Linear {
+                terms: vec![
+                    LinearTerm { var: 0, coeff: 1 },
+                    LinearTerm { var: 1, coeff: 1 },
+                ],
+                sense: LinearSense::Eq,
+                rhs: 4,
+            }],
+            objective: None,
+        };
+        for (strategy, expected) in [
+            (CpDomainValueStrategy::LowerHalf, vec![0, 4]),
+            (CpDomainValueStrategy::UpperHalf, vec![4, 0]),
+            (CpDomainValueStrategy::MedianValue, vec![2, 2]),
+        ] {
+            let sol = solve_cp_model(
+                &model,
+                CpSolveOptions {
+                    max_nodes: 100,
+                    solution_hint: Vec::new(),
+                    decision_strategies: vec![CpDecisionStrategy {
+                        vars: vec![0, 1],
+                        variable_strategy: CpVariableSelectionStrategy::First,
+                        domain_strategy: strategy,
+                    }],
+                },
+            );
+            assert_eq!(sol.status, CpStatus::Feasible);
+            assert_eq!(sol.assignment, expected);
+        }
+    }
+
+    #[test]
     fn enumerates_satisfaction_solution_pool() {
         let model = CpModel {
             variables: vec![
@@ -3258,6 +3470,78 @@ mod tests {
         assert_eq!(sol.status, CpStatus::Optimal);
         assert_eq!(sol.assignment, vec![1, 0]);
         assert_eq!(sol.objective, Some(1));
+    }
+
+    #[test]
+    fn enforced_linear_domain_respects_gate() {
+        let model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "active_gate".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "inactive_gate".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "x".to_string(),
+                    domain: vec![0, 1, 2, 3, 4],
+                },
+                CpVariable {
+                    name: "y".to_string(),
+                    domain: vec![0, 1, 2, 3, 4],
+                },
+                CpVariable {
+                    name: "free".to_string(),
+                    domain: vec![0, 1, 2],
+                },
+            ],
+            constraints: vec![
+                CpConstraint::BoolOr(vec![BoolLiteral {
+                    var: 0,
+                    positive: true,
+                }]),
+                CpConstraint::BoolOr(vec![BoolLiteral {
+                    var: 1,
+                    positive: false,
+                }]),
+                CpConstraint::EnforcedLinearDomain {
+                    enforcement: vec![BoolLiteral {
+                        var: 0,
+                        positive: true,
+                    }],
+                    terms: vec![
+                        LinearTerm { var: 2, coeff: 1 },
+                        LinearTerm { var: 3, coeff: 1 },
+                    ],
+                    intervals: vec![
+                        CpDomainInterval { lb: 3, ub: 3 },
+                        CpDomainInterval { lb: 7, ub: 7 },
+                    ],
+                },
+                CpConstraint::EnforcedLinearDomain {
+                    enforcement: vec![BoolLiteral {
+                        var: 1,
+                        positive: true,
+                    }],
+                    terms: vec![LinearTerm { var: 4, coeff: 1 }],
+                    intervals: vec![CpDomainInterval { lb: 2, ub: 2 }],
+                },
+            ],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![
+                    LinearTerm { var: 2, coeff: 10 },
+                    LinearTerm { var: 3, coeff: 1 },
+                    LinearTerm { var: 4, coeff: 1 },
+                ],
+            }),
+        };
+        let sol = solve_cp_model(&model, CpSolveOptions::default());
+        assert_eq!(sol.status, CpStatus::Optimal);
+        assert_eq!(sol.assignment, vec![1, 0, 0, 3, 0]);
+        assert_eq!(sol.objective, Some(3));
     }
 
     #[test]
@@ -4574,6 +4858,52 @@ mod tests {
     }
 
     #[test]
+    fn solves_at_least_one_constraint() {
+        let model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "a".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "b".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "c".to_string(),
+                    domain: vec![0, 1],
+                },
+            ],
+            constraints: vec![CpConstraint::AtLeastOne(vec![
+                BoolLiteral {
+                    var: 0,
+                    positive: true,
+                },
+                BoolLiteral {
+                    var: 1,
+                    positive: true,
+                },
+                BoolLiteral {
+                    var: 2,
+                    positive: true,
+                },
+            ])],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![
+                    LinearTerm { var: 0, coeff: 3 },
+                    LinearTerm { var: 1, coeff: 2 },
+                    LinearTerm { var: 2, coeff: 1 },
+                ],
+            }),
+        };
+        let sol = solve_cp_model(&model, CpSolveOptions::default());
+        assert_eq!(sol.status, CpStatus::Optimal);
+        assert_eq!(sol.assignment, vec![0, 0, 1]);
+        assert_eq!(sol.objective, Some(1));
+    }
+
+    #[test]
     fn solves_active_enforced_linear_constraint() {
         let model = CpModel {
             variables: vec![
@@ -4743,5 +5073,225 @@ mod tests {
         assert_eq!(inactive.status, CpStatus::Optimal);
         assert_eq!(inactive.assignment, vec![0, 0, 0]);
         assert_eq!(inactive.objective, Some(0));
+    }
+
+    #[test]
+    fn enforced_boolean_cardinality_constraints_respect_gate() {
+        let model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "active_gate".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "inactive_gate".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "x".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "y".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "z".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "inactive_x".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "inactive_y".to_string(),
+                    domain: vec![0, 1],
+                },
+            ],
+            constraints: vec![
+                CpConstraint::BoolOr(vec![BoolLiteral {
+                    var: 0,
+                    positive: true,
+                }]),
+                CpConstraint::BoolOr(vec![BoolLiteral {
+                    var: 1,
+                    positive: false,
+                }]),
+                CpConstraint::EnforcedExactlyOne {
+                    enforcement: vec![BoolLiteral {
+                        var: 0,
+                        positive: true,
+                    }],
+                    literals: vec![
+                        BoolLiteral {
+                            var: 2,
+                            positive: true,
+                        },
+                        BoolLiteral {
+                            var: 3,
+                            positive: true,
+                        },
+                    ],
+                },
+                CpConstraint::EnforcedBoolXor {
+                    enforcement: vec![BoolLiteral {
+                        var: 0,
+                        positive: true,
+                    }],
+                    literals: vec![
+                        BoolLiteral {
+                            var: 3,
+                            positive: true,
+                        },
+                        BoolLiteral {
+                            var: 4,
+                            positive: true,
+                        },
+                    ],
+                },
+                CpConstraint::EnforcedAtMostOne {
+                    enforcement: vec![BoolLiteral {
+                        var: 0,
+                        positive: true,
+                    }],
+                    literals: vec![
+                        BoolLiteral {
+                            var: 2,
+                            positive: true,
+                        },
+                        BoolLiteral {
+                            var: 4,
+                            positive: true,
+                        },
+                    ],
+                },
+                CpConstraint::EnforcedExactlyOne {
+                    enforcement: vec![BoolLiteral {
+                        var: 1,
+                        positive: true,
+                    }],
+                    literals: vec![
+                        BoolLiteral {
+                            var: 5,
+                            positive: true,
+                        },
+                        BoolLiteral {
+                            var: 6,
+                            positive: true,
+                        },
+                    ],
+                },
+            ],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![
+                    LinearTerm { var: 2, coeff: 1 },
+                    LinearTerm { var: 3, coeff: 1 },
+                    LinearTerm { var: 4, coeff: 1 },
+                    LinearTerm { var: 5, coeff: 1 },
+                    LinearTerm { var: 6, coeff: 1 },
+                ],
+            }),
+        };
+        let sol = solve_cp_model(&model, CpSolveOptions::default());
+        assert_eq!(sol.status, CpStatus::Optimal);
+        assert_eq!(sol.assignment, vec![1, 0, 0, 1, 0, 0, 0]);
+        assert_eq!(sol.objective, Some(1));
+    }
+
+    #[test]
+    fn enforced_at_least_one_respects_gate() {
+        let model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "active_gate".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "inactive_gate".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "x".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "y".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "z".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "inactive_x".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "inactive_y".to_string(),
+                    domain: vec![0, 1],
+                },
+            ],
+            constraints: vec![
+                CpConstraint::BoolOr(vec![BoolLiteral {
+                    var: 0,
+                    positive: true,
+                }]),
+                CpConstraint::BoolOr(vec![BoolLiteral {
+                    var: 1,
+                    positive: false,
+                }]),
+                CpConstraint::EnforcedAtLeastOne {
+                    enforcement: vec![BoolLiteral {
+                        var: 0,
+                        positive: true,
+                    }],
+                    literals: vec![
+                        BoolLiteral {
+                            var: 2,
+                            positive: true,
+                        },
+                        BoolLiteral {
+                            var: 3,
+                            positive: true,
+                        },
+                        BoolLiteral {
+                            var: 4,
+                            positive: true,
+                        },
+                    ],
+                },
+                CpConstraint::EnforcedAtLeastOne {
+                    enforcement: vec![BoolLiteral {
+                        var: 1,
+                        positive: true,
+                    }],
+                    literals: vec![
+                        BoolLiteral {
+                            var: 5,
+                            positive: true,
+                        },
+                        BoolLiteral {
+                            var: 6,
+                            positive: true,
+                        },
+                    ],
+                },
+            ],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![
+                    LinearTerm { var: 2, coeff: 3 },
+                    LinearTerm { var: 3, coeff: 2 },
+                    LinearTerm { var: 4, coeff: 1 },
+                    LinearTerm { var: 5, coeff: 1 },
+                    LinearTerm { var: 6, coeff: 1 },
+                ],
+            }),
+        };
+        let sol = solve_cp_model(&model, CpSolveOptions::default());
+        assert_eq!(sol.status, CpStatus::Optimal);
+        assert_eq!(sol.assignment, vec![1, 0, 0, 0, 1, 0, 0]);
+        assert_eq!(sol.objective, Some(1));
     }
 }

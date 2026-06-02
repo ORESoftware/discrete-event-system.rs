@@ -676,6 +676,19 @@ mod tests {
                         "ub": interval.ub,
                     })).collect::<Vec<_>>(),
                 }),
+                CpConstraint::EnforcedLinearDomain {
+                    enforcement,
+                    terms,
+                    intervals,
+                } => serde_json::json!({
+                    "kind": "enforced_linear_domain",
+                    "enforcement": enforcement.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                    "terms": terms.iter().map(|t| serde_json::json!({"var": t.var, "coeff": t.coeff})).collect::<Vec<_>>(),
+                    "intervals": intervals.iter().map(|interval| serde_json::json!({
+                        "lb": interval.lb,
+                        "ub": interval.ub,
+                    })).collect::<Vec<_>>(),
+                }),
                 CpConstraint::MapDomain {
                     var,
                     bools,
@@ -714,6 +727,38 @@ mod tests {
                     "enforcement": enforcement.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
                     "literals": literals.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
                 }),
+                CpConstraint::EnforcedBoolXor {
+                    enforcement,
+                    literals,
+                } => serde_json::json!({
+                    "kind": "enforced_bool_xor",
+                    "enforcement": enforcement.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                    "literals": literals.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                }),
+                CpConstraint::EnforcedAtMostOne {
+                    enforcement,
+                    literals,
+                } => serde_json::json!({
+                    "kind": "enforced_at_most_one",
+                    "enforcement": enforcement.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                    "literals": literals.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                }),
+                CpConstraint::EnforcedAtLeastOne {
+                    enforcement,
+                    literals,
+                } => serde_json::json!({
+                    "kind": "enforced_at_least_one",
+                    "enforcement": enforcement.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                    "literals": literals.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                }),
+                CpConstraint::EnforcedExactlyOne {
+                    enforcement,
+                    literals,
+                } => serde_json::json!({
+                    "kind": "enforced_exactly_one",
+                    "enforcement": enforcement.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                    "literals": literals.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                }),
                 CpConstraint::AllDifferent(vars) => {
                     serde_json::json!({"kind": "all_different", "vars": vars})
                 }
@@ -731,6 +776,10 @@ mod tests {
                 }),
                 CpConstraint::AtMostOne(lits) => serde_json::json!({
                     "kind": "at_most_one",
+                    "literals": lits.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                }),
+                CpConstraint::AtLeastOne(lits) => serde_json::json!({
+                    "kind": "at_least_one",
                     "literals": lits.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
                 }),
                 CpConstraint::ExactlyOne(lits) => serde_json::json!({

@@ -396,22 +396,39 @@ than as one monolithic planner:
 | Forecasting and state estimation | `nonlinear_forecasting_model`, `kalman_filter`, stochastic SDE/control reports |
 | LP and interior-point methods | `lp`, `lp_des`, `des_lp_bridge`, `external_linear_cli`; use `LP_SOLVER=internal-ipm` for the native primal-dual IPM or `scipy:highs-ipm` for SciPy HiGHS IPM; local CLI adapters can call installed HiGHS, GLPK, SCIP, CBC, CLP, and optional commercial solvers without vendoring executables; source-level range rows and objective offsets compile to equality/inequality rows; weighted L1 feasibility relaxation identifies minimum-cost row/bound repairs for infeasible models; simplex runs recover dual row prices and reduced costs when the active set is certifiable; infeasibility conflict extraction finds minimal row/bound subsystems for IIS-style diagnostics |
 | Convex QP, MIQP, SOCP, and QCP | `qp`; dense active-set QP returns row, equality, lower-bound, upper-bound, and reduced-gradient KKT certificates; bounded MIQP enumerates integer assignments and solves convex QP subproblems |
-| Constraint programming / CP-SAT | `cp_sat`; finite-domain search covers Boolean logic, enforced linear/Boolean/table constraints, automata, circuits/multiple-circuit routing, constant-array and variable-array element constraints, resource scheduling, optional and variable-size intervals, alternative mode intervals, fixed and variable-size 2D packing, variable-demand/capacity cumulative resources, reservoir constraints, solution hints/search starts, fixed-search decision strategies, bounded solution enumeration, assumptions, and infeasible assumption cores |
+| Constraint programming / CP-SAT | `cp_sat`; finite-domain search covers Boolean logic, at-least/at-most/exactly-one cardinality, enforced linear/linear-domain/Boolean/cardinality/table constraints, automata, circuits/multiple-circuit routing, constant-array and variable-array element constraints, resource scheduling, optional and variable-size intervals, alternative mode intervals, fixed and variable-size 2D packing, variable-demand/capacity cumulative resources, reservoir constraints, solution hints/search starts, fixed-search decision strategies with min/max/lower-half/upper-half/median domain reductions, bounded solution enumeration, assumptions, and infeasible assumption cores |
 | Mixed-integer optimization | `milp_bnb`, `ip_mip_des`, `external_linear_cli`; branch-and-cut covers solution pools, MIP starts, branch priorities, relative/absolute MIP gap limits, infeasibility conflict refinement, weighted feasibility relaxation, lower bounds, ranged rows, indicators, SOS1/SOS2, semi-continuous/semi-integer variables, piecewise-linear rewards, absolute-value, maximum, minimum, binary-logic, L1/Linf norm, exact binary-binary/binary-continuous bounded-product general constraints, exact binary/bounded quadratic objective terms, and lexicographic objectives |
+| Solver-style modeling facade | `math_program`; named-variable LP/MIP facade cross-checked against external HiGHS, GLPK, SCIP, and CBC oracles, including `<=`/`>=`/`=` rows, bounds, integer/binary domains, indicator lowering, max/general-constraint lowering, conflict refinement, feasibility relaxation, and solution pools |
 | Network flow and transportation | `max_flow`, `network_flow`, `traffic_flow`, `stochastic_flow_mdp` |
 | Vehicle routing and routing heuristics | `classical_optimization_models` VRP savings and nearest-neighbor runs |
 | Stochastic optimization and simulation | `stochastic_lp`, `statistical_optimization`, `fel`, `hybrid`, catalogue simulations |
 | Model predictive control and reinforcement learning | `mpc_double_integrator`, `temp_control` MPC, `qlearning_des`, `ppo_des`, `actor_critic_gridworld` |
+| Optional Java/Rust solver ecosystems | `external_optimization_ecosystem`; probes local Java classpaths for Choco Solver, JaCoP, IBM CP Optimizer, OptaPlanner, jMetal, MOEA Framework, ECJ, ojAlgo, and OR-Tools Java, plus Cargo manifests for `good_lp`, `lp-modeler`, `rust-linprog`, `argmin`, `nlopt-rs`, and HiGHS/SCIP/CBC Rust bindings |
 
 Solver parity checks live in `validate_optimization_suite`; scale-envelope
-checks live in `validate_optimization_scale`. The suite cross-checks HiGHS,
-GLPK, SCIP, CBC, CLP, OR-Tools GLOP, and OR-Tools CP-SAT when available, and
-keeps optional hooks for commercial CLIs such as Gurobi, CPLEX, Xpress, and
-LINDO. The public `des::general::external_linear_cli` module exposes the same
-local CLI path to library callers while keeping all solver executables out of
-version control; use `probe_external_linear_cli_solver` to distinguish
+checks live in `validate_optimization_scale`. The suite cross-checks the
+high-level `math_program` facade, HiGHS, GLPK, SCIP, CBC, CLP, OR-Tools GLOP,
+and OR-Tools CP-SAT when available, and keeps optional hooks for commercial CLIs
+such as Gurobi, CPLEX, Xpress, and LINDO. The public
+`des::general::external_linear_cli` module exposes the same local CLI path to
+library callers while keeping all solver executables out of version control;
+use `probe_external_linear_cli_solver` to distinguish
 not-installed tools from bridge-unsupported tools and ready smoke-tested
-solvers. The scale runner compares native LP/MIP solvers with installed
+solvers. The CLI bridge and `math_program` oracle both discover solver commands
+on `PATH` or from local env vars: `HIGHS_CMD`, `GLPSOL_CMD`/`GLPK_CMD`,
+`SCIP_CMD`, `CBC_CMD`, `CLP_CMD`, `GUROBI_CL_CMD`/`GUROBI_CMD`, `CPLEX_CMD`,
+`XPRESS_CMD`, or `LINDO_CMD` (each also has an `ORES_*_CMD` form for
+project-specific overrides). The companion
+`des::general::external_optimization_ecosystem` module
+keeps Java/Rust ecosystem integrations non-vendored too: set
+`CHOCO_SOLVER_CLASSPATH`, `JACOP_CLASSPATH`, `IBM_CP_OPTIMIZER_CLASSPATH`,
+`OPTAPLANNER_CLASSPATH`, `JMETAL_CLASSPATH`, `MOEA_FRAMEWORK_CLASSPATH`,
+`ECJ_CLASSPATH`, `OJALGO_CLASSPATH`, or `ORTOOLS_JAVA_CLASSPATH` to local jars,
+or set `GOOD_LP_CARGO_MANIFEST`, `LP_MODELER_CARGO_MANIFEST`,
+`RUST_LINPROG_CARGO_MANIFEST`, `ARGMIN_CARGO_MANIFEST`,
+`NLOPT_RS_CARGO_MANIFEST`, `HIGHS_RS_CARGO_MANIFEST`,
+`SCIP_RS_CARGO_MANIFEST`, or `CBC_RS_CARGO_MANIFEST` to a local `Cargo.toml`
+using that crate/binding. The scale runner compares native LP/MIP solvers with installed
 open-source engines and writes `out/external/optimization-scale/scale-report.json`:
 
 ```sh

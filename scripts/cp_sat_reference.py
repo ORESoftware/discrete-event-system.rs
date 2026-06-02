@@ -342,6 +342,14 @@ def ordered_domain_values(
                 values.sort()
             elif domain_strategy == "max_value":
                 values.sort(reverse=True)
+            elif domain_strategy == "lower_half":
+                values.sort()
+            elif domain_strategy == "upper_half":
+                values.sort(reverse=True)
+            elif domain_strategy == "median_value":
+                values.sort()
+                median = values.pop(len(values) // 2)
+                values.insert(0, median)
             else:
                 raise ValueError(f"unknown decision domain strategy {domain_strategy}")
     return values
@@ -355,6 +363,10 @@ def partial_ok(model: dict, partial: Sequence[Optional[int]]) -> bool:
                 return False
         elif kind == "linear_domain":
             if not linear_domain_partial_ok(model, partial, c):
+                return False
+        elif kind == "enforced_linear_domain":
+            active = enforcement_state(partial, c["enforcement"])
+            if active is True and not linear_domain_partial_ok(model, partial, c):
                 return False
         elif kind == "map_domain":
             var = int(c["var"])
@@ -404,6 +416,20 @@ def partial_ok(model: dict, partial: Sequence[Optional[int]]) -> bool:
                         unknown = True
                 if not satisfied and not unknown:
                     return False
+        elif kind == "enforced_at_least_one":
+            active = enforcement_state(partial, c["enforcement"])
+            if active is True:
+                unknown = False
+                satisfied = False
+                for lit in c["literals"]:
+                    truth = literal_truth(partial, lit)
+                    if truth is True:
+                        satisfied = True
+                        break
+                    if truth is None:
+                        unknown = True
+                if not satisfied and not unknown:
+                    return False
         elif kind == "enforced_bool_and":
             active = enforcement_state(partial, c["enforcement"])
             if active is True:
@@ -411,6 +437,38 @@ def partial_ok(model: dict, partial: Sequence[Optional[int]]) -> bool:
                     truth = literal_truth(partial, lit)
                     if truth is False:
                         return False
+        elif kind == "enforced_bool_xor":
+            active = enforcement_state(partial, c["enforcement"])
+            if active is True:
+                true_count = 0
+                unknown = False
+                for lit in c["literals"]:
+                    truth = literal_truth(partial, lit)
+                    if truth is True:
+                        true_count += 1
+                    elif truth is None:
+                        unknown = True
+                if not unknown and true_count % 2 == 0:
+                    return False
+        elif kind == "enforced_at_most_one":
+            active = enforcement_state(partial, c["enforcement"])
+            if active is True:
+                true_count = sum(1 for lit in c["literals"] if literal_truth(partial, lit) is True)
+                if true_count > 1:
+                    return False
+        elif kind == "enforced_exactly_one":
+            active = enforcement_state(partial, c["enforcement"])
+            if active is True:
+                true_count = 0
+                unknown = False
+                for lit in c["literals"]:
+                    truth = literal_truth(partial, lit)
+                    if truth is True:
+                        true_count += 1
+                    elif truth is None:
+                        unknown = True
+                if true_count > 1 or (true_count == 0 and not unknown):
+                    return False
         elif kind == "all_different":
             seen = set()
             for v in c["vars"]:
@@ -453,6 +511,18 @@ def partial_ok(model: dict, partial: Sequence[Optional[int]]) -> bool:
         elif kind == "at_most_one":
             true_count = sum(1 for lit in c["literals"] if literal_truth(partial, lit) is True)
             if true_count > 1:
+                return False
+        elif kind == "at_least_one":
+            unknown = False
+            satisfied = False
+            for lit in c["literals"]:
+                truth = literal_truth(partial, lit)
+                if truth is True:
+                    satisfied = True
+                    break
+                if truth is None:
+                    unknown = True
+            if not satisfied and not unknown:
                 return False
         elif kind == "exactly_one":
             true_count = 0
@@ -1152,6 +1222,9 @@ def ortools_reference(model: dict) -> Optional[dict]:
         mapping = {
             "min_value": cp_model.SELECT_MIN_VALUE,
             "max_value": cp_model.SELECT_MAX_VALUE,
+            "lower_half": cp_model.SELECT_LOWER_HALF,
+            "upper_half": cp_model.SELECT_UPPER_HALF,
+            "median_value": cp_model.SELECT_MEDIAN_VALUE,
         }
         if name not in mapping:
             raise ValueError(f"unknown decision domain strategy {name}")
@@ -1240,6 +1313,15 @@ def ortools_reference(model: dict) -> Optional[dict]:
                     [[int(interval["lb"]), int(interval["ub"])] for interval in c["intervals"]]
                 ),
             )
+        elif kind == "enforced_linear_domain":
+            expr = sum(int(t["coeff"]) * xs[int(t["var"])] for t in c["terms"])
+            constraint = cp.AddLinearExpressionInDomain(
+                expr,
+                cp_model.Domain.FromIntervals(
+                    [[int(interval["lb"]), int(interval["ub"])] for interval in c["intervals"]]
+                ),
+            )
+            constraint.OnlyEnforceIf(enforcement_literals(c["enforcement"]))
         elif kind == "map_domain":
             cp.AddMapDomain(
                 xs[int(c["var"])],
@@ -1261,6 +1343,18 @@ def ortools_reference(model: dict) -> Optional[dict]:
         elif kind == "enforced_bool_and":
             constraint = cp.AddBoolAnd([cp_literal(lit) for lit in c["literals"]])
             constraint.OnlyEnforceIf(enforcement_literals(c["enforcement"]))
+        elif kind == "enforced_bool_xor":
+            constraint = cp.AddBoolXOr([cp_literal(lit) for lit in c["literals"]])
+            constraint.OnlyEnforceIf(enforcement_literals(c["enforcement"]))
+        elif kind == "enforced_at_most_one":
+            constraint = cp.AddAtMostOne([cp_literal(lit) for lit in c["literals"]])
+            constraint.OnlyEnforceIf(enforcement_literals(c["enforcement"]))
+        elif kind == "enforced_at_least_one":
+            constraint = cp.AddAtLeastOne([cp_literal(lit) for lit in c["literals"]])
+            constraint.OnlyEnforceIf(enforcement_literals(c["enforcement"]))
+        elif kind == "enforced_exactly_one":
+            constraint = cp.AddExactlyOne([cp_literal(lit) for lit in c["literals"]])
+            constraint.OnlyEnforceIf(enforcement_literals(c["enforcement"]))
         elif kind == "all_different":
             cp.AddAllDifferent([xs[int(v)] for v in c["vars"]])
         elif kind == "bool_or":
@@ -1275,6 +1369,9 @@ def ortools_reference(model: dict) -> Optional[dict]:
         elif kind == "at_most_one":
             lits = [cp_literal(lit) for lit in c["literals"]]
             cp.AddAtMostOne(lits)
+        elif kind == "at_least_one":
+            lits = [cp_literal(lit) for lit in c["literals"]]
+            cp.AddAtLeastOne(lits)
         elif kind == "exactly_one":
             lits = [cp_literal(lit) for lit in c["literals"]]
             cp.AddExactlyOne(lits)
@@ -1534,6 +1631,8 @@ def ortools_reference(model: dict) -> Optional[dict]:
     solver.parameters.max_time_in_seconds = 10.0
     if decision_strategies:
         solver.parameters.search_branching = cp_model.FIXED_SEARCH
+        solver.parameters.cp_model_presolve = False
+        solver.parameters.num_search_workers = 1
     status = solver.Solve(cp)
     if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         assignment = [int(solver.Value(x)) for x in xs]

@@ -25,6 +25,9 @@ use crate::des::general::external_linear_cli::{
     ExternalLinearCliKind, ExternalLinearCliOptions, ExternalLinearCliProbeStatus,
     ExternalLinearCliSolver, ExternalLinearCliStatus,
 };
+use crate::des::general::external_optimization_ecosystem::{
+    probe_external_optimization_tool, ExternalOptimizationProbeStatus, ExternalOptimizationTool,
+};
 use crate::des::general::ip_mip_des::{
     build_absolute_value_penalty_ip, build_binary_knapsack_ip, build_binary_product_gate_ip,
     build_fixed_charge_indicator_ip, build_general_linear_rows_ip,
@@ -53,6 +56,14 @@ use crate::des::general::lp::{
     solve_objective_offset_lp_internal, ExternalSolverOptions, GeneralLinearLPProblem,
     InternalSimplexOptions, LPConflictMember, LPConflictOptions, LPFeasRelaxMember,
     LPFeasRelaxOptions, LPProblem, LPRowConstraint, LPStatus, ObjectiveOffsetLPProblem, Sense,
+};
+use crate::des::general::math_program::{
+    cross_check_math_program_conflict_with_external,
+    cross_check_math_program_feas_relaxation_with_external,
+    cross_check_math_program_solution_pool_with_external, cross_check_math_program_with_external,
+    ExternalMathProgramOptions, MathProgram, MathProgramConflictOptions,
+    MathProgramFeasRelaxOptions, MathProgramSolutionPoolOptions, MathProgramSolveOptions,
+    MathProgramStatus, ObjectiveSense as MathObjectiveSense, RowSense,
 };
 use crate::des::general::min_cost_flow::{
     min_cost_flow_to_lp, solve_min_cost_flow, MinCostFlowArc, MinCostFlowProblem, MinCostFlowStatus,
@@ -2250,6 +2261,411 @@ impl Driver {
                     1e-8,
                 );
             }
+        }
+    }
+
+    fn validate_external_optimization_ecosystems(&mut self) {
+        println!("\n-- Optional Java/Rust optimization ecosystems: classpath and Cargo probes --");
+        for tool in ExternalOptimizationTool::all().iter().copied() {
+            let probe = probe_external_optimization_tool(tool);
+            if matches!(
+                probe.status,
+                ExternalOptimizationProbeStatus::NotConfigured
+                    | ExternalOptimizationProbeStatus::RuntimeMissing
+            ) {
+                println!(
+                    "  SKIP  {} {}: {}",
+                    probe.ecosystem.as_str(),
+                    tool.as_str(),
+                    probe.message
+                );
+                continue;
+            }
+            self.check(
+                format!(
+                    "{} {} ecosystem probe ready",
+                    probe.ecosystem.as_str(),
+                    tool.as_str()
+                ),
+                probe.status == ExternalOptimizationProbeStatus::Ready,
+                format!(
+                    "status={} command={:?} env={} artifact={:?} message={}",
+                    probe.status.as_str(),
+                    probe.command,
+                    probe.env_var,
+                    probe.artifact,
+                    probe.message
+                ),
+            );
+        }
+    }
+
+    fn check_math_program_cli_cross_check(
+        &mut self,
+        label: &str,
+        program: &MathProgram,
+        solve_opts: &MathProgramSolveOptions,
+        kind: ExternalLinearCliKind,
+        solver: ExternalLinearCliSolver,
+        method: &str,
+    ) {
+        let probe = probe_external_linear_cli_solver(
+            kind,
+            &ExternalLinearCliOptions {
+                solver,
+                time_limit_secs: Some(5.0),
+                ..Default::default()
+            },
+        );
+        if probe.status == ExternalLinearCliProbeStatus::NotInstalled {
+            println!(
+                "  SKIP  MathProgram {label} facade {}:cli cross-check: {}",
+                solver.as_str(),
+                probe.message
+            );
+            return;
+        }
+        if probe.status != ExternalLinearCliProbeStatus::Ready {
+            self.check(
+                format!(
+                    "MathProgram {label} facade {}:cli probe ready",
+                    solver.as_str()
+                ),
+                false,
+                format!(
+                    "status={} command={:?} smoke={:?} message={}",
+                    probe.status.as_str(),
+                    probe.command,
+                    probe.smoke_status.map(|status| status.as_str()),
+                    probe.message
+                ),
+            );
+            return;
+        }
+
+        let external_opts = ExternalMathProgramOptions {
+            method: Some(method.to_string()),
+            time_limit_ms: Some(5_000.0),
+            ..Default::default()
+        };
+        match cross_check_math_program_with_external(program, solve_opts, &external_opts, 1e-7) {
+            Ok(report) => self.check(
+                format!(
+                    "MathProgram {label} facade {}:cli same-input cross-check",
+                    solver.as_str()
+                ),
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7),
+                format!(
+                    "method={} internal={:?} external={:?} obj_diff={:?} x_diff={:?} violations=({:?},{:?})",
+                    method,
+                    report.internal.status,
+                    report.external.status,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal_max_violation,
+                    report.external_max_violation
+                ),
+            ),
+            Err(err) => self.check(
+                format!(
+                    "MathProgram {label} facade {}:cli same-input cross-check",
+                    solver.as_str()
+                ),
+                false,
+                format!("{err:?}"),
+            ),
+        }
+    }
+
+    fn validate_math_program_facade(&mut self) {
+        println!("\n-- Math-program facade: native lowering vs external solver oracles --");
+        let solve_opts = MathProgramSolveOptions::default();
+        let external_opts = ExternalMathProgramOptions {
+            method: Some("highs".to_string()),
+            time_limit_ms: Some(5_000.0),
+            ..Default::default()
+        };
+
+        let mut lp = MathProgram::new(MathObjectiveSense::Max);
+        let lp_x = lp
+            .add_continuous_var("x", 5.0, Some(0.0), Some(4.0))
+            .expect("LP x");
+        let lp_y = lp
+            .add_continuous_var("y", 3.0, Some(0.0), Some(4.0))
+            .expect("LP y");
+        let lp_z = lp
+            .add_continuous_var("z", 0.5, Some(0.0), Some(5.0))
+            .expect("LP z");
+        lp.add_constraint(
+            "balance",
+            vec![(lp_x, 1.0), (lp_y, 1.0), (lp_z, 1.0)],
+            RowSense::Eq,
+            5.0,
+        )
+        .expect("LP balance");
+        lp.add_constraint(
+            "preference",
+            vec![(lp_x, 1.0), (lp_y, -1.0)],
+            RowSense::Ge,
+            1.0,
+        )
+        .expect("LP preference");
+
+        match cross_check_math_program_with_external(&lp, &solve_opts, &external_opts, 1e-7) {
+            Ok(report) => self.check(
+                "MathProgram LP facade same-input HiGHS cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7),
+                format!(
+                    "internal={:?} external={:?} obj_diff={:?} x_diff={:?} violations=({:?},{:?})",
+                    report.internal.status,
+                    report.external.status,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal_max_violation,
+                    report.external_max_violation
+                ),
+            ),
+            Err(err) => self.check(
+                "MathProgram LP facade same-input HiGHS cross-check",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        for (solver, method) in [
+            (ExternalLinearCliSolver::Highs, "highs:cli"),
+            (ExternalLinearCliSolver::Glpk, "glpsol:cli"),
+            (ExternalLinearCliSolver::Scip, "scip:cli"),
+            (ExternalLinearCliSolver::Cbc, "cbc:cli"),
+        ] {
+            self.check_math_program_cli_cross_check(
+                "LP",
+                &lp,
+                &solve_opts,
+                ExternalLinearCliKind::Lp,
+                solver,
+                method,
+            );
+        }
+
+        let mut mip = MathProgram::new(MathObjectiveSense::Max);
+        let open_a = mip.add_binary_var("open-a", 4.0).expect("open a");
+        let open_b = mip.add_binary_var("open-b", 3.0).expect("open b");
+        let load = mip
+            .add_integer_var("load", 2.0, Some(0.0), Some(4.0))
+            .expect("load");
+        let reserve = mip
+            .add_integer_var("reserve", 0.0, Some(0.0), Some(2.0))
+            .expect("reserve");
+        let peak = mip
+            .add_continuous_var("peak", -1.0, Some(0.0), Some(4.0))
+            .expect("peak");
+        mip.add_exactly_one("choose-one-site", vec![open_a, open_b])
+            .expect("exactly one");
+        mip.add_constraint(
+            "crew-capacity",
+            vec![(load, 1.0), (reserve, 1.0)],
+            RowSense::Le,
+            4.0,
+        )
+        .expect("crew capacity");
+        mip.add_indicator(
+            "open-a-min-load",
+            open_a,
+            true,
+            vec![(load, 1.0)],
+            RowSense::Ge,
+            3.0,
+        )
+        .expect("open a indicator");
+        mip.add_indicator(
+            "open-b-max-load",
+            open_b,
+            true,
+            vec![(load, 1.0)],
+            RowSense::Le,
+            1.0,
+        )
+        .expect("open b indicator");
+        mip.add_max("peak-load", peak, vec![load, reserve])
+            .expect("peak max");
+
+        match cross_check_math_program_with_external(&mip, &solve_opts, &external_opts, 1e-7) {
+            Ok(report) => self.check(
+                "MathProgram MIP facade indicator/general-constraint cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7),
+                format!(
+                    "internal={:?} external={:?} obj_diff={:?} x_diff={:?} violations=({:?},{:?})",
+                    report.internal.status,
+                    report.external.status,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal_max_violation,
+                    report.external_max_violation
+                ),
+            ),
+            Err(err) => self.check(
+                "MathProgram MIP facade indicator/general-constraint cross-check",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        for (solver, method) in [
+            (ExternalLinearCliSolver::Highs, "highs:cli"),
+            (ExternalLinearCliSolver::Glpk, "glpsol:cli"),
+            (ExternalLinearCliSolver::Scip, "scip:cli"),
+            (ExternalLinearCliSolver::Cbc, "cbc:cli"),
+        ] {
+            self.check_math_program_cli_cross_check(
+                "MIP",
+                &mip,
+                &solve_opts,
+                ExternalLinearCliKind::Mip,
+                solver,
+                method,
+            );
+        }
+
+        let mut conflict_model = MathProgram::new(MathObjectiveSense::Min);
+        let conflict_x = conflict_model
+            .add_continuous_var("x", 0.0, None, None)
+            .expect("conflict x");
+        let conflict_y = conflict_model
+            .add_continuous_var("y", 0.0, Some(0.0), None)
+            .expect("conflict y");
+        conflict_model
+            .add_constraint("x-at-least-two", vec![(conflict_x, 1.0)], RowSense::Ge, 2.0)
+            .expect("conflict lower row");
+        conflict_model
+            .add_constraint("x-at-most-one", vec![(conflict_x, 1.0)], RowSense::Le, 1.0)
+            .expect("conflict upper row");
+        conflict_model
+            .add_constraint("redundant-y", vec![(conflict_y, 1.0)], RowSense::Ge, 0.0)
+            .expect("conflict redundant row");
+
+        match cross_check_math_program_conflict_with_external(
+            &conflict_model,
+            &solve_opts,
+            &external_opts,
+            &MathProgramConflictOptions::default(),
+        ) {
+            Ok(report) => self.check(
+                "MathProgram conflict refiner subsystem external cross-check",
+                report.within_tolerance
+                    && report.internal.minimal
+                    && report.internal.items.len() == 2
+                    && report.external.status == MathProgramStatus::Infeasible,
+                format!(
+                    "internal={:?} external={:?} items={} minimal={} status_agree={}",
+                    report.internal.status,
+                    report.external.status,
+                    report.internal.items.len(),
+                    report.internal.minimal,
+                    report.status_agree
+                ),
+            ),
+            Err(err) => self.check(
+                "MathProgram conflict refiner subsystem external cross-check",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        let mut relax_model = MathProgram::new(MathObjectiveSense::Min);
+        let relax_x = relax_model
+            .add_continuous_var("x", 0.0, Some(2.0), None)
+            .expect("relax x");
+        relax_model
+            .add_constraint("cap", vec![(relax_x, 1.0)], RowSense::Le, 1.0)
+            .expect("relax cap");
+
+        match cross_check_math_program_feas_relaxation_with_external(
+            &relax_model,
+            &solve_opts,
+            &external_opts,
+            &MathProgramFeasRelaxOptions {
+                linear_penalty: 10.0,
+                bound_penalty: 1.0,
+                ..Default::default()
+            },
+            1e-7,
+        ) {
+            Ok(report) => self.check(
+                "MathProgram feasibility-relaxation external cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && (report.internal.violation_objective - 1.0).abs() <= 1e-7,
+                format!(
+                    "internal={:?} external={:?} violation_obj={} obj_diff={:?} violations={}",
+                    report.internal.status,
+                    report.external.status,
+                    report.internal.violation_objective,
+                    report.objective_abs_diff,
+                    report.internal.violations.len()
+                ),
+            ),
+            Err(err) => self.check(
+                "MathProgram feasibility-relaxation external cross-check",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        let mut pool_model = MathProgram::new(MathObjectiveSense::Max);
+        let pool_a = pool_model.add_binary_var("a", 4.0).expect("pool a");
+        let pool_b = pool_model.add_binary_var("b", 2.0).expect("pool b");
+        let pool_c = pool_model.add_binary_var("c", 1.0).expect("pool c");
+        pool_model
+            .add_constraint(
+                "choose-at-most-two",
+                vec![(pool_a, 1.0), (pool_b, 1.0), (pool_c, 1.0)],
+                RowSense::Le,
+                2.0,
+            )
+            .expect("pool capacity");
+
+        match cross_check_math_program_solution_pool_with_external(
+            &pool_model,
+            &solve_opts,
+            &external_opts,
+            &MathProgramSolutionPoolOptions {
+                max_solutions: 3,
+                ..Default::default()
+            },
+            1e-7,
+        ) {
+            Ok(report) => self.check(
+                "MathProgram solution-pool external cross-check",
+                report.within_tolerance
+                    && report.len_agree
+                    && report.internal.solutions.len() == 3
+                    && !report.internal.exhausted,
+                format!(
+                    "internal_len={} external_len={} exhausted=({},{}) obj_diffs={:?} x_diffs={:?}",
+                    report.internal.solutions.len(),
+                    report.external.solutions.len(),
+                    report.internal.exhausted,
+                    report.external.exhausted,
+                    report.objective_abs_diffs,
+                    report.max_x_abs_diffs
+                ),
+            ),
+            Err(err) => self.check(
+                "MathProgram solution-pool external cross-check",
+                false,
+                format!("{err:?}"),
+            ),
         }
     }
 
@@ -5433,6 +5849,19 @@ impl Driver {
                         "ub": interval.ub,
                     })).collect::<Vec<_>>(),
                 }),
+                CpConstraint::EnforcedLinearDomain {
+                    enforcement,
+                    terms,
+                    intervals,
+                } => serde_json::json!({
+                    "kind": "enforced_linear_domain",
+                    "enforcement": enforcement.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                    "terms": terms.iter().map(|t| serde_json::json!({"var": t.var, "coeff": t.coeff})).collect::<Vec<_>>(),
+                    "intervals": intervals.iter().map(|interval| serde_json::json!({
+                        "lb": interval.lb,
+                        "ub": interval.ub,
+                    })).collect::<Vec<_>>(),
+                }),
                 CpConstraint::MapDomain {
                     var,
                     bools,
@@ -5471,6 +5900,38 @@ impl Driver {
                     "enforcement": enforcement.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
                     "literals": literals.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
                 }),
+                CpConstraint::EnforcedBoolXor {
+                    enforcement,
+                    literals,
+                } => serde_json::json!({
+                    "kind": "enforced_bool_xor",
+                    "enforcement": enforcement.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                    "literals": literals.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                }),
+                CpConstraint::EnforcedAtMostOne {
+                    enforcement,
+                    literals,
+                } => serde_json::json!({
+                    "kind": "enforced_at_most_one",
+                    "enforcement": enforcement.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                    "literals": literals.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                }),
+                CpConstraint::EnforcedAtLeastOne {
+                    enforcement,
+                    literals,
+                } => serde_json::json!({
+                    "kind": "enforced_at_least_one",
+                    "enforcement": enforcement.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                    "literals": literals.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                }),
+                CpConstraint::EnforcedExactlyOne {
+                    enforcement,
+                    literals,
+                } => serde_json::json!({
+                    "kind": "enforced_exactly_one",
+                    "enforcement": enforcement.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                    "literals": literals.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                }),
                 CpConstraint::AllDifferent(vars) => {
                     serde_json::json!({"kind": "all_different", "vars": vars})
                 }
@@ -5488,6 +5949,10 @@ impl Driver {
                 }),
                 CpConstraint::AtMostOne(lits) => serde_json::json!({
                     "kind": "at_most_one",
+                    "literals": lits.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                }),
+                CpConstraint::AtLeastOne(lits) => serde_json::json!({
+                    "kind": "at_least_one",
                     "literals": lits.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
                 }),
                 CpConstraint::ExactlyOne(lits) => serde_json::json!({
@@ -7064,6 +7529,114 @@ impl Driver {
             ),
         );
 
+        for (label, domain_strategy, domain_strategy_json, expected_assignment) in [
+            (
+                "lower-half",
+                CpDomainValueStrategy::LowerHalf,
+                "lower_half",
+                vec![0, 4],
+            ),
+            (
+                "upper-half",
+                CpDomainValueStrategy::UpperHalf,
+                "upper_half",
+                vec![4, 0],
+            ),
+            (
+                "median-value",
+                CpDomainValueStrategy::MedianValue,
+                "median_value",
+                vec![2, 2],
+            ),
+        ] {
+            let domain_strategy_model = CpModel {
+                variables: vec![
+                    CpVariable {
+                        name: "domain_strategy_x".to_string(),
+                        domain: vec![0, 1, 2, 3, 4],
+                    },
+                    CpVariable {
+                        name: "domain_strategy_y".to_string(),
+                        domain: vec![0, 1, 2, 3, 4],
+                    },
+                ],
+                constraints: vec![CpConstraint::Linear {
+                    terms: vec![
+                        LinearTerm { var: 0, coeff: 1 },
+                        LinearTerm { var: 1, coeff: 1 },
+                    ],
+                    sense: LinearSense::Eq,
+                    rhs: 4,
+                }],
+                objective: None,
+            };
+            let domain_strategy_internal = solve_cp_model(
+                &domain_strategy_model,
+                CpSolveOptions {
+                    max_nodes: 100,
+                    solution_hint: Vec::new(),
+                    decision_strategies: vec![CpDecisionStrategy {
+                        vars: vec![0, 1],
+                        variable_strategy: CpVariableSelectionStrategy::First,
+                        domain_strategy,
+                    }],
+                },
+            );
+            let domain_strategy_json = serde_json::json!({
+                "variables": [
+                    {"name": "domain_strategy_x", "domain": [0, 1, 2, 3, 4]},
+                    {"name": "domain_strategy_y", "domain": [0, 1, 2, 3, 4]},
+                ],
+                "constraints": [
+                    {
+                        "kind": "linear",
+                        "terms": [
+                            {"var": 0, "coeff": 1},
+                            {"var": 1, "coeff": 1},
+                        ],
+                        "sense": "eq",
+                        "rhs": 4,
+                    },
+                ],
+                "objective": serde_json::Value::Null,
+                "decision_strategies": [
+                    {
+                        "vars": [0, 1],
+                        "variable_strategy": "first",
+                        "domain_strategy": domain_strategy_json,
+                    },
+                ],
+            })
+            .to_string();
+            let value = self.run_python_json(
+                "cp_sat_reference.py",
+                &["--solver", "auto"],
+                &domain_strategy_json,
+            );
+            let domain_strategy_reference: CpReference =
+                serde_json::from_value(value).expect("parse domain-reduction CP reference");
+            self.check(
+                format!("CP-SAT decision domain strategy {label} status internal/reference"),
+                domain_strategy_internal.status == CpStatus::Feasible
+                    && domain_strategy_reference.status == "feasible",
+                format!(
+                    "internal={} external={} solver={}",
+                    domain_strategy_internal.status.as_str(),
+                    domain_strategy_reference.status,
+                    domain_strategy_reference.solver
+                ),
+            );
+            self.check(
+                format!("CP-SAT decision domain strategy {label} assignment"),
+                domain_strategy_internal.assignment == domain_strategy_reference.assignment
+                    && domain_strategy_internal.assignment == expected_assignment,
+                format!(
+                    "internal={:?} external={:?}",
+                    domain_strategy_internal.assignment, domain_strategy_reference.assignment
+                ),
+            );
+        }
+
         let enforced_bool_model = CpModel {
             variables: vec![
                 CpVariable {
@@ -7240,6 +7813,567 @@ impl Driver {
             format!(
                 "internal={:?} external={:?}",
                 enforced_bool_internal.assignment, enforced_bool_reference.assignment
+            ),
+        );
+
+        let at_least_one_model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "active_gate".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "inactive_gate".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "x".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "y".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "z".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "required".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "inactive_x".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "inactive_y".to_string(),
+                    domain: vec![0, 1],
+                },
+            ],
+            constraints: vec![
+                CpConstraint::BoolOr(vec![BoolLiteral {
+                    var: 0,
+                    positive: true,
+                }]),
+                CpConstraint::BoolOr(vec![BoolLiteral {
+                    var: 1,
+                    positive: false,
+                }]),
+                CpConstraint::AtLeastOne(vec![BoolLiteral {
+                    var: 5,
+                    positive: true,
+                }]),
+                CpConstraint::EnforcedAtLeastOne {
+                    enforcement: vec![BoolLiteral {
+                        var: 0,
+                        positive: true,
+                    }],
+                    literals: vec![
+                        BoolLiteral {
+                            var: 2,
+                            positive: true,
+                        },
+                        BoolLiteral {
+                            var: 3,
+                            positive: true,
+                        },
+                        BoolLiteral {
+                            var: 4,
+                            positive: true,
+                        },
+                    ],
+                },
+                CpConstraint::EnforcedAtLeastOne {
+                    enforcement: vec![BoolLiteral {
+                        var: 1,
+                        positive: true,
+                    }],
+                    literals: vec![
+                        BoolLiteral {
+                            var: 6,
+                            positive: true,
+                        },
+                        BoolLiteral {
+                            var: 7,
+                            positive: true,
+                        },
+                    ],
+                },
+            ],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![
+                    LinearTerm { var: 2, coeff: 3 },
+                    LinearTerm { var: 3, coeff: 2 },
+                    LinearTerm { var: 4, coeff: 1 },
+                    LinearTerm { var: 5, coeff: 1 },
+                    LinearTerm { var: 6, coeff: 1 },
+                    LinearTerm { var: 7, coeff: 1 },
+                ],
+            }),
+        };
+        let at_least_one_internal = solve_cp_model(&at_least_one_model, CpSolveOptions::default());
+        let at_least_one_json = serde_json::json!({
+            "variables": [
+                {"name": "active_gate", "domain": [0, 1]},
+                {"name": "inactive_gate", "domain": [0, 1]},
+                {"name": "x", "domain": [0, 1]},
+                {"name": "y", "domain": [0, 1]},
+                {"name": "z", "domain": [0, 1]},
+                {"name": "required", "domain": [0, 1]},
+                {"name": "inactive_x", "domain": [0, 1]},
+                {"name": "inactive_y", "domain": [0, 1]},
+            ],
+            "constraints": [
+                {
+                    "kind": "bool_or",
+                    "literals": [{"var": 0, "positive": true}],
+                },
+                {
+                    "kind": "bool_or",
+                    "literals": [{"var": 1, "positive": false}],
+                },
+                {
+                    "kind": "at_least_one",
+                    "literals": [{"var": 5, "positive": true}],
+                },
+                {
+                    "kind": "enforced_at_least_one",
+                    "enforcement": [{"var": 0, "positive": true}],
+                    "literals": [
+                        {"var": 2, "positive": true},
+                        {"var": 3, "positive": true},
+                        {"var": 4, "positive": true},
+                    ],
+                },
+                {
+                    "kind": "enforced_at_least_one",
+                    "enforcement": [{"var": 1, "positive": true}],
+                    "literals": [
+                        {"var": 6, "positive": true},
+                        {"var": 7, "positive": true},
+                    ],
+                },
+            ],
+            "objective": {
+                "sense": "min",
+                "terms": [
+                    {"var": 2, "coeff": 3},
+                    {"var": 3, "coeff": 2},
+                    {"var": 4, "coeff": 1},
+                    {"var": 5, "coeff": 1},
+                    {"var": 6, "coeff": 1},
+                    {"var": 7, "coeff": 1},
+                ],
+            },
+        })
+        .to_string();
+        let value = self.run_python_json(
+            "cp_sat_reference.py",
+            &["--solver", "auto"],
+            &at_least_one_json,
+        );
+        let at_least_one_reference: CpReference =
+            serde_json::from_value(value).expect("parse at-least-one CP reference");
+        self.check(
+            "CP-SAT at-least-one status internal/reference",
+            at_least_one_internal.status == CpStatus::Optimal
+                && at_least_one_reference.status == "optimal",
+            format!(
+                "internal={} external={} solver={}",
+                at_least_one_internal.status.as_str(),
+                at_least_one_reference.status,
+                at_least_one_reference.solver
+            ),
+        );
+        self.check(
+            "CP-SAT at-least-one objective",
+            at_least_one_internal.objective == at_least_one_reference.objective
+                && at_least_one_internal.objective == Some(2),
+            format!(
+                "internal={:?} external={:?}",
+                at_least_one_internal.objective, at_least_one_reference.objective
+            ),
+        );
+        self.check(
+            "CP-SAT at-least-one assignment",
+            at_least_one_internal.assignment == at_least_one_reference.assignment
+                && at_least_one_internal.assignment == vec![1, 0, 0, 0, 1, 1, 0, 0],
+            format!(
+                "internal={:?} external={:?}",
+                at_least_one_internal.assignment, at_least_one_reference.assignment
+            ),
+        );
+
+        let enforced_linear_domain_model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "active_gate".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "inactive_gate".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "x".to_string(),
+                    domain: vec![0, 1, 2, 3, 4],
+                },
+                CpVariable {
+                    name: "y".to_string(),
+                    domain: vec![0, 1, 2, 3, 4],
+                },
+                CpVariable {
+                    name: "free".to_string(),
+                    domain: vec![0, 1, 2],
+                },
+            ],
+            constraints: vec![
+                CpConstraint::BoolOr(vec![BoolLiteral {
+                    var: 0,
+                    positive: true,
+                }]),
+                CpConstraint::BoolOr(vec![BoolLiteral {
+                    var: 1,
+                    positive: false,
+                }]),
+                CpConstraint::EnforcedLinearDomain {
+                    enforcement: vec![BoolLiteral {
+                        var: 0,
+                        positive: true,
+                    }],
+                    terms: vec![
+                        LinearTerm { var: 2, coeff: 1 },
+                        LinearTerm { var: 3, coeff: 1 },
+                    ],
+                    intervals: vec![
+                        CpDomainInterval { lb: 3, ub: 3 },
+                        CpDomainInterval { lb: 7, ub: 7 },
+                    ],
+                },
+                CpConstraint::EnforcedLinearDomain {
+                    enforcement: vec![BoolLiteral {
+                        var: 1,
+                        positive: true,
+                    }],
+                    terms: vec![LinearTerm { var: 4, coeff: 1 }],
+                    intervals: vec![CpDomainInterval { lb: 2, ub: 2 }],
+                },
+            ],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![
+                    LinearTerm { var: 2, coeff: 10 },
+                    LinearTerm { var: 3, coeff: 1 },
+                    LinearTerm { var: 4, coeff: 1 },
+                ],
+            }),
+        };
+        let enforced_linear_domain_internal =
+            solve_cp_model(&enforced_linear_domain_model, CpSolveOptions::default());
+        let enforced_linear_domain_json = serde_json::json!({
+            "variables": [
+                {"name": "active_gate", "domain": [0, 1]},
+                {"name": "inactive_gate", "domain": [0, 1]},
+                {"name": "x", "domain": [0, 1, 2, 3, 4]},
+                {"name": "y", "domain": [0, 1, 2, 3, 4]},
+                {"name": "free", "domain": [0, 1, 2]},
+            ],
+            "constraints": [
+                {
+                    "kind": "bool_or",
+                    "literals": [{"var": 0, "positive": true}],
+                },
+                {
+                    "kind": "bool_or",
+                    "literals": [{"var": 1, "positive": false}],
+                },
+                {
+                    "kind": "enforced_linear_domain",
+                    "enforcement": [{"var": 0, "positive": true}],
+                    "terms": [
+                        {"var": 2, "coeff": 1},
+                        {"var": 3, "coeff": 1},
+                    ],
+                    "intervals": [
+                        {"lb": 3, "ub": 3},
+                        {"lb": 7, "ub": 7},
+                    ],
+                },
+                {
+                    "kind": "enforced_linear_domain",
+                    "enforcement": [{"var": 1, "positive": true}],
+                    "terms": [{"var": 4, "coeff": 1}],
+                    "intervals": [{"lb": 2, "ub": 2}],
+                },
+            ],
+            "objective": {
+                "sense": "min",
+                "terms": [
+                    {"var": 2, "coeff": 10},
+                    {"var": 3, "coeff": 1},
+                    {"var": 4, "coeff": 1},
+                ],
+            },
+        })
+        .to_string();
+        let value = self.run_python_json(
+            "cp_sat_reference.py",
+            &["--solver", "auto"],
+            &enforced_linear_domain_json,
+        );
+        let enforced_linear_domain_reference: CpReference =
+            serde_json::from_value(value).expect("parse enforced-linear-domain CP reference");
+        self.check(
+            "CP-SAT enforced linear-domain status internal/reference",
+            enforced_linear_domain_internal.status == CpStatus::Optimal
+                && enforced_linear_domain_reference.status == "optimal",
+            format!(
+                "internal={} external={} solver={}",
+                enforced_linear_domain_internal.status.as_str(),
+                enforced_linear_domain_reference.status,
+                enforced_linear_domain_reference.solver
+            ),
+        );
+        self.check(
+            "CP-SAT enforced linear-domain objective",
+            enforced_linear_domain_internal.objective == enforced_linear_domain_reference.objective
+                && enforced_linear_domain_internal.objective == Some(3),
+            format!(
+                "internal={:?} external={:?}",
+                enforced_linear_domain_internal.objective,
+                enforced_linear_domain_reference.objective
+            ),
+        );
+        self.check(
+            "CP-SAT enforced linear-domain assignment",
+            enforced_linear_domain_internal.assignment
+                == enforced_linear_domain_reference.assignment
+                && enforced_linear_domain_internal.assignment == vec![1, 0, 0, 3, 0],
+            format!(
+                "internal={:?} external={:?}",
+                enforced_linear_domain_internal.assignment,
+                enforced_linear_domain_reference.assignment
+            ),
+        );
+
+        let enforced_cardinality_model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "active_gate".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "inactive_gate".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "x".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "y".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "z".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "inactive_x".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "inactive_y".to_string(),
+                    domain: vec![0, 1],
+                },
+            ],
+            constraints: vec![
+                CpConstraint::BoolOr(vec![BoolLiteral {
+                    var: 0,
+                    positive: true,
+                }]),
+                CpConstraint::BoolOr(vec![BoolLiteral {
+                    var: 1,
+                    positive: false,
+                }]),
+                CpConstraint::EnforcedExactlyOne {
+                    enforcement: vec![BoolLiteral {
+                        var: 0,
+                        positive: true,
+                    }],
+                    literals: vec![
+                        BoolLiteral {
+                            var: 2,
+                            positive: true,
+                        },
+                        BoolLiteral {
+                            var: 3,
+                            positive: true,
+                        },
+                    ],
+                },
+                CpConstraint::EnforcedBoolXor {
+                    enforcement: vec![BoolLiteral {
+                        var: 0,
+                        positive: true,
+                    }],
+                    literals: vec![
+                        BoolLiteral {
+                            var: 3,
+                            positive: true,
+                        },
+                        BoolLiteral {
+                            var: 4,
+                            positive: true,
+                        },
+                    ],
+                },
+                CpConstraint::EnforcedAtMostOne {
+                    enforcement: vec![BoolLiteral {
+                        var: 0,
+                        positive: true,
+                    }],
+                    literals: vec![
+                        BoolLiteral {
+                            var: 2,
+                            positive: true,
+                        },
+                        BoolLiteral {
+                            var: 4,
+                            positive: true,
+                        },
+                    ],
+                },
+                CpConstraint::EnforcedExactlyOne {
+                    enforcement: vec![BoolLiteral {
+                        var: 1,
+                        positive: true,
+                    }],
+                    literals: vec![
+                        BoolLiteral {
+                            var: 5,
+                            positive: true,
+                        },
+                        BoolLiteral {
+                            var: 6,
+                            positive: true,
+                        },
+                    ],
+                },
+            ],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![
+                    LinearTerm { var: 2, coeff: 1 },
+                    LinearTerm { var: 3, coeff: 1 },
+                    LinearTerm { var: 4, coeff: 1 },
+                    LinearTerm { var: 5, coeff: 1 },
+                    LinearTerm { var: 6, coeff: 1 },
+                ],
+            }),
+        };
+        let enforced_cardinality_internal =
+            solve_cp_model(&enforced_cardinality_model, CpSolveOptions::default());
+        let enforced_cardinality_json = serde_json::json!({
+            "variables": [
+                {"name": "active_gate", "domain": [0, 1]},
+                {"name": "inactive_gate", "domain": [0, 1]},
+                {"name": "x", "domain": [0, 1]},
+                {"name": "y", "domain": [0, 1]},
+                {"name": "z", "domain": [0, 1]},
+                {"name": "inactive_x", "domain": [0, 1]},
+                {"name": "inactive_y", "domain": [0, 1]},
+            ],
+            "constraints": [
+                {
+                    "kind": "bool_or",
+                    "literals": [{"var": 0, "positive": true}],
+                },
+                {
+                    "kind": "bool_or",
+                    "literals": [{"var": 1, "positive": false}],
+                },
+                {
+                    "kind": "enforced_exactly_one",
+                    "enforcement": [{"var": 0, "positive": true}],
+                    "literals": [
+                        {"var": 2, "positive": true},
+                        {"var": 3, "positive": true},
+                    ],
+                },
+                {
+                    "kind": "enforced_bool_xor",
+                    "enforcement": [{"var": 0, "positive": true}],
+                    "literals": [
+                        {"var": 3, "positive": true},
+                        {"var": 4, "positive": true},
+                    ],
+                },
+                {
+                    "kind": "enforced_at_most_one",
+                    "enforcement": [{"var": 0, "positive": true}],
+                    "literals": [
+                        {"var": 2, "positive": true},
+                        {"var": 4, "positive": true},
+                    ],
+                },
+                {
+                    "kind": "enforced_exactly_one",
+                    "enforcement": [{"var": 1, "positive": true}],
+                    "literals": [
+                        {"var": 5, "positive": true},
+                        {"var": 6, "positive": true},
+                    ],
+                },
+            ],
+            "objective": {
+                "sense": "min",
+                "terms": [
+                    {"var": 2, "coeff": 1},
+                    {"var": 3, "coeff": 1},
+                    {"var": 4, "coeff": 1},
+                    {"var": 5, "coeff": 1},
+                    {"var": 6, "coeff": 1},
+                ],
+            },
+        })
+        .to_string();
+        let value = self.run_python_json(
+            "cp_sat_reference.py",
+            &["--solver", "auto"],
+            &enforced_cardinality_json,
+        );
+        let enforced_cardinality_reference: CpReference =
+            serde_json::from_value(value).expect("parse enforced-cardinality CP reference");
+        self.check(
+            "CP-SAT enforced cardinality status internal/reference",
+            enforced_cardinality_internal.status == CpStatus::Optimal
+                && enforced_cardinality_reference.status == "optimal",
+            format!(
+                "internal={} external={} solver={}",
+                enforced_cardinality_internal.status.as_str(),
+                enforced_cardinality_reference.status,
+                enforced_cardinality_reference.solver
+            ),
+        );
+        self.check(
+            "CP-SAT enforced cardinality objective",
+            enforced_cardinality_internal.objective == enforced_cardinality_reference.objective
+                && enforced_cardinality_internal.objective == Some(1),
+            format!(
+                "internal={:?} external={:?}",
+                enforced_cardinality_internal.objective, enforced_cardinality_reference.objective
+            ),
+        );
+        self.check(
+            "CP-SAT enforced cardinality assignment",
+            enforced_cardinality_internal.assignment == enforced_cardinality_reference.assignment
+                && enforced_cardinality_internal.assignment == vec![1, 0, 0, 1, 0, 0, 0],
+            format!(
+                "internal={:?} external={:?}",
+                enforced_cardinality_internal.assignment, enforced_cardinality_reference.assignment
             ),
         );
 
@@ -7514,6 +8648,8 @@ impl Driver {
         self.validate_lp();
         self.validate_ip_mip();
         self.validate_external_solver_clis();
+        self.validate_external_optimization_ecosystems();
+        self.validate_math_program_facade();
         self.validate_min_cost_flow();
         self.validate_qp();
         self.validate_cp_sat();

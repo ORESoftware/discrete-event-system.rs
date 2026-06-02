@@ -8,7 +8,7 @@
 
 #![allow(dead_code)]
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex, RwLock};
@@ -428,6 +428,30 @@ impl SoccerQPolicy {
         }
     }
 
+    pub fn from_entries(
+        options: SoccerQPolicyOptions,
+        entries: &[SoccerQEntry],
+    ) -> Result<Self, String> {
+        validate_soccer_q_policy_options(&options)?;
+        let mut policy = SoccerQPolicy::new(options);
+        for entry in entries {
+            if !entry.value.is_finite() {
+                return Err("policy entry value must be finite".to_string());
+            }
+            let action = normalize_soccer_action_label(&entry.action).to_string();
+            if action.trim().is_empty() {
+                return Err("policy entry action must not be empty".to_string());
+            }
+            let key = SoccerQActionKey {
+                state: entry.state.clone(),
+                action,
+            };
+            policy.q_values.insert(key.clone(), entry.value);
+            policy.visits.insert(key, entry.visits);
+        }
+        Ok(policy)
+    }
+
     pub fn train(&mut self, transitions: &[SoccerLearningTransition]) {
         for transition in transitions {
             self.update(transition);
@@ -543,6 +567,10 @@ impl SoccerQPolicy {
         entries
     }
 
+    pub fn visit_count(&self) -> u64 {
+        self.visits.values().map(|v| u64::from(*v)).sum()
+    }
+
     fn best_action_filtered<F>(&self, state: &SoccerQStateKey, is_legal: F) -> Option<String>
     where
         F: Fn(&str) -> bool,
@@ -573,6 +601,129 @@ pub fn train_soccer_q_policy(
     let mut policy = SoccerQPolicy::new(options);
     policy.train(&dataset.transitions);
     policy
+}
+
+fn validate_soccer_q_policy_options(options: &SoccerQPolicyOptions) -> Result<(), String> {
+    if !options.alpha.is_finite() || !(0.0..=1.0).contains(&options.alpha) {
+        return Err("policy alpha must be finite and between 0.0 and 1.0".to_string());
+    }
+    if !options.gamma.is_finite() || !(0.0..=0.999).contains(&options.gamma) {
+        return Err("policy gamma must be finite and between 0.0 and 0.999".to_string());
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug)]
+pub struct SoccerTeamQPolicies {
+    pub home: SoccerQPolicy,
+    pub away: SoccerQPolicy,
+}
+
+impl SoccerTeamQPolicies {
+    pub fn new(options: SoccerQPolicyOptions) -> Self {
+        SoccerTeamQPolicies {
+            home: SoccerQPolicy::new(options.clone()),
+            away: SoccerQPolicy::new(options),
+        }
+    }
+
+    pub fn from_artifact(artifact: &SoccerTeamPolicyArtifact) -> Result<Self, String> {
+        let home_options = artifact.home_options.clone().unwrap_or_default();
+        let away_options = artifact.away_options.clone().unwrap_or_default();
+        Ok(SoccerTeamQPolicies {
+            home: SoccerQPolicy::from_entries(home_options, &artifact.home_entries)?,
+            away: SoccerQPolicy::from_entries(away_options, &artifact.away_entries)?,
+        })
+    }
+
+    pub fn policy(&self, team: Team) -> &SoccerQPolicy {
+        match team {
+            Team::Home => &self.home,
+            Team::Away => &self.away,
+        }
+    }
+
+    pub fn policy_mut(&mut self, team: Team) -> &mut SoccerQPolicy {
+        match team {
+            Team::Home => &mut self.home,
+            Team::Away => &mut self.away,
+        }
+    }
+
+    pub fn train(&mut self, transitions: &[SoccerLearningTransition]) {
+        for transition in transitions {
+            self.policy_mut(transition.team).update(transition);
+        }
+    }
+
+    pub fn train_adversarial(&mut self, transitions: &[SoccerLearningTransition]) {
+        let mut tick_rewards: BTreeMap<u64, (f64, u32, f64, u32)> = BTreeMap::new();
+        for transition in transitions {
+            let entry = tick_rewards.entry(transition.tick).or_default();
+            match transition.team {
+                Team::Home => {
+                    entry.0 += transition.reward;
+                    entry.1 += 1;
+                }
+                Team::Away => {
+                    entry.2 += transition.reward;
+                    entry.3 += 1;
+                }
+            }
+        }
+
+        for transition in transitions {
+            let Some((home_sum, home_count, away_sum, away_count)) =
+                tick_rewards.get(&transition.tick).copied()
+            else {
+                self.policy_mut(transition.team).update(transition);
+                continue;
+            };
+            let home_avg = if home_count == 0 {
+                0.0
+            } else {
+                home_sum / f64::from(home_count)
+            };
+            let away_avg = if away_count == 0 {
+                0.0
+            } else {
+                away_sum / f64::from(away_count)
+            };
+            let opponent_avg = match transition.team {
+                Team::Home => away_avg,
+                Team::Away => home_avg,
+            };
+            let mut adversarial_transition = transition.clone();
+            adversarial_transition.reward = transition.reward - opponent_avg;
+            self.policy_mut(transition.team)
+                .update(&adversarial_transition);
+        }
+    }
+
+    pub fn total_entries(&self) -> usize {
+        self.home.q_values.len() + self.away.q_values.len()
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerSelfPlayEpisodeSummary {
+    pub episode: usize,
+    pub seed: u64,
+    pub summary: MatchSummary,
+    pub transitions: usize,
+    pub home_policy_entries: usize,
+    pub away_policy_entries: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerSelfPlayTrainingArtifact {
+    pub config: MatchConfig,
+    pub options: SoccerQPolicyOptions,
+    pub episodes: Vec<SoccerSelfPlayEpisodeSummary>,
+    pub home_entries: Vec<SoccerQEntry>,
+    pub away_entries: Vec<SoccerQEntry>,
 }
 
 fn normalize_soccer_action_label(action: &str) -> &str {
@@ -781,14 +932,19 @@ impl PlayerAgent {
                     order_names.push("defend".to_string());
                     if !has_ball && snapshot.possession_team() == Some(self.team.other()) {
                         let dist = self.position.distance(snapshot.ball.position);
-                        let defend_radius = 10.0 + directive.press_intensity * 12.0;
+                        let defend_radius = 5.0 + directive.press_intensity * 7.0;
                         if dist < defend_radius
                             || rng.next_float()
-                                < (self.skills.aggression * directive.press_intensity)
+                                < (self.skills.aggression * directive.press_intensity * 0.36)
                                     .clamp(0.02, 0.95)
                         {
+                            let target = if dist < defend_radius {
+                                snapshot.ball.position
+                            } else {
+                                snapshot.mark_or_zone_for(self.id, self.home_position)
+                            };
                             chosen = Some((
-                                SoccerAction::MoveTo(snapshot.ball.position),
+                                SoccerAction::MoveTo(target),
                                 "defend".to_string(),
                             ));
                             break;
@@ -800,6 +956,8 @@ impl PlayerAgent {
                     if !has_ball {
                         let target = if snapshot.possession_team() == Some(self.team) {
                             snapshot.open_space_for(self.id, self.home_position)
+                        } else if snapshot.possession_team() == Some(self.team.other()) {
+                            snapshot.mark_or_zone_for(self.id, self.home_position)
                         } else {
                             snapshot.defensive_shape_for(self.id, self.home_position)
                         };
@@ -861,7 +1019,7 @@ impl PlayerAgent {
                 "dribble".to_string(),
             )),
             "defend" if snapshot.possession_team() == Some(self.team.other()) => Some((
-                SoccerAction::MoveTo(snapshot.ball.position),
+                SoccerAction::MoveTo(snapshot.mark_or_zone_for(self.id, self.home_position)),
                 "defend".to_string(),
             )),
             "tackle" => snapshot.ball.holder.and_then(|holder| {
@@ -882,6 +1040,8 @@ impl PlayerAgent {
             "space" if !observation.has_ball => {
                 let target = if snapshot.possession_team() == Some(self.team) {
                     snapshot.open_space_for(self.id, self.home_position)
+                } else if snapshot.possession_team() == Some(self.team.other()) {
+                    snapshot.mark_or_zone_for(self.id, self.home_position)
                 } else {
                     snapshot.defensive_shape_for(self.id, self.home_position)
                 };
@@ -1658,6 +1818,22 @@ impl MatchConfig {
     }
 }
 
+fn validate_ball_surface(ball_drag_per_tick: f64, ball_stop_speed_yps: f64) -> Result<(), String> {
+    if !ball_drag_per_tick.is_finite() {
+        return Err("ballDragPerTick must be finite".to_string());
+    }
+    if !(0.0..=0.95).contains(&ball_drag_per_tick) {
+        return Err("ballDragPerTick must be between 0.0 and 0.95".to_string());
+    }
+    if !ball_stop_speed_yps.is_finite() {
+        return Err("ballStopSpeedYps must be finite".to_string());
+    }
+    if !(0.0..=20.0).contains(&ball_stop_speed_yps) {
+        return Err("ballStopSpeedYps must be between 0.0 and 20.0".to_string());
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MatchStats {
@@ -1783,6 +1959,9 @@ struct BallRestart {
 pub struct TeamTacticalDirective {
     pub team: Team,
     pub defensive_line_y: f64,
+    pub defensive_cover_target: usize,
+    pub defensive_cover_actual: usize,
+    pub foremost_attacker_y: Option<f64>,
     pub support_depth_yards: f64,
     pub width_yards: f64,
     pub press_intensity: f64,
@@ -1800,6 +1979,9 @@ impl TeamTacticalDirective {
                 Team::Home => field_length * 0.40,
                 Team::Away => field_length * 0.60,
             },
+            defensive_cover_target: 2,
+            defensive_cover_actual: 0,
+            foremost_attacker_y: None,
             support_depth_yards: 11.0,
             width_yards: field_width * 0.62,
             press_intensity: 0.48,
@@ -1809,6 +1991,13 @@ impl TeamTacticalDirective {
             risk_tolerance: 0.50,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DefensiveCoverProfile {
+    target: usize,
+    actual: usize,
+    foremost_attacker_y: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1844,7 +2033,7 @@ impl Default for CentralBrain {
 }
 
 impl CentralBrain {
-    pub fn run_time_step(&mut self, snapshot: &WorldSnapshot) {
+    pub fn run_time_step(&mut self, snapshot: &WorldSnapshot, rng: &mut SeededRandom) {
         self.possession_team = snapshot.possession_team();
         let y = snapshot.ball.position.y;
         self.phase = match self.possession_team {
@@ -1856,6 +2045,10 @@ impl CentralBrain {
             None => TacticalPhase::Transition,
         };
         let score_diff_home = snapshot.score_home as i32 - snapshot.score_away as i32;
+        let home_cover =
+            defensive_cover_profile(snapshot, Team::Home, sample_defensive_cover_target(rng));
+        let away_cover =
+            defensive_cover_profile(snapshot, Team::Away, sample_defensive_cover_target(rng));
         self.home_directive = tactical_directive_for_team(
             Team::Home,
             self.phase,
@@ -1864,6 +2057,7 @@ impl CentralBrain {
             score_diff_home,
             snapshot.field_width,
             snapshot.field_length,
+            home_cover,
         );
         self.away_directive = tactical_directive_for_team(
             Team::Away,
@@ -1873,6 +2067,7 @@ impl CentralBrain {
             -score_diff_home,
             snapshot.field_width,
             snapshot.field_length,
+            away_cover,
         );
         self.pressure_line_home = self.home_directive.defensive_line_y;
         self.pressure_line_away = self.away_directive.defensive_line_y;
@@ -1882,6 +2077,34 @@ impl CentralBrain {
         match team {
             Team::Home => &self.home_directive,
             Team::Away => &self.away_directive,
+        }
+    }
+
+    pub fn to_snapshot(
+        &self,
+        snapshot: &WorldSnapshot,
+        tracked_officials: usize,
+    ) -> CentralBrainSnapshot {
+        CentralBrainSnapshot {
+            phase: self.phase,
+            possession_team: self.possession_team.or_else(|| snapshot.possession_team()),
+            ball_position: snapshot.ball.position,
+            ball_velocity: snapshot.ball.velocity,
+            ball_holder: snapshot.ball.holder,
+            pressure_line_home: self.pressure_line_home,
+            pressure_line_away: self.pressure_line_away,
+            tracked_players: snapshot
+                .players
+                .iter()
+                .map(|player| CentralBrainPlayerAwareness {
+                    id: player.id,
+                    team: player.team,
+                    position: player.position,
+                    velocity: player.velocity,
+                    controller_slot: player.controller_slot,
+                })
+                .collect(),
+            tracked_officials,
         }
     }
 }
@@ -1899,6 +2122,7 @@ pub struct PlayerSnapshot {
     pub home_position: Vec2,
     pub controller_slot: Option<usize>,
     pub acceleration: Vec2,
+    pub last_decision: Option<AgentDecisionTrace>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1947,6 +2171,7 @@ impl WorldSnapshot {
                     .latest_for(p.id)
                     .map(|sample| sample.acceleration)
                     .unwrap_or(p.acceleration),
+                last_decision: p.last_decision.clone(),
             })
             .collect::<Vec<_>>();
         WorldSnapshot {
@@ -2189,19 +2414,50 @@ impl WorldSnapshot {
         let directive = self.tactical_directive(me.team);
         let width_scale = (directive.width_yards / (self.field_width * 0.62)).clamp(0.65, 1.35);
         let depth_scale = (directive.support_depth_yards / 11.0).clamp(0.65, 1.65);
-        let mut best = home;
+        let role_depth = match me.role {
+            PlayerRole::Goalkeeper => -8.0,
+            PlayerRole::Defender => 4.0,
+            PlayerRole::Midfielder => directive.support_depth_yards,
+            PlayerRole::Forward => directive.support_depth_yards + 7.0,
+        };
+        let possession = self.possession_team() == Some(me.team);
+        let base = if possession {
+            Vec2::new(
+                home.x * 0.58 + self.ball.position.x * 0.42,
+                self.ball.position.y + role_depth * me.team.attack_dir(),
+            )
+        } else {
+            home
+        };
+        let mut best = base.clamp_to_pitch(self.field_width, self.field_length);
         let mut best_score = f64::NEG_INFINITY;
-        for dx in [-16.0, -8.0, 0.0, 8.0, 16.0] {
-            for dy in [-6.0, 4.0, 12.0, 20.0] {
+        for dx in [-22.0, -13.0, -6.0, 0.0, 6.0, 13.0, 22.0] {
+            for dy in [-8.0, 0.0, 7.0, 14.0, 22.0, 30.0] {
                 let p = Vec2::new(
-                    home.x + dx * width_scale,
-                    home.y + dy * depth_scale * me.team.attack_dir() + self.ball.position.y * 0.08,
+                    base.x + dx * width_scale,
+                    base.y + dy * depth_scale * me.team.attack_dir(),
                 )
                 .clamp_to_pitch(self.field_width, self.field_length);
                 let forward = (p.y - me_position.y) * me.team.attack_dir();
+                let forward_from_ball = (p.y - self.ball.position.y) * me.team.attack_dir();
+                let lane_bonus = if self.clear_line(self.ball.position, p, me.team.other(), 2.0) {
+                    1.8
+                } else {
+                    -1.2
+                };
+                let offside_penalty = if self.position_would_be_offside(me.team, p) {
+                    14.0
+                } else {
+                    0.0
+                };
                 let score = self.space_score_at(p, me.team)
-                    + forward.max(-4.0) * (0.03 + directive.risk_tolerance * 0.05)
-                    - p.distance(home) * 0.025;
+                    + forward.max(-4.0) * (0.04 + directive.risk_tolerance * 0.08)
+                    + forward_from_ball.clamp(-6.0, 28.0)
+                        * (0.08 + directive.risk_tolerance * 0.09)
+                    - (forward_from_ball - role_depth).abs() * 0.035
+                    - p.distance(home) * 0.010
+                    + lane_bonus
+                    - offside_penalty;
                 if score > best_score {
                     best = p;
                     best_score = score;
@@ -2248,6 +2504,68 @@ impl WorldSnapshot {
         Vec2::new(compact_x, compact_y).clamp_to_pitch(self.field_width, self.field_length)
     }
 
+    pub fn mark_or_zone_for(&self, player_id: usize, home: Vec2) -> Vec2 {
+        let Some(me) = self.players.iter().find(|p| p.id == player_id) else {
+            return home;
+        };
+        if me.role == PlayerRole::Goalkeeper {
+            return self.defensive_shape_for(player_id, home);
+        }
+
+        let zone = self.defensive_shape_for(player_id, home);
+        let own_goal = Vec2::new(self.field_width * 0.5, me.team.other().goal_y(self.field_length));
+        let mut best_mark = None;
+        let mut best_score = f64::NEG_INFINITY;
+        for opponent in self.players.iter().filter(|p| p.team == me.team.other()) {
+            let opponent_position = self.player_position(opponent.id).unwrap_or(opponent.position);
+            let distance_to_goal = opponent_position.distance(own_goal);
+            let ball_distance = opponent_position.distance(self.ball.position);
+            let zone_distance = opponent_position.distance(zone);
+            let role_threat = match opponent.role {
+                PlayerRole::Forward => 7.0,
+                PlayerRole::Midfielder => 4.0,
+                PlayerRole::Defender => 1.5,
+                PlayerRole::Goalkeeper => -8.0,
+            };
+            let holder_bonus = if self.ball.holder == Some(opponent.id) {
+                9.0
+            } else {
+                0.0
+            };
+            let lane_threat = if self.clear_line(opponent_position, own_goal, me.team, 2.4) {
+                4.0
+            } else {
+                0.0
+            };
+            let score = (70.0 - distance_to_goal).max(0.0) * 0.18
+                + (32.0 - ball_distance).max(0.0) * 0.15
+                - zone_distance * 0.055
+                + role_threat
+                + holder_bonus
+                + lane_threat;
+            if score > best_score {
+                best_mark = Some(opponent_position);
+                best_score = score;
+            }
+        }
+
+        let Some(mark) = best_mark else {
+            return zone;
+        };
+        let goal_side = (own_goal - mark).normalized();
+        let mark_distance = match me.role {
+            PlayerRole::Defender => 2.4,
+            PlayerRole::Midfielder => 3.4,
+            PlayerRole::Forward => 4.8,
+            PlayerRole::Goalkeeper => 1.0,
+        };
+        let mark_target = (mark + goal_side * mark_distance).clamp_to_pitch(
+            self.field_width,
+            self.field_length,
+        );
+        (mark_target * 0.72 + zone * 0.28).clamp_to_pitch(self.field_width, self.field_length)
+    }
+
     fn space_score_at(&self, p: Vec2, team: Team) -> f64 {
         let opponent_dist = self
             .players
@@ -2283,6 +2601,36 @@ impl WorldSnapshot {
                 let position = self.player_position(p.id).unwrap_or(p.position);
                 segment_distance_to_point(from, to, position) > radius
             })
+    }
+
+    fn position_would_be_offside(&self, team: Team, position: Vec2) -> bool {
+        let half_line = self.field_length * 0.5;
+        match team {
+            Team::Home if position.y <= half_line => return false,
+            Team::Away if position.y >= half_line => return false,
+            _ => {}
+        }
+
+        let mut defender_ys = self
+            .players
+            .iter()
+            .filter(|p| p.team == team.other())
+            .filter_map(|p| self.player_position(p.id).map(|position| position.y))
+            .collect::<Vec<_>>();
+        if defender_ys.len() < 2 {
+            return false;
+        }
+
+        match team {
+            Team::Home => {
+                defender_ys.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+                position.y > self.ball.position.y && position.y > defender_ys[1]
+            }
+            Team::Away => {
+                defender_ys.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                position.y < self.ball.position.y && position.y < defender_ys[1]
+            }
+        }
     }
 }
 
@@ -2508,6 +2856,30 @@ pub struct OfficialSnapshot {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CentralBrainPlayerAwareness {
+    pub id: usize,
+    pub team: Team,
+    pub position: Vec2,
+    pub velocity: Vec2,
+    pub controller_slot: Option<usize>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CentralBrainSnapshot {
+    pub phase: TacticalPhase,
+    pub possession_team: Option<Team>,
+    pub ball_position: Vec2,
+    pub ball_velocity: Vec2,
+    pub ball_holder: Option<usize>,
+    pub pressure_line_home: f64,
+    pub pressure_line_away: f64,
+    pub tracked_players: Vec<CentralBrainPlayerAwareness>,
+    pub tracked_officials: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MatchFrame {
     pub tick: u64,
     pub clock_seconds: f64,
@@ -2517,6 +2889,7 @@ pub struct MatchFrame {
     pub score_home: u32,
     pub score_away: u32,
     pub phase: TacticalPhase,
+    pub central_brain: CentralBrainSnapshot,
     pub home_directive: TeamTacticalDirective,
     pub away_directive: TeamTacticalDirective,
 }
@@ -2601,6 +2974,20 @@ pub struct SoccerPolicyArtifact {
     pub events: Vec<MatchEvent>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerTeamPolicyArtifact {
+    pub config: MatchConfig,
+    pub summary: MatchSummary,
+    pub learning: SoccerLearningSnapshot,
+    pub adversarial: bool,
+    pub home_options: Option<SoccerQPolicyOptions>,
+    pub away_options: Option<SoccerQPolicyOptions>,
+    pub home_entries: Vec<SoccerQEntry>,
+    pub away_entries: Vec<SoccerQEntry>,
+    pub events: Vec<MatchEvent>,
+}
+
 impl SoccerTrackingDataset {
     pub fn validate(&self) -> Result<(), String> {
         if self.config.dt_seconds <= 0.0 {
@@ -2666,6 +3053,19 @@ pub struct SoccerControllerAssignmentResponse {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SoccerBallSurfaceRequest {
+    pub ball_drag_per_tick: f64,
+    pub ball_stop_speed_yps: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerBallSurfaceResponse {
+    pub config: MatchConfig,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SoccerStepRequest {
     #[serde(default)]
     pub inputs: Vec<HumanInputFrame>,
@@ -2692,6 +3092,7 @@ pub struct SoccerStepResponse {
     pub frames: Vec<MatchFrame>,
     pub events: Vec<MatchEvent>,
     pub learning_transitions: Vec<SoccerLearningTransition>,
+    pub learning: SoccerLearningSnapshot,
     pub summary: MatchSummary,
     pub controller_assignments: Vec<ControllerAssignment>,
     pub accepted_inputs: usize,
@@ -2703,9 +3104,33 @@ pub struct SoccerStepResponse {
 pub struct SoccerLiveStateResponse {
     pub config: MatchConfig,
     pub frame: MatchFrame,
+    pub learning: SoccerLearningSnapshot,
     pub summary: MatchSummary,
     pub controller_assignments: Vec<ControllerAssignment>,
     pub done: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerTeamPolicyImportResponse {
+    pub learning: SoccerLearningSnapshot,
+    pub imported_home_entries: usize,
+    pub imported_away_entries: usize,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerLearningSnapshot {
+    pub total_transitions: usize,
+    pub shared_policy_enabled: bool,
+    pub shared_policy_entries: usize,
+    pub shared_policy_visits: u64,
+    pub team_policies_enabled: bool,
+    pub adversarial_learning_enabled: bool,
+    pub home_policy_entries: usize,
+    pub home_policy_visits: u64,
+    pub away_policy_entries: usize,
+    pub away_policy_visits: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2747,6 +3172,7 @@ pub struct SoccerMatch {
     pub events: Vec<MatchEvent>,
     pub learning_transitions: Vec<SoccerLearningTransition>,
     pub learned_policy: Option<SoccerQPolicy>,
+    pub team_policies: Option<SoccerTeamQPolicies>,
     pub human_inputs: SharedHumanInputs,
     pub central_brain: CentralBrain,
     rng: SeededRandom,
@@ -2816,6 +3242,7 @@ impl SoccerMatch {
             events: Vec::new(),
             learning_transitions: Vec::new(),
             learned_policy: None,
+            team_policies: None,
             human_inputs: SharedHumanInputs::new(),
             central_brain: CentralBrain::default(),
             rng,
@@ -2846,6 +3273,23 @@ impl SoccerMatch {
         self.learned_policy.as_mut()
     }
 
+    pub fn with_team_policies(mut self, team_policies: SoccerTeamQPolicies) -> Self {
+        self.team_policies = Some(team_policies);
+        self
+    }
+
+    pub fn set_team_policies(&mut self, team_policies: SoccerTeamQPolicies) {
+        self.team_policies = Some(team_policies);
+    }
+
+    pub fn team_policies(&self) -> Option<&SoccerTeamQPolicies> {
+        self.team_policies.as_ref()
+    }
+
+    pub fn team_policies_mut(&mut self) -> Option<&mut SoccerTeamQPolicies> {
+        self.team_policies.as_mut()
+    }
+
     pub fn summary(&self) -> MatchSummary {
         MatchSummary {
             score_home: self.score_home,
@@ -2854,6 +3298,80 @@ impl SoccerMatch {
             simulated_seconds: self.clock_seconds,
             stats: self.stats.clone(),
         }
+    }
+
+    pub fn learning_snapshot(&self) -> SoccerLearningSnapshot {
+        let (shared_policy_entries, shared_policy_visits) = self
+            .learned_policy
+            .as_ref()
+            .map(|policy| (policy.q_values.len(), policy.visit_count()))
+            .unwrap_or((0, 0));
+        let (home_policy_entries, home_policy_visits, away_policy_entries, away_policy_visits) =
+            self.team_policies
+                .as_ref()
+                .map(|policies| {
+                    (
+                        policies.home.q_values.len(),
+                        policies.home.visit_count(),
+                        policies.away.q_values.len(),
+                        policies.away.visit_count(),
+                    )
+                })
+                .unwrap_or((0, 0, 0, 0));
+
+        SoccerLearningSnapshot {
+            total_transitions: self.learning_transitions.len(),
+            shared_policy_enabled: self.learned_policy.is_some(),
+            shared_policy_entries,
+            shared_policy_visits,
+            team_policies_enabled: self.team_policies.is_some(),
+            adversarial_learning_enabled: self.team_policies.is_some(),
+            home_policy_entries,
+            home_policy_visits,
+            away_policy_entries,
+            away_policy_visits,
+        }
+    }
+
+    pub fn team_policy_artifact(&self) -> SoccerTeamPolicyArtifact {
+        let (home_options, away_options, home_entries, away_entries) =
+            if let Some(policies) = &self.team_policies {
+                (
+                    Some(policies.home.options.clone()),
+                    Some(policies.away.options.clone()),
+                    policies.home.entries(),
+                    policies.away.entries(),
+                )
+            } else {
+                (None, None, Vec::new(), Vec::new())
+            };
+
+        SoccerTeamPolicyArtifact {
+            config: self.config.clone(),
+            summary: self.summary(),
+            learning: self.learning_snapshot(),
+            adversarial: self.team_policies.is_some(),
+            home_options,
+            away_options,
+            home_entries,
+            away_entries,
+            events: self.events.clone(),
+        }
+    }
+
+    pub fn import_team_policy_artifact(
+        &mut self,
+        artifact: SoccerTeamPolicyArtifact,
+    ) -> Result<SoccerTeamPolicyImportResponse, String> {
+        let policies = SoccerTeamQPolicies::from_artifact(&artifact)?;
+        let imported_home_entries = policies.home.q_values.len();
+        let imported_away_entries = policies.away.q_values.len();
+        self.team_policies = Some(policies);
+        Ok(SoccerTeamPolicyImportResponse {
+            learning: self.learning_snapshot(),
+            imported_home_entries,
+            imported_away_entries,
+        })
     }
 
     pub fn is_done(&self) -> bool {
@@ -2919,6 +3437,38 @@ impl SoccerMatch {
         Ok(())
     }
 
+    pub fn clear_controller_assignments(&mut self) {
+        for player in &mut self.players {
+            player.controller_slot = None;
+        }
+    }
+
+    pub fn update_ball_surface(&mut self, request: SoccerBallSurfaceRequest) -> Result<(), String> {
+        validate_ball_surface(request.ball_drag_per_tick, request.ball_stop_speed_yps)?;
+        self.config.ball_drag_per_tick = request.ball_drag_per_tick;
+        self.config.ball_stop_speed_yps = request.ball_stop_speed_yps;
+        Ok(())
+    }
+
+    fn learned_action_for_player(
+        &self,
+        snapshot: &WorldSnapshot,
+        player_id: usize,
+    ) -> Option<String> {
+        let player = snapshot.players.iter().find(|p| p.id == player_id)?;
+        if let Some(team_policies) = &self.team_policies {
+            if let Some(action) = team_policies
+                .policy(player.team)
+                .best_action_for_snapshot(snapshot, player_id)
+            {
+                return Some(action);
+            }
+        }
+        self.learned_policy
+            .as_ref()
+            .and_then(|policy| policy.best_action_for_snapshot(snapshot, player_id))
+    }
+
     pub fn run_time_step(&mut self) {
         if self.is_done() {
             return;
@@ -2926,7 +3476,8 @@ impl SoccerMatch {
         let brain_input_snapshot = WorldSnapshot::from_match(self);
         let score_home_before = self.score_home;
         let score_away_before = self.score_away;
-        self.central_brain.run_time_step(&brain_input_snapshot);
+        self.central_brain
+            .run_time_step(&brain_input_snapshot, &mut self.rng);
         let snapshot = WorldSnapshot::from_match(self);
         let latest_inputs = self.human_inputs.drain_latest_by_slot();
         let ball_velocity_before = self.ball.velocity;
@@ -2941,10 +3492,7 @@ impl SoccerMatch {
                     .controller_slot
                     .and_then(|slot| latest_inputs.get(&slot))
                     .filter(|frame| frame.player_id.is_none() || frame.player_id == Some(actor));
-                let learned_action = self
-                    .learned_policy
-                    .as_ref()
-                    .and_then(|policy| policy.best_action_for_snapshot(&snapshot, actor));
+                let learned_action = self.learned_action_for_player(&snapshot, actor);
                 let intent = self.players[actor].run_time_step(
                     &snapshot,
                     input,
@@ -2979,8 +3527,11 @@ impl SoccerMatch {
             score_home_before,
             score_away_before,
         );
-        if self.learned_policy.is_some() {
+        if self.learned_policy.is_some() || self.team_policies.is_some() {
             let new_transitions = self.learning_transitions[learning_start..].to_vec();
+            if let Some(team_policies) = &mut self.team_policies {
+                team_policies.train_adversarial(&new_transitions);
+            }
             if let Some(policy) = &mut self.learned_policy {
                 policy.train(&new_transitions);
             }
@@ -2989,6 +3540,9 @@ impl SoccerMatch {
 
     pub fn to_frame(&self) -> MatchFrame {
         let snapshot = WorldSnapshot::from_match(self);
+        let central_brain = self
+            .central_brain
+            .to_snapshot(&snapshot, self.officials.len());
         MatchFrame {
             tick: self.tick,
             clock_seconds: self.clock_seconds,
@@ -3006,6 +3560,7 @@ impl SoccerMatch {
             score_home: self.score_home,
             score_away: self.score_away,
             phase: self.central_brain.phase,
+            central_brain,
             home_directive: self.central_brain.home_directive.clone(),
             away_directive: self.central_brain.away_directive.clone(),
         }
@@ -3576,6 +4131,10 @@ impl SoccerMatch {
     }
 
     fn reset_after_goal(&mut self, kickoff_team: Team) {
+        let center = Vec2::new(
+            self.config.field_width_yards * 0.5,
+            self.config.field_length_yards * 0.5,
+        );
         for p in &mut self.players {
             p.position = p.home_position;
             p.velocity = Vec2::zero();
@@ -3588,29 +4147,40 @@ impl SoccerMatch {
             .filter(|p| p.team == kickoff_team)
             .min_by(|a, b| {
                 a.position
-                    .distance(Vec2::new(
-                        self.config.field_width_yards * 0.5,
-                        self.config.field_length_yards * 0.5,
-                    ))
-                    .partial_cmp(&b.position.distance(Vec2::new(
-                        self.config.field_width_yards * 0.5,
-                        self.config.field_length_yards * 0.5,
-                    )))
+                    .distance(center)
+                    .partial_cmp(&b.position.distance(center))
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
             .map(|p| p.id);
-        self.ball.position = Vec2::new(
-            self.config.field_width_yards * 0.5,
-            self.config.field_length_yards * 0.5,
-        );
+        if let Some(holder_id) = kickoff {
+            if let Some(holder) = self.players.iter_mut().find(|p| p.id == holder_id) {
+                holder.position = center;
+                holder.velocity = Vec2::zero();
+                holder.acceleration = Vec2::zero();
+                holder.record_position_history();
+            }
+        }
+        self.ball.position = center;
         self.ball.velocity = Vec2::zero();
         self.ball.holder = kickoff;
         self.ball.last_touch_team = Some(kickoff_team);
-        self.ball.record_decision(self.tick, "reset");
+        self.ball.record_decision(self.tick, "kickoff");
         self.pending_pass = None;
         self.pending_shot = None;
         self.shared_positions
             .sync_from_players(&self.players, self.tick, self.clock_seconds);
+        let taker = kickoff
+            .and_then(|id| self.players.iter().find(|player| player.id == id))
+            .map(|player| player.name.as_str())
+            .unwrap_or("Kickoff");
+        self.events.push(MatchEvent {
+            tick: self.tick,
+            clock_seconds: self.clock_seconds,
+            kind: "kickoff".to_string(),
+            team: Some(kickoff_team),
+            player_id: kickoff,
+            description: format!("{taker} kickoff for {}", kickoff_team.label()),
+        });
     }
 
     fn stat_shot(&mut self, team: Team) {
@@ -3743,7 +4313,10 @@ pub struct SoccerRealtimeSession {
 impl SoccerRealtimeSession {
     pub fn new(config: MatchConfig) -> Self {
         let input_queue = SharedHumanInputs::new();
-        let sim = SoccerMatch::default_11v11(config).with_human_inputs(input_queue.clone());
+        let mut sim = SoccerMatch::default_11v11(config)
+            .with_human_inputs(input_queue.clone())
+            .with_team_policies(SoccerTeamQPolicies::new(SoccerQPolicyOptions::default()));
+        sim.clear_controller_assignments();
         SoccerRealtimeSession {
             sim,
             input_queue,
@@ -3829,6 +4402,7 @@ impl SoccerRealtimeSession {
             frames,
             events,
             learning_transitions,
+            learning: self.sim.learning_snapshot(),
             summary: self.sim.summary(),
             controller_assignments: self.sim.controller_assignments(),
             accepted_inputs,
@@ -3854,10 +4428,32 @@ impl SoccerRealtimeSession {
         })
     }
 
+    pub fn update_ball_surface(
+        &mut self,
+        request: SoccerBallSurfaceRequest,
+    ) -> Result<SoccerBallSurfaceResponse, String> {
+        self.sim.update_ball_surface(request)?;
+        Ok(SoccerBallSurfaceResponse {
+            config: self.sim.config.clone(),
+        })
+    }
+
+    pub fn team_policy_artifact(&self) -> SoccerTeamPolicyArtifact {
+        self.sim.team_policy_artifact()
+    }
+
+    pub fn import_team_policy_artifact(
+        &mut self,
+        artifact: SoccerTeamPolicyArtifact,
+    ) -> Result<SoccerTeamPolicyImportResponse, String> {
+        self.sim.import_team_policy_artifact(artifact)
+    }
+
     pub fn state_response(&self) -> SoccerLiveStateResponse {
         SoccerLiveStateResponse {
             config: self.sim.config.clone(),
             frame: self.sim.to_frame(),
+            learning: self.sim.learning_snapshot(),
             summary: self.sim.summary(),
             controller_assignments: self.sim.controller_assignments(),
             done: self.sim.is_done(),
@@ -4076,6 +4672,45 @@ fn handle_live_soccer_request(
             };
             LiveHttpResponse::json(&guard.state_response())
         }
+        ("GET", "/api/team-policy") | ("GET", "/api/policy") => {
+            let guard = match session.lock() {
+                Ok(guard) => guard,
+                Err(_) => {
+                    return LiveHttpResponse::error(
+                        500,
+                        "Internal Server Error",
+                        "soccer session lock poisoned",
+                    )
+                }
+            };
+            LiveHttpResponse::json(&guard.team_policy_artifact())
+        }
+        ("POST", "/api/team-policy") | ("POST", "/api/policy") => {
+            let artifact = match serde_json::from_str::<SoccerTeamPolicyArtifact>(req.body) {
+                Ok(artifact) => artifact,
+                Err(e) => {
+                    return LiveHttpResponse::error(
+                        400,
+                        "Bad Request",
+                        &format!("parse team policy artifact: {e}"),
+                    )
+                }
+            };
+            let mut guard = match session.lock() {
+                Ok(guard) => guard,
+                Err(_) => {
+                    return LiveHttpResponse::error(
+                        500,
+                        "Internal Server Error",
+                        "soccer session lock poisoned",
+                    )
+                }
+            };
+            match guard.import_team_policy_artifact(artifact) {
+                Ok(response) => LiveHttpResponse::json(&response),
+                Err(e) => LiveHttpResponse::error(400, "Bad Request", &e),
+            }
+        }
         ("POST", "/api/input") => match parse_human_input_payload(req.body) {
             Ok(inputs) => {
                 let mut count = 0;
@@ -4141,6 +4776,32 @@ fn handle_live_soccer_request(
                 Err(e) => LiveHttpResponse::error(400, "Bad Request", &e),
             }
         }
+        ("POST", "/api/surface") => {
+            let surface_req = match serde_json::from_str::<SoccerBallSurfaceRequest>(req.body) {
+                Ok(req) => req,
+                Err(e) => {
+                    return LiveHttpResponse::error(
+                        400,
+                        "Bad Request",
+                        &format!("parse ball surface request: {e}"),
+                    )
+                }
+            };
+            let mut guard = match session.lock() {
+                Ok(guard) => guard,
+                Err(_) => {
+                    return LiveHttpResponse::error(
+                        500,
+                        "Internal Server Error",
+                        "soccer session lock poisoned",
+                    )
+                }
+            };
+            match guard.update_ball_surface(surface_req) {
+                Ok(response) => LiveHttpResponse::json(&response),
+                Err(e) => LiveHttpResponse::error(400, "Bad Request", &e),
+            }
+        }
         _ => LiveHttpResponse::error(404, "Not Found", "unknown soccer live route"),
     }
 }
@@ -4192,6 +4853,152 @@ pub fn run_learning_episode(config: MatchConfig) -> SoccerLearningDataset {
 
 pub fn soccer_tracking_dataset_from_json(raw: &str) -> Result<SoccerTrackingDataset, String> {
     serde_json::from_str(raw).map_err(|e| format!("parse soccer tracking dataset: {e}"))
+}
+
+/// Parse player tracking rows into a [`SoccerTrackingDataset`].
+///
+/// Expected headers are one row per player sample with required `tick`,
+/// `player_id`, `team`, `role`, `x`, and `y` columns. Optional columns include
+/// `clock_seconds`, `name`, `shirt`, `vx`, `vy`, `home_x`, `home_y`, `ball_x`,
+/// `ball_y`, `ball_vx`, `ball_vy`, `ball_holder`, `last_touch_team`,
+/// `score_home`, and `score_away`.
+pub fn soccer_tracking_dataset_from_csv(
+    raw: &str,
+    config: MatchConfig,
+    source: &str,
+) -> Result<SoccerTrackingDataset, String> {
+    let records = parse_csv_records(raw)?;
+    let Some((header, rows)) = records.split_first() else {
+        return Err("tracking csv is empty".to_string());
+    };
+    let header_map = csv_header_map(header);
+    let mut builders: BTreeMap<u64, TrackingCsvFrameBuilder> = BTreeMap::new();
+
+    for (row_idx, row) in rows.iter().enumerate() {
+        let line_no = row_idx + 2;
+        if row.iter().all(|field| field.trim().is_empty()) {
+            continue;
+        }
+        let tick = csv_required_u64(row, &header_map, &["tick"], line_no)?;
+        let builder = builders
+            .entry(tick)
+            .or_insert_with(|| TrackingCsvFrameBuilder::new(tick));
+        if let Some(clock) = csv_optional_f64(
+            row,
+            &header_map,
+            &["clock_seconds", "clock", "time"],
+            line_no,
+        )? {
+            builder.clock_seconds = Some(clock);
+        }
+        if let Some(ball_position) = csv_optional_vec2(
+            row,
+            &header_map,
+            &["ball_x", "ballx"],
+            &["ball_y", "bally"],
+            line_no,
+        )? {
+            builder.ball_position = Some(ball_position);
+        }
+        if let Some(ball_velocity) = csv_optional_vec2(
+            row,
+            &header_map,
+            &["ball_vx", "ballvx"],
+            &["ball_vy", "ballvy"],
+            line_no,
+        )? {
+            builder.ball_velocity = Some(ball_velocity);
+        }
+        if let Some(holder) =
+            csv_optional_usize(row, &header_map, &["ball_holder", "ballholder"], line_no)?
+        {
+            builder.ball_holder = Some(holder);
+        }
+        if let Some(team_raw) =
+            csv_optional(row, &header_map, &["last_touch_team", "lasttouchteam"])
+        {
+            builder.last_touch_team = Some(parse_tracking_team(team_raw, line_no)?);
+        }
+        if let Some(score_home) =
+            csv_optional_u32(row, &header_map, &["score_home", "scorehome"], line_no)?
+        {
+            builder.score_home = Some(score_home);
+        }
+        if let Some(score_away) =
+            csv_optional_u32(row, &header_map, &["score_away", "scoreaway"], line_no)?
+        {
+            builder.score_away = Some(score_away);
+        }
+
+        let id = csv_required_usize(row, &header_map, &["player_id", "playerid", "id"], line_no)?;
+        let team_raw = csv_required(row, &header_map, &["team"], line_no)?;
+        let role_raw = csv_required(row, &header_map, &["role", "position_role"], line_no)?;
+        let position = Vec2::new(
+            csv_required_f64(row, &header_map, &["x", "player_x", "playerx"], line_no)?,
+            csv_required_f64(row, &header_map, &["y", "player_y", "playery"], line_no)?,
+        );
+        builder.players.push(SoccerTrackingPlayerSample {
+            id,
+            name: csv_optional(row, &header_map, &["name", "player_name", "playername"])
+                .map(ToString::to_string),
+            team: parse_tracking_team(team_raw, line_no)?,
+            role: parse_tracking_role(role_raw, line_no)?,
+            shirt: csv_optional_u8(
+                row,
+                &header_map,
+                &["shirt", "shirt_number", "number"],
+                line_no,
+            )?,
+            position,
+            velocity: csv_optional_vec2(
+                row,
+                &header_map,
+                &["vx", "player_vx", "playervx"],
+                &["vy", "player_vy", "playervy"],
+                line_no,
+            )?,
+            home_position: csv_optional_vec2(
+                row,
+                &header_map,
+                &["home_x", "homex"],
+                &["home_y", "homey"],
+                line_no,
+            )?,
+        });
+    }
+
+    if builders.is_empty() {
+        return Err("tracking csv has no player rows".to_string());
+    }
+
+    let center = Vec2::new(
+        config.field_width_yards * 0.5,
+        config.field_length_yards * 0.5,
+    );
+    let frames = builders
+        .into_values()
+        .map(|builder| SoccerTrackingFrame {
+            tick: builder.tick,
+            clock_seconds: builder
+                .clock_seconds
+                .unwrap_or(builder.tick as f64 * config.dt_seconds),
+            ball_position: builder.ball_position.unwrap_or(center),
+            ball_velocity: builder.ball_velocity,
+            ball_holder: builder.ball_holder,
+            last_touch_team: builder.last_touch_team,
+            score_home: builder.score_home,
+            score_away: builder.score_away,
+            players: builder.players,
+        })
+        .collect::<Vec<_>>();
+
+    let dataset = SoccerTrackingDataset {
+        source: source.to_string(),
+        config,
+        frames,
+    };
+    dataset.validate()?;
+    Ok(dataset)
 }
 
 pub fn soccer_tracking_dataset_to_learning_dataset(
@@ -4276,6 +5083,47 @@ pub fn train_soccer_q_policy_from_tracking(
     Ok(train_soccer_q_policy(&dataset, options))
 }
 
+pub fn train_soccer_team_policies_from_self_play(
+    config: MatchConfig,
+    episodes: usize,
+    options: SoccerQPolicyOptions,
+) -> SoccerSelfPlayTrainingArtifact {
+    let mut policies = SoccerTeamQPolicies::new(options.clone());
+    let mut episode_summaries = Vec::new();
+    let base_seed = config.seed;
+
+    for episode in 0..episodes {
+        let episode_seed = base_seed.wrapping_add(episode as u32);
+        let mut episode_config = config.clone();
+        episode_config.seed = episode_seed;
+        let total_ticks = episode_config.total_ticks();
+        let mut sim = SoccerMatch::default_11v11(episode_config).with_team_policies(policies);
+        for _ in 0..total_ticks {
+            sim.run_time_step();
+        }
+        policies = sim
+            .team_policies
+            .take()
+            .unwrap_or_else(|| SoccerTeamQPolicies::new(options.clone()));
+        episode_summaries.push(SoccerSelfPlayEpisodeSummary {
+            episode,
+            seed: episode_seed as u64,
+            summary: sim.summary(),
+            transitions: sim.learning_transitions.len(),
+            home_policy_entries: policies.home.q_values.len(),
+            away_policy_entries: policies.away.q_values.len(),
+        });
+    }
+
+    SoccerSelfPlayTrainingArtifact {
+        config,
+        options,
+        episodes: episode_summaries,
+        home_entries: policies.home.entries(),
+        away_entries: policies.away.entries(),
+    }
+}
+
 pub fn soccer_policy_artifact_from_learning_dataset(
     dataset: &SoccerLearningDataset,
     options: SoccerQPolicyOptions,
@@ -4319,8 +5167,26 @@ pub fn write_soccer_artifacts() {
     if let Ok(json) = serde_json::to_string_pretty(&policy_artifact) {
         let _ = std::fs::write(policy_path, json);
     }
+    let self_play_config = MatchConfig {
+        duration_seconds: 4.0,
+        seed: MatchConfig::default().seed + 20,
+        ..MatchConfig::default()
+    };
+    let self_play_artifact = train_soccer_team_policies_from_self_play(
+        self_play_config,
+        3,
+        SoccerQPolicyOptions::default(),
+    );
+    let self_play_path = std::path::Path::new("out/soccer-self-play-team-policies.json");
+    if let Ok(json) = serde_json::to_string_pretty(&self_play_artifact) {
+        let _ = std::fs::write(self_play_path, json);
+    }
     println!("# Soccer simulation UI: {}", ui_path.display());
     println!("# Soccer Q-policy artifact: {}", policy_path.display());
+    println!(
+        "# Soccer self-play team-policy artifact: {}",
+        self_play_path.display()
+    );
 }
 
 fn tracking_home_positions(tracking: &SoccerTrackingDataset) -> HashMap<usize, Vec2> {
@@ -4333,6 +5199,241 @@ fn tracking_home_positions(tracking: &SoccerTrackingDataset) -> HashMap<usize, V
         }
     }
     positions
+}
+
+#[derive(Clone, Debug)]
+struct TrackingCsvFrameBuilder {
+    tick: u64,
+    clock_seconds: Option<f64>,
+    ball_position: Option<Vec2>,
+    ball_velocity: Option<Vec2>,
+    ball_holder: Option<usize>,
+    last_touch_team: Option<Team>,
+    score_home: Option<u32>,
+    score_away: Option<u32>,
+    players: Vec<SoccerTrackingPlayerSample>,
+}
+
+impl TrackingCsvFrameBuilder {
+    fn new(tick: u64) -> Self {
+        TrackingCsvFrameBuilder {
+            tick,
+            clock_seconds: None,
+            ball_position: None,
+            ball_velocity: None,
+            ball_holder: None,
+            last_touch_team: None,
+            score_home: None,
+            score_away: None,
+            players: Vec::new(),
+        }
+    }
+}
+
+fn parse_csv_records(raw: &str) -> Result<Vec<Vec<String>>, String> {
+    let mut records = Vec::new();
+    for (idx, line) in raw.lines().enumerate() {
+        let line = line.trim_end_matches('\r');
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+        records.push(parse_csv_record(line).map_err(|e| format!("csv line {}: {e}", idx + 1))?);
+    }
+    Ok(records)
+}
+
+fn parse_csv_record(line: &str) -> Result<Vec<String>, String> {
+    let mut fields = Vec::new();
+    let mut field = String::new();
+    let mut chars = line.chars().peekable();
+    let mut quoted = false;
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' if quoted && chars.peek() == Some(&'"') => {
+                field.push('"');
+                chars.next();
+            }
+            '"' => quoted = !quoted,
+            ',' if !quoted => {
+                fields.push(field.trim().to_string());
+                field.clear();
+            }
+            _ => field.push(ch),
+        }
+    }
+    if quoted {
+        return Err("unterminated quoted field".to_string());
+    }
+    fields.push(field.trim().to_string());
+    Ok(fields)
+}
+
+fn normalize_csv_header(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| *ch != '_' && *ch != '-' && !ch.is_whitespace())
+        .flat_map(|ch| ch.to_lowercase())
+        .collect()
+}
+
+fn csv_header_map(header: &[String]) -> HashMap<String, usize> {
+    header
+        .iter()
+        .enumerate()
+        .map(|(idx, name)| (normalize_csv_header(name), idx))
+        .collect()
+}
+
+fn csv_optional<'a>(
+    row: &'a [String],
+    header: &HashMap<String, usize>,
+    aliases: &[&str],
+) -> Option<&'a str> {
+    aliases.iter().find_map(|alias| {
+        let idx = header.get(&normalize_csv_header(alias))?;
+        let value = row.get(*idx)?.trim();
+        if value.is_empty() {
+            None
+        } else {
+            Some(value)
+        }
+    })
+}
+
+fn csv_required<'a>(
+    row: &'a [String],
+    header: &HashMap<String, usize>,
+    aliases: &[&str],
+    line_no: usize,
+) -> Result<&'a str, String> {
+    csv_optional(row, header, aliases)
+        .ok_or_else(|| format!("csv line {line_no} missing required column {}", aliases[0]))
+}
+
+fn csv_required_f64(
+    row: &[String],
+    header: &HashMap<String, usize>,
+    aliases: &[&str],
+    line_no: usize,
+) -> Result<f64, String> {
+    let raw = csv_required(row, header, aliases, line_no)?;
+    raw.parse::<f64>()
+        .map_err(|e| format!("csv line {line_no} parse {}={raw}: {e}", aliases[0]))
+}
+
+fn csv_required_u64(
+    row: &[String],
+    header: &HashMap<String, usize>,
+    aliases: &[&str],
+    line_no: usize,
+) -> Result<u64, String> {
+    let raw = csv_required(row, header, aliases, line_no)?;
+    raw.parse::<u64>()
+        .map_err(|e| format!("csv line {line_no} parse {}={raw}: {e}", aliases[0]))
+}
+
+fn csv_required_usize(
+    row: &[String],
+    header: &HashMap<String, usize>,
+    aliases: &[&str],
+    line_no: usize,
+) -> Result<usize, String> {
+    let raw = csv_required(row, header, aliases, line_no)?;
+    raw.parse::<usize>()
+        .map_err(|e| format!("csv line {line_no} parse {}={raw}: {e}", aliases[0]))
+}
+
+fn csv_optional_f64(
+    row: &[String],
+    header: &HashMap<String, usize>,
+    aliases: &[&str],
+    line_no: usize,
+) -> Result<Option<f64>, String> {
+    let Some(raw) = csv_optional(row, header, aliases) else {
+        return Ok(None);
+    };
+    raw.parse::<f64>()
+        .map(Some)
+        .map_err(|e| format!("csv line {line_no} parse {}={raw}: {e}", aliases[0]))
+}
+
+fn csv_optional_usize(
+    row: &[String],
+    header: &HashMap<String, usize>,
+    aliases: &[&str],
+    line_no: usize,
+) -> Result<Option<usize>, String> {
+    let Some(raw) = csv_optional(row, header, aliases) else {
+        return Ok(None);
+    };
+    raw.parse::<usize>()
+        .map(Some)
+        .map_err(|e| format!("csv line {line_no} parse {}={raw}: {e}", aliases[0]))
+}
+
+fn csv_optional_u32(
+    row: &[String],
+    header: &HashMap<String, usize>,
+    aliases: &[&str],
+    line_no: usize,
+) -> Result<Option<u32>, String> {
+    let Some(raw) = csv_optional(row, header, aliases) else {
+        return Ok(None);
+    };
+    raw.parse::<u32>()
+        .map(Some)
+        .map_err(|e| format!("csv line {line_no} parse {}={raw}: {e}", aliases[0]))
+}
+
+fn csv_optional_u8(
+    row: &[String],
+    header: &HashMap<String, usize>,
+    aliases: &[&str],
+    line_no: usize,
+) -> Result<Option<u8>, String> {
+    let Some(raw) = csv_optional(row, header, aliases) else {
+        return Ok(None);
+    };
+    raw.parse::<u8>()
+        .map(Some)
+        .map_err(|e| format!("csv line {line_no} parse {}={raw}: {e}", aliases[0]))
+}
+
+fn csv_optional_vec2(
+    row: &[String],
+    header: &HashMap<String, usize>,
+    x_aliases: &[&str],
+    y_aliases: &[&str],
+    line_no: usize,
+) -> Result<Option<Vec2>, String> {
+    let x = csv_optional_f64(row, header, x_aliases, line_no)?;
+    let y = csv_optional_f64(row, header, y_aliases, line_no)?;
+    match (x, y) {
+        (Some(x), Some(y)) => Ok(Some(Vec2::new(x, y))),
+        (None, None) => Ok(None),
+        _ => Err(format!(
+            "csv line {line_no} must provide both {} and {}",
+            x_aliases[0], y_aliases[0]
+        )),
+    }
+}
+
+fn parse_tracking_team(raw: &str, line_no: usize) -> Result<Team, String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "home" | "h" | "1" => Ok(Team::Home),
+        "away" | "a" | "2" => Ok(Team::Away),
+        _ => Err(format!("csv line {line_no} unknown team {raw}")),
+    }
+}
+
+fn parse_tracking_role(raw: &str, line_no: usize) -> Result<PlayerRole, String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "goalkeeper" | "keeper" | "gk" | "g" => Ok(PlayerRole::Goalkeeper),
+        "defender" | "defence" | "defense" | "def" | "d" => Ok(PlayerRole::Defender),
+        "midfielder" | "midfield" | "mid" | "m" => Ok(PlayerRole::Midfielder),
+        "forward" | "striker" | "winger" | "fw" | "st" | "f" => Ok(PlayerRole::Forward),
+        _ => Err(format!("csv line {line_no} unknown role {raw}")),
+    }
 }
 
 fn tracking_frame_to_world_snapshot(
@@ -4365,6 +5466,7 @@ fn tracking_frame_to_world_snapshot(
                 .unwrap_or(p.home_position.unwrap_or(p.position)),
             controller_slot: None,
             acceleration: Vec2::zero(),
+            last_decision: None,
         })
         .collect::<Vec<_>>();
     let shared_positions = SharedPlayerPositionSnapshot::from_player_snapshots(
@@ -5112,6 +6214,39 @@ mod tests {
     }
 
     #[test]
+    fn match_frame_exposes_central_brain_global_awareness() {
+        let kickoff = SoccerMatch::default_11v11(MatchConfig::default()).to_frame();
+        assert_eq!(kickoff.central_brain.possession_team, Some(Team::Home));
+        assert_eq!(kickoff.central_brain.ball_holder, Some(5));
+
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        sim.players[9].position = Vec2::new(41.0, 94.0);
+        sim.players[9].velocity = Vec2::new(0.5, 1.0);
+        sim.ball.holder = Some(9);
+        sim.ball.position = sim.players[9].position;
+        sim.ball.velocity = Vec2::new(0.5, 1.0);
+        sim.ball.last_touch_team = Some(Team::Home);
+        let before = WorldSnapshot::from_match(&sim);
+        sim.central_brain.run_time_step(&before);
+
+        let frame = sim.to_frame();
+
+        assert_eq!(frame.central_brain.tracked_players.len(), 22);
+        assert_eq!(frame.central_brain.tracked_officials, 3);
+        assert_eq!(frame.central_brain.possession_team, Some(Team::Home));
+        assert_eq!(frame.central_brain.ball_holder, Some(9));
+        assert_eq!(frame.central_brain.ball_position, sim.ball.position);
+        let striker = frame
+            .central_brain
+            .tracked_players
+            .iter()
+            .find(|p| p.id == 9)
+            .expect("central brain tracks striker");
+        assert_eq!(striker.position, sim.players[9].position);
+        assert_eq!(striker.velocity, sim.players[9].velocity);
+    }
+
+    #[test]
     fn shared_position_board_tracks_rolling_player_history() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             duration_seconds: 6.0,
@@ -5305,6 +6440,10 @@ mod tests {
             seed: 77,
             ..Default::default()
         });
+        session
+            .match_mut()
+            .assign_controller_slot(0, Some(0))
+            .expect("assign human controller");
         let start_x = session.match_ref().players[0].position.x;
         let queue = session.input_queue();
 
@@ -5327,6 +6466,45 @@ mod tests {
         assert_eq!(resp.summary.ticks, 1);
         assert_eq!(resp.accepted_inputs, 0);
         assert!(session.match_ref().players[0].position.x > start_x);
+    }
+
+    #[test]
+    fn realtime_session_starts_unassigned_so_players_remain_autonomous_until_selected() {
+        let mut session = SoccerRealtimeSession::new(MatchConfig {
+            duration_seconds: 1.0,
+            max_human_players: 1,
+            seed: 771,
+            ..Default::default()
+        });
+        assert!(session.match_ref().controller_assignments().is_empty());
+
+        let response = session.step(SoccerStepRequest {
+            inputs: vec![HumanInputFrame {
+                controller_slot: 0,
+                player_id: Some(0),
+                seq: 1,
+                axis: Vec2::new(1.0, 0.0),
+                sprint: true,
+                pass: false,
+                shoot: false,
+                target_player: None,
+            }],
+            ticks: 1,
+            record_every_ticks: Some(1),
+        });
+
+        assert_eq!(response.accepted_inputs, 1);
+        assert_eq!(session.match_ref().players[0].controller_slot, None);
+        assert_ne!(
+            session.match_ref().players[0]
+                .last_decision
+                .as_ref()
+                .expect("autonomous decision")
+                .operation_order
+                .first()
+                .map(String::as_str),
+            Some("human-input")
+        );
     }
 
     #[test]
@@ -5436,8 +6614,20 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&json).expect("response json");
         assert_eq!(value["summary"]["ticks"], 3);
         assert_eq!(value["frames"].as_array().unwrap().len(), 3);
-        assert_eq!(value["controllerAssignments"].as_array().unwrap().len(), 2);
+        assert_eq!(value["controllerAssignments"].as_array().unwrap().len(), 0);
         assert_eq!(value["learningTransitions"].as_array().unwrap().len(), 66);
+        assert_eq!(value["learning"]["totalTransitions"], 66);
+        assert_eq!(value["learning"]["teamPoliciesEnabled"], true);
+        assert_eq!(value["learning"]["adversarialLearningEnabled"], true);
+        assert!(value["learning"]["homePolicyEntries"].as_u64().unwrap() > 0);
+        assert!(value["learning"]["awayPolicyEntries"].as_u64().unwrap() > 0);
+        assert!(value["learning"]["homePolicyVisits"].as_u64().unwrap() > 0);
+        assert!(value["learning"]["awayPolicyVisits"].as_u64().unwrap() > 0);
+        let player_decision = &value["frame"]["players"][0]["lastDecision"];
+        assert!(player_decision.get("mdpState").is_some());
+        assert!(player_decision.get("observation").is_some());
+        assert!(player_decision.get("belief").is_some());
+        assert!(player_decision.get("action").is_some());
     }
 
     #[test]
@@ -5511,6 +6701,126 @@ mod tests {
     }
 
     #[test]
+    fn team_q_policies_train_each_side_separately() {
+        let dataset = run_learning_episode(MatchConfig {
+            duration_seconds: 0.2,
+            seed: 151,
+            ..Default::default()
+        });
+        let mut policies = SoccerTeamQPolicies::new(SoccerQPolicyOptions::default());
+        policies.train(&dataset.transitions);
+
+        assert!(!policies.home.q_values.is_empty());
+        assert!(!policies.away.q_values.is_empty());
+        assert_eq!(
+            policies.total_entries(),
+            policies.home.q_values.len() + policies.away.q_values.len()
+        );
+    }
+
+    #[test]
+    fn adversarial_team_q_policies_train_against_opponent_rewards() {
+        let dataset = run_learning_episode(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 1511,
+            ..Default::default()
+        });
+        let mut home_transition = dataset
+            .transitions
+            .iter()
+            .find(|t| t.tick == 0 && t.team == Team::Home)
+            .expect("home transition")
+            .clone();
+        let mut away_transition = dataset
+            .transitions
+            .iter()
+            .find(|t| t.tick == 0 && t.team == Team::Away)
+            .expect("away transition")
+            .clone();
+        home_transition.reward = 1.0;
+        home_transition.done = true;
+        away_transition.reward = 0.25;
+        away_transition.done = true;
+
+        let options = SoccerQPolicyOptions {
+            alpha: 0.5,
+            gamma: 0.9,
+        };
+        let mut policies = SoccerTeamQPolicies::new(options);
+        policies.train_adversarial(&[home_transition.clone(), away_transition.clone()]);
+
+        let home_state = SoccerQStateKey::from_transition(&home_transition);
+        let away_state = SoccerQStateKey::from_transition(&away_transition);
+        let home_value = policies
+            .home
+            .q_value(&home_state, &home_transition.action)
+            .expect("home q value");
+        let away_value = policies
+            .away
+            .q_value(&away_state, &away_transition.action)
+            .expect("away q value");
+
+        assert!((home_value - 0.375).abs() < 1e-9);
+        assert!((away_value + 0.375).abs() < 1e-9);
+    }
+
+    #[test]
+    fn team_learned_policy_biases_matching_team_decision() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 152,
+            ..Default::default()
+        });
+        let snapshot = WorldSnapshot::from_match(&sim);
+        assert_eq!(snapshot.ball.holder, Some(5));
+        assert!(snapshot.best_pass_target(5).is_some());
+
+        let mut policies = SoccerTeamQPolicies::new(SoccerQPolicyOptions::default());
+        assert!(policies
+            .policy_mut(Team::Home)
+            .set_action_value_for_snapshot(&snapshot, 5, "pass", 5.0));
+        sim.set_team_policies(policies);
+        sim.run_time_step();
+
+        assert_eq!(
+            sim.players[5]
+                .last_decision
+                .as_ref()
+                .expect("player decision")
+                .action,
+            "pass"
+        );
+        let team_policies = sim.team_policies().expect("online team policies");
+        assert!(!team_policies.home.q_values.is_empty());
+        assert!(team_policies.away.q_values.len() > 0);
+    }
+
+    #[test]
+    fn self_play_training_returns_home_and_away_policy_entries() {
+        let artifact = train_soccer_team_policies_from_self_play(
+            MatchConfig {
+                duration_seconds: 0.2,
+                seed: 153,
+                ..Default::default()
+            },
+            2,
+            SoccerQPolicyOptions::default(),
+        );
+
+        assert_eq!(artifact.episodes.len(), 2);
+        assert_eq!(artifact.episodes[0].transitions, 44);
+        assert_eq!(artifact.episodes[1].transitions, 44);
+        assert!(!artifact.home_entries.is_empty());
+        assert!(!artifact.away_entries.is_empty());
+        assert!(
+            artifact.episodes[1].home_policy_entries >= artifact.episodes[0].home_policy_entries
+        );
+        assert!(
+            artifact.episodes[1].away_policy_entries >= artifact.episodes[0].away_policy_entries
+        );
+    }
+
+    #[test]
     fn semantic_move_labels_are_recorded_for_learning() {
         let dataset = run_learning_episode(MatchConfig {
             duration_seconds: 0.1,
@@ -5563,6 +6873,52 @@ mod tests {
             ..parsed
         };
         assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn tracking_dataset_csv_imports_rows_and_trains_policy() {
+        let config = MatchConfig {
+            duration_seconds: 0.2,
+            seed: 102,
+            ..Default::default()
+        };
+        let raw = r#"tick,clock_seconds,player_id,name,team,role,shirt,x,y,vx,vy,home_x,home_y,ball_x,ball_y,ball_vx,ball_vy,ball_holder,last_touch_team,score_home,score_away
+0,0.0,0,"Home, passer",Home,Midfielder,8,40.0,70.0,0.0,0.0,40.0,65.0,40.0,70.0,0.0,0.0,0,Home,0,0
+0,0.0,1,Home runner,Home,Forward,9,44.0,82.0,0.0,0.0,44.0,80.0,40.0,70.0,0.0,0.0,0,Home,0,0
+0,0.0,2,Away defender,Away,Defender,4,58.0,78.0,0.0,0.0,58.0,78.0,40.0,70.0,0.0,0.0,0,Home,0,0
+1,0.1,0,"Home, passer",Home,Midfielder,8,40.2,70.4,2.0,4.0,40.0,65.0,44.0,82.0,8.0,16.0,1,Home,0,0
+1,0.1,1,Home runner,Home,Forward,9,44.0,82.0,0.0,0.0,44.0,80.0,44.0,82.0,8.0,16.0,1,Home,0,0
+1,0.1,2,Away defender,Away,Defender,4,56.5,78.5,-15.0,5.0,58.0,78.0,44.0,82.0,8.0,16.0,1,Home,0,0
+"#;
+
+        let tracking =
+            soccer_tracking_dataset_from_csv(raw, config, "unit-csv").expect("csv tracking");
+        assert_eq!(tracking.source, "unit-csv");
+        assert_eq!(tracking.frames.len(), 2);
+        assert_eq!(tracking.frames[0].players.len(), 3);
+        assert_eq!(
+            tracking.frames[0].players[0].name.as_deref(),
+            Some("Home, passer")
+        );
+        assert_eq!(tracking.frames[1].ball_holder, Some(1));
+        assert_eq!(
+            tracking.frames[1].players[0].velocity,
+            Some(Vec2::new(2.0, 4.0))
+        );
+
+        let dataset = tracking.to_learning_dataset().expect("learning dataset");
+        assert_eq!(dataset.transitions.len(), 3);
+        let passer = dataset
+            .transitions
+            .iter()
+            .find(|transition| transition.player_id == 0)
+            .expect("passer transition");
+        assert_eq!(passer.action, "pass");
+        let policy =
+            train_soccer_q_policy_from_tracking(&tracking, SoccerQPolicyOptions::default())
+                .expect("policy from csv");
+        let state = SoccerQStateKey::from_transition(passer);
+        assert!(policy.q_value(&state, "pass").is_some());
     }
 
     #[test]
@@ -5762,6 +7118,30 @@ mod tests {
         assert!(long_grass.ball.velocity.len() < short_grass.ball.velocity.len());
         assert!((short_grass.ball.velocity.len() - 9.95).abs() < 1e-9);
         assert!((long_grass.ball.velocity.len() - 8.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn runtime_surface_update_changes_next_ball_drag_tick() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            ball_drag_per_tick: 0.005,
+            seed: 302,
+            ..Default::default()
+        });
+        sim.ball.holder = None;
+        sim.ball.position = Vec2::new(40.0, 60.0);
+        sim.ball.velocity = Vec2::new(10.0, 0.0);
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        sim.update_ball_surface(SoccerBallSurfaceRequest {
+            ball_drag_per_tick: 0.20,
+            ball_stop_speed_yps: 0.7,
+        })
+        .expect("surface update");
+        sim.integrate_ball();
+
+        assert_eq!(sim.config.ball_drag_per_tick, 0.20);
+        assert_eq!(sim.config.ball_stop_speed_yps, 0.7);
+        assert!((sim.ball.velocity.len() - 8.0).abs() < 1e-9);
     }
 
     #[test]
@@ -6008,6 +7388,9 @@ mod tests {
         );
         assert_eq!(state.status, 200);
         assert!(state.body.contains("\"controllerAssignments\""));
+        let state_value: serde_json::Value = serde_json::from_str(&state.body).expect("state json");
+        assert_eq!(state_value["learning"]["teamPoliciesEnabled"], true);
+        assert_eq!(state_value["learning"]["totalTransitions"], 0);
 
         let body = r#"{"ticks":2,"recordEveryTicks":1}"#;
         let step = handle_live_soccer_request(
@@ -6024,6 +7407,12 @@ mod tests {
         assert_eq!(value["summary"]["ticks"], 2);
         assert_eq!(value["frames"].as_array().unwrap().len(), 2);
         assert_eq!(value["learningTransitions"].as_array().unwrap().len(), 44);
+        assert_eq!(value["learning"]["totalTransitions"], 44);
+        assert!(value["learning"]["homePolicyEntries"].as_u64().unwrap() > 0);
+        assert!(value["learning"]["awayPolicyEntries"].as_u64().unwrap() > 0);
+        assert!(value["frame"]["players"][0]["lastDecision"]
+            .get("mdpState")
+            .is_some());
         assert!(value["frame"].get("homeDirective").is_some());
         assert!(value["frame"].get("awayDirective").is_some());
         assert!(value["frame"]["homeDirective"]
@@ -6041,6 +7430,59 @@ mod tests {
         assert!(value["summary"]["stats"].get("cornerKicksHome").is_some());
         assert!(value["summary"]["stats"].get("foulsHome").is_some());
         assert!(value["summary"]["stats"].get("freeKicksAway").is_some());
+
+        let policy = handle_live_soccer_request(
+            "GET /api/team-policy HTTP/1.1\r\nHost: local\r\n\r\n",
+            &session,
+            &input_queue,
+        );
+        assert_eq!(policy.status, 200);
+        let policy_value: serde_json::Value =
+            serde_json::from_str(&policy.body).expect("team policy json");
+        assert_eq!(policy_value["adversarial"], true);
+        assert_eq!(policy_value["summary"]["ticks"], 2);
+        assert_eq!(policy_value["learning"]["totalTransitions"], 44);
+        assert!(policy_value["homeOptions"].get("alpha").is_some());
+        assert!(policy_value["awayOptions"].get("gamma").is_some());
+        assert!(!policy_value["homeEntries"].as_array().unwrap().is_empty());
+        assert!(!policy_value["awayEntries"].as_array().unwrap().is_empty());
+
+        let import_session = Arc::new(Mutex::new(SoccerRealtimeSession::new(MatchConfig {
+            duration_seconds: 1.0,
+            max_human_players: 2,
+            seed: 56,
+            ..Default::default()
+        })));
+        let import_queue = import_session.lock().unwrap().input_queue();
+        let import = handle_live_soccer_request(
+            &format!(
+                "POST /api/team-policy HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
+                policy.body.len(),
+                policy.body
+            ),
+            &import_session,
+            &import_queue,
+        );
+        assert_eq!(import.status, 200);
+        let import_value: serde_json::Value =
+            serde_json::from_str(&import.body).expect("policy import json");
+        assert_eq!(import_value["learning"]["totalTransitions"], 0);
+        assert_eq!(
+            import_value["importedHomeEntries"],
+            policy_value["homeEntries"].as_array().unwrap().len()
+        );
+        assert_eq!(
+            import_value["importedAwayEntries"],
+            policy_value["awayEntries"].as_array().unwrap().len()
+        );
+        assert_eq!(
+            import_value["learning"]["homePolicyEntries"],
+            import_value["importedHomeEntries"]
+        );
+        assert_eq!(
+            import_value["learning"]["awayPolicyEntries"],
+            import_value["importedAwayEntries"]
+        );
     }
 
     #[test]
@@ -6092,6 +7534,52 @@ mod tests {
     }
 
     #[test]
+    fn live_http_surface_route_updates_ball_physics_config() {
+        let session = Arc::new(Mutex::new(SoccerRealtimeSession::new(MatchConfig {
+            duration_seconds: 1.0,
+            seed: 59,
+            ..Default::default()
+        })));
+        let input_queue = session.lock().unwrap().input_queue();
+
+        let body = r#"{"ballDragPerTick":0.045,"ballStopSpeedYps":0.65}"#;
+        let surface = handle_live_soccer_request(
+            &format!(
+                "POST /api/surface HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            ),
+            &session,
+            &input_queue,
+        );
+        assert_eq!(surface.status, 200);
+        let value: serde_json::Value = serde_json::from_str(&surface.body).expect("surface json");
+        assert_eq!(value["config"]["ballDragPerTick"], 0.045);
+        assert_eq!(value["config"]["ballStopSpeedYps"], 0.65);
+        assert_eq!(
+            session
+                .lock()
+                .unwrap()
+                .match_ref()
+                .config
+                .ball_drag_per_tick,
+            0.045
+        );
+
+        let invalid = r#"{"ballDragPerTick":1.1,"ballStopSpeedYps":0.65}"#;
+        let rejected = handle_live_soccer_request(
+            &format!(
+                "POST /api/surface HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
+                invalid.len(),
+                invalid
+            ),
+            &session,
+            &input_queue,
+        );
+        assert_eq!(rejected.status, 400);
+    }
+
+    #[test]
     fn live_http_input_route_feeds_next_step() {
         let session = Arc::new(Mutex::new(SoccerRealtimeSession::new(MatchConfig {
             duration_seconds: 1.0,
@@ -6100,6 +7588,14 @@ mod tests {
             ..Default::default()
         })));
         let input_queue = session.lock().unwrap().input_queue();
+        {
+            session
+                .lock()
+                .unwrap()
+                .match_mut()
+                .assign_controller_slot(0, Some(0))
+                .expect("assign human controller");
+        }
         let start_x = session.lock().unwrap().match_ref().players[0].position.x;
 
         let input = r#"{"controllerSlot":0,"playerId":0,"seq":1,"axis":{"x":1.0,"y":0.0},"sprint":true,"pass":false,"shoot":false,"targetPlayer":null}"#;

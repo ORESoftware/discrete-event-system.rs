@@ -37,6 +37,18 @@ COMMAND_ALIASES = {
     "lindo": ["lindo", "lindoapi"],
 }
 
+COMMAND_ENV_VARS = {
+    "glpk": ["GLPSOL_CMD", "GLPK_CMD", "ORES_GLPK_CMD"],
+    "highs": ["HIGHS_CMD", "ORES_HIGHS_CMD"],
+    "scip": ["SCIP_CMD", "ORES_SCIP_CMD"],
+    "cbc": ["CBC_CMD", "ORES_CBC_CMD"],
+    "clp": ["CLP_CMD", "ORES_CLP_CMD"],
+    "gurobi": ["GUROBI_CL_CMD", "GUROBI_CMD", "ORES_GUROBI_CMD"],
+    "cplex": ["CPLEX_CMD", "ORES_CPLEX_CMD"],
+    "xpress": ["XPRESS_CMD", "XPRESS_OPTIMIZER_CMD", "ORES_XPRESS_CMD"],
+    "lindo": ["LINDO_CMD", "LINDOAPI_CMD", "ORES_LINDO_CMD"],
+}
+
 SUPPORTED_SOLVERS = {"glpk", "highs", "scip", "cbc", "clp", "gurobi", "cplex"}
 
 
@@ -358,6 +370,16 @@ def solver_available(solver: str) -> bool:
 
 
 def solver_command(solver: str) -> Optional[str]:
+    configured_any = False
+    for env_var in COMMAND_ENV_VARS.get(solver, []):
+        configured = os.environ.get(env_var)
+        if configured and configured.strip():
+            configured_any = True
+            resolved = shutil.which(configured)
+            if resolved is not None:
+                return resolved
+    if configured_any:
+        return None
     for command in COMMAND_ALIASES.get(solver, [solver]):
         resolved = shutil.which(command)
         if resolved is not None:

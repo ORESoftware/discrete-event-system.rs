@@ -78,6 +78,27 @@ impl ExternalLinearCliSolver {
         }
     }
 
+    /// Environment variables that may point directly at the solver executable.
+    ///
+    /// These are intentionally local configuration only: users can install
+    /// solvers anywhere on their machine and point the bridge at the command
+    /// without committing binaries or absolute paths to version control.
+    pub fn command_env_vars(self) -> &'static [&'static str] {
+        match self {
+            ExternalLinearCliSolver::Highs => &["HIGHS_CMD", "ORES_HIGHS_CMD"],
+            ExternalLinearCliSolver::Glpk => &["GLPSOL_CMD", "GLPK_CMD", "ORES_GLPK_CMD"],
+            ExternalLinearCliSolver::Scip => &["SCIP_CMD", "ORES_SCIP_CMD"],
+            ExternalLinearCliSolver::Cbc => &["CBC_CMD", "ORES_CBC_CMD"],
+            ExternalLinearCliSolver::Clp => &["CLP_CMD", "ORES_CLP_CMD"],
+            ExternalLinearCliSolver::Gurobi => &["GUROBI_CL_CMD", "GUROBI_CMD", "ORES_GUROBI_CMD"],
+            ExternalLinearCliSolver::Cplex => &["CPLEX_CMD", "ORES_CPLEX_CMD"],
+            ExternalLinearCliSolver::Xpress => {
+                &["XPRESS_CMD", "XPRESS_OPTIMIZER_CMD", "ORES_XPRESS_CMD"]
+            }
+            ExternalLinearCliSolver::Lindo => &["LINDO_CMD", "LINDOAPI_CMD", "ORES_LINDO_CMD"],
+        }
+    }
+
     /// Whether the checked-in bridge knows the non-interactive command and
     /// solution parser for this solver/model family.
     pub fn supports_kind(self, kind: ExternalLinearCliKind) -> bool {
@@ -307,7 +328,7 @@ pub fn solve_ipmip_with_external_cli(
 
 /// Return the first executable-like command path found for a solver's aliases.
 pub fn external_linear_cli_command(solver: ExternalLinearCliSolver) -> Option<PathBuf> {
-    find_first_command(solver.command_aliases())
+    find_first_command(solver.command_env_vars(), solver.command_aliases())
 }
 
 /// Probe one solver for installation, bridge support, and a tiny smoke solve.
@@ -327,7 +348,8 @@ pub fn probe_external_linear_cli_solver(
             smoke_status: None,
             elapsed_ms: elapsed_ms(t0),
             message: format!(
-                "no executable found on PATH for aliases: {}",
+                "no executable found via env vars [{}] or PATH aliases [{}]",
+                solver.command_env_vars().join(", "),
                 solver.command_aliases().join(", ")
             ),
         };
@@ -557,19 +579,49 @@ fn default_linear_cli_script_path() -> PathBuf {
         .join("linear_cli_reference.py")
 }
 
-fn find_first_command(aliases: &[&str]) -> Option<PathBuf> {
+fn find_first_command(env_vars: &[&str], aliases: &[&str]) -> Option<PathBuf> {
+    let mut saw_configured_env = false;
+    for env_var in env_vars {
+        if let Some(value) = std::env::var_os(env_var) {
+            if !value.to_string_lossy().trim().is_empty() {
+                saw_configured_env = true;
+                if let Some(path) = resolve_command_candidate(&PathBuf::from(value)) {
+                    return Some(path);
+                }
+            }
+        }
+    }
+    if saw_configured_env {
+        return None;
+    }
+
     let path_var = std::env::var_os("PATH")?;
     let path_dirs: Vec<PathBuf> = std::env::split_paths(&path_var).collect();
     for alias in aliases {
-        let alias_path = Path::new(alias);
-        if alias_path.components().count() > 1 && alias_path.is_file() {
-            return Some(alias_path.to_path_buf());
+        let alias_path = PathBuf::from(alias);
+        if let Some(path) = resolve_command_candidate(&alias_path) {
+            return Some(path);
         }
         for dir in &path_dirs {
             let candidate = dir.join(alias);
-            if candidate.is_file() {
-                return Some(candidate);
+            if let Some(path) = resolve_command_candidate(&candidate) {
+                return Some(path);
             }
+        }
+    }
+    None
+}
+
+fn resolve_command_candidate(candidate: &Path) -> Option<PathBuf> {
+    if candidate.components().count() > 1 {
+        return candidate.is_file().then(|| candidate.to_path_buf());
+    }
+
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        let path = dir.join(candidate);
+        if path.is_file() {
+            return Some(path);
         }
     }
     None
@@ -719,6 +771,14 @@ mod tests {
     #[test]
     fn solver_aliases_and_kind_support_match_bridge_contract() {
         assert_eq!(ExternalLinearCliSolver::Glpk.command_aliases(), &["glpsol"]);
+        assert_eq!(
+            ExternalLinearCliSolver::Gurobi.command_env_vars(),
+            &["GUROBI_CL_CMD", "GUROBI_CMD", "ORES_GUROBI_CMD"]
+        );
+        assert_eq!(
+            ExternalLinearCliSolver::Lindo.command_env_vars(),
+            &["LINDO_CMD", "LINDOAPI_CMD", "ORES_LINDO_CMD"]
+        );
         assert_eq!(
             ExternalLinearCliSolver::Xpress.command_aliases(),
             &["optimizer", "xpress"]

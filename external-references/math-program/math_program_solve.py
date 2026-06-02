@@ -7,10 +7,39 @@ import argparse
 import contextlib
 import json
 import math
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
 from typing import Any
+
+
+COMMAND_ALIASES = {
+    "glpk": ["glpsol"],
+    "highs": ["highs"],
+    "scip": ["scip"],
+    "cbc": ["cbc"],
+}
+
+COMMAND_ENV_VARS = {
+    "glpk": ["GLPSOL_CMD", "GLPK_CMD", "ORES_GLPK_CMD"],
+    "highs": ["HIGHS_CMD", "ORES_HIGHS_CMD"],
+    "scip": ["SCIP_CMD", "ORES_SCIP_CMD"],
+    "cbc": ["CBC_CMD", "ORES_CBC_CMD"],
+}
+
+
+def _command_for(solver: str) -> str:
+    for env_var in COMMAND_ENV_VARS.get(solver, []):
+        value = os.environ.get(env_var)
+        if value:
+            return value
+    for alias in COMMAND_ALIASES.get(solver, [solver]):
+        path = shutil.which(alias)
+        if path is not None:
+            return path
+    return COMMAND_ALIASES.get(solver, [solver])[0]
 
 
 def _clean(value: Any) -> Any:
@@ -1070,7 +1099,7 @@ def solve_glpsol_cli(
         report_path = f"{tmp}/report.txt"
         names = _write_lp_file(problem, integer, model_path)
         commands = [
-            "glpsol",
+            _command_for("glpk"),
             "--lp",
             model_path,
             "--tmlim",
@@ -1209,7 +1238,7 @@ def solve_scip_cli(
                 "quit",
             ]
         )
-        scip_cmd = ["scip"] if not integer else ["scip", "-q"]
+        scip_cmd = [_command_for("scip")] if not integer else [_command_for("scip"), "-q"]
         for command in commands:
             scip_cmd.extend(["-c", command])
         result = subprocess.run(
@@ -1385,17 +1414,19 @@ def solve_highs_cli(
         model_path = f"{tmp}/model.lp"
         solution_path = f"{tmp}/solution.txt"
         options_path = f"{tmp}/options.txt"
+        log_path = f"{tmp}/highs.log"
         names = _write_lp_file(problem, integer, model_path)
         node_limit = _node_limit(options)
         relative_gap = _relative_gap_limit(options)
         with open(options_path, "w", encoding="utf-8") as handle:
             handle.write(f"time_limit = {_time_limit_seconds_text(options)}\n")
+            handle.write(f"log_file = {log_path}\n")
             if integer and node_limit is not None:
                 handle.write(f"mip_max_nodes = {node_limit}\n")
             if integer and relative_gap is not None:
                 handle.write(f"mip_rel_gap = {relative_gap:.17g}\n")
         commands = [
-            "highs",
+            _command_for("highs"),
             "--model_file",
             model_path,
             "--solution_file",
@@ -1571,7 +1602,7 @@ def solve_cbc_cli(
         names = _write_lp_file(problem, integer, model_path)
         ub_count = len(problem.get("A_ub") or [])
         eq_count = len(problem.get("A_eq") or [])
-        commands = ["cbc", model_path, "sec", _time_limit_seconds_text(options)]
+        commands = [_command_for("cbc"), model_path, "sec", _time_limit_seconds_text(options)]
         node_limit = _node_limit(options)
         relative_gap = _relative_gap_limit(options)
         if integer and node_limit is not None:

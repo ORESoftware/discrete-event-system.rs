@@ -27,6 +27,8 @@ pub const DEFAULT_FIELD_LENGTH_YARDS: f64 = 120.0;
 pub const DEFAULT_FIELD_WIDTH_YARDS: f64 = 80.0;
 pub const DEFAULT_GOAL_WIDTH_YARDS: f64 = 8.0;
 pub const DEFAULT_BALL_DRAG_PER_TICK: f64 = 0.015;
+pub const DEFAULT_BALL_AIR_RESISTANCE: f64 = 0.006;
+pub const DEFAULT_BALL_GRASS_RESISTANCE_YPS2: f64 = 0.45;
 pub const DEFAULT_BALL_STOP_SPEED_YPS: f64 = 0.35;
 const PLAYER_CONTROL_RADIUS_YARDS: f64 = 1.55;
 const PLAYER_BODY_RADIUS_YARDS: f64 = 0.78;
@@ -38,6 +40,14 @@ const BALL_POSITION_HISTORY_LIMIT: usize = 50;
 
 fn default_ball_drag_per_tick() -> f64 {
     DEFAULT_BALL_DRAG_PER_TICK
+}
+
+fn default_ball_air_resistance() -> f64 {
+    DEFAULT_BALL_AIR_RESISTANCE
+}
+
+fn default_ball_grass_resistance_yps2() -> f64 {
+    DEFAULT_BALL_GRASS_RESISTANCE_YPS2
 }
 
 fn default_ball_stop_speed_yps() -> f64 {
@@ -729,6 +739,7 @@ pub struct SoccerSelfPlayTrainingArtifact {
 fn normalize_soccer_action_label(action: &str) -> &str {
     match action {
         "move" => "space",
+        "pass1" | "pass2" | "pass3" => "pass",
         other => other,
     }
 }
@@ -745,6 +756,7 @@ pub struct PlayerAgent {
     pub position: Vec2,
     pub velocity: Vec2,
     pub acceleration: Vec2,
+    pub jerk: Vec2,
     pub position_history: VecDeque<Vec2>,
     pub skills: SkillProfile,
     pub fatigue: f64,
@@ -777,6 +789,19 @@ impl PlayerAgent {
         let v0 = (self.position_history[last - 1] - self.position_history[last - 2]) / dt_seconds;
         let v1 = (self.position_history[last] - self.position_history[last - 1]) / dt_seconds;
         (v1 - v0) / dt_seconds
+    }
+
+    pub fn history_jerk_estimate(&self, dt_seconds: f64) -> Vec2 {
+        if dt_seconds <= 0.0 || self.position_history.len() < 4 {
+            return self.jerk;
+        }
+        let last = self.position_history.len() - 1;
+        let v0 = (self.position_history[last - 2] - self.position_history[last - 3]) / dt_seconds;
+        let v1 = (self.position_history[last - 1] - self.position_history[last - 2]) / dt_seconds;
+        let v2 = (self.position_history[last] - self.position_history[last - 1]) / dt_seconds;
+        let a0 = (v1 - v0) / dt_seconds;
+        let a1 = (v2 - v1) / dt_seconds;
+        (a1 - a0) / dt_seconds
     }
 
     pub fn run_time_step(
@@ -867,110 +892,182 @@ impl PlayerAgent {
             }
         }
 
-        let mut ops = vec![0usize, 1, 2, 3, 4];
-        fisher_yates_shuffle(&mut ops, rng);
-        let mut order_names = Vec::with_capacity(ops.len());
-        let mut chosen = None;
-        for op in ops {
-            match op {
-                0 => {
-                    order_names.push("pass".to_string());
-                    let pass_chance =
-                        (self.preferences.pass_bias * directive.pass_priority).clamp(0.04, 0.96);
-                    if has_ball && rng.next_float() < pass_chance {
-                        if let Some(target) = snapshot.best_pass_target(self.id) {
+        if has_ball {
+            let pass_targets = snapshot.ranked_pass_targets(self.id, 3);
+            let mut ops = vec![0usize, 1];
+            ops.extend((0..pass_targets.len()).map(|rank| rank + 2));
+            fisher_yates_shuffle(&mut ops, rng);
+            let mut order_names = Vec::with_capacity(ops.len());
+            let mut chosen = None;
+            for op in ops {
+                match op {
+                    0 => {
+                        order_names.push("shoot".to_string());
+                        let shot_chance = (self.preferences.shoot_bias
+                            * (0.52 + self.skills.shooting * 0.62)
+                            * (1.0 + directive.risk_tolerance * 0.35))
+                            .clamp(0.04, 0.94);
+                        if observation.shot_lane_open
+                            && observation.yards_to_goal <= directive.shot_threshold_yards
+                            && rng.next_float() < shot_chance
+                        {
+                            chosen = Some((
+                                SoccerAction::Shoot {
+                                    power: 0.72 + 0.28 * self.skills.shooting,
+                                },
+                                "shoot".to_string(),
+                            ));
+                            break;
+                        }
+                    }
+                    1 => {
+                        order_names.push("dribble".to_string());
+                        let dribble_chance = (self.preferences.dribble_bias
+                            * (0.62 + self.skills.dribbling * 0.48)
+                            * directive.carry_priority)
+                            .clamp(0.02, 0.94);
+                        if rng.next_float() < dribble_chance {
+                            let target = snapshot.forward_space_for(self.id, self.home_position);
+                            chosen = Some((SoccerAction::Dribble(target), "dribble".to_string()));
+                            break;
+                        }
+                    }
+                    rank_op => {
+                        let rank = rank_op - 2;
+                        order_names.push(format!("pass{}", rank + 1));
+                        let rank_weight = match rank {
+                            0 => 1.00,
+                            1 => 0.74,
+                            _ => 0.56,
+                        };
+                        let pass_chance = (self.preferences.pass_bias
+                            * directive.pass_priority
+                            * (0.70 + self.skills.passing * 0.42)
+                            * rank_weight)
+                            .clamp(0.04, 0.97);
+                        if rng.next_float() < pass_chance {
+                            let target = pass_targets[rank];
                             chosen = Some((
                                 SoccerAction::Pass {
                                     target_player: Some(target),
                                     power: 0.58 + 0.32 * self.skills.passing,
                                 },
-                                "pass".to_string(),
+                                format!("pass{}", rank + 1),
                             ));
                             break;
                         }
                     }
                 }
-                1 => {
-                    order_names.push("dribble".to_string());
-                    let dribble_chance = (self.preferences.dribble_bias
-                        * (0.62 + self.skills.dribbling * 0.48)
-                        * directive.carry_priority)
-                        .clamp(0.02, 0.94);
-                    if has_ball && rng.next_float() < dribble_chance {
-                        let target = snapshot.forward_space_for(self.id, self.home_position);
-                        chosen = Some((SoccerAction::Dribble(target), "dribble".to_string()));
-                        break;
-                    }
-                }
-                2 => {
-                    order_names.push("tackle".to_string());
-                    if let Some(holder) = snapshot.ball.holder {
-                        let holder_is_opponent = snapshot
-                            .players
-                            .iter()
-                            .find(|p| p.id == holder)
-                            .is_some_and(|p| p.team == self.team.other());
-                        if !has_ball
-                            && holder_is_opponent
-                            && self.position.distance(snapshot.ball.position) < 3.1
-                            && rng.next_float()
-                                < ((self.skills.defending * 0.6 + self.skills.aggression * 0.4)
-                                    * directive.press_intensity)
-                                    .clamp(0.02, 0.92)
-                        {
-                            chosen = Some((
-                                SoccerAction::Tackle {
-                                    target_player: holder,
-                                },
-                                "tackle".to_string(),
-                            ));
-                            break;
-                        }
-                    }
-                }
-                3 => {
-                    order_names.push("defend".to_string());
-                    if !has_ball && snapshot.possession_team() == Some(self.team.other()) {
-                        let dist = self.position.distance(snapshot.ball.position);
-                        let defend_radius = 5.0 + directive.press_intensity * 7.0;
-                        if dist < defend_radius
-                            || rng.next_float()
-                                < (self.skills.aggression * directive.press_intensity * 0.36)
-                                    .clamp(0.02, 0.95)
-                        {
-                            let target = if dist < defend_radius {
-                                snapshot.ball.position
-                            } else {
-                                snapshot.mark_or_zone_for(self.id, self.home_position)
-                            };
-                            chosen = Some((
-                                SoccerAction::MoveTo(target),
-                                "defend".to_string(),
-                            ));
-                            break;
-                        }
-                    }
-                }
-                4 => {
-                    order_names.push("space".to_string());
-                    if !has_ball {
-                        let target = if snapshot.possession_team() == Some(self.team) {
-                            snapshot.open_space_for(self.id, self.home_position)
-                        } else if snapshot.possession_team() == Some(self.team.other()) {
-                            snapshot.mark_or_zone_for(self.id, self.home_position)
-                        } else {
-                            snapshot.defensive_shape_for(self.id, self.home_position)
-                        };
-                        chosen = Some((SoccerAction::MoveTo(target), "space".to_string()));
-                        break;
-                    }
-                }
-                _ => {}
             }
+
+            let (action, action_label) = chosen.unwrap_or_else(|| {
+                if let Some(target) = pass_targets.first() {
+                    (
+                        SoccerAction::Pass {
+                            target_player: Some(*target),
+                            power: 0.58 + 0.32 * self.skills.passing,
+                        },
+                        "pass1".to_string(),
+                    )
+                } else {
+                    (
+                        SoccerAction::Dribble(snapshot.forward_space_for(self.id, self.home_position)),
+                        "dribble".to_string(),
+                    )
+                }
+            });
+            self.last_decision = Some(AgentDecisionTrace {
+                mdp_state,
+                observation,
+                belief,
+                operation_order: order_names,
+                action: action_label,
+            });
+            return PlayerIntent {
+                player_id: self.id,
+                action,
+                sprint: false,
+            };
         }
 
-        let (action, action_label) = chosen
-            .unwrap_or_else(|| (SoccerAction::MoveTo(self.home_position), "hold".to_string()));
+        let possession_team = snapshot.possession_team();
+        let mut order_names = Vec::new();
+        let (action, action_label) = if possession_team == Some(self.team) {
+            let roam = rng.next_float() < 0.10;
+            order_names.push(if roam { "support-roam" } else { "support-shape" }.to_string());
+            (
+                SoccerAction::MoveTo(snapshot.positional_open_space_for(
+                    self.id,
+                    self.home_position,
+                    roam,
+                )),
+                "space".to_string(),
+            )
+        } else if possession_team == Some(self.team.other()) {
+            let mut ops = vec![0usize, 1];
+            fisher_yates_shuffle(&mut ops, rng);
+            let mut chosen = None;
+            for op in ops {
+                match op {
+                    0 => {
+                        order_names.push("tackle".to_string());
+                        if let Some(holder) = snapshot.ball.holder {
+                            let holder_is_opponent = snapshot
+                                .players
+                                .iter()
+                                .find(|p| p.id == holder)
+                                .is_some_and(|p| p.team == self.team.other());
+                            if holder_is_opponent
+                                && self.position.distance(snapshot.ball.position) < 3.1
+                                && rng.next_float()
+                                    < ((self.skills.defending * 0.6
+                                        + self.skills.aggression * 0.4)
+                                        * directive.press_intensity)
+                                        .clamp(0.02, 0.92)
+                            {
+                                chosen = Some((
+                                    SoccerAction::Tackle {
+                                        target_player: holder,
+                                    },
+                                    "tackle".to_string(),
+                                ));
+                                break;
+                            }
+                        }
+                    }
+                    _ => {
+                        let roam = rng.next_float() < 0.10;
+                        order_names.push(if roam { "defend-roam" } else { "defend-shape" }.to_string());
+                        let dist = self.position.distance(snapshot.ball.position);
+                        let defend_radius = 3.0 + directive.press_intensity * 3.0;
+                        let target = if roam && dist < defend_radius {
+                            snapshot.ball.position
+                        } else {
+                            snapshot.defensive_assignment_for(self.id, self.home_position, roam)
+                        };
+                        chosen = Some((SoccerAction::MoveTo(target), "defend".to_string()));
+                        break;
+                    }
+                }
+            }
+            chosen.unwrap_or_else(|| {
+                (
+                    SoccerAction::MoveTo(snapshot.defensive_assignment_for(
+                        self.id,
+                        self.home_position,
+                        false,
+                    )),
+                    "defend".to_string(),
+                )
+            })
+        } else {
+            order_names.push("hold-shape".to_string());
+            (
+                SoccerAction::MoveTo(snapshot.defensive_shape_for(self.id, self.home_position)),
+                "hold".to_string(),
+            )
+        };
+
         self.last_decision = Some(AgentDecisionTrace {
             mdp_state,
             observation,
@@ -1005,21 +1102,36 @@ impl PlayerAgent {
                     "shoot".to_string(),
                 ))
             }
-            "pass" if observation.has_ball => snapshot.best_pass_target(self.id).map(|target| {
+            "pass" | "pass1" if observation.has_ball => snapshot.best_pass_target(self.id).map(|target| {
                 (
                     SoccerAction::Pass {
                         target_player: Some(target),
                         power: 0.58 + 0.32 * self.skills.passing,
                     },
-                    "pass".to_string(),
+                    "pass1".to_string(),
                 )
             }),
+            "pass2" | "pass3" if observation.has_ball => {
+                let rank = if label == "pass2" { 1 } else { 2 };
+                snapshot.ranked_pass_targets(self.id, 3).get(rank).map(|target| (
+                    SoccerAction::Pass {
+                        target_player: Some(*target),
+                        power: 0.58 + 0.32 * self.skills.passing,
+                    },
+                    format!("pass{}", rank + 1),
+                )
+                )
+            }
             "dribble" if observation.has_ball => Some((
                 SoccerAction::Dribble(snapshot.forward_space_for(self.id, self.home_position)),
                 "dribble".to_string(),
             )),
             "defend" if snapshot.possession_team() == Some(self.team.other()) => Some((
-                SoccerAction::MoveTo(snapshot.mark_or_zone_for(self.id, self.home_position)),
+                SoccerAction::MoveTo(snapshot.defensive_assignment_for(
+                    self.id,
+                    self.home_position,
+                    false,
+                )),
                 "defend".to_string(),
             )),
             "tackle" => snapshot.ball.holder.and_then(|holder| {
@@ -1039,9 +1151,9 @@ impl PlayerAgent {
             }),
             "space" if !observation.has_ball => {
                 let target = if snapshot.possession_team() == Some(self.team) {
-                    snapshot.open_space_for(self.id, self.home_position)
+                    snapshot.positional_open_space_for(self.id, self.home_position, false)
                 } else if snapshot.possession_team() == Some(self.team.other()) {
-                    snapshot.mark_or_zone_for(self.id, self.home_position)
+                    snapshot.defensive_assignment_for(self.id, self.home_position, false)
                 } else {
                     snapshot.defensive_shape_for(self.id, self.home_position)
                 };
@@ -1197,6 +1309,7 @@ pub struct PlayerPositionSample {
     pub position: Vec2,
     pub velocity: Vec2,
     pub acceleration: Vec2,
+    pub jerk: Vec2,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1229,6 +1342,7 @@ impl SharedPlayerPositionSnapshot {
                 position: p.position,
                 velocity: p.velocity,
                 acceleration: p.acceleration,
+                jerk: p.jerk,
             })
             .collect::<Vec<_>>();
         let histories = latest
@@ -1272,6 +1386,7 @@ impl SharedPlayerPositionStore {
                 position: p.position,
                 velocity: p.velocity,
                 acceleration: p.acceleration,
+                jerk: p.jerk,
             })
             .collect();
         for sample in &self.latest {
@@ -1311,6 +1426,15 @@ impl SharedPlayerPositionStore {
                 } else {
                     p.acceleration
                 };
+                let prev_acceleration = self
+                    .latest_for(p.id)
+                    .map(|sample| sample.acceleration)
+                    .unwrap_or(p.acceleration);
+                let jerk = if dt_seconds > 0.0 {
+                    (acceleration - prev_acceleration) / dt_seconds
+                } else {
+                    p.jerk
+                };
                 PlayerPositionSample {
                     player_id: p.id,
                     tick,
@@ -1318,6 +1442,7 @@ impl SharedPlayerPositionStore {
                     position: p.position,
                     velocity: p.velocity,
                     acceleration,
+                    jerk,
                 }
             })
             .collect::<Vec<_>>();
@@ -1558,9 +1683,15 @@ impl BallAgent {
             return BallStepOutcome::None;
         }
 
-        self.position += self.velocity * context.dt_seconds;
-        let drag_multiplier = (1.0 - context.ball_drag_per_tick).clamp(0.0, 1.0);
-        self.velocity = self.velocity * drag_multiplier;
+        let previous_velocity = self.velocity;
+        self.velocity = ball_velocity_after_resistance(
+            self.velocity,
+            context.dt_seconds,
+            context.ball_drag_per_tick,
+            context.ball_air_resistance,
+            context.ball_grass_resistance_yps2,
+        );
+        self.position += (previous_velocity + self.velocity) * 0.5 * context.dt_seconds;
         if self.velocity.len() < context.ball_stop_speed_yps {
             self.velocity = Vec2::zero();
         }
@@ -1752,10 +1883,65 @@ pub struct OfficialAgent {
     pub kind: OfficialKind,
     pub position: Vec2,
     pub velocity: Vec2,
+    pub acceleration: Vec2,
+    pub jerk: Vec2,
+    pub position_history: VecDeque<Vec2>,
 }
 
 impl OfficialAgent {
+    fn new(id: usize, kind: OfficialKind, position: Vec2) -> Self {
+        OfficialAgent {
+            id,
+            kind,
+            position,
+            velocity: Vec2::zero(),
+            acceleration: Vec2::zero(),
+            jerk: Vec2::zero(),
+            position_history: VecDeque::from([position]),
+        }
+    }
+
+    fn record_position_history(&mut self) {
+        self.position_history.push_back(self.position);
+        while self.position_history.len() > PLAYER_POSITION_HISTORY_LIMIT {
+            self.position_history.pop_front();
+        }
+    }
+
+    pub fn history_velocity_estimate(&self, dt_seconds: f64) -> Vec2 {
+        if dt_seconds <= 0.0 || self.position_history.len() < 2 {
+            return self.velocity;
+        }
+        let last = self.position_history.len() - 1;
+        (self.position_history[last] - self.position_history[last - 1]) / dt_seconds
+    }
+
+    pub fn history_acceleration_estimate(&self, dt_seconds: f64) -> Vec2 {
+        if dt_seconds <= 0.0 || self.position_history.len() < 3 {
+            return self.acceleration;
+        }
+        let last = self.position_history.len() - 1;
+        let v0 = (self.position_history[last - 1] - self.position_history[last - 2]) / dt_seconds;
+        let v1 = (self.position_history[last] - self.position_history[last - 1]) / dt_seconds;
+        (v1 - v0) / dt_seconds
+    }
+
+    pub fn history_jerk_estimate(&self, dt_seconds: f64) -> Vec2 {
+        if dt_seconds <= 0.0 || self.position_history.len() < 4 {
+            return self.jerk;
+        }
+        let last = self.position_history.len() - 1;
+        let v0 = (self.position_history[last - 2] - self.position_history[last - 3]) / dt_seconds;
+        let v1 = (self.position_history[last - 1] - self.position_history[last - 2]) / dt_seconds;
+        let v2 = (self.position_history[last] - self.position_history[last - 1]) / dt_seconds;
+        let a0 = (v1 - v0) / dt_seconds;
+        let a1 = (v2 - v1) / dt_seconds;
+        (a1 - a0) / dt_seconds
+    }
+
     fn run_time_step(&mut self, snapshot: &WorldSnapshot, rng: &mut SeededRandom) {
+        let previous_velocity = self.velocity;
+        let previous_acceleration = self.acceleration;
         let target = match self.kind {
             OfficialKind::CenterReferee => Vec2::new(
                 snapshot.field_width * 0.5,
@@ -1769,10 +1955,21 @@ impl OfficialAgent {
         let jitter = Vec2::new(rng.next_float() - 0.5, rng.next_float() - 0.5) * 0.25;
         let desired = (target + jitter - self.position).normalized() * 6.1;
         self.velocity = approach_velocity(self.velocity, desired, 5.2, snapshot.dt_seconds);
+        self.acceleration = if snapshot.dt_seconds > 0.0 {
+            (self.velocity - previous_velocity) / snapshot.dt_seconds
+        } else {
+            Vec2::zero()
+        };
+        self.jerk = if snapshot.dt_seconds > 0.0 {
+            (self.acceleration - previous_acceleration) / snapshot.dt_seconds
+        } else {
+            Vec2::zero()
+        };
         self.position += self.velocity * snapshot.dt_seconds;
         self.position = self
             .position
             .clamp_to_pitch(snapshot.field_width, snapshot.field_length);
+        self.record_position_history();
     }
 }
 
@@ -1786,6 +1983,10 @@ pub struct MatchConfig {
     pub goal_width_yards: f64,
     #[serde(default = "default_ball_drag_per_tick")]
     pub ball_drag_per_tick: f64,
+    #[serde(default = "default_ball_air_resistance")]
+    pub ball_air_resistance: f64,
+    #[serde(default = "default_ball_grass_resistance_yps2")]
+    pub ball_grass_resistance_yps2: f64,
     #[serde(default = "default_ball_stop_speed_yps")]
     pub ball_stop_speed_yps: f64,
     pub max_human_players: usize,
@@ -1801,6 +2002,8 @@ impl Default for MatchConfig {
             field_width_yards: DEFAULT_FIELD_WIDTH_YARDS,
             goal_width_yards: DEFAULT_GOAL_WIDTH_YARDS,
             ball_drag_per_tick: DEFAULT_BALL_DRAG_PER_TICK,
+            ball_air_resistance: DEFAULT_BALL_AIR_RESISTANCE,
+            ball_grass_resistance_yps2: DEFAULT_BALL_GRASS_RESISTANCE_YPS2,
             ball_stop_speed_yps: DEFAULT_BALL_STOP_SPEED_YPS,
             max_human_players: 4,
             seed: 2026,
@@ -1818,12 +2021,29 @@ impl MatchConfig {
     }
 }
 
-fn validate_ball_surface(ball_drag_per_tick: f64, ball_stop_speed_yps: f64) -> Result<(), String> {
+fn validate_ball_surface(
+    ball_drag_per_tick: f64,
+    ball_air_resistance: f64,
+    ball_grass_resistance_yps2: f64,
+    ball_stop_speed_yps: f64,
+) -> Result<(), String> {
     if !ball_drag_per_tick.is_finite() {
         return Err("ballDragPerTick must be finite".to_string());
     }
     if !(0.0..=0.95).contains(&ball_drag_per_tick) {
         return Err("ballDragPerTick must be between 0.0 and 0.95".to_string());
+    }
+    if !ball_air_resistance.is_finite() {
+        return Err("ballAirResistance must be finite".to_string());
+    }
+    if !(0.0..=0.10).contains(&ball_air_resistance) {
+        return Err("ballAirResistance must be between 0.0 and 0.10".to_string());
+    }
+    if !ball_grass_resistance_yps2.is_finite() {
+        return Err("ballGrassResistanceYps2 must be finite".to_string());
+    }
+    if !(0.0..=5.0).contains(&ball_grass_resistance_yps2) {
+        return Err("ballGrassResistanceYps2 must be between 0.0 and 5.0".to_string());
     }
     if !ball_stop_speed_yps.is_finite() {
         return Err("ballStopSpeedYps must be finite".to_string());
@@ -1896,6 +2116,8 @@ struct BallStepContext<'a> {
     clock_seconds: f64,
     dt_seconds: f64,
     ball_drag_per_tick: f64,
+    ball_air_resistance: f64,
+    ball_grass_resistance_yps2: f64,
     ball_stop_speed_yps: f64,
     field_length: f64,
     field_width: f64,
@@ -1998,6 +2220,16 @@ struct DefensiveCoverProfile {
     target: usize,
     actual: usize,
     foremost_attacker_y: Option<f64>,
+}
+
+impl Default for DefensiveCoverProfile {
+    fn default() -> Self {
+        DefensiveCoverProfile {
+            target: 2,
+            actual: 2,
+            foremost_attacker_y: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2122,6 +2354,7 @@ pub struct PlayerSnapshot {
     pub home_position: Vec2,
     pub controller_slot: Option<usize>,
     pub acceleration: Vec2,
+    pub jerk: Vec2,
     pub last_decision: Option<AgentDecisionTrace>,
 }
 
@@ -2171,6 +2404,10 @@ impl WorldSnapshot {
                     .latest_for(p.id)
                     .map(|sample| sample.acceleration)
                     .unwrap_or(p.acceleration),
+                jerk: shared_positions
+                    .latest_for(p.id)
+                    .map(|sample| sample.jerk)
+                    .unwrap_or(p.jerk),
                 last_decision: p.last_decision.clone(),
             })
             .collect::<Vec<_>>();
@@ -2234,6 +2471,18 @@ impl WorldSnapshot {
                     .iter()
                     .find(|p| p.id == player_id)
                     .map(|p| p.acceleration)
+            })
+    }
+
+    pub fn player_jerk(&self, player_id: usize) -> Option<Vec2> {
+        self.shared_positions
+            .latest_for(player_id)
+            .map(|sample| sample.jerk)
+            .or_else(|| {
+                self.players
+                    .iter()
+                    .find(|p| p.id == player_id)
+                    .map(|p| p.jerk)
             })
     }
 
@@ -2317,10 +2566,17 @@ impl WorldSnapshot {
     }
 
     pub fn best_pass_target(&self, player_id: usize) -> Option<usize> {
-        let me = self.players.iter().find(|p| p.id == player_id)?;
+        self.ranked_pass_targets(player_id, 1).into_iter().next()
+    }
+
+    pub fn ranked_pass_targets(&self, player_id: usize, limit: usize) -> Vec<usize> {
+        let Some(me) = self.players.iter().find(|p| p.id == player_id) else {
+            return Vec::new();
+        };
         let me_position = self.player_position(me.id).unwrap_or(me.position);
         let directive = self.tactical_directive(me.team);
-        self.players
+        let mut ranked = self
+            .players
             .iter()
             .filter(|p| p.team == me.team && p.id != me.id)
             .filter_map(|p| {
@@ -2335,13 +2591,21 @@ impl WorldSnapshot {
                 let dist = me_position.distance(position);
                 let support_fit = (dist - directive.support_depth_yards).abs();
                 let forward_weight = 0.08 + directive.risk_tolerance * 0.15;
+                let role_bonus = match p.role {
+                    PlayerRole::Forward => 1.4,
+                    PlayerRole::Midfielder => 0.8,
+                    PlayerRole::Defender => 0.1,
+                    PlayerRole::Goalkeeper => -3.0,
+                };
                 let score = forward * forward_weight + self.space_score_at(position, me.team)
                     - dist * 0.010
-                    - support_fit * 0.020;
+                    - support_fit * 0.020
+                    + role_bonus;
                 (p.id, score)
             })
-            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(id, _)| id)
+            .collect::<Vec<_>>();
+        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        ranked.into_iter().take(limit).map(|(id, _)| id).collect()
     }
 
     fn pending_offside_for_pass(
@@ -2480,6 +2744,32 @@ impl WorldSnapshot {
             .clamp_to_pitch(self.field_width, self.field_length)
     }
 
+    pub fn positional_open_space_for(&self, player_id: usize, home: Vec2, roam: bool) -> Vec2 {
+        let Some(me) = self.players.iter().find(|p| p.id == player_id) else {
+            return home;
+        };
+        let open = self.open_space_for(player_id, home);
+        if roam {
+            return open;
+        }
+        let shape = if self.possession_team() == Some(me.team) {
+            let support_y = self.ball.position.y
+                - me.team.attack_dir()
+                    * match me.role {
+                        PlayerRole::Goalkeeper => 30.0,
+                        PlayerRole::Defender => 18.0,
+                        PlayerRole::Midfielder => 8.0,
+                        PlayerRole::Forward => -8.0,
+                    };
+            Vec2::new(home.x * 0.72 + self.ball.position.x * 0.28, support_y)
+                .clamp_to_pitch(self.field_width, self.field_length)
+        } else {
+            self.defensive_shape_for(player_id, home)
+        };
+        let target = open * 0.55 + shape * 0.30 + home * 0.15;
+        self.clamp_to_role_position(player_id, target, home, false)
+    }
+
     pub fn defensive_shape_for(&self, player_id: usize, home: Vec2) -> Vec2 {
         let Some(me) = self.players.iter().find(|p| p.id == player_id) else {
             return home;
@@ -2566,6 +2856,38 @@ impl WorldSnapshot {
         (mark_target * 0.72 + zone * 0.28).clamp_to_pitch(self.field_width, self.field_length)
     }
 
+    pub fn defensive_assignment_for(&self, player_id: usize, home: Vec2, roam: bool) -> Vec2 {
+        let zone = self.defensive_shape_for(player_id, home);
+        let mark = self.mark_or_zone_for(player_id, home);
+        let blended = if roam {
+            mark * 0.78 + zone * 0.22
+        } else {
+            mark * 0.46 + zone * 0.54
+        };
+        self.clamp_to_role_position(player_id, blended, home, roam)
+    }
+
+    fn clamp_to_role_position(&self, player_id: usize, target: Vec2, home: Vec2, roam: bool) -> Vec2 {
+        let Some(me) = self.players.iter().find(|p| p.id == player_id) else {
+            return home;
+        };
+        if roam {
+            return target.clamp_to_pitch(self.field_width, self.field_length);
+        }
+        let radius = match me.role {
+            PlayerRole::Goalkeeper => 7.0,
+            PlayerRole::Defender => 13.0,
+            PlayerRole::Midfielder => 18.0,
+            PlayerRole::Forward => 20.0,
+        };
+        let delta = target - home;
+        if delta.len() <= radius {
+            target.clamp_to_pitch(self.field_width, self.field_length)
+        } else {
+            (home + delta.normalized() * radius).clamp_to_pitch(self.field_width, self.field_length)
+        }
+    }
+
     fn space_score_at(&self, p: Vec2, team: Team) -> f64 {
         let opponent_dist = self
             .players
@@ -2634,6 +2956,58 @@ impl WorldSnapshot {
     }
 }
 
+fn sample_defensive_cover_target(rng: &mut SeededRandom) -> usize {
+    let roll = rng.next_float();
+    if roll < 0.10 {
+        0
+    } else if roll < 0.20 {
+        1
+    } else if roll < 0.50 {
+        2
+    } else if roll < 0.80 {
+        3
+    } else {
+        4
+    }
+}
+
+fn defensive_cover_profile(
+    snapshot: &WorldSnapshot,
+    team: Team,
+    target: usize,
+) -> DefensiveCoverProfile {
+    let foremost_attacker_y = snapshot
+        .players
+        .iter()
+        .filter(|player| player.team == team.other() && player.role != PlayerRole::Goalkeeper)
+        .filter_map(|player| snapshot.player_position(player.id).map(|position| position.y))
+        .reduce(|a, b| match team {
+            Team::Home => a.min(b),
+            Team::Away => a.max(b),
+        });
+
+    let actual = foremost_attacker_y
+        .map(|attacker_y| {
+            snapshot
+                .players
+                .iter()
+                .filter(|player| player.team == team && player.role != PlayerRole::Goalkeeper)
+                .filter_map(|player| snapshot.player_position(player.id))
+                .filter(|position| match team {
+                    Team::Home => position.y <= attacker_y,
+                    Team::Away => position.y >= attacker_y,
+                })
+                .count()
+        })
+        .unwrap_or(0);
+
+    DefensiveCoverProfile {
+        target,
+        actual,
+        foremost_attacker_y,
+    }
+}
+
 fn tactical_directive_for_team(
     team: Team,
     phase: TacticalPhase,
@@ -2642,6 +3016,7 @@ fn tactical_directive_for_team(
     score_diff_for_team: i32,
     field_width: f64,
     field_length: f64,
+    defensive_cover: DefensiveCoverProfile,
 ) -> TeamTacticalDirective {
     let has_ball = possession_team == Some(team);
     let defending = possession_team == Some(team.other());
@@ -2663,7 +3038,7 @@ fn tactical_directive_for_team(
         0.0
     };
     let attack_dir = team.attack_dir();
-    let line_seed = if has_ball {
+    let mut line_seed = if has_ball {
         let holding_distance = if attacking_phase { 18.0 } else { 25.0 };
         ball_position.y - attack_dir * holding_distance
     } else if defending {
@@ -2675,6 +3050,27 @@ fn tactical_directive_for_team(
             Team::Away => field_length * 0.58,
         }
     };
+    if defending {
+        if let Some(foremost_attacker_y) = defensive_cover.foremost_attacker_y {
+            let goal_side_dir = -attack_dir;
+            let cover_gap = match defensive_cover.target {
+                0 => -2.0,
+                1 => 3.5,
+                2 => 6.5,
+                3 => 9.5,
+                _ => 12.5,
+            };
+            let shortage = defensive_cover
+                .target
+                .saturating_sub(defensive_cover.actual) as f64;
+            let surplus = defensive_cover
+                .actual
+                .saturating_sub(defensive_cover.target + 1) as f64;
+            let adjusted_gap = cover_gap + shortage * 2.0 - surplus * 1.0;
+            let cover_line_seed = foremost_attacker_y + goal_side_dir * adjusted_gap;
+            line_seed = line_seed * 0.32 + cover_line_seed * 0.68;
+        }
+    }
     let defensive_line_y: f64 = line_seed.clamp(field_length * 0.08, field_length * 0.92);
 
     let risk_tolerance: f64 = (0.46
@@ -2745,6 +3141,9 @@ fn tactical_directive_for_team(
     TeamTacticalDirective {
         team,
         defensive_line_y,
+        defensive_cover_target: defensive_cover.target,
+        defensive_cover_actual: defensive_cover.actual,
+        foremost_attacker_y: defensive_cover.foremost_attacker_y,
         support_depth_yards,
         width_yards,
         press_intensity,
@@ -2852,6 +3251,9 @@ pub struct OfficialSnapshot {
     pub id: usize,
     pub kind: OfficialKind,
     pub position: Vec2,
+    pub velocity: Vec2,
+    pub acceleration: Vec2,
+    pub jerk: Vec2,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -3054,7 +3456,13 @@ pub struct SoccerControllerAssignmentResponse {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SoccerBallSurfaceRequest {
+    #[serde(default = "default_ball_drag_per_tick")]
     pub ball_drag_per_tick: f64,
+    #[serde(default = "default_ball_air_resistance")]
+    pub ball_air_resistance: f64,
+    #[serde(default = "default_ball_grass_resistance_yps2")]
+    pub ball_grass_resistance_yps2: f64,
+    #[serde(default = "default_ball_stop_speed_yps")]
     pub ball_stop_speed_yps: f64,
 }
 
@@ -3185,30 +3593,27 @@ impl SoccerMatch {
         let mut rng = mulberry32(config.seed);
         let players = default_players(&config, &mut rng);
         let officials = vec![
-            OfficialAgent {
-                id: 22,
-                kind: OfficialKind::CenterReferee,
-                position: Vec2::new(
+            OfficialAgent::new(
+                22,
+                OfficialKind::CenterReferee,
+                Vec2::new(
                     config.field_width_yards * 0.5,
                     config.field_length_yards * 0.5,
                 ),
-                velocity: Vec2::zero(),
-            },
-            OfficialAgent {
-                id: 23,
-                kind: OfficialKind::AssistantRefereeNear,
-                position: Vec2::new(1.5, config.field_length_yards * 0.5),
-                velocity: Vec2::zero(),
-            },
-            OfficialAgent {
-                id: 24,
-                kind: OfficialKind::AssistantRefereeFar,
-                position: Vec2::new(
+            ),
+            OfficialAgent::new(
+                23,
+                OfficialKind::AssistantRefereeNear,
+                Vec2::new(1.5, config.field_length_yards * 0.5),
+            ),
+            OfficialAgent::new(
+                24,
+                OfficialKind::AssistantRefereeFar,
+                Vec2::new(
                     config.field_width_yards - 1.5,
                     config.field_length_yards * 0.5,
                 ),
-                velocity: Vec2::zero(),
-            },
+            ),
         ];
         let kickoff = players
             .iter()
@@ -3444,8 +3849,15 @@ impl SoccerMatch {
     }
 
     pub fn update_ball_surface(&mut self, request: SoccerBallSurfaceRequest) -> Result<(), String> {
-        validate_ball_surface(request.ball_drag_per_tick, request.ball_stop_speed_yps)?;
+        validate_ball_surface(
+            request.ball_drag_per_tick,
+            request.ball_air_resistance,
+            request.ball_grass_resistance_yps2,
+            request.ball_stop_speed_yps,
+        )?;
         self.config.ball_drag_per_tick = request.ball_drag_per_tick;
+        self.config.ball_air_resistance = request.ball_air_resistance;
+        self.config.ball_grass_resistance_yps2 = request.ball_grass_resistance_yps2;
         self.config.ball_stop_speed_yps = request.ball_stop_speed_yps;
         Ok(())
     }
@@ -3555,6 +3967,9 @@ impl SoccerMatch {
                     id: o.id,
                     kind: o.kind,
                     position: o.position,
+                    velocity: o.velocity,
+                    acceleration: o.acceleration,
+                    jerk: o.jerk,
                 })
                 .collect(),
             score_home: self.score_home,
@@ -3726,12 +4141,18 @@ impl SoccerMatch {
         let dt = self.config.dt_seconds;
         let p = &mut self.players[player_id];
         let previous_velocity = p.velocity;
+        let previous_acceleration = p.acceleration;
         let fatigue_factor = (0.72 + 0.28 * p.skills.stamina - p.fatigue * 0.12).clamp(0.58, 1.05);
         let speed = p.skills.top_speed_yps * fatigue_factor * if sprint { 1.08 } else { 0.86 };
         let desired = (target - p.position).normalized() * speed;
         p.velocity = approach_velocity(p.velocity, desired, p.skills.acceleration_yps2, dt);
         p.acceleration = if dt > 0.0 {
             (p.velocity - previous_velocity) / dt
+        } else {
+            Vec2::zero()
+        };
+        p.jerk = if dt > 0.0 {
+            (p.acceleration - previous_acceleration) / dt
         } else {
             Vec2::zero()
         };
@@ -3797,6 +4218,8 @@ impl SoccerMatch {
             clock_seconds: self.clock_seconds,
             dt_seconds: self.config.dt_seconds,
             ball_drag_per_tick: self.config.ball_drag_per_tick,
+            ball_air_resistance: self.config.ball_air_resistance,
+            ball_grass_resistance_yps2: self.config.ball_grass_resistance_yps2,
             ball_stop_speed_yps: self.config.ball_stop_speed_yps,
             field_length: self.config.field_length_yards,
             field_width: self.config.field_width_yards,
@@ -3870,6 +4293,7 @@ impl SoccerMatch {
                     keeper.position = save_position;
                     keeper.velocity = Vec2::zero();
                     keeper.acceleration = Vec2::zero();
+                    keeper.jerk = Vec2::zero();
                 }
                 let keeper_name = self
                     .players
@@ -3952,6 +4376,7 @@ impl SoccerMatch {
                 holder.position = restart.position;
                 holder.velocity = Vec2::zero();
                 holder.acceleration = Vec2::zero();
+                holder.jerk = Vec2::zero();
                 holder.record_position_history();
             }
         }
@@ -3965,6 +4390,9 @@ impl SoccerMatch {
                 {
                     center_ref.position = restart.position;
                     center_ref.velocity = Vec2::zero();
+                    center_ref.acceleration = Vec2::zero();
+                    center_ref.jerk = Vec2::zero();
+                    center_ref.record_position_history();
                 }
             }
             _ => {
@@ -3976,6 +4404,9 @@ impl SoccerMatch {
                 }) {
                     assistant.position.y = restart.position.y;
                     assistant.velocity = Vec2::zero();
+                    assistant.acceleration = Vec2::zero();
+                    assistant.jerk = Vec2::zero();
+                    assistant.record_position_history();
                 }
             }
         }
@@ -4048,6 +4479,7 @@ impl SoccerMatch {
                 holder.position = restart_spot;
                 holder.velocity = Vec2::zero();
                 holder.acceleration = Vec2::zero();
+                holder.jerk = Vec2::zero();
                 holder.record_position_history();
             }
         }
@@ -4064,6 +4496,9 @@ impl SoccerMatch {
         {
             assistant.position.y = restart_spot.y;
             assistant.velocity = Vec2::zero();
+            assistant.acceleration = Vec2::zero();
+            assistant.jerk = Vec2::zero();
+            assistant.record_position_history();
         }
 
         self.stat_offside(offside.team);
@@ -4139,6 +4574,7 @@ impl SoccerMatch {
             p.position = p.home_position;
             p.velocity = Vec2::zero();
             p.acceleration = Vec2::zero();
+            p.jerk = Vec2::zero();
             p.record_position_history();
         }
         let kickoff = self
@@ -4157,6 +4593,7 @@ impl SoccerMatch {
                 holder.position = center;
                 holder.velocity = Vec2::zero();
                 holder.acceleration = Vec2::zero();
+                holder.jerk = Vec2::zero();
                 holder.record_position_history();
             }
         }
@@ -5466,6 +5903,7 @@ fn tracking_frame_to_world_snapshot(
                 .unwrap_or(p.home_position.unwrap_or(p.position)),
             controller_slot: None,
             acceleration: Vec2::zero(),
+            jerk: Vec2::zero(),
             last_decision: None,
         })
         .collect::<Vec<_>>();
@@ -5513,6 +5951,7 @@ fn tracking_frame_to_world_snapshot(
             score_diff_home,
             config.field_width_yards,
             config.field_length_yards,
+            DefensiveCoverProfile::default(),
         ),
         away_directive: tactical_directive_for_team(
             Team::Away,
@@ -5522,6 +5961,7 @@ fn tracking_frame_to_world_snapshot(
             -score_diff_home,
             config.field_width_yards,
             config.field_length_yards,
+            DefensiveCoverProfile::default(),
         ),
     }
 }
@@ -5682,6 +6122,7 @@ fn player_agent_from_snapshot(player: &PlayerSnapshot) -> PlayerAgent {
         position: player.position,
         velocity: player.velocity,
         acceleration: player.acceleration,
+        jerk: player.jerk,
         position_history,
         skills: neutral_tracking_skill_profile(player.role),
         fatigue: 0.0,
@@ -5949,6 +6390,25 @@ fn approach_velocity(current: Vec2, desired: Vec2, accel: f64, dt: f64) -> Vec2 
     }
 }
 
+fn ball_velocity_after_resistance(
+    velocity: Vec2,
+    dt_seconds: f64,
+    linear_drag_per_tick: f64,
+    air_resistance: f64,
+    grass_resistance_yps2: f64,
+) -> Vec2 {
+    let speed = velocity.len();
+    if speed <= 0.0 || dt_seconds <= 0.0 {
+        return velocity;
+    }
+    let linear_deceleration = speed * linear_drag_per_tick.clamp(0.0, 0.95) / dt_seconds;
+    let air_deceleration = air_resistance.clamp(0.0, 0.10) * speed * speed;
+    let grass_deceleration = grass_resistance_yps2.clamp(0.0, 5.0);
+    let speed_loss =
+        (linear_deceleration + air_deceleration + grass_deceleration) * dt_seconds;
+    velocity.normalized() * (speed - speed_loss).max(0.0)
+}
+
 fn zone(v: f64, max: f64, buckets: usize) -> usize {
     ((v / max).clamp(0.0, 0.999_999) * buckets as f64).floor() as usize
 }
@@ -6073,6 +6533,7 @@ fn default_players(config: &MatchConfig, rng: &mut SeededRandom) -> Vec<PlayerAg
                 position: pos,
                 velocity: Vec2::zero(),
                 acceleration: Vec2::zero(),
+                jerk: Vec2::zero(),
                 position_history: VecDeque::from([pos]),
                 skills: SkillProfile::blended(id, role, rng),
                 fatigue: 0.0,

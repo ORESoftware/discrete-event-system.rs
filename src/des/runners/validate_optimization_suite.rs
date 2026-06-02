@@ -61,9 +61,9 @@ use crate::des::general::math_program::{
     cross_check_math_program_conflict_with_external,
     cross_check_math_program_feas_relaxation_with_external,
     cross_check_math_program_solution_pool_with_external, cross_check_math_program_with_external,
-    ExternalMathProgramOptions, MathProgram, MathProgramConflictOptions,
-    MathProgramFeasRelaxOptions, MathProgramSolutionPoolOptions, MathProgramSolveOptions,
-    MathProgramStatus, ObjectiveSense as MathObjectiveSense, RowSense,
+    export_math_program_cplex_lp, ExternalMathProgramOptions, MathProgram,
+    MathProgramConflictOptions, MathProgramFeasRelaxOptions, MathProgramSolutionPoolOptions,
+    MathProgramSolveOptions, MathProgramStatus, ObjectiveSense as MathObjectiveSense, RowSense,
 };
 use crate::des::general::min_cost_flow::{
     min_cost_flow_to_lp, solve_min_cost_flow, MinCostFlowArc, MinCostFlowProblem, MinCostFlowStatus,
@@ -2438,6 +2438,30 @@ impl Driver {
             ),
         }
 
+        match export_math_program_cplex_lp(&lp) {
+            Ok(export) => self.check(
+                "MathProgram LP facade CPLEX-LP export",
+                !export.is_mip
+                    && export.original_variable_count == 3
+                    && export.variable_names.len() == 3
+                    && export.text.contains("Maximize\n")
+                    && export.text.contains("Subject To\n")
+                    && export.text.contains("Bounds\n")
+                    && export.text.ends_with("End\n"),
+                format!(
+                    "vars={} rows={} bytes={}",
+                    export.variable_names.len(),
+                    export.constraint_names.len(),
+                    export.text.len()
+                ),
+            ),
+            Err(err) => self.check(
+                "MathProgram LP facade CPLEX-LP export",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
         for (solver, method) in [
             (ExternalLinearCliSolver::Highs, "highs:cli"),
             (ExternalLinearCliSolver::Glpk, "glpsol:cli"),
@@ -2515,6 +2539,32 @@ impl Driver {
             ),
             Err(err) => self.check(
                 "MathProgram MIP facade indicator/general-constraint cross-check",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        match export_math_program_cplex_lp(&mip) {
+            Ok(export) => self.check(
+                "MathProgram MIP facade compiled CPLEX-LP export",
+                export.is_mip
+                    && export.original_variable_count == 5
+                    && export.variable_names.len() > export.original_variable_count
+                    && export.text.contains("Maximize\n")
+                    && export.text.contains("Subject To\n")
+                    && export.text.contains("Bounds\n")
+                    && export.text.contains("Binaries\n")
+                    && export.text.ends_with("End\n"),
+                format!(
+                    "original_vars={} exported_vars={} rows={} bytes={}",
+                    export.original_variable_count,
+                    export.variable_names.len(),
+                    export.constraint_names.len(),
+                    export.text.len()
+                ),
+            ),
+            Err(err) => self.check(
+                "MathProgram MIP facade compiled CPLEX-LP export",
                 false,
                 format!("{err:?}"),
             ),

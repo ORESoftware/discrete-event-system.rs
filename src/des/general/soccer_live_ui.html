@@ -209,7 +209,7 @@
       <div class="metric"><span>Home Brain</span><b id="homeBrain">P0.00 R0.00</b></div>
       <div class="metric"><span>Away Brain</span><b id="awayBrain">P0.00 R0.00</b></div>
       <div class="metric"><span>Ball</span><b id="ballPhysics">0.0y/s 0.0y/s2</b></div>
-      <div class="metric"><span>Surface</span><b id="surfaceReadout">D0.015 S0.35</b></div>
+      <div class="metric"><span>Surface</span><b id="surfaceReadout">D0.015 A0.006 G0.45 S0.35</b></div>
       <div class="metric"><span>Shots</span><b id="shots">0 - 0</b></div>
       <div class="metric"><span>On Target</span><b id="onTarget">0 - 0</b></div>
       <div class="metric"><span>Saves</span><b id="saves">0 - 0</b></div>
@@ -235,6 +235,16 @@
         <label for="dragRange">Drag</label>
         <input id="dragRange" type="range" min="0" max="0.08" step="0.001">
         <input id="dragNumber" type="number" min="0" max="0.95" step="0.001">
+      </div>
+      <div class="surface-control">
+        <label for="airRange">Air</label>
+        <input id="airRange" type="range" min="0" max="0.04" step="0.001">
+        <input id="airNumber" type="number" min="0" max="0.10" step="0.001">
+      </div>
+      <div class="surface-control">
+        <label for="grassRange">Grass</label>
+        <input id="grassRange" type="range" min="0" max="2.0" step="0.01">
+        <input id="grassNumber" type="number" min="0" max="5.0" step="0.01">
       </div>
       <div class="surface-control">
         <label for="stopRange">Stop</label>
@@ -297,6 +307,10 @@ const targetPick = document.getElementById("targetPick");
 const surfacePreset = document.getElementById("surfacePreset");
 const dragRange = document.getElementById("dragRange");
 const dragNumber = document.getElementById("dragNumber");
+const airRange = document.getElementById("airRange");
+const airNumber = document.getElementById("airNumber");
+const grassRange = document.getElementById("grassRange");
+const grassNumber = document.getElementById("grassNumber");
 const stopRange = document.getElementById("stopRange");
 const stopNumber = document.getElementById("stopNumber");
 const events = document.getElementById("events");
@@ -315,11 +329,11 @@ let eventLog = [];
 let surfaceTimer = null;
 let syncingSurface = false;
 const SURFACE_PRESETS = {
-  short: {ballDragPerTick: 0.008, ballStopSpeedYps: 0.25},
-  standard: {ballDragPerTick: 0.015, ballStopSpeedYps: 0.35},
-  long: {ballDragPerTick: 0.03, ballStopSpeedYps: 0.55},
-  wet: {ballDragPerTick: 0.005, ballStopSpeedYps: 0.18},
-  heavy: {ballDragPerTick: 0.06, ballStopSpeedYps: 0.85}
+  short: {ballDragPerTick: 0.008, ballAirResistance: 0.004, ballGrassResistanceYps2: 0.28, ballStopSpeedYps: 0.25},
+  standard: {ballDragPerTick: 0.015, ballAirResistance: 0.006, ballGrassResistanceYps2: 0.45, ballStopSpeedYps: 0.35},
+  long: {ballDragPerTick: 0.03, ballAirResistance: 0.007, ballGrassResistanceYps2: 0.82, ballStopSpeedYps: 0.55},
+  wet: {ballDragPerTick: 0.005, ballAirResistance: 0.003, ballGrassResistanceYps2: 0.18, ballStopSpeedYps: 0.18},
+  heavy: {ballDragPerTick: 0.06, ballAirResistance: 0.010, ballGrassResistanceYps2: 1.30, ballStopSpeedYps: 0.85}
 };
 
 function fmtClock(s) {
@@ -332,7 +346,10 @@ function phaseLabel(v) {
 }
 function directiveLabel(d) {
   if (!d) return "P0.00 R0.00";
-  return `P${Number(d.pressIntensity ?? 0).toFixed(2)} R${Number(d.riskTolerance ?? 0).toFixed(2)}`;
+  const target = Number(d.defensiveCoverTarget ?? 0);
+  const actual = Number(d.defensiveCoverActual ?? 0);
+  const cover = target >= 4 ? `C${actual}/4+` : `C${actual}/${target}`;
+  return `P${Number(d.pressIntensity ?? 0).toFixed(2)} R${Number(d.riskTolerance ?? 0).toFixed(2)} ${cover}`;
 }
 function centralBrainLabel(b) {
   if (!b) return "22p 3o Loose";
@@ -485,7 +502,7 @@ function render() {
   homeBrain.textContent = directiveLabel(f.homeDirective);
   awayBrain.textContent = directiveLabel(f.awayDirective);
   ballPhysics.textContent = `${vecLen(f.ball.velocity).toFixed(1)}y/s ${vecLen(f.ball.acceleration).toFixed(1)}y/s2`;
-  surfaceReadout.textContent = `D${Number(state.config.ballDragPerTick ?? 0).toFixed(3)} S${Number(state.config.ballStopSpeedYps ?? 0).toFixed(2)}`;
+  surfaceReadout.textContent = `D${Number(state.config.ballDragPerTick ?? 0).toFixed(3)} A${Number(state.config.ballAirResistance ?? 0).toFixed(3)} G${Number(state.config.ballGrassResistanceYps2 ?? 0).toFixed(2)} S${Number(state.config.ballStopSpeedYps ?? 0).toFixed(2)}`;
   const s = state.summary.stats;
   shots.textContent = `${s.shotsHome} - ${s.shotsAway}`;
   onTarget.textContent = `${s.shotsOnTargetHome ?? 0} - ${s.shotsOnTargetAway ?? 0}`;
@@ -528,6 +545,8 @@ function applyAssignmentsToFrame(assignments) {
 function surfaceValues() {
   return {
     ballDragPerTick: clamp(Number(dragNumber.value || dragRange.value || 0), 0, 0.95),
+    ballAirResistance: clamp(Number(airNumber.value || airRange.value || 0), 0, 0.10),
+    ballGrassResistanceYps2: clamp(Number(grassNumber.value || grassRange.value || 0), 0, 5.0),
     ballStopSpeedYps: clamp(Number(stopNumber.value || stopRange.value || 0), 0, 20)
   };
 }
@@ -536,8 +555,13 @@ function clamp(v, lo, hi) {
   return Math.min(hi, Math.max(lo, v));
 }
 function presetForSurface(drag, stop) {
+  const air = Number(state?.config?.ballAirResistance ?? 0);
+  const grass = Number(state?.config?.ballGrassResistanceYps2 ?? 0);
   for (const [name, preset] of Object.entries(SURFACE_PRESETS)) {
-    if (Math.abs(preset.ballDragPerTick - drag) < 0.0005 && Math.abs(preset.ballStopSpeedYps - stop) < 0.005) {
+    if (Math.abs(preset.ballDragPerTick - drag) < 0.0005
+        && Math.abs(preset.ballAirResistance - air) < 0.0005
+        && Math.abs(preset.ballGrassResistanceYps2 - grass) < 0.005
+        && Math.abs(preset.ballStopSpeedYps - stop) < 0.005) {
       return name;
     }
   }
@@ -547,9 +571,15 @@ function syncSurfaceControls() {
   if (!state?.config) return;
   syncingSurface = true;
   const drag = Number(state.config.ballDragPerTick ?? 0);
+  const air = Number(state.config.ballAirResistance ?? 0);
+  const grass = Number(state.config.ballGrassResistanceYps2 ?? 0);
   const stop = Number(state.config.ballStopSpeedYps ?? 0);
   dragRange.value = String(clamp(drag, Number(dragRange.min), Number(dragRange.max)));
   dragNumber.value = drag.toFixed(3);
+  airRange.value = String(clamp(air, Number(airRange.min), Number(airRange.max)));
+  airNumber.value = air.toFixed(3);
+  grassRange.value = String(clamp(grass, Number(grassRange.min), Number(grassRange.max)));
+  grassNumber.value = grass.toFixed(2);
   stopRange.value = String(clamp(stop, Number(stopRange.min), Number(stopRange.max)));
   stopNumber.value = stop.toFixed(2);
   surfacePreset.value = presetForSurface(drag, stop);
@@ -558,6 +588,10 @@ function syncSurfaceControls() {
 function syncSurfacePair(source) {
   if (source === dragRange) dragNumber.value = Number(dragRange.value).toFixed(3);
   if (source === dragNumber) dragRange.value = String(clamp(Number(dragNumber.value), Number(dragRange.min), Number(dragRange.max)));
+  if (source === airRange) airNumber.value = Number(airRange.value).toFixed(3);
+  if (source === airNumber) airRange.value = String(clamp(Number(airNumber.value), Number(airRange.min), Number(airRange.max)));
+  if (source === grassRange) grassNumber.value = Number(grassRange.value).toFixed(2);
+  if (source === grassNumber) grassRange.value = String(clamp(Number(grassNumber.value), Number(grassRange.min), Number(grassRange.max)));
   if (source === stopRange) stopNumber.value = Number(stopRange.value).toFixed(2);
   if (source === stopNumber) stopRange.value = String(clamp(Number(stopNumber.value), Number(stopRange.min), Number(stopRange.max)));
   const v = surfaceValues();

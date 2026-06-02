@@ -5447,6 +5447,22 @@ impl Driver {
                     "sense": sense.as_str(),
                     "rhs": rhs,
                 }),
+                CpConstraint::EnforcedBoolOr {
+                    enforcement,
+                    literals,
+                } => serde_json::json!({
+                    "kind": "enforced_bool_or",
+                    "enforcement": enforcement.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                    "literals": literals.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                }),
+                CpConstraint::EnforcedBoolAnd {
+                    enforcement,
+                    literals,
+                } => serde_json::json!({
+                    "kind": "enforced_bool_and",
+                    "enforcement": enforcement.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                    "literals": literals.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                }),
                 CpConstraint::AllDifferent(vars) => {
                     serde_json::json!({"kind": "all_different", "vars": vars})
                 }
@@ -5501,6 +5517,26 @@ impl Driver {
                 }),
                 CpConstraint::ForbiddenAssignments { vars, tuples } => serde_json::json!({
                     "kind": "forbidden_assignments",
+                    "vars": vars,
+                    "tuples": tuples,
+                }),
+                CpConstraint::EnforcedAllowedAssignments {
+                    enforcement,
+                    vars,
+                    tuples,
+                } => serde_json::json!({
+                    "kind": "enforced_allowed_assignments",
+                    "enforcement": enforcement.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                    "vars": vars,
+                    "tuples": tuples,
+                }),
+                CpConstraint::EnforcedForbiddenAssignments {
+                    enforcement,
+                    vars,
+                    tuples,
+                } => serde_json::json!({
+                    "kind": "enforced_forbidden_assignments",
+                    "enforcement": enforcement.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
                     "vars": vars,
                     "tuples": tuples,
                 }),
@@ -5564,6 +5600,12 @@ impl Driver {
                     "kind": "element",
                     "index": element.index,
                     "values": &element.values,
+                    "target": element.target,
+                }),
+                CpConstraint::VariableElement(element) => serde_json::json!({
+                    "kind": "variable_element",
+                    "index": element.index,
+                    "vars": &element.vars,
                     "target": element.target,
                 }),
                 CpConstraint::Alternative(alternative) => serde_json::json!({
@@ -5734,6 +5776,97 @@ impl Driver {
             format!(
                 "internal={:?} external={:?}",
                 internal.assignment, reference.assignment
+            ),
+        );
+
+        let variable_element_model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "choice".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "expensive".to_string(),
+                    domain: vec![4],
+                },
+                CpVariable {
+                    name: "cheap".to_string(),
+                    domain: vec![1, 3],
+                },
+                CpVariable {
+                    name: "selected".to_string(),
+                    domain: vec![1, 2, 3, 4],
+                },
+            ],
+            constraints: vec![CpConstraint::VariableElement(
+                crate::des::general::cp_sat::CpVariableElement {
+                    index: 0,
+                    vars: vec![1, 2],
+                    target: 3,
+                },
+            )],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![LinearTerm { var: 3, coeff: 1 }],
+            }),
+        };
+        let variable_element_internal =
+            solve_cp_model(&variable_element_model, CpSolveOptions::default());
+        let variable_element_json = serde_json::json!({
+            "variables": [
+                {"name": "choice", "domain": [0, 1]},
+                {"name": "expensive", "domain": [4]},
+                {"name": "cheap", "domain": [1, 3]},
+                {"name": "selected", "domain": [1, 2, 3, 4]},
+            ],
+            "constraints": [
+                {
+                    "kind": "variable_element",
+                    "index": 0,
+                    "vars": [1, 2],
+                    "target": 3,
+                },
+            ],
+            "objective": {
+                "sense": "min",
+                "terms": [{"var": 3, "coeff": 1}],
+            },
+        })
+        .to_string();
+        let value = self.run_python_json(
+            "cp_sat_reference.py",
+            &["--solver", "auto"],
+            &variable_element_json,
+        );
+        let variable_element_reference: CpReference =
+            serde_json::from_value(value).expect("parse variable-element CP reference");
+        self.check(
+            "CP-SAT variable element status internal/reference",
+            variable_element_internal.status == CpStatus::Optimal
+                && variable_element_reference.status == "optimal",
+            format!(
+                "internal={} external={} solver={}",
+                variable_element_internal.status.as_str(),
+                variable_element_reference.status,
+                variable_element_reference.solver
+            ),
+        );
+        self.check(
+            "CP-SAT variable element objective",
+            variable_element_internal.objective == variable_element_reference.objective
+                && variable_element_internal.objective == Some(1),
+            format!(
+                "internal={:?} external={:?}",
+                variable_element_internal.objective, variable_element_reference.objective
+            ),
+        );
+        self.check(
+            "CP-SAT variable element assignment",
+            variable_element_internal.assignment == variable_element_reference.assignment
+                && variable_element_internal.assignment == vec![1, 4, 1, 1],
+            format!(
+                "internal={:?} external={:?}",
+                variable_element_internal.assignment, variable_element_reference.assignment
             ),
         );
 
@@ -6920,6 +7053,343 @@ impl Driver {
                 strategic_internal.nodes,
                 unstrategic_internal.status.as_str(),
                 unstrategic_internal.nodes
+            ),
+        );
+
+        let enforced_bool_model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "active_gate".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "inactive_gate".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "x".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "y".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "inactive_x".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "inactive_y".to_string(),
+                    domain: vec![0, 1],
+                },
+            ],
+            constraints: vec![
+                CpConstraint::BoolOr(vec![BoolLiteral {
+                    var: 0,
+                    positive: true,
+                }]),
+                CpConstraint::BoolOr(vec![BoolLiteral {
+                    var: 1,
+                    positive: false,
+                }]),
+                CpConstraint::EnforcedBoolOr {
+                    enforcement: vec![BoolLiteral {
+                        var: 0,
+                        positive: true,
+                    }],
+                    literals: vec![
+                        BoolLiteral {
+                            var: 2,
+                            positive: true,
+                        },
+                        BoolLiteral {
+                            var: 3,
+                            positive: true,
+                        },
+                    ],
+                },
+                CpConstraint::EnforcedBoolAnd {
+                    enforcement: vec![BoolLiteral {
+                        var: 0,
+                        positive: true,
+                    }],
+                    literals: vec![BoolLiteral {
+                        var: 3,
+                        positive: true,
+                    }],
+                },
+                CpConstraint::EnforcedBoolAnd {
+                    enforcement: vec![BoolLiteral {
+                        var: 1,
+                        positive: true,
+                    }],
+                    literals: vec![
+                        BoolLiteral {
+                            var: 4,
+                            positive: true,
+                        },
+                        BoolLiteral {
+                            var: 5,
+                            positive: true,
+                        },
+                    ],
+                },
+            ],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![
+                    LinearTerm { var: 2, coeff: 1 },
+                    LinearTerm { var: 3, coeff: 1 },
+                    LinearTerm { var: 4, coeff: 1 },
+                    LinearTerm { var: 5, coeff: 1 },
+                ],
+            }),
+        };
+        let enforced_bool_internal =
+            solve_cp_model(&enforced_bool_model, CpSolveOptions::default());
+        let enforced_bool_json = serde_json::json!({
+            "variables": [
+                {"name": "active_gate", "domain": [0, 1]},
+                {"name": "inactive_gate", "domain": [0, 1]},
+                {"name": "x", "domain": [0, 1]},
+                {"name": "y", "domain": [0, 1]},
+                {"name": "inactive_x", "domain": [0, 1]},
+                {"name": "inactive_y", "domain": [0, 1]},
+            ],
+            "constraints": [
+                {
+                    "kind": "bool_or",
+                    "literals": [{"var": 0, "positive": true}],
+                },
+                {
+                    "kind": "bool_or",
+                    "literals": [{"var": 1, "positive": false}],
+                },
+                {
+                    "kind": "enforced_bool_or",
+                    "enforcement": [{"var": 0, "positive": true}],
+                    "literals": [
+                        {"var": 2, "positive": true},
+                        {"var": 3, "positive": true},
+                    ],
+                },
+                {
+                    "kind": "enforced_bool_and",
+                    "enforcement": [{"var": 0, "positive": true}],
+                    "literals": [{"var": 3, "positive": true}],
+                },
+                {
+                    "kind": "enforced_bool_and",
+                    "enforcement": [{"var": 1, "positive": true}],
+                    "literals": [
+                        {"var": 4, "positive": true},
+                        {"var": 5, "positive": true},
+                    ],
+                },
+            ],
+            "objective": {
+                "sense": "min",
+                "terms": [
+                    {"var": 2, "coeff": 1},
+                    {"var": 3, "coeff": 1},
+                    {"var": 4, "coeff": 1},
+                    {"var": 5, "coeff": 1},
+                ],
+            },
+        })
+        .to_string();
+        let value = self.run_python_json(
+            "cp_sat_reference.py",
+            &["--solver", "auto"],
+            &enforced_bool_json,
+        );
+        let enforced_bool_reference: CpReference =
+            serde_json::from_value(value).expect("parse enforced-bool CP reference");
+        self.check(
+            "CP-SAT enforced bool status internal/reference",
+            enforced_bool_internal.status == CpStatus::Optimal
+                && enforced_bool_reference.status == "optimal",
+            format!(
+                "internal={} external={} solver={}",
+                enforced_bool_internal.status.as_str(),
+                enforced_bool_reference.status,
+                enforced_bool_reference.solver
+            ),
+        );
+        self.check(
+            "CP-SAT enforced bool objective",
+            enforced_bool_internal.objective == enforced_bool_reference.objective
+                && enforced_bool_internal.objective == Some(1),
+            format!(
+                "internal={:?} external={:?}",
+                enforced_bool_internal.objective, enforced_bool_reference.objective
+            ),
+        );
+        self.check(
+            "CP-SAT enforced bool assignment",
+            enforced_bool_internal.assignment == enforced_bool_reference.assignment
+                && enforced_bool_internal.assignment == vec![1, 0, 0, 1, 0, 0],
+            format!(
+                "internal={:?} external={:?}",
+                enforced_bool_internal.assignment, enforced_bool_reference.assignment
+            ),
+        );
+
+        let enforced_table_model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "active_gate".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "inactive_gate".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "x".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "y".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "inactive_x".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "inactive_y".to_string(),
+                    domain: vec![0, 1],
+                },
+            ],
+            constraints: vec![
+                CpConstraint::BoolOr(vec![BoolLiteral {
+                    var: 0,
+                    positive: true,
+                }]),
+                CpConstraint::BoolOr(vec![BoolLiteral {
+                    var: 1,
+                    positive: false,
+                }]),
+                CpConstraint::EnforcedAllowedAssignments {
+                    enforcement: vec![BoolLiteral {
+                        var: 0,
+                        positive: true,
+                    }],
+                    vars: vec![2, 3],
+                    tuples: vec![vec![0, 1], vec![1, 0]],
+                },
+                CpConstraint::EnforcedForbiddenAssignments {
+                    enforcement: vec![BoolLiteral {
+                        var: 0,
+                        positive: true,
+                    }],
+                    vars: vec![2, 3],
+                    tuples: vec![vec![0, 1]],
+                },
+                CpConstraint::EnforcedForbiddenAssignments {
+                    enforcement: vec![BoolLiteral {
+                        var: 1,
+                        positive: true,
+                    }],
+                    vars: vec![4, 5],
+                    tuples: vec![vec![0, 0]],
+                },
+            ],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![
+                    LinearTerm { var: 2, coeff: 1 },
+                    LinearTerm { var: 3, coeff: 1 },
+                    LinearTerm { var: 4, coeff: 1 },
+                    LinearTerm { var: 5, coeff: 1 },
+                ],
+            }),
+        };
+        let enforced_table_internal =
+            solve_cp_model(&enforced_table_model, CpSolveOptions::default());
+        let enforced_table_json = serde_json::json!({
+            "variables": [
+                {"name": "active_gate", "domain": [0, 1]},
+                {"name": "inactive_gate", "domain": [0, 1]},
+                {"name": "x", "domain": [0, 1]},
+                {"name": "y", "domain": [0, 1]},
+                {"name": "inactive_x", "domain": [0, 1]},
+                {"name": "inactive_y", "domain": [0, 1]},
+            ],
+            "constraints": [
+                {
+                    "kind": "bool_or",
+                    "literals": [{"var": 0, "positive": true}],
+                },
+                {
+                    "kind": "bool_or",
+                    "literals": [{"var": 1, "positive": false}],
+                },
+                {
+                    "kind": "enforced_allowed_assignments",
+                    "enforcement": [{"var": 0, "positive": true}],
+                    "vars": [2, 3],
+                    "tuples": [[0, 1], [1, 0]],
+                },
+                {
+                    "kind": "enforced_forbidden_assignments",
+                    "enforcement": [{"var": 0, "positive": true}],
+                    "vars": [2, 3],
+                    "tuples": [[0, 1]],
+                },
+                {
+                    "kind": "enforced_forbidden_assignments",
+                    "enforcement": [{"var": 1, "positive": true}],
+                    "vars": [4, 5],
+                    "tuples": [[0, 0]],
+                },
+            ],
+            "objective": {
+                "sense": "min",
+                "terms": [
+                    {"var": 2, "coeff": 1},
+                    {"var": 3, "coeff": 1},
+                    {"var": 4, "coeff": 1},
+                    {"var": 5, "coeff": 1},
+                ],
+            },
+        })
+        .to_string();
+        let value = self.run_python_json(
+            "cp_sat_reference.py",
+            &["--solver", "auto"],
+            &enforced_table_json,
+        );
+        let enforced_table_reference: CpReference =
+            serde_json::from_value(value).expect("parse enforced-table CP reference");
+        self.check(
+            "CP-SAT enforced table status internal/reference",
+            enforced_table_internal.status == CpStatus::Optimal
+                && enforced_table_reference.status == "optimal",
+            format!(
+                "internal={} external={} solver={}",
+                enforced_table_internal.status.as_str(),
+                enforced_table_reference.status,
+                enforced_table_reference.solver
+            ),
+        );
+        self.check(
+            "CP-SAT enforced table objective",
+            enforced_table_internal.objective == enforced_table_reference.objective
+                && enforced_table_internal.objective == Some(1),
+            format!(
+                "internal={:?} external={:?}",
+                enforced_table_internal.objective, enforced_table_reference.objective
+            ),
+        );
+        self.check(
+            "CP-SAT enforced table assignment",
+            enforced_table_internal.assignment == enforced_table_reference.assignment
+                && enforced_table_internal.assignment == vec![1, 0, 1, 0, 0, 0],
+            format!(
+                "internal={:?} external={:?}",
+                enforced_table_internal.assignment, enforced_table_reference.assignment
             ),
         );
 

@@ -698,6 +698,22 @@ mod tests {
                     "sense": sense.as_str(),
                     "rhs": rhs,
                 }),
+                CpConstraint::EnforcedBoolOr {
+                    enforcement,
+                    literals,
+                } => serde_json::json!({
+                    "kind": "enforced_bool_or",
+                    "enforcement": enforcement.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                    "literals": literals.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                }),
+                CpConstraint::EnforcedBoolAnd {
+                    enforcement,
+                    literals,
+                } => serde_json::json!({
+                    "kind": "enforced_bool_and",
+                    "enforcement": enforcement.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                    "literals": literals.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                }),
                 CpConstraint::AllDifferent(vars) => {
                     serde_json::json!({"kind": "all_different", "vars": vars})
                 }
@@ -752,6 +768,26 @@ mod tests {
                 }),
                 CpConstraint::ForbiddenAssignments { vars, tuples } => serde_json::json!({
                     "kind": "forbidden_assignments",
+                    "vars": vars,
+                    "tuples": tuples,
+                }),
+                CpConstraint::EnforcedAllowedAssignments {
+                    enforcement,
+                    vars,
+                    tuples,
+                } => serde_json::json!({
+                    "kind": "enforced_allowed_assignments",
+                    "enforcement": enforcement.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                    "vars": vars,
+                    "tuples": tuples,
+                }),
+                CpConstraint::EnforcedForbiddenAssignments {
+                    enforcement,
+                    vars,
+                    tuples,
+                } => serde_json::json!({
+                    "kind": "enforced_forbidden_assignments",
+                    "enforcement": enforcement.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
                     "vars": vars,
                     "tuples": tuples,
                 }),
@@ -815,6 +851,12 @@ mod tests {
                     "kind": "element",
                     "index": element.index,
                     "values": &element.values,
+                    "target": element.target,
+                }),
+                CpConstraint::VariableElement(element) => serde_json::json!({
+                    "kind": "variable_element",
+                    "index": element.index,
+                    "vars": &element.vars,
                     "target": element.target,
                 }),
                 CpConstraint::Alternative(alternative) => serde_json::json!({

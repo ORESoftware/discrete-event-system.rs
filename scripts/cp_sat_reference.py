@@ -390,6 +390,27 @@ def partial_ok(model: dict, partial: Sequence[Optional[int]]) -> bool:
             active = enforcement_state(partial, c["enforcement"])
             if active is True and not linear_partial_ok(model, partial, c):
                 return False
+        elif kind == "enforced_bool_or":
+            active = enforcement_state(partial, c["enforcement"])
+            if active is True:
+                unknown = False
+                satisfied = False
+                for lit in c["literals"]:
+                    truth = literal_truth(partial, lit)
+                    if truth is True:
+                        satisfied = True
+                        break
+                    if truth is None:
+                        unknown = True
+                if not satisfied and not unknown:
+                    return False
+        elif kind == "enforced_bool_and":
+            active = enforcement_state(partial, c["enforcement"])
+            if active is True:
+                for lit in c["literals"]:
+                    truth = literal_truth(partial, lit)
+                    if truth is False:
+                        return False
         elif kind == "all_different":
             seen = set()
             for v in c["vars"]:
@@ -503,6 +524,24 @@ def partial_ok(model: dict, partial: Sequence[Optional[int]]) -> bool:
             for row in tuples:
                 if all(partial[var] is not None and int(partial[var]) == value for var, value in zip(vars_, row)):
                     return False
+        elif kind == "enforced_allowed_assignments":
+            active = enforcement_state(partial, c["enforcement"])
+            if active is True:
+                vars_ = [int(v) for v in c["vars"]]
+                tuples = [[int(v) for v in row] for row in c["tuples"]]
+                if not any(
+                    all(partial[var] is None or int(partial[var]) == value for var, value in zip(vars_, row))
+                    for row in tuples
+                ):
+                    return False
+        elif kind == "enforced_forbidden_assignments":
+            active = enforcement_state(partial, c["enforcement"])
+            if active is True:
+                vars_ = [int(v) for v in c["vars"]]
+                tuples = [[int(v) for v in row] for row in c["tuples"]]
+                for row in tuples:
+                    if all(partial[var] is not None and int(partial[var]) == value for var, value in zip(vars_, row)):
+                        return False
         elif kind == "inverse":
             direct = [int(v) for v in c["direct"]]
             inverse = [int(v) for v in c["inverse"]]
@@ -703,6 +742,35 @@ def partial_ok(model: dict, partial: Sequence[Optional[int]]) -> bool:
                 ):
                     return False
             elif not any(0 <= int(index) < len(values) for index in model["variables"][index_var]["domain"]):
+                return False
+        elif kind == "variable_element":
+            index_var = int(c["index"])
+            target_var = int(c["target"])
+            vars_ = [int(v) for v in c["vars"]]
+            index_values = (
+                [int(partial[index_var])]
+                if partial[index_var] is not None
+                else [int(v) for v in model["variables"][index_var]["domain"]]
+            )
+            target_values = (
+                [int(partial[target_var])]
+                if partial[target_var] is not None
+                else [int(v) for v in model["variables"][target_var]["domain"]]
+            )
+            possible = False
+            for index in index_values:
+                if index < 0 or index >= len(vars_):
+                    continue
+                selected_var = vars_[index]
+                selected_values = (
+                    [int(partial[selected_var])]
+                    if partial[selected_var] is not None
+                    else [int(v) for v in model["variables"][selected_var]["domain"]]
+                )
+                if set(selected_values) & set(target_values):
+                    possible = True
+                    break
+            if not possible:
                 return False
         elif kind == "alternative":
             parent_active = optional_presence_truth(partial, c)
@@ -1116,6 +1184,9 @@ def ortools_reference(model: dict) -> Optional[dict]:
         var = xs[int(lit["var"])]
         return var if bool(lit.get("positive", True)) else 1 - var
 
+    def enforcement_literals(literals: Sequence[dict]):
+        return [cp_literal(lit) for lit in literals]
+
     def fixed_size_interval(start_var, duration: int, name: str, item: dict):
         presence = item.get("presence")
         if presence is None:
@@ -1183,11 +1254,13 @@ def ortools_reference(model: dict) -> Optional[dict]:
                 constraint = cp.Add(expr >= int(c["rhs"]))
             else:
                 constraint = cp.Add(expr == int(c["rhs"]))
-            enforcement = []
-            for lit in c["enforcement"]:
-                x = xs[int(lit["var"])]
-                enforcement.append(x if bool(lit.get("positive", True)) else x.Not())
-            constraint.OnlyEnforceIf(enforcement)
+            constraint.OnlyEnforceIf(enforcement_literals(c["enforcement"]))
+        elif kind == "enforced_bool_or":
+            constraint = cp.AddBoolOr([cp_literal(lit) for lit in c["literals"]])
+            constraint.OnlyEnforceIf(enforcement_literals(c["enforcement"]))
+        elif kind == "enforced_bool_and":
+            constraint = cp.AddBoolAnd([cp_literal(lit) for lit in c["literals"]])
+            constraint.OnlyEnforceIf(enforcement_literals(c["enforcement"]))
         elif kind == "all_different":
             cp.AddAllDifferent([xs[int(v)] for v in c["vars"]])
         elif kind == "bool_or":
@@ -1227,6 +1300,18 @@ def ortools_reference(model: dict) -> Optional[dict]:
                 [xs[int(v)] for v in c["vars"]],
                 [[int(v) for v in row] for row in c["tuples"]],
             )
+        elif kind == "enforced_allowed_assignments":
+            constraint = cp.AddAllowedAssignments(
+                [xs[int(v)] for v in c["vars"]],
+                [[int(v) for v in row] for row in c["tuples"]],
+            )
+            constraint.OnlyEnforceIf(enforcement_literals(c["enforcement"]))
+        elif kind == "enforced_forbidden_assignments":
+            constraint = cp.AddForbiddenAssignments(
+                [xs[int(v)] for v in c["vars"]],
+                [[int(v) for v in row] for row in c["tuples"]],
+            )
+            constraint.OnlyEnforceIf(enforcement_literals(c["enforcement"]))
         elif kind == "inverse":
             cp.AddInverse(
                 [xs[int(v)] for v in c["direct"]],
@@ -1278,6 +1363,12 @@ def ortools_reference(model: dict) -> Optional[dict]:
             cp.AddElement(
                 xs[int(c["index"])],
                 [int(v) for v in c["values"]],
+                xs[int(c["target"])],
+            )
+        elif kind == "variable_element":
+            cp.AddElement(
+                xs[int(c["index"])],
+                [xs[int(v)] for v in c["vars"]],
                 xs[int(c["target"])],
             )
         elif kind == "alternative":

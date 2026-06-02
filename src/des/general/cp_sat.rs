@@ -179,6 +179,13 @@ pub struct CpElement {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CpVariableElement {
+    pub index: usize,
+    pub vars: Vec<usize>,
+    pub target: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CpTransition {
     pub tail: i64,
     pub label: i64,
@@ -222,6 +229,26 @@ pub enum CpConstraint {
         sense: LinearSense,
         rhs: i64,
     },
+    EnforcedBoolOr {
+        enforcement: Vec<BoolLiteral>,
+        literals: Vec<BoolLiteral>,
+    },
+    EnforcedBoolAnd {
+        enforcement: Vec<BoolLiteral>,
+        literals: Vec<BoolLiteral>,
+    },
+    EnforcedBoolXor {
+        enforcement: Vec<BoolLiteral>,
+        literals: Vec<BoolLiteral>,
+    },
+    EnforcedAtMostOne {
+        enforcement: Vec<BoolLiteral>,
+        literals: Vec<BoolLiteral>,
+    },
+    EnforcedExactlyOne {
+        enforcement: Vec<BoolLiteral>,
+        literals: Vec<BoolLiteral>,
+    },
     AllDifferent(Vec<usize>),
     BoolOr(Vec<BoolLiteral>),
     BoolAnd(Vec<BoolLiteral>),
@@ -237,6 +264,16 @@ pub enum CpConstraint {
         tuples: Vec<Vec<i64>>,
     },
     ForbiddenAssignments {
+        vars: Vec<usize>,
+        tuples: Vec<Vec<i64>>,
+    },
+    EnforcedAllowedAssignments {
+        enforcement: Vec<BoolLiteral>,
+        vars: Vec<usize>,
+        tuples: Vec<Vec<i64>>,
+    },
+    EnforcedForbiddenAssignments {
+        enforcement: Vec<BoolLiteral>,
         vars: Vec<usize>,
         tuples: Vec<Vec<i64>>,
     },
@@ -274,6 +311,7 @@ pub enum CpConstraint {
     Circuit(Vec<CpCircuitArc>),
     MultipleCircuit(Vec<CpCircuitArc>),
     Element(CpElement),
+    VariableElement(CpVariableElement),
     Alternative(CpAlternative),
     NoOverlap(Vec<CpInterval>),
     NoOverlapVariable(Vec<CpVariableInterval>),
@@ -508,6 +546,40 @@ fn validate_model(model: &CpModel) {
                     check_var(t.var);
                 }
             }
+            CpConstraint::EnforcedBoolOr {
+                enforcement,
+                literals,
+            } => {
+                if enforcement.is_empty() {
+                    panic!("cp-sat: enforced_bool_or has no enforcement literals");
+                }
+                if literals.is_empty() {
+                    panic!("cp-sat: enforced_bool_or has no literals");
+                }
+                for lit in enforcement {
+                    check_bool_literal(lit);
+                }
+                for lit in literals {
+                    check_bool_literal(lit);
+                }
+            }
+            CpConstraint::EnforcedBoolAnd {
+                enforcement,
+                literals,
+            } => {
+                if enforcement.is_empty() {
+                    panic!("cp-sat: enforced_bool_and has no enforcement literals");
+                }
+                if literals.is_empty() {
+                    panic!("cp-sat: enforced_bool_and has no literals");
+                }
+                for lit in enforcement {
+                    check_bool_literal(lit);
+                }
+                for lit in literals {
+                    check_bool_literal(lit);
+                }
+            }
             CpConstraint::AllDifferent(vars) => {
                 if vars.is_empty() {
                     panic!("cp-sat: all_different has no variables");
@@ -597,6 +669,66 @@ fn validate_model(model: &CpModel) {
                     if tuple.len() != vars.len() {
                         panic!(
                             "cp-sat: forbidden_assignments tuple {i} length {} != {}",
+                            tuple.len(),
+                            vars.len()
+                        );
+                    }
+                }
+            }
+            CpConstraint::EnforcedAllowedAssignments {
+                enforcement,
+                vars,
+                tuples,
+            } => {
+                if enforcement.is_empty() {
+                    panic!("cp-sat: enforced_allowed_assignments has no enforcement literals");
+                }
+                if vars.is_empty() {
+                    panic!("cp-sat: enforced_allowed_assignments has no variables");
+                }
+                if tuples.is_empty() {
+                    panic!("cp-sat: enforced_allowed_assignments has no tuples");
+                }
+                for lit in enforcement {
+                    check_bool_literal(lit);
+                }
+                for &v in vars {
+                    check_var(v);
+                }
+                for (i, tuple) in tuples.iter().enumerate() {
+                    if tuple.len() != vars.len() {
+                        panic!(
+                            "cp-sat: enforced_allowed_assignments tuple {i} length {} != {}",
+                            tuple.len(),
+                            vars.len()
+                        );
+                    }
+                }
+            }
+            CpConstraint::EnforcedForbiddenAssignments {
+                enforcement,
+                vars,
+                tuples,
+            } => {
+                if enforcement.is_empty() {
+                    panic!("cp-sat: enforced_forbidden_assignments has no enforcement literals");
+                }
+                if vars.is_empty() {
+                    panic!("cp-sat: enforced_forbidden_assignments has no variables");
+                }
+                if tuples.is_empty() {
+                    panic!("cp-sat: enforced_forbidden_assignments has no tuples");
+                }
+                for lit in enforcement {
+                    check_bool_literal(lit);
+                }
+                for &v in vars {
+                    check_var(v);
+                }
+                for (i, tuple) in tuples.iter().enumerate() {
+                    if tuple.len() != vars.len() {
+                        panic!(
+                            "cp-sat: enforced_forbidden_assignments tuple {i} length {} != {}",
                             tuple.len(),
                             vars.len()
                         );
@@ -750,6 +882,16 @@ fn validate_model(model: &CpModel) {
                 check_var(element.target);
                 if element.values.is_empty() {
                     panic!("cp-sat: element has no values");
+                }
+            }
+            CpConstraint::VariableElement(element) => {
+                check_var(element.index);
+                check_var(element.target);
+                if element.vars.is_empty() {
+                    panic!("cp-sat: variable_element has no variables");
+                }
+                for &var in &element.vars {
+                    check_var(var);
                 }
             }
             CpConstraint::Alternative(alternative) => {
@@ -1733,6 +1875,41 @@ fn partial_element_ok(model: &CpModel, assignment: &[Option<i64>], element: &CpE
     }
 }
 
+fn variable_element_candidate_ok(
+    model: &CpModel,
+    assignment: &[Option<i64>],
+    selected_var: usize,
+    target: usize,
+) -> bool {
+    match (assignment[selected_var], assignment[target]) {
+        (Some(selected), Some(target_value)) => selected == target_value,
+        (Some(selected), None) => model.variables[target].domain.contains(&selected),
+        (None, Some(target_value)) => model.variables[selected_var].domain.contains(&target_value),
+        (None, None) => model.variables[selected_var]
+            .domain
+            .iter()
+            .any(|value| model.variables[target].domain.contains(value)),
+    }
+}
+
+fn partial_variable_element_ok(
+    model: &CpModel,
+    assignment: &[Option<i64>],
+    element: &CpVariableElement,
+) -> bool {
+    let index_values: Vec<i64> = match assignment[element.index] {
+        Some(value) => vec![value],
+        None => model.variables[element.index].domain.clone(),
+    };
+    index_values
+        .iter()
+        .filter_map(|&index| usize::try_from(index).ok())
+        .filter_map(|index| element.vars.get(index).copied())
+        .any(|selected_var| {
+            variable_element_candidate_ok(model, assignment, selected_var, element.target)
+        })
+}
+
 fn active_interval_consistent(
     assignment: &[Option<i64>],
     start: usize,
@@ -2151,6 +2328,22 @@ fn partial_constraints_ok(model: &CpModel, assignment: &[Option<i64>]) -> bool {
                 Some(true) => partial_linear_ok(model, assignment, terms, *sense, *rhs),
                 None => true,
             },
+            CpConstraint::EnforcedBoolOr {
+                enforcement,
+                literals,
+            } => match enforcement_literals_active(assignment, enforcement) {
+                Some(false) => true,
+                Some(true) => partial_bool_or_ok(assignment, literals),
+                None => true,
+            },
+            CpConstraint::EnforcedBoolAnd {
+                enforcement,
+                literals,
+            } => match enforcement_literals_active(assignment, enforcement) {
+                Some(false) => true,
+                Some(true) => partial_bool_and_ok(assignment, literals),
+                None => true,
+            },
             CpConstraint::AllDifferent(vars) => partial_all_different_ok(assignment, vars),
             CpConstraint::BoolOr(lits) => partial_bool_or_ok(assignment, lits),
             CpConstraint::BoolAnd(lits) => partial_bool_and_ok(assignment, lits),
@@ -2167,6 +2360,24 @@ fn partial_constraints_ok(model: &CpModel, assignment: &[Option<i64>]) -> bool {
             CpConstraint::ForbiddenAssignments { vars, tuples } => {
                 partial_forbidden_assignments_ok(assignment, vars, tuples)
             }
+            CpConstraint::EnforcedAllowedAssignments {
+                enforcement,
+                vars,
+                tuples,
+            } => match enforcement_literals_active(assignment, enforcement) {
+                Some(false) => true,
+                Some(true) => partial_allowed_assignments_ok(assignment, vars, tuples),
+                None => true,
+            },
+            CpConstraint::EnforcedForbiddenAssignments {
+                enforcement,
+                vars,
+                tuples,
+            } => match enforcement_literals_active(assignment, enforcement) {
+                Some(false) => true,
+                Some(true) => partial_forbidden_assignments_ok(assignment, vars, tuples),
+                None => true,
+            },
             CpConstraint::Inverse { direct, inverse } => {
                 partial_inverse_ok(assignment, direct, inverse)
             }
@@ -2198,6 +2409,9 @@ fn partial_constraints_ok(model: &CpModel, assignment: &[Option<i64>]) -> bool {
             CpConstraint::Circuit(arcs) => partial_circuit_ok(assignment, arcs),
             CpConstraint::MultipleCircuit(arcs) => partial_multiple_circuit_ok(assignment, arcs),
             CpConstraint::Element(element) => partial_element_ok(model, assignment, element),
+            CpConstraint::VariableElement(element) => {
+                partial_variable_element_ok(model, assignment, element)
+            }
             CpConstraint::Alternative(alternative) => {
                 partial_alternative_ok(assignment, alternative)
             }
@@ -3688,6 +3902,43 @@ mod tests {
     }
 
     #[test]
+    fn solves_variable_element_constraint() {
+        let model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "choice".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "expensive".to_string(),
+                    domain: vec![4],
+                },
+                CpVariable {
+                    name: "cheap".to_string(),
+                    domain: vec![1, 3],
+                },
+                CpVariable {
+                    name: "selected".to_string(),
+                    domain: vec![1, 2, 3, 4],
+                },
+            ],
+            constraints: vec![CpConstraint::VariableElement(CpVariableElement {
+                index: 0,
+                vars: vec![1, 2],
+                target: 3,
+            })],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![LinearTerm { var: 3, coeff: 1 }],
+            }),
+        };
+        let sol = solve_cp_model(&model, CpSolveOptions::default());
+        assert_eq!(sol.status, CpStatus::Optimal);
+        assert_eq!(sol.assignment, vec![1, 4, 1, 1]);
+        assert_eq!(sol.objective, Some(1));
+    }
+
+    #[test]
     fn solves_allowed_assignments_constraint() {
         let model = CpModel {
             variables: vec![
@@ -3715,6 +3966,85 @@ mod tests {
         let sol = solve_cp_model(&model, CpSolveOptions::default());
         assert_eq!(sol.status, CpStatus::Optimal);
         assert_eq!(sol.assignment, vec![0, 1]);
+        assert_eq!(sol.objective, Some(1));
+    }
+
+    #[test]
+    fn enforced_table_constraints_respect_gate() {
+        let model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "active_gate".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "inactive_gate".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "x".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "y".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "inactive_x".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "inactive_y".to_string(),
+                    domain: vec![0, 1],
+                },
+            ],
+            constraints: vec![
+                CpConstraint::BoolOr(vec![BoolLiteral {
+                    var: 0,
+                    positive: true,
+                }]),
+                CpConstraint::BoolOr(vec![BoolLiteral {
+                    var: 1,
+                    positive: false,
+                }]),
+                CpConstraint::EnforcedAllowedAssignments {
+                    enforcement: vec![BoolLiteral {
+                        var: 0,
+                        positive: true,
+                    }],
+                    vars: vec![2, 3],
+                    tuples: vec![vec![0, 1], vec![1, 0]],
+                },
+                CpConstraint::EnforcedForbiddenAssignments {
+                    enforcement: vec![BoolLiteral {
+                        var: 0,
+                        positive: true,
+                    }],
+                    vars: vec![2, 3],
+                    tuples: vec![vec![0, 1]],
+                },
+                CpConstraint::EnforcedForbiddenAssignments {
+                    enforcement: vec![BoolLiteral {
+                        var: 1,
+                        positive: true,
+                    }],
+                    vars: vec![4, 5],
+                    tuples: vec![vec![0, 0]],
+                },
+            ],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![
+                    LinearTerm { var: 2, coeff: 1 },
+                    LinearTerm { var: 3, coeff: 1 },
+                    LinearTerm { var: 4, coeff: 1 },
+                    LinearTerm { var: 5, coeff: 1 },
+                ],
+            }),
+        };
+        let sol = solve_cp_model(&model, CpSolveOptions::default());
+        assert_eq!(sol.status, CpStatus::Optimal);
+        assert_eq!(sol.assignment, vec![1, 0, 1, 0, 0, 0]);
         assert_eq!(sol.objective, Some(1));
     }
 
@@ -4319,5 +4649,99 @@ mod tests {
         assert_eq!(sol.status, CpStatus::Optimal);
         assert_eq!(sol.assignment, vec![0, 0]);
         assert_eq!(sol.objective, Some(0));
+    }
+
+    #[test]
+    fn enforced_bool_constraints_respect_gate() {
+        let active_model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "use_rule".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "x".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "y".to_string(),
+                    domain: vec![0, 1],
+                },
+            ],
+            constraints: vec![
+                CpConstraint::BoolOr(vec![BoolLiteral {
+                    var: 0,
+                    positive: true,
+                }]),
+                CpConstraint::EnforcedBoolOr {
+                    enforcement: vec![BoolLiteral {
+                        var: 0,
+                        positive: true,
+                    }],
+                    literals: vec![
+                        BoolLiteral {
+                            var: 1,
+                            positive: true,
+                        },
+                        BoolLiteral {
+                            var: 2,
+                            positive: true,
+                        },
+                    ],
+                },
+                CpConstraint::EnforcedBoolAnd {
+                    enforcement: vec![BoolLiteral {
+                        var: 0,
+                        positive: true,
+                    }],
+                    literals: vec![BoolLiteral {
+                        var: 2,
+                        positive: true,
+                    }],
+                },
+            ],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![
+                    LinearTerm { var: 1, coeff: 1 },
+                    LinearTerm { var: 2, coeff: 1 },
+                ],
+            }),
+        };
+        let active = solve_cp_model(&active_model, CpSolveOptions::default());
+        assert_eq!(active.status, CpStatus::Optimal);
+        assert_eq!(active.assignment, vec![1, 0, 1]);
+        assert_eq!(active.objective, Some(1));
+
+        let inactive_model = CpModel {
+            variables: active_model.variables,
+            constraints: vec![
+                CpConstraint::BoolOr(vec![BoolLiteral {
+                    var: 0,
+                    positive: false,
+                }]),
+                CpConstraint::EnforcedBoolAnd {
+                    enforcement: vec![BoolLiteral {
+                        var: 0,
+                        positive: true,
+                    }],
+                    literals: vec![
+                        BoolLiteral {
+                            var: 1,
+                            positive: true,
+                        },
+                        BoolLiteral {
+                            var: 2,
+                            positive: true,
+                        },
+                    ],
+                },
+            ],
+            objective: active_model.objective,
+        };
+        let inactive = solve_cp_model(&inactive_model, CpSolveOptions::default());
+        assert_eq!(inactive.status, CpStatus::Optimal);
+        assert_eq!(inactive.assignment, vec![0, 0, 0]);
+        assert_eq!(inactive.objective, Some(0));
     }
 }

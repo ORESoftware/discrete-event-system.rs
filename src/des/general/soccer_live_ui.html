@@ -121,13 +121,14 @@
   }
   .slot {
     display: grid;
-    grid-template-columns: 52px 1fr;
+    grid-template-columns: 52px minmax(0, 1fr);
     gap: 8px;
     align-items: center;
     margin-bottom: 8px;
     font-size: 12px;
   }
   .slot label { color: var(--muted); }
+  .slot select { width: 100%; max-width: none; }
   .events {
     margin: 0;
     padding: 0;
@@ -179,12 +180,14 @@
         <button id="run" class="active">Run</button>
         <button id="step">Step</button>
         <select id="slotPick"></select>
+        <select id="targetPick"></select>
       </div>
       <div class="status" id="status">connecting</div>
       <div class="section">Match</div>
       <div class="metric"><span>Phase</span><b id="phase">Kickoff</b></div>
       <div class="metric"><span>Home Brain</span><b id="homeBrain">P0.00 R0.00</b></div>
       <div class="metric"><span>Away Brain</span><b id="awayBrain">P0.00 R0.00</b></div>
+      <div class="metric"><span>Ball</span><b id="ballPhysics">0.0y/s 0.0y/s2</b></div>
       <div class="metric"><span>Shots</span><b id="shots">0 - 0</b></div>
       <div class="metric"><span>On Target</span><b id="onTarget">0 - 0</b></div>
       <div class="metric"><span>Saves</span><b id="saves">0 - 0</b></div>
@@ -221,6 +224,7 @@ const clock = document.getElementById("clock");
 const phase = document.getElementById("phase");
 const homeBrain = document.getElementById("homeBrain");
 const awayBrain = document.getElementById("awayBrain");
+const ballPhysics = document.getElementById("ballPhysics");
 const shots = document.getElementById("shots");
 const onTarget = document.getElementById("onTarget");
 const saves = document.getElementById("saves");
@@ -233,6 +237,7 @@ const ticks = document.getElementById("ticks");
 const learning = document.getElementById("learning");
 const slots = document.getElementById("slots");
 const slotPick = document.getElementById("slotPick");
+const targetPick = document.getElementById("targetPick");
 const events = document.getElementById("events");
 const statusEl = document.getElementById("status");
 const runButton = document.getElementById("run");
@@ -256,6 +261,10 @@ function phaseLabel(v) {
 function directiveLabel(d) {
   if (!d) return "P0.00 R0.00";
   return `P${Number(d.pressIntensity ?? 0).toFixed(2)} R${Number(d.riskTolerance ?? 0).toFixed(2)}`;
+}
+function vecLen(v) {
+  if (!v) return 0;
+  return Math.hypot(Number(v.x || 0), Number(v.y || 0));
 }
 function pitchRect() {
   const pad = 34;
@@ -345,6 +354,7 @@ function render() {
   phase.textContent = phaseLabel(f.phase);
   homeBrain.textContent = directiveLabel(f.homeDirective);
   awayBrain.textContent = directiveLabel(f.awayDirective);
+  ballPhysics.textContent = `${vecLen(f.ball.velocity).toFixed(1)}y/s ${vecLen(f.ball.acceleration).toFixed(1)}y/s2`;
   const s = state.summary.stats;
   shots.textContent = `${s.shotsHome} - ${s.shotsAway}`;
   onTarget.textContent = `${s.shotsOnTargetHome ?? 0} - ${s.shotsOnTargetAway ?? 0}`;
@@ -360,24 +370,96 @@ function render() {
   learning.textContent = String(learningCount);
   events.innerHTML = eventLog.slice(-12).reverse().map(e => `<li>${fmtClock(e.clockSeconds)} ${e.description}</li>`).join("");
 }
+function humanSlotCount() {
+  if (!state || !state.config) return 0;
+  return Math.min(Number(state.config.maxHumanPlayers || 0), 4);
+}
+function assignmentForSlot(slot) {
+  return (state?.controllerAssignments || []).find(a => a.controllerSlot === slot) || null;
+}
+function assignmentKey(assignments) {
+  return (assignments || [])
+    .map(a => `${a.controllerSlot}:${a.playerId}`)
+    .sort()
+    .join("|");
+}
+function playerLabel(p) {
+  return `${p.team} ${p.shirt} ${p.name}`;
+}
+function applyAssignmentsToFrame(assignments) {
+  if (!state?.frame?.players) return;
+  const byPlayer = new Map((assignments || []).map(a => [a.playerId, a.controllerSlot]));
+  for (const p of state.frame.players) {
+    p.controllerSlot = byPlayer.has(p.id) ? byPlayer.get(p.id) : null;
+  }
+}
 function rebuildControls(assignments) {
   const existing = slotPick.value;
+  if (assignments) {
+    state.controllerAssignments = assignments;
+    applyAssignmentsToFrame(assignments);
+  }
   slotPick.innerHTML = "";
   slots.innerHTML = "";
-  for (const a of assignments) {
+  for (let slot = 0; slot < humanSlotCount(); slot++) {
+    const assignment = assignmentForSlot(slot);
     const opt = document.createElement("option");
-    opt.value = a.controllerSlot;
-    opt.textContent = `Slot ${a.controllerSlot + 1}: ${a.playerName}`;
+    opt.value = slot;
+    opt.textContent = `Slot ${slot + 1}: ${assignment ? assignment.playerName : "Unassigned"}`;
     slotPick.appendChild(opt);
+
     const row = document.createElement("div");
     row.className = "slot";
-    row.innerHTML = `<label>Slot ${a.controllerSlot + 1}</label><span>${a.playerName}</span>`;
+    const label = document.createElement("label");
+    label.textContent = `Slot ${slot + 1}`;
+    const pick = document.createElement("select");
+    const empty = document.createElement("option");
+    empty.value = "";
+    empty.textContent = "Unassigned";
+    pick.appendChild(empty);
+    for (const p of state.frame.players) {
+      const playerOpt = document.createElement("option");
+      playerOpt.value = p.id;
+      playerOpt.textContent = playerLabel(p);
+      pick.appendChild(playerOpt);
+    }
+    pick.value = assignment ? String(assignment.playerId) : "";
+    pick.addEventListener("change", () => {
+      const playerId = pick.value === "" ? null : Number(pick.value);
+      assignSlot(slot, playerId).catch(e => statusEl.textContent = e.message);
+    });
+    row.appendChild(label);
+    row.appendChild(pick);
     slots.appendChild(row);
   }
-  if (assignments.some(a => String(a.controllerSlot) === existing)) {
+  if (Array.from(slotPick.options).some(o => o.value === existing)) {
     slotPick.value = existing;
   }
   activeSlot = Number(slotPick.value || 0);
+  rebuildTargetPick();
+}
+function rebuildTargetPick() {
+  const existing = targetPick.value;
+  targetPick.innerHTML = "";
+  const auto = document.createElement("option");
+  auto.value = "";
+  auto.textContent = "Auto target";
+  targetPick.appendChild(auto);
+  if (state) {
+    const activeId = selectedPlayerId();
+    const activePlayer = state.frame.players.find(p => p.id === activeId);
+    if (activePlayer) {
+      for (const p of state.frame.players.filter(p => p.team === activePlayer.team && p.id !== activePlayer.id)) {
+        const opt = document.createElement("option");
+        opt.value = p.id;
+        opt.textContent = `${p.shirt} ${p.name}`;
+        targetPick.appendChild(opt);
+      }
+    }
+  }
+  if (Array.from(targetPick.options).some(o => o.value === existing)) {
+    targetPick.value = existing;
+  }
 }
 function axisFromKeys() {
   const axis = {x: 0, y: 0};
@@ -393,6 +475,9 @@ function selectedPlayerId() {
   const assignment = state.controllerAssignments.find(a => a.controllerSlot === slot);
   return assignment ? assignment.playerId : null;
 }
+function selectedPassTargetId() {
+  return targetPick.value === "" ? null : Number(targetPick.value);
+}
 function queueInput(pass = false, shoot = false) {
   queuedInputs.push({
     controllerSlot: Number(slotPick.value || 0),
@@ -402,7 +487,7 @@ function queueInput(pass = false, shoot = false) {
     sprint: keys.has("ShiftLeft") || keys.has("ShiftRight"),
     pass,
     shoot,
-    targetPlayer: null
+    targetPlayer: pass ? selectedPassTargetId() : null
   });
 }
 async function postJson(path, body) {
@@ -414,9 +499,18 @@ async function postJson(path, body) {
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
+async function assignSlot(slot, playerId) {
+  const response = await postJson("/api/assign", {controllerSlot: slot, playerId});
+  state.controllerAssignments = response.controllerAssignments;
+  applyAssignmentsToFrame(response.controllerAssignments);
+  rebuildControls(response.controllerAssignments);
+  statusEl.textContent = "controller assigned";
+  render();
+}
 async function loadState() {
   const res = await fetch("/api/state");
   state = await res.json();
+  applyAssignmentsToFrame(state.controllerAssignments);
   rebuildControls(state.controllerAssignments);
   statusEl.textContent = "connected";
   render();
@@ -424,6 +518,7 @@ async function loadState() {
 async function stepOnce() {
   if (!state || state.done) return;
   const inputs = queuedInputs.splice(0, queuedInputs.length);
+  const beforeAssignments = assignmentKey(state.controllerAssignments);
   const response = await postJson("/api/step", {ticks: 1, recordEveryTicks: 1, inputs});
   state = {
     config: state.config,
@@ -434,6 +529,12 @@ async function stepOnce() {
   };
   if (response.events.length) eventLog.push(...response.events);
   if (response.learningTransitions) learningCount += response.learningTransitions.length;
+  applyAssignmentsToFrame(state.controllerAssignments);
+  if (assignmentKey(state.controllerAssignments) !== beforeAssignments) {
+    rebuildControls(state.controllerAssignments);
+  } else {
+    rebuildTargetPick();
+  }
   render();
 }
 async function submitInputOnly(pass = false, shoot = false) {
@@ -449,7 +550,7 @@ runButton.addEventListener("click", () => {
 document.getElementById("step").addEventListener("click", () => stepOnce().catch(e => statusEl.textContent = e.message));
 document.getElementById("pass").addEventListener("click", () => submitInputOnly(true, false).catch(e => statusEl.textContent = e.message));
 document.getElementById("shoot").addEventListener("click", () => submitInputOnly(false, true).catch(e => statusEl.textContent = e.message));
-slotPick.addEventListener("change", () => { activeSlot = Number(slotPick.value || 0); render(); });
+slotPick.addEventListener("change", () => { activeSlot = Number(slotPick.value || 0); rebuildTargetPick(); render(); });
 window.addEventListener("keydown", e => {
   keys.add(e.code);
   if (["ArrowLeft","ArrowRight","ArrowUp","ArrowDown","KeyW","KeyA","KeyS","KeyD","ShiftLeft","ShiftRight"].includes(e.code)) {

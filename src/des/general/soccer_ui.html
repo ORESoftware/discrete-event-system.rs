@@ -200,6 +200,7 @@
       <div class="metric"><span>Phase</span><b id="phase">Kickoff</b></div>
       <div class="metric"><span>Home Brain</span><b id="homeBrain">P0.00 R0.00</b></div>
       <div class="metric"><span>Away Brain</span><b id="awayBrain">P0.00 R0.00</b></div>
+      <div class="metric"><span>Ball</span><b id="ballPhysics">0.0y/s 0.0y/s2</b></div>
       <div class="metric"><span>Shots</span><b id="shots">0 - 0</b></div>
       <div class="metric"><span>On Target</span><b id="onTarget">0 - 0</b></div>
       <div class="metric"><span>Saves</span><b id="saves">0 - 0</b></div>
@@ -211,6 +212,9 @@
       <div class="metric"><span>Ticks</span><b id="ticks">0</b></div>
       <div class="section">Controller Slots</div>
       <div id="slots"></div>
+      <div class="row">
+        <select id="passTarget"></select>
+      </div>
       <div class="row">
         <button id="capture">Capture</button>
         <button id="pass">Pass</button>
@@ -237,6 +241,7 @@ const clock = document.getElementById("clock");
 const phase = document.getElementById("phase");
 const homeBrain = document.getElementById("homeBrain");
 const awayBrain = document.getElementById("awayBrain");
+const ballPhysics = document.getElementById("ballPhysics");
 const shots = document.getElementById("shots");
 const onTarget = document.getElementById("onTarget");
 const saves = document.getElementById("saves");
@@ -251,6 +256,7 @@ const play = document.getElementById("play");
 const speed = document.getElementById("speed");
 const events = document.getElementById("events");
 const slots = document.getElementById("slots");
+const passTarget = document.getElementById("passTarget");
 const keys = new Set();
 let frameIndex = 0;
 let playing = false;
@@ -269,6 +275,10 @@ function phaseLabel(v) {
 function directiveLabel(d) {
   if (!d) return "P0.00 R0.00";
   return `P${Number(d.pressIntensity ?? 0).toFixed(2)} R${Number(d.riskTolerance ?? 0).toFixed(2)}`;
+}
+function vecLen(v) {
+  if (!v) return 0;
+  return Math.hypot(Number(v.x || 0), Number(v.y || 0));
 }
 function fmtClock(s) {
   const m = Math.floor(s / 60);
@@ -370,6 +380,7 @@ function render() {
   phase.textContent = phaseLabel(f.phase);
   homeBrain.textContent = directiveLabel(f.homeDirective);
   awayBrain.textContent = directiveLabel(f.awayDirective);
+  ballPhysics.textContent = `${vecLen(f.ball.velocity).toFixed(1)}y/s ${vecLen(f.ball.acceleration).toFixed(1)}y/s2`;
   ticks.textContent = `${f.tick} / ${trace.summary.ticks}`;
   scrub.value = frameIndex;
 }
@@ -404,6 +415,9 @@ function selectedPlayer(slot) {
   const sel = document.getElementById(`slot-${slot}`);
   return sel ? Number(sel.value) : null;
 }
+function selectedPassTarget() {
+  return passTarget.value === "" ? null : Number(passTarget.value);
+}
 function pushInput(pass = false, shoot = false) {
   const axis = {x: 0, y: 0};
   if (keys.has("ArrowLeft") || keys.has("KeyA")) axis.x -= 1;
@@ -418,8 +432,30 @@ function pushInput(pass = false, shoot = false) {
     sprint: keys.has("ShiftLeft") || keys.has("ShiftRight"),
     pass,
     shoot,
-    targetPlayer: null
+    targetPlayer: pass ? selectedPassTarget() : null
   });
+}
+function rebuildPassTargets() {
+  const players = trace.frames[Math.min(frameIndex, trace.frames.length - 1)].players;
+  const activePlayerId = selectedPlayer(activeSlot);
+  const activePlayer = players.find(p => p.id === activePlayerId);
+  const existing = passTarget.value;
+  passTarget.innerHTML = "";
+  const auto = document.createElement("option");
+  auto.value = "";
+  auto.textContent = "Auto target";
+  passTarget.appendChild(auto);
+  if (activePlayer) {
+    for (const p of players.filter(p => p.team === activePlayer.team && p.id !== activePlayer.id)) {
+      const opt = document.createElement("option");
+      opt.value = p.id;
+      opt.textContent = `${p.shirt} ${p.name}`;
+      passTarget.appendChild(opt);
+    }
+  }
+  if (Array.from(passTarget.options).some(o => o.value === existing)) {
+    passTarget.value = existing;
+  }
 }
 function buildSlots() {
   const players = trace.frames[0].players.filter(p => p.team === "Home");
@@ -438,24 +474,27 @@ function buildSlots() {
       if (p.controllerSlot === i) opt.selected = true;
       select.appendChild(opt);
     }
-    select.addEventListener("focus", () => activeSlot = i);
-    select.addEventListener("change", () => { activeSlot = i; render(); });
+    select.addEventListener("focus", () => { activeSlot = i; rebuildPassTargets(); });
+    select.addEventListener("change", () => { activeSlot = i; rebuildPassTargets(); render(); });
     row.append(label, select);
     slots.appendChild(row);
   }
+  rebuildPassTargets();
 }
 scrub.max = Math.max(0, trace.frames.length - 1);
-scrub.addEventListener("input", () => { frameIndex = Number(scrub.value); render(); });
+scrub.addEventListener("input", () => { frameIndex = Number(scrub.value); rebuildPassTargets(); render(); });
 play.addEventListener("click", () => {
   playing = !playing;
   play.textContent = playing ? "Pause" : "Play";
 });
 document.getElementById("prev").addEventListener("click", () => {
   frameIndex = Math.max(0, frameIndex - 1);
+  rebuildPassTargets();
   render();
 });
 document.getElementById("next").addEventListener("click", () => {
   frameIndex = Math.min(trace.frames.length - 1, frameIndex + 1);
+  rebuildPassTargets();
   render();
 });
 document.getElementById("capture").addEventListener("click", () => pushInput(false, false));

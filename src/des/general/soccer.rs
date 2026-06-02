@@ -34,6 +34,7 @@ const PLAYER_COLLISION_DAMPING: f64 = 0.34;
 const SHOT_SAVE_DEPTH_YARDS: f64 = 1.6;
 const BALL_AGENT_ID: usize = 25;
 const PLAYER_POSITION_HISTORY_LIMIT: usize = 50;
+const BALL_POSITION_HISTORY_LIMIT: usize = 50;
 
 fn default_ball_drag_per_tick() -> f64 {
     DEFAULT_BALL_DRAG_PER_TICK
@@ -943,9 +944,51 @@ pub struct HumanInputFrame {
     pub target_player: Option<usize>,
 }
 
+const HUMAN_INPUT_QUEUE_LIMIT: usize = 256;
+
+#[derive(Clone, Debug, Default)]
+struct SharedHumanInputStore {
+    pending: VecDeque<HumanInputFrame>,
+    latest_seq_by_slot: HashMap<usize, u64>,
+}
+
+impl SharedHumanInputStore {
+    fn push(&mut self, input: HumanInputFrame) -> bool {
+        if self
+            .latest_seq_by_slot
+            .get(&input.controller_slot)
+            .is_some_and(|last_seq| input.seq <= *last_seq)
+        {
+            return false;
+        }
+        self.latest_seq_by_slot
+            .insert(input.controller_slot, input.seq);
+        self.pending.push_back(input);
+        while self.pending.len() > HUMAN_INPUT_QUEUE_LIMIT {
+            self.pending.pop_front();
+        }
+        true
+    }
+
+    fn drain_latest_by_slot(&mut self) -> HashMap<usize, HumanInputFrame> {
+        let mut latest = HashMap::new();
+        for input in self.pending.drain(..) {
+            latest
+                .entry(input.controller_slot)
+                .and_modify(|current: &mut HumanInputFrame| {
+                    if input.seq > current.seq {
+                        *current = input.clone();
+                    }
+                })
+                .or_insert(input);
+        }
+        latest
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct SharedHumanInputs {
-    inner: Arc<Mutex<VecDeque<HumanInputFrame>>>,
+    inner: Arc<RwLock<SharedHumanInputStore>>,
 }
 
 impl SharedHumanInputs {
@@ -953,21 +996,35 @@ impl SharedHumanInputs {
         Self::default()
     }
 
-    pub fn push(&self, input: HumanInputFrame) {
-        let mut q = self.inner.lock().expect("human input queue poisoned");
-        q.push_back(input);
-        while q.len() > 256 {
-            q.pop_front();
-        }
+    pub fn push(&self, input: HumanInputFrame) -> bool {
+        self.inner
+            .write()
+            .expect("human input queue lock poisoned")
+            .push(input)
     }
 
     pub fn drain_latest_by_slot(&self) -> HashMap<usize, HumanInputFrame> {
-        let mut q = self.inner.lock().expect("human input queue poisoned");
-        let mut latest = HashMap::new();
-        for input in q.drain(..) {
-            latest.insert(input.controller_slot, input);
-        }
-        latest
+        self.inner
+            .write()
+            .expect("human input queue lock poisoned")
+            .drain_latest_by_slot()
+    }
+
+    pub fn queued_len(&self) -> usize {
+        self.inner
+            .read()
+            .expect("human input queue lock poisoned")
+            .pending
+            .len()
+    }
+
+    pub fn last_seq_for_slot(&self, controller_slot: usize) -> Option<u64> {
+        self.inner
+            .read()
+            .expect("human input queue lock poisoned")
+            .latest_seq_by_slot
+            .get(&controller_slot)
+            .copied()
     }
 }
 
@@ -1210,8 +1267,21 @@ impl Default for SharedPlayerPositions {
 pub struct BallState {
     pub position: Vec2,
     pub velocity: Vec2,
+    #[serde(default)]
+    pub acceleration: Vec2,
     pub holder: Option<usize>,
     pub last_touch_team: Option<Team>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BallPositionSample {
+    pub tick: u64,
+    pub clock_seconds: f64,
+    pub position: Vec2,
+    pub velocity: Vec2,
+    pub acceleration: Vec2,
+    pub holder: Option<usize>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1229,6 +1299,8 @@ pub struct BallAgent {
     pub id: usize,
     pub position: Vec2,
     pub velocity: Vec2,
+    pub acceleration: Vec2,
+    pub position_history: VecDeque<BallPositionSample>,
     pub holder: Option<usize>,
     pub last_touch_team: Option<Team>,
     pub last_decision: Option<BallDecisionTrace>,
@@ -1240,6 +1312,15 @@ impl BallAgent {
             id,
             position: state.position,
             velocity: state.velocity,
+            acceleration: state.acceleration,
+            position_history: VecDeque::from([BallPositionSample {
+                tick: 0,
+                clock_seconds: 0.0,
+                position: state.position,
+                velocity: state.velocity,
+                acceleration: state.acceleration,
+                holder: state.holder,
+            }]),
             holder: state.holder,
             last_touch_team: state.last_touch_team,
             last_decision: None,
@@ -1250,9 +1331,54 @@ impl BallAgent {
         BallState {
             position: self.position,
             velocity: self.velocity,
+            acceleration: self.acceleration,
             holder: self.holder,
             last_touch_team: self.last_touch_team,
         }
+    }
+
+    fn update_acceleration_from(&mut self, previous_velocity: Vec2, dt_seconds: f64) {
+        self.acceleration = if dt_seconds > 0.0 {
+            (self.velocity - previous_velocity) / dt_seconds
+        } else {
+            Vec2::zero()
+        };
+    }
+
+    fn record_position_history(&mut self, tick: u64, clock_seconds: f64) {
+        self.position_history.push_back(BallPositionSample {
+            tick,
+            clock_seconds,
+            position: self.position,
+            velocity: self.velocity,
+            acceleration: self.acceleration,
+            holder: self.holder,
+        });
+        while self.position_history.len() > BALL_POSITION_HISTORY_LIMIT {
+            self.position_history.pop_front();
+        }
+    }
+
+    pub fn history_velocity_estimate(&self, dt_seconds: f64) -> Vec2 {
+        if dt_seconds <= 0.0 || self.position_history.len() < 2 {
+            return self.velocity;
+        }
+        let last = self.position_history.len() - 1;
+        (self.position_history[last].position - self.position_history[last - 1].position)
+            / dt_seconds
+    }
+
+    pub fn history_acceleration_estimate(&self, dt_seconds: f64) -> Vec2 {
+        if dt_seconds <= 0.0 || self.position_history.len() < 3 {
+            return self.acceleration;
+        }
+        let last = self.position_history.len() - 1;
+        let v0 = (self.position_history[last - 1].position
+            - self.position_history[last - 2].position)
+            / dt_seconds;
+        let v1 = (self.position_history[last].position - self.position_history[last - 1].position)
+            / dt_seconds;
+        (v1 - v0) / dt_seconds
     }
 
     fn run_time_step(
@@ -1785,6 +1911,8 @@ pub struct WorldSnapshot {
     pub field_width: f64,
     pub goal_width: f64,
     pub ball: BallState,
+    #[serde(default)]
+    pub ball_history: Vec<BallPositionSample>,
     pub players: Vec<PlayerSnapshot>,
     pub shared_positions: SharedPlayerPositionSnapshot,
     pub score_home: u32,
@@ -1829,6 +1957,7 @@ impl WorldSnapshot {
             field_width: m.config.field_width_yards,
             goal_width: m.config.goal_width_yards,
             ball: m.ball.to_state(),
+            ball_history: m.ball.position_history.iter().cloned().collect(),
             players,
             shared_positions,
             score_home: m.score_home,
@@ -1885,6 +2014,10 @@ impl WorldSnapshot {
 
     pub fn player_position_history(&self, player_id: usize) -> Option<&[PlayerPositionSample]> {
         self.shared_positions.history_for(player_id)
+    }
+
+    pub fn ball_position_history(&self) -> &[BallPositionSample] {
+        &self.ball_history
     }
 
     pub fn tactical_directive(&self, team: Team) -> &TeamTacticalDirective {
@@ -2520,6 +2653,19 @@ pub struct ControllerAssignment {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SoccerControllerAssignmentRequest {
+    pub controller_slot: usize,
+    pub player_id: Option<usize>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerControllerAssignmentResponse {
+    pub controller_assignments: Vec<ControllerAssignment>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SoccerStepRequest {
     #[serde(default)]
     pub inputs: Vec<HumanInputFrame>,
@@ -2658,6 +2804,7 @@ impl SoccerMatch {
                         config.field_length_yards * 0.5,
                     ),
                     velocity: Vec2::zero(),
+                    acceleration: Vec2::zero(),
                     holder: kickoff,
                     last_touch_team: Some(Team::Home),
                 },
@@ -2731,6 +2878,47 @@ impl SoccerMatch {
         assignments
     }
 
+    pub fn assign_controller_slot(
+        &mut self,
+        controller_slot: usize,
+        player_id: Option<usize>,
+    ) -> Result<(), String> {
+        let slot_count = self.config.human_slots();
+        if controller_slot >= slot_count {
+            let range = if slot_count == 0 {
+                "no configured slots".to_string()
+            } else {
+                format!("configured slots 0..{}", slot_count - 1)
+            };
+            return Err(format!(
+                "controller slot {controller_slot} is outside {range}"
+            ));
+        }
+
+        let target_idx = if let Some(player_id) = player_id {
+            Some(
+                self.players
+                    .iter()
+                    .position(|p| p.id == player_id)
+                    .ok_or_else(|| format!("player {player_id} does not exist"))?,
+            )
+        } else {
+            None
+        };
+
+        for player in &mut self.players {
+            if player.controller_slot == Some(controller_slot) {
+                player.controller_slot = None;
+            }
+        }
+
+        if let Some(target_idx) = target_idx {
+            self.players[target_idx].controller_slot = Some(controller_slot);
+        }
+
+        Ok(())
+    }
+
     pub fn run_time_step(&mut self) {
         if self.is_done() {
             return;
@@ -2741,6 +2929,7 @@ impl SoccerMatch {
         self.central_brain.run_time_step(&brain_input_snapshot);
         let snapshot = WorldSnapshot::from_match(self);
         let latest_inputs = self.human_inputs.drain_latest_by_slot();
+        let ball_velocity_before = self.ball.velocity;
 
         let mut actor_order: Vec<usize> = (0..self.players.len() + self.officials.len()).collect();
         fisher_yates_shuffle(&mut actor_order, &mut self.rng);
@@ -2774,9 +2963,12 @@ impl SoccerMatch {
         }
         self.resolve_player_collisions();
         self.integrate_ball();
+        self.ball
+            .update_acceleration_from(ball_velocity_before, self.config.dt_seconds);
         self.clock_seconds += self.config.dt_seconds;
         self.tick += 1;
         self.record_player_position_histories();
+        self.record_ball_position_history();
         self.shared_positions
             .sync_from_players(&self.players, self.tick, self.clock_seconds);
         let next_snapshot = WorldSnapshot::from_match(self);
@@ -3002,6 +3194,11 @@ impl SoccerMatch {
         }
     }
 
+    fn record_ball_position_history(&mut self) {
+        self.ball
+            .record_position_history(self.tick, self.clock_seconds);
+    }
+
     fn resolve_player_collisions(&mut self) {
         let min_sep = PLAYER_BODY_RADIUS_YARDS * 2.0;
         let width = self.config.field_width_yards;
@@ -3039,6 +3236,7 @@ impl SoccerMatch {
     }
 
     fn integrate_ball(&mut self) {
+        let previous_velocity = self.ball.velocity;
         let context = BallStepContext {
             tick: self.tick,
             clock_seconds: self.clock_seconds,
@@ -3054,6 +3252,8 @@ impl SoccerMatch {
         };
         let outcome = self.ball.run_time_step(context, &mut self.rng);
         self.apply_ball_outcome(outcome);
+        self.ball
+            .update_acceleration_from(previous_velocity, self.config.dt_seconds);
     }
 
     fn nearest_ball_controller(&mut self) -> Option<(usize, Team)> {
@@ -3570,8 +3770,8 @@ impl SoccerRealtimeSession {
         self.sim.shared_positions.clone()
     }
 
-    pub fn push_human_input(&self, input: HumanInputFrame) {
-        self.input_queue.push(input);
+    pub fn push_human_input(&self, input: HumanInputFrame) -> bool {
+        self.input_queue.push(input)
     }
 
     pub fn match_ref(&self) -> &SoccerMatch {
@@ -3595,9 +3795,11 @@ impl SoccerRealtimeSession {
     }
 
     pub fn step(&mut self, request: SoccerStepRequest) -> SoccerStepResponse {
-        let accepted_inputs = request.inputs.len();
+        let mut accepted_inputs = 0;
         for input in request.inputs {
-            self.input_queue.push(input);
+            if self.input_queue.push(input) {
+                accepted_inputs += 1;
+            }
         }
 
         let ticks = request.ticks.max(1);
@@ -3639,6 +3841,17 @@ impl SoccerRealtimeSession {
             serde_json::from_str(request_json).map_err(|e| format!("parse step request: {e}"))?;
         let resp = self.step(req);
         serde_json::to_string(&resp).map_err(|e| format!("serialize step response: {e}"))
+    }
+
+    pub fn assign_controller_slot(
+        &mut self,
+        request: SoccerControllerAssignmentRequest,
+    ) -> Result<SoccerControllerAssignmentResponse, String> {
+        self.sim
+            .assign_controller_slot(request.controller_slot, request.player_id)?;
+        Ok(SoccerControllerAssignmentResponse {
+            controller_assignments: self.sim.controller_assignments(),
+        })
     }
 
     pub fn state_response(&self) -> SoccerLiveStateResponse {
@@ -3865,9 +4078,11 @@ fn handle_live_soccer_request(
         }
         ("POST", "/api/input") => match parse_human_input_payload(req.body) {
             Ok(inputs) => {
-                let count = inputs.len();
+                let mut count = 0;
                 for input in inputs {
-                    input_queue.push(input);
+                    if input_queue.push(input) {
+                        count += 1;
+                    }
                 }
                 LiveHttpResponse::json(&SoccerInputAck {
                     accepted_inputs: count,
@@ -3898,6 +4113,33 @@ fn handle_live_soccer_request(
                 }
             };
             LiveHttpResponse::json(&guard.step(step_req))
+        }
+        ("POST", "/api/assign") => {
+            let assignment_req =
+                match serde_json::from_str::<SoccerControllerAssignmentRequest>(req.body) {
+                    Ok(req) => req,
+                    Err(e) => {
+                        return LiveHttpResponse::error(
+                            400,
+                            "Bad Request",
+                            &format!("parse controller assignment request: {e}"),
+                        )
+                    }
+                };
+            let mut guard = match session.lock() {
+                Ok(guard) => guard,
+                Err(_) => {
+                    return LiveHttpResponse::error(
+                        500,
+                        "Internal Server Error",
+                        "soccer session lock poisoned",
+                    )
+                }
+            };
+            match guard.assign_controller_slot(assignment_req) {
+                Ok(response) => LiveHttpResponse::json(&response),
+                Err(e) => LiveHttpResponse::error(400, "Bad Request", &e),
+            }
         }
         _ => LiveHttpResponse::error(404, "Not Found", "unknown soccer live route"),
     }
@@ -4144,9 +4386,18 @@ fn tracking_frame_to_world_snapshot(
         ball: BallState {
             position: frame.ball_position,
             velocity: frame.ball_velocity.unwrap_or_default(),
+            acceleration: Vec2::zero(),
             holder: frame.ball_holder,
             last_touch_team,
         },
+        ball_history: vec![BallPositionSample {
+            tick: frame.tick,
+            clock_seconds: frame.clock_seconds,
+            position: frame.ball_position,
+            velocity: frame.ball_velocity.unwrap_or_default(),
+            acceleration: Vec2::zero(),
+            holder: frame.ball_holder,
+        }],
         players,
         shared_positions,
         score_home,
@@ -4761,6 +5012,55 @@ mod tests {
     }
 
     #[test]
+    fn ball_agent_tracks_acceleration_and_rolling_history() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            seed: 204,
+            ..Default::default()
+        });
+        for player in &mut sim.players {
+            player.position = Vec2::new(2.0, 2.0);
+            player.velocity = Vec2::zero();
+        }
+        sim.ball.holder = None;
+        sim.ball.position = Vec2::new(20.0, 60.0);
+        sim.ball.velocity = Vec2::new(10.0, 0.0);
+        sim.ball.acceleration = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.pending_pass = None;
+        sim.pending_shot = None;
+        sim.ball.position_history.clear();
+        sim.ball.record_position_history(0, 0.0);
+
+        for _ in 0..60 {
+            sim.integrate_ball();
+            sim.tick += 1;
+            sim.clock_seconds += sim.config.dt_seconds;
+            sim.record_ball_position_history();
+        }
+
+        assert_eq!(sim.ball.position_history.len(), BALL_POSITION_HISTORY_LIMIT);
+        assert!(sim.ball.acceleration.x < 0.0);
+        assert!(sim
+            .ball
+            .history_velocity_estimate(sim.config.dt_seconds)
+            .len()
+            .is_finite());
+        assert!(sim
+            .ball
+            .history_acceleration_estimate(sim.config.dt_seconds)
+            .len()
+            .is_finite());
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        assert_eq!(
+            snapshot.ball_position_history().len(),
+            BALL_POSITION_HISTORY_LIMIT
+        );
+        assert_eq!(snapshot.ball.acceleration, sim.ball.acceleration);
+        assert_eq!(sim.to_frame().ball.acceleration, sim.ball.acceleration);
+    }
+
+    #[test]
     fn central_brain_updates_before_player_decisions() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             duration_seconds: 0.1,
@@ -4878,7 +5178,7 @@ mod tests {
     #[test]
     fn human_input_queue_keeps_latest_by_slot() {
         let q = SharedHumanInputs::new();
-        q.push(HumanInputFrame {
+        assert!(q.push(HumanInputFrame {
             controller_slot: 0,
             player_id: Some(1),
             seq: 1,
@@ -4887,8 +5187,8 @@ mod tests {
             pass: false,
             shoot: false,
             target_player: None,
-        });
-        q.push(HumanInputFrame {
+        }));
+        assert!(q.push(HumanInputFrame {
             controller_slot: 0,
             player_id: Some(1),
             seq: 2,
@@ -4897,10 +5197,104 @@ mod tests {
             pass: false,
             shoot: false,
             target_player: None,
-        });
+        }));
         let latest = q.drain_latest_by_slot();
         assert_eq!(latest.get(&0).unwrap().seq, 2);
         assert!(latest.get(&0).unwrap().sprint);
+    }
+
+    #[test]
+    fn human_input_queue_rejects_stale_frames_and_allows_readers() {
+        let q = SharedHumanInputs::new();
+        assert!(q.push(HumanInputFrame {
+            controller_slot: 0,
+            player_id: Some(0),
+            seq: 5,
+            axis: Vec2::new(1.0, 0.0),
+            sprint: false,
+            pass: false,
+            shoot: false,
+            target_player: None,
+        }));
+        assert!(!q.push(HumanInputFrame {
+            controller_slot: 0,
+            player_id: Some(0),
+            seq: 4,
+            axis: Vec2::new(-1.0, 0.0),
+            sprint: true,
+            pass: false,
+            shoot: false,
+            target_player: None,
+        }));
+        assert_eq!(q.queued_len(), 1);
+        assert_eq!(q.last_seq_for_slot(0), Some(5));
+
+        let reader_queue = q.clone();
+        let reader = std::thread::spawn(move || {
+            assert_eq!(reader_queue.queued_len(), 1);
+            assert_eq!(reader_queue.last_seq_for_slot(0), Some(5));
+        });
+        reader.join().expect("reader joins");
+
+        assert!(q.push(HumanInputFrame {
+            controller_slot: 0,
+            player_id: Some(0),
+            seq: 6,
+            axis: Vec2::new(0.0, 1.0),
+            sprint: true,
+            pass: false,
+            shoot: false,
+            target_player: None,
+        }));
+        let latest = q.drain_latest_by_slot();
+        assert_eq!(latest.get(&0).unwrap().seq, 6);
+        assert!(latest.get(&0).unwrap().sprint);
+        assert_eq!(q.queued_len(), 0);
+        assert!(!q.push(HumanInputFrame {
+            controller_slot: 0,
+            player_id: Some(0),
+            seq: 5,
+            axis: Vec2::zero(),
+            sprint: false,
+            pass: false,
+            shoot: false,
+            target_player: None,
+        }));
+    }
+
+    #[test]
+    fn human_input_queue_handles_multiple_controller_threads() {
+        let q = SharedHumanInputs::new();
+        let mut handles = Vec::new();
+        for slot in 0..4 {
+            let q = q.clone();
+            handles.push(std::thread::spawn(move || {
+                for seq in [1, 3, 2] {
+                    let _ = q.push(HumanInputFrame {
+                        controller_slot: slot,
+                        player_id: Some(slot),
+                        seq,
+                        axis: Vec2::new(slot as f64, seq as f64),
+                        sprint: seq == 3,
+                        pass: false,
+                        shoot: false,
+                        target_player: None,
+                    });
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("controller writer joins");
+        }
+
+        let latest = q.drain_latest_by_slot();
+        assert_eq!(latest.len(), 4);
+        for slot in 0..4 {
+            let input = latest.get(&slot).expect("slot input");
+            assert_eq!(input.seq, 3);
+            assert!(input.sprint);
+            assert_eq!(q.last_seq_for_slot(slot), Some(3));
+        }
     }
 
     #[test]
@@ -4933,6 +5327,99 @@ mod tests {
         assert_eq!(resp.summary.ticks, 1);
         assert_eq!(resp.accepted_inputs, 0);
         assert!(session.match_ref().players[0].position.x > start_x);
+    }
+
+    #[test]
+    fn human_input_target_player_drives_targeted_pass() {
+        let mut session = SoccerRealtimeSession::new(MatchConfig {
+            duration_seconds: 1.0,
+            max_human_players: 1,
+            seed: 78,
+            ..Default::default()
+        });
+        {
+            let sim = session.match_mut();
+            sim.players[5].controller_slot = Some(0);
+            sim.ball.holder = Some(5);
+            sim.ball.position = sim.players[5].position;
+            sim.ball.velocity = Vec2::zero();
+            sim.ball.last_touch_team = Some(Team::Home);
+        }
+
+        let response = session.step(SoccerStepRequest {
+            inputs: vec![HumanInputFrame {
+                controller_slot: 0,
+                player_id: Some(5),
+                seq: 1,
+                axis: Vec2::zero(),
+                sprint: false,
+                pass: true,
+                shoot: false,
+                target_player: Some(8),
+            }],
+            ticks: 1,
+            record_every_ticks: Some(1),
+        });
+
+        assert_eq!(response.accepted_inputs, 1);
+        assert_eq!(session.match_ref().stats.passes_attempted_home, 1);
+        let pass = session
+            .match_ref()
+            .pending_pass
+            .as_ref()
+            .expect("pending targeted pass");
+        assert_eq!(pass.from, 5);
+        assert_eq!(pass.target, Some(8));
+        assert_eq!(
+            session.match_ref().players[5]
+                .last_decision
+                .as_ref()
+                .expect("human pass decision")
+                .action,
+            "pass"
+        );
+    }
+
+    #[test]
+    fn controller_slot_reassignment_moves_human_control_between_players() {
+        let mut session = SoccerRealtimeSession::new(MatchConfig {
+            duration_seconds: 1.0,
+            max_human_players: 2,
+            seed: 79,
+            ..Default::default()
+        });
+
+        let response = session
+            .assign_controller_slot(SoccerControllerAssignmentRequest {
+                controller_slot: 0,
+                player_id: Some(5),
+            })
+            .expect("controller reassignment");
+        assert!(response
+            .controller_assignments
+            .iter()
+            .any(|a| a.controller_slot == 0 && a.player_id == 5));
+        assert_eq!(session.match_ref().players[0].controller_slot, None);
+        assert_eq!(session.match_ref().players[5].controller_slot, Some(0));
+
+        let start_x = session.match_ref().players[5].position.x;
+        let response = session.step(SoccerStepRequest {
+            inputs: vec![HumanInputFrame {
+                controller_slot: 0,
+                player_id: Some(5),
+                seq: 1,
+                axis: Vec2::new(1.0, 0.0),
+                sprint: true,
+                pass: false,
+                shoot: false,
+                target_player: None,
+            }],
+            ticks: 1,
+            record_every_ticks: Some(1),
+        });
+
+        assert_eq!(response.accepted_inputs, 1);
+        assert!(session.match_ref().players[5].position.x > start_x);
     }
 
     #[test]
@@ -5542,6 +6029,7 @@ mod tests {
         assert!(value["frame"]["homeDirective"]
             .get("pressIntensity")
             .is_some());
+        assert!(value["frame"]["ball"].get("acceleration").is_some());
         assert!(value["summary"]["stats"]
             .get("looseBallRecoveriesHome")
             .is_some());
@@ -5553,6 +6041,54 @@ mod tests {
         assert!(value["summary"]["stats"].get("cornerKicksHome").is_some());
         assert!(value["summary"]["stats"].get("foulsHome").is_some());
         assert!(value["summary"]["stats"].get("freeKicksAway").is_some());
+    }
+
+    #[test]
+    fn live_http_assign_route_updates_controller_assignments() {
+        let session = Arc::new(Mutex::new(SoccerRealtimeSession::new(MatchConfig {
+            duration_seconds: 1.0,
+            max_human_players: 2,
+            seed: 58,
+            ..Default::default()
+        })));
+        let input_queue = session.lock().unwrap().input_queue();
+
+        let body = r#"{"controllerSlot":0,"playerId":5}"#;
+        let assign = handle_live_soccer_request(
+            &format!(
+                "POST /api/assign HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            ),
+            &session,
+            &input_queue,
+        );
+        assert_eq!(assign.status, 200);
+        let assign_value: serde_json::Value =
+            serde_json::from_str(&assign.body).expect("assignment json");
+        assert!(assign_value["controllerAssignments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["controllerSlot"] == 0 && a["playerId"] == 5));
+        assert_eq!(
+            session.lock().unwrap().match_ref().players[5].controller_slot,
+            Some(0)
+        );
+
+        let start_x = session.lock().unwrap().match_ref().players[5].position.x;
+        let step_body = r#"{"ticks":1,"inputs":[{"controllerSlot":0,"playerId":5,"seq":1,"axis":{"x":1.0,"y":0.0},"sprint":true,"pass":false,"shoot":false,"targetPlayer":null}]}"#;
+        let step = handle_live_soccer_request(
+            &format!(
+                "POST /api/step HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
+                step_body.len(),
+                step_body
+            ),
+            &session,
+            &input_queue,
+        );
+        assert_eq!(step.status, 200);
+        assert!(session.lock().unwrap().match_ref().players[5].position.x > start_x);
     }
 
     #[test]
@@ -5577,6 +6113,8 @@ mod tests {
             &input_queue,
         );
         assert_eq!(ack.status, 200);
+        let ack_value: serde_json::Value = serde_json::from_str(&ack.body).expect("ack json");
+        assert_eq!(ack_value["acceptedInputs"], 1);
 
         let step_body = r#"{"ticks":1}"#;
         let step = handle_live_soccer_request(
@@ -5590,6 +6128,38 @@ mod tests {
         );
         assert_eq!(step.status, 200);
         assert!(session.lock().unwrap().match_ref().players[0].position.x > start_x);
+    }
+
+    #[test]
+    fn live_http_input_route_counts_only_newer_controller_frames() {
+        let session = Arc::new(Mutex::new(SoccerRealtimeSession::new(MatchConfig {
+            duration_seconds: 1.0,
+            max_human_players: 1,
+            seed: 57,
+            ..Default::default()
+        })));
+        let input_queue = session.lock().unwrap().input_queue();
+        let body = r#"[
+            {"controllerSlot":0,"playerId":0,"seq":2,"axis":{"x":1.0,"y":0.0},"sprint":true,"pass":false,"shoot":false,"targetPlayer":null},
+            {"controllerSlot":0,"playerId":0,"seq":1,"axis":{"x":-1.0,"y":0.0},"sprint":false,"pass":false,"shoot":false,"targetPlayer":null}
+        ]"#;
+
+        let ack = handle_live_soccer_request(
+            &format!(
+                "POST /api/input HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            ),
+            &session,
+            &input_queue,
+        );
+        assert_eq!(ack.status, 200);
+        let value: serde_json::Value = serde_json::from_str(&ack.body).expect("ack json");
+        assert_eq!(value["acceptedInputs"], 1);
+        assert_eq!(input_queue.last_seq_for_slot(0), Some(2));
+
+        let latest = input_queue.drain_latest_by_slot();
+        assert_eq!(latest.get(&0).expect("slot input").seq, 2);
     }
 
     #[test]

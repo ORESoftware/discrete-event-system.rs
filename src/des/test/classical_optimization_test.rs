@@ -15,10 +15,10 @@
 mod tests {
     use crate::des::general::classical_optimization_models::{
         run_auction_assignment, run_flow_shop_neh, run_hungarian_assignment, run_job_shop_dispatch,
-        run_qp_coordinate_descent, run_qp_projected_gradient, run_vrp_nearest_neighbor,
-        run_vrp_savings, AssignmentParams, AuctionAssignmentParams, DispatchRule,
-        FlowShopNEHParams, JobShopDispatchParams, QPProjectedGradientParams, ScheduledOperation,
-        VRPSavingsParams,
+        run_job_shop_exact, run_qp_coordinate_descent, run_qp_projected_gradient, run_vrp_exact,
+        run_vrp_nearest_neighbor, run_vrp_savings, AssignmentParams, AuctionAssignmentParams,
+        DispatchRule, FlowShopNEHParams, JobShopDispatchParams, QPProjectedGradientParams,
+        ScheduledOperation, VRPSavingsParams,
     };
 
     fn close(a: f64, b: f64) -> bool {
@@ -133,6 +133,18 @@ mod tests {
     }
 
     #[test]
+    fn vrp_exact_bounds_heuristics() {
+        let exact = run_vrp_exact(VRPSavingsParams::default());
+        let savings = run_vrp_savings(VRPSavingsParams::default());
+        let nearest = run_vrp_nearest_neighbor(VRPSavingsParams::default());
+        let served: usize = exact.routes.iter().map(|r| r.customers.len()).sum();
+        assert_eq!(served, 5);
+        assert!(exact.routes.iter().all(|route| route.load <= 5.0));
+        assert!(savings.total_distance + 1e-9 >= exact.total_distance);
+        assert!(nearest.total_distance + 1e-9 >= exact.total_distance);
+    }
+
+    #[test]
     fn job_shop_dispatch() {
         let r = run_job_shop_dispatch(JobShopDispatchParams {
             jobs: None,
@@ -143,6 +155,20 @@ mod tests {
         assert!(respects_precedence(&r.schedule));
         assert!(no_machine_overlap(&r.schedule));
         assert!(has(&r.topology.movables, "JobToken"));
+    }
+
+    #[test]
+    fn job_shop_exact_bounds_dispatch() {
+        let dispatch = run_job_shop_dispatch(JobShopDispatchParams {
+            jobs: None,
+            rule: Some(DispatchRule::Spt),
+        });
+        let exact = run_job_shop_exact(JobShopDispatchParams::default());
+        assert_eq!(exact.schedule.len(), 6);
+        assert!(close(exact.makespan, 9.0), "makespan={}", exact.makespan);
+        assert!(exact.makespan <= dispatch.makespan + 1e-9);
+        assert!(respects_precedence(&exact.schedule));
+        assert!(no_machine_overlap(&exact.schedule));
     }
 
     #[test]

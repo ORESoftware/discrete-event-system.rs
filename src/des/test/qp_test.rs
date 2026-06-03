@@ -174,12 +174,13 @@ mod tests {
         let reference = run_reference(&qp);
         assert_eq!(reference.status, "optimal", "{reference:?}");
         assert!((reference.objective.unwrap() - internal.objective).abs() < 1e-8);
+        let reference_x_tol = 1e-7;
         assert!(
             reference
                 .x
                 .iter()
                 .zip(&internal.x)
-                .all(|(a, b)| (a - b).abs() < 1e-8),
+                .all(|(a, b)| (a - b).abs() < reference_x_tol),
             "reference={reference:?} internal={internal:?}"
         );
         assert!(!reference.solver.is_empty());

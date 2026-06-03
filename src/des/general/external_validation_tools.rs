@@ -190,7 +190,8 @@ const CONIC_FORMATS: &[&str] = &["mps", "lp", "qps", "cone", "json", "yaml"];
 const SDP_FORMATS: &[&str] = &["sdpa", "dat-s", "csdp", "json"];
 const SOFTWARE_MODEL_FORMATS: &[&str] = &["c", "cpp", "h", "json"];
 const PROGRAM_VERIFIER_FORMATS: &[&str] = &[
-    "dfy", "why", "mlw", "c", "h", "rs", "java", "v", "thy", "lean", "pvs", "lisp", "json",
+    "dfy", "why", "mlw", "bpl", "sil", "fst", "c", "cpp", "h", "rs", "java", "adb", "ads", "ll",
+    "bc", "v", "thy", "lean", "pvs", "lisp", "json",
 ];
 const SECURITY_PROTOCOL_FORMATS: &[&str] = &["spthy", "pv", "cv", "scyther", "vp", "sapic", "json"];
 const REWRITE_MODEL_FORMATS: &[&str] = &["maude", "mcrl2", "json"];
@@ -205,9 +206,17 @@ const TRAFFIC_SIM_FORMATS: &[&str] = &["net.xml", "rou.xml", "xml", "json"];
 const BUILDING_SIM_FORMATS: &[&str] = &["idf", "osm", "epw", "json"];
 const MODELICA_FORMATS: &[&str] = &["mo", "mos", "fmu", "ssp", "json"];
 const ROBOTICS_FORMATS: &[&str] = &["urdf", "sdf", "mjcf", "xml", "json"];
+const MATLAB_SIM_FORMATS: &[&str] = &["slx", "mdl", "m", "json"];
+const POWER_GRID_FORMATS: &[&str] = &["dss", "glm", "json", "csv", "xlsx"];
+const BIO_SIM_FORMATS: &[&str] = &["sbml", "antimony", "cps", "json"];
 const OUTPUT_FORMATS: &[&str] = &["json", "jsonschema", "csv", "parquet", "avro", "protobuf"];
 const API_OUTPUT_FORMATS: &[&str] = &["openapi", "yaml", "json"];
 const XML_OUTPUT_FORMATS: &[&str] = &["xml", "xsd", "rng", "sch"];
+const CUE_OUTPUT_FORMATS: &[&str] = &["cue", "json", "yaml"];
+const YAML_OUTPUT_FORMATS: &[&str] = &["yaml", "yml", "json"];
+const GRAPHQL_OUTPUT_FORMATS: &[&str] = &["graphql", "gql", "json"];
+const DBT_OUTPUT_FORMATS: &[&str] = &["sql", "yml", "yaml", "json"];
+const PARQUET_OUTPUT_FORMATS: &[&str] = &["parquet", "arrow", "json", "csv"];
 
 pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
     ExternalValidationToolSpec {
@@ -593,6 +602,150 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         capabilities: PROGRAM_VERIFIER_CAPS,
         input_formats: PROGRAM_VERIFIER_FORMATS,
         notes: "Bounded model checker for Java bytecode and Java reference exports",
+    },
+    ExternalValidationToolSpec {
+        id: "java-pathfinder",
+        display_name: "Java Pathfinder",
+        env_key: "JAVA_PATHFINDER",
+        family: ExternalValidationFamily::FormalModelChecker,
+        runtime: ExternalValidationRuntime::Java,
+        artifact_kind: ExternalValidationArtifactKind::JavaClasspath,
+        command_aliases: &["jpf", "jpf-core"],
+        capabilities: PROGRAM_VERIFIER_CAPS,
+        input_formats: PROGRAM_VERIFIER_FORMATS,
+        notes: "Java model checker for state-space and concurrency validation",
+    },
+    ExternalValidationToolSpec {
+        id: "key",
+        display_name: "KeY",
+        env_key: "KEY",
+        family: ExternalValidationFamily::FormalModelChecker,
+        runtime: ExternalValidationRuntime::Java,
+        artifact_kind: ExternalValidationArtifactKind::JavaClasspath,
+        command_aliases: &["key", "key-cli"],
+        capabilities: PROGRAM_VERIFIER_CAPS,
+        input_formats: PROGRAM_VERIFIER_FORMATS,
+        notes: "Deductive Java verifier for contracts and symbolic execution checks",
+    },
+    ExternalValidationToolSpec {
+        id: "boogie",
+        display_name: "Boogie",
+        env_key: "BOOGIE",
+        family: ExternalValidationFamily::FormalModelChecker,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::None,
+        command_aliases: &["boogie"],
+        capabilities: PROGRAM_VERIFIER_CAPS,
+        input_formats: PROGRAM_VERIFIER_FORMATS,
+        notes: "Intermediate verification-language checker used by Dafny and related frontends",
+    },
+    ExternalValidationToolSpec {
+        id: "viper",
+        display_name: "Viper",
+        env_key: "VIPER",
+        family: ExternalValidationFamily::FormalModelChecker,
+        runtime: ExternalValidationRuntime::GenericAdapter,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["viper", "silicon", "carbon"],
+        capabilities: PROGRAM_VERIFIER_CAPS,
+        input_formats: PROGRAM_VERIFIER_FORMATS,
+        notes: "Permission-based verification infrastructure for heap-manipulating programs",
+    },
+    ExternalValidationToolSpec {
+        id: "fstar",
+        display_name: "F*",
+        env_key: "FSTAR",
+        family: ExternalValidationFamily::FormalModelChecker,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["fstar", "fstar.exe"],
+        capabilities: PROGRAM_VERIFIER_CAPS,
+        input_formats: PROGRAM_VERIFIER_FORMATS,
+        notes: "Dependent-type program verifier for proof-carrying reference artifacts",
+    },
+    ExternalValidationToolSpec {
+        id: "gnatprove",
+        display_name: "GNATprove",
+        env_key: "GNATPROVE",
+        family: ExternalValidationFamily::FormalModelChecker,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["gnatprove"],
+        capabilities: PROGRAM_VERIFIER_CAPS,
+        input_formats: PROGRAM_VERIFIER_FORMATS,
+        notes: "SPARK/Ada proof tool for contract and absence-of-run-time-error validation",
+    },
+    ExternalValidationToolSpec {
+        id: "seahorn",
+        display_name: "SeaHorn",
+        env_key: "SEAHORN",
+        family: ExternalValidationFamily::FormalModelChecker,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["sea", "seahorn"],
+        capabilities: PROGRAM_VERIFIER_CAPS,
+        input_formats: PROGRAM_VERIFIER_FORMATS,
+        notes: "LLVM-based software model checker for C/C++ safety properties",
+    },
+    ExternalValidationToolSpec {
+        id: "smack",
+        display_name: "SMACK",
+        env_key: "SMACK",
+        family: ExternalValidationFamily::FormalModelChecker,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["smack"],
+        capabilities: PROGRAM_VERIFIER_CAPS,
+        input_formats: PROGRAM_VERIFIER_FORMATS,
+        notes: "LLVM-to-Boogie verifier bridge for program-level cross-checks",
+    },
+    ExternalValidationToolSpec {
+        id: "ultimate-automizer",
+        display_name: "Ultimate Automizer",
+        env_key: "ULTIMATE_AUTOMIZER",
+        family: ExternalValidationFamily::FormalModelChecker,
+        runtime: ExternalValidationRuntime::Java,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["Ultimate", "ultimate", "Ultimate.py"],
+        capabilities: PROGRAM_VERIFIER_CAPS,
+        input_formats: PROGRAM_VERIFIER_FORMATS,
+        notes: "Automata-based software verifier for C and concurrent program checks",
+    },
+    ExternalValidationToolSpec {
+        id: "goblint",
+        display_name: "Goblint",
+        env_key: "GOBLINT",
+        family: ExternalValidationFamily::FormalModelChecker,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::None,
+        command_aliases: &["goblint"],
+        capabilities: PROGRAM_VERIFIER_CAPS,
+        input_formats: PROGRAM_VERIFIER_FORMATS,
+        notes: "Static analyzer and verifier for C concurrency and race properties",
+    },
+    ExternalValidationToolSpec {
+        id: "prusti",
+        display_name: "Prusti",
+        env_key: "PRUSTI",
+        family: ExternalValidationFamily::FormalModelChecker,
+        runtime: ExternalValidationRuntime::Rust,
+        artifact_kind: ExternalValidationArtifactKind::RustCrate,
+        command_aliases: &["prusti-rustc", "cargo-prusti"],
+        capabilities: PROGRAM_VERIFIER_CAPS,
+        input_formats: PROGRAM_VERIFIER_FORMATS,
+        notes: "Rust verifier for contracts and borrow-aware program properties",
+    },
+    ExternalValidationToolSpec {
+        id: "creusot",
+        display_name: "Creusot",
+        env_key: "CREUSOT",
+        family: ExternalValidationFamily::FormalModelChecker,
+        runtime: ExternalValidationRuntime::Rust,
+        artifact_kind: ExternalValidationArtifactKind::RustCrate,
+        command_aliases: &["cargo-creusot", "creusot"],
+        capabilities: PROGRAM_VERIFIER_CAPS,
+        input_formats: PROGRAM_VERIFIER_FORMATS,
+        notes: "Rust-to-Why3 deductive verifier for functional correctness checks",
     },
     ExternalValidationToolSpec {
         id: "coq",
@@ -1279,6 +1432,102 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         notes: "OpenModelica co-simulation/master simulation tool",
     },
     ExternalValidationToolSpec {
+        id: "simulink",
+        display_name: "Simulink/SimEvents",
+        env_key: "SIMULINK",
+        family: ExternalValidationFamily::SimulationEngine,
+        runtime: ExternalValidationRuntime::GenericAdapter,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["matlab", "simulink-adapter"],
+        capabilities: SIMULATION_CAPS,
+        input_formats: MATLAB_SIM_FORMATS,
+        notes: "MATLAB Simulink/SimEvents adapter for hybrid and discrete-event models",
+    },
+    ExternalValidationToolSpec {
+        id: "ptolemy-ii",
+        display_name: "Ptolemy II",
+        env_key: "PTOLEMY_II",
+        family: ExternalValidationFamily::SimulationEngine,
+        runtime: ExternalValidationRuntime::Java,
+        artifact_kind: ExternalValidationArtifactKind::JavaClasspath,
+        command_aliases: &["ptolemy", "vergil", "ptolemy-adapter"],
+        capabilities: SIMULATION_CAPS,
+        input_formats: JAVA_SIM_FORMATS,
+        notes: "Heterogeneous actor-model simulation framework for hybrid/discrete systems",
+    },
+    ExternalValidationToolSpec {
+        id: "gem5",
+        display_name: "gem5",
+        env_key: "GEM5",
+        family: ExternalValidationFamily::SimulationEngine,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["gem5.opt", "gem5"],
+        capabilities: SIMULATION_CAPS,
+        input_formats: DISTRIBUTED_SIM_FORMATS,
+        notes: "Computer-system simulator for architecture, memory, and scheduling validation",
+    },
+    ExternalValidationToolSpec {
+        id: "gridlabd",
+        display_name: "GridLAB-D",
+        env_key: "GRIDLABD",
+        family: ExternalValidationFamily::SimulationEngine,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["gridlabd"],
+        capabilities: SIMULATION_CAPS,
+        input_formats: POWER_GRID_FORMATS,
+        notes: "Power-distribution and transactive-energy simulation engine",
+    },
+    ExternalValidationToolSpec {
+        id: "opendss",
+        display_name: "OpenDSS",
+        env_key: "OPENDSS",
+        family: ExternalValidationFamily::SimulationEngine,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["OpenDSSCmd", "opendsscmd", "dss"],
+        capabilities: SIMULATION_CAPS,
+        input_formats: POWER_GRID_FORMATS,
+        notes: "Electric-power distribution system simulator for grid validation",
+    },
+    ExternalValidationToolSpec {
+        id: "pandapower",
+        display_name: "pandapower",
+        env_key: "PANDAPOWER",
+        family: ExternalValidationFamily::SimulationEngine,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
+        command_aliases: &["pandapower-adapter"],
+        capabilities: SIMULATION_CAPS,
+        input_formats: POWER_GRID_FORMATS,
+        notes: "Python power-system analysis and simulation adapter",
+    },
+    ExternalValidationToolSpec {
+        id: "copasi",
+        display_name: "COPASI",
+        env_key: "COPASI",
+        family: ExternalValidationFamily::SimulationEngine,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["CopasiSE", "copasi"],
+        capabilities: SIMULATION_CAPS,
+        input_formats: BIO_SIM_FORMATS,
+        notes: "Biochemical network simulation and SBML validation adapter",
+    },
+    ExternalValidationToolSpec {
+        id: "tellurium",
+        display_name: "Tellurium",
+        env_key: "TELLURIUM",
+        family: ExternalValidationFamily::SimulationEngine,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
+        command_aliases: &["tellurium-adapter"],
+        capabilities: SIMULATION_CAPS,
+        input_formats: BIO_SIM_FORMATS,
+        notes: "Python systems-biology simulation adapter for Antimony/SBML models",
+    },
+    ExternalValidationToolSpec {
         id: "gazebo",
         display_name: "Gazebo",
         env_key: "GAZEBO",
@@ -1337,6 +1586,42 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         capabilities: SIMULATION_CAPS,
         input_formats: ROBOTICS_FORMATS,
         notes: "Python robotics and rigid-body simulation adapter",
+    },
+    ExternalValidationToolSpec {
+        id: "carla",
+        display_name: "CARLA",
+        env_key: "CARLA",
+        family: ExternalValidationFamily::SimulationEngine,
+        runtime: ExternalValidationRuntime::GenericAdapter,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["carla", "CarlaUE4", "CarlaUE4.sh"],
+        capabilities: SIMULATION_CAPS,
+        input_formats: ROBOTICS_FORMATS,
+        notes: "Autonomous-driving simulator for perception, routing, and control validation",
+    },
+    ExternalValidationToolSpec {
+        id: "isaac-sim",
+        display_name: "NVIDIA Isaac Sim",
+        env_key: "ISAAC_SIM",
+        family: ExternalValidationFamily::SimulationEngine,
+        runtime: ExternalValidationRuntime::GenericAdapter,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["isaac-sim", "isaacsim"],
+        capabilities: SIMULATION_CAPS,
+        input_formats: ROBOTICS_FORMATS,
+        notes: "Robotics and synthetic-data simulation adapter for physical validation",
+    },
+    ExternalValidationToolSpec {
+        id: "airsim",
+        display_name: "AirSim",
+        env_key: "AIRSIM",
+        family: ExternalValidationFamily::SimulationEngine,
+        runtime: ExternalValidationRuntime::GenericAdapter,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["airsim-adapter"],
+        capabilities: SIMULATION_CAPS,
+        input_formats: ROBOTICS_FORMATS,
+        notes: "Vehicle and drone simulator adapter for autonomy model validation",
     },
     ExternalValidationToolSpec {
         id: "mesa",
@@ -1471,6 +1756,42 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         notes: "CAPE-OPEN process-simulation interoperability adapter",
     },
     ExternalValidationToolSpec {
+        id: "plant-simulation",
+        display_name: "Tecnomatix Plant Simulation",
+        env_key: "PLANT_SIMULATION",
+        family: ExternalValidationFamily::SimulationEngine,
+        runtime: ExternalValidationRuntime::GenericAdapter,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["plant-simulation-adapter", "plantsim-adapter"],
+        capabilities: SIMULATION_CAPS,
+        input_formats: &["json", "xml", "csv", "spp"],
+        notes: "Commercial factory/logistics discrete-event simulation adapter",
+    },
+    ExternalValidationToolSpec {
+        id: "extendsim",
+        display_name: "ExtendSim",
+        env_key: "EXTENDSIM",
+        family: ExternalValidationFamily::SimulationEngine,
+        runtime: ExternalValidationRuntime::GenericAdapter,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["extendsim-adapter"],
+        capabilities: SIMULATION_CAPS,
+        input_formats: &["json", "xml", "csv"],
+        notes: "Commercial discrete-event and continuous simulation adapter",
+    },
+    ExternalValidationToolSpec {
+        id: "gpss-world",
+        display_name: "GPSS World",
+        env_key: "GPSS_WORLD",
+        family: ExternalValidationFamily::SimulationEngine,
+        runtime: ExternalValidationRuntime::GenericAdapter,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["gpss-adapter", "gpss-world-adapter"],
+        capabilities: SIMULATION_CAPS,
+        input_formats: &["gps", "json", "txt"],
+        notes: "GPSS-family discrete-event simulation adapter for queueing models",
+    },
+    ExternalValidationToolSpec {
         id: "anylogic",
         display_name: "AnyLogic",
         env_key: "ANYLOGIC",
@@ -1544,6 +1865,18 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         notes: "Schema validation for JSON run artifacts and traces",
     },
     ExternalValidationToolSpec {
+        id: "check-jsonschema",
+        display_name: "check-jsonschema",
+        env_key: "CHECK_JSONSCHEMA",
+        family: ExternalValidationFamily::OutputDataValidator,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
+        command_aliases: &["check-jsonschema"],
+        capabilities: OUTPUT_VALIDATOR_CAPS,
+        input_formats: OUTPUT_FORMATS,
+        notes: "Python CLI for JSON Schema, YAML, and policy-style artifact validation",
+    },
+    ExternalValidationToolSpec {
         id: "ajv",
         display_name: "Ajv",
         env_key: "AJV",
@@ -1554,6 +1887,30 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         capabilities: OUTPUT_VALIDATOR_CAPS,
         input_formats: OUTPUT_FORMATS,
         notes: "JavaScript JSON Schema validator and OpenAPI-compatible schema checker",
+    },
+    ExternalValidationToolSpec {
+        id: "cue",
+        display_name: "CUE",
+        env_key: "CUE",
+        family: ExternalValidationFamily::OutputDataValidator,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::None,
+        command_aliases: &["cue"],
+        capabilities: OUTPUT_VALIDATOR_CAPS,
+        input_formats: CUE_OUTPUT_FORMATS,
+        notes: "CUE schema, constraint, and data validation adapter",
+    },
+    ExternalValidationToolSpec {
+        id: "yamllint",
+        display_name: "yamllint",
+        env_key: "YAMLLINT",
+        family: ExternalValidationFamily::OutputDataValidator,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::None,
+        command_aliases: &["yamllint"],
+        capabilities: OUTPUT_VALIDATOR_CAPS,
+        input_formats: YAML_OUTPUT_FORMATS,
+        notes: "YAML syntax and convention validator for config and API artifacts",
     },
     ExternalValidationToolSpec {
         id: "csv-validator",
@@ -1580,6 +1937,18 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         notes: "OpenAPI/Swagger document and response-shape validation adapter",
     },
     ExternalValidationToolSpec {
+        id: "openapi-spec-validator",
+        display_name: "openapi-spec-validator",
+        env_key: "OPENAPI_SPEC_VALIDATOR",
+        family: ExternalValidationFamily::OutputDataValidator,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
+        command_aliases: &["openapi-spec-validator"],
+        capabilities: OUTPUT_VALIDATOR_CAPS,
+        input_formats: API_OUTPUT_FORMATS,
+        notes: "Python OpenAPI specification validator adapter",
+    },
+    ExternalValidationToolSpec {
         id: "spectral",
         display_name: "Spectral",
         env_key: "SPECTRAL",
@@ -1590,6 +1959,42 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         capabilities: OUTPUT_VALIDATOR_CAPS,
         input_formats: API_OUTPUT_FORMATS,
         notes: "OpenAPI/API description linter and validation adapter",
+    },
+    ExternalValidationToolSpec {
+        id: "redocly-cli",
+        display_name: "Redocly CLI",
+        env_key: "REDOCLY_CLI",
+        family: ExternalValidationFamily::OutputDataValidator,
+        runtime: ExternalValidationRuntime::GenericAdapter,
+        artifact_kind: ExternalValidationArtifactKind::None,
+        command_aliases: &["redocly", "redocly-cli"],
+        capabilities: OUTPUT_VALIDATOR_CAPS,
+        input_formats: API_OUTPUT_FORMATS,
+        notes: "OpenAPI linting and bundle validation adapter",
+    },
+    ExternalValidationToolSpec {
+        id: "asyncapi-cli",
+        display_name: "AsyncAPI CLI",
+        env_key: "ASYNCAPI_CLI",
+        family: ExternalValidationFamily::OutputDataValidator,
+        runtime: ExternalValidationRuntime::GenericAdapter,
+        artifact_kind: ExternalValidationArtifactKind::None,
+        command_aliases: &["asyncapi"],
+        capabilities: OUTPUT_VALIDATOR_CAPS,
+        input_formats: API_OUTPUT_FORMATS,
+        notes: "AsyncAPI document validation adapter for event/message interfaces",
+    },
+    ExternalValidationToolSpec {
+        id: "graphql-schema",
+        display_name: "GraphQL schema validator",
+        env_key: "GRAPHQL_SCHEMA",
+        family: ExternalValidationFamily::OutputDataValidator,
+        runtime: ExternalValidationRuntime::GenericAdapter,
+        artifact_kind: ExternalValidationArtifactKind::SchemaOrSpecPath,
+        command_aliases: &["graphql-schema-linter", "graphql-inspector"],
+        capabilities: OUTPUT_VALIDATOR_CAPS,
+        input_formats: GRAPHQL_OUTPUT_FORMATS,
+        notes: "GraphQL schema and operation validation adapter",
     },
     ExternalValidationToolSpec {
         id: "xmllint",
@@ -1662,6 +2067,54 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         capabilities: OUTPUT_VALIDATOR_CAPS,
         input_formats: OUTPUT_FORMATS,
         notes: "Python data-model validation adapter for structured run artifacts",
+    },
+    ExternalValidationToolSpec {
+        id: "zod",
+        display_name: "Zod",
+        env_key: "ZOD",
+        family: ExternalValidationFamily::OutputDataValidator,
+        runtime: ExternalValidationRuntime::GenericAdapter,
+        artifact_kind: ExternalValidationArtifactKind::None,
+        command_aliases: &["zod-adapter"],
+        capabilities: OUTPUT_VALIDATOR_CAPS,
+        input_formats: OUTPUT_FORMATS,
+        notes: "TypeScript schema validation adapter for JSON/API run artifacts",
+    },
+    ExternalValidationToolSpec {
+        id: "valibot",
+        display_name: "Valibot",
+        env_key: "VALIBOT",
+        family: ExternalValidationFamily::OutputDataValidator,
+        runtime: ExternalValidationRuntime::GenericAdapter,
+        artifact_kind: ExternalValidationArtifactKind::None,
+        command_aliases: &["valibot-adapter"],
+        capabilities: OUTPUT_VALIDATOR_CAPS,
+        input_formats: OUTPUT_FORMATS,
+        notes: "TypeScript schema validation adapter for structured artifacts",
+    },
+    ExternalValidationToolSpec {
+        id: "marshmallow",
+        display_name: "marshmallow",
+        env_key: "MARSHMALLOW",
+        family: ExternalValidationFamily::OutputDataValidator,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
+        command_aliases: &["marshmallow-adapter"],
+        capabilities: OUTPUT_VALIDATOR_CAPS,
+        input_formats: OUTPUT_FORMATS,
+        notes: "Python object/schema validation adapter for output payloads",
+    },
+    ExternalValidationToolSpec {
+        id: "cerberus",
+        display_name: "Cerberus",
+        env_key: "CERBERUS",
+        family: ExternalValidationFamily::OutputDataValidator,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
+        command_aliases: &["cerberus-adapter"],
+        capabilities: OUTPUT_VALIDATOR_CAPS,
+        input_formats: OUTPUT_FORMATS,
+        notes: "Python lightweight schema validation adapter for dictionaries and JSON",
     },
     ExternalValidationToolSpec {
         id: "python-xmlschema",
@@ -1748,6 +2201,30 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         notes: "Python dataframe/schema validation adapter",
     },
     ExternalValidationToolSpec {
+        id: "dbt",
+        display_name: "dbt",
+        env_key: "DBT",
+        family: ExternalValidationFamily::OutputDataValidator,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["dbt"],
+        capabilities: OUTPUT_VALIDATOR_CAPS,
+        input_formats: DBT_OUTPUT_FORMATS,
+        notes: "dbt test adapter for relational output contracts and data models",
+    },
+    ExternalValidationToolSpec {
+        id: "whylogs",
+        display_name: "whylogs",
+        env_key: "WHYLOGS",
+        family: ExternalValidationFamily::OutputDataValidator,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
+        command_aliases: &["whylogs-adapter"],
+        capabilities: OUTPUT_VALIDATOR_CAPS,
+        input_formats: OUTPUT_FORMATS,
+        notes: "Data-profile and constraint validation adapter for logged outputs",
+    },
+    ExternalValidationToolSpec {
         id: "soda-core",
         display_name: "Soda Core",
         env_key: "SODA_CORE",
@@ -1794,6 +2271,30 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         capabilities: OUTPUT_VALIDATOR_CAPS,
         input_formats: OUTPUT_FORMATS,
         notes: "Data Package and tabular-data validation for CSV/JSON outputs",
+    },
+    ExternalValidationToolSpec {
+        id: "parquet-tools",
+        display_name: "Parquet tools",
+        env_key: "PARQUET_TOOLS",
+        family: ExternalValidationFamily::OutputDataValidator,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::None,
+        command_aliases: &["parquet-tools"],
+        capabilities: OUTPUT_VALIDATOR_CAPS,
+        input_formats: PARQUET_OUTPUT_FORMATS,
+        notes: "Parquet file metadata and schema validation adapter",
+    },
+    ExternalValidationToolSpec {
+        id: "apache-arrow",
+        display_name: "Apache Arrow",
+        env_key: "APACHE_ARROW",
+        family: ExternalValidationFamily::OutputDataValidator,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
+        command_aliases: &["arrow-adapter", "pyarrow-adapter"],
+        capabilities: OUTPUT_VALIDATOR_CAPS,
+        input_formats: PARQUET_OUTPUT_FORMATS,
+        notes: "Arrow/Parquet schema and columnar output validation adapter",
     },
     ExternalValidationToolSpec {
         id: "deequ",
@@ -3391,13 +3892,33 @@ pub fn external_validation_artifact_env_names(tool: &ExternalValidationToolSpec)
         "mosek" => names.push("MOSEKLM_LICENSE_FILE".to_string()),
         "baron" => names.push("BARON_LICENSE".to_string()),
         "copt" => names.push("COPT_HOME".to_string()),
+        "java-pathfinder" => names.push("JPF_HOME".to_string()),
+        "key" => names.push("KEY_HOME".to_string()),
+        "viper" => names.push("VIPER_HOME".to_string()),
+        "fstar" => names.push("FSTAR_HOME".to_string()),
+        "gnatprove" => names.push("GNATPROVE_HOME".to_string()),
+        "seahorn" => names.push("SEAHORN_DIR".to_string()),
+        "smack" => names.push("SMACK_HOME".to_string()),
+        "ultimate-automizer" => names.push("ULTIMATE_HOME".to_string()),
         "sumo" => names.push("SUMO_HOME".to_string()),
         "omnetpp" => names.push("OMNETPP_ROOT".to_string()),
         "energyplus" => names.push("ENERGYPLUS_HOME".to_string()),
         "openmodelica" => names.push("OPENMODELICAHOME".to_string()),
+        "simulink" => names.push("MATLAB_ROOT".to_string()),
+        "ptolemy-ii" => names.push("PTII".to_string()),
+        "gem5" => names.push("GEM5_ROOT".to_string()),
+        "gridlabd" => names.push("GRIDLABD_HOME".to_string()),
+        "opendss" => names.push("OPENDSS_HOME".to_string()),
+        "copasi" => names.push("COPASI_HOME".to_string()),
         "gazebo" => names.push("GZ_SIM_RESOURCE_PATH".to_string()),
         "webots" => names.push("WEBOTS_HOME".to_string()),
         "mujoco" => names.push("MUJOCO_GL".to_string()),
+        "carla" => names.push("CARLA_ROOT".to_string()),
+        "isaac-sim" => names.push("ISAACSIM_PATH".to_string()),
+        "plant-simulation" => names.push("PLANT_SIMULATION_HOME".to_string()),
+        "extendsim" => names.push("EXTENDSIM_HOME".to_string()),
+        "gpss-world" => names.push("GPSS_WORLD_HOME".to_string()),
+        "dbt" => names.push("DBT_PROFILES_DIR".to_string()),
         _ => {}
     }
     names
@@ -3727,7 +4248,7 @@ mod tests {
     #[test]
     fn registry_covers_recommended_validation_layers() {
         let tools = external_validation_tool_specs();
-        assert_eq!(tools.len(), 135);
+        assert_eq!(tools.len(), 176);
         assert!(tools
             .iter()
             .any(|tool| tool.id == "minizinc" && tool.input_formats.contains(&"mzn")));
@@ -3753,6 +4274,16 @@ mod tests {
             tool.id == "cbmc" && tool.family == ExternalValidationFamily::FormalModelChecker
         }));
         assert!(tools.iter().any(|tool| {
+            tool.id == "java-pathfinder"
+                && tool.family == ExternalValidationFamily::FormalModelChecker
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "boogie" && tool.family == ExternalValidationFamily::FormalModelChecker
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "creusot" && tool.runtime == ExternalValidationRuntime::Rust
+        }));
+        assert!(tools.iter().any(|tool| {
             tool.id == "dafny" && tool.family == ExternalValidationFamily::FormalModelChecker
         }));
         assert!(tools.iter().any(|tool| {
@@ -3766,6 +4297,19 @@ mod tests {
         }));
         assert!(tools.iter().any(|tool| {
             tool.id == "energyplus" && tool.family == ExternalValidationFamily::SimulationEngine
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "gridlabd" && tool.family == ExternalValidationFamily::SimulationEngine
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "copasi" && tool.family == ExternalValidationFamily::SimulationEngine
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "carla" && tool.family == ExternalValidationFamily::SimulationEngine
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "plant-simulation"
+                && tool.family == ExternalValidationFamily::SimulationEngine
         }));
         assert!(tools.iter().any(|tool| {
             tool.id == "mesa" && tool.family == ExternalValidationFamily::SimulationEngine
@@ -3790,6 +4334,23 @@ mod tests {
         }));
         assert!(tools.iter().any(|tool| {
             tool.id == "great-expectations"
+                && tool.family == ExternalValidationFamily::OutputDataValidator
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "check-jsonschema"
+                && tool.family == ExternalValidationFamily::OutputDataValidator
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "cue" && tool.family == ExternalValidationFamily::OutputDataValidator
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "zod" && tool.family == ExternalValidationFamily::OutputDataValidator
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "dbt" && tool.family == ExternalValidationFamily::OutputDataValidator
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "apache-arrow"
                 && tool.family == ExternalValidationFamily::OutputDataValidator
         }));
         assert!(tools.iter().any(|tool| {
@@ -3840,6 +4401,21 @@ mod tests {
             external_validation_artifact_env_names(tlc)[0],
             "ORES_TLC_CLASSPATH"
         );
+        let jpf = find_external_validation_tool("java-pathfinder").unwrap();
+        assert_eq!(
+            external_validation_artifact_env_names(jpf)[0],
+            "ORES_JAVA_PATHFINDER_CLASSPATH"
+        );
+        let carla = find_external_validation_tool("carla").unwrap();
+        assert_eq!(
+            external_validation_artifact_env_names(carla)[0],
+            "ORES_CARLA_DIR"
+        );
+        let check_jsonschema = find_external_validation_tool("check-jsonschema").unwrap();
+        assert_eq!(
+            external_validation_artifact_env_names(check_jsonschema)[0],
+            "ORES_CHECK_JSONSCHEMA_PYTHON"
+        );
     }
 
     #[test]
@@ -3857,6 +4433,14 @@ mod tests {
                 .unwrap()
                 .id,
             "tensorflow-data-validation"
+        );
+        assert_eq!(
+            find_external_validation_tool("java_pathfinder").unwrap().id,
+            "java-pathfinder"
+        );
+        assert_eq!(
+            find_external_validation_tool("apache_arrow").unwrap().id,
+            "apache-arrow"
         );
         assert!(find_external_validation_tool("not-a-tool").is_none());
     }

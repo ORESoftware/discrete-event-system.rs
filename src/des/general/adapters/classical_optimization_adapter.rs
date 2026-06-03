@@ -2,7 +2,7 @@
 //! (module `des::general::adapters::classical_optimization_adapter`).
 //!
 //! Registers QP / assignment / VRP / job-shop / flow-shop JSON adapters
-//! (8 models) over classical-optimization station graphs.
+//! (9 models) over classical-optimization station graphs.
 //!
 //! ## Conversion notes
 //!
@@ -22,10 +22,11 @@
 use crate::des::general::adapters::adapter_utils::{csv_row, write_csv_lines};
 use crate::des::general::classical_optimization_models::{
     run_auction_assignment, run_flow_shop_neh, run_hungarian_assignment, run_job_shop_dispatch,
-    run_qp_coordinate_descent, run_qp_projected_gradient, run_vrp_nearest_neighbor,
-    run_vrp_savings, AssignmentParams, AssignmentResult, AuctionAssignmentParams, DispatchRule,
-    FlowShopNEHParams, FlowShopNEHResult, JobShopDispatchParams, JobShopDispatchResult,
-    QPProjectedGradientParams, QPProjectedGradientResult, VRPSavingsParams, VRPSavingsResult,
+    run_job_shop_exact, run_qp_coordinate_descent, run_qp_projected_gradient,
+    run_vrp_nearest_neighbor, run_vrp_savings, AssignmentParams, AssignmentResult,
+    AuctionAssignmentParams, DispatchRule, FlowShopNEHParams, FlowShopNEHResult,
+    JobShopDispatchParams, JobShopDispatchResult, QPProjectedGradientParams,
+    QPProjectedGradientResult, VRPSavingsParams, VRPSavingsResult,
 };
 use crate::des::general::des_spec::{
     DESModelRegistration, DESModelSpec, DESRuntimeConfig, ParamSchema, RegistrationExample,
@@ -752,6 +753,55 @@ impl DESModelRegistration<JobShopDispatchParams, JobShopDispatchResult> for JobS
                 rule: Some(DispatchRule::Spt),
                 ..Default::default()
             },
+        )]
+    }
+}
+
+// =============================================================================
+// job-shop-exact
+// =============================================================================
+
+pub struct JobShopExactAdapter;
+pub fn adapter_job_shop_exact() -> JobShopExactAdapter {
+    JobShopExactAdapter
+}
+
+impl DESModelRegistration<JobShopDispatchParams, JobShopDispatchResult> for JobShopExactAdapter {
+    fn id(&self) -> &str {
+        "job-shop-exact"
+    }
+    fn description(&self) -> &str {
+        "Exact small-instance job-shop scheduling with branch-and-bound over semi-active schedules."
+    }
+    fn schema(&self) -> ParamSchema {
+        obj(vec![("jobs", arr(job_schema(), Some(1)))], vec![])
+    }
+    fn run(
+        &self,
+        params: JobShopDispatchParams,
+        _runtime: &DESRuntimeConfig,
+    ) -> JobShopDispatchResult {
+        run_job_shop_exact(params)
+    }
+    fn summarize(&self, result: &JobShopDispatchResult, _params: &JobShopDispatchParams) -> String {
+        [
+            "JOB-SHOP EXACT".to_string(),
+            "--------------".to_string(),
+            format!("  Operations:     {}", result.schedule.len()),
+            format!("  Makespan:       {:.3}", result.makespan),
+            format!("  Total flow:     {:.3}", result.total_flow_time),
+        ]
+        .join("\n")
+    }
+    fn write_csv(&self, result: &JobShopDispatchResult, csv_path: &str) {
+        schedule_write_csv(&result.schedule, csv_path);
+    }
+    fn examples(&self) -> Vec<RegistrationExample<JobShopDispatchParams>> {
+        vec![example(
+            "three-job-exact",
+            "job-shop-exact",
+            "Three-job two-machine exact job-shop schedule.",
+            JobShopDispatchParams::default(),
         )]
     }
 }

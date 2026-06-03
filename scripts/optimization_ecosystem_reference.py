@@ -25,11 +25,30 @@ CP_TOOLS = {
     "jacop",
     "ibm-cp-optimizer",
     "ortools-java",
+    "ortools-python",
 }
-PLANNING_TOOLS = {"optaplanner"}
+PLANNING_TOOLS = {"optaplanner", "timefold"}
 MULTIOBJECTIVE_TOOLS = {"jmetal", "moea-framework", "ecj"}
-LINEAR_TOOLS = {"ojalgo", "good-lp", "lp-modeler", "rust-linprog", "highs-rust", "scip-rust", "cbc-rust"}
-NONLINEAR_TOOLS = {"argmin", "nlopt"}
+CONVEX_TOOLS = {"cvxpy", "cvxopt"}
+LINEAR_TOOLS = {
+    "ojalgo",
+    "pyomo",
+    "pulp",
+    "python-mip",
+    "docplex",
+    "jump",
+    "ampl",
+    "gams",
+    "good-lp",
+    "lp-modeler",
+    "rust-linprog",
+    "highs-rust",
+    "scip-rust",
+    "cbc-rust",
+}
+NATIVE_BINDING_TOOLS = {"pyscipopt", "gurobipy"}
+NONLINEAR_TOOLS = {"argmin", "nlopt", "scipy-optimize"}
+HYBRID_TOOLS = {"hexaly"}
 
 
 @dataclass
@@ -71,12 +90,18 @@ def arg_tool(args_tool: str | None) -> str:
 
 
 def tool_family(tool: str, payload_kind: str) -> str:
+    if tool in HYBRID_TOOLS:
+        return "hybrid-optimization"
     if tool in CP_TOOLS or payload_kind in {"cp-assignment", "ecosystem-cp-assignment"}:
         return "constraint-programming"
     if tool in PLANNING_TOOLS or payload_kind in {"planning-assignment", "ecosystem-planning-assignment"}:
         return "planning-metaheuristic"
     if tool in MULTIOBJECTIVE_TOOLS or payload_kind in {"multiobjective-front", "ecosystem-multiobjective"}:
         return "evolutionary-multiobjective"
+    if tool in CONVEX_TOOLS:
+        return "convex-optimization"
+    if tool in NATIVE_BINDING_TOOLS:
+        return "native-solver-binding"
     if tool in NONLINEAR_TOOLS or payload_kind in {"nonlinear-program", "ecosystem-nonlinear"}:
         return "nonlinear-optimization"
     return "linear-mip"
@@ -354,8 +379,20 @@ def solve(tool: str, payload: dict[str, Any]) -> tuple[str, Result]:
         return family, solve_planning_assignment(payload)
     if family == "evolutionary-multiobjective":
         return family, solve_multiobjective(payload)
+    if family == "convex-optimization":
+        if kind in {"nonlinear-program", "ecosystem-nonlinear"}:
+            return family, solve_nonlinear(payload)
+        return family, solve_discrete_linear(payload)
+    if family == "native-solver-binding":
+        return family, solve_discrete_linear(payload)
     if family == "nonlinear-optimization":
         return family, solve_nonlinear(payload)
+    if family == "hybrid-optimization":
+        if kind in {"planning-assignment", "ecosystem-planning-assignment"}:
+            return family, solve_planning_assignment(payload)
+        if kind in {"nonlinear-program", "ecosystem-nonlinear"}:
+            return family, solve_nonlinear(payload)
+        return family, solve_discrete_linear(payload)
     return family, solve_discrete_linear(payload)
 
 

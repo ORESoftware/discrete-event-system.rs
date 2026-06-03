@@ -120,6 +120,56 @@
     overflow-wrap: anywhere;
     font-variant-numeric: tabular-nums;
   }
+  .telemetry-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+    margin: 8px 0 4px;
+  }
+  .telemetry-chip {
+    min-width: 0;
+    padding: 5px 6px;
+    border: 1px solid #e2e9ee;
+    border-radius: 6px;
+    background: #f8fafb;
+    font-variant-numeric: tabular-nums;
+  }
+  .telemetry-chip span {
+    display: block;
+    color: var(--muted);
+    font-size: 10px;
+    line-height: 1.2;
+    text-transform: uppercase;
+    letter-spacing: .03em;
+    white-space: nowrap;
+  }
+  .telemetry-chip b {
+    display: block;
+    margin-top: 2px;
+    font-size: 12px;
+    line-height: 1.25;
+    overflow-wrap: anywhere;
+  }
+  .telemetry-bar {
+    height: 3px;
+    margin-top: 4px;
+    overflow: hidden;
+    border-radius: 999px;
+    background: #dbe4ea;
+  }
+  .telemetry-bar i {
+    display: block;
+    height: 100%;
+    width: 0;
+    border-radius: inherit;
+    background: #238547;
+  }
+  .telemetry-empty {
+    grid-column: 1 / -1;
+    margin: 8px 0 4px;
+    color: var(--muted);
+    font-size: 12px;
+  }
   .section {
     margin: 14px 0 6px;
     font-size: 12px;
@@ -246,6 +296,8 @@
       <div class="metric"><span>Fouls</span><b id="fouls">0 - 0</b></div>
       <div class="metric"><span>Ticks</span><b id="ticks">0</b></div>
       <div class="metric"><span>Learning</span><b id="learning">T0 H0 A0</b></div>
+      <div class="metric"><span>Tick Reward</span><b id="tickReward">H+0.00 A+0.00</b></div>
+      <div class="metric"><span>Recent Actions</span><b id="recentActions">-</b></div>
       <div class="toggle-control">
         <label for="learningEnabled"><input id="learningEnabled" type="checkbox" checked>Learn</label>
         <label for="learningLoggingEnabled"><input id="learningLoggingEnabled" type="checkbox" checked>Log</label>
@@ -297,10 +349,13 @@
       <div class="metric"><span>Energy</span><b id="agentEnergy">-</b></div>
       <div class="metric"><span>Skills</span><b id="agentSkills">-</b></div>
       <div class="metric"><span>Decision</span><b id="agentDecision">-</b></div>
+      <div class="metric"><span>Reward</span><b id="agentReward">-</b></div>
       <div class="metric"><span>Options</span><b id="agentOptions">-</b></div>
       <div class="metric"><span>MDP</span><b id="agentMdp">-</b></div>
       <div class="metric"><span>POMDP</span><b id="agentPomdp">-</b></div>
       <div class="metric"><span>Belief</span><b id="agentBelief">-</b></div>
+      <div class="telemetry-grid" id="agentSkillGrid"></div>
+      <div class="telemetry-grid" id="agentDecisionGrid"></div>
       <div class="legend">
         <span><i class="swatch" style="background:var(--home)"></i>Home</span>
         <span><i class="swatch" style="background:var(--away)"></i>Away</span>
@@ -336,6 +391,8 @@ const restarts = document.getElementById("restarts");
 const fouls = document.getElementById("fouls");
 const ticks = document.getElementById("ticks");
 const learning = document.getElementById("learning");
+const tickReward = document.getElementById("tickReward");
+const recentActions = document.getElementById("recentActions");
 const learningEnabled = document.getElementById("learningEnabled");
 const learningLoggingEnabled = document.getElementById("learningLoggingEnabled");
 const agentSelected = document.getElementById("agentSelected");
@@ -343,10 +400,13 @@ const agentMotion = document.getElementById("agentMotion");
 const agentEnergy = document.getElementById("agentEnergy");
 const agentSkills = document.getElementById("agentSkills");
 const agentDecision = document.getElementById("agentDecision");
+const agentReward = document.getElementById("agentReward");
 const agentOptions = document.getElementById("agentOptions");
 const agentMdp = document.getElementById("agentMdp");
 const agentPomdp = document.getElementById("agentPomdp");
 const agentBelief = document.getElementById("agentBelief");
+const agentSkillGrid = document.getElementById("agentSkillGrid");
+const agentDecisionGrid = document.getElementById("agentDecisionGrid");
 const slots = document.getElementById("slots");
 const slotPick = document.getElementById("slotPick");
 const targetPick = document.getElementById("targetPick");
@@ -377,11 +437,54 @@ let activeSlot = 0;
 let inputSeq = 0;
 let queuedInputs = [];
 let eventLog = [];
+let recentLearningTransitions = [];
 let surfaceTimer = null;
 let syncingSurface = false;
 let syncingLearning = false;
 let hoverPlayerId = null;
 const SLOT_COLORS = ["#f6c944", "#37d688", "#61a5ff", "#ef7ad3"];
+const CONTROLLER_KEYMAPS = [
+  {
+    left: "ArrowLeft",
+    right: "ArrowRight",
+    up: "ArrowUp",
+    down: "ArrowDown",
+    sprint: "ShiftRight",
+    action: "Enter",
+  },
+  {
+    left: "KeyA",
+    right: "KeyD",
+    up: "KeyW",
+    down: "KeyS",
+    sprint: "ShiftLeft",
+    action: "Space",
+  },
+  {
+    left: "KeyJ",
+    right: "KeyL",
+    up: "KeyI",
+    down: "KeyK",
+    sprint: "KeyU",
+    action: "KeyO",
+  },
+  {
+    left: "Numpad4",
+    right: "Numpad6",
+    up: "Numpad8",
+    down: "Numpad5",
+    sprint: "Numpad7",
+    action: "Numpad9",
+  },
+];
+const CONTROLLER_CODES = new Set(CONTROLLER_KEYMAPS.flatMap(map => [
+  map.left,
+  map.right,
+  map.up,
+  map.down,
+  map.sprint,
+  map.action,
+]));
 const SURFACE_PRESETS = {
   short: {ballDragPerTick: 0.008, ballAirResistance: 0.004, ballGrassResistanceYps2: 0.28, ballStopSpeedYps: 0.25},
   standard: {ballDragPerTick: 0.015, ballAirResistance: 0.006, ballGrassResistanceYps2: 0.45, ballStopSpeedYps: 0.35},
@@ -459,6 +562,54 @@ function learningLabel(l) {
   const log = l.learningLoggingEnabled === false ? " NL" : "";
   return `${mode}${log} T${total} H${home}/${homeTargets} A${away}/${awayTargets}`;
 }
+function signed(value, digits = 2) {
+  const n = Number(value || 0);
+  const sign = n >= 0 ? "+" : "";
+  return `${sign}${n.toFixed(digits)}`;
+}
+function transitionList() {
+  return Array.isArray(recentLearningTransitions) ? recentLearningTransitions : [];
+}
+function tickRewardLabel(transitions = transitionList()) {
+  if (!transitions.length) return "H+0.00 A+0.00";
+  let home = 0;
+  let away = 0;
+  for (const t of transitions) {
+    const reward = Number(t.reward || 0);
+    if (t.team === "Home") home += reward;
+    if (t.team === "Away") away += reward;
+  }
+  return `H${signed(home)} A${signed(away)} ${transitions.length}x`;
+}
+function recentActionLabel(transitions = transitionList()) {
+  if (!transitions.length) return "-";
+  const counts = new Map();
+  for (const t of transitions) {
+    const action = t.action || "-";
+    const entry = counts.get(action) || {count: 0, reward: 0};
+    entry.count += 1;
+    entry.reward += Number(t.reward || 0);
+    counts.set(action, entry);
+  }
+  return Array.from(counts.entries())
+    .sort((a, b) => b[1].count - a[1].count || Math.abs(b[1].reward) - Math.abs(a[1].reward))
+    .slice(0, 4)
+    .map(([action, entry]) => `${action} ${entry.count} ${signed(entry.reward, 1)}`)
+    .join(" ");
+}
+function latestTransitionForPlayer(playerId) {
+  const transitions = transitionList();
+  for (let i = transitions.length - 1; i >= 0; i--) {
+    if (Number(transitions[i].playerId) === Number(playerId)) return transitions[i];
+  }
+  return null;
+}
+function selectedRewardLabel(p) {
+  if (!p) return "-";
+  const t = latestTransitionForPlayer(p.id);
+  if (!t) return "waiting";
+  return `${t.action || "-"} R${signed(t.reward)} t${t.tick ?? "-"}`;
+}
 function fullTimeLabel() {
   if (!state?.frame) return "full time";
   return `full time ${state.frame.scoreHome}-${state.frame.scoreAway}`;
@@ -518,15 +669,122 @@ function agentBeliefLabel(d) {
 function agentMotionLabel(p) {
   return `${vecLen(p.velocity).toFixed(1)}y/s ${vecLen(p.acceleration).toFixed(1)}y/s2`;
 }
+function scoreValue(source, ...keys) {
+  for (const key of keys) {
+    const value = Number(source?.[key]);
+    if (Number.isFinite(value)) return value;
+  }
+  return 0;
+}
+function scoreText(source, ...keys) {
+  return scoreValue(source, ...keys).toFixed(1);
+}
+function scorePct(score, min = 1, max = 10) {
+  return clamp((Number(score) - min) / (max - min), 0, 1);
+}
+function setTelemetryGrid(el, items, emptyText) {
+  el.replaceChildren();
+  if (!items.length) {
+    const empty = document.createElement("div");
+    empty.className = "telemetry-empty";
+    empty.textContent = emptyText || "-";
+    el.appendChild(empty);
+    return;
+  }
+  for (const item of items) {
+    const chip = document.createElement("div");
+    chip.className = "telemetry-chip";
+    const label = document.createElement("span");
+    label.textContent = item.label;
+    const value = document.createElement("b");
+    value.textContent = item.value;
+    chip.append(label, value);
+    if (Number.isFinite(item.score)) {
+      const bar = document.createElement("div");
+      bar.className = "telemetry-bar";
+      const fill = document.createElement("i");
+      fill.style.width = `${(scorePct(item.score, item.min ?? 1, item.max ?? 10) * 100).toFixed(1)}%`;
+      bar.appendChild(fill);
+      chip.appendChild(bar);
+    }
+    el.appendChild(chip);
+  }
+}
+function gridCellLabel(grid) {
+  const fine = grid?.fine;
+  const tactical = grid?.tactical;
+  if (!fine) return "-";
+  const fineLabel = `F${Number(fine.x ?? 0)},${Number(fine.y ?? 0)}`;
+  if (!tactical) return fineLabel;
+  return `${fineLabel} T${Number(tactical.x ?? 0)},${Number(tactical.y ?? 0)}`;
+}
+function facingShort(value) {
+  return String(value || "?")
+    .replace("North", "N")
+    .replace("South", "S")
+    .replace("East", "E")
+    .replace("West", "W")
+    .replace("Unknown", "?");
+}
+function actionTargetLabel(d) {
+  const target = d?.actionTarget;
+  if (!target) return "-";
+  const player = target.playerId == null ? "" : `P${target.playerId}`;
+  const grid = target.grid ? gridCellLabel(target.grid) : "";
+  return [player, grid].filter(Boolean).join(" ") || "-";
+}
 function agentEnergyLabel(p) {
-  const stamina = Number(p.skills?.stamina ?? 0);
+  const stamina = scoreValue(p.skills, "stamina");
   const fatigue = Number(p.fatigue ?? 0);
-  const available = clamp(stamina * (1 - fatigue * 0.42), 0, 1);
+  const available = clamp((stamina / 10) * (1 - fatigue * 0.42), 0, 1);
   return `S${stamina.toFixed(2)} F${fatigue.toFixed(2)} A${available.toFixed(2)}`;
 }
 function agentSkillLabel(p) {
   const s = p.skills || {};
-  return `Sp${Number(s.topSpeedYps ?? 0).toFixed(1)} Ac${Number(s.accelerationYps2 ?? 0).toFixed(1)} Sh${Number(s.shooting ?? 0).toFixed(2)} Pa${Number(s.passing ?? 0).toFixed(2)} Dr${Number(s.dribbling ?? 0).toFixed(2)} Df${Number(s.defending ?? 0).toFixed(2)}`;
+  return `Sp${scoreText(s, "topSpeed", "topSpeedYps")} Ac${scoreText(s, "acceleration", "accelerationYps2")} Sh${scoreText(s, "shooting")} Pa${scoreText(s, "passingCompletionRate", "passing")} Dr${scoreText(s, "dribbling")} Df${scoreText(s, "defending")}`;
+}
+function skillTelemetryItems(p) {
+  const s = p.skills || {};
+  return [
+    ["Speed", "topSpeed", "topSpeedYps"],
+    ["Accel", "acceleration", "accelerationYps2"],
+    ["Strength", "strength"],
+    ["Height", "height"],
+    ["Dribble", "dribbling"],
+    ["Aggress", "aggression"],
+    ["R shot", "rightFootShotPower"],
+    ["L shot", "leftFootShotPower"],
+    ["Pass %", "passingCompletionRate"],
+    ["Flair", "flairPassing"],
+    ["L cross", "crossingLeft"],
+    ["R cross", "crossingRight"],
+    ["Goal", "goalkeeping"],
+    ["Defend", "defending"],
+    ["Track", "defensiveTracking"],
+  ].map(([label, ...keys]) => {
+    const score = scoreValue(s, ...keys);
+    return {label, value: score.toFixed(1), score};
+  });
+}
+function decisionTelemetryItems(d) {
+  if (!d) return [];
+  const s = d.mdpState || {};
+  const o = d.observation || {};
+  const b = d.belief || {};
+  return [
+    {label: "Grid", value: gridCellLabel(o.playerGrid || s.playerGrid)},
+    {label: "Facing", value: `R${facingShort(s.receiveFacing || o.receiveFacing)} A${facingShort(s.actionFacing || o.actionFacing)}`},
+    {label: "Pressure", value: `${Number(o.realPressure ?? 0).toFixed(2)} / ${Number(o.perceivedPressure ?? 0).toFixed(2)}`, score: Number(o.perceivedPressure ?? 0), min: 0, max: 1},
+    {label: "On ball", value: `${Number(o.realTimeOnBallSeconds ?? 0).toFixed(1)} / ${Number(o.perceivedTimeOnBallSeconds ?? 0).toFixed(1)}s`},
+    {label: "Goal", value: `${Number(o.yardsToGoal ?? 0).toFixed(1)}y ${Number(o.opponentGoalAngleDegrees ?? 0).toFixed(0)}deg`},
+    {label: "Keeper", value: `${Number(o.opposingGoalkeeperDistance ?? 0).toFixed(1)}y ${Number(o.opposingGoalkeeperAngleDegrees ?? 0).toFixed(0)}deg`},
+    {label: "Dribble", value: `${Number(o.forwardDribbleSpaceYards ?? 0).toFixed(1)}y`, score: Number(o.forwardDribbleSpaceYards ?? 0), min: 0, max: 24},
+    {label: "Passes", value: `${Number(o.visiblePassOptions ?? 0)}F ${Number(o.visibleAerialPassOptions ?? 0)}A`},
+    {label: "Aerial", value: `B${Number(o.aerialPassBypassScore ?? 0).toFixed(2)} R${Number(o.aerialPassInterceptionRisk ?? 0).toFixed(2)}`, score: Number(o.aerialPassBypassScore ?? 0) - Number(o.aerialPassInterceptionRisk ?? 0) + 1, min: 0, max: 2},
+    {label: "First", value: `S${Number(o.firstTimeShotScore ?? 0).toFixed(2)} P${Number(o.firstTimePassScore ?? 0).toFixed(2)} C${Number(o.controlTouchScore ?? 0).toFixed(2)}`},
+    {label: "Belief", value: `P${Number(b.possessionConfidence ?? 0).toFixed(2)} L${Number(b.passLaneOpen ?? 0).toFixed(2)}`},
+    {label: "Target", value: actionTargetLabel(d)},
+  ];
 }
 function updateAgentStatePanel() {
   const p = controlledPlayer();
@@ -536,10 +794,13 @@ function updateAgentStatePanel() {
     agentEnergy.textContent = "-";
     agentSkills.textContent = "-";
     agentDecision.textContent = "-";
+    agentReward.textContent = "-";
     agentOptions.textContent = "-";
     agentMdp.textContent = "-";
     agentPomdp.textContent = "-";
     agentBelief.textContent = "-";
+    setTelemetryGrid(agentSkillGrid, [], "no selected agent");
+    setTelemetryGrid(agentDecisionGrid, [], "no decision trace");
     return;
   }
   const d = p.lastDecision;
@@ -548,10 +809,13 @@ function updateAgentStatePanel() {
   agentEnergy.textContent = agentEnergyLabel(p);
   agentSkills.textContent = agentSkillLabel(p);
   agentDecision.textContent = agentDecisionLabel(d);
+  agentReward.textContent = selectedRewardLabel(p);
   agentOptions.textContent = agentOptionsLabel(d);
   agentMdp.textContent = agentMdpLabel(d);
   agentPomdp.textContent = agentPomdpLabel(d);
   agentBelief.textContent = agentBeliefLabel(d);
+  setTelemetryGrid(agentSkillGrid, skillTelemetryItems(p), "no skills");
+  setTelemetryGrid(agentDecisionGrid, decisionTelemetryItems(d), "no decision trace");
 }
 function vecLen(v) {
   if (!v) return 0;
@@ -833,6 +1097,18 @@ function drawPlayer(p, r) {
   const controlled = assigned && p.controllerSlot === activeSlot;
   const hovered = p.id === hoverPlayerId;
   const slotColor = assigned ? SLOT_COLORS[p.controllerSlot % SLOT_COLORS.length] : null;
+  const isDuel = Array.isArray(p.lastDecision?.operationOrder)
+    && p.lastDecision.operationOrder.includes("fifty-fifty-duel");
+  if (isDuel) {
+    ctx.save();
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath();
+    ctx.arc(pt.x, pt.y, 17, 0, Math.PI * 2);
+    ctx.strokeStyle = "#c58a13";
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+    ctx.restore();
+  }
   ctx.beginPath();
   ctx.arc(pt.x, pt.y, 12, 0, Math.PI * 2);
   ctx.fillStyle = color;
@@ -909,6 +1185,8 @@ function render() {
   fouls.textContent = `${s.foulsHome ?? 0} - ${s.foulsAway ?? 0}`;
   ticks.textContent = `${state.summary.ticks} / ${Math.round(state.config.durationSeconds / state.config.dtSeconds)}`;
   learning.textContent = learningLabel(state.learning);
+  tickReward.textContent = tickRewardLabel();
+  recentActions.textContent = recentActionLabel();
   syncLearningControls();
   updateAgentStatePanel();
   updateRunButton();
@@ -922,7 +1200,9 @@ function assignmentForSlot(slot) {
   return (state?.controllerAssignments || []).find(a => a.controllerSlot === slot) || null;
 }
 function slotLabel(slot, assignment) {
-  return assignment ? `Slot ${slot + 1}: ${assignment.playerName}` : `Slot ${slot + 1}: autonomous`;
+  return assignment
+    ? `Slot ${slot + 1}: ${assignment.playerName}`
+    : `Slot ${slot + 1}: autonomous`;
 }
 function setActiveSlot(slot) {
   const count = humanSlotCount();
@@ -1096,17 +1376,16 @@ function rebuildTargetPick() {
     targetPick.value = existing;
   }
 }
-function axisFromKeys() {
+function axisFromKeys(map = CONTROLLER_KEYMAPS[activeSlot] || CONTROLLER_KEYMAPS[0]) {
   const axis = {x: 0, y: 0};
-  if (keys.has("ArrowLeft") || keys.has("KeyA")) axis.x -= 1;
-  if (keys.has("ArrowRight") || keys.has("KeyD")) axis.x += 1;
-  if (keys.has("ArrowUp") || keys.has("KeyW")) axis.y += 1;
-  if (keys.has("ArrowDown") || keys.has("KeyS")) axis.y -= 1;
+  if (keys.has(map.left)) axis.x -= 1;
+  if (keys.has(map.right)) axis.x += 1;
+  if (keys.has(map.up)) axis.y += 1;
+  if (keys.has(map.down)) axis.y -= 1;
   return axis;
 }
-function selectedPlayerId() {
+function selectedPlayerId(slot = Number(slotPick.value || 0)) {
   if (!state) return null;
-  const slot = Number(slotPick.value || 0);
   const assignment = state.controllerAssignments.find(a => a.controllerSlot === slot);
   return assignment ? assignment.playerId : null;
 }
@@ -1117,6 +1396,13 @@ function controlledPlayer() {
 function selectedPassTargetId() {
   return targetPick.value === "" ? null : Number(targetPick.value);
 }
+function playerForSlot(slot) {
+  const playerId = selectedPlayerId(slot);
+  return playerId == null ? null : state?.frame?.players?.find(p => p.id === playerId) || null;
+}
+function passTargetForSlot(slot) {
+  return slot === activeSlot ? selectedPassTargetId() : null;
+}
 function setPassTarget(playerId) {
   const value = String(playerId);
   if (!Array.from(targetPick.options).some(o => o.value === value)) return false;
@@ -1126,19 +1412,20 @@ function setPassTarget(playerId) {
   render();
   return true;
 }
-function queueInput(pass = false, shoot = false) {
-  const playerId = selectedPlayerId();
+function queueInput(pass = false, shoot = false, slot = Number(slotPick.value || 0)) {
+  const playerId = selectedPlayerId(slot);
   if (playerId == null) return false;
+  const map = CONTROLLER_KEYMAPS[slot] || CONTROLLER_KEYMAPS[0];
   queuedInputs.push({
-    controllerSlot: Number(slotPick.value || 0),
+    controllerSlot: slot,
     playerId,
     seq: ++inputSeq,
-    axis: axisFromKeys(),
-    sprint: keys.has("ShiftLeft") || keys.has("ShiftRight"),
+    axis: axisFromKeys(map),
+    sprint: keys.has(map.sprint),
     pass,
     passFlight: pass ? passFlight.value : "floor",
     shoot,
-    targetPlayer: pass ? selectedPassTargetId() : null
+    targetPlayer: pass ? passTargetForSlot(slot) : null
   });
   return true;
 }
@@ -1147,12 +1434,34 @@ function playerCanShoot(p) {
   const goalY = p.team === "Home" ? Number(state.config.fieldLengthYards || 120) : 0;
   return Math.abs(goalY - Number(p.position?.y || 0)) <= 20;
 }
-function queueEnterAction() {
-  const p = controlledPlayer();
+function queueSlotAction(slot) {
+  const p = playerForSlot(slot);
   if (!p) return false;
   const isHolder = state?.frame?.ball?.holder === p.id;
-  const shoot = keys.has("ShiftLeft") || keys.has("ShiftRight") || (isHolder && playerCanShoot(p));
-  return queueInput(!shoot, shoot);
+  const map = CONTROLLER_KEYMAPS[slot] || CONTROLLER_KEYMAPS[0];
+  const shoot = keys.has(map.sprint) || (isHolder && playerCanShoot(p));
+  return queueInput(!shoot, shoot, slot);
+}
+function queueMotionInputsForPressedControllers() {
+  let queued = 0;
+  for (let slot = 0; slot < humanSlotCount(); slot++) {
+    const map = CONTROLLER_KEYMAPS[slot] || CONTROLLER_KEYMAPS[0];
+    const axis = axisFromKeys(map);
+    if (axis.x !== 0 || axis.y !== 0 || keys.has(map.sprint)) {
+      if (queueInput(false, false, slot)) queued++;
+    }
+  }
+  return queued;
+}
+function controllerSlotForCode(code) {
+  return CONTROLLER_KEYMAPS.findIndex(map =>
+    code === map.left
+      || code === map.right
+      || code === map.up
+      || code === map.down
+      || code === map.sprint
+      || code === map.action
+  );
 }
 function isFormEditingTarget(target) {
   const tag = String(target?.tagName || "").toLowerCase();
@@ -1298,6 +1607,7 @@ async function importTrackingFile(file) {
 async function loadState() {
   const res = await fetch("/api/state");
   state = await res.json();
+  recentLearningTransitions = [];
   applyAssignmentsToFrame(state.controllerAssignments);
   syncSurfaceControls();
   rebuildControls(state.controllerAssignments);
@@ -1310,6 +1620,7 @@ async function stepOnce() {
     updateRunButton();
     return;
   }
+  queueMotionInputsForPressedControllers();
   const inputs = queuedInputs.splice(0, queuedInputs.length);
   const beforeAssignments = assignmentKey(state.controllerAssignments);
   const response = await postJson("/api/step", {ticks: 1, recordEveryTicks: 1, inputs});
@@ -1322,6 +1633,9 @@ async function stepOnce() {
     done: response.done
   };
   if (response.events.length) eventLog.push(...response.events);
+  recentLearningTransitions = Array.isArray(response.learningTransitions)
+    ? response.learningTransitions
+    : [];
   applyAssignmentsToFrame(state.controllerAssignments);
   if (assignmentKey(state.controllerAssignments) !== beforeAssignments) {
     rebuildControls(state.controllerAssignments);
@@ -1418,21 +1732,30 @@ window.addEventListener("keydown", e => {
     }
     return;
   }
+  if (isFormEditingTarget(e.target)) return;
   keys.add(e.code);
-  if (e.code === "Enter") {
+  const actionSlot = CONTROLLER_KEYMAPS.findIndex(map => map.action === e.code);
+  if (actionSlot >= 0 && actionSlot < humanSlotCount()) {
     e.preventDefault();
-    if (!e.repeat && !queueEnterAction()) statusEl.textContent = "autonomous";
+    if (!e.repeat && !queueSlotAction(actionSlot)) {
+      statusEl.textContent = `slot ${actionSlot + 1} autonomous`;
+    }
     return;
   }
-  if (["ArrowLeft","ArrowRight","ArrowUp","ArrowDown","KeyW","KeyA","KeyS","KeyD","ShiftLeft","ShiftRight"].includes(e.code)) {
+  if (CONTROLLER_CODES.has(e.code)) {
     e.preventDefault();
-    queueInput(false, false);
+    queueMotionInputsForPressedControllers();
   }
 });
 window.addEventListener("keyup", e => {
+  const slot = controllerSlotForCode(e.code);
   keys.delete(e.code);
-  if (["ArrowLeft","ArrowRight","ArrowUp","ArrowDown","KeyW","KeyA","KeyS","KeyD","ShiftLeft","ShiftRight"].includes(e.code)) {
-    queueInput(false, false);
+  if (CONTROLLER_CODES.has(e.code)) {
+    e.preventDefault();
+    if (slot >= 0 && slot < humanSlotCount()) {
+      queueInput(false, false, slot);
+    }
+    queueMotionInputsForPressedControllers();
   }
 });
 setInterval(() => {

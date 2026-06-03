@@ -1,10 +1,12 @@
 //! Run accelerated soccer self-play and summarize learned MDP/POMDP policies.
 
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::time::Instant;
 
 use des_engine::des::general::soccer::{
-    train_soccer_team_policies_from_self_play, MatchConfig, SoccerQEntry, SoccerQPolicyOptions,
+    train_soccer_team_policies_from_self_play_with_progress, MatchConfig, SoccerQEntry,
+    SoccerQPolicyOptions,
 };
 
 fn env_usize(name: &str, default: usize) -> usize {
@@ -72,13 +74,46 @@ fn main() {
     };
 
     let started = Instant::now();
-    let artifact = train_soccer_team_policies_from_self_play(config.clone(), games, options);
+    let artifact = train_soccer_team_policies_from_self_play_with_progress(
+        config.clone(),
+        games,
+        options,
+        |episode| {
+            let stats = &episode.summary.stats;
+            println!(
+                "completed_game={} seed={} score={}-{} shots={} on_target={} pass_completion={}/{} interceptions={}",
+                episode.episode + 1,
+                episode.seed,
+                episode.summary.score_home,
+                episode.summary.score_away,
+                stats.shots_home + stats.shots_away,
+                stats.shots_on_target_home + stats.shots_on_target_away,
+                stats.passes_completed_home + stats.passes_completed_away,
+                stats.passes_attempted_home + stats.passes_attempted_away,
+                stats.interceptions_home + stats.interceptions_away,
+            );
+            let _ = std::io::stdout().flush();
+        },
+        |episode, seed, completed_ticks, total_ticks| {
+            println!(
+                "progress_game={} seed={} ticks={}/{}",
+                episode + 1,
+                seed,
+                completed_ticks,
+                total_ticks
+            );
+            let _ = std::io::stdout().flush();
+        },
+    );
     let elapsed = started.elapsed();
 
-    let _ = std::fs::create_dir_all("out");
-    let artifact_path = "out/soccer-mdp-pomdp-self-play-10x90.json";
+    let artifact_path = std::env::var("SOCCER_ARTIFACT_PATH")
+        .unwrap_or_else(|_| "out/soccer-mdp-pomdp-self-play-10x90.json".to_string());
+    if let Some(parent) = std::path::Path::new(&artifact_path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     if let Ok(json) = serde_json::to_string_pretty(&artifact) {
-        let _ = std::fs::write(artifact_path, json);
+        let _ = std::fs::write(&artifact_path, json);
     }
 
     println!(
@@ -90,7 +125,7 @@ fn main() {
         config.total_ticks(),
         elapsed
     );
-    println!("artifact={artifact_path}");
+    println!("artifact={}", artifact_path);
     println!("game seed score shots on_target passes_completed/pass_attempted interceptions");
 
     let mut total_home_goals = 0u32;

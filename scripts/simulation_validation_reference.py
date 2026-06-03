@@ -29,8 +29,13 @@ EVENT_ENGINES = {
     "simul8",
     "arena",
     "flexsim",
+    "plant-simulation",
+    "extendsim",
+    "gpss-world",
+    "simulink",
+    "ptolemy-ii",
 }
-MOBILITY_ENGINES = {"ns-3", "ns3", "omnetpp", "omnet++", "sumo", "matsim"}
+MOBILITY_ENGINES = {"ns-3", "ns3", "omnetpp", "omnet++", "sumo", "matsim", "carla"}
 ENERGY_ENGINES = {
     "energyplus",
     "openstudio",
@@ -39,11 +44,24 @@ ENERGY_ENGINES = {
     "fmi",
     "fmu",
     "omsimulator",
+    "simulink",
+    "gridlabd",
+    "opendss",
+    "pandapower",
 }
-PHYSICS_ENGINES = {"gazebo", "webots", "mujoco", "drake", "pybullet"}
+PHYSICS_ENGINES = {
+    "gazebo",
+    "webots",
+    "mujoco",
+    "drake",
+    "pybullet",
+    "carla",
+    "isaac-sim",
+    "airsim",
+}
 AGENT_BASED_ENGINES = {"mesa", "repast", "repast-simphony", "mason", "netlogo", "agentpy"}
-DISTRIBUTED_SYSTEM_ENGINES = {"simgrid", "cloudsim", "batsim"}
-PROCESS_ENGINES = {"neqsim", "dwsim", "cape-open"}
+DISTRIBUTED_SYSTEM_ENGINES = {"simgrid", "cloudsim", "batsim", "gem5", "ptolemy-ii"}
+PROCESS_ENGINES = {"neqsim", "dwsim", "cape-open", "copasi", "tellurium"}
 
 
 def result(

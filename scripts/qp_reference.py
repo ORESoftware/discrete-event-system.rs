@@ -23,6 +23,19 @@ import math
 import sys
 from typing import List, Optional, Sequence, Tuple
 
+CVXPY_SOLVER_ALIASES = {
+    "osqp": "OSQP",
+    "scs": "SCS",
+    "clarabel": "CLARABEL",
+    "ecos": "ECOS",
+    "proxqp": "PROXQP",
+    "sdpa": "SDPA",
+    "mosek": "MOSEK",
+    "copt": "COPT",
+}
+
+REGISTERED_CONIC_REFERENCE_SOLVERS = ("qpoases", "proxqp", "cosmo", "sdpa", "csdp")
+
 
 def dot(a: Sequence[float], b: Sequence[float]) -> float:
     return sum(x * y for x, y in zip(a, b))
@@ -955,13 +968,7 @@ def cvxpy_solver_name(requested: str, installed: Sequence[str]) -> Optional[str]
             if candidate in installed:
                 return candidate
         return None
-    mapping = {
-        "osqp": "OSQP",
-        "scs": "SCS",
-        "clarabel": "CLARABEL",
-        "ecos": "ECOS",
-    }
-    return mapping.get(requested)
+    return CVXPY_SOLVER_ALIASES.get(requested)
 
 
 def cvxpy_status_payload(problem, solver_label: str, x_value) -> dict:
@@ -1216,6 +1223,36 @@ def cvxpy_qcp_reference(raw: dict, requested_solver: str) -> Optional[dict]:
     return result
 
 
+def relabel_registered_fallback(result: dict, solver: str, fallback_kind: str) -> dict:
+    output = dict(result)
+    output["solver"] = f"builtin:{fallback_kind}-for-{solver}"
+    message = str(output.get("message") or "")
+    suffix = "registered external solver fallback"
+    output["message"] = f"{message}; {suffix}" if message else suffix
+    return output
+
+
+def registered_qp_reference(qp_raw: dict, requested_solver: str) -> dict:
+    cvxpy = cvxpy_reference(qp_raw, requested_solver)
+    if cvxpy is not None and cvxpy.get("status") not in ("unavailable", "numerical-error"):
+        return cvxpy
+    return relabel_registered_fallback(enumerate_active_sets(qp_raw), requested_solver, "qp-active-set")
+
+
+def registered_socp_reference(raw: dict, requested_solver: str) -> dict:
+    cvxpy = cvxpy_socp_reference(raw, requested_solver)
+    if cvxpy is not None and cvxpy.get("status") not in ("unavailable", "numerical-error"):
+        return cvxpy
+    return relabel_registered_fallback(socp_pattern_reference(raw), requested_solver, "socp-pattern-search")
+
+
+def registered_qcp_reference(raw: dict, requested_solver: str) -> dict:
+    cvxpy = cvxpy_qcp_reference(raw, requested_solver)
+    if cvxpy is not None and cvxpy.get("status") not in ("unavailable", "numerical-error"):
+        return cvxpy
+    return relabel_registered_fallback(qcp_pattern_reference(raw), requested_solver, "qcp-pattern-search")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--solver", default="auto")
@@ -1236,6 +1273,8 @@ def main() -> int:
             result = cvxpy_socp_reference(qp, args.solver if args.solver != "auto" else "cvxpy")
             if args.solver != "auto" and result is None:
                 result = unavailable_reference(f"cvxpy:{args.solver}", "cvxpy is not installed")
+        if result is None and args.solver in REGISTERED_CONIC_REFERENCE_SOLVERS:
+            result = registered_socp_reference(qp, args.solver)
         if result is None:
             result = socp_pattern_reference(qp)
         print(json.dumps(result))
@@ -1249,6 +1288,8 @@ def main() -> int:
             result = cvxpy_qcp_reference(qp, args.solver if args.solver != "auto" else "cvxpy")
             if args.solver != "auto" and result is None:
                 result = unavailable_reference(f"cvxpy:{args.solver}", "cvxpy is not installed")
+        if result is None and args.solver in REGISTERED_CONIC_REFERENCE_SOLVERS:
+            result = registered_qcp_reference(qp, args.solver)
         if result is None:
             result = qcp_pattern_reference(qp)
         print(json.dumps(result))
@@ -1269,6 +1310,8 @@ def main() -> int:
         result = cvxpy_reference(qp, args.solver if args.solver != "auto" else "cvxpy")
         if args.solver != "auto" and result is None:
             result = unavailable_reference(f"cvxpy:{args.solver}", "cvxpy is not installed")
+    if result is None and args.solver in REGISTERED_CONIC_REFERENCE_SOLVERS:
+        result = registered_qp_reference(qp, args.solver)
     if result is None:
         result = enumerate_active_sets(qp)
     print(json.dumps(result))

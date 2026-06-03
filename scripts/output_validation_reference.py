@@ -613,22 +613,55 @@ def main() -> int:
         kind = str(payload.get("kind", "")).strip().lower().replace("_", "-")
         if tool in ("json-schema", "jsonschema"):
             print(json.dumps(jsonschema_reference(payload)))
-        elif tool in ("ajv", "ajv-cli"):
+        elif tool in ("ajv", "ajv-cli", "check-jsonschema", "cue"):
             value = jsonschema_reference(payload)
-            value["validator"] = "builtin:json-schema-subset-for-ajv"
+            value["validator"] = f"builtin:json-schema-subset-for-{tool}"
             print(json.dumps(value))
-        elif tool in ("openapi", "openapi-validator", "spectral") or kind == "openapi-validation":
-            validator = "builtin:openapi-structural-for-spectral" if tool == "spectral" else "builtin:openapi-structural"
+        elif tool in (
+            "openapi",
+            "openapi-validator",
+            "spectral",
+            "openapi-spec-validator",
+            "redocly-cli",
+            "asyncapi-cli",
+        ) or kind == "openapi-validation":
+            validator = (
+                f"builtin:openapi-structural-for-{tool}"
+                if tool
+                in ("spectral", "openapi-spec-validator", "redocly-cli", "asyncapi-cli")
+                else "builtin:openapi-structural"
+            )
             print(json.dumps(openapi_reference(payload, validator)))
-        elif tool in ("xml", "xmllint", "xml-schema", "xsd") or kind in ("xml-validation", "xsd-validation"):
-            print(json.dumps(xml_reference(payload, "builtin:xml-schema-structural")))
+        elif tool in ("xml", "xmllint", "xml-schema", "xsd", "python-xmlschema") or kind in ("xml-validation", "xsd-validation"):
+            xml_validator = {
+                "xmllint": "builtin:xml-schema-structural-for-xmllint",
+                "python-xmlschema": "builtin:xml-schema-structural-for-python-xmlschema",
+            }.get(tool, "builtin:xml-schema-structural")
+            print(json.dumps(xml_reference(payload, xml_validator)))
         elif tool in ("schematron", "jing", "saxon") or kind == "schematron-validation":
             print(json.dumps(xml_reference(payload, "builtin:schematron-structural")))
-        elif tool == "pydantic" or kind == "pydantic-validation":
-            print(json.dumps(pydantic_reference(payload)))
+        elif tool in ("pydantic", "zod", "valibot", "marshmallow", "cerberus") or kind == "pydantic-validation":
+            value = pydantic_reference(payload)
+            if tool != "pydantic":
+                value["validator"] = f"builtin:pydantic-model-subset-for-{tool}"
+            print(json.dumps(value))
         elif tool in ("table", "table-schema", "tabular", "csv-validator") or kind == "table-validation":
             value = table_reference(payload)
-            if tool in ("frictionless", "pandera", "great-expectations", "soda-core", "evidently", "deepchecks"):
+            if tool in (
+                "frictionless",
+                "pandera",
+                "dbt",
+                "whylogs",
+                "great-expectations",
+                "soda-core",
+                "evidently",
+                "deepchecks",
+                "parquet-tools",
+                "apache-arrow",
+                "deequ",
+                "tensorflow-data-validation",
+                "openrefine",
+            ):
                 value["validator"] = f"builtin:table-schema-subset-for-{tool}"
             print(json.dumps(value))
         elif tool in ("protobuf", "protobuf-conformance", "protoc") or kind == "protobuf-validation":
@@ -637,7 +670,22 @@ def main() -> int:
             print(json.dumps(avro_reference(payload)))
         elif tool == "frictionless":
             print(json.dumps(frictionless_reference(payload)))
-        elif tool in ("pandera", "great-expectations", "soda-core", "evidently", "deepchecks"):
+        elif tool in (
+            "pandera",
+            "dbt",
+            "whylogs",
+            "great-expectations",
+            "soda-core",
+            "evidently",
+            "deepchecks",
+            "parquet-tools",
+            "apache-arrow",
+            "deequ",
+            "tensorflow-data-validation",
+            "openrefine",
+            "yamllint",
+            "graphql-schema",
+        ):
             print(json.dumps(package_unavailable(tool)))
         else:
             print(json.dumps(result("unavailable", "unknown", tool, f"unknown output validator '{tool}'")))

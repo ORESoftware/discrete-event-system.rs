@@ -31,6 +31,22 @@ ALLOWED_FUNCS: dict[str, Callable[..., float]] = {
     "max": max,
 }
 
+SCIPY_BRIDGE_SOLVERS = (
+    "auto",
+    "scipy",
+    "ipopt",
+    "bonmin",
+    "minotaur",
+    "couenne",
+    "symphony",
+    "knitro",
+    "mosek",
+    "baron",
+    "copt",
+)
+
+PACKAGE_BRIDGE_SOLVERS = ("casadi", "nlopt", "nlopt-cli")
+
 
 def result(
     status: str,
@@ -343,7 +359,7 @@ def package_reference(payload: dict[str, Any], package: str) -> dict[str, Any] |
 
 def dispatch(payload: dict[str, Any], requested: str) -> dict[str, Any]:
     solver = requested.strip().lower().replace("_", "-")
-    if solver in ("auto", "scipy", "ipopt", "bonmin", "couenne", "baron", "knitro"):
+    if solver in SCIPY_BRIDGE_SOLVERS:
         scipy = scipy_reference(payload, "scipy:SLSQP" if solver in ("auto", "scipy") else f"{solver}:scipy-bridge")
         if scipy is not None:
             return scipy
@@ -351,7 +367,7 @@ def dispatch(payload: dict[str, Any], requested: str) -> dict[str, Any]:
             fallback = fallback_reference(payload)
             fallback["solver"] = f"builtin:nlp-pattern-search-for-{solver}"
             return fallback
-    if solver in ("casadi", "nlopt", "nlopt-cli"):
+    if solver in PACKAGE_BRIDGE_SOLVERS:
         package = "nlopt" if solver in ("nlopt", "nlopt-cli") else solver
         package_result = package_reference(payload, package)
         if package_result is not None:

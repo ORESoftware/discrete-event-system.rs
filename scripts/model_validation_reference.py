@@ -152,7 +152,13 @@ def validate_dimacs(payload: dict[str, Any], tool: str) -> dict[str, Any]:
     text = str(payload.get("dimacs") or payload.get("cnf") or payload.get("text") or payload.get("model") or "")
     if not text.strip():
         return result("failed", "failure", "dimacs", "payload needs dimacs, cnf, text, or model")
-    command = first_command(tool, [tool, "kissat", "cadical", "cryptominisat"])
+    aliases_by_tool = {
+        "kissat": ["kissat"],
+        "cadical": ["cadical"],
+        "cryptominisat": ["cryptominisat5", "cryptominisat"],
+    }
+    aliases = ["kissat", "cadical", "cryptominisat5", "cryptominisat"] if tool == "auto" else aliases_by_tool.get(tool, [tool])
+    command = first_command(tool, aliases)
     if command:
         with tempfile.TemporaryDirectory(prefix="ores-dimacs-") as tmp:
             path = Path(tmp) / "problem.cnf"
@@ -178,7 +184,19 @@ def validate_smtlib(payload: dict[str, Any], tool: str) -> dict[str, Any]:
     text = str(payload.get("script") or payload.get("smtlib") or payload.get("text") or payload.get("model") or "")
     if not text.strip():
         return result("failed", "failure", "smtlib", "payload needs script, smtlib, text, or model")
-    command = first_command(tool, [tool, "z3", "cvc5", "yices-smt2", "yices", "bitwuzla", "boolector"])
+    aliases_by_tool = {
+        "z3": ["z3"],
+        "cvc5": ["cvc5"],
+        "yices": ["yices-smt2", "yices"],
+        "bitwuzla": ["bitwuzla"],
+        "boolector": ["boolector"],
+    }
+    aliases = (
+        ["z3", "cvc5", "yices-smt2", "yices", "bitwuzla", "boolector"]
+        if tool == "auto"
+        else aliases_by_tool.get(tool, [tool])
+    )
+    command = first_command(tool, aliases)
     if command:
         basename = Path(command).name.lower()
         if basename == "z3":
@@ -285,9 +303,9 @@ def dispatch(payload: dict[str, Any], tool_override: str | None = None) -> dict[
     if kind == "minizinc-validation" or tool in MINIZINC_TOOL_IDS:
         return validate_minizinc(payload, "minizinc" if tool == "auto" else tool)
     if kind in ("smtlib-validation", "smt-lib-validation") or tool in ("z3", "cvc5", "yices", "bitwuzla", "boolector"):
-        return validate_smtlib(payload, "z3" if tool == "auto" else tool)
+        return validate_smtlib(payload, tool)
     if kind in ("dimacs-validation", "dimacs-cnf-validation") or tool in ("kissat", "cadical", "cryptominisat"):
-        return validate_dimacs(payload, "kissat" if tool == "auto" else tool)
+        return validate_dimacs(payload, tool)
     return result("unavailable", "unknown", tool, f"unknown model validation payload kind {kind!r}")
 
 

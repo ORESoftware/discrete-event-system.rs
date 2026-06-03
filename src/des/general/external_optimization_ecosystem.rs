@@ -7,6 +7,7 @@
 //! Cargo manifests, and probes report whether that integration is ready.
 
 use std::env;
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -257,6 +258,79 @@ impl ExternalOptimizationTool {
         }
     }
 
+    pub fn artifact_env_vars(self) -> Vec<&'static str> {
+        let mut names = vec![self.env_var()];
+        for name in match self {
+            ExternalOptimizationTool::Pyomo => &["PYOMO_PYTHON"][..],
+            ExternalOptimizationTool::Pulp => &["PULP_PYTHON"],
+            ExternalOptimizationTool::Cvxpy => &["CVXPY_PYTHON"],
+            ExternalOptimizationTool::Cvxopt => &["CVXOPT_PYTHON"],
+            ExternalOptimizationTool::PyScipOpt => &["PYSCIPOPT_PYTHON"],
+            ExternalOptimizationTool::PythonMip => &["PYTHON_MIP_PYTHON"],
+            ExternalOptimizationTool::GurobiPy => &["GUROBIPY_PYTHON"],
+            ExternalOptimizationTool::Docplex => &["DOCPLEX_PYTHON"],
+            ExternalOptimizationTool::OrToolsPython => &["ORTOOLS_PYTHON"],
+            ExternalOptimizationTool::ScipyOptimize => &["SCIPY_PYTHON"],
+            ExternalOptimizationTool::Jump => &["JULIA_PROJECT"],
+            ExternalOptimizationTool::GoodLp => &["GOOD_LP_CARGO_MANIFEST"],
+            ExternalOptimizationTool::LpModeler => &["LP_MODELER_CARGO_MANIFEST"],
+            ExternalOptimizationTool::RustLinprog => &["RUST_LINPROG_CARGO_MANIFEST"],
+            ExternalOptimizationTool::Argmin => &["ARGMIN_CARGO_MANIFEST"],
+            ExternalOptimizationTool::NloptRs => &["NLOPT_RS_CARGO_MANIFEST"],
+            ExternalOptimizationTool::HighsRust => &["HIGHS_RS_CARGO_MANIFEST"],
+            ExternalOptimizationTool::ScipRust => &["SCIP_RS_CARGO_MANIFEST"],
+            ExternalOptimizationTool::CbcRust => &["CBC_RS_CARGO_MANIFEST"],
+            _ => &[],
+        } {
+            push_unique_env_name(&mut names, *name);
+        }
+        names
+    }
+
+    pub fn install_dir_env_vars(self) -> &'static [&'static str] {
+        match self {
+            ExternalOptimizationTool::ChocoSolver => &["CHOCO_SOLVER_HOME", "CHOCO_HOME"],
+            ExternalOptimizationTool::JaCoP => &["JACOP_HOME", "JACOP_DIR"],
+            ExternalOptimizationTool::IbmCpOptimizer => {
+                &["CPLEX_STUDIO_DIR", "CPLEX_HOME", "CP_OPTIMIZER_HOME"]
+            }
+            ExternalOptimizationTool::OptaPlanner => &["OPTAPLANNER_HOME", "OPTAPLANNER_DIR"],
+            ExternalOptimizationTool::Timefold => &["TIMEFOLD_HOME", "TIMEFOLD_DIR"],
+            ExternalOptimizationTool::JMetal => &["JMETAL_HOME", "JMETAL_DIR"],
+            ExternalOptimizationTool::MoeaFramework => &["MOEA_FRAMEWORK_HOME", "MOEA_HOME"],
+            ExternalOptimizationTool::Ecj => &["ECJ_HOME", "ECJ_DIR"],
+            ExternalOptimizationTool::OjAlgo => &["OJALGO_HOME", "OJALGO_DIR"],
+            ExternalOptimizationTool::OrToolsJava => &["ORTOOLS_JAVA_HOME", "ORTOOLS_HOME"],
+            ExternalOptimizationTool::Pyomo => &["PYOMO_HOME", "PYOMO_DIR"],
+            ExternalOptimizationTool::Pulp => &["PULP_HOME", "PULP_DIR"],
+            ExternalOptimizationTool::Cvxpy => &["CVXPY_HOME", "CVXPY_DIR"],
+            ExternalOptimizationTool::Cvxopt => &["CVXOPT_HOME", "CVXOPT_DIR"],
+            ExternalOptimizationTool::PyScipOpt => &["SCIPOPTDIR", "SCIP_DIR", "SCIP_HOME"],
+            ExternalOptimizationTool::PythonMip => &["PYTHON_MIP_HOME", "PYTHON_MIP_DIR"],
+            ExternalOptimizationTool::GurobiPy => &["GUROBI_HOME"],
+            ExternalOptimizationTool::Docplex => {
+                &["DOCPLEX_HOME", "CPLEX_STUDIO_DIR", "CPLEX_HOME"]
+            }
+            ExternalOptimizationTool::OrToolsPython => &["ORTOOLS_HOME", "ORTOOLS_PYTHON_HOME"],
+            ExternalOptimizationTool::ScipyOptimize => &["SCIPY_HOME", "SCIPY_DIR"],
+            ExternalOptimizationTool::Ampl => &["AMPL_HOME", "AMPL_DIR"],
+            ExternalOptimizationTool::Gams => &["GAMS_DIR", "GAMSDIR", "GAMS_HOME"],
+            ExternalOptimizationTool::Hexaly => &[
+                "HEXALY_HOME",
+                "HEXALY_DIR",
+                "LOCALSOLVER_HOME",
+                "LOCALSOLVER_DIR",
+            ],
+            ExternalOptimizationTool::NloptRs => &["NLOPT_DIR", "NLOPT_HOME"],
+            ExternalOptimizationTool::HighsRust => &["HIGHS_DIR", "HIGHS_HOME"],
+            ExternalOptimizationTool::ScipRust => &["SCIPOPTDIR", "SCIP_DIR", "SCIP_HOME"],
+            ExternalOptimizationTool::CbcRust => {
+                &["CBC_DIR", "CBC_HOME", "COINOR_DIR", "COINOR_HOME"]
+            }
+            _ => &[],
+        }
+    }
+
     pub fn java_probe_classes(self) -> &'static [&'static str] {
         match self {
             ExternalOptimizationTool::ChocoSolver => &["org.chocosolver.solver.Model"],
@@ -379,23 +453,23 @@ pub fn probe_external_optimization_tools() -> Vec<ExternalOptimizationProbe> {
 
 fn probe_java_tool(tool: ExternalOptimizationTool) -> ExternalOptimizationProbe {
     let t0 = Instant::now();
-    let env_var = tool.env_var();
-    let classpath = match env::var_os(env_var) {
-        Some(value) if !value.is_empty() => value,
-        _ => {
-            return probe_result(
-                tool,
-                ExternalOptimizationProbeStatus::NotConfigured,
-                None,
-                env_var,
-                None,
-                elapsed_ms(t0),
-                format!(
-                    "set {env_var} to a local jar/classpath for {}",
-                    tool.display_name()
-                ),
-            );
-        }
+    let primary_env_var = tool.env_var();
+    let classpath =
+        configured_java_classpath(tool).or_else(|| java_classpath_from_install_dirs(tool));
+    let Some((classpath, env_var)) = classpath else {
+        return probe_result(
+            tool,
+            ExternalOptimizationProbeStatus::NotConfigured,
+            None,
+            primary_env_var,
+            None,
+            elapsed_ms(t0),
+            format!(
+                "set {primary_env_var} to a local jar/classpath or one of {:?} to an installation root for {}",
+                tool.install_dir_env_vars(),
+                tool.display_name()
+            ),
+        );
     };
     let javap = find_first_command(&["javap"]);
     let Some(javap) = javap else {
@@ -460,39 +534,43 @@ fn probe_java_tool(tool: ExternalOptimizationTool) -> ExternalOptimizationProbe 
 
 fn probe_python_tool(tool: ExternalOptimizationTool) -> ExternalOptimizationProbe {
     let t0 = Instant::now();
-    let env_var = tool.env_var();
-    let python = env::var_os(env_var)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .and_then(|path| find_command_path(&path))
-        .or_else(|| find_first_command(&["python3", "python"]));
-    let Some(python) = python else {
+    let primary_env_var = tool.env_var();
+    let configured_python = configured_python_command(tool)
+        .or_else(|| python_command_from_install_dirs(tool))
+        .or_else(|| {
+            find_first_command(&["python3", "python"]).map(|python| (python, primary_env_var, None))
+        });
+    let Some((python, env_var, source_artifact)) = configured_python else {
         return probe_result(
             tool,
             ExternalOptimizationProbeStatus::NotConfigured,
             None,
-            env_var,
+            primary_env_var,
             None,
             elapsed_ms(t0),
             format!(
-                "set {env_var} to a Python interpreter with {} installed",
+                "set {primary_env_var} to a Python interpreter or one of {:?} to a Python package/venv root for {}",
+                tool.install_dir_env_vars(),
                 tool.display_name()
             ),
         );
     };
+    let python_path_roots = python_module_search_paths_from_install_dirs(tool);
+    let python_path = joined_python_path(&python_path_roots);
     for module in tool.python_modules() {
-        match Command::new(&python)
-            .arg("-c")
-            .arg(format!("import {module}"))
-            .output()
-        {
+        let mut command = Command::new(&python);
+        command.arg("-c").arg(format!("import {module}"));
+        if let Some(python_path) = python_path.as_ref() {
+            command.env("PYTHONPATH", python_path);
+        }
+        match command.output() {
             Ok(output) if output.status.success() => {
                 return probe_result(
                     tool,
                     ExternalOptimizationProbeStatus::Ready,
                     Some(python),
                     env_var,
-                    Some(module.to_string()),
+                    Some(source_artifact.unwrap_or_else(|| module.to_string())),
                     elapsed_ms(t0),
                     format!(
                         "Python interpreter can import module '{module}' for {}",
@@ -553,14 +631,30 @@ fn probe_native_tool(tool: ExternalOptimizationTool) -> ExternalOptimizationProb
     let t0 = Instant::now();
     let env_var = tool.env_var();
     if let Some(dir) = env::var_os(env_var).filter(|value| !value.is_empty()) {
+        let command =
+            find_command_in_install_dir(&PathBuf::from(&dir), tool.native_command_aliases())
+                .or_else(|| find_first_command(tool.native_command_aliases()));
         return probe_result(
             tool,
             ExternalOptimizationProbeStatus::Ready,
-            find_first_command(tool.native_command_aliases()),
+            command,
             env_var,
             Some(dir.to_string_lossy().to_string()),
             elapsed_ms(t0),
             format!("configured native installation for {}", tool.display_name()),
+        );
+    }
+    if let Some((command, source_env_var)) =
+        command_from_install_dirs(tool, tool.native_command_aliases())
+    {
+        return probe_result(
+            tool,
+            ExternalOptimizationProbeStatus::Ready,
+            Some(command),
+            source_env_var,
+            None,
+            elapsed_ms(t0),
+            format!("found native command for {}", tool.display_name()),
         );
     }
     if let Some(command) = find_first_command(tool.native_command_aliases()) {
@@ -590,23 +684,22 @@ fn probe_native_tool(tool: ExternalOptimizationTool) -> ExternalOptimizationProb
 
 fn probe_rust_tool(tool: ExternalOptimizationTool) -> ExternalOptimizationProbe {
     let t0 = Instant::now();
-    let env_var = tool.env_var();
-    let manifest = match env::var_os(env_var) {
-        Some(value) if !value.is_empty() => PathBuf::from(value),
-        _ => {
-            return probe_result(
-                tool,
-                ExternalOptimizationProbeStatus::NotConfigured,
-                None,
-                env_var,
-                None,
-                elapsed_ms(t0),
-                format!(
-                    "set {env_var} to a Cargo.toml that uses {}",
-                    tool.display_name()
-                ),
-            );
-        }
+    let primary_env_var = tool.env_var();
+    let manifest = configured_rust_manifest(tool).or_else(|| rust_manifest_from_install_dirs(tool));
+    let Some((manifest, env_var)) = manifest else {
+        return probe_result(
+            tool,
+            ExternalOptimizationProbeStatus::NotConfigured,
+            None,
+            primary_env_var,
+            None,
+            elapsed_ms(t0),
+            format!(
+                "set {primary_env_var} to a Cargo.toml or one of {:?} to a crate root that uses {}",
+                tool.install_dir_env_vars(),
+                tool.display_name()
+            ),
+        );
     };
     let cargo = find_first_command(&["cargo"]);
     let Some(cargo) = cargo else {
@@ -687,6 +780,277 @@ fn cargo_manifest_mentions_dependency(raw: &str, dependency: &str) -> bool {
             || trimmed.contains(&format!("package = \"{dependency}\""))
             || trimmed.contains(&format!("package = '{dependency}'"))
     })
+}
+
+fn push_unique_env_name(names: &mut Vec<&'static str>, name: &'static str) {
+    if !names.contains(&name) {
+        names.push(name);
+    }
+}
+
+fn configured_java_classpath(tool: ExternalOptimizationTool) -> Option<(OsString, &'static str)> {
+    for env_var in tool.artifact_env_vars() {
+        if let Some(value) = env::var_os(env_var).filter(|value| !value.is_empty()) {
+            return Some((value, env_var));
+        }
+    }
+    None
+}
+
+fn java_classpath_from_install_dirs(
+    tool: ExternalOptimizationTool,
+) -> Option<(OsString, &'static str)> {
+    for env_var in tool.install_dir_env_vars() {
+        let Some(value) = env::var_os(env_var).filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        let root = PathBuf::from(value);
+        if let Some(classpath) = find_java_classpath_in_install_dir(&root) {
+            return Some((classpath, env_var));
+        }
+    }
+    None
+}
+
+fn find_java_classpath_in_install_dir(root: &Path) -> Option<OsString> {
+    let mut jars = Vec::new();
+    if is_jar_file(root) {
+        jars.push(root.to_path_buf());
+    }
+    for dir in [
+        root.to_path_buf(),
+        root.join("lib"),
+        root.join("share").join("java"),
+        root.join("build").join("libs"),
+        root.join("target"),
+        root.join("target").join("dependency"),
+    ] {
+        collect_jar_files(&dir, &mut jars);
+    }
+    if let Ok(entries) = fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let child = entry.path();
+            if !child.is_dir() {
+                continue;
+            }
+            collect_jar_files(&child.join("lib"), &mut jars);
+            collect_jar_files(&child.join("build").join("libs"), &mut jars);
+            collect_jar_files(&child.join("target"), &mut jars);
+            collect_jar_files(&child.join("target").join("dependency"), &mut jars);
+        }
+    }
+    env::join_paths(jars).ok()
+}
+
+fn collect_jar_files(dir: &Path, jars: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if is_jar_file(&path) && !jars.contains(&path) {
+            jars.push(path);
+        }
+    }
+}
+
+fn is_jar_file(path: &Path) -> bool {
+    path.is_file()
+        && path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("jar"))
+}
+
+fn configured_python_command(
+    tool: ExternalOptimizationTool,
+) -> Option<(PathBuf, &'static str, Option<String>)> {
+    for env_var in tool.artifact_env_vars() {
+        let Some(value) = env::var_os(env_var).filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        let path = PathBuf::from(&value);
+        if let Some(command) = find_command_path(&path) {
+            return Some((command, env_var, Some(value.to_string_lossy().to_string())));
+        }
+    }
+    None
+}
+
+fn python_command_from_install_dirs(
+    tool: ExternalOptimizationTool,
+) -> Option<(PathBuf, &'static str, Option<String>)> {
+    for env_var in tool.install_dir_env_vars() {
+        let Some(value) = env::var_os(env_var).filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        let root = PathBuf::from(&value);
+        if let Some(command) = find_python_in_install_dir(&root) {
+            return Some((command, env_var, Some(root.display().to_string())));
+        }
+    }
+    None
+}
+
+fn find_python_in_install_dir(root: &Path) -> Option<PathBuf> {
+    if executable_file(root) {
+        return Some(root.to_path_buf());
+    }
+    for relative in [
+        "bin/python3",
+        "bin/python",
+        ".venv/bin/python3",
+        ".venv/bin/python",
+        "venv/bin/python3",
+        "venv/bin/python",
+    ] {
+        let candidate = root.join(relative);
+        if executable_file(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn python_module_search_paths_from_install_dirs(tool: ExternalOptimizationTool) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for env_var in tool.install_dir_env_vars() {
+        let Some(value) = env::var_os(env_var).filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        let root = PathBuf::from(value);
+        for base in [root.clone(), root.join("src"), root.join("lib")] {
+            if python_base_contains_probe_module(&base, tool.python_modules())
+                && !paths.contains(&base)
+            {
+                paths.push(base);
+            }
+        }
+    }
+    paths
+}
+
+fn python_base_contains_probe_module(base: &Path, modules: &[&str]) -> bool {
+    modules.iter().any(|module| {
+        let first = module.split('.').next().unwrap_or(module);
+        base.join(first).exists()
+    })
+}
+
+fn joined_python_path(extra_roots: &[PathBuf]) -> Option<OsString> {
+    if extra_roots.is_empty() {
+        return None;
+    }
+    let mut paths = extra_roots.to_vec();
+    if let Some(current) = env::var_os("PYTHONPATH") {
+        paths.extend(env::split_paths(&current));
+    }
+    env::join_paths(paths).ok()
+}
+
+fn command_from_install_dirs(
+    tool: ExternalOptimizationTool,
+    aliases: &[&str],
+) -> Option<(PathBuf, &'static str)> {
+    for env_var in tool.install_dir_env_vars() {
+        let Some(value) = env::var_os(env_var).filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        if let Some(command) = find_command_in_install_dir(&PathBuf::from(value), aliases) {
+            return Some((command, env_var));
+        }
+    }
+    None
+}
+
+fn find_command_in_install_dir(root: &Path, aliases: &[&str]) -> Option<PathBuf> {
+    for candidate_dir in [root.to_path_buf(), root.join("bin")] {
+        if let Some(path) = find_command_in_dir(&candidate_dir, aliases) {
+            return Some(path);
+        }
+    }
+    if let Ok(entries) = fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let child = entry.path();
+            if !child.is_dir() {
+                continue;
+            }
+            let child_bin = child.join("bin");
+            if let Some(path) = find_command_in_dir(&child_bin, aliases) {
+                return Some(path);
+            }
+            if let Ok(platforms) = fs::read_dir(&child_bin) {
+                for platform in platforms.flatten() {
+                    let platform_dir = platform.path();
+                    if !platform_dir.is_dir() {
+                        continue;
+                    }
+                    if let Some(path) = find_command_in_dir(&platform_dir, aliases) {
+                        return Some(path);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn find_command_in_dir(dir: &Path, aliases: &[&str]) -> Option<PathBuf> {
+    aliases
+        .iter()
+        .map(|alias| dir.join(alias))
+        .find(|candidate| executable_file(candidate))
+}
+
+fn configured_rust_manifest(tool: ExternalOptimizationTool) -> Option<(PathBuf, &'static str)> {
+    for env_var in tool.artifact_env_vars() {
+        let Some(value) = env::var_os(env_var).filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        let path = PathBuf::from(value);
+        if let Some(manifest) = manifest_path(&path) {
+            return Some((manifest, env_var));
+        }
+    }
+    None
+}
+
+fn rust_manifest_from_install_dirs(
+    tool: ExternalOptimizationTool,
+) -> Option<(PathBuf, &'static str)> {
+    for env_var in tool.install_dir_env_vars() {
+        let Some(value) = env::var_os(env_var).filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        let root = PathBuf::from(value);
+        if let Some(manifest) = manifest_path(&root).or_else(|| child_manifest_path(&root)) {
+            return Some((manifest, env_var));
+        }
+    }
+    None
+}
+
+fn manifest_path(path: &Path) -> Option<PathBuf> {
+    if path.is_file() {
+        return Some(path.to_path_buf());
+    }
+    let candidate = path.join("Cargo.toml");
+    candidate.is_file().then_some(candidate)
+}
+
+fn child_manifest_path(root: &Path) -> Option<PathBuf> {
+    let entries = fs::read_dir(root).ok()?;
+    for entry in entries.flatten() {
+        let child = entry.path();
+        if !child.is_dir() {
+            continue;
+        }
+        let candidate = child.join("Cargo.toml");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 fn probe_result(
@@ -789,6 +1153,18 @@ mod tests {
         assert!(ExternalOptimizationTool::HighsRust
             .rust_dependency_names()
             .contains(&"highs-sys"));
+        assert!(ExternalOptimizationTool::ChocoSolver
+            .install_dir_env_vars()
+            .contains(&"CHOCO_HOME"));
+        assert!(ExternalOptimizationTool::Pyomo
+            .artifact_env_vars()
+            .contains(&"PYOMO_PYTHON"));
+        assert!(ExternalOptimizationTool::Docplex
+            .install_dir_env_vars()
+            .contains(&"CPLEX_STUDIO_DIR"));
+        assert!(ExternalOptimizationTool::HighsRust
+            .install_dir_env_vars()
+            .contains(&"HIGHS_HOME"));
         assert_eq!(ExternalOptimizationEcosystem::Python.as_str(), "python");
     }
 
@@ -802,5 +1178,43 @@ mod tests {
         assert!(cargo_manifest_mentions_dependency(raw, "good_lp"));
         assert!(cargo_manifest_mentions_dependency(raw, "highs"));
         assert!(!cargo_manifest_mentions_dependency(raw, "argmin"));
+    }
+
+    #[test]
+    fn install_dir_lookup_handles_ecosystem_layouts() {
+        let root = std::env::temp_dir().join(format!(
+            "des-external-optimization-ecosystem-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        let jar = root.join("share").join("java").join("choco-solver.jar");
+        std::fs::create_dir_all(jar.parent().unwrap()).unwrap();
+        std::fs::write(&jar, b"").unwrap();
+        let classpath = find_java_classpath_in_install_dir(&root).unwrap();
+        assert!(env::split_paths(&classpath).any(|path| path == jar));
+
+        let native = root.join("hexaly").join("bin").join("macos").join("hexaly");
+        std::fs::create_dir_all(native.parent().unwrap()).unwrap();
+        std::fs::write(&native, b"").unwrap();
+        assert_eq!(
+            find_command_in_install_dir(&root, &["hexaly"]),
+            Some(native)
+        );
+
+        let python = root.join(".venv").join("bin").join("python3");
+        std::fs::create_dir_all(python.parent().unwrap()).unwrap();
+        std::fs::write(&python, b"").unwrap();
+        assert_eq!(find_python_in_install_dir(&root), Some(python));
+
+        let manifest = root.join("crate").join("Cargo.toml");
+        std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        std::fs::write(&manifest, b"[dependencies]\nhighs = \"1\"\n").unwrap();
+        assert_eq!(child_manifest_path(&root), Some(manifest));
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

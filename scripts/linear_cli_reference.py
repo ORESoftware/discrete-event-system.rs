@@ -52,6 +52,18 @@ COMMAND_ENV_VARS = {
     "lindo": ["RUNLINDO_CMD", "LINDO_CMD", "LINDOAPI_CMD", "ORES_LINDO_CMD", "ORES_LINDO_BIN", "DES_LINDO_BIN", "LINDO_BIN"],
 }
 
+COMMAND_DIR_ENV_VARS = {
+    "glpk": ["GLPK_DIR", "GLPK_HOME"],
+    "highs": ["HIGHS_DIR", "HIGHS_HOME"],
+    "scip": ["SCIPOPTDIR", "SCIP_DIR", "SCIP_HOME"],
+    "cbc": ["CBC_DIR", "CBC_HOME", "COINOR_DIR", "COINOR_HOME"],
+    "clp": ["CLP_DIR", "CLP_HOME", "COINOR_DIR", "COINOR_HOME"],
+    "gurobi": ["GUROBI_HOME"],
+    "cplex": ["CPLEX_STUDIO_DIR", "CPLEX_HOME"],
+    "xpress": ["XPRESSDIR", "XPRESS_DIR", "XPRESS_HOME"],
+    "lindo": ["LINDO_HOME", "LINDO_DIR", "LINDOAPI_HOME", "LINDOAPI_DIR"],
+}
+
 SUPPORTED_SOLVERS = {
     "glpk",
     "highs",
@@ -1806,12 +1818,50 @@ def solver_command(solver: str) -> Optional[str]:
             resolved = shutil.which(configured)
             if resolved is not None:
                 return resolved
+    for env_var in COMMAND_DIR_ENV_VARS.get(solver, []):
+        configured = os.environ.get(env_var)
+        if configured and configured.strip():
+            configured_any = True
+            resolved = command_in_install_dir(
+                os.path.expanduser(configured),
+                COMMAND_ALIASES.get(solver, [solver]),
+            )
+            if resolved is not None:
+                return resolved
     if configured_any:
         return None
     for command in COMMAND_ALIASES.get(solver, [solver]):
         resolved = shutil.which(command)
         if resolved is not None:
             return resolved
+    return None
+
+
+def command_in_install_dir(root: str, aliases: Sequence[str]) -> Optional[str]:
+    candidate_dirs = [root, os.path.join(root, "bin")]
+    try:
+        children = os.listdir(root)
+    except OSError:
+        children = []
+    for child in children:
+        child_path = os.path.join(root, child)
+        if not os.path.isdir(child_path):
+            continue
+        child_bin = os.path.join(child_path, "bin")
+        candidate_dirs.append(child_bin)
+        try:
+            platform_dirs = os.listdir(child_bin)
+        except OSError:
+            platform_dirs = []
+        for platform_dir in platform_dirs:
+            platform_path = os.path.join(child_bin, platform_dir)
+            if os.path.isdir(platform_path):
+                candidate_dirs.append(platform_path)
+    for candidate_dir in candidate_dirs:
+        for alias in aliases:
+            candidate = os.path.join(candidate_dir, alias)
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return candidate
     return None
 
 

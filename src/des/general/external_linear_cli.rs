@@ -187,22 +187,95 @@ impl ExternalLinearCliSolver {
     /// without committing binaries or absolute paths to version control.
     pub fn command_env_vars(self) -> &'static [&'static str] {
         match self {
-            ExternalLinearCliSolver::Highs => &["HIGHS_CMD", "ORES_HIGHS_CMD"],
-            ExternalLinearCliSolver::Glpk => &["GLPSOL_CMD", "GLPK_CMD", "ORES_GLPK_CMD"],
-            ExternalLinearCliSolver::Scip => &["SCIP_CMD", "ORES_SCIP_CMD"],
-            ExternalLinearCliSolver::Cbc => &["CBC_CMD", "ORES_CBC_CMD"],
-            ExternalLinearCliSolver::Clp => &["CLP_CMD", "ORES_CLP_CMD"],
-            ExternalLinearCliSolver::Gurobi => &["GUROBI_CL_CMD", "GUROBI_CMD", "ORES_GUROBI_CMD"],
-            ExternalLinearCliSolver::Cplex => &["CPLEX_CMD", "ORES_CPLEX_CMD"],
-            ExternalLinearCliSolver::Xpress => {
-                &["XPRESS_CMD", "XPRESS_OPTIMIZER_CMD", "ORES_XPRESS_CMD"]
-            }
+            ExternalLinearCliSolver::Highs => &[
+                "HIGHS_CMD",
+                "ORES_HIGHS_CMD",
+                "ORES_HIGHS_BIN",
+                "DES_HIGHS_BIN",
+                "HIGHS_BIN",
+            ],
+            ExternalLinearCliSolver::Glpk => &[
+                "GLPSOL_CMD",
+                "GLPK_CMD",
+                "ORES_GLPK_CMD",
+                "ORES_GLPK_BIN",
+                "DES_GLPK_BIN",
+                "GLPK_BIN",
+            ],
+            ExternalLinearCliSolver::Scip => &[
+                "SCIP_CMD",
+                "ORES_SCIP_CMD",
+                "ORES_SCIP_BIN",
+                "DES_SCIP_BIN",
+                "SCIP_BIN",
+            ],
+            ExternalLinearCliSolver::Cbc => &[
+                "CBC_CMD",
+                "ORES_CBC_CMD",
+                "ORES_CBC_BIN",
+                "DES_CBC_BIN",
+                "CBC_BIN",
+            ],
+            ExternalLinearCliSolver::Clp => &[
+                "CLP_CMD",
+                "ORES_CLP_CMD",
+                "ORES_CLP_BIN",
+                "DES_CLP_BIN",
+                "CLP_BIN",
+            ],
+            ExternalLinearCliSolver::Gurobi => &[
+                "GUROBI_CL_CMD",
+                "GUROBI_CMD",
+                "ORES_GUROBI_CMD",
+                "ORES_GUROBI_BIN",
+                "DES_GUROBI_BIN",
+                "GUROBI_BIN",
+            ],
+            ExternalLinearCliSolver::Cplex => &[
+                "CPLEX_CMD",
+                "ORES_CPLEX_CMD",
+                "ORES_CPLEX_BIN",
+                "DES_CPLEX_BIN",
+                "CPLEX_BIN",
+            ],
+            ExternalLinearCliSolver::Xpress => &[
+                "XPRESS_CMD",
+                "XPRESS_OPTIMIZER_CMD",
+                "ORES_XPRESS_CMD",
+                "ORES_XPRESS_BIN",
+                "DES_XPRESS_BIN",
+                "XPRESS_BIN",
+            ],
             ExternalLinearCliSolver::Lindo => &[
                 "RUNLINDO_CMD",
                 "LINDO_CMD",
                 "LINDOAPI_CMD",
                 "ORES_LINDO_CMD",
+                "ORES_LINDO_BIN",
+                "DES_LINDO_BIN",
+                "LINDO_BIN",
             ],
+        }
+    }
+
+    /// Environment variables that may point at a solver installation directory.
+    ///
+    /// The bridge searches each directory for common CLI locations such as the
+    /// directory itself, `bin/`, and one vendor/platform subdirectory under
+    /// `bin/`.
+    pub fn command_dir_env_vars(self) -> &'static [&'static str] {
+        match self {
+            ExternalLinearCliSolver::Highs => &["HIGHS_DIR", "HIGHS_HOME"],
+            ExternalLinearCliSolver::Glpk => &["GLPK_DIR", "GLPK_HOME"],
+            ExternalLinearCliSolver::Scip => &["SCIPOPTDIR", "SCIP_DIR", "SCIP_HOME"],
+            ExternalLinearCliSolver::Cbc => &["CBC_DIR", "CBC_HOME", "COINOR_DIR", "COINOR_HOME"],
+            ExternalLinearCliSolver::Clp => &["CLP_DIR", "CLP_HOME", "COINOR_DIR", "COINOR_HOME"],
+            ExternalLinearCliSolver::Gurobi => &["GUROBI_HOME"],
+            ExternalLinearCliSolver::Cplex => &["CPLEX_STUDIO_DIR", "CPLEX_HOME"],
+            ExternalLinearCliSolver::Xpress => &["XPRESSDIR", "XPRESS_DIR", "XPRESS_HOME"],
+            ExternalLinearCliSolver::Lindo => {
+                &["LINDO_HOME", "LINDO_DIR", "LINDOAPI_HOME", "LINDOAPI_DIR"]
+            }
         }
     }
 
@@ -775,7 +848,11 @@ pub fn solve_multi_objective_ipmip_with_external_cli(
 
 /// Return the first executable-like command path found for a solver's aliases.
 pub fn external_linear_cli_command(solver: ExternalLinearCliSolver) -> Option<PathBuf> {
-    find_first_command(solver.command_env_vars(), solver.command_aliases())
+    find_first_command(
+        solver.command_env_vars(),
+        solver.command_dir_env_vars(),
+        solver.command_aliases(),
+    )
 }
 
 /// Return the configured command override, or the first command found on `PATH`.
@@ -807,8 +884,9 @@ pub fn probe_external_linear_cli_solver(
             solver_version: None,
             elapsed_ms: elapsed_ms(t0),
             message: format!(
-                "no executable found via env vars [{}] or PATH aliases [{}]",
+                "no executable found via command env vars [{}], install dir env vars [{}], or PATH aliases [{}]",
                 solver.command_env_vars().join(", "),
+                solver.command_dir_env_vars().join(", "),
                 solver.command_aliases().join(", ")
             ),
         };
@@ -1570,9 +1648,13 @@ fn is_binary_bound(
             .is_some_and(|ub| (ub - 1.0).abs() <= 1.0e-12)
 }
 
-fn find_first_command(env_vars: &[&str], aliases: &[&str]) -> Option<PathBuf> {
+fn find_first_command(
+    command_env_vars: &[&str],
+    command_dir_env_vars: &[&str],
+    aliases: &[&str],
+) -> Option<PathBuf> {
     let mut saw_configured_env = false;
-    for env_var in env_vars {
+    for env_var in command_env_vars {
         if let Some(value) = std::env::var_os(env_var) {
             if !value.to_string_lossy().trim().is_empty() {
                 saw_configured_env = true;
@@ -1582,6 +1664,18 @@ fn find_first_command(env_vars: &[&str], aliases: &[&str]) -> Option<PathBuf> {
             }
         }
     }
+
+    for env_var in command_dir_env_vars {
+        if let Some(value) = std::env::var_os(env_var) {
+            if !value.to_string_lossy().trim().is_empty() {
+                saw_configured_env = true;
+                if let Some(path) = find_command_in_install_dir(&PathBuf::from(value), aliases) {
+                    return Some(path);
+                }
+            }
+        }
+    }
+
     if saw_configured_env {
         return None;
     }
@@ -1594,6 +1688,38 @@ fn find_first_command(env_vars: &[&str], aliases: &[&str]) -> Option<PathBuf> {
             return Some(path);
         }
         for dir in &path_dirs {
+            let candidate = dir.join(alias);
+            if let Some(path) = resolve_command_candidate(&candidate) {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+fn find_command_in_install_dir(root: &Path, aliases: &[&str]) -> Option<PathBuf> {
+    let mut candidate_dirs = vec![root.to_path_buf(), root.join("bin")];
+    if let Ok(children) = std::fs::read_dir(root) {
+        for child in children.flatten() {
+            let child_path = child.path();
+            if !child_path.is_dir() {
+                continue;
+            }
+            let child_bin = child_path.join("bin");
+            candidate_dirs.push(child_bin.clone());
+            if let Ok(platform_dirs) = std::fs::read_dir(&child_bin) {
+                for platform_dir in platform_dirs.flatten() {
+                    let platform_path = platform_dir.path();
+                    if platform_path.is_dir() {
+                        candidate_dirs.push(platform_path);
+                    }
+                }
+            }
+        }
+    }
+
+    for dir in candidate_dirs {
+        for alias in aliases {
             let candidate = dir.join(alias);
             if let Some(path) = resolve_command_candidate(&candidate) {
                 return Some(path);
@@ -1782,9 +1908,9 @@ fn option_strings(values: Option<&Vec<String>>) -> Value {
 #[cfg(test)]
 mod tests {
     use crate::des::general::external_linear_cli::{
-        external_linear_cli_command_with_options, ipmip_problem_to_cli_json,
-        ipmip_problem_to_cplex_lp_string, ipmip_problem_to_mps_string, lp_problem_to_cli_json,
-        lp_problem_to_cplex_lp_string, lp_problem_to_mps_string,
+        external_linear_cli_command_with_options, find_command_in_install_dir,
+        ipmip_problem_to_cli_json, ipmip_problem_to_cplex_lp_string, ipmip_problem_to_mps_string,
+        lp_problem_to_cli_json, lp_problem_to_cplex_lp_string, lp_problem_to_mps_string,
         multi_objective_ipmip_problem_to_cli_json, normalized_node_limit, normalized_random_seed,
         normalized_relative_gap, normalized_threads, solver_command_env_var, ExternalLinearCliKind,
         ExternalLinearCliModelFormat, ExternalLinearCliOptions, ExternalLinearCliProbeStatus,
@@ -2049,8 +2175,66 @@ mod tests {
     fn solver_aliases_and_kind_support_match_bridge_contract() {
         assert_eq!(ExternalLinearCliSolver::Glpk.command_aliases(), &["glpsol"]);
         assert_eq!(
+            ExternalLinearCliSolver::Highs.command_env_vars(),
+            &[
+                "HIGHS_CMD",
+                "ORES_HIGHS_CMD",
+                "ORES_HIGHS_BIN",
+                "DES_HIGHS_BIN",
+                "HIGHS_BIN"
+            ]
+        );
+        assert_eq!(
+            ExternalLinearCliSolver::Glpk.command_env_vars(),
+            &[
+                "GLPSOL_CMD",
+                "GLPK_CMD",
+                "ORES_GLPK_CMD",
+                "ORES_GLPK_BIN",
+                "DES_GLPK_BIN",
+                "GLPK_BIN"
+            ]
+        );
+        assert_eq!(
+            ExternalLinearCliSolver::Scip.command_env_vars(),
+            &[
+                "SCIP_CMD",
+                "ORES_SCIP_CMD",
+                "ORES_SCIP_BIN",
+                "DES_SCIP_BIN",
+                "SCIP_BIN"
+            ]
+        );
+        assert_eq!(
+            ExternalLinearCliSolver::Cbc.command_env_vars(),
+            &[
+                "CBC_CMD",
+                "ORES_CBC_CMD",
+                "ORES_CBC_BIN",
+                "DES_CBC_BIN",
+                "CBC_BIN"
+            ]
+        );
+        assert_eq!(
+            ExternalLinearCliSolver::Clp.command_env_vars(),
+            &[
+                "CLP_CMD",
+                "ORES_CLP_CMD",
+                "ORES_CLP_BIN",
+                "DES_CLP_BIN",
+                "CLP_BIN"
+            ]
+        );
+        assert_eq!(
             ExternalLinearCliSolver::Gurobi.command_env_vars(),
-            &["GUROBI_CL_CMD", "GUROBI_CMD", "ORES_GUROBI_CMD"]
+            &[
+                "GUROBI_CL_CMD",
+                "GUROBI_CMD",
+                "ORES_GUROBI_CMD",
+                "ORES_GUROBI_BIN",
+                "DES_GUROBI_BIN",
+                "GUROBI_BIN"
+            ]
         );
         assert_eq!(
             ExternalLinearCliSolver::Lindo.command_env_vars(),
@@ -2058,9 +2242,37 @@ mod tests {
                 "RUNLINDO_CMD",
                 "LINDO_CMD",
                 "LINDOAPI_CMD",
-                "ORES_LINDO_CMD"
+                "ORES_LINDO_CMD",
+                "ORES_LINDO_BIN",
+                "DES_LINDO_BIN",
+                "LINDO_BIN"
             ]
         );
+        assert!(ExternalLinearCliSolver::Highs
+            .command_env_vars()
+            .contains(&solver_command_env_var(ExternalLinearCliSolver::Highs).as_str()));
+        assert!(ExternalLinearCliSolver::Cplex
+            .command_env_vars()
+            .contains(&"CPLEX_BIN"));
+        assert!(ExternalLinearCliSolver::Xpress
+            .command_env_vars()
+            .contains(&"XPRESS_BIN"));
+        assert_eq!(
+            ExternalLinearCliSolver::Gurobi.command_dir_env_vars(),
+            &["GUROBI_HOME"]
+        );
+        assert!(ExternalLinearCliSolver::Highs
+            .command_dir_env_vars()
+            .contains(&"HIGHS_HOME"));
+        assert!(ExternalLinearCliSolver::Cbc
+            .command_dir_env_vars()
+            .contains(&"COINOR_DIR"));
+        assert!(ExternalLinearCliSolver::Cplex
+            .command_dir_env_vars()
+            .contains(&"CPLEX_STUDIO_DIR"));
+        assert!(ExternalLinearCliSolver::Lindo
+            .command_dir_env_vars()
+            .contains(&"LINDOAPI_HOME"));
         assert_eq!(
             ExternalLinearCliSolver::Xpress.command_aliases(),
             &["optimizer", "xpress"]
@@ -2103,6 +2315,32 @@ mod tests {
             solver_command_env_var(ExternalLinearCliSolver::Glpk),
             "ORES_GLPK_BIN"
         );
+    }
+
+    #[test]
+    fn install_dir_lookup_handles_vendor_bin_layout() {
+        let root = std::env::temp_dir().join(format!(
+            "des-external-linear-cli-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let command = root
+            .join("cplex")
+            .join("bin")
+            .join("x86-64_osx")
+            .join("cplex");
+        std::fs::create_dir_all(command.parent().unwrap()).unwrap();
+        std::fs::write(&command, b"").unwrap();
+
+        assert_eq!(
+            find_command_in_install_dir(&root, &["cplex"]),
+            Some(command)
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -96,6 +96,10 @@ use crate::des::general::external_quadratic_reference::{
     solve_qp_with_external_reference, solve_socp_with_external_reference,
     ExternalQuadraticReferenceOptions, ExternalQuadraticReferenceStatus,
 };
+use crate::des::general::external_routing_reference::{
+    solve_cvrp_with_external_reference, ExternalRoutingReferenceOptions,
+    ExternalRoutingReferenceStatus,
+};
 use crate::des::general::external_scheduling_reference::{
     solve_flow_shop_with_external_reference, solve_job_shop_with_external_reference,
     ExternalSchedulingReferenceOptions, ExternalSchedulingReferenceStatus,
@@ -103,6 +107,10 @@ use crate::des::general::external_scheduling_reference::{
 use crate::des::general::external_set_cover_reference::{
     solve_set_cover_with_external_reference, ExternalSetCoverReferenceOptions,
     ExternalSetCoverReferenceStatus,
+};
+use crate::des::general::external_stochastic_lp_reference::{
+    solve_stochastic_lp_with_external_reference, ExternalStochasticLpReferenceOptions,
+    ExternalStochasticLpReferenceStatus,
 };
 use crate::des::general::external_tsp_reference::{
     solve_tsp_with_external_reference, ExternalTspReferenceOptions, ExternalTspReferenceStatus,
@@ -186,9 +194,10 @@ use crate::des::general::math_program::{
     cross_check_math_program_conflict_with_external,
     cross_check_math_program_feas_relaxation_with_external,
     cross_check_math_program_solution_pool_with_external, cross_check_math_program_with_external,
-    export_math_program_cplex_lp, export_math_program_mps, ExternalMathProgramOptions, MathProgram,
-    MathProgramConflictOptions, MathProgramFeasRelaxOptions, MathProgramSolutionPoolOptions,
-    MathProgramSolveOptions, MathProgramStatus, ObjectiveSense as MathObjectiveSense, RowSense,
+    export_math_program_cplex_lp, export_math_program_mps, solve_math_program_external_scipy,
+    ExternalMathProgramOptions, MathProgram, MathProgramConflictOptions,
+    MathProgramFeasRelaxOptions, MathProgramSolutionPoolOptions, MathProgramSolveOptions,
+    MathProgramStatus, ObjectiveSense as MathObjectiveSense, RowSense,
 };
 use crate::des::general::max_flow::{
     build_textbook_max_flow_problem, solve_max_flow, MaxFlowEdgeFlow, MaxFlowStatus,
@@ -214,6 +223,10 @@ use crate::des::general::qp::{
 use crate::des::general::set_cover::{
     build_sample_set_cover_problem, set_cover_solution_feasible, solve_set_cover_exact,
     solve_set_cover_greedy, SetCoverProblem, SetCoverStatus,
+};
+use crate::des::general::stochastic_lp::{
+    build_production_scenarios, build_production_slp, solve_slp_benders, solve_slp_monolithic,
+    BendersOpts, SLPStatus, UniformDemandSpec,
 };
 use crate::des::general::weighted_independent_set::{
     build_sample_weighted_independent_set_problem, solve_weighted_independent_set_exact,
@@ -321,30 +334,6 @@ struct CpAssumptionCoreReference {
 struct CpLiteralReference {
     var: usize,
     positive: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct RoutingReference {
-    status: String,
-    solver: String,
-    routes: Vec<RoutingReferenceRoute>,
-    objective: Option<f64>,
-    #[serde(rename = "feasibleRouteMasks")]
-    feasible_route_masks: Option<usize>,
-    #[serde(rename = "ortoolsStatus")]
-    ortools_status: Option<String>,
-    #[serde(rename = "ortoolsObjective")]
-    ortools_objective: Option<f64>,
-    message: Option<String>,
-    #[serde(rename = "ortoolsMessage")]
-    ortools_message: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RoutingReferenceRoute {
-    customers: Vec<String>,
-    load: f64,
-    distance: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -9553,6 +9542,151 @@ impl Driver {
             ),
         }
 
+        let mut range_offset_lp = MathProgram::new(MathObjectiveSense::Max);
+        let range_x = range_offset_lp
+            .add_continuous_var("range-x", 2.0, Some(0.0), Some(2.0))
+            .expect("range x");
+        let range_y = range_offset_lp
+            .add_continuous_var("range-y", 1.0, Some(0.0), Some(2.0))
+            .expect("range y");
+        range_offset_lp
+            .add_objective_offset(5.5)
+            .expect("objective offset");
+        range_offset_lp
+            .add_range_constraint(
+                "throughput-range",
+                vec![(range_x, 1.0), (range_y, 1.0)],
+                Some(2.0),
+                Some(3.0),
+            )
+            .expect("range row");
+        let mut range_offset_expected_objective = None;
+        match cross_check_math_program_with_external(
+            &range_offset_lp,
+            &solve_opts,
+            &external_opts,
+            1e-7,
+        ) {
+            Ok(report) => {
+                range_offset_expected_objective = Some(report.internal.objective);
+                self.check(
+                    "MathProgram range-row/objective-offset HiGHS cross-check",
+                    report.within_tolerance
+                        && report.internal.status == MathProgramStatus::Optimal
+                        && report.external.status == MathProgramStatus::Optimal
+                        && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                        && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7),
+                    format!(
+                        "internal={:?} external={:?} obj_diff={:?} x_diff={:?} objective={:.10}",
+                        report.internal.status,
+                        report.external.status,
+                        report.objective_abs_diff,
+                        report.max_x_abs_diff,
+                        report.internal.objective
+                    ),
+                );
+            }
+            Err(err) => self.check(
+                "MathProgram range-row/objective-offset HiGHS cross-check",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+        match export_math_program_cplex_lp(&range_offset_lp) {
+            Ok(export) => {
+                let has_range_lower = export
+                    .constraint_names
+                    .iter()
+                    .any(|name| name.ends_with("range_lower") && export.text.contains(name));
+                let has_range_upper = export
+                    .constraint_names
+                    .iter()
+                    .any(|name| name.ends_with("range_upper") && export.text.contains(name));
+                let has_offset_column = export
+                    .variable_names
+                    .iter()
+                    .any(|name| name == "objective_offset")
+                    && export.text.contains("objective_offset = 1.");
+                let passed = !export.is_mip
+                    && export.original_variable_count == 2
+                    && export.variable_names.len() == 3
+                    && export.constraint_names.len() == 2
+                    && has_offset_column
+                    && has_range_lower
+                    && has_range_upper;
+                self.check(
+                    "MathProgram range-row/objective-offset CPLEX-LP export",
+                    passed,
+                    format!(
+                        "vars={:?} rows={:?} bytes={}",
+                        export.variable_names,
+                        export.constraint_names,
+                        export.text.len()
+                    ),
+                );
+                if passed {
+                    self.check_math_program_export_highs_file_solve(
+                        "MathProgram range-row/objective-offset CPLEX-LP HiGHS file solve",
+                        &export.text,
+                        "lp",
+                        range_offset_expected_objective,
+                    );
+                }
+            }
+            Err(err) => self.check(
+                "MathProgram range-row/objective-offset CPLEX-LP export",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+        match export_math_program_mps(&range_offset_lp) {
+            Ok(export) => {
+                let has_range_lower = export
+                    .constraint_names
+                    .iter()
+                    .any(|name| name.ends_with("range_lower") && export.text.contains(name));
+                let has_range_upper = export
+                    .constraint_names
+                    .iter()
+                    .any(|name| name.ends_with("range_upper") && export.text.contains(name));
+                let has_offset_column = export
+                    .variable_names
+                    .iter()
+                    .any(|name| name == "objective_offset")
+                    && export.text.contains(" FX BND1  objective_offset  1");
+                let passed = !export.is_mip
+                    && export.original_variable_count == 2
+                    && export.variable_names.len() == 3
+                    && export.constraint_names.len() == 2
+                    && has_offset_column
+                    && has_range_lower
+                    && has_range_upper;
+                self.check(
+                    "MathProgram range-row/objective-offset MPS export",
+                    passed,
+                    format!(
+                        "vars={:?} rows={:?} bytes={}",
+                        export.variable_names,
+                        export.constraint_names,
+                        export.text.len()
+                    ),
+                );
+                if passed {
+                    self.check_math_program_export_highs_file_solve(
+                        "MathProgram range-row/objective-offset MPS HiGHS file solve",
+                        &export.text,
+                        "mps",
+                        range_offset_expected_objective,
+                    );
+                }
+            }
+            Err(err) => self.check(
+                "MathProgram range-row/objective-offset MPS export",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
         for (solver, method) in [
             ("Gurobi", "gurobi:default"),
             ("CPLEX", "cplex:default"),
@@ -9723,6 +9857,202 @@ impl Driver {
             }
             Err(err) => self.check(
                 "MathProgram MIP facade indicator/general-constraint cross-check",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        let mut lazy_mip = MathProgram::new(MathObjectiveSense::Max);
+        let lazy_x = lazy_mip
+            .add_binary_var("lazy-preferred", 3.0)
+            .expect("lazy preferred");
+        let lazy_y = lazy_mip
+            .add_binary_var("lazy-secondary", 2.0)
+            .expect("lazy secondary");
+        lazy_mip
+            .add_lazy_constraint(
+                "lazy-at-most-one",
+                vec![(lazy_x, 1.0), (lazy_y, 1.0)],
+                RowSense::Le,
+                1.0,
+            )
+            .expect("lazy row");
+
+        let mut lazy_expected_objective = None;
+        match cross_check_math_program_with_external(&lazy_mip, &solve_opts, &external_opts, 1e-7) {
+            Ok(report) => {
+                lazy_expected_objective = Some(report.internal.objective);
+                self.check(
+                    "MathProgram MIP facade lazy-constraint external cross-check",
+                    report.within_tolerance
+                        && report.internal.status == MathProgramStatus::Optimal
+                        && report.external.status == MathProgramStatus::Optimal
+                        && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                        && (report.internal.objective - 3.0).abs() <= 1e-7
+                        && report.internal.x[lazy_x] >= 1.0 - 1e-7
+                        && report.internal.x[lazy_y] <= 1e-7
+                        && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7),
+                    format!(
+                        "internal={:?} external={:?} objective={} obj_diff={:?} x_diff={:?} violations=({:?},{:?})",
+                        report.internal.status,
+                        report.external.status,
+                        report.internal.objective,
+                        report.objective_abs_diff,
+                        report.max_x_abs_diff,
+                        report.internal_max_violation,
+                        report.external_max_violation
+                    ),
+                );
+            }
+            Err(err) => self.check(
+                "MathProgram MIP facade lazy-constraint external cross-check",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        match export_math_program_cplex_lp(&lazy_mip) {
+            Ok(export) => {
+                let passed = export.is_mip
+                    && export.original_variable_count == 2
+                    && export
+                        .constraint_names
+                        .iter()
+                        .any(|name| name.contains("lazy_at_most_one"))
+                    && export.text.contains("lazy_at_most_one")
+                    && export.text.contains("Binaries\n");
+                self.check(
+                    "MathProgram MIP facade lazy-constraint CPLEX-LP export",
+                    passed,
+                    format!(
+                        "vars={:?} rows={:?} bytes={}",
+                        export.variable_names,
+                        export.constraint_names,
+                        export.text.len()
+                    ),
+                );
+                if passed {
+                    self.check_math_program_export_highs_file_solve(
+                        "MathProgram MIP facade lazy-constraint CPLEX-LP HiGHS file solve",
+                        &export.text,
+                        "lp",
+                        lazy_expected_objective,
+                    );
+                }
+            }
+            Err(err) => self.check(
+                "MathProgram MIP facade lazy-constraint CPLEX-LP export",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        match export_math_program_mps(&lazy_mip) {
+            Ok(export) => {
+                let passed = export.is_mip
+                    && export.original_variable_count == 2
+                    && export
+                        .constraint_names
+                        .iter()
+                        .any(|name| name.contains("lazy_at_most_one"))
+                    && export.text.contains("lazy_at_most_one")
+                    && export.text.contains("'INTORG'")
+                    && export.text.contains("'INTEND'");
+                self.check(
+                    "MathProgram MIP facade lazy-constraint MPS export",
+                    passed,
+                    format!(
+                        "vars={:?} rows={:?} bytes={}",
+                        export.variable_names,
+                        export.constraint_names,
+                        export.text.len()
+                    ),
+                );
+                if passed {
+                    self.check_math_program_export_highs_file_solve(
+                        "MathProgram MIP facade lazy-constraint MPS HiGHS file solve",
+                        &export.text,
+                        "mps",
+                        lazy_expected_objective,
+                    );
+                }
+            }
+            Err(err) => self.check(
+                "MathProgram MIP facade lazy-constraint MPS export",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        let mut limited_mip = MathProgram::new(MathObjectiveSense::Max);
+        let limited_a = limited_mip.add_binary_var("limited-a", 10.0).expect("a");
+        let limited_b = limited_mip.add_binary_var("limited-b", 40.0).expect("b");
+        let limited_c = limited_mip.add_binary_var("limited-c", 30.0).expect("c");
+        let limited_d = limited_mip.add_binary_var("limited-d", 50.0).expect("d");
+        limited_mip
+            .add_constraint(
+                "limited-capacity",
+                vec![
+                    (limited_a, 5.0),
+                    (limited_b, 4.0),
+                    (limited_c, 6.0),
+                    (limited_d, 3.0),
+                ],
+                RowSense::Le,
+                10.0,
+            )
+            .expect("limited capacity");
+
+        let limited_opts = ExternalMathProgramOptions {
+            method: Some("cbc:cli".to_string()),
+            mip_start: Some(vec![1.0, 0.0, 0.0, 0.0]),
+            time_limit_ms: Some(5_000.0),
+            solution_limit: Some(1),
+            absolute_gap: Some(0.0),
+            threads: Some(1),
+            random_seed: Some(7),
+            presolve: Some(ExternalLinearCliPresolve::Off),
+            cuts: Some(ExternalLinearCliMipSwitch::Off),
+            heuristics: Some(ExternalLinearCliMipSwitch::Off),
+            branch_rule: Some(ExternalLinearCliBranchRule::FirstFractional),
+            branch_priorities: Some(vec![10, 0, 0, 0]),
+            node_selection: Some(ExternalLinearCliNodeSelection::Dfs),
+            ..Default::default()
+        };
+        match solve_math_program_external_scipy(&limited_mip, &limited_opts) {
+            Ok(solution)
+                if solution.status == MathProgramStatus::NumericalError
+                    && solution
+                        .message
+                        .as_deref()
+                        .is_some_and(|message| message.contains("not found")) =>
+            {
+                println!(
+                    "  SKIP  MathProgram external MIP incumbent-limit controls: cbc executable not found"
+                );
+            }
+            Ok(solution) => self.check(
+                "MathProgram external MIP incumbent-limit controls",
+                solution.status == MathProgramStatus::Feasible
+                    && solution.x.len() == 4
+                    && solution.objective.is_finite()
+                    && solution.objective >= 10.0 - 1e-7
+                    && 5.0 * solution.x[limited_a]
+                        + 4.0 * solution.x[limited_b]
+                        + 6.0 * solution.x[limited_c]
+                        + 3.0 * solution.x[limited_d]
+                        <= 10.0 + 1e-7,
+                format!(
+                    "status={:?} solver={} objective={} x={:?} message={:?}",
+                    solution.status,
+                    solution.solver,
+                    solution.objective,
+                    solution.x,
+                    solution.message
+                ),
+            ),
+            Err(err) => self.check(
+                "MathProgram external MIP incumbent-limit controls",
                 false,
                 format!("{err:?}"),
             ),
@@ -12744,27 +13074,18 @@ impl Driver {
             ),
         );
 
-        let routing_json = serde_json::json!({
-            "depot": {"x": 0.0, "y": 0.0},
-            "customers": customers.iter().map(|customer| serde_json::json!({
-                "id": &customer.id,
-                "x": customer.x,
-                "y": customer.y,
-                "demand": customer.demand,
-            })).collect::<Vec<_>>(),
-            "vehicle_capacity": 5.0,
-        })
-        .to_string();
-        let value =
-            self.run_python_json("routing_reference.py", &["--solver", "auto"], &routing_json);
-        let reference: RoutingReference =
-            serde_json::from_value(value).expect("parse routing reference");
+        let reference = solve_cvrp_with_external_reference(
+            Point { x: 0.0, y: 0.0 },
+            &customers,
+            5.0,
+            &ExternalRoutingReferenceOptions::default(),
+        );
         self.check(
             "CVRP exact/reference status",
-            reference.status == "optimal",
+            reference.status == ExternalRoutingReferenceStatus::Optimal,
             format!(
-                "status={} solver={} message={:?} route_masks={:?}",
-                reference.status,
+                "status={} solver={} message={} route_masks={:?}",
+                reference.status.as_str(),
                 reference.solver,
                 reference.message,
                 reference.feasible_route_masks
@@ -13004,6 +13325,106 @@ impl Driver {
                 external.ortools_status, external.message
             ),
         }
+    }
+
+    fn validate_stochastic_lp(&mut self) {
+        println!("\n-- Stochastic LP: monolithic/Benders vs SciPy HiGHS extensive-form bridge --");
+        let costs = vec![1.0, 1.0];
+        let prices = vec![3.0, 2.0];
+        let ranges = vec![(5.0, 15.0), (10.0, 20.0)];
+        let problem = build_production_slp(costs, prices, None);
+        let scenarios = build_production_scenarios(UniformDemandSpec { ranges, seed: 42 }, 25);
+
+        let monolithic = solve_slp_monolithic(problem.clone(), scenarios.clone());
+        self.check(
+            "Stochastic LP monolithic native status optimal",
+            monolithic.status == SLPStatus::Optimal,
+            format!(
+                "status={:?} objective={:.10} x={:?} expected_q={:.10}",
+                monolithic.status, monolithic.objective, monolithic.x, monolithic.expected_q
+            ),
+        );
+
+        let benders = solve_slp_benders(
+            problem.clone(),
+            scenarios.clone(),
+            BendersOpts {
+                tol: Some(1e-6),
+                max_iter: Some(200),
+                ..Default::default()
+            },
+        );
+        self.check(
+            "Stochastic LP Benders native status optimal",
+            benders.status == SLPStatus::Optimal,
+            format!(
+                "status={:?} objective={:.10} x={:?} iterations={}",
+                benders.status, benders.objective, benders.x, benders.iterations
+            ),
+        );
+        self.close(
+            "Stochastic LP Benders vs monolithic objective",
+            monolithic.objective,
+            benders.objective,
+            1e-3,
+        );
+        self.max_abs_close(
+            "Stochastic LP Benders vs monolithic x",
+            &monolithic.x,
+            &benders.x,
+            1e-3,
+        );
+
+        let reference = solve_stochastic_lp_with_external_reference(
+            &problem,
+            &scenarios,
+            &ExternalStochasticLpReferenceOptions::default(),
+        );
+        self.check(
+            "Stochastic LP external-reference bridge status optimal",
+            reference.status == ExternalStochasticLpReferenceStatus::Optimal,
+            format!(
+                "status={} solver={} message={} iterations={:?}",
+                reference.status.as_str(),
+                reference.solver,
+                reference.message,
+                reference.iterations
+            ),
+        );
+        self.close(
+            "Stochastic LP monolithic/reference objective",
+            monolithic.objective,
+            reference.objective.unwrap_or(f64::NAN),
+            1e-8,
+        );
+        self.close(
+            "Stochastic LP monolithic/reference expected recourse",
+            monolithic.expected_q,
+            reference.expected_q.unwrap_or(f64::NAN),
+            1e-8,
+        );
+        self.max_abs_close(
+            "Stochastic LP monolithic/reference x",
+            &monolithic.x,
+            &reference.x,
+            1e-7,
+        );
+        self.check(
+            "Stochastic LP reference scenario recourse shape",
+            reference.y_by_scenario.len() == scenarios.len()
+                && reference.scenario_values.len() == scenarios.len()
+                && reference
+                    .y_by_scenario
+                    .iter()
+                    .all(|y| y.len() == problem.q_second.len()),
+            format!(
+                "y_scenarios={} values={} n_scenarios={} n_second={}",
+                reference.y_by_scenario.len(),
+                reference.scenario_values.len(),
+                scenarios.len(),
+                problem.q_second.len()
+            ),
+        );
     }
 
     fn sample_qp(&self) -> QuadraticProgram {
@@ -17366,6 +17787,7 @@ impl Driver {
         self.validate_vehicle_routing();
         self.validate_job_shop_scheduling();
         self.validate_flow_shop_scheduling();
+        self.validate_stochastic_lp();
         self.validate_qp();
         self.validate_cp_sat();
     }

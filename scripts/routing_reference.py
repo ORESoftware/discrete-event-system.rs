@@ -10,6 +10,7 @@ routing engine agrees on the same input.
 
 from __future__ import annotations
 
+import argparse
 import json
 import math
 import sys
@@ -257,10 +258,25 @@ def ortools_routing(problem: dict) -> dict:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--solver", choices=["auto", "ortools", "fallback"], default="auto")
+    args = parser.parse_args()
+
     try:
         problem = normalize(json.load(sys.stdin))
         exact = exact_cvrp(problem)
+        if args.solver == "fallback":
+            print(json.dumps(exact))
+            return 0 if exact["status"] in ("optimal", "infeasible", "unsupported") else 1
+
         routing = ortools_routing(problem)
+        if args.solver == "ortools":
+            output = dict(routing)
+            output["referenceStatus"] = exact.get("status")
+            output["referenceObjective"] = exact.get("objective")
+            print(json.dumps(output))
+            return 0 if output["status"] in ("optimal", "infeasible", "unavailable") else 1
+
         solver = "ortools:routing+python:exact-cvrp" if routing["status"] != "unavailable" else "python:exact-cvrp"
         print(
             json.dumps(

@@ -36,6 +36,7 @@ COMMAND_ENV_VARS = {
 }
 
 COMMERCIAL_LINEAR_CLI_SOLVERS = {"gurobi", "cplex", "xpress", "lindo"}
+CP_SAT_INTEGER_TOL = 1e-6
 LINEAR_CLI_BACKEND_SOLVERS = COMMERCIAL_LINEAR_CLI_SOLVERS | {
     "highs",
     "glpk",
@@ -337,9 +338,43 @@ def _lp_row_basis_with_fixed_equalities(
 
 
 def _solver_backend(method: str) -> tuple[str, str]:
+    lowered = method.lower()
+    if lowered.endswith("-cli"):
+        return lowered.removesuffix("-cli"), "cli"
     if ":" in method:
         family, backend = method.split(":", 1)
-        return family.lower(), backend
+        family = family.lower()
+        backend_aliases = {
+            ("glop", "default"): ("ortools", "GLOP"),
+            ("glop", "linear_solver"): ("ortools", "GLOP"),
+            ("ortools", "glop"): ("ortools", "GLOP"),
+            ("ortools", "glop_linear_programming"): ("ortools", "GLOP"),
+            ("pdlp", "default"): ("ortools", "PDLP"),
+            ("pdlp", "linear_solver"): ("ortools", "PDLP"),
+            ("ortools", "pdlp"): ("ortools", "PDLP"),
+            ("ortools", "pdlp_linear_programming"): ("ortools", "PDLP"),
+            ("ortools", "scip"): ("ortools", "SCIP"),
+            ("ortools", "cp-sat"): ("ortools", "CP-SAT"),
+            ("ortools", "cpsat"): ("ortools", "CP-SAT"),
+        }
+        return backend_aliases.get((family, backend.lower()), (family, backend))
+    bare_aliases = {
+        "glop": ("ortools", "GLOP"),
+        "ortools-glop": ("ortools", "GLOP"),
+        "ortools_glop": ("ortools", "GLOP"),
+        "ortools": ("ortools", "GLOP"),
+        "pdlp": ("ortools", "PDLP"),
+        "ortools-pdlp": ("ortools", "PDLP"),
+        "ortools_pdlp": ("ortools", "PDLP"),
+        "ortools-scip": ("ortools", "SCIP"),
+        "ortools_scip": ("ortools", "SCIP"),
+        "cp-sat": ("ortools", "CP-SAT"),
+        "cpsat": ("ortools", "CP-SAT"),
+        "ortools-cp-sat": ("ortools", "CP-SAT"),
+        "ortools_cpsat": ("ortools", "CP-SAT"),
+    }
+    if lowered in bare_aliases:
+        return bare_aliases[lowered]
     return "scipy", method
 
 
@@ -426,7 +461,7 @@ def _limited_status(status: str, options: dict[str, Any]) -> str:
 def _integer_value(value: Any, name: str) -> int:
     numeric = float(value)
     rounded = round(numeric)
-    if not math.isfinite(numeric) or abs(numeric - rounded) > 1e-9:
+    if not math.isfinite(numeric) or abs(numeric - rounded) > CP_SAT_INTEGER_TOL:
         raise RuntimeError(f"CP-SAT oracle requires integer-scaled {name}, got {value}")
     return int(rounded)
 
@@ -503,6 +538,9 @@ def solve_linear_cli_bridge(
         ("relativeGap", "--relative-gap", float),
         ("absoluteGap", "--absolute-gap", float),
         ("objectiveLimit", "--objective-limit", float),
+        ("primalFeasibilityTolerance", "--primal-feasibility-tolerance", float),
+        ("dualFeasibilityTolerance", "--dual-feasibility-tolerance", float),
+        ("integerFeasibilityTolerance", "--integer-feasibility-tolerance", float),
         ("threads", "--threads", int),
         ("randomSeed", "--random-seed", int),
         ("presolve", "--presolve", str),
@@ -627,6 +665,261 @@ def solve_lp(payload: dict[str, Any], method: str) -> dict[str, Any]:
     }
 
 
+def _qp_objective_value(qp: dict[str, Any], x: list[float]) -> float:
+    value = sum(float(coef) * x[i] for i, coef in enumerate(qp.get("c", [])))
+    for term in qp.get("quadratic", []):
+        value += (
+            float(term["coeff"])
+            * x[int(term["i"])]
+            * x[int(term["j"])]
+        )
+    return float(value)
+
+
+def _qp_feasible(qp: dict[str, Any], x: list[float], tol: float = 1e-8) -> bool:
+    lower = qp.get("lb") or [None] * len(x)
+    upper = qp.get("ub") or [None] * len(x)
+    for i, value in enumerate(x):
+        lo = lower[i] if i < len(lower) else None
+        hi = upper[i] if i < len(upper) else None
+        if lo is not None and value < float(lo) - tol:
+            return False
+        if hi is not None and value > float(hi) + tol:
+            return False
+    for row, bound in zip(qp.get("A_ub") or [], qp.get("b_ub") or []):
+        lhs = sum(float(coef) * value for coef, value in zip(row, x))
+        if lhs > float(bound) + tol:
+            return False
+    for row, bound in zip(qp.get("A_eq") or [], qp.get("b_eq") or []):
+        lhs = sum(float(coef) * value for coef, value in zip(row, x))
+        if abs(lhs - float(bound)) > tol:
+            return False
+    return True
+
+
+def solve_bounded_integer_qp_by_enumeration(
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    qp = payload["qp"]
+    c = qp.get("c", [])
+    integer_vars = [bool(value) for value in qp.get("integerVars", [])]
+    if len(integer_vars) != len(c) or not all(integer_vars):
+        raise RuntimeError(
+            "bounded integer QP fallback requires every variable to be integer"
+        )
+
+    lower = qp.get("lb") or [0.0] * len(c)
+    upper = qp.get("ub") or [None] * len(c)
+    domains: list[list[int]] = []
+    for i in range(len(c)):
+        lo = lower[i] if i < len(lower) else 0.0
+        hi = upper[i] if i < len(upper) else None
+        if lo is None or hi is None:
+            raise RuntimeError(
+                "bounded integer QP fallback requires finite integer bounds"
+            )
+        lo_i = math.ceil(float(lo) - 1e-9)
+        hi_i = math.floor(float(hi) + 1e-9)
+        if lo_i > hi_i:
+            return {
+                "status": "infeasible",
+                "x": [],
+                "objective": None,
+                "solver": "python:bounded-integer-qp-enumeration",
+                "message": f"empty domain for variable {i}",
+            }
+        domains.append(list(range(lo_i, hi_i + 1)))
+
+    options = _external_options(payload)
+    max_nodes = _node_limit(options) or 200_000
+    sense = qp.get("sense", "max")
+    minimize = sense != "max"
+    best_x: list[float] | None = None
+    best_obj: float | None = None
+    nodes = 0
+    incumbent: list[int] = [0] * len(c)
+
+    def visit(idx: int) -> bool:
+        nonlocal best_x, best_obj, nodes
+        if nodes >= max_nodes:
+            return False
+        if idx == len(domains):
+            nodes += 1
+            x = [float(value) for value in incumbent]
+            if not _qp_feasible(qp, x):
+                return True
+            objective = _qp_objective_value(qp, x)
+            if best_obj is None or (
+                objective < best_obj - 1e-9
+                if minimize
+                else objective > best_obj + 1e-9
+            ):
+                best_obj = objective
+                best_x = x
+            return True
+        for value in domains[idx]:
+            incumbent[idx] = value
+            if not visit(idx + 1):
+                return False
+        return True
+
+    exhausted = visit(0)
+    status = "optimal" if exhausted else "node-limit"
+    if best_x is None:
+        return {
+            "status": "infeasible" if exhausted else status,
+            "x": [],
+            "objective": None,
+            "solver": "python:bounded-integer-qp-enumeration",
+            "nodesExplored": nodes,
+            "message": f"enumerated {nodes} bounded integer assignments",
+        }
+    return {
+        "status": status,
+        "x": best_x,
+        "objective": best_obj,
+        "bestBound": best_obj,
+        "mipGap": 0.0 if exhausted else None,
+        "nodesExplored": nodes,
+        "solver": "python:bounded-integer-qp-enumeration",
+        "message": f"enumerated {nodes} bounded integer assignments",
+    }
+
+
+def _sparse_value(coeffs: Any, constant: float, x: list[float]) -> float:
+    return float(constant + sum(float(coef) * x[int(idx)] for idx, coef in coeffs))
+
+
+def _quadratic_row_value(row: dict[str, Any], x: list[float]) -> float:
+    value = 0.0
+    for term in row.get("quadratic", []):
+        value += (
+            float(term["coeff"])
+            * x[int(term["i"])]
+            * x[int(term["j"])]
+        )
+    value += sum(float(coef) * x[int(idx)] for idx, coef in row.get("linear", []))
+    return float(value)
+
+
+def _conic_feasible(conic: dict[str, Any], x: list[float], tol: float = 1e-8) -> bool:
+    if not _qp_feasible(conic, x, tol):
+        return False
+    for cone in conic.get("soc", []):
+        values = [
+            _sparse_value(term.get("coeffs", []), float(term.get("constant", 0.0)), x)
+            for term in cone.get("terms", [])
+        ]
+        rhs = _sparse_value(
+            cone.get("rhsCoeffs", []),
+            float(cone.get("rhsConstant", 0.0)),
+            x,
+        )
+        if math.sqrt(sum(value * value for value in values)) > rhs + tol:
+            return False
+    for row in conic.get("quadraticConstraints", []):
+        value = _quadratic_row_value(row, x)
+        rhs = float(row.get("rhs", 0.0))
+        sense = row.get("sense", "<=")
+        if sense == ">=":
+            if value < rhs - tol:
+                return False
+        elif sense in {"=", "=="}:
+            if abs(value - rhs) > tol:
+                return False
+        elif value > rhs + tol:
+            return False
+    return True
+
+
+def solve_bounded_integer_conic_by_enumeration(
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    conic = payload["conic"]
+    c = conic.get("c", [])
+    integer_vars = [bool(value) for value in conic.get("integerVars", [])]
+    if len(integer_vars) != len(c) or not all(integer_vars):
+        raise RuntimeError(
+            "bounded integer conic fallback requires every variable to be integer"
+        )
+
+    lower = conic.get("lb") or [0.0] * len(c)
+    upper = conic.get("ub") or [None] * len(c)
+    domains: list[list[int]] = []
+    for i in range(len(c)):
+        lo = lower[i] if i < len(lower) else 0.0
+        hi = upper[i] if i < len(upper) else None
+        if lo is None or hi is None:
+            raise RuntimeError(
+                "bounded integer conic fallback requires finite integer bounds"
+            )
+        lo_i = math.ceil(float(lo) - 1e-9)
+        hi_i = math.floor(float(hi) + 1e-9)
+        if lo_i > hi_i:
+            return {
+                "status": "infeasible",
+                "x": [],
+                "objective": None,
+                "solver": "python:bounded-integer-conic-enumeration",
+                "message": f"empty domain for variable {i}",
+            }
+        domains.append(list(range(lo_i, hi_i + 1)))
+
+    options = _external_options(payload)
+    max_nodes = _node_limit(options) or 200_000
+    minimize = conic.get("sense", "max") != "max"
+    best_x: list[float] | None = None
+    best_obj: float | None = None
+    nodes = 0
+    incumbent: list[int] = [0] * len(c)
+
+    def visit(idx: int) -> bool:
+        nonlocal best_x, best_obj, nodes
+        if nodes >= max_nodes:
+            return False
+        if idx == len(domains):
+            nodes += 1
+            x = [float(value) for value in incumbent]
+            if not _conic_feasible(conic, x):
+                return True
+            objective = _qp_objective_value(conic, x)
+            if best_obj is None or (
+                objective < best_obj - 1e-9
+                if minimize
+                else objective > best_obj + 1e-9
+            ):
+                best_obj = objective
+                best_x = x
+            return True
+        for value in domains[idx]:
+            incumbent[idx] = value
+            if not visit(idx + 1):
+                return False
+        return True
+
+    exhausted = visit(0)
+    status = "optimal" if exhausted else "node-limit"
+    if best_x is None:
+        return {
+            "status": "infeasible" if exhausted else status,
+            "x": [],
+            "objective": None,
+            "solver": "python:bounded-integer-conic-enumeration",
+            "nodesExplored": nodes,
+            "message": f"enumerated {nodes} bounded integer assignments",
+        }
+    return {
+        "status": status,
+        "x": best_x,
+        "objective": best_obj,
+        "bestBound": best_obj,
+        "mipGap": 0.0 if exhausted else None,
+        "nodesExplored": nodes,
+        "solver": "python:bounded-integer-conic-enumeration",
+        "message": f"enumerated {nodes} bounded integer assignments",
+    }
+
+
 def solve_qp(payload: dict[str, Any], method: str) -> dict[str, Any]:
     family, _backend = _solver_backend(method)
     if family == "ortools":
@@ -640,15 +933,16 @@ def solve_qp(payload: dict[str, Any], method: str) -> dict[str, Any]:
     if family == "xpress":
         return solve_xpress_qp(payload)
 
+    qp = payload["qp"]
+    if any(bool(value) for value in qp.get("integerVars", [])):
+        return solve_bounded_integer_qp_by_enumeration(payload)
+
     try:
         import numpy as np
         from scipy.optimize import Bounds, LinearConstraint, minimize
     except Exception as exc:
         raise RuntimeError(f"scipy QP unavailable: {exc}") from exc
 
-    qp = payload["qp"]
-    if any(bool(value) for value in qp.get("integerVars", [])):
-        raise RuntimeError("SciPy QP oracle does not support integer variables")
     sense = qp.get("sense", "max")
     c = np.array([float(v) for v in qp.get("c", [])], dtype=float)
     sign = -1.0 if sense == "max" else 1.0
@@ -735,15 +1029,16 @@ def solve_conic(payload: dict[str, Any], method: str) -> dict[str, Any]:
     if family == "xpress":
         return solve_xpress_conic(payload)
 
+    conic = payload["conic"]
+    if any(bool(value) for value in conic.get("integerVars", [])):
+        return solve_bounded_integer_conic_by_enumeration(payload)
+
     try:
         import numpy as np
         from scipy.optimize import Bounds, LinearConstraint, NonlinearConstraint, minimize
     except Exception as exc:
         raise RuntimeError(f"scipy conic unavailable: {exc}") from exc
 
-    conic = payload["conic"]
-    if any(bool(value) for value in conic.get("integerVars", [])):
-        raise RuntimeError("SciPy conic oracle does not support integer variables")
     sense = conic.get("sense", "max")
     c = np.array([float(v) for v in conic.get("c", [])], dtype=float)
     sign = -1.0 if sense == "max" else 1.0

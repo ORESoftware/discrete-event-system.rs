@@ -1,9 +1,11 @@
 //! Rust-facing bridge for external/reference weighted Max-SAT solvers.
 //!
-//! The Python bridge (`scripts/weighted_max_sat_reference.py`) computes an
-//! exact enumeration reference and, when installed, solves the same weighted
-//! partial Max-SAT model with OR-Tools CP-SAT.
+//! The native Rust reference computes a deterministic exact enumeration check
+//! without Python startup. The Python bridge
+//! (`scripts/weighted_max_sat_reference.py`) remains available for OR-Tools
+//! CP-SAT.
 
+use std::collections::HashSet;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -12,11 +14,12 @@ use std::time::Instant;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::des::general::weighted_max_sat::WeightedMaxSatProblem;
+use crate::des::general::weighted_max_sat::{WeightedMaxSatClause, WeightedMaxSatProblem};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExternalWeightedMaxSatReferenceSolver {
     Auto,
+    RustEnumeration,
     OrTools,
     Fallback,
 }
@@ -25,6 +28,7 @@ impl ExternalWeightedMaxSatReferenceSolver {
     pub fn as_arg(self) -> &'static str {
         match self {
             ExternalWeightedMaxSatReferenceSolver::Auto => "auto",
+            ExternalWeightedMaxSatReferenceSolver::RustEnumeration => "rust-enumeration",
             ExternalWeightedMaxSatReferenceSolver::OrTools => "ortools",
             ExternalWeightedMaxSatReferenceSolver::Fallback => "fallback",
         }
@@ -130,6 +134,224 @@ fn status_from_str(status: &str) -> ExternalWeightedMaxSatReferenceStatus {
         "unsupported" => ExternalWeightedMaxSatReferenceStatus::Unsupported,
         "unavailable" => ExternalWeightedMaxSatReferenceStatus::Unavailable,
         _ => ExternalWeightedMaxSatReferenceStatus::NumericalError,
+    }
+}
+
+const RUST_WEIGHTED_MAX_SAT_MAX_EXACT_VARS: usize = 26;
+const RUST_WEIGHTED_MAX_SAT_EPS: f64 = 1e-9;
+
+#[derive(Clone, Debug)]
+struct RustWeightedMaxSatEvaluation {
+    satisfied_soft_weight: f64,
+    unsatisfied_soft_weight: f64,
+    satisfied_clause_ids: Vec<String>,
+    violated_hard_clause_ids: Vec<String>,
+}
+
+fn validate_rust_weighted_max_sat_problem(problem: &WeightedMaxSatProblem) -> Result<(), String> {
+    if problem.num_vars == 0 {
+        return Err("numVars must be positive".to_string());
+    }
+    if problem.clauses.is_empty() {
+        return Err("clauses must be non-empty".to_string());
+    }
+    let mut ids = HashSet::new();
+    for (clause_index, clause) in problem.clauses.iter().enumerate() {
+        if clause.id.trim().is_empty() {
+            return Err(format!("clauses[{clause_index}].id must be non-empty"));
+        }
+        if !ids.insert(clause.id.clone()) {
+            return Err(format!("duplicate clause id {:?}", clause.id));
+        }
+        if clause.literals.is_empty() {
+            return Err(format!(
+                "clauses[{clause_index}].literals must be non-empty"
+            ));
+        }
+        if !clause.weight.is_finite() || clause.weight < 0.0 {
+            return Err(format!(
+                "clauses[{clause_index}].weight must be finite and non-negative"
+            ));
+        }
+        for &literal in &clause.literals {
+            let variable = literal.unsigned_abs() as usize;
+            if literal == 0 || variable == 0 || variable > problem.num_vars {
+                return Err(format!(
+                    "clauses[{clause_index}] literal {literal} outside [1, numVars]"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn rust_weighted_max_sat_empty_solution(
+    status: ExternalWeightedMaxSatReferenceStatus,
+    solver: impl Into<String>,
+    message: impl Into<String>,
+    elapsed_ms: f64,
+) -> ExternalWeightedMaxSatReferenceSolution {
+    ExternalWeightedMaxSatReferenceSolution {
+        status,
+        solver: solver.into(),
+        assignment: Vec::new(),
+        objective: None,
+        satisfied_soft_weight: None,
+        unsatisfied_soft_weight: None,
+        satisfied_clause_ids: Vec::new(),
+        violated_hard_clause_ids: Vec::new(),
+        ortools_status: None,
+        ortools_assignment: Vec::new(),
+        ortools_objective: None,
+        ortools_satisfied_soft_weight: None,
+        ortools_unsatisfied_soft_weight: None,
+        ortools_satisfied_clause_ids: Vec::new(),
+        ortools_violated_hard_clause_ids: Vec::new(),
+        ortools_objective_bound: None,
+        message: message.into(),
+        elapsed_ms,
+    }
+}
+
+fn rust_weighted_max_sat_literal_satisfied(literal: i64, assignment: &[bool]) -> bool {
+    let value = assignment[(literal.unsigned_abs() as usize) - 1];
+    if literal > 0 {
+        value
+    } else {
+        !value
+    }
+}
+
+fn rust_weighted_max_sat_clause_satisfied(
+    clause: &WeightedMaxSatClause,
+    assignment: &[bool],
+) -> bool {
+    clause
+        .literals
+        .iter()
+        .any(|&literal| rust_weighted_max_sat_literal_satisfied(literal, assignment))
+}
+
+fn rust_weighted_max_sat_evaluate(
+    problem: &WeightedMaxSatProblem,
+    assignment: &[bool],
+) -> RustWeightedMaxSatEvaluation {
+    let mut satisfied_soft_weight = 0.0;
+    let mut unsatisfied_soft_weight = 0.0;
+    let mut satisfied_clause_ids = Vec::new();
+    let mut violated_hard_clause_ids = Vec::new();
+    for clause in &problem.clauses {
+        if rust_weighted_max_sat_clause_satisfied(clause, assignment) {
+            satisfied_clause_ids.push(clause.id.clone());
+            if !clause.hard {
+                satisfied_soft_weight += clause.weight;
+            }
+        } else if clause.hard {
+            violated_hard_clause_ids.push(clause.id.clone());
+        } else {
+            unsatisfied_soft_weight += clause.weight;
+        }
+    }
+    RustWeightedMaxSatEvaluation {
+        satisfied_soft_weight,
+        unsatisfied_soft_weight,
+        satisfied_clause_ids,
+        violated_hard_clause_ids,
+    }
+}
+
+fn rust_weighted_max_sat_solution(
+    status: ExternalWeightedMaxSatReferenceStatus,
+    assignment: Vec<bool>,
+    evaluation: RustWeightedMaxSatEvaluation,
+    message: impl Into<String>,
+    elapsed_ms: f64,
+) -> ExternalWeightedMaxSatReferenceSolution {
+    ExternalWeightedMaxSatReferenceSolution {
+        status,
+        solver: "rust:exact-weighted-max-sat".to_string(),
+        assignment,
+        objective: Some(evaluation.satisfied_soft_weight),
+        satisfied_soft_weight: Some(evaluation.satisfied_soft_weight),
+        unsatisfied_soft_weight: Some(evaluation.unsatisfied_soft_weight),
+        satisfied_clause_ids: evaluation.satisfied_clause_ids,
+        violated_hard_clause_ids: evaluation.violated_hard_clause_ids,
+        ortools_status: None,
+        ortools_assignment: Vec::new(),
+        ortools_objective: None,
+        ortools_satisfied_soft_weight: None,
+        ortools_unsatisfied_soft_weight: None,
+        ortools_satisfied_clause_ids: Vec::new(),
+        ortools_violated_hard_clause_ids: Vec::new(),
+        ortools_objective_bound: None,
+        message: message.into(),
+        elapsed_ms,
+    }
+}
+
+fn solve_weighted_max_sat_with_rust_reference(
+    problem: &WeightedMaxSatProblem,
+) -> ExternalWeightedMaxSatReferenceSolution {
+    let started = Instant::now();
+    if let Err(message) = validate_rust_weighted_max_sat_problem(problem) {
+        return rust_weighted_max_sat_empty_solution(
+            ExternalWeightedMaxSatReferenceStatus::NumericalError,
+            "rust:exact-weighted-max-sat",
+            message,
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+
+    if problem.num_vars > RUST_WEIGHTED_MAX_SAT_MAX_EXACT_VARS {
+        return rust_weighted_max_sat_empty_solution(
+            ExternalWeightedMaxSatReferenceStatus::Unsupported,
+            "rust:exact-weighted-max-sat",
+            format!(
+                "exact weighted Max-SAT only practical for <= {RUST_WEIGHTED_MAX_SAT_MAX_EXACT_VARS} variables, got {}",
+                problem.num_vars
+            ),
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+
+    let mut best_assignment = None;
+    let mut best_evaluation = None;
+    let total = 1usize << problem.num_vars;
+    for mask in 0..total {
+        let assignment = (0..problem.num_vars)
+            .map(|var| ((mask >> var) & 1) == 1)
+            .collect::<Vec<_>>();
+        let evaluation = rust_weighted_max_sat_evaluate(problem, &assignment);
+        if !evaluation.violated_hard_clause_ids.is_empty() {
+            continue;
+        }
+        let better =
+            best_evaluation
+                .as_ref()
+                .is_none_or(|current: &RustWeightedMaxSatEvaluation| {
+                    evaluation.satisfied_soft_weight
+                        > current.satisfied_soft_weight + RUST_WEIGHTED_MAX_SAT_EPS
+                });
+        if better {
+            best_assignment = Some(assignment);
+            best_evaluation = Some(evaluation);
+        }
+    }
+
+    match (best_assignment, best_evaluation) {
+        (Some(assignment), Some(evaluation)) => rust_weighted_max_sat_solution(
+            ExternalWeightedMaxSatReferenceStatus::Optimal,
+            assignment,
+            evaluation,
+            "exact weighted Max-SAT enumeration",
+            started.elapsed().as_secs_f64() * 1000.0,
+        ),
+        _ => rust_weighted_max_sat_empty_solution(
+            ExternalWeightedMaxSatReferenceStatus::Infeasible,
+            "rust:exact-weighted-max-sat",
+            "no assignment satisfies all hard clauses",
+            started.elapsed().as_secs_f64() * 1000.0,
+        ),
     }
 }
 
@@ -280,6 +502,14 @@ pub fn solve_weighted_max_sat_with_external_reference(
     problem: &WeightedMaxSatProblem,
     opts: &ExternalWeightedMaxSatReferenceOptions,
 ) -> ExternalWeightedMaxSatReferenceSolution {
+    if matches!(
+        opts.solver,
+        ExternalWeightedMaxSatReferenceSolver::RustEnumeration
+            | ExternalWeightedMaxSatReferenceSolver::Fallback
+    ) {
+        return solve_weighted_max_sat_with_rust_reference(problem);
+    }
+
     run_weighted_max_sat_reference_json(
         json!({
             "numVars": problem.num_vars,
@@ -292,4 +522,70 @@ pub fn solve_weighted_max_sat_with_external_reference(
         }),
         opts,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::des::general::weighted_max_sat::{
+        build_sample_weighted_max_sat_problem, WeightedMaxSatClause,
+    };
+
+    #[test]
+    fn rust_reference_solves_sample_weighted_max_sat() {
+        let problem = build_sample_weighted_max_sat_problem();
+        let solution = solve_weighted_max_sat_with_external_reference(
+            &problem,
+            &ExternalWeightedMaxSatReferenceOptions {
+                solver: ExternalWeightedMaxSatReferenceSolver::RustEnumeration,
+            },
+        );
+
+        assert_eq!(
+            solution.status,
+            ExternalWeightedMaxSatReferenceStatus::Optimal
+        );
+        assert_eq!(solution.solver, "rust:exact-weighted-max-sat");
+        assert_eq!(solution.objective, Some(16.0));
+        assert_eq!(solution.satisfied_soft_weight, Some(16.0));
+        assert_eq!(solution.assignment, vec![true, true, true]);
+        assert!(solution.violated_hard_clause_ids.is_empty());
+        assert!(solution.ortools_status.is_none());
+    }
+
+    #[test]
+    fn fallback_alias_uses_rust_reference_for_infeasible_hard_clauses() {
+        let problem = WeightedMaxSatProblem {
+            num_vars: 1,
+            clauses: vec![
+                WeightedMaxSatClause {
+                    id: "must_be_true".to_string(),
+                    literals: vec![1],
+                    weight: 0.0,
+                    hard: true,
+                },
+                WeightedMaxSatClause {
+                    id: "must_be_false".to_string(),
+                    literals: vec![-1],
+                    weight: 0.0,
+                    hard: true,
+                },
+            ],
+        };
+
+        let solution = solve_weighted_max_sat_with_external_reference(
+            &problem,
+            &ExternalWeightedMaxSatReferenceOptions {
+                solver: ExternalWeightedMaxSatReferenceSolver::Fallback,
+            },
+        );
+
+        assert_eq!(
+            solution.status,
+            ExternalWeightedMaxSatReferenceStatus::Infeasible
+        );
+        assert_eq!(solution.solver, "rust:exact-weighted-max-sat");
+        assert!(solution.assignment.is_empty());
+        assert!(solution.objective.is_none());
+    }
 }

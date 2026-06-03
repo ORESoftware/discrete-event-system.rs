@@ -1,9 +1,10 @@
 //! Rust-facing bridge for external/reference 0/1 knapsack solvers.
 //!
-//! The Python bridge (`scripts/knapsack_reference.py`) computes a deterministic
-//! exact branch-and-bound reference and, when installed, solves the same model
-//! with OR-Tools CP-SAT.
+//! The native Rust reference computes an independent exact branch-and-bound
+//! check without Python startup. The Python bridge (`scripts/knapsack_reference.py`)
+//! remains available for OR-Tools CP-SAT.
 
+use std::collections::HashSet;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -17,6 +18,7 @@ use crate::des::general::knapsack::KnapsackProblem;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExternalKnapsackReferenceSolver {
     Auto,
+    RustBranchAndBound,
     OrTools,
     Fallback,
 }
@@ -25,6 +27,7 @@ impl ExternalKnapsackReferenceSolver {
     pub fn as_arg(self) -> &'static str {
         match self {
             ExternalKnapsackReferenceSolver::Auto => "auto",
+            ExternalKnapsackReferenceSolver::RustBranchAndBound => "rust-branch-and-bound",
             ExternalKnapsackReferenceSolver::OrTools => "ortools",
             ExternalKnapsackReferenceSolver::Fallback => "fallback",
         }
@@ -118,6 +121,17 @@ struct KnapsackReferencePayload {
     message: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+struct RustKnapsackSearchItem {
+    index: usize,
+    weight: f64,
+    value: f64,
+    density: f64,
+}
+
+const RUST_KNAPSACK_EPS: f64 = 1e-9;
+const RUST_KNAPSACK_MAX_EXACT_ITEMS: usize = 64;
+
 fn status_from_str(status: &str) -> ExternalKnapsackReferenceStatus {
     match status {
         "optimal" => ExternalKnapsackReferenceStatus::Optimal,
@@ -126,6 +140,303 @@ fn status_from_str(status: &str) -> ExternalKnapsackReferenceStatus {
         "unavailable" => ExternalKnapsackReferenceStatus::Unavailable,
         _ => ExternalKnapsackReferenceStatus::NumericalError,
     }
+}
+
+fn validate_rust_knapsack_problem(problem: &KnapsackProblem) -> Result<(), String> {
+    if !problem.capacity.is_finite() || problem.capacity <= 0.0 {
+        return Err("capacity must be finite and > 0".to_string());
+    }
+    if problem.items.is_empty() {
+        return Err("items must be non-empty".to_string());
+    }
+    let mut seen = HashSet::new();
+    for (index, item) in problem.items.iter().enumerate() {
+        if item.id.trim().is_empty() {
+            return Err(format!("items[{index}].id must be non-empty"));
+        }
+        if !seen.insert(item.id.clone()) {
+            return Err(format!("duplicate item id {:?}", item.id));
+        }
+        if !item.weight.is_finite() || item.weight <= 0.0 {
+            return Err(format!("items[{index}].weight must be finite and > 0"));
+        }
+        if !item.value.is_finite() || item.value < 0.0 {
+            return Err(format!(
+                "items[{index}].value must be finite and non-negative"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn rust_knapsack_empty_solution(
+    status: ExternalKnapsackReferenceStatus,
+    solver: impl Into<String>,
+    message: impl Into<String>,
+    elapsed_ms: f64,
+) -> ExternalKnapsackReferenceSolution {
+    ExternalKnapsackReferenceSolution {
+        status,
+        solver: solver.into(),
+        selected_item_indices: Vec::new(),
+        selected_item_ids: Vec::new(),
+        total_weight: None,
+        total_value: None,
+        objective: None,
+        upper_bound: None,
+        ortools_status: None,
+        ortools_selected_item_indices: Vec::new(),
+        ortools_selected_item_ids: Vec::new(),
+        ortools_total_weight: None,
+        ortools_total_value: None,
+        ortools_objective: None,
+        ortools_objective_bound: None,
+        message: message.into(),
+        elapsed_ms,
+    }
+}
+
+fn rust_knapsack_sorted_items(problem: &KnapsackProblem) -> Vec<RustKnapsackSearchItem> {
+    let mut items = problem
+        .items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| RustKnapsackSearchItem {
+            index,
+            weight: item.weight,
+            value: item.value,
+            density: item.value / item.weight,
+        })
+        .collect::<Vec<_>>();
+    items.sort_by(|left, right| {
+        right
+            .density
+            .total_cmp(&left.density)
+            .then_with(|| right.value.total_cmp(&left.value))
+            .then_with(|| left.weight.total_cmp(&right.weight))
+            .then_with(|| left.index.cmp(&right.index))
+    });
+    items
+}
+
+fn rust_knapsack_fractional_upper_bound(
+    capacity: f64,
+    order: &[RustKnapsackSearchItem],
+    pos: usize,
+    current_weight: f64,
+    current_value: f64,
+) -> f64 {
+    if current_weight > capacity + RUST_KNAPSACK_EPS {
+        return f64::NEG_INFINITY;
+    }
+    let mut bound = current_value;
+    let mut remaining = capacity - current_weight;
+    for item in &order[pos..] {
+        if item.weight <= remaining + RUST_KNAPSACK_EPS {
+            bound += item.value;
+            remaining -= item.weight;
+        } else if remaining > RUST_KNAPSACK_EPS {
+            bound += item.value * (remaining / item.weight);
+            break;
+        } else {
+            break;
+        }
+    }
+    bound
+}
+
+fn rust_knapsack_candidate_better(
+    value: f64,
+    weight: f64,
+    indices: &[usize],
+    best_value: f64,
+    best_weight: f64,
+    best_indices: &[usize],
+) -> bool {
+    if value > best_value + RUST_KNAPSACK_EPS {
+        return true;
+    }
+    if (value - best_value).abs() <= RUST_KNAPSACK_EPS && weight < best_weight - RUST_KNAPSACK_EPS {
+        return true;
+    }
+    if (value - best_value).abs() <= RUST_KNAPSACK_EPS
+        && (weight - best_weight).abs() <= RUST_KNAPSACK_EPS
+    {
+        let mut left = indices.to_vec();
+        let mut right = best_indices.to_vec();
+        left.sort_unstable();
+        right.sort_unstable();
+        return left < right;
+    }
+    false
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rust_knapsack_search_branch_and_bound(
+    capacity: f64,
+    order: &[RustKnapsackSearchItem],
+    pos: usize,
+    current_weight: f64,
+    current_value: f64,
+    current: &mut Vec<usize>,
+    best_indices: &mut Vec<usize>,
+    best_weight: &mut f64,
+    best_value: &mut f64,
+) {
+    if current_weight > capacity + RUST_KNAPSACK_EPS {
+        return;
+    }
+    if pos == order.len() {
+        if rust_knapsack_candidate_better(
+            current_value,
+            current_weight,
+            current,
+            *best_value,
+            *best_weight,
+            best_indices,
+        ) {
+            *best_indices = current.clone();
+            *best_weight = current_weight;
+            *best_value = current_value;
+        }
+        return;
+    }
+
+    let bound =
+        rust_knapsack_fractional_upper_bound(capacity, order, pos, current_weight, current_value);
+    if bound + RUST_KNAPSACK_EPS < *best_value {
+        return;
+    }
+
+    let item = &order[pos];
+    current.push(item.index);
+    rust_knapsack_search_branch_and_bound(
+        capacity,
+        order,
+        pos + 1,
+        current_weight + item.weight,
+        current_value + item.value,
+        current,
+        best_indices,
+        best_weight,
+        best_value,
+    );
+    current.pop();
+    rust_knapsack_search_branch_and_bound(
+        capacity,
+        order,
+        pos + 1,
+        current_weight,
+        current_value,
+        current,
+        best_indices,
+        best_weight,
+        best_value,
+    );
+}
+
+fn rust_knapsack_solution(
+    problem: &KnapsackProblem,
+    status: ExternalKnapsackReferenceStatus,
+    mut selected_item_indices: Vec<usize>,
+    upper_bound: Option<f64>,
+    message: impl Into<String>,
+    elapsed_ms: f64,
+) -> ExternalKnapsackReferenceSolution {
+    selected_item_indices.sort_unstable();
+    let selected_item_ids = selected_item_indices
+        .iter()
+        .map(|&index| problem.items[index].id.clone())
+        .collect::<Vec<_>>();
+    let total_weight = selected_item_indices
+        .iter()
+        .map(|&index| problem.items[index].weight)
+        .sum::<f64>();
+    let total_value = selected_item_indices
+        .iter()
+        .map(|&index| problem.items[index].value)
+        .sum::<f64>();
+    ExternalKnapsackReferenceSolution {
+        status,
+        solver: "rust:branch-and-bound-knapsack".to_string(),
+        selected_item_indices,
+        selected_item_ids,
+        total_weight: Some(total_weight),
+        total_value: Some(total_value),
+        objective: Some(total_value),
+        upper_bound,
+        ortools_status: None,
+        ortools_selected_item_indices: Vec::new(),
+        ortools_selected_item_ids: Vec::new(),
+        ortools_total_weight: None,
+        ortools_total_value: None,
+        ortools_objective: None,
+        ortools_objective_bound: None,
+        message: message.into(),
+        elapsed_ms,
+    }
+}
+
+fn solve_knapsack_with_rust_reference(
+    problem: &KnapsackProblem,
+) -> ExternalKnapsackReferenceSolution {
+    let started = Instant::now();
+    if let Err(message) = validate_rust_knapsack_problem(problem) {
+        return rust_knapsack_empty_solution(
+            ExternalKnapsackReferenceStatus::NumericalError,
+            "rust:branch-and-bound-knapsack",
+            message,
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    if problem.items.len() > RUST_KNAPSACK_MAX_EXACT_ITEMS {
+        return rust_knapsack_solution(
+            problem,
+            ExternalKnapsackReferenceStatus::Unsupported,
+            Vec::new(),
+            None,
+            format!(
+                "exact knapsack only practical for <= {RUST_KNAPSACK_MAX_EXACT_ITEMS} items, got {}",
+                problem.items.len()
+            ),
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+
+    let order = rust_knapsack_sorted_items(problem);
+    let root_bound = rust_knapsack_fractional_upper_bound(problem.capacity, &order, 0, 0.0, 0.0);
+    let mut best_indices = Vec::new();
+    let mut best_weight = 0.0;
+    let mut best_value = 0.0;
+    for item in &order {
+        if best_weight + item.weight <= problem.capacity + RUST_KNAPSACK_EPS {
+            best_indices.push(item.index);
+            best_weight += item.weight;
+            best_value += item.value;
+        }
+    }
+
+    let mut current = Vec::new();
+    rust_knapsack_search_branch_and_bound(
+        problem.capacity,
+        &order,
+        0,
+        0.0,
+        0.0,
+        &mut current,
+        &mut best_indices,
+        &mut best_weight,
+        &mut best_value,
+    );
+
+    rust_knapsack_solution(
+        problem,
+        ExternalKnapsackReferenceStatus::Optimal,
+        best_indices,
+        Some(root_bound),
+        "exact branch-and-bound with fractional-relaxation bound",
+        started.elapsed().as_secs_f64() * 1000.0,
+    )
 }
 
 fn unavailable(message: impl Into<String>, elapsed_ms: f64) -> ExternalKnapsackReferenceSolution {
@@ -267,6 +578,14 @@ pub fn solve_knapsack_with_external_reference(
     problem: &KnapsackProblem,
     opts: &ExternalKnapsackReferenceOptions,
 ) -> ExternalKnapsackReferenceSolution {
+    if matches!(
+        opts.solver,
+        ExternalKnapsackReferenceSolver::RustBranchAndBound
+            | ExternalKnapsackReferenceSolver::Fallback
+    ) {
+        return solve_knapsack_with_rust_reference(problem);
+    }
+
     run_knapsack_reference_json(
         json!({
             "capacity": problem.capacity,
@@ -278,4 +597,69 @@ pub fn solve_knapsack_with_external_reference(
         }),
         opts,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::des::general::knapsack::{
+        build_sample_knapsack_problem, KnapsackItem, KnapsackProblem,
+    };
+
+    #[test]
+    fn rust_reference_solves_sample_knapsack() {
+        let problem = build_sample_knapsack_problem();
+        let solution = solve_knapsack_with_external_reference(
+            &problem,
+            &ExternalKnapsackReferenceOptions {
+                solver: ExternalKnapsackReferenceSolver::RustBranchAndBound,
+            },
+        );
+
+        assert_eq!(solution.status, ExternalKnapsackReferenceStatus::Optimal);
+        assert_eq!(solution.solver, "rust:branch-and-bound-knapsack");
+        assert_eq!(solution.selected_item_ids, vec!["B", "C", "D"]);
+        assert_eq!(solution.total_weight, Some(26.0));
+        assert_eq!(solution.total_value, Some(51.0));
+        assert_eq!(solution.objective, Some(51.0));
+        assert!(solution.upper_bound.is_some());
+        assert!(solution.ortools_status.is_none());
+    }
+
+    #[test]
+    fn fallback_alias_uses_rust_reference_with_tie_breaking() {
+        let problem = KnapsackProblem {
+            capacity: 5.0,
+            items: vec![
+                KnapsackItem {
+                    id: "A".to_string(),
+                    weight: 5.0,
+                    value: 10.0,
+                },
+                KnapsackItem {
+                    id: "B".to_string(),
+                    weight: 4.0,
+                    value: 10.0,
+                },
+                KnapsackItem {
+                    id: "C".to_string(),
+                    weight: 1.0,
+                    value: 0.0,
+                },
+            ],
+        };
+
+        let solution = solve_knapsack_with_external_reference(
+            &problem,
+            &ExternalKnapsackReferenceOptions {
+                solver: ExternalKnapsackReferenceSolver::Fallback,
+            },
+        );
+
+        assert_eq!(solution.status, ExternalKnapsackReferenceStatus::Optimal);
+        assert_eq!(solution.solver, "rust:branch-and-bound-knapsack");
+        assert_eq!(solution.selected_item_ids, vec!["B"]);
+        assert_eq!(solution.total_weight, Some(4.0));
+        assert_eq!(solution.total_value, Some(10.0));
+    }
 }

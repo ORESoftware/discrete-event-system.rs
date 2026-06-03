@@ -205,6 +205,8 @@ fn solve_delivery_planner_inner(
                 heuristic_passes: Some(32),
                 mip_gap_rel: None,
                 mip_gap_abs: None,
+                solution_limit: None,
+                objective_limit: None,
                 verbose: Some(false),
                 mip_start: None,
             },

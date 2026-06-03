@@ -375,6 +375,7 @@ impl Transform<Vec<Scenario>, SLPSolveResult> for SLPMonolithicSolver {
             &InternalSimplexOptions {
                 max_iter: Some(50000),
                 tol: None,
+                basis_start: None,
             },
         );
 

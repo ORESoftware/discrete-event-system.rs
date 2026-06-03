@@ -21,6 +21,10 @@ MAX_EXACT_ELEMENTS = 128
 SCALES = (1, 10, 100, 1000, 10000, 100000, 1000000)
 
 
+def popcount(mask: int) -> int:
+    return bin(mask).count("1")
+
+
 def normalize(raw: dict) -> dict:
     universe = [str(element) for element in (raw.get("universe") or [])]
     if not universe:
@@ -119,7 +123,7 @@ def greedy_set_cover(problem: dict) -> dict:
         for index, set_ in enumerate(problem["sets"]):
             if index in selected:
                 continue
-            new_bits = (set_masks[index] & ~covered).bit_count()
+            new_bits = popcount(set_masks[index] & ~covered)
             if new_bits == 0:
                 continue
             ratio = set_["cost"] / new_bits

@@ -212,4 +212,6 @@ pub mod main_wind_mppt_anim;
 pub mod max_flow;
 pub mod parent;
 pub mod program;
+pub mod soccer_learning;
+pub mod soccer_learning_pg;
 pub mod soccer_planner;

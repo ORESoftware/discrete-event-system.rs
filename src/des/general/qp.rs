@@ -104,6 +104,12 @@ pub struct SecondOrderConeProgram {
     pub var_names: Option<Vec<String>>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MixedIntegerSecondOrderConeProgram {
+    pub socp: SecondOrderConeProgram,
+    pub integer_vars: Vec<bool>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SocpStatus {
     Optimal,
@@ -151,6 +157,12 @@ pub struct QuadraticallyConstrainedProgram {
     pub ub: Option<Vec<Option<f64>>>,
     pub quadratic_constraints: Vec<QuadraticConstraint>,
     pub var_names: Option<Vec<String>>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MixedIntegerQuadraticallyConstrainedProgram {
+    pub qcp: QuadraticallyConstrainedProgram,
+    pub integer_vars: Vec<bool>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

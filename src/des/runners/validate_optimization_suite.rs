@@ -39,11 +39,12 @@ use crate::des::general::cp_sat::{
 };
 use crate::des::general::external_assignment_reference::{
     solve_assignment_with_external_reference, ExternalAssignmentReferenceOptions,
-    ExternalAssignmentReferenceStatus,
+    ExternalAssignmentReferenceSolver, ExternalAssignmentReferenceStatus,
 };
 use crate::des::general::external_bin_packing_reference::{
     solve_bin_packing_with_external_reference, ExternalBinPackingReferenceBin,
-    ExternalBinPackingReferenceOptions, ExternalBinPackingReferenceStatus,
+    ExternalBinPackingReferenceOptions, ExternalBinPackingReferenceSolver,
+    ExternalBinPackingReferenceStatus,
 };
 use crate::des::general::external_cp_sat_reference::{
     external_cp_sat_reference_solver_specs, solve_cp_assignment_with_external_reference,
@@ -52,15 +53,15 @@ use crate::des::general::external_cp_sat_reference::{
 };
 use crate::des::general::external_facility_location_reference::{
     solve_facility_location_with_external_reference, ExternalFacilityLocationReferenceOptions,
-    ExternalFacilityLocationReferenceStatus,
+    ExternalFacilityLocationReferenceSolver, ExternalFacilityLocationReferenceStatus,
 };
 use crate::des::general::external_graph_coloring_reference::{
     solve_graph_coloring_with_external_reference, ExternalGraphColoringReferenceOptions,
-    ExternalGraphColoringReferenceStatus,
+    ExternalGraphColoringReferenceSolver, ExternalGraphColoringReferenceStatus,
 };
 use crate::des::general::external_knapsack_reference::{
     solve_knapsack_with_external_reference, ExternalKnapsackReferenceOptions,
-    ExternalKnapsackReferenceStatus,
+    ExternalKnapsackReferenceSolver, ExternalKnapsackReferenceStatus,
 };
 use crate::des::general::external_linear_cli::{
     external_linear_cli_command, external_linear_cli_solver_specs,
@@ -73,15 +74,16 @@ use crate::des::general::external_linear_cli::{
 };
 use crate::des::general::external_max_flow_reference::{
     solve_max_flow_with_external_reference, ExternalMaxFlowReferenceOptions,
-    ExternalMaxFlowReferenceStatus,
+    ExternalMaxFlowReferenceSolver, ExternalMaxFlowReferenceStatus,
 };
 use crate::des::general::external_min_cost_flow_reference::{
     solve_min_cost_flow_with_external_reference, ExternalMinCostFlowReferenceOptions,
-    ExternalMinCostFlowReferenceStatus,
+    ExternalMinCostFlowReferenceSolver, ExternalMinCostFlowReferenceStatus,
 };
 use crate::des::general::external_minimum_spanning_tree_reference::{
     solve_minimum_spanning_tree_with_external_reference,
-    ExternalMinimumSpanningTreeReferenceOptions, ExternalMinimumSpanningTreeReferenceStatus,
+    ExternalMinimumSpanningTreeReferenceOptions, ExternalMinimumSpanningTreeReferenceSolver,
+    ExternalMinimumSpanningTreeReferenceStatus,
 };
 use crate::des::general::external_nonlinear_reference::{
     solve_exponential_fit_with_external_reference, solve_global_benchmark_with_external_reference,
@@ -105,7 +107,8 @@ use crate::des::general::external_optimization_tools::{
     ExternalOptimizationLanguage, ExternalOptimizationProbeStatus, ExternalOptimizationTool,
 };
 use crate::des::general::external_quadratic_reference::{
-    external_quadratic_reference_solver_specs, solve_miqp_with_external_reference,
+    external_quadratic_reference_solver_specs, solve_miqcp_with_external_reference,
+    solve_miqp_with_external_reference, solve_misocp_with_external_reference,
     solve_qcp_with_external_reference, solve_qp_with_external_reference,
     solve_socp_with_external_reference, ExternalQuadraticReferenceFamily,
     ExternalQuadraticReferenceOptions, ExternalQuadraticReferenceSolver,
@@ -121,14 +124,15 @@ use crate::des::general::external_scheduling_reference::{
 };
 use crate::des::general::external_set_cover_reference::{
     solve_set_cover_with_external_reference, ExternalSetCoverReferenceOptions,
-    ExternalSetCoverReferenceStatus,
+    ExternalSetCoverReferenceSolver, ExternalSetCoverReferenceStatus,
 };
 use crate::des::general::external_stochastic_lp_reference::{
     solve_stochastic_lp_with_external_reference, ExternalStochasticLpReferenceOptions,
-    ExternalStochasticLpReferenceStatus,
+    ExternalStochasticLpReferenceSolver, ExternalStochasticLpReferenceStatus,
 };
 use crate::des::general::external_tsp_reference::{
-    solve_tsp_with_external_reference, ExternalTspReferenceOptions, ExternalTspReferenceStatus,
+    solve_tsp_with_external_reference, ExternalTspReferenceOptions, ExternalTspReferenceSolver,
+    ExternalTspReferenceStatus,
 };
 use crate::des::general::external_validation_tools::{
     dimacs_cnf_to_string, external_benchmark_manifest_to_json,
@@ -155,11 +159,12 @@ use crate::des::general::external_validation_tools::{
 };
 use crate::des::general::external_weighted_independent_set_reference::{
     solve_weighted_independent_set_with_external_reference,
-    ExternalWeightedIndependentSetReferenceOptions, ExternalWeightedIndependentSetReferenceStatus,
+    ExternalWeightedIndependentSetReferenceOptions, ExternalWeightedIndependentSetReferenceSolver,
+    ExternalWeightedIndependentSetReferenceStatus,
 };
 use crate::des::general::external_weighted_max_sat_reference::{
     solve_weighted_max_sat_with_external_reference, ExternalWeightedMaxSatReferenceOptions,
-    ExternalWeightedMaxSatReferenceStatus,
+    ExternalWeightedMaxSatReferenceSolver, ExternalWeightedMaxSatReferenceStatus,
 };
 use crate::des::general::facility_location::{
     build_sample_facility_location_problem, facility_location_solution_feasible,
@@ -201,19 +206,26 @@ use crate::des::general::knapsack::{
     KnapsackSolution, KnapsackStatus,
 };
 use crate::des::general::lp::{
-    build_lp_feasibility_relaxation_problem, find_lp_infeasibility_conflict,
-    lp_feasibility_problem_from_conflict_members, solve_general_linear_lp_internal,
-    solve_lp_external, solve_lp_feasibility_relaxation_internal, solve_lp_internal,
-    solve_objective_offset_lp_internal, ExternalSolverOptions, GeneralLinearLPProblem,
-    InternalSimplexOptions, LPConflictMember, LPConflictOptions, LPFeasRelaxMember,
-    LPFeasRelaxOptions, LPProblem, LPRowConstraint, LPStatus, ObjectiveOffsetLPProblem, Sense,
+    analyze_lp_bound_sensitivity_internal, analyze_lp_objective_sensitivity_internal,
+    analyze_lp_rhs_sensitivity_internal, build_lp_feasibility_relaxation_problem,
+    find_lp_infeasibility_conflict, lp_feasibility_problem_from_conflict_members,
+    solve_general_linear_lp_internal, solve_lp_external, solve_lp_feasibility_relaxation_internal,
+    solve_lp_internal, solve_objective_offset_lp_internal, ExternalSolverOptions,
+    GeneralLinearLPProblem, InternalSimplexOptions, LPBasisWarmStart, LPBoundSensitivityKind,
+    LPBoundSensitivityOptions, LPConflictMember, LPConflictOptions, LPFeasRelaxMember,
+    LPFeasRelaxOptions, LPObjectiveSensitivityOptions, LPProblem, LPRhsSensitivityOptions,
+    LPRowConstraint, LPStatus, ObjectiveOffsetLPProblem, Sense,
 };
 use crate::des::general::math_program::{
-    cross_check_math_program_conflict_with_external,
+    analyze_math_program_bound_sensitivity, analyze_math_program_objective_sensitivity,
+    analyze_math_program_rhs_sensitivity, cross_check_math_program_conflict_with_external,
     cross_check_math_program_feas_relaxation_with_external,
     cross_check_math_program_solution_pool_with_external, cross_check_math_program_with_external,
-    export_math_program_cplex_lp, export_math_program_mps, solve_math_program_external_scipy,
-    ExternalMathProgramOptions, MathProgram, MathProgramConflictOptions,
+    export_math_program_cplex_lp, export_math_program_mps, map_math_program_export_solution,
+    map_math_program_lp_row_certificates, map_math_program_lp_variable_certificates,
+    solve_math_program, solve_math_program_external_scipy, solve_math_program_solution_pool,
+    ExternalMathProgramOptions, MathProgram, MathProgramConflictItem, MathProgramConflictOptions,
+    MathProgramCrossCheck, MathProgramExportRowKind, MathProgramExportVariableExpansion,
     MathProgramFeasRelaxOptions, MathProgramSolutionPoolOptions, MathProgramSolveOptions,
     MathProgramStatus, ObjectiveSense as MathObjectiveSense, RowSense,
 };
@@ -234,9 +246,11 @@ use crate::des::general::nonlinear_optimization_models::{
 };
 use crate::des::general::qp::{
     solve_miqp_enumeration, solve_qcp_pattern_search, solve_qp_active_set,
-    solve_socp_pattern_search, MIQPOptions, MixedIntegerQuadraticProgram, QPOptions, QPStatus,
-    QcpOptions, QcpStatus, QuadraticConstraint, QuadraticProgram, QuadraticallyConstrainedProgram,
-    SecondOrderCone, SecondOrderConeProgram, SocpOptions, SocpStatus,
+    solve_socp_pattern_search, MIQPOptions, MixedIntegerQuadraticProgram,
+    MixedIntegerQuadraticallyConstrainedProgram, MixedIntegerSecondOrderConeProgram, QPOptions,
+    QPStatus, QcpOptions, QcpStatus, QuadraticConstraint, QuadraticProgram,
+    QuadraticallyConstrainedProgram, SecondOrderCone, SecondOrderConeProgram, SocpOptions,
+    SocpStatus,
 };
 use crate::des::general::set_cover::{
     build_sample_set_cover_problem, set_cover_solution_feasible, solve_set_cover_exact,
@@ -435,22 +449,155 @@ fn one_line_preview(text: &str, max_chars: usize) -> String {
     preview
 }
 
+fn max_abs_diff(a: &[f64], b: &[f64]) -> f64 {
+    if a.len() != b.len() {
+        return f64::INFINITY;
+    }
+    a.iter()
+        .zip(b)
+        .map(|(left, right)| (left - right).abs())
+        .fold(0.0_f64, f64::max)
+}
+
 fn first_float_token(text: &str) -> Option<f64> {
     text.split_whitespace()
         .find_map(|token| token.parse::<f64>().ok())
 }
 
+fn objective_float_after_label(text: &str) -> Option<f64> {
+    let rest = text
+        .trim_start()
+        .trim_start_matches(|ch: char| ch == ':' || ch == '=' || ch.is_whitespace())
+        .trim_start();
+    if let Some(value) = rest
+        .split_whitespace()
+        .next()
+        .and_then(|token| token.parse::<f64>().ok())
+    {
+        return Some(value);
+    }
+    rest.to_ascii_lowercase()
+        .starts_with("value")
+        .then(|| first_float_token(rest))
+        .flatten()
+}
+
 fn highs_objective_from_text(text: &str) -> Option<f64> {
     text.lines().find_map(|line| {
         let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("Objective ") {
-            first_float_token(rest)
-        } else if trimmed.to_ascii_lowercase().starts_with("objective value") {
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.starts_with("objective value") {
             first_float_token(trimmed)
+        } else if let Some(rest) = trimmed.strip_prefix("Objective ") {
+            objective_float_after_label(rest)
         } else {
             None
         }
     })
+}
+
+#[derive(Clone, Copy)]
+struct MathProgramExportSolutionCheck<'a> {
+    variable_names: &'a [String],
+    original_variable_expansions: &'a [MathProgramExportVariableExpansion],
+    expected_original_x: &'a [f64],
+    tolerance: f64,
+}
+
+fn highs_primal_columns_from_solution_text(
+    text: &str,
+    variable_names: &[String],
+) -> Option<Vec<f64>> {
+    let name_to_index = variable_names
+        .iter()
+        .enumerate()
+        .map(|(idx, name)| (name.as_str(), idx))
+        .collect::<BTreeMap<_, _>>();
+    let mut values = vec![0.0; variable_names.len()];
+    let mut seen = vec![false; variable_names.len()];
+    let mut in_primal = false;
+    let mut in_columns = false;
+    let mut remaining = 0usize;
+
+    for raw_line in text.lines() {
+        let line = raw_line.trim();
+        if line == "# Primal solution values" {
+            in_primal = true;
+            in_columns = false;
+            remaining = 0;
+            continue;
+        }
+        if line == "# Dual solution values" || line.starts_with("# Basis") {
+            if in_primal {
+                break;
+            }
+            continue;
+        }
+        if !in_primal {
+            continue;
+        }
+        if line.starts_with("# Columns") {
+            in_columns = true;
+            remaining = line
+                .split_whitespace()
+                .nth(2)
+                .and_then(|token| token.parse::<usize>().ok())
+                .unwrap_or(variable_names.len());
+            continue;
+        }
+        if line.starts_with("# Rows") {
+            in_columns = false;
+            continue;
+        }
+        if !in_columns || line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        let mut parts = line.split_whitespace();
+        if let (Some(name), Some(value)) = (parts.next(), parts.next()) {
+            if let (Some(&idx), Ok(value)) = (name_to_index.get(name), value.parse::<f64>()) {
+                values[idx] = value;
+                seen[idx] = true;
+            }
+        }
+        remaining = remaining.saturating_sub(1);
+        if remaining == 0 {
+            in_columns = false;
+        }
+    }
+
+    seen.iter().all(|&item| item).then_some(values)
+}
+
+fn math_program_export_solution_detail(
+    solution_text: &str,
+    check: MathProgramExportSolutionCheck<'_>,
+) -> (bool, String) {
+    let Some(exported_x) =
+        highs_primal_columns_from_solution_text(solution_text, check.variable_names)
+    else {
+        return (
+            false,
+            format!(
+                "could not parse {} exported column values from HiGHS solution",
+                check.variable_names.len()
+            ),
+        );
+    };
+    match map_math_program_export_solution(check.original_variable_expansions, &exported_x) {
+        Ok(original_x) => {
+            let diff = max_abs_diff(&original_x, check.expected_original_x);
+            (
+                diff <= check.tolerance,
+                format!(
+                    "mapped_x_diff={diff:.3e} tol={:.1e} exported_vars={}",
+                    check.tolerance,
+                    exported_x.len()
+                ),
+            )
+        }
+        Err(err) => (false, format!("map exported solution failed: {err:?}")),
+    }
 }
 
 fn optional_math_program_external_unavailable(message: &str) -> bool {
@@ -1050,7 +1197,7 @@ impl Driver {
     }
 
     fn validate_assignment(&mut self) {
-        println!("\n-- Assignment: Hungarian/auction vs OR-Tools assignment bridge --");
+        println!("\n-- Assignment: Hungarian/auction vs Rust reference / OR-Tools/SciPy bridge --");
         let cost = vec![
             vec![8.0, 2.0, 5.0, 9.0],
             vec![6.0, 4.0, 7.0, 3.0],
@@ -1087,7 +1234,9 @@ impl Driver {
 
         let reference = solve_assignment_with_external_reference(
             &cost,
-            &ExternalAssignmentReferenceOptions::default(),
+            &ExternalAssignmentReferenceOptions {
+                solver: ExternalAssignmentReferenceSolver::RustDp,
+            },
         );
         self.check(
             "Assignment external-reference bridge status optimal",
@@ -1131,8 +1280,8 @@ impl Driver {
                 );
             }
             _ => println!(
-                "  SKIP  Assignment OR-Tools SimpleLinearSumAssignment objective: status={:?} message={}",
-                reference.ortools_status, reference.message
+                "  SKIP  Assignment OR-Tools SimpleLinearSumAssignment objective: no OR-Tools sidecar in solver={} message={}",
+                reference.solver, reference.message
             ),
         }
         match (reference.scipy_status.as_deref(), reference.scipy_objective) {
@@ -1153,14 +1302,14 @@ impl Driver {
                 );
             }
             _ => println!(
-                "  SKIP  Assignment SciPy linear_sum_assignment objective: status={:?} message={}",
-                reference.scipy_status, reference.message
+                "  SKIP  Assignment SciPy linear_sum_assignment objective: no SciPy sidecar in solver={} message={}",
+                reference.solver, reference.message
             ),
         }
     }
 
     fn validate_bin_packing(&mut self) {
-        println!("\n-- Bin packing: exact/FFD vs OR-Tools CP-SAT bridge --");
+        println!("\n-- Bin packing: exact/FFD vs Rust reference / OR-Tools CP-SAT bridge --");
         let problem = build_sample_bin_packing_problem();
         let exact = solve_bin_packing_exact(&problem);
         let ffd = solve_bin_packing_first_fit_decreasing(&problem);
@@ -1193,7 +1342,9 @@ impl Driver {
 
         let reference = solve_bin_packing_with_external_reference(
             &problem,
-            &ExternalBinPackingReferenceOptions::default(),
+            &ExternalBinPackingReferenceOptions {
+                solver: ExternalBinPackingReferenceSolver::RustExact,
+            },
         );
         self.check(
             "Bin-packing exact/reference bridge status optimal",
@@ -1243,14 +1394,14 @@ impl Driver {
                 );
             }
             _ => println!(
-                "  SKIP  Bin-packing OR-Tools CP-SAT objective: status={:?} message={}",
-                reference.ortools_status, reference.message
+                "  SKIP  Bin-packing OR-Tools CP-SAT objective: no OR-Tools sidecar in solver={} message={}",
+                reference.solver, reference.message
             ),
         }
     }
 
     fn validate_knapsack(&mut self) {
-        println!("\n-- Knapsack: exact/greedy vs OR-Tools CP-SAT bridge --");
+        println!("\n-- Knapsack: exact/greedy vs Rust reference / OR-Tools CP-SAT bridge --");
         let problem = build_sample_knapsack_problem();
         let exact = solve_knapsack_exact_branch_and_bound(&problem);
         let greedy = solve_knapsack_greedy_density(&problem);
@@ -1286,7 +1437,9 @@ impl Driver {
 
         let reference = solve_knapsack_with_external_reference(
             &problem,
-            &ExternalKnapsackReferenceOptions::default(),
+            &ExternalKnapsackReferenceOptions {
+                solver: ExternalKnapsackReferenceSolver::RustBranchAndBound,
+            },
         );
         self.check(
             "Knapsack exact/reference bridge status optimal",
@@ -1354,14 +1507,14 @@ impl Driver {
                 );
             }
             _ => println!(
-                "  SKIP  Knapsack OR-Tools CP-SAT objective: status={:?} message={}",
-                reference.ortools_status, reference.message
+                "  SKIP  Knapsack OR-Tools CP-SAT objective: no OR-Tools sidecar in solver={} message={}",
+                reference.solver, reference.message
             ),
         }
     }
 
     fn validate_set_cover(&mut self) {
-        println!("\n-- Set cover: exact/greedy vs OR-Tools CP-SAT bridge --");
+        println!("\n-- Set cover: exact/greedy vs Rust reference / OR-Tools CP-SAT bridge --");
         let problem = build_sample_set_cover_problem();
         let exact = solve_set_cover_exact(&problem);
         let greedy = solve_set_cover_greedy(&problem);
@@ -1394,7 +1547,9 @@ impl Driver {
 
         let reference = solve_set_cover_with_external_reference(
             &problem,
-            &ExternalSetCoverReferenceOptions::default(),
+            &ExternalSetCoverReferenceOptions {
+                solver: ExternalSetCoverReferenceSolver::RustExact,
+            },
         );
         self.check(
             "Set-cover exact/reference bridge status optimal",
@@ -1456,14 +1611,16 @@ impl Driver {
                 );
             }
             _ => println!(
-                "  SKIP  Set-cover OR-Tools CP-SAT objective: status={:?} message={}",
-                reference.ortools_status, reference.message
+                "  SKIP  Set-cover OR-Tools CP-SAT objective: no OR-Tools sidecar in solver={} message={}",
+                reference.solver, reference.message
             ),
         }
     }
 
     fn validate_facility_location(&mut self) {
-        println!("\n-- Facility location: exact/heuristic vs OR-Tools CP-SAT bridge --");
+        println!(
+            "\n-- Facility location: exact/heuristic vs Rust reference / OR-Tools CP-SAT bridge --"
+        );
         let problem = build_sample_facility_location_problem();
         let exact = solve_facility_location_exact(&problem);
         let greedy = solve_facility_location_greedy(&problem);
@@ -1497,7 +1654,9 @@ impl Driver {
 
         let reference = solve_facility_location_with_external_reference(
             &problem,
-            &ExternalFacilityLocationReferenceOptions::default(),
+            &ExternalFacilityLocationReferenceOptions {
+                solver: ExternalFacilityLocationReferenceSolver::RustExact,
+            },
         );
         self.check(
             "Facility-location exact/reference bridge status optimal",
@@ -1559,14 +1718,16 @@ impl Driver {
                 );
             }
             _ => println!(
-                "  SKIP  Facility-location OR-Tools CP-SAT objective: status={:?} message={}",
-                reference.ortools_status, reference.message
+                "  SKIP  Facility-location OR-Tools CP-SAT objective: no OR-Tools sidecar in solver={} message={}",
+                reference.solver, reference.message
             ),
         }
     }
 
     fn validate_graph_coloring(&mut self) {
-        println!("\n-- Graph coloring: DSATUR/greedy vs OR-Tools CP-SAT bridge --");
+        println!(
+            "\n-- Graph coloring: DSATUR/greedy vs Rust reference / OR-Tools CP-SAT bridge --"
+        );
         let problem = build_sample_graph_coloring_problem();
         let exact = solve_graph_coloring_exact(&problem);
         let greedy = solve_graph_coloring_greedy(&problem);
@@ -1597,7 +1758,9 @@ impl Driver {
 
         let reference = solve_graph_coloring_with_external_reference(
             &problem,
-            &ExternalGraphColoringReferenceOptions::default(),
+            &ExternalGraphColoringReferenceOptions {
+                solver: ExternalGraphColoringReferenceSolver::RustDsatur,
+            },
         );
         self.check(
             "Graph-coloring exact/reference bridge status optimal",
@@ -1658,14 +1821,16 @@ impl Driver {
                 );
             }
             _ => println!(
-                "  SKIP  Graph-coloring OR-Tools CP-SAT objective: status={:?} message={}",
-                reference.ortools_status, reference.message
+                "  SKIP  Graph-coloring OR-Tools CP-SAT objective: no OR-Tools sidecar in solver={} message={}",
+                reference.solver, reference.message
             ),
         }
     }
 
     fn validate_weighted_independent_set(&mut self) {
-        println!("\n-- Weighted independent set: exact/greedy vs OR-Tools CP-SAT bridge --");
+        println!(
+            "\n-- Weighted independent set: exact/greedy vs Rust reference / OR-Tools CP-SAT bridge --"
+        );
         let problem = build_sample_weighted_independent_set_problem();
         let exact = solve_weighted_independent_set_exact(&problem);
         let greedy = solve_weighted_independent_set_greedy(&problem);
@@ -1698,7 +1863,9 @@ impl Driver {
 
         let reference = solve_weighted_independent_set_with_external_reference(
             &problem,
-            &ExternalWeightedIndependentSetReferenceOptions::default(),
+            &ExternalWeightedIndependentSetReferenceOptions {
+                solver: ExternalWeightedIndependentSetReferenceSolver::RustBranchAndBound,
+            },
         );
         self.check(
             "Weighted independent set exact/reference bridge status optimal",
@@ -1762,14 +1929,16 @@ impl Driver {
                 );
             }
             _ => println!(
-                "  SKIP  Weighted independent set OR-Tools CP-SAT objective: status={:?} message={}",
-                reference.ortools_status, reference.message
+                "  SKIP  Weighted independent set OR-Tools CP-SAT objective: no OR-Tools sidecar in solver={} message={}",
+                reference.solver, reference.message
             ),
         }
     }
 
     fn validate_weighted_max_sat(&mut self) {
-        println!("\n-- Weighted Max-SAT: exact/greedy vs OR-Tools CP-SAT bridge --");
+        println!(
+            "\n-- Weighted Max-SAT: exact/greedy vs Rust reference / OR-Tools CP-SAT bridge --"
+        );
         let problem = build_sample_weighted_max_sat_problem();
         let exact = solve_weighted_max_sat_exact(&problem);
         let greedy = solve_weighted_max_sat_greedy(&problem);
@@ -1800,7 +1969,9 @@ impl Driver {
 
         let reference = solve_weighted_max_sat_with_external_reference(
             &problem,
-            &ExternalWeightedMaxSatReferenceOptions::default(),
+            &ExternalWeightedMaxSatReferenceOptions {
+                solver: ExternalWeightedMaxSatReferenceSolver::RustEnumeration,
+            },
         );
         self.check(
             "Weighted Max-SAT exact/reference bridge status optimal",
@@ -1862,8 +2033,8 @@ impl Driver {
                 );
             }
             _ => println!(
-                "  SKIP  Weighted Max-SAT OR-Tools CP-SAT objective: status={:?} message={}",
-                reference.ortools_status, reference.message
+                "  SKIP  Weighted Max-SAT OR-Tools CP-SAT objective: no OR-Tools sidecar in solver={} message={}",
+                reference.solver, reference.message
             ),
         }
     }
@@ -2040,16 +2211,21 @@ impl Driver {
                 ..Default::default()
             },
         );
-        self.check(
-            "LP OR-Tools GLOP status optimal",
-            internal.status == LPStatus::Optimal
-                && glop.status == LPStatus::Optimal
-                && glop.solver == "ortools:glop",
-            format!(
-                "internal={:?} external={:?} solver={}",
-                internal.status, glop.status, glop.solver
-            ),
-        );
+        if glop.solver == "ortools:glop" {
+            self.check(
+                "LP OR-Tools GLOP status optimal",
+                internal.status == LPStatus::Optimal && glop.status == LPStatus::Optimal,
+                format!(
+                    "internal={:?} external={:?} solver={}",
+                    internal.status, glop.status, glop.solver
+                ),
+            );
+        } else {
+            println!(
+                "  SKIP  LP OR-Tools GLOP status optimal: solver={} message={:?}",
+                glop.solver, glop.message
+            );
+        }
         self.close(
             "LP OR-Tools GLOP objective",
             internal.objective,
@@ -2225,6 +2401,358 @@ impl Driver {
             &offset_internal.x,
             &offset_reference.x,
             1e-8,
+        );
+
+        let sensitivity_lp = LPProblem {
+            sense: Sense::Max,
+            c: vec![3.0, 2.0],
+            a_ub: Some(vec![vec![1.0, 1.0], vec![1.0, 0.0], vec![0.0, 1.0]]),
+            b_ub: Some(vec![4.0, 3.0, 3.0]),
+            var_names: Some(vec!["x".to_string(), "y".to_string()]),
+            ..Default::default()
+        };
+        let sensitivity_report = analyze_lp_objective_sensitivity_internal(
+            &sensitivity_lp,
+            &InternalSimplexOptions::default(),
+            &LPObjectiveSensitivityOptions {
+                max_span: 8.0,
+                ..Default::default()
+            },
+        );
+        let x_range = sensitivity_report.ranges.first();
+        let y_range = sensitivity_report.ranges.get(1);
+        self.check(
+            "LP objective-sensitivity native ranges",
+            sensitivity_report.status == LPStatus::Optimal
+                && sensitivity_report.ranges.len() == 2
+                && x_range
+                    .and_then(|range| range.lower)
+                    .is_some_and(|value| (value - 2.0).abs() <= 1e-5)
+                && x_range.is_some_and(|range| range.upper.is_none())
+                && y_range
+                    .and_then(|range| range.lower)
+                    .is_some_and(|value| value.abs() <= 1e-5)
+                && y_range
+                    .and_then(|range| range.upper)
+                    .is_some_and(|value| (value - 3.0).abs() <= 1e-5),
+            format!(
+                "status={} x={:?} ranges={:?}",
+                sensitivity_report.status.as_str(),
+                sensitivity_report.base_x,
+                sensitivity_report.ranges
+            ),
+        );
+
+        let sensitivity_external_check =
+            |label: &str, coeffs: Vec<f64>, should_keep_base_optimal: bool, this: &mut Driver| {
+                let mut trial = sensitivity_lp.clone();
+                trial.c = coeffs;
+                let trial_json = serde_json::json!({
+                    "lp": {
+                        "sense": trial.sense.as_str(),
+                        "c": &trial.c,
+                        "A_ub": &trial.a_ub,
+                        "b_ub": &trial.b_ub,
+                        "A_eq": &trial.a_eq,
+                        "b_eq": &trial.b_eq,
+                        "lb": &trial.lb,
+                        "ub": &trial.ub,
+                    },
+                    "method": "highs",
+                })
+                .to_string();
+                let value =
+                    this.run_python_json("lp_solve.py", &["--method", "highs"], &trial_json);
+                let reference: LPReference =
+                    serde_json::from_value(value).expect("parse objective-sensitivity reference");
+                let base_objective = trial
+                    .c
+                    .iter()
+                    .zip(&sensitivity_report.base_x)
+                    .map(|(coef, value)| coef * value)
+                    .sum::<f64>();
+                let external_objective = reference.objective.unwrap_or(f64::NAN);
+                let base_is_external_optimal = (base_objective - external_objective).abs()
+                    <= 1e-7
+                        * 1.0_f64
+                            .max(base_objective.abs())
+                            .max(external_objective.abs());
+                this.check(
+                    format!("LP objective-sensitivity HiGHS {label}"),
+                    reference.status == "optimal"
+                        && base_is_external_optimal == should_keep_base_optimal,
+                    format!(
+                        "coeffs={:?} base_obj={:.10} external={:?} keep={} expected_keep={} solver={}",
+                        trial.c,
+                        base_objective,
+                        reference.objective,
+                        base_is_external_optimal,
+                        should_keep_base_optimal,
+                        reference.solver
+                    ),
+                );
+            };
+        sensitivity_external_check("inside x lower range", vec![2.25, 2.0], true, self);
+        sensitivity_external_check("outside x lower range", vec![1.75, 2.0], false, self);
+        sensitivity_external_check("inside y upper range", vec![3.0, 2.75], true, self);
+        sensitivity_external_check("outside y upper range", vec![3.0, 3.25], false, self);
+
+        let rhs_sensitivity_report = analyze_lp_rhs_sensitivity_internal(
+            &sensitivity_lp,
+            &InternalSimplexOptions::default(),
+            &LPRhsSensitivityOptions {
+                max_span: 8.0,
+                ..Default::default()
+            },
+        );
+        let capacity_range = rhs_sensitivity_report.ranges.first();
+        let x_cap_range = rhs_sensitivity_report.ranges.get(1);
+        self.check(
+            "LP RHS-sensitivity native ranges",
+            rhs_sensitivity_report.status == LPStatus::Optimal
+                && rhs_sensitivity_report.ranges.len() == 3
+                && capacity_range
+                    .and_then(|range| range.lower)
+                    .is_some_and(|value| (value - 3.0).abs() <= 1e-5)
+                && capacity_range
+                    .and_then(|range| range.upper)
+                    .is_some_and(|value| (value - 6.0).abs() <= 1e-5)
+                && x_cap_range
+                    .and_then(|range| range.lower)
+                    .is_some_and(|value| (value - 1.0).abs() <= 1e-5)
+                && x_cap_range
+                    .and_then(|range| range.upper)
+                    .is_some_and(|value| (value - 4.0).abs() <= 1e-5),
+            format!(
+                "status={} x={:?} ranges={:?}",
+                rhs_sensitivity_report.status.as_str(),
+                rhs_sensitivity_report.base_x,
+                rhs_sensitivity_report.ranges
+            ),
+        );
+
+        let rhs_base_solution =
+            solve_lp_internal(&sensitivity_lp, &InternalSimplexOptions::default());
+        let rhs_duals = rhs_base_solution.dual_ub.clone().unwrap_or_default();
+        let rhs_external_check = |label: &str,
+                                  row: usize,
+                                  rhs: f64,
+                                  should_follow_linear: bool,
+                                  this: &mut Driver| {
+            let mut trial = sensitivity_lp.clone();
+            if let Some(b_ub) = &mut trial.b_ub {
+                b_ub[row] = rhs;
+            }
+            let internal = solve_lp_internal(&trial, &InternalSimplexOptions::default());
+            let trial_json = serde_json::json!({
+                "lp": {
+                    "sense": trial.sense.as_str(),
+                    "c": &trial.c,
+                    "A_ub": &trial.a_ub,
+                    "b_ub": &trial.b_ub,
+                    "A_eq": &trial.a_eq,
+                    "b_eq": &trial.b_eq,
+                    "lb": &trial.lb,
+                    "ub": &trial.ub,
+                },
+                "method": "highs",
+            })
+            .to_string();
+            let value = this.run_python_json("lp_solve.py", &["--method", "highs"], &trial_json);
+            let reference: LPReference =
+                serde_json::from_value(value).expect("parse RHS-sensitivity reference");
+            let original_rhs = sensitivity_lp
+                .b_ub
+                .as_ref()
+                .and_then(|rhs_values| rhs_values.get(row))
+                .copied()
+                .unwrap_or(f64::NAN);
+            let predicted = rhs_base_solution.objective
+                + rhs_duals.get(row).copied().unwrap_or(0.0) * (rhs - original_rhs);
+            let external_objective = reference.objective.unwrap_or(f64::NAN);
+            let linear_prediction_matches = (predicted - external_objective).abs()
+                <= 1e-7 * 1.0_f64.max(predicted.abs()).max(external_objective.abs());
+            let max_x_diff = reference
+                .x
+                .iter()
+                .zip(&internal.x)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0_f64, f64::max);
+            this.check(
+                    format!("LP RHS-sensitivity HiGHS {label}"),
+                    reference.status == "optimal"
+                        && internal.status == LPStatus::Optimal
+                        && (internal.objective - external_objective).abs() <= 1e-7
+                        && max_x_diff <= 1e-7
+                        && linear_prediction_matches == should_follow_linear,
+                    format!(
+                        "row={row} rhs={rhs:.6} native_obj={:.10} external={:?} predicted={:.10} linear={} expected_linear={} x_diff={:.3e} solver={}",
+                        internal.objective,
+                        reference.objective,
+                        predicted,
+                        linear_prediction_matches,
+                        should_follow_linear,
+                        max_x_diff,
+                        reference.solver
+                    ),
+                );
+        };
+        rhs_external_check("inside capacity lower range", 0, 3.25, true, self);
+        rhs_external_check("outside capacity lower range", 0, 2.75, false, self);
+        rhs_external_check("inside capacity upper range", 0, 5.50, true, self);
+        rhs_external_check("outside capacity upper range", 0, 6.50, false, self);
+
+        let bound_sensitivity_lp = LPProblem {
+            sense: Sense::Max,
+            c: vec![3.0, 2.0],
+            a_ub: Some(vec![vec![1.0, 1.0]]),
+            b_ub: Some(vec![4.0]),
+            lb: Some(vec![Some(0.0), Some(0.0)]),
+            ub: Some(vec![Some(3.0), Some(3.0)]),
+            var_names: Some(vec!["x".to_string(), "y".to_string()]),
+            con_names: Some(vec!["capacity".to_string()]),
+            ..Default::default()
+        };
+        let bound_sensitivity_report = analyze_lp_bound_sensitivity_internal(
+            &bound_sensitivity_lp,
+            &InternalSimplexOptions::default(),
+            &LPBoundSensitivityOptions {
+                max_span: 8.0,
+                ..Default::default()
+            },
+        );
+        let bound_range = |kind: LPBoundSensitivityKind, variable: usize| {
+            bound_sensitivity_report
+                .ranges
+                .iter()
+                .find(|range| range.kind == kind && range.variable == variable)
+        };
+        let x_lower_bound = bound_range(LPBoundSensitivityKind::Lower, 0);
+        let x_upper_bound = bound_range(LPBoundSensitivityKind::Upper, 0);
+        let y_lower_bound = bound_range(LPBoundSensitivityKind::Lower, 1);
+        let y_upper_bound = bound_range(LPBoundSensitivityKind::Upper, 1);
+        self.check(
+            "LP bound-sensitivity native ranges",
+            bound_sensitivity_report.status == LPStatus::Optimal
+                && bound_sensitivity_report.ranges.len() == 4
+                && x_lower_bound.is_some_and(|range| {
+                    range.lower.is_none()
+                        && range.upper.is_some_and(|value| (value - 3.0).abs() <= 1e-5)
+                })
+                && x_upper_bound.is_some_and(|range| {
+                    range.lower.is_some_and(|value| (value - 1.0).abs() <= 1e-5)
+                        && range.upper.is_some_and(|value| (value - 4.0).abs() <= 1e-5)
+                })
+                && y_lower_bound.is_some_and(|range| {
+                    range.lower.is_none()
+                        && range.upper.is_some_and(|value| (value - 1.0).abs() <= 1e-5)
+                })
+                && y_upper_bound.is_some_and(|range| {
+                    range.lower.is_some_and(|value| (value - 1.0).abs() <= 1e-5)
+                        && range.upper.is_none()
+                }),
+            format!(
+                "status={} x={:?} ranges={:?}",
+                bound_sensitivity_report.status.as_str(),
+                bound_sensitivity_report.base_x,
+                bound_sensitivity_report.ranges
+            ),
+        );
+
+        let bound_external_check = |label: &str,
+                                    kind: LPBoundSensitivityKind,
+                                    variable: usize,
+                                    value: f64,
+                                    expected_objective: f64,
+                                    this: &mut Driver| {
+            let mut trial = bound_sensitivity_lp.clone();
+            match kind {
+                LPBoundSensitivityKind::Lower => {
+                    if let Some(lb) = &mut trial.lb {
+                        lb[variable] = Some(value);
+                    }
+                }
+                LPBoundSensitivityKind::Upper => {
+                    if let Some(ub) = &mut trial.ub {
+                        ub[variable] = Some(value);
+                    }
+                }
+            }
+            let internal = solve_lp_internal(&trial, &InternalSimplexOptions::default());
+            let trial_json = serde_json::json!({
+                "lp": {
+                    "sense": trial.sense.as_str(),
+                    "c": &trial.c,
+                    "A_ub": &trial.a_ub,
+                    "b_ub": &trial.b_ub,
+                    "A_eq": &trial.a_eq,
+                    "b_eq": &trial.b_eq,
+                    "lb": &trial.lb,
+                    "ub": &trial.ub,
+                },
+                "method": "highs",
+            })
+            .to_string();
+            let value_json =
+                this.run_python_json("lp_solve.py", &["--method", "highs"], &trial_json);
+            let reference: LPReference =
+                serde_json::from_value(value_json).expect("parse bound-sensitivity reference");
+            let external_objective = reference.objective.unwrap_or(f64::NAN);
+            let max_x_diff = reference
+                .x
+                .iter()
+                .zip(&internal.x)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0_f64, f64::max);
+            this.check(
+                format!("LP bound-sensitivity HiGHS {label}"),
+                reference.status == "optimal"
+                    && internal.status == LPStatus::Optimal
+                    && (internal.objective - external_objective).abs() <= 1e-7
+                    && (internal.objective - expected_objective).abs() <= 1e-7
+                    && max_x_diff <= 1e-7,
+                format!(
+                    "kind={} var={} value={value:.6} native_obj={:.10} external={:?} expected={expected_objective:.10} x_diff={:.3e} solver={}",
+                    kind.as_str(),
+                    variable,
+                    internal.objective,
+                    reference.objective,
+                    max_x_diff,
+                    reference.solver
+                ),
+            );
+        };
+        bound_external_check(
+            "inside active x upper range",
+            LPBoundSensitivityKind::Upper,
+            0,
+            3.5,
+            11.5,
+            self,
+        );
+        bound_external_check(
+            "outside active x upper range",
+            LPBoundSensitivityKind::Upper,
+            0,
+            4.5,
+            12.0,
+            self,
+        );
+        bound_external_check(
+            "inside inactive y upper range",
+            LPBoundSensitivityKind::Upper,
+            1,
+            2.0,
+            11.0,
+            self,
+        );
+        bound_external_check(
+            "outside inactive y upper range",
+            LPBoundSensitivityKind::Upper,
+            1,
+            0.5,
+            10.0,
+            self,
         );
 
         let conflict_lp = LPProblem {
@@ -2464,11 +2992,9 @@ impl Driver {
     }
 
     fn validate_external_solver_clis(&mut self) {
-        println!(
-            "\n-- External solver CLIs: GLPK/HiGHS/SCIP/CBC/CLP + optional commercial checks --"
-        );
-        let lp_solvers = ["highs", "glpk", "scip", "cbc", "clp"];
-        let mip_solvers = ["highs", "glpk", "scip", "cbc"];
+        println!("\n-- External solver CLIs: open-source LP/MIP + optional commercial checks --");
+        let lp_solvers = ["highs", "glpk", "scip", "cbc", "clp", "soplex", "lp-solve"];
+        let mip_solvers = ["highs", "glpk", "scip", "cbc", "lp-solve"];
         let commercial_lp_solvers = ["gurobi", "cplex", "xpress", "lindo"];
         let commercial_mip_solvers = ["gurobi", "cplex", "xpress", "lindo"];
         let cli_specs = external_linear_cli_solver_specs();
@@ -2483,8 +3009,9 @@ impl Driver {
         self.check(
             "External solver CLI manifest covers all local bridge solvers",
             cli_specs.len() == ExternalLinearCliSolver::all().len()
-                && open_source_spec_count == 5
-                && commercial_spec_count == 4
+                && open_source_spec_count == ExternalLinearCliSolver::open_source_lp().len()
+                && commercial_spec_count
+                    == ExternalLinearCliSolver::optional_commercial_mip().len()
                 && cli_specs.iter().all(|spec| {
                     !spec.command_aliases.is_empty()
                         && !spec.command_env_vars.is_empty()
@@ -3123,6 +3650,63 @@ impl Driver {
                     }),
                 format!("row_basis={:?}", cli_certificate_reference.row_basis),
             );
+            let cold_limited = solve_lp_internal(
+                &cli_certificate_lp,
+                &InternalSimplexOptions {
+                    max_iter: Some(1),
+                    tol: None,
+                    basis_start: None,
+                },
+            );
+            if let (Some(var_basis), Some(row_basis)) = (
+                cli_certificate_reference.var_basis.clone(),
+                cli_certificate_reference.row_basis.clone(),
+            ) {
+                let warm_limited = solve_lp_internal(
+                    &cli_certificate_lp,
+                    &InternalSimplexOptions {
+                        max_iter: Some(1),
+                        tol: None,
+                        basis_start: Some(LPBasisWarmStart {
+                            var_basis,
+                            row_basis,
+                            primal_start: Some(cli_certificate_reference.x.clone()),
+                        }),
+                    },
+                );
+                self.check(
+                    "LP highs:cli basis warm-start native status",
+                    cold_limited.status == LPStatus::IterLimit
+                        && warm_limited.status == LPStatus::Optimal,
+                    format!(
+                        "cold={} warm={} warm_message={:?}",
+                        cold_limited.status.as_str(),
+                        warm_limited.status.as_str(),
+                        warm_limited.message
+                    ),
+                );
+                self.close(
+                    "LP highs:cli basis warm-start objective",
+                    warm_limited.objective,
+                    cli_certificate_reference.objective.unwrap_or(f64::NAN),
+                    1e-9,
+                );
+                self.max_abs_close(
+                    "LP highs:cli basis warm-start x",
+                    &warm_limited.x,
+                    &cli_certificate_reference.x,
+                    1e-8,
+                );
+            } else {
+                self.check(
+                    "LP highs:cli basis warm-start native status",
+                    false,
+                    format!(
+                        "basis missing var={:?} row={:?}",
+                        cli_certificate_reference.var_basis, cli_certificate_reference.row_basis
+                    ),
+                );
+            }
         }
         let rust_cli_certificate_reference = solve_lp_with_external_cli(
             &cli_certificate_lp,
@@ -3563,6 +4147,89 @@ impl Driver {
                     expected_status.as_str()
                 ),
             );
+            if expected_status == LPStatus::Infeasible {
+                let certificate = status_internal.infeasibility_certificate.as_ref();
+                let stationarity = certificate
+                    .and_then(|certificate| certificate.max_stationarity_residual(&status_lp))
+                    .unwrap_or(f64::NAN);
+                let contradiction = certificate
+                    .and_then(|certificate| certificate.contradiction_value(&status_lp))
+                    .unwrap_or(f64::NAN);
+                self.check(
+                    format!("LP {case_name}:internal Farkas certificate"),
+                    certificate.is_some_and(|certificate| certificate.is_valid_for(&status_lp, 1e-7)),
+                    format!(
+                        "certificate={certificate:?} stationarity={stationarity:.3e} contradiction={contradiction:.3e}"
+                    ),
+                );
+            }
+            if expected_status == LPStatus::Unbounded {
+                let ray = status_internal.unbounded_ray.as_deref();
+                let objective_delta = ray
+                    .map(|ray| {
+                        status_lp
+                            .c
+                            .iter()
+                            .zip(ray)
+                            .map(|(coef, value)| coef * value)
+                            .sum::<f64>()
+                    })
+                    .unwrap_or(f64::NAN);
+                let objective_improves = match status_lp.sense {
+                    Sense::Max => objective_delta > 1e-9,
+                    Sense::Min => objective_delta < -1e-9,
+                };
+                let ub_rows_ok = ray.is_some_and(|ray| {
+                    status_lp.a_ub.as_ref().is_none_or(|rows| {
+                        rows.iter().all(|row| {
+                            row.iter()
+                                .zip(ray)
+                                .map(|(coef, value)| coef * value)
+                                .sum::<f64>()
+                                <= 1e-9
+                        })
+                    })
+                });
+                let eq_rows_ok = ray.is_some_and(|ray| {
+                    status_lp.a_eq.as_ref().is_none_or(|rows| {
+                        rows.iter().all(|row| {
+                            row.iter()
+                                .zip(ray)
+                                .map(|(coef, value)| coef * value)
+                                .sum::<f64>()
+                                .abs()
+                                <= 1e-9
+                        })
+                    })
+                });
+                let bounds_ok = ray.is_some_and(|ray| {
+                    ray.iter().enumerate().all(|(idx, value)| {
+                        let lower_ok = status_lp.lb.as_ref().map_or(*value >= -1e-9, |lbs| {
+                            lbs.get(idx)
+                                .and_then(|bound| *bound)
+                                .map_or(true, |_| *value >= -1e-9)
+                        });
+                        let upper_ok = status_lp
+                            .ub
+                            .as_ref()
+                            .and_then(|ubs| ubs.get(idx))
+                            .and_then(|bound| *bound)
+                            .map_or(true, |_| *value <= 1e-9);
+                        lower_ok && upper_ok
+                    })
+                });
+                self.check(
+                    format!("LP {case_name}:internal unbounded-ray certificate"),
+                    ray.is_some()
+                        && objective_improves
+                        && ub_rows_ok
+                        && eq_rows_ok
+                        && bounds_ok,
+                    format!(
+                        "ray={ray:?} objective_delta={objective_delta:.6} ub_rows_ok={ub_rows_ok} eq_rows_ok={eq_rows_ok} bounds_ok={bounds_ok}"
+                    ),
+                );
+            }
             for solver in lp_solvers.iter().copied() {
                 let reference = self.run_linear_cli_reference("lp", solver, &status_json);
                 if reference.status == "unavailable" && reference.message.contains("not found") {
@@ -6391,12 +7058,17 @@ impl Driver {
             .count();
         self.check(
             "External CP-SAT reference registry splits direct and ecosystem contracts",
-            cp_specs.len() == 18
-                && direct_cp_specs == 3
+            cp_specs.len() == 19
+                && direct_cp_specs == 4
                 && ecosystem_cp_specs == 15
                 && cp_specs.iter().any(|spec| {
                     spec.solver == ExternalCpSatReferenceSolver::OrToolsCpSat
                         && spec.family == ExternalCpSatReferenceFamily::CpSatScript
+                        && spec.supports_cp_sat_json
+                })
+                && cp_specs.iter().any(|spec| {
+                    spec.solver == ExternalCpSatReferenceSolver::RustEnumeration
+                        && spec.family == ExternalCpSatReferenceFamily::Fallback
                         && spec.supports_cp_sat_json
                 })
                 && cp_specs.iter().any(|spec| {
@@ -6438,7 +7110,7 @@ impl Driver {
         let cp_sat_reference = solve_cp_sat_json_with_external_reference(
             &cp_sat_smoke,
             &ExternalCpSatReferenceOptions {
-                solver: ExternalCpSatReferenceSolver::PythonEnumeration,
+                solver: ExternalCpSatReferenceSolver::RustEnumeration,
                 ..Default::default()
             },
         );
@@ -6582,6 +7254,57 @@ impl Driver {
             format!(
                 "agreement={} objective={:?} solution={:?}",
                 cp_report.agreement, cp_report.reference_objective, cp_report.reference_solution
+            ),
+        );
+
+        let cp_job_shop_payload = serde_json::json!({
+            "kind": "ecosystem-cp-job-shop",
+            "jobs": [
+                {"operations": [{"machine": "M1", "duration": 3}, {"machine": "M2", "duration": 2}]},
+                {"operations": [{"machine": "M2", "duration": 2}, {"machine": "M1", "duration": 4}]},
+                {"operations": [{"machine": "M1", "duration": 2}, {"machine": "M2", "duration": 3}]}
+            ]
+        });
+        let cp_job_shop_report = run_external_optimization_comparison(
+            &cp_job_shop_payload,
+            &[
+                ecosystem_invocation(
+                    "choco-job-shop-reference",
+                    ExternalOptimizationTool::ChocoSolver,
+                ),
+                ecosystem_invocation("jacop-job-shop-reference", ExternalOptimizationTool::Jacop),
+                ecosystem_invocation(
+                    "ibm-cp-optimizer-job-shop-reference",
+                    ExternalOptimizationTool::IbmCpOptimizer,
+                ),
+                ecosystem_invocation(
+                    "ortools-java-job-shop-reference",
+                    ExternalOptimizationTool::OrToolsJava,
+                ),
+                ecosystem_invocation(
+                    "ortools-python-job-shop-reference",
+                    ExternalOptimizationTool::OrToolsPython,
+                ),
+                ecosystem_invocation("cpmpy-job-shop-reference", ExternalOptimizationTool::Cpmpy),
+                ecosystem_invocation(
+                    "pycsp3-job-shop-reference",
+                    ExternalOptimizationTool::PyCsp3,
+                ),
+            ],
+            1e-9,
+            1e-9,
+        );
+        self.check(
+            "External optimization ecosystem CP scheduling reference bridge",
+            cp_job_shop_report.agreement
+                && cp_job_shop_report.reference_objective == Some(9.0)
+                && cp_job_shop_report.reference_solution.as_deref()
+                    == Some(&[0.0, 3.0, 0.0, 5.0, 3.0, 5.0]),
+            format!(
+                "agreement={} objective={:?} starts={:?}",
+                cp_job_shop_report.agreement,
+                cp_job_shop_report.reference_objective,
+                cp_job_shop_report.reference_solution
             ),
         );
 
@@ -6784,6 +7507,7 @@ impl Driver {
 
         let reference_reports = [
             &cp_report,
+            &cp_job_shop_report,
             &linear_report,
             &planning_report,
             &multiobjective_report,
@@ -6801,7 +7525,7 @@ impl Driver {
             });
         self.check(
             "External optimization ecosystem reference bridges cover every requested tool",
-            reference_bridge_count == external_optimization_tools().len()
+            reference_bridge_count >= external_optimization_tools().len()
                 && all_requested_tools_have_reference_bridge,
             format!(
                 "reference_runs={} tools={} all_covered={}",
@@ -9960,26 +10684,58 @@ impl Driver {
             ..Default::default()
         };
         match cross_check_math_program_with_external(program, solve_opts, &external_opts, 1e-7) {
-            Ok(report) => self.check(
-                format!(
-                    "MathProgram {label} facade {}:cli same-input cross-check",
-                    solver.as_str()
-                ),
-                report.within_tolerance
-                    && report.internal.status == MathProgramStatus::Optimal
-                    && report.external.status == MathProgramStatus::Optimal
-                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7),
-                format!(
-                    "method={} internal={:?} external={:?} obj_diff={:?} x_diff={:?} violations=({:?},{:?})",
-                    method,
-                    report.internal.status,
-                    report.external.status,
-                    report.objective_abs_diff,
-                    report.max_x_abs_diff,
-                    report.internal_max_violation,
-                    report.external_max_violation
-                ),
-            ),
+            Ok(report) => {
+                self.check(
+                    format!(
+                        "MathProgram {label} facade {}:cli same-input cross-check",
+                        solver.as_str()
+                    ),
+                    report.within_tolerance
+                        && report.internal.status == MathProgramStatus::Optimal
+                        && report.external.status == MathProgramStatus::Optimal
+                        && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7),
+                    format!(
+                        "method={} internal={:?} external={:?} obj_diff={:?} x_diff={:?} violations=({:?},{:?})",
+                        method,
+                        report.internal.status,
+                        report.external.status,
+                        report.objective_abs_diff,
+                        report.max_x_abs_diff,
+                        report.internal_max_violation,
+                        report.external_max_violation
+                    ),
+                );
+                if solver == ExternalLinearCliSolver::Highs {
+                    match kind {
+                        ExternalLinearCliKind::Lp => self.check(
+                            "MathProgram LP facade highs:cli solver diagnostics",
+                            report.external.solver_version.is_some()
+                                && report.external.iterations.is_some(),
+                            format!(
+                                "solver={} version={:?} iterations={:?}",
+                                report.external.solver,
+                                report.external.solver_version,
+                                report.external.iterations
+                            ),
+                        ),
+                        ExternalLinearCliKind::Mip => self.check(
+                            "MathProgram MIP facade highs:cli solver diagnostics",
+                            report.external.solver_version.is_some()
+                                && report.external.best_bound.is_some()
+                                && report.external.mip_gap.is_some()
+                                && report.external.nodes_explored.is_some(),
+                            format!(
+                                "solver={} version={:?} bound={:?} gap={:?} nodes={:?}",
+                                report.external.solver,
+                                report.external.solver_version,
+                                report.external.best_bound,
+                                report.external.mip_gap,
+                                report.external.nodes_explored
+                            ),
+                        ),
+                    }
+                }
+            }
             Err(err) => self.check(
                 format!(
                     "MathProgram {label} facade {}:cli same-input cross-check",
@@ -10044,12 +10800,45 @@ impl Driver {
         }
     }
 
+    fn math_program_cross_check_or_skip(
+        &mut self,
+        name: &str,
+        program: &MathProgram,
+        solve_opts: &MathProgramSolveOptions,
+        external_opts: &ExternalMathProgramOptions,
+        tol: f64,
+    ) -> Option<MathProgramCrossCheck> {
+        match cross_check_math_program_with_external(program, solve_opts, external_opts, tol) {
+            Ok(report) => {
+                let message = report.external.message.as_deref().unwrap_or("");
+                if report.external.status == MathProgramStatus::NumericalError
+                    && optional_math_program_external_unavailable(message)
+                {
+                    println!("  SKIP  {name}: {message}");
+                    None
+                } else {
+                    Some(report)
+                }
+            }
+            Err(err) => {
+                let message = format!("{err:?}");
+                if optional_math_program_external_unavailable(&message) {
+                    println!("  SKIP  {name}: {message}");
+                } else {
+                    self.check(name, false, message);
+                }
+                None
+            }
+        }
+    }
+
     fn check_math_program_export_highs_file_solve(
         &mut self,
         name: &str,
         model_text: &str,
         extension: &str,
         expected_objective: Option<f64>,
+        solution_check: Option<MathProgramExportSolutionCheck<'_>>,
     ) {
         let Some(highs) = external_linear_cli_command(ExternalLinearCliSolver::Highs) else {
             println!("  SKIP  {name}: highs executable not found");
@@ -10110,23 +10899,36 @@ impl Driver {
                     }
                     None => true,
                 };
-                let passed =
-                    output.status.success() && normalized.contains("optimal") && objective_ok;
+                let solution_detail = solution_check
+                    .map(|check| math_program_export_solution_detail(&solution, check));
+                let solution_ok = solution_detail.as_ref().map_or(true, |(ok, _)| *ok);
+                let passed = output.status.success()
+                    && normalized.contains("optimal")
+                    && objective_ok
+                    && solution_ok;
                 let detail = if passed {
                     format!(
-                        "command={:?} objective={:?} expected={:?} bytes={}",
+                        "command={:?} objective={:?} expected={:?} {}bytes={}",
                         highs,
                         objective,
                         expected_objective,
+                        solution_detail
+                            .as_ref()
+                            .map(|(_, detail)| format!("{detail} "))
+                            .unwrap_or_default(),
                         model_text.len()
                     )
                 } else {
                     format!(
-                        "command={:?} status={} objective={:?} expected={:?} output={}",
+                        "command={:?} status={} objective={:?} expected={:?} {}output={}",
                         highs,
                         output.status,
                         objective,
                         expected_objective,
+                        solution_detail
+                            .as_ref()
+                            .map(|(_, detail)| format!("{detail} "))
+                            .unwrap_or_default(),
                         one_line_preview(&combined, 240)
                     )
                 };
@@ -10142,7 +10944,7 @@ impl Driver {
         println!("\n-- Math-program facade: native lowering vs external solver oracles --");
         let solve_opts = MathProgramSolveOptions::default();
         let external_opts = ExternalMathProgramOptions {
-            method: Some("highs".to_string()),
+            method: Some("highs:cli".to_string()),
             time_limit_ms: Some(5_000.0),
             ..Default::default()
         };
@@ -10173,9 +10975,11 @@ impl Driver {
         .expect("LP preference");
 
         let mut lp_expected_objective = None;
+        let mut lp_expected_x = None;
         match cross_check_math_program_with_external(&lp, &solve_opts, &external_opts, 1e-7) {
             Ok(report) => {
                 lp_expected_objective = Some(report.internal.objective);
+                lp_expected_x = Some(report.internal.x.clone());
                 self.check(
                     "MathProgram LP facade same-input HiGHS cross-check",
                     report.within_tolerance
@@ -10192,6 +10996,56 @@ impl Driver {
                         report.external_max_violation
                     ),
                 );
+                match map_math_program_lp_row_certificates(&lp, &report.external) {
+                    Ok(rows) => self.check(
+                        "MathProgram LP facade external row certificate mapping",
+                        rows.len() == 2
+                            && rows[0].source_name == "preference"
+                            && rows[0].source_sense == RowSense::Ge
+                            && rows[0].generated_sense == RowSense::Le
+                            && rows[0].generated_row == 0
+                            && rows[0].source_dual.zip(rows[0].generated_dual).is_some_and(
+                                |(source, generated)| (source + generated).abs() <= 1e-8,
+                            )
+                            && rows[1].source_name == "balance"
+                            && rows[1].source_sense == RowSense::Eq
+                            && rows[1].generated_sense == RowSense::Eq
+                            && rows[1].generated_row == 1
+                            && rows[1].source_dual.is_some(),
+                        format!("rows={rows:?} external={:?}", report.external),
+                    ),
+                    Err(err) => self.check(
+                        "MathProgram LP facade external row certificate mapping",
+                        false,
+                        format!("{err:?}"),
+                    ),
+                }
+                match map_math_program_lp_variable_certificates(&lp, &report.external) {
+                    Ok(vars) => self.check(
+                        "MathProgram LP facade external variable certificate mapping",
+                        vars.len() == 3
+                            && vars[lp_x].name == "x"
+                            && vars[lp_x].objective_coefficient == 5.0
+                            && vars[lp_x].lb == Some(0.0)
+                            && vars[lp_x].ub == Some(4.0)
+                            && vars[lp_x]
+                                .value
+                                .zip(report.external.x.get(lp_x).copied())
+                                .is_some_and(|(mapped, raw)| (mapped - raw).abs() <= 1e-9)
+                            && vars[lp_x].reduced_cost.is_some()
+                            && vars[lp_y].name == "y"
+                            && vars[lp_y].reduced_cost.is_some()
+                            && vars[lp_z].name == "z"
+                            && vars[lp_z].ub == Some(5.0)
+                            && vars[lp_z].reduced_cost.is_some(),
+                        format!("vars={vars:?} external={:?}", report.external),
+                    ),
+                    Err(err) => self.check(
+                        "MathProgram LP facade external variable certificate mapping",
+                        false,
+                        format!("{err:?}"),
+                    ),
+                }
             }
             Err(err) => self.check(
                 "MathProgram LP facade same-input HiGHS cross-check",
@@ -10205,8 +11059,14 @@ impl Driver {
             time_limit_ms: Some(5_000.0),
             ..Default::default()
         };
-        match cross_check_math_program_with_external(&lp, &solve_opts, &ortools_glop_opts, 1e-7) {
-            Ok(report) => self.check(
+        if let Some(report) = self.math_program_cross_check_or_skip(
+            "MathProgram LP facade same-input OR-Tools GLOP cross-check",
+            &lp,
+            &solve_opts,
+            &ortools_glop_opts,
+            1e-7,
+        ) {
+            self.check(
                 "MathProgram LP facade same-input OR-Tools GLOP cross-check",
                 report.within_tolerance
                     && report.internal.status == MathProgramStatus::Optimal
@@ -10221,12 +11081,1344 @@ impl Driver {
                     report.internal_max_violation,
                     report.external_max_violation
                 ),
+            );
+        }
+
+        let ortools_pdlp_opts = ExternalMathProgramOptions {
+            method: Some("ortools:PDLP".to_string()),
+            time_limit_ms: Some(5_000.0),
+            ..Default::default()
+        };
+        if let Some(report) = self.math_program_cross_check_or_skip(
+            "MathProgram LP facade same-input OR-Tools PDLP cross-check",
+            &lp,
+            &solve_opts,
+            &ortools_pdlp_opts,
+            1e-6,
+        ) {
+            self.check(
+                "MathProgram LP facade same-input OR-Tools PDLP cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-6),
+                format!(
+                    "internal={:?} external={:?} obj_diff={:?} x_diff={:?} violations=({:?},{:?})",
+                    report.internal.status,
+                    report.external.status,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal_max_violation,
+                    report.external_max_violation
+                ),
+            );
+        }
+
+        let mut hierarchical_lp = MathProgram::new(MathObjectiveSense::Max);
+        let hierarchical_lp_x = hierarchical_lp
+            .add_continuous_var("hier-lp-x", 1.0, Some(0.0), Some(3.0))
+            .expect("hierarchical LP x");
+        let hierarchical_lp_y = hierarchical_lp
+            .add_continuous_var("hier-lp-y", 1.0, Some(0.0), Some(3.0))
+            .expect("hierarchical LP y");
+        hierarchical_lp
+            .add_constraint(
+                "hier-lp-capacity",
+                vec![(hierarchical_lp_x, 1.0), (hierarchical_lp_y, 1.0)],
+                RowSense::Le,
+                4.0,
+            )
+            .expect("hierarchical LP capacity");
+        hierarchical_lp
+            .add_secondary_objective(
+                "prefer-less-x",
+                MathObjectiveSense::Min,
+                10,
+                1.0,
+                vec![(hierarchical_lp_x, 1.0)],
+            )
+            .expect("hierarchical LP secondary objective");
+        match cross_check_math_program_with_external(
+            &hierarchical_lp,
+            &solve_opts,
+            &external_opts,
+            1e-7,
+        ) {
+            Ok(report) => self.check(
+                "MathProgram hierarchical LP facade same-input HiGHS cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && report.internal.solver.starts_with("des-hierarchical(")
+                    && report.external.solver.starts_with("external-hierarchical(")
+                    && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && (report.internal.x[hierarchical_lp_x] - 1.0).abs() <= 2e-7
+                    && (report.internal.x[hierarchical_lp_y] - 3.0).abs() <= 2e-7,
+                format!(
+                    "internal={:?} external={:?} solvers=({},{}) obj_diff={:?} x_diff={:?} x={:?} messages=({:?},{:?})",
+                    report.internal.status,
+                    report.external.status,
+                    report.internal.solver,
+                    report.external.solver,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal.x,
+                    report.internal.message,
+                    report.external.message
+                ),
             ),
             Err(err) => self.check(
-                "MathProgram LP facade same-input OR-Tools GLOP cross-check",
+                "MathProgram hierarchical LP facade same-input HiGHS cross-check",
                 false,
                 format!("{err:?}"),
             ),
+        }
+
+        let mut blended_lp = MathProgram::new(MathObjectiveSense::Max);
+        let blended_lp_x = blended_lp
+            .add_continuous_var("blend-lp-x", 1.0, Some(0.0), Some(1.0))
+            .expect("blended LP x");
+        let blended_lp_y = blended_lp
+            .add_continuous_var("blend-lp-y", 1.0, Some(0.0), Some(1.0))
+            .expect("blended LP y");
+        blended_lp
+            .add_constraint(
+                "blend-lp-capacity",
+                vec![(blended_lp_x, 1.0), (blended_lp_y, 1.0)],
+                RowSense::Le,
+                1.0,
+            )
+            .expect("blended LP capacity");
+        blended_lp
+            .add_secondary_objective(
+                "prefer-x-light",
+                MathObjectiveSense::Max,
+                10,
+                1.0,
+                vec![(blended_lp_x, 1.0)],
+            )
+            .expect("blended LP x objective");
+        blended_lp
+            .add_secondary_objective(
+                "prefer-y-heavy",
+                MathObjectiveSense::Max,
+                10,
+                3.0,
+                vec![(blended_lp_y, 1.0)],
+            )
+            .expect("blended LP y objective");
+        match cross_check_math_program_with_external(&blended_lp, &solve_opts, &external_opts, 1e-7)
+        {
+            Ok(report) => self.check(
+                "MathProgram blended-priority LP facade same-input HiGHS cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && report.internal.solver.starts_with("des-hierarchical(")
+                    && report.external.solver.starts_with("external-hierarchical(")
+                    && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report.internal.x[blended_lp_x].abs() <= 1e-7
+                    && (report.internal.x[blended_lp_y] - 1.0).abs() <= 1e-7,
+                format!(
+                    "internal={:?} external={:?} solvers=({},{}) obj_diff={:?} x_diff={:?} x={:?} messages=({:?},{:?})",
+                    report.internal.status,
+                    report.external.status,
+                    report.internal.solver,
+                    report.external.solver,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal.x,
+                    report.internal.message,
+                    report.external.message
+                ),
+            ),
+            Err(err) => self.check(
+                "MathProgram blended-priority LP facade same-input HiGHS cross-check",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        let mut basis_math_lp = MathProgram::new(MathObjectiveSense::Max);
+        let basis_x = basis_math_lp
+            .add_continuous_var("x", 3.0, Some(0.0), None)
+            .expect("basis x");
+        let basis_y = basis_math_lp
+            .add_continuous_var("y", 2.0, Some(0.0), None)
+            .expect("basis y");
+        basis_math_lp
+            .add_constraint(
+                "capacity",
+                vec![(basis_x, 1.0), (basis_y, 1.0)],
+                RowSense::Le,
+                4.0,
+            )
+            .expect("basis capacity");
+        basis_math_lp
+            .add_constraint(
+                "mix",
+                vec![(basis_x, 1.0), (basis_y, 3.0)],
+                RowSense::Le,
+                6.0,
+            )
+            .expect("basis mix");
+        match solve_math_program(&basis_math_lp, &solve_opts) {
+            Ok(base) => {
+                let mut cold_opts = solve_opts.clone();
+                cold_opts.lp_simplex.max_iter = Some(1);
+                cold_opts.lp_simplex.basis_start = None;
+                let mut warm_opts = cold_opts.clone();
+                warm_opts.lp_simplex.basis_start =
+                    base.var_basis.clone().zip(base.row_basis.clone()).map(
+                        |(var_basis, row_basis)| LPBasisWarmStart {
+                            var_basis,
+                            row_basis,
+                            primal_start: Some(base.x.clone()),
+                        },
+                    );
+                let cold = solve_math_program(&basis_math_lp, &cold_opts);
+                let warm = solve_math_program(&basis_math_lp, &warm_opts);
+                match (cold, warm) {
+                    (Ok(cold), Ok(warm)) => {
+                        self.check(
+                            "MathProgram LP facade basis warm-start status",
+                            cold.status == MathProgramStatus::IterLimit
+                                && warm.status == MathProgramStatus::Optimal
+                                && warm_opts.lp_simplex.basis_start.is_some(),
+                            format!(
+                                "cold={:?} warm={:?} warm_message={:?}",
+                                cold.status, warm.status, warm.message
+                            ),
+                        );
+                        self.close(
+                            "MathProgram LP facade basis warm-start objective",
+                            warm.objective,
+                            base.objective,
+                            1e-9,
+                        );
+                        self.max_abs_close(
+                            "MathProgram LP facade basis warm-start x",
+                            &warm.x,
+                            &base.x,
+                            1e-8,
+                        );
+                    }
+                    (cold, warm) => self.check(
+                        "MathProgram LP facade basis warm-start status",
+                        false,
+                        format!("cold={cold:?} warm={warm:?}"),
+                    ),
+                }
+            }
+            Err(err) => self.check(
+                "MathProgram LP facade basis warm-start status",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        let mut sensitivity_math_lp = MathProgram::new(MathObjectiveSense::Max);
+        let sensitivity_x = sensitivity_math_lp
+            .add_continuous_var("x", 3.0, Some(0.0), None)
+            .expect("sensitivity x");
+        let sensitivity_y = sensitivity_math_lp
+            .add_continuous_var("y", 2.0, Some(0.0), None)
+            .expect("sensitivity y");
+        sensitivity_math_lp
+            .add_constraint(
+                "capacity",
+                vec![(sensitivity_x, 1.0), (sensitivity_y, 1.0)],
+                RowSense::Le,
+                4.0,
+            )
+            .expect("sensitivity capacity");
+        sensitivity_math_lp
+            .add_constraint("x-cap", vec![(sensitivity_x, 1.0)], RowSense::Le, 3.0)
+            .expect("sensitivity x cap");
+        sensitivity_math_lp
+            .add_constraint("y-cap", vec![(sensitivity_y, 1.0)], RowSense::Le, 3.0)
+            .expect("sensitivity y cap");
+        match analyze_math_program_objective_sensitivity(
+            &sensitivity_math_lp,
+            &solve_opts,
+            &LPObjectiveSensitivityOptions {
+                max_span: 8.0,
+                ..Default::default()
+            },
+        ) {
+            Ok(report) => self.check(
+                "MathProgram LP facade objective-sensitivity ranges",
+                report.status == LPStatus::Optimal
+                    && report.ranges.len() == 2
+                    && report.ranges[0].name.as_deref() == Some("x")
+                    && report.ranges[0]
+                        .lower
+                        .is_some_and(|value| (value - 2.0).abs() <= 1e-5)
+                    && report.ranges[0].upper.is_none()
+                    && report.ranges[1].name.as_deref() == Some("y")
+                    && report.ranges[1]
+                        .lower
+                        .is_some_and(|value| value.abs() <= 1e-5)
+                    && report.ranges[1]
+                        .upper
+                        .is_some_and(|value| (value - 3.0).abs() <= 1e-5),
+                format!("x={:?} ranges={:?}", report.base_x, report.ranges),
+            ),
+            Err(err) => self.check(
+                "MathProgram LP facade objective-sensitivity ranges",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        match analyze_math_program_rhs_sensitivity(
+            &sensitivity_math_lp,
+            &solve_opts,
+            &LPRhsSensitivityOptions {
+                max_span: 8.0,
+                ..Default::default()
+            },
+        ) {
+            Ok(report) => self.check(
+                "MathProgram LP facade RHS-sensitivity ranges",
+                report.status == LPStatus::Optimal
+                    && report.ranges.len() == 3
+                    && report.ranges[0].name.as_deref() == Some("capacity")
+                    && report.ranges[0]
+                        .lower
+                        .is_some_and(|value| (value - 3.0).abs() <= 1e-5)
+                    && report.ranges[0]
+                        .upper
+                        .is_some_and(|value| (value - 6.0).abs() <= 1e-5)
+                    && report.ranges[1].name.as_deref() == Some("x-cap")
+                    && report.ranges[1]
+                        .lower
+                        .is_some_and(|value| (value - 1.0).abs() <= 1e-5)
+                    && report.ranges[1]
+                        .upper
+                        .is_some_and(|value| (value - 4.0).abs() <= 1e-5),
+                format!("x={:?} ranges={:?}", report.base_x, report.ranges),
+            ),
+            Err(err) => self.check(
+                "MathProgram LP facade RHS-sensitivity ranges",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        let mut bound_sensitivity_math_lp = MathProgram::new(MathObjectiveSense::Max);
+        let bound_x = bound_sensitivity_math_lp
+            .add_continuous_var("x", 3.0, Some(0.0), Some(3.0))
+            .expect("bound sensitivity x");
+        let bound_y = bound_sensitivity_math_lp
+            .add_continuous_var("y", 2.0, Some(0.0), Some(3.0))
+            .expect("bound sensitivity y");
+        bound_sensitivity_math_lp
+            .add_constraint(
+                "capacity",
+                vec![(bound_x, 1.0), (bound_y, 1.0)],
+                RowSense::Le,
+                4.0,
+            )
+            .expect("bound sensitivity capacity");
+        match analyze_math_program_bound_sensitivity(
+            &bound_sensitivity_math_lp,
+            &solve_opts,
+            &LPBoundSensitivityOptions {
+                max_span: 8.0,
+                ..Default::default()
+            },
+        ) {
+            Ok(report) => {
+                let bound_range = |kind: LPBoundSensitivityKind, variable: usize| {
+                    report
+                        .ranges
+                        .iter()
+                        .find(|range| range.kind == kind && range.variable == variable)
+                };
+                self.check(
+                    "MathProgram LP facade bound-sensitivity ranges",
+                    report.status == LPStatus::Optimal
+                        && report.ranges.len() == 4
+                        && bound_range(LPBoundSensitivityKind::Lower, bound_x).is_some_and(
+                            |range| {
+                                range.name.as_deref() == Some("x")
+                                    && range.lower.is_none()
+                                    && range.upper.is_some_and(|value| (value - 3.0).abs() <= 1e-5)
+                            },
+                        )
+                        && bound_range(LPBoundSensitivityKind::Upper, bound_x).is_some_and(
+                            |range| {
+                                range.name.as_deref() == Some("x")
+                                    && range.lower.is_some_and(|value| (value - 1.0).abs() <= 1e-5)
+                                    && range.upper.is_some_and(|value| (value - 4.0).abs() <= 1e-5)
+                            },
+                        )
+                        && bound_range(LPBoundSensitivityKind::Lower, bound_y).is_some_and(
+                            |range| {
+                                range.name.as_deref() == Some("y")
+                                    && range.lower.is_none()
+                                    && range.upper.is_some_and(|value| (value - 1.0).abs() <= 1e-5)
+                            },
+                        )
+                        && bound_range(LPBoundSensitivityKind::Upper, bound_y).is_some_and(
+                            |range| {
+                                range.name.as_deref() == Some("y")
+                                    && range.lower.is_some_and(|value| (value - 1.0).abs() <= 1e-5)
+                                    && range.upper.is_none()
+                            },
+                        ),
+                    format!("x={:?} ranges={:?}", report.base_x, report.ranges),
+                );
+            }
+            Err(err) => self.check(
+                "MathProgram LP facade bound-sensitivity ranges",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        let mut unbounded_math_lp = MathProgram::new(MathObjectiveSense::Max);
+        let bounded_axis = unbounded_math_lp
+            .add_continuous_var("bounded-axis", 0.0, Some(0.0), Some(1.0))
+            .expect("bounded axis");
+        let improving_axis = unbounded_math_lp
+            .add_continuous_var("improving-axis", 1.0, Some(0.0), None)
+            .expect("improving axis");
+        let unbounded_internal =
+            solve_math_program(&unbounded_math_lp, &solve_opts).expect("unbounded LP internal");
+        let unbounded_external =
+            solve_math_program_external_scipy(&unbounded_math_lp, &external_opts)
+                .expect("unbounded LP external");
+        self.check(
+            "MathProgram LP facade unbounded-ray certificate",
+            unbounded_internal.status == MathProgramStatus::Unbounded
+                && unbounded_external.status == MathProgramStatus::Unbounded
+                && unbounded_internal
+                    .unbounded_ray
+                    .as_ref()
+                    .is_some_and(|ray| {
+                        ray.len() == 2
+                            && ray[bounded_axis].abs() <= 1e-9
+                            && ray[improving_axis] > 1e-9
+                    }),
+            format!(
+                "internal={:?} external={:?} ray={:?}",
+                unbounded_internal.status,
+                unbounded_external.status,
+                unbounded_internal.unbounded_ray
+            ),
+        );
+
+        let mut infeasible_math_lp = MathProgram::new(MathObjectiveSense::Max);
+        let infeasible_x = infeasible_math_lp
+            .add_continuous_var("x", 0.0, Some(1.0), None)
+            .expect("infeasible x");
+        infeasible_math_lp
+            .add_constraint(
+                "x-at-most-zero",
+                vec![(infeasible_x, 1.0)],
+                RowSense::Le,
+                0.0,
+            )
+            .expect("infeasible upper row");
+        let infeasible_internal =
+            solve_math_program(&infeasible_math_lp, &solve_opts).expect("infeasible LP internal");
+        let infeasible_external =
+            solve_math_program_external_scipy(&infeasible_math_lp, &external_opts)
+                .expect("infeasible LP external");
+        self.check(
+            "MathProgram LP facade Farkas certificate",
+            infeasible_internal.status == MathProgramStatus::Infeasible
+                && infeasible_external.status == MathProgramStatus::Infeasible
+                && infeasible_internal
+                    .infeasibility_certificate
+                    .as_ref()
+                    .is_some_and(|certificate| {
+                        certificate.contradiction < -1e-7
+                            && certificate
+                                .max_stationarity_residual(&LPProblem {
+                                    sense: Sense::Max,
+                                    c: vec![0.0],
+                                    a_ub: Some(vec![vec![1.0]]),
+                                    b_ub: Some(vec![0.0]),
+                                    lb: Some(vec![Some(1.0)]),
+                                    ..Default::default()
+                                })
+                                .is_some_and(|residual| residual <= 1e-7)
+                    }),
+            format!(
+                "internal={:?} external={:?} certificate={:?}",
+                infeasible_internal.status,
+                infeasible_external.status,
+                infeasible_internal.infeasibility_certificate
+            ),
+        );
+
+        let nonlinear_external_opts = ExternalMathProgramOptions {
+            method: Some("SLSQP".to_string()),
+            time_limit_ms: Some(5_000.0),
+            ..Default::default()
+        };
+
+        let mut qp_facade = MathProgram::new(MathObjectiveSense::Min);
+        let qp_x = qp_facade
+            .add_continuous_var("qp-x", -4.0, Some(0.0), Some(5.0))
+            .expect("QP x");
+        qp_facade
+            .add_quadratic_objective_term(qp_x, qp_x, 1.0)
+            .expect("QP quadratic term");
+        if let Some(report) = self.math_program_cross_check_or_skip(
+            "MathProgram QP facade same-input SLSQP cross-check",
+            &qp_facade,
+            &solve_opts,
+            &nonlinear_external_opts,
+            1e-6,
+        ) {
+            self.check(
+                "MathProgram QP facade same-input SLSQP cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && report.internal.solver == "des-frank-wolfe-qp"
+                    && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-6)
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-5)
+                    && (report.internal.x[qp_x] - 2.0).abs() <= 1e-5,
+                format!(
+                    "internal={:?} external={:?} solver={} obj_diff={:?} x_diff={:?} x={:?} violations=({:?},{:?})",
+                    report.internal.status,
+                    report.external.status,
+                    report.internal.solver,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal.x,
+                    report.internal_max_violation,
+                    report.external_max_violation
+                ),
+            );
+        }
+        let qp_highs_problem = QuadraticProgram {
+            q: vec![vec![2.0]],
+            c: vec![-4.0],
+            lb: Some(vec![Some(0.0)]),
+            ub: Some(vec![Some(5.0)]),
+            var_names: Some(vec!["qp-x".to_string()]),
+            ..Default::default()
+        };
+        let qp_internal_for_highs =
+            solve_math_program(&qp_facade, &solve_opts).expect("QP facade internal solve");
+        let qp_highs_reference = solve_qp_with_external_reference(
+            &qp_highs_problem,
+            &ExternalQuadraticReferenceOptions {
+                solver: ExternalQuadraticReferenceSolver::Highs,
+                ..Default::default()
+            },
+        );
+        if qp_highs_reference.status == ExternalQuadraticReferenceStatus::Unavailable {
+            println!(
+                "  SKIP  MathProgram QP facade same-input HiGHS QP-reference cross-check: {}",
+                qp_highs_reference.message
+            );
+        } else {
+            self.check(
+                "MathProgram QP facade same-input HiGHS QP-reference cross-check",
+                qp_internal_for_highs.status == MathProgramStatus::Optimal
+                    && qp_highs_reference.status == ExternalQuadraticReferenceStatus::Optimal
+                    && qp_highs_reference.solver.contains("highs")
+                    && qp_highs_reference
+                        .objective
+                        .is_some_and(|objective| {
+                            (objective - qp_internal_for_highs.objective).abs() <= 1e-7
+                        })
+                    && max_abs_diff(&qp_internal_for_highs.x, &qp_highs_reference.x) <= 1e-7
+                    && (qp_internal_for_highs.x[qp_x] - 2.0).abs() <= 1e-7,
+                format!(
+                    "internal={:?} external={} solver={} objective={:?}/{:?} x={:?}/{:?} message={}",
+                    qp_internal_for_highs.status,
+                    qp_highs_reference.status.as_str(),
+                    qp_highs_reference.solver,
+                    Some(qp_internal_for_highs.objective),
+                    qp_highs_reference.objective,
+                    qp_internal_for_highs.x,
+                    qp_highs_reference.x,
+                    qp_highs_reference.message
+                ),
+            );
+        }
+
+        let mut miqp_facade = MathProgram::new(MathObjectiveSense::Min);
+        let miqp_x = miqp_facade
+            .add_integer_var("miqp-x", -4.0, Some(0.0), Some(5.0))
+            .expect("MIQP x");
+        miqp_facade
+            .add_quadratic_objective_term(miqp_x, miqp_x, 1.0)
+            .expect("MIQP quadratic term");
+        match cross_check_math_program_with_external(
+            &miqp_facade,
+            &solve_opts,
+            &nonlinear_external_opts,
+            1e-7,
+        ) {
+            Ok(report) => self.check(
+                "MathProgram MIQP facade same-input enumeration cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && report.internal.solver == "des-mip-convex-qp-cutting-plane"
+                    && report.external.solver == "python:bounded-integer-qp-enumeration"
+                    && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && (report.internal.x[miqp_x] - 2.0).abs() <= 1e-7,
+                format!(
+                    "internal={:?} external={:?} solvers=({},{}) obj_diff={:?} x_diff={:?} x={:?} nodes={:?}",
+                    report.internal.status,
+                    report.external.status,
+                    report.internal.solver,
+                    report.external.solver,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal.x,
+                    report.external.nodes_explored
+                ),
+            ),
+            Err(err) => self.check(
+                "MathProgram MIQP facade same-input enumeration cross-check",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+        let miqp_reference_problem = MixedIntegerQuadraticProgram {
+            qp: QuadraticProgram {
+                q: vec![vec![2.0]],
+                c: vec![-4.0],
+                lb: Some(vec![Some(0.0)]),
+                ub: Some(vec![Some(5.0)]),
+                var_names: Some(vec!["miqp-x".to_string()]),
+                ..Default::default()
+            },
+            integer_vars: vec![true],
+        };
+        let miqp_internal_for_reference =
+            solve_math_program(&miqp_facade, &solve_opts).expect("MIQP facade internal solve");
+        let miqp_external_reference = solve_miqp_with_external_reference(
+            &miqp_reference_problem,
+            &ExternalQuadraticReferenceOptions::default(),
+        );
+        if miqp_external_reference.status == ExternalQuadraticReferenceStatus::Unavailable {
+            println!(
+                "  SKIP  MathProgram MIQP facade same-input quadratic-reference cross-check: {}",
+                miqp_external_reference.message
+            );
+        } else {
+            self.check(
+                "MathProgram MIQP facade same-input quadratic-reference cross-check",
+                miqp_internal_for_reference.status == MathProgramStatus::Optimal
+                    && miqp_external_reference.status == ExternalQuadraticReferenceStatus::Optimal
+                    && miqp_external_reference
+                        .objective
+                        .is_some_and(|objective| {
+                            (objective - miqp_internal_for_reference.objective).abs() <= 1e-7
+                        })
+                    && max_abs_diff(&miqp_internal_for_reference.x, &miqp_external_reference.x)
+                        <= 1e-7
+                    && (miqp_internal_for_reference.x[miqp_x] - 2.0).abs() <= 1e-7,
+                format!(
+                    "internal={:?} external={} solver={} objective={:?}/{:?} x={:?}/{:?} enumerated={:?} message={}",
+                    miqp_internal_for_reference.status,
+                    miqp_external_reference.status.as_str(),
+                    miqp_external_reference.solver,
+                    Some(miqp_internal_for_reference.objective),
+                    miqp_external_reference.objective,
+                    miqp_internal_for_reference.x,
+                    miqp_external_reference.x,
+                    miqp_external_reference.enumerated,
+                    miqp_external_reference.message
+                ),
+            );
+        }
+
+        let mut socp_facade = MathProgram::new(MathObjectiveSense::Min);
+        let socp_x = socp_facade
+            .add_continuous_var("socp-x", 0.0, Some(0.0), Some(3.0))
+            .expect("SOCP x");
+        let socp_y = socp_facade
+            .add_continuous_var("socp-y", 0.0, Some(0.0), Some(4.0))
+            .expect("SOCP y");
+        let socp_t = socp_facade
+            .add_continuous_var("socp-t", 1.0, Some(0.0), Some(10.0))
+            .expect("SOCP t");
+        socp_facade
+            .add_constraint("fix-socp-x", vec![(socp_x, 1.0)], RowSense::Eq, 3.0)
+            .expect("SOCP fix x");
+        socp_facade
+            .add_constraint("fix-socp-y", vec![(socp_y, 1.0)], RowSense::Eq, 4.0)
+            .expect("SOCP fix y");
+        socp_facade
+            .add_l2_norm("socp-norm", socp_t, vec![socp_x, socp_y])
+            .expect("SOCP L2 norm");
+        if let Some(report) = self.math_program_cross_check_or_skip(
+            "MathProgram SOCP facade same-input SLSQP cross-check",
+            &socp_facade,
+            &solve_opts,
+            &nonlinear_external_opts,
+            1e-6,
+        ) {
+            self.check(
+                "MathProgram SOCP facade same-input SLSQP cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && report.internal.solver == "des-soc-cutting-plane"
+                    && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-6)
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-5)
+                    && (report.internal.x[socp_t] - 5.0).abs() <= 1e-5,
+                format!(
+                    "internal={:?} external={:?} solver={} obj_diff={:?} x_diff={:?} x={:?} violations=({:?},{:?})",
+                    report.internal.status,
+                    report.external.status,
+                    report.internal.solver,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal.x,
+                    report.internal_max_violation,
+                    report.external_max_violation
+                ),
+            );
+        }
+        let socp_reference_problem = SecondOrderConeProgram {
+            c: vec![0.0, 0.0, 1.0],
+            a_eq: Some(vec![vec![1.0, 0.0, 0.0], vec![0.0, 1.0, 0.0]]),
+            b_eq: Some(vec![3.0, 4.0]),
+            lb: Some(vec![Some(0.0), Some(0.0), Some(0.0)]),
+            ub: Some(vec![Some(3.0), Some(4.0), Some(10.0)]),
+            cones: vec![SecondOrderCone {
+                a: vec![vec![1.0, 0.0, 0.0], vec![0.0, 1.0, 0.0]],
+                b: vec![0.0, 0.0],
+                c: vec![0.0, 0.0, 1.0],
+                d: 0.0,
+                name: Some("socp-norm".to_string()),
+            }],
+            var_names: Some(vec![
+                "socp-x".to_string(),
+                "socp-y".to_string(),
+                "socp-t".to_string(),
+            ]),
+            ..Default::default()
+        };
+        let socp_internal_for_reference =
+            solve_math_program(&socp_facade, &solve_opts).expect("SOCP facade internal solve");
+        let socp_external_reference = solve_socp_with_external_reference(
+            &socp_reference_problem,
+            &ExternalQuadraticReferenceOptions {
+                solver: ExternalQuadraticReferenceSolver::Scipy,
+                ..Default::default()
+            },
+        );
+        if socp_external_reference.status == ExternalQuadraticReferenceStatus::Unavailable {
+            println!(
+                "  SKIP  MathProgram SOCP facade same-input quadratic-reference cross-check: {}",
+                socp_external_reference.message
+            );
+        } else {
+            self.check(
+                "MathProgram SOCP facade same-input quadratic-reference cross-check",
+                socp_internal_for_reference.status == MathProgramStatus::Optimal
+                    && socp_external_reference.status == ExternalQuadraticReferenceStatus::Optimal
+                    && socp_external_reference.solver.contains("scipy")
+                    && socp_external_reference
+                        .objective
+                        .is_some_and(|objective| {
+                            (objective - socp_internal_for_reference.objective).abs() <= 1e-6
+                        })
+                    && max_abs_diff(&socp_internal_for_reference.x, &socp_external_reference.x)
+                        <= 1e-5
+                    && (socp_internal_for_reference.x[socp_t] - 5.0).abs() <= 1e-5,
+                format!(
+                    "internal={:?} external={} solver={} objective={:?}/{:?} x={:?}/{:?} iterations={:?} message={}",
+                    socp_internal_for_reference.status,
+                    socp_external_reference.status.as_str(),
+                    socp_external_reference.solver,
+                    Some(socp_internal_for_reference.objective),
+                    socp_external_reference.objective,
+                    socp_internal_for_reference.x,
+                    socp_external_reference.x,
+                    socp_external_reference.iterations,
+                    socp_external_reference.message
+                ),
+            );
+        }
+
+        let mut rotated_socp_facade = MathProgram::new(MathObjectiveSense::Min);
+        let rotated_socp_u = rotated_socp_facade
+            .add_continuous_var("rotated-socp-u", 0.0, Some(0.0), Some(5.0))
+            .expect("rotated SOCP u");
+        let rotated_socp_v = rotated_socp_facade
+            .add_continuous_var("rotated-socp-v", 1.0, Some(0.0), Some(10.0))
+            .expect("rotated SOCP v");
+        let rotated_socp_z = rotated_socp_facade
+            .add_continuous_var("rotated-socp-z", 0.0, Some(0.0), Some(4.0))
+            .expect("rotated SOCP z");
+        rotated_socp_facade
+            .add_constraint(
+                "fix-rotated-socp-u",
+                vec![(rotated_socp_u, 1.0)],
+                RowSense::Eq,
+                2.0,
+            )
+            .expect("rotated SOCP fix u");
+        rotated_socp_facade
+            .add_constraint(
+                "fix-rotated-socp-z",
+                vec![(rotated_socp_z, 1.0)],
+                RowSense::Eq,
+                4.0,
+            )
+            .expect("rotated SOCP fix z");
+        rotated_socp_facade
+            .add_rotated_second_order_cone(
+                "rotated-socp-energy",
+                MathProgram::affine_term(vec![(rotated_socp_u, 1.0)], 0.0),
+                MathProgram::affine_term(vec![(rotated_socp_v, 1.0)], 0.0),
+                vec![MathProgram::affine_term(vec![(rotated_socp_z, 1.0)], 0.0)],
+            )
+            .expect("rotated SOCP cone");
+        if let Some(report) = self.math_program_cross_check_or_skip(
+            "MathProgram rotated SOCP facade same-input SLSQP cross-check",
+            &rotated_socp_facade,
+            &solve_opts,
+            &nonlinear_external_opts,
+            1e-6,
+        ) {
+            self.check(
+                "MathProgram rotated SOCP facade same-input SLSQP cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && report.internal.solver == "des-soc-cutting-plane"
+                    && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-6)
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-5)
+                    && (report.internal.x[rotated_socp_v] - 4.0).abs() <= 1e-5,
+                format!(
+                    "internal={:?} external={:?} solver={} obj_diff={:?} x_diff={:?} x={:?} violations=({:?},{:?})",
+                    report.internal.status,
+                    report.external.status,
+                    report.internal.solver,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal.x,
+                    report.internal_max_violation,
+                    report.external_max_violation
+                ),
+            );
+        }
+        let rotated_socp_reference_problem = SecondOrderConeProgram {
+            c: vec![0.0, 1.0, 0.0],
+            a_eq: Some(vec![vec![1.0, 0.0, 0.0], vec![0.0, 0.0, 1.0]]),
+            b_eq: Some(vec![2.0, 4.0]),
+            lb: Some(vec![Some(0.0), Some(0.0), Some(0.0)]),
+            ub: Some(vec![Some(5.0), Some(10.0), Some(4.0)]),
+            cones: vec![SecondOrderCone {
+                a: vec![vec![0.0, 0.0, 2.0_f64.sqrt()], vec![1.0, -1.0, 0.0]],
+                b: vec![0.0, 0.0],
+                c: vec![1.0, 1.0, 0.0],
+                d: 0.0,
+                name: Some("rotated-socp-energy-as-standard-soc".to_string()),
+            }],
+            var_names: Some(vec![
+                "rotated-socp-u".to_string(),
+                "rotated-socp-v".to_string(),
+                "rotated-socp-z".to_string(),
+            ]),
+            ..Default::default()
+        };
+        let rotated_socp_internal_for_reference =
+            solve_math_program(&rotated_socp_facade, &solve_opts)
+                .expect("rotated SOCP facade internal solve");
+        let rotated_socp_external_reference = solve_socp_with_external_reference(
+            &rotated_socp_reference_problem,
+            &ExternalQuadraticReferenceOptions {
+                solver: ExternalQuadraticReferenceSolver::Scipy,
+                ..Default::default()
+            },
+        );
+        if rotated_socp_external_reference.status == ExternalQuadraticReferenceStatus::Unavailable {
+            println!(
+                "  SKIP  MathProgram rotated SOCP facade same-input quadratic-reference cross-check: {}",
+                rotated_socp_external_reference.message
+            );
+        } else {
+            self.check(
+                "MathProgram rotated SOCP facade same-input quadratic-reference cross-check",
+                rotated_socp_internal_for_reference.status == MathProgramStatus::Optimal
+                    && rotated_socp_external_reference.status
+                        == ExternalQuadraticReferenceStatus::Optimal
+                    && rotated_socp_external_reference.solver.contains("scipy")
+                    && rotated_socp_external_reference
+                        .objective
+                        .is_some_and(|objective| {
+                            (objective - rotated_socp_internal_for_reference.objective).abs()
+                                <= 1e-6
+                        })
+                    && max_abs_diff(
+                        &rotated_socp_internal_for_reference.x,
+                        &rotated_socp_external_reference.x,
+                    ) <= 1e-5
+                    && (rotated_socp_internal_for_reference.x[rotated_socp_v] - 4.0).abs()
+                        <= 1e-5,
+                format!(
+                    "internal={:?} external={} solver={} objective={:?}/{:?} x={:?}/{:?} iterations={:?} message={}",
+                    rotated_socp_internal_for_reference.status,
+                    rotated_socp_external_reference.status.as_str(),
+                    rotated_socp_external_reference.solver,
+                    Some(rotated_socp_internal_for_reference.objective),
+                    rotated_socp_external_reference.objective,
+                    rotated_socp_internal_for_reference.x,
+                    rotated_socp_external_reference.x,
+                    rotated_socp_external_reference.iterations,
+                    rotated_socp_external_reference.message
+                ),
+            );
+        }
+
+        let mut misocp_facade = MathProgram::new(MathObjectiveSense::Min);
+        let misocp_x = misocp_facade
+            .add_integer_var("misocp-x", 0.0, Some(3.0), Some(3.0))
+            .expect("MISOCP x");
+        let misocp_y = misocp_facade
+            .add_integer_var("misocp-y", 0.0, Some(4.0), Some(4.0))
+            .expect("MISOCP y");
+        let misocp_t = misocp_facade
+            .add_integer_var("misocp-t", 1.0, Some(0.0), Some(10.0))
+            .expect("MISOCP t");
+        misocp_facade
+            .add_l2_norm("misocp-norm", misocp_t, vec![misocp_x, misocp_y])
+            .expect("MISOCP L2 norm");
+        match cross_check_math_program_with_external(
+            &misocp_facade,
+            &solve_opts,
+            &nonlinear_external_opts,
+            1e-7,
+        ) {
+            Ok(report) => self.check(
+                "MathProgram MISOCP facade same-input enumeration cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && report.internal.solver == "des-mip-soc-cutting-plane"
+                    && report.external.solver == "python:bounded-integer-conic-enumeration"
+                    && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && (report.internal.x[misocp_t] - 5.0).abs() <= 1e-7,
+                format!(
+                    "internal={:?} external={:?} solvers=({},{}) obj_diff={:?} x_diff={:?} x={:?} nodes={:?}",
+                    report.internal.status,
+                    report.external.status,
+                    report.internal.solver,
+                    report.external.solver,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal.x,
+                    report.external.nodes_explored
+                ),
+            ),
+            Err(err) => self.check(
+                "MathProgram MISOCP facade same-input enumeration cross-check",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+        let misocp_reference_problem = MixedIntegerSecondOrderConeProgram {
+            socp: SecondOrderConeProgram {
+                c: vec![0.0, 0.0, 1.0],
+                lb: Some(vec![Some(3.0), Some(4.0), Some(0.0)]),
+                ub: Some(vec![Some(3.0), Some(4.0), Some(10.0)]),
+                cones: vec![SecondOrderCone {
+                    a: vec![vec![1.0, 0.0, 0.0], vec![0.0, 1.0, 0.0]],
+                    b: vec![0.0, 0.0],
+                    c: vec![0.0, 0.0, 1.0],
+                    d: 0.0,
+                    name: Some("misocp-norm".to_string()),
+                }],
+                var_names: Some(vec![
+                    "misocp-x".to_string(),
+                    "misocp-y".to_string(),
+                    "misocp-t".to_string(),
+                ]),
+                ..Default::default()
+            },
+            integer_vars: vec![true, true, true],
+        };
+        let misocp_internal_for_reference =
+            solve_math_program(&misocp_facade, &solve_opts).expect("MISOCP facade internal solve");
+        let misocp_external_reference = solve_misocp_with_external_reference(
+            &misocp_reference_problem,
+            &ExternalQuadraticReferenceOptions::default(),
+        );
+        if misocp_external_reference.status == ExternalQuadraticReferenceStatus::Unavailable {
+            println!(
+                "  SKIP  MathProgram MISOCP facade same-input quadratic-reference cross-check: {}",
+                misocp_external_reference.message
+            );
+        } else {
+            self.check(
+                "MathProgram MISOCP facade same-input quadratic-reference cross-check",
+                misocp_internal_for_reference.status == MathProgramStatus::Optimal
+                    && misocp_external_reference.status == ExternalQuadraticReferenceStatus::Optimal
+                    && misocp_external_reference
+                        .objective
+                        .is_some_and(|objective| {
+                            (objective - misocp_internal_for_reference.objective).abs() <= 1e-7
+                        })
+                    && max_abs_diff(&misocp_internal_for_reference.x, &misocp_external_reference.x)
+                        <= 1e-7
+                    && (misocp_internal_for_reference.x[misocp_t] - 5.0).abs() <= 1e-7,
+                format!(
+                    "internal={:?} external={} solver={} objective={:?}/{:?} x={:?}/{:?} enumerated={:?} message={}",
+                    misocp_internal_for_reference.status,
+                    misocp_external_reference.status.as_str(),
+                    misocp_external_reference.solver,
+                    Some(misocp_internal_for_reference.objective),
+                    misocp_external_reference.objective,
+                    misocp_internal_for_reference.x,
+                    misocp_external_reference.x,
+                    misocp_external_reference.enumerated,
+                    misocp_external_reference.message
+                ),
+            );
+        }
+
+        let mut rotated_misocp_facade = MathProgram::new(MathObjectiveSense::Min);
+        let rotated_misocp_u = rotated_misocp_facade
+            .add_integer_var("rotated-misocp-u", 0.0, Some(2.0), Some(2.0))
+            .expect("rotated MISOCP u");
+        let rotated_misocp_v = rotated_misocp_facade
+            .add_integer_var("rotated-misocp-v", 1.0, Some(0.0), Some(10.0))
+            .expect("rotated MISOCP v");
+        let rotated_misocp_z = rotated_misocp_facade
+            .add_integer_var("rotated-misocp-z", 0.0, Some(4.0), Some(4.0))
+            .expect("rotated MISOCP z");
+        rotated_misocp_facade
+            .add_rotated_second_order_cone(
+                "rotated-misocp-energy",
+                MathProgram::affine_term(vec![(rotated_misocp_u, 1.0)], 0.0),
+                MathProgram::affine_term(vec![(rotated_misocp_v, 1.0)], 0.0),
+                vec![MathProgram::affine_term(vec![(rotated_misocp_z, 1.0)], 0.0)],
+            )
+            .expect("rotated MISOCP cone");
+        match cross_check_math_program_with_external(
+            &rotated_misocp_facade,
+            &solve_opts,
+            &nonlinear_external_opts,
+            1e-7,
+        ) {
+            Ok(report) => self.check(
+                "MathProgram rotated MISOCP facade same-input enumeration cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && report.internal.solver == "des-mip-soc-cutting-plane"
+                    && report.external.solver == "python:bounded-integer-conic-enumeration"
+                    && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && (report.internal.x[rotated_misocp_v] - 4.0).abs() <= 1e-7,
+                format!(
+                    "internal={:?} external={:?} solvers=({},{}) obj_diff={:?} x_diff={:?} x={:?} nodes={:?}",
+                    report.internal.status,
+                    report.external.status,
+                    report.internal.solver,
+                    report.external.solver,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal.x,
+                    report.external.nodes_explored
+                ),
+            ),
+            Err(err) => self.check(
+                "MathProgram rotated MISOCP facade same-input enumeration cross-check",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+        let rotated_misocp_reference_problem = MixedIntegerSecondOrderConeProgram {
+            socp: SecondOrderConeProgram {
+                c: vec![0.0, 1.0, 0.0],
+                lb: Some(vec![Some(2.0), Some(0.0), Some(4.0)]),
+                ub: Some(vec![Some(2.0), Some(10.0), Some(4.0)]),
+                cones: vec![SecondOrderCone {
+                    a: vec![vec![0.0, 0.0, 2.0_f64.sqrt()], vec![1.0, -1.0, 0.0]],
+                    b: vec![0.0, 0.0],
+                    c: vec![1.0, 1.0, 0.0],
+                    d: 0.0,
+                    name: Some("rotated-misocp-energy-as-standard-soc".to_string()),
+                }],
+                var_names: Some(vec![
+                    "rotated-misocp-u".to_string(),
+                    "rotated-misocp-v".to_string(),
+                    "rotated-misocp-z".to_string(),
+                ]),
+                ..Default::default()
+            },
+            integer_vars: vec![true, true, true],
+        };
+        let rotated_misocp_internal_for_reference =
+            solve_math_program(&rotated_misocp_facade, &solve_opts)
+                .expect("rotated MISOCP facade internal solve");
+        let rotated_misocp_external_reference = solve_misocp_with_external_reference(
+            &rotated_misocp_reference_problem,
+            &ExternalQuadraticReferenceOptions::default(),
+        );
+        if rotated_misocp_external_reference.status == ExternalQuadraticReferenceStatus::Unavailable
+        {
+            println!(
+                "  SKIP  MathProgram rotated MISOCP facade same-input quadratic-reference cross-check: {}",
+                rotated_misocp_external_reference.message
+            );
+        } else {
+            self.check(
+                "MathProgram rotated MISOCP facade same-input quadratic-reference cross-check",
+                rotated_misocp_internal_for_reference.status == MathProgramStatus::Optimal
+                    && rotated_misocp_external_reference.status
+                        == ExternalQuadraticReferenceStatus::Optimal
+                    && rotated_misocp_external_reference
+                        .objective
+                        .is_some_and(|objective| {
+                            (objective - rotated_misocp_internal_for_reference.objective).abs()
+                                <= 1e-7
+                        })
+                    && max_abs_diff(
+                        &rotated_misocp_internal_for_reference.x,
+                        &rotated_misocp_external_reference.x,
+                    ) <= 1e-7
+                    && (rotated_misocp_internal_for_reference.x[rotated_misocp_v] - 4.0).abs()
+                        <= 1e-7,
+                format!(
+                    "internal={:?} external={} solver={} objective={:?}/{:?} x={:?}/{:?} enumerated={:?} message={}",
+                    rotated_misocp_internal_for_reference.status,
+                    rotated_misocp_external_reference.status.as_str(),
+                    rotated_misocp_external_reference.solver,
+                    Some(rotated_misocp_internal_for_reference.objective),
+                    rotated_misocp_external_reference.objective,
+                    rotated_misocp_internal_for_reference.x,
+                    rotated_misocp_external_reference.x,
+                    rotated_misocp_external_reference.enumerated,
+                    rotated_misocp_external_reference.message
+                ),
+            );
+        }
+
+        let mut qcp_facade = MathProgram::new(MathObjectiveSense::Min);
+        let qcp_x = qcp_facade
+            .add_continuous_var("qcp-x", 0.0, Some(0.0), Some(5.0))
+            .expect("QCP x");
+        let qcp_y = qcp_facade
+            .add_continuous_var("qcp-y", 1.0, Some(0.0), Some(20.0))
+            .expect("QCP y");
+        qcp_facade
+            .add_constraint("fix-qcp-x", vec![(qcp_x, 1.0)], RowSense::Eq, 3.0)
+            .expect("QCP fix x");
+        qcp_facade
+            .add_quadratic_constraint(
+                "qcp-epigraph-square",
+                vec![(qcp_x, qcp_x, 1.0)],
+                vec![(qcp_y, -1.0)],
+                RowSense::Le,
+                0.0,
+            )
+            .expect("QCP quadratic row");
+        if let Some(report) = self.math_program_cross_check_or_skip(
+            "MathProgram QCP facade same-input SLSQP cross-check",
+            &qcp_facade,
+            &solve_opts,
+            &nonlinear_external_opts,
+            1e-6,
+        ) {
+            self.check(
+                "MathProgram QCP facade same-input SLSQP cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && report.internal.solver == "des-convex-cutting-plane"
+                    && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-6)
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-5)
+                    && (report.internal.x[qcp_y] - 9.0).abs() <= 1e-5,
+                format!(
+                    "internal={:?} external={:?} solver={} obj_diff={:?} x_diff={:?} x={:?} violations=({:?},{:?})",
+                    report.internal.status,
+                    report.external.status,
+                    report.internal.solver,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal.x,
+                    report.internal_max_violation,
+                    report.external_max_violation
+                ),
+            );
+        }
+        let qcp_reference_problem = QuadraticallyConstrainedProgram {
+            q: vec![vec![0.0, 0.0], vec![0.0, 0.0]],
+            c: vec![0.0, 1.0],
+            a_eq: Some(vec![vec![1.0, 0.0]]),
+            b_eq: Some(vec![3.0]),
+            lb: Some(vec![Some(0.0), Some(0.0)]),
+            ub: Some(vec![Some(5.0), Some(20.0)]),
+            quadratic_constraints: vec![QuadraticConstraint {
+                q: vec![vec![1.0, 0.0], vec![0.0, 0.0]],
+                c: vec![0.0, -1.0],
+                rhs: 0.0,
+                name: Some("qcp-epigraph-square".to_string()),
+            }],
+            var_names: Some(vec!["qcp-x".to_string(), "qcp-y".to_string()]),
+            ..Default::default()
+        };
+        let qcp_internal_for_reference =
+            solve_math_program(&qcp_facade, &solve_opts).expect("QCP facade internal solve");
+        let qcp_external_reference = solve_qcp_with_external_reference(
+            &qcp_reference_problem,
+            &ExternalQuadraticReferenceOptions {
+                solver: ExternalQuadraticReferenceSolver::Scipy,
+                ..Default::default()
+            },
+        );
+        if qcp_external_reference.status == ExternalQuadraticReferenceStatus::Unavailable {
+            println!(
+                "  SKIP  MathProgram QCP facade same-input quadratic-reference cross-check: {}",
+                qcp_external_reference.message
+            );
+        } else {
+            self.check(
+                "MathProgram QCP facade same-input quadratic-reference cross-check",
+                qcp_internal_for_reference.status == MathProgramStatus::Optimal
+                    && qcp_external_reference.status == ExternalQuadraticReferenceStatus::Optimal
+                    && qcp_external_reference.solver.contains("scipy")
+                    && qcp_external_reference
+                        .objective
+                        .is_some_and(|objective| {
+                            (objective - qcp_internal_for_reference.objective).abs() <= 1e-6
+                        })
+                    && max_abs_diff(&qcp_internal_for_reference.x, &qcp_external_reference.x)
+                        <= 1e-5
+                    && (qcp_internal_for_reference.x[qcp_y] - 9.0).abs() <= 1e-5,
+                format!(
+                    "internal={:?} external={} solver={} objective={:?}/{:?} x={:?}/{:?} iterations={:?} message={}",
+                    qcp_internal_for_reference.status,
+                    qcp_external_reference.status.as_str(),
+                    qcp_external_reference.solver,
+                    Some(qcp_internal_for_reference.objective),
+                    qcp_external_reference.objective,
+                    qcp_internal_for_reference.x,
+                    qcp_external_reference.x,
+                    qcp_external_reference.iterations,
+                    qcp_external_reference.message
+                ),
+            );
+        }
+
+        let mut miqcp_facade = MathProgram::new(MathObjectiveSense::Min);
+        let miqcp_x = miqcp_facade
+            .add_integer_var("miqcp-x", 0.0, Some(3.0), Some(3.0))
+            .expect("MIQCP x");
+        let miqcp_y = miqcp_facade
+            .add_integer_var("miqcp-y", 1.0, Some(0.0), Some(20.0))
+            .expect("MIQCP y");
+        miqcp_facade
+            .add_quadratic_constraint(
+                "miqcp-epigraph-square",
+                vec![(miqcp_x, miqcp_x, 1.0)],
+                vec![(miqcp_y, -1.0)],
+                RowSense::Le,
+                0.0,
+            )
+            .expect("MIQCP quadratic row");
+        match cross_check_math_program_with_external(
+            &miqcp_facade,
+            &solve_opts,
+            &nonlinear_external_opts,
+            1e-7,
+        ) {
+            Ok(report) => self.check(
+                "MathProgram MIQCP facade same-input enumeration cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && report.internal.solver == "des-mip-convex-cutting-plane"
+                    && report.external.solver == "python:bounded-integer-conic-enumeration"
+                    && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && (report.internal.x[miqcp_y] - 9.0).abs() <= 1e-7,
+                format!(
+                    "internal={:?} external={:?} solvers=({},{}) obj_diff={:?} x_diff={:?} x={:?} nodes={:?}",
+                    report.internal.status,
+                    report.external.status,
+                    report.internal.solver,
+                    report.external.solver,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal.x,
+                    report.external.nodes_explored
+                ),
+            ),
+            Err(err) => self.check(
+                "MathProgram MIQCP facade same-input enumeration cross-check",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+        let miqcp_reference_problem = MixedIntegerQuadraticallyConstrainedProgram {
+            qcp: QuadraticallyConstrainedProgram {
+                q: vec![vec![0.0, 0.0], vec![0.0, 0.0]],
+                c: vec![0.0, 1.0],
+                lb: Some(vec![Some(3.0), Some(0.0)]),
+                ub: Some(vec![Some(3.0), Some(20.0)]),
+                quadratic_constraints: vec![QuadraticConstraint {
+                    q: vec![vec![1.0, 0.0], vec![0.0, 0.0]],
+                    c: vec![0.0, -1.0],
+                    rhs: 0.0,
+                    name: Some("miqcp-epigraph-square".to_string()),
+                }],
+                var_names: Some(vec!["miqcp-x".to_string(), "miqcp-y".to_string()]),
+                ..Default::default()
+            },
+            integer_vars: vec![true, true],
+        };
+        let miqcp_internal_for_reference =
+            solve_math_program(&miqcp_facade, &solve_opts).expect("MIQCP facade internal solve");
+        let miqcp_external_reference = solve_miqcp_with_external_reference(
+            &miqcp_reference_problem,
+            &ExternalQuadraticReferenceOptions::default(),
+        );
+        if miqcp_external_reference.status == ExternalQuadraticReferenceStatus::Unavailable {
+            println!(
+                "  SKIP  MathProgram MIQCP facade same-input quadratic-reference cross-check: {}",
+                miqcp_external_reference.message
+            );
+        } else {
+            self.check(
+                "MathProgram MIQCP facade same-input quadratic-reference cross-check",
+                miqcp_internal_for_reference.status == MathProgramStatus::Optimal
+                    && miqcp_external_reference.status == ExternalQuadraticReferenceStatus::Optimal
+                    && miqcp_external_reference
+                        .objective
+                        .is_some_and(|objective| {
+                            (objective - miqcp_internal_for_reference.objective).abs() <= 1e-7
+                        })
+                    && max_abs_diff(&miqcp_internal_for_reference.x, &miqcp_external_reference.x)
+                        <= 1e-7
+                    && (miqcp_internal_for_reference.x[miqcp_y] - 9.0).abs() <= 1e-7,
+                format!(
+                    "internal={:?} external={} solver={} objective={:?}/{:?} x={:?}/{:?} enumerated={:?} message={}",
+                    miqcp_internal_for_reference.status,
+                    miqcp_external_reference.status.as_str(),
+                    miqcp_external_reference.solver,
+                    Some(miqcp_internal_for_reference.objective),
+                    miqcp_external_reference.objective,
+                    miqcp_internal_for_reference.x,
+                    miqcp_external_reference.x,
+                    miqcp_external_reference.enumerated,
+                    miqcp_external_reference.message
+                ),
+            );
         }
 
         let mut range_offset_lp = MathProgram::new(MathObjectiveSense::Max);
@@ -10248,6 +12440,7 @@ impl Driver {
             )
             .expect("range row");
         let mut range_offset_expected_objective = None;
+        let mut range_offset_expected_x = None;
         match cross_check_math_program_with_external(
             &range_offset_lp,
             &solve_opts,
@@ -10256,6 +12449,7 @@ impl Driver {
         ) {
             Ok(report) => {
                 range_offset_expected_objective = Some(report.internal.objective);
+                range_offset_expected_x = Some(report.internal.x.clone());
                 self.check(
                     "MathProgram range-row/objective-offset HiGHS cross-check",
                     report.within_tolerance
@@ -10298,6 +12492,15 @@ impl Driver {
                     && export.original_variable_count == 2
                     && export.variable_names.len() == 3
                     && export.constraint_names.len() == 2
+                    && export.row_mappings.len() == export.constraint_names.len()
+                    && export.row_mappings.iter().any(|row| {
+                        row.source_kind == MathProgramExportRowKind::LinearConstraint
+                            && row.source_name.ends_with("range_lower")
+                    })
+                    && export.row_mappings.iter().any(|row| {
+                        row.source_kind == MathProgramExportRowKind::LinearConstraint
+                            && row.source_name.ends_with("range_upper")
+                    })
                     && has_offset_column
                     && has_range_lower
                     && has_range_upper;
@@ -10317,6 +12520,14 @@ impl Driver {
                         &export.text,
                         "lp",
                         range_offset_expected_objective,
+                        range_offset_expected_x
+                            .as_deref()
+                            .map(|expected_original_x| MathProgramExportSolutionCheck {
+                                variable_names: &export.variable_names,
+                                original_variable_expansions: &export.original_variable_expansions,
+                                expected_original_x,
+                                tolerance: 1e-7,
+                            }),
                     );
                 }
             }
@@ -10345,6 +12556,15 @@ impl Driver {
                     && export.original_variable_count == 2
                     && export.variable_names.len() == 3
                     && export.constraint_names.len() == 2
+                    && export.row_mappings.len() == export.constraint_names.len()
+                    && export.row_mappings.iter().any(|row| {
+                        row.source_kind == MathProgramExportRowKind::LinearConstraint
+                            && row.source_name.ends_with("range_lower")
+                    })
+                    && export.row_mappings.iter().any(|row| {
+                        row.source_kind == MathProgramExportRowKind::LinearConstraint
+                            && row.source_name.ends_with("range_upper")
+                    })
                     && has_offset_column
                     && has_range_lower
                     && has_range_upper;
@@ -10364,6 +12584,14 @@ impl Driver {
                         &export.text,
                         "mps",
                         range_offset_expected_objective,
+                        range_offset_expected_x
+                            .as_deref()
+                            .map(|expected_original_x| MathProgramExportSolutionCheck {
+                                variable_names: &export.variable_names,
+                                original_variable_expansions: &export.original_variable_expansions,
+                                expected_original_x,
+                                tolerance: 1e-7,
+                            }),
                     );
                 }
             }
@@ -10393,6 +12621,15 @@ impl Driver {
                 let passed = !export.is_mip
                     && export.original_variable_count == 3
                     && export.variable_names.len() == 3
+                    && export.original_variable_expansions.len() == 3
+                    && export.row_mappings.len() == export.constraint_names.len()
+                    && export.row_mappings.iter().any(|row| {
+                        row.source_kind == MathProgramExportRowKind::LinearConstraint
+                            && row.source_name == "balance"
+                    })
+                    && export
+                        .original_x(&[4.0, 1.0, 0.0])
+                        .is_ok_and(|x| max_abs_diff(&x, &[4.0, 1.0, 0.0]) <= 1e-12)
                     && export.text.contains("Maximize\n")
                     && export.text.contains("Subject To\n")
                     && export.text.contains("Bounds\n")
@@ -10413,6 +12650,14 @@ impl Driver {
                         &export.text,
                         "lp",
                         lp_expected_objective,
+                        lp_expected_x.as_deref().map(|expected_original_x| {
+                            MathProgramExportSolutionCheck {
+                                variable_names: &export.variable_names,
+                                original_variable_expansions: &export.original_variable_expansions,
+                                expected_original_x,
+                                tolerance: 1e-7,
+                            }
+                        }),
                     );
                 }
             }
@@ -10428,6 +12673,15 @@ impl Driver {
                 let passed = !export.is_mip
                     && export.original_variable_count == 3
                     && export.variable_names.len() == 3
+                    && export.original_variable_expansions.len() == 3
+                    && export.row_mappings.len() == export.constraint_names.len()
+                    && export.row_mappings.iter().any(|row| {
+                        row.source_kind == MathProgramExportRowKind::LinearConstraint
+                            && row.source_name == "balance"
+                    })
+                    && export
+                        .original_x(&[4.0, 1.0, 0.0])
+                        .is_ok_and(|x| max_abs_diff(&x, &[4.0, 1.0, 0.0]) <= 1e-12)
                     && export.text.contains("OBJSENSE\n MAX\n")
                     && export.text.contains("ROWS\n N  OBJ\n")
                     && export.text.contains("COLUMNS\n")
@@ -10449,6 +12703,14 @@ impl Driver {
                         &export.text,
                         "mps",
                         lp_expected_objective,
+                        lp_expected_x.as_deref().map(|expected_original_x| {
+                            MathProgramExportSolutionCheck {
+                                variable_names: &export.variable_names,
+                                original_variable_expansions: &export.original_variable_expansions,
+                                expected_original_x,
+                                tolerance: 1e-7,
+                            }
+                        }),
                     );
                 }
             }
@@ -10459,16 +12721,44 @@ impl Driver {
             ),
         }
 
-        for (solver, method) in [
+        let math_program_lp_cli_solvers = [
             (ExternalLinearCliSolver::Highs, "highs:cli"),
             (ExternalLinearCliSolver::Glpk, "glpsol:cli"),
             (ExternalLinearCliSolver::Scip, "scip:cli"),
             (ExternalLinearCliSolver::Cbc, "cbc:cli"),
+            (ExternalLinearCliSolver::Clp, "clp:cli"),
+            (ExternalLinearCliSolver::Soplex, "soplex:cli"),
+            (ExternalLinearCliSolver::LpSolve, "lp-solve:cli"),
             (ExternalLinearCliSolver::Gurobi, "gurobi:cli"),
             (ExternalLinearCliSolver::Cplex, "cplex:cli"),
             (ExternalLinearCliSolver::Xpress, "xpress:cli"),
             (ExternalLinearCliSolver::Lindo, "lindo:cli"),
-        ] {
+        ];
+        self.check(
+            "MathProgram LP facade CLI list covers registered LP solvers",
+            ExternalLinearCliSolver::open_source_lp()
+                .iter()
+                .all(|solver| {
+                    math_program_lp_cli_solvers
+                        .iter()
+                        .any(|(candidate, _)| candidate == solver)
+                })
+                && ExternalLinearCliSolver::optional_commercial_mip()
+                    .iter()
+                    .all(|solver| {
+                        math_program_lp_cli_solvers
+                            .iter()
+                            .any(|(candidate, _)| candidate == solver)
+                    }),
+            format!(
+                "solvers={:?}",
+                math_program_lp_cli_solvers
+                    .iter()
+                    .map(|(solver, _)| solver.as_str())
+                    .collect::<Vec<_>>()
+            ),
+        );
+        for (solver, method) in math_program_lp_cli_solvers {
             self.check_math_program_cli_cross_check(
                 "LP",
                 &lp,
@@ -10522,9 +12812,11 @@ impl Driver {
             .expect("peak max");
 
         let mut mip_expected_objective = None;
+        let mut mip_expected_x = None;
         match cross_check_math_program_with_external(&mip, &solve_opts, &external_opts, 1e-7) {
             Ok(report) => {
                 mip_expected_objective = Some(report.internal.objective);
+                mip_expected_x = Some(report.internal.x.clone());
                 self.check(
                     "MathProgram MIP facade indicator/general-constraint cross-check",
                     report.within_tolerance
@@ -10547,6 +12839,2405 @@ impl Driver {
                 false,
                 format!("{err:?}"),
             ),
+        }
+
+        let indicator_ortools_scip_opts = ExternalMathProgramOptions {
+            method: Some("ortools:SCIP".to_string()),
+            time_limit_ms: Some(5_000.0),
+            ..Default::default()
+        };
+        if let Some(report) = self.math_program_cross_check_or_skip(
+            "MathProgram MIP facade indicator/general-constraint OR-Tools SCIP cross-check",
+            &mip,
+            &solve_opts,
+            &indicator_ortools_scip_opts,
+            1e-7,
+        ) {
+            self.check(
+                "MathProgram MIP facade indicator/general-constraint OR-Tools SCIP cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && (report.internal.objective - 8.0).abs() <= 1e-7
+                    && (report.internal.x[open_a] - 1.0).abs() <= 1e-7
+                    && report.internal.x[open_b].abs() <= 1e-7
+                    && (report.internal.x[load] - 4.0).abs() <= 1e-7
+                    && report.internal.x[reserve].abs() <= 1e-7
+                    && (report.internal.x[peak] - 4.0).abs() <= 1e-7,
+                format!(
+                    "internal={:?} external={:?} obj_diff={:?} x_diff={:?} objective={} x={:?} violations=({:?},{:?}) solver={} message={:?}",
+                    report.internal.status,
+                    report.external.status,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal.objective,
+                    report.internal.x,
+                    report.internal_max_violation,
+                    report.external_max_violation,
+                    report.external.solver,
+                    report.external.message
+                ),
+            );
+        }
+
+        let mut false_indicator_mip = MathProgram::new(MathObjectiveSense::Max);
+        let false_indicator_x = false_indicator_mip
+            .add_continuous_var("false-indicator-x", 1.0, Some(0.0), Some(10.0))
+            .expect("false indicator x");
+        let false_indicator_b = false_indicator_mip
+            .add_binary_var("false-indicator-b", -20.0)
+            .expect("false indicator b");
+        false_indicator_mip
+            .add_indicator(
+                "cap-when-indicator-false",
+                false_indicator_b,
+                false,
+                vec![(false_indicator_x, 1.0)],
+                RowSense::Le,
+                2.0,
+            )
+            .expect("false-active indicator");
+
+        match cross_check_math_program_with_external(
+            &false_indicator_mip,
+            &solve_opts,
+            &external_opts,
+            1e-7,
+        ) {
+            Ok(report) => self.check(
+                "MathProgram MIP facade false-active indicator HiGHS cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && (report.internal.objective - 2.0).abs() <= 1e-7
+                    && (report.internal.x[false_indicator_x] - 2.0).abs() <= 1e-7
+                    && report.internal.x[false_indicator_b].abs() <= 1e-7,
+                format!(
+                    "internal={:?} external={:?} obj_diff={:?} x_diff={:?} objective={} x={:?} violations=({:?},{:?})",
+                    report.internal.status,
+                    report.external.status,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal.objective,
+                    report.internal.x,
+                    report.internal_max_violation,
+                    report.external_max_violation
+                ),
+            ),
+            Err(err) => self.check(
+                "MathProgram MIP facade false-active indicator HiGHS cross-check",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+        if let Some(report) = self.math_program_cross_check_or_skip(
+            "MathProgram MIP facade false-active indicator OR-Tools SCIP cross-check",
+            &false_indicator_mip,
+            &solve_opts,
+            &indicator_ortools_scip_opts,
+            1e-7,
+        ) {
+            self.check(
+                "MathProgram MIP facade false-active indicator OR-Tools SCIP cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && (report.internal.objective - 2.0).abs() <= 1e-7
+                    && (report.internal.x[false_indicator_x] - 2.0).abs() <= 1e-7
+                    && report.internal.x[false_indicator_b].abs() <= 1e-7,
+                format!(
+                    "internal={:?} external={:?} obj_diff={:?} x_diff={:?} objective={} x={:?} violations=({:?},{:?}) solver={} message={:?}",
+                    report.internal.status,
+                    report.external.status,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal.objective,
+                    report.internal.x,
+                    report.internal_max_violation,
+                    report.external_max_violation,
+                    report.external.solver,
+                    report.external.message
+                ),
+            );
+        }
+
+        let mut general_mip = MathProgram::new(MathObjectiveSense::Max);
+        let logic_a = general_mip.add_binary_var("logic-a", 0.0).expect("logic a");
+        let logic_b = general_mip.add_binary_var("logic-b", 0.0).expect("logic b");
+        let logic_c = general_mip.add_binary_var("logic-c", 0.0).expect("logic c");
+        let logic_and = general_mip
+            .add_binary_var("logic-and", 1.0)
+            .expect("logic and");
+        let logic_or = general_mip
+            .add_binary_var("logic-or", 1.0)
+            .expect("logic or");
+        let logic_xor = general_mip
+            .add_binary_var("logic-xor", 1.0)
+            .expect("logic xor");
+        general_mip
+            .add_constraint("fix-logic-a", vec![(logic_a, 1.0)], RowSense::Eq, 1.0)
+            .expect("fix logic a");
+        general_mip
+            .add_constraint("fix-logic-b", vec![(logic_b, 1.0)], RowSense::Eq, 0.0)
+            .expect("fix logic b");
+        general_mip
+            .add_constraint("fix-logic-c", vec![(logic_c, 1.0)], RowSense::Eq, 1.0)
+            .expect("fix logic c");
+        general_mip
+            .add_binary_and("logical-and", logic_and, vec![logic_a, logic_b, logic_c])
+            .expect("logical and");
+        general_mip
+            .add_binary_or("logical-or", logic_or, vec![logic_a, logic_b])
+            .expect("logical or");
+        general_mip
+            .add_binary_xor("logical-xor", logic_xor, vec![logic_a, logic_b, logic_c])
+            .expect("logical xor");
+        general_mip
+            .add_exactly_k("logical-exactly-two", vec![logic_a, logic_b, logic_c], 2)
+            .expect("logical cardinality");
+        general_mip
+            .add_binary_implication("logical-implication", logic_a, logic_c)
+            .expect("logical implication");
+        general_mip
+            .add_boolean_clause(
+                "logical-clause",
+                vec![
+                    MathProgram::not_lit(logic_b),
+                    MathProgram::bool_lit(logic_c),
+                ],
+            )
+            .expect("logical clause");
+
+        let enforced_x = general_mip
+            .add_continuous_var("enforced-x", 1.0, Some(0.0), Some(8.0))
+            .expect("enforced x");
+        general_mip
+            .add_enforced_constraint(
+                "inactive-enforced-cap",
+                vec![
+                    MathProgram::bool_lit(logic_a),
+                    MathProgram::not_lit(logic_c),
+                ],
+                vec![(enforced_x, 1.0)],
+                RowSense::Le,
+                1.0,
+            )
+            .expect("inactive enforced cap");
+        general_mip
+            .add_enforced_constraint(
+                "active-enforced-cap",
+                vec![
+                    MathProgram::bool_lit(logic_a),
+                    MathProgram::bool_lit(logic_c),
+                ],
+                vec![(enforced_x, 1.0)],
+                RowSense::Le,
+                4.0,
+            )
+            .expect("active enforced cap");
+
+        let product_x = general_mip
+            .add_integer_var("product-x", 0.0, Some(2.0), Some(2.0))
+            .expect("product x");
+        let product_y = general_mip
+            .add_integer_var("product-y", 0.0, Some(3.0), Some(3.0))
+            .expect("product y");
+        let product_result = general_mip
+            .add_integer_var("product-result", 1.0, Some(0.0), Some(9.0))
+            .expect("product result");
+        general_mip
+            .add_multiplication_equality(
+                "integer-product",
+                product_result,
+                vec![product_x, product_y],
+            )
+            .expect("integer product");
+
+        let div_numerator = general_mip
+            .add_integer_var("div-numerator", 0.0, Some(7.0), Some(7.0))
+            .expect("division numerator");
+        let div_denominator = general_mip
+            .add_integer_var("div-denominator", 0.0, Some(3.0), Some(3.0))
+            .expect("division denominator");
+        let div_quotient = general_mip
+            .add_integer_var("div-quotient", 1.0, Some(0.0), Some(7.0))
+            .expect("division quotient");
+        let div_remainder = general_mip
+            .add_integer_var("div-remainder", 1.0, Some(0.0), Some(3.0))
+            .expect("division remainder");
+        general_mip
+            .add_division_equality(
+                "integer-division",
+                div_quotient,
+                div_numerator,
+                div_denominator,
+            )
+            .expect("integer division");
+        general_mip
+            .add_modulo_equality(
+                "integer-modulo",
+                div_remainder,
+                div_numerator,
+                div_denominator,
+            )
+            .expect("integer modulo");
+
+        let abs_arg = general_mip
+            .add_continuous_var("abs-arg", 0.0, Some(-5.0), Some(4.0))
+            .expect("abs arg");
+        let abs_result = general_mip
+            .add_continuous_var("abs-result", 1.0, Some(0.0), Some(5.0))
+            .expect("abs result");
+        general_mip
+            .add_constraint("fix-abs-arg", vec![(abs_arg, 1.0)], RowSense::Eq, -3.0)
+            .expect("fix abs arg");
+        general_mip
+            .add_abs("absolute-value", abs_result, abs_arg)
+            .expect("absolute value");
+
+        let max_a = general_mip
+            .add_continuous_var("max-a", 0.0, Some(-2.0), Some(5.0))
+            .expect("max a");
+        let max_b = general_mip
+            .add_continuous_var("max-b", 0.0, Some(-2.0), Some(5.0))
+            .expect("max b");
+        let max_result = general_mip
+            .add_continuous_var("max-result", 1.0, Some(-2.0), Some(5.0))
+            .expect("max result");
+        general_mip
+            .add_constraint("fix-max-a", vec![(max_a, 1.0)], RowSense::Eq, 2.0)
+            .expect("fix max a");
+        general_mip
+            .add_constraint("fix-max-b", vec![(max_b, 1.0)], RowSense::Eq, -1.0)
+            .expect("fix max b");
+        general_mip
+            .add_max("maximum", max_result, vec![max_a, max_b])
+            .expect("maximum");
+
+        let min_a = general_mip
+            .add_continuous_var("min-a", 0.0, Some(-2.0), Some(5.0))
+            .expect("min a");
+        let min_b = general_mip
+            .add_continuous_var("min-b", 0.0, Some(-2.0), Some(5.0))
+            .expect("min b");
+        let min_result = general_mip
+            .add_continuous_var("min-result", 1.0, Some(-2.0), Some(5.0))
+            .expect("min result");
+        general_mip
+            .add_constraint("fix-min-a", vec![(min_a, 1.0)], RowSense::Eq, 4.0)
+            .expect("fix min a");
+        general_mip
+            .add_constraint("fix-min-b", vec![(min_b, 1.0)], RowSense::Eq, 1.0)
+            .expect("fix min b");
+        general_mip
+            .add_min("minimum", min_result, vec![min_a, min_b])
+            .expect("minimum");
+
+        let l1_x = general_mip
+            .add_continuous_var("l1-x", 0.0, Some(-4.0), Some(4.0))
+            .expect("l1 x");
+        let l1_y = general_mip
+            .add_continuous_var("l1-y", 0.0, Some(-4.0), Some(4.0))
+            .expect("l1 y");
+        let l1_norm = general_mip
+            .add_continuous_var("l1-norm", 1.0, Some(0.0), Some(8.0))
+            .expect("l1 norm");
+        general_mip
+            .add_constraint("fix-l1-x", vec![(l1_x, 1.0)], RowSense::Eq, -2.0)
+            .expect("fix l1 x");
+        general_mip
+            .add_constraint("fix-l1-y", vec![(l1_y, 1.0)], RowSense::Eq, 3.0)
+            .expect("fix l1 y");
+        general_mip
+            .add_l1_norm("l1-norm-constraint", l1_norm, vec![l1_x, l1_y])
+            .expect("l1 norm constraint");
+
+        let linf_x = general_mip
+            .add_continuous_var("linf-x", 0.0, Some(-4.0), Some(4.0))
+            .expect("linf x");
+        let linf_y = general_mip
+            .add_continuous_var("linf-y", 0.0, Some(-4.0), Some(4.0))
+            .expect("linf y");
+        let linf_norm = general_mip
+            .add_continuous_var("linf-norm", 1.0, Some(0.0), Some(4.0))
+            .expect("linf norm");
+        general_mip
+            .add_constraint("fix-linf-x", vec![(linf_x, 1.0)], RowSense::Eq, -2.0)
+            .expect("fix linf x");
+        general_mip
+            .add_constraint("fix-linf-y", vec![(linf_y, 1.0)], RowSense::Eq, 3.0)
+            .expect("fix linf y");
+        general_mip
+            .add_l_infinity_norm("linf-norm-constraint", linf_norm, vec![linf_x, linf_y])
+            .expect("linf norm constraint");
+
+        let general_original_var_count = general_mip.variables.len();
+        let mut general_expected_objective = None;
+        let mut general_expected_x = None;
+        match cross_check_math_program_with_external(
+            &general_mip,
+            &solve_opts,
+            &external_opts,
+            1e-7,
+        ) {
+            Ok(report) => {
+                general_expected_objective = Some(report.internal.objective);
+                general_expected_x = Some(report.internal.x.clone());
+                self.check(
+                    "MathProgram MIP facade logical/arithmetic/norm HiGHS cross-check",
+                    report.within_tolerance
+                        && report.internal.status == MathProgramStatus::Optimal
+                        && report.external.status == MathProgramStatus::Optimal
+                        && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                        && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                        && report
+                            .internal_max_violation
+                            .is_some_and(|violation| violation <= 1e-7)
+                        && report
+                            .external_max_violation
+                            .is_some_and(|violation| violation <= 1e-7)
+                        && (report.internal.objective - 28.0).abs() <= 1e-7
+                        && (report.internal.x[logic_a] - 1.0).abs() <= 1e-7
+                        && report.internal.x[logic_b].abs() <= 1e-7
+                        && (report.internal.x[logic_c] - 1.0).abs() <= 1e-7
+                        && report.internal.x[logic_and].abs() <= 1e-7
+                        && (report.internal.x[logic_or] - 1.0).abs() <= 1e-7
+                        && report.internal.x[logic_xor].abs() <= 1e-7
+                        && (report.internal.x[enforced_x] - 4.0).abs() <= 1e-7
+                        && (report.internal.x[product_result] - 6.0).abs() <= 1e-7
+                        && (report.internal.x[div_quotient] - 2.0).abs() <= 1e-7
+                        && (report.internal.x[div_remainder] - 1.0).abs() <= 1e-7
+                        && (report.internal.x[abs_result] - 3.0).abs() <= 1e-7
+                        && (report.internal.x[max_result] - 2.0).abs() <= 1e-7
+                        && (report.internal.x[min_result] - 1.0).abs() <= 1e-7
+                        && (report.internal.x[l1_norm] - 5.0).abs() <= 1e-7
+                        && (report.internal.x[linf_norm] - 3.0).abs() <= 1e-7,
+                    format!(
+                        "internal={:?} external={:?} obj_diff={:?} x_diff={:?} objective={} x={:?} violations=({:?},{:?})",
+                        report.internal.status,
+                        report.external.status,
+                        report.objective_abs_diff,
+                        report.max_x_abs_diff,
+                        report.internal.objective,
+                        report.internal.x,
+                        report.internal_max_violation,
+                        report.external_max_violation
+                    ),
+                );
+            }
+            Err(err) => self.check(
+                "MathProgram MIP facade logical/arithmetic/norm HiGHS cross-check",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        let general_ortools_scip_opts = ExternalMathProgramOptions {
+            method: Some("ortools:SCIP".to_string()),
+            time_limit_ms: Some(5_000.0),
+            ..Default::default()
+        };
+        if let Some(report) = self.math_program_cross_check_or_skip(
+            "MathProgram MIP facade logical/arithmetic/norm OR-Tools SCIP cross-check",
+            &general_mip,
+            &solve_opts,
+            &general_ortools_scip_opts,
+            1e-7,
+        ) {
+            self.check(
+                "MathProgram MIP facade logical/arithmetic/norm OR-Tools SCIP cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report
+                        .internal_max_violation
+                        .is_some_and(|violation| violation <= 1e-7)
+                    && report
+                        .external_max_violation
+                        .is_some_and(|violation| violation <= 1e-7)
+                    && (report.internal.objective - 28.0).abs() <= 1e-7
+                    && (report.internal.x[logic_a] - 1.0).abs() <= 1e-7
+                    && report.internal.x[logic_b].abs() <= 1e-7
+                    && (report.internal.x[logic_c] - 1.0).abs() <= 1e-7
+                    && report.internal.x[logic_and].abs() <= 1e-7
+                    && (report.internal.x[logic_or] - 1.0).abs() <= 1e-7
+                    && report.internal.x[logic_xor].abs() <= 1e-7
+                    && (report.internal.x[enforced_x] - 4.0).abs() <= 1e-7
+                    && (report.internal.x[product_result] - 6.0).abs() <= 1e-7
+                    && (report.internal.x[div_quotient] - 2.0).abs() <= 1e-7
+                    && (report.internal.x[div_remainder] - 1.0).abs() <= 1e-7
+                    && (report.internal.x[abs_result] - 3.0).abs() <= 1e-7
+                    && (report.internal.x[max_result] - 2.0).abs() <= 1e-7
+                    && (report.internal.x[min_result] - 1.0).abs() <= 1e-7
+                    && (report.internal.x[l1_norm] - 5.0).abs() <= 1e-7
+                    && (report.internal.x[linf_norm] - 3.0).abs() <= 1e-7,
+                format!(
+                    "internal={:?} external={:?} obj_diff={:?} x_diff={:?} objective={} x={:?} violations=({:?},{:?}) solver={} message={:?}",
+                    report.internal.status,
+                    report.external.status,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal.objective,
+                    report.internal.x,
+                    report.internal_max_violation,
+                    report.external_max_violation,
+                    report.external.solver,
+                    report.external.message
+                ),
+            );
+        }
+
+        match export_math_program_cplex_lp(&general_mip) {
+            Ok(export) => {
+                let has_generated = |needle: &str| {
+                    export.row_mappings.iter().any(|row| {
+                        row.source_kind == MathProgramExportRowKind::Generated
+                            && row.source_name.contains(needle)
+                    })
+                };
+                let passed = export.is_mip
+                    && export.original_variable_count == general_original_var_count
+                    && export.variable_names.len() > export.original_variable_count
+                    && export.original_variable_expansions.len() == general_original_var_count
+                    && export.row_mappings.len() == export.constraint_names.len()
+                    && has_generated("logical-and")
+                    && has_generated("active-enforced-cap")
+                    && has_generated("integer-product")
+                    && has_generated("integer-division")
+                    && has_generated("absolute-value")
+                    && has_generated("maximum")
+                    && has_generated("linf-norm-constraint")
+                    && export.text.contains("Maximize\n")
+                    && export.text.contains("Subject To\n")
+                    && export.text.contains("Bounds\n")
+                    && export.text.contains("Binaries\n")
+                    && export.text.ends_with("End\n");
+                self.check(
+                    "MathProgram MIP facade logical/arithmetic/norm CPLEX-LP export",
+                    passed,
+                    format!(
+                        "original_vars={} exported_vars={} rows={} bytes={}",
+                        export.original_variable_count,
+                        export.variable_names.len(),
+                        export.constraint_names.len(),
+                        export.text.len()
+                    ),
+                );
+                if passed {
+                    self.check_math_program_export_highs_file_solve(
+                        "MathProgram MIP facade logical/arithmetic/norm CPLEX-LP HiGHS file solve",
+                        &export.text,
+                        "lp",
+                        general_expected_objective,
+                        general_expected_x.as_deref().map(|expected_original_x| {
+                            MathProgramExportSolutionCheck {
+                                variable_names: &export.variable_names,
+                                original_variable_expansions: &export.original_variable_expansions,
+                                expected_original_x,
+                                tolerance: 1e-7,
+                            }
+                        }),
+                    );
+                }
+            }
+            Err(err) => self.check(
+                "MathProgram MIP facade logical/arithmetic/norm CPLEX-LP export",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        match export_math_program_mps(&general_mip) {
+            Ok(export) => {
+                let has_generated = |needle: &str| {
+                    export.row_mappings.iter().any(|row| {
+                        row.source_kind == MathProgramExportRowKind::Generated
+                            && row.source_name.contains(needle)
+                    })
+                };
+                let passed = export.is_mip
+                    && export.original_variable_count == general_original_var_count
+                    && export.variable_names.len() > export.original_variable_count
+                    && export.original_variable_expansions.len() == general_original_var_count
+                    && export.row_mappings.len() == export.constraint_names.len()
+                    && has_generated("logical-and")
+                    && has_generated("active-enforced-cap")
+                    && has_generated("integer-product")
+                    && has_generated("integer-division")
+                    && has_generated("absolute-value")
+                    && has_generated("maximum")
+                    && has_generated("linf-norm-constraint")
+                    && export.text.contains("OBJSENSE\n MAX\n")
+                    && export.text.contains("ROWS\n N  OBJ\n")
+                    && export.text.contains("COLUMNS\n")
+                    && export.text.contains("'INTORG'")
+                    && export.text.contains("'INTEND'")
+                    && export.text.contains("BOUNDS\n")
+                    && export.text.ends_with("ENDATA\n");
+                self.check(
+                    "MathProgram MIP facade logical/arithmetic/norm MPS export",
+                    passed,
+                    format!(
+                        "original_vars={} exported_vars={} rows={} bytes={}",
+                        export.original_variable_count,
+                        export.variable_names.len(),
+                        export.constraint_names.len(),
+                        export.text.len()
+                    ),
+                );
+                if passed {
+                    self.check_math_program_export_highs_file_solve(
+                        "MathProgram MIP facade logical/arithmetic/norm MPS HiGHS file solve",
+                        &export.text,
+                        "mps",
+                        general_expected_objective,
+                        general_expected_x.as_deref().map(|expected_original_x| {
+                            MathProgramExportSolutionCheck {
+                                variable_names: &export.variable_names,
+                                original_variable_expansions: &export.original_variable_expansions,
+                                expected_original_x,
+                                tolerance: 1e-7,
+                            }
+                        }),
+                    );
+                }
+            }
+            Err(err) => self.check(
+                "MathProgram MIP facade logical/arithmetic/norm MPS export",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        let mut semi_mip = MathProgram::new(MathObjectiveSense::Min);
+        let semi_cont = semi_mip
+            .add_semi_continuous_var("semi-continuous-load", 1.0, 2.0, 5.0)
+            .expect("semi-continuous load");
+        let semi_int = semi_mip
+            .add_semi_integer_var("semi-integer-crew", 1.0, 3.0, 6.0)
+            .expect("semi-integer crew");
+        semi_mip
+            .add_constraint(
+                "force-semi-continuous-active",
+                vec![(semi_cont, 1.0)],
+                RowSense::Ge,
+                1.0,
+            )
+            .expect("semi-continuous activation");
+        semi_mip
+            .add_constraint(
+                "force-semi-integer-active",
+                vec![(semi_int, 1.0)],
+                RowSense::Ge,
+                2.0,
+            )
+            .expect("semi-integer activation");
+
+        let semi_original_var_count = semi_mip.variables.len();
+        let mut semi_expected_objective = None;
+        let mut semi_expected_x = None;
+        match cross_check_math_program_with_external(&semi_mip, &solve_opts, &external_opts, 1e-7) {
+            Ok(report) => {
+                semi_expected_objective = Some(report.internal.objective);
+                semi_expected_x = Some(report.internal.x.clone());
+                self.check(
+                    "MathProgram MIP facade semi-variable HiGHS cross-check",
+                    report.within_tolerance
+                        && report.internal.status == MathProgramStatus::Optimal
+                        && report.external.status == MathProgramStatus::Optimal
+                        && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                        && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                        && (report.internal.x[semi_cont] - 2.0).abs() <= 1e-7
+                        && (report.internal.x[semi_int] - 3.0).abs() <= 1e-7,
+                    format!(
+                        "internal={:?} external={:?} obj_diff={:?} x_diff={:?} x={:?} violations=({:?},{:?})",
+                        report.internal.status,
+                        report.external.status,
+                        report.objective_abs_diff,
+                        report.max_x_abs_diff,
+                        report.internal.x,
+                        report.internal_max_violation,
+                        report.external_max_violation
+                    ),
+                );
+            }
+            Err(err) => self.check(
+                "MathProgram MIP facade semi-variable HiGHS cross-check",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        let semi_ortools_scip_opts = ExternalMathProgramOptions {
+            method: Some("ortools:SCIP".to_string()),
+            time_limit_ms: Some(5_000.0),
+            ..Default::default()
+        };
+        if let Some(report) = self.math_program_cross_check_or_skip(
+            "MathProgram MIP facade semi-variable OR-Tools SCIP cross-check",
+            &semi_mip,
+            &solve_opts,
+            &semi_ortools_scip_opts,
+            1e-7,
+        ) {
+            self.check(
+                "MathProgram MIP facade semi-variable OR-Tools SCIP cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && (report.internal.x[semi_cont] - 2.0).abs() <= 1e-7
+                    && (report.internal.x[semi_int] - 3.0).abs() <= 1e-7,
+                format!(
+                    "internal={:?} external={:?} obj_diff={:?} x_diff={:?} x={:?} violations=({:?},{:?}) solver={} message={:?}",
+                    report.internal.status,
+                    report.external.status,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal.x,
+                    report.internal_max_violation,
+                    report.external_max_violation,
+                    report.external.solver,
+                    report.external.message
+                ),
+            );
+        }
+
+        match export_math_program_cplex_lp(&semi_mip) {
+            Ok(export) => {
+                let has_generated = |needle: &str| {
+                    export.row_mappings.iter().any(|row| {
+                        row.source_kind == MathProgramExportRowKind::Generated
+                            && row.source_name.contains(needle)
+                    })
+                };
+                let passed = export.is_mip
+                    && export.original_variable_count == semi_original_var_count
+                    && export.variable_names.len() > export.original_variable_count
+                    && export.original_variable_expansions.len() == semi_original_var_count
+                    && export.row_mappings.len() == export.constraint_names.len()
+                    && has_generated("semi-continuous-load__semi_upper")
+                    && has_generated("semi-continuous-load__semi_lower")
+                    && has_generated("semi-integer-crew__semi_upper")
+                    && has_generated("semi-integer-crew__semi_lower")
+                    && export.text.contains("Minimize\n")
+                    && export.text.contains("Subject To\n")
+                    && export.text.contains("Bounds\n")
+                    && export.text.contains("Binaries\n")
+                    && export.text.contains("Generals\n")
+                    && export.text.ends_with("End\n");
+                self.check(
+                    "MathProgram MIP facade semi-variable CPLEX-LP export",
+                    passed,
+                    format!(
+                        "original_vars={} exported_vars={} rows={} bytes={}",
+                        export.original_variable_count,
+                        export.variable_names.len(),
+                        export.constraint_names.len(),
+                        export.text.len()
+                    ),
+                );
+                if passed {
+                    self.check_math_program_export_highs_file_solve(
+                        "MathProgram MIP facade semi-variable CPLEX-LP HiGHS file solve",
+                        &export.text,
+                        "lp",
+                        semi_expected_objective,
+                        semi_expected_x.as_deref().map(|expected_original_x| {
+                            MathProgramExportSolutionCheck {
+                                variable_names: &export.variable_names,
+                                original_variable_expansions: &export.original_variable_expansions,
+                                expected_original_x,
+                                tolerance: 1e-7,
+                            }
+                        }),
+                    );
+                }
+            }
+            Err(err) => self.check(
+                "MathProgram MIP facade semi-variable CPLEX-LP export",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        match export_math_program_mps(&semi_mip) {
+            Ok(export) => {
+                let has_generated = |needle: &str| {
+                    export.row_mappings.iter().any(|row| {
+                        row.source_kind == MathProgramExportRowKind::Generated
+                            && row.source_name.contains(needle)
+                    })
+                };
+                let passed = export.is_mip
+                    && export.original_variable_count == semi_original_var_count
+                    && export.variable_names.len() > export.original_variable_count
+                    && export.original_variable_expansions.len() == semi_original_var_count
+                    && export.row_mappings.len() == export.constraint_names.len()
+                    && has_generated("semi-continuous-load__semi_upper")
+                    && has_generated("semi-continuous-load__semi_lower")
+                    && has_generated("semi-integer-crew__semi_upper")
+                    && has_generated("semi-integer-crew__semi_lower")
+                    && export.text.contains("OBJSENSE\n MIN\n")
+                    && export.text.contains("ROWS\n N  OBJ\n")
+                    && export.text.contains("COLUMNS\n")
+                    && export.text.contains("'INTORG'")
+                    && export.text.contains("'INTEND'")
+                    && export.text.contains("BOUNDS\n")
+                    && export.text.ends_with("ENDATA\n");
+                self.check(
+                    "MathProgram MIP facade semi-variable MPS export",
+                    passed,
+                    format!(
+                        "original_vars={} exported_vars={} rows={} bytes={}",
+                        export.original_variable_count,
+                        export.variable_names.len(),
+                        export.constraint_names.len(),
+                        export.text.len()
+                    ),
+                );
+                if passed {
+                    self.check_math_program_export_highs_file_solve(
+                        "MathProgram MIP facade semi-variable MPS HiGHS file solve",
+                        &export.text,
+                        "mps",
+                        semi_expected_objective,
+                        semi_expected_x.as_deref().map(|expected_original_x| {
+                            MathProgramExportSolutionCheck {
+                                variable_names: &export.variable_names,
+                                original_variable_expansions: &export.original_variable_expansions,
+                                expected_original_x,
+                                tolerance: 1e-7,
+                            }
+                        }),
+                    );
+                }
+            }
+            Err(err) => self.check(
+                "MathProgram MIP facade semi-variable MPS export",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        let mut sos_mip = MathProgram::new(MathObjectiveSense::Max);
+        let sos1_a = sos_mip
+            .add_continuous_var("sos1-a", 4.0, Some(0.0), Some(1.0))
+            .expect("sos1 a");
+        let sos1_b = sos_mip
+            .add_continuous_var("sos1-b", 9.0, Some(0.0), Some(1.0))
+            .expect("sos1 b");
+        let sos1_c = sos_mip
+            .add_continuous_var("sos1-c", 3.0, Some(0.0), Some(1.0))
+            .expect("sos1 c");
+        let sos2_a = sos_mip
+            .add_continuous_var("sos2-a", 7.0, Some(0.0), Some(1.0))
+            .expect("sos2 a");
+        let sos2_b = sos_mip
+            .add_continuous_var("sos2-b", 2.0, Some(0.0), Some(1.0))
+            .expect("sos2 b");
+        let sos2_c = sos_mip
+            .add_continuous_var("sos2-c", 6.0, Some(0.0), Some(1.0))
+            .expect("sos2 c");
+        sos_mip
+            .add_sos1(
+                "sos1-select",
+                vec![(sos1_a, 1.0), (sos1_b, 2.0), (sos1_c, 3.0)],
+            )
+            .expect("SOS1");
+        sos_mip
+            .add_constraint(
+                "sos2-pick-two",
+                vec![(sos2_a, 1.0), (sos2_b, 1.0), (sos2_c, 1.0)],
+                RowSense::Eq,
+                2.0,
+            )
+            .expect("SOS2 count");
+        sos_mip
+            .add_sos2(
+                "sos2-adjacent",
+                vec![(sos2_a, 1.0), (sos2_b, 2.0), (sos2_c, 3.0)],
+            )
+            .expect("SOS2");
+
+        let sos_original_var_count = sos_mip.variables.len();
+        let mut sos_expected_objective = None;
+        let mut sos_expected_x = None;
+        match cross_check_math_program_with_external(&sos_mip, &solve_opts, &external_opts, 1e-7) {
+            Ok(report) => {
+                sos_expected_objective = Some(report.internal.objective);
+                sos_expected_x = Some(report.internal.x.clone());
+                self.check(
+                    "MathProgram MIP facade SOS HiGHS cross-check",
+                    report.within_tolerance
+                        && report.internal.status == MathProgramStatus::Optimal
+                        && report.external.status == MathProgramStatus::Optimal
+                        && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                        && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                        && report.internal.x[sos1_a].abs() <= 1e-7
+                        && (report.internal.x[sos1_b] - 1.0).abs() <= 1e-7
+                        && report.internal.x[sos1_c].abs() <= 1e-7
+                        && (report.internal.x[sos2_a] - 1.0).abs() <= 1e-7
+                        && (report.internal.x[sos2_b] - 1.0).abs() <= 1e-7
+                        && report.internal.x[sos2_c].abs() <= 1e-7,
+                    format!(
+                        "internal={:?} external={:?} obj_diff={:?} x_diff={:?} x={:?} violations=({:?},{:?})",
+                        report.internal.status,
+                        report.external.status,
+                        report.objective_abs_diff,
+                        report.max_x_abs_diff,
+                        report.internal.x,
+                        report.internal_max_violation,
+                        report.external_max_violation
+                    ),
+                );
+            }
+            Err(err) => self.check(
+                "MathProgram MIP facade SOS HiGHS cross-check",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        let sos_ortools_scip_opts = ExternalMathProgramOptions {
+            method: Some("ortools:SCIP".to_string()),
+            time_limit_ms: Some(5_000.0),
+            ..Default::default()
+        };
+        if let Some(report) = self.math_program_cross_check_or_skip(
+            "MathProgram MIP facade SOS OR-Tools SCIP cross-check",
+            &sos_mip,
+            &solve_opts,
+            &sos_ortools_scip_opts,
+            1e-7,
+        ) {
+            self.check(
+                "MathProgram MIP facade SOS OR-Tools SCIP cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report.internal.x[sos1_a].abs() <= 1e-7
+                    && (report.internal.x[sos1_b] - 1.0).abs() <= 1e-7
+                    && report.internal.x[sos1_c].abs() <= 1e-7
+                    && (report.internal.x[sos2_a] - 1.0).abs() <= 1e-7
+                    && (report.internal.x[sos2_b] - 1.0).abs() <= 1e-7
+                    && report.internal.x[sos2_c].abs() <= 1e-7,
+                format!(
+                    "internal={:?} external={:?} obj_diff={:?} x_diff={:?} x={:?} violations=({:?},{:?}) solver={} message={:?}",
+                    report.internal.status,
+                    report.external.status,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal.x,
+                    report.internal_max_violation,
+                    report.external_max_violation,
+                    report.external.solver,
+                    report.external.message
+                ),
+            );
+        }
+
+        match export_math_program_cplex_lp(&sos_mip) {
+            Ok(export) => {
+                let has_generated = |needle: &str| {
+                    export.row_mappings.iter().any(|row| {
+                        row.source_kind == MathProgramExportRowKind::Generated
+                            && row.source_name.contains(needle)
+                    })
+                };
+                let passed = export.is_mip
+                    && export.original_variable_count == sos_original_var_count
+                    && export.variable_names.len() > export.original_variable_count
+                    && export.original_variable_expansions.len() == sos_original_var_count
+                    && export.row_mappings.len() == export.constraint_names.len()
+                    && has_generated("sos1-select__sos1_at_most_one")
+                    && has_generated("sos1-select__sos1_member_1")
+                    && has_generated("sos2-adjacent__sos2_one_interval")
+                    && has_generated("sos2-adjacent__sos2_member_1")
+                    && export.text.contains("Maximize\n")
+                    && export.text.contains("Subject To\n")
+                    && export.text.contains("Bounds\n")
+                    && export.text.contains("Binaries\n")
+                    && export.text.ends_with("End\n");
+                self.check(
+                    "MathProgram MIP facade SOS CPLEX-LP export",
+                    passed,
+                    format!(
+                        "original_vars={} exported_vars={} rows={} bytes={}",
+                        export.original_variable_count,
+                        export.variable_names.len(),
+                        export.constraint_names.len(),
+                        export.text.len()
+                    ),
+                );
+                if passed {
+                    self.check_math_program_export_highs_file_solve(
+                        "MathProgram MIP facade SOS CPLEX-LP HiGHS file solve",
+                        &export.text,
+                        "lp",
+                        sos_expected_objective,
+                        sos_expected_x.as_deref().map(|expected_original_x| {
+                            MathProgramExportSolutionCheck {
+                                variable_names: &export.variable_names,
+                                original_variable_expansions: &export.original_variable_expansions,
+                                expected_original_x,
+                                tolerance: 1e-7,
+                            }
+                        }),
+                    );
+                }
+            }
+            Err(err) => self.check(
+                "MathProgram MIP facade SOS CPLEX-LP export",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        match export_math_program_mps(&sos_mip) {
+            Ok(export) => {
+                let has_generated = |needle: &str| {
+                    export.row_mappings.iter().any(|row| {
+                        row.source_kind == MathProgramExportRowKind::Generated
+                            && row.source_name.contains(needle)
+                    })
+                };
+                let passed = export.is_mip
+                    && export.original_variable_count == sos_original_var_count
+                    && export.variable_names.len() > export.original_variable_count
+                    && export.original_variable_expansions.len() == sos_original_var_count
+                    && export.row_mappings.len() == export.constraint_names.len()
+                    && has_generated("sos1-select__sos1_at_most_one")
+                    && has_generated("sos1-select__sos1_member_1")
+                    && has_generated("sos2-adjacent__sos2_one_interval")
+                    && has_generated("sos2-adjacent__sos2_member_1")
+                    && export.text.contains("OBJSENSE\n MAX\n")
+                    && export.text.contains("ROWS\n N  OBJ\n")
+                    && export.text.contains("COLUMNS\n")
+                    && export.text.contains("'INTORG'")
+                    && export.text.contains("'INTEND'")
+                    && export.text.contains("BOUNDS\n")
+                    && export.text.ends_with("ENDATA\n");
+                self.check(
+                    "MathProgram MIP facade SOS MPS export",
+                    passed,
+                    format!(
+                        "original_vars={} exported_vars={} rows={} bytes={}",
+                        export.original_variable_count,
+                        export.variable_names.len(),
+                        export.constraint_names.len(),
+                        export.text.len()
+                    ),
+                );
+                if passed {
+                    self.check_math_program_export_highs_file_solve(
+                        "MathProgram MIP facade SOS MPS HiGHS file solve",
+                        &export.text,
+                        "mps",
+                        sos_expected_objective,
+                        sos_expected_x.as_deref().map(|expected_original_x| {
+                            MathProgramExportSolutionCheck {
+                                variable_names: &export.variable_names,
+                                original_variable_expansions: &export.original_variable_expansions,
+                                expected_original_x,
+                                tolerance: 1e-7,
+                            }
+                        }),
+                    );
+                }
+            }
+            Err(err) => self.check(
+                "MathProgram MIP facade SOS MPS export",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        let mut piecewise_mip = MathProgram::new(MathObjectiveSense::Min);
+        let piecewise_x = piecewise_mip
+            .add_continuous_var("piecewise-x", 0.0, Some(0.0), Some(2.0))
+            .expect("piecewise x");
+        let piecewise_y = piecewise_mip
+            .add_continuous_var("piecewise-y", 1.0, Some(0.0), Some(4.0))
+            .expect("piecewise y");
+        piecewise_mip
+            .add_constraint(
+                "fix-piecewise-x",
+                vec![(piecewise_x, 1.0)],
+                RowSense::Eq,
+                1.5,
+            )
+            .expect("piecewise x fix");
+        piecewise_mip
+            .add_piecewise_linear(
+                "square-ish",
+                piecewise_x,
+                piecewise_y,
+                vec![(0.0, 0.0), (1.0, 1.0), (2.0, 4.0)],
+            )
+            .expect("piecewise linear");
+
+        let piecewise_original_var_count = piecewise_mip.variables.len();
+        let mut piecewise_expected_objective = None;
+        let mut piecewise_expected_x = None;
+        match cross_check_math_program_with_external(
+            &piecewise_mip,
+            &solve_opts,
+            &external_opts,
+            1e-7,
+        ) {
+            Ok(report) => {
+                piecewise_expected_objective = Some(report.internal.objective);
+                piecewise_expected_x = Some(report.internal.x.clone());
+                self.check(
+                    "MathProgram MIP facade piecewise-linear HiGHS cross-check",
+                    report.within_tolerance
+                        && report.internal.status == MathProgramStatus::Optimal
+                        && report.external.status == MathProgramStatus::Optimal
+                        && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                        && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                        && (report.internal.x[piecewise_x] - 1.5).abs() <= 1e-7
+                        && (report.internal.x[piecewise_y] - 2.5).abs() <= 1e-7,
+                    format!(
+                        "internal={:?} external={:?} obj_diff={:?} x_diff={:?} x={:?} violations=({:?},{:?})",
+                        report.internal.status,
+                        report.external.status,
+                        report.objective_abs_diff,
+                        report.max_x_abs_diff,
+                        report.internal.x,
+                        report.internal_max_violation,
+                        report.external_max_violation
+                    ),
+                );
+            }
+            Err(err) => self.check(
+                "MathProgram MIP facade piecewise-linear HiGHS cross-check",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        let piecewise_ortools_scip_opts = ExternalMathProgramOptions {
+            method: Some("ortools:SCIP".to_string()),
+            time_limit_ms: Some(5_000.0),
+            ..Default::default()
+        };
+        if let Some(report) = self.math_program_cross_check_or_skip(
+            "MathProgram MIP facade piecewise-linear OR-Tools SCIP cross-check",
+            &piecewise_mip,
+            &solve_opts,
+            &piecewise_ortools_scip_opts,
+            1e-7,
+        ) {
+            self.check(
+                "MathProgram MIP facade piecewise-linear OR-Tools SCIP cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && (report.internal.x[piecewise_x] - 1.5).abs() <= 1e-7
+                    && (report.internal.x[piecewise_y] - 2.5).abs() <= 1e-7,
+                format!(
+                    "internal={:?} external={:?} obj_diff={:?} x_diff={:?} x={:?} violations=({:?},{:?}) solver={} message={:?}",
+                    report.internal.status,
+                    report.external.status,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal.x,
+                    report.internal_max_violation,
+                    report.external_max_violation,
+                    report.external.solver,
+                    report.external.message
+                ),
+            );
+        }
+
+        match export_math_program_cplex_lp(&piecewise_mip) {
+            Ok(export) => {
+                let has_generated = |needle: &str| {
+                    export.row_mappings.iter().any(|row| {
+                        row.source_kind == MathProgramExportRowKind::Generated
+                            && row.source_name.contains(needle)
+                    })
+                };
+                let passed = export.is_mip
+                    && export.original_variable_count == piecewise_original_var_count
+                    && export.variable_names.len() > export.original_variable_count
+                    && export.original_variable_expansions.len() == piecewise_original_var_count
+                    && export.row_mappings.len() == export.constraint_names.len()
+                    && has_generated("square-ish__lambda_sum")
+                    && has_generated("square-ish__x_link")
+                    && has_generated("square-ish__y_link")
+                    && has_generated("square-ish__segment_sum")
+                    && export.text.contains("Minimize\n")
+                    && export.text.contains("Subject To\n")
+                    && export.text.contains("Bounds\n")
+                    && export.text.contains("Binaries\n")
+                    && export.text.ends_with("End\n");
+                self.check(
+                    "MathProgram MIP facade piecewise-linear CPLEX-LP export",
+                    passed,
+                    format!(
+                        "original_vars={} exported_vars={} rows={} bytes={}",
+                        export.original_variable_count,
+                        export.variable_names.len(),
+                        export.constraint_names.len(),
+                        export.text.len()
+                    ),
+                );
+                if passed {
+                    self.check_math_program_export_highs_file_solve(
+                        "MathProgram MIP facade piecewise-linear CPLEX-LP HiGHS file solve",
+                        &export.text,
+                        "lp",
+                        piecewise_expected_objective,
+                        piecewise_expected_x.as_deref().map(|expected_original_x| {
+                            MathProgramExportSolutionCheck {
+                                variable_names: &export.variable_names,
+                                original_variable_expansions: &export.original_variable_expansions,
+                                expected_original_x,
+                                tolerance: 1e-7,
+                            }
+                        }),
+                    );
+                }
+            }
+            Err(err) => self.check(
+                "MathProgram MIP facade piecewise-linear CPLEX-LP export",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        match export_math_program_mps(&piecewise_mip) {
+            Ok(export) => {
+                let has_generated = |needle: &str| {
+                    export.row_mappings.iter().any(|row| {
+                        row.source_kind == MathProgramExportRowKind::Generated
+                            && row.source_name.contains(needle)
+                    })
+                };
+                let passed = export.is_mip
+                    && export.original_variable_count == piecewise_original_var_count
+                    && export.variable_names.len() > export.original_variable_count
+                    && export.original_variable_expansions.len() == piecewise_original_var_count
+                    && export.row_mappings.len() == export.constraint_names.len()
+                    && has_generated("square-ish__lambda_sum")
+                    && has_generated("square-ish__x_link")
+                    && has_generated("square-ish__y_link")
+                    && has_generated("square-ish__segment_sum")
+                    && export.text.contains("OBJSENSE\n MIN\n")
+                    && export.text.contains("ROWS\n N  OBJ\n")
+                    && export.text.contains("COLUMNS\n")
+                    && export.text.contains("'INTORG'")
+                    && export.text.contains("'INTEND'")
+                    && export.text.contains("BOUNDS\n")
+                    && export.text.ends_with("ENDATA\n");
+                self.check(
+                    "MathProgram MIP facade piecewise-linear MPS export",
+                    passed,
+                    format!(
+                        "original_vars={} exported_vars={} rows={} bytes={}",
+                        export.original_variable_count,
+                        export.variable_names.len(),
+                        export.constraint_names.len(),
+                        export.text.len()
+                    ),
+                );
+                if passed {
+                    self.check_math_program_export_highs_file_solve(
+                        "MathProgram MIP facade piecewise-linear MPS HiGHS file solve",
+                        &export.text,
+                        "mps",
+                        piecewise_expected_objective,
+                        piecewise_expected_x.as_deref().map(|expected_original_x| {
+                            MathProgramExportSolutionCheck {
+                                variable_names: &export.variable_names,
+                                original_variable_expansions: &export.original_variable_expansions,
+                                expected_original_x,
+                                tolerance: 1e-7,
+                            }
+                        }),
+                    );
+                }
+            }
+            Err(err) => self.check(
+                "MathProgram MIP facade piecewise-linear MPS export",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        let mut table_mip = MathProgram::new(MathObjectiveSense::Max);
+        let all_diff_x0 = table_mip
+            .add_integer_var("all-diff-x0", 100.0, Some(0.0), Some(2.0))
+            .expect("all-diff x0");
+        let all_diff_x1 = table_mip
+            .add_integer_var("all-diff-x1", 10.0, Some(0.0), Some(2.0))
+            .expect("all-diff x1");
+        let all_diff_x2 = table_mip
+            .add_integer_var("all-diff-x2", 1.0, Some(0.0), Some(2.0))
+            .expect("all-diff x2");
+        table_mip
+            .add_all_different("permute", vec![all_diff_x0, all_diff_x1, all_diff_x2])
+            .expect("all-different");
+
+        let allowed_x = table_mip
+            .add_integer_var("allowed-x", 10.0, Some(0.0), Some(2.0))
+            .expect("allowed x");
+        let allowed_y = table_mip
+            .add_integer_var("allowed-y", 1.0, Some(0.0), Some(2.0))
+            .expect("allowed y");
+        table_mip
+            .add_allowed_assignments(
+                "allowed-pairs",
+                vec![allowed_x, allowed_y],
+                vec![vec![0, 2], vec![1, 1]],
+            )
+            .expect("allowed assignments");
+
+        let forbidden_x = table_mip
+            .add_binary_var("forbidden-x", 2.0)
+            .expect("forbidden x");
+        let forbidden_y = table_mip
+            .add_binary_var("forbidden-y", 1.0)
+            .expect("forbidden y");
+        table_mip
+            .add_forbidden_assignments(
+                "forbidden-pair",
+                vec![forbidden_x, forbidden_y],
+                vec![vec![1, 1]],
+            )
+            .expect("forbidden assignments");
+
+        let element_index = table_mip
+            .add_integer_var("element-index", 0.0, Some(0.0), Some(3.0))
+            .expect("element index");
+        let element_picked = table_mip
+            .add_integer_var("element-picked", 1.0, Some(0.0), Some(9.0))
+            .expect("element picked");
+        table_mip
+            .add_element(
+                "constant-lookup",
+                element_index,
+                element_picked,
+                vec![1.0, 7.0, 4.0, 9.0],
+            )
+            .expect("element");
+
+        let variable_element_index = table_mip
+            .add_integer_var("variable-element-index", 0.0, Some(0.0), Some(2.0))
+            .expect("variable element index");
+        let variable_element_a = table_mip
+            .add_integer_var("variable-element-a", 0.0, Some(2.0), Some(2.0))
+            .expect("variable element a");
+        let variable_element_b = table_mip
+            .add_integer_var("variable-element-b", 0.0, Some(8.0), Some(8.0))
+            .expect("variable element b");
+        let variable_element_c = table_mip
+            .add_integer_var("variable-element-c", 0.0, Some(5.0), Some(5.0))
+            .expect("variable element c");
+        let variable_element_picked = table_mip
+            .add_integer_var("variable-element-picked", 1.0, Some(0.0), Some(10.0))
+            .expect("variable element picked");
+        table_mip
+            .add_variable_element(
+                "variable-lookup",
+                variable_element_index,
+                variable_element_picked,
+                vec![variable_element_a, variable_element_b, variable_element_c],
+            )
+            .expect("variable element");
+
+        let inverse_x0 = table_mip
+            .add_integer_var("inverse-x0", 0.0, Some(0.0), Some(2.0))
+            .expect("inverse x0");
+        let inverse_x1 = table_mip
+            .add_integer_var("inverse-x1", 1.0, Some(0.0), Some(2.0))
+            .expect("inverse x1");
+        let inverse_x2 = table_mip
+            .add_integer_var("inverse-x2", 0.0, Some(0.0), Some(2.0))
+            .expect("inverse x2");
+        let inverse_y0 = table_mip
+            .add_integer_var("inverse-y0", 0.0, Some(0.0), Some(2.0))
+            .expect("inverse y0");
+        let inverse_y1 = table_mip
+            .add_integer_var("inverse-y1", 0.0, Some(0.0), Some(2.0))
+            .expect("inverse y1");
+        let inverse_y2 = table_mip
+            .add_integer_var("inverse-y2", 0.0, Some(0.0), Some(2.0))
+            .expect("inverse y2");
+        table_mip
+            .add_constraint(
+                "force-inverse-x0",
+                vec![(inverse_x0, 1.0)],
+                RowSense::Eq,
+                1.0,
+            )
+            .expect("inverse x0 fix");
+        table_mip
+            .add_inverse(
+                "inverse-permutation",
+                vec![inverse_x0, inverse_x1, inverse_x2],
+                vec![inverse_y0, inverse_y1, inverse_y2],
+            )
+            .expect("inverse");
+
+        let table_original_var_count = table_mip.variables.len();
+        let mut table_expected_objective = None;
+        let mut table_expected_x = None;
+        match cross_check_math_program_with_external(&table_mip, &solve_opts, &external_opts, 1e-7)
+        {
+            Ok(report) => {
+                table_expected_objective = Some(report.internal.objective);
+                table_expected_x = Some(report.internal.x.clone());
+                self.check(
+                    "MathProgram MIP facade table/element global HiGHS cross-check",
+                    report.within_tolerance
+                        && report.internal.status == MathProgramStatus::Optimal
+                        && report.external.status == MathProgramStatus::Optimal
+                        && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                        && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                        && (report.internal.x[all_diff_x0] - 2.0).abs() <= 1e-7
+                        && (report.internal.x[all_diff_x1] - 1.0).abs() <= 1e-7
+                        && report.internal.x[all_diff_x2].abs() <= 1e-7
+                        && (report.internal.x[allowed_x] - 1.0).abs() <= 1e-7
+                        && (report.internal.x[allowed_y] - 1.0).abs() <= 1e-7
+                        && (report.internal.x[forbidden_x] - 1.0).abs() <= 1e-7
+                        && report.internal.x[forbidden_y].abs() <= 1e-7
+                        && (report.internal.x[element_index] - 3.0).abs() <= 1e-7
+                        && (report.internal.x[element_picked] - 9.0).abs() <= 1e-7
+                        && (report.internal.x[variable_element_index] - 1.0).abs() <= 1e-7
+                        && (report.internal.x[variable_element_picked] - 8.0).abs() <= 1e-7
+                        && (report.internal.x[inverse_x0] - 1.0).abs() <= 1e-7
+                        && (report.internal.x[inverse_x1] - 2.0).abs() <= 1e-7
+                        && report.internal.x[inverse_x2].abs() <= 1e-7
+                        && (report.internal.x[inverse_y0] - 2.0).abs() <= 1e-7
+                        && report.internal.x[inverse_y1].abs() <= 1e-7
+                        && (report.internal.x[inverse_y2] - 1.0).abs() <= 1e-7,
+                    format!(
+                        "internal={:?} external={:?} obj_diff={:?} x_diff={:?} x={:?} violations=({:?},{:?})",
+                        report.internal.status,
+                        report.external.status,
+                        report.objective_abs_diff,
+                        report.max_x_abs_diff,
+                        report.internal.x,
+                        report.internal_max_violation,
+                        report.external_max_violation
+                    ),
+                );
+            }
+            Err(err) => self.check(
+                "MathProgram MIP facade table/element global HiGHS cross-check",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        let table_cp_sat_opts = ExternalMathProgramOptions {
+            method: Some("ortools:CP-SAT".to_string()),
+            time_limit_ms: Some(5_000.0),
+            ..Default::default()
+        };
+        if let Some(report) = self.math_program_cross_check_or_skip(
+            "MathProgram MIP facade table/element global OR-Tools CP-SAT cross-check",
+            &table_mip,
+            &solve_opts,
+            &table_cp_sat_opts,
+            1e-7,
+        ) {
+            self.check(
+                "MathProgram MIP facade table/element global OR-Tools CP-SAT cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && (report.internal.x[all_diff_x0] - 2.0).abs() <= 1e-7
+                    && (report.internal.x[all_diff_x1] - 1.0).abs() <= 1e-7
+                    && report.internal.x[all_diff_x2].abs() <= 1e-7
+                    && (report.internal.x[allowed_x] - 1.0).abs() <= 1e-7
+                    && (report.internal.x[allowed_y] - 1.0).abs() <= 1e-7
+                    && (report.internal.x[forbidden_x] - 1.0).abs() <= 1e-7
+                    && report.internal.x[forbidden_y].abs() <= 1e-7
+                    && (report.internal.x[element_index] - 3.0).abs() <= 1e-7
+                    && (report.internal.x[element_picked] - 9.0).abs() <= 1e-7
+                    && (report.internal.x[variable_element_index] - 1.0).abs() <= 1e-7
+                    && (report.internal.x[variable_element_picked] - 8.0).abs() <= 1e-7
+                    && (report.internal.x[inverse_x0] - 1.0).abs() <= 1e-7
+                    && (report.internal.x[inverse_x1] - 2.0).abs() <= 1e-7
+                    && report.internal.x[inverse_x2].abs() <= 1e-7
+                    && (report.internal.x[inverse_y0] - 2.0).abs() <= 1e-7
+                    && report.internal.x[inverse_y1].abs() <= 1e-7
+                    && (report.internal.x[inverse_y2] - 1.0).abs() <= 1e-7,
+                format!(
+                    "internal={:?} external={:?} obj_diff={:?} x_diff={:?} x={:?} violations=({:?},{:?}) solver={} message={:?}",
+                    report.internal.status,
+                    report.external.status,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal.x,
+                    report.internal_max_violation,
+                    report.external_max_violation,
+                    report.external.solver,
+                    report.external.message
+                ),
+            );
+        }
+
+        match export_math_program_cplex_lp(&table_mip) {
+            Ok(export) => {
+                let has_generated = |needle: &str| {
+                    export.row_mappings.iter().any(|row| {
+                        row.source_kind == MathProgramExportRowKind::Generated
+                            && row.source_name.contains(needle)
+                    })
+                };
+                let passed = export.is_mip
+                    && export.original_variable_count == table_original_var_count
+                    && export.variable_names.len() > export.original_variable_count
+                    && export.original_variable_expansions.len() == table_original_var_count
+                    && export.row_mappings.len() == export.constraint_names.len()
+                    && has_generated("permute")
+                    && has_generated("allowed-pairs")
+                    && has_generated("forbidden-pair")
+                    && has_generated("constant-lookup")
+                    && has_generated("variable-lookup")
+                    && has_generated("inverse-permutation")
+                    && export.text.contains("Maximize\n")
+                    && export.text.contains("Subject To\n")
+                    && export.text.contains("Bounds\n")
+                    && export.text.contains("Binaries\n")
+                    && export.text.ends_with("End\n");
+                self.check(
+                    "MathProgram MIP facade table/element global CPLEX-LP export",
+                    passed,
+                    format!(
+                        "original_vars={} exported_vars={} rows={} bytes={}",
+                        export.original_variable_count,
+                        export.variable_names.len(),
+                        export.constraint_names.len(),
+                        export.text.len()
+                    ),
+                );
+                if passed {
+                    self.check_math_program_export_highs_file_solve(
+                        "MathProgram MIP facade table/element global CPLEX-LP HiGHS file solve",
+                        &export.text,
+                        "lp",
+                        table_expected_objective,
+                        table_expected_x.as_deref().map(|expected_original_x| {
+                            MathProgramExportSolutionCheck {
+                                variable_names: &export.variable_names,
+                                original_variable_expansions: &export.original_variable_expansions,
+                                expected_original_x,
+                                tolerance: 1e-7,
+                            }
+                        }),
+                    );
+                }
+            }
+            Err(err) => self.check(
+                "MathProgram MIP facade table/element global CPLEX-LP export",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        match export_math_program_mps(&table_mip) {
+            Ok(export) => {
+                let has_generated = |needle: &str| {
+                    export.row_mappings.iter().any(|row| {
+                        row.source_kind == MathProgramExportRowKind::Generated
+                            && row.source_name.contains(needle)
+                    })
+                };
+                let passed = export.is_mip
+                    && export.original_variable_count == table_original_var_count
+                    && export.variable_names.len() > export.original_variable_count
+                    && export.original_variable_expansions.len() == table_original_var_count
+                    && export.row_mappings.len() == export.constraint_names.len()
+                    && has_generated("permute")
+                    && has_generated("allowed-pairs")
+                    && has_generated("forbidden-pair")
+                    && has_generated("constant-lookup")
+                    && has_generated("variable-lookup")
+                    && has_generated("inverse-permutation")
+                    && export.text.contains("OBJSENSE\n MAX\n")
+                    && export.text.contains("ROWS\n N  OBJ\n")
+                    && export.text.contains("COLUMNS\n")
+                    && export.text.contains("'INTORG'")
+                    && export.text.contains("'INTEND'")
+                    && export.text.contains("BOUNDS\n")
+                    && export.text.ends_with("ENDATA\n");
+                self.check(
+                    "MathProgram MIP facade table/element global MPS export",
+                    passed,
+                    format!(
+                        "original_vars={} exported_vars={} rows={} bytes={}",
+                        export.original_variable_count,
+                        export.variable_names.len(),
+                        export.constraint_names.len(),
+                        export.text.len()
+                    ),
+                );
+                if passed {
+                    self.check_math_program_export_highs_file_solve(
+                        "MathProgram MIP facade table/element global MPS HiGHS file solve",
+                        &export.text,
+                        "mps",
+                        table_expected_objective,
+                        table_expected_x.as_deref().map(|expected_original_x| {
+                            MathProgramExportSolutionCheck {
+                                variable_names: &export.variable_names,
+                                original_variable_expansions: &export.original_variable_expansions,
+                                expected_original_x,
+                                tolerance: 1e-7,
+                            }
+                        }),
+                    );
+                }
+            }
+            Err(err) => self.check(
+                "MathProgram MIP facade table/element global MPS export",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        let mut routing_mip = MathProgram::new(MathObjectiveSense::Max);
+        let mut circuit_arcs = Vec::new();
+        let mut circuit_arc_vars = vec![vec![None; 4]; 4];
+        for tail in 0..4 {
+            for head in 0..4 {
+                if tail == head {
+                    continue;
+                }
+                let obj = match (tail, head) {
+                    (0, 1) | (1, 2) | (2, 3) | (3, 0) => 10.0,
+                    _ => 0.0,
+                };
+                let var = routing_mip
+                    .add_binary_var(format!("circuit-{tail}-{head}"), obj)
+                    .expect("circuit arc");
+                circuit_arcs.push((tail, head, var));
+                circuit_arc_vars[tail][head] = Some(var);
+            }
+        }
+        routing_mip
+            .add_circuit("tour", 4, circuit_arcs)
+            .expect("circuit");
+
+        let route_depot_to_first = routing_mip
+            .add_binary_var("route-0-1", 1.0)
+            .expect("route depot to first");
+        let route_first_to_second = routing_mip
+            .add_binary_var("route-1-2", 10.0)
+            .expect("route first to second");
+        let route_second_to_depot = routing_mip
+            .add_binary_var("route-2-0", 1.0)
+            .expect("route second to depot");
+        let route_second_to_first = routing_mip
+            .add_binary_var("route-2-1", 10.0)
+            .expect("route subtour arc");
+        let route_skipped = routing_mip
+            .add_binary_var("route-3-3", 0.0)
+            .expect("route skipped");
+        routing_mip
+            .add_multiple_circuit(
+                "routes",
+                4,
+                vec![
+                    (0, 1, route_depot_to_first),
+                    (1, 2, route_first_to_second),
+                    (2, 0, route_second_to_depot),
+                    (2, 1, route_second_to_first),
+                    (3, 3, route_skipped),
+                ],
+            )
+            .expect("multiple circuit");
+
+        let automaton_a = routing_mip
+            .add_binary_var("automaton-a", 4.0)
+            .expect("automaton a");
+        let automaton_b = routing_mip
+            .add_binary_var("automaton-b", 2.0)
+            .expect("automaton b");
+        let automaton_c = routing_mip
+            .add_binary_var("automaton-c", 1.0)
+            .expect("automaton c");
+        routing_mip
+            .add_automaton(
+                "pattern-101",
+                vec![automaton_a, automaton_b, automaton_c],
+                0,
+                vec![3],
+                vec![(0, 1, 1), (1, 0, 2), (2, 1, 3)],
+            )
+            .expect("automaton");
+
+        let bin_item0 = routing_mip
+            .add_integer_var("bin-item-0", 0.0, Some(0.0), Some(1.0))
+            .expect("bin item 0");
+        let bin_item1 = routing_mip
+            .add_integer_var("bin-item-1", 0.0, Some(0.0), Some(1.0))
+            .expect("bin item 1");
+        let bin_item2 = routing_mip
+            .add_integer_var("bin-item-2", 0.0, Some(0.0), Some(1.0))
+            .expect("bin item 2");
+        let bin_load0 = routing_mip
+            .add_integer_var("bin-load-0", 0.0, Some(0.0), Some(5.0))
+            .expect("bin load 0");
+        let bin_load1 = routing_mip
+            .add_integer_var("bin-load-1", -1.0, Some(0.0), Some(9.0))
+            .expect("bin load 1");
+        routing_mip
+            .add_bin_packing(
+                "packing",
+                vec![bin_item0, bin_item1, bin_item2],
+                vec![bin_load0, bin_load1],
+                vec![2.0, 3.0, 4.0],
+            )
+            .expect("bin packing");
+
+        let routing_original_var_count = routing_mip.variables.len();
+        let mut routing_expected_objective = None;
+        let mut routing_expected_x = None;
+        match cross_check_math_program_with_external(
+            &routing_mip,
+            &solve_opts,
+            &external_opts,
+            1e-7,
+        ) {
+            Ok(report) => {
+                routing_expected_objective = Some(report.internal.objective);
+                routing_expected_x = Some(report.internal.x.clone());
+                self.check(
+                    "MathProgram MIP facade routing/automaton/bin-packing HiGHS cross-check",
+                    report.within_tolerance
+                        && report.internal.status == MathProgramStatus::Optimal
+                        && report.external.status == MathProgramStatus::Optimal
+                        && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                        && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                        && [(0, 1), (1, 2), (2, 3), (3, 0)]
+                            .iter()
+                            .all(|&(tail, head)| {
+                                circuit_arc_vars[tail][head].is_some_and(|var| {
+                                    (report.internal.x[var] - 1.0).abs() <= 1e-7
+                                })
+                            })
+                        && (report.internal.x[route_depot_to_first] - 1.0).abs() <= 1e-7
+                        && (report.internal.x[route_first_to_second] - 1.0).abs() <= 1e-7
+                        && (report.internal.x[route_second_to_depot] - 1.0).abs() <= 1e-7
+                        && report.internal.x[route_second_to_first].abs() <= 1e-7
+                        && (report.internal.x[route_skipped] - 1.0).abs() <= 1e-7
+                        && (report.internal.x[automaton_a] - 1.0).abs() <= 1e-7
+                        && report.internal.x[automaton_b].abs() <= 1e-7
+                        && (report.internal.x[automaton_c] - 1.0).abs() <= 1e-7
+                        && report.internal.x[bin_item0].abs() <= 1e-7
+                        && report.internal.x[bin_item1].abs() <= 1e-7
+                        && (report.internal.x[bin_item2] - 1.0).abs() <= 1e-7
+                        && (report.internal.x[bin_load0] - 5.0).abs() <= 1e-7
+                        && (report.internal.x[bin_load1] - 4.0).abs() <= 1e-7,
+                    format!(
+                        "internal={:?} external={:?} obj_diff={:?} x_diff={:?} x={:?} violations=({:?},{:?})",
+                        report.internal.status,
+                        report.external.status,
+                        report.objective_abs_diff,
+                        report.max_x_abs_diff,
+                        report.internal.x,
+                        report.internal_max_violation,
+                        report.external_max_violation
+                    ),
+                );
+            }
+            Err(err) => self.check(
+                "MathProgram MIP facade routing/automaton/bin-packing HiGHS cross-check",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        let routing_cp_sat_opts = ExternalMathProgramOptions {
+            method: Some("ortools:CP-SAT".to_string()),
+            time_limit_ms: Some(5_000.0),
+            ..Default::default()
+        };
+        if let Some(report) = self.math_program_cross_check_or_skip(
+            "MathProgram MIP facade routing/automaton/bin-packing OR-Tools CP-SAT cross-check",
+            &routing_mip,
+            &solve_opts,
+            &routing_cp_sat_opts,
+            1e-7,
+        ) {
+            self.check(
+                "MathProgram MIP facade routing/automaton/bin-packing OR-Tools CP-SAT cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && [(0, 1), (1, 2), (2, 3), (3, 0)]
+                        .iter()
+                        .all(|&(tail, head)| {
+                            circuit_arc_vars[tail][head]
+                                .is_some_and(|var| (report.internal.x[var] - 1.0).abs() <= 1e-7)
+                        })
+                    && (report.internal.x[route_depot_to_first] - 1.0).abs() <= 1e-7
+                    && (report.internal.x[route_first_to_second] - 1.0).abs() <= 1e-7
+                    && (report.internal.x[route_second_to_depot] - 1.0).abs() <= 1e-7
+                    && report.internal.x[route_second_to_first].abs() <= 1e-7
+                    && (report.internal.x[route_skipped] - 1.0).abs() <= 1e-7
+                    && (report.internal.x[automaton_a] - 1.0).abs() <= 1e-7
+                    && report.internal.x[automaton_b].abs() <= 1e-7
+                    && (report.internal.x[automaton_c] - 1.0).abs() <= 1e-7
+                    && report.internal.x[bin_item0].abs() <= 1e-7
+                    && report.internal.x[bin_item1].abs() <= 1e-7
+                    && (report.internal.x[bin_item2] - 1.0).abs() <= 1e-7
+                    && (report.internal.x[bin_load0] - 5.0).abs() <= 1e-7
+                    && (report.internal.x[bin_load1] - 4.0).abs() <= 1e-7,
+                format!(
+                    "internal={:?} external={:?} obj_diff={:?} x_diff={:?} x={:?} violations=({:?},{:?}) solver={} message={:?}",
+                    report.internal.status,
+                    report.external.status,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal.x,
+                    report.internal_max_violation,
+                    report.external_max_violation,
+                    report.external.solver,
+                    report.external.message
+                ),
+            );
+        }
+
+        match export_math_program_cplex_lp(&routing_mip) {
+            Ok(export) => {
+                let has_generated = |needle: &str| {
+                    export.row_mappings.iter().any(|row| {
+                        row.source_kind == MathProgramExportRowKind::Generated
+                            && row.source_name.contains(needle)
+                    })
+                };
+                let passed = export.is_mip
+                    && export.original_variable_count == routing_original_var_count
+                    && export.variable_names.len() > export.original_variable_count
+                    && export.original_variable_expansions.len() == routing_original_var_count
+                    && export.row_mappings.len() == export.constraint_names.len()
+                    && has_generated("tour")
+                    && has_generated("routes")
+                    && has_generated("pattern-101")
+                    && has_generated("packing")
+                    && export.text.contains("Maximize\n")
+                    && export.text.contains("Subject To\n")
+                    && export.text.contains("Bounds\n")
+                    && export.text.contains("Binaries\n")
+                    && export.text.ends_with("End\n");
+                self.check(
+                    "MathProgram MIP facade routing/automaton/bin-packing CPLEX-LP export",
+                    passed,
+                    format!(
+                        "original_vars={} exported_vars={} rows={} bytes={}",
+                        export.original_variable_count,
+                        export.variable_names.len(),
+                        export.constraint_names.len(),
+                        export.text.len()
+                    ),
+                );
+                if passed {
+                    self.check_math_program_export_highs_file_solve(
+                        "MathProgram MIP facade routing/automaton/bin-packing CPLEX-LP HiGHS file solve",
+                        &export.text,
+                        "lp",
+                        routing_expected_objective,
+                        routing_expected_x.as_deref().map(|expected_original_x| {
+                            MathProgramExportSolutionCheck {
+                                variable_names: &export.variable_names,
+                                original_variable_expansions: &export.original_variable_expansions,
+                                expected_original_x,
+                                tolerance: 1e-7,
+                            }
+                        }),
+                    );
+                }
+            }
+            Err(err) => self.check(
+                "MathProgram MIP facade routing/automaton/bin-packing CPLEX-LP export",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        match export_math_program_mps(&routing_mip) {
+            Ok(export) => {
+                let has_generated = |needle: &str| {
+                    export.row_mappings.iter().any(|row| {
+                        row.source_kind == MathProgramExportRowKind::Generated
+                            && row.source_name.contains(needle)
+                    })
+                };
+                let passed = export.is_mip
+                    && export.original_variable_count == routing_original_var_count
+                    && export.variable_names.len() > export.original_variable_count
+                    && export.original_variable_expansions.len() == routing_original_var_count
+                    && export.row_mappings.len() == export.constraint_names.len()
+                    && has_generated("tour")
+                    && has_generated("routes")
+                    && has_generated("pattern-101")
+                    && has_generated("packing")
+                    && export.text.contains("OBJSENSE\n MAX\n")
+                    && export.text.contains("ROWS\n N  OBJ\n")
+                    && export.text.contains("COLUMNS\n")
+                    && export.text.contains("'INTORG'")
+                    && export.text.contains("'INTEND'")
+                    && export.text.contains("BOUNDS\n")
+                    && export.text.ends_with("ENDATA\n");
+                self.check(
+                    "MathProgram MIP facade routing/automaton/bin-packing MPS export",
+                    passed,
+                    format!(
+                        "original_vars={} exported_vars={} rows={} bytes={}",
+                        export.original_variable_count,
+                        export.variable_names.len(),
+                        export.constraint_names.len(),
+                        export.text.len()
+                    ),
+                );
+                if passed {
+                    self.check_math_program_export_highs_file_solve(
+                        "MathProgram MIP facade routing/automaton/bin-packing MPS HiGHS file solve",
+                        &export.text,
+                        "mps",
+                        routing_expected_objective,
+                        routing_expected_x.as_deref().map(|expected_original_x| {
+                            MathProgramExportSolutionCheck {
+                                variable_names: &export.variable_names,
+                                original_variable_expansions: &export.original_variable_expansions,
+                                expected_original_x,
+                                tolerance: 1e-7,
+                            }
+                        }),
+                    );
+                }
+            }
+            Err(err) => self.check(
+                "MathProgram MIP facade routing/automaton/bin-packing MPS export",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        let mut scheduling_mip = MathProgram::new(MathObjectiveSense::Min);
+        let alt_start = scheduling_mip
+            .add_integer_var("alt-start", 0.0, Some(0.0), Some(0.0))
+            .expect("alternative master start");
+        let alt_size = scheduling_mip
+            .add_integer_var("alt-size", 0.0, Some(0.0), Some(5.0))
+            .expect("alternative master size");
+        let alt_end = scheduling_mip
+            .add_integer_var("alt-end", 1.0, Some(0.0), Some(5.0))
+            .expect("alternative master end");
+        let alt_slow_start = scheduling_mip
+            .add_integer_var("alt-slow-start", 0.0, Some(0.0), Some(0.0))
+            .expect("alternative slow start");
+        let alt_slow_end = scheduling_mip
+            .add_integer_var("alt-slow-end", 0.0, Some(0.0), Some(5.0))
+            .expect("alternative slow end");
+        let alt_fast_start = scheduling_mip
+            .add_integer_var("alt-fast-start", 0.0, Some(0.0), Some(0.0))
+            .expect("alternative fast start");
+        let alt_fast_end = scheduling_mip
+            .add_integer_var("alt-fast-end", 0.0, Some(0.0), Some(5.0))
+            .expect("alternative fast end");
+        let alt_slow_present = scheduling_mip
+            .add_binary_var("alt-slow-present", 0.0)
+            .expect("alternative slow presence");
+        let alt_fast_present = scheduling_mip
+            .add_binary_var("alt-fast-present", 0.0)
+            .expect("alternative fast presence");
+        scheduling_mip
+            .add_constraint(
+                "inactive-slow-end-zero",
+                vec![(alt_slow_end, 1.0), (alt_slow_present, -5.0)],
+                RowSense::Le,
+                0.0,
+            )
+            .expect("slow inactive guard");
+        scheduling_mip
+            .add_constraint(
+                "inactive-fast-end-zero",
+                vec![(alt_fast_end, 1.0), (alt_fast_present, -5.0)],
+                RowSense::Le,
+                0.0,
+            )
+            .expect("fast inactive guard");
+        scheduling_mip
+            .add_alternative(
+                "choose-processing-mode",
+                MathProgram::variable_interval(alt_start, alt_size, alt_end),
+                vec![
+                    MathProgram::optional_interval(
+                        alt_slow_start,
+                        4.0,
+                        alt_slow_end,
+                        alt_slow_present,
+                    ),
+                    MathProgram::optional_interval(
+                        alt_fast_start,
+                        2.0,
+                        alt_fast_end,
+                        alt_fast_present,
+                    ),
+                ],
+            )
+            .expect("alternative scheduling global");
+
+        let no_a_start = scheduling_mip
+            .add_integer_var("no-a-start", 0.0, Some(0.0), Some(0.0))
+            .expect("no-overlap a start");
+        let no_a_end = scheduling_mip
+            .add_integer_var("no-a-end", 0.0, Some(0.0), Some(5.0))
+            .expect("no-overlap a end");
+        let no_b_start = scheduling_mip
+            .add_integer_var("no-b-start", 1.0, Some(0.0), Some(5.0))
+            .expect("no-overlap b start");
+        let no_b_end = scheduling_mip
+            .add_integer_var("no-b-end", 0.0, Some(0.0), Some(5.0))
+            .expect("no-overlap b end");
+        scheduling_mip
+            .add_no_overlap(
+                "single-machine",
+                vec![
+                    MathProgram::interval(no_a_start, 3.0, no_a_end),
+                    MathProgram::interval(no_b_start, 2.0, no_b_end),
+                ],
+            )
+            .expect("no-overlap scheduling global");
+
+        let pack_a_x_start = scheduling_mip
+            .add_integer_var("pack-a-x-start", 0.0, Some(0.0), Some(0.0))
+            .expect("packing a x start");
+        let pack_a_x_end = scheduling_mip
+            .add_integer_var("pack-a-x-end", 0.0, Some(0.0), Some(4.0))
+            .expect("packing a x end");
+        let pack_a_y_start = scheduling_mip
+            .add_integer_var("pack-a-y-start", 0.0, Some(0.0), Some(0.0))
+            .expect("packing a y start");
+        let pack_a_y_end = scheduling_mip
+            .add_integer_var("pack-a-y-end", 0.0, Some(0.0), Some(4.0))
+            .expect("packing a y end");
+        let pack_b_x_start = scheduling_mip
+            .add_integer_var("pack-b-x-start", 0.0, Some(0.0), Some(0.0))
+            .expect("packing b x start");
+        let pack_b_x_end = scheduling_mip
+            .add_integer_var("pack-b-x-end", 0.0, Some(0.0), Some(4.0))
+            .expect("packing b x end");
+        let pack_b_y_start = scheduling_mip
+            .add_integer_var("pack-b-y-start", 1.0, Some(0.0), Some(4.0))
+            .expect("packing b y start");
+        let pack_b_y_end = scheduling_mip
+            .add_integer_var("pack-b-y-end", 0.0, Some(0.0), Some(4.0))
+            .expect("packing b y end");
+        scheduling_mip
+            .add_no_overlap_2d(
+                "rectangle-packing",
+                vec![
+                    MathProgram::interval(pack_a_x_start, 2.0, pack_a_x_end),
+                    MathProgram::interval(pack_b_x_start, 2.0, pack_b_x_end),
+                ],
+                vec![
+                    MathProgram::interval(pack_a_y_start, 2.0, pack_a_y_end),
+                    MathProgram::interval(pack_b_y_start, 2.0, pack_b_y_end),
+                ],
+            )
+            .expect("no-overlap-2d scheduling global");
+
+        let cum_a_start = scheduling_mip
+            .add_integer_var("cum-a-start", 0.0, Some(0.0), Some(0.0))
+            .expect("cumulative a start");
+        let cum_a_end = scheduling_mip
+            .add_integer_var("cum-a-end", 0.0, Some(0.0), Some(4.0))
+            .expect("cumulative a end");
+        let cum_b_start = scheduling_mip
+            .add_integer_var("cum-b-start", 1.0, Some(0.0), Some(4.0))
+            .expect("cumulative b start");
+        let cum_b_end = scheduling_mip
+            .add_integer_var("cum-b-end", 0.0, Some(0.0), Some(4.0))
+            .expect("cumulative b end");
+        scheduling_mip
+            .add_cumulative(
+                "shared-resource",
+                vec![
+                    MathProgram::interval(cum_a_start, 2.0, cum_a_end),
+                    MathProgram::interval(cum_b_start, 2.0, cum_b_end),
+                ],
+                vec![2.0, 2.0],
+                3.0,
+            )
+            .expect("cumulative scheduling global");
+
+        let tank_supply_time = scheduling_mip
+            .add_integer_var("tank-supply-time", 0.0, Some(0.0), Some(2.0))
+            .expect("reservoir supply time");
+        let tank_drain_time = scheduling_mip
+            .add_integer_var("tank-drain-time", 0.0, Some(0.0), Some(0.0))
+            .expect("reservoir drain time");
+        scheduling_mip
+            .add_reservoir(
+                "tank",
+                vec![
+                    MathProgram::reservoir_event(tank_supply_time, 2.0),
+                    MathProgram::reservoir_event(tank_drain_time, -2.0),
+                ],
+                0.0,
+                2.0,
+            )
+            .expect("reservoir scheduling global");
+
+        let scheduling_original_var_count = scheduling_mip.variables.len();
+        let mut scheduling_expected_objective = None;
+        let mut scheduling_expected_x = None;
+        match cross_check_math_program_with_external(
+            &scheduling_mip,
+            &solve_opts,
+            &external_opts,
+            1e-7,
+        ) {
+            Ok(report) => {
+                scheduling_expected_objective = Some(report.internal.objective);
+                scheduling_expected_x = Some(report.internal.x.clone());
+                self.check(
+                    "MathProgram MIP facade scheduling-global HiGHS cross-check",
+                    report.within_tolerance
+                        && report.internal.status == MathProgramStatus::Optimal
+                        && report.external.status == MathProgramStatus::Optimal
+                        && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                        && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                        && report
+                            .internal_max_violation
+                            .is_some_and(|violation| violation <= 1e-7)
+                        && report
+                            .external_max_violation
+                            .is_some_and(|violation| violation <= 1e-7)
+                        && (report.internal.objective - 9.0).abs() <= 1e-7
+                        && (report.internal.x[alt_size] - 2.0).abs() <= 1e-7
+                        && (report.internal.x[alt_end] - 2.0).abs() <= 1e-7
+                        && report.internal.x[alt_slow_present].abs() <= 1e-7
+                        && (report.internal.x[alt_fast_present] - 1.0).abs() <= 1e-7
+                        && (report.internal.x[alt_fast_end] - 2.0).abs() <= 1e-7
+                        && (report.internal.x[no_b_start] - 3.0).abs() <= 1e-7
+                        && (report.internal.x[no_b_end] - 5.0).abs() <= 1e-7
+                        && (report.internal.x[pack_b_y_start] - 2.0).abs() <= 1e-7
+                        && (report.internal.x[pack_b_y_end] - 4.0).abs() <= 1e-7
+                        && (report.internal.x[cum_b_start] - 2.0).abs() <= 1e-7
+                        && (report.internal.x[cum_b_end] - 4.0).abs() <= 1e-7
+                        && report.internal.x[tank_supply_time].abs() <= 1e-7
+                        && report.internal.x[tank_drain_time].abs() <= 1e-7,
+                    format!(
+                        "internal={:?} external={:?} obj_diff={:?} x_diff={:?} objective={} x={:?} violations=({:?},{:?})",
+                        report.internal.status,
+                        report.external.status,
+                        report.objective_abs_diff,
+                        report.max_x_abs_diff,
+                        report.internal.objective,
+                        report.internal.x,
+                        report.internal_max_violation,
+                        report.external_max_violation
+                    ),
+                );
+            }
+            Err(err) => self.check(
+                "MathProgram MIP facade scheduling-global HiGHS cross-check",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        let scheduling_cp_sat_opts = ExternalMathProgramOptions {
+            method: Some("ortools:CP-SAT".to_string()),
+            time_limit_ms: Some(5_000.0),
+            ..Default::default()
+        };
+        if let Some(report) = self.math_program_cross_check_or_skip(
+            "MathProgram MIP facade scheduling-global OR-Tools CP-SAT cross-check",
+            &scheduling_mip,
+            &solve_opts,
+            &scheduling_cp_sat_opts,
+            1e-7,
+        ) {
+            self.check(
+                "MathProgram MIP facade scheduling-global OR-Tools CP-SAT cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report
+                        .internal_max_violation
+                        .is_some_and(|violation| violation <= 1e-7)
+                    && report
+                        .external_max_violation
+                        .is_some_and(|violation| violation <= 1e-7)
+                    && (report.internal.objective - 9.0).abs() <= 1e-7
+                    && (report.internal.x[alt_size] - 2.0).abs() <= 1e-7
+                    && (report.internal.x[alt_end] - 2.0).abs() <= 1e-7
+                    && report.internal.x[alt_slow_present].abs() <= 1e-7
+                    && (report.internal.x[alt_fast_present] - 1.0).abs() <= 1e-7
+                    && (report.internal.x[alt_fast_end] - 2.0).abs() <= 1e-7
+                    && (report.internal.x[no_b_start] - 3.0).abs() <= 1e-7
+                    && (report.internal.x[no_b_end] - 5.0).abs() <= 1e-7
+                    && (report.internal.x[pack_b_y_start] - 2.0).abs() <= 1e-7
+                    && (report.internal.x[pack_b_y_end] - 4.0).abs() <= 1e-7
+                    && (report.internal.x[cum_b_start] - 2.0).abs() <= 1e-7
+                    && (report.internal.x[cum_b_end] - 4.0).abs() <= 1e-7
+                    && report.internal.x[tank_supply_time].abs() <= 1e-7
+                    && report.internal.x[tank_drain_time].abs() <= 1e-7,
+                format!(
+                    "internal={:?} external={:?} obj_diff={:?} x_diff={:?} objective={} x={:?} violations=({:?},{:?}) solver={} message={:?}",
+                    report.internal.status,
+                    report.external.status,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal.objective,
+                    report.internal.x,
+                    report.internal_max_violation,
+                    report.external_max_violation,
+                    report.external.solver,
+                    report.external.message
+                ),
+            );
+        }
+
+        match export_math_program_cplex_lp(&scheduling_mip) {
+            Ok(export) => {
+                let has_generated = |needle: &str| {
+                    export.row_mappings.iter().any(|row| {
+                        row.source_kind == MathProgramExportRowKind::Generated
+                            && row.source_name.contains(needle)
+                    })
+                };
+                let passed = export.is_mip
+                    && export.original_variable_count == scheduling_original_var_count
+                    && export.variable_names.len() > export.original_variable_count
+                    && export.original_variable_expansions.len() == scheduling_original_var_count
+                    && export.row_mappings.len() == export.constraint_names.len()
+                    && has_generated("choose-processing-mode")
+                    && has_generated("single-machine")
+                    && has_generated("rectangle-packing")
+                    && has_generated("shared-resource")
+                    && has_generated("tank")
+                    && export.text.contains("Minimize\n")
+                    && export.text.contains("Subject To\n")
+                    && export.text.contains("Bounds\n")
+                    && export.text.contains("Binaries\n")
+                    && export.text.ends_with("End\n");
+                self.check(
+                    "MathProgram MIP facade scheduling-global CPLEX-LP export",
+                    passed,
+                    format!(
+                        "original_vars={} exported_vars={} rows={} bytes={}",
+                        export.original_variable_count,
+                        export.variable_names.len(),
+                        export.constraint_names.len(),
+                        export.text.len()
+                    ),
+                );
+                if passed {
+                    self.check_math_program_export_highs_file_solve(
+                        "MathProgram MIP facade scheduling-global CPLEX-LP HiGHS file solve",
+                        &export.text,
+                        "lp",
+                        scheduling_expected_objective,
+                        scheduling_expected_x.as_deref().map(|expected_original_x| {
+                            MathProgramExportSolutionCheck {
+                                variable_names: &export.variable_names,
+                                original_variable_expansions: &export.original_variable_expansions,
+                                expected_original_x,
+                                tolerance: 1e-7,
+                            }
+                        }),
+                    );
+                }
+            }
+            Err(err) => self.check(
+                "MathProgram MIP facade scheduling-global CPLEX-LP export",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        match export_math_program_mps(&scheduling_mip) {
+            Ok(export) => {
+                let has_generated = |needle: &str| {
+                    export.row_mappings.iter().any(|row| {
+                        row.source_kind == MathProgramExportRowKind::Generated
+                            && row.source_name.contains(needle)
+                    })
+                };
+                let passed = export.is_mip
+                    && export.original_variable_count == scheduling_original_var_count
+                    && export.variable_names.len() > export.original_variable_count
+                    && export.original_variable_expansions.len() == scheduling_original_var_count
+                    && export.row_mappings.len() == export.constraint_names.len()
+                    && has_generated("choose-processing-mode")
+                    && has_generated("single-machine")
+                    && has_generated("rectangle-packing")
+                    && has_generated("shared-resource")
+                    && has_generated("tank")
+                    && export.text.contains("OBJSENSE\n MIN\n")
+                    && export.text.contains("ROWS\n N  OBJ\n")
+                    && export.text.contains("COLUMNS\n")
+                    && export.text.contains("'INTORG'")
+                    && export.text.contains("'INTEND'")
+                    && export.text.contains("BOUNDS\n")
+                    && export.text.ends_with("ENDATA\n");
+                self.check(
+                    "MathProgram MIP facade scheduling-global MPS export",
+                    passed,
+                    format!(
+                        "original_vars={} exported_vars={} rows={} bytes={}",
+                        export.original_variable_count,
+                        export.variable_names.len(),
+                        export.constraint_names.len(),
+                        export.text.len()
+                    ),
+                );
+                if passed {
+                    self.check_math_program_export_highs_file_solve(
+                        "MathProgram MIP facade scheduling-global MPS HiGHS file solve",
+                        &export.text,
+                        "mps",
+                        scheduling_expected_objective,
+                        scheduling_expected_x.as_deref().map(|expected_original_x| {
+                            MathProgramExportSolutionCheck {
+                                variable_names: &export.variable_names,
+                                original_variable_expansions: &export.original_variable_expansions,
+                                expected_original_x,
+                                tolerance: 1e-7,
+                            }
+                        }),
+                    );
+                }
+            }
+            Err(err) => self.check(
+                "MathProgram MIP facade scheduling-global MPS export",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        let mut optional_reservoir_mip = MathProgram::new(MathObjectiveSense::Max);
+        let required_time = optional_reservoir_mip
+            .add_integer_var("required-time", 0.0, Some(0.0), Some(0.0))
+            .expect("optional reservoir required time");
+        let safe_time = optional_reservoir_mip
+            .add_integer_var("safe-time", 0.0, Some(0.0), Some(0.0))
+            .expect("optional reservoir safe time");
+        let overflow_time = optional_reservoir_mip
+            .add_integer_var("overflow-time", 0.0, Some(0.0), Some(0.0))
+            .expect("optional reservoir overflow time");
+        let safe_active = optional_reservoir_mip
+            .add_binary_var("safe-active", 3.0)
+            .expect("optional reservoir safe active");
+        let overflow_active = optional_reservoir_mip
+            .add_binary_var("overflow-active", 5.0)
+            .expect("optional reservoir overflow active");
+        optional_reservoir_mip
+            .add_reservoir(
+                "optional-tank",
+                vec![
+                    MathProgram::reservoir_event(required_time, 1.0),
+                    MathProgram::optional_reservoir_event(safe_time, 1.0, safe_active),
+                    MathProgram::optional_reservoir_event(overflow_time, 2.0, overflow_active),
+                ],
+                0.0,
+                2.0,
+            )
+            .expect("optional reservoir global");
+
+        match cross_check_math_program_with_external(
+            &optional_reservoir_mip,
+            &solve_opts,
+            &external_opts,
+            1e-7,
+        ) {
+            Ok(report) => self.check(
+                "MathProgram MIP facade optional-reservoir HiGHS cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && (report.internal.objective - 3.0).abs() <= 1e-7
+                    && (report.internal.x[safe_active] - 1.0).abs() <= 1e-7
+                    && report.internal.x[overflow_active].abs() <= 1e-7,
+                format!(
+                    "internal={:?} external={:?} obj_diff={:?} x_diff={:?} objective={} x={:?} violations=({:?},{:?})",
+                    report.internal.status,
+                    report.external.status,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal.objective,
+                    report.internal.x,
+                    report.internal_max_violation,
+                    report.external_max_violation
+                ),
+            ),
+            Err(err) => self.check(
+                "MathProgram MIP facade optional-reservoir HiGHS cross-check",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        let optional_reservoir_cp_sat_opts = ExternalMathProgramOptions {
+            method: Some("ortools:CP-SAT".to_string()),
+            time_limit_ms: Some(5_000.0),
+            ..Default::default()
+        };
+        if let Some(report) = self.math_program_cross_check_or_skip(
+            "MathProgram MIP facade optional-reservoir OR-Tools CP-SAT cross-check",
+            &optional_reservoir_mip,
+            &solve_opts,
+            &optional_reservoir_cp_sat_opts,
+            1e-7,
+        ) {
+            self.check(
+                "MathProgram MIP facade optional-reservoir OR-Tools CP-SAT cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && (report.internal.objective - 3.0).abs() <= 1e-7
+                    && (report.internal.x[safe_active] - 1.0).abs() <= 1e-7
+                    && report.internal.x[overflow_active].abs() <= 1e-7,
+                format!(
+                    "internal={:?} external={:?} obj_diff={:?} x_diff={:?} objective={} x={:?} violations=({:?},{:?}) solver={} message={:?}",
+                    report.internal.status,
+                    report.external.status,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal.objective,
+                    report.internal.x,
+                    report.internal_max_violation,
+                    report.external_max_violation,
+                    report.external.solver,
+                    report.external.message
+                ),
+            );
         }
 
         let mut lazy_mip = MathProgram::new(MathObjectiveSense::Max);
@@ -10602,6 +15293,12 @@ impl Driver {
             Ok(export) => {
                 let passed = export.is_mip
                     && export.original_variable_count == 2
+                    && export.original_variable_expansions.len() == 2
+                    && export.row_mappings.len() == export.constraint_names.len()
+                    && export.row_mappings.iter().any(|row| {
+                        row.source_kind == MathProgramExportRowKind::LazyConstraint
+                            && row.source_name.contains("lazy-at-most-one")
+                    })
                     && export
                         .constraint_names
                         .iter()
@@ -10624,6 +15321,7 @@ impl Driver {
                         &export.text,
                         "lp",
                         lazy_expected_objective,
+                        None,
                     );
                 }
             }
@@ -10638,6 +15336,12 @@ impl Driver {
             Ok(export) => {
                 let passed = export.is_mip
                     && export.original_variable_count == 2
+                    && export.original_variable_expansions.len() == 2
+                    && export.row_mappings.len() == export.constraint_names.len()
+                    && export.row_mappings.iter().any(|row| {
+                        row.source_kind == MathProgramExportRowKind::LazyConstraint
+                            && row.source_name.contains("lazy-at-most-one")
+                    })
                     && export
                         .constraint_names
                         .iter()
@@ -10661,6 +15365,7 @@ impl Driver {
                         &export.text,
                         "mps",
                         lazy_expected_objective,
+                        None,
                     );
                 }
             }
@@ -10706,6 +15411,188 @@ impl Driver {
             node_selection: Some(ExternalLinearCliNodeSelection::Dfs),
             ..Default::default()
         };
+
+        let native_limited = solve_math_program(
+            &limited_mip,
+            &MathProgramSolveOptions {
+                mip_start: Some(vec![1.0, 0.0, 0.0, 0.0]),
+                mip: IPMIPSolveOptions {
+                    solution_limit: Some(1),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        match &native_limited {
+            Ok(solution) => self.check(
+                "MathProgram native MIP incumbent-limit controls",
+                solution.status == MathProgramStatus::Feasible
+                    && (solution.objective - 10.0).abs() <= 1e-7
+                    && max_abs_diff(&solution.x, &[1.0, 0.0, 0.0, 0.0]) <= 1e-7
+                    && solution.nodes_explored == Some(0),
+                format!(
+                    "status={:?} solver={} objective={} x={:?} nodes={:?} message={:?}",
+                    solution.status,
+                    solution.solver,
+                    solution.objective,
+                    solution.x,
+                    solution.nodes_explored,
+                    solution.message
+                ),
+            ),
+            Err(err) => self.check(
+                "MathProgram native MIP incumbent-limit controls",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        let native_objective_limited = solve_math_program(
+            &limited_mip,
+            &MathProgramSolveOptions {
+                mip_start: Some(vec![1.0, 0.0, 0.0, 0.0]),
+                mip: IPMIPSolveOptions {
+                    objective_limit: Some(10.0),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        match &native_objective_limited {
+            Ok(solution) => self.check(
+                "MathProgram native MIP objective-limit controls",
+                solution.status == MathProgramStatus::Feasible
+                    && (solution.objective - 10.0).abs() <= 1e-7
+                    && max_abs_diff(&solution.x, &[1.0, 0.0, 0.0, 0.0]) <= 1e-7
+                    && solution.nodes_explored == Some(0),
+                format!(
+                    "status={:?} solver={} objective={} x={:?} nodes={:?} message={:?}",
+                    solution.status,
+                    solution.solver,
+                    solution.objective,
+                    solution.x,
+                    solution.nodes_explored,
+                    solution.message
+                ),
+            ),
+            Err(err) => self.check(
+                "MathProgram native MIP objective-limit controls",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        let mut branch_priority_mip = MathProgram::new(MathObjectiveSense::Max);
+        let low_priority = branch_priority_mip
+            .add_binary_var("low-priority", 1.0)
+            .expect("low priority");
+        let high_priority = branch_priority_mip
+            .add_binary_var("high-priority", 1.0)
+            .expect("high priority");
+        branch_priority_mip
+            .add_constraint(
+                "cap-low-priority",
+                vec![(low_priority, 1.0)],
+                RowSense::Le,
+                0.5,
+            )
+            .expect("low cap");
+        branch_priority_mip
+            .add_constraint(
+                "cap-high-priority",
+                vec![(high_priority, 1.0)],
+                RowSense::Le,
+                0.5,
+            )
+            .expect("high cap");
+        match solve_math_program(
+            &branch_priority_mip,
+            &MathProgramSolveOptions {
+                branch_priorities: Some(vec![0, 10]),
+                mip: IPMIPSolveOptions {
+                    branch_rule: Some(BranchRule::FirstFractional),
+                    max_cut_rounds: Some(0),
+                    lp_algorithm: Some(LpRelaxationAlgorithm::Concrete(
+                        ConcreteLpRelaxationAlgorithm::InternalSimplex,
+                    )),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ) {
+            Ok(solution) => self.check(
+                "MathProgram native MIP branch-priority first branch variable",
+                solution.status == MathProgramStatus::Optimal
+                    && solution.first_branch_variable.as_deref() == Some("high-priority")
+                    && (solution.objective - 0.0).abs() <= 1e-7
+                    && max_abs_diff(&solution.x, &[0.0, 0.0]) <= 1e-7,
+                format!(
+                    "status={:?} solver={} first_branch={:?} objective={} x={:?} nodes={:?}",
+                    solution.status,
+                    solution.solver,
+                    solution.first_branch_variable,
+                    solution.objective,
+                    solution.x,
+                    solution.nodes_explored
+                ),
+            ),
+            Err(err) => self.check(
+                "MathProgram native MIP branch-priority first branch variable",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        let branch_priority_external_opts = ExternalMathProgramOptions {
+            method: Some("scip:cli".to_string()),
+            time_limit_ms: Some(5_000.0),
+            branch_priorities: Some(vec![0, 10]),
+            ..Default::default()
+        };
+        match solve_math_program_external_scipy(
+            &branch_priority_mip,
+            &branch_priority_external_opts,
+        ) {
+            Ok(solution)
+                if solution.status == MathProgramStatus::NumericalError
+                    && solution
+                        .message
+                        .as_deref()
+                        .is_some_and(|message| message.contains("not found")) =>
+            {
+                println!(
+                    "  SKIP  MathProgram external MIP branch-priority controls: scip executable not found"
+                );
+            }
+            Ok(solution) => {
+                let feedback = solution.control_feedback.as_ref();
+                self.check(
+                    "MathProgram external MIP branch-priority controls",
+                    solution.status == MathProgramStatus::Optimal
+                        && (solution.objective - 0.0).abs() <= 1e-7
+                        && max_abs_diff(&solution.x, &[0.0, 0.0]) <= 1e-7
+                        && feedback.is_some_and(|feedback| {
+                            feedback.branch_priorities_accepted == Some(true)
+                                && feedback.branch_priority_count == Some(1)
+                        }),
+                    format!(
+                        "status={:?} solver={} objective={} x={:?} feedback={:?} message={:?}",
+                        solution.status,
+                        solution.solver,
+                        solution.objective,
+                        solution.x,
+                        solution.control_feedback,
+                        solution.message
+                    ),
+                );
+            }
+            Err(err) => self.check(
+                "MathProgram external MIP branch-priority controls",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
         match solve_math_program_external_scipy(&limited_mip, &limited_opts) {
             Ok(solution)
                 if solution.status == MathProgramStatus::NumericalError
@@ -10718,28 +15605,191 @@ impl Driver {
                     "  SKIP  MathProgram external MIP incumbent-limit controls: cbc executable not found"
                 );
             }
-            Ok(solution) => self.check(
-                "MathProgram external MIP incumbent-limit controls",
-                solution.status == MathProgramStatus::Feasible
-                    && solution.x.len() == 4
-                    && solution.objective.is_finite()
-                    && solution.objective >= 10.0 - 1e-7
-                    && 5.0 * solution.x[limited_a]
-                        + 4.0 * solution.x[limited_b]
-                        + 6.0 * solution.x[limited_c]
-                        + 3.0 * solution.x[limited_d]
-                        <= 10.0 + 1e-7,
-                format!(
-                    "status={:?} solver={} objective={} x={:?} message={:?}",
-                    solution.status,
-                    solution.solver,
-                    solution.objective,
-                    solution.x,
-                    solution.message
-                ),
-            ),
+            Ok(solution) => {
+                let feedback = solution.control_feedback.as_ref();
+                self.check(
+                    "MathProgram external MIP incumbent-limit controls",
+                    solution.status == MathProgramStatus::Feasible
+                        && native_limited.as_ref().is_ok_and(|native| {
+                            native.status == MathProgramStatus::Feasible
+                                && (native.objective - solution.objective).abs() <= 1e-7
+                                && max_abs_diff(&native.x, &solution.x) <= 1e-7
+                        })
+                        && solution.x.len() == 4
+                        && solution.objective.is_finite()
+                        && solution.objective >= 10.0 - 1e-7
+                        && 5.0 * solution.x[limited_a]
+                            + 4.0 * solution.x[limited_b]
+                            + 6.0 * solution.x[limited_c]
+                            + 3.0 * solution.x[limited_d]
+                            <= 10.0 + 1e-7
+                        && feedback.is_some_and(|feedback| {
+                            feedback.mip_start_accepted == Some(true)
+                                && feedback
+                                    .mip_start_objective
+                                    .is_some_and(|objective| (objective - 10.0).abs() <= 1e-9)
+                        }),
+                    format!(
+                        "status={:?} solver={} objective={} x={:?} feedback={:?} message={:?}",
+                        solution.status,
+                        solution.solver,
+                        solution.objective,
+                        solution.x,
+                        solution.control_feedback,
+                        solution.message
+                    ),
+                );
+            }
             Err(err) => self.check(
                 "MathProgram external MIP incumbent-limit controls",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        let objective_limit_target = 80.0;
+        let math_program_primal_tolerance = 1e-7;
+        let math_program_dual_tolerance = 2e-7;
+        let math_program_integer_tolerance = 1e-6;
+        let objective_limited_opts = ExternalMathProgramOptions {
+            method: Some("highs:cli".to_string()),
+            time_limit_ms: Some(5_000.0),
+            objective_limit: Some(objective_limit_target),
+            absolute_gap: Some(0.0),
+            primal_feasibility_tolerance: Some(math_program_primal_tolerance),
+            dual_feasibility_tolerance: Some(math_program_dual_tolerance),
+            integer_feasibility_tolerance: Some(math_program_integer_tolerance),
+            threads: Some(1),
+            random_seed: Some(7),
+            presolve: Some(ExternalLinearCliPresolve::Off),
+            ..Default::default()
+        };
+        match solve_math_program_external_scipy(&limited_mip, &objective_limited_opts) {
+            Ok(solution)
+                if solution.status == MathProgramStatus::NumericalError
+                    && solution
+                        .message
+                        .as_deref()
+                        .is_some_and(|message| message.contains("not found")) =>
+            {
+                println!(
+                    "  SKIP  MathProgram external MIP objective-limit controls: highs executable not found"
+                );
+            }
+            Ok(solution) => {
+                let feedback = solution.control_feedback.as_ref();
+                self.check(
+                    "MathProgram external MIP objective-limit controls",
+                    matches!(
+                        solution.status,
+                        MathProgramStatus::Optimal | MathProgramStatus::Feasible
+                    ) && feedback.is_some_and(|feedback| {
+                        feedback
+                            .objective_limit
+                            .is_some_and(|limit| (limit - objective_limit_target).abs() <= 1e-9)
+                            && feedback.absolute_gap.is_some_and(|gap| gap <= 1e-9)
+                            && feedback
+                                .primal_feasibility_tolerance
+                                .is_some_and(|tolerance| {
+                                    (tolerance - math_program_primal_tolerance).abs() <= 1e-12
+                                })
+                            && feedback
+                                .dual_feasibility_tolerance
+                                .is_some_and(|tolerance| {
+                                    (tolerance - math_program_dual_tolerance).abs() <= 1e-12
+                                })
+                            && feedback
+                                .integer_feasibility_tolerance
+                                .is_some_and(|tolerance| {
+                                    (tolerance - math_program_integer_tolerance).abs() <= 1e-12
+                                })
+                            && feedback.threads == Some(1)
+                            && feedback.random_seed == Some(7)
+                            && feedback.presolve.as_deref() == Some("off")
+                    }) && solution.x.len() == 4
+                        && solution.objective >= objective_limit_target - 1e-7
+                        && 5.0 * solution.x[limited_a]
+                            + 4.0 * solution.x[limited_b]
+                            + 6.0 * solution.x[limited_c]
+                            + 3.0 * solution.x[limited_d]
+                            <= 10.0 + 1e-7,
+                    format!(
+                        "status={:?} solver={} objective={} x={:?} feedback={:?} message={:?}",
+                        solution.status,
+                        solution.solver,
+                        solution.objective,
+                        solution.x,
+                        solution.control_feedback,
+                        solution.message
+                    ),
+                );
+            }
+            Err(err) => self.check(
+                "MathProgram external MIP objective-limit controls",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        let mut pool_control_mip = MathProgram::new(MathObjectiveSense::Max);
+        let pool_a = pool_control_mip
+            .add_binary_var("pool-a", 2.0)
+            .expect("pool a");
+        let pool_b = pool_control_mip
+            .add_binary_var("pool-b", 1.0)
+            .expect("pool b");
+        pool_control_mip
+            .add_constraint(
+                "pool-capacity",
+                vec![(pool_a, 1.0), (pool_b, 1.0)],
+                RowSense::Le,
+                1.0,
+            )
+            .expect("pool capacity");
+        let pool_size_target = 2_u64;
+        let pool_control_opts = ExternalMathProgramOptions {
+            method: Some("cbc:cli".to_string()),
+            time_limit_ms: Some(5_000.0),
+            solution_pool_size: Some(pool_size_target),
+            ..Default::default()
+        };
+        match solve_math_program_external_scipy(&pool_control_mip, &pool_control_opts) {
+            Ok(solution)
+                if solution.status == MathProgramStatus::NumericalError
+                    && solution
+                        .message
+                        .as_deref()
+                        .is_some_and(|message| message.contains("not found")) =>
+            {
+                println!(
+                    "  SKIP  MathProgram external MIP solution-pool controls: cbc executable not found"
+                );
+            }
+            Ok(solution) => {
+                let feedback = solution.control_feedback.as_ref();
+                self.check(
+                    "MathProgram external MIP solution-pool controls",
+                    solution.status == MathProgramStatus::Optimal
+                        && solution.x.len() == 2
+                        && (solution.objective - 2.0).abs() <= 1e-7
+                        && solution.x[pool_a] + solution.x[pool_b] <= 1.0 + 1e-7
+                        && max_abs_diff(&solution.x, &[1.0, 0.0]) <= 1e-7
+                        && feedback.is_some_and(|feedback| {
+                            feedback.solution_pool_size == Some(pool_size_target)
+                        }),
+                    format!(
+                        "status={:?} solver={} objective={} x={:?} feedback={:?} message={:?}",
+                        solution.status,
+                        solution.solver,
+                        solution.objective,
+                        solution.x,
+                        solution.control_feedback,
+                        solution.message
+                    ),
+                );
+            }
+            Err(err) => self.check(
+                "MathProgram external MIP solution-pool controls",
                 false,
                 format!("{err:?}"),
             ),
@@ -10795,13 +15845,14 @@ impl Driver {
             time_limit_ms: Some(5_000.0),
             ..Default::default()
         };
-        match cross_check_math_program_with_external(
+        if let Some(report) = self.math_program_cross_check_or_skip(
+            "MathProgram integer facade same-input OR-Tools CP-SAT cross-check",
             &cp_sat_mip,
             &solve_opts,
             &ortools_cp_sat_opts,
             1e-7,
         ) {
-            Ok(report) => self.check(
+            self.check(
                 "MathProgram integer facade same-input OR-Tools CP-SAT cross-check",
                 report.within_tolerance
                     && report.internal.status == MathProgramStatus::Optimal
@@ -10817,12 +15868,179 @@ impl Driver {
                     report.internal_max_violation,
                     report.external_max_violation
                 ),
-            ),
-            Err(err) => self.check(
-                "MathProgram integer facade same-input OR-Tools CP-SAT cross-check",
-                false,
-                format!("{err:?}"),
-            ),
+            );
+        }
+
+        let ortools_scip_opts = ExternalMathProgramOptions {
+            method: Some("ortools:SCIP".to_string()),
+            time_limit_ms: Some(5_000.0),
+            ..Default::default()
+        };
+        if let Some(report) = self.math_program_cross_check_or_skip(
+            "MathProgram integer facade same-input OR-Tools SCIP cross-check",
+            &cp_sat_mip,
+            &solve_opts,
+            &ortools_scip_opts,
+            1e-7,
+        ) {
+            self.check(
+                "MathProgram integer facade same-input OR-Tools SCIP cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7),
+                format!(
+                    "internal={:?} external={:?} obj_diff={:?} x_diff={:?} violations=({:?},{:?}) solver={} message={:?}",
+                    report.internal.status,
+                    report.external.status,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal_max_violation,
+                    report.external_max_violation,
+                    report.external.solver,
+                    report.external.message
+                ),
+            );
+        }
+
+        let mut hierarchical_mip = MathProgram::new(MathObjectiveSense::Max);
+        let hierarchical_mip_a = hierarchical_mip
+            .add_binary_var("hier-mip-a", 1.0)
+            .expect("hierarchical MIP a");
+        let hierarchical_mip_b = hierarchical_mip
+            .add_binary_var("hier-mip-b", 1.0)
+            .expect("hierarchical MIP b");
+        let hierarchical_mip_c = hierarchical_mip
+            .add_binary_var("hier-mip-c", 1.0)
+            .expect("hierarchical MIP c");
+        hierarchical_mip
+            .add_constraint(
+                "choose-exactly-two",
+                vec![
+                    (hierarchical_mip_a, 1.0),
+                    (hierarchical_mip_b, 1.0),
+                    (hierarchical_mip_c, 1.0),
+                ],
+                RowSense::Eq,
+                2.0,
+            )
+            .expect("hierarchical MIP cardinality");
+        hierarchical_mip
+            .add_secondary_objective(
+                "avoid-a",
+                MathObjectiveSense::Min,
+                10,
+                1.0,
+                vec![(hierarchical_mip_a, 1.0)],
+            )
+            .expect("hierarchical MIP secondary objective");
+        if let Some(report) = self.math_program_cross_check_or_skip(
+            "MathProgram hierarchical integer facade same-input OR-Tools CP-SAT cross-check",
+            &hierarchical_mip,
+            &solve_opts,
+            &ortools_cp_sat_opts,
+            1e-7,
+        ) {
+            self.check(
+                "MathProgram hierarchical integer facade same-input OR-Tools CP-SAT cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && report.internal.solver.starts_with("des-hierarchical(")
+                    && report.external.solver.starts_with("external-hierarchical(")
+                    && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report.internal.x[hierarchical_mip_a].abs() <= 1e-7
+                    && (report.internal.x[hierarchical_mip_b] - 1.0).abs() <= 1e-7
+                    && (report.internal.x[hierarchical_mip_c] - 1.0).abs() <= 1e-7,
+                format!(
+                    "internal={:?} external={:?} solvers=({},{}) obj_diff={:?} x_diff={:?} x={:?} messages=({:?},{:?})",
+                    report.internal.status,
+                    report.external.status,
+                    report.internal.solver,
+                    report.external.solver,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal.x,
+                    report.internal.message,
+                    report.external.message
+                ),
+            );
+        }
+
+        let mut blended_mip = MathProgram::new(MathObjectiveSense::Max);
+        let blended_mip_a = blended_mip
+            .add_binary_var("blend-mip-a", 1.0)
+            .expect("blended MIP a");
+        let blended_mip_b = blended_mip
+            .add_binary_var("blend-mip-b", 1.0)
+            .expect("blended MIP b");
+        let blended_mip_c = blended_mip
+            .add_binary_var("blend-mip-c", 1.0)
+            .expect("blended MIP c");
+        blended_mip
+            .add_constraint(
+                "choose-exactly-one-blended",
+                vec![
+                    (blended_mip_a, 1.0),
+                    (blended_mip_b, 1.0),
+                    (blended_mip_c, 1.0),
+                ],
+                RowSense::Eq,
+                1.0,
+            )
+            .expect("blended MIP cardinality");
+        blended_mip
+            .add_secondary_objective(
+                "prefer-a-light",
+                MathObjectiveSense::Max,
+                10,
+                1.0,
+                vec![(blended_mip_a, 1.0)],
+            )
+            .expect("blended MIP a objective");
+        blended_mip
+            .add_secondary_objective(
+                "prefer-b-heavy",
+                MathObjectiveSense::Max,
+                10,
+                3.0,
+                vec![(blended_mip_b, 1.0)],
+            )
+            .expect("blended MIP b objective");
+        if let Some(report) = self.math_program_cross_check_or_skip(
+            "MathProgram blended-priority integer facade same-input OR-Tools CP-SAT cross-check",
+            &blended_mip,
+            &solve_opts,
+            &ortools_cp_sat_opts,
+            1e-7,
+        ) {
+            self.check(
+                "MathProgram blended-priority integer facade same-input OR-Tools CP-SAT cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && report.internal.solver.starts_with("des-hierarchical(")
+                    && report.external.solver.starts_with("external-hierarchical(")
+                    && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report.internal.x[blended_mip_a].abs() <= 1e-7
+                    && (report.internal.x[blended_mip_b] - 1.0).abs() <= 1e-7
+                    && report.internal.x[blended_mip_c].abs() <= 1e-7,
+                format!(
+                    "internal={:?} external={:?} solvers=({},{}) obj_diff={:?} x_diff={:?} x={:?} messages=({:?},{:?})",
+                    report.internal.status,
+                    report.external.status,
+                    report.internal.solver,
+                    report.external.solver,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal.x,
+                    report.internal.message,
+                    report.external.message
+                ),
+            );
         }
 
         match export_math_program_cplex_lp(&mip) {
@@ -10830,6 +16048,14 @@ impl Driver {
                 let passed = export.is_mip
                     && export.original_variable_count == 5
                     && export.variable_names.len() > export.original_variable_count
+                    && export.original_variable_expansions.len() == 5
+                    && export.row_mappings.len() == export.constraint_names.len()
+                    && export.row_mappings.iter().any(|row| {
+                        row.source_kind == MathProgramExportRowKind::Generated
+                            && row.source_name.contains("open-a-min-load__indicator")
+                    })
+                    && export.original_variable_expansions[load].original_name == "load"
+                    && export.original_variable_expansions[load].terms.len() == 1
                     && export.text.contains("Maximize\n")
                     && export.text.contains("Subject To\n")
                     && export.text.contains("Bounds\n")
@@ -10852,6 +16078,14 @@ impl Driver {
                         &export.text,
                         "lp",
                         mip_expected_objective,
+                        mip_expected_x.as_deref().map(|expected_original_x| {
+                            MathProgramExportSolutionCheck {
+                                variable_names: &export.variable_names,
+                                original_variable_expansions: &export.original_variable_expansions,
+                                expected_original_x,
+                                tolerance: 1e-7,
+                            }
+                        }),
                     );
                 }
             }
@@ -10867,6 +16101,14 @@ impl Driver {
                 let passed = export.is_mip
                     && export.original_variable_count == 5
                     && export.variable_names.len() > export.original_variable_count
+                    && export.original_variable_expansions.len() == 5
+                    && export.row_mappings.len() == export.constraint_names.len()
+                    && export.row_mappings.iter().any(|row| {
+                        row.source_kind == MathProgramExportRowKind::Generated
+                            && row.source_name.contains("open-a-min-load__indicator")
+                    })
+                    && export.original_variable_expansions[load].original_name == "load"
+                    && export.original_variable_expansions[load].terms.len() == 1
                     && export.text.contains("OBJSENSE\n MAX\n")
                     && export.text.contains("ROWS\n N  OBJ\n")
                     && export.text.contains("COLUMNS\n")
@@ -10891,6 +16133,14 @@ impl Driver {
                         &export.text,
                         "mps",
                         mip_expected_objective,
+                        mip_expected_x.as_deref().map(|expected_original_x| {
+                            MathProgramExportSolutionCheck {
+                                variable_names: &export.variable_names,
+                                original_variable_expansions: &export.original_variable_expansions,
+                                expected_original_x,
+                                tolerance: 1e-7,
+                            }
+                        }),
                     );
                 }
             }
@@ -10901,16 +16151,42 @@ impl Driver {
             ),
         }
 
-        for (solver, method) in [
+        let math_program_mip_cli_solvers = [
             (ExternalLinearCliSolver::Highs, "highs:cli"),
             (ExternalLinearCliSolver::Glpk, "glpsol:cli"),
             (ExternalLinearCliSolver::Scip, "scip:cli"),
             (ExternalLinearCliSolver::Cbc, "cbc:cli"),
+            (ExternalLinearCliSolver::LpSolve, "lp-solve:cli"),
             (ExternalLinearCliSolver::Gurobi, "gurobi:cli"),
             (ExternalLinearCliSolver::Cplex, "cplex:cli"),
             (ExternalLinearCliSolver::Xpress, "xpress:cli"),
             (ExternalLinearCliSolver::Lindo, "lindo:cli"),
-        ] {
+        ];
+        self.check(
+            "MathProgram MIP facade CLI list covers registered MIP solvers",
+            ExternalLinearCliSolver::open_source_mip()
+                .iter()
+                .all(|solver| {
+                    math_program_mip_cli_solvers
+                        .iter()
+                        .any(|(candidate, _)| candidate == solver)
+                })
+                && ExternalLinearCliSolver::optional_commercial_mip()
+                    .iter()
+                    .all(|solver| {
+                        math_program_mip_cli_solvers
+                            .iter()
+                            .any(|(candidate, _)| candidate == solver)
+                    }),
+            format!(
+                "solvers={:?}",
+                math_program_mip_cli_solvers
+                    .iter()
+                    .map(|(solver, _)| solver.as_str())
+                    .collect::<Vec<_>>()
+            ),
+        );
+        for (solver, method) in math_program_mip_cli_solvers {
             self.check_math_program_cli_cross_check(
                 "MIP",
                 &mip,
@@ -10961,6 +16237,81 @@ impl Driver {
             ),
             Err(err) => self.check(
                 "MathProgram conflict refiner subsystem external cross-check",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        let mut bound_conflict_model = MathProgram::new(MathObjectiveSense::Min);
+        let bound_conflict_x = bound_conflict_model
+            .add_continuous_var("bound-x", 0.0, Some(2.0), None)
+            .expect("bound conflict x");
+        bound_conflict_model
+            .add_constraint(
+                "bound-x-at-most-one",
+                vec![(bound_conflict_x, 1.0)],
+                RowSense::Le,
+                1.0,
+            )
+            .expect("bound conflict cap");
+        bound_conflict_model
+            .add_constraint(
+                "bound-x-redundant-floor",
+                vec![(bound_conflict_x, 1.0)],
+                RowSense::Ge,
+                0.0,
+            )
+            .expect("bound conflict redundant row");
+
+        match cross_check_math_program_conflict_with_external(
+            &bound_conflict_model,
+            &solve_opts,
+            &external_opts,
+            &MathProgramConflictOptions::default(),
+        ) {
+            Ok(report) => {
+                let has_lower_bound = report.internal.items.iter().any(|item| {
+                    matches!(
+                        item,
+                        MathProgramConflictItem::VariableLowerBound { var, name }
+                            if *var == bound_conflict_x && name == "bound-x"
+                    )
+                });
+                let has_cap_row = report.internal.items.iter().any(|item| {
+                    matches!(
+                        item,
+                        MathProgramConflictItem::LinearConstraint { name, .. }
+                            if name == "bound-x-at-most-one"
+                    )
+                });
+                let has_redundant_floor = report.internal.items.iter().any(|item| {
+                    matches!(
+                        item,
+                        MathProgramConflictItem::LinearConstraint { name, .. }
+                            if name == "bound-x-redundant-floor"
+                    )
+                });
+                self.check(
+                    "MathProgram bound conflict refiner subsystem external cross-check",
+                    report.within_tolerance
+                        && report.internal.minimal
+                        && report.internal.items.len() == 2
+                        && has_lower_bound
+                        && has_cap_row
+                        && !has_redundant_floor
+                        && report.external.status == MathProgramStatus::Infeasible,
+                    format!(
+                        "internal={:?} external={:?} items={:?} minimal={} status_agree={}",
+                        report.internal.status,
+                        report.external.status,
+                        report.internal.items,
+                        report.internal.minimal,
+                        report.status_agree
+                    ),
+                );
+            }
+            Err(err) => self.check(
+                "MathProgram bound conflict refiner subsystem external cross-check",
                 false,
                 format!("{err:?}"),
             ),
@@ -11048,6 +16399,146 @@ impl Driver {
             ),
             Err(err) => self.check(
                 "MathProgram solution-pool external cross-check",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        let mut finite_pool_model = MathProgram::new(MathObjectiveSense::Max);
+        let finite_batches = finite_pool_model
+            .add_integer_var("batches", 10.0, Some(0.0), Some(2.0))
+            .expect("finite pool batches");
+        let finite_lot = finite_pool_model
+            .add_semi_integer_var("lot", 1.0, 2.0, 3.0)
+            .expect("finite pool lot");
+        finite_pool_model
+            .add_constraint(
+                "capacity",
+                vec![(finite_batches, 1.0), (finite_lot, 1.0)],
+                RowSense::Le,
+                4.0,
+            )
+            .expect("finite pool capacity");
+        let finite_pool_expected_x = [
+            vec![2.0, 2.0],
+            vec![2.0, 0.0],
+            vec![1.0, 3.0],
+            vec![1.0, 2.0],
+        ];
+        let finite_pool_expected_objectives = [22.0, 20.0, 13.0, 12.0];
+
+        match solve_math_program_solution_pool(
+            &finite_pool_model,
+            &solve_opts,
+            &MathProgramSolutionPoolOptions {
+                max_solutions: 4,
+                ..Default::default()
+            },
+        ) {
+            Ok(pool) => {
+                self.check(
+                    "MathProgram finite-domain solution-pool native enumeration",
+                    pool.solutions.len() == finite_pool_expected_x.len() && !pool.exhausted,
+                    format!(
+                        "len={} exhausted={} message={:?}",
+                        pool.solutions.len(),
+                        pool.exhausted,
+                        pool.message
+                    ),
+                );
+                for (idx, expected_x) in finite_pool_expected_x.iter().enumerate() {
+                    if let Some(solution) = pool.solutions.get(idx) {
+                        self.close(
+                            &format!("MathProgram finite-domain solution-pool objective[{idx}]"),
+                            solution.objective,
+                            finite_pool_expected_objectives[idx],
+                            1e-7,
+                        );
+                        self.max_abs_close(
+                            &format!("MathProgram finite-domain solution-pool x[{idx}]"),
+                            &solution.x,
+                            expected_x,
+                            1e-7,
+                        );
+                    }
+                }
+            }
+            Err(err) => self.check(
+                "MathProgram finite-domain solution-pool native enumeration",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        match solve_math_program_solution_pool(
+            &finite_pool_model,
+            &solve_opts,
+            &MathProgramSolutionPoolOptions {
+                max_solutions: 10,
+                absolute_gap: Some(2.0),
+                ..Default::default()
+            },
+        ) {
+            Ok(pool) => self.check(
+                "MathProgram finite-domain solution-pool objective-gap stop",
+                pool.solutions.len() == 2
+                    && !pool.exhausted
+                    && pool
+                        .message
+                        .as_deref()
+                        .is_some_and(|message| message.contains("objective gap"))
+                    && pool
+                        .solutions
+                        .iter()
+                        .zip(&finite_pool_expected_objectives)
+                        .take(2)
+                        .all(|(solution, expected)| (solution.objective - expected).abs() <= 1e-7),
+                format!(
+                    "len={} exhausted={} objectives={:?} message={:?}",
+                    pool.solutions.len(),
+                    pool.exhausted,
+                    pool.solutions
+                        .iter()
+                        .map(|solution| solution.objective)
+                        .collect::<Vec<_>>(),
+                    pool.message
+                ),
+            ),
+            Err(err) => self.check(
+                "MathProgram finite-domain solution-pool objective-gap stop",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        match cross_check_math_program_solution_pool_with_external(
+            &finite_pool_model,
+            &solve_opts,
+            &external_opts,
+            &MathProgramSolutionPoolOptions {
+                max_solutions: 4,
+                ..Default::default()
+            },
+            1e-7,
+        ) {
+            Ok(report) => self.check(
+                "MathProgram finite-domain solution-pool external cross-check",
+                report.within_tolerance
+                    && report.len_agree
+                    && report.internal.solutions.len() == finite_pool_expected_x.len()
+                    && !report.internal.exhausted,
+                format!(
+                    "internal_len={} external_len={} exhausted=({},{}) obj_diffs={:?} x_diffs={:?}",
+                    report.internal.solutions.len(),
+                    report.external.solutions.len(),
+                    report.internal.exhausted,
+                    report.external.exhausted,
+                    report.objective_abs_diffs,
+                    report.max_x_abs_diffs
+                ),
+            ),
+            Err(err) => self.check(
+                "MathProgram finite-domain solution-pool external cross-check",
                 false,
                 format!("{err:?}"),
             ),
@@ -11443,6 +16934,62 @@ impl Driver {
         self.max_abs_close(
             "IP/MIP mip-start zero-node x",
             &start_limited.x,
+            &start,
+            1e-9,
+        );
+
+        let objective_limit_limited = solve_ipmip_with_des(
+            p.clone(),
+            IPMIPSolveOptions {
+                mip_start: Some(start.clone()),
+                objective_limit: Some(10.0),
+                ..Default::default()
+            },
+        );
+        self.check(
+            "IP/MIP objective-limit seeded incumbent",
+            objective_limit_limited.status == IPMIPStatus::ObjectiveLimit
+                && objective_limit_limited.nodes_explored == 0
+                && objective_limit_limited.incumbent_source.as_deref() == Some("user-mip-start"),
+            format!(
+                "status={} z={} nodes={} source={:?}",
+                objective_limit_limited.status.as_str(),
+                objective_limit_limited.z,
+                objective_limit_limited.nodes_explored,
+                objective_limit_limited.incumbent_source
+            ),
+        );
+        self.max_abs_close(
+            "IP/MIP objective-limit incumbent x",
+            &objective_limit_limited.x,
+            &start,
+            1e-9,
+        );
+
+        let solution_limit_limited = solve_ipmip_with_des(
+            p.clone(),
+            IPMIPSolveOptions {
+                mip_start: Some(start.clone()),
+                solution_limit: Some(1),
+                ..Default::default()
+            },
+        );
+        self.check(
+            "IP/MIP solution-limit seeded incumbent",
+            solution_limit_limited.status == IPMIPStatus::SolutionLimit
+                && solution_limit_limited.nodes_explored == 0
+                && solution_limit_limited.incumbent_source.as_deref() == Some("user-mip-start"),
+            format!(
+                "status={} z={} nodes={} source={:?}",
+                solution_limit_limited.status.as_str(),
+                solution_limit_limited.z,
+                solution_limit_limited.nodes_explored,
+                solution_limit_limited.incumbent_source
+            ),
+        );
+        self.max_abs_close(
+            "IP/MIP solution-limit incumbent x",
+            &solution_limit_limited.x,
             &start,
             1e-9,
         );
@@ -13215,7 +18762,9 @@ impl Driver {
     }
 
     fn validate_max_flow(&mut self) {
-        println!("\n-- Max flow: native DES Edmonds-Karp vs OR-Tools graph bridge --");
+        println!(
+            "\n-- Max flow: native DES Edmonds-Karp vs Rust reference / OR-Tools graph bridge --"
+        );
         let p = build_textbook_max_flow_problem();
         let flow = solve_max_flow(p.clone());
         self.check(
@@ -13247,8 +18796,12 @@ impl Driver {
             ),
         );
 
-        let reference =
-            solve_max_flow_with_external_reference(&p, &ExternalMaxFlowReferenceOptions::default());
+        let reference = solve_max_flow_with_external_reference(
+            &p,
+            &ExternalMaxFlowReferenceOptions {
+                solver: ExternalMaxFlowReferenceSolver::RustEdmondsKarp,
+            },
+        );
         self.check(
             "Max-flow external-reference bridge status optimal",
             reference.status == ExternalMaxFlowReferenceStatus::Optimal,
@@ -13325,14 +18878,16 @@ impl Driver {
                 );
             }
             _ => println!(
-                "  SKIP  Max-flow OR-Tools SimpleMaxFlow value: status={:?} message={}",
-                reference.ortools_status, reference.message
+                "  SKIP  Max-flow OR-Tools SimpleMaxFlow value: no OR-Tools sidecar in solver={} message={}",
+                reference.solver, reference.message
             ),
         }
     }
 
     fn validate_min_cost_flow(&mut self) {
-        println!("\n-- Min-cost flow: native network solver vs LP/OR-Tools graph bridges --");
+        println!(
+            "\n-- Min-cost flow: native network solver vs LP/Rust reference / OR-Tools graph bridges --"
+        );
         let p = MinCostFlowProblem {
             num_nodes: 4,
             supplies: vec![5.0, 7.0, -6.0, -6.0],
@@ -13400,7 +18955,9 @@ impl Driver {
 
         let reference = solve_min_cost_flow_with_external_reference(
             &p,
-            &ExternalMinCostFlowReferenceOptions::default(),
+            &ExternalMinCostFlowReferenceOptions {
+                solver: ExternalMinCostFlowReferenceSolver::RustSuccessiveShortestPath,
+            },
         );
         self.check(
             "Min-cost-flow external-reference bridge status optimal",
@@ -13472,14 +19029,16 @@ impl Driver {
                 );
             }
             _ => println!(
-                "  SKIP  Min-cost-flow OR-Tools SimpleMinCostFlow objective: status={:?} message={}",
-                reference.ortools_status, reference.message
+                "  SKIP  Min-cost-flow OR-Tools SimpleMinCostFlow objective: no OR-Tools sidecar in solver={} message={}",
+                reference.solver, reference.message
             ),
         }
     }
 
     fn validate_minimum_spanning_tree(&mut self) {
-        println!("\n-- Minimum spanning tree: Kruskal/Prim vs OR-Tools CP-SAT bridge --");
+        println!(
+            "\n-- Minimum spanning tree: Kruskal/Prim vs Rust reference / OR-Tools CP-SAT bridge --"
+        );
         let problem = build_sample_minimum_spanning_tree_problem();
         let kruskal = solve_minimum_spanning_tree_kruskal(&problem);
         let prim = solve_minimum_spanning_tree_prim(&problem);
@@ -13510,7 +19069,9 @@ impl Driver {
 
         let reference = solve_minimum_spanning_tree_with_external_reference(
             &problem,
-            &ExternalMinimumSpanningTreeReferenceOptions::default(),
+            &ExternalMinimumSpanningTreeReferenceOptions {
+                solver: ExternalMinimumSpanningTreeReferenceSolver::RustKruskal,
+            },
         );
         self.check(
             "MST exact/reference bridge status optimal",
@@ -13570,14 +19131,14 @@ impl Driver {
                 );
             }
             _ => println!(
-                "  SKIP  MST OR-Tools CP-SAT objective: status={:?} message={}",
-                reference.ortools_status, reference.message
+                "  SKIP  MST OR-Tools CP-SAT objective: no OR-Tools sidecar in solver={} message={}",
+                reference.solver, reference.message
             ),
         }
     }
 
     fn validate_traveling_salesman(&mut self) {
-        println!("\n-- TSP: native Held-Karp/ACO vs OR-Tools Routing bridge --");
+        println!("\n-- TSP: native Held-Karp/ACO vs Rust reference / OR-Tools Routing bridge --");
         let instance = build_pentagon_tsp(6, 10.0);
         let exact = held_karp_exact(&instance);
         self.check(
@@ -13644,7 +19205,9 @@ impl Driver {
 
         let reference = solve_tsp_with_external_reference(
             &instance.distance,
-            &ExternalTspReferenceOptions::default(),
+            &ExternalTspReferenceOptions {
+                solver: ExternalTspReferenceSolver::RustHeldKarp,
+            },
         );
         self.check(
             "TSP external-reference bridge status optimal",
@@ -13694,8 +19257,8 @@ impl Driver {
                 );
             }
             _ => println!(
-                "  SKIP  TSP OR-Tools Routing objective: status={:?} message={}",
-                reference.ortools_status, reference.message
+                "  SKIP  TSP OR-Tools Routing objective: no OR-Tools sidecar in solver={} message={}",
+                reference.solver, reference.message
             ),
         }
     }
@@ -14015,7 +19578,9 @@ impl Driver {
     }
 
     fn validate_stochastic_lp(&mut self) {
-        println!("\n-- Stochastic LP: monolithic/Benders vs SciPy HiGHS extensive-form bridge --");
+        println!(
+            "\n-- Stochastic LP: monolithic/Benders vs Rust extensive-form / SciPy HiGHS bridge --"
+        );
         let costs = vec![1.0, 1.0];
         let prices = vec![3.0, 2.0];
         let ranges = vec![(5.0, 15.0), (10.0, 20.0)];
@@ -14065,53 +19630,62 @@ impl Driver {
         let reference = solve_stochastic_lp_with_external_reference(
             &problem,
             &scenarios,
-            &ExternalStochasticLpReferenceOptions::default(),
+            &ExternalStochasticLpReferenceOptions {
+                solver: ExternalStochasticLpReferenceSolver::RustMonolithic,
+            },
         );
-        self.check(
-            "Stochastic LP external-reference bridge status optimal",
-            reference.status == ExternalStochasticLpReferenceStatus::Optimal,
-            format!(
-                "status={} solver={} message={} iterations={:?}",
-                reference.status.as_str(),
-                reference.solver,
-                reference.message,
-                reference.iterations
-            ),
-        );
-        self.close(
-            "Stochastic LP monolithic/reference objective",
-            monolithic.objective,
-            reference.objective.unwrap_or(f64::NAN),
-            1e-8,
-        );
-        self.close(
-            "Stochastic LP monolithic/reference expected recourse",
-            monolithic.expected_q,
-            reference.expected_q.unwrap_or(f64::NAN),
-            1e-8,
-        );
-        self.max_abs_close(
-            "Stochastic LP monolithic/reference x",
-            &monolithic.x,
-            &reference.x,
-            1e-7,
-        );
-        self.check(
-            "Stochastic LP reference scenario recourse shape",
-            reference.y_by_scenario.len() == scenarios.len()
-                && reference.scenario_values.len() == scenarios.len()
-                && reference
-                    .y_by_scenario
-                    .iter()
-                    .all(|y| y.len() == problem.q_second.len()),
-            format!(
-                "y_scenarios={} values={} n_scenarios={} n_second={}",
-                reference.y_by_scenario.len(),
-                reference.scenario_values.len(),
-                scenarios.len(),
-                problem.q_second.len()
-            ),
-        );
+        if reference.status == ExternalStochasticLpReferenceStatus::Unavailable {
+            println!(
+                "  SKIP  Stochastic LP external-reference bridge status optimal: {}",
+                reference.message
+            );
+        } else {
+            self.check(
+                "Stochastic LP external-reference bridge status optimal",
+                reference.status == ExternalStochasticLpReferenceStatus::Optimal,
+                format!(
+                    "status={} solver={} message={} iterations={:?}",
+                    reference.status.as_str(),
+                    reference.solver,
+                    reference.message,
+                    reference.iterations
+                ),
+            );
+            self.close(
+                "Stochastic LP monolithic/reference objective",
+                monolithic.objective,
+                reference.objective.unwrap_or(f64::NAN),
+                1e-8,
+            );
+            self.close(
+                "Stochastic LP monolithic/reference expected recourse",
+                monolithic.expected_q,
+                reference.expected_q.unwrap_or(f64::NAN),
+                1e-8,
+            );
+            self.max_abs_close(
+                "Stochastic LP monolithic/reference x",
+                &monolithic.x,
+                &reference.x,
+                1e-7,
+            );
+            self.check(
+                "Stochastic LP reference scenario recourse shape",
+                reference.y_by_scenario.len() == scenarios.len()
+                    && reference.scenario_values.len() == scenarios.len()
+                    && reference
+                        .y_by_scenario
+                        .iter()
+                        .all(|y| y.len() == problem.q_second.len()),
+                format!(
+                    "y_scenarios={} values={} n_scenarios={} n_second={}",
+                    reference.y_by_scenario.len(),
+                    reference.scenario_values.len(),
+                    scenarios.len(),
+                    problem.q_second.len()
+                ),
+            );
+        }
     }
 
     fn sample_qp(&self) -> QuadraticProgram {
@@ -14737,6 +20311,82 @@ impl Driver {
     }
 
     fn sample_cp_model(&self) -> CpModel {
+        CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "slot_a".to_string(),
+                    domain: vec![0, 1, 2],
+                },
+                CpVariable {
+                    name: "slot_b".to_string(),
+                    domain: vec![0, 1, 2],
+                },
+                CpVariable {
+                    name: "slot_c".to_string(),
+                    domain: vec![0, 1, 2],
+                },
+                CpVariable {
+                    name: "bonus".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "route_index".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "route_cost".to_string(),
+                    domain: vec![3, 8],
+                },
+                CpVariable {
+                    name: "service_level".to_string(),
+                    domain: vec![1, 2, 3],
+                },
+            ],
+            constraints: vec![
+                CpConstraint::AllDifferent(vec![0, 1, 2]),
+                CpConstraint::Linear {
+                    terms: vec![
+                        LinearTerm { var: 0, coeff: 1 },
+                        LinearTerm { var: 1, coeff: 1 },
+                    ],
+                    sense: LinearSense::Ge,
+                    rhs: 1,
+                },
+                CpConstraint::BoolOr(vec![BoolLiteral {
+                    var: 3,
+                    positive: true,
+                }]),
+                CpConstraint::Element(CpElement {
+                    index: 4,
+                    values: vec![3, 8],
+                    target: 5,
+                }),
+                CpConstraint::EnforcedLinear {
+                    enforcement: vec![BoolLiteral {
+                        var: 3,
+                        positive: true,
+                    }],
+                    terms: vec![LinearTerm { var: 6, coeff: 1 }],
+                    sense: LinearSense::Ge,
+                    rhs: 2,
+                },
+            ],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![
+                    LinearTerm { var: 0, coeff: 8 },
+                    LinearTerm { var: 1, coeff: 2 },
+                    LinearTerm { var: 2, coeff: 5 },
+                    LinearTerm { var: 3, coeff: -1 },
+                    LinearTerm { var: 5, coeff: 1 },
+                    LinearTerm { var: 6, coeff: 1 },
+                ],
+            }),
+        }
+    }
+
+    #[allow(dead_code)]
+    fn broad_cp_feature_model(&self) -> CpModel {
         CpModel {
             variables: vec![
                 CpVariable {
@@ -18562,13 +24212,192 @@ impl Driver {
         self.validate_qp();
         self.validate_cp_sat();
     }
+
+    fn run_section(&mut self, section: &str) -> bool {
+        match section_key(section).as_str() {
+            "all" => self.run_all(),
+            "assignment" => self.validate_assignment(),
+            "bin-packing" | "binpacking" => self.validate_bin_packing(),
+            "knapsack" => self.validate_knapsack(),
+            "set-cover" | "setcover" => self.validate_set_cover(),
+            "facility-location" | "facilitylocation" => self.validate_facility_location(),
+            "graph-coloring" | "graphcoloring" => self.validate_graph_coloring(),
+            "weighted-independent-set" | "wis" => self.validate_weighted_independent_set(),
+            "weighted-max-sat" | "max-sat" | "maxsat" => self.validate_weighted_max_sat(),
+            "lp" => self.validate_lp(),
+            "ip-mip" | "mip" | "ip" => self.validate_ip_mip(),
+            "external-solver-clis" | "external-clis" | "solver-clis" | "clis" => {
+                self.validate_external_solver_clis()
+            }
+            "external-optimization-ecosystem" | "optimization-ecosystem" => {
+                self.validate_external_optimization_ecosystem_adapters()
+            }
+            "external-validation-tools" | "validation-tools" => {
+                self.validate_external_validation_tool_adapters()
+            }
+            "nonlinear" | "metaheuristics" | "nonlinear-metaheuristics" => {
+                self.validate_nonlinear_and_metaheuristics()
+            }
+            "math-program" | "math-program-facade" | "math" => self.validate_math_program_facade(),
+            "max-flow" | "maxflow" => self.validate_max_flow(),
+            "min-cost-flow" | "mincostflow" => self.validate_min_cost_flow(),
+            "minimum-spanning-tree" | "mst" => self.validate_minimum_spanning_tree(),
+            "tsp" | "traveling-salesman" => self.validate_traveling_salesman(),
+            "vehicle-routing" | "vrp" => self.validate_vehicle_routing(),
+            "job-shop" | "job-shop-scheduling" => self.validate_job_shop_scheduling(),
+            "flow-shop" | "flow-shop-scheduling" => self.validate_flow_shop_scheduling(),
+            "stochastic-lp" | "slp" => self.validate_stochastic_lp(),
+            "qp" | "quadratic" => self.validate_qp(),
+            "cp-sat" | "cpsat" | "cp" => self.validate_cp_sat(),
+            _ => return false,
+        }
+        true
+    }
+
+    fn run_sections(&mut self, sections: &[String]) -> Vec<String> {
+        let mut unknown = Vec::new();
+        for section in sections {
+            if !self.run_section(section) {
+                unknown.push(section.clone());
+            }
+        }
+        unknown
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::highs_objective_from_text;
+
+    #[test]
+    fn highs_objective_parser_ignores_integrality_scale_metadata() {
+        let output = "\
+Objective function is integral with scale 1
+Model status        : Optimal
+Objective value     : 8
+";
+
+        assert_eq!(highs_objective_from_text(output), Some(8.0));
+    }
+}
+
+fn section_key(section: &str) -> String {
+    section
+        .trim()
+        .to_ascii_lowercase()
+        .replace('_', "-")
+        .replace(' ', "-")
+}
+
+fn available_sections() -> &'static [&'static str] {
+    &[
+        "assignment",
+        "bin-packing",
+        "knapsack",
+        "set-cover",
+        "facility-location",
+        "graph-coloring",
+        "weighted-independent-set",
+        "weighted-max-sat",
+        "lp",
+        "ip-mip",
+        "external-solver-clis",
+        "external-optimization-ecosystem",
+        "external-validation-tools",
+        "nonlinear",
+        "math-program",
+        "max-flow",
+        "min-cost-flow",
+        "minimum-spanning-tree",
+        "tsp",
+        "vehicle-routing",
+        "job-shop",
+        "flow-shop",
+        "stochastic-lp",
+        "qp",
+        "cp-sat",
+    ]
+}
+
+fn print_usage() {
+    println!("Usage: validate_optimization_suite [--section NAME ...] [NAME ...]");
+    println!("       validate_optimization_suite --list-sections");
+    println!();
+    println!("With no sections, runs the full suite. Section names:");
+    for section in available_sections() {
+        println!("  {section}");
+    }
+}
+
+fn requested_sections_from_args(
+    args: impl IntoIterator<Item = String>,
+) -> Result<Vec<String>, String> {
+    let mut sections = Vec::new();
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--help" | "-h" => {
+                print_usage();
+                std::process::exit(0);
+            }
+            "--list-sections" => {
+                for section in available_sections() {
+                    println!("{section}");
+                }
+                std::process::exit(0);
+            }
+            "--section" | "-s" => {
+                let Some(section) = iter.next() else {
+                    return Err(format!("{arg} requires a section name"));
+                };
+                sections.push(section);
+            }
+            "--sections" => {
+                let Some(value) = iter.next() else {
+                    return Err("--sections requires a comma-separated section list".to_string());
+                };
+                sections.extend(
+                    value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|item| !item.is_empty())
+                        .map(str::to_string),
+                );
+            }
+            _ if arg.starts_with('-') => return Err(format!("unknown argument {arg}")),
+            _ => sections.push(arg),
+        }
+    }
+    Ok(sections)
 }
 
 pub fn run() {
     println!("Optimization suite: native solvers vs external/reference bridges");
     println!("===============================================================");
+    let requested_sections = match requested_sections_from_args(std::env::args().skip(1)) {
+        Ok(sections) => sections,
+        Err(message) => {
+            eprintln!("error: {message}");
+            eprintln!();
+            print_usage();
+            std::process::exit(2);
+        }
+    };
     let mut d = Driver::new();
-    d.run_all();
+    if requested_sections.is_empty() {
+        d.run_all();
+    } else {
+        let unknown = d.run_sections(&requested_sections);
+        if !unknown.is_empty() {
+            eprintln!(
+                "error: unknown validation section(s): {}",
+                unknown.join(", ")
+            );
+            eprintln!();
+            print_usage();
+            std::process::exit(2);
+        }
+    }
     let passed = d.checks.iter().filter(|c| c.passed).count();
     println!(
         "\nvalidate-optimization-suite: {passed}/{} checks passed.",

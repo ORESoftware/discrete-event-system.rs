@@ -702,6 +702,13 @@ pub struct IPMIPSolveOptions {
     /// Stop once the incumbent is within this absolute gap of the best known
     /// search bound. `0.0` requires a closed gap; `None` disables the limit.
     pub mip_gap_abs: Option<f64>,
+    /// Stop once this many feasible incumbent solutions have been accepted.
+    /// The optional MIP start counts as the first incumbent when feasible.
+    pub solution_limit: Option<usize>,
+    /// Stop once the incumbent reaches this objective target. For maximization
+    /// this means `z >= objective_limit`; for minimization it means
+    /// `z <= objective_limit`.
+    pub objective_limit: Option<f64>,
     pub node_selection: Option<NodeSelection>,
     pub lp_algorithm: Option<LpRelaxationAlgorithm>,
     pub allow_external_solvers: Option<bool>,
@@ -737,6 +744,8 @@ struct FilledIPMIPSolveOptions {
     branch_priorities: Vec<i32>,
     mip_gap_rel: Option<f64>,
     mip_gap_abs: Option<f64>,
+    solution_limit: Option<usize>,
+    objective_limit: Option<f64>,
     node_selection: NodeSelection,
     lp_algorithm: LpRelaxationAlgorithm,
     allow_external_solvers: bool,
@@ -756,6 +765,8 @@ pub enum IPMIPStatus {
     TickLimit,
     TimeLimit,
     GapLimit,
+    SolutionLimit,
+    ObjectiveLimit,
 }
 
 impl IPMIPStatus {
@@ -769,6 +780,8 @@ impl IPMIPStatus {
             IPMIPStatus::TickLimit => "tick-limit",
             IPMIPStatus::TimeLimit => "time-limit",
             IPMIPStatus::GapLimit => "gap-limit",
+            IPMIPStatus::SolutionLimit => "solution-limit",
+            IPMIPStatus::ObjectiveLimit => "objective-limit",
         }
     }
 }
@@ -2118,6 +2131,8 @@ struct MIPGapValues {
 enum IPMIPStopCondition {
     TimeLimit,
     GapLimit,
+    SolutionLimit,
+    ObjectiveLimit,
 }
 
 /// Composite single-threaded in-house branch-and-cut solver.
@@ -2266,6 +2281,28 @@ impl BranchAndCutSolverStation {
             || abs_limit.is_some_and(|limit| values.abs_gap <= limit + EPS)
     }
 
+    fn solution_limit_satisfied(&self, solution_limit: Option<usize>) -> bool {
+        let Some(solution_limit) = solution_limit else {
+            return false;
+        };
+        self.incumbent.borrow().updates >= solution_limit
+    }
+
+    fn objective_limit_satisfied(&self, objective_limit: Option<f64>) -> bool {
+        let Some(objective_limit) = objective_limit else {
+            return false;
+        };
+        let incumbent = self.incumbent.borrow();
+        if !incumbent.has_incumbent() || !incumbent.best_z.is_finite() {
+            return false;
+        }
+        if self.p.sense == Sense::Max {
+            incumbent.best_z >= objective_limit - EPS
+        } else {
+            incumbent.best_z <= objective_limit + EPS
+        }
+    }
+
     pub fn has_incumbent(&self) -> bool {
         self.incumbent.borrow().has_incumbent()
     }
@@ -2319,6 +2356,8 @@ fn fill_ipmip_options(opts: &IPMIPSolveOptions) -> FilledIPMIPSolveOptions {
         branch_priorities: opts.branch_priorities.clone().unwrap_or_default(),
         mip_gap_rel: opts.mip_gap_rel,
         mip_gap_abs: opts.mip_gap_abs,
+        solution_limit: opts.solution_limit,
+        objective_limit: opts.objective_limit,
         node_selection: opts.node_selection.unwrap_or(NodeSelection::Dfs),
         lp_algorithm: opts.lp_algorithm.unwrap_or(LpRelaxationAlgorithm::Auto),
         allow_external_solvers: opts.allow_external_solvers.unwrap_or(false),
@@ -2349,6 +2388,20 @@ fn validate_mip_gap_limit(name: &str, value: Option<f64>) {
     }
 }
 
+fn validate_solution_limit(value: Option<usize>) {
+    if value == Some(0) {
+        panic!("{MODEL}: solution_limit must be positive");
+    }
+}
+
+fn validate_objective_limit(value: Option<f64>) {
+    if let Some(value) = value {
+        if !value.is_finite() {
+            panic!("{MODEL}: objective_limit must be finite");
+        }
+    }
+}
+
 /// Solve an IP/MIP using the in-house branch-and-cut DES.
 pub fn solve_ipmip_with_des(p: IPMIPProblem, opts: IPMIPSolveOptions) -> IPMIPSolution {
     validate_ipmip_problem(&p);
@@ -2356,6 +2409,8 @@ pub fn solve_ipmip_with_des(p: IPMIPProblem, opts: IPMIPSolveOptions) -> IPMIPSo
     validate_branch_priorities(&p, opts.branch_priorities.as_deref());
     validate_mip_gap_limit("mip_gap_rel", opts.mip_gap_rel);
     validate_mip_gap_limit("mip_gap_abs", opts.mip_gap_abs);
+    validate_solution_limit(opts.solution_limit);
+    validate_objective_limit(opts.objective_limit);
     let filled = fill_ipmip_options(&opts);
     let t0 = Instant::now();
     let p_rc = Rc::new(p);
@@ -2368,6 +2423,8 @@ pub fn solve_ipmip_with_des(p: IPMIPProblem, opts: IPMIPSolveOptions) -> IPMIPSo
     let time_limit = filled.time_limit_ms;
     let mip_gap_rel = filled.mip_gap_rel;
     let mip_gap_abs = filled.mip_gap_abs;
+    let solution_limit = filled.solution_limit;
+    let objective_limit = filled.objective_limit;
     let stop_clock = t0;
     let stop_condition: Rc<RefCell<Option<IPMIPStopCondition>>> = Rc::new(RefCell::new(None));
     let stop_condition_for_loop = stop_condition.clone();
@@ -2382,6 +2439,21 @@ pub fn solve_ipmip_with_des(p: IPMIPProblem, opts: IPMIPSolveOptions) -> IPMIPSo
                     && stop_clock.elapsed().as_secs_f64() * 1000.0 >= time_limit
                 {
                     *stop_condition_for_loop.borrow_mut() = Some(IPMIPStopCondition::TimeLimit);
+                    return true;
+                }
+                if solver_for_stop
+                    .borrow()
+                    .objective_limit_satisfied(objective_limit)
+                {
+                    *stop_condition_for_loop.borrow_mut() =
+                        Some(IPMIPStopCondition::ObjectiveLimit);
+                    return true;
+                }
+                if solver_for_stop
+                    .borrow()
+                    .solution_limit_satisfied(solution_limit)
+                {
+                    *stop_condition_for_loop.borrow_mut() = Some(IPMIPStopCondition::SolutionLimit);
                     return true;
                 }
                 if solver_for_stop
@@ -2416,6 +2488,14 @@ pub fn solve_ipmip_with_des(p: IPMIPProblem, opts: IPMIPSolveOptions) -> IPMIPSo
     let saw_unbounded = solver_ref.decision.borrow().saw_unbounded;
     let status = if summary.reason == Some(RunReason::MaxTicks) {
         IPMIPStatus::TickLimit
+    } else if summary.reason == Some(RunReason::StopWhen)
+        && stop_condition == Some(IPMIPStopCondition::ObjectiveLimit)
+    {
+        IPMIPStatus::ObjectiveLimit
+    } else if summary.reason == Some(RunReason::StopWhen)
+        && stop_condition == Some(IPMIPStopCondition::SolutionLimit)
+    {
+        IPMIPStatus::SolutionLimit
     } else if summary.reason == Some(RunReason::StopWhen)
         && stop_condition == Some(IPMIPStopCondition::GapLimit)
     {
@@ -5938,6 +6018,7 @@ fn solve_node_relaxation(
                 &InternalSimplexOptions {
                     max_iter: Some(lp_max_iters),
                     tol: None,
+                    basis_start: None,
                 },
             );
             NodeLPResult {
@@ -6337,6 +6418,7 @@ fn solve_incremental_relaxation(
             &InternalSimplexOptions {
                 max_iter: Some(lp_max_iters),
                 tol: None,
+                basis_start: None,
             },
         );
         return NodeLPResult {

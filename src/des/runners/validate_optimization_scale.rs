@@ -14,6 +14,10 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
+use crate::des::general::cp_sat::{
+    solve_cp_model, CpConstraint, CpModel, CpObjective, CpSolution, CpSolveOptions, CpStatus,
+    CpVariable, LinearSense, LinearTerm, ObjectiveSense,
+};
 use crate::des::general::external_linear_cli::{
     solve_ipmip_with_external_cli, solve_lp_with_external_cli, ExternalLinearCliModelFormat,
     ExternalLinearCliOptions, ExternalLinearCliSolver, ExternalLinearCliStatus,
@@ -56,7 +60,13 @@ struct ScaleRow {
 struct ScaleReport {
     generated_at_unix_ms: u128,
     lp_sizes: Vec<usize>,
+    lp_methods: Vec<String>,
+    lp_cli_solvers: Vec<String>,
     mip_sizes: Vec<usize>,
+    mip_solvers: Vec<String>,
+    mip_cli_solvers: Vec<String>,
+    cli_formats: Vec<String>,
+    cp_sizes: Vec<usize>,
     rows: Vec<ScaleRow>,
 }
 
@@ -66,6 +76,16 @@ struct LinearCliReference {
     solver: String,
     objective: Option<f64>,
     message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CpSatReference {
+    status: String,
+    assignment: Vec<i64>,
+    objective: Option<i64>,
+    nodes: Option<usize>,
+    solver: String,
+    message: Option<String>,
 }
 
 struct Driver {
@@ -124,6 +144,7 @@ impl Driver {
             &InternalSimplexOptions {
                 max_iter: Some(20_000),
                 tol: Some(1e-8),
+                basis_start: None,
             },
         );
         let native_ms = native_t0.elapsed().as_secs_f64() * 1000.0;
@@ -149,7 +170,7 @@ impl Driver {
             format!("{case} objective"),
             native.objective,
             external.objective,
-            1e-7,
+            lp_method_objective_tolerance(method, native.objective, external.objective),
         );
         self.rows.push(ScaleRow {
             family: "lp-resource".to_string(),
@@ -183,6 +204,7 @@ impl Driver {
             &InternalSimplexOptions {
                 max_iter: Some(20_000),
                 tol: Some(1e-8),
+                basis_start: None,
             },
         );
         let native_ms = native_t0.elapsed().as_secs_f64() * 1000.0;
@@ -398,6 +420,75 @@ impl Driver {
         });
     }
 
+    fn run_cp_case(&mut self, n: usize) {
+        let model = build_cp_permutation_model(n);
+        let native_t0 = Instant::now();
+        let native = solve_cp_model(&model, CpSolveOptions::default());
+        let native_ms = native_t0.elapsed().as_secs_f64() * 1000.0;
+        let external_t0 = Instant::now();
+        let external = self.run_cp_sat_reference(&cp_model_json(&model));
+        let external_ms = external_t0.elapsed().as_secs_f64() * 1000.0;
+        if external.status == "unavailable" {
+            println!(
+                "  SKIP  CP-SAT permutation n={n} solver={}: {}",
+                external.solver,
+                external
+                    .message
+                    .as_deref()
+                    .unwrap_or("CP-SAT reference unavailable")
+            );
+            return;
+        }
+        let case = format!("CP-SAT permutation n={n}");
+        self.check(
+            format!("{case} statuses optimal"),
+            native.status == CpStatus::Optimal && external.status == "optimal",
+            format!(
+                "native={} external={} solver={} native_nodes={} external_nodes={:?}",
+                native.status.as_str(),
+                external.status,
+                external.solver,
+                native.nodes,
+                external.nodes
+            ),
+        );
+        self.check(
+            format!("{case} objective"),
+            native.objective == external.objective,
+            format!(
+                "native={:?} external={:?}",
+                native.objective, external.objective
+            ),
+        );
+        self.check(
+            format!("{case} assignment"),
+            native.assignment == external.assignment,
+            format!(
+                "native={} external={}",
+                compact_assignment(&native),
+                compact_vec(&external.assignment)
+            ),
+        );
+        self.rows.push(ScaleRow {
+            family: "cp-sat-permutation".to_string(),
+            size: n,
+            constraints: model.constraints.len(),
+            native_solver: native.solver,
+            external_solver: external.solver,
+            native_status: native.status.as_str().to_string(),
+            external_status: external.status,
+            native_objective: native.objective.unwrap_or_default() as f64,
+            external_objective: external.objective.unwrap_or_default() as f64,
+            objective_abs_diff: (native.objective.unwrap_or_default()
+                - external.objective.unwrap_or_default())
+            .unsigned_abs() as f64,
+            native_ms,
+            external_ms,
+            native_nodes: Some(native.nodes),
+            native_lp_solves: None,
+        });
+    }
+
     fn run_linear_cli_reference(
         &self,
         kind: &str,
@@ -438,7 +529,51 @@ impl Driver {
         serde_json::from_slice(&output.stdout).expect("parse linear CLI reference JSON")
     }
 
-    fn write_report(&self, lp_sizes: &[usize], mip_sizes: &[usize]) {
+    fn run_cp_sat_reference(&self, stdin_json: &str) -> CpSatReference {
+        use std::io::Write;
+
+        let python = std::env::var("PYTHON")
+            .or_else(|_| std::env::var("PYTHON_BIN"))
+            .unwrap_or_else(|_| "python3".to_string());
+        let script = self.root.join("scripts").join("cp_sat_reference.py");
+        let mut child = Command::new(&python)
+            .arg(&script)
+            .arg("--solver")
+            .arg("ortools")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|e| panic!("failed to start cp_sat_reference.py: {e}"));
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(stdin_json.as_bytes())
+                .expect("write CP-SAT reference stdin");
+        }
+        let output = child.wait_with_output().expect("wait for CP-SAT reference");
+        if let Ok(parsed) = serde_json::from_slice::<CpSatReference>(&output.stdout) {
+            return parsed;
+        }
+        if !output.status.success() {
+            panic!(
+                "cp_sat_reference.py failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        serde_json::from_slice(&output.stdout).expect("parse CP-SAT reference JSON")
+    }
+
+    fn write_report(
+        &self,
+        lp_sizes: &[usize],
+        lp_methods: &[String],
+        lp_cli_solvers: &[ExternalLinearCliSolver],
+        mip_sizes: &[usize],
+        mip_solvers: &[String],
+        mip_cli_solvers: &[ExternalLinearCliSolver],
+        cli_formats: &[ExternalLinearCliModelFormat],
+        cp_sizes: &[usize],
+    ) {
         let out_dir = self
             .root
             .join("out")
@@ -451,7 +586,13 @@ impl Driver {
                 .expect("system time before epoch")
                 .as_millis(),
             lp_sizes: lp_sizes.to_vec(),
+            lp_methods: lp_methods.to_vec(),
+            lp_cli_solvers: external_solver_names(lp_cli_solvers),
             mip_sizes: mip_sizes.to_vec(),
+            mip_solvers: mip_solvers.to_vec(),
+            mip_cli_solvers: external_solver_names(mip_cli_solvers),
+            cli_formats: cli_format_names(cli_formats),
+            cp_sizes: cp_sizes.to_vec(),
             rows: self.rows.clone(),
         };
         let path = out_dir.join("scale-report.json");
@@ -534,6 +675,20 @@ fn parse_model_format_list(
     }
 }
 
+fn external_solver_names(solvers: &[ExternalLinearCliSolver]) -> Vec<String> {
+    solvers
+        .iter()
+        .map(|solver| solver.as_str().to_string())
+        .collect()
+}
+
+fn cli_format_names(formats: &[ExternalLinearCliModelFormat]) -> Vec<String> {
+    formats
+        .iter()
+        .map(|format| format.as_str().to_string())
+        .collect()
+}
+
 fn build_resource_lp(n: usize, m: usize) -> LPProblem {
     let ub_value = 6.0;
     let mut a_ub = Vec::with_capacity(m);
@@ -577,6 +732,41 @@ fn build_scale_knapsack(n: usize) -> IPMIPProblem {
     build_binary_knapsack_ip(values, weights, capacity)
 }
 
+fn build_cp_permutation_model(n: usize) -> CpModel {
+    let n = n.max(2);
+    let vars: Vec<usize> = (0..n).collect();
+    let sum_rhs = (n * (n - 1) / 2) as i64;
+    CpModel {
+        variables: (0..n)
+            .map(|j| CpVariable {
+                name: format!("p{j}"),
+                domain: (0..n as i64).collect(),
+            })
+            .collect(),
+        constraints: vec![
+            CpConstraint::AllDifferent(vars.clone()),
+            CpConstraint::Linear {
+                terms: vars
+                    .iter()
+                    .map(|&var| LinearTerm { var, coeff: 1 })
+                    .collect(),
+                sense: LinearSense::Eq,
+                rhs: sum_rhs,
+            },
+        ],
+        objective: Some(CpObjective {
+            sense: ObjectiveSense::Max,
+            terms: vars
+                .iter()
+                .map(|&var| LinearTerm {
+                    var,
+                    coeff: var as i64 + 1,
+                })
+                .collect(),
+        }),
+    }
+}
+
 fn mip_json(problem: &IPMIPProblem) -> String {
     serde_json::json!({
         "sense": problem.sense.as_str(),
@@ -589,6 +779,62 @@ fn mip_json(problem: &IPMIPProblem) -> String {
         "con_names": &problem.con_names,
     })
     .to_string()
+}
+
+fn cp_model_json(model: &CpModel) -> String {
+    let variables: Vec<_> = model
+        .variables
+        .iter()
+        .map(|v| serde_json::json!({"name": v.name, "domain": v.domain}))
+        .collect();
+    let constraints: Vec<_> = model
+        .constraints
+        .iter()
+        .map(|c| match c {
+            CpConstraint::AllDifferent(vars) => {
+                serde_json::json!({"kind": "all_different", "vars": vars})
+            }
+            CpConstraint::Linear { terms, sense, rhs } => serde_json::json!({
+                "kind": "linear",
+                "terms": terms.iter().map(|t| serde_json::json!({
+                    "var": t.var,
+                    "coeff": t.coeff,
+                })).collect::<Vec<_>>(),
+                "sense": sense.as_str(),
+                "rhs": rhs,
+            }),
+            _ => panic!("scale CP-SAT JSON only supports generated all-different/linear models"),
+        })
+        .collect();
+    let objective = model.objective.as_ref().map(|obj| {
+        serde_json::json!({
+            "sense": obj.sense.as_str(),
+            "terms": obj.terms.iter().map(|t| serde_json::json!({
+                "var": t.var,
+                "coeff": t.coeff,
+            })).collect::<Vec<_>>(),
+        })
+    });
+    serde_json::json!({
+        "variables": variables,
+        "constraints": constraints,
+        "objective": objective,
+    })
+    .to_string()
+}
+
+fn compact_assignment(solution: &CpSolution) -> String {
+    compact_vec(&solution.assignment)
+}
+
+fn compact_vec(values: &[i64]) -> String {
+    if values.len() <= 12 {
+        return format!("{values:?}");
+    }
+    let mut preview: Vec<String> = values.iter().take(8).map(ToString::to_string).collect();
+    preview.push("...".to_string());
+    preview.extend(values.iter().rev().take(3).rev().map(ToString::to_string));
+    format!("[{}] len={}", preview.join(", "), values.len())
 }
 
 fn parse_size_list(env_name: &str, defaults: &[usize]) -> Vec<usize> {
@@ -624,14 +870,30 @@ fn parse_solver_list(env_name: &str, defaults: &[&str]) -> Vec<String> {
     }
 }
 
+fn lp_method_objective_tolerance(
+    method: &str,
+    native_objective: f64,
+    external_objective: f64,
+) -> f64 {
+    if method.trim().to_ascii_lowercase().contains("pdlp") {
+        1e-6 * native_objective
+            .abs()
+            .max(external_objective.abs())
+            .max(1.0)
+    } else {
+        1e-7
+    }
+}
+
 pub fn run() {
     println!("Optimization scale envelope: native solvers vs external engines");
     println!("===============================================================");
 
     let lp_sizes = parse_size_list("SCALE_LP_SIZES", &[8, 16, 24]);
     let mip_sizes = parse_size_list("SCALE_MIP_SIZES", &[8, 12, 16]);
-    let lp_methods = parse_solver_list("SCALE_LP_METHODS", &["highs", "glop"]);
-    let mip_solvers = parse_solver_list("SCALE_MIP_SOLVERS", &["highs", "cbc"]);
+    let cp_sizes = parse_size_list("SCALE_CP_SIZES", &[5, 6, 7]);
+    let lp_methods = parse_solver_list("SCALE_LP_METHODS", &["highs", "glop", "pdlp"]);
+    let mip_solvers = parse_solver_list("SCALE_MIP_SOLVERS", &["highs", "glpk", "scip", "cbc"]);
     let lp_cli_solvers = parse_external_solver_list(
         "SCALE_LP_CLI_SOLVERS",
         ExternalLinearCliSolver::open_source_lp(),
@@ -669,6 +931,20 @@ pub fn run() {
         }
     }
 
-    driver.write_report(&lp_sizes, &mip_sizes);
+    println!("\n-- CP-SAT permutation family --");
+    for &n in &cp_sizes {
+        driver.run_cp_case(n);
+    }
+
+    driver.write_report(
+        &lp_sizes,
+        &lp_methods,
+        &lp_cli_solvers,
+        &mip_sizes,
+        &mip_solvers,
+        &mip_cli_solvers,
+        &cli_formats,
+        &cp_sizes,
+    );
     driver.finish();
 }

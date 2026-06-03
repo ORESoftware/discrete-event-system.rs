@@ -38,6 +38,82 @@ mod tests {
                     domain: vec![0, 1, 2],
                 },
                 CpVariable {
+                    name: "bonus".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "route_index".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "route_cost".to_string(),
+                    domain: vec![3, 8],
+                },
+                CpVariable {
+                    name: "service_level".to_string(),
+                    domain: vec![1, 2, 3],
+                },
+            ],
+            constraints: vec![
+                CpConstraint::AllDifferent(vec![0, 1, 2]),
+                CpConstraint::Linear {
+                    terms: vec![
+                        LinearTerm { var: 0, coeff: 1 },
+                        LinearTerm { var: 1, coeff: 1 },
+                    ],
+                    sense: LinearSense::Ge,
+                    rhs: 1,
+                },
+                CpConstraint::BoolOr(vec![BoolLiteral {
+                    var: 3,
+                    positive: true,
+                }]),
+                CpConstraint::Element(CpElement {
+                    index: 4,
+                    values: vec![3, 8],
+                    target: 5,
+                }),
+                CpConstraint::EnforcedLinear {
+                    enforcement: vec![BoolLiteral {
+                        var: 3,
+                        positive: true,
+                    }],
+                    terms: vec![LinearTerm { var: 6, coeff: 1 }],
+                    sense: LinearSense::Ge,
+                    rhs: 2,
+                },
+            ],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![
+                    LinearTerm { var: 0, coeff: 8 },
+                    LinearTerm { var: 1, coeff: 2 },
+                    LinearTerm { var: 2, coeff: 5 },
+                    LinearTerm { var: 3, coeff: -1 },
+                    LinearTerm { var: 5, coeff: 1 },
+                    LinearTerm { var: 6, coeff: 1 },
+                ],
+            }),
+        }
+    }
+
+    #[allow(dead_code)]
+    fn broad_sample_model() -> CpModel {
+        CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "slot_a".to_string(),
+                    domain: vec![0, 1, 2],
+                },
+                CpVariable {
+                    name: "slot_b".to_string(),
+                    domain: vec![0, 1, 2],
+                },
+                CpVariable {
+                    name: "slot_c".to_string(),
+                    domain: vec![0, 1, 2],
+                },
+                CpVariable {
                     name: "use_bonus".to_string(),
                     domain: vec![0, 1],
                 },

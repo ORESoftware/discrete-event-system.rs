@@ -420,6 +420,7 @@ impl<'p, 'a> Transform<StageDecisionInput<'a>, StageDecision> for StageDecisionS
             &InternalSimplexOptions {
                 max_iter: Some(10000),
                 tol: None,
+                basis_start: None,
             },
         );
         if sol.status != LPStatus::Optimal {
@@ -1058,6 +1059,7 @@ fn solve_exact_scenario_tree_impl(p: &MultiStageInventoryProblem) -> ExactTreeNo
         &InternalSimplexOptions {
             max_iter: Some(100000),
             tol: None,
+            basis_start: None,
         },
     );
     ExactTreeNodeResult {

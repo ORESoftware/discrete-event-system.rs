@@ -48,6 +48,16 @@ pub enum ExternalOptimizationTool {
     Ecj,
     OjAlgo,
     OrToolsJava,
+    Cpmpy,
+    PyCsp3,
+    Conjure,
+    SavileRow,
+    Picat,
+    Clingo,
+    Clingcon,
+    Sat4j,
+    PySat,
+    OpenWbo,
     Pyomo,
     Pulp,
     Cvxpy,
@@ -85,6 +95,16 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Ecj,
             ExternalOptimizationTool::OjAlgo,
             ExternalOptimizationTool::OrToolsJava,
+            ExternalOptimizationTool::Cpmpy,
+            ExternalOptimizationTool::PyCsp3,
+            ExternalOptimizationTool::Conjure,
+            ExternalOptimizationTool::SavileRow,
+            ExternalOptimizationTool::Picat,
+            ExternalOptimizationTool::Clingo,
+            ExternalOptimizationTool::Clingcon,
+            ExternalOptimizationTool::Sat4j,
+            ExternalOptimizationTool::PySat,
+            ExternalOptimizationTool::OpenWbo,
             ExternalOptimizationTool::Pyomo,
             ExternalOptimizationTool::Pulp,
             ExternalOptimizationTool::Cvxpy,
@@ -122,6 +142,16 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Ecj => "ecj",
             ExternalOptimizationTool::OjAlgo => "ojalgo",
             ExternalOptimizationTool::OrToolsJava => "ortools-java",
+            ExternalOptimizationTool::Cpmpy => "cpmpy",
+            ExternalOptimizationTool::PyCsp3 => "pycsp3",
+            ExternalOptimizationTool::Conjure => "conjure",
+            ExternalOptimizationTool::SavileRow => "savile-row",
+            ExternalOptimizationTool::Picat => "picat",
+            ExternalOptimizationTool::Clingo => "clingo",
+            ExternalOptimizationTool::Clingcon => "clingcon",
+            ExternalOptimizationTool::Sat4j => "sat4j",
+            ExternalOptimizationTool::PySat => "pysat",
+            ExternalOptimizationTool::OpenWbo => "open-wbo",
             ExternalOptimizationTool::Pyomo => "pyomo",
             ExternalOptimizationTool::Pulp => "pulp",
             ExternalOptimizationTool::Cvxpy => "cvxpy",
@@ -159,6 +189,16 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Ecj => "ECJ",
             ExternalOptimizationTool::OjAlgo => "ojAlgo",
             ExternalOptimizationTool::OrToolsJava => "Google OR-Tools Java",
+            ExternalOptimizationTool::Cpmpy => "CPMpy",
+            ExternalOptimizationTool::PyCsp3 => "PyCSP3",
+            ExternalOptimizationTool::Conjure => "Conjure",
+            ExternalOptimizationTool::SavileRow => "Savile Row",
+            ExternalOptimizationTool::Picat => "Picat",
+            ExternalOptimizationTool::Clingo => "clingo",
+            ExternalOptimizationTool::Clingcon => "clingcon",
+            ExternalOptimizationTool::Sat4j => "SAT4J",
+            ExternalOptimizationTool::PySat => "PySAT",
+            ExternalOptimizationTool::OpenWbo => "Open-WBO",
             ExternalOptimizationTool::Pyomo => "Pyomo",
             ExternalOptimizationTool::Pulp => "PuLP",
             ExternalOptimizationTool::Cvxpy => "CVXPY",
@@ -195,8 +235,13 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::MoeaFramework
             | ExternalOptimizationTool::Ecj
             | ExternalOptimizationTool::OjAlgo
-            | ExternalOptimizationTool::OrToolsJava => ExternalOptimizationEcosystem::Java,
-            ExternalOptimizationTool::Pyomo
+            | ExternalOptimizationTool::OrToolsJava
+            | ExternalOptimizationTool::SavileRow
+            | ExternalOptimizationTool::Sat4j => ExternalOptimizationEcosystem::Java,
+            ExternalOptimizationTool::Cpmpy
+            | ExternalOptimizationTool::PyCsp3
+            | ExternalOptimizationTool::PySat
+            | ExternalOptimizationTool::Pyomo
             | ExternalOptimizationTool::Pulp
             | ExternalOptimizationTool::Cvxpy
             | ExternalOptimizationTool::Cvxopt
@@ -207,7 +252,12 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::OrToolsPython
             | ExternalOptimizationTool::ScipyOptimize => ExternalOptimizationEcosystem::Python,
             ExternalOptimizationTool::Jump => ExternalOptimizationEcosystem::Julia,
-            ExternalOptimizationTool::Ampl
+            ExternalOptimizationTool::Conjure
+            | ExternalOptimizationTool::Picat
+            | ExternalOptimizationTool::Clingo
+            | ExternalOptimizationTool::Clingcon
+            | ExternalOptimizationTool::OpenWbo
+            | ExternalOptimizationTool::Ampl
             | ExternalOptimizationTool::Gams
             | ExternalOptimizationTool::Hexaly => ExternalOptimizationEcosystem::Native,
             ExternalOptimizationTool::GoodLp
@@ -233,6 +283,16 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Ecj => "ECJ_CLASSPATH",
             ExternalOptimizationTool::OjAlgo => "OJALGO_CLASSPATH",
             ExternalOptimizationTool::OrToolsJava => "ORTOOLS_JAVA_CLASSPATH",
+            ExternalOptimizationTool::Cpmpy => "CPMPY_PYTHON",
+            ExternalOptimizationTool::PyCsp3 => "PYCSP3_PYTHON",
+            ExternalOptimizationTool::Conjure => "CONJURE_DIR",
+            ExternalOptimizationTool::SavileRow => "SAVILE_ROW_CLASSPATH",
+            ExternalOptimizationTool::Picat => "PICAT_DIR",
+            ExternalOptimizationTool::Clingo => "CLINGO_DIR",
+            ExternalOptimizationTool::Clingcon => "CLINGCON_DIR",
+            ExternalOptimizationTool::Sat4j => "SAT4J_CLASSPATH",
+            ExternalOptimizationTool::PySat => "PYSAT_PYTHON",
+            ExternalOptimizationTool::OpenWbo => "OPEN_WBO_DIR",
             ExternalOptimizationTool::Pyomo => "PYOMO_PYTHON",
             ExternalOptimizationTool::Pulp => "PULP_PYTHON",
             ExternalOptimizationTool::Cvxpy => "CVXPY_PYTHON",
@@ -261,6 +321,16 @@ impl ExternalOptimizationTool {
     pub fn artifact_env_vars(self) -> Vec<&'static str> {
         let mut names = vec![self.env_var()];
         for name in match self {
+            ExternalOptimizationTool::Cpmpy => &["CPMPY_PYTHON"][..],
+            ExternalOptimizationTool::PyCsp3 => &["PYCSP3_PYTHON"],
+            ExternalOptimizationTool::Conjure => &["CONJURE_HOME"],
+            ExternalOptimizationTool::SavileRow => &["SAVILEROW_HOME"],
+            ExternalOptimizationTool::Picat => &["PICAT_HOME"],
+            ExternalOptimizationTool::Clingo => &["CLINGO_HOME"],
+            ExternalOptimizationTool::Clingcon => &["CLINGCON_HOME"],
+            ExternalOptimizationTool::Sat4j => &["SAT4J_HOME"],
+            ExternalOptimizationTool::PySat => &["PYSAT_PYTHON"],
+            ExternalOptimizationTool::OpenWbo => &["OPEN_WBO_HOME"],
             ExternalOptimizationTool::Pyomo => &["PYOMO_PYTHON"][..],
             ExternalOptimizationTool::Pulp => &["PULP_PYTHON"],
             ExternalOptimizationTool::Cvxpy => &["CVXPY_PYTHON"],
@@ -301,6 +371,20 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Ecj => &["ECJ_HOME", "ECJ_DIR"],
             ExternalOptimizationTool::OjAlgo => &["OJALGO_HOME", "OJALGO_DIR"],
             ExternalOptimizationTool::OrToolsJava => &["ORTOOLS_JAVA_HOME", "ORTOOLS_HOME"],
+            ExternalOptimizationTool::Cpmpy => &["CPMPY_HOME", "CPMPY_DIR"],
+            ExternalOptimizationTool::PyCsp3 => &["PYCSP3_HOME", "PYCSP3_DIR"],
+            ExternalOptimizationTool::Conjure => &["CONJURE_HOME", "CONJURE_DIR"],
+            ExternalOptimizationTool::SavileRow => {
+                &["SAVILE_ROW_HOME", "SAVILE_ROW_DIR", "SAVILEROW_HOME"]
+            }
+            ExternalOptimizationTool::Picat => &["PICAT_HOME", "PICAT_DIR"],
+            ExternalOptimizationTool::Clingo => &["CLINGO_HOME", "CLINGO_DIR", "POTASSCO_HOME"],
+            ExternalOptimizationTool::Clingcon => {
+                &["CLINGCON_HOME", "CLINGCON_DIR", "POTASSCO_HOME"]
+            }
+            ExternalOptimizationTool::Sat4j => &["SAT4J_HOME", "SAT4J_DIR"],
+            ExternalOptimizationTool::PySat => &["PYSAT_HOME", "PYSAT_DIR"],
+            ExternalOptimizationTool::OpenWbo => &["OPEN_WBO_HOME", "OPEN_WBO_DIR", "OPENWBO_HOME"],
             ExternalOptimizationTool::Pyomo => &["PYOMO_HOME", "PYOMO_DIR"],
             ExternalOptimizationTool::Pulp => &["PULP_HOME", "PULP_DIR"],
             ExternalOptimizationTool::Cvxpy => &["CVXPY_HOME", "CVXPY_DIR"],
@@ -350,6 +434,11 @@ impl ExternalOptimizationTool {
                 "com.google.ortools.Loader",
                 "com.google.ortools.sat.CpModel",
             ],
+            ExternalOptimizationTool::SavileRow => &["savilerow.SavileRow", "SavileRow"],
+            ExternalOptimizationTool::Sat4j => &[
+                "org.sat4j.minisat.SolverFactory",
+                "org.sat4j.pb.SolverFactory",
+            ],
             _ => &[],
         }
     }
@@ -366,6 +455,9 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Docplex => &["docplex.mp.model"],
             ExternalOptimizationTool::OrToolsPython => &["ortools.sat.python.cp_model"],
             ExternalOptimizationTool::ScipyOptimize => &["scipy.optimize"],
+            ExternalOptimizationTool::Cpmpy => &["cpmpy"],
+            ExternalOptimizationTool::PyCsp3 => &["pycsp3"],
+            ExternalOptimizationTool::PySat => &["pysat"],
             _ => &[],
         }
     }
@@ -375,6 +467,11 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Ampl => &["ampl"],
             ExternalOptimizationTool::Gams => &["gams"],
             ExternalOptimizationTool::Hexaly => &["hexaly", "localsolver"],
+            ExternalOptimizationTool::Conjure => &["conjure"],
+            ExternalOptimizationTool::Picat => &["picat"],
+            ExternalOptimizationTool::Clingo => &["clingo"],
+            ExternalOptimizationTool::Clingcon => &["clingcon"],
+            ExternalOptimizationTool::OpenWbo => &["open-wbo", "open-wbo_static"],
             _ => &[],
         }
     }
@@ -1111,13 +1208,21 @@ mod tests {
 
     #[test]
     fn ecosystem_tool_metadata_covers_supported_languages() {
-        assert_eq!(ExternalOptimizationTool::all().len(), 32);
+        assert_eq!(ExternalOptimizationTool::all().len(), 42);
         assert_eq!(
             ExternalOptimizationTool::ChocoSolver.ecosystem(),
             ExternalOptimizationEcosystem::Java
         );
         assert_eq!(
+            ExternalOptimizationTool::SavileRow.ecosystem(),
+            ExternalOptimizationEcosystem::Java
+        );
+        assert_eq!(
             ExternalOptimizationTool::Pyomo.ecosystem(),
+            ExternalOptimizationEcosystem::Python
+        );
+        assert_eq!(
+            ExternalOptimizationTool::Cpmpy.ecosystem(),
             ExternalOptimizationEcosystem::Python
         );
         assert_eq!(
@@ -1126,6 +1231,10 @@ mod tests {
         );
         assert_eq!(
             ExternalOptimizationTool::Ampl.ecosystem(),
+            ExternalOptimizationEcosystem::Native
+        );
+        assert_eq!(
+            ExternalOptimizationTool::Conjure.ecosystem(),
             ExternalOptimizationEcosystem::Native
         );
         assert_eq!(
@@ -1144,12 +1253,21 @@ mod tests {
         assert!(ExternalOptimizationTool::Timefold
             .java_probe_classes()
             .contains(&"ai.timefold.solver.core.api.solver.SolverFactory"));
+        assert!(ExternalOptimizationTool::Sat4j
+            .java_probe_classes()
+            .contains(&"org.sat4j.minisat.SolverFactory"));
         assert!(ExternalOptimizationTool::GurobiPy
             .python_modules()
             .contains(&"gurobipy"));
+        assert!(ExternalOptimizationTool::Cpmpy
+            .python_modules()
+            .contains(&"cpmpy"));
         assert!(ExternalOptimizationTool::Hexaly
             .native_command_aliases()
             .contains(&"hexaly"));
+        assert!(ExternalOptimizationTool::OpenWbo
+            .native_command_aliases()
+            .contains(&"open-wbo"));
         assert!(ExternalOptimizationTool::HighsRust
             .rust_dependency_names()
             .contains(&"highs-sys"));
@@ -1159,9 +1277,15 @@ mod tests {
         assert!(ExternalOptimizationTool::Pyomo
             .artifact_env_vars()
             .contains(&"PYOMO_PYTHON"));
+        assert!(ExternalOptimizationTool::PySat
+            .artifact_env_vars()
+            .contains(&"PYSAT_PYTHON"));
         assert!(ExternalOptimizationTool::Docplex
             .install_dir_env_vars()
             .contains(&"CPLEX_STUDIO_DIR"));
+        assert!(ExternalOptimizationTool::Conjure
+            .install_dir_env_vars()
+            .contains(&"CONJURE_HOME"));
         assert!(ExternalOptimizationTool::HighsRust
             .install_dir_env_vars()
             .contains(&"HIGHS_HOME"));

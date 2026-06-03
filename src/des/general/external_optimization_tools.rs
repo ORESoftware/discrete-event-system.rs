@@ -6,6 +6,10 @@
 //! wrappers a stable JSON-in/JSON-out contract while keeping jars, native
 //! libraries, and generated executables out of version control.
 
+use super::external_linear_cli::{
+    probe_external_linear_cli_solver, ExternalLinearCliKind, ExternalLinearCliOptions,
+    ExternalLinearCliProbeStatus, ExternalLinearCliSolver,
+};
 use serde_json::{json, Value};
 use std::env;
 use std::fs;
@@ -26,6 +30,16 @@ pub enum ExternalOptimizationTool {
     Ecj,
     OjAlgo,
     OrToolsJava,
+    Cpmpy,
+    PyCsp3,
+    Conjure,
+    SavileRow,
+    Picat,
+    Clingo,
+    Clingcon,
+    Sat4j,
+    PySat,
+    OpenWbo,
     Pyomo,
     Pulp,
     Cvxpy,
@@ -40,6 +54,15 @@ pub enum ExternalOptimizationTool {
     Ampl,
     Gams,
     Hexaly,
+    HighsCli,
+    GlpkCli,
+    ScipCli,
+    CbcCli,
+    ClpCli,
+    GurobiCli,
+    CplexCli,
+    XpressCli,
+    LindoCli,
     GoodLp,
     LpModeler,
     RustLinprog,
@@ -63,6 +86,16 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Ecj => "ecj",
             ExternalOptimizationTool::OjAlgo => "ojalgo",
             ExternalOptimizationTool::OrToolsJava => "ortools-java",
+            ExternalOptimizationTool::Cpmpy => "cpmpy",
+            ExternalOptimizationTool::PyCsp3 => "pycsp3",
+            ExternalOptimizationTool::Conjure => "conjure",
+            ExternalOptimizationTool::SavileRow => "savile-row",
+            ExternalOptimizationTool::Picat => "picat",
+            ExternalOptimizationTool::Clingo => "clingo",
+            ExternalOptimizationTool::Clingcon => "clingcon",
+            ExternalOptimizationTool::Sat4j => "sat4j",
+            ExternalOptimizationTool::PySat => "pysat",
+            ExternalOptimizationTool::OpenWbo => "open-wbo",
             ExternalOptimizationTool::Pyomo => "pyomo",
             ExternalOptimizationTool::Pulp => "pulp",
             ExternalOptimizationTool::Cvxpy => "cvxpy",
@@ -77,6 +110,15 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Ampl => "ampl",
             ExternalOptimizationTool::Gams => "gams",
             ExternalOptimizationTool::Hexaly => "hexaly",
+            ExternalOptimizationTool::HighsCli => "highs-cli",
+            ExternalOptimizationTool::GlpkCli => "glpk-cli",
+            ExternalOptimizationTool::ScipCli => "scip-cli",
+            ExternalOptimizationTool::CbcCli => "cbc-cli",
+            ExternalOptimizationTool::ClpCli => "clp-cli",
+            ExternalOptimizationTool::GurobiCli => "gurobi-cli",
+            ExternalOptimizationTool::CplexCli => "cplex-cli",
+            ExternalOptimizationTool::XpressCli => "xpress-cli",
+            ExternalOptimizationTool::LindoCli => "lindo-cli",
             ExternalOptimizationTool::GoodLp => "good-lp",
             ExternalOptimizationTool::LpModeler => "lp-modeler",
             ExternalOptimizationTool::RustLinprog => "rust-linprog",
@@ -100,6 +142,16 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Ecj => "ECJ",
             ExternalOptimizationTool::OjAlgo => "ojAlgo",
             ExternalOptimizationTool::OrToolsJava => "Google OR-Tools Java",
+            ExternalOptimizationTool::Cpmpy => "CPMpy",
+            ExternalOptimizationTool::PyCsp3 => "PyCSP3",
+            ExternalOptimizationTool::Conjure => "Conjure",
+            ExternalOptimizationTool::SavileRow => "Savile Row",
+            ExternalOptimizationTool::Picat => "Picat",
+            ExternalOptimizationTool::Clingo => "clingo",
+            ExternalOptimizationTool::Clingcon => "clingcon",
+            ExternalOptimizationTool::Sat4j => "SAT4J",
+            ExternalOptimizationTool::PySat => "PySAT",
+            ExternalOptimizationTool::OpenWbo => "Open-WBO",
             ExternalOptimizationTool::Pyomo => "Pyomo",
             ExternalOptimizationTool::Pulp => "PuLP",
             ExternalOptimizationTool::Cvxpy => "CVXPY",
@@ -114,6 +166,15 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Ampl => "AMPL",
             ExternalOptimizationTool::Gams => "GAMS",
             ExternalOptimizationTool::Hexaly => "Hexaly Optimizer",
+            ExternalOptimizationTool::HighsCli => "HiGHS CLI",
+            ExternalOptimizationTool::GlpkCli => "GLPK glpsol CLI",
+            ExternalOptimizationTool::ScipCli => "SCIP CLI",
+            ExternalOptimizationTool::CbcCli => "COIN-OR CBC CLI",
+            ExternalOptimizationTool::ClpCli => "COIN-OR CLP CLI",
+            ExternalOptimizationTool::GurobiCli => "Gurobi Optimizer CLI",
+            ExternalOptimizationTool::CplexCli => "IBM ILOG CPLEX Optimizer CLI",
+            ExternalOptimizationTool::XpressCli => "FICO Xpress Optimizer CLI",
+            ExternalOptimizationTool::LindoCli => "LINDO Systems CLI",
             ExternalOptimizationTool::GoodLp => "good_lp",
             ExternalOptimizationTool::LpModeler => "lp-modeler",
             ExternalOptimizationTool::RustLinprog => "rust-linprog",
@@ -136,8 +197,13 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::MoeaFramework
             | ExternalOptimizationTool::Ecj
             | ExternalOptimizationTool::OjAlgo
-            | ExternalOptimizationTool::OrToolsJava => ExternalOptimizationLanguage::Java,
+            | ExternalOptimizationTool::OrToolsJava
+            | ExternalOptimizationTool::SavileRow
+            | ExternalOptimizationTool::Sat4j => ExternalOptimizationLanguage::Java,
             ExternalOptimizationTool::Pyomo
+            | ExternalOptimizationTool::Cpmpy
+            | ExternalOptimizationTool::PyCsp3
+            | ExternalOptimizationTool::PySat
             | ExternalOptimizationTool::Pulp
             | ExternalOptimizationTool::Cvxpy
             | ExternalOptimizationTool::Cvxopt
@@ -150,7 +216,21 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Jump => ExternalOptimizationLanguage::Julia,
             ExternalOptimizationTool::Ampl
             | ExternalOptimizationTool::Gams
-            | ExternalOptimizationTool::Hexaly => ExternalOptimizationLanguage::Native,
+            | ExternalOptimizationTool::Hexaly
+            | ExternalOptimizationTool::HighsCli
+            | ExternalOptimizationTool::GlpkCli
+            | ExternalOptimizationTool::ScipCli
+            | ExternalOptimizationTool::CbcCli
+            | ExternalOptimizationTool::ClpCli
+            | ExternalOptimizationTool::GurobiCli
+            | ExternalOptimizationTool::CplexCli
+            | ExternalOptimizationTool::XpressCli
+            | ExternalOptimizationTool::LindoCli
+            | ExternalOptimizationTool::Conjure
+            | ExternalOptimizationTool::Picat
+            | ExternalOptimizationTool::Clingo
+            | ExternalOptimizationTool::Clingcon
+            | ExternalOptimizationTool::OpenWbo => ExternalOptimizationLanguage::Native,
             ExternalOptimizationTool::GoodLp
             | ExternalOptimizationTool::LpModeler
             | ExternalOptimizationTool::RustLinprog
@@ -166,7 +246,17 @@ impl ExternalOptimizationTool {
         match self {
             ExternalOptimizationTool::ChocoSolver
             | ExternalOptimizationTool::Jacop
-            | ExternalOptimizationTool::IbmCpOptimizer => {
+            | ExternalOptimizationTool::IbmCpOptimizer
+            | ExternalOptimizationTool::Cpmpy
+            | ExternalOptimizationTool::PyCsp3
+            | ExternalOptimizationTool::Conjure
+            | ExternalOptimizationTool::SavileRow
+            | ExternalOptimizationTool::Picat
+            | ExternalOptimizationTool::Clingo
+            | ExternalOptimizationTool::Clingcon
+            | ExternalOptimizationTool::Sat4j
+            | ExternalOptimizationTool::PySat
+            | ExternalOptimizationTool::OpenWbo => {
                 ExternalOptimizationFamily::ConstraintProgramming
             }
             ExternalOptimizationTool::OptaPlanner => {
@@ -186,6 +276,15 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::Jump
             | ExternalOptimizationTool::Ampl
             | ExternalOptimizationTool::Gams
+            | ExternalOptimizationTool::HighsCli
+            | ExternalOptimizationTool::GlpkCli
+            | ExternalOptimizationTool::ScipCli
+            | ExternalOptimizationTool::CbcCli
+            | ExternalOptimizationTool::ClpCli
+            | ExternalOptimizationTool::GurobiCli
+            | ExternalOptimizationTool::CplexCli
+            | ExternalOptimizationTool::XpressCli
+            | ExternalOptimizationTool::LindoCli
             | ExternalOptimizationTool::GoodLp
             | ExternalOptimizationTool::LpModeler
             | ExternalOptimizationTool::RustLinprog => ExternalOptimizationFamily::LinearMip,
@@ -220,7 +319,22 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::RustLinprog
             | ExternalOptimizationTool::HighsRust
             | ExternalOptimizationTool::ScipRust
-            | ExternalOptimizationTool::CbcRust => ExternalOptimizationExactness::Exact,
+            | ExternalOptimizationTool::CbcRust
+            | ExternalOptimizationTool::Picat
+            | ExternalOptimizationTool::Clingo
+            | ExternalOptimizationTool::Clingcon
+            | ExternalOptimizationTool::Sat4j
+            | ExternalOptimizationTool::PySat
+            | ExternalOptimizationTool::OpenWbo
+            | ExternalOptimizationTool::HighsCli
+            | ExternalOptimizationTool::GlpkCli
+            | ExternalOptimizationTool::ScipCli
+            | ExternalOptimizationTool::CbcCli
+            | ExternalOptimizationTool::ClpCli
+            | ExternalOptimizationTool::GurobiCli
+            | ExternalOptimizationTool::CplexCli
+            | ExternalOptimizationTool::XpressCli
+            | ExternalOptimizationTool::LindoCli => ExternalOptimizationExactness::Exact,
             ExternalOptimizationTool::OptaPlanner
             | ExternalOptimizationTool::Timefold
             | ExternalOptimizationTool::Hexaly
@@ -228,6 +342,10 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::MoeaFramework
             | ExternalOptimizationTool::Ecj => ExternalOptimizationExactness::Heuristic,
             ExternalOptimizationTool::GoodLp
+            | ExternalOptimizationTool::Cpmpy
+            | ExternalOptimizationTool::PyCsp3
+            | ExternalOptimizationTool::Conjure
+            | ExternalOptimizationTool::SavileRow
             | ExternalOptimizationTool::LpModeler
             | ExternalOptimizationTool::Pyomo
             | ExternalOptimizationTool::Pulp
@@ -243,6 +361,21 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::PyScipOpt
             | ExternalOptimizationTool::GurobiPy
             | ExternalOptimizationTool::ScipyOptimize => ExternalOptimizationExactness::Numerical,
+        }
+    }
+
+    pub fn linear_cli_solver(self) -> Option<ExternalLinearCliSolver> {
+        match self {
+            ExternalOptimizationTool::HighsCli => Some(ExternalLinearCliSolver::Highs),
+            ExternalOptimizationTool::GlpkCli => Some(ExternalLinearCliSolver::Glpk),
+            ExternalOptimizationTool::ScipCli => Some(ExternalLinearCliSolver::Scip),
+            ExternalOptimizationTool::CbcCli => Some(ExternalLinearCliSolver::Cbc),
+            ExternalOptimizationTool::ClpCli => Some(ExternalLinearCliSolver::Clp),
+            ExternalOptimizationTool::GurobiCli => Some(ExternalLinearCliSolver::Gurobi),
+            ExternalOptimizationTool::CplexCli => Some(ExternalLinearCliSolver::Cplex),
+            ExternalOptimizationTool::XpressCli => Some(ExternalLinearCliSolver::Xpress),
+            ExternalOptimizationTool::LindoCli => Some(ExternalLinearCliSolver::Lindo),
+            _ => None,
         }
     }
 
@@ -268,6 +401,18 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::OrToolsJava => {
                 &["ores-ortools-java-adapter", "ortools-java-adapter"]
             }
+            ExternalOptimizationTool::Cpmpy => &["ores-cpmpy-adapter", "cpmpy-adapter"],
+            ExternalOptimizationTool::PyCsp3 => &["ores-pycsp3-adapter", "pycsp3-adapter"],
+            ExternalOptimizationTool::Conjure => &["ores-conjure-adapter", "conjure-adapter"],
+            ExternalOptimizationTool::SavileRow => {
+                &["ores-savile-row-adapter", "savile-row-adapter"]
+            }
+            ExternalOptimizationTool::Picat => &["ores-picat-adapter", "picat-adapter"],
+            ExternalOptimizationTool::Clingo => &["ores-clingo-adapter", "clingo-adapter"],
+            ExternalOptimizationTool::Clingcon => &["ores-clingcon-adapter", "clingcon-adapter"],
+            ExternalOptimizationTool::Sat4j => &["ores-sat4j-adapter", "sat4j-adapter"],
+            ExternalOptimizationTool::PySat => &["ores-pysat-adapter", "pysat-adapter"],
+            ExternalOptimizationTool::OpenWbo => &["ores-open-wbo-adapter", "open-wbo-adapter"],
             ExternalOptimizationTool::Pyomo => &["ores-pyomo-adapter", "pyomo-adapter"],
             ExternalOptimizationTool::Pulp => &["ores-pulp-adapter", "pulp-adapter"],
             ExternalOptimizationTool::Cvxpy => &["ores-cvxpy-adapter", "cvxpy-adapter"],
@@ -288,6 +433,15 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Ampl => &["ores-ampl-adapter", "ampl-adapter"],
             ExternalOptimizationTool::Gams => &["ores-gams-adapter", "gams-adapter"],
             ExternalOptimizationTool::Hexaly => &["ores-hexaly-adapter", "hexaly-adapter"],
+            ExternalOptimizationTool::HighsCli
+            | ExternalOptimizationTool::GlpkCli
+            | ExternalOptimizationTool::ScipCli
+            | ExternalOptimizationTool::CbcCli
+            | ExternalOptimizationTool::ClpCli
+            | ExternalOptimizationTool::GurobiCli
+            | ExternalOptimizationTool::CplexCli
+            | ExternalOptimizationTool::XpressCli
+            | ExternalOptimizationTool::LindoCli => &[],
             ExternalOptimizationTool::GoodLp => &["ores-good-lp-adapter", "good-lp-adapter"],
             ExternalOptimizationTool::LpModeler => {
                 &["ores-lp-modeler-adapter", "lp-modeler-adapter"]
@@ -322,6 +476,9 @@ impl ExternalOptimizationTool {
     pub fn python_modules(self) -> &'static [&'static str] {
         match self {
             ExternalOptimizationTool::Pyomo => &["pyomo"],
+            ExternalOptimizationTool::Cpmpy => &["cpmpy"],
+            ExternalOptimizationTool::PyCsp3 => &["pycsp3"],
+            ExternalOptimizationTool::PySat => &["pysat"],
             ExternalOptimizationTool::Pulp => &["pulp"],
             ExternalOptimizationTool::Cvxpy => &["cvxpy"],
             ExternalOptimizationTool::Cvxopt => &["cvxopt"],
@@ -372,6 +529,36 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::OrToolsJava => {
                 "Java API surface for OR-Tools CP-SAT, routing, and linear solvers"
             }
+            ExternalOptimizationTool::Cpmpy => {
+                "Python CP modeling layer for solver-agnostic constraint model cross-checks"
+            }
+            ExternalOptimizationTool::PyCsp3 => {
+                "Python/XCSP3 modeling layer for constraint-problem validation"
+            }
+            ExternalOptimizationTool::Conjure => {
+                "Essence constraint-modeling frontend for generating independent solver models"
+            }
+            ExternalOptimizationTool::SavileRow => {
+                "Constraint-model reformulation tool for Essence Prime and SAT/SMT/MIP backends"
+            }
+            ExternalOptimizationTool::Picat => {
+                "Logic-based CP/MIP/SAT programming language for independent model checks"
+            }
+            ExternalOptimizationTool::Clingo => {
+                "Answer-set programming solver for combinatorial logic-model cross-checks"
+            }
+            ExternalOptimizationTool::Clingcon => {
+                "Answer-set and finite-domain constraint solver in the Potassco ecosystem"
+            }
+            ExternalOptimizationTool::Sat4j => {
+                "Java SAT and pseudo-Boolean solver library for JVM-side validation"
+            }
+            ExternalOptimizationTool::PySat => {
+                "Python SAT toolkit wrapping multiple SAT solvers and cardinality encodings"
+            }
+            ExternalOptimizationTool::OpenWbo => {
+                "MaxSAT solver for weighted-CNF objective and feasibility cross-checks"
+            }
             ExternalOptimizationTool::Pyomo => {
                 "Python algebraic modeling system for LP, MIP, QP, NLP, MINLP, stochastic, and bilevel models"
             }
@@ -413,6 +600,33 @@ impl ExternalOptimizationTool {
             }
             ExternalOptimizationTool::Hexaly => {
                 "Hybrid optimization solver/modeler for routing, scheduling, nonlinear, and CP-style models"
+            }
+            ExternalOptimizationTool::HighsCli => {
+                "Native HiGHS command-line bridge for local LP/MIP/QP smoke checks and cross-validation"
+            }
+            ExternalOptimizationTool::GlpkCli => {
+                "Native GLPK glpsol command-line bridge for local LP/MIP cross-validation"
+            }
+            ExternalOptimizationTool::ScipCli => {
+                "Native SCIP command-line bridge for local LP/MIP and constraint-integer cross-validation"
+            }
+            ExternalOptimizationTool::CbcCli => {
+                "Native COIN-OR CBC command-line bridge for local MIP cross-validation"
+            }
+            ExternalOptimizationTool::ClpCli => {
+                "Native COIN-OR CLP command-line bridge for local LP cross-validation"
+            }
+            ExternalOptimizationTool::GurobiCli => {
+                "Commercial Gurobi Optimizer command-line bridge using local, non-vendored executables"
+            }
+            ExternalOptimizationTool::CplexCli => {
+                "Commercial IBM ILOG CPLEX Optimizer command-line bridge using local installations"
+            }
+            ExternalOptimizationTool::XpressCli => {
+                "Commercial FICO Xpress Optimizer command-line bridge using local installations"
+            }
+            ExternalOptimizationTool::LindoCli => {
+                "Commercial LINDO Systems command-line bridge using local installations"
             }
             ExternalOptimizationTool::GoodLp => {
                 "Rust LP/MIP modeling layer that delegates to solver backends"
@@ -529,6 +743,16 @@ pub fn external_optimization_tools() -> &'static [ExternalOptimizationTool] {
         ExternalOptimizationTool::Ecj,
         ExternalOptimizationTool::OjAlgo,
         ExternalOptimizationTool::OrToolsJava,
+        ExternalOptimizationTool::Cpmpy,
+        ExternalOptimizationTool::PyCsp3,
+        ExternalOptimizationTool::Conjure,
+        ExternalOptimizationTool::SavileRow,
+        ExternalOptimizationTool::Picat,
+        ExternalOptimizationTool::Clingo,
+        ExternalOptimizationTool::Clingcon,
+        ExternalOptimizationTool::Sat4j,
+        ExternalOptimizationTool::PySat,
+        ExternalOptimizationTool::OpenWbo,
         ExternalOptimizationTool::Pyomo,
         ExternalOptimizationTool::Pulp,
         ExternalOptimizationTool::Cvxpy,
@@ -543,6 +767,15 @@ pub fn external_optimization_tools() -> &'static [ExternalOptimizationTool] {
         ExternalOptimizationTool::Ampl,
         ExternalOptimizationTool::Gams,
         ExternalOptimizationTool::Hexaly,
+        ExternalOptimizationTool::HighsCli,
+        ExternalOptimizationTool::GlpkCli,
+        ExternalOptimizationTool::ScipCli,
+        ExternalOptimizationTool::CbcCli,
+        ExternalOptimizationTool::ClpCli,
+        ExternalOptimizationTool::GurobiCli,
+        ExternalOptimizationTool::CplexCli,
+        ExternalOptimizationTool::XpressCli,
+        ExternalOptimizationTool::LindoCli,
         ExternalOptimizationTool::GoodLp,
         ExternalOptimizationTool::LpModeler,
         ExternalOptimizationTool::RustLinprog,
@@ -724,6 +957,36 @@ pub fn artifact_env_names(tool: ExternalOptimizationTool) -> Vec<String> {
         ExternalOptimizationTool::OrToolsJava => {
             names.push("ORTOOLS_JAVA_HOME".to_string());
         }
+        ExternalOptimizationTool::Cpmpy => {
+            names.push("CPMPY_PYTHON".to_string());
+        }
+        ExternalOptimizationTool::PyCsp3 => {
+            names.push("PYCSP3_PYTHON".to_string());
+        }
+        ExternalOptimizationTool::Conjure => {
+            names.push("CONJURE_HOME".to_string());
+        }
+        ExternalOptimizationTool::SavileRow => {
+            names.push("SAVILEROW_HOME".to_string());
+        }
+        ExternalOptimizationTool::Picat => {
+            names.push("PICAT_HOME".to_string());
+        }
+        ExternalOptimizationTool::Clingo => {
+            names.push("CLINGO_HOME".to_string());
+        }
+        ExternalOptimizationTool::Clingcon => {
+            names.push("CLINGCON_HOME".to_string());
+        }
+        ExternalOptimizationTool::Sat4j => {
+            names.push("SAT4J_HOME".to_string());
+        }
+        ExternalOptimizationTool::PySat => {
+            names.push("PYSAT_PYTHON".to_string());
+        }
+        ExternalOptimizationTool::OpenWbo => {
+            names.push("OPEN_WBO_HOME".to_string());
+        }
         ExternalOptimizationTool::Pyomo => {
             names.push("PYOMO_PYTHON".to_string());
         }
@@ -772,6 +1035,24 @@ pub fn artifact_env_names(tool: ExternalOptimizationTool) -> Vec<String> {
             names.push("HEXALY_HOME".to_string());
             names.push("LOCALSOLVER_HOME".to_string());
         }
+        ExternalOptimizationTool::HighsCli
+        | ExternalOptimizationTool::GlpkCli
+        | ExternalOptimizationTool::ScipCli
+        | ExternalOptimizationTool::CbcCli
+        | ExternalOptimizationTool::ClpCli
+        | ExternalOptimizationTool::GurobiCli
+        | ExternalOptimizationTool::CplexCli
+        | ExternalOptimizationTool::XpressCli
+        | ExternalOptimizationTool::LindoCli => {
+            if let Some(solver) = tool.linear_cli_solver() {
+                for name in solver.command_env_vars() {
+                    push_unique_env_name(&mut names, *name);
+                }
+                for name in solver.command_dir_env_vars() {
+                    push_unique_env_name(&mut names, *name);
+                }
+            }
+        }
         ExternalOptimizationTool::Nlopt => {
             names.push("NLOPT_DIR".to_string());
         }
@@ -811,6 +1092,18 @@ pub fn external_optimization_command_dir_env_names(tool: ExternalOptimizationToo
         ExternalOptimizationTool::Ecj => &["ECJ_HOME", "ECJ_DIR"],
         ExternalOptimizationTool::OjAlgo => &["OJALGO_HOME", "OJALGO_DIR"],
         ExternalOptimizationTool::OrToolsJava => &["ORTOOLS_JAVA_HOME", "ORTOOLS_HOME"],
+        ExternalOptimizationTool::Cpmpy => &["CPMPY_HOME", "CPMPY_DIR"],
+        ExternalOptimizationTool::PyCsp3 => &["PYCSP3_HOME", "PYCSP3_DIR"],
+        ExternalOptimizationTool::Conjure => &["CONJURE_HOME", "CONJURE_DIR"],
+        ExternalOptimizationTool::SavileRow => {
+            &["SAVILE_ROW_HOME", "SAVILE_ROW_DIR", "SAVILEROW_HOME"][..]
+        }
+        ExternalOptimizationTool::Picat => &["PICAT_HOME", "PICAT_DIR"],
+        ExternalOptimizationTool::Clingo => &["CLINGO_HOME", "CLINGO_DIR", "POTASSCO_HOME"],
+        ExternalOptimizationTool::Clingcon => &["CLINGCON_HOME", "CLINGCON_DIR", "POTASSCO_HOME"],
+        ExternalOptimizationTool::Sat4j => &["SAT4J_HOME", "SAT4J_DIR"],
+        ExternalOptimizationTool::PySat => &["PYSAT_HOME", "PYSAT_DIR"],
+        ExternalOptimizationTool::OpenWbo => &["OPEN_WBO_HOME", "OPEN_WBO_DIR", "OPENWBO_HOME"],
         ExternalOptimizationTool::Pyomo => &["PYOMO_HOME", "PYOMO_DIR"],
         ExternalOptimizationTool::Pulp => &["PULP_HOME", "PULP_DIR"],
         ExternalOptimizationTool::Cvxpy => &["CVXPY_HOME", "CVXPY_DIR"],
@@ -829,6 +1122,17 @@ pub fn external_optimization_command_dir_env_names(tool: ExternalOptimizationToo
             "LOCALSOLVER_HOME",
             "LOCALSOLVER_DIR",
         ],
+        ExternalOptimizationTool::HighsCli => &["HIGHS_DIR", "HIGHS_HOME"],
+        ExternalOptimizationTool::GlpkCli => &["GLPK_DIR", "GLPK_HOME"],
+        ExternalOptimizationTool::ScipCli => &["SCIPOPTDIR", "SCIP_DIR", "SCIP_HOME"],
+        ExternalOptimizationTool::CbcCli => &["CBC_DIR", "CBC_HOME", "COINOR_DIR", "COINOR_HOME"],
+        ExternalOptimizationTool::ClpCli => &["CLP_DIR", "CLP_HOME", "COINOR_DIR", "COINOR_HOME"],
+        ExternalOptimizationTool::GurobiCli => &["GUROBI_HOME"],
+        ExternalOptimizationTool::CplexCli => &["CPLEX_STUDIO_DIR", "CPLEX_HOME"],
+        ExternalOptimizationTool::XpressCli => &["XPRESSDIR", "XPRESS_DIR", "XPRESS_HOME"],
+        ExternalOptimizationTool::LindoCli => {
+            &["LINDO_HOME", "LINDO_DIR", "LINDOAPI_HOME", "LINDOAPI_DIR"]
+        }
         ExternalOptimizationTool::Nlopt => &["NLOPT_DIR", "NLOPT_HOME"],
         ExternalOptimizationTool::HighsRust => &["HIGHS_DIR", "HIGHS_HOME"],
         ExternalOptimizationTool::ScipRust => &["SCIPOPTDIR", "SCIP_DIR", "SCIP_HOME"],
@@ -859,6 +1163,10 @@ pub fn external_optimization_adapter_command_with_options(
 pub fn probe_external_optimization_tool(
     opts: &ExternalOptimizationAdapterOptions,
 ) -> ExternalOptimizationProbe {
+    if let Some(solver) = opts.tool.linear_cli_solver() {
+        return probe_external_optimization_linear_cli_tool(opts, solver);
+    }
+
     let (configured_command, saw_configured_command) = configured_adapter_command(opts.tool);
     let command = opts
         .command_path
@@ -1340,6 +1648,40 @@ fn probe_native_tool(opts: &ExternalOptimizationAdapterOptions) -> ExternalOptim
     }
 }
 
+fn probe_external_optimization_linear_cli_tool(
+    opts: &ExternalOptimizationAdapterOptions,
+    solver: ExternalLinearCliSolver,
+) -> ExternalOptimizationProbe {
+    let mut cli_opts = ExternalLinearCliOptions {
+        solver,
+        command_path: opts.command_path.clone(),
+        time_limit_secs: opts.time_limit_secs,
+        ..Default::default()
+    };
+    if cli_opts.time_limit_secs.is_none() {
+        cli_opts.time_limit_secs = Some(2.0);
+    }
+    let probe = probe_external_linear_cli_solver(ExternalLinearCliKind::Lp, &cli_opts);
+    let status = match probe.status {
+        ExternalLinearCliProbeStatus::Ready => ExternalOptimizationProbeStatus::Ready,
+        ExternalLinearCliProbeStatus::NotInstalled => ExternalOptimizationProbeStatus::NotConfigured,
+        ExternalLinearCliProbeStatus::BridgeUnsupported | ExternalLinearCliProbeStatus::SmokeFailed => {
+            ExternalOptimizationProbeStatus::AdapterMissing
+        }
+    };
+    ExternalOptimizationProbe {
+        tool: opts.tool,
+        status,
+        command: probe.command,
+        message: format!(
+            "{} via external_linear_cli {} probe: {}",
+            opts.tool.display_name(),
+            probe.status.as_str(),
+            probe.message
+        ),
+    }
+}
+
 fn python_can_import(python: &Path, module: &str) -> bool {
     Command::new(python)
         .arg("-c")
@@ -1539,7 +1881,7 @@ mod tests {
         run_external_optimization_comparison, ExternalOptimizationAdapterInvocation,
         ExternalOptimizationAdapterOptions, ExternalOptimizationAdapterStatus,
         ExternalOptimizationExactness, ExternalOptimizationFamily, ExternalOptimizationLanguage,
-        ExternalOptimizationProbeStatus, ExternalOptimizationTool,
+        ExternalOptimizationProbeStatus, ExternalOptimizationTool, ExternalLinearCliSolver,
     };
     use serde_json::json;
     use std::path::PathBuf;
@@ -1547,13 +1889,13 @@ mod tests {
     #[test]
     fn registry_covers_requested_java_and_rust_ecosystems() {
         let specs = external_optimization_tool_specs();
-        assert_eq!(external_optimization_tools().len(), 32);
+        assert_eq!(external_optimization_tools().len(), 51);
         assert_eq!(
             specs
                 .iter()
                 .filter(|spec| spec.language == ExternalOptimizationLanguage::Java)
                 .count(),
-            10
+            12
         );
         assert_eq!(
             specs
@@ -1567,7 +1909,7 @@ mod tests {
                 .iter()
                 .filter(|spec| spec.language == ExternalOptimizationLanguage::Python)
                 .count(),
-            10
+            13
         );
         assert_eq!(
             specs
@@ -1581,7 +1923,7 @@ mod tests {
                 .iter()
                 .filter(|spec| spec.language == ExternalOptimizationLanguage::Native)
                 .count(),
-            3
+            17
         );
         assert!(specs.iter().any(|spec| {
             spec.tool == ExternalOptimizationTool::ChocoSolver
@@ -1604,6 +1946,16 @@ mod tests {
                 && spec.exactness == ExternalOptimizationExactness::ModelingLayer
         }));
         assert!(specs.iter().any(|spec| {
+            spec.tool == ExternalOptimizationTool::Cpmpy
+                && spec.family == ExternalOptimizationFamily::ConstraintProgramming
+                && spec.exactness == ExternalOptimizationExactness::ModelingLayer
+        }));
+        assert!(specs.iter().any(|spec| {
+            spec.tool == ExternalOptimizationTool::Clingo
+                && spec.family == ExternalOptimizationFamily::ConstraintProgramming
+                && spec.exactness == ExternalOptimizationExactness::Exact
+        }));
+        assert!(specs.iter().any(|spec| {
             spec.tool == ExternalOptimizationTool::Cvxpy
                 && spec.family == ExternalOptimizationFamily::ConvexOptimization
                 && spec.exactness == ExternalOptimizationExactness::ModelingLayer
@@ -1618,6 +1970,20 @@ mod tests {
                 && spec.family == ExternalOptimizationFamily::HybridOptimization
                 && spec.exactness == ExternalOptimizationExactness::Heuristic
         }));
+        assert!(specs.iter().any(|spec| {
+            spec.tool == ExternalOptimizationTool::HighsCli
+                && spec.family == ExternalOptimizationFamily::LinearMip
+                && spec.exactness == ExternalOptimizationExactness::Exact
+                && spec.adapter_command_aliases.is_empty()
+        }));
+        assert_eq!(
+            ExternalOptimizationTool::HighsCli.linear_cli_solver(),
+            Some(ExternalLinearCliSolver::Highs)
+        );
+        assert_eq!(
+            ExternalOptimizationTool::LindoCli.linear_cli_solver(),
+            Some(ExternalLinearCliSolver::Lindo)
+        );
     }
 
     #[test]
@@ -1643,6 +2009,22 @@ mod tests {
             "ORES_PYOMO_PYTHON"
         );
         assert_eq!(
+            adapter_env_names(ExternalOptimizationTool::Cpmpy)[0],
+            "ORES_CPMPY_ADAPTER"
+        );
+        assert_eq!(
+            artifact_env_names(ExternalOptimizationTool::Cpmpy)[0],
+            "ORES_CPMPY_PYTHON"
+        );
+        assert_eq!(
+            artifact_env_names(ExternalOptimizationTool::Conjure)[0],
+            "ORES_CONJURE_DIR"
+        );
+        assert_eq!(
+            artifact_env_names(ExternalOptimizationTool::Sat4j)[0],
+            "ORES_SAT4J_CLASSPATH"
+        );
+        assert_eq!(
             artifact_env_names(ExternalOptimizationTool::Cvxpy)[0],
             "ORES_CVXPY_PYTHON"
         );
@@ -1662,6 +2044,16 @@ mod tests {
             artifact_env_names(ExternalOptimizationTool::Ampl)[0],
             "ORES_AMPL_DIR"
         );
+        assert_eq!(
+            artifact_env_names(ExternalOptimizationTool::HighsCli)[0],
+            "ORES_HIGHS_CLI_DIR"
+        );
+        assert!(artifact_env_names(ExternalOptimizationTool::HighsCli)
+            .contains(&"HIGHS_CMD".to_string()));
+        assert!(artifact_env_names(ExternalOptimizationTool::GurobiCli)
+            .contains(&"GUROBI_CL_CMD".to_string()));
+        assert!(artifact_env_names(ExternalOptimizationTool::LindoCli)
+            .contains(&"LINDOAPI_CMD".to_string()));
         assert!(
             external_optimization_command_dir_env_names(ExternalOptimizationTool::Ampl)
                 .contains(&"AMPL_HOME".to_string())
@@ -1679,6 +2071,14 @@ mod tests {
                 .contains(&"PYOMO_HOME".to_string())
         );
         assert!(
+            external_optimization_command_dir_env_names(ExternalOptimizationTool::Cpmpy)
+                .contains(&"CPMPY_HOME".to_string())
+        );
+        assert!(
+            external_optimization_command_dir_env_names(ExternalOptimizationTool::OpenWbo)
+                .contains(&"OPEN_WBO_HOME".to_string())
+        );
+        assert!(
             external_optimization_command_dir_env_names(ExternalOptimizationTool::GurobiPy)
                 .contains(&"GUROBI_HOME".to_string())
         );
@@ -1689,6 +2089,14 @@ mod tests {
         assert!(
             external_optimization_command_dir_env_names(ExternalOptimizationTool::HighsRust)
                 .contains(&"HIGHS_HOME".to_string())
+        );
+        assert!(
+            external_optimization_command_dir_env_names(ExternalOptimizationTool::HighsCli)
+                .contains(&"HIGHS_HOME".to_string())
+        );
+        assert!(
+            external_optimization_command_dir_env_names(ExternalOptimizationTool::CplexCli)
+                .contains(&"CPLEX_STUDIO_DIR".to_string())
         );
     }
 

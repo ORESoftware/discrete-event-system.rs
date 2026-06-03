@@ -5649,7 +5649,7 @@ impl Driver {
         let specs = external_optimization_tool_specs();
         self.check(
             "External optimization ecosystem registry covers requested tools",
-            external_optimization_tools().len() == 32 && specs.len() == 32,
+            external_optimization_tools().len() == 42 && specs.len() == 42,
             format!(
                 "tools={} specs={}",
                 external_optimization_tools().len(),
@@ -5667,7 +5667,7 @@ impl Driver {
                             == legacy_external_optimization_ecosystem::ExternalOptimizationEcosystem::Python
                     })
                     .count()
-                    == 10
+                    == 13
                 && legacy_tools
                     .iter()
                     .any(|tool| tool.as_str() == "hexaly" && tool.ecosystem().as_str() == "native"),
@@ -5687,7 +5687,7 @@ impl Driver {
             .count();
         self.check(
             "External optimization ecosystem registry Java/Rust split",
-            java_count == 10 && rust_count == 8,
+            java_count == 12 && rust_count == 8,
             format!("java={java_count} rust={rust_count}"),
         );
         let python_count = specs
@@ -5704,13 +5704,25 @@ impl Driver {
             .count();
         self.check(
             "External optimization ecosystem registry Python/Julia/native split",
-            python_count == 10 && julia_count == 1 && native_count == 3,
+            python_count == 13 && julia_count == 1 && native_count == 8,
             format!("python={python_count} julia={julia_count} native={native_count}"),
         );
         self.check(
             "External optimization ecosystem registry CP/metaheuristic/numerical coverage",
             specs.iter().any(|spec| {
                 spec.tool == ExternalOptimizationTool::ChocoSolver
+                    && spec.family == ExternalOptimizationFamily::ConstraintProgramming
+                    && spec.exactness == ExternalOptimizationExactness::Exact
+            }) && specs.iter().any(|spec| {
+                spec.tool == ExternalOptimizationTool::Cpmpy
+                    && spec.family == ExternalOptimizationFamily::ConstraintProgramming
+                    && spec.exactness == ExternalOptimizationExactness::ModelingLayer
+            }) && specs.iter().any(|spec| {
+                spec.tool == ExternalOptimizationTool::Clingo
+                    && spec.family == ExternalOptimizationFamily::ConstraintProgramming
+                    && spec.exactness == ExternalOptimizationExactness::Exact
+            }) && specs.iter().any(|spec| {
+                spec.tool == ExternalOptimizationTool::OpenWbo
                     && spec.family == ExternalOptimizationFamily::ConstraintProgramming
                     && spec.exactness == ExternalOptimizationExactness::Exact
             }) && specs.iter().any(|spec| {
@@ -5742,7 +5754,7 @@ impl Driver {
                     && spec.family == ExternalOptimizationFamily::NonlinearOptimization
                     && spec.exactness == ExternalOptimizationExactness::Numerical
             }),
-            "checked Choco, OptaPlanner, Timefold, Pyomo, CVXPY, PySCIPOpt, Hexaly, and argmin classifications".to_string(),
+            "checked Choco, CPMpy, clingo, Open-WBO, OptaPlanner, Timefold, Pyomo, CVXPY, PySCIPOpt, Hexaly, and argmin classifications".to_string(),
         );
         let comparison_input = serde_json::json!({
             "status": "optimal",
@@ -5831,6 +5843,16 @@ impl Driver {
                     "ortools-python-reference",
                     ExternalOptimizationTool::OrToolsPython,
                 ),
+                ecosystem_invocation("cpmpy-reference", ExternalOptimizationTool::Cpmpy),
+                ecosystem_invocation("pycsp3-reference", ExternalOptimizationTool::PyCsp3),
+                ecosystem_invocation("conjure-reference", ExternalOptimizationTool::Conjure),
+                ecosystem_invocation("savile-row-reference", ExternalOptimizationTool::SavileRow),
+                ecosystem_invocation("picat-reference", ExternalOptimizationTool::Picat),
+                ecosystem_invocation("clingo-reference", ExternalOptimizationTool::Clingo),
+                ecosystem_invocation("clingcon-reference", ExternalOptimizationTool::Clingcon),
+                ecosystem_invocation("sat4j-reference", ExternalOptimizationTool::Sat4j),
+                ecosystem_invocation("pysat-reference", ExternalOptimizationTool::PySat),
+                ecosystem_invocation("open-wbo-reference", ExternalOptimizationTool::OpenWbo),
             ],
             1e-9,
             1e-9,
@@ -6067,7 +6089,7 @@ impl Driver {
         let specs = external_validation_tool_specs();
         self.check(
             "External validation registry covers recommended tools",
-            specs.len() == 176,
+            specs.len() == 190,
             format!("tools={}", specs.len()),
         );
         for (family, expected_at_least) in [

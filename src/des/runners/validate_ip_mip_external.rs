@@ -1,17 +1,26 @@
-//! Cross-check the in-house DES IP/MIP station graph against an external
-//! reference bridge.
+//! Cross-check the in-house DES IP/MIP station graph against installed external
+//! solver CLIs.
 //!
-//! The bridge is intentionally source-only: `scripts/ip_mip_reference.py`
-//! prefers installed open-source solvers (OR-Tools CP-SAT, SciPy/HiGHS MILP)
-//! and falls back to exact bounded enumeration for small validation models.
+//! The default path uses the Rust `external_linear_cli` adapter to serialize the
+//! same source model and call installed open-source/commercial CLIs. The older
+//! `scripts/ip_mip_reference.py` bridge remains as an explicit fallback for
+//! environments without a local solver command.
 
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
+use crate::des::general::external_linear_cli::{
+    external_linear_cli_command, general_linear_ipmip_problem_to_cli_json,
+    indicator_ipmip_problem_to_cli_json, ipmip_problem_to_cli_json,
+    lower_bounded_ipmip_problem_to_cli_json, multi_objective_ipmip_problem_to_cli_json,
+    pwl_ipmip_problem_to_cli_json, semi_ipmip_problem_to_cli_json, solve_linear_cli_json,
+    sos_ipmip_problem_to_cli_json, ExternalLinearCliKind, ExternalLinearCliOptions,
+    ExternalLinearCliSolution, ExternalLinearCliSolver, ExternalLinearCliStatus,
+};
 use crate::des::general::ip_mip_des::{
     build_binary_knapsack_ip, build_fixed_charge_indicator_ip, build_general_linear_rows_ip,
     build_lexicographic_choice_ip, build_lower_bounded_production_ip,
@@ -26,35 +35,6 @@ use crate::des::general::ip_mip_des::{
     MultiObjectiveIPMIPProblem, PwlIPMIPProblem, SemiIPMIPProblem, SosIPMIPProblem,
 };
 use crate::des::general::lp::Sense;
-
-#[derive(Clone, Debug, Serialize)]
-struct ExternalProblem<'a> {
-    sense: &'a str,
-    c: &'a [f64],
-    a: &'a [Vec<f64>],
-    b: &'a [f64],
-    integer_vars: &'a [bool],
-    lb: Option<&'a [f64]>,
-    ub: Option<&'a [f64]>,
-    var_names: Option<&'a [String]>,
-    con_names: Option<&'a [String]>,
-}
-
-impl<'a> From<&'a IPMIPProblem> for ExternalProblem<'a> {
-    fn from(p: &'a IPMIPProblem) -> Self {
-        ExternalProblem {
-            sense: p.sense.as_str(),
-            c: &p.c,
-            a: &p.a,
-            b: &p.b,
-            integer_vars: &p.integer_vars,
-            lb: None,
-            ub: p.ub.as_deref(),
-            var_names: p.var_names.as_deref(),
-            con_names: p.con_names.as_deref(),
-        }
-    }
-}
 
 #[derive(Clone, Debug, Default, Deserialize)]
 struct ExternalResultInner {
@@ -115,8 +95,7 @@ impl Driver {
     }
 
     fn write_problem(&self, name: &str, problem: &IPMIPProblem) -> PathBuf {
-        let value = serde_json::to_value(ExternalProblem::from(problem))
-            .expect("serialize IP/MIP validation problem");
+        let value = ipmip_problem_to_cli_json(problem);
         self.write_problem_value(name, &value)
     }
 
@@ -135,8 +114,8 @@ impl Driver {
         problem: &IPMIPProblem,
         solver: &str,
     ) -> ExternalPayload {
-        let problem_path = self.write_problem(name, problem);
-        self.run_external_path(name, problem_path, solver)
+        let problem_value = ipmip_problem_to_cli_json(problem);
+        self.run_external_value(name, &problem_value, solver)
     }
 
     fn run_external_value(
@@ -146,17 +125,69 @@ impl Driver {
         solver: &str,
     ) -> ExternalPayload {
         let problem_path = self.write_problem_value(name, problem);
-        self.run_external_path(name, problem_path, solver)
+        if !force_python_reference() {
+            match select_cli_solver(solver) {
+                Some((cli_solver, command)) => {
+                    println!(
+                        "  external rust-cli: solver={} command={}",
+                        cli_solver.as_str(),
+                        command.display()
+                    );
+                    let solution = solve_linear_cli_json(
+                        ExternalLinearCliKind::Mip,
+                        problem.clone(),
+                        &ExternalLinearCliOptions {
+                            solver: cli_solver,
+                            command_path: Some(command),
+                            time_limit_secs: Some(10.0),
+                            random_seed: Some(7),
+                            threads: Some(1),
+                            ..Default::default()
+                        },
+                    );
+                    if solution.status != ExternalLinearCliStatus::Unavailable {
+                        return payload_from_cli_solution(solution);
+                    }
+                }
+                None if solver != "auto" => {
+                    return ExternalPayload {
+                        result: ExternalResultInner {
+                            status: "unavailable".to_string(),
+                            solver: solver.to_string(),
+                            message: Some(format!(
+                                "no installed command found for requested solver `{solver}`"
+                            )),
+                            ..Default::default()
+                        },
+                    };
+                }
+                None => {}
+            }
+        }
+        self.run_python_external_path(name, problem_path, solver)
     }
 
-    fn run_external_path(
+    fn run_python_external_path(
         &mut self,
         name: &str,
         problem_path: PathBuf,
         solver: &str,
     ) -> ExternalPayload {
-        let out = self.out_dir.join(format!("{name}-reference.json"));
         let script = self.root.join("scripts").join("ip_mip_reference.py");
+        if !script.exists() {
+            return ExternalPayload {
+                result: ExternalResultInner {
+                    status: "unavailable".to_string(),
+                    solver: solver.to_string(),
+                    message: Some(format!(
+                        "Python fallback script missing: {}",
+                        script.display()
+                    )),
+                    ..Default::default()
+                },
+            };
+        }
+        let out = self.out_dir.join(format!("{name}-reference.json"));
         let python = std::env::var("PYTHON_BIN").unwrap_or_else(|_| "python3".to_string());
         let max_enumerations =
             std::env::var("IP_MIP_MAX_ENUMERATIONS").unwrap_or_else(|_| "1000000".to_string());
@@ -237,7 +268,7 @@ impl Driver {
         );
         let linearized = linearize_indicator_problem(&problem);
         let solver = std::env::var("IP_MIP_EXTERNAL_SOLVER").unwrap_or_else(|_| "auto".to_string());
-        let external_problem = indicator_problem_value(&problem);
+        let external_problem = indicator_ipmip_problem_to_cli_json(&problem);
         let external = self.run_external_value(name, &external_problem, &solver);
         self.compare(name, &linearized, &internal, &external);
     }
@@ -257,7 +288,7 @@ impl Driver {
         );
         let linearized = linearize_sos_problem(&problem);
         let solver = std::env::var("IP_MIP_EXTERNAL_SOLVER").unwrap_or_else(|_| "auto".to_string());
-        let external_problem = sos_problem_value(&problem);
+        let external_problem = sos_ipmip_problem_to_cli_json(&problem);
         let external = self.run_external_value(name, &external_problem, &solver);
         self.compare(name, &linearized, &internal, &external);
     }
@@ -277,7 +308,7 @@ impl Driver {
         );
         let linearized = linearize_semi_problem(&problem);
         let solver = std::env::var("IP_MIP_EXTERNAL_SOLVER").unwrap_or_else(|_| "auto".to_string());
-        let external_problem = semi_problem_value(&problem);
+        let external_problem = semi_ipmip_problem_to_cli_json(&problem);
         let external = self.run_external_value(name, &external_problem, &solver);
         self.compare(name, &linearized, &internal, &external);
     }
@@ -296,7 +327,7 @@ impl Driver {
             },
         );
         let solver = std::env::var("IP_MIP_EXTERNAL_SOLVER").unwrap_or_else(|_| "auto".to_string());
-        let external_problem = lower_bounded_problem_value(&problem);
+        let external_problem = lower_bounded_ipmip_problem_to_cli_json(&problem);
         let external = self.run_external_value(name, &external_problem, &solver);
         self.compare_with_lb(name, &problem, &internal, &external);
     }
@@ -316,7 +347,7 @@ impl Driver {
         );
         let linearized = linearize_general_linear_problem(&problem);
         let solver = std::env::var("IP_MIP_EXTERNAL_SOLVER").unwrap_or_else(|_| "auto".to_string());
-        let external_problem = general_linear_problem_value(&problem);
+        let external_problem = general_linear_ipmip_problem_to_cli_json(&problem);
         let external = self.run_external_value(name, &external_problem, &solver);
         self.compare(name, &linearized, &internal, &external);
     }
@@ -336,7 +367,7 @@ impl Driver {
         );
         let linearized = linearize_pwl_problem(&problem);
         let solver = std::env::var("IP_MIP_EXTERNAL_SOLVER").unwrap_or_else(|_| "auto".to_string());
-        let external_problem = pwl_problem_value(&problem);
+        let external_problem = pwl_ipmip_problem_to_cli_json(&problem);
         let external = self.run_external_value(name, &external_problem, &solver);
         self.compare(name, &linearized, &internal, &external);
     }
@@ -359,7 +390,7 @@ impl Driver {
             },
         );
         let solver = std::env::var("IP_MIP_EXTERNAL_SOLVER").unwrap_or_else(|_| "auto".to_string());
-        let external_problem = multi_objective_problem_value(&problem);
+        let external_problem = multi_objective_ipmip_problem_to_cli_json(&problem);
         let external = self.run_external_value(name, &external_problem, &solver);
         self.check(
             &format!("{name}: external reference available"),
@@ -498,137 +529,6 @@ impl Driver {
     }
 }
 
-fn indicator_problem_value(problem: &IndicatorIPMIPProblem) -> serde_json::Value {
-    let mut value = serde_json::to_value(ExternalProblem::from(&problem.base))
-        .expect("serialize indicator IP/MIP base problem");
-    value["indicators"] = serde_json::Value::Array(
-        problem
-            .indicators
-            .iter()
-            .map(|indicator| {
-                serde_json::json!({
-                    "binary_var": indicator.binary_var,
-                    "active_value": indicator.active_value,
-                    "coefs": &indicator.coefs,
-                    "sense": indicator.sense.as_str(),
-                    "rhs": indicator.rhs,
-                    "name": &indicator.name,
-                })
-            })
-            .collect(),
-    );
-    value
-}
-
-fn sos_problem_value(problem: &SosIPMIPProblem) -> serde_json::Value {
-    let mut value =
-        serde_json::to_value(ExternalProblem::from(&problem.base)).expect("serialize SOS base");
-    value["sos"] = serde_json::Value::Array(
-        problem
-            .sos
-            .iter()
-            .map(|set| {
-                serde_json::json!({
-                    "kind": set.kind.as_str(),
-                    "vars": &set.vars,
-                    "weights": &set.weights,
-                    "name": &set.name,
-                })
-            })
-            .collect(),
-    );
-    value
-}
-
-fn semi_problem_value(problem: &SemiIPMIPProblem) -> serde_json::Value {
-    let mut value =
-        serde_json::to_value(ExternalProblem::from(&problem.base)).expect("serialize semi base");
-    value["semi_variables"] = serde_json::Value::Array(
-        problem
-            .semi_variables
-            .iter()
-            .map(|semi| {
-                serde_json::json!({
-                    "kind": semi.kind.as_str(),
-                    "var": semi.var,
-                    "lower": semi.lower,
-                    "name": &semi.name,
-                })
-            })
-            .collect(),
-    );
-    value
-}
-
-fn lower_bounded_problem_value(problem: &LowerBoundedIPMIPProblem) -> serde_json::Value {
-    let mut value = serde_json::to_value(ExternalProblem::from(&problem.base))
-        .expect("serialize lower-bounded base");
-    value["lb"] = serde_json::json!(&problem.lb);
-    value
-}
-
-fn general_linear_problem_value(problem: &GeneralLinearIPMIPProblem) -> serde_json::Value {
-    let mut value = serde_json::to_value(ExternalProblem::from(&problem.base))
-        .expect("serialize general-linear base");
-    value["linear_constraints"] = serde_json::Value::Array(
-        problem
-            .linear_constraints
-            .iter()
-            .map(|constraint| {
-                serde_json::json!({
-                    "coefs": &constraint.coefs,
-                    "lower": constraint.lower,
-                    "upper": constraint.upper,
-                    "name": &constraint.name,
-                })
-            })
-            .collect(),
-    );
-    value
-}
-
-fn pwl_problem_value(problem: &PwlIPMIPProblem) -> serde_json::Value {
-    let mut value =
-        serde_json::to_value(ExternalProblem::from(&problem.base)).expect("serialize PWL base");
-    value["pwl"] = serde_json::Value::Array(
-        problem
-            .pwl
-            .iter()
-            .map(|pwl| {
-                serde_json::json!({
-                    "x_var": pwl.x_var,
-                    "y_var": pwl.y_var,
-                    "points": pwl.points.iter().map(|point| serde_json::json!({
-                        "x": point.x,
-                        "y": point.y,
-                    })).collect::<Vec<_>>(),
-                    "name": &pwl.name,
-                })
-            })
-            .collect(),
-    );
-    value
-}
-
-fn multi_objective_problem_value(problem: &MultiObjectiveIPMIPProblem) -> serde_json::Value {
-    let mut value = serde_json::to_value(ExternalProblem::from(&problem.base))
-        .expect("serialize multi-objective base");
-    value["multi_objectives"] = serde_json::Value::Array(
-        problem
-            .objectives
-            .iter()
-            .map(|objective| {
-                serde_json::json!({
-                    "sense": objective.sense.as_str(),
-                    "c": &objective.c,
-                    "name": &objective.name,
-                })
-            })
-            .collect(),
-    );
-    value
-}
-
 fn fmt_vec(x: &[f64]) -> String {
     format!(
         "[{}]",
@@ -693,6 +593,56 @@ fn feasible_with_lb(p: &IPMIPProblem, lb: &[f64], x: &[f64], tol: f64) -> bool {
     true
 }
 
+fn force_python_reference() -> bool {
+    std::env::var("IP_MIP_EXTERNAL_BRIDGE")
+        .map(|value| value.eq_ignore_ascii_case("python"))
+        .unwrap_or(false)
+}
+
+fn select_cli_solver(requested: &str) -> Option<(ExternalLinearCliSolver, PathBuf)> {
+    if requested == "auto" {
+        return ExternalLinearCliSolver::open_source_mip()
+            .iter()
+            .copied()
+            .find_map(|solver| {
+                external_linear_cli_command(solver).map(|command| (solver, command))
+            });
+    }
+    let solver = parse_cli_solver(requested)?;
+    external_linear_cli_command(solver).map(|command| (solver, command))
+}
+
+fn parse_cli_solver(value: &str) -> Option<ExternalLinearCliSolver> {
+    let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+    match normalized.as_str() {
+        "highs" | "highs-cli" => Some(ExternalLinearCliSolver::Highs),
+        "glpk" | "glpsol" | "glpsol-cli" => Some(ExternalLinearCliSolver::Glpk),
+        "scip" | "scip-cli" => Some(ExternalLinearCliSolver::Scip),
+        "cbc" | "coin-cbc" | "coin-or-cbc" | "cbc-cli" => Some(ExternalLinearCliSolver::Cbc),
+        "lp-solve" | "lpsolve" | "lp-solve-cli" => Some(ExternalLinearCliSolver::LpSolve),
+        "gurobi" | "gurobi-cl" | "gurobi-cli" => Some(ExternalLinearCliSolver::Gurobi),
+        "cplex" | "cplex-cli" => Some(ExternalLinearCliSolver::Cplex),
+        "xpress" | "optimizer" | "xpress-cli" => Some(ExternalLinearCliSolver::Xpress),
+        "lindo" | "runlindo" | "lindoapi" | "lindo-cli" => Some(ExternalLinearCliSolver::Lindo),
+        _ => None,
+    }
+}
+
+fn payload_from_cli_solution(solution: ExternalLinearCliSolution) -> ExternalPayload {
+    let status = solution.status.as_str().to_string();
+    ExternalPayload {
+        result: ExternalResultInner {
+            status,
+            solver: solution.solver,
+            x: (!solution.x.is_empty()).then_some(solution.x),
+            objective: solution.objective,
+            objective_values: solution.objective_values,
+            message: Some(solution.message),
+            enumerated: None,
+        },
+    }
+}
+
 fn root_from_env() -> PathBuf {
     std::env::var("REPO_ROOT")
         .map(PathBuf::from)
@@ -711,7 +661,6 @@ fn assert_script_exists(root: &Path) {
 /// Binary driver.
 pub fn run() {
     let root = root_from_env();
-    assert_script_exists(&root);
     let mut d = Driver {
         checks: Vec::new(),
         out_dir: root.join("out").join("external").join("ip-mip"),

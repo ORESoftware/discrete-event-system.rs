@@ -65,12 +65,20 @@ use crate::des::general::external_knapsack_reference::{
 };
 use crate::des::general::external_linear_cli::{
     external_linear_cli_command, external_linear_cli_solver_specs,
-    probe_external_linear_cli_solver, solve_ipmip_with_external_cli, solve_lp_with_external_cli,
-    solve_multi_objective_ipmip_with_external_cli, ExternalLinearCliBranchRule,
+    general_linear_ipmip_problem_to_cli_json, indicator_ipmip_problem_to_cli_json,
+    ipmip_problem_to_cli_json, lower_bounded_ipmip_problem_to_cli_json,
+    multi_objective_ipmip_problem_to_cli_json, probe_external_linear_cli_solver,
+    pwl_ipmip_problem_to_cli_json, quadratic_objective_ipmip_problem_to_cli_json,
+    semi_ipmip_problem_to_cli_json, solve_general_linear_ipmip_with_external_cli,
+    solve_indicator_ipmip_with_external_cli, solve_ipmip_with_external_cli,
+    solve_lower_bounded_ipmip_with_external_cli, solve_lp_with_external_cli,
+    solve_multi_objective_ipmip_with_external_cli, solve_pwl_ipmip_with_external_cli,
+    solve_quadratic_objective_ipmip_with_external_cli, solve_source_ipmip_with_external_cli,
+    sos_ipmip_problem_to_cli_json, source_ipmip_problem_to_cli_json, ExternalLinearCliBranchRule,
     ExternalLinearCliKind, ExternalLinearCliLicenseClass, ExternalLinearCliLpAlgorithm,
     ExternalLinearCliMipSwitch, ExternalLinearCliModelFormat, ExternalLinearCliNodeSelection,
     ExternalLinearCliOptions, ExternalLinearCliPresolve, ExternalLinearCliProbeStatus,
-    ExternalLinearCliSolver, ExternalLinearCliStatus,
+    ExternalLinearCliSolution, ExternalLinearCliSolver, ExternalLinearCliStatus,
 };
 use crate::des::general::external_max_flow_reference::{
     solve_max_flow_with_external_reference, ExternalMaxFlowReferenceOptions,
@@ -199,7 +207,7 @@ use crate::des::general::ip_mip_des::{
     solve_sos_ipmip_with_des, solve_source_ipmip_with_des, BranchOrCutConstraint, BranchRule,
     ConcreteLpRelaxationAlgorithm, ConstraintKind, IPMIPConflictMember, IPMIPConflictOptions,
     IPMIPFeasRelaxMember, IPMIPFeasRelaxOptions, IPMIPProblem, IPMIPSolutionPoolOptions,
-    IPMIPSolveOptions, IPMIPStatus, LpRelaxationAlgorithm, TraceAction,
+    IPMIPSolveOptions, IPMIPStatus, LpRelaxationAlgorithm, SourceIPMIPProblem, TraceAction,
 };
 use crate::des::general::knapsack::{
     build_sample_knapsack_problem, knapsack_solution_feasible,
@@ -209,13 +217,14 @@ use crate::des::general::knapsack::{
 use crate::des::general::lp::{
     analyze_lp_bound_sensitivity_internal, analyze_lp_objective_sensitivity_internal,
     analyze_lp_rhs_sensitivity_internal, build_lp_feasibility_relaxation_problem,
-    find_lp_infeasibility_conflict, lp_feasibility_problem_from_conflict_members,
-    solve_general_linear_lp_internal, solve_lp_external, solve_lp_feasibility_relaxation_internal,
-    solve_lp_internal, solve_objective_offset_lp_internal, ExternalSolverOptions,
-    GeneralLinearLPProblem, InternalSimplexOptions, LPBasisWarmStart, LPBoundSensitivityKind,
-    LPBoundSensitivityOptions, LPConflictMember, LPConflictOptions, LPFeasRelaxMember,
-    LPFeasRelaxOptions, LPObjectiveSensitivityOptions, LPProblem, LPRhsSensitivityOptions,
-    LPRowConstraint, LPStatus, ObjectiveOffsetLPProblem, Sense,
+    find_lp_infeasibility_conflict, linearize_general_linear_lp_problem,
+    lp_feasibility_problem_from_conflict_members, solve_general_linear_lp_internal,
+    solve_lp_feasibility_relaxation_internal, solve_lp_internal,
+    solve_objective_offset_lp_internal, GeneralLinearLPProblem, InternalSimplexOptions,
+    LPBasisWarmStart, LPBoundSensitivityKind, LPBoundSensitivityOptions, LPConflictMember,
+    LPConflictOptions, LPFeasRelaxMember, LPFeasRelaxOptions, LPObjectiveSensitivityOptions,
+    LPProblem, LPRhsSensitivityOptions, LPRowConstraint, LPSolution, LPStatus,
+    ObjectiveOffsetLPProblem, Sense,
 };
 use crate::des::general::math_program::{
     analyze_math_program_bound_sensitivity, analyze_math_program_objective_sensitivity,
@@ -307,14 +316,6 @@ struct MipReference {
 struct MipPoolReferenceSolution {
     x: Vec<f64>,
     objective: f64,
-}
-
-#[derive(Debug, Deserialize)]
-struct LPReference {
-    status: String,
-    solver: String,
-    x: Vec<f64>,
-    objective: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -668,6 +669,82 @@ impl Driver {
             (Some(a), Some(b)) => self.max_abs_close(name, a, b, tol),
             _ => self.check(name, false, "missing certificate vector"),
         }
+    }
+
+    fn lp_status_from_external_cli(status: ExternalLinearCliStatus) -> LPStatus {
+        match status {
+            ExternalLinearCliStatus::Optimal | ExternalLinearCliStatus::Feasible => {
+                LPStatus::Optimal
+            }
+            ExternalLinearCliStatus::Infeasible => LPStatus::Infeasible,
+            ExternalLinearCliStatus::Unbounded => LPStatus::Unbounded,
+            ExternalLinearCliStatus::Unavailable
+            | ExternalLinearCliStatus::NumericalError
+            | ExternalLinearCliStatus::Unknown => LPStatus::NumericalError,
+        }
+    }
+
+    fn lp_solution_from_external_cli(solution: ExternalLinearCliSolution) -> LPSolution {
+        LPSolution {
+            status: Self::lp_status_from_external_cli(solution.status),
+            x: solution.x,
+            objective: solution.objective.unwrap_or(f64::NAN),
+            dual_ub: solution.dual_ub,
+            dual_eq: solution.dual_eq,
+            reduced_costs: solution.reduced_costs,
+            var_basis: solution.var_basis,
+            row_basis: solution.row_basis,
+            unbounded_ray: None,
+            infeasibility_certificate: None,
+            iters: solution.iterations.map(|iters| iters as usize),
+            solver: solution.solver,
+            elapsed_ms: solution.elapsed_ms,
+            message: Some(solution.message),
+        }
+    }
+
+    fn solve_lp_highs_reference(
+        &self,
+        problem: &LPProblem,
+        lp_algorithm: Option<ExternalLinearCliLpAlgorithm>,
+    ) -> LPSolution {
+        let algorithm_label = lp_algorithm
+            .map(|algorithm| algorithm.as_str())
+            .unwrap_or("default");
+        if let Some(command) = external_linear_cli_command(ExternalLinearCliSolver::Highs) {
+            let solution = solve_lp_with_external_cli(
+                problem,
+                &ExternalLinearCliOptions {
+                    solver: ExternalLinearCliSolver::Highs,
+                    command_path: Some(command),
+                    time_limit_secs: Some(2.0),
+                    lp_algorithm,
+                    ..Default::default()
+                },
+            );
+            if !matches!(
+                solution.status,
+                ExternalLinearCliStatus::Unavailable
+                    | ExternalLinearCliStatus::NumericalError
+                    | ExternalLinearCliStatus::Unknown
+            ) {
+                return Self::lp_solution_from_external_cli(solution);
+            }
+            let mut fallback = solve_lp_internal(problem, &InternalSimplexOptions::default());
+            fallback.solver = format!("internal-simplex-fallback-for-highs-cli-{algorithm_label}");
+            fallback.message = Some(format!(
+                "HiGHS CLI status {} via {} unavailable for Rust reference path; {}",
+                solution.status.as_str(),
+                algorithm_label,
+                solution.message
+            ));
+            return fallback;
+        }
+
+        let mut fallback = solve_lp_internal(problem, &InternalSimplexOptions::default());
+        fallback.solver = format!("internal-simplex-no-highs-cli-{algorithm_label}");
+        fallback.message = Some("highs executable not found; used internal simplex".to_string());
+        fallback
     }
 
     fn run_python_json(&self, script: &str, args: &[&str], stdin_json: &str) -> serde_json::Value {
@@ -2062,7 +2139,7 @@ impl Driver {
     }
 
     fn validate_lp(&mut self) {
-        println!("\n-- LP: internal simplex vs external LP bridge --");
+        println!("\n-- LP: internal simplex vs Rust LP references --");
         let lp = LPProblem {
             sense: Sense::Max,
             c: vec![3.0, 2.0],
@@ -2071,13 +2148,7 @@ impl Driver {
             ..Default::default()
         };
         let internal = solve_lp_internal(&lp, &InternalSimplexOptions::default());
-        let external = solve_lp_external(
-            &lp,
-            &ExternalSolverOptions {
-                method: Some("highs".to_string()),
-                ..Default::default()
-            },
-        );
+        let external = self.solve_lp_highs_reference(&lp, None);
         self.check(
             "LP statuses optimal",
             internal.status == LPStatus::Optimal && external.status == LPStatus::Optimal,
@@ -2098,13 +2169,7 @@ impl Driver {
         };
         let certificate_internal =
             solve_lp_internal(&certificate_lp, &InternalSimplexOptions::default());
-        let certificate_external = solve_lp_external(
-            &certificate_lp,
-            &ExternalSolverOptions {
-                method: Some("highs".to_string()),
-                ..Default::default()
-            },
-        );
+        let certificate_external = self.solve_lp_highs_reference(&certificate_lp, None);
         self.check(
             "LP certificate statuses optimal",
             certificate_internal.status == LPStatus::Optimal
@@ -2161,13 +2226,7 @@ impl Driver {
         };
         let bound_certificate_internal =
             solve_lp_internal(&bound_certificate_lp, &InternalSimplexOptions::default());
-        let bound_certificate_external = solve_lp_external(
-            &bound_certificate_lp,
-            &ExternalSolverOptions {
-                method: Some("highs".to_string()),
-                ..Default::default()
-            },
-        );
+        let bound_certificate_external = self.solve_lp_highs_reference(&bound_certificate_lp, None);
         self.check(
             "LP bound certificate statuses optimal",
             bound_certificate_internal.status == LPStatus::Optimal
@@ -2226,70 +2285,45 @@ impl Driver {
             1e-8,
         );
 
-        let glop = solve_lp_external(
-            &lp,
-            &ExternalSolverOptions {
-                method: Some("glop".to_string()),
-                ..Default::default()
-            },
+        let highs_simplex =
+            self.solve_lp_highs_reference(&lp, Some(ExternalLinearCliLpAlgorithm::Simplex));
+        self.check(
+            "LP HiGHS/simplex reference status optimal",
+            internal.status == LPStatus::Optimal && highs_simplex.status == LPStatus::Optimal,
+            format!(
+                "internal={:?} reference={:?} solver={}",
+                internal.status, highs_simplex.status, highs_simplex.solver
+            ),
         );
-        if glop.solver == "ortools:glop" {
-            self.check(
-                "LP OR-Tools GLOP status optimal",
-                internal.status == LPStatus::Optimal && glop.status == LPStatus::Optimal,
-                format!(
-                    "internal={:?} external={:?} solver={}",
-                    internal.status, glop.status, glop.solver
-                ),
-            );
-        } else {
-            println!(
-                "  SKIP  LP OR-Tools GLOP status optimal: solver={} message={:?}",
-                glop.solver, glop.message
-            );
-        }
         self.close(
-            "LP OR-Tools GLOP objective",
+            "LP HiGHS/simplex reference objective",
             internal.objective,
-            glop.objective,
+            highs_simplex.objective,
             1e-9,
         );
-        self.max_abs_close("LP OR-Tools GLOP x", &internal.x, &glop.x, 1e-8);
-
-        let pdlp = solve_lp_external(
-            &lp,
-            &ExternalSolverOptions {
-                method: Some("pdlp".to_string()),
-                ..Default::default()
-            },
+        self.max_abs_close(
+            "LP HiGHS/simplex reference x",
+            &internal.x,
+            &highs_simplex.x,
+            1e-8,
         );
-        if pdlp.solver == "ortools:pdlp" {
-            self.check(
-                "LP OR-Tools PDLP status optimal",
-                internal.status == LPStatus::Optimal && pdlp.status == LPStatus::Optimal,
-                format!(
-                    "internal={:?} external={:?} solver={}",
-                    internal.status, pdlp.status, pdlp.solver
-                ),
-            );
-            self.close(
-                "LP OR-Tools PDLP objective",
-                internal.objective,
-                pdlp.objective,
-                1e-7,
-            );
-            self.max_abs_close("LP OR-Tools PDLP x", &internal.x, &pdlp.x, 1e-6);
-        } else {
-            self.check(
-                "LP OR-Tools PDLP bridge fallback solves same input",
-                pdlp.status == LPStatus::Optimal
-                    && (pdlp.objective - internal.objective).abs() <= 1e-9,
-                format!(
-                    "solver={} status={:?} objective={} expected={}",
-                    pdlp.solver, pdlp.status, pdlp.objective, internal.objective
-                ),
-            );
-        }
+
+        let highs_ipm = self.solve_lp_highs_reference(&lp, Some(ExternalLinearCliLpAlgorithm::Ipm));
+        self.check(
+            "LP HiGHS/IPM reference status optimal",
+            internal.status == LPStatus::Optimal && highs_ipm.status == LPStatus::Optimal,
+            format!(
+                "internal={:?} reference={:?} solver={}",
+                internal.status, highs_ipm.status, highs_ipm.solver
+            ),
+        );
+        self.close(
+            "LP HiGHS/IPM reference objective",
+            internal.objective,
+            highs_ipm.objective,
+            1e-7,
+        );
+        self.max_abs_close("LP HiGHS/IPM reference x", &internal.x, &highs_ipm.x, 1e-6);
 
         let range_lp = GeneralLinearLPProblem {
             base: LPProblem {
@@ -2326,43 +2360,23 @@ impl Driver {
         };
         let range_internal =
             solve_general_linear_lp_internal(&range_lp, &InternalSimplexOptions::default());
-        let range_json = serde_json::json!({
-            "lp": {
-                "sense": range_lp.base.sense.as_str(),
-                "c": &range_lp.base.c,
-                "A_ub": &range_lp.base.a_ub,
-                "b_ub": &range_lp.base.b_ub,
-                "A_eq": &range_lp.base.a_eq,
-                "b_eq": &range_lp.base.b_eq,
-                "lb": &range_lp.base.lb,
-                "ub": &range_lp.base.ub,
-                "linear_constraints": range_lp.linear_constraints.iter().map(|row| serde_json::json!({
-                    "coefs": &row.coefs,
-                    "lower": row.lower,
-                    "upper": row.upper,
-                    "name": &row.name,
-                })).collect::<Vec<_>>(),
-            },
-            "method": "highs",
-        })
-        .to_string();
-        let value = self.run_python_json("lp_solve.py", &["--method", "highs"], &range_json);
-        let range_reference: LPReference =
-            serde_json::from_value(value).expect("parse range-row LP reference");
+        let range_reference_problem = linearize_general_linear_lp_problem(&range_lp);
+        let range_reference = self.solve_lp_highs_reference(&range_reference_problem, None);
         self.check(
             "LP range-row statuses optimal",
-            range_internal.status == LPStatus::Optimal && range_reference.status == "optimal",
+            range_internal.status == LPStatus::Optimal
+                && range_reference.status == LPStatus::Optimal,
             format!(
                 "internal={} external={} solver={}",
                 range_internal.status.as_str(),
-                range_reference.status,
+                range_reference.status.as_str(),
                 range_reference.solver
             ),
         );
         self.close(
             "LP range-row objective",
             range_internal.objective,
-            range_reference.objective.unwrap_or(f64::NAN),
+            range_reference.objective,
             1e-8,
         );
         self.max_abs_close(
@@ -2384,38 +2398,25 @@ impl Driver {
         };
         let offset_internal =
             solve_objective_offset_lp_internal(&offset_lp, &InternalSimplexOptions::default());
-        let offset_json = serde_json::json!({
-            "lp": {
-                "sense": offset_lp.base.sense.as_str(),
-                "c": &offset_lp.base.c,
-                "A_ub": &offset_lp.base.a_ub,
-                "b_ub": &offset_lp.base.b_ub,
-                "A_eq": &offset_lp.base.a_eq,
-                "b_eq": &offset_lp.base.b_eq,
-                "lb": &offset_lp.base.lb,
-                "ub": &offset_lp.base.ub,
-                "objective_offset": offset_lp.objective_offset,
-            },
-            "method": "highs",
-        })
-        .to_string();
-        let value = self.run_python_json("lp_solve.py", &["--method", "highs"], &offset_json);
-        let offset_reference: LPReference =
-            serde_json::from_value(value).expect("parse objective-offset LP reference");
+        let mut offset_reference = self.solve_lp_highs_reference(&offset_lp.base, None);
+        if offset_reference.objective.is_finite() {
+            offset_reference.objective += offset_lp.objective_offset;
+        }
         self.check(
             "LP objective-offset statuses optimal",
-            offset_internal.status == LPStatus::Optimal && offset_reference.status == "optimal",
+            offset_internal.status == LPStatus::Optimal
+                && offset_reference.status == LPStatus::Optimal,
             format!(
                 "internal={} external={} solver={}",
                 offset_internal.status.as_str(),
-                offset_reference.status,
+                offset_reference.status.as_str(),
                 offset_reference.solver
             ),
         );
         self.close(
             "LP objective-offset objective",
             offset_internal.objective,
-            offset_reference.objective.unwrap_or(f64::NAN),
+            offset_reference.objective,
             1e-8,
         );
         self.max_abs_close(
@@ -2469,31 +2470,14 @@ impl Driver {
             |label: &str, coeffs: Vec<f64>, should_keep_base_optimal: bool, this: &mut Driver| {
                 let mut trial = sensitivity_lp.clone();
                 trial.c = coeffs;
-                let trial_json = serde_json::json!({
-                    "lp": {
-                        "sense": trial.sense.as_str(),
-                        "c": &trial.c,
-                        "A_ub": &trial.a_ub,
-                        "b_ub": &trial.b_ub,
-                        "A_eq": &trial.a_eq,
-                        "b_eq": &trial.b_eq,
-                        "lb": &trial.lb,
-                        "ub": &trial.ub,
-                    },
-                    "method": "highs",
-                })
-                .to_string();
-                let value =
-                    this.run_python_json("lp_solve.py", &["--method", "highs"], &trial_json);
-                let reference: LPReference =
-                    serde_json::from_value(value).expect("parse objective-sensitivity reference");
+                let reference = this.solve_lp_highs_reference(&trial, None);
                 let base_objective = trial
                     .c
                     .iter()
                     .zip(&sensitivity_report.base_x)
                     .map(|(coef, value)| coef * value)
                     .sum::<f64>();
-                let external_objective = reference.objective.unwrap_or(f64::NAN);
+                let external_objective = reference.objective;
                 let base_is_external_optimal = (base_objective - external_objective).abs()
                     <= 1e-7
                         * 1.0_f64
@@ -2501,10 +2485,10 @@ impl Driver {
                             .max(external_objective.abs());
                 this.check(
                     format!("LP objective-sensitivity HiGHS {label}"),
-                    reference.status == "optimal"
+                    reference.status == LPStatus::Optimal
                         && base_is_external_optimal == should_keep_base_optimal,
                     format!(
-                        "coeffs={:?} base_obj={:.10} external={:?} keep={} expected_keep={} solver={}",
+                        "coeffs={:?} base_obj={:.10} external={:.10} keep={} expected_keep={} solver={}",
                         trial.c,
                         base_objective,
                         reference.objective,
@@ -2566,23 +2550,7 @@ impl Driver {
                 b_ub[row] = rhs;
             }
             let internal = solve_lp_internal(&trial, &InternalSimplexOptions::default());
-            let trial_json = serde_json::json!({
-                "lp": {
-                    "sense": trial.sense.as_str(),
-                    "c": &trial.c,
-                    "A_ub": &trial.a_ub,
-                    "b_ub": &trial.b_ub,
-                    "A_eq": &trial.a_eq,
-                    "b_eq": &trial.b_eq,
-                    "lb": &trial.lb,
-                    "ub": &trial.ub,
-                },
-                "method": "highs",
-            })
-            .to_string();
-            let value = this.run_python_json("lp_solve.py", &["--method", "highs"], &trial_json);
-            let reference: LPReference =
-                serde_json::from_value(value).expect("parse RHS-sensitivity reference");
+            let reference = this.solve_lp_highs_reference(&trial, None);
             let original_rhs = sensitivity_lp
                 .b_ub
                 .as_ref()
@@ -2591,7 +2559,7 @@ impl Driver {
                 .unwrap_or(f64::NAN);
             let predicted = rhs_base_solution.objective
                 + rhs_duals.get(row).copied().unwrap_or(0.0) * (rhs - original_rhs);
-            let external_objective = reference.objective.unwrap_or(f64::NAN);
+            let external_objective = reference.objective;
             let linear_prediction_matches = (predicted - external_objective).abs()
                 <= 1e-7 * 1.0_f64.max(predicted.abs()).max(external_objective.abs());
             let max_x_diff = reference
@@ -2602,13 +2570,13 @@ impl Driver {
                 .fold(0.0_f64, f64::max);
             this.check(
                     format!("LP RHS-sensitivity HiGHS {label}"),
-                    reference.status == "optimal"
+                    reference.status == LPStatus::Optimal
                         && internal.status == LPStatus::Optimal
                         && (internal.objective - external_objective).abs() <= 1e-7
                         && max_x_diff <= 1e-7
                         && linear_prediction_matches == should_follow_linear,
                     format!(
-                        "row={row} rhs={rhs:.6} native_obj={:.10} external={:?} predicted={:.10} linear={} expected_linear={} x_diff={:.3e} solver={}",
+                        "row={row} rhs={rhs:.6} native_obj={:.10} external={:.10} predicted={:.10} linear={} expected_linear={} x_diff={:.3e} solver={}",
                         internal.objective,
                         reference.objective,
                         predicted,
@@ -2701,25 +2669,8 @@ impl Driver {
                 }
             }
             let internal = solve_lp_internal(&trial, &InternalSimplexOptions::default());
-            let trial_json = serde_json::json!({
-                "lp": {
-                    "sense": trial.sense.as_str(),
-                    "c": &trial.c,
-                    "A_ub": &trial.a_ub,
-                    "b_ub": &trial.b_ub,
-                    "A_eq": &trial.a_eq,
-                    "b_eq": &trial.b_eq,
-                    "lb": &trial.lb,
-                    "ub": &trial.ub,
-                },
-                "method": "highs",
-            })
-            .to_string();
-            let value_json =
-                this.run_python_json("lp_solve.py", &["--method", "highs"], &trial_json);
-            let reference: LPReference =
-                serde_json::from_value(value_json).expect("parse bound-sensitivity reference");
-            let external_objective = reference.objective.unwrap_or(f64::NAN);
+            let reference = this.solve_lp_highs_reference(&trial, None);
+            let external_objective = reference.objective;
             let max_x_diff = reference
                 .x
                 .iter()
@@ -2728,13 +2679,13 @@ impl Driver {
                 .fold(0.0_f64, f64::max);
             this.check(
                 format!("LP bound-sensitivity HiGHS {label}"),
-                reference.status == "optimal"
+                reference.status == LPStatus::Optimal
                     && internal.status == LPStatus::Optimal
                     && (internal.objective - external_objective).abs() <= 1e-7
                     && (internal.objective - expected_objective).abs() <= 1e-7
                     && max_x_diff <= 1e-7,
                 format!(
-                    "kind={} var={} value={value:.6} native_obj={:.10} external={:?} expected={expected_objective:.10} x_diff={:.3e} solver={}",
+                    "kind={} var={} value={value:.6} native_obj={:.10} external={:.10} expected={expected_objective:.10} x_diff={:.3e} solver={}",
                     kind.as_str(),
                     variable,
                     internal.objective,
@@ -2807,29 +2758,14 @@ impl Driver {
         );
         let conflict_subproblem =
             lp_feasibility_problem_from_conflict_members(&conflict_lp, &conflict.members);
-        let conflict_json = serde_json::json!({
-            "lp": {
-                "sense": conflict_subproblem.sense.as_str(),
-                "c": &conflict_subproblem.c,
-                "A_ub": &conflict_subproblem.a_ub,
-                "b_ub": &conflict_subproblem.b_ub,
-                "A_eq": &conflict_subproblem.a_eq,
-                "b_eq": &conflict_subproblem.b_eq,
-                "lb": &conflict_subproblem.lb,
-                "ub": &conflict_subproblem.ub,
-            },
-            "method": "highs",
-        })
-        .to_string();
-        let value = self.run_python_json("lp_solve.py", &["--method", "highs"], &conflict_json);
-        let conflict_reference: LPReference =
-            serde_json::from_value(value).expect("parse LP conflict reference");
+        let conflict_reference = self.solve_lp_highs_reference(&conflict_subproblem, None);
         self.check(
             "LP conflict subsystem external infeasible",
-            conflict_reference.status == "infeasible",
+            conflict_reference.status == LPStatus::Infeasible,
             format!(
                 "external={} solver={}",
-                conflict_reference.status, conflict_reference.solver
+                conflict_reference.status.as_str(),
+                conflict_reference.solver
             ),
         );
         let mut deletion_statuses = Vec::new();
@@ -2839,25 +2775,9 @@ impl Driver {
             trial.remove(idx);
             let trial_subproblem =
                 lp_feasibility_problem_from_conflict_members(&conflict_lp, &trial);
-            let trial_json = serde_json::json!({
-                "lp": {
-                    "sense": trial_subproblem.sense.as_str(),
-                    "c": &trial_subproblem.c,
-                    "A_ub": &trial_subproblem.a_ub,
-                    "b_ub": &trial_subproblem.b_ub,
-                    "A_eq": &trial_subproblem.a_eq,
-                    "b_eq": &trial_subproblem.b_eq,
-                    "lb": &trial_subproblem.lb,
-                    "ub": &trial_subproblem.ub,
-                },
-                "method": "highs",
-            })
-            .to_string();
-            let value = self.run_python_json("lp_solve.py", &["--method", "highs"], &trial_json);
-            let reference: LPReference =
-                serde_json::from_value(value).expect("parse LP conflict deletion reference");
-            all_single_deletions_feasible &= reference.status == "optimal";
-            deletion_statuses.push(reference.status);
+            let reference = self.solve_lp_highs_reference(&trial_subproblem, None);
+            all_single_deletions_feasible &= reference.status == LPStatus::Optimal;
+            deletion_statuses.push(reference.status.as_str().to_string());
         }
         self.check(
             "LP conflict single-deletion external feasibility",
@@ -2910,17 +2830,10 @@ impl Driver {
         );
         let feas_relax_model =
             build_lp_feasibility_relaxation_problem(&feas_relax_lp, &feas_relax_options);
-        let feas_relax_reference = solve_lp_with_external_cli(
-            &feas_relax_model.problem,
-            &ExternalLinearCliOptions {
-                solver: ExternalLinearCliSolver::Highs,
-                time_limit_secs: Some(2.0),
-                ..Default::default()
-            },
-        );
+        let feas_relax_reference = self.solve_lp_highs_reference(&feas_relax_model.problem, None);
         self.check(
             "LP feasibility-relaxation HiGHS status optimal",
-            feas_relax_reference.status == ExternalLinearCliStatus::Optimal,
+            feas_relax_reference.status == LPStatus::Optimal,
             format!(
                 "external={} solver={}",
                 feas_relax_reference.status.as_str(),
@@ -2930,7 +2843,7 @@ impl Driver {
         self.close(
             "LP feasibility-relaxation cost vs HiGHS",
             feas_relax_internal.relaxation_cost,
-            feas_relax_reference.objective.unwrap_or(f64::NAN),
+            feas_relax_reference.objective,
             1e-9,
         );
         let external_original_x =
@@ -2971,13 +2884,7 @@ impl Driver {
         ];
         for (case_name, problem, expected_status) in lp_status_cases {
             let internal = solve_lp_internal(&problem, &InternalSimplexOptions::default());
-            let external = solve_lp_external(
-                &problem,
-                &ExternalSolverOptions {
-                    method: Some("highs".to_string()),
-                    ..Default::default()
-                },
-            );
+            let external = self.solve_lp_highs_reference(&problem, None);
             self.check(
                 format!("LP {case_name} status internal/HiGHS"),
                 internal.status == expected_status && external.status == expected_status,
@@ -3011,6 +2918,170 @@ impl Driver {
         args.extend_from_slice(extra_args);
         let value = self.run_python_json("linear_cli_reference.py", &args, stdin_json);
         serde_json::from_value(value).expect("parse linear CLI reference")
+    }
+
+    fn check_source_ipmip_external_cli(
+        &mut self,
+        label: &str,
+        problem: &SourceIPMIPProblem,
+        linearized: &IPMIPProblem,
+        original_var_count: usize,
+        internal_status: IPMIPStatus,
+        internal_objective: f64,
+        internal_x: &[f64],
+    ) {
+        for solver in ExternalLinearCliSolver::open_source_mip().iter().copied() {
+            let solver_name = solver.as_str();
+            let reference = solve_source_ipmip_with_external_cli(
+                problem,
+                &ExternalLinearCliOptions {
+                    solver,
+                    time_limit_secs: Some(5.0),
+                    ..Default::default()
+                },
+            );
+            if reference.status == ExternalLinearCliStatus::Unavailable
+                && reference.message.contains("not found")
+            {
+                println!("  SKIP  IP/MIP {label} {solver_name}:rust-cli executable not found");
+                continue;
+            }
+            self.check(
+                format!("IP/MIP {label} {solver_name}:rust-cli status optimal"),
+                internal_status == IPMIPStatus::Optimal
+                    && reference.status == ExternalLinearCliStatus::Optimal,
+                format!(
+                    "internal={} external={} solver={}",
+                    internal_status.as_str(),
+                    reference.status.as_str(),
+                    reference.solver
+                ),
+            );
+            self.close(
+                &format!("IP/MIP {label} {solver_name}:rust-cli objective"),
+                internal_objective,
+                reference.objective.unwrap_or(f64::NAN),
+                1e-9,
+            );
+            self.check(
+                format!("IP/MIP {label} {solver_name}:rust-cli expanded x length"),
+                reference.x.len() == linearized.c.len(),
+                format!(
+                    "expected={} actual={}",
+                    linearized.c.len(),
+                    reference.x.len()
+                ),
+            );
+            if reference.x.len() >= original_var_count {
+                self.max_abs_close(
+                    &format!("IP/MIP {label} {solver_name}:rust-cli original x"),
+                    &internal_x[..original_var_count],
+                    &reference.x[..original_var_count],
+                    1e-8,
+                );
+            }
+        }
+    }
+
+    fn check_ipmip_external_cli_full_x<F>(
+        &mut self,
+        label: &str,
+        internal_status: IPMIPStatus,
+        internal_objective: f64,
+        internal_x: &[f64],
+        mut solve: F,
+    ) where
+        F: FnMut(ExternalLinearCliSolver) -> ExternalLinearCliSolution,
+    {
+        for solver in ExternalLinearCliSolver::open_source_mip().iter().copied() {
+            let solver_name = solver.as_str();
+            let reference = solve(solver);
+            if reference.status == ExternalLinearCliStatus::Unavailable
+                && reference.message.contains("not found")
+            {
+                println!("  SKIP  IP/MIP {label} {solver_name}:rust-cli executable not found");
+                continue;
+            }
+            self.check(
+                format!("IP/MIP {label} {solver_name}:rust-cli status optimal"),
+                internal_status == IPMIPStatus::Optimal
+                    && reference.status == ExternalLinearCliStatus::Optimal,
+                format!(
+                    "internal={} external={} solver={}",
+                    internal_status.as_str(),
+                    reference.status.as_str(),
+                    reference.solver
+                ),
+            );
+            self.close(
+                &format!("IP/MIP {label} {solver_name}:rust-cli objective"),
+                internal_objective,
+                reference.objective.unwrap_or(f64::NAN),
+                1e-9,
+            );
+            self.max_abs_close(
+                &format!("IP/MIP {label} {solver_name}:rust-cli x"),
+                internal_x,
+                &reference.x,
+                1e-8,
+            );
+        }
+    }
+
+    fn check_ipmip_external_cli_expanded<F>(
+        &mut self,
+        label: &str,
+        expected_len: usize,
+        original_var_count: Option<usize>,
+        internal_status: IPMIPStatus,
+        internal_objective: f64,
+        internal_x: &[f64],
+        mut solve: F,
+    ) where
+        F: FnMut(ExternalLinearCliSolver) -> ExternalLinearCliSolution,
+    {
+        for solver in ExternalLinearCliSolver::open_source_mip().iter().copied() {
+            let solver_name = solver.as_str();
+            let reference = solve(solver);
+            if reference.status == ExternalLinearCliStatus::Unavailable
+                && reference.message.contains("not found")
+            {
+                println!("  SKIP  IP/MIP {label} {solver_name}:rust-cli executable not found");
+                continue;
+            }
+            self.check(
+                format!("IP/MIP {label} {solver_name}:rust-cli status optimal"),
+                internal_status == IPMIPStatus::Optimal
+                    && reference.status == ExternalLinearCliStatus::Optimal,
+                format!(
+                    "internal={} external={} solver={}",
+                    internal_status.as_str(),
+                    reference.status.as_str(),
+                    reference.solver
+                ),
+            );
+            self.close(
+                &format!("IP/MIP {label} {solver_name}:rust-cli objective"),
+                internal_objective,
+                reference.objective.unwrap_or(f64::NAN),
+                1e-9,
+            );
+            self.check(
+                format!("IP/MIP {label} {solver_name}:rust-cli expanded x length"),
+                reference.x.len() == expected_len,
+                format!("expected={} actual={}", expected_len, reference.x.len()),
+            );
+            if let Some(original_var_count) = original_var_count {
+                if reference.x.len() >= original_var_count {
+                    self.max_abs_close(
+                        &format!("IP/MIP {label} {solver_name}:rust-cli original x"),
+                        &internal_x[..original_var_count],
+                        &reference.x[..original_var_count],
+                        1e-8,
+                    );
+                }
+            }
+        }
     }
 
     fn validate_external_solver_clis(&mut self) {
@@ -3102,7 +3173,8 @@ impl Driver {
             self.check(
                 format!("LP {}:rust-cli probe ready", solver.as_str()),
                 probe.status == ExternalLinearCliProbeStatus::Ready
-                    && probe.solver_version.is_some(),
+                    && (solver == ExternalLinearCliSolver::LpSolve
+                        || probe.solver_version.is_some()),
                 format!(
                     "status={} command={:?} smoke={:?} version={:?} message={}",
                     probe.status.as_str(),
@@ -3134,7 +3206,8 @@ impl Driver {
             self.check(
                 format!("IP/MIP {}:rust-cli probe ready", solver.as_str()),
                 probe.status == ExternalLinearCliProbeStatus::Ready
-                    && probe.solver_version.is_some(),
+                    && (solver == ExternalLinearCliSolver::LpSolve
+                        || probe.solver_version.is_some()),
                 format!(
                     "status={} command={:?} smoke={:?} version={:?} message={}",
                     probe.status.as_str(),
@@ -3228,49 +3301,63 @@ impl Driver {
             ..Default::default()
         };
         let lp_internal = solve_lp_internal(&lp, &InternalSimplexOptions::default());
-        let lp_json = serde_json::json!({
-            "lp": {
-                "sense": lp.sense.as_str(),
-                "c": &lp.c,
-                "a_ub": &lp.a_ub,
-                "b_ub": &lp.b_ub,
-                "a_eq": &lp.a_eq,
-                "b_eq": &lp.b_eq,
-                "lb": &lp.lb,
-                "ub": &lp.ub,
-            }
-        })
-        .to_string();
 
-        for solver in lp_solvers.iter().copied() {
-            let reference = self.run_linear_cli_reference("lp", solver, &lp_json);
-            if reference.status == "unavailable" && reference.message.contains("not found") {
-                println!("  SKIP  LP {solver}: executable not found");
+        for solver in [
+            ExternalLinearCliSolver::Highs,
+            ExternalLinearCliSolver::Glpk,
+            ExternalLinearCliSolver::Scip,
+            ExternalLinearCliSolver::Cbc,
+            ExternalLinearCliSolver::Clp,
+            ExternalLinearCliSolver::Soplex,
+            ExternalLinearCliSolver::LpSolve,
+        ] {
+            let solver_name = solver.as_str();
+            let reference = solve_lp_with_external_cli(
+                &lp,
+                &ExternalLinearCliOptions {
+                    solver,
+                    time_limit_secs: Some(2.0),
+                    ..Default::default()
+                },
+            );
+            if reference.status == ExternalLinearCliStatus::Unavailable
+                && reference.message.contains("not found")
+            {
+                println!("  SKIP  LP {solver_name}: executable not found");
                 continue;
             }
             self.check(
-                format!("LP {solver}:cli status optimal"),
-                lp_internal.status == LPStatus::Optimal && reference.status == "optimal",
+                format!("LP {solver_name}:cli status optimal"),
+                lp_internal.status == LPStatus::Optimal
+                    && reference.status == ExternalLinearCliStatus::Optimal,
                 format!(
                     "internal={:?} external={} solver={}",
-                    lp_internal.status, reference.status, reference.solver
+                    lp_internal.status,
+                    reference.status.as_str(),
+                    reference.solver
                 ),
             );
             self.close(
-                &format!("LP {solver}:cli objective"),
+                &format!("LP {solver_name}:cli objective"),
                 lp_internal.objective,
                 reference.objective.unwrap_or(f64::NAN),
                 1e-9,
             );
             self.max_abs_close(
-                &format!("LP {solver}:cli x"),
+                &format!("LP {solver_name}:cli x"),
                 &lp_internal.x,
                 &reference.x,
                 1e-8,
             );
-            if matches!(solver, "highs" | "glpk" | "cbc" | "clp") {
+            if matches!(
+                solver,
+                ExternalLinearCliSolver::Highs
+                    | ExternalLinearCliSolver::Glpk
+                    | ExternalLinearCliSolver::Cbc
+                    | ExternalLinearCliSolver::Clp
+            ) {
                 self.check(
-                    format!("LP {solver}:cli iteration metadata"),
+                    format!("LP {solver_name}:cli iteration metadata"),
                     reference.iterations.is_some(),
                     format!("iterations={:?}", reference.iterations),
                 );
@@ -3278,41 +3365,60 @@ impl Driver {
         }
 
         for (solver, algorithm) in [
-            ("highs", "simplex"),
-            ("highs", "ipm"),
-            ("glpk", "simplex"),
-            ("glpk", "ipm"),
+            (
+                ExternalLinearCliSolver::Highs,
+                ExternalLinearCliLpAlgorithm::Simplex,
+            ),
+            (
+                ExternalLinearCliSolver::Highs,
+                ExternalLinearCliLpAlgorithm::Ipm,
+            ),
+            (
+                ExternalLinearCliSolver::Glpk,
+                ExternalLinearCliLpAlgorithm::Simplex,
+            ),
+            (
+                ExternalLinearCliSolver::Glpk,
+                ExternalLinearCliLpAlgorithm::Ipm,
+            ),
         ] {
-            let reference = self.run_linear_cli_reference_with_args(
-                "lp",
-                solver,
-                &lp_json,
-                &["--time-limit", "5", "--lp-algorithm", algorithm],
+            let solver_name = solver.as_str();
+            let algorithm_name = algorithm.as_str();
+            let reference = solve_lp_with_external_cli(
+                &lp,
+                &ExternalLinearCliOptions {
+                    solver,
+                    time_limit_secs: Some(5.0),
+                    lp_algorithm: Some(algorithm),
+                    ..Default::default()
+                },
             );
-            if reference.status == "unavailable" && reference.message.contains("not found") {
-                println!("  SKIP  LP {solver}:cli {algorithm} executable not found");
+            if reference.status == ExternalLinearCliStatus::Unavailable
+                && reference.message.contains("not found")
+            {
+                println!("  SKIP  LP {solver_name}:cli {algorithm_name} executable not found");
                 continue;
             }
             self.check(
-                format!("LP {solver}:cli {algorithm} algorithm control"),
-                reference.status == "optimal"
-                    && reference.lp_algorithm.as_deref() == Some(algorithm),
+                format!("LP {solver_name}:cli {algorithm_name} algorithm control"),
+                reference.status == ExternalLinearCliStatus::Optimal
+                    && reference.lp_algorithm.as_deref() == Some(algorithm_name),
                 format!(
                     "status={} lp_algorithm={:?} objective={:?} message={}",
-                    reference.status,
+                    reference.status.as_str(),
                     reference.lp_algorithm,
                     reference.objective,
                     reference.message
                 ),
             );
             self.close(
-                &format!("LP {solver}:cli {algorithm} objective"),
+                &format!("LP {solver_name}:cli {algorithm_name} objective"),
                 lp_internal.objective,
                 reference.objective.unwrap_or(f64::NAN),
                 1e-6,
             );
             self.max_abs_close(
-                &format!("LP {solver}:cli {algorithm} x"),
+                &format!("LP {solver_name}:cli {algorithm_name} x"),
                 &lp_internal.x,
                 &reference.x,
                 1e-6,
@@ -3321,27 +3427,32 @@ impl Driver {
 
         let lp_primal_tolerance = 1e-7;
         let lp_dual_tolerance = 2e-7;
-        for solver in ["highs", "scip", "cbc", "clp"] {
-            let reference = self.run_linear_cli_reference_with_args(
-                "lp",
-                solver,
-                &lp_json,
-                &[
-                    "--time-limit",
-                    "5",
-                    "--primal-feasibility-tolerance",
-                    "1e-7",
-                    "--dual-feasibility-tolerance",
-                    "2e-7",
-                ],
+        for solver in [
+            ExternalLinearCliSolver::Highs,
+            ExternalLinearCliSolver::Scip,
+            ExternalLinearCliSolver::Cbc,
+            ExternalLinearCliSolver::Clp,
+        ] {
+            let solver_name = solver.as_str();
+            let reference = solve_lp_with_external_cli(
+                &lp,
+                &ExternalLinearCliOptions {
+                    solver,
+                    time_limit_secs: Some(5.0),
+                    primal_feasibility_tolerance: Some(lp_primal_tolerance),
+                    dual_feasibility_tolerance: Some(lp_dual_tolerance),
+                    ..Default::default()
+                },
             );
-            if reference.status == "unavailable" && reference.message.contains("not found") {
-                println!("  SKIP  LP {solver}:cli tolerance controls executable not found");
+            if reference.status == ExternalLinearCliStatus::Unavailable
+                && reference.message.contains("not found")
+            {
+                println!("  SKIP  LP {solver_name}:cli tolerance controls executable not found");
                 continue;
             }
             self.check(
-                format!("LP {solver}:cli tolerance controls"),
-                reference.status == "optimal"
+                format!("LP {solver_name}:cli tolerance controls"),
+                reference.status == ExternalLinearCliStatus::Optimal
                     && reference
                         .primal_feasibility_tolerance
                         .is_some_and(|tol| (tol - lp_primal_tolerance).abs() <= 1e-12)
@@ -3350,7 +3461,7 @@ impl Driver {
                         .is_some_and(|tol| (tol - lp_dual_tolerance).abs() <= 1e-12),
                 format!(
                     "status={} primal={:?} dual={:?} objective={:?} message={}",
-                    reference.status,
+                    reference.status.as_str(),
                     reference.primal_feasibility_tolerance,
                     reference.dual_feasibility_tolerance,
                     reference.objective,
@@ -3358,35 +3469,51 @@ impl Driver {
                 ),
             );
             self.close(
-                &format!("LP {solver}:cli tolerance objective"),
+                &format!("LP {solver_name}:cli tolerance objective"),
                 lp_internal.objective,
                 reference.objective.unwrap_or(f64::NAN),
                 1e-6,
             );
         }
 
-        for solver in commercial_lp_solvers.iter().copied() {
-            let reference = self.run_linear_cli_reference("lp", solver, &lp_json);
-            if reference.status == "unavailable" {
-                println!("  SKIP  LP commercial {solver}: {}", reference.message);
+        for solver in [
+            ExternalLinearCliSolver::Gurobi,
+            ExternalLinearCliSolver::Cplex,
+            ExternalLinearCliSolver::Xpress,
+            ExternalLinearCliSolver::Lindo,
+        ] {
+            let solver_name = solver.as_str();
+            let reference = solve_lp_with_external_cli(
+                &lp,
+                &ExternalLinearCliOptions {
+                    solver,
+                    time_limit_secs: Some(2.0),
+                    ..Default::default()
+                },
+            );
+            if reference.status == ExternalLinearCliStatus::Unavailable {
+                println!("  SKIP  LP commercial {solver_name}: {}", reference.message);
                 continue;
             }
             self.check(
-                format!("LP commercial {solver}:cli status optimal"),
-                lp_internal.status == LPStatus::Optimal && reference.status == "optimal",
+                format!("LP commercial {solver_name}:cli status optimal"),
+                lp_internal.status == LPStatus::Optimal
+                    && reference.status == ExternalLinearCliStatus::Optimal,
                 format!(
                     "internal={:?} external={} solver={}",
-                    lp_internal.status, reference.status, reference.solver
+                    lp_internal.status,
+                    reference.status.as_str(),
+                    reference.solver
                 ),
             );
             self.close(
-                &format!("LP commercial {solver}:cli objective"),
+                &format!("LP commercial {solver_name}:cli objective"),
                 lp_internal.objective,
                 reference.objective.unwrap_or(f64::NAN),
                 1e-9,
             );
             self.max_abs_close(
-                &format!("LP commercial {solver}:cli x"),
+                &format!("LP commercial {solver_name}:cli x"),
                 &lp_internal.x,
                 &reference.x,
                 1e-8,
@@ -3611,125 +3738,6 @@ impl Driver {
             b_ub: Some(vec![4.0, 5.0]),
             ..Default::default()
         };
-        let cli_certificate_json = serde_json::json!({
-            "lp": {
-                "sense": cli_certificate_lp.sense.as_str(),
-                "c": &cli_certificate_lp.c,
-                "a_ub": &cli_certificate_lp.a_ub,
-                "b_ub": &cli_certificate_lp.b_ub,
-                "a_eq": &cli_certificate_lp.a_eq,
-                "b_eq": &cli_certificate_lp.b_eq,
-                "lb": &cli_certificate_lp.lb,
-                "ub": &cli_certificate_lp.ub,
-            }
-        })
-        .to_string();
-        let cli_certificate_reference =
-            self.run_linear_cli_reference("lp", "highs", &cli_certificate_json);
-        if cli_certificate_reference.status == "unavailable"
-            && cli_certificate_reference.message.contains("not found")
-        {
-            println!("  SKIP  LP highs:cli certificate executable not found");
-        } else {
-            self.check(
-                "LP highs:cli certificate status optimal",
-                cli_certificate_reference.status == "optimal",
-                format!(
-                    "external={} solver={}",
-                    cli_certificate_reference.status, cli_certificate_reference.solver
-                ),
-            );
-            self.max_abs_close_optional(
-                "LP highs:cli certificate dual_ub",
-                cli_certificate_reference.dual_ub.as_deref(),
-                Some(&[1.0, 1.0]),
-                1e-8,
-            );
-            self.max_abs_close_optional(
-                "LP highs:cli certificate reduced_costs",
-                cli_certificate_reference.reduced_costs.as_deref(),
-                Some(&[0.0, 0.0]),
-                1e-8,
-            );
-            self.check(
-                "LP highs:cli basis var statuses",
-                cli_certificate_reference
-                    .var_basis
-                    .as_ref()
-                    .is_some_and(|basis| basis.iter().map(String::as_str).eq(["basic", "basic"])),
-                format!("var_basis={:?}", cli_certificate_reference.var_basis),
-            );
-            self.check(
-                "LP highs:cli basis row statuses",
-                cli_certificate_reference
-                    .row_basis
-                    .as_ref()
-                    .is_some_and(|basis| {
-                        basis
-                            .iter()
-                            .map(String::as_str)
-                            .eq(["at_upper", "at_upper"])
-                    }),
-                format!("row_basis={:?}", cli_certificate_reference.row_basis),
-            );
-            let cold_limited = solve_lp_internal(
-                &cli_certificate_lp,
-                &InternalSimplexOptions {
-                    max_iter: Some(1),
-                    tol: None,
-                    basis_start: None,
-                },
-            );
-            if let (Some(var_basis), Some(row_basis)) = (
-                cli_certificate_reference.var_basis.clone(),
-                cli_certificate_reference.row_basis.clone(),
-            ) {
-                let warm_limited = solve_lp_internal(
-                    &cli_certificate_lp,
-                    &InternalSimplexOptions {
-                        max_iter: Some(1),
-                        tol: None,
-                        basis_start: Some(LPBasisWarmStart {
-                            var_basis,
-                            row_basis,
-                            primal_start: Some(cli_certificate_reference.x.clone()),
-                        }),
-                    },
-                );
-                self.check(
-                    "LP highs:cli basis warm-start native status",
-                    cold_limited.status == LPStatus::IterLimit
-                        && warm_limited.status == LPStatus::Optimal,
-                    format!(
-                        "cold={} warm={} warm_message={:?}",
-                        cold_limited.status.as_str(),
-                        warm_limited.status.as_str(),
-                        warm_limited.message
-                    ),
-                );
-                self.close(
-                    "LP highs:cli basis warm-start objective",
-                    warm_limited.objective,
-                    cli_certificate_reference.objective.unwrap_or(f64::NAN),
-                    1e-9,
-                );
-                self.max_abs_close(
-                    "LP highs:cli basis warm-start x",
-                    &warm_limited.x,
-                    &cli_certificate_reference.x,
-                    1e-8,
-                );
-            } else {
-                self.check(
-                    "LP highs:cli basis warm-start native status",
-                    false,
-                    format!(
-                        "basis missing var={:?} row={:?}",
-                        cli_certificate_reference.var_basis, cli_certificate_reference.row_basis
-                    ),
-                );
-            }
-        }
         let rust_cli_certificate_reference = solve_lp_with_external_cli(
             &cli_certificate_lp,
             &ExternalLinearCliOptions {
@@ -3784,55 +3792,64 @@ impl Driver {
                     }),
                 format!("row_basis={:?}", rust_cli_certificate_reference.row_basis),
             );
-        }
-        let glpk_cli_certificate_reference =
-            self.run_linear_cli_reference("lp", "glpk", &cli_certificate_json);
-        if glpk_cli_certificate_reference.status == "unavailable"
-            && glpk_cli_certificate_reference.message.contains("not found")
-        {
-            println!("  SKIP  LP glpk:cli certificate executable not found");
-        } else {
-            self.check(
-                "LP glpk:cli certificate status optimal",
-                glpk_cli_certificate_reference.status == "optimal",
-                format!(
-                    "external={} solver={}",
-                    glpk_cli_certificate_reference.status, glpk_cli_certificate_reference.solver
-                ),
+            let cold_limited = solve_lp_internal(
+                &cli_certificate_lp,
+                &InternalSimplexOptions {
+                    max_iter: Some(1),
+                    tol: None,
+                    basis_start: None,
+                },
             );
-            self.max_abs_close_optional(
-                "LP glpk:cli certificate dual_ub",
-                glpk_cli_certificate_reference.dual_ub.as_deref(),
-                Some(&[1.0, 1.0]),
-                1e-8,
-            );
-            self.max_abs_close_optional(
-                "LP glpk:cli certificate reduced_costs",
-                glpk_cli_certificate_reference.reduced_costs.as_deref(),
-                Some(&[0.0, 0.0]),
-                1e-8,
-            );
-            self.check(
-                "LP glpk:cli basis var statuses",
-                glpk_cli_certificate_reference
-                    .var_basis
-                    .as_ref()
-                    .is_some_and(|basis| basis.iter().map(String::as_str).eq(["basic", "basic"])),
-                format!("var_basis={:?}", glpk_cli_certificate_reference.var_basis),
-            );
-            self.check(
-                "LP glpk:cli basis row statuses",
-                glpk_cli_certificate_reference
-                    .row_basis
-                    .as_ref()
-                    .is_some_and(|basis| {
-                        basis
-                            .iter()
-                            .map(String::as_str)
-                            .eq(["at_upper", "at_upper"])
-                    }),
-                format!("row_basis={:?}", glpk_cli_certificate_reference.row_basis),
-            );
+            if let (Some(var_basis), Some(row_basis)) = (
+                rust_cli_certificate_reference.var_basis.clone(),
+                rust_cli_certificate_reference.row_basis.clone(),
+            ) {
+                let warm_limited = solve_lp_internal(
+                    &cli_certificate_lp,
+                    &InternalSimplexOptions {
+                        max_iter: Some(1),
+                        tol: None,
+                        basis_start: Some(LPBasisWarmStart {
+                            var_basis,
+                            row_basis,
+                            primal_start: Some(rust_cli_certificate_reference.x.clone()),
+                        }),
+                    },
+                );
+                self.check(
+                    "LP highs:rust-cli basis warm-start native status",
+                    cold_limited.status == LPStatus::IterLimit
+                        && warm_limited.status == LPStatus::Optimal,
+                    format!(
+                        "cold={} warm={} warm_message={:?}",
+                        cold_limited.status.as_str(),
+                        warm_limited.status.as_str(),
+                        warm_limited.message
+                    ),
+                );
+                self.close(
+                    "LP highs:rust-cli basis warm-start objective",
+                    warm_limited.objective,
+                    rust_cli_certificate_reference.objective.unwrap_or(f64::NAN),
+                    1e-9,
+                );
+                self.max_abs_close(
+                    "LP highs:rust-cli basis warm-start x",
+                    &warm_limited.x,
+                    &rust_cli_certificate_reference.x,
+                    1e-8,
+                );
+            } else {
+                self.check(
+                    "LP highs:rust-cli basis warm-start native status",
+                    false,
+                    format!(
+                        "basis missing var={:?} row={:?}",
+                        rust_cli_certificate_reference.var_basis,
+                        rust_cli_certificate_reference.row_basis
+                    ),
+                );
+            }
         }
         let glpk_rust_cli_certificate_reference = solve_lp_with_external_cli(
             &cli_certificate_lp,
@@ -3897,55 +3914,6 @@ impl Driver {
                 ),
             );
         }
-        let cbc_cli_certificate_reference =
-            self.run_linear_cli_reference("lp", "cbc", &cli_certificate_json);
-        if cbc_cli_certificate_reference.status == "unavailable"
-            && cbc_cli_certificate_reference.message.contains("not found")
-        {
-            println!("  SKIP  LP cbc:cli certificate executable not found");
-        } else {
-            self.check(
-                "LP cbc:cli certificate status optimal",
-                cbc_cli_certificate_reference.status == "optimal",
-                format!(
-                    "external={} solver={}",
-                    cbc_cli_certificate_reference.status, cbc_cli_certificate_reference.solver
-                ),
-            );
-            self.max_abs_close_optional(
-                "LP cbc:cli certificate dual_ub",
-                cbc_cli_certificate_reference.dual_ub.as_deref(),
-                Some(&[1.0, 1.0]),
-                1e-8,
-            );
-            self.max_abs_close_optional(
-                "LP cbc:cli certificate reduced_costs",
-                cbc_cli_certificate_reference.reduced_costs.as_deref(),
-                Some(&[0.0, 0.0]),
-                1e-8,
-            );
-            self.check(
-                "LP cbc:cli basis var statuses",
-                cbc_cli_certificate_reference
-                    .var_basis
-                    .as_ref()
-                    .is_some_and(|basis| basis.iter().map(String::as_str).eq(["basic", "basic"])),
-                format!("var_basis={:?}", cbc_cli_certificate_reference.var_basis),
-            );
-            self.check(
-                "LP cbc:cli basis row statuses",
-                cbc_cli_certificate_reference
-                    .row_basis
-                    .as_ref()
-                    .is_some_and(|basis| {
-                        basis
-                            .iter()
-                            .map(String::as_str)
-                            .eq(["at_upper", "at_upper"])
-                    }),
-                format!("row_basis={:?}", cbc_cli_certificate_reference.row_basis),
-            );
-        }
         let cbc_rust_cli_certificate_reference = solve_lp_with_external_cli(
             &cli_certificate_lp,
             &ExternalLinearCliOptions {
@@ -4007,55 +3975,6 @@ impl Driver {
                     "row_basis={:?}",
                     cbc_rust_cli_certificate_reference.row_basis
                 ),
-            );
-        }
-        let clp_cli_certificate_reference =
-            self.run_linear_cli_reference("lp", "clp", &cli_certificate_json);
-        if clp_cli_certificate_reference.status == "unavailable"
-            && clp_cli_certificate_reference.message.contains("not found")
-        {
-            println!("  SKIP  LP clp:cli certificate executable not found");
-        } else {
-            self.check(
-                "LP clp:cli certificate status optimal",
-                clp_cli_certificate_reference.status == "optimal",
-                format!(
-                    "external={} solver={}",
-                    clp_cli_certificate_reference.status, clp_cli_certificate_reference.solver
-                ),
-            );
-            self.max_abs_close_optional(
-                "LP clp:cli certificate dual_ub",
-                clp_cli_certificate_reference.dual_ub.as_deref(),
-                Some(&[1.0, 1.0]),
-                1e-8,
-            );
-            self.max_abs_close_optional(
-                "LP clp:cli certificate reduced_costs",
-                clp_cli_certificate_reference.reduced_costs.as_deref(),
-                Some(&[0.0, 0.0]),
-                1e-8,
-            );
-            self.check(
-                "LP clp:cli basis var statuses",
-                clp_cli_certificate_reference
-                    .var_basis
-                    .as_ref()
-                    .is_some_and(|basis| basis.iter().map(String::as_str).eq(["basic", "basic"])),
-                format!("var_basis={:?}", clp_cli_certificate_reference.var_basis),
-            );
-            self.check(
-                "LP clp:cli basis row statuses",
-                clp_cli_certificate_reference
-                    .row_basis
-                    .as_ref()
-                    .is_some_and(|basis| {
-                        basis
-                            .iter()
-                            .map(String::as_str)
-                            .eq(["at_upper", "at_upper"])
-                    }),
-                format!("row_basis={:?}", clp_cli_certificate_reference.row_basis),
             );
         }
         let clp_rust_cli_certificate_reference = solve_lp_with_external_cli(
@@ -4147,19 +4066,6 @@ impl Driver {
         ];
         for (case_name, status_lp, expected_status) in lp_status_cases {
             let status_internal = solve_lp_internal(&status_lp, &InternalSimplexOptions::default());
-            let status_json = serde_json::json!({
-                "lp": {
-                    "sense": status_lp.sense.as_str(),
-                    "c": &status_lp.c,
-                    "a_ub": &status_lp.a_ub,
-                    "b_ub": &status_lp.b_ub,
-                    "a_eq": &status_lp.a_eq,
-                    "b_eq": &status_lp.b_eq,
-                    "lb": &status_lp.lb,
-                    "ub": &status_lp.ub,
-                }
-            })
-            .to_string();
             self.check(
                 format!("LP {case_name}:internal status"),
                 status_internal.status == expected_status,
@@ -4252,38 +4158,67 @@ impl Driver {
                     ),
                 );
             }
-            for solver in lp_solvers.iter().copied() {
-                let reference = self.run_linear_cli_reference("lp", solver, &status_json);
-                if reference.status == "unavailable" && reference.message.contains("not found") {
-                    println!("  SKIP  LP {case_name} {solver}: executable not found");
+            let expected_external_status =
+                ExternalLinearCliStatus::from_str(expected_status.as_str());
+            for solver in ExternalLinearCliSolver::open_source_lp().iter().copied() {
+                let solver_name = solver.as_str();
+                if case_name == "unbounded" && solver == ExternalLinearCliSolver::LpSolve {
+                    println!(
+                        "  SKIP  LP {case_name} {solver_name}: lp_solve reports the smoke unbounded LP as optimal"
+                    );
+                    continue;
+                }
+                let reference = solve_lp_with_external_cli(
+                    &status_lp,
+                    &ExternalLinearCliOptions {
+                        solver,
+                        time_limit_secs: Some(2.0),
+                        ..Default::default()
+                    },
+                );
+                if reference.status == ExternalLinearCliStatus::Unavailable
+                    && reference.message.contains("not found")
+                {
+                    println!("  SKIP  LP {case_name} {solver_name}: executable not found");
                     continue;
                 }
                 self.check(
-                    format!("LP {case_name} {solver}:cli status"),
-                    reference.status == expected_status.as_str(),
+                    format!("LP {case_name} {solver_name}:rust-cli status"),
+                    reference.status == expected_external_status,
                     format!(
                         "external={} expected={} solver={}",
-                        reference.status,
+                        reference.status.as_str(),
                         expected_status.as_str(),
                         reference.solver
                     ),
                 );
             }
-            for solver in commercial_lp_solvers.iter().copied() {
-                let reference = self.run_linear_cli_reference("lp", solver, &status_json);
-                if reference.status == "unavailable" {
+            for solver in ExternalLinearCliSolver::optional_commercial_mip()
+                .iter()
+                .copied()
+            {
+                let solver_name = solver.as_str();
+                let reference = solve_lp_with_external_cli(
+                    &status_lp,
+                    &ExternalLinearCliOptions {
+                        solver,
+                        time_limit_secs: Some(2.0),
+                        ..Default::default()
+                    },
+                );
+                if reference.status == ExternalLinearCliStatus::Unavailable {
                     println!(
-                        "  SKIP  LP commercial {case_name} {solver}: {}",
+                        "  SKIP  LP commercial {case_name} {solver_name}: {}",
                         reference.message
                     );
                     continue;
                 }
                 self.check(
-                    format!("LP commercial {case_name} {solver}:cli status"),
-                    reference.status == expected_status.as_str(),
+                    format!("LP commercial {case_name} {solver_name}:rust-cli status"),
+                    reference.status == expected_external_status,
                     format!(
                         "external={} expected={} solver={}",
-                        reference.status,
+                        reference.status.as_str(),
                         expected_status.as_str(),
                         reference.solver
                     ),
@@ -4339,23 +4274,6 @@ impl Driver {
                 ..Default::default()
             },
         );
-        let multi_base = &multi_problem.base;
-        let multi_json = serde_json::json!({
-            "sense": multi_base.sense.as_str(),
-            "c": &multi_base.c,
-            "a": &multi_base.a,
-            "b": &multi_base.b,
-            "integer_vars": &multi_base.integer_vars,
-            "ub": &multi_base.ub,
-            "var_names": &multi_base.var_names,
-            "con_names": &multi_base.con_names,
-            "multi_objectives": multi_problem.objectives.iter().map(|objective| serde_json::json!({
-                "sense": objective.sense.as_str(),
-                "c": &objective.c,
-                "name": &objective.name,
-            })).collect::<Vec<_>>(),
-        })
-        .to_string();
         let lazy_mip = IPMIPProblem {
             sense: Sense::Max,
             c: vec![1.0, 1.0],
@@ -4383,67 +4301,56 @@ impl Driver {
                 ..Default::default()
             },
         );
-        let lazy_json = serde_json::json!({
-            "sense": lazy_mip.sense.as_str(),
-            "c": lazy_mip.c,
-            "a": lazy_mip.a,
-            "b": lazy_mip.b,
-            "integer_vars": lazy_mip.integer_vars,
-            "ub": lazy_mip.ub,
-            "var_names": lazy_mip.var_names,
-            "con_names": lazy_mip.con_names,
-            "lazy_constraints": lazy_mip.lazy_constraints.as_ref().map(|rows| rows.iter().map(|row| serde_json::json!({
-                "coefs": &row.coefs,
-                "rhs": row.rhs,
-                "name": &row.name,
-                "kind": match row.kind {
-                    ConstraintKind::Branch => "branch",
-                    ConstraintKind::Cut => "cut",
-                    ConstraintKind::Lazy => "lazy",
+        for solver in ExternalLinearCliSolver::open_source_mip().iter().copied() {
+            let solver_name = solver.as_str();
+            let reference = solve_ipmip_with_external_cli(
+                &mip,
+                &ExternalLinearCliOptions {
+                    solver,
+                    time_limit_secs: Some(5.0),
+                    ..Default::default()
                 },
-            })).collect::<Vec<_>>()),
-        })
-        .to_string();
-
-        for solver in mip_solvers.iter().copied() {
-            let reference = self.run_linear_cli_reference("mip", solver, &mip_json);
-            if reference.status == "unavailable" && reference.message.contains("not found") {
-                println!("  SKIP  IP/MIP {solver}: executable not found");
+            );
+            if reference.status == ExternalLinearCliStatus::Unavailable
+                && reference.message.contains("not found")
+            {
+                println!("  SKIP  IP/MIP {solver_name}: executable not found");
                 continue;
             }
             self.check(
-                format!("IP/MIP {solver}:cli status optimal"),
-                mip_internal.status == IPMIPStatus::Optimal && reference.status == "optimal",
+                format!("IP/MIP {solver_name}:rust-cli status optimal"),
+                mip_internal.status == IPMIPStatus::Optimal
+                    && reference.status == ExternalLinearCliStatus::Optimal,
                 format!(
                     "internal={} external={} solver={}",
                     mip_internal.status.as_str(),
-                    reference.status,
+                    reference.status.as_str(),
                     reference.solver
                 ),
             );
             self.close(
-                &format!("IP/MIP {solver}:cli objective"),
+                &format!("IP/MIP {solver_name}:rust-cli objective"),
                 mip_internal.z,
                 reference.objective.unwrap_or(f64::NAN),
                 1e-9,
             );
             self.max_abs_close(
-                &format!("IP/MIP {solver}:cli x"),
+                &format!("IP/MIP {solver_name}:rust-cli x"),
                 &mip_internal.x,
                 &reference.x,
                 1e-8,
             );
             self.check(
-                format!("IP/MIP {solver}:cli solver version metadata"),
-                reference.solver_version.is_some(),
+                format!("IP/MIP {solver_name}:rust-cli solver version metadata"),
+                solver == ExternalLinearCliSolver::LpSolve || reference.solver_version.is_some(),
                 format!(
                     "solver={} version={:?} message={}",
                     reference.solver, reference.solver_version, reference.message
                 ),
             );
-            if solver == "scip" {
+            if solver == ExternalLinearCliSolver::Scip {
                 self.check(
-                    "IP/MIP scip:cli quality metadata",
+                    "IP/MIP scip:rust-cli quality metadata",
                     reference
                         .best_bound
                         .zip(reference.objective)
@@ -4461,31 +4368,48 @@ impl Driver {
             }
         }
 
-        for solver in ["highs", "scip", "cbc"] {
-            let reference = self.run_linear_cli_reference("mip", solver, &lazy_json);
-            if reference.status == "unavailable" && reference.message.contains("not found") {
-                println!("  SKIP  IP/MIP {solver}:cli lazy constraints executable not found");
+        for solver in [
+            ExternalLinearCliSolver::Highs,
+            ExternalLinearCliSolver::Scip,
+            ExternalLinearCliSolver::Cbc,
+        ] {
+            let solver_name = solver.as_str();
+            let reference = solve_ipmip_with_external_cli(
+                &lazy_mip,
+                &ExternalLinearCliOptions {
+                    solver,
+                    time_limit_secs: Some(5.0),
+                    ..Default::default()
+                },
+            );
+            if reference.status == ExternalLinearCliStatus::Unavailable
+                && reference.message.contains("not found")
+            {
+                println!(
+                    "  SKIP  IP/MIP {solver_name}:rust-cli lazy constraints executable not found"
+                );
                 continue;
             }
             self.check(
-                format!("IP/MIP {solver}:cli lazy constraints status"),
-                lazy_internal.status == IPMIPStatus::Optimal && reference.status == "optimal",
+                format!("IP/MIP {solver_name}:rust-cli lazy constraints status"),
+                lazy_internal.status == IPMIPStatus::Optimal
+                    && reference.status == ExternalLinearCliStatus::Optimal,
                 format!(
                     "internal={} external={} solver={} message={}",
                     lazy_internal.status.as_str(),
-                    reference.status,
+                    reference.status.as_str(),
                     reference.solver,
                     reference.message
                 ),
             );
             self.close(
-                &format!("IP/MIP {solver}:cli lazy constraints objective"),
+                &format!("IP/MIP {solver_name}:rust-cli lazy constraints objective"),
                 lazy_internal.z,
                 reference.objective.unwrap_or(f64::NAN),
                 1e-9,
             );
             self.check(
-                format!("IP/MIP {solver}:cli lazy constraints cut changed optimum"),
+                format!("IP/MIP {solver_name}:rust-cli lazy constraints cut changed optimum"),
                 reference
                     .objective
                     .is_some_and(|objective| objective < 2.0 - 1e-9),
@@ -5762,17 +5686,6 @@ impl Driver {
                     ..Default::default()
                 },
             );
-            let status_json = serde_json::json!({
-                "sense": status_mip.sense.as_str(),
-                "c": &status_mip.c,
-                "a": &status_mip.a,
-                "b": &status_mip.b,
-                "integer_vars": &status_mip.integer_vars,
-                "ub": &status_mip.ub,
-                "var_names": &status_mip.var_names,
-                "con_names": &status_mip.con_names,
-            })
-            .to_string();
             self.check(
                 format!("IP/MIP {case_name}:internal status"),
                 status_internal.status == expected_status,
@@ -5782,18 +5695,36 @@ impl Driver {
                     expected_status.as_str()
                 ),
             );
-            for solver in mip_solvers.iter().copied() {
-                let reference = self.run_linear_cli_reference("mip", solver, &status_json);
-                if reference.status == "unavailable" && reference.message.contains("not found") {
-                    println!("  SKIP  IP/MIP {case_name} {solver}: executable not found");
+            let expected_external_status =
+                ExternalLinearCliStatus::from_str(expected_status.as_str());
+            for solver in ExternalLinearCliSolver::open_source_mip().iter().copied() {
+                let solver_name = solver.as_str();
+                if case_name == "unbounded" && solver == ExternalLinearCliSolver::LpSolve {
+                    println!(
+                        "  SKIP  IP/MIP {case_name} {solver_name}: lp_solve reports the smoke unbounded model as optimal"
+                    );
+                    continue;
+                }
+                let reference = solve_ipmip_with_external_cli(
+                    &status_mip,
+                    &ExternalLinearCliOptions {
+                        solver,
+                        time_limit_secs: Some(5.0),
+                        ..Default::default()
+                    },
+                );
+                if reference.status == ExternalLinearCliStatus::Unavailable
+                    && reference.message.contains("not found")
+                {
+                    println!("  SKIP  IP/MIP {case_name} {solver_name}: executable not found");
                     continue;
                 }
                 self.check(
-                    format!("IP/MIP {case_name} {solver}:cli status"),
-                    reference.status == expected_status.as_str(),
+                    format!("IP/MIP {case_name} {solver_name}:rust-cli status"),
+                    reference.status == expected_external_status,
                     format!(
                         "external={} expected={} solver={}",
-                        reference.status,
+                        reference.status.as_str(),
                         expected_status.as_str(),
                         reference.solver
                     ),
@@ -5801,30 +5732,45 @@ impl Driver {
             }
         }
 
-        for solver in commercial_mip_solvers.iter().copied() {
-            let reference = self.run_linear_cli_reference("mip", solver, &mip_json);
-            if reference.status == "unavailable" {
-                println!("  SKIP  IP/MIP commercial {solver}: {}", reference.message);
+        for solver in ExternalLinearCliSolver::optional_commercial_mip()
+            .iter()
+            .copied()
+        {
+            let solver_name = solver.as_str();
+            let reference = solve_ipmip_with_external_cli(
+                &mip,
+                &ExternalLinearCliOptions {
+                    solver,
+                    time_limit_secs: Some(5.0),
+                    ..Default::default()
+                },
+            );
+            if reference.status == ExternalLinearCliStatus::Unavailable {
+                println!(
+                    "  SKIP  IP/MIP commercial {solver_name}: {}",
+                    reference.message
+                );
                 continue;
             }
             self.check(
-                format!("IP/MIP commercial {solver}:cli status optimal"),
-                mip_internal.status == IPMIPStatus::Optimal && reference.status == "optimal",
+                format!("IP/MIP commercial {solver_name}:rust-cli status optimal"),
+                mip_internal.status == IPMIPStatus::Optimal
+                    && reference.status == ExternalLinearCliStatus::Optimal,
                 format!(
                     "internal={} external={} solver={}",
                     mip_internal.status.as_str(),
-                    reference.status,
+                    reference.status.as_str(),
                     reference.solver
                 ),
             );
             self.close(
-                &format!("IP/MIP commercial {solver}:cli objective"),
+                &format!("IP/MIP commercial {solver_name}:rust-cli objective"),
                 mip_internal.z,
                 reference.objective.unwrap_or(f64::NAN),
                 1e-9,
             );
             self.max_abs_close(
-                &format!("IP/MIP commercial {solver}:cli x"),
+                &format!("IP/MIP commercial {solver_name}:rust-cli x"),
                 &mip_internal.x,
                 &reference.x,
                 1e-8,
@@ -5842,49 +5788,22 @@ impl Driver {
                 ..Default::default()
             },
         );
-        let lower_base = &lower_problem.base;
-        let lower_json = serde_json::json!({
-            "sense": lower_base.sense.as_str(),
-            "c": &lower_base.c,
-            "a": &lower_base.a,
-            "b": &lower_base.b,
-            "integer_vars": &lower_base.integer_vars,
-            "lb": &lower_problem.lb,
-            "ub": &lower_base.ub,
-            "var_names": &lower_base.var_names,
-            "con_names": &lower_base.con_names,
-        })
-        .to_string();
-
-        for solver in mip_solvers.iter().copied() {
-            let reference = self.run_linear_cli_reference("mip", solver, &lower_json);
-            if reference.status == "unavailable" && reference.message.contains("not found") {
-                println!("  SKIP  IP/MIP lower-bounded {solver}: executable not found");
-                continue;
-            }
-            self.check(
-                format!("IP/MIP lower-bounded {solver}:cli status optimal"),
-                lower_internal.status == IPMIPStatus::Optimal && reference.status == "optimal",
-                format!(
-                    "internal={} external={} solver={}",
-                    lower_internal.status.as_str(),
-                    reference.status,
-                    reference.solver
-                ),
-            );
-            self.close(
-                &format!("IP/MIP lower-bounded {solver}:cli objective"),
-                lower_internal.z,
-                reference.objective.unwrap_or(f64::NAN),
-                1e-9,
-            );
-            self.max_abs_close(
-                &format!("IP/MIP lower-bounded {solver}:cli x"),
-                &lower_internal.x,
-                &reference.x,
-                1e-8,
-            );
-        }
+        self.check_ipmip_external_cli_full_x(
+            "lower-bounded",
+            lower_internal.status,
+            lower_internal.z,
+            &lower_internal.x,
+            |solver| {
+                solve_lower_bounded_ipmip_with_external_cli(
+                    &lower_problem,
+                    &ExternalLinearCliOptions {
+                        solver,
+                        time_limit_secs: Some(5.0),
+                        ..Default::default()
+                    },
+                )
+            },
+        );
 
         let general_problem = build_general_linear_rows_ip();
         let general_internal = solve_general_linear_ipmip_with_des(
@@ -5897,54 +5816,22 @@ impl Driver {
                 ..Default::default()
             },
         );
-        let general_base = &general_problem.base;
-        let general_json = serde_json::json!({
-            "sense": general_base.sense.as_str(),
-            "c": &general_base.c,
-            "a": &general_base.a,
-            "b": &general_base.b,
-            "integer_vars": &general_base.integer_vars,
-            "ub": &general_base.ub,
-            "var_names": &general_base.var_names,
-            "con_names": &general_base.con_names,
-            "linear_constraints": general_problem.linear_constraints.iter().map(|constraint| serde_json::json!({
-                "coefs": &constraint.coefs,
-                "lower": constraint.lower,
-                "upper": constraint.upper,
-                "name": &constraint.name,
-            })).collect::<Vec<_>>(),
-        })
-        .to_string();
-
-        for solver in mip_solvers.iter().copied() {
-            let reference = self.run_linear_cli_reference("mip", solver, &general_json);
-            if reference.status == "unavailable" && reference.message.contains("not found") {
-                println!("  SKIP  IP/MIP general-linear {solver}: executable not found");
-                continue;
-            }
-            self.check(
-                format!("IP/MIP general-linear {solver}:cli status optimal"),
-                general_internal.status == IPMIPStatus::Optimal && reference.status == "optimal",
-                format!(
-                    "internal={} external={} solver={}",
-                    general_internal.status.as_str(),
-                    reference.status,
-                    reference.solver
-                ),
-            );
-            self.close(
-                &format!("IP/MIP general-linear {solver}:cli objective"),
-                general_internal.z,
-                reference.objective.unwrap_or(f64::NAN),
-                1e-9,
-            );
-            self.max_abs_close(
-                &format!("IP/MIP general-linear {solver}:cli x"),
-                &general_internal.x,
-                &reference.x,
-                1e-8,
-            );
-        }
+        self.check_ipmip_external_cli_full_x(
+            "general-linear",
+            general_internal.status,
+            general_internal.z,
+            &general_internal.x,
+            |solver| {
+                solve_general_linear_ipmip_with_external_cli(
+                    &general_problem,
+                    &ExternalLinearCliOptions {
+                        solver,
+                        time_limit_secs: Some(5.0),
+                        ..Default::default()
+                    },
+                )
+            },
+        );
 
         let indicator_problem = build_fixed_charge_indicator_ip();
         let indicator_internal = solve_indicator_ipmip_with_des(
@@ -5957,56 +5844,22 @@ impl Driver {
                 ..Default::default()
             },
         );
-        let indicator_base = &indicator_problem.base;
-        let indicator_json = serde_json::json!({
-            "sense": indicator_base.sense.as_str(),
-            "c": &indicator_base.c,
-            "a": &indicator_base.a,
-            "b": &indicator_base.b,
-            "integer_vars": &indicator_base.integer_vars,
-            "ub": &indicator_base.ub,
-            "var_names": &indicator_base.var_names,
-            "con_names": &indicator_base.con_names,
-            "indicators": indicator_problem.indicators.iter().map(|indicator| serde_json::json!({
-                "binary_var": indicator.binary_var,
-                "active_value": indicator.active_value,
-                "coefs": &indicator.coefs,
-                "sense": indicator.sense.as_str(),
-                "rhs": indicator.rhs,
-                "name": &indicator.name,
-            })).collect::<Vec<_>>(),
-        })
-        .to_string();
-
-        for solver in mip_solvers.iter().copied() {
-            let reference = self.run_linear_cli_reference("mip", solver, &indicator_json);
-            if reference.status == "unavailable" && reference.message.contains("not found") {
-                println!("  SKIP  IP/MIP indicator {solver}: executable not found");
-                continue;
-            }
-            self.check(
-                format!("IP/MIP indicator {solver}:cli status optimal"),
-                indicator_internal.status == IPMIPStatus::Optimal && reference.status == "optimal",
-                format!(
-                    "internal={} external={} solver={}",
-                    indicator_internal.status.as_str(),
-                    reference.status,
-                    reference.solver
-                ),
-            );
-            self.close(
-                &format!("IP/MIP indicator {solver}:cli objective"),
-                indicator_internal.z,
-                reference.objective.unwrap_or(f64::NAN),
-                1e-9,
-            );
-            self.max_abs_close(
-                &format!("IP/MIP indicator {solver}:cli x"),
-                &indicator_internal.x,
-                &reference.x,
-                1e-8,
-            );
-        }
+        self.check_ipmip_external_cli_full_x(
+            "indicator",
+            indicator_internal.status,
+            indicator_internal.z,
+            &indicator_internal.x,
+            |solver| {
+                solve_indicator_ipmip_with_external_cli(
+                    &indicator_problem,
+                    &ExternalLinearCliOptions {
+                        solver,
+                        time_limit_secs: Some(5.0),
+                        ..Default::default()
+                    },
+                )
+            },
+        );
 
         let pwl_problem = build_piecewise_linear_reward_ip();
         let linearized_pwl = linearize_pwl_problem(&pwl_problem);
@@ -6020,60 +5873,24 @@ impl Driver {
                 ..Default::default()
             },
         );
-        let pwl_base = &pwl_problem.base;
-        let pwl_json = serde_json::json!({
-            "sense": pwl_base.sense.as_str(),
-            "c": &pwl_base.c,
-            "a": &pwl_base.a,
-            "b": &pwl_base.b,
-            "integer_vars": &pwl_base.integer_vars,
-            "ub": &pwl_base.ub,
-            "var_names": &pwl_base.var_names,
-            "con_names": &pwl_base.con_names,
-            "pwl": pwl_problem.pwl.iter().map(|pwl| serde_json::json!({
-                "x_var": pwl.x_var,
-                "y_var": pwl.y_var,
-                "points": pwl.points.iter().map(|point| serde_json::json!({
-                    "x": point.x,
-                    "y": point.y,
-                })).collect::<Vec<_>>(),
-                "name": &pwl.name,
-            })).collect::<Vec<_>>(),
-        })
-        .to_string();
-
-        for solver in mip_solvers.iter().copied() {
-            let reference = self.run_linear_cli_reference("mip", solver, &pwl_json);
-            if reference.status == "unavailable" && reference.message.contains("not found") {
-                println!("  SKIP  IP/MIP piecewise-linear {solver}: executable not found");
-                continue;
-            }
-            self.check(
-                format!("IP/MIP piecewise-linear {solver}:cli status optimal"),
-                pwl_internal.status == IPMIPStatus::Optimal && reference.status == "optimal",
-                format!(
-                    "internal={} external={} solver={}",
-                    pwl_internal.status.as_str(),
-                    reference.status,
-                    reference.solver
-                ),
-            );
-            self.close(
-                &format!("IP/MIP piecewise-linear {solver}:cli objective"),
-                pwl_internal.z,
-                reference.objective.unwrap_or(f64::NAN),
-                1e-9,
-            );
-            self.check(
-                format!("IP/MIP piecewise-linear {solver}:cli expanded x length"),
-                reference.x.len() == linearized_pwl.c.len(),
-                format!(
-                    "expected={} actual={}",
-                    linearized_pwl.c.len(),
-                    reference.x.len()
-                ),
-            );
-        }
+        self.check_ipmip_external_cli_expanded(
+            "piecewise-linear",
+            linearized_pwl.c.len(),
+            None,
+            pwl_internal.status,
+            pwl_internal.z,
+            &pwl_internal.x,
+            |solver| {
+                solve_pwl_ipmip_with_external_cli(
+                    &pwl_problem,
+                    &ExternalLinearCliOptions {
+                        solver,
+                        time_limit_secs: Some(5.0),
+                        ..Default::default()
+                    },
+                )
+            },
+        );
 
         let abs_problem = build_absolute_value_penalty_ip();
         let (linearized_abs, _, abs_original_vars) = linearize_source_ipmip_problem(&abs_problem);
@@ -6087,65 +5904,15 @@ impl Driver {
                 ..Default::default()
             },
         );
-        let abs_base = &abs_problem.base;
-        let abs_json = serde_json::json!({
-            "sense": abs_base.sense.as_str(),
-            "c": &abs_base.c,
-            "a": &abs_base.a,
-            "b": &abs_base.b,
-            "integer_vars": &abs_base.integer_vars,
-            "lb": &abs_problem.lb,
-            "ub": &abs_base.ub,
-            "var_names": &abs_base.var_names,
-            "con_names": &abs_base.con_names,
-            "abs": abs_problem.abs.iter().map(|constraint| serde_json::json!({
-                "arg_var": constraint.arg_var,
-                "target_var": constraint.target_var,
-                "name": &constraint.name,
-            })).collect::<Vec<_>>(),
-        })
-        .to_string();
-
-        for solver in mip_solvers.iter().copied() {
-            let reference = self.run_linear_cli_reference("mip", solver, &abs_json);
-            if reference.status == "unavailable" && reference.message.contains("not found") {
-                println!("  SKIP  IP/MIP abs-value {solver}: executable not found");
-                continue;
-            }
-            self.check(
-                format!("IP/MIP abs-value {solver}:cli status optimal"),
-                abs_internal.status == IPMIPStatus::Optimal && reference.status == "optimal",
-                format!(
-                    "internal={} external={} solver={}",
-                    abs_internal.status.as_str(),
-                    reference.status,
-                    reference.solver
-                ),
-            );
-            self.close(
-                &format!("IP/MIP abs-value {solver}:cli objective"),
-                abs_internal.z,
-                reference.objective.unwrap_or(f64::NAN),
-                1e-9,
-            );
-            self.check(
-                format!("IP/MIP abs-value {solver}:cli expanded x length"),
-                reference.x.len() == linearized_abs.c.len(),
-                format!(
-                    "expected={} actual={}",
-                    linearized_abs.c.len(),
-                    reference.x.len()
-                ),
-            );
-            if reference.x.len() >= abs_original_vars {
-                self.max_abs_close(
-                    &format!("IP/MIP abs-value {solver}:cli original x"),
-                    &abs_internal.x[..abs_original_vars],
-                    &reference.x[..abs_original_vars],
-                    1e-8,
-                );
-            }
-        }
+        self.check_source_ipmip_external_cli(
+            "abs-value",
+            &abs_problem,
+            &linearized_abs,
+            abs_original_vars,
+            abs_internal.status,
+            abs_internal.z,
+            &abs_internal.x,
+        );
 
         let maximum_problem = build_maximum_peak_ip();
         let (linearized_maximum, _, maximum_original_vars) =
@@ -6160,66 +5927,15 @@ impl Driver {
                 ..Default::default()
             },
         );
-        let maximum_base = &maximum_problem.base;
-        let maximum_json = serde_json::json!({
-            "sense": maximum_base.sense.as_str(),
-            "c": &maximum_base.c,
-            "a": &maximum_base.a,
-            "b": &maximum_base.b,
-            "integer_vars": &maximum_base.integer_vars,
-            "lb": &maximum_problem.lb,
-            "ub": &maximum_base.ub,
-            "var_names": &maximum_base.var_names,
-            "con_names": &maximum_base.con_names,
-            "maximums": maximum_problem.maximums.iter().map(|constraint| serde_json::json!({
-                "target_var": constraint.target_var,
-                "arg_vars": &constraint.arg_vars,
-                "constant": constraint.constant,
-                "name": &constraint.name,
-            })).collect::<Vec<_>>(),
-        })
-        .to_string();
-
-        for solver in mip_solvers.iter().copied() {
-            let reference = self.run_linear_cli_reference("mip", solver, &maximum_json);
-            if reference.status == "unavailable" && reference.message.contains("not found") {
-                println!("  SKIP  IP/MIP maximum {solver}: executable not found");
-                continue;
-            }
-            self.check(
-                format!("IP/MIP maximum {solver}:cli status optimal"),
-                maximum_internal.status == IPMIPStatus::Optimal && reference.status == "optimal",
-                format!(
-                    "internal={} external={} solver={}",
-                    maximum_internal.status.as_str(),
-                    reference.status,
-                    reference.solver
-                ),
-            );
-            self.close(
-                &format!("IP/MIP maximum {solver}:cli objective"),
-                maximum_internal.z,
-                reference.objective.unwrap_or(f64::NAN),
-                1e-9,
-            );
-            self.check(
-                format!("IP/MIP maximum {solver}:cli expanded x length"),
-                reference.x.len() == linearized_maximum.c.len(),
-                format!(
-                    "expected={} actual={}",
-                    linearized_maximum.c.len(),
-                    reference.x.len()
-                ),
-            );
-            if reference.x.len() >= maximum_original_vars {
-                self.max_abs_close(
-                    &format!("IP/MIP maximum {solver}:cli original x"),
-                    &maximum_internal.x[..maximum_original_vars],
-                    &reference.x[..maximum_original_vars],
-                    1e-8,
-                );
-            }
-        }
+        self.check_source_ipmip_external_cli(
+            "maximum",
+            &maximum_problem,
+            &linearized_maximum,
+            maximum_original_vars,
+            maximum_internal.status,
+            maximum_internal.z,
+            &maximum_internal.x,
+        );
 
         let minimum_problem = build_minimum_floor_ip();
         let (linearized_minimum, _, minimum_original_vars) =
@@ -6234,66 +5950,15 @@ impl Driver {
                 ..Default::default()
             },
         );
-        let minimum_base = &minimum_problem.base;
-        let minimum_json = serde_json::json!({
-            "sense": minimum_base.sense.as_str(),
-            "c": &minimum_base.c,
-            "a": &minimum_base.a,
-            "b": &minimum_base.b,
-            "integer_vars": &minimum_base.integer_vars,
-            "lb": &minimum_problem.lb,
-            "ub": &minimum_base.ub,
-            "var_names": &minimum_base.var_names,
-            "con_names": &minimum_base.con_names,
-            "minimums": minimum_problem.minimums.iter().map(|constraint| serde_json::json!({
-                "target_var": constraint.target_var,
-                "arg_vars": &constraint.arg_vars,
-                "constant": constraint.constant,
-                "name": &constraint.name,
-            })).collect::<Vec<_>>(),
-        })
-        .to_string();
-
-        for solver in mip_solvers.iter().copied() {
-            let reference = self.run_linear_cli_reference("mip", solver, &minimum_json);
-            if reference.status == "unavailable" && reference.message.contains("not found") {
-                println!("  SKIP  IP/MIP minimum {solver}: executable not found");
-                continue;
-            }
-            self.check(
-                format!("IP/MIP minimum {solver}:cli status optimal"),
-                minimum_internal.status == IPMIPStatus::Optimal && reference.status == "optimal",
-                format!(
-                    "internal={} external={} solver={}",
-                    minimum_internal.status.as_str(),
-                    reference.status,
-                    reference.solver
-                ),
-            );
-            self.close(
-                &format!("IP/MIP minimum {solver}:cli objective"),
-                minimum_internal.z,
-                reference.objective.unwrap_or(f64::NAN),
-                1e-9,
-            );
-            self.check(
-                format!("IP/MIP minimum {solver}:cli expanded x length"),
-                reference.x.len() == linearized_minimum.c.len(),
-                format!(
-                    "expected={} actual={}",
-                    linearized_minimum.c.len(),
-                    reference.x.len()
-                ),
-            );
-            if reference.x.len() >= minimum_original_vars {
-                self.max_abs_close(
-                    &format!("IP/MIP minimum {solver}:cli original x"),
-                    &minimum_internal.x[..minimum_original_vars],
-                    &reference.x[..minimum_original_vars],
-                    1e-8,
-                );
-            }
-        }
+        self.check_source_ipmip_external_cli(
+            "minimum",
+            &minimum_problem,
+            &linearized_minimum,
+            minimum_original_vars,
+            minimum_internal.status,
+            minimum_internal.z,
+            &minimum_internal.x,
+        );
 
         let logical_problem = build_logical_gate_ip();
         let (linearized_logical, _, logical_original_vars) =
@@ -6308,66 +5973,15 @@ impl Driver {
                 ..Default::default()
             },
         );
-        let logical_base = &logical_problem.base;
-        let logical_json = serde_json::json!({
-            "sense": logical_base.sense.as_str(),
-            "c": &logical_base.c,
-            "a": &logical_base.a,
-            "b": &logical_base.b,
-            "integer_vars": &logical_base.integer_vars,
-            "lb": &logical_problem.lb,
-            "ub": &logical_base.ub,
-            "var_names": &logical_base.var_names,
-            "con_names": &logical_base.con_names,
-            "logical": logical_problem.logical.iter().map(|constraint| serde_json::json!({
-                "kind": constraint.kind.as_str(),
-                "target_var": constraint.target_var,
-                "arg_vars": &constraint.arg_vars,
-                "name": &constraint.name,
-            })).collect::<Vec<_>>(),
-        })
-        .to_string();
-
-        for solver in mip_solvers.iter().copied() {
-            let reference = self.run_linear_cli_reference("mip", solver, &logical_json);
-            if reference.status == "unavailable" && reference.message.contains("not found") {
-                println!("  SKIP  IP/MIP logical {solver}: executable not found");
-                continue;
-            }
-            self.check(
-                format!("IP/MIP logical {solver}:cli status optimal"),
-                logical_internal.status == IPMIPStatus::Optimal && reference.status == "optimal",
-                format!(
-                    "internal={} external={} solver={}",
-                    logical_internal.status.as_str(),
-                    reference.status,
-                    reference.solver
-                ),
-            );
-            self.close(
-                &format!("IP/MIP logical {solver}:cli objective"),
-                logical_internal.z,
-                reference.objective.unwrap_or(f64::NAN),
-                1e-9,
-            );
-            self.check(
-                format!("IP/MIP logical {solver}:cli expanded x length"),
-                reference.x.len() == linearized_logical.c.len(),
-                format!(
-                    "expected={} actual={}",
-                    linearized_logical.c.len(),
-                    reference.x.len()
-                ),
-            );
-            if reference.x.len() >= logical_original_vars {
-                self.max_abs_close(
-                    &format!("IP/MIP logical {solver}:cli original x"),
-                    &logical_internal.x[..logical_original_vars],
-                    &reference.x[..logical_original_vars],
-                    1e-8,
-                );
-            }
-        }
+        self.check_source_ipmip_external_cli(
+            "logical",
+            &logical_problem,
+            &linearized_logical,
+            logical_original_vars,
+            logical_internal.status,
+            logical_internal.z,
+            &logical_internal.x,
+        );
 
         let l1_problem = build_l1_norm_deviation_ip();
         let (linearized_l1, _, l1_original_vars) = linearize_source_ipmip_problem(&l1_problem);
@@ -6381,65 +5995,15 @@ impl Driver {
                 ..Default::default()
             },
         );
-        let l1_base = &l1_problem.base;
-        let l1_json = serde_json::json!({
-            "sense": l1_base.sense.as_str(),
-            "c": &l1_base.c,
-            "a": &l1_base.a,
-            "b": &l1_base.b,
-            "integer_vars": &l1_base.integer_vars,
-            "lb": &l1_problem.lb,
-            "ub": &l1_base.ub,
-            "var_names": &l1_base.var_names,
-            "con_names": &l1_base.con_names,
-            "l1_norms": l1_problem.l1_norms.iter().map(|constraint| serde_json::json!({
-                "target_var": constraint.target_var,
-                "arg_vars": &constraint.arg_vars,
-                "name": &constraint.name,
-            })).collect::<Vec<_>>(),
-        })
-        .to_string();
-
-        for solver in mip_solvers.iter().copied() {
-            let reference = self.run_linear_cli_reference("mip", solver, &l1_json);
-            if reference.status == "unavailable" && reference.message.contains("not found") {
-                println!("  SKIP  IP/MIP L1 norm {solver}: executable not found");
-                continue;
-            }
-            self.check(
-                format!("IP/MIP L1 norm {solver}:cli status optimal"),
-                l1_internal.status == IPMIPStatus::Optimal && reference.status == "optimal",
-                format!(
-                    "internal={} external={} solver={}",
-                    l1_internal.status.as_str(),
-                    reference.status,
-                    reference.solver
-                ),
-            );
-            self.close(
-                &format!("IP/MIP L1 norm {solver}:cli objective"),
-                l1_internal.z,
-                reference.objective.unwrap_or(f64::NAN),
-                1e-9,
-            );
-            self.check(
-                format!("IP/MIP L1 norm {solver}:cli expanded x length"),
-                reference.x.len() == linearized_l1.c.len(),
-                format!(
-                    "expected={} actual={}",
-                    linearized_l1.c.len(),
-                    reference.x.len()
-                ),
-            );
-            if reference.x.len() >= l1_original_vars {
-                self.max_abs_close(
-                    &format!("IP/MIP L1 norm {solver}:cli original x"),
-                    &l1_internal.x[..l1_original_vars],
-                    &reference.x[..l1_original_vars],
-                    1e-8,
-                );
-            }
-        }
+        self.check_source_ipmip_external_cli(
+            "L1 norm",
+            &l1_problem,
+            &linearized_l1,
+            l1_original_vars,
+            l1_internal.status,
+            l1_internal.z,
+            &l1_internal.x,
+        );
 
         let linf_problem = build_linf_norm_deviation_ip();
         let (linearized_linf, _, linf_original_vars) =
@@ -6454,65 +6018,15 @@ impl Driver {
                 ..Default::default()
             },
         );
-        let linf_base = &linf_problem.base;
-        let linf_json = serde_json::json!({
-            "sense": linf_base.sense.as_str(),
-            "c": &linf_base.c,
-            "a": &linf_base.a,
-            "b": &linf_base.b,
-            "integer_vars": &linf_base.integer_vars,
-            "lb": &linf_problem.lb,
-            "ub": &linf_base.ub,
-            "var_names": &linf_base.var_names,
-            "con_names": &linf_base.con_names,
-            "linf_norms": linf_problem.linf_norms.iter().map(|constraint| serde_json::json!({
-                "target_var": constraint.target_var,
-                "arg_vars": &constraint.arg_vars,
-                "name": &constraint.name,
-            })).collect::<Vec<_>>(),
-        })
-        .to_string();
-
-        for solver in mip_solvers.iter().copied() {
-            let reference = self.run_linear_cli_reference("mip", solver, &linf_json);
-            if reference.status == "unavailable" && reference.message.contains("not found") {
-                println!("  SKIP  IP/MIP Linf norm {solver}: executable not found");
-                continue;
-            }
-            self.check(
-                format!("IP/MIP Linf norm {solver}:cli status optimal"),
-                linf_internal.status == IPMIPStatus::Optimal && reference.status == "optimal",
-                format!(
-                    "internal={} external={} solver={}",
-                    linf_internal.status.as_str(),
-                    reference.status,
-                    reference.solver
-                ),
-            );
-            self.close(
-                &format!("IP/MIP Linf norm {solver}:cli objective"),
-                linf_internal.z,
-                reference.objective.unwrap_or(f64::NAN),
-                1e-9,
-            );
-            self.check(
-                format!("IP/MIP Linf norm {solver}:cli expanded x length"),
-                reference.x.len() == linearized_linf.c.len(),
-                format!(
-                    "expected={} actual={}",
-                    linearized_linf.c.len(),
-                    reference.x.len()
-                ),
-            );
-            if reference.x.len() >= linf_original_vars {
-                self.max_abs_close(
-                    &format!("IP/MIP Linf norm {solver}:cli original x"),
-                    &linf_internal.x[..linf_original_vars],
-                    &reference.x[..linf_original_vars],
-                    1e-8,
-                );
-            }
-        }
+        self.check_source_ipmip_external_cli(
+            "Linf norm",
+            &linf_problem,
+            &linearized_linf,
+            linf_original_vars,
+            linf_internal.status,
+            linf_internal.z,
+            &linf_internal.x,
+        );
 
         for (product_name, product_problem) in vec![
             ("activation", build_product_activation_ip()),
@@ -6530,69 +6044,16 @@ impl Driver {
                     ..Default::default()
                 },
             );
-            let product_base = &product_problem.base;
-            let product_json = serde_json::json!({
-                "sense": product_base.sense.as_str(),
-                "c": &product_base.c,
-                "a": &product_base.a,
-                "b": &product_base.b,
-                "integer_vars": &product_base.integer_vars,
-                "lb": &product_problem.lb,
-                "ub": &product_base.ub,
-                "var_names": &product_base.var_names,
-                "con_names": &product_base.con_names,
-                "products": product_problem.products.iter().map(|constraint| serde_json::json!({
-                    "target_var": constraint.target_var,
-                    "x_var": constraint.x_var,
-                    "y_var": constraint.y_var,
-                    "name": &constraint.name,
-                })).collect::<Vec<_>>(),
-            })
-            .to_string();
-
-            for solver in mip_solvers.iter().copied() {
-                let reference = self.run_linear_cli_reference("mip", solver, &product_json);
-                if reference.status == "unavailable" && reference.message.contains("not found") {
-                    println!(
-                        "  SKIP  IP/MIP product {product_name} {solver}: executable not found"
-                    );
-                    continue;
-                }
-                self.check(
-                    format!("IP/MIP product {product_name} {solver}:cli status optimal"),
-                    product_internal.status == IPMIPStatus::Optimal
-                        && reference.status == "optimal",
-                    format!(
-                        "internal={} external={} solver={}",
-                        product_internal.status.as_str(),
-                        reference.status,
-                        reference.solver
-                    ),
-                );
-                self.close(
-                    &format!("IP/MIP product {product_name} {solver}:cli objective"),
-                    product_internal.z,
-                    reference.objective.unwrap_or(f64::NAN),
-                    1e-9,
-                );
-                self.check(
-                    format!("IP/MIP product {product_name} {solver}:cli expanded x length"),
-                    reference.x.len() == linearized_product.c.len(),
-                    format!(
-                        "expected={} actual={}",
-                        linearized_product.c.len(),
-                        reference.x.len()
-                    ),
-                );
-                if reference.x.len() >= product_original_vars {
-                    self.max_abs_close(
-                        &format!("IP/MIP product {product_name} {solver}:cli original x"),
-                        &product_internal.x[..product_original_vars],
-                        &reference.x[..product_original_vars],
-                        1e-8,
-                    );
-                }
-            }
+            let product_label = format!("product {product_name}");
+            self.check_source_ipmip_external_cli(
+                &product_label,
+                &product_problem,
+                &linearized_product,
+                product_original_vars,
+                product_internal.status,
+                product_internal.z,
+                &product_internal.x,
+            );
         }
 
         let quadratic_problem = build_quadratic_objective_mix_ip();
@@ -6608,66 +6069,24 @@ impl Driver {
                 ..Default::default()
             },
         );
-        let quadratic_base = &quadratic_problem.base;
-        let quadratic_json = serde_json::json!({
-            "sense": quadratic_base.sense.as_str(),
-            "c": &quadratic_base.c,
-            "a": &quadratic_base.a,
-            "b": &quadratic_base.b,
-            "integer_vars": &quadratic_base.integer_vars,
-            "lb": &quadratic_problem.lb,
-            "ub": &quadratic_base.ub,
-            "var_names": &quadratic_base.var_names,
-            "con_names": &quadratic_base.con_names,
-            "quadratic_objective": quadratic_problem.quadratic_objective.iter().map(|term| serde_json::json!({
-                "x_var": term.x_var,
-                "y_var": term.y_var,
-                "coeff": term.coeff,
-                "name": &term.name,
-            })).collect::<Vec<_>>(),
-        })
-        .to_string();
-
-        for solver in mip_solvers.iter().copied() {
-            let reference = self.run_linear_cli_reference("mip", solver, &quadratic_json);
-            if reference.status == "unavailable" && reference.message.contains("not found") {
-                println!("  SKIP  IP/MIP quadratic objective {solver}: executable not found");
-                continue;
-            }
-            self.check(
-                format!("IP/MIP quadratic objective {solver}:cli status optimal"),
-                quadratic_internal.status == IPMIPStatus::Optimal && reference.status == "optimal",
-                format!(
-                    "internal={} external={} solver={}",
-                    quadratic_internal.status.as_str(),
-                    reference.status,
-                    reference.solver
-                ),
-            );
-            self.close(
-                &format!("IP/MIP quadratic objective {solver}:cli objective"),
-                quadratic_internal.z,
-                reference.objective.unwrap_or(f64::NAN),
-                1e-9,
-            );
-            self.check(
-                format!("IP/MIP quadratic objective {solver}:cli expanded x length"),
-                reference.x.len() == linearized_quadratic.c.len(),
-                format!(
-                    "expected={} actual={}",
-                    linearized_quadratic.c.len(),
-                    reference.x.len()
-                ),
-            );
-            if reference.x.len() >= quadratic_original_vars {
-                self.max_abs_close(
-                    &format!("IP/MIP quadratic objective {solver}:cli original x"),
-                    &quadratic_internal.x[..quadratic_original_vars],
-                    &reference.x[..quadratic_original_vars],
-                    1e-8,
-                );
-            }
-        }
+        self.check_ipmip_external_cli_expanded(
+            "quadratic objective",
+            linearized_quadratic.c.len(),
+            Some(quadratic_original_vars),
+            quadratic_internal.status,
+            quadratic_internal.z,
+            &quadratic_internal.x,
+            |solver| {
+                solve_quadratic_objective_ipmip_with_external_cli(
+                    &quadratic_problem,
+                    &ExternalLinearCliOptions {
+                        solver,
+                        time_limit_secs: Some(5.0),
+                        ..Default::default()
+                    },
+                )
+            },
+        );
 
         let source_problem = build_source_feature_mix_ip();
         let (linearized_source, _, source_original_vars) =
@@ -6682,161 +6101,22 @@ impl Driver {
                 ..Default::default()
             },
         );
-        let source_base = &source_problem.base;
-        let source_json = serde_json::json!({
-            "sense": source_base.sense.as_str(),
-            "c": &source_base.c,
-            "a": &source_base.a,
-            "b": &source_base.b,
-            "integer_vars": &source_base.integer_vars,
-            "lb": &source_problem.lb,
-            "ub": &source_base.ub,
-            "var_names": &source_base.var_names,
-            "con_names": &source_base.con_names,
-            "linear_constraints": source_problem.linear_constraints.iter().map(|constraint| serde_json::json!({
-                "coefs": &constraint.coefs,
-                "lower": constraint.lower,
-                "upper": constraint.upper,
-                "name": &constraint.name,
-            })).collect::<Vec<_>>(),
-            "indicators": source_problem.indicators.iter().map(|indicator| serde_json::json!({
-                "binary_var": indicator.binary_var,
-                "active_value": indicator.active_value,
-                "coefs": &indicator.coefs,
-                "sense": indicator.sense.as_str(),
-                "rhs": indicator.rhs,
-                "name": &indicator.name,
-            })).collect::<Vec<_>>(),
-            "pwl": source_problem.pwl.iter().map(|pwl| serde_json::json!({
-                "x_var": pwl.x_var,
-                "y_var": pwl.y_var,
-                "points": pwl.points.iter().map(|point| serde_json::json!({
-                    "x": point.x,
-                    "y": point.y,
-                })).collect::<Vec<_>>(),
-                "name": &pwl.name,
-            })).collect::<Vec<_>>(),
-            "abs": source_problem.abs.iter().map(|constraint| serde_json::json!({
-                "arg_var": constraint.arg_var,
-                "target_var": constraint.target_var,
-                "name": &constraint.name,
-            })).collect::<Vec<_>>(),
-            "maximums": source_problem.maximums.iter().map(|constraint| serde_json::json!({
-                "target_var": constraint.target_var,
-                "arg_vars": &constraint.arg_vars,
-                "constant": constraint.constant,
-                "name": &constraint.name,
-            })).collect::<Vec<_>>(),
-            "minimums": source_problem.minimums.iter().map(|constraint| serde_json::json!({
-                "target_var": constraint.target_var,
-                "arg_vars": &constraint.arg_vars,
-                "constant": constraint.constant,
-                "name": &constraint.name,
-            })).collect::<Vec<_>>(),
-            "logical": source_problem.logical.iter().map(|constraint| serde_json::json!({
-                "kind": constraint.kind.as_str(),
-                "target_var": constraint.target_var,
-                "arg_vars": &constraint.arg_vars,
-                "name": &constraint.name,
-            })).collect::<Vec<_>>(),
-            "l1_norms": source_problem.l1_norms.iter().map(|constraint| serde_json::json!({
-                "target_var": constraint.target_var,
-                "arg_vars": &constraint.arg_vars,
-                "name": &constraint.name,
-            })).collect::<Vec<_>>(),
-            "linf_norms": source_problem.linf_norms.iter().map(|constraint| serde_json::json!({
-                "target_var": constraint.target_var,
-                "arg_vars": &constraint.arg_vars,
-                "name": &constraint.name,
-            })).collect::<Vec<_>>(),
-            "products": source_problem.products.iter().map(|constraint| serde_json::json!({
-                "target_var": constraint.target_var,
-                "x_var": constraint.x_var,
-                "y_var": constraint.y_var,
-                "name": &constraint.name,
-            })).collect::<Vec<_>>(),
-        })
-        .to_string();
-
-        for solver in mip_solvers.iter().copied() {
-            let reference = self.run_linear_cli_reference("mip", solver, &source_json);
-            if reference.status == "unavailable" && reference.message.contains("not found") {
-                println!("  SKIP  IP/MIP source-feature-mix {solver}: executable not found");
-                continue;
-            }
-            self.check(
-                format!("IP/MIP source-feature-mix {solver}:cli status optimal"),
-                source_internal.status == IPMIPStatus::Optimal && reference.status == "optimal",
-                format!(
-                    "internal={} external={} solver={}",
-                    source_internal.status.as_str(),
-                    reference.status,
-                    reference.solver
-                ),
-            );
-            self.close(
-                &format!("IP/MIP source-feature-mix {solver}:cli objective"),
-                source_internal.z,
-                reference.objective.unwrap_or(f64::NAN),
-                1e-9,
-            );
-            self.check(
-                format!("IP/MIP source-feature-mix {solver}:cli expanded x length"),
-                reference.x.len() == linearized_source.c.len(),
-                format!(
-                    "expected={} actual={}",
-                    linearized_source.c.len(),
-                    reference.x.len()
-                ),
-            );
-            if reference.x.len() >= source_original_vars {
-                self.max_abs_close(
-                    &format!("IP/MIP source-feature-mix {solver}:cli original x"),
-                    &source_internal.x[..source_original_vars],
-                    &reference.x[..source_original_vars],
-                    1e-8,
-                );
-            }
-        }
-
-        for solver in mip_solvers.iter().copied() {
-            let reference = self.run_linear_cli_reference("mip", solver, &multi_json);
-            if reference.status == "unavailable" && reference.message.contains("not found") {
-                println!("  SKIP  IP/MIP lexicographic-choice {solver}: executable not found");
-                continue;
-            }
-            let objective_values = reference.objective_values.clone().unwrap_or_default();
-            self.check(
-                format!("IP/MIP lexicographic-choice {solver}:cli status optimal"),
-                multi_internal.status == IPMIPStatus::Optimal && reference.status == "optimal",
-                format!(
-                    "internal={} external={} solver={} values={:?} message={}",
-                    multi_internal.status.as_str(),
-                    reference.status,
-                    reference.solver,
-                    objective_values,
-                    reference.message
-                ),
-            );
-            self.max_abs_close(
-                &format!("IP/MIP lexicographic-choice {solver}:cli x"),
-                &multi_internal.x,
-                &reference.x,
-                1e-9,
-            );
-            self.max_abs_close(
-                &format!("IP/MIP lexicographic-choice {solver}:cli objective vector"),
-                &multi_internal.objective_values,
-                &objective_values,
-                1e-9,
-            );
-        }
+        self.check_source_ipmip_external_cli(
+            "source-feature-mix",
+            &source_problem,
+            &linearized_source,
+            source_original_vars,
+            source_internal.status,
+            source_internal.z,
+            &source_internal.x,
+        );
 
         for solver in [
             ExternalLinearCliSolver::Highs,
             ExternalLinearCliSolver::Glpk,
             ExternalLinearCliSolver::Scip,
             ExternalLinearCliSolver::Cbc,
+            ExternalLinearCliSolver::LpSolve,
         ] {
             let solver_name = solver.as_str();
             let reference = solve_multi_objective_ipmip_with_external_cli(
@@ -18036,16 +17316,7 @@ impl Driver {
         std::fs::create_dir_all(&out_dir).expect("create optimization-suite out dir");
         let problem_path = out_dir.join("knapsack-problem.json");
         let reference_path = out_dir.join("knapsack-reference.json");
-        let problem_json = serde_json::json!({
-            "sense": p.sense.as_str(),
-            "c": &p.c,
-            "a": &p.a,
-            "b": &p.b,
-            "integer_vars": &p.integer_vars,
-            "ub": &p.ub,
-            "var_names": &p.var_names,
-            "con_names": &p.con_names,
-        });
+        let problem_json = ipmip_problem_to_cli_json(&p);
         std::fs::write(
             &problem_path,
             serde_json::to_string_pretty(&problem_json).expect("serialize MIP problem"),
@@ -18122,16 +17393,7 @@ impl Driver {
         );
         let pool_problem_path = out_dir.join("solution-pool-problem.json");
         let pool_reference_path = out_dir.join("solution-pool-reference.json");
-        let pool_problem_json = serde_json::json!({
-            "sense": pool_problem.sense.as_str(),
-            "c": &pool_problem.c,
-            "a": &pool_problem.a,
-            "b": &pool_problem.b,
-            "integer_vars": &pool_problem.integer_vars,
-            "ub": &pool_problem.ub,
-            "var_names": &pool_problem.var_names,
-            "con_names": &pool_problem.con_names,
-        });
+        let pool_problem_json = ipmip_problem_to_cli_json(&pool_problem);
         std::fs::write(
             &pool_problem_path,
             serde_json::to_string_pretty(&pool_problem_json)
@@ -18245,29 +17507,21 @@ impl Driver {
         );
         let conflict_subproblem =
             ipmip_feasibility_problem_from_conflict_members(&conflict_problem, &conflict.members);
-        let conflict_ub = conflict_subproblem.ub.as_ref().map(|ub| {
-            ub.iter()
-                .map(|&upper| upper.is_finite().then_some(upper))
-                .collect::<Vec<_>>()
-        });
-        let conflict_json = serde_json::json!({
-            "sense": conflict_subproblem.sense.as_str(),
-            "c": &conflict_subproblem.c,
-            "a": &conflict_subproblem.a,
-            "b": &conflict_subproblem.b,
-            "integer_vars": &conflict_subproblem.integer_vars,
-            "ub": conflict_ub,
-            "var_names": &conflict_subproblem.var_names,
-            "con_names": &conflict_subproblem.con_names,
-        })
-        .to_string();
-        let conflict_reference = self.run_linear_cli_reference("mip", "highs", &conflict_json);
+        let conflict_reference = solve_ipmip_with_external_cli(
+            &conflict_subproblem,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Highs,
+                time_limit_secs: Some(2.0),
+                ..Default::default()
+            },
+        );
         self.check(
             "IP/MIP conflict subsystem HiGHS infeasible",
-            conflict_reference.status == "infeasible",
+            conflict_reference.status == ExternalLinearCliStatus::Infeasible,
             format!(
                 "external={} solver={}",
-                conflict_reference.status, conflict_reference.solver
+                conflict_reference.status.as_str(),
+                conflict_reference.solver
             ),
         );
         let mut deletion_statuses = Vec::new();
@@ -18277,25 +17531,16 @@ impl Driver {
             trial.remove(idx);
             let trial_subproblem =
                 ipmip_feasibility_problem_from_conflict_members(&conflict_problem, &trial);
-            let trial_ub = trial_subproblem.ub.as_ref().map(|ub| {
-                ub.iter()
-                    .map(|&upper| upper.is_finite().then_some(upper))
-                    .collect::<Vec<_>>()
-            });
-            let trial_json = serde_json::json!({
-                "sense": trial_subproblem.sense.as_str(),
-                "c": &trial_subproblem.c,
-                "a": &trial_subproblem.a,
-                "b": &trial_subproblem.b,
-                "integer_vars": &trial_subproblem.integer_vars,
-                "ub": trial_ub,
-                "var_names": &trial_subproblem.var_names,
-                "con_names": &trial_subproblem.con_names,
-            })
-            .to_string();
-            let reference = self.run_linear_cli_reference("mip", "highs", &trial_json);
-            all_single_deletions_feasible &= reference.status == "optimal";
-            deletion_statuses.push(reference.status);
+            let reference = solve_ipmip_with_external_cli(
+                &trial_subproblem,
+                &ExternalLinearCliOptions {
+                    solver: ExternalLinearCliSolver::Highs,
+                    time_limit_secs: Some(2.0),
+                    ..Default::default()
+                },
+            );
+            all_single_deletions_feasible &= reference.status == ExternalLinearCliStatus::Optimal;
+            deletion_statuses.push(reference.status.as_str().to_string());
         }
         self.check(
             "IP/MIP conflict single-deletion HiGHS feasibility",
@@ -18502,27 +17747,22 @@ impl Driver {
             first_branch_var == Some(1),
             format!("first_branch_var={first_branch_var:?}"),
         );
-        let branch_priority_json = serde_json::json!({
-            "sense": branch_priority_problem.sense.as_str(),
-            "c": &branch_priority_problem.c,
-            "a": &branch_priority_problem.a,
-            "b": &branch_priority_problem.b,
-            "integer_vars": &branch_priority_problem.integer_vars,
-            "ub": &branch_priority_problem.ub,
-            "var_names": &branch_priority_problem.var_names,
-            "con_names": &branch_priority_problem.con_names,
-        })
-        .to_string();
-        let branch_priority_reference =
-            self.run_linear_cli_reference("mip", "highs", &branch_priority_json);
+        let branch_priority_reference = solve_ipmip_with_external_cli(
+            &branch_priority_problem,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Highs,
+                time_limit_secs: Some(2.0),
+                ..Default::default()
+            },
+        );
         self.check(
             "IP/MIP branch-priority statuses optimal",
             branch_priority_internal.status == IPMIPStatus::Optimal
-                && branch_priority_reference.status == "optimal",
+                && branch_priority_reference.status == ExternalLinearCliStatus::Optimal,
             format!(
                 "internal={} external={} solver={}",
                 branch_priority_internal.status.as_str(),
-                branch_priority_reference.status,
+                branch_priority_reference.status.as_str(),
                 branch_priority_reference.solver
             ),
         );
@@ -18578,24 +17818,21 @@ impl Driver {
                 mip_gap_internal.best_bound, mip_gap_internal.gap
             ),
         );
-        let mip_gap_json = serde_json::json!({
-            "sense": mip_gap_problem.sense.as_str(),
-            "c": &mip_gap_problem.c,
-            "a": &mip_gap_problem.a,
-            "b": &mip_gap_problem.b,
-            "integer_vars": &mip_gap_problem.integer_vars,
-            "ub": &mip_gap_problem.ub,
-            "var_names": &mip_gap_problem.var_names,
-            "con_names": &mip_gap_problem.con_names,
-        })
-        .to_string();
-        let mip_gap_reference = self.run_linear_cli_reference("mip", "highs", &mip_gap_json);
+        let mip_gap_reference = solve_ipmip_with_external_cli(
+            &mip_gap_problem,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Highs,
+                time_limit_secs: Some(2.0),
+                ..Default::default()
+            },
+        );
         self.check(
             "IP/MIP gap-limit HiGHS status optimal",
-            mip_gap_reference.status == "optimal",
+            mip_gap_reference.status == ExternalLinearCliStatus::Optimal,
             format!(
                 "external={} solver={}",
-                mip_gap_reference.status, mip_gap_reference.solver
+                mip_gap_reference.status.as_str(),
+                mip_gap_reference.solver
             ),
         );
         self.close(
@@ -18760,18 +17997,7 @@ impl Driver {
         );
         let lower_problem_path = out_dir.join("lower-bounded-production-problem.json");
         let lower_reference_path = out_dir.join("lower-bounded-production-reference.json");
-        let base = &lower_problem.base;
-        let lower_json = serde_json::json!({
-            "sense": base.sense.as_str(),
-            "c": &base.c,
-            "a": &base.a,
-            "b": &base.b,
-            "integer_vars": &base.integer_vars,
-            "lb": &lower_problem.lb,
-            "ub": &base.ub,
-            "var_names": &base.var_names,
-            "con_names": &base.con_names,
-        });
+        let lower_json = lower_bounded_ipmip_problem_to_cli_json(&lower_problem);
         std::fs::write(
             &lower_problem_path,
             serde_json::to_string_pretty(&lower_json).expect("serialize lower-bounded MIP problem"),
@@ -18831,23 +18057,7 @@ impl Driver {
         );
         let general_problem_path = out_dir.join("general-linear-rows-problem.json");
         let general_reference_path = out_dir.join("general-linear-rows-reference.json");
-        let base = &general_problem.base;
-        let general_json = serde_json::json!({
-            "sense": base.sense.as_str(),
-            "c": &base.c,
-            "a": &base.a,
-            "b": &base.b,
-            "integer_vars": &base.integer_vars,
-            "ub": &base.ub,
-            "var_names": &base.var_names,
-            "con_names": &base.con_names,
-            "linear_constraints": general_problem.linear_constraints.iter().map(|constraint| serde_json::json!({
-                "coefs": &constraint.coefs,
-                "lower": constraint.lower,
-                "upper": constraint.upper,
-                "name": &constraint.name,
-            })).collect::<Vec<_>>(),
-        });
+        let general_json = general_linear_ipmip_problem_to_cli_json(&general_problem);
         std::fs::write(
             &general_problem_path,
             serde_json::to_string_pretty(&general_json)
@@ -18910,25 +18120,7 @@ impl Driver {
         );
         let indicator_problem_path = out_dir.join("fixed-charge-indicator-problem.json");
         let indicator_reference_path = out_dir.join("fixed-charge-indicator-reference.json");
-        let base = &indicator.base;
-        let indicator_json = serde_json::json!({
-            "sense": base.sense.as_str(),
-            "c": &base.c,
-            "a": &base.a,
-            "b": &base.b,
-            "integer_vars": &base.integer_vars,
-            "ub": &base.ub,
-            "var_names": &base.var_names,
-            "con_names": &base.con_names,
-            "indicators": indicator.indicators.iter().map(|ind| serde_json::json!({
-                "binary_var": ind.binary_var,
-                "active_value": ind.active_value,
-                "coefs": &ind.coefs,
-                "sense": ind.sense.as_str(),
-                "rhs": ind.rhs,
-                "name": &ind.name,
-            })).collect::<Vec<_>>(),
-        });
+        let indicator_json = indicator_ipmip_problem_to_cli_json(&indicator);
         std::fs::write(
             &indicator_problem_path,
             serde_json::to_string_pretty(&indicator_json).expect("serialize indicator MIP problem"),
@@ -18996,23 +18188,7 @@ impl Driver {
             );
             let sos_problem_path = out_dir.join(format!("{case_name}-problem.json"));
             let sos_reference_path = out_dir.join(format!("{case_name}-reference.json"));
-            let base = &sos_problem.base;
-            let sos_json = serde_json::json!({
-                "sense": base.sense.as_str(),
-                "c": &base.c,
-                "a": &base.a,
-                "b": &base.b,
-                "integer_vars": &base.integer_vars,
-                "ub": &base.ub,
-                "var_names": &base.var_names,
-                "con_names": &base.con_names,
-                "sos": sos_problem.sos.iter().map(|set| serde_json::json!({
-                    "kind": set.kind.as_str(),
-                    "vars": &set.vars,
-                    "weights": &set.weights,
-                    "name": &set.name,
-                })).collect::<Vec<_>>(),
-            });
+            let sos_json = sos_ipmip_problem_to_cli_json(&sos_problem);
             std::fs::write(
                 &sos_problem_path,
                 serde_json::to_string_pretty(&sos_json).expect("serialize SOS MIP problem"),
@@ -19081,23 +18257,7 @@ impl Driver {
             );
             let semi_problem_path = out_dir.join(format!("{case_name}-problem.json"));
             let semi_reference_path = out_dir.join(format!("{case_name}-reference.json"));
-            let base = &semi_problem.base;
-            let semi_json = serde_json::json!({
-                "sense": base.sense.as_str(),
-                "c": &base.c,
-                "a": &base.a,
-                "b": &base.b,
-                "integer_vars": &base.integer_vars,
-                "ub": &base.ub,
-                "var_names": &base.var_names,
-                "con_names": &base.con_names,
-                "semi_variables": semi_problem.semi_variables.iter().map(|semi| serde_json::json!({
-                    "kind": semi.kind.as_str(),
-                    "var": semi.var,
-                    "lower": semi.lower,
-                    "name": &semi.name,
-                })).collect::<Vec<_>>(),
-            });
+            let semi_json = semi_ipmip_problem_to_cli_json(&semi_problem);
             std::fs::write(
                 &semi_problem_path,
                 serde_json::to_string_pretty(&semi_json)
@@ -19165,26 +18325,7 @@ impl Driver {
         );
         let pwl_problem_path = out_dir.join("piecewise-linear-reward-problem.json");
         let pwl_reference_path = out_dir.join("piecewise-linear-reward-reference.json");
-        let base = &pwl_problem.base;
-        let pwl_json = serde_json::json!({
-            "sense": base.sense.as_str(),
-            "c": &base.c,
-            "a": &base.a,
-            "b": &base.b,
-            "integer_vars": &base.integer_vars,
-            "ub": &base.ub,
-            "var_names": &base.var_names,
-            "con_names": &base.con_names,
-            "pwl": pwl_problem.pwl.iter().map(|pwl| serde_json::json!({
-                "x_var": pwl.x_var,
-                "y_var": pwl.y_var,
-                "points": pwl.points.iter().map(|point| serde_json::json!({
-                    "x": point.x,
-                    "y": point.y,
-                })).collect::<Vec<_>>(),
-                "name": &pwl.name,
-            })).collect::<Vec<_>>(),
-        });
+        let pwl_json = pwl_ipmip_problem_to_cli_json(&pwl_problem);
         std::fs::write(
             &pwl_problem_path,
             serde_json::to_string_pretty(&pwl_json).expect("serialize PWL MIP problem"),
@@ -19248,23 +18389,7 @@ impl Driver {
         );
         let abs_problem_path = out_dir.join("absolute-value-penalty-problem.json");
         let abs_reference_path = out_dir.join("absolute-value-penalty-reference.json");
-        let base = &abs_problem.base;
-        let abs_json = serde_json::json!({
-            "sense": base.sense.as_str(),
-            "c": &base.c,
-            "a": &base.a,
-            "b": &base.b,
-            "integer_vars": &base.integer_vars,
-            "lb": &abs_problem.lb,
-            "ub": &base.ub,
-            "var_names": &base.var_names,
-            "con_names": &base.con_names,
-            "abs": abs_problem.abs.iter().map(|constraint| serde_json::json!({
-                "arg_var": constraint.arg_var,
-                "target_var": constraint.target_var,
-                "name": &constraint.name,
-            })).collect::<Vec<_>>(),
-        });
+        let abs_json = source_ipmip_problem_to_cli_json(&abs_problem);
         std::fs::write(
             &abs_problem_path,
             serde_json::to_string_pretty(&abs_json).expect("serialize abs-value MIP problem"),
@@ -19337,24 +18462,7 @@ impl Driver {
         );
         let maximum_problem_path = out_dir.join("maximum-peak-problem.json");
         let maximum_reference_path = out_dir.join("maximum-peak-reference.json");
-        let base = &maximum_problem.base;
-        let maximum_json = serde_json::json!({
-            "sense": base.sense.as_str(),
-            "c": &base.c,
-            "a": &base.a,
-            "b": &base.b,
-            "integer_vars": &base.integer_vars,
-            "lb": &maximum_problem.lb,
-            "ub": &base.ub,
-            "var_names": &base.var_names,
-            "con_names": &base.con_names,
-            "maximums": maximum_problem.maximums.iter().map(|constraint| serde_json::json!({
-                "target_var": constraint.target_var,
-                "arg_vars": &constraint.arg_vars,
-                "constant": constraint.constant,
-                "name": &constraint.name,
-            })).collect::<Vec<_>>(),
-        });
+        let maximum_json = source_ipmip_problem_to_cli_json(&maximum_problem);
         std::fs::write(
             &maximum_problem_path,
             serde_json::to_string_pretty(&maximum_json).expect("serialize maximum MIP problem"),
@@ -19428,24 +18536,7 @@ impl Driver {
         );
         let minimum_problem_path = out_dir.join("minimum-floor-problem.json");
         let minimum_reference_path = out_dir.join("minimum-floor-reference.json");
-        let base = &minimum_problem.base;
-        let minimum_json = serde_json::json!({
-            "sense": base.sense.as_str(),
-            "c": &base.c,
-            "a": &base.a,
-            "b": &base.b,
-            "integer_vars": &base.integer_vars,
-            "lb": &minimum_problem.lb,
-            "ub": &base.ub,
-            "var_names": &base.var_names,
-            "con_names": &base.con_names,
-            "minimums": minimum_problem.minimums.iter().map(|constraint| serde_json::json!({
-                "target_var": constraint.target_var,
-                "arg_vars": &constraint.arg_vars,
-                "constant": constraint.constant,
-                "name": &constraint.name,
-            })).collect::<Vec<_>>(),
-        });
+        let minimum_json = source_ipmip_problem_to_cli_json(&minimum_problem);
         std::fs::write(
             &minimum_problem_path,
             serde_json::to_string_pretty(&minimum_json).expect("serialize minimum MIP problem"),
@@ -19519,24 +18610,7 @@ impl Driver {
         );
         let logical_problem_path = out_dir.join("logical-gate-problem.json");
         let logical_reference_path = out_dir.join("logical-gate-reference.json");
-        let base = &logical_problem.base;
-        let logical_json = serde_json::json!({
-            "sense": base.sense.as_str(),
-            "c": &base.c,
-            "a": &base.a,
-            "b": &base.b,
-            "integer_vars": &base.integer_vars,
-            "lb": &logical_problem.lb,
-            "ub": &base.ub,
-            "var_names": &base.var_names,
-            "con_names": &base.con_names,
-            "logical": logical_problem.logical.iter().map(|constraint| serde_json::json!({
-                "kind": constraint.kind.as_str(),
-                "target_var": constraint.target_var,
-                "arg_vars": &constraint.arg_vars,
-                "name": &constraint.name,
-            })).collect::<Vec<_>>(),
-        });
+        let logical_json = source_ipmip_problem_to_cli_json(&logical_problem);
         std::fs::write(
             &logical_problem_path,
             serde_json::to_string_pretty(&logical_json).expect("serialize logical MIP problem"),
@@ -19609,23 +18683,7 @@ impl Driver {
         );
         let l1_problem_path = out_dir.join("l1-norm-deviation-problem.json");
         let l1_reference_path = out_dir.join("l1-norm-deviation-reference.json");
-        let base = &l1_problem.base;
-        let l1_json = serde_json::json!({
-            "sense": base.sense.as_str(),
-            "c": &base.c,
-            "a": &base.a,
-            "b": &base.b,
-            "integer_vars": &base.integer_vars,
-            "lb": &l1_problem.lb,
-            "ub": &base.ub,
-            "var_names": &base.var_names,
-            "con_names": &base.con_names,
-            "l1_norms": l1_problem.l1_norms.iter().map(|constraint| serde_json::json!({
-                "target_var": constraint.target_var,
-                "arg_vars": &constraint.arg_vars,
-                "name": &constraint.name,
-            })).collect::<Vec<_>>(),
-        });
+        let l1_json = source_ipmip_problem_to_cli_json(&l1_problem);
         std::fs::write(
             &l1_problem_path,
             serde_json::to_string_pretty(&l1_json).expect("serialize L1 norm MIP problem"),
@@ -19698,23 +18756,7 @@ impl Driver {
         );
         let linf_problem_path = out_dir.join("linf-norm-deviation-problem.json");
         let linf_reference_path = out_dir.join("linf-norm-deviation-reference.json");
-        let base = &linf_problem.base;
-        let linf_json = serde_json::json!({
-            "sense": base.sense.as_str(),
-            "c": &base.c,
-            "a": &base.a,
-            "b": &base.b,
-            "integer_vars": &base.integer_vars,
-            "lb": &linf_problem.lb,
-            "ub": &base.ub,
-            "var_names": &base.var_names,
-            "con_names": &base.con_names,
-            "linf_norms": linf_problem.linf_norms.iter().map(|constraint| serde_json::json!({
-                "target_var": constraint.target_var,
-                "arg_vars": &constraint.arg_vars,
-                "name": &constraint.name,
-            })).collect::<Vec<_>>(),
-        });
+        let linf_json = source_ipmip_problem_to_cli_json(&linf_problem);
         std::fs::write(
             &linf_problem_path,
             serde_json::to_string_pretty(&linf_json).expect("serialize Linf norm MIP problem"),
@@ -19792,24 +18834,7 @@ impl Driver {
             let product_problem_path = out_dir.join(format!("product-{product_name}-problem.json"));
             let product_reference_path =
                 out_dir.join(format!("product-{product_name}-reference.json"));
-            let base = &product_problem.base;
-            let product_json = serde_json::json!({
-                "sense": base.sense.as_str(),
-                "c": &base.c,
-                "a": &base.a,
-                "b": &base.b,
-                "integer_vars": &base.integer_vars,
-                "lb": &product_problem.lb,
-                "ub": &base.ub,
-                "var_names": &base.var_names,
-                "con_names": &base.con_names,
-                "products": product_problem.products.iter().map(|constraint| serde_json::json!({
-                    "target_var": constraint.target_var,
-                    "x_var": constraint.x_var,
-                    "y_var": constraint.y_var,
-                    "name": &constraint.name,
-                })).collect::<Vec<_>>(),
-            });
+            let product_json = source_ipmip_problem_to_cli_json(&product_problem);
             std::fs::write(
                 &product_problem_path,
                 serde_json::to_string_pretty(&product_json).expect("serialize product MIP problem"),
@@ -19884,24 +18909,7 @@ impl Driver {
         );
         let quadratic_problem_path = out_dir.join("quadratic-objective-mix-problem.json");
         let quadratic_reference_path = out_dir.join("quadratic-objective-mix-reference.json");
-        let base = &quadratic_problem.base;
-        let quadratic_json = serde_json::json!({
-            "sense": base.sense.as_str(),
-            "c": &base.c,
-            "a": &base.a,
-            "b": &base.b,
-            "integer_vars": &base.integer_vars,
-            "lb": &quadratic_problem.lb,
-            "ub": &base.ub,
-            "var_names": &base.var_names,
-            "con_names": &base.con_names,
-            "quadratic_objective": quadratic_problem.quadratic_objective.iter().map(|term| serde_json::json!({
-                "x_var": term.x_var,
-                "y_var": term.y_var,
-                "coeff": term.coeff,
-                "name": &term.name,
-            })).collect::<Vec<_>>(),
-        });
+        let quadratic_json = quadratic_objective_ipmip_problem_to_cli_json(&quadratic_problem);
         std::fs::write(
             &quadratic_problem_path,
             serde_json::to_string_pretty(&quadratic_json)
@@ -19977,80 +18985,7 @@ impl Driver {
         );
         let source_problem_path = out_dir.join("source-feature-mix-problem.json");
         let source_reference_path = out_dir.join("source-feature-mix-reference.json");
-        let base = &source_problem.base;
-        let source_json = serde_json::json!({
-            "sense": base.sense.as_str(),
-            "c": &base.c,
-            "a": &base.a,
-            "b": &base.b,
-            "integer_vars": &base.integer_vars,
-            "lb": &source_problem.lb,
-            "ub": &base.ub,
-            "var_names": &base.var_names,
-            "con_names": &base.con_names,
-            "linear_constraints": source_problem.linear_constraints.iter().map(|constraint| serde_json::json!({
-                "coefs": &constraint.coefs,
-                "lower": constraint.lower,
-                "upper": constraint.upper,
-                "name": &constraint.name,
-            })).collect::<Vec<_>>(),
-            "indicators": source_problem.indicators.iter().map(|indicator| serde_json::json!({
-                "binary_var": indicator.binary_var,
-                "active_value": indicator.active_value,
-                "coefs": &indicator.coefs,
-                "sense": indicator.sense.as_str(),
-                "rhs": indicator.rhs,
-                "name": &indicator.name,
-            })).collect::<Vec<_>>(),
-            "pwl": source_problem.pwl.iter().map(|pwl| serde_json::json!({
-                "x_var": pwl.x_var,
-                "y_var": pwl.y_var,
-                "points": pwl.points.iter().map(|point| serde_json::json!({
-                    "x": point.x,
-                    "y": point.y,
-                })).collect::<Vec<_>>(),
-                "name": &pwl.name,
-            })).collect::<Vec<_>>(),
-            "abs": source_problem.abs.iter().map(|constraint| serde_json::json!({
-                "arg_var": constraint.arg_var,
-                "target_var": constraint.target_var,
-                "name": &constraint.name,
-            })).collect::<Vec<_>>(),
-            "maximums": source_problem.maximums.iter().map(|constraint| serde_json::json!({
-                "target_var": constraint.target_var,
-                "arg_vars": &constraint.arg_vars,
-                "constant": constraint.constant,
-                "name": &constraint.name,
-            })).collect::<Vec<_>>(),
-            "minimums": source_problem.minimums.iter().map(|constraint| serde_json::json!({
-                "target_var": constraint.target_var,
-                "arg_vars": &constraint.arg_vars,
-                "constant": constraint.constant,
-                "name": &constraint.name,
-            })).collect::<Vec<_>>(),
-            "logical": source_problem.logical.iter().map(|constraint| serde_json::json!({
-                "kind": constraint.kind.as_str(),
-                "target_var": constraint.target_var,
-                "arg_vars": &constraint.arg_vars,
-                "name": &constraint.name,
-            })).collect::<Vec<_>>(),
-            "l1_norms": source_problem.l1_norms.iter().map(|constraint| serde_json::json!({
-                "target_var": constraint.target_var,
-                "arg_vars": &constraint.arg_vars,
-                "name": &constraint.name,
-            })).collect::<Vec<_>>(),
-            "linf_norms": source_problem.linf_norms.iter().map(|constraint| serde_json::json!({
-                "target_var": constraint.target_var,
-                "arg_vars": &constraint.arg_vars,
-                "name": &constraint.name,
-            })).collect::<Vec<_>>(),
-            "products": source_problem.products.iter().map(|constraint| serde_json::json!({
-                "target_var": constraint.target_var,
-                "x_var": constraint.x_var,
-                "y_var": constraint.y_var,
-                "name": &constraint.name,
-            })).collect::<Vec<_>>(),
-        });
+        let source_json = source_ipmip_problem_to_cli_json(&source_problem);
         std::fs::write(
             &source_problem_path,
             serde_json::to_string_pretty(&source_json)
@@ -20123,22 +19058,7 @@ impl Driver {
         );
         let multi_problem_path = out_dir.join("lexicographic-choice-problem.json");
         let multi_reference_path = out_dir.join("lexicographic-choice-reference.json");
-        let base = &multi_problem.base;
-        let multi_json = serde_json::json!({
-            "sense": base.sense.as_str(),
-            "c": &base.c,
-            "a": &base.a,
-            "b": &base.b,
-            "integer_vars": &base.integer_vars,
-            "ub": &base.ub,
-            "var_names": &base.var_names,
-            "con_names": &base.con_names,
-            "multi_objectives": multi_problem.objectives.iter().map(|objective| serde_json::json!({
-                "sense": objective.sense.as_str(),
-                "c": &objective.c,
-                "name": &objective.name,
-            })).collect::<Vec<_>>(),
-        });
+        let multi_json = multi_objective_ipmip_problem_to_cli_json(&multi_problem);
         std::fs::write(
             &multi_problem_path,
             serde_json::to_string_pretty(&multi_json)
@@ -20398,13 +19318,7 @@ impl Driver {
         };
         let flow = solve_min_cost_flow(p.clone());
         let lp = min_cost_flow_to_lp(&p);
-        let external = solve_lp_external(
-            &lp,
-            &ExternalSolverOptions {
-                method: Some("highs".to_string()),
-                ..Default::default()
-            },
-        );
+        let external = self.solve_lp_highs_reference(&lp, None);
         self.check(
             "Min-cost-flow statuses optimal",
             flow.status == MinCostFlowStatus::Optimal && external.status == LPStatus::Optimal,

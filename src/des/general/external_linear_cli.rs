@@ -16,7 +16,11 @@ use serde::Deserialize;
 use serde_json::{json, Number, Value};
 
 use crate::des::general::ip_mip_des::{
-    BranchOrCutConstraint, ConstraintKind, IPMIPProblem, MultiObjectiveIPMIPProblem,
+    BranchOrCutConstraint, ConstraintKind, GeneralLinearIPMIPProblem, IPMIPProblem,
+    IndicatorConstraint, IndicatorIPMIPProblem, LinearRowConstraint, LowerBoundedIPMIPProblem,
+    MultiObjectiveIPMIPProblem, PiecewiseLinearConstraint, PwlIPMIPProblem,
+    QuadraticObjectiveIPMIPProblem, QuadraticObjectiveTerm, SemiIPMIPProblem, SemiVariable,
+    SosIPMIPProblem, SourceIPMIPProblem, SpecialOrderedSet,
 };
 use crate::des::general::lp::{LPProblem, Sense};
 
@@ -910,6 +914,191 @@ pub fn ipmip_problem_to_cli_json(problem: &IPMIPProblem) -> Value {
     })
 }
 
+/// Serialize a lower-bounded IP/MIP wrapper into the CLI bridge contract.
+pub fn lower_bounded_ipmip_problem_to_cli_json(problem: &LowerBoundedIPMIPProblem) -> Value {
+    let mut payload = ipmip_problem_to_cli_json(&problem.base);
+    insert_cli_field(&mut payload, "lb", f64_vec(&problem.lb));
+    payload
+}
+
+/// Serialize a general-row IP/MIP wrapper into the CLI bridge contract.
+pub fn general_linear_ipmip_problem_to_cli_json(problem: &GeneralLinearIPMIPProblem) -> Value {
+    let mut payload = ipmip_problem_to_cli_json(&problem.base);
+    insert_cli_field(
+        &mut payload,
+        "linear_constraints",
+        linear_constraints_json(&problem.linear_constraints),
+    );
+    payload
+}
+
+/// Serialize an indicator-constraint IP/MIP wrapper into the CLI bridge contract.
+pub fn indicator_ipmip_problem_to_cli_json(problem: &IndicatorIPMIPProblem) -> Value {
+    let mut payload = ipmip_problem_to_cli_json(&problem.base);
+    insert_cli_field(
+        &mut payload,
+        "indicators",
+        indicator_constraints_json(&problem.indicators),
+    );
+    payload
+}
+
+/// Serialize an SOS IP/MIP wrapper into the CLI bridge contract.
+pub fn sos_ipmip_problem_to_cli_json(problem: &SosIPMIPProblem) -> Value {
+    let mut payload = ipmip_problem_to_cli_json(&problem.base);
+    insert_cli_field(&mut payload, "sos", sos_sets_json(&problem.sos));
+    payload
+}
+
+/// Serialize a semi-variable IP/MIP wrapper into the CLI bridge contract.
+pub fn semi_ipmip_problem_to_cli_json(problem: &SemiIPMIPProblem) -> Value {
+    let mut payload = ipmip_problem_to_cli_json(&problem.base);
+    insert_cli_field(
+        &mut payload,
+        "semi_variables",
+        semi_variables_json(&problem.semi_variables),
+    );
+    payload
+}
+
+/// Serialize a piecewise-linear IP/MIP wrapper into the CLI bridge contract.
+pub fn pwl_ipmip_problem_to_cli_json(problem: &PwlIPMIPProblem) -> Value {
+    let mut payload = ipmip_problem_to_cli_json(&problem.base);
+    insert_cli_field(&mut payload, "pwl", pwl_constraints_json(&problem.pwl));
+    payload
+}
+
+/// Serialize a quadratic-objective IP/MIP wrapper into the CLI bridge contract.
+pub fn quadratic_objective_ipmip_problem_to_cli_json(
+    problem: &QuadraticObjectiveIPMIPProblem,
+) -> Value {
+    let mut payload = ipmip_problem_to_cli_json(&problem.base);
+    insert_cli_field(&mut payload, "lb", opt_plain_vec_f64(problem.lb.as_ref()));
+    insert_cli_field(
+        &mut payload,
+        "quadratic_objective",
+        quadratic_objective_json(&problem.quadratic_objective),
+    );
+    payload
+}
+
+/// Serialize a source-level IP/MIP model with general constraints into the CLI bridge contract.
+pub fn source_ipmip_problem_to_cli_json(problem: &SourceIPMIPProblem) -> Value {
+    let base = &problem.base;
+    json!({
+        "sense": base.sense.as_str(),
+        "c": f64_vec(&base.c),
+        "a": matrix_f64(&base.a),
+        "b": f64_vec(&base.b),
+        "integer_vars": base.integer_vars,
+        "lb": opt_plain_vec_f64(problem.lb.as_ref()),
+        "ub": opt_plain_vec_f64(base.ub.as_ref()),
+        "var_names": option_strings(base.var_names.as_ref()),
+        "con_names": option_strings(base.con_names.as_ref()),
+        "lazy_constraints": lazy_constraints_json(base.lazy_constraints.as_ref()),
+        "linear_constraints": linear_constraints_json(&problem.linear_constraints),
+        "indicators": indicator_constraints_json(&problem.indicators),
+        "sos": sos_sets_json(&problem.sos),
+        "semi_variables": semi_variables_json(&problem.semi_variables),
+        "pwl": pwl_constraints_json(&problem.pwl),
+        "abs": Value::Array(
+            problem
+                .abs
+                .iter()
+                .map(|constraint| {
+                    json!({
+                        "arg_var": constraint.arg_var,
+                        "target_var": constraint.target_var,
+                        "name": &constraint.name,
+                    })
+                })
+                .collect(),
+        ),
+        "maximums": Value::Array(
+            problem
+                .maximums
+                .iter()
+                .map(|constraint| {
+                    json!({
+                        "target_var": constraint.target_var,
+                        "arg_vars": &constraint.arg_vars,
+                        "constant": opt_f64_value(constraint.constant),
+                        "name": &constraint.name,
+                    })
+                })
+                .collect(),
+        ),
+        "minimums": Value::Array(
+            problem
+                .minimums
+                .iter()
+                .map(|constraint| {
+                    json!({
+                        "target_var": constraint.target_var,
+                        "arg_vars": &constraint.arg_vars,
+                        "constant": opt_f64_value(constraint.constant),
+                        "name": &constraint.name,
+                    })
+                })
+                .collect(),
+        ),
+        "logical": Value::Array(
+            problem
+                .logical
+                .iter()
+                .map(|constraint| {
+                    json!({
+                        "kind": constraint.kind.as_str(),
+                        "target_var": constraint.target_var,
+                        "arg_vars": &constraint.arg_vars,
+                        "name": &constraint.name,
+                    })
+                })
+                .collect(),
+        ),
+        "l1_norms": Value::Array(
+            problem
+                .l1_norms
+                .iter()
+                .map(|constraint| {
+                    json!({
+                        "target_var": constraint.target_var,
+                        "arg_vars": &constraint.arg_vars,
+                        "name": &constraint.name,
+                    })
+                })
+                .collect(),
+        ),
+        "linf_norms": Value::Array(
+            problem
+                .linf_norms
+                .iter()
+                .map(|constraint| {
+                    json!({
+                        "target_var": constraint.target_var,
+                        "arg_vars": &constraint.arg_vars,
+                        "name": &constraint.name,
+                    })
+                })
+                .collect(),
+        ),
+        "products": Value::Array(
+            problem
+                .products
+                .iter()
+                .map(|constraint| {
+                    json!({
+                        "target_var": constraint.target_var,
+                        "x_var": constraint.x_var,
+                        "y_var": constraint.y_var,
+                        "name": &constraint.name,
+                    })
+                })
+                .collect(),
+        ),
+    })
+}
+
 /// Export an LP as a CPLEX LP-format string accepted by the local CLI bridge.
 ///
 /// The export uses stable `x0`, `x1`, ... column names so solver solution files
@@ -1051,6 +1240,90 @@ pub fn solve_ipmip_with_external_cli(
     )
 }
 
+/// Solve a lower-bounded IP/MIP through a locally installed CLI solver.
+pub fn solve_lower_bounded_ipmip_with_external_cli(
+    problem: &LowerBoundedIPMIPProblem,
+    opts: &ExternalLinearCliOptions,
+) -> ExternalLinearCliSolution {
+    solve_linear_cli_json(
+        ExternalLinearCliKind::Mip,
+        lower_bounded_ipmip_problem_to_cli_json(problem),
+        opts,
+    )
+}
+
+/// Solve a general-row IP/MIP through a locally installed CLI solver.
+pub fn solve_general_linear_ipmip_with_external_cli(
+    problem: &GeneralLinearIPMIPProblem,
+    opts: &ExternalLinearCliOptions,
+) -> ExternalLinearCliSolution {
+    solve_linear_cli_json(
+        ExternalLinearCliKind::Mip,
+        general_linear_ipmip_problem_to_cli_json(problem),
+        opts,
+    )
+}
+
+/// Solve an indicator-constraint IP/MIP through a locally installed CLI solver.
+pub fn solve_indicator_ipmip_with_external_cli(
+    problem: &IndicatorIPMIPProblem,
+    opts: &ExternalLinearCliOptions,
+) -> ExternalLinearCliSolution {
+    solve_linear_cli_json(
+        ExternalLinearCliKind::Mip,
+        indicator_ipmip_problem_to_cli_json(problem),
+        opts,
+    )
+}
+
+/// Solve an SOS IP/MIP through a locally installed CLI solver.
+pub fn solve_sos_ipmip_with_external_cli(
+    problem: &SosIPMIPProblem,
+    opts: &ExternalLinearCliOptions,
+) -> ExternalLinearCliSolution {
+    solve_linear_cli_json(
+        ExternalLinearCliKind::Mip,
+        sos_ipmip_problem_to_cli_json(problem),
+        opts,
+    )
+}
+
+/// Solve a semi-variable IP/MIP through a locally installed CLI solver.
+pub fn solve_semi_ipmip_with_external_cli(
+    problem: &SemiIPMIPProblem,
+    opts: &ExternalLinearCliOptions,
+) -> ExternalLinearCliSolution {
+    solve_linear_cli_json(
+        ExternalLinearCliKind::Mip,
+        semi_ipmip_problem_to_cli_json(problem),
+        opts,
+    )
+}
+
+/// Solve a piecewise-linear IP/MIP through a locally installed CLI solver.
+pub fn solve_pwl_ipmip_with_external_cli(
+    problem: &PwlIPMIPProblem,
+    opts: &ExternalLinearCliOptions,
+) -> ExternalLinearCliSolution {
+    solve_linear_cli_json(
+        ExternalLinearCliKind::Mip,
+        pwl_ipmip_problem_to_cli_json(problem),
+        opts,
+    )
+}
+
+/// Solve a quadratic-objective IP/MIP through a locally installed CLI solver.
+pub fn solve_quadratic_objective_ipmip_with_external_cli(
+    problem: &QuadraticObjectiveIPMIPProblem,
+    opts: &ExternalLinearCliOptions,
+) -> ExternalLinearCliSolution {
+    solve_linear_cli_json(
+        ExternalLinearCliKind::Mip,
+        quadratic_objective_ipmip_problem_to_cli_json(problem),
+        opts,
+    )
+}
+
 /// Solve a lexicographic multi-objective MIP through a locally installed CLI solver.
 pub fn solve_multi_objective_ipmip_with_external_cli(
     problem: &MultiObjectiveIPMIPProblem,
@@ -1059,6 +1332,18 @@ pub fn solve_multi_objective_ipmip_with_external_cli(
     solve_linear_cli_json(
         ExternalLinearCliKind::Mip,
         multi_objective_ipmip_problem_to_cli_json(problem),
+        opts,
+    )
+}
+
+/// Solve a source-level IP/MIP through a locally installed command-line solver.
+pub fn solve_source_ipmip_with_external_cli(
+    problem: &SourceIPMIPProblem,
+    opts: &ExternalLinearCliOptions,
+) -> ExternalLinearCliSolution {
+    solve_linear_cli_json(
+        ExternalLinearCliKind::Mip,
+        source_ipmip_problem_to_cli_json(problem),
         opts,
     )
 }
@@ -2060,6 +2345,123 @@ fn f64_value(value: f64) -> Value {
         .unwrap_or(Value::Null)
 }
 
+fn opt_f64_value(value: Option<f64>) -> Value {
+    value.map_or(Value::Null, f64_value)
+}
+
+fn insert_cli_field(payload: &mut Value, key: &str, value: Value) {
+    if let Value::Object(object) = payload {
+        object.insert(key.to_string(), value);
+    }
+}
+
+fn linear_constraints_json(constraints: &[LinearRowConstraint]) -> Value {
+    Value::Array(
+        constraints
+            .iter()
+            .map(|constraint| {
+                json!({
+                    "coefs": f64_vec(&constraint.coefs),
+                    "lower": opt_f64_value(constraint.lower),
+                    "upper": opt_f64_value(constraint.upper),
+                    "name": &constraint.name,
+                })
+            })
+            .collect(),
+    )
+}
+
+fn indicator_constraints_json(constraints: &[IndicatorConstraint]) -> Value {
+    Value::Array(
+        constraints
+            .iter()
+            .map(|indicator| {
+                json!({
+                    "binary_var": indicator.binary_var,
+                    "active_value": indicator.active_value,
+                    "coefs": f64_vec(&indicator.coefs),
+                    "sense": indicator.sense.as_str(),
+                    "rhs": f64_value(indicator.rhs),
+                    "name": &indicator.name,
+                })
+            })
+            .collect(),
+    )
+}
+
+fn sos_sets_json(sets: &[SpecialOrderedSet]) -> Value {
+    Value::Array(
+        sets.iter()
+            .map(|set| {
+                json!({
+                    "kind": set.kind.as_str(),
+                    "vars": &set.vars,
+                    "weights": opt_plain_vec_f64(set.weights.as_ref()),
+                    "name": &set.name,
+                })
+            })
+            .collect(),
+    )
+}
+
+fn semi_variables_json(variables: &[SemiVariable]) -> Value {
+    Value::Array(
+        variables
+            .iter()
+            .map(|semi| {
+                json!({
+                    "kind": semi.kind.as_str(),
+                    "var": semi.var,
+                    "lower": f64_value(semi.lower),
+                    "name": &semi.name,
+                })
+            })
+            .collect(),
+    )
+}
+
+fn pwl_constraints_json(constraints: &[PiecewiseLinearConstraint]) -> Value {
+    Value::Array(
+        constraints
+            .iter()
+            .map(|pwl| {
+                json!({
+                    "x_var": pwl.x_var,
+                    "y_var": pwl.y_var,
+                    "points": Value::Array(
+                        pwl.points
+                            .iter()
+                            .map(|point| {
+                                json!({
+                                    "x": f64_value(point.x),
+                                    "y": f64_value(point.y),
+                                })
+                            })
+                            .collect(),
+                    ),
+                    "name": &pwl.name,
+                })
+            })
+            .collect(),
+    )
+}
+
+fn quadratic_objective_json(terms: &[QuadraticObjectiveTerm]) -> Value {
+    Value::Array(
+        terms
+            .iter()
+            .map(|term| {
+                json!({
+                    "x_var": term.x_var,
+                    "y_var": term.y_var,
+                    "coeff": f64_value(term.coeff),
+                    "name": &term.name,
+                })
+            })
+            .collect(),
+    )
+}
+
 fn f64_vec(values: &[f64]) -> Value {
     Value::Array(values.iter().copied().map(f64_value).collect())
 }
@@ -2127,18 +2529,25 @@ mod tests {
     use crate::des::general::external_linear_cli::{
         external_linear_cli_command, external_linear_cli_command_with_options,
         external_linear_cli_solver_manifest, external_linear_cli_solver_specs,
-        find_command_in_install_dir, ipmip_problem_to_cli_json, ipmip_problem_to_cplex_lp_string,
-        ipmip_problem_to_mps_string, lp_problem_to_cli_json, lp_problem_to_cplex_lp_string,
-        lp_problem_to_mps_string, multi_objective_ipmip_problem_to_cli_json, normalized_node_limit,
-        normalized_random_seed, normalized_relative_gap, normalized_threads,
+        find_command_in_install_dir, general_linear_ipmip_problem_to_cli_json,
+        indicator_ipmip_problem_to_cli_json, ipmip_problem_to_cli_json,
+        ipmip_problem_to_cplex_lp_string, ipmip_problem_to_mps_string,
+        lower_bounded_ipmip_problem_to_cli_json, lp_problem_to_cli_json,
+        lp_problem_to_cplex_lp_string, lp_problem_to_mps_string,
+        multi_objective_ipmip_problem_to_cli_json, normalized_node_limit, normalized_random_seed,
+        normalized_relative_gap, normalized_threads, pwl_ipmip_problem_to_cli_json,
+        quadratic_objective_ipmip_problem_to_cli_json, semi_ipmip_problem_to_cli_json,
         solve_ipmip_with_external_cli, solve_lp_with_external_cli, solver_command_env_var,
-        ExternalLinearCliKind, ExternalLinearCliLicenseClass, ExternalLinearCliModelFormat,
-        ExternalLinearCliOptions, ExternalLinearCliProbeStatus, ExternalLinearCliSolver,
-        ExternalLinearCliStatus,
+        sos_ipmip_problem_to_cli_json, source_ipmip_problem_to_cli_json, ExternalLinearCliKind,
+        ExternalLinearCliLicenseClass, ExternalLinearCliModelFormat, ExternalLinearCliOptions,
+        ExternalLinearCliProbeStatus, ExternalLinearCliSolver, ExternalLinearCliStatus,
     };
     use crate::des::general::ip_mip_des::{
-        BranchOrCutConstraint, ConstraintKind, IPMIPProblem, LexicographicObjective,
-        MultiObjectiveIPMIPProblem,
+        build_fixed_charge_indicator_ip, build_general_linear_rows_ip,
+        build_lower_bounded_production_ip, build_piecewise_linear_reward_ip,
+        build_quadratic_objective_mix_ip, build_semi_continuous_gate_ip, build_sos1_choice_ip,
+        build_source_feature_mix_ip, BranchOrCutConstraint, ConstraintKind, IPMIPProblem,
+        LexicographicObjective, MultiObjectiveIPMIPProblem,
     };
     use crate::des::general::lp::{LPProblem, Sense};
     use std::path::PathBuf;
@@ -2177,6 +2586,54 @@ mod tests {
         assert_eq!(payload["sense"], "max");
         assert_eq!(payload["integer_vars"][0], true);
         assert_eq!(payload["ub"][0], 1.0);
+    }
+
+    #[test]
+    fn source_ipmip_payload_includes_general_constraint_sections() {
+        let p = build_source_feature_mix_ip();
+        let payload = source_ipmip_problem_to_cli_json(&p);
+        assert_eq!(payload["sense"], "max");
+        assert_eq!(payload["lb"][0], 1.0);
+        assert_eq!(
+            payload["linear_constraints"][0]["name"],
+            "activity_reward_budget"
+        );
+        assert_eq!(payload["indicators"][0]["sense"], "le");
+        assert_eq!(payload["pwl"][0]["points"][1]["y"], 5.0);
+        assert!(payload["products"].as_array().is_some_and(Vec::is_empty));
+    }
+
+    #[test]
+    fn source_wrapper_payloads_include_owned_sections() {
+        let lower = lower_bounded_ipmip_problem_to_cli_json(&build_lower_bounded_production_ip());
+        assert_eq!(lower["lb"][0], 3.0);
+
+        let general = general_linear_ipmip_problem_to_cli_json(&build_general_linear_rows_ip());
+        assert_eq!(general["linear_constraints"][2]["name"], "throughput_range");
+        assert_eq!(general["linear_constraints"][2]["upper"], 7.0);
+
+        let indicator = indicator_ipmip_problem_to_cli_json(&build_fixed_charge_indicator_ip());
+        assert_eq!(indicator["indicators"][0]["active_value"], false);
+        assert_eq!(indicator["indicators"][0]["sense"], "le");
+
+        let sos = sos_ipmip_problem_to_cli_json(&build_sos1_choice_ip());
+        assert_eq!(sos["sos"][0]["kind"], "sos1");
+        assert_eq!(sos["sos"][0]["weights"][2], 3.0);
+
+        let semi = semi_ipmip_problem_to_cli_json(&build_semi_continuous_gate_ip());
+        assert_eq!(semi["semi_variables"][0]["kind"], "semi_continuous");
+        assert_eq!(semi["semi_variables"][0]["lower"], 3.0);
+
+        let pwl = pwl_ipmip_problem_to_cli_json(&build_piecewise_linear_reward_ip());
+        assert_eq!(pwl["pwl"][0]["points"][1]["y"], 4.0);
+
+        let quadratic =
+            quadratic_objective_ipmip_problem_to_cli_json(&build_quadratic_objective_mix_ip());
+        assert_eq!(
+            quadratic["quadratic_objective"][0]["name"],
+            "machine_premium_bonus"
+        );
+        assert_eq!(quadratic["lb"][2], 1.0);
     }
 
     #[test]

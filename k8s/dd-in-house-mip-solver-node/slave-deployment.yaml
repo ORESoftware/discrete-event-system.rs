@@ -1,0 +1,97 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dd-in-house-mip-solver-node-slave
+  namespace: default
+  labels:
+    app: dd-in-house-mip-solver-node-slave
+    app.kubernetes.io/component: slave
+spec:
+  replicas: 1
+  minReadySeconds: 5
+  progressDeadlineSeconds: 1800
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 4
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: dd-in-house-mip-solver-node-slave
+  template:
+    metadata:
+      labels:
+        app: dd-in-house-mip-solver-node-slave
+        app.kubernetes.io/component: slave
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: solver
+          image: docker.io/library/dd-in-house-mip-solver-node:dev
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          env:
+            - name: HOST
+              value: 0.0.0.0
+            - name: PORT
+              value: '8117'
+            - name: MIP_SOLVER_NODE_ROLE
+              value: slave
+            - name: NATS_URL
+              value: nats://dd-nats.messaging.svc.cluster.local:4222
+            - name: MIP_SOLVER_NATS_CONSUMER
+              value: dd-in-house-mip-solver-node-workers
+            - name: MIP_SOLVER_JOBS_SUBJECT
+              value: dd.remote.mip_solver.jobs
+            - name: MIP_SOLVER_RESULTS_SUBJECT
+              value: dd.remote.mip_solver.results
+            - name: MIP_SOLVER_EVENTS_SUBJECT
+              value: dd.remote.mip_solver.events
+            - name: MIP_SOLVER_ACK_WAIT_SECONDS
+              value: '600'
+            - name: MIP_SOLVER_MAX_ACK_PENDING
+              value: '32'
+            - name: MIP_SOLVER_MAX_DELIVER
+              value: '5'
+            - name: MIP_SOLVER_GPU_MODE
+              value: auto
+            - name: MIP_SOLVER_LP_MAX_ITERS
+              value: '10000'
+          ports:
+            - name: http
+              containerPort: 8117
+          resources:
+            requests:
+              cpu: '2'
+              memory: 4Gi
+            limits:
+              cpu: '8'
+              memory: 24Gi
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+

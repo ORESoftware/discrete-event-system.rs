@@ -791,9 +791,59 @@ pub fn artifact_env_names(tool: ExternalOptimizationTool) -> Vec<String> {
     names
 }
 
+pub fn external_optimization_command_dir_env_names(tool: ExternalOptimizationTool) -> Vec<String> {
+    let mut names = Vec::new();
+    if tool.language() == ExternalOptimizationLanguage::Native {
+        for name in artifact_env_names(tool) {
+            push_unique_env_name(&mut names, name);
+        }
+    }
+    for name in match tool {
+        ExternalOptimizationTool::ChocoSolver => &["CHOCO_SOLVER_HOME", "CHOCO_HOME"][..],
+        ExternalOptimizationTool::Jacop => &["JACOP_HOME", "JACOP_DIR"],
+        ExternalOptimizationTool::IbmCpOptimizer => {
+            &["CPLEX_STUDIO_DIR", "CPLEX_HOME", "CP_OPTIMIZER_HOME"][..]
+        }
+        ExternalOptimizationTool::OptaPlanner => &["OPTAPLANNER_HOME", "OPTAPLANNER_DIR"],
+        ExternalOptimizationTool::Timefold => &["TIMEFOLD_HOME", "TIMEFOLD_DIR"],
+        ExternalOptimizationTool::JMetal => &["JMETAL_HOME", "JMETAL_DIR"],
+        ExternalOptimizationTool::MoeaFramework => &["MOEA_FRAMEWORK_HOME", "MOEA_HOME"],
+        ExternalOptimizationTool::Ecj => &["ECJ_HOME", "ECJ_DIR"],
+        ExternalOptimizationTool::OjAlgo => &["OJALGO_HOME", "OJALGO_DIR"],
+        ExternalOptimizationTool::OrToolsJava => &["ORTOOLS_JAVA_HOME", "ORTOOLS_HOME"],
+        ExternalOptimizationTool::Pyomo => &["PYOMO_HOME", "PYOMO_DIR"],
+        ExternalOptimizationTool::Pulp => &["PULP_HOME", "PULP_DIR"],
+        ExternalOptimizationTool::Cvxpy => &["CVXPY_HOME", "CVXPY_DIR"],
+        ExternalOptimizationTool::Cvxopt => &["CVXOPT_HOME", "CVXOPT_DIR"],
+        ExternalOptimizationTool::PyScipOpt => &["SCIPOPTDIR", "SCIP_DIR", "SCIP_HOME"],
+        ExternalOptimizationTool::PythonMip => &["PYTHON_MIP_HOME", "PYTHON_MIP_DIR"],
+        ExternalOptimizationTool::GurobiPy => &["GUROBI_HOME"],
+        ExternalOptimizationTool::Docplex => &["DOCPLEX_HOME", "CPLEX_STUDIO_DIR", "CPLEX_HOME"],
+        ExternalOptimizationTool::OrToolsPython => &["ORTOOLS_HOME", "ORTOOLS_PYTHON_HOME"],
+        ExternalOptimizationTool::ScipyOptimize => &["SCIPY_HOME", "SCIPY_DIR"],
+        ExternalOptimizationTool::Ampl => &["AMPL_HOME", "AMPL_DIR"],
+        ExternalOptimizationTool::Gams => &["GAMS_DIR", "GAMSDIR", "GAMS_HOME"],
+        ExternalOptimizationTool::Hexaly => &[
+            "HEXALY_HOME",
+            "HEXALY_DIR",
+            "LOCALSOLVER_HOME",
+            "LOCALSOLVER_DIR",
+        ],
+        ExternalOptimizationTool::Nlopt => &["NLOPT_DIR", "NLOPT_HOME"],
+        ExternalOptimizationTool::HighsRust => &["HIGHS_DIR", "HIGHS_HOME"],
+        ExternalOptimizationTool::ScipRust => &["SCIPOPTDIR", "SCIP_DIR", "SCIP_HOME"],
+        ExternalOptimizationTool::CbcRust => &["CBC_DIR", "CBC_HOME", "COINOR_DIR", "COINOR_HOME"],
+        _ => &[],
+    } {
+        push_unique_env_name(&mut names, *name);
+    }
+    names
+}
+
 pub fn external_optimization_adapter_command(tool: ExternalOptimizationTool) -> Option<PathBuf> {
     configured_adapter_command(tool)
         .0
+        .or_else(|| find_first_command_in_install_dirs(tool))
         .or_else(|| find_first_command(tool.adapter_command_aliases()))
 }
 
@@ -815,6 +865,7 @@ pub fn probe_external_optimization_tool(
         .as_ref()
         .cloned()
         .or(configured_command)
+        .or_else(|| find_first_command_in_install_dirs(opts.tool))
         .or_else(|| find_first_command(opts.tool.adapter_command_aliases()));
     if let Some(command) = command {
         return ExternalOptimizationProbe {
@@ -1331,6 +1382,61 @@ fn configured_adapter_command(tool: ExternalOptimizationTool) -> (Option<PathBuf
     (None, saw_configured)
 }
 
+fn push_unique_env_name(names: &mut Vec<String>, name: impl Into<String>) {
+    let name = name.into();
+    if !names.iter().any(|existing| existing == &name) {
+        names.push(name);
+    }
+}
+
+fn find_first_command_in_install_dirs(tool: ExternalOptimizationTool) -> Option<PathBuf> {
+    for env_name in external_optimization_command_dir_env_names(tool) {
+        let Some(raw_value) = env::var_os(&env_name) else {
+            continue;
+        };
+        if raw_value.to_string_lossy().trim().is_empty() {
+            continue;
+        }
+        for root in env::split_paths(&raw_value) {
+            if let Some(path) = find_command_in_install_dir(&root, tool.adapter_command_aliases()) {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+fn find_command_in_install_dir(root: &Path, aliases: &[&str]) -> Option<PathBuf> {
+    let mut candidate_dirs = vec![root.to_path_buf(), root.join("bin")];
+    if let Ok(children) = fs::read_dir(root) {
+        for child in children.flatten() {
+            let child_path = child.path();
+            if !child_path.is_dir() {
+                continue;
+            }
+            let child_bin = child_path.join("bin");
+            candidate_dirs.push(child_bin.clone());
+            if let Ok(platform_dirs) = fs::read_dir(&child_bin) {
+                for platform_dir in platform_dirs.flatten() {
+                    let platform_path = platform_dir.path();
+                    if platform_path.is_dir() {
+                        candidate_dirs.push(platform_path);
+                    }
+                }
+            }
+        }
+    }
+
+    for dir in candidate_dirs {
+        for alias in aliases {
+            if let Some(path) = resolve_command_path(&dir.join(alias)) {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
 fn first_configured_env_value(names: &[String]) -> Option<String> {
     names.iter().find_map(|name| {
         env::var(name)
@@ -1426,13 +1532,14 @@ fn numeric_vector_from_value(value: &Value) -> Option<Vec<f64>> {
 #[cfg(test)]
 mod tests {
     use crate::des::general::external_optimization_tools::{
-        adapter_env_names, artifact_env_names, external_optimization_comparison_report_to_json,
+        adapter_env_names, artifact_env_names, external_optimization_command_dir_env_names,
+        external_optimization_comparison_report_to_json,
         external_optimization_normalized_result_from_value, external_optimization_tool_specs,
-        external_optimization_tools, run_external_optimization_comparison,
-        ExternalOptimizationAdapterInvocation, ExternalOptimizationAdapterOptions,
-        ExternalOptimizationAdapterStatus, ExternalOptimizationExactness,
-        ExternalOptimizationFamily, ExternalOptimizationLanguage, ExternalOptimizationProbeStatus,
-        ExternalOptimizationTool,
+        external_optimization_tools, find_command_in_install_dir,
+        run_external_optimization_comparison, ExternalOptimizationAdapterInvocation,
+        ExternalOptimizationAdapterOptions, ExternalOptimizationAdapterStatus,
+        ExternalOptimizationExactness, ExternalOptimizationFamily, ExternalOptimizationLanguage,
+        ExternalOptimizationProbeStatus, ExternalOptimizationTool,
     };
     use serde_json::json;
     use std::path::PathBuf;
@@ -1555,6 +1662,60 @@ mod tests {
             artifact_env_names(ExternalOptimizationTool::Ampl)[0],
             "ORES_AMPL_DIR"
         );
+        assert!(
+            external_optimization_command_dir_env_names(ExternalOptimizationTool::Ampl)
+                .contains(&"AMPL_HOME".to_string())
+        );
+        assert!(
+            external_optimization_command_dir_env_names(ExternalOptimizationTool::ChocoSolver)
+                .contains(&"CHOCO_HOME".to_string())
+        );
+        assert!(
+            external_optimization_command_dir_env_names(ExternalOptimizationTool::OptaPlanner)
+                .contains(&"OPTAPLANNER_HOME".to_string())
+        );
+        assert!(
+            external_optimization_command_dir_env_names(ExternalOptimizationTool::Pyomo)
+                .contains(&"PYOMO_HOME".to_string())
+        );
+        assert!(
+            external_optimization_command_dir_env_names(ExternalOptimizationTool::GurobiPy)
+                .contains(&"GUROBI_HOME".to_string())
+        );
+        assert!(
+            !external_optimization_command_dir_env_names(ExternalOptimizationTool::GurobiPy)
+                .contains(&"GRB_LICENSE_FILE".to_string())
+        );
+        assert!(
+            external_optimization_command_dir_env_names(ExternalOptimizationTool::HighsRust)
+                .contains(&"HIGHS_HOME".to_string())
+        );
+    }
+
+    #[test]
+    fn install_dir_lookup_handles_adapter_bin_layouts() {
+        let root = std::env::temp_dir().join(format!(
+            "des-external-optimization-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let command = root
+            .join("hexaly")
+            .join("bin")
+            .join("macos")
+            .join("hexaly-adapter");
+        std::fs::create_dir_all(command.parent().unwrap()).unwrap();
+        std::fs::write(&command, b"").unwrap();
+
+        assert_eq!(
+            find_command_in_install_dir(&root, &["hexaly-adapter"]),
+            Some(command)
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

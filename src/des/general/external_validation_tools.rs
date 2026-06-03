@@ -9,6 +9,7 @@
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::env;
+use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -3924,9 +3925,87 @@ pub fn external_validation_artifact_env_names(tool: &ExternalValidationToolSpec)
     names
 }
 
+pub fn external_validation_command_dir_env_names(tool: &ExternalValidationToolSpec) -> Vec<String> {
+    let mut names = Vec::new();
+    if tool.artifact_kind == ExternalValidationArtifactKind::NativeInstallDir {
+        for name in external_validation_artifact_env_names(tool) {
+            push_unique_env_name(&mut names, name);
+        }
+    }
+    for name in match tool.id {
+        "minizinc" | "flatzinc" | "minizinc-solution-checker" => &["MINIZINC_HOME"][..],
+        "tlc" => &["TLC_HOME", "TLA_TOOLS_DIR"],
+        "apalache" => &["APALACHE_HOME", "APALACHE_DIR"],
+        "alloy" => &["ALLOY_HOME", "ALLOY_DIR"],
+        "kodkod" => &["KODKOD_HOME", "KODKOD_DIR"],
+        "spin" => &["SPIN_HOME", "SPIN_DIR"],
+        "nuxmv" => &["NUXMV_HOME", "NUXMV_DIR"],
+        "prism" => &["PRISM_HOME", "PRISM_DIR"],
+        "storm" => &["STORM_HOME", "STORM_DIR"],
+        "uppaal" => &["UPPAAL_HOME", "UPPAAL_DIR"],
+        "cbmc" => &["CBMC_HOME", "CBMC_DIR"],
+        "dafny" => &["DAFNY_HOME", "DAFNY_DIR"],
+        "frama-c" => &["FRAMA_C_HOME", "FRAMA_C_DIR"],
+        "why3" => &["WHY3_HOME", "WHY3_DIR"],
+        "esbmc" => &["ESBMC_HOME", "ESBMC_DIR"],
+        "jbmc" => &["JBMC_HOME", "JBMC_DIR"],
+        "java-pathfinder" => &["JPF_HOME", "JAVA_PATHFINDER_HOME"],
+        "key" => &["KEY_HOME"],
+        "boogie" => &["BOOGIE_HOME", "BOOGIE_DIR"],
+        "goblint" => &["GOBLINT_HOME", "GOBLINT_DIR"],
+        "coq" => &["COQ_HOME", "COQ_DIR"],
+        "lean" => &["LEAN_HOME", "LEAN_DIR"],
+        "acl2" => &["ACL2_HOME", "ACL2_DIR"],
+        "tamarin" => &["TAMARIN_HOME", "TAMARIN_DIR"],
+        "proverif" => &["PROVERIF_HOME", "PROVERIF_DIR"],
+        "cryptoverif" => &["CRYPTOVERIF_HOME", "CRYPTOVERIF_DIR"],
+        "deepsec" => &["DEEPSEC_HOME", "DEEPSEC_DIR"],
+        "scyther" => &["SCYTHER_HOME", "SCYTHER_DIR"],
+        "verifpal" => &["VERIFPAL_HOME", "VERIFPAL_DIR"],
+        "sapic-plus" => &["SAPIC_PLUS_HOME", "SAPIC_PLUS_DIR"],
+        "maude" => &["MAUDE_HOME", "MAUDE_DIR"],
+        "ipopt" => &["IPOPT_DIR", "IPOPT_HOME"],
+        "bonmin" => &["BONMIN_DIR", "BONMIN_HOME"],
+        "minotaur" => &["MINOTAUR_DIR", "MINOTAUR_HOME"],
+        "couenne" => &["COUENNE_DIR", "COUENNE_HOME"],
+        "symphony" => &["SYMPHONY_DIR", "SYMPHONY_HOME", "COINOR_DIR", "COINOR_HOME"],
+        "knitro" => &["KNITRO_HOME", "KNITRODIR", "KNITRO_DIR", "ARTELYS_HOME"],
+        "mosek" => &["MOSEK_HOME", "MSKHOME"],
+        "baron" => &["BARON_DIR", "BARON_HOME"],
+        "copt" => &["COPT_HOME", "COPT_DIR"],
+        "nlopt-cli" => &["NLOPT_DIR", "NLOPT_HOME"],
+        "casadi" => &["CASADI_DIR", "CASADI_HOME"],
+        "osqp" => &["OSQP_DIR", "OSQP_HOME"],
+        "scs" => &["SCS_DIR", "SCS_HOME"],
+        "clarabel" => &["CLARABEL_DIR", "CLARABEL_HOME"],
+        "ecos" => &["ECOS_DIR", "ECOS_HOME"],
+        "qpoases" => &["QPOASES_DIR", "QPOASES_HOME"],
+        "proxqp" => &["PROXQP_DIR", "PROXQP_HOME"],
+        "cosmo" => &["COSMO_DIR", "COSMO_HOME"],
+        "sdpa" => &["SDPA_DIR", "SDPA_HOME"],
+        "csdp" => &["CSDP_DIR", "CSDP_HOME"],
+        "openmodelica" => &["OPENMODELICAHOME", "OPENMODELICA_HOME"],
+        "simulink" => &["MATLAB_ROOT", "MATLAB_HOME"],
+        "gazebo" => &["GAZEBO_HOME", "GZ_HOME"],
+        "jaamsim" => &["JAAMSIM_HOME", "JAAMSIM_DIR"],
+        "matsim" => &["MATSIM_HOME", "MATSIM_DIR"],
+        "ptolemy-ii" => &["PTII", "PTOLEMY_HOME", "PTOLEMY_II_HOME"],
+        "repast" => &["REPAST_HOME", "REPAST_DIR"],
+        "mason" => &["MASON_HOME", "MASON_DIR"],
+        "cloudsim" => &["CLOUDSIM_HOME", "CLOUDSIM_DIR"],
+        "neqsim" => &["NEQSIM_HOME", "NEQSIM_DIR"],
+        "anylogic" => &["ANYLOGIC_HOME", "ANYLOGIC_DIR"],
+        _ => &[],
+    } {
+        push_unique_env_name(&mut names, *name);
+    }
+    names
+}
+
 pub fn external_validation_adapter_command(tool: &ExternalValidationToolSpec) -> Option<PathBuf> {
     configured_adapter_command(tool)
         .0
+        .or_else(|| find_first_command_in_install_dirs(tool))
         .or_else(|| find_first_command(tool.command_aliases))
 }
 
@@ -3944,7 +4023,10 @@ pub fn probe_external_validation_tool(
     tool: &ExternalValidationToolSpec,
 ) -> ExternalValidationProbe {
     let (configured_command, saw_configured_command) = configured_adapter_command(tool);
-    if let Some(command) = configured_command.or_else(|| find_first_command(tool.command_aliases)) {
+    if let Some(command) = configured_command
+        .or_else(|| find_first_command_in_install_dirs(tool))
+        .or_else(|| find_first_command(tool.command_aliases))
+    {
         return ExternalValidationProbe {
             tool_id: tool.id.to_string(),
             status: ExternalValidationProbeStatus::Ready,
@@ -3971,6 +4053,11 @@ pub fn probe_external_validation_tool(
     let artifact = first_configured_env_value(&external_validation_artifact_env_names(tool));
     if let Some(value) = artifact {
         return probe_configured_artifact(tool, value);
+    }
+    if tool.artifact_kind == ExternalValidationArtifactKind::JavaClasspath {
+        if let Some(classpath) = java_classpath_from_install_dirs(tool) {
+            return probe_configured_artifact(tool, classpath.to_string_lossy().to_string());
+        }
     }
 
     ExternalValidationProbe {
@@ -4165,6 +4252,13 @@ fn external_validation_artifact_hint(tool: &ExternalValidationToolSpec) -> Strin
         .unwrap_or_else(|| "a local adapter command".to_string())
 }
 
+fn push_unique_env_name(names: &mut Vec<String>, name: impl Into<String>) {
+    let name = name.into();
+    if !names.iter().any(|existing| existing == &name) {
+        names.push(name);
+    }
+}
+
 fn configured_adapter_command(tool: &ExternalValidationToolSpec) -> (Option<PathBuf>, bool) {
     let mut saw_configured = false;
     for env_name in external_validation_adapter_env_names(tool) {
@@ -4178,6 +4272,124 @@ fn configured_adapter_command(tool: &ExternalValidationToolSpec) -> (Option<Path
         }
     }
     (None, saw_configured)
+}
+
+fn find_first_command_in_install_dirs(tool: &ExternalValidationToolSpec) -> Option<PathBuf> {
+    for env_name in external_validation_command_dir_env_names(tool) {
+        let Some(raw_value) = env::var_os(&env_name) else {
+            continue;
+        };
+        if raw_value.to_string_lossy().trim().is_empty() {
+            continue;
+        }
+        for root in env::split_paths(&raw_value) {
+            if let Some(path) = find_command_in_install_dir(&root, tool.command_aliases) {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+fn java_classpath_from_install_dirs(tool: &ExternalValidationToolSpec) -> Option<OsString> {
+    for env_name in external_validation_command_dir_env_names(tool) {
+        let Some(raw_value) = env::var_os(&env_name) else {
+            continue;
+        };
+        if raw_value.to_string_lossy().trim().is_empty() {
+            continue;
+        }
+        for root in env::split_paths(&raw_value) {
+            if let Some(classpath) = find_java_classpath_in_install_dir(&root) {
+                return Some(classpath);
+            }
+        }
+    }
+    None
+}
+
+fn find_java_classpath_in_install_dir(root: &Path) -> Option<OsString> {
+    let mut jars = Vec::new();
+    if is_jar_file(root) {
+        jars.push(root.to_path_buf());
+    }
+    for dir in [
+        root.to_path_buf(),
+        root.join("lib"),
+        root.join("share").join("java"),
+        root.join("build").join("libs"),
+        root.join("target"),
+        root.join("target").join("dependency"),
+    ] {
+        collect_jar_files(&dir, &mut jars);
+    }
+    if let Ok(children) = fs::read_dir(root) {
+        for child in children.flatten() {
+            let child_path = child.path();
+            if !child_path.is_dir() {
+                continue;
+            }
+            collect_jar_files(&child_path.join("lib"), &mut jars);
+            collect_jar_files(&child_path.join("build").join("libs"), &mut jars);
+            collect_jar_files(&child_path.join("target"), &mut jars);
+            collect_jar_files(&child_path.join("target").join("dependency"), &mut jars);
+        }
+    }
+    if jars.is_empty() {
+        return None;
+    }
+    env::join_paths(jars).ok()
+}
+
+fn collect_jar_files(dir: &Path, jars: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if is_jar_file(&path) && !jars.contains(&path) {
+            jars.push(path);
+        }
+    }
+}
+
+fn is_jar_file(path: &Path) -> bool {
+    path.is_file()
+        && path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("jar"))
+}
+
+fn find_command_in_install_dir(root: &Path, aliases: &[&str]) -> Option<PathBuf> {
+    let mut candidate_dirs = vec![root.to_path_buf(), root.join("bin")];
+    if let Ok(children) = fs::read_dir(root) {
+        for child in children.flatten() {
+            let child_path = child.path();
+            if !child_path.is_dir() {
+                continue;
+            }
+            let child_bin = child_path.join("bin");
+            candidate_dirs.push(child_bin.clone());
+            if let Ok(platform_dirs) = fs::read_dir(&child_bin) {
+                for platform_dir in platform_dirs.flatten() {
+                    let platform_path = platform_dir.path();
+                    if platform_path.is_dir() {
+                        candidate_dirs.push(platform_path);
+                    }
+                }
+            }
+        }
+    }
+
+    for dir in candidate_dirs {
+        for alias in aliases {
+            if let Some(path) = resolve_command_path(&dir.join(alias)) {
+                return Some(path);
+            }
+        }
+    }
+    None
 }
 
 fn first_configured_env_value(names: &[String]) -> Option<String> {
@@ -4220,20 +4432,21 @@ mod tests {
     use crate::des::general::external_validation_tools::{
         dimacs_cnf_to_string, dimacs_wcnf_to_string, external_benchmark_manifest_to_json,
         external_validation_adapter_env_names, external_validation_artifact_cli_args,
-        external_validation_artifact_env_names, external_validation_consensus_report_to_json,
+        external_validation_artifact_env_names, external_validation_command_dir_env_names,
+        external_validation_consensus_report_to_json,
         external_validation_default_artifact_cli_args, external_validation_default_file_cli_args,
         external_validation_default_text_cli_args, external_validation_file_cli_args,
-        external_validation_tool_specs, find_external_validation_tool,
-        infer_external_validation_text_verdict, json_schema_validation_request_to_json,
-        minizinc_validation_request_to_json, prism_validation_model_to_string,
-        prism_validation_properties_to_string, run_external_validation_artifact_cli,
-        run_external_validation_consensus, run_external_validation_file_cli,
-        run_external_validation_text_cli, simulation_validation_request_to_json,
-        smtlib_validation_script_to_string, tla_validation_module_to_string, DimacsCnf, DimacsWcnf,
-        DimacsWeightedClause, ExternalBenchmarkManifest, ExternalBenchmarkManifestEntry,
-        ExternalValidationArtifact, ExternalValidationArtifactCliOptions,
-        ExternalValidationArtifactKind, ExternalValidationCapability,
-        ExternalValidationCliInvocation, ExternalValidationFamily,
+        external_validation_tool_specs, find_command_in_install_dir, find_external_validation_tool,
+        find_java_classpath_in_install_dir, infer_external_validation_text_verdict, is_jar_file,
+        json_schema_validation_request_to_json, minizinc_validation_request_to_json,
+        prism_validation_model_to_string, prism_validation_properties_to_string,
+        run_external_validation_artifact_cli, run_external_validation_consensus,
+        run_external_validation_file_cli, run_external_validation_text_cli,
+        simulation_validation_request_to_json, smtlib_validation_script_to_string,
+        tla_validation_module_to_string, DimacsCnf, DimacsWcnf, DimacsWeightedClause,
+        ExternalBenchmarkManifest, ExternalBenchmarkManifestEntry, ExternalValidationArtifact,
+        ExternalValidationArtifactCliOptions, ExternalValidationArtifactKind,
+        ExternalValidationCapability, ExternalValidationCliInvocation, ExternalValidationFamily,
         ExternalValidationFileCliOptions, ExternalValidationProbeStatus,
         ExternalValidationRunStatus, ExternalValidationRuntime, ExternalValidationTextCliOptions,
         ExternalValidationTextFormat, ExternalValidationTextVerdict, JsonSchemaValidationRequest,
@@ -4416,6 +4629,110 @@ mod tests {
             external_validation_artifact_env_names(check_jsonschema)[0],
             "ORES_CHECK_JSONSCHEMA_PYTHON"
         );
+        let sumo = find_external_validation_tool("sumo").unwrap();
+        assert!(
+            external_validation_command_dir_env_names(sumo).contains(&"ORES_SUMO_DIR".to_string())
+        );
+        assert!(external_validation_command_dir_env_names(sumo).contains(&"SUMO_HOME".to_string()));
+        let minizinc = find_external_validation_tool("minizinc").unwrap();
+        assert!(external_validation_command_dir_env_names(minizinc)
+            .contains(&"MINIZINC_HOME".to_string()));
+        let copt = find_external_validation_tool("copt").unwrap();
+        assert!(external_validation_command_dir_env_names(copt).contains(&"COPT_HOME".to_string()));
+        let mosek = find_external_validation_tool("mosek").unwrap();
+        assert!(
+            external_validation_command_dir_env_names(mosek).contains(&"MOSEK_HOME".to_string())
+        );
+        assert!(!external_validation_command_dir_env_names(mosek)
+            .contains(&"MOSEKLM_LICENSE_FILE".to_string()));
+        let prism = find_external_validation_tool("prism").unwrap();
+        assert!(
+            external_validation_command_dir_env_names(prism).contains(&"PRISM_HOME".to_string())
+        );
+        let jpf = find_external_validation_tool("java-pathfinder").unwrap();
+        assert!(external_validation_command_dir_env_names(jpf).contains(&"JPF_HOME".to_string()));
+        let ptolemy = find_external_validation_tool("ptolemy-ii").unwrap();
+        assert!(external_validation_command_dir_env_names(ptolemy).contains(&"PTII".to_string()));
+        let jaamsim = find_external_validation_tool("jaamsim").unwrap();
+        assert!(external_validation_command_dir_env_names(jaamsim)
+            .contains(&"JAAMSIM_HOME".to_string()));
+        let proverif = find_external_validation_tool("proverif").unwrap();
+        assert!(external_validation_command_dir_env_names(proverif)
+            .contains(&"PROVERIF_HOME".to_string()));
+    }
+
+    #[test]
+    fn install_dir_lookup_handles_validation_tool_bin_layouts() {
+        let root = std::env::temp_dir().join(format!(
+            "des-external-validation-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let command = root
+            .join("webots")
+            .join("bin")
+            .join("x86-64_osx")
+            .join("webots");
+        std::fs::create_dir_all(command.parent().unwrap()).unwrap();
+        std::fs::write(&command, b"").unwrap();
+
+        assert_eq!(
+            find_command_in_install_dir(&root, &["webots"]),
+            Some(command)
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn install_dir_lookup_builds_java_classpath_layouts() {
+        let root = std::env::temp_dir().join(format!(
+            "des-external-validation-java-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let share_jar = root.join("share").join("java").join("jaamsim.jar");
+        let nested_jar = root.join("ptolemy").join("lib").join("ptolemy.jar");
+        let non_jar = root.join("lib").join("README.txt");
+        std::fs::create_dir_all(share_jar.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(nested_jar.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(non_jar.parent().unwrap()).unwrap();
+        std::fs::write(&share_jar, b"").unwrap();
+        std::fs::write(&nested_jar, b"").unwrap();
+        std::fs::write(&non_jar, b"").unwrap();
+
+        let classpath = find_java_classpath_in_install_dir(&root).unwrap();
+        let paths: Vec<PathBuf> = std::env::split_paths(&classpath).collect();
+        assert!(paths.contains(&share_jar));
+        assert!(paths.contains(&nested_jar));
+        assert!(!paths.contains(&non_jar));
+        assert!(is_jar_file(&share_jar));
+        assert!(!is_jar_file(&non_jar));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn empty_install_dir_does_not_make_java_classpath() {
+        let root = std::env::temp_dir().join(format!(
+            "des-external-validation-empty-java-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+
+        assert!(find_java_classpath_in_install_dir(&root).is_none());
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

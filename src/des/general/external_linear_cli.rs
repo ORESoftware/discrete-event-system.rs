@@ -15,7 +15,9 @@ use std::time::Instant;
 use serde::Deserialize;
 use serde_json::{json, Number, Value};
 
-use crate::des::general::ip_mip_des::{BranchOrCutConstraint, ConstraintKind, IPMIPProblem};
+use crate::des::general::ip_mip_des::{
+    BranchOrCutConstraint, ConstraintKind, IPMIPProblem, MultiObjectiveIPMIPProblem,
+};
 use crate::des::general::lp::LPProblem;
 
 /// Linear model family to send to the external CLI bridge.
@@ -405,6 +407,8 @@ pub struct ExternalLinearCliSolution {
     pub solver_version: Option<String>,
     pub x: Vec<f64>,
     pub objective: Option<f64>,
+    /// Lexicographic objective values in priority order, when a multi-objective MIP is solved.
+    pub objective_values: Option<Vec<f64>>,
     /// LP algorithm family accepted by the CLI, when reported.
     pub lp_algorithm: Option<String>,
     /// Best known dual bound reported by a MIP-capable CLI, when available.
@@ -490,6 +494,8 @@ struct RawExternalLinearCliSolution {
     solver_version: Option<String>,
     x: Vec<f64>,
     objective: Option<f64>,
+    #[serde(rename = "objectiveValues")]
+    objective_values: Option<Vec<f64>>,
     #[serde(rename = "lpAlgorithm")]
     lp_algorithm: Option<String>,
     #[serde(rename = "bestBound")]
@@ -587,6 +593,30 @@ pub fn ipmip_problem_to_cli_json(problem: &IPMIPProblem) -> Value {
     })
 }
 
+/// Serialize a lexicographic multi-objective MIP into the CLI bridge contract.
+pub fn multi_objective_ipmip_problem_to_cli_json(problem: &MultiObjectiveIPMIPProblem) -> Value {
+    let mut payload = ipmip_problem_to_cli_json(&problem.base);
+    if let Value::Object(ref mut object) = payload {
+        object.insert(
+            "multi_objectives".to_string(),
+            Value::Array(
+                problem
+                    .objectives
+                    .iter()
+                    .map(|objective| {
+                        json!({
+                            "sense": objective.sense.as_str(),
+                            "c": f64_vec(&objective.c),
+                            "name": objective.name.as_deref(),
+                        })
+                    })
+                    .collect(),
+            ),
+        );
+    }
+    payload
+}
+
 /// Solve an LP through a locally installed command-line solver.
 pub fn solve_lp_with_external_cli(
     problem: &LPProblem,
@@ -607,6 +637,18 @@ pub fn solve_ipmip_with_external_cli(
     solve_linear_cli_json(
         ExternalLinearCliKind::Mip,
         ipmip_problem_to_cli_json(problem),
+        opts,
+    )
+}
+
+/// Solve a lexicographic multi-objective MIP through a locally installed CLI solver.
+pub fn solve_multi_objective_ipmip_with_external_cli(
+    problem: &MultiObjectiveIPMIPProblem,
+    opts: &ExternalLinearCliOptions,
+) -> ExternalLinearCliSolution {
+    solve_linear_cli_json(
+        ExternalLinearCliKind::Mip,
+        multi_objective_ipmip_problem_to_cli_json(problem),
         opts,
     )
 }
@@ -929,6 +971,7 @@ pub fn solve_linear_cli_json(
             solver_version: raw.solver_version,
             x: raw.x,
             objective: raw.objective,
+            objective_values: raw.objective_values,
             lp_algorithm: raw.lp_algorithm,
             best_bound: raw.best_bound,
             solution_limit: raw.solution_limit,
@@ -995,6 +1038,7 @@ fn external_cli_failure(
         solver_version: None,
         x: Vec::new(),
         objective: None,
+        objective_values: None,
         lp_algorithm: None,
         best_bound: None,
         solution_limit: None,
@@ -1241,10 +1285,14 @@ fn option_strings(values: Option<&Vec<String>>) -> Value {
 #[cfg(test)]
 mod tests {
     use crate::des::general::external_linear_cli::{
-        ipmip_problem_to_cli_json, lp_problem_to_cli_json, ExternalLinearCliKind,
+        ipmip_problem_to_cli_json, lp_problem_to_cli_json,
+        multi_objective_ipmip_problem_to_cli_json, ExternalLinearCliKind,
         ExternalLinearCliProbeStatus, ExternalLinearCliSolver, ExternalLinearCliStatus,
     };
-    use crate::des::general::ip_mip_des::{BranchOrCutConstraint, ConstraintKind, IPMIPProblem};
+    use crate::des::general::ip_mip_des::{
+        BranchOrCutConstraint, ConstraintKind, IPMIPProblem, LexicographicObjective,
+        MultiObjectiveIPMIPProblem,
+    };
     use crate::des::general::lp::{LPProblem, Sense};
 
     #[test]
@@ -1308,6 +1356,43 @@ mod tests {
         assert_eq!(payload["lazy_constraints"][0]["rhs"], 1.0);
         assert_eq!(payload["lazy_constraints"][0]["name"], "lazy-at-most-one");
         assert_eq!(payload["lazy_constraints"][0]["kind"], "lazy");
+    }
+
+    #[test]
+    fn multi_objective_payload_includes_lexicographic_stages() {
+        let base = IPMIPProblem {
+            sense: Sense::Max,
+            c: vec![0.0, 0.0],
+            a: vec![vec![1.0, 1.0]],
+            b: vec![1.0],
+            integer_vars: vec![true, true],
+            ub: Some(vec![1.0, 1.0]),
+            var_names: None,
+            con_names: None,
+            lazy_constraints: None,
+            variable_nodes: None,
+            constraint_nodes: None,
+        };
+        let p = MultiObjectiveIPMIPProblem {
+            base,
+            objectives: vec![
+                LexicographicObjective {
+                    sense: Sense::Max,
+                    c: vec![1.0, 1.0],
+                    name: Some("cardinality".to_string()),
+                },
+                LexicographicObjective {
+                    sense: Sense::Max,
+                    c: vec![3.0, 1.0],
+                    name: Some("preference".to_string()),
+                },
+            ],
+        };
+        let payload = multi_objective_ipmip_problem_to_cli_json(&p);
+        assert_eq!(payload["multi_objectives"][0]["sense"], "max");
+        assert_eq!(payload["multi_objectives"][0]["name"], "cardinality");
+        assert_eq!(payload["multi_objectives"][1]["c"][0], 3.0);
+        assert_eq!(payload["integer_vars"][1], true);
     }
 
     #[test]

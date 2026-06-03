@@ -6,11 +6,21 @@
 
 #![allow(dead_code)]
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use serde::Deserialize;
 
+use crate::des::general::advanced_optimization_models::{
+    pareto_front_is_nondominated, run_pareto_portfolio, run_particle_swarm,
+    ContinuousObjectiveName, ParetoPortfolioParams, ParticleSwarmParams, PortfolioAsset,
+};
+use crate::des::general::classical_optimization_models::{
+    run_job_shop_dispatch, run_job_shop_exact, run_vrp_exact, run_vrp_nearest_neighbor,
+    run_vrp_savings, DispatchRule, JobOperation, JobShopDispatchParams, JobShopJob, Point,
+    ScheduledOperation, VRPCustomer, VRPSavingsParams,
+};
 use crate::des::general::cp_sat::{
     enumerate_cp_solutions, find_cp_assumption_unsat_core, solve_cp_model, BoolLiteral,
     CpAlternative, CpAssumptionCoreOptions, CpAutomaton, CpCircuitArc, CpConstraint,
@@ -22,13 +32,29 @@ use crate::des::general::cp_sat::{
 };
 use crate::des::general::external_linear_cli::{
     external_linear_cli_command, probe_external_linear_cli_solver, solve_ipmip_with_external_cli,
-    solve_lp_with_external_cli, ExternalLinearCliBranchRule, ExternalLinearCliKind,
-    ExternalLinearCliLpAlgorithm, ExternalLinearCliMipSwitch, ExternalLinearCliNodeSelection,
-    ExternalLinearCliOptions, ExternalLinearCliPresolve, ExternalLinearCliProbeStatus,
-    ExternalLinearCliSolver, ExternalLinearCliStatus,
+    solve_lp_with_external_cli, solve_multi_objective_ipmip_with_external_cli,
+    ExternalLinearCliBranchRule, ExternalLinearCliKind, ExternalLinearCliLpAlgorithm,
+    ExternalLinearCliMipSwitch, ExternalLinearCliNodeSelection, ExternalLinearCliOptions,
+    ExternalLinearCliPresolve, ExternalLinearCliProbeStatus, ExternalLinearCliSolver,
+    ExternalLinearCliStatus,
+};
+use crate::des::general::external_nonlinear_reference::{
+    solve_exponential_fit_with_external_reference, solve_global_benchmark_with_external_reference,
+    solve_pareto_portfolio_with_external_reference, solve_rosenbrock_with_external_reference,
+    ExternalNonlinearBenchmarkObjective, ExternalNonlinearReferenceOptions,
+    ExternalNonlinearReferenceStatus,
 };
 use crate::des::general::external_optimization_ecosystem::{
     probe_external_optimization_tool, ExternalOptimizationProbeStatus, ExternalOptimizationTool,
+};
+use crate::des::general::external_quadratic_reference::{
+    solve_miqp_with_external_reference, solve_qcp_with_external_reference,
+    solve_qp_with_external_reference, solve_socp_with_external_reference,
+    ExternalQuadraticReferenceOptions, ExternalQuadraticReferenceStatus,
+};
+use crate::des::general::external_scheduling_reference::{
+    solve_job_shop_with_external_reference, ExternalSchedulingReferenceOptions,
+    ExternalSchedulingReferenceStatus,
 };
 use crate::des::general::ip_mip_des::{
     build_absolute_value_penalty_ip, build_binary_knapsack_ip, build_binary_product_gate_ip,
@@ -69,6 +95,10 @@ use crate::des::general::math_program::{
 };
 use crate::des::general::min_cost_flow::{
     min_cost_flow_to_lp, solve_min_cost_flow, MinCostFlowArc, MinCostFlowProblem, MinCostFlowStatus,
+};
+use crate::des::general::nonlinear_optimization_models::{
+    run_bfgs_rosenbrock, run_gauss_newton_curve_fit, run_levenberg_marquardt_curve_fit,
+    run_newton_rosenbrock, CurveFitPoint, NonlinearLeastSquaresParams, UnconstrainedOptParams,
 };
 use crate::des::general::qp::{
     solve_miqp_enumeration, solve_qcp_pattern_search, solve_qp_active_set,
@@ -175,6 +205,30 @@ struct CpLiteralReference {
 }
 
 #[derive(Debug, Deserialize)]
+struct RoutingReference {
+    status: String,
+    solver: String,
+    routes: Vec<RoutingReferenceRoute>,
+    objective: Option<f64>,
+    #[serde(rename = "feasibleRouteMasks")]
+    feasible_route_masks: Option<usize>,
+    #[serde(rename = "ortoolsStatus")]
+    ortools_status: Option<String>,
+    #[serde(rename = "ortoolsObjective")]
+    ortools_objective: Option<f64>,
+    message: Option<String>,
+    #[serde(rename = "ortoolsMessage")]
+    ortools_message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RoutingReferenceRoute {
+    customers: Vec<String>,
+    load: f64,
+    distance: f64,
+}
+
+#[derive(Debug, Deserialize)]
 struct LinearCliReference {
     status: String,
     solver: String,
@@ -182,6 +236,8 @@ struct LinearCliReference {
     solver_version: Option<String>,
     x: Vec<f64>,
     objective: Option<f64>,
+    #[serde(rename = "objectiveValues")]
+    objective_values: Option<Vec<f64>>,
     #[serde(rename = "lpAlgorithm")]
     lp_algorithm: Option<String>,
     #[serde(rename = "bestBound")]
@@ -388,6 +444,163 @@ impl Driver {
         }
         serde_json::from_slice(&out.stdout)
             .unwrap_or_else(|e| panic!("parse {script} stdout as JSON: {e}"))
+    }
+
+    fn sample_job_shop_jobs(&self) -> Vec<JobShopJob> {
+        vec![
+            JobShopJob {
+                id: "J1".to_string(),
+                due: Some(10.0),
+                operations: vec![
+                    JobOperation {
+                        machine: "M1".to_string(),
+                        duration: 3.0,
+                    },
+                    JobOperation {
+                        machine: "M2".to_string(),
+                        duration: 2.0,
+                    },
+                ],
+            },
+            JobShopJob {
+                id: "J2".to_string(),
+                due: Some(8.0),
+                operations: vec![
+                    JobOperation {
+                        machine: "M2".to_string(),
+                        duration: 2.0,
+                    },
+                    JobOperation {
+                        machine: "M1".to_string(),
+                        duration: 4.0,
+                    },
+                ],
+            },
+            JobShopJob {
+                id: "J3".to_string(),
+                due: Some(12.0),
+                operations: vec![
+                    JobOperation {
+                        machine: "M1".to_string(),
+                        duration: 2.0,
+                    },
+                    JobOperation {
+                        machine: "M2".to_string(),
+                        duration: 3.0,
+                    },
+                ],
+            },
+        ]
+    }
+
+    fn job_shop_schedule_feasible(
+        &self,
+        jobs: &[JobShopJob],
+        schedule: &[ScheduledOperation],
+    ) -> bool {
+        let total_ops: usize = jobs.iter().map(|job| job.operations.len()).sum();
+        if schedule.len() != total_ops {
+            return false;
+        }
+
+        let mut seen: HashSet<(String, usize)> = HashSet::new();
+        for op in schedule {
+            if op.start < -1e-9 || op.finish + 1e-9 < op.start {
+                return false;
+            }
+            if !seen.insert((op.job_id.clone(), op.op_index)) {
+                return false;
+            }
+            let Some(job) = jobs.iter().find(|job| job.id == op.job_id) else {
+                return false;
+            };
+            let Some(expected) = job.operations.get(op.op_index) else {
+                return false;
+            };
+            if expected.machine != op.machine {
+                return false;
+            }
+            if ((op.finish - op.start) - expected.duration).abs()
+                > 1e-8 * 1.0_f64.max(expected.duration.abs())
+            {
+                return false;
+            }
+            if op.op_index > 0 {
+                let Some(previous) = schedule
+                    .iter()
+                    .find(|other| other.job_id == op.job_id && other.op_index == op.op_index - 1)
+                else {
+                    return false;
+                };
+                if previous.finish > op.start + 1e-9 {
+                    return false;
+                }
+            }
+        }
+
+        for job in jobs {
+            for op_index in 0..job.operations.len() {
+                if !seen.contains(&(job.id.clone(), op_index)) {
+                    return false;
+                }
+            }
+        }
+
+        for i in 0..schedule.len() {
+            for j in (i + 1)..schedule.len() {
+                let a = &schedule[i];
+                let b = &schedule[j];
+                if a.machine == b.machine && a.start.max(b.start) < a.finish.min(b.finish) - 1e-9 {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    fn check_cp_reference_optimal(
+        &mut self,
+        label: &str,
+        model: &CpModel,
+        reference_json: serde_json::Value,
+        expected_assignment: &[i64],
+        expected_objective: Option<i64>,
+    ) {
+        let internal = solve_cp_model(model, CpSolveOptions::default());
+        let value = self.run_python_json(
+            "cp_sat_reference.py",
+            &["--solver", "auto"],
+            &reference_json.to_string(),
+        );
+        let reference: CpReference =
+            serde_json::from_value(value).expect("parse optimal CP reference");
+        self.check(
+            format!("CP-SAT {label} status internal/reference"),
+            internal.status == CpStatus::Optimal && reference.status == "optimal",
+            format!(
+                "internal={} external={} solver={}",
+                internal.status.as_str(),
+                reference.status,
+                reference.solver
+            ),
+        );
+        self.check(
+            format!("CP-SAT {label} objective"),
+            internal.objective == reference.objective && internal.objective == expected_objective,
+            format!(
+                "internal={:?} external={:?} expected={:?}",
+                internal.objective, reference.objective, expected_objective
+            ),
+        );
+        self.check(
+            format!("CP-SAT {label} assignment"),
+            internal.assignment == reference.assignment
+                && internal.assignment.as_slice() == expected_assignment,
+            format!(
+                "internal={:?} external={:?} expected={:?}",
+                internal.assignment, reference.assignment, expected_assignment
+            ),
+        );
     }
 
     fn validate_lp(&mut self) {
@@ -1928,6 +2141,34 @@ impl Driver {
         .to_string();
         let expected_pool_x = [vec![1.0, 0.0], vec![0.0, 1.0], vec![0.0, 0.0]];
         let expected_pool_objectives = [3.0, 2.0, 0.0];
+        let multi_problem = build_lexicographic_choice_ip();
+        let multi_internal = solve_multi_objective_ipmip_with_des(
+            multi_problem.clone(),
+            IPMIPSolveOptions {
+                lp_algorithm: Some(LpRelaxationAlgorithm::Concrete(
+                    ConcreteLpRelaxationAlgorithm::InternalSimplex,
+                )),
+                max_cut_rounds: Some(1),
+                ..Default::default()
+            },
+        );
+        let multi_base = &multi_problem.base;
+        let multi_json = serde_json::json!({
+            "sense": multi_base.sense.as_str(),
+            "c": &multi_base.c,
+            "a": &multi_base.a,
+            "b": &multi_base.b,
+            "integer_vars": &multi_base.integer_vars,
+            "ub": &multi_base.ub,
+            "var_names": &multi_base.var_names,
+            "con_names": &multi_base.con_names,
+            "multi_objectives": multi_problem.objectives.iter().map(|objective| serde_json::json!({
+                "sense": objective.sense.as_str(),
+                "c": &objective.c,
+                "name": &objective.name,
+            })).collect::<Vec<_>>(),
+        })
+        .to_string();
         let lazy_mip = IPMIPProblem {
             sense: Sense::Max,
             c: vec![1.0, 1.0],
@@ -4319,6 +4560,90 @@ impl Driver {
                 );
             }
         }
+
+        for solver in mip_solvers.iter().copied() {
+            let reference = self.run_linear_cli_reference("mip", solver, &multi_json);
+            if reference.status == "unavailable" && reference.message.contains("not found") {
+                println!("  SKIP  IP/MIP lexicographic-choice {solver}: executable not found");
+                continue;
+            }
+            let objective_values = reference.objective_values.clone().unwrap_or_default();
+            self.check(
+                format!("IP/MIP lexicographic-choice {solver}:cli status optimal"),
+                multi_internal.status == IPMIPStatus::Optimal && reference.status == "optimal",
+                format!(
+                    "internal={} external={} solver={} values={:?} message={}",
+                    multi_internal.status.as_str(),
+                    reference.status,
+                    reference.solver,
+                    objective_values,
+                    reference.message
+                ),
+            );
+            self.max_abs_close(
+                &format!("IP/MIP lexicographic-choice {solver}:cli x"),
+                &multi_internal.x,
+                &reference.x,
+                1e-9,
+            );
+            self.max_abs_close(
+                &format!("IP/MIP lexicographic-choice {solver}:cli objective vector"),
+                &multi_internal.objective_values,
+                &objective_values,
+                1e-9,
+            );
+        }
+
+        for solver in [
+            ExternalLinearCliSolver::Highs,
+            ExternalLinearCliSolver::Glpk,
+            ExternalLinearCliSolver::Scip,
+            ExternalLinearCliSolver::Cbc,
+        ] {
+            let solver_name = solver.as_str();
+            let reference = solve_multi_objective_ipmip_with_external_cli(
+                &multi_problem,
+                &ExternalLinearCliOptions {
+                    solver,
+                    time_limit_secs: Some(5.0),
+                    ..Default::default()
+                },
+            );
+            if reference.status == ExternalLinearCliStatus::Unavailable
+                && reference.message.contains("not found")
+            {
+                println!(
+                    "  SKIP  IP/MIP lexicographic-choice {solver_name}:rust-cli executable not found"
+                );
+                continue;
+            }
+            let objective_values = reference.objective_values.clone().unwrap_or_default();
+            self.check(
+                format!("IP/MIP lexicographic-choice {solver_name}:rust-cli status optimal"),
+                multi_internal.status == IPMIPStatus::Optimal
+                    && reference.status == ExternalLinearCliStatus::Optimal,
+                format!(
+                    "internal={} external={} solver={} values={:?} message={}",
+                    multi_internal.status.as_str(),
+                    reference.status.as_str(),
+                    reference.solver,
+                    objective_values,
+                    reference.message
+                ),
+            );
+            self.max_abs_close(
+                &format!("IP/MIP lexicographic-choice {solver_name}:rust-cli x"),
+                &multi_internal.x,
+                &reference.x,
+                1e-9,
+            );
+            self.max_abs_close(
+                &format!("IP/MIP lexicographic-choice {solver_name}:rust-cli objective vector"),
+                &multi_internal.objective_values,
+                &objective_values,
+                1e-9,
+            );
+        }
     }
 
     fn validate_external_optimization_ecosystems(&mut self) {
@@ -4355,6 +4680,242 @@ impl Driver {
                 ),
             );
         }
+    }
+
+    fn validate_nonlinear_and_metaheuristics(&mut self) {
+        println!(
+            "\n-- Nonlinear/metaheuristic optimization: native DES vs SciPy/NLopt-style bridge --"
+        );
+        let opts = ExternalNonlinearReferenceOptions {
+            max_iterations: Some(250),
+            ..Default::default()
+        };
+        let x0 = vec![-1.2, 1.0];
+        let rosenbrock_reference = solve_rosenbrock_with_external_reference(&x0, &opts);
+        let newton = run_newton_rosenbrock(UnconstrainedOptParams::default());
+        self.check(
+            "Rosenbrock external reference status",
+            rosenbrock_reference.status == ExternalNonlinearReferenceStatus::Optimal,
+            format!(
+                "status={} solver={} objective={:?} grad={:?} message={}",
+                rosenbrock_reference.status.as_str(),
+                rosenbrock_reference.solver,
+                rosenbrock_reference.objective,
+                rosenbrock_reference.gradient_norm,
+                rosenbrock_reference.message
+            ),
+        );
+        self.close(
+            "Newton Rosenbrock objective vs reference",
+            newton.objective,
+            rosenbrock_reference.objective.unwrap_or(f64::NAN),
+            1e-6,
+        );
+        self.max_abs_close(
+            "Newton Rosenbrock x vs reference",
+            &newton.x,
+            &rosenbrock_reference.x,
+            1e-4,
+        );
+
+        let bfgs = run_bfgs_rosenbrock(UnconstrainedOptParams::default());
+        self.close(
+            "BFGS Rosenbrock objective vs reference",
+            bfgs.objective,
+            rosenbrock_reference.objective.unwrap_or(f64::NAN),
+            1e-6,
+        );
+        self.max_abs_close(
+            "BFGS Rosenbrock x vs reference",
+            &bfgs.x,
+            &rosenbrock_reference.x,
+            2e-3,
+        );
+
+        let points = vec![
+            CurveFitPoint { x: 0.0, y: 2.00 },
+            CurveFitPoint { x: 1.0, y: 1.22 },
+            CurveFitPoint { x: 2.0, y: 0.74 },
+            CurveFitPoint { x: 3.0, y: 0.45 },
+            CurveFitPoint { x: 4.0, y: 0.27 },
+        ];
+        let initial = vec![1.0, -0.2];
+        let fit_reference = solve_exponential_fit_with_external_reference(&points, &initial, &opts);
+        let gauss_newton = run_gauss_newton_curve_fit(NonlinearLeastSquaresParams::default());
+        let levenberg_marquardt =
+            run_levenberg_marquardt_curve_fit(NonlinearLeastSquaresParams::default());
+        self.check(
+            "Exponential fit external reference status",
+            fit_reference.status == ExternalNonlinearReferenceStatus::Optimal,
+            format!(
+                "status={} solver={} sse={:?} residual={:?} grad={:?} message={}",
+                fit_reference.status.as_str(),
+                fit_reference.solver,
+                fit_reference.objective,
+                fit_reference.residual_norm,
+                fit_reference.gradient_norm,
+                fit_reference.message
+            ),
+        );
+        self.close(
+            "Gauss-Newton exponential fit SSE vs reference",
+            gauss_newton.sse,
+            fit_reference.objective.unwrap_or(f64::NAN),
+            1e-7,
+        );
+        self.max_abs_close(
+            "Gauss-Newton exponential fit params vs reference",
+            &gauss_newton.params,
+            &fit_reference.x,
+            1e-4,
+        );
+        self.close(
+            "Levenberg-Marquardt exponential fit SSE vs reference",
+            levenberg_marquardt.sse,
+            fit_reference.objective.unwrap_or(f64::NAN),
+            1e-6,
+        );
+        self.max_abs_close(
+            "Levenberg-Marquardt exponential fit params vs reference",
+            &levenberg_marquardt.params,
+            &fit_reference.x,
+            2e-3,
+        );
+
+        let global_reference = solve_global_benchmark_with_external_reference(
+            ExternalNonlinearBenchmarkObjective::Sphere,
+            3,
+            -5.0,
+            5.0,
+            &ExternalNonlinearReferenceOptions {
+                max_iterations: Some(120),
+                ..Default::default()
+            },
+        );
+        let pso = run_particle_swarm(ParticleSwarmParams {
+            objective: Some(ContinuousObjectiveName::Sphere),
+            dimension: Some(3),
+            particles: Some(32),
+            iterations: Some(120),
+            seed: Some(11),
+            ..Default::default()
+        });
+        self.check(
+            "Sphere global reference status",
+            global_reference.status == ExternalNonlinearReferenceStatus::Optimal,
+            format!(
+                "status={} solver={} objective={:?} message={}",
+                global_reference.status.as_str(),
+                global_reference.solver,
+                global_reference.objective,
+                global_reference.message
+            ),
+        );
+        self.check(
+            "Particle swarm sphere objective reaches reference basin",
+            pso.best_value <= global_reference.objective.unwrap_or(0.0) + 1e-6,
+            format!(
+                "native={:.10} reference={:?} solver={}",
+                pso.best_value, global_reference.objective, global_reference.solver
+            ),
+        );
+
+        let assets = vec![
+            PortfolioAsset {
+                name: "cash".to_string(),
+                expected_return: 0.02,
+                risk: 0.01,
+            },
+            PortfolioAsset {
+                name: "bonds".to_string(),
+                expected_return: 0.045,
+                risk: 0.06,
+            },
+            PortfolioAsset {
+                name: "equity".to_string(),
+                expected_return: 0.09,
+                risk: 0.18,
+            },
+            PortfolioAsset {
+                name: "growth".to_string(),
+                expected_return: 0.13,
+                risk: 0.30,
+            },
+        ];
+        let pareto_native = run_pareto_portfolio(ParetoPortfolioParams {
+            assets: Some(assets.clone()),
+            samples: Some(240),
+            seed: Some(19),
+        });
+        let pareto_reference =
+            solve_pareto_portfolio_with_external_reference(&assets, 240, 19, &opts);
+        self.check(
+            "Pareto portfolio external reference status",
+            pareto_reference.status == ExternalNonlinearReferenceStatus::Optimal,
+            format!(
+                "status={} solver={} points={} candidates={:?} hypervolume={:?} message={}",
+                pareto_reference.status.as_str(),
+                pareto_reference.solver,
+                pareto_reference.pareto_front.len(),
+                pareto_reference.candidate_count,
+                pareto_reference.hypervolume,
+                pareto_reference.message
+            ),
+        );
+        self.check(
+            "Pareto portfolio native/reference candidate count",
+            pareto_reference
+                .candidate_count
+                .is_some_and(|count| count as usize == pareto_native.candidate_count),
+            format!(
+                "native={} reference={:?}",
+                pareto_native.candidate_count, pareto_reference.candidate_count
+            ),
+        );
+        self.check(
+            "Pareto portfolio fronts nondominated",
+            pareto_front_is_nondominated(&pareto_native.pareto_front)
+                && pareto_front_is_nondominated(&pareto_reference.pareto_front),
+            format!(
+                "native_points={} reference_points={}",
+                pareto_native.pareto_front.len(),
+                pareto_reference.pareto_front.len()
+            ),
+        );
+        self.check(
+            "Pareto portfolio front length",
+            pareto_native.pareto_front.len() == pareto_reference.pareto_front.len(),
+            format!(
+                "native={} reference={}",
+                pareto_native.pareto_front.len(),
+                pareto_reference.pareto_front.len()
+            ),
+        );
+        let mut max_front_diff = 0.0_f64;
+        for (native, reference) in pareto_native
+            .pareto_front
+            .iter()
+            .zip(&pareto_reference.pareto_front)
+        {
+            max_front_diff = max_front_diff
+                .max((native.risk - reference.risk).abs())
+                .max((native.expected_return - reference.expected_return).abs());
+            for (a, b) in native.weights.iter().zip(&reference.weights) {
+                max_front_diff = max_front_diff.max((a - b).abs());
+            }
+        }
+        self.check(
+            "Pareto portfolio front values",
+            pareto_native.pareto_front.len() == pareto_reference.pareto_front.len()
+                && max_front_diff <= 1e-10,
+            format!("max_abs={max_front_diff:.3e}"),
+        );
+        self.close(
+            "Pareto portfolio hypervolume vs reference",
+            pareto_native.hypervolume,
+            pareto_reference.hypervolume.unwrap_or(f64::NAN),
+            1e-10,
+        );
     }
 
     fn check_math_program_cli_cross_check(
@@ -7354,6 +7915,224 @@ impl Driver {
         );
     }
 
+    fn validate_vehicle_routing(&mut self) {
+        println!("\n-- Vehicle routing: exact CVRP vs OR-Tools Routing bridge --");
+        let customers = vec![
+            VRPCustomer {
+                id: "A".to_string(),
+                x: 1.0,
+                y: 2.0,
+                demand: 2.0,
+            },
+            VRPCustomer {
+                id: "B".to_string(),
+                x: 2.0,
+                y: 1.0,
+                demand: 2.0,
+            },
+            VRPCustomer {
+                id: "C".to_string(),
+                x: 4.0,
+                y: 1.0,
+                demand: 2.0,
+            },
+            VRPCustomer {
+                id: "D".to_string(),
+                x: 5.0,
+                y: 2.0,
+                demand: 1.0,
+            },
+            VRPCustomer {
+                id: "E".to_string(),
+                x: 3.0,
+                y: 4.0,
+                demand: 2.0,
+            },
+        ];
+        let params = VRPSavingsParams {
+            depot: Some(Point { x: 0.0, y: 0.0 }),
+            customers: Some(customers.clone()),
+            vehicle_capacity: Some(5.0),
+        };
+        let exact = run_vrp_exact(params.clone());
+        let savings = run_vrp_savings(params.clone());
+        let nearest = run_vrp_nearest_neighbor(params.clone());
+        let served: usize = exact.routes.iter().map(|route| route.customers.len()).sum();
+        self.check(
+            "CVRP exact native feasibility",
+            served == customers.len() && exact.routes.iter().all(|route| route.load <= 5.0 + 1e-9),
+            format!(
+                "routes={:?} total={:.10}",
+                exact.routes, exact.total_distance
+            ),
+        );
+        self.check(
+            "CVRP heuristics bounded by exact optimum",
+            savings.total_distance + 1e-9 >= exact.total_distance
+                && nearest.total_distance + 1e-9 >= exact.total_distance,
+            format!(
+                "exact={:.10} savings={:.10} nearest={:.10}",
+                exact.total_distance, savings.total_distance, nearest.total_distance
+            ),
+        );
+
+        let routing_json = serde_json::json!({
+            "depot": {"x": 0.0, "y": 0.0},
+            "customers": customers.iter().map(|customer| serde_json::json!({
+                "id": &customer.id,
+                "x": customer.x,
+                "y": customer.y,
+                "demand": customer.demand,
+            })).collect::<Vec<_>>(),
+            "vehicle_capacity": 5.0,
+        })
+        .to_string();
+        let value =
+            self.run_python_json("routing_reference.py", &["--solver", "auto"], &routing_json);
+        let reference: RoutingReference =
+            serde_json::from_value(value).expect("parse routing reference");
+        self.check(
+            "CVRP exact/reference status",
+            reference.status == "optimal",
+            format!(
+                "status={} solver={} message={:?} route_masks={:?}",
+                reference.status,
+                reference.solver,
+                reference.message,
+                reference.feasible_route_masks
+            ),
+        );
+        self.close(
+            "CVRP exact/reference objective",
+            exact.total_distance,
+            reference.objective.unwrap_or(f64::NAN),
+            1e-8,
+        );
+        self.check(
+            "CVRP exact/reference route feasibility",
+            reference
+                .routes
+                .iter()
+                .all(|route| route.load <= 5.0 + 1e-9)
+                && reference
+                    .routes
+                    .iter()
+                    .map(|route| route.customers.len())
+                    .sum::<usize>()
+                    == customers.len()
+                && reference.routes.iter().all(|route| route.distance >= 0.0),
+            format!("routes={:?}", reference.routes),
+        );
+        match (
+            reference.ortools_status.as_deref(),
+            reference.ortools_objective,
+        ) {
+            (Some("optimal"), Some(objective)) => self.close(
+                "CVRP OR-Tools Routing objective",
+                exact.total_distance,
+                objective,
+                1e-6,
+            ),
+            _ => println!(
+                "  SKIP  CVRP OR-Tools Routing objective: status={:?} message={:?}",
+                reference.ortools_status, reference.ortools_message
+            ),
+        }
+    }
+
+    fn validate_job_shop_scheduling(&mut self) {
+        println!("\n-- Scheduling: exact job-shop vs OR-Tools CP-SAT bridge --");
+        let jobs = self.sample_job_shop_jobs();
+        let params = JobShopDispatchParams {
+            jobs: Some(jobs.clone()),
+            rule: Some(DispatchRule::Spt),
+        };
+        let exact = run_job_shop_exact(params.clone());
+        let dispatch = run_job_shop_dispatch(params);
+        self.check(
+            "Job-shop exact native feasibility",
+            self.job_shop_schedule_feasible(&jobs, &exact.schedule),
+            format!(
+                "operations={} makespan={:.10} total_flow={:.10}",
+                exact.schedule.len(),
+                exact.makespan,
+                exact.total_flow_time
+            ),
+        );
+        self.check(
+            "Job-shop exact improves/bounds dispatch",
+            exact.makespan <= dispatch.makespan + 1e-9,
+            format!(
+                "exact={:.10} dispatch={:.10}",
+                exact.makespan, dispatch.makespan
+            ),
+        );
+        self.close("Job-shop exact known optimum", exact.makespan, 9.0, 1e-10);
+
+        let external = solve_job_shop_with_external_reference(
+            &jobs,
+            &ExternalSchedulingReferenceOptions::default(),
+        );
+        self.check(
+            "Job-shop exact/reference bridge status optimal",
+            external.status == ExternalSchedulingReferenceStatus::Optimal,
+            format!(
+                "status={} solver={} message={}",
+                external.status.as_str(),
+                external.solver,
+                external.message
+            ),
+        );
+        self.close(
+            "Job-shop exact/reference makespan",
+            exact.makespan,
+            external.makespan.unwrap_or(f64::NAN),
+            1e-8,
+        );
+        self.close(
+            "Job-shop exact/reference total flow",
+            exact.total_flow_time,
+            external.total_flow_time.unwrap_or(f64::NAN),
+            1e-8,
+        );
+        self.check(
+            "Job-shop exact/reference feasibility",
+            self.job_shop_schedule_feasible(&jobs, &external.schedule),
+            format!(
+                "external_ops={} external_makespan={:?}",
+                external.schedule.len(),
+                external.makespan
+            ),
+        );
+
+        match (
+            external.ortools_status.as_deref(),
+            external.ortools_makespan,
+        ) {
+            (Some("optimal"), Some(makespan)) => {
+                self.close(
+                    "Job-shop OR-Tools CP-SAT makespan",
+                    exact.makespan,
+                    makespan,
+                    1e-8,
+                );
+                self.check(
+                    "Job-shop OR-Tools CP-SAT feasibility",
+                    self.job_shop_schedule_feasible(&jobs, &external.ortools_schedule),
+                    format!(
+                        "ortools_ops={} ortools_total_flow={:?}",
+                        external.ortools_schedule.len(),
+                        external.ortools_total_flow_time
+                    ),
+                );
+            }
+            _ => println!(
+                "  SKIP  Job-shop OR-Tools CP-SAT makespan: status={:?} message={}",
+                external.ortools_status, external.message
+            ),
+        }
+    }
+
     fn sample_qp(&self) -> QuadraticProgram {
         QuadraticProgram {
             q: vec![vec![2.0, 0.5], vec![0.5, 2.0]],
@@ -7473,6 +8252,38 @@ impl Driver {
             "QP reduced-gradient internal/external",
             Some(internal.reduced_gradient.as_slice()),
             reference.reduced_gradient.as_deref(),
+            1e-7,
+        );
+        let external_qp =
+            solve_qp_with_external_reference(&qp, &ExternalQuadraticReferenceOptions::default());
+        self.check(
+            "QP Rust external-reference bridge status optimal",
+            internal.status == QPStatus::Optimal
+                && external_qp.status == ExternalQuadraticReferenceStatus::Optimal,
+            format!(
+                "internal={} external={} solver={} message={}",
+                internal.status.as_str(),
+                external_qp.status.as_str(),
+                external_qp.solver,
+                external_qp.message
+            ),
+        );
+        self.close(
+            "QP Rust external-reference bridge objective",
+            internal.objective,
+            external_qp.objective.unwrap_or(f64::NAN),
+            1e-8,
+        );
+        self.max_abs_close(
+            "QP Rust external-reference bridge x",
+            &internal.x,
+            &external_qp.x,
+            1e-7,
+        );
+        self.max_abs_close_optional(
+            "QP Rust external-reference bridge dual_ub",
+            Some(internal.dual_ub.as_slice()),
+            external_qp.dual_ub.as_deref(),
             1e-7,
         );
 
@@ -7616,6 +8427,35 @@ impl Driver {
             1e-8,
         );
         self.max_abs_close("MIQP x", &miqp_internal.x, &miqp_reference.x, 1e-7);
+        let external_miqp = solve_miqp_with_external_reference(
+            &miqp,
+            &ExternalQuadraticReferenceOptions::default(),
+        );
+        self.check(
+            "MIQP Rust external-reference bridge status optimal",
+            miqp_internal.status == QPStatus::Optimal
+                && external_miqp.status == ExternalQuadraticReferenceStatus::Optimal,
+            format!(
+                "internal={} external={} solver={} enumerated={:?} message={}",
+                miqp_internal.status.as_str(),
+                external_miqp.status.as_str(),
+                external_miqp.solver,
+                external_miqp.enumerated,
+                external_miqp.message
+            ),
+        );
+        self.close(
+            "MIQP Rust external-reference bridge objective",
+            miqp_internal.objective,
+            external_miqp.objective.unwrap_or(f64::NAN),
+            1e-8,
+        );
+        self.max_abs_close(
+            "MIQP Rust external-reference bridge x",
+            &miqp_internal.x,
+            &external_miqp.x,
+            1e-7,
+        );
 
         let socp = self.sample_socp();
         let socp_internal = solve_socp_pattern_search(&socp, SocpOptions::default());
@@ -7656,6 +8496,34 @@ impl Driver {
             1e-6,
         );
         self.max_abs_close("SOCP x", &socp_internal.x, &socp_reference.x, 1e-6);
+        let external_socp = solve_socp_with_external_reference(
+            &socp,
+            &ExternalQuadraticReferenceOptions::default(),
+        );
+        self.check(
+            "SOCP Rust external-reference bridge status optimal",
+            socp_internal.status == SocpStatus::Optimal
+                && external_socp.status == ExternalQuadraticReferenceStatus::Optimal,
+            format!(
+                "internal={} external={} solver={} message={}",
+                socp_internal.status.as_str(),
+                external_socp.status.as_str(),
+                external_socp.solver,
+                external_socp.message
+            ),
+        );
+        self.close(
+            "SOCP Rust external-reference bridge objective",
+            socp_internal.objective,
+            external_socp.objective.unwrap_or(f64::NAN),
+            1e-6,
+        );
+        self.max_abs_close(
+            "SOCP Rust external-reference bridge x",
+            &socp_internal.x,
+            &external_socp.x,
+            1e-6,
+        );
 
         let qcp = self.sample_qcp();
         let qcp_internal = solve_qcp_pattern_search(&qcp, QcpOptions::default());
@@ -7696,6 +8564,32 @@ impl Driver {
             1e-6,
         );
         self.max_abs_close("QCP x", &qcp_internal.x, &qcp_reference.x, 1e-6);
+        let external_qcp =
+            solve_qcp_with_external_reference(&qcp, &ExternalQuadraticReferenceOptions::default());
+        self.check(
+            "QCP Rust external-reference bridge status optimal",
+            qcp_internal.status == QcpStatus::Optimal
+                && external_qcp.status == ExternalQuadraticReferenceStatus::Optimal,
+            format!(
+                "internal={} external={} solver={} message={}",
+                qcp_internal.status.as_str(),
+                external_qcp.status.as_str(),
+                external_qcp.solver,
+                external_qcp.message
+            ),
+        );
+        self.close(
+            "QCP Rust external-reference bridge objective",
+            qcp_internal.objective,
+            external_qcp.objective.unwrap_or(f64::NAN),
+            1e-6,
+        );
+        self.max_abs_close(
+            "QCP Rust external-reference bridge x",
+            &qcp_internal.x,
+            &external_qcp.x,
+            1e-6,
+        );
     }
 
     fn sample_cp_model(&self) -> CpModel {
@@ -11041,6 +11935,353 @@ impl Driver {
             ),
         );
 
+        let all_different_model = CpModel {
+            variables: (0..3)
+                .map(|i| CpVariable {
+                    name: format!("worker_{i}"),
+                    domain: vec![0, 1, 2],
+                })
+                .collect(),
+            constraints: vec![CpConstraint::AllDifferent(vec![0, 1, 2])],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![
+                    LinearTerm { var: 0, coeff: 8 },
+                    LinearTerm { var: 1, coeff: 2 },
+                    LinearTerm { var: 2, coeff: 5 },
+                ],
+            }),
+        };
+        self.check_cp_reference_optimal(
+            "all-different global",
+            &all_different_model,
+            serde_json::json!({
+                "variables": [
+                    {"name": "worker_0", "domain": [0, 1, 2]},
+                    {"name": "worker_1", "domain": [0, 1, 2]},
+                    {"name": "worker_2", "domain": [0, 1, 2]},
+                ],
+                "constraints": [
+                    {"kind": "all_different", "vars": [0, 1, 2]},
+                ],
+                "objective": {
+                    "sense": "min",
+                    "terms": [
+                        {"var": 0, "coeff": 8},
+                        {"var": 1, "coeff": 2},
+                        {"var": 2, "coeff": 5},
+                    ],
+                },
+            }),
+            &[0, 2, 1],
+            Some(9),
+        );
+
+        let inverse_model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "direct_0".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "direct_1".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "inverse_0".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "inverse_1".to_string(),
+                    domain: vec![0, 1],
+                },
+            ],
+            constraints: vec![CpConstraint::Inverse {
+                direct: vec![0, 1],
+                inverse: vec![2, 3],
+            }],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![
+                    LinearTerm { var: 0, coeff: 1 },
+                    LinearTerm { var: 1, coeff: 2 },
+                ],
+            }),
+        };
+        self.check_cp_reference_optimal(
+            "inverse global",
+            &inverse_model,
+            serde_json::json!({
+                "variables": [
+                    {"name": "direct_0", "domain": [0, 1]},
+                    {"name": "direct_1", "domain": [0, 1]},
+                    {"name": "inverse_0", "domain": [0, 1]},
+                    {"name": "inverse_1", "domain": [0, 1]},
+                ],
+                "constraints": [
+                    {"kind": "inverse", "direct": [0, 1], "inverse": [2, 3]},
+                ],
+                "objective": {
+                    "sense": "min",
+                    "terms": [
+                        {"var": 0, "coeff": 1},
+                        {"var": 1, "coeff": 2},
+                    ],
+                },
+            }),
+            &[1, 0, 1, 0],
+            Some(1),
+        );
+
+        let min_max_model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "score_a".to_string(),
+                    domain: vec![2, 4],
+                },
+                CpVariable {
+                    name: "score_b".to_string(),
+                    domain: vec![3, 5],
+                },
+                CpVariable {
+                    name: "max_score".to_string(),
+                    domain: vec![3, 4, 5],
+                },
+                CpVariable {
+                    name: "min_score".to_string(),
+                    domain: vec![2, 3, 4],
+                },
+            ],
+            constraints: vec![
+                CpConstraint::MaxEquality {
+                    target: 2,
+                    vars: vec![0, 1],
+                },
+                CpConstraint::MinEquality {
+                    target: 3,
+                    vars: vec![0, 1],
+                },
+            ],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![
+                    LinearTerm { var: 2, coeff: 1 },
+                    LinearTerm { var: 3, coeff: 1 },
+                ],
+            }),
+        };
+        self.check_cp_reference_optimal(
+            "min/max equality globals",
+            &min_max_model,
+            serde_json::json!({
+                "variables": [
+                    {"name": "score_a", "domain": [2, 4]},
+                    {"name": "score_b", "domain": [3, 5]},
+                    {"name": "max_score", "domain": [3, 4, 5]},
+                    {"name": "min_score", "domain": [2, 3, 4]},
+                ],
+                "constraints": [
+                    {"kind": "max_equality", "target": 2, "vars": [0, 1]},
+                    {"kind": "min_equality", "target": 3, "vars": [0, 1]},
+                ],
+                "objective": {
+                    "sense": "min",
+                    "terms": [
+                        {"var": 2, "coeff": 1},
+                        {"var": 3, "coeff": 1},
+                    ],
+                },
+            }),
+            &[2, 3, 3, 2],
+            Some(5),
+        );
+
+        let abs_model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "deviation".to_string(),
+                    domain: vec![-3, -1, 2],
+                },
+                CpVariable {
+                    name: "absolute_deviation".to_string(),
+                    domain: vec![0, 1, 2, 3],
+                },
+            ],
+            constraints: vec![CpConstraint::AbsEquality { target: 1, var: 0 }],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![LinearTerm { var: 1, coeff: 1 }],
+            }),
+        };
+        self.check_cp_reference_optimal(
+            "absolute-value equality",
+            &abs_model,
+            serde_json::json!({
+                "variables": [
+                    {"name": "deviation", "domain": [-3, -1, 2]},
+                    {"name": "absolute_deviation", "domain": [0, 1, 2, 3]},
+                ],
+                "constraints": [
+                    {"kind": "abs_equality", "target": 1, "var": 0},
+                ],
+                "objective": {
+                    "sense": "min",
+                    "terms": [{"var": 1, "coeff": 1}],
+                },
+            }),
+            &[-1, 1],
+            Some(1),
+        );
+
+        let multiplication_model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "x".to_string(),
+                    domain: vec![-2, -1, 3],
+                },
+                CpVariable {
+                    name: "y".to_string(),
+                    domain: vec![-3, 2],
+                },
+                CpVariable {
+                    name: "product".to_string(),
+                    domain: vec![-9, -4, -3, 2, 6],
+                },
+            ],
+            constraints: vec![CpConstraint::MultiplicationEquality {
+                target: 2,
+                vars: vec![0, 1],
+            }],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![LinearTerm { var: 2, coeff: 1 }],
+            }),
+        };
+        self.check_cp_reference_optimal(
+            "multiplication equality",
+            &multiplication_model,
+            serde_json::json!({
+                "variables": [
+                    {"name": "x", "domain": [-2, -1, 3]},
+                    {"name": "y", "domain": [-3, 2]},
+                    {"name": "product", "domain": [-9, -4, -3, 2, 6]},
+                ],
+                "constraints": [
+                    {"kind": "multiplication_equality", "target": 2, "vars": [0, 1]},
+                ],
+                "objective": {
+                    "sense": "min",
+                    "terms": [{"var": 2, "coeff": 1}],
+                },
+            }),
+            &[3, -3, -9],
+            Some(-9),
+        );
+
+        let division_model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "numerator".to_string(),
+                    domain: vec![5, 6, 7],
+                },
+                CpVariable {
+                    name: "denominator".to_string(),
+                    domain: vec![2],
+                },
+                CpVariable {
+                    name: "quotient".to_string(),
+                    domain: vec![2, 3],
+                },
+            ],
+            constraints: vec![CpConstraint::DivisionEquality {
+                target: 2,
+                numerator: 0,
+                denominator: 1,
+            }],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![
+                    LinearTerm { var: 0, coeff: 1 },
+                    LinearTerm { var: 2, coeff: 10 },
+                ],
+            }),
+        };
+        self.check_cp_reference_optimal(
+            "division equality",
+            &division_model,
+            serde_json::json!({
+                "variables": [
+                    {"name": "numerator", "domain": [5, 6, 7]},
+                    {"name": "denominator", "domain": [2]},
+                    {"name": "quotient", "domain": [2, 3]},
+                ],
+                "constraints": [
+                    {"kind": "division_equality", "target": 2, "numerator": 0, "denominator": 1},
+                ],
+                "objective": {
+                    "sense": "min",
+                    "terms": [
+                        {"var": 0, "coeff": 1},
+                        {"var": 2, "coeff": 10},
+                    ],
+                },
+            }),
+            &[5, 2, 2],
+            Some(25),
+        );
+
+        let modulo_model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "value".to_string(),
+                    domain: vec![5, 6, 7],
+                },
+                CpVariable {
+                    name: "modulus".to_string(),
+                    domain: vec![3],
+                },
+                CpVariable {
+                    name: "remainder".to_string(),
+                    domain: vec![0, 1, 2],
+                },
+            ],
+            constraints: vec![CpConstraint::ModuloEquality {
+                target: 2,
+                var: 0,
+                modulus: 1,
+            }],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![
+                    LinearTerm { var: 0, coeff: 1 },
+                    LinearTerm { var: 2, coeff: 10 },
+                ],
+            }),
+        };
+        self.check_cp_reference_optimal(
+            "modulo equality",
+            &modulo_model,
+            serde_json::json!({
+                "variables": [
+                    {"name": "value", "domain": [5, 6, 7]},
+                    {"name": "modulus", "domain": [3]},
+                    {"name": "remainder", "domain": [0, 1, 2]},
+                ],
+                "constraints": [
+                    {"kind": "modulo_equality", "target": 2, "var": 0, "modulus": 1},
+                ],
+                "objective": {
+                    "sense": "min",
+                    "terms": [
+                        {"var": 0, "coeff": 1},
+                        {"var": 2, "coeff": 10},
+                    ],
+                },
+            }),
+            &[6, 3, 0],
+            Some(6),
+        );
+
         let feasible_model = CpModel {
             variables: vec![CpVariable {
                 name: "x".to_string(),
@@ -11155,8 +12396,11 @@ impl Driver {
         self.validate_ip_mip();
         self.validate_external_solver_clis();
         self.validate_external_optimization_ecosystems();
+        self.validate_nonlinear_and_metaheuristics();
         self.validate_math_program_facade();
         self.validate_min_cost_flow();
+        self.validate_vehicle_routing();
+        self.validate_job_shop_scheduling();
         self.validate_qp();
         self.validate_cp_sat();
     }

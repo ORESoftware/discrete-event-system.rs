@@ -396,6 +396,51 @@ def plain_mip_payload(
     }
 
 
+def normalized_multi_objectives(raw: dict, n: int) -> list[dict]:
+    objectives = raw.get("multi_objectives") or raw.get("multiObjectives") or []
+    normalized: list[dict] = []
+    for idx, objective in enumerate(objectives):
+        coeffs = [float(v) for v in objective["c"]]
+        if len(coeffs) < n:
+            coeffs.extend([0.0] * (n - len(coeffs)))
+        if len(coeffs) != n:
+            raise ValueError(
+                f"multi_objectives[{idx}] coefficient length {len(coeffs)} "
+                f"does not match variable count {n}"
+            )
+        sense = objective.get("sense", "max").strip().lower()
+        if sense not in {"max", "min"}:
+            raise ValueError(f"multi_objectives[{idx}] has unknown sense '{sense}'")
+        normalized.append(
+            {
+                "sense": sense,
+                "c": coeffs,
+                "name": objective.get("name", f"multi_objective_{idx}"),
+            }
+        )
+    return normalized
+
+
+def add_objective_lock_rows(
+    working: dict,
+    coeffs: Sequence[float],
+    optimum: float,
+    name: str,
+) -> None:
+    rows = [[float(value) for value in row] for row in working.get("a", [])]
+    rhs = [float(value) for value in working.get("b", [])]
+    con_names = list(working.get("con_names") or [f"c{i}" for i in range(len(rows))])
+    rows.append([float(value) for value in coeffs])
+    rhs.append(float(optimum))
+    con_names.append(f"{name}_le")
+    rows.append([-float(value) for value in coeffs])
+    rhs.append(float(-optimum))
+    con_names.append(f"{name}_ge")
+    working["a"] = rows
+    working["b"] = rhs
+    working["con_names"] = con_names
+
+
 def solution_pool_integer_indices(integer_vars: Sequence[bool]) -> list[int]:
     return [idx for idx, is_integer in enumerate(integer_vars) if is_integer]
 
@@ -2263,6 +2308,114 @@ def solve_solution_pool(
     return payload
 
 
+def solve_multi_objective(
+    solver: str,
+    sense: str,
+    c: Sequence[float],
+    rows: Sequence[Sequence[float]],
+    rhs: Sequence[float],
+    lbs: Sequence[Optional[float]],
+    ubs: Sequence[Optional[float]],
+    integer_vars: Sequence[bool],
+    objectives: Sequence[dict],
+    time_limit: float,
+    node_limit: Optional[int] = None,
+    solution_limit: Optional[int] = None,
+    relative_gap: Optional[float] = None,
+    absolute_gap: Optional[float] = None,
+    objective_limit: Optional[float] = None,
+    primal_feasibility_tolerance: Optional[float] = None,
+    dual_feasibility_tolerance: Optional[float] = None,
+    integer_feasibility_tolerance: Optional[float] = None,
+    threads: Optional[int] = None,
+    random_seed: Optional[int] = None,
+    presolve: Optional[str] = None,
+    cuts: Optional[str] = None,
+    heuristics: Optional[str] = None,
+    branch_rule: Optional[str] = None,
+    branch_priorities: Optional[Sequence[int]] = None,
+    node_selection: Optional[str] = None,
+    mip_start: Optional[Sequence[float]] = None,
+) -> dict:
+    if not objectives:
+        return status_payload("unavailable", f"{solver}:cli", "multi_objectives must be non-empty")
+
+    working = plain_mip_payload(sense, c, rows, rhs, lbs, ubs, integer_vars)
+    stage_results: list[dict] = []
+    stage_mip_start = mip_start
+
+    for idx, objective in enumerate(objectives):
+        coeffs = [float(v) for v in objective["c"]]
+        working["sense"] = objective["sense"]
+        working["c"] = coeffs
+        result = solve(
+            "mip",
+            solver,
+            working,
+            time_limit,
+            node_limit=node_limit,
+            solution_limit=solution_limit,
+            relative_gap=relative_gap,
+            absolute_gap=absolute_gap,
+            objective_limit=objective_limit,
+            primal_feasibility_tolerance=primal_feasibility_tolerance,
+            dual_feasibility_tolerance=dual_feasibility_tolerance,
+            integer_feasibility_tolerance=integer_feasibility_tolerance,
+            threads=threads,
+            random_seed=random_seed,
+            presolve=presolve,
+            cuts=cuts,
+            heuristics=heuristics,
+            branch_rule=branch_rule,
+            branch_priorities=branch_priorities,
+            node_selection=node_selection,
+            mip_start=stage_mip_start,
+        )
+        stage_results.append(result)
+        if result["status"] != "optimal":
+            payload = status_payload(
+                result["status"],
+                result.get("solver", f"{solver}:cli"),
+                result.get("message", ""),
+                result.get("solverVersion"),
+            )
+            payload["x"] = result.get("x", [])
+            payload["objective"] = result.get("objective")
+            payload["objectiveValues"] = []
+            payload["stageCount"] = len(stage_results)
+            return payload
+
+        x = [float(value) for value in result["x"]]
+        optimum = dot(coeffs, x)
+        name = str(objective.get("name") or f"multi_objective_{idx}")
+        add_objective_lock_rows(working, coeffs, optimum, name)
+        stage_mip_start = x
+
+    final_x = [float(value) for value in stage_results[-1]["x"]]
+    objective_values = [dot([float(v) for v in objective["c"]], final_x) for objective in objectives]
+    payload = {
+        "status": "optimal",
+        "solver": f"{solver}:cli",
+        "x": final_x,
+        "objective": objective_values[-1] if objective_values else None,
+        "objectiveValues": objective_values,
+        "stageCount": len(stage_results),
+        "message": "sequential lexicographic optimization",
+    }
+    if stage_results[-1].get("solverVersion") is not None:
+        payload["solverVersion"] = stage_results[-1]["solverVersion"]
+    for key in (
+        "primalFeasibilityTolerance",
+        "dualFeasibilityTolerance",
+        "integerFeasibilityTolerance",
+        "branchPrioritiesAccepted",
+        "branchPriorityCount",
+    ):
+        if stage_results[-1].get(key) is not None:
+            payload[key] = stage_results[-1][key]
+    return payload
+
+
 def solve(
     kind: str,
     solver: str,
@@ -2331,6 +2484,43 @@ def solve(
         if mip_start is None:
             mip_start = raw.get("mip_start") or raw.get("mipStart")
         mip_start = normalized_mip_start(mip_start, len(c))
+        multi_objectives = normalized_multi_objectives(raw, len(c))
+        if multi_objectives:
+            if solution_pool_size is not None:
+                return status_payload(
+                    "unavailable",
+                    f"{solver}:cli",
+                    "solution pools for multi-objective MIPs are not supported",
+                )
+            return solve_multi_objective(
+                solver,
+                sense,
+                c,
+                a_ub,
+                b_ub,
+                lbs,
+                ubs,
+                integer_vars,
+                multi_objectives,
+                time_limit,
+                node_limit=node_limit,
+                solution_limit=solution_limit,
+                relative_gap=relative_gap,
+                absolute_gap=absolute_gap,
+                objective_limit=objective_limit,
+                primal_feasibility_tolerance=primal_feasibility_tolerance,
+                dual_feasibility_tolerance=dual_feasibility_tolerance,
+                integer_feasibility_tolerance=integer_feasibility_tolerance,
+                threads=threads,
+                random_seed=random_seed,
+                presolve=presolve,
+                cuts=cuts,
+                heuristics=heuristics,
+                branch_rule=branch_rule,
+                branch_priorities=branch_priorities,
+                node_selection=node_selection,
+                mip_start=mip_start,
+            )
         if solution_pool_size is not None:
             return solve_solution_pool(
                 solver,

@@ -8,7 +8,9 @@
 //!   - auction-assignment
 //!   - vrp-savings
 //!   - vrp-nearest-neighbor
+//!   - vrp-exact
 //!   - job-shop-dispatch
+//!   - job-shop-exact
 //!   - flow-shop-neh
 //!
 //! ## Conversion notes (per the TS "RUST MIGRATION" header)
@@ -1633,8 +1635,184 @@ pub fn run_vrp_nearest_neighbor(params: VRPSavingsParams) -> VRPSavingsResult {
     result
 }
 
+pub fn run_vrp_exact(params: VRPSavingsParams) -> VRPSavingsResult {
+    let problem = build_vrp_problem(&params);
+    solve_vrp_exact_problem(&problem)
+}
+
+fn solve_vrp_exact_problem(problem: &VRPProblemToken) -> VRPSavingsResult {
+    let n = problem.customers.len();
+    if n == 0 {
+        return VRPSavingsResult {
+            routes: Vec::new(),
+            total_distance: 0.0,
+            savings_considered: 0,
+            topology: empty_station_graph(),
+        };
+    }
+    if n > 16 {
+        panic!("vrp-exact only practical for n <= 16, got {n}");
+    }
+    if problem.capacity <= 0.0 {
+        panic!("vrp-exact: vehicle capacity must be positive");
+    }
+    if problem
+        .customers
+        .iter()
+        .any(|customer| customer.demand > problem.capacity + 1e-9)
+    {
+        panic!("vrp-exact: customer demand exceeds vehicle capacity");
+    }
+
+    let full = (1usize << n) - 1;
+    let mut demand = vec![0.0; 1usize << n];
+    for mask in 1usize..=full {
+        let bit = mask & mask.wrapping_neg();
+        let idx = bit.trailing_zeros() as usize;
+        demand[mask] = demand[mask ^ bit] + problem.customers[idx].demand;
+    }
+
+    let mut path_cost = vec![vec![f64::INFINITY; n]; 1usize << n];
+    let mut path_parent = vec![vec![None; n]; 1usize << n];
+    for i in 0..n {
+        let bit = 1usize << i;
+        let customer = &problem.customers[i];
+        path_cost[bit][i] = dist(problem.depot.x, problem.depot.y, customer.x, customer.y);
+    }
+    for mask in 1usize..=full {
+        for last in 0..n {
+            if mask & (1usize << last) == 0 {
+                continue;
+            }
+            let prev_mask = mask ^ (1usize << last);
+            if prev_mask == 0 {
+                continue;
+            }
+            let mut best = path_cost[mask][last];
+            let mut best_prev = path_parent[mask][last];
+            for prev in 0..n {
+                if prev_mask & (1usize << prev) == 0 {
+                    continue;
+                }
+                let candidate = path_cost[prev_mask][prev]
+                    + dist(
+                        problem.customers[prev].x,
+                        problem.customers[prev].y,
+                        problem.customers[last].x,
+                        problem.customers[last].y,
+                    );
+                if candidate < best {
+                    best = candidate;
+                    best_prev = Some(prev);
+                }
+            }
+            path_cost[mask][last] = best;
+            path_parent[mask][last] = best_prev;
+        }
+    }
+
+    let mut route_cost = vec![f64::INFINITY; 1usize << n];
+    let mut route_last = vec![None; 1usize << n];
+    let mut feasible_route_masks = Vec::new();
+    for mask in 1usize..=full {
+        if demand[mask] > problem.capacity + 1e-9 {
+            continue;
+        }
+        feasible_route_masks.push(mask);
+        for last in 0..n {
+            if mask & (1usize << last) == 0 {
+                continue;
+            }
+            let last_customer = &problem.customers[last];
+            let candidate = path_cost[mask][last]
+                + dist(
+                    last_customer.x,
+                    last_customer.y,
+                    problem.depot.x,
+                    problem.depot.y,
+                );
+            if candidate < route_cost[mask] {
+                route_cost[mask] = candidate;
+                route_last[mask] = Some(last);
+            }
+        }
+    }
+
+    let mut cover_cost = vec![f64::INFINITY; 1usize << n];
+    let mut cover_choice = vec![0usize; 1usize << n];
+    cover_cost[0] = 0.0;
+    for mask in 1usize..=full {
+        let mut sub = mask;
+        while sub > 0 {
+            if route_cost[sub].is_finite() {
+                let remaining = mask ^ sub;
+                let candidate = cover_cost[remaining] + route_cost[sub];
+                if candidate < cover_cost[mask] {
+                    cover_cost[mask] = candidate;
+                    cover_choice[mask] = sub;
+                }
+            }
+            sub = (sub - 1) & mask;
+        }
+    }
+    if !cover_cost[full].is_finite() {
+        panic!("vrp-exact: no feasible route cover found");
+    }
+
+    let mut routes = Vec::new();
+    let mut mask = full;
+    while mask > 0 {
+        let route_mask = cover_choice[mask];
+        if route_mask == 0 {
+            panic!("vrp-exact: failed to reconstruct route cover");
+        }
+        let order = reconstruct_vrp_route(route_mask, &route_last, &path_parent);
+        let customers: Vec<VRPCustomer> = order
+            .iter()
+            .map(|&idx| problem.customers[idx].clone())
+            .collect();
+        routes.push(VRPRoute {
+            customers: customers
+                .iter()
+                .map(|customer| customer.id.clone())
+                .collect(),
+            load: demand[route_mask],
+            distance: route_distance(problem.depot, &customers),
+        });
+        mask ^= route_mask;
+    }
+    routes.sort_by(|a, b| a.customers.cmp(&b.customers));
+    let total_distance = routes.iter().map(|route| route.distance).sum();
+    VRPSavingsResult {
+        routes,
+        total_distance,
+        savings_considered: feasible_route_masks.len(),
+        topology: empty_station_graph(),
+    }
+}
+
+fn reconstruct_vrp_route(
+    route_mask: usize,
+    route_last: &[Option<usize>],
+    path_parent: &[Vec<Option<usize>>],
+) -> Vec<usize> {
+    let mut mask = route_mask;
+    let mut last = route_last[route_mask].expect("route last");
+    let mut reversed = Vec::new();
+    loop {
+        reversed.push(last);
+        let Some(parent) = path_parent[mask][last] else {
+            break;
+        };
+        mask ^= 1usize << last;
+        last = parent;
+    }
+    reversed.reverse();
+    reversed
+}
+
 // =============================================================================
-// Scheduling (job-shop dispatch / flow-shop NEH)
+// Scheduling (job-shop dispatch / exact job-shop / flow-shop NEH)
 // =============================================================================
 
 const CH_JOB: &str = "job";
@@ -2103,6 +2281,7 @@ fn default_jobs() -> Vec<JobShopJob> {
 
 pub fn run_job_shop_dispatch(params: JobShopDispatchParams) -> JobShopDispatchResult {
     let jobs = non_empty_array(params.jobs.as_deref(), &default_jobs());
+    validate_job_shop_jobs("job-shop-dispatch", &jobs);
     let source = Rc::new(RefCell::new(JobSourceStation::new("job-source", jobs)));
     let scheduler = Rc::new(RefCell::new(DispatchSchedulerStation::new(
         "dispatch-scheduler",
@@ -2163,6 +2342,12 @@ pub fn run_job_shop_dispatch(params: JobShopDispatchParams) -> JobShopDispatchRe
         &edges,
     );
     result
+}
+
+pub fn run_job_shop_exact(params: JobShopDispatchParams) -> JobShopDispatchResult {
+    let jobs = non_empty_array(params.jobs.as_deref(), &default_jobs());
+    validate_job_shop_jobs("job-shop-exact", &jobs);
+    solve_job_shop_exact(&jobs)
 }
 
 fn default_flow_shop_jobs() -> Vec<FlowShopJob> {
@@ -2364,6 +2549,193 @@ struct Remaining {
     op_index: usize,
 }
 
+const JOB_SHOP_EPS: f64 = 1e-9;
+
+fn validate_job_shop_jobs(model: &str, jobs: &[JobShopJob]) {
+    if jobs.is_empty() {
+        panic!("{model}: jobs must be non-empty");
+    }
+    let mut ids: HashSet<&str> = HashSet::new();
+    for (job_idx, job) in jobs.iter().enumerate() {
+        if job.id.trim().is_empty() {
+            panic!("{model}: jobs[{job_idx}].id must be non-empty");
+        }
+        if !ids.insert(job.id.as_str()) {
+            panic!("{model}: duplicate job id '{}'", job.id);
+        }
+        if job.operations.is_empty() {
+            panic!("{model}: jobs[{job_idx}].operations must be non-empty");
+        }
+        for (op_idx, op) in job.operations.iter().enumerate() {
+            if op.machine.trim().is_empty() {
+                panic!("{model}: jobs[{job_idx}].operations[{op_idx}].machine must be non-empty");
+            }
+            require(Preconditions::non_negative(
+                model,
+                &format!("jobs[{job_idx}].operations[{op_idx}].duration"),
+                op.duration,
+            ));
+        }
+    }
+}
+
+fn job_shop_makespan(schedule: &[ScheduledOperation]) -> f64 {
+    schedule.iter().map(|op| op.finish).fold(0.0_f64, f64::max)
+}
+
+fn job_shop_total_flow_time(jobs: &[JobShopJob], schedule: &[ScheduledOperation]) -> f64 {
+    jobs.iter()
+        .map(|job| {
+            schedule
+                .iter()
+                .filter(|op| op.job_id == job.id)
+                .map(|op| op.finish)
+                .fold(0.0_f64, f64::max)
+        })
+        .sum()
+}
+
+struct JobShopExactState {
+    next_ops: Vec<usize>,
+    machine_ready: HashMap<String, f64>,
+    job_ready: Vec<f64>,
+    schedule: Vec<ScheduledOperation>,
+}
+
+struct JobShopExactSearch<'a> {
+    jobs: &'a [JobShopJob],
+    total_ops: usize,
+    best_makespan: f64,
+    best_total_flow_time: f64,
+    best_schedule: Vec<ScheduledOperation>,
+}
+
+impl<'a> JobShopExactSearch<'a> {
+    fn search(&mut self, state: &mut JobShopExactState) {
+        if state.schedule.len() == self.total_ops {
+            let makespan = state.job_ready.iter().copied().fold(0.0_f64, f64::max);
+            let total_flow_time: f64 = state.job_ready.iter().sum();
+            if makespan < self.best_makespan - JOB_SHOP_EPS
+                || ((makespan - self.best_makespan).abs() <= JOB_SHOP_EPS
+                    && total_flow_time < self.best_total_flow_time - JOB_SHOP_EPS)
+            {
+                self.best_makespan = makespan;
+                self.best_total_flow_time = total_flow_time;
+                self.best_schedule = state.schedule.clone();
+            }
+            return;
+        }
+
+        if self.lower_bound(state) > self.best_makespan + JOB_SHOP_EPS {
+            return;
+        }
+
+        let mut candidates: Vec<(f64, f64, usize)> = Vec::new();
+        for (job_idx, job) in self.jobs.iter().enumerate() {
+            let op_index = state.next_ops[job_idx];
+            if op_index >= job.operations.len() {
+                continue;
+            }
+            let op = &job.operations[op_index];
+            let start = state.job_ready[job_idx]
+                .max(state.machine_ready.get(&op.machine).copied().unwrap_or(0.0));
+            let finish = start + op.duration;
+            candidates.push((finish, start, job_idx));
+        }
+        candidates.sort_by(|a, b| {
+            a.0.total_cmp(&b.0)
+                .then_with(|| a.1.total_cmp(&b.1))
+                .then_with(|| a.2.cmp(&b.2))
+        });
+
+        for (_, start, job_idx) in candidates {
+            let op_index = state.next_ops[job_idx];
+            let job = &self.jobs[job_idx];
+            let op = &job.operations[op_index];
+            let machine = op.machine.clone();
+            let finish = start + op.duration;
+            let previous_machine_ready = state.machine_ready.insert(machine.clone(), finish);
+            let previous_job_ready = state.job_ready[job_idx];
+            state.job_ready[job_idx] = finish;
+            state.next_ops[job_idx] += 1;
+            state.schedule.push(ScheduledOperation {
+                job_id: job.id.clone(),
+                op_index,
+                machine: machine.clone(),
+                start,
+                finish,
+            });
+
+            self.search(state);
+
+            state.schedule.pop();
+            state.next_ops[job_idx] -= 1;
+            state.job_ready[job_idx] = previous_job_ready;
+            match previous_machine_ready {
+                Some(value) => {
+                    state.machine_ready.insert(machine, value);
+                }
+                None => {
+                    state.machine_ready.remove(&machine);
+                }
+            }
+        }
+    }
+
+    fn lower_bound(&self, state: &JobShopExactState) -> f64 {
+        let mut bound = state.job_ready.iter().copied().fold(0.0_f64, f64::max);
+        for (job_idx, job) in self.jobs.iter().enumerate() {
+            let remaining: f64 = job.operations[state.next_ops[job_idx]..]
+                .iter()
+                .map(|op| op.duration)
+                .sum();
+            bound = bound.max(state.job_ready[job_idx] + remaining);
+        }
+
+        let mut machine_work: HashMap<&str, f64> = HashMap::new();
+        for (job_idx, job) in self.jobs.iter().enumerate() {
+            for op in &job.operations[state.next_ops[job_idx]..] {
+                *machine_work.entry(op.machine.as_str()).or_insert(0.0) += op.duration;
+            }
+        }
+        for (machine, work) in machine_work {
+            let ready = state.machine_ready.get(machine).copied().unwrap_or(0.0);
+            bound = bound.max(ready + work);
+        }
+        bound
+    }
+}
+
+fn solve_job_shop_exact(jobs: &[JobShopJob]) -> JobShopDispatchResult {
+    let total_ops: usize = jobs.iter().map(|job| job.operations.len()).sum();
+    if total_ops > 20 {
+        panic!("job-shop-exact only practical for <= 20 operations, got {total_ops}");
+    }
+
+    let incumbent = dispatch_schedule(jobs, DispatchRule::Spt);
+    let mut search = JobShopExactSearch {
+        jobs,
+        total_ops,
+        best_makespan: incumbent.makespan,
+        best_total_flow_time: incumbent.total_flow_time,
+        best_schedule: incumbent.schedule,
+    };
+    let mut state = JobShopExactState {
+        next_ops: vec![0; jobs.len()],
+        machine_ready: HashMap::new(),
+        job_ready: vec![0.0; jobs.len()],
+        schedule: Vec::new(),
+    };
+    search.search(&mut state);
+
+    JobShopDispatchResult {
+        schedule: search.best_schedule,
+        makespan: search.best_makespan,
+        total_flow_time: search.best_total_flow_time,
+        topology: empty_station_graph(),
+    }
+}
+
 fn dispatch_schedule(jobs: &[JobShopJob], rule: DispatchRule) -> JobShopDispatchResult {
     let mut machine_ready: HashMap<String, f64> = HashMap::new();
     let mut job_ready: HashMap<String, f64> = HashMap::new();
@@ -2418,20 +2790,8 @@ fn dispatch_schedule(jobs: &[JobShopJob], rule: DispatchRule) -> JobShopDispatch
         remaining[next_idx].op_index += 1;
     }
 
-    let makespan = schedule
-        .iter()
-        .map(|op| op.finish)
-        .fold(f64::NEG_INFINITY, f64::max);
-    let total_flow_time: f64 = jobs
-        .iter()
-        .map(|job| {
-            schedule
-                .iter()
-                .filter(|op| op.job_id == job.id)
-                .map(|op| op.finish)
-                .fold(f64::NEG_INFINITY, f64::max)
-        })
-        .sum();
+    let makespan = job_shop_makespan(&schedule);
+    let total_flow_time = job_shop_total_flow_time(jobs, &schedule);
     JobShopDispatchResult {
         schedule,
         makespan,

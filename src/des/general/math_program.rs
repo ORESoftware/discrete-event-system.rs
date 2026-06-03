@@ -14,8 +14,11 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 use crate::des::general::external_linear_cli::{
-    ExternalLinearCliBranchRule, ExternalLinearCliMipSwitch, ExternalLinearCliNodeSelection,
-    ExternalLinearCliPresolve,
+    ipmip_problem_to_cli_json, lp_problem_to_cli_json, solve_linear_cli_json,
+    ExternalLinearCliBranchRule, ExternalLinearCliKind, ExternalLinearCliMipSwitch,
+    ExternalLinearCliModelFormat, ExternalLinearCliNodeSelection, ExternalLinearCliOptions,
+    ExternalLinearCliPresolve, ExternalLinearCliSolution, ExternalLinearCliSolver,
+    ExternalLinearCliStatus,
 };
 use crate::des::general::ip_mip_des::{
     solve_ipmip_with_des, BranchOrCutConstraint, ConstraintKind, IPMIPProblem, IPMIPSolveOptions,
@@ -5219,12 +5222,19 @@ impl Default for MathProgramSolveOptions {
     }
 }
 
-/// Options for the optional Python external-solver oracle.
+/// Options for an optional external-solver oracle.
+///
+/// Explicit local CLI methods such as `highs-cli`, `highs:cli`, `glpk-cli`,
+/// `cbc-cli`, `clp-cli`, `soplex-cli`, `qsopt-ex-cli`, `lp-solve-cli`, and
+/// `lindo-cli` use the Rust `external_linear_cli` adapter for LP/MIP models.
+/// Python remains the fallback bridge for SciPy, OR-Tools, nonlinear oracles,
+/// and external API bindings.
 #[derive(Clone, Debug, Default)]
 pub struct ExternalMathProgramOptions {
-    /// Solver method, such as `highs`, `ortools:GLOP`, `ortools:PDLP`,
-    /// `ortools:SCIP`, `ortools:CP-SAT`, `glpk:default`,
-    /// `gurobi:default`, `cplex:default`, or `xpress:default`.
+    /// Solver method, such as `highs`, `highs-cli`, `clp-cli`,
+    /// `soplex-cli`, `qsopt-ex-cli`, `lp-solve-cli`, `ortools:GLOP`,
+    /// `ortools:PDLP`, `ortools:SCIP`, `ortools:CP-SAT`, `glpk:default`,
+    /// `gurobi:default`, `cplex:default`, `xpress:default`, or `lindo-cli`.
     pub method: Option<String>,
     /// Python executable. Defaults to `PYTHON` or `python3`.
     pub python: Option<String>,
@@ -6240,11 +6250,13 @@ fn solve_mixed_integer_conic(
     Ok(solution)
 }
 
-/// Solve the same model internally and with an optional Python external oracle.
+/// Solve the same model internally and with an optional external oracle.
 ///
-/// If Python or the requested solver are unavailable, `external.status` is `NumericalError` and
-/// `within_tolerance` is false. The internal solve is still returned so callers
-/// can keep validation runs non-fatal on machines without the external stack.
+/// Explicit local CLI methods route through the Rust `external_linear_cli`
+/// adapter first. If the requested external stack is unavailable,
+/// `external.status` is `NumericalError` and `within_tolerance` is false. The
+/// internal solve is still returned so callers can keep validation runs
+/// non-fatal on machines without every external solver installed.
 pub fn cross_check_math_program_with_external(
     program: &MathProgram,
     internal_opts: &MathProgramSolveOptions,
@@ -8861,6 +8873,9 @@ fn solve_math_program_external_scipy_single_objective(
             "highs".to_string()
         }
     });
+    if let Some(solution) = solve_math_program_external_linear_cli(program, opts, &method)? {
+        return Ok(solution);
+    }
     let python = opts
         .python
         .clone()
@@ -9090,6 +9105,281 @@ fn solve_math_program_external_scipy_single_objective(
             .and_then(Value::as_str)
             .map(str::to_string),
     })
+}
+
+fn solve_math_program_external_linear_cli(
+    program: &MathProgram,
+    opts: &ExternalMathProgramOptions,
+    method: &str,
+) -> Result<Option<MathProgramSolution>, MathProgramError> {
+    let Some(solver) = parse_external_math_program_linear_cli_method(method) else {
+        return Ok(None);
+    };
+
+    if program.has_discrete_features() {
+        if program.has_conic_constraints()
+            || program.has_quadratic_constraints()
+            || (program.has_quadratic_objective()
+                && quadratic_objective_has_native_nonlinear_terms(program))
+        {
+            return Ok(Some(math_program_external_cli_failure(
+                method,
+                "linear CLI adapters only accept linearly compiled LP/MIP facade models; use a nonlinear external method for QP/QCP/SOCP models"
+                    .to_string(),
+            )));
+        }
+        let kind = ExternalLinearCliKind::Mip;
+        if !solver.supports_kind(kind) {
+            return Ok(Some(math_program_external_cli_failure(
+                method,
+                format!(
+                    "{} does not support {} models through the local CLI bridge",
+                    solver.display_name(),
+                    kind.as_str()
+                ),
+            )));
+        }
+        let compiled = compile_mip(program)?;
+        let mut cli_opts = external_linear_cli_options_from_math(opts, solver)?;
+        if let Some(start) = &opts.mip_start {
+            cli_opts.mip_start = Some(canonical_mip_start(program, &compiled, start)?);
+        }
+        if let Some(priorities) = &opts.branch_priorities {
+            cli_opts.branch_priorities =
+                Some(canonical_branch_priorities(program, &compiled, priorities)?);
+        }
+        let cli_solution = solve_linear_cli_json(
+            kind,
+            ipmip_problem_to_cli_json(&compiled.problem),
+            &cli_opts,
+        );
+        return Ok(Some(math_program_solution_from_external_linear_cli(
+            program,
+            Some(&compiled),
+            cli_solution,
+        )));
+    }
+
+    if program.has_conic_constraints()
+        || program.has_quadratic_constraints()
+        || program.has_quadratic_objective()
+    {
+        return Ok(Some(math_program_external_cli_failure(
+            method,
+            "linear CLI adapters only accept LP/MIP models; use a nonlinear external method for QP/QCP/SOCP models"
+                .to_string(),
+        )));
+    }
+    let kind = ExternalLinearCliKind::Lp;
+    if !solver.supports_kind(kind) {
+        return Ok(Some(math_program_external_cli_failure(
+            method,
+            format!(
+                "{} does not support {} models through the local CLI bridge",
+                solver.display_name(),
+                kind.as_str()
+            ),
+        )));
+    }
+    let lp = program.to_lp_problem()?;
+    let cli_solution = solve_linear_cli_json(
+        kind,
+        lp_problem_to_cli_json(&lp),
+        &external_linear_cli_options_from_math(opts, solver)?,
+    );
+    Ok(Some(math_program_solution_from_external_linear_cli(
+        program,
+        None,
+        cli_solution,
+    )))
+}
+
+fn parse_external_math_program_linear_cli_method(method: &str) -> Option<ExternalLinearCliSolver> {
+    let normalized = method.trim().to_ascii_lowercase().replace('_', "-");
+    let normalized = normalized
+        .strip_suffix(":default")
+        .unwrap_or(&normalized)
+        .to_string();
+    match normalized.as_str() {
+        "highs-cli" | "highs:cli" => Some(ExternalLinearCliSolver::Highs),
+        "glpk-cli" | "glpsol-cli" | "glpk:cli" | "glpsol:cli" => {
+            Some(ExternalLinearCliSolver::Glpk)
+        }
+        "scip-cli" | "scip:cli" => Some(ExternalLinearCliSolver::Scip),
+        "cbc-cli" | "coin-cbc-cli" | "coin-or-cbc-cli" | "cbc:cli" => {
+            Some(ExternalLinearCliSolver::Cbc)
+        }
+        "clp-cli" | "clp:cli" => Some(ExternalLinearCliSolver::Clp),
+        "soplex-cli" | "soplex:cli" => Some(ExternalLinearCliSolver::Soplex),
+        "qsopt-ex-cli" | "qsopt:cli" | "qsopt-ex:cli" => Some(ExternalLinearCliSolver::QsoptEx),
+        "lp-solve-cli" | "lpsolve-cli" | "lp-solve:cli" | "lpsolve:cli" => {
+            Some(ExternalLinearCliSolver::LpSolve)
+        }
+        "gurobi-cli" | "gurobi-cl" | "gurobi:cli" => Some(ExternalLinearCliSolver::Gurobi),
+        "cplex-cli" | "cplex:cli" => Some(ExternalLinearCliSolver::Cplex),
+        "xpress-cli" | "optimizer-cli" | "xpress:cli" | "optimizer:cli" => {
+            Some(ExternalLinearCliSolver::Xpress)
+        }
+        "lindo-cli" | "runlindo-cli" | "lindo:cli" | "runlindo:cli" => {
+            Some(ExternalLinearCliSolver::Lindo)
+        }
+        _ => None,
+    }
+}
+
+fn external_linear_cli_options_from_math(
+    opts: &ExternalMathProgramOptions,
+    solver: ExternalLinearCliSolver,
+) -> Result<ExternalLinearCliOptions, MathProgramError> {
+    let _validated = encode_external_math_program_options(opts)?;
+    Ok(ExternalLinearCliOptions {
+        solver,
+        model_format: if solver == ExternalLinearCliSolver::Glpk {
+            ExternalLinearCliModelFormat::Mps
+        } else {
+            ExternalLinearCliModelFormat::CplexLp
+        },
+        time_limit_secs: opts.time_limit_ms.map(|ms| ms / 1000.0),
+        node_limit: opts.node_limit,
+        max_nodes: opts.node_limit.map(|limit| limit as u64),
+        solution_limit: opts.solution_limit,
+        solution_pool_size: opts.solution_pool_size,
+        relative_gap: opts.relative_gap,
+        absolute_gap: opts.absolute_gap,
+        objective_limit: opts.objective_limit,
+        primal_feasibility_tolerance: opts.primal_feasibility_tolerance,
+        dual_feasibility_tolerance: opts.dual_feasibility_tolerance,
+        integer_feasibility_tolerance: opts.integer_feasibility_tolerance,
+        threads: opts.threads,
+        random_seed: opts.random_seed,
+        presolve: opts.presolve,
+        cuts: opts.cuts,
+        heuristics: opts.heuristics,
+        branch_rule: opts.branch_rule,
+        node_selection: opts.node_selection,
+        python: opts.python.clone(),
+        ..Default::default()
+    })
+}
+
+fn math_program_solution_from_external_linear_cli(
+    program: &MathProgram,
+    compiled: Option<&CompiledMip>,
+    cli: ExternalLinearCliSolution,
+) -> MathProgramSolution {
+    let status = from_external_linear_cli_status(cli.status);
+    let x = match compiled {
+        Some(compiled) if cli.x.len() == compiled.problem.c.len() => compiled.original_x(&cli.x),
+        _ => cli.x.clone(),
+    };
+    let objective = if x.len() == program.variables.len() {
+        objective_value(program, &x)
+    } else {
+        cli.objective.unwrap_or(f64::NAN)
+    };
+    let best_bound = cli.best_bound.and_then(|bound| match compiled {
+        Some(compiled) => {
+            original_mip_best_bound(bound, compiled_objective_offset(program, compiled))
+        }
+        None => finite_option(bound),
+    });
+    let mip_gap = original_mip_gap(best_bound, objective).or_else(|| {
+        cli.mip_gap
+            .and_then(|gap| gap.is_finite().then_some(gap.max(0.0)))
+    });
+    let nodes_explored = cli
+        .nodes_explored
+        .and_then(|nodes| usize::try_from(nodes).ok());
+    let iterations = cli
+        .iterations
+        .and_then(|iterations| usize::try_from(iterations).ok());
+    let control_feedback = math_program_control_feedback_from_external_linear_cli(&cli);
+
+    MathProgramSolution {
+        status,
+        x,
+        objective,
+        best_bound,
+        mip_gap,
+        nodes_explored,
+        first_branch_variable: None,
+        solver_version: cli.solver_version,
+        iterations,
+        control_feedback,
+        dual_ub: cli.dual_ub,
+        dual_eq: cli.dual_eq,
+        reduced_costs: cli.reduced_costs,
+        var_basis: cli.var_basis,
+        row_basis: cli.row_basis,
+        unbounded_ray: None,
+        infeasibility_certificate: None,
+        solver: cli.solver,
+        message: Some(cli.message),
+    }
+}
+
+fn math_program_control_feedback_from_external_linear_cli(
+    cli: &ExternalLinearCliSolution,
+) -> Option<MathProgramSolverControlFeedback> {
+    let feedback = MathProgramSolverControlFeedback {
+        solution_limit: cli.solution_limit,
+        solution_pool_size: cli.solution_pool_size,
+        objective_limit: cli.objective_limit,
+        absolute_gap: cli.absolute_gap,
+        primal_feasibility_tolerance: cli.primal_feasibility_tolerance,
+        dual_feasibility_tolerance: cli.dual_feasibility_tolerance,
+        integer_feasibility_tolerance: cli.integer_feasibility_tolerance,
+        threads: cli.threads,
+        random_seed: cli.random_seed,
+        presolve: cli.presolve.clone(),
+        cuts: cli.cuts.clone(),
+        heuristics: cli.heuristics.clone(),
+        branch_rule: cli.branch_rule.clone(),
+        node_selection: cli.node_selection.clone(),
+        branch_priorities_accepted: cli.branch_priorities_accepted,
+        branch_priority_count: cli
+            .branch_priority_count
+            .and_then(|count| usize::try_from(count).ok()),
+        mip_start_accepted: cli.mip_start_accepted,
+        mip_start_objective: cli.mip_start_objective,
+    };
+    (feedback != MathProgramSolverControlFeedback::default()).then_some(feedback)
+}
+
+fn from_external_linear_cli_status(status: ExternalLinearCliStatus) -> MathProgramStatus {
+    match status {
+        ExternalLinearCliStatus::Optimal => MathProgramStatus::Optimal,
+        ExternalLinearCliStatus::Feasible => MathProgramStatus::Feasible,
+        ExternalLinearCliStatus::Infeasible => MathProgramStatus::Infeasible,
+        ExternalLinearCliStatus::Unbounded => MathProgramStatus::Unbounded,
+        ExternalLinearCliStatus::Unavailable
+        | ExternalLinearCliStatus::NumericalError
+        | ExternalLinearCliStatus::Unknown => MathProgramStatus::NumericalError,
+    }
+}
+
+fn math_program_external_cli_failure(method: &str, message: String) -> MathProgramSolution {
+    MathProgramSolution {
+        status: MathProgramStatus::NumericalError,
+        x: Vec::new(),
+        objective: f64::NAN,
+        best_bound: None,
+        mip_gap: None,
+        nodes_explored: None,
+        first_branch_variable: None,
+        solver_version: None,
+        iterations: None,
+        control_feedback: None,
+        dual_ub: None,
+        dual_eq: None,
+        reduced_costs: None,
+        var_basis: None,
+        row_basis: None,
+        unbounded_ray: None,
+        infeasibility_certificate: None,
+        solver: method.to_string(),
+        message: Some(message),
+    }
 }
 
 fn solve_lp_with_backend(lp: &LPProblem, opts: &MathProgramSolveOptions) -> LPSolution {
@@ -20528,6 +20818,34 @@ mod tests {
         assert_eq!(pool.solutions[0].x, vec![2.0, 2.0]);
         assert_eq!(pool.solutions[1].x, vec![2.0, 0.0]);
         assert_eq!(pool.solutions[2].x, vec![1.0, 3.0]);
+    }
+
+    #[test]
+    fn external_math_program_cli_method_parser_keeps_api_methods_on_bridge() {
+        assert_eq!(
+            parse_external_math_program_linear_cli_method("highs:cli"),
+            Some(ExternalLinearCliSolver::Highs)
+        );
+        assert_eq!(
+            parse_external_math_program_linear_cli_method("highs-cli:default"),
+            Some(ExternalLinearCliSolver::Highs)
+        );
+        assert_eq!(
+            parse_external_math_program_linear_cli_method("qsopt_ex_cli"),
+            Some(ExternalLinearCliSolver::QsoptEx)
+        );
+        assert_eq!(
+            parse_external_math_program_linear_cli_method("lindo-cli"),
+            Some(ExternalLinearCliSolver::Lindo)
+        );
+        assert_eq!(
+            parse_external_math_program_linear_cli_method("gurobi:default"),
+            None
+        );
+        assert_eq!(
+            parse_external_math_program_linear_cli_method("ortools:CP-SAT"),
+            None
+        );
     }
 
     #[test]

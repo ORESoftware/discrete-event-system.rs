@@ -435,6 +435,13 @@ bridge-unsupported tools and ready smoke-tested solvers, with CLI results,
 LP iteration counts, LP unbounded-ray certificates, native LP Farkas
 infeasibility certificates, and MIP quality fields when the executable exposes
 them.
+`validate_ip_mip_external` now prefers this Rust CLI harness for same-input
+IP/MIP checks; set `IP_MIP_EXTERNAL_BRIDGE=python` only when the older
+`ip_mip_reference.py` fallback is needed.
+The `math_program` facade also routes explicit CLI methods such as `highs-cli`,
+`glpk-cli`, `cbc-cli`, `clp-cli`, and `scip-cli` through this Rust adapter for
+linear LP/MIP cross-checks before falling back to Python-only SciPy, OR-Tools,
+and nonlinear oracle bridges.
 The same module exports `lp_problem_to_cplex_lp_string`,
 `ipmip_problem_to_cplex_lp_string`, `lp_problem_to_mps_string`, and
 `ipmip_problem_to_mps_string`; set

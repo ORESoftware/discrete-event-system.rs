@@ -5188,3 +5188,74 @@ Solving report
   Repair LPs        0
   LP iterations     0
 Writing the solution to /private/tmp/ores-highs-options.f8DQRK/solution.sol
+Running HiGHS 1.14.0 (git hash: n/a): Copyright (c) 2026 under MIT licence terms
+Command line parsed using CLI11 2.5.0: Copyright (c) 2017-2025 University of Cincinnati
+Set option time_limit to 10
+Set option solution_file to "/tmp/highs-sample.C8V3Uh/highs.sol"
+MIP model has 1 row; 3 cols; 3 nonzeros; 3 integer variables (3 binary)
+Coefficient ranges:
+  Matrix  [1e+00, 1e+00]
+  Cost    [1e+00, 4e+00]
+  Bound   [1e+00, 1e+00]
+  RHS     [2e+00, 2e+00]
+Presolving model
+1 rows, 0 cols, 0 nonzeros 0s
+0 rows, 0 cols, 0 nonzeros 0s
+Presolve reductions: rows 0(-1); columns 0(-3); nonzeros 0(-3) - Reduced to empty
+Presolve: Optimal
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+         0       0         0   0.00%   6               6                  0.00%        0      0      0         0     0.0s
+
+Solving report
+  Model             model
+  Status            Optimal
+  Primal bound      6
+  Dual bound        6
+  Gap               0% (tolerance: 0.01%)
+  P-D integral      0
+  Solution status   feasible
+                    6 (objective)
+                    0 (bound viol.)
+                    0 (int. viol.)
+                    0 (row viol.)
+  Timing            0.00
+  Max sub-MIP depth 0
+  Nodes             0
+  Repair LPs        0
+  LP iterations     0
+Writing the solution to /tmp/highs-sample.C8V3Uh/highs.sol
+Running HiGHS 1.14.0 (git hash: n/a): Copyright (c) 2026 under MIT licence terms
+Command line parsed using CLI11 2.5.0: Copyright (c) 2017-2025 University of Cincinnati
+Set option time_limit to 10
+Set option solution_file to "/tmp/highs-lp.lZbVWj/highs.sol"
+LP model has 3 rows; 2 cols; 6 nonzeros
+Coefficient ranges:
+  Matrix  [1e+00, 2e+00]
+  Cost    [3e+00, 4e+00]
+  Bound   [0e+00, 0e+00]
+  RHS     [2e+00, 2e+01]
+Presolving model
+3 rows, 2 cols, 6 nonzeros 0s
+3 rows, 2 cols, 6 nonzeros 0s
+Presolve reductions: rows 3(-0); columns 2(-0); nonzeros 6(-0) - Not reduced
+Problem not reduced by presolve: solving the LP
+Using dual simplex solver
+  Iteration        Objective     Infeasibilities num(sum)
+          0    -6.9999914868e+00 Ph1: 2(6); Du: 2(6.99999) 0.0s
+          2     3.4000000000e+01 Pr: 0(0) 0.0s
+
+Model name          : model
+Model status        : Optimal
+Simplex   iterations: 2
+Objective value     :  3.4000000000e+01
+P-D objective error :  0.0000000000e+00
+HiGHS run time      :          0.00
+Writing the solution to /tmp/highs-lp.lZbVWj/highs.sol

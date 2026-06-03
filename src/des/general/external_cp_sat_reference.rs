@@ -17,6 +17,15 @@ use std::time::Instant;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::des::general::cp_sat::{
+    enumerate_cp_solutions, find_cp_assumption_unsat_core, solve_cp_model, BoolLiteral,
+    CpAlternative, CpAssumptionCoreOptions, CpAutomaton, CpCircuitArc, CpConstraint,
+    CpDecisionStrategy, CpDemandInterval, CpDomainInterval, CpDomainValueStrategy, CpElement,
+    CpEnumerateOptions, CpInterval, CpModel, CpObjective, CpRectangle, CpReservoirEvent,
+    CpSolutionHint, CpSolveOptions, CpStatus, CpTransition, CpVariable, CpVariableDemandInterval,
+    CpVariableElement, CpVariableInterval, CpVariableRectangle, CpVariableSelectionStrategy,
+    LinearSense, LinearTerm, ObjectiveSense,
+};
 use crate::des::general::external_optimization_tools::{
     run_external_optimization_ecosystem_reference, ExternalOptimizationAdapterStatus,
     ExternalOptimizationTool,
@@ -416,6 +425,783 @@ fn cp_sat_error_run(
     }
 }
 
+fn native_cp_status(status: CpStatus) -> ExternalCpSatReferenceStatus {
+    match status {
+        CpStatus::Optimal => ExternalCpSatReferenceStatus::Optimal,
+        CpStatus::Feasible => ExternalCpSatReferenceStatus::Feasible,
+        CpStatus::Infeasible => ExternalCpSatReferenceStatus::Infeasible,
+    }
+}
+
+fn native_cp_object<'a>(
+    value: &'a Value,
+    context: &str,
+) -> Result<&'a serde_json::Map<String, Value>, String> {
+    value
+        .as_object()
+        .ok_or_else(|| format!("{context} must be an object"))
+}
+
+fn native_cp_array<'a>(
+    object: &'a serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<&'a Vec<Value>, String> {
+    object
+        .get(key)
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("missing or non-array `{key}`"))
+}
+
+fn native_cp_optional_array<'a>(
+    object: &'a serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<Option<&'a Vec<Value>>, String> {
+    match object.get(key) {
+        Some(Value::Array(values)) => Ok(Some(values)),
+        Some(Value::Null) | None => Ok(None),
+        Some(_) => Err(format!("`{key}` must be an array")),
+    }
+}
+
+fn native_cp_string<'a>(
+    object: &'a serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<&'a str, String> {
+    object
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("missing or non-string `{key}`"))
+}
+
+fn native_cp_i64_value(value: &Value, context: &str) -> Result<i64, String> {
+    value
+        .as_i64()
+        .ok_or_else(|| format!("{context} must be an integer"))
+}
+
+fn native_cp_i64(object: &serde_json::Map<String, Value>, key: &str) -> Result<i64, String> {
+    object
+        .get(key)
+        .ok_or_else(|| format!("missing `{key}`"))
+        .and_then(|value| native_cp_i64_value(value, key))
+}
+
+fn native_cp_usize_value(value: &Value, context: &str) -> Result<usize, String> {
+    let raw = native_cp_i64_value(value, context)?;
+    usize::try_from(raw).map_err(|_| format!("{context} must be non-negative"))
+}
+
+fn native_cp_usize(object: &serde_json::Map<String, Value>, key: &str) -> Result<usize, String> {
+    object
+        .get(key)
+        .ok_or_else(|| format!("missing `{key}`"))
+        .and_then(|value| native_cp_usize_value(value, key))
+}
+
+fn native_cp_bool(object: &serde_json::Map<String, Value>, key: &str, default: bool) -> bool {
+    object.get(key).and_then(Value::as_bool).unwrap_or(default)
+}
+
+fn native_cp_name(object: &serde_json::Map<String, Value>) -> Result<Option<String>, String> {
+    match object.get("name") {
+        Some(Value::String(name)) => Ok(Some(name.clone())),
+        Some(Value::Null) | None => Ok(None),
+        Some(_) => Err("`name` must be a string".to_string()),
+    }
+}
+
+fn native_cp_indices(
+    object: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<Vec<usize>, String> {
+    native_cp_array(object, key)?
+        .iter()
+        .enumerate()
+        .map(|(idx, value)| native_cp_usize_value(value, &format!("{key}[{idx}]")))
+        .collect()
+}
+
+fn native_cp_i64_values(
+    object: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<Vec<i64>, String> {
+    native_cp_array(object, key)?
+        .iter()
+        .enumerate()
+        .map(|(idx, value)| native_cp_i64_value(value, &format!("{key}[{idx}]")))
+        .collect()
+}
+
+fn native_cp_terms(
+    object: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<Vec<LinearTerm>, String> {
+    native_cp_array(object, key)?
+        .iter()
+        .map(|value| {
+            let term = native_cp_object(value, "linear term")?;
+            Ok(LinearTerm {
+                var: native_cp_usize(term, "var")?,
+                coeff: native_cp_i64(term, "coeff")?,
+            })
+        })
+        .collect()
+}
+
+fn native_cp_literal(value: &Value) -> Result<BoolLiteral, String> {
+    let object = native_cp_object(value, "literal")?;
+    Ok(BoolLiteral {
+        var: native_cp_usize(object, "var")?,
+        positive: native_cp_bool(object, "positive", true),
+    })
+}
+
+fn native_cp_literals(
+    object: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<Vec<BoolLiteral>, String> {
+    native_cp_array(object, key)?
+        .iter()
+        .map(native_cp_literal)
+        .collect()
+}
+
+fn native_cp_optional_literal(
+    object: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<Option<BoolLiteral>, String> {
+    match object.get(key) {
+        Some(Value::Null) | None => Ok(None),
+        Some(value) => native_cp_literal(value).map(Some),
+    }
+}
+
+fn native_cp_intervals(
+    object: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<Vec<CpDomainInterval>, String> {
+    native_cp_array(object, key)?
+        .iter()
+        .map(|value| {
+            let interval = native_cp_object(value, "domain interval")?;
+            Ok(CpDomainInterval {
+                lb: native_cp_i64(interval, "lb")?,
+                ub: native_cp_i64(interval, "ub")?,
+            })
+        })
+        .collect()
+}
+
+fn native_cp_tuples(
+    object: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<Vec<Vec<i64>>, String> {
+    native_cp_array(object, key)?
+        .iter()
+        .map(|value| {
+            value
+                .as_array()
+                .ok_or_else(|| "tuple entry must be an array".to_string())?
+                .iter()
+                .enumerate()
+                .map(|(idx, value)| native_cp_i64_value(value, &format!("tuple[{idx}]")))
+                .collect()
+        })
+        .collect()
+}
+
+fn native_cp_linear_sense(object: &serde_json::Map<String, Value>) -> Result<LinearSense, String> {
+    match native_cp_string(object, "sense")? {
+        "le" => Ok(LinearSense::Le),
+        "ge" => Ok(LinearSense::Ge),
+        "eq" => Ok(LinearSense::Eq),
+        other => Err(format!("unsupported linear sense `{other}`")),
+    }
+}
+
+fn native_cp_objective_sense(
+    object: &serde_json::Map<String, Value>,
+) -> Result<ObjectiveSense, String> {
+    match object.get("sense").and_then(Value::as_str).unwrap_or("min") {
+        "min" => Ok(ObjectiveSense::Min),
+        "max" => Ok(ObjectiveSense::Max),
+        other => Err(format!("unsupported objective sense `{other}`")),
+    }
+}
+
+fn native_cp_fixed_interval(value: &Value) -> Result<CpInterval, String> {
+    let object = native_cp_object(value, "fixed interval")?;
+    Ok(CpInterval {
+        start: native_cp_usize(object, "start")?,
+        duration: native_cp_i64(object, "duration")?,
+        presence: native_cp_optional_literal(object, "presence")?,
+        name: native_cp_name(object)?,
+    })
+}
+
+fn native_cp_variable_interval(value: &Value) -> Result<CpVariableInterval, String> {
+    let object = native_cp_object(value, "variable interval")?;
+    Ok(CpVariableInterval {
+        start: native_cp_usize(object, "start")?,
+        duration: native_cp_usize(object, "duration")?,
+        end: native_cp_usize(object, "end")?,
+        presence: native_cp_optional_literal(object, "presence")?,
+        name: native_cp_name(object)?,
+    })
+}
+
+fn native_cp_demand_interval(value: &Value) -> Result<CpDemandInterval, String> {
+    let object = native_cp_object(value, "demand interval")?;
+    Ok(CpDemandInterval {
+        start: native_cp_usize(object, "start")?,
+        duration: native_cp_i64(object, "duration")?,
+        demand: native_cp_i64(object, "demand")?,
+        presence: native_cp_optional_literal(object, "presence")?,
+        name: native_cp_name(object)?,
+    })
+}
+
+fn native_cp_variable_demand_interval(value: &Value) -> Result<CpVariableDemandInterval, String> {
+    let object = native_cp_object(value, "variable demand interval")?;
+    Ok(CpVariableDemandInterval {
+        start: native_cp_usize(object, "start")?,
+        duration: native_cp_usize(object, "duration")?,
+        end: native_cp_usize(object, "end")?,
+        demand: native_cp_usize(object, "demand")?,
+        presence: native_cp_optional_literal(object, "presence")?,
+        name: native_cp_name(object)?,
+    })
+}
+
+fn native_cp_rectangle(value: &Value) -> Result<CpRectangle, String> {
+    let object = native_cp_object(value, "rectangle")?;
+    Ok(CpRectangle {
+        x_start: native_cp_usize(object, "x_start")?,
+        y_start: native_cp_usize(object, "y_start")?,
+        width: native_cp_i64(object, "width")?,
+        height: native_cp_i64(object, "height")?,
+        presence: native_cp_optional_literal(object, "presence")?,
+        name: native_cp_name(object)?,
+    })
+}
+
+fn native_cp_variable_rectangle(value: &Value) -> Result<CpVariableRectangle, String> {
+    let object = native_cp_object(value, "variable rectangle")?;
+    Ok(CpVariableRectangle {
+        x_start: native_cp_usize(object, "x_start")?,
+        x_size: native_cp_usize(object, "x_size")?,
+        x_end: native_cp_usize(object, "x_end")?,
+        y_start: native_cp_usize(object, "y_start")?,
+        y_size: native_cp_usize(object, "y_size")?,
+        y_end: native_cp_usize(object, "y_end")?,
+        presence: native_cp_optional_literal(object, "presence")?,
+        name: native_cp_name(object)?,
+    })
+}
+
+fn native_cp_constraint(value: &Value) -> Result<CpConstraint, String> {
+    let object = native_cp_object(value, "constraint")?;
+    match native_cp_string(object, "kind")? {
+        "linear" => Ok(CpConstraint::Linear {
+            terms: native_cp_terms(object, "terms")?,
+            sense: native_cp_linear_sense(object)?,
+            rhs: native_cp_i64(object, "rhs")?,
+        }),
+        "linear_domain" => Ok(CpConstraint::LinearDomain {
+            terms: native_cp_terms(object, "terms")?,
+            intervals: native_cp_intervals(object, "intervals")?,
+        }),
+        "enforced_linear_domain" => Ok(CpConstraint::EnforcedLinearDomain {
+            enforcement: native_cp_literals(object, "enforcement")?,
+            terms: native_cp_terms(object, "terms")?,
+            intervals: native_cp_intervals(object, "intervals")?,
+        }),
+        "map_domain" => Ok(CpConstraint::MapDomain {
+            var: native_cp_usize(object, "var")?,
+            bools: native_cp_indices(object, "bools")?,
+            offset: native_cp_i64(object, "offset")?,
+        }),
+        "enforced_linear" => Ok(CpConstraint::EnforcedLinear {
+            enforcement: native_cp_literals(object, "enforcement")?,
+            terms: native_cp_terms(object, "terms")?,
+            sense: native_cp_linear_sense(object)?,
+            rhs: native_cp_i64(object, "rhs")?,
+        }),
+        "enforced_bool_or" => Ok(CpConstraint::EnforcedBoolOr {
+            enforcement: native_cp_literals(object, "enforcement")?,
+            literals: native_cp_literals(object, "literals")?,
+        }),
+        "enforced_bool_and" => Ok(CpConstraint::EnforcedBoolAnd {
+            enforcement: native_cp_literals(object, "enforcement")?,
+            literals: native_cp_literals(object, "literals")?,
+        }),
+        "enforced_bool_xor" => Ok(CpConstraint::EnforcedBoolXor {
+            enforcement: native_cp_literals(object, "enforcement")?,
+            literals: native_cp_literals(object, "literals")?,
+        }),
+        "enforced_at_most_one" => Ok(CpConstraint::EnforcedAtMostOne {
+            enforcement: native_cp_literals(object, "enforcement")?,
+            literals: native_cp_literals(object, "literals")?,
+        }),
+        "enforced_at_least_one" => Ok(CpConstraint::EnforcedAtLeastOne {
+            enforcement: native_cp_literals(object, "enforcement")?,
+            literals: native_cp_literals(object, "literals")?,
+        }),
+        "enforced_exactly_one" => Ok(CpConstraint::EnforcedExactlyOne {
+            enforcement: native_cp_literals(object, "enforcement")?,
+            literals: native_cp_literals(object, "literals")?,
+        }),
+        "all_different" => Ok(CpConstraint::AllDifferent(native_cp_indices(
+            object, "vars",
+        )?)),
+        "bool_or" => Ok(CpConstraint::BoolOr(native_cp_literals(
+            object, "literals",
+        )?)),
+        "bool_and" => Ok(CpConstraint::BoolAnd(native_cp_literals(
+            object, "literals",
+        )?)),
+        "bool_xor" => Ok(CpConstraint::BoolXor(native_cp_literals(
+            object, "literals",
+        )?)),
+        "at_most_one" => Ok(CpConstraint::AtMostOne(native_cp_literals(
+            object, "literals",
+        )?)),
+        "at_least_one" => Ok(CpConstraint::AtLeastOne(native_cp_literals(
+            object, "literals",
+        )?)),
+        "exactly_one" => Ok(CpConstraint::ExactlyOne(native_cp_literals(
+            object, "literals",
+        )?)),
+        "implication" => Ok(CpConstraint::Implication {
+            antecedent: native_cp_literal(
+                object
+                    .get("antecedent")
+                    .ok_or_else(|| "missing `antecedent`".to_string())?,
+            )?,
+            consequent: native_cp_literal(
+                object
+                    .get("consequent")
+                    .ok_or_else(|| "missing `consequent`".to_string())?,
+            )?,
+        }),
+        "allowed_assignments" => Ok(CpConstraint::AllowedAssignments {
+            vars: native_cp_indices(object, "vars")?,
+            tuples: native_cp_tuples(object, "tuples")?,
+        }),
+        "forbidden_assignments" => Ok(CpConstraint::ForbiddenAssignments {
+            vars: native_cp_indices(object, "vars")?,
+            tuples: native_cp_tuples(object, "tuples")?,
+        }),
+        "enforced_allowed_assignments" => Ok(CpConstraint::EnforcedAllowedAssignments {
+            enforcement: native_cp_literals(object, "enforcement")?,
+            vars: native_cp_indices(object, "vars")?,
+            tuples: native_cp_tuples(object, "tuples")?,
+        }),
+        "enforced_forbidden_assignments" => Ok(CpConstraint::EnforcedForbiddenAssignments {
+            enforcement: native_cp_literals(object, "enforcement")?,
+            vars: native_cp_indices(object, "vars")?,
+            tuples: native_cp_tuples(object, "tuples")?,
+        }),
+        "inverse" => Ok(CpConstraint::Inverse {
+            direct: native_cp_indices(object, "direct")?,
+            inverse: native_cp_indices(object, "inverse")?,
+        }),
+        "max_equality" => Ok(CpConstraint::MaxEquality {
+            target: native_cp_usize(object, "target")?,
+            vars: native_cp_indices(object, "vars")?,
+        }),
+        "min_equality" => Ok(CpConstraint::MinEquality {
+            target: native_cp_usize(object, "target")?,
+            vars: native_cp_indices(object, "vars")?,
+        }),
+        "abs_equality" => Ok(CpConstraint::AbsEquality {
+            target: native_cp_usize(object, "target")?,
+            var: native_cp_usize(object, "var")?,
+        }),
+        "multiplication_equality" => Ok(CpConstraint::MultiplicationEquality {
+            target: native_cp_usize(object, "target")?,
+            vars: native_cp_indices(object, "vars")?,
+        }),
+        "division_equality" => Ok(CpConstraint::DivisionEquality {
+            target: native_cp_usize(object, "target")?,
+            numerator: native_cp_usize(object, "numerator")?,
+            denominator: native_cp_usize(object, "denominator")?,
+        }),
+        "modulo_equality" => Ok(CpConstraint::ModuloEquality {
+            target: native_cp_usize(object, "target")?,
+            var: native_cp_usize(object, "var")?,
+            modulus: native_cp_usize(object, "modulus")?,
+        }),
+        "automaton" => Ok(CpConstraint::Automaton(CpAutomaton {
+            vars: native_cp_indices(object, "vars")?,
+            starting_state: native_cp_i64(object, "starting_state")?,
+            final_states: native_cp_i64_values(object, "final_states")?,
+            transitions: native_cp_array(object, "transitions")?
+                .iter()
+                .map(|value| {
+                    let transition = native_cp_object(value, "automaton transition")?;
+                    Ok(CpTransition {
+                        tail: native_cp_i64(transition, "tail")?,
+                        label: native_cp_i64(transition, "label")?,
+                        head: native_cp_i64(transition, "head")?,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?,
+        })),
+        "circuit" => Ok(CpConstraint::Circuit(native_cp_circuit_arcs(object)?)),
+        "multiple_circuit" => Ok(CpConstraint::MultipleCircuit(native_cp_circuit_arcs(
+            object,
+        )?)),
+        "element" => Ok(CpConstraint::Element(CpElement {
+            index: native_cp_usize(object, "index")?,
+            values: native_cp_i64_values(object, "values")?,
+            target: native_cp_usize(object, "target")?,
+        })),
+        "variable_element" => Ok(CpConstraint::VariableElement(CpVariableElement {
+            index: native_cp_usize(object, "index")?,
+            vars: native_cp_indices(object, "vars")?,
+            target: native_cp_usize(object, "target")?,
+        })),
+        "alternative" => Ok(CpConstraint::Alternative(CpAlternative {
+            start: native_cp_usize(object, "start")?,
+            duration: native_cp_usize(object, "duration")?,
+            end: native_cp_usize(object, "end")?,
+            presence: native_cp_optional_literal(object, "presence")?,
+            alternatives: native_cp_array(object, "alternatives")?
+                .iter()
+                .map(native_cp_variable_interval)
+                .collect::<Result<Vec<_>, String>>()?,
+            name: native_cp_name(object)?,
+        })),
+        "no_overlap" => Ok(CpConstraint::NoOverlap(
+            native_cp_array(object, "intervals")?
+                .iter()
+                .map(native_cp_fixed_interval)
+                .collect::<Result<Vec<_>, String>>()?,
+        )),
+        "no_overlap_variable" => Ok(CpConstraint::NoOverlapVariable(
+            native_cp_array(object, "intervals")?
+                .iter()
+                .map(native_cp_variable_interval)
+                .collect::<Result<Vec<_>, String>>()?,
+        )),
+        "no_overlap_2d" => Ok(CpConstraint::NoOverlap2D(
+            native_cp_array(object, "rectangles")?
+                .iter()
+                .map(native_cp_rectangle)
+                .collect::<Result<Vec<_>, String>>()?,
+        )),
+        "no_overlap_2d_variable" => Ok(CpConstraint::NoOverlap2DVariable(
+            native_cp_array(object, "rectangles")?
+                .iter()
+                .map(native_cp_variable_rectangle)
+                .collect::<Result<Vec<_>, String>>()?,
+        )),
+        "cumulative" => Ok(CpConstraint::Cumulative {
+            intervals: native_cp_array(object, "intervals")?
+                .iter()
+                .map(native_cp_demand_interval)
+                .collect::<Result<Vec<_>, String>>()?,
+            capacity: native_cp_i64(object, "capacity")?,
+        }),
+        "cumulative_variable" => Ok(CpConstraint::CumulativeVariable {
+            intervals: native_cp_array(object, "intervals")?
+                .iter()
+                .map(native_cp_variable_demand_interval)
+                .collect::<Result<Vec<_>, String>>()?,
+            capacity: native_cp_usize(object, "capacity")?,
+        }),
+        "reservoir" => Ok(CpConstraint::Reservoir {
+            events: native_cp_array(object, "events")?
+                .iter()
+                .map(|value| {
+                    let event = native_cp_object(value, "reservoir event")?;
+                    Ok(CpReservoirEvent {
+                        time: native_cp_usize(event, "time")?,
+                        level_change: native_cp_i64(event, "level_change")?,
+                        active: native_cp_optional_literal(event, "active")?,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?,
+            min_level: native_cp_i64(object, "min_level")?,
+            max_level: native_cp_i64(object, "max_level")?,
+        }),
+        other => Err(format!(
+            "rust-native parser does not support constraint kind `{other}`"
+        )),
+    }
+}
+
+fn native_cp_circuit_arcs(
+    object: &serde_json::Map<String, Value>,
+) -> Result<Vec<CpCircuitArc>, String> {
+    native_cp_array(object, "arcs")?
+        .iter()
+        .map(|value| {
+            let arc = native_cp_object(value, "circuit arc")?;
+            Ok(CpCircuitArc {
+                tail: native_cp_i64(arc, "tail")?,
+                head: native_cp_i64(arc, "head")?,
+                literal: native_cp_literal(
+                    arc.get("literal")
+                        .ok_or_else(|| "missing `literal`".to_string())?,
+                )?,
+            })
+        })
+        .collect()
+}
+
+fn native_cp_model(
+    value: &Value,
+) -> Result<(CpModel, Vec<CpSolutionHint>, Vec<CpDecisionStrategy>), String> {
+    let object = native_cp_object(value, "CP-SAT model")?;
+    let variables = native_cp_array(object, "variables")?
+        .iter()
+        .enumerate()
+        .map(|(idx, value)| {
+            let variable = native_cp_object(value, "variable")?;
+            let name = variable
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("x{idx}"));
+            Ok(CpVariable {
+                name,
+                domain: native_cp_i64_values(variable, "domain")?,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let constraints = native_cp_optional_array(object, "constraints")?
+        .into_iter()
+        .flatten()
+        .map(native_cp_constraint)
+        .collect::<Result<Vec<_>, String>>()?;
+    let objective = match object.get("objective") {
+        Some(Value::Null) | None => None,
+        Some(value) => {
+            let objective = native_cp_object(value, "objective")?;
+            Some(CpObjective {
+                sense: native_cp_objective_sense(objective)?,
+                terms: native_cp_terms(objective, "terms")?,
+            })
+        }
+    };
+    let solution_hint = native_cp_optional_array(object, "solution_hint")?
+        .into_iter()
+        .flatten()
+        .map(|value| {
+            let hint = native_cp_object(value, "solution hint")?;
+            Ok(CpSolutionHint {
+                var: native_cp_usize(hint, "var")?,
+                value: native_cp_i64(hint, "value")?,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let decision_strategies = native_cp_optional_array(object, "decision_strategies")?
+        .into_iter()
+        .flatten()
+        .map(native_cp_decision_strategy)
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok((
+        CpModel {
+            variables,
+            constraints,
+            objective,
+        },
+        solution_hint,
+        decision_strategies,
+    ))
+}
+
+fn native_cp_decision_strategy(value: &Value) -> Result<CpDecisionStrategy, String> {
+    let strategy = native_cp_object(value, "decision strategy")?;
+    let variable_strategy = match strategy
+        .get("variable_strategy")
+        .and_then(Value::as_str)
+        .unwrap_or("first")
+    {
+        "first" => CpVariableSelectionStrategy::First,
+        "min_domain_size" => CpVariableSelectionStrategy::MinDomainSize,
+        "max_domain_size" => CpVariableSelectionStrategy::MaxDomainSize,
+        "lowest_min" => CpVariableSelectionStrategy::LowestMin,
+        "highest_max" => CpVariableSelectionStrategy::HighestMax,
+        other => return Err(format!("unsupported variable strategy `{other}`")),
+    };
+    let domain_strategy = match strategy
+        .get("domain_strategy")
+        .and_then(Value::as_str)
+        .unwrap_or("min_value")
+    {
+        "min_value" => CpDomainValueStrategy::MinValue,
+        "max_value" => CpDomainValueStrategy::MaxValue,
+        "lower_half" => CpDomainValueStrategy::LowerHalf,
+        "upper_half" => CpDomainValueStrategy::UpperHalf,
+        "median_value" => CpDomainValueStrategy::MedianValue,
+        other => return Err(format!("unsupported domain strategy `{other}`")),
+    };
+    Ok(CpDecisionStrategy {
+        vars: native_cp_indices(strategy, "vars")?,
+        variable_strategy,
+        domain_strategy,
+    })
+}
+
+fn native_cp_assumptions(value: &Value) -> Result<Vec<BoolLiteral>, String> {
+    let object = native_cp_object(value, "CP-SAT model")?;
+    native_cp_optional_array(object, "assumptions")?
+        .into_iter()
+        .flatten()
+        .map(native_cp_literal)
+        .collect()
+}
+
+fn cp_solve_options(
+    solution_hint: Vec<CpSolutionHint>,
+    decision_strategies: Vec<CpDecisionStrategy>,
+) -> CpSolveOptions {
+    CpSolveOptions {
+        solution_hint,
+        decision_strategies,
+        ..Default::default()
+    }
+}
+
+fn solve_cp_sat_json_with_native_rust(
+    model: &Value,
+    options: &ExternalCpSatReferenceOptions,
+    started: Instant,
+) -> Result<ExternalCpSatReferenceRun, String> {
+    let (cp_model, solution_hint, decision_strategies) = native_cp_model(model)?;
+    if options.assumption_core {
+        let assumptions = native_cp_assumptions(model)?;
+        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            find_cp_assumption_unsat_core(
+                &cp_model,
+                &assumptions,
+                CpAssumptionCoreOptions {
+                    solve_options: cp_solve_options(solution_hint, decision_strategies),
+                },
+            )
+        }))
+        .map_err(|_| "native Rust CP assumption-core solve panicked".to_string())?;
+        let status = native_cp_status(run.status);
+        let assumptions_json = run
+            .assumptions
+            .iter()
+            .map(|literal| json!({"var": literal.var, "positive": literal.positive}))
+            .collect::<Vec<_>>();
+        let message = run
+            .message
+            .clone()
+            .unwrap_or_else(|| "native Rust assumption core".to_string());
+        return Ok(ExternalCpSatReferenceRun {
+            solver: options.solver,
+            backend: "rust:cp-native-assumption-core".to_string(),
+            status,
+            assignment: Vec::new(),
+            objective: None,
+            nodes: Some(run.checks as u64),
+            raw: json!({
+                "status": status.as_str(),
+                "assumptions": assumptions_json,
+                "minimal": run.minimal,
+                "checks": run.checks,
+                "solver": "rust:cp-native-assumption-core",
+                "message": message,
+            }),
+            elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+            message,
+        });
+    }
+
+    if let Some(limit) = options.enumerate_solutions {
+        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            enumerate_cp_solutions(
+                &cp_model,
+                CpEnumerateOptions {
+                    max_solutions: limit.max(1),
+                    ..Default::default()
+                },
+            )
+        }))
+        .map_err(|_| "native Rust CP solution enumeration panicked".to_string())?;
+        let status = native_cp_status(run.status);
+        let first = run.solutions.first();
+        let assignment = first
+            .map(|solution| solution.assignment.clone())
+            .unwrap_or_default();
+        let objective = first
+            .and_then(|solution| solution.objective)
+            .map(|value| value as f64);
+        let solutions_json = run
+            .solutions
+            .iter()
+            .map(|solution| {
+                json!({
+                    "assignment": solution.assignment,
+                    "objective": solution.objective,
+                })
+            })
+            .collect::<Vec<_>>();
+        let message = run
+            .message
+            .clone()
+            .unwrap_or_else(|| "native Rust solution enumeration".to_string());
+        return Ok(ExternalCpSatReferenceRun {
+            solver: options.solver,
+            backend: "rust:cp-native-solution-enumeration".to_string(),
+            status,
+            assignment,
+            objective,
+            nodes: Some(run.nodes as u64),
+            raw: json!({
+                "status": status.as_str(),
+                "assignment": first.map(|solution| solution.assignment.clone()).unwrap_or_default(),
+                "objective": first.and_then(|solution| solution.objective),
+                "solutions": solutions_json,
+                "exhausted": run.exhausted,
+                "nodes": run.nodes,
+                "solver": "rust:cp-native-solution-enumeration",
+                "message": message,
+            }),
+            elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+            message,
+        });
+    }
+
+    let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        solve_cp_model(
+            &cp_model,
+            cp_solve_options(solution_hint, decision_strategies),
+        )
+    }))
+    .map_err(|_| "native Rust CP solve panicked".to_string())?;
+    let status = native_cp_status(run.status);
+    let objective = run.objective.map(|value| value as f64);
+    let message = run
+        .message
+        .clone()
+        .unwrap_or_else(|| "native Rust exact finite-domain solve".to_string());
+    Ok(ExternalCpSatReferenceRun {
+        solver: options.solver,
+        backend: "rust:cp-native-enumeration".to_string(),
+        status,
+        assignment: run.assignment.clone(),
+        objective,
+        nodes: Some(run.nodes as u64),
+        raw: json!({
+            "status": status.as_str(),
+            "assignment": run.assignment,
+            "objective": run.objective,
+            "nodes": run.nodes,
+            "solver": "rust:cp-native-enumeration",
+            "message": message,
+        }),
+        elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+        message,
+    })
+}
+
 fn cp_sat_array<'a>(value: &'a Value, key: &str) -> Result<&'a Vec<Value>, String> {
     value
         .get(key)
@@ -713,6 +1499,10 @@ fn solve_cp_sat_json_with_rust_enumeration(
     options: &ExternalCpSatReferenceOptions,
     started: Instant,
 ) -> ExternalCpSatReferenceRun {
+    if let Ok(run) = solve_cp_sat_json_with_native_rust(model, options, started) {
+        return run;
+    }
+
     if options.assumption_core {
         return cp_sat_error_run(
             options.solver,
@@ -1184,7 +1974,7 @@ mod tests {
         assert_eq!(run.status, ExternalCpSatReferenceStatus::Optimal);
         assert_eq!(run.assignment, vec![1, 0]);
         assert_eq!(run.objective, Some(1.0));
-        assert_eq!(run.backend, "rust:cp-enumeration");
+        assert_eq!(run.backend, "rust:cp-native-enumeration");
     }
 
     #[test]
@@ -1225,6 +2015,42 @@ mod tests {
         assert_eq!(run.status, ExternalCpSatReferenceStatus::Optimal);
         assert_eq!(run.assignment, vec![1, 0, 1]);
         assert_eq!(run.objective, Some(2.0));
+    }
+
+    #[test]
+    fn cp_sat_rust_enumeration_uses_native_global_parser() {
+        let model = json!({
+            "variables": [
+                {"name": "choice", "domain": [0, 1]},
+                {"name": "expensive", "domain": [4]},
+                {"name": "cheap", "domain": [1, 3]},
+                {"name": "selected", "domain": [1, 2, 3, 4]}
+            ],
+            "constraints": [
+                {
+                    "kind": "variable_element",
+                    "index": 0,
+                    "vars": [1, 2],
+                    "target": 3
+                }
+            ],
+            "objective": {
+                "sense": "min",
+                "terms": [{"var": 3, "coeff": 1}]
+            }
+        });
+        let run = solve_cp_sat_json_with_external_reference(
+            &model,
+            &ExternalCpSatReferenceOptions {
+                solver: ExternalCpSatReferenceSolver::RustEnumeration,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(run.status, ExternalCpSatReferenceStatus::Optimal);
+        assert_eq!(run.backend, "rust:cp-native-enumeration");
+        assert_eq!(run.assignment, vec![1, 4, 1, 1]);
+        assert_eq!(run.objective, Some(1.0));
     }
 
     #[test]

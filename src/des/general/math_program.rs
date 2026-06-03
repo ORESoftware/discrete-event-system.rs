@@ -3420,7 +3420,8 @@ impl Default for MathProgramSolveOptions {
 /// Options for the optional Python external-solver oracle.
 #[derive(Clone, Debug, Default)]
 pub struct ExternalMathProgramOptions {
-    /// Solver method, such as `highs`, `ortools:SCIP`, `glpk:default`,
+    /// Solver method, such as `highs`, `ortools:GLOP`, `ortools:PDLP`,
+    /// `ortools:SCIP`, `ortools:CP-SAT`, `glpk:default`,
     /// `gurobi:default`, `cplex:default`, or `xpress:default`.
     pub method: Option<String>,
     /// Python executable. Defaults to `PYTHON` or `python3`.
@@ -15346,6 +15347,42 @@ mod tests {
     }
 
     #[test]
+    fn optional_reservoir_event_links_activity_and_level_bounds() {
+        let mut p = MathProgram::new(ObjectiveSense::Max);
+        let required_time = p
+            .add_integer_var("required_time", 0.0, Some(0.0), Some(0.0))
+            .unwrap();
+        let safe_time = p
+            .add_integer_var("safe_time", 0.0, Some(0.0), Some(0.0))
+            .unwrap();
+        let overflow_time = p
+            .add_integer_var("overflow_time", 0.0, Some(0.0), Some(0.0))
+            .unwrap();
+        let safe_active = p.add_binary_var("safe_active", 3.0).unwrap();
+        let overflow_active = p.add_binary_var("overflow_active", 5.0).unwrap();
+        p.add_reservoir(
+            "optional-tank",
+            vec![
+                MathProgram::reservoir_event(required_time, 1.0),
+                MathProgram::optional_reservoir_event(safe_time, 1.0, safe_active),
+                MathProgram::optional_reservoir_event(overflow_time, 2.0, overflow_active),
+            ],
+            0.0,
+            2.0,
+        )
+        .unwrap();
+
+        let sol = solve_math_program(&p, &MathProgramSolveOptions::default()).unwrap();
+        assert_eq!(sol.status, MathProgramStatus::Optimal);
+        assert_close(sol.objective, 3.0);
+        assert_close(sol.x[required_time], 0.0);
+        assert_close(sol.x[safe_time], 0.0);
+        assert_close(sol.x[overflow_time], 0.0);
+        assert_close(sol.x[safe_active], 1.0);
+        assert_close(sol.x[overflow_active], 0.0);
+    }
+
+    #[test]
     fn solution_pool_enumerates_top_binary_assignments() {
         let mut p = MathProgram::new(ObjectiveSense::Max);
         let a = p.add_binary_var("a", 4.0).unwrap();
@@ -15377,6 +15414,204 @@ mod tests {
         assert_eq!(pool.solutions[0].x, vec![1.0, 1.0, 0.0]);
         assert_eq!(pool.solutions[1].x, vec![1.0, 0.0, 1.0]);
         assert_eq!(pool.solutions[2].x, vec![1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn solution_pool_enumerates_integer_and_semi_integer_domains() {
+        let mut p = MathProgram::new(ObjectiveSense::Max);
+        let batches = p
+            .add_integer_var("batches", 10.0, Some(0.0), Some(2.0))
+            .unwrap();
+        let lot = p.add_semi_integer_var("lot", 1.0, 2.0, 3.0).unwrap();
+        p.add_constraint(
+            "capacity",
+            vec![(batches, 1.0), (lot, 1.0)],
+            RowSense::Le,
+            4.0,
+        )
+        .unwrap();
+
+        let pool = solve_math_program_solution_pool(
+            &p,
+            &MathProgramSolveOptions::default(),
+            &MathProgramSolutionPoolOptions {
+                max_solutions: 4,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(pool.solutions.len(), 4);
+        assert!(!pool.exhausted);
+        assert_close(pool.solutions[0].objective, 22.0);
+        assert_close(pool.solutions[1].objective, 20.0);
+        assert_close(pool.solutions[2].objective, 13.0);
+        assert_close(pool.solutions[3].objective, 12.0);
+        assert_eq!(pool.solutions[0].x, vec![2.0, 2.0]);
+        assert_eq!(pool.solutions[1].x, vec![2.0, 0.0]);
+        assert_eq!(pool.solutions[2].x, vec![1.0, 3.0]);
+        assert_eq!(pool.solutions[3].x, vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn solution_pool_respects_absolute_objective_gap_for_integer_domains() {
+        let mut p = MathProgram::new(ObjectiveSense::Max);
+        let batches = p
+            .add_integer_var("batches", 10.0, Some(0.0), Some(2.0))
+            .unwrap();
+        let lot = p.add_semi_integer_var("lot", 1.0, 2.0, 3.0).unwrap();
+        p.add_constraint(
+            "capacity",
+            vec![(batches, 1.0), (lot, 1.0)],
+            RowSense::Le,
+            4.0,
+        )
+        .unwrap();
+
+        let pool = solve_math_program_solution_pool(
+            &p,
+            &MathProgramSolveOptions::default(),
+            &MathProgramSolutionPoolOptions {
+                max_solutions: 10,
+                absolute_gap: Some(2.0),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(pool.solutions.len(), 2);
+        assert!(!pool.exhausted);
+        assert!(pool
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("objective gap")));
+        assert_close(pool.solutions[0].objective, 22.0);
+        assert_close(pool.solutions[1].objective, 20.0);
+        assert_eq!(pool.solutions[0].x, vec![2.0, 2.0]);
+        assert_eq!(pool.solutions[1].x, vec![2.0, 0.0]);
+    }
+
+    #[test]
+    fn external_cli_facade_cross_checks_conflict_relaxation_pool_and_clp_lp() {
+        if std::process::Command::new("highs")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping MathProgram external CLI facade test; highs is not installed");
+            return;
+        }
+
+        let highs_cli = ExternalMathProgramOptions {
+            method: Some("highs:cli".to_string()),
+            time_limit_ms: Some(5_000.0),
+            ..Default::default()
+        };
+
+        let mut conflict_model = MathProgram::new(ObjectiveSense::Min);
+        let conflict_x = conflict_model
+            .add_continuous_var("x", 0.0, None, None)
+            .unwrap();
+        let conflict_y = conflict_model
+            .add_continuous_var("y", 0.0, Some(0.0), None)
+            .unwrap();
+        conflict_model
+            .add_constraint("x-at-least-two", vec![(conflict_x, 1.0)], RowSense::Ge, 2.0)
+            .unwrap();
+        conflict_model
+            .add_constraint("x-at-most-one", vec![(conflict_x, 1.0)], RowSense::Le, 1.0)
+            .unwrap();
+        conflict_model
+            .add_constraint("redundant-y", vec![(conflict_y, 1.0)], RowSense::Ge, 0.0)
+            .unwrap();
+
+        let conflict = cross_check_math_program_conflict_with_external(
+            &conflict_model,
+            &MathProgramSolveOptions::default(),
+            &highs_cli,
+            &MathProgramConflictOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(conflict.external.status, MathProgramStatus::Infeasible);
+        assert!(conflict.within_tolerance);
+        assert!(conflict.internal.minimal);
+        assert_eq!(conflict.internal.items.len(), 2);
+
+        let mut relax_model = MathProgram::new(ObjectiveSense::Min);
+        let relax_x = relax_model
+            .add_continuous_var("x", 0.0, Some(2.0), None)
+            .unwrap();
+        relax_model
+            .add_constraint("cap", vec![(relax_x, 1.0)], RowSense::Le, 1.0)
+            .unwrap();
+        let relaxation = cross_check_math_program_feas_relaxation_with_external(
+            &relax_model,
+            &MathProgramSolveOptions::default(),
+            &highs_cli,
+            &MathProgramFeasRelaxOptions {
+                linear_penalty: 10.0,
+                bound_penalty: 1.0,
+                ..Default::default()
+            },
+            1e-7,
+        )
+        .unwrap();
+        assert_eq!(relaxation.external.status, MathProgramStatus::Optimal);
+        assert!(relaxation.within_tolerance);
+        assert_close(relaxation.internal.violation_objective, 1.0);
+
+        let mut pool_model = MathProgram::new(ObjectiveSense::Max);
+        let pool_a = pool_model.add_binary_var("a", 4.0).unwrap();
+        let pool_b = pool_model.add_binary_var("b", 2.0).unwrap();
+        let pool_c = pool_model.add_binary_var("c", 1.0).unwrap();
+        pool_model
+            .add_constraint(
+                "choose-at-most-two",
+                vec![(pool_a, 1.0), (pool_b, 1.0), (pool_c, 1.0)],
+                RowSense::Le,
+                2.0,
+            )
+            .unwrap();
+        let pool = cross_check_math_program_solution_pool_with_external(
+            &pool_model,
+            &MathProgramSolveOptions::default(),
+            &highs_cli,
+            &MathProgramSolutionPoolOptions {
+                max_solutions: 3,
+                ..Default::default()
+            },
+            1e-7,
+        )
+        .unwrap();
+        assert!(pool.within_tolerance);
+        assert!(pool.len_agree);
+        assert_eq!(pool.external.solutions.len(), 3);
+
+        if std::process::Command::new("clp")
+            .arg("-version")
+            .output()
+            .is_ok()
+        {
+            let mut lp = MathProgram::new(ObjectiveSense::Max);
+            let x = lp.add_continuous_var("x", 1.0, Some(0.0), None).unwrap();
+            lp.add_constraint("cap", vec![(x, 1.0)], RowSense::Le, 1.0)
+                .unwrap();
+            let clp = cross_check_math_program_with_external(
+                &lp,
+                &MathProgramSolveOptions::default(),
+                &ExternalMathProgramOptions {
+                    method: Some("clp:cli".to_string()),
+                    time_limit_ms: Some(5_000.0),
+                    ..Default::default()
+                },
+                1e-7,
+            )
+            .unwrap();
+            assert_eq!(clp.external.status, MathProgramStatus::Optimal);
+            assert_eq!(clp.external.solver, "clp:cli");
+            assert!(clp.within_tolerance);
+            assert_close(clp.external.objective, 1.0);
+        }
     }
 
     #[test]

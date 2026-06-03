@@ -68,7 +68,48 @@ MINIZINC_TOOL_IDS = {
     "minizinc-solution-checker",
     "gecode",
     "chuffed",
+    "ortools-cp-sat",
+    "fzn-cp-sat",
 }
+
+
+ASP_TOOL_IDS = {
+    "clingo",
+    "clingcon",
+}
+
+
+def choose_minizinc_solver(command: str, requested: str = "") -> str:
+    ok, stdout, stderr = run_command(command, ["--solvers"])
+    catalog = f"{stdout}\n{stderr}".lower() if ok else ""
+    aliases = {
+        "cbc": "org.minizinc.mip.coin-bc",
+        "coin-bc": "org.minizinc.mip.coin-bc",
+        "coinbc": "org.minizinc.mip.coin-bc",
+        "scip": "org.minizinc.mip.scip",
+        "highs": "org.minizinc.mip.highs",
+        "gecode": "org.gecode.gecode",
+        "chuffed": "org.chuffed.chuffed",
+        "cp-sat": "cp-sat",
+        "ortools-cp-sat": "cp-sat",
+        "or-tools-cp-sat": "cp-sat",
+        "fzn-cp-sat": "cp-sat",
+    }
+    if requested:
+        normalized = aliases.get(requested.lower(), requested)
+        if not catalog or normalized.lower() in catalog or requested.lower() in catalog:
+            return normalized
+    for candidate in [
+        "org.gecode.gecode",
+        "org.chuffed.chuffed",
+        "cp-sat",
+        "org.minizinc.mip.coin-bc",
+        "org.minizinc.mip.scip",
+        "org.minizinc.mip.highs",
+    ]:
+        if candidate.lower() in catalog:
+            return candidate
+    return requested
 
 
 def infer_sat_like(stdout: str, stderr: str, exit_success: bool) -> str:
@@ -483,13 +524,59 @@ def validate_minizinc(payload: dict[str, Any], tool: str) -> dict[str, Any]:
         if configured and shutil.which(configured)
         else first_command(command_tool, ["minizinc"])
     )
+    fzn_gecode = first_command("gecode", ["fzn-gecode"])
+    fzn_cp_sat = first_command("ortools-cp-sat", ["fzn-cp-sat"])
+    flatzinc_backend: tuple[str, str, str] | None = None
+    if tool in {"flatzinc", "gecode"} and fzn_gecode:
+        flatzinc_backend = (
+            fzn_gecode,
+            solver,
+            "MiniZinc to FlatZinc compilation failed",
+        )
+    elif tool in {"ortools-cp-sat", "fzn-cp-sat"} and fzn_cp_sat:
+        flatzinc_backend = (
+            fzn_cp_sat,
+            solver or "cp-sat",
+            "MiniZinc to OR-Tools CP-SAT FlatZinc compilation failed",
+        )
+    if flatzinc_backend is not None:
+        flatzinc_command, compile_solver_request, compile_error = flatzinc_backend
+        minizinc = first_command("minizinc", ["minizinc"])
+        if minizinc:
+            with tempfile.TemporaryDirectory(prefix="ores-minizinc-gecode-") as tmp:
+                model_path = Path(tmp) / "model.mzn"
+                data_path = Path(tmp) / "data.dzn"
+                fzn_path = Path(tmp) / "model.fzn"
+                model_path.write_text(model, encoding="utf-8")
+                compile_solver = choose_minizinc_solver(minizinc, compile_solver_request)
+                compile_args = ["--compile", "--solver", compile_solver, "-o", str(fzn_path), str(model_path)]
+                if data.strip():
+                    data_path.write_text(data, encoding="utf-8")
+                    compile_args.append(str(data_path))
+                compile_ok, compile_stdout, compile_stderr = run_command(minizinc, compile_args)
+                if compile_ok:
+                    ok, stdout, stderr = run_command(flatzinc_command, [str(fzn_path)])
+                    verdict = infer_sat_like(stdout, stderr, ok)
+                    return result("ok" if ok else "failed", verdict, flatzinc_command, "", stdout, stderr)
+                if tool in {"gecode", "ortools-cp-sat", "fzn-cp-sat"}:
+                    return result(
+                        "failed",
+                        "failure",
+                        minizinc,
+                        compile_error,
+                        compile_stdout,
+                        compile_stderr,
+                    )
     if command:
         with tempfile.TemporaryDirectory(prefix="ores-minizinc-") as tmp:
             model_path = Path(tmp) / "model.mzn"
             data_path = Path(tmp) / "data.dzn"
             model_path.write_text(model, encoding="utf-8")
             args = []
-            backend_solver = solver or (tool if tool in {"gecode", "chuffed"} else "")
+            backend_solver = solver or (
+                tool if tool in {"gecode", "chuffed", "ortools-cp-sat", "fzn-cp-sat"} else ""
+            )
+            backend_solver = choose_minizinc_solver(command, backend_solver)
             if backend_solver:
                 args.extend(["--solver", backend_solver])
             args.append(str(model_path))
@@ -497,9 +584,36 @@ def validate_minizinc(payload: dict[str, Any], tool: str) -> dict[str, Any]:
                 data_path.write_text(data, encoding="utf-8")
                 args.append(str(data_path))
             ok, stdout, stderr = run_command(command, args)
+        if not ok and backend_solver and "no solver with tag" in stderr.lower():
+            return builtin_minizinc(model)
         verdict = infer_sat_like(stdout, stderr, ok)
         return result("ok" if ok else "failed", verdict, command, "", stdout, stderr)
     return builtin_minizinc(model)
+
+
+def validate_asp(payload: dict[str, Any], tool: str) -> dict[str, Any]:
+    program = str(
+        payload.get("asp")
+        or payload.get("program")
+        or payload.get("model")
+        or payload.get("text")
+        or ""
+    )
+    tool = normalize_tool_id(tool)
+    if not program.strip():
+        return result("failed", "failure", "asp", "payload needs asp, program, model, or text")
+    aliases_by_tool = {
+        "clingo": ["clingo"],
+        "clingcon": ["clingcon", "clingo"],
+    }
+    command = first_command(tool, aliases_by_tool.get(tool, [tool]))
+    if command:
+        ok, stdout, stderr = run_command(command, ["-", "0"], program)
+        verdict = infer_sat_like(stdout, stderr, ok or stdout.strip() != "")
+        if verdict in {"sat", "unsat"}:
+            return result("ok", verdict, command, "", stdout, stderr)
+        return result("failed", verdict, command, "", stdout, stderr)
+    return result("unavailable", "unknown", tool, f"{tool} executable not found")
 
 
 def dispatch(payload: dict[str, Any], tool_override: str | None = None) -> dict[str, Any]:
@@ -507,6 +621,8 @@ def dispatch(payload: dict[str, Any], tool_override: str | None = None) -> dict[
     tool = normalize_tool_id(tool_override or payload.get("solver") or payload.get("tool"))
     if kind == "minizinc-validation" or tool in MINIZINC_TOOL_IDS:
         return validate_minizinc(payload, "minizinc" if tool == "auto" else tool)
+    if kind in ("asp-validation", "clingo-validation") or tool in ASP_TOOL_IDS:
+        return validate_asp(payload, "clingo" if tool == "auto" else tool)
     if kind in ("smtlib-validation", "smt-lib-validation") or tool in (
         "z3",
         "cvc5",

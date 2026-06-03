@@ -306,6 +306,8 @@
       <div class="metric"><span>On Target</span><b id="onTarget">0 - 0</b></div>
       <div class="metric"><span>Saves</span><b id="saves">0 - 0</b></div>
       <div class="metric"><span>Passes</span><b id="passes">0 / 0</b></div>
+      <div class="metric"><span>Clearances</span><b id="clearances">0 - 0</b></div>
+      <div class="metric"><span>Route 1</span><b id="routeOne">0 - 0</b></div>
       <div class="metric"><span>Recoveries</span><b id="recoveries">0 - 0</b></div>
       <div class="metric"><span>Offside</span><b id="offsides">0 - 0</b></div>
       <div class="metric"><span>Offside Line</span><b id="offsideLine">none</b></div>
@@ -477,6 +479,8 @@ const shots = document.getElementById("shots");
 const onTarget = document.getElementById("onTarget");
 const saves = document.getElementById("saves");
 const passes = document.getElementById("passes");
+const clearances = document.getElementById("clearances");
+const routeOne = document.getElementById("routeOne");
 const recoveries = document.getElementById("recoveries");
 const offsides = document.getElementById("offsides");
 const offsideLine = document.getElementById("offsideLine");
@@ -651,7 +655,10 @@ function directiveLabel(d) {
   const target = Number(d.defensiveCoverTarget ?? 0);
   const actual = Number(d.defensiveCoverActual ?? 0);
   const cover = target >= 4 ? `C${actual}/4+` : `C${actual}/${target}`;
-  return `P${Number(d.pressIntensity ?? 0).toFixed(2)} R${Number(d.riskTolerance ?? 0).toFixed(2)} ${cover}`;
+  const advantage = Number(d.attackingNumbersAdvantage ?? 0);
+  const overload = Number(d.attackingOverloadScore ?? 0);
+  const numbersUp = advantage > 0 ? ` N+${advantage}/${overload.toFixed(2)}` : "";
+  return `P${Number(d.pressIntensity ?? 0).toFixed(2)} R${Number(d.riskTolerance ?? 0).toFixed(2)} ${cover}${numbersUp}`;
 }
 function centralBrainLabel(b) {
   if (!b) return "22p 3o Loose";
@@ -1674,6 +1681,8 @@ function render() {
   onTarget.textContent = `${s.shotsOnTargetHome ?? 0} - ${s.shotsOnTargetAway ?? 0}`;
   saves.textContent = `${s.savesHome ?? 0} - ${s.savesAway ?? 0}`;
   passes.textContent = `${s.passesCompletedHome + s.passesCompletedAway} / ${s.passesAttemptedHome + s.passesAttemptedAway}`;
+  clearances.textContent = `${s.clearancesHome ?? 0} - ${s.clearancesAway ?? 0}`;
+  routeOne.textContent = `${s.routeOneBallsHome ?? 0} - ${s.routeOneBallsAway ?? 0}`;
   recoveries.textContent = `${s.looseBallRecoveriesHome ?? 0} - ${s.looseBallRecoveriesAway ?? 0}`;
   offsides.textContent = `${s.offsidesHome ?? 0} - ${s.offsidesAway ?? 0}`;
   offsideLine.textContent = offsideLineLabel();

@@ -43,6 +43,10 @@ pub enum ExternalOptimizationTool {
     IbmCpOptimizer,
     OptaPlanner,
     Timefold,
+    FastDownward,
+    LpgTd,
+    Optic,
+    Enhsp,
     JMetal,
     MoeaFramework,
     Ecj,
@@ -67,6 +71,8 @@ pub enum ExternalOptimizationTool {
     GurobiPy,
     Docplex,
     OrToolsPython,
+    OrToolsGlop,
+    OrToolsPdlp,
     ScipyOptimize,
     Jump,
     Ampl,
@@ -106,6 +112,8 @@ pub enum ExternalOptimizationTool {
     ScipCli,
     CbcCli,
     ClpCli,
+    SoplexCli,
+    LpSolveCli,
     GurobiCli,
     CplexCli,
     XpressCli,
@@ -128,6 +136,10 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::IbmCpOptimizer,
             ExternalOptimizationTool::OptaPlanner,
             ExternalOptimizationTool::Timefold,
+            ExternalOptimizationTool::FastDownward,
+            ExternalOptimizationTool::LpgTd,
+            ExternalOptimizationTool::Optic,
+            ExternalOptimizationTool::Enhsp,
             ExternalOptimizationTool::JMetal,
             ExternalOptimizationTool::MoeaFramework,
             ExternalOptimizationTool::Ecj,
@@ -152,6 +164,8 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::GurobiPy,
             ExternalOptimizationTool::Docplex,
             ExternalOptimizationTool::OrToolsPython,
+            ExternalOptimizationTool::OrToolsGlop,
+            ExternalOptimizationTool::OrToolsPdlp,
             ExternalOptimizationTool::ScipyOptimize,
             ExternalOptimizationTool::Jump,
             ExternalOptimizationTool::Ampl,
@@ -191,6 +205,8 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::ScipCli,
             ExternalOptimizationTool::CbcCli,
             ExternalOptimizationTool::ClpCli,
+            ExternalOptimizationTool::SoplexCli,
+            ExternalOptimizationTool::LpSolveCli,
             ExternalOptimizationTool::GurobiCli,
             ExternalOptimizationTool::CplexCli,
             ExternalOptimizationTool::XpressCli,
@@ -213,6 +229,10 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::IbmCpOptimizer => "ibm-cp-optimizer",
             ExternalOptimizationTool::OptaPlanner => "optaplanner",
             ExternalOptimizationTool::Timefold => "timefold",
+            ExternalOptimizationTool::FastDownward => "fast-downward",
+            ExternalOptimizationTool::LpgTd => "lpg-td",
+            ExternalOptimizationTool::Optic => "optic",
+            ExternalOptimizationTool::Enhsp => "enhsp",
             ExternalOptimizationTool::JMetal => "jmetal",
             ExternalOptimizationTool::MoeaFramework => "moea-framework",
             ExternalOptimizationTool::Ecj => "ecj",
@@ -237,6 +257,8 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::GurobiPy => "gurobipy",
             ExternalOptimizationTool::Docplex => "docplex",
             ExternalOptimizationTool::OrToolsPython => "ortools-python",
+            ExternalOptimizationTool::OrToolsGlop => "ortools-glop",
+            ExternalOptimizationTool::OrToolsPdlp => "ortools-pdlp",
             ExternalOptimizationTool::ScipyOptimize => "scipy-optimize",
             ExternalOptimizationTool::Jump => "jump",
             ExternalOptimizationTool::Ampl => "ampl",
@@ -276,6 +298,8 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::ScipCli => "scip-cli",
             ExternalOptimizationTool::CbcCli => "cbc-cli",
             ExternalOptimizationTool::ClpCli => "clp-cli",
+            ExternalOptimizationTool::SoplexCli => "soplex-cli",
+            ExternalOptimizationTool::LpSolveCli => "lp-solve-cli",
             ExternalOptimizationTool::GurobiCli => "gurobi-cli",
             ExternalOptimizationTool::CplexCli => "cplex-cli",
             ExternalOptimizationTool::XpressCli => "xpress-cli",
@@ -298,6 +322,10 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::IbmCpOptimizer => "IBM ILOG CP Optimizer",
             ExternalOptimizationTool::OptaPlanner => "OptaPlanner",
             ExternalOptimizationTool::Timefold => "Timefold Solver",
+            ExternalOptimizationTool::FastDownward => "Fast Downward",
+            ExternalOptimizationTool::LpgTd => "LPG-td",
+            ExternalOptimizationTool::Optic => "OPTIC",
+            ExternalOptimizationTool::Enhsp => "ENHSP",
             ExternalOptimizationTool::JMetal => "jMetal",
             ExternalOptimizationTool::MoeaFramework => "MOEA Framework",
             ExternalOptimizationTool::Ecj => "ECJ",
@@ -322,6 +350,8 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::GurobiPy => "gurobipy",
             ExternalOptimizationTool::Docplex => "DOcplex",
             ExternalOptimizationTool::OrToolsPython => "Google OR-Tools Python",
+            ExternalOptimizationTool::OrToolsGlop => "Google OR-Tools GLOP",
+            ExternalOptimizationTool::OrToolsPdlp => "Google OR-Tools PDLP",
             ExternalOptimizationTool::ScipyOptimize => "SciPy optimize",
             ExternalOptimizationTool::Jump => "JuMP",
             ExternalOptimizationTool::Ampl => "AMPL",
@@ -361,6 +391,8 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::ScipCli => "SCIP CLI",
             ExternalOptimizationTool::CbcCli => "COIN-OR CBC CLI",
             ExternalOptimizationTool::ClpCli => "COIN-OR CLP CLI",
+            ExternalOptimizationTool::SoplexCli => "SoPlex CLI",
+            ExternalOptimizationTool::LpSolveCli => "lp_solve CLI",
             ExternalOptimizationTool::GurobiCli => "Gurobi Optimizer CLI",
             ExternalOptimizationTool::CplexCli => "IBM ILOG CPLEX Optimizer CLI",
             ExternalOptimizationTool::XpressCli => "FICO Xpress Optimizer CLI",
@@ -402,6 +434,8 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::GurobiPy
             | ExternalOptimizationTool::Docplex
             | ExternalOptimizationTool::OrToolsPython
+            | ExternalOptimizationTool::OrToolsGlop
+            | ExternalOptimizationTool::OrToolsPdlp
             | ExternalOptimizationTool::ScipyOptimize
             | ExternalOptimizationTool::Casadi
             | ExternalOptimizationTool::Osqp
@@ -417,6 +451,10 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::Ampl
             | ExternalOptimizationTool::Gams
             | ExternalOptimizationTool::Hexaly
+            | ExternalOptimizationTool::FastDownward
+            | ExternalOptimizationTool::LpgTd
+            | ExternalOptimizationTool::Optic
+            | ExternalOptimizationTool::Enhsp
             | ExternalOptimizationTool::Minotaur
             | ExternalOptimizationTool::Symphony
             | ExternalOptimizationTool::Ipopt
@@ -446,6 +484,8 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::ScipCli
             | ExternalOptimizationTool::CbcCli
             | ExternalOptimizationTool::ClpCli
+            | ExternalOptimizationTool::SoplexCli
+            | ExternalOptimizationTool::LpSolveCli
             | ExternalOptimizationTool::GurobiCli
             | ExternalOptimizationTool::CplexCli
             | ExternalOptimizationTool::XpressCli
@@ -468,6 +508,10 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::IbmCpOptimizer => "IBM_CP_OPTIMIZER_CLASSPATH",
             ExternalOptimizationTool::OptaPlanner => "OPTAPLANNER_CLASSPATH",
             ExternalOptimizationTool::Timefold => "TIMEFOLD_CLASSPATH",
+            ExternalOptimizationTool::FastDownward => "FAST_DOWNWARD_DIR",
+            ExternalOptimizationTool::LpgTd => "LPG_TD_DIR",
+            ExternalOptimizationTool::Optic => "OPTIC_DIR",
+            ExternalOptimizationTool::Enhsp => "ENHSP_DIR",
             ExternalOptimizationTool::JMetal => "JMETAL_CLASSPATH",
             ExternalOptimizationTool::MoeaFramework => "MOEA_FRAMEWORK_CLASSPATH",
             ExternalOptimizationTool::Ecj => "ECJ_CLASSPATH",
@@ -492,6 +536,8 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::GurobiPy => "GUROBIPY_PYTHON",
             ExternalOptimizationTool::Docplex => "DOCPLEX_PYTHON",
             ExternalOptimizationTool::OrToolsPython => "ORTOOLS_PYTHON_PYTHON",
+            ExternalOptimizationTool::OrToolsGlop => "ORTOOLS_GLOP_PYTHON",
+            ExternalOptimizationTool::OrToolsPdlp => "ORTOOLS_PDLP_PYTHON",
             ExternalOptimizationTool::ScipyOptimize => "SCIPY_OPTIMIZE_PYTHON",
             ExternalOptimizationTool::Jump => "JUMP_JULIA",
             ExternalOptimizationTool::Ampl => "AMPL_DIR",
@@ -531,6 +577,8 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::ScipCli => "SCIP_DIR",
             ExternalOptimizationTool::CbcCli => "CBC_DIR",
             ExternalOptimizationTool::ClpCli => "CLP_DIR",
+            ExternalOptimizationTool::SoplexCli => "SOPLEX_DIR",
+            ExternalOptimizationTool::LpSolveCli => "LP_SOLVE_DIR",
             ExternalOptimizationTool::GurobiCli => "GUROBI_HOME",
             ExternalOptimizationTool::CplexCli => "CPLEX_STUDIO_DIR",
             ExternalOptimizationTool::XpressCli => "XPRESSDIR",
@@ -559,6 +607,10 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Sat4j => &["SAT4J_HOME"],
             ExternalOptimizationTool::PySat => &["PYSAT_PYTHON"],
             ExternalOptimizationTool::OpenWbo => &["OPEN_WBO_HOME"],
+            ExternalOptimizationTool::FastDownward => &["FAST_DOWNWARD_HOME"],
+            ExternalOptimizationTool::LpgTd => &["LPG_TD_HOME", "LPG_HOME"],
+            ExternalOptimizationTool::Optic => &["OPTIC_HOME"],
+            ExternalOptimizationTool::Enhsp => &["ENHSP_HOME"],
             ExternalOptimizationTool::Pyomo => &["PYOMO_PYTHON"][..],
             ExternalOptimizationTool::Pulp => &["PULP_PYTHON"],
             ExternalOptimizationTool::Cvxpy => &["CVXPY_PYTHON"],
@@ -567,7 +619,9 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::PythonMip => &["PYTHON_MIP_PYTHON"],
             ExternalOptimizationTool::GurobiPy => &["GUROBIPY_PYTHON"],
             ExternalOptimizationTool::Docplex => &["DOCPLEX_PYTHON"],
-            ExternalOptimizationTool::OrToolsPython => &["ORTOOLS_PYTHON"],
+            ExternalOptimizationTool::OrToolsPython
+            | ExternalOptimizationTool::OrToolsGlop
+            | ExternalOptimizationTool::OrToolsPdlp => &["ORTOOLS_PYTHON"],
             ExternalOptimizationTool::ScipyOptimize => &["SCIPY_PYTHON"],
             ExternalOptimizationTool::Jump => &["JULIA_PROJECT"],
             ExternalOptimizationTool::Minotaur => &["MINOTAUR_HOME"],
@@ -604,6 +658,8 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::ScipCli => &["SCIP_CMD", "SCIPOPTDIR", "SCIP_HOME"],
             ExternalOptimizationTool::CbcCli => &["CBC_CMD", "CBC_HOME", "COINOR_HOME"],
             ExternalOptimizationTool::ClpCli => &["CLP_CMD", "CLP_HOME", "COINOR_HOME"],
+            ExternalOptimizationTool::SoplexCli => &["SOPLEX_CMD", "SOPLEX_HOME"],
+            ExternalOptimizationTool::LpSolveCli => &["LP_SOLVE_CMD", "LPSOLVE_CMD"],
             ExternalOptimizationTool::GurobiCli => &["GUROBI_CL_CMD", "GUROBI_CMD"],
             ExternalOptimizationTool::CplexCli => &["CPLEX_CMD", "CPLEX_HOME"],
             ExternalOptimizationTool::XpressCli => &["XPRESS_CMD", "XPRESS_HOME"],
@@ -632,6 +688,10 @@ impl ExternalOptimizationTool {
             }
             ExternalOptimizationTool::OptaPlanner => &["OPTAPLANNER_HOME", "OPTAPLANNER_DIR"],
             ExternalOptimizationTool::Timefold => &["TIMEFOLD_HOME", "TIMEFOLD_DIR"],
+            ExternalOptimizationTool::FastDownward => &["FAST_DOWNWARD_HOME", "FAST_DOWNWARD_DIR"],
+            ExternalOptimizationTool::LpgTd => &["LPG_TD_HOME", "LPG_HOME", "LPG_DIR"],
+            ExternalOptimizationTool::Optic => &["OPTIC_HOME", "OPTIC_DIR"],
+            ExternalOptimizationTool::Enhsp => &["ENHSP_HOME", "ENHSP_DIR"],
             ExternalOptimizationTool::JMetal => &["JMETAL_HOME", "JMETAL_DIR"],
             ExternalOptimizationTool::MoeaFramework => &["MOEA_FRAMEWORK_HOME", "MOEA_HOME"],
             ExternalOptimizationTool::Ecj => &["ECJ_HOME", "ECJ_DIR"],
@@ -661,7 +721,9 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Docplex => {
                 &["DOCPLEX_HOME", "CPLEX_STUDIO_DIR", "CPLEX_HOME"]
             }
-            ExternalOptimizationTool::OrToolsPython => &["ORTOOLS_HOME", "ORTOOLS_PYTHON_HOME"],
+            ExternalOptimizationTool::OrToolsPython
+            | ExternalOptimizationTool::OrToolsGlop
+            | ExternalOptimizationTool::OrToolsPdlp => &["ORTOOLS_HOME", "ORTOOLS_PYTHON_HOME"][..],
             ExternalOptimizationTool::ScipyOptimize => &["SCIPY_HOME", "SCIPY_DIR"],
             ExternalOptimizationTool::Ampl => &["AMPL_HOME", "AMPL_DIR"],
             ExternalOptimizationTool::Gams => &["GAMS_DIR", "GAMSDIR", "GAMS_HOME"],
@@ -713,6 +775,13 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::ClpCli => {
                 &["CLP_DIR", "CLP_HOME", "COINOR_DIR", "COINOR_HOME"]
             }
+            ExternalOptimizationTool::SoplexCli => &["SOPLEX_DIR", "SOPLEX_HOME"],
+            ExternalOptimizationTool::LpSolveCli => &[
+                "LP_SOLVE_DIR",
+                "LPSOLVE_DIR",
+                "LP_SOLVE_HOME",
+                "LPSOLVE_HOME",
+            ],
             ExternalOptimizationTool::GurobiCli => &["GUROBI_HOME"],
             ExternalOptimizationTool::CplexCli => &["CPLEX_STUDIO_DIR", "CPLEX_HOME"],
             ExternalOptimizationTool::XpressCli => &["XPRESSDIR", "XPRESS_DIR", "XPRESS_HOME"],
@@ -768,6 +837,9 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::GurobiPy => &["gurobipy"],
             ExternalOptimizationTool::Docplex => &["docplex.mp.model"],
             ExternalOptimizationTool::OrToolsPython => &["ortools.sat.python.cp_model"],
+            ExternalOptimizationTool::OrToolsGlop | ExternalOptimizationTool::OrToolsPdlp => {
+                &["ortools.linear_solver.pywraplp"]
+            }
             ExternalOptimizationTool::ScipyOptimize => &["scipy.optimize"],
             ExternalOptimizationTool::Cpmpy => &["cpmpy"],
             ExternalOptimizationTool::PyCsp3 => &["pycsp3"],
@@ -791,6 +863,8 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::ScipCli => &["scip"],
             ExternalOptimizationTool::CbcCli => &["cbc"],
             ExternalOptimizationTool::ClpCli => &["clp"],
+            ExternalOptimizationTool::SoplexCli => &["soplex"],
+            ExternalOptimizationTool::LpSolveCli => &["lp_solve", "lp-solve", "lpsolve"],
             ExternalOptimizationTool::GurobiCli => &["gurobi_cl"],
             ExternalOptimizationTool::CplexCli => &["cplex"],
             ExternalOptimizationTool::XpressCli => &["optimizer", "xpress"],
@@ -800,6 +874,10 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Clingo => &["clingo"],
             ExternalOptimizationTool::Clingcon => &["clingcon"],
             ExternalOptimizationTool::OpenWbo => &["open-wbo", "open-wbo_static"],
+            ExternalOptimizationTool::FastDownward => &["fast-downward.py", "fast-downward"],
+            ExternalOptimizationTool::LpgTd => &["lpg-td", "lpg"],
+            ExternalOptimizationTool::Optic => &["optic", "optic-clp"],
+            ExternalOptimizationTool::Enhsp => &["enhsp", "enhsp.jar"],
             ExternalOptimizationTool::Minotaur => &["minotaur"],
             ExternalOptimizationTool::Symphony => &["symphony"],
             ExternalOptimizationTool::Ipopt => &["ipopt"],
@@ -1560,7 +1638,7 @@ mod tests {
 
     #[test]
     fn ecosystem_tool_metadata_covers_supported_languages() {
-        assert_eq!(ExternalOptimizationTool::all().len(), 80);
+        assert_eq!(ExternalOptimizationTool::all().len(), 88);
         assert_eq!(
             ExternalOptimizationTool::ChocoSolver.ecosystem(),
             ExternalOptimizationEcosystem::Java
@@ -1586,6 +1664,10 @@ mod tests {
             ExternalOptimizationEcosystem::Native
         );
         assert_eq!(
+            ExternalOptimizationTool::FastDownward.ecosystem(),
+            ExternalOptimizationEcosystem::Native
+        );
+        assert_eq!(
             ExternalOptimizationTool::Conjure.ecosystem(),
             ExternalOptimizationEcosystem::Native
         );
@@ -1606,6 +1688,10 @@ mod tests {
             ExternalOptimizationEcosystem::Python
         );
         assert_eq!(
+            ExternalOptimizationTool::OrToolsPdlp.ecosystem(),
+            ExternalOptimizationEcosystem::Python
+        );
+        assert_eq!(
             ExternalOptimizationTool::GoodLp.ecosystem(),
             ExternalOptimizationEcosystem::Rust
         );
@@ -1615,6 +1701,10 @@ mod tests {
         );
         assert_eq!(ExternalOptimizationTool::Cvxpy.env_var(), "CVXPY_PYTHON");
         assert_eq!(ExternalOptimizationTool::Hexaly.env_var(), "HEXALY_DIR");
+        assert_eq!(
+            ExternalOptimizationTool::FastDownward.env_var(),
+            "FAST_DOWNWARD_DIR"
+        );
         assert_eq!(ExternalOptimizationTool::Mosek.env_var(), "MOSEK_HOME");
         assert_eq!(ExternalOptimizationTool::Z3.env_var(), "Z3_DIR");
         assert_eq!(
@@ -1634,6 +1724,16 @@ mod tests {
         assert!(ExternalOptimizationTool::GurobiPy
             .python_modules()
             .contains(&"gurobipy"));
+        assert!(ExternalOptimizationTool::OrToolsGlop
+            .python_modules()
+            .contains(&"ortools.linear_solver.pywraplp"));
+        assert_eq!(
+            ExternalOptimizationTool::OrToolsPdlp.env_var(),
+            "ORTOOLS_PDLP_PYTHON"
+        );
+        assert!(ExternalOptimizationTool::OrToolsPdlp
+            .artifact_env_vars()
+            .contains(&"ORTOOLS_PYTHON"));
         assert!(ExternalOptimizationTool::Cpmpy
             .python_modules()
             .contains(&"cpmpy"));
@@ -1652,6 +1752,18 @@ mod tests {
         assert!(ExternalOptimizationTool::OpenWbo
             .native_command_aliases()
             .contains(&"open-wbo"));
+        assert!(ExternalOptimizationTool::FastDownward
+            .native_command_aliases()
+            .contains(&"fast-downward.py"));
+        assert!(ExternalOptimizationTool::LpgTd
+            .native_command_aliases()
+            .contains(&"lpg-td"));
+        assert!(ExternalOptimizationTool::Optic
+            .native_command_aliases()
+            .contains(&"optic"));
+        assert!(ExternalOptimizationTool::Enhsp
+            .native_command_aliases()
+            .contains(&"enhsp"));
         assert!(ExternalOptimizationTool::Z3
             .native_command_aliases()
             .contains(&"z3"));
@@ -1688,6 +1800,9 @@ mod tests {
         assert!(ExternalOptimizationTool::Conjure
             .install_dir_env_vars()
             .contains(&"CONJURE_HOME"));
+        assert!(ExternalOptimizationTool::FastDownward
+            .install_dir_env_vars()
+            .contains(&"FAST_DOWNWARD_HOME"));
         assert!(ExternalOptimizationTool::Symphony
             .install_dir_env_vars()
             .contains(&"COINOR_HOME"));

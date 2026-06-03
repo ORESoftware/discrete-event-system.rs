@@ -1,8 +1,9 @@
-FROM rust:1.86-bookworm AS build
+FROM rust:1.86-bookworm AS builder
 
-WORKDIR /app
+WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+
 RUN cargo build --release --bin main_soccer_learning_run
 
 FROM debian:bookworm-slim
@@ -12,16 +13,27 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /work
-COPY --from=build /app/target/release/main_soccer_learning_run /usr/local/bin/main_soccer_learning_run
+COPY --from=builder /src/target/release/main_soccer_learning_run /usr/local/bin/main_soccer_learning_run
 
 ENV SOCCER_GAMES=100 \
-    SOCCER_MINUTES=90 \
     SOCCER_HALVES=2 \
     SOCCER_HALF_MINUTES=45 \
+    SOCCER_PERIOD_BREAK_RECOVERY_SECONDS=900 \
     SOCCER_DT_SECONDS=0.2 \
     SOCCER_LEARNING_INTERVAL_TICKS=4 \
     SOCCER_PARALLEL_GAMES=1 \
+    SOCCER_CHECKPOINT_INTERVAL_GAMES=10 \
+    SOCCER_ARTIFACT_MAX_ENTRIES_PER_POLICY=10000 \
     SOCCER_GAME_ARTIFACT_MODE=summary \
-    SOCCER_WRITE_GAME_ARTIFACTS=true
+    SOCCER_WRITE_GAME_ARTIFACTS=true \
+    SOCCER_ATTACK_SPACING_DELTA_WEIGHT=0.22 \
+    SOCCER_ATTACK_SPACING_SCORE_WEIGHT=0.06 \
+    SOCCER_ATTACK_WIDTH_DELTA_WEIGHT=0.52 \
+    SOCCER_ATTACK_WIDTH_SCORE_WEIGHT=0.14 \
+    SOCCER_ATTACK_FLANK_LANE_WEIGHT=0.28 \
+    SOCCER_DEFENSE_SPACING_DELTA_WEIGHT=0.08 \
+    SOCCER_DEFENSE_SPACING_SCORE_WEIGHT=0.04 \
+    SOCCER_DEFENSE_CONTRACT_DELTA_WEIGHT=0.42 \
+    SOCCER_DEFENSE_COMPACTNESS_SCORE_WEIGHT=0.14
 
-CMD ["main_soccer_learning_run"]
+ENTRYPOINT ["/usr/local/bin/main_soccer_learning_run"]

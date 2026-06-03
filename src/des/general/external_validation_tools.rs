@@ -6,6 +6,7 @@
 //! but it does not vendor jars, native libraries, solver binaries, benchmark
 //! corpora, or simulator installations.
 
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::env;
@@ -168,6 +169,12 @@ const BENCHMARK_CAPS: &[ExternalValidationCapability] =
 const NONLINEAR_CAPS: &[ExternalValidationCapability] = &[ExternalValidationCapability::SolveModel];
 const CONVEX_CONIC_CAPS: &[ExternalValidationCapability] =
     &[ExternalValidationCapability::SolveModel];
+const SOLVE_AND_VALIDATE_CAPS: &[ExternalValidationCapability] = &[
+    ExternalValidationCapability::SolveModel,
+    ExternalValidationCapability::CheckSolution,
+];
+const PLAN_VALIDATOR_CAPS: &[ExternalValidationCapability] =
+    &[ExternalValidationCapability::CheckSolution];
 const SIMULATION_CAPS: &[ExternalValidationCapability] =
     &[ExternalValidationCapability::RunSimulation];
 const OUTPUT_VALIDATOR_CAPS: &[ExternalValidationCapability] =
@@ -188,6 +195,9 @@ const CP_MODEL_FORMATS: &[&str] = &[
     "json",
 ];
 const ASP_FORMATS: &[&str] = &["lp", "asp", "clingo", "dlv", "json"];
+const ALGEBRAIC_MODEL_FORMATS: &[&str] =
+    &["lp", "mps", "nl", "mod", "dat", "gms", "jl", "py", "json"];
+const PDDL_FORMATS: &[&str] = &["pddl", "plan", "sas", "json"];
 const SMT_FORMATS: &[&str] = &["smt2"];
 const SAT_FORMATS: &[&str] = &["cnf", "wcnf", "opb"];
 const PROOF_FORMATS: &[&str] = &["drat", "lrat", "grat", "frat", "opb", "pbp", "rup"];
@@ -270,6 +280,222 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         notes: "MiniZinc checker-model path for independent solution validation",
     },
     ExternalValidationToolSpec {
+        id: "choco-solver",
+        display_name: "Choco Solver",
+        env_key: "CHOCO_SOLVER",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::Java,
+        artifact_kind: ExternalValidationArtifactKind::JavaClasspath,
+        command_aliases: &["ores-choco-solver-adapter", "choco-solver-adapter"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: CP_MODEL_FORMATS,
+        notes: "Java-native finite-domain CP solver adapter for scheduling, timetabling, and combinatorial checks",
+    },
+    ExternalValidationToolSpec {
+        id: "jacop",
+        display_name: "JaCoP",
+        env_key: "JACOP",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::Java,
+        artifact_kind: ExternalValidationArtifactKind::JavaClasspath,
+        command_aliases: &["ores-jacop-adapter", "jacop-adapter"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: CP_MODEL_FORMATS,
+        notes: "Java CP solver adapter for independent finite-domain and scheduling-model validation",
+    },
+    ExternalValidationToolSpec {
+        id: "ibm-cp-optimizer",
+        display_name: "IBM ILOG CP Optimizer",
+        env_key: "IBM_CP_OPTIMIZER",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::Java,
+        artifact_kind: ExternalValidationArtifactKind::JavaClasspath,
+        command_aliases: &["ores-ibm-cp-optimizer-adapter", "cpoptimizer-adapter", "cpoptimizer"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: CP_MODEL_FORMATS,
+        notes: "Industrial CP Optimizer adapter hook for interval scheduling and CP solution cross-checks",
+    },
+    ExternalValidationToolSpec {
+        id: "ortools-java",
+        display_name: "Google OR-Tools Java",
+        env_key: "ORTOOLS_JAVA",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::Java,
+        artifact_kind: ExternalValidationArtifactKind::JavaClasspath,
+        command_aliases: &["ores-ortools-java-adapter", "ortools-java-adapter"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: CP_MODEL_FORMATS,
+        notes: "Java OR-Tools CP-SAT, routing, and linear-solver adapter for independent JVM-side validation",
+    },
+    ExternalValidationToolSpec {
+        id: "ojalgo",
+        display_name: "ojAlgo",
+        env_key: "OJALGO",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::Java,
+        artifact_kind: ExternalValidationArtifactKind::JavaClasspath,
+        command_aliases: &["ores-ojalgo-adapter", "ojalgo-adapter"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: ALGEBRAIC_MODEL_FORMATS,
+        notes: "Java numerical optimization and self-contained LP/MIP-style validation adapter",
+    },
+    ExternalValidationToolSpec {
+        id: "optaplanner",
+        display_name: "OptaPlanner",
+        env_key: "OPTAPLANNER",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::Java,
+        artifact_kind: ExternalValidationArtifactKind::JavaClasspath,
+        command_aliases: &["ores-optaplanner-adapter", "optaplanner-adapter"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: PDDL_FORMATS,
+        notes: "Java planning/metaheuristic adapter for timetabling, routing, rostering, and plan-output validation",
+    },
+    ExternalValidationToolSpec {
+        id: "timefold",
+        display_name: "Timefold Solver",
+        env_key: "TIMEFOLD",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::Java,
+        artifact_kind: ExternalValidationArtifactKind::JavaClasspath,
+        command_aliases: &["ores-timefold-adapter", "timefold-adapter"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: PDDL_FORMATS,
+        notes: "Open-source Java/Kotlin planning solver adapter for metaheuristic schedule cross-checks",
+    },
+    ExternalValidationToolSpec {
+        id: "jmetal",
+        display_name: "jMetal",
+        env_key: "JMETAL",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::Java,
+        artifact_kind: ExternalValidationArtifactKind::JavaClasspath,
+        command_aliases: &["ores-jmetal-adapter", "jmetal-adapter"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: OUTPUT_FORMATS,
+        notes: "Java evolutionary multi-objective optimization adapter for Pareto-front validation",
+    },
+    ExternalValidationToolSpec {
+        id: "moea-framework",
+        display_name: "MOEA Framework",
+        env_key: "MOEA_FRAMEWORK",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::Java,
+        artifact_kind: ExternalValidationArtifactKind::JavaClasspath,
+        command_aliases: &["ores-moea-framework-adapter", "moea-framework-adapter"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: OUTPUT_FORMATS,
+        notes: "Java multi-objective evolutionary optimizer adapter for Pareto-front and scalarization checks",
+    },
+    ExternalValidationToolSpec {
+        id: "ecj",
+        display_name: "ECJ",
+        env_key: "ECJ",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::Java,
+        artifact_kind: ExternalValidationArtifactKind::JavaClasspath,
+        command_aliases: &["ores-ecj-adapter", "ecj-adapter"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: OUTPUT_FORMATS,
+        notes: "Java evolutionary computation framework adapter for heuristic-result validation",
+    },
+    ExternalValidationToolSpec {
+        id: "good-lp",
+        display_name: "good_lp",
+        env_key: "GOOD_LP",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::Rust,
+        artifact_kind: ExternalValidationArtifactKind::RustCrate,
+        command_aliases: &["ores-good-lp-adapter", "good-lp-adapter"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: ALGEBRAIC_MODEL_FORMATS,
+        notes: "Rust LP/MIP modeling layer adapter for cross-checking solver-backed linear models",
+    },
+    ExternalValidationToolSpec {
+        id: "lp-modeler",
+        display_name: "lp-modeler",
+        env_key: "LP_MODELER",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::Rust,
+        artifact_kind: ExternalValidationArtifactKind::RustCrate,
+        command_aliases: &["ores-lp-modeler-adapter", "lp-modeler-adapter"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: ALGEBRAIC_MODEL_FORMATS,
+        notes: "Rust linear-programming DSL adapter for independent LP/MIP model export validation",
+    },
+    ExternalValidationToolSpec {
+        id: "rust-linprog",
+        display_name: "rust-linprog",
+        env_key: "RUST_LINPROG",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::Rust,
+        artifact_kind: ExternalValidationArtifactKind::RustCrate,
+        command_aliases: &["ores-rust-linprog-adapter", "rust-linprog-adapter"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: ALGEBRAIC_MODEL_FORMATS,
+        notes: "Rust-first lightweight LP adapter for validation-scale simplex cross-checks",
+    },
+    ExternalValidationToolSpec {
+        id: "argmin",
+        display_name: "argmin",
+        env_key: "ARGMIN",
+        family: ExternalValidationFamily::NonlinearGlobalSolver,
+        runtime: ExternalValidationRuntime::Rust,
+        artifact_kind: ExternalValidationArtifactKind::RustCrate,
+        command_aliases: &["ores-argmin-adapter", "argmin-adapter"],
+        capabilities: NONLINEAR_CAPS,
+        input_formats: NLP_FORMATS,
+        notes: "Rust nonlinear optimization crate adapter for gradient and derivative-free validation runs",
+    },
+    ExternalValidationToolSpec {
+        id: "nlopt-rs",
+        display_name: "NLopt Rust bindings",
+        env_key: "NLOPT_RS",
+        family: ExternalValidationFamily::NonlinearGlobalSolver,
+        runtime: ExternalValidationRuntime::Rust,
+        artifact_kind: ExternalValidationArtifactKind::RustCrate,
+        command_aliases: &["ores-nlopt-rs-adapter", "nlopt-rs-adapter", "nlopt-adapter"],
+        capabilities: NONLINEAR_CAPS,
+        input_formats: NLP_FORMATS,
+        notes: "Rust bindings to NLopt nonlinear algorithms for local nonlinear model cross-checks",
+    },
+    ExternalValidationToolSpec {
+        id: "highs-rust",
+        display_name: "HiGHS Rust bindings",
+        env_key: "HIGHS_RUST",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::Rust,
+        artifact_kind: ExternalValidationArtifactKind::RustCrate,
+        command_aliases: &["ores-highs-rust-adapter", "highs-rust-adapter"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: ALGEBRAIC_MODEL_FORMATS,
+        notes: "Rust HiGHS binding adapter for LP/MIP/QP cross-checks without vendoring solver binaries",
+    },
+    ExternalValidationToolSpec {
+        id: "scip-rust",
+        display_name: "SCIP Rust bindings",
+        env_key: "SCIP_RUST",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::Rust,
+        artifact_kind: ExternalValidationArtifactKind::RustCrate,
+        command_aliases: &["ores-scip-rust-adapter", "scip-rust-adapter"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: ALGEBRAIC_MODEL_FORMATS,
+        notes: "Rust SCIP binding adapter for MIP/CP-stack validation using local SCIP installations",
+    },
+    ExternalValidationToolSpec {
+        id: "cbc-rust",
+        display_name: "CBC Rust bindings",
+        env_key: "CBC_RUST",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::Rust,
+        artifact_kind: ExternalValidationArtifactKind::RustCrate,
+        command_aliases: &["ores-cbc-rust-adapter", "cbc-rust-adapter"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: ALGEBRAIC_MODEL_FORMATS,
+        notes: "Rust COIN-OR CBC binding adapter for MIP solution and model validation",
+    },
+    ExternalValidationToolSpec {
         id: "gecode",
         display_name: "Gecode FlatZinc",
         env_key: "GECODE",
@@ -292,6 +518,18 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         capabilities: &[ExternalValidationCapability::SolveModel],
         input_formats: &["fzn"],
         notes: "Lazy-clause-generation FlatZinc backend for CP cross-checks",
+    },
+    ExternalValidationToolSpec {
+        id: "ortools-cp-sat",
+        display_name: "Google OR-Tools CP-SAT FlatZinc",
+        env_key: "ORTOOLS_CP_SAT",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::None,
+        command_aliases: &["fzn-cp-sat"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: MZN_FORMATS,
+        notes: "Native OR-Tools CP-SAT FlatZinc backend, usually exposed by Homebrew or MiniZinc solver bundles",
     },
     ExternalValidationToolSpec {
         id: "cpmpy",
@@ -384,6 +622,390 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         ],
         input_formats: ASP_FORMATS,
         notes: "Answer-set and finite-domain constraint solver in the Potassco ecosystem",
+    },
+    ExternalValidationToolSpec {
+        id: "pyomo",
+        display_name: "Pyomo",
+        env_key: "PYOMO",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
+        command_aliases: &["pyomo", "pyomo-adapter"],
+        capabilities: MINIZINC_CAPS,
+        input_formats: ALGEBRAIC_MODEL_FORMATS,
+        notes: "Python algebraic modeling layer for LP/MIP/NLP validation adapters",
+    },
+    ExternalValidationToolSpec {
+        id: "pulp",
+        display_name: "PuLP",
+        env_key: "PULP",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
+        command_aliases: &["pulp-adapter"],
+        capabilities: MINIZINC_CAPS,
+        input_formats: ALGEBRAIC_MODEL_FORMATS,
+        notes: "Python LP/MIP modeling layer for independent model checks",
+    },
+    ExternalValidationToolSpec {
+        id: "pyscipopt",
+        display_name: "PySCIPOpt",
+        env_key: "PYSCIPOPT",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
+        command_aliases: &["pyscipopt-adapter"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: MILP_FORMATS,
+        notes: "Python SCIP binding adapter for MIP, MINLP, solution-pool, and plugin-backed validation",
+    },
+    ExternalValidationToolSpec {
+        id: "python-mip",
+        display_name: "Python-MIP",
+        env_key: "PYTHON_MIP",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
+        command_aliases: &["python-mip-adapter", "mip-adapter"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: MILP_FORMATS,
+        notes: "Python-MIP adapter for CBC/Gurobi-backed LP/MIP model and solution validation",
+    },
+    ExternalValidationToolSpec {
+        id: "gurobipy",
+        display_name: "gurobipy",
+        env_key: "GUROBIPY",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
+        command_aliases: &["gurobipy-adapter"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: MILP_FORMATS,
+        notes: "Official Gurobi Python API adapter for model, attribute, parameter, and solution validation",
+    },
+    ExternalValidationToolSpec {
+        id: "docplex",
+        display_name: "DOcplex",
+        env_key: "DOCPLEX",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
+        command_aliases: &["docplex-adapter"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: MILP_FORMATS,
+        notes: "IBM DOcplex adapter for CPLEX and CP Optimizer model validation",
+    },
+    ExternalValidationToolSpec {
+        id: "ortools-python",
+        display_name: "Google OR-Tools Python",
+        env_key: "ORTOOLS_PYTHON",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
+        command_aliases: &["ortools-python-adapter", "ortools-adapter"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: ALGEBRAIC_MODEL_FORMATS,
+        notes: "Python OR-Tools adapter for CP-SAT, routing, and linear-solver validation",
+    },
+    ExternalValidationToolSpec {
+        id: "ortools-glop",
+        display_name: "Google OR-Tools GLOP",
+        env_key: "ORTOOLS_GLOP",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
+        command_aliases: &["ortools-glop-adapter", "glop-adapter"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: &["lp", "mps", "proto", "json"],
+        notes: "OR-Tools GLOP linear-programming adapter for independent LP solution checks",
+    },
+    ExternalValidationToolSpec {
+        id: "ortools-pdlp",
+        display_name: "Google OR-Tools PDLP",
+        env_key: "ORTOOLS_PDLP",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
+        command_aliases: &["ortools-pdlp-adapter", "pdlp-adapter"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: &["lp", "mps", "proto", "json"],
+        notes: "OR-Tools PDLP first-order linear-programming adapter for large sparse LP validation",
+    },
+    ExternalValidationToolSpec {
+        id: "scipy-optimize",
+        display_name: "SciPy optimize",
+        env_key: "SCIPY_OPTIMIZE",
+        family: ExternalValidationFamily::NonlinearGlobalSolver,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
+        command_aliases: &["scipy-optimize-adapter", "scipy-adapter"],
+        capabilities: NONLINEAR_CAPS,
+        input_formats: NLP_FORMATS,
+        notes: "SciPy optimize adapter for lightweight nonlinear and constrained numerical cross-checks",
+    },
+    ExternalValidationToolSpec {
+        id: "highs-cli",
+        display_name: "HiGHS CLI",
+        env_key: "HIGHS_CLI",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["highs"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: MILP_FORMATS,
+        notes: "Native HiGHS command-line adapter for LP/MIP/QP model and solution cross-checks",
+    },
+    ExternalValidationToolSpec {
+        id: "glpk-cli",
+        display_name: "GLPK glpsol CLI",
+        env_key: "GLPK_CLI",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["glpsol"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: MILP_FORMATS,
+        notes: "GLPK glpsol command-line adapter for LP/MIP validation and model export checks",
+    },
+    ExternalValidationToolSpec {
+        id: "scip-cli",
+        display_name: "SCIP CLI",
+        env_key: "SCIP_CLI",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["scip"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: MILP_FORMATS,
+        notes: "SCIP command-line adapter for MIP, constraint-integer, and validation-scale model checks",
+    },
+    ExternalValidationToolSpec {
+        id: "cbc-cli",
+        display_name: "COIN-OR CBC CLI",
+        env_key: "CBC_CLI",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["cbc"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: MILP_FORMATS,
+        notes: "COIN-OR CBC command-line adapter for MIP solution and model validation",
+    },
+    ExternalValidationToolSpec {
+        id: "clp-cli",
+        display_name: "COIN-OR CLP CLI",
+        env_key: "CLP_CLI",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["clp"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: &["lp", "mps", "json"],
+        notes: "COIN-OR CLP command-line adapter for LP-only model and solution validation",
+    },
+    ExternalValidationToolSpec {
+        id: "soplex-cli",
+        display_name: "SoPlex CLI",
+        env_key: "SOPLEX_CLI",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["soplex"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: &["lp", "mps", "json"],
+        notes: "ZIB SoPlex command-line adapter for LP validation, including rational solve modes",
+    },
+    ExternalValidationToolSpec {
+        id: "qsopt-ex-cli",
+        display_name: "QSopt_ex CLI",
+        env_key: "QSOPT_EX_CLI",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["qsopt_ex", "qsopt-ex", "qsopt"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: &["lp", "mps", "json"],
+        notes: "QSopt_ex exact rational LP solver adapter hook for independently validating LP optima",
+    },
+    ExternalValidationToolSpec {
+        id: "lp-solve-cli",
+        display_name: "lp_solve CLI",
+        env_key: "LP_SOLVE_CLI",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["lp_solve", "lp-solve", "lpsolve"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: &["lp", "json"],
+        notes: "lp_solve command-line adapter for lightweight LP/MIP validation cross-checks",
+    },
+    ExternalValidationToolSpec {
+        id: "gurobi-cli",
+        display_name: "Gurobi Optimizer CLI",
+        env_key: "GUROBI_CLI",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["gurobi_cl"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: MILP_FORMATS,
+        notes: "Commercial Gurobi command-line adapter using local non-vendored executables",
+    },
+    ExternalValidationToolSpec {
+        id: "cplex-cli",
+        display_name: "IBM ILOG CPLEX CLI",
+        env_key: "CPLEX_CLI",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["cplex"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: MILP_FORMATS,
+        notes: "Commercial IBM ILOG CPLEX command-line adapter using local installations",
+    },
+    ExternalValidationToolSpec {
+        id: "xpress-cli",
+        display_name: "FICO Xpress CLI",
+        env_key: "XPRESS_CLI",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["optimizer", "xpress"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: MILP_FORMATS,
+        notes: "Commercial FICO Xpress command-line adapter using local installations",
+    },
+    ExternalValidationToolSpec {
+        id: "lindo-cli",
+        display_name: "LINDO Systems CLI",
+        env_key: "LINDO_CLI",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["runlindo", "lindo", "lindoapi"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: MILP_FORMATS,
+        notes: "Commercial LINDO Systems command-line adapter using local installations",
+    },
+    ExternalValidationToolSpec {
+        id: "ampl",
+        display_name: "AMPL",
+        env_key: "AMPL",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["ampl"],
+        capabilities: MINIZINC_CAPS,
+        input_formats: ALGEBRAIC_MODEL_FORMATS,
+        notes: "Algebraic modeling language and solver launcher for optimization model validation",
+    },
+    ExternalValidationToolSpec {
+        id: "gams",
+        display_name: "GAMS",
+        env_key: "GAMS",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["gams"],
+        capabilities: MINIZINC_CAPS,
+        input_formats: ALGEBRAIC_MODEL_FORMATS,
+        notes: "Algebraic modeling system for optimization model cross-checks",
+    },
+    ExternalValidationToolSpec {
+        id: "hexaly",
+        display_name: "Hexaly Optimizer",
+        env_key: "HEXALY",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["hexaly", "localsolver", "localsolver-studio"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: ALGEBRAIC_MODEL_FORMATS,
+        notes: "Hexaly/LocalSolver adapter hook for routing, scheduling, nonlinear, and CP-style validation",
+    },
+    ExternalValidationToolSpec {
+        id: "jump",
+        display_name: "JuMP",
+        env_key: "JUMP",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::GenericAdapter,
+        artifact_kind: ExternalValidationArtifactKind::None,
+        command_aliases: &["jump-adapter", "julia"],
+        capabilities: MINIZINC_CAPS,
+        input_formats: ALGEBRAIC_MODEL_FORMATS,
+        notes: "Julia/JuMP adapter hook for solver-independent optimization model checks",
+    },
+    ExternalValidationToolSpec {
+        id: "neos",
+        display_name: "NEOS Server adapter",
+        env_key: "NEOS",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::GenericAdapter,
+        artifact_kind: ExternalValidationArtifactKind::None,
+        command_aliases: &["neos-adapter", "kestrel"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: ALGEBRAIC_MODEL_FORMATS,
+        notes: "Local adapter hook for NEOS/Kestrel-style remote solver validation",
+    },
+    ExternalValidationToolSpec {
+        id: "pddl-val",
+        display_name: "VAL PDDL validator",
+        env_key: "PDDL_VAL",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["Validate", "validate", "val"],
+        capabilities: PLAN_VALIDATOR_CAPS,
+        input_formats: PDDL_FORMATS,
+        notes: "PDDL plan validator for independent plan/output validation",
+    },
+    ExternalValidationToolSpec {
+        id: "fast-downward",
+        display_name: "Fast Downward",
+        env_key: "FAST_DOWNWARD",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["fast-downward.py", "fast-downward"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: PDDL_FORMATS,
+        notes: "Classical planning solver for PDDL validation scenarios",
+    },
+    ExternalValidationToolSpec {
+        id: "lpg-td",
+        display_name: "LPG-td",
+        env_key: "LPG_TD",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["lpg-td", "lpg"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: PDDL_FORMATS,
+        notes: "Temporal planning solver for PDDL schedule/plan cross-checks",
+    },
+    ExternalValidationToolSpec {
+        id: "optic",
+        display_name: "OPTIC",
+        env_key: "OPTIC",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["optic", "optic-clp"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: PDDL_FORMATS,
+        notes: "Temporal/continuous-effects PDDL planner for plan validation scenarios",
+    },
+    ExternalValidationToolSpec {
+        id: "enhsp",
+        display_name: "ENHSP",
+        env_key: "ENHSP",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["enhsp", "enhsp.jar"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: PDDL_FORMATS,
+        notes: "Hybrid numeric PDDL planner adapter for planning-model validation",
     },
     ExternalValidationToolSpec {
         id: "z3",
@@ -1466,6 +2088,18 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         notes: "Commercial LP/QP/QCP/MIP solver CLI for independent checks",
     },
     ExternalValidationToolSpec {
+        id: "nlopt",
+        display_name: "NLopt",
+        env_key: "NLOPT",
+        family: ExternalValidationFamily::NonlinearGlobalSolver,
+        runtime: ExternalValidationRuntime::GenericAdapter,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["ores-nlopt-adapter", "nlopt-adapter"],
+        capabilities: NONLINEAR_CAPS,
+        input_formats: &["json", "nl"],
+        notes: "NLopt derivative-free and gradient nonlinear optimization adapter using local installations",
+    },
+    ExternalValidationToolSpec {
         id: "nlopt-cli",
         display_name: "NLopt CLI",
         env_key: "NLOPT_CLI",
@@ -1608,6 +2242,18 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         capabilities: CONVEX_CONIC_CAPS,
         input_formats: &["py", "json"],
         notes: "Python convex modeling layer used to dispatch OSQP/SCS/Clarabel/ECOS checks",
+    },
+    ExternalValidationToolSpec {
+        id: "cvxopt",
+        display_name: "CVXOPT",
+        env_key: "CVXOPT",
+        family: ExternalValidationFamily::ConvexConicSolver,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
+        command_aliases: &["cvxopt-adapter"],
+        capabilities: CONVEX_CONIC_CAPS,
+        input_formats: &["py", "json", "mps", "cone"],
+        notes: "Python convex/numerical optimization package for LP, QP, and cone-program validation",
     },
     ExternalValidationToolSpec {
         id: "simpy",
@@ -3344,6 +3990,301 @@ pub fn simulation_validation_request_to_json(request: &SimulationValidationReque
     })
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExternalSimulationValidationReferenceOptions {
+    pub engine_id: Option<String>,
+}
+
+impl Default for ExternalSimulationValidationReferenceOptions {
+    fn default() -> Self {
+        ExternalSimulationValidationReferenceOptions { engine_id: None }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExternalSimulationValidationStatus {
+    Ok,
+    Unavailable,
+    Failed,
+    Unknown,
+}
+
+impl ExternalSimulationValidationStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ExternalSimulationValidationStatus::Ok => "ok",
+            ExternalSimulationValidationStatus::Unavailable => "unavailable",
+            ExternalSimulationValidationStatus::Failed => "failed",
+            ExternalSimulationValidationStatus::Unknown => "unknown",
+        }
+    }
+
+    pub fn from_label(label: &str) -> Self {
+        match label {
+            "ok" => ExternalSimulationValidationStatus::Ok,
+            "unavailable" => ExternalSimulationValidationStatus::Unavailable,
+            "failed" => ExternalSimulationValidationStatus::Failed,
+            _ => ExternalSimulationValidationStatus::Unknown,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExternalSimulationValidationVerdict {
+    Valid,
+    Invalid,
+    Failure,
+    Unknown,
+}
+
+impl ExternalSimulationValidationVerdict {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ExternalSimulationValidationVerdict::Valid => "valid",
+            ExternalSimulationValidationVerdict::Invalid => "invalid",
+            ExternalSimulationValidationVerdict::Failure => "failure",
+            ExternalSimulationValidationVerdict::Unknown => "unknown",
+        }
+    }
+
+    pub fn from_label(label: &str) -> Self {
+        match label {
+            "valid" => ExternalSimulationValidationVerdict::Valid,
+            "invalid" => ExternalSimulationValidationVerdict::Invalid,
+            "failure" => ExternalSimulationValidationVerdict::Failure,
+            _ => ExternalSimulationValidationVerdict::Unknown,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExternalSimulationValidationReferenceRun {
+    pub engine_id: String,
+    pub simulator: String,
+    pub status: ExternalSimulationValidationStatus,
+    pub verdict: ExternalSimulationValidationVerdict,
+    pub metrics: BTreeMap<String, f64>,
+    pub checks: Vec<Value>,
+    pub trace: Vec<Value>,
+    pub raw: Value,
+    pub elapsed_ms: f64,
+    pub message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SimulationValidationReferenceOutput {
+    status: String,
+    verdict: String,
+    #[serde(default)]
+    simulator: String,
+    #[serde(default)]
+    message: String,
+    #[serde(default)]
+    metrics: BTreeMap<String, f64>,
+    #[serde(default)]
+    checks: Vec<Value>,
+    #[serde(default)]
+    trace: Vec<Value>,
+}
+
+pub fn external_simulation_validation_tool_specs() -> Vec<&'static ExternalValidationToolSpec> {
+    EXTERNAL_VALIDATION_TOOLS
+        .iter()
+        .filter(|tool| tool.family == ExternalValidationFamily::SimulationEngine)
+        .collect()
+}
+
+pub fn external_simulation_validation_engine_manifest() -> Value {
+    Value::Array(
+        external_simulation_validation_tool_specs()
+            .into_iter()
+            .map(|tool| {
+                json!({
+                    "id": tool.id,
+                    "displayName": tool.display_name,
+                    "runtime": tool.runtime.as_str(),
+                    "artifactKind": tool.artifact_kind.env_suffix().unwrap_or("none"),
+                    "commandAliases": tool.command_aliases,
+                    "inputFormats": tool.input_formats,
+                    "notes": tool.notes,
+                })
+            })
+            .collect(),
+    )
+}
+
+pub fn external_simulation_validation_reference_script() -> PathBuf {
+    let root = env::var_os("REPO_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    root.join("scripts")
+        .join("simulation_validation_reference.py")
+}
+
+pub fn run_simulation_validation_with_external_reference(
+    request: &SimulationValidationRequest,
+    options: &ExternalSimulationValidationReferenceOptions,
+) -> ExternalSimulationValidationReferenceRun {
+    let payload = simulation_validation_request_to_json(request);
+    run_simulation_validation_json_with_external_reference(&payload, options)
+}
+
+pub fn run_simulation_validation_json_with_external_reference(
+    payload: &Value,
+    options: &ExternalSimulationValidationReferenceOptions,
+) -> ExternalSimulationValidationReferenceRun {
+    let engine_id = options
+        .engine_id
+        .clone()
+        .or_else(|| {
+            payload
+                .get("engine")
+                .or_else(|| payload.get("engine_id"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "builtin".to_string());
+    let started = Instant::now();
+    let python = env::var_os("PYTHON_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("python3"));
+    let script = external_simulation_validation_reference_script();
+    let working_dir = script
+        .parent()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf);
+    let mut command = Command::new(python);
+    if let Some(working_dir) = working_dir {
+        command.current_dir(working_dir);
+    }
+    command.arg(script).arg("--engine").arg(&engine_id);
+
+    let mut child = match command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) => {
+            return ExternalSimulationValidationReferenceRun {
+                engine_id,
+                simulator: "unavailable".to_string(),
+                status: ExternalSimulationValidationStatus::Unavailable,
+                verdict: ExternalSimulationValidationVerdict::Unknown,
+                metrics: BTreeMap::new(),
+                checks: Vec::new(),
+                trace: Vec::new(),
+                raw: json!({"status": "unavailable", "verdict": "unknown", "message": e.to_string()}),
+                elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+                message: e.to_string(),
+            }
+        }
+    };
+
+    if let Some(stdin) = child.stdin.as_mut() {
+        if let Err(e) = stdin.write_all(payload.to_string().as_bytes()) {
+            return ExternalSimulationValidationReferenceRun {
+                engine_id,
+                simulator: "failed".to_string(),
+                status: ExternalSimulationValidationStatus::Failed,
+                verdict: ExternalSimulationValidationVerdict::Failure,
+                metrics: BTreeMap::new(),
+                checks: Vec::new(),
+                trace: Vec::new(),
+                raw: json!({"status": "failed", "verdict": "failure", "message": e.to_string()}),
+                elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+                message: e.to_string(),
+            };
+        }
+    }
+
+    let output = match child.wait_with_output() {
+        Ok(output) => output,
+        Err(e) => {
+            return ExternalSimulationValidationReferenceRun {
+                engine_id,
+                simulator: "failed".to_string(),
+                status: ExternalSimulationValidationStatus::Failed,
+                verdict: ExternalSimulationValidationVerdict::Failure,
+                metrics: BTreeMap::new(),
+                checks: Vec::new(),
+                trace: Vec::new(),
+                raw: json!({"status": "failed", "verdict": "failure", "message": e.to_string()}),
+                elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+                message: e.to_string(),
+            }
+        }
+    };
+
+    let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let raw = match serde_json::from_str::<Value>(stdout.trim()) {
+        Ok(raw) => raw,
+        Err(e) => {
+            return ExternalSimulationValidationReferenceRun {
+                engine_id,
+                simulator: "failed".to_string(),
+                status: ExternalSimulationValidationStatus::Failed,
+                verdict: ExternalSimulationValidationVerdict::Failure,
+                metrics: BTreeMap::new(),
+                checks: Vec::new(),
+                trace: Vec::new(),
+                raw: json!({
+                    "status": "failed",
+                    "verdict": "failure",
+                    "stdout": stdout.trim(),
+                    "stderr": stderr,
+                    "message": e.to_string(),
+                }),
+                elapsed_ms,
+                message: e.to_string(),
+            };
+        }
+    };
+    let parsed = serde_json::from_value::<SimulationValidationReferenceOutput>(raw.clone()).ok();
+    let status = parsed
+        .as_ref()
+        .map(|parsed| ExternalSimulationValidationStatus::from_label(&parsed.status))
+        .unwrap_or(ExternalSimulationValidationStatus::Unknown);
+    let verdict = parsed
+        .as_ref()
+        .map(|parsed| ExternalSimulationValidationVerdict::from_label(&parsed.verdict))
+        .unwrap_or(ExternalSimulationValidationVerdict::Unknown);
+    let message = parsed
+        .as_ref()
+        .map(|parsed| parsed.message.clone())
+        .filter(|message| !message.is_empty())
+        .unwrap_or(stderr);
+
+    ExternalSimulationValidationReferenceRun {
+        engine_id,
+        simulator: parsed
+            .as_ref()
+            .map(|parsed| parsed.simulator.clone())
+            .filter(|simulator| !simulator.is_empty())
+            .unwrap_or_else(|| "simulation".to_string()),
+        status,
+        verdict,
+        metrics: parsed
+            .as_ref()
+            .map(|parsed| parsed.metrics.clone())
+            .unwrap_or_default(),
+        checks: parsed
+            .as_ref()
+            .map(|parsed| parsed.checks.clone())
+            .unwrap_or_default(),
+        trace: parsed
+            .as_ref()
+            .map(|parsed| parsed.trace.clone())
+            .unwrap_or_default(),
+        raw,
+        elapsed_ms,
+        message,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExternalBenchmarkManifestEntry {
     pub name: String,
@@ -4277,6 +5218,29 @@ pub fn external_validation_artifact_env_names(tool: &ExternalValidationToolSpec)
         "minizinc" | "flatzinc" | "minizinc-solution-checker" => {
             names.push("MINIZINC_HOME".to_string());
         }
+        "ortools-cp-sat" => {
+            names.push("FZN_CP_SAT_CMD".to_string());
+            names.push("ORTOOLS_HOME".to_string());
+            names.push("MINIZINC_HOME".to_string());
+        }
+        "choco-solver" => names.push("CHOCO_SOLVER_HOME".to_string()),
+        "jacop" => names.push("JACOP_HOME".to_string()),
+        "ibm-cp-optimizer" => names.push("CPLEX_STUDIO_DIR".to_string()),
+        "ortools-java" => names.push("ORTOOLS_JAVA_HOME".to_string()),
+        "ojalgo" => names.push("OJALGO_HOME".to_string()),
+        "optaplanner" => names.push("OPTAPLANNER_HOME".to_string()),
+        "timefold" => names.push("TIMEFOLD_HOME".to_string()),
+        "jmetal" => names.push("JMETAL_HOME".to_string()),
+        "moea-framework" => names.push("MOEA_FRAMEWORK_HOME".to_string()),
+        "ecj" => names.push("ECJ_HOME".to_string()),
+        "good-lp" => names.push("GOOD_LP_CRATE".to_string()),
+        "lp-modeler" => names.push("LP_MODELER_CRATE".to_string()),
+        "rust-linprog" => names.push("RUST_LINPROG_CRATE".to_string()),
+        "argmin" => names.push("ARGMIN_CRATE".to_string()),
+        "nlopt-rs" => names.push("NLOPT_DIR".to_string()),
+        "highs-rust" => names.push("HIGHS_DIR".to_string()),
+        "scip-rust" => names.push("SCIPOPTDIR".to_string()),
+        "cbc-rust" => names.push("CBC_DIR".to_string()),
         "cpmpy" => names.push("CPMPY_PYTHON".to_string()),
         "pycsp3" => names.push("PYCSP3_PYTHON".to_string()),
         "conjure" => names.push("CONJURE_HOME".to_string()),
@@ -4284,6 +5248,38 @@ pub fn external_validation_artifact_env_names(tool: &ExternalValidationToolSpec)
         "picat" => names.push("PICAT_HOME".to_string()),
         "clingo" => names.push("CLINGO_HOME".to_string()),
         "clingcon" => names.push("CLINGCON_HOME".to_string()),
+        "pyomo" => names.push("PYOMO_PYTHON".to_string()),
+        "pulp" => names.push("PULP_PYTHON".to_string()),
+        "pyscipopt" => names.push("PYSCIPOPT_PYTHON".to_string()),
+        "python-mip" => names.push("PYTHON_MIP_PYTHON".to_string()),
+        "gurobipy" => names.push("GUROBIPY_PYTHON".to_string()),
+        "docplex" => names.push("DOCPLEX_PYTHON".to_string()),
+        "ortools-python" | "ortools-glop" | "ortools-pdlp" => {
+            names.push("ORTOOLS_PYTHON".to_string())
+        }
+        "scipy-optimize" => names.push("SCIPY_OPTIMIZE_PYTHON".to_string()),
+        "highs-cli" => names.push("HIGHS_CMD".to_string()),
+        "glpk-cli" => names.push("GLPSOL_CMD".to_string()),
+        "scip-cli" => names.push("SCIP_CMD".to_string()),
+        "cbc-cli" => names.push("CBC_CMD".to_string()),
+        "clp-cli" => names.push("CLP_CMD".to_string()),
+        "soplex-cli" => names.push("SOPLEX_CMD".to_string()),
+        "qsopt-ex-cli" => names.push("QSOPT_EX_CMD".to_string()),
+        "lp-solve-cli" => names.push("LP_SOLVE_CMD".to_string()),
+        "gurobi-cli" => names.push("GUROBI_CL_CMD".to_string()),
+        "cplex-cli" => names.push("CPLEX_CMD".to_string()),
+        "xpress-cli" => names.push("XPRESS_CMD".to_string()),
+        "lindo-cli" => names.push("LINDOAPI_CMD".to_string()),
+        "ampl" => names.push("AMPL_HOME".to_string()),
+        "gams" => names.push("GAMS_HOME".to_string()),
+        "hexaly" => names.push("HEXALY_HOME".to_string()),
+        "jump" => names.push("JULIA_PROJECT".to_string()),
+        "neos" => names.push("NEOS_EMAIL".to_string()),
+        "pddl-val" => names.push("VAL_HOME".to_string()),
+        "fast-downward" => names.push("FAST_DOWNWARD_HOME".to_string()),
+        "lpg-td" => names.push("LPG_HOME".to_string()),
+        "optic" => names.push("OPTIC_HOME".to_string()),
+        "enhsp" => names.push("ENHSP_HOME".to_string()),
         "sat4j" => names.push("SAT4J_HOME".to_string()),
         "pysat" => names.push("PYSAT_PYTHON".to_string()),
         "open-wbo" => names.push("OPEN_WBO_HOME".to_string()),
@@ -4298,6 +5294,8 @@ pub fn external_validation_artifact_env_names(tool: &ExternalValidationToolSpec)
         "mosek" => names.push("MOSEKLM_LICENSE_FILE".to_string()),
         "baron" => names.push("BARON_LICENSE".to_string()),
         "copt" => names.push("COPT_HOME".to_string()),
+        "nlopt" => names.push("NLOPT_DIR".to_string()),
+        "cvxopt" => names.push("CVXOPT_PYTHON".to_string()),
         "java-pathfinder" => names.push("JPF_HOME".to_string()),
         "key" => names.push("KEY_HOME".to_string()),
         "viper" => names.push("VIPER_HOME".to_string()),
@@ -4344,6 +5342,21 @@ pub fn external_validation_command_dir_env_names(tool: &ExternalValidationToolSp
     }
     for name in match tool.id {
         "minizinc" | "flatzinc" | "minizinc-solution-checker" => &["MINIZINC_HOME"][..],
+        "ortools-cp-sat" => &["ORTOOLS_HOME", "ORTOOLS_DIR", "MINIZINC_HOME"],
+        "choco-solver" => &["CHOCO_SOLVER_HOME", "CHOCO_HOME"],
+        "jacop" => &["JACOP_HOME", "JACOP_DIR"],
+        "ibm-cp-optimizer" => &["CPLEX_STUDIO_DIR", "CPLEX_HOME", "CP_OPTIMIZER_HOME"],
+        "ortools-java" => &["ORTOOLS_JAVA_HOME", "ORTOOLS_HOME"],
+        "ojalgo" => &["OJALGO_HOME", "OJALGO_DIR"],
+        "optaplanner" => &["OPTAPLANNER_HOME", "OPTAPLANNER_DIR"],
+        "timefold" => &["TIMEFOLD_HOME", "TIMEFOLD_DIR"],
+        "jmetal" => &["JMETAL_HOME", "JMETAL_DIR"],
+        "moea-framework" => &["MOEA_FRAMEWORK_HOME", "MOEA_HOME"],
+        "ecj" => &["ECJ_HOME", "ECJ_DIR"],
+        "nlopt-rs" => &["NLOPT_DIR", "NLOPT_HOME"],
+        "highs-rust" => &["HIGHS_DIR", "HIGHS_HOME"],
+        "scip-rust" => &["SCIPOPTDIR", "SCIP_DIR", "SCIP_HOME"],
+        "cbc-rust" => &["CBC_DIR", "CBC_HOME", "COINOR_DIR", "COINOR_HOME"],
         "cpmpy" => &["CPMPY_HOME", "CPMPY_DIR"],
         "pycsp3" => &["PYCSP3_HOME", "PYCSP3_DIR"],
         "conjure" => &["CONJURE_HOME", "CONJURE_DIR"],
@@ -4351,6 +5364,41 @@ pub fn external_validation_command_dir_env_names(tool: &ExternalValidationToolSp
         "picat" => &["PICAT_HOME", "PICAT_DIR"],
         "clingo" => &["CLINGO_HOME", "CLINGO_DIR", "POTASSCO_HOME"],
         "clingcon" => &["CLINGCON_HOME", "CLINGCON_DIR", "POTASSCO_HOME"],
+        "pyomo" => &["PYOMO_HOME", "PYOMO_DIR"],
+        "pulp" => &["PULP_HOME", "PULP_DIR"],
+        "pyscipopt" => &["PYSCIPOPT_HOME", "PYSCIPOPT_DIR", "SCIPOPTDIR", "SCIP_DIR"],
+        "python-mip" => &["PYTHON_MIP_HOME", "MIP_HOME", "MIP_DIR"],
+        "gurobipy" => &["GUROBI_HOME"],
+        "docplex" => &["DOCPLEX_HOME", "CPLEX_STUDIO_DIR", "CPLEX_HOME"],
+        "ortools-python" | "ortools-glop" | "ortools-pdlp" => &["ORTOOLS_HOME", "ORTOOLS_DIR"],
+        "scipy-optimize" => &["SCIPY_HOME", "SCIPY_DIR"],
+        "highs-cli" => &["HIGHS_DIR", "HIGHS_HOME"],
+        "glpk-cli" => &["GLPK_DIR", "GLPK_HOME"],
+        "scip-cli" => &["SCIPOPTDIR", "SCIP_DIR", "SCIP_HOME"],
+        "cbc-cli" => &["CBC_DIR", "CBC_HOME", "COINOR_DIR", "COINOR_HOME"],
+        "clp-cli" => &["CLP_DIR", "CLP_HOME", "COINOR_DIR", "COINOR_HOME"],
+        "soplex-cli" => &["SOPLEX_DIR", "SOPLEX_HOME"],
+        "qsopt-ex-cli" => &["QSOPT_EX_DIR", "QSOPT_EX_HOME", "QSOPT_DIR", "QSOPT_HOME"],
+        "lp-solve-cli" => &[
+            "LP_SOLVE_DIR",
+            "LPSOLVE_DIR",
+            "LP_SOLVE_HOME",
+            "LPSOLVE_HOME",
+        ],
+        "gurobi-cli" => &["GUROBI_HOME"],
+        "cplex-cli" => &["CPLEX_STUDIO_DIR", "CPLEX_HOME"],
+        "xpress-cli" => &["XPRESSDIR", "XPRESS_DIR", "XPRESS_HOME"],
+        "lindo-cli" => &["LINDO_HOME", "LINDO_DIR", "LINDOAPI_HOME", "LINDOAPI_DIR"],
+        "ampl" => &["AMPL_HOME", "AMPL_DIR"],
+        "gams" => &["GAMS_HOME", "GAMS_DIR"],
+        "hexaly" => &["HEXALY_HOME", "HEXALY_DIR", "LOCALSOLVER_HOME"],
+        "jump" => &["JUMP_HOME", "JULIA_HOME", "JULIA_DIR"],
+        "neos" => &["NEOS_HOME", "NEOS_DIR"],
+        "pddl-val" => &["VAL_HOME", "VAL_DIR", "PDDL_VAL_HOME", "PDDL_VAL_DIR"],
+        "fast-downward" => &["FAST_DOWNWARD_HOME", "FAST_DOWNWARD_DIR"],
+        "lpg-td" => &["LPG_TD_HOME", "LPG_HOME", "LPG_DIR"],
+        "optic" => &["OPTIC_HOME", "OPTIC_DIR"],
+        "enhsp" => &["ENHSP_HOME", "ENHSP_DIR"],
         "minisat" => &["MINISAT_HOME", "MINISAT_DIR"],
         "glucose" => &["GLUCOSE_HOME", "GLUCOSE_DIR"],
         "maplesat" => &["MAPLESAT_HOME", "MAPLESAT_DIR"],
@@ -4404,8 +5452,10 @@ pub fn external_validation_command_dir_env_names(tool: &ExternalValidationToolSp
         "mosek" => &["MOSEK_HOME", "MSKHOME"],
         "baron" => &["BARON_DIR", "BARON_HOME"],
         "copt" => &["COPT_HOME", "COPT_DIR"],
+        "nlopt" => &["NLOPT_DIR", "NLOPT_HOME"],
         "nlopt-cli" => &["NLOPT_DIR", "NLOPT_HOME"],
         "casadi" => &["CASADI_DIR", "CASADI_HOME"],
+        "cvxopt" => &["CVXOPT_DIR", "CVXOPT_HOME"],
         "osqp" => &["OSQP_DIR", "OSQP_HOME"],
         "scs" => &["SCS_DIR", "SCS_HOME"],
         "clarabel" => &["CLARABEL_DIR", "CLARABEL_HOME"],
@@ -4866,6 +5916,7 @@ fn resolve_command_path(command: &Path) -> Option<PathBuf> {
 mod tests {
     use crate::des::general::external_validation_tools::{
         dimacs_cnf_to_string, dimacs_wcnf_to_string, external_benchmark_manifest_to_json,
+        external_simulation_validation_engine_manifest, external_simulation_validation_tool_specs,
         external_validation_adapter_env_names, external_validation_artifact_cli_args,
         external_validation_artifact_env_names, external_validation_command_dir_env_names,
         external_validation_consensus_report_to_json,
@@ -4877,9 +5928,11 @@ mod tests {
         prism_validation_model_to_string, prism_validation_properties_to_string,
         run_external_validation_artifact_cli, run_external_validation_consensus,
         run_external_validation_file_cli, run_external_validation_text_cli,
-        simulation_validation_request_to_json, smtlib_validation_script_to_string,
-        tla_validation_module_to_string, DimacsCnf, DimacsWcnf, DimacsWeightedClause,
-        ExternalBenchmarkManifest, ExternalBenchmarkManifestEntry, ExternalValidationArtifact,
+        run_simulation_validation_with_external_reference, simulation_validation_request_to_json,
+        smtlib_validation_script_to_string, tla_validation_module_to_string, DimacsCnf, DimacsWcnf,
+        DimacsWeightedClause, ExternalBenchmarkManifest, ExternalBenchmarkManifestEntry,
+        ExternalSimulationValidationReferenceOptions, ExternalSimulationValidationStatus,
+        ExternalSimulationValidationVerdict, ExternalValidationArtifact,
         ExternalValidationArtifactCliOptions, ExternalValidationArtifactKind,
         ExternalValidationCapability, ExternalValidationCliInvocation, ExternalValidationFamily,
         ExternalValidationFileCliOptions, ExternalValidationProbeStatus,
@@ -4896,10 +5949,78 @@ mod tests {
     #[test]
     fn registry_covers_recommended_validation_layers() {
         let tools = external_validation_tool_specs();
-        assert_eq!(tools.len(), 206);
+        assert_eq!(tools.len(), 259);
         assert!(tools
             .iter()
             .any(|tool| tool.id == "minizinc" && tool.input_formats.contains(&"mzn")));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "choco-solver"
+                && tool.runtime == ExternalValidationRuntime::Java
+                && tool
+                    .capabilities
+                    .contains(&ExternalValidationCapability::CheckSolution)
+        }));
+        assert!(tools
+            .iter()
+            .any(|tool| { tool.id == "jacop" && tool.input_formats.contains(&"xcsp3") }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "ibm-cp-optimizer"
+                && tool.artifact_kind == ExternalValidationArtifactKind::JavaClasspath
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "ortools-java" && tool.runtime == ExternalValidationRuntime::Java
+        }));
+        assert!(tools
+            .iter()
+            .any(|tool| { tool.id == "ojalgo" && tool.input_formats.contains(&"mps") }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "optaplanner"
+                && tool
+                    .capabilities
+                    .contains(&ExternalValidationCapability::SolveModel)
+        }));
+        assert!(tools
+            .iter()
+            .any(|tool| { tool.id == "timefold" && tool.input_formats.contains(&"pddl") }));
+        assert!(tools
+            .iter()
+            .any(|tool| { tool.id == "jmetal" && tool.input_formats.contains(&"json") }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "moea-framework" && tool.runtime == ExternalValidationRuntime::Java
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "ecj" && tool.family == ExternalValidationFamily::ConstraintModeling
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "good-lp"
+                && tool.runtime == ExternalValidationRuntime::Rust
+                && tool.input_formats.contains(&"lp")
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "lp-modeler"
+                && tool.artifact_kind == ExternalValidationArtifactKind::RustCrate
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "rust-linprog" && tool.runtime == ExternalValidationRuntime::Rust
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "argmin" && tool.family == ExternalValidationFamily::NonlinearGlobalSolver
+        }));
+        assert!(tools
+            .iter()
+            .any(|tool| { tool.id == "nlopt-rs" && tool.input_formats.contains(&"nl") }));
+        assert!(tools
+            .iter()
+            .any(|tool| { tool.id == "nlopt" && tool.input_formats.contains(&"json") }));
+        assert!(tools
+            .iter()
+            .any(|tool| { tool.id == "highs-rust" && tool.input_formats.contains(&"mps") }));
+        assert!(tools
+            .iter()
+            .any(|tool| { tool.id == "scip-rust" && tool.input_formats.contains(&"json") }));
+        assert!(tools
+            .iter()
+            .any(|tool| { tool.id == "cbc-rust" && tool.input_formats.contains(&"lp") }));
         assert!(tools.iter().any(|tool| {
             tool.id == "cpmpy" && tool.family == ExternalValidationFamily::ConstraintModeling
         }));
@@ -4909,6 +6030,117 @@ mod tests {
         assert!(tools
             .iter()
             .any(|tool| { tool.id == "clingo" && tool.input_formats.contains(&"asp") }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "pyomo" && tool.family == ExternalValidationFamily::ConstraintModeling
+        }));
+        assert!(tools
+            .iter()
+            .any(|tool| { tool.id == "pulp" && tool.input_formats.contains(&"lp") }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "pyscipopt"
+                && tool.runtime == ExternalValidationRuntime::Python
+                && tool.input_formats.contains(&"mps")
+        }));
+        assert!(tools
+            .iter()
+            .any(|tool| { tool.id == "python-mip" && tool.input_formats.contains(&"osil") }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "gurobipy"
+                && tool.artifact_kind == ExternalValidationArtifactKind::PythonPackage
+        }));
+        assert!(tools
+            .iter()
+            .any(|tool| { tool.id == "docplex" && tool.input_formats.contains(&"lp") }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "ortools-python" && tool.runtime == ExternalValidationRuntime::Python
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "ortools-cp-sat"
+                && tool.runtime == ExternalValidationRuntime::NativeCli
+                && tool.command_aliases.contains(&"fzn-cp-sat")
+        }));
+        assert!(tools
+            .iter()
+            .any(|tool| { tool.id == "ortools-glop" && tool.input_formats.contains(&"proto") }));
+        assert!(tools
+            .iter()
+            .any(|tool| { tool.id == "ortools-pdlp" && tool.input_formats.contains(&"proto") }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "scipy-optimize"
+                && tool.family == ExternalValidationFamily::NonlinearGlobalSolver
+        }));
+        assert!(tools
+            .iter()
+            .any(|tool| { tool.id == "highs-cli" && tool.command_aliases.contains(&"highs") }));
+        assert!(tools
+            .iter()
+            .any(|tool| { tool.id == "glpk-cli" && tool.command_aliases.contains(&"glpsol") }));
+        assert!(tools
+            .iter()
+            .any(|tool| { tool.id == "scip-cli" && tool.command_aliases.contains(&"scip") }));
+        assert!(tools
+            .iter()
+            .any(|tool| { tool.id == "cbc-cli" && tool.command_aliases.contains(&"cbc") }));
+        assert!(tools
+            .iter()
+            .any(|tool| { tool.id == "clp-cli" && tool.command_aliases.contains(&"clp") }));
+        assert!(tools
+            .iter()
+            .any(|tool| { tool.id == "soplex-cli" && tool.command_aliases.contains(&"soplex") }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "qsopt-ex-cli" && tool.command_aliases.contains(&"qsopt_ex")
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "lp-solve-cli" && tool.command_aliases.contains(&"lp_solve")
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "gurobi-cli" && tool.command_aliases.contains(&"gurobi_cl")
+        }));
+        assert!(tools
+            .iter()
+            .any(|tool| { tool.id == "cplex-cli" && tool.command_aliases.contains(&"cplex") }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "xpress-cli" && tool.command_aliases.contains(&"optimizer")
+        }));
+        assert!(tools
+            .iter()
+            .any(|tool| { tool.id == "lindo-cli" && tool.command_aliases.contains(&"runlindo") }));
+        assert!(tools
+            .iter()
+            .any(|tool| { tool.id == "ampl" && tool.input_formats.contains(&"mod") }));
+        assert!(tools
+            .iter()
+            .any(|tool| { tool.id == "gams" && tool.input_formats.contains(&"gms") }));
+        assert!(tools
+            .iter()
+            .any(|tool| { tool.id == "hexaly" && tool.command_aliases.contains(&"localsolver") }));
+        assert!(tools
+            .iter()
+            .any(|tool| { tool.id == "jump" && tool.command_aliases.contains(&"julia") }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "neos"
+                && tool
+                    .capabilities
+                    .contains(&ExternalValidationCapability::SolveModel)
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "pddl-val"
+                && tool
+                    .capabilities
+                    .contains(&ExternalValidationCapability::CheckSolution)
+        }));
+        assert!(tools
+            .iter()
+            .any(|tool| { tool.id == "fast-downward" && tool.input_formats.contains(&"pddl") }));
+        assert!(tools
+            .iter()
+            .any(|tool| { tool.id == "lpg-td" && tool.input_formats.contains(&"pddl") }));
+        assert!(tools
+            .iter()
+            .any(|tool| { tool.id == "optic" && tool.input_formats.contains(&"pddl") }));
+        assert!(tools
+            .iter()
+            .any(|tool| { tool.id == "enhsp" && tool.input_formats.contains(&"pddl") }));
         assert!(tools
             .iter()
             .any(|tool| { tool.id == "z3" && tool.family == ExternalValidationFamily::SmtSolver }));
@@ -4955,6 +6187,9 @@ mod tests {
         }));
         assert!(tools.iter().any(|tool| {
             tool.id == "osqp" && tool.family == ExternalValidationFamily::ConvexConicSolver
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "cvxopt" && tool.family == ExternalValidationFamily::ConvexConicSolver
         }));
         assert!(tools.iter().any(|tool| {
             tool.id == "cbmc" && tool.family == ExternalValidationFamily::FormalModelChecker
@@ -5125,6 +6360,55 @@ mod tests {
         let minizinc = find_external_validation_tool("minizinc").unwrap();
         assert!(external_validation_command_dir_env_names(minizinc)
             .contains(&"MINIZINC_HOME".to_string()));
+        let choco = find_external_validation_tool("choco_solver").unwrap();
+        assert_eq!(choco.id, "choco-solver");
+        assert_eq!(
+            external_validation_artifact_env_names(choco)[0],
+            "ORES_CHOCO_SOLVER_CLASSPATH"
+        );
+        assert!(external_validation_command_dir_env_names(choco)
+            .contains(&"CHOCO_SOLVER_HOME".to_string()));
+        let cp_optimizer = find_external_validation_tool("ibm_cp_optimizer").unwrap();
+        assert_eq!(cp_optimizer.id, "ibm-cp-optimizer");
+        assert!(external_validation_command_dir_env_names(cp_optimizer)
+            .contains(&"CPLEX_STUDIO_DIR".to_string()));
+        let timefold = find_external_validation_tool("timefold").unwrap();
+        assert!(external_validation_command_dir_env_names(timefold)
+            .contains(&"TIMEFOLD_HOME".to_string()));
+        let moea = find_external_validation_tool("moea_framework").unwrap();
+        assert_eq!(moea.id, "moea-framework");
+        assert!(external_validation_command_dir_env_names(moea)
+            .contains(&"MOEA_FRAMEWORK_HOME".to_string()));
+        let good_lp = find_external_validation_tool("good_lp").unwrap();
+        assert_eq!(good_lp.id, "good-lp");
+        assert_eq!(
+            external_validation_artifact_env_names(good_lp)[0],
+            "ORES_GOOD_LP_CRATE"
+        );
+        let argmin = find_external_validation_tool("argmin").unwrap();
+        assert_eq!(
+            external_validation_artifact_env_names(argmin)[0],
+            "ORES_ARGMIN_CRATE"
+        );
+        let nlopt_rs = find_external_validation_tool("nlopt_rs").unwrap();
+        assert_eq!(nlopt_rs.id, "nlopt-rs");
+        assert!(
+            external_validation_command_dir_env_names(nlopt_rs).contains(&"NLOPT_HOME".to_string())
+        );
+        let nlopt = find_external_validation_tool("nlopt").unwrap();
+        assert_eq!(
+            external_validation_artifact_env_names(nlopt)[0],
+            "ORES_NLOPT_DIR"
+        );
+        let highs_rust = find_external_validation_tool("highs_rust").unwrap();
+        assert!(external_validation_command_dir_env_names(highs_rust)
+            .contains(&"HIGHS_HOME".to_string()));
+        let scip_rust = find_external_validation_tool("scip_rust").unwrap();
+        assert!(external_validation_command_dir_env_names(scip_rust)
+            .contains(&"SCIPOPTDIR".to_string()));
+        let cbc_rust = find_external_validation_tool("cbc_rust").unwrap();
+        assert!(external_validation_command_dir_env_names(cbc_rust)
+            .contains(&"COINOR_HOME".to_string()));
         let cpmpy = find_external_validation_tool("cpmpy").unwrap();
         assert_eq!(
             external_validation_artifact_env_names(cpmpy)[0],
@@ -5133,6 +6417,91 @@ mod tests {
         assert!(
             external_validation_command_dir_env_names(cpmpy).contains(&"CPMPY_HOME".to_string())
         );
+        let pyomo = find_external_validation_tool("pyomo").unwrap();
+        assert_eq!(
+            external_validation_artifact_env_names(pyomo)[0],
+            "ORES_PYOMO_PYTHON"
+        );
+        let pyscipopt = find_external_validation_tool("pyscipopt").unwrap();
+        assert_eq!(
+            external_validation_artifact_env_names(pyscipopt)[0],
+            "ORES_PYSCIPOPT_PYTHON"
+        );
+        assert!(external_validation_command_dir_env_names(pyscipopt)
+            .contains(&"SCIPOPTDIR".to_string()));
+        let ortools_glop = find_external_validation_tool("ortools_glop").unwrap();
+        assert_eq!(ortools_glop.id, "ortools-glop");
+        assert!(external_validation_artifact_env_names(ortools_glop)
+            .contains(&"ORTOOLS_PYTHON".to_string()));
+        let ortools_cp_sat = find_external_validation_tool("ortools_cp_sat").unwrap();
+        assert_eq!(ortools_cp_sat.id, "ortools-cp-sat");
+        assert!(external_validation_artifact_env_names(ortools_cp_sat)
+            .contains(&"FZN_CP_SAT_CMD".to_string()));
+        assert!(external_validation_command_dir_env_names(ortools_cp_sat)
+            .contains(&"ORTOOLS_HOME".to_string()));
+        let scipy_optimize = find_external_validation_tool("scipy_optimize").unwrap();
+        assert_eq!(
+            external_validation_artifact_env_names(scipy_optimize)[0],
+            "ORES_SCIPY_OPTIMIZE_PYTHON"
+        );
+        let gurobipy = find_external_validation_tool("gurobipy").unwrap();
+        assert!(external_validation_command_dir_env_names(gurobipy)
+            .contains(&"GUROBI_HOME".to_string()));
+        let highs_cli = find_external_validation_tool("highs_cli").unwrap();
+        assert_eq!(highs_cli.id, "highs-cli");
+        assert!(
+            external_validation_artifact_env_names(highs_cli).contains(&"HIGHS_CMD".to_string())
+        );
+        let glpk_cli = find_external_validation_tool("glpk_cli").unwrap();
+        assert!(
+            external_validation_artifact_env_names(glpk_cli).contains(&"GLPSOL_CMD".to_string())
+        );
+        let soplex_cli = find_external_validation_tool("soplex_cli").unwrap();
+        assert_eq!(soplex_cli.id, "soplex-cli");
+        assert!(
+            external_validation_artifact_env_names(soplex_cli).contains(&"SOPLEX_CMD".to_string())
+        );
+        let qsopt_ex_cli = find_external_validation_tool("qsopt_ex_cli").unwrap();
+        assert_eq!(qsopt_ex_cli.id, "qsopt-ex-cli");
+        assert!(external_validation_artifact_env_names(qsopt_ex_cli)
+            .contains(&"QSOPT_EX_CMD".to_string()));
+        let lp_solve_cli = find_external_validation_tool("lp_solve_cli").unwrap();
+        assert_eq!(lp_solve_cli.id, "lp-solve-cli");
+        assert!(external_validation_artifact_env_names(lp_solve_cli)
+            .contains(&"LP_SOLVE_CMD".to_string()));
+        let gurobi_cli = find_external_validation_tool("gurobi_cli").unwrap();
+        assert!(external_validation_artifact_env_names(gurobi_cli)
+            .contains(&"GUROBI_CL_CMD".to_string()));
+        let cplex_cli = find_external_validation_tool("cplex_cli").unwrap();
+        assert!(external_validation_command_dir_env_names(cplex_cli)
+            .contains(&"CPLEX_STUDIO_DIR".to_string()));
+        let xpress_cli = find_external_validation_tool("xpress_cli").unwrap();
+        assert!(external_validation_command_dir_env_names(xpress_cli)
+            .contains(&"XPRESSDIR".to_string()));
+        let lindo_cli = find_external_validation_tool("lindo_cli").unwrap();
+        assert!(
+            external_validation_artifact_env_names(lindo_cli).contains(&"LINDOAPI_CMD".to_string())
+        );
+        let ampl = find_external_validation_tool("ampl").unwrap();
+        assert!(external_validation_command_dir_env_names(ampl).contains(&"AMPL_HOME".to_string()));
+        let hexaly = find_external_validation_tool("hexaly").unwrap();
+        assert!(
+            external_validation_command_dir_env_names(hexaly).contains(&"HEXALY_HOME".to_string())
+        );
+        let cvxopt = find_external_validation_tool("cvxopt").unwrap();
+        assert_eq!(
+            external_validation_artifact_env_names(cvxopt)[0],
+            "ORES_CVXOPT_PYTHON"
+        );
+        let pddl_val = find_external_validation_tool("pddl_val").unwrap();
+        assert_eq!(pddl_val.id, "pddl-val");
+        assert!(
+            external_validation_command_dir_env_names(pddl_val).contains(&"VAL_HOME".to_string())
+        );
+        let fast_downward = find_external_validation_tool("fast_downward").unwrap();
+        assert_eq!(fast_downward.id, "fast-downward");
+        assert!(external_validation_command_dir_env_names(fast_downward)
+            .contains(&"FAST_DOWNWARD_HOME".to_string()));
         let conjure = find_external_validation_tool("conjure").unwrap();
         assert!(external_validation_command_dir_env_names(conjure)
             .contains(&"ORES_CONJURE_DIR".to_string()));
@@ -5465,6 +6834,89 @@ mod tests {
         assert_eq!(manifest["suite"], "miplib");
         assert_eq!(manifest["entries"][0]["path"], "MIPLIB/sample.mps");
         assert_eq!(manifest["entries"][0]["tags"][0], "smoke");
+    }
+
+    #[test]
+    fn simulation_validation_manifest_covers_external_engine_families() {
+        let specs = external_simulation_validation_tool_specs();
+        let manifest = external_simulation_validation_engine_manifest();
+
+        assert!(specs.len() >= 40);
+        for id in [
+            "simpy",
+            "sumo",
+            "energyplus",
+            "openmodelica",
+            "fmi-fmu",
+            "mujoco",
+            "mesa",
+            "simgrid",
+            "neqsim",
+            "anylogic",
+            "arena",
+        ] {
+            assert!(specs.iter().any(|spec| spec.id == id), "missing {id}");
+        }
+        assert_eq!(manifest.as_array().map(Vec::len), Some(specs.len()));
+    }
+
+    #[test]
+    fn simulation_validation_reference_wrapper_runs_valid_and_invalid_cases() {
+        let valid = SimulationValidationRequest {
+            engine_id: "simpy".to_string(),
+            model_format: "json-event-network".to_string(),
+            model: json!({
+                "servers": 1,
+                "arrival_times": [0.0, 1.0, 2.0],
+                "service_times": [1.0, 1.0, 1.0]
+            }),
+            scenario: Some(json!({"horizon": 10.0})),
+            expected_trace_properties: vec![
+                "queue_length_never_negative".to_string(),
+                "departures_after_arrivals".to_string(),
+            ],
+            metric_expectations: vec![SimulationMetricExpectation {
+                name: "jobs_completed".to_string(),
+                target: 3.0,
+                tolerance: 1e-9,
+                comparison: "equal".to_string(),
+            }],
+        };
+        let valid_run = run_simulation_validation_with_external_reference(
+            &valid,
+            &ExternalSimulationValidationReferenceOptions::default(),
+        );
+        assert_eq!(valid_run.status, ExternalSimulationValidationStatus::Ok);
+        assert_eq!(
+            valid_run.verdict,
+            ExternalSimulationValidationVerdict::Valid
+        );
+        assert_eq!(valid_run.metrics.get("jobs_completed").copied(), Some(3.0));
+        assert_eq!(valid_run.trace.len(), 9);
+
+        let mut invalid = valid;
+        invalid.metric_expectations = vec![SimulationMetricExpectation {
+            name: "mean_wait".to_string(),
+            target: 2.0,
+            tolerance: 0.1,
+            comparison: "within-absolute".to_string(),
+        }];
+        let invalid_run = run_simulation_validation_with_external_reference(
+            &invalid,
+            &ExternalSimulationValidationReferenceOptions {
+                engine_id: Some("arena".to_string()),
+            },
+        );
+        assert_eq!(invalid_run.status, ExternalSimulationValidationStatus::Ok);
+        assert_eq!(
+            invalid_run.verdict,
+            ExternalSimulationValidationVerdict::Invalid
+        );
+        assert!(invalid_run.simulator.contains("arena"));
+        assert!(invalid_run
+            .checks
+            .iter()
+            .any(|check| check["name"] == "mean_wait" && check["passed"] == false));
     }
 
     #[test]

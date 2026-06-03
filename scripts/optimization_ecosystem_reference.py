@@ -38,6 +38,7 @@ CP_TOOLS = {
     "open-wbo",
 }
 PLANNING_TOOLS = {"optaplanner", "timefold"}
+AI_PLANNING_TOOLS = {"fast-downward", "lpg-td", "optic", "enhsp"}
 MULTIOBJECTIVE_TOOLS = {"jmetal", "moea-framework", "ecj"}
 CONVEX_TOOLS = {
     "cvxpy",
@@ -59,6 +60,8 @@ LINEAR_TOOLS = {
     "pyomo",
     "pulp",
     "python-mip",
+    "ortools-glop",
+    "ortools-pdlp",
     "docplex",
     "jump",
     "ampl",
@@ -69,6 +72,8 @@ LINEAR_TOOLS = {
     "scip-cli",
     "cbc-cli",
     "clp-cli",
+    "soplex-cli",
+    "lp-solve-cli",
     "gurobi-cli",
     "cplex-cli",
     "xpress-cli",
@@ -153,6 +158,8 @@ def tool_family(tool: str, payload_kind: str) -> str:
         return "smt-omt"
     if tool in CP_TOOLS or payload_kind in {"cp-assignment", "ecosystem-cp-assignment"}:
         return "constraint-programming"
+    if tool in AI_PLANNING_TOOLS:
+        return "ai-planning"
     if tool in PLANNING_TOOLS or payload_kind in {"planning-assignment", "ecosystem-planning-assignment"}:
         return "planning-metaheuristic"
     if tool in MULTIOBJECTIVE_TOOLS or payload_kind in {"multiobjective-front", "ecosystem-multiobjective"}:
@@ -559,6 +566,8 @@ def solve(tool: str, payload: dict[str, Any]) -> tuple[str, Result]:
     if family == "smt-omt":
         return family, solve_cp_assignment(payload)
     if family == "planning-metaheuristic":
+        return family, solve_planning_assignment(payload)
+    if family == "ai-planning":
         return family, solve_planning_assignment(payload)
     if family == "evolutionary-multiobjective":
         return family, solve_multiobjective(payload)

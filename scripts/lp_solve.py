@@ -4,7 +4,7 @@
 Input is JSON on stdin:
   {"lp": {...}, "method": "highs"}
 
-The bridge supports SciPy/HiGHS methods plus OR-Tools GLOP. If the requested
+The bridge supports SciPy/HiGHS methods plus OR-Tools GLOP/PDLP. If the requested
 solver is unavailable, it falls back to dependency-free vertex enumeration,
 which is intended for small validation models rather than production-scale LPs.
 """
@@ -438,13 +438,14 @@ def scipy_linprog(lp: dict, method: str) -> Optional[dict]:
     return apply_objective_offset(lp, result_payload)
 
 
-def ortools_glop(lp: dict) -> Optional[dict]:
+def ortools_linear_solver(lp: dict, backend: str) -> Optional[dict]:
     try:
         from ortools.linear_solver import pywraplp  # type: ignore
     except Exception:
         return None
 
-    solver = pywraplp.Solver.CreateSolver("GLOP")
+    solver_name = backend.upper()
+    solver = pywraplp.Solver.CreateSolver(solver_name)
     if solver is None:
         return None
 
@@ -498,8 +499,8 @@ def ortools_glop(lp: dict) -> Optional[dict]:
         "x": x,
         "objective": dot(c, x) if status in ("optimal", "feasible") else None,
         "iters": int(iters or 0),
-        "solver": "ortools:glop",
-        "message": f"GLOP status code {status_code}",
+        "solver": f"ortools:{backend.lower()}",
+        "message": f"{solver_name} status code {status_code}",
     }
     if status == "optimal":
         result_payload.update(recover_certificate(lp, x))
@@ -509,7 +510,9 @@ def ortools_glop(lp: dict) -> Optional[dict]:
 def solve_external(lp: dict, method: str) -> Optional[dict]:
     normalized = method.lower().replace("_", "-")
     if normalized in ("glop", "ortools-glop", "ortools:glop"):
-        return ortools_glop(lp)
+        return ortools_linear_solver(lp, "glop")
+    if normalized in ("pdlp", "ortools-pdlp", "ortools:pdlp"):
+        return ortools_linear_solver(lp, "pdlp")
     return scipy_linprog(lp, method)
 
 

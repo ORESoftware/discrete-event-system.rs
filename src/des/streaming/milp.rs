@@ -445,7 +445,9 @@ impl StreamingModel for StreamingMilp {
                 if let Some(names) = self.problem.con_names.as_mut() {
                     names.remove(index);
                 }
-                vec![json!({"event":"applied","op":"remove_constraint","numConstraints": self.n_cons()})]
+                vec![
+                    json!({"event":"applied","op":"remove_constraint","numConstraints": self.n_cons()}),
+                ]
             }
             "set_rhs" => {
                 let index = match usize_at(command, "index") {
@@ -479,7 +481,9 @@ impl StreamingModel for StreamingMilp {
                 }
                 let value = f64_at(command, "value", self.problem.a[row][col]);
                 self.problem.a[row][col] = value;
-                vec![json!({"event":"applied","op":"set_coefficient","row":row,"col":col,"value":value})]
+                vec![
+                    json!({"event":"applied","op":"set_coefficient","row":row,"col":col,"value":value}),
+                ]
             }
             "add_variable" => {
                 let column = vec_f64(command, "column").unwrap_or_default();

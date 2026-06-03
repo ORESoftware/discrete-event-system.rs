@@ -12797,6 +12797,7 @@ impl Driver {
             (ExternalLinearCliSolver::Cbc, "cbc:cli"),
             (ExternalLinearCliSolver::Clp, "clp:cli"),
             (ExternalLinearCliSolver::Soplex, "soplex:cli"),
+            (ExternalLinearCliSolver::QsoptEx, "qsopt-ex:cli"),
             (ExternalLinearCliSolver::LpSolve, "lp-solve:cli"),
             (ExternalLinearCliSolver::Gurobi, "gurobi:cli"),
             (ExternalLinearCliSolver::Cplex, "cplex:cli"),
@@ -13069,6 +13070,36 @@ impl Driver {
         let signed_logic_count = general_mip
             .add_integer_var("signed-logic-count", 2.0, Some(0.0), Some(3.0))
             .expect("signed logic count");
+        let enforced_bool_and_a = general_mip
+            .add_binary_var("enforced-bool-and-a", 5.0)
+            .expect("enforced bool and a");
+        let enforced_bool_and_b = general_mip
+            .add_binary_var("enforced-bool-and-b", 4.0)
+            .expect("enforced bool and b");
+        let enforced_bool_or_a = general_mip
+            .add_binary_var("enforced-bool-or-a", -1.0)
+            .expect("enforced bool or a");
+        let enforced_bool_or_b = general_mip
+            .add_binary_var("enforced-bool-or-b", -2.0)
+            .expect("enforced bool or b");
+        let enforced_bool_xor_a = general_mip
+            .add_binary_var("enforced-bool-xor-a", 7.0)
+            .expect("enforced bool xor a");
+        let enforced_bool_xor_b = general_mip
+            .add_binary_var("enforced-bool-xor-b", 6.0)
+            .expect("enforced bool xor b");
+        let enforced_bool_exact_a = general_mip
+            .add_binary_var("enforced-bool-exact-a", 8.0)
+            .expect("enforced bool exact a");
+        let enforced_bool_exact_b = general_mip
+            .add_binary_var("enforced-bool-exact-b", 1.0)
+            .expect("enforced bool exact b");
+        let inactive_bool_card_a = general_mip
+            .add_binary_var("inactive-bool-card-a", 2.0)
+            .expect("inactive bool card a");
+        let inactive_bool_card_b = general_mip
+            .add_binary_var("inactive-bool-card-b", 1.0)
+            .expect("inactive bool card b");
         let reified_threshold = general_mip
             .add_binary_var("reified-logic-threshold", 3.0)
             .expect("reified logic threshold");
@@ -13078,6 +13109,12 @@ impl Driver {
         let linear_domain_value = general_mip
             .add_integer_var("linear-domain-value", 6.0, Some(0.0), Some(5.0))
             .expect("linear domain value");
+        let enforced_domain_active = general_mip
+            .add_integer_var("enforced-domain-active", 2.0, Some(0.0), Some(5.0))
+            .expect("enforced domain active");
+        let enforced_domain_inactive = general_mip
+            .add_integer_var("enforced-domain-inactive", 1.0, Some(0.0), Some(5.0))
+            .expect("enforced domain inactive");
         general_mip
             .add_constraint("fix-logic-a", vec![(logic_a, 1.0)], RowSense::Eq, 1.0)
             .expect("fix logic a");
@@ -13143,6 +13180,56 @@ impl Driver {
             )
             .expect("signed logical count");
         general_mip
+            .add_enforced_boolean_and(
+                "active-enforced-bool-and",
+                vec![MathProgram::bool_lit(logic_a)],
+                vec![
+                    MathProgram::bool_lit(enforced_bool_and_a),
+                    MathProgram::not_lit(enforced_bool_and_b),
+                ],
+            )
+            .expect("active enforced bool and");
+        general_mip
+            .add_enforced_boolean_or(
+                "active-enforced-bool-or",
+                vec![MathProgram::bool_lit(logic_a)],
+                vec![
+                    MathProgram::bool_lit(enforced_bool_or_a),
+                    MathProgram::bool_lit(enforced_bool_or_b),
+                ],
+            )
+            .expect("active enforced bool or");
+        general_mip
+            .add_enforced_boolean_xor(
+                "active-enforced-bool-xor",
+                vec![MathProgram::bool_lit(logic_a)],
+                vec![
+                    MathProgram::bool_lit(enforced_bool_xor_a),
+                    MathProgram::bool_lit(enforced_bool_xor_b),
+                ],
+            )
+            .expect("active enforced bool xor");
+        general_mip
+            .add_enforced_literal_exactly_one(
+                "active-enforced-bool-exactly-one",
+                vec![MathProgram::bool_lit(logic_a)],
+                vec![
+                    MathProgram::bool_lit(enforced_bool_exact_a),
+                    MathProgram::bool_lit(enforced_bool_exact_b),
+                ],
+            )
+            .expect("active enforced bool exactly one");
+        general_mip
+            .add_enforced_literal_at_most_one(
+                "inactive-enforced-bool-at-most-one",
+                vec![MathProgram::bool_lit(logic_b)],
+                vec![
+                    MathProgram::bool_lit(inactive_bool_card_a),
+                    MathProgram::bool_lit(inactive_bool_card_b),
+                ],
+            )
+            .expect("inactive enforced bool at most one");
+        general_mip
             .add_reified_le_constraint(
                 "reified-logic-threshold",
                 MathProgram::bool_lit(reified_threshold),
@@ -13165,6 +13252,25 @@ impl Driver {
                 vec![(1, 2), (4, 4)],
             )
             .expect("linear expression domain");
+        general_mip
+            .add_enforced_linear_domain(
+                "active-linear-expression-domain",
+                vec![
+                    MathProgram::bool_lit(logic_a),
+                    MathProgram::bool_lit(logic_c),
+                ],
+                vec![(enforced_domain_active, 1.0)],
+                vec![(1, 2), (4, 4)],
+            )
+            .expect("active enforced linear domain");
+        general_mip
+            .add_enforced_linear_domain(
+                "inactive-linear-expression-domain",
+                vec![MathProgram::bool_lit(logic_b)],
+                vec![(enforced_domain_inactive, 1.0)],
+                vec![(1, 2), (4, 4)],
+            )
+            .expect("inactive enforced linear domain");
         general_mip
             .add_binary_implication("logical-implication", logic_a, logic_c)
             .expect("logical implication");
@@ -13380,9 +13486,9 @@ impl Driver {
                             .internal_max_violation
                             .is_some_and(|violation| violation <= 1e-7)
                         && report
-                            .external_max_violation
-                            .is_some_and(|violation| violation <= 1e-7)
-                        && (report.internal.objective - 90.0).abs() <= 1e-7
+                        .external_max_violation
+                        .is_some_and(|violation| violation <= 1e-7)
+                        && (report.internal.objective - 125.0).abs() <= 1e-7
                         && (report.internal.x[logic_a] - 1.0).abs() <= 1e-7
                         && report.internal.x[logic_b].abs() <= 1e-7
                         && (report.internal.x[logic_c] - 1.0).abs() <= 1e-7
@@ -13393,9 +13499,21 @@ impl Driver {
                         && report.internal.x[signed_logic_or].abs() <= 1e-7
                         && (report.internal.x[signed_logic_xor] - 1.0).abs() <= 1e-7
                         && (report.internal.x[signed_logic_count] - 3.0).abs() <= 1e-7
+                        && (report.internal.x[enforced_bool_and_a] - 1.0).abs() <= 1e-7
+                        && report.internal.x[enforced_bool_and_b].abs() <= 1e-7
+                        && (report.internal.x[enforced_bool_or_a] - 1.0).abs() <= 1e-7
+                        && report.internal.x[enforced_bool_or_b].abs() <= 1e-7
+                        && (report.internal.x[enforced_bool_xor_a] - 1.0).abs() <= 1e-7
+                        && report.internal.x[enforced_bool_xor_b].abs() <= 1e-7
+                        && (report.internal.x[enforced_bool_exact_a] - 1.0).abs() <= 1e-7
+                        && report.internal.x[enforced_bool_exact_b].abs() <= 1e-7
+                        && (report.internal.x[inactive_bool_card_a] - 1.0).abs() <= 1e-7
+                        && (report.internal.x[inactive_bool_card_b] - 1.0).abs() <= 1e-7
                         && (report.internal.x[reified_threshold] - 1.0).abs() <= 1e-7
                         && (report.internal.x[reified_equality] - 1.0).abs() <= 1e-7
                         && (report.internal.x[linear_domain_value] - 4.0).abs() <= 1e-7
+                        && (report.internal.x[enforced_domain_active] - 4.0).abs() <= 1e-7
+                        && (report.internal.x[enforced_domain_inactive] - 5.0).abs() <= 1e-7
                         && (report.internal.x[enforced_x] - 4.0).abs() <= 1e-7
                         && (report.internal.x[product_result] - 6.0).abs() <= 1e-7
                         && (report.internal.x[div_quotient] - 2.0).abs() <= 1e-7
@@ -13454,7 +13572,7 @@ impl Driver {
                     && report
                         .external_max_violation
                         .is_some_and(|violation| violation <= 1e-7)
-                    && (report.internal.objective - 90.0).abs() <= 1e-7
+                    && (report.internal.objective - 125.0).abs() <= 1e-7
                     && (report.internal.x[logic_a] - 1.0).abs() <= 1e-7
                     && report.internal.x[logic_b].abs() <= 1e-7
                     && (report.internal.x[logic_c] - 1.0).abs() <= 1e-7
@@ -13465,9 +13583,21 @@ impl Driver {
                     && report.internal.x[signed_logic_or].abs() <= 1e-7
                     && (report.internal.x[signed_logic_xor] - 1.0).abs() <= 1e-7
                     && (report.internal.x[signed_logic_count] - 3.0).abs() <= 1e-7
+                    && (report.internal.x[enforced_bool_and_a] - 1.0).abs() <= 1e-7
+                    && report.internal.x[enforced_bool_and_b].abs() <= 1e-7
+                    && (report.internal.x[enforced_bool_or_a] - 1.0).abs() <= 1e-7
+                    && report.internal.x[enforced_bool_or_b].abs() <= 1e-7
+                    && (report.internal.x[enforced_bool_xor_a] - 1.0).abs() <= 1e-7
+                    && report.internal.x[enforced_bool_xor_b].abs() <= 1e-7
+                    && (report.internal.x[enforced_bool_exact_a] - 1.0).abs() <= 1e-7
+                    && report.internal.x[enforced_bool_exact_b].abs() <= 1e-7
+                    && (report.internal.x[inactive_bool_card_a] - 1.0).abs() <= 1e-7
+                    && (report.internal.x[inactive_bool_card_b] - 1.0).abs() <= 1e-7
                     && (report.internal.x[reified_threshold] - 1.0).abs() <= 1e-7
                     && (report.internal.x[reified_equality] - 1.0).abs() <= 1e-7
                     && (report.internal.x[linear_domain_value] - 4.0).abs() <= 1e-7
+                    && (report.internal.x[enforced_domain_active] - 4.0).abs() <= 1e-7
+                    && (report.internal.x[enforced_domain_inactive] - 5.0).abs() <= 1e-7
                     && (report.internal.x[enforced_x] - 4.0).abs() <= 1e-7
                     && (report.internal.x[product_result] - 6.0).abs() <= 1e-7
                     && (report.internal.x[div_quotient] - 2.0).abs() <= 1e-7
@@ -13515,9 +13645,16 @@ impl Driver {
                     && has_generated("signed-logical-or")
                     && has_generated("signed-logical-xor")
                     && has_generated("signed-logical-count")
+                    && has_generated("active-enforced-bool-and")
+                    && has_generated("active-enforced-bool-or")
+                    && has_generated("active-enforced-bool-xor")
+                    && has_generated("active-enforced-bool-exactly-one")
+                    && has_generated("inactive-enforced-bool-at-most-one")
                     && has_generated("reified-logic-threshold")
                     && has_generated("reified-logic-equality")
                     && has_generated("linear-expression-domain")
+                    && has_generated("active-linear-expression-domain")
+                    && has_generated("inactive-linear-expression-domain")
                     && has_generated("active-enforced-cap")
                     && has_generated("integer-product")
                     && has_generated("integer-division")
@@ -13583,9 +13720,16 @@ impl Driver {
                     && has_generated("signed-logical-or")
                     && has_generated("signed-logical-xor")
                     && has_generated("signed-logical-count")
+                    && has_generated("active-enforced-bool-and")
+                    && has_generated("active-enforced-bool-or")
+                    && has_generated("active-enforced-bool-xor")
+                    && has_generated("active-enforced-bool-exactly-one")
+                    && has_generated("inactive-enforced-bool-at-most-one")
                     && has_generated("reified-logic-threshold")
                     && has_generated("reified-logic-equality")
                     && has_generated("linear-expression-domain")
+                    && has_generated("active-linear-expression-domain")
+                    && has_generated("inactive-linear-expression-domain")
                     && has_generated("active-enforced-cap")
                     && has_generated("integer-product")
                     && has_generated("integer-division")
@@ -14182,6 +14326,150 @@ impl Driver {
             );
         }
 
+        let mut function_mip = MathProgram::new(MathObjectiveSense::Min);
+        let function_square_x = function_mip
+            .add_continuous_var("function-square-x", 0.0, Some(0.0), Some(2.0))
+            .expect("function square x");
+        let function_square_y = function_mip
+            .add_continuous_var("function-square-y", 1.0, Some(0.0), Some(4.0))
+            .expect("function square y");
+        function_mip
+            .add_constraint(
+                "fix-function-square-x",
+                vec![(function_square_x, 1.0)],
+                RowSense::Eq,
+                1.5,
+            )
+            .expect("fix function square");
+        function_mip
+            .add_power_function(
+                "power-function",
+                function_square_x,
+                function_square_y,
+                2.0,
+                vec![0.0, 1.0, 2.0],
+            )
+            .expect("power function");
+
+        let function_exp_x = function_mip
+            .add_continuous_var("function-exp-x", 0.0, Some(0.0), Some(1.0))
+            .expect("function exp x");
+        let function_exp_y = function_mip
+            .add_continuous_var("function-exp-y", 1.0, Some(1.0), Some(3.0))
+            .expect("function exp y");
+        function_mip
+            .add_constraint(
+                "fix-function-exp-x",
+                vec![(function_exp_x, 1.0)],
+                RowSense::Eq,
+                0.5,
+            )
+            .expect("fix function exp");
+        function_mip
+            .add_exp_function(
+                "exp-function",
+                function_exp_x,
+                function_exp_y,
+                vec![0.0, 0.5, 1.0],
+            )
+            .expect("exp function");
+
+        let function_logistic_x = function_mip
+            .add_continuous_var("function-logistic-x", 0.0, Some(-2.0), Some(2.0))
+            .expect("function logistic x");
+        let function_logistic_y = function_mip
+            .add_continuous_var("function-logistic-y", 1.0, Some(0.0), Some(1.0))
+            .expect("function logistic y");
+        function_mip
+            .add_constraint(
+                "fix-function-logistic-x",
+                vec![(function_logistic_x, 1.0)],
+                RowSense::Eq,
+                0.0,
+            )
+            .expect("fix function logistic");
+        function_mip
+            .add_logistic_function(
+                "logistic-function",
+                function_logistic_x,
+                function_logistic_y,
+                vec![-2.0, 0.0, 2.0],
+            )
+            .expect("logistic function");
+
+        let function_expected_objective = 2.5 + 0.5_f64.exp() + 0.5;
+        match cross_check_math_program_with_external(
+            &function_mip,
+            &solve_opts,
+            &external_opts,
+            1e-7,
+        ) {
+            Ok(report) => self.check(
+                "MathProgram MIP facade function-constraint HiGHS cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && (report.internal.objective - function_expected_objective).abs() <= 1e-7
+                    && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && (report.internal.x[function_square_y] - 2.5).abs() <= 1e-7
+                    && (report.internal.x[function_exp_y] - 0.5_f64.exp()).abs() <= 1e-7
+                    && (report.internal.x[function_logistic_y] - 0.5).abs() <= 1e-7,
+                format!(
+                    "internal={:?} external={:?} obj={:.9} expected={:.9} obj_diff={:?} x_diff={:?} x={:?} violations=({:?},{:?})",
+                    report.internal.status,
+                    report.external.status,
+                    report.internal.objective,
+                    function_expected_objective,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal.x,
+                    report.internal_max_violation,
+                    report.external_max_violation
+                ),
+            ),
+            Err(err) => self.check(
+                "MathProgram MIP facade function-constraint HiGHS cross-check",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        if let Some(report) = self.math_program_cross_check_or_skip(
+            "MathProgram MIP facade function-constraint OR-Tools SCIP cross-check",
+            &function_mip,
+            &solve_opts,
+            &piecewise_ortools_scip_opts,
+            1e-7,
+        ) {
+            self.check(
+                "MathProgram MIP facade function-constraint OR-Tools SCIP cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && (report.internal.objective - function_expected_objective).abs() <= 1e-7
+                    && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && (report.internal.x[function_square_y] - 2.5).abs() <= 1e-7
+                    && (report.internal.x[function_exp_y] - 0.5_f64.exp()).abs() <= 1e-7
+                    && (report.internal.x[function_logistic_y] - 0.5).abs() <= 1e-7,
+                format!(
+                    "internal={:?} external={:?} obj={:.9} expected={:.9} obj_diff={:?} x_diff={:?} x={:?} violations=({:?},{:?}) solver={} message={:?}",
+                    report.internal.status,
+                    report.external.status,
+                    report.internal.objective,
+                    function_expected_objective,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal.x,
+                    report.internal_max_violation,
+                    report.external_max_violation,
+                    report.external.solver,
+                    report.external.message
+                ),
+            );
+        }
+
         match export_math_program_cplex_lp(&piecewise_mip) {
             Ok(export) => {
                 let has_generated = |needle: &str| {
@@ -14347,6 +14635,27 @@ impl Driver {
             )
             .expect("value count");
 
+        let map_mode = table_mip
+            .add_integer_var("map-mode", 0.0, Some(5.0), Some(7.0))
+            .expect("map mode");
+        let map_is_five = table_mip
+            .add_binary_var("map-is-five", 1.0)
+            .expect("map is five");
+        let map_is_six = table_mip
+            .add_binary_var("map-is-six", 8.0)
+            .expect("map is six");
+        let map_is_seven = table_mip
+            .add_binary_var("map-is-seven", 2.0)
+            .expect("map is seven");
+        table_mip
+            .add_map_domain(
+                "map-domain-mode",
+                map_mode,
+                vec![map_is_five, map_is_six, map_is_seven],
+                5,
+            )
+            .expect("map domain");
+
         let literal_a = table_mip
             .add_binary_var("literal-a", 10.0)
             .expect("literal a");
@@ -14399,6 +14708,84 @@ impl Driver {
                 vec![vec![1, 1]],
             )
             .expect("forbidden assignments");
+
+        let enforced_allowed_gate = table_mip
+            .add_binary_var("enforced-allowed-gate", 0.0)
+            .expect("enforced allowed gate");
+        let enforced_allowed_x = table_mip
+            .add_integer_var("enforced-allowed-x", 8.0, Some(0.0), Some(2.0))
+            .expect("enforced allowed x");
+        let enforced_allowed_y = table_mip
+            .add_integer_var("enforced-allowed-y", 1.0, Some(0.0), Some(2.0))
+            .expect("enforced allowed y");
+        table_mip
+            .add_constraint(
+                "force-enforced-allowed-gate",
+                vec![(enforced_allowed_gate, 1.0)],
+                RowSense::Eq,
+                1.0,
+            )
+            .expect("force enforced allowed gate");
+        table_mip
+            .add_enforced_allowed_assignments(
+                "active-allowed-pairs",
+                vec![MathProgram::bool_lit(enforced_allowed_gate)],
+                vec![enforced_allowed_x, enforced_allowed_y],
+                vec![vec![0, 2], vec![2, 0]],
+            )
+            .expect("enforced allowed assignments");
+
+        let enforced_forbidden_gate = table_mip
+            .add_binary_var("enforced-forbidden-gate", 0.0)
+            .expect("enforced forbidden gate");
+        let enforced_forbidden_x = table_mip
+            .add_binary_var("enforced-forbidden-x", 5.0)
+            .expect("enforced forbidden x");
+        let enforced_forbidden_y = table_mip
+            .add_binary_var("enforced-forbidden-y", 3.0)
+            .expect("enforced forbidden y");
+        table_mip
+            .add_constraint(
+                "force-enforced-forbidden-gate",
+                vec![(enforced_forbidden_gate, 1.0)],
+                RowSense::Eq,
+                1.0,
+            )
+            .expect("force enforced forbidden gate");
+        table_mip
+            .add_enforced_forbidden_assignments(
+                "active-forbidden-pair",
+                vec![MathProgram::bool_lit(enforced_forbidden_gate)],
+                vec![enforced_forbidden_x, enforced_forbidden_y],
+                vec![vec![1, 1]],
+            )
+            .expect("enforced forbidden assignments");
+
+        let inactive_forbidden_gate = table_mip
+            .add_binary_var("inactive-forbidden-gate", 0.0)
+            .expect("inactive forbidden gate");
+        let inactive_forbidden_x = table_mip
+            .add_binary_var("inactive-forbidden-x", 2.0)
+            .expect("inactive forbidden x");
+        let inactive_forbidden_y = table_mip
+            .add_binary_var("inactive-forbidden-y", 1.0)
+            .expect("inactive forbidden y");
+        table_mip
+            .add_constraint(
+                "force-inactive-forbidden-gate",
+                vec![(inactive_forbidden_gate, 1.0)],
+                RowSense::Eq,
+                0.0,
+            )
+            .expect("force inactive forbidden gate");
+        table_mip
+            .add_enforced_forbidden_assignments(
+                "inactive-forbidden-pair",
+                vec![MathProgram::bool_lit(inactive_forbidden_gate)],
+                vec![inactive_forbidden_x, inactive_forbidden_y],
+                vec![vec![1, 1]],
+            )
+            .expect("inactive enforced forbidden assignments");
 
         let element_index = table_mip
             .add_integer_var("element-index", 0.0, Some(0.0), Some(3.0))
@@ -14496,6 +14883,10 @@ impl Driver {
                         && (report.internal.x[count_x2] - 1.0).abs() <= 1e-7
                         && report.internal.x[count_x3].abs() <= 1e-7
                         && (report.internal.x[count_ones] - 2.0).abs() <= 1e-7
+                        && (report.internal.x[map_mode] - 6.0).abs() <= 1e-7
+                        && report.internal.x[map_is_five].abs() <= 1e-7
+                        && (report.internal.x[map_is_six] - 1.0).abs() <= 1e-7
+                        && report.internal.x[map_is_seven].abs() <= 1e-7
                         && (report.internal.x[literal_a] - 1.0).abs() <= 1e-7
                         && report.internal.x[literal_b].abs() <= 1e-7
                         && report.internal.x[literal_c].abs() <= 1e-7
@@ -14504,6 +14895,15 @@ impl Driver {
                         && (report.internal.x[allowed_y] - 1.0).abs() <= 1e-7
                         && (report.internal.x[forbidden_x] - 1.0).abs() <= 1e-7
                         && report.internal.x[forbidden_y].abs() <= 1e-7
+                        && (report.internal.x[enforced_allowed_gate] - 1.0).abs() <= 1e-7
+                        && (report.internal.x[enforced_allowed_x] - 2.0).abs() <= 1e-7
+                        && report.internal.x[enforced_allowed_y].abs() <= 1e-7
+                        && (report.internal.x[enforced_forbidden_gate] - 1.0).abs() <= 1e-7
+                        && (report.internal.x[enforced_forbidden_x] - 1.0).abs() <= 1e-7
+                        && report.internal.x[enforced_forbidden_y].abs() <= 1e-7
+                        && report.internal.x[inactive_forbidden_gate].abs() <= 1e-7
+                        && (report.internal.x[inactive_forbidden_x] - 1.0).abs() <= 1e-7
+                        && (report.internal.x[inactive_forbidden_y] - 1.0).abs() <= 1e-7
                         && (report.internal.x[element_index] - 3.0).abs() <= 1e-7
                         && (report.internal.x[element_picked] - 9.0).abs() <= 1e-7
                         && (report.internal.x[variable_element_index] - 1.0).abs() <= 1e-7
@@ -14560,6 +14960,10 @@ impl Driver {
                     && (report.internal.x[count_x2] - 1.0).abs() <= 1e-7
                     && report.internal.x[count_x3].abs() <= 1e-7
                     && (report.internal.x[count_ones] - 2.0).abs() <= 1e-7
+                    && (report.internal.x[map_mode] - 6.0).abs() <= 1e-7
+                    && report.internal.x[map_is_five].abs() <= 1e-7
+                    && (report.internal.x[map_is_six] - 1.0).abs() <= 1e-7
+                    && report.internal.x[map_is_seven].abs() <= 1e-7
                     && (report.internal.x[literal_a] - 1.0).abs() <= 1e-7
                     && report.internal.x[literal_b].abs() <= 1e-7
                     && report.internal.x[literal_c].abs() <= 1e-7
@@ -14568,6 +14972,15 @@ impl Driver {
                     && (report.internal.x[allowed_y] - 1.0).abs() <= 1e-7
                     && (report.internal.x[forbidden_x] - 1.0).abs() <= 1e-7
                     && report.internal.x[forbidden_y].abs() <= 1e-7
+                    && (report.internal.x[enforced_allowed_gate] - 1.0).abs() <= 1e-7
+                    && (report.internal.x[enforced_allowed_x] - 2.0).abs() <= 1e-7
+                    && report.internal.x[enforced_allowed_y].abs() <= 1e-7
+                    && (report.internal.x[enforced_forbidden_gate] - 1.0).abs() <= 1e-7
+                    && (report.internal.x[enforced_forbidden_x] - 1.0).abs() <= 1e-7
+                    && report.internal.x[enforced_forbidden_y].abs() <= 1e-7
+                    && report.internal.x[inactive_forbidden_gate].abs() <= 1e-7
+                    && (report.internal.x[inactive_forbidden_x] - 1.0).abs() <= 1e-7
+                    && (report.internal.x[inactive_forbidden_y] - 1.0).abs() <= 1e-7
                     && (report.internal.x[element_index] - 3.0).abs() <= 1e-7
                     && (report.internal.x[element_picked] - 9.0).abs() <= 1e-7
                     && (report.internal.x[variable_element_index] - 1.0).abs() <= 1e-7
@@ -14609,6 +15022,9 @@ impl Driver {
                     && has_generated("permute")
                     && has_generated("allowed-pairs")
                     && has_generated("forbidden-pair")
+                    && has_generated("active-allowed-pairs")
+                    && has_generated("active-forbidden-pair")
+                    && has_generated("inactive-forbidden-pair")
                     && has_generated("constant-lookup")
                     && has_generated("variable-lookup")
                     && has_generated("inverse-permutation")
@@ -14668,6 +15084,9 @@ impl Driver {
                     && has_generated("permute")
                     && has_generated("allowed-pairs")
                     && has_generated("forbidden-pair")
+                    && has_generated("active-allowed-pairs")
+                    && has_generated("active-forbidden-pair")
+                    && has_generated("inactive-forbidden-pair")
                     && has_generated("constant-lookup")
                     && has_generated("variable-lookup")
                     && has_generated("inverse-permutation")
@@ -16265,6 +16684,82 @@ impl Driver {
             );
         }
 
+        let mut tolerant_mip = MathProgram::new(MathObjectiveSense::Max);
+        let tolerant_mip_a = tolerant_mip
+            .add_binary_var("tolerant-mip-a", 0.0)
+            .expect("tolerant MIP a");
+        let tolerant_mip_b = tolerant_mip
+            .add_binary_var("tolerant-mip-b", 0.0)
+            .expect("tolerant MIP b");
+        let tolerant_mip_c = tolerant_mip
+            .add_binary_var("tolerant-mip-c", 0.0)
+            .expect("tolerant MIP c");
+        tolerant_mip
+            .add_constraint(
+                "choose-one-with-degradation",
+                vec![
+                    (tolerant_mip_a, 1.0),
+                    (tolerant_mip_b, 1.0),
+                    (tolerant_mip_c, 1.0),
+                ],
+                RowSense::Eq,
+                1.0,
+            )
+            .expect("tolerant MIP cardinality");
+        tolerant_mip
+            .add_secondary_objective_with_tolerances(
+                "prefer-a-with-degradation",
+                MathObjectiveSense::Max,
+                10,
+                1.0,
+                1.0,
+                0.0,
+                vec![(tolerant_mip_a, 1.0)],
+            )
+            .expect("tolerant MIP a objective");
+        tolerant_mip
+            .add_secondary_objective(
+                "prefer-b-after-degradation",
+                MathObjectiveSense::Max,
+                1,
+                1.0,
+                vec![(tolerant_mip_b, 1.0)],
+            )
+            .expect("tolerant MIP b objective");
+        if let Some(report) = self.math_program_cross_check_or_skip(
+            "MathProgram hierarchical integer tolerance same-input OR-Tools CP-SAT cross-check",
+            &tolerant_mip,
+            &solve_opts,
+            &ortools_cp_sat_opts,
+            1e-7,
+        ) {
+            self.check(
+                "MathProgram hierarchical integer tolerance same-input OR-Tools CP-SAT cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && report.internal.solver.starts_with("des-hierarchical(")
+                    && report.external.solver.starts_with("external-hierarchical(")
+                    && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report.internal.x[tolerant_mip_a].abs() <= 1e-7
+                    && (report.internal.x[tolerant_mip_b] - 1.0).abs() <= 1e-7
+                    && report.internal.x[tolerant_mip_c].abs() <= 1e-7,
+                format!(
+                    "internal={:?} external={:?} solvers=({},{}) obj_diff={:?} x_diff={:?} x={:?} messages=({:?},{:?})",
+                    report.internal.status,
+                    report.external.status,
+                    report.internal.solver,
+                    report.external.solver,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal.x,
+                    report.internal.message,
+                    report.external.message
+                ),
+            );
+        }
+
         let mut blended_mip = MathProgram::new(MathObjectiveSense::Max);
         let blended_mip_a = blended_mip
             .add_binary_var("blend-mip-a", 1.0)
@@ -16802,6 +17297,81 @@ impl Driver {
             ),
             Err(err) => self.check(
                 "MathProgram finite-domain solution-pool objective-gap stop",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        match solve_math_program_solution_pool(
+            &finite_pool_model,
+            &solve_opts,
+            &MathProgramSolutionPoolOptions {
+                max_solutions: 10,
+                relative_gap: Some(0.41),
+                ..Default::default()
+            },
+        ) {
+            Ok(pool) => self.check(
+                "MathProgram finite-domain solution-pool relative-gap stop",
+                pool.solutions.len() == 3
+                    && !pool.exhausted
+                    && pool
+                        .message
+                        .as_deref()
+                        .is_some_and(|message| message.contains("objective gap"))
+                    && pool
+                        .solutions
+                        .iter()
+                        .zip(&finite_pool_expected_objectives)
+                        .take(3)
+                        .all(|(solution, expected)| (solution.objective - expected).abs() <= 1e-7),
+                format!(
+                    "len={} exhausted={} objectives={:?} message={:?}",
+                    pool.solutions.len(),
+                    pool.exhausted,
+                    pool.solutions
+                        .iter()
+                        .map(|solution| solution.objective)
+                        .collect::<Vec<_>>(),
+                    pool.message
+                ),
+            ),
+            Err(err) => self.check(
+                "MathProgram finite-domain solution-pool relative-gap stop",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        match cross_check_math_program_solution_pool_with_external(
+            &finite_pool_model,
+            &solve_opts,
+            &external_opts,
+            &MathProgramSolutionPoolOptions {
+                max_solutions: 10,
+                relative_gap: Some(0.41),
+                ..Default::default()
+            },
+            1e-7,
+        ) {
+            Ok(report) => self.check(
+                "MathProgram finite-domain solution-pool relative-gap external cross-check",
+                report.within_tolerance
+                    && report.len_agree
+                    && report.internal.solutions.len() == 3
+                    && !report.internal.exhausted,
+                format!(
+                    "internal_len={} external_len={} exhausted=({},{}) obj_diffs={:?} x_diffs={:?}",
+                    report.internal.solutions.len(),
+                    report.external.solutions.len(),
+                    report.internal.exhausted,
+                    report.external.exhausted,
+                    report.objective_abs_diffs,
+                    report.max_x_abs_diffs
+                ),
+            ),
+            Err(err) => self.check(
+                "MathProgram finite-domain solution-pool relative-gap external cross-check",
                 false,
                 format!("{err:?}"),
             ),

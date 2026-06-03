@@ -1072,6 +1072,7 @@ pub fn policy_greedy_feasible_schedule(problem: &SoccerProblem) -> Option<Schedu
     let mut prev_bench: HashSet<usize> = HashSet::new();
     let mut prev_on: HashSet<usize> = HashSet::new();
     let mut consecutive_on = vec![0usize; problem.num_players];
+    let mut consecutive_bench = vec![0usize; problem.num_players];
 
     for t in 0..problem.num_periods {
         let mut selected: Vec<usize> = Vec::new();
@@ -1122,15 +1123,27 @@ pub fn policy_greedy_feasible_schedule(problem: &SoccerProblem) -> Option<Schedu
             }
         }
 
-        let mut must_play: Vec<usize> = if problem.enforce_no_consecutive_bench {
-            prev_bench
-                .iter()
-                .copied()
-                .filter(|&p| player_is_fieldable(problem, p) && !selected_set.contains(&p))
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let mut must_play: Vec<usize> = prev_bench
+            .iter()
+            .copied()
+            .filter(|&p| {
+                !selected_set.contains(&p)
+                    && player_is_fieldable(problem, p)
+                    && player_max_contiguous_bench(problem, p)
+                        .map(|limit| consecutive_bench[p] >= limit)
+                        .unwrap_or(false)
+            })
+            .collect();
+        if problem.enforce_no_consecutive_bench {
+            must_play.extend(
+                prev_bench
+                    .iter()
+                    .copied()
+                    .filter(|&p| player_is_fieldable(problem, p) && !selected_set.contains(&p)),
+            );
+            must_play.sort_unstable();
+            must_play.dedup();
+        }
         must_play.sort_by(|&a, &b| {
             best_eligible_position_score(problem, b, t)
                 .unwrap_or(f64::NEG_INFINITY)
@@ -1196,8 +1209,14 @@ pub fn policy_greedy_feasible_schedule(problem: &SoccerProblem) -> Option<Schedu
         for p in 0..problem.num_players {
             if used.contains(&p) {
                 consecutive_on[p] += 1;
+                consecutive_bench[p] = 0;
             } else {
                 consecutive_on[p] = 0;
+                if player_is_fieldable(problem, p) {
+                    consecutive_bench[p] += 1;
+                } else {
+                    consecutive_bench[p] = 0;
+                }
             }
         }
         prev_on = used;
@@ -1962,7 +1981,52 @@ pub fn build_soccer_ipmip(problem: &SoccerProblem) -> SoccerIPMIPModel {
         }
     }
 
-    // (4b) Min stint length: if a player starts in T, they stay on through the
+    // (4b) Max bench run: in any (B+1)-slot window, the player appears on field
+    //      at least once.
+    for p in 0..p_count {
+        if !player_is_fieldable(problem, p) {
+            continue;
+        }
+        if let Some(bmax) = player_max_contiguous_bench(problem, p) {
+            if t_count > bmax {
+                for t0 in 0..=(t_count - (bmax + 1)) {
+                    let mut row = vec![0.0; n];
+                    for dt in 0..=bmax {
+                        let t = t0 + dt;
+                        for pos in 0..k {
+                            row[idx(p, pos, t)] -= 1.0;
+                        }
+                    }
+                    let row_index = a.len();
+                    a.push(row);
+                    b.push(-1.0);
+                    con_names.push(format!(
+                        "max_contig_bench_{}_T{}_{}",
+                        player_name(p),
+                        t0 + 1,
+                        t0 + bmax + 1
+                    ));
+                    constraint_nodes.push(ConstraintNode {
+                        row_index,
+                        node_id: format!(
+                            "station:bench-run:{}:T{}-{}",
+                            player_name(p),
+                            t0 + 1,
+                            t0 + bmax + 1
+                        ),
+                        label: Some(format!(
+                            "{} plays at least once in periods {}-{}",
+                            player_name(p),
+                            t0 + 1,
+                            t0 + bmax + 1
+                        )),
+                    });
+                }
+            }
+        }
+    }
+
+    // (4c) Min stint length: if a player starts in T, they stay on through the
     //      configured minimum contiguous time slots. Late starts that cannot
     //      satisfy the minimum are disallowed.
     for p in 0..p_count {
@@ -2585,9 +2649,15 @@ fn has_planner_only_constraints(problem: &SoccerProblem) -> bool {
         .as_ref()
         .map(|limits| limits.iter().any(|&limit| limit >= 1))
         .unwrap_or(false);
+    let has_max_bench = problem
+        .max_contiguous_bench
+        .as_ref()
+        .map(|limits| limits.iter().any(|&limit| limit >= 1))
+        .unwrap_or(false);
     problem.max_consecutive_on_field.is_some()
         || has_min_contiguous
         || has_max_contiguous
+        || has_max_bench
         || problem.max_subs_per_game.is_some()
         || problem.min_subs_per_game.is_some()
         || has_unavailable
@@ -3000,12 +3070,45 @@ mod tests {
     //! respects the no-consecutive-bench fairness constraint.
 
     use super::*;
+    use crate::des::general::ip_mip_des::IPMIPStatus;
+    use crate::des::general::lp::{solve_lp_internal, InternalSimplexOptions};
 
     fn problem() -> SoccerProblem {
         build_sample_soccer_problem(&AffinityBuilderOptions {
             seed: Some(7),
             ..Default::default()
         })
+    }
+
+    fn tiny_internal_solver_problem() -> SoccerProblem {
+        SoccerProblem {
+            num_players: 3,
+            num_positions: 2,
+            num_periods: 2,
+            bench_size: 1,
+            max_consecutive_on_field: None,
+            min_contiguous_on_field: Some(vec![1, 1, 1]),
+            max_contiguous_on_field: Some(vec![2, 2, 2]),
+            max_contiguous_bench: Some(vec![2, 2, 2]),
+            enforce_no_consecutive_bench: false,
+            max_subs_per_game: Some(2),
+            min_subs_per_game: Some(0),
+            affinity: vec![
+                vec![vec![1.0, 1.0], vec![0.1, 0.1]],
+                vec![vec![0.1, 0.1], vec![1.0, 1.0]],
+                vec![vec![0.7, 0.7], vec![0.7, 0.7]],
+            ],
+            player_names: Some(vec![
+                "Keeper".to_string(),
+                "Wing".to_string(),
+                "Flex".to_string(),
+            ]),
+            position_names: Some(vec!["GK".to_string(), "RF".to_string()]),
+            player_status: None,
+            fixed_position: None,
+            banned_positions: None,
+            synergy_rules: None,
+        }
     }
 
     #[test]
@@ -3063,6 +3166,95 @@ mod tests {
     }
 
     #[test]
+    fn soccer_lp_relaxation_solves_with_internal_simplex() {
+        let p = tiny_internal_solver_problem();
+        let lp = build_soccer_lp(&p);
+        let sol = solve_lp_internal(
+            &lp,
+            &InternalSimplexOptions {
+                max_iter: Some(200),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(sol.status, LPStatus::Optimal, "message={:?}", sol.message);
+        assert_eq!(sol.solver, "internal");
+        assert!((sol.objective - 4.0).abs() < 1e-6, "z={}", sol.objective);
+    }
+
+    #[test]
+    fn soccer_ipmip_policy_uses_internal_branch_and_cut_only() {
+        let p = tiny_internal_solver_problem();
+        let result = policy_ipmip_feasible(
+            &p,
+            &SoccerIPMIPPolicyOptions {
+                time_limit_ms: Some(5_000.0),
+                max_nodes: Some(20),
+                max_ticks: Some(500),
+                lp_max_iters: Some(200),
+                lp_algorithm: Some(LpRelaxationAlgorithm::Concrete(
+                    ConcreteLpRelaxationAlgorithm::InternalSimplex,
+                )),
+                max_cut_rounds: Some(0),
+                fallback_to_mdp: Some(false),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(result.mip.status, IPMIPStatus::Optimal);
+        assert!(!result.used_fallback, "reason={:?}", result.fallback_reason);
+        assert_eq!(result.mip.solver_kind, "in-house-branch-and-cut");
+        assert!(result.mip.in_house_only);
+        assert!(!result.mip.uses_external_solvers);
+        assert_eq!(
+            result
+                .mip
+                .lp_algorithm_usage
+                .get(&ConcreteLpRelaxationAlgorithm::InternalSimplex)
+                .copied()
+                .unwrap_or(0),
+            result.mip.lp_solves as u64
+        );
+        assert!(
+            result
+                .mip
+                .topology
+                .iter()
+                .any(|node| node.id == "ip-lp-relaxation"
+                    && node.role.contains("stationary LP solver block")),
+            "topology={:?}",
+            result.mip.topology
+        );
+    }
+
+    #[test]
+    fn soccer_ipmip_model_exposes_movable_and_station_metadata_for_solver_tab() {
+        let p = tiny_internal_solver_problem();
+        let model = build_soccer_ipmip(&p);
+        let variables = model.ip.variable_nodes.as_ref().expect("variable nodes");
+        let constraints = model
+            .ip
+            .constraint_nodes
+            .as_ref()
+            .expect("constraint nodes");
+
+        assert_eq!(
+            variables.len(),
+            p.num_players * p.num_positions * p.num_periods
+        );
+        assert!(variables.len() < model.ip.c.len());
+        assert!(variables
+            .iter()
+            .any(|node| node.node_id.starts_with("movable:Keeper:")));
+        assert!(constraints
+            .iter()
+            .any(|node| node.node_id.starts_with("station:eligibility:Keeper:")));
+        assert!(constraints
+            .iter()
+            .any(|node| node.node_id.starts_with("station:position:GK:")));
+    }
+
+    #[test]
     fn match_sim_is_deterministic_for_seed() {
         let p = problem();
         let sched = policy_greedy_hungarian(&p, &GreedyHungarianOptions::default());
@@ -3099,6 +3291,7 @@ mod tests {
             max_consecutive_on_field: Some(1),
             min_contiguous_on_field: None,
             max_contiguous_on_field: None,
+            max_contiguous_bench: None,
             enforce_no_consecutive_bench: true,
             max_subs_per_game: None,
             min_subs_per_game: None,
@@ -3123,6 +3316,58 @@ mod tests {
         let mut uncapped = problem.clone();
         uncapped.max_consecutive_on_field = None;
         assert!(consecutive_on_field_violations(&uncapped, &schedule).is_empty());
+    }
+
+    #[test]
+    fn max_bench_blocks_allow_repeated_short_bench_stints() {
+        let mut problem = SoccerProblem {
+            num_players: 2,
+            num_positions: 1,
+            num_periods: 8,
+            bench_size: 1,
+            max_consecutive_on_field: None,
+            min_contiguous_on_field: None,
+            max_contiguous_on_field: None,
+            max_contiguous_bench: Some(vec![2, 2]),
+            enforce_no_consecutive_bench: false,
+            max_subs_per_game: None,
+            min_subs_per_game: None,
+            affinity: vec![vec![vec![0.0; 8]; 1]; 2],
+            player_names: None,
+            position_names: None,
+            player_status: None,
+            fixed_position: None,
+            banned_positions: None,
+            synergy_rules: None,
+        };
+        let repeated_short_stints = Schedule {
+            assignment: vec![
+                vec![0],
+                vec![1],
+                vec![1],
+                vec![0],
+                vec![0],
+                vec![1],
+                vec![1],
+                vec![0],
+            ],
+            bench: vec![
+                vec![1],
+                vec![0],
+                vec![0],
+                vec![1],
+                vec![1],
+                vec![0],
+                vec![0],
+                vec![1],
+            ],
+        };
+        assert!(max_contiguous_bench_violations(&problem, &repeated_short_stints).is_empty());
+
+        problem.max_contiguous_bench = Some(vec![1, 1]);
+        let violations = max_contiguous_bench_violations(&problem, &repeated_short_stints);
+        assert_eq!(violations.len(), 3);
+        assert!(violations.iter().all(|v| v.length == 2));
     }
 
     /// Turning on the stamina cap adds exactly one rolling window row per player

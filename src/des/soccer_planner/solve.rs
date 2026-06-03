@@ -244,6 +244,20 @@ fn schedule_diagnostics(
             "Lower that player's min blocks, keep them on for a longer stint, or adjust fixed/banned constraints that force an early substitution.",
         ));
     }
+    for s in &eval.max_contiguous_bench_violations {
+        violations.push(violation(
+            "bench",
+            "Max contiguous 5-minute bench blocks",
+            format!(
+                "{} is on the bench for {} contiguous 5-minute block(s) starting at block {}, above the max of {}.",
+                player_label(problem, s.player_id),
+                s.length,
+                s.start_period + 1,
+                s.max_length
+            ),
+            "Raise that player's max bench blocks, shorten the bench stint, or add enough eligible lineup changes to bring them back on sooner.",
+        ));
+    }
     if !eval.subs_ok {
         let min = problem.min_subs_per_game.unwrap_or(0);
         let max = problem.max_subs_per_game.unwrap_or(usize::MAX);
@@ -429,6 +443,16 @@ pub fn build_problem_from_request(req: &PlannerRequest) -> Result<SoccerProblem,
                 .clamp(1, 18)
         })
         .collect::<Vec<_>>();
+    let max_contiguous_bench = req
+        .players
+        .iter()
+        .map(|player| {
+            player
+                .max_bench_blocks
+                .unwrap_or(req.default_max_bench_blocks)
+                .clamp(1, 18)
+        })
+        .collect::<Vec<_>>();
     if let Some((i, (min, max))) = min_contiguous_on_field
         .iter()
         .zip(max_contiguous_on_field.iter())
@@ -454,6 +478,7 @@ pub fn build_problem_from_request(req: &PlannerRequest) -> Result<SoccerProblem,
         max_consecutive_on_field: None,
         min_contiguous_on_field: Some(min_contiguous_on_field),
         max_contiguous_on_field: Some(max_contiguous_on_field),
+        max_contiguous_bench: Some(max_contiguous_bench),
         enforce_no_consecutive_bench: false,
         max_subs_per_game: Some(req.max_subs_per_game),
         min_subs_per_game: Some(req.min_subs_per_game),
@@ -1322,7 +1347,63 @@ mod tests {
     };
     use crate::des::general::ip_mip_des::validate_ipmip_problem;
     use crate::des::general::soccer_rotation::build_soccer_ipmip;
-    use crate::des::soccer_planner::default_planner_request;
+    use crate::des::soccer_planner::{default_planner_request, PlannerPlayer, PlannerRequest};
+
+    fn tiny_branch_and_cut_request() -> PlannerRequest {
+        PlannerRequest {
+            outfield_formation: vec![1],
+            num_periods: 1,
+            minutes_per_period: 10,
+            max_subs_per_game: 2,
+            min_subs_per_game: 0,
+            default_min_contiguous_blocks: 1,
+            default_max_contiguous_blocks: 2,
+            default_max_bench_blocks: 2,
+            players: vec![
+                PlannerPlayer {
+                    id: 0,
+                    name: "Keeper".to_string(),
+                    status: "available".to_string(),
+                    position_scores: vec![1.0, 0.1],
+                    banned_positions: Vec::new(),
+                    fixed_position: None,
+                    min_contiguous_blocks: None,
+                    max_contiguous_blocks: None,
+                    max_bench_blocks: None,
+                },
+                PlannerPlayer {
+                    id: 1,
+                    name: "Wing".to_string(),
+                    status: "available".to_string(),
+                    position_scores: vec![0.1, 1.0],
+                    banned_positions: Vec::new(),
+                    fixed_position: None,
+                    min_contiguous_blocks: None,
+                    max_contiguous_blocks: None,
+                    max_bench_blocks: None,
+                },
+                PlannerPlayer {
+                    id: 2,
+                    name: "Flex".to_string(),
+                    status: "available".to_string(),
+                    position_scores: vec![0.7, 0.7],
+                    banned_positions: Vec::new(),
+                    fixed_position: None,
+                    min_contiguous_blocks: None,
+                    max_contiguous_blocks: None,
+                    max_bench_blocks: None,
+                },
+            ],
+            synergies: Vec::new(),
+            seed: 7,
+            solver_time_limit_ms: 5_000.0,
+            solver_max_nodes: 20,
+            solver_max_ticks: 500,
+            solver_lp_max_iters: 200,
+            solver_heuristic_passes: 10,
+            fallback_to_mdp: false,
+        }
+    }
 
     fn assert_solved(resp: &PlannerResponse) {
         assert!(resp.ok, "default planner solve failed: {:?}", resp.error);
@@ -1361,6 +1442,26 @@ mod tests {
     }
 
     #[test]
+    fn planner_request_can_force_internal_branch_and_cut_without_fallback() {
+        let resp = solve_planner_summary(&tiny_branch_and_cut_request());
+
+        assert!(
+            resp.ok,
+            "branch-and-cut planner solve failed: {:?}",
+            resp.error
+        );
+        assert_eq!(resp.mip_status, "optimal");
+        assert!(!resp.used_fallback, "fallback={:?}", resp.fallback_reason);
+        assert_eq!(resp.num_players, 3);
+        assert_eq!(resp.num_positions, 2);
+        assert_eq!(resp.assignment.len(), 2);
+        assert!(resp
+            .solver_notes
+            .iter()
+            .any(|note| note.contains("Branch-and-bound completed")));
+    }
+
+    #[test]
     fn planner_uses_five_minute_blocks_and_player_stint_overrides() {
         let mut req = default_planner_request();
         req.players[3].min_contiguous_blocks = Some(2);
@@ -1371,6 +1472,7 @@ mod tests {
         assert!(!problem.enforce_no_consecutive_bench);
         assert_eq!(problem.min_contiguous_on_field.as_ref().unwrap()[3], 2);
         assert_eq!(problem.max_contiguous_on_field.as_ref().unwrap()[3], 5);
+        assert_eq!(problem.max_contiguous_bench.as_ref().unwrap()[3], 3);
         assert_eq!(problem.fixed_position.as_ref().unwrap()[0], None);
         assert!(!problem.banned_positions.as_ref().unwrap()[1][0]);
     }

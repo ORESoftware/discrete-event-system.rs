@@ -85,6 +85,7 @@ mod tests {
         assert_eq!(req.min_subs_per_game, 0);
         assert_eq!(req.default_min_contiguous_blocks, 1);
         assert_eq!(req.default_max_contiguous_blocks, 4);
+        assert_eq!(req.default_max_bench_blocks, 3);
         assert_eq!(req.solver_max_nodes, 20_000);
     }
 

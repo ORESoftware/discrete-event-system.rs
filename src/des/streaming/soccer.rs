@@ -52,7 +52,8 @@ impl StreamingSoccerPlanner {
                     "minSubsPerGame": self.request.min_subs_per_game,
                     "maxSubsPerGame": self.request.max_subs_per_game,
                     "defaultMinContiguousBlocks": self.request.default_min_contiguous_blocks,
-                    "defaultMaxContiguousBlocks": self.request.default_max_contiguous_blocks
+                    "defaultMaxContiguousBlocks": self.request.default_max_contiguous_blocks,
+                    "defaultMaxBenchBlocks": self.request.default_max_bench_blocks
                 })
             }
             Err(err) => error_frame(err),
@@ -127,7 +128,7 @@ impl StreamingModel for StreamingSoccerPlanner {
                 StreamOp::new(
                     "set_match",
                     "Set match length, substitution bounds, default contiguous 5-minute block limits, seed, and solver budgets.",
-                    json!({"op":"set_match","numPeriods":2,"minutesPerPeriod":45,"defaultMinContiguousBlocks":1,"defaultMaxContiguousBlocks":4}),
+                    json!({"op":"set_match","numPeriods":2,"minutesPerPeriod":45,"defaultMinContiguousBlocks":1,"defaultMaxContiguousBlocks":4,"defaultMaxBenchBlocks":3}),
                 ),
                 StreamOp::new(
                     "set_formation",
@@ -137,7 +138,7 @@ impl StreamingModel for StreamingSoccerPlanner {
                 StreamOp::new(
                     "add_player",
                     "Add a player variable. Alias: add_variable.",
-                    json!({"op":"add_player","name":"Guest 13","status":"guest","minContiguousBlocks":1,"maxContiguousBlocks":4}),
+                    json!({"op":"add_player","name":"Guest 13","status":"guest","minContiguousBlocks":1,"maxContiguousBlocks":4,"maxBenchBlocks":3}),
                 ),
                 StreamOp::new(
                     "remove_player",

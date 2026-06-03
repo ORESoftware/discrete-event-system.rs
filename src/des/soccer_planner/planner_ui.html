@@ -38,7 +38,7 @@ button:disabled{opacity:.55;cursor:wait}
 .pill{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--line);border-radius:999px;padding:4px 8px;font-size:12px;color:var(--muted);background:#0b141d}
 .player{border:1px solid var(--line);border-radius:8px;background:#0b141d;margin-bottom:8px;padding:8px}
 .player-head{display:grid;grid-template-columns:minmax(90px,1fr) 104px 34px;gap:6px;align-items:center}
-.player-tools{display:grid;grid-template-columns:1fr 1fr 82px 82px;gap:6px;margin-top:6px}
+.player-tools{display:grid;grid-template-columns:1fr 1fr 82px 82px 82px;gap:6px;margin-top:6px}
 .banned{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}
 .banned label{display:inline-flex;align-items:center;gap:3px;margin:0;padding:3px 6px;border:1px solid var(--line);border-radius:999px;font-size:11px;color:var(--muted)}
 .scores{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:5px;margin-top:8px}
@@ -113,6 +113,7 @@ summary{cursor:pointer;color:var(--muted);font-size:12px}
         <div><label>Default max blocks</label><input type="number" id="defaultMaxBlocks" min="1" max="18" value="4"></div>
       </div>
       <div class="grid2" style="margin-top:8px">
+        <div><label>Default max bench</label><input type="number" id="defaultMaxBenchBlocks" min="1" max="18" value="3"></div>
         <div><label>Seed</label><input type="number" id="seed" min="1" value="4242"></div>
       </div>
     </div>
@@ -221,7 +222,8 @@ function fallbackDefaultState() {
       bannedPositions: [],
       fixedPosition: null,
       minContiguousBlocks: null,
-      maxContiguousBlocks: null
+      maxContiguousBlocks: null,
+      maxBenchBlocks: null
     });
   }
   return {
@@ -232,6 +234,7 @@ function fallbackDefaultState() {
     maxSubsPerGame: 119,
     defaultMinContiguousBlocks: 1,
     defaultMaxContiguousBlocks: 4,
+    defaultMaxBenchBlocks: 3,
     players,
     synergies: [{player: 9, position: 10, partnerPlayer: 7, partnerPosition: 6, scoreWith: 0.92, scoreWithout: 0.78, partnerScoreWith: 0.9, partnerScoreWithout: 0.76}],
     seed: 4242,
@@ -321,6 +324,7 @@ function syncStateFromControls() {
   state.defaultMinContiguousBlocks = clamp($('defaultMinBlocks').value, 1, 18);
   state.defaultMaxContiguousBlocks = clamp($('defaultMaxBlocks').value, 1, 18);
   if (state.defaultMinContiguousBlocks > state.defaultMaxContiguousBlocks) state.defaultMaxContiguousBlocks = state.defaultMinContiguousBlocks;
+  state.defaultMaxBenchBlocks = clamp($('defaultMaxBenchBlocks').value, 1, 18);
   state.seed = Math.max(1, +$('seed').value || 4242);
   state.solverTimeLimitMs = Math.max(250, (+$('solverSeconds').value || 1) * 1000);
   state.solverMaxNodes = Math.max(1, +$('solverMaxNodes').value || 1);
@@ -339,6 +343,7 @@ function syncControlsFromState() {
   $('maxSubs').value = state.maxSubsPerGame;
   $('defaultMinBlocks').value = state.defaultMinContiguousBlocks;
   $('defaultMaxBlocks').value = state.defaultMaxContiguousBlocks;
+  $('defaultMaxBenchBlocks').value = state.defaultMaxBenchBlocks;
   $('seed').value = state.seed;
   $('solverSeconds').value = Math.round((state.solverTimeLimitMs || 120000) / 1000);
   $('solverMaxNodes').value = state.solverMaxNodes || 20000;
@@ -354,6 +359,7 @@ function normalizeState() {
   state.defaultMinContiguousBlocks = clamp(state.defaultMinContiguousBlocks ?? 1, 1, 18);
   state.defaultMaxContiguousBlocks = clamp(state.defaultMaxContiguousBlocks ?? state.maxConsecutiveOnField ?? 4, 1, 18);
   if (state.defaultMinContiguousBlocks > state.defaultMaxContiguousBlocks) state.defaultMaxContiguousBlocks = state.defaultMinContiguousBlocks;
+  state.defaultMaxBenchBlocks = clamp(state.defaultMaxBenchBlocks ?? 3, 1, 18);
   for (let i = 0; i < state.players.length; i++) {
     const p = state.players[i];
     p.id = i;
@@ -367,6 +373,7 @@ function normalizeState() {
     if (p.fixedPosition != null && (p.fixedPosition < 0 || p.fixedPosition >= posNames.length)) p.fixedPosition = null;
     p.minContiguousBlocks = p.minContiguousBlocks == null || p.minContiguousBlocks === '' ? null : clamp(p.minContiguousBlocks, 1, 18);
     p.maxContiguousBlocks = p.maxContiguousBlocks == null || p.maxContiguousBlocks === '' ? null : clamp(p.maxContiguousBlocks, 1, 18);
+    p.maxBenchBlocks = p.maxBenchBlocks == null || p.maxBenchBlocks === '' ? null : clamp(p.maxBenchBlocks, 1, 18);
     if (p.minContiguousBlocks != null && p.maxContiguousBlocks != null && p.minContiguousBlocks > p.maxContiguousBlocks) {
       p.maxContiguousBlocks = p.minContiguousBlocks;
     }
@@ -402,6 +409,10 @@ function playerMaxBlocks(p) {
   return clamp(p?.maxContiguousBlocks ?? state.defaultMaxContiguousBlocks ?? 4, 1, 18);
 }
 
+function playerMaxBenchBlocks(p) {
+  return clamp(p?.maxBenchBlocks ?? state.defaultMaxBenchBlocks ?? 3, 1, 18);
+}
+
 function fixedOptions(value) {
   return '<option value="">Free</option>' + posNames.map((n,i) =>
     `<option value="${i}" ${value===i?'selected':''}>${esc(n)}</option>`).join('');
@@ -431,6 +442,7 @@ function renderRoster() {
         <div><label>Base score</label><input type="range" min="0" max="1" step="0.05" data-base-score="${idx}" value="${average(p.positionScores).toFixed(2)}"></div>
         <div><label>Min blocks</label><input type="number" min="1" max="18" data-min-blocks="${idx}" placeholder="${state.defaultMinContiguousBlocks}" value="${p.minContiguousBlocks ?? ''}"></div>
         <div><label>Max blocks</label><input type="number" min="1" max="18" data-max-blocks="${idx}" placeholder="${state.defaultMaxContiguousBlocks}" value="${p.maxContiguousBlocks ?? ''}"></div>
+        <div><label>Max bench</label><input type="number" min="1" max="18" data-max-bench-blocks="${idx}" placeholder="${state.defaultMaxBenchBlocks}" value="${p.maxBenchBlocks ?? ''}"></div>
       </div>
       <div class="banned">${banned}</div>
       <details><summary>Position scores</summary><div class="scores">${scores}</div></details>`;
@@ -449,6 +461,13 @@ function renderRoster() {
   el.querySelectorAll('[data-max-blocks]').forEach(inp => inp.onchange = () => {
     const p = state.players[+inp.dataset.maxBlocks];
     p.maxContiguousBlocks = inp.value === '' ? null : clamp(inp.value, 1, 18);
+    normalizeState();
+    renderRoster();
+    updateRequestJson();
+  });
+  el.querySelectorAll('[data-max-bench-blocks]').forEach(inp => inp.onchange = () => {
+    const p = state.players[+inp.dataset.maxBenchBlocks];
+    p.maxBenchBlocks = inp.value === '' ? null : clamp(inp.value, 1, 18);
     normalizeState();
     renderRoster();
     updateRequestJson();
@@ -523,12 +542,13 @@ function applyCommand(cmd) {
   const op = cmd.op || '';
   if (op === 'reset') state = loadDefaultState();
   if (op === 'set_match') {
-    for (const k of ['numPeriods','minutesPerPeriod','minSubsPerGame','maxSubsPerGame','defaultMinContiguousBlocks','defaultMaxContiguousBlocks','seed','solverTimeLimitMs','solverMaxNodes','solverMaxTicks','solverLpMaxIters','solverHeuristicPasses','fallbackToMdp']) {
+    for (const k of ['numPeriods','minutesPerPeriod','minSubsPerGame','maxSubsPerGame','defaultMinContiguousBlocks','defaultMaxContiguousBlocks','defaultMaxBenchBlocks','seed','solverTimeLimitMs','solverMaxNodes','solverMaxTicks','solverLpMaxIters','solverHeuristicPasses','fallbackToMdp']) {
       if (cmd[k] !== undefined) state[k] = cmd[k];
     }
     if (cmd.maxConsecutiveOnField !== undefined) state.defaultMaxContiguousBlocks = cmd.maxConsecutiveOnField;
     if (cmd.minContiguousBlocks !== undefined) state.defaultMinContiguousBlocks = cmd.minContiguousBlocks;
     if (cmd.maxContiguousBlocks !== undefined) state.defaultMaxContiguousBlocks = cmd.maxContiguousBlocks;
+    if (cmd.maxBenchBlocks !== undefined) state.defaultMaxBenchBlocks = cmd.maxBenchBlocks;
   }
   if (op === 'set_formation') state.outfieldFormation = cmd.outfieldFormation || parseFormation(cmd.formation);
   if (op === 'add_player' || op === 'add_variable') {
@@ -540,6 +560,7 @@ function applyCommand(cmd) {
     p.fixedPosition = cmd.fixedPosition ?? p.fixedPosition ?? null;
     p.minContiguousBlocks = cmd.minContiguousBlocks ?? p.minContiguousBlocks ?? null;
     p.maxContiguousBlocks = cmd.maxContiguousBlocks ?? p.maxContiguousBlocks ?? null;
+    p.maxBenchBlocks = cmd.maxBenchBlocks ?? p.maxBenchBlocks ?? null;
     state.players.push(p);
   }
   if (op === 'remove_player' || op === 'remove_variable') {
@@ -776,16 +797,16 @@ function resizeRoster(n) {
 }
 
 function setPreset(v) {
-  if (v === '7') { state.outfieldFormation = [2,3,1]; resizeRosterRaw(12); state.minSubsPerGame = 0; state.maxSubsPerGame = 119; state.numPeriods = 4; state.minutesPerPeriod = 10; state.defaultMinContiguousBlocks = 1; state.defaultMaxContiguousBlocks = 4; }
-  if (v === '9') { state.outfieldFormation = [3,3,2]; resizeRosterRaw(14); state.minSubsPerGame = 0; state.maxSubsPerGame = 119; state.numPeriods = 3; state.minutesPerPeriod = 20; state.defaultMinContiguousBlocks = 1; state.defaultMaxContiguousBlocks = 4; }
-  if (v === '11') { state.outfieldFormation = [4,4,2]; resizeRosterRaw(18); state.minSubsPerGame = 0; state.maxSubsPerGame = 119; state.numPeriods = 2; state.minutesPerPeriod = 45; state.defaultMinContiguousBlocks = 1; state.defaultMaxContiguousBlocks = 4; }
+  if (v === '7') { state.outfieldFormation = [2,3,1]; resizeRosterRaw(12); state.minSubsPerGame = 0; state.maxSubsPerGame = 119; state.numPeriods = 4; state.minutesPerPeriod = 10; state.defaultMinContiguousBlocks = 1; state.defaultMaxContiguousBlocks = 4; state.defaultMaxBenchBlocks = 3; }
+  if (v === '9') { state.outfieldFormation = [3,3,2]; resizeRosterRaw(14); state.minSubsPerGame = 0; state.maxSubsPerGame = 119; state.numPeriods = 3; state.minutesPerPeriod = 20; state.defaultMinContiguousBlocks = 1; state.defaultMaxContiguousBlocks = 4; state.defaultMaxBenchBlocks = 3; }
+  if (v === '11') { state.outfieldFormation = [4,4,2]; resizeRosterRaw(18); state.minSubsPerGame = 0; state.maxSubsPerGame = 119; state.numPeriods = 2; state.minutesPerPeriod = 45; state.defaultMinContiguousBlocks = 1; state.defaultMaxContiguousBlocks = 4; state.defaultMaxBenchBlocks = 3; }
   renderAll();
 }
 
 function resizeRosterRaw(n) {
   normalizeState();
   while (state.players.length < n) {
-    state.players.push({id:state.players.length,name:'Player'+(state.players.length+1),status:'available',positionScores:posNames.map(()=>0.45),bannedPositions:[],fixedPosition:null,minContiguousBlocks:null,maxContiguousBlocks:null});
+    state.players.push({id:state.players.length,name:'Player'+(state.players.length+1),status:'available',positionScores:posNames.map(()=>0.45),bannedPositions:[],fixedPosition:null,minContiguousBlocks:null,maxContiguousBlocks:null,maxBenchBlocks:null});
   }
   while (state.players.length > n) state.players.pop();
   state.synergies = [];
@@ -861,6 +882,7 @@ function estimateModelShape() {
   const subVars = p * t + Math.max(0, p * (t - 1));
   let constraints = p * t + 2 * k * t + p * Math.max(0, t - 1);
   constraints += state.players.reduce((n, pl) => n + (t > playerMaxBlocks(pl) ? t - playerMaxBlocks(pl) : 0), 0);
+  constraints += state.players.reduce((n, pl) => n + (t > playerMaxBenchBlocks(pl) ? t - playerMaxBenchBlocks(pl) : 0), 0);
   constraints += state.players.reduce((n, pl) => {
     const m = playerMinBlocks(pl);
     if (m <= 1) return n;
@@ -900,6 +922,7 @@ function localPreviewSolve() {
   let prevBench = new Set();
   let totalSubs = 0;
   let affinity = 0;
+  const benchRun = state.players.map(() => 0);
   const blocks = solverBlockCount();
   for (let period = 0; period < blocks; period++) {
     const row = Array(nPos).fill(-1);
@@ -919,7 +942,17 @@ function localPreviewSolve() {
       row[pos] = pid;
       used.add(pid);
     }
-    const mustPlay = new Set([...prevBench].filter(pid => fieldable.some(p => p.id === pid) && !used.has(pid)));
+    const mustPlay = new Set([...prevBench].filter(pid => {
+      const p = state.players[pid];
+      return p && benchRun[pid] >= playerMaxBenchBlocks(p) && fieldable.some(fp => fp.id === pid) && !used.has(pid);
+    }));
+    for (const pid of mustPlay) {
+      const p = state.players[pid];
+      const pos = bestOpenPositionFor(p, row, used);
+      if (pos == null) throw new Error(`${p.name} cannot return from a maximum bench stint in block ${period + 1}`);
+      row[pos] = pid;
+      used.add(pid);
+    }
     const chooseFor = (pos) => {
       const scored = fieldable.filter(p => {
         if (used.has(p.id)) return false;
@@ -947,7 +980,15 @@ function localPreviewSolve() {
     if (period > 0) {
       for (const pid of prevOn) if (!used.has(pid)) totalSubs++;
     }
-    for (const p of state.players) run[p.id] = used.has(p.id) ? run[p.id] + 1 : 0;
+    for (const p of state.players) {
+      if (used.has(p.id)) {
+        run[p.id] = run[p.id] + 1;
+        benchRun[p.id] = 0;
+      } else {
+        run[p.id] = 0;
+        benchRun[p.id] = (p.status === 'awol' || p.status === 'injured') ? 0 : benchRun[p.id] + 1;
+      }
+    }
     assignment.push(row);
     bench.push(curBench);
     prevOn = used;
@@ -1127,13 +1168,13 @@ document.querySelectorAll('.tab').forEach(btn => btn.onclick = () => {
 $('solveBtn').onclick = solveViaJson;
 $('snapshotBtn').onclick = () => { syncStateFromControls(); updateRequestJson(); logStream('snapshot players=' + state.players.length + ' positions=' + posNames.length); };
 $('preset').onchange = () => setPreset($('preset').value);
-['formation','numPeriods','minutesPerPeriod','minSubs','maxSubs','defaultMinBlocks','defaultMaxBlocks','seed','solverSeconds','solverMaxNodes','solverMaxTicks','solverLpIters','solverHeuristics','fallbackToMdp'].forEach(id => $(id).onchange = () => { syncStateFromControls(); renderAll(); });
+['formation','numPeriods','minutesPerPeriod','minSubs','maxSubs','defaultMinBlocks','defaultMaxBlocks','defaultMaxBenchBlocks','seed','solverSeconds','solverMaxNodes','solverMaxTicks','solverLpIters','solverHeuristics','fallbackToMdp'].forEach(id => $(id).onchange = () => { syncStateFromControls(); renderAll(); });
 $('resizeRoster').onclick = () => resizeRoster(Math.max(posNames.length + 1, +$('rosterTarget').value || state.players.length));
 $('addGuest').onclick = () => { applyCommand({op:'add_player', name:'Guest' + (state.players.length + 1), status:'guest'}); renderAll(); };
 $('addSynergy').onclick = () => { normalizeState(); state.synergies.push({player:Math.min(9,state.players.length-1),position:Math.max(0,posNames.length-1),partnerPlayer:Math.min(7,state.players.length-1),partnerPosition:Math.max(0,posNames.length-2),scoreWith:.9,scoreWithout:.75,partnerScoreWith:.9,partnerScoreWithout:.75}); renderSynergies(); updateRequestJson(); };
 $('cmdAddPlayer').onclick = () => appendCommand({op:'add_player', name:'Guest' + (state.players.length + 1), status:'guest'}, true);
 $('cmdBanGk').onclick = () => appendCommand({op:'ban_position', player:Math.min(1,state.players.length-1), position:0}, true);
-$('cmdStamina').onclick = () => appendCommand({op:'set_match', defaultMinContiguousBlocks:1, defaultMaxContiguousBlocks:4}, true);
+$('cmdStamina').onclick = () => appendCommand({op:'set_match', defaultMinContiguousBlocks:1, defaultMaxContiguousBlocks:4, defaultMaxBenchBlocks:3}, true);
 $('cmdApply').onclick = () => { try { applyStreamText(); setStatus('', 'Stream applied.'); } catch(e) { setStatus('err', 'Bad stream: ' + e.message); } };
 $('cmdStreamSolve').onclick = solveViaStream;
 $('cmdClear').onclick = () => { $('commandStream').value = ''; logStream('cleared'); };
@@ -1146,6 +1187,7 @@ state.solverHeuristicPasses = state.solverHeuristicPasses || 120;
 state.fallbackToMdp = state.fallbackToMdp !== false;
 state.defaultMinContiguousBlocks = state.defaultMinContiguousBlocks || 1;
 state.defaultMaxContiguousBlocks = state.defaultMaxContiguousBlocks || state.maxConsecutiveOnField || 4;
+state.defaultMaxBenchBlocks = state.defaultMaxBenchBlocks || 3;
 renderAll();
 </script>
 </body>

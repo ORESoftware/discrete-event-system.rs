@@ -348,6 +348,18 @@ pub enum GeneralConstraint {
         coeffs: Vec<(usize, f64)>,
         intervals: Vec<LinearDomainInterval>,
     },
+    EnforcedLinearDomain {
+        name: String,
+        enforcement: Vec<BoolLiteral>,
+        coeffs: Vec<(usize, f64)>,
+        intervals: Vec<LinearDomainInterval>,
+    },
+    MapDomain {
+        name: String,
+        var: usize,
+        bool_vars: Vec<usize>,
+        offset: i64,
+    },
     IntegerProduct {
         name: String,
         target_var: usize,
@@ -414,6 +426,18 @@ pub enum GeneralConstraint {
     },
     ForbiddenAssignments {
         name: String,
+        variables: Vec<usize>,
+        tuples: Vec<Vec<i64>>,
+    },
+    EnforcedAllowedAssignments {
+        name: String,
+        enforcement: Vec<BoolLiteral>,
+        variables: Vec<usize>,
+        tuples: Vec<Vec<i64>>,
+    },
+    EnforcedForbiddenAssignments {
+        name: String,
+        enforcement: Vec<BoolLiteral>,
         variables: Vec<usize>,
         tuples: Vec<Vec<i64>>,
     },
@@ -1213,6 +1237,187 @@ impl MathProgram {
         self.add_literal_exactly_k(name, literals, 1)
     }
 
+    pub fn add_enforced_boolean_clause(
+        &mut self,
+        name: impl Into<String>,
+        enforcement: Vec<BoolLiteral>,
+        literals: Vec<BoolLiteral>,
+    ) -> Result<usize, MathProgramError> {
+        self.validate_enforced_boolean_cardinality_args(&enforcement, &literals, Some(1), None)?;
+        let (coeffs, negated_count) = literal_cardinality_terms(&literals);
+        self.add_enforced_constraint(
+            name,
+            enforcement,
+            coeffs,
+            RowSense::Ge,
+            1.0 - negated_count as f64,
+        )
+    }
+
+    pub fn add_enforced_boolean_or(
+        &mut self,
+        name: impl Into<String>,
+        enforcement: Vec<BoolLiteral>,
+        literals: Vec<BoolLiteral>,
+    ) -> Result<usize, MathProgramError> {
+        self.add_enforced_boolean_clause(name, enforcement, literals)
+    }
+
+    pub fn add_enforced_boolean_and(
+        &mut self,
+        name: impl Into<String>,
+        enforcement: Vec<BoolLiteral>,
+        literals: Vec<BoolLiteral>,
+    ) -> Result<usize, MathProgramError> {
+        let count = literals.len();
+        let ids =
+            self.add_enforced_boolean_cardinality(name, enforcement, literals, Some(count), None)?;
+        ids.first().copied().ok_or_else(|| {
+            MathProgramError::Unsupported("enforced boolean-and generated no rows".to_string())
+        })
+    }
+
+    pub fn add_enforced_boolean_xor(
+        &mut self,
+        name: impl Into<String>,
+        enforcement: Vec<BoolLiteral>,
+        literals: Vec<BoolLiteral>,
+    ) -> Result<usize, MathProgramError> {
+        self.validate_enforced_boolean_cardinality_args(&enforcement, &literals, Some(1), None)?;
+        let (coeffs, negated_count) = literal_cardinality_terms(&literals);
+        let intervals = (1..=literals.len())
+            .step_by(2)
+            .map(|truth_count| {
+                let shifted = truth_count as i64 - negated_count as i64;
+                (shifted, shifted)
+            })
+            .collect::<Vec<_>>();
+        self.add_enforced_linear_domain(name, enforcement, coeffs, intervals)
+    }
+
+    pub fn add_enforced_boolean_cardinality(
+        &mut self,
+        name: impl Into<String>,
+        enforcement: Vec<BoolLiteral>,
+        literals: Vec<BoolLiteral>,
+        min_count: Option<usize>,
+        max_count: Option<usize>,
+    ) -> Result<Vec<usize>, MathProgramError> {
+        self.validate_enforced_boolean_cardinality_args(
+            &enforcement,
+            &literals,
+            min_count,
+            max_count,
+        )?;
+        let name = name.into();
+        let (coeffs, negated_count) = literal_cardinality_terms(&literals);
+        let mut ids = Vec::new();
+        if let Some(max_count) = max_count {
+            let row_name = if min_count.is_some() {
+                format!("{name}__at_most")
+            } else {
+                name.clone()
+            };
+            ids.push(self.add_enforced_constraint(
+                row_name,
+                enforcement.clone(),
+                coeffs.clone(),
+                RowSense::Le,
+                max_count as f64 - negated_count as f64,
+            )?);
+        }
+        if let Some(min_count) = min_count {
+            let row_name = if max_count.is_some() {
+                format!("{name}__at_least")
+            } else {
+                name
+            };
+            ids.push(self.add_enforced_constraint(
+                row_name,
+                enforcement,
+                coeffs,
+                RowSense::Ge,
+                min_count as f64 - negated_count as f64,
+            )?);
+        }
+        Ok(ids)
+    }
+
+    pub fn add_enforced_literal_at_most_k(
+        &mut self,
+        name: impl Into<String>,
+        enforcement: Vec<BoolLiteral>,
+        literals: Vec<BoolLiteral>,
+        max_count: usize,
+    ) -> Result<usize, MathProgramError> {
+        let ids = self.add_enforced_boolean_cardinality(
+            name,
+            enforcement,
+            literals,
+            None,
+            Some(max_count),
+        )?;
+        ids.first().copied().ok_or_else(|| {
+            MathProgramError::Unsupported("enforced literal-at-most generated no rows".to_string())
+        })
+    }
+
+    pub fn add_enforced_literal_at_least_k(
+        &mut self,
+        name: impl Into<String>,
+        enforcement: Vec<BoolLiteral>,
+        literals: Vec<BoolLiteral>,
+        min_count: usize,
+    ) -> Result<usize, MathProgramError> {
+        let ids = self.add_enforced_boolean_cardinality(
+            name,
+            enforcement,
+            literals,
+            Some(min_count),
+            None,
+        )?;
+        ids.first().copied().ok_or_else(|| {
+            MathProgramError::Unsupported("enforced literal-at-least generated no rows".to_string())
+        })
+    }
+
+    pub fn add_enforced_literal_exactly_k(
+        &mut self,
+        name: impl Into<String>,
+        enforcement: Vec<BoolLiteral>,
+        literals: Vec<BoolLiteral>,
+        count: usize,
+    ) -> Result<Vec<usize>, MathProgramError> {
+        self.add_enforced_boolean_cardinality(name, enforcement, literals, Some(count), Some(count))
+    }
+
+    pub fn add_enforced_literal_at_most_one(
+        &mut self,
+        name: impl Into<String>,
+        enforcement: Vec<BoolLiteral>,
+        literals: Vec<BoolLiteral>,
+    ) -> Result<usize, MathProgramError> {
+        self.add_enforced_literal_at_most_k(name, enforcement, literals, 1)
+    }
+
+    pub fn add_enforced_literal_at_least_one(
+        &mut self,
+        name: impl Into<String>,
+        enforcement: Vec<BoolLiteral>,
+        literals: Vec<BoolLiteral>,
+    ) -> Result<usize, MathProgramError> {
+        self.add_enforced_literal_at_least_k(name, enforcement, literals, 1)
+    }
+
+    pub fn add_enforced_literal_exactly_one(
+        &mut self,
+        name: impl Into<String>,
+        enforcement: Vec<BoolLiteral>,
+        literals: Vec<BoolLiteral>,
+    ) -> Result<Vec<usize>, MathProgramError> {
+        self.add_enforced_literal_exactly_k(name, enforcement, literals, 1)
+    }
+
     pub fn add_boolean_count(
         &mut self,
         name: impl Into<String>,
@@ -1508,6 +1713,118 @@ impl MathProgram {
         Ok(self.general_constraints.len() - 1)
     }
 
+    /// Add a univariate function constraint `y = f(x)` by interpolating over
+    /// explicit breakpoints and lowering to the same SOS2-style MIP encoding as
+    /// [`Self::add_piecewise_linear`].
+    pub fn add_univariate_piecewise_function<F>(
+        &mut self,
+        name: impl Into<String>,
+        x_var: usize,
+        y_var: usize,
+        breakpoints: Vec<f64>,
+        function: F,
+    ) -> Result<usize, MathProgramError>
+    where
+        F: Fn(f64) -> f64,
+    {
+        let points =
+            self.univariate_function_points("univariate function", &breakpoints, function)?;
+        self.add_piecewise_linear(name, x_var, y_var, points)
+    }
+
+    /// Add `y = exp(x)` using explicit piecewise-linear breakpoints.
+    pub fn add_exp_function(
+        &mut self,
+        name: impl Into<String>,
+        x_var: usize,
+        y_var: usize,
+        breakpoints: Vec<f64>,
+    ) -> Result<usize, MathProgramError> {
+        let points =
+            self.univariate_function_points("exponential function", &breakpoints, f64::exp)?;
+        self.add_piecewise_linear(name, x_var, y_var, points)
+    }
+
+    /// Add `y = ln(x)` using explicit piecewise-linear breakpoints.
+    pub fn add_log_function(
+        &mut self,
+        name: impl Into<String>,
+        x_var: usize,
+        y_var: usize,
+        breakpoints: Vec<f64>,
+    ) -> Result<usize, MathProgramError> {
+        let points =
+            self.univariate_function_points("logarithm function", &breakpoints, f64::ln)?;
+        self.add_piecewise_linear(name, x_var, y_var, points)
+    }
+
+    /// Add `y = x^exponent` using explicit piecewise-linear breakpoints.
+    pub fn add_power_function(
+        &mut self,
+        name: impl Into<String>,
+        x_var: usize,
+        y_var: usize,
+        exponent: f64,
+        breakpoints: Vec<f64>,
+    ) -> Result<usize, MathProgramError> {
+        if !exponent.is_finite() {
+            return Err(MathProgramError::NonFinite("power exponent".to_string()));
+        }
+        let points =
+            self.univariate_function_points("power function", &breakpoints, |x| x.powf(exponent))?;
+        self.add_piecewise_linear(name, x_var, y_var, points)
+    }
+
+    /// Add `y = 1 / (1 + exp(-x))` using explicit piecewise-linear breakpoints.
+    pub fn add_logistic_function(
+        &mut self,
+        name: impl Into<String>,
+        x_var: usize,
+        y_var: usize,
+        breakpoints: Vec<f64>,
+    ) -> Result<usize, MathProgramError> {
+        let points = self.univariate_function_points("logistic function", &breakpoints, |x| {
+            1.0 / (1.0 + (-x).exp())
+        })?;
+        self.add_piecewise_linear(name, x_var, y_var, points)
+    }
+
+    /// Add `y = sin(x)` using explicit piecewise-linear breakpoints.
+    pub fn add_sin_function(
+        &mut self,
+        name: impl Into<String>,
+        x_var: usize,
+        y_var: usize,
+        breakpoints: Vec<f64>,
+    ) -> Result<usize, MathProgramError> {
+        let points = self.univariate_function_points("sine function", &breakpoints, f64::sin)?;
+        self.add_piecewise_linear(name, x_var, y_var, points)
+    }
+
+    /// Add `y = cos(x)` using explicit piecewise-linear breakpoints.
+    pub fn add_cos_function(
+        &mut self,
+        name: impl Into<String>,
+        x_var: usize,
+        y_var: usize,
+        breakpoints: Vec<f64>,
+    ) -> Result<usize, MathProgramError> {
+        let points = self.univariate_function_points("cosine function", &breakpoints, f64::cos)?;
+        self.add_piecewise_linear(name, x_var, y_var, points)
+    }
+
+    /// Add `y = tan(x)` using explicit piecewise-linear breakpoints.
+    pub fn add_tan_function(
+        &mut self,
+        name: impl Into<String>,
+        x_var: usize,
+        y_var: usize,
+        breakpoints: Vec<f64>,
+    ) -> Result<usize, MathProgramError> {
+        let points = self.univariate_function_points("tangent function", &breakpoints, f64::tan)?;
+        self.add_piecewise_linear(name, x_var, y_var, points)
+    }
+
     pub fn add_all_different(
         &mut self,
         name: impl Into<String>,
@@ -1576,6 +1893,51 @@ impl MathProgram {
         Ok(self.general_constraints.len() - 1)
     }
 
+    pub fn add_enforced_linear_domain(
+        &mut self,
+        name: impl Into<String>,
+        enforcement: Vec<BoolLiteral>,
+        coeffs: Vec<(usize, f64)>,
+        intervals: Vec<(i64, i64)>,
+    ) -> Result<usize, MathProgramError> {
+        let intervals = intervals
+            .into_iter()
+            .map(|(lower, upper)| LinearDomainInterval { lower, upper })
+            .collect::<Vec<_>>();
+        self.validate_enforced_linear_domain_args(&enforcement, &coeffs, &intervals)?;
+        self.general_constraints
+            .push(GeneralConstraint::EnforcedLinearDomain {
+                name: name.into(),
+                enforcement,
+                coeffs,
+                intervals,
+            });
+        Ok(self.general_constraints.len() - 1)
+    }
+
+    /// Add the CP-SAT-style channeling constraint
+    /// `bool_vars[i] <=> var == offset + i`.
+    ///
+    /// If `var` can take values outside the mapped range, every selector is
+    /// forced to zero for those values. If `var` is bounded exactly to the
+    /// mapped range, the selectors form a one-hot encoding.
+    pub fn add_map_domain(
+        &mut self,
+        name: impl Into<String>,
+        var: usize,
+        bool_vars: Vec<usize>,
+        offset: i64,
+    ) -> Result<usize, MathProgramError> {
+        self.validate_map_domain_args(var, &bool_vars, offset)?;
+        self.general_constraints.push(GeneralConstraint::MapDomain {
+            name: name.into(),
+            var,
+            bool_vars,
+            offset,
+        });
+        Ok(self.general_constraints.len() - 1)
+    }
+
     pub fn add_allowed_assignments(
         &mut self,
         name: impl Into<String>,
@@ -1602,6 +1964,52 @@ impl MathProgram {
         self.general_constraints
             .push(GeneralConstraint::ForbiddenAssignments {
                 name: name.into(),
+                variables,
+                tuples,
+            });
+        Ok(self.general_constraints.len() - 1)
+    }
+
+    pub fn add_enforced_allowed_assignments(
+        &mut self,
+        name: impl Into<String>,
+        enforcement: Vec<BoolLiteral>,
+        variables: Vec<usize>,
+        tuples: Vec<Vec<i64>>,
+    ) -> Result<usize, MathProgramError> {
+        self.validate_enforced_table_assignments_args(
+            "enforced-allowed-assignments",
+            &enforcement,
+            &variables,
+            &tuples,
+        )?;
+        self.general_constraints
+            .push(GeneralConstraint::EnforcedAllowedAssignments {
+                name: name.into(),
+                enforcement,
+                variables,
+                tuples,
+            });
+        Ok(self.general_constraints.len() - 1)
+    }
+
+    pub fn add_enforced_forbidden_assignments(
+        &mut self,
+        name: impl Into<String>,
+        enforcement: Vec<BoolLiteral>,
+        variables: Vec<usize>,
+        tuples: Vec<Vec<i64>>,
+    ) -> Result<usize, MathProgramError> {
+        self.validate_enforced_table_assignments_args(
+            "enforced-forbidden-assignments",
+            &enforcement,
+            &variables,
+            &tuples,
+        )?;
+        self.general_constraints
+            .push(GeneralConstraint::EnforcedForbiddenAssignments {
+                name: name.into(),
+                enforcement,
                 variables,
                 tuples,
             });
@@ -2155,6 +2563,20 @@ impl MathProgram {
                 } => {
                     self.validate_linear_domain_args(coeffs, intervals)?;
                 }
+                GeneralConstraint::EnforcedLinearDomain {
+                    enforcement,
+                    coeffs,
+                    intervals,
+                    ..
+                } => {
+                    self.validate_enforced_linear_domain_args(enforcement, coeffs, intervals)?;
+                }
+                GeneralConstraint::MapDomain {
+                    var,
+                    bool_vars,
+                    offset,
+                    ..
+                } => self.validate_map_domain_args(*var, bool_vars, *offset)?,
                 GeneralConstraint::IntegerProduct {
                     target_var,
                     operands,
@@ -2250,6 +2672,28 @@ impl MathProgram {
                     variables, tuples, ..
                 } => self.validate_table_assignments_args(
                     "forbidden-assignments",
+                    variables,
+                    tuples,
+                )?,
+                GeneralConstraint::EnforcedAllowedAssignments {
+                    enforcement,
+                    variables,
+                    tuples,
+                    ..
+                } => self.validate_enforced_table_assignments_args(
+                    "enforced-allowed-assignments",
+                    enforcement,
+                    variables,
+                    tuples,
+                )?,
+                GeneralConstraint::EnforcedForbiddenAssignments {
+                    enforcement,
+                    variables,
+                    tuples,
+                    ..
+                } => self.validate_enforced_table_assignments_args(
+                    "enforced-forbidden-assignments",
+                    enforcement,
                     variables,
                     tuples,
                 )?,
@@ -2987,6 +3431,96 @@ impl MathProgram {
         Ok(())
     }
 
+    fn validate_enforced_linear_domain_args(
+        &self,
+        enforcement: &[BoolLiteral],
+        coeffs: &[(usize, f64)],
+        intervals: &[LinearDomainInterval],
+    ) -> Result<(), MathProgramError> {
+        if enforcement.is_empty() {
+            return Err(MathProgramError::Unsupported(
+                "enforced linear-domain constraints require at least one enforcement literal"
+                    .to_string(),
+            ));
+        }
+        self.validate_boolean_clause_args(enforcement)?;
+        self.validate_linear_domain_args(coeffs, intervals)
+    }
+
+    fn validate_map_domain_args(
+        &self,
+        var: usize,
+        bool_vars: &[usize],
+        offset: i64,
+    ) -> Result<(), MathProgramError> {
+        if var >= self.variables.len() {
+            return Err(MathProgramError::BadIndex(format!(
+                "map-domain variable index {var} out of bounds"
+            )));
+        }
+        if !matches!(
+            self.variables[var].var_type,
+            VariableType::Binary | VariableType::Integer
+        ) {
+            return Err(MathProgramError::Unsupported(format!(
+                "map-domain variable `{}` must be binary or integer",
+                self.variables[var].name
+            )));
+        }
+        let (lower, upper) = integer_bounds(&self.variables[var]).ok_or_else(|| {
+            MathProgramError::UnboundedBigM(format!(
+                "map-domain variable `{}` requires finite integer bounds",
+                self.variables[var].name
+            ))
+        })?;
+        let domain_size = upper
+            .checked_sub(lower)
+            .and_then(|span| span.checked_add(1))
+            .ok_or_else(|| {
+                MathProgramError::Unsupported("map-domain source domain overflowed".to_string())
+            })?;
+        if domain_size > 512 {
+            return Err(MathProgramError::Unsupported(format!(
+                "map-domain exact MIP lowering is limited to 512 source values, got {domain_size}"
+            )));
+        }
+        if bool_vars.is_empty() {
+            return Err(MathProgramError::Unsupported(
+                "map-domain requires at least one selector variable".to_string(),
+            ));
+        }
+        let mut seen = BTreeSet::new();
+        for (pos, &bool_var) in bool_vars.iter().enumerate() {
+            offset.checked_add(pos as i64).ok_or_else(|| {
+                MathProgramError::Unsupported("map-domain target value overflowed".to_string())
+            })?;
+            if bool_var >= self.variables.len() {
+                return Err(MathProgramError::BadIndex(format!(
+                    "map-domain selector index {bool_var} out of bounds"
+                )));
+            }
+            if bool_var == var {
+                return Err(MathProgramError::Unsupported(format!(
+                    "map-domain selector `{}` must be distinct from the mapped variable",
+                    self.variables[bool_var].name
+                )));
+            }
+            if !seen.insert(bool_var) {
+                return Err(MathProgramError::Unsupported(format!(
+                    "map-domain does not support duplicate selector `{}`",
+                    self.variables[bool_var].name
+                )));
+            }
+            if self.variables[bool_var].var_type != VariableType::Binary {
+                return Err(MathProgramError::Unsupported(format!(
+                    "map-domain selector `{}` must be binary",
+                    self.variables[bool_var].name
+                )));
+            }
+        }
+        Ok(())
+    }
+
     fn validate_table_assignments_args(
         &self,
         kind: &str,
@@ -3065,6 +3599,41 @@ impl MathProgram {
             }
         }
 
+        Ok(())
+    }
+
+    fn validate_enforced_table_assignments_args(
+        &self,
+        kind: &str,
+        enforcement: &[BoolLiteral],
+        variables: &[usize],
+        tuples: &[Vec<i64>],
+    ) -> Result<(), MathProgramError> {
+        if enforcement.is_empty() {
+            return Err(MathProgramError::Unsupported(format!(
+                "{kind} requires at least one enforcement literal"
+            )));
+        }
+        self.validate_boolean_clause_args(enforcement)?;
+        self.validate_table_assignments_args(kind, variables, tuples)?;
+
+        let mut seen_vars = BTreeSet::new();
+        for &var in variables {
+            if !seen_vars.insert(var) {
+                return Err(MathProgramError::Unsupported(format!(
+                    "{kind} does not support duplicate variable `{}`",
+                    self.variables[var].name
+                )));
+            }
+        }
+        for literal in enforcement {
+            if seen_vars.contains(&literal.var) {
+                return Err(MathProgramError::Unsupported(format!(
+                    "{kind} enforcement literal `{}` must be distinct from table variables",
+                    self.variables[literal.var].name
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -3823,6 +4392,23 @@ impl MathProgram {
         self.validate_boolean_clause_args(literals)
     }
 
+    fn validate_enforced_boolean_cardinality_args(
+        &self,
+        enforcement: &[BoolLiteral],
+        literals: &[BoolLiteral],
+        min_count: Option<usize>,
+        max_count: Option<usize>,
+    ) -> Result<(), MathProgramError> {
+        if enforcement.is_empty() {
+            return Err(MathProgramError::Unsupported(
+                "enforced Boolean/cardinality constraints require at least one enforcement literal"
+                    .to_string(),
+            ));
+        }
+        self.validate_boolean_clause_args(enforcement)?;
+        self.validate_boolean_cardinality_args(literals, min_count, max_count)
+    }
+
     fn validate_boolean_count_args(
         &self,
         literals: &[BoolLiteral],
@@ -4024,6 +4610,47 @@ impl MathProgram {
             }
         }
         Ok(())
+    }
+
+    fn univariate_function_points<F>(
+        &self,
+        kind: &str,
+        breakpoints: &[f64],
+        function: F,
+    ) -> Result<Vec<(f64, f64)>, MathProgramError>
+    where
+        F: Fn(f64) -> f64,
+    {
+        if breakpoints.len() < 2 {
+            return Err(MathProgramError::Unsupported(format!(
+                "{kind} requires at least two breakpoints"
+            )));
+        }
+        for &x in breakpoints {
+            if !x.is_finite() {
+                return Err(MathProgramError::NonFinite(format!("{kind} breakpoint")));
+            }
+        }
+        for pair in breakpoints.windows(2) {
+            if pair[1] <= pair[0] {
+                return Err(MathProgramError::Unsupported(format!(
+                    "{kind} breakpoints must be strictly increasing"
+                )));
+            }
+        }
+        breakpoints
+            .iter()
+            .map(|&x| {
+                let y = function(x);
+                if y.is_finite() {
+                    Ok((x, y))
+                } else {
+                    Err(MathProgramError::NonFinite(format!(
+                        "{kind} value at breakpoint {x}"
+                    )))
+                }
+            })
+            .collect()
     }
 
     fn validate_interval_args(
@@ -10238,6 +10865,40 @@ fn add_general_constraint_rows(
             coeffs,
             intervals,
         )?,
+        GeneralConstraint::EnforcedLinearDomain {
+            name,
+            enforcement,
+            coeffs,
+            intervals,
+        } => add_enforced_linear_domain_rows(
+            program,
+            names,
+            integer_vars,
+            ub,
+            rows,
+            expansions,
+            name,
+            enforcement,
+            coeffs,
+            intervals,
+        )?,
+        GeneralConstraint::MapDomain {
+            name,
+            var,
+            bool_vars,
+            offset,
+        } => add_map_domain_rows(
+            program,
+            names,
+            integer_vars,
+            ub,
+            rows,
+            expansions,
+            name,
+            *var,
+            bool_vars,
+            *offset,
+        )?,
         GeneralConstraint::AllowedAssignments {
             name,
             variables,
@@ -10266,6 +10927,42 @@ fn add_general_constraint_rows(
             name,
             variables,
             tuples,
+        )?,
+        GeneralConstraint::EnforcedAllowedAssignments {
+            name,
+            enforcement,
+            variables,
+            tuples,
+        } => add_enforced_table_assignment_rows(
+            program,
+            names,
+            integer_vars,
+            ub,
+            rows,
+            expansions,
+            name,
+            enforcement,
+            variables,
+            tuples,
+            false,
+        )?,
+        GeneralConstraint::EnforcedForbiddenAssignments {
+            name,
+            enforcement,
+            variables,
+            tuples,
+        } => add_enforced_table_assignment_rows(
+            program,
+            names,
+            integer_vars,
+            ub,
+            rows,
+            expansions,
+            name,
+            enforcement,
+            variables,
+            tuples,
+            true,
         )?,
         GeneralConstraint::BinPacking {
             name,
@@ -10773,6 +11470,162 @@ fn add_linear_domain_rows(
     Ok(())
 }
 
+fn add_enforced_linear_domain_rows(
+    program: &MathProgram,
+    names: &mut Vec<String>,
+    integer_vars: &mut Vec<bool>,
+    ub: &mut Vec<f64>,
+    rows: &mut Vec<SparseRow>,
+    expansions: &[LinearExpansion],
+    name: &str,
+    enforcement: &[BoolLiteral],
+    coeffs: &[(usize, f64)],
+    intervals: &[LinearDomainInterval],
+) -> Result<(), MathProgramError> {
+    let (min_lhs, max_lhs) = linear_bounds(program, coeffs).ok_or_else(|| {
+        MathProgramError::UnboundedBigM(format!(
+            "enforced linear-domain constraint `{name}` needs finite variable bounds for exact MIP lowering"
+        ))
+    })?;
+    let selectors = intervals
+        .iter()
+        .enumerate()
+        .map(|(idx, interval)| {
+            push_canonical_var(
+                &format!(
+                    "{name}__enforced_domain_{}_{}_{idx}",
+                    interval.lower, interval.upper
+                ),
+                true,
+                1.0,
+                names,
+                integer_vars,
+                ub,
+            )
+        })
+        .collect::<Vec<_>>();
+    let selector_sum = selectors
+        .iter()
+        .map(|&selector| (selector, 1.0))
+        .collect::<Vec<_>>();
+    add_program_row_with_canonical_terms(
+        rows,
+        format!("{name}__domain_select_at_most_one"),
+        expansions,
+        &[],
+        &selector_sum,
+        RowSense::Le,
+        1.0,
+    );
+
+    let positive_literal_count = enforcement.iter().filter(|literal| literal.value).count() as f64;
+    let activation_coeffs = enforcement
+        .iter()
+        .map(|literal| {
+            let coeff = if literal.value { -1.0 } else { 1.0 };
+            (literal.var, coeff)
+        })
+        .collect::<Vec<_>>();
+    add_program_row_with_canonical_terms(
+        rows,
+        format!("{name}__domain_select_if_enforced"),
+        expansions,
+        &activation_coeffs,
+        &selector_sum,
+        RowSense::Ge,
+        1.0 - positive_literal_count,
+    );
+
+    for (idx, (interval, &selector)) in intervals.iter().zip(&selectors).enumerate() {
+        let lower = interval.lower as f64;
+        let upper = interval.upper as f64;
+        let upper_m = 0.0_f64.max(max_lhs - upper);
+        add_program_row_with_canonical_terms(
+            rows,
+            format!("{name}__enforced_domain_{idx}_upper"),
+            expansions,
+            coeffs,
+            &[(selector, upper_m)],
+            RowSense::Le,
+            upper + upper_m,
+        );
+        let lower_m = 0.0_f64.max(lower - min_lhs);
+        add_program_row_with_canonical_terms(
+            rows,
+            format!("{name}__enforced_domain_{idx}_lower"),
+            expansions,
+            coeffs,
+            &[(selector, -lower_m)],
+            RowSense::Ge,
+            lower - lower_m,
+        );
+    }
+    Ok(())
+}
+
+fn add_map_domain_rows(
+    program: &MathProgram,
+    names: &mut Vec<String>,
+    integer_vars: &mut Vec<bool>,
+    ub: &mut Vec<f64>,
+    rows: &mut Vec<SparseRow>,
+    expansions: &[LinearExpansion],
+    name: &str,
+    var: usize,
+    bool_vars: &[usize],
+    offset: i64,
+) -> Result<(), MathProgramError> {
+    let (variables, tuples) = map_domain_variables_and_tuples(program, var, bool_vars, offset)?;
+    add_allowed_assignment_rows(
+        names,
+        integer_vars,
+        ub,
+        rows,
+        expansions,
+        name,
+        &variables,
+        &tuples,
+    )
+}
+
+fn map_domain_variables_and_tuples(
+    program: &MathProgram,
+    var: usize,
+    bool_vars: &[usize],
+    offset: i64,
+) -> Result<(Vec<usize>, Vec<Vec<i64>>), MathProgramError> {
+    let (lower, upper) = integer_bounds(&program.variables[var]).ok_or_else(|| {
+        MathProgramError::UnboundedBigM(format!(
+            "map-domain variable `{}` requires finite integer bounds",
+            program.variables[var].name
+        ))
+    })?;
+    let targets = (0..bool_vars.len())
+        .map(|pos| {
+            offset.checked_add(pos as i64).ok_or_else(|| {
+                MathProgramError::Unsupported("map-domain target value overflowed".to_string())
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut tuples = Vec::new();
+    for value in lower..=upper {
+        let mut tuple = Vec::with_capacity(1 + bool_vars.len());
+        tuple.push(value);
+        tuple.extend(
+            targets
+                .iter()
+                .map(|&target| if value == target { 1 } else { 0 }),
+        );
+        tuples.push(tuple);
+    }
+
+    let mut variables = Vec::with_capacity(1 + bool_vars.len());
+    variables.push(var);
+    variables.extend_from_slice(bool_vars);
+    Ok((variables, tuples))
+}
+
 fn add_integer_product_rows(
     program: &MathProgram,
     names: &mut Vec<String>,
@@ -11207,6 +12060,184 @@ fn add_allowed_assignment_rows(
         });
     }
 
+    Ok(())
+}
+
+fn add_enforced_table_assignment_rows(
+    program: &MathProgram,
+    names: &mut Vec<String>,
+    integer_vars: &mut Vec<bool>,
+    ub: &mut Vec<f64>,
+    rows: &mut Vec<SparseRow>,
+    expansions: &[LinearExpansion],
+    name: &str,
+    enforcement: &[BoolLiteral],
+    variables: &[usize],
+    tuples: &[Vec<i64>],
+    forbidden: bool,
+) -> Result<(), MathProgramError> {
+    let (variables, expanded_tuples) =
+        enforced_table_variables_and_tuples(program, enforcement, variables, tuples, forbidden)?;
+    if expanded_tuples.is_empty() {
+        rows.push(SparseRow {
+            coeffs: Vec::new(),
+            rhs: -1.0,
+            name: format!("{name}__infeasible_enforced_table"),
+        });
+        return Ok(());
+    }
+    add_allowed_assignment_rows(
+        names,
+        integer_vars,
+        ub,
+        rows,
+        expansions,
+        name,
+        &variables,
+        &expanded_tuples,
+    )
+}
+
+fn enforced_table_variables_and_tuples(
+    program: &MathProgram,
+    enforcement: &[BoolLiteral],
+    variables: &[usize],
+    tuples: &[Vec<i64>],
+    forbidden: bool,
+) -> Result<(Vec<usize>, Vec<Vec<i64>>), MathProgramError> {
+    let mut enforcement_vars = Vec::new();
+    let mut seen_enforcement = BTreeSet::new();
+    for literal in enforcement {
+        if seen_enforcement.insert(literal.var) {
+            enforcement_vars.push(literal.var);
+        }
+    }
+
+    let mut domains = Vec::with_capacity(variables.len());
+    for &var in variables {
+        let (lower, upper) = integer_bounds(&program.variables[var]).ok_or_else(|| {
+            MathProgramError::UnboundedBigM(format!(
+                "enforced table variable `{}` requires finite integer bounds",
+                program.variables[var].name
+            ))
+        })?;
+        domains.push((lower, upper));
+    }
+
+    let table = tuples.iter().cloned().collect::<BTreeSet<_>>();
+    let mut expanded = Vec::new();
+    let mut variable_values = Vec::with_capacity(variables.len());
+    enumerate_enforced_table_variable_values(
+        0,
+        &domains,
+        &mut variable_values,
+        &table,
+        enforcement,
+        &enforcement_vars,
+        forbidden,
+        &mut expanded,
+    )?;
+
+    let mut expanded_vars = variables.to_vec();
+    expanded_vars.extend(enforcement_vars);
+    Ok((expanded_vars, expanded))
+}
+
+fn enumerate_enforced_table_variable_values(
+    pos: usize,
+    domains: &[(i64, i64)],
+    variable_values: &mut Vec<i64>,
+    table: &BTreeSet<Vec<i64>>,
+    enforcement: &[BoolLiteral],
+    enforcement_vars: &[usize],
+    forbidden: bool,
+    expanded: &mut Vec<Vec<i64>>,
+) -> Result<(), MathProgramError> {
+    if pos == domains.len() {
+        let mut enforcement_values = Vec::with_capacity(enforcement_vars.len());
+        enumerate_enforced_table_enforcement_values(
+            0,
+            variable_values,
+            table,
+            enforcement,
+            enforcement_vars,
+            &mut enforcement_values,
+            forbidden,
+            expanded,
+        )?;
+        return Ok(());
+    }
+
+    let (lower, upper) = domains[pos];
+    for value in lower..=upper {
+        variable_values.push(value);
+        enumerate_enforced_table_variable_values(
+            pos + 1,
+            domains,
+            variable_values,
+            table,
+            enforcement,
+            enforcement_vars,
+            forbidden,
+            expanded,
+        )?;
+        variable_values.pop();
+    }
+    Ok(())
+}
+
+fn enumerate_enforced_table_enforcement_values(
+    pos: usize,
+    variable_values: &[i64],
+    table: &BTreeSet<Vec<i64>>,
+    enforcement: &[BoolLiteral],
+    enforcement_vars: &[usize],
+    enforcement_values: &mut Vec<i64>,
+    forbidden: bool,
+    expanded: &mut Vec<Vec<i64>>,
+) -> Result<(), MathProgramError> {
+    if pos == enforcement_vars.len() {
+        let active = enforcement.iter().all(|literal| {
+            let idx = enforcement_vars
+                .iter()
+                .position(|&var| var == literal.var)
+                .expect("literal var listed");
+            (enforcement_values[idx] == 1) == literal.value
+        });
+        let listed = table.contains(variable_values);
+        let allowed = if forbidden {
+            !(active && listed)
+        } else {
+            !active || listed
+        };
+        if allowed {
+            if expanded.len() >= 512 {
+                return Err(MathProgramError::Unsupported(
+                    "enforced table exact MIP lowering is limited to 512 expanded tuples"
+                        .to_string(),
+                ));
+            }
+            let mut tuple = variable_values.to_vec();
+            tuple.extend_from_slice(enforcement_values);
+            expanded.push(tuple);
+        }
+        return Ok(());
+    }
+
+    for value in [0_i64, 1_i64] {
+        enforcement_values.push(value);
+        enumerate_enforced_table_enforcement_values(
+            pos + 1,
+            variable_values,
+            table,
+            enforcement,
+            enforcement_vars,
+            enforcement_values,
+            forbidden,
+            expanded,
+        )?;
+        enforcement_values.pop();
+    }
     Ok(())
 }
 
@@ -12462,10 +13493,19 @@ fn add_piecewise_linear_rows(
             )
         })
         .collect::<Vec<_>>();
+    let lambda_sum = lambdas
+        .iter()
+        .map(|&lambda| (lambda, 1.0))
+        .collect::<Vec<_>>();
     rows.push(SparseRow {
-        coeffs: lambdas.iter().map(|&lambda| (lambda, 1.0)).collect(),
+        coeffs: lambda_sum.clone(),
         rhs: 1.0,
         name: format!("{name}__lambda_sum"),
+    });
+    rows.push(SparseRow {
+        coeffs: negate_sparse(&lambda_sum),
+        rhs: -1.0,
+        name: format!("{name}__lambda_sum_ge"),
     });
 
     let x_terms = points
@@ -12509,10 +13549,16 @@ fn add_piecewise_linear_rows(
             )
         })
         .collect::<Vec<_>>();
+    let segment_sum = intervals.iter().map(|&z| (z, 1.0)).collect::<Vec<_>>();
     rows.push(SparseRow {
-        coeffs: intervals.iter().map(|&z| (z, 1.0)).collect(),
+        coeffs: segment_sum.clone(),
         rhs: 1.0,
         name: format!("{name}__segment_sum"),
+    });
+    rows.push(SparseRow {
+        coeffs: negate_sparse(&segment_sum),
+        rhs: -1.0,
+        name: format!("{name}__segment_sum_ge"),
     });
     for (i, &lambda) in lambdas.iter().enumerate() {
         let mut coeffs = vec![(lambda, 1.0)];
@@ -13911,6 +14957,18 @@ fn general_constraint_violation(constraint: &GeneralConstraint, x: &[f64], tol: 
         GeneralConstraint::LinearDomain {
             coeffs, intervals, ..
         } => linear_domain_violation(coeffs, intervals, x),
+        GeneralConstraint::EnforcedLinearDomain {
+            enforcement,
+            coeffs,
+            intervals,
+            ..
+        } => enforced_linear_domain_violation(enforcement, coeffs, intervals, x),
+        GeneralConstraint::MapDomain {
+            var,
+            bool_vars,
+            offset,
+            ..
+        } => map_domain_violation(*var, bool_vars, *offset, x),
         GeneralConstraint::IntegerProduct {
             target_var,
             operands,
@@ -13995,6 +15053,18 @@ fn general_constraint_violation(constraint: &GeneralConstraint, x: &[f64], tol: 
         GeneralConstraint::ForbiddenAssignments {
             variables, tuples, ..
         } => forbidden_assignments_violation(variables, tuples, x),
+        GeneralConstraint::EnforcedAllowedAssignments {
+            enforcement,
+            variables,
+            tuples,
+            ..
+        } => enforced_table_violation(enforcement, variables, tuples, x, false),
+        GeneralConstraint::EnforcedForbiddenAssignments {
+            enforcement,
+            variables,
+            tuples,
+            ..
+        } => enforced_table_violation(enforcement, variables, tuples, x, true),
         GeneralConstraint::BinPacking {
             item_bin_vars,
             load_vars,
@@ -14148,6 +15218,22 @@ fn linear_domain_violation(
     integrality_violation(value).max(domain_distance)
 }
 
+fn enforced_linear_domain_violation(
+    enforcement: &[BoolLiteral],
+    coeffs: &[(usize, f64)],
+    intervals: &[LinearDomainInterval],
+    x: &[f64],
+) -> f64 {
+    let active = enforcement
+        .iter()
+        .all(|literal| binary_truth(x[literal.var]) == literal.value);
+    if active {
+        linear_domain_violation(coeffs, intervals, x)
+    } else {
+        0.0
+    }
+}
+
 fn integer_product_violation(target_var: usize, operands: &[usize], x: &[f64]) -> f64 {
     let mut product = 1.0;
     let mut violation = integrality_violation(x[target_var]);
@@ -14267,6 +15353,22 @@ fn value_count_violation(variables: &[usize], value: i64, count_var: usize, x: &
     violation.max((x[count_var] - observed as f64).abs())
 }
 
+fn map_domain_violation(var: usize, bool_vars: &[usize], offset: i64, x: &[f64]) -> f64 {
+    let value = x[var];
+    let rounded = value.round() as i64;
+    let mut violation = integrality_violation(value);
+    for (pos, &bool_var) in bool_vars.iter().enumerate() {
+        let Some(target) = offset.checked_add(pos as i64) else {
+            return 1.0;
+        };
+        let expected = if rounded == target { 1.0 } else { 0.0 };
+        violation = violation
+            .max(integrality_violation(x[bool_var]))
+            .max((x[bool_var] - expected).abs());
+    }
+    violation
+}
+
 fn allowed_assignments_violation(variables: &[usize], tuples: &[Vec<i64>], x: &[f64]) -> f64 {
     tuples
         .iter()
@@ -14291,6 +15393,26 @@ fn forbidden_assignments_violation(variables: &[usize], tuples: &[Vec<i64>], x: 
         1.0
     } else {
         0.0
+    }
+}
+
+fn enforced_table_violation(
+    enforcement: &[BoolLiteral],
+    variables: &[usize],
+    tuples: &[Vec<i64>],
+    x: &[f64],
+    forbidden: bool,
+) -> f64 {
+    let active = enforcement
+        .iter()
+        .all(|literal| binary_truth(x[literal.var]) == literal.value);
+    if !active {
+        return 0.0;
+    }
+    if forbidden {
+        forbidden_assignments_violation(variables, tuples, x)
+    } else {
+        allowed_assignments_violation(variables, tuples, x)
     }
 }
 
@@ -16591,6 +17713,82 @@ mod tests {
     }
 
     #[test]
+    fn enforced_boolean_helpers_respect_active_and_inactive_gates() {
+        let mut p = MathProgram::new(ObjectiveSense::Max);
+        let gate = p.add_binary_var("gate", 0.0).unwrap();
+        let inactive_gate = p.add_binary_var("inactive-gate", 0.0).unwrap();
+        let and_a = p.add_binary_var("and-a", 5.0).unwrap();
+        let and_b = p.add_binary_var("and-b", 4.0).unwrap();
+        let or_a = p.add_binary_var("or-a", 3.0).unwrap();
+        let or_b = p.add_binary_var("or-b", 2.0).unwrap();
+        let xor_a = p.add_binary_var("xor-a", 7.0).unwrap();
+        let xor_b = p.add_binary_var("xor-b", 6.0).unwrap();
+        let one_a = p.add_binary_var("one-a", 8.0).unwrap();
+        let one_b = p.add_binary_var("one-b", 1.0).unwrap();
+        let inactive_a = p.add_binary_var("inactive-a", 2.0).unwrap();
+        let inactive_b = p.add_binary_var("inactive-b", 1.0).unwrap();
+
+        p.add_constraint("force-gate", vec![(gate, 1.0)], RowSense::Eq, 1.0)
+            .unwrap();
+        p.add_constraint(
+            "force-inactive-gate",
+            vec![(inactive_gate, 1.0)],
+            RowSense::Eq,
+            0.0,
+        )
+        .unwrap();
+        p.add_enforced_boolean_and(
+            "active-and",
+            vec![MathProgram::bool_lit(gate)],
+            vec![MathProgram::bool_lit(and_a), MathProgram::not_lit(and_b)],
+        )
+        .unwrap();
+        p.add_enforced_boolean_or(
+            "active-or",
+            vec![MathProgram::bool_lit(gate)],
+            vec![MathProgram::bool_lit(or_a), MathProgram::bool_lit(or_b)],
+        )
+        .unwrap();
+        p.add_enforced_boolean_xor(
+            "active-xor",
+            vec![MathProgram::bool_lit(gate)],
+            vec![MathProgram::bool_lit(xor_a), MathProgram::bool_lit(xor_b)],
+        )
+        .unwrap();
+        p.add_enforced_literal_exactly_one(
+            "active-exactly-one",
+            vec![MathProgram::bool_lit(gate)],
+            vec![MathProgram::bool_lit(one_a), MathProgram::bool_lit(one_b)],
+        )
+        .unwrap();
+        p.add_enforced_literal_at_most_one(
+            "inactive-at-most-one",
+            vec![MathProgram::bool_lit(inactive_gate)],
+            vec![
+                MathProgram::bool_lit(inactive_a),
+                MathProgram::bool_lit(inactive_b),
+            ],
+        )
+        .unwrap();
+
+        let sol = solve_math_program(&p, &MathProgramSolveOptions::default()).unwrap();
+        assert_eq!(sol.status, MathProgramStatus::Optimal);
+        assert_close(sol.x[gate], 1.0);
+        assert_close(sol.x[inactive_gate], 0.0);
+        assert_close(sol.x[and_a], 1.0);
+        assert_close(sol.x[and_b], 0.0);
+        assert_close(sol.x[or_a], 1.0);
+        assert_close(sol.x[or_b], 1.0);
+        assert_close(sol.x[xor_a], 1.0);
+        assert_close(sol.x[xor_b], 0.0);
+        assert_close(sol.x[one_a], 1.0);
+        assert_close(sol.x[one_b], 0.0);
+        assert_close(sol.x[inactive_a], 1.0);
+        assert_close(sol.x[inactive_b], 1.0);
+        assert_close(sol.objective, 28.0);
+    }
+
+    #[test]
     fn boolean_count_links_signed_literals_to_count_variable() {
         let mut p = MathProgram::new(ObjectiveSense::Max);
         let a = p.add_binary_var("a", 5.0).unwrap();
@@ -16934,6 +18132,115 @@ mod tests {
     }
 
     #[test]
+    fn univariate_function_helpers_lower_to_piecewise_linear() {
+        let mut p = MathProgram::new(ObjectiveSense::Min);
+
+        let square_x = p
+            .add_continuous_var("square-x", 0.0, Some(0.0), Some(2.0))
+            .unwrap();
+        let square_y = p
+            .add_continuous_var("square-y", 1.0, Some(0.0), Some(4.0))
+            .unwrap();
+        p.add_constraint("fix-square-x", vec![(square_x, 1.0)], RowSense::Eq, 1.5)
+            .unwrap();
+        p.add_power_function(
+            "square-function",
+            square_x,
+            square_y,
+            2.0,
+            vec![0.0, 1.0, 2.0],
+        )
+        .unwrap();
+
+        let exp_x = p
+            .add_continuous_var("exp-x", 0.0, Some(0.0), Some(1.0))
+            .unwrap();
+        let exp_y = p
+            .add_continuous_var("exp-y", 1.0, Some(1.0), Some(3.0))
+            .unwrap();
+        p.add_constraint("fix-exp-x", vec![(exp_x, 1.0)], RowSense::Eq, 0.5)
+            .unwrap();
+        p.add_exp_function("exp-function", exp_x, exp_y, vec![0.0, 0.5, 1.0])
+            .unwrap();
+
+        let log_x = p
+            .add_continuous_var("log-x", 0.0, Some(1.0), Some(4.0))
+            .unwrap();
+        let log_y = p
+            .add_continuous_var("log-y", 1.0, Some(0.0), Some(2.0))
+            .unwrap();
+        p.add_constraint("fix-log-x", vec![(log_x, 1.0)], RowSense::Eq, 2.0)
+            .unwrap();
+        p.add_log_function("log-function", log_x, log_y, vec![1.0, 2.0, 4.0])
+            .unwrap();
+
+        let logistic_x = p
+            .add_continuous_var("logistic-x", 0.0, Some(-2.0), Some(2.0))
+            .unwrap();
+        let logistic_y = p
+            .add_continuous_var("logistic-y", 1.0, Some(0.0), Some(1.0))
+            .unwrap();
+        p.add_constraint("fix-logistic-x", vec![(logistic_x, 1.0)], RowSense::Eq, 0.0)
+            .unwrap();
+        p.add_logistic_function(
+            "logistic-function",
+            logistic_x,
+            logistic_y,
+            vec![-2.0, 0.0, 2.0],
+        )
+        .unwrap();
+
+        let trig_x = p
+            .add_continuous_var("trig-x", 0.0, Some(-1.0), Some(1.0))
+            .unwrap();
+        let sin_y = p
+            .add_continuous_var("sin-y", 1.0, Some(-1.0), Some(1.0))
+            .unwrap();
+        let cos_y = p
+            .add_continuous_var("cos-y", 1.0, Some(-1.0), Some(1.0))
+            .unwrap();
+        let tan_y = p
+            .add_continuous_var("tan-y", 1.0, Some(-2.0), Some(2.0))
+            .unwrap();
+        p.add_constraint("fix-trig-x", vec![(trig_x, 1.0)], RowSense::Eq, 0.0)
+            .unwrap();
+        p.add_sin_function("sin-function", trig_x, sin_y, vec![-1.0, 0.0, 1.0])
+            .unwrap();
+        p.add_cos_function("cos-function", trig_x, cos_y, vec![-1.0, 0.0, 1.0])
+            .unwrap();
+        p.add_tan_function("tan-function", trig_x, tan_y, vec![-1.0, 0.0, 1.0])
+            .unwrap();
+
+        let generic_x = p
+            .add_continuous_var("generic-x", 0.0, Some(0.0), Some(2.0))
+            .unwrap();
+        let generic_y = p
+            .add_continuous_var("generic-y", 1.0, Some(1.0), Some(5.0))
+            .unwrap();
+        p.add_constraint("fix-generic-x", vec![(generic_x, 1.0)], RowSense::Eq, 1.0)
+            .unwrap();
+        p.add_univariate_piecewise_function(
+            "generic-function",
+            generic_x,
+            generic_y,
+            vec![0.0, 1.0, 2.0],
+            |x| x + 1.0,
+        )
+        .unwrap();
+
+        let sol = solve_math_program(&p, &MathProgramSolveOptions::default()).unwrap();
+        assert_eq!(sol.status, MathProgramStatus::Optimal);
+        assert_close(sol.x[square_y], 2.5);
+        assert_close(sol.x[exp_y], 0.5_f64.exp());
+        assert_close(sol.x[log_y], 2.0_f64.ln());
+        assert_close(sol.x[logistic_y], 0.5);
+        assert_close(sol.x[sin_y], 0.0);
+        assert_close(sol.x[cos_y], 1.0);
+        assert_close(sol.x[tan_y], 0.0);
+        assert_close(sol.x[generic_y], 2.0);
+    }
+
+    #[test]
     fn all_different_lowers_to_assignment_literals() {
         let mut p = MathProgram::new(ObjectiveSense::Max);
         let x0 = p
@@ -17004,6 +18311,60 @@ mod tests {
     }
 
     #[test]
+    fn map_domain_links_integer_value_to_selectors() {
+        let mut p = MathProgram::new(ObjectiveSense::Max);
+        let mode = p
+            .add_integer_var("mode", 0.0, Some(5.0), Some(7.0))
+            .unwrap();
+        let is_five = p.add_binary_var("is-five", 1.0).unwrap();
+        let is_six = p.add_binary_var("is-six", 10.0).unwrap();
+        let is_seven = p.add_binary_var("is-seven", 2.0).unwrap();
+        p.add_map_domain("mode-selectors", mode, vec![is_five, is_six, is_seven], 5)
+            .unwrap();
+
+        let sol = solve_math_program(&p, &MathProgramSolveOptions::default()).unwrap();
+        assert_eq!(sol.status, MathProgramStatus::Optimal);
+        assert_close(sol.x[mode], 6.0);
+        assert_close(sol.x[is_five], 0.0);
+        assert_close(sol.x[is_six], 1.0);
+        assert_close(sol.x[is_seven], 0.0);
+        assert_close(sol.objective, 10.0);
+
+        let mut outside = MathProgram::new(ObjectiveSense::Max);
+        let outside_mode = outside
+            .add_integer_var("outside-mode", 0.0, Some(4.0), Some(7.0))
+            .unwrap();
+        let outside_five = outside.add_binary_var("outside-five", 1.0).unwrap();
+        let outside_six = outside.add_binary_var("outside-six", 1.0).unwrap();
+        let outside_seven = outside.add_binary_var("outside-seven", 1.0).unwrap();
+        outside
+            .add_constraint(
+                "force-outside",
+                vec![(outside_mode, 1.0)],
+                RowSense::Eq,
+                4.0,
+            )
+            .unwrap();
+        outside
+            .add_map_domain(
+                "outside-selectors",
+                outside_mode,
+                vec![outside_five, outside_six, outside_seven],
+                5,
+            )
+            .unwrap();
+
+        let outside_sol =
+            solve_math_program(&outside, &MathProgramSolveOptions::default()).unwrap();
+        assert_eq!(outside_sol.status, MathProgramStatus::Optimal);
+        assert_close(outside_sol.x[outside_mode], 4.0);
+        assert_close(outside_sol.x[outside_five], 0.0);
+        assert_close(outside_sol.x[outside_six], 0.0);
+        assert_close(outside_sol.x[outside_seven], 0.0);
+        assert_close(outside_sol.objective, 0.0);
+    }
+
+    #[test]
     fn linear_domain_restricts_integer_expression_to_interval_union() {
         let mut p = MathProgram::new(ObjectiveSense::Max);
         let x = p.add_integer_var("x", 1.0, Some(0.0), Some(5.0)).unwrap();
@@ -17018,6 +18379,69 @@ mod tests {
         assert_close(sol.x[x], 4.0);
         assert_close(sol.x[y], 0.0);
         assert_close(sol.objective, 4.0);
+    }
+
+    #[test]
+    fn enforced_linear_domain_only_applies_when_literals_are_active() {
+        let mut p = MathProgram::new(ObjectiveSense::Max);
+        let active_gate = p.add_binary_var("active-gate", 0.0).unwrap();
+        let active_blocker = p.add_binary_var("active-blocker", 0.0).unwrap();
+        let active_x = p
+            .add_integer_var("active-x", 10.0, Some(0.0), Some(5.0))
+            .unwrap();
+        let inactive_gate = p.add_binary_var("inactive-gate", 0.0).unwrap();
+        let inactive_x = p
+            .add_integer_var("inactive-x", 1.0, Some(0.0), Some(5.0))
+            .unwrap();
+
+        p.add_constraint(
+            "force-active-gate",
+            vec![(active_gate, 1.0)],
+            RowSense::Eq,
+            1.0,
+        )
+        .unwrap();
+        p.add_constraint(
+            "force-active-blocker",
+            vec![(active_blocker, 1.0)],
+            RowSense::Eq,
+            0.0,
+        )
+        .unwrap();
+        p.add_constraint(
+            "force-inactive-gate",
+            vec![(inactive_gate, 1.0)],
+            RowSense::Eq,
+            0.0,
+        )
+        .unwrap();
+
+        p.add_enforced_linear_domain(
+            "active-domain",
+            vec![
+                MathProgram::bool_lit(active_gate),
+                MathProgram::not_lit(active_blocker),
+            ],
+            vec![(active_x, 1.0)],
+            vec![(1, 2), (4, 4)],
+        )
+        .unwrap();
+        p.add_enforced_linear_domain(
+            "inactive-domain",
+            vec![MathProgram::bool_lit(inactive_gate)],
+            vec![(inactive_x, 1.0)],
+            vec![(1, 2), (4, 4)],
+        )
+        .unwrap();
+
+        let sol = solve_math_program(&p, &MathProgramSolveOptions::default()).unwrap();
+        assert_eq!(sol.status, MathProgramStatus::Optimal);
+        assert_close(sol.x[active_gate], 1.0);
+        assert_close(sol.x[active_blocker], 0.0);
+        assert_close(sol.x[active_x], 4.0);
+        assert_close(sol.x[inactive_gate], 0.0);
+        assert_close(sol.x[inactive_x], 5.0);
+        assert_close(sol.objective, 45.0);
     }
 
     #[test]
@@ -17048,6 +18472,119 @@ mod tests {
         assert_close(sol.x[x], 1.0);
         assert_close(sol.x[y], 0.0);
         assert_close(sol.objective, 2.0);
+    }
+
+    #[test]
+    fn enforced_table_assignments_respect_enforcement_literals() {
+        let mut active_allowed = MathProgram::new(ObjectiveSense::Max);
+        let allow_gate = active_allowed.add_binary_var("allow-gate", 0.0).unwrap();
+        let allow_block = active_allowed.add_binary_var("allow-block", 0.0).unwrap();
+        let allow_x = active_allowed
+            .add_integer_var("allow-x", 8.0, Some(0.0), Some(2.0))
+            .unwrap();
+        let allow_y = active_allowed
+            .add_integer_var("allow-y", 1.0, Some(0.0), Some(2.0))
+            .unwrap();
+        active_allowed
+            .add_constraint(
+                "force-allow-gate",
+                vec![(allow_gate, 1.0)],
+                RowSense::Eq,
+                1.0,
+            )
+            .unwrap();
+        active_allowed
+            .add_constraint(
+                "force-allow-block",
+                vec![(allow_block, 1.0)],
+                RowSense::Eq,
+                0.0,
+            )
+            .unwrap();
+        active_allowed
+            .add_enforced_allowed_assignments(
+                "active-allowed",
+                vec![
+                    MathProgram::bool_lit(allow_gate),
+                    MathProgram::not_lit(allow_block),
+                ],
+                vec![allow_x, allow_y],
+                vec![vec![0, 2], vec![2, 0]],
+            )
+            .unwrap();
+
+        let active_allowed_sol =
+            solve_math_program(&active_allowed, &MathProgramSolveOptions::default()).unwrap();
+        assert_eq!(active_allowed_sol.status, MathProgramStatus::Optimal);
+        assert_close(active_allowed_sol.x[allow_gate], 1.0);
+        assert_close(active_allowed_sol.x[allow_block], 0.0);
+        assert_close(active_allowed_sol.x[allow_x], 2.0);
+        assert_close(active_allowed_sol.x[allow_y], 0.0);
+        assert_close(active_allowed_sol.objective, 16.0);
+
+        let mut active_forbidden = MathProgram::new(ObjectiveSense::Max);
+        let forbid_gate = active_forbidden.add_binary_var("forbid-gate", 0.0).unwrap();
+        let forbid_x = active_forbidden.add_binary_var("forbid-x", 5.0).unwrap();
+        let forbid_y = active_forbidden.add_binary_var("forbid-y", 3.0).unwrap();
+        active_forbidden
+            .add_constraint(
+                "force-forbid-gate",
+                vec![(forbid_gate, 1.0)],
+                RowSense::Eq,
+                1.0,
+            )
+            .unwrap();
+        active_forbidden
+            .add_enforced_forbidden_assignments(
+                "active-forbidden",
+                vec![MathProgram::bool_lit(forbid_gate)],
+                vec![forbid_x, forbid_y],
+                vec![vec![1, 1]],
+            )
+            .unwrap();
+
+        let active_forbidden_sol =
+            solve_math_program(&active_forbidden, &MathProgramSolveOptions::default()).unwrap();
+        assert_eq!(active_forbidden_sol.status, MathProgramStatus::Optimal);
+        assert_close(active_forbidden_sol.x[forbid_gate], 1.0);
+        assert_close(active_forbidden_sol.x[forbid_x], 1.0);
+        assert_close(active_forbidden_sol.x[forbid_y], 0.0);
+        assert_close(active_forbidden_sol.objective, 5.0);
+
+        let mut inactive_forbidden = MathProgram::new(ObjectiveSense::Max);
+        let inactive_gate = inactive_forbidden
+            .add_binary_var("inactive-gate", 0.0)
+            .unwrap();
+        let inactive_x = inactive_forbidden
+            .add_binary_var("inactive-x", 2.0)
+            .unwrap();
+        let inactive_y = inactive_forbidden
+            .add_binary_var("inactive-y", 1.0)
+            .unwrap();
+        inactive_forbidden
+            .add_constraint(
+                "force-inactive-gate",
+                vec![(inactive_gate, 1.0)],
+                RowSense::Eq,
+                0.0,
+            )
+            .unwrap();
+        inactive_forbidden
+            .add_enforced_forbidden_assignments(
+                "inactive-forbidden",
+                vec![MathProgram::bool_lit(inactive_gate)],
+                vec![inactive_x, inactive_y],
+                vec![vec![1, 1]],
+            )
+            .unwrap();
+
+        let inactive_forbidden_sol =
+            solve_math_program(&inactive_forbidden, &MathProgramSolveOptions::default()).unwrap();
+        assert_eq!(inactive_forbidden_sol.status, MathProgramStatus::Optimal);
+        assert_close(inactive_forbidden_sol.x[inactive_gate], 0.0);
+        assert_close(inactive_forbidden_sol.x[inactive_x], 1.0);
+        assert_close(inactive_forbidden_sol.x[inactive_y], 1.0);
+        assert_close(inactive_forbidden_sol.objective, 3.0);
     }
 
     #[test]
@@ -17711,6 +19248,46 @@ mod tests {
         assert_close(pool.solutions[1].objective, 20.0);
         assert_eq!(pool.solutions[0].x, vec![2.0, 2.0]);
         assert_eq!(pool.solutions[1].x, vec![2.0, 0.0]);
+    }
+
+    #[test]
+    fn solution_pool_respects_relative_objective_gap_for_integer_domains() {
+        let mut p = MathProgram::new(ObjectiveSense::Max);
+        let batches = p
+            .add_integer_var("batches", 10.0, Some(0.0), Some(2.0))
+            .unwrap();
+        let lot = p.add_semi_integer_var("lot", 1.0, 2.0, 3.0).unwrap();
+        p.add_constraint(
+            "capacity",
+            vec![(batches, 1.0), (lot, 1.0)],
+            RowSense::Le,
+            4.0,
+        )
+        .unwrap();
+
+        let pool = solve_math_program_solution_pool(
+            &p,
+            &MathProgramSolveOptions::default(),
+            &MathProgramSolutionPoolOptions {
+                max_solutions: 10,
+                relative_gap: Some(0.41),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(pool.solutions.len(), 3);
+        assert!(!pool.exhausted);
+        assert!(pool
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("objective gap")));
+        assert_close(pool.solutions[0].objective, 22.0);
+        assert_close(pool.solutions[1].objective, 20.0);
+        assert_close(pool.solutions[2].objective, 13.0);
+        assert_eq!(pool.solutions[0].x, vec![2.0, 2.0]);
+        assert_eq!(pool.solutions[1].x, vec![2.0, 0.0]);
+        assert_eq!(pool.solutions[2].x, vec![1.0, 3.0]);
     }
 
     #[test]

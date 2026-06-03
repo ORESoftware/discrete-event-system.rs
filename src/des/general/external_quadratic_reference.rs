@@ -1,12 +1,12 @@
 //! Rust-facing bridge for external/reference quadratic solvers.
 //!
-//! The checked-in Python bridge (`scripts/qp_reference.py`) prefers installed
-//! open-source solvers such as HiGHS/highspy or SciPy when available and falls
-//! back to dependency-free exact/pattern-search routines for small models. This
-//! module owns the library boundary: typed model serialization, subprocess
-//! execution, status mapping, and elapsed-time accounting.
+//! The native Rust reference uses the crate's active-set, enumeration, and
+//! pattern-search solvers without Python startup. The checked-in Python bridge
+//! (`scripts/qp_reference.py`) remains available for installed open-source
+//! solvers such as HiGHS/highspy, SciPy, OSQP, and CVXPY backends.
 
 use std::io::Write;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Instant;
@@ -15,14 +15,17 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::des::general::qp::{
-    MixedIntegerQuadraticProgram, MixedIntegerQuadraticallyConstrainedProgram,
-    MixedIntegerSecondOrderConeProgram, QuadraticProgram, QuadraticallyConstrainedProgram,
-    SecondOrderConeProgram,
+    solve_miqp_enumeration, solve_qcp_pattern_search, solve_qp_active_set,
+    solve_socp_pattern_search, MIQPOptions, MixedIntegerQuadraticProgram,
+    MixedIntegerQuadraticallyConstrainedProgram, MixedIntegerSecondOrderConeProgram, QPOptions,
+    QPStatus, QcpOptions, QcpStatus, QuadraticProgram, QuadraticallyConstrainedProgram,
+    SecondOrderConeProgram, SocpOptions, SocpStatus,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExternalQuadraticReferenceSolver {
     Auto,
+    RustInternal,
     Highs,
     Scipy,
     Osqp,
@@ -44,6 +47,7 @@ impl ExternalQuadraticReferenceSolver {
     pub fn all() -> &'static [ExternalQuadraticReferenceSolver] {
         &[
             ExternalQuadraticReferenceSolver::Auto,
+            ExternalQuadraticReferenceSolver::RustInternal,
             ExternalQuadraticReferenceSolver::Highs,
             ExternalQuadraticReferenceSolver::Scipy,
             ExternalQuadraticReferenceSolver::Osqp,
@@ -65,6 +69,7 @@ impl ExternalQuadraticReferenceSolver {
     pub fn as_arg(self) -> &'static str {
         match self {
             ExternalQuadraticReferenceSolver::Auto => "auto",
+            ExternalQuadraticReferenceSolver::RustInternal => "rust",
             ExternalQuadraticReferenceSolver::Highs => "highs",
             ExternalQuadraticReferenceSolver::Scipy => "scipy",
             ExternalQuadraticReferenceSolver::Osqp => "osqp",
@@ -86,6 +91,7 @@ impl ExternalQuadraticReferenceSolver {
     pub fn display_name(self) -> &'static str {
         match self {
             ExternalQuadraticReferenceSolver::Auto => "Auto",
+            ExternalQuadraticReferenceSolver::RustInternal => "Rust internal",
             ExternalQuadraticReferenceSolver::Highs => "HiGHS/highspy",
             ExternalQuadraticReferenceSolver::Scipy => "SciPy SLSQP",
             ExternalQuadraticReferenceSolver::Osqp => "OSQP",
@@ -107,6 +113,9 @@ impl ExternalQuadraticReferenceSolver {
     pub fn family(self) -> ExternalQuadraticReferenceFamily {
         match self {
             ExternalQuadraticReferenceSolver::Auto => ExternalQuadraticReferenceFamily::Auto,
+            ExternalQuadraticReferenceSolver::RustInternal => {
+                ExternalQuadraticReferenceFamily::Fallback
+            }
             ExternalQuadraticReferenceSolver::Highs
             | ExternalQuadraticReferenceSolver::Scipy
             | ExternalQuadraticReferenceSolver::Osqp => {
@@ -139,6 +148,7 @@ impl ExternalQuadraticReferenceSolver {
         matches!(
             self,
             ExternalQuadraticReferenceSolver::Auto
+                | ExternalQuadraticReferenceSolver::RustInternal
                 | ExternalQuadraticReferenceSolver::Highs
                 | ExternalQuadraticReferenceSolver::Scipy
                 | ExternalQuadraticReferenceSolver::Fallback
@@ -149,6 +159,7 @@ impl ExternalQuadraticReferenceSolver {
         matches!(
             self,
             ExternalQuadraticReferenceSolver::Auto
+                | ExternalQuadraticReferenceSolver::RustInternal
                 | ExternalQuadraticReferenceSolver::Scipy
                 | ExternalQuadraticReferenceSolver::Cvxpy
                 | ExternalQuadraticReferenceSolver::Scs
@@ -184,7 +195,7 @@ impl ExternalQuadraticReferenceSolver {
                 "Registered conic backend name with a checked-in fallback for deterministic validation coverage."
             }
             ExternalQuadraticReferenceFamily::Fallback => {
-                "Dependency-free active-set or pattern-search fallback for small validation models."
+                "Dependency-free Rust active-set, enumeration, or pattern-search fallback for small validation models."
             }
         }
     }
@@ -350,6 +361,693 @@ fn status_from_str(status: &str) -> ExternalQuadraticReferenceStatus {
     }
 }
 
+fn status_from_qp_status(status: QPStatus) -> ExternalQuadraticReferenceStatus {
+    match status {
+        QPStatus::Optimal => ExternalQuadraticReferenceStatus::Optimal,
+        QPStatus::Infeasible => ExternalQuadraticReferenceStatus::Infeasible,
+        QPStatus::NumericalError => ExternalQuadraticReferenceStatus::NumericalError,
+    }
+}
+
+fn status_from_socp_status(status: SocpStatus) -> ExternalQuadraticReferenceStatus {
+    match status {
+        SocpStatus::Optimal => ExternalQuadraticReferenceStatus::Optimal,
+        SocpStatus::Infeasible => ExternalQuadraticReferenceStatus::Infeasible,
+        SocpStatus::NumericalError => ExternalQuadraticReferenceStatus::NumericalError,
+    }
+}
+
+fn status_from_qcp_status(status: QcpStatus) -> ExternalQuadraticReferenceStatus {
+    match status {
+        QcpStatus::Optimal => ExternalQuadraticReferenceStatus::Optimal,
+        QcpStatus::Infeasible => ExternalQuadraticReferenceStatus::Infeasible,
+        QcpStatus::NumericalError => ExternalQuadraticReferenceStatus::NumericalError,
+    }
+}
+
+fn rust_quadratic_empty_solution(
+    status: ExternalQuadraticReferenceStatus,
+    solver: impl Into<String>,
+    message: impl Into<String>,
+    elapsed_ms: f64,
+) -> ExternalQuadraticReferenceSolution {
+    ExternalQuadraticReferenceSolution {
+        status,
+        solver: solver.into(),
+        x: Vec::new(),
+        objective: None,
+        dual_ub: None,
+        dual_eq: None,
+        dual_lower_bounds: None,
+        dual_upper_bounds: None,
+        reduced_gradient: None,
+        iterations: None,
+        enumerated: None,
+        message: message.into(),
+        elapsed_ms,
+    }
+}
+
+fn panic_message(error: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = error.downcast_ref::<String>() {
+        message.clone()
+    } else if let Some(message) = error.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else {
+        "Rust quadratic reference panicked".to_string()
+    }
+}
+
+fn is_rust_quadratic_solver(opts: &ExternalQuadraticReferenceOptions) -> bool {
+    matches!(
+        opts.solver,
+        ExternalQuadraticReferenceSolver::RustInternal | ExternalQuadraticReferenceSolver::Fallback
+    )
+}
+
+fn solve_qp_with_rust_reference(
+    problem: &QuadraticProgram,
+    opts: &ExternalQuadraticReferenceOptions,
+) -> ExternalQuadraticReferenceSolution {
+    let started = Instant::now();
+    let max_active_sets = opts.max_enumerations.unwrap_or(1_000_000);
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        solve_qp_active_set(
+            problem,
+            QPOptions {
+                max_active_sets,
+                ..QPOptions::default()
+            },
+        )
+    }));
+    let solution = match result {
+        Ok(solution) => solution,
+        Err(error) => {
+            return rust_quadratic_empty_solution(
+                ExternalQuadraticReferenceStatus::NumericalError,
+                "rust:qp-active-set",
+                panic_message(error),
+                started.elapsed().as_secs_f64() * 1000.0,
+            )
+        }
+    };
+    let status = status_from_qp_status(solution.status);
+    ExternalQuadraticReferenceSolution {
+        status,
+        solver: "rust:qp-active-set".to_string(),
+        x: solution.x,
+        objective: (status == ExternalQuadraticReferenceStatus::Optimal)
+            .then_some(solution.objective),
+        dual_ub: Some(solution.dual_ub),
+        dual_eq: Some(solution.dual_eq),
+        dual_lower_bounds: Some(solution.dual_lower_bounds),
+        dual_upper_bounds: Some(solution.dual_upper_bounds),
+        reduced_gradient: Some(solution.reduced_gradient),
+        iterations: Some(solution.iterations as u64),
+        enumerated: None,
+        message: solution
+            .message
+            .unwrap_or_else(|| "Rust QP active-set enumeration".to_string()),
+        elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+    }
+}
+
+fn solve_miqp_with_rust_reference(
+    problem: &MixedIntegerQuadraticProgram,
+    opts: &ExternalQuadraticReferenceOptions,
+) -> ExternalQuadraticReferenceSolution {
+    let started = Instant::now();
+    let max_enumerations = opts.max_enumerations.unwrap_or(1_000_000);
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        solve_miqp_enumeration(
+            problem,
+            MIQPOptions {
+                max_enumerations,
+                qp_options: QPOptions::default(),
+            },
+        )
+    }));
+    let solution = match result {
+        Ok(solution) => solution,
+        Err(error) => {
+            return rust_quadratic_empty_solution(
+                ExternalQuadraticReferenceStatus::NumericalError,
+                "rust:miqp-enumeration",
+                panic_message(error),
+                started.elapsed().as_secs_f64() * 1000.0,
+            )
+        }
+    };
+    let status = status_from_qp_status(solution.status);
+    ExternalQuadraticReferenceSolution {
+        status,
+        solver: "rust:miqp-enumeration".to_string(),
+        x: solution.x,
+        objective: (status == ExternalQuadraticReferenceStatus::Optimal)
+            .then_some(solution.objective),
+        dual_ub: None,
+        dual_eq: None,
+        dual_lower_bounds: None,
+        dual_upper_bounds: None,
+        reduced_gradient: None,
+        iterations: Some(solution.qp_subproblems as u64),
+        enumerated: Some(solution.enumerated as u64),
+        message: solution
+            .message
+            .unwrap_or_else(|| "Rust MIQP enumeration".to_string()),
+        elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+    }
+}
+
+fn solve_socp_with_rust_reference(
+    problem: &SecondOrderConeProgram,
+) -> ExternalQuadraticReferenceSolution {
+    let started = Instant::now();
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        solve_socp_pattern_search(problem, SocpOptions::default())
+    }));
+    let solution = match result {
+        Ok(solution) => solution,
+        Err(error) => {
+            return rust_quadratic_empty_solution(
+                ExternalQuadraticReferenceStatus::NumericalError,
+                "rust:socp-pattern-search",
+                panic_message(error),
+                started.elapsed().as_secs_f64() * 1000.0,
+            )
+        }
+    };
+    let status = status_from_socp_status(solution.status);
+    ExternalQuadraticReferenceSolution {
+        status,
+        solver: "rust:socp-pattern-search".to_string(),
+        x: solution.x,
+        objective: (status == ExternalQuadraticReferenceStatus::Optimal)
+            .then_some(solution.objective),
+        dual_ub: None,
+        dual_eq: None,
+        dual_lower_bounds: None,
+        dual_upper_bounds: None,
+        reduced_gradient: None,
+        iterations: Some(solution.iterations as u64),
+        enumerated: None,
+        message: solution
+            .message
+            .unwrap_or_else(|| "Rust SOCP pattern search".to_string()),
+        elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+    }
+}
+
+fn solve_qcp_with_rust_reference(
+    problem: &QuadraticallyConstrainedProgram,
+) -> ExternalQuadraticReferenceSolution {
+    let started = Instant::now();
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        solve_qcp_pattern_search(problem, QcpOptions::default())
+    }));
+    let solution = match result {
+        Ok(solution) => solution,
+        Err(error) => {
+            return rust_quadratic_empty_solution(
+                ExternalQuadraticReferenceStatus::NumericalError,
+                "rust:qcp-pattern-search",
+                panic_message(error),
+                started.elapsed().as_secs_f64() * 1000.0,
+            )
+        }
+    };
+    let status = status_from_qcp_status(solution.status);
+    ExternalQuadraticReferenceSolution {
+        status,
+        solver: "rust:qcp-pattern-search".to_string(),
+        x: solution.x,
+        objective: (status == ExternalQuadraticReferenceStatus::Optimal)
+            .then_some(solution.objective),
+        dual_ub: None,
+        dual_eq: None,
+        dual_lower_bounds: None,
+        dual_upper_bounds: None,
+        reduced_gradient: None,
+        iterations: Some(solution.iterations as u64),
+        enumerated: None,
+        message: solution
+            .message
+            .unwrap_or_else(|| "Rust QCP pattern search".to_string()),
+        elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct IntegerDomain {
+    var: usize,
+    lower: i64,
+    upper: i64,
+}
+
+fn integer_domains_for_rust_reference(
+    kind: &str,
+    n: usize,
+    integer_vars: &[bool],
+    lb: &Option<Vec<Option<f64>>>,
+    ub: &Option<Vec<Option<f64>>>,
+) -> Result<Vec<IntegerDomain>, String> {
+    if integer_vars.len() != n {
+        return Err(format!(
+            "{kind}: integer_vars length {} != variable count {n}",
+            integer_vars.len()
+        ));
+    }
+    if let Some(bounds) = lb {
+        if bounds.len() != n {
+            return Err(format!(
+                "{kind}: lb length {} != variable count {n}",
+                bounds.len()
+            ));
+        }
+    }
+    if let Some(bounds) = ub {
+        if bounds.len() != n {
+            return Err(format!(
+                "{kind}: ub length {} != variable count {n}",
+                bounds.len()
+            ));
+        }
+    }
+
+    let mut domains = Vec::new();
+    for (idx, &is_integer) in integer_vars.iter().enumerate() {
+        if !is_integer {
+            continue;
+        }
+        let lower = lb
+            .as_ref()
+            .and_then(|bounds| bounds[idx])
+            .ok_or_else(|| format!("{kind}: integer variable {idx} needs a finite lower bound"))?;
+        let upper = ub
+            .as_ref()
+            .and_then(|bounds| bounds[idx])
+            .ok_or_else(|| format!("{kind}: integer variable {idx} needs a finite upper bound"))?;
+        if !lower.is_finite() || !upper.is_finite() {
+            return Err(format!(
+                "{kind}: integer variable {idx} needs finite bounds"
+            ));
+        }
+        let lower = lower.ceil();
+        let upper = upper.floor();
+        if lower > upper {
+            return Err(format!(
+                "{kind}: integer variable {idx} has no integer value in its bounds"
+            ));
+        }
+        if lower < i64::MIN as f64 || upper > i64::MAX as f64 {
+            return Err(format!(
+                "{kind}: integer variable {idx} bounds exceed i64 enumeration range"
+            ));
+        }
+        domains.push(IntegerDomain {
+            var: idx,
+            lower: lower as i64,
+            upper: upper as i64,
+        });
+    }
+    Ok(domains)
+}
+
+fn enumerate_integer_assignments<F>(
+    depth: usize,
+    domains: &[IntegerDomain],
+    max_enumerations: usize,
+    current: &mut Vec<(usize, f64)>,
+    enumerated: &mut usize,
+    hit_limit: &mut bool,
+    visit: &mut F,
+) where
+    F: FnMut(&[(usize, f64)]),
+{
+    if *hit_limit {
+        return;
+    }
+    if depth == domains.len() {
+        *enumerated += 1;
+        if *enumerated > max_enumerations {
+            *hit_limit = true;
+            return;
+        }
+        visit(current);
+        return;
+    }
+
+    let domain = domains[depth];
+    for value in domain.lower..=domain.upper {
+        current.push((domain.var, value as f64));
+        enumerate_integer_assignments(
+            depth + 1,
+            domains,
+            max_enumerations,
+            current,
+            enumerated,
+            hit_limit,
+            visit,
+        );
+        current.pop();
+        if *hit_limit {
+            return;
+        }
+    }
+}
+
+fn fixed_socp_integer_subproblem(
+    problem: &MixedIntegerSecondOrderConeProgram,
+    assignment: &[(usize, f64)],
+) -> SecondOrderConeProgram {
+    let n = problem.socp.c.len();
+    let mut sub = problem.socp.clone();
+    let mut a_eq = sub.a_eq.clone().unwrap_or_default();
+    let mut b_eq = sub.b_eq.clone().unwrap_or_default();
+    let mut lb = sub.lb.clone().unwrap_or_else(|| vec![None; n]);
+    let mut ub = sub.ub.clone().unwrap_or_else(|| vec![None; n]);
+    for &(var, value) in assignment {
+        let mut row = vec![0.0; n];
+        row[var] = 1.0;
+        a_eq.push(row);
+        b_eq.push(value);
+        lb[var] = Some(value);
+        ub[var] = Some(value);
+    }
+    sub.a_eq = Some(a_eq);
+    sub.b_eq = Some(b_eq);
+    sub.lb = Some(lb);
+    sub.ub = Some(ub);
+    sub
+}
+
+fn fixed_qcp_integer_subproblem(
+    problem: &MixedIntegerQuadraticallyConstrainedProgram,
+    assignment: &[(usize, f64)],
+) -> QuadraticallyConstrainedProgram {
+    let n = problem.qcp.c.len();
+    let mut sub = problem.qcp.clone();
+    let mut a_eq = sub.a_eq.clone().unwrap_or_default();
+    let mut b_eq = sub.b_eq.clone().unwrap_or_default();
+    let mut lb = sub.lb.clone().unwrap_or_else(|| vec![None; n]);
+    let mut ub = sub.ub.clone().unwrap_or_else(|| vec![None; n]);
+    for &(var, value) in assignment {
+        let mut row = vec![0.0; n];
+        row[var] = 1.0;
+        a_eq.push(row);
+        b_eq.push(value);
+        lb[var] = Some(value);
+        ub[var] = Some(value);
+    }
+    sub.a_eq = Some(a_eq);
+    sub.b_eq = Some(b_eq);
+    sub.lb = Some(lb);
+    sub.ub = Some(ub);
+    sub
+}
+
+fn solve_misocp_with_rust_reference(
+    problem: &MixedIntegerSecondOrderConeProgram,
+    opts: &ExternalQuadraticReferenceOptions,
+) -> ExternalQuadraticReferenceSolution {
+    let started = Instant::now();
+    let domains = match integer_domains_for_rust_reference(
+        "misocp",
+        problem.socp.c.len(),
+        &problem.integer_vars,
+        &problem.socp.lb,
+        &problem.socp.ub,
+    ) {
+        Ok(domains) => domains,
+        Err(message) => {
+            return rust_quadratic_empty_solution(
+                ExternalQuadraticReferenceStatus::NumericalError,
+                "rust:misocp-enumeration",
+                message,
+                started.elapsed().as_secs_f64() * 1000.0,
+            )
+        }
+    };
+    if domains.is_empty() {
+        let mut solution = solve_socp_with_rust_reference(&problem.socp);
+        solution.solver = "rust:misocp-enumeration".to_string();
+        solution.enumerated = Some(1);
+        solution.message = format!("no integer variables; {}", solution.message);
+        return solution;
+    }
+
+    let max_enumerations = opts.max_enumerations.unwrap_or(1_000_000);
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let mut current = Vec::with_capacity(domains.len());
+        let mut best_x = Vec::new();
+        let mut best_obj = f64::INFINITY;
+        let mut iterations = 0u64;
+        let mut enumerated = 0usize;
+        let mut hit_limit = false;
+        let mut saw_numerical = false;
+        enumerate_integer_assignments(
+            0,
+            &domains,
+            max_enumerations,
+            &mut current,
+            &mut enumerated,
+            &mut hit_limit,
+            &mut |assignment| {
+                let sub = fixed_socp_integer_subproblem(problem, assignment);
+                let solution = solve_socp_pattern_search(&sub, SocpOptions::default());
+                iterations += solution.iterations as u64;
+                match solution.status {
+                    SocpStatus::Optimal if solution.objective < best_obj - 1e-7 => {
+                        best_obj = solution.objective;
+                        best_x = solution.x;
+                    }
+                    SocpStatus::NumericalError => saw_numerical = true,
+                    SocpStatus::Optimal | SocpStatus::Infeasible => {}
+                }
+            },
+        );
+        (
+            best_x,
+            best_obj,
+            iterations,
+            enumerated,
+            hit_limit,
+            saw_numerical,
+        )
+    }));
+    let (best_x, best_obj, iterations, enumerated, hit_limit, saw_numerical) = match result {
+        Ok(result) => result,
+        Err(error) => {
+            return rust_quadratic_empty_solution(
+                ExternalQuadraticReferenceStatus::NumericalError,
+                "rust:misocp-enumeration",
+                panic_message(error),
+                started.elapsed().as_secs_f64() * 1000.0,
+            )
+        }
+    };
+
+    let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+    if hit_limit {
+        return ExternalQuadraticReferenceSolution {
+            status: ExternalQuadraticReferenceStatus::NumericalError,
+            solver: "rust:misocp-enumeration".to_string(),
+            x: best_x,
+            objective: None,
+            dual_ub: None,
+            dual_eq: None,
+            dual_lower_bounds: None,
+            dual_upper_bounds: None,
+            reduced_gradient: None,
+            iterations: Some(iterations),
+            enumerated: Some(enumerated as u64),
+            message: "Rust MISOCP enumeration limit reached".to_string(),
+            elapsed_ms,
+        };
+    }
+    if best_x.is_empty() {
+        return ExternalQuadraticReferenceSolution {
+            status: if saw_numerical {
+                ExternalQuadraticReferenceStatus::NumericalError
+            } else {
+                ExternalQuadraticReferenceStatus::Infeasible
+            },
+            solver: "rust:misocp-enumeration".to_string(),
+            x: Vec::new(),
+            objective: None,
+            dual_ub: None,
+            dual_eq: None,
+            dual_lower_bounds: None,
+            dual_upper_bounds: None,
+            reduced_gradient: None,
+            iterations: Some(iterations),
+            enumerated: Some(enumerated as u64),
+            message: if saw_numerical {
+                "Rust MISOCP enumeration saw only numerical subproblem failures".to_string()
+            } else {
+                "no feasible integer SOCP assignment found".to_string()
+            },
+            elapsed_ms,
+        };
+    }
+    ExternalQuadraticReferenceSolution {
+        status: ExternalQuadraticReferenceStatus::Optimal,
+        solver: "rust:misocp-enumeration".to_string(),
+        x: best_x,
+        objective: Some(best_obj),
+        dual_ub: None,
+        dual_eq: None,
+        dual_lower_bounds: None,
+        dual_upper_bounds: None,
+        reduced_gradient: None,
+        iterations: Some(iterations),
+        enumerated: Some(enumerated as u64),
+        message: "bounded Rust MISOCP enumeration over integer variables".to_string(),
+        elapsed_ms,
+    }
+}
+
+fn solve_miqcp_with_rust_reference(
+    problem: &MixedIntegerQuadraticallyConstrainedProgram,
+    opts: &ExternalQuadraticReferenceOptions,
+) -> ExternalQuadraticReferenceSolution {
+    let started = Instant::now();
+    let domains = match integer_domains_for_rust_reference(
+        "miqcp",
+        problem.qcp.c.len(),
+        &problem.integer_vars,
+        &problem.qcp.lb,
+        &problem.qcp.ub,
+    ) {
+        Ok(domains) => domains,
+        Err(message) => {
+            return rust_quadratic_empty_solution(
+                ExternalQuadraticReferenceStatus::NumericalError,
+                "rust:miqcp-enumeration",
+                message,
+                started.elapsed().as_secs_f64() * 1000.0,
+            )
+        }
+    };
+    if domains.is_empty() {
+        let mut solution = solve_qcp_with_rust_reference(&problem.qcp);
+        solution.solver = "rust:miqcp-enumeration".to_string();
+        solution.enumerated = Some(1);
+        solution.message = format!("no integer variables; {}", solution.message);
+        return solution;
+    }
+
+    let max_enumerations = opts.max_enumerations.unwrap_or(1_000_000);
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let mut current = Vec::with_capacity(domains.len());
+        let mut best_x = Vec::new();
+        let mut best_obj = f64::INFINITY;
+        let mut iterations = 0u64;
+        let mut enumerated = 0usize;
+        let mut hit_limit = false;
+        let mut saw_numerical = false;
+        enumerate_integer_assignments(
+            0,
+            &domains,
+            max_enumerations,
+            &mut current,
+            &mut enumerated,
+            &mut hit_limit,
+            &mut |assignment| {
+                let sub = fixed_qcp_integer_subproblem(problem, assignment);
+                let solution = solve_qcp_pattern_search(&sub, QcpOptions::default());
+                iterations += solution.iterations as u64;
+                match solution.status {
+                    QcpStatus::Optimal if solution.objective < best_obj - 1e-7 => {
+                        best_obj = solution.objective;
+                        best_x = solution.x;
+                    }
+                    QcpStatus::NumericalError => saw_numerical = true,
+                    QcpStatus::Optimal | QcpStatus::Infeasible => {}
+                }
+            },
+        );
+        (
+            best_x,
+            best_obj,
+            iterations,
+            enumerated,
+            hit_limit,
+            saw_numerical,
+        )
+    }));
+    let (best_x, best_obj, iterations, enumerated, hit_limit, saw_numerical) = match result {
+        Ok(result) => result,
+        Err(error) => {
+            return rust_quadratic_empty_solution(
+                ExternalQuadraticReferenceStatus::NumericalError,
+                "rust:miqcp-enumeration",
+                panic_message(error),
+                started.elapsed().as_secs_f64() * 1000.0,
+            )
+        }
+    };
+
+    let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+    if hit_limit {
+        return ExternalQuadraticReferenceSolution {
+            status: ExternalQuadraticReferenceStatus::NumericalError,
+            solver: "rust:miqcp-enumeration".to_string(),
+            x: best_x,
+            objective: None,
+            dual_ub: None,
+            dual_eq: None,
+            dual_lower_bounds: None,
+            dual_upper_bounds: None,
+            reduced_gradient: None,
+            iterations: Some(iterations),
+            enumerated: Some(enumerated as u64),
+            message: "Rust MIQCP enumeration limit reached".to_string(),
+            elapsed_ms,
+        };
+    }
+    if best_x.is_empty() {
+        return ExternalQuadraticReferenceSolution {
+            status: if saw_numerical {
+                ExternalQuadraticReferenceStatus::NumericalError
+            } else {
+                ExternalQuadraticReferenceStatus::Infeasible
+            },
+            solver: "rust:miqcp-enumeration".to_string(),
+            x: Vec::new(),
+            objective: None,
+            dual_ub: None,
+            dual_eq: None,
+            dual_lower_bounds: None,
+            dual_upper_bounds: None,
+            reduced_gradient: None,
+            iterations: Some(iterations),
+            enumerated: Some(enumerated as u64),
+            message: if saw_numerical {
+                "Rust MIQCP enumeration saw only numerical subproblem failures".to_string()
+            } else {
+                "no feasible integer QCP assignment found".to_string()
+            },
+            elapsed_ms,
+        };
+    }
+    ExternalQuadraticReferenceSolution {
+        status: ExternalQuadraticReferenceStatus::Optimal,
+        solver: "rust:miqcp-enumeration".to_string(),
+        x: best_x,
+        objective: Some(best_obj),
+        dual_ub: None,
+        dual_eq: None,
+        dual_lower_bounds: None,
+        dual_upper_bounds: None,
+        reduced_gradient: None,
+        iterations: Some(iterations),
+        enumerated: Some(enumerated as u64),
+        message: "bounded Rust MIQCP enumeration over integer variables".to_string(),
+        elapsed_ms,
+    }
+}
+
 fn unavailable(message: impl Into<String>, elapsed_ms: f64) -> ExternalQuadraticReferenceSolution {
     ExternalQuadraticReferenceSolution {
         status: ExternalQuadraticReferenceStatus::Unavailable,
@@ -496,6 +1194,10 @@ pub fn solve_qp_with_external_reference(
     problem: &QuadraticProgram,
     opts: &ExternalQuadraticReferenceOptions,
 ) -> ExternalQuadraticReferenceSolution {
+    if is_rust_quadratic_solver(opts) {
+        return solve_qp_with_rust_reference(problem, opts);
+    }
+
     run_quadratic_reference_json(qp_json(problem), opts)
 }
 
@@ -503,6 +1205,10 @@ pub fn solve_miqp_with_external_reference(
     problem: &MixedIntegerQuadraticProgram,
     opts: &ExternalQuadraticReferenceOptions,
 ) -> ExternalQuadraticReferenceSolution {
+    if is_rust_quadratic_solver(opts) {
+        return solve_miqp_with_rust_reference(problem, opts);
+    }
+
     let mut payload = qp_json(&problem.qp);
     if let Some(map) = payload.as_object_mut() {
         map.insert("integer_vars".to_string(), json!(&problem.integer_vars));
@@ -534,6 +1240,10 @@ pub fn solve_socp_with_external_reference(
     problem: &SecondOrderConeProgram,
     opts: &ExternalQuadraticReferenceOptions,
 ) -> ExternalQuadraticReferenceSolution {
+    if is_rust_quadratic_solver(opts) {
+        return solve_socp_with_rust_reference(problem);
+    }
+
     run_quadratic_reference_json(socp_json(problem), opts)
 }
 
@@ -541,6 +1251,10 @@ pub fn solve_misocp_with_external_reference(
     problem: &MixedIntegerSecondOrderConeProgram,
     opts: &ExternalQuadraticReferenceOptions,
 ) -> ExternalQuadraticReferenceSolution {
+    if is_rust_quadratic_solver(opts) {
+        return solve_misocp_with_rust_reference(problem, opts);
+    }
+
     let mut payload = socp_json(&problem.socp);
     if let Some(map) = payload.as_object_mut() {
         map.insert("integer_vars".to_string(), json!(&problem.integer_vars));
@@ -572,6 +1286,10 @@ pub fn solve_qcp_with_external_reference(
     problem: &QuadraticallyConstrainedProgram,
     opts: &ExternalQuadraticReferenceOptions,
 ) -> ExternalQuadraticReferenceSolution {
+    if is_rust_quadratic_solver(opts) {
+        return solve_qcp_with_rust_reference(problem);
+    }
+
     run_quadratic_reference_json(qcp_json(problem), opts)
 }
 
@@ -579,6 +1297,10 @@ pub fn solve_miqcp_with_external_reference(
     problem: &MixedIntegerQuadraticallyConstrainedProgram,
     opts: &ExternalQuadraticReferenceOptions,
 ) -> ExternalQuadraticReferenceSolution {
+    if is_rust_quadratic_solver(opts) {
+        return solve_miqcp_with_rust_reference(problem, opts);
+    }
+
     let mut payload = qcp_json(&problem.qcp);
     if let Some(map) = payload.as_object_mut() {
         map.insert("integer_vars".to_string(), json!(&problem.integer_vars));
@@ -588,14 +1310,23 @@ pub fn solve_miqcp_with_external_reference(
 
 #[cfg(test)]
 mod tests {
+    use crate::des::general::qp::{QuadraticConstraint, SecondOrderCone, SecondOrderConeProgram};
+
     use crate::des::general::external_quadratic_reference::{
         external_quadratic_reference_solver_manifest, external_quadratic_reference_solver_specs,
-        ExternalQuadraticReferenceFamily, ExternalQuadraticReferenceSolver,
+        solve_miqcp_with_external_reference, solve_misocp_with_external_reference,
+        ExternalQuadraticReferenceFamily, ExternalQuadraticReferenceOptions,
+        ExternalQuadraticReferenceSolution, ExternalQuadraticReferenceSolver,
+        ExternalQuadraticReferenceStatus,
     };
 
     #[test]
     fn solver_args_cover_python_bridge_names() {
-        assert_eq!(ExternalQuadraticReferenceSolver::all().len(), 16);
+        assert_eq!(ExternalQuadraticReferenceSolver::all().len(), 17);
+        assert_eq!(
+            ExternalQuadraticReferenceSolver::RustInternal.as_arg(),
+            "rust"
+        );
         assert_eq!(ExternalQuadraticReferenceSolver::Mosek.as_arg(), "mosek");
         assert_eq!(ExternalQuadraticReferenceSolver::Copt.as_arg(), "copt");
         assert_eq!(
@@ -613,6 +1344,8 @@ mod tests {
             ExternalQuadraticReferenceFamily::RegisteredConic
         );
         assert!(ExternalQuadraticReferenceSolver::Osqp.supports_qp());
+        assert!(ExternalQuadraticReferenceSolver::RustInternal.supports_miqp());
+        assert!(ExternalQuadraticReferenceSolver::RustInternal.supports_socp());
         assert!(!ExternalQuadraticReferenceSolver::Osqp.supports_socp());
         assert!(ExternalQuadraticReferenceSolver::Mosek.supports_qp());
         assert!(ExternalQuadraticReferenceSolver::Mosek.supports_socp());
@@ -624,7 +1357,7 @@ mod tests {
     #[test]
     fn solver_manifest_exposes_optional_quadratic_backends() {
         let specs = external_quadratic_reference_solver_specs();
-        assert_eq!(specs.len(), 16);
+        assert_eq!(specs.len(), 17);
         assert_eq!(
             specs
                 .iter()
@@ -640,6 +1373,14 @@ mod tests {
             5
         );
         assert!(specs.iter().any(|spec| {
+            spec.solver == ExternalQuadraticReferenceSolver::RustInternal
+                && spec.id == "rust"
+                && spec.supports_qp
+                && spec.supports_miqp
+                && spec.supports_socp
+                && spec.supports_qcp
+        }));
+        assert!(specs.iter().any(|spec| {
             spec.solver == ExternalQuadraticReferenceSolver::Copt
                 && spec.id == "copt"
                 && spec.supports_qp
@@ -650,11 +1391,89 @@ mod tests {
 
         let manifest = external_quadratic_reference_solver_manifest();
         let items = manifest.as_array().expect("manifest array");
-        assert_eq!(items.len(), 16);
+        assert_eq!(items.len(), 17);
+        assert!(items.iter().any(|item| {
+            item.get("id").and_then(|value| value.as_str()) == Some("rust")
+                && item.get("supportsMiqp").and_then(|value| value.as_bool()) == Some(true)
+        }));
         assert!(items.iter().any(|item| {
             item.get("id").and_then(|value| value.as_str()) == Some("mosek")
                 && item.get("family").and_then(|value| value.as_str()) == Some("cvxpy")
                 && item.get("supportsQcp").and_then(|value| value.as_bool()) == Some(true)
         }));
+    }
+
+    fn rust_solver_options() -> ExternalQuadraticReferenceOptions {
+        ExternalQuadraticReferenceOptions {
+            solver: ExternalQuadraticReferenceSolver::RustInternal,
+            ..Default::default()
+        }
+    }
+
+    fn assert_optimal(solution: &ExternalQuadraticReferenceSolution) {
+        assert_eq!(
+            solution.status,
+            ExternalQuadraticReferenceStatus::Optimal,
+            "{solution:?}"
+        );
+    }
+
+    #[test]
+    fn rust_internal_solves_misocp_enumeration_reference() {
+        let problem = super::MixedIntegerSecondOrderConeProgram {
+            socp: SecondOrderConeProgram {
+                c: vec![0.0, 0.0, 1.0],
+                lb: Some(vec![Some(2.0), Some(2.0), Some(0.0)]),
+                ub: Some(vec![Some(2.0), Some(2.0), Some(10.0)]),
+                cones: vec![SecondOrderCone {
+                    a: vec![vec![1.0, 0.0, 0.0], vec![0.0, 1.0, 0.0]],
+                    b: vec![0.0, 0.0],
+                    c: vec![0.0, 0.0, 1.0],
+                    d: 0.0,
+                    name: Some("integer-norm".to_string()),
+                }],
+                ..Default::default()
+            },
+            integer_vars: vec![true, true, true],
+        };
+        let solution = solve_misocp_with_external_reference(&problem, &rust_solver_options());
+        assert_optimal(&solution);
+        assert_eq!(solution.solver, "rust:misocp-enumeration");
+        assert!(solution
+            .objective
+            .is_some_and(|objective| { (objective - 3.0).abs() <= 1e-7 }));
+        assert!((solution.x[0] - 2.0).abs() <= 1e-7, "{solution:?}");
+        assert!((solution.x[1] - 2.0).abs() <= 1e-7, "{solution:?}");
+        assert!((solution.x[2] - 3.0).abs() <= 1e-7, "{solution:?}");
+        assert_eq!(solution.enumerated, Some(11));
+    }
+
+    #[test]
+    fn rust_internal_solves_miqcp_enumeration_reference() {
+        let problem = super::MixedIntegerQuadraticallyConstrainedProgram {
+            qcp: super::QuadraticallyConstrainedProgram {
+                q: vec![vec![0.0, 0.0], vec![0.0, 0.0]],
+                c: vec![0.0, 1.0],
+                lb: Some(vec![Some(3.0), Some(0.0)]),
+                ub: Some(vec![Some(3.0), Some(20.0)]),
+                quadratic_constraints: vec![QuadraticConstraint {
+                    q: vec![vec![1.0, 0.0], vec![0.0, 0.0]],
+                    c: vec![0.0, -1.0],
+                    rhs: 0.0,
+                    name: Some("integer-square-epigraph".to_string()),
+                }],
+                ..Default::default()
+            },
+            integer_vars: vec![true, true],
+        };
+        let solution = solve_miqcp_with_external_reference(&problem, &rust_solver_options());
+        assert_optimal(&solution);
+        assert_eq!(solution.solver, "rust:miqcp-enumeration");
+        assert!(solution
+            .objective
+            .is_some_and(|objective| { (objective - 9.0).abs() <= 1e-7 }));
+        assert!((solution.x[0] - 3.0).abs() <= 1e-7, "{solution:?}");
+        assert!((solution.x[1] - 9.0).abs() <= 1e-7, "{solution:?}");
+        assert_eq!(solution.enumerated, Some(21));
     }
 }

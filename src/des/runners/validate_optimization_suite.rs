@@ -116,11 +116,12 @@ use crate::des::general::external_quadratic_reference::{
 };
 use crate::des::general::external_routing_reference::{
     solve_cvrp_with_external_reference, ExternalRoutingReferenceOptions,
-    ExternalRoutingReferenceStatus,
+    ExternalRoutingReferenceSolver, ExternalRoutingReferenceStatus,
 };
 use crate::des::general::external_scheduling_reference::{
     solve_flow_shop_with_external_reference, solve_job_shop_with_external_reference,
-    ExternalSchedulingReferenceOptions, ExternalSchedulingReferenceStatus,
+    ExternalSchedulingReferenceOptions, ExternalSchedulingReferenceSolver,
+    ExternalSchedulingReferenceStatus,
 };
 use crate::des::general::external_set_cover_reference::{
     solve_set_cover_with_external_reference, ExternalSetCoverReferenceOptions,
@@ -144,18 +145,18 @@ use crate::des::general::external_validation_tools::{
     prism_validation_model_to_string, prism_validation_properties_to_string,
     probe_external_validation_tool, run_external_validation_artifact_cli,
     run_external_validation_consensus, run_external_validation_file_cli,
-    run_external_validation_text_cli, run_simulation_validation_with_external_reference,
-    simulation_validation_request_to_json, smtlib_validation_script_to_string,
-    tla_validation_module_to_string, DimacsCnf, ExternalBenchmarkManifest,
-    ExternalBenchmarkManifestEntry, ExternalSimulationValidationReferenceOptions,
-    ExternalSimulationValidationStatus, ExternalSimulationValidationVerdict,
-    ExternalValidationArtifact, ExternalValidationArtifactCliOptions,
-    ExternalValidationCliInvocation, ExternalValidationFamily, ExternalValidationFileCliOptions,
-    ExternalValidationProbeStatus, ExternalValidationRunStatus, ExternalValidationTextCliOptions,
-    ExternalValidationTextFormat, ExternalValidationTextVerdict, JsonSchemaValidationRequest,
-    MiniZincValidationRequest, PrismModule, PrismValidationModel, SimulationMetricExpectation,
-    SimulationValidationRequest, SmtDeclaration, SmtLibValidationScript, SmtSort,
-    TlaValidationModule,
+    run_external_validation_text_cli, run_simulation_validation_json_with_external_reference,
+    run_simulation_validation_with_external_reference, simulation_validation_request_to_json,
+    smtlib_validation_script_to_string, tla_validation_module_to_string, DimacsCnf,
+    ExternalBenchmarkManifest, ExternalBenchmarkManifestEntry,
+    ExternalSimulationValidationReferenceOptions, ExternalSimulationValidationStatus,
+    ExternalSimulationValidationVerdict, ExternalValidationArtifact,
+    ExternalValidationArtifactCliOptions, ExternalValidationCliInvocation,
+    ExternalValidationFamily, ExternalValidationFileCliOptions, ExternalValidationProbeStatus,
+    ExternalValidationRunStatus, ExternalValidationTextCliOptions, ExternalValidationTextFormat,
+    ExternalValidationTextVerdict, JsonSchemaValidationRequest, MiniZincValidationRequest,
+    PrismModule, PrismValidationModel, SimulationMetricExpectation, SimulationValidationRequest,
+    SmtDeclaration, SmtLibValidationScript, SmtSort, TlaValidationModule,
 };
 use crate::des::general::external_weighted_independent_set_reference::{
     solve_weighted_independent_set_with_external_reference,
@@ -9686,6 +9687,9 @@ impl Driver {
             "External validation simulation Rust bridge valid payload",
             simulation_bridge_run.status == ExternalSimulationValidationStatus::Ok
                 && simulation_bridge_run.verdict == ExternalSimulationValidationVerdict::Valid
+                && simulation_bridge_run
+                    .simulator
+                    .starts_with("rust:single-station-des")
                 && simulation_bridge_run.metrics.get("mean_wait").copied() == Some(0.0)
                 && simulation_bridge_run.trace.len() == 9,
             format!(
@@ -9696,23 +9700,25 @@ impl Driver {
             ),
         );
         for engine in ["plant-simulation", "extendsim", "gpss-world", "simulink"] {
-            let event_alias_run = self.run_python_json(
-                "simulation_validation_reference.py",
-                &["--engine", engine],
-                &simulation_bridge_payload.to_string(),
+            let event_alias_run = run_simulation_validation_json_with_external_reference(
+                &simulation_bridge_payload,
+                &ExternalSimulationValidationReferenceOptions {
+                    engine_id: Some(engine.to_string()),
+                },
             );
             self.check(
                 format!("External validation event simulation {engine} bridge valid payload"),
-                event_alias_run["status"].as_str() == Some("ok")
-                    && event_alias_run["verdict"].as_str() == Some("valid")
-                    && event_alias_run["simulator"]
-                        .as_str()
-                        .is_some_and(|simulator| simulator.contains(engine)),
+                event_alias_run.status == ExternalSimulationValidationStatus::Ok
+                    && event_alias_run.verdict == ExternalSimulationValidationVerdict::Valid
+                    && event_alias_run
+                        .simulator
+                        .starts_with("rust:single-station-des")
+                    && event_alias_run.simulator.contains(engine),
                 format!(
                     "status={} verdict={} simulator={}",
-                    event_alias_run["status"].as_str().unwrap_or(""),
-                    event_alias_run["verdict"].as_str().unwrap_or(""),
-                    event_alias_run["simulator"].as_str().unwrap_or("")
+                    event_alias_run.status.as_str(),
+                    event_alias_run.verdict.as_str(),
+                    event_alias_run.simulator
                 ),
             );
         }
@@ -9779,44 +9785,52 @@ impl Driver {
                 {"name": "mean_travel_time", "target": 4.5, "tolerance": 1e-9, "comparison": "within-absolute"}
             ]
         });
-        let mobility_simulation_run = self.run_python_json(
-            "simulation_validation_reference.py",
-            &["--engine", "sumo"],
-            &mobility_simulation_payload.to_string(),
+        let mobility_simulation_run = run_simulation_validation_json_with_external_reference(
+            &mobility_simulation_payload,
+            &ExternalSimulationValidationReferenceOptions {
+                engine_id: Some("sumo".to_string()),
+            },
         );
         self.check(
             "External validation mobility simulation bridge valid payload",
-            mobility_simulation_run["status"].as_str() == Some("ok")
-                && mobility_simulation_run["verdict"].as_str() == Some("valid")
-                && mobility_simulation_run["metrics"]["mean_travel_time"].as_f64() == Some(4.5)
-                && mobility_simulation_run["simulator"]
-                    .as_str()
-                    .is_some_and(|simulator| simulator.contains("sumo")),
+            mobility_simulation_run.status == ExternalSimulationValidationStatus::Ok
+                && mobility_simulation_run.verdict == ExternalSimulationValidationVerdict::Valid
+                && mobility_simulation_run
+                    .metrics
+                    .get("mean_travel_time")
+                    .copied()
+                    == Some(4.5)
+                && mobility_simulation_run
+                    .simulator
+                    .starts_with("rust:mobility-network")
+                && mobility_simulation_run.simulator.contains("sumo"),
             format!(
                 "status={} verdict={} simulator={}",
-                mobility_simulation_run["status"].as_str().unwrap_or(""),
-                mobility_simulation_run["verdict"].as_str().unwrap_or(""),
-                mobility_simulation_run["simulator"].as_str().unwrap_or("")
+                mobility_simulation_run.status.as_str(),
+                mobility_simulation_run.verdict.as_str(),
+                mobility_simulation_run.simulator
             ),
         );
         for engine in ["carla"] {
-            let mobility_alias_run = self.run_python_json(
-                "simulation_validation_reference.py",
-                &["--engine", engine],
-                &mobility_simulation_payload.to_string(),
+            let mobility_alias_run = run_simulation_validation_json_with_external_reference(
+                &mobility_simulation_payload,
+                &ExternalSimulationValidationReferenceOptions {
+                    engine_id: Some(engine.to_string()),
+                },
             );
             self.check(
                 format!("External validation mobility simulation {engine} bridge valid payload"),
-                mobility_alias_run["status"].as_str() == Some("ok")
-                    && mobility_alias_run["verdict"].as_str() == Some("valid")
-                    && mobility_alias_run["simulator"]
-                        .as_str()
-                        .is_some_and(|simulator| simulator.contains(engine)),
+                mobility_alias_run.status == ExternalSimulationValidationStatus::Ok
+                    && mobility_alias_run.verdict == ExternalSimulationValidationVerdict::Valid
+                    && mobility_alias_run
+                        .simulator
+                        .starts_with("rust:mobility-network")
+                    && mobility_alias_run.simulator.contains(engine),
                 format!(
                     "status={} verdict={} simulator={}",
-                    mobility_alias_run["status"].as_str().unwrap_or(""),
-                    mobility_alias_run["verdict"].as_str().unwrap_or(""),
-                    mobility_alias_run["simulator"].as_str().unwrap_or("")
+                    mobility_alias_run.status.as_str(),
+                    mobility_alias_run.verdict.as_str(),
+                    mobility_alias_run.simulator
                 ),
             );
         }
@@ -9845,44 +9859,50 @@ impl Driver {
                 {"name": "energy_kwh", "target": 0.0, "tolerance": 10.0, "comparison": "greater-equal"}
             ]
         });
-        let energy_simulation_run = self.run_python_json(
-            "simulation_validation_reference.py",
-            &["--engine", "energyplus"],
-            &energy_simulation_payload.to_string(),
+        let energy_simulation_run = run_simulation_validation_json_with_external_reference(
+            &energy_simulation_payload,
+            &ExternalSimulationValidationReferenceOptions {
+                engine_id: Some("energyplus".to_string()),
+            },
         );
         self.check(
             "External validation energy simulation bridge valid payload",
-            energy_simulation_run["status"].as_str() == Some("ok")
-                && energy_simulation_run["verdict"].as_str() == Some("valid")
-                && energy_simulation_run["metrics"]["zones"].as_f64() == Some(1.0)
-                && energy_simulation_run["simulator"]
-                    .as_str()
-                    .is_some_and(|simulator| simulator.contains("energyplus")),
+            energy_simulation_run.status == ExternalSimulationValidationStatus::Ok
+                && energy_simulation_run.verdict == ExternalSimulationValidationVerdict::Valid
+                && energy_simulation_run.metrics.get("zones").copied() == Some(1.0)
+                && energy_simulation_run
+                    .simulator
+                    .starts_with("rust:energy-balance")
+                && energy_simulation_run.simulator.contains("energyplus"),
             format!(
-                "status={} verdict={} energy={:?}",
-                energy_simulation_run["status"].as_str().unwrap_or(""),
-                energy_simulation_run["verdict"].as_str().unwrap_or(""),
-                energy_simulation_run["metrics"]["energy_kwh"].as_f64()
+                "status={} verdict={} simulator={} energy={:?}",
+                energy_simulation_run.status.as_str(),
+                energy_simulation_run.verdict.as_str(),
+                energy_simulation_run.simulator,
+                energy_simulation_run.metrics.get("energy_kwh").copied()
             ),
         );
         for engine in ["gridlabd", "opendss", "pandapower"] {
-            let energy_alias_run = self.run_python_json(
-                "simulation_validation_reference.py",
-                &["--engine", engine],
-                &energy_simulation_payload.to_string(),
+            let energy_alias_run = run_simulation_validation_json_with_external_reference(
+                &energy_simulation_payload,
+                &ExternalSimulationValidationReferenceOptions {
+                    engine_id: Some(engine.to_string()),
+                },
             );
             self.check(
                 format!("External validation energy simulation {engine} bridge valid payload"),
-                energy_alias_run["status"].as_str() == Some("ok")
-                    && energy_alias_run["verdict"].as_str() == Some("valid")
-                    && energy_alias_run["simulator"]
-                        .as_str()
-                        .is_some_and(|simulator| simulator.contains(engine)),
+                energy_alias_run.status == ExternalSimulationValidationStatus::Ok
+                    && energy_alias_run.verdict == ExternalSimulationValidationVerdict::Valid
+                    && energy_alias_run
+                        .simulator
+                        .starts_with("rust:energy-balance")
+                    && energy_alias_run.simulator.contains(engine),
                 format!(
-                    "status={} verdict={} zones={:?}",
-                    energy_alias_run["status"].as_str().unwrap_or(""),
-                    energy_alias_run["verdict"].as_str().unwrap_or(""),
-                    energy_alias_run["metrics"]["zones"].as_f64()
+                    "status={} verdict={} simulator={} zones={:?}",
+                    energy_alias_run.status.as_str(),
+                    energy_alias_run.verdict.as_str(),
+                    energy_alias_run.simulator,
+                    energy_alias_run.metrics.get("zones").copied()
                 ),
             );
         }
@@ -9909,44 +9929,57 @@ impl Driver {
                 {"name": "final_velocity", "target": 2.0, "tolerance": 1e-9, "comparison": "within-absolute"}
             ]
         });
-        let physics_simulation_run = self.run_python_json(
-            "simulation_validation_reference.py",
-            &["--engine", "mujoco"],
-            &physics_simulation_payload.to_string(),
+        let physics_simulation_run = run_simulation_validation_json_with_external_reference(
+            &physics_simulation_payload,
+            &ExternalSimulationValidationReferenceOptions {
+                engine_id: Some("mujoco".to_string()),
+            },
         );
         self.check(
             "External validation physics simulation bridge valid payload",
-            physics_simulation_run["status"].as_str() == Some("ok")
-                && physics_simulation_run["verdict"].as_str() == Some("valid")
-                && physics_simulation_run["metrics"]["final_position"].as_f64() == Some(2.5)
-                && physics_simulation_run["simulator"]
-                    .as_str()
-                    .is_some_and(|simulator| simulator.contains("mujoco")),
+            physics_simulation_run.status == ExternalSimulationValidationStatus::Ok
+                && physics_simulation_run.verdict == ExternalSimulationValidationVerdict::Valid
+                && physics_simulation_run
+                    .metrics
+                    .get("final_position")
+                    .copied()
+                    == Some(2.5)
+                && physics_simulation_run
+                    .simulator
+                    .starts_with("rust:physics-trajectory")
+                && physics_simulation_run.simulator.contains("mujoco"),
             format!(
-                "status={} verdict={} final_position={:?}",
-                physics_simulation_run["status"].as_str().unwrap_or(""),
-                physics_simulation_run["verdict"].as_str().unwrap_or(""),
-                physics_simulation_run["metrics"]["final_position"].as_f64()
+                "status={} verdict={} simulator={} final_position={:?}",
+                physics_simulation_run.status.as_str(),
+                physics_simulation_run.verdict.as_str(),
+                physics_simulation_run.simulator,
+                physics_simulation_run
+                    .metrics
+                    .get("final_position")
+                    .copied()
             ),
         );
         for engine in ["carla", "isaac-sim", "airsim"] {
-            let physics_alias_run = self.run_python_json(
-                "simulation_validation_reference.py",
-                &["--engine", engine],
-                &physics_simulation_payload.to_string(),
+            let physics_alias_run = run_simulation_validation_json_with_external_reference(
+                &physics_simulation_payload,
+                &ExternalSimulationValidationReferenceOptions {
+                    engine_id: Some(engine.to_string()),
+                },
             );
             self.check(
                 format!("External validation physics simulation {engine} bridge valid payload"),
-                physics_alias_run["status"].as_str() == Some("ok")
-                    && physics_alias_run["verdict"].as_str() == Some("valid")
-                    && physics_alias_run["simulator"]
-                        .as_str()
-                        .is_some_and(|simulator| simulator.contains(engine)),
+                physics_alias_run.status == ExternalSimulationValidationStatus::Ok
+                    && physics_alias_run.verdict == ExternalSimulationValidationVerdict::Valid
+                    && physics_alias_run
+                        .simulator
+                        .starts_with("rust:physics-trajectory")
+                    && physics_alias_run.simulator.contains(engine),
                 format!(
-                    "status={} verdict={} final_position={:?}",
-                    physics_alias_run["status"].as_str().unwrap_or(""),
-                    physics_alias_run["verdict"].as_str().unwrap_or(""),
-                    physics_alias_run["metrics"]["final_position"].as_f64()
+                    "status={} verdict={} simulator={} final_position={:?}",
+                    physics_alias_run.status.as_str(),
+                    physics_alias_run.verdict.as_str(),
+                    physics_alias_run.simulator,
+                    physics_alias_run.metrics.get("final_position").copied()
                 ),
             );
         }
@@ -9966,45 +9999,49 @@ impl Driver {
                 "interactions_reference_agents"
             ]
         });
-        let agent_simulation_run = self.run_python_json(
-            "simulation_validation_reference.py",
-            &["--engine", "mesa"],
-            &agent_simulation_payload.to_string(),
+        let agent_simulation_run = run_simulation_validation_json_with_external_reference(
+            &agent_simulation_payload,
+            &ExternalSimulationValidationReferenceOptions {
+                engine_id: Some("mesa".to_string()),
+            },
         );
         self.check(
             "External validation agent simulation bridge valid payload",
-            agent_simulation_run["status"].as_str() == Some("ok")
-                && agent_simulation_run["verdict"].as_str() == Some("valid")
-                && agent_simulation_run["metrics"]["agents"].as_f64() == Some(2.0)
-                && agent_simulation_run["simulator"]
-                    .as_str()
-                    .is_some_and(|simulator| simulator.contains("mesa")),
+            agent_simulation_run.status == ExternalSimulationValidationStatus::Ok
+                && agent_simulation_run.verdict == ExternalSimulationValidationVerdict::Valid
+                && agent_simulation_run.metrics.get("agents").copied() == Some(2.0)
+                && agent_simulation_run
+                    .simulator
+                    .starts_with("rust:agent-based")
+                && agent_simulation_run.simulator.contains("mesa"),
             format!(
-                "status={} verdict={} agents={:?}",
-                agent_simulation_run["status"].as_str().unwrap_or(""),
-                agent_simulation_run["verdict"].as_str().unwrap_or(""),
-                agent_simulation_run["metrics"]["agents"].as_f64()
+                "status={} verdict={} simulator={} agents={:?}",
+                agent_simulation_run.status.as_str(),
+                agent_simulation_run.verdict.as_str(),
+                agent_simulation_run.simulator,
+                agent_simulation_run.metrics.get("agents").copied()
             ),
         );
         for engine in ["agentpy"] {
-            let agent_alias_run = self.run_python_json(
-                "simulation_validation_reference.py",
-                &["--engine", engine],
-                &agent_simulation_payload.to_string(),
+            let agent_alias_run = run_simulation_validation_json_with_external_reference(
+                &agent_simulation_payload,
+                &ExternalSimulationValidationReferenceOptions {
+                    engine_id: Some(engine.to_string()),
+                },
             );
             self.check(
                 format!("External validation agent simulation {engine} bridge valid payload"),
-                agent_alias_run["status"].as_str() == Some("ok")
-                    && agent_alias_run["verdict"].as_str() == Some("valid")
-                    && agent_alias_run["metrics"]["agents"].as_f64() == Some(2.0)
-                    && agent_alias_run["simulator"]
-                        .as_str()
-                        .is_some_and(|simulator| simulator.contains(engine)),
+                agent_alias_run.status == ExternalSimulationValidationStatus::Ok
+                    && agent_alias_run.verdict == ExternalSimulationValidationVerdict::Valid
+                    && agent_alias_run.metrics.get("agents").copied() == Some(2.0)
+                    && agent_alias_run.simulator.starts_with("rust:agent-based")
+                    && agent_alias_run.simulator.contains(engine),
                 format!(
-                    "status={} verdict={} agents={:?}",
-                    agent_alias_run["status"].as_str().unwrap_or(""),
-                    agent_alias_run["verdict"].as_str().unwrap_or(""),
-                    agent_alias_run["metrics"]["agents"].as_f64()
+                    "status={} verdict={} simulator={} agents={:?}",
+                    agent_alias_run.status.as_str(),
+                    agent_alias_run.verdict.as_str(),
+                    agent_alias_run.simulator,
+                    agent_alias_run.metrics.get("agents").copied()
                 ),
             );
         }
@@ -10024,45 +10061,51 @@ impl Driver {
                 "tasks_schedulable"
             ]
         });
-        let distributed_simulation_run = self.run_python_json(
-            "simulation_validation_reference.py",
-            &["--engine", "simgrid"],
-            &distributed_simulation_payload.to_string(),
+        let distributed_simulation_run = run_simulation_validation_json_with_external_reference(
+            &distributed_simulation_payload,
+            &ExternalSimulationValidationReferenceOptions {
+                engine_id: Some("simgrid".to_string()),
+            },
         );
         self.check(
             "External validation distributed simulation bridge valid payload",
-            distributed_simulation_run["status"].as_str() == Some("ok")
-                && distributed_simulation_run["verdict"].as_str() == Some("valid")
-                && distributed_simulation_run["metrics"]["hosts"].as_f64() == Some(1.0)
-                && distributed_simulation_run["simulator"]
-                    .as_str()
-                    .is_some_and(|simulator| simulator.contains("simgrid")),
+            distributed_simulation_run.status == ExternalSimulationValidationStatus::Ok
+                && distributed_simulation_run.verdict == ExternalSimulationValidationVerdict::Valid
+                && distributed_simulation_run.metrics.get("hosts").copied() == Some(1.0)
+                && distributed_simulation_run
+                    .simulator
+                    .starts_with("rust:distributed-system")
+                && distributed_simulation_run.simulator.contains("simgrid"),
             format!(
-                "status={} verdict={} hosts={:?}",
-                distributed_simulation_run["status"].as_str().unwrap_or(""),
-                distributed_simulation_run["verdict"].as_str().unwrap_or(""),
-                distributed_simulation_run["metrics"]["hosts"].as_f64()
+                "status={} verdict={} simulator={} hosts={:?}",
+                distributed_simulation_run.status.as_str(),
+                distributed_simulation_run.verdict.as_str(),
+                distributed_simulation_run.simulator,
+                distributed_simulation_run.metrics.get("hosts").copied()
             ),
         );
         for engine in ["cloudsim", "batsim", "gem5", "ptolemy-ii"] {
-            let distributed_alias_run = self.run_python_json(
-                "simulation_validation_reference.py",
-                &["--engine", engine],
-                &distributed_simulation_payload.to_string(),
+            let distributed_alias_run = run_simulation_validation_json_with_external_reference(
+                &distributed_simulation_payload,
+                &ExternalSimulationValidationReferenceOptions {
+                    engine_id: Some(engine.to_string()),
+                },
             );
             self.check(
                 format!("External validation distributed simulation {engine} bridge valid payload"),
-                distributed_alias_run["status"].as_str() == Some("ok")
-                    && distributed_alias_run["verdict"].as_str() == Some("valid")
-                    && distributed_alias_run["metrics"]["hosts"].as_f64() == Some(1.0)
-                    && distributed_alias_run["simulator"]
-                        .as_str()
-                        .is_some_and(|simulator| simulator.contains(engine)),
+                distributed_alias_run.status == ExternalSimulationValidationStatus::Ok
+                    && distributed_alias_run.verdict == ExternalSimulationValidationVerdict::Valid
+                    && distributed_alias_run.metrics.get("hosts").copied() == Some(1.0)
+                    && distributed_alias_run
+                        .simulator
+                        .starts_with("rust:distributed-system")
+                    && distributed_alias_run.simulator.contains(engine),
                 format!(
-                    "status={} verdict={} hosts={:?}",
-                    distributed_alias_run["status"].as_str().unwrap_or(""),
-                    distributed_alias_run["verdict"].as_str().unwrap_or(""),
-                    distributed_alias_run["metrics"]["hosts"].as_f64()
+                    "status={} verdict={} simulator={} hosts={:?}",
+                    distributed_alias_run.status.as_str(),
+                    distributed_alias_run.verdict.as_str(),
+                    distributed_alias_run.simulator,
+                    distributed_alias_run.metrics.get("hosts").copied()
                 ),
             );
         }
@@ -10084,45 +10127,56 @@ impl Driver {
                 "mass_balance_closed"
             ]
         });
-        let process_simulation_run = self.run_python_json(
-            "simulation_validation_reference.py",
-            &["--engine", "neqsim"],
-            &process_simulation_payload.to_string(),
+        let process_simulation_run = run_simulation_validation_json_with_external_reference(
+            &process_simulation_payload,
+            &ExternalSimulationValidationReferenceOptions {
+                engine_id: Some("neqsim".to_string()),
+            },
         );
         self.check(
             "External validation process simulation bridge valid payload",
-            process_simulation_run["status"].as_str() == Some("ok")
-                && process_simulation_run["verdict"].as_str() == Some("valid")
-                && process_simulation_run["metrics"]["mass_balance_error"].as_f64() == Some(0.0)
-                && process_simulation_run["simulator"]
-                    .as_str()
-                    .is_some_and(|simulator| simulator.contains("neqsim")),
+            process_simulation_run.status == ExternalSimulationValidationStatus::Ok
+                && process_simulation_run.verdict == ExternalSimulationValidationVerdict::Valid
+                && process_simulation_run
+                    .metrics
+                    .get("mass_balance_error")
+                    .copied()
+                    == Some(0.0)
+                && process_simulation_run
+                    .simulator
+                    .starts_with("rust:process-flow")
+                && process_simulation_run.simulator.contains("neqsim"),
             format!(
-                "status={} verdict={} mass_balance_error={:?}",
-                process_simulation_run["status"].as_str().unwrap_or(""),
-                process_simulation_run["verdict"].as_str().unwrap_or(""),
-                process_simulation_run["metrics"]["mass_balance_error"].as_f64()
+                "status={} verdict={} simulator={} mass_balance_error={:?}",
+                process_simulation_run.status.as_str(),
+                process_simulation_run.verdict.as_str(),
+                process_simulation_run.simulator,
+                process_simulation_run
+                    .metrics
+                    .get("mass_balance_error")
+                    .copied()
             ),
         );
         for engine in ["cape-open", "copasi", "tellurium"] {
-            let process_alias_run = self.run_python_json(
-                "simulation_validation_reference.py",
-                &["--engine", engine],
-                &process_simulation_payload.to_string(),
+            let process_alias_run = run_simulation_validation_json_with_external_reference(
+                &process_simulation_payload,
+                &ExternalSimulationValidationReferenceOptions {
+                    engine_id: Some(engine.to_string()),
+                },
             );
             self.check(
                 format!("External validation process simulation {engine} bridge valid payload"),
-                process_alias_run["status"].as_str() == Some("ok")
-                    && process_alias_run["verdict"].as_str() == Some("valid")
-                    && process_alias_run["metrics"]["mass_balance_error"].as_f64() == Some(0.0)
-                    && process_alias_run["simulator"]
-                        .as_str()
-                        .is_some_and(|simulator| simulator.contains(engine)),
+                process_alias_run.status == ExternalSimulationValidationStatus::Ok
+                    && process_alias_run.verdict == ExternalSimulationValidationVerdict::Valid
+                    && process_alias_run.metrics.get("mass_balance_error").copied() == Some(0.0)
+                    && process_alias_run.simulator.starts_with("rust:process-flow")
+                    && process_alias_run.simulator.contains(engine),
                 format!(
-                    "status={} verdict={} mass_balance_error={:?}",
-                    process_alias_run["status"].as_str().unwrap_or(""),
-                    process_alias_run["verdict"].as_str().unwrap_or(""),
-                    process_alias_run["metrics"]["mass_balance_error"].as_f64()
+                    "status={} verdict={} simulator={} mass_balance_error={:?}",
+                    process_alias_run.status.as_str(),
+                    process_alias_run.verdict.as_str(),
+                    process_alias_run.simulator,
+                    process_alias_run.metrics.get("mass_balance_error").copied()
                 ),
             );
         }
@@ -11704,7 +11758,10 @@ impl Driver {
             solve_math_program(&miqp_facade, &solve_opts).expect("MIQP facade internal solve");
         let miqp_external_reference = solve_miqp_with_external_reference(
             &miqp_reference_problem,
-            &ExternalQuadraticReferenceOptions::default(),
+            &ExternalQuadraticReferenceOptions {
+                solver: ExternalQuadraticReferenceSolver::RustInternal,
+                ..Default::default()
+            },
         );
         if miqp_external_reference.status == ExternalQuadraticReferenceStatus::Unavailable {
             println!(
@@ -12054,7 +12111,10 @@ impl Driver {
             solve_math_program(&misocp_facade, &solve_opts).expect("MISOCP facade internal solve");
         let misocp_external_reference = solve_misocp_with_external_reference(
             &misocp_reference_problem,
-            &ExternalQuadraticReferenceOptions::default(),
+            &ExternalQuadraticReferenceOptions {
+                solver: ExternalQuadraticReferenceSolver::RustInternal,
+                ..Default::default()
+            },
         );
         if misocp_external_reference.status == ExternalQuadraticReferenceStatus::Unavailable {
             println!(
@@ -12167,7 +12227,10 @@ impl Driver {
                 .expect("rotated MISOCP facade internal solve");
         let rotated_misocp_external_reference = solve_misocp_with_external_reference(
             &rotated_misocp_reference_problem,
-            &ExternalQuadraticReferenceOptions::default(),
+            &ExternalQuadraticReferenceOptions {
+                solver: ExternalQuadraticReferenceSolver::RustInternal,
+                ..Default::default()
+            },
         );
         if rotated_misocp_external_reference.status == ExternalQuadraticReferenceStatus::Unavailable
         {
@@ -12386,7 +12449,10 @@ impl Driver {
             solve_math_program(&miqcp_facade, &solve_opts).expect("MIQCP facade internal solve");
         let miqcp_external_reference = solve_miqcp_with_external_reference(
             &miqcp_reference_problem,
-            &ExternalQuadraticReferenceOptions::default(),
+            &ExternalQuadraticReferenceOptions {
+                solver: ExternalQuadraticReferenceSolver::RustInternal,
+                ..Default::default()
+            },
         );
         if miqcp_external_reference.status == ExternalQuadraticReferenceStatus::Unavailable {
             println!(
@@ -19264,7 +19330,7 @@ impl Driver {
     }
 
     fn validate_vehicle_routing(&mut self) {
-        println!("\n-- Vehicle routing: exact CVRP vs OR-Tools Routing bridge --");
+        println!("\n-- Vehicle routing: exact CVRP vs Rust reference / OR-Tools Routing bridge --");
         let customers = vec![
             VRPCustomer {
                 id: "A".to_string(),
@@ -19328,7 +19394,9 @@ impl Driver {
             Point { x: 0.0, y: 0.0 },
             &customers,
             5.0,
-            &ExternalRoutingReferenceOptions::default(),
+            &ExternalRoutingReferenceOptions {
+                solver: ExternalRoutingReferenceSolver::RustExact,
+            },
         );
         self.check(
             "CVRP exact/reference status",
@@ -19373,14 +19441,14 @@ impl Driver {
                 1e-6,
             ),
             _ => println!(
-                "  SKIP  CVRP OR-Tools Routing objective: status={:?} message={:?}",
-                reference.ortools_status, reference.ortools_message
+                "  SKIP  CVRP OR-Tools Routing objective: no OR-Tools sidecar in solver={} message={}",
+                reference.solver, reference.message
             ),
         }
     }
 
     fn validate_job_shop_scheduling(&mut self) {
-        println!("\n-- Scheduling: exact job-shop vs OR-Tools CP-SAT bridge --");
+        println!("\n-- Scheduling: exact job-shop vs Rust reference / OR-Tools CP-SAT bridge --");
         let jobs = self.sample_job_shop_jobs();
         let params = JobShopDispatchParams {
             jobs: Some(jobs.clone()),
@@ -19410,7 +19478,9 @@ impl Driver {
 
         let external = solve_job_shop_with_external_reference(
             &jobs,
-            &ExternalSchedulingReferenceOptions::default(),
+            &ExternalSchedulingReferenceOptions {
+                solver: ExternalSchedulingReferenceSolver::RustExact,
+            },
         );
         self.check(
             "Job-shop exact/reference bridge status optimal",
@@ -19466,14 +19536,16 @@ impl Driver {
                 );
             }
             _ => println!(
-                "  SKIP  Job-shop OR-Tools CP-SAT makespan: status={:?} message={}",
-                external.ortools_status, external.message
+                "  SKIP  Job-shop OR-Tools CP-SAT makespan: no OR-Tools sidecar in solver={} message={}",
+                external.solver, external.message
             ),
         }
     }
 
     fn validate_flow_shop_scheduling(&mut self) {
-        println!("\n-- Flow-shop scheduling: NEH/exact vs OR-Tools CP-SAT bridge --");
+        println!(
+            "\n-- Flow-shop scheduling: NEH/exact vs Rust reference / OR-Tools CP-SAT bridge --"
+        );
         let jobs = self.sample_flow_shop_jobs();
         let params = FlowShopNEHParams {
             jobs: Some(jobs.clone()),
@@ -19509,7 +19581,9 @@ impl Driver {
 
         let external = solve_flow_shop_with_external_reference(
             &jobs,
-            &ExternalSchedulingReferenceOptions::default(),
+            &ExternalSchedulingReferenceOptions {
+                solver: ExternalSchedulingReferenceSolver::RustExact,
+            },
         );
         self.check(
             "Flow-shop exact/reference bridge status optimal",
@@ -19571,8 +19645,8 @@ impl Driver {
                 );
             }
             _ => println!(
-                "  SKIP  Flow-shop OR-Tools CP-SAT makespan: status={:?} message={}",
-                external.ortools_status, external.message
+                "  SKIP  Flow-shop OR-Tools CP-SAT makespan: no OR-Tools sidecar in solver={} message={}",
+                external.solver, external.message
             ),
         }
     }
@@ -19928,8 +20002,13 @@ impl Driver {
             reference.reduced_gradient.as_deref(),
             1e-7,
         );
-        let external_qp =
-            solve_qp_with_external_reference(&qp, &ExternalQuadraticReferenceOptions::default());
+        let external_qp = solve_qp_with_external_reference(
+            &qp,
+            &ExternalQuadraticReferenceOptions {
+                solver: ExternalQuadraticReferenceSolver::RustInternal,
+                ..Default::default()
+            },
+        );
         self.check(
             "QP Rust external-reference bridge status optimal",
             internal.status == QPStatus::Optimal
@@ -20103,7 +20182,10 @@ impl Driver {
         self.max_abs_close("MIQP x", &miqp_internal.x, &miqp_reference.x, 1e-7);
         let external_miqp = solve_miqp_with_external_reference(
             &miqp,
-            &ExternalQuadraticReferenceOptions::default(),
+            &ExternalQuadraticReferenceOptions {
+                solver: ExternalQuadraticReferenceSolver::RustInternal,
+                ..Default::default()
+            },
         );
         self.check(
             "MIQP Rust external-reference bridge status optimal",
@@ -20194,7 +20276,10 @@ impl Driver {
         }
         let external_socp = solve_socp_with_external_reference(
             &socp,
-            &ExternalQuadraticReferenceOptions::default(),
+            &ExternalQuadraticReferenceOptions {
+                solver: ExternalQuadraticReferenceSolver::RustInternal,
+                ..Default::default()
+            },
         );
         self.check(
             "SOCP Rust external-reference bridge status optimal",
@@ -20282,8 +20367,13 @@ impl Driver {
             let x_check = format!("QCP registered {solver} x");
             self.max_abs_close(&x_check, &qcp_internal.x, &optional_qcp_reference.x, 1e-6);
         }
-        let external_qcp =
-            solve_qcp_with_external_reference(&qcp, &ExternalQuadraticReferenceOptions::default());
+        let external_qcp = solve_qcp_with_external_reference(
+            &qcp,
+            &ExternalQuadraticReferenceOptions {
+                solver: ExternalQuadraticReferenceSolver::RustInternal,
+                ..Default::default()
+            },
+        );
         self.check(
             "QCP Rust external-reference bridge status optimal",
             qcp_internal.status == QcpStatus::Optimal

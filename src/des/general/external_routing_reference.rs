@@ -1,9 +1,9 @@
 //! Rust-facing bridge for external/reference vehicle-routing solvers.
 //!
-//! The checked-in Python bridge (`scripts/routing_reference.py`) computes an
-//! exact small CVRP route-cover reference and, when installed, calls OR-Tools
-//! Routing on the same input. This module owns typed model serialization and
-//! status mapping so callers do not need to shell out manually.
+//! The native Rust reference computes an exact small CVRP route-cover check
+//! without Python startup. The checked-in Python bridge
+//! (`scripts/routing_reference.py`) remains available for OR-Tools Routing on
+//! the same input.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -13,11 +13,14 @@ use std::time::Instant;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::des::general::classical_optimization_models::{Point, VRPCustomer, VRPRoute};
+use crate::des::general::classical_optimization_models::{
+    run_vrp_exact, Point, VRPCustomer, VRPRoute, VRPSavingsParams,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExternalRoutingReferenceSolver {
     Auto,
+    RustExact,
     OrTools,
     Fallback,
 }
@@ -26,6 +29,7 @@ impl ExternalRoutingReferenceSolver {
     pub fn as_arg(self) -> &'static str {
         match self {
             ExternalRoutingReferenceSolver::Auto => "auto",
+            ExternalRoutingReferenceSolver::RustExact => "rust-exact",
             ExternalRoutingReferenceSolver::OrTools => "ortools",
             ExternalRoutingReferenceSolver::Fallback => "fallback",
         }
@@ -124,6 +128,132 @@ fn status_from_str(status: &str) -> ExternalRoutingReferenceStatus {
         "unsupported" => ExternalRoutingReferenceStatus::Unsupported,
         "unavailable" => ExternalRoutingReferenceStatus::Unavailable,
         _ => ExternalRoutingReferenceStatus::NumericalError,
+    }
+}
+
+const RUST_CVRP_MAX_EXACT_CUSTOMERS: usize = 16;
+
+fn rust_routing_empty_solution(
+    status: ExternalRoutingReferenceStatus,
+    solver: impl Into<String>,
+    message: impl Into<String>,
+    elapsed_ms: f64,
+) -> ExternalRoutingReferenceSolution {
+    ExternalRoutingReferenceSolution {
+        status,
+        solver: solver.into(),
+        routes: Vec::new(),
+        objective: None,
+        feasible_route_masks: None,
+        ortools_status: None,
+        ortools_routes: Vec::new(),
+        ortools_objective: None,
+        message: message.into(),
+        ortools_message: String::new(),
+        elapsed_ms,
+    }
+}
+
+fn validate_rust_cvrp_inputs(
+    depot: Point,
+    customers: &[VRPCustomer],
+    vehicle_capacity: f64,
+) -> Result<(), String> {
+    if !depot.x.is_finite() || !depot.y.is_finite() {
+        return Err("depot coordinates must be finite".to_string());
+    }
+    if !vehicle_capacity.is_finite() || vehicle_capacity <= 0.0 {
+        return Err("vehicle_capacity must be finite and positive".to_string());
+    }
+    let mut ids = std::collections::HashSet::new();
+    for (index, customer) in customers.iter().enumerate() {
+        if customer.id.trim().is_empty() {
+            return Err(format!("customers[{index}].id must be non-empty"));
+        }
+        if !ids.insert(customer.id.clone()) {
+            return Err(format!("duplicate customer id {:?}", customer.id));
+        }
+        if !customer.x.is_finite() || !customer.y.is_finite() {
+            return Err(format!("customers[{index}] coordinates must be finite"));
+        }
+        if !customer.demand.is_finite() || customer.demand < 0.0 {
+            return Err(format!(
+                "customers[{index}].demand must be finite and non-negative"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn solve_cvrp_with_rust_reference(
+    depot: Point,
+    customers: &[VRPCustomer],
+    vehicle_capacity: f64,
+) -> ExternalRoutingReferenceSolution {
+    let started = Instant::now();
+    if let Err(message) = validate_rust_cvrp_inputs(depot, customers, vehicle_capacity) {
+        return rust_routing_empty_solution(
+            ExternalRoutingReferenceStatus::NumericalError,
+            "rust:exact-cvrp",
+            message,
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    if customers.len() > RUST_CVRP_MAX_EXACT_CUSTOMERS {
+        return rust_routing_empty_solution(
+            ExternalRoutingReferenceStatus::Unsupported,
+            "rust:exact-cvrp",
+            format!(
+                "exact CVRP only practical for n <= {RUST_CVRP_MAX_EXACT_CUSTOMERS}, got {}",
+                customers.len()
+            ),
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    if customers
+        .iter()
+        .any(|customer| customer.demand > vehicle_capacity + 1e-9)
+    {
+        return rust_routing_empty_solution(
+            ExternalRoutingReferenceStatus::Infeasible,
+            "rust:exact-cvrp",
+            "customer demand exceeds vehicle capacity",
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    if customers.is_empty() {
+        return ExternalRoutingReferenceSolution {
+            status: ExternalRoutingReferenceStatus::Optimal,
+            solver: "rust:exact-cvrp".to_string(),
+            routes: Vec::new(),
+            objective: Some(0.0),
+            feasible_route_masks: Some(0),
+            ortools_status: None,
+            ortools_routes: Vec::new(),
+            ortools_objective: None,
+            message: "empty instance".to_string(),
+            ortools_message: String::new(),
+            elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+        };
+    }
+
+    let result = run_vrp_exact(VRPSavingsParams {
+        depot: Some(depot),
+        customers: Some(customers.to_vec()),
+        vehicle_capacity: Some(vehicle_capacity),
+    });
+    ExternalRoutingReferenceSolution {
+        status: ExternalRoutingReferenceStatus::Optimal,
+        solver: "rust:exact-cvrp".to_string(),
+        routes: result.routes,
+        objective: Some(result.total_distance),
+        feasible_route_masks: Some(result.savings_considered),
+        ortools_status: None,
+        ortools_routes: Vec::new(),
+        ortools_objective: None,
+        message: "exact CVRP route-cover dynamic program".to_string(),
+        ortools_message: String::new(),
+        elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
     }
 }
 
@@ -260,6 +390,13 @@ pub fn solve_cvrp_with_external_reference(
     vehicle_capacity: f64,
     opts: &ExternalRoutingReferenceOptions,
 ) -> ExternalRoutingReferenceSolution {
+    if matches!(
+        opts.solver,
+        ExternalRoutingReferenceSolver::RustExact | ExternalRoutingReferenceSolver::Fallback
+    ) {
+        return solve_cvrp_with_rust_reference(depot, customers, vehicle_capacity);
+    }
+
     run_routing_reference_json(
         json!({
             "depot": {
@@ -276,4 +413,92 @@ pub fn solve_cvrp_with_external_reference(
         }),
         opts,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_customers() -> Vec<VRPCustomer> {
+        vec![
+            VRPCustomer {
+                id: "A".to_string(),
+                x: 1.0,
+                y: 2.0,
+                demand: 2.0,
+            },
+            VRPCustomer {
+                id: "B".to_string(),
+                x: 2.0,
+                y: 1.0,
+                demand: 2.0,
+            },
+            VRPCustomer {
+                id: "C".to_string(),
+                x: 4.0,
+                y: 1.0,
+                demand: 2.0,
+            },
+            VRPCustomer {
+                id: "D".to_string(),
+                x: 5.0,
+                y: 2.0,
+                demand: 1.0,
+            },
+            VRPCustomer {
+                id: "E".to_string(),
+                x: 3.0,
+                y: 4.0,
+                demand: 2.0,
+            },
+        ]
+    }
+
+    #[test]
+    fn rust_reference_solves_sample_cvrp() {
+        let solution = solve_cvrp_with_external_reference(
+            Point { x: 0.0, y: 0.0 },
+            &sample_customers(),
+            5.0,
+            &ExternalRoutingReferenceOptions {
+                solver: ExternalRoutingReferenceSolver::RustExact,
+            },
+        );
+
+        assert_eq!(solution.status, ExternalRoutingReferenceStatus::Optimal);
+        assert_eq!(solution.solver, "rust:exact-cvrp");
+        assert!(solution.objective.is_some());
+        assert_eq!(
+            solution
+                .routes
+                .iter()
+                .map(|route| route.customers.len())
+                .sum::<usize>(),
+            5
+        );
+        assert!(solution.feasible_route_masks.is_some());
+        assert!(solution.ortools_status.is_none());
+    }
+
+    #[test]
+    fn fallback_alias_uses_rust_reference_for_infeasible_capacity() {
+        let customers = vec![VRPCustomer {
+            id: "A".to_string(),
+            x: 1.0,
+            y: 0.0,
+            demand: 2.0,
+        }];
+        let solution = solve_cvrp_with_external_reference(
+            Point { x: 0.0, y: 0.0 },
+            &customers,
+            1.0,
+            &ExternalRoutingReferenceOptions {
+                solver: ExternalRoutingReferenceSolver::Fallback,
+            },
+        );
+
+        assert_eq!(solution.status, ExternalRoutingReferenceStatus::Infeasible);
+        assert_eq!(solution.solver, "rust:exact-cvrp");
+        assert!(solution.objective.is_none());
+    }
 }

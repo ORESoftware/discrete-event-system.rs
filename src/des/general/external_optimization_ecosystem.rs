@@ -456,6 +456,133 @@ fn probe_java_tool(tool: ExternalOptimizationTool) -> ExternalOptimizationProbe 
     )
 }
 
+fn probe_python_tool(tool: ExternalOptimizationTool) -> ExternalOptimizationProbe {
+    let t0 = Instant::now();
+    let env_var = tool.env_var();
+    let python = env::var_os(env_var)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .and_then(|path| find_command_path(&path))
+        .or_else(|| find_first_command(&["python3", "python"]));
+    let Some(python) = python else {
+        return probe_result(
+            tool,
+            ExternalOptimizationProbeStatus::NotConfigured,
+            None,
+            env_var,
+            None,
+            elapsed_ms(t0),
+            format!(
+                "set {env_var} to a Python interpreter with {} installed",
+                tool.display_name()
+            ),
+        );
+    };
+    for module in tool.python_modules() {
+        match Command::new(&python)
+            .arg("-c")
+            .arg(format!("import {module}"))
+            .output()
+        {
+            Ok(output) if output.status.success() => {
+                return probe_result(
+                    tool,
+                    ExternalOptimizationProbeStatus::Ready,
+                    Some(python),
+                    env_var,
+                    Some(module.to_string()),
+                    elapsed_ms(t0),
+                    format!(
+                        "Python interpreter can import module '{module}' for {}",
+                        tool.display_name()
+                    ),
+                );
+            }
+            Ok(_) | Err(_) => {}
+        }
+    }
+    probe_result(
+        tool,
+        ExternalOptimizationProbeStatus::NotConfigured,
+        Some(python),
+        env_var,
+        None,
+        elapsed_ms(t0),
+        format!(
+            "{} Python modules {:?} are not importable; set {env_var}",
+            tool.display_name(),
+            tool.python_modules()
+        ),
+    )
+}
+
+fn probe_julia_tool(tool: ExternalOptimizationTool) -> ExternalOptimizationProbe {
+    let t0 = Instant::now();
+    let env_var = tool.env_var();
+    if let Some(project) = env::var_os(env_var).filter(|value| !value.is_empty()) {
+        return probe_result(
+            tool,
+            ExternalOptimizationProbeStatus::Ready,
+            find_first_command(&["julia"]),
+            env_var,
+            Some(project.to_string_lossy().to_string()),
+            elapsed_ms(t0),
+            format!("configured Julia project/runtime for {}", tool.display_name()),
+        );
+    }
+    probe_result(
+        tool,
+        ExternalOptimizationProbeStatus::NotConfigured,
+        find_first_command(&["julia"]),
+        env_var,
+        None,
+        elapsed_ms(t0),
+        format!(
+            "set {env_var} to a Julia project or environment with {}",
+            tool.display_name()
+        ),
+    )
+}
+
+fn probe_native_tool(tool: ExternalOptimizationTool) -> ExternalOptimizationProbe {
+    let t0 = Instant::now();
+    let env_var = tool.env_var();
+    if let Some(dir) = env::var_os(env_var).filter(|value| !value.is_empty()) {
+        return probe_result(
+            tool,
+            ExternalOptimizationProbeStatus::Ready,
+            find_first_command(tool.native_command_aliases()),
+            env_var,
+            Some(dir.to_string_lossy().to_string()),
+            elapsed_ms(t0),
+            format!("configured native installation for {}", tool.display_name()),
+        );
+    }
+    if let Some(command) = find_first_command(tool.native_command_aliases()) {
+        return probe_result(
+            tool,
+            ExternalOptimizationProbeStatus::Ready,
+            Some(command),
+            env_var,
+            None,
+            elapsed_ms(t0),
+            format!("found native command for {}", tool.display_name()),
+        );
+    }
+    probe_result(
+        tool,
+        ExternalOptimizationProbeStatus::NotConfigured,
+        None,
+        env_var,
+        None,
+        elapsed_ms(t0),
+        format!(
+            "set {env_var} to a local installation directory for {}",
+            tool.display_name()
+        ),
+    )
+}
+
 fn probe_rust_tool(tool: ExternalOptimizationTool) -> ExternalOptimizationProbe {
     let t0 = Instant::now();
     let env_var = tool.env_var();
@@ -580,6 +707,14 @@ fn probe_result(
 
 fn find_first_command(aliases: &[&str]) -> Option<PathBuf> {
     aliases.iter().find_map(|alias| find_command(alias))
+}
+
+fn find_command_path(path: &Path) -> Option<PathBuf> {
+    if path.components().count() > 1 {
+        executable_file(path).then(|| path.to_path_buf())
+    } else {
+        path.to_str().and_then(find_command)
+    }
 }
 
 fn find_command(alias: &str) -> Option<PathBuf> {

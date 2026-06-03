@@ -72,6 +72,15 @@ pub enum ExternalOptimizationTool {
     Ampl,
     Gams,
     Hexaly,
+    HighsCli,
+    GlpkCli,
+    ScipCli,
+    CbcCli,
+    ClpCli,
+    GurobiCli,
+    CplexCli,
+    XpressCli,
+    LindoCli,
     GoodLp,
     LpModeler,
     RustLinprog,
@@ -119,6 +128,15 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Ampl,
             ExternalOptimizationTool::Gams,
             ExternalOptimizationTool::Hexaly,
+            ExternalOptimizationTool::HighsCli,
+            ExternalOptimizationTool::GlpkCli,
+            ExternalOptimizationTool::ScipCli,
+            ExternalOptimizationTool::CbcCli,
+            ExternalOptimizationTool::ClpCli,
+            ExternalOptimizationTool::GurobiCli,
+            ExternalOptimizationTool::CplexCli,
+            ExternalOptimizationTool::XpressCli,
+            ExternalOptimizationTool::LindoCli,
             ExternalOptimizationTool::GoodLp,
             ExternalOptimizationTool::LpModeler,
             ExternalOptimizationTool::RustLinprog,
@@ -166,6 +184,15 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Ampl => "ampl",
             ExternalOptimizationTool::Gams => "gams",
             ExternalOptimizationTool::Hexaly => "hexaly",
+            ExternalOptimizationTool::HighsCli => "highs-cli",
+            ExternalOptimizationTool::GlpkCli => "glpk-cli",
+            ExternalOptimizationTool::ScipCli => "scip-cli",
+            ExternalOptimizationTool::CbcCli => "cbc-cli",
+            ExternalOptimizationTool::ClpCli => "clp-cli",
+            ExternalOptimizationTool::GurobiCli => "gurobi-cli",
+            ExternalOptimizationTool::CplexCli => "cplex-cli",
+            ExternalOptimizationTool::XpressCli => "xpress-cli",
+            ExternalOptimizationTool::LindoCli => "lindo-cli",
             ExternalOptimizationTool::GoodLp => "good-lp",
             ExternalOptimizationTool::LpModeler => "lp-modeler",
             ExternalOptimizationTool::RustLinprog => "rust-linprog",
@@ -213,6 +240,15 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Ampl => "AMPL",
             ExternalOptimizationTool::Gams => "GAMS",
             ExternalOptimizationTool::Hexaly => "Hexaly Optimizer",
+            ExternalOptimizationTool::HighsCli => "HiGHS CLI",
+            ExternalOptimizationTool::GlpkCli => "GLPK glpsol CLI",
+            ExternalOptimizationTool::ScipCli => "SCIP CLI",
+            ExternalOptimizationTool::CbcCli => "COIN-OR CBC CLI",
+            ExternalOptimizationTool::ClpCli => "COIN-OR CLP CLI",
+            ExternalOptimizationTool::GurobiCli => "Gurobi Optimizer CLI",
+            ExternalOptimizationTool::CplexCli => "IBM ILOG CPLEX Optimizer CLI",
+            ExternalOptimizationTool::XpressCli => "FICO Xpress Optimizer CLI",
+            ExternalOptimizationTool::LindoCli => "LINDO Systems CLI",
             ExternalOptimizationTool::GoodLp => "good_lp",
             ExternalOptimizationTool::LpModeler => "lp-modeler",
             ExternalOptimizationTool::RustLinprog => "rust-linprog",
@@ -259,7 +295,16 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::OpenWbo
             | ExternalOptimizationTool::Ampl
             | ExternalOptimizationTool::Gams
-            | ExternalOptimizationTool::Hexaly => ExternalOptimizationEcosystem::Native,
+            | ExternalOptimizationTool::Hexaly
+            | ExternalOptimizationTool::HighsCli
+            | ExternalOptimizationTool::GlpkCli
+            | ExternalOptimizationTool::ScipCli
+            | ExternalOptimizationTool::CbcCli
+            | ExternalOptimizationTool::ClpCli
+            | ExternalOptimizationTool::GurobiCli
+            | ExternalOptimizationTool::CplexCli
+            | ExternalOptimizationTool::XpressCli
+            | ExternalOptimizationTool::LindoCli => ExternalOptimizationEcosystem::Native,
             ExternalOptimizationTool::GoodLp
             | ExternalOptimizationTool::LpModeler
             | ExternalOptimizationTool::RustLinprog
@@ -307,6 +352,15 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Ampl => "AMPL_DIR",
             ExternalOptimizationTool::Gams => "GAMS_DIR",
             ExternalOptimizationTool::Hexaly => "HEXALY_DIR",
+            ExternalOptimizationTool::HighsCli => "HIGHS_CMD",
+            ExternalOptimizationTool::GlpkCli => "GLPSOL_CMD",
+            ExternalOptimizationTool::ScipCli => "SCIP_CMD",
+            ExternalOptimizationTool::CbcCli => "CBC_CMD",
+            ExternalOptimizationTool::ClpCli => "CLP_CMD",
+            ExternalOptimizationTool::GurobiCli => "GUROBI_CMD",
+            ExternalOptimizationTool::CplexCli => "CPLEX_CMD",
+            ExternalOptimizationTool::XpressCli => "XPRESS_CMD",
+            ExternalOptimizationTool::LindoCli => "LINDO_CMD",
             ExternalOptimizationTool::GoodLp => "GOOD_LP_CARGO_MANIFEST",
             ExternalOptimizationTool::LpModeler => "LP_MODELER_CARGO_MANIFEST",
             ExternalOptimizationTool::RustLinprog => "RUST_LINPROG_CARGO_MANIFEST",
@@ -405,6 +459,21 @@ impl ExternalOptimizationTool {
                 "LOCALSOLVER_HOME",
                 "LOCALSOLVER_DIR",
             ],
+            ExternalOptimizationTool::HighsCli => &["HIGHS_HOME", "HIGHS_DIR"],
+            ExternalOptimizationTool::GlpkCli => &["GLPK_HOME", "GLPK_DIR"],
+            ExternalOptimizationTool::ScipCli => &["SCIPOPTDIR", "SCIP_DIR", "SCIP_HOME"],
+            ExternalOptimizationTool::CbcCli => {
+                &["CBC_DIR", "CBC_HOME", "COINOR_DIR", "COINOR_HOME"]
+            }
+            ExternalOptimizationTool::ClpCli => {
+                &["CLP_DIR", "CLP_HOME", "COINOR_DIR", "COINOR_HOME"]
+            }
+            ExternalOptimizationTool::GurobiCli => &["GUROBI_HOME"],
+            ExternalOptimizationTool::CplexCli => &["CPLEX_STUDIO_DIR", "CPLEX_HOME"],
+            ExternalOptimizationTool::XpressCli => &["XPRESSDIR", "XPRESS_DIR", "XPRESS_HOME"],
+            ExternalOptimizationTool::LindoCli => {
+                &["LINDO_HOME", "LINDO_DIR", "LINDOAPI_HOME", "LINDOAPI_DIR"]
+            }
             ExternalOptimizationTool::NloptRs => &["NLOPT_DIR", "NLOPT_HOME"],
             ExternalOptimizationTool::HighsRust => &["HIGHS_DIR", "HIGHS_HOME"],
             ExternalOptimizationTool::ScipRust => &["SCIPOPTDIR", "SCIP_DIR", "SCIP_HOME"],
@@ -467,6 +536,15 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Ampl => &["ampl"],
             ExternalOptimizationTool::Gams => &["gams"],
             ExternalOptimizationTool::Hexaly => &["hexaly", "localsolver"],
+            ExternalOptimizationTool::HighsCli => &["highs"],
+            ExternalOptimizationTool::GlpkCli => &["glpsol"],
+            ExternalOptimizationTool::ScipCli => &["scip"],
+            ExternalOptimizationTool::CbcCli => &["cbc"],
+            ExternalOptimizationTool::ClpCli => &["clp"],
+            ExternalOptimizationTool::GurobiCli => &["gurobi_cl"],
+            ExternalOptimizationTool::CplexCli => &["cplex"],
+            ExternalOptimizationTool::XpressCli => &["optimizer", "xpress"],
+            ExternalOptimizationTool::LindoCli => &["runlindo", "lindo", "lindoapi"],
             ExternalOptimizationTool::Conjure => &["conjure"],
             ExternalOptimizationTool::Picat => &["picat"],
             ExternalOptimizationTool::Clingo => &["clingo"],
@@ -1208,7 +1286,7 @@ mod tests {
 
     #[test]
     fn ecosystem_tool_metadata_covers_supported_languages() {
-        assert_eq!(ExternalOptimizationTool::all().len(), 42);
+        assert_eq!(ExternalOptimizationTool::all().len(), 51);
         assert_eq!(
             ExternalOptimizationTool::ChocoSolver.ecosystem(),
             ExternalOptimizationEcosystem::Java
@@ -1235,6 +1313,10 @@ mod tests {
         );
         assert_eq!(
             ExternalOptimizationTool::Conjure.ecosystem(),
+            ExternalOptimizationEcosystem::Native
+        );
+        assert_eq!(
+            ExternalOptimizationTool::HighsCli.ecosystem(),
             ExternalOptimizationEcosystem::Native
         );
         assert_eq!(
@@ -1265,6 +1347,9 @@ mod tests {
         assert!(ExternalOptimizationTool::Hexaly
             .native_command_aliases()
             .contains(&"hexaly"));
+        assert!(ExternalOptimizationTool::HighsCli
+            .native_command_aliases()
+            .contains(&"highs"));
         assert!(ExternalOptimizationTool::OpenWbo
             .native_command_aliases()
             .contains(&"open-wbo"));

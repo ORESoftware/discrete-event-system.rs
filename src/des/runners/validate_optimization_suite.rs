@@ -127,6 +127,10 @@ use crate::des::general::external_validation_tools::{
     PrismModule, PrismValidationModel, SimulationMetricExpectation, SimulationValidationRequest,
     SmtDeclaration, SmtLibValidationScript, SmtSort, TlaValidationModule,
 };
+use crate::des::general::external_weighted_independent_set_reference::{
+    solve_weighted_independent_set_with_external_reference,
+    ExternalWeightedIndependentSetReferenceOptions, ExternalWeightedIndependentSetReferenceStatus,
+};
 use crate::des::general::external_weighted_max_sat_reference::{
     solve_weighted_max_sat_with_external_reference, ExternalWeightedMaxSatReferenceOptions,
     ExternalWeightedMaxSatReferenceStatus,
@@ -210,6 +214,11 @@ use crate::des::general::qp::{
 use crate::des::general::set_cover::{
     build_sample_set_cover_problem, set_cover_solution_feasible, solve_set_cover_exact,
     solve_set_cover_greedy, SetCoverProblem, SetCoverStatus,
+};
+use crate::des::general::weighted_independent_set::{
+    build_sample_weighted_independent_set_problem, solve_weighted_independent_set_exact,
+    solve_weighted_independent_set_greedy, weighted_independent_set_solution_feasible,
+    WeightedIndependentSetProblem, WeightedIndependentSetSolution, WeightedIndependentSetStatus,
 };
 use crate::des::general::weighted_max_sat::{
     build_sample_weighted_max_sat_problem, solve_weighted_max_sat_exact,
@@ -913,6 +922,26 @@ impl Driver {
                 color_names: color_names.to_vec(),
                 used_color_count,
                 message: "external graph-coloring solution".to_string(),
+            },
+        )
+    }
+
+    fn weighted_independent_set_external_solution_feasible(
+        &self,
+        problem: &WeightedIndependentSetProblem,
+        selected_vertex_indices: &[usize],
+        selected_vertex_ids: &[String],
+        total_weight: Option<f64>,
+    ) -> bool {
+        weighted_independent_set_solution_feasible(
+            problem,
+            &WeightedIndependentSetSolution {
+                status: WeightedIndependentSetStatus::Feasible,
+                selected_vertex_indices: selected_vertex_indices.to_vec(),
+                selected_vertex_ids: selected_vertex_ids.to_vec(),
+                total_weight: total_weight.unwrap_or(f64::NAN),
+                upper_bound: None,
+                message: "external weighted independent set solution".to_string(),
             },
         )
     }
@@ -1623,6 +1652,110 @@ impl Driver {
             }
             _ => println!(
                 "  SKIP  Graph-coloring OR-Tools CP-SAT objective: status={:?} message={}",
+                reference.ortools_status, reference.message
+            ),
+        }
+    }
+
+    fn validate_weighted_independent_set(&mut self) {
+        println!("\n-- Weighted independent set: exact/greedy vs OR-Tools CP-SAT bridge --");
+        let problem = build_sample_weighted_independent_set_problem();
+        let exact = solve_weighted_independent_set_exact(&problem);
+        let greedy = solve_weighted_independent_set_greedy(&problem);
+        self.check(
+            "Weighted independent set exact native optimum",
+            exact.status == WeightedIndependentSetStatus::Optimal
+                && (exact.total_weight - 16.0).abs() <= 1e-9
+                && exact.selected_vertex_ids == vec!["B", "D", "G"]
+                && weighted_independent_set_solution_feasible(&problem, &exact),
+            format!(
+                "status={} weight={:.10} vertices={:?} upper_bound={:?}",
+                exact.status.as_str(),
+                exact.total_weight,
+                exact.selected_vertex_ids,
+                exact.upper_bound
+            ),
+        );
+        self.check(
+            "Weighted independent set greedy native feasibility",
+            greedy.status == WeightedIndependentSetStatus::Feasible
+                && weighted_independent_set_solution_feasible(&problem, &greedy)
+                && greedy.total_weight <= exact.total_weight + 1e-9,
+            format!(
+                "status={} weight={:.10} vertices={:?}",
+                greedy.status.as_str(),
+                greedy.total_weight,
+                greedy.selected_vertex_ids
+            ),
+        );
+
+        let reference = solve_weighted_independent_set_with_external_reference(
+            &problem,
+            &ExternalWeightedIndependentSetReferenceOptions::default(),
+        );
+        self.check(
+            "Weighted independent set exact/reference bridge status optimal",
+            reference.status == ExternalWeightedIndependentSetReferenceStatus::Optimal,
+            format!(
+                "status={} solver={} message={}",
+                reference.status.as_str(),
+                reference.solver,
+                reference.message
+            ),
+        );
+        self.close(
+            "Weighted independent set exact/reference objective",
+            exact.total_weight,
+            reference.objective.unwrap_or(f64::NAN),
+            0.0,
+        );
+        self.check(
+            "Weighted independent set exact/reference feasibility",
+            self.weighted_independent_set_external_solution_feasible(
+                &problem,
+                &reference.selected_vertex_indices,
+                &reference.selected_vertex_ids,
+                reference.total_weight,
+            ),
+            format!(
+                "objective={:?} weight={:?} vertices={:?} upper_bound={:?}",
+                reference.objective,
+                reference.total_weight,
+                reference.selected_vertex_ids,
+                reference.upper_bound
+            ),
+        );
+
+        match (
+            reference.ortools_status.as_deref(),
+            reference.ortools_objective,
+        ) {
+            (Some("optimal"), Some(objective)) => {
+                self.close(
+                    "Weighted independent set OR-Tools CP-SAT objective",
+                    exact.total_weight,
+                    objective,
+                    0.0,
+                );
+                self.check(
+                    "Weighted independent set OR-Tools CP-SAT feasibility",
+                    self.weighted_independent_set_external_solution_feasible(
+                        &problem,
+                        &reference.ortools_selected_vertex_indices,
+                        &reference.ortools_selected_vertex_ids,
+                        reference.ortools_total_weight,
+                    ),
+                    format!(
+                        "objective={:?} weight={:?} vertices={:?} bound={:?}",
+                        reference.ortools_objective,
+                        reference.ortools_total_weight,
+                        reference.ortools_selected_vertex_ids,
+                        reference.ortools_objective_bound
+                    ),
+                );
+            }
+            _ => println!(
+                "  SKIP  Weighted independent set OR-Tools CP-SAT objective: status={:?} message={}",
                 reference.ortools_status, reference.message
             ),
         }
@@ -5958,19 +6091,16 @@ impl Driver {
     fn validate_external_optimization_ecosystem_adapters(&mut self) {
         println!("\n-- External Java/Rust optimization adapters --");
         let specs = external_optimization_tool_specs();
+        let current_tools = external_optimization_tools();
         self.check(
             "External optimization ecosystem registry covers requested tools",
-            external_optimization_tools().len() == 42 && specs.len() == 42,
-            format!(
-                "tools={} specs={}",
-                external_optimization_tools().len(),
-                specs.len()
-            ),
+            current_tools.len() == 51 && specs.len() == current_tools.len(),
+            format!("tools={} specs={}", current_tools.len(), specs.len()),
         );
         let legacy_tools = legacy_external_optimization_ecosystem::ExternalOptimizationTool::all();
         self.check(
             "External optimization legacy probe registry synchronized",
-            legacy_tools.len() == external_optimization_tools().len()
+            legacy_tools.len() == current_tools.len()
                 && legacy_tools
                     .iter()
                     .filter(|tool| {
@@ -5985,7 +6115,7 @@ impl Driver {
             format!(
                 "legacy_tools={} current_tools={}",
                 legacy_tools.len(),
-                external_optimization_tools().len()
+                current_tools.len()
             ),
         );
         let java_count = specs
@@ -6015,7 +6145,7 @@ impl Driver {
             .count();
         self.check(
             "External optimization ecosystem registry Python/Julia/native split",
-            python_count == 13 && julia_count == 1 && native_count == 8,
+            python_count == 13 && julia_count == 1 && native_count == 17,
             format!("python={python_count} julia={julia_count} native={native_count}"),
         );
         self.check(
@@ -6207,6 +6337,15 @@ impl Driver {
                 ecosystem_invocation("jump-reference", ExternalOptimizationTool::Jump),
                 ecosystem_invocation("ampl-reference", ExternalOptimizationTool::Ampl),
                 ecosystem_invocation("gams-reference", ExternalOptimizationTool::Gams),
+                ecosystem_invocation("highs-cli-reference", ExternalOptimizationTool::HighsCli),
+                ecosystem_invocation("glpk-cli-reference", ExternalOptimizationTool::GlpkCli),
+                ecosystem_invocation("scip-cli-reference", ExternalOptimizationTool::ScipCli),
+                ecosystem_invocation("cbc-cli-reference", ExternalOptimizationTool::CbcCli),
+                ecosystem_invocation("clp-cli-reference", ExternalOptimizationTool::ClpCli),
+                ecosystem_invocation("gurobi-cli-reference", ExternalOptimizationTool::GurobiCli),
+                ecosystem_invocation("cplex-cli-reference", ExternalOptimizationTool::CplexCli),
+                ecosystem_invocation("xpress-cli-reference", ExternalOptimizationTool::XpressCli),
+                ecosystem_invocation("lindo-cli-reference", ExternalOptimizationTool::LindoCli),
                 ecosystem_invocation("highs-rust-reference", ExternalOptimizationTool::HighsRust),
                 ecosystem_invocation("scip-rust-reference", ExternalOptimizationTool::ScipRust),
                 ecosystem_invocation("cbc-rust-reference", ExternalOptimizationTool::CbcRust),
@@ -17211,6 +17350,7 @@ impl Driver {
         self.validate_set_cover();
         self.validate_facility_location();
         self.validate_graph_coloring();
+        self.validate_weighted_independent_set();
         self.validate_weighted_max_sat();
         self.validate_lp();
         self.validate_ip_mip();

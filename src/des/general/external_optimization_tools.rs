@@ -1664,8 +1664,11 @@ fn probe_external_optimization_linear_cli_tool(
     let probe = probe_external_linear_cli_solver(ExternalLinearCliKind::Lp, &cli_opts);
     let status = match probe.status {
         ExternalLinearCliProbeStatus::Ready => ExternalOptimizationProbeStatus::Ready,
-        ExternalLinearCliProbeStatus::NotInstalled => ExternalOptimizationProbeStatus::NotConfigured,
-        ExternalLinearCliProbeStatus::BridgeUnsupported | ExternalLinearCliProbeStatus::SmokeFailed => {
+        ExternalLinearCliProbeStatus::NotInstalled => {
+            ExternalOptimizationProbeStatus::NotConfigured
+        }
+        ExternalLinearCliProbeStatus::BridgeUnsupported
+        | ExternalLinearCliProbeStatus::SmokeFailed => {
             ExternalOptimizationProbeStatus::AdapterMissing
         }
     };
@@ -1878,10 +1881,11 @@ mod tests {
         external_optimization_comparison_report_to_json,
         external_optimization_normalized_result_from_value, external_optimization_tool_specs,
         external_optimization_tools, find_command_in_install_dir,
-        run_external_optimization_comparison, ExternalOptimizationAdapterInvocation,
-        ExternalOptimizationAdapterOptions, ExternalOptimizationAdapterStatus,
-        ExternalOptimizationExactness, ExternalOptimizationFamily, ExternalOptimizationLanguage,
-        ExternalOptimizationProbeStatus, ExternalOptimizationTool, ExternalLinearCliSolver,
+        run_external_optimization_comparison, ExternalLinearCliSolver,
+        ExternalOptimizationAdapterInvocation, ExternalOptimizationAdapterOptions,
+        ExternalOptimizationAdapterStatus, ExternalOptimizationExactness,
+        ExternalOptimizationFamily, ExternalOptimizationLanguage, ExternalOptimizationProbeStatus,
+        ExternalOptimizationTool,
     };
     use serde_json::json;
     use std::path::PathBuf;

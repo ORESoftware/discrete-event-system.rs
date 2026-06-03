@@ -34,6 +34,7 @@ pub mod lp;
 pub mod math_program;
 pub mod minimum_spanning_tree;
 pub mod statistical_optimization;
+pub mod weighted_independent_set;
 pub mod weighted_max_sat;
 
 pub mod advanced_control_models;
@@ -117,6 +118,7 @@ pub mod external_scheduling_reference;
 pub mod external_set_cover_reference;
 pub mod external_tsp_reference;
 pub mod external_validation_tools;
+pub mod external_weighted_independent_set_reference;
 pub mod external_weighted_max_sat_reference;
 pub mod feasibility_pipeline;
 pub mod internal_solver_network;

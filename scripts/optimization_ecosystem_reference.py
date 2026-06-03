@@ -39,7 +39,21 @@ CP_TOOLS = {
 }
 PLANNING_TOOLS = {"optaplanner", "timefold"}
 MULTIOBJECTIVE_TOOLS = {"jmetal", "moea-framework", "ecj"}
-CONVEX_TOOLS = {"cvxpy", "cvxopt"}
+CONVEX_TOOLS = {
+    "cvxpy",
+    "cvxopt",
+    "mosek",
+    "copt",
+    "osqp",
+    "scs",
+    "clarabel",
+    "ecos",
+    "qpoases",
+    "proxqp",
+    "cosmo",
+    "sdpa",
+    "csdp",
+}
 LINEAR_TOOLS = {
     "ojalgo",
     "pyomo",
@@ -49,6 +63,16 @@ LINEAR_TOOLS = {
     "jump",
     "ampl",
     "gams",
+    "symphony",
+    "highs-cli",
+    "glpk-cli",
+    "scip-cli",
+    "cbc-cli",
+    "clp-cli",
+    "gurobi-cli",
+    "cplex-cli",
+    "xpress-cli",
+    "lindo-cli",
     "good-lp",
     "lp-modeler",
     "rust-linprog",
@@ -57,7 +81,18 @@ LINEAR_TOOLS = {
     "cbc-rust",
 }
 NATIVE_BINDING_TOOLS = {"pyscipopt", "gurobipy"}
-NONLINEAR_TOOLS = {"argmin", "nlopt", "scipy-optimize"}
+NONLINEAR_TOOLS = {
+    "argmin",
+    "nlopt",
+    "scipy-optimize",
+    "minotaur",
+    "ipopt",
+    "bonmin",
+    "couenne",
+    "knitro",
+    "baron",
+    "casadi",
+}
 HYBRID_TOOLS = {"hexaly"}
 
 

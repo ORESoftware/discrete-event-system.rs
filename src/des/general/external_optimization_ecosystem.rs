@@ -72,6 +72,34 @@ pub enum ExternalOptimizationTool {
     Ampl,
     Gams,
     Hexaly,
+    Minotaur,
+    Symphony,
+    Ipopt,
+    Bonmin,
+    Couenne,
+    Knitro,
+    Mosek,
+    Baron,
+    Copt,
+    Casadi,
+    Osqp,
+    Scs,
+    Clarabel,
+    Ecos,
+    Qpoases,
+    Proxqp,
+    Cosmo,
+    Sdpa,
+    Csdp,
+    HighsCli,
+    GlpkCli,
+    ScipCli,
+    CbcCli,
+    ClpCli,
+    GurobiCli,
+    CplexCli,
+    XpressCli,
+    LindoCli,
     GoodLp,
     LpModeler,
     RustLinprog,
@@ -119,6 +147,34 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Ampl,
             ExternalOptimizationTool::Gams,
             ExternalOptimizationTool::Hexaly,
+            ExternalOptimizationTool::Minotaur,
+            ExternalOptimizationTool::Symphony,
+            ExternalOptimizationTool::Ipopt,
+            ExternalOptimizationTool::Bonmin,
+            ExternalOptimizationTool::Couenne,
+            ExternalOptimizationTool::Knitro,
+            ExternalOptimizationTool::Mosek,
+            ExternalOptimizationTool::Baron,
+            ExternalOptimizationTool::Copt,
+            ExternalOptimizationTool::Casadi,
+            ExternalOptimizationTool::Osqp,
+            ExternalOptimizationTool::Scs,
+            ExternalOptimizationTool::Clarabel,
+            ExternalOptimizationTool::Ecos,
+            ExternalOptimizationTool::Qpoases,
+            ExternalOptimizationTool::Proxqp,
+            ExternalOptimizationTool::Cosmo,
+            ExternalOptimizationTool::Sdpa,
+            ExternalOptimizationTool::Csdp,
+            ExternalOptimizationTool::HighsCli,
+            ExternalOptimizationTool::GlpkCli,
+            ExternalOptimizationTool::ScipCli,
+            ExternalOptimizationTool::CbcCli,
+            ExternalOptimizationTool::ClpCli,
+            ExternalOptimizationTool::GurobiCli,
+            ExternalOptimizationTool::CplexCli,
+            ExternalOptimizationTool::XpressCli,
+            ExternalOptimizationTool::LindoCli,
             ExternalOptimizationTool::GoodLp,
             ExternalOptimizationTool::LpModeler,
             ExternalOptimizationTool::RustLinprog,
@@ -166,6 +222,34 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Ampl => "ampl",
             ExternalOptimizationTool::Gams => "gams",
             ExternalOptimizationTool::Hexaly => "hexaly",
+            ExternalOptimizationTool::Minotaur => "minotaur",
+            ExternalOptimizationTool::Symphony => "symphony",
+            ExternalOptimizationTool::Ipopt => "ipopt",
+            ExternalOptimizationTool::Bonmin => "bonmin",
+            ExternalOptimizationTool::Couenne => "couenne",
+            ExternalOptimizationTool::Knitro => "knitro",
+            ExternalOptimizationTool::Mosek => "mosek",
+            ExternalOptimizationTool::Baron => "baron",
+            ExternalOptimizationTool::Copt => "copt",
+            ExternalOptimizationTool::Casadi => "casadi",
+            ExternalOptimizationTool::Osqp => "osqp",
+            ExternalOptimizationTool::Scs => "scs",
+            ExternalOptimizationTool::Clarabel => "clarabel",
+            ExternalOptimizationTool::Ecos => "ecos",
+            ExternalOptimizationTool::Qpoases => "qpoases",
+            ExternalOptimizationTool::Proxqp => "proxqp",
+            ExternalOptimizationTool::Cosmo => "cosmo",
+            ExternalOptimizationTool::Sdpa => "sdpa",
+            ExternalOptimizationTool::Csdp => "csdp",
+            ExternalOptimizationTool::HighsCli => "highs-cli",
+            ExternalOptimizationTool::GlpkCli => "glpk-cli",
+            ExternalOptimizationTool::ScipCli => "scip-cli",
+            ExternalOptimizationTool::CbcCli => "cbc-cli",
+            ExternalOptimizationTool::ClpCli => "clp-cli",
+            ExternalOptimizationTool::GurobiCli => "gurobi-cli",
+            ExternalOptimizationTool::CplexCli => "cplex-cli",
+            ExternalOptimizationTool::XpressCli => "xpress-cli",
+            ExternalOptimizationTool::LindoCli => "lindo-cli",
             ExternalOptimizationTool::GoodLp => "good-lp",
             ExternalOptimizationTool::LpModeler => "lp-modeler",
             ExternalOptimizationTool::RustLinprog => "rust-linprog",
@@ -213,6 +297,34 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Ampl => "AMPL",
             ExternalOptimizationTool::Gams => "GAMS",
             ExternalOptimizationTool::Hexaly => "Hexaly Optimizer",
+            ExternalOptimizationTool::Minotaur => "MINOTAUR",
+            ExternalOptimizationTool::Symphony => "COIN-OR SYMPHONY",
+            ExternalOptimizationTool::Ipopt => "Ipopt",
+            ExternalOptimizationTool::Bonmin => "Bonmin",
+            ExternalOptimizationTool::Couenne => "Couenne",
+            ExternalOptimizationTool::Knitro => "Artelys Knitro",
+            ExternalOptimizationTool::Mosek => "MOSEK",
+            ExternalOptimizationTool::Baron => "BARON",
+            ExternalOptimizationTool::Copt => "COPT",
+            ExternalOptimizationTool::Casadi => "CasADi",
+            ExternalOptimizationTool::Osqp => "OSQP",
+            ExternalOptimizationTool::Scs => "SCS",
+            ExternalOptimizationTool::Clarabel => "Clarabel",
+            ExternalOptimizationTool::Ecos => "ECOS",
+            ExternalOptimizationTool::Qpoases => "qpOASES",
+            ExternalOptimizationTool::Proxqp => "ProxQP",
+            ExternalOptimizationTool::Cosmo => "COSMO",
+            ExternalOptimizationTool::Sdpa => "SDPA",
+            ExternalOptimizationTool::Csdp => "CSDP",
+            ExternalOptimizationTool::HighsCli => "HiGHS CLI",
+            ExternalOptimizationTool::GlpkCli => "GLPK glpsol CLI",
+            ExternalOptimizationTool::ScipCli => "SCIP CLI",
+            ExternalOptimizationTool::CbcCli => "COIN-OR CBC CLI",
+            ExternalOptimizationTool::ClpCli => "COIN-OR CLP CLI",
+            ExternalOptimizationTool::GurobiCli => "Gurobi Optimizer CLI",
+            ExternalOptimizationTool::CplexCli => "IBM ILOG CPLEX Optimizer CLI",
+            ExternalOptimizationTool::XpressCli => "FICO Xpress Optimizer CLI",
+            ExternalOptimizationTool::LindoCli => "LINDO Systems CLI",
             ExternalOptimizationTool::GoodLp => "good_lp",
             ExternalOptimizationTool::LpModeler => "lp-modeler",
             ExternalOptimizationTool::RustLinprog => "rust-linprog",
@@ -250,7 +362,12 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::GurobiPy
             | ExternalOptimizationTool::Docplex
             | ExternalOptimizationTool::OrToolsPython
-            | ExternalOptimizationTool::ScipyOptimize => ExternalOptimizationEcosystem::Python,
+            | ExternalOptimizationTool::ScipyOptimize
+            | ExternalOptimizationTool::Casadi
+            | ExternalOptimizationTool::Osqp
+            | ExternalOptimizationTool::Scs
+            | ExternalOptimizationTool::Clarabel
+            | ExternalOptimizationTool::Ecos => ExternalOptimizationEcosystem::Python,
             ExternalOptimizationTool::Jump => ExternalOptimizationEcosystem::Julia,
             ExternalOptimizationTool::Conjure
             | ExternalOptimizationTool::Picat
@@ -259,7 +376,30 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::OpenWbo
             | ExternalOptimizationTool::Ampl
             | ExternalOptimizationTool::Gams
-            | ExternalOptimizationTool::Hexaly => ExternalOptimizationEcosystem::Native,
+            | ExternalOptimizationTool::Hexaly
+            | ExternalOptimizationTool::Minotaur
+            | ExternalOptimizationTool::Symphony
+            | ExternalOptimizationTool::Ipopt
+            | ExternalOptimizationTool::Bonmin
+            | ExternalOptimizationTool::Couenne
+            | ExternalOptimizationTool::Knitro
+            | ExternalOptimizationTool::Mosek
+            | ExternalOptimizationTool::Baron
+            | ExternalOptimizationTool::Copt
+            | ExternalOptimizationTool::Qpoases
+            | ExternalOptimizationTool::Proxqp
+            | ExternalOptimizationTool::Cosmo
+            | ExternalOptimizationTool::Sdpa
+            | ExternalOptimizationTool::Csdp
+            | ExternalOptimizationTool::HighsCli
+            | ExternalOptimizationTool::GlpkCli
+            | ExternalOptimizationTool::ScipCli
+            | ExternalOptimizationTool::CbcCli
+            | ExternalOptimizationTool::ClpCli
+            | ExternalOptimizationTool::GurobiCli
+            | ExternalOptimizationTool::CplexCli
+            | ExternalOptimizationTool::XpressCli
+            | ExternalOptimizationTool::LindoCli => ExternalOptimizationEcosystem::Native,
             ExternalOptimizationTool::GoodLp
             | ExternalOptimizationTool::LpModeler
             | ExternalOptimizationTool::RustLinprog
@@ -307,6 +447,34 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Ampl => "AMPL_DIR",
             ExternalOptimizationTool::Gams => "GAMS_DIR",
             ExternalOptimizationTool::Hexaly => "HEXALY_DIR",
+            ExternalOptimizationTool::Minotaur => "MINOTAUR_DIR",
+            ExternalOptimizationTool::Symphony => "SYMPHONY_DIR",
+            ExternalOptimizationTool::Ipopt => "IPOPT_DIR",
+            ExternalOptimizationTool::Bonmin => "BONMIN_DIR",
+            ExternalOptimizationTool::Couenne => "COUENNE_DIR",
+            ExternalOptimizationTool::Knitro => "KNITRO_HOME",
+            ExternalOptimizationTool::Mosek => "MOSEK_HOME",
+            ExternalOptimizationTool::Baron => "BARON_DIR",
+            ExternalOptimizationTool::Copt => "COPT_HOME",
+            ExternalOptimizationTool::Casadi => "CASADI_PYTHON",
+            ExternalOptimizationTool::Osqp => "OSQP_PYTHON",
+            ExternalOptimizationTool::Scs => "SCS_PYTHON",
+            ExternalOptimizationTool::Clarabel => "CLARABEL_PYTHON",
+            ExternalOptimizationTool::Ecos => "ECOS_PYTHON",
+            ExternalOptimizationTool::Qpoases => "QPOASES_DIR",
+            ExternalOptimizationTool::Proxqp => "PROXQP_DIR",
+            ExternalOptimizationTool::Cosmo => "COSMO_DIR",
+            ExternalOptimizationTool::Sdpa => "SDPA_DIR",
+            ExternalOptimizationTool::Csdp => "CSDP_DIR",
+            ExternalOptimizationTool::HighsCli => "HIGHS_DIR",
+            ExternalOptimizationTool::GlpkCli => "GLPK_DIR",
+            ExternalOptimizationTool::ScipCli => "SCIP_DIR",
+            ExternalOptimizationTool::CbcCli => "CBC_DIR",
+            ExternalOptimizationTool::ClpCli => "CLP_DIR",
+            ExternalOptimizationTool::GurobiCli => "GUROBI_HOME",
+            ExternalOptimizationTool::CplexCli => "CPLEX_STUDIO_DIR",
+            ExternalOptimizationTool::XpressCli => "XPRESSDIR",
+            ExternalOptimizationTool::LindoCli => "LINDO_HOME",
             ExternalOptimizationTool::GoodLp => "GOOD_LP_CARGO_MANIFEST",
             ExternalOptimizationTool::LpModeler => "LP_MODELER_CARGO_MANIFEST",
             ExternalOptimizationTool::RustLinprog => "RUST_LINPROG_CARGO_MANIFEST",
@@ -342,6 +510,34 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::OrToolsPython => &["ORTOOLS_PYTHON"],
             ExternalOptimizationTool::ScipyOptimize => &["SCIPY_PYTHON"],
             ExternalOptimizationTool::Jump => &["JULIA_PROJECT"],
+            ExternalOptimizationTool::Minotaur => &["MINOTAUR_HOME"],
+            ExternalOptimizationTool::Symphony => &["SYMPHONY_HOME", "COINOR_HOME"],
+            ExternalOptimizationTool::Ipopt => &["IPOPT_HOME"],
+            ExternalOptimizationTool::Bonmin => &["BONMIN_HOME"],
+            ExternalOptimizationTool::Couenne => &["COUENNE_HOME"],
+            ExternalOptimizationTool::Knitro => &["KNITRODIR", "KNITRO_DIR", "ARTELYS_LICENSE"],
+            ExternalOptimizationTool::Mosek => &["MSKHOME", "MOSEKLM_LICENSE_FILE"],
+            ExternalOptimizationTool::Baron => &["BARON_HOME", "BARON_LICENSE"],
+            ExternalOptimizationTool::Copt => &["COPT_DIR"],
+            ExternalOptimizationTool::Casadi => &["CASADI_PYTHON"],
+            ExternalOptimizationTool::Osqp => &["OSQP_PYTHON"],
+            ExternalOptimizationTool::Scs => &["SCS_PYTHON"],
+            ExternalOptimizationTool::Clarabel => &["CLARABEL_PYTHON"],
+            ExternalOptimizationTool::Ecos => &["ECOS_PYTHON"],
+            ExternalOptimizationTool::Qpoases => &["QPOASES_HOME"],
+            ExternalOptimizationTool::Proxqp => &["PROXQP_HOME"],
+            ExternalOptimizationTool::Cosmo => &["COSMO_HOME"],
+            ExternalOptimizationTool::Sdpa => &["SDPA_HOME"],
+            ExternalOptimizationTool::Csdp => &["CSDP_HOME"],
+            ExternalOptimizationTool::HighsCli => &["HIGHS_CMD", "HIGHS_HOME"],
+            ExternalOptimizationTool::GlpkCli => &["GLPSOL_CMD", "GLPK_CMD", "GLPK_HOME"],
+            ExternalOptimizationTool::ScipCli => &["SCIP_CMD", "SCIPOPTDIR", "SCIP_HOME"],
+            ExternalOptimizationTool::CbcCli => &["CBC_CMD", "CBC_HOME", "COINOR_HOME"],
+            ExternalOptimizationTool::ClpCli => &["CLP_CMD", "CLP_HOME", "COINOR_HOME"],
+            ExternalOptimizationTool::GurobiCli => &["GUROBI_CL_CMD", "GUROBI_CMD"],
+            ExternalOptimizationTool::CplexCli => &["CPLEX_CMD", "CPLEX_HOME"],
+            ExternalOptimizationTool::XpressCli => &["XPRESS_CMD", "XPRESS_HOME"],
+            ExternalOptimizationTool::LindoCli => &["RUNLINDO_CMD", "LINDO_CMD", "LINDOAPI_CMD"],
             ExternalOptimizationTool::GoodLp => &["GOOD_LP_CARGO_MANIFEST"],
             ExternalOptimizationTool::LpModeler => &["LP_MODELER_CARGO_MANIFEST"],
             ExternalOptimizationTool::RustLinprog => &["RUST_LINPROG_CARGO_MANIFEST"],
@@ -405,6 +601,44 @@ impl ExternalOptimizationTool {
                 "LOCALSOLVER_HOME",
                 "LOCALSOLVER_DIR",
             ],
+            ExternalOptimizationTool::Minotaur => &["MINOTAUR_DIR", "MINOTAUR_HOME"],
+            ExternalOptimizationTool::Symphony => {
+                &["SYMPHONY_DIR", "SYMPHONY_HOME", "COINOR_DIR", "COINOR_HOME"]
+            }
+            ExternalOptimizationTool::Ipopt => &["IPOPT_DIR", "IPOPT_HOME"],
+            ExternalOptimizationTool::Bonmin => &["BONMIN_DIR", "BONMIN_HOME"],
+            ExternalOptimizationTool::Couenne => &["COUENNE_DIR", "COUENNE_HOME"],
+            ExternalOptimizationTool::Knitro => {
+                &["KNITRO_HOME", "KNITRODIR", "KNITRO_DIR", "ARTELYS_HOME"]
+            }
+            ExternalOptimizationTool::Mosek => &["MOSEK_HOME", "MSKHOME"],
+            ExternalOptimizationTool::Baron => &["BARON_DIR", "BARON_HOME"],
+            ExternalOptimizationTool::Copt => &["COPT_HOME", "COPT_DIR"],
+            ExternalOptimizationTool::Casadi => &["CASADI_DIR", "CASADI_HOME"],
+            ExternalOptimizationTool::Osqp => &["OSQP_DIR", "OSQP_HOME"],
+            ExternalOptimizationTool::Scs => &["SCS_DIR", "SCS_HOME"],
+            ExternalOptimizationTool::Clarabel => &["CLARABEL_DIR", "CLARABEL_HOME"],
+            ExternalOptimizationTool::Ecos => &["ECOS_DIR", "ECOS_HOME"],
+            ExternalOptimizationTool::Qpoases => &["QPOASES_DIR", "QPOASES_HOME"],
+            ExternalOptimizationTool::Proxqp => &["PROXQP_DIR", "PROXQP_HOME"],
+            ExternalOptimizationTool::Cosmo => &["COSMO_DIR", "COSMO_HOME"],
+            ExternalOptimizationTool::Sdpa => &["SDPA_DIR", "SDPA_HOME"],
+            ExternalOptimizationTool::Csdp => &["CSDP_DIR", "CSDP_HOME"],
+            ExternalOptimizationTool::HighsCli => &["HIGHS_DIR", "HIGHS_HOME"],
+            ExternalOptimizationTool::GlpkCli => &["GLPK_DIR", "GLPK_HOME"],
+            ExternalOptimizationTool::ScipCli => &["SCIPOPTDIR", "SCIP_DIR", "SCIP_HOME"],
+            ExternalOptimizationTool::CbcCli => {
+                &["CBC_DIR", "CBC_HOME", "COINOR_DIR", "COINOR_HOME"]
+            }
+            ExternalOptimizationTool::ClpCli => {
+                &["CLP_DIR", "CLP_HOME", "COINOR_DIR", "COINOR_HOME"]
+            }
+            ExternalOptimizationTool::GurobiCli => &["GUROBI_HOME"],
+            ExternalOptimizationTool::CplexCli => &["CPLEX_STUDIO_DIR", "CPLEX_HOME"],
+            ExternalOptimizationTool::XpressCli => &["XPRESSDIR", "XPRESS_DIR", "XPRESS_HOME"],
+            ExternalOptimizationTool::LindoCli => {
+                &["LINDO_HOME", "LINDO_DIR", "LINDOAPI_HOME", "LINDOAPI_DIR"]
+            }
             ExternalOptimizationTool::NloptRs => &["NLOPT_DIR", "NLOPT_HOME"],
             ExternalOptimizationTool::HighsRust => &["HIGHS_DIR", "HIGHS_HOME"],
             ExternalOptimizationTool::ScipRust => &["SCIPOPTDIR", "SCIP_DIR", "SCIP_HOME"],
@@ -458,6 +692,11 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Cpmpy => &["cpmpy"],
             ExternalOptimizationTool::PyCsp3 => &["pycsp3"],
             ExternalOptimizationTool::PySat => &["pysat"],
+            ExternalOptimizationTool::Casadi => &["casadi"],
+            ExternalOptimizationTool::Osqp => &["osqp"],
+            ExternalOptimizationTool::Scs => &["scs"],
+            ExternalOptimizationTool::Clarabel => &["clarabel"],
+            ExternalOptimizationTool::Ecos => &["ecos"],
             _ => &[],
         }
     }
@@ -472,6 +711,29 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Clingo => &["clingo"],
             ExternalOptimizationTool::Clingcon => &["clingcon"],
             ExternalOptimizationTool::OpenWbo => &["open-wbo", "open-wbo_static"],
+            ExternalOptimizationTool::Minotaur => &["minotaur"],
+            ExternalOptimizationTool::Symphony => &["symphony"],
+            ExternalOptimizationTool::Ipopt => &["ipopt"],
+            ExternalOptimizationTool::Bonmin => &["bonmin"],
+            ExternalOptimizationTool::Couenne => &["couenne"],
+            ExternalOptimizationTool::Knitro => &["knitro", "knitroampl"],
+            ExternalOptimizationTool::Mosek => &["mosek"],
+            ExternalOptimizationTool::Baron => &["baron"],
+            ExternalOptimizationTool::Copt => &["copt_cmd", "copt"],
+            ExternalOptimizationTool::Qpoases => &["qpoases"],
+            ExternalOptimizationTool::Proxqp => &["proxqp"],
+            ExternalOptimizationTool::Cosmo => &["cosmo"],
+            ExternalOptimizationTool::Sdpa => &["sdpa", "sdpa_gmp", "sdpa_dd"],
+            ExternalOptimizationTool::Csdp => &["csdp"],
+            ExternalOptimizationTool::HighsCli => &["highs"],
+            ExternalOptimizationTool::GlpkCli => &["glpsol"],
+            ExternalOptimizationTool::ScipCli => &["scip"],
+            ExternalOptimizationTool::CbcCli => &["cbc"],
+            ExternalOptimizationTool::ClpCli => &["clp"],
+            ExternalOptimizationTool::GurobiCli => &["gurobi_cl"],
+            ExternalOptimizationTool::CplexCli => &["cplex"],
+            ExternalOptimizationTool::XpressCli => &["optimizer", "xpress"],
+            ExternalOptimizationTool::LindoCli => &["runlindo", "lindo", "lindoapi"],
             _ => &[],
         }
     }
@@ -1208,7 +1470,7 @@ mod tests {
 
     #[test]
     fn ecosystem_tool_metadata_covers_supported_languages() {
-        assert_eq!(ExternalOptimizationTool::all().len(), 42);
+        assert_eq!(ExternalOptimizationTool::all().len(), 70);
         assert_eq!(
             ExternalOptimizationTool::ChocoSolver.ecosystem(),
             ExternalOptimizationEcosystem::Java
@@ -1238,6 +1500,18 @@ mod tests {
             ExternalOptimizationEcosystem::Native
         );
         assert_eq!(
+            ExternalOptimizationTool::HighsCli.ecosystem(),
+            ExternalOptimizationEcosystem::Native
+        );
+        assert_eq!(
+            ExternalOptimizationTool::Ipopt.ecosystem(),
+            ExternalOptimizationEcosystem::Native
+        );
+        assert_eq!(
+            ExternalOptimizationTool::Casadi.ecosystem(),
+            ExternalOptimizationEcosystem::Python
+        );
+        assert_eq!(
             ExternalOptimizationTool::GoodLp.ecosystem(),
             ExternalOptimizationEcosystem::Rust
         );
@@ -1247,6 +1521,8 @@ mod tests {
         );
         assert_eq!(ExternalOptimizationTool::Cvxpy.env_var(), "CVXPY_PYTHON");
         assert_eq!(ExternalOptimizationTool::Hexaly.env_var(), "HEXALY_DIR");
+        assert_eq!(ExternalOptimizationTool::Mosek.env_var(), "MOSEK_HOME");
+        assert_eq!(ExternalOptimizationTool::Casadi.env_var(), "CASADI_PYTHON");
         assert!(ExternalOptimizationTool::OjAlgo
             .java_probe_classes()
             .contains(&"org.ojalgo.optimisation.ExpressionsBasedModel"));
@@ -1262,12 +1538,27 @@ mod tests {
         assert!(ExternalOptimizationTool::Cpmpy
             .python_modules()
             .contains(&"cpmpy"));
+        assert!(ExternalOptimizationTool::Osqp
+            .python_modules()
+            .contains(&"osqp"));
         assert!(ExternalOptimizationTool::Hexaly
             .native_command_aliases()
             .contains(&"hexaly"));
+        assert!(ExternalOptimizationTool::Ipopt
+            .native_command_aliases()
+            .contains(&"ipopt"));
+        assert!(ExternalOptimizationTool::Sdpa
+            .native_command_aliases()
+            .contains(&"sdpa_gmp"));
         assert!(ExternalOptimizationTool::OpenWbo
             .native_command_aliases()
             .contains(&"open-wbo"));
+        assert!(ExternalOptimizationTool::HighsCli
+            .native_command_aliases()
+            .contains(&"highs"));
+        assert!(ExternalOptimizationTool::LindoCli
+            .native_command_aliases()
+            .contains(&"runlindo"));
         assert!(ExternalOptimizationTool::HighsRust
             .rust_dependency_names()
             .contains(&"highs-sys"));
@@ -1286,6 +1577,18 @@ mod tests {
         assert!(ExternalOptimizationTool::Conjure
             .install_dir_env_vars()
             .contains(&"CONJURE_HOME"));
+        assert!(ExternalOptimizationTool::Symphony
+            .install_dir_env_vars()
+            .contains(&"COINOR_HOME"));
+        assert!(ExternalOptimizationTool::Mosek
+            .artifact_env_vars()
+            .contains(&"MOSEKLM_LICENSE_FILE"));
+        assert!(ExternalOptimizationTool::CplexCli
+            .install_dir_env_vars()
+            .contains(&"CPLEX_STUDIO_DIR"));
+        assert!(ExternalOptimizationTool::GurobiCli
+            .artifact_env_vars()
+            .contains(&"GUROBI_CL_CMD"));
         assert!(ExternalOptimizationTool::HighsRust
             .install_dir_env_vars()
             .contains(&"HIGHS_HOME"));

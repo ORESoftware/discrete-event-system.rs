@@ -54,6 +54,25 @@ pub enum ExternalOptimizationTool {
     Ampl,
     Gams,
     Hexaly,
+    Minotaur,
+    Symphony,
+    Ipopt,
+    Bonmin,
+    Couenne,
+    Knitro,
+    Mosek,
+    Baron,
+    Copt,
+    Casadi,
+    Osqp,
+    Scs,
+    Clarabel,
+    Ecos,
+    Qpoases,
+    Proxqp,
+    Cosmo,
+    Sdpa,
+    Csdp,
     HighsCli,
     GlpkCli,
     ScipCli,
@@ -110,6 +129,25 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Ampl => "ampl",
             ExternalOptimizationTool::Gams => "gams",
             ExternalOptimizationTool::Hexaly => "hexaly",
+            ExternalOptimizationTool::Minotaur => "minotaur",
+            ExternalOptimizationTool::Symphony => "symphony",
+            ExternalOptimizationTool::Ipopt => "ipopt",
+            ExternalOptimizationTool::Bonmin => "bonmin",
+            ExternalOptimizationTool::Couenne => "couenne",
+            ExternalOptimizationTool::Knitro => "knitro",
+            ExternalOptimizationTool::Mosek => "mosek",
+            ExternalOptimizationTool::Baron => "baron",
+            ExternalOptimizationTool::Copt => "copt",
+            ExternalOptimizationTool::Casadi => "casadi",
+            ExternalOptimizationTool::Osqp => "osqp",
+            ExternalOptimizationTool::Scs => "scs",
+            ExternalOptimizationTool::Clarabel => "clarabel",
+            ExternalOptimizationTool::Ecos => "ecos",
+            ExternalOptimizationTool::Qpoases => "qpoases",
+            ExternalOptimizationTool::Proxqp => "proxqp",
+            ExternalOptimizationTool::Cosmo => "cosmo",
+            ExternalOptimizationTool::Sdpa => "sdpa",
+            ExternalOptimizationTool::Csdp => "csdp",
             ExternalOptimizationTool::HighsCli => "highs-cli",
             ExternalOptimizationTool::GlpkCli => "glpk-cli",
             ExternalOptimizationTool::ScipCli => "scip-cli",
@@ -166,6 +204,25 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Ampl => "AMPL",
             ExternalOptimizationTool::Gams => "GAMS",
             ExternalOptimizationTool::Hexaly => "Hexaly Optimizer",
+            ExternalOptimizationTool::Minotaur => "MINOTAUR",
+            ExternalOptimizationTool::Symphony => "COIN-OR SYMPHONY",
+            ExternalOptimizationTool::Ipopt => "Ipopt",
+            ExternalOptimizationTool::Bonmin => "Bonmin",
+            ExternalOptimizationTool::Couenne => "Couenne",
+            ExternalOptimizationTool::Knitro => "Artelys Knitro",
+            ExternalOptimizationTool::Mosek => "MOSEK",
+            ExternalOptimizationTool::Baron => "BARON",
+            ExternalOptimizationTool::Copt => "COPT",
+            ExternalOptimizationTool::Casadi => "CasADi",
+            ExternalOptimizationTool::Osqp => "OSQP",
+            ExternalOptimizationTool::Scs => "SCS",
+            ExternalOptimizationTool::Clarabel => "Clarabel",
+            ExternalOptimizationTool::Ecos => "ECOS",
+            ExternalOptimizationTool::Qpoases => "qpOASES",
+            ExternalOptimizationTool::Proxqp => "ProxQP",
+            ExternalOptimizationTool::Cosmo => "COSMO",
+            ExternalOptimizationTool::Sdpa => "SDPA",
+            ExternalOptimizationTool::Csdp => "CSDP",
             ExternalOptimizationTool::HighsCli => "HiGHS CLI",
             ExternalOptimizationTool::GlpkCli => "GLPK glpsol CLI",
             ExternalOptimizationTool::ScipCli => "SCIP CLI",
@@ -212,11 +269,30 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::GurobiPy
             | ExternalOptimizationTool::Docplex
             | ExternalOptimizationTool::OrToolsPython
-            | ExternalOptimizationTool::ScipyOptimize => ExternalOptimizationLanguage::Python,
+            | ExternalOptimizationTool::ScipyOptimize
+            | ExternalOptimizationTool::Casadi
+            | ExternalOptimizationTool::Osqp
+            | ExternalOptimizationTool::Scs
+            | ExternalOptimizationTool::Clarabel
+            | ExternalOptimizationTool::Ecos => ExternalOptimizationLanguage::Python,
             ExternalOptimizationTool::Jump => ExternalOptimizationLanguage::Julia,
             ExternalOptimizationTool::Ampl
             | ExternalOptimizationTool::Gams
             | ExternalOptimizationTool::Hexaly
+            | ExternalOptimizationTool::Minotaur
+            | ExternalOptimizationTool::Symphony
+            | ExternalOptimizationTool::Ipopt
+            | ExternalOptimizationTool::Bonmin
+            | ExternalOptimizationTool::Couenne
+            | ExternalOptimizationTool::Knitro
+            | ExternalOptimizationTool::Mosek
+            | ExternalOptimizationTool::Baron
+            | ExternalOptimizationTool::Copt
+            | ExternalOptimizationTool::Qpoases
+            | ExternalOptimizationTool::Proxqp
+            | ExternalOptimizationTool::Cosmo
+            | ExternalOptimizationTool::Sdpa
+            | ExternalOptimizationTool::Csdp
             | ExternalOptimizationTool::HighsCli
             | ExternalOptimizationTool::GlpkCli
             | ExternalOptimizationTool::ScipCli
@@ -276,6 +352,7 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::Jump
             | ExternalOptimizationTool::Ampl
             | ExternalOptimizationTool::Gams
+            | ExternalOptimizationTool::Symphony
             | ExternalOptimizationTool::HighsCli
             | ExternalOptimizationTool::GlpkCli
             | ExternalOptimizationTool::ScipCli
@@ -288,18 +365,33 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::GoodLp
             | ExternalOptimizationTool::LpModeler
             | ExternalOptimizationTool::RustLinprog => ExternalOptimizationFamily::LinearMip,
-            ExternalOptimizationTool::Cvxpy | ExternalOptimizationTool::Cvxopt => {
-                ExternalOptimizationFamily::ConvexOptimization
-            }
+            ExternalOptimizationTool::Cvxpy
+            | ExternalOptimizationTool::Cvxopt
+            | ExternalOptimizationTool::Mosek
+            | ExternalOptimizationTool::Copt
+            | ExternalOptimizationTool::Osqp
+            | ExternalOptimizationTool::Scs
+            | ExternalOptimizationTool::Clarabel
+            | ExternalOptimizationTool::Ecos
+            | ExternalOptimizationTool::Qpoases
+            | ExternalOptimizationTool::Proxqp
+            | ExternalOptimizationTool::Cosmo
+            | ExternalOptimizationTool::Sdpa
+            | ExternalOptimizationTool::Csdp => ExternalOptimizationFamily::ConvexOptimization,
             ExternalOptimizationTool::OrToolsJava | ExternalOptimizationTool::OrToolsPython => {
                 ExternalOptimizationFamily::CpSatRouting
             }
             ExternalOptimizationTool::Hexaly => ExternalOptimizationFamily::HybridOptimization,
             ExternalOptimizationTool::Argmin
             | ExternalOptimizationTool::Nlopt
-            | ExternalOptimizationTool::ScipyOptimize => {
-                ExternalOptimizationFamily::NonlinearOptimization
-            }
+            | ExternalOptimizationTool::ScipyOptimize
+            | ExternalOptimizationTool::Minotaur
+            | ExternalOptimizationTool::Ipopt
+            | ExternalOptimizationTool::Bonmin
+            | ExternalOptimizationTool::Couenne
+            | ExternalOptimizationTool::Knitro
+            | ExternalOptimizationTool::Baron
+            | ExternalOptimizationTool::Casadi => ExternalOptimizationFamily::NonlinearOptimization,
             ExternalOptimizationTool::HighsRust
             | ExternalOptimizationTool::ScipRust
             | ExternalOptimizationTool::CbcRust
@@ -331,6 +423,7 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::ScipCli
             | ExternalOptimizationTool::CbcCli
             | ExternalOptimizationTool::ClpCli
+            | ExternalOptimizationTool::Symphony
             | ExternalOptimizationTool::GurobiCli
             | ExternalOptimizationTool::CplexCli
             | ExternalOptimizationTool::XpressCli
@@ -355,9 +448,27 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::Jump
             | ExternalOptimizationTool::Ampl
             | ExternalOptimizationTool::Gams => ExternalOptimizationExactness::ModelingLayer,
+            ExternalOptimizationTool::Casadi => ExternalOptimizationExactness::ModelingLayer,
             ExternalOptimizationTool::Argmin
             | ExternalOptimizationTool::Nlopt
             | ExternalOptimizationTool::Cvxopt
+            | ExternalOptimizationTool::Minotaur
+            | ExternalOptimizationTool::Ipopt
+            | ExternalOptimizationTool::Bonmin
+            | ExternalOptimizationTool::Couenne
+            | ExternalOptimizationTool::Knitro
+            | ExternalOptimizationTool::Mosek
+            | ExternalOptimizationTool::Baron
+            | ExternalOptimizationTool::Copt
+            | ExternalOptimizationTool::Osqp
+            | ExternalOptimizationTool::Scs
+            | ExternalOptimizationTool::Clarabel
+            | ExternalOptimizationTool::Ecos
+            | ExternalOptimizationTool::Qpoases
+            | ExternalOptimizationTool::Proxqp
+            | ExternalOptimizationTool::Cosmo
+            | ExternalOptimizationTool::Sdpa
+            | ExternalOptimizationTool::Csdp
             | ExternalOptimizationTool::PyScipOpt
             | ExternalOptimizationTool::GurobiPy
             | ExternalOptimizationTool::ScipyOptimize => ExternalOptimizationExactness::Numerical,
@@ -433,6 +544,25 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Ampl => &["ores-ampl-adapter", "ampl-adapter"],
             ExternalOptimizationTool::Gams => &["ores-gams-adapter", "gams-adapter"],
             ExternalOptimizationTool::Hexaly => &["ores-hexaly-adapter", "hexaly-adapter"],
+            ExternalOptimizationTool::Minotaur => &["ores-minotaur-adapter", "minotaur-adapter"],
+            ExternalOptimizationTool::Symphony => &["ores-symphony-adapter", "symphony-adapter"],
+            ExternalOptimizationTool::Ipopt => &["ores-ipopt-adapter", "ipopt-adapter"],
+            ExternalOptimizationTool::Bonmin => &["ores-bonmin-adapter", "bonmin-adapter"],
+            ExternalOptimizationTool::Couenne => &["ores-couenne-adapter", "couenne-adapter"],
+            ExternalOptimizationTool::Knitro => &["ores-knitro-adapter", "knitro-adapter"],
+            ExternalOptimizationTool::Mosek => &["ores-mosek-adapter", "mosek-adapter"],
+            ExternalOptimizationTool::Baron => &["ores-baron-adapter", "baron-adapter"],
+            ExternalOptimizationTool::Copt => &["ores-copt-adapter", "copt-adapter"],
+            ExternalOptimizationTool::Casadi => &["ores-casadi-adapter", "casadi-adapter"],
+            ExternalOptimizationTool::Osqp => &["ores-osqp-adapter", "osqp-adapter"],
+            ExternalOptimizationTool::Scs => &["ores-scs-adapter", "scs-adapter"],
+            ExternalOptimizationTool::Clarabel => &["ores-clarabel-adapter", "clarabel-adapter"],
+            ExternalOptimizationTool::Ecos => &["ores-ecos-adapter", "ecos-adapter"],
+            ExternalOptimizationTool::Qpoases => &["ores-qpoases-adapter", "qpoases-adapter"],
+            ExternalOptimizationTool::Proxqp => &["ores-proxqp-adapter", "proxqp-adapter"],
+            ExternalOptimizationTool::Cosmo => &["ores-cosmo-adapter", "cosmo-adapter"],
+            ExternalOptimizationTool::Sdpa => &["ores-sdpa-adapter", "sdpa-adapter"],
+            ExternalOptimizationTool::Csdp => &["ores-csdp-adapter", "csdp-adapter"],
             ExternalOptimizationTool::HighsCli
             | ExternalOptimizationTool::GlpkCli
             | ExternalOptimizationTool::ScipCli
@@ -488,6 +618,11 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Docplex => &["docplex"],
             ExternalOptimizationTool::OrToolsPython => &["ortools"],
             ExternalOptimizationTool::ScipyOptimize => &["scipy"],
+            ExternalOptimizationTool::Casadi => &["casadi"],
+            ExternalOptimizationTool::Osqp => &["osqp"],
+            ExternalOptimizationTool::Scs => &["scs"],
+            ExternalOptimizationTool::Clarabel => &["clarabel"],
+            ExternalOptimizationTool::Ecos => &["ecos"],
             _ => &[],
         }
     }
@@ -600,6 +735,63 @@ impl ExternalOptimizationTool {
             }
             ExternalOptimizationTool::Hexaly => {
                 "Hybrid optimization solver/modeler for routing, scheduling, nonlinear, and CP-style models"
+            }
+            ExternalOptimizationTool::Minotaur => {
+                "Open-source mixed-integer nonlinear optimization toolkit for MINLP cross-checks"
+            }
+            ExternalOptimizationTool::Symphony => {
+                "COIN-OR branch-and-cut MILP solver framework for independent MIP checks"
+            }
+            ExternalOptimizationTool::Ipopt => {
+                "Interior-point nonlinear programming solver for smooth NLP validation"
+            }
+            ExternalOptimizationTool::Bonmin => {
+                "COIN-OR mixed-integer nonlinear programming solver"
+            }
+            ExternalOptimizationTool::Couenne => {
+                "COIN-OR global optimization solver for nonconvex MINLP models"
+            }
+            ExternalOptimizationTool::Knitro => {
+                "Commercial nonlinear and mixed-integer nonlinear optimization solver"
+            }
+            ExternalOptimizationTool::Mosek => {
+                "Commercial conic, quadratic, semidefinite, and mixed-integer optimization solver"
+            }
+            ExternalOptimizationTool::Baron => {
+                "Commercial global optimization solver for nonlinear and mixed-integer nonlinear models"
+            }
+            ExternalOptimizationTool::Copt => {
+                "Commercial LP/QP/QCP/MIP and conic optimization solver"
+            }
+            ExternalOptimizationTool::Casadi => {
+                "Python symbolic/numeric optimization and automatic-differentiation modeling layer"
+            }
+            ExternalOptimizationTool::Osqp => {
+                "Operator-splitting quadratic-program solver for convex QP cross-checks"
+            }
+            ExternalOptimizationTool::Scs => {
+                "Splitting conic solver for convex cone-program cross-checks"
+            }
+            ExternalOptimizationTool::Clarabel => {
+                "Interior-point conic solver with quadratic objective support"
+            }
+            ExternalOptimizationTool::Ecos => {
+                "Embedded conic solver for SOCP-style reference checks"
+            }
+            ExternalOptimizationTool::Qpoases => {
+                "Active-set quadratic-program solver for dense and online QP checks"
+            }
+            ExternalOptimizationTool::Proxqp => {
+                "Proximal quadratic-program solver for convex QP validation"
+            }
+            ExternalOptimizationTool::Cosmo => {
+                "Conic splitting solver for convex cone-program validation"
+            }
+            ExternalOptimizationTool::Sdpa => {
+                "Semidefinite programming solver for SDP cross-checks"
+            }
+            ExternalOptimizationTool::Csdp => {
+                "COIN-OR semidefinite programming solver for SDP cross-checks"
             }
             ExternalOptimizationTool::HighsCli => {
                 "Native HiGHS command-line bridge for local LP/MIP/QP smoke checks and cross-validation"
@@ -767,6 +959,25 @@ pub fn external_optimization_tools() -> &'static [ExternalOptimizationTool] {
         ExternalOptimizationTool::Ampl,
         ExternalOptimizationTool::Gams,
         ExternalOptimizationTool::Hexaly,
+        ExternalOptimizationTool::Minotaur,
+        ExternalOptimizationTool::Symphony,
+        ExternalOptimizationTool::Ipopt,
+        ExternalOptimizationTool::Bonmin,
+        ExternalOptimizationTool::Couenne,
+        ExternalOptimizationTool::Knitro,
+        ExternalOptimizationTool::Mosek,
+        ExternalOptimizationTool::Baron,
+        ExternalOptimizationTool::Copt,
+        ExternalOptimizationTool::Casadi,
+        ExternalOptimizationTool::Osqp,
+        ExternalOptimizationTool::Scs,
+        ExternalOptimizationTool::Clarabel,
+        ExternalOptimizationTool::Ecos,
+        ExternalOptimizationTool::Qpoases,
+        ExternalOptimizationTool::Proxqp,
+        ExternalOptimizationTool::Cosmo,
+        ExternalOptimizationTool::Sdpa,
+        ExternalOptimizationTool::Csdp,
         ExternalOptimizationTool::HighsCli,
         ExternalOptimizationTool::GlpkCli,
         ExternalOptimizationTool::ScipCli,
@@ -1035,6 +1246,64 @@ pub fn artifact_env_names(tool: ExternalOptimizationTool) -> Vec<String> {
             names.push("HEXALY_HOME".to_string());
             names.push("LOCALSOLVER_HOME".to_string());
         }
+        ExternalOptimizationTool::Minotaur => {
+            names.push("MINOTAUR_DIR".to_string());
+        }
+        ExternalOptimizationTool::Symphony => {
+            names.push("SYMPHONY_DIR".to_string());
+            names.push("COINOR_DIR".to_string());
+        }
+        ExternalOptimizationTool::Ipopt => {
+            names.push("IPOPT_DIR".to_string());
+        }
+        ExternalOptimizationTool::Bonmin => {
+            names.push("BONMIN_DIR".to_string());
+        }
+        ExternalOptimizationTool::Couenne => {
+            names.push("COUENNE_DIR".to_string());
+        }
+        ExternalOptimizationTool::Knitro => {
+            names.push("ARTELYS_LICENSE".to_string());
+        }
+        ExternalOptimizationTool::Mosek => {
+            names.push("MOSEKLM_LICENSE_FILE".to_string());
+        }
+        ExternalOptimizationTool::Baron => {
+            names.push("BARON_LICENSE".to_string());
+        }
+        ExternalOptimizationTool::Copt => {
+            names.push("COPT_HOME".to_string());
+        }
+        ExternalOptimizationTool::Casadi => {
+            names.push("CASADI_PYTHON".to_string());
+        }
+        ExternalOptimizationTool::Osqp => {
+            names.push("OSQP_PYTHON".to_string());
+        }
+        ExternalOptimizationTool::Scs => {
+            names.push("SCS_PYTHON".to_string());
+        }
+        ExternalOptimizationTool::Clarabel => {
+            names.push("CLARABEL_PYTHON".to_string());
+        }
+        ExternalOptimizationTool::Ecos => {
+            names.push("ECOS_PYTHON".to_string());
+        }
+        ExternalOptimizationTool::Qpoases => {
+            names.push("QPOASES_DIR".to_string());
+        }
+        ExternalOptimizationTool::Proxqp => {
+            names.push("PROXQP_DIR".to_string());
+        }
+        ExternalOptimizationTool::Cosmo => {
+            names.push("COSMO_DIR".to_string());
+        }
+        ExternalOptimizationTool::Sdpa => {
+            names.push("SDPA_DIR".to_string());
+        }
+        ExternalOptimizationTool::Csdp => {
+            names.push("CSDP_DIR".to_string());
+        }
         ExternalOptimizationTool::HighsCli
         | ExternalOptimizationTool::GlpkCli
         | ExternalOptimizationTool::ScipCli
@@ -1122,6 +1391,29 @@ pub fn external_optimization_command_dir_env_names(tool: ExternalOptimizationToo
             "LOCALSOLVER_HOME",
             "LOCALSOLVER_DIR",
         ],
+        ExternalOptimizationTool::Minotaur => &["MINOTAUR_DIR", "MINOTAUR_HOME"],
+        ExternalOptimizationTool::Symphony => {
+            &["SYMPHONY_DIR", "SYMPHONY_HOME", "COINOR_DIR", "COINOR_HOME"]
+        }
+        ExternalOptimizationTool::Ipopt => &["IPOPT_DIR", "IPOPT_HOME"],
+        ExternalOptimizationTool::Bonmin => &["BONMIN_DIR", "BONMIN_HOME"],
+        ExternalOptimizationTool::Couenne => &["COUENNE_DIR", "COUENNE_HOME"],
+        ExternalOptimizationTool::Knitro => {
+            &["KNITRO_HOME", "KNITRODIR", "KNITRO_DIR", "ARTELYS_HOME"]
+        }
+        ExternalOptimizationTool::Mosek => &["MOSEK_HOME", "MSKHOME"],
+        ExternalOptimizationTool::Baron => &["BARON_DIR", "BARON_HOME"],
+        ExternalOptimizationTool::Copt => &["COPT_HOME", "COPT_DIR"],
+        ExternalOptimizationTool::Casadi => &["CASADI_DIR", "CASADI_HOME"],
+        ExternalOptimizationTool::Osqp => &["OSQP_DIR", "OSQP_HOME"],
+        ExternalOptimizationTool::Scs => &["SCS_DIR", "SCS_HOME"],
+        ExternalOptimizationTool::Clarabel => &["CLARABEL_DIR", "CLARABEL_HOME"],
+        ExternalOptimizationTool::Ecos => &["ECOS_DIR", "ECOS_HOME"],
+        ExternalOptimizationTool::Qpoases => &["QPOASES_DIR", "QPOASES_HOME"],
+        ExternalOptimizationTool::Proxqp => &["PROXQP_DIR", "PROXQP_HOME"],
+        ExternalOptimizationTool::Cosmo => &["COSMO_DIR", "COSMO_HOME"],
+        ExternalOptimizationTool::Sdpa => &["SDPA_DIR", "SDPA_HOME"],
+        ExternalOptimizationTool::Csdp => &["CSDP_DIR", "CSDP_HOME"],
         ExternalOptimizationTool::HighsCli => &["HIGHS_DIR", "HIGHS_HOME"],
         ExternalOptimizationTool::GlpkCli => &["GLPK_DIR", "GLPK_HOME"],
         ExternalOptimizationTool::ScipCli => &["SCIPOPTDIR", "SCIP_DIR", "SCIP_HOME"],
@@ -1664,8 +1956,11 @@ fn probe_external_optimization_linear_cli_tool(
     let probe = probe_external_linear_cli_solver(ExternalLinearCliKind::Lp, &cli_opts);
     let status = match probe.status {
         ExternalLinearCliProbeStatus::Ready => ExternalOptimizationProbeStatus::Ready,
-        ExternalLinearCliProbeStatus::NotInstalled => ExternalOptimizationProbeStatus::NotConfigured,
-        ExternalLinearCliProbeStatus::BridgeUnsupported | ExternalLinearCliProbeStatus::SmokeFailed => {
+        ExternalLinearCliProbeStatus::NotInstalled => {
+            ExternalOptimizationProbeStatus::NotConfigured
+        }
+        ExternalLinearCliProbeStatus::BridgeUnsupported
+        | ExternalLinearCliProbeStatus::SmokeFailed => {
             ExternalOptimizationProbeStatus::AdapterMissing
         }
     };
@@ -1878,10 +2173,11 @@ mod tests {
         external_optimization_comparison_report_to_json,
         external_optimization_normalized_result_from_value, external_optimization_tool_specs,
         external_optimization_tools, find_command_in_install_dir,
-        run_external_optimization_comparison, ExternalOptimizationAdapterInvocation,
-        ExternalOptimizationAdapterOptions, ExternalOptimizationAdapterStatus,
-        ExternalOptimizationExactness, ExternalOptimizationFamily, ExternalOptimizationLanguage,
-        ExternalOptimizationProbeStatus, ExternalOptimizationTool, ExternalLinearCliSolver,
+        run_external_optimization_comparison, ExternalLinearCliSolver,
+        ExternalOptimizationAdapterInvocation, ExternalOptimizationAdapterOptions,
+        ExternalOptimizationAdapterStatus, ExternalOptimizationExactness,
+        ExternalOptimizationFamily, ExternalOptimizationLanguage, ExternalOptimizationProbeStatus,
+        ExternalOptimizationTool,
     };
     use serde_json::json;
     use std::path::PathBuf;
@@ -1889,7 +2185,7 @@ mod tests {
     #[test]
     fn registry_covers_requested_java_and_rust_ecosystems() {
         let specs = external_optimization_tool_specs();
-        assert_eq!(external_optimization_tools().len(), 51);
+        assert_eq!(external_optimization_tools().len(), 70);
         assert_eq!(
             specs
                 .iter()
@@ -1909,7 +2205,7 @@ mod tests {
                 .iter()
                 .filter(|spec| spec.language == ExternalOptimizationLanguage::Python)
                 .count(),
-            13
+            18
         );
         assert_eq!(
             specs
@@ -1923,7 +2219,7 @@ mod tests {
                 .iter()
                 .filter(|spec| spec.language == ExternalOptimizationLanguage::Native)
                 .count(),
-            17
+            31
         );
         assert!(specs.iter().any(|spec| {
             spec.tool == ExternalOptimizationTool::ChocoSolver
@@ -1969,6 +2265,21 @@ mod tests {
             spec.tool == ExternalOptimizationTool::Hexaly
                 && spec.family == ExternalOptimizationFamily::HybridOptimization
                 && spec.exactness == ExternalOptimizationExactness::Heuristic
+        }));
+        assert!(specs.iter().any(|spec| {
+            spec.tool == ExternalOptimizationTool::Ipopt
+                && spec.family == ExternalOptimizationFamily::NonlinearOptimization
+                && spec.exactness == ExternalOptimizationExactness::Numerical
+        }));
+        assert!(specs.iter().any(|spec| {
+            spec.tool == ExternalOptimizationTool::Mosek
+                && spec.family == ExternalOptimizationFamily::ConvexOptimization
+                && spec.exactness == ExternalOptimizationExactness::Numerical
+        }));
+        assert!(specs.iter().any(|spec| {
+            spec.tool == ExternalOptimizationTool::Casadi
+                && spec.family == ExternalOptimizationFamily::NonlinearOptimization
+                && spec.exactness == ExternalOptimizationExactness::ModelingLayer
         }));
         assert!(specs.iter().any(|spec| {
             spec.tool == ExternalOptimizationTool::HighsCli
@@ -2045,6 +2356,14 @@ mod tests {
             "ORES_AMPL_DIR"
         );
         assert_eq!(
+            artifact_env_names(ExternalOptimizationTool::Ipopt)[0],
+            "ORES_IPOPT_DIR"
+        );
+        assert_eq!(
+            artifact_env_names(ExternalOptimizationTool::Casadi)[0],
+            "ORES_CASADI_PYTHON"
+        );
+        assert_eq!(
             artifact_env_names(ExternalOptimizationTool::HighsCli)[0],
             "ORES_HIGHS_CLI_DIR"
         );
@@ -2089,6 +2408,14 @@ mod tests {
         assert!(
             external_optimization_command_dir_env_names(ExternalOptimizationTool::HighsRust)
                 .contains(&"HIGHS_HOME".to_string())
+        );
+        assert!(
+            external_optimization_command_dir_env_names(ExternalOptimizationTool::Mosek)
+                .contains(&"MSKHOME".to_string())
+        );
+        assert!(
+            external_optimization_command_dir_env_names(ExternalOptimizationTool::Symphony)
+                .contains(&"COINOR_HOME".to_string())
         );
         assert!(
             external_optimization_command_dir_env_names(ExternalOptimizationTool::HighsCli)

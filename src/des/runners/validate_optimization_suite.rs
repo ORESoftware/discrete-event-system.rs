@@ -5960,7 +5960,7 @@ impl Driver {
         let specs = external_optimization_tool_specs();
         self.check(
             "External optimization ecosystem registry covers requested tools",
-            external_optimization_tools().len() == 42 && specs.len() == 42,
+            external_optimization_tools().len() == 70 && specs.len() == 70,
             format!(
                 "tools={} specs={}",
                 external_optimization_tools().len(),
@@ -5978,7 +5978,7 @@ impl Driver {
                             == legacy_external_optimization_ecosystem::ExternalOptimizationEcosystem::Python
                     })
                     .count()
-                    == 13
+                    == 18
                 && legacy_tools
                     .iter()
                     .any(|tool| tool.as_str() == "hexaly" && tool.ecosystem().as_str() == "native"),
@@ -6015,7 +6015,7 @@ impl Driver {
             .count();
         self.check(
             "External optimization ecosystem registry Python/Julia/native split",
-            python_count == 13 && julia_count == 1 && native_count == 8,
+            python_count == 18 && julia_count == 1 && native_count == 31,
             format!("python={python_count} julia={julia_count} native={native_count}"),
         );
         self.check(
@@ -6049,6 +6049,10 @@ impl Driver {
                     && spec.family == ExternalOptimizationFamily::LinearMip
                     && spec.exactness == ExternalOptimizationExactness::ModelingLayer
             }) && specs.iter().any(|spec| {
+                spec.tool == ExternalOptimizationTool::HighsCli
+                    && spec.family == ExternalOptimizationFamily::LinearMip
+                    && spec.exactness == ExternalOptimizationExactness::Exact
+            }) && specs.iter().any(|spec| {
                 spec.tool == ExternalOptimizationTool::Cvxpy
                     && spec.family == ExternalOptimizationFamily::ConvexOptimization
                     && spec.exactness == ExternalOptimizationExactness::ModelingLayer
@@ -6064,8 +6068,20 @@ impl Driver {
                 spec.tool == ExternalOptimizationTool::Argmin
                     && spec.family == ExternalOptimizationFamily::NonlinearOptimization
                     && spec.exactness == ExternalOptimizationExactness::Numerical
+            }) && specs.iter().any(|spec| {
+                spec.tool == ExternalOptimizationTool::Ipopt
+                    && spec.family == ExternalOptimizationFamily::NonlinearOptimization
+                    && spec.exactness == ExternalOptimizationExactness::Numerical
+            }) && specs.iter().any(|spec| {
+                spec.tool == ExternalOptimizationTool::Mosek
+                    && spec.family == ExternalOptimizationFamily::ConvexOptimization
+                    && spec.exactness == ExternalOptimizationExactness::Numerical
+            }) && specs.iter().any(|spec| {
+                spec.tool == ExternalOptimizationTool::Casadi
+                    && spec.family == ExternalOptimizationFamily::NonlinearOptimization
+                    && spec.exactness == ExternalOptimizationExactness::ModelingLayer
             }),
-            "checked Choco, CPMpy, clingo, Open-WBO, OptaPlanner, Timefold, Pyomo, CVXPY, PySCIPOpt, Hexaly, and argmin classifications".to_string(),
+            "checked Choco, CPMpy, clingo, Open-WBO, OptaPlanner, Timefold, Pyomo, HiGHS CLI, CVXPY, PySCIPOpt, Hexaly, argmin, Ipopt, MOSEK, and CasADi classifications".to_string(),
         );
         let comparison_input = serde_json::json!({
             "status": "optimal",
@@ -6207,6 +6223,27 @@ impl Driver {
                 ecosystem_invocation("jump-reference", ExternalOptimizationTool::Jump),
                 ecosystem_invocation("ampl-reference", ExternalOptimizationTool::Ampl),
                 ecosystem_invocation("gams-reference", ExternalOptimizationTool::Gams),
+                ecosystem_invocation("symphony-reference", ExternalOptimizationTool::Symphony),
+                ecosystem_invocation("mosek-reference", ExternalOptimizationTool::Mosek),
+                ecosystem_invocation("copt-reference", ExternalOptimizationTool::Copt),
+                ecosystem_invocation("osqp-reference", ExternalOptimizationTool::Osqp),
+                ecosystem_invocation("scs-reference", ExternalOptimizationTool::Scs),
+                ecosystem_invocation("clarabel-reference", ExternalOptimizationTool::Clarabel),
+                ecosystem_invocation("ecos-reference", ExternalOptimizationTool::Ecos),
+                ecosystem_invocation("qpoases-reference", ExternalOptimizationTool::Qpoases),
+                ecosystem_invocation("proxqp-reference", ExternalOptimizationTool::Proxqp),
+                ecosystem_invocation("cosmo-reference", ExternalOptimizationTool::Cosmo),
+                ecosystem_invocation("sdpa-reference", ExternalOptimizationTool::Sdpa),
+                ecosystem_invocation("csdp-reference", ExternalOptimizationTool::Csdp),
+                ecosystem_invocation("highs-cli-reference", ExternalOptimizationTool::HighsCli),
+                ecosystem_invocation("glpk-cli-reference", ExternalOptimizationTool::GlpkCli),
+                ecosystem_invocation("scip-cli-reference", ExternalOptimizationTool::ScipCli),
+                ecosystem_invocation("cbc-cli-reference", ExternalOptimizationTool::CbcCli),
+                ecosystem_invocation("clp-cli-reference", ExternalOptimizationTool::ClpCli),
+                ecosystem_invocation("gurobi-cli-reference", ExternalOptimizationTool::GurobiCli),
+                ecosystem_invocation("cplex-cli-reference", ExternalOptimizationTool::CplexCli),
+                ecosystem_invocation("xpress-cli-reference", ExternalOptimizationTool::XpressCli),
+                ecosystem_invocation("lindo-cli-reference", ExternalOptimizationTool::LindoCli),
                 ecosystem_invocation("highs-rust-reference", ExternalOptimizationTool::HighsRust),
                 ecosystem_invocation("scip-rust-reference", ExternalOptimizationTool::ScipRust),
                 ecosystem_invocation("cbc-rust-reference", ExternalOptimizationTool::CbcRust),
@@ -6314,6 +6351,13 @@ impl Driver {
                     "scipy-optimize-reference",
                     ExternalOptimizationTool::ScipyOptimize,
                 ),
+                ecosystem_invocation("minotaur-reference", ExternalOptimizationTool::Minotaur),
+                ecosystem_invocation("ipopt-reference", ExternalOptimizationTool::Ipopt),
+                ecosystem_invocation("bonmin-reference", ExternalOptimizationTool::Bonmin),
+                ecosystem_invocation("couenne-reference", ExternalOptimizationTool::Couenne),
+                ecosystem_invocation("knitro-reference", ExternalOptimizationTool::Knitro),
+                ecosystem_invocation("baron-reference", ExternalOptimizationTool::Baron),
+                ecosystem_invocation("casadi-reference", ExternalOptimizationTool::Casadi),
             ],
             1e-9,
             1e-9,

@@ -26,6 +26,7 @@ CP_TOOLS = {
     "ibm-cp-optimizer",
     "ortools-java",
     "ortools-python",
+    "ortools-cp-sat",
     "cpmpy",
     "pycsp3",
     "conjure",
@@ -85,7 +86,7 @@ LINEAR_TOOLS = {
     "scip-rust",
     "cbc-rust",
 }
-NATIVE_BINDING_TOOLS = {"pyscipopt", "gurobipy"}
+NATIVE_BINDING_TOOLS = {"pyscipopt", "gurobipy", "cplex-python", "xpress-python"}
 NONLINEAR_TOOLS = {
     "argmin",
     "nlopt",

@@ -29,6 +29,7 @@ run_id="${SOCCER_RUN_ID:-server-$(date -u +%Y%m%dT%H%M%SZ)}"
 local_out="${SOCCER_SERVER_LOCAL_OUT:-out/soccer-self-play/$run_id}"
 shard_out="${SOCCER_SERVER_SHARD_OUT:-$local_out/shard-0-of-1}"
 server_artifact_path="${SOCCER_SERVER_ARTIFACT_PATH:-out/soccer-self-play/$run_id/artifact.json}"
+server_learned_params_path="${SOCCER_SERVER_LEARNED_PARAMS_PATH:-out/soccer-self-play/$run_id/learned-params.json}"
 base_url="${DES_RS_URL:-https://54.91.17.58/des-rs}"
 base_url="${base_url%/}"
 endpoint="${DES_RS_TRAIN_URL:-$base_url/api/train-self-play}"
@@ -40,11 +41,20 @@ if [[ -z "$auth_value" && "$endpoint" == https://54.91.17.58* ]]; then
   exit 2
 fi
 
+response_path="${SOCCER_SERVER_RESPONSE_PATH:-$shard_out/response.json}"
+artifact_path="${SOCCER_SERVER_LOCAL_ARTIFACT_PATH:-$shard_out/artifact.json}"
+learned_params_path="${SOCCER_SERVER_LOCAL_LEARNED_PARAMS_PATH:-$shard_out/learned-params.json}"
+episode_log_path="${SOCCER_SERVER_EPISODE_LOG_PATH:-$shard_out/episodes.jsonl}"
+
 mkdir -p "$shard_out"
 cat > "$local_out/run.env" <<EOF
 run_id=$run_id
 mode=server
 endpoint=$endpoint
+server_artifact_path=$server_artifact_path
+server_learned_params_path=$server_learned_params_path
+local_artifact_path=$artifact_path
+local_learned_params_path=$learned_params_path
 games=$SOCCER_GAMES
 halves=$SOCCER_HALVES
 minutes=$SOCCER_MINUTES
@@ -64,11 +74,8 @@ shards=1
 parallel_shards=1
 EOF
 payload_path="$shard_out/payload.json"
-response_path="${SOCCER_SERVER_RESPONSE_PATH:-$shard_out/response.json}"
-artifact_path="${SOCCER_SERVER_LOCAL_ARTIFACT_PATH:-$shard_out/artifact.json}"
-episode_log_path="${SOCCER_SERVER_EPISODE_LOG_PATH:-$shard_out/episodes.jsonl}"
 
-python3 - "$server_artifact_path" > "$payload_path" <<'PY'
+python3 - "$server_artifact_path" "$server_learned_params_path" > "$payload_path" <<'PY'
 import json
 import os
 import sys
@@ -83,6 +90,7 @@ def as_bool(name: str) -> bool:
     return os.environ.get(name, "1").strip().lower() not in {"0", "false", "no", "off"}
 
 artifact_path = sys.argv[1]
+learned_params_path = sys.argv[2]
 payload = {
     "episodes": as_int("SOCCER_GAMES"),
     "minutes": as_float("SOCCER_MINUTES"),
@@ -107,6 +115,7 @@ payload = {
         "defenseCompactnessScoreWeight": as_float("SOCCER_DEFENSE_COMPACTNESS_SCORE_WEIGHT"),
     },
     "artifactPath": artifact_path,
+    "learnedParamsPath": learned_params_path,
     "importIntoSession": as_bool("SOCCER_IMPORT_INTO_SESSION"),
 }
 print(json.dumps(payload, indent=2, sort_keys=True))
@@ -126,27 +135,33 @@ fi
 
 curl "${curl_args[@]}"
 
-python3 - "$response_path" "$artifact_path" "$episode_log_path" <<'PY'
+python3 - "$response_path" "$artifact_path" "$learned_params_path" "$episode_log_path" <<'PY'
 import json
 import pathlib
 import sys
 
 response_path = pathlib.Path(sys.argv[1])
 artifact_path = pathlib.Path(sys.argv[2])
-episode_log_path = pathlib.Path(sys.argv[3])
+learned_params_path = pathlib.Path(sys.argv[3])
+episode_log_path = pathlib.Path(sys.argv[4])
 response = json.loads(response_path.read_text())
 if response.get("ok") is False:
     raise SystemExit(f"server returned error response: {response.get('error', response)}")
 artifact = response.get("artifact")
 if not isinstance(artifact, dict):
     raise SystemExit("server response did not include an artifact object")
+learned_params = response.get("learnedParams")
+if not isinstance(learned_params, dict):
+    raise SystemExit("server response did not include learnedParams")
 artifact_path.write_text(json.dumps(artifact, indent=2, sort_keys=True) + "\n")
+learned_params_path.write_text(json.dumps(learned_params, indent=2, sort_keys=True) + "\n")
 episodes = artifact.get("episodes") or []
 episode_log_path.write_text(
     "".join(json.dumps(episode, sort_keys=True) + "\n" for episode in episodes)
 )
 print(f"server_response={response_path}")
 print(f"artifact={artifact_path}")
+print(f"learned_params={learned_params_path}")
 print(f"episode_log={episode_log_path}")
 print(f"episodes={len(episodes)}")
 print(f"home_entries={len(artifact.get('homeEntries') or [])}")

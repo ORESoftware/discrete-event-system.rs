@@ -6201,7 +6201,7 @@ impl Driver {
         let current_tools = external_optimization_tools();
         self.check(
             "External optimization ecosystem registry covers requested tools",
-            current_tools.len() == 88 && specs.len() == current_tools.len(),
+            current_tools.len() == 96 && specs.len() == current_tools.len(),
             format!("tools={} specs={}", current_tools.len(), specs.len()),
         );
         let legacy_tools = legacy_external_optimization_ecosystem::ExternalOptimizationTool::all();
@@ -6215,7 +6215,7 @@ impl Driver {
                             == legacy_external_optimization_ecosystem::ExternalOptimizationEcosystem::Python
                     })
                     .count()
-                    == 20
+                    == 23
                 && legacy_tools
                     .iter()
                     .any(|tool| tool.as_str() == "hexaly" && tool.ecosystem().as_str() == "native"),
@@ -6235,7 +6235,7 @@ impl Driver {
             .count();
         self.check(
             "External optimization ecosystem registry Java/Rust split",
-            java_count == 12 && rust_count == 8,
+            java_count == 12 && rust_count == 11,
             format!("java={java_count} rust={rust_count}"),
         );
         let python_count = specs
@@ -6252,7 +6252,7 @@ impl Driver {
             .count();
         self.check(
             "External optimization ecosystem registry Python/Julia/native split",
-            python_count == 20 && julia_count == 1 && native_count == 47,
+            python_count == 23 && julia_count == 1 && native_count == 49,
             format!("python={python_count} julia={julia_count} native={native_count}"),
         );
         self.check(
@@ -6302,6 +6302,10 @@ impl Driver {
                     && spec.family == ExternalOptimizationFamily::LinearMip
                     && spec.exactness == ExternalOptimizationExactness::Exact
             }) && specs.iter().any(|spec| {
+                spec.tool == ExternalOptimizationTool::QsoptExCli
+                    && spec.family == ExternalOptimizationFamily::LinearMip
+                    && spec.exactness == ExternalOptimizationExactness::Exact
+            }) && specs.iter().any(|spec| {
                 spec.tool == ExternalOptimizationTool::LpSolveCli
                     && spec.family == ExternalOptimizationFamily::LinearMip
                     && spec.exactness == ExternalOptimizationExactness::Exact
@@ -6314,11 +6318,23 @@ impl Driver {
                     && spec.family == ExternalOptimizationFamily::LinearMip
                     && spec.exactness == ExternalOptimizationExactness::Numerical
             }) && specs.iter().any(|spec| {
+                spec.tool == ExternalOptimizationTool::OrToolsCpSat
+                    && spec.family == ExternalOptimizationFamily::CpSatRouting
+                    && spec.exactness == ExternalOptimizationExactness::Exact
+            }) && specs.iter().any(|spec| {
                 spec.tool == ExternalOptimizationTool::Cvxpy
                     && spec.family == ExternalOptimizationFamily::ConvexOptimization
                     && spec.exactness == ExternalOptimizationExactness::ModelingLayer
             }) && specs.iter().any(|spec| {
                 spec.tool == ExternalOptimizationTool::PyScipOpt
+                    && spec.family == ExternalOptimizationFamily::NativeSolverBinding
+                    && spec.exactness == ExternalOptimizationExactness::Numerical
+            }) && specs.iter().any(|spec| {
+                spec.tool == ExternalOptimizationTool::CplexPython
+                    && spec.family == ExternalOptimizationFamily::NativeSolverBinding
+                    && spec.exactness == ExternalOptimizationExactness::Numerical
+            }) && specs.iter().any(|spec| {
+                spec.tool == ExternalOptimizationTool::XpressPython
                     && spec.family == ExternalOptimizationFamily::NativeSolverBinding
                     && spec.exactness == ExternalOptimizationExactness::Numerical
             }) && specs.iter().any(|spec| {
@@ -6331,6 +6347,18 @@ impl Driver {
                     && spec.exactness == ExternalOptimizationExactness::Numerical
             }) && specs.iter().any(|spec| {
                 spec.tool == ExternalOptimizationTool::Ipopt
+                    && spec.family == ExternalOptimizationFamily::NonlinearOptimization
+                    && spec.exactness == ExternalOptimizationExactness::Numerical
+            }) && specs.iter().any(|spec| {
+                spec.tool == ExternalOptimizationTool::GurobiRust
+                    && spec.family == ExternalOptimizationFamily::NativeSolverBinding
+                    && spec.exactness == ExternalOptimizationExactness::Numerical
+            }) && specs.iter().any(|spec| {
+                spec.tool == ExternalOptimizationTool::CplexRust
+                    && spec.family == ExternalOptimizationFamily::NativeSolverBinding
+                    && spec.exactness == ExternalOptimizationExactness::Numerical
+            }) && specs.iter().any(|spec| {
+                spec.tool == ExternalOptimizationTool::IpoptRust
                     && spec.family == ExternalOptimizationFamily::NonlinearOptimization
                     && spec.exactness == ExternalOptimizationExactness::Numerical
             }) && specs.iter().any(|spec| {
@@ -6350,7 +6378,7 @@ impl Driver {
                     && spec.family == ExternalOptimizationFamily::NonlinearOptimization
                     && spec.exactness == ExternalOptimizationExactness::ModelingLayer
             }),
-            "checked Choco, CPMpy, clingo, Open-WBO, OptaPlanner, Timefold, PDDL planners, Pyomo, HiGHS/SoPlex/lp_solve CLI, OR-Tools GLOP/PDLP, CVXPY, PySCIPOpt, Hexaly, argmin, Ipopt, MOSEK, Z3, OptiMathSAT, and CasADi classifications".to_string(),
+            "checked Choco, CPMpy, clingo, Open-WBO, OptaPlanner, Timefold, PDDL planners, Pyomo, HiGHS/SoPlex/lp_solve CLI, OR-Tools GLOP/PDLP, CVXPY, PySCIPOpt, Hexaly, argmin, Ipopt, Gurobi/CPLEX/Ipopt Rust bindings, MOSEK, Z3, OptiMathSAT, and CasADi classifications".to_string(),
         );
         let cp_specs = external_cp_sat_reference_solver_specs();
         let direct_cp_specs = cp_specs
@@ -6821,7 +6849,7 @@ impl Driver {
         let specs = external_validation_tool_specs();
         self.check(
             "External validation registry covers recommended tools",
-            specs.len() == 259,
+            specs.len() == 264,
             format!("tools={}", specs.len()),
         );
         for (family, expected_at_least) in [
@@ -6861,6 +6889,9 @@ impl Driver {
                 && specs.iter().any(|spec| spec.id == "rust-linprog")
                 && specs.iter().any(|spec| spec.id == "argmin")
                 && specs.iter().any(|spec| spec.id == "nlopt-rs")
+                && specs.iter().any(|spec| spec.id == "gurobi-rust")
+                && specs.iter().any(|spec| spec.id == "cplex-rust")
+                && specs.iter().any(|spec| spec.id == "ipopt-rust")
                 && specs.iter().any(|spec| spec.id == "nlopt")
                 && specs.iter().any(|spec| spec.id == "highs-rust")
                 && specs.iter().any(|spec| spec.id == "scip-rust")
@@ -6869,6 +6900,8 @@ impl Driver {
                 && specs.iter().any(|spec| spec.id == "pyscipopt")
                 && specs.iter().any(|spec| spec.id == "python-mip")
                 && specs.iter().any(|spec| spec.id == "gurobipy")
+                && specs.iter().any(|spec| spec.id == "cplex-python")
+                && specs.iter().any(|spec| spec.id == "xpress-python")
                 && specs.iter().any(|spec| spec.id == "docplex")
                 && specs.iter().any(|spec| spec.id == "ortools-python")
                 && specs.iter().any(|spec| spec.id == "ortools-cp-sat")
@@ -6940,7 +6973,7 @@ impl Driver {
                 && specs.iter().any(|spec| spec.id == "protoc")
                 && specs.iter().any(|spec| spec.id == "apache-avro")
                 && specs.iter().any(|spec| spec.id == "frictionless"),
-            "checked MiniZinc, Choco/JaCoP/CP Optimizer/OR-Tools Java/Python/CP-SAT/ojAlgo, OptaPlanner/Timefold, jMetal/MOEA/ECJ, good_lp/lp-modeler/rust-linprog/argmin/NLopt/HiGHS/SCIP/CBC Rust bindings, PySCIPOpt/Python-MIP/gurobipy/DOcplex, HiGHS/GLPK/SCIP/CBC/CLP/SoPlex/QSopt_ex/lp_solve/Gurobi/CPLEX/Xpress/LINDO CLI adapters, Pyomo/AMPL/NEOS, PDDL planning validators, Z3/OptiMathSAT, MiniSat/Glucose/MapleSAT/Varisat/MaxHS/RoundingSat, clingo ASP, DRAT/FRAT/VeriPB, TLC, MIPLIB, Ipopt, OSQP, software verifiers, simulation engines, API/data validators, XML, CSV, Protobuf, Avro, and Frictionless".to_string(),
+            "checked MiniZinc, Choco/JaCoP/CP Optimizer/OR-Tools Java/Python/CP-SAT/ojAlgo, OptaPlanner/Timefold, jMetal/MOEA/ECJ, good_lp/lp-modeler/rust-linprog/argmin/NLopt/Gurobi/CPLEX/Ipopt/HiGHS/SCIP/CBC Rust bindings, PySCIPOpt/Python-MIP/gurobipy/CPLEX Python/Xpress Python/DOcplex, HiGHS/GLPK/SCIP/CBC/CLP/SoPlex/QSopt_ex/lp_solve/Gurobi/CPLEX/Xpress/LINDO CLI adapters, Pyomo/AMPL/NEOS, PDDL planning validators, Z3/OptiMathSAT, MiniSat/Glucose/MapleSAT/Varisat/MaxHS/RoundingSat, clingo ASP, DRAT/FRAT/VeriPB, TLC, MIPLIB, Ipopt, OSQP, software verifiers, simulation engines, API/data validators, XML, CSV, Protobuf, Avro, and Frictionless".to_string(),
         );
 
         let minizinc_payload = minizinc_validation_request_to_json(&MiniZincValidationRequest {

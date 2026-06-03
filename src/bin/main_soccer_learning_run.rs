@@ -6,10 +6,11 @@ use std::io::Write;
 use std::time::Instant;
 
 use des_engine::des::general::soccer::{
+    soccer_self_play_default_learned_params_path,
     train_soccer_team_policies_from_self_play_with_initial_policies_progress_and_checkpoints,
     MatchConfig, SoccerQEntry, SoccerQPolicyOptions, SoccerQTargetEntry,
-    SoccerSelfPlayEpisodeSummary, SoccerSelfPlayTrainingArtifact, SoccerTacticalLearningWeights,
-    SoccerTeamQPolicies,
+    SoccerSelfPlayEpisodeSummary, SoccerSelfPlayLearnedParams, SoccerSelfPlayTrainingArtifact,
+    SoccerTacticalLearningWeights, SoccerTeamQPolicies,
 };
 
 fn env_usize(name: &str, default: usize) -> usize {
@@ -115,6 +116,25 @@ fn write_training_artifact(
     }
 }
 
+fn write_learned_params(path: &str, artifact: &SoccerSelfPlayTrainingArtifact) -> bool {
+    create_parent_dir(path);
+    let params = SoccerSelfPlayLearnedParams::from_training_artifact(artifact);
+    let json = match serde_json::to_string_pretty(&params) {
+        Ok(json) => json,
+        Err(e) => {
+            eprintln!("failed to serialize learned params {path}: {e}");
+            return false;
+        }
+    };
+    match std::fs::write(path, json) {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!("failed to write learned params {path}: {e}");
+            false
+        }
+    }
+}
+
 fn env_tactical_learning_weights() -> SoccerTacticalLearningWeights {
     let default = SoccerTacticalLearningWeights::default();
     SoccerTacticalLearningWeights {
@@ -202,14 +222,23 @@ fn load_initial_policies(
             std::process::exit(2);
         }
     };
-    let artifact = match serde_json::from_str::<SoccerSelfPlayTrainingArtifact>(&raw) {
-        Ok(artifact) => artifact,
+    if let Ok(artifact) = serde_json::from_str::<SoccerSelfPlayTrainingArtifact>(&raw) {
+        return match SoccerTeamQPolicies::from_self_play_artifact(&artifact) {
+            Ok(policies) => policies,
+            Err(e) => {
+                eprintln!("failed to restore policies from {path}: {e}");
+                std::process::exit(2);
+            }
+        };
+    }
+    let params = match serde_json::from_str::<SoccerSelfPlayLearnedParams>(&raw) {
+        Ok(params) => params,
         Err(e) => {
-            eprintln!("failed to parse self-play artifact {path}: {e}");
+            eprintln!("failed to parse self-play artifact or learned params {path}: {e}");
             std::process::exit(2);
         }
     };
-    match SoccerTeamQPolicies::from_self_play_artifact(&artifact) {
+    match SoccerTeamQPolicies::from_learned_params(&params) {
         Ok(policies) => policies,
         Err(e) => {
             eprintln!("failed to restore policies from {path}: {e}");
@@ -295,6 +324,8 @@ fn main() {
     };
     let artifact_path = std::env::var("SOCCER_ARTIFACT_PATH")
         .unwrap_or_else(|_| default_artifact_path(games, minutes, shard_index, shard_count));
+    let learned_params_path = std::env::var("SOCCER_LEARNED_PARAMS_PATH")
+        .unwrap_or_else(|_| soccer_self_play_default_learned_params_path(&artifact_path));
     let checkpoint_interval_games = env_usize("SOCCER_CHECKPOINT_INTERVAL_GAMES", 10);
     let artifact_max_entries_per_policy =
         env_usize("SOCCER_ARTIFACT_MAX_ENTRIES_PER_POLICY", 10_000);
@@ -369,6 +400,7 @@ fn main() {
     let elapsed = started.elapsed();
 
     let _ = write_training_artifact(&artifact_path, &artifact, artifact_max_entries_per_policy);
+    let _ = write_learned_params(&learned_params_path, &artifact);
 
     println!(
         "soccer_self_play games={} halves={} half_minutes={:.1} minutes={:.1} dt={:.3}s learning_interval_ticks={} ticks_per_game={} shard={}/{} base_seed={} effective_seed={} elapsed={:.2?}",
@@ -386,6 +418,7 @@ fn main() {
         elapsed
     );
     println!("artifact={}", artifact_path);
+    println!("learned_params={}", learned_params_path);
     if checkpoint_interval_games == 0 {
         println!("checkpoint_artifact=disabled");
     } else {

@@ -2159,6 +2159,58 @@ pub struct SoccerSelfPlayTrainingArtifact {
     pub away_target_entries: Vec<SoccerQTargetEntry>,
 }
 
+pub const SOCCER_SELF_PLAY_LEARNED_PARAMS_VERSION: u32 = 1;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerSelfPlayLearnedParams {
+    pub version: u32,
+    pub config: MatchConfig,
+    pub options: SoccerQPolicyOptions,
+    #[serde(default = "default_tactical_learning_weights")]
+    pub tactical_learning: SoccerTacticalLearningWeights,
+    pub episodes: usize,
+    pub home_entries: Vec<SoccerQEntry>,
+    #[serde(default)]
+    pub home_target_entries: Vec<SoccerQTargetEntry>,
+    pub away_entries: Vec<SoccerQEntry>,
+    #[serde(default)]
+    pub away_target_entries: Vec<SoccerQTargetEntry>,
+}
+
+impl SoccerSelfPlayLearnedParams {
+    pub fn from_training_artifact(artifact: &SoccerSelfPlayTrainingArtifact) -> Self {
+        SoccerSelfPlayLearnedParams {
+            version: SOCCER_SELF_PLAY_LEARNED_PARAMS_VERSION,
+            config: artifact.config.clone(),
+            options: artifact.options.clone(),
+            tactical_learning: artifact.tactical_learning.clone(),
+            episodes: artifact.episodes.len(),
+            home_entries: artifact.home_entries.clone(),
+            home_target_entries: artifact.home_target_entries.clone(),
+            away_entries: artifact.away_entries.clone(),
+            away_target_entries: artifact.away_target_entries.clone(),
+        }
+    }
+}
+
+impl SoccerTeamQPolicies {
+    pub fn from_learned_params(params: &SoccerSelfPlayLearnedParams) -> Result<Self, String> {
+        Ok(SoccerTeamQPolicies {
+            home: SoccerQPolicy::from_entries_with_targets(
+                params.options.clone(),
+                &params.home_entries,
+                &params.home_target_entries,
+            )?,
+            away: SoccerQPolicy::from_entries_with_targets(
+                params.options.clone(),
+                &params.away_entries,
+                &params.away_target_entries,
+            )?,
+        })
+    }
+}
+
 fn normalize_soccer_action_label(action: &str) -> &str {
     match action {
         "move" => "space",
@@ -8699,6 +8751,7 @@ pub struct SoccerSelfPlayTrainingRequest {
     pub options: Option<SoccerQPolicyOptions>,
     pub tactical_learning: Option<SoccerTacticalLearningWeights>,
     pub artifact_path: Option<String>,
+    pub learned_params_path: Option<String>,
     #[serde(default = "default_import_trained_policy")]
     pub import_into_session: bool,
 }
@@ -8707,9 +8760,11 @@ pub struct SoccerSelfPlayTrainingRequest {
 #[serde(rename_all = "camelCase")]
 pub struct SoccerSelfPlayTrainingResponse {
     pub artifact_path: Option<String>,
+    pub learned_params_path: Option<String>,
     pub imported_home_entries: usize,
     pub imported_away_entries: usize,
     pub learning: SoccerLearningSnapshot,
+    pub learned_params: SoccerSelfPlayLearnedParams,
     pub artifact: SoccerSelfPlayTrainingArtifact,
 }
 
@@ -11563,8 +11618,20 @@ impl SoccerRealtimeSession {
         let options = request.options.unwrap_or_default();
         validate_soccer_q_policy_options(&options)?;
         let artifact = train_soccer_team_policies_from_self_play(config, request.episodes, options);
+        let learned_params = SoccerSelfPlayLearnedParams::from_training_artifact(&artifact);
+        let default_learned_params_path = request
+            .artifact_path
+            .as_deref()
+            .map(soccer_self_play_default_learned_params_path);
         let artifact_path =
             write_self_play_training_artifact(request.artifact_path.as_deref(), &artifact)?;
+        let learned_params_path = write_self_play_learned_params(
+            request
+                .learned_params_path
+                .as_deref()
+                .or(default_learned_params_path.as_deref()),
+            &learned_params,
+        )?;
 
         let (imported_home_entries, imported_away_entries, learning) =
             if request.import_into_session {
@@ -11583,9 +11650,11 @@ impl SoccerRealtimeSession {
 
         Ok(SoccerSelfPlayTrainingResponse {
             artifact_path,
+            learned_params_path,
             imported_home_entries,
             imported_away_entries,
             learning,
+            learned_params,
             artifact,
         })
     }
@@ -11821,11 +11890,35 @@ fn write_self_play_training_artifact(
     artifact_path: Option<&str>,
     artifact: &SoccerSelfPlayTrainingArtifact,
 ) -> Result<Option<String>, String> {
-    let Some(path) = artifact_path.map(str::trim).filter(|path| !path.is_empty()) else {
+    write_pretty_json_file(artifact_path, artifact, "self-play training artifact")
+}
+
+fn write_self_play_learned_params(
+    learned_params_path: Option<&str>,
+    params: &SoccerSelfPlayLearnedParams,
+) -> Result<Option<String>, String> {
+    write_pretty_json_file(learned_params_path, params, "self-play learned params")
+}
+
+pub fn soccer_self_play_default_learned_params_path(artifact_path: &str) -> String {
+    let trimmed = artifact_path.trim();
+    if let Some(prefix) = trimmed.strip_suffix(".json") {
+        format!("{prefix}.params.json")
+    } else {
+        format!("{trimmed}.params.json")
+    }
+}
+
+fn write_pretty_json_file<T: Serialize>(
+    path: Option<&str>,
+    value: &T,
+    label: &str,
+) -> Result<Option<String>, String> {
+    let Some(path) = path.map(str::trim).filter(|path| !path.is_empty()) else {
         return Ok(None);
     };
-    let json = serde_json::to_string_pretty(artifact)
-        .map_err(|e| format!("serialize self-play training artifact: {e}"))?;
+    let json =
+        serde_json::to_string_pretty(value).map_err(|e| format!("serialize {label}: {e}"))?;
     let path_ref = std::path::Path::new(path);
     if let Some(parent) = path_ref
         .parent()
@@ -11834,12 +11927,8 @@ fn write_self_play_training_artifact(
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("create artifact directory {}: {e}", parent.display()))?;
     }
-    std::fs::write(path_ref, json).map_err(|e| {
-        format!(
-            "write self-play training artifact {}: {e}",
-            path_ref.display()
-        )
-    })?;
+    std::fs::write(path_ref, json)
+        .map_err(|e| format!("write {label} {}: {e}", path_ref.display()))?;
     Ok(Some(path.to_string()))
 }
 
@@ -18402,6 +18491,20 @@ mod tests {
             value["config"]["tacticalLearning"]["defenseContractDeltaWeight"],
             serde_json::json!(0.42)
         );
+        let params = SoccerSelfPlayLearnedParams::from_training_artifact(&artifact);
+        let params_value = serde_json::to_value(&params).expect("learned params json");
+        assert_eq!(params.version, SOCCER_SELF_PLAY_LEARNED_PARAMS_VERSION);
+        assert_eq!(params.episodes, 1);
+        assert_eq!(params.tactical_learning.attack_flank_lane_weight, 0.31);
+        assert_eq!(
+            params_value["tacticalLearning"]["attackFlankLaneWeight"],
+            serde_json::json!(0.31)
+        );
+        assert_eq!(params.home_entries.len(), artifact.home_entries.len());
+        let restored =
+            SoccerTeamQPolicies::from_learned_params(&params).expect("restore learned params");
+        assert!(!restored.home.q_values.is_empty());
+        assert!(!restored.away.q_values.is_empty());
     }
 
     #[test]
@@ -20544,6 +20647,18 @@ mod tests {
         assert_eq!(
             value["artifact"]["config"]["tacticalLearning"]["defenseContractDeltaWeight"],
             serde_json::json!(0.33)
+        );
+        assert_eq!(value["learnedParams"]["episodes"], serde_json::json!(1));
+        assert_eq!(
+            value["learnedParams"]["tacticalLearning"]["attackFlankLaneWeight"],
+            serde_json::json!(0.22)
+        );
+        assert!(
+            value["learnedParams"]["homeEntries"]
+                .as_array()
+                .unwrap()
+                .len()
+                > 0
         );
         assert!(value["importedHomeEntries"].as_u64().unwrap() > 0);
         assert!(value["importedAwayEntries"].as_u64().unwrap() > 0);

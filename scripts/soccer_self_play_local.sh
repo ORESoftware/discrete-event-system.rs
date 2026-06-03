@@ -5,8 +5,8 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_dir="$(cd "$script_dir/.." && pwd)"
 cd "$repo_dir"
 
-if [[ -n "${SOCCER_ARTIFACT_PATH:-}" || -n "${SOCCER_EPISODE_LOG_PATH:-}" ]]; then
-  echo "SOCCER_ARTIFACT_PATH and SOCCER_EPISODE_LOG_PATH are managed per shard by this launcher." >&2
+if [[ -n "${SOCCER_ARTIFACT_PATH:-}" || -n "${SOCCER_EPISODE_LOG_PATH:-}" || -n "${SOCCER_LEARNED_PARAMS_PATH:-}" ]]; then
+  echo "SOCCER_ARTIFACT_PATH, SOCCER_EPISODE_LOG_PATH, and SOCCER_LEARNED_PARAMS_PATH are managed per shard by this launcher." >&2
   echo "Use SOCCER_OUT_ROOT or SOCCER_RUN_ID to choose the output namespace." >&2
   exit 2
 fi
@@ -64,6 +64,7 @@ printf 'dt_seconds=%s\n' "$SOCCER_DT_SECONDS" >> "$out_root/run.env"
 printf 'learning_interval_ticks=%s\n' "$SOCCER_LEARNING_INTERVAL_TICKS" >> "$out_root/run.env"
 printf 'checkpoint_interval_games=%s\n' "$SOCCER_CHECKPOINT_INTERVAL_GAMES" >> "$out_root/run.env"
 printf 'artifact_max_entries_per_policy=%s\n' "$SOCCER_ARTIFACT_MAX_ENTRIES_PER_POLICY" >> "$out_root/run.env"
+printf 'learned_params_file=learned-params.json\n' >> "$out_root/run.env"
 printf 'attack_spacing_delta_weight=%s\n' "$SOCCER_ATTACK_SPACING_DELTA_WEIGHT" >> "$out_root/run.env"
 printf 'attack_spacing_score_weight=%s\n' "$SOCCER_ATTACK_SPACING_SCORE_WEIGHT" >> "$out_root/run.env"
 printf 'attack_width_delta_weight=%s\n' "$SOCCER_ATTACK_WIDTH_DELTA_WEIGHT" >> "$out_root/run.env"
@@ -84,6 +85,7 @@ run_shard() {
   SOCCER_SHARD_INDEX="$shard_index" \
     SOCCER_SHARD_COUNT="$shards" \
     SOCCER_ARTIFACT_PATH="$shard_dir/artifact.json" \
+    SOCCER_LEARNED_PARAMS_PATH="$shard_dir/learned-params.json" \
     SOCCER_EPISODE_LOG_PATH="$shard_dir/episodes.jsonl" \
     "$binary" > "$shard_dir/stdout.log" 2> "$shard_dir/stderr.log"
   printf 'finished shard %s/%s -> %s\n' "$shard_index" "$shards" "$shard_dir"

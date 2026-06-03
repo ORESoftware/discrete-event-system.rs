@@ -3,7 +3,7 @@
 
 The Rust optimization suite already cross-checks through Python APIs such as
 SciPy and OR-Tools. This bridge exercises actual command-line solvers
-(`highs`, `glpsol`, `scip`, `cbc`, LP-only `clp`/`soplex`, `lp_solve`, and optional commercial
+(`highs`, `glpsol`, `scip`, `cbc`, LP-only `clp`/`soplex`/`qsopt_ex`, `lp_solve`, and optional commercial
 CLIs such as `gurobi_cl`, `cplex`, FICO Xpress `optimizer`, and LINDO
 `runlindo`) on the same small validation models by writing a solver-readable
 LP/MPS file, invoking the solver, and parsing the primal solution.
@@ -35,6 +35,7 @@ COMMAND_ALIASES = {
     "cbc": ["cbc"],
     "clp": ["clp"],
     "soplex": ["soplex"],
+    "qsopt-ex": ["qsopt_ex", "qsopt-ex", "qsopt", "esolver"],
     "lp-solve": ["lp_solve", "lp-solve", "lpsolve"],
     "gurobi": ["gurobi_cl"],
     "cplex": ["cplex"],
@@ -49,6 +50,7 @@ COMMAND_ENV_VARS = {
     "cbc": ["CBC_CMD", "ORES_CBC_CMD", "ORES_CBC_BIN", "DES_CBC_BIN", "CBC_BIN"],
     "clp": ["CLP_CMD", "ORES_CLP_CMD", "ORES_CLP_BIN", "DES_CLP_BIN", "CLP_BIN"],
     "soplex": ["SOPLEX_CMD", "ORES_SOPLEX_CMD", "ORES_SOPLEX_BIN", "DES_SOPLEX_BIN", "SOPLEX_BIN"],
+    "qsopt-ex": ["QSOPT_EX_CMD", "QSOPT_CMD", "ORES_QSOPT_EX_CMD", "ORES_QSOPT_EX_BIN", "DES_QSOPT_EX_BIN", "QSOPT_EX_BIN"],
     "lp-solve": ["LP_SOLVE_CMD", "LPSOLVE_CMD", "ORES_LP_SOLVE_CMD", "ORES_LPSOLVE_BIN", "DES_LPSOLVE_BIN", "LPSOLVE_BIN"],
     "gurobi": ["GUROBI_CL_CMD", "GUROBI_CMD", "ORES_GUROBI_CMD", "ORES_GUROBI_BIN", "DES_GUROBI_BIN", "GUROBI_BIN"],
     "cplex": ["CPLEX_CMD", "ORES_CPLEX_CMD", "ORES_CPLEX_BIN", "DES_CPLEX_BIN", "CPLEX_BIN"],
@@ -63,6 +65,7 @@ COMMAND_DIR_ENV_VARS = {
     "cbc": ["CBC_DIR", "CBC_HOME", "COINOR_DIR", "COINOR_HOME"],
     "clp": ["CLP_DIR", "CLP_HOME", "COINOR_DIR", "COINOR_HOME"],
     "soplex": ["SOPLEX_DIR", "SOPLEX_HOME"],
+    "qsopt-ex": ["QSOPT_EX_DIR", "QSOPT_EX_HOME", "QSOPT_DIR", "QSOPT_HOME"],
     "lp-solve": ["LP_SOLVE_DIR", "LPSOLVE_DIR", "LP_SOLVE_HOME", "LPSOLVE_HOME"],
     "gurobi": ["GUROBI_HOME"],
     "cplex": ["CPLEX_STUDIO_DIR", "CPLEX_HOME"],
@@ -77,6 +80,7 @@ SUPPORTED_SOLVERS = {
     "cbc",
     "clp",
     "soplex",
+    "qsopt-ex",
     "lp-solve",
     "gurobi",
     "cplex",
@@ -1216,6 +1220,28 @@ def parse_soplex_solution(path: str, n: int, stdout: str, stderr: str) -> tuple[
     return status, x
 
 
+def parse_qsopt_ex_solution(path: str, n: int, stdout: str, stderr: str) -> tuple[str, list[float]]:
+    x = [0.0] * n
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        text = f.read()
+    lower = f"{stdout}\n{stderr}\n{text}".lower()
+    if "infeasible" in lower:
+        status = "infeasible"
+    elif "unbounded" in lower:
+        status = "unbounded"
+    elif "optimal" in lower or "objective" in lower or "primal solution" in lower:
+        status = "optimal"
+    else:
+        status = "unknown"
+
+    for line in text.splitlines():
+        parsed = _parse_named_value_line(line, n)
+        if parsed is not None:
+            idx, value = parsed
+            x[idx] = value
+    return status, x
+
+
 def _parse_named_value_line(line: str, n: int) -> Optional[tuple[int, float]]:
     match = re.search(r"\bx(\d+)\b", line, flags=re.IGNORECASE)
     if match is None:
@@ -2311,6 +2337,14 @@ def run_solver(
             *(["-s0"] if presolve == "off" else ["-s1"] if presolve == "on" else []),
             model_path,
         ]
+    elif solver == "qsopt-ex":
+        cmd = [
+            command,
+            "-L",
+            "-O",
+            solution_path,
+            model_path,
+        ]
     elif solver == "lp-solve":
         cmd = [
             command,
@@ -2703,7 +2737,7 @@ def solve(
         dual_feasibility_tolerance = normalized_tolerance(dual_feasibility_tolerance)
         integer_feasibility_tolerance = None
     elif kind == "mip":
-        if solver in {"clp", "soplex"}:
+        if solver in {"clp", "soplex", "qsopt-ex"}:
             return status_payload("unavailable", f"{solver}:cli", f"{solver} is LP-only")
         sense, c, a_ub, b_ub, lbs, ubs, integer_vars = normalize_mip(raw)
         a_eq, b_eq = [], []
@@ -2797,7 +2831,11 @@ def solve(
 
     with tempfile.TemporaryDirectory(prefix="ores-linear-cli-") as tmp:
         effective_model_format = (
-            "mps" if solver == "lindo" else "lp" if solver == "lp-solve" else model_format
+            "mps"
+            if solver == "lindo"
+            else "lp"
+            if solver in {"lp-solve", "qsopt-ex"}
+            else model_format
         )
         extension = "mps" if effective_model_format == "mps" else "lp"
         model_path = os.path.join(tmp, f"model.{extension}")
@@ -2919,6 +2957,8 @@ def solve(
             status, x = parse_lp_solve_solution(solution_path, len(c))
         elif solver == "soplex":
             status, x = parse_soplex_solution(solution_path, len(c), stdout, stderr)
+        elif solver == "qsopt-ex":
+            status, x = parse_qsopt_ex_solution(solution_path, len(c), stdout, stderr)
         else:
             status, x, certificate_fields = parse_cbc_solution(
                 solution_path,

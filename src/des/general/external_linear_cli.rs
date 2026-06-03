@@ -77,6 +77,7 @@ pub enum ExternalLinearCliSolver {
     Cbc,
     Clp,
     Soplex,
+    QsoptEx,
     LpSolve,
     Gurobi,
     Cplex,
@@ -192,6 +193,7 @@ impl ExternalLinearCliSolver {
             ExternalLinearCliSolver::Cbc,
             ExternalLinearCliSolver::Clp,
             ExternalLinearCliSolver::Soplex,
+            ExternalLinearCliSolver::QsoptEx,
             ExternalLinearCliSolver::LpSolve,
             ExternalLinearCliSolver::Gurobi,
             ExternalLinearCliSolver::Cplex,
@@ -208,6 +210,7 @@ impl ExternalLinearCliSolver {
             ExternalLinearCliSolver::Cbc => "cbc",
             ExternalLinearCliSolver::Clp => "clp",
             ExternalLinearCliSolver::Soplex => "soplex",
+            ExternalLinearCliSolver::QsoptEx => "qsopt-ex",
             ExternalLinearCliSolver::LpSolve => "lp-solve",
             ExternalLinearCliSolver::Gurobi => "gurobi",
             ExternalLinearCliSolver::Cplex => "cplex",
@@ -224,6 +227,7 @@ impl ExternalLinearCliSolver {
             ExternalLinearCliSolver::Cbc => "COIN-OR CBC",
             ExternalLinearCliSolver::Clp => "COIN-OR CLP",
             ExternalLinearCliSolver::Soplex => "SoPlex",
+            ExternalLinearCliSolver::QsoptEx => "QSopt_ex",
             ExternalLinearCliSolver::LpSolve => "lp_solve",
             ExternalLinearCliSolver::Gurobi => "Gurobi Optimizer",
             ExternalLinearCliSolver::Cplex => "IBM ILOG CPLEX",
@@ -240,6 +244,7 @@ impl ExternalLinearCliSolver {
             | ExternalLinearCliSolver::Cbc
             | ExternalLinearCliSolver::Clp
             | ExternalLinearCliSolver::Soplex
+            | ExternalLinearCliSolver::QsoptEx
             | ExternalLinearCliSolver::LpSolve => ExternalLinearCliLicenseClass::OpenSource,
             ExternalLinearCliSolver::Gurobi
             | ExternalLinearCliSolver::Cplex
@@ -268,6 +273,9 @@ impl ExternalLinearCliSolver {
             ExternalLinearCliSolver::Soplex => {
                 "ZIB SoPlex LP solver; LP-only bridge target with floating-point and rational solve modes."
             }
+            ExternalLinearCliSolver::QsoptEx => {
+                "QSopt_ex exact rational LP solver; LP-only bridge target for certifying small LP optima."
+            }
             ExternalLinearCliSolver::LpSolve => {
                 "Open-source LP/MIP solver with a compact LP-file CLI; useful legacy and lightweight cross-check target."
             }
@@ -295,6 +303,7 @@ impl ExternalLinearCliSolver {
             ExternalLinearCliSolver::Cbc => &["cbc"],
             ExternalLinearCliSolver::Clp => &["clp"],
             ExternalLinearCliSolver::Soplex => &["soplex"],
+            ExternalLinearCliSolver::QsoptEx => &["qsopt_ex", "qsopt-ex", "qsopt", "esolver"],
             ExternalLinearCliSolver::LpSolve => &["lp_solve", "lp-solve", "lpsolve"],
             ExternalLinearCliSolver::Gurobi => &["gurobi_cl"],
             ExternalLinearCliSolver::Cplex => &["cplex"],
@@ -353,6 +362,14 @@ impl ExternalLinearCliSolver {
                 "DES_SOPLEX_BIN",
                 "SOPLEX_BIN",
             ],
+            ExternalLinearCliSolver::QsoptEx => &[
+                "QSOPT_EX_CMD",
+                "QSOPT_CMD",
+                "ORES_QSOPT_EX_CMD",
+                "ORES_QSOPT_EX_BIN",
+                "DES_QSOPT_EX_BIN",
+                "QSOPT_EX_BIN",
+            ],
             ExternalLinearCliSolver::LpSolve => &[
                 "LP_SOLVE_CMD",
                 "LPSOLVE_CMD",
@@ -409,6 +426,9 @@ impl ExternalLinearCliSolver {
             ExternalLinearCliSolver::Cbc => &["CBC_DIR", "CBC_HOME", "COINOR_DIR", "COINOR_HOME"],
             ExternalLinearCliSolver::Clp => &["CLP_DIR", "CLP_HOME", "COINOR_DIR", "COINOR_HOME"],
             ExternalLinearCliSolver::Soplex => &["SOPLEX_DIR", "SOPLEX_HOME"],
+            ExternalLinearCliSolver::QsoptEx => {
+                &["QSOPT_EX_DIR", "QSOPT_EX_HOME", "QSOPT_DIR", "QSOPT_HOME"]
+            }
             ExternalLinearCliSolver::LpSolve => &[
                 "LP_SOLVE_DIR",
                 "LPSOLVE_DIR",
@@ -436,6 +456,7 @@ impl ExternalLinearCliSolver {
                     | ExternalLinearCliSolver::Cbc
                     | ExternalLinearCliSolver::Clp
                     | ExternalLinearCliSolver::Soplex
+                    | ExternalLinearCliSolver::QsoptEx
                     | ExternalLinearCliSolver::LpSolve
                     | ExternalLinearCliSolver::Gurobi
                     | ExternalLinearCliSolver::Cplex
@@ -466,6 +487,7 @@ impl ExternalLinearCliSolver {
             ExternalLinearCliSolver::Cbc,
             ExternalLinearCliSolver::Clp,
             ExternalLinearCliSolver::Soplex,
+            ExternalLinearCliSolver::QsoptEx,
             ExternalLinearCliSolver::LpSolve,
         ]
     }
@@ -2371,7 +2393,7 @@ mod tests {
 
     #[test]
     fn solver_aliases_and_kind_support_match_bridge_contract() {
-        assert_eq!(ExternalLinearCliSolver::all().len(), 11);
+        assert_eq!(ExternalLinearCliSolver::all().len(), 12);
         assert_eq!(ExternalLinearCliSolver::Glpk.command_aliases(), &["glpsol"]);
         assert_eq!(
             ExternalLinearCliSolver::Highs.command_env_vars(),
@@ -2432,6 +2454,17 @@ mod tests {
                 "ORES_SOPLEX_BIN",
                 "DES_SOPLEX_BIN",
                 "SOPLEX_BIN"
+            ]
+        );
+        assert_eq!(
+            ExternalLinearCliSolver::QsoptEx.command_env_vars(),
+            &[
+                "QSOPT_EX_CMD",
+                "QSOPT_CMD",
+                "ORES_QSOPT_EX_CMD",
+                "ORES_QSOPT_EX_BIN",
+                "DES_QSOPT_EX_BIN",
+                "QSOPT_EX_BIN"
             ]
         );
         assert_eq!(
@@ -2499,6 +2532,9 @@ mod tests {
         assert!(ExternalLinearCliSolver::Soplex
             .command_dir_env_vars()
             .contains(&"SOPLEX_HOME"));
+        assert!(ExternalLinearCliSolver::QsoptEx
+            .command_dir_env_vars()
+            .contains(&"QSOPT_EX_HOME"));
         assert_eq!(
             ExternalLinearCliSolver::Xpress.command_aliases(),
             &["optimizer", "xpress"]
@@ -2515,12 +2551,18 @@ mod tests {
             ExternalLinearCliSolver::Soplex.command_aliases(),
             &["soplex"]
         );
+        assert_eq!(
+            ExternalLinearCliSolver::QsoptEx.command_aliases(),
+            &["qsopt_ex", "qsopt-ex", "qsopt", "esolver"]
+        );
         assert!(ExternalLinearCliSolver::Highs.supports_kind(ExternalLinearCliKind::Lp));
         assert!(ExternalLinearCliSolver::Highs.supports_kind(ExternalLinearCliKind::Mip));
         assert!(ExternalLinearCliSolver::Clp.supports_kind(ExternalLinearCliKind::Lp));
         assert!(!ExternalLinearCliSolver::Clp.supports_kind(ExternalLinearCliKind::Mip));
         assert!(ExternalLinearCliSolver::Soplex.supports_kind(ExternalLinearCliKind::Lp));
         assert!(!ExternalLinearCliSolver::Soplex.supports_kind(ExternalLinearCliKind::Mip));
+        assert!(ExternalLinearCliSolver::QsoptEx.supports_kind(ExternalLinearCliKind::Lp));
+        assert!(!ExternalLinearCliSolver::QsoptEx.supports_kind(ExternalLinearCliKind::Mip));
         assert!(ExternalLinearCliSolver::LpSolve.supports_kind(ExternalLinearCliKind::Lp));
         assert!(ExternalLinearCliSolver::LpSolve.supports_kind(ExternalLinearCliKind::Mip));
         assert!(ExternalLinearCliSolver::Lindo.supports_kind(ExternalLinearCliKind::Lp));
@@ -2532,13 +2574,13 @@ mod tests {
     #[test]
     fn solver_manifest_matches_bridge_contract() {
         let specs = external_linear_cli_solver_specs();
-        assert_eq!(specs.len(), 11);
+        assert_eq!(specs.len(), 12);
         assert_eq!(
             specs
                 .iter()
                 .filter(|spec| spec.license_class == ExternalLinearCliLicenseClass::OpenSource)
                 .count(),
-            7
+            8
         );
         assert_eq!(
             specs
@@ -2569,6 +2611,16 @@ mod tests {
         assert!(soplex.supports_lp);
         assert!(!soplex.supports_mip);
 
+        let qsopt_ex = ExternalLinearCliSolver::QsoptEx.spec();
+        assert_eq!(qsopt_ex.id, "qsopt-ex");
+        assert_eq!(qsopt_ex.display_name, "QSopt_ex");
+        assert!(qsopt_ex.command_aliases.contains(&"qsopt_ex"));
+        assert!(qsopt_ex.command_aliases.contains(&"esolver"));
+        assert!(qsopt_ex.command_env_vars.contains(&"QSOPT_EX_CMD"));
+        assert!(qsopt_ex.command_dir_env_vars.contains(&"QSOPT_EX_HOME"));
+        assert!(qsopt_ex.supports_lp);
+        assert!(!qsopt_ex.supports_mip);
+
         let lindo = ExternalLinearCliSolver::Lindo.spec();
         assert_eq!(
             lindo.license_class,
@@ -2581,7 +2633,7 @@ mod tests {
 
         let manifest = external_linear_cli_solver_manifest();
         let items = manifest.as_array().expect("manifest array");
-        assert_eq!(items.len(), 11);
+        assert_eq!(items.len(), 12);
         assert!(items.iter().any(|item| {
             item.get("id").and_then(|value| value.as_str()) == Some("cbc")
                 && item

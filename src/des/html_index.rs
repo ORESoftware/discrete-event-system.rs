@@ -308,9 +308,9 @@ const EXTENDED_SIMULATIONS: &[HtmlIndexSpec] = &[
     },
     HtmlIndexSpec {
         kind: "simulation",
-        title: "Soccer 2D live match",
+        title: "Soccer videogame",
         href: "soccer-sim.html",
-        description: "Single-threaded 11v11 soccer prototype with 0.1-second ticks, shuffled agents, ball physics, officials, and controller slots.",
+        description: "Playable 2D 11v11 match artifact with MDP/POMDP player learning, ball physics, possession chains, shots, officials, and controller slots.",
     },
 ];
 

@@ -4,15 +4,19 @@
 //! `LPProblem` accepts LP rows/bounds, and `IPMIPProblem` accepts non-negative
 //! variables with `<=` rows. This module is the compatibility layer users expect
 //! from tools such as OR-Tools, Gurobi, CPLEX, FICO Xpress, LINDO, SCIP, GLPK, and HiGHS:
-//! named variables, `<=`/`>=`/`=` rows, continuous/integer/binary/semi-continuous
-//! domains, and indicator constraints. The compiler lowers those features into
-//! the existing native solvers and keeps enough metadata to map solutions back
-//! to the user's original variables.
+//! named variables, `<=`/`>=`/`=`/range rows, objective constants,
+//! continuous/integer/binary/semi-continuous domains, and indicator constraints.
+//! The compiler lowers those features into the existing native solvers and keeps
+//! enough metadata to map solutions back to the user's original variables.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+use crate::des::general::external_linear_cli::{
+    ExternalLinearCliBranchRule, ExternalLinearCliMipSwitch, ExternalLinearCliNodeSelection,
+    ExternalLinearCliPresolve,
+};
 use crate::des::general::ip_mip_des::{
     solve_ipmip_with_des, BranchOrCutConstraint, ConstraintKind, IPMIPProblem, IPMIPSolveOptions,
     IPMIPStatus,
@@ -391,6 +395,7 @@ pub struct LinearObjective {
 #[derive(Clone, Debug, PartialEq)]
 pub struct MathProgram {
     pub sense: ObjectiveSense,
+    pub objective_offset: f64,
     pub variables: Vec<Variable>,
     pub quadratic_objective: Vec<QuadraticObjectiveTerm>,
     pub secondary_objectives: Vec<LinearObjective>,
@@ -408,6 +413,7 @@ impl MathProgram {
     pub fn new(sense: ObjectiveSense) -> Self {
         MathProgram {
             sense,
+            objective_offset: 0.0,
             variables: Vec::new(),
             quadratic_objective: Vec::new(),
             secondary_objectives: Vec::new(),
@@ -553,6 +559,61 @@ impl MathProgram {
             rhs,
         });
         Ok(self.constraints.len() - 1)
+    }
+
+    pub fn set_objective_offset(&mut self, offset: f64) -> Result<(), MathProgramError> {
+        validate_objective_offset(offset)?;
+        self.objective_offset = offset;
+        Ok(())
+    }
+
+    pub fn add_objective_offset(&mut self, offset: f64) -> Result<(), MathProgramError> {
+        validate_objective_offset(offset)?;
+        self.objective_offset += offset;
+        validate_objective_offset(self.objective_offset)?;
+        Ok(())
+    }
+
+    /// Add a source-level range row `lower <= coeffs*x <= upper`.
+    ///
+    /// Solvers such as CPLEX, Gurobi, LINDO, SCIP, GLPK, and HiGHS expose ranged
+    /// rows as a modeling convenience. The facade stores them as ordinary one- or
+    /// two-sided linear rows so all native and external backends see the same
+    /// compiled model.
+    pub fn add_range_constraint(
+        &mut self,
+        name: impl Into<String>,
+        coeffs: Vec<(usize, f64)>,
+        lower: Option<f64>,
+        upper: Option<f64>,
+    ) -> Result<Vec<usize>, MathProgramError> {
+        let name = name.into();
+        validate_range_bounds(&name, lower, upper)?;
+        validate_coeffs(self.variables.len(), &coeffs)?;
+
+        match (lower, upper) {
+            (Some(lo), Some(hi)) if (lo - hi).abs() <= 1e-12 => self
+                .add_constraint(name, coeffs, RowSense::Eq, lo)
+                .map(|idx| vec![idx]),
+            (Some(lo), Some(hi)) => {
+                let lower_idx = self.add_constraint(
+                    format!("{name}__range_lower"),
+                    coeffs.clone(),
+                    RowSense::Ge,
+                    lo,
+                )?;
+                let upper_idx =
+                    self.add_constraint(format!("{name}__range_upper"), coeffs, RowSense::Le, hi)?;
+                Ok(vec![lower_idx, upper_idx])
+            }
+            (Some(lo), None) => self
+                .add_constraint(name, coeffs, RowSense::Ge, lo)
+                .map(|idx| vec![idx]),
+            (None, Some(hi)) => self
+                .add_constraint(name, coeffs, RowSense::Le, hi)
+                .map(|idx| vec![idx]),
+            (None, None) => unreachable!("validate_range_bounds rejects empty range rows"),
+        }
     }
 
     pub fn add_lazy_constraint(
@@ -1598,6 +1659,7 @@ impl MathProgram {
         if self.variables.is_empty() {
             return Err(MathProgramError::EmptyModel);
         }
+        validate_objective_offset(self.objective_offset)?;
         for var in &self.variables {
             validate_variable(var)?;
         }
@@ -3369,12 +3431,37 @@ pub struct ExternalMathProgramOptions {
     pub node_limit: Option<usize>,
     /// Optional external relative MIP optimality gap.
     pub relative_gap: Option<f64>,
+    /// Optional external absolute MIP optimality gap.
+    pub absolute_gap: Option<f64>,
+    /// Optional incumbent solution limit for MIP-style external solves.
+    pub solution_limit: Option<u64>,
+    /// Optional solution-pool target size for external CLI solves that expose it.
+    pub solution_pool_size: Option<u64>,
+    /// Optional incumbent objective target for external MIP-style solves.
+    pub objective_limit: Option<f64>,
+    /// Optional worker thread count for external CLI/API solves that expose it.
+    pub threads: Option<u32>,
+    /// Optional random seed for external CLI/API solves that expose it.
+    pub random_seed: Option<u64>,
+    /// Optional presolve mode for external CLI solves that expose it.
+    pub presolve: Option<ExternalLinearCliPresolve>,
+    /// Optional cut-generation mode for external MIP CLI solves that expose it.
+    pub cuts: Option<ExternalLinearCliMipSwitch>,
+    /// Optional heuristic-search mode for external MIP CLI solves that expose it.
+    pub heuristics: Option<ExternalLinearCliMipSwitch>,
+    /// Optional branching rule for external MIP CLI solves that expose it.
+    pub branch_rule: Option<ExternalLinearCliBranchRule>,
+    /// Optional branching priorities in the original math-program variable space.
+    pub branch_priorities: Option<Vec<i32>>,
+    /// Optional node-selection rule for external MIP CLI solves that expose it.
+    pub node_selection: Option<ExternalLinearCliNodeSelection>,
 }
 
 /// Facade status normalized across LP and IP/MIP solvers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MathProgramStatus {
     Optimal,
+    Feasible,
     Infeasible,
     Unbounded,
     IterLimit,
@@ -3601,7 +3688,9 @@ fn solve_math_program_single_objective(
             return solve_continuous_qp(program, opts);
         }
         let lp = program.to_lp_problem()?;
-        return Ok(from_lp_solution(solve_lp_with_backend(&lp, opts)));
+        let mut solution = from_lp_solution(solve_lp_with_backend(&lp, opts));
+        add_objective_offset_to_solution(&mut solution, program.objective_offset);
+        return Ok(solution);
     }
 
     if program.has_quadratic_objective() && quadratic_objective_has_native_nonlinear_terms(program)
@@ -3906,6 +3995,9 @@ fn solve_mixed_integer_conic(
                 cut, mip.nodes_explored, mip.gap, mip.performance.lp_solves_per_second
             )),
         };
+        if solution.x.len() == program.variables.len() {
+            solution.objective = objective_value(program, &solution.x);
+        }
         if solution.status != MathProgramStatus::Optimal {
             return Ok(solution);
         }
@@ -4335,7 +4427,7 @@ fn math_program_linear_text_export_parts(
             .ub
             .as_ref()
             .map(|upper| upper.iter().copied().map(Some).collect::<Vec<_>>());
-        return Ok(LinearTextExportParts {
+        let mut parts = LinearTextExportParts {
             sense: compiled.problem.sense,
             objective: compiled.problem.c,
             variable_names,
@@ -4346,7 +4438,9 @@ fn math_program_linear_text_export_parts(
             integer_vars: Some(compiled.problem.integer_vars),
             is_mip: true,
             original_variable_count: program.variables.len(),
-        });
+        };
+        add_objective_offset_export_column(&mut parts, program.objective_offset)?;
+        return Ok(parts);
     }
 
     if program.has_quadratic_objective() {
@@ -4380,7 +4474,7 @@ fn math_program_linear_text_export_parts(
         .iter()
         .map(|var| var.obj)
         .collect::<Vec<_>>();
-    Ok(LinearTextExportParts {
+    let mut parts = LinearTextExportParts {
         sense: program.sense.to_lp(),
         objective,
         variable_names,
@@ -4391,7 +4485,9 @@ fn math_program_linear_text_export_parts(
         integer_vars: None,
         is_mip: false,
         original_variable_count: program.variables.len(),
-    })
+    };
+    add_objective_offset_export_column(&mut parts, program.objective_offset)?;
+    Ok(parts)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -4860,6 +4956,51 @@ fn append_mps_bound_rows(
             }
             append_mps_bound_row(out, "UP", name, Some(hi))?;
         }
+    }
+    Ok(())
+}
+
+fn add_objective_offset_export_column(
+    parts: &mut LinearTextExportParts,
+    offset: f64,
+) -> Result<(), MathProgramError> {
+    if offset.abs() <= 1e-12 {
+        return Ok(());
+    }
+    validate_objective_offset(offset)?;
+    let old_len = parts.variable_names.len();
+    let mut used = parts
+        .variable_names
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let name = unique_cplex_lp_name(
+        sanitize_cplex_lp_name("__objective_offset", "x", old_len),
+        &mut used,
+    );
+    parts.variable_names.push(name);
+    parts.objective.push(offset);
+    for row in &mut parts.rows {
+        row.coeffs.push(0.0);
+    }
+    match parts.lower.as_mut() {
+        Some(lower) => lower.push(Some(1.0)),
+        None => {
+            let mut lower = vec![Some(0.0); old_len];
+            lower.push(Some(1.0));
+            parts.lower = Some(lower);
+        }
+    }
+    match parts.upper.as_mut() {
+        Some(upper) => upper.push(Some(1.0)),
+        None => {
+            let mut upper = vec![None; old_len];
+            upper.push(Some(1.0));
+            parts.upper = Some(upper);
+        }
+    }
+    if let Some(integer_vars) = parts.integer_vars.as_mut() {
+        integer_vars.push(false);
     }
     Ok(())
 }
@@ -5983,6 +6124,7 @@ fn solve_math_program_external_scipy_single_objective(
     } else if program.has_discrete_features() {
         let compiled = compile_mip(program)?;
         let mut mip_payload = encode_ipmip_problem(&compiled.problem);
+        let mut mip_external_options = external_options.clone();
         if let Some(start) = &opts.mip_start {
             if let Some(object) = mip_payload.as_object_mut() {
                 object.insert(
@@ -5996,12 +6138,25 @@ fn solve_math_program_external_scipy_single_objective(
                 );
             }
         }
+        if let Some(priorities) = &opts.branch_priorities {
+            if let Some(object) = mip_external_options.as_object_mut() {
+                object.insert(
+                    "branchPriorities".to_string(),
+                    Value::Array(
+                        canonical_branch_priorities(program, &compiled, priorities)?
+                            .into_iter()
+                            .map(Value::from)
+                            .collect(),
+                    ),
+                );
+            }
+        }
         (
             json!({
                 "kind": "mip",
                 "mip": mip_payload,
                 "method": method,
-                "options": external_options.clone(),
+                "options": mip_external_options,
             }),
             Some(compiled),
         )
@@ -6322,6 +6477,9 @@ fn solve_continuous_conic(
                 opts,
             ))
         };
+        if solution.x.len() == program.variables.len() {
+            solution.objective = objective_value(program, &solution.x);
+        }
         if solution.status != MathProgramStatus::Optimal {
             return Ok(solution);
         }
@@ -6583,6 +6741,7 @@ fn encode_ipmip_problem(mip: &IPMIPProblem) -> Value {
 fn parse_external_status(raw: &Value) -> MathProgramStatus {
     match raw.get("status").and_then(Value::as_str) {
         Some("optimal") => MathProgramStatus::Optimal,
+        Some("feasible") => MathProgramStatus::Feasible,
         Some("infeasible") => MathProgramStatus::Infeasible,
         Some("unbounded") => MathProgramStatus::Unbounded,
         Some("iter-limit") => MathProgramStatus::IterLimit,
@@ -6624,16 +6783,81 @@ fn encode_external_math_program_options(
         }
         object.insert("relativeGap".to_string(), Value::from(relative_gap));
     }
+    if let Some(absolute_gap) = opts.absolute_gap {
+        if !absolute_gap.is_finite() || absolute_gap < 0.0 {
+            return Err(MathProgramError::InvalidBound(
+                "external absolute_gap must be finite and non-negative".to_string(),
+            ));
+        }
+        object.insert("absoluteGap".to_string(), Value::from(absolute_gap));
+    }
+    if let Some(solution_limit) = opts.solution_limit {
+        if solution_limit == 0 {
+            return Err(MathProgramError::InvalidBound(
+                "external solution_limit must be positive".to_string(),
+            ));
+        }
+        object.insert("solutionLimit".to_string(), Value::from(solution_limit));
+    }
+    if let Some(solution_pool_size) = opts.solution_pool_size {
+        if solution_pool_size == 0 {
+            return Err(MathProgramError::InvalidBound(
+                "external solution_pool_size must be positive".to_string(),
+            ));
+        }
+        object.insert(
+            "solutionPoolSize".to_string(),
+            Value::from(solution_pool_size),
+        );
+    }
+    if let Some(objective_limit) = opts.objective_limit {
+        if !objective_limit.is_finite() {
+            return Err(MathProgramError::InvalidBound(
+                "external objective_limit must be finite".to_string(),
+            ));
+        }
+        object.insert("objectiveLimit".to_string(), Value::from(objective_limit));
+    }
+    if let Some(threads) = opts.threads {
+        if threads == 0 {
+            return Err(MathProgramError::InvalidBound(
+                "external threads must be positive".to_string(),
+            ));
+        }
+        object.insert("threads".to_string(), Value::from(threads));
+    }
+    if let Some(random_seed) = opts.random_seed {
+        object.insert("randomSeed".to_string(), Value::from(random_seed));
+    }
+    if let Some(presolve) = opts.presolve {
+        object.insert("presolve".to_string(), Value::from(presolve.as_str()));
+    }
+    if let Some(cuts) = opts.cuts {
+        object.insert("cuts".to_string(), Value::from(cuts.as_str()));
+    }
+    if let Some(heuristics) = opts.heuristics {
+        object.insert("heuristics".to_string(), Value::from(heuristics.as_str()));
+    }
+    if let Some(branch_rule) = opts.branch_rule {
+        object.insert("branchRule".to_string(), Value::from(branch_rule.as_str()));
+    }
+    if let Some(node_selection) = opts.node_selection {
+        object.insert(
+            "nodeSelection".to_string(),
+            Value::from(node_selection.as_str()),
+        );
+    }
     Ok(Value::Object(object))
 }
 
 fn compiled_objective_offset(program: &MathProgram, compiled: &CompiledMip) -> f64 {
-    program
-        .variables
-        .iter()
-        .zip(&compiled.expansions)
-        .map(|(var, expansion)| var.obj * expansion.constant)
-        .sum()
+    program.objective_offset
+        + program
+            .variables
+            .iter()
+            .zip(&compiled.expansions)
+            .map(|(var, expansion)| var.obj * expansion.constant)
+            .sum::<f64>()
 }
 
 fn original_mip_best_bound(best_bound: f64, objective_offset: f64) -> Option<f64> {
@@ -6679,6 +6903,12 @@ fn from_lp_solution(sol: LPSolution) -> MathProgramSolution {
         row_basis: sol.row_basis,
         solver: sol.solver,
         message: sol.message,
+    }
+}
+
+fn add_objective_offset_to_solution(solution: &mut MathProgramSolution, offset: f64) {
+    if offset.abs() > 1e-12 && solution.objective.is_finite() {
+        solution.objective += offset;
     }
 }
 
@@ -12259,7 +12489,7 @@ fn objective_value(program: &MathProgram, x: &[f64]) -> f64 {
         .iter()
         .map(|term| term.coeff * x[term.var_i] * x[term.var_j])
         .sum::<f64>();
-    linear + quadratic
+    program.objective_offset + linear + quadratic
 }
 
 fn quadratic_gradient(program: &MathProgram, x: &[f64]) -> Vec<f64> {
@@ -12357,6 +12587,41 @@ fn validate_variable(var: &Variable) -> Result<(), MathProgramError> {
             }
         }
         VariableType::Continuous | VariableType::Integer => {}
+    }
+    Ok(())
+}
+
+fn validate_objective_offset(offset: f64) -> Result<(), MathProgramError> {
+    if offset.is_finite() {
+        Ok(())
+    } else {
+        Err(MathProgramError::NonFinite("objective offset".to_string()))
+    }
+}
+
+fn validate_range_bounds(
+    name: &str,
+    lower: Option<f64>,
+    upper: Option<f64>,
+) -> Result<(), MathProgramError> {
+    if lower.is_none() && upper.is_none() {
+        return Err(MathProgramError::InvalidBound(format!(
+            "range row `{name}` requires a lower or upper bound"
+        )));
+    }
+    if lower.is_some_and(|value| !value.is_finite())
+        || upper.is_some_and(|value| !value.is_finite())
+    {
+        return Err(MathProgramError::NonFinite(format!(
+            "range row `{name}` bound"
+        )));
+    }
+    if let (Some(lo), Some(hi)) = (lower, upper) {
+        if lo > hi {
+            return Err(MathProgramError::InvalidBound(format!(
+                "range row `{name}` has lower bound {lo} above upper bound {hi}"
+            )));
+        }
     }
     Ok(())
 }
@@ -12497,6 +12762,32 @@ mod tests {
             .expect("DES LP reduced costs");
         assert_close(des_reduced_costs[x], reduced_costs[x]);
         assert_close(des_reduced_costs[y], reduced_costs[y]);
+    }
+
+    #[test]
+    fn range_rows_and_objective_offsets_are_facade_level_features() {
+        let mut p = MathProgram::new(ObjectiveSense::Max);
+        let x = p
+            .add_continuous_var("x", 2.0, Some(0.0), Some(2.0))
+            .unwrap();
+        let y = p
+            .add_continuous_var("y", 1.0, Some(0.0), Some(2.0))
+            .unwrap();
+        p.add_objective_offset(5.5).unwrap();
+        let range_rows = p
+            .add_range_constraint("throughput", vec![(x, 1.0), (y, 1.0)], Some(2.0), Some(3.0))
+            .unwrap();
+
+        assert_eq!(range_rows.len(), 2);
+        let sol = solve_math_program(&p, &MathProgramSolveOptions::default()).unwrap();
+        assert_eq!(sol.status, MathProgramStatus::Optimal);
+        assert_close(sol.x[x], 2.0);
+        assert_close(sol.x[y], 1.0);
+        assert_close(sol.objective, 10.5);
+
+        let export = export_math_program_cplex_lp(&p).unwrap();
+        assert!(export.text.contains("objective_offset"));
+        assert!(export.text.contains("objective_offset = 1."));
     }
 
     #[test]

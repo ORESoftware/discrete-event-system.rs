@@ -452,18 +452,43 @@ def solve_linear_cli_bridge(
 ) -> dict[str, Any]:
     raw = {"lp": problem} if kind == "lp" else _mip_for_linear_cli_bridge(problem)
     time_limit = _time_limit_seconds(options, 60.0) or 60.0
+    commands = [
+        sys.executable,
+        _linear_cli_reference_script(),
+        "--kind",
+        kind,
+        "--solver",
+        solver,
+        "--time-limit",
+        f"{time_limit:.17g}",
+    ]
+
+    passthrough = [
+        ("nodeLimit", "--node-limit", int),
+        ("solutionLimit", "--solution-limit", int),
+        ("solutionPoolSize", "--solution-pool-size", int),
+        ("relativeGap", "--relative-gap", float),
+        ("absoluteGap", "--absolute-gap", float),
+        ("objectiveLimit", "--objective-limit", float),
+        ("threads", "--threads", int),
+        ("randomSeed", "--random-seed", int),
+        ("presolve", "--presolve", str),
+        ("cuts", "--cuts", str),
+        ("heuristics", "--heuristics", str),
+        ("branchRule", "--branch-rule", str),
+        ("nodeSelection", "--node-selection", str),
+    ]
+    for key, flag, cast in passthrough:
+        if key in options and options[key] is not None:
+            commands.extend([flag, str(cast(options[key]))])
+    if isinstance(options.get("branchPriorities"), list):
+        commands.extend(["--branch-priorities", json.dumps(options["branchPriorities"])])
+    if isinstance(problem.get("mipStart"), list):
+        commands.extend(["--mip-start", json.dumps(problem["mipStart"])])
+
     try:
         run = subprocess.run(
-            [
-                sys.executable,
-                _linear_cli_reference_script(),
-                "--kind",
-                kind,
-                "--solver",
-                solver,
-                "--time-limit",
-                f"{time_limit:.17g}",
-            ],
+            commands,
             input=json.dumps(raw, allow_nan=True),
             text=True,
             stdout=subprocess.PIPE,

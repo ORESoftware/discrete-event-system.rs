@@ -239,19 +239,23 @@ def with_qp_certificate(result: dict, qp_raw: dict) -> dict:
     return result
 
 
-def integer_domains(qp: dict, integer_vars: Sequence[bool]) -> list[tuple[int, int]]:
+def integer_domains(
+    model: dict,
+    integer_vars: Sequence[bool],
+    label: str = "mixed-integer model",
+) -> list[tuple[int, int]]:
     domains = []
     for idx, is_integer in enumerate(integer_vars):
         if not is_integer:
             continue
-        lower = qp["lb"][idx]
-        upper = qp["ub"][idx]
+        lower = model["lb"][idx]
+        upper = model["ub"][idx]
         if lower is None or upper is None:
-            raise ValueError(f"MIQP integer variable {idx} needs finite bounds")
+            raise ValueError(f"{label} integer variable {idx} needs finite bounds")
         lo = math.ceil(float(lower))
         hi = math.floor(float(upper))
         if lo > hi:
-            raise ValueError(f"MIQP integer variable {idx} has no integer value in its bounds")
+            raise ValueError(f"{label} integer variable {idx} has no integer value in its bounds")
         domains.append((lo, hi))
     return domains
 
@@ -288,7 +292,7 @@ def solve_miqp_reference(raw: dict, solver: str, max_enumerations: int = 1_000_0
             "message": "integer_vars length mismatch",
         }
     try:
-        domains = integer_domains(qp, integer_vars)
+        domains = integer_domains(qp, integer_vars, "MIQP")
     except ValueError as exc:
         return {
             "status": "numerical-error",
@@ -884,7 +888,7 @@ def scipy_reference(qp_raw: dict) -> Optional[dict]:
     if not result.success:
         return {"status": "numerical-error", "solver": "scipy:SLSQP", "x": [], "objective": None, "message": str(result.message)}
     x = [float(v) for v in result.x]
-    return with_qp_certificate({"status": "optimal", "solver": "scipy:SLSQP", "x": x, "objective": objective(qp, x), "iterations": int(result.nit), "message": str(result.message)}, qp)
+    return with_qp_certificate({"status": "optimal", "solver": "scipy:SLSQP", "x": x, "objective": objective(qp, x), "iterations": scipy_iterations(result), "message": str(result.message)}, qp)
 
 
 def unavailable_reference(solver: str, message: str) -> dict:
@@ -1076,7 +1080,7 @@ def scipy_socp_reference(raw: dict) -> Optional[dict]:
     if not result.success:
         return {"status": "numerical-error", "solver": "scipy:SLSQP-socp", "x": [], "objective": None, "message": str(result.message)}
     x = [float(v) for v in result.x]
-    return {"status": "optimal", "solver": "scipy:SLSQP-socp", "x": x, "objective": socp_objective(p, x), "iterations": int(result.nit), "message": str(result.message)}
+    return {"status": "optimal", "solver": "scipy:SLSQP-socp", "x": x, "objective": socp_objective(p, x), "iterations": scipy_iterations(result), "message": str(result.message)}
 
 
 def cvxpy_socp_reference(raw: dict, requested_solver: str) -> Optional[dict]:
@@ -1167,7 +1171,7 @@ def scipy_qcp_reference(raw: dict) -> Optional[dict]:
     if not result.success:
         return {"status": "numerical-error", "solver": "scipy:SLSQP-qcp", "x": [], "objective": None, "message": str(result.message)}
     x = [float(v) for v in result.x]
-    return {"status": "optimal", "solver": "scipy:SLSQP-qcp", "x": x, "objective": qcp_objective(p, x), "iterations": int(result.nit), "message": str(result.message)}
+    return {"status": "optimal", "solver": "scipy:SLSQP-qcp", "x": x, "objective": qcp_objective(p, x), "iterations": scipy_iterations(result), "message": str(result.message)}
 
 
 def cvxpy_qcp_reference(raw: dict, requested_solver: str) -> Optional[dict]:
@@ -1253,6 +1257,263 @@ def registered_qcp_reference(raw: dict, requested_solver: str) -> dict:
     return relabel_registered_fallback(qcp_pattern_reference(raw), requested_solver, "qcp-pattern-search")
 
 
+def scipy_iterations(result) -> int:
+    try:
+        return int(result.get("nit", 0))
+    except AttributeError:
+        return int(getattr(result, "nit", 0))
+
+
+def should_try_next_auto_reference(result: Optional[dict], solver: str) -> bool:
+    return solver == "auto" and result is not None and result.get("status") in ("unavailable", "numerical-error")
+
+
+def continuous_socp_reference(raw: dict, solver: str) -> dict:
+    result = None
+    if solver in ("auto", "scipy", "scipy-slsqp"):
+        result = scipy_socp_reference(raw)
+        if solver != "auto" and result is None:
+            return {
+                "status": "unavailable",
+                "solver": "scipy:SLSQP-socp",
+                "x": [],
+                "objective": None,
+                "message": "scipy is not installed",
+            }
+        if should_try_next_auto_reference(result, solver):
+            result = None
+    if result is None and solver in ("auto", "cvxpy", "scs", "clarabel", "ecos"):
+        result = cvxpy_socp_reference(raw, solver if solver != "auto" else "cvxpy")
+        if solver != "auto" and result is None:
+            return unavailable_reference(f"cvxpy:{solver}", "cvxpy is not installed")
+        if should_try_next_auto_reference(result, solver):
+            result = None
+    if result is None and solver in REGISTERED_CONIC_REFERENCE_SOLVERS:
+        result = registered_socp_reference(raw, solver)
+    if result is None:
+        result = socp_pattern_reference(raw)
+    return result
+
+
+def continuous_qcp_reference(raw: dict, solver: str) -> dict:
+    result = None
+    if solver in ("auto", "scipy", "scipy-slsqp"):
+        result = scipy_qcp_reference(raw)
+        if solver != "auto" and result is None:
+            return {
+                "status": "unavailable",
+                "solver": "scipy:SLSQP-qcp",
+                "x": [],
+                "objective": None,
+                "message": "scipy is not installed",
+            }
+        if should_try_next_auto_reference(result, solver):
+            result = None
+    if result is None and solver in ("auto", "cvxpy", "scs", "clarabel", "ecos"):
+        result = cvxpy_qcp_reference(raw, solver if solver != "auto" else "cvxpy")
+        if solver != "auto" and result is None:
+            return unavailable_reference(f"cvxpy:{solver}", "cvxpy is not installed")
+        if should_try_next_auto_reference(result, solver):
+            result = None
+    if result is None and solver in REGISTERED_CONIC_REFERENCE_SOLVERS:
+        result = registered_qcp_reference(raw, solver)
+    if result is None:
+        result = qcp_pattern_reference(raw)
+    return result
+
+
+def fixed_integer_socp(socp: dict, fixed: Sequence[tuple[int, int]]) -> dict:
+    sub = {
+        "c": socp["c"][:],
+        "A_ub": [row[:] for row in socp["A_ub"]],
+        "b_ub": socp["b_ub"][:],
+        "A_eq": [row[:] for row in socp["A_eq"]],
+        "b_eq": socp["b_eq"][:],
+        "lb": socp["lb"][:],
+        "ub": socp["ub"][:],
+        "cones": [
+            {
+                "A": [row[:] for row in cone["A"]],
+                "b": cone["b"][:],
+                "c": cone["c"][:],
+                "d": cone["d"],
+                "name": cone.get("name"),
+            }
+            for cone in socp["cones"]
+        ],
+    }
+    n = len(socp["c"])
+    for var, value in fixed:
+        sub["lb"][var] = float(value)
+        sub["ub"][var] = float(value)
+        row = [0.0] * n
+        row[var] = 1.0
+        sub["A_eq"].append(row)
+        sub["b_eq"].append(float(value))
+    return sub
+
+
+def fixed_integer_qcp(qcp: dict, fixed: Sequence[tuple[int, int]]) -> dict:
+    sub = {
+        "Q": [row[:] for row in qcp["Q"]],
+        "c": qcp["c"][:],
+        "A_ub": [row[:] for row in qcp["A_ub"]],
+        "b_ub": qcp["b_ub"][:],
+        "A_eq": [row[:] for row in qcp["A_eq"]],
+        "b_eq": qcp["b_eq"][:],
+        "lb": qcp["lb"][:],
+        "ub": qcp["ub"][:],
+        "quadratic_constraints": [
+            {
+                "Q": [row[:] for row in constraint["Q"]],
+                "c": constraint["c"][:],
+                "rhs": constraint["rhs"],
+                "name": constraint.get("name"),
+            }
+            for constraint in qcp["quadratic_constraints"]
+        ],
+    }
+    n = len(qcp["c"])
+    for var, value in fixed:
+        sub["lb"][var] = float(value)
+        sub["ub"][var] = float(value)
+        row = [0.0] * n
+        row[var] = 1.0
+        sub["A_eq"].append(row)
+        sub["b_eq"].append(float(value))
+    return sub
+
+
+def solve_misocp_reference(raw: dict, solver: str, max_enumerations: int = 1_000_000) -> dict:
+    socp = normalize_socp(raw)
+    integer_vars = [bool(v) for v in raw.get("integer_vars", [])]
+    if len(integer_vars) != len(socp["c"]):
+        return {
+            "status": "numerical-error",
+            "solver": "python:misocp-enumeration",
+            "x": [],
+            "objective": None,
+            "message": "integer_vars length mismatch",
+        }
+    try:
+        domains = integer_domains(socp, integer_vars, "MISOCP")
+    except ValueError as exc:
+        return {
+            "status": "numerical-error",
+            "solver": "python:misocp-enumeration",
+            "x": [],
+            "objective": None,
+            "message": str(exc),
+        }
+    integer_indices = [idx for idx, is_integer in enumerate(integer_vars) if is_integer]
+    if not integer_indices:
+        return continuous_socp_reference(raw, solver)
+
+    best = None
+    best_obj = math.inf
+    enumerated = 0
+    for values in itertools.product(*(range(lo, hi + 1) for lo, hi in domains)):
+        enumerated += 1
+        if enumerated > max_enumerations:
+            return {
+                "status": "numerical-error",
+                "solver": "python:misocp-enumeration",
+                "x": [] if best is None else best,
+                "objective": None if best is None else best_obj,
+                "enumerated": enumerated,
+                "message": "MISOCP enumeration limit reached",
+            }
+        sub = fixed_integer_socp(socp, list(zip(integer_indices, values)))
+        result = continuous_socp_reference(sub, solver)
+        if result.get("status") != "optimal":
+            continue
+        obj = float(result["objective"])
+        if obj < best_obj - 1e-8:
+            best_obj = obj
+            best = [float(v) for v in result["x"]]
+    if best is None:
+        return {
+            "status": "infeasible",
+            "solver": "python:misocp-enumeration",
+            "x": [],
+            "objective": None,
+            "enumerated": enumerated,
+        }
+    return {
+        "status": "optimal",
+        "solver": "python:misocp-enumeration",
+        "x": best,
+        "objective": best_obj,
+        "enumerated": enumerated,
+        "message": "bounded MISOCP enumeration over integer variables",
+    }
+
+
+def solve_miqcp_reference(raw: dict, solver: str, max_enumerations: int = 1_000_000) -> dict:
+    qcp = normalize_qcp(raw)
+    integer_vars = [bool(v) for v in raw.get("integer_vars", [])]
+    if len(integer_vars) != len(qcp["c"]):
+        return {
+            "status": "numerical-error",
+            "solver": "python:miqcp-enumeration",
+            "x": [],
+            "objective": None,
+            "message": "integer_vars length mismatch",
+        }
+    try:
+        domains = integer_domains(qcp, integer_vars, "MIQCP")
+    except ValueError as exc:
+        return {
+            "status": "numerical-error",
+            "solver": "python:miqcp-enumeration",
+            "x": [],
+            "objective": None,
+            "message": str(exc),
+        }
+    integer_indices = [idx for idx, is_integer in enumerate(integer_vars) if is_integer]
+    if not integer_indices:
+        return continuous_qcp_reference(raw, solver)
+
+    best = None
+    best_obj = math.inf
+    enumerated = 0
+    for values in itertools.product(*(range(lo, hi + 1) for lo, hi in domains)):
+        enumerated += 1
+        if enumerated > max_enumerations:
+            return {
+                "status": "numerical-error",
+                "solver": "python:miqcp-enumeration",
+                "x": [] if best is None else best,
+                "objective": None if best is None else best_obj,
+                "enumerated": enumerated,
+                "message": "MIQCP enumeration limit reached",
+            }
+        sub = fixed_integer_qcp(qcp, list(zip(integer_indices, values)))
+        result = continuous_qcp_reference(sub, solver)
+        if result.get("status") != "optimal":
+            continue
+        obj = float(result["objective"])
+        if obj < best_obj - 1e-8:
+            best_obj = obj
+            best = [float(v) for v in result["x"]]
+    if best is None:
+        return {
+            "status": "infeasible",
+            "solver": "python:miqcp-enumeration",
+            "x": [],
+            "objective": None,
+            "enumerated": enumerated,
+        }
+    return {
+        "status": "optimal",
+        "solver": "python:miqcp-enumeration",
+        "x": best,
+        "objective": best_obj,
+        "enumerated": enumerated,
+        "message": "bounded MIQCP enumeration over integer variables",
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--solver", default="auto")
@@ -1260,38 +1521,24 @@ def main() -> int:
     args = parser.parse_args()
     qp = json.load(sys.stdin)
     result = None
+    if qp.get("integer_vars") and qp.get("cones"):
+        result = solve_misocp_reference(qp, args.solver, args.max_enumerations)
+        print(json.dumps(result))
+        return 0 if result.get("status") != "unavailable" else 2
+    if qp.get("integer_vars") and (qp.get("quadratic_constraints") or qp.get("q_constraints")):
+        result = solve_miqcp_reference(qp, args.solver, args.max_enumerations)
+        print(json.dumps(result))
+        return 0 if result.get("status") != "unavailable" else 2
     if qp.get("integer_vars"):
         result = solve_miqp_reference(qp, args.solver, args.max_enumerations)
         print(json.dumps(result))
         return 0 if result.get("status") != "unavailable" else 2
     if qp.get("cones"):
-        if args.solver in ("auto", "scipy", "scipy-slsqp"):
-            result = scipy_socp_reference(qp)
-            if args.solver != "auto" and result is None:
-                result = {"status": "unavailable", "solver": "scipy:SLSQP-socp", "x": [], "objective": None, "message": "scipy is not installed"}
-        if result is None and args.solver in ("auto", "cvxpy", "scs", "clarabel", "ecos"):
-            result = cvxpy_socp_reference(qp, args.solver if args.solver != "auto" else "cvxpy")
-            if args.solver != "auto" and result is None:
-                result = unavailable_reference(f"cvxpy:{args.solver}", "cvxpy is not installed")
-        if result is None and args.solver in REGISTERED_CONIC_REFERENCE_SOLVERS:
-            result = registered_socp_reference(qp, args.solver)
-        if result is None:
-            result = socp_pattern_reference(qp)
+        result = continuous_socp_reference(qp, args.solver)
         print(json.dumps(result))
         return 0 if result.get("status") != "unavailable" else 2
     if qp.get("quadratic_constraints") or qp.get("q_constraints"):
-        if args.solver in ("auto", "scipy", "scipy-slsqp"):
-            result = scipy_qcp_reference(qp)
-            if args.solver != "auto" and result is None:
-                result = {"status": "unavailable", "solver": "scipy:SLSQP-qcp", "x": [], "objective": None, "message": "scipy is not installed"}
-        if result is None and args.solver in ("auto", "cvxpy", "scs", "clarabel", "ecos"):
-            result = cvxpy_qcp_reference(qp, args.solver if args.solver != "auto" else "cvxpy")
-            if args.solver != "auto" and result is None:
-                result = unavailable_reference(f"cvxpy:{args.solver}", "cvxpy is not installed")
-        if result is None and args.solver in REGISTERED_CONIC_REFERENCE_SOLVERS:
-            result = registered_qcp_reference(qp, args.solver)
-        if result is None:
-            result = qcp_pattern_reference(qp)
+        result = continuous_qcp_reference(qp, args.solver)
         print(json.dumps(result))
         return 0 if result.get("status") != "unavailable" else 2
     if args.solver in ("auto", "highs", "highspy", "highs-qp"):

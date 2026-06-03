@@ -259,6 +259,78 @@ def rank(rows: Sequence[Sequence[float]]) -> int:
     return r
 
 
+def null_vector_rank_n_minus_one(rows: Sequence[Sequence[float]], n: int) -> Optional[List[float]]:
+    if n == 0:
+        return None
+    work = [list(map(float, row)) for row in rows if any(abs(float(v)) > 1e-10 for v in row)]
+    pivots: List[int] = []
+    r = 0
+    for c in range(n):
+        pivot = max(range(r, len(work)), key=lambda i: abs(work[i][c]), default=r)
+        if pivot >= len(work) or abs(work[pivot][c]) <= 1e-10:
+            continue
+        work[r], work[pivot] = work[pivot], work[r]
+        pv = work[r][c]
+        for j in range(c, n):
+            work[r][j] /= pv
+        for i in range(len(work)):
+            if i == r:
+                continue
+            factor = work[i][c]
+            if abs(factor) <= 1e-15:
+                continue
+            for j in range(c, n):
+                work[i][j] -= factor * work[r][j]
+        pivots.append(c)
+        r += 1
+        if r == len(work):
+            break
+    if len(pivots) != n - 1:
+        return None
+    free_cols = [c for c in range(n) if c not in pivots]
+    if len(free_cols) != 1:
+        return None
+    free = free_cols[0]
+    d = [0.0] * n
+    d[free] = 1.0
+    for row_idx, pivot_col in enumerate(pivots):
+        d[pivot_col] = -work[row_idx][free]
+    norm = max(abs(v) for v in d)
+    if norm <= 1e-12:
+        return None
+    return [v / norm for v in d]
+
+
+def improving_recession_ray(
+    sense: str,
+    c: Sequence[float],
+    a_ub: Sequence[Sequence[float]],
+    a_eq: Sequence[Sequence[float]],
+) -> Optional[List[float]]:
+    n = len(c)
+    if n == 0:
+        return None
+    objective_sign = 1.0 if sense == "max" else -1.0
+    active_needed = max(0, n - 1 - rank(a_eq))
+    if active_needed > len(a_ub):
+        candidates = [()]
+    else:
+        candidates = itertools.combinations(range(len(a_ub)), active_needed)
+    for active in candidates:
+        rows = [list(row) for row in a_eq] + [list(a_ub[i]) for i in active]
+        ray = null_vector_rank_n_minus_one(rows, n)
+        if ray is None:
+            continue
+        for direction in (ray, [-v for v in ray]):
+            if all(dot(row, direction) <= 1e-8 for row in a_ub) and all(
+                abs(dot(row, direction)) <= 1e-8 for row in a_eq
+            ):
+                improvement = objective_sign * dot(c, direction)
+                if improvement > 1e-8:
+                    return direction
+    return None
+
+
 def vertex_enumeration(lp: dict) -> dict:
     sense, c, raw_a_ub, raw_b_ub, a_eq, b_eq, lb, ub = normalize_lp(lp)
     n = len(c)
@@ -297,6 +369,18 @@ def vertex_enumeration(lp: dict) -> dict:
                 candidates.append(x)
     if not candidates:
         return status_payload("infeasible", solver, "no feasible vertex found")
+
+    ray = improving_recession_ray(sense, c, a_ub, a_eq)
+    if ray is not None:
+        return {
+            "status": "unbounded",
+            "x": [],
+            "objective": None,
+            "iters": len(candidates),
+            "solver": solver,
+            "unboundedRay": ray,
+            "message": "dependency-free recession-ray fallback",
+        }
 
     sign = 1.0 if sense == "max" else -1.0
     best = max(candidates, key=lambda x: sign * dot(c, x))

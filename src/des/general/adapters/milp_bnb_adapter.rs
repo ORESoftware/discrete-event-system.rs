@@ -666,6 +666,8 @@ impl DESModelRegistration<IPMIPDESParams, IPMIPSolution> for IpMipDesAdapter {
                 heuristic_passes: o.heuristic_passes,
                 mip_gap_rel: o.mip_gap_rel,
                 mip_gap_abs: o.mip_gap_abs,
+                solution_limit: None,
+                objective_limit: None,
                 verbose: None,
             })
             .unwrap_or_default();

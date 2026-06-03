@@ -265,6 +265,126 @@ def solve_cp_assignment(payload: dict[str, Any]) -> Result:
     return Result("optimal", best_obj, [float(v) for v in best_x])
 
 
+def solve_cp_job_shop(payload: dict[str, Any]) -> Result:
+    jobs = payload.get("jobs")
+    if not isinstance(jobs, list) or not jobs:
+        return Result("invalid", message="missing jobs")
+
+    operations: list[dict[str, Any]] = []
+    per_machine: dict[str, list[int]] = {}
+    job_operation_ids: list[list[int]] = []
+    for job_index, job in enumerate(jobs):
+        raw_operations = job.get("operations") if isinstance(job, dict) else None
+        if not isinstance(raw_operations, list) or not raw_operations:
+            return Result("invalid", message="each job needs operations")
+        ids: list[int] = []
+        for op_index, raw_op in enumerate(raw_operations):
+            if not isinstance(raw_op, dict):
+                return Result("invalid", message="operation must be an object")
+            machine = str(raw_op.get("machine", ""))
+            duration = as_number(raw_op.get("duration"))
+            if not machine:
+                return Result("invalid", message="operation machine is required")
+            if duration < 0.0:
+                return Result("invalid", message="operation duration must be non-negative")
+            op_id = len(operations)
+            operations.append(
+                {
+                    "job": job_index,
+                    "op": op_index,
+                    "machine": machine,
+                    "duration": duration,
+                }
+            )
+            per_machine.setdefault(machine, []).append(op_id)
+            ids.append(op_id)
+        job_operation_ids.append(ids)
+
+    if len(operations) > int(as_number(payload.get("max_operations"), 10)):
+        return Result("unsupported", message="job-shop reference model is too large")
+
+    machine_names = sorted(per_machine)
+    machine_orders = [
+        list(itertools.permutations(per_machine[machine])) for machine in machine_names
+    ]
+    best_starts: list[float] | None = None
+    best_makespan: float | None = None
+    best_machine_order: dict[str, list[int]] | None = None
+    n = len(operations)
+
+    for order_choice in itertools.product(*machine_orders):
+        successors: list[list[tuple[int, float]]] = [[] for _ in operations]
+        indegree = [0 for _ in operations]
+
+        def add_arc(before: int, after: int) -> None:
+            successors[before].append((after, float(operations[before]["duration"])))
+            indegree[after] += 1
+
+        for ids in job_operation_ids:
+            for before, after in zip(ids, ids[1:]):
+                add_arc(before, after)
+        for machine_order in order_choice:
+            for before, after in zip(machine_order, machine_order[1:]):
+                add_arc(before, after)
+
+        starts = [0.0 for _ in operations]
+        ready = [idx for idx, count in enumerate(indegree) if count == 0]
+        topological_count = 0
+        while ready:
+            current = min(ready)
+            ready.remove(current)
+            topological_count += 1
+            for nxt, lag in successors[current]:
+                starts[nxt] = max(starts[nxt], starts[current] + lag)
+                indegree[nxt] -= 1
+                if indegree[nxt] == 0:
+                    ready.append(nxt)
+        if topological_count != n:
+            continue
+
+        makespan = max(
+            starts[idx] + float(operation["duration"])
+            for idx, operation in enumerate(operations)
+        )
+        if (
+            best_makespan is None
+            or makespan < best_makespan - 1e-12
+            or (
+                abs(makespan - best_makespan) <= 1e-12
+                and tuple(starts) < tuple(best_starts or [])
+            )
+        ):
+            best_makespan = makespan
+            best_starts = starts
+            best_machine_order = {
+                machine: list(order)
+                for machine, order in zip(machine_names, order_choice)
+            }
+
+    if best_starts is None or best_makespan is None:
+        return Result("infeasible", message="no acyclic machine/job ordering")
+
+    schedule = []
+    for idx, operation in enumerate(operations):
+        start = best_starts[idx]
+        duration = float(operation["duration"])
+        schedule.append(
+            {
+                "job": operation["job"],
+                "op": operation["op"],
+                "machine": operation["machine"],
+                "start": start,
+                "finish": start + duration,
+            }
+        )
+    return Result(
+        "optimal",
+        best_makespan,
+        [float(value) for value in best_starts],
+        extra={"schedule": schedule, "machine_orders": best_machine_order},
+    )
+
+
 def solve_planning_assignment(payload: dict[str, Any]) -> Result:
     durations = [as_number(v) for v in payload.get("task_durations", [])]
     if not durations:
@@ -433,6 +553,8 @@ def solve(tool: str, payload: dict[str, Any]) -> tuple[str, Result]:
     kind = str(payload.get("kind", ""))
     family = tool_family(tool, kind)
     if family == "constraint-programming":
+        if kind in {"cp-job-shop", "ecosystem-cp-job-shop"}:
+            return family, solve_cp_job_shop(payload)
         return family, solve_cp_assignment(payload)
     if family == "smt-omt":
         return family, solve_cp_assignment(payload)

@@ -1,0 +1,27 @@
+FROM rust:1.86-bookworm AS build
+
+WORKDIR /app
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+RUN cargo build --release --bin main_soccer_learning_run
+
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /work
+COPY --from=build /app/target/release/main_soccer_learning_run /usr/local/bin/main_soccer_learning_run
+
+ENV SOCCER_GAMES=100 \
+    SOCCER_MINUTES=90 \
+    SOCCER_HALVES=2 \
+    SOCCER_HALF_MINUTES=45 \
+    SOCCER_DT_SECONDS=0.2 \
+    SOCCER_LEARNING_INTERVAL_TICKS=4 \
+    SOCCER_PARALLEL_GAMES=1 \
+    SOCCER_GAME_ARTIFACT_MODE=summary \
+    SOCCER_WRITE_GAME_ARTIFACTS=true
+
+CMD ["main_soccer_learning_run"]

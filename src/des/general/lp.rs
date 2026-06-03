@@ -179,6 +179,124 @@ pub struct LPInfeasibilityConflict {
     pub message: Option<String>,
 }
 
+/// Numeric Farkas-style certificate for LP infeasibility.
+///
+/// For an LP with rows `A_ub x <= b_ub`, `A_eq x = b_eq`, and finite bounds
+/// `lb <= x <= ub`, the certificate stores multipliers `(u, v, l, w)` such that
+/// `u,l,w >= 0`,
+///
+/// ```text
+/// A_ub^T u + A_eq^T v - l + w = 0
+/// b_ub^T u + b_eq^T v - lb^T l + ub^T w < 0
+/// ```
+///
+/// which proves no primal `x` can satisfy all rows and bounds.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LPInfeasibilityCertificate {
+    pub dual_ub: Vec<f64>,
+    pub dual_eq: Vec<f64>,
+    pub lower_bound: Vec<f64>,
+    pub upper_bound: Vec<f64>,
+    pub contradiction: f64,
+}
+
+impl LPInfeasibilityCertificate {
+    pub fn contradiction_value(&self, p: &LPProblem) -> Option<f64> {
+        let n = p.c.len();
+        let a_ub: &[Vec<f64>] = p.a_ub.as_deref().unwrap_or(&[]);
+        let b_ub: &[f64] = p.b_ub.as_deref().unwrap_or(&[]);
+        let a_eq: &[Vec<f64>] = p.a_eq.as_deref().unwrap_or(&[]);
+        let b_eq: &[f64] = p.b_eq.as_deref().unwrap_or(&[]);
+        if self.dual_ub.len() != a_ub.len()
+            || self.dual_eq.len() != a_eq.len()
+            || self.lower_bound.len() != n
+            || self.upper_bound.len() != n
+            || b_ub.len() != a_ub.len()
+            || b_eq.len() != a_eq.len()
+        {
+            return None;
+        }
+        let lb = p.lb.clone().unwrap_or_else(|| vec![Some(0.0); n]);
+        let ub = p.ub.clone().unwrap_or_else(|| vec![None; n]);
+        if lb.len() != n || ub.len() != n {
+            return None;
+        }
+
+        let mut value = 0.0;
+        for (rhs, multiplier) in b_ub.iter().zip(&self.dual_ub) {
+            value += rhs * multiplier;
+        }
+        for (rhs, multiplier) in b_eq.iter().zip(&self.dual_eq) {
+            value += rhs * multiplier;
+        }
+        for j in 0..n {
+            if let Some(lower) = lb[j] {
+                value -= lower * self.lower_bound[j];
+            }
+            if let Some(upper) = ub[j] {
+                value += upper * self.upper_bound[j];
+            }
+        }
+        Some(clean_certificate_value(value))
+    }
+
+    pub fn max_stationarity_residual(&self, p: &LPProblem) -> Option<f64> {
+        let n = p.c.len();
+        let a_ub: &[Vec<f64>] = p.a_ub.as_deref().unwrap_or(&[]);
+        let a_eq: &[Vec<f64>] = p.a_eq.as_deref().unwrap_or(&[]);
+        if self.dual_ub.len() != a_ub.len()
+            || self.dual_eq.len() != a_eq.len()
+            || self.lower_bound.len() != n
+            || self.upper_bound.len() != n
+        {
+            return None;
+        }
+
+        let mut max_residual: f64 = 0.0;
+        for j in 0..n {
+            let mut value = -self.lower_bound[j] + self.upper_bound[j];
+            for (row, multiplier) in a_ub.iter().zip(&self.dual_ub) {
+                value += row.get(j).copied().unwrap_or(0.0) * multiplier;
+            }
+            for (row, multiplier) in a_eq.iter().zip(&self.dual_eq) {
+                value += row.get(j).copied().unwrap_or(0.0) * multiplier;
+            }
+            max_residual = max_residual.max(value.abs());
+        }
+        Some(max_residual)
+    }
+
+    pub fn is_valid_for(&self, p: &LPProblem, tol: f64) -> bool {
+        let n = p.c.len();
+        let lb = p.lb.clone().unwrap_or_else(|| vec![Some(0.0); n]);
+        let ub = p.ub.clone().unwrap_or_else(|| vec![None; n]);
+        if lb.len() != n || ub.len() != n {
+            return false;
+        }
+        let nonnegative_cone = self
+            .dual_ub
+            .iter()
+            .chain(&self.lower_bound)
+            .chain(&self.upper_bound)
+            .all(|value| *value >= -tol);
+        let absent_bounds_zero = (0..n).all(|j| {
+            (lb[j].is_some() || self.lower_bound[j].abs() <= tol)
+                && (ub[j].is_some() || self.upper_bound[j].abs() <= tol)
+        });
+        let stationarity_ok = self
+            .max_stationarity_residual(p)
+            .is_some_and(|value| value <= tol);
+        let contradiction = self.contradiction_value(p);
+        let contradiction_matches =
+            contradiction.is_some_and(|value| (value - self.contradiction).abs() <= tol.max(1e-9));
+        nonnegative_cone
+            && absent_bounds_zero
+            && stationarity_ok
+            && contradiction_matches
+            && self.contradiction < -tol
+    }
+}
+
 /// One relaxable member in a weighted LP feasibility relaxation.
 ///
 /// Equality rows can be violated above or below the target, so they are split
@@ -267,6 +385,185 @@ pub struct LPFeasRelaxResult {
     pub message: Option<String>,
 }
 
+/// One objective-coefficient stability interval from LP sensitivity analysis.
+///
+/// `lower`/`upper` are coefficient values, not deltas. A missing side means the
+/// current optimum remained optimal throughout the configured search envelope.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LPObjectiveCoefficientRange {
+    pub variable: usize,
+    pub name: Option<String>,
+    pub original: f64,
+    pub lower: Option<f64>,
+    pub upper: Option<f64>,
+}
+
+/// Constraint family for RHS sensitivity ranges.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LPRhsSensitivityKind {
+    Upper,
+    Equality,
+}
+
+impl LPRhsSensitivityKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LPRhsSensitivityKind::Upper => "upper",
+            LPRhsSensitivityKind::Equality => "equality",
+        }
+    }
+}
+
+/// One RHS stability interval from LP sensitivity analysis.
+///
+/// `lower`/`upper` are RHS values, not deltas. A missing side means the current
+/// basis pattern stayed optimal throughout the configured search envelope.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LPRhsRange {
+    pub kind: LPRhsSensitivityKind,
+    pub row: usize,
+    pub name: Option<String>,
+    pub original: f64,
+    pub lower: Option<f64>,
+    pub upper: Option<f64>,
+}
+
+/// Variable-bound family for LP bound sensitivity ranges.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LPBoundSensitivityKind {
+    Lower,
+    Upper,
+}
+
+impl LPBoundSensitivityKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LPBoundSensitivityKind::Lower => "lower",
+            LPBoundSensitivityKind::Upper => "upper",
+        }
+    }
+}
+
+/// One variable-bound stability interval from LP sensitivity analysis.
+///
+/// `lower`/`upper` are bound values, not deltas. A missing side means the
+/// current basis pattern stayed optimal throughout the configured search
+/// envelope.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LPVariableBoundRange {
+    pub kind: LPBoundSensitivityKind,
+    pub variable: usize,
+    pub name: Option<String>,
+    pub original: f64,
+    pub lower: Option<f64>,
+    pub upper: Option<f64>,
+}
+
+/// Options for native LP objective-coefficient sensitivity analysis.
+#[derive(Clone, Copy, Debug)]
+pub struct LPObjectiveSensitivityOptions {
+    /// First one-sided coefficient perturbation to test. Default `1.0`.
+    pub initial_step: f64,
+    /// Maximum one-sided perturbation explored before reporting an open side.
+    pub max_span: f64,
+    /// Bisection iterations after the first failing perturbation. Default `48`.
+    pub refinement_iters: usize,
+    /// Optimality tolerance when checking whether the incumbent point remains optimal.
+    pub tol: f64,
+}
+
+impl Default for LPObjectiveSensitivityOptions {
+    fn default() -> Self {
+        LPObjectiveSensitivityOptions {
+            initial_step: 1.0,
+            max_span: 1.0e6,
+            refinement_iters: 48,
+            tol: 1.0e-7,
+        }
+    }
+}
+
+/// Solver-grade post-optimality report for LP objective coefficients.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LPObjectiveSensitivityReport {
+    pub status: LPStatus,
+    pub base_x: Vec<f64>,
+    pub base_objective: f64,
+    pub ranges: Vec<LPObjectiveCoefficientRange>,
+    pub solver: String,
+    pub message: Option<String>,
+}
+
+/// Options for native LP RHS sensitivity analysis.
+#[derive(Clone, Copy, Debug)]
+pub struct LPRhsSensitivityOptions {
+    /// First one-sided RHS perturbation to test. Default `1.0`.
+    pub initial_step: f64,
+    /// Maximum one-sided perturbation explored before reporting an open side.
+    pub max_span: f64,
+    /// Bisection iterations after the first failing perturbation. Default `48`.
+    pub refinement_iters: usize,
+    /// Tolerance used when comparing basis/status strings and optimal solves.
+    pub tol: f64,
+}
+
+impl Default for LPRhsSensitivityOptions {
+    fn default() -> Self {
+        LPRhsSensitivityOptions {
+            initial_step: 1.0,
+            max_span: 1.0e6,
+            refinement_iters: 48,
+            tol: 1.0e-7,
+        }
+    }
+}
+
+/// Solver-grade post-optimality report for LP row RHS values.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LPRhsSensitivityReport {
+    pub status: LPStatus,
+    pub base_x: Vec<f64>,
+    pub base_objective: f64,
+    pub ranges: Vec<LPRhsRange>,
+    pub solver: String,
+    pub message: Option<String>,
+}
+
+/// Options for native LP variable-bound sensitivity analysis.
+#[derive(Clone, Copy, Debug)]
+pub struct LPBoundSensitivityOptions {
+    /// First one-sided bound perturbation to test. Default `1.0`.
+    pub initial_step: f64,
+    /// Maximum one-sided perturbation explored before reporting an open side.
+    pub max_span: f64,
+    /// Bisection iterations after the first failing perturbation. Default `48`.
+    pub refinement_iters: usize,
+    /// Tolerance used when comparing basis/status strings and optimal solves.
+    pub tol: f64,
+}
+
+impl Default for LPBoundSensitivityOptions {
+    fn default() -> Self {
+        LPBoundSensitivityOptions {
+            initial_step: 1.0,
+            max_span: 1.0e6,
+            refinement_iters: 48,
+            tol: 1.0e-7,
+        }
+    }
+}
+
+/// Solver-grade post-optimality report for LP variable bounds.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LPBoundSensitivityReport {
+    pub status: LPStatus,
+    pub base_x: Vec<f64>,
+    pub base_objective: f64,
+    pub ranges: Vec<LPVariableBoundRange>,
+    pub solver: String,
+    pub message: Option<String>,
+}
+
 /// Solve outcome. TS `type LPStatus = 'optimal' | ...`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LPStatus {
@@ -322,6 +619,10 @@ pub struct LPSolution {
     pub var_basis: Option<Vec<String>>,
     /// Basis status for original LP rows (`A_ub` rows followed by `A_eq` rows).
     pub row_basis: Option<Vec<String>>,
+    /// Primal improving ray for unbounded LPs, in original variable space.
+    pub unbounded_ray: Option<Vec<f64>>,
+    /// Farkas-style infeasibility proof for infeasible LPs.
+    pub infeasibility_certificate: Option<LPInfeasibilityCertificate>,
     /// Iteration count if reported by the solver.
     pub iters: Option<usize>,
     /// Solver name (e.g. `"internal"`, `"scipy:highs"`).
@@ -336,13 +637,39 @@ pub struct LPSolution {
 // In-process two-phase simplex.
 // -----------------------------------------------------------------------------
 
+/// Basis status warm start for the internal simplex.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LPBasisWarmStart {
+    /// Basis statuses for original variables. Uses the same normalized labels
+    /// reported by `LPSolution.var_basis`.
+    pub var_basis: Vec<String>,
+    /// Basis statuses for original LP rows (`A_ub` rows followed by `A_eq` rows).
+    pub row_basis: Vec<String>,
+    /// Optional primal vector from the same basis. This disambiguates free
+    /// variables and helps infer inactive finite upper-bound slacks.
+    pub primal_start: Option<Vec<f64>>,
+}
+
+impl LPBasisWarmStart {
+    pub fn from_solution(solution: &LPSolution) -> Option<Self> {
+        Some(LPBasisWarmStart {
+            var_basis: solution.var_basis.clone()?,
+            row_basis: solution.row_basis.clone()?,
+            primal_start: (solution.x.len() > 0).then_some(solution.x.clone()),
+        })
+    }
+}
+
 /// Configuration for the internal simplex. TS `interface InternalSimplexOptions`.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct InternalSimplexOptions {
     /// Maximum total simplex iterations across both phases. Default 5000.
     pub max_iter: Option<usize>,
     /// Pivot tolerance. Default 1e-9.
     pub tol: Option<f64>,
+    /// Optional basis status warm start. When compatible with the standardized
+    /// LP tableau, the solver pivots toward this basis before phase 2.
+    pub basis_start: Option<LPBasisWarmStart>,
 }
 
 fn ms_since(t0: Instant) -> f64 {
@@ -353,6 +680,14 @@ fn ms_since(t0: Instant) -> f64 {
 /// `InternalSimplexSolver` / `solve_lp_internal`). Faithful port of TS
 /// `runInternalSimplex`.
 fn run_internal_simplex(p: &LPProblem, opts: &InternalSimplexOptions) -> LPSolution {
+    run_internal_simplex_impl(p, opts, true)
+}
+
+fn run_internal_simplex_impl(
+    p: &LPProblem,
+    opts: &InternalSimplexOptions,
+    build_infeasibility_certificate: bool,
+) -> LPSolution {
     let t0 = Instant::now();
     let tol = opts.tol.unwrap_or(1e-9);
     let max_iter = opts.max_iter.unwrap_or(5000);
@@ -445,6 +780,7 @@ fn run_internal_simplex(p: &LPProblem, opts: &InternalSimplexOptions) -> LPSolut
         by.push(-rhs);
     }
     // 3. Upper bounds on x.
+    let mut upper_bound_row_of_var = vec![None; n];
     for i in 0..n {
         if let Some(u) = ub[i] {
             let mut row = vec![0.0; ny];
@@ -452,6 +788,7 @@ fn run_internal_simplex(p: &LPProblem, opts: &InternalSimplexOptions) -> LPSolut
             if free_neg[i] >= 0 {
                 row[free_neg[i] as usize] = -1.0;
             }
+            upper_bound_row_of_var[i] = Some(ay.len());
             ay.push(row);
             by.push(u - shifts[i]);
         }
@@ -478,6 +815,8 @@ fn run_internal_simplex(p: &LPProblem, opts: &InternalSimplexOptions) -> LPSolut
                 reduced_costs: None,
                 var_basis: None,
                 row_basis: None,
+                unbounded_ray: first_improving_y_ray(&c_y, &y_index_of_pos, &free_neg, n, tol),
+                infeasibility_certificate: None,
                 iters: Some(0),
                 solver: "internal".to_string(),
                 elapsed_ms: ms_since(t0),
@@ -497,6 +836,8 @@ fn run_internal_simplex(p: &LPProblem, opts: &InternalSimplexOptions) -> LPSolut
             reduced_costs,
             var_basis: None,
             row_basis: None,
+            unbounded_ray: None,
+            infeasibility_certificate: None,
             iters: Some(0),
             solver: "internal".to_string(),
             elapsed_ms: ms_since(t0),
@@ -596,6 +937,8 @@ fn run_internal_simplex(p: &LPProblem, opts: &InternalSimplexOptions) -> LPSolut
                 reduced_costs: None,
                 var_basis: None,
                 row_basis: None,
+                unbounded_ray: None,
+                infeasibility_certificate: None,
                 iters: Some(iters),
                 solver: "internal".to_string(),
                 elapsed_ms: ms_since(t0),
@@ -613,6 +956,11 @@ fn run_internal_simplex(p: &LPProblem, opts: &InternalSimplexOptions) -> LPSolut
             }
         }
         if phase1_obj < -1e-7 {
+            let infeasibility_certificate = if build_infeasibility_certificate {
+                find_lp_farkas_certificate(p, tol, max_iter)
+            } else {
+                None
+            };
             eprintln!(
                 "[lp.internal] infeasible: phase 1 residual sum of artificials = {:.3e} (> 0); feasible region is empty.",
                 -phase1_obj
@@ -626,6 +974,8 @@ fn run_internal_simplex(p: &LPProblem, opts: &InternalSimplexOptions) -> LPSolut
                 reduced_costs: None,
                 var_basis: None,
                 row_basis: None,
+                unbounded_ray: None,
+                infeasibility_certificate,
                 iters: Some(iters),
                 solver: "internal".to_string(),
                 elapsed_ms: ms_since(t0),
@@ -648,6 +998,28 @@ fn run_internal_simplex(p: &LPProblem, opts: &InternalSimplexOptions) -> LPSolut
         }
     }
 
+    let mut warm_start_note = None;
+    if let Some(start) = opts.basis_start.as_ref() {
+        warm_start_note = Some(
+            match apply_lp_basis_warm_start(
+                p,
+                start,
+                &mut t,
+                &mut basis,
+                &y_index_of_pos,
+                &free_neg,
+                &upper_bound_row_of_var,
+                slack_start,
+                tol,
+            ) {
+                Ok((matched, candidates, pivots)) => format!(
+                    "basis warm start accepted ({matched}/{candidates} columns, {pivots} setup pivots)"
+                ),
+                Err(message) => format!("basis warm start ignored: {message}"),
+            },
+        );
+    }
+
     // ---- Phase 2: maximise c_Y^T y. ----
     let mut phase2_cost = vec![0.0; full_cols];
     for j in 0..ny {
@@ -666,6 +1038,18 @@ fn run_internal_simplex(p: &LPProblem, opts: &InternalSimplexOptions) -> LPSolut
     );
     iters += phase2.iters;
     if phase2.status == LPStatus::Unbounded {
+        let unbounded_ray = phase2.unbounded_col.and_then(|entering| {
+            simplex_unbounded_original_ray(
+                n,
+                ny,
+                &basis,
+                &t,
+                entering,
+                &y_index_of_pos,
+                &free_neg,
+                tol,
+            )
+        });
         eprintln!(
             "[lp.internal] objective is unbounded in the '{}' direction after {} iters; check for missing bounding constraints.",
             p.sense.as_str(),
@@ -684,6 +1068,8 @@ fn run_internal_simplex(p: &LPProblem, opts: &InternalSimplexOptions) -> LPSolut
             reduced_costs: None,
             var_basis: None,
             row_basis: None,
+            unbounded_ray,
+            infeasibility_certificate: None,
             iters: Some(iters),
             solver: "internal".to_string(),
             elapsed_ms: ms_since(t0),
@@ -706,6 +1092,8 @@ fn run_internal_simplex(p: &LPProblem, opts: &InternalSimplexOptions) -> LPSolut
             reduced_costs: None,
             var_basis: None,
             row_basis: None,
+            unbounded_ray: None,
+            infeasibility_certificate: None,
             iters: Some(iters),
             solver: "internal".to_string(),
             elapsed_ms: ms_since(t0),
@@ -739,6 +1127,12 @@ fn run_internal_simplex(p: &LPProblem, opts: &InternalSimplexOptions) -> LPSolut
     let (var_basis, row_basis) =
         lp_basis_statuses_from_basis(p, &basis, &x, &y_index_of_pos, &free_neg, ny, tol);
 
+    let mut message = format!("internal simplex: phase1+phase2, {iters} iters");
+    if let Some(note) = warm_start_note {
+        message.push_str("; ");
+        message.push_str(&note);
+    }
+
     LPSolution {
         status: LPStatus::Optimal,
         x,
@@ -748,10 +1142,12 @@ fn run_internal_simplex(p: &LPProblem, opts: &InternalSimplexOptions) -> LPSolut
         reduced_costs,
         var_basis,
         row_basis,
+        unbounded_ray: None,
+        infeasibility_certificate: None,
         iters: Some(iters),
         solver: "internal".to_string(),
         elapsed_ms: ms_since(t0),
-        message: Some(format!("internal simplex: phase1+phase2, {iters} iters")),
+        message: Some(message),
     }
 }
 
@@ -856,6 +1252,193 @@ pub(crate) fn lp_basis_statuses_from_basis(
     (Some(var_basis), Some(row_basis))
 }
 
+fn normalized_lp_basis_status(status: &str) -> Option<&'static str> {
+    let normalized = status.trim().to_ascii_lowercase().replace('-', "_");
+    match normalized.as_str() {
+        "b" | "basic" => Some("basic"),
+        "l" | "lower" | "at_lower" | "lower_bound" => Some("at_lower"),
+        "u" | "upper" | "at_upper" | "upper_bound" => Some("at_upper"),
+        "f" | "fixed" => Some("fixed"),
+        "free" | "superbasic" => Some("free"),
+        "n" | "nb" | "nonbasic" | "non_basic" => Some("nonbasic"),
+        _ => None,
+    }
+}
+
+fn push_unique_column(columns: &mut Vec<usize>, col: usize) {
+    if !columns.contains(&col) {
+        columns.push(col);
+    }
+}
+
+fn lp_basis_warm_start_candidates(
+    p: &LPProblem,
+    start: &LPBasisWarmStart,
+    y_index_of_pos: &[usize],
+    free_neg: &[isize],
+    upper_bound_row_of_var: &[Option<usize>],
+    slack_start: usize,
+    tol: f64,
+) -> Result<Vec<usize>, String> {
+    let n = p.c.len();
+    let a_ub: &[Vec<f64>] = p.a_ub.as_deref().unwrap_or(&[]);
+    let a_eq: &[Vec<f64>] = p.a_eq.as_deref().unwrap_or(&[]);
+    let ub: Vec<Option<f64>> = p.ub.clone().unwrap_or_else(|| vec![None; n]);
+
+    if start.var_basis.len() != n {
+        return Err(format!(
+            "variable basis length {} does not match {n}",
+            start.var_basis.len()
+        ));
+    }
+    if start.row_basis.len() != a_ub.len() + a_eq.len() {
+        return Err(format!(
+            "row basis length {} does not match {}",
+            start.row_basis.len(),
+            a_ub.len() + a_eq.len()
+        ));
+    }
+    if let Some(primal) = start.primal_start.as_ref() {
+        if primal.len() != n {
+            return Err(format!(
+                "primal start length {} does not match {n}",
+                primal.len()
+            ));
+        }
+        if primal.iter().any(|value| !value.is_finite()) {
+            return Err("primal start contains a non-finite value".to_string());
+        }
+    }
+
+    let mut columns = Vec::new();
+    let mut var_statuses = Vec::with_capacity(n);
+    for (i, status) in start.var_basis.iter().enumerate() {
+        let token = normalized_lp_basis_status(status)
+            .ok_or_else(|| format!("unknown variable basis status `{status}`"))?;
+        var_statuses.push(token);
+        if token == "basic" {
+            let col =
+                if free_neg[i] >= 0 && start.primal_start.as_ref().is_some_and(|x| x[i] < -tol) {
+                    free_neg[i] as usize
+                } else {
+                    y_index_of_pos[i]
+                };
+            push_unique_column(&mut columns, col);
+        }
+    }
+
+    for r in 0..a_ub.len() {
+        let status = &start.row_basis[r];
+        let token = normalized_lp_basis_status(status)
+            .ok_or_else(|| format!("unknown row basis status `{status}`"))?;
+        if token == "basic" {
+            push_unique_column(&mut columns, slack_start + r);
+        }
+    }
+    for r in 0..a_eq.len() {
+        let status = &start.row_basis[a_ub.len() + r];
+        normalized_lp_basis_status(status)
+            .ok_or_else(|| format!("unknown equality row basis status `{status}`"))?;
+    }
+
+    for i in 0..n {
+        let Some(upper) = ub[i] else {
+            continue;
+        };
+        let Some(row) = upper_bound_row_of_var[i] else {
+            continue;
+        };
+        let upper_inactive = start
+            .primal_start
+            .as_ref()
+            .map(|x| x[i] < upper - tol)
+            .unwrap_or(var_statuses[i] != "at_upper");
+        if upper_inactive {
+            push_unique_column(&mut columns, slack_start + row);
+        }
+    }
+
+    Ok(columns)
+}
+
+fn simplex_rebase_towards_columns(
+    t: &mut Vec<Vec<f64>>,
+    basis: &mut [usize],
+    columns: &[usize],
+    tol: f64,
+) -> (usize, usize) {
+    if t.is_empty() {
+        return (0, 0);
+    }
+    let ncols = t[0].len() - 1;
+    let mut matched = 0usize;
+    let mut pivots = 0usize;
+
+    for &col in columns {
+        if col >= ncols {
+            continue;
+        }
+        if basis.iter().any(|&basic| basic == col) {
+            matched += 1;
+            continue;
+        }
+
+        let mut leaving: Option<usize> = None;
+        let mut best_ratio = f64::INFINITY;
+        for r in 0..t.len() {
+            if t[r][col] > tol {
+                let ratio = t[r][ncols] / t[r][col];
+                if ratio < best_ratio - tol
+                    || ((ratio - best_ratio).abs() <= tol
+                        && (leaving.is_none() || basis[r] < basis[leaving.unwrap()]))
+                {
+                    best_ratio = ratio;
+                    leaving = Some(r);
+                }
+            }
+        }
+
+        if let Some(row) = leaving {
+            pivot(t, basis, row, col);
+            matched += 1;
+            pivots += 1;
+        }
+    }
+
+    (matched, pivots)
+}
+
+fn apply_lp_basis_warm_start(
+    p: &LPProblem,
+    start: &LPBasisWarmStart,
+    t: &mut Vec<Vec<f64>>,
+    basis: &mut [usize],
+    y_index_of_pos: &[usize],
+    free_neg: &[isize],
+    upper_bound_row_of_var: &[Option<usize>],
+    slack_start: usize,
+    tol: f64,
+) -> Result<(usize, usize, usize), String> {
+    let columns = lp_basis_warm_start_candidates(
+        p,
+        start,
+        y_index_of_pos,
+        free_neg,
+        upper_bound_row_of_var,
+        slack_start,
+        tol,
+    )?;
+    if columns.is_empty() {
+        return Err("no usable basic columns in warm start".to_string());
+    }
+    let candidate_count = columns.len();
+    let (matched, pivots) = simplex_rebase_towards_columns(t, basis, &columns, tol);
+    if matched == 0 {
+        return Err("no warm-start columns could enter the current feasible basis".to_string());
+    }
+    Ok((matched, candidate_count, pivots))
+}
+
 fn simplex_reduced_cost(
     t: &[Vec<f64>],
     basis: &[usize],
@@ -882,10 +1465,218 @@ fn clean_certificate_value(value: f64) -> f64 {
     }
 }
 
+fn first_improving_y_ray(
+    c_y: &[f64],
+    y_index_of_pos: &[usize],
+    free_neg: &[isize],
+    original_n: usize,
+    tol: f64,
+) -> Option<Vec<f64>> {
+    let entering = c_y.iter().position(|&coef| coef > tol)?;
+    let mut y_ray = vec![0.0; c_y.len()];
+    y_ray[entering] = 1.0;
+    original_ray_from_y_ray(&y_ray, y_index_of_pos, free_neg, original_n)
+}
+
+fn simplex_unbounded_original_ray(
+    original_n: usize,
+    ny: usize,
+    basis: &[usize],
+    tableau: &[Vec<f64>],
+    entering: usize,
+    y_index_of_pos: &[usize],
+    free_neg: &[isize],
+    tol: f64,
+) -> Option<Vec<f64>> {
+    if entering >= ny {
+        return None;
+    }
+    let mut y_ray = vec![0.0; ny];
+    y_ray[entering] = 1.0;
+    for (row, &basic_col) in basis.iter().enumerate() {
+        if basic_col < ny {
+            y_ray[basic_col] = -tableau[row][entering];
+        }
+    }
+    for value in &mut y_ray {
+        if value.abs() <= tol {
+            *value = 0.0;
+        }
+    }
+    original_ray_from_y_ray(&y_ray, y_index_of_pos, free_neg, original_n)
+}
+
+fn original_ray_from_y_ray(
+    y_ray: &[f64],
+    y_index_of_pos: &[usize],
+    free_neg: &[isize],
+    original_n: usize,
+) -> Option<Vec<f64>> {
+    let mut ray = Vec::with_capacity(original_n);
+    for i in 0..original_n {
+        let pos = *y_ray.get(*y_index_of_pos.get(i)?)?;
+        let neg = if *free_neg.get(i)? >= 0 {
+            *y_ray.get(free_neg[i] as usize)?
+        } else {
+            0.0
+        };
+        ray.push(clean_certificate_value(pos - neg));
+    }
+    ray.iter().any(|value| value.abs() > 1e-10).then_some(ray)
+}
+
+fn clean_certificate_vec(values: &mut [f64], tol: f64) {
+    for value in values {
+        if value.abs() <= tol {
+            *value = 0.0;
+        }
+    }
+}
+
+fn find_lp_farkas_certificate(
+    p: &LPProblem,
+    tol: f64,
+    max_iter: usize,
+) -> Option<LPInfeasibilityCertificate> {
+    let n = p.c.len();
+    let a_ub: &[Vec<f64>] = p.a_ub.as_deref().unwrap_or(&[]);
+    let b_ub: &[f64] = p.b_ub.as_deref().unwrap_or(&[]);
+    let a_eq: &[Vec<f64>] = p.a_eq.as_deref().unwrap_or(&[]);
+    let b_eq: &[f64] = p.b_eq.as_deref().unwrap_or(&[]);
+    if a_ub.len() != b_ub.len() || a_eq.len() != b_eq.len() {
+        return None;
+    }
+    let lb = p.lb.clone().unwrap_or_else(|| vec![Some(0.0); n]);
+    let ub = p.ub.clone().unwrap_or_else(|| vec![None; n]);
+    if lb.len() != n || ub.len() != n {
+        return None;
+    }
+
+    let mut lower_cols = vec![None; n];
+    let mut upper_cols = vec![None; n];
+    let dual_ub_start = 0;
+    let dual_eq_start = dual_ub_start + a_ub.len();
+    let mut next_col = dual_eq_start + a_eq.len();
+
+    for j in 0..n {
+        if lb[j].is_some_and(f64::is_finite) {
+            lower_cols[j] = Some(next_col);
+            next_col += 1;
+        }
+    }
+    for j in 0..n {
+        if ub[j].is_some_and(f64::is_finite) {
+            upper_cols[j] = Some(next_col);
+            next_col += 1;
+        }
+    }
+
+    if next_col == 0 {
+        return None;
+    }
+
+    let mut aux_lb = vec![Some(0.0); next_col];
+    for r in 0..a_eq.len() {
+        aux_lb[dual_eq_start + r] = None;
+    }
+
+    let mut stationarity_rows = Vec::with_capacity(n);
+    let mut stationarity_rhs = Vec::with_capacity(n);
+    for j in 0..n {
+        let mut row = vec![0.0; next_col];
+        for (r, source_row) in a_ub.iter().enumerate() {
+            row[dual_ub_start + r] = source_row.get(j).copied().unwrap_or(0.0);
+        }
+        for (r, source_row) in a_eq.iter().enumerate() {
+            row[dual_eq_start + r] = source_row.get(j).copied().unwrap_or(0.0);
+        }
+        if let Some(col) = lower_cols[j] {
+            row[col] = -1.0;
+        }
+        if let Some(col) = upper_cols[j] {
+            row[col] = 1.0;
+        }
+        stationarity_rows.push(row);
+        stationarity_rhs.push(0.0);
+    }
+
+    let mut contradiction_row = vec![0.0; next_col];
+    for (r, rhs) in b_ub.iter().enumerate() {
+        contradiction_row[dual_ub_start + r] = *rhs;
+    }
+    for (r, rhs) in b_eq.iter().enumerate() {
+        contradiction_row[dual_eq_start + r] = *rhs;
+    }
+    for j in 0..n {
+        if let (Some(lower), Some(col)) = (lb[j], lower_cols[j]) {
+            contradiction_row[col] = -lower;
+        }
+        if let (Some(upper), Some(col)) = (ub[j], upper_cols[j]) {
+            contradiction_row[col] = upper;
+        }
+    }
+
+    let aux = LPProblem {
+        sense: Sense::Max,
+        c: vec![0.0; next_col],
+        a_ub: Some(vec![contradiction_row]),
+        b_ub: Some(vec![-1.0]),
+        a_eq: Some(stationarity_rows),
+        b_eq: Some(stationarity_rhs),
+        lb: Some(aux_lb),
+        ub: Some(vec![None; next_col]),
+        ..Default::default()
+    };
+    let aux_opts = InternalSimplexOptions {
+        max_iter: Some(max_iter),
+        tol: Some(tol),
+        basis_start: None,
+    };
+    let aux_solution = run_internal_simplex_impl(&aux, &aux_opts, false);
+    if aux_solution.status != LPStatus::Optimal || aux_solution.x.len() != next_col {
+        return None;
+    }
+
+    let mut dual_ub = vec![0.0; a_ub.len()];
+    for r in 0..a_ub.len() {
+        dual_ub[r] = aux_solution.x[dual_ub_start + r];
+    }
+    let mut dual_eq = vec![0.0; a_eq.len()];
+    for r in 0..a_eq.len() {
+        dual_eq[r] = aux_solution.x[dual_eq_start + r];
+    }
+    let mut lower_bound = vec![0.0; n];
+    let mut upper_bound = vec![0.0; n];
+    for j in 0..n {
+        if let Some(col) = lower_cols[j] {
+            lower_bound[j] = aux_solution.x[col];
+        }
+        if let Some(col) = upper_cols[j] {
+            upper_bound[j] = aux_solution.x[col];
+        }
+    }
+    clean_certificate_vec(&mut dual_ub, tol);
+    clean_certificate_vec(&mut dual_eq, tol);
+    clean_certificate_vec(&mut lower_bound, tol);
+    clean_certificate_vec(&mut upper_bound, tol);
+
+    let mut certificate = LPInfeasibilityCertificate {
+        dual_ub,
+        dual_eq,
+        lower_bound,
+        upper_bound,
+        contradiction: f64::NAN,
+    };
+    certificate.contradiction = certificate.contradiction_value(p)?;
+    certificate
+        .is_valid_for(p, tol.max(1e-7))
+        .then_some(certificate)
+}
+
 /// In-process two-phase simplex as a transform. Config (iteration cap, pivot
 /// tolerance) lives on the struct; the LP is the `transform` input. Always
 /// returns a fully-populated `LPSolution` (failure via `status`, not panic).
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct InternalSimplexSolver {
     pub opts: InternalSimplexOptions,
 }
@@ -906,6 +1697,524 @@ impl Transform<LPProblem, LPSolution> for InternalSimplexSolver {
 /// free-function API; prefer `InternalSimplexSolver` for new code.)
 pub fn solve_lp_internal(p: &LPProblem, opts: &InternalSimplexOptions) -> LPSolution {
     run_internal_simplex(p, opts)
+}
+
+fn lp_objective_value_at(p: &LPProblem, x: &[f64]) -> Option<f64> {
+    (p.c.len() == x.len()).then(|| dot_local(&p.c, x))
+}
+
+fn lp_point_remains_objective_optimal(
+    p: &LPProblem,
+    point: &[f64],
+    solve_opts: &InternalSimplexOptions,
+    tol: f64,
+) -> bool {
+    let sol = run_internal_simplex_impl(p, solve_opts, false);
+    if sol.status != LPStatus::Optimal {
+        return false;
+    }
+    let Some(point_objective) = lp_objective_value_at(p, point) else {
+        return false;
+    };
+    let scale = 1.0_f64.max(point_objective.abs()).max(sol.objective.abs());
+    (point_objective - sol.objective).abs() <= tol * scale
+}
+
+fn lp_objective_sensitivity_side(
+    p: &LPProblem,
+    base_x: &[f64],
+    variable: usize,
+    direction: f64,
+    solve_opts: &InternalSimplexOptions,
+    opts: &LPObjectiveSensitivityOptions,
+) -> Option<f64> {
+    let original = p.c[variable];
+    let mut low_delta = 0.0;
+    let mut high_delta = opts.initial_step.abs().max(1.0e-9);
+    let max_span = opts.max_span.abs().max(high_delta);
+
+    while high_delta <= max_span {
+        let mut trial = p.clone();
+        trial.c[variable] = original + direction * high_delta;
+        if !lp_point_remains_objective_optimal(&trial, base_x, solve_opts, opts.tol) {
+            let mut lo = low_delta;
+            let mut hi = high_delta;
+            for _ in 0..opts.refinement_iters {
+                let mid = 0.5 * (lo + hi);
+                let mut refined = p.clone();
+                refined.c[variable] = original + direction * mid;
+                if lp_point_remains_objective_optimal(&refined, base_x, solve_opts, opts.tol) {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            return Some(original + direction * lo);
+        }
+        low_delta = high_delta;
+        high_delta *= 2.0;
+    }
+
+    None
+}
+
+fn lp_rhs_original(p: &LPProblem, kind: LPRhsSensitivityKind, row: usize) -> Option<f64> {
+    match kind {
+        LPRhsSensitivityKind::Upper => p.b_ub.as_ref().and_then(|rhs| rhs.get(row)).copied(),
+        LPRhsSensitivityKind::Equality => p.b_eq.as_ref().and_then(|rhs| rhs.get(row)).copied(),
+    }
+}
+
+fn lp_rhs_row_name(p: &LPProblem, kind: LPRhsSensitivityKind, row: usize) -> Option<String> {
+    let ub_count = p.b_ub.as_ref().map(|rhs| rhs.len()).unwrap_or(0);
+    let offset = match kind {
+        LPRhsSensitivityKind::Upper => row,
+        LPRhsSensitivityKind::Equality => ub_count + row,
+    };
+    p.con_names
+        .as_ref()
+        .and_then(|names| names.get(offset).cloned())
+}
+
+fn lp_with_rhs_value(
+    p: &LPProblem,
+    kind: LPRhsSensitivityKind,
+    row: usize,
+    value: f64,
+) -> LPProblem {
+    let mut trial = p.clone();
+    match kind {
+        LPRhsSensitivityKind::Upper => {
+            if let Some(rhs) = &mut trial.b_ub {
+                rhs[row] = value;
+            }
+        }
+        LPRhsSensitivityKind::Equality => {
+            if let Some(rhs) = &mut trial.b_eq {
+                rhs[row] = value;
+            }
+        }
+    }
+    trial
+}
+
+fn lp_basis_pattern_matches(
+    p: &LPProblem,
+    base_var_basis: &[String],
+    base_row_basis: &[String],
+    solve_opts: &InternalSimplexOptions,
+) -> bool {
+    let sol = run_internal_simplex_impl(p, solve_opts, false);
+    if sol.status != LPStatus::Optimal {
+        return false;
+    }
+    let Some(var_basis) = sol.var_basis.as_ref() else {
+        return false;
+    };
+    let Some(row_basis) = sol.row_basis.as_ref() else {
+        return false;
+    };
+    var_basis == base_var_basis && row_basis == base_row_basis
+}
+
+fn lp_rhs_sensitivity_side(
+    p: &LPProblem,
+    base_var_basis: &[String],
+    base_row_basis: &[String],
+    kind: LPRhsSensitivityKind,
+    row: usize,
+    direction: f64,
+    solve_opts: &InternalSimplexOptions,
+    opts: &LPRhsSensitivityOptions,
+) -> Option<f64> {
+    let original = lp_rhs_original(p, kind, row)?;
+    let mut low_delta = 0.0;
+    let mut high_delta = opts.initial_step.abs().max(1.0e-9);
+    let max_span = opts.max_span.abs().max(high_delta);
+
+    while high_delta <= max_span {
+        let trial = lp_with_rhs_value(p, kind, row, original + direction * high_delta);
+        if !lp_basis_pattern_matches(&trial, base_var_basis, base_row_basis, solve_opts) {
+            let mut lo = low_delta;
+            let mut hi = high_delta;
+            for _ in 0..opts.refinement_iters {
+                let mid = 0.5 * (lo + hi);
+                let refined = lp_with_rhs_value(p, kind, row, original + direction * mid);
+                if lp_basis_pattern_matches(&refined, base_var_basis, base_row_basis, solve_opts) {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            return Some(original + direction * lo);
+        }
+        low_delta = high_delta;
+        high_delta *= 2.0;
+    }
+
+    None
+}
+
+#[derive(Clone, Debug)]
+struct LPBoundRowMapping {
+    kind: LPBoundSensitivityKind,
+    variable: usize,
+    row: usize,
+    original: f64,
+}
+
+fn lp_effective_lower_bounds(p: &LPProblem) -> Vec<Option<f64>> {
+    p.lb.clone().unwrap_or_else(|| vec![Some(0.0); p.c.len()])
+}
+
+fn lp_effective_upper_bounds(p: &LPProblem) -> Vec<Option<f64>> {
+    p.ub.clone().unwrap_or_else(|| vec![None; p.c.len()])
+}
+
+fn lp_variable_name(p: &LPProblem, variable: usize) -> Option<String> {
+    p.var_names
+        .as_ref()
+        .and_then(|names| names.get(variable).cloned())
+}
+
+fn lp_bound_sensitivity_rhs_options(opts: &LPBoundSensitivityOptions) -> LPRhsSensitivityOptions {
+    LPRhsSensitivityOptions {
+        initial_step: opts.initial_step,
+        max_span: opts.max_span,
+        refinement_iters: opts.refinement_iters,
+        tol: opts.tol,
+    }
+}
+
+fn lp_bound_rows_problem(p: &LPProblem) -> (LPProblem, Vec<LPBoundRowMapping>) {
+    let n = p.c.len();
+    let lb = lp_effective_lower_bounds(p);
+    let ub = lp_effective_upper_bounds(p);
+    if lb.len() != n || ub.len() != n {
+        panic!("LP bounds length mismatch");
+    }
+
+    let original_ub_rows: &[Vec<f64>] = p.a_ub.as_deref().unwrap_or(&[]);
+    let original_ub_rhs: &[f64] = p.b_ub.as_deref().unwrap_or(&[]);
+    let original_eq_rows: &[Vec<f64>] = p.a_eq.as_deref().unwrap_or(&[]);
+    let original_eq_rhs: &[f64] = p.b_eq.as_deref().unwrap_or(&[]);
+    if original_ub_rows.len() != original_ub_rhs.len()
+        || original_eq_rows.len() != original_eq_rhs.len()
+    {
+        panic!("LP row/RHS length mismatch");
+    }
+
+    let mut a_ub = original_ub_rows.to_vec();
+    let mut b_ub = original_ub_rhs.to_vec();
+    let mut con_names = Vec::new();
+    for row in 0..original_ub_rows.len() {
+        con_names.push(lp_source_row_name(p, row, format!("c{row}")));
+    }
+
+    let mut mappings = Vec::new();
+    for variable in 0..n {
+        let name = lp_variable_name(p, variable).unwrap_or_else(|| format!("x{variable}"));
+        if let Some(lower) = lb[variable] {
+            let mut row = vec![0.0; n];
+            row[variable] = -1.0;
+            let row_index = a_ub.len();
+            a_ub.push(row);
+            b_ub.push(-lower);
+            con_names.push(format!("bound_lower_{name}"));
+            mappings.push(LPBoundRowMapping {
+                kind: LPBoundSensitivityKind::Lower,
+                variable,
+                row: row_index,
+                original: lower,
+            });
+        }
+        if let Some(upper) = ub[variable] {
+            let mut row = vec![0.0; n];
+            row[variable] = 1.0;
+            let row_index = a_ub.len();
+            a_ub.push(row);
+            b_ub.push(upper);
+            con_names.push(format!("bound_upper_{name}"));
+            mappings.push(LPBoundRowMapping {
+                kind: LPBoundSensitivityKind::Upper,
+                variable,
+                row: row_index,
+                original: upper,
+            });
+        }
+    }
+
+    let eq_offset = original_ub_rows.len() + original_eq_rows.len();
+    let original_bound_row_count = original_ub_rows.len();
+    for row in 0..original_eq_rows.len() {
+        con_names.push(lp_source_row_name(
+            p,
+            original_bound_row_count + row,
+            format!("eq{row}"),
+        ));
+    }
+    debug_assert_eq!(eq_offset + mappings.len(), con_names.len());
+
+    (
+        LPProblem {
+            sense: p.sense,
+            c: p.c.clone(),
+            a_ub: (!a_ub.is_empty()).then_some(a_ub),
+            b_ub: (!b_ub.is_empty()).then_some(b_ub),
+            a_eq: (!original_eq_rows.is_empty()).then_some(original_eq_rows.to_vec()),
+            b_eq: (!original_eq_rhs.is_empty()).then_some(original_eq_rhs.to_vec()),
+            lb: Some(vec![None; n]),
+            ub: Some(vec![None; n]),
+            var_names: p.var_names.clone(),
+            con_names: (!con_names.is_empty()).then_some(con_names),
+        },
+        mappings,
+    )
+}
+
+fn lp_bound_range_from_rhs(
+    p: &LPProblem,
+    mapping: &LPBoundRowMapping,
+    rhs_range: &LPRhsRange,
+) -> LPVariableBoundRange {
+    let (lower, upper) = match mapping.kind {
+        LPBoundSensitivityKind::Lower => (
+            rhs_range.upper.map(|value| -value),
+            rhs_range.lower.map(|value| -value),
+        ),
+        LPBoundSensitivityKind::Upper => (rhs_range.lower, rhs_range.upper),
+    };
+    LPVariableBoundRange {
+        kind: mapping.kind,
+        variable: mapping.variable,
+        name: lp_variable_name(p, mapping.variable),
+        original: mapping.original,
+        lower,
+        upper,
+    }
+}
+
+/// Compute objective-coefficient stability ranges for the current LP optimum.
+///
+/// The report answers the common post-optimality question exposed by commercial
+/// solvers: how far can each original objective coefficient move before the
+/// current primal optimum is no longer optimal? The native implementation is a
+/// solver-backed search, so it works with the same bounds/equalities/free
+/// variables as `solve_lp_internal`, but it is intended for validation-sized and
+/// medium-small models rather than huge industrial ranging jobs.
+pub fn analyze_lp_objective_sensitivity_internal(
+    p: &LPProblem,
+    solve_opts: &InternalSimplexOptions,
+    sensitivity_opts: &LPObjectiveSensitivityOptions,
+) -> LPObjectiveSensitivityReport {
+    let base = solve_lp_internal(p, solve_opts);
+    if base.status != LPStatus::Optimal {
+        return LPObjectiveSensitivityReport {
+            status: base.status,
+            base_x: base.x,
+            base_objective: base.objective,
+            ranges: Vec::new(),
+            solver: "internal-objective-sensitivity".to_string(),
+            message: Some("base LP is not optimal; no sensitivity ranges computed".to_string()),
+        };
+    }
+
+    let mut ranges = Vec::with_capacity(p.c.len());
+    for variable in 0..p.c.len() {
+        let lower =
+            lp_objective_sensitivity_side(p, &base.x, variable, -1.0, solve_opts, sensitivity_opts);
+        let upper =
+            lp_objective_sensitivity_side(p, &base.x, variable, 1.0, solve_opts, sensitivity_opts);
+        ranges.push(LPObjectiveCoefficientRange {
+            variable,
+            name: p
+                .var_names
+                .as_ref()
+                .and_then(|names| names.get(variable).cloned()),
+            original: p.c[variable],
+            lower,
+            upper,
+        });
+    }
+
+    LPObjectiveSensitivityReport {
+        status: LPStatus::Optimal,
+        base_x: base.x,
+        base_objective: base.objective,
+        ranges,
+        solver: "internal-objective-sensitivity".to_string(),
+        message: Some(format!(
+            "objective coefficient ranges via repeated internal simplex solves; max_span={:.3e}",
+            sensitivity_opts.max_span
+        )),
+    }
+}
+
+/// Compute row-RHS stability ranges for the current LP basis pattern.
+///
+/// This is the row-side companion to objective-coefficient sensitivity: it
+/// answers how far each original `<=` or equality RHS can move while repeated
+/// native simplex solves recover the same variable/row basis status pattern.
+/// The solver-backed search is intentionally validation-oriented, but gives the
+/// library a local analogue of the RHS ranging reports exposed by production LP
+/// engines.
+pub fn analyze_lp_rhs_sensitivity_internal(
+    p: &LPProblem,
+    solve_opts: &InternalSimplexOptions,
+    sensitivity_opts: &LPRhsSensitivityOptions,
+) -> LPRhsSensitivityReport {
+    let base = solve_lp_internal(p, solve_opts);
+    if base.status != LPStatus::Optimal {
+        return LPRhsSensitivityReport {
+            status: base.status,
+            base_x: base.x,
+            base_objective: base.objective,
+            ranges: Vec::new(),
+            solver: "internal-rhs-sensitivity".to_string(),
+            message: Some("base LP is not optimal; no RHS sensitivity ranges computed".to_string()),
+        };
+    }
+    let (Some(base_var_basis), Some(base_row_basis)) =
+        (base.var_basis.as_ref(), base.row_basis.as_ref())
+    else {
+        return LPRhsSensitivityReport {
+            status: LPStatus::NumericalError,
+            base_x: base.x,
+            base_objective: base.objective,
+            ranges: Vec::new(),
+            solver: "internal-rhs-sensitivity".to_string(),
+            message: Some(
+                "base LP solve did not expose basis statuses; no RHS ranges computed".to_string(),
+            ),
+        };
+    };
+
+    let ub_count = p.b_ub.as_ref().map(|rhs| rhs.len()).unwrap_or(0);
+    let eq_count = p.b_eq.as_ref().map(|rhs| rhs.len()).unwrap_or(0);
+    let mut ranges = Vec::with_capacity(ub_count + eq_count);
+    for row in 0..ub_count {
+        let lower = lp_rhs_sensitivity_side(
+            p,
+            base_var_basis,
+            base_row_basis,
+            LPRhsSensitivityKind::Upper,
+            row,
+            -1.0,
+            solve_opts,
+            sensitivity_opts,
+        );
+        let upper = lp_rhs_sensitivity_side(
+            p,
+            base_var_basis,
+            base_row_basis,
+            LPRhsSensitivityKind::Upper,
+            row,
+            1.0,
+            solve_opts,
+            sensitivity_opts,
+        );
+        ranges.push(LPRhsRange {
+            kind: LPRhsSensitivityKind::Upper,
+            row,
+            name: lp_rhs_row_name(p, LPRhsSensitivityKind::Upper, row),
+            original: lp_rhs_original(p, LPRhsSensitivityKind::Upper, row).unwrap_or(0.0),
+            lower,
+            upper,
+        });
+    }
+    for row in 0..eq_count {
+        let lower = lp_rhs_sensitivity_side(
+            p,
+            base_var_basis,
+            base_row_basis,
+            LPRhsSensitivityKind::Equality,
+            row,
+            -1.0,
+            solve_opts,
+            sensitivity_opts,
+        );
+        let upper = lp_rhs_sensitivity_side(
+            p,
+            base_var_basis,
+            base_row_basis,
+            LPRhsSensitivityKind::Equality,
+            row,
+            1.0,
+            solve_opts,
+            sensitivity_opts,
+        );
+        ranges.push(LPRhsRange {
+            kind: LPRhsSensitivityKind::Equality,
+            row,
+            name: lp_rhs_row_name(p, LPRhsSensitivityKind::Equality, row),
+            original: lp_rhs_original(p, LPRhsSensitivityKind::Equality, row).unwrap_or(0.0),
+            lower,
+            upper,
+        });
+    }
+
+    LPRhsSensitivityReport {
+        status: LPStatus::Optimal,
+        base_x: base.x,
+        base_objective: base.objective,
+        ranges,
+        solver: "internal-rhs-sensitivity".to_string(),
+        message: Some(format!(
+            "RHS ranges via repeated internal simplex solves and basis checks; max_span={:.3e}",
+            sensitivity_opts.max_span
+        )),
+    }
+}
+
+/// Compute variable-bound stability ranges for the current LP basis pattern.
+///
+/// Finite lower and upper bounds are converted into explicit LP rows, ranged
+/// with the same RHS sensitivity engine, and then mapped back to original bound
+/// values. Default nonnegative lower bounds are treated as finite `0.0`
+/// bounds, matching `LPProblem` solve semantics.
+pub fn analyze_lp_bound_sensitivity_internal(
+    p: &LPProblem,
+    solve_opts: &InternalSimplexOptions,
+    sensitivity_opts: &LPBoundSensitivityOptions,
+) -> LPBoundSensitivityReport {
+    let (bound_row_problem, mappings) = lp_bound_rows_problem(p);
+    let rhs_opts = lp_bound_sensitivity_rhs_options(sensitivity_opts);
+    let rhs_report = analyze_lp_rhs_sensitivity_internal(&bound_row_problem, solve_opts, &rhs_opts);
+    if rhs_report.status != LPStatus::Optimal {
+        return LPBoundSensitivityReport {
+            status: rhs_report.status,
+            base_x: rhs_report.base_x,
+            base_objective: rhs_report.base_objective,
+            ranges: Vec::new(),
+            solver: "internal-bound-sensitivity".to_string(),
+            message: Some(
+                "bound-row LP is not optimal; no variable-bound ranges computed".to_string(),
+            ),
+        };
+    }
+
+    let mut ranges = Vec::with_capacity(mappings.len());
+    for mapping in &mappings {
+        if let Some(rhs_range) = rhs_report
+            .ranges
+            .iter()
+            .find(|range| range.kind == LPRhsSensitivityKind::Upper && range.row == mapping.row)
+        {
+            ranges.push(lp_bound_range_from_rhs(p, mapping, rhs_range));
+        }
+    }
+
+    LPBoundSensitivityReport {
+        status: LPStatus::Optimal,
+        base_x: rhs_report.base_x,
+        base_objective: rhs_report.base_objective,
+        ranges,
+        solver: "internal-bound-sensitivity".to_string(),
+        message: Some(format!(
+            "variable-bound ranges via explicit bound rows and internal simplex basis checks; max_span={:.3e}",
+            sensitivity_opts.max_span
+        )),
+    }
 }
 
 fn add_lp_objective_offset(mut sol: LPSolution, offset: f64) -> LPSolution {
@@ -1296,6 +2605,7 @@ pub fn solve_lp_feasibility_relaxation_internal(
     let simplex_opts = InternalSimplexOptions {
         max_iter: opts.lp_max_iter,
         tol: opts.tol,
+        basis_start: None,
     };
     let solution = solve_lp_internal(&model.problem, &simplex_opts);
     let status = solution.status;
@@ -1455,6 +2765,7 @@ fn lp_conflict_subset_status(
         &InternalSimplexOptions {
             max_iter: opts.lp_max_iter,
             tol: opts.tol,
+            basis_start: None,
         },
     )
     .status
@@ -1573,6 +2884,8 @@ fn empty_lp_solution(
         reduced_costs: None,
         var_basis: None,
         row_basis: None,
+        unbounded_ray: None,
+        infeasibility_certificate: None,
         iters: None,
         solver: solver.to_string(),
         elapsed_ms: ms_since(t0),
@@ -2029,6 +3342,8 @@ fn run_internal_ipm(p: &LPProblem, opts: &InternalInteriorPointOptions) -> LPSol
                 reduced_costs: None,
                 var_basis: None,
                 row_basis: None,
+                unbounded_ray: None,
+                infeasibility_certificate: None,
                 iters: Some(0),
                 solver: "internal-ipm".to_string(),
                 elapsed_ms: ms_since(t0),
@@ -2071,6 +3386,8 @@ fn run_internal_ipm(p: &LPProblem, opts: &InternalInteriorPointOptions) -> LPSol
             reduced_costs: None,
             var_basis: None,
             row_basis: None,
+            unbounded_ray: None,
+            infeasibility_certificate: None,
             iters: Some(0),
             solver: "internal-ipm".to_string(),
             elapsed_ms: ms_since(t0),
@@ -2118,6 +3435,8 @@ fn run_internal_ipm(p: &LPProblem, opts: &InternalInteriorPointOptions) -> LPSol
                 reduced_costs: None,
                 var_basis: None,
                 row_basis: None,
+                unbounded_ray: None,
+                infeasibility_certificate: None,
                 iters: Some(iter),
                 solver: "internal-ipm".to_string(),
                 elapsed_ms: ms_since(t0),
@@ -2214,6 +3533,8 @@ fn run_internal_ipm(p: &LPProblem, opts: &InternalInteriorPointOptions) -> LPSol
         reduced_costs: None,
         var_basis: None,
         row_basis: None,
+        unbounded_ray: None,
+        infeasibility_certificate: None,
         iters: Some(max_iter),
         solver: "internal-ipm".to_string(),
         elapsed_ms: ms_since(t0),
@@ -2251,6 +3572,7 @@ pub fn solve_lp_internal_ipm(p: &LPProblem, opts: &InternalInteriorPointOptions)
 struct SimplexResult {
     status: LPStatus,
     iters: usize,
+    unbounded_col: Option<usize>,
 }
 
 fn simplex_core(
@@ -2265,6 +3587,7 @@ fn simplex_core(
         return SimplexResult {
             status: LPStatus::Optimal,
             iters: 0,
+            unbounded_col: None,
         };
     }
     let ncols = t[0].len() - 1;
@@ -2291,6 +3614,7 @@ fn simplex_core(
                 return SimplexResult {
                     status: LPStatus::Optimal,
                     iters,
+                    unbounded_col: None,
                 }
             }
         };
@@ -2315,6 +3639,7 @@ fn simplex_core(
                 return SimplexResult {
                     status: LPStatus::Unbounded,
                     iters,
+                    unbounded_col: Some(entering),
                 }
             }
         };
@@ -2326,6 +3651,7 @@ fn simplex_core(
     SimplexResult {
         status: LPStatus::IterLimit,
         iters,
+        unbounded_col: None,
     }
 }
 
@@ -2437,6 +3763,8 @@ impl ExternalSolver {
             reduced_costs: None,
             var_basis: None,
             row_basis: None,
+            unbounded_ray: None,
+            infeasibility_certificate: None,
             iters: None,
             solver: requested_solver.clone(),
             elapsed_ms: ms_since(t0),
@@ -2529,6 +3857,9 @@ impl ExternalSolver {
             reduced_costs: json_get(&parsed, "reducedCosts").and_then(json_as_f64_array),
             var_basis: json_get(&parsed, "varBasis").and_then(json_as_string_array),
             row_basis: json_get(&parsed, "rowBasis").and_then(json_as_string_array),
+            unbounded_ray: json_get(&parsed, "unboundedRay").and_then(json_as_f64_array),
+            infeasibility_certificate: json_get(&parsed, "infeasibilityCertificate")
+                .and_then(json_as_lp_infeasibility_certificate),
             iters: json_get(&parsed, "iters")
                 .and_then(json_as_f64)
                 .map(|f| f as usize),
@@ -2588,6 +3919,7 @@ impl LpSolverOptions {
         InternalSimplexOptions {
             max_iter: self.max_iter,
             tol: self.tol,
+            basis_start: None,
         }
     }
 
@@ -2864,6 +4196,17 @@ fn json_as_string_array(v: &Json) -> Option<Vec<String>> {
             .collect(),
         _ => None,
     }
+}
+
+fn json_as_lp_infeasibility_certificate(v: &Json) -> Option<LPInfeasibilityCertificate> {
+    let certificate = LPInfeasibilityCertificate {
+        dual_ub: json_get(v, "dualUB").and_then(json_as_f64_array)?,
+        dual_eq: json_get(v, "dualEQ").and_then(json_as_f64_array)?,
+        lower_bound: json_get(v, "lowerBound").and_then(json_as_f64_array)?,
+        upper_bound: json_get(v, "upperBound").and_then(json_as_f64_array)?,
+        contradiction: json_get(v, "contradiction").and_then(json_as_f64)?,
+    };
+    Some(certificate)
 }
 
 struct JsonParser<'a> {
@@ -3343,6 +4686,50 @@ mod tests {
     }
 
     #[test]
+    fn internal_simplex_accepts_basis_warm_start() {
+        let p = LPProblem {
+            sense: Sense::Max,
+            c: vec![3.0, 2.0],
+            a_ub: Some(vec![vec![1.0, 1.0], vec![1.0, 3.0]]),
+            b_ub: Some(vec![4.0, 6.0]),
+            ..Default::default()
+        };
+        let base = solve_lp_internal(&p, &opts());
+        assert_eq!(base.status, LPStatus::Optimal, "{base:?}");
+        let basis_start = LPBasisWarmStart::from_solution(&base).expect("basis start");
+
+        let cold_limited = solve_lp_internal(
+            &p,
+            &InternalSimplexOptions {
+                max_iter: Some(1),
+                tol: None,
+                basis_start: None,
+            },
+        );
+        assert_eq!(cold_limited.status, LPStatus::IterLimit, "{cold_limited:?}");
+
+        let warm_limited = solve_lp_internal(
+            &p,
+            &InternalSimplexOptions {
+                max_iter: Some(1),
+                tol: None,
+                basis_start: Some(basis_start),
+            },
+        );
+        assert_eq!(warm_limited.status, LPStatus::Optimal, "{warm_limited:?}");
+        assert_close(warm_limited.objective, base.objective);
+        assert_eq!(warm_limited.x.len(), base.x.len());
+        assert!(
+            warm_limited
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("basis warm start accepted")),
+            "{:?}",
+            warm_limited.message
+        );
+    }
+
+    #[test]
     fn internal_simplex_reports_equality_dual() {
         let p = LPProblem {
             sense: Sense::Max,
@@ -3481,6 +4868,204 @@ mod tests {
         let sol = solve_lp_internal(&p, &opts());
         assert_eq!(sol.status, LPStatus::Unbounded, "{:?}", sol.message);
         assert!(sol.objective.is_infinite() && sol.objective.is_sign_positive());
+        assert_eq!(sol.unbounded_ray.as_deref(), Some(&[1.0][..]));
+    }
+
+    #[test]
+    fn tableau_unbounded_ray_is_reported_in_original_variables() {
+        let p = LPProblem {
+            sense: Sense::Max,
+            c: vec![0.0, 1.0],
+            a_ub: Some(vec![vec![1.0, 0.0]]),
+            b_ub: Some(vec![1.0]),
+            ..Default::default()
+        };
+        let sol = solve_lp_internal(&p, &opts());
+        assert_eq!(sol.status, LPStatus::Unbounded, "{:?}", sol.message);
+        let ray = sol.unbounded_ray.as_ref().expect("unbounded ray");
+        assert_eq!(ray.len(), 2);
+        assert_close(ray[0], 0.0);
+        assert_close(ray[1], 1.0);
+        assert!(p.c.iter().zip(ray).map(|(c, d)| c * d).sum::<f64>() > 0.0);
+        assert!(
+            p.a_ub.as_ref().unwrap()[0]
+                .iter()
+                .zip(ray)
+                .map(|(a, d)| a * d)
+                .sum::<f64>()
+                <= TOL
+        );
+    }
+
+    #[test]
+    fn infeasible_bound_conflict_reports_farkas_certificate() {
+        let p = LPProblem {
+            sense: Sense::Max,
+            c: vec![0.0],
+            a_ub: Some(vec![vec![1.0]]),
+            b_ub: Some(vec![0.0]),
+            lb: Some(vec![Some(1.0)]),
+            ..Default::default()
+        };
+        let sol = solve_lp_internal(&p, &opts());
+        assert_eq!(sol.status, LPStatus::Infeasible, "{:?}", sol.message);
+        let certificate = sol
+            .infeasibility_certificate
+            .as_ref()
+            .expect("infeasibility certificate");
+        assert!(
+            certificate.is_valid_for(&p, 1e-7),
+            "certificate={certificate:?} residual={:?} contradiction={:?}",
+            certificate.max_stationarity_residual(&p),
+            certificate.contradiction_value(&p)
+        );
+        assert!(certificate.contradiction < -TOL);
+    }
+
+    #[test]
+    fn infeasible_equalities_report_farkas_certificate() {
+        let p = LPProblem {
+            sense: Sense::Min,
+            c: vec![0.0],
+            a_eq: Some(vec![vec![1.0], vec![1.0]]),
+            b_eq: Some(vec![1.0, 2.0]),
+            ..Default::default()
+        };
+        let sol = solve_lp_internal(&p, &opts());
+        assert_eq!(sol.status, LPStatus::Infeasible, "{:?}", sol.message);
+        let certificate = sol
+            .infeasibility_certificate
+            .as_ref()
+            .expect("infeasibility certificate");
+        assert!(
+            certificate.is_valid_for(&p, 1e-7),
+            "certificate={certificate:?} residual={:?} contradiction={:?}",
+            certificate.max_stationarity_residual(&p),
+            certificate.contradiction_value(&p)
+        );
+    }
+
+    #[test]
+    fn objective_sensitivity_reports_known_coefficient_ranges() {
+        let p = LPProblem {
+            sense: Sense::Max,
+            c: vec![3.0, 2.0],
+            a_ub: Some(vec![vec![1.0, 1.0], vec![1.0, 0.0], vec![0.0, 1.0]]),
+            b_ub: Some(vec![4.0, 3.0, 3.0]),
+            var_names: Some(vec!["x".to_string(), "y".to_string()]),
+            ..Default::default()
+        };
+        let report = analyze_lp_objective_sensitivity_internal(
+            &p,
+            &opts(),
+            &LPObjectiveSensitivityOptions {
+                max_span: 8.0,
+                ..Default::default()
+            },
+        );
+        assert_eq!(report.status, LPStatus::Optimal);
+        assert_eq!(report.ranges.len(), 2);
+        assert_close(report.base_x[0], 3.0);
+        assert_close(report.base_x[1], 1.0);
+
+        let x_range = &report.ranges[0];
+        assert_eq!(x_range.name.as_deref(), Some("x"));
+        assert_close(x_range.lower.expect("x lower"), 2.0);
+        assert_eq!(x_range.upper, None);
+
+        let y_range = &report.ranges[1];
+        assert_eq!(y_range.name.as_deref(), Some("y"));
+        assert_close(y_range.lower.expect("y lower"), 0.0);
+        assert_close(y_range.upper.expect("y upper"), 3.0);
+    }
+
+    #[test]
+    fn rhs_sensitivity_reports_known_row_ranges() {
+        let p = LPProblem {
+            sense: Sense::Max,
+            c: vec![3.0, 2.0],
+            a_ub: Some(vec![vec![1.0, 1.0], vec![1.0, 0.0], vec![0.0, 1.0]]),
+            b_ub: Some(vec![4.0, 3.0, 3.0]),
+            var_names: Some(vec!["x".to_string(), "y".to_string()]),
+            con_names: Some(vec![
+                "capacity".to_string(),
+                "x_cap".to_string(),
+                "y_cap".to_string(),
+            ]),
+            ..Default::default()
+        };
+        let report = analyze_lp_rhs_sensitivity_internal(
+            &p,
+            &opts(),
+            &LPRhsSensitivityOptions {
+                max_span: 8.0,
+                ..Default::default()
+            },
+        );
+        assert_eq!(report.status, LPStatus::Optimal);
+        assert_eq!(report.ranges.len(), 3);
+        assert_close(report.base_x[0], 3.0);
+        assert_close(report.base_x[1], 1.0);
+
+        let capacity = &report.ranges[0];
+        assert_eq!(capacity.name.as_deref(), Some("capacity"));
+        assert_close(capacity.lower.expect("capacity lower"), 3.0);
+        assert_close(capacity.upper.expect("capacity upper"), 6.0);
+
+        let x_cap = &report.ranges[1];
+        assert_eq!(x_cap.name.as_deref(), Some("x_cap"));
+        assert_close(x_cap.lower.expect("x cap lower"), 1.0);
+        assert_close(x_cap.upper.expect("x cap upper"), 4.0);
+    }
+
+    #[test]
+    fn bound_sensitivity_reports_known_variable_ranges() {
+        let p = LPProblem {
+            sense: Sense::Max,
+            c: vec![3.0, 2.0],
+            a_ub: Some(vec![vec![1.0, 1.0]]),
+            b_ub: Some(vec![4.0]),
+            ub: Some(vec![Some(3.0), Some(3.0)]),
+            var_names: Some(vec!["x".to_string(), "y".to_string()]),
+            con_names: Some(vec!["capacity".to_string()]),
+            ..Default::default()
+        };
+        let report = analyze_lp_bound_sensitivity_internal(
+            &p,
+            &opts(),
+            &LPBoundSensitivityOptions {
+                max_span: 8.0,
+                ..Default::default()
+            },
+        );
+        assert_eq!(report.status, LPStatus::Optimal);
+        assert_eq!(report.ranges.len(), 4);
+        assert_close(report.base_x[0], 3.0);
+        assert_close(report.base_x[1], 1.0);
+
+        let x_lower = &report.ranges[0];
+        assert_eq!(x_lower.kind, LPBoundSensitivityKind::Lower);
+        assert_eq!(x_lower.name.as_deref(), Some("x"));
+        assert_eq!(x_lower.lower, None);
+        assert_close(x_lower.upper.expect("x lower upper"), 3.0);
+
+        let x_upper = &report.ranges[1];
+        assert_eq!(x_upper.kind, LPBoundSensitivityKind::Upper);
+        assert_eq!(x_upper.name.as_deref(), Some("x"));
+        assert_close(x_upper.lower.expect("x upper lower"), 1.0);
+        assert_close(x_upper.upper.expect("x upper upper"), 4.0);
+
+        let y_lower = &report.ranges[2];
+        assert_eq!(y_lower.kind, LPBoundSensitivityKind::Lower);
+        assert_eq!(y_lower.name.as_deref(), Some("y"));
+        assert_eq!(y_lower.lower, None);
+        assert_close(y_lower.upper.expect("y lower upper"), 1.0);
+
+        let y_upper = &report.ranges[3];
+        assert_eq!(y_upper.kind, LPBoundSensitivityKind::Upper);
+        assert_eq!(y_upper.name.as_deref(), Some("y"));
+        assert_close(y_upper.lower.expect("y upper lower"), 1.0);
+        assert_eq!(y_upper.upper, None);
     }
 
     #[test]

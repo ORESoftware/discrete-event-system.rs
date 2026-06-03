@@ -124,6 +124,7 @@ impl Driver {
             &InternalSimplexOptions {
                 max_iter: Some(20_000),
                 tol: Some(1e-8),
+                basis_start: None,
             },
         );
         let native_ms = native_t0.elapsed().as_secs_f64() * 1000.0;
@@ -183,6 +184,7 @@ impl Driver {
             &InternalSimplexOptions {
                 max_iter: Some(20_000),
                 tol: Some(1e-8),
+                basis_start: None,
             },
         );
         let native_ms = native_t0.elapsed().as_secs_f64() * 1000.0;

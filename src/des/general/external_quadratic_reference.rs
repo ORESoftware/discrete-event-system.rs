@@ -15,7 +15,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::des::general::qp::{
-    MixedIntegerQuadraticProgram, QuadraticProgram, QuadraticallyConstrainedProgram,
+    MixedIntegerQuadraticProgram, MixedIntegerQuadraticallyConstrainedProgram,
+    MixedIntegerSecondOrderConeProgram, QuadraticProgram, QuadraticallyConstrainedProgram,
     SecondOrderConeProgram,
 };
 
@@ -282,54 +283,78 @@ pub fn solve_miqp_with_external_reference(
     run_quadratic_reference_json(payload, opts)
 }
 
+fn socp_json(problem: &SecondOrderConeProgram) -> Value {
+    json!({
+        "c": &problem.c,
+        "A_ub": &problem.a_ub,
+        "b_ub": &problem.b_ub,
+        "A_eq": &problem.a_eq,
+        "b_eq": &problem.b_eq,
+        "lb": &problem.lb,
+        "ub": &problem.ub,
+        "cones": problem.cones.iter().map(|cone| json!({
+            "A": &cone.a,
+            "b": &cone.b,
+            "c": &cone.c,
+            "d": cone.d,
+            "name": &cone.name,
+        })).collect::<Vec<_>>(),
+        "var_names": &problem.var_names,
+    })
+}
+
 pub fn solve_socp_with_external_reference(
     problem: &SecondOrderConeProgram,
     opts: &ExternalQuadraticReferenceOptions,
 ) -> ExternalQuadraticReferenceSolution {
-    run_quadratic_reference_json(
-        json!({
-            "c": &problem.c,
-            "A_ub": &problem.a_ub,
-            "b_ub": &problem.b_ub,
-            "A_eq": &problem.a_eq,
-            "b_eq": &problem.b_eq,
-            "lb": &problem.lb,
-            "ub": &problem.ub,
-            "cones": problem.cones.iter().map(|cone| json!({
-                "A": &cone.a,
-                "b": &cone.b,
-                "c": &cone.c,
-                "d": cone.d,
-                "name": &cone.name,
-            })).collect::<Vec<_>>(),
-            "var_names": &problem.var_names,
-        }),
-        opts,
-    )
+    run_quadratic_reference_json(socp_json(problem), opts)
+}
+
+pub fn solve_misocp_with_external_reference(
+    problem: &MixedIntegerSecondOrderConeProgram,
+    opts: &ExternalQuadraticReferenceOptions,
+) -> ExternalQuadraticReferenceSolution {
+    let mut payload = socp_json(&problem.socp);
+    if let Some(map) = payload.as_object_mut() {
+        map.insert("integer_vars".to_string(), json!(&problem.integer_vars));
+    }
+    run_quadratic_reference_json(payload, opts)
+}
+
+fn qcp_json(problem: &QuadraticallyConstrainedProgram) -> Value {
+    json!({
+        "Q": &problem.q,
+        "c": &problem.c,
+        "A_ub": &problem.a_ub,
+        "b_ub": &problem.b_ub,
+        "A_eq": &problem.a_eq,
+        "b_eq": &problem.b_eq,
+        "lb": &problem.lb,
+        "ub": &problem.ub,
+        "quadratic_constraints": problem.quadratic_constraints.iter().map(|constraint| json!({
+            "Q": &constraint.q,
+            "c": &constraint.c,
+            "rhs": constraint.rhs,
+            "name": &constraint.name,
+        })).collect::<Vec<_>>(),
+        "var_names": &problem.var_names,
+    })
 }
 
 pub fn solve_qcp_with_external_reference(
     problem: &QuadraticallyConstrainedProgram,
     opts: &ExternalQuadraticReferenceOptions,
 ) -> ExternalQuadraticReferenceSolution {
-    run_quadratic_reference_json(
-        json!({
-            "Q": &problem.q,
-            "c": &problem.c,
-            "A_ub": &problem.a_ub,
-            "b_ub": &problem.b_ub,
-            "A_eq": &problem.a_eq,
-            "b_eq": &problem.b_eq,
-            "lb": &problem.lb,
-            "ub": &problem.ub,
-            "quadratic_constraints": problem.quadratic_constraints.iter().map(|constraint| json!({
-                "Q": &constraint.q,
-                "c": &constraint.c,
-                "rhs": constraint.rhs,
-                "name": &constraint.name,
-            })).collect::<Vec<_>>(),
-            "var_names": &problem.var_names,
-        }),
-        opts,
-    )
+    run_quadratic_reference_json(qcp_json(problem), opts)
+}
+
+pub fn solve_miqcp_with_external_reference(
+    problem: &MixedIntegerQuadraticallyConstrainedProgram,
+    opts: &ExternalQuadraticReferenceOptions,
+) -> ExternalQuadraticReferenceSolution {
+    let mut payload = qcp_json(&problem.qcp);
+    if let Some(map) = payload.as_object_mut() {
+        map.insert("integer_vars".to_string(), json!(&problem.integer_vars));
+    }
+    run_quadratic_reference_json(payload, opts)
 }

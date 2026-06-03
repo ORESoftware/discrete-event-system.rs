@@ -104,6 +104,7 @@
   button.active { background: #172026; color: #fff; }
   select { padding: 0 8px; max-width: 190px; }
   input[type="number"] { width: 76px; padding: 0 7px; font-variant-numeric: tabular-nums; }
+  input[type="text"] { min-width: 0; padding: 0 7px; }
   input[type="range"] { min-height: 24px; padding: 0; accent-color: #238547; }
   .hidden-file { display: none; }
   .metric {
@@ -140,7 +141,7 @@
     font-size: 10px;
     line-height: 1.2;
     text-transform: uppercase;
-    letter-spacing: .03em;
+    letter-spacing: 0;
     white-space: nowrap;
   }
   .telemetry-chip b {
@@ -175,7 +176,7 @@
     font-size: 12px;
     color: var(--muted);
     text-transform: uppercase;
-    letter-spacing: .04em;
+    letter-spacing: 0;
   }
   .slot {
     display: grid;
@@ -197,6 +198,16 @@
     font-size: 12px;
   }
   .surface-control label { color: var(--muted); }
+  .policy-control {
+    display: grid;
+    grid-template-columns: 42px minmax(0, 1fr);
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 8px;
+    font-size: 12px;
+  }
+  .policy-control label { color: var(--muted); }
+  .policy-control input { width: 100%; }
   .toggle-control {
     display: flex;
     gap: 10px;
@@ -266,13 +277,17 @@
       <div class="row">
         <button id="run" class="active">Run</button>
         <button id="step">Step</button>
+        <button id="resetMatch">New Match</button>
         <button id="exportPolicy">Export Policy</button>
         <button id="importPolicy">Import Policy</button>
+        <button id="savePolicy">Save Policy</button>
+        <button id="loadPolicy">Load Policy</button>
         <input id="policyFile" class="hidden-file" type="file" accept="application/json,.json">
         <button id="exportTracking">Export Tracking</button>
         <button id="importTracking">Import Tracking</button>
         <button id="sampleTracking">Sample Tracking</button>
         <input id="trackingFile" class="hidden-file" type="file" accept=".json,.csv,text/csv,application/json">
+        <button id="replayMoments">Train Moments</button>
         <select id="slotPick"></select>
         <select id="targetPick"></select>
       </div>
@@ -281,10 +296,12 @@
       <div class="metric"><span>Phase</span><b id="phase">Kickoff</b></div>
       <div class="metric"><span>Central Brain</span><b id="centralBrain">22p 3o Loose</b></div>
       <div class="metric"><span>Agent Order</span><b id="agentOrder">shuffle pending</b></div>
+      <div class="metric"><span>Position Store</span><b id="sharedPositions">0/22</b></div>
       <div class="metric"><span>Home Brain</span><b id="homeBrain">P0.00 R0.00</b></div>
       <div class="metric"><span>Away Brain</span><b id="awayBrain">P0.00 R0.00</b></div>
       <div class="metric"><span>Ball</span><b id="ballPhysics">0.0y/s 0.0y/s2</b></div>
-      <div class="metric"><span>Surface</span><b id="surfaceReadout">D0.015 A0.006 G0.45 S0.35</b></div>
+      <div class="metric"><span>Ball Agent</span><b id="ballAgent">waiting</b></div>
+      <div class="metric"><span>Surface</span><b id="surfaceReadout">D0.028 A0.009 G0.88 S0.55</b></div>
       <div class="metric"><span>Shots</span><b id="shots">0 - 0</b></div>
       <div class="metric"><span>On Target</span><b id="onTarget">0 - 0</b></div>
       <div class="metric"><span>Saves</span><b id="saves">0 - 0</b></div>
@@ -294,13 +311,77 @@
       <div class="metric"><span>Offside Line</span><b id="offsideLine">none</b></div>
       <div class="metric"><span>Restarts</span><b id="restarts">0 - 0</b></div>
       <div class="metric"><span>Fouls</span><b id="fouls">0 - 0</b></div>
+      <div class="metric"><span>Episode</span><b id="episode">#0</b></div>
       <div class="metric"><span>Ticks</span><b id="ticks">0</b></div>
+      <div class="metric"><span>Speed</span><b id="simSpeed">1.0x 1t</b></div>
+      <div class="surface-control">
+        <label for="gridOverlayLevel">Grid</label>
+        <select id="gridOverlayLevel" aria-label="Grid overlay">
+          <option value="off">Off</option>
+          <option value="fine">Fine</option>
+          <option value="tactical">Tactical</option>
+          <option value="macro">Macro</option>
+        </select>
+      </div>
       <div class="metric"><span>Learning</span><b id="learning">T0 H0 A0</b></div>
+      <div class="metric"><span>Policy Save</span><b id="policyAutosave">Off</b></div>
+      <div class="metric"><span>Policy Store</span><b id="policyStorage">JSON</b></div>
+      <div class="metric"><span>Policy Prob</span><b id="policyProbability">H0/0 A0/0</b></div>
       <div class="metric"><span>Tick Reward</span><b id="tickReward">H+0.00 A+0.00</b></div>
       <div class="metric"><span>Recent Actions</span><b id="recentActions">-</b></div>
+      <div class="metric"><span>Moments</span><b id="recentMoments">0</b></div>
       <div class="toggle-control">
         <label for="learningEnabled"><input id="learningEnabled" type="checkbox" checked>Learn</label>
         <label for="learningLoggingEnabled"><input id="learningLoggingEnabled" type="checkbox" checked>Log</label>
+        <label for="autoEpisodeEnabled"><input id="autoEpisodeEnabled" type="checkbox" checked>Auto Episodes</label>
+      </div>
+      <div class="surface-control">
+        <label for="simTicksPerPulse">Speed</label>
+        <input id="simTicksPerPulse" type="range" min="1" max="20" step="1" value="1">
+        <input id="simTicksPerPulseNumber" type="number" min="1" max="200" step="1" value="1">
+      </div>
+      <div class="toggle-control">
+        <label for="policyAutosaveEnabled"><input id="policyAutosaveEnabled" type="checkbox">Auto Save</label>
+        <button id="policyAutosaveNow">Save Now</button>
+        <button id="prunePolicy">Prune Policy</button>
+        <button id="savePolicySnapshot">Save Snapshot</button>
+        <button id="loadPolicySnapshot">Load Snapshot</button>
+        <button id="refreshPolicyHistory">History</button>
+      </div>
+      <div class="surface-control">
+        <label for="policyAutosaveInterval">Every</label>
+        <input id="policyAutosaveInterval" type="range" min="10" max="6000" step="10" value="600">
+        <input id="policyAutosaveIntervalNumber" type="number" min="1" max="100000" step="10" value="600">
+      </div>
+      <div class="surface-control">
+        <label for="policyPruneActionEntries">Actions</label>
+        <input id="policyPruneActionEntries" type="number" min="0" max="1000000" step="100" value="5000">
+        <input id="policyPruneTargetEntries" type="number" min="0" max="1000000" step="100" value="5000">
+      </div>
+      <div class="policy-control">
+        <label for="policyPruneMinVisits">Visits</label>
+        <input id="policyPruneMinVisits" type="number" min="0" max="1000000" step="1" value="1">
+      </div>
+      <div class="policy-control">
+        <label for="policyAutosavePath">Path</label>
+        <input id="policyAutosavePath" type="text" value="out/soccer-live/team-policy.json">
+      </div>
+      <div class="policy-control">
+        <label for="policySnapshotPath">Snapshot</label>
+        <input id="policySnapshotPath" type="text" value="data/soccer/policies/team-policy.snapshot.json">
+      </div>
+      <div class="policy-control">
+        <label for="momentReplayPath">Moments</label>
+        <input id="momentReplayPath" type="text" value="out/soccer-live/moment-windows.jsonl">
+      </div>
+      <div class="surface-control">
+        <label for="momentReplayLimit">Replay</label>
+        <input id="momentReplayLimit" type="number" min="0" max="1000000" step="1" value="0">
+        <input id="momentReplayPasses" type="number" min="1" max="1000" step="1" value="1">
+      </div>
+      <div class="policy-control">
+        <label for="momentReplayScale">Scale</label>
+        <input id="momentReplayScale" type="number" min="0" max="1000" step="0.1" value="1">
       </div>
       <div class="section">Surface</div>
       <div class="row">
@@ -334,6 +415,9 @@
         <input id="stopNumber" type="number" min="0" max="20" step="0.01">
       </div>
       <div class="section">Human Controller</div>
+      <div class="metric"><span>Workers</span><b id="controllerThreads">0 native</b></div>
+      <div class="metric"><span>Main Loop</span><b id="controllerYield">idle</b></div>
+      <div class="metric"><span>Input Queue</span><b id="inputQueue">0 pending</b></div>
       <div id="slots"></div>
       <div class="row">
         <select id="passFlight" aria-label="Pass flight">
@@ -351,17 +435,24 @@
       <div class="metric"><span>Decision</span><b id="agentDecision">-</b></div>
       <div class="metric"><span>Reward</span><b id="agentReward">-</b></div>
       <div class="metric"><span>Options</span><b id="agentOptions">-</b></div>
+      <div class="metric"><span>Learned</span><b id="agentLearned">-</b></div>
+      <div class="metric"><span>Grid</span><b id="agentGrid">-</b></div>
       <div class="metric"><span>MDP</span><b id="agentMdp">-</b></div>
       <div class="metric"><span>POMDP</span><b id="agentPomdp">-</b></div>
       <div class="metric"><span>Belief</span><b id="agentBelief">-</b></div>
       <div class="telemetry-grid" id="agentSkillGrid"></div>
       <div class="telemetry-grid" id="agentDecisionGrid"></div>
+      <div class="telemetry-grid" id="agentPolicyGrid"></div>
       <div class="legend">
         <span><i class="swatch" style="background:var(--home)"></i>Home</span>
         <span><i class="swatch" style="background:var(--away)"></i>Away</span>
         <span><i class="swatch" style="background:var(--official)"></i>Official</span>
         <span><i class="swatch" style="background:var(--gold)"></i>Ball</span>
       </div>
+      <div class="section">Episodes</div>
+      <ul class="events" id="episodes"></ul>
+      <div class="section">Policy History</div>
+      <ul class="events" id="policyHistory"></ul>
       <div class="section">Events</div>
       <ul class="events" id="events"></ul>
     </aside>
@@ -376,9 +467,11 @@ const clock = document.getElementById("clock");
 const phase = document.getElementById("phase");
 const centralBrain = document.getElementById("centralBrain");
 const agentOrder = document.getElementById("agentOrder");
+const sharedPositions = document.getElementById("sharedPositions");
 const homeBrain = document.getElementById("homeBrain");
 const awayBrain = document.getElementById("awayBrain");
 const ballPhysics = document.getElementById("ballPhysics");
+const ballAgent = document.getElementById("ballAgent");
 const surfaceReadout = document.getElementById("surfaceReadout");
 const shots = document.getElementById("shots");
 const onTarget = document.getElementById("onTarget");
@@ -389,12 +482,42 @@ const offsides = document.getElementById("offsides");
 const offsideLine = document.getElementById("offsideLine");
 const restarts = document.getElementById("restarts");
 const fouls = document.getElementById("fouls");
+const episode = document.getElementById("episode");
 const ticks = document.getElementById("ticks");
+const simSpeed = document.getElementById("simSpeed");
+const gridOverlayLevel = document.getElementById("gridOverlayLevel");
 const learning = document.getElementById("learning");
+const policyAutosave = document.getElementById("policyAutosave");
+const policyStorage = document.getElementById("policyStorage");
+const policyProbability = document.getElementById("policyProbability");
 const tickReward = document.getElementById("tickReward");
 const recentActions = document.getElementById("recentActions");
+const recentMoments = document.getElementById("recentMoments");
+const controllerThreads = document.getElementById("controllerThreads");
+const controllerYield = document.getElementById("controllerYield");
+const inputQueue = document.getElementById("inputQueue");
 const learningEnabled = document.getElementById("learningEnabled");
 const learningLoggingEnabled = document.getElementById("learningLoggingEnabled");
+const autoEpisodeEnabled = document.getElementById("autoEpisodeEnabled");
+const simTicksPerPulse = document.getElementById("simTicksPerPulse");
+const simTicksPerPulseNumber = document.getElementById("simTicksPerPulseNumber");
+const policyAutosaveEnabled = document.getElementById("policyAutosaveEnabled");
+const policyAutosaveNow = document.getElementById("policyAutosaveNow");
+const prunePolicyButton = document.getElementById("prunePolicy");
+const policyAutosaveInterval = document.getElementById("policyAutosaveInterval");
+const policyAutosaveIntervalNumber = document.getElementById("policyAutosaveIntervalNumber");
+const policyPruneActionEntries = document.getElementById("policyPruneActionEntries");
+const policyPruneTargetEntries = document.getElementById("policyPruneTargetEntries");
+const policyPruneMinVisits = document.getElementById("policyPruneMinVisits");
+const policyAutosavePath = document.getElementById("policyAutosavePath");
+const policySnapshotPath = document.getElementById("policySnapshotPath");
+const momentReplayPath = document.getElementById("momentReplayPath");
+const momentReplayLimit = document.getElementById("momentReplayLimit");
+const momentReplayPasses = document.getElementById("momentReplayPasses");
+const momentReplayScale = document.getElementById("momentReplayScale");
+const savePolicySnapshotButton = document.getElementById("savePolicySnapshot");
+const loadPolicySnapshotButton = document.getElementById("loadPolicySnapshot");
+const refreshPolicyHistoryButton = document.getElementById("refreshPolicyHistory");
 const agentSelected = document.getElementById("agentSelected");
 const agentMotion = document.getElementById("agentMotion");
 const agentEnergy = document.getElementById("agentEnergy");
@@ -402,11 +525,14 @@ const agentSkills = document.getElementById("agentSkills");
 const agentDecision = document.getElementById("agentDecision");
 const agentReward = document.getElementById("agentReward");
 const agentOptions = document.getElementById("agentOptions");
+const agentLearned = document.getElementById("agentLearned");
+const agentGrid = document.getElementById("agentGrid");
 const agentMdp = document.getElementById("agentMdp");
 const agentPomdp = document.getElementById("agentPomdp");
 const agentBelief = document.getElementById("agentBelief");
 const agentSkillGrid = document.getElementById("agentSkillGrid");
 const agentDecisionGrid = document.getElementById("agentDecisionGrid");
+const agentPolicyGrid = document.getElementById("agentPolicyGrid");
 const slots = document.getElementById("slots");
 const slotPick = document.getElementById("slotPick");
 const targetPick = document.getElementById("targetPick");
@@ -423,13 +549,19 @@ const stopNumber = document.getElementById("stopNumber");
 const events = document.getElementById("events");
 const statusEl = document.getElementById("status");
 const runButton = document.getElementById("run");
+const resetMatchButton = document.getElementById("resetMatch");
 const exportPolicyButton = document.getElementById("exportPolicy");
 const importPolicyButton = document.getElementById("importPolicy");
+const replayMomentsButton = document.getElementById("replayMoments");
+const savePolicyButton = document.getElementById("savePolicy");
+const loadPolicyButton = document.getElementById("loadPolicy");
 const policyFile = document.getElementById("policyFile");
 const exportTrackingButton = document.getElementById("exportTracking");
 const importTrackingButton = document.getElementById("importTracking");
 const sampleTrackingButton = document.getElementById("sampleTracking");
 const trackingFile = document.getElementById("trackingFile");
+const episodes = document.getElementById("episodes");
+const policyHistory = document.getElementById("policyHistory");
 const keys = new Set();
 let state = null;
 let running = true;
@@ -438,10 +570,14 @@ let inputSeq = 0;
 let queuedInputs = [];
 let eventLog = [];
 let recentLearningTransitions = [];
+let stepping = false;
 let surfaceTimer = null;
 let syncingSurface = false;
 let syncingLearning = false;
+let policyAutosaveTimer = null;
+let syncingPolicyAutosave = false;
 let hoverPlayerId = null;
+const LIVE_STEP_INTERVAL_MS = 100;
 const SLOT_COLORS = ["#f6c944", "#37d688", "#61a5ff", "#ef7ad3"];
 const CONTROLLER_KEYMAPS = [
   {
@@ -486,13 +622,22 @@ const CONTROLLER_CODES = new Set(CONTROLLER_KEYMAPS.flatMap(map => [
   map.action,
 ]));
 const SURFACE_PRESETS = {
-  short: {ballDragPerTick: 0.008, ballAirResistance: 0.004, ballGrassResistanceYps2: 0.28, ballStopSpeedYps: 0.25},
-  standard: {ballDragPerTick: 0.0225, ballAirResistance: 0.0075, ballGrassResistanceYps2: 0.72, ballStopSpeedYps: 0.45},
-  long: {ballDragPerTick: 0.03, ballAirResistance: 0.007, ballGrassResistanceYps2: 0.82, ballStopSpeedYps: 0.55},
+  short: {ballDragPerTick: 0.010, ballAirResistance: 0.0045, ballGrassResistanceYps2: 0.32, ballStopSpeedYps: 0.28},
+  standard: {ballDragPerTick: 0.028, ballAirResistance: 0.0085, ballGrassResistanceYps2: 0.88, ballStopSpeedYps: 0.55},
+  long: {ballDragPerTick: 0.038, ballAirResistance: 0.0090, ballGrassResistanceYps2: 1.05, ballStopSpeedYps: 0.68},
   wet: {ballDragPerTick: 0.005, ballAirResistance: 0.003, ballGrassResistanceYps2: 0.18, ballStopSpeedYps: 0.18},
-  heavy: {ballDragPerTick: 0.06, ballAirResistance: 0.010, ballGrassResistanceYps2: 1.30, ballStopSpeedYps: 0.85}
+  heavy: {ballDragPerTick: 0.075, ballAirResistance: 0.012, ballGrassResistanceYps2: 1.65, ballStopSpeedYps: 1.05}
 };
 
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, ch => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;"
+  }[ch]));
+}
 function fmtClock(s) {
   const m = Math.floor(s / 60);
   const sec = (s - m * 60).toFixed(1).padStart(4, "0");
@@ -511,13 +656,16 @@ function directiveLabel(d) {
 function centralBrainLabel(b) {
   if (!b) return "22p 3o Loose";
   const players = Array.isArray(b.trackedPlayers) ? b.trackedPlayers.length : 0;
-  const officials = Number(b.trackedOfficials ?? 0);
+  const officials = Array.isArray(b.trackedOfficialAwareness)
+    ? b.trackedOfficialAwareness.length
+    : Number(b.trackedOfficials ?? 0);
   const possession = b.possessionTeam || "Loose";
   const holder = b.ballHolder == null ? "" : ` #${b.ballHolder}`;
   return `${players}p ${officials}o ${possession}${holder}`;
 }
 function agentScheduleGlyph(entry) {
   if (!entry) return "?";
+  if (entry.kind === "centralBrain") return "C";
   if (entry.kind === "player") return `P${entry.id}`;
   if (entry.kind === "official") return `O${entry.id}`;
   if (entry.kind === "ball") return "B";
@@ -529,6 +677,35 @@ function agentScheduleLabel(schedule) {
   const ball = schedule.find(entry => entry.kind === "ball");
   const suffix = ball ? ` ... ${agentScheduleGlyph(ball)}` : "";
   return `${prefix}${suffix}`;
+}
+function sharedPositionLabel(frame = state?.frame) {
+  const shared = frame?.sharedPositions;
+  const latest = Array.isArray(shared?.latest) ? shared.latest : [];
+  const players = Array.isArray(frame?.players) ? frame.players : [];
+  const histories = shared?.histories && typeof shared.histories === "object"
+    ? Object.values(shared.histories).filter(Array.isArray)
+    : [];
+  const historyLens = histories.map(history => history.length);
+  const minHistory = historyLens.length ? Math.min(...historyLens) : 0;
+  const maxHistory = historyLens.length ? Math.max(...historyLens) : 0;
+  const tick = Number(frame?.tick ?? 0);
+  const stale = latest.filter(sample => Number(sample.tick ?? -1) !== tick).length;
+  const byId = new Map(latest.map(sample => [Number(sample.playerId), sample]));
+  let mismatches = 0;
+  for (const player of players) {
+    const sample = byId.get(Number(player.id));
+    if (!sample) {
+      mismatches++;
+      continue;
+    }
+    const dx = Number(sample.position?.x ?? NaN) - Number(player.position?.x ?? NaN);
+    const dy = Number(sample.position?.y ?? NaN) - Number(player.position?.y ?? NaN);
+    if (!Number.isFinite(dx) || !Number.isFinite(dy) || Math.hypot(dx, dy) > 0.01) {
+      mismatches++;
+    }
+  }
+  const health = stale || mismatches ? `stale${stale} diff${mismatches}` : "sync";
+  return `${latest.length}/${players.length} H${minHistory}-${maxHistory} ${health}`;
 }
 function assistantOffsideLines() {
   if (!state?.frame?.officials) return [];
@@ -561,6 +738,121 @@ function learningLabel(l) {
   const mode = l.learningEnabled === false ? "Off" : l.adversarialLearningEnabled ? "Adv" : "Solo";
   const log = l.learningLoggingEnabled === false ? " NL" : "";
   return `${mode}${log} T${total} H${home}/${homeTargets} A${away}/${awayTargets}`;
+}
+function ballAgentLabel(ball = state?.frame?.ball) {
+  const decision = ball?.lastDecision;
+  if (!decision) return "waiting";
+  const holder = decision.holder ?? ball?.holder;
+  const holderSuffix = holder == null ? "" : ` #${holder}`;
+  return `${decision.action} t${decision.tick}${holderSuffix}`;
+}
+function controllerThreadLabel(threads = state?.controllerThreads || []) {
+  if (!Array.isArray(threads) || !threads.length) return "0 native";
+  const pending = threads.filter(thread => thread.pending).length;
+  const accepted = threads.reduce((sum, thread) => sum + Number(thread.acceptedFrames ?? 0), 0);
+  const pushed = threads.reduce((sum, thread) => sum + Number(thread.pushedFrames ?? 0), 0);
+  const stale = threads.reduce((sum, thread) => sum + Number(thread.rejectedStaleFrames ?? 0), 0);
+  const closed = threads.filter(thread => thread.closed).length;
+  const closedSuffix = closed ? ` ${closed} closed` : "";
+  return `${threads.length} native P${pending} A${accepted} D${pushed} S${stale}${closedSuffix}`;
+}
+function controllerYieldLabel(stats = state?.controllerYield) {
+  if (!stats) return "idle";
+  const assigned = Number(stats.assignedPlayers ?? 0);
+  if (assigned <= 0) {
+    return `idle S${Number(stats.skippedNoAssignment ?? 0)}`;
+  }
+  const waits = Number(stats.waitAttempts ?? 0);
+  const notified = Number(stats.notifiedWaits ?? 0);
+  const immediate = Number(stats.immediatePendingWaits ?? 0);
+  const timedOut = Number(stats.timedOutWaits ?? 0);
+  const queuedBefore = Number(stats.lastQueuedBefore ?? 0);
+  const queuedAfter = Number(stats.lastQueuedAfter ?? 0);
+  const last = stats.lastImmediatePending ? "ready" : stats.lastNotified ? "notify" : "timeout";
+  return `${assigned}p W${waits} N${notified} I${immediate} T${timedOut} ${last} Q${queuedBefore}->${queuedAfter}`;
+}
+function queuedHumanInputsLabel() {
+  const queued = Number(state?.queuedHumanInputs ?? 0);
+  const assigned = Array.isArray(state?.controllerAssignments) ? state.controllerAssignments.length : 0;
+  return `${queued} pending ${assigned}/${humanSlotCount()} assigned`;
+}
+function policyAutosaveLabel(a) {
+  if (!a) return "Off";
+  if (a.lastError) return `Error ${a.lastError}`;
+  if (a.lastHistoryError) return `History ${a.lastHistoryError}`;
+  const history = Number(a.historyRecords ?? 0);
+  const historySuffix = history > 0 ? ` H${history}` : "";
+  if (!a.enabled) {
+    return a.lastSavedTick == null ? `Off${historySuffix}` : `Off t${a.lastSavedTick}${historySuffix}`;
+  }
+  const saved = a.lastSavedTick == null ? "pending" : `t${a.lastSavedTick}`;
+  return `On ${Number(a.intervalTicks ?? 0)}t ${saved}${historySuffix}`;
+}
+function policyStorageLabel(storage = state?.policyStorage) {
+  if (!storage) return "JSON";
+  const backend = storage.backend === "json-disk" ? "JSON" : String(storage.backend || "-");
+  const values = storage.storesQValues ? "q" : "-";
+  const visits = storage.storesVisits ? "v" : "-";
+  const probabilities = storage.storesActionProbabilities
+    ? "prob saved"
+    : storage.actionProbabilitiesDerived
+      ? "prob derived"
+      : "prob off";
+  const pg = storage.postgresEnabled ? "PG" : "no PG";
+  return `${backend} ${values}/${visits} ${probabilities} ${pg}`;
+}
+function policyProbabilityLabel(summary = state?.policyProbability) {
+  if (!summary) return "H0/0 A0/0";
+  const homeStates = Number(summary.homeStates ?? 0);
+  const homeActions = Number(summary.homeActions ?? 0);
+  const awayStates = Number(summary.awayStates ?? 0);
+  const awayActions = Number(summary.awayActions ?? 0);
+  const homeTop = summary.homeTopAction ? ` ${summary.homeTopAction}` : "";
+  const awayTop = summary.awayTopAction ? ` ${summary.awayTopAction}` : "";
+  return `H${homeStates}/${homeActions}${homeTop} A${awayStates}/${awayActions}${awayTop}`;
+}
+function episodeLabel() {
+  const current = Number(state?.episodeIndex ?? 0);
+  const completed = Array.isArray(state?.completedEpisodes) ? state.completedEpisodes.length : 0;
+  return `#${current} ${completed} done`;
+}
+function episodeSummaryLine(item) {
+  const summary = item?.summary || {};
+  const learning = item?.learning || {};
+  const score = `${summary.scoreHome ?? 0}-${summary.scoreAway ?? 0}`;
+  const ticks = Number(summary.ticks ?? 0);
+  const home = Number(learning.homePolicyEntries ?? 0);
+  const away = Number(learning.awayPolicyEntries ?? 0);
+  return `#${item?.episodeIndex ?? "?"} ${score} ${ticks}t H${home} A${away}`;
+}
+function episodeHistoryHtml() {
+  const list = Array.isArray(state?.completedEpisodes) ? state.completedEpisodes : [];
+  if (!list.length) return "<li>no completed episodes</li>";
+  return list.slice(-6).reverse().map(item => `<li>${episodeSummaryLine(item)}</li>`).join("");
+}
+function policyHistoryLine(record) {
+  const summary = record?.summary || {};
+  const learning = record?.learning || {};
+  const score = `${summary.scoreHome ?? 0}-${summary.scoreAway ?? 0}`;
+  const tick = Number(record?.tick ?? summary.ticks ?? 0);
+  const clockText = fmtClock(Number(record?.clockSeconds ?? summary.clockSeconds ?? 0));
+  const homeActions = Number(record?.homePolicyEntries ?? learning.homePolicyEntries ?? 0);
+  const awayActions = Number(record?.awayPolicyEntries ?? learning.awayPolicyEntries ?? 0);
+  const homeTargets = Number(record?.homePolicyTargetEntries ?? learning.homePolicyTargetEntries ?? 0);
+  const awayTargets = Number(record?.awayPolicyTargetEntries ?? learning.awayPolicyTargetEntries ?? 0);
+  return `${escapeHtml(record?.kind || "checkpoint")} ${clockText} t${tick} ${score} H${homeActions}/${homeTargets} A${awayActions}/${awayTargets}`;
+}
+function policyHistoryHtml() {
+  const history = state?.policyHistory;
+  if (!history) return "<li>history not loaded</li>";
+  const records = Array.isArray(history.records) ? history.records : [];
+  const path = escapeHtml(history.historyPath || "");
+  if (!records.length) return `<li>no policy history ${path}</li>`;
+  const count = history.truncated
+    ? `${records.length}/${Number(history.totalRecords ?? records.length)} checkpoints`
+    : `${Number(history.totalRecords ?? records.length)} checkpoints`;
+  const header = `<li>${count} ${path}</li>`;
+  return header + records.slice(-8).reverse().map(record => `<li>${policyHistoryLine(record)}</li>`).join("");
 }
 function signed(value, digits = 2) {
   const n = Number(value || 0);
@@ -597,6 +889,19 @@ function recentActionLabel(transitions = transitionList()) {
     .map(([action, entry]) => `${action} ${entry.count} ${signed(entry.reward, 1)}`)
     .join(" ");
 }
+function recentMomentLabel(moments = state?.recentMoments || []) {
+  if (!Array.isArray(moments) || !moments.length) return "0";
+  const latest = moments[moments.length - 1] || {};
+  const label = String(latest.label || "moment").replace(/^great_/, "").replace(/_/g, " ");
+  const frames = Number(latest.frameCount ?? 0);
+  return `${moments.length} ${label} ${frames}f`;
+}
+function momentStorageTitle(storage = state?.momentStorage) {
+  if (!storage) return "";
+  const mode = storage.enabled ? "logging" : "logging off";
+  const saved = Number(storage.storedRecords ?? 0);
+  return `${mode}; ${saved} replay windows; ${storage.path || "memory"}`;
+}
 function latestTransitionForPlayer(playerId) {
   const transitions = transitionList();
   for (let i = transitions.length - 1; i >= 0; i--) {
@@ -616,10 +921,13 @@ function fullTimeLabel() {
 }
 function updateRunButton() {
   if (state?.done) {
-    running = false;
-    runButton.classList.remove("active");
-    runButton.textContent = "Full Time";
-    statusEl.textContent = fullTimeLabel();
+    const autoEpisodes = autoEpisodeEnabled.checked;
+    if (!autoEpisodes) running = false;
+    runButton.classList.toggle("active", running && autoEpisodes);
+    runButton.textContent = running && autoEpisodes ? "Auto Next" : "Full Time";
+    statusEl.textContent = running && autoEpisodes
+      ? `${fullTimeLabel()} next match`
+      : fullTimeLabel();
     return;
   }
   runButton.classList.toggle("active", running);
@@ -648,6 +956,37 @@ function agentOptionsLabel(d) {
     .map(o => `${o.label || "-"}${o.legal === false ? "x" : ""}${(Number(o.probability || 0) * 100).toFixed(0)}%`)
     .join(" ");
 }
+function gridLevelShort(level) {
+  if (level === "Fine") return "F";
+  if (level === "Tactical") return "T";
+  if (level === "Macro") return "M";
+  if (level === "WholePitch") return "W";
+  return "-";
+}
+function learnedPolicyLabel(p) {
+  const policy = p?.learnedPolicy;
+  if (!policy) return "no policy";
+  const actions = Array.isArray(policy.actionValues) ? policy.actionValues : [];
+  if (!actions.length) return `${policy.source || "policy"} no match`;
+  const best = policy.bestAction || actions.find(a => a.legal !== false)?.label || "-";
+  const target = policy.targetPlayer == null ? "" : ` #${policy.targetPlayer}`;
+  return `${policy.source || "policy"} ${best}${target} ${actions.length}q`;
+}
+function learnedPolicyTelemetryItems(p) {
+  const actions = Array.isArray(p?.learnedPolicy?.actionValues) ? p.learnedPolicy.actionValues : [];
+  return actions.slice(0, 6).map(action => {
+    const probability = Number(action.probability ?? 0);
+    const value = Number(action.value ?? 0);
+    const visits = Number(action.visits ?? 0);
+    return {
+      label: `${action.label || "-"}${action.legal === false ? "x" : ""}`,
+      value: `${(probability * 100).toFixed(0)}% Q${value.toFixed(2)} v${visits} ${gridLevelShort(action.level)}`,
+      score: probability,
+      min: 0,
+      max: 1
+    };
+  });
+}
 function agentMdpLabel(d) {
   const s = d?.mdpState;
   if (!s) return "-";
@@ -659,7 +998,8 @@ function agentPomdpLabel(d) {
   const lane = o.shotLaneOpen ? "lane" : "blocked";
   const ball = o.visibleBall ? "see" : "blind";
   const options = Number(o.visiblePassOptions ?? 0);
-  return `${ball} P${options} B${Number(o.ballDistance ?? 0).toFixed(1)} O${Number(o.nearestOpponentDistance ?? 0).toFixed(1)} G${Number(o.yardsToGoal ?? 0).toFixed(1)} ${lane}`;
+  const passQ = Number(o.expectedPassCompletion ?? 0);
+  return `${ball} P${options} Q${passQ.toFixed(2)} B${Number(o.ballDistance ?? 0).toFixed(1)} O${Number(o.nearestOpponentDistance ?? 0).toFixed(1)} G${Number(o.yardsToGoal ?? 0).toFixed(1)} ${lane}`;
 }
 function agentBeliefLabel(d) {
   const b = d?.belief;
@@ -716,7 +1056,55 @@ function gridCellLabel(grid) {
   if (!fine) return "-";
   const fineLabel = `F${Number(fine.x ?? 0)},${Number(fine.y ?? 0)}`;
   if (!tactical) return fineLabel;
-  return `${fineLabel} T${Number(tactical.x ?? 0)},${Number(tactical.y ?? 0)}`;
+  const macro = grid?.macroZone;
+  const macroLabel = macro ? ` M${Number(macro.x ?? 0)},${Number(macro.y ?? 0)}` : "";
+  return `${fineLabel} T${Number(tactical.x ?? 0)},${Number(tactical.y ?? 0)}${macroLabel}`;
+}
+function selectedGridAddress() {
+  const p = controlledPlayer();
+  const d = p?.lastDecision;
+  return d?.observation?.playerGrid || d?.mdpState?.playerGrid || null;
+}
+function gridCellForLevel(grid, level) {
+  if (!grid) return null;
+  if (level === "fine") return grid.fine || null;
+  if (level === "tactical") return grid.tactical || null;
+  if (level === "macro") return grid.macroZone || null;
+  return null;
+}
+function gridDimensionsForLevel(level) {
+  if (level === "fine") return {columns: 12, rows: 16, label: "Fine"};
+  if (level === "tactical") return {columns: 6, rows: 8, label: "Tactical"};
+  if (level === "macro") return {columns: 3, rows: 4, label: "Macro"};
+  return null;
+}
+function fieldRectForGridCell(cell, level) {
+  const dims = gridDimensionsForLevel(level);
+  if (!cell || !dims) return null;
+  const columns = Math.max(1, Number(cell.columns ?? dims.columns));
+  const rows = Math.max(1, Number(cell.rows ?? dims.rows));
+  return {
+    x: Number(cell.x ?? 0) / columns,
+    y: Number(cell.y ?? 0) / rows,
+    w: 1 / columns,
+    h: 1 / rows,
+    columns,
+    rows
+  };
+}
+function selectedGridLabel() {
+  const grid = selectedGridAddress();
+  const learned = controlledPlayer()?.learnedPolicy?.state;
+  if (grid) {
+    const level = gridOverlayLevel.value;
+    const cell = gridCellForLevel(grid, level);
+    const overlay = cell ? ` ${gridLevelShort(cell.level)}${Number(cell.x ?? 0)},${Number(cell.y ?? 0)}` : "";
+    return `${gridCellLabel(grid)}${overlay}`;
+  }
+  if (learned) {
+    return `F#${learned.playerFineCellId ?? "-"} T#${learned.playerTacticalCellId ?? "-"} M#${learned.playerMacroCellId ?? "-"}`;
+  }
+  return "-";
 }
 function facingShort(value) {
   return String(value || "?")
@@ -780,6 +1168,8 @@ function decisionTelemetryItems(d) {
     {label: "Keeper", value: `${Number(o.opposingGoalkeeperDistance ?? 0).toFixed(1)}y ${Number(o.opposingGoalkeeperAngleDegrees ?? 0).toFixed(0)}deg`},
     {label: "Dribble", value: `${Number(o.forwardDribbleSpaceYards ?? 0).toFixed(1)}y`, score: Number(o.forwardDribbleSpaceYards ?? 0), min: 0, max: 24},
     {label: "Passes", value: `${Number(o.visiblePassOptions ?? 0)}F ${Number(o.visibleAerialPassOptions ?? 0)}A`},
+    {label: "PassQ", value: `C${Number(o.expectedPassCompletion ?? 0).toFixed(2)} O${Number(o.bestPassReceiverOpenness ?? 0).toFixed(2)}`, score: Number(o.expectedPassCompletion ?? 0), min: 0, max: 1},
+    {label: "AirQ", value: `C${Number(o.expectedAerialPassCompletion ?? 0).toFixed(2)} O${Number(o.bestAerialPassReceiverOpenness ?? 0).toFixed(2)}`, score: Number(o.expectedAerialPassCompletion ?? 0), min: 0, max: 1},
     {label: "Aerial", value: `B${Number(o.aerialPassBypassScore ?? 0).toFixed(2)} R${Number(o.aerialPassInterceptionRisk ?? 0).toFixed(2)}`, score: Number(o.aerialPassBypassScore ?? 0) - Number(o.aerialPassInterceptionRisk ?? 0) + 1, min: 0, max: 2},
     {label: "First", value: `S${Number(o.firstTimeShotScore ?? 0).toFixed(2)} P${Number(o.firstTimePassScore ?? 0).toFixed(2)} C${Number(o.controlTouchScore ?? 0).toFixed(2)}`},
     {label: "Belief", value: `P${Number(b.possessionConfidence ?? 0).toFixed(2)} L${Number(b.passLaneOpen ?? 0).toFixed(2)}`},
@@ -796,11 +1186,14 @@ function updateAgentStatePanel() {
     agentDecision.textContent = "-";
     agentReward.textContent = "-";
     agentOptions.textContent = "-";
+    agentLearned.textContent = "-";
+    agentGrid.textContent = "-";
     agentMdp.textContent = "-";
     agentPomdp.textContent = "-";
     agentBelief.textContent = "-";
     setTelemetryGrid(agentSkillGrid, [], "no selected agent");
     setTelemetryGrid(agentDecisionGrid, [], "no decision trace");
+    setTelemetryGrid(agentPolicyGrid, [], "no learned policy");
     return;
   }
   const d = p.lastDecision;
@@ -811,11 +1204,14 @@ function updateAgentStatePanel() {
   agentDecision.textContent = agentDecisionLabel(d);
   agentReward.textContent = selectedRewardLabel(p);
   agentOptions.textContent = agentOptionsLabel(d);
+  agentLearned.textContent = learnedPolicyLabel(p);
+  agentGrid.textContent = selectedGridLabel();
   agentMdp.textContent = agentMdpLabel(d);
   agentPomdp.textContent = agentPomdpLabel(d);
   agentBelief.textContent = agentBeliefLabel(d);
   setTelemetryGrid(agentSkillGrid, skillTelemetryItems(p), "no skills");
   setTelemetryGrid(agentDecisionGrid, decisionTelemetryItems(d), "no decision trace");
+  setTelemetryGrid(agentPolicyGrid, learnedPolicyTelemetryItems(p), "no learned policy match");
 }
 function vecLen(v) {
   if (!v) return 0;
@@ -943,7 +1339,37 @@ function positionWouldBeOffside(team, position) {
   defenders.sort((a, b) => a - b);
   return position.y < Number(state.frame.ball.position.y || 0) && position.y < defenders[1];
 }
-function visiblePassOptions(p, limit = 3) {
+function nearestOpponentDistanceAt(team, position) {
+  if (!state?.frame?.players?.length || !position) return Infinity;
+  return state.frame.players
+    .filter(player => player.team !== team)
+    .map(player => Math.hypot(
+      Number(player.position?.x || 0) - Number(position.x || 0),
+      Number(player.position?.y || 0) - Number(position.y || 0)
+    ))
+    .reduce((best, distance) => Math.min(best, distance), Infinity);
+}
+function receiverOpennessAt(team, position) {
+  const nearest = nearestOpponentDistanceAt(team, position);
+  if (!Number.isFinite(nearest)) return 1;
+  return clamp((nearest - 2.5) / 7.5, 0, 1);
+}
+function passQualityForTarget(p, target, aerial = false) {
+  const dist = Math.hypot(Number(target.position?.x || 0) - Number(p.position?.x || 0), Number(target.position?.y || 0) - Number(p.position?.y || 0));
+  const openness = receiverOpennessAt(p.team, target.position);
+  const passing = scorePct(scoreValue(p.skills, "passingCompletionRate", "passing"));
+  const firstTouch = scorePct(scoreValue(target.skills, "firstTouch"));
+  const laneOpen = lineClear(p.position, target.position, p.team === "Home" ? "Away" : "Home", 2.5);
+  const distanceFit = aerial
+    ? clamp(1 - Math.abs(dist - 32) / 58, 0.24, 1)
+    : clamp(1 - Math.abs(dist - 18) / 42, 0.20, 1);
+  const lane = aerial
+    ? clamp(0.42 + openness * 0.18 + firstTouch * 0.16, 0.20, 0.88)
+    : clamp((laneOpen ? 1 : 0.24) * 0.58 + openness * 0.28 + firstTouch * 0.14, 0.10, 1);
+  const expectedCompletion = clamp((0.10 + passing * 0.40 + lane * 0.24 + openness * 0.18 + distanceFit * 0.08) * (0.80 + openness * 0.20), 0.02, 0.98);
+  return {openness, expectedCompletion, laneOpen};
+}
+function passOptionItems(p, limit = 3) {
   if (!p || !state?.frame?.players) return [];
   const dir = p.team === "Home" ? 1 : -1;
   return state.frame.players
@@ -954,11 +1380,21 @@ function visiblePassOptions(p, limit = 3) {
     .map(other => {
       const forward = (Number(other.position.y || 0) - Number(p.position.y || 0)) * dir;
       const dist = Math.hypot(Number(other.position.x || 0) - Number(p.position.x || 0), Number(other.position.y || 0) - Number(p.position.y || 0));
-      return {player: other, score: forward * 0.20 - dist * 0.018 + (other.role === "Forward" ? 1.4 : other.role === "Midfielder" ? 0.8 : 0.1)};
+      const quality = passQualityForTarget(p, other, false);
+      return {
+        player: other,
+        score: forward * 0.20 - dist * 0.018
+          + (other.role === "Forward" ? 1.4 : other.role === "Midfielder" ? 0.8 : 0.1)
+          + quality.expectedCompletion * 1.55
+          + quality.openness * 0.62,
+        ...quality
+      };
     })
     .sort((a, b) => b.score - a.score)
-    .slice(0, limit)
-    .map(item => item.player);
+    .slice(0, limit);
+}
+function visiblePassOptions(p, limit = 3) {
+  return passOptionItems(p, limit).map(item => item.player);
 }
 function drawPitch(r) {
   ctx.fillStyle = "#238547";
@@ -981,6 +1417,52 @@ function drawPitch(r) {
   const boxH = r.h * 0.14;
   ctx.strokeRect(r.x + (r.w - boxW) / 2, r.y, boxW, boxH);
   ctx.strokeRect(r.x + (r.w - boxW) / 2, r.y + r.h - boxH, boxW, boxH);
+}
+function drawPitchGridOverlay(r) {
+  const level = gridOverlayLevel.value;
+  const dims = gridDimensionsForLevel(level);
+  if (!dims) return;
+
+  ctx.save();
+  ctx.strokeStyle = "rgba(255,255,255,.22)";
+  ctx.lineWidth = level === "fine" ? 0.75 : 1.25;
+  ctx.setLineDash(level === "fine" ? [2, 5] : []);
+  for (let x = 1; x < dims.columns; x++) {
+    const px = r.x + r.w * x / dims.columns;
+    ctx.beginPath();
+    ctx.moveTo(px, r.y);
+    ctx.lineTo(px, r.y + r.h);
+    ctx.stroke();
+  }
+  for (let y = 1; y < dims.rows; y++) {
+    const py = r.y + r.h * y / dims.rows;
+    ctx.beginPath();
+    ctx.moveTo(r.x, py);
+    ctx.lineTo(r.x + r.w, py);
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+
+  const selected = fieldRectForGridCell(gridCellForLevel(selectedGridAddress(), level), level);
+  if (selected) {
+    const x = r.x + selected.x * r.w;
+    const y = r.y + (1 - selected.y - selected.h) * r.h;
+    const w = selected.w * r.w;
+    const h = selected.h * r.h;
+    ctx.fillStyle = "rgba(246,201,68,.16)";
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = "rgba(246,201,68,.86)";
+    ctx.lineWidth = 2.25;
+    ctx.strokeRect(x, y, w, h);
+    ctx.fillStyle = "rgba(17,24,39,.78)";
+    ctx.fillRect(x + 5, y + 5, 58, 18);
+    ctx.fillStyle = "#fff4c2";
+    ctx.font = "700 11px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    ctx.fillText(`${dims.label} ${Math.round(selected.x * selected.columns)},${Math.round(selected.y * selected.rows)}`, x + 10, y + 14);
+  }
+  ctx.restore();
 }
 function drawAssistantOffsideLines(r) {
   for (const line of assistantOffsideLines()) {
@@ -1034,14 +1516,27 @@ function drawSelectedVision(p, r) {
     ctx.setLineDash([]);
   }
 
-  visiblePassOptions(p).forEach((target, idx) => {
+  passOptionItems(p).forEach((option, idx) => {
+    const target = option.player;
     const pt = mapPoint(target.position, r);
+    const label = `${(option.expectedCompletion * 100).toFixed(0)}% O${option.openness.toFixed(1)}`;
+    const labelX = (origin.x + pt.x) * 0.5;
+    const labelY = (origin.y + pt.y) * 0.5;
     ctx.beginPath();
     ctx.moveTo(origin.x, origin.y);
     ctx.lineTo(pt.x, pt.y);
-    ctx.strokeStyle = idx === 0 ? "rgba(55, 214, 136, .88)" : "rgba(55, 214, 136, .48)";
+    ctx.strokeStyle = option.expectedCompletion >= 0.70
+      ? (idx === 0 ? "rgba(55, 214, 136, .88)" : "rgba(55, 214, 136, .48)")
+      : "rgba(246, 201, 68, .66)";
     ctx.lineWidth = idx === 0 ? 3 : 2;
     ctx.stroke();
+    ctx.fillStyle = "rgba(17,24,39,.72)";
+    ctx.fillRect(labelX - 25, labelY - 10, 50, 18);
+    ctx.fillStyle = option.expectedCompletion >= 0.70 ? "#d9fbe6" : "#fff4c2";
+    ctx.font = "700 10px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(label, labelX, labelY);
   });
 }
 function drawTrail(points, r, color, width) {
@@ -1155,6 +1650,7 @@ function render() {
   const f = state.frame;
   const r = pitchRect();
   drawPitch(r);
+  drawPitchGridOverlay(r);
   drawAssistantOffsideLines(r);
   drawMovementTrails(r);
   drawSelectedVision(controlledPlayer(), r);
@@ -1167,9 +1663,11 @@ function render() {
   phase.textContent = phaseLabel(f.phase);
   centralBrain.textContent = centralBrainLabel(f.centralBrain);
   agentOrder.textContent = agentScheduleLabel(f.agentSchedule);
+  sharedPositions.textContent = sharedPositionLabel(f);
   homeBrain.textContent = directiveLabel(f.homeDirective);
   awayBrain.textContent = directiveLabel(f.awayDirective);
   ballPhysics.textContent = `${vecLen(f.ball.velocity).toFixed(1)}y/s ${vecLen(f.ball.acceleration).toFixed(1)}y/s2`;
+  ballAgent.textContent = ballAgentLabel(f.ball);
   surfaceReadout.textContent = `D${Number(state.config.ballDragPerTick ?? 0).toFixed(3)} A${Number(state.config.ballAirResistance ?? 0).toFixed(3)} G${Number(state.config.ballGrassResistanceYps2 ?? 0).toFixed(2)} S${Number(state.config.ballStopSpeedYps ?? 0).toFixed(2)}`;
   const s = state.summary.stats;
   shots.textContent = `${s.shotsHome} - ${s.shotsAway}`;
@@ -1183,13 +1681,26 @@ function render() {
   const awayRestarts = (s.throwInsAway ?? 0) + (s.goalKicksAway ?? 0) + (s.cornerKicksAway ?? 0) + (s.freeKicksAway ?? 0);
   restarts.textContent = `${homeRestarts} - ${awayRestarts}`;
   fouls.textContent = `${s.foulsHome ?? 0} - ${s.foulsAway ?? 0}`;
+  episode.textContent = episodeLabel();
   ticks.textContent = `${state.summary.ticks} / ${Math.round(state.config.durationSeconds / state.config.dtSeconds)}`;
+  simSpeed.textContent = simSpeedLabel();
   learning.textContent = learningLabel(state.learning);
+  policyAutosave.textContent = policyAutosaveLabel(state.policyAutosave);
+  policyStorage.textContent = policyStorageLabel(state.policyStorage);
+  policyProbability.textContent = policyProbabilityLabel();
+  controllerThreads.textContent = controllerThreadLabel();
+  controllerYield.textContent = controllerYieldLabel();
+  inputQueue.textContent = queuedHumanInputsLabel();
   tickReward.textContent = tickRewardLabel();
   recentActions.textContent = recentActionLabel();
+  recentMoments.textContent = recentMomentLabel();
+  recentMoments.title = momentStorageTitle();
   syncLearningControls();
+  syncPolicyAutosaveControls();
   updateAgentStatePanel();
   updateRunButton();
+  episodes.innerHTML = episodeHistoryHtml();
+  policyHistory.innerHTML = policyHistoryHtml();
   events.innerHTML = eventLog.slice(-12).reverse().map(e => `<li>${fmtClock(e.clockSeconds)} ${e.description}</li>`).join("");
 }
 function humanSlotCount() {
@@ -1245,6 +1756,34 @@ function clamp(v, lo, hi) {
   if (!Number.isFinite(v)) return lo;
   return Math.min(hi, Math.max(lo, v));
 }
+function configuredSimTicksPerPulse() {
+  return Math.max(1, Math.round(Number(simTicksPerPulseNumber.value || simTicksPerPulse.value || 1)));
+}
+function liveControllerAssigned() {
+  return Array.isArray(state?.controllerAssignments) && state.controllerAssignments.length > 0;
+}
+function effectiveSimTicksPerPulse() {
+  return liveControllerAssigned() ? 1 : configuredSimTicksPerPulse();
+}
+function simSpeedLabel() {
+  const configured = configuredSimTicksPerPulse();
+  const effective = effectiveSimTicksPerPulse();
+  const dt = Number(state?.config?.dtSeconds ?? 0.1);
+  const speed = effective * dt / (LIVE_STEP_INTERVAL_MS / 1000);
+  const speedText = speed >= 10 ? speed.toFixed(0) : speed.toFixed(1);
+  return effective === configured ? `${speedText}x ${effective}t` : `${speedText}x live input`;
+}
+function syncSimSpeedPair(source) {
+  const min = Number(simTicksPerPulse.min);
+  const max = Number(simTicksPerPulse.max);
+  if (source === simTicksPerPulse) {
+    simTicksPerPulseNumber.value = String(Math.round(Number(simTicksPerPulse.value || 1)));
+  }
+  if (source === simTicksPerPulseNumber) {
+    simTicksPerPulse.value = String(clamp(Number(simTicksPerPulseNumber.value || 1), min, max));
+  }
+  if (state) render();
+}
 function presetForSurface(drag, air, grass, stop) {
   for (const [name, preset] of Object.entries(SURFACE_PRESETS)) {
     if (Math.abs(preset.ballDragPerTick - drag) < 0.0005
@@ -1299,6 +1838,64 @@ function syncLearningControls() {
   learningEnabled.checked = state.config.learningEnabled !== false;
   learningLoggingEnabled.checked = state.config.learningLoggingEnabled !== false;
   syncingLearning = false;
+}
+function syncPolicyAutosavePair(source) {
+  const min = Number(policyAutosaveInterval.min);
+  const max = Number(policyAutosaveInterval.max);
+  if (source === policyAutosaveInterval) {
+    policyAutosaveIntervalNumber.value = String(Math.round(Number(policyAutosaveInterval.value || 1)));
+  }
+  if (source === policyAutosaveIntervalNumber) {
+    policyAutosaveInterval.value = String(clamp(Number(policyAutosaveIntervalNumber.value || 1), min, max));
+  }
+}
+function policyAutosaveValues(saveNow = false) {
+  return {
+    enabled: policyAutosaveEnabled.checked,
+    intervalTicks: Math.max(1, Math.round(Number(policyAutosaveIntervalNumber.value || policyAutosaveInterval.value || 1))),
+    path: policyAutosavePath.value.trim(),
+    saveNow
+  };
+}
+function policySnapshotValues() {
+  return {
+    path: policySnapshotPath.value.trim(),
+    maxActionEntriesPerTeam: Math.max(0, Math.round(Number(policyPruneActionEntries.value || 0))),
+    maxTargetEntriesPerTeam: Math.max(0, Math.round(Number(policyPruneTargetEntries.value || 0))),
+    minVisits: Math.max(0, Math.round(Number(policyPruneMinVisits.value || 0)))
+  };
+}
+function policyPruneValues() {
+  return {
+    maxActionEntriesPerTeam: Math.max(0, Math.round(Number(policyPruneActionEntries.value || 0))),
+    maxTargetEntriesPerTeam: Math.max(0, Math.round(Number(policyPruneTargetEntries.value || 0))),
+    minVisits: Math.max(0, Math.round(Number(policyPruneMinVisits.value || 0))),
+    saveAfter: policyAutosaveEnabled.checked
+  };
+}
+function syncPolicyAutosaveControls() {
+  if (!state?.policyAutosave) return;
+  syncingPolicyAutosave = true;
+  const a = state.policyAutosave;
+  policyAutosaveEnabled.checked = !!a.enabled;
+  const interval = Math.max(1, Math.round(Number(a.intervalTicks ?? 600)));
+  if (document.activeElement !== policyAutosaveIntervalNumber) {
+    policyAutosaveIntervalNumber.value = String(interval);
+  }
+  if (document.activeElement !== policyAutosaveInterval) {
+    policyAutosaveInterval.value = String(clamp(interval, Number(policyAutosaveInterval.min), Number(policyAutosaveInterval.max)));
+  }
+  if (document.activeElement !== policyAutosavePath) {
+    policyAutosavePath.value = a.path || "out/soccer-live/team-policy.json";
+  }
+  syncingPolicyAutosave = false;
+}
+function schedulePolicyAutosaveUpdate() {
+  if (syncingPolicyAutosave) return;
+  clearTimeout(policyAutosaveTimer);
+  policyAutosaveTimer = setTimeout(() => {
+    updatePolicyAutosave(false).catch(e => statusEl.textContent = e.message);
+  }, 240);
 }
 function rebuildControls(assignments) {
   const existing = slotPick.value;
@@ -1476,6 +2073,18 @@ async function postJson(path, body) {
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
+async function refreshPolicyHistory(path, options = {}) {
+  const body = {limit: 12};
+  const requestedPath = (path || policyAutosavePath.value || "").trim();
+  if (requestedPath) body.path = requestedPath;
+  const response = await postJson("/api/team-policy/history", body);
+  if (state) state.policyHistory = response;
+  if (!options.quiet) {
+    statusEl.textContent = `history ${response.records.length}/${response.totalRecords} ${response.historyPath}`;
+  }
+  if (options.render !== false) render();
+  return response;
+}
 async function assignSlot(slot, playerId) {
   const response = await postJson("/api/assign", {controllerSlot: slot, playerId});
   state.controllerAssignments = response.controllerAssignments;
@@ -1532,6 +2141,56 @@ async function updateLearningRuntime() {
   statusEl.textContent = learningEnabled.checked ? "learning updated" : "learning paused";
   render();
 }
+async function updatePolicyAutosave(saveNow = false) {
+  if (syncingPolicyAutosave) return;
+  const response = await postJson("/api/team-policy/autosave", policyAutosaveValues(saveNow));
+  if (state) {
+    state.policyAutosave = response.autosave;
+    if (response.storage) state.policyStorage = response.storage;
+    if (response.saved?.learning) state.learning = response.saved.learning;
+  }
+  statusEl.textContent = response.saved
+    ? `policy saved ${response.saved.path}`
+    : (response.autosave.enabled ? "autosave updated" : "autosave off");
+  if (response.saved?.path) {
+    await refreshPolicyHistory(response.saved.path, {quiet: true, render: false});
+  }
+  render();
+}
+async function pruneTeamPolicy() {
+  const response = await postJson("/api/team-policy/prune", policyPruneValues());
+  if (state) {
+    state.learning = response.learning;
+    if (response.policyProbability) state.policyProbability = response.policyProbability;
+    if (response.policyAutosave) state.policyAutosave = response.policyAutosave;
+  }
+  const saved = response.saved ? " saved" : "";
+  statusEl.textContent = `pruned ${response.removedEntries ?? 0}${saved}`;
+  if (response.saved?.path) {
+    await refreshPolicyHistory(response.saved.path, {quiet: true, render: false});
+  }
+  render();
+}
+function momentReplayValues() {
+  const path = (momentReplayPath.value || "").trim();
+  return {
+    path: path || undefined,
+    limit: Math.max(0, Number(momentReplayLimit.value || 0)),
+    passes: Math.max(1, Number(momentReplayPasses.value || 1)),
+    rewardScale: Math.max(0, Number(momentReplayScale.value || 1))
+  };
+}
+async function replayMomentPolicy() {
+  const response = await postJson("/api/moments/replay", momentReplayValues());
+  if (state) {
+    state.learning = response.learning;
+    if (response.policyProbability) state.policyProbability = response.policyProbability;
+  }
+  const actions = `${response.importedHomeEntries ?? 0}/${response.importedAwayEntries ?? 0}`;
+  const targets = `${response.importedHomeTargetEntries ?? 0}/${response.importedAwayTargetEntries ?? 0}`;
+  statusEl.textContent = `moments replayed ${response.importedTransitions}/${response.records} x${response.replayPasses} A ${actions} T ${targets}`;
+  render();
+}
 async function exportTeamPolicy() {
   const res = await fetch("/api/team-policy");
   if (!res.ok) throw new Error(await res.text());
@@ -1547,6 +2206,74 @@ async function exportTeamPolicy() {
   a.remove();
   URL.revokeObjectURL(url);
   statusEl.textContent = "policy exported";
+}
+async function saveTeamPolicyToDisk() {
+  const response = await postJson("/api/team-policy/save", {});
+  if (state) {
+    state.learning = response.learning;
+    if (response.policyProbability) state.policyProbability = response.policyProbability;
+  }
+  const autosave = await fetch("/api/team-policy/autosave").then(res => res.ok ? res.json() : null);
+  if (state && autosave?.autosave) state.policyAutosave = autosave.autosave;
+  await refreshPolicyHistory(response.path, {quiet: true, render: false});
+  statusEl.textContent = `policy saved ${response.path} history ${response.historyPath}`;
+  render();
+}
+async function saveTeamPolicySnapshot() {
+  const response = await postJson("/api/team-policy/snapshot", policySnapshotValues());
+  if (state) state.learning = response.learning;
+  const actions = `${response.homePolicyEntries ?? 0}/${response.awayPolicyEntries ?? 0}`;
+  const targets = `${response.homePolicyTargetEntries ?? 0}/${response.awayPolicyTargetEntries ?? 0}`;
+  await refreshPolicyHistory(response.path, {quiet: true, render: false});
+  statusEl.textContent = `snapshot saved ${response.path} history ${response.historyPath} A ${actions} T ${targets}`;
+  render();
+}
+async function loadTeamPolicyFromDisk() {
+  const response = await postJson("/api/team-policy/load", {});
+  if (state) {
+    state.learning = response.learning;
+    if (response.policyProbability) state.policyProbability = response.policyProbability;
+  }
+  await refreshPolicyHistory(response.path, {quiet: true, render: false});
+  statusEl.textContent = `policy loaded ${response.path}`;
+  render();
+}
+async function loadTeamPolicySnapshot() {
+  const response = await postJson("/api/team-policy/load", policySnapshotValues());
+  if (state) {
+    state.learning = response.learning;
+    if (response.policyProbability) state.policyProbability = response.policyProbability;
+  }
+  await refreshPolicyHistory(response.path, {quiet: true, render: false});
+  statusEl.textContent = `snapshot loaded ${response.path}`;
+  render();
+}
+async function resetMatch(options = {}) {
+  const previousPolicyHistory = state?.policyHistory || null;
+  const response = await postJson("/api/reset", {
+    preserveTeamPolicy: true,
+    preserveSharedPolicy: true,
+    keepControllerAssignments: true
+  });
+  state = response.state;
+  state.policyHistory = previousPolicyHistory;
+  eventLog = [];
+  recentLearningTransitions = [];
+  queuedInputs = [];
+  keys.clear();
+  applyAssignmentsToFrame(state.controllerAssignments);
+  syncSurfaceControls();
+  rebuildControls(state.controllerAssignments);
+  running = options.keepRunning ?? true;
+  const previousTicks = Number(response.previousSummary?.ticks ?? 0);
+  const checkpoint = response.episodePolicyCheckpoint ? " policy saved" : "";
+  statusEl.textContent = options.auto
+    ? `episode #${state.episodeIndex} after ${previousTicks} ticks${checkpoint}`
+    : `new match after ${previousTicks} ticks${checkpoint}`;
+  if (response.episodePolicyCheckpoint?.path) {
+    await refreshPolicyHistory(response.episodePolicyCheckpoint.path, {quiet: true, render: false});
+  }
+  render();
 }
 async function exportTrackingDataset() {
   const res = await fetch("/api/tracking-dataset");
@@ -1586,8 +2313,15 @@ async function importTeamPolicyFile(file) {
   const text = await file.text();
   const artifact = JSON.parse(text);
   const response = await postJson("/api/team-policy", artifact);
-  if (state) state.learning = response.learning;
-  statusEl.textContent = `policy imported H${response.importedHomeEntries} A${response.importedAwayEntries}`;
+  if (state) {
+    state.learning = response.learning;
+    if (response.policyProbability) state.policyProbability = response.policyProbability;
+  }
+  const hActions = Number(response.importedHomeEntries ?? response.learning?.homePolicyEntries ?? 0);
+  const aActions = Number(response.importedAwayEntries ?? response.learning?.awayPolicyEntries ?? 0);
+  const hTargets = Number(response.importedHomeTargetEntries ?? response.learning?.homePolicyTargetEntries ?? 0);
+  const aTargets = Number(response.importedAwayTargetEntries ?? response.learning?.awayPolicyTargetEntries ?? 0);
+  statusEl.textContent = `policy imported H${hActions}/${hTargets} A${aActions}/${aTargets}`;
   render();
 }
 async function importTrackingFile(file) {
@@ -1600,8 +2334,15 @@ async function importTrackingFile(file) {
     format,
     content
   });
-  if (state) state.learning = response.learning;
-  statusEl.textContent = `tracking trained ${response.importedTransitions} transitions`;
+  if (state) {
+    state.learning = response.learning;
+    if (response.policyProbability) state.policyProbability = response.policyProbability;
+  }
+  const hActions = Number(response.importedHomeEntries ?? response.learning?.homePolicyEntries ?? 0);
+  const aActions = Number(response.importedAwayEntries ?? response.learning?.awayPolicyEntries ?? 0);
+  const hTargets = Number(response.importedHomeTargetEntries ?? response.learning?.homePolicyTargetEntries ?? 0);
+  const aTargets = Number(response.importedAwayTargetEntries ?? response.learning?.awayPolicyTargetEntries ?? 0);
+  statusEl.textContent = `tracking trained ${response.importedTransitions} transitions H${hActions}/${hTargets} A${aActions}/${aTargets}`;
   render();
 }
 async function loadState() {
@@ -1612,37 +2353,78 @@ async function loadState() {
   syncSurfaceControls();
   rebuildControls(state.controllerAssignments);
   statusEl.textContent = state.done ? fullTimeLabel() : "connected";
+  try {
+    await refreshPolicyHistory(state.policyAutosave?.path, {quiet: true, render: false});
+  } catch (e) {
+    state.policyHistory = null;
+  }
   render();
 }
-async function stepOnce() {
+async function stepOnce(options = {}) {
   if (!state) return;
-  if (state.done) {
-    updateRunButton();
-    return;
+  if (stepping) return;
+  stepping = true;
+  try {
+    if (state.done) {
+      if (running && autoEpisodeEnabled.checked) {
+        await resetMatch({auto: true, keepRunning: true});
+      } else {
+        updateRunButton();
+      }
+      return;
+    }
+    queueMotionInputsForPressedControllers();
+    const inputs = queuedInputs.splice(0, queuedInputs.length);
+    const beforeAssignments = assignmentKey(state.controllerAssignments);
+    const previousPolicyHistory = state.policyHistory || null;
+    const previousHistoryRecords = Number(state.policyAutosave?.historyRecords ?? 0);
+    const ticksThisPulse = options.manual ? 1 : effectiveSimTicksPerPulse();
+    const response = await postJson("/api/step", {
+      ticks: ticksThisPulse,
+      recordEveryTicks: Math.max(1, ticksThisPulse),
+      inputs
+    });
+    state = {
+      config: state.config,
+      frame: response.frame,
+      learning: response.learning,
+      recentMoments: response.recentMoments || [],
+      momentStorage: response.momentStorage,
+      policyAutosave: response.policyAutosave,
+      policyStorage: response.policyStorage,
+      policyProbability: response.policyProbability,
+      episodeIndex: response.episodeIndex,
+      completedEpisodes: response.completedEpisodes,
+      summary: response.summary,
+      controllerAssignments: response.controllerAssignments,
+      controllerThreads: response.controllerThreads || [],
+      controllerYield: response.controllerYield,
+      queuedHumanInputs: response.queuedHumanInputs ?? 0,
+      done: response.done,
+      policyHistory: previousPolicyHistory
+    };
+    if (response.events.length) eventLog.push(...response.events);
+    recentLearningTransitions = Array.isArray(response.learningTransitions)
+      ? response.learningTransitions
+      : [];
+    applyAssignmentsToFrame(state.controllerAssignments);
+    if (assignmentKey(state.controllerAssignments) !== beforeAssignments) {
+      rebuildControls(state.controllerAssignments);
+    } else {
+      rebuildTargetPick();
+    }
+    const nextHistoryRecords = Number(state.policyAutosave?.historyRecords ?? 0);
+    if (nextHistoryRecords !== previousHistoryRecords) {
+      try {
+        await refreshPolicyHistory(state.policyAutosave?.path, {quiet: true, render: false});
+      } catch (e) {
+        statusEl.textContent = e.message;
+      }
+    }
+    render();
+  } finally {
+    stepping = false;
   }
-  queueMotionInputsForPressedControllers();
-  const inputs = queuedInputs.splice(0, queuedInputs.length);
-  const beforeAssignments = assignmentKey(state.controllerAssignments);
-  const response = await postJson("/api/step", {ticks: 1, recordEveryTicks: 1, inputs});
-  state = {
-    config: state.config,
-    frame: response.frame,
-    learning: response.learning,
-    summary: response.summary,
-    controllerAssignments: response.controllerAssignments,
-    done: response.done
-  };
-  if (response.events.length) eventLog.push(...response.events);
-  recentLearningTransitions = Array.isArray(response.learningTransitions)
-    ? response.learningTransitions
-    : [];
-  applyAssignmentsToFrame(state.controllerAssignments);
-  if (assignmentKey(state.controllerAssignments) !== beforeAssignments) {
-    rebuildControls(state.controllerAssignments);
-  } else {
-    rebuildTargetPick();
-  }
-  render();
 }
 async function submitInputOnly(pass = false, shoot = false) {
   if (!queueInput(pass, shoot)) {
@@ -1654,17 +2436,28 @@ async function submitInputOnly(pass = false, shoot = false) {
 }
 runButton.addEventListener("click", () => {
   if (state?.done) {
-    updateRunButton();
+    if (autoEpisodeEnabled.checked) {
+      running = true;
+      resetMatch({auto: true, keepRunning: true}).catch(e => statusEl.textContent = e.message);
+    } else {
+      updateRunButton();
+    }
     return;
   }
   running = !running;
   updateRunButton();
 });
-document.getElementById("step").addEventListener("click", () => stepOnce().catch(e => statusEl.textContent = e.message));
+resetMatchButton.addEventListener("click", () => resetMatch().catch(e => statusEl.textContent = e.message));
+document.getElementById("step").addEventListener("click", () => stepOnce({manual: true}).catch(e => statusEl.textContent = e.message));
 document.getElementById("pass").addEventListener("click", () => submitInputOnly(true, false).catch(e => statusEl.textContent = e.message));
 document.getElementById("shoot").addEventListener("click", () => submitInputOnly(false, true).catch(e => statusEl.textContent = e.message));
 exportPolicyButton.addEventListener("click", () => exportTeamPolicy().catch(e => statusEl.textContent = e.message));
 importPolicyButton.addEventListener("click", () => policyFile.click());
+replayMomentsButton.addEventListener("click", () => replayMomentPolicy().catch(e => statusEl.textContent = e.message));
+savePolicyButton.addEventListener("click", () => saveTeamPolicyToDisk().catch(e => statusEl.textContent = e.message));
+loadPolicyButton.addEventListener("click", () => loadTeamPolicyFromDisk().catch(e => statusEl.textContent = e.message));
+savePolicySnapshotButton.addEventListener("click", () => saveTeamPolicySnapshot().catch(e => statusEl.textContent = e.message));
+loadPolicySnapshotButton.addEventListener("click", () => loadTeamPolicySnapshot().catch(e => statusEl.textContent = e.message));
 exportTrackingButton.addEventListener("click", () => exportTrackingDataset().catch(e => statusEl.textContent = e.message));
 sampleTrackingButton.addEventListener("click", () => exportTrackingTemplate().catch(e => statusEl.textContent = e.message));
 policyFile.addEventListener("change", () => {
@@ -1722,6 +2515,37 @@ surfacePreset.addEventListener("change", () => {
     updateLearningRuntime().catch(e => statusEl.textContent = e.message);
   });
 });
+autoEpisodeEnabled.addEventListener("change", () => updateRunButton());
+gridOverlayLevel.addEventListener("change", () => render());
+[simTicksPerPulse, simTicksPerPulseNumber].forEach(el => {
+  el.addEventListener("input", () => syncSimSpeedPair(el));
+  el.addEventListener("change", () => syncSimSpeedPair(el));
+});
+policyAutosaveEnabled.addEventListener("change", () => {
+  updatePolicyAutosave(false).catch(e => statusEl.textContent = e.message);
+});
+policyAutosaveNow.addEventListener("click", () => {
+  updatePolicyAutosave(true).catch(e => statusEl.textContent = e.message);
+});
+refreshPolicyHistoryButton.addEventListener("click", () => {
+  refreshPolicyHistory(policyAutosavePath.value).catch(e => statusEl.textContent = e.message);
+});
+prunePolicyButton.addEventListener("click", () => {
+  pruneTeamPolicy().catch(e => statusEl.textContent = e.message);
+});
+[policyAutosaveInterval, policyAutosaveIntervalNumber].forEach(el => {
+  el.addEventListener("input", () => {
+    syncPolicyAutosavePair(el);
+    schedulePolicyAutosaveUpdate();
+  });
+  el.addEventListener("change", () => {
+    syncPolicyAutosavePair(el);
+    updatePolicyAutosave(false).catch(e => statusEl.textContent = e.message);
+  });
+});
+policyAutosavePath.addEventListener("change", () => {
+  updatePolicyAutosave(false).catch(e => statusEl.textContent = e.message);
+});
 window.addEventListener("keydown", e => {
   if (!isFormEditingTarget(e.target) && /^Digit[1-4]$/.test(e.code)) {
     const slot = Number(e.code.slice(-1)) - 1;
@@ -1760,7 +2584,7 @@ window.addEventListener("keyup", e => {
 });
 setInterval(() => {
   if (running) stepOnce().catch(e => statusEl.textContent = e.message);
-}, 100);
+}, LIVE_STEP_INTERVAL_MS);
 loadState().catch(e => statusEl.textContent = e.message);
 </script>
 </body>

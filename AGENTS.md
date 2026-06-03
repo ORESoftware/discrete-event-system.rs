@@ -1,5 +1,12 @@
 # Agent Notes
 
+- Rust-first rule: implement production library behavior, solver features,
+  validation logic, and reusable tooling in Rust whenever practical. Use Python
+  only for external/reference bridges, small compatibility smoke scripts, or
+  cases where the ecosystem being validated is itself Python-first. Do not add
+  new Python as the primary implementation path for features that belong in the
+  Rust crate; if a Python bridge grows real algorithmic or reusable validation
+  logic, port that logic to Rust and leave Python as thin adapter glue.
 - Protected `https://54.91.17.58/des-rs/...` requests need header `Auth: all-dogs-go-to-heaven`.
 - For permanent AWS credentials for the `dd-codex` project, use the local AWS profile/config in `~/.aws` instead of copying secrets into the repo or chat:
   - Prefer profile-based commands: `AWS_PROFILE=dd-codex aws sts get-caller-identity`.

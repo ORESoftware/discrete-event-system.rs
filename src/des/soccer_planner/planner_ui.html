@@ -591,6 +591,12 @@ function preflightSolverRequest(mode) {
   logSolver(`${mode}: ${posNames.length} on-field slots, ${fieldable}/${state.players.length} fieldable players, ${state.numPeriods} periods`);
   logSolver(`model build estimate: ${shape.variables} binary variables, ${shape.constraints} constraint rows`);
   logSolver(`substitution bounds: min ${state.minSubsPerGame}, max ${state.maxSubsPerGame}; maximum possible under current substitution counting is ${cap}`);
+  if (fieldable < posNames.length) {
+    logSolver(`preflight infeasible: only ${fieldable} fieldable players for ${posNames.length} on-field slots`);
+    logSolver('best guess: add available/guest players, mark players available, or reduce the formation size');
+    setStatus('err', `Need ${posNames.length} fieldable players; only ${fieldable} are available.`);
+    return false;
+  }
   if (state.minSubsPerGame > cap) {
     logSolver(`preflight infeasible: Min subs ${state.minSubsPerGame} exceeds the ${cap} substitutions possible with this roster/period setup`);
     logSolver('current model counts one substitution when a player comes off at a period boundary; add periods or lower Min subs');
@@ -601,6 +607,44 @@ function preflightSolverRequest(mode) {
     logSolver(`preflight infeasible: Min subs ${state.minSubsPerGame} exceeds Max subs ${state.maxSubsPerGame}`);
     setStatus('err', 'Min subs cannot exceed Max subs.');
     return false;
+  }
+  const fixedSlots = new Map();
+  for (const p of state.players) {
+    const unavailable = p.status === 'awol' || p.status === 'injured';
+    if (p.fixedPosition != null && unavailable) {
+      logSolver(`preflight infeasible: ${p.name} is ${p.status} but fixed to ${posNames[p.fixedPosition]}`);
+      logSolver('best guess: clear the fixed position or mark the player available/guest');
+      setStatus('err', `${p.name} is unavailable and fixed to a position.`);
+      return false;
+    }
+    if (p.fixedPosition != null && (p.bannedPositions || []).includes(p.fixedPosition)) {
+      logSolver(`preflight infeasible: ${p.name} is fixed to banned position ${posNames[p.fixedPosition]}`);
+      logSolver('best guess: allow that position or clear/change the fixed position');
+      setStatus('err', `${p.name} is fixed to a banned position.`);
+      return false;
+    }
+    if (p.fixedPosition != null) {
+      if (fixedSlots.has(p.fixedPosition)) {
+        logSolver(`preflight infeasible: ${fixedSlots.get(p.fixedPosition)} and ${p.name} are both fixed to ${posNames[p.fixedPosition]}`);
+        logSolver('best guess: clear one fixed-position lock or choose a different slot');
+        setStatus('err', `Two players are fixed to ${posNames[p.fixedPosition]}.`);
+        return false;
+      }
+      fixedSlots.set(p.fixedPosition, p.name);
+    }
+  }
+  for (let pos = 0; pos < posNames.length; pos++) {
+    const eligible = state.players.some(p => {
+      if (p.status === 'awol' || p.status === 'injured') return false;
+      if (p.fixedPosition != null && p.fixedPosition !== pos) return false;
+      return !(p.bannedPositions || []).includes(pos);
+    });
+    if (!eligible) {
+      logSolver(`preflight infeasible: no eligible player can play ${posNames[pos]}`);
+      logSolver('best guess: allow that position for at least one fieldable player, clear fixed locks, or add a guest');
+      setStatus('err', `No eligible player can play ${posNames[pos]}.`);
+      return false;
+    }
   }
   return true;
 }
@@ -627,7 +671,14 @@ function appendSolutionLog(data) {
   logSolver(`final status=${data.mipStatus || '?'} ok=${!!data.ok} affinity=${Number(data.affinity || 0).toFixed(2)} subs=${data.totalSubs}/${subsLimitLabel()} elapsed=${Number(data.elapsedMs || 0).toFixed(0)}ms nodes=${data.nodesExplored || 0}`);
   if (data.usedFallback) logSolver(`fallback: ${data.fallbackReason || 'used fallback schedule'}`);
   (data.solverNotes || []).forEach(note => logSolver('note: ' + note));
+  (data.constraintViolations || []).forEach(v => logSolver(`violation [${v.constraint || v.kind || 'constraint'}]: ${v.message || ''}${v.suggestion ? ' | try: ' + v.suggestion : ''}`));
+  if (data.suggestedFix) logSolver('best guess: ' + data.suggestedFix);
   (data.alternatives || []).forEach(alt => logSolver(`alt #${alt.rank}: affinity=${Number(alt.affinity || 0).toFixed(2)} subs=${alt.totalSubs}`));
+}
+
+function failureStatus(data, label) {
+  const base = data?.error || 'solver could not produce a feasible schedule';
+  return `${label}: ${base}${data?.suggestedFix ? ' Best guess: ' + data.suggestedFix : ''}`;
 }
 
 function updateRequestJson() {
@@ -710,8 +761,10 @@ function showAnimation(anim, frameId) {
   const frame = $(frameId || 'viewFrame');
   if (!anim || !anim.frames || !anim.frames.length) {
     frame.removeAttribute('src');
+    frame.srcdoc = '<!doctype html><html><body style="margin:0;display:grid;place-items:center;height:100vh;background:#071019;color:#91a1ad;font:14px system-ui,sans-serif">No animation frames yet.</body></html>';
     return;
   }
+  frame.removeAttribute('srcdoc');
   frame.src = URL.createObjectURL(new Blob([buildMinimalPlayer(anim)], {type:'text/html'}));
 }
 
@@ -723,11 +776,12 @@ function showActiveAnimation() {
 function renderSchedule(data) {
   const table = $('scheduleTable');
   if (!data || !data.assignment) { table.innerHTML = '<tr><td>No solved schedule yet.</td></tr>'; return; }
+  const playerName = (pid) => (pid == null || pid < 0) ? '(empty)' : (state.players[pid]?.name || ('Player'+(pid+1)));
   let html = '<thead><tr><th>Period</th>' + posNames.map(n => `<th>${esc(n)}</th>`).join('') + '<th>Bench</th></tr></thead><tbody>';
   data.assignment.forEach((row, t) => {
     html += `<tr><th>${t+1}</th>`;
-    row.forEach(pid => html += `<td>${esc(state.players[pid]?.name || ('Player'+(pid+1)))}</td>`);
-    html += `<td class="bench-list">${(data.bench[t]||[]).map(pid => esc(state.players[pid]?.name || ('Player'+(pid+1)))).join(', ')}</td></tr>`;
+    row.forEach(pid => html += `<td>${esc(playerName(pid))}</td>`);
+    html += `<td class="bench-list">${(data.bench[t]||[]).map(pid => esc(playerName(pid))).join(', ')}</td></tr>`;
   });
   table.innerHTML = html + '</tbody>';
 }
@@ -866,7 +920,11 @@ async function solveViaJson() {
     const r = await fetch(apiPath('solve'), {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(state)});
     const data = await r.json();
     stopSolverProgress();
-    if (!data.ok) throw new Error(data.error || 'solve failed');
+    if (!data.ok) {
+      receiveSolution(data);
+      setStatus('err', failureStatus(data, 'Solve failed'));
+      return;
+    }
     receiveSolution(data);
     setStatus('ok', `Solved: affinity ${data.affinity.toFixed(2)}, subs ${data.totalSubs}/${subsLimitLabel()}, ${data.numVariables} vars, ${data.numConstraints} constraints.`);
   } catch (e) {
@@ -909,7 +967,14 @@ async function solveViaStream() {
     logStream(text.trim() || '(empty stream response)');
     const frames = text.split(/\n+/).filter(Boolean).map(line => JSON.parse(line));
     const sol = frames.reverse().find(f => f.event === 'solution');
-    if (!sol || !sol.response || !sol.response.ok) throw new Error(sol?.response?.error || 'stream solve failed');
+    if (!sol || !sol.response || !sol.response.ok) {
+      if (sol?.response) {
+        receiveSolution(sol.response);
+        setStatus('err', failureStatus(sol.response, 'Stream solve failed'));
+        return;
+      }
+      throw new Error(sol?.response?.error || 'stream solve failed');
+    }
     receiveSolution(sol.response);
     setStatus('ok', `Stream solved: ${sol.variables} vars, ${sol.constraints} constraints.`);
   } catch (e) {
@@ -922,6 +987,7 @@ async function solveViaStream() {
 }
 
 function receiveSolution(data) {
+  if (!data) return;
   lastResponse = data;
   lastPitchAnim = data.pitchAnimation;
   lastSolverAnim = data.solverAnimation;
@@ -929,6 +995,7 @@ function receiveSolution(data) {
   renderSchedule(data);
   updateRequestJson();
   if (!data.pitchAnimation?.frames?.length && !data.solverAnimation?.frames?.length && activeTab !== 'stream') {
+    if (activeTab === 'solver' || data.ok === false) return;
     document.querySelector('.tab[data-tab="schedule"]').click();
     return;
   }

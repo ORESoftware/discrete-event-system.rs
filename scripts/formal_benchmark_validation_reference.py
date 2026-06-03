@@ -47,6 +47,20 @@ def normalize_tool(tool: str | None) -> str:
     return (tool or "auto").strip().lower().replace("_", "-")
 
 
+BENCHMARK_TOOL_IDS = {
+    "benchmark",
+    "miplib",
+    "qplib",
+    "minlplib",
+    "netlib-lp",
+    "csplib",
+    "or-library",
+    "tsplib",
+    "vrplib",
+    "minizinc-challenge",
+}
+
+
 def adapter_env(tool: str) -> str:
     return "ORES_" + re.sub(r"[^A-Z0-9]+", "_", tool.upper()).strip("_") + "_ADAPTER"
 
@@ -569,7 +583,7 @@ def dispatch(payload: dict[str, Any], tool_override: str | None = None) -> dict[
         return validate_mcrl2(payload)
     if kind in ("maude-validation", "maude-module-validation") or tool == "maude":
         return validate_maude(payload)
-    if kind == "external-benchmark-manifest" or tool in ("benchmark", "miplib", "qplib", "minlplib"):
+    if kind == "external-benchmark-manifest" or tool in BENCHMARK_TOOL_IDS:
         return validate_benchmark_manifest(payload)
     return result("unavailable", "unknown", tool, f"unknown formal/benchmark payload kind {kind!r}")
 

@@ -62,6 +62,15 @@ def first_command(tool: str, aliases: list[str]) -> str | None:
     return None
 
 
+MINIZINC_TOOL_IDS = {
+    "minizinc",
+    "flatzinc",
+    "minizinc-solution-checker",
+    "gecode",
+    "chuffed",
+}
+
+
 def infer_sat_like(stdout: str, stderr: str, exit_success: bool) -> str:
     text = f"{stdout}\n{stderr}".lower()
     if "=====unsatisfiable=====" in text or "unsatisfiable" in text:
@@ -169,13 +178,15 @@ def validate_smtlib(payload: dict[str, Any], tool: str) -> dict[str, Any]:
     text = str(payload.get("script") or payload.get("smtlib") or payload.get("text") or payload.get("model") or "")
     if not text.strip():
         return result("failed", "failure", "smtlib", "payload needs script, smtlib, text, or model")
-    command = first_command(tool, [tool, "z3", "cvc5", "bitwuzla", "boolector"])
+    command = first_command(tool, [tool, "z3", "cvc5", "yices-smt2", "yices", "bitwuzla", "boolector"])
     if command:
         basename = Path(command).name.lower()
         if basename == "z3":
             args = ["-in", "-smt2"]
         elif basename == "cvc5":
             args = ["--lang=smt2", "-"]
+        elif basename in ("yices-smt2", "yices"):
+            args = []
         elif basename in ("bitwuzla", "boolector"):
             args = ["--smt2", "-"]
         else:
@@ -239,17 +250,25 @@ def validate_minizinc(payload: dict[str, Any], tool: str) -> dict[str, Any]:
     model = str(payload.get("model") or "")
     data = str(payload.get("data") or "")
     solver = str(payload.get("solver") or "").strip()
+    tool = normalize_tool_id(tool)
     if not model.strip():
         return result("failed", "failure", "minizinc", "payload needs model")
-    command = first_command(tool, [tool, "minizinc"])
+    command_tool = "minizinc" if tool in MINIZINC_TOOL_IDS else tool
+    configured = command_from_env(tool)
+    command = (
+        configured
+        if configured and shutil.which(configured)
+        else first_command(command_tool, ["minizinc"])
+    )
     if command:
         with tempfile.TemporaryDirectory(prefix="ores-minizinc-") as tmp:
             model_path = Path(tmp) / "model.mzn"
             data_path = Path(tmp) / "data.dzn"
             model_path.write_text(model, encoding="utf-8")
             args = []
-            if solver:
-                args.extend(["--solver", solver])
+            backend_solver = solver or (tool if tool in {"gecode", "chuffed"} else "")
+            if backend_solver:
+                args.extend(["--solver", backend_solver])
             args.append(str(model_path))
             if data.strip():
                 data_path.write_text(data, encoding="utf-8")
@@ -263,9 +282,9 @@ def validate_minizinc(payload: dict[str, Any], tool: str) -> dict[str, Any]:
 def dispatch(payload: dict[str, Any], tool_override: str | None = None) -> dict[str, Any]:
     kind = normalize_tool_id(str(payload.get("kind", "")))
     tool = normalize_tool_id(tool_override or payload.get("solver") or payload.get("tool"))
-    if kind == "minizinc-validation" or tool == "minizinc":
-        return validate_minizinc(payload, "minizinc")
-    if kind in ("smtlib-validation", "smt-lib-validation") or tool in ("z3", "cvc5", "bitwuzla", "boolector"):
+    if kind == "minizinc-validation" or tool in MINIZINC_TOOL_IDS:
+        return validate_minizinc(payload, "minizinc" if tool == "auto" else tool)
+    if kind in ("smtlib-validation", "smt-lib-validation") or tool in ("z3", "cvc5", "yices", "bitwuzla", "boolector"):
         return validate_smtlib(payload, "z3" if tool == "auto" else tool)
     if kind in ("dimacs-validation", "dimacs-cnf-validation") or tool in ("kissat", "cadical", "cryptominisat"):
         return validate_dimacs(payload, "kissat" if tool == "auto" else tool)

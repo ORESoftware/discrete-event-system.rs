@@ -22,8 +22,10 @@ use crate::des::general::cp_sat::{
     ObjectiveSense,
 };
 use crate::des::general::external_linear_cli::{
-    probe_external_linear_cli_solver, solve_ipmip_with_external_cli, solve_lp_with_external_cli,
-    ExternalLinearCliKind, ExternalLinearCliModelFormat, ExternalLinearCliOptions,
+    external_linear_cli_command, probe_external_linear_cli_solver, solve_ipmip_with_external_cli,
+    solve_lp_with_external_cli, ExternalLinearCliBranchRule, ExternalLinearCliKind,
+    ExternalLinearCliLpAlgorithm, ExternalLinearCliMipSwitch, ExternalLinearCliModelFormat,
+    ExternalLinearCliNodeSelection, ExternalLinearCliOptions, ExternalLinearCliPresolve,
     ExternalLinearCliProbeStatus, ExternalLinearCliSolver, ExternalLinearCliStatus,
 };
 use crate::des::general::external_optimization_tools::{
@@ -69,10 +71,10 @@ use crate::des::general::ip_mip_des::{
     solve_ipmip_feasibility_relaxation_with_des, solve_ipmip_solution_pool_with_des,
     solve_ipmip_with_des, solve_lower_bounded_ipmip_with_des, solve_multi_objective_ipmip_with_des,
     solve_pwl_ipmip_with_des, solve_quadratic_objective_ipmip_with_des, solve_semi_ipmip_with_des,
-    solve_sos_ipmip_with_des, solve_source_ipmip_with_des, BranchRule,
-    ConcreteLpRelaxationAlgorithm, IPMIPConflictMember, IPMIPConflictOptions, IPMIPFeasRelaxMember,
-    IPMIPFeasRelaxOptions, IPMIPProblem, IPMIPSolutionPoolOptions, IPMIPSolveOptions, IPMIPStatus,
-    LpRelaxationAlgorithm, TraceAction,
+    solve_sos_ipmip_with_des, solve_source_ipmip_with_des, BranchOrCutConstraint, BranchRule,
+    ConcreteLpRelaxationAlgorithm, ConstraintKind, IPMIPConflictMember, IPMIPConflictOptions,
+    IPMIPFeasRelaxMember, IPMIPFeasRelaxOptions, IPMIPProblem, IPMIPSolutionPoolOptions,
+    IPMIPSolveOptions, IPMIPStatus, LpRelaxationAlgorithm, TraceAction,
 };
 use crate::des::general::lp::{
     build_lp_feasibility_relaxation_problem, find_lp_infeasibility_conflict,
@@ -81,6 +83,14 @@ use crate::des::general::lp::{
     solve_objective_offset_lp_internal, ExternalSolverOptions, GeneralLinearLPProblem,
     InternalSimplexOptions, LPConflictMember, LPConflictOptions, LPFeasRelaxMember,
     LPFeasRelaxOptions, LPProblem, LPRowConstraint, LPStatus, ObjectiveOffsetLPProblem, Sense,
+};
+use crate::des::general::math_program::{
+    cross_check_math_program_conflict_with_external,
+    cross_check_math_program_feas_relaxation_with_external,
+    cross_check_math_program_solution_pool_with_external, cross_check_math_program_with_external,
+    export_math_program_cplex_lp, export_math_program_mps, ExternalMathProgramOptions, MathProgram,
+    MathProgramConflictOptions, MathProgramFeasRelaxOptions, MathProgramSolutionPoolOptions,
+    MathProgramSolveOptions, MathProgramStatus, ObjectiveSense as MathObjectiveSense, RowSense,
 };
 use crate::des::general::min_cost_flow::{
     min_cost_flow_to_lp, solve_min_cost_flow, MinCostFlowArc, MinCostFlowProblem, MinCostFlowStatus,
@@ -193,9 +203,117 @@ struct CpLiteralReference {
 struct LinearCliReference {
     status: String,
     solver: String,
+    #[serde(rename = "solverVersion")]
+    solver_version: Option<String>,
     x: Vec<f64>,
     objective: Option<f64>,
+    #[serde(rename = "lpAlgorithm")]
+    lp_algorithm: Option<String>,
+    #[serde(rename = "bestBound")]
+    best_bound: Option<f64>,
+    #[serde(rename = "solutionLimit")]
+    solution_limit: Option<u64>,
+    #[serde(rename = "solutionPoolSize")]
+    solution_pool_size: Option<u64>,
+    solutions: Option<Vec<LinearCliPoolMember>>,
+    exhausted: Option<bool>,
+    #[serde(rename = "mipGap")]
+    mip_gap: Option<f64>,
+    #[serde(rename = "absoluteGap")]
+    absolute_gap: Option<f64>,
+    #[serde(rename = "objectiveLimit")]
+    objective_limit: Option<f64>,
+    #[serde(rename = "primalFeasibilityTolerance")]
+    primal_feasibility_tolerance: Option<f64>,
+    #[serde(rename = "dualFeasibilityTolerance")]
+    dual_feasibility_tolerance: Option<f64>,
+    #[serde(rename = "integerFeasibilityTolerance")]
+    integer_feasibility_tolerance: Option<f64>,
+    #[serde(rename = "nodesExplored")]
+    nodes_explored: Option<u64>,
+    threads: Option<u32>,
+    #[serde(rename = "randomSeed")]
+    random_seed: Option<u64>,
+    presolve: Option<String>,
+    cuts: Option<String>,
+    heuristics: Option<String>,
+    #[serde(rename = "branchRule")]
+    branch_rule: Option<String>,
+    #[serde(rename = "branchPrioritiesAccepted")]
+    branch_priorities_accepted: Option<bool>,
+    #[serde(rename = "branchPriorityCount")]
+    branch_priority_count: Option<u64>,
+    #[serde(rename = "nodeSelection")]
+    node_selection: Option<String>,
+    #[serde(rename = "mipStartAccepted")]
+    mip_start_accepted: Option<bool>,
+    #[serde(rename = "mipStartObjective")]
+    mip_start_objective: Option<f64>,
+    #[serde(rename = "dualUB")]
+    dual_ub: Option<Vec<f64>>,
+    #[serde(rename = "dualEQ")]
+    dual_eq: Option<Vec<f64>>,
+    #[serde(rename = "reducedCosts")]
+    reduced_costs: Option<Vec<f64>>,
+    #[serde(rename = "varBasis")]
+    var_basis: Option<Vec<String>>,
+    #[serde(rename = "rowBasis")]
+    row_basis: Option<Vec<String>>,
+    iterations: Option<u64>,
     message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LinearCliPoolMember {
+    x: Vec<f64>,
+    objective: f64,
+}
+
+fn one_line_preview(text: &str, max_chars: usize) -> String {
+    let mut preview = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if preview.len() > max_chars {
+        preview.truncate(max_chars);
+        preview.push_str("...");
+    }
+    preview
+}
+
+fn first_float_token(text: &str) -> Option<f64> {
+    text.split_whitespace()
+        .find_map(|token| token.parse::<f64>().ok())
+}
+
+fn highs_objective_from_text(text: &str) -> Option<f64> {
+    text.lines().find_map(|line| {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("Objective ") {
+            first_float_token(rest)
+        } else if trimmed.to_ascii_lowercase().starts_with("objective value") {
+            first_float_token(trimmed)
+        } else {
+            None
+        }
+    })
+}
+
+fn optional_math_program_external_unavailable(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    [
+        "unavailable",
+        "not installed",
+        "not found",
+        "no module named",
+        "module not found",
+        "could not import",
+        "importerror",
+        "license",
+        "licence",
+        "not configured",
+        "cannot find",
+        "failed to load",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
 }
 
 impl Driver {
@@ -880,11 +998,19 @@ impl Driver {
         solver: &str,
         stdin_json: &str,
     ) -> LinearCliReference {
-        let value = self.run_python_json(
-            "linear_cli_reference.py",
-            &["--kind", kind, "--solver", solver],
-            stdin_json,
-        );
+        self.run_linear_cli_reference_with_args(kind, solver, stdin_json, &[])
+    }
+
+    fn run_linear_cli_reference_with_args(
+        &self,
+        kind: &str,
+        solver: &str,
+        stdin_json: &str,
+        extra_args: &[&str],
+    ) -> LinearCliReference {
+        let mut args = vec!["--kind", kind, "--solver", solver];
+        args.extend_from_slice(extra_args);
+        let value = self.run_python_json("linear_cli_reference.py", &args, stdin_json);
         serde_json::from_value(value).expect("parse linear CLI reference")
     }
 
@@ -912,12 +1038,14 @@ impl Driver {
             }
             self.check(
                 format!("LP {}:rust-cli probe ready", solver.as_str()),
-                probe.status == ExternalLinearCliProbeStatus::Ready,
+                probe.status == ExternalLinearCliProbeStatus::Ready
+                    && probe.solver_version.is_some(),
                 format!(
-                    "status={} command={:?} smoke={:?} message={}",
+                    "status={} command={:?} smoke={:?} version={:?} message={}",
                     probe.status.as_str(),
                     probe.command,
                     probe.smoke_status.map(|status| status.as_str()),
+                    probe.solver_version,
                     probe.message
                 ),
             );
@@ -942,12 +1070,14 @@ impl Driver {
             }
             self.check(
                 format!("IP/MIP {}:rust-cli probe ready", solver.as_str()),
-                probe.status == ExternalLinearCliProbeStatus::Ready,
+                probe.status == ExternalLinearCliProbeStatus::Ready
+                    && probe.solver_version.is_some(),
                 format!(
-                    "status={} command={:?} smoke={:?} message={}",
+                    "status={} command={:?} smoke={:?} version={:?} message={}",
                     probe.status.as_str(),
                     probe.command,
                     probe.smoke_status.map(|status| status.as_str()),
+                    probe.solver_version,
                     probe.message
                 ),
             );
@@ -1075,6 +1205,101 @@ impl Driver {
                 &reference.x,
                 1e-8,
             );
+            if matches!(solver, "highs" | "glpk" | "cbc" | "clp") {
+                self.check(
+                    format!("LP {solver}:cli iteration metadata"),
+                    reference.iterations.is_some(),
+                    format!("iterations={:?}", reference.iterations),
+                );
+            }
+        }
+
+        for (solver, algorithm) in [
+            ("highs", "simplex"),
+            ("highs", "ipm"),
+            ("glpk", "simplex"),
+            ("glpk", "ipm"),
+        ] {
+            let reference = self.run_linear_cli_reference_with_args(
+                "lp",
+                solver,
+                &lp_json,
+                &["--time-limit", "5", "--lp-algorithm", algorithm],
+            );
+            if reference.status == "unavailable" && reference.message.contains("not found") {
+                println!("  SKIP  LP {solver}:cli {algorithm} executable not found");
+                continue;
+            }
+            self.check(
+                format!("LP {solver}:cli {algorithm} algorithm control"),
+                reference.status == "optimal"
+                    && reference.lp_algorithm.as_deref() == Some(algorithm),
+                format!(
+                    "status={} lp_algorithm={:?} objective={:?} message={}",
+                    reference.status,
+                    reference.lp_algorithm,
+                    reference.objective,
+                    reference.message
+                ),
+            );
+            self.close(
+                &format!("LP {solver}:cli {algorithm} objective"),
+                lp_internal.objective,
+                reference.objective.unwrap_or(f64::NAN),
+                1e-6,
+            );
+            self.max_abs_close(
+                &format!("LP {solver}:cli {algorithm} x"),
+                &lp_internal.x,
+                &reference.x,
+                1e-6,
+            );
+        }
+
+        let lp_primal_tolerance = 1e-7;
+        let lp_dual_tolerance = 2e-7;
+        for solver in ["highs", "scip", "cbc", "clp"] {
+            let reference = self.run_linear_cli_reference_with_args(
+                "lp",
+                solver,
+                &lp_json,
+                &[
+                    "--time-limit",
+                    "5",
+                    "--primal-feasibility-tolerance",
+                    "1e-7",
+                    "--dual-feasibility-tolerance",
+                    "2e-7",
+                ],
+            );
+            if reference.status == "unavailable" && reference.message.contains("not found") {
+                println!("  SKIP  LP {solver}:cli tolerance controls executable not found");
+                continue;
+            }
+            self.check(
+                format!("LP {solver}:cli tolerance controls"),
+                reference.status == "optimal"
+                    && reference
+                        .primal_feasibility_tolerance
+                        .is_some_and(|tol| (tol - lp_primal_tolerance).abs() <= 1e-12)
+                    && reference
+                        .dual_feasibility_tolerance
+                        .is_some_and(|tol| (tol - lp_dual_tolerance).abs() <= 1e-12),
+                format!(
+                    "status={} primal={:?} dual={:?} objective={:?} message={}",
+                    reference.status,
+                    reference.primal_feasibility_tolerance,
+                    reference.dual_feasibility_tolerance,
+                    reference.objective,
+                    reference.message
+                ),
+            );
+            self.close(
+                &format!("LP {solver}:cli tolerance objective"),
+                lp_internal.objective,
+                reference.objective.unwrap_or(f64::NAN),
+                1e-6,
+            );
         }
 
         for solver in commercial_lp_solvers.iter().copied() {
@@ -1144,6 +1369,23 @@ impl Driver {
                 &reference.x,
                 1e-8,
             );
+            if matches!(
+                solver,
+                ExternalLinearCliSolver::Highs
+                    | ExternalLinearCliSolver::Glpk
+                    | ExternalLinearCliSolver::Cbc
+                    | ExternalLinearCliSolver::Clp
+            ) {
+                self.check(
+                    format!("LP {solver_name}:rust-cli iteration metadata"),
+                    reference.iterations.is_some(),
+                    format!("iterations={:?}", reference.iterations),
+                );
+            }
+        }
+
+        for solver in ExternalLinearCliSolver::open_source_lp().iter().copied() {
+            let solver_name = solver.as_str();
             let mps_reference = solve_lp_with_external_cli(
                 &lp,
                 &ExternalLinearCliOptions {
@@ -1153,6 +1395,12 @@ impl Driver {
                     ..Default::default()
                 },
             );
+            if mps_reference.status == ExternalLinearCliStatus::Unavailable
+                && mps_reference.message.contains("not found")
+            {
+                println!("  SKIP  LP {solver_name}:rust-cli MPS executable not found");
+                continue;
+            }
             self.check(
                 format!("LP {solver_name}:rust-cli MPS status optimal"),
                 lp_internal.status == LPStatus::Optimal
@@ -1178,77 +1426,579 @@ impl Driver {
             );
         }
 
-        for solver in ExternalLinearCliSolver::optional_commercial_mip()
-            .iter()
-            .copied()
-        {
+        for (solver, algorithm, algorithm_name) in [
+            (
+                ExternalLinearCliSolver::Highs,
+                ExternalLinearCliLpAlgorithm::Simplex,
+                "simplex",
+            ),
+            (
+                ExternalLinearCliSolver::Highs,
+                ExternalLinearCliLpAlgorithm::Ipm,
+                "ipm",
+            ),
+            (
+                ExternalLinearCliSolver::Glpk,
+                ExternalLinearCliLpAlgorithm::Simplex,
+                "simplex",
+            ),
+            (
+                ExternalLinearCliSolver::Glpk,
+                ExternalLinearCliLpAlgorithm::Ipm,
+                "ipm",
+            ),
+        ] {
             let solver_name = solver.as_str();
             let reference = solve_lp_with_external_cli(
                 &lp,
                 &ExternalLinearCliOptions {
                     solver,
-                    time_limit_secs: Some(2.0),
+                    time_limit_secs: Some(5.0),
+                    lp_algorithm: Some(algorithm),
                     ..Default::default()
                 },
             );
-            if reference.status == ExternalLinearCliStatus::Unavailable {
-                println!("  SKIP  LP commercial {solver_name}: {}", reference.message);
+            if reference.status == ExternalLinearCliStatus::Unavailable
+                && reference.message.contains("not found")
+            {
+                println!("  SKIP  LP {solver_name}:rust-cli {algorithm_name} executable not found");
                 continue;
             }
             self.check(
-                format!("LP commercial {solver_name}:rust-cli status optimal"),
-                lp_internal.status == LPStatus::Optimal
-                    && reference.status == ExternalLinearCliStatus::Optimal,
+                format!("LP {solver_name}:rust-cli {algorithm_name} algorithm control"),
+                reference.status == ExternalLinearCliStatus::Optimal
+                    && reference.lp_algorithm.as_deref() == Some(algorithm_name),
                 format!(
-                    "internal={:?} external={} solver={}",
-                    lp_internal.status,
+                    "status={} lp_algorithm={:?} objective={:?} message={}",
                     reference.status.as_str(),
-                    reference.solver
+                    reference.lp_algorithm,
+                    reference.objective,
+                    reference.message
                 ),
             );
             self.close(
-                &format!("LP commercial {solver_name}:rust-cli objective"),
+                &format!("LP {solver_name}:rust-cli {algorithm_name} objective"),
                 lp_internal.objective,
                 reference.objective.unwrap_or(f64::NAN),
-                1e-9,
+                1e-6,
             );
             self.max_abs_close(
-                &format!("LP commercial {solver_name}:rust-cli x"),
+                &format!("LP {solver_name}:rust-cli {algorithm_name} x"),
                 &lp_internal.x,
                 &reference.x,
-                1e-8,
+                1e-6,
             );
-            let mps_reference = solve_lp_with_external_cli(
+        }
+
+        for solver in [
+            ExternalLinearCliSolver::Highs,
+            ExternalLinearCliSolver::Scip,
+            ExternalLinearCliSolver::Cbc,
+            ExternalLinearCliSolver::Clp,
+        ] {
+            let solver_name = solver.as_str();
+            let reference = solve_lp_with_external_cli(
                 &lp,
                 &ExternalLinearCliOptions {
                     solver,
-                    time_limit_secs: Some(2.0),
-                    model_format: ExternalLinearCliModelFormat::Mps,
+                    time_limit_secs: Some(5.0),
+                    primal_feasibility_tolerance: Some(lp_primal_tolerance),
+                    dual_feasibility_tolerance: Some(lp_dual_tolerance),
                     ..Default::default()
                 },
             );
+            if reference.status == ExternalLinearCliStatus::Unavailable
+                && reference.message.contains("not found")
+            {
+                println!(
+                    "  SKIP  LP {solver_name}:rust-cli tolerance controls executable not found"
+                );
+                continue;
+            }
             self.check(
-                format!("LP commercial {solver_name}:rust-cli MPS status optimal"),
-                lp_internal.status == LPStatus::Optimal
-                    && mps_reference.status == ExternalLinearCliStatus::Optimal,
+                format!("LP {solver_name}:rust-cli tolerance controls"),
+                reference.status == ExternalLinearCliStatus::Optimal
+                    && reference
+                        .primal_feasibility_tolerance
+                        .is_some_and(|tol| (tol - lp_primal_tolerance).abs() <= 1e-12)
+                    && reference
+                        .dual_feasibility_tolerance
+                        .is_some_and(|tol| (tol - lp_dual_tolerance).abs() <= 1e-12),
                 format!(
-                    "internal={:?} external={} solver={}",
-                    lp_internal.status,
-                    mps_reference.status.as_str(),
-                    mps_reference.solver
+                    "status={} primal={:?} dual={:?} objective={:?} message={}",
+                    reference.status.as_str(),
+                    reference.primal_feasibility_tolerance,
+                    reference.dual_feasibility_tolerance,
+                    reference.objective,
+                    reference.message
                 ),
             );
             self.close(
-                &format!("LP commercial {solver_name}:rust-cli MPS objective"),
+                &format!("LP {solver_name}:rust-cli tolerance objective"),
                 lp_internal.objective,
-                mps_reference.objective.unwrap_or(f64::NAN),
-                1e-9,
+                reference.objective.unwrap_or(f64::NAN),
+                1e-6,
             );
-            self.max_abs_close(
-                &format!("LP commercial {solver_name}:rust-cli MPS x"),
-                &lp_internal.x,
-                &mps_reference.x,
+        }
+
+        let cli_certificate_lp = LPProblem {
+            sense: Sense::Max,
+            c: vec![3.0, 2.0],
+            a_ub: Some(vec![vec![1.0, 1.0], vec![2.0, 1.0]]),
+            b_ub: Some(vec![4.0, 5.0]),
+            ..Default::default()
+        };
+        let cli_certificate_json = serde_json::json!({
+            "lp": {
+                "sense": cli_certificate_lp.sense.as_str(),
+                "c": &cli_certificate_lp.c,
+                "a_ub": &cli_certificate_lp.a_ub,
+                "b_ub": &cli_certificate_lp.b_ub,
+                "a_eq": &cli_certificate_lp.a_eq,
+                "b_eq": &cli_certificate_lp.b_eq,
+                "lb": &cli_certificate_lp.lb,
+                "ub": &cli_certificate_lp.ub,
+            }
+        })
+        .to_string();
+        let cli_certificate_reference =
+            self.run_linear_cli_reference("lp", "highs", &cli_certificate_json);
+        if cli_certificate_reference.status == "unavailable"
+            && cli_certificate_reference.message.contains("not found")
+        {
+            println!("  SKIP  LP highs:cli certificate executable not found");
+        } else {
+            self.check(
+                "LP highs:cli certificate status optimal",
+                cli_certificate_reference.status == "optimal",
+                format!(
+                    "external={} solver={}",
+                    cli_certificate_reference.status, cli_certificate_reference.solver
+                ),
+            );
+            self.max_abs_close_optional(
+                "LP highs:cli certificate dual_ub",
+                cli_certificate_reference.dual_ub.as_deref(),
+                Some(&[1.0, 1.0]),
                 1e-8,
+            );
+            self.max_abs_close_optional(
+                "LP highs:cli certificate reduced_costs",
+                cli_certificate_reference.reduced_costs.as_deref(),
+                Some(&[0.0, 0.0]),
+                1e-8,
+            );
+            self.check(
+                "LP highs:cli basis var statuses",
+                cli_certificate_reference
+                    .var_basis
+                    .as_ref()
+                    .is_some_and(|basis| basis.iter().map(String::as_str).eq(["basic", "basic"])),
+                format!("var_basis={:?}", cli_certificate_reference.var_basis),
+            );
+            self.check(
+                "LP highs:cli basis row statuses",
+                cli_certificate_reference
+                    .row_basis
+                    .as_ref()
+                    .is_some_and(|basis| {
+                        basis
+                            .iter()
+                            .map(String::as_str)
+                            .eq(["at_upper", "at_upper"])
+                    }),
+                format!("row_basis={:?}", cli_certificate_reference.row_basis),
+            );
+        }
+        let rust_cli_certificate_reference = solve_lp_with_external_cli(
+            &cli_certificate_lp,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Highs,
+                ..Default::default()
+            },
+        );
+        if rust_cli_certificate_reference.status == ExternalLinearCliStatus::Unavailable
+            && rust_cli_certificate_reference.message.contains("not found")
+        {
+            println!("  SKIP  LP highs:rust-cli certificate executable not found");
+        } else {
+            self.check(
+                "LP highs:rust-cli certificate status optimal",
+                rust_cli_certificate_reference.status == ExternalLinearCliStatus::Optimal,
+                format!(
+                    "external={} solver={}",
+                    rust_cli_certificate_reference.status.as_str(),
+                    rust_cli_certificate_reference.solver
+                ),
+            );
+            self.max_abs_close_optional(
+                "LP highs:rust-cli certificate dual_ub",
+                rust_cli_certificate_reference.dual_ub.as_deref(),
+                Some(&[1.0, 1.0]),
+                1e-8,
+            );
+            self.max_abs_close_optional(
+                "LP highs:rust-cli certificate reduced_costs",
+                rust_cli_certificate_reference.reduced_costs.as_deref(),
+                Some(&[0.0, 0.0]),
+                1e-8,
+            );
+            self.check(
+                "LP highs:rust-cli basis var statuses",
+                rust_cli_certificate_reference
+                    .var_basis
+                    .as_ref()
+                    .is_some_and(|basis| basis.iter().map(String::as_str).eq(["basic", "basic"])),
+                format!("var_basis={:?}", rust_cli_certificate_reference.var_basis),
+            );
+            self.check(
+                "LP highs:rust-cli basis row statuses",
+                rust_cli_certificate_reference
+                    .row_basis
+                    .as_ref()
+                    .is_some_and(|basis| {
+                        basis
+                            .iter()
+                            .map(String::as_str)
+                            .eq(["at_upper", "at_upper"])
+                    }),
+                format!("row_basis={:?}", rust_cli_certificate_reference.row_basis),
+            );
+        }
+        let glpk_cli_certificate_reference =
+            self.run_linear_cli_reference("lp", "glpk", &cli_certificate_json);
+        if glpk_cli_certificate_reference.status == "unavailable"
+            && glpk_cli_certificate_reference.message.contains("not found")
+        {
+            println!("  SKIP  LP glpk:cli certificate executable not found");
+        } else {
+            self.check(
+                "LP glpk:cli certificate status optimal",
+                glpk_cli_certificate_reference.status == "optimal",
+                format!(
+                    "external={} solver={}",
+                    glpk_cli_certificate_reference.status, glpk_cli_certificate_reference.solver
+                ),
+            );
+            self.max_abs_close_optional(
+                "LP glpk:cli certificate dual_ub",
+                glpk_cli_certificate_reference.dual_ub.as_deref(),
+                Some(&[1.0, 1.0]),
+                1e-8,
+            );
+            self.max_abs_close_optional(
+                "LP glpk:cli certificate reduced_costs",
+                glpk_cli_certificate_reference.reduced_costs.as_deref(),
+                Some(&[0.0, 0.0]),
+                1e-8,
+            );
+            self.check(
+                "LP glpk:cli basis var statuses",
+                glpk_cli_certificate_reference
+                    .var_basis
+                    .as_ref()
+                    .is_some_and(|basis| basis.iter().map(String::as_str).eq(["basic", "basic"])),
+                format!("var_basis={:?}", glpk_cli_certificate_reference.var_basis),
+            );
+            self.check(
+                "LP glpk:cli basis row statuses",
+                glpk_cli_certificate_reference
+                    .row_basis
+                    .as_ref()
+                    .is_some_and(|basis| {
+                        basis
+                            .iter()
+                            .map(String::as_str)
+                            .eq(["at_upper", "at_upper"])
+                    }),
+                format!("row_basis={:?}", glpk_cli_certificate_reference.row_basis),
+            );
+        }
+        let glpk_rust_cli_certificate_reference = solve_lp_with_external_cli(
+            &cli_certificate_lp,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Glpk,
+                ..Default::default()
+            },
+        );
+        if glpk_rust_cli_certificate_reference.status == ExternalLinearCliStatus::Unavailable
+            && glpk_rust_cli_certificate_reference
+                .message
+                .contains("not found")
+        {
+            println!("  SKIP  LP glpk:rust-cli certificate executable not found");
+        } else {
+            self.check(
+                "LP glpk:rust-cli certificate status optimal",
+                glpk_rust_cli_certificate_reference.status == ExternalLinearCliStatus::Optimal,
+                format!(
+                    "external={} solver={}",
+                    glpk_rust_cli_certificate_reference.status.as_str(),
+                    glpk_rust_cli_certificate_reference.solver
+                ),
+            );
+            self.max_abs_close_optional(
+                "LP glpk:rust-cli certificate dual_ub",
+                glpk_rust_cli_certificate_reference.dual_ub.as_deref(),
+                Some(&[1.0, 1.0]),
+                1e-8,
+            );
+            self.max_abs_close_optional(
+                "LP glpk:rust-cli certificate reduced_costs",
+                glpk_rust_cli_certificate_reference.reduced_costs.as_deref(),
+                Some(&[0.0, 0.0]),
+                1e-8,
+            );
+            self.check(
+                "LP glpk:rust-cli basis var statuses",
+                glpk_rust_cli_certificate_reference
+                    .var_basis
+                    .as_ref()
+                    .is_some_and(|basis| basis.iter().map(String::as_str).eq(["basic", "basic"])),
+                format!(
+                    "var_basis={:?}",
+                    glpk_rust_cli_certificate_reference.var_basis
+                ),
+            );
+            self.check(
+                "LP glpk:rust-cli basis row statuses",
+                glpk_rust_cli_certificate_reference
+                    .row_basis
+                    .as_ref()
+                    .is_some_and(|basis| {
+                        basis
+                            .iter()
+                            .map(String::as_str)
+                            .eq(["at_upper", "at_upper"])
+                    }),
+                format!(
+                    "row_basis={:?}",
+                    glpk_rust_cli_certificate_reference.row_basis
+                ),
+            );
+        }
+        let cbc_cli_certificate_reference =
+            self.run_linear_cli_reference("lp", "cbc", &cli_certificate_json);
+        if cbc_cli_certificate_reference.status == "unavailable"
+            && cbc_cli_certificate_reference.message.contains("not found")
+        {
+            println!("  SKIP  LP cbc:cli certificate executable not found");
+        } else {
+            self.check(
+                "LP cbc:cli certificate status optimal",
+                cbc_cli_certificate_reference.status == "optimal",
+                format!(
+                    "external={} solver={}",
+                    cbc_cli_certificate_reference.status, cbc_cli_certificate_reference.solver
+                ),
+            );
+            self.max_abs_close_optional(
+                "LP cbc:cli certificate dual_ub",
+                cbc_cli_certificate_reference.dual_ub.as_deref(),
+                Some(&[1.0, 1.0]),
+                1e-8,
+            );
+            self.max_abs_close_optional(
+                "LP cbc:cli certificate reduced_costs",
+                cbc_cli_certificate_reference.reduced_costs.as_deref(),
+                Some(&[0.0, 0.0]),
+                1e-8,
+            );
+            self.check(
+                "LP cbc:cli basis var statuses",
+                cbc_cli_certificate_reference
+                    .var_basis
+                    .as_ref()
+                    .is_some_and(|basis| basis.iter().map(String::as_str).eq(["basic", "basic"])),
+                format!("var_basis={:?}", cbc_cli_certificate_reference.var_basis),
+            );
+            self.check(
+                "LP cbc:cli basis row statuses",
+                cbc_cli_certificate_reference
+                    .row_basis
+                    .as_ref()
+                    .is_some_and(|basis| {
+                        basis
+                            .iter()
+                            .map(String::as_str)
+                            .eq(["at_upper", "at_upper"])
+                    }),
+                format!("row_basis={:?}", cbc_cli_certificate_reference.row_basis),
+            );
+        }
+        let cbc_rust_cli_certificate_reference = solve_lp_with_external_cli(
+            &cli_certificate_lp,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Cbc,
+                ..Default::default()
+            },
+        );
+        if cbc_rust_cli_certificate_reference.status == ExternalLinearCliStatus::Unavailable
+            && cbc_rust_cli_certificate_reference
+                .message
+                .contains("not found")
+        {
+            println!("  SKIP  LP cbc:rust-cli certificate executable not found");
+        } else {
+            self.check(
+                "LP cbc:rust-cli certificate status optimal",
+                cbc_rust_cli_certificate_reference.status == ExternalLinearCliStatus::Optimal,
+                format!(
+                    "external={} solver={}",
+                    cbc_rust_cli_certificate_reference.status.as_str(),
+                    cbc_rust_cli_certificate_reference.solver
+                ),
+            );
+            self.max_abs_close_optional(
+                "LP cbc:rust-cli certificate dual_ub",
+                cbc_rust_cli_certificate_reference.dual_ub.as_deref(),
+                Some(&[1.0, 1.0]),
+                1e-8,
+            );
+            self.max_abs_close_optional(
+                "LP cbc:rust-cli certificate reduced_costs",
+                cbc_rust_cli_certificate_reference.reduced_costs.as_deref(),
+                Some(&[0.0, 0.0]),
+                1e-8,
+            );
+            self.check(
+                "LP cbc:rust-cli basis var statuses",
+                cbc_rust_cli_certificate_reference
+                    .var_basis
+                    .as_ref()
+                    .is_some_and(|basis| basis.iter().map(String::as_str).eq(["basic", "basic"])),
+                format!(
+                    "var_basis={:?}",
+                    cbc_rust_cli_certificate_reference.var_basis
+                ),
+            );
+            self.check(
+                "LP cbc:rust-cli basis row statuses",
+                cbc_rust_cli_certificate_reference
+                    .row_basis
+                    .as_ref()
+                    .is_some_and(|basis| {
+                        basis
+                            .iter()
+                            .map(String::as_str)
+                            .eq(["at_upper", "at_upper"])
+                    }),
+                format!(
+                    "row_basis={:?}",
+                    cbc_rust_cli_certificate_reference.row_basis
+                ),
+            );
+        }
+        let clp_cli_certificate_reference =
+            self.run_linear_cli_reference("lp", "clp", &cli_certificate_json);
+        if clp_cli_certificate_reference.status == "unavailable"
+            && clp_cli_certificate_reference.message.contains("not found")
+        {
+            println!("  SKIP  LP clp:cli certificate executable not found");
+        } else {
+            self.check(
+                "LP clp:cli certificate status optimal",
+                clp_cli_certificate_reference.status == "optimal",
+                format!(
+                    "external={} solver={}",
+                    clp_cli_certificate_reference.status, clp_cli_certificate_reference.solver
+                ),
+            );
+            self.max_abs_close_optional(
+                "LP clp:cli certificate dual_ub",
+                clp_cli_certificate_reference.dual_ub.as_deref(),
+                Some(&[1.0, 1.0]),
+                1e-8,
+            );
+            self.max_abs_close_optional(
+                "LP clp:cli certificate reduced_costs",
+                clp_cli_certificate_reference.reduced_costs.as_deref(),
+                Some(&[0.0, 0.0]),
+                1e-8,
+            );
+            self.check(
+                "LP clp:cli basis var statuses",
+                clp_cli_certificate_reference
+                    .var_basis
+                    .as_ref()
+                    .is_some_and(|basis| basis.iter().map(String::as_str).eq(["basic", "basic"])),
+                format!("var_basis={:?}", clp_cli_certificate_reference.var_basis),
+            );
+            self.check(
+                "LP clp:cli basis row statuses",
+                clp_cli_certificate_reference
+                    .row_basis
+                    .as_ref()
+                    .is_some_and(|basis| {
+                        basis
+                            .iter()
+                            .map(String::as_str)
+                            .eq(["at_upper", "at_upper"])
+                    }),
+                format!("row_basis={:?}", clp_cli_certificate_reference.row_basis),
+            );
+        }
+        let clp_rust_cli_certificate_reference = solve_lp_with_external_cli(
+            &cli_certificate_lp,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Clp,
+                ..Default::default()
+            },
+        );
+        if clp_rust_cli_certificate_reference.status == ExternalLinearCliStatus::Unavailable
+            && clp_rust_cli_certificate_reference
+                .message
+                .contains("not found")
+        {
+            println!("  SKIP  LP clp:rust-cli certificate executable not found");
+        } else {
+            self.check(
+                "LP clp:rust-cli certificate status optimal",
+                clp_rust_cli_certificate_reference.status == ExternalLinearCliStatus::Optimal,
+                format!(
+                    "external={} solver={}",
+                    clp_rust_cli_certificate_reference.status.as_str(),
+                    clp_rust_cli_certificate_reference.solver
+                ),
+            );
+            self.max_abs_close_optional(
+                "LP clp:rust-cli certificate dual_ub",
+                clp_rust_cli_certificate_reference.dual_ub.as_deref(),
+                Some(&[1.0, 1.0]),
+                1e-8,
+            );
+            self.max_abs_close_optional(
+                "LP clp:rust-cli certificate reduced_costs",
+                clp_rust_cli_certificate_reference.reduced_costs.as_deref(),
+                Some(&[0.0, 0.0]),
+                1e-8,
+            );
+            self.check(
+                "LP clp:rust-cli basis var statuses",
+                clp_rust_cli_certificate_reference
+                    .var_basis
+                    .as_ref()
+                    .is_some_and(|basis| basis.iter().map(String::as_str).eq(["basic", "basic"])),
+                format!(
+                    "var_basis={:?}",
+                    clp_rust_cli_certificate_reference.var_basis
+                ),
+            );
+            self.check(
+                "LP clp:rust-cli basis row statuses",
+                clp_rust_cli_certificate_reference
+                    .row_basis
+                    .as_ref()
+                    .is_some_and(|basis| {
+                        basis
+                            .iter()
+                            .map(String::as_str)
+                            .eq(["at_upper", "at_upper"])
+                    }),
+                format!(
+                    "row_basis={:?}",
+                    clp_rust_cli_certificate_reference.row_basis
+                ),
             );
         }
 
@@ -1361,6 +2111,68 @@ impl Driver {
             "con_names": mip.con_names,
         })
         .to_string();
+        let pool_mip = build_binary_knapsack_ip(vec![3.0, 2.0], vec![1.0, 1.0], 1.0);
+        let pool_json = serde_json::json!({
+            "sense": pool_mip.sense.as_str(),
+            "c": pool_mip.c,
+            "a": pool_mip.a,
+            "b": pool_mip.b,
+            "integer_vars": pool_mip.integer_vars,
+            "ub": pool_mip.ub,
+            "var_names": pool_mip.var_names,
+            "con_names": pool_mip.con_names,
+        })
+        .to_string();
+        let expected_pool_x = [vec![1.0, 0.0], vec![0.0, 1.0], vec![0.0, 0.0]];
+        let expected_pool_objectives = [3.0, 2.0, 0.0];
+        let lazy_mip = IPMIPProblem {
+            sense: Sense::Max,
+            c: vec![1.0, 1.0],
+            a: vec![vec![1.0, 1.0]],
+            b: vec![2.0],
+            integer_vars: vec![true, true],
+            ub: Some(vec![1.0, 1.0]),
+            var_names: Some(vec!["x".to_string(), "y".to_string()]),
+            con_names: Some(vec!["loose-capacity".to_string()]),
+            lazy_constraints: Some(vec![BranchOrCutConstraint {
+                coefs: vec![1.0, 1.0],
+                rhs: 1.0,
+                name: "lazy-at-most-one".to_string(),
+                kind: ConstraintKind::Lazy,
+            }]),
+            variable_nodes: None,
+            constraint_nodes: None,
+        };
+        let lazy_internal = solve_ipmip_with_des(
+            lazy_mip.clone(),
+            IPMIPSolveOptions {
+                lp_algorithm: Some(LpRelaxationAlgorithm::Concrete(
+                    ConcreteLpRelaxationAlgorithm::InternalSimplex,
+                )),
+                ..Default::default()
+            },
+        );
+        let lazy_json = serde_json::json!({
+            "sense": lazy_mip.sense.as_str(),
+            "c": lazy_mip.c,
+            "a": lazy_mip.a,
+            "b": lazy_mip.b,
+            "integer_vars": lazy_mip.integer_vars,
+            "ub": lazy_mip.ub,
+            "var_names": lazy_mip.var_names,
+            "con_names": lazy_mip.con_names,
+            "lazy_constraints": lazy_mip.lazy_constraints.as_ref().map(|rows| rows.iter().map(|row| serde_json::json!({
+                "coefs": &row.coefs,
+                "rhs": row.rhs,
+                "name": &row.name,
+                "kind": match row.kind {
+                    ConstraintKind::Branch => "branch",
+                    ConstraintKind::Cut => "cut",
+                    ConstraintKind::Lazy => "lazy",
+                },
+            })).collect::<Vec<_>>()),
+        })
+        .to_string();
 
         for solver in mip_solvers.iter().copied() {
             let reference = self.run_linear_cli_reference("mip", solver, &mip_json);
@@ -1389,6 +2201,547 @@ impl Driver {
                 &mip_internal.x,
                 &reference.x,
                 1e-8,
+            );
+            self.check(
+                format!("IP/MIP {solver}:cli solver version metadata"),
+                reference.solver_version.is_some(),
+                format!(
+                    "solver={} version={:?} message={}",
+                    reference.solver, reference.solver_version, reference.message
+                ),
+            );
+            if solver == "scip" {
+                self.check(
+                    "IP/MIP scip:cli quality metadata",
+                    reference
+                        .best_bound
+                        .zip(reference.objective)
+                        .is_some_and(|(bound, objective)| (bound - objective).abs() <= 1e-9)
+                        && reference.mip_gap.is_some_and(|gap| gap <= 1e-9)
+                        && reference.nodes_explored.is_some(),
+                    format!(
+                        "best_bound={:?} objective={:?} gap={:?} nodes={:?}",
+                        reference.best_bound,
+                        reference.objective,
+                        reference.mip_gap,
+                        reference.nodes_explored
+                    ),
+                );
+            }
+        }
+
+        for solver in ["highs", "scip", "cbc"] {
+            let reference = self.run_linear_cli_reference("mip", solver, &lazy_json);
+            if reference.status == "unavailable" && reference.message.contains("not found") {
+                println!("  SKIP  IP/MIP {solver}:cli lazy constraints executable not found");
+                continue;
+            }
+            self.check(
+                format!("IP/MIP {solver}:cli lazy constraints status"),
+                lazy_internal.status == IPMIPStatus::Optimal && reference.status == "optimal",
+                format!(
+                    "internal={} external={} solver={} message={}",
+                    lazy_internal.status.as_str(),
+                    reference.status,
+                    reference.solver,
+                    reference.message
+                ),
+            );
+            self.close(
+                &format!("IP/MIP {solver}:cli lazy constraints objective"),
+                lazy_internal.z,
+                reference.objective.unwrap_or(f64::NAN),
+                1e-9,
+            );
+            self.check(
+                format!("IP/MIP {solver}:cli lazy constraints cut changed optimum"),
+                reference
+                    .objective
+                    .is_some_and(|objective| objective < 2.0 - 1e-9),
+                format!("objective={:?} x={:?}", reference.objective, reference.x),
+            );
+        }
+
+        for solver in ["highs", "scip", "cbc"] {
+            let reference = self.run_linear_cli_reference_with_args(
+                "mip",
+                solver,
+                &mip_json,
+                &[
+                    "--time-limit",
+                    "5",
+                    "--node-limit",
+                    "0",
+                    "--relative-gap",
+                    "0.25",
+                ],
+            );
+            if reference.status == "unavailable" && reference.message.contains("not found") {
+                println!("  SKIP  IP/MIP {solver}:cli node/gap controls executable not found");
+                continue;
+            }
+            self.check(
+                format!("IP/MIP {solver}:cli node/gap controls"),
+                reference.status == "optimal"
+                    && reference.nodes_explored.is_some()
+                    && reference.mip_gap.is_some(),
+                format!(
+                    "status={} best_bound={:?} objective={:?} gap={:?} nodes={:?} message={}",
+                    reference.status,
+                    reference.best_bound,
+                    reference.objective,
+                    reference.mip_gap,
+                    reference.nodes_explored,
+                    reference.message
+                ),
+            );
+        }
+        let glpk_gap_reference = self.run_linear_cli_reference_with_args(
+            "mip",
+            "glpk",
+            &mip_json,
+            &["--time-limit", "5", "--relative-gap", "0.25"],
+        );
+        if glpk_gap_reference.status == "unavailable"
+            && glpk_gap_reference.message.contains("not found")
+        {
+            println!("  SKIP  IP/MIP glpk:cli relative-gap control executable not found");
+        } else {
+            self.check(
+                "IP/MIP glpk:cli relative-gap control",
+                glpk_gap_reference.status == "optimal",
+                format!(
+                    "status={} objective={:?} message={}",
+                    glpk_gap_reference.status,
+                    glpk_gap_reference.objective,
+                    glpk_gap_reference.message
+                ),
+            );
+        }
+
+        let glpk_search_reference = self.run_linear_cli_reference_with_args(
+            "mip",
+            "glpk",
+            &mip_json,
+            &[
+                "--time-limit",
+                "5",
+                "--branch-rule",
+                "first-fractional",
+                "--node-selection",
+                "dfs",
+            ],
+        );
+        if glpk_search_reference.status == "unavailable"
+            && glpk_search_reference.message.contains("not found")
+        {
+            println!("  SKIP  IP/MIP glpk:cli search controls executable not found");
+        } else {
+            self.check(
+                "IP/MIP glpk:cli search controls",
+                glpk_search_reference.status == "optimal"
+                    && glpk_search_reference.branch_rule.as_deref() == Some("first-fractional")
+                    && glpk_search_reference.node_selection.as_deref() == Some("dfs"),
+                format!(
+                    "status={} branch_rule={:?} node_selection={:?} objective={:?} message={}",
+                    glpk_search_reference.status,
+                    glpk_search_reference.branch_rule,
+                    glpk_search_reference.node_selection,
+                    glpk_search_reference.objective,
+                    glpk_search_reference.message
+                ),
+            );
+        }
+        let cbc_search_reference = self.run_linear_cli_reference_with_args(
+            "mip",
+            "cbc",
+            &mip_json,
+            &[
+                "--time-limit",
+                "5",
+                "--node-limit",
+                "0",
+                "--node-selection",
+                "dfs",
+            ],
+        );
+        if cbc_search_reference.status == "unavailable"
+            && cbc_search_reference.message.contains("not found")
+        {
+            println!("  SKIP  IP/MIP cbc:cli search controls executable not found");
+        } else {
+            self.check(
+                "IP/MIP cbc:cli search controls",
+                cbc_search_reference.status == "optimal"
+                    && cbc_search_reference.node_selection.as_deref() == Some("dfs"),
+                format!(
+                    "status={} branch_rule={:?} node_selection={:?} objective={:?} message={}",
+                    cbc_search_reference.status,
+                    cbc_search_reference.branch_rule,
+                    cbc_search_reference.node_selection,
+                    cbc_search_reference.objective,
+                    cbc_search_reference.message
+                ),
+            );
+        }
+
+        for solver in ["scip", "cbc"] {
+            let reference = self.run_linear_cli_reference_with_args(
+                "mip",
+                solver,
+                &mip_json,
+                &["--time-limit", "5", "--branch-priorities", "[0,10,0,0]"],
+            );
+            if reference.status == "unavailable" && reference.message.contains("not found") {
+                println!(
+                    "  SKIP  IP/MIP {solver}:cli branch-priority control executable not found"
+                );
+                continue;
+            }
+            self.check(
+                format!("IP/MIP {solver}:cli branch-priority control"),
+                reference.status == "optimal"
+                    && reference.branch_priorities_accepted == Some(true)
+                    && reference.branch_priority_count == Some(1),
+                format!(
+                    "status={} accepted={:?} count={:?} objective={:?} message={}",
+                    reference.status,
+                    reference.branch_priorities_accepted,
+                    reference.branch_priority_count,
+                    reference.objective,
+                    reference.message
+                ),
+            );
+        }
+
+        for solver in ["highs", "glpk", "scip", "cbc"] {
+            let reference = self.run_linear_cli_reference_with_args(
+                "mip",
+                solver,
+                &mip_json,
+                &[
+                    "--time-limit",
+                    "5",
+                    "--threads",
+                    "1",
+                    "--random-seed",
+                    "7",
+                    "--presolve",
+                    "off",
+                ],
+            );
+            if reference.status == "unavailable" && reference.message.contains("not found") {
+                println!("  SKIP  IP/MIP {solver}:cli operational controls executable not found");
+                continue;
+            }
+            let reports_threads = matches!(solver, "highs" | "scip" | "cbc");
+            self.check(
+                format!("IP/MIP {solver}:cli operational controls"),
+                reference.status == "optimal"
+                    && (!reports_threads || reference.threads == Some(1))
+                    && reference.random_seed == Some(7)
+                    && reference.presolve.as_deref() == Some("off"),
+                format!(
+                    "status={} threads={:?} random_seed={:?} presolve={:?} objective={:?} message={}",
+                    reference.status,
+                    reference.threads,
+                    reference.random_seed,
+                    reference.presolve,
+                    reference.objective,
+                    reference.message
+                ),
+            );
+        }
+
+        let mip_primal_tolerance = 1e-7;
+        let mip_dual_tolerance = 2e-7;
+        let mip_integer_tolerance = 1e-6;
+        for solver in ["highs", "scip", "cbc"] {
+            let reference = self.run_linear_cli_reference_with_args(
+                "mip",
+                solver,
+                &mip_json,
+                &[
+                    "--time-limit",
+                    "5",
+                    "--primal-feasibility-tolerance",
+                    "1e-7",
+                    "--dual-feasibility-tolerance",
+                    "2e-7",
+                    "--integer-feasibility-tolerance",
+                    "1e-6",
+                ],
+            );
+            if reference.status == "unavailable" && reference.message.contains("not found") {
+                println!("  SKIP  IP/MIP {solver}:cli tolerance controls executable not found");
+                continue;
+            }
+            let reports_integer = matches!(solver, "highs" | "cbc");
+            self.check(
+                format!("IP/MIP {solver}:cli tolerance controls"),
+                reference.status == "optimal"
+                    && reference
+                        .primal_feasibility_tolerance
+                        .is_some_and(|tol| (tol - mip_primal_tolerance).abs() <= 1e-12)
+                    && reference
+                        .dual_feasibility_tolerance
+                        .is_some_and(|tol| (tol - mip_dual_tolerance).abs() <= 1e-12)
+                    && (!reports_integer
+                        || reference
+                            .integer_feasibility_tolerance
+                            .is_some_and(|tol| (tol - mip_integer_tolerance).abs() <= 1e-12)),
+                format!(
+                    "status={} primal={:?} dual={:?} integer={:?} objective={:?} message={}",
+                    reference.status,
+                    reference.primal_feasibility_tolerance,
+                    reference.dual_feasibility_tolerance,
+                    reference.integer_feasibility_tolerance,
+                    reference.objective,
+                    reference.message
+                ),
+            );
+            self.close(
+                &format!("IP/MIP {solver}:cli tolerance objective"),
+                mip_internal.z,
+                reference.objective.unwrap_or(f64::NAN),
+                1e-6,
+            );
+        }
+
+        for solver in ["scip", "cbc"] {
+            let reference = self.run_linear_cli_reference_with_args(
+                "mip",
+                solver,
+                &mip_json,
+                &["--time-limit", "5", "--cuts", "off", "--heuristics", "off"],
+            );
+            if reference.status == "unavailable" && reference.message.contains("not found") {
+                println!("  SKIP  IP/MIP {solver}:cli strategy controls executable not found");
+                continue;
+            }
+            self.check(
+                format!("IP/MIP {solver}:cli strategy controls"),
+                reference.status == "optimal"
+                    && reference.cuts.as_deref() == Some("off")
+                    && reference.heuristics.as_deref() == Some("off"),
+                format!(
+                    "status={} cuts={:?} heuristics={:?} objective={:?} message={}",
+                    reference.status,
+                    reference.cuts,
+                    reference.heuristics,
+                    reference.objective,
+                    reference.message
+                ),
+            );
+        }
+        let glpk_cuts_reference = self.run_linear_cli_reference_with_args(
+            "mip",
+            "glpk",
+            &mip_json,
+            &["--time-limit", "5", "--cuts", "on"],
+        );
+        if glpk_cuts_reference.status == "unavailable"
+            && glpk_cuts_reference.message.contains("not found")
+        {
+            println!("  SKIP  IP/MIP glpk:cli cut controls executable not found");
+        } else {
+            self.check(
+                "IP/MIP glpk:cli cut controls",
+                glpk_cuts_reference.status == "optimal"
+                    && glpk_cuts_reference.cuts.as_deref() == Some("on"),
+                format!(
+                    "status={} cuts={:?} objective={:?} message={}",
+                    glpk_cuts_reference.status,
+                    glpk_cuts_reference.cuts,
+                    glpk_cuts_reference.objective,
+                    glpk_cuts_reference.message
+                ),
+            );
+        }
+
+        for (solver, expected_objective) in [("cbc", 90.0), ("scip", 0.0)] {
+            let reference = self.run_linear_cli_reference_with_args(
+                "mip",
+                solver,
+                &mip_json,
+                &["--time-limit", "5", "--solution-limit", "1"],
+            );
+            if reference.status == "unavailable" && reference.message.contains("not found") {
+                println!("  SKIP  IP/MIP {solver}:cli solution-limit executable not found");
+                continue;
+            }
+            self.check(
+                format!("IP/MIP {solver}:cli solution-limit feasible"),
+                reference.status == "feasible" && reference.solution_limit == Some(1),
+                format!(
+                    "status={} solution_limit={:?} objective={:?} best_bound={:?} message={}",
+                    reference.status,
+                    reference.solution_limit,
+                    reference.objective,
+                    reference.best_bound,
+                    reference.message
+                ),
+            );
+            self.close(
+                &format!("IP/MIP {solver}:cli solution-limit incumbent objective"),
+                expected_objective,
+                reference.objective.unwrap_or(f64::NAN),
+                1e-9,
+            );
+        }
+
+        for solver in ["highs", "scip"] {
+            let reference = self.run_linear_cli_reference_with_args(
+                "mip",
+                solver,
+                &mip_json,
+                &["--time-limit", "5", "--objective-limit", "80"],
+            );
+            if reference.status == "unavailable" && reference.message.contains("not found") {
+                println!("  SKIP  IP/MIP {solver}:cli objective-limit executable not found");
+                continue;
+            }
+            self.check(
+                format!("IP/MIP {solver}:cli objective-limit accepted"),
+                reference.status == "optimal"
+                    && reference
+                        .objective_limit
+                        .is_some_and(|limit| (limit - 80.0).abs() <= 1e-9),
+                format!(
+                    "status={} objective_limit={:?} objective={:?} message={}",
+                    reference.status,
+                    reference.objective_limit,
+                    reference.objective,
+                    reference.message
+                ),
+            );
+            self.close(
+                &format!("IP/MIP {solver}:cli objective-limit objective"),
+                mip_internal.z,
+                reference.objective.unwrap_or(f64::NAN),
+                1e-9,
+            );
+        }
+
+        for solver in ["cbc", "scip"] {
+            let reference = self.run_linear_cli_reference_with_args(
+                "mip",
+                solver,
+                &pool_json,
+                &["--time-limit", "5", "--solution-pool-size", "3"],
+            );
+            if reference.status == "unavailable" && reference.message.contains("not found") {
+                println!("  SKIP  IP/MIP {solver}:cli solution-pool executable not found");
+                continue;
+            }
+            let solutions = reference.solutions.as_deref().unwrap_or(&[]);
+            self.check(
+                format!("IP/MIP {solver}:cli solution-pool metadata"),
+                reference.status == "optimal"
+                    && reference.solution_pool_size == Some(3)
+                    && solutions.len() == expected_pool_x.len()
+                    && reference.exhausted == Some(false),
+                format!(
+                    "status={} pool_size={:?} len={} exhausted={:?} message={}",
+                    reference.status,
+                    reference.solution_pool_size,
+                    solutions.len(),
+                    reference.exhausted,
+                    reference.message
+                ),
+            );
+            for (idx, expected_x) in expected_pool_x.iter().enumerate() {
+                let Some(solution) = solutions.get(idx) else {
+                    continue;
+                };
+                self.close(
+                    &format!("IP/MIP {solver}:cli solution-pool objective[{idx}]"),
+                    expected_pool_objectives[idx],
+                    solution.objective,
+                    1e-9,
+                );
+                self.max_abs_close(
+                    &format!("IP/MIP {solver}:cli solution-pool x[{idx}]"),
+                    expected_x,
+                    &solution.x,
+                    1e-9,
+                );
+            }
+        }
+
+        for solver in ["highs", "scip", "cbc"] {
+            let reference = self.run_linear_cli_reference_with_args(
+                "mip",
+                solver,
+                &mip_json,
+                &[
+                    "--time-limit",
+                    "5",
+                    "--node-limit",
+                    "0",
+                    "--absolute-gap",
+                    "1",
+                ],
+            );
+            if reference.status == "unavailable" && reference.message.contains("not found") {
+                println!("  SKIP  IP/MIP {solver}:cli absolute-gap control executable not found");
+                continue;
+            }
+            let reports_absolute_gap = matches!(solver, "highs" | "scip");
+            self.check(
+                format!("IP/MIP {solver}:cli absolute-gap control"),
+                reference.status == "optimal"
+                    && reference.nodes_explored.is_some()
+                    && (!reports_absolute_gap
+                        || reference.absolute_gap.is_some_and(|gap| gap <= 1e-9)),
+                format!(
+                    "status={} best_bound={:?} objective={:?} absolute_gap={:?} nodes={:?} message={}",
+                    reference.status,
+                    reference.best_bound,
+                    reference.objective,
+                    reference.absolute_gap,
+                    reference.nodes_explored,
+                    reference.message
+                ),
+            );
+        }
+
+        let mip_start_json = "[1,0,0,0]";
+        for solver in ["highs", "scip", "cbc"] {
+            let reference = self.run_linear_cli_reference_with_args(
+                "mip",
+                solver,
+                &mip_json,
+                &[
+                    "--time-limit",
+                    "5",
+                    "--node-limit",
+                    "0",
+                    "--mip-start",
+                    mip_start_json,
+                ],
+            );
+            if reference.status == "unavailable" && reference.message.contains("not found") {
+                println!("  SKIP  IP/MIP {solver}:cli mip-start executable not found");
+                continue;
+            }
+            self.check(
+                format!("IP/MIP {solver}:cli mip-start accepted"),
+                reference.status == "optimal" && reference.mip_start_accepted == Some(true),
+                format!(
+                    "status={} accepted={:?} start_objective={:?} objective={:?} message={}",
+                    reference.status,
+                    reference.mip_start_accepted,
+                    reference.mip_start_objective,
+                    reference.objective,
+                    reference.message
+                ),
+            );
+            self.close(
+                &format!("IP/MIP {solver}:cli mip-start objective"),
+                10.0,
+                reference.mip_start_objective.unwrap_or(f64::NAN),
+                1e-9,
             );
         }
 
@@ -1435,6 +2788,46 @@ impl Driver {
                 &reference.x,
                 1e-8,
             );
+            if solver == ExternalLinearCliSolver::Highs {
+                self.check(
+                    "IP/MIP highs:rust-cli quality metadata",
+                    reference
+                        .best_bound
+                        .zip(reference.objective)
+                        .is_some_and(|(bound, objective)| (bound - objective).abs() <= 1e-9)
+                        && reference.mip_gap.is_some_and(|gap| gap <= 1e-9)
+                        && reference.nodes_explored.is_some(),
+                    format!(
+                        "best_bound={:?} objective={:?} gap={:?} nodes={:?}",
+                        reference.best_bound,
+                        reference.objective,
+                        reference.mip_gap,
+                        reference.nodes_explored
+                    ),
+                );
+            }
+            if solver == ExternalLinearCliSolver::Scip {
+                self.check(
+                    "IP/MIP scip:rust-cli quality metadata",
+                    reference
+                        .best_bound
+                        .zip(reference.objective)
+                        .is_some_and(|(bound, objective)| (bound - objective).abs() <= 1e-9)
+                        && reference.mip_gap.is_some_and(|gap| gap <= 1e-9)
+                        && reference.nodes_explored.is_some(),
+                    format!(
+                        "best_bound={:?} objective={:?} gap={:?} nodes={:?}",
+                        reference.best_bound,
+                        reference.objective,
+                        reference.mip_gap,
+                        reference.nodes_explored
+                    ),
+                );
+            }
+        }
+
+        for solver in ExternalLinearCliSolver::open_source_mip().iter().copied() {
+            let solver_name = solver.as_str();
             let mps_reference = solve_ipmip_with_external_cli(
                 &mip,
                 &ExternalLinearCliOptions {
@@ -1448,6 +2841,12 @@ impl Driver {
                     ..Default::default()
                 },
             );
+            if mps_reference.status == ExternalLinearCliStatus::Unavailable
+                && mps_reference.message.contains("not found")
+            {
+                println!("  SKIP  IP/MIP {solver_name}:rust-cli MPS executable not found");
+                continue;
+            }
             self.check(
                 format!("IP/MIP {solver_name}:rust-cli MPS status optimal"),
                 mip_internal.status == IPMIPStatus::Optimal
@@ -1470,6 +2869,618 @@ impl Driver {
                 &mip_internal.x,
                 &mps_reference.x,
                 1e-8,
+            );
+        }
+
+        for solver in [
+            ExternalLinearCliSolver::Highs,
+            ExternalLinearCliSolver::Scip,
+            ExternalLinearCliSolver::Cbc,
+        ] {
+            let solver_name = solver.as_str();
+            let reference = solve_ipmip_with_external_cli(
+                &lazy_mip,
+                &ExternalLinearCliOptions {
+                    solver,
+                    ..Default::default()
+                },
+            );
+            if reference.status == ExternalLinearCliStatus::Unavailable
+                && reference.message.contains("not found")
+            {
+                println!(
+                    "  SKIP  IP/MIP {solver_name}:rust-cli lazy constraints executable not found"
+                );
+                continue;
+            }
+            self.check(
+                format!("IP/MIP {solver_name}:rust-cli lazy constraints status"),
+                lazy_internal.status == IPMIPStatus::Optimal
+                    && reference.status == ExternalLinearCliStatus::Optimal,
+                format!(
+                    "internal={} external={} solver={} message={}",
+                    lazy_internal.status.as_str(),
+                    reference.status.as_str(),
+                    reference.solver,
+                    reference.message
+                ),
+            );
+            self.close(
+                &format!("IP/MIP {solver_name}:rust-cli lazy constraints objective"),
+                lazy_internal.z,
+                reference.objective.unwrap_or(f64::NAN),
+                1e-9,
+            );
+            self.check(
+                format!("IP/MIP {solver_name}:rust-cli lazy constraints cut changed optimum"),
+                reference
+                    .objective
+                    .is_some_and(|objective| objective < 2.0 - 1e-9),
+                format!("objective={:?} x={:?}", reference.objective, reference.x),
+            );
+        }
+
+        let glpk_search_reference = solve_ipmip_with_external_cli(
+            &mip,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Glpk,
+                time_limit_secs: Some(5.0),
+                branch_rule: Some(ExternalLinearCliBranchRule::FirstFractional),
+                node_selection: Some(ExternalLinearCliNodeSelection::Dfs),
+                ..Default::default()
+            },
+        );
+        if glpk_search_reference.status == ExternalLinearCliStatus::Unavailable
+            && glpk_search_reference.message.contains("not found")
+        {
+            println!("  SKIP  IP/MIP glpk:rust-cli search controls executable not found");
+        } else {
+            self.check(
+                "IP/MIP glpk:rust-cli search controls",
+                glpk_search_reference.status == ExternalLinearCliStatus::Optimal
+                    && glpk_search_reference.branch_rule.as_deref() == Some("first-fractional")
+                    && glpk_search_reference.node_selection.as_deref() == Some("dfs"),
+                format!(
+                    "status={} branch_rule={:?} node_selection={:?} objective={:?} message={}",
+                    glpk_search_reference.status.as_str(),
+                    glpk_search_reference.branch_rule,
+                    glpk_search_reference.node_selection,
+                    glpk_search_reference.objective,
+                    glpk_search_reference.message
+                ),
+            );
+        }
+        let cbc_search_reference = solve_ipmip_with_external_cli(
+            &mip,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Cbc,
+                time_limit_secs: Some(5.0),
+                max_nodes: Some(0),
+                node_selection: Some(ExternalLinearCliNodeSelection::Dfs),
+                ..Default::default()
+            },
+        );
+        if cbc_search_reference.status == ExternalLinearCliStatus::Unavailable
+            && cbc_search_reference.message.contains("not found")
+        {
+            println!("  SKIP  IP/MIP cbc:rust-cli search controls executable not found");
+        } else {
+            self.check(
+                "IP/MIP cbc:rust-cli search controls",
+                cbc_search_reference.status == ExternalLinearCliStatus::Optimal
+                    && cbc_search_reference.node_selection.as_deref() == Some("dfs"),
+                format!(
+                    "status={} branch_rule={:?} node_selection={:?} objective={:?} message={}",
+                    cbc_search_reference.status.as_str(),
+                    cbc_search_reference.branch_rule,
+                    cbc_search_reference.node_selection,
+                    cbc_search_reference.objective,
+                    cbc_search_reference.message
+                ),
+            );
+        }
+
+        for solver in [ExternalLinearCliSolver::Scip, ExternalLinearCliSolver::Cbc] {
+            let solver_name = solver.as_str();
+            let reference = solve_ipmip_with_external_cli(
+                &mip,
+                &ExternalLinearCliOptions {
+                    solver,
+                    time_limit_secs: Some(5.0),
+                    branch_priorities: Some(vec![0, 10, 0, 0]),
+                    ..Default::default()
+                },
+            );
+            if reference.status == ExternalLinearCliStatus::Unavailable
+                && reference.message.contains("not found")
+            {
+                println!(
+                    "  SKIP  IP/MIP {solver_name}:rust-cli branch-priority control executable not found"
+                );
+                continue;
+            }
+            self.check(
+                format!("IP/MIP {solver_name}:rust-cli branch-priority control"),
+                reference.status == ExternalLinearCliStatus::Optimal
+                    && reference.branch_priorities_accepted == Some(true)
+                    && reference.branch_priority_count == Some(1),
+                format!(
+                    "status={} accepted={:?} count={:?} objective={:?} message={}",
+                    reference.status.as_str(),
+                    reference.branch_priorities_accepted,
+                    reference.branch_priority_count,
+                    reference.objective,
+                    reference.message
+                ),
+            );
+        }
+
+        for solver in [
+            ExternalLinearCliSolver::Highs,
+            ExternalLinearCliSolver::Glpk,
+            ExternalLinearCliSolver::Scip,
+            ExternalLinearCliSolver::Cbc,
+        ] {
+            let solver_name = solver.as_str();
+            let reference = solve_ipmip_with_external_cli(
+                &mip,
+                &ExternalLinearCliOptions {
+                    solver,
+                    time_limit_secs: Some(5.0),
+                    threads: Some(1),
+                    random_seed: Some(7),
+                    presolve: Some(ExternalLinearCliPresolve::Off),
+                    ..Default::default()
+                },
+            );
+            if reference.status == ExternalLinearCliStatus::Unavailable
+                && reference.message.contains("not found")
+            {
+                println!(
+                    "  SKIP  IP/MIP {solver_name}:rust-cli operational controls executable not found"
+                );
+                continue;
+            }
+            let reports_threads = matches!(
+                solver,
+                ExternalLinearCliSolver::Highs
+                    | ExternalLinearCliSolver::Scip
+                    | ExternalLinearCliSolver::Cbc
+            );
+            self.check(
+                format!("IP/MIP {solver_name}:rust-cli operational controls"),
+                reference.status == ExternalLinearCliStatus::Optimal
+                    && (!reports_threads || reference.threads == Some(1))
+                    && reference.random_seed == Some(7)
+                    && reference.presolve.as_deref() == Some("off"),
+                format!(
+                    "status={} threads={:?} random_seed={:?} presolve={:?} objective={:?} message={}",
+                    reference.status.as_str(),
+                    reference.threads,
+                    reference.random_seed,
+                    reference.presolve,
+                    reference.objective,
+                    reference.message
+                ),
+            );
+        }
+
+        for solver in [
+            ExternalLinearCliSolver::Highs,
+            ExternalLinearCliSolver::Scip,
+            ExternalLinearCliSolver::Cbc,
+        ] {
+            let solver_name = solver.as_str();
+            let reference = solve_ipmip_with_external_cli(
+                &mip,
+                &ExternalLinearCliOptions {
+                    solver,
+                    time_limit_secs: Some(5.0),
+                    primal_feasibility_tolerance: Some(mip_primal_tolerance),
+                    dual_feasibility_tolerance: Some(mip_dual_tolerance),
+                    integer_feasibility_tolerance: Some(mip_integer_tolerance),
+                    ..Default::default()
+                },
+            );
+            if reference.status == ExternalLinearCliStatus::Unavailable
+                && reference.message.contains("not found")
+            {
+                println!(
+                    "  SKIP  IP/MIP {solver_name}:rust-cli tolerance controls executable not found"
+                );
+                continue;
+            }
+            let reports_integer = matches!(
+                solver,
+                ExternalLinearCliSolver::Highs | ExternalLinearCliSolver::Cbc
+            );
+            self.check(
+                format!("IP/MIP {solver_name}:rust-cli tolerance controls"),
+                reference.status == ExternalLinearCliStatus::Optimal
+                    && reference
+                        .primal_feasibility_tolerance
+                        .is_some_and(|tol| (tol - mip_primal_tolerance).abs() <= 1e-12)
+                    && reference
+                        .dual_feasibility_tolerance
+                        .is_some_and(|tol| (tol - mip_dual_tolerance).abs() <= 1e-12)
+                    && (!reports_integer
+                        || reference
+                            .integer_feasibility_tolerance
+                            .is_some_and(|tol| (tol - mip_integer_tolerance).abs() <= 1e-12)),
+                format!(
+                    "status={} primal={:?} dual={:?} integer={:?} objective={:?} message={}",
+                    reference.status.as_str(),
+                    reference.primal_feasibility_tolerance,
+                    reference.dual_feasibility_tolerance,
+                    reference.integer_feasibility_tolerance,
+                    reference.objective,
+                    reference.message
+                ),
+            );
+            self.close(
+                &format!("IP/MIP {solver_name}:rust-cli tolerance objective"),
+                mip_internal.z,
+                reference.objective.unwrap_or(f64::NAN),
+                1e-6,
+            );
+        }
+
+        for solver in [ExternalLinearCliSolver::Scip, ExternalLinearCliSolver::Cbc] {
+            let solver_name = solver.as_str();
+            let reference = solve_ipmip_with_external_cli(
+                &mip,
+                &ExternalLinearCliOptions {
+                    solver,
+                    time_limit_secs: Some(5.0),
+                    cuts: Some(ExternalLinearCliMipSwitch::Off),
+                    heuristics: Some(ExternalLinearCliMipSwitch::Off),
+                    ..Default::default()
+                },
+            );
+            if reference.status == ExternalLinearCliStatus::Unavailable
+                && reference.message.contains("not found")
+            {
+                println!(
+                    "  SKIP  IP/MIP {solver_name}:rust-cli strategy controls executable not found"
+                );
+                continue;
+            }
+            self.check(
+                format!("IP/MIP {solver_name}:rust-cli strategy controls"),
+                reference.status == ExternalLinearCliStatus::Optimal
+                    && reference.cuts.as_deref() == Some("off")
+                    && reference.heuristics.as_deref() == Some("off"),
+                format!(
+                    "status={} cuts={:?} heuristics={:?} objective={:?} message={}",
+                    reference.status.as_str(),
+                    reference.cuts,
+                    reference.heuristics,
+                    reference.objective,
+                    reference.message
+                ),
+            );
+        }
+        let glpk_cuts_reference = solve_ipmip_with_external_cli(
+            &mip,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Glpk,
+                time_limit_secs: Some(5.0),
+                cuts: Some(ExternalLinearCliMipSwitch::On),
+                ..Default::default()
+            },
+        );
+        if glpk_cuts_reference.status == ExternalLinearCliStatus::Unavailable
+            && glpk_cuts_reference.message.contains("not found")
+        {
+            println!("  SKIP  IP/MIP glpk:rust-cli cut controls executable not found");
+        } else {
+            self.check(
+                "IP/MIP glpk:rust-cli cut controls",
+                glpk_cuts_reference.status == ExternalLinearCliStatus::Optimal
+                    && glpk_cuts_reference.cuts.as_deref() == Some("on"),
+                format!(
+                    "status={} cuts={:?} objective={:?} message={}",
+                    glpk_cuts_reference.status.as_str(),
+                    glpk_cuts_reference.cuts,
+                    glpk_cuts_reference.objective,
+                    glpk_cuts_reference.message
+                ),
+            );
+        }
+
+        for (solver, expected_objective) in [
+            (ExternalLinearCliSolver::Cbc, 90.0),
+            (ExternalLinearCliSolver::Scip, 0.0),
+        ] {
+            let solver_name = solver.as_str();
+            let reference = solve_ipmip_with_external_cli(
+                &mip,
+                &ExternalLinearCliOptions {
+                    solver,
+                    time_limit_secs: Some(5.0),
+                    solution_limit: Some(1),
+                    ..Default::default()
+                },
+            );
+            if reference.status == ExternalLinearCliStatus::Unavailable
+                && reference.message.contains("not found")
+            {
+                println!(
+                    "  SKIP  IP/MIP {solver_name}:rust-cli solution-limit executable not found"
+                );
+                continue;
+            }
+            self.check(
+                format!("IP/MIP {solver_name}:rust-cli solution-limit feasible"),
+                reference.status == ExternalLinearCliStatus::Feasible
+                    && reference.solution_limit == Some(1),
+                format!(
+                    "status={} solution_limit={:?} objective={:?} best_bound={:?} message={}",
+                    reference.status.as_str(),
+                    reference.solution_limit,
+                    reference.objective,
+                    reference.best_bound,
+                    reference.message
+                ),
+            );
+            self.close(
+                &format!("IP/MIP {solver_name}:rust-cli solution-limit incumbent objective"),
+                expected_objective,
+                reference.objective.unwrap_or(f64::NAN),
+                1e-9,
+            );
+        }
+
+        for solver in [
+            ExternalLinearCliSolver::Highs,
+            ExternalLinearCliSolver::Scip,
+        ] {
+            let solver_name = solver.as_str();
+            let reference = solve_ipmip_with_external_cli(
+                &mip,
+                &ExternalLinearCliOptions {
+                    solver,
+                    time_limit_secs: Some(5.0),
+                    objective_limit: Some(80.0),
+                    ..Default::default()
+                },
+            );
+            if reference.status == ExternalLinearCliStatus::Unavailable
+                && reference.message.contains("not found")
+            {
+                println!(
+                    "  SKIP  IP/MIP {solver_name}:rust-cli objective-limit executable not found"
+                );
+                continue;
+            }
+            self.check(
+                format!("IP/MIP {solver_name}:rust-cli objective-limit accepted"),
+                reference.status == ExternalLinearCliStatus::Optimal
+                    && reference
+                        .objective_limit
+                        .is_some_and(|limit| (limit - 80.0).abs() <= 1e-9),
+                format!(
+                    "status={} objective_limit={:?} objective={:?} message={}",
+                    reference.status.as_str(),
+                    reference.objective_limit,
+                    reference.objective,
+                    reference.message
+                ),
+            );
+            self.close(
+                &format!("IP/MIP {solver_name}:rust-cli objective-limit objective"),
+                mip_internal.z,
+                reference.objective.unwrap_or(f64::NAN),
+                1e-9,
+            );
+        }
+
+        for solver in [ExternalLinearCliSolver::Cbc, ExternalLinearCliSolver::Scip] {
+            let solver_name = solver.as_str();
+            let reference = solve_ipmip_with_external_cli(
+                &pool_mip,
+                &ExternalLinearCliOptions {
+                    solver,
+                    time_limit_secs: Some(5.0),
+                    solution_pool_size: Some(3),
+                    ..Default::default()
+                },
+            );
+            if reference.status == ExternalLinearCliStatus::Unavailable
+                && reference.message.contains("not found")
+            {
+                println!(
+                    "  SKIP  IP/MIP {solver_name}:rust-cli solution-pool executable not found"
+                );
+                continue;
+            }
+            let solutions = reference.solutions.as_deref().unwrap_or(&[]);
+            self.check(
+                format!("IP/MIP {solver_name}:rust-cli solution-pool metadata"),
+                reference.status == ExternalLinearCliStatus::Optimal
+                    && reference.solution_pool_size == Some(3)
+                    && solutions.len() == expected_pool_x.len()
+                    && reference.exhausted == Some(false),
+                format!(
+                    "status={} pool_size={:?} len={} exhausted={:?} message={}",
+                    reference.status.as_str(),
+                    reference.solution_pool_size,
+                    solutions.len(),
+                    reference.exhausted,
+                    reference.message
+                ),
+            );
+            for (idx, expected_x) in expected_pool_x.iter().enumerate() {
+                let Some(solution) = solutions.get(idx) else {
+                    continue;
+                };
+                self.close(
+                    &format!("IP/MIP {solver_name}:rust-cli solution-pool objective[{idx}]"),
+                    expected_pool_objectives[idx],
+                    solution.objective,
+                    1e-9,
+                );
+                self.max_abs_close(
+                    &format!("IP/MIP {solver_name}:rust-cli solution-pool x[{idx}]"),
+                    expected_x,
+                    &solution.x,
+                    1e-9,
+                );
+            }
+        }
+
+        for solver in [
+            ExternalLinearCliSolver::Highs,
+            ExternalLinearCliSolver::Scip,
+            ExternalLinearCliSolver::Cbc,
+        ] {
+            let solver_name = solver.as_str();
+            let reference = solve_ipmip_with_external_cli(
+                &mip,
+                &ExternalLinearCliOptions {
+                    solver,
+                    time_limit_secs: Some(5.0),
+                    max_nodes: Some(0),
+                    absolute_gap: Some(1.0),
+                    ..Default::default()
+                },
+            );
+            if reference.status == ExternalLinearCliStatus::Unavailable
+                && reference.message.contains("not found")
+            {
+                println!(
+                    "  SKIP  IP/MIP {solver_name}:rust-cli absolute-gap control executable not found"
+                );
+                continue;
+            }
+            let reports_absolute_gap = matches!(
+                solver,
+                ExternalLinearCliSolver::Highs | ExternalLinearCliSolver::Scip
+            );
+            self.check(
+                format!("IP/MIP {solver_name}:rust-cli absolute-gap control"),
+                reference.status == ExternalLinearCliStatus::Optimal
+                    && reference.nodes_explored.is_some()
+                    && (!reports_absolute_gap
+                        || reference.absolute_gap.is_some_and(|gap| gap <= 1e-9)),
+                format!(
+                    "status={} best_bound={:?} objective={:?} absolute_gap={:?} nodes={:?} message={}",
+                    reference.status.as_str(),
+                    reference.best_bound,
+                    reference.objective,
+                    reference.absolute_gap,
+                    reference.nodes_explored,
+                    reference.message
+                ),
+            );
+        }
+
+        for solver in [
+            ExternalLinearCliSolver::Highs,
+            ExternalLinearCliSolver::Scip,
+            ExternalLinearCliSolver::Cbc,
+        ] {
+            let solver_name = solver.as_str();
+            let reference = solve_ipmip_with_external_cli(
+                &mip,
+                &ExternalLinearCliOptions {
+                    solver,
+                    time_limit_secs: Some(5.0),
+                    max_nodes: Some(0),
+                    mip_start: Some(vec![1.0, 0.0, 0.0, 0.0]),
+                    ..Default::default()
+                },
+            );
+            if reference.status == ExternalLinearCliStatus::Unavailable
+                && reference.message.contains("not found")
+            {
+                println!("  SKIP  IP/MIP {solver_name}:rust-cli mip-start executable not found");
+                continue;
+            }
+            self.check(
+                format!("IP/MIP {solver_name}:rust-cli mip-start accepted"),
+                reference.status == ExternalLinearCliStatus::Optimal
+                    && reference.mip_start_accepted == Some(true),
+                format!(
+                    "status={} accepted={:?} start_objective={:?} objective={:?} message={}",
+                    reference.status.as_str(),
+                    reference.mip_start_accepted,
+                    reference.mip_start_objective,
+                    reference.objective,
+                    reference.message
+                ),
+            );
+            self.close(
+                &format!("IP/MIP {solver_name}:rust-cli mip-start objective"),
+                10.0,
+                reference.mip_start_objective.unwrap_or(f64::NAN),
+                1e-9,
+            );
+        }
+
+        for solver in [
+            ExternalLinearCliSolver::Highs,
+            ExternalLinearCliSolver::Scip,
+            ExternalLinearCliSolver::Cbc,
+        ] {
+            let solver_name = solver.as_str();
+            let reference = solve_ipmip_with_external_cli(
+                &mip,
+                &ExternalLinearCliOptions {
+                    solver,
+                    time_limit_secs: Some(5.0),
+                    max_nodes: Some(0),
+                    relative_gap: Some(0.25),
+                    ..Default::default()
+                },
+            );
+            if reference.status == ExternalLinearCliStatus::Unavailable
+                && reference.message.contains("not found")
+            {
+                println!(
+                    "  SKIP  IP/MIP {solver_name}:rust-cli node/gap controls executable not found"
+                );
+                continue;
+            }
+            self.check(
+                format!("IP/MIP {solver_name}:rust-cli node/gap controls"),
+                reference.status == ExternalLinearCliStatus::Optimal
+                    && reference.nodes_explored.is_some()
+                    && reference.mip_gap.is_some(),
+                format!(
+                    "status={} best_bound={:?} objective={:?} gap={:?} nodes={:?} message={}",
+                    reference.status.as_str(),
+                    reference.best_bound,
+                    reference.objective,
+                    reference.mip_gap,
+                    reference.nodes_explored,
+                    reference.message
+                ),
+            );
+        }
+        let glpk_gap_reference = solve_ipmip_with_external_cli(
+            &mip,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Glpk,
+                time_limit_secs: Some(5.0),
+                relative_gap: Some(0.25),
+                ..Default::default()
+            },
+        );
+        if glpk_gap_reference.status == ExternalLinearCliStatus::Unavailable
+            && glpk_gap_reference.message.contains("not found")
+        {
+            println!("  SKIP  IP/MIP glpk:rust-cli relative-gap control executable not found");
+        } else {
+            self.check(
+                "IP/MIP glpk:rust-cli relative-gap control",
+                glpk_gap_reference.status == ExternalLinearCliStatus::Optimal,
+                format!(
+                    "status={} objective={:?} message={}",
+                    glpk_gap_reference.status.as_str(),
+                    glpk_gap_reference.objective,
+                    glpk_gap_reference.message
+                ),
             );
         }
 
@@ -2675,6 +4686,14 @@ impl Driver {
             &[
                 ecosystem_invocation("choco-reference", ExternalOptimizationTool::ChocoSolver),
                 ecosystem_invocation("jacop-reference", ExternalOptimizationTool::Jacop),
+                ecosystem_invocation(
+                    "ibm-cp-optimizer-reference",
+                    ExternalOptimizationTool::IbmCpOptimizer,
+                ),
+                ecosystem_invocation(
+                    "ortools-java-reference",
+                    ExternalOptimizationTool::OrToolsJava,
+                ),
             ],
             1e-9,
             1e-9,
@@ -2701,7 +4720,15 @@ impl Driver {
             &linear_payload,
             &[
                 ecosystem_invocation("good-lp-reference", ExternalOptimizationTool::GoodLp),
+                ecosystem_invocation("lp-modeler-reference", ExternalOptimizationTool::LpModeler),
+                ecosystem_invocation(
+                    "rust-linprog-reference",
+                    ExternalOptimizationTool::RustLinprog,
+                ),
                 ecosystem_invocation("ojalgo-reference", ExternalOptimizationTool::OjAlgo),
+                ecosystem_invocation("highs-rust-reference", ExternalOptimizationTool::HighsRust),
+                ecosystem_invocation("scip-rust-reference", ExternalOptimizationTool::ScipRust),
+                ecosystem_invocation("cbc-rust-reference", ExternalOptimizationTool::CbcRust),
             ],
             1e-9,
             1e-9,
@@ -2716,6 +4743,34 @@ impl Driver {
                 linear_report.agreement,
                 linear_report.reference_objective,
                 linear_report.reference_solution
+            ),
+        );
+
+        let planning_payload = serde_json::json!({
+            "kind": "ecosystem-planning-assignment",
+            "task_durations": [2, 3, 4],
+            "machines": 2,
+            "capacities": [6, 6]
+        });
+        let planning_report = run_external_optimization_comparison(
+            &planning_payload,
+            &[ecosystem_invocation(
+                "optaplanner-reference",
+                ExternalOptimizationTool::OptaPlanner,
+            )],
+            1e-9,
+            1e-9,
+        );
+        self.check(
+            "External optimization ecosystem planning reference bridge",
+            planning_report.agreement
+                && planning_report.reference_objective == Some(5.0)
+                && planning_report.reference_solution.as_deref() == Some(&[0.0, 0.0, 1.0]),
+            format!(
+                "agreement={} objective={:?} solution={:?}",
+                planning_report.agreement,
+                planning_report.reference_objective,
+                planning_report.reference_solution
             ),
         );
 
@@ -2738,6 +4793,7 @@ impl Driver {
                     "moea-framework-reference",
                     ExternalOptimizationTool::MoeaFramework,
                 ),
+                ecosystem_invocation("ecj-reference", ExternalOptimizationTool::Ecj),
             ],
             1e-9,
             1e-9,
@@ -2788,6 +4844,35 @@ impl Driver {
             ),
         );
 
+        let reference_reports = [
+            &cp_report,
+            &linear_report,
+            &planning_report,
+            &multiobjective_report,
+            &nonlinear_report,
+        ];
+        let reference_bridge_count: usize = reference_reports
+            .iter()
+            .map(|report| report.runs.len())
+            .sum();
+        let all_requested_tools_have_reference_bridge =
+            external_optimization_tools().iter().copied().all(|tool| {
+                reference_reports
+                    .iter()
+                    .any(|report| report.runs.iter().any(|run| run.run.tool == tool))
+            });
+        self.check(
+            "External optimization ecosystem reference bridges cover every requested tool",
+            reference_bridge_count == external_optimization_tools().len()
+                && all_requested_tools_have_reference_bridge,
+            format!(
+                "reference_runs={} tools={} all_covered={}",
+                reference_bridge_count,
+                external_optimization_tools().len(),
+                all_requested_tools_have_reference_bridge
+            ),
+        );
+
         for spec in specs {
             let probe = probe_external_optimization_tool(&ExternalOptimizationAdapterOptions {
                 tool: spec.tool,
@@ -2826,7 +4911,7 @@ impl Driver {
         let specs = external_validation_tool_specs();
         self.check(
             "External validation registry covers recommended tools",
-            specs.len() == 87,
+            specs.len() == 135,
             format!("tools={}", specs.len()),
         );
         for (family, expected_at_least) in [
@@ -2834,12 +4919,12 @@ impl Driver {
             (ExternalValidationFamily::SmtSolver, 5),
             (ExternalValidationFamily::SatSolver, 3),
             (ExternalValidationFamily::ProofChecker, 2),
-            (ExternalValidationFamily::FormalModelChecker, 11),
+            (ExternalValidationFamily::FormalModelChecker, 31),
             (ExternalValidationFamily::BenchmarkLibrary, 9),
-            (ExternalValidationFamily::NonlinearGlobalSolver, 9),
-            (ExternalValidationFamily::ConvexConicSolver, 8),
-            (ExternalValidationFamily::SimulationEngine, 23),
-            (ExternalValidationFamily::OutputDataValidator, 12),
+            (ExternalValidationFamily::NonlinearGlobalSolver, 11),
+            (ExternalValidationFamily::ConvexConicSolver, 10),
+            (ExternalValidationFamily::SimulationEngine, 34),
+            (ExternalValidationFamily::OutputDataValidator, 25),
         ] {
             let count = specs.iter().filter(|spec| spec.family == family).count();
             self.check(
@@ -2854,16 +4939,27 @@ impl Driver {
                 && specs.iter().any(|spec| spec.id == "z3")
                 && specs.iter().any(|spec| spec.id == "drat-trim")
                 && specs.iter().any(|spec| spec.id == "tlc")
+                && specs.iter().any(|spec| spec.id == "kodkod")
                 && specs.iter().any(|spec| spec.id == "miplib")
                 && specs.iter().any(|spec| spec.id == "ipopt")
                 && specs.iter().any(|spec| spec.id == "osqp")
                 && specs.iter().any(|spec| spec.id == "cbmc")
                 && specs.iter().any(|spec| spec.id == "simpy")
+                && specs.iter().any(|spec| spec.id == "agentpy")
+                && specs.iter().any(|spec| spec.id == "cloudsim")
+                && specs.iter().any(|spec| spec.id == "batsim")
+                && specs.iter().any(|spec| spec.id == "cape-open")
                 && specs.iter().any(|spec| spec.id == "energyplus")
                 && specs.iter().any(|spec| spec.id == "anylogic")
                 && specs.iter().any(|spec| spec.id == "great-expectations")
+                && specs.iter().any(|spec| spec.id == "jing")
+                && specs.iter().any(|spec| spec.id == "saxon")
+                && specs.iter().any(|spec| spec.id == "xml-schema")
+                && specs.iter().any(|spec| spec.id == "csv-validator")
+                && specs.iter().any(|spec| spec.id == "protoc")
+                && specs.iter().any(|spec| spec.id == "apache-avro")
                 && specs.iter().any(|spec| spec.id == "frictionless"),
-            "checked MiniZinc, Z3, DRAT, TLC, MIPLIB, Ipopt, OSQP, CBMC, SimPy, EnergyPlus, AnyLogic, GX, and Frictionless".to_string(),
+            "checked MiniZinc, Z3, DRAT, TLC, MIPLIB, Ipopt, OSQP, CBMC, simulation engines, GX, XML, CSV, Protobuf, Avro, and Frictionless".to_string(),
         );
 
         let minizinc_payload = minizinc_validation_request_to_json(&MiniZincValidationRequest {
@@ -2933,6 +5029,30 @@ impl Driver {
                 minizinc_bridge_run["validator"].as_str().unwrap_or("")
             ),
         );
+        let minizinc_registered_tool_payload = serde_json::json!({
+            "model": "var 0..5: x; constraint x >= 1; solve satisfy;"
+        });
+        for tool in ["flatzinc", "gecode", "chuffed", "minizinc-solution-checker"] {
+            let registered_tool_run = self.run_python_json(
+                "model_validation_reference.py",
+                &["--tool", tool],
+                &minizinc_registered_tool_payload.to_string(),
+            );
+            self.check(
+                format!("External validation {tool} MiniZinc-family registered-tool payload"),
+                registered_tool_run["status"].as_str() == Some("ok")
+                    && registered_tool_run["verdict"].as_str() == Some("sat")
+                    && registered_tool_run["stdout"]
+                        .as_str()
+                        .is_some_and(|stdout| stdout.contains("x =")),
+                format!(
+                    "status={} verdict={} validator={}",
+                    registered_tool_run["status"].as_str().unwrap_or(""),
+                    registered_tool_run["verdict"].as_str().unwrap_or(""),
+                    registered_tool_run["validator"].as_str().unwrap_or("")
+                ),
+            );
+        }
 
         let smt_bridge_payload = serde_json::json!({
             "kind": "smtlib-validation",
@@ -2954,6 +5074,67 @@ impl Driver {
                 smt_bridge_run["validator"].as_str().unwrap_or("")
             ),
         );
+        let yices_smt_bridge_payload = serde_json::json!({
+            "script": smtlib,
+        });
+        let yices_smt_bridge_run = self.run_python_json(
+            "model_validation_reference.py",
+            &["--tool", "yices"],
+            &yices_smt_bridge_payload.to_string(),
+        );
+        self.check(
+            "External validation Yices SMT-LIB bridge registered-tool payload",
+            yices_smt_bridge_run["status"].as_str() == Some("ok")
+                && yices_smt_bridge_run["verdict"].as_str() == Some("sat"),
+            format!(
+                "status={} verdict={} validator={}",
+                yices_smt_bridge_run["status"].as_str().unwrap_or(""),
+                yices_smt_bridge_run["verdict"].as_str().unwrap_or(""),
+                yices_smt_bridge_run["validator"].as_str().unwrap_or("")
+            ),
+        );
+        let generic_smt_sat_payload = serde_json::json!({
+            "script": "(check-sat)\n",
+        });
+        for tool in ["cvc5", "bitwuzla", "boolector"] {
+            let registered_smt_run = self.run_python_json(
+                "model_validation_reference.py",
+                &["--tool", tool],
+                &generic_smt_sat_payload.to_string(),
+            );
+            self.check(
+                format!("External validation {tool} SMT-LIB registered-tool sat payload"),
+                registered_smt_run["status"].as_str() == Some("ok")
+                    && registered_smt_run["verdict"].as_str() == Some("sat"),
+                format!(
+                    "status={} verdict={} validator={}",
+                    registered_smt_run["status"].as_str().unwrap_or(""),
+                    registered_smt_run["verdict"].as_str().unwrap_or(""),
+                    registered_smt_run["validator"].as_str().unwrap_or("")
+                ),
+            );
+        }
+        let generic_smt_unsat_payload = serde_json::json!({
+            "script": "(assert false)\n(check-sat)\n",
+        });
+        for tool in ["cvc5", "yices", "bitwuzla", "boolector"] {
+            let registered_smt_unsat_run = self.run_python_json(
+                "model_validation_reference.py",
+                &["--tool", tool],
+                &generic_smt_unsat_payload.to_string(),
+            );
+            self.check(
+                format!("External validation {tool} SMT-LIB registered-tool unsat payload"),
+                registered_smt_unsat_run["status"].as_str() == Some("ok")
+                    && registered_smt_unsat_run["verdict"].as_str() == Some("unsat"),
+                format!(
+                    "status={} verdict={} validator={}",
+                    registered_smt_unsat_run["status"].as_str().unwrap_or(""),
+                    registered_smt_unsat_run["verdict"].as_str().unwrap_or(""),
+                    registered_smt_unsat_run["validator"].as_str().unwrap_or("")
+                ),
+            );
+        }
 
         let dimacs_bridge_payload = serde_json::json!({
             "kind": "dimacs-cnf-validation",
@@ -2996,6 +5177,31 @@ impl Driver {
                 unsat_dimacs_bridge_run["validator"].as_str().unwrap_or("")
             ),
         );
+        for (tool, payload, expected) in [
+            ("cadical", &dimacs_bridge_payload, "sat"),
+            ("cryptominisat", &dimacs_bridge_payload, "sat"),
+            ("cadical", &unsat_dimacs_bridge_payload, "unsat"),
+            ("cryptominisat", &unsat_dimacs_bridge_payload, "unsat"),
+        ] {
+            let registered_sat_run = self.run_python_json(
+                "model_validation_reference.py",
+                &["--tool", tool],
+                &payload.to_string(),
+            );
+            self.check(
+                format!(
+                    "External validation {tool} DIMACS registered-tool {expected} payload"
+                ),
+                registered_sat_run["status"].as_str() == Some("ok")
+                    && registered_sat_run["verdict"].as_str() == Some(expected),
+                format!(
+                    "status={} verdict={} validator={}",
+                    registered_sat_run["status"].as_str().unwrap_or(""),
+                    registered_sat_run["verdict"].as_str().unwrap_or(""),
+                    registered_sat_run["validator"].as_str().unwrap_or("")
+                ),
+            );
+        }
 
         let proof_bridge_payload = serde_json::json!({
             "kind": "proof-validation",
@@ -3106,6 +5312,25 @@ impl Driver {
                 tla_bridge_run["validator"].as_str().unwrap_or("")
             ),
         );
+        for tool in ["tlc", "apalache"] {
+            let registered_tla_run = self.run_python_json(
+                "formal_benchmark_validation_reference.py",
+                &["--tool", tool],
+                &tla_bridge_payload.to_string(),
+            );
+            self.check(
+                format!("External validation {tool} TLA registered-tool payload"),
+                registered_tla_run["status"].as_str() == Some("ok")
+                    && registered_tla_run["verdict"].as_str() == Some("valid")
+                    && registered_tla_run["validator"].as_str() == Some("builtin:tla-structural"),
+                format!(
+                    "status={} verdict={} validator={}",
+                    registered_tla_run["status"].as_str().unwrap_or(""),
+                    registered_tla_run["verdict"].as_str().unwrap_or(""),
+                    registered_tla_run["validator"].as_str().unwrap_or("")
+                ),
+            );
+        }
 
         let prism_bridge_payload = serde_json::json!({
             "kind": "prism-validation",
@@ -3225,6 +5450,29 @@ impl Driver {
             ),
         );
 
+        let kodkod_bridge_payload = serde_json::json!({
+            "kind": "kodkod-validation",
+            "model": "module smoke\nsig Node { next: lone Node }\npred someNode { some Node }\n",
+            "commands": ["run someNode for 3"],
+        });
+        let kodkod_bridge_run = self.run_python_json(
+            "formal_benchmark_validation_reference.py",
+            &["--tool", "kodkod"],
+            &kodkod_bridge_payload.to_string(),
+        );
+        self.check(
+            "External validation Kodkod bridge registered-tool payload",
+            kodkod_bridge_run["status"].as_str() == Some("ok")
+                && kodkod_bridge_run["verdict"].as_str() == Some("valid")
+                && kodkod_bridge_run["validator"].as_str() == Some("builtin:alloy-structural"),
+            format!(
+                "status={} verdict={} validator={}",
+                kodkod_bridge_run["status"].as_str().unwrap_or(""),
+                kodkod_bridge_run["verdict"].as_str().unwrap_or(""),
+                kodkod_bridge_run["validator"].as_str().unwrap_or("")
+            ),
+        );
+
         let uppaal_bridge_payload = serde_json::json!({
             "kind": "uppaal-validation",
             "model": "<nta><template><name>P</name><location id=\"id0\"/><init ref=\"id0\"/><transition><source ref=\"id0\"/><target ref=\"id0\"/></transition></template></nta>",
@@ -3317,6 +5565,122 @@ impl Driver {
                 program_verifier_run["validator"].as_str().unwrap_or("")
             ),
         );
+        for (tool, payload) in [
+            (
+                "frama-c",
+                serde_json::json!({
+                    "kind": "program-verifier-validation",
+                    "language": "frama-c",
+                    "source": "/*@ requires x >= 0; ensures \\result >= x; */\nint inc(int x) { return x + 1; }\n",
+                }),
+            ),
+            (
+                "why3",
+                serde_json::json!({
+                    "kind": "program-verifier-validation",
+                    "language": "why3",
+                    "source": "module Smoke\n  goal smoke: true\nend\n",
+                }),
+            ),
+            (
+                "kani",
+                serde_json::json!({
+                    "kind": "program-verifier-validation",
+                    "language": "kani",
+                    "source": "#[kani::proof]\nfn smoke() { assert!(1 + 1 == 2); }\n",
+                }),
+            ),
+            (
+                "esbmc",
+                serde_json::json!({
+                    "kind": "program-verifier-validation",
+                    "language": "esbmc",
+                    "source": "#include <assert.h>\nint main() { int x = 1; assert(x == 1); return 0; }\n",
+                }),
+            ),
+            (
+                "cpachecker",
+                serde_json::json!({
+                    "kind": "program-verifier-validation",
+                    "language": "cpachecker",
+                    "source": "#include <assert.h>\nint main() { int x = 1; assert(x == 1); return 0; }\n",
+                }),
+            ),
+            (
+                "jbmc",
+                serde_json::json!({
+                    "kind": "program-verifier-validation",
+                    "language": "jbmc",
+                    "source": "class Smoke { void test() { int x = 1; assert(x == 1); } }\n",
+                }),
+            ),
+            (
+                "coq",
+                serde_json::json!({
+                    "kind": "program-verifier-validation",
+                    "language": "coq",
+                    "source": "Theorem smoke : True.\nProof. exact I. Qed.\n",
+                    "contracts": ["theorem smoke"],
+                }),
+            ),
+            (
+                "isabelle",
+                serde_json::json!({
+                    "kind": "program-verifier-validation",
+                    "language": "isabelle",
+                    "source": "theory Smoke imports Main begin\nlemma smoke: True by simp\nend\n",
+                }),
+            ),
+            (
+                "lean",
+                serde_json::json!({
+                    "kind": "program-verifier-validation",
+                    "language": "lean",
+                    "source": "theorem smoke : True := True.intro\n",
+                }),
+            ),
+            (
+                "pvs",
+                serde_json::json!({
+                    "kind": "program-verifier-validation",
+                    "language": "pvs",
+                    "source": "smoke: THEORY BEGIN\n  lemma smoke: TRUE\nEND smoke\n",
+                }),
+            ),
+            (
+                "acl2",
+                serde_json::json!({
+                    "kind": "program-verifier-validation",
+                    "language": "acl2",
+                    "source": "(def smoke t)\n; theorem smoke\n",
+                }),
+            ),
+        ] {
+            let registered_program_verifier_run = self.run_python_json(
+                "formal_benchmark_validation_reference.py",
+                &["--tool", tool],
+                &payload.to_string(),
+            );
+            self.check(
+                format!("External validation {tool} program-verifier registered-tool payload"),
+                registered_program_verifier_run["status"].as_str() == Some("ok")
+                    && registered_program_verifier_run["verdict"].as_str() == Some("valid")
+                    && registered_program_verifier_run["validator"].as_str()
+                        == Some("builtin:program-verifier-structural"),
+                format!(
+                    "status={} verdict={} validator={}",
+                    registered_program_verifier_run["status"]
+                        .as_str()
+                        .unwrap_or(""),
+                    registered_program_verifier_run["verdict"]
+                        .as_str()
+                        .unwrap_or(""),
+                    registered_program_verifier_run["validator"]
+                        .as_str()
+                        .unwrap_or("")
+                ),
+            );
+        }
 
         let security_protocol_payload = serde_json::json!({
             "kind": "security-protocol-validation",
@@ -3340,6 +5704,72 @@ impl Driver {
                 security_protocol_run["validator"].as_str().unwrap_or("")
             ),
         );
+        for (tool, payload) in [
+            (
+                "proverif",
+                serde_json::json!({
+                    "kind": "security-protocol-validation",
+                    "model": "free c: channel.\nfree secret: bitstring [private].\nprocess out(c, secret)\n",
+                    "queries": ["query attacker(secret)."],
+                }),
+            ),
+            (
+                "cryptoverif",
+                serde_json::json!({
+                    "kind": "security-protocol-validation",
+                    "model": "free c: channel.\nfree secret: bitstring [private].\nprocess out(c, secret)\n",
+                    "queries": ["query attacker(secret)."],
+                }),
+            ),
+            (
+                "deepsec",
+                serde_json::json!({
+                    "kind": "security-protocol-validation",
+                    "model": "free c: channel.\nfree secret: bitstring [private].\nprocess out(c, secret)\n",
+                    "queries": ["query attacker(secret)."],
+                }),
+            ),
+            (
+                "scyther",
+                serde_json::json!({
+                    "kind": "security-protocol-validation",
+                    "model": "protocol Smoke(A,B) {\n  role A {\n    send_1(A,B,Na);\n    claim(A, Secret, Na);\n  }\n  role B {\n    recv_1(A,B,Na);\n  }\n}\n",
+                }),
+            ),
+            (
+                "verifpal",
+                serde_json::json!({
+                    "kind": "security-protocol-validation",
+                    "model": "principal Alice [\n  knows private a\n]\nqueries [\n  confidentiality? a\n]\n",
+                }),
+            ),
+            (
+                "sapic-plus",
+                serde_json::json!({
+                    "kind": "security-protocol-validation",
+                    "model": "process Smoke = out(c, secret)\nquery secrecy secret\n",
+                }),
+            ),
+        ] {
+            let registered_security_run = self.run_python_json(
+                "formal_benchmark_validation_reference.py",
+                &["--tool", tool],
+                &payload.to_string(),
+            );
+            self.check(
+                format!("External validation {tool} security-protocol registered-tool payload"),
+                registered_security_run["status"].as_str() == Some("ok")
+                    && registered_security_run["verdict"].as_str() == Some("valid")
+                    && registered_security_run["validator"].as_str()
+                        == Some("builtin:security-protocol-structural"),
+                format!(
+                    "status={} verdict={} validator={}",
+                    registered_security_run["status"].as_str().unwrap_or(""),
+                    registered_security_run["verdict"].as_str().unwrap_or(""),
+                    registered_security_run["validator"].as_str().unwrap_or("")
+                ),
+            );
+        }
 
         let schema_payload = json_schema_validation_request_to_json(&JsonSchemaValidationRequest {
             schema: serde_json::json!({
@@ -3408,6 +5838,43 @@ impl Driver {
                 benchmark_bridge_run["validator"].as_str().unwrap_or("")
             ),
         );
+        for (tool, family, format, path) in [
+            ("miplib", "mip", "mps", "sample.mps"),
+            ("qplib", "qp", "qplib", "sample.qplib"),
+            ("minlplib", "minlp", "nl", "sample.nl"),
+            ("netlib-lp", "lp", "json", "sample.json"),
+            ("csplib", "cp", "json", "sample.json"),
+            ("or-library", "or", "json", "sample.json"),
+            ("tsplib", "routing", "json", "sample.json"),
+            ("vrplib", "routing", "json", "sample.json"),
+            ("minizinc-challenge", "cp", "dzn", "sample.dzn"),
+        ] {
+            let registered_benchmark_payload = serde_json::json!({
+                "suite": tool,
+                "entries": [
+                    {"name": "sample", "family": family, "format": format, "path": path}
+                ]
+            });
+            let registered_benchmark_run = self.run_python_json(
+                "formal_benchmark_validation_reference.py",
+                &["--tool", tool],
+                &registered_benchmark_payload.to_string(),
+            );
+            self.check(
+                format!("External validation benchmark {tool} registered-tool payload"),
+                registered_benchmark_run["status"].as_str() == Some("ok")
+                    && registered_benchmark_run["verdict"].as_str() == Some("valid")
+                    && registered_benchmark_run["checks"]
+                        .as_array()
+                        .is_some_and(|checks| !checks.is_empty()),
+                format!(
+                    "status={} verdict={} validator={}",
+                    registered_benchmark_run["status"].as_str().unwrap_or(""),
+                    registered_benchmark_run["verdict"].as_str().unwrap_or(""),
+                    registered_benchmark_run["validator"].as_str().unwrap_or("")
+                ),
+            );
+        }
         let invalid_benchmark_bridge_payload = serde_json::json!({
             "kind": "external-benchmark-manifest",
             "suite": "miplib",
@@ -3586,6 +6053,24 @@ impl Driver {
             ),
         );
 
+        let csv_validator_run = self.run_python_json(
+            "output_validation_reference.py",
+            &["--tool", "csv-validator"],
+            &table_payload.to_string(),
+        );
+        self.check(
+            "External validation CSV validator registered-tool payload",
+            csv_validator_run["status"].as_str() == Some("ok")
+                && csv_validator_run["verdict"].as_str() == Some("valid")
+                && csv_validator_run["validator"].as_str() == Some("builtin:table-schema-subset"),
+            format!(
+                "status={} verdict={} validator={}",
+                csv_validator_run["status"].as_str().unwrap_or(""),
+                csv_validator_run["verdict"].as_str().unwrap_or(""),
+                csv_validator_run["validator"].as_str().unwrap_or("")
+            ),
+        );
+
         let invalid_table_payload = serde_json::json!({
             "kind": "table-validation",
             "rows": [
@@ -3701,6 +6186,53 @@ impl Driver {
                 schematron_run["validator"].as_str().unwrap_or("")
             ),
         );
+        let xml_schema_payload = serde_json::json!({
+            "kind": "xsd-validation",
+            "xml": "<run><objective>3.5</objective></run>",
+            "xsd": "<xs:schema xmlns:xs='http://www.w3.org/2001/XMLSchema'><xs:element name='run'/></xs:schema>",
+            "required_elements": ["objective"]
+        });
+        let xml_schema_run = self.run_python_json(
+            "output_validation_reference.py",
+            &["--tool", "xml-schema"],
+            &xml_schema_payload.to_string(),
+        );
+        self.check(
+            "External validation XML Schema registered-tool payload",
+            xml_schema_run["status"].as_str() == Some("ok")
+                && xml_schema_run["verdict"].as_str() == Some("valid")
+                && xml_schema_run["validator"].as_str() == Some("builtin:xml-schema-structural"),
+            format!(
+                "status={} verdict={} validator={}",
+                xml_schema_run["status"].as_str().unwrap_or(""),
+                xml_schema_run["verdict"].as_str().unwrap_or(""),
+                xml_schema_run["validator"].as_str().unwrap_or("")
+            ),
+        );
+        let xml_rule_payload = serde_json::json!({
+            "xml": "<run><objective>3.5</objective></run>",
+            "schematron": "<schema><pattern><rule context='run'><assert test='objective'>objective required</assert></rule></pattern></schema>",
+            "required_elements": ["objective"]
+        });
+        for tool in ["jing", "saxon"] {
+            let xml_rule_run = self.run_python_json(
+                "output_validation_reference.py",
+                &["--tool", tool],
+                &xml_rule_payload.to_string(),
+            );
+            self.check(
+                format!("External validation {tool} XML rule bridge registered-tool payload"),
+                xml_rule_run["status"].as_str() == Some("ok")
+                    && xml_rule_run["verdict"].as_str() == Some("valid")
+                    && xml_rule_run["validator"].as_str() == Some("builtin:schematron-structural"),
+                format!(
+                    "status={} verdict={} validator={}",
+                    xml_rule_run["status"].as_str().unwrap_or(""),
+                    xml_rule_run["verdict"].as_str().unwrap_or(""),
+                    xml_rule_run["validator"].as_str().unwrap_or("")
+                ),
+            );
+        }
 
         let pydantic_payload = serde_json::json!({
             "kind": "pydantic-validation",
@@ -3758,6 +6290,24 @@ impl Driver {
                 protobuf_run["status"].as_str().unwrap_or(""),
                 protobuf_run["verdict"].as_str().unwrap_or(""),
                 protobuf_run["validator"].as_str().unwrap_or("")
+            ),
+        );
+
+        let protoc_run = self.run_python_json(
+            "output_validation_reference.py",
+            &["--tool", "protoc"],
+            &protobuf_payload.to_string(),
+        );
+        self.check(
+            "External validation protoc registered-tool payload",
+            protoc_run["status"].as_str() == Some("ok")
+                && protoc_run["verdict"].as_str() == Some("valid")
+                && protoc_run["validator"].as_str() == Some("builtin:protobuf-conformance-subset"),
+            format!(
+                "status={} verdict={} validator={}",
+                protoc_run["status"].as_str().unwrap_or(""),
+                protoc_run["verdict"].as_str().unwrap_or(""),
+                protoc_run["validator"].as_str().unwrap_or("")
             ),
         );
 
@@ -3825,6 +6375,24 @@ impl Driver {
                 avro_run["status"].as_str().unwrap_or(""),
                 avro_run["verdict"].as_str().unwrap_or(""),
                 avro_run["validator"].as_str().unwrap_or("")
+            ),
+        );
+
+        let apache_avro_run = self.run_python_json(
+            "output_validation_reference.py",
+            &["--tool", "apache-avro"],
+            &avro_payload.to_string(),
+        );
+        self.check(
+            "External validation Apache Avro registered-tool payload",
+            apache_avro_run["status"].as_str() == Some("ok")
+                && apache_avro_run["verdict"].as_str() == Some("valid")
+                && apache_avro_run["validator"].as_str() == Some("builtin:avro-schema-subset"),
+            format!(
+                "status={} verdict={} validator={}",
+                apache_avro_run["status"].as_str().unwrap_or(""),
+                apache_avro_run["verdict"].as_str().unwrap_or(""),
+                apache_avro_run["validator"].as_str().unwrap_or("")
             ),
         );
 
@@ -4124,6 +6692,28 @@ impl Driver {
                 agent_simulation_run["metrics"]["agents"].as_f64()
             ),
         );
+        for engine in ["agentpy"] {
+            let agent_alias_run = self.run_python_json(
+                "simulation_validation_reference.py",
+                &["--engine", engine],
+                &agent_simulation_payload.to_string(),
+            );
+            self.check(
+                format!("External validation agent simulation {engine} bridge valid payload"),
+                agent_alias_run["status"].as_str() == Some("ok")
+                    && agent_alias_run["verdict"].as_str() == Some("valid")
+                    && agent_alias_run["metrics"]["agents"].as_f64() == Some(2.0)
+                    && agent_alias_run["simulator"]
+                        .as_str()
+                        .is_some_and(|simulator| simulator.contains(engine)),
+                format!(
+                    "status={} verdict={} agents={:?}",
+                    agent_alias_run["status"].as_str().unwrap_or(""),
+                    agent_alias_run["verdict"].as_str().unwrap_or(""),
+                    agent_alias_run["metrics"]["agents"].as_f64()
+                ),
+            );
+        }
 
         let distributed_simulation_payload = serde_json::json!({
             "kind": "simulation-validation",
@@ -4160,6 +6750,28 @@ impl Driver {
                 distributed_simulation_run["metrics"]["hosts"].as_f64()
             ),
         );
+        for engine in ["cloudsim", "batsim"] {
+            let distributed_alias_run = self.run_python_json(
+                "simulation_validation_reference.py",
+                &["--engine", engine],
+                &distributed_simulation_payload.to_string(),
+            );
+            self.check(
+                format!("External validation distributed simulation {engine} bridge valid payload"),
+                distributed_alias_run["status"].as_str() == Some("ok")
+                    && distributed_alias_run["verdict"].as_str() == Some("valid")
+                    && distributed_alias_run["metrics"]["hosts"].as_f64() == Some(1.0)
+                    && distributed_alias_run["simulator"]
+                        .as_str()
+                        .is_some_and(|simulator| simulator.contains(engine)),
+                format!(
+                    "status={} verdict={} hosts={:?}",
+                    distributed_alias_run["status"].as_str().unwrap_or(""),
+                    distributed_alias_run["verdict"].as_str().unwrap_or(""),
+                    distributed_alias_run["metrics"]["hosts"].as_f64()
+                ),
+            );
+        }
 
         let process_simulation_payload = serde_json::json!({
             "kind": "simulation-validation",
@@ -4198,6 +6810,28 @@ impl Driver {
                 process_simulation_run["metrics"]["mass_balance_error"].as_f64()
             ),
         );
+        for engine in ["cape-open"] {
+            let process_alias_run = self.run_python_json(
+                "simulation_validation_reference.py",
+                &["--engine", engine],
+                &process_simulation_payload.to_string(),
+            );
+            self.check(
+                format!("External validation process simulation {engine} bridge valid payload"),
+                process_alias_run["status"].as_str() == Some("ok")
+                    && process_alias_run["verdict"].as_str() == Some("valid")
+                    && process_alias_run["metrics"]["mass_balance_error"].as_f64() == Some(0.0)
+                    && process_alias_run["simulator"]
+                        .as_str()
+                        .is_some_and(|simulator| simulator.contains(engine)),
+                format!(
+                    "status={} verdict={} mass_balance_error={:?}",
+                    process_alias_run["status"].as_str().unwrap_or(""),
+                    process_alias_run["verdict"].as_str().unwrap_or(""),
+                    process_alias_run["metrics"]["mass_balance_error"].as_f64()
+                ),
+            );
+        }
 
         self.check(
             "External validation text CLI defaults and verdict inference",
@@ -4471,6 +7105,807 @@ impl Driver {
         }
     }
 
+    fn check_math_program_cli_cross_check(
+        &mut self,
+        label: &str,
+        program: &MathProgram,
+        solve_opts: &MathProgramSolveOptions,
+        kind: ExternalLinearCliKind,
+        solver: ExternalLinearCliSolver,
+        method: &str,
+    ) {
+        let probe = probe_external_linear_cli_solver(
+            kind,
+            &ExternalLinearCliOptions {
+                solver,
+                time_limit_secs: Some(5.0),
+                ..Default::default()
+            },
+        );
+        if probe.status == ExternalLinearCliProbeStatus::NotInstalled {
+            println!(
+                "  SKIP  MathProgram {label} facade {}:cli cross-check: {}",
+                solver.as_str(),
+                probe.message
+            );
+            return;
+        }
+        if probe.status != ExternalLinearCliProbeStatus::Ready {
+            self.check(
+                format!(
+                    "MathProgram {label} facade {}:cli probe ready",
+                    solver.as_str()
+                ),
+                false,
+                format!(
+                    "status={} command={:?} smoke={:?} message={}",
+                    probe.status.as_str(),
+                    probe.command,
+                    probe.smoke_status.map(|status| status.as_str()),
+                    probe.message
+                ),
+            );
+            return;
+        }
+
+        let external_opts = ExternalMathProgramOptions {
+            method: Some(method.to_string()),
+            time_limit_ms: Some(5_000.0),
+            ..Default::default()
+        };
+        match cross_check_math_program_with_external(program, solve_opts, &external_opts, 1e-7) {
+            Ok(report) => self.check(
+                format!(
+                    "MathProgram {label} facade {}:cli same-input cross-check",
+                    solver.as_str()
+                ),
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7),
+                format!(
+                    "method={} internal={:?} external={:?} obj_diff={:?} x_diff={:?} violations=({:?},{:?})",
+                    method,
+                    report.internal.status,
+                    report.external.status,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal_max_violation,
+                    report.external_max_violation
+                ),
+            ),
+            Err(err) => self.check(
+                format!(
+                    "MathProgram {label} facade {}:cli same-input cross-check",
+                    solver.as_str()
+                ),
+                false,
+                format!("{err:?}"),
+            ),
+        }
+    }
+
+    fn check_optional_math_program_external_cross_check(
+        &mut self,
+        name: &str,
+        program: &MathProgram,
+        solve_opts: &MathProgramSolveOptions,
+        method: &str,
+        tol: f64,
+    ) {
+        let external_opts = ExternalMathProgramOptions {
+            method: Some(method.to_string()),
+            time_limit_ms: Some(5_000.0),
+            ..Default::default()
+        };
+        match cross_check_math_program_with_external(program, solve_opts, &external_opts, tol) {
+            Ok(report) => {
+                let message = report.external.message.as_deref().unwrap_or("");
+                if report.external.status == MathProgramStatus::NumericalError
+                    && optional_math_program_external_unavailable(message)
+                {
+                    println!("  SKIP  {name}: {message}");
+                    return;
+                }
+                self.check(
+                    name,
+                    report.within_tolerance
+                        && report.internal.status == MathProgramStatus::Optimal
+                        && report.external.status == MathProgramStatus::Optimal
+                        && report.objective_abs_diff.is_some_and(|diff| diff <= tol)
+                        && report.max_x_abs_diff.is_some_and(|diff| diff <= tol),
+                    format!(
+                        "method={} internal={:?} external={:?} obj_diff={:?} x_diff={:?} violations=({:?},{:?}) message={:?}",
+                        method,
+                        report.internal.status,
+                        report.external.status,
+                        report.objective_abs_diff,
+                        report.max_x_abs_diff,
+                        report.internal_max_violation,
+                        report.external_max_violation,
+                        report.external.message
+                    ),
+                );
+            }
+            Err(err) => {
+                let message = format!("{err:?}");
+                if optional_math_program_external_unavailable(&message) {
+                    println!("  SKIP  {name}: {message}");
+                } else {
+                    self.check(name, false, message);
+                }
+            }
+        }
+    }
+
+    fn check_math_program_export_highs_file_solve(
+        &mut self,
+        name: &str,
+        model_text: &str,
+        extension: &str,
+        expected_objective: Option<f64>,
+    ) {
+        let Some(highs) = external_linear_cli_command(ExternalLinearCliSolver::Highs) else {
+            println!("  SKIP  {name}: highs executable not found");
+            return;
+        };
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let work_dir = std::env::temp_dir().join(format!(
+            "des-math-program-export-{}-{stamp}",
+            std::process::id()
+        ));
+        if let Err(err) = std::fs::create_dir_all(&work_dir) {
+            self.check(name, false, format!("create temp dir failed: {err}"));
+            return;
+        }
+
+        let model_path = work_dir.join(format!("model.{}", extension.trim_start_matches('.')));
+        let solution_path = work_dir.join("solution.txt");
+        let options_path = work_dir.join("options.txt");
+        let log_path = work_dir.join("highs.log");
+        let write_result = std::fs::write(&model_path, model_text).and_then(|_| {
+            std::fs::write(
+                &options_path,
+                format!("time_limit = 5\nlog_file = {}\n", log_path.display()),
+            )
+        });
+        if let Err(err) = write_result {
+            let _ = std::fs::remove_dir_all(&work_dir);
+            self.check(
+                name,
+                false,
+                format!("write exported model solve files failed: {err}"),
+            );
+            return;
+        }
+
+        let output = Command::new(&highs)
+            .arg("--model_file")
+            .arg(&model_path)
+            .arg("--solution_file")
+            .arg(&solution_path)
+            .arg("--options_file")
+            .arg(&options_path)
+            .output();
+        let result = match output {
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let solution = std::fs::read_to_string(&solution_path).unwrap_or_default();
+                let combined = format!("{stdout}\n{stderr}\n{solution}");
+                let normalized = combined.to_ascii_lowercase();
+                let objective = highs_objective_from_text(&combined);
+                let objective_ok = match expected_objective {
+                    Some(expected) => {
+                        objective.is_some_and(|actual| (actual - expected).abs() <= 1e-7)
+                    }
+                    None => true,
+                };
+                let passed =
+                    output.status.success() && normalized.contains("optimal") && objective_ok;
+                let detail = if passed {
+                    format!(
+                        "command={:?} objective={:?} expected={:?} bytes={}",
+                        highs,
+                        objective,
+                        expected_objective,
+                        model_text.len()
+                    )
+                } else {
+                    format!(
+                        "command={:?} status={} objective={:?} expected={:?} output={}",
+                        highs,
+                        output.status,
+                        objective,
+                        expected_objective,
+                        one_line_preview(&combined, 240)
+                    )
+                };
+                (passed, detail)
+            }
+            Err(err) => (false, format!("command={:?} failed: {err}", highs)),
+        };
+        let _ = std::fs::remove_dir_all(&work_dir);
+        self.check(name, result.0, result.1);
+    }
+
+    fn validate_math_program_facade(&mut self) {
+        println!("\n-- Math-program facade: native lowering vs external solver oracles --");
+        let solve_opts = MathProgramSolveOptions::default();
+        let external_opts = ExternalMathProgramOptions {
+            method: Some("highs".to_string()),
+            time_limit_ms: Some(5_000.0),
+            ..Default::default()
+        };
+
+        let mut lp = MathProgram::new(MathObjectiveSense::Max);
+        let lp_x = lp
+            .add_continuous_var("x", 5.0, Some(0.0), Some(4.0))
+            .expect("LP x");
+        let lp_y = lp
+            .add_continuous_var("y", 3.0, Some(0.0), Some(4.0))
+            .expect("LP y");
+        let lp_z = lp
+            .add_continuous_var("z", 0.5, Some(0.0), Some(5.0))
+            .expect("LP z");
+        lp.add_constraint(
+            "balance",
+            vec![(lp_x, 1.0), (lp_y, 1.0), (lp_z, 1.0)],
+            RowSense::Eq,
+            5.0,
+        )
+        .expect("LP balance");
+        lp.add_constraint(
+            "preference",
+            vec![(lp_x, 1.0), (lp_y, -1.0)],
+            RowSense::Ge,
+            1.0,
+        )
+        .expect("LP preference");
+
+        let mut lp_expected_objective = None;
+        match cross_check_math_program_with_external(&lp, &solve_opts, &external_opts, 1e-7) {
+            Ok(report) => {
+                lp_expected_objective = Some(report.internal.objective);
+                self.check(
+                    "MathProgram LP facade same-input HiGHS cross-check",
+                    report.within_tolerance
+                        && report.internal.status == MathProgramStatus::Optimal
+                        && report.external.status == MathProgramStatus::Optimal
+                        && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7),
+                    format!(
+                        "internal={:?} external={:?} obj_diff={:?} x_diff={:?} violations=({:?},{:?})",
+                        report.internal.status,
+                        report.external.status,
+                        report.objective_abs_diff,
+                        report.max_x_abs_diff,
+                        report.internal_max_violation,
+                        report.external_max_violation
+                    ),
+                );
+            }
+            Err(err) => self.check(
+                "MathProgram LP facade same-input HiGHS cross-check",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        let ortools_glop_opts = ExternalMathProgramOptions {
+            method: Some("ortools:GLOP".to_string()),
+            time_limit_ms: Some(5_000.0),
+            ..Default::default()
+        };
+        match cross_check_math_program_with_external(&lp, &solve_opts, &ortools_glop_opts, 1e-7) {
+            Ok(report) => self.check(
+                "MathProgram LP facade same-input OR-Tools GLOP cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7),
+                format!(
+                    "internal={:?} external={:?} obj_diff={:?} x_diff={:?} violations=({:?},{:?})",
+                    report.internal.status,
+                    report.external.status,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal_max_violation,
+                    report.external_max_violation
+                ),
+            ),
+            Err(err) => self.check(
+                "MathProgram LP facade same-input OR-Tools GLOP cross-check",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        for (solver, method) in [
+            ("Gurobi", "gurobi:default"),
+            ("CPLEX", "cplex:default"),
+            ("Xpress", "xpress:default"),
+        ] {
+            self.check_optional_math_program_external_cross_check(
+                &format!("MathProgram LP facade optional {solver} API same-input cross-check"),
+                &lp,
+                &solve_opts,
+                method,
+                1e-7,
+            );
+        }
+
+        match export_math_program_cplex_lp(&lp) {
+            Ok(export) => {
+                let passed = !export.is_mip
+                    && export.original_variable_count == 3
+                    && export.variable_names.len() == 3
+                    && export.text.contains("Maximize\n")
+                    && export.text.contains("Subject To\n")
+                    && export.text.contains("Bounds\n")
+                    && export.text.ends_with("End\n");
+                self.check(
+                    "MathProgram LP facade CPLEX-LP export",
+                    passed,
+                    format!(
+                        "vars={} rows={} bytes={}",
+                        export.variable_names.len(),
+                        export.constraint_names.len(),
+                        export.text.len()
+                    ),
+                );
+                if passed {
+                    self.check_math_program_export_highs_file_solve(
+                        "MathProgram LP facade CPLEX-LP HiGHS file solve",
+                        &export.text,
+                        "lp",
+                        lp_expected_objective,
+                    );
+                }
+            }
+            Err(err) => self.check(
+                "MathProgram LP facade CPLEX-LP export",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        match export_math_program_mps(&lp) {
+            Ok(export) => {
+                let passed = !export.is_mip
+                    && export.original_variable_count == 3
+                    && export.variable_names.len() == 3
+                    && export.text.contains("OBJSENSE\n MAX\n")
+                    && export.text.contains("ROWS\n N  OBJ\n")
+                    && export.text.contains("COLUMNS\n")
+                    && export.text.contains("BOUNDS\n")
+                    && export.text.ends_with("ENDATA\n");
+                self.check(
+                    "MathProgram LP facade MPS export",
+                    passed,
+                    format!(
+                        "vars={} rows={} bytes={}",
+                        export.variable_names.len(),
+                        export.constraint_names.len(),
+                        export.text.len()
+                    ),
+                );
+                if passed {
+                    self.check_math_program_export_highs_file_solve(
+                        "MathProgram LP facade MPS HiGHS file solve",
+                        &export.text,
+                        "mps",
+                        lp_expected_objective,
+                    );
+                }
+            }
+            Err(err) => self.check(
+                "MathProgram LP facade MPS export",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        for (solver, method) in [
+            (ExternalLinearCliSolver::Highs, "highs:cli"),
+            (ExternalLinearCliSolver::Glpk, "glpsol:cli"),
+            (ExternalLinearCliSolver::Scip, "scip:cli"),
+            (ExternalLinearCliSolver::Cbc, "cbc:cli"),
+            (ExternalLinearCliSolver::Gurobi, "gurobi:cli"),
+            (ExternalLinearCliSolver::Cplex, "cplex:cli"),
+            (ExternalLinearCliSolver::Xpress, "xpress:cli"),
+            (ExternalLinearCliSolver::Lindo, "lindo:cli"),
+        ] {
+            self.check_math_program_cli_cross_check(
+                "LP",
+                &lp,
+                &solve_opts,
+                ExternalLinearCliKind::Lp,
+                solver,
+                method,
+            );
+        }
+
+        let mut mip = MathProgram::new(MathObjectiveSense::Max);
+        let open_a = mip.add_binary_var("open-a", 4.0).expect("open a");
+        let open_b = mip.add_binary_var("open-b", 3.0).expect("open b");
+        let load = mip
+            .add_integer_var("load", 2.0, Some(0.0), Some(4.0))
+            .expect("load");
+        let reserve = mip
+            .add_integer_var("reserve", 0.0, Some(0.0), Some(2.0))
+            .expect("reserve");
+        let peak = mip
+            .add_continuous_var("peak", -1.0, Some(0.0), Some(4.0))
+            .expect("peak");
+        mip.add_exactly_one("choose-one-site", vec![open_a, open_b])
+            .expect("exactly one");
+        mip.add_constraint(
+            "crew-capacity",
+            vec![(load, 1.0), (reserve, 1.0)],
+            RowSense::Le,
+            4.0,
+        )
+        .expect("crew capacity");
+        mip.add_indicator(
+            "open-a-min-load",
+            open_a,
+            true,
+            vec![(load, 1.0)],
+            RowSense::Ge,
+            3.0,
+        )
+        .expect("open a indicator");
+        mip.add_indicator(
+            "open-b-max-load",
+            open_b,
+            true,
+            vec![(load, 1.0)],
+            RowSense::Le,
+            1.0,
+        )
+        .expect("open b indicator");
+        mip.add_max("peak-load", peak, vec![load, reserve])
+            .expect("peak max");
+
+        let mut mip_expected_objective = None;
+        match cross_check_math_program_with_external(&mip, &solve_opts, &external_opts, 1e-7) {
+            Ok(report) => {
+                mip_expected_objective = Some(report.internal.objective);
+                self.check(
+                    "MathProgram MIP facade indicator/general-constraint cross-check",
+                    report.within_tolerance
+                        && report.internal.status == MathProgramStatus::Optimal
+                        && report.external.status == MathProgramStatus::Optimal
+                        && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7),
+                    format!(
+                        "internal={:?} external={:?} obj_diff={:?} x_diff={:?} violations=({:?},{:?})",
+                        report.internal.status,
+                        report.external.status,
+                        report.objective_abs_diff,
+                        report.max_x_abs_diff,
+                        report.internal_max_violation,
+                        report.external_max_violation
+                    ),
+                );
+            }
+            Err(err) => self.check(
+                "MathProgram MIP facade indicator/general-constraint cross-check",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        for (solver, method) in [
+            ("Gurobi", "gurobi:default"),
+            ("CPLEX", "cplex:default"),
+            ("Xpress", "xpress:default"),
+        ] {
+            self.check_optional_math_program_external_cross_check(
+                &format!("MathProgram MIP facade optional {solver} API same-input cross-check"),
+                &mip,
+                &solve_opts,
+                method,
+                1e-7,
+            );
+        }
+
+        let mut cp_sat_mip = MathProgram::new(MathObjectiveSense::Max);
+        let cp_a = cp_sat_mip.add_binary_var("select-a", 5.0).expect("cp a");
+        let cp_b = cp_sat_mip.add_binary_var("select-b", 4.0).expect("cp b");
+        let cp_load = cp_sat_mip
+            .add_integer_var("integer-load", 2.0, Some(0.0), Some(3.0))
+            .expect("cp load");
+        cp_sat_mip
+            .add_constraint(
+                "choose-at-most-one",
+                vec![(cp_a, 1.0), (cp_b, 1.0)],
+                RowSense::Le,
+                1.0,
+            )
+            .expect("cp choose");
+        cp_sat_mip
+            .add_constraint(
+                "capacity",
+                vec![(cp_load, 1.0), (cp_a, 2.0), (cp_b, 1.0)],
+                RowSense::Le,
+                3.0,
+            )
+            .expect("cp capacity");
+        cp_sat_mip
+            .add_constraint(
+                "b-requires-load",
+                vec![(cp_load, 1.0), (cp_b, -2.0)],
+                RowSense::Ge,
+                0.0,
+            )
+            .expect("cp load lower");
+
+        let ortools_cp_sat_opts = ExternalMathProgramOptions {
+            method: Some("ortools:CP-SAT".to_string()),
+            time_limit_ms: Some(5_000.0),
+            ..Default::default()
+        };
+        match cross_check_math_program_with_external(
+            &cp_sat_mip,
+            &solve_opts,
+            &ortools_cp_sat_opts,
+            1e-7,
+        ) {
+            Ok(report) => self.check(
+                "MathProgram integer facade same-input OR-Tools CP-SAT cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7),
+                format!(
+                    "internal={:?} external={:?} obj_diff={:?} x_diff={:?} violations=({:?},{:?})",
+                    report.internal.status,
+                    report.external.status,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal_max_violation,
+                    report.external_max_violation
+                ),
+            ),
+            Err(err) => self.check(
+                "MathProgram integer facade same-input OR-Tools CP-SAT cross-check",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        match export_math_program_cplex_lp(&mip) {
+            Ok(export) => {
+                let passed = export.is_mip
+                    && export.original_variable_count == 5
+                    && export.variable_names.len() > export.original_variable_count
+                    && export.text.contains("Maximize\n")
+                    && export.text.contains("Subject To\n")
+                    && export.text.contains("Bounds\n")
+                    && export.text.contains("Binaries\n")
+                    && export.text.ends_with("End\n");
+                self.check(
+                    "MathProgram MIP facade compiled CPLEX-LP export",
+                    passed,
+                    format!(
+                        "original_vars={} exported_vars={} rows={} bytes={}",
+                        export.original_variable_count,
+                        export.variable_names.len(),
+                        export.constraint_names.len(),
+                        export.text.len()
+                    ),
+                );
+                if passed {
+                    self.check_math_program_export_highs_file_solve(
+                        "MathProgram MIP facade CPLEX-LP HiGHS file solve",
+                        &export.text,
+                        "lp",
+                        mip_expected_objective,
+                    );
+                }
+            }
+            Err(err) => self.check(
+                "MathProgram MIP facade compiled CPLEX-LP export",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        match export_math_program_mps(&mip) {
+            Ok(export) => {
+                let passed = export.is_mip
+                    && export.original_variable_count == 5
+                    && export.variable_names.len() > export.original_variable_count
+                    && export.text.contains("OBJSENSE\n MAX\n")
+                    && export.text.contains("ROWS\n N  OBJ\n")
+                    && export.text.contains("COLUMNS\n")
+                    && export.text.contains("'INTORG'")
+                    && export.text.contains("'INTEND'")
+                    && export.text.contains("BOUNDS\n")
+                    && export.text.ends_with("ENDATA\n");
+                self.check(
+                    "MathProgram MIP facade compiled MPS export",
+                    passed,
+                    format!(
+                        "original_vars={} exported_vars={} rows={} bytes={}",
+                        export.original_variable_count,
+                        export.variable_names.len(),
+                        export.constraint_names.len(),
+                        export.text.len()
+                    ),
+                );
+                if passed {
+                    self.check_math_program_export_highs_file_solve(
+                        "MathProgram MIP facade MPS HiGHS file solve",
+                        &export.text,
+                        "mps",
+                        mip_expected_objective,
+                    );
+                }
+            }
+            Err(err) => self.check(
+                "MathProgram MIP facade compiled MPS export",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        for (solver, method) in [
+            (ExternalLinearCliSolver::Highs, "highs:cli"),
+            (ExternalLinearCliSolver::Glpk, "glpsol:cli"),
+            (ExternalLinearCliSolver::Scip, "scip:cli"),
+            (ExternalLinearCliSolver::Cbc, "cbc:cli"),
+            (ExternalLinearCliSolver::Gurobi, "gurobi:cli"),
+            (ExternalLinearCliSolver::Cplex, "cplex:cli"),
+            (ExternalLinearCliSolver::Xpress, "xpress:cli"),
+            (ExternalLinearCliSolver::Lindo, "lindo:cli"),
+        ] {
+            self.check_math_program_cli_cross_check(
+                "MIP",
+                &mip,
+                &solve_opts,
+                ExternalLinearCliKind::Mip,
+                solver,
+                method,
+            );
+        }
+
+        let mut conflict_model = MathProgram::new(MathObjectiveSense::Min);
+        let conflict_x = conflict_model
+            .add_continuous_var("x", 0.0, None, None)
+            .expect("conflict x");
+        let conflict_y = conflict_model
+            .add_continuous_var("y", 0.0, Some(0.0), None)
+            .expect("conflict y");
+        conflict_model
+            .add_constraint("x-at-least-two", vec![(conflict_x, 1.0)], RowSense::Ge, 2.0)
+            .expect("conflict lower row");
+        conflict_model
+            .add_constraint("x-at-most-one", vec![(conflict_x, 1.0)], RowSense::Le, 1.0)
+            .expect("conflict upper row");
+        conflict_model
+            .add_constraint("redundant-y", vec![(conflict_y, 1.0)], RowSense::Ge, 0.0)
+            .expect("conflict redundant row");
+
+        match cross_check_math_program_conflict_with_external(
+            &conflict_model,
+            &solve_opts,
+            &external_opts,
+            &MathProgramConflictOptions::default(),
+        ) {
+            Ok(report) => self.check(
+                "MathProgram conflict refiner subsystem external cross-check",
+                report.within_tolerance
+                    && report.internal.minimal
+                    && report.internal.items.len() == 2
+                    && report.external.status == MathProgramStatus::Infeasible,
+                format!(
+                    "internal={:?} external={:?} items={} minimal={} status_agree={}",
+                    report.internal.status,
+                    report.external.status,
+                    report.internal.items.len(),
+                    report.internal.minimal,
+                    report.status_agree
+                ),
+            ),
+            Err(err) => self.check(
+                "MathProgram conflict refiner subsystem external cross-check",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        let mut relax_model = MathProgram::new(MathObjectiveSense::Min);
+        let relax_x = relax_model
+            .add_continuous_var("x", 0.0, Some(2.0), None)
+            .expect("relax x");
+        relax_model
+            .add_constraint("cap", vec![(relax_x, 1.0)], RowSense::Le, 1.0)
+            .expect("relax cap");
+
+        match cross_check_math_program_feas_relaxation_with_external(
+            &relax_model,
+            &solve_opts,
+            &external_opts,
+            &MathProgramFeasRelaxOptions {
+                linear_penalty: 10.0,
+                bound_penalty: 1.0,
+                ..Default::default()
+            },
+            1e-7,
+        ) {
+            Ok(report) => self.check(
+                "MathProgram feasibility-relaxation external cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && (report.internal.violation_objective - 1.0).abs() <= 1e-7,
+                format!(
+                    "internal={:?} external={:?} violation_obj={} obj_diff={:?} violations={}",
+                    report.internal.status,
+                    report.external.status,
+                    report.internal.violation_objective,
+                    report.objective_abs_diff,
+                    report.internal.violations.len()
+                ),
+            ),
+            Err(err) => self.check(
+                "MathProgram feasibility-relaxation external cross-check",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        let mut pool_model = MathProgram::new(MathObjectiveSense::Max);
+        let pool_a = pool_model.add_binary_var("a", 4.0).expect("pool a");
+        let pool_b = pool_model.add_binary_var("b", 2.0).expect("pool b");
+        let pool_c = pool_model.add_binary_var("c", 1.0).expect("pool c");
+        pool_model
+            .add_constraint(
+                "choose-at-most-two",
+                vec![(pool_a, 1.0), (pool_b, 1.0), (pool_c, 1.0)],
+                RowSense::Le,
+                2.0,
+            )
+            .expect("pool capacity");
+
+        match cross_check_math_program_solution_pool_with_external(
+            &pool_model,
+            &solve_opts,
+            &external_opts,
+            &MathProgramSolutionPoolOptions {
+                max_solutions: 3,
+                ..Default::default()
+            },
+            1e-7,
+        ) {
+            Ok(report) => self.check(
+                "MathProgram solution-pool external cross-check",
+                report.within_tolerance
+                    && report.len_agree
+                    && report.internal.solutions.len() == 3
+                    && !report.internal.exhausted,
+                format!(
+                    "internal_len={} external_len={} exhausted=({},{}) obj_diffs={:?} x_diffs={:?}",
+                    report.internal.solutions.len(),
+                    report.external.solutions.len(),
+                    report.internal.exhausted,
+                    report.external.exhausted,
+                    report.objective_abs_diffs,
+                    report.max_x_abs_diffs
+                ),
+            ),
+            Err(err) => self.check(
+                "MathProgram solution-pool external cross-check",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+    }
     fn validate_ip_mip(&mut self) {
         println!("\n-- IP/MIP: DES branch-and-cut vs external MIP bridge --");
         let p =
@@ -5004,6 +8439,22 @@ impl Driver {
             mip_gap_internal.z,
             mip_gap_reference.objective.unwrap_or(f64::NAN),
             1e-9,
+        );
+        self.check(
+            "IP/MIP HiGHS CLI quality metadata",
+            mip_gap_reference
+                .best_bound
+                .zip(mip_gap_reference.objective)
+                .is_some_and(|(bound, objective)| (bound - objective).abs() <= 1e-9)
+                && mip_gap_reference.mip_gap.is_some_and(|gap| gap <= 1e-9)
+                && mip_gap_reference.nodes_explored.is_some(),
+            format!(
+                "best_bound={:?} objective={:?} gap={:?} nodes={:?}",
+                mip_gap_reference.best_bound,
+                mip_gap_reference.objective,
+                mip_gap_reference.mip_gap,
+                mip_gap_reference.nodes_explored
+            ),
         );
 
         let start_internal = solve_ipmip_with_des(
@@ -7683,6 +11134,19 @@ impl Driver {
                         "ub": interval.ub,
                     })).collect::<Vec<_>>(),
                 }),
+                CpConstraint::EnforcedLinearDomain {
+                    enforcement,
+                    terms,
+                    intervals,
+                } => serde_json::json!({
+                    "kind": "enforced_linear_domain",
+                    "enforcement": enforcement.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                    "terms": terms.iter().map(|t| serde_json::json!({"var": t.var, "coeff": t.coeff})).collect::<Vec<_>>(),
+                    "intervals": intervals.iter().map(|interval| serde_json::json!({
+                        "lb": interval.lb,
+                        "ub": interval.ub,
+                    })).collect::<Vec<_>>(),
+                }),
                 CpConstraint::MapDomain {
                     var,
                     bools,
@@ -7705,6 +11169,54 @@ impl Driver {
                     "sense": sense.as_str(),
                     "rhs": rhs,
                 }),
+                CpConstraint::EnforcedBoolOr {
+                    enforcement,
+                    literals,
+                } => serde_json::json!({
+                    "kind": "enforced_bool_or",
+                    "enforcement": enforcement.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                    "literals": literals.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                }),
+                CpConstraint::EnforcedBoolAnd {
+                    enforcement,
+                    literals,
+                } => serde_json::json!({
+                    "kind": "enforced_bool_and",
+                    "enforcement": enforcement.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                    "literals": literals.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                }),
+                CpConstraint::EnforcedBoolXor {
+                    enforcement,
+                    literals,
+                } => serde_json::json!({
+                    "kind": "enforced_bool_xor",
+                    "enforcement": enforcement.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                    "literals": literals.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                }),
+                CpConstraint::EnforcedAtMostOne {
+                    enforcement,
+                    literals,
+                } => serde_json::json!({
+                    "kind": "enforced_at_most_one",
+                    "enforcement": enforcement.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                    "literals": literals.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                }),
+                CpConstraint::EnforcedAtLeastOne {
+                    enforcement,
+                    literals,
+                } => serde_json::json!({
+                    "kind": "enforced_at_least_one",
+                    "enforcement": enforcement.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                    "literals": literals.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                }),
+                CpConstraint::EnforcedExactlyOne {
+                    enforcement,
+                    literals,
+                } => serde_json::json!({
+                    "kind": "enforced_exactly_one",
+                    "enforcement": enforcement.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                    "literals": literals.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                }),
                 CpConstraint::AllDifferent(vars) => {
                     serde_json::json!({"kind": "all_different", "vars": vars})
                 }
@@ -7722,6 +11234,10 @@ impl Driver {
                 }),
                 CpConstraint::AtMostOne(lits) => serde_json::json!({
                     "kind": "at_most_one",
+                    "literals": lits.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                }),
+                CpConstraint::AtLeastOne(lits) => serde_json::json!({
+                    "kind": "at_least_one",
                     "literals": lits.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
                 }),
                 CpConstraint::ExactlyOne(lits) => serde_json::json!({
@@ -7759,6 +11275,26 @@ impl Driver {
                 }),
                 CpConstraint::ForbiddenAssignments { vars, tuples } => serde_json::json!({
                     "kind": "forbidden_assignments",
+                    "vars": vars,
+                    "tuples": tuples,
+                }),
+                CpConstraint::EnforcedAllowedAssignments {
+                    enforcement,
+                    vars,
+                    tuples,
+                } => serde_json::json!({
+                    "kind": "enforced_allowed_assignments",
+                    "enforcement": enforcement.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
+                    "vars": vars,
+                    "tuples": tuples,
+                }),
+                CpConstraint::EnforcedForbiddenAssignments {
+                    enforcement,
+                    vars,
+                    tuples,
+                } => serde_json::json!({
+                    "kind": "enforced_forbidden_assignments",
+                    "enforcement": enforcement.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
                     "vars": vars,
                     "tuples": tuples,
                 }),
@@ -7822,6 +11358,12 @@ impl Driver {
                     "kind": "element",
                     "index": element.index,
                     "values": &element.values,
+                    "target": element.target,
+                }),
+                CpConstraint::VariableElement(element) => serde_json::json!({
+                    "kind": "variable_element",
+                    "index": element.index,
+                    "vars": &element.vars,
                     "target": element.target,
                 }),
                 CpConstraint::Alternative(alternative) => serde_json::json!({
@@ -7992,6 +11534,97 @@ impl Driver {
             format!(
                 "internal={:?} external={:?}",
                 internal.assignment, reference.assignment
+            ),
+        );
+
+        let variable_element_model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "choice".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "expensive".to_string(),
+                    domain: vec![4],
+                },
+                CpVariable {
+                    name: "cheap".to_string(),
+                    domain: vec![1, 3],
+                },
+                CpVariable {
+                    name: "selected".to_string(),
+                    domain: vec![1, 2, 3, 4],
+                },
+            ],
+            constraints: vec![CpConstraint::VariableElement(
+                crate::des::general::cp_sat::CpVariableElement {
+                    index: 0,
+                    vars: vec![1, 2],
+                    target: 3,
+                },
+            )],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![LinearTerm { var: 3, coeff: 1 }],
+            }),
+        };
+        let variable_element_internal =
+            solve_cp_model(&variable_element_model, CpSolveOptions::default());
+        let variable_element_json = serde_json::json!({
+            "variables": [
+                {"name": "choice", "domain": [0, 1]},
+                {"name": "expensive", "domain": [4]},
+                {"name": "cheap", "domain": [1, 3]},
+                {"name": "selected", "domain": [1, 2, 3, 4]},
+            ],
+            "constraints": [
+                {
+                    "kind": "variable_element",
+                    "index": 0,
+                    "vars": [1, 2],
+                    "target": 3,
+                },
+            ],
+            "objective": {
+                "sense": "min",
+                "terms": [{"var": 3, "coeff": 1}],
+            },
+        })
+        .to_string();
+        let value = self.run_python_json(
+            "cp_sat_reference.py",
+            &["--solver", "auto"],
+            &variable_element_json,
+        );
+        let variable_element_reference: CpReference =
+            serde_json::from_value(value).expect("parse variable-element CP reference");
+        self.check(
+            "CP-SAT variable element status internal/reference",
+            variable_element_internal.status == CpStatus::Optimal
+                && variable_element_reference.status == "optimal",
+            format!(
+                "internal={} external={} solver={}",
+                variable_element_internal.status.as_str(),
+                variable_element_reference.status,
+                variable_element_reference.solver
+            ),
+        );
+        self.check(
+            "CP-SAT variable element objective",
+            variable_element_internal.objective == variable_element_reference.objective
+                && variable_element_internal.objective == Some(1),
+            format!(
+                "internal={:?} external={:?}",
+                variable_element_internal.objective, variable_element_reference.objective
+            ),
+        );
+        self.check(
+            "CP-SAT variable element assignment",
+            variable_element_internal.assignment == variable_element_reference.assignment
+                && variable_element_internal.assignment == vec![1, 4, 1, 1],
+            format!(
+                "internal={:?} external={:?}",
+                variable_element_internal.assignment, variable_element_reference.assignment
             ),
         );
 
@@ -9181,6 +12814,1012 @@ impl Driver {
             ),
         );
 
+        for (label, domain_strategy, domain_strategy_json, expected_assignment) in [
+            (
+                "lower-half",
+                CpDomainValueStrategy::LowerHalf,
+                "lower_half",
+                vec![0, 4],
+            ),
+            (
+                "upper-half",
+                CpDomainValueStrategy::UpperHalf,
+                "upper_half",
+                vec![4, 0],
+            ),
+            (
+                "median-value",
+                CpDomainValueStrategy::MedianValue,
+                "median_value",
+                vec![2, 2],
+            ),
+        ] {
+            let domain_strategy_model = CpModel {
+                variables: vec![
+                    CpVariable {
+                        name: "domain_strategy_x".to_string(),
+                        domain: vec![0, 1, 2, 3, 4],
+                    },
+                    CpVariable {
+                        name: "domain_strategy_y".to_string(),
+                        domain: vec![0, 1, 2, 3, 4],
+                    },
+                ],
+                constraints: vec![CpConstraint::Linear {
+                    terms: vec![
+                        LinearTerm { var: 0, coeff: 1 },
+                        LinearTerm { var: 1, coeff: 1 },
+                    ],
+                    sense: LinearSense::Eq,
+                    rhs: 4,
+                }],
+                objective: None,
+            };
+            let domain_strategy_internal = solve_cp_model(
+                &domain_strategy_model,
+                CpSolveOptions {
+                    max_nodes: 100,
+                    solution_hint: Vec::new(),
+                    decision_strategies: vec![CpDecisionStrategy {
+                        vars: vec![0, 1],
+                        variable_strategy: CpVariableSelectionStrategy::First,
+                        domain_strategy,
+                    }],
+                },
+            );
+            let domain_strategy_json = serde_json::json!({
+                "variables": [
+                    {"name": "domain_strategy_x", "domain": [0, 1, 2, 3, 4]},
+                    {"name": "domain_strategy_y", "domain": [0, 1, 2, 3, 4]},
+                ],
+                "constraints": [
+                    {
+                        "kind": "linear",
+                        "terms": [
+                            {"var": 0, "coeff": 1},
+                            {"var": 1, "coeff": 1},
+                        ],
+                        "sense": "eq",
+                        "rhs": 4,
+                    },
+                ],
+                "objective": serde_json::Value::Null,
+                "decision_strategies": [
+                    {
+                        "vars": [0, 1],
+                        "variable_strategy": "first",
+                        "domain_strategy": domain_strategy_json,
+                    },
+                ],
+            })
+            .to_string();
+            let value = self.run_python_json(
+                "cp_sat_reference.py",
+                &["--solver", "auto"],
+                &domain_strategy_json,
+            );
+            let domain_strategy_reference: CpReference =
+                serde_json::from_value(value).expect("parse domain-reduction CP reference");
+            self.check(
+                format!("CP-SAT decision domain strategy {label} status internal/reference"),
+                domain_strategy_internal.status == CpStatus::Feasible
+                    && domain_strategy_reference.status == "feasible",
+                format!(
+                    "internal={} external={} solver={}",
+                    domain_strategy_internal.status.as_str(),
+                    domain_strategy_reference.status,
+                    domain_strategy_reference.solver
+                ),
+            );
+            self.check(
+                format!("CP-SAT decision domain strategy {label} assignment"),
+                domain_strategy_internal.assignment == domain_strategy_reference.assignment
+                    && domain_strategy_internal.assignment == expected_assignment,
+                format!(
+                    "internal={:?} external={:?}",
+                    domain_strategy_internal.assignment, domain_strategy_reference.assignment
+                ),
+            );
+        }
+
+        let enforced_bool_model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "active_gate".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "inactive_gate".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "x".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "y".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "inactive_x".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "inactive_y".to_string(),
+                    domain: vec![0, 1],
+                },
+            ],
+            constraints: vec![
+                CpConstraint::BoolOr(vec![BoolLiteral {
+                    var: 0,
+                    positive: true,
+                }]),
+                CpConstraint::BoolOr(vec![BoolLiteral {
+                    var: 1,
+                    positive: false,
+                }]),
+                CpConstraint::EnforcedBoolOr {
+                    enforcement: vec![BoolLiteral {
+                        var: 0,
+                        positive: true,
+                    }],
+                    literals: vec![
+                        BoolLiteral {
+                            var: 2,
+                            positive: true,
+                        },
+                        BoolLiteral {
+                            var: 3,
+                            positive: true,
+                        },
+                    ],
+                },
+                CpConstraint::EnforcedBoolAnd {
+                    enforcement: vec![BoolLiteral {
+                        var: 0,
+                        positive: true,
+                    }],
+                    literals: vec![BoolLiteral {
+                        var: 3,
+                        positive: true,
+                    }],
+                },
+                CpConstraint::EnforcedBoolAnd {
+                    enforcement: vec![BoolLiteral {
+                        var: 1,
+                        positive: true,
+                    }],
+                    literals: vec![
+                        BoolLiteral {
+                            var: 4,
+                            positive: true,
+                        },
+                        BoolLiteral {
+                            var: 5,
+                            positive: true,
+                        },
+                    ],
+                },
+            ],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![
+                    LinearTerm { var: 2, coeff: 1 },
+                    LinearTerm { var: 3, coeff: 1 },
+                    LinearTerm { var: 4, coeff: 1 },
+                    LinearTerm { var: 5, coeff: 1 },
+                ],
+            }),
+        };
+        let enforced_bool_internal =
+            solve_cp_model(&enforced_bool_model, CpSolveOptions::default());
+        let enforced_bool_json = serde_json::json!({
+            "variables": [
+                {"name": "active_gate", "domain": [0, 1]},
+                {"name": "inactive_gate", "domain": [0, 1]},
+                {"name": "x", "domain": [0, 1]},
+                {"name": "y", "domain": [0, 1]},
+                {"name": "inactive_x", "domain": [0, 1]},
+                {"name": "inactive_y", "domain": [0, 1]},
+            ],
+            "constraints": [
+                {
+                    "kind": "bool_or",
+                    "literals": [{"var": 0, "positive": true}],
+                },
+                {
+                    "kind": "bool_or",
+                    "literals": [{"var": 1, "positive": false}],
+                },
+                {
+                    "kind": "enforced_bool_or",
+                    "enforcement": [{"var": 0, "positive": true}],
+                    "literals": [
+                        {"var": 2, "positive": true},
+                        {"var": 3, "positive": true},
+                    ],
+                },
+                {
+                    "kind": "enforced_bool_and",
+                    "enforcement": [{"var": 0, "positive": true}],
+                    "literals": [{"var": 3, "positive": true}],
+                },
+                {
+                    "kind": "enforced_bool_and",
+                    "enforcement": [{"var": 1, "positive": true}],
+                    "literals": [
+                        {"var": 4, "positive": true},
+                        {"var": 5, "positive": true},
+                    ],
+                },
+            ],
+            "objective": {
+                "sense": "min",
+                "terms": [
+                    {"var": 2, "coeff": 1},
+                    {"var": 3, "coeff": 1},
+                    {"var": 4, "coeff": 1},
+                    {"var": 5, "coeff": 1},
+                ],
+            },
+        })
+        .to_string();
+        let value = self.run_python_json(
+            "cp_sat_reference.py",
+            &["--solver", "auto"],
+            &enforced_bool_json,
+        );
+        let enforced_bool_reference: CpReference =
+            serde_json::from_value(value).expect("parse enforced-bool CP reference");
+        self.check(
+            "CP-SAT enforced bool status internal/reference",
+            enforced_bool_internal.status == CpStatus::Optimal
+                && enforced_bool_reference.status == "optimal",
+            format!(
+                "internal={} external={} solver={}",
+                enforced_bool_internal.status.as_str(),
+                enforced_bool_reference.status,
+                enforced_bool_reference.solver
+            ),
+        );
+        self.check(
+            "CP-SAT enforced bool objective",
+            enforced_bool_internal.objective == enforced_bool_reference.objective
+                && enforced_bool_internal.objective == Some(1),
+            format!(
+                "internal={:?} external={:?}",
+                enforced_bool_internal.objective, enforced_bool_reference.objective
+            ),
+        );
+        self.check(
+            "CP-SAT enforced bool assignment",
+            enforced_bool_internal.assignment == enforced_bool_reference.assignment
+                && enforced_bool_internal.assignment == vec![1, 0, 0, 1, 0, 0],
+            format!(
+                "internal={:?} external={:?}",
+                enforced_bool_internal.assignment, enforced_bool_reference.assignment
+            ),
+        );
+
+        let at_least_one_model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "active_gate".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "inactive_gate".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "x".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "y".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "z".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "required".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "inactive_x".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "inactive_y".to_string(),
+                    domain: vec![0, 1],
+                },
+            ],
+            constraints: vec![
+                CpConstraint::BoolOr(vec![BoolLiteral {
+                    var: 0,
+                    positive: true,
+                }]),
+                CpConstraint::BoolOr(vec![BoolLiteral {
+                    var: 1,
+                    positive: false,
+                }]),
+                CpConstraint::AtLeastOne(vec![BoolLiteral {
+                    var: 5,
+                    positive: true,
+                }]),
+                CpConstraint::EnforcedAtLeastOne {
+                    enforcement: vec![BoolLiteral {
+                        var: 0,
+                        positive: true,
+                    }],
+                    literals: vec![
+                        BoolLiteral {
+                            var: 2,
+                            positive: true,
+                        },
+                        BoolLiteral {
+                            var: 3,
+                            positive: true,
+                        },
+                        BoolLiteral {
+                            var: 4,
+                            positive: true,
+                        },
+                    ],
+                },
+                CpConstraint::EnforcedAtLeastOne {
+                    enforcement: vec![BoolLiteral {
+                        var: 1,
+                        positive: true,
+                    }],
+                    literals: vec![
+                        BoolLiteral {
+                            var: 6,
+                            positive: true,
+                        },
+                        BoolLiteral {
+                            var: 7,
+                            positive: true,
+                        },
+                    ],
+                },
+            ],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![
+                    LinearTerm { var: 2, coeff: 3 },
+                    LinearTerm { var: 3, coeff: 2 },
+                    LinearTerm { var: 4, coeff: 1 },
+                    LinearTerm { var: 5, coeff: 1 },
+                    LinearTerm { var: 6, coeff: 1 },
+                    LinearTerm { var: 7, coeff: 1 },
+                ],
+            }),
+        };
+        let at_least_one_internal = solve_cp_model(&at_least_one_model, CpSolveOptions::default());
+        let at_least_one_json = serde_json::json!({
+            "variables": [
+                {"name": "active_gate", "domain": [0, 1]},
+                {"name": "inactive_gate", "domain": [0, 1]},
+                {"name": "x", "domain": [0, 1]},
+                {"name": "y", "domain": [0, 1]},
+                {"name": "z", "domain": [0, 1]},
+                {"name": "required", "domain": [0, 1]},
+                {"name": "inactive_x", "domain": [0, 1]},
+                {"name": "inactive_y", "domain": [0, 1]},
+            ],
+            "constraints": [
+                {
+                    "kind": "bool_or",
+                    "literals": [{"var": 0, "positive": true}],
+                },
+                {
+                    "kind": "bool_or",
+                    "literals": [{"var": 1, "positive": false}],
+                },
+                {
+                    "kind": "at_least_one",
+                    "literals": [{"var": 5, "positive": true}],
+                },
+                {
+                    "kind": "enforced_at_least_one",
+                    "enforcement": [{"var": 0, "positive": true}],
+                    "literals": [
+                        {"var": 2, "positive": true},
+                        {"var": 3, "positive": true},
+                        {"var": 4, "positive": true},
+                    ],
+                },
+                {
+                    "kind": "enforced_at_least_one",
+                    "enforcement": [{"var": 1, "positive": true}],
+                    "literals": [
+                        {"var": 6, "positive": true},
+                        {"var": 7, "positive": true},
+                    ],
+                },
+            ],
+            "objective": {
+                "sense": "min",
+                "terms": [
+                    {"var": 2, "coeff": 3},
+                    {"var": 3, "coeff": 2},
+                    {"var": 4, "coeff": 1},
+                    {"var": 5, "coeff": 1},
+                    {"var": 6, "coeff": 1},
+                    {"var": 7, "coeff": 1},
+                ],
+            },
+        })
+        .to_string();
+        let value = self.run_python_json(
+            "cp_sat_reference.py",
+            &["--solver", "auto"],
+            &at_least_one_json,
+        );
+        let at_least_one_reference: CpReference =
+            serde_json::from_value(value).expect("parse at-least-one CP reference");
+        self.check(
+            "CP-SAT at-least-one status internal/reference",
+            at_least_one_internal.status == CpStatus::Optimal
+                && at_least_one_reference.status == "optimal",
+            format!(
+                "internal={} external={} solver={}",
+                at_least_one_internal.status.as_str(),
+                at_least_one_reference.status,
+                at_least_one_reference.solver
+            ),
+        );
+        self.check(
+            "CP-SAT at-least-one objective",
+            at_least_one_internal.objective == at_least_one_reference.objective
+                && at_least_one_internal.objective == Some(2),
+            format!(
+                "internal={:?} external={:?}",
+                at_least_one_internal.objective, at_least_one_reference.objective
+            ),
+        );
+        self.check(
+            "CP-SAT at-least-one assignment",
+            at_least_one_internal.assignment == at_least_one_reference.assignment
+                && at_least_one_internal.assignment == vec![1, 0, 0, 0, 1, 1, 0, 0],
+            format!(
+                "internal={:?} external={:?}",
+                at_least_one_internal.assignment, at_least_one_reference.assignment
+            ),
+        );
+
+        let enforced_linear_domain_model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "active_gate".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "inactive_gate".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "x".to_string(),
+                    domain: vec![0, 1, 2, 3, 4],
+                },
+                CpVariable {
+                    name: "y".to_string(),
+                    domain: vec![0, 1, 2, 3, 4],
+                },
+                CpVariable {
+                    name: "free".to_string(),
+                    domain: vec![0, 1, 2],
+                },
+            ],
+            constraints: vec![
+                CpConstraint::BoolOr(vec![BoolLiteral {
+                    var: 0,
+                    positive: true,
+                }]),
+                CpConstraint::BoolOr(vec![BoolLiteral {
+                    var: 1,
+                    positive: false,
+                }]),
+                CpConstraint::EnforcedLinearDomain {
+                    enforcement: vec![BoolLiteral {
+                        var: 0,
+                        positive: true,
+                    }],
+                    terms: vec![
+                        LinearTerm { var: 2, coeff: 1 },
+                        LinearTerm { var: 3, coeff: 1 },
+                    ],
+                    intervals: vec![
+                        CpDomainInterval { lb: 3, ub: 3 },
+                        CpDomainInterval { lb: 7, ub: 7 },
+                    ],
+                },
+                CpConstraint::EnforcedLinearDomain {
+                    enforcement: vec![BoolLiteral {
+                        var: 1,
+                        positive: true,
+                    }],
+                    terms: vec![LinearTerm { var: 4, coeff: 1 }],
+                    intervals: vec![CpDomainInterval { lb: 2, ub: 2 }],
+                },
+            ],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![
+                    LinearTerm { var: 2, coeff: 10 },
+                    LinearTerm { var: 3, coeff: 1 },
+                    LinearTerm { var: 4, coeff: 1 },
+                ],
+            }),
+        };
+        let enforced_linear_domain_internal =
+            solve_cp_model(&enforced_linear_domain_model, CpSolveOptions::default());
+        let enforced_linear_domain_json = serde_json::json!({
+            "variables": [
+                {"name": "active_gate", "domain": [0, 1]},
+                {"name": "inactive_gate", "domain": [0, 1]},
+                {"name": "x", "domain": [0, 1, 2, 3, 4]},
+                {"name": "y", "domain": [0, 1, 2, 3, 4]},
+                {"name": "free", "domain": [0, 1, 2]},
+            ],
+            "constraints": [
+                {
+                    "kind": "bool_or",
+                    "literals": [{"var": 0, "positive": true}],
+                },
+                {
+                    "kind": "bool_or",
+                    "literals": [{"var": 1, "positive": false}],
+                },
+                {
+                    "kind": "enforced_linear_domain",
+                    "enforcement": [{"var": 0, "positive": true}],
+                    "terms": [
+                        {"var": 2, "coeff": 1},
+                        {"var": 3, "coeff": 1},
+                    ],
+                    "intervals": [
+                        {"lb": 3, "ub": 3},
+                        {"lb": 7, "ub": 7},
+                    ],
+                },
+                {
+                    "kind": "enforced_linear_domain",
+                    "enforcement": [{"var": 1, "positive": true}],
+                    "terms": [{"var": 4, "coeff": 1}],
+                    "intervals": [{"lb": 2, "ub": 2}],
+                },
+            ],
+            "objective": {
+                "sense": "min",
+                "terms": [
+                    {"var": 2, "coeff": 10},
+                    {"var": 3, "coeff": 1},
+                    {"var": 4, "coeff": 1},
+                ],
+            },
+        })
+        .to_string();
+        let value = self.run_python_json(
+            "cp_sat_reference.py",
+            &["--solver", "auto"],
+            &enforced_linear_domain_json,
+        );
+        let enforced_linear_domain_reference: CpReference =
+            serde_json::from_value(value).expect("parse enforced-linear-domain CP reference");
+        self.check(
+            "CP-SAT enforced linear-domain status internal/reference",
+            enforced_linear_domain_internal.status == CpStatus::Optimal
+                && enforced_linear_domain_reference.status == "optimal",
+            format!(
+                "internal={} external={} solver={}",
+                enforced_linear_domain_internal.status.as_str(),
+                enforced_linear_domain_reference.status,
+                enforced_linear_domain_reference.solver
+            ),
+        );
+        self.check(
+            "CP-SAT enforced linear-domain objective",
+            enforced_linear_domain_internal.objective == enforced_linear_domain_reference.objective
+                && enforced_linear_domain_internal.objective == Some(3),
+            format!(
+                "internal={:?} external={:?}",
+                enforced_linear_domain_internal.objective,
+                enforced_linear_domain_reference.objective
+            ),
+        );
+        self.check(
+            "CP-SAT enforced linear-domain assignment",
+            enforced_linear_domain_internal.assignment
+                == enforced_linear_domain_reference.assignment
+                && enforced_linear_domain_internal.assignment == vec![1, 0, 0, 3, 0],
+            format!(
+                "internal={:?} external={:?}",
+                enforced_linear_domain_internal.assignment,
+                enforced_linear_domain_reference.assignment
+            ),
+        );
+
+        let enforced_cardinality_model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "active_gate".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "inactive_gate".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "x".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "y".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "z".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "inactive_x".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "inactive_y".to_string(),
+                    domain: vec![0, 1],
+                },
+            ],
+            constraints: vec![
+                CpConstraint::BoolOr(vec![BoolLiteral {
+                    var: 0,
+                    positive: true,
+                }]),
+                CpConstraint::BoolOr(vec![BoolLiteral {
+                    var: 1,
+                    positive: false,
+                }]),
+                CpConstraint::EnforcedExactlyOne {
+                    enforcement: vec![BoolLiteral {
+                        var: 0,
+                        positive: true,
+                    }],
+                    literals: vec![
+                        BoolLiteral {
+                            var: 2,
+                            positive: true,
+                        },
+                        BoolLiteral {
+                            var: 3,
+                            positive: true,
+                        },
+                    ],
+                },
+                CpConstraint::EnforcedBoolXor {
+                    enforcement: vec![BoolLiteral {
+                        var: 0,
+                        positive: true,
+                    }],
+                    literals: vec![
+                        BoolLiteral {
+                            var: 3,
+                            positive: true,
+                        },
+                        BoolLiteral {
+                            var: 4,
+                            positive: true,
+                        },
+                    ],
+                },
+                CpConstraint::EnforcedAtMostOne {
+                    enforcement: vec![BoolLiteral {
+                        var: 0,
+                        positive: true,
+                    }],
+                    literals: vec![
+                        BoolLiteral {
+                            var: 2,
+                            positive: true,
+                        },
+                        BoolLiteral {
+                            var: 4,
+                            positive: true,
+                        },
+                    ],
+                },
+                CpConstraint::EnforcedExactlyOne {
+                    enforcement: vec![BoolLiteral {
+                        var: 1,
+                        positive: true,
+                    }],
+                    literals: vec![
+                        BoolLiteral {
+                            var: 5,
+                            positive: true,
+                        },
+                        BoolLiteral {
+                            var: 6,
+                            positive: true,
+                        },
+                    ],
+                },
+            ],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![
+                    LinearTerm { var: 2, coeff: 1 },
+                    LinearTerm { var: 3, coeff: 1 },
+                    LinearTerm { var: 4, coeff: 1 },
+                    LinearTerm { var: 5, coeff: 1 },
+                    LinearTerm { var: 6, coeff: 1 },
+                ],
+            }),
+        };
+        let enforced_cardinality_internal =
+            solve_cp_model(&enforced_cardinality_model, CpSolveOptions::default());
+        let enforced_cardinality_json = serde_json::json!({
+            "variables": [
+                {"name": "active_gate", "domain": [0, 1]},
+                {"name": "inactive_gate", "domain": [0, 1]},
+                {"name": "x", "domain": [0, 1]},
+                {"name": "y", "domain": [0, 1]},
+                {"name": "z", "domain": [0, 1]},
+                {"name": "inactive_x", "domain": [0, 1]},
+                {"name": "inactive_y", "domain": [0, 1]},
+            ],
+            "constraints": [
+                {
+                    "kind": "bool_or",
+                    "literals": [{"var": 0, "positive": true}],
+                },
+                {
+                    "kind": "bool_or",
+                    "literals": [{"var": 1, "positive": false}],
+                },
+                {
+                    "kind": "enforced_exactly_one",
+                    "enforcement": [{"var": 0, "positive": true}],
+                    "literals": [
+                        {"var": 2, "positive": true},
+                        {"var": 3, "positive": true},
+                    ],
+                },
+                {
+                    "kind": "enforced_bool_xor",
+                    "enforcement": [{"var": 0, "positive": true}],
+                    "literals": [
+                        {"var": 3, "positive": true},
+                        {"var": 4, "positive": true},
+                    ],
+                },
+                {
+                    "kind": "enforced_at_most_one",
+                    "enforcement": [{"var": 0, "positive": true}],
+                    "literals": [
+                        {"var": 2, "positive": true},
+                        {"var": 4, "positive": true},
+                    ],
+                },
+                {
+                    "kind": "enforced_exactly_one",
+                    "enforcement": [{"var": 1, "positive": true}],
+                    "literals": [
+                        {"var": 5, "positive": true},
+                        {"var": 6, "positive": true},
+                    ],
+                },
+            ],
+            "objective": {
+                "sense": "min",
+                "terms": [
+                    {"var": 2, "coeff": 1},
+                    {"var": 3, "coeff": 1},
+                    {"var": 4, "coeff": 1},
+                    {"var": 5, "coeff": 1},
+                    {"var": 6, "coeff": 1},
+                ],
+            },
+        })
+        .to_string();
+        let value = self.run_python_json(
+            "cp_sat_reference.py",
+            &["--solver", "auto"],
+            &enforced_cardinality_json,
+        );
+        let enforced_cardinality_reference: CpReference =
+            serde_json::from_value(value).expect("parse enforced-cardinality CP reference");
+        self.check(
+            "CP-SAT enforced cardinality status internal/reference",
+            enforced_cardinality_internal.status == CpStatus::Optimal
+                && enforced_cardinality_reference.status == "optimal",
+            format!(
+                "internal={} external={} solver={}",
+                enforced_cardinality_internal.status.as_str(),
+                enforced_cardinality_reference.status,
+                enforced_cardinality_reference.solver
+            ),
+        );
+        self.check(
+            "CP-SAT enforced cardinality objective",
+            enforced_cardinality_internal.objective == enforced_cardinality_reference.objective
+                && enforced_cardinality_internal.objective == Some(1),
+            format!(
+                "internal={:?} external={:?}",
+                enforced_cardinality_internal.objective, enforced_cardinality_reference.objective
+            ),
+        );
+        self.check(
+            "CP-SAT enforced cardinality assignment",
+            enforced_cardinality_internal.assignment == enforced_cardinality_reference.assignment
+                && enforced_cardinality_internal.assignment == vec![1, 0, 0, 1, 0, 0, 0],
+            format!(
+                "internal={:?} external={:?}",
+                enforced_cardinality_internal.assignment, enforced_cardinality_reference.assignment
+            ),
+        );
+
+        let enforced_table_model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "active_gate".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "inactive_gate".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "x".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "y".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "inactive_x".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "inactive_y".to_string(),
+                    domain: vec![0, 1],
+                },
+            ],
+            constraints: vec![
+                CpConstraint::BoolOr(vec![BoolLiteral {
+                    var: 0,
+                    positive: true,
+                }]),
+                CpConstraint::BoolOr(vec![BoolLiteral {
+                    var: 1,
+                    positive: false,
+                }]),
+                CpConstraint::EnforcedAllowedAssignments {
+                    enforcement: vec![BoolLiteral {
+                        var: 0,
+                        positive: true,
+                    }],
+                    vars: vec![2, 3],
+                    tuples: vec![vec![0, 1], vec![1, 0]],
+                },
+                CpConstraint::EnforcedForbiddenAssignments {
+                    enforcement: vec![BoolLiteral {
+                        var: 0,
+                        positive: true,
+                    }],
+                    vars: vec![2, 3],
+                    tuples: vec![vec![0, 1]],
+                },
+                CpConstraint::EnforcedForbiddenAssignments {
+                    enforcement: vec![BoolLiteral {
+                        var: 1,
+                        positive: true,
+                    }],
+                    vars: vec![4, 5],
+                    tuples: vec![vec![0, 0]],
+                },
+            ],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![
+                    LinearTerm { var: 2, coeff: 1 },
+                    LinearTerm { var: 3, coeff: 1 },
+                    LinearTerm { var: 4, coeff: 1 },
+                    LinearTerm { var: 5, coeff: 1 },
+                ],
+            }),
+        };
+        let enforced_table_internal =
+            solve_cp_model(&enforced_table_model, CpSolveOptions::default());
+        let enforced_table_json = serde_json::json!({
+            "variables": [
+                {"name": "active_gate", "domain": [0, 1]},
+                {"name": "inactive_gate", "domain": [0, 1]},
+                {"name": "x", "domain": [0, 1]},
+                {"name": "y", "domain": [0, 1]},
+                {"name": "inactive_x", "domain": [0, 1]},
+                {"name": "inactive_y", "domain": [0, 1]},
+            ],
+            "constraints": [
+                {
+                    "kind": "bool_or",
+                    "literals": [{"var": 0, "positive": true}],
+                },
+                {
+                    "kind": "bool_or",
+                    "literals": [{"var": 1, "positive": false}],
+                },
+                {
+                    "kind": "enforced_allowed_assignments",
+                    "enforcement": [{"var": 0, "positive": true}],
+                    "vars": [2, 3],
+                    "tuples": [[0, 1], [1, 0]],
+                },
+                {
+                    "kind": "enforced_forbidden_assignments",
+                    "enforcement": [{"var": 0, "positive": true}],
+                    "vars": [2, 3],
+                    "tuples": [[0, 1]],
+                },
+                {
+                    "kind": "enforced_forbidden_assignments",
+                    "enforcement": [{"var": 1, "positive": true}],
+                    "vars": [4, 5],
+                    "tuples": [[0, 0]],
+                },
+            ],
+            "objective": {
+                "sense": "min",
+                "terms": [
+                    {"var": 2, "coeff": 1},
+                    {"var": 3, "coeff": 1},
+                    {"var": 4, "coeff": 1},
+                    {"var": 5, "coeff": 1},
+                ],
+            },
+        })
+        .to_string();
+        let value = self.run_python_json(
+            "cp_sat_reference.py",
+            &["--solver", "auto"],
+            &enforced_table_json,
+        );
+        let enforced_table_reference: CpReference =
+            serde_json::from_value(value).expect("parse enforced-table CP reference");
+        self.check(
+            "CP-SAT enforced table status internal/reference",
+            enforced_table_internal.status == CpStatus::Optimal
+                && enforced_table_reference.status == "optimal",
+            format!(
+                "internal={} external={} solver={}",
+                enforced_table_internal.status.as_str(),
+                enforced_table_reference.status,
+                enforced_table_reference.solver
+            ),
+        );
+        self.check(
+            "CP-SAT enforced table objective",
+            enforced_table_internal.objective == enforced_table_reference.objective
+                && enforced_table_internal.objective == Some(1),
+            format!(
+                "internal={:?} external={:?}",
+                enforced_table_internal.objective, enforced_table_reference.objective
+            ),
+        );
+        self.check(
+            "CP-SAT enforced table assignment",
+            enforced_table_internal.assignment == enforced_table_reference.assignment
+                && enforced_table_internal.assignment == vec![1, 0, 1, 0, 0, 0],
+            format!(
+                "internal={:?} external={:?}",
+                enforced_table_internal.assignment, enforced_table_reference.assignment
+            ),
+        );
+
         let feasible_model = CpModel {
             variables: vec![CpVariable {
                 name: "x".to_string(),
@@ -9296,6 +13935,7 @@ impl Driver {
         self.validate_external_solver_clis();
         self.validate_external_optimization_ecosystem_adapters();
         self.validate_external_validation_tool_adapters();
+        self.validate_math_program_facade();
         self.validate_min_cost_flow();
         self.validate_qp();
         self.validate_cp_sat();

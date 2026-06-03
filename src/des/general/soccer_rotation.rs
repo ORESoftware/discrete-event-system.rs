@@ -2161,6 +2161,26 @@ pub fn policy_ipmip_feasible(
             mip.status.as_str()
         );
     }
+    if has_planner_only_constraints(problem) {
+        if let Some(schedule) = policy_greedy_feasible_schedule(problem) {
+            let reason = format!(
+                "IP/MIP status={} had no feasible incumbent; used constructive planner fallback because active constraints are not representable by the exact MDP fallback",
+                mip.status.as_str()
+            );
+            return SoccerIPMIPPolicyResult {
+                schedule,
+                model,
+                mip,
+                solver_options,
+                used_fallback: true,
+                fallback_reason: Some(reason),
+            };
+        }
+        panic!(
+            "soccer IP/MIP produced no decodable feasible schedule and the constructive planner fallback could not satisfy the active planner constraints: status={}",
+            mip.status.as_str()
+        );
+    }
     let mdp = policy_mdp_vi(problem);
     let schedule = mdp.to_schedule();
     let reason = format!(
@@ -2175,6 +2195,40 @@ pub fn policy_ipmip_feasible(
         used_fallback: true,
         fallback_reason: Some(reason),
     }
+}
+
+fn has_planner_only_constraints(problem: &SoccerProblem) -> bool {
+    let has_unavailable = problem
+        .player_status
+        .as_ref()
+        .map(|statuses| {
+            statuses
+                .iter()
+                .any(|s| matches!(s, PlayerStatus::Awol | PlayerStatus::Injured))
+        })
+        .unwrap_or(false);
+    let has_fixed = problem
+        .fixed_position
+        .as_ref()
+        .map(|fixed| fixed.iter().any(|p| p.is_some()))
+        .unwrap_or(false);
+    let has_banned = problem
+        .banned_positions
+        .as_ref()
+        .map(|rows| rows.iter().any(|row| row.iter().any(|&b| b)))
+        .unwrap_or(false);
+    let has_synergy = problem
+        .synergy_rules
+        .as_ref()
+        .map(|rules| !rules.is_empty())
+        .unwrap_or(false);
+    problem.max_consecutive_on_field.is_some()
+        || problem.max_subs_per_game.is_some()
+        || problem.min_subs_per_game.is_some()
+        || has_unavailable
+        || has_fixed
+        || has_banned
+        || has_synergy
 }
 
 // -----------------------------------------------------------------------------

@@ -15,7 +15,7 @@ use std::time::Instant;
 use serde::Deserialize;
 use serde_json::{json, Number, Value};
 
-use crate::des::general::ip_mip_des::IPMIPProblem;
+use crate::des::general::ip_mip_des::{BranchOrCutConstraint, ConstraintKind, IPMIPProblem};
 use crate::des::general::lp::{LPProblem, Sense};
 
 /// Linear model family to send to the external CLI bridge.
@@ -50,6 +50,22 @@ impl ExternalLinearCliModelFormat {
     }
 }
 
+/// LP algorithm requested from CLI solvers that expose a comparable knob.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExternalLinearCliLpAlgorithm {
+    Simplex,
+    Ipm,
+}
+
+impl ExternalLinearCliLpAlgorithm {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ExternalLinearCliLpAlgorithm::Simplex => "simplex",
+            ExternalLinearCliLpAlgorithm::Ipm => "ipm",
+        }
+    }
+}
+
 /// Solver executable family known to the local CLI bridge.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExternalLinearCliSolver {
@@ -62,6 +78,74 @@ pub enum ExternalLinearCliSolver {
     Cplex,
     Xpress,
     Lindo,
+}
+
+/// MIP branching rule requested from CLI solvers that expose a comparable knob.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExternalLinearCliBranchRule {
+    FirstFractional,
+    MostFractional,
+}
+
+impl ExternalLinearCliBranchRule {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ExternalLinearCliBranchRule::FirstFractional => "first-fractional",
+            ExternalLinearCliBranchRule::MostFractional => "most-fractional",
+        }
+    }
+}
+
+/// MIP node-selection rule requested from CLI solvers that expose a comparable knob.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExternalLinearCliNodeSelection {
+    Dfs,
+    BestBound,
+}
+
+impl ExternalLinearCliNodeSelection {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ExternalLinearCliNodeSelection::Dfs => "dfs",
+            ExternalLinearCliNodeSelection::BestBound => "best-bound",
+        }
+    }
+}
+
+/// Presolve mode requested from CLI solvers that expose a comparable knob.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExternalLinearCliPresolve {
+    Auto,
+    On,
+    Off,
+}
+
+impl ExternalLinearCliPresolve {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ExternalLinearCliPresolve::Auto => "auto",
+            ExternalLinearCliPresolve::On => "on",
+            ExternalLinearCliPresolve::Off => "off",
+        }
+    }
+}
+
+/// MIP search feature mode requested from CLI solvers with comparable switches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExternalLinearCliMipSwitch {
+    Auto,
+    On,
+    Off,
+}
+
+impl ExternalLinearCliMipSwitch {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ExternalLinearCliMipSwitch::Auto => "auto",
+            ExternalLinearCliMipSwitch::On => "on",
+            ExternalLinearCliMipSwitch::Off => "off",
+        }
+    }
 }
 
 impl ExternalLinearCliSolver {
@@ -91,6 +175,32 @@ impl ExternalLinearCliSolver {
             ExternalLinearCliSolver::Cplex => &["cplex"],
             ExternalLinearCliSolver::Xpress => &["optimizer", "xpress"],
             ExternalLinearCliSolver::Lindo => &["runlindo", "lindo", "lindoapi"],
+        }
+    }
+
+    /// Environment variables that may point directly at the solver executable.
+    ///
+    /// These are intentionally local configuration only: users can install
+    /// solvers anywhere on their machine and point the bridge at the command
+    /// without committing binaries or absolute paths to version control.
+    pub fn command_env_vars(self) -> &'static [&'static str] {
+        match self {
+            ExternalLinearCliSolver::Highs => &["HIGHS_CMD", "ORES_HIGHS_CMD"],
+            ExternalLinearCliSolver::Glpk => &["GLPSOL_CMD", "GLPK_CMD", "ORES_GLPK_CMD"],
+            ExternalLinearCliSolver::Scip => &["SCIP_CMD", "ORES_SCIP_CMD"],
+            ExternalLinearCliSolver::Cbc => &["CBC_CMD", "ORES_CBC_CMD"],
+            ExternalLinearCliSolver::Clp => &["CLP_CMD", "ORES_CLP_CMD"],
+            ExternalLinearCliSolver::Gurobi => &["GUROBI_CL_CMD", "GUROBI_CMD", "ORES_GUROBI_CMD"],
+            ExternalLinearCliSolver::Cplex => &["CPLEX_CMD", "ORES_CPLEX_CMD"],
+            ExternalLinearCliSolver::Xpress => {
+                &["XPRESS_CMD", "XPRESS_OPTIMIZER_CMD", "ORES_XPRESS_CMD"]
+            }
+            ExternalLinearCliSolver::Lindo => &[
+                "RUNLINDO_CMD",
+                "LINDO_CMD",
+                "LINDOAPI_CMD",
+                "ORES_LINDO_CMD",
+            ],
         }
     }
 
@@ -180,6 +290,7 @@ impl ExternalLinearCliProbeStatus {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExternalLinearCliStatus {
     Optimal,
+    Feasible,
     Infeasible,
     Unbounded,
     Unavailable,
@@ -191,6 +302,7 @@ impl ExternalLinearCliStatus {
     pub fn as_str(self) -> &'static str {
         match self {
             ExternalLinearCliStatus::Optimal => "optimal",
+            ExternalLinearCliStatus::Feasible => "feasible",
             ExternalLinearCliStatus::Infeasible => "infeasible",
             ExternalLinearCliStatus::Unbounded => "unbounded",
             ExternalLinearCliStatus::Unavailable => "unavailable",
@@ -202,6 +314,7 @@ impl ExternalLinearCliStatus {
     pub fn from_str(status: &str) -> Self {
         match status {
             "optimal" => ExternalLinearCliStatus::Optimal,
+            "feasible" => ExternalLinearCliStatus::Feasible,
             "infeasible" => ExternalLinearCliStatus::Infeasible,
             "unbounded" => ExternalLinearCliStatus::Unbounded,
             "unavailable" => ExternalLinearCliStatus::Unavailable,
@@ -219,14 +332,46 @@ pub struct ExternalLinearCliOptions {
     pub time_limit_secs: Option<f64>,
     /// Optional MIP node limit. Ignored for LP probes and solves.
     pub node_limit: Option<usize>,
-    /// Optional relative MIP optimality gap. Ignored for LP probes and solves.
-    pub relative_gap: Option<f64>,
-    /// Optional solver thread count for CLI backends that support it.
-    pub threads: Option<usize>,
-    /// Optional deterministic random seed for CLI backends that support it.
-    pub random_seed: Option<u32>,
     /// Model file format used by the bridge. Defaults to CPLEX LP syntax.
     pub model_format: ExternalLinearCliModelFormat,
+    /// LP algorithm family, when supported by the CLI.
+    pub lp_algorithm: Option<ExternalLinearCliLpAlgorithm>,
+    /// Branch-and-bound node limit for MIP solves, when supported by the CLI.
+    pub max_nodes: Option<u64>,
+    /// Feasible-solution limit for MIP solves, when supported by the CLI.
+    pub solution_limit: Option<u64>,
+    /// Requested number of external solution-pool members for MIP solves.
+    pub solution_pool_size: Option<u64>,
+    /// Relative MIP optimality gap tolerance, when supported by the CLI.
+    pub relative_gap: Option<f64>,
+    /// Absolute MIP optimality gap tolerance, when supported by the CLI.
+    pub absolute_gap: Option<f64>,
+    /// Objective target/limit for MIP solves, when supported by the CLI.
+    pub objective_limit: Option<f64>,
+    /// Primal/row feasibility tolerance, when supported by the CLI.
+    pub primal_feasibility_tolerance: Option<f64>,
+    /// Dual/reduced-cost feasibility tolerance, when supported by the CLI.
+    pub dual_feasibility_tolerance: Option<f64>,
+    /// Integer integrality tolerance for MIP solves, when supported by the CLI.
+    pub integer_feasibility_tolerance: Option<f64>,
+    /// Solver worker/thread cap, when supported by the CLI.
+    pub threads: Option<u32>,
+    /// Solver random seed, when supported by the CLI.
+    pub random_seed: Option<u64>,
+    /// Presolve mode, when supported by the CLI.
+    pub presolve: Option<ExternalLinearCliPresolve>,
+    /// MIP cut generation mode, when supported by the CLI.
+    pub cuts: Option<ExternalLinearCliMipSwitch>,
+    /// MIP primal heuristic mode, when supported by the CLI.
+    pub heuristics: Option<ExternalLinearCliMipSwitch>,
+    /// MIP branching rule, when supported by the CLI.
+    pub branch_rule: Option<ExternalLinearCliBranchRule>,
+    /// Per-variable MIP branch priorities in model variable order, when supported by the CLI.
+    pub branch_priorities: Option<Vec<i32>>,
+    /// MIP search node-selection rule, when supported by the CLI.
+    pub node_selection: Option<ExternalLinearCliNodeSelection>,
+    /// Optional MIP incumbent start in the bridge model's variable order.
+    pub mip_start: Option<Vec<f64>>,
     /// Python executable for the bridge. Defaults to `PYTHON_BIN`, then
     /// `PYTHON`, then `python3`.
     pub python: Option<String>,
@@ -244,10 +389,26 @@ impl Default for ExternalLinearCliOptions {
             solver: ExternalLinearCliSolver::Highs,
             time_limit_secs: None,
             node_limit: None,
+            model_format: ExternalLinearCliModelFormat::CplexLp,
+            lp_algorithm: None,
+            max_nodes: None,
+            solution_limit: None,
+            solution_pool_size: None,
             relative_gap: None,
+            absolute_gap: None,
+            objective_limit: None,
+            primal_feasibility_tolerance: None,
+            dual_feasibility_tolerance: None,
+            integer_feasibility_tolerance: None,
             threads: None,
             random_seed: None,
-            model_format: ExternalLinearCliModelFormat::CplexLp,
+            presolve: None,
+            cuts: None,
+            heuristics: None,
+            branch_rule: None,
+            branch_priorities: None,
+            node_selection: None,
+            mip_start: None,
             python: None,
             command_path: None,
             script_path: None,
@@ -255,13 +416,82 @@ impl Default for ExternalLinearCliOptions {
     }
 }
 
+/// One member of an external MIP solution pool.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExternalLinearCliPoolMember {
+    pub x: Vec<f64>,
+    pub objective: f64,
+}
+
 /// Result returned by a local external solver CLI.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExternalLinearCliSolution {
     pub status: ExternalLinearCliStatus,
     pub solver: String,
+    /// Version/build string reported by the external solver CLI, when available.
+    pub solver_version: Option<String>,
     pub x: Vec<f64>,
     pub objective: Option<f64>,
+    /// LP algorithm family accepted by the CLI, when reported.
+    pub lp_algorithm: Option<String>,
+    /// Best known dual bound reported by a MIP-capable CLI, when available.
+    pub best_bound: Option<f64>,
+    /// Feasible-solution limit accepted by the CLI, when reported.
+    pub solution_limit: Option<u64>,
+    /// Requested external solution-pool size, when reported.
+    pub solution_pool_size: Option<u64>,
+    /// External solution-pool members, when requested.
+    pub solutions: Option<Vec<ExternalLinearCliPoolMember>>,
+    /// Whether the external pool search proved there are no more feasible members.
+    pub exhausted: Option<bool>,
+    /// Relative MIP gap reported by a MIP-capable CLI, when available.
+    pub mip_gap: Option<f64>,
+    /// Absolute MIP gap reported by a MIP-capable CLI, when available.
+    pub absolute_gap: Option<f64>,
+    /// Objective target/limit accepted by the CLI, when reported.
+    pub objective_limit: Option<f64>,
+    /// Primal/row feasibility tolerance accepted by the CLI, when reported.
+    pub primal_feasibility_tolerance: Option<f64>,
+    /// Dual/reduced-cost feasibility tolerance accepted by the CLI, when reported.
+    pub dual_feasibility_tolerance: Option<f64>,
+    /// Integer integrality tolerance accepted by the CLI, when reported.
+    pub integer_feasibility_tolerance: Option<f64>,
+    /// Branch-and-bound nodes explored by a MIP-capable CLI, when available.
+    pub nodes_explored: Option<u64>,
+    /// Solver worker/thread cap accepted by the CLI, when reported.
+    pub threads: Option<u32>,
+    /// Solver random seed accepted by the CLI, when reported.
+    pub random_seed: Option<u64>,
+    /// Presolve mode accepted by the CLI, when reported.
+    pub presolve: Option<String>,
+    /// MIP cut generation mode accepted by the CLI, when reported.
+    pub cuts: Option<String>,
+    /// MIP primal heuristic mode accepted by the CLI, when reported.
+    pub heuristics: Option<String>,
+    /// MIP branching rule accepted by the CLI, when reported.
+    pub branch_rule: Option<String>,
+    /// Whether provided per-variable branch priorities were accepted by the CLI, when reported.
+    pub branch_priorities_accepted: Option<bool>,
+    /// Number of nonzero integer-variable branch priorities sent to the CLI, when reported.
+    pub branch_priority_count: Option<u64>,
+    /// MIP node-selection rule accepted by the CLI, when reported.
+    pub node_selection: Option<String>,
+    /// Whether a provided MIP start was accepted by the CLI, when reported.
+    pub mip_start_accepted: Option<bool>,
+    /// Objective value of the provided MIP start in the bridge model, when reported.
+    pub mip_start_objective: Option<f64>,
+    /// LP inequality row dual prices reported by a CLI, when available.
+    pub dual_ub: Option<Vec<f64>>,
+    /// LP equality row dual prices reported by a CLI, when available.
+    pub dual_eq: Option<Vec<f64>>,
+    /// LP reduced costs reported by a CLI, when available.
+    pub reduced_costs: Option<Vec<f64>>,
+    /// LP basis status for original variables, when reported by a CLI.
+    pub var_basis: Option<Vec<String>>,
+    /// LP basis status for rows (`A_ub` rows followed by `A_eq` rows), when reported by a CLI.
+    pub row_basis: Option<Vec<String>>,
+    /// LP simplex iterations reported by a CLI, when available.
+    pub iterations: Option<u64>,
     pub elapsed_ms: f64,
     pub message: String,
 }
@@ -274,6 +504,7 @@ pub struct ExternalLinearCliProbe {
     pub command: Option<PathBuf>,
     pub status: ExternalLinearCliProbeStatus,
     pub smoke_status: Option<ExternalLinearCliStatus>,
+    pub solver_version: Option<String>,
     pub elapsed_ms: f64,
     pub message: String,
 }
@@ -282,9 +513,70 @@ pub struct ExternalLinearCliProbe {
 struct RawExternalLinearCliSolution {
     status: String,
     solver: String,
+    #[serde(rename = "solverVersion")]
+    solver_version: Option<String>,
     x: Vec<f64>,
     objective: Option<f64>,
+    #[serde(rename = "lpAlgorithm")]
+    lp_algorithm: Option<String>,
+    #[serde(rename = "bestBound")]
+    best_bound: Option<f64>,
+    #[serde(rename = "solutionLimit")]
+    solution_limit: Option<u64>,
+    #[serde(rename = "solutionPoolSize")]
+    solution_pool_size: Option<u64>,
+    solutions: Option<Vec<RawExternalLinearCliPoolMember>>,
+    exhausted: Option<bool>,
+    #[serde(rename = "mipGap")]
+    mip_gap: Option<f64>,
+    #[serde(rename = "absoluteGap")]
+    absolute_gap: Option<f64>,
+    #[serde(rename = "objectiveLimit")]
+    objective_limit: Option<f64>,
+    #[serde(rename = "primalFeasibilityTolerance")]
+    primal_feasibility_tolerance: Option<f64>,
+    #[serde(rename = "dualFeasibilityTolerance")]
+    dual_feasibility_tolerance: Option<f64>,
+    #[serde(rename = "integerFeasibilityTolerance")]
+    integer_feasibility_tolerance: Option<f64>,
+    #[serde(rename = "nodesExplored")]
+    nodes_explored: Option<u64>,
+    threads: Option<u32>,
+    #[serde(rename = "randomSeed")]
+    random_seed: Option<u64>,
+    presolve: Option<String>,
+    cuts: Option<String>,
+    heuristics: Option<String>,
+    #[serde(rename = "branchRule")]
+    branch_rule: Option<String>,
+    #[serde(rename = "branchPrioritiesAccepted")]
+    branch_priorities_accepted: Option<bool>,
+    #[serde(rename = "branchPriorityCount")]
+    branch_priority_count: Option<u64>,
+    #[serde(rename = "nodeSelection")]
+    node_selection: Option<String>,
+    #[serde(rename = "mipStartAccepted")]
+    mip_start_accepted: Option<bool>,
+    #[serde(rename = "mipStartObjective")]
+    mip_start_objective: Option<f64>,
+    #[serde(rename = "dualUB")]
+    dual_ub: Option<Vec<f64>>,
+    #[serde(rename = "dualEQ")]
+    dual_eq: Option<Vec<f64>>,
+    #[serde(rename = "reducedCosts")]
+    reduced_costs: Option<Vec<f64>>,
+    #[serde(rename = "varBasis")]
+    var_basis: Option<Vec<String>>,
+    #[serde(rename = "rowBasis")]
+    row_basis: Option<Vec<String>>,
+    iterations: Option<u64>,
     message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawExternalLinearCliPoolMember {
+    x: Vec<f64>,
+    objective: f64,
 }
 
 /// Serialize an [`LPProblem`] into the JSON contract accepted by
@@ -318,6 +610,7 @@ pub fn ipmip_problem_to_cli_json(problem: &IPMIPProblem) -> Value {
         "ub": opt_plain_vec_f64(problem.ub.as_ref()),
         "var_names": option_strings(problem.var_names.as_ref()),
         "con_names": option_strings(problem.con_names.as_ref()),
+        "lazy_constraints": lazy_constraints_json(problem.lazy_constraints.as_ref()),
     })
 }
 
@@ -440,7 +733,7 @@ pub fn solve_ipmip_with_external_cli(
 
 /// Return the first executable-like command path found for a solver's aliases.
 pub fn external_linear_cli_command(solver: ExternalLinearCliSolver) -> Option<PathBuf> {
-    find_first_command(solver.command_aliases())
+    find_first_command(solver.command_env_vars(), solver.command_aliases())
 }
 
 /// Return the configured command override, or the first command found on `PATH`.
@@ -469,9 +762,11 @@ pub fn probe_external_linear_cli_solver(
             command,
             status: ExternalLinearCliProbeStatus::NotInstalled,
             smoke_status: None,
+            solver_version: None,
             elapsed_ms: elapsed_ms(t0),
             message: format!(
-                "no executable found on PATH for aliases: {}",
+                "no executable found via env vars [{}] or PATH aliases [{}]",
+                solver.command_env_vars().join(", "),
                 solver.command_aliases().join(", ")
             ),
         };
@@ -484,6 +779,7 @@ pub fn probe_external_linear_cli_solver(
             command,
             status: ExternalLinearCliProbeStatus::BridgeUnsupported,
             smoke_status: None,
+            solver_version: None,
             elapsed_ms: elapsed_ms(t0),
             message: format!(
                 "{} is installed, but this bridge does not yet support {} solves for it",
@@ -522,6 +818,7 @@ pub fn probe_external_linear_cli_solver(
             ExternalLinearCliProbeStatus::SmokeFailed
         },
         smoke_status: Some(solution.status),
+        solver_version: solution.solver_version.clone(),
         elapsed_ms: elapsed_ms(t0),
         message: if smoke_ok {
             format!(
@@ -587,10 +884,38 @@ pub fn solve_linear_cli_json(
         .clone()
         .unwrap_or_else(default_linear_cli_script_path);
     let time_limit = normalized_time_limit(opts.time_limit_secs);
-    let node_limit = normalized_node_limit(opts.node_limit);
+    let max_nodes = opts
+        .max_nodes
+        .or_else(|| opts.node_limit.map(|limit| limit as u64));
     let relative_gap = normalized_relative_gap(opts.relative_gap);
-    let threads = normalized_threads(opts.threads);
-    let random_seed = normalized_random_seed(opts.random_seed);
+    let absolute_gap = normalized_absolute_gap(opts.absolute_gap);
+    let objective_limit = normalized_objective_limit(opts.objective_limit);
+    let primal_feasibility_tolerance = normalized_tolerance(opts.primal_feasibility_tolerance);
+    let dual_feasibility_tolerance = normalized_tolerance(opts.dual_feasibility_tolerance);
+    let integer_feasibility_tolerance = normalized_tolerance(opts.integer_feasibility_tolerance);
+    let branch_priorities_json =
+        match normalized_branch_priorities_json(opts.branch_priorities.as_deref()) {
+            Ok(value) => value,
+            Err(message) => {
+                return external_cli_failure(
+                    ExternalLinearCliStatus::NumericalError,
+                    bridge_solver,
+                    message,
+                    elapsed_ms(t0),
+                );
+            }
+        };
+    let mip_start_json = match normalized_mip_start_json(opts.mip_start.as_deref()) {
+        Ok(value) => value,
+        Err(message) => {
+            return external_cli_failure(
+                ExternalLinearCliStatus::NumericalError,
+                bridge_solver,
+                message,
+                elapsed_ms(t0),
+            );
+        }
+    };
 
     let mut command = Command::new(&python);
     command
@@ -602,27 +927,89 @@ pub fn solve_linear_cli_json(
         .arg("--model-format")
         .arg(opts.model_format.as_str())
         .arg("--time-limit")
-        .arg(time_limit.to_string())
+        .arg(time_limit.to_string());
+    if let Some(max_nodes) = max_nodes {
+        command.arg("--node-limit").arg(max_nodes.to_string());
+    }
+    if let Some(solution_limit) = opts.solution_limit {
+        command
+            .arg("--solution-limit")
+            .arg(solution_limit.max(1).to_string());
+    }
+    if let Some(solution_pool_size) = opts.solution_pool_size {
+        command
+            .arg("--solution-pool-size")
+            .arg(solution_pool_size.max(1).to_string());
+    }
+    if let Some(relative_gap) = relative_gap {
+        command
+            .arg("--relative-gap")
+            .arg(format!("{relative_gap:.17}"));
+    }
+    if let Some(absolute_gap) = absolute_gap {
+        command
+            .arg("--absolute-gap")
+            .arg(format!("{absolute_gap:.17}"));
+    }
+    if let Some(objective_limit) = objective_limit {
+        command
+            .arg("--objective-limit")
+            .arg(format!("{objective_limit:.17}"));
+    }
+    if let Some(primal_feasibility_tolerance) = primal_feasibility_tolerance {
+        command
+            .arg("--primal-feasibility-tolerance")
+            .arg(format!("{primal_feasibility_tolerance:.17}"));
+    }
+    if let Some(dual_feasibility_tolerance) = dual_feasibility_tolerance {
+        command
+            .arg("--dual-feasibility-tolerance")
+            .arg(format!("{dual_feasibility_tolerance:.17}"));
+    }
+    if let Some(integer_feasibility_tolerance) = integer_feasibility_tolerance {
+        command
+            .arg("--integer-feasibility-tolerance")
+            .arg(format!("{integer_feasibility_tolerance:.17}"));
+    }
+    if let Some(lp_algorithm) = opts.lp_algorithm {
+        command.arg("--lp-algorithm").arg(lp_algorithm.as_str());
+    }
+    if let Some(threads) = opts.threads {
+        command.arg("--threads").arg(threads.max(1).to_string());
+    }
+    if let Some(random_seed) = opts.random_seed {
+        command.arg("--random-seed").arg(random_seed.to_string());
+    }
+    if let Some(presolve) = opts.presolve {
+        command.arg("--presolve").arg(presolve.as_str());
+    }
+    if let Some(cuts) = opts.cuts {
+        command.arg("--cuts").arg(cuts.as_str());
+    }
+    if let Some(heuristics) = opts.heuristics {
+        command.arg("--heuristics").arg(heuristics.as_str());
+    }
+    if let Some(branch_rule) = opts.branch_rule {
+        command.arg("--branch-rule").arg(branch_rule.as_str());
+    }
+    if let Some(branch_priorities_json) = branch_priorities_json {
+        command
+            .arg("--branch-priorities")
+            .arg(branch_priorities_json);
+    }
+    if let Some(node_selection) = opts.node_selection {
+        command.arg("--node-selection").arg(node_selection.as_str());
+    }
+    if let Some(mip_start_json) = mip_start_json {
+        command.arg("--mip-start").arg(mip_start_json);
+    }
+    if let Some(command_path) = external_linear_cli_command_with_options(opts.solver, opts) {
+        command.env(solver_command_env_var(opts.solver), command_path);
+    }
+    command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    if kind == ExternalLinearCliKind::Mip {
-        if let Some(node_limit) = node_limit {
-            command.arg("--node-limit").arg(node_limit.to_string());
-        }
-        if let Some(relative_gap) = relative_gap {
-            command.arg("--relative-gap").arg(relative_gap.to_string());
-        }
-    }
-    if let Some(threads) = threads {
-        command.arg("--threads").arg(threads.to_string());
-    }
-    if let Some(random_seed) = random_seed {
-        command.arg("--random-seed").arg(random_seed.to_string());
-    }
-    if let Some(command_path) = &opts.command_path {
-        command.env(solver_command_env_var(opts.solver), command_path);
-    }
 
     let mut child = match command.spawn() {
         Ok(child) => child,
@@ -677,8 +1064,47 @@ pub fn solve_linear_cli_json(
         Ok(raw) => ExternalLinearCliSolution {
             status: ExternalLinearCliStatus::from_str(&raw.status),
             solver: raw.solver,
+            solver_version: raw.solver_version,
             x: raw.x,
             objective: raw.objective,
+            lp_algorithm: raw.lp_algorithm,
+            best_bound: raw.best_bound,
+            solution_limit: raw.solution_limit,
+            solution_pool_size: raw.solution_pool_size,
+            solutions: raw.solutions.map(|solutions| {
+                solutions
+                    .into_iter()
+                    .map(|solution| ExternalLinearCliPoolMember {
+                        x: solution.x,
+                        objective: solution.objective,
+                    })
+                    .collect()
+            }),
+            exhausted: raw.exhausted,
+            mip_gap: raw.mip_gap,
+            absolute_gap: raw.absolute_gap,
+            objective_limit: raw.objective_limit,
+            primal_feasibility_tolerance: raw.primal_feasibility_tolerance,
+            dual_feasibility_tolerance: raw.dual_feasibility_tolerance,
+            integer_feasibility_tolerance: raw.integer_feasibility_tolerance,
+            nodes_explored: raw.nodes_explored,
+            threads: raw.threads,
+            random_seed: raw.random_seed,
+            presolve: raw.presolve,
+            cuts: raw.cuts,
+            heuristics: raw.heuristics,
+            branch_rule: raw.branch_rule,
+            branch_priorities_accepted: raw.branch_priorities_accepted,
+            branch_priority_count: raw.branch_priority_count,
+            node_selection: raw.node_selection,
+            mip_start_accepted: raw.mip_start_accepted,
+            mip_start_objective: raw.mip_start_objective,
+            dual_ub: raw.dual_ub,
+            dual_eq: raw.dual_eq,
+            reduced_costs: raw.reduced_costs,
+            var_basis: raw.var_basis,
+            row_basis: raw.row_basis,
+            iterations: raw.iterations,
             elapsed_ms: elapsed,
             message: raw.message,
         },
@@ -704,8 +1130,39 @@ fn external_cli_failure(
     ExternalLinearCliSolution {
         status,
         solver,
+        solver_version: None,
         x: Vec::new(),
         objective: None,
+        lp_algorithm: None,
+        best_bound: None,
+        solution_limit: None,
+        solution_pool_size: None,
+        solutions: None,
+        exhausted: None,
+        mip_gap: None,
+        absolute_gap: None,
+        objective_limit: None,
+        primal_feasibility_tolerance: None,
+        dual_feasibility_tolerance: None,
+        integer_feasibility_tolerance: None,
+        nodes_explored: None,
+        threads: None,
+        random_seed: None,
+        presolve: None,
+        cuts: None,
+        heuristics: None,
+        branch_rule: None,
+        branch_priorities_accepted: None,
+        branch_priority_count: None,
+        node_selection: None,
+        mip_start_accepted: None,
+        mip_start_objective: None,
+        dual_ub: None,
+        dual_eq: None,
+        reduced_costs: None,
+        var_basis: None,
+        row_basis: None,
+        iterations: None,
         elapsed_ms,
         message,
     }
@@ -1069,19 +1526,49 @@ fn is_binary_bound(
             .is_some_and(|ub| (ub - 1.0).abs() <= 1.0e-12)
 }
 
-fn find_first_command(aliases: &[&str]) -> Option<PathBuf> {
+fn find_first_command(env_vars: &[&str], aliases: &[&str]) -> Option<PathBuf> {
+    let mut saw_configured_env = false;
+    for env_var in env_vars {
+        if let Some(value) = std::env::var_os(env_var) {
+            if !value.to_string_lossy().trim().is_empty() {
+                saw_configured_env = true;
+                if let Some(path) = resolve_command_candidate(&PathBuf::from(value)) {
+                    return Some(path);
+                }
+            }
+        }
+    }
+    if saw_configured_env {
+        return None;
+    }
+
     let path_var = std::env::var_os("PATH")?;
     let path_dirs: Vec<PathBuf> = std::env::split_paths(&path_var).collect();
     for alias in aliases {
-        let alias_path = Path::new(alias);
-        if alias_path.components().count() > 1 && alias_path.is_file() {
-            return Some(alias_path.to_path_buf());
+        let alias_path = PathBuf::from(alias);
+        if let Some(path) = resolve_command_candidate(&alias_path) {
+            return Some(path);
         }
         for dir in &path_dirs {
             let candidate = dir.join(alias);
-            if candidate.is_file() {
-                return Some(candidate);
+            if let Some(path) = resolve_command_candidate(&candidate) {
+                return Some(path);
             }
+        }
+    }
+    None
+}
+
+fn resolve_command_candidate(candidate: &Path) -> Option<PathBuf> {
+    if candidate.components().count() > 1 {
+        return candidate.is_file().then(|| candidate.to_path_buf());
+    }
+
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        let path = dir.join(candidate);
+        if path.is_file() {
+            return Some(path);
         }
     }
     None
@@ -1122,20 +1609,58 @@ fn normalized_time_limit(time_limit_secs: Option<f64>) -> f64 {
     }
 }
 
+#[cfg(test)]
 fn normalized_node_limit(node_limit: Option<usize>) -> Option<usize> {
     node_limit.filter(|value| *value > 0)
+}
+
+#[cfg(test)]
+fn normalized_threads(threads: Option<u32>) -> Option<u32> {
+    threads.filter(|value| *value > 0)
+}
+
+#[cfg(test)]
+fn normalized_random_seed(random_seed: Option<u32>) -> Option<u32> {
+    random_seed.filter(|value| *value <= i32::MAX as u32)
 }
 
 fn normalized_relative_gap(relative_gap: Option<f64>) -> Option<f64> {
     relative_gap.filter(|value| value.is_finite() && *value >= 0.0)
 }
 
-fn normalized_threads(threads: Option<usize>) -> Option<usize> {
-    threads.filter(|value| *value > 0)
+fn normalized_absolute_gap(absolute_gap: Option<f64>) -> Option<f64> {
+    absolute_gap.filter(|value| value.is_finite() && *value >= 0.0)
 }
 
-fn normalized_random_seed(random_seed: Option<u32>) -> Option<u32> {
-    random_seed.filter(|value| *value <= i32::MAX as u32)
+fn normalized_objective_limit(objective_limit: Option<f64>) -> Option<f64> {
+    objective_limit.filter(|value| value.is_finite())
+}
+
+fn normalized_tolerance(tolerance: Option<f64>) -> Option<f64> {
+    tolerance.filter(|value| value.is_finite() && *value > 0.0)
+}
+
+fn normalized_branch_priorities_json(
+    branch_priorities: Option<&[i32]>,
+) -> Result<Option<String>, String> {
+    let Some(branch_priorities) = branch_priorities else {
+        return Ok(None);
+    };
+    serde_json::to_string(branch_priorities)
+        .map(Some)
+        .map_err(|err| format!("failed to serialize branch_priorities: {err}"))
+}
+
+fn normalized_mip_start_json(mip_start: Option<&[f64]>) -> Result<Option<String>, String> {
+    let Some(mip_start) = mip_start else {
+        return Ok(None);
+    };
+    if mip_start.iter().any(|value| !value.is_finite()) {
+        return Err("mip_start values must be finite".to_string());
+    }
+    serde_json::to_string(mip_start)
+        .map(Some)
+        .map_err(|err| format!("failed to serialize mip_start: {err}"))
 }
 
 fn elapsed_ms(t0: Instant) -> f64 {
@@ -1179,6 +1704,31 @@ fn opt_vec_opt_f64(values: Option<&Vec<Option<f64>>>) -> Value {
     })
 }
 
+fn lazy_constraints_json(rows: Option<&Vec<BranchOrCutConstraint>>) -> Value {
+    rows.map_or(Value::Null, |rows| {
+        Value::Array(
+            rows.iter()
+                .map(|row| {
+                    json!({
+                        "coefs": f64_vec(&row.coefs),
+                        "rhs": f64_value(row.rhs),
+                        "name": &row.name,
+                        "kind": constraint_kind_name(row.kind),
+                    })
+                })
+                .collect(),
+        )
+    })
+}
+
+fn constraint_kind_name(kind: ConstraintKind) -> &'static str {
+    match kind {
+        ConstraintKind::Branch => "branch",
+        ConstraintKind::Cut => "cut",
+        ConstraintKind::Lazy => "lazy",
+    }
+}
+
 fn option_strings(values: Option<&Vec<String>>) -> Value {
     values.map_or(Value::Null, |values| {
         Value::Array(values.iter().cloned().map(Value::String).collect())
@@ -1196,7 +1746,7 @@ mod tests {
         ExternalLinearCliOptions, ExternalLinearCliProbeStatus, ExternalLinearCliSolver,
         ExternalLinearCliStatus,
     };
-    use crate::des::general::ip_mip_des::IPMIPProblem;
+    use crate::des::general::ip_mip_des::{BranchOrCutConstraint, ConstraintKind, IPMIPProblem};
     use crate::des::general::lp::{LPProblem, Sense};
     use std::path::PathBuf;
 
@@ -1333,9 +1883,37 @@ mod tests {
     }
 
     #[test]
+    fn ipmip_payload_includes_lazy_constraints_for_external_validation() {
+        let p = IPMIPProblem {
+            sense: Sense::Max,
+            c: vec![1.0, 1.0],
+            a: vec![vec![1.0, 1.0]],
+            b: vec![2.0],
+            integer_vars: vec![true, true],
+            ub: Some(vec![1.0, 1.0]),
+            var_names: None,
+            con_names: None,
+            lazy_constraints: Some(vec![BranchOrCutConstraint {
+                coefs: vec![1.0, 1.0],
+                rhs: 1.0,
+                name: "lazy-at-most-one".to_string(),
+                kind: ConstraintKind::Lazy,
+            }]),
+            variable_nodes: None,
+            constraint_nodes: None,
+        };
+        let payload = ipmip_problem_to_cli_json(&p);
+        assert_eq!(payload["lazy_constraints"][0]["coefs"][1], 1.0);
+        assert_eq!(payload["lazy_constraints"][0]["rhs"], 1.0);
+        assert_eq!(payload["lazy_constraints"][0]["name"], "lazy-at-most-one");
+        assert_eq!(payload["lazy_constraints"][0]["kind"], "lazy");
+    }
+
+    #[test]
     fn external_status_round_trips_bridge_spelling() {
         for status in [
             ExternalLinearCliStatus::Optimal,
+            ExternalLinearCliStatus::Feasible,
             ExternalLinearCliStatus::Infeasible,
             ExternalLinearCliStatus::Unbounded,
             ExternalLinearCliStatus::Unavailable,
@@ -1386,6 +1964,19 @@ mod tests {
     #[test]
     fn solver_aliases_and_kind_support_match_bridge_contract() {
         assert_eq!(ExternalLinearCliSolver::Glpk.command_aliases(), &["glpsol"]);
+        assert_eq!(
+            ExternalLinearCliSolver::Gurobi.command_env_vars(),
+            &["GUROBI_CL_CMD", "GUROBI_CMD", "ORES_GUROBI_CMD"]
+        );
+        assert_eq!(
+            ExternalLinearCliSolver::Lindo.command_env_vars(),
+            &[
+                "RUNLINDO_CMD",
+                "LINDO_CMD",
+                "LINDOAPI_CMD",
+                "ORES_LINDO_CMD"
+            ]
+        );
         assert_eq!(
             ExternalLinearCliSolver::Xpress.command_aliases(),
             &["optimizer", "xpress"]

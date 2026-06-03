@@ -182,6 +182,8 @@ def circuit_complete_ok(selected: Sequence[dict], nodes: Sequence[int]) -> bool:
 
 def multiple_circuit_complete_ok(selected: Sequence[dict], nodes: Sequence[int]) -> bool:
     node_set = set(nodes)
+    if 0 not in node_set:
+        return False
     incoming = {node: 0 for node in nodes}
     outgoing = {node: 0 for node in nodes}
     next_node = {}
@@ -417,6 +419,14 @@ def ordered_domain_values(
                 values.sort()
             elif domain_strategy == "max_value":
                 values.sort(reverse=True)
+            elif domain_strategy == "lower_half":
+                values.sort()
+            elif domain_strategy == "upper_half":
+                values.sort(reverse=True)
+            elif domain_strategy == "median_value":
+                values.sort()
+                median = values.pop(len(values) // 2)
+                values.insert(0, median)
             else:
                 raise ValueError(f"unknown decision domain strategy {domain_strategy}")
     return values
@@ -430,6 +440,10 @@ def partial_ok(model: dict, partial: Sequence[Optional[int]]) -> bool:
                 return False
         elif kind == "linear_domain":
             if not linear_domain_partial_ok(model, partial, c):
+                return False
+        elif kind == "enforced_linear_domain":
+            active = enforcement_state(partial, c["enforcement"])
+            if active is True and not linear_domain_partial_ok(model, partial, c):
                 return False
         elif kind == "map_domain":
             var = int(c["var"])
@@ -465,6 +479,73 @@ def partial_ok(model: dict, partial: Sequence[Optional[int]]) -> bool:
             active = enforcement_state(partial, c["enforcement"])
             if active is True and not linear_partial_ok(model, partial, c):
                 return False
+        elif kind == "enforced_bool_or":
+            active = enforcement_state(partial, c["enforcement"])
+            if active is True:
+                unknown = False
+                satisfied = False
+                for lit in c["literals"]:
+                    truth = literal_truth(partial, lit)
+                    if truth is True:
+                        satisfied = True
+                        break
+                    if truth is None:
+                        unknown = True
+                if not satisfied and not unknown:
+                    return False
+        elif kind == "enforced_at_least_one":
+            active = enforcement_state(partial, c["enforcement"])
+            if active is True:
+                unknown = False
+                satisfied = False
+                for lit in c["literals"]:
+                    truth = literal_truth(partial, lit)
+                    if truth is True:
+                        satisfied = True
+                        break
+                    if truth is None:
+                        unknown = True
+                if not satisfied and not unknown:
+                    return False
+        elif kind == "enforced_bool_and":
+            active = enforcement_state(partial, c["enforcement"])
+            if active is True:
+                for lit in c["literals"]:
+                    truth = literal_truth(partial, lit)
+                    if truth is False:
+                        return False
+        elif kind == "enforced_bool_xor":
+            active = enforcement_state(partial, c["enforcement"])
+            if active is True:
+                true_count = 0
+                unknown = False
+                for lit in c["literals"]:
+                    truth = literal_truth(partial, lit)
+                    if truth is True:
+                        true_count += 1
+                    elif truth is None:
+                        unknown = True
+                if not unknown and true_count % 2 == 0:
+                    return False
+        elif kind == "enforced_at_most_one":
+            active = enforcement_state(partial, c["enforcement"])
+            if active is True:
+                true_count = sum(1 for lit in c["literals"] if literal_truth(partial, lit) is True)
+                if true_count > 1:
+                    return False
+        elif kind == "enforced_exactly_one":
+            active = enforcement_state(partial, c["enforcement"])
+            if active is True:
+                true_count = 0
+                unknown = False
+                for lit in c["literals"]:
+                    truth = literal_truth(partial, lit)
+                    if truth is True:
+                        true_count += 1
+                    elif truth is None:
+                        unknown = True
+                if true_count > 1 or (true_count == 0 and not unknown):
+                    return False
         elif kind == "all_different":
             seen = set()
             for v in c["vars"]:
@@ -507,6 +588,18 @@ def partial_ok(model: dict, partial: Sequence[Optional[int]]) -> bool:
         elif kind == "at_most_one":
             true_count = sum(1 for lit in c["literals"] if literal_truth(partial, lit) is True)
             if true_count > 1:
+                return False
+        elif kind == "at_least_one":
+            unknown = False
+            satisfied = False
+            for lit in c["literals"]:
+                truth = literal_truth(partial, lit)
+                if truth is True:
+                    satisfied = True
+                    break
+                if truth is None:
+                    unknown = True
+            if not satisfied and not unknown:
                 return False
         elif kind == "exactly_one":
             true_count = 0
@@ -565,6 +658,8 @@ def partial_ok(model: dict, partial: Sequence[Optional[int]]) -> bool:
         elif kind == "multiple_circuit":
             arcs = c["arcs"]
             nodes = sorted({int(arc["tail"]) for arc in arcs} | {int(arc["head"]) for arc in arcs})
+            if 0 not in nodes:
+                return False
             for node in nodes:
                 true_out = sum(
                     1
@@ -584,8 +679,6 @@ def partial_ok(model: dict, partial: Sequence[Optional[int]]) -> bool:
                         for arc in arcs
                     ):
                         return False
-                elif true_out > 1 or true_in > 1:
-                    return False
                 possible_out = sum(
                     1
                     for arc in arcs
@@ -596,7 +689,11 @@ def partial_ok(model: dict, partial: Sequence[Optional[int]]) -> bool:
                     for arc in arcs
                     if int(arc["head"]) == node and literal_truth(partial, arc["literal"]) is not False
                 )
-                if node != 0 and (possible_out == 0 or possible_in == 0):
+                if node == 0:
+                    if true_out > possible_in or true_in > possible_out:
+                        return False
+                    continue
+                if true_out > 1 or true_in > 1 or possible_out == 0 or possible_in == 0:
                     return False
             all_bound = True
             selected = []
@@ -626,6 +723,24 @@ def partial_ok(model: dict, partial: Sequence[Optional[int]]) -> bool:
             for row in tuples:
                 if all(partial[var] is not None and int(partial[var]) == value for var, value in zip(vars_, row)):
                     return False
+        elif kind == "enforced_allowed_assignments":
+            active = enforcement_state(partial, c["enforcement"])
+            if active is True:
+                vars_ = [int(v) for v in c["vars"]]
+                tuples = [[int(v) for v in row] for row in c["tuples"]]
+                if not any(
+                    all(partial[var] is None or int(partial[var]) == value for var, value in zip(vars_, row))
+                    for row in tuples
+                ):
+                    return False
+        elif kind == "enforced_forbidden_assignments":
+            active = enforcement_state(partial, c["enforcement"])
+            if active is True:
+                vars_ = [int(v) for v in c["vars"]]
+                tuples = [[int(v) for v in row] for row in c["tuples"]]
+                for row in tuples:
+                    if all(partial[var] is not None and int(partial[var]) == value for var, value in zip(vars_, row)):
+                        return False
         elif kind == "inverse":
             direct = [int(v) for v in c["direct"]]
             inverse = [int(v) for v in c["inverse"]]
@@ -826,6 +941,35 @@ def partial_ok(model: dict, partial: Sequence[Optional[int]]) -> bool:
                 ):
                     return False
             elif not any(0 <= int(index) < len(values) for index in model["variables"][index_var]["domain"]):
+                return False
+        elif kind == "variable_element":
+            index_var = int(c["index"])
+            target_var = int(c["target"])
+            vars_ = [int(v) for v in c["vars"]]
+            index_values = (
+                [int(partial[index_var])]
+                if partial[index_var] is not None
+                else [int(v) for v in model["variables"][index_var]["domain"]]
+            )
+            target_values = (
+                [int(partial[target_var])]
+                if partial[target_var] is not None
+                else [int(v) for v in model["variables"][target_var]["domain"]]
+            )
+            possible = False
+            for index in index_values:
+                if index < 0 or index >= len(vars_):
+                    continue
+                selected_var = vars_[index]
+                selected_values = (
+                    [int(partial[selected_var])]
+                    if partial[selected_var] is not None
+                    else [int(v) for v in model["variables"][selected_var]["domain"]]
+                )
+                if set(selected_values) & set(target_values):
+                    possible = True
+                    break
+            if not possible:
                 return False
         elif kind == "alternative":
             parent_active = optional_presence_truth(partial, c)
@@ -1207,6 +1351,9 @@ def ortools_reference(model: dict) -> Optional[dict]:
         mapping = {
             "min_value": cp_model.SELECT_MIN_VALUE,
             "max_value": cp_model.SELECT_MAX_VALUE,
+            "lower_half": cp_model.SELECT_LOWER_HALF,
+            "upper_half": cp_model.SELECT_UPPER_HALF,
+            "median_value": cp_model.SELECT_MEDIAN_VALUE,
         }
         if name not in mapping:
             raise ValueError(f"unknown decision domain strategy {name}")
@@ -1238,6 +1385,9 @@ def ortools_reference(model: dict) -> Optional[dict]:
     def literal_expr(lit: dict):
         var = xs[int(lit["var"])]
         return var if bool(lit.get("positive", True)) else 1 - var
+
+    def enforcement_literals(literals: Sequence[dict]):
+        return [cp_literal(lit) for lit in literals]
 
     def fixed_size_interval(start_var, duration: int, name: str, item: dict):
         presence = item.get("presence")
@@ -1292,6 +1442,15 @@ def ortools_reference(model: dict) -> Optional[dict]:
                     [[int(interval["lb"]), int(interval["ub"])] for interval in c["intervals"]]
                 ),
             )
+        elif kind == "enforced_linear_domain":
+            expr = sum(int(t["coeff"]) * xs[int(t["var"])] for t in c["terms"])
+            constraint = cp.AddLinearExpressionInDomain(
+                expr,
+                cp_model.Domain.FromIntervals(
+                    [[int(interval["lb"]), int(interval["ub"])] for interval in c["intervals"]]
+                ),
+            )
+            constraint.OnlyEnforceIf(enforcement_literals(c["enforcement"]))
         elif kind == "map_domain":
             cp.AddMapDomain(
                 xs[int(c["var"])],
@@ -1306,11 +1465,25 @@ def ortools_reference(model: dict) -> Optional[dict]:
                 constraint = cp.Add(expr >= int(c["rhs"]))
             else:
                 constraint = cp.Add(expr == int(c["rhs"]))
-            enforcement = []
-            for lit in c["enforcement"]:
-                x = xs[int(lit["var"])]
-                enforcement.append(x if bool(lit.get("positive", True)) else x.Not())
-            constraint.OnlyEnforceIf(enforcement)
+            constraint.OnlyEnforceIf(enforcement_literals(c["enforcement"]))
+        elif kind == "enforced_bool_or":
+            constraint = cp.AddBoolOr([cp_literal(lit) for lit in c["literals"]])
+            constraint.OnlyEnforceIf(enforcement_literals(c["enforcement"]))
+        elif kind == "enforced_bool_and":
+            constraint = cp.AddBoolAnd([cp_literal(lit) for lit in c["literals"]])
+            constraint.OnlyEnforceIf(enforcement_literals(c["enforcement"]))
+        elif kind == "enforced_bool_xor":
+            constraint = cp.AddBoolXOr([cp_literal(lit) for lit in c["literals"]])
+            constraint.OnlyEnforceIf(enforcement_literals(c["enforcement"]))
+        elif kind == "enforced_at_most_one":
+            constraint = cp.AddAtMostOne([cp_literal(lit) for lit in c["literals"]])
+            constraint.OnlyEnforceIf(enforcement_literals(c["enforcement"]))
+        elif kind == "enforced_at_least_one":
+            constraint = cp.AddAtLeastOne([cp_literal(lit) for lit in c["literals"]])
+            constraint.OnlyEnforceIf(enforcement_literals(c["enforcement"]))
+        elif kind == "enforced_exactly_one":
+            constraint = cp.AddExactlyOne([cp_literal(lit) for lit in c["literals"]])
+            constraint.OnlyEnforceIf(enforcement_literals(c["enforcement"]))
         elif kind == "all_different":
             cp.AddAllDifferent([xs[int(v)] for v in c["vars"]])
         elif kind == "bool_or":
@@ -1325,6 +1498,9 @@ def ortools_reference(model: dict) -> Optional[dict]:
         elif kind == "at_most_one":
             lits = [cp_literal(lit) for lit in c["literals"]]
             cp.AddAtMostOne(lits)
+        elif kind == "at_least_one":
+            lits = [cp_literal(lit) for lit in c["literals"]]
+            cp.AddAtLeastOne(lits)
         elif kind == "exactly_one":
             lits = [cp_literal(lit) for lit in c["literals"]]
             cp.AddExactlyOne(lits)
@@ -1350,6 +1526,18 @@ def ortools_reference(model: dict) -> Optional[dict]:
                 [xs[int(v)] for v in c["vars"]],
                 [[int(v) for v in row] for row in c["tuples"]],
             )
+        elif kind == "enforced_allowed_assignments":
+            constraint = cp.AddAllowedAssignments(
+                [xs[int(v)] for v in c["vars"]],
+                [[int(v) for v in row] for row in c["tuples"]],
+            )
+            constraint.OnlyEnforceIf(enforcement_literals(c["enforcement"]))
+        elif kind == "enforced_forbidden_assignments":
+            constraint = cp.AddForbiddenAssignments(
+                [xs[int(v)] for v in c["vars"]],
+                [[int(v) for v in row] for row in c["tuples"]],
+            )
+            constraint.OnlyEnforceIf(enforcement_literals(c["enforcement"]))
         elif kind == "inverse":
             cp.AddInverse(
                 [xs[int(v)] for v in c["direct"]],
@@ -1401,6 +1589,12 @@ def ortools_reference(model: dict) -> Optional[dict]:
             cp.AddElement(
                 xs[int(c["index"])],
                 [int(v) for v in c["values"]],
+                xs[int(c["target"])],
+            )
+        elif kind == "variable_element":
+            cp.AddElement(
+                xs[int(c["index"])],
+                [xs[int(v)] for v in c["vars"]],
                 xs[int(c["target"])],
             )
         elif kind == "alternative":
@@ -1566,6 +1760,8 @@ def ortools_reference(model: dict) -> Optional[dict]:
     solver.parameters.max_time_in_seconds = 10.0
     if decision_strategies:
         solver.parameters.search_branching = cp_model.FIXED_SEARCH
+        solver.parameters.cp_model_presolve = False
+        solver.parameters.num_search_workers = 1
     status = solver.Solve(cp)
     if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         assignment = [int(solver.Value(x)) for x in xs]

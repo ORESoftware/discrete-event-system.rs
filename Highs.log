@@ -5142,3 +5142,49 @@ Objective value     :  1.0000000000e+00
 P-D objective error :  0.0000000000e+00
 HiGHS run time      :          0.00
 Writing the solution to /var/folders/vw/gdr1xfp14098n0tnwkvtd8hw0000gp/T/des-highs-cli-rdt07wta/solution.txt
+Running HiGHS 1.14.0 (git hash: n/a): Copyright (c) 2026 under MIT licence terms
+Command line parsed using CLI11 2.5.0: Copyright (c) 2017-2025 University of Cincinnati
+Set option time_limit to 5
+Set option solution_file to "/private/tmp/ores-highs-options.f8DQRK/solution.sol"
+Set option mip_max_nodes to 0
+Set option mip_rel_gap to 0.25
+MIP model has 1 row; 2 cols; 2 nonzeros; 2 integer variables (2 binary)
+Coefficient ranges:
+  Matrix  [1e+00, 1e+00]
+  Cost    [1e+01, 1e+01]
+  Bound   [1e+00, 1e+00]
+  RHS     [1e+00, 1e+00]
+Presolving model
+1 rows, 0 cols, 0 nonzeros 0s
+0 rows, 0 cols, 0 nonzeros 0s
+Presolve reductions: rows 0(-1); columns 0(-2); nonzeros 0(-2) - Reduced to empty
+Presolve: Optimal
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+         0       0         0   0.00%   10.5            10.5               0.00%        0      0      0         0     0.0s
+
+Solving report
+  Model             model
+  Status            Optimal
+  Primal bound      10.5
+  Dual bound        10.5
+  Gap               0% (tolerance: 25%)
+  P-D integral      0
+  Solution status   feasible
+                    10.5 (objective)
+                    0 (bound viol.)
+                    0 (int. viol.)
+                    0 (row viol.)
+  Timing            0.00
+  Max sub-MIP depth 0
+  Nodes             0
+  Repair LPs        0
+  LP iterations     0
+Writing the solution to /private/tmp/ores-highs-options.f8DQRK/solution.sol

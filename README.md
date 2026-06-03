@@ -394,144 +394,67 @@ than as one monolithic planner:
 | --- | --- |
 | Inventory control and dynamic programming | `inventory_dp`, `multistage_stochastic`, `main_inventory_mdp`, `main_newsvendor` |
 | Forecasting and state estimation | `nonlinear_forecasting_model`, `kalman_filter`, stochastic SDE/control reports |
-| LP and interior-point methods | `lp`, `lp_des`, `des_lp_bridge`, `external_linear_cli`; use `LP_SOLVER=internal-ipm` for the native primal-dual IPM or `scipy:highs-ipm` for SciPy HiGHS IPM; local CLI adapters can call installed HiGHS, GLPK, SCIP, CBC, CLP, and optional commercial solvers without vendoring executables; source-level range rows and objective offsets compile to equality/inequality rows; weighted L1 feasibility relaxation identifies minimum-cost row/bound repairs for infeasible models; simplex runs recover dual row prices and reduced costs when the active set is certifiable; infeasibility conflict extraction finds minimal row/bound subsystems for IIS-style diagnostics |
+| LP and interior-point methods | `lp`, `lp_des`, `des_lp_bridge`, `external_linear_cli`; use `LP_SOLVER=internal-ipm` for the native primal-dual IPM or `scipy:highs-ipm` for SciPy HiGHS IPM; local CLI adapters can call installed HiGHS, GLPK, SCIP, CBC, CLP, Gurobi, CPLEX, Xpress, and LINDO/RunLindo without vendoring executables; CLI bridges can request LP simplex/IPM algorithms plus primal and dual feasibility tolerances where supported; source-level range rows and objective offsets compile to equality/inequality rows; weighted L1 feasibility relaxation identifies minimum-cost row/bound repairs for infeasible models; simplex runs recover dual row prices and reduced costs when the active set is certifiable; HiGHS/GLPK/CBC/CLP CLI bridges surface reported LP dual row prices, reduced costs, basis statuses, and simplex iteration counts when available; infeasibility conflict extraction finds minimal row/bound subsystems for IIS-style diagnostics |
 | Convex QP, MIQP, SOCP, and QCP | `qp`; dense active-set QP returns row, equality, lower-bound, upper-bound, and reduced-gradient KKT certificates; bounded MIQP enumerates integer assignments and solves convex QP subproblems |
-| Constraint programming / CP-SAT | `cp_sat`; finite-domain search covers Boolean logic, multi-literal enforced linear rows, tables, automata, circuits/multiple-circuit routing, constant-array and variable-array element constraints, resource scheduling, optional and variable-size intervals, alternative mode intervals, fixed and variable-size 2D packing, variable-demand/capacity cumulative resources, reservoir constraints, solution hints/search starts, fixed-search decision strategies, bounded solution enumeration, assumptions, and infeasible assumption cores |
-| Mixed-integer optimization | `milp_bnb`, `ip_mip_des`, `external_linear_cli`; branch-and-cut covers solution pools, MIP starts, original-variable branch priorities, relative/absolute MIP gap limits, infeasibility conflict refinement, weighted feasibility relaxation, lower bounds, ranged rows, indicators, SOS1/SOS2, semi-continuous/semi-integer variables, piecewise-linear rewards, absolute-value, maximum, minimum, binary-logic, L1/Linf norm, exact binary-binary/binary-continuous bounded-product general constraints, exact binary/bounded quadratic objective terms, and lexicographic objectives |
+| Constraint programming / CP-SAT | `cp_sat`; finite-domain search covers Boolean logic, at-least/at-most/exactly-one cardinality, enforced linear/linear-domain/Boolean/cardinality/table constraints, automata, circuits/multiple-circuit routing, constant-array and variable-array element constraints, resource scheduling, optional and variable-size intervals, alternative mode intervals, fixed and variable-size 2D packing, variable-demand/capacity cumulative resources, reservoir constraints, solution hints/search starts, fixed-search decision strategies with min/max/lower-half/upper-half/median domain reductions, bounded solution enumeration, assumptions, and infeasible assumption cores |
+| Mixed-integer optimization | `milp_bnb`, `ip_mip_des`, `external_linear_cli`; branch-and-cut covers solution pools, MIP starts, branch priorities, relative/absolute MIP gap limits, lazy constraints, infeasibility conflict refinement, weighted feasibility relaxation, lower bounds, ranged rows, indicators, SOS1/SOS2, semi-continuous/semi-integer variables, piecewise-linear rewards, absolute-value, maximum, minimum, binary-logic, L1/Linf norm, exact binary-binary/binary-continuous bounded-product general constraints, exact binary/bounded quadratic objective terms, and lexicographic objectives; CLI bridges accept local MIP starts plus time/node/solution/objective/relative-gap/absolute-gap, primal/dual/integer feasibility tolerances, branch/search, per-variable branch-priority controls, threads, random-seed, presolve, cut-generation, and heuristic controls where supported, materialize known lazy rows for static external validation, provide portable external solution-pool enumeration through repeated no-good cuts, and surface feasible incumbents plus reported best bound, gap, and node counts when available |
+| Solver-style modeling facade | `math_program`; named-variable LP/MIP facade cross-checked against external HiGHS, GLPK, SCIP, CBC, OR-Tools GLOP/CP-SAT, optional commercial Gurobi/CPLEX/Xpress API oracles, and optional commercial Gurobi/CPLEX/Xpress/LINDO CLI oracles when locally available, with CPLEX-LP and MPS text export for local solver CLIs, including `<=`/`>=`/`=` rows, bounds, integer/binary domains, indicator lowering, max/general-constraint lowering, conflict refinement, feasibility relaxation, and solution pools |
 | Network flow and transportation | `max_flow`, `network_flow`, `traffic_flow`, `stochastic_flow_mdp` |
 | Vehicle routing and routing heuristics | `classical_optimization_models` VRP savings and nearest-neighbor runs |
 | Stochastic optimization and simulation | `stochastic_lp`, `statistical_optimization`, `fel`, `hybrid`, catalogue simulations |
 | Model predictive control and reinforcement learning | `mpc_double_integrator`, `temp_control` MPC, `qlearning_des`, `ppo_des`, `actor_critic_gridworld` |
+| Optional Java/Rust solver ecosystems | `external_optimization_ecosystem`; probes local Java classpaths for Choco Solver, JaCoP, IBM CP Optimizer, OptaPlanner, jMetal, MOEA Framework, ECJ, ojAlgo, and OR-Tools Java, plus Cargo manifests for `good_lp`, `lp-modeler`, `rust-linprog`, `argmin`, `nlopt-rs`, and HiGHS/SCIP/CBC Rust bindings |
 
 Solver parity checks live in `validate_optimization_suite`; scale-envelope
-checks live in `validate_optimization_scale`. The suite cross-checks HiGHS,
-GLPK, SCIP, CBC, CLP, OR-Tools GLOP, and OR-Tools CP-SAT when available, and
-keeps optional hooks for commercial CLIs such as Gurobi, CPLEX, Xpress, and
-LINDO. The public `des::general::external_linear_cli` module exposes the same
-local CLI path to library callers while keeping all solver executables out of
-version control; callers can set `ExternalLinearCliOptions::command_path`, or
-set `ORES_<SOLVER>_BIN`, `DES_<SOLVER>_BIN`, or `<SOLVER>_BIN` environment
-variables such as `ORES_HIGHS_BIN=/opt/homebrew/bin/highs`. The same module
-also exports `lp_problem_to_cplex_lp_string`, `ipmip_problem_to_cplex_lp_string`,
-`lp_problem_to_mps_string`, and `ipmip_problem_to_mps_string`, so callers can
-hand generated LP-format or MPS-format models to a locally licensed solver even
-when this crate does not vendor or directly wrap that solver executable. Set
-`ExternalLinearCliOptions::model_format = ExternalLinearCliModelFormat::Mps` to
-run the CLI bridge itself through MPS instead of CPLEX LP syntax; MIP bridge
-runs can also set `time_limit_secs`, `node_limit`, `relative_gap`, `threads`,
-and `random_seed` for bounded, reproducible cross-checks. Use
+checks live in `validate_optimization_scale`. The suite cross-checks the
+high-level `math_program` facade, HiGHS, GLPK, SCIP, CBC, CLP, OR-Tools GLOP,
+and OR-Tools CP-SAT when available, and keeps optional hooks for commercial
+Gurobi, CPLEX, and Xpress APIs plus commercial CLI solves for Gurobi, CPLEX,
+Xpress, and LINDO/RunLindo. The public
+`des::general::external_linear_cli` module exposes the same local CLI path to
+library callers while keeping all solver executables out of version control;
+callers can set `ExternalLinearCliOptions::command_path`, solver-specific
+`*_CMD`/`ORES_*_CMD` variables, or the `ORES_<SOLVER>_BIN`,
+`DES_<SOLVER>_BIN`, and `<SOLVER>_BIN` overrides used by the bridge. Use
 `probe_external_linear_cli_solver` to distinguish not-installed tools from
-bridge-unsupported tools and ready smoke-tested solvers.
+bridge-unsupported tools and ready smoke-tested solvers, with CLI results and
+probes reporting solver version metadata when the executable exposes it. The
+same module exports `lp_problem_to_cplex_lp_string`,
+`ipmip_problem_to_cplex_lp_string`, `lp_problem_to_mps_string`, and
+`ipmip_problem_to_mps_string`; set
+`ExternalLinearCliOptions::model_format = ExternalLinearCliModelFormat::Mps` to
+run supported CLI bridges through MPS instead of CPLEX LP syntax. The companion
+`des::general::external_optimization_ecosystem` module
+keeps Java/Rust ecosystem integrations non-vendored too: set
+`CHOCO_SOLVER_CLASSPATH`, `JACOP_CLASSPATH`, `IBM_CP_OPTIMIZER_CLASSPATH`,
+`OPTAPLANNER_CLASSPATH`, `JMETAL_CLASSPATH`, `MOEA_FRAMEWORK_CLASSPATH`,
+`ECJ_CLASSPATH`, `OJALGO_CLASSPATH`, or `ORTOOLS_JAVA_CLASSPATH` to local jars,
+or set `GOOD_LP_CARGO_MANIFEST`, `LP_MODELER_CARGO_MANIFEST`,
+`RUST_LINPROG_CARGO_MANIFEST`, `ARGMIN_CARGO_MANIFEST`,
+`NLOPT_RS_CARGO_MANIFEST`, `HIGHS_RS_CARGO_MANIFEST`,
+`SCIP_RS_CARGO_MANIFEST`, or `CBC_RS_CARGO_MANIFEST` to a local `Cargo.toml`
+using that crate/binding.
 
-For non-LP/MIP ecosystems, `des::general::external_optimization_tools` exposes
-the same local-only integration pattern for Java systems such as Choco, JaCoP,
-IBM CP Optimizer, OptaPlanner, jMetal, MOEA Framework, ECJ, ojAlgo, and
-OR-Tools Java, plus Rust-side crates/bindings such as `good_lp`, `lp-modeler`,
-`rust-linprog`, `argmin`, NLopt, HiGHS, SCIP, and CBC wrappers. Local wrappers
-use a JSON-in/JSON-out adapter command set through variables such as
-`ORES_CHOCO_SOLVER_ADAPTER` or `ORES_ARGMIN_ADAPTER`; Java classpaths can be
-declared with `ORES_<TOOL>_CLASSPATH`, and Rust crate/native binding setups can
-be declared with `ORES_<TOOL>_CRATE` or the tool-specific native env vars. The
-suite probes these adapters when configured and skips them otherwise.
-`run_external_optimization_comparison` can run several JSON adapters over the
-same model payload and returns an `external-optimization-comparison-report`
-with normalized status, objective, and solution agreement checks.
-`scripts/optimization_ecosystem_reference.py` provides a dependency-free
-adapter-contract bridge for representative CP assignment, planning assignment,
-discrete LP/MIP, Pareto-front, and nonlinear payloads, so the suite can
-cross-check Java/Rust ecosystem adapters before local solver packages are
-installed.
+The broader `des::general::external_optimization_tools` module retains
+JSON-adapter comparison helpers for local Java/Rust ecosystem wrappers and
+skips adapters that are not configured.
 
 For model/output validation beyond optimization, `des::general::external_validation_tools`
 registers local adapter hooks for MiniZinc/FlatZinc, SMT/SAT solvers and
-proof checkers, formal model checkers such as TLC, Apalache, Alloy, SPIN,
-nuXmv, PRISM, Storm, UPPAAL, CBMC, mCRL2, and Maude, program and protocol
-verifiers such as Dafny, Frama-C, Why3, Kani, ESBMC, CPAchecker, Coq, Lean,
-Tamarin, ProVerif, Scyther, Verifpal, and SAPIC+, benchmark corpora such as
-MIPLIB, QPLIB, MINLPLib, Netlib LP, CSPLib, OR-Library, TSPLIB, VRPLIB, and
-MiniZinc Challenge archives, nonlinear/global solvers such as Ipopt, Bonmin,
-MINOTAUR, Couenne, SYMPHONY, Knitro, MOSEK, BARON, COPT, NLopt, and CasADi,
-convex/QP/conic references such as OSQP, SCS, Clarabel, ECOS, qpOASES, ProxQP,
-COSMO, SDPA, CSDP, and CVXPY, simulation engines such as SimPy, ns-3, OMNeT++,
-SUMO, MATSim, EnergyPlus, OpenStudio, OpenModelica, FMI/FMU, OMSimulator,
-Gazebo, Webots, MuJoCo, Drake, PyBullet, Mesa, Repast, MASON, NetLogo, SimGrid,
-NeqSim, DWSIM, AnyLogic, Simio, Simul8, Arena, and FlexSim, and output
-validators such as JSON Schema, Ajv, OpenAPI/Spectral, XML/XSD/Schematron,
-Pydantic, Protobuf conformance, Avro, Great Expectations, Pandera, Soda Core,
-Evidently, Deepchecks, Frictionless Data, Deequ, TensorFlow Data Validation, and
-OpenRefine. Adapter commands
-use `ORES_<TOOL>_ADAPTER`; datasets use `ORES_<TOOL>_DATA_DIR`; schemas use
-`ORES_<TOOL>_SPEC`; Java tools use `ORES_<TOOL>_CLASSPATH`; Python/Rust
-bindings can be declared with `ORES_<TOOL>_PYTHON` or `ORES_<TOOL>_CRATE`.
-The module also includes concrete request/export builders for the common
-cross-validation formats: `minizinc_validation_request_to_json`,
-`smtlib_validation_script_to_string`, `dimacs_cnf_to_string`,
-`dimacs_wcnf_to_string`, `tla_validation_module_to_string`,
-`prism_validation_model_to_string`, `json_schema_validation_request_to_json`,
-`simulation_validation_request_to_json`, and
-`external_benchmark_manifest_to_json`. These keep model, proof, benchmark,
-simulator, and output-checker payloads reproducible while still requiring local
-adapter commands or datasets for actual external execution. For tools that can
-consume standard text on stdin, `run_external_validation_text_cli` provides a
-direct command runner with normalized verdicts and default argument profiles for
-common SMT/SAT tools such as Z3, cvc5, Bitwuzla, Boolector, Kissat, CaDiCaL, and
-CryptoMiniSat; pass `ExternalValidationTextCliOptions::use_default_args = false`
-when a local wrapper needs a different CLI shape. When a tool expects a file
-path instead, `run_external_validation_file_cli` writes a UUID-named temporary
-model file, invokes the local executable with default file-path arguments or
-caller-provided `{input}` placeholders, normalizes the same verdict payload, and
-removes the temporary file after the run. `run_external_validation_artifact_cli`
-handles multi-file validator jobs such as model+data, model+properties, or
-CNF+proof by writing a UUID-named temporary workspace and substituting named
-paths like `{model}`, `{properties}`, and `{proof}` into local CLI arguments.
-`run_external_validation_consensus` groups stdin, file, and artifact invocations
-over the same input and returns a report that records per-tool results,
-normalized verdicts, agreement, and optional expected-verdict matching.
-The QP reference bridge in `scripts/qp_reference.py` also accepts named
-optional convex backends (`--solver osqp`, `cvxpy`, `scs`, `clarabel`, and
-`ecos`) in addition to the existing `auto`, HiGHS, SciPy, and dependency-free
-fallback paths. These packages are discovered from the local Python environment
-and report structured `unavailable` JSON when not installed.
-For nonlinear/global validation, `scripts/nonlinear_validation_reference.py
---solver auto` consumes bounded `nonlinear-validation` payloads, prefers SciPy
-SLSQP when available, recognizes Ipopt/NLopt/CasADi-style solver labels, and
-falls back to dependency-free grid plus pattern search for small models.
-For model validation, `scripts/model_validation_reference.py --tool minizinc`,
-`--tool z3`, or `--tool kissat` consumes MiniZinc, SMT-LIB, and DIMACS payloads,
-prefers local executables when present, and otherwise uses dependency-free smoke
-fallbacks for small cross-check cases.
-For proof validation, `scripts/proof_validation_reference.py --tool drat` or
-`--tool lrat` consumes `proof-validation` CNF+proof payloads and provides a
-small dependency-free unsat-proof sanity check for DRAT/LRAT-style empty-clause
-certificates.
-For formal and benchmark validation,
-`scripts/formal_benchmark_validation_reference.py --tool tla`, `--tool prism`,
-`--tool alloy`, `--tool spin`, `--tool nuxmv`, `--tool uppaal`, `--tool cbmc`,
-`--tool dafny`, `--tool tamarin`, `--tool mcrl2`, `--tool maude`, or `--tool
-benchmark` structurally checks TLA+/PRISM/Alloy/Promela/SMV/UPPAAL/CBMC,
-deductive/program-verifier, security-protocol, mCRL2, Maude, and benchmark
-exports, with local executable validators used when available.
-For output validation, `scripts/output_validation_reference.py --tool
-json-schema` consumes the same `json-schema-validation` payloads and validates
-common JSON Schema object/type/required/property constraints with a built-in
-fallback, or the local `jsonschema` package when it is installed. The same
-bridge also accepts `--tool ajv`, `--tool spectral` for OpenAPI structural
-checks, `--tool schematron` or `--tool xmllint` for XML-style output checks,
-`--tool pydantic` for data-model checks, `--tool protobuf-conformance` for
-Protobuf-style message schema checks, `--tool avro-tools` for Avro record/schema
-checks, and `table-validation` payloads for dependency-free CSV or row-object
-validation. Other package-backed adapters return structured `unavailable` JSON
-until their local packages or adapter commands are present.
-For simulation validation, `scripts/simulation_validation_reference.py --engine
-simpy` consumes `simulation-validation` payloads and provides dependency-free
-deterministic smoke checks for queue/DES, mobility-route timing, building energy
-balance, physics/robot trajectory, agent-based, distributed-system, and
-process-flow models, while local simulator packages or adapter commands can be
-swapped in for SimPy, SUMO, EnergyPlus, MuJoCo, Mesa, SimGrid, NeqSim, and
-similar engines.
+proof checkers, formal model checkers, benchmark corpora, nonlinear/global
+solvers, convex/QP/conic references, simulation engines, and output validators.
+Adapter commands use `ORES_<TOOL>_ADAPTER`; datasets use
+`ORES_<TOOL>_DATA_DIR`; schemas use `ORES_<TOOL>_SPEC`; Java tools use
+`ORES_<TOOL>_CLASSPATH`; Python/Rust bindings can be declared with
+`ORES_<TOOL>_PYTHON` or `ORES_<TOOL>_CRATE`. The module also includes concrete
+request/export builders for common cross-validation formats plus stdin, file,
+artifact, and consensus CLI runners. The companion reference scripts cover QP,
+nonlinear/global validation, model validation, proof validation, formal and
+benchmark validation, output validation, and simulation validation with local
+executables when available and dependency-free fallbacks for small smoke cases.
 
-The scale runner compares native LP/MIP solvers with installed open-source engines and writes
-`out/external/optimization-scale/scale-report.json`; use
+The scale runner compares native LP/MIP solvers with installed open-source
+engines and writes `out/external/optimization-scale/scale-report.json`; use
 `SCALE_LP_CLI_SOLVERS`, `SCALE_MIP_CLI_SOLVERS`, and `SCALE_CLI_FORMATS=lp,mps`
 to route the public Rust CLI bridge through selected local executables:
 

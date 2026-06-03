@@ -427,6 +427,18 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         notes: "Relational model finder for Alloy specifications via Kodkod",
     },
     ExternalValidationToolSpec {
+        id: "kodkod",
+        display_name: "Kodkod",
+        env_key: "KODKOD",
+        family: ExternalValidationFamily::FormalModelChecker,
+        runtime: ExternalValidationRuntime::Java,
+        artifact_kind: ExternalValidationArtifactKind::JavaClasspath,
+        command_aliases: &["kodkod"],
+        capabilities: MODEL_CHECK_CAPS,
+        input_formats: ALLOY_FORMATS,
+        notes: "Standalone relational model finder backend for Alloy-style validation",
+    },
+    ExternalValidationToolSpec {
         id: "spin",
         display_name: "SPIN",
         env_key: "SPIN",
@@ -1339,6 +1351,18 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         notes: "Python agent-based modeling framework",
     },
     ExternalValidationToolSpec {
+        id: "agentpy",
+        display_name: "AgentPy",
+        env_key: "AGENTPY",
+        family: ExternalValidationFamily::SimulationEngine,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
+        command_aliases: &["agentpy-adapter"],
+        capabilities: SIMULATION_CAPS,
+        input_formats: AGENT_SIM_FORMATS,
+        notes: "Python agent-based simulation toolkit for stochastic ABM validation",
+    },
+    ExternalValidationToolSpec {
         id: "repast",
         display_name: "Repast",
         env_key: "REPAST",
@@ -1387,6 +1411,30 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         notes: "Distributed-system simulation framework for clusters, grids, clouds, and HPC",
     },
     ExternalValidationToolSpec {
+        id: "cloudsim",
+        display_name: "CloudSim",
+        env_key: "CLOUDSIM",
+        family: ExternalValidationFamily::SimulationEngine,
+        runtime: ExternalValidationRuntime::Java,
+        artifact_kind: ExternalValidationArtifactKind::JavaClasspath,
+        command_aliases: &["cloudsim-adapter"],
+        capabilities: SIMULATION_CAPS,
+        input_formats: DISTRIBUTED_SIM_FORMATS,
+        notes: "Java cloud/datacenter simulation adapter for resource-scheduling checks",
+    },
+    ExternalValidationToolSpec {
+        id: "batsim",
+        display_name: "Batsim",
+        env_key: "BATSIM",
+        family: ExternalValidationFamily::SimulationEngine,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["batsim"],
+        capabilities: SIMULATION_CAPS,
+        input_formats: DISTRIBUTED_SIM_FORMATS,
+        notes: "Batch-scheduler and distributed-platform simulation adapter",
+    },
+    ExternalValidationToolSpec {
         id: "neqsim",
         display_name: "NeqSim",
         env_key: "NEQSIM",
@@ -1409,6 +1457,18 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         capabilities: SIMULATION_CAPS,
         input_formats: PROCESS_SIM_FORMATS,
         notes: "Open-source chemical-process simulation adapter",
+    },
+    ExternalValidationToolSpec {
+        id: "cape-open",
+        display_name: "CAPE-OPEN",
+        env_key: "CAPE_OPEN",
+        family: ExternalValidationFamily::SimulationEngine,
+        runtime: ExternalValidationRuntime::GenericAdapter,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["cape-open-adapter", "capeopen-adapter"],
+        capabilities: SIMULATION_CAPS,
+        input_formats: PROCESS_SIM_FORMATS,
+        notes: "CAPE-OPEN process-simulation interoperability adapter",
     },
     ExternalValidationToolSpec {
         id: "anylogic",
@@ -1496,6 +1556,18 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         notes: "JavaScript JSON Schema validator and OpenAPI-compatible schema checker",
     },
     ExternalValidationToolSpec {
+        id: "csv-validator",
+        display_name: "CSV Validator",
+        env_key: "CSV_VALIDATOR",
+        family: ExternalValidationFamily::OutputDataValidator,
+        runtime: ExternalValidationRuntime::GenericAdapter,
+        artifact_kind: ExternalValidationArtifactKind::SchemaOrSpecPath,
+        command_aliases: &["csv-validator", "csvlint"],
+        capabilities: OUTPUT_VALIDATOR_CAPS,
+        input_formats: &["csv", "json"],
+        notes: "CSV/table schema validation adapter for tabular run artifacts",
+    },
+    ExternalValidationToolSpec {
         id: "openapi-validator",
         display_name: "OpenAPI validator",
         env_key: "OPENAPI_VALIDATOR",
@@ -1532,6 +1604,18 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         notes: "XML well-formedness and XSD validation adapter",
     },
     ExternalValidationToolSpec {
+        id: "xml-schema",
+        display_name: "XML Schema",
+        env_key: "XML_SCHEMA",
+        family: ExternalValidationFamily::OutputDataValidator,
+        runtime: ExternalValidationRuntime::GenericAdapter,
+        artifact_kind: ExternalValidationArtifactKind::SchemaOrSpecPath,
+        command_aliases: &["xmlschema", "xsd-validator"],
+        capabilities: OUTPUT_VALIDATOR_CAPS,
+        input_formats: XML_OUTPUT_FORMATS,
+        notes: "XSD/XML Schema validation adapter for structured XML run artifacts",
+    },
+    ExternalValidationToolSpec {
         id: "schematron",
         display_name: "Schematron",
         env_key: "SCHEMATRON",
@@ -1542,6 +1626,30 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         capabilities: OUTPUT_VALIDATOR_CAPS,
         input_formats: XML_OUTPUT_FORMATS,
         notes: "Rule-based XML validation adapter for cross-field output constraints",
+    },
+    ExternalValidationToolSpec {
+        id: "jing",
+        display_name: "Jing",
+        env_key: "JING",
+        family: ExternalValidationFamily::OutputDataValidator,
+        runtime: ExternalValidationRuntime::GenericAdapter,
+        artifact_kind: ExternalValidationArtifactKind::SchemaOrSpecPath,
+        command_aliases: &["jing"],
+        capabilities: OUTPUT_VALIDATOR_CAPS,
+        input_formats: XML_OUTPUT_FORMATS,
+        notes: "RELAX NG and XML structural validation adapter for run artifacts",
+    },
+    ExternalValidationToolSpec {
+        id: "saxon",
+        display_name: "Saxon",
+        env_key: "SAXON",
+        family: ExternalValidationFamily::OutputDataValidator,
+        runtime: ExternalValidationRuntime::GenericAdapter,
+        artifact_kind: ExternalValidationArtifactKind::SchemaOrSpecPath,
+        command_aliases: &["saxon", "saxon-he", "saxon9he"],
+        capabilities: OUTPUT_VALIDATOR_CAPS,
+        input_formats: XML_OUTPUT_FORMATS,
+        notes: "Saxon-backed XML, XPath, and Schematron-style validation adapter",
     },
     ExternalValidationToolSpec {
         id: "pydantic",
@@ -1580,6 +1688,18 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         notes: "Protocol Buffers schema/conformance validation adapter",
     },
     ExternalValidationToolSpec {
+        id: "protoc",
+        display_name: "protoc",
+        env_key: "PROTOC",
+        family: ExternalValidationFamily::OutputDataValidator,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::SchemaOrSpecPath,
+        command_aliases: &["protoc"],
+        capabilities: OUTPUT_VALIDATOR_CAPS,
+        input_formats: &["proto", "pb", "json"],
+        notes: "Protocol Buffers compiler and descriptor validation adapter",
+    },
+    ExternalValidationToolSpec {
         id: "avro-tools",
         display_name: "Avro tools",
         env_key: "AVRO_TOOLS",
@@ -1590,6 +1710,18 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         capabilities: OUTPUT_VALIDATOR_CAPS,
         input_formats: &["avro", "avsc", "json"],
         notes: "Avro schema and data-file validation adapter",
+    },
+    ExternalValidationToolSpec {
+        id: "apache-avro",
+        display_name: "Apache Avro",
+        env_key: "APACHE_AVRO",
+        family: ExternalValidationFamily::OutputDataValidator,
+        runtime: ExternalValidationRuntime::Java,
+        artifact_kind: ExternalValidationArtifactKind::JavaClasspath,
+        command_aliases: &["avro-tools", "avro"],
+        capabilities: OUTPUT_VALIDATOR_CAPS,
+        input_formats: &["avro", "avsc", "json"],
+        notes: "Apache Avro schema and data-file validation adapter",
     },
     ExternalValidationToolSpec {
         id: "great-expectations",
@@ -3595,7 +3727,7 @@ mod tests {
     #[test]
     fn registry_covers_recommended_validation_layers() {
         let tools = external_validation_tool_specs();
-        assert_eq!(tools.len(), 124);
+        assert_eq!(tools.len(), 135);
         assert!(tools
             .iter()
             .any(|tool| tool.id == "minizinc" && tool.input_formats.contains(&"mzn")));
@@ -3608,6 +3740,9 @@ mod tests {
         assert!(tools
             .iter()
             .any(|tool| { tool.id == "tlc" && tool.runtime == ExternalValidationRuntime::Java }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "kodkod" && tool.family == ExternalValidationFamily::FormalModelChecker
+        }));
         assert!(tools.iter().any(|tool| {
             tool.id == "miplib" && tool.family == ExternalValidationFamily::BenchmarkLibrary
         }));
@@ -3636,7 +3771,19 @@ mod tests {
             tool.id == "mesa" && tool.family == ExternalValidationFamily::SimulationEngine
         }));
         assert!(tools.iter().any(|tool| {
+            tool.id == "agentpy" && tool.family == ExternalValidationFamily::SimulationEngine
+        }));
+        assert!(tools.iter().any(|tool| {
             tool.id == "simgrid" && tool.family == ExternalValidationFamily::SimulationEngine
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "cloudsim" && tool.family == ExternalValidationFamily::SimulationEngine
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "batsim" && tool.family == ExternalValidationFamily::SimulationEngine
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "cape-open" && tool.family == ExternalValidationFamily::SimulationEngine
         }));
         assert!(tools.iter().any(|tool| {
             tool.id == "anylogic" && tool.family == ExternalValidationFamily::SimulationEngine
@@ -3650,6 +3797,25 @@ mod tests {
         }));
         assert!(tools.iter().any(|tool| {
             tool.id == "schematron" && tool.family == ExternalValidationFamily::OutputDataValidator
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "xml-schema" && tool.family == ExternalValidationFamily::OutputDataValidator
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "jing" && tool.family == ExternalValidationFamily::OutputDataValidator
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "saxon" && tool.family == ExternalValidationFamily::OutputDataValidator
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "csv-validator"
+                && tool.family == ExternalValidationFamily::OutputDataValidator
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "protoc" && tool.family == ExternalValidationFamily::OutputDataValidator
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "apache-avro" && tool.family == ExternalValidationFamily::OutputDataValidator
         }));
         assert!(tools.iter().any(|tool| {
             tool.id == "frictionless"

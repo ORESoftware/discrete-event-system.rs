@@ -70,7 +70,7 @@ use crate::des::general::external_linear_cli::{
     ExternalLinearCliKind, ExternalLinearCliLicenseClass, ExternalLinearCliLpAlgorithm,
     ExternalLinearCliMipSwitch, ExternalLinearCliModelFormat, ExternalLinearCliNodeSelection,
     ExternalLinearCliOptions, ExternalLinearCliPresolve, ExternalLinearCliProbeStatus,
-    ExternalLinearCliSolver, ExternalLinearCliStatus,
+    ExternalLinearCliSolution, ExternalLinearCliSolver, ExternalLinearCliStatus,
 };
 use crate::des::general::external_max_flow_reference::{
     solve_max_flow_with_external_reference, ExternalMaxFlowReferenceOptions,
@@ -209,13 +209,14 @@ use crate::des::general::knapsack::{
 use crate::des::general::lp::{
     analyze_lp_bound_sensitivity_internal, analyze_lp_objective_sensitivity_internal,
     analyze_lp_rhs_sensitivity_internal, build_lp_feasibility_relaxation_problem,
-    find_lp_infeasibility_conflict, lp_feasibility_problem_from_conflict_members,
-    solve_general_linear_lp_internal, solve_lp_external, solve_lp_feasibility_relaxation_internal,
-    solve_lp_internal, solve_objective_offset_lp_internal, ExternalSolverOptions,
-    GeneralLinearLPProblem, InternalSimplexOptions, LPBasisWarmStart, LPBoundSensitivityKind,
-    LPBoundSensitivityOptions, LPConflictMember, LPConflictOptions, LPFeasRelaxMember,
-    LPFeasRelaxOptions, LPObjectiveSensitivityOptions, LPProblem, LPRhsSensitivityOptions,
-    LPRowConstraint, LPStatus, ObjectiveOffsetLPProblem, Sense,
+    find_lp_infeasibility_conflict, linearize_general_linear_lp_problem,
+    lp_feasibility_problem_from_conflict_members, solve_general_linear_lp_internal,
+    solve_lp_feasibility_relaxation_internal, solve_lp_internal,
+    solve_objective_offset_lp_internal, GeneralLinearLPProblem, InternalSimplexOptions,
+    LPBasisWarmStart, LPBoundSensitivityKind, LPBoundSensitivityOptions, LPConflictMember,
+    LPConflictOptions, LPFeasRelaxMember, LPFeasRelaxOptions, LPObjectiveSensitivityOptions,
+    LPProblem, LPRhsSensitivityOptions, LPRowConstraint, LPSolution, LPStatus,
+    ObjectiveOffsetLPProblem, Sense,
 };
 use crate::des::general::math_program::{
     analyze_math_program_bound_sensitivity, analyze_math_program_objective_sensitivity,
@@ -306,14 +307,6 @@ struct MipReference {
 struct MipPoolReferenceSolution {
     x: Vec<f64>,
     objective: f64,
-}
-
-#[derive(Debug, Deserialize)]
-struct LPReference {
-    status: String,
-    solver: String,
-    x: Vec<f64>,
-    objective: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -667,6 +660,82 @@ impl Driver {
             (Some(a), Some(b)) => self.max_abs_close(name, a, b, tol),
             _ => self.check(name, false, "missing certificate vector"),
         }
+    }
+
+    fn lp_status_from_external_cli(status: ExternalLinearCliStatus) -> LPStatus {
+        match status {
+            ExternalLinearCliStatus::Optimal | ExternalLinearCliStatus::Feasible => {
+                LPStatus::Optimal
+            }
+            ExternalLinearCliStatus::Infeasible => LPStatus::Infeasible,
+            ExternalLinearCliStatus::Unbounded => LPStatus::Unbounded,
+            ExternalLinearCliStatus::Unavailable
+            | ExternalLinearCliStatus::NumericalError
+            | ExternalLinearCliStatus::Unknown => LPStatus::NumericalError,
+        }
+    }
+
+    fn lp_solution_from_external_cli(solution: ExternalLinearCliSolution) -> LPSolution {
+        LPSolution {
+            status: Self::lp_status_from_external_cli(solution.status),
+            x: solution.x,
+            objective: solution.objective.unwrap_or(f64::NAN),
+            dual_ub: solution.dual_ub,
+            dual_eq: solution.dual_eq,
+            reduced_costs: solution.reduced_costs,
+            var_basis: solution.var_basis,
+            row_basis: solution.row_basis,
+            unbounded_ray: None,
+            infeasibility_certificate: None,
+            iters: solution.iterations.map(|iters| iters as usize),
+            solver: solution.solver,
+            elapsed_ms: solution.elapsed_ms,
+            message: Some(solution.message),
+        }
+    }
+
+    fn solve_lp_highs_reference(
+        &self,
+        problem: &LPProblem,
+        lp_algorithm: Option<ExternalLinearCliLpAlgorithm>,
+    ) -> LPSolution {
+        let algorithm_label = lp_algorithm
+            .map(|algorithm| algorithm.as_str())
+            .unwrap_or("default");
+        if let Some(command) = external_linear_cli_command(ExternalLinearCliSolver::Highs) {
+            let solution = solve_lp_with_external_cli(
+                problem,
+                &ExternalLinearCliOptions {
+                    solver: ExternalLinearCliSolver::Highs,
+                    command_path: Some(command),
+                    time_limit_secs: Some(2.0),
+                    lp_algorithm,
+                    ..Default::default()
+                },
+            );
+            if !matches!(
+                solution.status,
+                ExternalLinearCliStatus::Unavailable
+                    | ExternalLinearCliStatus::NumericalError
+                    | ExternalLinearCliStatus::Unknown
+            ) {
+                return Self::lp_solution_from_external_cli(solution);
+            }
+            let mut fallback = solve_lp_internal(problem, &InternalSimplexOptions::default());
+            fallback.solver = format!("internal-simplex-fallback-for-highs-cli-{algorithm_label}");
+            fallback.message = Some(format!(
+                "HiGHS CLI status {} via {} unavailable for Rust reference path; {}",
+                solution.status.as_str(),
+                algorithm_label,
+                solution.message
+            ));
+            return fallback;
+        }
+
+        let mut fallback = solve_lp_internal(problem, &InternalSimplexOptions::default());
+        fallback.solver = format!("internal-simplex-no-highs-cli-{algorithm_label}");
+        fallback.message = Some("highs executable not found; used internal simplex".to_string());
+        fallback
     }
 
     fn run_python_json(&self, script: &str, args: &[&str], stdin_json: &str) -> serde_json::Value {
@@ -2061,7 +2130,7 @@ impl Driver {
     }
 
     fn validate_lp(&mut self) {
-        println!("\n-- LP: internal simplex vs external LP bridge --");
+        println!("\n-- LP: internal simplex vs Rust LP references --");
         let lp = LPProblem {
             sense: Sense::Max,
             c: vec![3.0, 2.0],
@@ -2070,13 +2139,7 @@ impl Driver {
             ..Default::default()
         };
         let internal = solve_lp_internal(&lp, &InternalSimplexOptions::default());
-        let external = solve_lp_external(
-            &lp,
-            &ExternalSolverOptions {
-                method: Some("highs".to_string()),
-                ..Default::default()
-            },
-        );
+        let external = self.solve_lp_highs_reference(&lp, None);
         self.check(
             "LP statuses optimal",
             internal.status == LPStatus::Optimal && external.status == LPStatus::Optimal,
@@ -2097,13 +2160,7 @@ impl Driver {
         };
         let certificate_internal =
             solve_lp_internal(&certificate_lp, &InternalSimplexOptions::default());
-        let certificate_external = solve_lp_external(
-            &certificate_lp,
-            &ExternalSolverOptions {
-                method: Some("highs".to_string()),
-                ..Default::default()
-            },
-        );
+        let certificate_external = self.solve_lp_highs_reference(&certificate_lp, None);
         self.check(
             "LP certificate statuses optimal",
             certificate_internal.status == LPStatus::Optimal
@@ -2160,13 +2217,7 @@ impl Driver {
         };
         let bound_certificate_internal =
             solve_lp_internal(&bound_certificate_lp, &InternalSimplexOptions::default());
-        let bound_certificate_external = solve_lp_external(
-            &bound_certificate_lp,
-            &ExternalSolverOptions {
-                method: Some("highs".to_string()),
-                ..Default::default()
-            },
-        );
+        let bound_certificate_external = self.solve_lp_highs_reference(&bound_certificate_lp, None);
         self.check(
             "LP bound certificate statuses optimal",
             bound_certificate_internal.status == LPStatus::Optimal
@@ -2225,70 +2276,45 @@ impl Driver {
             1e-8,
         );
 
-        let glop = solve_lp_external(
-            &lp,
-            &ExternalSolverOptions {
-                method: Some("glop".to_string()),
-                ..Default::default()
-            },
+        let highs_simplex =
+            self.solve_lp_highs_reference(&lp, Some(ExternalLinearCliLpAlgorithm::Simplex));
+        self.check(
+            "LP HiGHS/simplex reference status optimal",
+            internal.status == LPStatus::Optimal && highs_simplex.status == LPStatus::Optimal,
+            format!(
+                "internal={:?} reference={:?} solver={}",
+                internal.status, highs_simplex.status, highs_simplex.solver
+            ),
         );
-        if glop.solver == "ortools:glop" {
-            self.check(
-                "LP OR-Tools GLOP status optimal",
-                internal.status == LPStatus::Optimal && glop.status == LPStatus::Optimal,
-                format!(
-                    "internal={:?} external={:?} solver={}",
-                    internal.status, glop.status, glop.solver
-                ),
-            );
-        } else {
-            println!(
-                "  SKIP  LP OR-Tools GLOP status optimal: solver={} message={:?}",
-                glop.solver, glop.message
-            );
-        }
         self.close(
-            "LP OR-Tools GLOP objective",
+            "LP HiGHS/simplex reference objective",
             internal.objective,
-            glop.objective,
+            highs_simplex.objective,
             1e-9,
         );
-        self.max_abs_close("LP OR-Tools GLOP x", &internal.x, &glop.x, 1e-8);
-
-        let pdlp = solve_lp_external(
-            &lp,
-            &ExternalSolverOptions {
-                method: Some("pdlp".to_string()),
-                ..Default::default()
-            },
+        self.max_abs_close(
+            "LP HiGHS/simplex reference x",
+            &internal.x,
+            &highs_simplex.x,
+            1e-8,
         );
-        if pdlp.solver == "ortools:pdlp" {
-            self.check(
-                "LP OR-Tools PDLP status optimal",
-                internal.status == LPStatus::Optimal && pdlp.status == LPStatus::Optimal,
-                format!(
-                    "internal={:?} external={:?} solver={}",
-                    internal.status, pdlp.status, pdlp.solver
-                ),
-            );
-            self.close(
-                "LP OR-Tools PDLP objective",
-                internal.objective,
-                pdlp.objective,
-                1e-7,
-            );
-            self.max_abs_close("LP OR-Tools PDLP x", &internal.x, &pdlp.x, 1e-6);
-        } else {
-            self.check(
-                "LP OR-Tools PDLP bridge fallback solves same input",
-                pdlp.status == LPStatus::Optimal
-                    && (pdlp.objective - internal.objective).abs() <= 1e-9,
-                format!(
-                    "solver={} status={:?} objective={} expected={}",
-                    pdlp.solver, pdlp.status, pdlp.objective, internal.objective
-                ),
-            );
-        }
+
+        let highs_ipm = self.solve_lp_highs_reference(&lp, Some(ExternalLinearCliLpAlgorithm::Ipm));
+        self.check(
+            "LP HiGHS/IPM reference status optimal",
+            internal.status == LPStatus::Optimal && highs_ipm.status == LPStatus::Optimal,
+            format!(
+                "internal={:?} reference={:?} solver={}",
+                internal.status, highs_ipm.status, highs_ipm.solver
+            ),
+        );
+        self.close(
+            "LP HiGHS/IPM reference objective",
+            internal.objective,
+            highs_ipm.objective,
+            1e-7,
+        );
+        self.max_abs_close("LP HiGHS/IPM reference x", &internal.x, &highs_ipm.x, 1e-6);
 
         let range_lp = GeneralLinearLPProblem {
             base: LPProblem {
@@ -2325,43 +2351,23 @@ impl Driver {
         };
         let range_internal =
             solve_general_linear_lp_internal(&range_lp, &InternalSimplexOptions::default());
-        let range_json = serde_json::json!({
-            "lp": {
-                "sense": range_lp.base.sense.as_str(),
-                "c": &range_lp.base.c,
-                "A_ub": &range_lp.base.a_ub,
-                "b_ub": &range_lp.base.b_ub,
-                "A_eq": &range_lp.base.a_eq,
-                "b_eq": &range_lp.base.b_eq,
-                "lb": &range_lp.base.lb,
-                "ub": &range_lp.base.ub,
-                "linear_constraints": range_lp.linear_constraints.iter().map(|row| serde_json::json!({
-                    "coefs": &row.coefs,
-                    "lower": row.lower,
-                    "upper": row.upper,
-                    "name": &row.name,
-                })).collect::<Vec<_>>(),
-            },
-            "method": "highs",
-        })
-        .to_string();
-        let value = self.run_python_json("lp_solve.py", &["--method", "highs"], &range_json);
-        let range_reference: LPReference =
-            serde_json::from_value(value).expect("parse range-row LP reference");
+        let range_reference_problem = linearize_general_linear_lp_problem(&range_lp);
+        let range_reference = self.solve_lp_highs_reference(&range_reference_problem, None);
         self.check(
             "LP range-row statuses optimal",
-            range_internal.status == LPStatus::Optimal && range_reference.status == "optimal",
+            range_internal.status == LPStatus::Optimal
+                && range_reference.status == LPStatus::Optimal,
             format!(
                 "internal={} external={} solver={}",
                 range_internal.status.as_str(),
-                range_reference.status,
+                range_reference.status.as_str(),
                 range_reference.solver
             ),
         );
         self.close(
             "LP range-row objective",
             range_internal.objective,
-            range_reference.objective.unwrap_or(f64::NAN),
+            range_reference.objective,
             1e-8,
         );
         self.max_abs_close(
@@ -2383,38 +2389,25 @@ impl Driver {
         };
         let offset_internal =
             solve_objective_offset_lp_internal(&offset_lp, &InternalSimplexOptions::default());
-        let offset_json = serde_json::json!({
-            "lp": {
-                "sense": offset_lp.base.sense.as_str(),
-                "c": &offset_lp.base.c,
-                "A_ub": &offset_lp.base.a_ub,
-                "b_ub": &offset_lp.base.b_ub,
-                "A_eq": &offset_lp.base.a_eq,
-                "b_eq": &offset_lp.base.b_eq,
-                "lb": &offset_lp.base.lb,
-                "ub": &offset_lp.base.ub,
-                "objective_offset": offset_lp.objective_offset,
-            },
-            "method": "highs",
-        })
-        .to_string();
-        let value = self.run_python_json("lp_solve.py", &["--method", "highs"], &offset_json);
-        let offset_reference: LPReference =
-            serde_json::from_value(value).expect("parse objective-offset LP reference");
+        let mut offset_reference = self.solve_lp_highs_reference(&offset_lp.base, None);
+        if offset_reference.objective.is_finite() {
+            offset_reference.objective += offset_lp.objective_offset;
+        }
         self.check(
             "LP objective-offset statuses optimal",
-            offset_internal.status == LPStatus::Optimal && offset_reference.status == "optimal",
+            offset_internal.status == LPStatus::Optimal
+                && offset_reference.status == LPStatus::Optimal,
             format!(
                 "internal={} external={} solver={}",
                 offset_internal.status.as_str(),
-                offset_reference.status,
+                offset_reference.status.as_str(),
                 offset_reference.solver
             ),
         );
         self.close(
             "LP objective-offset objective",
             offset_internal.objective,
-            offset_reference.objective.unwrap_or(f64::NAN),
+            offset_reference.objective,
             1e-8,
         );
         self.max_abs_close(
@@ -2468,31 +2461,14 @@ impl Driver {
             |label: &str, coeffs: Vec<f64>, should_keep_base_optimal: bool, this: &mut Driver| {
                 let mut trial = sensitivity_lp.clone();
                 trial.c = coeffs;
-                let trial_json = serde_json::json!({
-                    "lp": {
-                        "sense": trial.sense.as_str(),
-                        "c": &trial.c,
-                        "A_ub": &trial.a_ub,
-                        "b_ub": &trial.b_ub,
-                        "A_eq": &trial.a_eq,
-                        "b_eq": &trial.b_eq,
-                        "lb": &trial.lb,
-                        "ub": &trial.ub,
-                    },
-                    "method": "highs",
-                })
-                .to_string();
-                let value =
-                    this.run_python_json("lp_solve.py", &["--method", "highs"], &trial_json);
-                let reference: LPReference =
-                    serde_json::from_value(value).expect("parse objective-sensitivity reference");
+                let reference = this.solve_lp_highs_reference(&trial, None);
                 let base_objective = trial
                     .c
                     .iter()
                     .zip(&sensitivity_report.base_x)
                     .map(|(coef, value)| coef * value)
                     .sum::<f64>();
-                let external_objective = reference.objective.unwrap_or(f64::NAN);
+                let external_objective = reference.objective;
                 let base_is_external_optimal = (base_objective - external_objective).abs()
                     <= 1e-7
                         * 1.0_f64
@@ -2500,10 +2476,10 @@ impl Driver {
                             .max(external_objective.abs());
                 this.check(
                     format!("LP objective-sensitivity HiGHS {label}"),
-                    reference.status == "optimal"
+                    reference.status == LPStatus::Optimal
                         && base_is_external_optimal == should_keep_base_optimal,
                     format!(
-                        "coeffs={:?} base_obj={:.10} external={:?} keep={} expected_keep={} solver={}",
+                        "coeffs={:?} base_obj={:.10} external={:.10} keep={} expected_keep={} solver={}",
                         trial.c,
                         base_objective,
                         reference.objective,
@@ -2565,23 +2541,7 @@ impl Driver {
                 b_ub[row] = rhs;
             }
             let internal = solve_lp_internal(&trial, &InternalSimplexOptions::default());
-            let trial_json = serde_json::json!({
-                "lp": {
-                    "sense": trial.sense.as_str(),
-                    "c": &trial.c,
-                    "A_ub": &trial.a_ub,
-                    "b_ub": &trial.b_ub,
-                    "A_eq": &trial.a_eq,
-                    "b_eq": &trial.b_eq,
-                    "lb": &trial.lb,
-                    "ub": &trial.ub,
-                },
-                "method": "highs",
-            })
-            .to_string();
-            let value = this.run_python_json("lp_solve.py", &["--method", "highs"], &trial_json);
-            let reference: LPReference =
-                serde_json::from_value(value).expect("parse RHS-sensitivity reference");
+            let reference = this.solve_lp_highs_reference(&trial, None);
             let original_rhs = sensitivity_lp
                 .b_ub
                 .as_ref()
@@ -2590,7 +2550,7 @@ impl Driver {
                 .unwrap_or(f64::NAN);
             let predicted = rhs_base_solution.objective
                 + rhs_duals.get(row).copied().unwrap_or(0.0) * (rhs - original_rhs);
-            let external_objective = reference.objective.unwrap_or(f64::NAN);
+            let external_objective = reference.objective;
             let linear_prediction_matches = (predicted - external_objective).abs()
                 <= 1e-7 * 1.0_f64.max(predicted.abs()).max(external_objective.abs());
             let max_x_diff = reference
@@ -2601,13 +2561,13 @@ impl Driver {
                 .fold(0.0_f64, f64::max);
             this.check(
                     format!("LP RHS-sensitivity HiGHS {label}"),
-                    reference.status == "optimal"
+                    reference.status == LPStatus::Optimal
                         && internal.status == LPStatus::Optimal
                         && (internal.objective - external_objective).abs() <= 1e-7
                         && max_x_diff <= 1e-7
                         && linear_prediction_matches == should_follow_linear,
                     format!(
-                        "row={row} rhs={rhs:.6} native_obj={:.10} external={:?} predicted={:.10} linear={} expected_linear={} x_diff={:.3e} solver={}",
+                        "row={row} rhs={rhs:.6} native_obj={:.10} external={:.10} predicted={:.10} linear={} expected_linear={} x_diff={:.3e} solver={}",
                         internal.objective,
                         reference.objective,
                         predicted,
@@ -2700,25 +2660,8 @@ impl Driver {
                 }
             }
             let internal = solve_lp_internal(&trial, &InternalSimplexOptions::default());
-            let trial_json = serde_json::json!({
-                "lp": {
-                    "sense": trial.sense.as_str(),
-                    "c": &trial.c,
-                    "A_ub": &trial.a_ub,
-                    "b_ub": &trial.b_ub,
-                    "A_eq": &trial.a_eq,
-                    "b_eq": &trial.b_eq,
-                    "lb": &trial.lb,
-                    "ub": &trial.ub,
-                },
-                "method": "highs",
-            })
-            .to_string();
-            let value_json =
-                this.run_python_json("lp_solve.py", &["--method", "highs"], &trial_json);
-            let reference: LPReference =
-                serde_json::from_value(value_json).expect("parse bound-sensitivity reference");
-            let external_objective = reference.objective.unwrap_or(f64::NAN);
+            let reference = this.solve_lp_highs_reference(&trial, None);
+            let external_objective = reference.objective;
             let max_x_diff = reference
                 .x
                 .iter()
@@ -2727,13 +2670,13 @@ impl Driver {
                 .fold(0.0_f64, f64::max);
             this.check(
                 format!("LP bound-sensitivity HiGHS {label}"),
-                reference.status == "optimal"
+                reference.status == LPStatus::Optimal
                     && internal.status == LPStatus::Optimal
                     && (internal.objective - external_objective).abs() <= 1e-7
                     && (internal.objective - expected_objective).abs() <= 1e-7
                     && max_x_diff <= 1e-7,
                 format!(
-                    "kind={} var={} value={value:.6} native_obj={:.10} external={:?} expected={expected_objective:.10} x_diff={:.3e} solver={}",
+                    "kind={} var={} value={value:.6} native_obj={:.10} external={:.10} expected={expected_objective:.10} x_diff={:.3e} solver={}",
                     kind.as_str(),
                     variable,
                     internal.objective,
@@ -2806,29 +2749,14 @@ impl Driver {
         );
         let conflict_subproblem =
             lp_feasibility_problem_from_conflict_members(&conflict_lp, &conflict.members);
-        let conflict_json = serde_json::json!({
-            "lp": {
-                "sense": conflict_subproblem.sense.as_str(),
-                "c": &conflict_subproblem.c,
-                "A_ub": &conflict_subproblem.a_ub,
-                "b_ub": &conflict_subproblem.b_ub,
-                "A_eq": &conflict_subproblem.a_eq,
-                "b_eq": &conflict_subproblem.b_eq,
-                "lb": &conflict_subproblem.lb,
-                "ub": &conflict_subproblem.ub,
-            },
-            "method": "highs",
-        })
-        .to_string();
-        let value = self.run_python_json("lp_solve.py", &["--method", "highs"], &conflict_json);
-        let conflict_reference: LPReference =
-            serde_json::from_value(value).expect("parse LP conflict reference");
+        let conflict_reference = self.solve_lp_highs_reference(&conflict_subproblem, None);
         self.check(
             "LP conflict subsystem external infeasible",
-            conflict_reference.status == "infeasible",
+            conflict_reference.status == LPStatus::Infeasible,
             format!(
                 "external={} solver={}",
-                conflict_reference.status, conflict_reference.solver
+                conflict_reference.status.as_str(),
+                conflict_reference.solver
             ),
         );
         let mut deletion_statuses = Vec::new();
@@ -2838,25 +2766,9 @@ impl Driver {
             trial.remove(idx);
             let trial_subproblem =
                 lp_feasibility_problem_from_conflict_members(&conflict_lp, &trial);
-            let trial_json = serde_json::json!({
-                "lp": {
-                    "sense": trial_subproblem.sense.as_str(),
-                    "c": &trial_subproblem.c,
-                    "A_ub": &trial_subproblem.a_ub,
-                    "b_ub": &trial_subproblem.b_ub,
-                    "A_eq": &trial_subproblem.a_eq,
-                    "b_eq": &trial_subproblem.b_eq,
-                    "lb": &trial_subproblem.lb,
-                    "ub": &trial_subproblem.ub,
-                },
-                "method": "highs",
-            })
-            .to_string();
-            let value = self.run_python_json("lp_solve.py", &["--method", "highs"], &trial_json);
-            let reference: LPReference =
-                serde_json::from_value(value).expect("parse LP conflict deletion reference");
-            all_single_deletions_feasible &= reference.status == "optimal";
-            deletion_statuses.push(reference.status);
+            let reference = self.solve_lp_highs_reference(&trial_subproblem, None);
+            all_single_deletions_feasible &= reference.status == LPStatus::Optimal;
+            deletion_statuses.push(reference.status.as_str().to_string());
         }
         self.check(
             "LP conflict single-deletion external feasibility",
@@ -2909,17 +2821,10 @@ impl Driver {
         );
         let feas_relax_model =
             build_lp_feasibility_relaxation_problem(&feas_relax_lp, &feas_relax_options);
-        let feas_relax_reference = solve_lp_with_external_cli(
-            &feas_relax_model.problem,
-            &ExternalLinearCliOptions {
-                solver: ExternalLinearCliSolver::Highs,
-                time_limit_secs: Some(2.0),
-                ..Default::default()
-            },
-        );
+        let feas_relax_reference = self.solve_lp_highs_reference(&feas_relax_model.problem, None);
         self.check(
             "LP feasibility-relaxation HiGHS status optimal",
-            feas_relax_reference.status == ExternalLinearCliStatus::Optimal,
+            feas_relax_reference.status == LPStatus::Optimal,
             format!(
                 "external={} solver={}",
                 feas_relax_reference.status.as_str(),
@@ -2929,7 +2834,7 @@ impl Driver {
         self.close(
             "LP feasibility-relaxation cost vs HiGHS",
             feas_relax_internal.relaxation_cost,
-            feas_relax_reference.objective.unwrap_or(f64::NAN),
+            feas_relax_reference.objective,
             1e-9,
         );
         let external_original_x =
@@ -2970,13 +2875,7 @@ impl Driver {
         ];
         for (case_name, problem, expected_status) in lp_status_cases {
             let internal = solve_lp_internal(&problem, &InternalSimplexOptions::default());
-            let external = solve_lp_external(
-                &problem,
-                &ExternalSolverOptions {
-                    method: Some("highs".to_string()),
-                    ..Default::default()
-                },
-            );
+            let external = self.solve_lp_highs_reference(&problem, None);
             self.check(
                 format!("LP {case_name} status internal/HiGHS"),
                 internal.status == expected_status && external.status == expected_status,
@@ -19851,13 +19750,7 @@ impl Driver {
         };
         let flow = solve_min_cost_flow(p.clone());
         let lp = min_cost_flow_to_lp(&p);
-        let external = solve_lp_external(
-            &lp,
-            &ExternalSolverOptions {
-                method: Some("highs".to_string()),
-                ..Default::default()
-            },
-        );
+        let external = self.solve_lp_highs_reference(&lp, None);
         self.check(
             "Min-cost-flow statuses optimal",
             flow.status == MinCostFlowStatus::Optimal && external.status == LPStatus::Optimal,

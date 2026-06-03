@@ -53,6 +53,10 @@ use crate::des::general::external_graph_coloring_reference::{
     solve_graph_coloring_with_external_reference, ExternalGraphColoringReferenceOptions,
     ExternalGraphColoringReferenceStatus,
 };
+use crate::des::general::external_knapsack_reference::{
+    solve_knapsack_with_external_reference, ExternalKnapsackReferenceOptions,
+    ExternalKnapsackReferenceStatus,
+};
 use crate::des::general::external_linear_cli::{
     external_linear_cli_command, probe_external_linear_cli_solver, solve_ipmip_with_external_cli,
     solve_lp_with_external_cli, solve_multi_objective_ipmip_with_external_cli,
@@ -68,6 +72,10 @@ use crate::des::general::external_max_flow_reference::{
 use crate::des::general::external_min_cost_flow_reference::{
     solve_min_cost_flow_with_external_reference, ExternalMinCostFlowReferenceOptions,
     ExternalMinCostFlowReferenceStatus,
+};
+use crate::des::general::external_minimum_spanning_tree_reference::{
+    solve_minimum_spanning_tree_with_external_reference,
+    ExternalMinimumSpanningTreeReferenceOptions, ExternalMinimumSpanningTreeReferenceStatus,
 };
 use crate::des::general::external_nonlinear_reference::{
     solve_exponential_fit_with_external_reference, solve_global_benchmark_with_external_reference,
@@ -119,6 +127,10 @@ use crate::des::general::external_validation_tools::{
     PrismModule, PrismValidationModel, SimulationMetricExpectation, SimulationValidationRequest,
     SmtDeclaration, SmtLibValidationScript, SmtSort, TlaValidationModule,
 };
+use crate::des::general::external_weighted_max_sat_reference::{
+    solve_weighted_max_sat_with_external_reference, ExternalWeightedMaxSatReferenceOptions,
+    ExternalWeightedMaxSatReferenceStatus,
+};
 use crate::des::general::facility_location::{
     build_sample_facility_location_problem, facility_location_solution_feasible,
     solve_facility_location_exact, solve_facility_location_greedy, FacilityLocationAssignment,
@@ -153,6 +165,11 @@ use crate::des::general::ip_mip_des::{
     IPMIPFeasRelaxMember, IPMIPFeasRelaxOptions, IPMIPProblem, IPMIPSolutionPoolOptions,
     IPMIPSolveOptions, IPMIPStatus, LpRelaxationAlgorithm, TraceAction,
 };
+use crate::des::general::knapsack::{
+    build_sample_knapsack_problem, knapsack_solution_feasible,
+    solve_knapsack_exact_branch_and_bound, solve_knapsack_greedy_density, KnapsackProblem,
+    KnapsackSolution, KnapsackStatus,
+};
 use crate::des::general::lp::{
     build_lp_feasibility_relaxation_problem, find_lp_infeasibility_conflict,
     lp_feasibility_problem_from_conflict_members, solve_general_linear_lp_internal,
@@ -175,6 +192,11 @@ use crate::des::general::max_flow::{
 use crate::des::general::min_cost_flow::{
     min_cost_flow_to_lp, solve_min_cost_flow, MinCostFlowArc, MinCostFlowProblem, MinCostFlowStatus,
 };
+use crate::des::general::minimum_spanning_tree::{
+    build_sample_minimum_spanning_tree_problem, minimum_spanning_tree_solution_feasible,
+    solve_minimum_spanning_tree_kruskal, solve_minimum_spanning_tree_prim,
+    MinimumSpanningTreeProblem, MinimumSpanningTreeSolution, MinimumSpanningTreeStatus,
+};
 use crate::des::general::nonlinear_optimization_models::{
     run_bfgs_rosenbrock, run_gauss_newton_curve_fit, run_levenberg_marquardt_curve_fit,
     run_newton_rosenbrock, CurveFitPoint, NonlinearLeastSquaresParams, UnconstrainedOptParams,
@@ -188,6 +210,11 @@ use crate::des::general::qp::{
 use crate::des::general::set_cover::{
     build_sample_set_cover_problem, set_cover_solution_feasible, solve_set_cover_exact,
     solve_set_cover_greedy, SetCoverProblem, SetCoverStatus,
+};
+use crate::des::general::weighted_max_sat::{
+    build_sample_weighted_max_sat_problem, solve_weighted_max_sat_exact,
+    solve_weighted_max_sat_greedy, weighted_max_sat_solution_feasible, WeightedMaxSatProblem,
+    WeightedMaxSatSolution, WeightedMaxSatStatus,
 };
 
 #[derive(Clone, Debug)]
@@ -797,6 +824,28 @@ impl Driver {
         seen.len() == problem.items.len()
     }
 
+    fn knapsack_external_solution_feasible(
+        &self,
+        problem: &KnapsackProblem,
+        selected_item_indices: &[usize],
+        selected_item_ids: &[String],
+        total_weight: Option<f64>,
+        total_value: Option<f64>,
+    ) -> bool {
+        knapsack_solution_feasible(
+            problem,
+            &KnapsackSolution {
+                status: KnapsackStatus::Feasible,
+                selected_item_indices: selected_item_indices.to_vec(),
+                selected_item_ids: selected_item_ids.to_vec(),
+                total_weight: total_weight.unwrap_or(f64::NAN),
+                total_value: total_value.unwrap_or(f64::NAN),
+                upper_bound: None,
+                message: "external knapsack solution".to_string(),
+            },
+        )
+    }
+
     fn set_cover_external_solution_feasible(
         &self,
         problem: &SetCoverProblem,
@@ -864,6 +913,57 @@ impl Driver {
                 color_names: color_names.to_vec(),
                 used_color_count,
                 message: "external graph-coloring solution".to_string(),
+            },
+        )
+    }
+
+    fn weighted_max_sat_external_solution_feasible(
+        &self,
+        problem: &WeightedMaxSatProblem,
+        assignment: &[bool],
+        objective: Option<f64>,
+        satisfied_clause_ids: &[String],
+        violated_hard_clause_ids: &[String],
+    ) -> bool {
+        if violated_hard_clause_ids.is_empty() && assignment.len() == problem.num_vars {
+            let solution = WeightedMaxSatSolution {
+                status: WeightedMaxSatStatus::Feasible,
+                assignment: assignment.to_vec(),
+                satisfied_soft_weight: objective,
+                unsatisfied_soft_weight: Some(
+                    problem
+                        .clauses
+                        .iter()
+                        .filter(|clause| !clause.hard)
+                        .map(|clause| clause.weight)
+                        .sum::<f64>()
+                        - objective.unwrap_or(0.0),
+                ),
+                satisfied_clause_ids: satisfied_clause_ids.to_vec(),
+                violated_hard_clause_ids: violated_hard_clause_ids.to_vec(),
+                message: "external weighted Max-SAT solution".to_string(),
+            };
+            weighted_max_sat_solution_feasible(problem, &solution)
+        } else {
+            false
+        }
+    }
+
+    fn minimum_spanning_tree_external_solution_feasible(
+        &self,
+        problem: &MinimumSpanningTreeProblem,
+        selected_edge_indices: &[usize],
+        selected_edge_ids: &[String],
+        total_weight: Option<f64>,
+    ) -> bool {
+        minimum_spanning_tree_solution_feasible(
+            problem,
+            &MinimumSpanningTreeSolution {
+                status: MinimumSpanningTreeStatus::Optimal,
+                selected_edge_indices: selected_edge_indices.to_vec(),
+                selected_edge_ids: selected_edge_ids.to_vec(),
+                total_weight,
+                message: "external minimum-spanning-tree solution".to_string(),
             },
         )
     }
@@ -1108,6 +1208,117 @@ impl Driver {
             }
             _ => println!(
                 "  SKIP  Bin-packing OR-Tools CP-SAT objective: status={:?} message={}",
+                reference.ortools_status, reference.message
+            ),
+        }
+    }
+
+    fn validate_knapsack(&mut self) {
+        println!("\n-- Knapsack: exact/greedy vs OR-Tools CP-SAT bridge --");
+        let problem = build_sample_knapsack_problem();
+        let exact = solve_knapsack_exact_branch_and_bound(&problem);
+        let greedy = solve_knapsack_greedy_density(&problem);
+        self.check(
+            "Knapsack exact native optimum",
+            exact.status == KnapsackStatus::Optimal
+                && (exact.total_value - 51.0).abs() <= 1e-9
+                && (exact.total_weight - 26.0).abs() <= 1e-9
+                && exact.selected_item_ids == vec!["B", "C", "D"]
+                && knapsack_solution_feasible(&problem, &exact),
+            format!(
+                "status={} value={:.10} weight={:.10} items={:?} upper_bound={:?}",
+                exact.status.as_str(),
+                exact.total_value,
+                exact.total_weight,
+                exact.selected_item_ids,
+                exact.upper_bound
+            ),
+        );
+        self.check(
+            "Knapsack greedy native feasibility",
+            greedy.status == KnapsackStatus::Feasible
+                && knapsack_solution_feasible(&problem, &greedy)
+                && greedy.total_value <= exact.total_value + 1e-9,
+            format!(
+                "status={} value={:.10} weight={:.10} items={:?}",
+                greedy.status.as_str(),
+                greedy.total_value,
+                greedy.total_weight,
+                greedy.selected_item_ids
+            ),
+        );
+
+        let reference = solve_knapsack_with_external_reference(
+            &problem,
+            &ExternalKnapsackReferenceOptions::default(),
+        );
+        self.check(
+            "Knapsack exact/reference bridge status optimal",
+            reference.status == ExternalKnapsackReferenceStatus::Optimal,
+            format!(
+                "status={} solver={} message={}",
+                reference.status.as_str(),
+                reference.solver,
+                reference.message
+            ),
+        );
+        self.close(
+            "Knapsack exact/reference objective",
+            exact.total_value,
+            reference.objective.unwrap_or(f64::NAN),
+            0.0,
+        );
+        self.check(
+            "Knapsack exact/reference feasibility",
+            self.knapsack_external_solution_feasible(
+                &problem,
+                &reference.selected_item_indices,
+                &reference.selected_item_ids,
+                reference.total_weight,
+                reference.total_value,
+            ),
+            format!(
+                "objective={:?} weight={:?} value={:?} items={:?} upper_bound={:?}",
+                reference.objective,
+                reference.total_weight,
+                reference.total_value,
+                reference.selected_item_ids,
+                reference.upper_bound
+            ),
+        );
+
+        match (
+            reference.ortools_status.as_deref(),
+            reference.ortools_objective,
+        ) {
+            (Some("optimal"), Some(objective)) => {
+                self.close(
+                    "Knapsack OR-Tools CP-SAT objective",
+                    exact.total_value,
+                    objective,
+                    0.0,
+                );
+                self.check(
+                    "Knapsack OR-Tools CP-SAT feasibility",
+                    self.knapsack_external_solution_feasible(
+                        &problem,
+                        &reference.ortools_selected_item_indices,
+                        &reference.ortools_selected_item_ids,
+                        reference.ortools_total_weight,
+                        reference.ortools_total_value,
+                    ),
+                    format!(
+                        "objective={:?} weight={:?} value={:?} items={:?} bound={:?}",
+                        reference.ortools_objective,
+                        reference.ortools_total_weight,
+                        reference.ortools_total_value,
+                        reference.ortools_selected_item_ids,
+                        reference.ortools_objective_bound
+                    ),
+                );
+            }
+            _ => println!(
+                "  SKIP  Knapsack OR-Tools CP-SAT objective: status={:?} message={}",
                 reference.ortools_status, reference.message
             ),
         }
@@ -1412,6 +1623,106 @@ impl Driver {
             }
             _ => println!(
                 "  SKIP  Graph-coloring OR-Tools CP-SAT objective: status={:?} message={}",
+                reference.ortools_status, reference.message
+            ),
+        }
+    }
+
+    fn validate_weighted_max_sat(&mut self) {
+        println!("\n-- Weighted Max-SAT: exact/greedy vs OR-Tools CP-SAT bridge --");
+        let problem = build_sample_weighted_max_sat_problem();
+        let exact = solve_weighted_max_sat_exact(&problem);
+        let greedy = solve_weighted_max_sat_greedy(&problem);
+        self.check(
+            "Weighted Max-SAT exact native optimum",
+            exact.status == WeightedMaxSatStatus::Optimal
+                && exact.satisfied_soft_weight == Some(16.0)
+                && weighted_max_sat_solution_feasible(&problem, &exact),
+            format!(
+                "status={} objective={:?} assignment={:?}",
+                exact.status.as_str(),
+                exact.satisfied_soft_weight,
+                exact.assignment
+            ),
+        );
+        self.check(
+            "Weighted Max-SAT greedy native feasibility",
+            greedy.status == WeightedMaxSatStatus::Feasible
+                && weighted_max_sat_solution_feasible(&problem, &greedy)
+                && greedy.satisfied_soft_weight <= exact.satisfied_soft_weight,
+            format!(
+                "status={} objective={:?} assignment={:?}",
+                greedy.status.as_str(),
+                greedy.satisfied_soft_weight,
+                greedy.assignment
+            ),
+        );
+
+        let reference = solve_weighted_max_sat_with_external_reference(
+            &problem,
+            &ExternalWeightedMaxSatReferenceOptions::default(),
+        );
+        self.check(
+            "Weighted Max-SAT exact/reference bridge status optimal",
+            reference.status == ExternalWeightedMaxSatReferenceStatus::Optimal,
+            format!(
+                "status={} solver={} message={}",
+                reference.status.as_str(),
+                reference.solver,
+                reference.message
+            ),
+        );
+        self.close(
+            "Weighted Max-SAT exact/reference objective",
+            exact.satisfied_soft_weight.unwrap_or(f64::NAN),
+            reference.objective.unwrap_or(f64::NAN),
+            0.0,
+        );
+        self.check(
+            "Weighted Max-SAT exact/reference feasibility",
+            self.weighted_max_sat_external_solution_feasible(
+                &problem,
+                &reference.assignment,
+                reference.objective,
+                &reference.satisfied_clause_ids,
+                &reference.violated_hard_clause_ids,
+            ),
+            format!(
+                "objective={:?} assignment={:?} satisfied={:?}",
+                reference.objective, reference.assignment, reference.satisfied_clause_ids
+            ),
+        );
+
+        match (
+            reference.ortools_status.as_deref(),
+            reference.ortools_objective,
+        ) {
+            (Some("optimal"), Some(objective)) => {
+                self.close(
+                    "Weighted Max-SAT OR-Tools CP-SAT objective",
+                    exact.satisfied_soft_weight.unwrap_or(f64::NAN),
+                    objective,
+                    0.0,
+                );
+                self.check(
+                    "Weighted Max-SAT OR-Tools CP-SAT feasibility",
+                    self.weighted_max_sat_external_solution_feasible(
+                        &problem,
+                        &reference.ortools_assignment,
+                        reference.ortools_objective,
+                        &reference.ortools_satisfied_clause_ids,
+                        &reference.ortools_violated_hard_clause_ids,
+                    ),
+                    format!(
+                        "objective={:?} assignment={:?} bound={:?}",
+                        reference.ortools_objective,
+                        reference.ortools_assignment,
+                        reference.ortools_objective_bound
+                    ),
+                );
+            }
+            _ => println!(
+                "  SKIP  Weighted Max-SAT OR-Tools CP-SAT objective: status={:?} message={}",
                 reference.ortools_status, reference.message
             ),
         }
@@ -11989,6 +12300,104 @@ impl Driver {
         }
     }
 
+    fn validate_minimum_spanning_tree(&mut self) {
+        println!("\n-- Minimum spanning tree: Kruskal/Prim vs OR-Tools CP-SAT bridge --");
+        let problem = build_sample_minimum_spanning_tree_problem();
+        let kruskal = solve_minimum_spanning_tree_kruskal(&problem);
+        let prim = solve_minimum_spanning_tree_prim(&problem);
+        self.check(
+            "MST Kruskal native optimum",
+            kruskal.status == MinimumSpanningTreeStatus::Optimal
+                && kruskal.total_weight == Some(6.0)
+                && minimum_spanning_tree_solution_feasible(&problem, &kruskal),
+            format!(
+                "status={} weight={:?} edges={:?}",
+                kruskal.status.as_str(),
+                kruskal.total_weight,
+                kruskal.selected_edge_ids
+            ),
+        );
+        self.check(
+            "MST Prim native matches Kruskal",
+            prim.status == MinimumSpanningTreeStatus::Optimal
+                && prim.total_weight == kruskal.total_weight
+                && minimum_spanning_tree_solution_feasible(&problem, &prim),
+            format!(
+                "status={} weight={:?} edges={:?}",
+                prim.status.as_str(),
+                prim.total_weight,
+                prim.selected_edge_ids
+            ),
+        );
+
+        let reference = solve_minimum_spanning_tree_with_external_reference(
+            &problem,
+            &ExternalMinimumSpanningTreeReferenceOptions::default(),
+        );
+        self.check(
+            "MST exact/reference bridge status optimal",
+            reference.status == ExternalMinimumSpanningTreeReferenceStatus::Optimal,
+            format!(
+                "status={} solver={} message={}",
+                reference.status.as_str(),
+                reference.solver,
+                reference.message
+            ),
+        );
+        self.close(
+            "MST exact/reference objective",
+            kruskal.total_weight.unwrap_or(f64::NAN),
+            reference.objective.unwrap_or(f64::NAN),
+            0.0,
+        );
+        self.check(
+            "MST exact/reference feasibility",
+            self.minimum_spanning_tree_external_solution_feasible(
+                &problem,
+                &reference.selected_edge_indices,
+                &reference.selected_edge_ids,
+                reference.total_weight,
+            ),
+            format!(
+                "objective={:?} edges={:?}",
+                reference.objective, reference.selected_edge_ids
+            ),
+        );
+
+        match (
+            reference.ortools_status.as_deref(),
+            reference.ortools_objective,
+        ) {
+            (Some("optimal"), Some(objective)) => {
+                self.close(
+                    "MST OR-Tools CP-SAT objective",
+                    kruskal.total_weight.unwrap_or(f64::NAN),
+                    objective,
+                    0.0,
+                );
+                self.check(
+                    "MST OR-Tools CP-SAT feasibility",
+                    self.minimum_spanning_tree_external_solution_feasible(
+                        &problem,
+                        &reference.ortools_selected_edge_indices,
+                        &reference.ortools_selected_edge_ids,
+                        reference.ortools_total_weight,
+                    ),
+                    format!(
+                        "objective={:?} edges={:?} bound={:?}",
+                        reference.ortools_objective,
+                        reference.ortools_selected_edge_ids,
+                        reference.ortools_objective_bound
+                    ),
+                );
+            }
+            _ => println!(
+                "  SKIP  MST OR-Tools CP-SAT objective: status={:?} message={}",
+                reference.ortools_status, reference.message
+            ),
+        }
+    }
+
     fn validate_traveling_salesman(&mut self) {
         println!("\n-- TSP: native Held-Karp/ACO vs OR-Tools Routing bridge --");
         let instance = build_pentagon_tsp(6, 10.0);
@@ -16776,9 +17185,11 @@ impl Driver {
     fn run_all(&mut self) {
         self.validate_assignment();
         self.validate_bin_packing();
+        self.validate_knapsack();
         self.validate_set_cover();
         self.validate_facility_location();
         self.validate_graph_coloring();
+        self.validate_weighted_max_sat();
         self.validate_lp();
         self.validate_ip_mip();
         self.validate_external_solver_clis();
@@ -16788,6 +17199,7 @@ impl Driver {
         self.validate_math_program_facade();
         self.validate_max_flow();
         self.validate_min_cost_flow();
+        self.validate_minimum_spanning_tree();
         self.validate_traveling_salesman();
         self.validate_vehicle_routing();
         self.validate_job_shop_scheduling();

@@ -12,6 +12,7 @@
 //!   - job-shop-dispatch
 //!   - job-shop-exact
 //!   - flow-shop-neh
+//!   - flow-shop-exact
 //!
 //! ## Conversion notes (per the TS "RUST MIGRATION" header)
 //!
@@ -2377,6 +2378,7 @@ fn default_flow_shop_jobs() -> Vec<FlowShopJob> {
 
 pub fn run_flow_shop_neh(params: FlowShopNEHParams) -> FlowShopNEHResult {
     let jobs = non_empty_array(params.jobs.as_deref(), &default_flow_shop_jobs());
+    validate_flow_shop_jobs("flow-shop-neh", &jobs);
     let source = Rc::new(RefCell::new(FlowShopJobSourceStation::new(
         "flow-shop-source",
         jobs,
@@ -2459,6 +2461,12 @@ pub fn run_flow_shop_neh(params: FlowShopNEHParams) -> FlowShopNEHResult {
         &edges,
     );
     result
+}
+
+pub fn run_flow_shop_exact(params: FlowShopNEHParams) -> FlowShopNEHResult {
+    let jobs = non_empty_array(params.jobs.as_deref(), &default_flow_shop_jobs());
+    validate_flow_shop_jobs("flow-shop-exact", &jobs);
+    solve_flow_shop_exact(&jobs)
 }
 
 // =============================================================================
@@ -2574,6 +2582,38 @@ fn validate_job_shop_jobs(model: &str, jobs: &[JobShopJob]) {
                 model,
                 &format!("jobs[{job_idx}].operations[{op_idx}].duration"),
                 op.duration,
+            ));
+        }
+    }
+}
+
+fn validate_flow_shop_jobs(model: &str, jobs: &[FlowShopJob]) {
+    if jobs.is_empty() {
+        panic!("{model}: jobs must be non-empty");
+    }
+    let machine_count = jobs[0].processing_times.len();
+    if machine_count == 0 {
+        panic!("{model}: jobs[0].processing_times must be non-empty");
+    }
+    let mut ids: HashSet<&str> = HashSet::new();
+    for (job_idx, job) in jobs.iter().enumerate() {
+        if job.id.trim().is_empty() {
+            panic!("{model}: jobs[{job_idx}].id must be non-empty");
+        }
+        if !ids.insert(job.id.as_str()) {
+            panic!("{model}: duplicate job id '{}'", job.id);
+        }
+        if job.processing_times.len() != machine_count {
+            panic!(
+                "{model}: jobs[{job_idx}].processing_times length {} != {machine_count}",
+                job.processing_times.len()
+            );
+        }
+        for (machine_idx, duration) in job.processing_times.iter().enumerate() {
+            require(Preconditions::non_negative(
+                model,
+                &format!("jobs[{job_idx}].processing_times[{machine_idx}]"),
+                *duration,
             ));
         }
     }
@@ -2736,6 +2776,32 @@ fn solve_job_shop_exact(jobs: &[JobShopJob]) -> JobShopDispatchResult {
     }
 }
 
+fn solve_flow_shop_exact(jobs: &[FlowShopJob]) -> FlowShopNEHResult {
+    if jobs.len() > 10 {
+        panic!(
+            "flow-shop-exact only practical for <= 10 jobs, got {}",
+            jobs.len()
+        );
+    }
+    let neh = neh_sequence(jobs);
+    let neh_schedule = build_flow_shop_schedule(&neh);
+    let mut best_sequence = neh;
+    let mut best_makespan = flow_shop_makespan(&best_sequence);
+    let mut best_total_flow_time = flow_shop_total_flow_time(&best_sequence, &neh_schedule);
+
+    let mut used = vec![false; jobs.len()];
+    let mut current: Vec<FlowShopJob> = Vec::with_capacity(jobs.len());
+    flow_shop_exact_search(
+        jobs,
+        &mut used,
+        &mut current,
+        &mut best_sequence,
+        &mut best_makespan,
+        &mut best_total_flow_time,
+    );
+    flow_shop_result_from_sequence(best_sequence, empty_station_graph())
+}
+
 fn dispatch_schedule(jobs: &[JobShopJob], rule: DispatchRule) -> JobShopDispatchResult {
     let mut machine_ready: HashMap<String, f64> = HashMap::new();
     let mut job_ready: HashMap<String, f64> = HashMap::new();
@@ -2823,6 +2889,63 @@ fn neh_sequence(jobs: &[FlowShopJob]) -> Vec<FlowShopJob> {
     sequence
 }
 
+fn flow_shop_exact_search(
+    jobs: &[FlowShopJob],
+    used: &mut [bool],
+    current: &mut Vec<FlowShopJob>,
+    best_sequence: &mut Vec<FlowShopJob>,
+    best_makespan: &mut f64,
+    best_total_flow_time: &mut f64,
+) {
+    if current.len() == jobs.len() {
+        let schedule = build_flow_shop_schedule(current);
+        let makespan = schedule.iter().map(|op| op.finish).fold(0.0_f64, f64::max);
+        let total_flow_time = flow_shop_total_flow_time(current, &schedule);
+        if makespan < *best_makespan - JOB_SHOP_EPS
+            || ((makespan - *best_makespan).abs() <= JOB_SHOP_EPS
+                && total_flow_time < *best_total_flow_time - JOB_SHOP_EPS)
+        {
+            *best_makespan = makespan;
+            *best_total_flow_time = total_flow_time;
+            *best_sequence = current.clone();
+        }
+        return;
+    }
+    for idx in 0..jobs.len() {
+        if used[idx] {
+            continue;
+        }
+        used[idx] = true;
+        current.push(jobs[idx].clone());
+        flow_shop_exact_search(
+            jobs,
+            used,
+            current,
+            best_sequence,
+            best_makespan,
+            best_total_flow_time,
+        );
+        current.pop();
+        used[idx] = false;
+    }
+}
+
+fn flow_shop_result_from_sequence(
+    sequence: Vec<FlowShopJob>,
+    topology: StationGraphSummary,
+) -> FlowShopNEHResult {
+    let schedule = build_flow_shop_schedule(&sequence);
+    let makespan = schedule.iter().map(|op| op.finish).fold(0.0_f64, f64::max);
+    let total_flow_time = flow_shop_total_flow_time(&sequence, &schedule);
+    FlowShopNEHResult {
+        sequence: sequence.iter().map(|job| job.id.clone()).collect(),
+        schedule,
+        makespan,
+        total_flow_time,
+        topology,
+    }
+}
+
 fn build_flow_shop_schedule(sequence: &[FlowShopJob]) -> Vec<ScheduledOperation> {
     if sequence.is_empty() {
         return Vec::new();
@@ -2854,6 +2977,19 @@ fn flow_shop_makespan(sequence: &[FlowShopJob]) -> f64 {
         .iter()
         .map(|op| op.finish)
         .fold(0.0_f64, f64::max)
+}
+
+fn flow_shop_total_flow_time(sequence: &[FlowShopJob], schedule: &[ScheduledOperation]) -> f64 {
+    sequence
+        .iter()
+        .map(|job| {
+            schedule
+                .iter()
+                .filter(|op| op.job_id == job.id)
+                .map(|op| op.finish)
+                .fold(0.0_f64, f64::max)
+        })
+        .sum()
 }
 
 fn total_processing_time(job: &FlowShopJob) -> f64 {

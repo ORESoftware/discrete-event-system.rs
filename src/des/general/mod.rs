@@ -93,12 +93,16 @@ pub mod control_systems;
 // Standalone optimisation/forecasting/LP models built on des-base + general kernels.
 pub mod do_audit;
 pub mod equation_to_stations;
+pub mod external_assignment_reference;
 pub mod external_linear_cli;
+pub mod external_max_flow_reference;
+pub mod external_min_cost_flow_reference;
 pub mod external_nonlinear_reference;
 pub mod external_optimization_ecosystem;
 pub mod external_optimization_tools;
 pub mod external_quadratic_reference;
 pub mod external_scheduling_reference;
+pub mod external_tsp_reference;
 pub mod external_validation_tools;
 pub mod feasibility_pipeline;
 pub mod internal_solver_network;

@@ -1,0 +1,263 @@
+#!/usr/bin/env python3
+"""Reference bridge for small traveling-salesman instances.
+
+The deterministic oracle is Held-Karp dynamic programming over a dense distance
+matrix. When OR-Tools is installed, the same matrix is also sent to OR-Tools
+Routing as a one-vehicle TSP so Rust validation can cross-check the local
+external routing engine without vendoring solver executables.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import sys
+from typing import Optional
+
+
+DISTANCE_SCALE = 1_000_000
+
+
+def euclidean_distance(a: dict, b: dict) -> float:
+    return math.hypot(float(a["x"]) - float(b["x"]), float(a["y"]) - float(b["y"]))
+
+
+def parse_point(raw: object, index: int) -> dict:
+    if isinstance(raw, dict):
+        return {
+            "id": str(raw.get("id", index)),
+            "x": float(raw["x"]),
+            "y": float(raw["y"]),
+        }
+    if isinstance(raw, (list, tuple)) and len(raw) >= 2:
+        return {"id": str(index), "x": float(raw[0]), "y": float(raw[1])}
+    raise ValueError(f"point {index} must be an object with x/y or a length-2 array")
+
+
+def build_distance_matrix(points: list[dict]) -> list[list[float]]:
+    return [[euclidean_distance(a, b) for b in points] for a in points]
+
+
+def normalize(raw: dict) -> dict:
+    matrix_raw = raw.get("distanceMatrix", raw.get("distance_matrix"))
+    points_raw = raw.get("points", raw.get("cities"))
+    points: list[dict] = []
+    if points_raw is not None:
+        points = [parse_point(point, i) for i, point in enumerate(points_raw)]
+
+    if matrix_raw is None:
+        if not points:
+            raise ValueError("points or distanceMatrix is required")
+        matrix = build_distance_matrix(points)
+    else:
+        matrix = [[float(v) for v in row] for row in matrix_raw]
+
+    n = len(matrix)
+    if n < 2:
+        raise ValueError("TSP requires at least two cities")
+    for i, row in enumerate(matrix):
+        if len(row) != n:
+            raise ValueError(f"distance row {i} length {len(row)} != {n}")
+        for j, value in enumerate(row):
+            if not math.isfinite(value) or value < 0.0:
+                raise ValueError(f"distance[{i}][{j}] must be finite and non-negative")
+        if abs(row[i]) > 1e-9:
+            raise ValueError(f"distance[{i}][{i}] must be zero")
+
+    if not points:
+        points = [{"id": str(i), "x": float(i), "y": 0.0} for i in range(n)]
+    if len(points) != n:
+        raise ValueError(f"points length {len(points)} != distance matrix size {n}")
+
+    return {"points": points, "distanceMatrix": matrix}
+
+
+def tour_length(matrix: list[list[float]], tour: list[int]) -> float:
+    if not tour:
+        return 0.0
+    total = 0.0
+    for a, b in zip(tour, tour[1:]):
+        total += matrix[a][b]
+    total += matrix[tour[-1]][tour[0]]
+    return total
+
+
+def result(
+    status: str,
+    solver: str,
+    tour: Optional[list[int]] = None,
+    objective: Optional[float] = None,
+    message: str = "",
+) -> dict:
+    return {
+        "status": status,
+        "solver": solver,
+        "tour": [] if tour is None else [int(v) for v in tour],
+        "objective": None if objective is None else float(objective),
+        "message": message,
+    }
+
+
+def reconstruct(parent: list[int], mask: int, end: int, n: int) -> list[int]:
+    tour: list[int] = []
+    cur = end
+    while cur >= 0:
+        tour.append(cur)
+        prev = parent[mask * n + cur]
+        mask ^= 1 << cur
+        cur = prev
+    tour.reverse()
+    return tour
+
+
+def exact_tsp(problem: dict) -> dict:
+    matrix = problem["distanceMatrix"]
+    n = len(matrix)
+    if n > 16:
+        return result(
+            "unsupported",
+            "python:held-karp-tsp",
+            message=f"Held-Karp TSP only practical for n <= 16, got {n}",
+        )
+
+    big_n = 1 << n
+    dp = [math.inf for _ in range(big_n * n)]
+    parent = [-1 for _ in range(big_n * n)]
+    dp[1 * n + 0] = 0.0
+    for mask in range(1, big_n):
+        if (mask & 1) == 0:
+            continue
+        for i in range(n):
+            if (mask & (1 << i)) == 0:
+                continue
+            cur = dp[mask * n + i]
+            if not math.isfinite(cur):
+                continue
+            for j in range(n):
+                if mask & (1 << j):
+                    continue
+                new_mask = mask | (1 << j)
+                candidate = cur + matrix[i][j]
+                idx = new_mask * n + j
+                if candidate < dp[idx] - 1e-12:
+                    dp[idx] = candidate
+                    parent[idx] = i
+
+    full = big_n - 1
+    best_end = -1
+    best_objective = math.inf
+    best_tour: list[int] = []
+    for end in range(1, n):
+        candidate = dp[full * n + end] + matrix[end][0]
+        if not math.isfinite(candidate):
+            continue
+        candidate_tour = reconstruct(parent, full, end, n)
+        if candidate < best_objective - 1e-12 or (
+            abs(candidate - best_objective) <= 1e-12 and candidate_tour < best_tour
+        ):
+            best_end = end
+            best_objective = candidate
+            best_tour = candidate_tour
+    if best_end < 0:
+        return result("infeasible", "python:held-karp-tsp", message="no Hamiltonian cycle")
+    return result(
+        "optimal",
+        "python:held-karp-tsp",
+        tour=best_tour,
+        objective=best_objective,
+        message="exact Held-Karp dynamic program",
+    )
+
+
+def ortools_tsp(problem: dict) -> dict:
+    try:
+        from ortools.constraint_solver import pywrapcp, routing_enums_pb2  # type: ignore
+    except Exception as exc:
+        return result("unavailable", "ortools:routing-tsp", message=str(exc))
+
+    matrix = problem["distanceMatrix"]
+    n = len(matrix)
+    manager = pywrapcp.RoutingIndexManager(n, 1, 0)
+    routing = pywrapcp.RoutingModel(manager)
+
+    def distance_callback(from_index: int, to_index: int) -> int:
+        from_node = manager.IndexToNode(from_index)
+        to_node = manager.IndexToNode(to_index)
+        return int(round(matrix[from_node][to_node] * DISTANCE_SCALE))
+
+    transit = routing.RegisterTransitCallback(distance_callback)
+    routing.SetArcCostEvaluatorOfAllVehicles(transit)
+
+    params = pywrapcp.DefaultRoutingSearchParameters()
+    params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
+    params.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
+    params.time_limit.FromSeconds(5)
+
+    solution = routing.SolveWithParameters(params)
+    if solution is None:
+        return result("infeasible", "ortools:routing-tsp", message="OR-Tools Routing found no tour")
+
+    tour: list[int] = []
+    index = routing.Start(0)
+    while not routing.IsEnd(index):
+        tour.append(manager.IndexToNode(index))
+        index = solution.Value(routing.NextVar(index))
+    return result(
+        "optimal",
+        "ortools:routing-tsp",
+        tour=tour,
+        objective=tour_length(matrix, tour),
+        message="OR-Tools Routing one-vehicle TSP",
+    )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--solver", choices=["auto", "ortools", "fallback"], default="auto")
+    args = parser.parse_args()
+
+    try:
+        problem = normalize(json.load(sys.stdin))
+        exact = exact_tsp(problem)
+        if args.solver == "fallback":
+            print(json.dumps(exact))
+            return 0 if exact["status"] in ("optimal", "infeasible", "unsupported") else 1
+
+        routing = ortools_tsp(problem)
+        if args.solver == "ortools":
+            output = dict(routing)
+            output["referenceStatus"] = exact.get("status")
+            output["referenceObjective"] = exact.get("objective")
+            print(json.dumps(output))
+            return 0 if output["status"] in ("optimal", "infeasible", "unavailable") else 1
+
+        output = dict(exact)
+        output["solver"] = (
+            "ortools:routing-tsp+python:held-karp"
+            if routing.get("status") != "unavailable"
+            else "python:held-karp-tsp"
+        )
+        output["ortoolsStatus"] = routing.get("status")
+        output["ortoolsTour"] = routing.get("tour", [])
+        output["ortoolsObjective"] = routing.get("objective")
+        output["ortoolsMessage"] = routing.get("message", "")
+        print(json.dumps(output))
+        return 0 if output["status"] in ("optimal", "infeasible", "unsupported") else 1
+    except Exception as exc:
+        print(
+            json.dumps(
+                {
+                    "status": "error",
+                    "solver": "tsp-reference",
+                    "tour": [],
+                    "objective": None,
+                    "message": str(exc),
+                }
+            )
+        )
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

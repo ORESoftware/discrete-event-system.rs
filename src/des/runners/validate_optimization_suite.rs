@@ -13,13 +13,16 @@ use std::process::{Command, Stdio};
 use serde::Deserialize;
 
 use crate::des::general::advanced_optimization_models::{
-    pareto_front_is_nondominated, run_pareto_portfolio, run_particle_swarm,
-    ContinuousObjectiveName, ParetoPortfolioParams, ParticleSwarmParams, PortfolioAsset,
+    pareto_front_is_nondominated, run_ant_colony_tsp, run_pareto_portfolio, run_particle_swarm,
+    AntColonyTSPParams, ContinuousObjectiveName, ParetoPortfolioParams, ParticleSwarmParams,
+    Point2, PortfolioAsset,
 };
 use crate::des::general::classical_optimization_models::{
+    run_auction_assignment, run_flow_shop_exact, run_flow_shop_neh, run_hungarian_assignment,
     run_job_shop_dispatch, run_job_shop_exact, run_vrp_exact, run_vrp_nearest_neighbor,
-    run_vrp_savings, DispatchRule, JobOperation, JobShopDispatchParams, JobShopJob, Point,
-    ScheduledOperation, VRPCustomer, VRPSavingsParams,
+    run_vrp_savings, AssignmentParams, AuctionAssignmentParams, DispatchRule, FlowShopJob,
+    FlowShopNEHParams, JobOperation, JobShopDispatchParams, JobShopJob, Point, ScheduledOperation,
+    VRPCustomer, VRPSavingsParams,
 };
 use crate::des::general::cp_sat::{
     enumerate_cp_solutions, find_cp_assumption_unsat_core, solve_cp_model, BoolLiteral,
@@ -30,6 +33,10 @@ use crate::des::general::cp_sat::{
     CpVariableInterval, CpVariableRectangle, CpVariableSelectionStrategy, LinearSense, LinearTerm,
     ObjectiveSense,
 };
+use crate::des::general::external_assignment_reference::{
+    solve_assignment_with_external_reference, ExternalAssignmentReferenceOptions,
+    ExternalAssignmentReferenceStatus,
+};
 use crate::des::general::external_linear_cli::{
     external_linear_cli_command, probe_external_linear_cli_solver, solve_ipmip_with_external_cli,
     solve_lp_with_external_cli, solve_multi_objective_ipmip_with_external_cli,
@@ -37,6 +44,14 @@ use crate::des::general::external_linear_cli::{
     ExternalLinearCliMipSwitch, ExternalLinearCliModelFormat, ExternalLinearCliNodeSelection,
     ExternalLinearCliOptions, ExternalLinearCliPresolve, ExternalLinearCliProbeStatus,
     ExternalLinearCliSolver, ExternalLinearCliStatus,
+};
+use crate::des::general::external_max_flow_reference::{
+    solve_max_flow_with_external_reference, ExternalMaxFlowReferenceOptions,
+    ExternalMaxFlowReferenceStatus,
+};
+use crate::des::general::external_min_cost_flow_reference::{
+    solve_min_cost_flow_with_external_reference, ExternalMinCostFlowReferenceOptions,
+    ExternalMinCostFlowReferenceStatus,
 };
 use crate::des::general::external_nonlinear_reference::{
     solve_exponential_fit_with_external_reference, solve_global_benchmark_with_external_reference,
@@ -57,8 +72,14 @@ use crate::des::general::external_quadratic_reference::{
     ExternalQuadraticReferenceOptions, ExternalQuadraticReferenceStatus,
 };
 use crate::des::general::external_scheduling_reference::{
-    solve_job_shop_with_external_reference, ExternalSchedulingReferenceOptions,
-    ExternalSchedulingReferenceStatus,
+    solve_flow_shop_with_external_reference, solve_job_shop_with_external_reference,
+    ExternalSchedulingReferenceOptions, ExternalSchedulingReferenceStatus,
+};
+use crate::des::general::external_tsp_reference::{
+    solve_tsp_with_external_reference, ExternalTspReferenceOptions, ExternalTspReferenceStatus,
+};
+use crate::des::general::genetic_tsp::{
+    build_pentagon_tsp, held_karp_exact, is_permutation, tour_length,
 };
 use crate::des::general::external_validation_tools::{
     dimacs_cnf_to_string, external_benchmark_manifest_to_json,
@@ -116,6 +137,9 @@ use crate::des::general::math_program::{
     export_math_program_cplex_lp, export_math_program_mps, ExternalMathProgramOptions, MathProgram,
     MathProgramConflictOptions, MathProgramFeasRelaxOptions, MathProgramSolutionPoolOptions,
     MathProgramSolveOptions, MathProgramStatus, ObjectiveSense as MathObjectiveSense, RowSense,
+};
+use crate::des::general::max_flow::{
+    build_textbook_max_flow_problem, solve_max_flow, MaxFlowEdgeFlow, MaxFlowStatus,
 };
 use crate::des::general::min_cost_flow::{
     min_cost_flow_to_lp, solve_min_cost_flow, MinCostFlowArc, MinCostFlowProblem, MinCostFlowStatus,
@@ -556,6 +580,31 @@ impl Driver {
         ]
     }
 
+    fn sample_flow_shop_jobs(&self) -> Vec<FlowShopJob> {
+        vec![
+            FlowShopJob {
+                id: "F1".to_string(),
+                processing_times: vec![2.0, 3.0, 2.0],
+                due: None,
+            },
+            FlowShopJob {
+                id: "F2".to_string(),
+                processing_times: vec![4.0, 1.0, 3.0],
+                due: None,
+            },
+            FlowShopJob {
+                id: "F3".to_string(),
+                processing_times: vec![3.0, 2.0, 4.0],
+                due: None,
+            },
+            FlowShopJob {
+                id: "F4".to_string(),
+                processing_times: vec![2.0, 5.0, 1.0],
+                due: None,
+            },
+        ]
+    }
+
     fn job_shop_schedule_feasible(
         &self,
         jobs: &[JobShopJob],
@@ -621,6 +670,64 @@ impl Driver {
         true
     }
 
+    fn flow_shop_schedule_feasible(
+        &self,
+        jobs: &[FlowShopJob],
+        schedule: &[ScheduledOperation],
+        sequence: &[String],
+    ) -> bool {
+        let Some(first) = jobs.first() else {
+            return schedule.is_empty() && sequence.is_empty();
+        };
+        let machine_count = first.processing_times.len();
+        if machine_count == 0
+            || jobs
+                .iter()
+                .any(|job| job.processing_times.len() != machine_count)
+            || sequence.len() != jobs.len()
+            || schedule.len() != jobs.len() * machine_count
+        {
+            return false;
+        }
+
+        let mut seen_jobs = HashSet::new();
+        for job_id in sequence {
+            if !seen_jobs.insert(job_id.clone())
+                || !jobs.iter().any(|job| job.id.as_str() == job_id.as_str())
+            {
+                return false;
+            }
+        }
+
+        let mut machine_ready = vec![0.0_f64; machine_count];
+        for (position, job_id) in sequence.iter().enumerate() {
+            let Some(job) = jobs.iter().find(|job| job.id.as_str() == job_id.as_str()) else {
+                return false;
+            };
+            let mut job_ready = 0.0_f64;
+            for machine_index in 0..machine_count {
+                let op = &schedule[position * machine_count + machine_index];
+                let duration = job.processing_times[machine_index];
+                let expected_machine = format!("M{}", machine_index + 1);
+                let earliest_start = machine_ready[machine_index].max(job_ready);
+                if op.job_id.as_str() != job_id.as_str()
+                    || op.op_index != machine_index
+                    || op.machine != expected_machine
+                    || op.start < -1e-9
+                    || op.finish + 1e-9 < op.start
+                    || op.start + 1e-9 < earliest_start
+                    || ((op.finish - op.start) - duration).abs()
+                        > 1e-8 * 1.0_f64.max(duration.abs())
+                {
+                    return false;
+                }
+                machine_ready[machine_index] = op.finish;
+                job_ready = op.finish;
+            }
+        }
+        true
+    }
+
     fn check_cp_reference_optimal(
         &mut self,
         label: &str,
@@ -664,6 +771,116 @@ impl Driver {
                 internal.assignment, reference.assignment, expected_assignment
             ),
         );
+    }
+
+    fn validate_assignment(&mut self) {
+        println!("\n-- Assignment: Hungarian/auction vs OR-Tools assignment bridge --");
+        let cost = vec![
+            vec![8.0, 2.0, 5.0, 9.0],
+            vec![6.0, 4.0, 7.0, 3.0],
+            vec![5.0, 8.0, 1.0, 6.0],
+            vec![7.0, 3.0, 4.0, 2.0],
+        ];
+        let expected_assignment = vec![1, 0, 2, 3];
+        let hungarian = run_hungarian_assignment(AssignmentParams {
+            cost: Some(cost.clone()),
+        });
+        let auction = run_auction_assignment(AuctionAssignmentParams {
+            cost: Some(cost.clone()),
+            epsilon: Some(1e-9),
+            max_iter: Some(2_000),
+        });
+        self.check(
+            "Assignment Hungarian optimum",
+            hungarian.assignment == expected_assignment
+                && (hungarian.objective - 11.0).abs() < 1e-9,
+            format!(
+                "assignment={:?} objective={:.10}",
+                hungarian.assignment, hungarian.objective
+            ),
+        );
+        self.check(
+            "Assignment auction matches Hungarian",
+            auction.assignment == hungarian.assignment
+                && (auction.objective - hungarian.objective).abs() <= 1e-8,
+            format!(
+                "hungarian={:?}/{:.10} auction={:?}/{:.10}",
+                hungarian.assignment, hungarian.objective, auction.assignment, auction.objective
+            ),
+        );
+
+        let reference = solve_assignment_with_external_reference(
+            &cost,
+            &ExternalAssignmentReferenceOptions::default(),
+        );
+        self.check(
+            "Assignment external-reference bridge status optimal",
+            reference.status == ExternalAssignmentReferenceStatus::Optimal,
+            format!(
+                "status={} solver={} message={}",
+                reference.status.as_str(),
+                reference.solver,
+                reference.message
+            ),
+        );
+        self.close(
+            "Assignment external-reference objective",
+            hungarian.objective,
+            reference.objective.unwrap_or(f64::NAN),
+            1e-10,
+        );
+        self.check(
+            "Assignment external-reference assignment",
+            reference.assignment == hungarian.assignment,
+            format!(
+                "native={:?} reference={:?}",
+                hungarian.assignment, reference.assignment
+            ),
+        );
+        match (reference.ortools_status.as_deref(), reference.ortools_objective) {
+            (Some("optimal"), Some(objective)) => {
+                self.close(
+                    "Assignment OR-Tools SimpleLinearSumAssignment objective",
+                    hungarian.objective,
+                    objective,
+                    1e-10,
+                );
+                self.check(
+                    "Assignment OR-Tools SimpleLinearSumAssignment assignment",
+                    reference.ortools_assignment == hungarian.assignment,
+                    format!(
+                        "native={:?} ortools={:?}",
+                        hungarian.assignment, reference.ortools_assignment
+                    ),
+                );
+            }
+            _ => println!(
+                "  SKIP  Assignment OR-Tools SimpleLinearSumAssignment objective: status={:?} message={}",
+                reference.ortools_status, reference.message
+            ),
+        }
+        match (reference.scipy_status.as_deref(), reference.scipy_objective) {
+            (Some("optimal"), Some(objective)) => {
+                self.close(
+                    "Assignment SciPy linear_sum_assignment objective",
+                    hungarian.objective,
+                    objective,
+                    1e-10,
+                );
+                self.check(
+                    "Assignment SciPy linear_sum_assignment assignment",
+                    reference.scipy_assignment == hungarian.assignment,
+                    format!(
+                        "native={:?} scipy={:?}",
+                        hungarian.assignment, reference.scipy_assignment
+                    ),
+                );
+            }
+            _ => println!(
+                "  SKIP  Assignment SciPy linear_sum_assignment objective: status={:?} message={}",
+                reference.scipy_status, reference.message
+            ),
+        }
     }
 
     fn validate_lp(&mut self) {
@@ -10925,8 +11142,153 @@ impl Driver {
         }
     }
 
+    fn max_flow_node_balance(num_nodes: usize, edge_flows: &[MaxFlowEdgeFlow]) -> Vec<f64> {
+        let mut balance = vec![0.0; num_nodes];
+        for edge in edge_flows {
+            balance[edge.from] -= edge.flow;
+            balance[edge.to] += edge.flow;
+        }
+        balance
+    }
+
+    fn max_flow_feasible(
+        num_nodes: usize,
+        source: usize,
+        sink: usize,
+        edge_flows: &[MaxFlowEdgeFlow],
+        value: f64,
+    ) -> bool {
+        let balance = Self::max_flow_node_balance(num_nodes, edge_flows);
+        edge_flows
+            .iter()
+            .all(|edge| edge.flow >= -1e-8 && edge.flow <= edge.capacity + 1e-8)
+            && balance
+                .iter()
+                .enumerate()
+                .all(|(node, value)| node == source || node == sink || value.abs() <= 1e-8)
+            && (balance[source] + value).abs() <= 1e-8
+            && (balance[sink] - value).abs() <= 1e-8
+    }
+
+    fn validate_max_flow(&mut self) {
+        println!("\n-- Max flow: native DES Edmonds-Karp vs OR-Tools graph bridge --");
+        let p = build_textbook_max_flow_problem();
+        let flow = solve_max_flow(p.clone());
+        self.check(
+            "Max-flow native status/value",
+            flow.status == MaxFlowStatus::Optimal && (flow.max_flow - 23.0).abs() <= 1e-9,
+            format!(
+                "status={:?} value={:.10} iterations={}",
+                flow.status, flow.max_flow, flow.iterations
+            ),
+        );
+        self.close(
+            "Max-flow native min-cut capacity",
+            flow.max_flow,
+            flow.min_cut.capacity,
+            1e-9,
+        );
+        self.check(
+            "Max-flow native feasibility",
+            Self::max_flow_feasible(
+                flow.num_nodes,
+                flow.source,
+                flow.sink,
+                &flow.edge_flows,
+                flow.max_flow,
+            ),
+            format!(
+                "balance={:?}",
+                Self::max_flow_node_balance(flow.num_nodes, &flow.edge_flows)
+            ),
+        );
+
+        let reference =
+            solve_max_flow_with_external_reference(&p, &ExternalMaxFlowReferenceOptions::default());
+        self.check(
+            "Max-flow external-reference bridge status optimal",
+            reference.status == ExternalMaxFlowReferenceStatus::Optimal,
+            format!(
+                "status={} solver={} message={} iterations={:?}",
+                reference.status.as_str(),
+                reference.solver,
+                reference.message,
+                reference.iterations
+            ),
+        );
+        self.close(
+            "Max-flow external-reference value",
+            flow.max_flow,
+            reference.max_flow.unwrap_or(f64::NAN),
+            1e-9,
+        );
+        self.max_abs_close(
+            "Max-flow external-reference edge flows",
+            &flow
+                .edge_flows
+                .iter()
+                .map(|edge| edge.flow)
+                .collect::<Vec<_>>(),
+            &reference
+                .edge_flows
+                .iter()
+                .map(|edge| edge.flow)
+                .collect::<Vec<_>>(),
+            1e-9,
+        );
+        self.close(
+            "Max-flow external-reference min-cut capacity",
+            flow.max_flow,
+            reference.min_cut.capacity,
+            1e-9,
+        );
+        self.max_abs_close(
+            "Max-flow external-reference node balance",
+            &Self::max_flow_node_balance(flow.num_nodes, &flow.edge_flows),
+            &reference.node_balance,
+            1e-9,
+        );
+        match (
+            reference.ortools_status.as_deref(),
+            reference.ortools_max_flow,
+        ) {
+            (Some("optimal"), Some(value)) => {
+                self.close(
+                    "Max-flow OR-Tools SimpleMaxFlow value",
+                    flow.max_flow,
+                    value,
+                    1e-9,
+                );
+                self.close(
+                    "Max-flow OR-Tools SimpleMaxFlow min-cut capacity",
+                    flow.max_flow,
+                    reference.ortools_min_cut.capacity,
+                    1e-9,
+                );
+                self.check(
+                    "Max-flow OR-Tools SimpleMaxFlow feasibility",
+                    Self::max_flow_feasible(
+                        flow.num_nodes,
+                        flow.source,
+                        flow.sink,
+                        &reference.ortools_edge_flows,
+                        value,
+                    ),
+                    format!(
+                        "flows={:?} balance={:?}",
+                        reference.ortools_edge_flows, reference.ortools_node_balance
+                    ),
+                );
+            }
+            _ => println!(
+                "  SKIP  Max-flow OR-Tools SimpleMaxFlow value: status={:?} message={}",
+                reference.ortools_status, reference.message
+            ),
+        }
+    }
+
     fn validate_min_cost_flow(&mut self) {
-        println!("\n-- Min-cost flow: native network solver vs external LP bridge --");
+        println!("\n-- Min-cost flow: native network solver vs LP/OR-Tools graph bridges --");
         let p = MinCostFlowProblem {
             num_nodes: 4,
             supplies: vec![5.0, 7.0, -6.0, -6.0],
@@ -10942,7 +11304,7 @@ impl Driver {
                 MinCostFlowArc {
                     from: 0,
                     to: 3,
-                    lower_bound: 0.0,
+                    lower_bound: 2.0,
                     capacity: 5.0,
                     cost: 4.0,
                     name: Some("s0_d1".to_string()),
@@ -10985,6 +11347,215 @@ impl Driver {
             external.objective,
             1e-8,
         );
+        self.max_abs_close(
+            "Min-cost-flow node balance",
+            &flow.node_balance,
+            &p.supplies,
+            1e-8,
+        );
+
+        let reference = solve_min_cost_flow_with_external_reference(
+            &p,
+            &ExternalMinCostFlowReferenceOptions::default(),
+        );
+        self.check(
+            "Min-cost-flow external-reference bridge status optimal",
+            reference.status == ExternalMinCostFlowReferenceStatus::Optimal,
+            format!(
+                "status={} solver={} message={} iterations={:?}",
+                reference.status.as_str(),
+                reference.solver,
+                reference.message,
+                reference.iterations
+            ),
+        );
+        self.close(
+            "Min-cost-flow external-reference objective",
+            flow.total_cost,
+            reference.objective.unwrap_or(f64::NAN),
+            1e-8,
+        );
+        self.max_abs_close(
+            "Min-cost-flow external-reference flows",
+            &flow
+                .arc_flows
+                .iter()
+                .map(|arc| arc.flow)
+                .collect::<Vec<_>>(),
+            &reference
+                .flows
+                .iter()
+                .map(|arc| arc.flow)
+                .collect::<Vec<_>>(),
+            1e-8,
+        );
+        self.max_abs_close(
+            "Min-cost-flow external-reference node balance",
+            &p.supplies,
+            &reference.node_balance,
+            1e-8,
+        );
+        match (
+            reference.ortools_status.as_deref(),
+            reference.ortools_objective,
+        ) {
+            (Some("optimal"), Some(objective)) => {
+                self.close(
+                    "Min-cost-flow OR-Tools SimpleMinCostFlow objective",
+                    flow.total_cost,
+                    objective,
+                    1e-8,
+                );
+                self.max_abs_close(
+                    "Min-cost-flow OR-Tools SimpleMinCostFlow flows",
+                    &flow
+                        .arc_flows
+                        .iter()
+                        .map(|arc| arc.flow)
+                        .collect::<Vec<_>>(),
+                    &reference
+                        .ortools_flows
+                        .iter()
+                        .map(|arc| arc.flow)
+                        .collect::<Vec<_>>(),
+                    1e-8,
+                );
+                self.max_abs_close(
+                    "Min-cost-flow OR-Tools SimpleMinCostFlow node balance",
+                    &p.supplies,
+                    &reference.ortools_node_balance,
+                    1e-8,
+                );
+            }
+            _ => println!(
+                "  SKIP  Min-cost-flow OR-Tools SimpleMinCostFlow objective: status={:?} message={}",
+                reference.ortools_status, reference.message
+            ),
+        }
+    }
+
+    fn validate_traveling_salesman(&mut self) {
+        println!("\n-- TSP: native Held-Karp/ACO vs OR-Tools Routing bridge --");
+        let instance = build_pentagon_tsp(6, 10.0);
+        let exact = held_karp_exact(&instance);
+        self.check(
+            "TSP Held-Karp native tour feasibility",
+            is_permutation(&exact.tour, instance.n),
+            format!("tour={:?} length={:.10}", exact.tour, exact.length),
+        );
+        self.close(
+            "TSP Held-Karp native length self-check",
+            exact.length,
+            tour_length(&instance, &exact.tour),
+            1e-9,
+        );
+
+        let aco_points = instance
+            .coordinates
+            .iter()
+            .map(|&(x, y)| Point2 { x, y })
+            .collect::<Vec<_>>();
+        let aco = run_ant_colony_tsp(AntColonyTSPParams {
+            points: Some(aco_points),
+            ants: Some(36),
+            iterations: Some(120),
+            seed: Some(17),
+            ..Default::default()
+        });
+        let mut aco_tour = aco.best_tour.clone();
+        let aco_closed = aco_tour.len() == instance.n + 1
+            && aco_tour
+                .first()
+                .zip(aco_tour.last())
+                .is_some_and(|(a, b)| a == b);
+        if aco_closed {
+            aco_tour.pop();
+        }
+        let aco_permutation = is_permutation(&aco_tour, instance.n);
+        self.check(
+            "TSP ant-colony closed-tour feasibility",
+            aco_closed && aco_permutation,
+            format!(
+                "raw_tour={:?} normalized_tour={:?} length={:.10}",
+                aco.best_tour, aco_tour, aco.best_length
+            ),
+        );
+        if aco_permutation {
+            self.close(
+                "TSP ant-colony reported length",
+                aco.best_length,
+                tour_length(&instance, &aco_tour),
+                1e-8,
+            );
+            self.check(
+                "TSP ant-colony bounded by Held-Karp",
+                aco.best_length + 1e-8 >= exact.length,
+                format!("exact={:.10} aco={:.10}", exact.length, aco.best_length),
+            );
+        } else {
+            self.check(
+                "TSP ant-colony reported length",
+                false,
+                format!("invalid normalized_tour={aco_tour:?}"),
+            );
+        }
+
+        let reference = solve_tsp_with_external_reference(
+            &instance.distance,
+            &ExternalTspReferenceOptions::default(),
+        );
+        self.check(
+            "TSP external-reference bridge status optimal",
+            reference.status == ExternalTspReferenceStatus::Optimal,
+            format!(
+                "status={} solver={} message={}",
+                reference.status.as_str(),
+                reference.solver,
+                reference.message
+            ),
+        );
+        self.close(
+            "TSP external-reference objective",
+            exact.length,
+            reference.objective.unwrap_or(f64::NAN),
+            1e-8,
+        );
+        let reference_permutation = is_permutation(&reference.tour, instance.n);
+        self.check(
+            "TSP external-reference tour feasibility",
+            reference_permutation,
+            format!("tour={:?}", reference.tour),
+        );
+        if reference_permutation {
+            self.close(
+                "TSP external-reference tour length",
+                exact.length,
+                tour_length(&instance, &reference.tour),
+                1e-8,
+            );
+        }
+        match (
+            reference.ortools_status.as_deref(),
+            reference.ortools_objective,
+        ) {
+            (Some("optimal"), Some(objective)) => {
+                self.close(
+                    "TSP OR-Tools Routing objective",
+                    exact.length,
+                    objective,
+                    1e-6,
+                );
+                self.check(
+                    "TSP OR-Tools Routing tour feasibility",
+                    is_permutation(&reference.ortools_tour, instance.n),
+                    format!("tour={:?}", reference.ortools_tour),
+                );
+            }
+            _ => println!(
+                "  SKIP  TSP OR-Tools Routing objective: status={:?} message={}",
+                reference.ortools_status, reference.message
+            ),
+        }
     }
 
     fn validate_vehicle_routing(&mut self) {
@@ -11200,6 +11771,111 @@ impl Driver {
             }
             _ => println!(
                 "  SKIP  Job-shop OR-Tools CP-SAT makespan: status={:?} message={}",
+                external.ortools_status, external.message
+            ),
+        }
+    }
+
+    fn validate_flow_shop_scheduling(&mut self) {
+        println!("\n-- Flow-shop scheduling: NEH/exact vs OR-Tools CP-SAT bridge --");
+        let jobs = self.sample_flow_shop_jobs();
+        let params = FlowShopNEHParams {
+            jobs: Some(jobs.clone()),
+        };
+        let exact = run_flow_shop_exact(params.clone());
+        let neh = run_flow_shop_neh(params);
+        self.check(
+            "Flow-shop exact native feasibility",
+            self.flow_shop_schedule_feasible(&jobs, &exact.schedule, &exact.sequence),
+            format!(
+                "sequence={:?} operations={} makespan={:.10} total_flow={:.10}",
+                exact.sequence,
+                exact.schedule.len(),
+                exact.makespan,
+                exact.total_flow_time
+            ),
+        );
+        self.check(
+            "Flow-shop NEH native feasibility",
+            self.flow_shop_schedule_feasible(&jobs, &neh.schedule, &neh.sequence),
+            format!(
+                "sequence={:?} operations={} makespan={:.10}",
+                neh.sequence,
+                neh.schedule.len(),
+                neh.makespan
+            ),
+        );
+        self.check(
+            "Flow-shop exact improves/bounds NEH",
+            exact.makespan <= neh.makespan + 1e-9,
+            format!("exact={:.10} neh={:.10}", exact.makespan, neh.makespan),
+        );
+
+        let external = solve_flow_shop_with_external_reference(
+            &jobs,
+            &ExternalSchedulingReferenceOptions::default(),
+        );
+        self.check(
+            "Flow-shop exact/reference bridge status optimal",
+            external.status == ExternalSchedulingReferenceStatus::Optimal,
+            format!(
+                "status={} solver={} message={}",
+                external.status.as_str(),
+                external.solver,
+                external.message
+            ),
+        );
+        self.close(
+            "Flow-shop exact/reference makespan",
+            exact.makespan,
+            external.makespan.unwrap_or(f64::NAN),
+            1e-8,
+        );
+        self.close(
+            "Flow-shop exact/reference total flow",
+            exact.total_flow_time,
+            external.total_flow_time.unwrap_or(f64::NAN),
+            1e-8,
+        );
+        self.check(
+            "Flow-shop exact/reference feasibility",
+            self.flow_shop_schedule_feasible(&jobs, &external.schedule, &external.sequence),
+            format!(
+                "sequence={:?} external_ops={} external_makespan={:?}",
+                external.sequence,
+                external.schedule.len(),
+                external.makespan
+            ),
+        );
+
+        match (
+            external.ortools_status.as_deref(),
+            external.ortools_makespan,
+        ) {
+            (Some("optimal"), Some(makespan)) => {
+                self.close(
+                    "Flow-shop OR-Tools CP-SAT makespan",
+                    exact.makespan,
+                    makespan,
+                    1e-8,
+                );
+                self.check(
+                    "Flow-shop OR-Tools CP-SAT feasibility",
+                    self.flow_shop_schedule_feasible(
+                        &jobs,
+                        &external.ortools_schedule,
+                        &external.ortools_sequence,
+                    ),
+                    format!(
+                        "sequence={:?} ortools_ops={} ortools_total_flow={:?}",
+                        external.ortools_sequence,
+                        external.ortools_schedule.len(),
+                        external.ortools_total_flow_time
+                    ),
+                );
+            }
+            _ => println!(
+                "  SKIP  Flow-shop OR-Tools CP-SAT makespan: status={:?} message={}",
                 external.ortools_status, external.message
             ),
         }
@@ -15543,6 +16219,7 @@ impl Driver {
     }
 
     fn run_all(&mut self) {
+        self.validate_assignment();
         self.validate_lp();
         self.validate_ip_mip();
         self.validate_external_solver_clis();
@@ -15550,9 +16227,12 @@ impl Driver {
         self.validate_external_validation_tool_adapters();
         self.validate_nonlinear_and_metaheuristics();
         self.validate_math_program_facade();
+        self.validate_max_flow();
         self.validate_min_cost_flow();
+        self.validate_traveling_salesman();
         self.validate_vehicle_routing();
         self.validate_job_shop_scheduling();
+        self.validate_flow_shop_scheduling();
         self.validate_qp();
         self.validate_cp_sat();
     }

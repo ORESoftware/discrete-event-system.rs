@@ -460,6 +460,42 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         notes: "Rust bindings to NLopt nonlinear algorithms for local nonlinear model cross-checks",
     },
     ExternalValidationToolSpec {
+        id: "gurobi-rust",
+        display_name: "Gurobi Rust bindings",
+        env_key: "GUROBI_RUST",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::Rust,
+        artifact_kind: ExternalValidationArtifactKind::RustCrate,
+        command_aliases: &["ores-gurobi-rust-adapter", "gurobi-rust-adapter"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: MILP_FORMATS,
+        notes: "Rust binding adapter for Gurobi Optimizer using local, non-vendored solver libraries",
+    },
+    ExternalValidationToolSpec {
+        id: "cplex-rust",
+        display_name: "CPLEX Rust bindings",
+        env_key: "CPLEX_RUST",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::Rust,
+        artifact_kind: ExternalValidationArtifactKind::RustCrate,
+        command_aliases: &["ores-cplex-rust-adapter", "cplex-rust-adapter"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: MILP_FORMATS,
+        notes: "Rust binding adapter for IBM ILOG CPLEX using local, non-vendored solver libraries",
+    },
+    ExternalValidationToolSpec {
+        id: "ipopt-rust",
+        display_name: "Ipopt Rust bindings",
+        env_key: "IPOPT_RUST",
+        family: ExternalValidationFamily::NonlinearGlobalSolver,
+        runtime: ExternalValidationRuntime::Rust,
+        artifact_kind: ExternalValidationArtifactKind::RustCrate,
+        command_aliases: &["ores-ipopt-rust-adapter", "ipopt-rust-adapter"],
+        capabilities: NONLINEAR_CAPS,
+        input_formats: NLP_FORMATS,
+        notes: "Rust binding adapter for Ipopt nonlinear optimization using local native libraries",
+    },
+    ExternalValidationToolSpec {
         id: "highs-rust",
         display_name: "HiGHS Rust bindings",
         env_key: "HIGHS_RUST",
@@ -684,6 +720,30 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         notes: "Official Gurobi Python API adapter for model, attribute, parameter, and solution validation",
     },
     ExternalValidationToolSpec {
+        id: "cplex-python",
+        display_name: "IBM ILOG CPLEX Python API",
+        env_key: "CPLEX_PYTHON",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
+        command_aliases: &["cplex-python-adapter"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: MILP_FORMATS,
+        notes: "Official CPLEX Python API adapter for model, parameter, and solution validation",
+    },
+    ExternalValidationToolSpec {
+        id: "xpress-python",
+        display_name: "FICO Xpress Python API",
+        env_key: "XPRESS_PYTHON",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
+        command_aliases: &["xpress-python-adapter"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: MILP_FORMATS,
+        notes: "Official FICO Xpress Python API adapter for model, parameter, and solution validation",
+    },
+    ExternalValidationToolSpec {
         id: "docplex",
         display_name: "DOcplex",
         env_key: "DOCPLEX",
@@ -822,7 +882,7 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         family: ExternalValidationFamily::ConstraintModeling,
         runtime: ExternalValidationRuntime::NativeCli,
         artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
-        command_aliases: &["qsopt_ex", "qsopt-ex", "qsopt"],
+        command_aliases: &["qsopt_ex", "qsopt-ex", "qsopt", "esolver"],
         capabilities: SOLVE_AND_VALIDATE_CAPS,
         input_formats: &["lp", "mps", "json"],
         notes: "QSopt_ex exact rational LP solver adapter hook for independently validating LP optima",
@@ -5238,6 +5298,21 @@ pub fn external_validation_artifact_env_names(tool: &ExternalValidationToolSpec)
         "rust-linprog" => names.push("RUST_LINPROG_CRATE".to_string()),
         "argmin" => names.push("ARGMIN_CRATE".to_string()),
         "nlopt-rs" => names.push("NLOPT_DIR".to_string()),
+        "gurobi-rust" => {
+            names.push("GUROBI_RUST_CARGO_MANIFEST".to_string());
+            names.push("GUROBI_HOME".to_string());
+            names.push("GRB_LICENSE_FILE".to_string());
+        }
+        "cplex-rust" => {
+            names.push("CPLEX_RUST_CARGO_MANIFEST".to_string());
+            names.push("CPLEX_STUDIO_DIR".to_string());
+            names.push("CPLEX_HOME".to_string());
+        }
+        "ipopt-rust" => {
+            names.push("IPOPT_RUST_CARGO_MANIFEST".to_string());
+            names.push("IPOPT_DIR".to_string());
+            names.push("IPOPT_HOME".to_string());
+        }
         "highs-rust" => names.push("HIGHS_DIR".to_string()),
         "scip-rust" => names.push("SCIPOPTDIR".to_string()),
         "cbc-rust" => names.push("CBC_DIR".to_string()),
@@ -5253,6 +5328,14 @@ pub fn external_validation_artifact_env_names(tool: &ExternalValidationToolSpec)
         "pyscipopt" => names.push("PYSCIPOPT_PYTHON".to_string()),
         "python-mip" => names.push("PYTHON_MIP_PYTHON".to_string()),
         "gurobipy" => names.push("GUROBIPY_PYTHON".to_string()),
+        "cplex-python" => {
+            names.push("CPLEX_PYTHON".to_string());
+            names.push("CPLEX_STUDIO_DIR".to_string());
+        }
+        "xpress-python" => {
+            names.push("XPRESS_PYTHON".to_string());
+            names.push("XPRESSDIR".to_string());
+        }
         "docplex" => names.push("DOCPLEX_PYTHON".to_string()),
         "ortools-python" | "ortools-glop" | "ortools-pdlp" => {
             names.push("ORTOOLS_PYTHON".to_string())
@@ -5354,6 +5437,9 @@ pub fn external_validation_command_dir_env_names(tool: &ExternalValidationToolSp
         "moea-framework" => &["MOEA_FRAMEWORK_HOME", "MOEA_HOME"],
         "ecj" => &["ECJ_HOME", "ECJ_DIR"],
         "nlopt-rs" => &["NLOPT_DIR", "NLOPT_HOME"],
+        "gurobi-rust" => &["GUROBI_HOME"],
+        "cplex-rust" => &["CPLEX_STUDIO_DIR", "CPLEX_HOME"],
+        "ipopt-rust" => &["IPOPT_DIR", "IPOPT_HOME"],
         "highs-rust" => &["HIGHS_DIR", "HIGHS_HOME"],
         "scip-rust" => &["SCIPOPTDIR", "SCIP_DIR", "SCIP_HOME"],
         "cbc-rust" => &["CBC_DIR", "CBC_HOME", "COINOR_DIR", "COINOR_HOME"],
@@ -5369,6 +5455,8 @@ pub fn external_validation_command_dir_env_names(tool: &ExternalValidationToolSp
         "pyscipopt" => &["PYSCIPOPT_HOME", "PYSCIPOPT_DIR", "SCIPOPTDIR", "SCIP_DIR"],
         "python-mip" => &["PYTHON_MIP_HOME", "MIP_HOME", "MIP_DIR"],
         "gurobipy" => &["GUROBI_HOME"],
+        "cplex-python" => &["CPLEX_STUDIO_DIR", "CPLEX_HOME"],
+        "xpress-python" => &["XPRESSDIR", "XPRESS_DIR", "XPRESS_HOME"],
         "docplex" => &["DOCPLEX_HOME", "CPLEX_STUDIO_DIR", "CPLEX_HOME"],
         "ortools-python" | "ortools-glop" | "ortools-pdlp" => &["ORTOOLS_HOME", "ORTOOLS_DIR"],
         "scipy-optimize" => &["SCIPY_HOME", "SCIPY_DIR"],
@@ -5949,7 +6037,7 @@ mod tests {
     #[test]
     fn registry_covers_recommended_validation_layers() {
         let tools = external_validation_tool_specs();
-        assert_eq!(tools.len(), 259);
+        assert_eq!(tools.len(), 264);
         assert!(tools
             .iter()
             .any(|tool| tool.id == "minizinc" && tool.input_formats.contains(&"mzn")));
@@ -6009,6 +6097,26 @@ mod tests {
         assert!(tools
             .iter()
             .any(|tool| { tool.id == "nlopt-rs" && tool.input_formats.contains(&"nl") }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "gurobi-rust"
+                && tool.runtime == ExternalValidationRuntime::Rust
+                && tool.artifact_kind == ExternalValidationArtifactKind::RustCrate
+                && tool.command_aliases.contains(&"gurobi-rust-adapter")
+                && tool.input_formats.contains(&"mps")
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "cplex-rust"
+                && tool.runtime == ExternalValidationRuntime::Rust
+                && tool.artifact_kind == ExternalValidationArtifactKind::RustCrate
+                && tool.command_aliases.contains(&"cplex-rust-adapter")
+                && tool.input_formats.contains(&"lp")
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "ipopt-rust"
+                && tool.runtime == ExternalValidationRuntime::Rust
+                && tool.family == ExternalValidationFamily::NonlinearGlobalSolver
+                && tool.input_formats.contains(&"nl")
+        }));
         assert!(tools
             .iter()
             .any(|tool| { tool.id == "nlopt" && tool.input_formats.contains(&"json") }));
@@ -6047,6 +6155,16 @@ mod tests {
         assert!(tools.iter().any(|tool| {
             tool.id == "gurobipy"
                 && tool.artifact_kind == ExternalValidationArtifactKind::PythonPackage
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "cplex-python"
+                && tool.runtime == ExternalValidationRuntime::Python
+                && tool.input_formats.contains(&"mps")
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "xpress-python"
+                && tool.runtime == ExternalValidationRuntime::Python
+                && tool.input_formats.contains(&"lp")
         }));
         assert!(tools
             .iter()
@@ -6088,7 +6206,9 @@ mod tests {
             .iter()
             .any(|tool| { tool.id == "soplex-cli" && tool.command_aliases.contains(&"soplex") }));
         assert!(tools.iter().any(|tool| {
-            tool.id == "qsopt-ex-cli" && tool.command_aliases.contains(&"qsopt_ex")
+            tool.id == "qsopt-ex-cli"
+                && tool.command_aliases.contains(&"qsopt_ex")
+                && tool.command_aliases.contains(&"esolver")
         }));
         assert!(tools.iter().any(|tool| {
             tool.id == "lp-solve-cli" && tool.command_aliases.contains(&"lp_solve")
@@ -6395,6 +6515,25 @@ mod tests {
         assert!(
             external_validation_command_dir_env_names(nlopt_rs).contains(&"NLOPT_HOME".to_string())
         );
+        let gurobi_rust = find_external_validation_tool("gurobi_rust").unwrap();
+        assert_eq!(
+            external_validation_artifact_env_names(gurobi_rust)[0],
+            "ORES_GUROBI_RUST_CRATE"
+        );
+        assert!(external_validation_artifact_env_names(gurobi_rust)
+            .contains(&"GRB_LICENSE_FILE".to_string()));
+        assert!(external_validation_command_dir_env_names(gurobi_rust)
+            .contains(&"GUROBI_HOME".to_string()));
+        let cplex_rust = find_external_validation_tool("cplex_rust").unwrap();
+        assert!(external_validation_artifact_env_names(cplex_rust)
+            .contains(&"CPLEX_RUST_CARGO_MANIFEST".to_string()));
+        assert!(external_validation_command_dir_env_names(cplex_rust)
+            .contains(&"CPLEX_STUDIO_DIR".to_string()));
+        let ipopt_rust = find_external_validation_tool("ipopt_rust").unwrap();
+        assert!(external_validation_artifact_env_names(ipopt_rust)
+            .contains(&"IPOPT_RUST_CARGO_MANIFEST".to_string()));
+        assert!(external_validation_command_dir_env_names(ipopt_rust)
+            .contains(&"IPOPT_HOME".to_string()));
         let nlopt = find_external_validation_tool("nlopt").unwrap();
         assert_eq!(
             external_validation_artifact_env_names(nlopt)[0],
@@ -6447,6 +6586,18 @@ mod tests {
         let gurobipy = find_external_validation_tool("gurobipy").unwrap();
         assert!(external_validation_command_dir_env_names(gurobipy)
             .contains(&"GUROBI_HOME".to_string()));
+        let cplex_python = find_external_validation_tool("cplex_python").unwrap();
+        assert_eq!(cplex_python.id, "cplex-python");
+        assert!(external_validation_artifact_env_names(cplex_python)
+            .contains(&"CPLEX_STUDIO_DIR".to_string()));
+        assert!(external_validation_command_dir_env_names(cplex_python)
+            .contains(&"CPLEX_HOME".to_string()));
+        let xpress_python = find_external_validation_tool("xpress_python").unwrap();
+        assert_eq!(xpress_python.id, "xpress-python");
+        assert!(external_validation_artifact_env_names(xpress_python)
+            .contains(&"XPRESSDIR".to_string()));
+        assert!(external_validation_command_dir_env_names(xpress_python)
+            .contains(&"XPRESS_HOME".to_string()));
         let highs_cli = find_external_validation_tool("highs_cli").unwrap();
         assert_eq!(highs_cli.id, "highs-cli");
         assert!(

@@ -9,9 +9,10 @@ use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use des_engine::des::general::soccer::{
-    soccer_moment_records_from_jsonl, soccer_moment_records_to_learning_dataset, MatchConfig,
-    SoccerMatch, SoccerQEntry, SoccerQPolicy, SoccerQPolicyOptions, SoccerQTargetEntry,
-    SoccerSelfPlayEpisodeSummary, SoccerSelfPlayTrainingArtifact, SoccerTacticalLearningWeights,
+    soccer_moment_records_from_jsonl, soccer_moment_records_to_learning_dataset,
+    soccer_self_play_default_learned_params_path, MatchConfig, SoccerMatch, SoccerQEntry,
+    SoccerQPolicy, SoccerQPolicyOptions, SoccerQTargetEntry, SoccerSelfPlayEpisodeSummary,
+    SoccerSelfPlayLearnedParams, SoccerSelfPlayTrainingArtifact, SoccerTacticalLearningWeights,
     SoccerTeamPolicyArtifact, SoccerTeamQPolicies,
 };
 use serde::Serialize;
@@ -249,6 +250,7 @@ struct RunManifest {
     config: MatchConfig,
     options: SoccerQPolicyOptions,
     final_artifact_path: String,
+    learned_params_path: String,
     checkpoint_artifact_path: String,
     checkpoint_interval_games: usize,
     max_policy_entries_per_team: usize,
@@ -356,12 +358,16 @@ fn load_initial_policies(
     if let Ok(artifact) = serde_json::from_str::<SoccerSelfPlayTrainingArtifact>(&raw) {
         return policies_from_self_play_artifact(&artifact).map_err(|err| invalid_data(err).into());
     }
+    if let Ok(params) = serde_json::from_str::<SoccerSelfPlayLearnedParams>(&raw) {
+        return SoccerTeamQPolicies::from_learned_params(&params)
+            .map_err(|err| invalid_data(err).into());
+    }
     if let Ok(artifact) = serde_json::from_str::<SoccerTeamPolicyArtifact>(&raw) {
         return SoccerTeamQPolicies::from_artifact(&artifact)
             .map_err(|err| invalid_data(err).into());
     }
     Err(invalid_data(format!(
-        "resume artifact {path} is neither a self-play nor team-policy artifact"
+        "resume artifact {path} is neither a self-play, learned-params, nor team-policy artifact"
     ))
     .into())
 }
@@ -561,6 +567,7 @@ fn run_manifest(
     config: MatchConfig,
     options: SoccerQPolicyOptions,
     final_artifact_path: &Path,
+    learned_params_path: &Path,
     checkpoint_artifact_path: &Path,
     checkpoint_interval_games: usize,
     max_policy_entries_per_team: usize,
@@ -583,6 +590,7 @@ fn run_manifest(
         config,
         options,
         final_artifact_path: final_artifact_path.display().to_string(),
+        learned_params_path: learned_params_path.display().to_string(),
         checkpoint_artifact_path: checkpoint_artifact_path.display().to_string(),
         checkpoint_interval_games,
         max_policy_entries_per_team,
@@ -671,6 +679,11 @@ fn run() -> Result<(), Box<dyn Error>> {
         std::env::var("SOCCER_ARTIFACT_PATH")
             .unwrap_or_else(|_| default_artifact_path(games, minutes, shard_index, shard_count)),
     );
+    let default_learned_params_path =
+        soccer_self_play_default_learned_params_path(&final_artifact_path.display().to_string());
+    let learned_params_path = PathBuf::from(
+        std::env::var("SOCCER_LEARNED_PARAMS_PATH").unwrap_or(default_learned_params_path),
+    );
     let checkpoint_artifact_path = PathBuf::from(
         std::env::var("SOCCER_CHECKPOINT_ARTIFACT_PATH")
             .unwrap_or_else(|_| format!("{}.checkpoint.json", final_artifact_path.display())),
@@ -742,6 +755,15 @@ fn run() -> Result<(), Box<dyn Error>> {
         if moment_replay_path.is_some() { moment_replay_passes } else { 0 },
         moment_replay_reward_scale
     );
+    println!("artifact={}", final_artifact_path.display());
+    println!("learned_params={}", learned_params_path.display());
+    println!("manifest={}", manifest_path.display());
+    if checkpoint_interval_games == 0 {
+        println!("checkpoint_artifact=disabled");
+    } else {
+        println!("checkpoint_artifact={}", checkpoint_artifact_path.display());
+        println!("checkpoint_interval_games={}", checkpoint_interval_games);
+    }
     if let Some(path) = &resume_artifact {
         println!("resume_artifact={path}");
     }
@@ -904,6 +926,9 @@ fn run() -> Result<(), Box<dyn Error>> {
                 artifact_max_entries_per_policy,
             );
             write_json(&checkpoint_artifact_path, &checkpoint_export)?;
+            let checkpoint_params =
+                SoccerSelfPlayLearnedParams::from_training_artifact(&checkpoint_artifact);
+            write_json(&learned_params_path, &checkpoint_params)?;
             let checkpoint_manifest = run_manifest(
                 &run_id,
                 &run_dir,
@@ -912,6 +937,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 config.clone(),
                 options.clone(),
                 &final_artifact_path,
+                &learned_params_path,
                 &checkpoint_artifact_path,
                 checkpoint_interval_games,
                 max_policy_entries_per_team,
@@ -951,6 +977,8 @@ fn run() -> Result<(), Box<dyn Error>> {
     let final_export =
         compact_training_artifact_for_export(&artifact, artifact_max_entries_per_policy);
     write_json(&final_artifact_path, &final_export)?;
+    let learned_params = SoccerSelfPlayLearnedParams::from_training_artifact(&artifact);
+    write_json(&learned_params_path, &learned_params)?;
 
     let manifest = run_manifest(
         &run_id,
@@ -960,6 +988,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         config.clone(),
         options,
         &final_artifact_path,
+        &learned_params_path,
         &checkpoint_artifact_path,
         checkpoint_interval_games,
         max_policy_entries_per_team,
@@ -993,6 +1022,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         elapsed
     );
     println!("artifact={}", final_artifact_path.display());
+    println!("learned_params={}", learned_params_path.display());
     println!("manifest={}", manifest_path.display());
     println!(
         "aggregate goals_per_game={:.2} home_goals={} away_goals={} shots_per_game={:.2} on_target_rate={:.2} pass_completion={:.2} interceptions_per_game={:.2}",

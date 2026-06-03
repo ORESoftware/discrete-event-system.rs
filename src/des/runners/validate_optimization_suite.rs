@@ -39,11 +39,12 @@ use crate::des::general::cp_sat::{
 };
 use crate::des::general::external_assignment_reference::{
     solve_assignment_with_external_reference, ExternalAssignmentReferenceOptions,
-    ExternalAssignmentReferenceStatus,
+    ExternalAssignmentReferenceSolver, ExternalAssignmentReferenceStatus,
 };
 use crate::des::general::external_bin_packing_reference::{
     solve_bin_packing_with_external_reference, ExternalBinPackingReferenceBin,
-    ExternalBinPackingReferenceOptions, ExternalBinPackingReferenceStatus,
+    ExternalBinPackingReferenceOptions, ExternalBinPackingReferenceSolver,
+    ExternalBinPackingReferenceStatus,
 };
 use crate::des::general::external_cp_sat_reference::{
     external_cp_sat_reference_solver_specs, solve_cp_assignment_with_external_reference,
@@ -52,15 +53,15 @@ use crate::des::general::external_cp_sat_reference::{
 };
 use crate::des::general::external_facility_location_reference::{
     solve_facility_location_with_external_reference, ExternalFacilityLocationReferenceOptions,
-    ExternalFacilityLocationReferenceStatus,
+    ExternalFacilityLocationReferenceSolver, ExternalFacilityLocationReferenceStatus,
 };
 use crate::des::general::external_graph_coloring_reference::{
     solve_graph_coloring_with_external_reference, ExternalGraphColoringReferenceOptions,
-    ExternalGraphColoringReferenceStatus,
+    ExternalGraphColoringReferenceSolver, ExternalGraphColoringReferenceStatus,
 };
 use crate::des::general::external_knapsack_reference::{
     solve_knapsack_with_external_reference, ExternalKnapsackReferenceOptions,
-    ExternalKnapsackReferenceStatus,
+    ExternalKnapsackReferenceSolver, ExternalKnapsackReferenceStatus,
 };
 use crate::des::general::external_linear_cli::{
     external_linear_cli_command, external_linear_cli_solver_specs,
@@ -73,15 +74,16 @@ use crate::des::general::external_linear_cli::{
 };
 use crate::des::general::external_max_flow_reference::{
     solve_max_flow_with_external_reference, ExternalMaxFlowReferenceOptions,
-    ExternalMaxFlowReferenceStatus,
+    ExternalMaxFlowReferenceSolver, ExternalMaxFlowReferenceStatus,
 };
 use crate::des::general::external_min_cost_flow_reference::{
     solve_min_cost_flow_with_external_reference, ExternalMinCostFlowReferenceOptions,
-    ExternalMinCostFlowReferenceStatus,
+    ExternalMinCostFlowReferenceSolver, ExternalMinCostFlowReferenceStatus,
 };
 use crate::des::general::external_minimum_spanning_tree_reference::{
     solve_minimum_spanning_tree_with_external_reference,
-    ExternalMinimumSpanningTreeReferenceOptions, ExternalMinimumSpanningTreeReferenceStatus,
+    ExternalMinimumSpanningTreeReferenceOptions, ExternalMinimumSpanningTreeReferenceSolver,
+    ExternalMinimumSpanningTreeReferenceStatus,
 };
 use crate::des::general::external_nonlinear_reference::{
     solve_exponential_fit_with_external_reference, solve_global_benchmark_with_external_reference,
@@ -122,14 +124,15 @@ use crate::des::general::external_scheduling_reference::{
 };
 use crate::des::general::external_set_cover_reference::{
     solve_set_cover_with_external_reference, ExternalSetCoverReferenceOptions,
-    ExternalSetCoverReferenceStatus,
+    ExternalSetCoverReferenceSolver, ExternalSetCoverReferenceStatus,
 };
 use crate::des::general::external_stochastic_lp_reference::{
     solve_stochastic_lp_with_external_reference, ExternalStochasticLpReferenceOptions,
-    ExternalStochasticLpReferenceStatus,
+    ExternalStochasticLpReferenceSolver, ExternalStochasticLpReferenceStatus,
 };
 use crate::des::general::external_tsp_reference::{
-    solve_tsp_with_external_reference, ExternalTspReferenceOptions, ExternalTspReferenceStatus,
+    solve_tsp_with_external_reference, ExternalTspReferenceOptions, ExternalTspReferenceSolver,
+    ExternalTspReferenceStatus,
 };
 use crate::des::general::external_validation_tools::{
     dimacs_cnf_to_string, external_benchmark_manifest_to_json,
@@ -156,11 +159,12 @@ use crate::des::general::external_validation_tools::{
 };
 use crate::des::general::external_weighted_independent_set_reference::{
     solve_weighted_independent_set_with_external_reference,
-    ExternalWeightedIndependentSetReferenceOptions, ExternalWeightedIndependentSetReferenceStatus,
+    ExternalWeightedIndependentSetReferenceOptions, ExternalWeightedIndependentSetReferenceSolver,
+    ExternalWeightedIndependentSetReferenceStatus,
 };
 use crate::des::general::external_weighted_max_sat_reference::{
     solve_weighted_max_sat_with_external_reference, ExternalWeightedMaxSatReferenceOptions,
-    ExternalWeightedMaxSatReferenceStatus,
+    ExternalWeightedMaxSatReferenceSolver, ExternalWeightedMaxSatReferenceStatus,
 };
 use crate::des::general::facility_location::{
     build_sample_facility_location_problem, facility_location_solution_feasible,
@@ -1194,7 +1198,7 @@ impl Driver {
     }
 
     fn validate_assignment(&mut self) {
-        println!("\n-- Assignment: Hungarian/auction vs OR-Tools assignment bridge --");
+        println!("\n-- Assignment: Hungarian/auction vs Rust reference / OR-Tools/SciPy bridge --");
         let cost = vec![
             vec![8.0, 2.0, 5.0, 9.0],
             vec![6.0, 4.0, 7.0, 3.0],
@@ -1231,7 +1235,9 @@ impl Driver {
 
         let reference = solve_assignment_with_external_reference(
             &cost,
-            &ExternalAssignmentReferenceOptions::default(),
+            &ExternalAssignmentReferenceOptions {
+                solver: ExternalAssignmentReferenceSolver::RustDp,
+            },
         );
         self.check(
             "Assignment external-reference bridge status optimal",
@@ -1275,8 +1281,8 @@ impl Driver {
                 );
             }
             _ => println!(
-                "  SKIP  Assignment OR-Tools SimpleLinearSumAssignment objective: status={:?} message={}",
-                reference.ortools_status, reference.message
+                "  SKIP  Assignment OR-Tools SimpleLinearSumAssignment objective: no OR-Tools sidecar in solver={} message={}",
+                reference.solver, reference.message
             ),
         }
         match (reference.scipy_status.as_deref(), reference.scipy_objective) {
@@ -1297,14 +1303,14 @@ impl Driver {
                 );
             }
             _ => println!(
-                "  SKIP  Assignment SciPy linear_sum_assignment objective: status={:?} message={}",
-                reference.scipy_status, reference.message
+                "  SKIP  Assignment SciPy linear_sum_assignment objective: no SciPy sidecar in solver={} message={}",
+                reference.solver, reference.message
             ),
         }
     }
 
     fn validate_bin_packing(&mut self) {
-        println!("\n-- Bin packing: exact/FFD vs OR-Tools CP-SAT bridge --");
+        println!("\n-- Bin packing: exact/FFD vs Rust reference / OR-Tools CP-SAT bridge --");
         let problem = build_sample_bin_packing_problem();
         let exact = solve_bin_packing_exact(&problem);
         let ffd = solve_bin_packing_first_fit_decreasing(&problem);
@@ -1337,7 +1343,9 @@ impl Driver {
 
         let reference = solve_bin_packing_with_external_reference(
             &problem,
-            &ExternalBinPackingReferenceOptions::default(),
+            &ExternalBinPackingReferenceOptions {
+                solver: ExternalBinPackingReferenceSolver::RustExact,
+            },
         );
         self.check(
             "Bin-packing exact/reference bridge status optimal",
@@ -1387,14 +1395,14 @@ impl Driver {
                 );
             }
             _ => println!(
-                "  SKIP  Bin-packing OR-Tools CP-SAT objective: status={:?} message={}",
-                reference.ortools_status, reference.message
+                "  SKIP  Bin-packing OR-Tools CP-SAT objective: no OR-Tools sidecar in solver={} message={}",
+                reference.solver, reference.message
             ),
         }
     }
 
     fn validate_knapsack(&mut self) {
-        println!("\n-- Knapsack: exact/greedy vs OR-Tools CP-SAT bridge --");
+        println!("\n-- Knapsack: exact/greedy vs Rust reference / OR-Tools CP-SAT bridge --");
         let problem = build_sample_knapsack_problem();
         let exact = solve_knapsack_exact_branch_and_bound(&problem);
         let greedy = solve_knapsack_greedy_density(&problem);
@@ -1430,7 +1438,9 @@ impl Driver {
 
         let reference = solve_knapsack_with_external_reference(
             &problem,
-            &ExternalKnapsackReferenceOptions::default(),
+            &ExternalKnapsackReferenceOptions {
+                solver: ExternalKnapsackReferenceSolver::RustBranchAndBound,
+            },
         );
         self.check(
             "Knapsack exact/reference bridge status optimal",
@@ -1498,14 +1508,14 @@ impl Driver {
                 );
             }
             _ => println!(
-                "  SKIP  Knapsack OR-Tools CP-SAT objective: status={:?} message={}",
-                reference.ortools_status, reference.message
+                "  SKIP  Knapsack OR-Tools CP-SAT objective: no OR-Tools sidecar in solver={} message={}",
+                reference.solver, reference.message
             ),
         }
     }
 
     fn validate_set_cover(&mut self) {
-        println!("\n-- Set cover: exact/greedy vs OR-Tools CP-SAT bridge --");
+        println!("\n-- Set cover: exact/greedy vs Rust reference / OR-Tools CP-SAT bridge --");
         let problem = build_sample_set_cover_problem();
         let exact = solve_set_cover_exact(&problem);
         let greedy = solve_set_cover_greedy(&problem);
@@ -1538,7 +1548,9 @@ impl Driver {
 
         let reference = solve_set_cover_with_external_reference(
             &problem,
-            &ExternalSetCoverReferenceOptions::default(),
+            &ExternalSetCoverReferenceOptions {
+                solver: ExternalSetCoverReferenceSolver::RustExact,
+            },
         );
         self.check(
             "Set-cover exact/reference bridge status optimal",
@@ -1600,14 +1612,16 @@ impl Driver {
                 );
             }
             _ => println!(
-                "  SKIP  Set-cover OR-Tools CP-SAT objective: status={:?} message={}",
-                reference.ortools_status, reference.message
+                "  SKIP  Set-cover OR-Tools CP-SAT objective: no OR-Tools sidecar in solver={} message={}",
+                reference.solver, reference.message
             ),
         }
     }
 
     fn validate_facility_location(&mut self) {
-        println!("\n-- Facility location: exact/heuristic vs OR-Tools CP-SAT bridge --");
+        println!(
+            "\n-- Facility location: exact/heuristic vs Rust reference / OR-Tools CP-SAT bridge --"
+        );
         let problem = build_sample_facility_location_problem();
         let exact = solve_facility_location_exact(&problem);
         let greedy = solve_facility_location_greedy(&problem);
@@ -1641,7 +1655,9 @@ impl Driver {
 
         let reference = solve_facility_location_with_external_reference(
             &problem,
-            &ExternalFacilityLocationReferenceOptions::default(),
+            &ExternalFacilityLocationReferenceOptions {
+                solver: ExternalFacilityLocationReferenceSolver::RustExact,
+            },
         );
         self.check(
             "Facility-location exact/reference bridge status optimal",
@@ -1703,14 +1719,16 @@ impl Driver {
                 );
             }
             _ => println!(
-                "  SKIP  Facility-location OR-Tools CP-SAT objective: status={:?} message={}",
-                reference.ortools_status, reference.message
+                "  SKIP  Facility-location OR-Tools CP-SAT objective: no OR-Tools sidecar in solver={} message={}",
+                reference.solver, reference.message
             ),
         }
     }
 
     fn validate_graph_coloring(&mut self) {
-        println!("\n-- Graph coloring: DSATUR/greedy vs OR-Tools CP-SAT bridge --");
+        println!(
+            "\n-- Graph coloring: DSATUR/greedy vs Rust reference / OR-Tools CP-SAT bridge --"
+        );
         let problem = build_sample_graph_coloring_problem();
         let exact = solve_graph_coloring_exact(&problem);
         let greedy = solve_graph_coloring_greedy(&problem);
@@ -1741,7 +1759,9 @@ impl Driver {
 
         let reference = solve_graph_coloring_with_external_reference(
             &problem,
-            &ExternalGraphColoringReferenceOptions::default(),
+            &ExternalGraphColoringReferenceOptions {
+                solver: ExternalGraphColoringReferenceSolver::RustDsatur,
+            },
         );
         self.check(
             "Graph-coloring exact/reference bridge status optimal",
@@ -1802,14 +1822,16 @@ impl Driver {
                 );
             }
             _ => println!(
-                "  SKIP  Graph-coloring OR-Tools CP-SAT objective: status={:?} message={}",
-                reference.ortools_status, reference.message
+                "  SKIP  Graph-coloring OR-Tools CP-SAT objective: no OR-Tools sidecar in solver={} message={}",
+                reference.solver, reference.message
             ),
         }
     }
 
     fn validate_weighted_independent_set(&mut self) {
-        println!("\n-- Weighted independent set: exact/greedy vs OR-Tools CP-SAT bridge --");
+        println!(
+            "\n-- Weighted independent set: exact/greedy vs Rust reference / OR-Tools CP-SAT bridge --"
+        );
         let problem = build_sample_weighted_independent_set_problem();
         let exact = solve_weighted_independent_set_exact(&problem);
         let greedy = solve_weighted_independent_set_greedy(&problem);
@@ -1842,7 +1864,9 @@ impl Driver {
 
         let reference = solve_weighted_independent_set_with_external_reference(
             &problem,
-            &ExternalWeightedIndependentSetReferenceOptions::default(),
+            &ExternalWeightedIndependentSetReferenceOptions {
+                solver: ExternalWeightedIndependentSetReferenceSolver::RustBranchAndBound,
+            },
         );
         self.check(
             "Weighted independent set exact/reference bridge status optimal",
@@ -1906,14 +1930,16 @@ impl Driver {
                 );
             }
             _ => println!(
-                "  SKIP  Weighted independent set OR-Tools CP-SAT objective: status={:?} message={}",
-                reference.ortools_status, reference.message
+                "  SKIP  Weighted independent set OR-Tools CP-SAT objective: no OR-Tools sidecar in solver={} message={}",
+                reference.solver, reference.message
             ),
         }
     }
 
     fn validate_weighted_max_sat(&mut self) {
-        println!("\n-- Weighted Max-SAT: exact/greedy vs OR-Tools CP-SAT bridge --");
+        println!(
+            "\n-- Weighted Max-SAT: exact/greedy vs Rust reference / OR-Tools CP-SAT bridge --"
+        );
         let problem = build_sample_weighted_max_sat_problem();
         let exact = solve_weighted_max_sat_exact(&problem);
         let greedy = solve_weighted_max_sat_greedy(&problem);
@@ -1944,7 +1970,9 @@ impl Driver {
 
         let reference = solve_weighted_max_sat_with_external_reference(
             &problem,
-            &ExternalWeightedMaxSatReferenceOptions::default(),
+            &ExternalWeightedMaxSatReferenceOptions {
+                solver: ExternalWeightedMaxSatReferenceSolver::RustEnumeration,
+            },
         );
         self.check(
             "Weighted Max-SAT exact/reference bridge status optimal",
@@ -2006,8 +2034,8 @@ impl Driver {
                 );
             }
             _ => println!(
-                "  SKIP  Weighted Max-SAT OR-Tools CP-SAT objective: status={:?} message={}",
-                reference.ortools_status, reference.message
+                "  SKIP  Weighted Max-SAT OR-Tools CP-SAT objective: no OR-Tools sidecar in solver={} message={}",
+                reference.solver, reference.message
             ),
         }
     }
@@ -6841,7 +6869,7 @@ impl Driver {
         let current_tools = external_optimization_tools();
         self.check(
             "External optimization ecosystem registry covers requested tools",
-            current_tools.len() == 88 && specs.len() == current_tools.len(),
+            current_tools.len() == 96 && specs.len() == current_tools.len(),
             format!("tools={} specs={}", current_tools.len(), specs.len()),
         );
         let legacy_tools = legacy_external_optimization_ecosystem::ExternalOptimizationTool::all();
@@ -6855,7 +6883,7 @@ impl Driver {
                             == legacy_external_optimization_ecosystem::ExternalOptimizationEcosystem::Python
                     })
                     .count()
-                    == 20
+                    == 23
                 && legacy_tools
                     .iter()
                     .any(|tool| tool.as_str() == "hexaly" && tool.ecosystem().as_str() == "native"),
@@ -6875,7 +6903,7 @@ impl Driver {
             .count();
         self.check(
             "External optimization ecosystem registry Java/Rust split",
-            java_count == 12 && rust_count == 8,
+            java_count == 12 && rust_count == 11,
             format!("java={java_count} rust={rust_count}"),
         );
         let python_count = specs
@@ -6892,7 +6920,7 @@ impl Driver {
             .count();
         self.check(
             "External optimization ecosystem registry Python/Julia/native split",
-            python_count == 20 && julia_count == 1 && native_count == 47,
+            python_count == 23 && julia_count == 1 && native_count == 49,
             format!("python={python_count} julia={julia_count} native={native_count}"),
         );
         self.check(
@@ -6942,6 +6970,10 @@ impl Driver {
                     && spec.family == ExternalOptimizationFamily::LinearMip
                     && spec.exactness == ExternalOptimizationExactness::Exact
             }) && specs.iter().any(|spec| {
+                spec.tool == ExternalOptimizationTool::QsoptExCli
+                    && spec.family == ExternalOptimizationFamily::LinearMip
+                    && spec.exactness == ExternalOptimizationExactness::Exact
+            }) && specs.iter().any(|spec| {
                 spec.tool == ExternalOptimizationTool::LpSolveCli
                     && spec.family == ExternalOptimizationFamily::LinearMip
                     && spec.exactness == ExternalOptimizationExactness::Exact
@@ -6954,11 +6986,23 @@ impl Driver {
                     && spec.family == ExternalOptimizationFamily::LinearMip
                     && spec.exactness == ExternalOptimizationExactness::Numerical
             }) && specs.iter().any(|spec| {
+                spec.tool == ExternalOptimizationTool::OrToolsCpSat
+                    && spec.family == ExternalOptimizationFamily::CpSatRouting
+                    && spec.exactness == ExternalOptimizationExactness::Exact
+            }) && specs.iter().any(|spec| {
                 spec.tool == ExternalOptimizationTool::Cvxpy
                     && spec.family == ExternalOptimizationFamily::ConvexOptimization
                     && spec.exactness == ExternalOptimizationExactness::ModelingLayer
             }) && specs.iter().any(|spec| {
                 spec.tool == ExternalOptimizationTool::PyScipOpt
+                    && spec.family == ExternalOptimizationFamily::NativeSolverBinding
+                    && spec.exactness == ExternalOptimizationExactness::Numerical
+            }) && specs.iter().any(|spec| {
+                spec.tool == ExternalOptimizationTool::CplexPython
+                    && spec.family == ExternalOptimizationFamily::NativeSolverBinding
+                    && spec.exactness == ExternalOptimizationExactness::Numerical
+            }) && specs.iter().any(|spec| {
+                spec.tool == ExternalOptimizationTool::XpressPython
                     && spec.family == ExternalOptimizationFamily::NativeSolverBinding
                     && spec.exactness == ExternalOptimizationExactness::Numerical
             }) && specs.iter().any(|spec| {
@@ -6971,6 +7015,18 @@ impl Driver {
                     && spec.exactness == ExternalOptimizationExactness::Numerical
             }) && specs.iter().any(|spec| {
                 spec.tool == ExternalOptimizationTool::Ipopt
+                    && spec.family == ExternalOptimizationFamily::NonlinearOptimization
+                    && spec.exactness == ExternalOptimizationExactness::Numerical
+            }) && specs.iter().any(|spec| {
+                spec.tool == ExternalOptimizationTool::GurobiRust
+                    && spec.family == ExternalOptimizationFamily::NativeSolverBinding
+                    && spec.exactness == ExternalOptimizationExactness::Numerical
+            }) && specs.iter().any(|spec| {
+                spec.tool == ExternalOptimizationTool::CplexRust
+                    && spec.family == ExternalOptimizationFamily::NativeSolverBinding
+                    && spec.exactness == ExternalOptimizationExactness::Numerical
+            }) && specs.iter().any(|spec| {
+                spec.tool == ExternalOptimizationTool::IpoptRust
                     && spec.family == ExternalOptimizationFamily::NonlinearOptimization
                     && spec.exactness == ExternalOptimizationExactness::Numerical
             }) && specs.iter().any(|spec| {
@@ -6990,7 +7046,7 @@ impl Driver {
                     && spec.family == ExternalOptimizationFamily::NonlinearOptimization
                     && spec.exactness == ExternalOptimizationExactness::ModelingLayer
             }),
-            "checked Choco, CPMpy, clingo, Open-WBO, OptaPlanner, Timefold, PDDL planners, Pyomo, HiGHS/SoPlex/lp_solve CLI, OR-Tools GLOP/PDLP, CVXPY, PySCIPOpt, Hexaly, argmin, Ipopt, MOSEK, Z3, OptiMathSAT, and CasADi classifications".to_string(),
+            "checked Choco, CPMpy, clingo, Open-WBO, OptaPlanner, Timefold, PDDL planners, Pyomo, HiGHS/SoPlex/lp_solve CLI, OR-Tools GLOP/PDLP, CVXPY, PySCIPOpt, Hexaly, argmin, Ipopt, Gurobi/CPLEX/Ipopt Rust bindings, MOSEK, Z3, OptiMathSAT, and CasADi classifications".to_string(),
         );
         let cp_specs = external_cp_sat_reference_solver_specs();
         let direct_cp_specs = cp_specs
@@ -7003,12 +7059,17 @@ impl Driver {
             .count();
         self.check(
             "External CP-SAT reference registry splits direct and ecosystem contracts",
-            cp_specs.len() == 18
-                && direct_cp_specs == 3
+            cp_specs.len() == 19
+                && direct_cp_specs == 4
                 && ecosystem_cp_specs == 15
                 && cp_specs.iter().any(|spec| {
                     spec.solver == ExternalCpSatReferenceSolver::OrToolsCpSat
                         && spec.family == ExternalCpSatReferenceFamily::CpSatScript
+                        && spec.supports_cp_sat_json
+                })
+                && cp_specs.iter().any(|spec| {
+                    spec.solver == ExternalCpSatReferenceSolver::RustEnumeration
+                        && spec.family == ExternalCpSatReferenceFamily::Fallback
                         && spec.supports_cp_sat_json
                 })
                 && cp_specs.iter().any(|spec| {
@@ -7050,7 +7111,7 @@ impl Driver {
         let cp_sat_reference = solve_cp_sat_json_with_external_reference(
             &cp_sat_smoke,
             &ExternalCpSatReferenceOptions {
-                solver: ExternalCpSatReferenceSolver::PythonEnumeration,
+                solver: ExternalCpSatReferenceSolver::RustEnumeration,
                 ..Default::default()
             },
         );
@@ -7513,7 +7574,7 @@ impl Driver {
         let specs = external_validation_tool_specs();
         self.check(
             "External validation registry covers recommended tools",
-            specs.len() == 259,
+            specs.len() == 264,
             format!("tools={}", specs.len()),
         );
         for (family, expected_at_least) in [
@@ -7553,6 +7614,9 @@ impl Driver {
                 && specs.iter().any(|spec| spec.id == "rust-linprog")
                 && specs.iter().any(|spec| spec.id == "argmin")
                 && specs.iter().any(|spec| spec.id == "nlopt-rs")
+                && specs.iter().any(|spec| spec.id == "gurobi-rust")
+                && specs.iter().any(|spec| spec.id == "cplex-rust")
+                && specs.iter().any(|spec| spec.id == "ipopt-rust")
                 && specs.iter().any(|spec| spec.id == "nlopt")
                 && specs.iter().any(|spec| spec.id == "highs-rust")
                 && specs.iter().any(|spec| spec.id == "scip-rust")
@@ -7561,6 +7625,8 @@ impl Driver {
                 && specs.iter().any(|spec| spec.id == "pyscipopt")
                 && specs.iter().any(|spec| spec.id == "python-mip")
                 && specs.iter().any(|spec| spec.id == "gurobipy")
+                && specs.iter().any(|spec| spec.id == "cplex-python")
+                && specs.iter().any(|spec| spec.id == "xpress-python")
                 && specs.iter().any(|spec| spec.id == "docplex")
                 && specs.iter().any(|spec| spec.id == "ortools-python")
                 && specs.iter().any(|spec| spec.id == "ortools-cp-sat")
@@ -7632,7 +7698,7 @@ impl Driver {
                 && specs.iter().any(|spec| spec.id == "protoc")
                 && specs.iter().any(|spec| spec.id == "apache-avro")
                 && specs.iter().any(|spec| spec.id == "frictionless"),
-            "checked MiniZinc, Choco/JaCoP/CP Optimizer/OR-Tools Java/Python/CP-SAT/ojAlgo, OptaPlanner/Timefold, jMetal/MOEA/ECJ, good_lp/lp-modeler/rust-linprog/argmin/NLopt/HiGHS/SCIP/CBC Rust bindings, PySCIPOpt/Python-MIP/gurobipy/DOcplex, HiGHS/GLPK/SCIP/CBC/CLP/SoPlex/QSopt_ex/lp_solve/Gurobi/CPLEX/Xpress/LINDO CLI adapters, Pyomo/AMPL/NEOS, PDDL planning validators, Z3/OptiMathSAT, MiniSat/Glucose/MapleSAT/Varisat/MaxHS/RoundingSat, clingo ASP, DRAT/FRAT/VeriPB, TLC, MIPLIB, Ipopt, OSQP, software verifiers, simulation engines, API/data validators, XML, CSV, Protobuf, Avro, and Frictionless".to_string(),
+            "checked MiniZinc, Choco/JaCoP/CP Optimizer/OR-Tools Java/Python/CP-SAT/ojAlgo, OptaPlanner/Timefold, jMetal/MOEA/ECJ, good_lp/lp-modeler/rust-linprog/argmin/NLopt/Gurobi/CPLEX/Ipopt/HiGHS/SCIP/CBC Rust bindings, PySCIPOpt/Python-MIP/gurobipy/CPLEX Python/Xpress Python/DOcplex, HiGHS/GLPK/SCIP/CBC/CLP/SoPlex/QSopt_ex/lp_solve/Gurobi/CPLEX/Xpress/LINDO CLI adapters, Pyomo/AMPL/NEOS, PDDL planning validators, Z3/OptiMathSAT, MiniSat/Glucose/MapleSAT/Varisat/MaxHS/RoundingSat, clingo ASP, DRAT/FRAT/VeriPB, TLC, MIPLIB, Ipopt, OSQP, software verifiers, simulation engines, API/data validators, XML, CSV, Protobuf, Avro, and Frictionless".to_string(),
         );
 
         let minizinc_payload = minizinc_validation_request_to_json(&MiniZincValidationRequest {
@@ -18924,7 +18990,9 @@ impl Driver {
     }
 
     fn validate_max_flow(&mut self) {
-        println!("\n-- Max flow: native DES Edmonds-Karp vs OR-Tools graph bridge --");
+        println!(
+            "\n-- Max flow: native DES Edmonds-Karp vs Rust reference / OR-Tools graph bridge --"
+        );
         let p = build_textbook_max_flow_problem();
         let flow = solve_max_flow(p.clone());
         self.check(
@@ -18956,8 +19024,12 @@ impl Driver {
             ),
         );
 
-        let reference =
-            solve_max_flow_with_external_reference(&p, &ExternalMaxFlowReferenceOptions::default());
+        let reference = solve_max_flow_with_external_reference(
+            &p,
+            &ExternalMaxFlowReferenceOptions {
+                solver: ExternalMaxFlowReferenceSolver::RustEdmondsKarp,
+            },
+        );
         self.check(
             "Max-flow external-reference bridge status optimal",
             reference.status == ExternalMaxFlowReferenceStatus::Optimal,
@@ -19034,14 +19106,16 @@ impl Driver {
                 );
             }
             _ => println!(
-                "  SKIP  Max-flow OR-Tools SimpleMaxFlow value: status={:?} message={}",
-                reference.ortools_status, reference.message
+                "  SKIP  Max-flow OR-Tools SimpleMaxFlow value: no OR-Tools sidecar in solver={} message={}",
+                reference.solver, reference.message
             ),
         }
     }
 
     fn validate_min_cost_flow(&mut self) {
-        println!("\n-- Min-cost flow: native network solver vs LP/OR-Tools graph bridges --");
+        println!(
+            "\n-- Min-cost flow: native network solver vs LP/Rust reference / OR-Tools graph bridges --"
+        );
         let p = MinCostFlowProblem {
             num_nodes: 4,
             supplies: vec![5.0, 7.0, -6.0, -6.0],
@@ -19109,7 +19183,9 @@ impl Driver {
 
         let reference = solve_min_cost_flow_with_external_reference(
             &p,
-            &ExternalMinCostFlowReferenceOptions::default(),
+            &ExternalMinCostFlowReferenceOptions {
+                solver: ExternalMinCostFlowReferenceSolver::RustSuccessiveShortestPath,
+            },
         );
         self.check(
             "Min-cost-flow external-reference bridge status optimal",
@@ -19181,14 +19257,16 @@ impl Driver {
                 );
             }
             _ => println!(
-                "  SKIP  Min-cost-flow OR-Tools SimpleMinCostFlow objective: status={:?} message={}",
-                reference.ortools_status, reference.message
+                "  SKIP  Min-cost-flow OR-Tools SimpleMinCostFlow objective: no OR-Tools sidecar in solver={} message={}",
+                reference.solver, reference.message
             ),
         }
     }
 
     fn validate_minimum_spanning_tree(&mut self) {
-        println!("\n-- Minimum spanning tree: Kruskal/Prim vs OR-Tools CP-SAT bridge --");
+        println!(
+            "\n-- Minimum spanning tree: Kruskal/Prim vs Rust reference / OR-Tools CP-SAT bridge --"
+        );
         let problem = build_sample_minimum_spanning_tree_problem();
         let kruskal = solve_minimum_spanning_tree_kruskal(&problem);
         let prim = solve_minimum_spanning_tree_prim(&problem);
@@ -19219,7 +19297,9 @@ impl Driver {
 
         let reference = solve_minimum_spanning_tree_with_external_reference(
             &problem,
-            &ExternalMinimumSpanningTreeReferenceOptions::default(),
+            &ExternalMinimumSpanningTreeReferenceOptions {
+                solver: ExternalMinimumSpanningTreeReferenceSolver::RustKruskal,
+            },
         );
         self.check(
             "MST exact/reference bridge status optimal",
@@ -19279,14 +19359,14 @@ impl Driver {
                 );
             }
             _ => println!(
-                "  SKIP  MST OR-Tools CP-SAT objective: status={:?} message={}",
-                reference.ortools_status, reference.message
+                "  SKIP  MST OR-Tools CP-SAT objective: no OR-Tools sidecar in solver={} message={}",
+                reference.solver, reference.message
             ),
         }
     }
 
     fn validate_traveling_salesman(&mut self) {
-        println!("\n-- TSP: native Held-Karp/ACO vs OR-Tools Routing bridge --");
+        println!("\n-- TSP: native Held-Karp/ACO vs Rust reference / OR-Tools Routing bridge --");
         let instance = build_pentagon_tsp(6, 10.0);
         let exact = held_karp_exact(&instance);
         self.check(
@@ -19353,7 +19433,9 @@ impl Driver {
 
         let reference = solve_tsp_with_external_reference(
             &instance.distance,
-            &ExternalTspReferenceOptions::default(),
+            &ExternalTspReferenceOptions {
+                solver: ExternalTspReferenceSolver::RustHeldKarp,
+            },
         );
         self.check(
             "TSP external-reference bridge status optimal",
@@ -19403,8 +19485,8 @@ impl Driver {
                 );
             }
             _ => println!(
-                "  SKIP  TSP OR-Tools Routing objective: status={:?} message={}",
-                reference.ortools_status, reference.message
+                "  SKIP  TSP OR-Tools Routing objective: no OR-Tools sidecar in solver={} message={}",
+                reference.solver, reference.message
             ),
         }
     }
@@ -19724,7 +19806,9 @@ impl Driver {
     }
 
     fn validate_stochastic_lp(&mut self) {
-        println!("\n-- Stochastic LP: monolithic/Benders vs SciPy HiGHS extensive-form bridge --");
+        println!(
+            "\n-- Stochastic LP: monolithic/Benders vs Rust extensive-form / SciPy HiGHS bridge --"
+        );
         let costs = vec![1.0, 1.0];
         let prices = vec![3.0, 2.0];
         let ranges = vec![(5.0, 15.0), (10.0, 20.0)];
@@ -19774,7 +19858,9 @@ impl Driver {
         let reference = solve_stochastic_lp_with_external_reference(
             &problem,
             &scenarios,
-            &ExternalStochasticLpReferenceOptions::default(),
+            &ExternalStochasticLpReferenceOptions {
+                solver: ExternalStochasticLpReferenceSolver::RustMonolithic,
+            },
         );
         if reference.status == ExternalStochasticLpReferenceStatus::Unavailable {
             println!(

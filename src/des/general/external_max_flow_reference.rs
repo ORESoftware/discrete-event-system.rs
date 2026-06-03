@@ -1,9 +1,11 @@
 //! Rust-facing bridge for external/reference max-flow solvers.
 //!
-//! The checked-in Python bridge (`scripts/max_flow_reference.py`) computes an
-//! Edmonds-Karp reference and calls OR-Tools SimpleMaxFlow when installed and
-//! when capacities can be integer-scaled.
+//! The native Rust reference computes an independent Edmonds-Karp check without
+//! Python startup. The checked-in Python bridge (`scripts/max_flow_reference.py`)
+//! remains available for OR-Tools SimpleMaxFlow when installed and when
+//! capacities can be integer-scaled.
 
+use std::collections::VecDeque;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -17,6 +19,7 @@ use crate::des::general::max_flow::{MaxFlowEdgeFlow, MaxFlowProblem};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExternalMaxFlowReferenceSolver {
     Auto,
+    RustEdmondsKarp,
     OrTools,
     Fallback,
 }
@@ -25,6 +28,7 @@ impl ExternalMaxFlowReferenceSolver {
     pub fn as_arg(self) -> &'static str {
         match self {
             ExternalMaxFlowReferenceSolver::Auto => "auto",
+            ExternalMaxFlowReferenceSolver::RustEdmondsKarp => "rust-edmonds-karp",
             ExternalMaxFlowReferenceSolver::OrTools => "ortools",
             ExternalMaxFlowReferenceSolver::Fallback => "fallback",
         }
@@ -165,6 +169,21 @@ impl From<MaxFlowCutPayload> for ExternalMaxFlowReferenceCut {
     }
 }
 
+#[derive(Clone, Debug)]
+struct RustResidualEdge {
+    to: usize,
+    rev: usize,
+    cap: f64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RustForwardRef {
+    from: usize,
+    edge_index: usize,
+}
+
+const RUST_MAX_FLOW_EPS: f64 = 1e-12;
+
 fn status_from_str(status: &str) -> ExternalMaxFlowReferenceStatus {
     match status {
         "optimal" => ExternalMaxFlowReferenceStatus::Optimal,
@@ -172,6 +191,210 @@ fn status_from_str(status: &str) -> ExternalMaxFlowReferenceStatus {
         "unsupported" => ExternalMaxFlowReferenceStatus::Unsupported,
         "unavailable" => ExternalMaxFlowReferenceStatus::Unavailable,
         _ => ExternalMaxFlowReferenceStatus::NumericalError,
+    }
+}
+
+fn validate_rust_max_flow_problem(problem: &MaxFlowProblem) -> Result<(), String> {
+    if problem.num_nodes < 2 {
+        return Err("numNodes must be at least 2".to_string());
+    }
+    if problem.source >= problem.num_nodes {
+        return Err("source is outside node range".to_string());
+    }
+    if problem.sink >= problem.num_nodes {
+        return Err("sink is outside node range".to_string());
+    }
+    if problem.source == problem.sink {
+        return Err("source and sink must differ".to_string());
+    }
+    if problem.edges.is_empty() {
+        return Err("edges must be non-empty".to_string());
+    }
+    for (index, edge) in problem.edges.iter().enumerate() {
+        if edge.from >= problem.num_nodes || edge.to >= problem.num_nodes {
+            return Err(format!("edge {index} endpoint is outside node range"));
+        }
+        if !edge.capacity.is_finite() || edge.capacity < 0.0 {
+            return Err(format!(
+                "edge {index} capacity must be finite and non-negative"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn max_flow_node_balance(num_nodes: usize, edge_flows: &[MaxFlowEdgeFlow]) -> Vec<f64> {
+    let mut balance = vec![0.0; num_nodes];
+    for edge in edge_flows {
+        balance[edge.from] -= edge.flow;
+        balance[edge.to] += edge.flow;
+    }
+    balance
+}
+
+fn rust_max_flow_cut(
+    problem: &MaxFlowProblem,
+    residual: &[Vec<RustResidualEdge>],
+    edge_flows: &[MaxFlowEdgeFlow],
+) -> ExternalMaxFlowReferenceCut {
+    let mut seen = vec![false; problem.num_nodes];
+    let mut queue = VecDeque::from([problem.source]);
+    seen[problem.source] = true;
+    while let Some(node) = queue.pop_front() {
+        for edge in &residual[node] {
+            if edge.cap > RUST_MAX_FLOW_EPS && !seen[edge.to] {
+                seen[edge.to] = true;
+                queue.push_back(edge.to);
+            }
+        }
+    }
+
+    let source_side: Vec<usize> = seen
+        .iter()
+        .enumerate()
+        .filter_map(|(node, is_seen)| is_seen.then_some(node))
+        .collect();
+    let sink_side: Vec<usize> = seen
+        .iter()
+        .enumerate()
+        .filter_map(|(node, is_seen)| (!is_seen).then_some(node))
+        .collect();
+    let cut_edges: Vec<MaxFlowEdgeFlow> = edge_flows
+        .iter()
+        .filter(|edge| seen[edge.from] && !seen[edge.to])
+        .cloned()
+        .collect();
+    let capacity = cut_edges.iter().map(|edge| edge.capacity).sum();
+
+    ExternalMaxFlowReferenceCut {
+        source_side,
+        sink_side,
+        cut_edges,
+        capacity,
+    }
+}
+
+fn solve_max_flow_with_rust_reference(
+    problem: &MaxFlowProblem,
+) -> ExternalMaxFlowReferenceSolution {
+    let started = Instant::now();
+    if let Err(message) = validate_rust_max_flow_problem(problem) {
+        return empty_solution(
+            ExternalMaxFlowReferenceStatus::NumericalError,
+            message,
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+
+    let mut residual = vec![Vec::<RustResidualEdge>::new(); problem.num_nodes];
+    let mut forward_refs = Vec::<RustForwardRef>::with_capacity(problem.edges.len());
+    for edge in &problem.edges {
+        let forward_rev = residual[edge.to].len();
+        let reverse_rev = residual[edge.from].len();
+        residual[edge.from].push(RustResidualEdge {
+            to: edge.to,
+            rev: forward_rev,
+            cap: edge.capacity,
+        });
+        residual[edge.to].push(RustResidualEdge {
+            to: edge.from,
+            rev: reverse_rev,
+            cap: 0.0,
+        });
+        forward_refs.push(RustForwardRef {
+            from: edge.from,
+            edge_index: residual[edge.from].len() - 1,
+        });
+    }
+
+    let mut max_flow = 0.0;
+    let mut iterations = 0_u64;
+    loop {
+        let mut parent_node = vec![None; problem.num_nodes];
+        let mut parent_edge = vec![None; problem.num_nodes];
+        let mut queue = VecDeque::from([problem.source]);
+        parent_node[problem.source] = Some(problem.source);
+        let mut found_sink = false;
+
+        while let Some(node) = queue.pop_front() {
+            for (edge_index, edge) in residual[node].iter().enumerate() {
+                if edge.cap <= RUST_MAX_FLOW_EPS || parent_node[edge.to].is_some() {
+                    continue;
+                }
+                parent_node[edge.to] = Some(node);
+                parent_edge[edge.to] = Some(edge_index);
+                if edge.to == problem.sink {
+                    found_sink = true;
+                    break;
+                }
+                queue.push_back(edge.to);
+            }
+            if found_sink {
+                break;
+            }
+        }
+
+        if !found_sink {
+            break;
+        }
+
+        let mut bottleneck = f64::INFINITY;
+        let mut node = problem.sink;
+        while node != problem.source {
+            let prev = parent_node[node].expect("max-flow parent node missing after BFS");
+            let edge_index = parent_edge[node].expect("max-flow parent edge missing after BFS");
+            bottleneck = bottleneck.min(residual[prev][edge_index].cap);
+            node = prev;
+        }
+
+        let mut node = problem.sink;
+        while node != problem.source {
+            let prev = parent_node[node].expect("max-flow parent node missing after BFS");
+            let edge_index = parent_edge[node].expect("max-flow parent edge missing after BFS");
+            let to = residual[prev][edge_index].to;
+            let rev = residual[prev][edge_index].rev;
+            residual[prev][edge_index].cap -= bottleneck;
+            residual[to][rev].cap += bottleneck;
+            node = prev;
+        }
+
+        iterations += 1;
+        max_flow += bottleneck;
+    }
+
+    let edge_flows: Vec<MaxFlowEdgeFlow> = problem
+        .edges
+        .iter()
+        .zip(forward_refs.iter())
+        .map(|(edge, reference)| {
+            let residual_capacity = residual[reference.from][reference.edge_index].cap;
+            MaxFlowEdgeFlow {
+                from: edge.from,
+                to: edge.to,
+                capacity: edge.capacity,
+                name: edge.name.clone(),
+                flow: edge.capacity - residual_capacity,
+            }
+        })
+        .collect();
+    let min_cut = rust_max_flow_cut(problem, &residual, &edge_flows);
+    let node_balance = max_flow_node_balance(problem.num_nodes, &edge_flows);
+
+    ExternalMaxFlowReferenceSolution {
+        status: ExternalMaxFlowReferenceStatus::Optimal,
+        solver: "rust:edmonds-karp-max-flow".to_string(),
+        max_flow: Some(max_flow),
+        edge_flows,
+        min_cut,
+        node_balance,
+        iterations: Some(iterations),
+        ortools_status: None,
+        ortools_max_flow: None,
+        ortools_edge_flows: Vec::new(),
+        ortools_min_cut: ExternalMaxFlowReferenceCut::default(),
+        ortools_node_balance: Vec::new(),
+        message: "Rust Edmonds-Karp augmenting-path reference".to_string(),
+        elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
     }
 }
 
@@ -301,6 +524,13 @@ pub fn solve_max_flow_with_external_reference(
     problem: &MaxFlowProblem,
     opts: &ExternalMaxFlowReferenceOptions,
 ) -> ExternalMaxFlowReferenceSolution {
+    if matches!(
+        opts.solver,
+        ExternalMaxFlowReferenceSolver::RustEdmondsKarp | ExternalMaxFlowReferenceSolver::Fallback
+    ) {
+        return solve_max_flow_with_rust_reference(problem);
+    }
+
     run_max_flow_reference_json(
         json!({
             "numNodes": problem.num_nodes,
@@ -317,4 +547,81 @@ pub fn solve_max_flow_with_external_reference(
         }),
         opts,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::des::general::max_flow::{build_textbook_max_flow_problem, MaxFlowEdge};
+
+    #[test]
+    fn rust_reference_solves_textbook_max_flow() {
+        let problem = build_textbook_max_flow_problem();
+        let solution = solve_max_flow_with_external_reference(
+            &problem,
+            &ExternalMaxFlowReferenceOptions {
+                solver: ExternalMaxFlowReferenceSolver::RustEdmondsKarp,
+            },
+        );
+
+        assert_eq!(solution.status, ExternalMaxFlowReferenceStatus::Optimal);
+        assert_eq!(solution.solver, "rust:edmonds-karp-max-flow");
+        assert!((solution.max_flow.unwrap() - 23.0).abs() <= 1e-9);
+        assert!((solution.min_cut.capacity - 23.0).abs() <= 1e-9);
+        assert_eq!(solution.node_balance.len(), problem.num_nodes);
+        assert!(solution.ortools_status.is_none());
+    }
+
+    #[test]
+    fn fallback_alias_uses_rust_reference_without_python() {
+        let problem = MaxFlowProblem {
+            num_nodes: 4,
+            source: 0,
+            sink: 3,
+            edges: vec![
+                MaxFlowEdge {
+                    from: 0,
+                    to: 1,
+                    capacity: 3.0,
+                    name: None,
+                },
+                MaxFlowEdge {
+                    from: 0,
+                    to: 2,
+                    capacity: 2.0,
+                    name: None,
+                },
+                MaxFlowEdge {
+                    from: 1,
+                    to: 3,
+                    capacity: 2.0,
+                    name: None,
+                },
+                MaxFlowEdge {
+                    from: 2,
+                    to: 3,
+                    capacity: 3.0,
+                    name: None,
+                },
+                MaxFlowEdge {
+                    from: 1,
+                    to: 2,
+                    capacity: 1.0,
+                    name: None,
+                },
+            ],
+        };
+
+        let solution = solve_max_flow_with_external_reference(
+            &problem,
+            &ExternalMaxFlowReferenceOptions {
+                solver: ExternalMaxFlowReferenceSolver::Fallback,
+            },
+        );
+
+        assert_eq!(solution.status, ExternalMaxFlowReferenceStatus::Optimal);
+        assert_eq!(solution.solver, "rust:edmonds-karp-max-flow");
+        assert!((solution.max_flow.unwrap() - 5.0).abs() <= 1e-9);
+        assert!((solution.min_cut.capacity - 5.0).abs() <= 1e-9);
+    }
 }

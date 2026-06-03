@@ -1,10 +1,10 @@
 //! Rust-facing bridge for external/reference min-cost-flow solvers.
 //!
-//! The checked-in Python bridge (`scripts/min_cost_flow_reference.py`) computes
-//! a deterministic successive-shortest-path reference and, when installed,
-//! calls OR-Tools SimpleMinCostFlow on an integer-scaled, lower-bound-normalized
-//! copy of the same input. This module owns typed serialization and status
-//! mapping for those same-input network-flow cross-checks.
+//! The native Rust reference computes a deterministic successive-shortest-path
+//! check without Python startup. The checked-in Python bridge
+//! (`scripts/min_cost_flow_reference.py`) remains available for OR-Tools
+//! SimpleMinCostFlow on an integer-scaled, lower-bound-normalized copy of the
+//! same input.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -14,11 +14,14 @@ use std::time::Instant;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::des::general::min_cost_flow::{MinCostFlowArcResult, MinCostFlowProblem};
+use crate::des::general::min_cost_flow::{
+    solve_min_cost_flow, MinCostFlowArcResult, MinCostFlowProblem, MinCostFlowStatus,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExternalMinCostFlowReferenceSolver {
     Auto,
+    RustSuccessiveShortestPath,
     OrTools,
     Fallback,
 }
@@ -27,6 +30,7 @@ impl ExternalMinCostFlowReferenceSolver {
     pub fn as_arg(self) -> &'static str {
         match self {
             ExternalMinCostFlowReferenceSolver::Auto => "auto",
+            ExternalMinCostFlowReferenceSolver::RustSuccessiveShortestPath => "rust-ssp",
             ExternalMinCostFlowReferenceSolver::OrTools => "ortools",
             ExternalMinCostFlowReferenceSolver::Fallback => "fallback",
         }
@@ -139,6 +143,120 @@ fn status_from_str(status: &str) -> ExternalMinCostFlowReferenceStatus {
         "unsupported" => ExternalMinCostFlowReferenceStatus::Unsupported,
         "unavailable" => ExternalMinCostFlowReferenceStatus::Unavailable,
         _ => ExternalMinCostFlowReferenceStatus::NumericalError,
+    }
+}
+
+fn status_from_min_cost_flow_status(
+    status: MinCostFlowStatus,
+) -> ExternalMinCostFlowReferenceStatus {
+    match status {
+        MinCostFlowStatus::Optimal => ExternalMinCostFlowReferenceStatus::Optimal,
+        MinCostFlowStatus::Infeasible => ExternalMinCostFlowReferenceStatus::Infeasible,
+    }
+}
+
+const RUST_MIN_COST_FLOW_EPS: f64 = 1e-9;
+
+fn validate_rust_min_cost_flow_problem(problem: &MinCostFlowProblem) -> Result<(), String> {
+    if problem.num_nodes == 0 {
+        return Err("num_nodes must be positive".to_string());
+    }
+    if problem.supplies.len() != problem.num_nodes {
+        return Err(format!(
+            "supplies length {} != num_nodes {}",
+            problem.supplies.len(),
+            problem.num_nodes
+        ));
+    }
+    if problem.supplies.iter().any(|value| !value.is_finite()) {
+        return Err("supplies must be finite".to_string());
+    }
+    let total_supply = problem.supplies.iter().sum::<f64>();
+    if total_supply.abs() > 1e-7 {
+        return Err(format!("supplies must sum to zero, got {total_supply:.3e}"));
+    }
+    if problem.arcs.is_empty() {
+        return Err("arcs must be non-empty".to_string());
+    }
+    for (index, arc) in problem.arcs.iter().enumerate() {
+        if arc.from >= problem.num_nodes || arc.to >= problem.num_nodes {
+            return Err(format!("arc {index} endpoint out of range"));
+        }
+        if arc.from == arc.to {
+            return Err(format!("arc {index} is a self-loop"));
+        }
+        if !arc.lower_bound.is_finite() || !arc.capacity.is_finite() || !arc.cost.is_finite() {
+            return Err(format!("arc {index} fields must be finite"));
+        }
+        if arc.lower_bound < -RUST_MIN_COST_FLOW_EPS {
+            return Err(format!("arc {index} lower_bound must be non-negative"));
+        }
+        if arc.capacity + RUST_MIN_COST_FLOW_EPS < arc.lower_bound {
+            return Err(format!(
+                "arc {index} capacity {} < lower_bound {}",
+                arc.capacity, arc.lower_bound
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn rust_min_cost_flow_empty_solution(
+    status: ExternalMinCostFlowReferenceStatus,
+    solver: impl Into<String>,
+    message: impl Into<String>,
+    elapsed_ms: f64,
+) -> ExternalMinCostFlowReferenceSolution {
+    ExternalMinCostFlowReferenceSolution {
+        status,
+        solver: solver.into(),
+        objective: None,
+        flows: Vec::new(),
+        node_balance: Vec::new(),
+        iterations: None,
+        ortools_status: None,
+        ortools_objective: None,
+        ortools_flows: Vec::new(),
+        ortools_node_balance: Vec::new(),
+        message: message.into(),
+        elapsed_ms,
+    }
+}
+
+fn solve_min_cost_flow_with_rust_reference(
+    problem: &MinCostFlowProblem,
+) -> ExternalMinCostFlowReferenceSolution {
+    let started = Instant::now();
+    if let Err(message) = validate_rust_min_cost_flow_problem(problem) {
+        return rust_min_cost_flow_empty_solution(
+            ExternalMinCostFlowReferenceStatus::NumericalError,
+            "rust:ssp-min-cost-flow",
+            message,
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+
+    let solution = solve_min_cost_flow(problem.clone());
+    let status = status_from_min_cost_flow_status(solution.status);
+    ExternalMinCostFlowReferenceSolution {
+        status,
+        solver: "rust:ssp-min-cost-flow".to_string(),
+        objective: if status == ExternalMinCostFlowReferenceStatus::Optimal {
+            Some(solution.total_cost)
+        } else {
+            None
+        },
+        flows: solution.arc_flows,
+        node_balance: solution.node_balance,
+        iterations: Some(solution.iterations as u64),
+        ortools_status: None,
+        ortools_objective: None,
+        ortools_flows: Vec::new(),
+        ortools_node_balance: Vec::new(),
+        message: solution
+            .message
+            .unwrap_or_else(|| "successive shortest augmenting path reference".to_string()),
+        elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
     }
 }
 
@@ -279,6 +397,14 @@ pub fn solve_min_cost_flow_with_external_reference(
     problem: &MinCostFlowProblem,
     opts: &ExternalMinCostFlowReferenceOptions,
 ) -> ExternalMinCostFlowReferenceSolution {
+    if matches!(
+        opts.solver,
+        ExternalMinCostFlowReferenceSolver::RustSuccessiveShortestPath
+            | ExternalMinCostFlowReferenceSolver::Fallback
+    ) {
+        return solve_min_cost_flow_with_rust_reference(problem);
+    }
+
     run_min_cost_flow_reference_json(
         json!({
             "num_nodes": problem.num_nodes,
@@ -294,4 +420,98 @@ pub fn solve_min_cost_flow_with_external_reference(
         }),
         opts,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::des::general::min_cost_flow::MinCostFlowArc;
+
+    fn transportation_problem() -> MinCostFlowProblem {
+        MinCostFlowProblem {
+            num_nodes: 4,
+            supplies: vec![5.0, 7.0, -6.0, -6.0],
+            arcs: vec![
+                MinCostFlowArc {
+                    from: 0,
+                    to: 2,
+                    lower_bound: 0.0,
+                    capacity: 5.0,
+                    cost: 2.0,
+                    name: Some("s0_d0".to_string()),
+                },
+                MinCostFlowArc {
+                    from: 0,
+                    to: 3,
+                    lower_bound: 0.0,
+                    capacity: 5.0,
+                    cost: 4.0,
+                    name: Some("s0_d1".to_string()),
+                },
+                MinCostFlowArc {
+                    from: 1,
+                    to: 2,
+                    lower_bound: 0.0,
+                    capacity: 6.0,
+                    cost: 5.0,
+                    name: Some("s1_d0".to_string()),
+                },
+                MinCostFlowArc {
+                    from: 1,
+                    to: 3,
+                    lower_bound: 0.0,
+                    capacity: 8.0,
+                    cost: 1.0,
+                    name: Some("s1_d1".to_string()),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn rust_reference_solves_transportation_problem() {
+        let solution = solve_min_cost_flow_with_external_reference(
+            &transportation_problem(),
+            &ExternalMinCostFlowReferenceOptions {
+                solver: ExternalMinCostFlowReferenceSolver::RustSuccessiveShortestPath,
+            },
+        );
+
+        assert_eq!(solution.status, ExternalMinCostFlowReferenceStatus::Optimal);
+        assert_eq!(solution.solver, "rust:ssp-min-cost-flow");
+        assert_eq!(solution.objective, Some(21.0));
+        assert_eq!(solution.flows.len(), 4);
+        assert_eq!(solution.node_balance, vec![5.0, 7.0, -6.0, -6.0]);
+        assert!(solution.ortools_status.is_none());
+    }
+
+    #[test]
+    fn fallback_alias_uses_rust_reference_for_infeasible_problem() {
+        let problem = MinCostFlowProblem {
+            num_nodes: 2,
+            supplies: vec![1.0, -1.0],
+            arcs: vec![MinCostFlowArc {
+                from: 0,
+                to: 1,
+                lower_bound: 0.0,
+                capacity: 0.0,
+                cost: 1.0,
+                name: Some("blocked".to_string()),
+            }],
+        };
+
+        let solution = solve_min_cost_flow_with_external_reference(
+            &problem,
+            &ExternalMinCostFlowReferenceOptions {
+                solver: ExternalMinCostFlowReferenceSolver::Fallback,
+            },
+        );
+
+        assert_eq!(
+            solution.status,
+            ExternalMinCostFlowReferenceStatus::Infeasible
+        );
+        assert_eq!(solution.solver, "rust:ssp-min-cost-flow");
+        assert!(solution.objective.is_none());
+    }
 }

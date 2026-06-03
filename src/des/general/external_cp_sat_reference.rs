@@ -1,9 +1,10 @@
 //! Rust-facing bridge for CP-SAT and constraint-programming reference checks.
 //!
-//! `scripts/cp_sat_reference.py` accepts the crate's compact CP-SAT JSON model
-//! and can directly use OR-Tools CP-SAT when installed, otherwise falling back to
-//! exact enumeration for small validation models. Broader CP ecosystems such as
-//! Choco, JaCoP, CPMpy, Conjure, clingo, SAT4J, and Open-WBO use the
+//! The native Rust fallback accepts the crate's compact CP-SAT JSON model and
+//! enumerates small finite-domain validation models without a Python dependency.
+//! `scripts/cp_sat_reference.py` remains available for OR-Tools CP-SAT and
+//! legacy Python fallback checks. Broader CP ecosystems such as Choco, JaCoP,
+//! CPMpy, Conjure, clingo, SAT4J, and Open-WBO use the
 //! `optimization_ecosystem_reference.py` smoke-model contract instead; this
 //! module exposes both paths without pretending they share one model format.
 
@@ -25,6 +26,7 @@ use crate::des::general::external_optimization_tools::{
 pub enum ExternalCpSatReferenceSolver {
     Auto,
     OrToolsCpSat,
+    RustEnumeration,
     PythonEnumeration,
     ChocoSolver,
     JaCoP,
@@ -48,6 +50,7 @@ impl ExternalCpSatReferenceSolver {
         &[
             ExternalCpSatReferenceSolver::Auto,
             ExternalCpSatReferenceSolver::OrToolsCpSat,
+            ExternalCpSatReferenceSolver::RustEnumeration,
             ExternalCpSatReferenceSolver::PythonEnumeration,
             ExternalCpSatReferenceSolver::ChocoSolver,
             ExternalCpSatReferenceSolver::JaCoP,
@@ -71,6 +74,7 @@ impl ExternalCpSatReferenceSolver {
         match self {
             ExternalCpSatReferenceSolver::Auto => "auto",
             ExternalCpSatReferenceSolver::OrToolsCpSat => "ortools-cp-sat",
+            ExternalCpSatReferenceSolver::RustEnumeration => "rust-enumeration",
             ExternalCpSatReferenceSolver::PythonEnumeration => "python-enumeration",
             ExternalCpSatReferenceSolver::ChocoSolver => "choco-solver",
             ExternalCpSatReferenceSolver::JaCoP => "jacop",
@@ -94,6 +98,7 @@ impl ExternalCpSatReferenceSolver {
         match self {
             ExternalCpSatReferenceSolver::Auto => "Auto",
             ExternalCpSatReferenceSolver::OrToolsCpSat => "Google OR-Tools CP-SAT",
+            ExternalCpSatReferenceSolver::RustEnumeration => "Rust exact CP enumeration",
             ExternalCpSatReferenceSolver::PythonEnumeration => {
                 "Dependency-free exact CP enumeration"
             }
@@ -119,7 +124,8 @@ impl ExternalCpSatReferenceSolver {
         match self {
             ExternalCpSatReferenceSolver::Auto => ExternalCpSatReferenceFamily::Auto,
             ExternalCpSatReferenceSolver::OrToolsCpSat => ExternalCpSatReferenceFamily::CpSatScript,
-            ExternalCpSatReferenceSolver::PythonEnumeration => {
+            ExternalCpSatReferenceSolver::RustEnumeration
+            | ExternalCpSatReferenceSolver::PythonEnumeration => {
                 ExternalCpSatReferenceFamily::Fallback
             }
             ExternalCpSatReferenceSolver::ChocoSolver
@@ -146,6 +152,7 @@ impl ExternalCpSatReferenceSolver {
         match self {
             ExternalCpSatReferenceSolver::Auto => Some("auto"),
             ExternalCpSatReferenceSolver::OrToolsCpSat => Some("ortools-cp-sat"),
+            ExternalCpSatReferenceSolver::RustEnumeration => Some("rust-enumeration"),
             ExternalCpSatReferenceSolver::PythonEnumeration => Some("fallback"),
             _ => None,
         }
@@ -189,17 +196,20 @@ impl ExternalCpSatReferenceSolver {
     }
 
     pub fn notes(self) -> &'static str {
-        match self.family() {
-            ExternalCpSatReferenceFamily::Auto => {
-                "Use OR-Tools CP-SAT when installed; otherwise use exact Python enumeration for small CP-SAT JSON models."
+        match self {
+            ExternalCpSatReferenceSolver::Auto => {
+                "Use the configured direct CP-SAT bridge; rust-enumeration is the dependency-free same-input fallback for small models."
             }
-            ExternalCpSatReferenceFamily::CpSatScript => {
-                "Direct same-input bridge through scripts/cp_sat_reference.py."
+            ExternalCpSatReferenceSolver::OrToolsCpSat => {
+                "Direct same-input OR-Tools CP-SAT bridge through scripts/cp_sat_reference.py."
             }
-            ExternalCpSatReferenceFamily::Fallback => {
-                "Dependency-free exact enumeration bridge for small finite-domain CP-SAT JSON models."
+            ExternalCpSatReferenceSolver::RustEnumeration => {
+                "Native Rust exact enumeration for small finite-domain CP-SAT JSON models."
             }
-            ExternalCpSatReferenceFamily::EcosystemReference => {
+            ExternalCpSatReferenceSolver::PythonEnumeration => {
+                "Legacy exact enumeration bridge through scripts/cp_sat_reference.py."
+            }
+            _ => {
                 "Ecosystem smoke bridge through scripts/optimization_ecosystem_reference.py; uses the ecosystem CP-assignment contract rather than the CP-SAT JSON model."
             }
         }
@@ -382,10 +392,507 @@ fn script_working_dir(script: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
+fn cp_sat_error_run(
+    solver: ExternalCpSatReferenceSolver,
+    status: ExternalCpSatReferenceStatus,
+    message: impl Into<String>,
+    started: Instant,
+) -> ExternalCpSatReferenceRun {
+    let message = message.into();
+    ExternalCpSatReferenceRun {
+        solver,
+        backend: "rust:cp-enumeration".to_string(),
+        status,
+        assignment: Vec::new(),
+        objective: None,
+        nodes: Some(0),
+        raw: json!({
+            "status": status.as_str(),
+            "solver": "rust:cp-enumeration",
+            "message": message,
+        }),
+        elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+        message,
+    }
+}
+
+fn cp_sat_array<'a>(value: &'a Value, key: &str) -> Result<&'a Vec<Value>, String> {
+    value
+        .get(key)
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("missing or non-array `{key}`"))
+}
+
+fn cp_sat_i64(value: &Value, key: &str) -> Result<i64, String> {
+    value
+        .get(key)
+        .and_then(Value::as_i64)
+        .ok_or_else(|| format!("missing or non-integer `{key}`"))
+}
+
+fn cp_sat_usize(value: &Value, key: &str, len: usize) -> Result<usize, String> {
+    let raw = cp_sat_i64(value, key)?;
+    if raw < 0 || raw as usize >= len {
+        return Err(format!("`{key}` index {raw} is outside 0..{len}"));
+    }
+    Ok(raw as usize)
+}
+
+fn cp_sat_domains(model: &Value) -> Result<Vec<Vec<i64>>, String> {
+    cp_sat_array(model, "variables")?
+        .iter()
+        .enumerate()
+        .map(|(idx, variable)| {
+            let domain = cp_sat_array(variable, "domain")?
+                .iter()
+                .map(|value| {
+                    value
+                        .as_i64()
+                        .ok_or_else(|| format!("variable {idx} has a non-integer domain value"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if domain.is_empty() {
+                return Err(format!("variable {idx} has an empty domain"));
+            }
+            Ok(domain)
+        })
+        .collect()
+}
+
+fn cp_sat_literal_truth(assignment: &[i64], lit: &Value) -> Result<bool, String> {
+    let var = cp_sat_usize(lit, "var", assignment.len())?;
+    let positive = lit.get("positive").and_then(Value::as_bool).unwrap_or(true);
+    Ok(if positive {
+        assignment[var] == 1
+    } else {
+        assignment[var] == 0
+    })
+}
+
+fn cp_sat_enforcement_active(assignment: &[i64], constraint: &Value) -> Result<bool, String> {
+    let Some(enforcement) = constraint.get("enforcement") else {
+        return Ok(true);
+    };
+    let literals = enforcement
+        .as_array()
+        .ok_or_else(|| "`enforcement` must be an array".to_string())?;
+    for lit in literals {
+        if !cp_sat_literal_truth(assignment, lit)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn cp_sat_linear_value(assignment: &[i64], terms: &[Value]) -> Result<i64, String> {
+    let mut total = 0i64;
+    for term in terms {
+        let var = cp_sat_usize(term, "var", assignment.len())?;
+        let coeff = cp_sat_i64(term, "coeff")?;
+        total = total
+            .checked_add(
+                coeff
+                    .checked_mul(assignment[var])
+                    .ok_or_else(|| "linear term overflow".to_string())?,
+            )
+            .ok_or_else(|| "linear expression overflow".to_string())?;
+    }
+    Ok(total)
+}
+
+fn cp_sat_linear_constraint_ok(assignment: &[i64], constraint: &Value) -> Result<bool, String> {
+    let value = cp_sat_linear_value(assignment, cp_sat_array(constraint, "terms")?)?;
+    let rhs = cp_sat_i64(constraint, "rhs")?;
+    match constraint
+        .get("sense")
+        .and_then(Value::as_str)
+        .unwrap_or("eq")
+    {
+        "le" => Ok(value <= rhs),
+        "ge" => Ok(value >= rhs),
+        "eq" => Ok(value == rhs),
+        sense => Err(format!("unsupported linear sense `{sense}`")),
+    }
+}
+
+fn cp_sat_linear_domain_constraint_ok(
+    assignment: &[i64],
+    constraint: &Value,
+) -> Result<bool, String> {
+    let value = cp_sat_linear_value(assignment, cp_sat_array(constraint, "terms")?)?;
+    for interval in cp_sat_array(constraint, "intervals")? {
+        let lb = cp_sat_i64(interval, "lb")?;
+        let ub = cp_sat_i64(interval, "ub")?;
+        if lb <= value && value <= ub {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn cp_sat_bool_clause_ok(
+    assignment: &[i64],
+    constraint: &Value,
+    mode: &str,
+) -> Result<bool, String> {
+    let literals = cp_sat_array(constraint, "literals")?;
+    let true_count = literals.iter().try_fold(0usize, |count, lit| {
+        Ok::<_, String>(count + usize::from(cp_sat_literal_truth(assignment, lit)?))
+    })?;
+    match mode {
+        "or" | "at_least_one" => Ok(true_count >= 1),
+        "and" => Ok(true_count == literals.len()),
+        "xor" => Ok(true_count % 2 == 1),
+        "at_most_one" => Ok(true_count <= 1),
+        "exactly_one" => Ok(true_count == 1),
+        _ => Err(format!("unsupported Boolean mode `{mode}`")),
+    }
+}
+
+fn cp_sat_tuple_constraint_ok(
+    assignment: &[i64],
+    constraint: &Value,
+    allowed: bool,
+) -> Result<bool, String> {
+    let vars = cp_sat_array(constraint, "vars")?
+        .iter()
+        .map(|value| {
+            value
+                .as_i64()
+                .ok_or_else(|| "tuple variable index must be an integer".to_string())
+                .and_then(|idx| {
+                    if idx < 0 || idx as usize >= assignment.len() {
+                        Err(format!("tuple variable index {idx} out of range"))
+                    } else {
+                        Ok(idx as usize)
+                    }
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let selected = vars.iter().map(|var| assignment[*var]).collect::<Vec<_>>();
+    let mut listed = false;
+    for tuple in cp_sat_array(constraint, "tuples")? {
+        let tuple_values = tuple
+            .as_array()
+            .ok_or_else(|| "tuple entry must be an array".to_string())?
+            .iter()
+            .map(|value| {
+                value
+                    .as_i64()
+                    .ok_or_else(|| "tuple value must be an integer".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if tuple_values == selected {
+            listed = true;
+            break;
+        }
+    }
+    Ok(listed == allowed)
+}
+
+fn cp_sat_constraint_ok(assignment: &[i64], constraint: &Value) -> Result<bool, String> {
+    let kind = constraint
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "constraint missing string `kind`".to_string())?;
+    let active = match kind {
+        "enforced_linear"
+        | "enforced_linear_domain"
+        | "enforced_bool_or"
+        | "enforced_at_least_one"
+        | "enforced_bool_and"
+        | "enforced_bool_xor"
+        | "enforced_at_most_one"
+        | "enforced_exactly_one"
+        | "enforced_allowed_assignments"
+        | "enforced_forbidden_assignments" => cp_sat_enforcement_active(assignment, constraint)?,
+        _ => true,
+    };
+    if !active {
+        return Ok(true);
+    }
+    match kind {
+        "linear" | "enforced_linear" => cp_sat_linear_constraint_ok(assignment, constraint),
+        "linear_domain" | "enforced_linear_domain" => {
+            cp_sat_linear_domain_constraint_ok(assignment, constraint)
+        }
+        "all_different" => {
+            let mut seen = std::collections::BTreeSet::new();
+            for var in cp_sat_array(constraint, "vars")? {
+                let idx = var
+                    .as_i64()
+                    .ok_or_else(|| "all_different variable must be an integer".to_string())?;
+                if idx < 0 || idx as usize >= assignment.len() {
+                    return Err(format!("all_different variable index {idx} out of range"));
+                }
+                if !seen.insert(assignment[idx as usize]) {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        "bool_or" | "enforced_bool_or" => cp_sat_bool_clause_ok(assignment, constraint, "or"),
+        "bool_and" | "enforced_bool_and" => cp_sat_bool_clause_ok(assignment, constraint, "and"),
+        "bool_xor" | "enforced_bool_xor" => cp_sat_bool_clause_ok(assignment, constraint, "xor"),
+        "at_most_one" | "enforced_at_most_one" => {
+            cp_sat_bool_clause_ok(assignment, constraint, "at_most_one")
+        }
+        "at_least_one" | "enforced_at_least_one" => {
+            cp_sat_bool_clause_ok(assignment, constraint, "at_least_one")
+        }
+        "exactly_one" | "enforced_exactly_one" => {
+            cp_sat_bool_clause_ok(assignment, constraint, "exactly_one")
+        }
+        "implication" => {
+            let antecedent = cp_sat_literal_truth(
+                assignment,
+                constraint
+                    .get("antecedent")
+                    .ok_or_else(|| "implication missing antecedent".to_string())?,
+            )?;
+            let consequent = cp_sat_literal_truth(
+                assignment,
+                constraint
+                    .get("consequent")
+                    .ok_or_else(|| "implication missing consequent".to_string())?,
+            )?;
+            Ok(!antecedent || consequent)
+        }
+        "allowed_assignments" | "enforced_allowed_assignments" => {
+            cp_sat_tuple_constraint_ok(assignment, constraint, true)
+        }
+        "forbidden_assignments" | "enforced_forbidden_assignments" => {
+            cp_sat_tuple_constraint_ok(assignment, constraint, false)
+        }
+        other => Err(format!(
+            "rust-enumeration does not support constraint kind `{other}`"
+        )),
+    }
+}
+
+fn cp_sat_assignment_feasible(model: &Value, assignment: &[i64]) -> Result<bool, String> {
+    for constraint in model
+        .get("constraints")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if !cp_sat_constraint_ok(assignment, constraint)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn cp_sat_objective_value(model: &Value, assignment: &[i64]) -> Result<Option<i64>, String> {
+    let Some(objective) = model.get("objective") else {
+        return Ok(None);
+    };
+    Ok(Some(cp_sat_linear_value(
+        assignment,
+        cp_sat_array(objective, "terms")?,
+    )?))
+}
+
+fn cp_sat_better_objective(model: &Value, candidate: i64, incumbent: i64) -> bool {
+    let minimize = model
+        .get("objective")
+        .and_then(|objective| objective.get("sense"))
+        .and_then(Value::as_str)
+        .unwrap_or("min")
+        != "max";
+    if minimize {
+        candidate < incumbent
+    } else {
+        candidate > incumbent
+    }
+}
+
+fn solve_cp_sat_json_with_rust_enumeration(
+    model: &Value,
+    options: &ExternalCpSatReferenceOptions,
+    started: Instant,
+) -> ExternalCpSatReferenceRun {
+    if options.assumption_core {
+        return cp_sat_error_run(
+            options.solver,
+            ExternalCpSatReferenceStatus::Unsupported,
+            "rust-enumeration does not compute assumption cores yet",
+            started,
+        );
+    }
+
+    let domains = match cp_sat_domains(model) {
+        Ok(domains) => domains,
+        Err(message) => {
+            return cp_sat_error_run(
+                options.solver,
+                ExternalCpSatReferenceStatus::Invalid,
+                message,
+                started,
+            )
+        }
+    };
+    let mut assignment = vec![0; domains.len()];
+    let mut nodes = 0u64;
+    let mut best_assignment = None::<Vec<i64>>;
+    let mut best_objective = None::<i64>;
+    let mut solutions = Vec::<Value>::new();
+    let solution_limit = options.enumerate_solutions.unwrap_or(usize::MAX).max(1);
+
+    fn dfs(
+        model: &Value,
+        domains: &[Vec<i64>],
+        assignment: &mut [i64],
+        var_idx: usize,
+        nodes: &mut u64,
+        best_assignment: &mut Option<Vec<i64>>,
+        best_objective: &mut Option<i64>,
+        solutions: &mut Vec<Value>,
+        solution_limit: usize,
+    ) -> Result<(), String> {
+        if var_idx == domains.len() {
+            *nodes = nodes.saturating_add(1);
+            if !cp_sat_assignment_feasible(model, assignment)? {
+                return Ok(());
+            }
+            let objective = cp_sat_objective_value(model, assignment)?;
+            let is_better = match (*best_objective, objective) {
+                (Some(incumbent), Some(candidate)) => {
+                    cp_sat_better_objective(model, candidate, incumbent)
+                }
+                (None, Some(_)) | (None, None) => best_assignment.is_none(),
+                (Some(_), None) => false,
+            };
+            if is_better {
+                *best_assignment = Some(assignment.to_vec());
+                *best_objective = objective;
+            }
+            if solutions.len() < solution_limit {
+                solutions.push(json!({
+                    "assignment": assignment,
+                    "objective": objective.map(|value| value as f64),
+                }));
+            }
+            return Ok(());
+        }
+        for value in &domains[var_idx] {
+            assignment[var_idx] = *value;
+            dfs(
+                model,
+                domains,
+                assignment,
+                var_idx + 1,
+                nodes,
+                best_assignment,
+                best_objective,
+                solutions,
+                solution_limit,
+            )?;
+        }
+        Ok(())
+    }
+
+    if let Err(message) = dfs(
+        model,
+        &domains,
+        &mut assignment,
+        0,
+        &mut nodes,
+        &mut best_assignment,
+        &mut best_objective,
+        &mut solutions,
+        solution_limit,
+    ) {
+        let status = if message.contains("does not support") {
+            ExternalCpSatReferenceStatus::Unsupported
+        } else {
+            ExternalCpSatReferenceStatus::Invalid
+        };
+        return cp_sat_error_run(options.solver, status, message, started);
+    }
+
+    let Some(best) = best_assignment else {
+        let raw = json!({
+            "status": "infeasible",
+            "solver": "rust:cp-enumeration",
+            "assignment": [],
+            "objective": null,
+            "nodes": nodes,
+        });
+        return ExternalCpSatReferenceRun {
+            solver: options.solver,
+            backend: "rust:cp-enumeration".to_string(),
+            status: ExternalCpSatReferenceStatus::Infeasible,
+            assignment: Vec::new(),
+            objective: None,
+            nodes: Some(nodes),
+            raw,
+            elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+            message: String::new(),
+        };
+    };
+
+    if model.get("objective").is_some() {
+        let reverse = model
+            .get("objective")
+            .and_then(|objective| objective.get("sense"))
+            .and_then(Value::as_str)
+            .unwrap_or("min")
+            == "max";
+        solutions.sort_by(|a, b| {
+            let lhs = a.get("objective").and_then(Value::as_f64).unwrap_or(0.0);
+            let rhs = b.get("objective").and_then(Value::as_f64).unwrap_or(0.0);
+            if reverse {
+                rhs.partial_cmp(&lhs).unwrap_or(std::cmp::Ordering::Equal)
+            } else {
+                lhs.partial_cmp(&rhs).unwrap_or(std::cmp::Ordering::Equal)
+            }
+        });
+        solutions.truncate(solution_limit);
+    }
+
+    let objective = best_objective.map(|value| value as f64);
+    let status = if model.get("objective").is_some() {
+        ExternalCpSatReferenceStatus::Optimal
+    } else {
+        ExternalCpSatReferenceStatus::Feasible
+    };
+    let raw = json!({
+        "status": status.as_str(),
+        "solver": "rust:cp-enumeration",
+        "assignment": best,
+        "objective": objective,
+        "nodes": nodes,
+        "solutions": if options.enumerate_solutions.is_some() { Value::Array(solutions) } else { Value::Null },
+        "message": "native Rust exact enumeration fallback",
+    });
+    ExternalCpSatReferenceRun {
+        solver: options.solver,
+        backend: "rust:cp-enumeration".to_string(),
+        status,
+        assignment: raw
+            .get("assignment")
+            .and_then(Value::as_array)
+            .map(|values| values.iter().filter_map(Value::as_i64).collect())
+            .unwrap_or_default(),
+        objective,
+        nodes: Some(nodes),
+        raw,
+        elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+        message: "native Rust exact enumeration fallback".to_string(),
+    }
+}
+
 pub fn solve_cp_sat_json_with_external_reference(
     model: &Value,
     options: &ExternalCpSatReferenceOptions,
 ) -> ExternalCpSatReferenceRun {
+    let started = Instant::now();
+    if options.solver == ExternalCpSatReferenceSolver::RustEnumeration {
+        return solve_cp_sat_json_with_rust_enumeration(model, options, started);
+    }
+
     let Some(solver_arg) = options.solver.direct_cp_sat_json_solver_arg() else {
         return ExternalCpSatReferenceRun {
             solver: options.solver,
@@ -405,7 +912,6 @@ pub fn solve_cp_sat_json_with_external_reference(
         };
     };
 
-    let started = Instant::now();
     let script = external_cp_sat_reference_script();
     let mut command = Command::new(python_command());
     if let Some(working_dir) = script_working_dir(&script) {
@@ -648,23 +1154,29 @@ mod tests {
             .filter(|spec| spec.supports_ecosystem_cp_assignment)
             .count();
 
-        assert_eq!(specs.len(), 18);
-        assert_eq!(direct, 3);
+        assert_eq!(specs.len(), 19);
+        assert_eq!(direct, 4);
         assert_eq!(ecosystem, 15);
+        assert!(specs.iter().any(|spec| {
+            spec.solver == ExternalCpSatReferenceSolver::RustEnumeration
+                && spec.family == ExternalCpSatReferenceFamily::Fallback
+                && spec.supports_cp_sat_json
+        }));
         assert!(specs.iter().any(|spec| {
             spec.solver == ExternalCpSatReferenceSolver::ChocoSolver
                 && spec.family == ExternalCpSatReferenceFamily::EcosystemReference
         }));
+        assert!(ExternalCpSatReferenceSolver::RustEnumeration.supports_cp_sat_json());
         assert!(ExternalCpSatReferenceSolver::PythonEnumeration.supports_cp_sat_json());
         assert!(!ExternalCpSatReferenceSolver::ChocoSolver.supports_cp_sat_json());
     }
 
     #[test]
-    fn cp_sat_python_enumeration_bridge_solves_same_input_json() {
+    fn cp_sat_rust_enumeration_solves_same_input_json() {
         let run = solve_cp_sat_json_with_external_reference(
             &tiny_cp_sat_model(),
             &ExternalCpSatReferenceOptions {
-                solver: ExternalCpSatReferenceSolver::PythonEnumeration,
+                solver: ExternalCpSatReferenceSolver::RustEnumeration,
                 ..Default::default()
             },
         );
@@ -672,7 +1184,47 @@ mod tests {
         assert_eq!(run.status, ExternalCpSatReferenceStatus::Optimal);
         assert_eq!(run.assignment, vec![1, 0]);
         assert_eq!(run.objective, Some(1.0));
-        assert_eq!(run.backend, "python:cp-enumeration");
+        assert_eq!(run.backend, "rust:cp-enumeration");
+    }
+
+    #[test]
+    fn cp_sat_rust_enumeration_handles_bool_and_all_different() {
+        let model = json!({
+            "variables": [
+                {"name": "a", "domain": [0, 1]},
+                {"name": "b", "domain": [0, 1]},
+                {"name": "c", "domain": [0, 1]}
+            ],
+            "constraints": [
+                {
+                    "kind": "exactly_one",
+                    "literals": [
+                        {"var": 0, "positive": true},
+                        {"var": 1, "positive": true}
+                    ]
+                },
+                {"kind": "implication", "antecedent": {"var": 0}, "consequent": {"var": 2}},
+                {"kind": "linear_domain", "terms": [{"var": 2, "coeff": 1}], "intervals": [{"lb": 1, "ub": 1}]}
+            ],
+            "objective": {
+                "sense": "max",
+                "terms": [
+                    {"var": 0, "coeff": 2},
+                    {"var": 1, "coeff": 1}
+                ]
+            }
+        });
+        let run = solve_cp_sat_json_with_external_reference(
+            &model,
+            &ExternalCpSatReferenceOptions {
+                solver: ExternalCpSatReferenceSolver::RustEnumeration,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(run.status, ExternalCpSatReferenceStatus::Optimal);
+        assert_eq!(run.assignment, vec![1, 0, 1]);
+        assert_eq!(run.objective, Some(2.0));
     }
 
     #[test]

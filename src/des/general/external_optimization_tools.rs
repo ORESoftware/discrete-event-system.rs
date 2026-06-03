@@ -51,11 +51,15 @@ pub enum ExternalOptimizationTool {
     PyScipOpt,
     PythonMip,
     GurobiPy,
+    CplexPython,
+    XpressPython,
     Docplex,
     OrToolsPython,
     OrToolsGlop,
     OrToolsPdlp,
+    OrToolsCpSat,
     ScipyOptimize,
+    MosekPython,
     Jump,
     Ampl,
     Gams,
@@ -95,6 +99,7 @@ pub enum ExternalOptimizationTool {
     CbcCli,
     ClpCli,
     SoplexCli,
+    QsoptExCli,
     LpSolveCli,
     GurobiCli,
     CplexCli,
@@ -105,6 +110,9 @@ pub enum ExternalOptimizationTool {
     RustLinprog,
     Argmin,
     Nlopt,
+    GurobiRust,
+    CplexRust,
+    IpoptRust,
     HighsRust,
     ScipRust,
     CbcRust,
@@ -144,11 +152,15 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::PyScipOpt => "pyscipopt",
             ExternalOptimizationTool::PythonMip => "python-mip",
             ExternalOptimizationTool::GurobiPy => "gurobipy",
+            ExternalOptimizationTool::CplexPython => "cplex-python",
+            ExternalOptimizationTool::XpressPython => "xpress-python",
             ExternalOptimizationTool::Docplex => "docplex",
             ExternalOptimizationTool::OrToolsPython => "ortools-python",
             ExternalOptimizationTool::OrToolsGlop => "ortools-glop",
             ExternalOptimizationTool::OrToolsPdlp => "ortools-pdlp",
+            ExternalOptimizationTool::OrToolsCpSat => "ortools-cp-sat",
             ExternalOptimizationTool::ScipyOptimize => "scipy-optimize",
+            ExternalOptimizationTool::MosekPython => "mosek-python",
             ExternalOptimizationTool::Jump => "jump",
             ExternalOptimizationTool::Ampl => "ampl",
             ExternalOptimizationTool::Gams => "gams",
@@ -188,6 +200,7 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::CbcCli => "cbc-cli",
             ExternalOptimizationTool::ClpCli => "clp-cli",
             ExternalOptimizationTool::SoplexCli => "soplex-cli",
+            ExternalOptimizationTool::QsoptExCli => "qsopt-ex-cli",
             ExternalOptimizationTool::LpSolveCli => "lp-solve-cli",
             ExternalOptimizationTool::GurobiCli => "gurobi-cli",
             ExternalOptimizationTool::CplexCli => "cplex-cli",
@@ -198,6 +211,9 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::RustLinprog => "rust-linprog",
             ExternalOptimizationTool::Argmin => "argmin",
             ExternalOptimizationTool::Nlopt => "nlopt",
+            ExternalOptimizationTool::GurobiRust => "gurobi-rust",
+            ExternalOptimizationTool::CplexRust => "cplex-rust",
+            ExternalOptimizationTool::IpoptRust => "ipopt-rust",
             ExternalOptimizationTool::HighsRust => "highs-rust",
             ExternalOptimizationTool::ScipRust => "scip-rust",
             ExternalOptimizationTool::CbcRust => "cbc-rust",
@@ -237,11 +253,15 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::PyScipOpt => "PySCIPOpt",
             ExternalOptimizationTool::PythonMip => "Python-MIP",
             ExternalOptimizationTool::GurobiPy => "gurobipy",
+            ExternalOptimizationTool::CplexPython => "IBM ILOG CPLEX Python API",
+            ExternalOptimizationTool::XpressPython => "FICO Xpress Python API",
             ExternalOptimizationTool::Docplex => "DOcplex",
             ExternalOptimizationTool::OrToolsPython => "Google OR-Tools Python",
             ExternalOptimizationTool::OrToolsGlop => "Google OR-Tools GLOP",
             ExternalOptimizationTool::OrToolsPdlp => "Google OR-Tools PDLP",
+            ExternalOptimizationTool::OrToolsCpSat => "Google OR-Tools CP-SAT FlatZinc",
             ExternalOptimizationTool::ScipyOptimize => "SciPy optimize",
+            ExternalOptimizationTool::MosekPython => "MOSEK Python API",
             ExternalOptimizationTool::Jump => "JuMP",
             ExternalOptimizationTool::Ampl => "AMPL",
             ExternalOptimizationTool::Gams => "GAMS",
@@ -281,6 +301,7 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::CbcCli => "COIN-OR CBC CLI",
             ExternalOptimizationTool::ClpCli => "COIN-OR CLP CLI",
             ExternalOptimizationTool::SoplexCli => "SoPlex CLI",
+            ExternalOptimizationTool::QsoptExCli => "QSopt_ex CLI",
             ExternalOptimizationTool::LpSolveCli => "lp_solve CLI",
             ExternalOptimizationTool::GurobiCli => "Gurobi Optimizer CLI",
             ExternalOptimizationTool::CplexCli => "IBM ILOG CPLEX Optimizer CLI",
@@ -291,6 +312,9 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::RustLinprog => "rust-linprog",
             ExternalOptimizationTool::Argmin => "argmin",
             ExternalOptimizationTool::Nlopt => "NLopt Rust bindings",
+            ExternalOptimizationTool::GurobiRust => "Gurobi Rust bindings",
+            ExternalOptimizationTool::CplexRust => "CPLEX Rust bindings",
+            ExternalOptimizationTool::IpoptRust => "Ipopt Rust bindings",
             ExternalOptimizationTool::HighsRust => "HiGHS Rust bindings",
             ExternalOptimizationTool::ScipRust => "SCIP Rust bindings",
             ExternalOptimizationTool::CbcRust => "CBC Rust bindings",
@@ -321,11 +345,14 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::PyScipOpt
             | ExternalOptimizationTool::PythonMip
             | ExternalOptimizationTool::GurobiPy
+            | ExternalOptimizationTool::CplexPython
+            | ExternalOptimizationTool::XpressPython
             | ExternalOptimizationTool::Docplex
             | ExternalOptimizationTool::OrToolsPython
             | ExternalOptimizationTool::OrToolsGlop
             | ExternalOptimizationTool::OrToolsPdlp
             | ExternalOptimizationTool::ScipyOptimize
+            | ExternalOptimizationTool::MosekPython
             | ExternalOptimizationTool::Casadi
             | ExternalOptimizationTool::Osqp
             | ExternalOptimizationTool::Scs
@@ -334,6 +361,7 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Jump => ExternalOptimizationLanguage::Julia,
             ExternalOptimizationTool::Ampl
             | ExternalOptimizationTool::Gams
+            | ExternalOptimizationTool::OrToolsCpSat
             | ExternalOptimizationTool::Hexaly
             | ExternalOptimizationTool::FastDownward
             | ExternalOptimizationTool::LpgTd
@@ -369,6 +397,7 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::CbcCli
             | ExternalOptimizationTool::ClpCli
             | ExternalOptimizationTool::SoplexCli
+            | ExternalOptimizationTool::QsoptExCli
             | ExternalOptimizationTool::LpSolveCli
             | ExternalOptimizationTool::GurobiCli
             | ExternalOptimizationTool::CplexCli
@@ -384,6 +413,9 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::RustLinprog
             | ExternalOptimizationTool::Argmin
             | ExternalOptimizationTool::Nlopt
+            | ExternalOptimizationTool::GurobiRust
+            | ExternalOptimizationTool::CplexRust
+            | ExternalOptimizationTool::IpoptRust
             | ExternalOptimizationTool::HighsRust
             | ExternalOptimizationTool::ScipRust
             | ExternalOptimizationTool::CbcRust => ExternalOptimizationLanguage::Rust,
@@ -437,6 +469,7 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::CbcCli
             | ExternalOptimizationTool::ClpCli
             | ExternalOptimizationTool::SoplexCli
+            | ExternalOptimizationTool::QsoptExCli
             | ExternalOptimizationTool::LpSolveCli
             | ExternalOptimizationTool::GurobiCli
             | ExternalOptimizationTool::CplexCli
@@ -447,6 +480,7 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::RustLinprog => ExternalOptimizationFamily::LinearMip,
             ExternalOptimizationTool::Cvxpy
             | ExternalOptimizationTool::Cvxopt
+            | ExternalOptimizationTool::MosekPython
             | ExternalOptimizationTool::Mosek
             | ExternalOptimizationTool::Copt
             | ExternalOptimizationTool::Osqp
@@ -468,25 +502,32 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::OpenSmt
             | ExternalOptimizationTool::SmtInterpol
             | ExternalOptimizationTool::Princess => ExternalOptimizationFamily::SmtOmt,
-            ExternalOptimizationTool::OrToolsJava | ExternalOptimizationTool::OrToolsPython => {
-                ExternalOptimizationFamily::CpSatRouting
-            }
+            ExternalOptimizationTool::OrToolsJava
+            | ExternalOptimizationTool::OrToolsPython
+            | ExternalOptimizationTool::OrToolsCpSat => ExternalOptimizationFamily::CpSatRouting,
             ExternalOptimizationTool::Hexaly => ExternalOptimizationFamily::HybridOptimization,
             ExternalOptimizationTool::Argmin
             | ExternalOptimizationTool::Nlopt
             | ExternalOptimizationTool::ScipyOptimize
             | ExternalOptimizationTool::Minotaur
             | ExternalOptimizationTool::Ipopt
+            | ExternalOptimizationTool::IpoptRust
             | ExternalOptimizationTool::Bonmin
             | ExternalOptimizationTool::Couenne
             | ExternalOptimizationTool::Knitro
             | ExternalOptimizationTool::Baron
             | ExternalOptimizationTool::Casadi => ExternalOptimizationFamily::NonlinearOptimization,
-            ExternalOptimizationTool::HighsRust
+            ExternalOptimizationTool::GurobiRust
+            | ExternalOptimizationTool::CplexRust
+            | ExternalOptimizationTool::HighsRust
             | ExternalOptimizationTool::ScipRust
             | ExternalOptimizationTool::CbcRust
             | ExternalOptimizationTool::PyScipOpt
-            | ExternalOptimizationTool::GurobiPy => ExternalOptimizationFamily::NativeSolverBinding,
+            | ExternalOptimizationTool::GurobiPy
+            | ExternalOptimizationTool::CplexPython
+            | ExternalOptimizationTool::XpressPython => {
+                ExternalOptimizationFamily::NativeSolverBinding
+            }
         }
     }
 
@@ -498,6 +539,7 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::OjAlgo
             | ExternalOptimizationTool::OrToolsJava
             | ExternalOptimizationTool::OrToolsPython
+            | ExternalOptimizationTool::OrToolsCpSat
             | ExternalOptimizationTool::RustLinprog
             | ExternalOptimizationTool::HighsRust
             | ExternalOptimizationTool::ScipRust
@@ -515,6 +557,7 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::CbcCli
             | ExternalOptimizationTool::ClpCli
             | ExternalOptimizationTool::SoplexCli
+            | ExternalOptimizationTool::QsoptExCli
             | ExternalOptimizationTool::LpSolveCli
             | ExternalOptimizationTool::Symphony
             | ExternalOptimizationTool::GurobiCli
@@ -557,6 +600,9 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Casadi => ExternalOptimizationExactness::ModelingLayer,
             ExternalOptimizationTool::Argmin
             | ExternalOptimizationTool::Nlopt
+            | ExternalOptimizationTool::GurobiRust
+            | ExternalOptimizationTool::CplexRust
+            | ExternalOptimizationTool::IpoptRust
             | ExternalOptimizationTool::OrToolsGlop
             | ExternalOptimizationTool::OrToolsPdlp
             | ExternalOptimizationTool::Cvxopt
@@ -579,6 +625,9 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::Csdp
             | ExternalOptimizationTool::PyScipOpt
             | ExternalOptimizationTool::GurobiPy
+            | ExternalOptimizationTool::CplexPython
+            | ExternalOptimizationTool::XpressPython
+            | ExternalOptimizationTool::MosekPython
             | ExternalOptimizationTool::ScipyOptimize => ExternalOptimizationExactness::Numerical,
         }
     }
@@ -591,6 +640,7 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::CbcCli => Some(ExternalLinearCliSolver::Cbc),
             ExternalOptimizationTool::ClpCli => Some(ExternalLinearCliSolver::Clp),
             ExternalOptimizationTool::SoplexCli => Some(ExternalLinearCliSolver::Soplex),
+            ExternalOptimizationTool::QsoptExCli => Some(ExternalLinearCliSolver::QsoptEx),
             ExternalOptimizationTool::LpSolveCli => Some(ExternalLinearCliSolver::LpSolve),
             ExternalOptimizationTool::GurobiCli => Some(ExternalLinearCliSolver::Gurobi),
             ExternalOptimizationTool::CplexCli => Some(ExternalLinearCliSolver::Cplex),
@@ -649,6 +699,12 @@ impl ExternalOptimizationTool {
                 &["ores-python-mip-adapter", "python-mip-adapter"]
             }
             ExternalOptimizationTool::GurobiPy => &["ores-gurobipy-adapter", "gurobipy-adapter"],
+            ExternalOptimizationTool::CplexPython => {
+                &["ores-cplex-python-adapter", "cplex-python-adapter"]
+            }
+            ExternalOptimizationTool::XpressPython => {
+                &["ores-xpress-python-adapter", "xpress-python-adapter"]
+            }
             ExternalOptimizationTool::Docplex => &["ores-docplex-adapter", "docplex-adapter"],
             ExternalOptimizationTool::OrToolsPython => {
                 &["ores-ortools-python-adapter", "ortools-python-adapter"]
@@ -661,6 +717,9 @@ impl ExternalOptimizationTool {
             }
             ExternalOptimizationTool::ScipyOptimize => {
                 &["ores-scipy-optimize-adapter", "scipy-optimize-adapter"]
+            }
+            ExternalOptimizationTool::MosekPython => {
+                &["ores-mosek-python-adapter", "mosek-python-adapter"]
             }
             ExternalOptimizationTool::Jump => &["ores-jump-adapter", "jump-adapter"],
             ExternalOptimizationTool::Ampl => &["ores-ampl-adapter", "ampl-adapter"],
@@ -705,11 +764,13 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::CbcCli
             | ExternalOptimizationTool::ClpCli
             | ExternalOptimizationTool::SoplexCli
+            | ExternalOptimizationTool::QsoptExCli
             | ExternalOptimizationTool::LpSolveCli
             | ExternalOptimizationTool::GurobiCli
             | ExternalOptimizationTool::CplexCli
             | ExternalOptimizationTool::XpressCli
-            | ExternalOptimizationTool::LindoCli => &[],
+            | ExternalOptimizationTool::LindoCli
+            | ExternalOptimizationTool::OrToolsCpSat => &[],
             ExternalOptimizationTool::GoodLp => &["ores-good-lp-adapter", "good-lp-adapter"],
             ExternalOptimizationTool::LpModeler => {
                 &["ores-lp-modeler-adapter", "lp-modeler-adapter"]
@@ -719,6 +780,15 @@ impl ExternalOptimizationTool {
             }
             ExternalOptimizationTool::Argmin => &["ores-argmin-adapter", "argmin-adapter"],
             ExternalOptimizationTool::Nlopt => &["ores-nlopt-adapter", "nlopt-adapter"],
+            ExternalOptimizationTool::GurobiRust => {
+                &["ores-gurobi-rust-adapter", "gurobi-rust-adapter"]
+            }
+            ExternalOptimizationTool::CplexRust => {
+                &["ores-cplex-rust-adapter", "cplex-rust-adapter"]
+            }
+            ExternalOptimizationTool::IpoptRust => {
+                &["ores-ipopt-rust-adapter", "ipopt-rust-adapter"]
+            }
             ExternalOptimizationTool::HighsRust => {
                 &["ores-highs-rust-adapter", "highs-rust-adapter"]
             }
@@ -734,6 +804,9 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::RustLinprog => &["rust-linprog", "linprog"],
             ExternalOptimizationTool::Argmin => &["argmin"],
             ExternalOptimizationTool::Nlopt => &["nlopt", "nlopt-rs", "nlopt-sys"],
+            ExternalOptimizationTool::GurobiRust => &["grb", "gurobi"],
+            ExternalOptimizationTool::CplexRust => &["cplex-rs", "cplex-rs-sys", "cplex_sys"],
+            ExternalOptimizationTool::IpoptRust => &["ipopt", "ipopt-sys"],
             ExternalOptimizationTool::HighsRust => &["highs", "highs-sys", "highs-rs"],
             ExternalOptimizationTool::ScipRust => &["russcip", "scip-sys"],
             ExternalOptimizationTool::CbcRust => &["coin_cbc", "cbc-sys"],
@@ -753,11 +826,14 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::PyScipOpt => &["pyscipopt"],
             ExternalOptimizationTool::PythonMip => &["mip"],
             ExternalOptimizationTool::GurobiPy => &["gurobipy"],
+            ExternalOptimizationTool::CplexPython => &["cplex"],
+            ExternalOptimizationTool::XpressPython => &["xpress"],
             ExternalOptimizationTool::Docplex => &["docplex"],
             ExternalOptimizationTool::OrToolsPython
             | ExternalOptimizationTool::OrToolsGlop
             | ExternalOptimizationTool::OrToolsPdlp => &["ortools"],
             ExternalOptimizationTool::ScipyOptimize => &["scipy"],
+            ExternalOptimizationTool::MosekPython => &["mosek"],
             ExternalOptimizationTool::Casadi => &["casadi"],
             ExternalOptimizationTool::Osqp => &["osqp"],
             ExternalOptimizationTool::Scs => &["scs"],
@@ -867,6 +943,12 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::GurobiPy => {
                 "Official Python API for Gurobi Optimizer models, parameters, callbacks, and attributes"
             }
+            ExternalOptimizationTool::CplexPython => {
+                "Official IBM ILOG CPLEX Python API for direct model, parameter, and solution checks"
+            }
+            ExternalOptimizationTool::XpressPython => {
+                "Official FICO Xpress Python API for direct optimizer model and solution checks"
+            }
             ExternalOptimizationTool::Docplex => {
                 "IBM DOcplex object-oriented Python modeling API for CPLEX and CP Optimizer"
             }
@@ -879,8 +961,14 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::OrToolsPdlp => {
                 "OR-Tools PDLP first-order linear-programming engine for large sparse LP cross-checks"
             }
+            ExternalOptimizationTool::OrToolsCpSat => {
+                "OR-Tools CP-SAT FlatZinc executable for MiniZinc-model cross-checks"
+            }
             ExternalOptimizationTool::ScipyOptimize => {
                 "SciPy numerical optimization routines for nonlinear and least-squares reference checks"
+            }
+            ExternalOptimizationTool::MosekPython => {
+                "Official MOSEK Python API for LP, conic, convex, and mixed-integer model cross-checks"
             }
             ExternalOptimizationTool::Jump => {
                 "Julia algebraic modeling layer using MathOptInterface-compatible solvers"
@@ -999,6 +1087,9 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::SoplexCli => {
                 "Native SoPlex command-line bridge for local LP cross-validation and rational-mode checks"
             }
+            ExternalOptimizationTool::QsoptExCli => {
+                "Native QSopt_ex exact-rational LP command-line bridge for local optimum validation"
+            }
             ExternalOptimizationTool::LpSolveCli => {
                 "Native lp_solve command-line bridge for local LP/MIP cross-validation"
             }
@@ -1024,6 +1115,15 @@ impl ExternalOptimizationTool {
             }
             ExternalOptimizationTool::Nlopt => {
                 "Rust bindings to NLopt nonlinear optimization algorithms"
+            }
+            ExternalOptimizationTool::GurobiRust => {
+                "Rust bindings to Gurobi Optimizer using local, non-vendored solver libraries"
+            }
+            ExternalOptimizationTool::CplexRust => {
+                "Rust bindings to IBM ILOG CPLEX using local, non-vendored solver libraries"
+            }
+            ExternalOptimizationTool::IpoptRust => {
+                "Rust bindings to Ipopt nonlinear optimization using local native libraries"
             }
             ExternalOptimizationTool::HighsRust => "Rust bindings to HiGHS LP/MIP/QP",
             ExternalOptimizationTool::ScipRust => "Rust bindings to SCIP MIP/CP stack",
@@ -1154,11 +1254,15 @@ pub fn external_optimization_tools() -> &'static [ExternalOptimizationTool] {
         ExternalOptimizationTool::PyScipOpt,
         ExternalOptimizationTool::PythonMip,
         ExternalOptimizationTool::GurobiPy,
+        ExternalOptimizationTool::CplexPython,
+        ExternalOptimizationTool::XpressPython,
         ExternalOptimizationTool::Docplex,
         ExternalOptimizationTool::OrToolsPython,
         ExternalOptimizationTool::OrToolsGlop,
         ExternalOptimizationTool::OrToolsPdlp,
+        ExternalOptimizationTool::OrToolsCpSat,
         ExternalOptimizationTool::ScipyOptimize,
+        ExternalOptimizationTool::MosekPython,
         ExternalOptimizationTool::Jump,
         ExternalOptimizationTool::Ampl,
         ExternalOptimizationTool::Gams,
@@ -1198,6 +1302,7 @@ pub fn external_optimization_tools() -> &'static [ExternalOptimizationTool] {
         ExternalOptimizationTool::CbcCli,
         ExternalOptimizationTool::ClpCli,
         ExternalOptimizationTool::SoplexCli,
+        ExternalOptimizationTool::QsoptExCli,
         ExternalOptimizationTool::LpSolveCli,
         ExternalOptimizationTool::GurobiCli,
         ExternalOptimizationTool::CplexCli,
@@ -1208,6 +1313,9 @@ pub fn external_optimization_tools() -> &'static [ExternalOptimizationTool] {
         ExternalOptimizationTool::RustLinprog,
         ExternalOptimizationTool::Argmin,
         ExternalOptimizationTool::Nlopt,
+        ExternalOptimizationTool::GurobiRust,
+        ExternalOptimizationTool::CplexRust,
+        ExternalOptimizationTool::IpoptRust,
         ExternalOptimizationTool::HighsRust,
         ExternalOptimizationTool::ScipRust,
         ExternalOptimizationTool::CbcRust,
@@ -1500,6 +1608,16 @@ pub fn artifact_env_names(tool: ExternalOptimizationTool) -> Vec<String> {
             names.push("GUROBI_HOME".to_string());
             names.push("GRB_LICENSE_FILE".to_string());
         }
+        ExternalOptimizationTool::CplexPython => {
+            names.push("CPLEX_PYTHON".to_string());
+            names.push("CPLEX_STUDIO_DIR".to_string());
+            names.push("CPLEX_HOME".to_string());
+        }
+        ExternalOptimizationTool::XpressPython => {
+            names.push("XPRESS_PYTHON".to_string());
+            names.push("XPRESSDIR".to_string());
+            names.push("XPRESS_HOME".to_string());
+        }
         ExternalOptimizationTool::Docplex => {
             names.push("DOCPLEX_PYTHON".to_string());
             names.push("CPLEX_STUDIO_DIR".to_string());
@@ -1509,8 +1627,20 @@ pub fn artifact_env_names(tool: ExternalOptimizationTool) -> Vec<String> {
         | ExternalOptimizationTool::OrToolsPdlp => {
             names.push("ORTOOLS_PYTHON".to_string());
         }
+        ExternalOptimizationTool::OrToolsCpSat => {
+            names.push("FZN_CP_SAT_CMD".to_string());
+            names.push("ORTOOLS_CP_SAT_CMD".to_string());
+            names.push("ORTOOLS_HOME".to_string());
+            names.push("MINIZINC_HOME".to_string());
+        }
         ExternalOptimizationTool::ScipyOptimize => {
             names.push("SCIPY_PYTHON".to_string());
+        }
+        ExternalOptimizationTool::MosekPython => {
+            names.push("MOSEK_PYTHON".to_string());
+            names.push("MOSEK_HOME".to_string());
+            names.push("MSKHOME".to_string());
+            names.push("MOSEKLM_LICENSE_FILE".to_string());
         }
         ExternalOptimizationTool::Jump => {
             names.push("JULIA_PROJECT".to_string());
@@ -1631,6 +1761,7 @@ pub fn artifact_env_names(tool: ExternalOptimizationTool) -> Vec<String> {
         | ExternalOptimizationTool::CbcCli
         | ExternalOptimizationTool::ClpCli
         | ExternalOptimizationTool::SoplexCli
+        | ExternalOptimizationTool::QsoptExCli
         | ExternalOptimizationTool::LpSolveCli
         | ExternalOptimizationTool::GurobiCli
         | ExternalOptimizationTool::CplexCli
@@ -1647,6 +1778,21 @@ pub fn artifact_env_names(tool: ExternalOptimizationTool) -> Vec<String> {
         }
         ExternalOptimizationTool::Nlopt => {
             names.push("NLOPT_DIR".to_string());
+        }
+        ExternalOptimizationTool::GurobiRust => {
+            names.push("GUROBI_RUST_CARGO_MANIFEST".to_string());
+            names.push("GUROBI_HOME".to_string());
+            names.push("GRB_LICENSE_FILE".to_string());
+        }
+        ExternalOptimizationTool::CplexRust => {
+            names.push("CPLEX_RUST_CARGO_MANIFEST".to_string());
+            names.push("CPLEX_STUDIO_DIR".to_string());
+            names.push("CPLEX_HOME".to_string());
+        }
+        ExternalOptimizationTool::IpoptRust => {
+            names.push("IPOPT_RUST_CARGO_MANIFEST".to_string());
+            names.push("IPOPT_DIR".to_string());
+            names.push("IPOPT_HOME".to_string());
         }
         ExternalOptimizationTool::HighsRust => {
             names.push("HIGHS_DIR".to_string());
@@ -1707,11 +1853,20 @@ pub fn external_optimization_command_dir_env_names(tool: ExternalOptimizationToo
         ExternalOptimizationTool::PyScipOpt => &["SCIPOPTDIR", "SCIP_DIR", "SCIP_HOME"],
         ExternalOptimizationTool::PythonMip => &["PYTHON_MIP_HOME", "PYTHON_MIP_DIR"],
         ExternalOptimizationTool::GurobiPy => &["GUROBI_HOME"],
+        ExternalOptimizationTool::CplexPython => &["CPLEX_STUDIO_DIR", "CPLEX_HOME"],
+        ExternalOptimizationTool::XpressPython => &["XPRESSDIR", "XPRESS_DIR", "XPRESS_HOME"],
         ExternalOptimizationTool::Docplex => &["DOCPLEX_HOME", "CPLEX_STUDIO_DIR", "CPLEX_HOME"],
         ExternalOptimizationTool::OrToolsPython
         | ExternalOptimizationTool::OrToolsGlop
         | ExternalOptimizationTool::OrToolsPdlp => &["ORTOOLS_HOME", "ORTOOLS_PYTHON_HOME"][..],
+        ExternalOptimizationTool::OrToolsCpSat => &[
+            "ORTOOLS_HOME",
+            "ORTOOLS_DIR",
+            "MINIZINC_HOME",
+            "MINIZINC_DIR",
+        ],
         ExternalOptimizationTool::ScipyOptimize => &["SCIPY_HOME", "SCIPY_DIR"],
+        ExternalOptimizationTool::MosekPython => &["MOSEK_HOME", "MSKHOME"],
         ExternalOptimizationTool::Ampl => &["AMPL_HOME", "AMPL_DIR"],
         ExternalOptimizationTool::Gams => &["GAMS_DIR", "GAMSDIR", "GAMS_HOME"],
         ExternalOptimizationTool::Hexaly => &[
@@ -1759,6 +1914,9 @@ pub fn external_optimization_command_dir_env_names(tool: ExternalOptimizationToo
         ExternalOptimizationTool::CbcCli => &["CBC_DIR", "CBC_HOME", "COINOR_DIR", "COINOR_HOME"],
         ExternalOptimizationTool::ClpCli => &["CLP_DIR", "CLP_HOME", "COINOR_DIR", "COINOR_HOME"],
         ExternalOptimizationTool::SoplexCli => &["SOPLEX_DIR", "SOPLEX_HOME"],
+        ExternalOptimizationTool::QsoptExCli => {
+            &["QSOPT_EX_DIR", "QSOPT_EX_HOME", "QSOPT_DIR", "QSOPT_HOME"]
+        }
         ExternalOptimizationTool::LpSolveCli => &[
             "LP_SOLVE_DIR",
             "LPSOLVE_DIR",
@@ -1772,6 +1930,9 @@ pub fn external_optimization_command_dir_env_names(tool: ExternalOptimizationToo
             &["LINDO_HOME", "LINDO_DIR", "LINDOAPI_HOME", "LINDOAPI_DIR"]
         }
         ExternalOptimizationTool::Nlopt => &["NLOPT_DIR", "NLOPT_HOME"],
+        ExternalOptimizationTool::GurobiRust => &["GUROBI_HOME"],
+        ExternalOptimizationTool::CplexRust => &["CPLEX_STUDIO_DIR", "CPLEX_HOME"],
+        ExternalOptimizationTool::IpoptRust => &["IPOPT_DIR", "IPOPT_HOME"],
         ExternalOptimizationTool::HighsRust => &["HIGHS_DIR", "HIGHS_HOME"],
         ExternalOptimizationTool::ScipRust => &["SCIPOPTDIR", "SCIP_DIR", "SCIP_HOME"],
         ExternalOptimizationTool::CbcRust => &["CBC_DIR", "CBC_HOME", "COINOR_DIR", "COINOR_HOME"],
@@ -2534,7 +2695,7 @@ mod tests {
     #[test]
     fn registry_covers_requested_java_and_rust_ecosystems() {
         let specs = external_optimization_tool_specs();
-        assert_eq!(external_optimization_tools().len(), 88);
+        assert_eq!(external_optimization_tools().len(), 96);
         assert_eq!(
             specs
                 .iter()
@@ -2547,14 +2708,14 @@ mod tests {
                 .iter()
                 .filter(|spec| spec.language == ExternalOptimizationLanguage::Rust)
                 .count(),
-            8
+            11
         );
         assert_eq!(
             specs
                 .iter()
                 .filter(|spec| spec.language == ExternalOptimizationLanguage::Python)
                 .count(),
-            20
+            23
         );
         assert_eq!(
             specs
@@ -2568,7 +2729,7 @@ mod tests {
                 .iter()
                 .filter(|spec| spec.language == ExternalOptimizationLanguage::Native)
                 .count(),
-            47
+            49
         );
         assert!(specs.iter().any(|spec| {
             spec.tool == ExternalOptimizationTool::ChocoSolver
@@ -2628,6 +2789,18 @@ mod tests {
                 && spec.notes.contains("PDLP")
         }));
         assert!(specs.iter().any(|spec| {
+            spec.tool == ExternalOptimizationTool::OrToolsCpSat
+                && spec.language == ExternalOptimizationLanguage::Native
+                && spec.family == ExternalOptimizationFamily::CpSatRouting
+                && spec.exactness == ExternalOptimizationExactness::Exact
+                && spec.adapter_command_aliases.is_empty()
+                && spec
+                    .artifact_env_names
+                    .iter()
+                    .any(|name| name == "FZN_CP_SAT_CMD")
+                && spec.notes.contains("FlatZinc")
+        }));
+        assert!(specs.iter().any(|spec| {
             spec.tool == ExternalOptimizationTool::Cpmpy
                 && spec.family == ExternalOptimizationFamily::ConstraintProgramming
                 && spec.exactness == ExternalOptimizationExactness::ModelingLayer
@@ -2648,6 +2821,30 @@ mod tests {
                 && spec.exactness == ExternalOptimizationExactness::Numerical
         }));
         assert!(specs.iter().any(|spec| {
+            spec.tool == ExternalOptimizationTool::CplexPython
+                && spec.language == ExternalOptimizationLanguage::Python
+                && spec.family == ExternalOptimizationFamily::NativeSolverBinding
+                && spec.exactness == ExternalOptimizationExactness::Numerical
+                && spec.tool.python_modules().contains(&"cplex")
+                && spec.notes.contains("CPLEX Python API")
+        }));
+        assert!(specs.iter().any(|spec| {
+            spec.tool == ExternalOptimizationTool::XpressPython
+                && spec.language == ExternalOptimizationLanguage::Python
+                && spec.family == ExternalOptimizationFamily::NativeSolverBinding
+                && spec.exactness == ExternalOptimizationExactness::Numerical
+                && spec.tool.python_modules().contains(&"xpress")
+                && spec.notes.contains("Xpress Python API")
+        }));
+        assert!(specs.iter().any(|spec| {
+            spec.tool == ExternalOptimizationTool::MosekPython
+                && spec.language == ExternalOptimizationLanguage::Python
+                && spec.family == ExternalOptimizationFamily::ConvexOptimization
+                && spec.exactness == ExternalOptimizationExactness::Numerical
+                && spec.tool.python_modules().contains(&"mosek")
+                && spec.notes.contains("MOSEK Python API")
+        }));
+        assert!(specs.iter().any(|spec| {
             spec.tool == ExternalOptimizationTool::Hexaly
                 && spec.family == ExternalOptimizationFamily::HybridOptimization
                 && spec.exactness == ExternalOptimizationExactness::Heuristic
@@ -2656,6 +2853,35 @@ mod tests {
             spec.tool == ExternalOptimizationTool::Ipopt
                 && spec.family == ExternalOptimizationFamily::NonlinearOptimization
                 && spec.exactness == ExternalOptimizationExactness::Numerical
+        }));
+        assert!(specs.iter().any(|spec| {
+            spec.tool == ExternalOptimizationTool::GurobiRust
+                && spec.language == ExternalOptimizationLanguage::Rust
+                && spec.family == ExternalOptimizationFamily::NativeSolverBinding
+                && spec.exactness == ExternalOptimizationExactness::Numerical
+                && spec.tool.cargo_crates().contains(&"grb")
+                && spec
+                    .adapter_command_aliases
+                    .contains(&"gurobi-rust-adapter")
+                && spec.notes.contains("Gurobi Optimizer")
+        }));
+        assert!(specs.iter().any(|spec| {
+            spec.tool == ExternalOptimizationTool::CplexRust
+                && spec.language == ExternalOptimizationLanguage::Rust
+                && spec.family == ExternalOptimizationFamily::NativeSolverBinding
+                && spec.exactness == ExternalOptimizationExactness::Numerical
+                && spec.tool.cargo_crates().contains(&"cplex-rs")
+                && spec.adapter_command_aliases.contains(&"cplex-rust-adapter")
+                && spec.notes.contains("CPLEX")
+        }));
+        assert!(specs.iter().any(|spec| {
+            spec.tool == ExternalOptimizationTool::IpoptRust
+                && spec.language == ExternalOptimizationLanguage::Rust
+                && spec.family == ExternalOptimizationFamily::NonlinearOptimization
+                && spec.exactness == ExternalOptimizationExactness::Numerical
+                && spec.tool.cargo_crates().contains(&"ipopt")
+                && spec.adapter_command_aliases.contains(&"ipopt-rust-adapter")
+                && spec.notes.contains("Ipopt")
         }));
         assert!(specs.iter().any(|spec| {
             spec.tool == ExternalOptimizationTool::Mosek
@@ -2699,6 +2925,10 @@ mod tests {
             ExternalOptimizationTool::SoplexCli.linear_cli_solver(),
             Some(ExternalLinearCliSolver::Soplex)
         );
+        assert_eq!(
+            ExternalOptimizationTool::QsoptExCli.linear_cli_solver(),
+            Some(ExternalLinearCliSolver::QsoptEx)
+        );
     }
 
     #[test]
@@ -2719,6 +2949,20 @@ mod tests {
             artifact_env_names(ExternalOptimizationTool::GoodLp)[0],
             "ORES_GOOD_LP_CRATE"
         );
+        assert_eq!(
+            artifact_env_names(ExternalOptimizationTool::GurobiRust)[0],
+            "ORES_GUROBI_RUST_CRATE"
+        );
+        assert!(artifact_env_names(ExternalOptimizationTool::GurobiRust)
+            .contains(&"GUROBI_RUST_CARGO_MANIFEST".to_string()));
+        assert_eq!(
+            adapter_env_names(ExternalOptimizationTool::CplexRust)[0],
+            "ORES_CPLEX_RUST_ADAPTER"
+        );
+        assert!(artifact_env_names(ExternalOptimizationTool::CplexRust)
+            .contains(&"CPLEX_RUST_CARGO_MANIFEST".to_string()));
+        assert!(artifact_env_names(ExternalOptimizationTool::IpoptRust)
+            .contains(&"IPOPT_RUST_CARGO_MANIFEST".to_string()));
         assert_eq!(
             artifact_env_names(ExternalOptimizationTool::Pyomo)[0],
             "ORES_PYOMO_PYTHON"
@@ -2752,6 +2996,24 @@ mod tests {
             "ORES_GUROBIPY_PYTHON"
         );
         assert_eq!(
+            artifact_env_names(ExternalOptimizationTool::CplexPython)[0],
+            "ORES_CPLEX_PYTHON_PYTHON"
+        );
+        assert!(artifact_env_names(ExternalOptimizationTool::CplexPython)
+            .contains(&"CPLEX_STUDIO_DIR".to_string()));
+        assert_eq!(
+            artifact_env_names(ExternalOptimizationTool::XpressPython)[0],
+            "ORES_XPRESS_PYTHON_PYTHON"
+        );
+        assert!(artifact_env_names(ExternalOptimizationTool::XpressPython)
+            .contains(&"XPRESSDIR".to_string()));
+        assert_eq!(
+            artifact_env_names(ExternalOptimizationTool::MosekPython)[0],
+            "ORES_MOSEK_PYTHON_PYTHON"
+        );
+        assert!(artifact_env_names(ExternalOptimizationTool::MosekPython)
+            .contains(&"MOSEKLM_LICENSE_FILE".to_string()));
+        assert_eq!(
             artifact_env_names(ExternalOptimizationTool::Jump)[0],
             "ORES_JUMP_JULIA"
         );
@@ -2783,12 +3045,24 @@ mod tests {
             .contains(&"HIGHS_CMD".to_string()));
         assert!(artifact_env_names(ExternalOptimizationTool::SoplexCli)
             .contains(&"SOPLEX_CMD".to_string()));
+        assert!(artifact_env_names(ExternalOptimizationTool::QsoptExCli)
+            .contains(&"QSOPT_EX_CMD".to_string()));
         assert!(artifact_env_names(ExternalOptimizationTool::LpSolveCli)
             .contains(&"LP_SOLVE_CMD".to_string()));
         assert!(artifact_env_names(ExternalOptimizationTool::GurobiCli)
             .contains(&"GUROBI_CL_CMD".to_string()));
         assert!(artifact_env_names(ExternalOptimizationTool::LindoCli)
             .contains(&"LINDOAPI_CMD".to_string()));
+        assert_eq!(
+            artifact_env_names(ExternalOptimizationTool::OrToolsCpSat)[0],
+            "ORES_ORTOOLS_CP_SAT_DIR"
+        );
+        assert!(artifact_env_names(ExternalOptimizationTool::OrToolsCpSat)
+            .contains(&"FZN_CP_SAT_CMD".to_string()));
+        assert!(external_optimization_command_dir_env_names(
+            ExternalOptimizationTool::OrToolsCpSat
+        )
+        .contains(&"ORTOOLS_HOME".to_string()));
         assert!(
             external_optimization_command_dir_env_names(ExternalOptimizationTool::Ampl)
                 .contains(&"AMPL_HOME".to_string())
@@ -2838,6 +3112,30 @@ mod tests {
                 .contains(&"GRB_LICENSE_FILE".to_string())
         );
         assert!(
+            external_optimization_command_dir_env_names(ExternalOptimizationTool::CplexPython)
+                .contains(&"CPLEX_STUDIO_DIR".to_string())
+        );
+        assert!(external_optimization_command_dir_env_names(
+            ExternalOptimizationTool::XpressPython
+        )
+        .contains(&"XPRESSDIR".to_string()));
+        assert!(
+            external_optimization_command_dir_env_names(ExternalOptimizationTool::MosekPython)
+                .contains(&"MOSEK_HOME".to_string())
+        );
+        assert!(
+            external_optimization_command_dir_env_names(ExternalOptimizationTool::GurobiRust)
+                .contains(&"GUROBI_HOME".to_string())
+        );
+        assert!(
+            external_optimization_command_dir_env_names(ExternalOptimizationTool::CplexRust)
+                .contains(&"CPLEX_STUDIO_DIR".to_string())
+        );
+        assert!(
+            external_optimization_command_dir_env_names(ExternalOptimizationTool::IpoptRust)
+                .contains(&"IPOPT_HOME".to_string())
+        );
+        assert!(
             external_optimization_command_dir_env_names(ExternalOptimizationTool::HighsRust)
                 .contains(&"HIGHS_HOME".to_string())
         );
@@ -2856,6 +3154,10 @@ mod tests {
         assert!(
             external_optimization_command_dir_env_names(ExternalOptimizationTool::SoplexCli)
                 .contains(&"SOPLEX_HOME".to_string())
+        );
+        assert!(
+            external_optimization_command_dir_env_names(ExternalOptimizationTool::QsoptExCli)
+                .contains(&"QSOPT_EX_HOME".to_string())
         );
         assert!(
             external_optimization_command_dir_env_names(ExternalOptimizationTool::LpSolveCli)

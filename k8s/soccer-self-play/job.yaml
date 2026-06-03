@@ -31,6 +31,7 @@ spec:
               shard_dir="/work/out/soccer-self-play/${run_id}/shard-${SOCCER_SHARD_INDEX}-of-${SOCCER_SHARD_COUNT}"
               mkdir -p "$shard_dir"
               export SOCCER_ARTIFACT_PATH="$shard_dir/artifact.json"
+              export SOCCER_LEARNED_PARAMS_PATH="$shard_dir/learned-params.json"
               export SOCCER_EPISODE_LOG_PATH="$shard_dir/episodes.jsonl"
               exec /usr/local/bin/main_soccer_learning_run
           env:

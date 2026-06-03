@@ -1,9 +1,10 @@
 //! Rust-facing bridge for external/reference facility-location solvers.
 //!
-//! The Python bridge (`scripts/facility_location_reference.py`) computes an
-//! exact small-instance reference and, when installed, solves the same
-//! uncapacitated facility-location model with OR-Tools CP-SAT.
+//! The native Rust reference computes an exact small-instance check without
+//! Python startup. The Python bridge (`scripts/facility_location_reference.py`)
+//! remains available for OR-Tools CP-SAT.
 
+use std::collections::HashSet;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -17,6 +18,7 @@ use crate::des::general::facility_location::{FacilityLocationAssignment, Facilit
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExternalFacilityLocationReferenceSolver {
     Auto,
+    RustExact,
     OrTools,
     Fallback,
 }
@@ -25,6 +27,7 @@ impl ExternalFacilityLocationReferenceSolver {
     pub fn as_arg(self) -> &'static str {
         match self {
             ExternalFacilityLocationReferenceSolver::Auto => "auto",
+            ExternalFacilityLocationReferenceSolver::RustExact => "rust-exact",
             ExternalFacilityLocationReferenceSolver::OrTools => "ortools",
             ExternalFacilityLocationReferenceSolver::Fallback => "fallback",
         }
@@ -130,6 +133,231 @@ fn status_from_str(status: &str) -> ExternalFacilityLocationReferenceStatus {
         "unavailable" => ExternalFacilityLocationReferenceStatus::Unavailable,
         _ => ExternalFacilityLocationReferenceStatus::NumericalError,
     }
+}
+
+const RUST_FACILITY_LOCATION_MAX_EXACT_FACILITIES: usize = 24;
+const RUST_FACILITY_LOCATION_EPS: f64 = 1e-9;
+
+fn validate_rust_facility_location_problem(
+    problem: &FacilityLocationProblem,
+) -> Result<(), String> {
+    if problem.facility_ids.is_empty() {
+        return Err("facilities must be non-empty".to_string());
+    }
+    if problem.customer_ids.is_empty() {
+        return Err("customers must be non-empty".to_string());
+    }
+    if problem.fixed_costs.len() != problem.facility_ids.len() {
+        return Err("fixedCosts length must equal facilities length".to_string());
+    }
+    if problem.service_costs.len() != problem.facility_ids.len() {
+        return Err("serviceCosts row count must equal facilities length".to_string());
+    }
+
+    let mut facilities = HashSet::new();
+    for (index, facility) in problem.facility_ids.iter().enumerate() {
+        if facility.trim().is_empty() {
+            return Err(format!("facilities[{index}] must be non-empty"));
+        }
+        if !facilities.insert(facility.clone()) {
+            return Err(format!("duplicate facility id {facility:?}"));
+        }
+        let fixed_cost = problem.fixed_costs[index];
+        if !fixed_cost.is_finite() || fixed_cost < 0.0 {
+            return Err(format!(
+                "fixedCosts[{index}] must be finite and non-negative"
+            ));
+        }
+    }
+
+    let mut customers = HashSet::new();
+    for (index, customer) in problem.customer_ids.iter().enumerate() {
+        if customer.trim().is_empty() {
+            return Err(format!("customers[{index}] must be non-empty"));
+        }
+        if !customers.insert(customer.clone()) {
+            return Err(format!("duplicate customer id {customer:?}"));
+        }
+    }
+
+    for (facility_index, row) in problem.service_costs.iter().enumerate() {
+        if row.len() != problem.customer_ids.len() {
+            return Err(format!(
+                "serviceCosts[{facility_index}] length must equal customers length"
+            ));
+        }
+        for (customer_index, &cost) in row.iter().enumerate() {
+            if !cost.is_finite() || cost < 0.0 {
+                return Err(format!(
+                    "serviceCosts[{facility_index}][{customer_index}] must be finite and non-negative"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn rust_facility_location_empty_solution(
+    status: ExternalFacilityLocationReferenceStatus,
+    solver: impl Into<String>,
+    message: impl Into<String>,
+    elapsed_ms: f64,
+) -> ExternalFacilityLocationReferenceSolution {
+    ExternalFacilityLocationReferenceSolution {
+        status,
+        solver: solver.into(),
+        open_facility_indices: Vec::new(),
+        open_facility_ids: Vec::new(),
+        assignments: Vec::new(),
+        objective: None,
+        ortools_status: None,
+        ortools_open_facility_indices: Vec::new(),
+        ortools_open_facility_ids: Vec::new(),
+        ortools_assignments: Vec::new(),
+        ortools_objective: None,
+        ortools_objective_bound: None,
+        message: message.into(),
+        elapsed_ms,
+    }
+}
+
+fn rust_facility_location_evaluate_open(
+    problem: &FacilityLocationProblem,
+    open_facility_indices: &[usize],
+) -> Option<(f64, Vec<FacilityLocationAssignment>)> {
+    if open_facility_indices.is_empty() {
+        return None;
+    }
+
+    let mut objective = open_facility_indices
+        .iter()
+        .map(|&index| problem.fixed_costs[index])
+        .sum::<f64>();
+    let mut assignments = Vec::with_capacity(problem.customer_ids.len());
+    for customer_index in 0..problem.customer_ids.len() {
+        let mut best: Option<(usize, f64)> = None;
+        for &facility_index in open_facility_indices {
+            let cost = problem.service_costs[facility_index][customer_index];
+            if best.is_none_or(|(best_index, best_cost)| {
+                cost < best_cost - RUST_FACILITY_LOCATION_EPS
+                    || ((cost - best_cost).abs() <= RUST_FACILITY_LOCATION_EPS
+                        && facility_index < best_index)
+            }) {
+                best = Some((facility_index, cost));
+            }
+        }
+        let (facility_index, cost) = best?;
+        objective += cost;
+        assignments.push(FacilityLocationAssignment {
+            customer_index,
+            customer_id: problem.customer_ids[customer_index].clone(),
+            facility_index,
+            facility_id: problem.facility_ids[facility_index].clone(),
+            cost,
+        });
+    }
+
+    Some((objective, assignments))
+}
+
+fn rust_facility_location_solution(
+    problem: &FacilityLocationProblem,
+    status: ExternalFacilityLocationReferenceStatus,
+    mut open_facility_indices: Vec<usize>,
+    assignments: Vec<FacilityLocationAssignment>,
+    objective: f64,
+    message: impl Into<String>,
+    elapsed_ms: f64,
+) -> ExternalFacilityLocationReferenceSolution {
+    open_facility_indices.sort_unstable();
+    let open_facility_ids = open_facility_indices
+        .iter()
+        .map(|&index| problem.facility_ids[index].clone())
+        .collect::<Vec<_>>();
+    ExternalFacilityLocationReferenceSolution {
+        status,
+        solver: "rust:exact-facility-location".to_string(),
+        open_facility_indices,
+        open_facility_ids,
+        assignments,
+        objective: Some(objective),
+        ortools_status: None,
+        ortools_open_facility_indices: Vec::new(),
+        ortools_open_facility_ids: Vec::new(),
+        ortools_assignments: Vec::new(),
+        ortools_objective: None,
+        ortools_objective_bound: None,
+        message: message.into(),
+        elapsed_ms,
+    }
+}
+
+fn solve_facility_location_with_rust_reference(
+    problem: &FacilityLocationProblem,
+) -> ExternalFacilityLocationReferenceSolution {
+    let started = Instant::now();
+    if let Err(message) = validate_rust_facility_location_problem(problem) {
+        return rust_facility_location_empty_solution(
+            ExternalFacilityLocationReferenceStatus::NumericalError,
+            "rust:exact-facility-location",
+            message,
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+
+    if problem.facility_ids.len() > RUST_FACILITY_LOCATION_MAX_EXACT_FACILITIES {
+        return rust_facility_location_empty_solution(
+            ExternalFacilityLocationReferenceStatus::Unsupported,
+            "rust:exact-facility-location",
+            format!(
+                "exact facility-location enumeration only practical for <= {RUST_FACILITY_LOCATION_MAX_EXACT_FACILITIES} facilities, got {}",
+                problem.facility_ids.len()
+            ),
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+
+    let mut best_open = Vec::new();
+    let mut best_assignments = Vec::new();
+    let mut best_objective = f64::INFINITY;
+    let upper_mask = 1_u128 << problem.facility_ids.len();
+    for mask in 1_u128..upper_mask {
+        let open_facility_indices = (0..problem.facility_ids.len())
+            .filter(|&index| mask & (1_u128 << index) != 0)
+            .collect::<Vec<_>>();
+        let Some((objective, assignments)) =
+            rust_facility_location_evaluate_open(problem, &open_facility_indices)
+        else {
+            continue;
+        };
+        if objective < best_objective - RUST_FACILITY_LOCATION_EPS
+            || ((objective - best_objective).abs() <= RUST_FACILITY_LOCATION_EPS
+                && open_facility_indices < best_open)
+        {
+            best_open = open_facility_indices;
+            best_assignments = assignments;
+            best_objective = objective;
+        }
+    }
+
+    if best_open.is_empty() {
+        return rust_facility_location_empty_solution(
+            ExternalFacilityLocationReferenceStatus::Infeasible,
+            "rust:exact-facility-location",
+            "no feasible facility subset",
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+
+    rust_facility_location_solution(
+        problem,
+        ExternalFacilityLocationReferenceStatus::Optimal,
+        best_open,
+        best_assignments,
+        best_objective,
+        "exact open-facility subset enumeration",
+        started.elapsed().as_secs_f64() * 1000.0,
+    )
 }
 
 fn convert_assignments(
@@ -281,6 +509,14 @@ pub fn solve_facility_location_with_external_reference(
     problem: &FacilityLocationProblem,
     opts: &ExternalFacilityLocationReferenceOptions,
 ) -> ExternalFacilityLocationReferenceSolution {
+    if matches!(
+        opts.solver,
+        ExternalFacilityLocationReferenceSolver::RustExact
+            | ExternalFacilityLocationReferenceSolver::Fallback
+    ) {
+        return solve_facility_location_with_rust_reference(problem);
+    }
+
     run_facility_location_reference_json(
         json!({
             "facilities": &problem.facility_ids,
@@ -290,4 +526,58 @@ pub fn solve_facility_location_with_external_reference(
         }),
         opts,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::des::general::facility_location::{
+        build_sample_facility_location_problem, FacilityLocationProblem,
+    };
+
+    #[test]
+    fn rust_reference_solves_sample_facility_location() {
+        let problem = build_sample_facility_location_problem();
+        let solution = solve_facility_location_with_external_reference(
+            &problem,
+            &ExternalFacilityLocationReferenceOptions {
+                solver: ExternalFacilityLocationReferenceSolver::RustExact,
+            },
+        );
+
+        assert_eq!(
+            solution.status,
+            ExternalFacilityLocationReferenceStatus::Optimal
+        );
+        assert_eq!(solution.solver, "rust:exact-facility-location");
+        assert_eq!(solution.open_facility_ids, vec!["North", "South"]);
+        assert_eq!(solution.objective, Some(28.0));
+        assert_eq!(solution.assignments.len(), problem.customer_ids.len());
+        assert!(solution.ortools_status.is_none());
+    }
+
+    #[test]
+    fn fallback_alias_uses_rust_reference_with_tie_breaking() {
+        let problem = FacilityLocationProblem {
+            facility_ids: vec!["A".to_string(), "B".to_string()],
+            customer_ids: vec!["C".to_string()],
+            fixed_costs: vec![1.0, 1.0],
+            service_costs: vec![vec![1.0], vec![1.0]],
+        };
+
+        let solution = solve_facility_location_with_external_reference(
+            &problem,
+            &ExternalFacilityLocationReferenceOptions {
+                solver: ExternalFacilityLocationReferenceSolver::Fallback,
+            },
+        );
+
+        assert_eq!(
+            solution.status,
+            ExternalFacilityLocationReferenceStatus::Optimal
+        );
+        assert_eq!(solution.solver, "rust:exact-facility-location");
+        assert_eq!(solution.open_facility_ids, vec!["A"]);
+        assert_eq!(solution.objective, Some(2.0));
+    }
 }

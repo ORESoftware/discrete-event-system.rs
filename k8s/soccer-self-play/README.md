@@ -35,6 +35,8 @@ SOCCER_GAMES=100 \
 Outputs are written under `out/soccer-self-play/<run-id>/shard-N-of-M/`:
 
 - `artifact.json`: learned home/away policy weights after that shard's games.
+- `learned-params.json`: compact reusable Rust/serde params with tactical
+  weights plus home/away Q-policy and target weights.
 - `episodes.jsonl`: one episode summary per game for that shard.
 - `stdout.log` and `stderr.log`: runner output for the shard.
 
@@ -51,11 +53,11 @@ Verify checkpoint or final artifacts after they appear:
 scripts/soccer_self_play_verify_artifacts.js out/soccer-self-play/<run-id>
 ```
 
-To continue learning from a previous artifact without mixing new results into
-the old output directory:
+To continue learning from a previous artifact or learned-params file without
+mixing new results into the old output directory:
 
 ```bash
-SOCCER_RESUME_ARTIFACT_PATH=out/soccer-self-play/<run-id>/shard-0-of-1/artifact.json \
+SOCCER_RESUME_ARTIFACT_PATH=out/soccer-self-play/<run-id>/shard-0-of-1/learned-params.json \
 SOCCER_RUN_ID=resume-$(date -u +%Y%m%dT%H%M%SZ) \
 SOCCER_GAMES=100 \
   scripts/soccer_self_play_local.sh
@@ -73,7 +75,7 @@ SOCCER_GAMES=100 SOCCER_SHARDS=4 SOCCER_PARALLEL_SHARDS=4 \
 The live soccer server also exposes synchronous self-play training at
 `/api/train-self-play`. The protected des-rs deployment is normally addressed
 through `/des-rs`, so the helper defaults to that base URL and saves the server
-response plus extracted artifact locally:
+response plus extracted artifact and learned params locally:
 
 ```bash
 DES_RS_AUTH=<auth-value> SOCCER_GAMES=100 \

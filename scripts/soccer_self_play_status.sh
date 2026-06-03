@@ -67,6 +67,7 @@ for shard_dir in "$run_dir"/shard-*-of-*; do
   stdout_log="$shard_dir/stdout.log"
   episode_log="$shard_dir/episodes.jsonl"
   artifact="$shard_dir/artifact.json"
+  learned_params="$shard_dir/learned-params.json"
   checkpoint_artifact="$shard_dir/artifact.json.checkpoint.json"
 
   completed_games="0"
@@ -78,6 +79,12 @@ for shard_dir in "$run_dir"/shard-*-of-*; do
   if [[ -f "$artifact" ]]; then
     artifact_bytes="$(wc -c < "$artifact" | tr -d ' ')"
     artifact_status="present:${artifact_bytes}B"
+  fi
+
+  learned_params_status="missing"
+  if [[ -f "$learned_params" ]]; then
+    learned_params_bytes="$(wc -c < "$learned_params" | tr -d ' ')"
+    learned_params_status="present:${learned_params_bytes}B"
   fi
 
   checkpoint_status="missing"
@@ -95,9 +102,9 @@ for shard_dir in "$run_dir"/shard-*-of-*; do
   fi
 
   if [[ -n "$expected_games" ]]; then
-    echo "  $shard_name completed_games=$completed_games/$expected_games artifact=$artifact_status checkpoint=$checkpoint_status"
+    echo "  $shard_name completed_games=$completed_games/$expected_games artifact=$artifact_status params=$learned_params_status checkpoint=$checkpoint_status"
   else
-    echo "  $shard_name completed_games=$completed_games artifact=$artifact_status checkpoint=$checkpoint_status"
+    echo "  $shard_name completed_games=$completed_games artifact=$artifact_status params=$learned_params_status checkpoint=$checkpoint_status"
   fi
   echo "    last=$last_line"
 done

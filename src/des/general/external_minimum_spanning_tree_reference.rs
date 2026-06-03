@@ -1,9 +1,11 @@
 //! Rust-facing bridge for external/reference minimum spanning tree solvers.
 //!
-//! The Python bridge (`scripts/minimum_spanning_tree_reference.py`) computes a
-//! Kruskal reference and, when installed, solves the same graph with OR-Tools
-//! CP-SAT using a root-flow connectivity formulation.
+//! The native Rust reference computes an independent Kruskal check without
+//! Python startup. The Python bridge (`scripts/minimum_spanning_tree_reference.py`)
+//! remains available for OR-Tools CP-SAT using a root-flow connectivity
+//! formulation.
 
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -17,6 +19,7 @@ use crate::des::general::minimum_spanning_tree::MinimumSpanningTreeProblem;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExternalMinimumSpanningTreeReferenceSolver {
     Auto,
+    RustKruskal,
     OrTools,
     Fallback,
 }
@@ -25,6 +28,7 @@ impl ExternalMinimumSpanningTreeReferenceSolver {
     pub fn as_arg(self) -> &'static str {
         match self {
             ExternalMinimumSpanningTreeReferenceSolver::Auto => "auto",
+            ExternalMinimumSpanningTreeReferenceSolver::RustKruskal => "rust-kruskal",
             ExternalMinimumSpanningTreeReferenceSolver::OrTools => "ortools",
             ExternalMinimumSpanningTreeReferenceSolver::Fallback => "fallback",
         }
@@ -116,6 +120,216 @@ fn status_from_str(status: &str) -> ExternalMinimumSpanningTreeReferenceStatus {
         "infeasible" => ExternalMinimumSpanningTreeReferenceStatus::Infeasible,
         "unavailable" => ExternalMinimumSpanningTreeReferenceStatus::Unavailable,
         _ => ExternalMinimumSpanningTreeReferenceStatus::NumericalError,
+    }
+}
+
+#[derive(Clone, Debug)]
+struct RustDisjointSet {
+    parent: Vec<usize>,
+    rank: Vec<usize>,
+}
+
+impl RustDisjointSet {
+    fn new(size: usize) -> Self {
+        RustDisjointSet {
+            parent: (0..size).collect(),
+            rank: vec![0; size],
+        }
+    }
+
+    fn find(&mut self, value: usize) -> usize {
+        if self.parent[value] != value {
+            let root = self.find(self.parent[value]);
+            self.parent[value] = root;
+        }
+        self.parent[value]
+    }
+
+    fn union(&mut self, a: usize, b: usize) -> bool {
+        let mut root_a = self.find(a);
+        let mut root_b = self.find(b);
+        if root_a == root_b {
+            return false;
+        }
+        if self.rank[root_a] < self.rank[root_b] {
+            std::mem::swap(&mut root_a, &mut root_b);
+        }
+        self.parent[root_b] = root_a;
+        if self.rank[root_a] == self.rank[root_b] {
+            self.rank[root_a] += 1;
+        }
+        true
+    }
+}
+
+fn validate_rust_minimum_spanning_tree_problem(
+    problem: &MinimumSpanningTreeProblem,
+) -> Result<HashMap<String, usize>, String> {
+    if problem.vertices.is_empty() {
+        return Err("vertices must be non-empty".to_string());
+    }
+    let mut vertex_index = HashMap::with_capacity(problem.vertices.len());
+    for (index, vertex) in problem.vertices.iter().enumerate() {
+        if vertex.trim().is_empty() {
+            return Err("vertices must be non-empty strings".to_string());
+        }
+        if vertex_index.insert(vertex.clone(), index).is_some() {
+            return Err("vertices must be unique".to_string());
+        }
+    }
+
+    let mut seen_ids = HashSet::new();
+    let mut seen_edges = HashSet::new();
+    for (edge_index, edge) in problem.edges.iter().enumerate() {
+        if edge.id.trim().is_empty() {
+            return Err(format!("edges[{edge_index}].id must be non-empty"));
+        }
+        if !seen_ids.insert(edge.id.clone()) {
+            return Err(format!("duplicate edge id {:?}", edge.id));
+        }
+        let Some(&from) = vertex_index.get(&edge.from) else {
+            return Err(format!(
+                "edges[{edge_index}] endpoints must belong to vertices"
+            ));
+        };
+        let Some(&to) = vertex_index.get(&edge.to) else {
+            return Err(format!(
+                "edges[{edge_index}] endpoints must belong to vertices"
+            ));
+        };
+        if from == to {
+            return Err(format!("edges[{edge_index}] must not be a self-loop"));
+        }
+        if !edge.weight.is_finite() {
+            return Err(format!("edges[{edge_index}].weight must be finite"));
+        }
+        let key = if from < to { (from, to) } else { (to, from) };
+        if !seen_edges.insert(key) {
+            return Err(format!(
+                "duplicate undirected edge {:?}-{:?}",
+                edge.from, edge.to
+            ));
+        }
+    }
+
+    Ok(vertex_index)
+}
+
+fn minimum_spanning_tree_empty_solution(
+    status: ExternalMinimumSpanningTreeReferenceStatus,
+    solver: impl Into<String>,
+    message: impl Into<String>,
+    elapsed_ms: f64,
+) -> ExternalMinimumSpanningTreeReferenceSolution {
+    ExternalMinimumSpanningTreeReferenceSolution {
+        status,
+        solver: solver.into(),
+        selected_edge_indices: Vec::new(),
+        selected_edge_ids: Vec::new(),
+        objective: None,
+        total_weight: None,
+        ortools_status: None,
+        ortools_selected_edge_indices: Vec::new(),
+        ortools_selected_edge_ids: Vec::new(),
+        ortools_objective: None,
+        ortools_total_weight: None,
+        ortools_objective_bound: None,
+        message: message.into(),
+        elapsed_ms,
+    }
+}
+
+fn solve_minimum_spanning_tree_with_rust_reference(
+    problem: &MinimumSpanningTreeProblem,
+) -> ExternalMinimumSpanningTreeReferenceSolution {
+    let started = Instant::now();
+    let vertex_index = match validate_rust_minimum_spanning_tree_problem(problem) {
+        Ok(vertex_index) => vertex_index,
+        Err(message) => {
+            return minimum_spanning_tree_empty_solution(
+                ExternalMinimumSpanningTreeReferenceStatus::NumericalError,
+                "rust:kruskal-mst",
+                message,
+                started.elapsed().as_secs_f64() * 1000.0,
+            )
+        }
+    };
+
+    if problem.vertices.len() == 1 {
+        return ExternalMinimumSpanningTreeReferenceSolution {
+            status: ExternalMinimumSpanningTreeReferenceStatus::Optimal,
+            solver: "rust:kruskal-mst".to_string(),
+            selected_edge_indices: Vec::new(),
+            selected_edge_ids: Vec::new(),
+            objective: Some(0.0),
+            total_weight: Some(0.0),
+            ortools_status: None,
+            ortools_selected_edge_indices: Vec::new(),
+            ortools_selected_edge_ids: Vec::new(),
+            ortools_objective: None,
+            ortools_total_weight: None,
+            ortools_objective_bound: None,
+            message: "single-vertex MST".to_string(),
+            elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+        };
+    }
+
+    let mut order = (0..problem.edges.len()).collect::<Vec<_>>();
+    order.sort_by(|&left, &right| {
+        problem.edges[left]
+            .weight
+            .total_cmp(&problem.edges[right].weight)
+            .then_with(|| problem.edges[left].id.cmp(&problem.edges[right].id))
+    });
+
+    let mut dsu = RustDisjointSet::new(problem.vertices.len());
+    let mut selected = Vec::new();
+    for edge_index in order {
+        let edge = &problem.edges[edge_index];
+        let from = vertex_index[&edge.from];
+        let to = vertex_index[&edge.to];
+        if dsu.union(from, to) {
+            selected.push(edge_index);
+            if selected.len() + 1 == problem.vertices.len() {
+                break;
+            }
+        }
+    }
+
+    if selected.len() + 1 != problem.vertices.len() {
+        return minimum_spanning_tree_empty_solution(
+            ExternalMinimumSpanningTreeReferenceStatus::Infeasible,
+            "rust:kruskal-mst",
+            "graph is disconnected",
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+
+    selected.sort_unstable();
+    let total_weight = selected
+        .iter()
+        .map(|&edge_index| problem.edges[edge_index].weight)
+        .sum::<f64>();
+    let selected_edge_ids = selected
+        .iter()
+        .map(|&edge_index| problem.edges[edge_index].id.clone())
+        .collect();
+
+    ExternalMinimumSpanningTreeReferenceSolution {
+        status: ExternalMinimumSpanningTreeReferenceStatus::Optimal,
+        solver: "rust:kruskal-mst".to_string(),
+        selected_edge_indices: selected,
+        selected_edge_ids,
+        objective: Some(total_weight),
+        total_weight: Some(total_weight),
+        ortools_status: None,
+        ortools_selected_edge_indices: Vec::new(),
+        ortools_selected_edge_ids: Vec::new(),
+        ortools_objective: None,
+        ortools_total_weight: None,
+        ortools_objective_bound: None,
+        message: "Kruskal minimum spanning tree".to_string(),
+        elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
     }
 }
 
@@ -253,6 +467,14 @@ pub fn solve_minimum_spanning_tree_with_external_reference(
     problem: &MinimumSpanningTreeProblem,
     opts: &ExternalMinimumSpanningTreeReferenceOptions,
 ) -> ExternalMinimumSpanningTreeReferenceSolution {
+    if matches!(
+        opts.solver,
+        ExternalMinimumSpanningTreeReferenceSolver::RustKruskal
+            | ExternalMinimumSpanningTreeReferenceSolver::Fallback
+    ) {
+        return solve_minimum_spanning_tree_with_rust_reference(problem);
+    }
+
     run_minimum_spanning_tree_reference_json(
         json!({
             "vertices": &problem.vertices,
@@ -265,4 +487,61 @@ pub fn solve_minimum_spanning_tree_with_external_reference(
         }),
         opts,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::des::general::minimum_spanning_tree::{
+        build_sample_minimum_spanning_tree_problem, MinimumSpanningTreeEdge,
+    };
+
+    #[test]
+    fn rust_reference_solves_sample_mst() {
+        let problem = build_sample_minimum_spanning_tree_problem();
+        let solution = solve_minimum_spanning_tree_with_external_reference(
+            &problem,
+            &ExternalMinimumSpanningTreeReferenceOptions {
+                solver: ExternalMinimumSpanningTreeReferenceSolver::RustKruskal,
+            },
+        );
+
+        assert_eq!(
+            solution.status,
+            ExternalMinimumSpanningTreeReferenceStatus::Optimal
+        );
+        assert_eq!(solution.solver, "rust:kruskal-mst");
+        assert_eq!(solution.objective, Some(6.0));
+        assert_eq!(solution.total_weight, Some(6.0));
+        assert_eq!(solution.selected_edge_ids, vec!["AB", "BC", "CD", "DE"]);
+        assert!(solution.ortools_status.is_none());
+    }
+
+    #[test]
+    fn fallback_alias_uses_rust_reference_for_disconnected_graph() {
+        let problem = MinimumSpanningTreeProblem {
+            vertices: vec!["A".to_string(), "B".to_string(), "C".to_string()],
+            edges: vec![MinimumSpanningTreeEdge {
+                id: "AB".to_string(),
+                from: "A".to_string(),
+                to: "B".to_string(),
+                weight: 1.0,
+            }],
+        };
+
+        let solution = solve_minimum_spanning_tree_with_external_reference(
+            &problem,
+            &ExternalMinimumSpanningTreeReferenceOptions {
+                solver: ExternalMinimumSpanningTreeReferenceSolver::Fallback,
+            },
+        );
+
+        assert_eq!(
+            solution.status,
+            ExternalMinimumSpanningTreeReferenceStatus::Infeasible
+        );
+        assert_eq!(solution.solver, "rust:kruskal-mst");
+        assert!(solution.selected_edge_indices.is_empty());
+        assert!(solution.objective.is_none());
+    }
 }

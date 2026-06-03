@@ -1,9 +1,11 @@
 //! Rust-facing bridge for external/reference weighted independent-set solvers.
 //!
-//! The Python bridge (`scripts/weighted_independent_set_reference.py`) computes
-//! a deterministic exact branch-and-bound reference and, when installed, solves
-//! the same conflict graph with OR-Tools CP-SAT.
+//! The native Rust reference computes a deterministic exact branch-and-bound
+//! check without Python startup. The Python bridge
+//! (`scripts/weighted_independent_set_reference.py`) remains available for
+//! OR-Tools CP-SAT.
 
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -17,6 +19,7 @@ use crate::des::general::weighted_independent_set::WeightedIndependentSetProblem
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExternalWeightedIndependentSetReferenceSolver {
     Auto,
+    RustBranchAndBound,
     OrTools,
     Fallback,
 }
@@ -25,6 +28,9 @@ impl ExternalWeightedIndependentSetReferenceSolver {
     pub fn as_arg(self) -> &'static str {
         match self {
             ExternalWeightedIndependentSetReferenceSolver::Auto => "auto",
+            ExternalWeightedIndependentSetReferenceSolver::RustBranchAndBound => {
+                "rust-branch-and-bound"
+            }
             ExternalWeightedIndependentSetReferenceSolver::OrTools => "ortools",
             ExternalWeightedIndependentSetReferenceSolver::Fallback => "fallback",
         }
@@ -120,6 +126,316 @@ fn status_from_str(status: &str) -> ExternalWeightedIndependentSetReferenceStatu
         "unavailable" => ExternalWeightedIndependentSetReferenceStatus::Unavailable,
         _ => ExternalWeightedIndependentSetReferenceStatus::NumericalError,
     }
+}
+
+#[derive(Clone, Debug)]
+struct RustWisSearchVertex {
+    index: usize,
+    weight: f64,
+}
+
+const RUST_WIS_EPS: f64 = 1e-9;
+const RUST_WIS_MAX_EXACT_VERTICES: usize = 64;
+
+fn validate_rust_weighted_independent_set_problem(
+    problem: &WeightedIndependentSetProblem,
+) -> Result<HashMap<String, usize>, String> {
+    if problem.vertices.is_empty() {
+        return Err("vertices must be non-empty".to_string());
+    }
+    let mut vertex_index = HashMap::with_capacity(problem.vertices.len());
+    for (index, vertex) in problem.vertices.iter().enumerate() {
+        if vertex.id.trim().is_empty() {
+            return Err(format!("vertices[{index}].id must be non-empty"));
+        }
+        if vertex_index.insert(vertex.id.clone(), index).is_some() {
+            return Err(format!("duplicate vertex id {:?}", vertex.id));
+        }
+        if !vertex.weight.is_finite() || vertex.weight < 0.0 {
+            return Err(format!(
+                "vertices[{index}].weight must be finite and non-negative"
+            ));
+        }
+    }
+
+    let mut seen_edges = HashSet::new();
+    for (edge_index, (from, to)) in problem.edges.iter().enumerate() {
+        let Some(&from_index) = vertex_index.get(from) else {
+            return Err(format!(
+                "edges[{edge_index}] endpoints must belong to vertices"
+            ));
+        };
+        let Some(&to_index) = vertex_index.get(to) else {
+            return Err(format!(
+                "edges[{edge_index}] endpoints must belong to vertices"
+            ));
+        };
+        if from_index == to_index {
+            return Err(format!("edges[{edge_index}] must not be a self-loop"));
+        }
+        let key = if from_index < to_index {
+            (from_index, to_index)
+        } else {
+            (to_index, from_index)
+        };
+        if !seen_edges.insert(key) {
+            return Err(format!("duplicate undirected edge {from:?}-{to:?}"));
+        }
+    }
+
+    Ok(vertex_index)
+}
+
+fn rust_wis_empty_solution(
+    status: ExternalWeightedIndependentSetReferenceStatus,
+    solver: impl Into<String>,
+    message: impl Into<String>,
+    elapsed_ms: f64,
+) -> ExternalWeightedIndependentSetReferenceSolution {
+    ExternalWeightedIndependentSetReferenceSolution {
+        status,
+        solver: solver.into(),
+        selected_vertex_indices: Vec::new(),
+        selected_vertex_ids: Vec::new(),
+        total_weight: None,
+        objective: None,
+        upper_bound: None,
+        ortools_status: None,
+        ortools_selected_vertex_indices: Vec::new(),
+        ortools_selected_vertex_ids: Vec::new(),
+        ortools_total_weight: None,
+        ortools_objective: None,
+        ortools_objective_bound: None,
+        message: message.into(),
+        elapsed_ms,
+    }
+}
+
+fn rust_wis_adjacency(
+    problem: &WeightedIndependentSetProblem,
+    vertex_index: &HashMap<String, usize>,
+) -> Vec<Vec<bool>> {
+    let mut adjacency = vec![vec![false; problem.vertices.len()]; problem.vertices.len()];
+    for (from, to) in &problem.edges {
+        let from_index = vertex_index[from];
+        let to_index = vertex_index[to];
+        adjacency[from_index][to_index] = true;
+        adjacency[to_index][from_index] = true;
+    }
+    adjacency
+}
+
+fn rust_wis_sorted_vertices(problem: &WeightedIndependentSetProblem) -> Vec<RustWisSearchVertex> {
+    let mut vertices = problem
+        .vertices
+        .iter()
+        .enumerate()
+        .map(|(index, vertex)| RustWisSearchVertex {
+            index,
+            weight: vertex.weight,
+        })
+        .collect::<Vec<_>>();
+    vertices.sort_by(|left, right| {
+        right.weight.total_cmp(&left.weight).then_with(|| {
+            problem.vertices[left.index]
+                .id
+                .cmp(&problem.vertices[right.index].id)
+        })
+    });
+    vertices
+}
+
+fn rust_wis_compatible(adjacency: &[Vec<bool>], vertex: usize, selected: &[usize]) -> bool {
+    selected.iter().all(|&other| !adjacency[vertex][other])
+}
+
+fn rust_wis_candidate_better(
+    problem: &WeightedIndependentSetProblem,
+    weight: f64,
+    indices: &[usize],
+    best_weight: f64,
+    best_indices: &[usize],
+) -> bool {
+    if weight > best_weight + RUST_WIS_EPS {
+        return true;
+    }
+    if (weight - best_weight).abs() <= RUST_WIS_EPS && indices.len() < best_indices.len() {
+        return true;
+    }
+    if (weight - best_weight).abs() <= RUST_WIS_EPS && indices.len() == best_indices.len() {
+        let mut left = indices
+            .iter()
+            .map(|&index| problem.vertices[index].id.clone())
+            .collect::<Vec<_>>();
+        let mut right = best_indices
+            .iter()
+            .map(|&index| problem.vertices[index].id.clone())
+            .collect::<Vec<_>>();
+        left.sort();
+        right.sort();
+        return left < right;
+    }
+    false
+}
+
+fn rust_wis_solution(
+    problem: &WeightedIndependentSetProblem,
+    status: ExternalWeightedIndependentSetReferenceStatus,
+    mut selected_vertex_indices: Vec<usize>,
+    upper_bound: Option<f64>,
+    message: impl Into<String>,
+    elapsed_ms: f64,
+) -> ExternalWeightedIndependentSetReferenceSolution {
+    selected_vertex_indices.sort_unstable();
+    let selected_vertex_ids = selected_vertex_indices
+        .iter()
+        .map(|&index| problem.vertices[index].id.clone())
+        .collect::<Vec<_>>();
+    let total_weight = selected_vertex_indices
+        .iter()
+        .map(|&index| problem.vertices[index].weight)
+        .sum::<f64>();
+    ExternalWeightedIndependentSetReferenceSolution {
+        status,
+        solver: "rust:branch-and-bound-weighted-independent-set".to_string(),
+        selected_vertex_indices,
+        selected_vertex_ids,
+        total_weight: Some(total_weight),
+        objective: Some(total_weight),
+        upper_bound,
+        ortools_status: None,
+        ortools_selected_vertex_indices: Vec::new(),
+        ortools_selected_vertex_ids: Vec::new(),
+        ortools_total_weight: None,
+        ortools_objective: None,
+        ortools_objective_bound: None,
+        message: message.into(),
+        elapsed_ms,
+    }
+}
+
+fn rust_wis_greedy(adjacency: &[Vec<bool>], order: &[RustWisSearchVertex]) -> Vec<usize> {
+    let mut selected = Vec::new();
+    for vertex in order {
+        if rust_wis_compatible(adjacency, vertex.index, &selected) {
+            selected.push(vertex.index);
+        }
+    }
+    selected
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rust_wis_exact_search(
+    problem: &WeightedIndependentSetProblem,
+    adjacency: &[Vec<bool>],
+    order: &[RustWisSearchVertex],
+    suffix_weight: &[f64],
+    pos: usize,
+    current_weight: f64,
+    current: &mut Vec<usize>,
+    best_indices: &mut Vec<usize>,
+    best_weight: &mut f64,
+) {
+    if pos == order.len() {
+        if rust_wis_candidate_better(problem, current_weight, current, *best_weight, best_indices) {
+            *best_indices = current.clone();
+            *best_weight = current_weight;
+        }
+        return;
+    }
+    if current_weight + suffix_weight[pos] + RUST_WIS_EPS < *best_weight {
+        return;
+    }
+
+    let vertex = &order[pos];
+    if rust_wis_compatible(adjacency, vertex.index, current) {
+        current.push(vertex.index);
+        rust_wis_exact_search(
+            problem,
+            adjacency,
+            order,
+            suffix_weight,
+            pos + 1,
+            current_weight + vertex.weight,
+            current,
+            best_indices,
+            best_weight,
+        );
+        current.pop();
+    }
+    rust_wis_exact_search(
+        problem,
+        adjacency,
+        order,
+        suffix_weight,
+        pos + 1,
+        current_weight,
+        current,
+        best_indices,
+        best_weight,
+    );
+}
+
+fn solve_weighted_independent_set_with_rust_reference(
+    problem: &WeightedIndependentSetProblem,
+) -> ExternalWeightedIndependentSetReferenceSolution {
+    let started = Instant::now();
+    let vertex_index = match validate_rust_weighted_independent_set_problem(problem) {
+        Ok(vertex_index) => vertex_index,
+        Err(message) => {
+            return rust_wis_empty_solution(
+                ExternalWeightedIndependentSetReferenceStatus::NumericalError,
+                "rust:branch-and-bound-weighted-independent-set",
+                message,
+                started.elapsed().as_secs_f64() * 1000.0,
+            )
+        }
+    };
+
+    if problem.vertices.len() > RUST_WIS_MAX_EXACT_VERTICES {
+        return rust_wis_empty_solution(
+            ExternalWeightedIndependentSetReferenceStatus::Unsupported,
+            "rust:branch-and-bound-weighted-independent-set",
+            format!(
+                "exact weighted independent set only practical for <= {RUST_WIS_MAX_EXACT_VERTICES} vertices, got {}",
+                problem.vertices.len()
+            ),
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+
+    let adjacency = rust_wis_adjacency(problem, &vertex_index);
+    let order = rust_wis_sorted_vertices(problem);
+    let mut suffix_weight = vec![0.0; order.len() + 1];
+    for index in (0..order.len()).rev() {
+        suffix_weight[index] = suffix_weight[index + 1] + order[index].weight;
+    }
+    let mut best_indices = rust_wis_greedy(&adjacency, &order);
+    let mut best_weight = best_indices
+        .iter()
+        .map(|&index| problem.vertices[index].weight)
+        .sum::<f64>();
+    let mut current = Vec::new();
+    rust_wis_exact_search(
+        problem,
+        &adjacency,
+        &order,
+        &suffix_weight,
+        0,
+        0.0,
+        &mut current,
+        &mut best_indices,
+        &mut best_weight,
+    );
+
+    rust_wis_solution(
+        problem,
+        ExternalWeightedIndependentSetReferenceStatus::Optimal,
+        best_indices,
+        Some(suffix_weight[0]),
+        "exact branch-and-bound weighted independent set",
+        started.elapsed().as_secs_f64() * 1000.0,
+    )
 }
 
 fn unavailable(
@@ -263,6 +579,14 @@ pub fn solve_weighted_independent_set_with_external_reference(
     problem: &WeightedIndependentSetProblem,
     opts: &ExternalWeightedIndependentSetReferenceOptions,
 ) -> ExternalWeightedIndependentSetReferenceSolution {
+    if matches!(
+        opts.solver,
+        ExternalWeightedIndependentSetReferenceSolver::RustBranchAndBound
+            | ExternalWeightedIndependentSetReferenceSolver::Fallback
+    ) {
+        return solve_weighted_independent_set_with_rust_reference(problem);
+    }
+
     run_weighted_independent_set_reference_json(
         json!({
             "vertices": problem.vertices.iter().map(|vertex| json!({
@@ -273,4 +597,77 @@ pub fn solve_weighted_independent_set_with_external_reference(
         }),
         opts,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::des::general::weighted_independent_set::{
+        build_sample_weighted_independent_set_problem, WeightedIndependentSetProblem,
+        WeightedIndependentSetVertex,
+    };
+
+    #[test]
+    fn rust_reference_solves_sample_weighted_independent_set() {
+        let problem = build_sample_weighted_independent_set_problem();
+        let solution = solve_weighted_independent_set_with_external_reference(
+            &problem,
+            &ExternalWeightedIndependentSetReferenceOptions {
+                solver: ExternalWeightedIndependentSetReferenceSolver::RustBranchAndBound,
+            },
+        );
+
+        assert_eq!(
+            solution.status,
+            ExternalWeightedIndependentSetReferenceStatus::Optimal
+        );
+        assert_eq!(
+            solution.solver,
+            "rust:branch-and-bound-weighted-independent-set"
+        );
+        assert_eq!(solution.selected_vertex_ids, vec!["B", "D", "G"]);
+        assert_eq!(solution.total_weight, Some(16.0));
+        assert_eq!(solution.objective, Some(16.0));
+        assert!(solution.upper_bound.is_some());
+        assert!(solution.ortools_status.is_none());
+    }
+
+    #[test]
+    fn fallback_alias_uses_rust_reference_with_tie_breaking() {
+        let problem = WeightedIndependentSetProblem {
+            vertices: vec![
+                WeightedIndependentSetVertex {
+                    id: "A".to_string(),
+                    weight: 5.0,
+                },
+                WeightedIndependentSetVertex {
+                    id: "B".to_string(),
+                    weight: 5.0,
+                },
+                WeightedIndependentSetVertex {
+                    id: "C".to_string(),
+                    weight: 0.0,
+                },
+            ],
+            edges: vec![("A".to_string(), "B".to_string())],
+        };
+
+        let solution = solve_weighted_independent_set_with_external_reference(
+            &problem,
+            &ExternalWeightedIndependentSetReferenceOptions {
+                solver: ExternalWeightedIndependentSetReferenceSolver::Fallback,
+            },
+        );
+
+        assert_eq!(
+            solution.status,
+            ExternalWeightedIndependentSetReferenceStatus::Optimal
+        );
+        assert_eq!(
+            solution.solver,
+            "rust:branch-and-bound-weighted-independent-set"
+        );
+        assert_eq!(solution.selected_vertex_ids, vec!["A"]);
+        assert_eq!(solution.total_weight, Some(5.0));
+    }
 }

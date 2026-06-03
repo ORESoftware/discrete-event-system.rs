@@ -8,7 +8,7 @@
 
 #![allow(dead_code)]
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -131,6 +131,13 @@ const SOCCER_MOMENT_WINDOW_SECONDS: f64 = 10.0;
 const SOCCER_MOMENT_HISTORY_LIMIT: usize = 24;
 const SOCCER_MOMENT_ACTION_LIMIT: usize = 12;
 const SOCCER_MOMENT_FEATURE_FRAME_SAMPLES: usize = 8;
+const SOCCER_MOMENT_EMBEDDER_VERSION: &str = "soccer-moment-local-v2";
+const DEFAULT_ADVERSARIAL_MOMENT_MEMORY_LIMIT: usize = 64;
+const MAX_ADVERSARIAL_MOMENT_MEMORY_LIMIT: usize = 512;
+const ADVERSARIAL_EMBEDDING_SEARCH_LIMIT: usize = 3;
+const ADVERSARIAL_EMBEDDING_MAX_CANDIDATES: usize = 96;
+const ADVERSARIAL_EMBEDDING_BUCKET_RADIUS: usize = 8;
+const ADVERSARIAL_EMBEDDING_MIN_SCORE: f32 = 0.72;
 const SOCCER_MOMENT_REPLAY_SHOT_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_PASS_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_DRIBBLE_REWARD: f64 = 15.0;
@@ -169,6 +176,18 @@ fn default_live_policy_disk_path() -> String {
 
 fn default_live_moment_disk_path() -> String {
     DEFAULT_LIVE_MOMENT_WINDOWS_PATH.to_string()
+}
+
+fn default_soccer_moment_embedder_version() -> String {
+    SOCCER_MOMENT_EMBEDDER_VERSION.to_string()
+}
+
+fn default_adversarial_embedding_exploitation_enabled() -> bool {
+    true
+}
+
+fn default_adversarial_moment_memory_limit() -> usize {
+    DEFAULT_ADVERSARIAL_MOMENT_MEMORY_LIMIT
 }
 
 fn default_live_policy_autoload() -> bool {
@@ -6425,6 +6444,10 @@ pub struct MatchConfig {
     pub tactical_learning: SoccerTacticalLearningWeights,
     #[serde(default = "default_neural_learning_config")]
     pub neural_learning: SoccerNeuralLearningConfig,
+    #[serde(default = "default_adversarial_embedding_exploitation_enabled")]
+    pub adversarial_embedding_exploitation_enabled: bool,
+    #[serde(default = "default_adversarial_moment_memory_limit")]
+    pub adversarial_embedding_memory_limit: usize,
     pub max_human_players: usize,
     pub seed: u32,
 }
@@ -6451,6 +6474,8 @@ impl Default for MatchConfig {
             learning_interval_ticks: 1,
             tactical_learning: SoccerTacticalLearningWeights::default(),
             neural_learning: SoccerNeuralLearningConfig::default(),
+            adversarial_embedding_exploitation_enabled: true,
+            adversarial_embedding_memory_limit: DEFAULT_ADVERSARIAL_MOMENT_MEMORY_LIMIT,
             max_human_players: 4,
             seed: 2026,
         }
@@ -6466,6 +6491,7 @@ impl MatchConfig {
                 enabled: false,
                 ..SoccerNeuralLearningConfig::default()
             },
+            adversarial_embedding_exploitation_enabled: false,
             max_human_players: 4,
             ..MatchConfig::default()
         }
@@ -6816,6 +6842,12 @@ pub struct TeamTacticalDirective {
     pub carry_priority: f64,
     pub shot_threshold_yards: f64,
     pub risk_tolerance: f64,
+    #[serde(default)]
+    pub adversarial_embedding_attack_score: f64,
+    #[serde(default)]
+    pub adversarial_embedding_defense_score: f64,
+    #[serde(default)]
+    pub adversarial_embedding_hits: usize,
 }
 
 impl TeamTacticalDirective {
@@ -6840,6 +6872,9 @@ impl TeamTacticalDirective {
             carry_priority: 1.0,
             shot_threshold_yards: 20.0,
             risk_tolerance: 0.50,
+            adversarial_embedding_attack_score: 0.0,
+            adversarial_embedding_defense_score: 0.0,
+            adversarial_embedding_hits: 0,
         }
     }
 }
@@ -6867,6 +6902,35 @@ struct AttackingOverloadProfile {
     defenders: usize,
     advantage: i32,
     score: f64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct SoccerAdversarialEmbeddingSignal {
+    attack_score: f64,
+    defense_score: f64,
+    hits: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct SoccerAdversarialEmbeddingSignals {
+    home: SoccerAdversarialEmbeddingSignal,
+    away: SoccerAdversarialEmbeddingSignal,
+}
+
+impl SoccerAdversarialEmbeddingSignals {
+    fn signal_for(&self, team: Team) -> SoccerAdversarialEmbeddingSignal {
+        match team {
+            Team::Home => self.home,
+            Team::Away => self.away,
+        }
+    }
+
+    fn signal_for_mut(&mut self, team: Team) -> &mut SoccerAdversarialEmbeddingSignal {
+        match team {
+            Team::Home => &mut self.home,
+            Team::Away => &mut self.away,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -6903,6 +6967,15 @@ impl Default for CentralBrain {
 
 impl CentralBrain {
     pub fn run_time_step(&mut self, snapshot: &WorldSnapshot, rng: &mut SeededRandom) {
+        self.run_time_step_with_adversarial_embeddings(snapshot, rng, None);
+    }
+
+    fn run_time_step_with_adversarial_embeddings(
+        &mut self,
+        snapshot: &WorldSnapshot,
+        rng: &mut SeededRandom,
+        embedding_signals: Option<&SoccerAdversarialEmbeddingSignals>,
+    ) {
         self.possession_team = snapshot.possession_team();
         let y = snapshot.ball.position.y;
         self.phase = match self.possession_team {
@@ -6942,6 +7015,20 @@ impl CentralBrain {
             away_cover,
             away_overload,
         );
+        if let Some(signals) = embedding_signals {
+            apply_adversarial_embedding_signal(
+                &mut self.home_directive,
+                signals.signal_for(Team::Home),
+                snapshot.field_width,
+                snapshot.field_length,
+            );
+            apply_adversarial_embedding_signal(
+                &mut self.away_directive,
+                signals.signal_for(Team::Away),
+                snapshot.field_width,
+                snapshot.field_length,
+            );
+        }
         self.pressure_line_home = self.home_directive.defensive_line_y;
         self.pressure_line_away = self.away_directive.defensive_line_y;
     }
@@ -9493,7 +9580,44 @@ fn tactical_directive_for_team(
         carry_priority,
         shot_threshold_yards,
         risk_tolerance,
+        adversarial_embedding_attack_score: 0.0,
+        adversarial_embedding_defense_score: 0.0,
+        adversarial_embedding_hits: 0,
     }
+}
+
+fn apply_adversarial_embedding_signal(
+    directive: &mut TeamTacticalDirective,
+    signal: SoccerAdversarialEmbeddingSignal,
+    field_width: f64,
+    field_length: f64,
+) {
+    let attack = signal.attack_score.clamp(0.0, 1.0);
+    let defense = signal.defense_score.clamp(0.0, 1.0);
+    directive.adversarial_embedding_attack_score = attack;
+    directive.adversarial_embedding_defense_score = defense;
+    directive.adversarial_embedding_hits = signal.hits;
+    if attack <= 1e-9 && defense <= 1e-9 {
+        return;
+    }
+
+    directive.risk_tolerance =
+        (directive.risk_tolerance + attack * 0.10 - defense * 0.03).clamp(0.20, 0.96);
+    directive.pass_priority = (directive.pass_priority + attack * 0.12).clamp(0.62, 1.42);
+    directive.carry_priority = (directive.carry_priority + attack * 0.10).clamp(0.55, 1.42);
+    directive.shot_threshold_yards =
+        (directive.shot_threshold_yards + attack * 2.2).clamp(15.0, 30.0);
+    directive.support_depth_yards =
+        (directive.support_depth_yards + attack * 3.0 - defense * 0.5).clamp(6.0, 25.0);
+    directive.width_yards = (directive.width_yards
+        + field_width * (attack * 0.04 - defense * 0.02))
+        .clamp(field_width * 0.30, field_width * 0.96);
+    directive.press_intensity =
+        (directive.press_intensity + defense * 0.18 + attack * 0.04).clamp(0.22, 1.0);
+
+    let goal_side_dir = -directive.team.attack_dir();
+    directive.defensive_line_y = (directive.defensive_line_y + goal_side_dir * defense * 3.5)
+        .clamp(field_length * 0.08, field_length * 0.92);
 }
 
 fn belief_from_observation(obs: &SoccerPomdpObservation) -> BeliefState {
@@ -11245,7 +11369,249 @@ pub struct SoccerMomentWindow {
     pub summary: SoccerMomentSummary,
     pub actions: Vec<SoccerMomentActionMarker>,
     pub frames: Vec<SoccerTrackingFrame>,
+    #[serde(default = "default_soccer_moment_embedder_version")]
+    pub embedder_version: String,
     pub feature_vector: Vec<f32>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerMomentVectorIndexStatus {
+    pub embedder_version: String,
+    pub dimension: usize,
+    pub entries: usize,
+    pub buckets: usize,
+    pub skipped_windows: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerMomentVectorSearchRequest {
+    pub bucket: SoccerMomentBucketKey,
+    pub feature_vector: Vec<f32>,
+    #[serde(default)]
+    pub limit: usize,
+    #[serde(default)]
+    pub max_candidates: usize,
+    #[serde(default)]
+    pub bucket_radius: usize,
+    #[serde(default)]
+    pub same_label_only: bool,
+}
+
+impl SoccerMomentVectorSearchRequest {
+    fn limit(&self) -> usize {
+        if self.limit == 0 {
+            5
+        } else {
+            self.limit.min(50)
+        }
+    }
+
+    fn max_candidates(&self) -> usize {
+        if self.max_candidates == 0 {
+            256
+        } else {
+            self.max_candidates.max(self.limit()).min(10_000)
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerMomentVectorSearchHit {
+    pub summary: SoccerMomentSummary,
+    pub score: f32,
+    pub bucket_distance: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerMomentVectorSearchResponse {
+    pub status: SoccerMomentVectorIndexStatus,
+    pub scanned_candidates: usize,
+    pub results: Vec<SoccerMomentVectorSearchHit>,
+}
+
+#[derive(Clone, Debug)]
+struct SoccerMomentVectorEntry {
+    summary: SoccerMomentSummary,
+    bucket: SoccerMomentBucketKey,
+    vector: Vec<f32>,
+    norm: f32,
+}
+
+#[derive(Clone, Debug)]
+pub struct SoccerMomentVectorIndex {
+    embedder_version: String,
+    dimension: usize,
+    entries: Vec<SoccerMomentVectorEntry>,
+    buckets: HashMap<String, Vec<usize>>,
+    skipped_windows: usize,
+}
+
+impl SoccerMomentVectorIndex {
+    pub fn from_windows(windows: &[SoccerMomentWindow]) -> Self {
+        Self::from_window_iter(windows.iter())
+    }
+
+    pub fn from_records(records: &[SoccerMomentStorageRecord]) -> Self {
+        Self::from_window_iter(records.iter().map(|record| &record.window))
+    }
+
+    fn from_window_iter<'a, I>(windows: I) -> Self
+    where
+        I: IntoIterator<Item = &'a SoccerMomentWindow>,
+    {
+        let mut embedder_version = String::new();
+        let mut dimension = 0usize;
+        let mut entries = Vec::new();
+        let mut buckets: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut skipped_windows = 0usize;
+
+        for window in windows {
+            let vector = &window.feature_vector;
+            let norm = soccer_moment_vector_norm(vector);
+            if vector.is_empty() || norm <= 1e-9 || vector.iter().any(|value| !value.is_finite()) {
+                skipped_windows = skipped_windows.saturating_add(1);
+                continue;
+            }
+            if embedder_version.is_empty() {
+                embedder_version = window.embedder_version.clone();
+                dimension = vector.len();
+            }
+            if window.embedder_version != embedder_version || vector.len() != dimension {
+                skipped_windows = skipped_windows.saturating_add(1);
+                continue;
+            }
+
+            let idx = entries.len();
+            buckets
+                .entry(soccer_moment_bucket_partition_key(&window.summary.bucket))
+                .or_default()
+                .push(idx);
+            entries.push(SoccerMomentVectorEntry {
+                summary: window.summary.clone(),
+                bucket: window.summary.bucket.clone(),
+                vector: vector.clone(),
+                norm,
+            });
+        }
+
+        if embedder_version.is_empty() {
+            embedder_version = default_soccer_moment_embedder_version();
+        }
+
+        SoccerMomentVectorIndex {
+            embedder_version,
+            dimension,
+            entries,
+            buckets,
+            skipped_windows,
+        }
+    }
+
+    pub fn status(&self) -> SoccerMomentVectorIndexStatus {
+        SoccerMomentVectorIndexStatus {
+            embedder_version: self.embedder_version.clone(),
+            dimension: self.dimension,
+            entries: self.entries.len(),
+            buckets: self.buckets.len(),
+            skipped_windows: self.skipped_windows,
+        }
+    }
+
+    pub fn search(
+        &self,
+        request: &SoccerMomentVectorSearchRequest,
+    ) -> SoccerMomentVectorSearchResponse {
+        let status = self.status();
+        let query_norm = soccer_moment_vector_norm(&request.feature_vector);
+        if self.dimension == 0
+            || request.feature_vector.len() != self.dimension
+            || query_norm <= 1e-9
+            || request
+                .feature_vector
+                .iter()
+                .any(|value| !value.is_finite())
+        {
+            return SoccerMomentVectorSearchResponse {
+                status,
+                scanned_candidates: 0,
+                results: Vec::new(),
+            };
+        }
+
+        let max_candidates = request.max_candidates();
+        let mut candidate_indices = Vec::new();
+        let mut seen = HashSet::new();
+        let partition_key = soccer_moment_bucket_partition_key(&request.bucket);
+        if let Some(indices) = self.buckets.get(&partition_key) {
+            for &idx in indices {
+                if candidate_indices.len() >= max_candidates {
+                    break;
+                }
+                let entry = &self.entries[idx];
+                if request.same_label_only && entry.bucket.label != request.bucket.label {
+                    continue;
+                }
+                if seen.insert(idx) {
+                    candidate_indices.push(idx);
+                }
+            }
+        }
+
+        if request.bucket_radius > 0 && candidate_indices.len() < max_candidates {
+            for (idx, entry) in self.entries.iter().enumerate() {
+                if candidate_indices.len() >= max_candidates {
+                    break;
+                }
+                if seen.contains(&idx) {
+                    continue;
+                }
+                if request.same_label_only && entry.bucket.label != request.bucket.label {
+                    continue;
+                }
+                let bucket_distance = soccer_moment_bucket_distance(&request.bucket, &entry.bucket);
+                if bucket_distance <= request.bucket_radius && seen.insert(idx) {
+                    candidate_indices.push(idx);
+                }
+            }
+        }
+
+        let scanned_candidates = candidate_indices.len();
+        let mut results = candidate_indices
+            .into_iter()
+            .filter_map(|idx| {
+                let entry = &self.entries[idx];
+                let score = soccer_moment_cosine_similarity(
+                    &request.feature_vector,
+                    query_norm,
+                    &entry.vector,
+                    entry.norm,
+                )?;
+                Some(SoccerMomentVectorSearchHit {
+                    summary: entry.summary.clone(),
+                    score,
+                    bucket_distance: soccer_moment_bucket_distance(&request.bucket, &entry.bucket),
+                })
+            })
+            .collect::<Vec<_>>();
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.bucket_distance.cmp(&b.bucket_distance))
+                .then_with(|| a.summary.id.cmp(&b.summary.id))
+        });
+        results.truncate(request.limit());
+
+        SoccerMomentVectorSearchResponse {
+            status,
+            scanned_candidates,
+            results,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -11593,6 +11959,10 @@ pub struct SoccerLearningSnapshot {
     pub shared_policy_target_visits: u64,
     pub team_policies_enabled: bool,
     pub adversarial_learning_enabled: bool,
+    #[serde(default)]
+    pub adversarial_embedding_exploitation_enabled: bool,
+    #[serde(default)]
+    pub adversarial_embedding_memory_size: usize,
     pub home_policy_entries: usize,
     pub home_policy_visits: u64,
     #[serde(default)]
@@ -12534,6 +12904,7 @@ pub struct SoccerMatch {
     defensive_delay_clocks: HashMap<usize, f64>,
     defensive_beat_clocks: HashMap<usize, f64>,
     defensive_clear_hold_trackers: HashMap<Team, DefensiveClearAndHoldTracker>,
+    adversarial_moment_memory: VecDeque<SoccerMomentWindow>,
     last_agent_schedule: Vec<AgentScheduleEntry>,
     controller_yield_stats: ControllerYieldStats,
 }
@@ -12631,6 +13002,7 @@ impl SoccerMatch {
             defensive_delay_clocks: HashMap::new(),
             defensive_beat_clocks: HashMap::new(),
             defensive_clear_hold_trackers: HashMap::new(),
+            adversarial_moment_memory: VecDeque::new(),
             last_agent_schedule: Vec::new(),
             controller_yield_stats: ControllerYieldStats::default(),
         };
@@ -12682,6 +13054,108 @@ impl SoccerMatch {
 
     pub fn team_policies_mut(&mut self) -> Option<&mut SoccerTeamQPolicies> {
         self.team_policies.as_mut()
+    }
+
+    fn sanitized_adversarial_moment_memory_limit(&self) -> usize {
+        self.config
+            .adversarial_embedding_memory_limit
+            .min(MAX_ADVERSARIAL_MOMENT_MEMORY_LIMIT)
+    }
+
+    pub fn adversarial_moment_memory_len(&self) -> usize {
+        self.adversarial_moment_memory.len()
+    }
+
+    pub fn remember_adversarial_moment_window(&mut self, window: SoccerMomentWindow) {
+        if !self.config.adversarial_embedding_exploitation_enabled {
+            return;
+        }
+        let limit = self.sanitized_adversarial_moment_memory_limit();
+        if limit == 0 || window.feature_vector.is_empty() {
+            return;
+        }
+        self.adversarial_moment_memory.push_back(window);
+        while self.adversarial_moment_memory.len() > limit {
+            self.adversarial_moment_memory.pop_front();
+        }
+    }
+
+    fn remember_adversarial_moment_records(&mut self, records: &[SoccerMomentStorageRecord]) {
+        for record in records {
+            self.remember_adversarial_moment_window(record.window.clone());
+        }
+    }
+
+    fn adversarial_embedding_exploitation_active(&self) -> bool {
+        self.config.learning_enabled
+            && self.config.adversarial_embedding_exploitation_enabled
+            && !self.adversarial_moment_memory.is_empty()
+    }
+
+    fn adversarial_embedding_signals(&self) -> Option<SoccerAdversarialEmbeddingSignals> {
+        if !self.adversarial_embedding_exploitation_active() {
+            return None;
+        }
+        let index =
+            SoccerMomentVectorIndex::from_window_iter(self.adversarial_moment_memory.iter());
+        if index.status().entries == 0 {
+            return None;
+        }
+
+        let frame = tracking_frame_from_match(self);
+        let mut signals = SoccerAdversarialEmbeddingSignals::default();
+        for perspective_team in [Team::Home, Team::Away] {
+            let feature_vector = soccer_moment_feature_vector(
+                std::slice::from_ref(&frame),
+                perspective_team,
+                &self.config,
+            );
+            if feature_vector.is_empty() {
+                continue;
+            }
+            let bucket =
+                soccer_moment_bucket_key("current_shape", perspective_team, &frame, &self.config);
+            let response = index.search(&SoccerMomentVectorSearchRequest {
+                bucket,
+                feature_vector,
+                limit: ADVERSARIAL_EMBEDDING_SEARCH_LIMIT,
+                max_candidates: ADVERSARIAL_EMBEDDING_MAX_CANDIDATES
+                    .min(self.adversarial_moment_memory.len().max(1)),
+                bucket_radius: ADVERSARIAL_EMBEDDING_BUCKET_RADIUS,
+                same_label_only: false,
+            });
+            for hit in response.results {
+                if hit.summary.team != perspective_team
+                    || hit.score < ADVERSARIAL_EMBEDDING_MIN_SCORE
+                {
+                    continue;
+                }
+                let score = ((hit.score - ADVERSARIAL_EMBEDDING_MIN_SCORE)
+                    / (1.0 - ADVERSARIAL_EMBEDDING_MIN_SCORE))
+                    .clamp(0.0, 1.0) as f64;
+                let contribution =
+                    score * soccer_moment_adversarial_label_weight(&hit.summary.label);
+                if contribution <= 1e-9 {
+                    continue;
+                }
+
+                let attack_signal = signals.signal_for_mut(perspective_team);
+                attack_signal.attack_score =
+                    (attack_signal.attack_score + contribution).clamp(0.0, 1.0);
+                attack_signal.hits = attack_signal.hits.saturating_add(1);
+
+                let defense_signal = signals.signal_for_mut(perspective_team.other());
+                defense_signal.defense_score =
+                    (defense_signal.defense_score + contribution).clamp(0.0, 1.0);
+                defense_signal.hits = defense_signal.hits.saturating_add(1);
+            }
+        }
+
+        if signals.home.hits == 0 && signals.away.hits == 0 {
+            None
+        } else {
+            Some(signals)
+        }
     }
 
     pub fn summary(&self) -> MatchSummary {
@@ -12750,6 +13224,9 @@ impl SoccerMatch {
             shared_policy_target_visits,
             team_policies_enabled: self.team_policies.is_some(),
             adversarial_learning_enabled: self.team_policies.is_some(),
+            adversarial_embedding_exploitation_enabled: self.config.learning_enabled
+                && self.config.adversarial_embedding_exploitation_enabled,
+            adversarial_embedding_memory_size: self.adversarial_moment_memory.len(),
             home_policy_entries,
             home_policy_visits,
             home_policy_target_entries,
@@ -13056,6 +13533,7 @@ impl SoccerMatch {
         let replay_passes = request.passes.max(1);
         let dataset =
             soccer_moment_records_to_learning_dataset(&records, self.config.clone(), reward_scale)?;
+        self.remember_adversarial_moment_records(&records);
         let policies = self
             .team_policies
             .get_or_insert_with(|| SoccerTeamQPolicies::new(SoccerQPolicyOptions::default()));
@@ -13495,8 +13973,13 @@ impl SoccerMatch {
         let score_home_before = self.score_home;
         let score_away_before = self.score_away;
         let reward_event_start = self.reward_events.len();
+        let adversarial_embedding_signals = self.adversarial_embedding_signals();
         self.central_brain
-            .run_time_step(&brain_input_snapshot, &mut self.rng);
+            .run_time_step_with_adversarial_embeddings(
+                &brain_input_snapshot,
+                &mut self.rng,
+                adversarial_embedding_signals.as_ref(),
+            );
         self.yield_for_controller_threads();
         let snapshot = WorldSnapshot::from_match(self);
         let ball_velocity_before = self.ball.velocity;
@@ -16127,6 +16610,13 @@ impl SoccerRealtimeSession {
         }
     }
 
+    pub fn search_moments(
+        &self,
+        request: &SoccerMomentVectorSearchRequest,
+    ) -> SoccerMomentVectorSearchResponse {
+        SoccerMomentVectorIndex::from_window_iter(self.recent_moments.iter()).search(request)
+    }
+
     pub fn set_moment_storage_path(&mut self, path: impl AsRef<Path>) {
         self.moment_storage.apply_path(
             path.as_ref()
@@ -16228,9 +16718,11 @@ impl SoccerRealtimeSession {
                     summary,
                     actions: actions.clone(),
                     frames: frames.clone(),
+                    embedder_version: SOCCER_MOMENT_EMBEDDER_VERSION.to_string(),
                     feature_vector,
                 };
                 self.record_moment_window(&window);
+                self.sim.remember_adversarial_moment_window(window.clone());
                 self.recent_moments.push_back(window);
                 while self.recent_moments.len() > SOCCER_MOMENT_HISTORY_LIMIT {
                     self.recent_moments.pop_front();
@@ -16964,11 +17456,11 @@ fn soccer_moment_feature_vector(
     if frames.is_empty() {
         return Vec::new();
     }
-    let sample_count = frames.len().min(SOCCER_MOMENT_FEATURE_FRAME_SAMPLES);
-    let mut vector = Vec::with_capacity(sample_count * 12);
+    let sample_count = SOCCER_MOMENT_FEATURE_FRAME_SAMPLES;
+    let mut vector = Vec::with_capacity(sample_count * (12 + soccer_moment_role_shape_len()));
     for sample_idx in 0..sample_count {
-        let frame_idx = if sample_count <= 1 {
-            frames.len() - 1
+        let frame_idx = if frames.len() <= 1 || sample_count <= 1 {
+            0
         } else {
             sample_idx * (frames.len() - 1) / (sample_count - 1)
         };
@@ -17012,8 +17504,142 @@ fn soccer_moment_feature_vector(
             (frame.score_home.unwrap_or(0) as f32 - frame.score_away.unwrap_or(0) as f32) / 5.0,
             frame.ball_altitude_yards.unwrap_or(0.0).clamp(0.0, 8.0) as f32 / 8.0,
         ]);
+        vector.extend(soccer_moment_role_shape_features(
+            frame,
+            team,
+            config,
+            (ball_x, ball_y),
+        ));
     }
     vector
+}
+
+fn soccer_moment_role_shape_len() -> usize {
+    soccer_moment_role_slot_layout()
+        .iter()
+        .map(|(_, slots)| *slots)
+        .sum::<usize>()
+        * 2
+        * 6
+}
+
+fn soccer_moment_role_slot_layout() -> [(PlayerRole, usize); 4] {
+    [
+        (PlayerRole::Goalkeeper, 1),
+        (PlayerRole::Defender, 4),
+        (PlayerRole::Midfielder, 4),
+        (PlayerRole::Forward, 3),
+    ]
+}
+
+fn soccer_moment_role_shape_features(
+    frame: &SoccerTrackingFrame,
+    team: Team,
+    config: &MatchConfig,
+    ball: (f64, f64),
+) -> Vec<f32> {
+    let mut vector = Vec::with_capacity(soccer_moment_role_shape_len());
+    for shape_team in [team, team.other()] {
+        for (role, slots) in soccer_moment_role_slot_layout() {
+            let mut players = frame
+                .players
+                .iter()
+                .filter(|player| player.team == shape_team && player.role == role)
+                .collect::<Vec<_>>();
+            players.sort_by(|a, b| {
+                let a_anchor = a.home_position.unwrap_or(a.position);
+                let b_anchor = b.home_position.unwrap_or(b.position);
+                let (a_x, a_y) = canonical_pitch_point(a_anchor, team, config);
+                let (b_x, b_y) = canonical_pitch_point(b_anchor, team, config);
+                a_x.partial_cmp(&b_x)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a_y.partial_cmp(&b_y).unwrap_or(std::cmp::Ordering::Equal))
+                    .then_with(|| a.id.cmp(&b.id))
+            });
+
+            for slot in 0..slots {
+                if let Some(player) = players.get(slot) {
+                    let (player_x, player_y) = canonical_pitch_point(player.position, team, config);
+                    let player_velocity = player.velocity.unwrap_or_default();
+                    let (player_vx, player_vy) =
+                        canonical_pitch_vector(player_velocity, team, config);
+                    vector.extend([
+                        1.0,
+                        player_x as f32,
+                        player_y as f32,
+                        (player_x - ball.0).clamp(-1.0, 1.0) as f32,
+                        (player_y - ball.1).clamp(-1.0, 1.0) as f32,
+                        ((player_vx * player_vx + player_vy * player_vy)
+                            .sqrt()
+                            .clamp(0.0, 1.0)) as f32,
+                    ]);
+                } else {
+                    vector.extend([0.0; 6]);
+                }
+            }
+        }
+    }
+    vector
+}
+
+fn soccer_moment_vector_norm(vector: &[f32]) -> f32 {
+    vector.iter().map(|value| value * value).sum::<f32>().sqrt()
+}
+
+fn soccer_moment_cosine_similarity(
+    query: &[f32],
+    query_norm: f32,
+    candidate: &[f32],
+    candidate_norm: f32,
+) -> Option<f32> {
+    if query.len() != candidate.len() || query_norm <= 1e-9 || candidate_norm <= 1e-9 {
+        return None;
+    }
+    let dot = query.iter().zip(candidate).map(|(a, b)| a * b).sum::<f32>();
+    Some((dot / (query_norm * candidate_norm)).clamp(-1.0, 1.0))
+}
+
+fn soccer_moment_bucket_partition_key(bucket: &SoccerMomentBucketKey) -> String {
+    format!(
+        "{:?}|{}|{}|{}|{}",
+        bucket.phase,
+        bucket.ball_macro_cell_id,
+        bucket.ball_tactical_cell_id,
+        bucket.yards_to_goal_bin,
+        bucket.central_lane_bin
+    )
+}
+
+fn soccer_moment_bucket_distance(a: &SoccerMomentBucketKey, b: &SoccerMomentBucketKey) -> usize {
+    let mut distance = 0usize;
+    if a.label != b.label {
+        distance = distance.saturating_add(3);
+    }
+    if a.phase != b.phase {
+        distance = distance.saturating_add(3);
+    }
+    if a.ball_macro_cell_id != b.ball_macro_cell_id {
+        distance = distance.saturating_add(2);
+    }
+    if a.ball_tactical_cell_id != b.ball_tactical_cell_id {
+        distance = distance.saturating_add(1);
+    }
+    if a.ball_fine_cell_id != b.ball_fine_cell_id {
+        distance = distance.saturating_add(1);
+    }
+    distance = distance
+        .saturating_add(a.yards_to_goal_bin.abs_diff(b.yards_to_goal_bin) as usize * 2)
+        .saturating_add(a.central_lane_bin.abs_diff(b.central_lane_bin) as usize);
+    distance
+}
+
+fn soccer_moment_adversarial_label_weight(label: &str) -> f64 {
+    match label {
+        "great_shot_to_goal" => 1.0,
+        "great_pass_to_goal" => 0.86,
+        "great_dribble_to_goal" => 0.78,
+        _ => 0.50,
+    }
 }
 
 fn canonical_pitch_point(point: Vec2, team: Team, config: &MatchConfig) -> (f64, f64) {
@@ -17379,6 +18005,30 @@ fn handle_live_soccer_request(
                 }
             };
             LiveHttpResponse::json(&guard.moment_windows())
+        }
+        ("POST", "/api/moments/search") | ("POST", "/api/moment-windows/search") => {
+            let search_req = match serde_json::from_str::<SoccerMomentVectorSearchRequest>(req.body)
+            {
+                Ok(req) => req,
+                Err(e) => {
+                    return LiveHttpResponse::error(
+                        400,
+                        "Bad Request",
+                        &format!("parse moment vector search request: {e}"),
+                    )
+                }
+            };
+            let guard = match session.lock() {
+                Ok(guard) => guard,
+                Err(_) => {
+                    return LiveHttpResponse::error(
+                        500,
+                        "Internal Server Error",
+                        "soccer session lock poisoned",
+                    )
+                }
+            };
+            LiveHttpResponse::json(&guard.search_moments(&search_req))
         }
         ("GET", "/api/moments/history") | ("GET", "/api/moment-windows/history") => {
             let guard = match session.lock() {
@@ -23185,6 +23835,81 @@ mod tests {
         assert!(defensive_shape.y > neutral_shape.y);
     }
 
+    #[test]
+    fn adversarial_embedding_memory_biases_team_brain_directives() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 1701,
+            ..Default::default()
+        });
+        sim.players[9].position = Vec2::new(40.0, 94.0);
+        sim.ball.holder = Some(9);
+        sim.ball.position = sim.players[9].position;
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let mut neutral_brain = CentralBrain::default();
+        let mut neutral_rng = mulberry32(1701);
+        neutral_brain.run_time_step(&snapshot, &mut neutral_rng);
+
+        let frame = tracking_frame_from_match(&sim);
+        let feature_vector =
+            soccer_moment_feature_vector(std::slice::from_ref(&frame), Team::Home, &sim.config);
+        let bucket =
+            soccer_moment_bucket_key("great_shot_to_goal", Team::Home, &frame, &sim.config);
+        let summary = SoccerMomentSummary {
+            id: "memory-shot".to_string(),
+            label: "great_shot_to_goal".to_string(),
+            team: Team::Home,
+            player_id: Some(9),
+            event_tick: frame.tick,
+            start_tick: frame.tick,
+            end_tick: frame.tick,
+            goal_delta_ticks: 0,
+            frame_count: 1,
+            action_count: 1,
+            feature_vector_len: feature_vector.len(),
+            bucket,
+        };
+        sim.remember_adversarial_moment_window(SoccerMomentWindow {
+            summary,
+            actions: vec![SoccerMomentActionMarker {
+                tick: frame.tick,
+                player_id: 9,
+                action: "shoot".to_string(),
+                target_player: None,
+                reward: SOCCER_MOMENT_REPLAY_SHOT_REWARD,
+            }],
+            frames: vec![frame],
+            embedder_version: SOCCER_MOMENT_EMBEDDER_VERSION.to_string(),
+            feature_vector,
+        });
+
+        assert_eq!(sim.adversarial_moment_memory_len(), 1);
+        sim.run_time_step();
+
+        assert!(
+            sim.central_brain
+                .home_directive
+                .adversarial_embedding_attack_score
+                > 0.90
+        );
+        assert!(
+            sim.central_brain
+                .away_directive
+                .adversarial_embedding_defense_score
+                > 0.90
+        );
+        assert!(
+            sim.central_brain.home_directive.risk_tolerance
+                > neutral_brain.home_directive.risk_tolerance
+        );
+        assert!(
+            sim.central_brain.away_directive.press_intensity
+                > neutral_brain.away_directive.press_intensity
+        );
+    }
+
     fn home_numbers_up_overload_match() -> SoccerMatch {
         let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
         let holder = 6;
@@ -24877,6 +25602,31 @@ mod tests {
             .moments
             .iter()
             .all(|moment| !moment.frames.is_empty() && !moment.feature_vector.is_empty()));
+        assert!(windows
+            .moments
+            .iter()
+            .all(|moment| moment.embedder_version == SOCCER_MOMENT_EMBEDDER_VERSION));
+        assert!(windows
+            .moments
+            .iter()
+            .all(|moment| moment.feature_vector.len() > SOCCER_MOMENT_FEATURE_FRAME_SAMPLES * 12));
+        let query = SoccerMomentVectorSearchRequest {
+            bucket: windows.moments[0].summary.bucket.clone(),
+            feature_vector: windows.moments[0].feature_vector.clone(),
+            limit: 2,
+            max_candidates: 10,
+            bucket_radius: 6,
+            same_label_only: true,
+        };
+        let index = SoccerMomentVectorIndex::from_windows(&windows.moments);
+        let status = index.status();
+        assert_eq!(status.entries, 3);
+        assert_eq!(status.dimension, windows.moments[0].feature_vector.len());
+        assert_eq!(status.embedder_version, SOCCER_MOMENT_EMBEDDER_VERSION);
+        let search = index.search(&query);
+        assert!(!search.results.is_empty());
+        assert_eq!(search.results[0].summary.id, windows.moments[0].summary.id);
+        assert!(search.results[0].score > 0.999);
         assert!(moment_path.exists());
         let records = read_moment_history_jsonl(&moment_path);
         assert_eq!(records.len(), 3);
@@ -24891,6 +25641,10 @@ mod tests {
             "great_shot_to_goal"
         );
         assert_eq!(
+            records[0]["window"]["embedderVersion"],
+            SOCCER_MOMENT_EMBEDDER_VERSION
+        );
+        assert_eq!(
             records[0]["window"]["featureVector"]
                 .as_array()
                 .expect("feature vector")
@@ -24901,6 +25655,12 @@ mod tests {
         let typed_records =
             soccer_moment_records_from_jsonl(&raw_records).expect("typed moment records");
         assert_eq!(typed_records.len(), 3);
+        assert_eq!(
+            SoccerMomentVectorIndex::from_records(&typed_records)
+                .status()
+                .entries,
+            3
+        );
         let replay_dataset = soccer_moment_records_to_learning_dataset(
             &typed_records,
             session.sim.config.clone(),
@@ -24959,6 +25719,24 @@ mod tests {
         assert!(history.truncated);
         let session = Arc::new(Mutex::new(session));
         let input_queue = session.lock().unwrap().input_queue();
+        let search_body = serde_json::to_string(&query).expect("moment search request json");
+        let search_response = handle_live_soccer_request(
+            &format!(
+                "POST /api/moments/search HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
+                search_body.len(),
+                search_body
+            ),
+            &session,
+            &input_queue,
+        );
+        assert_eq!(search_response.status, 200);
+        let search_value: serde_json::Value =
+            serde_json::from_str(&search_response.body).expect("moment search json");
+        assert_eq!(search_value["status"]["entries"], 3);
+        assert_eq!(
+            search_value["results"][0]["summary"]["id"],
+            windows.moments[0].summary.id
+        );
         let replay_body = serde_json::json!({
             "limit": 2,
             "passes": 2,
@@ -26125,6 +26903,7 @@ mod tests {
         assert!(!config.learning_enabled);
         assert!(!config.learning_logging_enabled);
         assert!(!config.neural_learning.enabled);
+        assert!(!config.adversarial_embedding_exploitation_enabled);
     }
 
     #[test]

@@ -293,6 +293,446 @@ pub fn external_cp_sat_reference_solver_manifest() -> Value {
     )
 }
 
+pub fn cp_sat_model_to_reference_json(model: &CpModel) -> Value {
+    let variables: Vec<_> = model
+        .variables
+        .iter()
+        .map(cp_variable_to_reference_json)
+        .collect();
+    let constraints: Vec<_> = model
+        .constraints
+        .iter()
+        .map(cp_constraint_to_reference_json)
+        .collect();
+    let objective = model.objective.as_ref().map(cp_objective_to_reference_json);
+
+    json!({
+        "variables": variables,
+        "constraints": constraints,
+        "objective": objective,
+    })
+}
+
+pub fn cp_sat_model_to_reference_json_string(model: &CpModel) -> String {
+    cp_sat_model_to_reference_json(model).to_string()
+}
+
+fn cp_variable_to_reference_json(variable: &CpVariable) -> Value {
+    json!({
+        "name": variable.name,
+        "domain": variable.domain,
+    })
+}
+
+fn cp_terms_to_reference_json(terms: &[LinearTerm]) -> Vec<Value> {
+    terms
+        .iter()
+        .map(|term| {
+            json!({
+                "var": term.var,
+                "coeff": term.coeff,
+            })
+        })
+        .collect()
+}
+
+fn cp_literal_to_reference_json(literal: &BoolLiteral) -> Value {
+    json!({
+        "var": literal.var,
+        "positive": literal.positive,
+    })
+}
+
+fn cp_optional_literal_to_reference_json(literal: Option<&BoolLiteral>) -> Value {
+    literal
+        .map(cp_literal_to_reference_json)
+        .unwrap_or(Value::Null)
+}
+
+fn cp_literals_to_reference_json(literals: &[BoolLiteral]) -> Vec<Value> {
+    literals.iter().map(cp_literal_to_reference_json).collect()
+}
+
+fn cp_domain_intervals_to_reference_json(intervals: &[CpDomainInterval]) -> Vec<Value> {
+    intervals
+        .iter()
+        .map(|interval| {
+            json!({
+                "lb": interval.lb,
+                "ub": interval.ub,
+            })
+        })
+        .collect()
+}
+
+fn cp_interval_to_reference_json(interval: &CpInterval) -> Value {
+    json!({
+        "start": interval.start,
+        "duration": interval.duration,
+        "presence": cp_optional_literal_to_reference_json(interval.presence.as_ref()),
+        "name": interval.name,
+    })
+}
+
+fn cp_variable_interval_to_reference_json(interval: &CpVariableInterval) -> Value {
+    json!({
+        "start": interval.start,
+        "duration": interval.duration,
+        "end": interval.end,
+        "presence": cp_optional_literal_to_reference_json(interval.presence.as_ref()),
+        "name": interval.name,
+    })
+}
+
+fn cp_demand_interval_to_reference_json(interval: &CpDemandInterval) -> Value {
+    json!({
+        "start": interval.start,
+        "duration": interval.duration,
+        "demand": interval.demand,
+        "presence": cp_optional_literal_to_reference_json(interval.presence.as_ref()),
+        "name": interval.name,
+    })
+}
+
+fn cp_variable_demand_interval_to_reference_json(interval: &CpVariableDemandInterval) -> Value {
+    json!({
+        "start": interval.start,
+        "duration": interval.duration,
+        "end": interval.end,
+        "demand": interval.demand,
+        "presence": cp_optional_literal_to_reference_json(interval.presence.as_ref()),
+        "name": interval.name,
+    })
+}
+
+fn cp_rectangle_to_reference_json(rectangle: &CpRectangle) -> Value {
+    json!({
+        "x_start": rectangle.x_start,
+        "y_start": rectangle.y_start,
+        "width": rectangle.width,
+        "height": rectangle.height,
+        "presence": cp_optional_literal_to_reference_json(rectangle.presence.as_ref()),
+        "name": rectangle.name,
+    })
+}
+
+fn cp_variable_rectangle_to_reference_json(rectangle: &CpVariableRectangle) -> Value {
+    json!({
+        "x_start": rectangle.x_start,
+        "x_size": rectangle.x_size,
+        "x_end": rectangle.x_end,
+        "y_start": rectangle.y_start,
+        "y_size": rectangle.y_size,
+        "y_end": rectangle.y_end,
+        "presence": cp_optional_literal_to_reference_json(rectangle.presence.as_ref()),
+        "name": rectangle.name,
+    })
+}
+
+fn cp_objective_to_reference_json(objective: &CpObjective) -> Value {
+    json!({
+        "sense": objective.sense.as_str(),
+        "terms": cp_terms_to_reference_json(&objective.terms),
+    })
+}
+
+fn cp_constraint_to_reference_json(constraint: &CpConstraint) -> Value {
+    match constraint {
+        CpConstraint::Linear { terms, sense, rhs } => json!({
+            "kind": "linear",
+            "terms": cp_terms_to_reference_json(terms),
+            "sense": sense.as_str(),
+            "rhs": rhs,
+        }),
+        CpConstraint::LinearDomain { terms, intervals } => json!({
+            "kind": "linear_domain",
+            "terms": cp_terms_to_reference_json(terms),
+            "intervals": cp_domain_intervals_to_reference_json(intervals),
+        }),
+        CpConstraint::EnforcedLinearDomain {
+            enforcement,
+            terms,
+            intervals,
+        } => json!({
+            "kind": "enforced_linear_domain",
+            "enforcement": cp_literals_to_reference_json(enforcement),
+            "terms": cp_terms_to_reference_json(terms),
+            "intervals": cp_domain_intervals_to_reference_json(intervals),
+        }),
+        CpConstraint::MapDomain { var, bools, offset } => json!({
+            "kind": "map_domain",
+            "var": var,
+            "bools": bools,
+            "offset": offset,
+        }),
+        CpConstraint::EnforcedLinear {
+            enforcement,
+            terms,
+            sense,
+            rhs,
+        } => json!({
+            "kind": "enforced_linear",
+            "enforcement": cp_literals_to_reference_json(enforcement),
+            "terms": cp_terms_to_reference_json(terms),
+            "sense": sense.as_str(),
+            "rhs": rhs,
+        }),
+        CpConstraint::EnforcedBoolOr {
+            enforcement,
+            literals,
+        } => json!({
+            "kind": "enforced_bool_or",
+            "enforcement": cp_literals_to_reference_json(enforcement),
+            "literals": cp_literals_to_reference_json(literals),
+        }),
+        CpConstraint::EnforcedBoolAnd {
+            enforcement,
+            literals,
+        } => json!({
+            "kind": "enforced_bool_and",
+            "enforcement": cp_literals_to_reference_json(enforcement),
+            "literals": cp_literals_to_reference_json(literals),
+        }),
+        CpConstraint::EnforcedBoolXor {
+            enforcement,
+            literals,
+        } => json!({
+            "kind": "enforced_bool_xor",
+            "enforcement": cp_literals_to_reference_json(enforcement),
+            "literals": cp_literals_to_reference_json(literals),
+        }),
+        CpConstraint::EnforcedAtMostOne {
+            enforcement,
+            literals,
+        } => json!({
+            "kind": "enforced_at_most_one",
+            "enforcement": cp_literals_to_reference_json(enforcement),
+            "literals": cp_literals_to_reference_json(literals),
+        }),
+        CpConstraint::EnforcedAtLeastOne {
+            enforcement,
+            literals,
+        } => json!({
+            "kind": "enforced_at_least_one",
+            "enforcement": cp_literals_to_reference_json(enforcement),
+            "literals": cp_literals_to_reference_json(literals),
+        }),
+        CpConstraint::EnforcedExactlyOne {
+            enforcement,
+            literals,
+        } => json!({
+            "kind": "enforced_exactly_one",
+            "enforcement": cp_literals_to_reference_json(enforcement),
+            "literals": cp_literals_to_reference_json(literals),
+        }),
+        CpConstraint::AllDifferent(vars) => json!({
+            "kind": "all_different",
+            "vars": vars,
+        }),
+        CpConstraint::BoolOr(literals) => json!({
+            "kind": "bool_or",
+            "literals": cp_literals_to_reference_json(literals),
+        }),
+        CpConstraint::BoolAnd(literals) => json!({
+            "kind": "bool_and",
+            "literals": cp_literals_to_reference_json(literals),
+        }),
+        CpConstraint::BoolXor(literals) => json!({
+            "kind": "bool_xor",
+            "literals": cp_literals_to_reference_json(literals),
+        }),
+        CpConstraint::AtMostOne(literals) => json!({
+            "kind": "at_most_one",
+            "literals": cp_literals_to_reference_json(literals),
+        }),
+        CpConstraint::AtLeastOne(literals) => json!({
+            "kind": "at_least_one",
+            "literals": cp_literals_to_reference_json(literals),
+        }),
+        CpConstraint::ExactlyOne(literals) => json!({
+            "kind": "exactly_one",
+            "literals": cp_literals_to_reference_json(literals),
+        }),
+        CpConstraint::Implication {
+            antecedent,
+            consequent,
+        } => json!({
+            "kind": "implication",
+            "antecedent": cp_literal_to_reference_json(antecedent),
+            "consequent": cp_literal_to_reference_json(consequent),
+        }),
+        CpConstraint::AllowedAssignments { vars, tuples } => json!({
+            "kind": "allowed_assignments",
+            "vars": vars,
+            "tuples": tuples,
+        }),
+        CpConstraint::ForbiddenAssignments { vars, tuples } => json!({
+            "kind": "forbidden_assignments",
+            "vars": vars,
+            "tuples": tuples,
+        }),
+        CpConstraint::EnforcedAllowedAssignments {
+            enforcement,
+            vars,
+            tuples,
+        } => json!({
+            "kind": "enforced_allowed_assignments",
+            "enforcement": cp_literals_to_reference_json(enforcement),
+            "vars": vars,
+            "tuples": tuples,
+        }),
+        CpConstraint::EnforcedForbiddenAssignments {
+            enforcement,
+            vars,
+            tuples,
+        } => json!({
+            "kind": "enforced_forbidden_assignments",
+            "enforcement": cp_literals_to_reference_json(enforcement),
+            "vars": vars,
+            "tuples": tuples,
+        }),
+        CpConstraint::Inverse { direct, inverse } => json!({
+            "kind": "inverse",
+            "direct": direct,
+            "inverse": inverse,
+        }),
+        CpConstraint::MaxEquality { target, vars } => json!({
+            "kind": "max_equality",
+            "target": target,
+            "vars": vars,
+        }),
+        CpConstraint::MinEquality { target, vars } => json!({
+            "kind": "min_equality",
+            "target": target,
+            "vars": vars,
+        }),
+        CpConstraint::AbsEquality { target, var } => json!({
+            "kind": "abs_equality",
+            "target": target,
+            "var": var,
+        }),
+        CpConstraint::MultiplicationEquality { target, vars } => json!({
+            "kind": "multiplication_equality",
+            "target": target,
+            "vars": vars,
+        }),
+        CpConstraint::DivisionEquality {
+            target,
+            numerator,
+            denominator,
+        } => json!({
+            "kind": "division_equality",
+            "target": target,
+            "numerator": numerator,
+            "denominator": denominator,
+        }),
+        CpConstraint::ModuloEquality {
+            target,
+            var,
+            modulus,
+        } => json!({
+            "kind": "modulo_equality",
+            "target": target,
+            "var": var,
+            "modulus": modulus,
+        }),
+        CpConstraint::Automaton(automaton) => json!({
+            "kind": "automaton",
+            "vars": automaton.vars,
+            "starting_state": automaton.starting_state,
+            "final_states": automaton.final_states,
+            "transitions": automaton.transitions.iter().map(|transition| json!({
+                "tail": transition.tail,
+                "label": transition.label,
+                "head": transition.head,
+            })).collect::<Vec<_>>(),
+        }),
+        CpConstraint::Circuit(arcs) => json!({
+            "kind": "circuit",
+            "arcs": arcs.iter().map(|arc| json!({
+                "tail": arc.tail,
+                "head": arc.head,
+                "literal": cp_literal_to_reference_json(&arc.literal),
+            })).collect::<Vec<_>>(),
+        }),
+        CpConstraint::MultipleCircuit(arcs) => json!({
+            "kind": "multiple_circuit",
+            "arcs": arcs.iter().map(|arc| json!({
+                "tail": arc.tail,
+                "head": arc.head,
+                "literal": cp_literal_to_reference_json(&arc.literal),
+            })).collect::<Vec<_>>(),
+        }),
+        CpConstraint::Element(element) => json!({
+            "kind": "element",
+            "index": element.index,
+            "values": element.values,
+            "target": element.target,
+        }),
+        CpConstraint::VariableElement(element) => json!({
+            "kind": "variable_element",
+            "index": element.index,
+            "vars": element.vars,
+            "target": element.target,
+        }),
+        CpConstraint::Alternative(alternative) => json!({
+            "kind": "alternative",
+            "start": alternative.start,
+            "duration": alternative.duration,
+            "end": alternative.end,
+            "presence": cp_optional_literal_to_reference_json(alternative.presence.as_ref()),
+            "alternatives": alternative.alternatives.iter().map(cp_variable_interval_to_reference_json).collect::<Vec<_>>(),
+            "name": alternative.name,
+        }),
+        CpConstraint::NoOverlap(intervals) => json!({
+            "kind": "no_overlap",
+            "intervals": intervals.iter().map(cp_interval_to_reference_json).collect::<Vec<_>>(),
+        }),
+        CpConstraint::NoOverlapVariable(intervals) => json!({
+            "kind": "no_overlap_variable",
+            "intervals": intervals.iter().map(cp_variable_interval_to_reference_json).collect::<Vec<_>>(),
+        }),
+        CpConstraint::NoOverlap2D(rectangles) => json!({
+            "kind": "no_overlap_2d",
+            "rectangles": rectangles.iter().map(cp_rectangle_to_reference_json).collect::<Vec<_>>(),
+        }),
+        CpConstraint::NoOverlap2DVariable(rectangles) => json!({
+            "kind": "no_overlap_2d_variable",
+            "rectangles": rectangles.iter().map(cp_variable_rectangle_to_reference_json).collect::<Vec<_>>(),
+        }),
+        CpConstraint::Cumulative {
+            intervals,
+            capacity,
+        } => json!({
+            "kind": "cumulative",
+            "capacity": capacity,
+            "intervals": intervals.iter().map(cp_demand_interval_to_reference_json).collect::<Vec<_>>(),
+        }),
+        CpConstraint::CumulativeVariable {
+            intervals,
+            capacity,
+        } => json!({
+            "kind": "cumulative_variable",
+            "capacity": capacity,
+            "intervals": intervals.iter().map(cp_variable_demand_interval_to_reference_json).collect::<Vec<_>>(),
+        }),
+        CpConstraint::Reservoir {
+            events,
+            min_level,
+            max_level,
+        } => json!({
+            "kind": "reservoir",
+            "min_level": min_level,
+            "max_level": max_level,
+            "events": events.iter().map(|event| json!({
+                "time": event.time,
+                "level_change": event.level_change,
+                "active": cp_optional_literal_to_reference_json(event.active.as_ref()),
+            })).collect::<Vec<_>>(),
+        }),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExternalCpSatReferenceOptions {
     pub solver: ExternalCpSatReferenceSolver,
@@ -1959,6 +2399,112 @@ mod tests {
         assert!(ExternalCpSatReferenceSolver::RustEnumeration.supports_cp_sat_json());
         assert!(ExternalCpSatReferenceSolver::PythonEnumeration.supports_cp_sat_json());
         assert!(!ExternalCpSatReferenceSolver::ChocoSolver.supports_cp_sat_json());
+    }
+
+    #[test]
+    fn cp_sat_model_serializer_emits_reference_contract() {
+        let model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "pick".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "load".to_string(),
+                    domain: vec![0, 4],
+                },
+            ],
+            constraints: vec![
+                CpConstraint::EnforcedLinear {
+                    enforcement: vec![BoolLiteral {
+                        var: 0,
+                        positive: true,
+                    }],
+                    terms: vec![LinearTerm { var: 1, coeff: 1 }],
+                    sense: LinearSense::Ge,
+                    rhs: 2,
+                },
+                CpConstraint::NoOverlap(vec![CpInterval {
+                    start: 0,
+                    duration: 2,
+                    presence: Some(BoolLiteral {
+                        var: 0,
+                        positive: true,
+                    }),
+                    name: Some("optional_job".to_string()),
+                }]),
+            ],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Min,
+                terms: vec![LinearTerm { var: 1, coeff: 1 }],
+            }),
+        };
+
+        let payload = cp_sat_model_to_reference_json(&model);
+
+        assert_eq!(payload["variables"][0]["name"], "pick");
+        assert_eq!(payload["constraints"][0]["kind"], "enforced_linear");
+        assert_eq!(
+            payload["constraints"][1]["intervals"][0]["presence"],
+            json!({"var": 0, "positive": true})
+        );
+        assert_eq!(payload["objective"]["sense"], "min");
+
+        let (parsed, hints, strategies) =
+            native_cp_model(&payload).expect("parse serialized model");
+        assert_eq!(parsed, model);
+        assert!(hints.is_empty());
+        assert!(strategies.is_empty());
+        assert_eq!(
+            cp_sat_model_to_reference_json_string(&model),
+            payload.to_string()
+        );
+    }
+
+    #[test]
+    fn cp_sat_model_serializer_feeds_rust_reference_solver() {
+        let model = CpModel {
+            variables: vec![
+                CpVariable {
+                    name: "x".to_string(),
+                    domain: vec![0, 1],
+                },
+                CpVariable {
+                    name: "y".to_string(),
+                    domain: vec![0, 1],
+                },
+            ],
+            constraints: vec![CpConstraint::ExactlyOne(vec![
+                BoolLiteral {
+                    var: 0,
+                    positive: true,
+                },
+                BoolLiteral {
+                    var: 1,
+                    positive: true,
+                },
+            ])],
+            objective: Some(CpObjective {
+                sense: ObjectiveSense::Max,
+                terms: vec![
+                    LinearTerm { var: 0, coeff: 2 },
+                    LinearTerm { var: 1, coeff: 1 },
+                ],
+            }),
+        };
+        let payload = cp_sat_model_to_reference_json(&model);
+        let run = solve_cp_sat_json_with_external_reference(
+            &payload,
+            &ExternalCpSatReferenceOptions {
+                solver: ExternalCpSatReferenceSolver::RustEnumeration,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(run.status, ExternalCpSatReferenceStatus::Optimal);
+        assert_eq!(run.assignment, vec![1, 0]);
+        assert_eq!(run.objective, Some(2.0));
+        assert_eq!(run.backend, "rust:cp-native-enumeration");
     }
 
     #[test]

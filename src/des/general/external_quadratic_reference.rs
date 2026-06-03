@@ -1176,7 +1176,7 @@ fn run_quadratic_reference_json(
     }
 }
 
-fn qp_json(problem: &QuadraticProgram) -> Value {
+pub fn quadratic_program_to_reference_json(problem: &QuadraticProgram) -> Value {
     json!({
         "Q": &problem.q,
         "c": &problem.c,
@@ -1198,7 +1198,7 @@ pub fn solve_qp_with_external_reference(
         return solve_qp_with_rust_reference(problem, opts);
     }
 
-    run_quadratic_reference_json(qp_json(problem), opts)
+    run_quadratic_reference_json(quadratic_program_to_reference_json(problem), opts)
 }
 
 pub fn solve_miqp_with_external_reference(
@@ -1209,14 +1209,14 @@ pub fn solve_miqp_with_external_reference(
         return solve_miqp_with_rust_reference(problem, opts);
     }
 
-    let mut payload = qp_json(&problem.qp);
+    let mut payload = quadratic_program_to_reference_json(&problem.qp);
     if let Some(map) = payload.as_object_mut() {
         map.insert("integer_vars".to_string(), json!(&problem.integer_vars));
     }
     run_quadratic_reference_json(payload, opts)
 }
 
-fn socp_json(problem: &SecondOrderConeProgram) -> Value {
+pub fn second_order_cone_program_to_reference_json(problem: &SecondOrderConeProgram) -> Value {
     json!({
         "c": &problem.c,
         "A_ub": &problem.a_ub,
@@ -1244,7 +1244,7 @@ pub fn solve_socp_with_external_reference(
         return solve_socp_with_rust_reference(problem);
     }
 
-    run_quadratic_reference_json(socp_json(problem), opts)
+    run_quadratic_reference_json(second_order_cone_program_to_reference_json(problem), opts)
 }
 
 pub fn solve_misocp_with_external_reference(
@@ -1255,14 +1255,16 @@ pub fn solve_misocp_with_external_reference(
         return solve_misocp_with_rust_reference(problem, opts);
     }
 
-    let mut payload = socp_json(&problem.socp);
+    let mut payload = second_order_cone_program_to_reference_json(&problem.socp);
     if let Some(map) = payload.as_object_mut() {
         map.insert("integer_vars".to_string(), json!(&problem.integer_vars));
     }
     run_quadratic_reference_json(payload, opts)
 }
 
-fn qcp_json(problem: &QuadraticallyConstrainedProgram) -> Value {
+pub fn quadratically_constrained_program_to_reference_json(
+    problem: &QuadraticallyConstrainedProgram,
+) -> Value {
     json!({
         "Q": &problem.q,
         "c": &problem.c,
@@ -1290,7 +1292,10 @@ pub fn solve_qcp_with_external_reference(
         return solve_qcp_with_rust_reference(problem);
     }
 
-    run_quadratic_reference_json(qcp_json(problem), opts)
+    run_quadratic_reference_json(
+        quadratically_constrained_program_to_reference_json(problem),
+        opts,
+    )
 }
 
 pub fn solve_miqcp_with_external_reference(
@@ -1301,7 +1306,7 @@ pub fn solve_miqcp_with_external_reference(
         return solve_miqcp_with_rust_reference(problem, opts);
     }
 
-    let mut payload = qcp_json(&problem.qcp);
+    let mut payload = quadratically_constrained_program_to_reference_json(&problem.qcp);
     if let Some(map) = payload.as_object_mut() {
         map.insert("integer_vars".to_string(), json!(&problem.integer_vars));
     }

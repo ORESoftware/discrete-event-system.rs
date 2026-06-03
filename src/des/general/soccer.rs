@@ -157,6 +157,8 @@ const SOCCER_MOMENT_FEATURES_PER_FRAME: usize =
 const SOCCER_SET_PLAY_WINDOW_SECONDS: f64 = 15.0;
 const SOCCER_SET_PLAY_MAX_RELEASE_DELAY_SECONDS: f64 = 3.0;
 const SOCCER_SET_PLAY_MAX_TRIAL_SECONDS: f64 = 60.0;
+const SOCCER_SET_PLAY_MIN_TRIAL_DT_SECONDS: f64 = 0.02;
+const SOCCER_SET_PLAY_MAX_TRIAL_TICKS: u64 = 3_000;
 const DEFAULT_ADVERSARIAL_MOMENT_MEMORY_LIMIT: usize = 64;
 const MAX_ADVERSARIAL_MOMENT_MEMORY_LIMIT: usize = 512;
 const ADVERSARIAL_EMBEDDING_SEARCH_LIMIT: usize = 3;
@@ -377,6 +379,49 @@ impl Vec2 {
             y: self.y.max(0.0).min(field_length),
         }
     }
+}
+
+fn sane_pitch_dimensions(field_width: f64, field_length: f64) -> (f64, f64) {
+    let width = if field_width.is_finite() && field_width > 0.0 {
+        field_width
+    } else {
+        DEFAULT_FIELD_WIDTH_YARDS
+    };
+    let length = if field_length.is_finite() && field_length > 0.0 {
+        field_length
+    } else {
+        DEFAULT_FIELD_LENGTH_YARDS
+    };
+    (width, length)
+}
+
+fn finite_pitch_point(point: Vec2, field_width: f64, field_length: f64, fallback: Vec2) -> Vec2 {
+    let (width, length) = sane_pitch_dimensions(field_width, field_length);
+    let fallback = Vec2::new(
+        if fallback.x.is_finite() {
+            fallback.x.clamp(0.0, width)
+        } else {
+            width * 0.5
+        },
+        if fallback.y.is_finite() {
+            fallback.y.clamp(0.0, length)
+        } else {
+            length * 0.5
+        },
+    );
+    Vec2::new(
+        if point.x.is_finite() {
+            point.x
+        } else {
+            fallback.x
+        },
+        if point.y.is_finite() {
+            point.y
+        } else {
+            fallback.y
+        },
+    )
+    .clamp_to_pitch(width, length)
 }
 
 impl std::ops::Add for Vec2 {
@@ -14004,19 +14049,17 @@ impl SoccerMatch {
         team: Team,
         spot: Vec2,
     ) {
-        let spot = spot.clamp_to_pitch(
+        let (field_width, field_length) = sane_pitch_dimensions(
             self.config.field_width_yards,
             self.config.field_length_yards,
         );
+        let center = Vec2::new(field_width * 0.5, field_length * 0.5);
+        let spot = finite_pitch_point(spot, field_width, field_length, center);
         if let Some(kind) = restart.ball_restart_kind() {
             self.apply_restart_with_label(kind, team, spot, restart.as_label());
             return;
         }
 
-        let center = Vec2::new(
-            self.config.field_width_yards * 0.5,
-            self.config.field_length_yards * 0.5,
-        );
         let kickoff = self
             .players
             .iter()
@@ -16391,8 +16434,10 @@ impl SoccerMatch {
 
     fn resolve_player_collisions(&mut self) {
         let min_sep = PLAYER_BODY_RADIUS_YARDS * 2.0;
-        let width = self.config.field_width_yards;
-        let length = self.config.field_length_yards;
+        let (width, length) = sane_pitch_dimensions(
+            self.config.field_width_yards,
+            self.config.field_length_yards,
+        );
         for i in 0..self.players.len() {
             for j in i + 1..self.players.len() {
                 let (left, right) = self.players.split_at_mut(j);
@@ -16688,11 +16733,18 @@ impl SoccerMatch {
         position: Vec2,
         restart_label: &str,
     ) {
+        let (field_width, field_length) = sane_pitch_dimensions(
+            self.config.field_width_yards,
+            self.config.field_length_yards,
+        );
+        let fallback = Vec2::new(field_width * 0.5, field_length * 0.5);
         let restart = BallRestart {
             kind: restart_kind,
             awarded_team,
-            position,
+            position: finite_pitch_point(position, field_width, field_length, fallback),
         };
+        self.pending_pass = None;
+        self.pending_shot = None;
         self.stat_restart(restart.kind, restart.awarded_team);
         let restart_holder = self.nearest_player_on_team(restart.awarded_team, restart.position);
         if let Some(holder_id) = restart_holder {
@@ -16744,8 +16796,8 @@ impl SoccerMatch {
                     assistant.position = official_position_bounds(
                         assistant.kind,
                         Vec2::new(assistant.position.x, restart.position.y),
-                        self.config.field_width_yards,
-                        self.config.field_length_yards,
+                        field_width,
+                        field_length,
                     );
                     assistant.velocity = Vec2::zero();
                     assistant.acceleration = Vec2::zero();
@@ -16820,10 +16872,12 @@ impl SoccerMatch {
     }
 
     fn set_dead_ball_player_position(&mut self, player_id: usize, position: Vec2) {
-        let width = self.config.field_width_yards;
-        let length = self.config.field_length_yards;
+        let (width, length) = sane_pitch_dimensions(
+            self.config.field_width_yards,
+            self.config.field_length_yards,
+        );
         if let Some(player) = self.players.iter_mut().find(|p| p.id == player_id) {
-            player.position = position.clamp_to_pitch(width, length);
+            player.position = finite_pitch_point(position, width, length, player.home_position);
             player.velocity = Vec2::zero();
             player.acceleration = Vec2::zero();
             player.jerk = Vec2::zero();
@@ -16889,10 +16943,11 @@ impl SoccerMatch {
             Some(BallRestartKind::GoalKick) => SoccerSetPlayRoutineKind::GoalKickBuildOut,
             Some(BallRestartKind::CornerKick) => SoccerSetPlayRoutineKind::CornerFarPost,
             Some(BallRestartKind::FreeKick) => {
-                let goal = Vec2::new(
-                    self.config.field_width_yards * 0.5,
-                    team.goal_y(self.config.field_length_yards),
+                let (width, length) = sane_pitch_dimensions(
+                    self.config.field_width_yards,
+                    self.config.field_length_yards,
                 );
+                let goal = Vec2::new(width * 0.5, team.goal_y(length));
                 if restart_label != "indirect-free-kick" && spot.distance(goal) <= 32.0 {
                     SoccerSetPlayRoutineKind::FreeKickDirectShot
                 } else {
@@ -16941,8 +16996,10 @@ impl SoccerMatch {
             return;
         }
 
-        let width = self.config.field_width_yards;
-        let length = self.config.field_length_yards;
+        let (width, length) = sane_pitch_dimensions(
+            self.config.field_width_yards,
+            self.config.field_length_yards,
+        );
         let dir = call.team.attack_dir();
         let goal = Vec2::new(width * 0.5, call.team.goal_y(length));
         let to_goal = (goal - spot).normalized();
@@ -16997,8 +17054,10 @@ impl SoccerMatch {
         taker: Option<usize>,
         vector_hint: Option<SoccerSetPlayVectorHint>,
     ) -> SoccerSetPlayCall {
-        let width = self.config.field_width_yards;
-        let length = self.config.field_length_yards;
+        let (width, length) = sane_pitch_dimensions(
+            self.config.field_width_yards,
+            self.config.field_length_yards,
+        );
         let dir = team.attack_dir();
         let goal_y = team.goal_y(length);
         let own_goal_y = team.other().goal_y(length);
@@ -17018,7 +17077,7 @@ impl SoccerMatch {
                 assignments.push(SoccerSetPlayAssignment {
                     player_id,
                     role,
-                    target: target.clamp_to_pitch(width, length),
+                    target: finite_pitch_point(target, width, length, spot),
                     release_after_seconds,
                 });
             }
@@ -20488,16 +20547,8 @@ fn default_set_play_spot(
     restart: SoccerSetPlayRestartKind,
     team: Team,
 ) -> Vec2 {
-    let width = if config.field_width_yards.is_finite() && config.field_width_yards > 0.0 {
-        config.field_width_yards
-    } else {
-        DEFAULT_FIELD_WIDTH_YARDS
-    };
-    let length = if config.field_length_yards.is_finite() && config.field_length_yards > 0.0 {
-        config.field_length_yards
-    } else {
-        DEFAULT_FIELD_LENGTH_YARDS
-    };
+    let (width, length) =
+        sane_pitch_dimensions(config.field_width_yards, config.field_length_yards);
     let dir = team.attack_dir();
     let spot = match restart {
         SoccerSetPlayRestartKind::Kickoff => Vec2::new(width * 0.5, length * 0.5),
@@ -20516,11 +20567,40 @@ fn default_set_play_spot(
             Vec2::new(width * 0.5, team.goal_y(length) - dir * 25.0)
         }
     };
-    spot.clamp_to_pitch(width, length)
+    finite_pitch_point(spot, width, length, Vec2::new(width * 0.5, length * 0.5))
+}
+
+fn sanitized_set_play_trial_config(mut config: MatchConfig) -> MatchConfig {
+    config.dt_seconds = if config.dt_seconds.is_finite() && config.dt_seconds > 0.0 {
+        config.dt_seconds.max(SOCCER_SET_PLAY_MIN_TRIAL_DT_SECONDS)
+    } else {
+        DEFAULT_DT_SECONDS
+    };
+    if !config.duration_seconds.is_finite() || config.duration_seconds < 0.0 {
+        config.duration_seconds = 0.0;
+    }
+    if !config.half_duration_seconds.is_finite() || config.half_duration_seconds < 0.0 {
+        config.half_duration_seconds = 0.0;
+    }
+    if !config.period_break_recovery_seconds.is_finite()
+        || config.period_break_recovery_seconds < 0.0
+    {
+        config.period_break_recovery_seconds = 0.0;
+    }
+    let (width, length) =
+        sane_pitch_dimensions(config.field_width_yards, config.field_length_yards);
+    config.field_width_yards = width;
+    config.field_length_yards = length;
+    if !config.goal_width_yards.is_finite() || config.goal_width_yards <= 0.0 {
+        config.goal_width_yards = DEFAULT_GOAL_WIDTH_YARDS.min(width * 0.5);
+    } else {
+        config.goal_width_yards = config.goal_width_yards.min(width * 0.8).max(1.0);
+    }
+    config
 }
 
 pub fn run_soccer_set_play_trial(request: SoccerSetPlayTrialRequest) -> SoccerSetPlayTrialResult {
-    let mut config = request.config.clone();
+    let mut config = sanitized_set_play_trial_config(request.config.clone());
     let duration_seconds = if request.duration_seconds.is_finite() && request.duration_seconds > 0.0
     {
         request
@@ -20529,7 +20609,7 @@ pub fn run_soccer_set_play_trial(request: SoccerSetPlayTrialRequest) -> SoccerSe
     } else {
         SOCCER_SET_PLAY_WINDOW_SECONDS
     };
-    let dt = config.dt_seconds.max(1e-6);
+    let dt = config.dt_seconds;
     config.duration_seconds = config.duration_seconds.max(duration_seconds + dt);
     let mut sim = SoccerMatch::default_11v11(config.clone());
     if config.learning_enabled && sim.team_policies.is_none() {
@@ -20549,7 +20629,7 @@ pub fn run_soccer_set_play_trial(request: SoccerSetPlayTrialRequest) -> SoccerSe
     };
     sim.stage_set_play_restart(request.restart, request.team, spot);
     let routine = sim.active_set_play.as_ref().map(|call| call.routine);
-    let total_ticks = (duration_seconds / dt).ceil() as u64;
+    let total_ticks = ((duration_seconds / dt).ceil() as u64).min(SOCCER_SET_PLAY_MAX_TRIAL_TICKS);
     for _ in 0..total_ticks {
         if sim.is_done() {
             break;
@@ -28138,6 +28218,157 @@ mod tests {
 
         assert_eq!(result.ticks, SOCCER_SET_PLAY_MAX_TRIAL_SECONDS as u64);
         assert!(result.simulated_seconds <= SOCCER_SET_PLAY_MAX_TRIAL_SECONDS + 1e-9);
+    }
+
+    #[test]
+    fn set_play_trial_sanitizes_malformed_config_and_spot() {
+        let result = run_soccer_set_play_trial(SoccerSetPlayTrialRequest {
+            config: MatchConfig {
+                duration_seconds: f64::NAN,
+                dt_seconds: 1e-9,
+                field_width_yards: f64::NAN,
+                field_length_yards: -10.0,
+                goal_width_yards: f64::INFINITY,
+                max_human_players: 0,
+                learning_enabled: false,
+                ..Default::default()
+            },
+            restart: SoccerSetPlayRestartKind::DirectFreeKick,
+            team: Team::Home,
+            spot: Some(Vec2::new(f64::NAN, f64::INFINITY)),
+            duration_seconds: 0.5,
+            vector_hint: None,
+        });
+
+        assert!(result.ticks <= SOCCER_SET_PLAY_MAX_TRIAL_TICKS);
+        assert!(result.ticks <= 25);
+        assert!(result.simulated_seconds.is_finite());
+        assert!(result
+            .events
+            .iter()
+            .any(|event| event.kind == "set-play"));
+    }
+
+    #[test]
+    fn staging_set_play_restart_clears_stale_live_ball_context() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            max_human_players: 0,
+            learning_enabled: false,
+            ..Default::default()
+        });
+        sim.pending_pass = Some(PendingPass {
+            team: Team::Home,
+            from: 5,
+            target: Some(9),
+            flight: PassFlight::Floor,
+            is_cross: false,
+            launch_tick: sim.tick,
+            origin: sim.players[5].position,
+            intended_target: sim.players[9].position,
+            distance_yards: sim.players[5].position.distance(sim.players[9].position),
+            receiver_openness: 0.8,
+            passer_skill: 0.7,
+            offside: None,
+        });
+        sim.pending_shot = Some(PendingShot {
+            team: Team::Home,
+            shooter: 5,
+            origin: sim.players[5].position,
+        });
+
+        sim.stage_set_play_restart(
+            SoccerSetPlayRestartKind::DirectFreeKick,
+            Team::Home,
+            Vec2::new(f64::NAN, 95.0),
+        );
+
+        assert!(sim.pending_pass.is_none());
+        assert!(sim.pending_shot.is_none());
+        assert!(sim.ball.position.x.is_finite());
+        assert!(sim.ball.position.y.is_finite());
+    }
+
+    #[test]
+    fn set_play_release_sanitizes_bad_target_and_power() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            max_human_players: 0,
+            learning_enabled: false,
+            ..Default::default()
+        });
+        sim.set_coach_set_play_hint(SoccerSetPlayVectorHint {
+            team: Team::Home,
+            restart: "free-kick".to_string(),
+            routine: SoccerSetPlayRoutineKind::FreeKickFarPostCross,
+            score: 0.9,
+            source_moment_id: None,
+            label: None,
+        });
+        sim.stage_set_play_restart(
+            SoccerSetPlayRestartKind::DirectFreeKick,
+            Team::Home,
+            Vec2::new(40.0, 95.0),
+        );
+        let taker = sim.ball.holder.expect("restart taker");
+        if let Some(call) = &mut sim.active_set_play {
+            call.release_player = Some(11);
+            call.release_power = f64::NAN;
+            call.started_clock_seconds = 0.0;
+        }
+        let mut snapshot = WorldSnapshot::from_match(&sim);
+        snapshot.clock_seconds = SOCCER_SET_PLAY_MAX_RELEASE_DELAY_SECONDS + 0.1;
+        let observation = snapshot.observation_for(taker);
+        let release = sim.players[taker]
+            .restart_release_action(&snapshot, &observation, "free-kick")
+            .expect("sanitized release");
+
+        match release.0 {
+            SoccerAction::Pass {
+                target_player,
+                power,
+                flight: PassFlight::Aerial,
+            } => {
+                assert_eq!(target_player, None);
+                assert!((power - 0.65).abs() < 1e-9);
+            }
+            other => panic!("expected sanitized aerial pass, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_set_play_hint_is_ignored() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            max_human_players: 0,
+            learning_enabled: false,
+            ..Default::default()
+        });
+        sim.set_coach_set_play_hint(SoccerSetPlayVectorHint {
+            team: Team::Home,
+            restart: "not-a-restart".to_string(),
+            routine: SoccerSetPlayRoutineKind::FreeKickFarPostCross,
+            score: 1.0,
+            source_moment_id: Some("bad".to_string()),
+            label: None,
+        });
+        sim.set_coach_set_play_hint(SoccerSetPlayVectorHint {
+            team: Team::Home,
+            restart: "free-kick".to_string(),
+            routine: SoccerSetPlayRoutineKind::FreeKickFarPostCross,
+            score: f64::NAN,
+            source_moment_id: Some("nan".to_string()),
+            label: None,
+        });
+
+        sim.stage_set_play_restart(
+            SoccerSetPlayRestartKind::DirectFreeKick,
+            Team::Home,
+            Vec2::new(40.0, 95.0),
+        );
+
+        assert!(sim
+            .active_set_play
+            .as_ref()
+            .and_then(|call| call.vector_hint.as_ref())
+            .is_none());
     }
 
     #[test]

@@ -2,16 +2,11 @@
 //!
 //! This module exposes a Rust-facing interface for solver executables that are
 //! installed locally (for example through Homebrew) without vendoring any
-//! external binaries into the repository. HiGHS and GLPK use direct Rust
-//! subprocess paths for plain LP/MIP models; the remaining solver-specific
-//! command lines, richer source-model expansion, and solution-pool iteration
-//! still live in `scripts/linear_cli_reference.py`. This module owns the library
-//! boundary: problem serialization, subprocess execution, typed status mapping,
-//! and elapsed-time accounting.
+//! external binaries into the repository. HiGHS plain LP/MIP solves run through
+//! a native Rust CLI path; the broader solver-specific command lines and parsers
+//! still live in `scripts/linear_cli_reference.py` as a compatibility bridge.
 
-use std::collections::HashMap;
 use std::fs;
-use std::io;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -884,66 +879,6 @@ struct RawExternalLinearCliPoolMember {
     objective: f64,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-struct HighsCliModel {
-    sense: Sense,
-    c: Vec<f64>,
-    le_rows: Vec<Vec<f64>>,
-    le_rhs: Vec<f64>,
-    eq_rows: Vec<Vec<f64>>,
-    eq_rhs: Vec<f64>,
-    lbs: Vec<Option<f64>>,
-    ubs: Vec<Option<f64>>,
-    integer_vars: Vec<bool>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-struct HighsParsedSolution {
-    status: String,
-    x: Vec<f64>,
-    dual_ub: Option<Vec<f64>>,
-    dual_eq: Option<Vec<f64>>,
-    reduced_costs: Option<Vec<f64>>,
-    var_basis: Option<Vec<String>>,
-    row_basis: Option<Vec<String>>,
-}
-
-struct ExternalLinearCliTempDir {
-    path: PathBuf,
-}
-
-impl ExternalLinearCliTempDir {
-    fn new(prefix: &str) -> io::Result<Self> {
-        let base = std::env::temp_dir();
-        for attempt in 0..100 {
-            let nanos = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or(0);
-            let path = base.join(format!("{prefix}-{}-{nanos}-{attempt}", std::process::id()));
-            match fs::create_dir(&path) {
-                Ok(()) => return Ok(Self { path }),
-                Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
-                Err(err) => return Err(err),
-            }
-        }
-        Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            format!("could not create unique temporary directory for {prefix}"),
-        ))
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for ExternalLinearCliTempDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
-    }
-}
-
 /// Serialize an [`LPProblem`] into the JSON contract accepted by
 /// `scripts/linear_cli_reference.py`.
 pub fn lp_problem_to_cli_json(problem: &LPProblem) -> Value {
@@ -1189,8 +1124,9 @@ pub fn lp_problem_to_cplex_lp_string(problem: &LPProblem) -> String {
 /// Export an IP/MIP as a CPLEX LP-format string accepted by many solver CLIs.
 ///
 /// `IPMIPProblem` lower bounds are the branch-and-cut backend default of zero;
-/// finite upper bounds and integer markers are emitted as LP `Bounds`,
-/// `General`, and `Binary` sections.
+/// lazy/cut rows are emitted as ordinary `<=` rows for same-input external
+/// validation; finite upper bounds and integer markers are emitted as LP
+/// `Bounds`, `General`, and `Binary` sections.
 pub fn ipmip_problem_to_cplex_lp_string(problem: &IPMIPProblem) -> String {
     let n = problem.c.len();
     let lbs = vec![Some(0.0); n];
@@ -1199,11 +1135,12 @@ pub fn ipmip_problem_to_cplex_lp_string(problem: &IPMIPProblem) -> String {
         .as_ref()
         .map(|upper| upper.iter().copied().map(Some).collect::<Vec<_>>())
         .unwrap_or_else(|| vec![None; n]);
+    let (le_rows, le_rhs) = ipmip_le_rows_with_lazy(problem);
     cplex_lp_string(
         problem.sense,
         &problem.c,
-        &problem.a,
-        &problem.b,
+        &le_rows,
+        &le_rhs,
         &[],
         &[],
         &lbs,
@@ -1218,6 +1155,10 @@ pub fn ipmip_problem_to_cplex_lp_string(problem: &IPMIPProblem) -> String {
 /// LP/MIP solvers. This exporter keeps stable `x0`, `x1`, ... column names for
 /// the same reason as the LP-format exporter.
 pub fn lp_problem_to_mps_string(problem: &LPProblem) -> String {
+    lp_problem_to_mps_string_with_objsense(problem, true)
+}
+
+fn lp_problem_to_mps_string_with_objsense(problem: &LPProblem, include_objsense: bool) -> String {
     let n = problem.c.len();
     let lbs = problem.lb.clone().unwrap_or_else(|| vec![Some(0.0); n]);
     let ubs = problem.ub.clone().unwrap_or_else(|| vec![None; n]);
@@ -1232,11 +1173,19 @@ pub fn lp_problem_to_mps_string(problem: &LPProblem) -> String {
         &lbs,
         &ubs,
         &integer_vars,
+        include_objsense,
     )
 }
 
 /// Export an IP/MIP as a free-format MPS string with integer markers.
 pub fn ipmip_problem_to_mps_string(problem: &IPMIPProblem) -> String {
+    ipmip_problem_to_mps_string_with_objsense(problem, true)
+}
+
+fn ipmip_problem_to_mps_string_with_objsense(
+    problem: &IPMIPProblem,
+    include_objsense: bool,
+) -> String {
     let n = problem.c.len();
     let lbs = vec![Some(0.0); n];
     let ubs = problem
@@ -1244,17 +1193,48 @@ pub fn ipmip_problem_to_mps_string(problem: &IPMIPProblem) -> String {
         .as_ref()
         .map(|upper| upper.iter().copied().map(Some).collect::<Vec<_>>())
         .unwrap_or_else(|| vec![None; n]);
+    let (le_rows, le_rhs) = ipmip_le_rows_with_lazy(problem);
     mps_string(
         problem.sense,
         &problem.c,
-        &problem.a,
-        &problem.b,
+        &le_rows,
+        &le_rhs,
         &[],
         &[],
         &lbs,
         &ubs,
         &problem.integer_vars,
+        include_objsense,
     )
+}
+
+fn ipmip_le_rows_with_lazy(problem: &IPMIPProblem) -> (Vec<Vec<f64>>, Vec<f64>) {
+    let mut rows = problem.a.clone();
+    let mut rhs = problem.b.clone();
+    if let Some(lazy_constraints) = &problem.lazy_constraints {
+        for constraint in lazy_constraints {
+            debug_assert_eq!(
+                constraint.coefs.len(),
+                problem.c.len(),
+                "lazy constraint row length must match variable count"
+            );
+            if constraint.coefs.len() == problem.c.len() {
+                rows.push(constraint.coefs.clone());
+                rhs.push(constraint.rhs);
+            }
+        }
+    }
+    (rows, rhs)
+}
+
+fn ipmip_total_le_row_count(problem: &IPMIPProblem) -> usize {
+    problem.a.len()
+        + problem.lazy_constraints.as_ref().map_or(0, |constraints| {
+            constraints
+                .iter()
+                .filter(|constraint| constraint.coefs.len() == problem.c.len())
+                .count()
+        })
 }
 
 /// Serialize a lexicographic multi-objective MIP into the CLI bridge contract.
@@ -1286,6 +1266,18 @@ pub fn solve_lp_with_external_cli(
     problem: &LPProblem,
     opts: &ExternalLinearCliOptions,
 ) -> ExternalLinearCliSolution {
+    if should_use_native_highs_cli(ExternalLinearCliKind::Lp, opts) {
+        return solve_lp_with_native_highs_cli(problem, opts);
+    }
+    if should_use_native_glpk_cli(opts) {
+        return solve_lp_with_native_glpk_cli(problem, opts);
+    }
+    if should_use_native_cbc_cli(opts) {
+        return solve_lp_with_native_cbc_cli(problem, opts);
+    }
+    if should_use_native_clp_cli(opts) {
+        return solve_lp_with_native_clp_cli(problem, opts);
+    }
     solve_linear_cli_json(
         ExternalLinearCliKind::Lp,
         lp_problem_to_cli_json(problem),
@@ -1298,6 +1290,15 @@ pub fn solve_ipmip_with_external_cli(
     problem: &IPMIPProblem,
     opts: &ExternalLinearCliOptions,
 ) -> ExternalLinearCliSolution {
+    if should_use_native_highs_cli(ExternalLinearCliKind::Mip, opts) {
+        return solve_ipmip_with_native_highs_cli(problem, opts);
+    }
+    if should_use_native_glpk_cli(opts) {
+        return solve_ipmip_with_native_glpk_cli(problem, opts);
+    }
+    if should_use_native_cbc_cli(opts) {
+        return solve_ipmip_with_native_cbc_cli(problem, opts);
+    }
     solve_linear_cli_json(
         ExternalLinearCliKind::Mip,
         ipmip_problem_to_cli_json(problem),
@@ -1554,12 +1555,6 @@ pub fn solve_linear_cli_json(
     let t0 = Instant::now();
     let solver_name = opts.solver.as_str();
     let bridge_solver = format!("{solver_name}:cli");
-    if let Some(solution) = solve_highs_cli_json_direct(kind, &problem_json, opts, t0) {
-        return solution;
-    }
-    if let Some(solution) = solve_glpk_cli_json_direct(kind, &problem_json, opts, t0) {
-        return solution;
-    }
     let stdin_json = match serde_json::to_string(&problem_json) {
         Ok(stdin_json) => stdin_json,
         Err(err) => {
@@ -1815,222 +1810,417 @@ pub fn solve_linear_cli_json(
     }
 }
 
-fn solve_highs_cli_json_direct(
+fn should_use_native_highs_cli(
     kind: ExternalLinearCliKind,
-    problem_json: &Value,
     opts: &ExternalLinearCliOptions,
-    t0: Instant,
-) -> Option<ExternalLinearCliSolution> {
-    if opts.solver != ExternalLinearCliSolver::Highs {
-        return None;
+) -> bool {
+    if opts.solver != ExternalLinearCliSolver::Highs
+        || opts.python.is_some()
+        || opts.script_path.is_some()
+        || opts.solution_pool_size.is_some()
+        || opts.solution_limit.is_some()
+        || opts.cuts.is_some()
+        || opts.heuristics.is_some()
+        || opts.branch_rule.is_some()
+        || opts.branch_priorities.is_some()
+        || opts.node_selection.is_some()
+        || opts.mip_start.is_some()
+    {
+        return false;
     }
-    if opts.solution_pool_size.is_some() {
-        return None;
+    if kind == ExternalLinearCliKind::Lp {
+        return true;
     }
+    true
+}
 
-    let solver = "highs:cli".to_string();
-    let model = match highs_model_from_cli_json(kind, problem_json) {
-        Ok(Some(model)) => model,
-        Ok(None) => return None,
-        Err(message) => {
-            return Some(external_cli_failure(
-                ExternalLinearCliStatus::NumericalError,
-                solver,
-                message,
-                elapsed_ms(t0),
-            ));
+fn solve_lp_with_native_highs_cli(
+    problem: &LPProblem,
+    opts: &ExternalLinearCliOptions,
+) -> ExternalLinearCliSolution {
+    let model_text = match opts.model_format {
+        ExternalLinearCliModelFormat::CplexLp => lp_problem_to_cplex_lp_string(problem),
+        ExternalLinearCliModelFormat::Mps => lp_problem_to_mps_string(problem),
+    };
+    let le_count = problem.a_ub.as_ref().map_or(0, Vec::len);
+    let eq_count = problem.a_eq.as_ref().map_or(0, Vec::len);
+    solve_native_highs_cli_model(
+        ExternalLinearCliKind::Lp,
+        &model_text,
+        problem.c.len(),
+        le_count,
+        eq_count,
+        &problem.c,
+        opts,
+    )
+}
+
+fn solve_ipmip_with_native_highs_cli(
+    problem: &IPMIPProblem,
+    opts: &ExternalLinearCliOptions,
+) -> ExternalLinearCliSolution {
+    let model_text = match opts.model_format {
+        ExternalLinearCliModelFormat::CplexLp => ipmip_problem_to_cplex_lp_string(problem),
+        ExternalLinearCliModelFormat::Mps => ipmip_problem_to_mps_string(problem),
+    };
+    solve_native_highs_cli_model(
+        ExternalLinearCliKind::Mip,
+        &model_text,
+        problem.c.len(),
+        ipmip_total_le_row_count(problem),
+        0,
+        &problem.c,
+        opts,
+    )
+}
+
+fn should_use_native_glpk_cli(opts: &ExternalLinearCliOptions) -> bool {
+    opts.solver == ExternalLinearCliSolver::Glpk
+        && opts.python.is_none()
+        && opts.script_path.is_none()
+        && opts.lp_algorithm.is_none()
+        && opts.max_nodes.is_none()
+        && opts.node_limit.is_none()
+        && opts.solution_limit.is_none()
+        && opts.solution_pool_size.is_none()
+        && opts.relative_gap.is_none()
+        && opts.absolute_gap.is_none()
+        && opts.objective_limit.is_none()
+        && opts.primal_feasibility_tolerance.is_none()
+        && opts.dual_feasibility_tolerance.is_none()
+        && opts.integer_feasibility_tolerance.is_none()
+        && opts.threads.is_none()
+        && opts.random_seed.is_none()
+        && opts.presolve.is_none()
+        && opts.cuts.is_none()
+        && opts.heuristics.is_none()
+        && opts.branch_rule.is_none()
+        && opts.branch_priorities.is_none()
+        && opts.node_selection.is_none()
+        && opts.mip_start.is_none()
+}
+
+fn solve_lp_with_native_glpk_cli(
+    problem: &LPProblem,
+    opts: &ExternalLinearCliOptions,
+) -> ExternalLinearCliSolution {
+    let model_text = match opts.model_format {
+        ExternalLinearCliModelFormat::CplexLp => lp_problem_to_cplex_lp_string(problem),
+        ExternalLinearCliModelFormat::Mps => lp_problem_to_mps_string_with_objsense(problem, false),
+    };
+    let le_count = problem.a_ub.as_ref().map_or(0, Vec::len);
+    let eq_count = problem.a_eq.as_ref().map_or(0, Vec::len);
+    solve_native_glpk_cli_model(
+        ExternalLinearCliKind::Lp,
+        problem.sense,
+        &model_text,
+        problem.c.len(),
+        le_count,
+        eq_count,
+        &problem.c,
+        opts,
+    )
+}
+
+fn solve_ipmip_with_native_glpk_cli(
+    problem: &IPMIPProblem,
+    opts: &ExternalLinearCliOptions,
+) -> ExternalLinearCliSolution {
+    let model_text = match opts.model_format {
+        ExternalLinearCliModelFormat::CplexLp => ipmip_problem_to_cplex_lp_string(problem),
+        ExternalLinearCliModelFormat::Mps => {
+            ipmip_problem_to_mps_string_with_objsense(problem, false)
         }
     };
+    solve_native_glpk_cli_model(
+        ExternalLinearCliKind::Mip,
+        problem.sense,
+        &model_text,
+        problem.c.len(),
+        ipmip_total_le_row_count(problem),
+        0,
+        &problem.c,
+        opts,
+    )
+}
+
+fn should_use_native_cbc_cli(opts: &ExternalLinearCliOptions) -> bool {
+    opts.solver == ExternalLinearCliSolver::Cbc
+        && opts.python.is_none()
+        && opts.script_path.is_none()
+        && opts.lp_algorithm.is_none()
+        && opts.max_nodes.is_none()
+        && opts.node_limit.is_none()
+        && opts.solution_limit.is_none()
+        && opts.solution_pool_size.is_none()
+        && opts.relative_gap.is_none()
+        && opts.absolute_gap.is_none()
+        && opts.objective_limit.is_none()
+        && opts.primal_feasibility_tolerance.is_none()
+        && opts.dual_feasibility_tolerance.is_none()
+        && opts.integer_feasibility_tolerance.is_none()
+        && opts.threads.is_none()
+        && opts.random_seed.is_none()
+        && opts.presolve.is_none()
+        && opts.cuts.is_none()
+        && opts.heuristics.is_none()
+        && opts.branch_rule.is_none()
+        && opts.branch_priorities.is_none()
+        && opts.node_selection.is_none()
+        && opts.mip_start.is_none()
+}
+
+fn solve_lp_with_native_cbc_cli(
+    problem: &LPProblem,
+    opts: &ExternalLinearCliOptions,
+) -> ExternalLinearCliSolution {
+    let model_text = match opts.model_format {
+        ExternalLinearCliModelFormat::CplexLp => lp_problem_to_cplex_lp_string(problem),
+        ExternalLinearCliModelFormat::Mps => lp_problem_to_mps_string(problem),
+    };
+    let le_count = problem.a_ub.as_ref().map_or(0, Vec::len);
+    let eq_count = problem.a_eq.as_ref().map_or(0, Vec::len);
+    solve_native_cbc_cli_model(
+        ExternalLinearCliKind::Lp,
+        problem.sense,
+        &model_text,
+        problem.c.len(),
+        le_count,
+        eq_count,
+        &problem.c,
+        opts,
+    )
+}
+
+fn solve_ipmip_with_native_cbc_cli(
+    problem: &IPMIPProblem,
+    opts: &ExternalLinearCliOptions,
+) -> ExternalLinearCliSolution {
+    let model_text = match opts.model_format {
+        ExternalLinearCliModelFormat::CplexLp => ipmip_problem_to_cplex_lp_string(problem),
+        ExternalLinearCliModelFormat::Mps => ipmip_problem_to_mps_string(problem),
+    };
+    solve_native_cbc_cli_model(
+        ExternalLinearCliKind::Mip,
+        problem.sense,
+        &model_text,
+        problem.c.len(),
+        ipmip_total_le_row_count(problem),
+        0,
+        &problem.c,
+        opts,
+    )
+}
+
+fn should_use_native_clp_cli(opts: &ExternalLinearCliOptions) -> bool {
+    opts.solver == ExternalLinearCliSolver::Clp
+        && opts.python.is_none()
+        && opts.script_path.is_none()
+        && opts.lp_algorithm.is_none()
+        && opts.max_nodes.is_none()
+        && opts.node_limit.is_none()
+        && opts.solution_limit.is_none()
+        && opts.solution_pool_size.is_none()
+        && opts.relative_gap.is_none()
+        && opts.absolute_gap.is_none()
+        && opts.objective_limit.is_none()
+        && opts.primal_feasibility_tolerance.is_none()
+        && opts.dual_feasibility_tolerance.is_none()
+        && opts.integer_feasibility_tolerance.is_none()
+        && opts.threads.is_none()
+        && opts.random_seed.is_none()
+        && opts.presolve.is_none()
+        && opts.cuts.is_none()
+        && opts.heuristics.is_none()
+        && opts.branch_rule.is_none()
+        && opts.branch_priorities.is_none()
+        && opts.node_selection.is_none()
+        && opts.mip_start.is_none()
+}
+
+fn solve_lp_with_native_clp_cli(
+    problem: &LPProblem,
+    opts: &ExternalLinearCliOptions,
+) -> ExternalLinearCliSolution {
+    let model_text = match opts.model_format {
+        ExternalLinearCliModelFormat::CplexLp => lp_problem_to_cplex_lp_string(problem),
+        ExternalLinearCliModelFormat::Mps => lp_problem_to_mps_string(problem),
+    };
+    let le_count = problem.a_ub.as_ref().map_or(0, Vec::len);
+    let eq_count = problem.a_eq.as_ref().map_or(0, Vec::len);
+    solve_native_clp_cli_model(
+        problem.sense,
+        &model_text,
+        problem.c.len(),
+        le_count,
+        eq_count,
+        &problem.c,
+        opts,
+    )
+}
+
+fn solve_native_cbc_cli_model(
+    kind: ExternalLinearCliKind,
+    sense: Sense,
+    model_text: &str,
+    variable_count: usize,
+    le_count: usize,
+    eq_count: usize,
+    objective_coefficients: &[f64],
+    opts: &ExternalLinearCliOptions,
+) -> ExternalLinearCliSolution {
+    let t0 = Instant::now();
+    let bridge_solver = "cbc:cli".to_string();
     let Some(command_path) =
-        external_linear_cli_command_with_options(ExternalLinearCliSolver::Highs, opts)
+        external_linear_cli_command_with_options(ExternalLinearCliSolver::Cbc, opts)
     else {
-        return Some(external_cli_failure(
+        return external_cli_failure(
             ExternalLinearCliStatus::Unavailable,
-            solver,
-            "highs executable not found".to_string(),
+            bridge_solver,
+            "cbc executable not found".to_string(),
             elapsed_ms(t0),
-        ));
+        );
     };
 
-    let temp_dir = match ExternalLinearCliTempDir::new("ores-highs-cli") {
-        Ok(temp_dir) => temp_dir,
-        Err(err) => {
-            return Some(external_cli_failure(
-                ExternalLinearCliStatus::NumericalError,
-                solver,
-                format!("failed to create temporary HiGHS workspace: {err}"),
-                elapsed_ms(t0),
-            ));
-        }
-    };
-    let model_extension = match opts.model_format {
+    let extension = match opts.model_format {
         ExternalLinearCliModelFormat::CplexLp => "lp",
         ExternalLinearCliModelFormat::Mps => "mps",
     };
-    let model_path = temp_dir.path().join(format!("model.{model_extension}"));
-    let solution_path = temp_dir.path().join("highs.sol");
-    let model_text = highs_model_to_string(&model, opts.model_format);
+    let model_path = native_cbc_temp_path("model", extension);
+    let solution_path = native_cbc_temp_path("solution", "sol");
+    let basis_path = native_cbc_temp_path("basis", "bas");
+    let cleanup_paths = vec![
+        model_path.clone(),
+        solution_path.clone(),
+        basis_path.clone(),
+    ];
+
     if let Err(err) = fs::write(&model_path, model_text) {
-        return Some(external_cli_failure(
+        cleanup_native_cbc_temp_files(&cleanup_paths);
+        return external_cli_failure(
             ExternalLinearCliStatus::NumericalError,
-            solver,
-            format!("failed to write HiGHS model file: {err}"),
+            bridge_solver,
+            format!(
+                "failed to write CBC model file '{}': {err}",
+                model_path.display()
+            ),
             elapsed_ms(t0),
-        ));
+        );
     }
 
-    let time_limit = normalized_time_limit(opts.time_limit_secs);
     let mut command = Command::new(&command_path);
     command
-        .arg("--model_file")
         .arg(&model_path)
-        .arg("--solution_file")
-        .arg(&solution_path)
-        .arg("--time_limit")
-        .arg(time_limit.to_string());
-
-    let mut mip_start_objective = None;
-    if kind == ExternalLinearCliKind::Mip {
-        if let Some(mip_start) = opts.mip_start.as_deref() {
-            let mip_start = match normalized_highs_mip_start(mip_start, model.c.len()) {
-                Ok(mip_start) => mip_start,
-                Err(message) => {
-                    return Some(external_cli_failure(
-                        ExternalLinearCliStatus::NumericalError,
-                        solver,
-                        message,
-                        elapsed_ms(t0),
-                    ));
-                }
-            };
-            let objective = dot_f64(&model.c, &mip_start);
-            let start_path = temp_dir.path().join("highs-start.sol");
-            if let Err(err) = fs::write(&start_path, highs_mip_start_string(&mip_start, objective))
-            {
-                return Some(external_cli_failure(
-                    ExternalLinearCliStatus::NumericalError,
-                    solver,
-                    format!("failed to write HiGHS MIP start file: {err}"),
-                    elapsed_ms(t0),
-                ));
-            }
-            command.arg("--read_solution_file").arg(start_path);
-            mip_start_objective = Some(objective);
-        }
-    }
-
-    if let Some(options_text) = highs_options_file_text(kind, opts) {
-        let options_path = temp_dir.path().join("highs.options");
-        if let Err(err) = fs::write(&options_path, options_text) {
-            return Some(external_cli_failure(
-                ExternalLinearCliStatus::NumericalError,
-                solver,
-                format!("failed to write HiGHS options file: {err}"),
-                elapsed_ms(t0),
-            ));
-        }
-        command.arg("--options_file").arg(options_path);
+        .arg("-seconds")
+        .arg(cbc_time_limit_arg(opts.time_limit_secs));
+    if opts.model_format == ExternalLinearCliModelFormat::Mps {
+        command.arg(match sense {
+            Sense::Max => "-max",
+            Sense::Min => "-min",
+        });
     }
     if kind == ExternalLinearCliKind::Lp {
-        if let Some(lp_algorithm) = opts.lp_algorithm {
-            command.arg("--solver").arg(lp_algorithm.as_str());
-        }
+        command.arg("-printingOptions").arg("all");
     }
-    if let Some(random_seed) = opts.random_seed {
-        command.arg("--random_seed").arg(random_seed.to_string());
+    command.arg("-solve").arg("-solution").arg(&solution_path);
+    if kind == ExternalLinearCliKind::Lp {
+        command.arg("-basisOut").arg(&basis_path);
     }
-    if let Some(presolve) = opts.presolve {
-        command
-            .arg("--presolve")
-            .arg(if presolve == ExternalLinearCliPresolve::Auto {
-                "choose"
-            } else {
-                presolve.as_str()
-            });
-    }
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-    let output = match command
-        .current_dir(temp_dir.path())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-    {
+    let output = match command.output() {
         Ok(output) => output,
         Err(err) => {
-            return Some(external_cli_failure(
+            cleanup_native_cbc_temp_files(&cleanup_paths);
+            return external_cli_failure(
                 ExternalLinearCliStatus::Unavailable,
-                solver,
+                bridge_solver,
                 format!(
-                    "failed to start HiGHS command '{}': {err}",
+                    "failed to start CBC executable '{}': {err}",
                     command_path.display()
                 ),
                 elapsed_ms(t0),
-            ));
+            );
         }
     };
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let solver_version = highs_solver_version_from_output(&stdout, &stderr);
+    let elapsed = elapsed_ms(t0);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let solver_version = parse_cbc_solver_version(&format!("{stdout}\n{stderr}"))
+        .or_else(|| probe_cbc_solver_version(&command_path));
 
     if !solution_path.exists() {
-        let status = classify_highs_status("", &stdout, &stderr);
-        let message = nonempty_trimmed(&stderr).unwrap_or_else(|| stdout.trim().to_string());
-        let status = if matches!(
-            status,
-            ExternalLinearCliStatus::Infeasible | ExternalLinearCliStatus::Unbounded
-        ) {
-            status
-        } else {
-            ExternalLinearCliStatus::Unavailable
-        };
-        let mut solution = external_cli_failure(status, solver, message, elapsed_ms(t0));
-        solution.solver_version = solver_version;
-        return Some(solution);
+        let status = classify_native_linear_status("", &stdout, &stderr);
+        cleanup_native_cbc_temp_files(&cleanup_paths);
+        let mut failure = external_cli_failure(
+            if matches!(
+                status,
+                ExternalLinearCliStatus::Infeasible | ExternalLinearCliStatus::Unbounded
+            ) {
+                status
+            } else {
+                ExternalLinearCliStatus::Unavailable
+            },
+            bridge_solver,
+            native_solver_message("", &stdout, &stderr),
+            elapsed,
+        );
+        failure.solver_version = solver_version;
+        return failure;
     }
 
-    let parsed = match parse_highs_solution_file(
+    let parsed = match parse_native_cbc_solution_file(
         &solution_path,
-        model.c.len(),
-        model.le_rows.len(),
-        model.eq_rows.len(),
+        variable_count,
+        le_count,
+        eq_count,
+        (kind == ExternalLinearCliKind::Lp).then_some(basis_path.as_path()),
     ) {
         Ok(parsed) => parsed,
         Err(message) => {
-            return Some(external_cli_failure(
+            cleanup_native_cbc_temp_files(&cleanup_paths);
+            let mut failure = external_cli_failure(
                 ExternalLinearCliStatus::NumericalError,
-                solver,
+                bridge_solver,
                 message,
-                elapsed_ms(t0),
-            ));
+                elapsed,
+            );
+            failure.solver_version = solver_version;
+            return failure;
         }
     };
-    let status = classify_highs_status(&parsed.status, &stdout, &stderr);
+    cleanup_native_cbc_temp_files(&cleanup_paths);
+
+    let status = classify_native_linear_status(&parsed.status, &stdout, &stderr);
     if !matches!(
         status,
         ExternalLinearCliStatus::Optimal | ExternalLinearCliStatus::Feasible
     ) {
-        let status = if matches!(
-            status,
-            ExternalLinearCliStatus::Infeasible | ExternalLinearCliStatus::Unbounded
-        ) {
-            status
-        } else {
-            ExternalLinearCliStatus::Unavailable
-        };
-        let mut solution = external_cli_failure(status, solver, parsed.status, elapsed_ms(t0));
-        solution.solver_version = solver_version;
-        return Some(solution);
+        let mut failure = external_cli_failure(
+            if matches!(
+                status,
+                ExternalLinearCliStatus::Infeasible | ExternalLinearCliStatus::Unbounded
+            ) {
+                status
+            } else {
+                ExternalLinearCliStatus::Unavailable
+            },
+            bridge_solver,
+            native_solver_message(&parsed.status, &stdout, &stderr),
+            elapsed,
+        );
+        failure.solver_version = solver_version;
+        return failure;
     }
 
-    let objective = dot_f64(&model.c, &parsed.x);
-    let mut solution = ExternalLinearCliSolution {
+    ExternalLinearCliSolution {
         status,
-        solver,
+        solver: bridge_solver,
         solver_version,
-        x: parsed.x,
-        objective: Some(objective),
+        x: parsed.x.clone(),
+        objective: Some(dot_f64(objective_coefficients, &parsed.x)),
         objective_values: None,
-        lp_algorithm: highs_lp_algorithm_feedback(kind, opts.lp_algorithm, &stdout, &stderr),
+        lp_algorithm: None,
         best_bound: None,
         solution_limit: None,
         solution_pool_size: None,
@@ -2038,23 +2228,14 @@ fn solve_highs_cli_json_direct(
         exhausted: None,
         mip_gap: None,
         absolute_gap: None,
-        objective_limit: highs_objective_limit_feedback(
-            kind,
-            opts.objective_limit,
-            &stdout,
-            &stderr,
-        ),
-        primal_feasibility_tolerance: normalized_tolerance(opts.primal_feasibility_tolerance),
-        dual_feasibility_tolerance: normalized_tolerance(opts.dual_feasibility_tolerance),
-        integer_feasibility_tolerance: if kind == ExternalLinearCliKind::Mip {
-            normalized_tolerance(opts.integer_feasibility_tolerance)
-        } else {
-            None
-        },
+        objective_limit: None,
+        primal_feasibility_tolerance: None,
+        dual_feasibility_tolerance: None,
+        integer_feasibility_tolerance: None,
         nodes_explored: None,
-        threads: highs_threads_feedback(opts.threads, &stdout, &stderr),
-        random_seed: highs_random_seed_feedback(opts.random_seed, &stdout, &stderr),
-        presolve: highs_presolve_feedback(opts.presolve, &stdout, &stderr),
+        threads: None,
+        random_seed: None,
+        presolve: None,
         cuts: None,
         heuristics: None,
         branch_rule: None,
@@ -2063,583 +2244,884 @@ fn solve_highs_cli_json_direct(
         node_selection: None,
         mip_start_accepted: None,
         mip_start_objective: None,
-        dual_ub: if kind == ExternalLinearCliKind::Lp {
-            parsed.dual_ub
-        } else {
-            None
-        },
-        dual_eq: if kind == ExternalLinearCliKind::Lp {
-            parsed.dual_eq
-        } else {
-            None
-        },
-        reduced_costs: if kind == ExternalLinearCliKind::Lp {
-            parsed.reduced_costs
-        } else {
-            None
-        },
-        var_basis: if kind == ExternalLinearCliKind::Lp {
-            parsed.var_basis
-        } else {
-            None
-        },
-        row_basis: if kind == ExternalLinearCliKind::Lp {
-            parsed.row_basis
-        } else {
-            None
-        },
-        iterations: highs_lp_iterations(kind, &stdout, &stderr),
-        elapsed_ms: elapsed_ms(t0),
+        dual_ub: (kind == ExternalLinearCliKind::Lp)
+            .then_some(parsed.dual_ub)
+            .flatten(),
+        dual_eq: (kind == ExternalLinearCliKind::Lp)
+            .then_some(parsed.dual_eq)
+            .flatten(),
+        reduced_costs: (kind == ExternalLinearCliKind::Lp)
+            .then_some(parsed.reduced_costs)
+            .flatten(),
+        var_basis: (kind == ExternalLinearCliKind::Lp)
+            .then_some(parsed.var_basis)
+            .flatten(),
+        row_basis: (kind == ExternalLinearCliKind::Lp)
+            .then_some(parsed.row_basis)
+            .flatten(),
+        iterations: (kind == ExternalLinearCliKind::Lp)
+            .then(|| parse_cbc_lp_iterations(&stdout, &stderr))
+            .flatten(),
+        elapsed_ms: elapsed,
         message: parsed.status,
-    };
-    if kind == ExternalLinearCliKind::Mip {
-        apply_highs_mip_quality(&mut solution, objective, &stdout, &stderr);
-        if opts.mip_start.is_some() {
-            solution.mip_start_accepted = Some(highs_mip_start_accepted(&stdout, &stderr));
-            solution.mip_start_objective = mip_start_objective;
-        }
-    }
-    Some(solution)
-}
-
-fn highs_model_from_cli_json(
-    kind: ExternalLinearCliKind,
-    problem_json: &Value,
-) -> Result<Option<HighsCliModel>, String> {
-    match kind {
-        ExternalLinearCliKind::Lp => highs_lp_model_from_cli_json(problem_json).map(Some),
-        ExternalLinearCliKind::Mip => highs_mip_model_from_cli_json(problem_json),
     }
 }
 
-fn highs_lp_model_from_cli_json(problem_json: &Value) -> Result<HighsCliModel, String> {
-    let lp = problem_json.get("lp").unwrap_or(problem_json);
-    let object = lp
-        .as_object()
-        .ok_or_else(|| "LP payload must be a JSON object".to_string())?;
-    let c = required_f64_array(object, "c")?;
-    let n = c.len();
-    let sense = parse_cli_sense(object.get("sense"))?;
-    let mut le_rows = optional_f64_matrix(object, &["A_ub", "a_ub"])?;
-    let mut le_rhs = optional_f64_array(object, &["b_ub"])?;
-    let mut eq_rows = optional_f64_matrix(object, &["A_eq", "a_eq"])?;
-    let mut eq_rhs = optional_f64_array(object, &["b_eq"])?;
-    append_linear_constraint_rows(
-        object.get("linear_constraints"),
-        n,
-        &mut le_rows,
-        &mut le_rhs,
-        &mut eq_rows,
-        &mut eq_rhs,
-    )?;
-    let lbs = optional_bound_array(object.get("lb"), n, Some(0.0), false, "lb")?;
-    let ubs = optional_bound_array(object.get("ub"), n, None, false, "ub")?;
-    validate_highs_model_dimensions(n, &le_rows, &le_rhs, &eq_rows, &eq_rhs, &lbs, &ubs)?;
-    Ok(HighsCliModel {
-        sense,
-        c,
-        le_rows,
-        le_rhs,
-        eq_rows,
-        eq_rhs,
-        lbs,
-        ubs,
-        integer_vars: vec![false; n],
-    })
-}
-
-fn highs_mip_model_from_cli_json(problem_json: &Value) -> Result<Option<HighsCliModel>, String> {
-    let object = problem_json
-        .as_object()
-        .ok_or_else(|| "MIP payload must be a JSON object".to_string())?;
-    for key in [
-        "indicators",
-        "sos",
-        "semi_variables",
-        "pwl",
-        "quadratic_objective",
-        "abs",
-        "maximums",
-        "minimums",
-        "logical",
-        "l1_norms",
-        "linf_norms",
-        "products",
-        "multi_objectives",
-    ] {
-        if json_field_has_content(object.get(key)) {
-            return Ok(None);
-        }
-    }
-
-    let c = required_f64_array(object, "c")?;
-    let n = c.len();
-    let sense = parse_cli_sense(object.get("sense"))?;
-    let mut le_rows = optional_f64_matrix(object, &["a"])?;
-    let mut le_rhs = optional_f64_array(object, &["b"])?;
-    let mut eq_rows = Vec::new();
-    let mut eq_rhs = Vec::new();
-    append_linear_constraint_rows(
-        object.get("linear_constraints"),
-        n,
-        &mut le_rows,
-        &mut le_rhs,
-        &mut eq_rows,
-        &mut eq_rhs,
-    )?;
-    append_lazy_constraint_rows(object.get("lazy_constraints"), n, &mut le_rows, &mut le_rhs)?;
-    let lbs = optional_bound_array(object.get("lb"), n, Some(0.0), true, "lb")?;
-    let ubs = optional_bound_array(object.get("ub"), n, None, false, "ub")?;
-    let integer_vars = optional_bool_array(object.get("integer_vars"), n, false, "integer_vars")?;
-    validate_highs_model_dimensions(n, &le_rows, &le_rhs, &eq_rows, &eq_rhs, &lbs, &ubs)?;
-    Ok(Some(HighsCliModel {
-        sense,
-        c,
-        le_rows,
-        le_rhs,
-        eq_rows,
-        eq_rhs,
-        lbs,
-        ubs,
-        integer_vars,
-    }))
-}
-
-fn highs_model_to_string(
-    model: &HighsCliModel,
-    model_format: ExternalLinearCliModelFormat,
-) -> String {
-    match model_format {
-        ExternalLinearCliModelFormat::CplexLp => cplex_lp_string(
-            model.sense,
-            &model.c,
-            &model.le_rows,
-            &model.le_rhs,
-            &model.eq_rows,
-            &model.eq_rhs,
-            &model.lbs,
-            &model.ubs,
-            &model.integer_vars,
-        ),
-        ExternalLinearCliModelFormat::Mps => mps_string(
-            model.sense,
-            &model.c,
-            &model.le_rows,
-            &model.le_rhs,
-            &model.eq_rows,
-            &model.eq_rhs,
-            &model.lbs,
-            &model.ubs,
-            &model.integer_vars,
-        ),
-    }
-}
-
-fn highs_options_file_text(
-    kind: ExternalLinearCliKind,
-    opts: &ExternalLinearCliOptions,
-) -> Option<String> {
-    let mut text = String::new();
-    if let Some(threads) = opts.threads.filter(|threads| *threads > 0) {
-        text.push_str(&format!("threads = {threads}\n"));
-    }
-    if let Some(tolerance) = normalized_tolerance(opts.primal_feasibility_tolerance) {
-        text.push_str(&format!("primal_feasibility_tolerance = {tolerance:.17}\n"));
-    }
-    if let Some(tolerance) = normalized_tolerance(opts.dual_feasibility_tolerance) {
-        text.push_str(&format!("dual_feasibility_tolerance = {tolerance:.17}\n"));
-    }
-    if kind == ExternalLinearCliKind::Mip {
-        let max_nodes = opts
-            .max_nodes
-            .or_else(|| opts.node_limit.map(|limit| limit as u64))
-            .filter(|nodes| *nodes > 0);
-        if let Some(max_nodes) = max_nodes {
-            text.push_str(&format!("mip_max_nodes = {max_nodes}\n"));
-        }
-        if let Some(gap) = normalized_relative_gap(opts.relative_gap) {
-            text.push_str(&format!("mip_rel_gap = {gap:.17}\n"));
-        }
-        if let Some(gap) = normalized_absolute_gap(opts.absolute_gap) {
-            text.push_str(&format!("mip_abs_gap = {gap:.17}\n"));
-        }
-        if let Some(limit) = normalized_objective_limit(opts.objective_limit) {
-            text.push_str(&format!("objective_target = {limit:.17}\n"));
-        }
-        if let Some(tolerance) = normalized_tolerance(opts.integer_feasibility_tolerance) {
-            text.push_str(&format!("mip_feasibility_tolerance = {tolerance:.17}\n"));
-        }
-    }
-    (!text.is_empty()).then_some(text)
-}
-
-fn parse_cli_sense(value: Option<&Value>) -> Result<Sense, String> {
-    let Some(value) = value else {
-        return Ok(Sense::Max);
-    };
-    let Some(text) = value.as_str() else {
-        return Err("sense must be a string".to_string());
-    };
-    match text.trim().to_ascii_lowercase().as_str() {
-        "max" | "maximize" => Ok(Sense::Max),
-        "min" | "minimize" => Ok(Sense::Min),
-        other => Err(format!("unknown objective sense '{other}'")),
-    }
-}
-
-fn required_f64_array(
-    object: &serde_json::Map<String, Value>,
-    key: &str,
-) -> Result<Vec<f64>, String> {
-    let Some(value) = object.get(key) else {
-        return Err(format!("missing required array '{key}'"));
-    };
-    f64_array_from_value(value, key)
-}
-
-fn optional_f64_array(
-    object: &serde_json::Map<String, Value>,
-    keys: &[&str],
-) -> Result<Vec<f64>, String> {
-    for key in keys {
-        if let Some(value) = object.get(*key) {
-            if value.is_null() {
-                return Ok(Vec::new());
-            }
-            return f64_array_from_value(value, key);
-        }
-    }
-    Ok(Vec::new())
-}
-
-fn optional_f64_matrix(
-    object: &serde_json::Map<String, Value>,
-    keys: &[&str],
-) -> Result<Vec<Vec<f64>>, String> {
-    for key in keys {
-        if let Some(value) = object.get(*key) {
-            if value.is_null() {
-                return Ok(Vec::new());
-            }
-            let Some(rows) = value.as_array() else {
-                return Err(format!("{key} must be an array of rows"));
-            };
-            return rows
-                .iter()
-                .enumerate()
-                .map(|(idx, row)| f64_array_from_value(row, &format!("{key}[{idx}]")))
-                .collect();
-        }
-    }
-    Ok(Vec::new())
-}
-
-fn f64_array_from_value(value: &Value, key: &str) -> Result<Vec<f64>, String> {
-    let Some(values) = value.as_array() else {
-        return Err(format!("{key} must be an array"));
-    };
-    values
-        .iter()
-        .enumerate()
-        .map(|(idx, value)| {
-            value
-                .as_f64()
-                .filter(|value| value.is_finite())
-                .ok_or_else(|| format!("{key}[{idx}] must be a finite number"))
-        })
-        .collect()
-}
-
-fn optional_bound_array(
-    value: Option<&Value>,
-    n: usize,
-    default: Option<f64>,
-    null_means_default: bool,
-    name: &str,
-) -> Result<Vec<Option<f64>>, String> {
-    let Some(value) = value else {
-        return Ok(vec![default; n]);
-    };
-    if value.is_null() {
-        return Ok(vec![default; n]);
-    }
-    let Some(values) = value.as_array() else {
-        return Err(format!("{name} must be an array"));
-    };
-    if values.len() != n {
-        return Err(format!(
-            "{name} length {} does not match variable count {n}",
-            values.len()
-        ));
-    }
-    values
-        .iter()
-        .enumerate()
-        .map(|(idx, value)| {
-            if value.is_null() {
-                return Ok(if null_means_default { default } else { None });
-            }
-            value
-                .as_f64()
-                .filter(|value| value.is_finite())
-                .map(Some)
-                .ok_or_else(|| format!("{name}[{idx}] must be finite or null"))
-        })
-        .collect()
-}
-
-fn optional_bool_array(
-    value: Option<&Value>,
-    n: usize,
-    default: bool,
-    name: &str,
-) -> Result<Vec<bool>, String> {
-    let Some(value) = value else {
-        return Ok(vec![default; n]);
-    };
-    if value.is_null() {
-        return Ok(vec![default; n]);
-    }
-    let Some(values) = value.as_array() else {
-        return Err(format!("{name} must be an array"));
-    };
-    if values.len() != n {
-        return Err(format!(
-            "{name} length {} does not match variable count {n}",
-            values.len()
-        ));
-    }
-    values
-        .iter()
-        .enumerate()
-        .map(|(idx, value)| {
-            value
-                .as_bool()
-                .ok_or_else(|| format!("{name}[{idx}] must be a boolean"))
-        })
-        .collect()
-}
-
-fn append_linear_constraint_rows(
-    value: Option<&Value>,
-    n: usize,
-    le_rows: &mut Vec<Vec<f64>>,
-    le_rhs: &mut Vec<f64>,
-    eq_rows: &mut Vec<Vec<f64>>,
-    eq_rhs: &mut Vec<f64>,
-) -> Result<(), String> {
-    let Some(value) = value else {
-        return Ok(());
-    };
-    if value.is_null() {
-        return Ok(());
-    }
-    let Some(rows) = value.as_array() else {
-        return Err("linear_constraints must be an array".to_string());
-    };
-    for (idx, row_value) in rows.iter().enumerate() {
-        let Some(row_object) = row_value.as_object() else {
-            return Err(format!("linear_constraints[{idx}] must be an object"));
-        };
-        let row = required_f64_array(row_object, "coefs")?;
-        if row.len() != n {
-            return Err(format!(
-                "linear_constraints[{idx}] coefficient length {} does not match variable count {n}",
-                row.len()
-            ));
-        }
-        let lower = optional_f64_field(
-            row_object.get("lower"),
-            &format!("linear_constraints[{idx}].lower"),
-        )?;
-        let upper = optional_f64_field(
-            row_object.get("upper"),
-            &format!("linear_constraints[{idx}].upper"),
-        )?;
-        if lower.is_none() && upper.is_none() {
-            return Err(format!(
-                "linear_constraints[{idx}] needs a lower or upper bound"
-            ));
-        }
-        if let (Some(lower), Some(upper)) = (lower, upper) {
-            if lower > upper + 1.0e-9 {
-                return Err(format!("linear_constraints[{idx}] lower exceeds upper"));
-            }
-            if (lower - upper).abs() <= 1.0e-9 {
-                eq_rows.push(row);
-                eq_rhs.push(upper);
-                continue;
-            }
-        }
-        if let Some(upper) = upper {
-            le_rows.push(row.clone());
-            le_rhs.push(upper);
-        }
-        if let Some(lower) = lower {
-            le_rows.push(row.iter().map(|value| -*value).collect());
-            le_rhs.push(-lower);
-        }
-    }
-    Ok(())
-}
-
-fn append_lazy_constraint_rows(
-    value: Option<&Value>,
-    n: usize,
-    le_rows: &mut Vec<Vec<f64>>,
-    le_rhs: &mut Vec<f64>,
-) -> Result<(), String> {
-    let Some(value) = value else {
-        return Ok(());
-    };
-    if value.is_null() {
-        return Ok(());
-    }
-    let Some(rows) = value.as_array() else {
-        return Err("lazy_constraints must be an array".to_string());
-    };
-    for (idx, row_value) in rows.iter().enumerate() {
-        let Some(row_object) = row_value.as_object() else {
-            return Err(format!("lazy_constraints[{idx}] must be an object"));
-        };
-        let row = required_f64_array(row_object, "coefs")?;
-        if row.len() != n {
-            return Err(format!(
-                "lazy_constraints[{idx}] coefficient length {} does not match variable count {n}",
-                row.len()
-            ));
-        }
-        let rhs = required_f64_field(
-            row_object.get("rhs"),
-            &format!("lazy_constraints[{idx}].rhs"),
-        )?;
-        le_rows.push(row);
-        le_rhs.push(rhs);
-    }
-    Ok(())
-}
-
-fn optional_f64_field(value: Option<&Value>, name: &str) -> Result<Option<f64>, String> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    if value.is_null() {
-        return Ok(None);
-    }
-    required_f64_field(Some(value), name).map(Some)
-}
-
-fn required_f64_field(value: Option<&Value>, name: &str) -> Result<f64, String> {
-    let Some(value) = value else {
-        return Err(format!("missing required number '{name}'"));
-    };
-    value
-        .as_f64()
-        .filter(|value| value.is_finite())
-        .ok_or_else(|| format!("{name} must be a finite number"))
-}
-
-fn validate_highs_model_dimensions(
-    n: usize,
-    le_rows: &[Vec<f64>],
-    le_rhs: &[f64],
-    eq_rows: &[Vec<f64>],
-    eq_rhs: &[f64],
-    lbs: &[Option<f64>],
-    ubs: &[Option<f64>],
-) -> Result<(), String> {
-    if le_rows.len() != le_rhs.len() {
-        return Err("inequality matrix/RHS length mismatch".to_string());
-    }
-    if eq_rows.len() != eq_rhs.len() {
-        return Err("equality matrix/RHS length mismatch".to_string());
-    }
-    if lbs.len() != n || ubs.len() != n {
-        return Err("bound vector length mismatch".to_string());
-    }
-    for row in le_rows.iter().chain(eq_rows) {
-        if row.len() != n {
-            return Err("constraint row length mismatch".to_string());
-        }
-    }
-    Ok(())
-}
-
-fn json_field_has_content(value: Option<&Value>) -> bool {
-    match value {
-        None | Some(Value::Null) => false,
-        Some(Value::Array(values)) => !values.is_empty(),
-        Some(Value::Object(values)) => !values.is_empty(),
-        Some(Value::String(value)) => !value.is_empty(),
-        Some(_) => true,
-    }
-}
-
-fn normalized_highs_mip_start(start: &[f64], n: usize) -> Result<Vec<f64>, String> {
-    if start.len() != n {
-        return Err(format!(
-            "mip_start length {} does not match variable count {n}",
-            start.len()
-        ));
-    }
-    if start.iter().any(|value| !value.is_finite()) {
-        return Err("mip_start values must be finite".to_string());
-    }
-    Ok(start.to_vec())
-}
-
-fn highs_mip_start_string(start: &[f64], objective: f64) -> String {
-    let mut out = String::new();
-    out.push_str("Model status\nUnknown\n\n");
-    out.push_str("# Primal solution values\nFeasible\n");
-    out.push_str(&format!("Objective {objective:.17}\n"));
-    out.push_str(&format!("# Columns {}\n", start.len()));
-    for (idx, value) in start.iter().enumerate() {
-        out.push_str(&format!("x{idx} {value:.17}\n"));
-    }
-    out.push_str(
-        "# Rows 0\n\n# Dual solution values\nNone\n\n# Basis\nHiGHS_basis_file v2\nNone\n",
-    );
-    out
-}
-
-fn parse_highs_solution_file(
-    path: &Path,
-    n: usize,
+fn solve_native_clp_cli_model(
+    sense: Sense,
+    model_text: &str,
+    variable_count: usize,
     le_count: usize,
     eq_count: usize,
-) -> Result<HighsParsedSolution, String> {
+    objective_coefficients: &[f64],
+    opts: &ExternalLinearCliOptions,
+) -> ExternalLinearCliSolution {
+    let t0 = Instant::now();
+    let bridge_solver = "clp:cli".to_string();
+    let Some(command_path) =
+        external_linear_cli_command_with_options(ExternalLinearCliSolver::Clp, opts)
+    else {
+        return external_cli_failure(
+            ExternalLinearCliStatus::Unavailable,
+            bridge_solver,
+            "clp executable not found".to_string(),
+            elapsed_ms(t0),
+        );
+    };
+
+    let extension = match opts.model_format {
+        ExternalLinearCliModelFormat::CplexLp => "lp",
+        ExternalLinearCliModelFormat::Mps => "mps",
+    };
+    let model_path = native_clp_temp_path("model", extension);
+    let solution_path = native_clp_temp_path("solution", "sol");
+    let basis_path = native_clp_temp_path("basis", "bas");
+    let cleanup_paths = vec![
+        model_path.clone(),
+        solution_path.clone(),
+        basis_path.clone(),
+    ];
+
+    if let Err(err) = fs::write(&model_path, model_text) {
+        cleanup_native_clp_temp_files(&cleanup_paths);
+        return external_cli_failure(
+            ExternalLinearCliStatus::NumericalError,
+            bridge_solver,
+            format!(
+                "failed to write CLP model file '{}': {err}",
+                model_path.display()
+            ),
+            elapsed_ms(t0),
+        );
+    }
+
+    let mut command = Command::new(&command_path);
+    command
+        .arg(&model_path)
+        .arg("-seconds")
+        .arg(cbc_time_limit_arg(opts.time_limit_secs));
+    if opts.model_format == ExternalLinearCliModelFormat::Mps {
+        command.arg(match sense {
+            Sense::Max => "-max",
+            Sense::Min => "-min",
+        });
+    }
+    command
+        .arg("-printingOptions")
+        .arg("all")
+        .arg("-solve")
+        .arg("-solution")
+        .arg(&solution_path)
+        .arg("-basisOut")
+        .arg(&basis_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let output = match command.output() {
+        Ok(output) => output,
+        Err(err) => {
+            cleanup_native_clp_temp_files(&cleanup_paths);
+            return external_cli_failure(
+                ExternalLinearCliStatus::Unavailable,
+                bridge_solver,
+                format!(
+                    "failed to start CLP executable '{}': {err}",
+                    command_path.display()
+                ),
+                elapsed_ms(t0),
+            );
+        }
+    };
+    let elapsed = elapsed_ms(t0);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let solver_version = parse_clp_solver_version(&format!("{stdout}\n{stderr}"))
+        .or_else(|| probe_clp_solver_version(&command_path));
+
+    if !solution_path.exists() {
+        let status = classify_native_linear_status("", &stdout, &stderr);
+        cleanup_native_clp_temp_files(&cleanup_paths);
+        let mut failure = external_cli_failure(
+            if matches!(
+                status,
+                ExternalLinearCliStatus::Infeasible | ExternalLinearCliStatus::Unbounded
+            ) {
+                status
+            } else {
+                ExternalLinearCliStatus::Unavailable
+            },
+            bridge_solver,
+            native_solver_message("", &stdout, &stderr),
+            elapsed,
+        );
+        failure.solver_version = solver_version;
+        return failure;
+    }
+
+    let parsed = match parse_native_cbc_solution_file(
+        &solution_path,
+        variable_count,
+        le_count,
+        eq_count,
+        Some(basis_path.as_path()),
+    ) {
+        Ok(parsed) => parsed,
+        Err(message) => {
+            cleanup_native_clp_temp_files(&cleanup_paths);
+            let mut failure = external_cli_failure(
+                ExternalLinearCliStatus::NumericalError,
+                bridge_solver,
+                message,
+                elapsed,
+            );
+            failure.solver_version = solver_version;
+            return failure;
+        }
+    };
+    cleanup_native_clp_temp_files(&cleanup_paths);
+
+    let status = classify_native_linear_status(&parsed.status, &stdout, &stderr);
+    if !matches!(
+        status,
+        ExternalLinearCliStatus::Optimal | ExternalLinearCliStatus::Feasible
+    ) {
+        let mut failure = external_cli_failure(
+            if matches!(
+                status,
+                ExternalLinearCliStatus::Infeasible | ExternalLinearCliStatus::Unbounded
+            ) {
+                status
+            } else {
+                ExternalLinearCliStatus::Unavailable
+            },
+            bridge_solver,
+            native_solver_message(&parsed.status, &stdout, &stderr),
+            elapsed,
+        );
+        failure.solver_version = solver_version;
+        return failure;
+    }
+
+    ExternalLinearCliSolution {
+        status,
+        solver: bridge_solver,
+        solver_version,
+        x: parsed.x.clone(),
+        objective: Some(dot_f64(objective_coefficients, &parsed.x)),
+        objective_values: None,
+        lp_algorithm: None,
+        best_bound: None,
+        solution_limit: None,
+        solution_pool_size: None,
+        solutions: None,
+        exhausted: None,
+        mip_gap: None,
+        absolute_gap: None,
+        objective_limit: None,
+        primal_feasibility_tolerance: None,
+        dual_feasibility_tolerance: None,
+        integer_feasibility_tolerance: None,
+        nodes_explored: None,
+        threads: None,
+        random_seed: None,
+        presolve: None,
+        cuts: None,
+        heuristics: None,
+        branch_rule: None,
+        branch_priorities_accepted: None,
+        branch_priority_count: None,
+        node_selection: None,
+        mip_start_accepted: None,
+        mip_start_objective: None,
+        dual_ub: parsed.dual_ub,
+        dual_eq: parsed.dual_eq,
+        reduced_costs: parsed.reduced_costs,
+        var_basis: parsed.var_basis,
+        row_basis: parsed.row_basis,
+        iterations: parse_cbc_lp_iterations(&stdout, &stderr),
+        elapsed_ms: elapsed,
+        message: parsed.status,
+    }
+}
+
+fn solve_native_glpk_cli_model(
+    kind: ExternalLinearCliKind,
+    sense: Sense,
+    model_text: &str,
+    variable_count: usize,
+    le_count: usize,
+    eq_count: usize,
+    objective_coefficients: &[f64],
+    opts: &ExternalLinearCliOptions,
+) -> ExternalLinearCliSolution {
+    let t0 = Instant::now();
+    let bridge_solver = "glpk:cli".to_string();
+    let Some(command_path) =
+        external_linear_cli_command_with_options(ExternalLinearCliSolver::Glpk, opts)
+    else {
+        return external_cli_failure(
+            ExternalLinearCliStatus::Unavailable,
+            bridge_solver,
+            "glpsol executable not found".to_string(),
+            elapsed_ms(t0),
+        );
+    };
+
+    let extension = match opts.model_format {
+        ExternalLinearCliModelFormat::CplexLp => "lp",
+        ExternalLinearCliModelFormat::Mps => "mps",
+    };
+    let model_path = native_glpk_temp_path("model", extension);
+    let solution_path = native_glpk_temp_path("solution", "sol");
+    let report_path = native_glpk_temp_path("report", "txt");
+    let log_path = native_glpk_temp_path("log", "log");
+    let cleanup_paths = vec![
+        model_path.clone(),
+        solution_path.clone(),
+        report_path.clone(),
+        log_path.clone(),
+    ];
+
+    if let Err(err) = fs::write(&model_path, model_text) {
+        cleanup_native_glpk_temp_files(&cleanup_paths);
+        return external_cli_failure(
+            ExternalLinearCliStatus::NumericalError,
+            bridge_solver,
+            format!(
+                "failed to write GLPK model file '{}': {err}",
+                model_path.display()
+            ),
+            elapsed_ms(t0),
+        );
+    }
+
+    let mut command = Command::new(&command_path);
+    command
+        .arg(match opts.model_format {
+            ExternalLinearCliModelFormat::CplexLp => "--lp",
+            ExternalLinearCliModelFormat::Mps => "--freemps",
+        })
+        .arg(&model_path)
+        .arg(match sense {
+            Sense::Max => "--max",
+            Sense::Min => "--min",
+        })
+        .arg("--tmlim")
+        .arg(glpk_time_limit_arg(opts.time_limit_secs))
+        .arg("--log")
+        .arg(&log_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    match kind {
+        ExternalLinearCliKind::Lp => {
+            command
+                .arg("--output")
+                .arg(&report_path)
+                .arg("--write")
+                .arg(&solution_path);
+        }
+        ExternalLinearCliKind::Mip => {
+            command.arg("-o").arg(&solution_path);
+        }
+    }
+
+    let output = match command.output() {
+        Ok(output) => output,
+        Err(err) => {
+            cleanup_native_glpk_temp_files(&cleanup_paths);
+            return external_cli_failure(
+                ExternalLinearCliStatus::Unavailable,
+                bridge_solver,
+                format!(
+                    "failed to start GLPK executable '{}': {err}",
+                    command_path.display()
+                ),
+                elapsed_ms(t0),
+            );
+        }
+    };
+    let elapsed = elapsed_ms(t0);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let solver_version = parse_glpk_solver_version(&format!("{stdout}\n{stderr}"))
+        .or_else(|| probe_glpk_solver_version(&command_path));
+
+    if !solution_path.exists() {
+        let status = classify_native_linear_status("", &stdout, &stderr);
+        cleanup_native_glpk_temp_files(&cleanup_paths);
+        let mut failure = external_cli_failure(
+            if matches!(
+                status,
+                ExternalLinearCliStatus::Infeasible | ExternalLinearCliStatus::Unbounded
+            ) {
+                status
+            } else {
+                ExternalLinearCliStatus::Unavailable
+            },
+            bridge_solver,
+            native_solver_message("", &stdout, &stderr),
+            elapsed,
+        );
+        failure.solver_version = solver_version;
+        return failure;
+    }
+
+    let parsed =
+        match parse_native_glpk_solution_file(&solution_path, variable_count, le_count, eq_count) {
+            Ok(parsed) => parsed,
+            Err(message) => {
+                cleanup_native_glpk_temp_files(&cleanup_paths);
+                let mut failure = external_cli_failure(
+                    ExternalLinearCliStatus::NumericalError,
+                    bridge_solver,
+                    message,
+                    elapsed,
+                );
+                failure.solver_version = solver_version;
+                return failure;
+            }
+        };
+    cleanup_native_glpk_temp_files(&cleanup_paths);
+
+    let status = classify_native_linear_status(&parsed.status, &stdout, &stderr);
+    if !matches!(
+        status,
+        ExternalLinearCliStatus::Optimal | ExternalLinearCliStatus::Feasible
+    ) {
+        let mut failure = external_cli_failure(
+            if matches!(
+                status,
+                ExternalLinearCliStatus::Infeasible | ExternalLinearCliStatus::Unbounded
+            ) {
+                status
+            } else {
+                ExternalLinearCliStatus::Unavailable
+            },
+            bridge_solver,
+            native_solver_message(&parsed.status, &stdout, &stderr),
+            elapsed,
+        );
+        failure.solver_version = solver_version;
+        return failure;
+    }
+
+    ExternalLinearCliSolution {
+        status,
+        solver: bridge_solver,
+        solver_version,
+        x: parsed.x.clone(),
+        objective: Some(dot_f64(objective_coefficients, &parsed.x)),
+        objective_values: None,
+        lp_algorithm: None,
+        best_bound: None,
+        solution_limit: None,
+        solution_pool_size: None,
+        solutions: None,
+        exhausted: None,
+        mip_gap: None,
+        absolute_gap: None,
+        objective_limit: None,
+        primal_feasibility_tolerance: None,
+        dual_feasibility_tolerance: None,
+        integer_feasibility_tolerance: None,
+        nodes_explored: None,
+        threads: None,
+        random_seed: None,
+        presolve: None,
+        cuts: None,
+        heuristics: None,
+        branch_rule: None,
+        branch_priorities_accepted: None,
+        branch_priority_count: None,
+        node_selection: None,
+        mip_start_accepted: None,
+        mip_start_objective: None,
+        dual_ub: (kind == ExternalLinearCliKind::Lp)
+            .then_some(parsed.dual_ub)
+            .flatten(),
+        dual_eq: (kind == ExternalLinearCliKind::Lp)
+            .then_some(parsed.dual_eq)
+            .flatten(),
+        reduced_costs: (kind == ExternalLinearCliKind::Lp)
+            .then_some(parsed.reduced_costs)
+            .flatten(),
+        var_basis: (kind == ExternalLinearCliKind::Lp)
+            .then_some(parsed.var_basis)
+            .flatten(),
+        row_basis: (kind == ExternalLinearCliKind::Lp)
+            .then_some(parsed.row_basis)
+            .flatten(),
+        iterations: (kind == ExternalLinearCliKind::Lp)
+            .then(|| parse_glpk_lp_iterations(&stdout, &stderr))
+            .flatten(),
+        elapsed_ms: elapsed,
+        message: parsed.status,
+    }
+}
+
+fn solve_native_highs_cli_model(
+    kind: ExternalLinearCliKind,
+    model_text: &str,
+    variable_count: usize,
+    le_count: usize,
+    eq_count: usize,
+    objective_coefficients: &[f64],
+    opts: &ExternalLinearCliOptions,
+) -> ExternalLinearCliSolution {
+    let t0 = Instant::now();
+    let bridge_solver = "highs:cli".to_string();
+    let Some(command_path) =
+        external_linear_cli_command_with_options(ExternalLinearCliSolver::Highs, opts)
+    else {
+        return external_cli_failure(
+            ExternalLinearCliStatus::Unavailable,
+            bridge_solver,
+            "highs executable not found".to_string(),
+            elapsed_ms(t0),
+        );
+    };
+
+    let extension = match opts.model_format {
+        ExternalLinearCliModelFormat::CplexLp => "lp",
+        ExternalLinearCliModelFormat::Mps => "mps",
+    };
+    let model_path = native_highs_temp_path("model", extension);
+    let solution_path = native_highs_temp_path("solution", "sol");
+    let options_path = native_highs_temp_path("options", "options");
+    let log_path = native_highs_temp_path("log", "log");
+    let mut cleanup_paths = vec![model_path.clone(), solution_path.clone(), log_path.clone()];
+
+    if let Err(err) = fs::write(&model_path, model_text) {
+        cleanup_native_highs_temp_files(&cleanup_paths);
+        return external_cli_failure(
+            ExternalLinearCliStatus::NumericalError,
+            bridge_solver,
+            format!(
+                "failed to write HiGHS model file '{}': {err}",
+                model_path.display()
+            ),
+            elapsed_ms(t0),
+        );
+    }
+
+    let options_text = native_highs_options_text(kind, opts, &log_path);
+    if let Some(options_text) = options_text {
+        if let Err(err) = fs::write(&options_path, options_text) {
+            cleanup_native_highs_temp_files(&cleanup_paths);
+            return external_cli_failure(
+                ExternalLinearCliStatus::NumericalError,
+                bridge_solver,
+                format!(
+                    "failed to write HiGHS options file '{}': {err}",
+                    options_path.display()
+                ),
+                elapsed_ms(t0),
+            );
+        }
+        cleanup_paths.push(options_path.clone());
+    }
+
+    let mut command = Command::new(&command_path);
+    command
+        .arg("--model_file")
+        .arg(&model_path)
+        .arg("--solution_file")
+        .arg(&solution_path)
+        .arg("--time_limit")
+        .arg(normalized_time_limit(opts.time_limit_secs).to_string())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if options_path.exists() {
+        command.arg("--options_file").arg(&options_path);
+    }
+    if kind == ExternalLinearCliKind::Lp {
+        if let Some(lp_algorithm) = opts.lp_algorithm {
+            command.arg("--solver").arg(lp_algorithm.as_str());
+        }
+    }
+    if let Some(random_seed) = normalized_highs_random_seed(opts.random_seed) {
+        command.arg("--random_seed").arg(random_seed.to_string());
+    }
+    if let Some(presolve) = opts.presolve {
+        command.arg("--presolve").arg(match presolve {
+            ExternalLinearCliPresolve::Auto => "choose",
+            ExternalLinearCliPresolve::On => "on",
+            ExternalLinearCliPresolve::Off => "off",
+        });
+    }
+
+    let output = match command.output() {
+        Ok(output) => output,
+        Err(err) => {
+            cleanup_native_highs_temp_files(&cleanup_paths);
+            return external_cli_failure(
+                ExternalLinearCliStatus::Unavailable,
+                bridge_solver,
+                format!(
+                    "failed to start HiGHS executable '{}': {err}",
+                    command_path.display()
+                ),
+                elapsed_ms(t0),
+            );
+        }
+    };
+    let elapsed = elapsed_ms(t0);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let solver_version = parse_highs_solver_version(&format!("{stdout}\n{stderr}"))
+        .or_else(|| probe_highs_solver_version(&command_path));
+
+    if !solution_path.exists() {
+        let status = classify_highs_status("", &stdout, &stderr);
+        cleanup_native_highs_temp_files(&cleanup_paths);
+        let mut failure = external_cli_failure(
+            if matches!(
+                status,
+                ExternalLinearCliStatus::Infeasible | ExternalLinearCliStatus::Unbounded
+            ) {
+                status
+            } else {
+                ExternalLinearCliStatus::Unavailable
+            },
+            bridge_solver,
+            native_highs_message("", &stdout, &stderr),
+            elapsed,
+        );
+        failure.solver_version = solver_version;
+        return failure;
+    }
+
+    let parsed = match parse_native_highs_solution_file(
+        &solution_path,
+        variable_count,
+        le_count,
+        eq_count,
+    ) {
+        Ok(parsed) => parsed,
+        Err(message) => {
+            cleanup_native_highs_temp_files(&cleanup_paths);
+            let mut failure = external_cli_failure(
+                ExternalLinearCliStatus::NumericalError,
+                bridge_solver,
+                message,
+                elapsed,
+            );
+            failure.solver_version = solver_version;
+            return failure;
+        }
+    };
+    cleanup_native_highs_temp_files(&cleanup_paths);
+
+    let status = classify_highs_status(&parsed.status, &stdout, &stderr);
+    if !matches!(
+        status,
+        ExternalLinearCliStatus::Optimal | ExternalLinearCliStatus::Feasible
+    ) {
+        let mut failure = external_cli_failure(
+            if matches!(
+                status,
+                ExternalLinearCliStatus::Infeasible | ExternalLinearCliStatus::Unbounded
+            ) {
+                status
+            } else {
+                ExternalLinearCliStatus::Unavailable
+            },
+            bridge_solver,
+            native_highs_message(&parsed.status, &stdout, &stderr),
+            elapsed,
+        );
+        failure.solver_version = solver_version;
+        return failure;
+    }
+
+    let objective = dot_f64(objective_coefficients, &parsed.x);
+    let quality = parse_highs_mip_quality(kind, objective, &stdout, &stderr);
+    ExternalLinearCliSolution {
+        status,
+        solver: bridge_solver,
+        solver_version,
+        x: parsed.x,
+        objective: Some(objective),
+        objective_values: None,
+        lp_algorithm: (kind == ExternalLinearCliKind::Lp)
+            .then(|| {
+                opts.lp_algorithm
+                    .map(|algorithm| algorithm.as_str().to_string())
+            })
+            .flatten(),
+        best_bound: quality.best_bound,
+        solution_limit: None,
+        solution_pool_size: None,
+        solutions: None,
+        exhausted: None,
+        mip_gap: quality.mip_gap,
+        absolute_gap: quality.absolute_gap,
+        objective_limit: (kind == ExternalLinearCliKind::Mip)
+            .then(|| normalized_objective_limit(opts.objective_limit))
+            .flatten(),
+        primal_feasibility_tolerance: normalized_tolerance(opts.primal_feasibility_tolerance),
+        dual_feasibility_tolerance: normalized_tolerance(opts.dual_feasibility_tolerance),
+        integer_feasibility_tolerance: (kind == ExternalLinearCliKind::Mip)
+            .then(|| normalized_tolerance(opts.integer_feasibility_tolerance))
+            .flatten(),
+        nodes_explored: quality.nodes_explored,
+        threads: opts.threads.filter(|threads| *threads > 0),
+        random_seed: normalized_highs_random_seed(opts.random_seed),
+        presolve: opts.presolve.map(|presolve| presolve.as_str().to_string()),
+        cuts: None,
+        heuristics: None,
+        branch_rule: None,
+        branch_priorities_accepted: None,
+        branch_priority_count: None,
+        node_selection: None,
+        mip_start_accepted: None,
+        mip_start_objective: None,
+        dual_ub: (kind == ExternalLinearCliKind::Lp)
+            .then_some(parsed.dual_ub)
+            .flatten(),
+        dual_eq: (kind == ExternalLinearCliKind::Lp)
+            .then_some(parsed.dual_eq)
+            .flatten(),
+        reduced_costs: (kind == ExternalLinearCliKind::Lp)
+            .then_some(parsed.reduced_costs)
+            .flatten(),
+        var_basis: (kind == ExternalLinearCliKind::Lp)
+            .then_some(parsed.var_basis)
+            .flatten(),
+        row_basis: (kind == ExternalLinearCliKind::Lp)
+            .then_some(parsed.row_basis)
+            .flatten(),
+        iterations: (kind == ExternalLinearCliKind::Lp)
+            .then(|| parse_highs_lp_iterations(&stdout, &stderr))
+            .flatten(),
+        elapsed_ms: elapsed,
+        message: parsed.status,
+    }
+}
+
+#[derive(Default)]
+struct ParsedNativeHighsSolution {
+    status: String,
+    x: Vec<f64>,
+    reduced_costs: Option<Vec<f64>>,
+    dual_ub: Option<Vec<f64>>,
+    dual_eq: Option<Vec<f64>>,
+    var_basis: Option<Vec<String>>,
+    row_basis: Option<Vec<String>>,
+}
+
+#[derive(Default)]
+struct ParsedNativeGlpkSolution {
+    status: String,
+    x: Vec<f64>,
+    reduced_costs: Option<Vec<f64>>,
+    dual_ub: Option<Vec<f64>>,
+    dual_eq: Option<Vec<f64>>,
+    var_basis: Option<Vec<String>>,
+    row_basis: Option<Vec<String>>,
+}
+
+#[derive(Default)]
+struct ParsedNativeCbcSolution {
+    status: String,
+    x: Vec<f64>,
+    reduced_costs: Option<Vec<f64>>,
+    dual_ub: Option<Vec<f64>>,
+    dual_eq: Option<Vec<f64>>,
+    var_basis: Option<Vec<String>>,
+    row_basis: Option<Vec<String>>,
+}
+
+#[derive(Default)]
+struct HighsMipQuality {
+    best_bound: Option<f64>,
+    mip_gap: Option<f64>,
+    absolute_gap: Option<f64>,
+    nodes_explored: Option<u64>,
+}
+
+fn native_highs_temp_path(stem: &str, extension: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    std::env::temp_dir().join(format!(
+        "ores-native-highs-{stem}-{}-{nanos}.{extension}",
+        std::process::id()
+    ))
+}
+
+fn cleanup_native_highs_temp_files(paths: &[PathBuf]) {
+    for path in paths {
+        let _ = fs::remove_file(path);
+    }
+}
+
+fn native_glpk_temp_path(stem: &str, extension: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    std::env::temp_dir().join(format!(
+        "ores-native-glpk-{stem}-{}-{nanos}.{extension}",
+        std::process::id()
+    ))
+}
+
+fn cleanup_native_glpk_temp_files(paths: &[PathBuf]) {
+    for path in paths {
+        let _ = fs::remove_file(path);
+    }
+}
+
+fn native_cbc_temp_path(stem: &str, extension: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    std::env::temp_dir().join(format!(
+        "ores-native-cbc-{stem}-{}-{nanos}.{extension}",
+        std::process::id()
+    ))
+}
+
+fn cleanup_native_cbc_temp_files(paths: &[PathBuf]) {
+    for path in paths {
+        let _ = fs::remove_file(path);
+    }
+}
+
+fn native_clp_temp_path(stem: &str, extension: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    std::env::temp_dir().join(format!(
+        "ores-native-clp-{stem}-{}-{nanos}.{extension}",
+        std::process::id()
+    ))
+}
+
+fn cleanup_native_clp_temp_files(paths: &[PathBuf]) {
+    for path in paths {
+        let _ = fs::remove_file(path);
+    }
+}
+
+fn glpk_time_limit_arg(time_limit_secs: Option<f64>) -> String {
+    normalized_time_limit(time_limit_secs)
+        .ceil()
+        .max(1.0)
+        .to_string()
+}
+
+fn cbc_time_limit_arg(time_limit_secs: Option<f64>) -> String {
+    format!("{:.17}", normalized_time_limit(time_limit_secs))
+}
+
+fn native_highs_options_text(
+    kind: ExternalLinearCliKind,
+    opts: &ExternalLinearCliOptions,
+    log_path: &Path,
+) -> Option<String> {
+    let mut lines = vec![format!("log_file = {}", log_path.display())];
+    if let Some(threads) = opts.threads.filter(|threads| *threads > 0) {
+        lines.push(format!("threads = {threads}"));
+    }
+    if let Some(tolerance) = normalized_tolerance(opts.primal_feasibility_tolerance) {
+        lines.push(format!("primal_feasibility_tolerance = {tolerance:.17}"));
+    }
+    if let Some(tolerance) = normalized_tolerance(opts.dual_feasibility_tolerance) {
+        lines.push(format!("dual_feasibility_tolerance = {tolerance:.17}"));
+    }
+    if kind == ExternalLinearCliKind::Mip {
+        if let Some(max_nodes) = opts
+            .max_nodes
+            .or_else(|| opts.node_limit.map(|limit| limit as u64))
+            .filter(|limit| *limit > 0)
+        {
+            lines.push(format!("mip_max_nodes = {max_nodes}"));
+        }
+        if let Some(relative_gap) = normalized_relative_gap(opts.relative_gap) {
+            lines.push(format!("mip_rel_gap = {relative_gap:.17}"));
+        }
+        if let Some(absolute_gap) = normalized_absolute_gap(opts.absolute_gap) {
+            lines.push(format!("mip_abs_gap = {absolute_gap:.17}"));
+        }
+        if let Some(objective_limit) = normalized_objective_limit(opts.objective_limit) {
+            lines.push(format!("objective_target = {objective_limit:.17}"));
+        }
+        if let Some(tolerance) = normalized_tolerance(opts.integer_feasibility_tolerance) {
+            lines.push(format!("mip_feasibility_tolerance = {tolerance:.17}"));
+        }
+    }
+    if lines.is_empty() {
+        None
+    } else {
+        let mut text = lines.join("\n");
+        text.push('\n');
+        Some(text)
+    }
+}
+
+fn parse_native_highs_solution_file(
+    path: &Path,
+    variable_count: usize,
+    le_count: usize,
+    eq_count: usize,
+) -> Result<ParsedNativeHighsSolution, String> {
     let text = fs::read_to_string(path).map_err(|err| {
         format!(
             "failed to read HiGHS solution file '{}': {err}",
             path.display()
         )
     })?;
-    Ok(parse_highs_solution_text(&text, n, le_count, eq_count))
+    parse_native_highs_solution_text(&text, variable_count, le_count, eq_count)
 }
 
-fn parse_highs_solution_text(
+fn parse_native_highs_solution_text(
     text: &str,
-    n: usize,
+    variable_count: usize,
     le_count: usize,
     eq_count: usize,
-) -> HighsParsedSolution {
-    let lines = text.lines().map(str::trim).collect::<Vec<_>>();
-    let mut x = vec![0.0; n];
+) -> Result<ParsedNativeHighsSolution, String> {
+    let mut x = vec![0.0; variable_count];
     let mut status = "unknown".to_string();
-    let mut dual_columns = vec![None; n];
-    let mut dual_rows: HashMap<String, f64> = HashMap::new();
-    let mut var_basis: Vec<Option<String>> = vec![None; n];
-    let mut row_basis: HashMap<String, String> = HashMap::new();
+    let mut dual_columns = vec![None::<f64>; variable_count];
+    let mut dual_rows = std::collections::BTreeMap::<String, f64>::new();
+    let mut var_basis = vec![None::<String>; variable_count];
+    let mut row_basis = std::collections::BTreeMap::<String, String>::new();
+    let lines = text.lines().map(str::trim).collect::<Vec<_>>();
     let mut section: Option<&str> = None;
     let mut block: Option<&str> = None;
-    let mut remaining = 0usize;
+    let mut remaining = 0_usize;
 
     for (idx, line) in lines.iter().enumerate() {
         if *line == "Model status" {
             if let Some(next) = lines.get(idx + 1) {
                 status = next.to_ascii_lowercase();
             }
+            continue;
         }
         match *line {
             "# Primal solution values" => {
@@ -2659,6 +3141,7 @@ fn parse_highs_solution_text(
             }
             _ => {}
         }
+
         if section.is_none() {
             continue;
         }
@@ -2683,108 +3166,391 @@ fn parse_highs_solution_text(
         if line.is_empty() || line.starts_with('#') || block.is_none() {
             continue;
         }
+
         let parts = line.split_whitespace().collect::<Vec<_>>();
         if parts.len() >= 2 {
+            let value = parts[1].parse::<f64>().ok();
             match (section, block) {
                 (Some("primal"), Some("columns")) => {
-                    if let Some(var_idx) = parse_x_index(parts[0], n) {
-                        if let Ok(value) = parts[1].parse::<f64>() {
-                            x[var_idx] = value;
+                    if let (Some(index), Some(value)) = (highs_variable_index(parts[0]), value) {
+                        if index < variable_count {
+                            x[index] = value;
                         }
                     }
                 }
                 (Some("dual"), Some("columns")) => {
-                    if let Some(var_idx) = parse_x_index(parts[0], n) {
-                        if let Ok(value) = parts[1].parse::<f64>() {
-                            dual_columns[var_idx] = Some(value);
-                        }
-                    }
-                }
-                (Some("basis"), Some("columns")) => {
-                    if let Some(var_idx) = parse_x_index(parts[0], n) {
-                        if let Some(status) = basis_status_from_token(parts[1]) {
-                            var_basis[var_idx] = Some(status.to_string());
+                    if let (Some(index), Some(value)) = (highs_variable_index(parts[0]), value) {
+                        if index < variable_count {
+                            dual_columns[index] = Some(value);
                         }
                     }
                 }
                 (Some("dual"), Some("rows")) => {
-                    if let Ok(value) = parts[1].parse::<f64>() {
+                    if let Some(value) = value {
                         dual_rows.insert(parts[0].to_string(), value);
                     }
                 }
+                (Some("basis"), Some("columns")) => {
+                    if let Some(index) = highs_variable_index(parts[0]) {
+                        if index < variable_count {
+                            if let Some(status) = highs_basis_status(parts[1]) {
+                                var_basis[index] = Some(status.to_string());
+                            }
+                        }
+                    }
+                }
                 (Some("basis"), Some("rows")) => {
-                    if let Some(status) = basis_status_from_token(parts[1]) {
+                    if let Some(status) = highs_basis_status(parts[1]) {
                         row_basis.insert(parts[0].to_string(), status.to_string());
                     }
                 }
                 _ => {}
             }
         }
-        remaining = remaining.saturating_sub(1);
-        if remaining == 0 {
-            block = None;
+
+        if remaining > 0 {
+            remaining -= 1;
+            if remaining == 0 {
+                block = None;
+            }
         }
     }
 
-    let reduced_costs = dual_columns.into_iter().collect::<Option<Vec<_>>>();
-    let dual_ub = collect_named_row_values(&dual_rows, "c", le_count);
-    let dual_eq = collect_named_row_values(&dual_rows, "e", eq_count);
-    let var_basis = var_basis.into_iter().collect::<Option<Vec<_>>>();
-    let mut row_statuses = Vec::with_capacity(le_count + eq_count);
-    for i in 0..le_count {
-        row_statuses.push(row_basis.get(&format!("c{i}")).cloned());
+    let reduced_costs = all_some_f64(&dual_columns);
+    let dual_ub = row_values(&dual_rows, "c", le_count);
+    let dual_eq = row_values(&dual_rows, "e", eq_count);
+    let var_basis = all_some_string(&var_basis);
+    let mut rows = Vec::with_capacity(le_count + eq_count);
+    for idx in 0..le_count {
+        rows.push(row_basis.get(&format!("c{idx}")).cloned());
     }
-    for i in 0..eq_count {
-        row_statuses.push(row_basis.get(&format!("e{i}")).cloned());
+    for idx in 0..eq_count {
+        rows.push(row_basis.get(&format!("e{idx}")).cloned());
     }
-    let row_basis = row_statuses.into_iter().collect::<Option<Vec<_>>>();
+    let row_basis = all_some_string(&rows);
 
-    HighsParsedSolution {
+    Ok(ParsedNativeHighsSolution {
         status,
         x,
+        reduced_costs,
         dual_ub,
         dual_eq,
-        reduced_costs,
         var_basis,
         row_basis,
+    })
+}
+
+fn parse_native_glpk_solution_file(
+    path: &Path,
+    variable_count: usize,
+    le_count: usize,
+    eq_count: usize,
+) -> Result<ParsedNativeGlpkSolution, String> {
+    let text = fs::read_to_string(path).map_err(|err| {
+        format!(
+            "failed to read GLPK solution file '{}': {err}",
+            path.display()
+        )
+    })?;
+    parse_native_glpk_solution_text(&text, variable_count, le_count, eq_count)
+}
+
+fn parse_native_glpk_solution_text(
+    text: &str,
+    variable_count: usize,
+    le_count: usize,
+    eq_count: usize,
+) -> Result<ParsedNativeGlpkSolution, String> {
+    let mut x = vec![0.0; variable_count];
+    let mut status = "unknown".to_string();
+    let row_count = le_count + eq_count;
+    let mut row_duals = vec![None::<f64>; row_count];
+    let mut reduced_costs = vec![None::<f64>; variable_count];
+    let mut var_basis = vec![None::<String>; variable_count];
+    let mut row_basis = vec![None::<String>; row_count];
+    let mut in_named_columns = false;
+
+    for line in text.lines() {
+        let parts = line.split_whitespace().collect::<Vec<_>>();
+        if parts.len() >= 3 && parts[0] == "c" && parts[1] == "Status:" {
+            status = parts[2..].join(" ").to_ascii_lowercase();
+        } else if parts.len() >= 2 && parts[0] == "Status:" {
+            status = parts[1..].join(" ").to_ascii_lowercase();
+        } else if line.contains("Column name") {
+            in_named_columns = true;
+        } else if in_named_columns
+            && (line.trim().starts_with("Integer feasibility")
+                || line.trim().starts_with("KKT.")
+                || line.trim().starts_with("End of output"))
+        {
+            in_named_columns = false;
+        } else if in_named_columns
+            && parts.len() >= 3
+            && parts[0].chars().all(|ch| ch.is_ascii_digit())
+            && parts[1].starts_with('x')
+        {
+            if let Some(index) = highs_variable_index(parts[1]) {
+                if index < variable_count {
+                    if let Some(value) = parts[2..]
+                        .iter()
+                        .copied()
+                        .filter(|token| *token != "*")
+                        .find_map(parse_f64_token)
+                    {
+                        x[index] = value;
+                    }
+                }
+            }
+        } else if parts.len() >= 3 && parts[0] == "j" {
+            let Some(index) = parts[1]
+                .parse::<usize>()
+                .ok()
+                .and_then(|value| value.checked_sub(1))
+            else {
+                continue;
+            };
+            if index < variable_count {
+                if parts.len() >= 4 && parse_f64_token(parts[2]).is_none() {
+                    if let Some(value) = parse_f64_token(parts[3]) {
+                        x[index] = value;
+                    }
+                    if let Some(status) = highs_basis_status(parts[2]) {
+                        var_basis[index] = Some(status.to_string());
+                    }
+                    if parts.len() >= 5 {
+                        reduced_costs[index] = parse_f64_token(parts[4]);
+                    }
+                } else if let Some(value) = parse_f64_token(parts[2]) {
+                    x[index] = value;
+                }
+            }
+        } else if parts.len() >= 5 && parts[0] == "i" {
+            let Some(index) = parts[1]
+                .parse::<usize>()
+                .ok()
+                .and_then(|value| value.checked_sub(1))
+            else {
+                continue;
+            };
+            if index < row_count {
+                if let Some(status) = highs_basis_status(parts[2]) {
+                    row_basis[index] = Some(status.to_string());
+                }
+                row_duals[index] = parse_f64_token(parts[4]);
+            }
+        }
     }
+
+    let dual_ub = all_some_f64(&row_duals[..le_count]);
+    let dual_eq = all_some_f64(&row_duals[le_count..]);
+    Ok(ParsedNativeGlpkSolution {
+        status,
+        x,
+        reduced_costs: all_some_f64(&reduced_costs),
+        dual_ub,
+        dual_eq,
+        var_basis: all_some_string(&var_basis),
+        row_basis: all_some_string(&row_basis),
+    })
 }
 
-fn parse_x_index(name: &str, n: usize) -> Option<usize> {
-    let idx = name.strip_prefix('x')?.parse::<usize>().ok()?;
-    (idx < n).then_some(idx)
+fn parse_native_cbc_solution_file(
+    path: &Path,
+    variable_count: usize,
+    le_count: usize,
+    eq_count: usize,
+    basis_path: Option<&Path>,
+) -> Result<ParsedNativeCbcSolution, String> {
+    let text = fs::read_to_string(path).map_err(|err| {
+        format!(
+            "failed to read CBC solution file '{}': {err}",
+            path.display()
+        )
+    })?;
+    let basis_text =
+        match basis_path.filter(|path| path.exists()) {
+            Some(path) => Some(fs::read_to_string(path).map_err(|err| {
+                format!("failed to read CBC basis file '{}': {err}", path.display())
+            })?),
+            None => None,
+        };
+    parse_native_cbc_solution_text(
+        &text,
+        variable_count,
+        le_count,
+        eq_count,
+        basis_text.as_deref(),
+    )
 }
 
-fn collect_named_row_values(
-    values: &HashMap<String, f64>,
-    prefix: &str,
-    count: usize,
-) -> Option<Vec<f64>> {
-    let mut out = Vec::with_capacity(count);
-    for idx in 0..count {
-        out.push(*values.get(&format!("{prefix}{idx}"))?);
+fn parse_native_cbc_solution_text(
+    text: &str,
+    variable_count: usize,
+    le_count: usize,
+    eq_count: usize,
+    basis_text: Option<&str>,
+) -> Result<ParsedNativeCbcSolution, String> {
+    let mut x = vec![0.0; variable_count];
+    let mut status = "unknown".to_string();
+    let row_count = le_count + eq_count;
+    let mut row_duals = vec![None::<f64>; row_count];
+    let mut reduced_costs = vec![None::<f64>; variable_count];
+
+    for (line_no, line) in text.lines().enumerate() {
+        let mut parts = line.split_whitespace().collect::<Vec<_>>();
+        if line_no == 0 && !line.trim().is_empty() {
+            status = line.trim().to_ascii_lowercase();
+            continue;
+        }
+        if parts.first() == Some(&"**") {
+            parts.remove(0);
+        }
+        if parts.len() >= 3 && signed_usize_token(parts[0]).is_some() && parts[1].starts_with('x') {
+            if let Some(index) = highs_variable_index(parts[1]) {
+                if index < variable_count {
+                    if let Some(value) = parse_f64_token(parts[2]) {
+                        x[index] = value;
+                    }
+                    if parts.len() >= 4 {
+                        reduced_costs[index] = parse_f64_token(parts[3]);
+                    }
+                }
+            }
+        } else if parts.len() >= 4 && signed_usize_token(parts[0]).is_some() {
+            let row_index = if let Some(suffix) = parts[1].strip_prefix('c') {
+                suffix.parse::<usize>().ok()
+            } else if let Some(suffix) = parts[1].strip_prefix('e') {
+                suffix
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|index| le_count.checked_add(index))
+            } else {
+                None
+            };
+            if let Some(index) = row_index.filter(|index| *index < row_count) {
+                row_duals[index] = parse_f64_token(parts[3]);
+            }
+        }
     }
-    Some(out)
+
+    let (var_basis, row_basis) = basis_text
+        .map(|text| parse_native_cbc_basis_text(text, variable_count, le_count, eq_count))
+        .unwrap_or((None, None));
+    Ok(ParsedNativeCbcSolution {
+        status,
+        x,
+        reduced_costs: all_some_f64(&reduced_costs),
+        dual_ub: all_some_f64(&row_duals[..le_count]),
+        dual_eq: all_some_f64(&row_duals[le_count..]),
+        var_basis,
+        row_basis,
+    })
 }
 
-fn basis_status_from_token(token: &str) -> Option<&'static str> {
+fn parse_native_cbc_basis_text(
+    text: &str,
+    variable_count: usize,
+    le_count: usize,
+    eq_count: usize,
+) -> (Option<Vec<String>>, Option<Vec<String>>) {
+    let mut var_basis = vec![None::<String>; variable_count];
+    let mut row_basis = vec![Some("basic".to_string()); le_count];
+    row_basis.extend((0..eq_count).map(|_| Some("fixed".to_string())));
+
+    for line in text.lines() {
+        let parts = line.split_whitespace().collect::<Vec<_>>();
+        if parts.is_empty() || matches!(parts[0], "NAME" | "ENDATA") {
+            continue;
+        }
+        let code = parts[0].to_ascii_uppercase();
+        if parts.len() >= 2 && parts[1].starts_with('x') {
+            if let Some(index) = highs_variable_index(parts[1]) {
+                if index < variable_count {
+                    let status = match code.as_str() {
+                        "BS" | "XL" | "XU" => Some("basic"),
+                        "LL" => Some("at_lower"),
+                        "UL" => Some("at_upper"),
+                        "FX" => Some("fixed"),
+                        "FR" => Some("free"),
+                        _ => None,
+                    };
+                    if let Some(status) = status {
+                        var_basis[index] = Some(status.to_string());
+                    }
+                }
+            }
+        }
+        if matches!(code.as_str(), "XL" | "XU") && parts.len() >= 3 {
+            if let Some(index) = parts[2]
+                .strip_prefix('c')
+                .and_then(|suffix| suffix.parse::<usize>().ok())
+                .filter(|index| *index < le_count)
+            {
+                row_basis[index] =
+                    Some(if code == "XL" { "at_lower" } else { "at_upper" }.to_string());
+            }
+        }
+    }
+
+    (all_some_string(&var_basis), all_some_string(&row_basis))
+}
+
+fn highs_variable_index(name: &str) -> Option<usize> {
+    name.strip_prefix('x')?.parse::<usize>().ok()
+}
+
+fn signed_usize_token(token: &str) -> Option<usize> {
+    token
+        .trim_start_matches('-')
+        .chars()
+        .all(|ch| ch.is_ascii_digit())
+        .then(|| token.trim_start_matches('-').parse::<usize>().ok())
+        .flatten()
+}
+
+fn highs_basis_status(token: &str) -> Option<&'static str> {
     match token.trim().to_ascii_lowercase().as_str() {
-        "0" | "lower" | "at_lower" => Some("at_lower"),
-        "1" | "basic" => Some("basic"),
-        "2" | "upper" | "at_upper" => Some("at_upper"),
-        "3" | "zero" => Some("zero"),
-        "4" | "nonbasic" => Some("nonbasic"),
+        "0" => Some("at_lower"),
+        "1" => Some("basic"),
+        "2" => Some("at_upper"),
+        "3" => Some("zero"),
+        "4" => Some("nonbasic"),
         "b" | "bs" => Some("basic"),
         "l" | "nl" => Some("at_lower"),
         "u" | "nu" => Some("at_upper"),
-        "f" | "nf" | "free" => Some("free"),
-        "s" | "ns" | "fixed" => Some("fixed"),
-        "superbasic" => Some("superbasic"),
+        "f" | "nf" => Some("free"),
+        "s" | "ns" => Some("superbasic"),
         _ => None,
     }
 }
 
+fn all_some_f64(values: &[Option<f64>]) -> Option<Vec<f64>> {
+    values.iter().copied().collect()
+}
+
+fn all_some_string(values: &[Option<String>]) -> Option<Vec<String>> {
+    values.iter().cloned().collect()
+}
+
+fn row_values(
+    rows: &std::collections::BTreeMap<String, f64>,
+    prefix: &str,
+    count: usize,
+) -> Option<Vec<f64>> {
+    (0..count)
+        .map(|idx| rows.get(&format!("{prefix}{idx}")).copied())
+        .collect()
+}
+
 fn classify_highs_status(status: &str, stdout: &str, stderr: &str) -> ExternalLinearCliStatus {
+    classify_native_linear_status(status, stdout, stderr)
+}
+
+fn classify_native_linear_status(
+    status: &str,
+    stdout: &str,
+    stderr: &str,
+) -> ExternalLinearCliStatus {
     let parsed = status.to_ascii_lowercase();
     if parsed.contains("primal infeasible")
         || (parsed.contains("infeasible") && !parsed.contains("dual"))
@@ -2843,12 +3609,16 @@ fn classify_highs_status(status: &str, stdout: &str, stderr: &str) -> ExternalLi
     ExternalLinearCliStatus::Unknown
 }
 
-fn highs_solver_version_from_output(stdout: &str, stderr: &str) -> Option<String> {
-    for line in stdout.lines().chain(stderr.lines()) {
-        let line = line.trim();
-        for prefix in ["Running HiGHS ", "HiGHS version "] {
-            if let Some(rest) = line.strip_prefix(prefix) {
-                if let Some(version) = rest.split_whitespace().next() {
+fn parse_highs_solver_version(text: &str) -> Option<String> {
+    for line in text.lines() {
+        for marker in ["Running HiGHS ", "HiGHS version "] {
+            if let Some(rest) = line.split_once(marker).map(|(_, rest)| rest) {
+                let version = rest
+                    .split(|ch: char| ch.is_whitespace() || ch == ',' || ch == ')')
+                    .next()
+                    .unwrap_or("")
+                    .trim();
+                if version.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
                     return Some(format!("HiGHS {version}"));
                 }
             }
@@ -2857,600 +3627,31 @@ fn highs_solver_version_from_output(stdout: &str, stderr: &str) -> Option<String
     None
 }
 
-fn highs_lp_iterations(kind: ExternalLinearCliKind, stdout: &str, stderr: &str) -> Option<u64> {
-    if kind != ExternalLinearCliKind::Lp {
-        return None;
-    }
-    for line in stdout.lines().chain(stderr.lines()) {
-        let stripped = line.trim();
-        let lowered = stripped.to_ascii_lowercase();
-        if lowered.starts_with("simplex") && lowered.contains("iterations") {
-            if let Some(value) = first_float_after_colon(stripped) {
-                return (value >= 0.0).then_some(value.round() as u64);
-            }
-        }
-    }
-    None
-}
-
-fn apply_highs_mip_quality(
-    solution: &mut ExternalLinearCliSolution,
-    objective: f64,
-    stdout: &str,
-    stderr: &str,
-) {
-    let mut best_bound = None;
-    let mut mip_gap = None;
-    let mut nodes_explored = None;
-
-    for line in stdout.lines().chain(stderr.lines()) {
-        let stripped = line.trim();
-        let lowered = stripped.to_ascii_lowercase();
-        if lowered.starts_with("dual bound") {
-            best_bound = first_float_after_colon(stripped);
-        } else if lowered.starts_with("gap") {
-            if let Some(value) = first_float(stripped) {
-                mip_gap = Some(if stripped.contains('%') {
-                    value / 100.0
-                } else {
-                    value
-                });
-            }
-        } else if lowered.starts_with("nodes") {
-            if let Some(value) = first_float_after_colon(stripped) {
-                nodes_explored = (value >= 0.0).then_some(value.round() as u64);
-            }
-        }
-    }
-
-    if let Some(best_bound) = best_bound.filter(|value| value.is_finite()) {
-        solution.best_bound = Some(best_bound);
-        solution.absolute_gap = Some((best_bound - objective).abs().max(0.0));
-        if mip_gap.is_none() {
-            mip_gap = Some((best_bound - objective).abs() / objective.abs().max(1.0));
-        }
-    }
-    solution.mip_gap = mip_gap
-        .filter(|value| value.is_finite())
-        .map(|value| value.max(0.0));
-    solution.nodes_explored = nodes_explored;
-}
-
-fn highs_lp_algorithm_feedback(
-    kind: ExternalLinearCliKind,
-    lp_algorithm: Option<ExternalLinearCliLpAlgorithm>,
-    stdout: &str,
-    stderr: &str,
-) -> Option<String> {
-    if kind != ExternalLinearCliKind::Lp {
-        return None;
-    }
-    let lp_algorithm = lp_algorithm?;
-    let text = format!("{stdout}\n{stderr}").to_ascii_lowercase();
-    text.contains(&format!(
-        "set option solver to \"{}\"",
-        lp_algorithm.as_str()
-    ))
-    .then(|| lp_algorithm.as_str().to_string())
-}
-
-fn highs_objective_limit_feedback(
-    kind: ExternalLinearCliKind,
-    objective_limit: Option<f64>,
-    stdout: &str,
-    stderr: &str,
-) -> Option<f64> {
-    if kind != ExternalLinearCliKind::Mip {
-        return None;
-    }
-    let objective_limit = normalized_objective_limit(objective_limit)?;
-    let text = format!("{stdout}\n{stderr}").to_ascii_lowercase();
-    text.contains("set option objective_target to")
-        .then_some(objective_limit)
-}
-
-fn highs_threads_feedback(threads: Option<u32>, stdout: &str, stderr: &str) -> Option<u32> {
-    let threads = threads.filter(|threads| *threads > 0)?;
-    let text = format!("{stdout}\n{stderr}").to_ascii_lowercase();
-    text.contains(&format!("set option threads to {threads}"))
-        .then_some(threads)
-}
-
-fn highs_random_seed_feedback(random_seed: Option<u64>, stdout: &str, stderr: &str) -> Option<u64> {
-    let random_seed = random_seed?;
-    let text = format!("{stdout}\n{stderr}").to_ascii_lowercase();
-    text.contains(&format!("set option random_seed to {random_seed}"))
-        .then_some(random_seed)
-}
-
-fn highs_presolve_feedback(
-    presolve: Option<ExternalLinearCliPresolve>,
-    stdout: &str,
-    stderr: &str,
-) -> Option<String> {
-    let presolve = presolve?;
-    let highs_presolve = if presolve == ExternalLinearCliPresolve::Auto {
-        "choose"
-    } else {
-        presolve.as_str()
-    };
-    let text = format!("{stdout}\n{stderr}").to_ascii_lowercase();
-    text.contains(&format!("set option presolve to \"{highs_presolve}\""))
-        .then(|| presolve.as_str().to_string())
-}
-
-fn highs_mip_start_accepted(stdout: &str, stderr: &str) -> bool {
-    let text = format!("{stdout}\n{stderr}");
-    let lowered = text.to_ascii_lowercase();
-    if lowered.contains("mip start solution is feasible") {
-        return true;
-    }
-    if !lowered.contains("assessing feasibility of mip") {
-        return false;
-    }
-    let infeasibilities = text
-        .lines()
-        .filter(|line| line.to_ascii_lowercase().contains("infeasibilities"))
-        .filter_map(first_float)
-        .collect::<Vec<_>>();
-    infeasibilities.len() >= 3
-        && infeasibilities
-            .iter()
-            .take(3)
-            .all(|value| value.abs() <= 1.0e-9)
-}
-
-fn first_float_after_colon(text: &str) -> Option<f64> {
-    let text = text.split_once(':').map(|(_, rest)| rest).unwrap_or(text);
-    first_float(text)
-}
-
-fn first_float(text: &str) -> Option<f64> {
-    text.split(|ch: char| ch.is_whitespace() || ch == ',' || ch == '(' || ch == ')')
-        .filter_map(|token| {
-            let token = token.trim().trim_end_matches('%');
-            (!token.is_empty())
-                .then(|| token.parse::<f64>().ok())
-                .flatten()
-        })
-        .next()
-}
-
-fn dot_f64(lhs: &[f64], rhs: &[f64]) -> f64 {
-    lhs.iter().zip(rhs).map(|(a, b)| a * b).sum()
-}
-
-fn nonempty_trimmed(text: &str) -> Option<String> {
-    let text = text.trim();
-    (!text.is_empty()).then(|| text.to_string())
-}
-
-fn solve_glpk_cli_json_direct(
-    kind: ExternalLinearCliKind,
-    problem_json: &Value,
-    opts: &ExternalLinearCliOptions,
-    t0: Instant,
-) -> Option<ExternalLinearCliSolution> {
-    if opts.solver != ExternalLinearCliSolver::Glpk {
-        return None;
-    }
-    if opts.solution_pool_size.is_some() {
-        return None;
-    }
-
-    let solver = "glpk:cli".to_string();
-    let model = match highs_model_from_cli_json(kind, problem_json) {
-        Ok(Some(model)) => model,
-        Ok(None) => return None,
-        Err(message) => {
-            return Some(external_cli_failure(
-                ExternalLinearCliStatus::NumericalError,
-                solver,
-                message,
-                elapsed_ms(t0),
-            ));
-        }
-    };
-    let Some(command_path) =
-        external_linear_cli_command_with_options(ExternalLinearCliSolver::Glpk, opts)
-    else {
-        return Some(external_cli_failure(
-            ExternalLinearCliStatus::Unavailable,
-            solver,
-            "glpk executable not found".to_string(),
-            elapsed_ms(t0),
-        ));
-    };
-
-    let temp_dir = match ExternalLinearCliTempDir::new("ores-glpk-cli") {
-        Ok(temp_dir) => temp_dir,
-        Err(err) => {
-            return Some(external_cli_failure(
-                ExternalLinearCliStatus::NumericalError,
-                solver,
-                format!("failed to create temporary GLPK workspace: {err}"),
-                elapsed_ms(t0),
-            ));
-        }
-    };
-    let model_format = opts.model_format;
-    let model_extension = match model_format {
-        ExternalLinearCliModelFormat::CplexLp => "lp",
-        ExternalLinearCliModelFormat::Mps => "mps",
-    };
-    let model_path = temp_dir.path().join(format!("model.{model_extension}"));
-    let solution_path = temp_dir.path().join("glpk.sol");
-    if let Err(err) = fs::write(&model_path, glpk_model_to_string(&model, model_format)) {
-        return Some(external_cli_failure(
-            ExternalLinearCliStatus::NumericalError,
-            solver,
-            format!("failed to write GLPK model file: {err}"),
-            elapsed_ms(t0),
-        ));
-    }
-
-    let time_limit = normalized_time_limit(opts.time_limit_secs);
-    let time_limit_secs = time_limit.ceil().max(1.0) as u64;
-    let mut command = Command::new(&command_path);
-    match model_format {
-        ExternalLinearCliModelFormat::CplexLp => {
-            command.arg("--lp");
-        }
-        ExternalLinearCliModelFormat::Mps => {
-            command.arg("--freemps");
-        }
-    }
-    command.arg(&model_path);
-    command.arg(match model.sense {
-        Sense::Max => "--max",
-        Sense::Min => "--min",
-    });
-    match kind {
-        ExternalLinearCliKind::Lp => {
-            command
-                .arg("--output")
-                .arg(solution_path.with_extension("report"))
-                .arg("--write")
-                .arg(&solution_path)
-                .arg("--tmlim")
-                .arg(time_limit_secs.to_string());
-            if opts.presolve == Some(ExternalLinearCliPresolve::Off) {
-                command.arg("--nopresol");
-            } else if opts.presolve == Some(ExternalLinearCliPresolve::On) {
-                command.arg("--presol");
-            }
-            if opts.lp_algorithm == Some(ExternalLinearCliLpAlgorithm::Simplex) {
-                command.arg("--simplex");
-            } else if opts.lp_algorithm == Some(ExternalLinearCliLpAlgorithm::Ipm) {
-                command.arg("--interior");
-            }
-        }
-        ExternalLinearCliKind::Mip => {
-            command
-                .arg("-o")
-                .arg(&solution_path)
-                .arg("--tmlim")
-                .arg(time_limit_secs.to_string());
-            if opts.presolve == Some(ExternalLinearCliPresolve::Off) {
-                command.arg("--nointopt");
-            } else if opts.presolve == Some(ExternalLinearCliPresolve::On) {
-                command.arg("--intopt");
-            }
-            if opts.branch_rule == Some(ExternalLinearCliBranchRule::FirstFractional) {
-                command.arg("--first");
-            } else if opts.branch_rule == Some(ExternalLinearCliBranchRule::MostFractional) {
-                command.arg("--mostf");
-            }
-            if opts.node_selection == Some(ExternalLinearCliNodeSelection::Dfs) {
-                command.arg("--dfs");
-            } else if opts.node_selection == Some(ExternalLinearCliNodeSelection::BestBound) {
-                command.arg("--bestb");
-            }
-            if let Some(gap) = normalized_relative_gap(opts.relative_gap) {
-                command.arg("--mipgap").arg(format!("{gap:.17}"));
-            }
-            if opts.cuts == Some(ExternalLinearCliMipSwitch::On) {
-                command.arg("--cuts");
-            }
-        }
-    }
-    if let Some(random_seed) = opts.random_seed {
-        command.arg("--seed").arg(random_seed.to_string());
-    }
-
-    let output = match command
-        .current_dir(temp_dir.path())
+fn probe_highs_solver_version(command_path: &Path) -> Option<String> {
+    let output = Command::new(command_path)
+        .arg("--version")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-    {
-        Ok(output) => output,
-        Err(err) => {
-            return Some(external_cli_failure(
-                ExternalLinearCliStatus::Unavailable,
-                solver,
-                format!(
-                    "failed to start GLPK command '{}': {err}",
-                    command_path.display()
-                ),
-                elapsed_ms(t0),
-            ));
-        }
-    };
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let solver_version = glpk_solver_version_from_output(&stdout, &stderr);
-
-    if !solution_path.exists() {
-        let status = classify_highs_status("", &stdout, &stderr);
-        let message = nonempty_trimmed(&stderr).unwrap_or_else(|| stdout.trim().to_string());
-        let status = if matches!(
-            status,
-            ExternalLinearCliStatus::Infeasible | ExternalLinearCliStatus::Unbounded
-        ) {
-            status
-        } else {
-            ExternalLinearCliStatus::Unavailable
-        };
-        let mut solution = external_cli_failure(status, solver, message, elapsed_ms(t0));
-        solution.solver_version = solver_version;
-        return Some(solution);
-    }
-
-    let parsed = match parse_glpk_solution_file(
-        &solution_path,
-        model.c.len(),
-        model.le_rows.len(),
-        model.eq_rows.len(),
-    ) {
-        Ok(parsed) => parsed,
-        Err(message) => {
-            return Some(external_cli_failure(
-                ExternalLinearCliStatus::NumericalError,
-                solver,
-                message,
-                elapsed_ms(t0),
-            ));
-        }
-    };
-    let status = classify_highs_status(&parsed.status, &stdout, &stderr);
-    if !matches!(
-        status,
-        ExternalLinearCliStatus::Optimal | ExternalLinearCliStatus::Feasible
-    ) {
-        let status = if matches!(
-            status,
-            ExternalLinearCliStatus::Infeasible | ExternalLinearCliStatus::Unbounded
-        ) {
-            status
-        } else {
-            ExternalLinearCliStatus::Unavailable
-        };
-        let mut solution = external_cli_failure(status, solver, parsed.status, elapsed_ms(t0));
-        solution.solver_version = solver_version;
-        return Some(solution);
-    }
-
-    let objective = dot_f64(&model.c, &parsed.x);
-    let mut solution = ExternalLinearCliSolution {
-        status,
-        solver,
-        solver_version,
-        x: parsed.x,
-        objective: Some(objective),
-        objective_values: None,
-        lp_algorithm: glpk_lp_algorithm_feedback(kind, opts.lp_algorithm, &stdout, &stderr),
-        best_bound: None,
-        solution_limit: None,
-        solution_pool_size: None,
-        solutions: None,
-        exhausted: None,
-        mip_gap: None,
-        absolute_gap: None,
-        objective_limit: None,
-        primal_feasibility_tolerance: None,
-        dual_feasibility_tolerance: None,
-        integer_feasibility_tolerance: None,
-        nodes_explored: None,
-        threads: None,
-        random_seed: glpk_random_seed_feedback(opts.random_seed, &stdout, &stderr),
-        presolve: glpk_presolve_feedback(kind, opts.presolve, &stdout, &stderr),
-        cuts: glpk_cuts_feedback(kind, opts.cuts, &stdout, &stderr),
-        heuristics: None,
-        branch_rule: glpk_branch_rule_feedback(kind, opts.branch_rule, &stdout, &stderr),
-        branch_priorities_accepted: None,
-        branch_priority_count: None,
-        node_selection: glpk_node_selection_feedback(kind, opts.node_selection, &stdout, &stderr),
-        mip_start_accepted: None,
-        mip_start_objective: None,
-        dual_ub: if kind == ExternalLinearCliKind::Lp {
-            parsed.dual_ub
-        } else {
-            None
-        },
-        dual_eq: if kind == ExternalLinearCliKind::Lp {
-            parsed.dual_eq
-        } else {
-            None
-        },
-        reduced_costs: if kind == ExternalLinearCliKind::Lp {
-            parsed.reduced_costs
-        } else {
-            None
-        },
-        var_basis: if kind == ExternalLinearCliKind::Lp {
-            parsed.var_basis
-        } else {
-            None
-        },
-        row_basis: if kind == ExternalLinearCliKind::Lp {
-            parsed.row_basis
-        } else {
-            None
-        },
-        iterations: glpk_lp_iterations(kind, &stdout, &stderr),
-        elapsed_ms: elapsed_ms(t0),
-        message: parsed.status,
-    };
-    if kind == ExternalLinearCliKind::Mip {
-        apply_glpk_mip_quality(&mut solution, &stdout, &stderr);
-    }
-    Some(solution)
+        .ok()?;
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    parse_highs_solver_version(&text)
 }
 
-fn glpk_model_to_string(
-    model: &HighsCliModel,
-    model_format: ExternalLinearCliModelFormat,
-) -> String {
-    match model_format {
-        ExternalLinearCliModelFormat::CplexLp => cplex_lp_string(
-            model.sense,
-            &model.c,
-            &model.le_rows,
-            &model.le_rhs,
-            &model.eq_rows,
-            &model.eq_rhs,
-            &model.lbs,
-            &model.ubs,
-            &model.integer_vars,
-        ),
-        ExternalLinearCliModelFormat::Mps => mps_string_with_objsense(
-            model.sense,
-            &model.c,
-            &model.le_rows,
-            &model.le_rhs,
-            &model.eq_rows,
-            &model.eq_rhs,
-            &model.lbs,
-            &model.ubs,
-            &model.integer_vars,
-            false,
-        ),
-    }
-}
-
-fn parse_glpk_solution_file(
-    path: &Path,
-    n: usize,
-    le_count: usize,
-    eq_count: usize,
-) -> Result<HighsParsedSolution, String> {
-    let text = fs::read_to_string(path).map_err(|err| {
-        format!(
-            "failed to read GLPK solution file '{}': {err}",
-            path.display()
-        )
-    })?;
-    Ok(parse_glpk_solution_text(&text, n, le_count, eq_count))
-}
-
-fn parse_glpk_solution_text(
-    text: &str,
-    n: usize,
-    le_count: usize,
-    eq_count: usize,
-) -> HighsParsedSolution {
-    let mut x = vec![0.0; n];
-    let mut status = "unknown".to_string();
-    let mut row_duals = vec![None; le_count + eq_count];
-    let mut reduced_costs = vec![None; n];
-    let mut var_basis = vec![None; n];
-    let mut row_basis = vec![None; le_count + eq_count];
-    let mut in_named_columns = false;
-
+fn parse_glpk_solver_version(text: &str) -> Option<String> {
     for line in text.lines() {
-        let parts = line.split_whitespace().collect::<Vec<_>>();
-        if parts.len() >= 3 && parts[0] == "c" && parts[1] == "Status:" {
-            status = parts[2..].join(" ").to_ascii_lowercase();
-        } else if parts.len() >= 2 && parts[0] == "Status:" {
-            status = parts[1..].join(" ").to_ascii_lowercase();
-        } else if line.contains("Column name") {
-            in_named_columns = true;
-        } else if in_named_columns
-            && stripped_starts(line, &["Integer feasibility", "KKT.", "End of output"])
-        {
-            in_named_columns = false;
-        } else if in_named_columns
-            && parts.len() >= 3
-            && parts[0].chars().all(|ch| ch.is_ascii_digit())
-            && parts[1].starts_with('x')
-        {
-            if let Some(idx) = parse_x_index(parts[1], n) {
-                if let Some(value) = parts
-                    .iter()
-                    .skip(2)
-                    .find_map(|token| (*token != "*").then(|| token.parse::<f64>().ok()).flatten())
-                {
-                    x[idx] = value;
-                }
-            }
-        } else if parts.len() >= 3 && parts[0] == "j" {
-            let idx = parts[1]
-                .parse::<usize>()
-                .ok()
-                .and_then(|idx| idx.checked_sub(1));
-            if let Some(idx) = idx.filter(|idx| *idx < n) {
-                if parts.len() >= 4 && parts[2].parse::<f64>().is_err() {
-                    if let Ok(value) = parts[3].parse::<f64>() {
-                        x[idx] = value;
-                    }
-                    if let Some(status) = basis_status_from_token(parts[2]) {
-                        var_basis[idx] = Some(status.to_string());
-                    }
-                    if parts.len() >= 5 {
-                        if let Ok(value) = parts[4].parse::<f64>() {
-                            reduced_costs[idx] = Some(value);
-                        }
-                    }
-                } else if let Ok(value) = parts[2].parse::<f64>() {
-                    x[idx] = value;
-                }
-            }
-        } else if parts.len() >= 5 && parts[0] == "i" {
-            let idx = parts[1]
-                .parse::<usize>()
-                .ok()
-                .and_then(|idx| idx.checked_sub(1));
-            if let Some(idx) = idx.filter(|idx| *idx < row_duals.len()) {
-                if let Some(status) = basis_status_from_token(parts[2]) {
-                    row_basis[idx] = Some(status.to_string());
-                }
-                if let Ok(value) = parts[4].parse::<f64>() {
-                    row_duals[idx] = Some(value);
-                }
-            }
-        }
-    }
-
-    let dual_ub = row_duals[..le_count]
-        .iter()
-        .copied()
-        .collect::<Option<Vec<_>>>();
-    let dual_eq = row_duals[le_count..]
-        .iter()
-        .copied()
-        .collect::<Option<Vec<_>>>();
-    HighsParsedSolution {
-        status,
-        x,
-        dual_ub,
-        dual_eq,
-        reduced_costs: reduced_costs.into_iter().collect::<Option<Vec<_>>>(),
-        var_basis: var_basis.into_iter().collect::<Option<Vec<_>>>(),
-        row_basis: row_basis.into_iter().collect::<Option<Vec<_>>>(),
-    }
-}
-
-fn stripped_starts(text: &str, prefixes: &[&str]) -> bool {
-    let stripped = text.trim();
-    prefixes.iter().any(|prefix| stripped.starts_with(prefix))
-}
-
-fn glpk_solver_version_from_output(stdout: &str, stderr: &str) -> Option<String> {
-    for line in stdout.lines().chain(stderr.lines()) {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("GLPSOL--GLPK LP/MIP Solver ") {
-            if let Some(version) = rest.split_whitespace().next() {
+        if let Some(rest) = line.split_once("GLPSOL--GLPK LP/MIP Solver ") {
+            let version = rest
+                .1
+                .split(|ch: char| ch.is_whitespace() || ch == ',')
+                .next()
+                .unwrap_or("")
+                .trim();
+            if version.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
                 return Some(format!("GLPK {version}"));
             }
         }
@@ -3458,130 +3659,215 @@ fn glpk_solver_version_from_output(stdout: &str, stderr: &str) -> Option<String>
     None
 }
 
-fn glpk_lp_iterations(kind: ExternalLinearCliKind, stdout: &str, stderr: &str) -> Option<u64> {
-    if kind != ExternalLinearCliKind::Lp {
-        return None;
-    }
-    for line in stdout.lines().chain(stderr.lines()) {
-        let stripped = line.trim_start_matches('*').trim();
-        let Some((iteration, rest)) = stripped.split_once(':') else {
-            continue;
-        };
-        if rest.trim_start().starts_with("obj") {
-            if let Ok(iteration) = iteration.trim().parse::<u64>() {
-                return Some(iteration);
+fn probe_glpk_solver_version(command_path: &Path) -> Option<String> {
+    let output = Command::new(command_path)
+        .arg("--version")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .ok()?;
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    parse_glpk_solver_version(&text)
+}
+
+fn parse_cbc_solver_version(text: &str) -> Option<String> {
+    for line in text.lines() {
+        if let Some((_, rest)) = line.split_once("Version:") {
+            let version = rest
+                .split(|ch: char| ch.is_whitespace() || ch == ',' || ch == ')')
+                .find(|token| token.chars().next().is_some_and(|ch| ch.is_ascii_digit()))
+                .unwrap_or("")
+                .trim();
+            if !version.is_empty() {
+                return Some(format!("CBC {version}"));
             }
         }
     }
     None
 }
 
-fn apply_glpk_mip_quality(solution: &mut ExternalLinearCliSolution, stdout: &str, stderr: &str) {
-    for line in stdout.lines().chain(stderr.lines()) {
-        let lowered = line.to_ascii_lowercase();
-        if lowered.contains("mip gap") || lowered.contains("relative gap") {
-            if let Some(gap) = first_float(line) {
-                solution.mip_gap = Some(if line.contains('%') { gap / 100.0 } else { gap });
+fn probe_cbc_solver_version(command_path: &Path) -> Option<String> {
+    let output = Command::new(command_path)
+        .arg("-version")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .ok()?;
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    parse_cbc_solver_version(&text)
+}
+
+fn parse_clp_solver_version(text: &str) -> Option<String> {
+    for line in text.lines() {
+        if let Some((_, rest)) = line.split_once("Version:") {
+            let version = rest
+                .split(|ch: char| ch.is_whitespace() || ch == ',' || ch == ')')
+                .find(|token| token.chars().next().is_some_and(|ch| ch.is_ascii_digit()))
+                .unwrap_or("")
+                .trim();
+            if !version.is_empty() {
+                return Some(format!("CLP {version}"));
             }
         }
-        if lowered.contains("tree is empty") || lowered.contains("integer optimization begins") {
-            solution.nodes_explored.get_or_insert(0);
+    }
+    None
+}
+
+fn probe_clp_solver_version(command_path: &Path) -> Option<String> {
+    let output = Command::new(command_path)
+        .arg("-version")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .ok()?;
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    parse_clp_solver_version(&text)
+}
+
+fn parse_highs_lp_iterations(stdout: &str, stderr: &str) -> Option<u64> {
+    for line in format!("{stdout}\n{stderr}").lines() {
+        let stripped = line.trim();
+        let lowered = stripped.to_ascii_lowercase();
+        if lowered.starts_with("simplex") && lowered.contains("iterations") {
+            if let Some(value) = first_float_after_colon(stripped) {
+                if value >= 0.0 && value.is_finite() {
+                    return Some(value.round() as u64);
+                }
+            }
         }
     }
+    None
 }
 
-fn glpk_lp_algorithm_feedback(
-    kind: ExternalLinearCliKind,
-    lp_algorithm: Option<ExternalLinearCliLpAlgorithm>,
-    stdout: &str,
-    stderr: &str,
-) -> Option<String> {
-    if kind != ExternalLinearCliKind::Lp {
-        return None;
+fn parse_glpk_lp_iterations(stdout: &str, stderr: &str) -> Option<u64> {
+    for line in format!("{stdout}\n{stderr}").lines() {
+        let stripped = line.trim();
+        let stripped = stripped.strip_prefix('*').unwrap_or(stripped).trim();
+        let Some((prefix, rest)) = stripped.split_once(':') else {
+            continue;
+        };
+        if prefix.trim().chars().all(|ch| ch.is_ascii_digit()) && rest.trim().starts_with("obj") {
+            if let Ok(iterations) = prefix.trim().parse::<u64>() {
+                return Some(iterations);
+            }
+        }
     }
-    let lp_algorithm = lp_algorithm?;
-    let flag = match lp_algorithm {
-        ExternalLinearCliLpAlgorithm::Simplex => "--simplex",
-        ExternalLinearCliLpAlgorithm::Ipm => "--interior",
-    };
-    format!("{stdout}\n{stderr}")
-        .contains(flag)
-        .then(|| lp_algorithm.as_str().to_string())
+    None
 }
 
-fn glpk_random_seed_feedback(random_seed: Option<u64>, stdout: &str, stderr: &str) -> Option<u64> {
-    let random_seed = random_seed?;
-    format!("{stdout}\n{stderr}")
-        .contains(&format!("--seed {random_seed}"))
-        .then_some(random_seed)
+fn parse_cbc_lp_iterations(stdout: &str, stderr: &str) -> Option<u64> {
+    for line in format!("{stdout}\n{stderr}").lines() {
+        let stripped = line.trim();
+        let lowered = stripped.to_ascii_lowercase();
+        if !lowered.contains("iterations") {
+            continue;
+        }
+        let before_iterations = lowered.split("iterations").next().unwrap_or("");
+        for token in before_iterations
+            .split(|ch: char| !ch.is_ascii_digit())
+            .rev()
+        {
+            if token.is_empty() {
+                continue;
+            }
+            if let Ok(iterations) = token.parse::<u64>() {
+                return Some(iterations);
+            }
+        }
+    }
+    None
 }
 
-fn glpk_presolve_feedback(
+fn parse_highs_mip_quality(
     kind: ExternalLinearCliKind,
-    presolve: Option<ExternalLinearCliPresolve>,
+    objective: f64,
     stdout: &str,
     stderr: &str,
-) -> Option<String> {
-    let presolve = presolve?;
-    let text = format!("{stdout}\n{stderr}");
-    let accepted = match (kind, presolve) {
-        (ExternalLinearCliKind::Lp, ExternalLinearCliPresolve::Off) => text.contains("--nopresol"),
-        (ExternalLinearCliKind::Lp, ExternalLinearCliPresolve::On) => text.contains("--presol"),
-        (ExternalLinearCliKind::Mip, ExternalLinearCliPresolve::Off) => text.contains("--nointopt"),
-        (ExternalLinearCliKind::Mip, ExternalLinearCliPresolve::On) => text.contains("--intopt"),
-        (_, ExternalLinearCliPresolve::Auto) => false,
-    };
-    accepted.then(|| presolve.as_str().to_string())
-}
-
-fn glpk_cuts_feedback(
-    kind: ExternalLinearCliKind,
-    cuts: Option<ExternalLinearCliMipSwitch>,
-    stdout: &str,
-    stderr: &str,
-) -> Option<String> {
-    (kind == ExternalLinearCliKind::Mip
-        && cuts == Some(ExternalLinearCliMipSwitch::On)
-        && format!("{stdout}\n{stderr}").contains("--cuts"))
-    .then(|| "on".to_string())
-}
-
-fn glpk_branch_rule_feedback(
-    kind: ExternalLinearCliKind,
-    branch_rule: Option<ExternalLinearCliBranchRule>,
-    stdout: &str,
-    stderr: &str,
-) -> Option<String> {
+) -> HighsMipQuality {
     if kind != ExternalLinearCliKind::Mip {
-        return None;
+        return HighsMipQuality::default();
     }
-    let branch_rule = branch_rule?;
-    let flag = match branch_rule {
-        ExternalLinearCliBranchRule::FirstFractional => "--first",
-        ExternalLinearCliBranchRule::MostFractional => "--mostf",
-    };
-    format!("{stdout}\n{stderr}")
-        .contains(flag)
-        .then(|| branch_rule.as_str().to_string())
+    let mut quality = HighsMipQuality::default();
+    for line in format!("{stdout}\n{stderr}").lines() {
+        let stripped = line.trim();
+        let lowered = stripped.to_ascii_lowercase();
+        if lowered.starts_with("dual bound") {
+            quality.best_bound = first_float_after_colon(stripped);
+        } else if lowered.starts_with("gap") {
+            quality.mip_gap = first_float(stripped).map(|gap| {
+                if stripped.contains('%') {
+                    gap / 100.0
+                } else {
+                    gap
+                }
+            });
+        } else if lowered.starts_with("nodes") {
+            quality.nodes_explored = first_float_after_colon(stripped)
+                .filter(|value| value.is_finite() && *value >= 0.0)
+                .map(|value| value.round() as u64);
+        }
+    }
+    if let Some(best_bound) = quality.best_bound.filter(|value| value.is_finite()) {
+        quality.absolute_gap = Some((best_bound - objective).abs().max(0.0));
+        if quality.mip_gap.is_none() {
+            quality.mip_gap = Some((best_bound - objective).abs() / objective.abs().max(1.0));
+        }
+    }
+    quality.mip_gap = quality
+        .mip_gap
+        .filter(|value| value.is_finite())
+        .map(|value| value.max(0.0));
+    quality
 }
 
-fn glpk_node_selection_feedback(
-    kind: ExternalLinearCliKind,
-    node_selection: Option<ExternalLinearCliNodeSelection>,
-    stdout: &str,
-    stderr: &str,
-) -> Option<String> {
-    if kind != ExternalLinearCliKind::Mip {
-        return None;
+fn first_float_after_colon(line: &str) -> Option<f64> {
+    let text = line.split_once(':').map_or(line, |(_, rest)| rest);
+    first_float(text)
+}
+
+fn first_float(text: &str) -> Option<f64> {
+    text.split(|ch: char| ch.is_whitespace() || ch == ',' || ch == '(' || ch == ')')
+        .filter_map(|token| token.trim().trim_end_matches('%').parse::<f64>().ok())
+        .next()
+}
+
+fn parse_f64_token(token: &str) -> Option<f64> {
+    token.trim().trim_end_matches('%').parse::<f64>().ok()
+}
+
+fn dot_f64(left: &[f64], right: &[f64]) -> f64 {
+    left.iter().zip(right).map(|(a, b)| a * b).sum()
+}
+
+fn normalized_highs_random_seed(random_seed: Option<u64>) -> Option<u64> {
+    random_seed.filter(|seed| *seed <= i32::MAX as u64)
+}
+
+fn native_highs_message(status: &str, stdout: &str, stderr: &str) -> String {
+    native_solver_message(status, stdout, stderr)
+}
+
+fn native_solver_message(status: &str, stdout: &str, stderr: &str) -> String {
+    if !status.trim().is_empty() {
+        return status.to_string();
     }
-    let node_selection = node_selection?;
-    let flag = match node_selection {
-        ExternalLinearCliNodeSelection::Dfs => "--dfs",
-        ExternalLinearCliNodeSelection::BestBound => "--bestb",
-    };
-    format!("{stdout}\n{stderr}")
-        .contains(flag)
-        .then(|| node_selection.as_str().to_string())
+    let stderr = stderr.trim();
+    if !stderr.is_empty() {
+        return stderr.to_string();
+    }
+    stdout.trim().to_string()
 }
 
 fn external_cli_failure(
@@ -3806,32 +4092,6 @@ fn fmt_lp_number(value: f64) -> String {
 }
 
 fn mps_string(
-    sense: Sense,
-    c: &[f64],
-    le_rows: &[Vec<f64>],
-    le_rhs: &[f64],
-    eq_rows: &[Vec<f64>],
-    eq_rhs: &[f64],
-    lbs: &[Option<f64>],
-    ubs: &[Option<f64>],
-    integer_vars: &[bool],
-) -> String {
-    mps_string_with_objsense(
-        sense,
-        c,
-        le_rows,
-        le_rhs,
-        eq_rows,
-        eq_rhs,
-        lbs,
-        ubs,
-        integer_vars,
-        true,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn mps_string_with_objsense(
     sense: Sense,
     c: &[f64],
     le_rows: &[Vec<f64>],
@@ -4550,6 +4810,38 @@ mod tests {
     }
 
     #[test]
+    fn ipmip_exports_lazy_constraints_as_cli_rows() {
+        let p = IPMIPProblem {
+            sense: Sense::Max,
+            c: vec![1.0, 1.0],
+            a: vec![vec![1.0, 0.0]],
+            b: vec![1.0],
+            integer_vars: vec![true, true],
+            ub: Some(vec![1.0, 1.0]),
+            var_names: None,
+            con_names: None,
+            lazy_constraints: Some(vec![BranchOrCutConstraint {
+                coefs: vec![1.0, 1.0],
+                rhs: 1.0,
+                name: "lazy-at-most-one".to_string(),
+                kind: ConstraintKind::Lazy,
+            }]),
+            variable_nodes: None,
+            constraint_nodes: None,
+        };
+
+        let lp_text = ipmip_problem_to_cplex_lp_string(&p);
+        assert!(lp_text.contains(" c0: x0 <= 1\n"));
+        assert!(lp_text.contains(" c1: x0 + x1 <= 1\n"));
+
+        let mps_text = ipmip_problem_to_mps_string(&p);
+        assert!(mps_text.contains(" L  c1\n"));
+        assert!(mps_text.contains("    x0        c1        1\n"));
+        assert!(mps_text.contains("    x1        c1        1\n"));
+        assert!(mps_text.contains("    RHS1      c1        1\n"));
+    }
+
+    #[test]
     fn lp_mps_export_uses_rows_columns_rhs_and_bounds() {
         let p = LPProblem {
             sense: Sense::Min,
@@ -4573,6 +4865,22 @@ mod tests {
         assert!(text.contains(" MI BND1      x0\n"));
         assert!(text.contains(" UP BND1      x0        5\n"));
         assert!(text.contains(" LO BND1      x1        1\n"));
+        assert!(text.ends_with("ENDATA\n"));
+    }
+
+    #[test]
+    fn glpk_mps_export_omits_objsense_header() {
+        let p = LPProblem {
+            sense: Sense::Max,
+            c: vec![1.0, 2.0],
+            a_ub: Some(vec![vec![1.0, 1.0]]),
+            b_ub: Some(vec![3.0]),
+            ..Default::default()
+        };
+        let text = super::lp_problem_to_mps_string_with_objsense(&p, false);
+        assert!(text.starts_with("NAME          ORES\nROWS\n"));
+        assert!(!text.contains("OBJSENSE"));
+        assert!(text.contains(" N  OBJ\n"));
         assert!(text.ends_with("ENDATA\n"));
     }
 
@@ -4681,48 +4989,75 @@ mod tests {
     }
 
     #[test]
-    fn highs_solution_parser_extracts_primal_duals_and_basis() {
-        let text = r#"
+    fn native_highs_solution_parser_reads_primal_dual_and_basis_sections() {
+        let text = "\
 Model status
 Optimal
 
 # Primal solution values
 Feasible
-Objective 34
+Objective 5
 # Columns 2
-x0 6
-x1 4
+x0 1
+x1 2
 # Rows 2
-c0 10
-e0 4
+c0 0
+e0 0
 
 # Dual solution values
 Feasible
 # Columns 2
-x0 0
-x1 -1.5
+x0 0.5
+x1 -0.25
 # Rows 2
 c0 3
-e0 -2
+e0 -4
 
 # Basis
 HiGHS_basis_file v2
 # Columns 2
 x0 1
-x1 0
+x1 2
 # Rows 2
-c0 2
+c0 0
 e0 1
-"#;
-        let parsed = super::parse_highs_solution_text(text, 2, 1, 1);
+";
+        let parsed = super::parse_native_highs_solution_text(text, 2, 1, 1).unwrap();
         assert_eq!(parsed.status, "optimal");
-        assert_eq!(parsed.x, vec![6.0, 4.0]);
+        assert_eq!(parsed.x, vec![1.0, 2.0]);
+        assert_eq!(parsed.reduced_costs, Some(vec![0.5, -0.25]));
         assert_eq!(parsed.dual_ub, Some(vec![3.0]));
-        assert_eq!(parsed.dual_eq, Some(vec![-2.0]));
-        assert_eq!(parsed.reduced_costs, Some(vec![0.0, -1.5]));
+        assert_eq!(parsed.dual_eq, Some(vec![-4.0]));
         assert_eq!(
             parsed.var_basis,
-            Some(vec!["basic".to_string(), "at_lower".to_string()])
+            Some(vec!["basic".to_string(), "at_upper".to_string()])
+        );
+        assert_eq!(
+            parsed.row_basis,
+            Some(vec!["at_lower".to_string(), "basic".to_string()])
+        );
+    }
+
+    #[test]
+    fn native_glpk_solution_parser_reads_plain_lp_sections() {
+        let text = "\
+c Status:     OPTIMAL
+s bas 2 2 f f 12
+i 1 u 4 3
+i 2 b 6 -4
+j 1 b 1 0.5
+j 2 u 2 -0.25
+e o f
+";
+        let parsed = super::parse_native_glpk_solution_text(text, 2, 1, 1).unwrap();
+        assert_eq!(parsed.status, "optimal");
+        assert_eq!(parsed.x, vec![1.0, 2.0]);
+        assert_eq!(parsed.reduced_costs, Some(vec![0.5, -0.25]));
+        assert_eq!(parsed.dual_ub, Some(vec![3.0]));
+        assert_eq!(parsed.dual_eq, Some(vec![-4.0]));
+        assert_eq!(
+            parsed.var_basis,
+            Some(vec!["basic".to_string(), "at_upper".to_string()])
         );
         assert_eq!(
             parsed.row_basis,
@@ -4731,27 +5066,61 @@ e0 1
     }
 
     #[test]
-    fn glpk_solution_parser_extracts_machine_solution_fields() {
-        let text = r#"
-c Status: OPTIMAL
-i 1 b 1 3
-i 2 u 2 -2
-j 1 b 6 0
-j 2 l 4 -1.5
-"#;
-        let parsed = super::parse_glpk_solution_text(text, 2, 1, 1);
-        assert_eq!(parsed.status, "optimal");
-        assert_eq!(parsed.x, vec![6.0, 4.0]);
+    fn native_glpk_solution_parser_reads_printable_mip_columns() {
+        let text = "\
+Status:     INTEGER OPTIMAL
+
+   No. Column name       Activity     Lower bound   Upper bound
+------ ------------ ------------- ------------- -------------
+     1 x0           *             1             0             1
+     2 x1           *             0             0             1
+
+Integer feasibility conditions:
+";
+        let parsed = super::parse_native_glpk_solution_text(text, 2, 0, 0).unwrap();
+        assert_eq!(parsed.status, "integer optimal");
+        assert_eq!(parsed.x, vec![1.0, 0.0]);
+    }
+
+    #[test]
+    fn native_cbc_solution_parser_reads_lp_solution_and_basis() {
+        let solution_text = "\
+Optimal - objective value 12.00000000
+      0 c0                     4                       3
+      1 e0                     6                      -4
+      2 x0                     1                     0.5
+      3 x1                     2                   -0.25
+";
+        let basis_text = "\
+NAME          ORES
+ XL x0 c0 0
+ LL x1 0
+ENDATA
+";
+        let parsed =
+            super::parse_native_cbc_solution_text(solution_text, 2, 1, 1, Some(basis_text))
+                .unwrap();
+        assert_eq!(parsed.status, "optimal - objective value 12.00000000");
+        assert_eq!(parsed.x, vec![1.0, 2.0]);
+        assert_eq!(parsed.reduced_costs, Some(vec![0.5, -0.25]));
         assert_eq!(parsed.dual_ub, Some(vec![3.0]));
-        assert_eq!(parsed.dual_eq, Some(vec![-2.0]));
-        assert_eq!(parsed.reduced_costs, Some(vec![0.0, -1.5]));
+        assert_eq!(parsed.dual_eq, Some(vec![-4.0]));
         assert_eq!(
             parsed.var_basis,
             Some(vec!["basic".to_string(), "at_lower".to_string()])
         );
         assert_eq!(
             parsed.row_basis,
-            Some(vec!["basic".to_string(), "at_upper".to_string()])
+            Some(vec!["at_lower".to_string(), "fixed".to_string()])
+        );
+    }
+
+    #[test]
+    fn native_clp_version_parser_uses_clp_label() {
+        let text = "Coin LP version 1.17.11\nVersion: 1.17.11\n";
+        assert_eq!(
+            super::parse_clp_solver_version(text),
+            Some("CLP 1.17.11".to_string())
         );
     }
 
@@ -4790,137 +5159,6 @@ j 2 l 4 -1.5
         );
         assert_eq!(normalized_random_seed(Some(i32::MAX as u32 + 1)), None);
         assert_eq!(normalized_random_seed(None), None);
-    }
-
-    #[test]
-    fn highs_direct_plain_lp_succeeds_without_python_bridge() {
-        let Some(command) = external_linear_cli_command(ExternalLinearCliSolver::Highs) else {
-            eprintln!("SKIP direct HiGHS LP solve: highs command not installed");
-            return;
-        };
-        let solution = solve_lp_with_external_cli(
-            &super::external_linear_cli_smoke_lp(),
-            &ExternalLinearCliOptions {
-                solver: ExternalLinearCliSolver::Highs,
-                command_path: Some(command),
-                python: Some("/definitely/not-a-python-for-highs-direct".to_string()),
-                time_limit_secs: Some(2.0),
-                ..Default::default()
-            },
-        );
-        assert_eq!(
-            solution.status,
-            ExternalLinearCliStatus::Optimal,
-            "{}",
-            solution.message
-        );
-        assert_eq!(solution.solver, "highs:cli");
-        assert_eq!(solution.x, vec![1.0]);
-        assert!(solution
-            .objective
-            .is_some_and(|objective| (objective - 1.0).abs() <= 1.0e-8));
-        assert!(solution
-            .solver_version
-            .as_deref()
-            .is_some_and(|version| version.starts_with("HiGHS ")));
-    }
-
-    #[test]
-    fn highs_direct_plain_mip_succeeds_without_python_bridge() {
-        let Some(command) = external_linear_cli_command(ExternalLinearCliSolver::Highs) else {
-            eprintln!("SKIP direct HiGHS MIP solve: highs command not installed");
-            return;
-        };
-        let solution = solve_ipmip_with_external_cli(
-            &super::external_linear_cli_smoke_mip(),
-            &ExternalLinearCliOptions {
-                solver: ExternalLinearCliSolver::Highs,
-                command_path: Some(command),
-                python: Some("/definitely/not-a-python-for-highs-direct".to_string()),
-                time_limit_secs: Some(2.0),
-                random_seed: Some(7),
-                ..Default::default()
-            },
-        );
-        assert_eq!(
-            solution.status,
-            ExternalLinearCliStatus::Optimal,
-            "{}",
-            solution.message
-        );
-        assert_eq!(solution.solver, "highs:cli");
-        assert_eq!(solution.x, vec![1.0]);
-        assert!(solution
-            .objective
-            .is_some_and(|objective| (objective - 1.0).abs() <= 1.0e-8));
-        assert!(solution
-            .best_bound
-            .is_some_and(|bound| (bound - 1.0).abs() <= 1.0e-8));
-    }
-
-    #[test]
-    fn glpk_direct_plain_lp_succeeds_without_python_bridge() {
-        let Some(command) = external_linear_cli_command(ExternalLinearCliSolver::Glpk) else {
-            eprintln!("SKIP direct GLPK LP solve: glpsol command not installed");
-            return;
-        };
-        let solution = solve_lp_with_external_cli(
-            &super::external_linear_cli_smoke_lp(),
-            &ExternalLinearCliOptions {
-                solver: ExternalLinearCliSolver::Glpk,
-                command_path: Some(command),
-                python: Some("/definitely/not-a-python-for-glpk-direct".to_string()),
-                model_format: ExternalLinearCliModelFormat::Mps,
-                time_limit_secs: Some(2.0),
-                ..Default::default()
-            },
-        );
-        assert_eq!(
-            solution.status,
-            ExternalLinearCliStatus::Optimal,
-            "{}",
-            solution.message
-        );
-        assert_eq!(solution.solver, "glpk:cli");
-        assert_eq!(solution.x, vec![1.0]);
-        assert!(solution
-            .objective
-            .is_some_and(|objective| (objective - 1.0).abs() <= 1.0e-8));
-        assert!(solution
-            .solver_version
-            .as_deref()
-            .is_some_and(|version| version.starts_with("GLPK ")));
-    }
-
-    #[test]
-    fn glpk_direct_plain_mip_succeeds_without_python_bridge() {
-        let Some(command) = external_linear_cli_command(ExternalLinearCliSolver::Glpk) else {
-            eprintln!("SKIP direct GLPK MIP solve: glpsol command not installed");
-            return;
-        };
-        let solution = solve_ipmip_with_external_cli(
-            &super::external_linear_cli_smoke_mip(),
-            &ExternalLinearCliOptions {
-                solver: ExternalLinearCliSolver::Glpk,
-                command_path: Some(command),
-                python: Some("/definitely/not-a-python-for-glpk-direct".to_string()),
-                model_format: ExternalLinearCliModelFormat::Mps,
-                time_limit_secs: Some(2.0),
-                random_seed: Some(7),
-                ..Default::default()
-            },
-        );
-        assert_eq!(
-            solution.status,
-            ExternalLinearCliStatus::Optimal,
-            "{}",
-            solution.message
-        );
-        assert_eq!(solution.solver, "glpk:cli");
-        assert_eq!(solution.x, vec![1.0]);
-        assert!(solution
-            .objective
-            .is_some_and(|objective| (objective - 1.0).abs() <= 1.0e-8));
     }
 
     #[test]

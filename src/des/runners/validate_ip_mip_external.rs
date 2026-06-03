@@ -10,8 +10,14 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
+use crate::des::general::external_linear_cli::{
+    general_linear_ipmip_problem_to_cli_json, indicator_ipmip_problem_to_cli_json,
+    ipmip_problem_to_cli_json, lower_bounded_ipmip_problem_to_cli_json,
+    multi_objective_ipmip_problem_to_cli_json, pwl_ipmip_problem_to_cli_json,
+    semi_ipmip_problem_to_cli_json, sos_ipmip_problem_to_cli_json,
+};
 use crate::des::general::ip_mip_des::{
     build_binary_knapsack_ip, build_fixed_charge_indicator_ip, build_general_linear_rows_ip,
     build_lexicographic_choice_ip, build_lower_bounded_production_ip,
@@ -26,35 +32,6 @@ use crate::des::general::ip_mip_des::{
     MultiObjectiveIPMIPProblem, PwlIPMIPProblem, SemiIPMIPProblem, SosIPMIPProblem,
 };
 use crate::des::general::lp::Sense;
-
-#[derive(Clone, Debug, Serialize)]
-struct ExternalProblem<'a> {
-    sense: &'a str,
-    c: &'a [f64],
-    a: &'a [Vec<f64>],
-    b: &'a [f64],
-    integer_vars: &'a [bool],
-    lb: Option<&'a [f64]>,
-    ub: Option<&'a [f64]>,
-    var_names: Option<&'a [String]>,
-    con_names: Option<&'a [String]>,
-}
-
-impl<'a> From<&'a IPMIPProblem> for ExternalProblem<'a> {
-    fn from(p: &'a IPMIPProblem) -> Self {
-        ExternalProblem {
-            sense: p.sense.as_str(),
-            c: &p.c,
-            a: &p.a,
-            b: &p.b,
-            integer_vars: &p.integer_vars,
-            lb: None,
-            ub: p.ub.as_deref(),
-            var_names: p.var_names.as_deref(),
-            con_names: p.con_names.as_deref(),
-        }
-    }
-}
 
 #[derive(Clone, Debug, Default, Deserialize)]
 struct ExternalResultInner {
@@ -115,8 +92,7 @@ impl Driver {
     }
 
     fn write_problem(&self, name: &str, problem: &IPMIPProblem) -> PathBuf {
-        let value = serde_json::to_value(ExternalProblem::from(problem))
-            .expect("serialize IP/MIP validation problem");
+        let value = ipmip_problem_to_cli_json(problem);
         self.write_problem_value(name, &value)
     }
 
@@ -237,7 +213,7 @@ impl Driver {
         );
         let linearized = linearize_indicator_problem(&problem);
         let solver = std::env::var("IP_MIP_EXTERNAL_SOLVER").unwrap_or_else(|_| "auto".to_string());
-        let external_problem = indicator_problem_value(&problem);
+        let external_problem = indicator_ipmip_problem_to_cli_json(&problem);
         let external = self.run_external_value(name, &external_problem, &solver);
         self.compare(name, &linearized, &internal, &external);
     }
@@ -257,7 +233,7 @@ impl Driver {
         );
         let linearized = linearize_sos_problem(&problem);
         let solver = std::env::var("IP_MIP_EXTERNAL_SOLVER").unwrap_or_else(|_| "auto".to_string());
-        let external_problem = sos_problem_value(&problem);
+        let external_problem = sos_ipmip_problem_to_cli_json(&problem);
         let external = self.run_external_value(name, &external_problem, &solver);
         self.compare(name, &linearized, &internal, &external);
     }
@@ -277,7 +253,7 @@ impl Driver {
         );
         let linearized = linearize_semi_problem(&problem);
         let solver = std::env::var("IP_MIP_EXTERNAL_SOLVER").unwrap_or_else(|_| "auto".to_string());
-        let external_problem = semi_problem_value(&problem);
+        let external_problem = semi_ipmip_problem_to_cli_json(&problem);
         let external = self.run_external_value(name, &external_problem, &solver);
         self.compare(name, &linearized, &internal, &external);
     }
@@ -296,7 +272,7 @@ impl Driver {
             },
         );
         let solver = std::env::var("IP_MIP_EXTERNAL_SOLVER").unwrap_or_else(|_| "auto".to_string());
-        let external_problem = lower_bounded_problem_value(&problem);
+        let external_problem = lower_bounded_ipmip_problem_to_cli_json(&problem);
         let external = self.run_external_value(name, &external_problem, &solver);
         self.compare_with_lb(name, &problem, &internal, &external);
     }
@@ -316,7 +292,7 @@ impl Driver {
         );
         let linearized = linearize_general_linear_problem(&problem);
         let solver = std::env::var("IP_MIP_EXTERNAL_SOLVER").unwrap_or_else(|_| "auto".to_string());
-        let external_problem = general_linear_problem_value(&problem);
+        let external_problem = general_linear_ipmip_problem_to_cli_json(&problem);
         let external = self.run_external_value(name, &external_problem, &solver);
         self.compare(name, &linearized, &internal, &external);
     }
@@ -336,7 +312,7 @@ impl Driver {
         );
         let linearized = linearize_pwl_problem(&problem);
         let solver = std::env::var("IP_MIP_EXTERNAL_SOLVER").unwrap_or_else(|_| "auto".to_string());
-        let external_problem = pwl_problem_value(&problem);
+        let external_problem = pwl_ipmip_problem_to_cli_json(&problem);
         let external = self.run_external_value(name, &external_problem, &solver);
         self.compare(name, &linearized, &internal, &external);
     }
@@ -359,7 +335,7 @@ impl Driver {
             },
         );
         let solver = std::env::var("IP_MIP_EXTERNAL_SOLVER").unwrap_or_else(|_| "auto".to_string());
-        let external_problem = multi_objective_problem_value(&problem);
+        let external_problem = multi_objective_ipmip_problem_to_cli_json(&problem);
         let external = self.run_external_value(name, &external_problem, &solver);
         self.check(
             &format!("{name}: external reference available"),
@@ -496,137 +472,6 @@ impl Driver {
             )),
         );
     }
-}
-
-fn indicator_problem_value(problem: &IndicatorIPMIPProblem) -> serde_json::Value {
-    let mut value = serde_json::to_value(ExternalProblem::from(&problem.base))
-        .expect("serialize indicator IP/MIP base problem");
-    value["indicators"] = serde_json::Value::Array(
-        problem
-            .indicators
-            .iter()
-            .map(|indicator| {
-                serde_json::json!({
-                    "binary_var": indicator.binary_var,
-                    "active_value": indicator.active_value,
-                    "coefs": &indicator.coefs,
-                    "sense": indicator.sense.as_str(),
-                    "rhs": indicator.rhs,
-                    "name": &indicator.name,
-                })
-            })
-            .collect(),
-    );
-    value
-}
-
-fn sos_problem_value(problem: &SosIPMIPProblem) -> serde_json::Value {
-    let mut value =
-        serde_json::to_value(ExternalProblem::from(&problem.base)).expect("serialize SOS base");
-    value["sos"] = serde_json::Value::Array(
-        problem
-            .sos
-            .iter()
-            .map(|set| {
-                serde_json::json!({
-                    "kind": set.kind.as_str(),
-                    "vars": &set.vars,
-                    "weights": &set.weights,
-                    "name": &set.name,
-                })
-            })
-            .collect(),
-    );
-    value
-}
-
-fn semi_problem_value(problem: &SemiIPMIPProblem) -> serde_json::Value {
-    let mut value =
-        serde_json::to_value(ExternalProblem::from(&problem.base)).expect("serialize semi base");
-    value["semi_variables"] = serde_json::Value::Array(
-        problem
-            .semi_variables
-            .iter()
-            .map(|semi| {
-                serde_json::json!({
-                    "kind": semi.kind.as_str(),
-                    "var": semi.var,
-                    "lower": semi.lower,
-                    "name": &semi.name,
-                })
-            })
-            .collect(),
-    );
-    value
-}
-
-fn lower_bounded_problem_value(problem: &LowerBoundedIPMIPProblem) -> serde_json::Value {
-    let mut value = serde_json::to_value(ExternalProblem::from(&problem.base))
-        .expect("serialize lower-bounded base");
-    value["lb"] = serde_json::json!(&problem.lb);
-    value
-}
-
-fn general_linear_problem_value(problem: &GeneralLinearIPMIPProblem) -> serde_json::Value {
-    let mut value = serde_json::to_value(ExternalProblem::from(&problem.base))
-        .expect("serialize general-linear base");
-    value["linear_constraints"] = serde_json::Value::Array(
-        problem
-            .linear_constraints
-            .iter()
-            .map(|constraint| {
-                serde_json::json!({
-                    "coefs": &constraint.coefs,
-                    "lower": constraint.lower,
-                    "upper": constraint.upper,
-                    "name": &constraint.name,
-                })
-            })
-            .collect(),
-    );
-    value
-}
-
-fn pwl_problem_value(problem: &PwlIPMIPProblem) -> serde_json::Value {
-    let mut value =
-        serde_json::to_value(ExternalProblem::from(&problem.base)).expect("serialize PWL base");
-    value["pwl"] = serde_json::Value::Array(
-        problem
-            .pwl
-            .iter()
-            .map(|pwl| {
-                serde_json::json!({
-                    "x_var": pwl.x_var,
-                    "y_var": pwl.y_var,
-                    "points": pwl.points.iter().map(|point| serde_json::json!({
-                        "x": point.x,
-                        "y": point.y,
-                    })).collect::<Vec<_>>(),
-                    "name": &pwl.name,
-                })
-            })
-            .collect(),
-    );
-    value
-}
-
-fn multi_objective_problem_value(problem: &MultiObjectiveIPMIPProblem) -> serde_json::Value {
-    let mut value = serde_json::to_value(ExternalProblem::from(&problem.base))
-        .expect("serialize multi-objective base");
-    value["multi_objectives"] = serde_json::Value::Array(
-        problem
-            .objectives
-            .iter()
-            .map(|objective| {
-                serde_json::json!({
-                    "sense": objective.sense.as_str(),
-                    "c": &objective.c,
-                    "name": &objective.name,
-                })
-            })
-            .collect(),
-    );
-    value
 }
 
 fn fmt_vec(x: &[f64]) -> String {

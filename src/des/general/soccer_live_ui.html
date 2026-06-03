@@ -301,6 +301,7 @@
       <div class="metric"><span>Away Brain</span><b id="awayBrain">P0.00 R0.00</b></div>
       <div class="metric"><span>Ball</span><b id="ballPhysics">0.0y/s 0.0y/s2</b></div>
       <div class="metric"><span>Ball Agent</span><b id="ballAgent">waiting</b></div>
+      <div class="metric"><span>Ball Action</span><b id="ballAction">waiting</b></div>
       <div class="metric"><span>Surface</span><b id="surfaceReadout">D0.028 A0.009 G0.88 S0.55</b></div>
       <div class="metric"><span>Shots</span><b id="shots">0 - 0</b></div>
       <div class="metric"><span>On Target</span><b id="onTarget">0 - 0</b></div>
@@ -474,6 +475,7 @@ const homeBrain = document.getElementById("homeBrain");
 const awayBrain = document.getElementById("awayBrain");
 const ballPhysics = document.getElementById("ballPhysics");
 const ballAgent = document.getElementById("ballAgent");
+const ballAction = document.getElementById("ballAction");
 const surfaceReadout = document.getElementById("surfaceReadout");
 const shots = document.getElementById("shots");
 const onTarget = document.getElementById("onTarget");
@@ -581,8 +583,29 @@ let syncingLearning = false;
 let policyAutosaveTimer = null;
 let syncingPolicyAutosave = false;
 let hoverPlayerId = null;
+let lastSemanticBallAction = null;
 const LIVE_STEP_INTERVAL_MS = 100;
 const SLOT_COLORS = ["#f6c944", "#37d688", "#61a5ff", "#ef7ad3"];
+const SEMANTIC_BALL_ACTIONS = new Set([
+  "pass",
+  "aerial-pass",
+  "first-time-pass",
+  "clearance",
+  "route-one",
+  "shoot",
+  "first-time-shot",
+  "first-time-header",
+  "control-touch",
+  "kickoff",
+  "throw-in",
+  "goal-kick",
+  "corner-kick",
+  "free-kick",
+  "offside",
+  "goal",
+  "save",
+  "shot-blocked"
+]);
 const CONTROLLER_KEYMAPS = [
   {
     left: "ArrowLeft",
@@ -752,6 +775,79 @@ function ballAgentLabel(ball = state?.frame?.ball) {
   const holder = decision.holder ?? ball?.holder;
   const holderSuffix = holder == null ? "" : ` #${holder}`;
   return `${decision.action} t${decision.tick}${holderSuffix}`;
+}
+function normalizeUiActionLabel(action) {
+  const compact = String(action || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_]+/g, "-");
+  if (compact === "route1" || compact === "route-1" || compact === "long-ball" || compact === "longball") return "route-one";
+  if (compact === "hoof" || compact === "hoofed-clearance") return "clearance";
+  if (compact === "pass1" || compact === "pass2" || compact === "pass3") return "pass";
+  if (compact === "aerial-pass1" || compact === "aerial-pass2" || compact === "aerial-pass3") return "aerial-pass";
+  return compact;
+}
+function playerForSemanticBallDecision(frame, decision) {
+  const players = Array.isArray(frame?.players) ? frame.players : [];
+  const action = normalizeUiActionLabel(decision?.action);
+  const tick = Number(decision?.tick);
+  return players.find(player => {
+    const d = player?.lastDecision;
+    return d
+      && Number(d?.mdpState?.tick ?? d?.tick) === tick
+      && normalizeUiActionLabel(d.action) === action;
+  }) || null;
+}
+function semanticBallActionRecordFromFrame(frame) {
+  const decision = frame?.ball?.lastDecision;
+  const action = normalizeUiActionLabel(decision?.action);
+  if (!SEMANTIC_BALL_ACTIONS.has(action)) return null;
+  const player = playerForSemanticBallDecision(frame, decision);
+  return {
+    action,
+    tick: Number(decision.tick ?? frame?.tick ?? 0),
+    clockSeconds: Number(frame?.clockSeconds ?? state?.frame?.clockSeconds ?? 0),
+    playerId: player?.id ?? decision?.holder ?? frame?.ball?.holder ?? null,
+    team: player?.team ?? frame?.ball?.lastTouchTeam ?? null,
+    source: "ball"
+  };
+}
+function semanticBallActionRecordFromTransition(t) {
+  const action = normalizeUiActionLabel(t?.action);
+  if (!SEMANTIC_BALL_ACTIONS.has(action)) return null;
+  return {
+    action,
+    tick: Number(t.tick ?? state?.frame?.tick ?? 0),
+    clockSeconds: Number(state?.frame?.clockSeconds ?? 0),
+    playerId: t.playerId ?? null,
+    team: t.team ?? null,
+    reward: Number(t.reward ?? 0),
+    source: "learning"
+  };
+}
+function rememberSemanticBallAction(record) {
+  if (!record) return;
+  if (!lastSemanticBallAction || Number(record.tick ?? 0) >= Number(lastSemanticBallAction.tick ?? -1)) {
+    lastSemanticBallAction = record;
+  }
+}
+function rememberSemanticBallActionsFromFrames(frames = []) {
+  if (!Array.isArray(frames)) return;
+  for (const frame of frames) rememberSemanticBallAction(semanticBallActionRecordFromFrame(frame));
+}
+function rememberSemanticBallActionsFromTransitions(transitions = []) {
+  if (!Array.isArray(transitions)) return;
+  for (const t of transitions) rememberSemanticBallAction(semanticBallActionRecordFromTransition(t));
+}
+function semanticBallActionLabel() {
+  const current = semanticBallActionRecordFromFrame(state?.frame);
+  if (current) rememberSemanticBallAction(current);
+  const record = lastSemanticBallAction;
+  if (!record) return "waiting";
+  const player = record.playerId == null ? "" : ` #${record.playerId}`;
+  const team = shortTeam(record.team);
+  const reward = Number.isFinite(record.reward) ? ` R${signed(record.reward)}` : "";
+  return `${record.action}${player} ${team} t${record.tick}${reward}`;
 }
 function controllerThreadLabel(threads = state?.controllerThreads || []) {
   if (!Array.isArray(threads) || !threads.length) return "0 native";
@@ -1675,6 +1771,7 @@ function render() {
   awayBrain.textContent = directiveLabel(f.awayDirective);
   ballPhysics.textContent = `${vecLen(f.ball.velocity).toFixed(1)}y/s ${vecLen(f.ball.acceleration).toFixed(1)}y/s2`;
   ballAgent.textContent = ballAgentLabel(f.ball);
+  ballAction.textContent = semanticBallActionLabel();
   surfaceReadout.textContent = `D${Number(state.config.ballDragPerTick ?? 0).toFixed(3)} A${Number(state.config.ballAirResistance ?? 0).toFixed(3)} G${Number(state.config.ballGrassResistanceYps2 ?? 0).toFixed(2)} S${Number(state.config.ballStopSpeedYps ?? 0).toFixed(2)}`;
   const s = state.summary.stats;
   shots.textContent = `${s.shotsHome} - ${s.shotsAway}`;
@@ -2268,8 +2365,10 @@ async function resetMatch(options = {}) {
   state.policyHistory = previousPolicyHistory;
   eventLog = [];
   recentLearningTransitions = [];
+  lastSemanticBallAction = null;
   queuedInputs = [];
   keys.clear();
+  rememberSemanticBallActionsFromFrames([state.frame]);
   applyAssignmentsToFrame(state.controllerAssignments);
   syncSurfaceControls();
   rebuildControls(state.controllerAssignments);
@@ -2358,6 +2457,8 @@ async function loadState() {
   const res = await fetch("/api/state");
   state = await res.json();
   recentLearningTransitions = [];
+  lastSemanticBallAction = null;
+  rememberSemanticBallActionsFromFrames([state.frame]);
   applyAssignmentsToFrame(state.controllerAssignments);
   syncSurfaceControls();
   rebuildControls(state.controllerAssignments);
@@ -2416,6 +2517,8 @@ async function stepOnce(options = {}) {
     recentLearningTransitions = Array.isArray(response.learningTransitions)
       ? response.learningTransitions
       : [];
+    rememberSemanticBallActionsFromFrames(Array.isArray(response.frames) ? response.frames : [response.frame]);
+    rememberSemanticBallActionsFromTransitions(recentLearningTransitions);
     applyAssignmentsToFrame(state.controllerAssignments);
     if (assignmentKey(state.controllerAssignments) !== beforeAssignments) {
       rebuildControls(state.controllerAssignments);

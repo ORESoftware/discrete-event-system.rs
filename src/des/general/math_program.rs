@@ -14317,6 +14317,30 @@ mod tests {
     }
 
     #[test]
+    fn inactive_value_indicator_lowers_with_big_m() {
+        let mut p = MathProgram::new(ObjectiveSense::Max);
+        let x = p
+            .add_continuous_var("x", 1.0, Some(0.0), Some(10.0))
+            .unwrap();
+        let b = p.add_binary_var("b", -20.0).unwrap();
+        p.add_indicator(
+            "cap-when-false",
+            b,
+            false,
+            vec![(x, 1.0)],
+            RowSense::Le,
+            2.0,
+        )
+        .unwrap();
+
+        let sol = solve_math_program(&p, &MathProgramSolveOptions::default()).unwrap();
+        assert_eq!(sol.status, MathProgramStatus::Optimal);
+        assert_close(sol.x[b], 0.0);
+        assert_close(sol.x[x], 2.0);
+        assert_close(sol.objective, 2.0);
+    }
+
+    #[test]
     fn enforced_linear_constraint_uses_literal_conjunction() {
         let mut p = MathProgram::new(ObjectiveSense::Max);
         let x = p
@@ -14826,6 +14850,21 @@ mod tests {
         assert_close(sol.x[x], 1.0);
         assert_close(sol.x[y], 1.0);
         assert_close(sol.objective, 11.0);
+    }
+
+    #[test]
+    fn forbidden_assignments_excludes_disallowed_tuple() {
+        let mut p = MathProgram::new(ObjectiveSense::Max);
+        let x = p.add_binary_var("x", 2.0).unwrap();
+        let y = p.add_binary_var("y", 1.0).unwrap();
+        p.add_forbidden_assignments("not-both", vec![x, y], vec![vec![1, 1]])
+            .unwrap();
+
+        let sol = solve_math_program(&p, &MathProgramSolveOptions::default()).unwrap();
+        assert_eq!(sol.status, MathProgramStatus::Optimal);
+        assert_close(sol.x[x], 1.0);
+        assert_close(sol.x[y], 0.0);
+        assert_close(sol.objective, 2.0);
     }
 
     #[test]

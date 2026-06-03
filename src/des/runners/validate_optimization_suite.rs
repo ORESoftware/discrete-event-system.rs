@@ -2964,11 +2964,9 @@ impl Driver {
     }
 
     fn validate_external_solver_clis(&mut self) {
-        println!(
-            "\n-- External solver CLIs: GLPK/HiGHS/SCIP/CBC/CLP + optional commercial checks --"
-        );
-        let lp_solvers = ["highs", "glpk", "scip", "cbc", "clp"];
-        let mip_solvers = ["highs", "glpk", "scip", "cbc"];
+        println!("\n-- External solver CLIs: open-source LP/MIP + optional commercial checks --");
+        let lp_solvers = ["highs", "glpk", "scip", "cbc", "clp", "soplex", "lp-solve"];
+        let mip_solvers = ["highs", "glpk", "scip", "cbc", "lp-solve"];
         let commercial_lp_solvers = ["gurobi", "cplex", "xpress", "lindo"];
         let commercial_mip_solvers = ["gurobi", "cplex", "xpress", "lindo"];
         let cli_specs = external_linear_cli_solver_specs();
@@ -12657,16 +12655,44 @@ impl Driver {
             ),
         }
 
-        for (solver, method) in [
+        let math_program_lp_cli_solvers = [
             (ExternalLinearCliSolver::Highs, "highs:cli"),
             (ExternalLinearCliSolver::Glpk, "glpsol:cli"),
             (ExternalLinearCliSolver::Scip, "scip:cli"),
             (ExternalLinearCliSolver::Cbc, "cbc:cli"),
+            (ExternalLinearCliSolver::Clp, "clp:cli"),
+            (ExternalLinearCliSolver::Soplex, "soplex:cli"),
+            (ExternalLinearCliSolver::LpSolve, "lp-solve:cli"),
             (ExternalLinearCliSolver::Gurobi, "gurobi:cli"),
             (ExternalLinearCliSolver::Cplex, "cplex:cli"),
             (ExternalLinearCliSolver::Xpress, "xpress:cli"),
             (ExternalLinearCliSolver::Lindo, "lindo:cli"),
-        ] {
+        ];
+        self.check(
+            "MathProgram LP facade CLI list covers registered LP solvers",
+            ExternalLinearCliSolver::open_source_lp()
+                .iter()
+                .all(|solver| {
+                    math_program_lp_cli_solvers
+                        .iter()
+                        .any(|(candidate, _)| candidate == solver)
+                })
+                && ExternalLinearCliSolver::optional_commercial_mip()
+                    .iter()
+                    .all(|solver| {
+                        math_program_lp_cli_solvers
+                            .iter()
+                            .any(|(candidate, _)| candidate == solver)
+                    }),
+            format!(
+                "solvers={:?}",
+                math_program_lp_cli_solvers
+                    .iter()
+                    .map(|(solver, _)| solver.as_str())
+                    .collect::<Vec<_>>()
+            ),
+        );
+        for (solver, method) in math_program_lp_cli_solvers {
             self.check_math_program_cli_cross_check(
                 "LP",
                 &lp,
@@ -12747,6 +12773,132 @@ impl Driver {
                 false,
                 format!("{err:?}"),
             ),
+        }
+
+        let indicator_ortools_scip_opts = ExternalMathProgramOptions {
+            method: Some("ortools:SCIP".to_string()),
+            time_limit_ms: Some(5_000.0),
+            ..Default::default()
+        };
+        if let Some(report) = self.math_program_cross_check_or_skip(
+            "MathProgram MIP facade indicator/general-constraint OR-Tools SCIP cross-check",
+            &mip,
+            &solve_opts,
+            &indicator_ortools_scip_opts,
+            1e-7,
+        ) {
+            self.check(
+                "MathProgram MIP facade indicator/general-constraint OR-Tools SCIP cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && (report.internal.objective - 8.0).abs() <= 1e-7
+                    && (report.internal.x[open_a] - 1.0).abs() <= 1e-7
+                    && report.internal.x[open_b].abs() <= 1e-7
+                    && (report.internal.x[load] - 4.0).abs() <= 1e-7
+                    && report.internal.x[reserve].abs() <= 1e-7
+                    && (report.internal.x[peak] - 4.0).abs() <= 1e-7,
+                format!(
+                    "internal={:?} external={:?} obj_diff={:?} x_diff={:?} objective={} x={:?} violations=({:?},{:?}) solver={} message={:?}",
+                    report.internal.status,
+                    report.external.status,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal.objective,
+                    report.internal.x,
+                    report.internal_max_violation,
+                    report.external_max_violation,
+                    report.external.solver,
+                    report.external.message
+                ),
+            );
+        }
+
+        let mut false_indicator_mip = MathProgram::new(MathObjectiveSense::Max);
+        let false_indicator_x = false_indicator_mip
+            .add_continuous_var("false-indicator-x", 1.0, Some(0.0), Some(10.0))
+            .expect("false indicator x");
+        let false_indicator_b = false_indicator_mip
+            .add_binary_var("false-indicator-b", -20.0)
+            .expect("false indicator b");
+        false_indicator_mip
+            .add_indicator(
+                "cap-when-indicator-false",
+                false_indicator_b,
+                false,
+                vec![(false_indicator_x, 1.0)],
+                RowSense::Le,
+                2.0,
+            )
+            .expect("false-active indicator");
+
+        match cross_check_math_program_with_external(
+            &false_indicator_mip,
+            &solve_opts,
+            &external_opts,
+            1e-7,
+        ) {
+            Ok(report) => self.check(
+                "MathProgram MIP facade false-active indicator HiGHS cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && (report.internal.objective - 2.0).abs() <= 1e-7
+                    && (report.internal.x[false_indicator_x] - 2.0).abs() <= 1e-7
+                    && report.internal.x[false_indicator_b].abs() <= 1e-7,
+                format!(
+                    "internal={:?} external={:?} obj_diff={:?} x_diff={:?} objective={} x={:?} violations=({:?},{:?})",
+                    report.internal.status,
+                    report.external.status,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal.objective,
+                    report.internal.x,
+                    report.internal_max_violation,
+                    report.external_max_violation
+                ),
+            ),
+            Err(err) => self.check(
+                "MathProgram MIP facade false-active indicator HiGHS cross-check",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+        if let Some(report) = self.math_program_cross_check_or_skip(
+            "MathProgram MIP facade false-active indicator OR-Tools SCIP cross-check",
+            &false_indicator_mip,
+            &solve_opts,
+            &indicator_ortools_scip_opts,
+            1e-7,
+        ) {
+            self.check(
+                "MathProgram MIP facade false-active indicator OR-Tools SCIP cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && (report.internal.objective - 2.0).abs() <= 1e-7
+                    && (report.internal.x[false_indicator_x] - 2.0).abs() <= 1e-7
+                    && report.internal.x[false_indicator_b].abs() <= 1e-7,
+                format!(
+                    "internal={:?} external={:?} obj_diff={:?} x_diff={:?} objective={} x={:?} violations=({:?},{:?}) solver={} message={:?}",
+                    report.internal.status,
+                    report.external.status,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal.objective,
+                    report.internal.x,
+                    report.internal_max_violation,
+                    report.external_max_violation,
+                    report.external.solver,
+                    report.external.message
+                ),
+            );
         }
 
         let mut general_mip = MathProgram::new(MathObjectiveSense::Max);
@@ -13020,6 +13172,63 @@ impl Driver {
             ),
         }
 
+        let general_ortools_scip_opts = ExternalMathProgramOptions {
+            method: Some("ortools:SCIP".to_string()),
+            time_limit_ms: Some(5_000.0),
+            ..Default::default()
+        };
+        if let Some(report) = self.math_program_cross_check_or_skip(
+            "MathProgram MIP facade logical/arithmetic/norm OR-Tools SCIP cross-check",
+            &general_mip,
+            &solve_opts,
+            &general_ortools_scip_opts,
+            1e-7,
+        ) {
+            self.check(
+                "MathProgram MIP facade logical/arithmetic/norm OR-Tools SCIP cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report
+                        .internal_max_violation
+                        .is_some_and(|violation| violation <= 1e-7)
+                    && report
+                        .external_max_violation
+                        .is_some_and(|violation| violation <= 1e-7)
+                    && (report.internal.objective - 28.0).abs() <= 1e-7
+                    && (report.internal.x[logic_a] - 1.0).abs() <= 1e-7
+                    && report.internal.x[logic_b].abs() <= 1e-7
+                    && (report.internal.x[logic_c] - 1.0).abs() <= 1e-7
+                    && report.internal.x[logic_and].abs() <= 1e-7
+                    && (report.internal.x[logic_or] - 1.0).abs() <= 1e-7
+                    && report.internal.x[logic_xor].abs() <= 1e-7
+                    && (report.internal.x[enforced_x] - 4.0).abs() <= 1e-7
+                    && (report.internal.x[product_result] - 6.0).abs() <= 1e-7
+                    && (report.internal.x[div_quotient] - 2.0).abs() <= 1e-7
+                    && (report.internal.x[div_remainder] - 1.0).abs() <= 1e-7
+                    && (report.internal.x[abs_result] - 3.0).abs() <= 1e-7
+                    && (report.internal.x[max_result] - 2.0).abs() <= 1e-7
+                    && (report.internal.x[min_result] - 1.0).abs() <= 1e-7
+                    && (report.internal.x[l1_norm] - 5.0).abs() <= 1e-7
+                    && (report.internal.x[linf_norm] - 3.0).abs() <= 1e-7,
+                format!(
+                    "internal={:?} external={:?} obj_diff={:?} x_diff={:?} objective={} x={:?} violations=({:?},{:?}) solver={} message={:?}",
+                    report.internal.status,
+                    report.external.status,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal.objective,
+                    report.internal.x,
+                    report.internal_max_violation,
+                    report.external_max_violation,
+                    report.external.solver,
+                    report.external.message
+                ),
+            );
+        }
+
         match export_math_program_cplex_lp(&general_mip) {
             Ok(export) => {
                 let has_generated = |needle: &str| {
@@ -13199,6 +13408,42 @@ impl Driver {
                 false,
                 format!("{err:?}"),
             ),
+        }
+
+        let semi_ortools_scip_opts = ExternalMathProgramOptions {
+            method: Some("ortools:SCIP".to_string()),
+            time_limit_ms: Some(5_000.0),
+            ..Default::default()
+        };
+        if let Some(report) = self.math_program_cross_check_or_skip(
+            "MathProgram MIP facade semi-variable OR-Tools SCIP cross-check",
+            &semi_mip,
+            &solve_opts,
+            &semi_ortools_scip_opts,
+            1e-7,
+        ) {
+            self.check(
+                "MathProgram MIP facade semi-variable OR-Tools SCIP cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && (report.internal.x[semi_cont] - 2.0).abs() <= 1e-7
+                    && (report.internal.x[semi_int] - 3.0).abs() <= 1e-7,
+                format!(
+                    "internal={:?} external={:?} obj_diff={:?} x_diff={:?} x={:?} violations=({:?},{:?}) solver={} message={:?}",
+                    report.internal.status,
+                    report.external.status,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal.x,
+                    report.internal_max_violation,
+                    report.external_max_violation,
+                    report.external.solver,
+                    report.external.message
+                ),
+            );
         }
 
         match export_math_program_cplex_lp(&semi_mip) {
@@ -13397,6 +13642,46 @@ impl Driver {
             ),
         }
 
+        let sos_ortools_scip_opts = ExternalMathProgramOptions {
+            method: Some("ortools:SCIP".to_string()),
+            time_limit_ms: Some(5_000.0),
+            ..Default::default()
+        };
+        if let Some(report) = self.math_program_cross_check_or_skip(
+            "MathProgram MIP facade SOS OR-Tools SCIP cross-check",
+            &sos_mip,
+            &solve_opts,
+            &sos_ortools_scip_opts,
+            1e-7,
+        ) {
+            self.check(
+                "MathProgram MIP facade SOS OR-Tools SCIP cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report.internal.x[sos1_a].abs() <= 1e-7
+                    && (report.internal.x[sos1_b] - 1.0).abs() <= 1e-7
+                    && report.internal.x[sos1_c].abs() <= 1e-7
+                    && (report.internal.x[sos2_a] - 1.0).abs() <= 1e-7
+                    && (report.internal.x[sos2_b] - 1.0).abs() <= 1e-7
+                    && report.internal.x[sos2_c].abs() <= 1e-7,
+                format!(
+                    "internal={:?} external={:?} obj_diff={:?} x_diff={:?} x={:?} violations=({:?},{:?}) solver={} message={:?}",
+                    report.internal.status,
+                    report.external.status,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal.x,
+                    report.internal_max_violation,
+                    report.external_max_violation,
+                    report.external.solver,
+                    report.external.message
+                ),
+            );
+        }
+
         match export_math_program_cplex_lp(&sos_mip) {
             Ok(export) => {
                 let has_generated = |needle: &str| {
@@ -13575,6 +13860,42 @@ impl Driver {
                 false,
                 format!("{err:?}"),
             ),
+        }
+
+        let piecewise_ortools_scip_opts = ExternalMathProgramOptions {
+            method: Some("ortools:SCIP".to_string()),
+            time_limit_ms: Some(5_000.0),
+            ..Default::default()
+        };
+        if let Some(report) = self.math_program_cross_check_or_skip(
+            "MathProgram MIP facade piecewise-linear OR-Tools SCIP cross-check",
+            &piecewise_mip,
+            &solve_opts,
+            &piecewise_ortools_scip_opts,
+            1e-7,
+        ) {
+            self.check(
+                "MathProgram MIP facade piecewise-linear OR-Tools SCIP cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && (report.internal.x[piecewise_x] - 1.5).abs() <= 1e-7
+                    && (report.internal.x[piecewise_y] - 2.5).abs() <= 1e-7,
+                format!(
+                    "internal={:?} external={:?} obj_diff={:?} x_diff={:?} x={:?} violations=({:?},{:?}) solver={} message={:?}",
+                    report.internal.status,
+                    report.external.status,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal.x,
+                    report.internal_max_violation,
+                    report.external_max_violation,
+                    report.external.solver,
+                    report.external.message
+                ),
+            );
         }
 
         match export_math_program_cplex_lp(&piecewise_mip) {
@@ -13859,6 +14180,57 @@ impl Driver {
             ),
         }
 
+        let table_cp_sat_opts = ExternalMathProgramOptions {
+            method: Some("ortools:CP-SAT".to_string()),
+            time_limit_ms: Some(5_000.0),
+            ..Default::default()
+        };
+        if let Some(report) = self.math_program_cross_check_or_skip(
+            "MathProgram MIP facade table/element global OR-Tools CP-SAT cross-check",
+            &table_mip,
+            &solve_opts,
+            &table_cp_sat_opts,
+            1e-7,
+        ) {
+            self.check(
+                "MathProgram MIP facade table/element global OR-Tools CP-SAT cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && (report.internal.x[all_diff_x0] - 2.0).abs() <= 1e-7
+                    && (report.internal.x[all_diff_x1] - 1.0).abs() <= 1e-7
+                    && report.internal.x[all_diff_x2].abs() <= 1e-7
+                    && (report.internal.x[allowed_x] - 1.0).abs() <= 1e-7
+                    && (report.internal.x[allowed_y] - 1.0).abs() <= 1e-7
+                    && (report.internal.x[forbidden_x] - 1.0).abs() <= 1e-7
+                    && report.internal.x[forbidden_y].abs() <= 1e-7
+                    && (report.internal.x[element_index] - 3.0).abs() <= 1e-7
+                    && (report.internal.x[element_picked] - 9.0).abs() <= 1e-7
+                    && (report.internal.x[variable_element_index] - 1.0).abs() <= 1e-7
+                    && (report.internal.x[variable_element_picked] - 8.0).abs() <= 1e-7
+                    && (report.internal.x[inverse_x0] - 1.0).abs() <= 1e-7
+                    && (report.internal.x[inverse_x1] - 2.0).abs() <= 1e-7
+                    && report.internal.x[inverse_x2].abs() <= 1e-7
+                    && (report.internal.x[inverse_y0] - 2.0).abs() <= 1e-7
+                    && report.internal.x[inverse_y1].abs() <= 1e-7
+                    && (report.internal.x[inverse_y2] - 1.0).abs() <= 1e-7,
+                format!(
+                    "internal={:?} external={:?} obj_diff={:?} x_diff={:?} x={:?} violations=({:?},{:?}) solver={} message={:?}",
+                    report.internal.status,
+                    report.external.status,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal.x,
+                    report.internal_max_violation,
+                    report.external_max_violation,
+                    report.external.solver,
+                    report.external.message
+                ),
+            );
+        }
+
         match export_math_program_cplex_lp(&table_mip) {
             Ok(export) => {
                 let has_generated = |needle: &str| {
@@ -14130,6 +14502,59 @@ impl Driver {
                 false,
                 format!("{err:?}"),
             ),
+        }
+
+        let routing_cp_sat_opts = ExternalMathProgramOptions {
+            method: Some("ortools:CP-SAT".to_string()),
+            time_limit_ms: Some(5_000.0),
+            ..Default::default()
+        };
+        if let Some(report) = self.math_program_cross_check_or_skip(
+            "MathProgram MIP facade routing/automaton/bin-packing OR-Tools CP-SAT cross-check",
+            &routing_mip,
+            &solve_opts,
+            &routing_cp_sat_opts,
+            1e-7,
+        ) {
+            self.check(
+                "MathProgram MIP facade routing/automaton/bin-packing OR-Tools CP-SAT cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && [(0, 1), (1, 2), (2, 3), (3, 0)]
+                        .iter()
+                        .all(|&(tail, head)| {
+                            circuit_arc_vars[tail][head]
+                                .is_some_and(|var| (report.internal.x[var] - 1.0).abs() <= 1e-7)
+                        })
+                    && (report.internal.x[route_depot_to_first] - 1.0).abs() <= 1e-7
+                    && (report.internal.x[route_first_to_second] - 1.0).abs() <= 1e-7
+                    && (report.internal.x[route_second_to_depot] - 1.0).abs() <= 1e-7
+                    && report.internal.x[route_second_to_first].abs() <= 1e-7
+                    && (report.internal.x[route_skipped] - 1.0).abs() <= 1e-7
+                    && (report.internal.x[automaton_a] - 1.0).abs() <= 1e-7
+                    && report.internal.x[automaton_b].abs() <= 1e-7
+                    && (report.internal.x[automaton_c] - 1.0).abs() <= 1e-7
+                    && report.internal.x[bin_item0].abs() <= 1e-7
+                    && report.internal.x[bin_item1].abs() <= 1e-7
+                    && (report.internal.x[bin_item2] - 1.0).abs() <= 1e-7
+                    && (report.internal.x[bin_load0] - 5.0).abs() <= 1e-7
+                    && (report.internal.x[bin_load1] - 4.0).abs() <= 1e-7,
+                format!(
+                    "internal={:?} external={:?} obj_diff={:?} x_diff={:?} x={:?} violations=({:?},{:?}) solver={} message={:?}",
+                    report.internal.status,
+                    report.external.status,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal.x,
+                    report.internal_max_violation,
+                    report.external_max_violation,
+                    report.external.solver,
+                    report.external.message
+                ),
+            );
         }
 
         match export_math_program_cplex_lp(&routing_mip) {
@@ -14472,6 +14897,61 @@ impl Driver {
                 false,
                 format!("{err:?}"),
             ),
+        }
+
+        let scheduling_cp_sat_opts = ExternalMathProgramOptions {
+            method: Some("ortools:CP-SAT".to_string()),
+            time_limit_ms: Some(5_000.0),
+            ..Default::default()
+        };
+        if let Some(report) = self.math_program_cross_check_or_skip(
+            "MathProgram MIP facade scheduling-global OR-Tools CP-SAT cross-check",
+            &scheduling_mip,
+            &solve_opts,
+            &scheduling_cp_sat_opts,
+            1e-7,
+        ) {
+            self.check(
+                "MathProgram MIP facade scheduling-global OR-Tools CP-SAT cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report
+                        .internal_max_violation
+                        .is_some_and(|violation| violation <= 1e-7)
+                    && report
+                        .external_max_violation
+                        .is_some_and(|violation| violation <= 1e-7)
+                    && (report.internal.objective - 9.0).abs() <= 1e-7
+                    && (report.internal.x[alt_size] - 2.0).abs() <= 1e-7
+                    && (report.internal.x[alt_end] - 2.0).abs() <= 1e-7
+                    && report.internal.x[alt_slow_present].abs() <= 1e-7
+                    && (report.internal.x[alt_fast_present] - 1.0).abs() <= 1e-7
+                    && (report.internal.x[alt_fast_end] - 2.0).abs() <= 1e-7
+                    && (report.internal.x[no_b_start] - 3.0).abs() <= 1e-7
+                    && (report.internal.x[no_b_end] - 5.0).abs() <= 1e-7
+                    && (report.internal.x[pack_b_y_start] - 2.0).abs() <= 1e-7
+                    && (report.internal.x[pack_b_y_end] - 4.0).abs() <= 1e-7
+                    && (report.internal.x[cum_b_start] - 2.0).abs() <= 1e-7
+                    && (report.internal.x[cum_b_end] - 4.0).abs() <= 1e-7
+                    && report.internal.x[tank_supply_time].abs() <= 1e-7
+                    && report.internal.x[tank_drain_time].abs() <= 1e-7,
+                format!(
+                    "internal={:?} external={:?} obj_diff={:?} x_diff={:?} objective={} x={:?} violations=({:?},{:?}) solver={} message={:?}",
+                    report.internal.status,
+                    report.external.status,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal.objective,
+                    report.internal.x,
+                    report.internal_max_violation,
+                    report.external_max_violation,
+                    report.external.solver,
+                    report.external.message
+                ),
+            );
         }
 
         match export_math_program_cplex_lp(&scheduling_mip) {
@@ -15605,16 +16085,42 @@ impl Driver {
             ),
         }
 
-        for (solver, method) in [
+        let math_program_mip_cli_solvers = [
             (ExternalLinearCliSolver::Highs, "highs:cli"),
             (ExternalLinearCliSolver::Glpk, "glpsol:cli"),
             (ExternalLinearCliSolver::Scip, "scip:cli"),
             (ExternalLinearCliSolver::Cbc, "cbc:cli"),
+            (ExternalLinearCliSolver::LpSolve, "lp-solve:cli"),
             (ExternalLinearCliSolver::Gurobi, "gurobi:cli"),
             (ExternalLinearCliSolver::Cplex, "cplex:cli"),
             (ExternalLinearCliSolver::Xpress, "xpress:cli"),
             (ExternalLinearCliSolver::Lindo, "lindo:cli"),
-        ] {
+        ];
+        self.check(
+            "MathProgram MIP facade CLI list covers registered MIP solvers",
+            ExternalLinearCliSolver::open_source_mip()
+                .iter()
+                .all(|solver| {
+                    math_program_mip_cli_solvers
+                        .iter()
+                        .any(|(candidate, _)| candidate == solver)
+                })
+                && ExternalLinearCliSolver::optional_commercial_mip()
+                    .iter()
+                    .all(|solver| {
+                        math_program_mip_cli_solvers
+                            .iter()
+                            .any(|(candidate, _)| candidate == solver)
+                    }),
+            format!(
+                "solvers={:?}",
+                math_program_mip_cli_solvers
+                    .iter()
+                    .map(|(solver, _)| solver.as_str())
+                    .collect::<Vec<_>>()
+            ),
+        );
+        for (solver, method) in math_program_mip_cli_solvers {
             self.check_math_program_cli_cross_check(
                 "MIP",
                 &mip,

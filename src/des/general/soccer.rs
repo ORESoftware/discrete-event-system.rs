@@ -2935,6 +2935,28 @@ fn normalize_soccer_action_label(action: &str) -> &str {
     }
 }
 
+fn is_untargeted_long_ball_action(action: &str) -> bool {
+    matches!(
+        normalize_soccer_action_label(action),
+        "clearance" | "route-one"
+    )
+}
+
+fn offside_exempt_restart_action(action: &str) -> bool {
+    matches!(
+        normalize_soccer_action_label(action),
+        "throw-in" | "goal-kick" | "corner-kick"
+    )
+}
+
+fn loose_long_ball_altitude_yards(speed_yps: f64) -> f64 {
+    if speed_yps < 8.0 {
+        0.0
+    } else {
+        (0.035 + (speed_yps - 8.0) / 95.0).clamp(0.035, 0.24)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlayerAgent {
@@ -5153,6 +5175,21 @@ impl BallAgent {
         (v1 - v0) / dt_seconds
     }
 
+    fn untargeted_long_ball_team(&self, pending_pass: Option<&PendingPass>) -> Option<Team> {
+        if self.holder.is_some() || pending_pass.is_some() {
+            return None;
+        }
+        let long_ball_action = self
+            .last_decision
+            .as_ref()
+            .is_some_and(|decision| is_untargeted_long_ball_action(&decision.action));
+        if long_ball_action && (self.velocity.len() >= 8.0 || self.altitude_yards > 0.02) {
+            self.last_touch_team
+        } else {
+            None
+        }
+    }
+
     fn run_time_step(
         &mut self,
         context: BallStepContext<'_>,
@@ -5184,11 +5221,19 @@ impl BallAgent {
         );
         self.curl_acceleration = decayed_ball_curl(self.curl_acceleration, context.dt_seconds);
         self.position += (previous_velocity + self.velocity) * 0.5 * context.dt_seconds;
+        let loose_long_ball_altitude = if self
+            .untargeted_long_ball_team(context.pending_pass.as_ref())
+            .is_some()
+        {
+            loose_long_ball_altitude_yards(self.velocity.len())
+        } else {
+            0.0
+        };
         self.altitude_yards = context
             .pending_pass
             .as_ref()
             .map(|pass| pass_ball_altitude_yards(pass, self.position))
-            .unwrap_or(0.0);
+            .unwrap_or(loose_long_ball_altitude);
         if self.velocity.len() < context.ball_stop_speed_yps {
             self.velocity = Vec2::zero();
             self.curl_acceleration = Vec2::zero();
@@ -5467,12 +5512,15 @@ impl BallAgent {
             };
         }
 
+        let loose_long_ball_team = self.untargeted_long_ball_team(context.pending_pass.as_ref());
         if let Some((holder, holder_team)) = nearest_ball_controller_for(
             context.tick,
             self.position,
             self.velocity,
             context.players,
             context.pending_pass.as_ref(),
+            loose_long_ball_team,
+            self.altitude_yards,
             rng,
         ) {
             self.holder = Some(holder);
@@ -5495,7 +5543,9 @@ impl BallAgent {
             };
         }
 
-        self.record_decision(context.tick, "roll");
+        if loose_long_ball_team.is_none() {
+            self.record_decision(context.tick, "roll");
+        }
         BallStepOutcome::None
     }
 
@@ -7721,6 +7771,14 @@ impl WorldSnapshot {
         passer_id: usize,
         target_id: usize,
     ) -> Option<PendingOffside> {
+        if self
+            .ball
+            .last_decision
+            .as_ref()
+            .is_some_and(|decision| offside_exempt_restart_action(&decision.action))
+        {
+            return None;
+        }
         let passer = self.players.iter().find(|p| p.id == passer_id)?;
         let target = self.players.iter().find(|p| p.id == target_id)?;
         if passer.team != target.team || passer.id == target.id {
@@ -8007,10 +8065,11 @@ impl WorldSnapshot {
         if speed < 8.0 {
             return None;
         }
-        let long_ball_action =
-            self.ball.last_decision.as_ref().is_some_and(|decision| {
-                matches!(decision.action.as_str(), "clearance" | "route-one")
-            });
+        let long_ball_action = self
+            .ball
+            .last_decision
+            .as_ref()
+            .is_some_and(|decision| is_untargeted_long_ball_action(&decision.action));
         if !long_ball_action && self.ball.altitude_yards <= 0.02 {
             return None;
         }
@@ -8611,20 +8670,31 @@ fn defensive_cover_profile(
 }
 
 fn attacking_overload_profile(snapshot: &WorldSnapshot, team: Team) -> AttackingOverloadProfile {
-    if snapshot.controlled_possession_team() != Some(team) {
+    let controlled_possession = snapshot.controlled_possession_team() == Some(team);
+    let loose_long_ball = !controlled_possession
+        && snapshot.ball.holder.is_none()
+        && snapshot.pending_pass.is_none()
+        && snapshot.possession_team() == Some(team);
+    let focus = if controlled_possession {
+        snapshot.ball.position
+    } else if loose_long_ball {
+        let Some(projected) = snapshot.projected_loose_ball_target() else {
+            return AttackingOverloadProfile::default();
+        };
+        projected
+    } else {
         return AttackingOverloadProfile::default();
-    }
+    };
 
     let dir = team.attack_dir();
-    let ball = snapshot.ball.position;
     let goal_x = snapshot.field_width * 0.5;
-    let corridor_center_x = ball.x * 0.68 + goal_x * 0.32;
+    let corridor_center_x = focus.x * 0.68 + goal_x * 0.32;
     let corridor_half_width = (18.0 + snapshot.field_width * 0.12).clamp(20.0, 30.0);
-    let forward_depth = 44.0;
-    let support_trailer_yards = 7.0;
+    let forward_depth = if loose_long_ball { 50.0 } else { 44.0 };
+    let support_trailer_yards = if loose_long_ball { 14.0 } else { 7.0 };
 
     let in_threat_lane = |position: Vec2| {
-        let forward = (position.y - ball.y) * dir;
+        let forward = (position.y - focus.y) * dir;
         forward >= -support_trailer_yards
             && forward <= forward_depth
             && (position.x - corridor_center_x).abs() <= corridor_half_width
@@ -8644,7 +8714,7 @@ fn attacking_overload_profile(snapshot: &WorldSnapshot, team: Team) -> Attacking
                 attackers += 1;
             }
         } else {
-            let forward = (position.y - ball.y) * dir;
+            let forward = (position.y - focus.y) * dir;
             if forward >= -1.5
                 && forward <= forward_depth + 5.0
                 && (position.x - corridor_center_x).abs() <= corridor_half_width + 4.0
@@ -8655,7 +8725,7 @@ fn attacking_overload_profile(snapshot: &WorldSnapshot, team: Team) -> Attacking
     }
 
     let advantage = attackers as i32 - defenders as i32;
-    let field_progress = ((ball.y - snapshot.field_length * 0.5) * dir / 36.0).clamp(-0.35, 0.45);
+    let field_progress = ((focus.y - snapshot.field_length * 0.5) * dir / 36.0).clamp(-0.35, 0.45);
     let score = if advantage > 0 {
         (advantage as f64 * 0.34 + field_progress + (attackers as f64 / 6.0).clamp(0.0, 0.45))
             .clamp(0.0, 1.0)
@@ -10210,7 +10280,12 @@ pub struct SoccerTrackingFrame {
     pub pass_flight: Option<PassFlight>,
     #[serde(default, alias = "action", alias = "eventAction", alias = "ballEvent")]
     pub ball_action: Option<String>,
-    #[serde(default, alias = "actionPlayerId", alias = "eventPlayer", alias = "eventPlayerId")]
+    #[serde(
+        default,
+        alias = "actionPlayerId",
+        alias = "eventPlayer",
+        alias = "eventPlayerId"
+    )]
     pub action_player: Option<usize>,
     #[serde(default)]
     pub ball_holder: Option<usize>,
@@ -13275,6 +13350,9 @@ impl SoccerMatch {
             self.ball.velocity,
             &self.players,
             self.pending_pass.as_ref(),
+            self.ball
+                .untargeted_long_ball_team(self.pending_pass.as_ref()),
+            self.ball.altitude_yards,
             &mut self.rng,
         )
     }
@@ -15397,10 +15475,13 @@ fn tracking_frame_action_from_match(sim: &SoccerMatch) -> (Option<String>, Optio
         .players
         .iter()
         .find(|player| {
-            player.last_decision.as_ref().is_some_and(|player_decision| {
-                player_decision.mdp_state.tick == decision.tick
-                    && normalize_soccer_action_label(&player_decision.action) == action.as_str()
-            })
+            player
+                .last_decision
+                .as_ref()
+                .is_some_and(|player_decision| {
+                    player_decision.mdp_state.tick == decision.tick
+                        && normalize_soccer_action_label(&player_decision.action) == action.as_str()
+                })
         })
         .map(|player| player.id)
         .or(decision.holder);
@@ -16492,6 +16573,8 @@ pub fn soccer_tracking_template_dataset(config: &MatchConfig) -> SoccerTrackingD
                 ball_curl_acceleration: Some(Vec2::zero()),
                 ball_altitude_yards: Some(0.0),
                 pass_flight: None,
+                ball_action: None,
+                action_player: None,
                 ball_holder: Some(0),
                 last_touch_team: Some(Team::Home),
                 score_home: Some(0),
@@ -16547,6 +16630,8 @@ pub fn soccer_tracking_template_dataset(config: &MatchConfig) -> SoccerTrackingD
                 ball_curl_acceleration: Some(Vec2::zero()),
                 ball_altitude_yards: Some(0.0),
                 pass_flight: Some(PassFlight::Floor),
+                ball_action: Some("pass".to_string()),
+                action_player: Some(0),
                 ball_holder: Some(1),
                 last_touch_team: Some(Team::Home),
                 score_home: Some(0),
@@ -16627,7 +16712,8 @@ fn tracking_import_format(request: &SoccerTrackingImportRequest) -> String {
 /// `defending`, plus `ball_x`, `ball_y`, `ball_x_norm`, `ball_y_norm`,
 /// `ball_pixel_x`, `ball_pixel_y`, `ball_vx`, `ball_vy`, `ball_ax`, `ball_ay`,
 /// `ball_curl_ax`, `ball_curl_ay`,
-/// `ball_altitude_yards`, `pass_flight`, `ball_holder`, `last_touch_team`,
+/// `ball_altitude_yards`, `pass_flight`, `ball_action`, `action_player`,
+/// `ball_holder`, `last_touch_team`,
 /// `score_home`, and `score_away`.
 pub fn soccer_tracking_dataset_from_csv(
     raw: &str,
@@ -16731,6 +16817,38 @@ pub fn soccer_tracking_dataset_from_csv(
             ],
         ) {
             builder.pass_flight = Some(parse_tracking_pass_flight(flight_raw, line_no)?);
+        }
+        if let Some(action_raw) = csv_optional(
+            row,
+            &header_map,
+            &[
+                "ball_action",
+                "ballaction",
+                "event_action",
+                "eventaction",
+                "ball_event",
+                "ballevent",
+                "action",
+            ],
+        ) {
+            builder.ball_action = parse_tracking_ball_action(action_raw, line_no)?;
+        }
+        if let Some(action_player) = csv_optional_usize(
+            row,
+            &header_map,
+            &[
+                "action_player",
+                "actionplayer",
+                "action_player_id",
+                "actionplayerid",
+                "event_player",
+                "eventplayer",
+                "event_player_id",
+                "eventplayerid",
+            ],
+            line_no,
+        )? {
+            builder.action_player = Some(action_player);
         }
         if let Some(holder) =
             csv_optional_usize(row, &header_map, &["ball_holder", "ballholder"], line_no)?
@@ -16870,6 +16988,8 @@ pub fn soccer_tracking_dataset_from_csv(
             ball_curl_acceleration: builder.ball_curl_acceleration,
             ball_altitude_yards: builder.ball_altitude_yards,
             pass_flight: builder.pass_flight,
+            ball_action: builder.ball_action,
+            action_player: builder.action_player,
             ball_holder: builder.ball_holder,
             last_touch_team: builder.last_touch_team,
             score_home: builder.score_home,
@@ -17535,6 +17655,8 @@ struct TrackingCsvFrameBuilder {
     ball_curl_acceleration: Option<Vec2>,
     ball_altitude_yards: Option<f64>,
     pass_flight: Option<PassFlight>,
+    ball_action: Option<String>,
+    action_player: Option<usize>,
     ball_holder: Option<usize>,
     last_touch_team: Option<Team>,
     score_home: Option<u32>,
@@ -17553,6 +17675,8 @@ impl TrackingCsvFrameBuilder {
             ball_curl_acceleration: None,
             ball_altitude_yards: None,
             pass_flight: None,
+            ball_action: None,
+            action_player: None,
             ball_holder: None,
             last_touch_team: None,
             score_home: None,
@@ -18236,6 +18360,47 @@ fn parse_tracking_pass_flight(raw: &str, line_no: usize) -> Result<PassFlight, S
     }
 }
 
+fn parse_tracking_ball_action(raw: &str, line_no: usize) -> Result<Option<String>, String> {
+    normalize_tracking_ball_action(raw)
+        .map_err(|err| format!("csv line {line_no} unknown ball action {raw}: {err}"))
+}
+
+fn normalize_tracking_ball_action(raw: &str) -> Result<Option<String>, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let compact = normalize_csv_header(trimmed);
+    let action = match compact.as_str() {
+        "none" | "na" | "null" | "noaction" => return Ok(None),
+        "groundpass" | "floorpass" | "shortpass" => "pass",
+        "aerial" | "aerialpass" | "chippedpass" | "loftedpass" | "cross" | "aerialcross" => {
+            "aerial-pass"
+        }
+        "shot" => "shoot",
+        "routeone" | "route1" | "longball" | "longpass" | "directball" => "route-one",
+        "clear" | "clearance" | "hoof" | "hoofedclearance" => "clearance",
+        "firsttimepass" => "first-time-pass",
+        "firsttimeshot" => "first-time-shot",
+        "firsttimeheader" | "header" => "first-time-header",
+        "control" | "trap" | "chestcontrol" => "control-touch",
+        "freekick" => "free-kick",
+        "goalkick" => "goal-kick",
+        "cornerkick" => "corner-kick",
+        "throwin" => "throw-in",
+        other => normalize_soccer_action_label(other),
+    };
+    match action {
+        "pass" | "aerial-pass" | "first-time-pass" | "clearance" | "route-one" | "shoot"
+        | "first-time-shot" | "first-time-header" | "control-touch" | "dribble" | "space"
+        | "defend" | "tackle" | "recover" | "hold" | "kickoff" | "throw-in" | "goal-kick"
+        | "corner-kick" | "free-kick" | "offside" | "goal" | "save" | "shot-blocked" => {
+            Ok(Some(action.to_string()))
+        }
+        _ => Err("expected a known soccer action label".to_string()),
+    }
+}
+
 fn tracking_frame_to_world_snapshot(
     config: &MatchConfig,
     frame: &SoccerTrackingFrame,
@@ -18317,7 +18482,16 @@ fn tracking_frame_to_world_snapshot(
             altitude_yards: frame.ball_altitude_yards.unwrap_or(0.0).max(0.0),
             holder: frame.ball_holder,
             last_touch_team,
-            last_decision: None,
+            last_decision: frame
+                .ball_action
+                .as_deref()
+                .and_then(|action| normalize_tracking_ball_action(action).ok().flatten())
+                .map(|action| BallDecisionTrace {
+                    tick: frame.tick,
+                    action,
+                    position: frame.ball_position,
+                    holder: frame.ball_holder,
+                }),
         },
         ball_history: vec![BallPositionSample {
             tick: frame.tick,
@@ -18392,6 +18566,11 @@ fn infer_tracking_action(
     let moved = player.position.distance(next_player.position);
 
     if before.ball.holder == Some(player.id) {
+        if let Some(action) =
+            tracking_explicit_holder_action(player.id, before_frame, after_frame, before, after)
+        {
+            return action;
+        }
         if tracking_team_scored(player.team, before, after) {
             return "shoot".to_string();
         }
@@ -18453,6 +18632,35 @@ fn infer_tracking_action(
         }
     } else {
         "hold".to_string()
+    }
+}
+
+fn tracking_explicit_holder_action(
+    player_id: usize,
+    before_frame: &SoccerTrackingFrame,
+    after_frame: &SoccerTrackingFrame,
+    before: &WorldSnapshot,
+    after: &WorldSnapshot,
+) -> Option<String> {
+    let (raw_action, action_player) = after_frame
+        .ball_action
+        .as_deref()
+        .map(|action| (action, after_frame.action_player))
+        .or_else(|| {
+            before_frame
+                .ball_action
+                .as_deref()
+                .map(|action| (action, before_frame.action_player))
+        })?;
+    if action_player.is_some_and(|id| id != player_id) {
+        return None;
+    }
+    let action = normalize_tracking_ball_action(raw_action).ok().flatten()?;
+    match action.as_str() {
+        "pass" => Some(tracking_pass_label(before_frame, after_frame, before, after).to_string()),
+        "aerial-pass" | "first-time-pass" | "clearance" | "route-one" | "shoot"
+        | "first-time-shot" | "first-time-header" | "control-touch" => Some(action),
+        _ => None,
     }
 }
 
@@ -20294,6 +20502,8 @@ fn nearest_ball_controller_for(
     ball_velocity: Vec2,
     players: &[PlayerAgent],
     pending_pass: Option<&PendingPass>,
+    loose_long_ball_team: Option<Team>,
+    ball_altitude_yards: f64,
     rng: &mut SeededRandom,
 ) -> Option<(usize, Team)> {
     let ball_speed = ball_velocity.len();
@@ -20341,6 +20551,19 @@ fn nearest_ball_controller_for(
                         PLAYER_CONTROL_RADIUS_YARDS * (interception_multiplier - 1.0) * 0.26;
                     aerial_score_bonus += (interception_multiplier - 1.0) * 0.34;
                     aerial_score_bonus += if landing_distance <= 8.5 { 0.62 } else { 0.28 };
+                }
+            }
+        } else if let Some(long_ball_team) = loose_long_ball_team {
+            if ball_altitude_yards > 0.02 || ball_speed >= 8.0 {
+                let aerial_duel = aerial_duel_skill_from_agent(p);
+                let altitude_bonus = (ball_altitude_yards / 0.22).clamp(0.0, 1.0);
+                control_radius += aerial_duel * (0.34 + altitude_bonus * 0.24);
+                aerial_score_bonus += aerial_duel * (0.58 + altitude_bonus * 0.18);
+                if p.team == long_ball_team {
+                    pass_reception_score_bonus += ability01(p.skills.first_touch) * 0.12;
+                } else {
+                    aerial_score_bonus += ability01(p.skills.defending) * 0.18
+                        + ability01(p.skills.aggression) * 0.12;
                 }
             }
         }
@@ -21462,6 +21685,66 @@ mod tests {
         assert!(urgent.press_intensity > neutral.press_intensity);
         assert!(urgent.carry_priority > neutral.carry_priority);
         assert!(urgent.risk_tolerance > neutral.risk_tolerance);
+    }
+
+    #[test]
+    fn team_brain_detects_route_one_numbers_up_from_projected_loose_ball() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        for player in &mut sim.players {
+            player.position = match player.team {
+                Team::Home => Vec2::new(4.0, 34.0),
+                Team::Away => Vec2::new(76.0, 112.0),
+            };
+            player.velocity = Vec2::zero();
+        }
+        sim.players[6].position = Vec2::new(42.0, 74.0);
+        sim.players[7].position = Vec2::new(34.0, 79.0);
+        sim.players[8].position = Vec2::new(48.0, 82.0);
+        sim.players[9].position = Vec2::new(36.0, 94.0);
+        sim.players[10].position = Vec2::new(50.0, 96.0);
+        sim.players[12].position = Vec2::new(42.0, 90.0);
+        sim.ball.holder = None;
+        sim.ball.position = Vec2::new(40.0, 42.0);
+        sim.ball.velocity = Vec2::new(0.0, 18.0);
+        sim.ball.altitude_yards = 0.05;
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.ball.last_decision = Some(BallDecisionTrace {
+            tick: sim.tick,
+            action: "route-one".to_string(),
+            position: sim.ball.position,
+            holder: None,
+        });
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let projected = snapshot
+            .projected_loose_ball_target()
+            .expect("route-one ball should project a recovery point");
+        let home_overload = attacking_overload_profile(&snapshot, Team::Home);
+        let away_overload = attacking_overload_profile(&snapshot, Team::Away);
+        let mut rng = mulberry32(911);
+        sim.central_brain.run_time_step(&snapshot, &mut rng);
+        let after = WorldSnapshot::from_match(&sim);
+        let runner_observation = after.observation_for(9);
+
+        assert_eq!(snapshot.controlled_possession_team(), None);
+        assert_eq!(snapshot.possession_team(), Some(Team::Home));
+        assert!(projected.y > sim.ball.position.y + 30.0);
+        assert_eq!(home_overload.attackers, 5);
+        assert_eq!(home_overload.defenders, 1);
+        assert_eq!(home_overload.advantage, 4);
+        assert!(home_overload.score > 0.70);
+        assert_eq!(away_overload.score, 0.0);
+        assert_eq!(
+            sim.central_brain.home_directive.attacking_numbers_advantage,
+            4
+        );
+        assert!(sim.central_brain.home_directive.attacking_overload_score > 0.70);
+        assert_eq!(
+            sim.central_brain.away_directive.attacking_overload_score,
+            0.0
+        );
+        assert_eq!(runner_observation.attacking_numbers_advantage, 4);
+        assert!(runner_observation.attacking_overload_score > 0.70);
     }
 
     #[test]
@@ -22749,6 +23032,18 @@ mod tests {
         assert_eq!(tracking.frames[0].tick, 0);
         assert_eq!(tracking.frames[2].tick, 2);
         assert_eq!(tracking.frames[2].players.len(), 22);
+        assert!(
+            tracking.frames[2].ball_action.is_none()
+                || tracking.frames[2]
+                    .ball_action
+                    .as_deref()
+                    .is_some_and(|action| {
+                        normalize_tracking_ball_action(action)
+                            .ok()
+                            .flatten()
+                            .is_some()
+                    })
+        );
         assert_eq!(
             tracking.frames[2].ball_position,
             response.frame.ball.position
@@ -24841,6 +25136,63 @@ mod tests {
     }
 
     #[test]
+    fn tracking_dataset_converts_clearance_to_learning_transition_and_policy() {
+        let mut tracking = sample_tracking_pass_dataset();
+        tracking.source = "unit-clearance".to_string();
+        tracking.frames[0].ball_position = Vec2::new(31.0, 18.0);
+        tracking.frames[0].ball_holder = Some(0);
+        tracking.frames[0].last_touch_team = Some(Team::Home);
+        tracking.frames[0].players[0].role = PlayerRole::Defender;
+        tracking.frames[0].players[0].position = Vec2::new(31.0, 18.0);
+        tracking.frames[0].players[0].home_position = Some(Vec2::new(24.0, 24.0));
+        tracking.frames[0].players[1].position = Vec2::new(45.0, 70.0);
+        tracking.frames[0].players[2].position = Vec2::new(31.8, 20.0);
+
+        tracking.frames[1].ball_position = Vec2::new(38.0, 58.0);
+        tracking.frames[1].ball_velocity = Some(Vec2::new(2.0, 20.0));
+        tracking.frames[1].ball_altitude_yards = Some(3.8);
+        tracking.frames[1].pass_flight = Some(PassFlight::Aerial);
+        tracking.frames[1].ball_action = Some("hoof".to_string());
+        tracking.frames[1].action_player = Some(0);
+        tracking.frames[1].ball_holder = None;
+        tracking.frames[1].last_touch_team = Some(Team::Home);
+        tracking.frames[1].players[0].role = PlayerRole::Defender;
+        tracking.frames[1].players[0].position = Vec2::new(31.3, 19.0);
+        tracking.frames[1].players[0].home_position = Some(Vec2::new(24.0, 24.0));
+        tracking.frames[1].players[1].position = Vec2::new(45.0, 72.0);
+        tracking.frames[1].players[2].position = Vec2::new(32.2, 22.0);
+
+        let json = serde_json::to_string(&tracking).expect("clearance tracking json");
+        let parsed = soccer_tracking_dataset_from_json(&json).expect("parse clearance tracking");
+        parsed.validate().expect("clearance tracking validates");
+        let dataset = parsed.to_learning_dataset().expect("tracking conversion");
+        let defender = dataset
+            .transitions
+            .iter()
+            .find(|transition| transition.player_id == 0)
+            .expect("defender transition");
+        assert_eq!(defender.action, "clearance");
+        assert!(
+            defender.reward > 0.8,
+            "clearance reward: {}",
+            defender.reward
+        );
+        let action_target = defender
+            .action_target
+            .as_ref()
+            .expect("clearance target trace");
+        assert_eq!(action_target.player_id, None);
+
+        let policy = train_soccer_q_policy_from_tracking(&parsed, SoccerQPolicyOptions::default())
+            .expect("tracking policy");
+        let state = SoccerQStateKey::from_transition(defender);
+        assert!(policy.q_value(&state, "clearance").is_some());
+        assert!(policy
+            .best_target_grid_for_state_action(&state, "clearance")
+            .is_some());
+    }
+
+    #[test]
     fn tracking_dataset_uses_imported_player_skills_in_learning_state() {
         let mut tracking = sample_tracking_pass_dataset();
         let mut skills = SkillProfile::default();
@@ -25090,6 +25442,54 @@ mod tests {
             .find(|transition| transition.player_id == 0)
             .expect("passer transition");
         assert_eq!(passer.action, "aerial-pass");
+    }
+
+    #[test]
+    fn tracking_dataset_csv_imports_route_one_action_metadata() {
+        let config = MatchConfig {
+            duration_seconds: 0.2,
+            seed: 107,
+            ..Default::default()
+        };
+        let raw = r#"tick,clock_seconds,player_id,name,team,role,shirt,x,y,ball_x,ball_y,ball_vx,ball_vy,ball_altitude_yards,pass_flight,ball_action,action_player,ball_holder,last_touch_team,score_home,score_away
+0,0.0,0,Home distributor,Home,Midfielder,8,34.0,38.0,34.0,38.0,0.0,0.0,0.0,,,0,0,Home,0,0
+0,0.0,1,Home runner,Home,Forward,9,42.0,66.0,34.0,38.0,0.0,0.0,0.0,,,0,0,Home,0,0
+0,0.0,2,Away defender,Away,Defender,4,50.0,74.0,34.0,38.0,0.0,0.0,0.0,,,0,0,Home,0,0
+1,0.1,0,Home distributor,Home,Midfielder,8,34.2,39.0,42.0,86.0,1.0,22.0,4.1,aerial,long-ball,0,,Home,0,0
+1,0.1,1,Home runner,Home,Forward,9,42.0,68.0,42.0,86.0,1.0,22.0,4.1,aerial,long-ball,0,,Home,0,0
+1,0.1,2,Away defender,Away,Defender,4,50.0,75.0,42.0,86.0,1.0,22.0,4.1,aerial,long-ball,0,,Home,0,0
+"#;
+
+        let tracking = soccer_tracking_dataset_from_csv(raw, config, "unit-csv-route-one")
+            .expect("csv route one");
+        assert_eq!(tracking.frames[1].pass_flight, Some(PassFlight::Aerial));
+        assert_eq!(tracking.frames[1].ball_action.as_deref(), Some("route-one"));
+        assert_eq!(tracking.frames[1].action_player, Some(0));
+        assert_eq!(tracking.frames[1].ball_holder, None);
+
+        let dataset = tracking.to_learning_dataset().expect("learning dataset");
+        let distributor = dataset
+            .transitions
+            .iter()
+            .find(|transition| transition.player_id == 0)
+            .expect("distributor transition");
+        assert_eq!(distributor.action, "route-one");
+        assert!(
+            distributor.reward > 1.0,
+            "route-one tracking reward: {}",
+            distributor.reward
+        );
+        let action_target = distributor
+            .action_target
+            .as_ref()
+            .expect("route-one target trace");
+        assert_eq!(action_target.player_id, None);
+
+        let policy =
+            train_soccer_q_policy_from_tracking(&tracking, SoccerQPolicyOptions::default())
+                .expect("policy from route-one csv");
+        let state = SoccerQStateKey::from_transition(distributor);
+        assert!(policy.q_value(&state, "route-one").is_some());
     }
 
     #[test]
@@ -25421,6 +25821,82 @@ mod tests {
     }
 
     #[test]
+    fn direct_goal_kick_pass_is_exempt_from_offside() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        sim.apply_restart(BallRestart {
+            kind: BallRestartKind::GoalKick,
+            awarded_team: Team::Home,
+            position: Vec2::new(40.0, 10.0),
+        });
+        let passer = sim.ball.holder.expect("goal kick taker");
+        let runner = 9;
+        sim.players[runner].position = Vec2::new(40.0, 108.0);
+        for away in 11..22 {
+            sim.players[away].position = Vec2::new(8.0 + away as f64, 82.0);
+        }
+        sim.players[11].position = Vec2::new(40.0, 118.0);
+        sim.players[12].position = Vec2::new(42.0, 96.0);
+        sim.ball.position = sim.players[passer].position;
+        sim.ball.holder = Some(passer);
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        assert_eq!(
+            snapshot.ball.last_decision.as_ref().map(|d| d.action.as_str()),
+            Some("goal-kick")
+        );
+        assert!(
+            snapshot.pending_offside_for_pass(passer, runner).is_none(),
+            "direct goal kick should not be offside even when runner is beyond the second-last defender"
+        );
+
+        sim.apply_player_intent(PlayerIntent {
+            player_id: passer,
+            action: SoccerAction::Pass {
+                target_player: Some(runner),
+                power: 1.0,
+                flight: PassFlight::Aerial,
+            },
+            sprint: false,
+        });
+
+        assert!(sim
+            .pending_pass
+            .as_ref()
+            .expect("pending goal-kick pass")
+            .offside
+            .is_none());
+    }
+
+    #[test]
+    fn direct_free_kick_pass_can_still_be_offside() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        sim.apply_restart(BallRestart {
+            kind: BallRestartKind::FreeKick,
+            awarded_team: Team::Home,
+            position: Vec2::new(40.0, 70.0),
+        });
+        let passer = sim.ball.holder.expect("free kick taker");
+        let runner = 9;
+        sim.players[runner].position = Vec2::new(40.0, 108.0);
+        for away in 11..22 {
+            sim.players[away].position = Vec2::new(8.0 + away as f64, 82.0);
+        }
+        sim.players[11].position = Vec2::new(40.0, 118.0);
+        sim.players[12].position = Vec2::new(42.0, 96.0);
+        sim.ball.position = sim.players[passer].position;
+        sim.ball.holder = Some(passer);
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let offside = snapshot
+            .pending_offside_for_pass(passer, runner)
+            .expect("direct free kick should still apply offside");
+        assert_eq!(offside.target, runner);
+        assert_eq!(offside.second_last_defender_y, 96.0);
+    }
+
+    #[test]
     fn assistant_refs_track_effective_offside_line() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
         sim.players[5].position = Vec2::new(40.0, 70.0);
@@ -25698,6 +26174,39 @@ mod tests {
     }
 
     #[test]
+    fn live_tracking_export_labels_route_one_ball_action_and_player() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let holder = 6;
+        sim.players[holder].position = Vec2::new(34.0, 38.0);
+        sim.ball.holder = Some(holder);
+        sim.ball.position = sim.players[holder].position;
+        sim.ball.last_touch_team = Some(Team::Home);
+        let before = WorldSnapshot::from_match(&sim);
+        sim.players[holder].last_decision = Some(test_decision_trace(&before, holder, "route-one"));
+        let target = route_one_target_for_player(
+            Team::Home,
+            sim.players[holder].position,
+            sim.config.field_width_yards,
+            sim.config.field_length_yards,
+        );
+
+        sim.apply_player_intent(PlayerIntent {
+            player_id: holder,
+            action: SoccerAction::RouteOne {
+                target,
+                power: 0.88,
+            },
+            sprint: false,
+        });
+
+        let frame = tracking_frame_from_match(&sim);
+        assert_eq!(frame.ball_action.as_deref(), Some("route-one"));
+        assert_eq!(frame.action_player, Some(holder));
+        assert_eq!(frame.ball_holder, None);
+        assert_eq!(frame.pass_flight, None);
+    }
+
+    #[test]
     fn clearance_reward_values_relief_from_pressure_without_pass_credit() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
         let defender = 2;
@@ -25938,6 +26447,90 @@ mod tests {
                 .as_ref()
                 .map(|decision| decision.action.as_str()),
             Some("recover")
+        );
+    }
+
+    #[test]
+    fn route_one_context_persists_across_ball_agent_ticks_until_recovery() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        for player in &mut sim.players {
+            player.position = Vec2::new(3.0, 3.0);
+            player.velocity = Vec2::zero();
+        }
+        sim.ball.holder = None;
+        sim.ball.position = Vec2::new(40.0, 42.0);
+        sim.ball.velocity = Vec2::new(0.0, 18.0);
+        sim.ball.altitude_yards = 0.05;
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.ball.last_decision = Some(BallDecisionTrace {
+            tick: sim.tick,
+            action: "route-one".to_string(),
+            position: sim.ball.position,
+            holder: None,
+        });
+
+        sim.integrate_ball();
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let projected = snapshot
+            .projected_loose_ball_target()
+            .expect("fast route-one ball should keep its projected recovery point");
+
+        assert_eq!(
+            sim.ball.last_decision.as_ref().map(|d| d.action.as_str()),
+            Some("route-one")
+        );
+        assert!(sim.ball.holder.is_none());
+        assert!(sim.ball.altitude_yards > 0.02);
+        assert!(projected.y > sim.ball.position.y + 24.0);
+    }
+
+    #[test]
+    fn route_one_second_ball_control_uses_aerial_duel_skill() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let strong_receiver = 9;
+        let weak_marker = 14;
+        let ball_position = Vec2::new(40.0, 82.0);
+        for player in &mut sim.players {
+            player.position = Vec2::new(3.0, 3.0);
+            player.velocity = Vec2::zero();
+        }
+        sim.players[strong_receiver].position = Vec2::new(39.2, 82.0);
+        sim.players[strong_receiver].skills.height = 10.0;
+        sim.players[strong_receiver].skills.strength = 10.0;
+        sim.players[strong_receiver].skills.aggression = 9.0;
+        sim.players[strong_receiver].skills.first_touch = 9.5;
+        sim.players[weak_marker].position = Vec2::new(40.8, 82.0);
+        sim.players[weak_marker].skills.height = 1.0;
+        sim.players[weak_marker].skills.strength = 1.0;
+        sim.players[weak_marker].skills.aggression = 1.0;
+        sim.players[weak_marker].skills.first_touch = 1.0;
+        sim.players[weak_marker].skills.defending = 1.0;
+
+        let mut strong_wins = 0usize;
+        let mut total_contests = 0usize;
+        for seed in 0..300 {
+            let mut rng = mulberry32(80_000 + seed);
+            if let Some((winner, _team)) = nearest_ball_controller_for(
+                12,
+                ball_position,
+                Vec2::new(0.0, 14.0),
+                &sim.players,
+                None,
+                Some(Team::Home),
+                0.14,
+                &mut rng,
+            ) {
+                total_contests += 1;
+                if winner == strong_receiver {
+                    strong_wins += 1;
+                }
+            }
+        }
+
+        assert_eq!(total_contests, 300);
+        assert!(
+            strong_wins > 250,
+            "strong aerial player should win most route-one second balls: {strong_wins}/300"
         );
     }
 
@@ -26989,6 +27582,15 @@ mod tests {
         })));
         let input_queue = session.lock().unwrap().input_queue();
 
+        let html = handle_live_soccer_request(
+            "GET / HTTP/1.1\r\nHost: local\r\n\r\n",
+            &session,
+            &input_queue,
+        );
+        assert_eq!(html.status, 200);
+        assert!(html.body.contains("id=\"ballAction\""));
+        assert!(html.body.contains("semanticBallActionLabel"));
+
         let state = handle_live_soccer_request(
             "GET /api/state HTTP/1.1\r\nHost: local\r\n\r\n",
             &session,
@@ -27164,6 +27766,8 @@ mod tests {
             serde_json::from_str(&tracking.body).expect("tracking dataset json");
         assert_eq!(tracking_value["source"], "live-session");
         assert_eq!(tracking_value["frames"].as_array().unwrap().len(), 3);
+        assert!(tracking_value["frames"][0].get("ballAction").is_some());
+        assert!(tracking_value["frames"][0].get("actionPlayer").is_some());
         assert_eq!(
             tracking_value["frames"][2]["players"]
                 .as_array()
@@ -28434,6 +29038,8 @@ mod tests {
                     ball_curl_acceleration: None,
                     ball_altitude_yards: Some(0.0),
                     pass_flight: None,
+                    ball_action: None,
+                    action_player: None,
                     ball_holder: Some(0),
                     last_touch_team: Some(Team::Home),
                     score_home: Some(0),
@@ -28489,6 +29095,8 @@ mod tests {
                     ball_curl_acceleration: None,
                     ball_altitude_yards: Some(0.0),
                     pass_flight: Some(PassFlight::Floor),
+                    ball_action: Some("pass".to_string()),
+                    action_player: Some(0),
                     ball_holder: Some(1),
                     last_touch_team: Some(Team::Home),
                     score_home: Some(0),

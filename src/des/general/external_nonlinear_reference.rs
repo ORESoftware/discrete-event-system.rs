@@ -1,11 +1,13 @@
 //! Rust-facing bridge for external/reference nonlinear optimizers.
 //!
-//! The checked-in Python bridge (`scripts/nonlinear_reference.py`) prefers
-//! installed open-source optimizers such as SciPy and can use NLopt when
-//! available, then falls back to deterministic small-model references. This
-//! module owns the typed library boundary for smooth unconstrained problems,
-//! nonlinear least squares, and derivative-free benchmark minimization.
+//! The default path is a Rust reference for the small smooth, least-squares,
+//! global-benchmark, and Pareto-front models used by the validation suite. The
+//! checked-in Python bridge (`scripts/nonlinear_reference.py`) remains available
+//! for explicit SciPy/NLopt requests. This module owns the typed library
+//! boundary for smooth unconstrained problems, nonlinear least squares, and
+//! derivative-free benchmark minimization.
 
+use std::f64::consts::PI;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -16,10 +18,13 @@ use serde_json::{json, Value};
 
 use crate::des::general::advanced_optimization_models::{ParetoPortfolioPoint, PortfolioAsset};
 use crate::des::general::nonlinear_optimization_models::CurveFitPoint;
+use crate::des::general::prng::mulberry32;
+use crate::des::shared::capabilities::RandomSource;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExternalNonlinearReferenceSolver {
     Auto,
+    RustFallback,
     Scipy,
     Nlopt,
     Fallback,
@@ -29,6 +34,7 @@ impl ExternalNonlinearReferenceSolver {
     pub fn as_arg(self) -> &'static str {
         match self {
             ExternalNonlinearReferenceSolver::Auto => "auto",
+            ExternalNonlinearReferenceSolver::RustFallback => "rust-fallback",
             ExternalNonlinearReferenceSolver::Scipy => "scipy",
             ExternalNonlinearReferenceSolver::Nlopt => "nlopt",
             ExternalNonlinearReferenceSolver::Fallback => "fallback",
@@ -156,6 +162,446 @@ fn status_from_str(status: &str) -> ExternalNonlinearReferenceStatus {
         "unsupported" => ExternalNonlinearReferenceStatus::Unsupported,
         "unavailable" => ExternalNonlinearReferenceStatus::Unavailable,
         _ => ExternalNonlinearReferenceStatus::NumericalError,
+    }
+}
+
+fn should_use_rust_reference(opts: &ExternalNonlinearReferenceOptions) -> bool {
+    matches!(
+        opts.solver,
+        ExternalNonlinearReferenceSolver::Auto
+            | ExternalNonlinearReferenceSolver::RustFallback
+            | ExternalNonlinearReferenceSolver::Fallback
+    )
+}
+
+fn reference_max_iterations(opts: &ExternalNonlinearReferenceOptions, default: usize) -> usize {
+    opts.max_iterations.unwrap_or(default).max(1)
+}
+
+fn norm2(values: &[f64]) -> f64 {
+    values.iter().map(|value| value * value).sum::<f64>().sqrt()
+}
+
+fn rust_nonlinear_solution(
+    status: ExternalNonlinearReferenceStatus,
+    solver: impl Into<String>,
+    x: Vec<f64>,
+    objective: Option<f64>,
+    gradient_norm: Option<f64>,
+    residual_norm: Option<f64>,
+    iterations: Option<u64>,
+    evaluations: Option<u64>,
+    message: impl Into<String>,
+    started: Instant,
+) -> ExternalNonlinearReferenceSolution {
+    ExternalNonlinearReferenceSolution {
+        status,
+        solver: solver.into(),
+        x,
+        objective,
+        gradient_norm,
+        residual_norm,
+        iterations,
+        evaluations,
+        message: message.into(),
+        elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+    }
+}
+
+fn rust_rosenbrock(x: &[f64]) -> f64 {
+    x.windows(2)
+        .map(|pair| 100.0 * (pair[1] - pair[0] * pair[0]).powi(2) + (1.0 - pair[0]).powi(2))
+        .sum()
+}
+
+fn rust_rosenbrock_grad(x: &[f64]) -> Vec<f64> {
+    let mut gradient = vec![0.0; x.len()];
+    for i in 0..x.len().saturating_sub(1) {
+        gradient[i] += -400.0 * x[i] * (x[i + 1] - x[i] * x[i]) - 2.0 * (1.0 - x[i]);
+        gradient[i + 1] += 200.0 * (x[i + 1] - x[i] * x[i]);
+    }
+    gradient
+}
+
+fn solve_rosenbrock_with_rust_reference(x0: &[f64]) -> ExternalNonlinearReferenceSolution {
+    let started = Instant::now();
+    if x0.is_empty() || !x0.iter().all(|value| value.is_finite()) {
+        return rust_nonlinear_solution(
+            ExternalNonlinearReferenceStatus::NumericalError,
+            "rust:known-rosenbrock-minimum",
+            Vec::new(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            "x0 must be non-empty and finite",
+            started,
+        );
+    }
+    let x = vec![1.0; x0.len()];
+    let objective = rust_rosenbrock(&x);
+    let gradient = rust_rosenbrock_grad(&x);
+    rust_nonlinear_solution(
+        ExternalNonlinearReferenceStatus::Optimal,
+        "rust:known-rosenbrock-minimum",
+        x,
+        Some(objective),
+        Some(norm2(&gradient)),
+        None,
+        Some(0),
+        Some(1),
+        "analytic Rosenbrock minimizer",
+        started,
+    )
+}
+
+fn rust_exp_residuals(params: &[f64; 2], points: &[CurveFitPoint]) -> Vec<f64> {
+    points
+        .iter()
+        .map(|point| params[0] * (params[1] * point.x).exp() - point.y)
+        .collect()
+}
+
+fn rust_exp_jacobian_row(params: &[f64; 2], x: f64) -> [f64; 2] {
+    let exponential = (params[1] * x).exp();
+    [exponential, params[0] * x * exponential]
+}
+
+fn rust_exp_fit_stats(params: &[f64; 2], points: &[CurveFitPoint]) -> (f64, f64, f64) {
+    let residuals = rust_exp_residuals(params, points);
+    let mut gradient = [0.0, 0.0];
+    for (point, residual) in points.iter().zip(&residuals) {
+        let row = rust_exp_jacobian_row(params, point.x);
+        gradient[0] += 2.0 * row[0] * residual;
+        gradient[1] += 2.0 * row[1] * residual;
+    }
+    let sse = residuals.iter().map(|value| value * value).sum::<f64>();
+    (sse, norm2(&residuals), norm2(&gradient))
+}
+
+fn solve_rust_2x2(matrix: [[f64; 2]; 2], rhs: [f64; 2]) -> Option<[f64; 2]> {
+    let determinant = matrix[0][0] * matrix[1][1] - matrix[0][1] * matrix[1][0];
+    if determinant.abs() <= 1e-14 {
+        return None;
+    }
+    Some([
+        (rhs[0] * matrix[1][1] - matrix[0][1] * rhs[1]) / determinant,
+        (matrix[0][0] * rhs[1] - rhs[0] * matrix[1][0]) / determinant,
+    ])
+}
+
+fn solve_exponential_fit_with_rust_reference(
+    points: &[CurveFitPoint],
+    initial: &[f64],
+    opts: &ExternalNonlinearReferenceOptions,
+) -> ExternalNonlinearReferenceSolution {
+    let started = Instant::now();
+    if points.is_empty()
+        || !points
+            .iter()
+            .all(|point| point.x.is_finite() && point.y.is_finite())
+    {
+        return rust_nonlinear_solution(
+            ExternalNonlinearReferenceStatus::NumericalError,
+            "rust:gauss-newton",
+            Vec::new(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            "curve-fit points must be non-empty and finite",
+            started,
+        );
+    }
+    let mut params = [
+        initial.first().copied().unwrap_or(1.0),
+        initial.get(1).copied().unwrap_or(-0.2),
+    ];
+    if !params.iter().all(|value| value.is_finite()) {
+        params = [1.0, -0.2];
+    }
+    let max_iterations = reference_max_iterations(opts, 250);
+    let mut iterations = 0_u64;
+    let mut evaluations = 0_u64;
+    for iteration in 0..max_iterations {
+        iterations = iteration as u64;
+        let residuals = rust_exp_residuals(&params, points);
+        evaluations += 1;
+        let mut normal = [[1e-10, 0.0], [0.0, 1e-10]];
+        let mut rhs = [0.0, 0.0];
+        for (point, residual) in points.iter().zip(&residuals) {
+            let row = rust_exp_jacobian_row(&params, point.x);
+            rhs[0] -= row[0] * residual;
+            rhs[1] -= row[1] * residual;
+            normal[0][0] += row[0] * row[0];
+            normal[0][1] += row[0] * row[1];
+            normal[1][0] += row[1] * row[0];
+            normal[1][1] += row[1] * row[1];
+        }
+        let Some(step) = solve_rust_2x2(normal, rhs) else {
+            break;
+        };
+        params[0] += step[0];
+        params[1] += step[1];
+        if norm2(&step) <= 1e-10 {
+            break;
+        }
+    }
+    let (sse, residual_norm, gradient_norm) = rust_exp_fit_stats(&params, points);
+    let status = if gradient_norm <= 1e-6 {
+        ExternalNonlinearReferenceStatus::Optimal
+    } else {
+        ExternalNonlinearReferenceStatus::Feasible
+    };
+    rust_nonlinear_solution(
+        status,
+        "rust:gauss-newton",
+        params.to_vec(),
+        Some(sse),
+        Some(gradient_norm),
+        Some(residual_norm),
+        Some(iterations),
+        Some(evaluations),
+        "dependency-free damped normal-equation reference",
+        started,
+    )
+}
+
+fn rust_benchmark_value(objective: ExternalNonlinearBenchmarkObjective, x: &[f64]) -> f64 {
+    match objective {
+        ExternalNonlinearBenchmarkObjective::Sphere => x.iter().map(|value| value * value).sum(),
+        ExternalNonlinearBenchmarkObjective::Rastrigin => {
+            10.0 * x.len() as f64
+                + x.iter()
+                    .map(|value| value * value - 10.0 * (2.0 * PI * value).cos())
+                    .sum::<f64>()
+        }
+        ExternalNonlinearBenchmarkObjective::Rosenbrock => rust_rosenbrock(x),
+    }
+}
+
+fn rust_known_global_solution(
+    objective: ExternalNonlinearBenchmarkObjective,
+    dimension: usize,
+    lower: f64,
+    upper: f64,
+) -> Option<Vec<f64>> {
+    match objective {
+        ExternalNonlinearBenchmarkObjective::Sphere
+        | ExternalNonlinearBenchmarkObjective::Rastrigin
+            if lower <= 0.0 && 0.0 <= upper =>
+        {
+            Some(vec![0.0; dimension])
+        }
+        ExternalNonlinearBenchmarkObjective::Rosenbrock if lower <= 1.0 && 1.0 <= upper => {
+            Some(vec![1.0; dimension])
+        }
+        _ => None,
+    }
+}
+
+fn solve_global_benchmark_with_rust_reference(
+    objective: ExternalNonlinearBenchmarkObjective,
+    dimension: usize,
+    lower: f64,
+    upper: f64,
+) -> ExternalNonlinearReferenceSolution {
+    let started = Instant::now();
+    if dimension == 0 || !lower.is_finite() || !upper.is_finite() || lower > upper {
+        return rust_nonlinear_solution(
+            ExternalNonlinearReferenceStatus::NumericalError,
+            "rust:analytic-global-benchmark",
+            Vec::new(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            "dimension must be positive and bounds must be finite with lower <= upper",
+            started,
+        );
+    }
+    let (status, solver, x, message) =
+        if let Some(x) = rust_known_global_solution(objective, dimension, lower, upper) {
+            (
+                ExternalNonlinearReferenceStatus::Optimal,
+                format!("rust:known-{}-minimum", objective.as_arg()),
+                x,
+                "analytic benchmark minimizer",
+            )
+        } else {
+            (
+                ExternalNonlinearReferenceStatus::Feasible,
+                "rust:bounded-center".to_string(),
+                vec![(lower + upper) * 0.5; dimension],
+                "no known analytic optimum inside bounds",
+            )
+        };
+    let objective_value = rust_benchmark_value(objective, &x);
+    rust_nonlinear_solution(
+        status,
+        solver,
+        x,
+        Some(objective_value),
+        None,
+        None,
+        Some(0),
+        Some(1),
+        message,
+        started,
+    )
+}
+
+fn default_portfolio_assets() -> Vec<PortfolioAsset> {
+    vec![
+        PortfolioAsset {
+            name: "cash".to_string(),
+            expected_return: 0.02,
+            risk: 0.01,
+        },
+        PortfolioAsset {
+            name: "bonds".to_string(),
+            expected_return: 0.045,
+            risk: 0.06,
+        },
+        PortfolioAsset {
+            name: "equity".to_string(),
+            expected_return: 0.09,
+            risk: 0.18,
+        },
+        PortfolioAsset {
+            name: "growth".to_string(),
+            expected_return: 0.13,
+            risk: 0.30,
+        },
+    ]
+}
+
+fn rust_random_simplex(n: usize, rng: &mut dyn RandomSource) -> Vec<f64> {
+    let draws = (0..n)
+        .map(|_| -(1e-12_f64.max(rng.next_float())).ln())
+        .collect::<Vec<_>>();
+    let total = draws.iter().sum::<f64>();
+    draws.into_iter().map(|draw| draw / total).collect()
+}
+
+fn rust_portfolio_point(assets: &[PortfolioAsset], weights: &[f64]) -> ParetoPortfolioPoint {
+    let mut expected_return = 0.0;
+    let mut variance = 0.0;
+    for (asset, weight) in assets.iter().zip(weights) {
+        expected_return += weight * asset.expected_return;
+        variance += (weight * asset.risk).powi(2);
+    }
+    ParetoPortfolioPoint {
+        weights: weights.to_vec(),
+        expected_return,
+        risk: variance.sqrt(),
+    }
+}
+
+fn rust_portfolio_dominates(a: &ParetoPortfolioPoint, b: &ParetoPortfolioPoint) -> bool {
+    let a_objectives = [a.risk, -a.expected_return];
+    let b_objectives = [b.risk, -b.expected_return];
+    let mut strictly_better = false;
+    for (a_value, b_value) in a_objectives.iter().zip(b_objectives) {
+        if *a_value > b_value + 1e-12 {
+            return false;
+        }
+        if *a_value < b_value - 1e-12 {
+            strictly_better = true;
+        }
+    }
+    strictly_better
+}
+
+fn rust_portfolio_hypervolume(front: &[ParetoPortfolioPoint]) -> f64 {
+    if front.is_empty() {
+        return 0.0;
+    }
+    let max_risk = front
+        .iter()
+        .map(|point| point.risk)
+        .fold(f64::NEG_INFINITY, f64::max)
+        * 1.1;
+    let min_return = front
+        .iter()
+        .map(|point| point.expected_return)
+        .fold(f64::INFINITY, f64::min)
+        * 0.9;
+    let mut hypervolume = 0.0;
+    let mut prev_risk = 0.0;
+    for point in front {
+        let width = (point.risk - prev_risk).max(0.0);
+        let height = (point.expected_return - min_return).max(0.0);
+        hypervolume += width * height;
+        prev_risk = point.risk;
+    }
+    let tail_width = (max_risk - prev_risk).max(0.0);
+    let last = &front[front.len() - 1];
+    hypervolume + tail_width * (last.expected_return - min_return).max(0.0)
+}
+
+fn solve_pareto_portfolio_with_rust_reference(
+    assets: &[PortfolioAsset],
+    samples: usize,
+    seed: u32,
+) -> ExternalParetoPortfolioReferenceSolution {
+    let started = Instant::now();
+    let assets = if assets.is_empty() {
+        default_portfolio_assets()
+    } else {
+        assets.to_vec()
+    };
+    if samples == 0
+        || assets.iter().any(|asset| {
+            !asset.expected_return.is_finite() || !asset.risk.is_finite() || asset.risk < 0.0
+        })
+    {
+        return pareto_numerical_error(
+            "samples must be positive and assets must have finite return/nonnegative risk",
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    let mut rng = mulberry32(seed);
+    let mut candidates = Vec::with_capacity(samples + assets.len());
+    for _ in 0..samples {
+        let weights = rust_random_simplex(assets.len(), &mut rng);
+        candidates.push(rust_portfolio_point(&assets, &weights));
+    }
+    for index in 0..assets.len() {
+        let mut weights = vec![0.0; assets.len()];
+        weights[index] = 1.0;
+        candidates.push(rust_portfolio_point(&assets, &weights));
+    }
+    let mut front = Vec::new();
+    for (index, candidate) in candidates.iter().enumerate() {
+        let dominated = candidates.iter().enumerate().any(|(other_index, other)| {
+            other_index != index && rust_portfolio_dominates(other, candidate)
+        });
+        if !dominated {
+            front.push(candidate.clone());
+        }
+    }
+    front.sort_by(|a, b| {
+        a.risk
+            .partial_cmp(&b.risk)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(
+                a.expected_return
+                    .partial_cmp(&b.expected_return)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
+    });
+    ExternalParetoPortfolioReferenceSolution {
+        status: ExternalNonlinearReferenceStatus::Optimal,
+        solver: "rust:pareto-portfolio-enumeration".to_string(),
+        hypervolume: Some(rust_portfolio_hypervolume(&front)),
+        pareto_front: front,
+        candidate_count: Some(candidates.len() as u64),
+        message: "dependency-free Pareto archive enumeration".to_string(),
+        elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
     }
 }
 
@@ -377,6 +823,9 @@ pub fn solve_rosenbrock_with_external_reference(
     x0: &[f64],
     opts: &ExternalNonlinearReferenceOptions,
 ) -> ExternalNonlinearReferenceSolution {
+    if should_use_rust_reference(opts) {
+        return solve_rosenbrock_with_rust_reference(x0);
+    }
     run_nonlinear_reference_json(
         json!({
             "kind": "rosenbrock",
@@ -392,6 +841,9 @@ pub fn solve_pareto_portfolio_with_external_reference(
     seed: u32,
     opts: &ExternalNonlinearReferenceOptions,
 ) -> ExternalParetoPortfolioReferenceSolution {
+    if should_use_rust_reference(opts) {
+        return solve_pareto_portfolio_with_rust_reference(assets, samples, seed);
+    }
     run_pareto_portfolio_reference_json(
         json!({
             "kind": "pareto_portfolio",
@@ -412,6 +864,9 @@ pub fn solve_exponential_fit_with_external_reference(
     initial: &[f64],
     opts: &ExternalNonlinearReferenceOptions,
 ) -> ExternalNonlinearReferenceSolution {
+    if should_use_rust_reference(opts) {
+        return solve_exponential_fit_with_rust_reference(points, initial, opts);
+    }
     run_nonlinear_reference_json(
         json!({
             "kind": "least_squares",
@@ -432,6 +887,9 @@ pub fn solve_global_benchmark_with_external_reference(
     upper: f64,
     opts: &ExternalNonlinearReferenceOptions,
 ) -> ExternalNonlinearReferenceSolution {
+    if should_use_rust_reference(opts) {
+        return solve_global_benchmark_with_rust_reference(objective, dimension, lower, upper);
+    }
     run_nonlinear_reference_json(
         json!({
             "kind": "global_benchmark",

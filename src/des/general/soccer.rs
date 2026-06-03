@@ -42,6 +42,9 @@ pub const DEFAULT_CONTROLLER_DEBOUNCE_MS: u64 = 4;
 const PLAYER_CONTROL_RADIUS_YARDS: f64 = 1.55;
 const PLAYER_BODY_RADIUS_YARDS: f64 = 0.78;
 const PLAYER_COLLISION_DAMPING: f64 = 0.34;
+const PLAYER_AVOIDANCE_LOOKAHEAD_SECONDS: f64 = 0.72;
+const PLAYER_AVOIDANCE_LANE_RADIUS_YARDS: f64 = PLAYER_BODY_RADIUS_YARDS * 3.0;
+const PLAYER_AVOIDANCE_HEAD_ON_DOT: f64 = -0.35;
 const KICKOFF_CENTER_CIRCLE_RADIUS_YARDS: f64 = 10.0;
 const SHOT_SAVE_DEPTH_YARDS: f64 = 1.6;
 const BALL_AGENT_ID: usize = 25;
@@ -96,6 +99,15 @@ const DEFENSIVE_DISPOSSESSION_REWARD_POINTS: f64 = 10.0;
 const FAILED_DISPOSSESSION_PENALTY_POINTS: f64 = 4.0;
 const BEATEN_BY_DRIBBLE_PENALTY_POINTS: f64 = 3.0;
 const SIDE_STEP_BEAT_REWARD_POINTS: f64 = 6.0;
+const DRIBBLE_LEFT_CUT_CHANCE: f64 = 0.45;
+const DRIBBLE_RIGHT_CUT_CHANCE: f64 = 0.45;
+const DRIBBLE_CUT_LATERAL_YARDS: f64 = 1.0;
+const DRIBBLE_CUT_FORWARD_YARDS: f64 = 0.35;
+const DRIBBLE_NUTMEG_FORWARD_YARDS: f64 = 1.65;
+const HOLD_UP_DISPOSSESSION_PROBABILITY: f64 = 0.20;
+const COMMIT_DISPOSSESSION_PROBABILITY: f64 = 0.50;
+const COMMIT_DRIBBLE_BEAT_MULTIPLIER: f64 = 1.50;
+const DRIBBLE_HOLD_UP_CONTEST_RADIUS_YARDS: f64 = 2.6;
 const GOAL_CHAIN_REWARD_PATTERN: [f64; 5] = [30.0, 30.0, 20.0, 15.0, 5.0];
 const SHOT_ON_TARGET_REWARD_PATTERN: [f64; 5] = [15.0, 15.0, 10.0, 7.5, 2.5];
 const MATCH_RESULT_WIN_PLAYER_REWARD: f64 = 8.0;
@@ -143,6 +155,10 @@ const SOCCER_MOMENT_FEATURES_PER_ENTITY: usize = 6;
 const SOCCER_MOMENT_FEATURES_PER_FRAME: usize =
     (SOCCER_MOMENT_ROLE_ALIGNED_PLAYERS + 1) * SOCCER_MOMENT_FEATURES_PER_ENTITY;
 const SOCCER_SET_PLAY_WINDOW_SECONDS: f64 = 15.0;
+const SOCCER_SET_PLAY_MAX_RELEASE_DELAY_SECONDS: f64 = 3.0;
+const SOCCER_SET_PLAY_MAX_TRIAL_SECONDS: f64 = 60.0;
+const SOCCER_SET_PLAY_MIN_TRIAL_DT_SECONDS: f64 = 0.02;
+const SOCCER_SET_PLAY_MAX_TRIAL_TICKS: u64 = 3_000;
 const DEFAULT_ADVERSARIAL_MOMENT_MEMORY_LIMIT: usize = 64;
 const MAX_ADVERSARIAL_MOMENT_MEMORY_LIMIT: usize = 512;
 const ADVERSARIAL_EMBEDDING_SEARCH_LIMIT: usize = 3;
@@ -363,6 +379,49 @@ impl Vec2 {
             y: self.y.max(0.0).min(field_length),
         }
     }
+}
+
+fn sane_pitch_dimensions(field_width: f64, field_length: f64) -> (f64, f64) {
+    let width = if field_width.is_finite() && field_width > 0.0 {
+        field_width
+    } else {
+        DEFAULT_FIELD_WIDTH_YARDS
+    };
+    let length = if field_length.is_finite() && field_length > 0.0 {
+        field_length
+    } else {
+        DEFAULT_FIELD_LENGTH_YARDS
+    };
+    (width, length)
+}
+
+fn finite_pitch_point(point: Vec2, field_width: f64, field_length: f64, fallback: Vec2) -> Vec2 {
+    let (width, length) = sane_pitch_dimensions(field_width, field_length);
+    let fallback = Vec2::new(
+        if fallback.x.is_finite() {
+            fallback.x.clamp(0.0, width)
+        } else {
+            width * 0.5
+        },
+        if fallback.y.is_finite() {
+            fallback.y.clamp(0.0, length)
+        } else {
+            length * 0.5
+        },
+    );
+    Vec2::new(
+        if point.x.is_finite() {
+            point.x
+        } else {
+            fallback.x
+        },
+        if point.y.is_finite() {
+            point.y
+        } else {
+            fallback.y
+        },
+    )
+    .clamp_to_pitch(width, length)
 }
 
 impl std::ops::Add for Vec2 {
@@ -3094,8 +3153,55 @@ fn normalize_soccer_action_label(action: &str) -> &str {
         "hoof" | "hoofed-clearance" => "clearance",
         "header" => "first-time-header",
         "chest-control" => "control-touch",
-        "sidestep" | "side_step" => "side-step",
+        "sidestep" | "side_step" | "side-step-dribble" | "sidestep-dribble" => "side-step",
+        "leftcut" | "left_cut" | "left-cut-dribble" | "cut-left" => "left-cut",
+        "rightcut" | "right_cut" | "right-cut-dribble" | "cut-right" => "right-cut",
+        "nut-meg" | "nut_meg" | "meg" => "nutmeg",
         other => other,
+    }
+}
+
+fn dribble_move_kind_for_action_label(action: &str) -> Option<DribbleMoveKind> {
+    match normalize_soccer_action_label(action) {
+        "left-cut" | "side-step" | "dribble" => Some(DribbleMoveKind::LeftCut),
+        "right-cut" => Some(DribbleMoveKind::RightCut),
+        "nutmeg" => Some(DribbleMoveKind::Nutmeg),
+        _ => None,
+    }
+}
+
+fn is_dribble_action_label(action: &str) -> bool {
+    dribble_move_kind_for_action_label(action).is_some()
+}
+
+fn choose_dribble_move_kind(rng: &mut SeededRandom) -> DribbleMoveKind {
+    let draw = rng.next_float();
+    if draw < DRIBBLE_LEFT_CUT_CHANCE {
+        DribbleMoveKind::LeftCut
+    } else if draw < DRIBBLE_LEFT_CUT_CHANCE + DRIBBLE_RIGHT_CUT_CHANCE {
+        DribbleMoveKind::RightCut
+    } else {
+        debug_assert!((DRIBBLE_LEFT_CUT_CHANCE + DRIBBLE_RIGHT_CUT_CHANCE - 0.90).abs() < 1e-9);
+        DribbleMoveKind::Nutmeg
+    }
+}
+
+fn deterministic_dribble_move_kind(tick: u64, player_id: usize) -> DribbleMoveKind {
+    let mut value = tick
+        .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        .wrapping_add((player_id as u64).wrapping_mul(0xbf58_476d_1ce4_e5b9));
+    value ^= value >> 30;
+    value = value.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value ^= value >> 27;
+    value = value.wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^= value >> 31;
+    let draw = (value % 10_000) as f64 / 10_000.0;
+    if draw < DRIBBLE_LEFT_CUT_CHANCE {
+        DribbleMoveKind::LeftCut
+    } else if draw < DRIBBLE_LEFT_CUT_CHANCE + DRIBBLE_RIGHT_CUT_CHANCE {
+        DribbleMoveKind::RightCut
+    } else {
+        DribbleMoveKind::Nutmeg
     }
 }
 
@@ -3122,6 +3228,43 @@ fn restart_action_label(action: &str) -> Option<&'static str> {
         "free-kick" => Some("free-kick"),
         _ => None,
     }
+}
+
+fn canonical_set_play_restart_label(label: &str) -> Option<&'static str> {
+    let normalized = normalize_soccer_action_label(label.trim());
+    match normalized {
+        "kickoff" => return Some("kickoff"),
+        "throw-in" => return Some("throw-in"),
+        "goal-kick" => return Some("goal-kick"),
+        "corner-kick" => return Some("corner-kick"),
+        "free-kick" => return Some("free-kick"),
+        "direct-free-kick" => return Some("direct-free-kick"),
+        "indirect-free-kick" => return Some("indirect-free-kick"),
+        _ => {}
+    }
+
+    match normalize_csv_header(normalized).as_str() {
+        "kickoff" | "kickoffpattern" => Some("kickoff"),
+        "throwin" | "throw" => Some("throw-in"),
+        "goalkick" => Some("goal-kick"),
+        "cornerkick" | "corner" => Some("corner-kick"),
+        "freekick" | "fk" => Some("free-kick"),
+        "directfreekick" | "directfk" | "dfk" => Some("direct-free-kick"),
+        "indirectfreekick" | "indirectfk" | "ifk" => Some("indirect-free-kick"),
+        _ => None,
+    }
+}
+
+fn set_play_restart_labels_match(a: &str, b: &str) -> bool {
+    let Some(a) = canonical_set_play_restart_label(a) else {
+        return false;
+    };
+    let Some(b) = canonical_set_play_restart_label(b) else {
+        return false;
+    };
+    a == b
+        || matches!(a, "free-kick" | "direct-free-kick" | "indirect-free-kick")
+            && matches!(b, "free-kick" | "direct-free-kick" | "indirect-free-kick")
 }
 
 fn held_restart_action_for_snapshot(
@@ -3484,6 +3627,7 @@ impl PlayerAgent {
             SoccerAction::HoldShape => (self.home_position, None),
             SoccerAction::MoveTo(target)
             | SoccerAction::Dribble(target)
+            | SoccerAction::DribbleMove { target, .. }
             | SoccerAction::ControlTouch { target } => (*target, None),
             SoccerAction::Pass {
                 target_player,
@@ -3547,6 +3691,11 @@ impl PlayerAgent {
         observation: &SoccerPomdpObservation,
         restart_label: &str,
     ) -> Option<(SoccerAction, String)> {
+        if let Some(planned_release) = snapshot.active_set_play_release_for(self.id, restart_label)
+        {
+            return Some(planned_release);
+        }
+
         let passing_skill = ability01(self.skills.passing_completion_rate);
         let crossing_skill = ability01(self.skills.crossing_left.max(self.skills.crossing_right));
         if restart_label == "free-kick"
@@ -3758,6 +3907,38 @@ impl PlayerAgent {
             };
         }
 
+        if !has_ball {
+            if let Some(assignment) = snapshot.active_set_play_assignment_for(self.id) {
+                let distance = self.position.distance(assignment.target);
+                if distance > 0.35 {
+                    let action = SoccerAction::MoveTo(assignment.target);
+                    self.last_decision = Some(self.decision_trace(
+                        snapshot,
+                        mdp_state,
+                        observation,
+                        belief,
+                        vec![
+                            "set-play-routine".to_string(),
+                            assignment.role.as_label().to_string(),
+                        ],
+                        single_action_option("set-play-run"),
+                        &action,
+                        "set-play-run",
+                    ));
+                    return PlayerIntent {
+                        player_id: self.id,
+                        action,
+                        sprint: matches!(
+                            assignment.role,
+                            SoccerSetPlayAssignmentRole::PrimaryRunner
+                                | SoccerSetPlayAssignmentRole::SecondaryRunner
+                                | SoccerSetPlayAssignmentRole::Screen
+                        ),
+                    };
+                }
+            }
+        }
+
         if has_ball && observation.first_touch_available {
             let pass_targets = snapshot.ranked_visible_pass_targets(self.id, 3);
             let action_options = self.first_touch_action_options(&observation, pass_targets.len());
@@ -3949,9 +4130,15 @@ impl PlayerAgent {
                     if rng.next_float()
                         >= time_window_probability(learned_shot_chance, snapshot.dt_seconds)
                     {
-                        let defer_action = SoccerAction::Dribble(
-                            snapshot.shot_creation_space_for(self.id, self.home_position),
-                        );
+                        let kind = deterministic_dribble_move_kind(snapshot.tick, self.id);
+                        let defer_action = SoccerAction::DribbleMove {
+                            target: snapshot.dribble_move_target_for(
+                                self.id,
+                                self.home_position,
+                                kind,
+                            ),
+                            kind,
+                        };
                         self.last_decision = Some(self.decision_trace(
                             snapshot,
                             mdp_state,
@@ -3962,9 +4149,9 @@ impl PlayerAgent {
                                 plan.action.clone(),
                                 "defer-shot".to_string(),
                             ],
-                            single_action_option("dribble"),
+                            single_action_option(kind.label()),
                             &defer_action,
-                            "dribble",
+                            kind.label(),
                         ));
                         return PlayerIntent {
                             player_id: self.id,
@@ -4082,9 +4269,13 @@ impl PlayerAgent {
                         if rng.next_float()
                             < time_window_probability(dribble_chance, snapshot.dt_seconds)
                         {
+                            let kind = choose_dribble_move_kind(rng);
                             let target =
-                                snapshot.shot_creation_space_for(self.id, self.home_position);
-                            chosen = Some((SoccerAction::Dribble(target), "dribble".to_string()));
+                                snapshot.dribble_move_target_for(self.id, self.home_position, kind);
+                            chosen = Some((
+                                SoccerAction::DribbleMove { target, kind },
+                                kind.label().to_string(),
+                            ));
                             break;
                         }
                     }
@@ -4094,9 +4285,13 @@ impl PlayerAgent {
                         if rng.next_float()
                             < time_window_probability(side_step_chance, snapshot.dt_seconds)
                         {
+                            let kind = snapshot.side_step_dribble_kind_for(self.id);
                             let target =
-                                snapshot.side_step_dribble_target_for(self.id, self.home_position);
-                            chosen = Some((SoccerAction::Dribble(target), "side-step".to_string()));
+                                snapshot.dribble_move_target_for(self.id, self.home_position, kind);
+                            chosen = Some((
+                                SoccerAction::DribbleMove { target, kind },
+                                kind.label().to_string(),
+                            ));
                             break;
                         }
                     }
@@ -4239,11 +4434,17 @@ impl PlayerAgent {
                 let carry_to_create = shot_creation_carry_multiplier(&observation) > 1.28
                     && observation.forward_dribble_space_yards > 2.2;
                 if carry_to_create || pass_targets.is_empty() {
+                    let kind = deterministic_dribble_move_kind(snapshot.tick, self.id);
                     (
-                        SoccerAction::Dribble(
-                            snapshot.shot_creation_space_for(self.id, self.home_position),
-                        ),
-                        "dribble".to_string(),
+                        SoccerAction::DribbleMove {
+                            target: snapshot.dribble_move_target_for(
+                                self.id,
+                                self.home_position,
+                                kind,
+                            ),
+                            kind,
+                        },
+                        kind.label().to_string(),
                     )
                 } else if let Some(target) = pass_targets.first() {
                     (
@@ -4255,11 +4456,17 @@ impl PlayerAgent {
                         "pass1".to_string(),
                     )
                 } else {
+                    let kind = deterministic_dribble_move_kind(snapshot.tick, self.id);
                     (
-                        SoccerAction::Dribble(
-                            snapshot.shot_creation_space_for(self.id, self.home_position),
-                        ),
-                        "dribble".to_string(),
+                        SoccerAction::DribbleMove {
+                            target: snapshot.dribble_move_target_for(
+                                self.id,
+                                self.home_position,
+                                kind,
+                            ),
+                            kind,
+                        },
+                        kind.label().to_string(),
                     )
                 }
             });
@@ -4579,18 +4786,35 @@ impl PlayerAgent {
                 },
                 "route-one".to_string(),
             )),
-            "dribble" if observation.has_ball => Some((
-                SoccerAction::Dribble(plan.target_point.unwrap_or_else(|| {
-                    snapshot.shot_creation_space_for(self.id, self.home_position)
-                })),
-                "dribble".to_string(),
-            )),
-            "side-step" if observation.has_ball => Some((
-                SoccerAction::Dribble(plan.target_point.unwrap_or_else(|| {
-                    snapshot.side_step_dribble_target_for(self.id, self.home_position)
-                })),
-                "side-step".to_string(),
-            )),
+            "dribble" | "left-cut" | "right-cut" | "nutmeg" if observation.has_ball => {
+                let kind = match label {
+                    "left-cut" => DribbleMoveKind::LeftCut,
+                    "right-cut" => DribbleMoveKind::RightCut,
+                    "nutmeg" => DribbleMoveKind::Nutmeg,
+                    _ => deterministic_dribble_move_kind(snapshot.tick, self.id),
+                };
+                Some((
+                    SoccerAction::DribbleMove {
+                        target: plan.target_point.unwrap_or_else(|| {
+                            snapshot.dribble_move_target_for(self.id, self.home_position, kind)
+                        }),
+                        kind,
+                    },
+                    kind.label().to_string(),
+                ))
+            }
+            "side-step" if observation.has_ball => {
+                let kind = snapshot.side_step_dribble_kind_for(self.id);
+                Some((
+                    SoccerAction::DribbleMove {
+                        target: plan.target_point.unwrap_or_else(|| {
+                            snapshot.dribble_move_target_for(self.id, self.home_position, kind)
+                        }),
+                        kind,
+                    },
+                    kind.label().to_string(),
+                ))
+            }
             "defend" if snapshot.controlled_possession_team() == Some(self.team.other()) => Some((
                 SoccerAction::MoveTo(snapshot.defensive_assignment_for(
                     self.id,
@@ -4639,6 +4863,10 @@ pub enum SoccerAction {
     HoldShape,
     MoveTo(Vec2),
     Dribble(Vec2),
+    DribbleMove {
+        target: Vec2,
+        kind: DribbleMoveKind,
+    },
     ControlTouch {
         target: Vec2,
     },
@@ -4664,12 +4892,35 @@ pub enum SoccerAction {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DribbleMoveKind {
+    LeftCut,
+    RightCut,
+    Nutmeg,
+}
+
+impl DribbleMoveKind {
+    fn label(self) -> &'static str {
+        match self {
+            DribbleMoveKind::LeftCut => "left-cut",
+            DribbleMoveKind::RightCut => "right-cut",
+            DribbleMoveKind::Nutmeg => "nutmeg",
+        }
+    }
+
+    fn event_kind(self) -> &'static str {
+        self.label()
+    }
+}
+
 impl SoccerAction {
     fn label(&self) -> String {
         match self {
             SoccerAction::HoldShape => "hold".to_string(),
             SoccerAction::MoveTo(_) => "move".to_string(),
             SoccerAction::Dribble(_) => "dribble".to_string(),
+            SoccerAction::DribbleMove { kind, .. } => kind.label().to_string(),
             SoccerAction::ControlTouch { .. } => "control-touch".to_string(),
             SoccerAction::Pass { flight, .. } => {
                 if flight.is_aerial() {
@@ -7020,7 +7271,9 @@ pub struct SoccerSetPlayCall {
 pub struct SoccerSetPlayTrialRequest {
     #[serde(default)]
     pub config: MatchConfig,
+    #[serde(default = "default_set_play_restart_kind")]
     pub restart: SoccerSetPlayRestartKind,
+    #[serde(default = "default_set_play_team")]
     pub team: Team,
     #[serde(default)]
     pub spot: Option<Vec2>,
@@ -7041,6 +7294,14 @@ impl Default for SoccerSetPlayTrialRequest {
             vector_hint: None,
         }
     }
+}
+
+fn default_set_play_restart_kind() -> SoccerSetPlayRestartKind {
+    SoccerSetPlayRestartKind::DirectFreeKick
+}
+
+fn default_set_play_team() -> Team {
+    Team::Home
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -7705,6 +7966,88 @@ impl WorldSnapshot {
 
     pub fn ball_position_history(&self) -> &[BallPositionSample] {
         &self.ball_history
+    }
+
+    fn active_set_play_is_live(&self, call: &SoccerSetPlayCall) -> bool {
+        self.tick <= call.expires_tick && self.clock_seconds <= call.expires_clock_seconds
+    }
+
+    pub fn active_set_play_assignment_for(
+        &self,
+        player_id: usize,
+    ) -> Option<&SoccerSetPlayAssignment> {
+        let call = self.active_set_play.as_ref()?;
+        if !self.active_set_play_is_live(call) {
+            return None;
+        }
+        call.assignments
+            .iter()
+            .find(|assignment| assignment.player_id == player_id)
+    }
+
+    fn active_set_play_release_for(
+        &self,
+        taker_id: usize,
+        restart_label: &str,
+    ) -> Option<(SoccerAction, String)> {
+        let call = self.active_set_play.as_ref()?;
+        if !self.active_set_play_is_live(call)
+            || !set_play_restart_labels_match(&call.restart, restart_label)
+        {
+            return None;
+        }
+        let taker = self.players.iter().find(|player| player.id == taker_id)?;
+        if taker.team != call.team {
+            return None;
+        }
+        let is_taker = call.assignments.iter().any(|assignment| {
+            assignment.player_id == taker_id
+                && assignment.role == SoccerSetPlayAssignmentRole::Taker
+        });
+        if !is_taker {
+            return None;
+        }
+        let elapsed = (self.clock_seconds - call.started_clock_seconds).max(0.0);
+        let release_delay = call
+            .assignments
+            .iter()
+            .filter(|assignment| assignment.role != SoccerSetPlayAssignmentRole::Taker)
+            .filter(|assignment| assignment.release_after_seconds.is_finite())
+            .map(|assignment| assignment.release_after_seconds)
+            .fold(0.0, f64::max)
+            .clamp(0.0, SOCCER_SET_PLAY_MAX_RELEASE_DELAY_SECONDS);
+        if elapsed + 1e-9 < release_delay {
+            return Some((
+                SoccerAction::MoveTo(taker.position),
+                "hold-restart".to_string(),
+            ));
+        }
+        let release_player = call.release_player.filter(|player_id| {
+            self.players
+                .iter()
+                .any(|player| player.id == *player_id && player.team == call.team)
+        });
+        let release_power = if call.release_power.is_finite() {
+            call.release_power.clamp(0.0, 1.0)
+        } else {
+            0.65
+        };
+        let action = match call.release_kind {
+            SoccerSetPlayReleaseKind::Pass => SoccerAction::Pass {
+                target_player: release_player,
+                power: release_power,
+                flight: PassFlight::Floor,
+            },
+            SoccerSetPlayReleaseKind::AerialPass => SoccerAction::Pass {
+                target_player: release_player,
+                power: release_power,
+                flight: PassFlight::Aerial,
+            },
+            SoccerSetPlayReleaseKind::Shoot => SoccerAction::Shoot {
+                power: release_power,
+            },
+        };
+        Some((action, restart_label.to_string()))
     }
 
     fn nearest_opponent_at(&self, team: Team, position: Vec2) -> Option<(usize, Vec2, f64)> {
@@ -9097,63 +9440,69 @@ impl WorldSnapshot {
         best.clamp_to_pitch(self.field_width, self.field_length)
     }
 
-    pub fn side_step_dribble_target_for(&self, player_id: usize, home: Vec2) -> Vec2 {
+    pub fn side_step_dribble_kind_for(&self, player_id: usize) -> DribbleMoveKind {
+        let Some(me) = self.players.iter().find(|p| p.id == player_id) else {
+            return DribbleMoveKind::LeftCut;
+        };
+        let current = self.player_position(me.id).unwrap_or(me.position);
+        let Some((_, defender_position, _)) = self.nearest_opponent_at(me.team, current) else {
+            return DribbleMoveKind::LeftCut;
+        };
+        let away_x_sign = if defender_position.x >= current.x {
+            -1.0
+        } else {
+            1.0
+        };
+        let left_x_sign = -me.team.attack_dir();
+        if (left_x_sign - away_x_sign).abs() < f64::EPSILON {
+            DribbleMoveKind::LeftCut
+        } else {
+            DribbleMoveKind::RightCut
+        }
+    }
+
+    pub fn dribble_move_target_for(
+        &self,
+        player_id: usize,
+        home: Vec2,
+        kind: DribbleMoveKind,
+    ) -> Vec2 {
         let Some(me) = self.players.iter().find(|p| p.id == player_id) else {
             return home;
         };
         let current = self.player_position(me.id).unwrap_or(me.position);
-        let Some((defender_id, defender_position, defender_distance)) =
-            self.nearest_opponent_at(me.team, current)
-        else {
+        let nearest_defender = self.nearest_opponent_at(me.team, current);
+        let Some((_, defender_position, defender_distance)) = nearest_defender else {
             return self.shot_creation_space_for(player_id, home);
         };
         if defender_distance > 5.6 {
             return self.shot_creation_space_for(player_id, home);
         }
 
-        let defender_committed = self
-            .players
-            .iter()
-            .find(|player| player.id == defender_id)
-            .map(player_normalized_last_action)
-            .is_some_and(|action| matches!(action, "tackle" | "defend"));
         let forward = Vec2::new(0.0, me.team.attack_dir());
-        let lateral_axis = Vec2::new(1.0, 0.0);
-        let away_side = if defender_position.x >= current.x {
-            -1.0
-        } else {
-            1.0
-        };
-        let lateral_yards = if defender_committed { 3.4 } else { 2.7 };
-        let forward_yards = if defender_committed { 2.4 } else { 1.7 };
-        let mut best = self.shot_creation_space_for(player_id, home);
-        let mut best_score = f64::NEG_INFINITY;
-
-        for side in [away_side, -away_side] {
-            let candidate =
-                (current + forward * forward_yards + lateral_axis * side * lateral_yards)
-                    .clamp_to_pitch(self.field_width, self.field_length);
-            let separation = candidate.distance(defender_position);
-            let away_bonus = if (side - away_side).abs() < f64::EPSILON {
-                0.62
-            } else {
-                0.0
-            };
-            let committed_bonus = if defender_committed { 0.38 } else { 0.0 };
-            let forward_gain = (candidate.y - current.y) * me.team.attack_dir();
-            let score = self.space_score_at(candidate, me.team) * 0.08
-                + separation.clamp(0.0, 8.0) * 0.16
-                + forward_gain.clamp(-1.5, 4.0) * 0.18
-                + away_bonus
-                + committed_bonus
-                - candidate.distance(home) * 0.004;
-            if score > best_score {
-                best = candidate;
-                best_score = score;
+        let target = match kind {
+            DribbleMoveKind::LeftCut | DribbleMoveKind::RightCut => {
+                let lateral_sign = match kind {
+                    DribbleMoveKind::LeftCut => -me.team.attack_dir(),
+                    DribbleMoveKind::RightCut => me.team.attack_dir(),
+                    DribbleMoveKind::Nutmeg => 0.0,
+                };
+                current
+                    + Vec2::new(lateral_sign * DRIBBLE_CUT_LATERAL_YARDS, 0.0)
+                    + forward * DRIBBLE_CUT_FORWARD_YARDS
             }
-        }
+            DribbleMoveKind::Nutmeg => Vec2::new(
+                current.x * 0.78 + defender_position.x * 0.22,
+                current.y + DRIBBLE_NUTMEG_FORWARD_YARDS * me.team.attack_dir(),
+            ),
+        };
 
-        best.clamp_to_pitch(self.field_width, self.field_length)
+        target.clamp_to_pitch(self.field_width, self.field_length)
+    }
+
+    pub fn side_step_dribble_target_for(&self, player_id: usize, home: Vec2) -> Vec2 {
+        let kind = self.side_step_dribble_kind_for(player_id);
+        self.dribble_move_target_for(player_id, home, kind)
     }
 
     fn shot_creation_score_for(
@@ -10651,7 +11000,17 @@ fn dense_soccer_transition_reward(
         reward += (before_obs.yards_to_goal - after_obs.yards_to_goal).clamp(-8.0, 8.0) * 0.07;
         if matches!(
             action,
-            "dribble" | "side-step" | "pass" | "aerial-pass" | "shoot" | "clearance" | "route-one"
+            "dribble"
+                | "side-step"
+                | "left-cut"
+                | "right-cut"
+                | "nutmeg"
+                | "set-play-run"
+                | "pass"
+                | "aerial-pass"
+                | "shoot"
+                | "clearance"
+                | "route-one"
         ) {
             reward += 0.08;
         }
@@ -13306,6 +13665,9 @@ fn soccer_neural_action_family_features(action: &str) -> (f64, f64, f64) {
         "shoot"
             | "dribble"
             | "side-step"
+            | "left-cut"
+            | "right-cut"
+            | "nutmeg"
             | "pass"
             | "aerial-pass"
             | "route-one"
@@ -13317,7 +13679,7 @@ fn soccer_neural_action_family_features(action: &str) -> (f64, f64, f64) {
     let defense = matches!(action, "tackle" | "defend" | "defend-shape" | "defend-roam");
     let support = matches!(
         action,
-        "support-shape" | "support-roam" | "recover" | "space" | "control-touch"
+        "support-shape" | "support-roam" | "recover" | "space" | "control-touch" | "set-play-run"
     );
     (
         soccer_neural_bool(attack),
@@ -13666,191 +14028,19 @@ impl SoccerMatch {
         }
     }
 
-    pub fn set_coach_set_play_hint(&mut self, hint: SoccerSetPlayVectorHint) {
-        if hint.score.is_finite() {
-            self.coach_set_play_hints.insert(hint.team, hint);
+    pub fn set_coach_set_play_hint(&mut self, mut hint: SoccerSetPlayVectorHint) {
+        if !hint.score.is_finite() {
+            return;
         }
+        let Some(restart) = canonical_set_play_restart_label(&hint.restart) else {
+            return;
+        };
+        hint.restart = restart.to_string();
+        self.coach_set_play_hints.insert(hint.team, hint);
     }
 
     pub fn clear_coach_set_play_hint(&mut self, team: Team) {
         self.coach_set_play_hints.remove(&team);
-    }
-
-    fn activate_set_play_for_restart(
-        &mut self,
-        restart_label: &str,
-        restart_kind: Option<BallRestartKind>,
-        team: Team,
-        spot: Vec2,
-        taker: Option<usize>,
-    ) {
-        let vector_hint = self
-            .coach_set_play_hints
-            .get(&team)
-            .filter(|hint| hint.restart == restart_label || hint.restart.is_empty())
-            .cloned();
-        let routine = vector_hint
-            .as_ref()
-            .map(|hint| hint.routine)
-            .unwrap_or_else(|| {
-                if restart_label == "kickoff" {
-                    return SoccerSetPlayRoutineKind::KickoffPattern;
-                }
-                match restart_kind {
-                    Some(BallRestartKind::ThrowIn) => SoccerSetPlayRoutineKind::ThrowInTriangle,
-                    Some(BallRestartKind::GoalKick) => SoccerSetPlayRoutineKind::GoalKickBuildOut,
-                    Some(BallRestartKind::CornerKick) => SoccerSetPlayRoutineKind::CornerFarPost,
-                    Some(BallRestartKind::FreeKick) => {
-                        let goal = Vec2::new(
-                            self.config.field_width_yards * 0.5,
-                            team.goal_y(self.config.field_length_yards),
-                        );
-                        if restart_label == "direct-free-kick" || spot.distance(goal) <= 32.0 {
-                            SoccerSetPlayRoutineKind::FreeKickDirectShot
-                        } else {
-                            SoccerSetPlayRoutineKind::FreeKickFarPostCross
-                        }
-                    }
-                    None => SoccerSetPlayRoutineKind::KickoffPattern,
-                }
-            });
-        let release_kind = match routine {
-            SoccerSetPlayRoutineKind::FreeKickDirectShot => SoccerSetPlayReleaseKind::Shoot,
-            SoccerSetPlayRoutineKind::CornerFarPost
-            | SoccerSetPlayRoutineKind::FreeKickFarPostCross => {
-                SoccerSetPlayReleaseKind::AerialPass
-            }
-            SoccerSetPlayRoutineKind::KickoffPattern
-            | SoccerSetPlayRoutineKind::ThrowInTriangle
-            | SoccerSetPlayRoutineKind::GoalKickBuildOut => SoccerSetPlayReleaseKind::Pass,
-        };
-        let release_power = match release_kind {
-            SoccerSetPlayReleaseKind::Shoot => 1.0,
-            SoccerSetPlayReleaseKind::AerialPass => 0.86,
-            SoccerSetPlayReleaseKind::Pass => {
-                if restart_label == "throw-in" {
-                    0.58
-                } else {
-                    0.76
-                }
-            }
-        };
-        let attacking_roles = match routine {
-            SoccerSetPlayRoutineKind::KickoffPattern => vec![
-                SoccerSetPlayAssignmentRole::PrimaryRunner,
-                SoccerSetPlayAssignmentRole::Outlet,
-                SoccerSetPlayAssignmentRole::Safety,
-            ],
-            SoccerSetPlayRoutineKind::ThrowInTriangle => vec![
-                SoccerSetPlayAssignmentRole::PrimaryRunner,
-                SoccerSetPlayAssignmentRole::SecondaryRunner,
-                SoccerSetPlayAssignmentRole::Outlet,
-            ],
-            SoccerSetPlayRoutineKind::GoalKickBuildOut => vec![
-                SoccerSetPlayAssignmentRole::Outlet,
-                SoccerSetPlayAssignmentRole::Outlet,
-                SoccerSetPlayAssignmentRole::Safety,
-                SoccerSetPlayAssignmentRole::PrimaryRunner,
-            ],
-            SoccerSetPlayRoutineKind::CornerFarPost => vec![
-                SoccerSetPlayAssignmentRole::PrimaryRunner,
-                SoccerSetPlayAssignmentRole::SecondaryRunner,
-                SoccerSetPlayAssignmentRole::Screen,
-                SoccerSetPlayAssignmentRole::Safety,
-            ],
-            SoccerSetPlayRoutineKind::FreeKickDirectShot => vec![
-                SoccerSetPlayAssignmentRole::Screen,
-                SoccerSetPlayAssignmentRole::Outlet,
-                SoccerSetPlayAssignmentRole::Safety,
-            ],
-            SoccerSetPlayRoutineKind::FreeKickFarPostCross => vec![
-                SoccerSetPlayAssignmentRole::PrimaryRunner,
-                SoccerSetPlayAssignmentRole::SecondaryRunner,
-                SoccerSetPlayAssignmentRole::Screen,
-                SoccerSetPlayAssignmentRole::Outlet,
-            ],
-        };
-        let mut assignments = Vec::new();
-        if let Some(taker_id) = taker {
-            assignments.push(SoccerSetPlayAssignment {
-                player_id: taker_id,
-                role: SoccerSetPlayAssignmentRole::Taker,
-                target: spot,
-                release_after_seconds: 0.0,
-            });
-        }
-        for (idx, (player_id, role)) in self
-            .restart_team_ids(team, false, taker)
-            .into_iter()
-            .zip(attacking_roles.into_iter())
-            .enumerate()
-        {
-            let target = self
-                .players
-                .iter()
-                .find(|player| player.id == player_id)
-                .map(|player| player.position)
-                .unwrap_or(spot);
-            assignments.push(SoccerSetPlayAssignment {
-                player_id,
-                role,
-                target,
-                release_after_seconds: 0.55 + idx as f64 * 0.25,
-            });
-        }
-        if matches!(
-            routine,
-            SoccerSetPlayRoutineKind::CornerFarPost
-                | SoccerSetPlayRoutineKind::FreeKickDirectShot
-                | SoccerSetPlayRoutineKind::FreeKickFarPostCross
-        ) {
-            let defense_role = if routine == SoccerSetPlayRoutineKind::FreeKickDirectShot {
-                SoccerSetPlayAssignmentRole::Wall
-            } else {
-                SoccerSetPlayAssignmentRole::Marker
-            };
-            for player_id in self
-                .restart_team_ids(team.other(), false, None)
-                .into_iter()
-                .take(4)
-            {
-                let target = self
-                    .players
-                    .iter()
-                    .find(|player| player.id == player_id)
-                    .map(|player| player.position)
-                    .unwrap_or(spot);
-                assignments.push(SoccerSetPlayAssignment {
-                    player_id,
-                    role: defense_role,
-                    target,
-                    release_after_seconds: 0.0,
-                });
-            }
-        }
-        let release_player = match release_kind {
-            SoccerSetPlayReleaseKind::Shoot => taker,
-            SoccerSetPlayReleaseKind::Pass | SoccerSetPlayReleaseKind::AerialPass => assignments
-                .iter()
-                .find(|assignment| assignment.role != SoccerSetPlayAssignmentRole::Taker)
-                .map(|assignment| assignment.player_id),
-        };
-        let duration_ticks =
-            (SOCCER_SET_PLAY_WINDOW_SECONDS / self.config.dt_seconds.max(1e-6)).ceil() as u64;
-        self.active_set_play = Some(SoccerSetPlayCall {
-            team,
-            restart: restart_label.to_string(),
-            routine,
-            started_tick: self.tick,
-            started_clock_seconds: self.clock_seconds,
-            expires_tick: self.tick.saturating_add(duration_ticks.max(1)),
-            expires_clock_seconds: self.clock_seconds + SOCCER_SET_PLAY_WINDOW_SECONDS,
-            assignments,
-            release_kind,
-            release_player,
-            release_power,
-            vector_hint,
-        });
     }
 
     pub fn stage_set_play_restart(
@@ -13859,19 +14049,17 @@ impl SoccerMatch {
         team: Team,
         spot: Vec2,
     ) {
-        let spot = spot.clamp_to_pitch(
+        let (field_width, field_length) = sane_pitch_dimensions(
             self.config.field_width_yards,
             self.config.field_length_yards,
         );
+        let center = Vec2::new(field_width * 0.5, field_length * 0.5);
+        let spot = finite_pitch_point(spot, field_width, field_length, center);
         if let Some(kind) = restart.ball_restart_kind() {
             self.apply_restart_with_label(kind, team, spot, restart.as_label());
             return;
         }
 
-        let center = Vec2::new(
-            self.config.field_width_yards * 0.5,
-            self.config.field_length_yards * 0.5,
-        );
         let kickoff = self
             .players
             .iter()
@@ -14702,6 +14890,20 @@ impl SoccerMatch {
         self.controller_yield_stats
     }
 
+    fn clear_finished_set_play_if_needed(&mut self) {
+        let should_clear = self.active_set_play.as_ref().is_some_and(|call| {
+            self.tick > call.expires_tick
+                || self.clock_seconds > call.expires_clock_seconds
+                || (self.ball.holder.is_some()
+                    && self.ball.last_touch_team == Some(call.team.other())
+                    && self.pending_pass.is_none()
+                    && self.pending_shot.is_none())
+        });
+        if should_clear {
+            self.active_set_play = None;
+        }
+    }
+
     fn yield_for_controller_threads(&mut self) {
         let assigned_players = self
             .players
@@ -14785,6 +14987,7 @@ impl SoccerMatch {
         for intent in intents {
             self.apply_player_intent(intent);
         }
+        self.resolve_dribble_hold_up_contests();
         self.resolve_player_collisions();
         self.integrate_ball();
         self.ball
@@ -14795,6 +14998,7 @@ impl SoccerMatch {
         self.record_ball_position_history();
         self.shared_positions
             .sync_from_players(&self.players, self.tick, self.clock_seconds);
+        self.clear_finished_set_play_if_needed();
         let next_snapshot = WorldSnapshot::from_match(self);
         self.update_possession_chase_trackers(
             &snapshot,
@@ -15456,6 +15660,7 @@ impl SoccerMatch {
             SoccerAction::HoldShape => Some(player.home_position),
             SoccerAction::MoveTo(target)
             | SoccerAction::Dribble(target)
+            | SoccerAction::DribbleMove { target, .. }
             | SoccerAction::ControlTouch { target } => Some(*target),
             SoccerAction::Pass { target_player, .. } => target_player
                 .and_then(|target_id| self.players.get(target_id).map(|target| target.position)),
@@ -15481,6 +15686,217 @@ impl SoccerMatch {
         }
     }
 
+    fn apply_dribble_intent(
+        &mut self,
+        player_id: usize,
+        target: Vec2,
+        sprint: bool,
+        kind: Option<DribbleMoveKind>,
+    ) {
+        let player_pos = self.players[player_id].position;
+        let player_team = self.players[player_id].team;
+        let snapshot = WorldSnapshot::from_match(self);
+        let observation = snapshot.observation_for(player_id);
+        let pressure = pressure_from_observation(&observation);
+        let dribble_dir = (target - player_pos).normalized();
+        self.move_player_towards(player_id, target, sprint);
+        if self.ball.holder == Some(player_id) {
+            let kind_touch_multiplier = match kind {
+                Some(DribbleMoveKind::Nutmeg) => 1.18,
+                Some(DribbleMoveKind::LeftCut | DribbleMoveKind::RightCut) => 1.04,
+                None => 1.0,
+            };
+            let touch_probability =
+                dribble_heavy_touch_probability(&self.players[player_id], pressure)
+                    * kind_touch_multiplier;
+            let player = &self.players[player_id];
+            let dir = if dribble_dir.len() > 0.0 {
+                dribble_dir
+            } else {
+                carried_ball_lead(player).normalized()
+            };
+            if self.rng.next_float()
+                < time_window_probability(touch_probability, self.config.dt_seconds)
+            {
+                let touch_distance = DRIBBLE_HEAVY_TOUCH_MIN_YARDS
+                    + pressure * 0.9
+                    + (1.0 - ability01(player.skills.dribbling)) * 0.65;
+                self.ball.holder = None;
+                self.ball.position = (player.position + dir * touch_distance).clamp_to_pitch(
+                    self.config.field_width_yards,
+                    self.config.field_length_yards,
+                );
+                self.ball.velocity =
+                    player.velocity + dir * (4.0 + pressure * 8.0 + touch_distance);
+                self.ball.curl_acceleration = Vec2::zero();
+                self.ball.altitude_yards = 0.0;
+                self.ball.last_touch_team = Some(player_team);
+                self.pending_pass = None;
+                self.pending_shot = None;
+                self.events.push(MatchEvent {
+                    tick: self.tick,
+                    clock_seconds: self.clock_seconds,
+                    kind: "heavy-touch".to_string(),
+                    team: Some(player_team),
+                    player_id: Some(player_id),
+                    description: format!("{} heavy touch", player.name),
+                });
+            } else {
+                self.ball.position = (player.position + carried_ball_lead(player)).clamp_to_pitch(
+                    self.config.field_width_yards,
+                    self.config.field_length_yards,
+                );
+                self.ball.velocity = player.velocity;
+                self.ball.curl_acceleration = Vec2::zero();
+                self.ball.altitude_yards = 0.0;
+                self.ball.last_touch_team = Some(player_team);
+            }
+        }
+    }
+
+    fn complete_defensive_dispossession(
+        &mut self,
+        defender_id: usize,
+        attacker_id: usize,
+        event_kind: &str,
+    ) {
+        if defender_id >= self.players.len() || attacker_id >= self.players.len() {
+            return;
+        }
+        let defender_team = self.players[defender_id].team;
+        let defender_name = self.players[defender_id].name.clone();
+        let attacker_name = self.players[attacker_id].name.clone();
+        let defender_position = self.players[defender_id].position;
+        let defender_lead = carried_ball_lead(&self.players[defender_id]);
+
+        self.ball.holder = Some(defender_id);
+        self.ball.position = (defender_position + defender_lead * 0.35).clamp_to_pitch(
+            self.config.field_width_yards,
+            self.config.field_length_yards,
+        );
+        self.ball.velocity = self.players[defender_id].velocity;
+        self.ball.altitude_yards = 0.0;
+        self.ball.curl_acceleration = Vec2::zero();
+        self.ball.last_touch_team = Some(defender_team);
+        self.pending_pass = None;
+        self.pending_shot = None;
+        self.mark_ball_received(defender_id);
+        self.record_reward_event(defender_id, DEFENSIVE_DISPOSSESSION_REWARD_POINTS);
+        self.record_possession_touch(defender_id);
+        self.events.push(MatchEvent {
+            tick: self.tick,
+            clock_seconds: self.clock_seconds,
+            kind: event_kind.to_string(),
+            team: Some(defender_team),
+            player_id: Some(defender_id),
+            description: format!("{defender_name} dispossessed {attacker_name}"),
+        });
+    }
+
+    fn record_dribble_beat_event(
+        &mut self,
+        attacker_id: usize,
+        defender_id: usize,
+        kind: DribbleMoveKind,
+    ) {
+        if attacker_id >= self.players.len() || defender_id >= self.players.len() {
+            return;
+        }
+        let attacker_team = self.players[attacker_id].team;
+        let attacker_name = self.players[attacker_id].name.clone();
+        let defender_name = self.players[defender_id].name.clone();
+        let attacker_position = self.players[attacker_id].position;
+        let attacker_lead = carried_ball_lead(&self.players[attacker_id]);
+
+        self.ball.holder = Some(attacker_id);
+        self.ball.position = (attacker_position + attacker_lead).clamp_to_pitch(
+            self.config.field_width_yards,
+            self.config.field_length_yards,
+        );
+        self.ball.velocity = self.players[attacker_id].velocity;
+        self.ball.altitude_yards = 0.0;
+        self.ball.curl_acceleration = Vec2::zero();
+        self.ball.last_touch_team = Some(attacker_team);
+        self.pending_pass = None;
+        self.pending_shot = None;
+        self.record_reward_event(attacker_id, SIDE_STEP_BEAT_REWARD_POINTS);
+        self.record_reward_event(defender_id, -BEATEN_BY_DRIBBLE_PENALTY_POINTS);
+        self.record_possession_touch(attacker_id);
+        self.events.push(MatchEvent {
+            tick: self.tick,
+            clock_seconds: self.clock_seconds,
+            kind: kind.event_kind().to_string(),
+            team: Some(attacker_team),
+            player_id: Some(attacker_id),
+            description: format!(
+                "{} beat {} with {}",
+                attacker_name,
+                defender_name,
+                kind.label()
+            ),
+        });
+    }
+
+    fn resolve_dribble_hold_up_contests(&mut self) {
+        let Some(attacker_id) = self.ball.holder else {
+            return;
+        };
+        if attacker_id >= self.players.len() {
+            return;
+        }
+        let attacker_action = self.players[attacker_id]
+            .last_decision
+            .as_ref()
+            .map(|decision| normalize_soccer_action_label(&decision.action))
+            .unwrap_or("hold");
+        let Some(kind) = dribble_move_kind_for_action_label(attacker_action) else {
+            return;
+        };
+        let attacker_team = self.players[attacker_id].team;
+        let attacker_position = self.players[attacker_id].position;
+        let Some((defender_id, _)) = self
+            .players
+            .iter()
+            .filter(|player| player.team == attacker_team.other())
+            .filter(|player| {
+                player
+                    .last_decision
+                    .as_ref()
+                    .map(|decision| normalize_soccer_action_label(&decision.action) == "defend")
+                    .unwrap_or(false)
+            })
+            .filter_map(|player| {
+                let distance = player.position.distance(attacker_position);
+                (distance <= DRIBBLE_HOLD_UP_CONTEST_RADIUS_YARDS).then_some((player.id, distance))
+            })
+            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        else {
+            return;
+        };
+
+        let dispossession_probability = dribble_dispossession_probability(
+            &self.players[defender_id].skills,
+            &self.players[attacker_id].skills,
+            DefenderDribbleResponse::HoldUp,
+        );
+        if self.rng.next_float() < dispossession_probability {
+            self.complete_defensive_dispossession(
+                defender_id,
+                attacker_id,
+                "hold-up-dispossession",
+            );
+        } else if self.rng.next_float()
+            < dribble_beat_probability(
+                kind,
+                &self.players[attacker_id].skills,
+                &self.players[defender_id].skills,
+                DefenderDribbleResponse::HoldUp,
+            )
+        {
+            self.record_dribble_beat_event(attacker_id, defender_id, kind);
+        }
+    }
+
     fn apply_player_intent(&mut self, intent: PlayerIntent) {
         if intent.player_id >= self.players.len() {
             return;
@@ -15499,59 +15915,10 @@ impl SoccerMatch {
                 self.move_player_towards(player_id, target, intent.sprint);
             }
             SoccerAction::Dribble(target) => {
-                let snapshot = WorldSnapshot::from_match(self);
-                let observation = snapshot.observation_for(player_id);
-                let pressure = pressure_from_observation(&observation);
-                let dribble_dir = (target - player_pos).normalized();
-                self.move_player_towards(player_id, target, true);
-                if self.ball.holder == Some(player_id) {
-                    let touch_probability =
-                        dribble_heavy_touch_probability(&self.players[player_id], pressure);
-                    let player = &self.players[player_id];
-                    let dir = if dribble_dir.len() > 0.0 {
-                        dribble_dir
-                    } else {
-                        carried_ball_lead(player).normalized()
-                    };
-                    if self.rng.next_float()
-                        < time_window_probability(touch_probability, self.config.dt_seconds)
-                    {
-                        let touch_distance = DRIBBLE_HEAVY_TOUCH_MIN_YARDS
-                            + pressure * 0.9
-                            + (1.0 - ability01(player.skills.dribbling)) * 0.65;
-                        self.ball.holder = None;
-                        self.ball.position = (player.position + dir * touch_distance)
-                            .clamp_to_pitch(
-                                self.config.field_width_yards,
-                                self.config.field_length_yards,
-                            );
-                        self.ball.velocity =
-                            player.velocity + dir * (4.0 + pressure * 8.0 + touch_distance);
-                        self.ball.curl_acceleration = Vec2::zero();
-                        self.ball.altitude_yards = 0.0;
-                        self.ball.last_touch_team = Some(player_team);
-                        self.pending_pass = None;
-                        self.pending_shot = None;
-                        self.events.push(MatchEvent {
-                            tick: self.tick,
-                            clock_seconds: self.clock_seconds,
-                            kind: "heavy-touch".to_string(),
-                            team: Some(player_team),
-                            player_id: Some(player_id),
-                            description: format!("{} heavy touch", player.name),
-                        });
-                    } else {
-                        self.ball.position = (player.position + carried_ball_lead(player))
-                            .clamp_to_pitch(
-                                self.config.field_width_yards,
-                                self.config.field_length_yards,
-                            );
-                        self.ball.velocity = player.velocity;
-                        self.ball.curl_acceleration = Vec2::zero();
-                        self.ball.altitude_yards = 0.0;
-                        self.ball.last_touch_team = Some(player_team);
-                    }
-                }
+                self.apply_dribble_intent(player_id, target, true, None);
+            }
+            SoccerAction::DribbleMove { target, kind } => {
+                self.apply_dribble_intent(player_id, target, false, Some(kind));
             }
             SoccerAction::ControlTouch { target } => {
                 self.move_player_towards(player_id, target, false);
@@ -15866,50 +16233,10 @@ impl SoccerMatch {
                         .as_ref()
                         .map(|decision| normalize_soccer_action_label(&decision.action).to_string())
                         .unwrap_or_else(|| "hold".to_string());
+                    let target_dribble_kind = dribble_move_kind_for_action_label(&target_action);
                     if contact_distance >= 2.2 {
                         failed_dispossession = true;
                     } else {
-                        if target_action == "side-step"
-                            && self.rng.next_float()
-                                < side_step_escape_probability(
-                                    &self.players[target_player].skills,
-                                    &self.players[player_id].skills,
-                                )
-                        {
-                            self.ball.holder = Some(target_player);
-                            self.ball.altitude_yards = 0.0;
-                            self.ball.last_touch_team = Some(player_team.other());
-                            self.ball.position = (self.players[target_player].position
-                                + carried_ball_lead(&self.players[target_player]))
-                            .clamp_to_pitch(
-                                self.config.field_width_yards,
-                                self.config.field_length_yards,
-                            );
-                            self.ball.velocity = self.players[target_player].velocity;
-                            self.record_reward_event(target_player, SIDE_STEP_BEAT_REWARD_POINTS);
-                            self.record_reward_event(player_id, -BEATEN_BY_DRIBBLE_PENALTY_POINTS);
-                            self.record_reward_event(
-                                player_id,
-                                -FAILED_DISPOSSESSION_PENALTY_POINTS,
-                            );
-                            self.record_possession_touch(target_player);
-                            self.events.push(MatchEvent {
-                                tick: self.tick,
-                                clock_seconds: self.clock_seconds,
-                                kind: "side-step".to_string(),
-                                team: Some(player_team.other()),
-                                player_id: Some(target_player),
-                                description: format!(
-                                    "{} side-stepped {}",
-                                    self.players[target_player].name, self.players[player_id].name
-                                ),
-                            });
-                            self.move_player_towards(player_id, self.ball.position, true);
-                            return;
-                        }
-
-                        beaten_by_dribble =
-                            matches!(target_action.as_str(), "dribble" | "side-step");
                         let contact_speed = (self.players[player_id].velocity
                             - self.players[target_player].velocity)
                             .len();
@@ -15937,36 +16264,37 @@ impl SoccerMatch {
                             &self.players[target_player].skills,
                         );
                         if self.rng.next_float() < success_probability {
-                            self.ball.holder = Some(player_id);
-                            self.ball.altitude_yards = 0.0;
-                            self.ball.last_touch_team = Some(player_team);
-                            self.mark_ball_received(player_id);
-                            self.record_reward_event(
+                            self.complete_defensive_dispossession(
                                 player_id,
-                                DEFENSIVE_DISPOSSESSION_REWARD_POINTS,
+                                target_player,
+                                "tackle",
                             );
-                            self.record_possession_touch(player_id);
-                            self.events.push(MatchEvent {
-                                tick: self.tick,
-                                clock_seconds: self.clock_seconds,
-                                kind: "tackle".to_string(),
-                                team: Some(player_team),
-                                player_id: Some(player_id),
-                                description: format!(
-                                    "{} won a tackle",
-                                    self.players[player_id].name
-                                ),
-                            });
                         } else {
                             failed_dispossession = true;
+                            if let Some(kind) = target_dribble_kind {
+                                let beat_probability = dribble_beat_probability(
+                                    kind,
+                                    &self.players[target_player].skills,
+                                    &self.players[player_id].skills,
+                                    DefenderDribbleResponse::Commit,
+                                );
+                                beaten_by_dribble = self.rng.next_float() < beat_probability;
+                            }
                         }
                     }
                 }
                 if failed_dispossession {
                     self.record_reward_event(player_id, -FAILED_DISPOSSESSION_PENALTY_POINTS);
                     if beaten_by_dribble {
-                        self.record_reward_event(player_id, -BEATEN_BY_DRIBBLE_PENALTY_POINTS);
-                        self.record_reward_event(target_player, SIDE_STEP_BEAT_REWARD_POINTS);
+                        let kind = dribble_move_kind_for_action_label(
+                            self.players[target_player]
+                                .last_decision
+                                .as_ref()
+                                .map(|decision| decision.action.as_str())
+                                .unwrap_or("dribble"),
+                        )
+                        .unwrap_or(DribbleMoveKind::LeftCut);
+                        self.record_dribble_beat_event(target_player, player_id, kind);
                     }
                 }
                 self.move_player_towards(player_id, self.ball.position, true);
@@ -15975,18 +16303,25 @@ impl SoccerMatch {
     }
 
     fn move_player_towards(&mut self, player_id: usize, target: Vec2, sprint: bool) {
+        if player_id >= self.players.len() {
+            return;
+        }
         let dt = self.config.dt_seconds;
-        let p = &mut self.players[player_id];
-        let previous_velocity = p.velocity;
-        let previous_acceleration = p.acceleration;
-        let to_target = target - p.position;
-        let gait = classify_movement_gait(p.team, to_target, sprint);
-        p.movement_gait = gait;
-        let fatigue_factor = fatigue_speed_factor(p.skills.stamina, p.fatigue);
-        let speed =
-            top_speed_yps_from_score(p.skills.top_speed) * fatigue_factor * gait.speed_multiplier();
-        let desired = to_target.normalized() * speed;
+        let previous_velocity = self.players[player_id].velocity;
+        let previous_acceleration = self.players[player_id].acceleration;
+        let to_target = target - self.players[player_id].position;
+        let gait = classify_movement_gait(self.players[player_id].team, to_target, sprint);
+        let fatigue_factor = fatigue_speed_factor(
+            self.players[player_id].skills.stamina,
+            self.players[player_id].fatigue,
+        );
+        let speed = top_speed_yps_from_score(self.players[player_id].skills.top_speed)
+            * fatigue_factor
+            * gait.speed_multiplier();
+        let desired = self.collision_aware_desired_velocity(player_id, target, speed);
         let acceleration_factor = (0.62 + fatigue_factor * 0.38).clamp(0.45, 1.05);
+        let p = &mut self.players[player_id];
+        p.movement_gait = gait;
         p.velocity = approach_velocity(
             p.velocity,
             desired,
@@ -16015,6 +16350,77 @@ impl SoccerMatch {
         p.fatigue = (p.fatigue + gait.fatigue_delta(p.skills.stamina, dt)).clamp(0.0, 1.0);
     }
 
+    fn collision_aware_desired_velocity(&self, player_id: usize, target: Vec2, speed: f64) -> Vec2 {
+        let Some(player) = self.players.get(player_id) else {
+            return Vec2::zero();
+        };
+        let to_target = target - player.position;
+        let distance_to_target = to_target.len();
+        if distance_to_target <= 1e-9 || speed <= 1e-9 {
+            return Vec2::zero();
+        }
+
+        let desired_dir = to_target.normalized();
+        let lookahead = distance_to_target
+            .min((speed * PLAYER_AVOIDANCE_LOOKAHEAD_SECONDS).max(PLAYER_BODY_RADIUS_YARDS * 2.0));
+        let path_end = player.position + desired_dir * lookahead;
+        let path = path_end - player.position;
+        let path_len_sq = dot(path, path);
+        if path_len_sq <= 1e-12 {
+            return desired_dir * speed;
+        }
+        let lateral_axis = Vec2::new(-desired_dir.y, desired_dir.x).normalized();
+        let mut steer = Vec2::zero();
+        let mut speed_scale: f64 = 1.0;
+
+        for other in &self.players {
+            if other.id == player_id {
+                continue;
+            }
+            let projection = dot(other.position - player.position, path) / path_len_sq;
+            if !(0.0..=1.0).contains(&projection) {
+                continue;
+            }
+            let lateral_distance =
+                segment_distance_to_point(player.position, path_end, other.position);
+            if lateral_distance > PLAYER_AVOIDANCE_LANE_RADIUS_YARDS {
+                continue;
+            }
+
+            let along_weight = 1.0 - projection * 0.45;
+            let lateral_weight =
+                1.0 - (lateral_distance / PLAYER_AVOIDANCE_LANE_RADIUS_YARDS).clamp(0.0, 1.0);
+            let weight = (along_weight * lateral_weight).clamp(0.0, 1.0);
+            if weight <= 1e-9 {
+                continue;
+            }
+
+            let side_dot = dot(other.position - player.position, lateral_axis);
+            let side = if side_dot.abs() > 1e-6 {
+                -side_dot.signum()
+            } else if (player.id + other.id) % 2 == 0 {
+                1.0
+            } else {
+                -1.0
+            };
+            let other_speed = other.velocity.len();
+            let head_on = other_speed > 0.75
+                && dot(desired_dir, other.velocity.normalized()) < PLAYER_AVOIDANCE_HEAD_ON_DOT;
+            let very_close =
+                player.position.distance(other.position) < PLAYER_BODY_RADIUS_YARDS * 3.0;
+            let slow = if head_on || very_close { 0.55 } else { 0.78 };
+            speed_scale = speed_scale.min(1.0 - weight * (1.0 - slow));
+            steer += lateral_axis * side * weight;
+        }
+
+        let adjusted_dir = if steer.len() > 1e-9 {
+            (desired_dir + steer.normalized() * 0.48).normalized()
+        } else {
+            desired_dir
+        };
+        adjusted_dir * (speed * speed_scale.clamp(0.35, 1.0))
+    }
+
     fn record_player_position_histories(&mut self) {
         for player in &mut self.players {
             player.record_position_history();
@@ -16028,8 +16434,10 @@ impl SoccerMatch {
 
     fn resolve_player_collisions(&mut self) {
         let min_sep = PLAYER_BODY_RADIUS_YARDS * 2.0;
-        let width = self.config.field_width_yards;
-        let length = self.config.field_length_yards;
+        let (width, length) = sane_pitch_dimensions(
+            self.config.field_width_yards,
+            self.config.field_length_yards,
+        );
         for i in 0..self.players.len() {
             for j in i + 1..self.players.len() {
                 let (left, right) = self.players.split_at_mut(j);
@@ -16325,11 +16733,18 @@ impl SoccerMatch {
         position: Vec2,
         restart_label: &str,
     ) {
+        let (field_width, field_length) = sane_pitch_dimensions(
+            self.config.field_width_yards,
+            self.config.field_length_yards,
+        );
+        let fallback = Vec2::new(field_width * 0.5, field_length * 0.5);
         let restart = BallRestart {
             kind: restart_kind,
             awarded_team,
-            position,
+            position: finite_pitch_point(position, field_width, field_length, fallback),
         };
+        self.pending_pass = None;
+        self.pending_shot = None;
         self.stat_restart(restart.kind, restart.awarded_team);
         let restart_holder = self.nearest_player_on_team(restart.awarded_team, restart.position);
         if let Some(holder_id) = restart_holder {
@@ -16381,8 +16796,8 @@ impl SoccerMatch {
                     assistant.position = official_position_bounds(
                         assistant.kind,
                         Vec2::new(assistant.position.x, restart.position.y),
-                        self.config.field_width_yards,
-                        self.config.field_length_yards,
+                        field_width,
+                        field_length,
                     );
                     assistant.velocity = Vec2::zero();
                     assistant.acceleration = Vec2::zero();
@@ -16457,15 +16872,438 @@ impl SoccerMatch {
     }
 
     fn set_dead_ball_player_position(&mut self, player_id: usize, position: Vec2) {
-        let width = self.config.field_width_yards;
-        let length = self.config.field_length_yards;
+        let (width, length) = sane_pitch_dimensions(
+            self.config.field_width_yards,
+            self.config.field_length_yards,
+        );
         if let Some(player) = self.players.iter_mut().find(|p| p.id == player_id) {
-            player.position = position.clamp_to_pitch(width, length);
+            player.position = finite_pitch_point(position, width, length, player.home_position);
             player.velocity = Vec2::zero();
             player.acceleration = Vec2::zero();
             player.jerk = Vec2::zero();
             player.movement_gait = MovementGait::Stand;
             player.record_position_history();
+        }
+    }
+
+    fn set_play_role_ids(
+        &self,
+        team: Team,
+        role: PlayerRole,
+        exclude: Option<usize>,
+    ) -> Vec<usize> {
+        let mut ids = self
+            .players
+            .iter()
+            .filter(|player| {
+                player.team == team && player.role == role && exclude != Some(player.id)
+            })
+            .map(|player| (player.id, player.home_position.x))
+            .collect::<Vec<_>>();
+        ids.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        ids.into_iter().map(|(id, _)| id).collect()
+    }
+
+    fn matching_set_play_hint(
+        &self,
+        team: Team,
+        restart_label: &str,
+    ) -> Option<SoccerSetPlayVectorHint> {
+        self.coach_set_play_hints
+            .get(&team)
+            .filter(|hint| {
+                hint.score.is_finite()
+                    && set_play_restart_labels_match(&hint.restart, restart_label)
+            })
+            .cloned()
+    }
+
+    fn select_set_play_routine(
+        &self,
+        restart_label: &str,
+        kind: Option<BallRestartKind>,
+        team: Team,
+        spot: Vec2,
+        hint: Option<&SoccerSetPlayVectorHint>,
+    ) -> SoccerSetPlayRoutineKind {
+        if let Some(hint) = hint {
+            if set_play_restart_labels_match(&hint.restart, restart_label) {
+                return match (restart_label, hint.routine) {
+                    ("indirect-free-kick", SoccerSetPlayRoutineKind::FreeKickDirectShot) => {
+                        SoccerSetPlayRoutineKind::FreeKickFarPostCross
+                    }
+                    _ => hint.routine,
+                };
+            }
+        }
+
+        match kind {
+            None => SoccerSetPlayRoutineKind::KickoffPattern,
+            Some(BallRestartKind::ThrowIn) => SoccerSetPlayRoutineKind::ThrowInTriangle,
+            Some(BallRestartKind::GoalKick) => SoccerSetPlayRoutineKind::GoalKickBuildOut,
+            Some(BallRestartKind::CornerKick) => SoccerSetPlayRoutineKind::CornerFarPost,
+            Some(BallRestartKind::FreeKick) => {
+                let (width, length) = sane_pitch_dimensions(
+                    self.config.field_width_yards,
+                    self.config.field_length_yards,
+                );
+                let goal = Vec2::new(width * 0.5, team.goal_y(length));
+                if restart_label != "indirect-free-kick" && spot.distance(goal) <= 32.0 {
+                    SoccerSetPlayRoutineKind::FreeKickDirectShot
+                } else {
+                    SoccerSetPlayRoutineKind::FreeKickFarPostCross
+                }
+            }
+        }
+    }
+
+    fn activate_set_play_for_restart(
+        &mut self,
+        restart_label: &str,
+        kind: Option<BallRestartKind>,
+        team: Team,
+        spot: Vec2,
+        taker: Option<usize>,
+    ) {
+        let hint = self.matching_set_play_hint(team, restart_label);
+        let routine = self.select_set_play_routine(restart_label, kind, team, spot, hint.as_ref());
+        let call =
+            self.build_set_play_call(restart_label, routine, team, spot, taker, hint.clone());
+        self.apply_set_play_starting_positions(&call, spot);
+        self.active_set_play = Some(call.clone());
+        self.events.push(MatchEvent {
+            tick: self.tick,
+            clock_seconds: self.clock_seconds,
+            kind: "set-play".to_string(),
+            team: Some(team),
+            player_id: taker,
+            description: format!(
+                "{} set play: {} from {}",
+                team.label(),
+                call.routine.as_label(),
+                call.restart
+            ),
+        });
+    }
+
+    fn apply_set_play_starting_positions(&mut self, call: &SoccerSetPlayCall, spot: Vec2) {
+        if !matches!(
+            call.routine,
+            SoccerSetPlayRoutineKind::FreeKickFarPostCross
+                | SoccerSetPlayRoutineKind::FreeKickDirectShot
+                | SoccerSetPlayRoutineKind::CornerFarPost
+        ) {
+            return;
+        }
+
+        let (width, length) = sane_pitch_dimensions(
+            self.config.field_width_yards,
+            self.config.field_length_yards,
+        );
+        let dir = call.team.attack_dir();
+        let goal = Vec2::new(width * 0.5, call.team.goal_y(length));
+        let to_goal = (goal - spot).normalized();
+        let lateral = Vec2::new(-to_goal.y, to_goal.x).normalized();
+        for assignment in call.assignments.iter() {
+            if assignment.role == SoccerSetPlayAssignmentRole::Taker {
+                self.set_dead_ball_player_position(assignment.player_id, spot);
+                continue;
+            }
+            if self
+                .players
+                .iter()
+                .find(|player| player.id == assignment.player_id)
+                .map(|player| player.team)
+                != Some(call.team)
+            {
+                continue;
+            }
+
+            let side = if assignment.target.x >= width * 0.5 {
+                1.0
+            } else {
+                -1.0
+            };
+            let start = match assignment.role {
+                SoccerSetPlayAssignmentRole::PrimaryRunner => {
+                    assignment.target - Vec2::new(0.0, dir * 13.0) + lateral * side * 2.8
+                }
+                SoccerSetPlayAssignmentRole::SecondaryRunner => {
+                    assignment.target - Vec2::new(0.0, dir * 10.5) - lateral * side * 2.2
+                }
+                SoccerSetPlayAssignmentRole::Screen => assignment.target - to_goal * 5.0,
+                SoccerSetPlayAssignmentRole::Outlet => {
+                    assignment.target - Vec2::new(0.0, dir * 7.0)
+                }
+                SoccerSetPlayAssignmentRole::Safety
+                | SoccerSetPlayAssignmentRole::Wall
+                | SoccerSetPlayAssignmentRole::Marker
+                | SoccerSetPlayAssignmentRole::Taker => assignment.target,
+            }
+            .clamp_to_pitch(width, length);
+            self.set_dead_ball_player_position(assignment.player_id, start);
+        }
+    }
+
+    fn build_set_play_call(
+        &self,
+        restart_label: &str,
+        routine: SoccerSetPlayRoutineKind,
+        team: Team,
+        spot: Vec2,
+        taker: Option<usize>,
+        vector_hint: Option<SoccerSetPlayVectorHint>,
+    ) -> SoccerSetPlayCall {
+        let (width, length) = sane_pitch_dimensions(
+            self.config.field_width_yards,
+            self.config.field_length_yards,
+        );
+        let dir = team.attack_dir();
+        let goal_y = team.goal_y(length);
+        let own_goal_y = team.other().goal_y(length);
+        let goal = Vec2::new(width * 0.5, goal_y);
+        let side_sign = if spot.x <= width * 0.5 { 1.0 } else { -1.0 };
+        let mut assignments = Vec::new();
+        let mut add_assignment = |player_id: Option<usize>,
+                                  role: SoccerSetPlayAssignmentRole,
+                                  target: Vec2,
+                                  release_after_seconds: f64| {
+            if let Some(player_id) = player_id {
+                let release_after_seconds = if release_after_seconds.is_finite() {
+                    release_after_seconds.clamp(0.0, SOCCER_SET_PLAY_MAX_RELEASE_DELAY_SECONDS)
+                } else {
+                    0.0
+                };
+                assignments.push(SoccerSetPlayAssignment {
+                    player_id,
+                    role,
+                    target: finite_pitch_point(target, width, length, spot),
+                    release_after_seconds,
+                });
+            }
+        };
+
+        add_assignment(taker, SoccerSetPlayAssignmentRole::Taker, spot, 0.0);
+
+        let teammates = self.restart_team_ids(team, false, taker);
+        let forwards = self.set_play_role_ids(team, PlayerRole::Forward, taker);
+        let midfielders = self.set_play_role_ids(team, PlayerRole::Midfielder, taker);
+        let defenders = self.set_play_role_ids(team, PlayerRole::Defender, taker);
+        let opponents = self.restart_team_ids(team.other(), false, None);
+
+        let primary_attacker = forwards
+            .first()
+            .copied()
+            .or_else(|| midfielders.first().copied())
+            .or_else(|| teammates.first().copied());
+        let secondary_attacker = forwards
+            .get(1)
+            .copied()
+            .or_else(|| midfielders.get(1).copied())
+            .or_else(|| teammates.get(1).copied());
+        let outlet = midfielders
+            .first()
+            .copied()
+            .or_else(|| defenders.first().copied())
+            .or_else(|| teammates.first().copied());
+        let safety = defenders
+            .last()
+            .copied()
+            .or_else(|| midfielders.last().copied())
+            .or_else(|| teammates.last().copied());
+
+        let (release_kind, release_player, release_power) = match routine {
+            SoccerSetPlayRoutineKind::KickoffPattern => {
+                let support = midfielders
+                    .first()
+                    .copied()
+                    .or_else(|| teammates.first().copied());
+                add_assignment(
+                    support,
+                    SoccerSetPlayAssignmentRole::Outlet,
+                    Vec2::new(width * 0.5 + side_sign * 7.0, length * 0.5 - dir * 2.5),
+                    0.1,
+                );
+                add_assignment(
+                    primary_attacker,
+                    SoccerSetPlayAssignmentRole::PrimaryRunner,
+                    Vec2::new(width * 0.50, length * 0.5 + dir * 18.0),
+                    0.5,
+                );
+                (SoccerSetPlayReleaseKind::Pass, support, 0.54)
+            }
+            SoccerSetPlayRoutineKind::ThrowInTriangle => {
+                let inside_x = (spot.x + side_sign * 8.0).clamp(4.0, width - 4.0);
+                add_assignment(
+                    primary_attacker,
+                    SoccerSetPlayAssignmentRole::PrimaryRunner,
+                    Vec2::new(inside_x, spot.y + dir * 7.0),
+                    0.25,
+                );
+                add_assignment(
+                    secondary_attacker,
+                    SoccerSetPlayAssignmentRole::SecondaryRunner,
+                    Vec2::new(inside_x + side_sign * 8.0, spot.y - dir * 5.0),
+                    0.35,
+                );
+                add_assignment(
+                    outlet,
+                    SoccerSetPlayAssignmentRole::Outlet,
+                    Vec2::new(width * 0.5, spot.y + dir * 13.0),
+                    0.4,
+                );
+                (
+                    SoccerSetPlayReleaseKind::AerialPass,
+                    primary_attacker.or(outlet),
+                    0.60,
+                )
+            }
+            SoccerSetPlayRoutineKind::GoalKickBuildOut => {
+                let left_back = defenders.first().copied().or(outlet);
+                let right_back = defenders.last().copied().or(outlet);
+                add_assignment(
+                    left_back,
+                    SoccerSetPlayAssignmentRole::Outlet,
+                    Vec2::new(width * 0.22, own_goal_y + dir * 18.0),
+                    0.0,
+                );
+                add_assignment(
+                    right_back,
+                    SoccerSetPlayAssignmentRole::Outlet,
+                    Vec2::new(width * 0.78, own_goal_y + dir * 18.0),
+                    0.0,
+                );
+                add_assignment(
+                    outlet,
+                    SoccerSetPlayAssignmentRole::PrimaryRunner,
+                    Vec2::new(width * 0.50, own_goal_y + dir * 30.0),
+                    0.0,
+                );
+                (
+                    SoccerSetPlayReleaseKind::Pass,
+                    left_back.or(right_back).or(outlet),
+                    0.64,
+                )
+            }
+            SoccerSetPlayRoutineKind::CornerFarPost => {
+                let far_post_x = if spot.x <= width * 0.5 {
+                    width * 0.62
+                } else {
+                    width * 0.38
+                };
+                add_assignment(
+                    primary_attacker,
+                    SoccerSetPlayAssignmentRole::PrimaryRunner,
+                    Vec2::new(far_post_x, goal_y - dir * 4.5),
+                    1.10,
+                );
+                add_assignment(
+                    secondary_attacker,
+                    SoccerSetPlayAssignmentRole::SecondaryRunner,
+                    Vec2::new(width * 0.50, goal_y - dir * 8.0),
+                    0.90,
+                );
+                add_assignment(
+                    safety,
+                    SoccerSetPlayAssignmentRole::Safety,
+                    Vec2::new(width * 0.50, goal_y - dir * 28.0),
+                    0.2,
+                );
+                (
+                    SoccerSetPlayReleaseKind::AerialPass,
+                    primary_attacker.or(secondary_attacker),
+                    0.82,
+                )
+            }
+            SoccerSetPlayRoutineKind::FreeKickDirectShot => {
+                let to_goal = (goal - spot).normalized();
+                let lateral = Vec2::new(-to_goal.y, to_goal.x).normalized();
+                add_assignment(
+                    primary_attacker,
+                    SoccerSetPlayAssignmentRole::Screen,
+                    spot + lateral * 4.5 + to_goal * 3.0,
+                    0.55,
+                );
+                add_assignment(
+                    secondary_attacker,
+                    SoccerSetPlayAssignmentRole::PrimaryRunner,
+                    Vec2::new(width * 0.50, goal_y - dir * 6.5),
+                    1.00,
+                );
+                add_assignment(
+                    safety,
+                    SoccerSetPlayAssignmentRole::Safety,
+                    spot - to_goal * 10.0,
+                    0.1,
+                );
+                for (player_id, offset) in opponents
+                    .iter()
+                    .copied()
+                    .take(4)
+                    .zip([-3.0, -1.0, 1.0, 3.0])
+                {
+                    add_assignment(
+                        Some(player_id),
+                        SoccerSetPlayAssignmentRole::Wall,
+                        spot + to_goal * 10.0 + lateral * offset,
+                        0.0,
+                    );
+                }
+                (SoccerSetPlayReleaseKind::Shoot, None, 0.88)
+            }
+            SoccerSetPlayRoutineKind::FreeKickFarPostCross => {
+                let far_post_x = if spot.x <= width * 0.5 {
+                    width * 0.62
+                } else {
+                    width * 0.38
+                };
+                add_assignment(
+                    primary_attacker,
+                    SoccerSetPlayAssignmentRole::PrimaryRunner,
+                    Vec2::new(far_post_x, goal_y - dir * 4.5),
+                    1.25,
+                );
+                add_assignment(
+                    secondary_attacker,
+                    SoccerSetPlayAssignmentRole::SecondaryRunner,
+                    Vec2::new(width * 0.46, goal_y - dir * 8.0),
+                    1.05,
+                );
+                add_assignment(
+                    outlet,
+                    SoccerSetPlayAssignmentRole::Screen,
+                    spot + Vec2::new(side_sign * 5.0, -dir * 2.0),
+                    0.45,
+                );
+                add_assignment(
+                    safety,
+                    SoccerSetPlayAssignmentRole::Safety,
+                    Vec2::new(width * 0.50, spot.y - dir * 12.0),
+                    0.1,
+                );
+                (
+                    SoccerSetPlayReleaseKind::AerialPass,
+                    primary_attacker.or(secondary_attacker),
+                    0.78,
+                )
+            }
+        };
+
+        let dt = self.config.dt_seconds.max(1e-6);
+        let duration_ticks = (SOCCER_SET_PLAY_WINDOW_SECONDS / dt).ceil() as u64;
+        SoccerSetPlayCall {
+            team,
+            restart: restart_label.to_string(),
+            routine,
+            started_tick: self.tick,
+            started_clock_seconds: self.clock_seconds,
+            expires_tick: self.tick.saturating_add(duration_ticks),
+            expires_clock_seconds: self.clock_seconds + SOCCER_SET_PLAY_WINDOW_SECONDS,
+            assignments,
+            release_kind,
+            release_player,
+            release_power,
+            vector_hint,
         }
     }
 
@@ -16877,6 +17715,13 @@ impl SoccerMatch {
             (holder_after_position.y - holder_before_position.y) * holder_team.attack_dir();
         let retained_attack = after.possession_team() == Some(holder_team);
         let dt = self.config.dt_seconds.max(0.0);
+        let holder_action = self
+            .players
+            .get(holder_id)
+            .and_then(|player| player.last_decision.as_ref())
+            .map(|decision| normalize_soccer_action_label(&decision.action))
+            .unwrap_or("hold");
+        let holder_dribbling = is_dribble_action_label(holder_action);
 
         let mut delay_rewards = Vec::new();
         let mut beat_penalties = Vec::new();
@@ -16921,7 +17766,8 @@ impl SoccerMatch {
             let attacker_ahead = (holder_after_position.y - defender_after_position.y)
                 * holder_team.attack_dir()
                 > 0.35;
-            let beaten = active_defense
+            let beaten = holder_dribbling
+                && active_defense
                 && retained_attack
                 && distance_to_holder <= 5.2
                 && lateral_gap <= 5.0
@@ -16942,8 +17788,15 @@ impl SoccerMatch {
         for defender_id in delay_rewards {
             self.record_reward_event_at(before.tick, defender_id, 2.0);
         }
+        if !beat_penalties.is_empty() {
+            self.record_reward_event_at(before.tick, holder_id, SIDE_STEP_BEAT_REWARD_POINTS);
+        }
         for defender_id in beat_penalties {
-            self.record_reward_event_at(before.tick, defender_id, -3.0);
+            self.record_reward_event_at(
+                before.tick,
+                defender_id,
+                -BEATEN_BY_DRIBBLE_PENALTY_POINTS,
+            );
         }
     }
 
@@ -17013,6 +17866,7 @@ impl SoccerMatch {
             })
             .map(|p| p.id);
         self.arrange_kickoff_shape(kickoff_team, kickoff, center);
+        self.activate_set_play_for_restart("kickoff", None, kickoff_team, center, kickoff);
         self.ball.position = center;
         self.ball.velocity = Vec2::zero();
         self.ball.acceleration = Vec2::zero();
@@ -17078,6 +17932,7 @@ impl SoccerMatch {
             })
             .map(|p| p.id);
         self.arrange_kickoff_shape(kickoff_team, kickoff, center);
+        self.activate_set_play_for_restart("kickoff", None, kickoff_team, center, kickoff);
         self.ball.position = center;
         self.ball.velocity = Vec2::zero();
         self.ball.acceleration = Vec2::zero();
@@ -17781,7 +18636,7 @@ impl SoccerRealtimeSession {
             if let Some(player_id) = last_moment_action_player(&actions, |action| {
                 matches!(
                     normalize_soccer_action_label(action),
-                    "dribble" | "side-step"
+                    "dribble" | "side-step" | "left-cut" | "right-cut" | "nutmeg"
                 )
             }) {
                 labels.push(("great_dribble_to_goal", Some(player_id)));
@@ -17846,7 +18701,13 @@ impl SoccerRealtimeSession {
                 is_pass_like_action(action)
                     || matches!(
                         action,
-                        "dribble" | "side-step" | "shoot" | "first-time-shot"
+                        "dribble"
+                            | "side-step"
+                            | "left-cut"
+                            | "right-cut"
+                            | "nutmeg"
+                            | "shoot"
+                            | "first-time-shot"
                     )
             })
             .map(|transition| SoccerMomentActionMarker {
@@ -18498,7 +19359,7 @@ fn semantic_tracking_ball_action(action: &str) -> Option<String> {
     match normalized {
         "pass" | "aerial-pass" | "first-time-pass" | "clearance" | "route-one" | "shoot"
         | "kickoff" | "throw-in" | "goal-kick" | "corner-kick" | "free-kick" | "offside"
-        | "goal" | "save" | "shot-blocked" => Some(normalized.to_string()),
+        | "goal" | "save" | "shot-blocked" | "set-play-run" => Some(normalized.to_string()),
         _ => None,
     }
 }
@@ -19677,6 +20538,120 @@ pub fn run_learning_episode(config: MatchConfig) -> SoccerLearningDataset {
         config,
         summary: sim.summary(),
         transitions: sim.learning_transitions,
+        events: sim.events,
+    }
+}
+
+fn default_set_play_spot(
+    config: &MatchConfig,
+    restart: SoccerSetPlayRestartKind,
+    team: Team,
+) -> Vec2 {
+    let (width, length) =
+        sane_pitch_dimensions(config.field_width_yards, config.field_length_yards);
+    let dir = team.attack_dir();
+    let spot = match restart {
+        SoccerSetPlayRestartKind::Kickoff => Vec2::new(width * 0.5, length * 0.5),
+        SoccerSetPlayRestartKind::ThrowIn => Vec2::new(
+            if team == Team::Home { width } else { 0.0 },
+            length * 0.5 + dir * 18.0,
+        ),
+        SoccerSetPlayRestartKind::GoalKick => {
+            Vec2::new(width * 0.5, team.other().goal_y(length) + dir * 6.0)
+        }
+        SoccerSetPlayRestartKind::CornerKick => Vec2::new(
+            if team == Team::Home { width } else { 0.0 },
+            team.goal_y(length),
+        ),
+        SoccerSetPlayRestartKind::DirectFreeKick | SoccerSetPlayRestartKind::IndirectFreeKick => {
+            Vec2::new(width * 0.5, team.goal_y(length) - dir * 25.0)
+        }
+    };
+    finite_pitch_point(spot, width, length, Vec2::new(width * 0.5, length * 0.5))
+}
+
+fn sanitized_set_play_trial_config(mut config: MatchConfig) -> MatchConfig {
+    config.dt_seconds = if config.dt_seconds.is_finite() && config.dt_seconds > 0.0 {
+        config.dt_seconds.max(SOCCER_SET_PLAY_MIN_TRIAL_DT_SECONDS)
+    } else {
+        DEFAULT_DT_SECONDS
+    };
+    if !config.duration_seconds.is_finite() || config.duration_seconds < 0.0 {
+        config.duration_seconds = 0.0;
+    }
+    if !config.half_duration_seconds.is_finite() || config.half_duration_seconds < 0.0 {
+        config.half_duration_seconds = 0.0;
+    }
+    if !config.period_break_recovery_seconds.is_finite()
+        || config.period_break_recovery_seconds < 0.0
+    {
+        config.period_break_recovery_seconds = 0.0;
+    }
+    let (width, length) =
+        sane_pitch_dimensions(config.field_width_yards, config.field_length_yards);
+    config.field_width_yards = width;
+    config.field_length_yards = length;
+    if !config.goal_width_yards.is_finite() || config.goal_width_yards <= 0.0 {
+        config.goal_width_yards = DEFAULT_GOAL_WIDTH_YARDS.min(width * 0.5);
+    } else {
+        config.goal_width_yards = config.goal_width_yards.min(width * 0.8).max(1.0);
+    }
+    config
+}
+
+pub fn run_soccer_set_play_trial(request: SoccerSetPlayTrialRequest) -> SoccerSetPlayTrialResult {
+    let mut config = sanitized_set_play_trial_config(request.config.clone());
+    let duration_seconds = if request.duration_seconds.is_finite() && request.duration_seconds > 0.0
+    {
+        request
+            .duration_seconds
+            .min(SOCCER_SET_PLAY_MAX_TRIAL_SECONDS)
+    } else {
+        SOCCER_SET_PLAY_WINDOW_SECONDS
+    };
+    let dt = config.dt_seconds;
+    config.duration_seconds = config.duration_seconds.max(duration_seconds + dt);
+    let mut sim = SoccerMatch::default_11v11(config.clone());
+    if config.learning_enabled && sim.team_policies.is_none() {
+        sim.set_team_policies(SoccerTeamQPolicies::new(SoccerQPolicyOptions::default()));
+    }
+    if let Some(hint) = request.vector_hint.clone() {
+        sim.set_coach_set_play_hint(hint);
+    }
+    let spot = request
+        .spot
+        .unwrap_or_else(|| default_set_play_spot(&config, request.restart, request.team));
+    let start_tick = sim.tick;
+    let start_clock = sim.clock_seconds;
+    let start_score = match request.team {
+        Team::Home => sim.score_home,
+        Team::Away => sim.score_away,
+    };
+    sim.stage_set_play_restart(request.restart, request.team, spot);
+    let routine = sim.active_set_play.as_ref().map(|call| call.routine);
+    let total_ticks = ((duration_seconds / dt).ceil() as u64).min(SOCCER_SET_PLAY_MAX_TRIAL_TICKS);
+    for _ in 0..total_ticks {
+        if sim.is_done() {
+            break;
+        }
+        sim.run_time_step();
+    }
+    let end_score = match request.team {
+        Team::Home => sim.score_home,
+        Team::Away => sim.score_away,
+    };
+    let score_delta_for_team = end_score as i32 - start_score as i32;
+    let summary = sim.summary();
+    let learning = sim.learning_snapshot();
+    SoccerSetPlayTrialResult {
+        restart: request.restart,
+        routine,
+        scored: score_delta_for_team > 0,
+        score_delta_for_team,
+        ticks: sim.tick.saturating_sub(start_tick),
+        simulated_seconds: sim.clock_seconds - start_clock,
+        summary,
+        learning,
         events: sim.events,
     }
 }
@@ -21511,6 +22486,9 @@ fn normalize_tracking_ball_action(raw: &str) -> Result<Option<String>, String> {
         "firsttimeheader" | "header" => "first-time-header",
         "control" | "trap" | "chestcontrol" => "control-touch",
         "sidestep" | "sidestepdribble" | "sidestepmove" => "side-step",
+        "leftcut" | "leftcutdribble" | "cutleft" => "left-cut",
+        "rightcut" | "rightcutdribble" | "cutright" => "right-cut",
+        "nutmeg" | "nutmegged" | "meg" => "nutmeg",
         "freekick" => "free-kick",
         "goalkick" => "goal-kick",
         "cornerkick" => "corner-kick",
@@ -21520,9 +22498,11 @@ fn normalize_tracking_ball_action(raw: &str) -> Result<Option<String>, String> {
     match action {
         "pass" | "aerial-pass" | "first-time-pass" | "clearance" | "route-one" | "shoot"
         | "first-time-shot" | "first-time-header" | "control-touch" | "dribble" | "side-step"
-        | "space" | "defend" | "tackle" | "recover" | "hold" | "kickoff" | "throw-in"
-        | "goal-kick" | "corner-kick" | "free-kick" | "offside" | "goal" | "save"
-        | "shot-blocked" => Ok(Some(action.to_string())),
+        | "left-cut" | "right-cut" | "nutmeg" | "set-play-run" | "space" | "defend" | "tackle"
+        | "recover" | "hold" | "kickoff" | "throw-in" | "goal-kick" | "corner-kick"
+        | "free-kick" | "offside" | "goal" | "save" | "shot-blocked" => {
+            Ok(Some(action.to_string()))
+        }
         _ => Err("expected a known soccer action label".to_string()),
     }
 }
@@ -21853,7 +22833,7 @@ fn tracking_action_target_trace(
         }
         "clearance" | "route-one" => (after.ball.position, None),
         "shoot" => (goal, None),
-        "dribble" | "side-step" | "space" | "defend" => (
+        "dribble" | "side-step" | "left-cut" | "right-cut" | "nutmeg" | "space" | "defend" => (
             next_player.map(|p| p.position).unwrap_or(player.position),
             None,
         ),
@@ -21957,7 +22937,12 @@ fn soccer_moment_action_matches_label(action: &SoccerMomentActionMarker, label: 
     match label {
         "great_shot_to_goal" => matches!(action, "shoot" | "first-time-shot"),
         "great_pass_to_goal" => is_pass_like_action(action),
-        "great_dribble_to_goal" => matches!(action, "dribble" | "side-step"),
+        "great_dribble_to_goal" => {
+            matches!(
+                action,
+                "dribble" | "side-step" | "left-cut" | "right-cut" | "nutmeg"
+            )
+        }
         _ => false,
     }
 }
@@ -22030,7 +23015,7 @@ fn soccer_moment_action_target_trace(
             (point, target_player)
         }
         "shoot" | "first-time-shot" => (goal, None),
-        "dribble" | "side-step" | "space" | "defend" => (
+        "dribble" | "side-step" | "left-cut" | "right-cut" | "nutmeg" | "space" | "defend" => (
             next_player.map(|p| p.position).unwrap_or(player.position),
             None,
         ),
@@ -22227,21 +23212,57 @@ fn neutral_tracking_skill_profile(role: PlayerRole) -> SkillProfile {
     }
 }
 
-fn tackle_success_probability(defender: &SkillProfile, attacker: &SkillProfile) -> f64 {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DefenderDribbleResponse {
+    HoldUp,
+    Commit,
+}
+
+fn dribble_dispossession_probability(
+    defender: &SkillProfile,
+    attacker: &SkillProfile,
+    response: DefenderDribbleResponse,
+) -> f64 {
+    let base = match response {
+        DefenderDribbleResponse::HoldUp => HOLD_UP_DISPOSSESSION_PROBABILITY,
+        DefenderDribbleResponse::Commit => COMMIT_DISPOSSESSION_PROBABILITY,
+    };
     let ball_control =
         ability01(attacker.dribbling) * 0.70 + ability01(attacker.first_touch) * 0.30;
     let defensive_pressure =
         ability01(defender.defending) * 0.82 + ability01(defender.aggression) * 0.18;
-    (defensive_pressure / (defensive_pressure + ball_control)).clamp(0.18, 0.82)
+    let skill_edge = defensive_pressure - ball_control;
+    match response {
+        DefenderDribbleResponse::HoldUp => (base + skill_edge * 0.16).clamp(0.06, 0.42),
+        DefenderDribbleResponse::Commit => (base + skill_edge * 0.22).clamp(0.24, 0.76),
+    }
 }
 
-fn side_step_escape_probability(attacker: &SkillProfile, defender: &SkillProfile) -> f64 {
-    let attacker_evasion = ability01(attacker.dribbling) * 0.54
-        + ability01(attacker.acceleration) * 0.26
+fn dribble_beat_probability(
+    kind: DribbleMoveKind,
+    attacker: &SkillProfile,
+    defender: &SkillProfile,
+    response: DefenderDribbleResponse,
+) -> f64 {
+    let attacker_evasion = ability01(attacker.dribbling) * 0.52
+        + ability01(attacker.acceleration) * 0.28
         + ability01(attacker.first_touch) * 0.20;
-    let defender_commitment =
-        ability01(defender.defending) * 0.62 + ability01(defender.aggression) * 0.38;
-    (attacker_evasion / (attacker_evasion + defender_commitment * 0.88)).clamp(0.20, 0.78)
+    let defender_balance =
+        ability01(defender.defending) * 0.68 + ability01(defender.aggression) * 0.32;
+    let kind_multiplier = match kind {
+        DribbleMoveKind::LeftCut | DribbleMoveKind::RightCut => 1.0,
+        DribbleMoveKind::Nutmeg => 0.82,
+    };
+    let response_multiplier = match response {
+        DefenderDribbleResponse::HoldUp => 1.0,
+        DefenderDribbleResponse::Commit => COMMIT_DRIBBLE_BEAT_MULTIPLIER,
+    };
+    let raw = attacker_evasion / (attacker_evasion + defender_balance * 0.94);
+    (raw * kind_multiplier * response_multiplier).clamp(0.10, 0.88)
+}
+
+fn tackle_success_probability(defender: &SkillProfile, attacker: &SkillProfile) -> f64 {
+    dribble_dispossession_probability(defender, attacker, DefenderDribbleResponse::Commit)
 }
 
 fn tackle_foul_probability(
@@ -23863,6 +24884,9 @@ fn learned_action_label_is_legal(action: &str, snapshot: &WorldSnapshot, player_
         }
         "control-touch" => observation.has_ball && observation.first_touch_available,
         "dribble" => observation.has_ball,
+        "left-cut" | "right-cut" | "nutmeg" => {
+            observation.has_ball && observation.nearest_opponent_distance <= 5.6
+        }
         "side-step" => {
             observation.has_ball
                 && observation.nearest_opponent_distance <= 4.6
@@ -23927,7 +24951,7 @@ fn classify_movement_gait(team: Team, to_target: Vec2, sprint: bool) -> Movement
         }
     } else if sprint && distance > 1.0 {
         MovementGait::Sprint
-    } else if lateral_dominant && distance > 1.2 && distance <= 7.0 {
+    } else if lateral_dominant && distance > 0.75 && distance <= 7.0 {
         MovementGait::SideStep
     } else if distance <= 1.8 {
         MovementGait::Walk
@@ -26960,6 +27984,445 @@ mod tests {
     }
 
     #[test]
+    fn free_kick_set_play_hint_stages_fresh_far_post_runs() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 4.0,
+            max_human_players: 0,
+            learning_enabled: false,
+            ..Default::default()
+        });
+        sim.set_coach_set_play_hint(SoccerSetPlayVectorHint {
+            team: Team::Home,
+            restart: "free-kick".to_string(),
+            routine: SoccerSetPlayRoutineKind::FreeKickFarPostCross,
+            score: 0.93,
+            source_moment_id: Some("moment-far-post".to_string()),
+            label: Some("vector-neighbor".to_string()),
+        });
+
+        sim.stage_set_play_restart(
+            SoccerSetPlayRestartKind::DirectFreeKick,
+            Team::Home,
+            Vec2::new(40.0, 95.0),
+        );
+
+        let call = sim.active_set_play.clone().expect("active set play");
+        assert_eq!(call.routine, SoccerSetPlayRoutineKind::FreeKickFarPostCross);
+        assert_eq!(
+            call.vector_hint
+                .as_ref()
+                .and_then(|hint| hint.source_moment_id.as_deref()),
+            Some("moment-far-post")
+        );
+        let primary = call
+            .assignments
+            .iter()
+            .find(|assignment| assignment.role == SoccerSetPlayAssignmentRole::PrimaryRunner)
+            .expect("primary runner");
+        let start = sim.players[primary.player_id].position;
+        assert!(
+            start.distance(primary.target) > 7.0,
+            "runner should start away from ideal finish target: start={start:?} target={:?}",
+            primary.target
+        );
+        assert!(
+            start.y < primary.target.y,
+            "home runner should begin deeper than the ideal far-post target"
+        );
+
+        let taker = call
+            .assignments
+            .iter()
+            .find(|assignment| assignment.role == SoccerSetPlayAssignmentRole::Taker)
+            .map(|assignment| assignment.player_id)
+            .expect("taker");
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let observation = snapshot.observation_for(taker);
+        let early = sim.players[taker]
+            .restart_release_action(&snapshot, &observation, "free-kick")
+            .expect("early set-play action");
+        assert!(matches!(early.0, SoccerAction::MoveTo(_)));
+
+        let mut later = snapshot.clone();
+        later.clock_seconds = call.started_clock_seconds + 1.30;
+        let release = sim.players[taker]
+            .restart_release_action(&later, &observation, "free-kick")
+            .expect("delayed set-play release");
+        assert!(matches!(
+            release.0,
+            SoccerAction::Pass {
+                target_player,
+                flight: PassFlight::Aerial,
+                ..
+            } if target_player == call.release_player
+        ));
+    }
+
+    #[test]
+    fn set_play_runners_chase_ideal_targets_under_physics() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 2.0,
+            max_human_players: 0,
+            learning_enabled: false,
+            ..Default::default()
+        });
+        sim.set_coach_set_play_hint(SoccerSetPlayVectorHint {
+            team: Team::Home,
+            restart: "direct-free-kick".to_string(),
+            routine: SoccerSetPlayRoutineKind::FreeKickFarPostCross,
+            score: 0.8,
+            source_moment_id: None,
+            label: None,
+        });
+        sim.stage_set_play_restart(
+            SoccerSetPlayRestartKind::DirectFreeKick,
+            Team::Home,
+            Vec2::new(40.0, 95.0),
+        );
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let assignment = snapshot
+            .active_set_play
+            .as_ref()
+            .and_then(|call| {
+                call.assignments.iter().find(|assignment| {
+                    assignment.role == SoccerSetPlayAssignmentRole::PrimaryRunner
+                })
+            })
+            .cloned()
+            .expect("primary runner assignment");
+        let mut runner = sim.players[assignment.player_id].clone();
+        let mut rng = mulberry32(9876);
+        let intent = runner.run_time_step(&snapshot, None, None, &mut rng);
+
+        match intent.action {
+            SoccerAction::MoveTo(target) => assert!(target.distance(assignment.target) < 1e-9),
+            other => panic!("expected set-play run to ideal target, got {other:?}"),
+        }
+        let decision = runner.last_decision.expect("runner decision");
+        assert_eq!(decision.action, "set-play-run");
+        assert!(decision
+            .operation_order
+            .iter()
+            .any(|step| step == "primary-runner"));
+    }
+
+    #[test]
+    fn set_play_trial_runs_fifteen_seconds_and_keeps_learning_switches() {
+        let result = run_soccer_set_play_trial(SoccerSetPlayTrialRequest {
+            config: MatchConfig {
+                duration_seconds: 20.0,
+                max_human_players: 0,
+                learning_enabled: true,
+                neural_learning: SoccerNeuralLearningConfig {
+                    enabled: false,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            restart: SoccerSetPlayRestartKind::DirectFreeKick,
+            team: Team::Home,
+            spot: Some(Vec2::new(40.0, 95.0)),
+            duration_seconds: SOCCER_SET_PLAY_WINDOW_SECONDS,
+            vector_hint: Some(SoccerSetPlayVectorHint {
+                team: Team::Home,
+                restart: "free-kick".to_string(),
+                routine: SoccerSetPlayRoutineKind::FreeKickFarPostCross,
+                score: 0.9,
+                source_moment_id: Some("trial-neighbor".to_string()),
+                label: None,
+            }),
+        });
+
+        assert_eq!(
+            result.routine,
+            Some(SoccerSetPlayRoutineKind::FreeKickFarPostCross)
+        );
+        assert_eq!(result.ticks, 150);
+        assert!(result.simulated_seconds >= SOCCER_SET_PLAY_WINDOW_SECONDS - 1e-9);
+        assert!(result.learning.learning_enabled);
+        assert!(result.learning.adversarial_learning_enabled);
+    }
+
+    #[test]
+    fn set_play_hints_accept_aliases_and_indirect_free_kicks_block_direct_shots() {
+        let parsed: SoccerSetPlayTrialRequest =
+            serde_json::from_str("{}").expect("default set play trial request");
+        assert_eq!(parsed.restart, SoccerSetPlayRestartKind::DirectFreeKick);
+        assert_eq!(parsed.team, Team::Home);
+
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            max_human_players: 0,
+            learning_enabled: false,
+            ..Default::default()
+        });
+        sim.set_coach_set_play_hint(SoccerSetPlayVectorHint {
+            team: Team::Home,
+            restart: "directFreeKick".to_string(),
+            routine: SoccerSetPlayRoutineKind::FreeKickFarPostCross,
+            score: 0.7,
+            source_moment_id: Some("alias".to_string()),
+            label: None,
+        });
+        sim.stage_set_play_restart(
+            SoccerSetPlayRestartKind::DirectFreeKick,
+            Team::Home,
+            Vec2::new(40.0, 95.0),
+        );
+        let call = sim.active_set_play.as_ref().expect("direct free-kick call");
+        assert_eq!(call.routine, SoccerSetPlayRoutineKind::FreeKickFarPostCross);
+        assert_eq!(
+            call.vector_hint.as_ref().map(|hint| hint.restart.as_str()),
+            Some("direct-free-kick")
+        );
+
+        let mut indirect = SoccerMatch::default_11v11(MatchConfig {
+            max_human_players: 0,
+            learning_enabled: false,
+            ..Default::default()
+        });
+        indirect.set_coach_set_play_hint(SoccerSetPlayVectorHint {
+            team: Team::Home,
+            restart: "indirect_free_kick".to_string(),
+            routine: SoccerSetPlayRoutineKind::FreeKickDirectShot,
+            score: 0.9,
+            source_moment_id: Some("unsafe-direct".to_string()),
+            label: None,
+        });
+        indirect.stage_set_play_restart(
+            SoccerSetPlayRestartKind::IndirectFreeKick,
+            Team::Home,
+            Vec2::new(40.0, 95.0),
+        );
+        assert_eq!(
+            indirect.active_set_play.as_ref().map(|call| call.routine),
+            Some(SoccerSetPlayRoutineKind::FreeKickFarPostCross)
+        );
+    }
+
+    #[test]
+    fn set_play_trial_caps_pathological_duration_requests() {
+        let result = run_soccer_set_play_trial(SoccerSetPlayTrialRequest {
+            config: MatchConfig {
+                duration_seconds: 600.0,
+                dt_seconds: 1.0,
+                max_human_players: 0,
+                learning_enabled: false,
+                ..Default::default()
+            },
+            restart: SoccerSetPlayRestartKind::DirectFreeKick,
+            team: Team::Home,
+            spot: Some(Vec2::new(40.0, 95.0)),
+            duration_seconds: 1_000.0,
+            vector_hint: None,
+        });
+
+        assert_eq!(result.ticks, SOCCER_SET_PLAY_MAX_TRIAL_SECONDS as u64);
+        assert!(result.simulated_seconds <= SOCCER_SET_PLAY_MAX_TRIAL_SECONDS + 1e-9);
+    }
+
+    #[test]
+    fn set_play_trial_sanitizes_malformed_config_and_spot() {
+        let result = run_soccer_set_play_trial(SoccerSetPlayTrialRequest {
+            config: MatchConfig {
+                duration_seconds: f64::NAN,
+                dt_seconds: 1e-9,
+                field_width_yards: f64::NAN,
+                field_length_yards: -10.0,
+                goal_width_yards: f64::INFINITY,
+                max_human_players: 0,
+                learning_enabled: false,
+                ..Default::default()
+            },
+            restart: SoccerSetPlayRestartKind::DirectFreeKick,
+            team: Team::Home,
+            spot: Some(Vec2::new(f64::NAN, f64::INFINITY)),
+            duration_seconds: 0.5,
+            vector_hint: None,
+        });
+
+        assert!(result.ticks <= SOCCER_SET_PLAY_MAX_TRIAL_TICKS);
+        assert!(result.ticks <= 25);
+        assert!(result.simulated_seconds.is_finite());
+        assert!(result
+            .events
+            .iter()
+            .any(|event| event.kind == "set-play"));
+    }
+
+    #[test]
+    fn staging_set_play_restart_clears_stale_live_ball_context() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            max_human_players: 0,
+            learning_enabled: false,
+            ..Default::default()
+        });
+        sim.pending_pass = Some(PendingPass {
+            team: Team::Home,
+            from: 5,
+            target: Some(9),
+            flight: PassFlight::Floor,
+            is_cross: false,
+            launch_tick: sim.tick,
+            origin: sim.players[5].position,
+            intended_target: sim.players[9].position,
+            distance_yards: sim.players[5].position.distance(sim.players[9].position),
+            receiver_openness: 0.8,
+            passer_skill: 0.7,
+            offside: None,
+        });
+        sim.pending_shot = Some(PendingShot {
+            team: Team::Home,
+            shooter: 5,
+            origin: sim.players[5].position,
+        });
+
+        sim.stage_set_play_restart(
+            SoccerSetPlayRestartKind::DirectFreeKick,
+            Team::Home,
+            Vec2::new(f64::NAN, 95.0),
+        );
+
+        assert!(sim.pending_pass.is_none());
+        assert!(sim.pending_shot.is_none());
+        assert!(sim.ball.position.x.is_finite());
+        assert!(sim.ball.position.y.is_finite());
+    }
+
+    #[test]
+    fn set_play_release_sanitizes_bad_target_and_power() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            max_human_players: 0,
+            learning_enabled: false,
+            ..Default::default()
+        });
+        sim.set_coach_set_play_hint(SoccerSetPlayVectorHint {
+            team: Team::Home,
+            restart: "free-kick".to_string(),
+            routine: SoccerSetPlayRoutineKind::FreeKickFarPostCross,
+            score: 0.9,
+            source_moment_id: None,
+            label: None,
+        });
+        sim.stage_set_play_restart(
+            SoccerSetPlayRestartKind::DirectFreeKick,
+            Team::Home,
+            Vec2::new(40.0, 95.0),
+        );
+        let taker = sim.ball.holder.expect("restart taker");
+        if let Some(call) = &mut sim.active_set_play {
+            call.release_player = Some(11);
+            call.release_power = f64::NAN;
+            call.started_clock_seconds = 0.0;
+        }
+        let mut snapshot = WorldSnapshot::from_match(&sim);
+        snapshot.clock_seconds = SOCCER_SET_PLAY_MAX_RELEASE_DELAY_SECONDS + 0.1;
+        let observation = snapshot.observation_for(taker);
+        let release = sim.players[taker]
+            .restart_release_action(&snapshot, &observation, "free-kick")
+            .expect("sanitized release");
+
+        match release.0 {
+            SoccerAction::Pass {
+                target_player,
+                power,
+                flight: PassFlight::Aerial,
+            } => {
+                assert_eq!(target_player, None);
+                assert!((power - 0.65).abs() < 1e-9);
+            }
+            other => panic!("expected sanitized aerial pass, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_set_play_hint_is_ignored() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            max_human_players: 0,
+            learning_enabled: false,
+            ..Default::default()
+        });
+        sim.set_coach_set_play_hint(SoccerSetPlayVectorHint {
+            team: Team::Home,
+            restart: "not-a-restart".to_string(),
+            routine: SoccerSetPlayRoutineKind::FreeKickFarPostCross,
+            score: 1.0,
+            source_moment_id: Some("bad".to_string()),
+            label: None,
+        });
+        sim.set_coach_set_play_hint(SoccerSetPlayVectorHint {
+            team: Team::Home,
+            restart: "free-kick".to_string(),
+            routine: SoccerSetPlayRoutineKind::FreeKickFarPostCross,
+            score: f64::NAN,
+            source_moment_id: Some("nan".to_string()),
+            label: None,
+        });
+
+        sim.stage_set_play_restart(
+            SoccerSetPlayRestartKind::DirectFreeKick,
+            Team::Home,
+            Vec2::new(40.0, 95.0),
+        );
+
+        assert!(sim
+            .active_set_play
+            .as_ref()
+            .and_then(|call| call.vector_hint.as_ref())
+            .is_none());
+    }
+
+    #[test]
+    fn movement_steers_around_head_on_body_lane() {
+        let mut open = SoccerMatch::default_11v11(MatchConfig {
+            max_human_players: 0,
+            seed: 991,
+            ..Default::default()
+        });
+        let runner = 5;
+        let blocker = 6;
+        open.players[runner].position = Vec2::new(40.0, 40.0);
+        open.players[runner].velocity = Vec2::zero();
+        open.players[blocker].position = Vec2::new(55.0, 43.0);
+        open.move_player_towards(runner, Vec2::new(40.0, 70.0), true);
+        let open_lateral = open.players[runner].velocity.x.abs();
+
+        let mut crowded = SoccerMatch::default_11v11(MatchConfig {
+            max_human_players: 0,
+            seed: 991,
+            ..Default::default()
+        });
+        crowded.players[runner].position = Vec2::new(40.0, 40.0);
+        crowded.players[runner].velocity = Vec2::zero();
+        crowded.players[blocker].position = Vec2::new(40.0, 43.0);
+        crowded.players[blocker].velocity = Vec2::new(0.0, -4.0);
+        crowded.move_player_towards(runner, Vec2::new(40.0, 70.0), true);
+
+        assert!(
+            crowded.players[runner].velocity.x.abs() > open_lateral + 0.01,
+            "runner should bias laterally around a body in the lane"
+        );
+        assert!(
+            crowded.players[runner].velocity.y < open.players[runner].velocity.y,
+            "runner should slow slightly for a head-on lane conflict"
+        );
+
+        let mut behind = SoccerMatch::default_11v11(MatchConfig {
+            max_human_players: 0,
+            seed: 991,
+            ..Default::default()
+        });
+        behind.players[runner].position = Vec2::new(40.0, 40.0);
+        behind.players[runner].velocity = Vec2::zero();
+        behind.players[blocker].position = Vec2::new(40.0, 36.0);
+        behind.players[blocker].velocity = Vec2::new(0.0, -4.0);
+        behind.move_player_towards(runner, Vec2::new(40.0, 70.0), true);
+        assert!(
+            behind.players[runner].velocity.x.abs() <= open_lateral + 0.01,
+            "runner should not swerve for a player behind the lane"
+        );
+    }
+
+    #[test]
     fn realtime_session_step_json_round_trips() {
         let mut session = SoccerRealtimeSession::new(MatchConfig {
             duration_seconds: 1.0,
@@ -28697,6 +30160,8 @@ mod tests {
         sim.ball.position = sim.players[attacker].position;
         sim.ball.last_touch_team = Some(Team::Home);
         let before = WorldSnapshot::from_match(&sim);
+        sim.players[attacker].last_decision =
+            Some(test_decision_trace(&before, attacker, "left-cut"));
         sim.players[defender].last_decision =
             Some(test_decision_trace(&before, defender, "defend"));
         sim.defensive_beat_clocks.insert(defender, 0.20);
@@ -31508,6 +32973,112 @@ mod tests {
     }
 
     #[test]
+    fn dribble_kinds_and_defensive_response_probabilities_match_1v1_contract() {
+        let mut rng = mulberry32(44_010);
+        let mut left = 0usize;
+        let mut right = 0usize;
+        let mut nutmeg = 0usize;
+        for _ in 0..10_000 {
+            match choose_dribble_move_kind(&mut rng) {
+                DribbleMoveKind::LeftCut => left += 1,
+                DribbleMoveKind::RightCut => right += 1,
+                DribbleMoveKind::Nutmeg => nutmeg += 1,
+            }
+        }
+        let ratio = |count: usize| count as f64 / 10_000.0;
+        assert!((ratio(left) - 0.45).abs() < 0.025, "left={left}");
+        assert!((ratio(right) - 0.45).abs() < 0.025, "right={right}");
+        assert!((ratio(nutmeg) - 0.10).abs() < 0.018, "nutmeg={nutmeg}");
+
+        let attacker = SkillProfile {
+            dribbling: 7.0,
+            first_touch: 7.0,
+            acceleration: 7.0,
+            ..neutral_tracking_skill_profile(PlayerRole::Forward)
+        };
+        let defender = SkillProfile {
+            defending: 7.0,
+            aggression: 7.0,
+            ..neutral_tracking_skill_profile(PlayerRole::Defender)
+        };
+        let hold_up = dribble_dispossession_probability(
+            &defender,
+            &attacker,
+            DefenderDribbleResponse::HoldUp,
+        );
+        let commit = dribble_dispossession_probability(
+            &defender,
+            &attacker,
+            DefenderDribbleResponse::Commit,
+        );
+        assert!((hold_up - HOLD_UP_DISPOSSESSION_PROBABILITY).abs() < 1e-9);
+        assert!((commit - COMMIT_DISPOSSESSION_PROBABILITY).abs() < 1e-9);
+
+        let hold_up_beat = dribble_beat_probability(
+            DribbleMoveKind::LeftCut,
+            &attacker,
+            &defender,
+            DefenderDribbleResponse::HoldUp,
+        );
+        let commit_beat = dribble_beat_probability(
+            DribbleMoveKind::LeftCut,
+            &attacker,
+            &defender,
+            DefenderDribbleResponse::Commit,
+        );
+        assert!(
+            (commit_beat / hold_up_beat - COMMIT_DRIBBLE_BEAT_MULTIPLIER).abs() < 0.02,
+            "hold_up_beat={hold_up_beat}, commit_beat={commit_beat}"
+        );
+    }
+
+    #[test]
+    fn hold_up_defender_can_dispossess_dribbler_without_committing() {
+        let mut observed = false;
+        for seed in 0..260 {
+            let mut sim = SoccerMatch::default_11v11(MatchConfig {
+                seed,
+                ..Default::default()
+            });
+            let defender = 0;
+            let attacker = 11;
+            sim.players[defender].position = Vec2::new(40.0, 60.0);
+            sim.players[defender].skills.defending = 9.4;
+            sim.players[defender].skills.aggression = 8.0;
+            sim.players[attacker].position = Vec2::new(41.0, 60.0);
+            sim.players[attacker].skills.dribbling = 2.0;
+            sim.players[attacker].skills.first_touch = 2.0;
+            sim.ball.holder = Some(attacker);
+            sim.ball.position = sim.players[attacker].position;
+            let before = WorldSnapshot::from_match(&sim);
+            sim.players[attacker].last_decision =
+                Some(test_decision_trace(&before, attacker, "right-cut"));
+            sim.players[defender].last_decision =
+                Some(test_decision_trace(&before, defender, "defend"));
+
+            sim.resolve_dribble_hold_up_contests();
+
+            if sim.ball.holder == Some(defender) {
+                let defender_reward = sim
+                    .reward_events
+                    .iter()
+                    .filter(|event| event.player_id == defender)
+                    .map(|event| event.amount)
+                    .sum::<f64>();
+                assert_eq!(defender_reward, DEFENSIVE_DISPOSSESSION_REWARD_POINTS);
+                assert!(sim
+                    .events
+                    .iter()
+                    .any(|event| event.kind == "hold-up-dispossession"));
+                observed = true;
+                break;
+            }
+        }
+
+        assert!(observed, "expected at least one hold-up dispossession");
+    }
+
+    #[test]
     fn failed_tackle_penalizes_defender_and_rewards_dribbler_when_beaten() {
         let mut observed = false;
         for seed in 0..180 {
@@ -31551,7 +33122,7 @@ mod tests {
                 .filter(|event| event.player_id == attacker)
                 .map(|event| event.amount)
                 .sum::<f64>();
-            if sim.ball.holder == Some(attacker) && defender_reward < 0.0 {
+            if sim.ball.holder == Some(attacker) && attacker_reward > 0.0 {
                 assert_eq!(
                     defender_reward,
                     -(FAILED_DISPOSSESSION_PENALTY_POINTS + BEATEN_BY_DRIBBLE_PENALTY_POINTS)
@@ -31599,9 +33170,10 @@ mod tests {
             assert!(side_step.probability > 0.0);
             let target =
                 before.side_step_dribble_target_for(attacker, sim.players[attacker].home_position);
+            let lateral_yards = (target.x - sim.players[attacker].position.x).abs();
             assert!(
-                (target.x - sim.players[attacker].position.x).abs() > 1.5,
-                "side-step target should move laterally: target={target:?}"
+                (0.75..=1.25).contains(&lateral_yards),
+                "side-step target should move about one yard laterally: target={target:?}"
             );
             sim.players[attacker].last_decision =
                 Some(test_decision_trace(&before, attacker, "side-step"));
@@ -31614,7 +33186,11 @@ mod tests {
                 sprint: true,
             });
 
-            if sim.events.iter().any(|event| event.kind == "side-step") {
+            if sim
+                .events
+                .iter()
+                .any(|event| matches!(event.kind.as_str(), "left-cut" | "right-cut" | "nutmeg"))
+            {
                 let defender_reward = sim
                     .reward_events
                     .iter()

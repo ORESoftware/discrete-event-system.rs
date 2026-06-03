@@ -8,7 +8,7 @@
 
 #![allow(dead_code)]
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 use serde::Deserialize;
@@ -17,22 +17,29 @@ use crate::des::general::external_linear_cli::{
     external_linear_cli_command, general_linear_ipmip_problem_to_cli_json,
     indicator_ipmip_problem_to_cli_json, ipmip_problem_to_cli_json,
     lower_bounded_ipmip_problem_to_cli_json, multi_objective_ipmip_problem_to_cli_json,
-    pwl_ipmip_problem_to_cli_json, semi_ipmip_problem_to_cli_json, solve_linear_cli_json,
-    sos_ipmip_problem_to_cli_json, ExternalLinearCliKind, ExternalLinearCliOptions,
+    pwl_ipmip_problem_to_cli_json, quadratic_objective_ipmip_problem_to_cli_json,
+    semi_ipmip_problem_to_cli_json, solve_linear_cli_json, sos_ipmip_problem_to_cli_json,
+    source_ipmip_problem_to_cli_json, ExternalLinearCliKind, ExternalLinearCliOptions,
     ExternalLinearCliSolution, ExternalLinearCliSolver, ExternalLinearCliStatus,
 };
 use crate::des::general::ip_mip_des::{
-    build_binary_knapsack_ip, build_fixed_charge_indicator_ip, build_general_linear_rows_ip,
-    build_lexicographic_choice_ip, build_lower_bounded_production_ip,
-    build_piecewise_linear_reward_ip, build_semi_continuous_gate_ip, build_semi_integer_lot_ip,
-    build_sos1_choice_ip, build_sos2_adjacency_ip, linearize_general_linear_problem,
-    linearize_indicator_problem, linearize_pwl_problem, linearize_semi_problem,
-    linearize_sos_problem, solve_general_linear_ipmip_with_des, solve_indicator_ipmip_with_des,
-    solve_ipmip_with_des, solve_lower_bounded_ipmip_with_des, solve_multi_objective_ipmip_with_des,
-    solve_pwl_ipmip_with_des, solve_semi_ipmip_with_des, solve_sos_ipmip_with_des,
-    ConcreteLpRelaxationAlgorithm, GeneralLinearIPMIPProblem, IPMIPProblem, IPMIPSolveOptions,
-    IPMIPStatus, IndicatorIPMIPProblem, LowerBoundedIPMIPProblem, LpRelaxationAlgorithm,
-    MultiObjectiveIPMIPProblem, PwlIPMIPProblem, SemiIPMIPProblem, SosIPMIPProblem,
+    build_absolute_value_penalty_ip, build_binary_knapsack_ip, build_binary_product_gate_ip,
+    build_fixed_charge_indicator_ip, build_general_linear_rows_ip, build_l1_norm_deviation_ip,
+    build_lexicographic_choice_ip, build_linf_norm_deviation_ip, build_logical_gate_ip,
+    build_lower_bounded_production_ip, build_maximum_peak_ip, build_minimum_floor_ip,
+    build_piecewise_linear_reward_ip, build_product_activation_ip,
+    build_quadratic_objective_mix_ip, build_semi_continuous_gate_ip, build_semi_integer_lot_ip,
+    build_sos1_choice_ip, build_sos2_adjacency_ip, build_source_feature_mix_ip,
+    linearize_general_linear_problem, linearize_indicator_problem, linearize_pwl_problem,
+    linearize_quadratic_objective_problem, linearize_semi_problem, linearize_sos_problem,
+    linearize_source_ipmip_problem, solve_general_linear_ipmip_with_des,
+    solve_indicator_ipmip_with_des, solve_ipmip_with_des, solve_lower_bounded_ipmip_with_des,
+    solve_multi_objective_ipmip_with_des, solve_pwl_ipmip_with_des,
+    solve_quadratic_objective_ipmip_with_des, solve_semi_ipmip_with_des, solve_sos_ipmip_with_des,
+    solve_source_ipmip_with_des, ConcreteLpRelaxationAlgorithm, GeneralLinearIPMIPProblem,
+    IPMIPProblem, IPMIPSolveOptions, IPMIPStatus, IndicatorIPMIPProblem, LowerBoundedIPMIPProblem,
+    LpRelaxationAlgorithm, MultiObjectiveIPMIPProblem, PwlIPMIPProblem,
+    QuadraticObjectiveIPMIPProblem, SemiIPMIPProblem, SosIPMIPProblem, SourceIPMIPProblem,
 };
 use crate::des::general::lp::Sense;
 
@@ -149,7 +156,7 @@ impl Driver {
                         return payload_from_cli_solution(solution);
                     }
                 }
-                None if solver != "auto" => {
+                None if !is_auto_solver_request(solver) => {
                     return ExternalPayload {
                         result: ExternalResultInner {
                             status: "unavailable".to_string(),
@@ -372,6 +379,50 @@ impl Driver {
         self.compare(name, &linearized, &internal, &external);
     }
 
+    fn compare_quadratic_objective_scenario(
+        &mut self,
+        name: &str,
+        problem: QuadraticObjectiveIPMIPProblem,
+    ) {
+        println!();
+        println!("-- {name} --");
+        let internal = solve_quadratic_objective_ipmip_with_des(
+            problem.clone(),
+            IPMIPSolveOptions {
+                lp_algorithm: Some(LpRelaxationAlgorithm::Concrete(
+                    ConcreteLpRelaxationAlgorithm::InternalSimplex,
+                )),
+                max_cut_rounds: Some(0),
+                ..Default::default()
+            },
+        );
+        let (linearized, _, original_vars) = linearize_quadratic_objective_problem(&problem);
+        let solver = std::env::var("IP_MIP_EXTERNAL_SOLVER").unwrap_or_else(|_| "auto".to_string());
+        let external_problem = quadratic_objective_ipmip_problem_to_cli_json(&problem);
+        let external = self.run_external_value(name, &external_problem, &solver);
+        self.compare_source_mapped(name, &linearized, original_vars, &internal, &external);
+    }
+
+    fn compare_source_scenario(&mut self, name: &str, problem: SourceIPMIPProblem) {
+        println!();
+        println!("-- {name} --");
+        let internal = solve_source_ipmip_with_des(
+            problem.clone(),
+            IPMIPSolveOptions {
+                lp_algorithm: Some(LpRelaxationAlgorithm::Concrete(
+                    ConcreteLpRelaxationAlgorithm::InternalSimplex,
+                )),
+                max_cut_rounds: Some(0),
+                ..Default::default()
+            },
+        );
+        let (linearized, _, original_vars) = linearize_source_ipmip_problem(&problem);
+        let solver = std::env::var("IP_MIP_EXTERNAL_SOLVER").unwrap_or_else(|_| "auto".to_string());
+        let external_problem = source_ipmip_problem_to_cli_json(&problem);
+        let external = self.run_external_value(name, &external_problem, &solver);
+        self.compare_source_mapped(name, &linearized, original_vars, &internal, &external);
+    }
+
     fn compare_multi_objective_scenario(
         &mut self,
         name: &str,
@@ -438,6 +489,73 @@ impl Driver {
             feasible(&problem.base, &ext_x, 1e-8),
             Some(format!("x={}", fmt_vec(&ext_x))),
         );
+    }
+
+    fn compare_source_mapped(
+        &mut self,
+        name: &str,
+        linearized_problem: &IPMIPProblem,
+        original_vars: usize,
+        internal: &crate::des::general::ip_mip_des::IPMIPSolution,
+        external: &ExternalPayload,
+    ) {
+        self.check(
+            &format!("{name}: external reference available"),
+            external.result.status != "unavailable",
+            external.result.message.clone(),
+        );
+        self.check(
+            &format!("{name}: statuses agree optimal"),
+            internal.status == IPMIPStatus::Optimal && external.result.status == "optimal",
+            Some(format!(
+                "internal={} external={} solver={}",
+                internal.status.as_str(),
+                external.result.status,
+                external.result.solver
+            )),
+        );
+        if external.result.status != "optimal" || external.result.objective.is_none() {
+            return;
+        }
+        let obj = external.result.objective.unwrap();
+        self.close(&format!("{name}: objective"), internal.z, obj, 1e-8);
+
+        let ext_x = external.result.x.clone().unwrap_or_default();
+        self.check(
+            &format!("{name}: external compiled x length"),
+            ext_x.len() == linearized_problem.c.len(),
+            Some(format!(
+                "external_len={} compiled_len={}",
+                ext_x.len(),
+                linearized_problem.c.len()
+            )),
+        );
+        self.check(
+            &format!("{name}: internal source x length"),
+            internal.x.len() >= original_vars,
+            Some(format!(
+                "internal_len={} original_vars={original_vars}",
+                internal.x.len()
+            )),
+        );
+        if ext_x.len() >= original_vars && internal.x.len() >= original_vars {
+            let max_abs = internal
+                .x
+                .iter()
+                .take(original_vars)
+                .zip(ext_x.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0, f64::max);
+            self.check(
+                &format!("{name}: original-variable values agree"),
+                max_abs <= 1e-8,
+                Some(format!(
+                    "max_abs={max_abs:.3e} internal={} external={}",
+                    fmt_vec(&internal.x[..original_vars]),
+                    fmt_vec(&ext_x[..original_vars])
+                )),
+            );
+        }
     }
 
     fn compare_with_lb(
@@ -599,8 +717,12 @@ fn force_python_reference() -> bool {
         .unwrap_or(false)
 }
 
+fn is_auto_solver_request(value: &str) -> bool {
+    value.trim().eq_ignore_ascii_case("auto")
+}
+
 fn select_cli_solver(requested: &str) -> Option<(ExternalLinearCliSolver, PathBuf)> {
-    if requested == "auto" {
+    if is_auto_solver_request(requested) {
         return ExternalLinearCliSolver::open_source_mip()
             .iter()
             .copied()
@@ -647,15 +769,6 @@ fn root_from_env() -> PathBuf {
     std::env::var("REPO_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")))
-}
-
-fn assert_script_exists(root: &Path) {
-    let script = root.join("scripts").join("ip_mip_reference.py");
-    assert!(
-        script.exists(),
-        "external IP/MIP reference script missing: {}",
-        script.display()
-    );
 }
 
 /// Binary driver.
@@ -708,6 +821,19 @@ pub fn run() {
         "piecewise-linear-reward",
         build_piecewise_linear_reward_ip(),
     );
+    d.compare_source_scenario("absolute-value-penalty", build_absolute_value_penalty_ip());
+    d.compare_source_scenario("maximum-peak", build_maximum_peak_ip());
+    d.compare_source_scenario("minimum-floor", build_minimum_floor_ip());
+    d.compare_source_scenario("logical-gate", build_logical_gate_ip());
+    d.compare_source_scenario("l1-norm-deviation", build_l1_norm_deviation_ip());
+    d.compare_source_scenario("linf-norm-deviation", build_linf_norm_deviation_ip());
+    d.compare_source_scenario("product-activation", build_product_activation_ip());
+    d.compare_source_scenario("binary-product-gate", build_binary_product_gate_ip());
+    d.compare_quadratic_objective_scenario(
+        "quadratic-objective-mix",
+        build_quadratic_objective_mix_ip(),
+    );
+    d.compare_source_scenario("source-feature-mix", build_source_feature_mix_ip());
     d.compare_multi_objective_scenario("lexicographic-choice", build_lexicographic_choice_ip());
 
     println!();

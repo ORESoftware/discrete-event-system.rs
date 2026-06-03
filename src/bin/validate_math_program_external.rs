@@ -5,14 +5,16 @@
 //! SKIP.
 
 use des_engine::des::general::math_program::{
+    cross_check_math_program_assumption_core_with_external,
     cross_check_math_program_conflict_with_external,
     cross_check_math_program_feas_relaxation_with_external,
     cross_check_math_program_solution_pool_with_external, cross_check_math_program_with_external,
-    AffineTerm, ExternalMathProgramOptions, MathProgram, MathProgramConflictCrossCheck,
-    MathProgramConflictOptions, MathProgramCrossCheck, MathProgramFeasRelaxCrossCheck,
-    MathProgramFeasRelaxOptions, MathProgramFeasRelaxViolation, MathProgramLpBackend,
-    MathProgramSolution, MathProgramSolutionPoolCrossCheck, MathProgramSolutionPoolOptions,
-    MathProgramSolveOptions, MathProgramStatus, ObjectiveSense, RowSense,
+    AffineTerm, ExternalMathProgramOptions, MathProgram, MathProgramAssumptionCoreCrossCheck,
+    MathProgramAssumptionCoreOptions, MathProgramConflictCrossCheck, MathProgramConflictOptions,
+    MathProgramCrossCheck, MathProgramFeasRelaxCrossCheck, MathProgramFeasRelaxOptions,
+    MathProgramFeasRelaxViolation, MathProgramLpBackend, MathProgramSolution,
+    MathProgramSolutionPoolCrossCheck, MathProgramSolutionPoolOptions, MathProgramSolveOptions,
+    MathProgramStatus, ObjectiveSense, RowSense,
 };
 
 fn main() {
@@ -143,6 +145,14 @@ fn main() {
             println!("FAIL  linear-conflict: {err:?}");
         }
     }
+    match run_assumption_core_case() {
+        Ok(true) => {}
+        Ok(false) => failed += 1,
+        Err(err) => {
+            failed += 1;
+            println!("FAIL  assumption-core: {err:?}");
+        }
+    }
     match run_feas_relax_case() {
         Ok(true) => {}
         Ok(false) => failed += 1,
@@ -158,48 +168,7 @@ fn main() {
 }
 
 fn run_case(name: &str, program: &MathProgram) -> Result<bool, String> {
-    let continuous_nonlinear = !program.has_discrete_features()
-        && (program.has_quadratic_objective()
-            || program.has_quadratic_constraints()
-            || program.has_conic_constraints());
-    let mixed_integer_nonlinear = program.has_discrete_features()
-        && (program.has_quadratic_constraints() || program.has_conic_constraints());
-    let direct_mixed_integer_qp = name == "mixed-integer-qp";
-    let ortools_method = if program.has_discrete_features() {
-        "ortools:SCIP"
-    } else {
-        "ortools:GLOP"
-    };
-    let mut external_methods = if continuous_nonlinear {
-        vec![
-            ("scipy-slsqp", Some("SLSQP".to_string())),
-            ("gurobi", Some("gurobi:default".to_string())),
-            ("cplex", Some("cplex:default".to_string())),
-            ("xpress", Some("xpress:default".to_string())),
-        ]
-    } else if mixed_integer_nonlinear || direct_mixed_integer_qp {
-        vec![
-            ("gurobi", Some("gurobi:default".to_string())),
-            ("cplex", Some("cplex:default".to_string())),
-            ("xpress", Some("xpress:default".to_string())),
-        ]
-    } else {
-        vec![
-            ("scipy-highs", None),
-            ("highs-cli", Some("highs-cli:default".to_string())),
-            ("cbc-cli", Some("cbc-cli:default".to_string())),
-            ("ortools", Some(ortools_method.to_string())),
-            ("glpk", Some("glpk:default".to_string())),
-            ("glpk-cli", Some("glpk-cli:default".to_string())),
-            ("scip-cli", Some("scip-cli:default".to_string())),
-            ("gurobi", Some("gurobi:default".to_string())),
-            ("cplex", Some("cplex:default".to_string())),
-            ("xpress", Some("xpress:default".to_string())),
-        ]
-    };
-    if program.has_discrete_features() && !mixed_integer_nonlinear && !direct_mixed_integer_qp {
-        external_methods.push(("ortools-cp-sat", Some("ortools:CP-SAT".to_string())));
-    }
+    let external_methods = external_methods_for_case(name, program);
 
     let mut ok = true;
     for (label, method) in external_methods {
@@ -252,6 +221,76 @@ fn run_case(name: &str, program: &MathProgram) -> Result<bool, String> {
         }
     }
     Ok(ok)
+}
+
+fn external_methods_for_case(
+    name: &str,
+    program: &MathProgram,
+) -> Vec<(&'static str, Option<String>)> {
+    let continuous_nonlinear = !program.has_discrete_features()
+        && (program.has_quadratic_objective()
+            || program.has_quadratic_constraints()
+            || program.has_conic_constraints());
+    let mixed_integer_nonlinear = program.has_discrete_features()
+        && (program.has_quadratic_constraints() || program.has_conic_constraints());
+    let direct_mixed_integer_qp = name == "mixed-integer-qp";
+    let ortools_method = if program.has_discrete_features() {
+        "ortools:SCIP"
+    } else {
+        "ortools:GLOP"
+    };
+    let mut external_methods = if continuous_nonlinear {
+        vec![
+            ("scipy-slsqp", Some("SLSQP".to_string())),
+            ("gurobi", Some("gurobi:default".to_string())),
+            ("cplex", Some("cplex:default".to_string())),
+            ("xpress", Some("xpress:default".to_string())),
+        ]
+    } else if mixed_integer_nonlinear || direct_mixed_integer_qp {
+        vec![
+            ("gurobi", Some("gurobi:default".to_string())),
+            ("cplex", Some("cplex:default".to_string())),
+            ("xpress", Some("xpress:default".to_string())),
+        ]
+    } else if program.has_discrete_features() {
+        vec![
+            ("scipy-highs", None),
+            ("highs-cli", Some("highs-cli:default".to_string())),
+            ("cbc-cli", Some("cbc-cli:default".to_string())),
+            ("ortools", Some(ortools_method.to_string())),
+            ("glpk", Some("glpk:default".to_string())),
+            ("glpk-cli", Some("glpk-cli:default".to_string())),
+            ("scip-cli", Some("scip-cli:default".to_string())),
+            ("lp-solve-cli", Some("lp-solve-cli".to_string())),
+            ("gurobi", Some("gurobi:default".to_string())),
+            ("cplex", Some("cplex:default".to_string())),
+            ("xpress", Some("xpress:default".to_string())),
+            ("lindo-cli", Some("lindo-cli".to_string())),
+        ]
+    } else {
+        vec![
+            ("scipy-highs", None),
+            ("highs-cli", Some("highs-cli:default".to_string())),
+            ("cbc-cli", Some("cbc-cli:default".to_string())),
+            ("clp-cli", Some("clp-cli".to_string())),
+            ("soplex-cli", Some("soplex-cli".to_string())),
+            ("qsopt-ex-cli", Some("qsopt-ex-cli".to_string())),
+            ("lp-solve-cli", Some("lp-solve-cli".to_string())),
+            ("ortools", Some(ortools_method.to_string())),
+            ("ortools-pdlp", Some("ortools:PDLP".to_string())),
+            ("glpk", Some("glpk:default".to_string())),
+            ("glpk-cli", Some("glpk-cli:default".to_string())),
+            ("scip-cli", Some("scip-cli:default".to_string())),
+            ("gurobi", Some("gurobi:default".to_string())),
+            ("cplex", Some("cplex:default".to_string())),
+            ("xpress", Some("xpress:default".to_string())),
+            ("lindo-cli", Some("lindo-cli".to_string())),
+        ]
+    };
+    if program.has_discrete_features() && !mixed_integer_nonlinear && !direct_mixed_integer_qp {
+        external_methods.push(("ortools-cp-sat", Some("ortools:CP-SAT".to_string())));
+    }
+    external_methods
 }
 
 #[derive(Clone, Copy)]
@@ -350,7 +389,7 @@ fn lp_basis_case_ok(name: &str, label: &str, report: &MathProgramCrossCheck) -> 
     }
 }
 
-fn external_certificates_required(name: &str, label: &str) -> bool {
+fn external_certificates_required(_name: &str, label: &str) -> bool {
     let base = label.strip_suffix("/des-simplex").unwrap_or(label);
     matches!(
         base,
@@ -363,7 +402,7 @@ fn external_certificates_required(name: &str, label: &str) -> bool {
             | "gurobi"
             | "cplex"
             | "xpress"
-    ) || (name == "lp-row-senses" && base == "scip-cli")
+    )
 }
 
 fn external_basis_required(label: &str) -> bool {
@@ -473,9 +512,11 @@ fn run_mip_start_case() -> Result<bool, String> {
         ("glpk", Some("glpk:default".to_string())),
         ("glpk-cli", Some("glpk-cli:default".to_string())),
         ("scip-cli", Some("scip-cli:default".to_string())),
+        ("lp-solve-cli", Some("lp-solve-cli".to_string())),
         ("gurobi", Some("gurobi:default".to_string())),
         ("cplex", Some("cplex:default".to_string())),
         ("xpress", Some("xpress:default".to_string())),
+        ("lindo-cli", Some("lindo-cli".to_string())),
         ("ortools-cp-sat", Some("ortools:CP-SAT".to_string())),
     ];
 
@@ -522,9 +563,11 @@ fn run_external_mip_options_case() -> Result<bool, String> {
         ("glpk", Some("glpk:default".to_string())),
         ("glpk-cli", Some("glpk-cli:default".to_string())),
         ("scip-cli", Some("scip-cli:default".to_string())),
+        ("lp-solve-cli", Some("lp-solve-cli".to_string())),
         ("gurobi", Some("gurobi:default".to_string())),
         ("cplex", Some("cplex:default".to_string())),
         ("xpress", Some("xpress:default".to_string())),
+        ("lindo-cli", Some("lindo-cli".to_string())),
         ("ortools-cp-sat", Some("ortools:CP-SAT".to_string())),
     ];
 
@@ -575,6 +618,7 @@ fn run_conflict_case() -> Result<bool, String> {
         ("scipy-highs", None),
         ("highs-cli", Some("highs-cli:default".to_string())),
         ("cbc-cli", Some("cbc-cli:default".to_string())),
+        ("lp-solve-cli", Some("lp-solve-cli".to_string())),
         ("ortools", Some("ortools:SCIP".to_string())),
         ("glpk", Some("glpk:default".to_string())),
         ("glpk-cli", Some("glpk-cli:default".to_string())),
@@ -582,6 +626,7 @@ fn run_conflict_case() -> Result<bool, String> {
         ("gurobi", Some("gurobi:default".to_string())),
         ("cplex", Some("cplex:default".to_string())),
         ("xpress", Some("xpress:default".to_string())),
+        ("lindo-cli", Some("lindo-cli".to_string())),
         ("ortools-cp-sat", Some("ortools:CP-SAT".to_string())),
     ];
     let conflict_opts = MathProgramConflictOptions::default();
@@ -609,6 +654,67 @@ fn run_conflict_case() -> Result<bool, String> {
     Ok(ok)
 }
 
+fn run_assumption_core_case() -> Result<bool, String> {
+    let name = "assumption-core";
+    let mut program = MathProgram::new(ObjectiveSense::Min);
+    let assume_a = program.add_binary_var("assume-a", 0.0).unwrap();
+    let assume_b = program.add_binary_var("assume-b", 0.0).unwrap();
+    let assume_noise = program.add_binary_var("assume-noise", 0.0).unwrap();
+    program
+        .add_constraint(
+            "assumption-at-most-one",
+            vec![(assume_a, 1.0), (assume_b, 1.0)],
+            RowSense::Le,
+            1.0,
+        )
+        .unwrap();
+    let assumptions = vec![
+        MathProgram::bool_lit(assume_a),
+        MathProgram::bool_lit(assume_b),
+        MathProgram::not_lit(assume_noise),
+    ];
+    let methods = vec![
+        ("scipy-highs", None),
+        ("highs-cli", Some("highs-cli:default".to_string())),
+        ("cbc-cli", Some("cbc-cli:default".to_string())),
+        ("ortools", Some("ortools:SCIP".to_string())),
+        ("glpk", Some("glpk:default".to_string())),
+        ("glpk-cli", Some("glpk-cli:default".to_string())),
+        ("scip-cli", Some("scip-cli:default".to_string())),
+        ("lp-solve-cli", Some("lp-solve-cli".to_string())),
+        ("gurobi", Some("gurobi:default".to_string())),
+        ("cplex", Some("cplex:default".to_string())),
+        ("xpress", Some("xpress:default".to_string())),
+        ("lindo-cli", Some("lindo-cli".to_string())),
+        ("ortools-cp-sat", Some("ortools:CP-SAT".to_string())),
+    ];
+    let core_opts = MathProgramAssumptionCoreOptions::default();
+
+    let mut ok = true;
+    for (label, method) in methods {
+        let report = cross_check_math_program_assumption_core_with_external(
+            &program,
+            &assumptions,
+            &MathProgramSolveOptions::default(),
+            &ExternalMathProgramOptions {
+                method,
+                ..Default::default()
+            },
+            &core_opts,
+        )
+        .map_err(|err| format!("{err:?}"))?;
+
+        print_assumption_core_report(name, label, &report);
+        if report.external.status == MathProgramStatus::NumericalError {
+            continue;
+        }
+        ok &= report.within_tolerance
+            && report.internal.minimal
+            && report.internal.assumptions.len() == 2;
+    }
+    Ok(ok)
+}
+
 fn run_feas_relax_case() -> Result<bool, String> {
     let name = "feasibility-relaxation";
     let program = build_feas_relax_case();
@@ -616,6 +722,10 @@ fn run_feas_relax_case() -> Result<bool, String> {
         ("scipy-highs", None),
         ("highs-cli", Some("highs-cli:default".to_string())),
         ("cbc-cli", Some("cbc-cli:default".to_string())),
+        ("clp-cli", Some("clp-cli".to_string())),
+        ("soplex-cli", Some("soplex-cli".to_string())),
+        ("qsopt-ex-cli", Some("qsopt-ex-cli".to_string())),
+        ("lp-solve-cli", Some("lp-solve-cli".to_string())),
         ("ortools", Some("ortools:GLOP".to_string())),
         ("glpk", Some("glpk:default".to_string())),
         ("glpk-cli", Some("glpk-cli:default".to_string())),
@@ -623,6 +733,7 @@ fn run_feas_relax_case() -> Result<bool, String> {
         ("gurobi", Some("gurobi:default".to_string())),
         ("cplex", Some("cplex:default".to_string())),
         ("xpress", Some("xpress:default".to_string())),
+        ("lindo-cli", Some("lindo-cli".to_string())),
     ];
     let relax_opts = MathProgramFeasRelaxOptions {
         linear_penalty: 10.0,
@@ -674,9 +785,11 @@ fn run_solution_pool_case() -> Result<bool, String> {
         ("glpk", Some("glpk:default".to_string())),
         ("glpk-cli", Some("glpk-cli:default".to_string())),
         ("scip-cli", Some("scip-cli:default".to_string())),
+        ("lp-solve-cli", Some("lp-solve-cli".to_string())),
         ("gurobi", Some("gurobi:default".to_string())),
         ("cplex", Some("cplex:default".to_string())),
         ("xpress", Some("xpress:default".to_string())),
+        ("lindo-cli", Some("lindo-cli".to_string())),
         ("ortools-cp-sat", Some("ortools:CP-SAT".to_string())),
     ];
     let pool_opts = MathProgramSolutionPoolOptions {
@@ -737,6 +850,47 @@ fn print_conflict_report(name: &str, label: &str, report: &MathProgramConflictCr
             "FAIL  {name} [{label}]: status_agree={} conflict_items={} minimal={}",
             report.status_agree,
             report.internal.items.len(),
+            report.internal.minimal
+        );
+    }
+}
+
+fn print_assumption_core_report(
+    name: &str,
+    label: &str,
+    report: &MathProgramAssumptionCoreCrossCheck,
+) {
+    println!(
+        "{} [{}]  internal_core={:?} minimal={} assumptions={:?}",
+        name, label, report.internal.status, report.internal.minimal, report.internal.assumptions
+    );
+    println!(
+        "{} [{}]  external={} {:?}",
+        name, label, report.external.solver, report.external.status
+    );
+    if report.external.status == MathProgramStatus::NumericalError {
+        println!(
+            "SKIP  {name} [{label}]: external solver unavailable ({})",
+            report
+                .external
+                .message
+                .as_deref()
+                .unwrap_or("no external diagnostic")
+        );
+    } else if report.within_tolerance
+        && report.internal.minimal
+        && report.internal.assumptions.len() == 2
+    {
+        println!(
+            "PASS  {name} [{label}]: status_agree={} core_assumptions={}",
+            report.status_agree,
+            report.internal.assumptions.len()
+        );
+    } else {
+        println!(
+            "FAIL  {name} [{label}]: status_agree={} core_assumptions={} minimal={}",
+            report.status_agree,
+            report.internal.assumptions.len(),
             report.internal.minimal
         );
     }
@@ -2189,4 +2343,35 @@ fn build_optional_reservoir_case() -> MathProgram {
     )
     .unwrap();
     p
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn assumption_core_external_case_runs() {
+        assert!(super::run_assumption_core_case().unwrap());
+    }
+
+    #[test]
+    fn continuous_lp_matrix_includes_ortools_pdlp() {
+        let lp = super::build_lp_case();
+        let methods = super::external_methods_for_case("lp-row-senses", &lp);
+        assert!(methods
+            .iter()
+            .any(|(label, method)| *label == "ortools-pdlp"
+                && method.as_deref() == Some("ortools:PDLP")));
+    }
+
+    #[test]
+    fn non_lp_matrices_do_not_use_ortools_pdlp() {
+        let mip = super::build_binary_mip_case();
+        let mip_methods = super::external_methods_for_case("binary-mip", &mip);
+        assert!(!mip_methods
+            .iter()
+            .any(|(label, _)| *label == "ortools-pdlp"));
+
+        let qp = super::build_continuous_qp_case();
+        let qp_methods = super::external_methods_for_case("continuous-qp", &qp);
+        assert!(!qp_methods.iter().any(|(label, _)| *label == "ortools-pdlp"));
+    }
 }

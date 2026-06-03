@@ -22,6 +22,7 @@ COMMAND_ALIASES = {
     "cbc": ["cbc"],
     "clp": ["clp"],
     "soplex": ["soplex"],
+    "qsopt-ex": ["qsopt_ex", "qsopt-ex", "qsopt", "esolver"],
     "lp-solve": ["lp_solve", "lp-solve", "lpsolve"],
 }
 
@@ -32,6 +33,14 @@ COMMAND_ENV_VARS = {
     "cbc": ["CBC_CMD", "ORES_CBC_CMD", "ORES_CBC_BIN"],
     "clp": ["CLP_CMD", "ORES_CLP_CMD", "ORES_CLP_BIN"],
     "soplex": ["SOPLEX_CMD", "ORES_SOPLEX_CMD", "ORES_SOPLEX_BIN"],
+    "qsopt-ex": [
+        "QSOPT_EX_CMD",
+        "QSOPT_CMD",
+        "ORES_QSOPT_EX_CMD",
+        "ORES_QSOPT_EX_BIN",
+        "DES_QSOPT_EX_BIN",
+        "QSOPT_EX_BIN",
+    ],
     "lp-solve": ["LP_SOLVE_CMD", "LPSOLVE_CMD", "ORES_LP_SOLVE_CMD", "ORES_LPSOLVE_BIN"],
 }
 
@@ -44,6 +53,7 @@ LINEAR_CLI_BACKEND_SOLVERS = COMMERCIAL_LINEAR_CLI_SOLVERS | {
     "cbc",
     "clp",
     "soplex",
+    "qsopt-ex",
     "lp-solve",
 }
 LINEAR_CLI_DIRECT_ALIASES = {
@@ -59,6 +69,10 @@ LINEAR_CLI_DIRECT_ALIASES = {
     "clp-cli": "clp",
     "soplex": "soplex",
     "soplex-cli": "soplex",
+    "qsopt-ex": "qsopt-ex",
+    "qsopt-ex-cli": "qsopt-ex",
+    "qsopt_ex": "qsopt-ex",
+    "qsopt_ex_cli": "qsopt-ex",
     "lp-solve": "lp-solve",
     "lp-solve-cli": "lp-solve",
     "lpsolve": "lp-solve",

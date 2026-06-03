@@ -1,0 +1,43 @@
+diff --git a/remote/deployments/in-house-mip-solver-node-rs/src/main.rs b/remote/deployments/in-house-mip-solver-node-rs/src/main.rs
+--- a/remote/deployments/in-house-mip-solver-node-rs/src/main.rs
++++ b/remote/deployments/in-house-mip-solver-node-rs/src/main.rs
+@@
+         &InternalSimplexOptions {
+             max_iter: Some(lp_max_iters),
+             tol: Some(1e-9),
+-            basis_start: None,
+         },
+     );
+@@
+-        match tokio::time::timeout(deadline - now, result_sub.next()).await {
+-            Ok(Some(message)) => match message {
+-                Ok(message) => {
+-                    let parsed = serde_json::from_slice::<SubproblemResult>(&message.payload).ok();
+-                    if let Some(result) = parsed.filter(|result| result.solve_id == solve_id) {
+-                        results.push(result);
+-                        state
+-                            .metrics
+-                            .subproblem_jobs_completed_total
+-                            .fetch_add(1, Ordering::Relaxed);
+-                    }
+-                }
+-                Err(error) => {
+-                    warnings.push(format!("NATS result subscription error: {error}"));
+-                    timed_out = true;
+-                    break;
+-                }
+-            },
++        match tokio::time::timeout(deadline - now, result_sub.next()).await {
++            Ok(Some(message)) => {
++                let parsed = serde_json::from_slice::<SubproblemResult>(&message.payload).ok();
++                if let Some(result) = parsed.filter(|result| result.solve_id == solve_id) {
++                    results.push(result);
++                    state
++                        .metrics
++                        .subproblem_jobs_completed_total
++                        .fetch_add(1, Ordering::Relaxed);
++                }
++            }
+             Ok(None) => {
+                 warnings.push("NATS result subscription closed".to_string());
+                 timed_out = true;

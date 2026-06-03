@@ -5142,6 +5142,40 @@ pub struct MathProgramConflictCrossCheck {
     pub within_tolerance: bool,
 }
 
+/// Options for native deletion-filter assumption-core refinement.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MathProgramAssumptionCoreOptions {
+    pub max_candidate_checks: usize,
+}
+
+impl Default for MathProgramAssumptionCoreOptions {
+    fn default() -> Self {
+        MathProgramAssumptionCoreOptions {
+            max_candidate_checks: usize::MAX,
+        }
+    }
+}
+
+/// Minimal infeasible subset of Boolean assumptions for a math program.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MathProgramAssumptionCore {
+    pub status: MathProgramStatus,
+    pub assumptions: Vec<BoolLiteral>,
+    pub subsystem: MathProgram,
+    pub minimal: bool,
+    pub solver: String,
+    pub message: Option<String>,
+}
+
+/// Internal-vs-external check for the refined assumption-core subsystem.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MathProgramAssumptionCoreCrossCheck {
+    pub internal: MathProgramAssumptionCore,
+    pub external: MathProgramSolution,
+    pub status_agree: bool,
+    pub within_tolerance: bool,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct MathProgramFeasRelaxOptions {
     pub relax_linear_constraints: bool,

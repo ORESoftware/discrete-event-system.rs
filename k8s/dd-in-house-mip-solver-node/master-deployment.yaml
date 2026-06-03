@@ -1,0 +1,91 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dd-in-house-mip-solver-node-master
+  namespace: default
+  labels:
+    app: dd-in-house-mip-solver-node-master
+    app.kubernetes.io/component: master
+spec:
+  replicas: 1
+  minReadySeconds: 5
+  progressDeadlineSeconds: 1800
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: dd-in-house-mip-solver-node-master
+  template:
+    metadata:
+      labels:
+        app: dd-in-house-mip-solver-node-master
+        app.kubernetes.io/component: master
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: solver
+          image: docker.io/library/dd-in-house-mip-solver-node:dev
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          env:
+            - name: HOST
+              value: 0.0.0.0
+            - name: PORT
+              value: '8117'
+            - name: MIP_SOLVER_NODE_ROLE
+              value: master
+            - name: NATS_URL
+              value: nats://dd-nats.messaging.svc.cluster.local:4222
+            - name: MIP_SOLVER_JOBS_SUBJECT
+              value: dd.remote.mip_solver.jobs
+            - name: MIP_SOLVER_RESULTS_SUBJECT
+              value: dd.remote.mip_solver.results
+            - name: MIP_SOLVER_EVENTS_SUBJECT
+              value: dd.remote.mip_solver.events
+            - name: MIP_SOLVER_MAX_SUBPROBLEMS
+              value: '256'
+            - name: MIP_SOLVER_SPLIT_DEPTH
+              value: '4'
+            - name: MIP_SOLVER_LP_MAX_ITERS
+              value: '10000'
+          ports:
+            - name: http
+              containerPort: 8117
+          resources:
+            requests:
+              cpu: '1'
+              memory: 2Gi
+            limits:
+              cpu: '4'
+              memory: 8Gi
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+

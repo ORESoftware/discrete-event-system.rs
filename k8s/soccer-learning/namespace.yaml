@@ -1,7 +1,0 @@
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: des-soccer-learning
-  labels:
-    app.kubernetes.io/name: des-soccer-learning
-    app.kubernetes.io/part-of: discrete-event-system

@@ -219,17 +219,18 @@ use crate::des::general::lp::{
 };
 use crate::des::general::math_program::{
     analyze_math_program_bound_sensitivity, analyze_math_program_objective_sensitivity,
-    analyze_math_program_rhs_sensitivity, cross_check_math_program_conflict_with_external,
+    analyze_math_program_rhs_sensitivity, cross_check_math_program_assumption_core_with_external,
+    cross_check_math_program_conflict_with_external,
     cross_check_math_program_feas_relaxation_with_external,
     cross_check_math_program_solution_pool_with_external, cross_check_math_program_with_external,
     export_math_program_cplex_lp, export_math_program_mps, map_math_program_export_solution,
     map_math_program_lp_row_certificates, map_math_program_lp_variable_certificates,
     solve_math_program, solve_math_program_external_scipy, solve_math_program_solution_pool,
-    ExternalMathProgramOptions, GlobalCardinalityCount, MathProgram, MathProgramConflictItem,
-    MathProgramConflictOptions, MathProgramCrossCheck, MathProgramExportRowKind,
-    MathProgramExportVariableExpansion, MathProgramFeasRelaxOptions,
-    MathProgramSolutionPoolOptions, MathProgramSolveOptions, MathProgramStatus,
-    ObjectiveSense as MathObjectiveSense, RowSense,
+    ExternalMathProgramOptions, GlobalCardinalityCount, MathProgram,
+    MathProgramAssumptionCoreOptions, MathProgramConflictItem, MathProgramConflictOptions,
+    MathProgramCrossCheck, MathProgramExportRowKind, MathProgramExportVariableExpansion,
+    MathProgramFeasRelaxOptions, MathProgramSolutionPoolOptions, MathProgramSolveOptions,
+    MathProgramStatus, ObjectiveSense as MathObjectiveSense, RowSense,
 };
 use crate::des::general::max_flow::{
     build_textbook_max_flow_problem, solve_max_flow, MaxFlowEdgeFlow, MaxFlowStatus,
@@ -11762,6 +11763,67 @@ impl Driver {
             );
         }
 
+        match export_math_program_cplex_lp(&qp_facade) {
+            Ok(export) => {
+                let passed = !export.is_mip
+                    && export.original_variable_count == 1
+                    && export.variable_names == vec!["qp_x".to_string()]
+                    && export.original_variable_expansions.len() == 1
+                    && export.row_mappings.len() == export.constraint_names.len()
+                    && export.text.contains("Minimize\n")
+                    && export.text.contains(
+                        "obj: - 4.00000000000000000e0 qp_x + [ 2.00000000000000000e0 qp_x * qp_x ] / 2",
+                    )
+                    && export.text.contains("Bounds\n")
+                    && export.text.ends_with("End\n");
+                self.check(
+                    "MathProgram QP facade CPLEX-LP quadratic-objective export",
+                    passed,
+                    format!(
+                        "vars={} rows={} bytes={}",
+                        export.variable_names.len(),
+                        export.constraint_names.len(),
+                        export.text.len()
+                    ),
+                );
+            }
+            Err(err) => self.check(
+                "MathProgram QP facade CPLEX-LP quadratic-objective export",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        match export_math_program_mps(&qp_facade) {
+            Ok(export) => {
+                let passed = !export.is_mip
+                    && export.original_variable_count == 1
+                    && export.variable_names == vec!["qp_x".to_string()]
+                    && export.original_variable_expansions.len() == 1
+                    && export.row_mappings.len() == export.constraint_names.len()
+                    && export.text.contains("OBJSENSE\n MIN\n")
+                    && export.text.contains("QUADOBJ\n")
+                    && export.text.contains("qp_x  qp_x  2.00000000000000000e0")
+                    && export.text.contains("BOUNDS\n")
+                    && export.text.ends_with("ENDATA\n");
+                self.check(
+                    "MathProgram QP facade MPS quadratic-objective export",
+                    passed,
+                    format!(
+                        "vars={} rows={} bytes={}",
+                        export.variable_names.len(),
+                        export.constraint_names.len(),
+                        export.text.len()
+                    ),
+                );
+            }
+            Err(err) => self.check(
+                "MathProgram QP facade MPS quadratic-objective export",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
         let mut miqp_facade = MathProgram::new(MathObjectiveSense::Min);
         let miqp_x = miqp_facade
             .add_integer_var("miqp-x", -4.0, Some(0.0), Some(5.0))
@@ -12436,6 +12498,41 @@ impl Driver {
                     qcp_external_reference.message
                 ),
             );
+        }
+
+        match export_math_program_mps(&qcp_facade) {
+            Ok(export) => {
+                let passed = !export.is_mip
+                    && export.original_variable_count == 2
+                    && export.variable_names == vec!["qcp_x".to_string(), "qcp_y".to_string()]
+                    && export.original_variable_expansions.len() == 2
+                    && export.row_mappings.len() == 2
+                    && export.row_mappings.iter().any(|row| {
+                        row.source_kind == MathProgramExportRowKind::QuadraticConstraint
+                            && row.exported_name == "qcp_epigraph_square"
+                            && row.source_name == "qcp-epigraph-square"
+                    })
+                    && export.text.contains("OBJSENSE\n MIN\n")
+                    && export.text.contains("QCMATRIX   qcp_epigraph_square\n")
+                    && export.text.contains("qcp_x  qcp_x  1.00000000000000000e0")
+                    && export.text.contains("BOUNDS\n")
+                    && export.text.ends_with("ENDATA\n");
+                self.check(
+                    "MathProgram QCP facade MPS quadratic-constraint export",
+                    passed,
+                    format!(
+                        "vars={} rows={} bytes={}",
+                        export.variable_names.len(),
+                        export.constraint_names.len(),
+                        export.text.len()
+                    ),
+                );
+            }
+            Err(err) => self.check(
+                "MathProgram QCP facade MPS quadratic-constraint export",
+                false,
+                format!("{err:?}"),
+            ),
         }
 
         let mut miqcp_facade = MathProgram::new(MathObjectiveSense::Min);
@@ -13127,6 +13224,12 @@ impl Driver {
         let signed_logic_count = general_mip
             .add_integer_var("signed-logic-count", 2.0, Some(0.0), Some(3.0))
             .expect("signed logic count");
+        let signed_implication_blocked = general_mip
+            .add_binary_var("signed-implication-blocked", 9.0)
+            .expect("signed implication blocked");
+        let signed_equivalence_forced = general_mip
+            .add_binary_var("signed-equivalence-forced", 0.0)
+            .expect("signed equivalence forced");
         let enforced_bool_and_a = general_mip
             .add_binary_var("enforced-bool-and-a", 5.0)
             .expect("enforced bool and a");
@@ -13172,6 +13275,24 @@ impl Driver {
         let enforced_domain_inactive = general_mip
             .add_integer_var("enforced-domain-inactive", 1.0, Some(0.0), Some(5.0))
             .expect("enforced domain inactive");
+        let linear_not_equal_value = general_mip
+            .add_integer_var("linear-not-equal-value", 1.0, Some(0.0), Some(4.0))
+            .expect("linear not equal value");
+        let enforced_not_equal_active = general_mip
+            .add_integer_var("enforced-not-equal-active", 1.0, Some(0.0), Some(4.0))
+            .expect("enforced not equal active");
+        let enforced_not_equal_inactive = general_mip
+            .add_integer_var("enforced-not-equal-inactive", 1.0, Some(0.0), Some(4.0))
+            .expect("enforced not equal inactive");
+        let linear_not_in_domain_value = general_mip
+            .add_integer_var("linear-not-in-domain-value", 1.0, Some(0.0), Some(6.0))
+            .expect("linear not in domain value");
+        let enforced_not_in_domain_active = general_mip
+            .add_integer_var("enforced-not-in-domain-active", 1.0, Some(0.0), Some(6.0))
+            .expect("enforced not in domain active");
+        let enforced_not_in_domain_inactive = general_mip
+            .add_integer_var("enforced-not-in-domain-inactive", 1.0, Some(0.0), Some(6.0))
+            .expect("enforced not in domain inactive");
         general_mip
             .add_constraint("fix-logic-a", vec![(logic_a, 1.0)], RowSense::Eq, 1.0)
             .expect("fix logic a");
@@ -13236,6 +13357,20 @@ impl Driver {
                 signed_logic_count,
             )
             .expect("signed logical count");
+        general_mip
+            .add_literal_implication(
+                "signed-literal-implication",
+                MathProgram::not_lit(logic_b),
+                MathProgram::not_lit(signed_implication_blocked),
+            )
+            .expect("signed literal implication");
+        general_mip
+            .add_literal_equivalence(
+                "signed-literal-equivalence",
+                MathProgram::not_lit(logic_b),
+                MathProgram::bool_lit(signed_equivalence_forced),
+            )
+            .expect("signed literal equivalence");
         general_mip
             .add_enforced_boolean_and(
                 "active-enforced-bool-and",
@@ -13328,6 +13463,100 @@ impl Driver {
                 vec![(1, 2), (4, 4)],
             )
             .expect("inactive enforced linear domain");
+        general_mip
+            .add_constraint(
+                "linear-not-equal-cap",
+                vec![(linear_not_equal_value, 1.0)],
+                RowSense::Le,
+                3.0,
+            )
+            .expect("linear not equal cap");
+        general_mip
+            .add_linear_not_equal(
+                "linear-expression-not-equal",
+                vec![(linear_not_equal_value, 1.0)],
+                3,
+            )
+            .expect("linear expression not equal");
+        general_mip
+            .add_constraint(
+                "active-linear-not-equal-cap",
+                vec![(enforced_not_equal_active, 1.0)],
+                RowSense::Le,
+                3.0,
+            )
+            .expect("active linear not equal cap");
+        general_mip
+            .add_enforced_linear_not_equal(
+                "active-linear-expression-not-equal",
+                vec![MathProgram::bool_lit(logic_a)],
+                vec![(enforced_not_equal_active, 1.0)],
+                3,
+            )
+            .expect("active linear expression not equal");
+        general_mip
+            .add_constraint(
+                "inactive-linear-not-equal-cap",
+                vec![(enforced_not_equal_inactive, 1.0)],
+                RowSense::Le,
+                3.0,
+            )
+            .expect("inactive linear not equal cap");
+        general_mip
+            .add_enforced_linear_not_equal(
+                "inactive-linear-expression-not-equal",
+                vec![MathProgram::bool_lit(logic_b)],
+                vec![(enforced_not_equal_inactive, 1.0)],
+                3,
+            )
+            .expect("inactive linear expression not equal");
+        general_mip
+            .add_constraint(
+                "linear-not-in-domain-cap",
+                vec![(linear_not_in_domain_value, 1.0)],
+                RowSense::Le,
+                5.0,
+            )
+            .expect("linear not in domain cap");
+        general_mip
+            .add_linear_not_in_domain(
+                "linear-expression-not-in-domain",
+                vec![(linear_not_in_domain_value, 1.0)],
+                vec![(2, 3), (5, 5)],
+            )
+            .expect("linear expression not in domain");
+        general_mip
+            .add_constraint(
+                "active-linear-not-in-domain-cap",
+                vec![(enforced_not_in_domain_active, 1.0)],
+                RowSense::Le,
+                5.0,
+            )
+            .expect("active linear not in domain cap");
+        general_mip
+            .add_enforced_linear_not_in_domain(
+                "active-linear-expression-not-in-domain",
+                vec![MathProgram::bool_lit(logic_a)],
+                vec![(enforced_not_in_domain_active, 1.0)],
+                vec![(1, 2), (4, 5)],
+            )
+            .expect("active linear expression not in domain");
+        general_mip
+            .add_constraint(
+                "inactive-linear-not-in-domain-cap",
+                vec![(enforced_not_in_domain_inactive, 1.0)],
+                RowSense::Le,
+                5.0,
+            )
+            .expect("inactive linear not in domain cap");
+        general_mip
+            .add_enforced_linear_not_in_domain(
+                "inactive-linear-expression-not-in-domain",
+                vec![MathProgram::bool_lit(logic_b)],
+                vec![(enforced_not_in_domain_inactive, 1.0)],
+                vec![(1, 2), (4, 5)],
+            )
+            .expect("inactive linear expression not in domain");
         general_mip
             .add_binary_implication("logical-implication", logic_a, logic_c)
             .expect("logical implication");
@@ -13545,7 +13774,7 @@ impl Driver {
                         && report
                         .external_max_violation
                         .is_some_and(|violation| violation <= 1e-7)
-                        && (report.internal.objective - 125.0).abs() <= 1e-7
+                        && (report.internal.objective - 144.0).abs() <= 1e-7
                         && (report.internal.x[logic_a] - 1.0).abs() <= 1e-7
                         && report.internal.x[logic_b].abs() <= 1e-7
                         && (report.internal.x[logic_c] - 1.0).abs() <= 1e-7
@@ -13556,6 +13785,8 @@ impl Driver {
                         && report.internal.x[signed_logic_or].abs() <= 1e-7
                         && (report.internal.x[signed_logic_xor] - 1.0).abs() <= 1e-7
                         && (report.internal.x[signed_logic_count] - 3.0).abs() <= 1e-7
+                        && report.internal.x[signed_implication_blocked].abs() <= 1e-7
+                        && (report.internal.x[signed_equivalence_forced] - 1.0).abs() <= 1e-7
                         && (report.internal.x[enforced_bool_and_a] - 1.0).abs() <= 1e-7
                         && report.internal.x[enforced_bool_and_b].abs() <= 1e-7
                         && (report.internal.x[enforced_bool_or_a] - 1.0).abs() <= 1e-7
@@ -13571,6 +13802,14 @@ impl Driver {
                         && (report.internal.x[linear_domain_value] - 4.0).abs() <= 1e-7
                         && (report.internal.x[enforced_domain_active] - 4.0).abs() <= 1e-7
                         && (report.internal.x[enforced_domain_inactive] - 5.0).abs() <= 1e-7
+                        && (report.internal.x[linear_not_equal_value] - 2.0).abs() <= 1e-7
+                        && (report.internal.x[enforced_not_equal_active] - 2.0).abs() <= 1e-7
+                        && (report.internal.x[enforced_not_equal_inactive] - 3.0).abs() <= 1e-7
+                        && (report.internal.x[linear_not_in_domain_value] - 4.0).abs() <= 1e-7
+                        && (report.internal.x[enforced_not_in_domain_active] - 3.0).abs()
+                            <= 1e-7
+                        && (report.internal.x[enforced_not_in_domain_inactive] - 5.0).abs()
+                            <= 1e-7
                         && (report.internal.x[enforced_x] - 4.0).abs() <= 1e-7
                         && (report.internal.x[product_result] - 6.0).abs() <= 1e-7
                         && (report.internal.x[div_quotient] - 2.0).abs() <= 1e-7
@@ -13629,7 +13868,7 @@ impl Driver {
                     && report
                         .external_max_violation
                         .is_some_and(|violation| violation <= 1e-7)
-                    && (report.internal.objective - 125.0).abs() <= 1e-7
+                    && (report.internal.objective - 144.0).abs() <= 1e-7
                     && (report.internal.x[logic_a] - 1.0).abs() <= 1e-7
                     && report.internal.x[logic_b].abs() <= 1e-7
                     && (report.internal.x[logic_c] - 1.0).abs() <= 1e-7
@@ -13640,6 +13879,8 @@ impl Driver {
                     && report.internal.x[signed_logic_or].abs() <= 1e-7
                     && (report.internal.x[signed_logic_xor] - 1.0).abs() <= 1e-7
                     && (report.internal.x[signed_logic_count] - 3.0).abs() <= 1e-7
+                    && report.internal.x[signed_implication_blocked].abs() <= 1e-7
+                    && (report.internal.x[signed_equivalence_forced] - 1.0).abs() <= 1e-7
                     && (report.internal.x[enforced_bool_and_a] - 1.0).abs() <= 1e-7
                     && report.internal.x[enforced_bool_and_b].abs() <= 1e-7
                     && (report.internal.x[enforced_bool_or_a] - 1.0).abs() <= 1e-7
@@ -13655,6 +13896,12 @@ impl Driver {
                     && (report.internal.x[linear_domain_value] - 4.0).abs() <= 1e-7
                     && (report.internal.x[enforced_domain_active] - 4.0).abs() <= 1e-7
                     && (report.internal.x[enforced_domain_inactive] - 5.0).abs() <= 1e-7
+                    && (report.internal.x[linear_not_equal_value] - 2.0).abs() <= 1e-7
+                    && (report.internal.x[enforced_not_equal_active] - 2.0).abs() <= 1e-7
+                    && (report.internal.x[enforced_not_equal_inactive] - 3.0).abs() <= 1e-7
+                    && (report.internal.x[linear_not_in_domain_value] - 4.0).abs() <= 1e-7
+                    && (report.internal.x[enforced_not_in_domain_active] - 3.0).abs() <= 1e-7
+                    && (report.internal.x[enforced_not_in_domain_inactive] - 5.0).abs() <= 1e-7
                     && (report.internal.x[enforced_x] - 4.0).abs() <= 1e-7
                     && (report.internal.x[product_result] - 6.0).abs() <= 1e-7
                     && (report.internal.x[div_quotient] - 2.0).abs() <= 1e-7
@@ -13702,6 +13949,8 @@ impl Driver {
                     && has_generated("signed-logical-or")
                     && has_generated("signed-logical-xor")
                     && has_generated("signed-logical-count")
+                    && has_generated("signed-literal-implication")
+                    && has_generated("signed-literal-equivalence")
                     && has_generated("active-enforced-bool-and")
                     && has_generated("active-enforced-bool-or")
                     && has_generated("active-enforced-bool-xor")
@@ -13712,6 +13961,12 @@ impl Driver {
                     && has_generated("linear-expression-domain")
                     && has_generated("active-linear-expression-domain")
                     && has_generated("inactive-linear-expression-domain")
+                    && has_generated("linear-expression-not-equal")
+                    && has_generated("active-linear-expression-not-equal")
+                    && has_generated("inactive-linear-expression-not-equal")
+                    && has_generated("linear-expression-not-in-domain")
+                    && has_generated("active-linear-expression-not-in-domain")
+                    && has_generated("inactive-linear-expression-not-in-domain")
                     && has_generated("active-enforced-cap")
                     && has_generated("integer-product")
                     && has_generated("integer-division")
@@ -13777,6 +14032,8 @@ impl Driver {
                     && has_generated("signed-logical-or")
                     && has_generated("signed-logical-xor")
                     && has_generated("signed-logical-count")
+                    && has_generated("signed-literal-implication")
+                    && has_generated("signed-literal-equivalence")
                     && has_generated("active-enforced-bool-and")
                     && has_generated("active-enforced-bool-or")
                     && has_generated("active-enforced-bool-xor")
@@ -13787,6 +14044,12 @@ impl Driver {
                     && has_generated("linear-expression-domain")
                     && has_generated("active-linear-expression-domain")
                     && has_generated("inactive-linear-expression-domain")
+                    && has_generated("linear-expression-not-equal")
+                    && has_generated("active-linear-expression-not-equal")
+                    && has_generated("inactive-linear-expression-not-equal")
+                    && has_generated("linear-expression-not-in-domain")
+                    && has_generated("active-linear-expression-not-in-domain")
+                    && has_generated("inactive-linear-expression-not-in-domain")
                     && has_generated("active-enforced-cap")
                     && has_generated("integer-product")
                     && has_generated("integer-division")
@@ -13831,6 +14094,234 @@ impl Driver {
             }
             Err(err) => self.check(
                 "MathProgram MIP facade logical/arithmetic/norm MPS export",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        let mut reified_domain_mip = MathProgram::new(MathObjectiveSense::Max);
+        let domain_x = reified_domain_mip
+            .add_integer_var("domain-x", 1.0, Some(0.0), Some(5.0))
+            .expect("domain x");
+        let domain_flag = reified_domain_mip
+            .add_binary_var("domain-flag", 10.0)
+            .expect("domain flag");
+        let forced_x = reified_domain_mip
+            .add_integer_var("forced-x", 0.0, Some(0.0), Some(5.0))
+            .expect("forced x");
+        let forced_flag = reified_domain_mip
+            .add_binary_var("forced-domain-flag", 7.0)
+            .expect("forced domain flag");
+        let outside_x = reified_domain_mip
+            .add_integer_var("outside-x", 1.0, Some(0.0), Some(5.0))
+            .expect("outside x");
+        let outside_flag = reified_domain_mip
+            .add_binary_var("outside-domain-flag", 10.0)
+            .expect("outside domain flag");
+        reified_domain_mip
+            .add_reified_linear_domain(
+                "reified-linear-domain-membership",
+                MathProgram::bool_lit(domain_flag),
+                vec![(domain_x, 1.0)],
+                vec![(1, 2), (4, 4)],
+            )
+            .expect("reified linear domain membership");
+        reified_domain_mip
+            .add_constraint(
+                "force-domain-outside",
+                vec![(forced_x, 1.0)],
+                RowSense::Eq,
+                5.0,
+            )
+            .expect("force domain outside");
+        reified_domain_mip
+            .add_reified_linear_domain(
+                "forced-reified-linear-domain-membership",
+                MathProgram::bool_lit(forced_flag),
+                vec![(forced_x, 1.0)],
+                vec![(1, 2), (4, 4)],
+            )
+            .expect("forced reified linear domain membership");
+        reified_domain_mip
+            .add_constraint(
+                "outside-domain-cap",
+                vec![(outside_x, 1.0)],
+                RowSense::Le,
+                4.0,
+            )
+            .expect("outside domain cap");
+        reified_domain_mip
+            .add_reified_linear_not_in_domain(
+                "reified-linear-not-in-domain-membership",
+                MathProgram::bool_lit(outside_flag),
+                vec![(outside_x, 1.0)],
+                vec![(1, 3)],
+            )
+            .expect("reified linear not in domain membership");
+
+        let reified_domain_original_var_count = reified_domain_mip.variables.len();
+        let mut reified_domain_expected_objective = None;
+        let mut reified_domain_expected_x = None;
+        match cross_check_math_program_with_external(
+            &reified_domain_mip,
+            &solve_opts,
+            &external_opts,
+            1e-7,
+        ) {
+            Ok(report) => {
+                reified_domain_expected_objective = Some(report.internal.objective);
+                reified_domain_expected_x = Some(report.internal.x.clone());
+                self.check(
+                    "MathProgram MIP facade reified linear-domain HiGHS cross-check",
+                    report.within_tolerance
+                        && report.internal.status == MathProgramStatus::Optimal
+                        && report.external.status == MathProgramStatus::Optimal
+                        && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                        && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                        && (report.internal.objective - 28.0).abs() <= 1e-7
+                        && (report.internal.x[domain_x] - 4.0).abs() <= 1e-7
+                        && (report.internal.x[domain_flag] - 1.0).abs() <= 1e-7
+                        && (report.internal.x[forced_x] - 5.0).abs() <= 1e-7
+                        && report.internal.x[forced_flag].abs() <= 1e-7
+                        && (report.internal.x[outside_x] - 4.0).abs() <= 1e-7
+                        && (report.internal.x[outside_flag] - 1.0).abs() <= 1e-7
+                        && report
+                            .internal_max_violation
+                            .is_some_and(|violation| violation <= 1e-7)
+                        && report
+                            .external_max_violation
+                            .is_some_and(|violation| violation <= 1e-7),
+                    format!(
+                        "internal={:?} external={:?} obj_diff={:?} x_diff={:?} objective={} x={:?} violations=({:?},{:?})",
+                        report.internal.status,
+                        report.external.status,
+                        report.objective_abs_diff,
+                        report.max_x_abs_diff,
+                        report.internal.objective,
+                        report.internal.x,
+                        report.internal_max_violation,
+                        report.external_max_violation
+                    ),
+                );
+            }
+            Err(err) => self.check(
+                "MathProgram MIP facade reified linear-domain HiGHS cross-check",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        match export_math_program_cplex_lp(&reified_domain_mip) {
+            Ok(export) => {
+                let has_generated = |needle: &str| {
+                    export.row_mappings.iter().any(|row| {
+                        row.source_kind == MathProgramExportRowKind::Generated
+                            && row.source_name.contains(needle)
+                    })
+                };
+                let passed = export.is_mip
+                    && export.original_variable_count == reified_domain_original_var_count
+                    && export.variable_names.len() > export.original_variable_count
+                    && export.original_variable_expansions.len()
+                        == reified_domain_original_var_count
+                    && export.row_mappings.len() == export.constraint_names.len()
+                    && has_generated("reified-linear-domain-membership")
+                    && has_generated("forced-reified-linear-domain-membership")
+                    && has_generated("reified-linear-not-in-domain-membership")
+                    && export.text.contains("Maximize\n")
+                    && export.text.contains("Subject To\n")
+                    && export.text.contains("Bounds\n")
+                    && export.text.contains("Binaries\n")
+                    && export.text.ends_with("End\n");
+                self.check(
+                    "MathProgram MIP facade reified linear-domain CPLEX-LP export",
+                    passed,
+                    format!(
+                        "original_vars={} exported_vars={} rows={} bytes={}",
+                        export.original_variable_count,
+                        export.variable_names.len(),
+                        export.constraint_names.len(),
+                        export.text.len()
+                    ),
+                );
+                if passed {
+                    self.check_math_program_export_highs_file_solve(
+                        "MathProgram MIP facade reified linear-domain CPLEX-LP HiGHS file solve",
+                        &export.text,
+                        "lp",
+                        reified_domain_expected_objective,
+                        reified_domain_expected_x
+                            .as_deref()
+                            .map(|expected_original_x| MathProgramExportSolutionCheck {
+                                variable_names: &export.variable_names,
+                                original_variable_expansions: &export.original_variable_expansions,
+                                expected_original_x,
+                                tolerance: 1e-7,
+                            }),
+                    );
+                }
+            }
+            Err(err) => self.check(
+                "MathProgram MIP facade reified linear-domain CPLEX-LP export",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        match export_math_program_mps(&reified_domain_mip) {
+            Ok(export) => {
+                let has_generated = |needle: &str| {
+                    export.row_mappings.iter().any(|row| {
+                        row.source_kind == MathProgramExportRowKind::Generated
+                            && row.source_name.contains(needle)
+                    })
+                };
+                let passed = export.is_mip
+                    && export.original_variable_count == reified_domain_original_var_count
+                    && export.variable_names.len() > export.original_variable_count
+                    && export.original_variable_expansions.len()
+                        == reified_domain_original_var_count
+                    && export.row_mappings.len() == export.constraint_names.len()
+                    && has_generated("reified-linear-domain-membership")
+                    && has_generated("forced-reified-linear-domain-membership")
+                    && has_generated("reified-linear-not-in-domain-membership")
+                    && export.text.contains("OBJSENSE\n MAX\n")
+                    && export.text.contains("ROWS\n N  OBJ\n")
+                    && export.text.contains("COLUMNS\n")
+                    && export.text.contains("'INTORG'")
+                    && export.text.contains("'INTEND'")
+                    && export.text.contains("BOUNDS\n")
+                    && export.text.ends_with("ENDATA\n");
+                self.check(
+                    "MathProgram MIP facade reified linear-domain MPS export",
+                    passed,
+                    format!(
+                        "original_vars={} exported_vars={} rows={} bytes={}",
+                        export.original_variable_count,
+                        export.variable_names.len(),
+                        export.constraint_names.len(),
+                        export.text.len()
+                    ),
+                );
+                if passed {
+                    self.check_math_program_export_highs_file_solve(
+                        "MathProgram MIP facade reified linear-domain MPS HiGHS file solve",
+                        &export.text,
+                        "mps",
+                        reified_domain_expected_objective,
+                        reified_domain_expected_x
+                            .as_deref()
+                            .map(|expected_original_x| MathProgramExportSolutionCheck {
+                                variable_names: &export.variable_names,
+                                original_variable_expansions: &export.original_variable_expansions,
+                                expected_original_x,
+                                tolerance: 1e-7,
+                            }),
+                    );
+                }
+            }
+            Err(err) => self.check(
+                "MathProgram MIP facade reified linear-domain MPS export",
                 false,
                 format!("{err:?}"),
             ),
@@ -17160,6 +17651,62 @@ impl Driver {
             }
             Err(err) => self.check(
                 "MathProgram bound conflict refiner subsystem external cross-check",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
+        let mut assumption_core_model = MathProgram::new(MathObjectiveSense::Min);
+        let assume_a = assumption_core_model
+            .add_binary_var("assume-a", 0.0)
+            .expect("assume a");
+        let assume_b = assumption_core_model
+            .add_binary_var("assume-b", 0.0)
+            .expect("assume b");
+        let assume_noise = assumption_core_model
+            .add_binary_var("assume-noise", 0.0)
+            .expect("assume noise");
+        assumption_core_model
+            .add_constraint(
+                "assumption-at-most-one",
+                vec![(assume_a, 1.0), (assume_b, 1.0)],
+                RowSense::Le,
+                1.0,
+            )
+            .expect("assumption core cap");
+        let assumption_core_literals = vec![
+            MathProgram::bool_lit(assume_a),
+            MathProgram::bool_lit(assume_b),
+            MathProgram::not_lit(assume_noise),
+        ];
+        match cross_check_math_program_assumption_core_with_external(
+            &assumption_core_model,
+            &assumption_core_literals,
+            &solve_opts,
+            &external_opts,
+            &MathProgramAssumptionCoreOptions::default(),
+        ) {
+            Ok(report) => self.check(
+                "MathProgram assumption-core external cross-check",
+                report.within_tolerance
+                    && report.internal.minimal
+                    && report.internal.assumptions
+                        == vec![
+                            MathProgram::bool_lit(assume_a),
+                            MathProgram::bool_lit(assume_b),
+                        ]
+                    && report.external.status == MathProgramStatus::Infeasible,
+                format!(
+                    "internal={:?} external={:?} core={:?} minimal={} status_agree={}",
+                    report.internal.status,
+                    report.external.status,
+                    report.internal.assumptions,
+                    report.internal.minimal,
+                    report.status_agree
+                ),
+            ),
+            Err(err) => self.check(
+                "MathProgram assumption-core external cross-check",
                 false,
                 format!("{err:?}"),
             ),

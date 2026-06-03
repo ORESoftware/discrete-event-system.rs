@@ -156,8 +156,28 @@ def validate_dimacs(payload: dict[str, Any], tool: str) -> dict[str, Any]:
         "kissat": ["kissat"],
         "cadical": ["cadical"],
         "cryptominisat": ["cryptominisat5", "cryptominisat"],
+        "minisat": ["minisat"],
+        "glucose": ["glucose", "glucose-syrup"],
+        "maplesat": ["maplesat", "maple-sat", "maple-lcm"],
+        "varisat": ["varisat"],
     }
-    aliases = ["kissat", "cadical", "cryptominisat5", "cryptominisat"] if tool == "auto" else aliases_by_tool.get(tool, [tool])
+    aliases = (
+        [
+            "kissat",
+            "cadical",
+            "cryptominisat5",
+            "cryptominisat",
+            "minisat",
+            "glucose",
+            "glucose-syrup",
+            "maplesat",
+            "maple-sat",
+            "maple-lcm",
+            "varisat",
+        ]
+        if tool == "auto"
+        else aliases_by_tool.get(tool, [tool])
+    )
     command = first_command(tool, aliases)
     if command:
         with tempfile.TemporaryDirectory(prefix="ores-dimacs-") as tmp:
@@ -166,6 +186,166 @@ def validate_dimacs(payload: dict[str, Any], tool: str) -> dict[str, Any]:
             ok, stdout, stderr = run_command(command, [str(path)])
         return result("ok" if ok else "failed", infer_sat_like(stdout, stderr, ok), command, "", stdout, stderr)
     return brute_force_dimacs(text)
+
+
+def parse_wcnf(text: str) -> tuple[int, int | None, list[tuple[int, list[int]]]]:
+    variables = 0
+    top_weight: int | None = None
+    clauses: list[tuple[int, list[int]]] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("c"):
+            continue
+        if line.startswith("p"):
+            parts = line.split()
+            if len(parts) >= 4 and parts[1].lower() == "wcnf":
+                variables = int(parts[2])
+                if len(parts) >= 5:
+                    top_weight = int(parts[4])
+            continue
+        tokens = [int(token) for token in line.split()]
+        if len(tokens) < 2 or tokens[-1] != 0:
+            raise ValueError("WCNF clauses must be '<weight> <lits...> 0'")
+        weight = tokens[0]
+        clause = tokens[1:-1]
+        variables = max([variables, *[abs(literal) for literal in clause]])
+        clauses.append((weight, clause))
+    return variables, top_weight, clauses
+
+
+def brute_force_wcnf(text: str) -> dict[str, Any]:
+    variables, top_weight, clauses = parse_wcnf(text)
+    if variables > 24:
+        return result(
+            "unavailable",
+            "unknown",
+            "builtin:wcnf-small-maxsat",
+            f"builtin WCNF fallback is capped at 24 variables, got {variables}",
+        )
+    best_cost: int | None = None
+    best_model: list[int] = []
+    for bits in itertools.product([False, True], repeat=variables):
+        assignment = {idx + 1: value for idx, value in enumerate(bits)}
+        hard_failed = False
+        cost = 0
+        for weight, clause in clauses:
+            satisfied = any(assignment[abs(lit)] == (lit > 0) for lit in clause)
+            if satisfied:
+                continue
+            if top_weight is not None and weight >= top_weight:
+                hard_failed = True
+                break
+            cost += weight
+        if hard_failed:
+            continue
+        if best_cost is None or cost < best_cost:
+            best_cost = cost
+            best_model = [idx if value else -idx for idx, value in assignment.items()]
+    if best_cost is None:
+        return result("ok", "unsat", "builtin:wcnf-small-maxsat", "hard clauses are unsatisfiable")
+    stdout = f"o {best_cost}\ns OPTIMUM FOUND\nv {' '.join(str(value) for value in best_model)} 0\n"
+    return result("ok", "optimal", "builtin:wcnf-small-maxsat", f"optimum={best_cost}", stdout)
+
+
+def validate_wcnf(payload: dict[str, Any], tool: str) -> dict[str, Any]:
+    text = str(payload.get("wcnf") or payload.get("dimacs") or payload.get("text") or payload.get("model") or "")
+    if not text.strip():
+        return result("failed", "failure", "wcnf", "payload needs wcnf, dimacs, text, or model")
+    aliases_by_tool = {
+        "open-wbo": ["open-wbo", "open-wbo_static"],
+        "maxhs": ["maxhs"],
+        "sat4j": ["sat4j", "sat4j-sat"],
+        "pysat": ["pysat-adapter", "python-sat-adapter"],
+    }
+    aliases = ["open-wbo", "open-wbo_static", "maxhs"] if tool == "auto" else aliases_by_tool.get(tool, [tool])
+    command = first_command(tool, aliases)
+    if command:
+        with tempfile.TemporaryDirectory(prefix="ores-wcnf-") as tmp:
+            path = Path(tmp) / "problem.wcnf"
+            path.write_text(text, encoding="utf-8")
+            ok, stdout, stderr = run_command(command, [str(path)])
+        return result("ok" if ok else "failed", infer_sat_like(stdout, stderr, ok), command, "", stdout, stderr)
+    return brute_force_wcnf(text)
+
+
+def parse_opb(text: str) -> tuple[list[str], list[tuple[list[tuple[int, str]], str, int]]]:
+    variables: set[str] = set()
+    constraints: list[tuple[list[tuple[int, str]], str, int]] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("*"):
+            continue
+        if line.lower().startswith(("min:", "max:")):
+            continue
+        match = re.fullmatch(r"(.+?)\s*(>=|<=|=)\s*(-?\d+)\s*;?", line)
+        if not match:
+            raise ValueError(f"unsupported OPB constraint {line!r}")
+        lhs, op, rhs_text = match.groups()
+        tokens = lhs.split()
+        if len(tokens) % 2 != 0:
+            raise ValueError(f"unsupported OPB term list {lhs!r}")
+        terms: list[tuple[int, str]] = []
+        for idx in range(0, len(tokens), 2):
+            coeff = int(tokens[idx])
+            name = tokens[idx + 1]
+            if not re.fullmatch(r"[A-Za-z_]\w*", name):
+                raise ValueError(f"unsupported OPB variable {name!r}")
+            variables.add(name)
+            terms.append((coeff, name))
+        constraints.append((terms, op, int(rhs_text)))
+    if not constraints:
+        raise ValueError("missing OPB constraints")
+    return sorted(variables), constraints
+
+
+def opb_constraint_satisfied(
+    constraint: tuple[list[tuple[int, str]], str, int],
+    assignment: dict[str, bool],
+) -> bool:
+    terms, op, rhs = constraint
+    total = sum(coeff * int(assignment[name]) for coeff, name in terms)
+    if op == ">=":
+        return total >= rhs
+    if op == "<=":
+        return total <= rhs
+    return total == rhs
+
+
+def brute_force_opb(text: str) -> dict[str, Any]:
+    variables, constraints = parse_opb(text)
+    if len(variables) > 24:
+        return result(
+            "unavailable",
+            "unknown",
+            "builtin:opb-small-pb",
+            f"builtin OPB fallback is capped at 24 variables, got {len(variables)}",
+        )
+    for bits in itertools.product([False, True], repeat=len(variables)):
+        assignment = dict(zip(variables, bits))
+        if all(opb_constraint_satisfied(constraint, assignment) for constraint in constraints):
+            model = " ".join(f"{name}={int(assignment[name])}" for name in variables)
+            return result("ok", "sat", "builtin:opb-small-pb", "satisfying assignment found", model)
+    return result("ok", "unsat", "builtin:opb-small-pb", "all assignments exhausted")
+
+
+def validate_opb(payload: dict[str, Any], tool: str) -> dict[str, Any]:
+    text = str(payload.get("opb") or payload.get("pb") or payload.get("text") or payload.get("model") or "")
+    if not text.strip():
+        return result("failed", "failure", "opb", "payload needs opb, pb, text, or model")
+    aliases_by_tool = {
+        "roundingsat": ["roundingsat"],
+        "sat4j": ["sat4j", "sat4j-pb"],
+        "pysat": ["pysat-adapter", "python-sat-adapter"],
+    }
+    aliases = ["roundingsat"] if tool == "auto" else aliases_by_tool.get(tool, [tool])
+    command = first_command(tool, aliases)
+    if command:
+        with tempfile.TemporaryDirectory(prefix="ores-opb-") as tmp:
+            path = Path(tmp) / "problem.opb"
+            path.write_text(text, encoding="utf-8")
+            ok, stdout, stderr = run_command(command, [str(path)])
+        return result("ok" if ok else "failed", infer_sat_like(stdout, stderr, ok), command, "", stdout, stderr)
+    return brute_force_opb(text)
 
 
 def builtin_smtlib(text: str) -> dict[str, Any]:
@@ -190,9 +370,30 @@ def validate_smtlib(payload: dict[str, Any], tool: str) -> dict[str, Any]:
         "yices": ["yices-smt2", "yices"],
         "bitwuzla": ["bitwuzla"],
         "boolector": ["boolector"],
+        "mathsat": ["mathsat"],
+        "optimathsat": ["optimathsat", "optimathsat5"],
+        "opensmt": ["opensmt", "opensmt2"],
+        "smtinterpol": ["smtinterpol", "smtinterpol.sh"],
+        "princess": ["princess", "princess-smt"],
     }
     aliases = (
-        ["z3", "cvc5", "yices-smt2", "yices", "bitwuzla", "boolector"]
+        [
+            "z3",
+            "cvc5",
+            "yices-smt2",
+            "yices",
+            "bitwuzla",
+            "boolector",
+            "mathsat",
+            "optimathsat",
+            "optimathsat5",
+            "opensmt",
+            "opensmt2",
+            "smtinterpol",
+            "smtinterpol.sh",
+            "princess",
+            "princess-smt",
+        ]
         if tool == "auto"
         else aliases_by_tool.get(tool, [tool])
     )
@@ -206,6 +407,10 @@ def validate_smtlib(payload: dict[str, Any], tool: str) -> dict[str, Any]:
         elif basename in ("yices-smt2", "yices"):
             args = []
         elif basename in ("bitwuzla", "boolector"):
+            args = ["--smt2", "-"]
+        elif basename in ("mathsat", "optimathsat", "optimathsat5"):
+            args = ["-input=smt2"]
+        elif basename in ("opensmt", "opensmt2"):
             args = ["--smt2", "-"]
         else:
             args = []
@@ -302,9 +507,34 @@ def dispatch(payload: dict[str, Any], tool_override: str | None = None) -> dict[
     tool = normalize_tool_id(tool_override or payload.get("solver") or payload.get("tool"))
     if kind == "minizinc-validation" or tool in MINIZINC_TOOL_IDS:
         return validate_minizinc(payload, "minizinc" if tool == "auto" else tool)
-    if kind in ("smtlib-validation", "smt-lib-validation") or tool in ("z3", "cvc5", "yices", "bitwuzla", "boolector"):
+    if kind in ("smtlib-validation", "smt-lib-validation") or tool in (
+        "z3",
+        "cvc5",
+        "yices",
+        "bitwuzla",
+        "boolector",
+        "mathsat",
+        "optimathsat",
+        "opensmt",
+        "smtinterpol",
+        "princess",
+    ):
         return validate_smtlib(payload, tool)
-    if kind in ("dimacs-validation", "dimacs-cnf-validation") or tool in ("kissat", "cadical", "cryptominisat"):
+    if kind in ("wcnf-validation", "dimacs-wcnf-validation", "maxsat-validation") or (
+        tool in ("open-wbo", "maxhs") and any(key in payload for key in ("wcnf", "dimacs"))
+    ):
+        return validate_wcnf(payload, tool)
+    if kind in ("opb-validation", "pseudo-boolean-validation") or tool in ("roundingsat",):
+        return validate_opb(payload, tool)
+    if kind in ("dimacs-validation", "dimacs-cnf-validation") or tool in (
+        "kissat",
+        "cadical",
+        "cryptominisat",
+        "minisat",
+        "glucose",
+        "maplesat",
+        "varisat",
+    ):
         return validate_dimacs(payload, tool)
     return result("unavailable", "unknown", tool, f"unknown model validation payload kind {kind!r}")
 

@@ -73,6 +73,16 @@ pub enum ExternalOptimizationTool {
     Cosmo,
     Sdpa,
     Csdp,
+    Z3,
+    Cvc5,
+    Yices,
+    Bitwuzla,
+    Boolector,
+    MathSat,
+    OptiMathSat,
+    OpenSmt,
+    SmtInterpol,
+    Princess,
     HighsCli,
     GlpkCli,
     ScipCli,
@@ -148,6 +158,16 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Cosmo => "cosmo",
             ExternalOptimizationTool::Sdpa => "sdpa",
             ExternalOptimizationTool::Csdp => "csdp",
+            ExternalOptimizationTool::Z3 => "z3",
+            ExternalOptimizationTool::Cvc5 => "cvc5",
+            ExternalOptimizationTool::Yices => "yices",
+            ExternalOptimizationTool::Bitwuzla => "bitwuzla",
+            ExternalOptimizationTool::Boolector => "boolector",
+            ExternalOptimizationTool::MathSat => "mathsat",
+            ExternalOptimizationTool::OptiMathSat => "optimathsat",
+            ExternalOptimizationTool::OpenSmt => "opensmt",
+            ExternalOptimizationTool::SmtInterpol => "smtinterpol",
+            ExternalOptimizationTool::Princess => "princess",
             ExternalOptimizationTool::HighsCli => "highs-cli",
             ExternalOptimizationTool::GlpkCli => "glpk-cli",
             ExternalOptimizationTool::ScipCli => "scip-cli",
@@ -223,6 +243,16 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Cosmo => "COSMO",
             ExternalOptimizationTool::Sdpa => "SDPA",
             ExternalOptimizationTool::Csdp => "CSDP",
+            ExternalOptimizationTool::Z3 => "Z3",
+            ExternalOptimizationTool::Cvc5 => "cvc5",
+            ExternalOptimizationTool::Yices => "Yices",
+            ExternalOptimizationTool::Bitwuzla => "Bitwuzla",
+            ExternalOptimizationTool::Boolector => "Boolector",
+            ExternalOptimizationTool::MathSat => "MathSAT",
+            ExternalOptimizationTool::OptiMathSat => "OptiMathSAT",
+            ExternalOptimizationTool::OpenSmt => "OpenSMT",
+            ExternalOptimizationTool::SmtInterpol => "SMTInterpol",
+            ExternalOptimizationTool::Princess => "Princess",
             ExternalOptimizationTool::HighsCli => "HiGHS CLI",
             ExternalOptimizationTool::GlpkCli => "GLPK glpsol CLI",
             ExternalOptimizationTool::ScipCli => "SCIP CLI",
@@ -293,6 +323,16 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::Cosmo
             | ExternalOptimizationTool::Sdpa
             | ExternalOptimizationTool::Csdp
+            | ExternalOptimizationTool::Z3
+            | ExternalOptimizationTool::Cvc5
+            | ExternalOptimizationTool::Yices
+            | ExternalOptimizationTool::Bitwuzla
+            | ExternalOptimizationTool::Boolector
+            | ExternalOptimizationTool::MathSat
+            | ExternalOptimizationTool::OptiMathSat
+            | ExternalOptimizationTool::OpenSmt
+            | ExternalOptimizationTool::SmtInterpol
+            | ExternalOptimizationTool::Princess
             | ExternalOptimizationTool::HighsCli
             | ExternalOptimizationTool::GlpkCli
             | ExternalOptimizationTool::ScipCli
@@ -378,6 +418,16 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::Cosmo
             | ExternalOptimizationTool::Sdpa
             | ExternalOptimizationTool::Csdp => ExternalOptimizationFamily::ConvexOptimization,
+            ExternalOptimizationTool::Z3
+            | ExternalOptimizationTool::Cvc5
+            | ExternalOptimizationTool::Yices
+            | ExternalOptimizationTool::Bitwuzla
+            | ExternalOptimizationTool::Boolector
+            | ExternalOptimizationTool::MathSat
+            | ExternalOptimizationTool::OptiMathSat
+            | ExternalOptimizationTool::OpenSmt
+            | ExternalOptimizationTool::SmtInterpol
+            | ExternalOptimizationTool::Princess => ExternalOptimizationFamily::SmtOmt,
             ExternalOptimizationTool::OrToolsJava | ExternalOptimizationTool::OrToolsPython => {
                 ExternalOptimizationFamily::CpSatRouting
             }
@@ -427,7 +477,17 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::GurobiCli
             | ExternalOptimizationTool::CplexCli
             | ExternalOptimizationTool::XpressCli
-            | ExternalOptimizationTool::LindoCli => ExternalOptimizationExactness::Exact,
+            | ExternalOptimizationTool::LindoCli
+            | ExternalOptimizationTool::Z3
+            | ExternalOptimizationTool::Cvc5
+            | ExternalOptimizationTool::Yices
+            | ExternalOptimizationTool::Bitwuzla
+            | ExternalOptimizationTool::Boolector
+            | ExternalOptimizationTool::MathSat
+            | ExternalOptimizationTool::OptiMathSat
+            | ExternalOptimizationTool::OpenSmt
+            | ExternalOptimizationTool::SmtInterpol
+            | ExternalOptimizationTool::Princess => ExternalOptimizationExactness::Exact,
             ExternalOptimizationTool::OptaPlanner
             | ExternalOptimizationTool::Timefold
             | ExternalOptimizationTool::Hexaly
@@ -563,6 +623,20 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Cosmo => &["ores-cosmo-adapter", "cosmo-adapter"],
             ExternalOptimizationTool::Sdpa => &["ores-sdpa-adapter", "sdpa-adapter"],
             ExternalOptimizationTool::Csdp => &["ores-csdp-adapter", "csdp-adapter"],
+            ExternalOptimizationTool::Z3 => &["ores-z3-adapter", "z3-adapter"],
+            ExternalOptimizationTool::Cvc5 => &["ores-cvc5-adapter", "cvc5-adapter"],
+            ExternalOptimizationTool::Yices => &["ores-yices-adapter", "yices-adapter"],
+            ExternalOptimizationTool::Bitwuzla => &["ores-bitwuzla-adapter", "bitwuzla-adapter"],
+            ExternalOptimizationTool::Boolector => &["ores-boolector-adapter", "boolector-adapter"],
+            ExternalOptimizationTool::MathSat => &["ores-mathsat-adapter", "mathsat-adapter"],
+            ExternalOptimizationTool::OptiMathSat => {
+                &["ores-optimathsat-adapter", "optimathsat-adapter"]
+            }
+            ExternalOptimizationTool::OpenSmt => &["ores-opensmt-adapter", "opensmt-adapter"],
+            ExternalOptimizationTool::SmtInterpol => {
+                &["ores-smtinterpol-adapter", "smtinterpol-adapter"]
+            }
+            ExternalOptimizationTool::Princess => &["ores-princess-adapter", "princess-adapter"],
             ExternalOptimizationTool::HighsCli
             | ExternalOptimizationTool::GlpkCli
             | ExternalOptimizationTool::ScipCli
@@ -793,6 +867,36 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Csdp => {
                 "COIN-OR semidefinite programming solver for SDP cross-checks"
             }
+            ExternalOptimizationTool::Z3 => {
+                "SMT/OMT solver for SMT-LIB Optimize, MaxSMT, and feasibility cross-checks"
+            }
+            ExternalOptimizationTool::Cvc5 => {
+                "SMT solver with optimization support for SMT-LIB model and objective validation"
+            }
+            ExternalOptimizationTool::Yices => {
+                "SMT solver for bit-vector, arithmetic, and finite-domain feasibility validation"
+            }
+            ExternalOptimizationTool::Bitwuzla => {
+                "SMT solver for bit-vector and array-heavy optimization model cross-checks"
+            }
+            ExternalOptimizationTool::Boolector => {
+                "SMT solver for bit-vector and array feasibility cross-checks"
+            }
+            ExternalOptimizationTool::MathSat => {
+                "SMT solver for arithmetic, bit-vector, and array feasibility cross-checks"
+            }
+            ExternalOptimizationTool::OptiMathSat => {
+                "Optimization-modulo-theories solver for SMT-LIB Optimize and MaxSMT checks"
+            }
+            ExternalOptimizationTool::OpenSmt => {
+                "Open-source SMT solver for independent SMT-LIB feasibility checks"
+            }
+            ExternalOptimizationTool::SmtInterpol => {
+                "Interpolating SMT solver for proof-oriented feasibility cross-checks"
+            }
+            ExternalOptimizationTool::Princess => {
+                "SMT solver and theorem prover for integer-arithmetic model checks"
+            }
             ExternalOptimizationTool::HighsCli => {
                 "Native HiGHS command-line bridge for local LP/MIP/QP smoke checks and cross-validation"
             }
@@ -869,6 +973,7 @@ pub enum ExternalOptimizationFamily {
     ConvexOptimization,
     NonlinearOptimization,
     HybridOptimization,
+    SmtOmt,
     NativeSolverBinding,
 }
 
@@ -885,6 +990,7 @@ impl ExternalOptimizationFamily {
             ExternalOptimizationFamily::ConvexOptimization => "convex-optimization",
             ExternalOptimizationFamily::NonlinearOptimization => "nonlinear-optimization",
             ExternalOptimizationFamily::HybridOptimization => "hybrid-optimization",
+            ExternalOptimizationFamily::SmtOmt => "smt-omt",
             ExternalOptimizationFamily::NativeSolverBinding => "native-solver-binding",
         }
     }
@@ -978,6 +1084,16 @@ pub fn external_optimization_tools() -> &'static [ExternalOptimizationTool] {
         ExternalOptimizationTool::Cosmo,
         ExternalOptimizationTool::Sdpa,
         ExternalOptimizationTool::Csdp,
+        ExternalOptimizationTool::Z3,
+        ExternalOptimizationTool::Cvc5,
+        ExternalOptimizationTool::Yices,
+        ExternalOptimizationTool::Bitwuzla,
+        ExternalOptimizationTool::Boolector,
+        ExternalOptimizationTool::MathSat,
+        ExternalOptimizationTool::OptiMathSat,
+        ExternalOptimizationTool::OpenSmt,
+        ExternalOptimizationTool::SmtInterpol,
+        ExternalOptimizationTool::Princess,
         ExternalOptimizationTool::HighsCli,
         ExternalOptimizationTool::GlpkCli,
         ExternalOptimizationTool::ScipCli,
@@ -1304,6 +1420,46 @@ pub fn artifact_env_names(tool: ExternalOptimizationTool) -> Vec<String> {
         ExternalOptimizationTool::Csdp => {
             names.push("CSDP_DIR".to_string());
         }
+        ExternalOptimizationTool::Z3 => {
+            names.push("Z3_HOME".to_string());
+            names.push("Z3_DIR".to_string());
+        }
+        ExternalOptimizationTool::Cvc5 => {
+            names.push("CVC5_HOME".to_string());
+            names.push("CVC5_DIR".to_string());
+        }
+        ExternalOptimizationTool::Yices => {
+            names.push("YICES_HOME".to_string());
+            names.push("YICES_DIR".to_string());
+        }
+        ExternalOptimizationTool::Bitwuzla => {
+            names.push("BITWUZLA_HOME".to_string());
+            names.push("BITWUZLA_DIR".to_string());
+        }
+        ExternalOptimizationTool::Boolector => {
+            names.push("BOOLECTOR_HOME".to_string());
+            names.push("BOOLECTOR_DIR".to_string());
+        }
+        ExternalOptimizationTool::MathSat => {
+            names.push("MATHSAT_HOME".to_string());
+            names.push("MATHSAT_DIR".to_string());
+        }
+        ExternalOptimizationTool::OptiMathSat => {
+            names.push("OPTIMATHSAT_HOME".to_string());
+            names.push("OPTIMATHSAT_DIR".to_string());
+        }
+        ExternalOptimizationTool::OpenSmt => {
+            names.push("OPENSMT_HOME".to_string());
+            names.push("OPENSMT_DIR".to_string());
+        }
+        ExternalOptimizationTool::SmtInterpol => {
+            names.push("SMTINTERPOL_HOME".to_string());
+            names.push("SMTINTERPOL_DIR".to_string());
+        }
+        ExternalOptimizationTool::Princess => {
+            names.push("PRINCESS_HOME".to_string());
+            names.push("PRINCESS_DIR".to_string());
+        }
         ExternalOptimizationTool::HighsCli
         | ExternalOptimizationTool::GlpkCli
         | ExternalOptimizationTool::ScipCli
@@ -1414,6 +1570,16 @@ pub fn external_optimization_command_dir_env_names(tool: ExternalOptimizationToo
         ExternalOptimizationTool::Cosmo => &["COSMO_DIR", "COSMO_HOME"],
         ExternalOptimizationTool::Sdpa => &["SDPA_DIR", "SDPA_HOME"],
         ExternalOptimizationTool::Csdp => &["CSDP_DIR", "CSDP_HOME"],
+        ExternalOptimizationTool::Z3 => &["Z3_DIR", "Z3_HOME"],
+        ExternalOptimizationTool::Cvc5 => &["CVC5_DIR", "CVC5_HOME"],
+        ExternalOptimizationTool::Yices => &["YICES_DIR", "YICES_HOME"],
+        ExternalOptimizationTool::Bitwuzla => &["BITWUZLA_DIR", "BITWUZLA_HOME"],
+        ExternalOptimizationTool::Boolector => &["BOOLECTOR_DIR", "BOOLECTOR_HOME"],
+        ExternalOptimizationTool::MathSat => &["MATHSAT_DIR", "MATHSAT_HOME"],
+        ExternalOptimizationTool::OptiMathSat => &["OPTIMATHSAT_DIR", "OPTIMATHSAT_HOME"],
+        ExternalOptimizationTool::OpenSmt => &["OPENSMT_DIR", "OPENSMT_HOME"],
+        ExternalOptimizationTool::SmtInterpol => &["SMTINTERPOL_DIR", "SMTINTERPOL_HOME"],
+        ExternalOptimizationTool::Princess => &["PRINCESS_DIR", "PRINCESS_HOME"],
         ExternalOptimizationTool::HighsCli => &["HIGHS_DIR", "HIGHS_HOME"],
         ExternalOptimizationTool::GlpkCli => &["GLPK_DIR", "GLPK_HOME"],
         ExternalOptimizationTool::ScipCli => &["SCIPOPTDIR", "SCIP_DIR", "SCIP_HOME"],
@@ -2185,7 +2351,7 @@ mod tests {
     #[test]
     fn registry_covers_requested_java_and_rust_ecosystems() {
         let specs = external_optimization_tool_specs();
-        assert_eq!(external_optimization_tools().len(), 70);
+        assert_eq!(external_optimization_tools().len(), 80);
         assert_eq!(
             specs
                 .iter()
@@ -2219,7 +2385,7 @@ mod tests {
                 .iter()
                 .filter(|spec| spec.language == ExternalOptimizationLanguage::Native)
                 .count(),
-            31
+            41
         );
         assert!(specs.iter().any(|spec| {
             spec.tool == ExternalOptimizationTool::ChocoSolver
@@ -2275,6 +2441,16 @@ mod tests {
             spec.tool == ExternalOptimizationTool::Mosek
                 && spec.family == ExternalOptimizationFamily::ConvexOptimization
                 && spec.exactness == ExternalOptimizationExactness::Numerical
+        }));
+        assert!(specs.iter().any(|spec| {
+            spec.tool == ExternalOptimizationTool::Z3
+                && spec.family == ExternalOptimizationFamily::SmtOmt
+                && spec.exactness == ExternalOptimizationExactness::Exact
+        }));
+        assert!(specs.iter().any(|spec| {
+            spec.tool == ExternalOptimizationTool::OptiMathSat
+                && spec.family == ExternalOptimizationFamily::SmtOmt
+                && spec.exactness == ExternalOptimizationExactness::Exact
         }));
         assert!(specs.iter().any(|spec| {
             spec.tool == ExternalOptimizationTool::Casadi
@@ -2366,6 +2542,14 @@ mod tests {
         assert_eq!(
             artifact_env_names(ExternalOptimizationTool::HighsCli)[0],
             "ORES_HIGHS_CLI_DIR"
+        );
+        assert_eq!(
+            artifact_env_names(ExternalOptimizationTool::Z3)[0],
+            "ORES_Z3_DIR"
+        );
+        assert!(
+            external_optimization_command_dir_env_names(ExternalOptimizationTool::Z3)
+                .contains(&"Z3_HOME".to_string())
         );
         assert!(artifact_env_names(ExternalOptimizationTool::HighsCli)
             .contains(&"HIGHS_CMD".to_string()));
@@ -2520,6 +2704,7 @@ mod tests {
             ExternalOptimizationFamily::HybridOptimization.as_str(),
             "hybrid-optimization"
         );
+        assert_eq!(ExternalOptimizationFamily::SmtOmt.as_str(), "smt-omt");
         assert_eq!(
             ExternalOptimizationExactness::ModelingLayer.as_str(),
             "modeling-layer"

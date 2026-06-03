@@ -94,6 +94,18 @@ NONLINEAR_TOOLS = {
     "casadi",
 }
 HYBRID_TOOLS = {"hexaly"}
+SMT_TOOLS = {
+    "z3",
+    "cvc5",
+    "yices",
+    "bitwuzla",
+    "boolector",
+    "mathsat",
+    "optimathsat",
+    "opensmt",
+    "smtinterpol",
+    "princess",
+}
 
 
 @dataclass
@@ -137,6 +149,8 @@ def arg_tool(args_tool: str | None) -> str:
 def tool_family(tool: str, payload_kind: str) -> str:
     if tool in HYBRID_TOOLS:
         return "hybrid-optimization"
+    if tool in SMT_TOOLS:
+        return "smt-omt"
     if tool in CP_TOOLS or payload_kind in {"cp-assignment", "ecosystem-cp-assignment"}:
         return "constraint-programming"
     if tool in PLANNING_TOOLS or payload_kind in {"planning-assignment", "ecosystem-planning-assignment"}:
@@ -419,6 +433,8 @@ def solve(tool: str, payload: dict[str, Any]) -> tuple[str, Result]:
     kind = str(payload.get("kind", ""))
     family = tool_family(tool, kind)
     if family == "constraint-programming":
+        return family, solve_cp_assignment(payload)
+    if family == "smt-omt":
         return family, solve_cp_assignment(payload)
     if family == "planning-metaheuristic":
         return family, solve_planning_assignment(payload)

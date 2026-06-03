@@ -394,18 +394,18 @@ def validate_program_verifier(payload: dict[str, Any], tool: str) -> dict[str, A
                 check("acsl-contract", "/*@" in source or "//@" in source, "missing ACSL annotation"),
             ]
         )
-    elif language in ("kani", "rust"):
+    elif language in ("kani", "mirai", "rust"):
         checks.extend(
             [
                 check("rust-function", bool(re.search(r"\bfn\s+\w+\s*\(", source)), "missing Rust function"),
                 check(
-                    "kani-harness-or-assert",
+                    "rust-harness-or-assert",
                     "#[kani::proof]" in source or "kani::" in source or "assert!" in source,
-                    "missing Kani proof harness/assertion",
+                    "missing Rust verifier harness/assertion",
                 ),
             ]
         )
-    elif language in ("esbmc", "cbmc", "cpa-checker", "cpachecker", "jbmc"):
+    elif language in ("ebmc", "esbmc", "cbmc", "cpa-checker", "cpachecker", "jbmc", "klee"):
         checks.append(
             check(
                 "bounded-model-assertion",
@@ -557,10 +557,13 @@ def dispatch(payload: dict[str, Any], tool_override: str | None = None) -> dict[
         "why3",
         "whyml",
         "kani",
+        "mirai",
+        "ebmc",
         "esbmc",
         "cpa-checker",
         "cpachecker",
         "jbmc",
+        "klee",
         "coq",
         "isabelle",
         "lean",

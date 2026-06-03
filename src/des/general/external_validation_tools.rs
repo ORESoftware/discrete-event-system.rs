@@ -189,8 +189,8 @@ const CP_MODEL_FORMATS: &[&str] = &[
 ];
 const ASP_FORMATS: &[&str] = &["lp", "asp", "clingo", "dlv", "json"];
 const SMT_FORMATS: &[&str] = &["smt2"];
-const SAT_FORMATS: &[&str] = &["cnf", "wcnf"];
-const PROOF_FORMATS: &[&str] = &["drat", "lrat", "grat"];
+const SAT_FORMATS: &[&str] = &["cnf", "wcnf", "opb"];
+const PROOF_FORMATS: &[&str] = &["drat", "lrat", "grat", "frat", "opb", "pbp", "rup"];
 const TLA_FORMATS: &[&str] = &["tla", "cfg"];
 const ALLOY_FORMATS: &[&str] = &["als"];
 const PROMELA_FORMATS: &[&str] = &["pml"];
@@ -446,6 +446,66 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         notes: "SMT solver for bit-vector and array encodings",
     },
     ExternalValidationToolSpec {
+        id: "mathsat",
+        display_name: "MathSAT",
+        env_key: "MATHSAT",
+        family: ExternalValidationFamily::SmtSolver,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::None,
+        command_aliases: &["mathsat"],
+        capabilities: SMT_CAPS,
+        input_formats: SMT_FORMATS,
+        notes: "SMT solver for arithmetic, bit-vector, and array model validation",
+    },
+    ExternalValidationToolSpec {
+        id: "optimathsat",
+        display_name: "OptiMathSAT",
+        env_key: "OPTIMATHSAT",
+        family: ExternalValidationFamily::SmtSolver,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::None,
+        command_aliases: &["optimathsat", "optimathsat5"],
+        capabilities: SMT_CAPS,
+        input_formats: SMT_FORMATS,
+        notes: "Optimization-modulo-theories solver for SMT-LIB Optimize validation",
+    },
+    ExternalValidationToolSpec {
+        id: "opensmt",
+        display_name: "OpenSMT",
+        env_key: "OPENSMT",
+        family: ExternalValidationFamily::SmtSolver,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::None,
+        command_aliases: &["opensmt", "opensmt2"],
+        capabilities: SMT_CAPS,
+        input_formats: SMT_FORMATS,
+        notes: "Open-source SMT solver for independent SMT-LIB satisfiability checks",
+    },
+    ExternalValidationToolSpec {
+        id: "smtinterpol",
+        display_name: "SMTInterpol",
+        env_key: "SMTINTERPOL",
+        family: ExternalValidationFamily::SmtSolver,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::None,
+        command_aliases: &["smtinterpol", "smtinterpol.sh"],
+        capabilities: SMT_CAPS,
+        input_formats: SMT_FORMATS,
+        notes: "Interpolating SMT solver useful for proof-oriented model validation",
+    },
+    ExternalValidationToolSpec {
+        id: "princess",
+        display_name: "Princess",
+        env_key: "PRINCESS",
+        family: ExternalValidationFamily::SmtSolver,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::None,
+        command_aliases: &["princess", "princess-smt"],
+        capabilities: SMT_CAPS,
+        input_formats: SMT_FORMATS,
+        notes: "SMT solver and theorem prover for integer arithmetic model checks",
+    },
+    ExternalValidationToolSpec {
         id: "kissat",
         display_name: "Kissat",
         env_key: "KISSAT",
@@ -480,6 +540,54 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         capabilities: SAT_CAPS,
         input_formats: SAT_FORMATS,
         notes: "SAT solver for CNF/XOR-heavy Boolean encodings",
+    },
+    ExternalValidationToolSpec {
+        id: "minisat",
+        display_name: "MiniSat",
+        env_key: "MINISAT",
+        family: ExternalValidationFamily::SatSolver,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::None,
+        command_aliases: &["minisat"],
+        capabilities: SAT_CAPS,
+        input_formats: SAT_FORMATS,
+        notes: "Classic CDCL SAT solver for DIMACS CNF smoke-model validation",
+    },
+    ExternalValidationToolSpec {
+        id: "glucose",
+        display_name: "Glucose",
+        env_key: "GLUCOSE",
+        family: ExternalValidationFamily::SatSolver,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::None,
+        command_aliases: &["glucose", "glucose-syrup"],
+        capabilities: SAT_CAPS,
+        input_formats: SAT_FORMATS,
+        notes: "CDCL SAT solver family for independent DIMACS satisfiability checks",
+    },
+    ExternalValidationToolSpec {
+        id: "maplesat",
+        display_name: "MapleSAT",
+        env_key: "MAPLESAT",
+        family: ExternalValidationFamily::SatSolver,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::None,
+        command_aliases: &["maplesat", "maple-sat", "maple-lcm"],
+        capabilities: SAT_CAPS,
+        input_formats: SAT_FORMATS,
+        notes: "Maple-family SAT solver for CDCL branching and restart cross-checks",
+    },
+    ExternalValidationToolSpec {
+        id: "varisat",
+        display_name: "Varisat",
+        env_key: "VARISAT",
+        family: ExternalValidationFamily::SatSolver,
+        runtime: ExternalValidationRuntime::Rust,
+        artifact_kind: ExternalValidationArtifactKind::RustCrate,
+        command_aliases: &["varisat"],
+        capabilities: SAT_CAPS,
+        input_formats: SAT_FORMATS,
+        notes: "Rust SAT solver and checker for DIMACS/LRAT-oriented validation",
     },
     ExternalValidationToolSpec {
         id: "sat4j",
@@ -518,6 +626,30 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         notes: "MaxSAT solver for weighted-CNF objective and feasibility cross-checks",
     },
     ExternalValidationToolSpec {
+        id: "maxhs",
+        display_name: "MaxHS",
+        env_key: "MAXHS",
+        family: ExternalValidationFamily::SatSolver,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["maxhs"],
+        capabilities: SAT_CAPS,
+        input_formats: SAT_FORMATS,
+        notes: "Core-guided MaxSAT solver for weighted-CNF objective validation",
+    },
+    ExternalValidationToolSpec {
+        id: "roundingsat",
+        display_name: "RoundingSat",
+        env_key: "ROUNDINGSAT",
+        family: ExternalValidationFamily::SatSolver,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["roundingsat"],
+        capabilities: SAT_CAPS,
+        input_formats: SAT_FORMATS,
+        notes: "Pseudo-Boolean optimizer and proof-producing SAT/PB solver for OPB checks",
+    },
+    ExternalValidationToolSpec {
         id: "drat-trim",
         display_name: "DRAT-trim",
         env_key: "DRAT_TRIM",
@@ -540,6 +672,30 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         capabilities: PROOF_CAPS,
         input_formats: PROOF_FORMATS,
         notes: "LRAT/LPR proof checker for machine-checkable SAT certificates",
+    },
+    ExternalValidationToolSpec {
+        id: "frat",
+        display_name: "FRAT checker",
+        env_key: "FRAT",
+        family: ExternalValidationFamily::ProofChecker,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::None,
+        command_aliases: &["frat-rs", "frat-trim", "frat"],
+        capabilities: PROOF_CAPS,
+        input_formats: PROOF_FORMATS,
+        notes: "FRAT proof checker for SAT/UNSAT certificate validation",
+    },
+    ExternalValidationToolSpec {
+        id: "veripb",
+        display_name: "VeriPB",
+        env_key: "VERIPB",
+        family: ExternalValidationFamily::ProofChecker,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::None,
+        command_aliases: &["veripb", "veripb-checker"],
+        capabilities: PROOF_CAPS,
+        input_formats: PROOF_FORMATS,
+        notes: "Pseudo-Boolean proof checker for OPB/PBP/RUP optimization certificates",
     },
     ExternalValidationToolSpec {
         id: "tlc",
@@ -662,6 +818,18 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         notes: "Bounded model checker for C/C++ reference implementations and generated code",
     },
     ExternalValidationToolSpec {
+        id: "ebmc",
+        display_name: "EBMC",
+        env_key: "EBMC",
+        family: ExternalValidationFamily::FormalModelChecker,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::None,
+        command_aliases: &["ebmc"],
+        capabilities: PROGRAM_VERIFIER_CAPS,
+        input_formats: PROGRAM_VERIFIER_FORMATS,
+        notes: "CBMC-family bounded model checker for hardware, C, and SystemC reference artifacts",
+    },
+    ExternalValidationToolSpec {
         id: "dafny",
         display_name: "Dafny",
         env_key: "DAFNY",
@@ -744,6 +912,18 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         capabilities: PROGRAM_VERIFIER_CAPS,
         input_formats: PROGRAM_VERIFIER_FORMATS,
         notes: "Bounded model checker for Java bytecode and Java reference exports",
+    },
+    ExternalValidationToolSpec {
+        id: "klee",
+        display_name: "KLEE",
+        env_key: "KLEE",
+        family: ExternalValidationFamily::FormalModelChecker,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["klee"],
+        capabilities: PROGRAM_VERIFIER_CAPS,
+        input_formats: PROGRAM_VERIFIER_FORMATS,
+        notes: "LLVM symbolic-execution engine for generated C/C++ and bitcode safety checks",
     },
     ExternalValidationToolSpec {
         id: "java-pathfinder",
@@ -876,6 +1056,18 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         capabilities: PROGRAM_VERIFIER_CAPS,
         input_formats: PROGRAM_VERIFIER_FORMATS,
         notes: "Rust verifier for contracts and borrow-aware program properties",
+    },
+    ExternalValidationToolSpec {
+        id: "mirai",
+        display_name: "MIRAI",
+        env_key: "MIRAI",
+        family: ExternalValidationFamily::FormalModelChecker,
+        runtime: ExternalValidationRuntime::Rust,
+        artifact_kind: ExternalValidationArtifactKind::RustCrate,
+        command_aliases: &["cargo-mirai", "mirai"],
+        capabilities: PROGRAM_VERIFIER_CAPS,
+        input_formats: PROGRAM_VERIFIER_FORMATS,
+        notes: "Rust abstract interpreter for contracts, panics, and safety invariants",
     },
     ExternalValidationToolSpec {
         id: "creusot",
@@ -3202,8 +3394,11 @@ pub fn external_validation_default_text_cli_args(
         ("cvc5", ExternalValidationTextFormat::SmtLib2) => &["--lang=smt2", "-"],
         ("bitwuzla", ExternalValidationTextFormat::SmtLib2) => &["--smt2", "-"],
         ("boolector", ExternalValidationTextFormat::SmtLib2) => &["--smt2", "-"],
+        ("mathsat" | "optimathsat", ExternalValidationTextFormat::SmtLib2) => &["-input=smt2"],
+        ("opensmt", ExternalValidationTextFormat::SmtLib2) => &["--smt2", "-"],
         (
-            "kissat" | "cadical" | "cryptominisat",
+            "kissat" | "cadical" | "cryptominisat" | "minisat" | "glucose" | "maplesat" | "varisat"
+            | "open-wbo" | "maxhs" | "roundingsat",
             ExternalValidationTextFormat::DimacsCnf | ExternalValidationTextFormat::DimacsWcnf,
         ) => &["-"],
         (
@@ -3234,8 +3429,15 @@ pub fn external_validation_default_file_cli_args(
         ("boolector", ExternalValidationTextFormat::SmtLib2) => {
             vec!["--smt2".to_string(), path]
         }
+        ("mathsat" | "optimathsat", ExternalValidationTextFormat::SmtLib2) => {
+            vec!["-input=smt2".to_string(), path]
+        }
+        ("opensmt", ExternalValidationTextFormat::SmtLib2) => {
+            vec!["--smt2".to_string(), path]
+        }
         (
-            "kissat" | "cadical" | "cryptominisat",
+            "kissat" | "cadical" | "cryptominisat" | "minisat" | "glucose" | "maplesat" | "varisat"
+            | "open-wbo" | "maxhs" | "roundingsat",
             ExternalValidationTextFormat::DimacsCnf | ExternalValidationTextFormat::DimacsWcnf,
         ) => vec![path],
         (
@@ -4085,6 +4287,10 @@ pub fn external_validation_artifact_env_names(tool: &ExternalValidationToolSpec)
         "sat4j" => names.push("SAT4J_HOME".to_string()),
         "pysat" => names.push("PYSAT_PYTHON".to_string()),
         "open-wbo" => names.push("OPEN_WBO_HOME".to_string()),
+        "maxhs" => names.push("MAXHS_HOME".to_string()),
+        "roundingsat" => names.push("ROUNDINGSAT_HOME".to_string()),
+        "frat" => names.push("FRAT_HOME".to_string()),
+        "veripb" => names.push("VERIPB_HOME".to_string()),
         "ipopt" => names.push("IPOPT_DIR".to_string()),
         "bonmin" => names.push("BONMIN_DIR".to_string()),
         "couenne" => names.push("COUENNE_DIR".to_string()),
@@ -4099,6 +4305,7 @@ pub fn external_validation_artifact_env_names(tool: &ExternalValidationToolSpec)
         "gnatprove" => names.push("GNATPROVE_HOME".to_string()),
         "seahorn" => names.push("SEAHORN_DIR".to_string()),
         "smack" => names.push("SMACK_HOME".to_string()),
+        "klee" => names.push("KLEE_HOME".to_string()),
         "ultimate-automizer" => names.push("ULTIMATE_HOME".to_string()),
         "sumo" => names.push("SUMO_HOME".to_string()),
         "omnetpp" => names.push("OMNETPP_ROOT".to_string()),
@@ -4144,9 +4351,17 @@ pub fn external_validation_command_dir_env_names(tool: &ExternalValidationToolSp
         "picat" => &["PICAT_HOME", "PICAT_DIR"],
         "clingo" => &["CLINGO_HOME", "CLINGO_DIR", "POTASSCO_HOME"],
         "clingcon" => &["CLINGCON_HOME", "CLINGCON_DIR", "POTASSCO_HOME"],
+        "minisat" => &["MINISAT_HOME", "MINISAT_DIR"],
+        "glucose" => &["GLUCOSE_HOME", "GLUCOSE_DIR"],
+        "maplesat" => &["MAPLESAT_HOME", "MAPLESAT_DIR"],
+        "varisat" => &["VARISAT_HOME", "VARISAT_DIR"],
         "sat4j" => &["SAT4J_HOME", "SAT4J_DIR"],
         "pysat" => &["PYSAT_HOME", "PYSAT_DIR"],
         "open-wbo" => &["OPEN_WBO_HOME", "OPEN_WBO_DIR", "OPENWBO_HOME"],
+        "maxhs" => &["MAXHS_HOME", "MAXHS_DIR"],
+        "roundingsat" => &["ROUNDINGSAT_HOME", "ROUNDINGSAT_DIR"],
+        "frat" => &["FRAT_HOME", "FRAT_DIR"],
+        "veripb" => &["VERIPB_HOME", "VERIPB_DIR"],
         "tlc" => &["TLC_HOME", "TLA_TOOLS_DIR"],
         "apalache" => &["APALACHE_HOME", "APALACHE_DIR"],
         "alloy" => &["ALLOY_HOME", "ALLOY_DIR"],
@@ -4157,10 +4372,13 @@ pub fn external_validation_command_dir_env_names(tool: &ExternalValidationToolSp
         "storm" => &["STORM_HOME", "STORM_DIR"],
         "uppaal" => &["UPPAAL_HOME", "UPPAAL_DIR"],
         "cbmc" => &["CBMC_HOME", "CBMC_DIR"],
+        "ebmc" => &["EBMC_HOME", "EBMC_DIR"],
         "dafny" => &["DAFNY_HOME", "DAFNY_DIR"],
         "frama-c" => &["FRAMA_C_HOME", "FRAMA_C_DIR"],
         "why3" => &["WHY3_HOME", "WHY3_DIR"],
         "esbmc" => &["ESBMC_HOME", "ESBMC_DIR"],
+        "klee" => &["KLEE_HOME", "KLEE_DIR"],
+        "mirai" => &["MIRAI_HOME", "MIRAI_DIR"],
         "jbmc" => &["JBMC_HOME", "JBMC_DIR"],
         "java-pathfinder" => &["JPF_HOME", "JAVA_PATHFINDER_HOME"],
         "key" => &["KEY_HOME"],
@@ -4678,7 +4896,7 @@ mod tests {
     #[test]
     fn registry_covers_recommended_validation_layers() {
         let tools = external_validation_tool_specs();
-        assert_eq!(tools.len(), 190);
+        assert_eq!(tools.len(), 206);
         assert!(tools
             .iter()
             .any(|tool| tool.id == "minizinc" && tool.input_formats.contains(&"mzn")));
@@ -4695,14 +4913,37 @@ mod tests {
             .iter()
             .any(|tool| { tool.id == "z3" && tool.family == ExternalValidationFamily::SmtSolver }));
         assert!(tools.iter().any(|tool| {
+            tool.id == "optimathsat"
+                && tool.family == ExternalValidationFamily::SmtSolver
+                && tool.input_formats.contains(&"smt2")
+        }));
+        assert!(tools.iter().any(|tool| {
             tool.id == "sat4j" && tool.family == ExternalValidationFamily::SatSolver
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "minisat" && tool.family == ExternalValidationFamily::SatSolver
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "varisat" && tool.runtime == ExternalValidationRuntime::Rust
         }));
         assert!(tools
             .iter()
             .any(|tool| { tool.id == "open-wbo" && tool.input_formats.contains(&"wcnf") }));
+        assert!(tools
+            .iter()
+            .any(|tool| { tool.id == "maxhs" && tool.input_formats.contains(&"wcnf") }));
+        assert!(tools
+            .iter()
+            .any(|tool| { tool.id == "roundingsat" && tool.input_formats.contains(&"opb") }));
         assert!(tools.iter().any(|tool| {
             tool.id == "drat-trim" && tool.family == ExternalValidationFamily::ProofChecker
         }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "veripb" && tool.family == ExternalValidationFamily::ProofChecker
+        }));
+        assert!(tools
+            .iter()
+            .any(|tool| { tool.id == "frat" && tool.input_formats.contains(&"frat") }));
         assert!(tools
             .iter()
             .any(|tool| { tool.id == "tlc" && tool.runtime == ExternalValidationRuntime::Java }));
@@ -4719,6 +4960,12 @@ mod tests {
             tool.id == "cbmc" && tool.family == ExternalValidationFamily::FormalModelChecker
         }));
         assert!(tools.iter().any(|tool| {
+            tool.id == "ebmc" && tool.family == ExternalValidationFamily::FormalModelChecker
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "klee" && tool.family == ExternalValidationFamily::FormalModelChecker
+        }));
+        assert!(tools.iter().any(|tool| {
             tool.id == "java-pathfinder"
                 && tool.family == ExternalValidationFamily::FormalModelChecker
         }));
@@ -4728,6 +4975,9 @@ mod tests {
         assert!(tools.iter().any(|tool| {
             tool.id == "creusot" && tool.runtime == ExternalValidationRuntime::Rust
         }));
+        assert!(tools
+            .iter()
+            .any(|tool| { tool.id == "mirai" && tool.runtime == ExternalValidationRuntime::Rust }));
         assert!(tools.iter().any(|tool| {
             tool.id == "dafny" && tool.family == ExternalValidationFamily::FormalModelChecker
         }));
@@ -4892,6 +5142,19 @@ mod tests {
         assert_eq!(open_wbo.id, "open-wbo");
         assert!(external_validation_command_dir_env_names(open_wbo)
             .contains(&"OPEN_WBO_HOME".to_string()));
+        let maxhs = find_external_validation_tool("maxhs").unwrap();
+        assert!(
+            external_validation_command_dir_env_names(maxhs).contains(&"MAXHS_HOME".to_string())
+        );
+        let roundingsat = find_external_validation_tool("roundingsat").unwrap();
+        assert!(external_validation_command_dir_env_names(roundingsat)
+            .contains(&"ROUNDINGSAT_HOME".to_string()));
+        let veripb = find_external_validation_tool("veripb").unwrap();
+        assert!(
+            external_validation_command_dir_env_names(veripb).contains(&"VERIPB_HOME".to_string())
+        );
+        let klee = find_external_validation_tool("klee").unwrap();
+        assert!(external_validation_command_dir_env_names(klee).contains(&"KLEE_HOME".to_string()));
         let copt = find_external_validation_tool("copt").unwrap();
         assert!(external_validation_command_dir_env_names(copt).contains(&"COPT_HOME".to_string()));
         let mosek = find_external_validation_tool("mosek").unwrap();
@@ -5212,6 +5475,13 @@ mod tests {
         );
         assert_eq!(
             external_validation_default_text_cli_args(
+                "mathsat",
+                ExternalValidationTextFormat::SmtLib2
+            ),
+            &["-input=smt2"]
+        );
+        assert_eq!(
+            external_validation_default_text_cli_args(
                 "kissat",
                 ExternalValidationTextFormat::DimacsCnf
             ),
@@ -5301,6 +5571,14 @@ mod tests {
                 &input,
             ),
             vec!["-smt2".to_string(), "/tmp/model.smt2".to_string()]
+        );
+        assert_eq!(
+            external_validation_default_file_cli_args(
+                "optimathsat",
+                ExternalValidationTextFormat::SmtLib2,
+                &input,
+            ),
+            vec!["-input=smt2".to_string(), "/tmp/model.smt2".to_string()]
         );
         assert_eq!(
             external_validation_default_file_cli_args(

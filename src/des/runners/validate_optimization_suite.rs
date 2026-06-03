@@ -127,6 +127,10 @@ use crate::des::general::external_validation_tools::{
     PrismModule, PrismValidationModel, SimulationMetricExpectation, SimulationValidationRequest,
     SmtDeclaration, SmtLibValidationScript, SmtSort, TlaValidationModule,
 };
+use crate::des::general::external_weighted_independent_set_reference::{
+    solve_weighted_independent_set_with_external_reference,
+    ExternalWeightedIndependentSetReferenceOptions, ExternalWeightedIndependentSetReferenceStatus,
+};
 use crate::des::general::external_weighted_max_sat_reference::{
     solve_weighted_max_sat_with_external_reference, ExternalWeightedMaxSatReferenceOptions,
     ExternalWeightedMaxSatReferenceStatus,
@@ -210,6 +214,11 @@ use crate::des::general::qp::{
 use crate::des::general::set_cover::{
     build_sample_set_cover_problem, set_cover_solution_feasible, solve_set_cover_exact,
     solve_set_cover_greedy, SetCoverProblem, SetCoverStatus,
+};
+use crate::des::general::weighted_independent_set::{
+    build_sample_weighted_independent_set_problem, solve_weighted_independent_set_exact,
+    solve_weighted_independent_set_greedy, weighted_independent_set_solution_feasible,
+    WeightedIndependentSetProblem, WeightedIndependentSetSolution, WeightedIndependentSetStatus,
 };
 use crate::des::general::weighted_max_sat::{
     build_sample_weighted_max_sat_problem, solve_weighted_max_sat_exact,
@@ -913,6 +922,26 @@ impl Driver {
                 color_names: color_names.to_vec(),
                 used_color_count,
                 message: "external graph-coloring solution".to_string(),
+            },
+        )
+    }
+
+    fn weighted_independent_set_external_solution_feasible(
+        &self,
+        problem: &WeightedIndependentSetProblem,
+        selected_vertex_indices: &[usize],
+        selected_vertex_ids: &[String],
+        total_weight: Option<f64>,
+    ) -> bool {
+        weighted_independent_set_solution_feasible(
+            problem,
+            &WeightedIndependentSetSolution {
+                status: WeightedIndependentSetStatus::Feasible,
+                selected_vertex_indices: selected_vertex_indices.to_vec(),
+                selected_vertex_ids: selected_vertex_ids.to_vec(),
+                total_weight: total_weight.unwrap_or(f64::NAN),
+                upper_bound: None,
+                message: "external weighted independent set solution".to_string(),
             },
         )
     }
@@ -1623,6 +1652,110 @@ impl Driver {
             }
             _ => println!(
                 "  SKIP  Graph-coloring OR-Tools CP-SAT objective: status={:?} message={}",
+                reference.ortools_status, reference.message
+            ),
+        }
+    }
+
+    fn validate_weighted_independent_set(&mut self) {
+        println!("\n-- Weighted independent set: exact/greedy vs OR-Tools CP-SAT bridge --");
+        let problem = build_sample_weighted_independent_set_problem();
+        let exact = solve_weighted_independent_set_exact(&problem);
+        let greedy = solve_weighted_independent_set_greedy(&problem);
+        self.check(
+            "Weighted independent set exact native optimum",
+            exact.status == WeightedIndependentSetStatus::Optimal
+                && (exact.total_weight - 16.0).abs() <= 1e-9
+                && exact.selected_vertex_ids == vec!["B", "D", "G"]
+                && weighted_independent_set_solution_feasible(&problem, &exact),
+            format!(
+                "status={} weight={:.10} vertices={:?} upper_bound={:?}",
+                exact.status.as_str(),
+                exact.total_weight,
+                exact.selected_vertex_ids,
+                exact.upper_bound
+            ),
+        );
+        self.check(
+            "Weighted independent set greedy native feasibility",
+            greedy.status == WeightedIndependentSetStatus::Feasible
+                && weighted_independent_set_solution_feasible(&problem, &greedy)
+                && greedy.total_weight <= exact.total_weight + 1e-9,
+            format!(
+                "status={} weight={:.10} vertices={:?}",
+                greedy.status.as_str(),
+                greedy.total_weight,
+                greedy.selected_vertex_ids
+            ),
+        );
+
+        let reference = solve_weighted_independent_set_with_external_reference(
+            &problem,
+            &ExternalWeightedIndependentSetReferenceOptions::default(),
+        );
+        self.check(
+            "Weighted independent set exact/reference bridge status optimal",
+            reference.status == ExternalWeightedIndependentSetReferenceStatus::Optimal,
+            format!(
+                "status={} solver={} message={}",
+                reference.status.as_str(),
+                reference.solver,
+                reference.message
+            ),
+        );
+        self.close(
+            "Weighted independent set exact/reference objective",
+            exact.total_weight,
+            reference.objective.unwrap_or(f64::NAN),
+            0.0,
+        );
+        self.check(
+            "Weighted independent set exact/reference feasibility",
+            self.weighted_independent_set_external_solution_feasible(
+                &problem,
+                &reference.selected_vertex_indices,
+                &reference.selected_vertex_ids,
+                reference.total_weight,
+            ),
+            format!(
+                "objective={:?} weight={:?} vertices={:?} upper_bound={:?}",
+                reference.objective,
+                reference.total_weight,
+                reference.selected_vertex_ids,
+                reference.upper_bound
+            ),
+        );
+
+        match (
+            reference.ortools_status.as_deref(),
+            reference.ortools_objective,
+        ) {
+            (Some("optimal"), Some(objective)) => {
+                self.close(
+                    "Weighted independent set OR-Tools CP-SAT objective",
+                    exact.total_weight,
+                    objective,
+                    0.0,
+                );
+                self.check(
+                    "Weighted independent set OR-Tools CP-SAT feasibility",
+                    self.weighted_independent_set_external_solution_feasible(
+                        &problem,
+                        &reference.ortools_selected_vertex_indices,
+                        &reference.ortools_selected_vertex_ids,
+                        reference.ortools_total_weight,
+                    ),
+                    format!(
+                        "objective={:?} weight={:?} vertices={:?} bound={:?}",
+                        reference.ortools_objective,
+                        reference.ortools_total_weight,
+                        reference.ortools_selected_vertex_ids,
+                        reference.ortools_objective_bound
+                    ),
+                );
+            }
+            _ => println!(
+                "  SKIP  Weighted independent set OR-Tools CP-SAT objective: status={:?} message={}",
                 reference.ortools_status, reference.message
             ),
         }
@@ -5958,19 +6091,16 @@ impl Driver {
     fn validate_external_optimization_ecosystem_adapters(&mut self) {
         println!("\n-- External Java/Rust optimization adapters --");
         let specs = external_optimization_tool_specs();
+        let current_tools = external_optimization_tools();
         self.check(
             "External optimization ecosystem registry covers requested tools",
-            external_optimization_tools().len() == 70 && specs.len() == 70,
-            format!(
-                "tools={} specs={}",
-                external_optimization_tools().len(),
-                specs.len()
-            ),
+            current_tools.len() == 80 && specs.len() == current_tools.len(),
+            format!("tools={} specs={}", current_tools.len(), specs.len()),
         );
         let legacy_tools = legacy_external_optimization_ecosystem::ExternalOptimizationTool::all();
         self.check(
             "External optimization legacy probe registry synchronized",
-            legacy_tools.len() == external_optimization_tools().len()
+            legacy_tools.len() == current_tools.len()
                 && legacy_tools
                     .iter()
                     .filter(|tool| {
@@ -5985,7 +6115,7 @@ impl Driver {
             format!(
                 "legacy_tools={} current_tools={}",
                 legacy_tools.len(),
-                external_optimization_tools().len()
+                current_tools.len()
             ),
         );
         let java_count = specs
@@ -6015,7 +6145,7 @@ impl Driver {
             .count();
         self.check(
             "External optimization ecosystem registry Python/Julia/native split",
-            python_count == 18 && julia_count == 1 && native_count == 31,
+            python_count == 18 && julia_count == 1 && native_count == 41,
             format!("python={python_count} julia={julia_count} native={native_count}"),
         );
         self.check(
@@ -6077,11 +6207,19 @@ impl Driver {
                     && spec.family == ExternalOptimizationFamily::ConvexOptimization
                     && spec.exactness == ExternalOptimizationExactness::Numerical
             }) && specs.iter().any(|spec| {
+                spec.tool == ExternalOptimizationTool::Z3
+                    && spec.family == ExternalOptimizationFamily::SmtOmt
+                    && spec.exactness == ExternalOptimizationExactness::Exact
+            }) && specs.iter().any(|spec| {
+                spec.tool == ExternalOptimizationTool::OptiMathSat
+                    && spec.family == ExternalOptimizationFamily::SmtOmt
+                    && spec.exactness == ExternalOptimizationExactness::Exact
+            }) && specs.iter().any(|spec| {
                 spec.tool == ExternalOptimizationTool::Casadi
                     && spec.family == ExternalOptimizationFamily::NonlinearOptimization
                     && spec.exactness == ExternalOptimizationExactness::ModelingLayer
             }),
-            "checked Choco, CPMpy, clingo, Open-WBO, OptaPlanner, Timefold, Pyomo, HiGHS CLI, CVXPY, PySCIPOpt, Hexaly, argmin, Ipopt, MOSEK, and CasADi classifications".to_string(),
+            "checked Choco, CPMpy, clingo, Open-WBO, OptaPlanner, Timefold, Pyomo, HiGHS CLI, CVXPY, PySCIPOpt, Hexaly, argmin, Ipopt, MOSEK, Z3, OptiMathSAT, and CasADi classifications".to_string(),
         );
         let comparison_input = serde_json::json!({
             "status": "optimal",
@@ -6180,6 +6318,22 @@ impl Driver {
                 ecosystem_invocation("sat4j-reference", ExternalOptimizationTool::Sat4j),
                 ecosystem_invocation("pysat-reference", ExternalOptimizationTool::PySat),
                 ecosystem_invocation("open-wbo-reference", ExternalOptimizationTool::OpenWbo),
+                ecosystem_invocation("z3-reference", ExternalOptimizationTool::Z3),
+                ecosystem_invocation("cvc5-reference", ExternalOptimizationTool::Cvc5),
+                ecosystem_invocation("yices-reference", ExternalOptimizationTool::Yices),
+                ecosystem_invocation("bitwuzla-reference", ExternalOptimizationTool::Bitwuzla),
+                ecosystem_invocation("boolector-reference", ExternalOptimizationTool::Boolector),
+                ecosystem_invocation("mathsat-reference", ExternalOptimizationTool::MathSat),
+                ecosystem_invocation(
+                    "optimathsat-reference",
+                    ExternalOptimizationTool::OptiMathSat,
+                ),
+                ecosystem_invocation("opensmt-reference", ExternalOptimizationTool::OpenSmt),
+                ecosystem_invocation(
+                    "smtinterpol-reference",
+                    ExternalOptimizationTool::SmtInterpol,
+                ),
+                ecosystem_invocation("princess-reference", ExternalOptimizationTool::Princess),
             ],
             1e-9,
             1e-9,
@@ -6444,15 +6598,15 @@ impl Driver {
         let specs = external_validation_tool_specs();
         self.check(
             "External validation registry covers recommended tools",
-            specs.len() == 190,
+            specs.len() == 206,
             format!("tools={}", specs.len()),
         );
         for (family, expected_at_least) in [
             (ExternalValidationFamily::ConstraintModeling, 5),
-            (ExternalValidationFamily::SmtSolver, 5),
-            (ExternalValidationFamily::SatSolver, 3),
-            (ExternalValidationFamily::ProofChecker, 2),
-            (ExternalValidationFamily::FormalModelChecker, 43),
+            (ExternalValidationFamily::SmtSolver, 10),
+            (ExternalValidationFamily::SatSolver, 12),
+            (ExternalValidationFamily::ProofChecker, 4),
+            (ExternalValidationFamily::FormalModelChecker, 46),
             (ExternalValidationFamily::BenchmarkLibrary, 9),
             (ExternalValidationFamily::NonlinearGlobalSolver, 11),
             (ExternalValidationFamily::ConvexConicSolver, 10),
@@ -6470,16 +6624,28 @@ impl Driver {
             "External validation registry representative coverage",
             specs.iter().any(|spec| spec.id == "minizinc")
                 && specs.iter().any(|spec| spec.id == "z3")
+                && specs.iter().any(|spec| spec.id == "optimathsat")
+                && specs.iter().any(|spec| spec.id == "minisat")
+                && specs.iter().any(|spec| spec.id == "glucose")
+                && specs.iter().any(|spec| spec.id == "maplesat")
+                && specs.iter().any(|spec| spec.id == "varisat")
+                && specs.iter().any(|spec| spec.id == "maxhs")
+                && specs.iter().any(|spec| spec.id == "roundingsat")
                 && specs.iter().any(|spec| spec.id == "drat-trim")
+                && specs.iter().any(|spec| spec.id == "frat")
+                && specs.iter().any(|spec| spec.id == "veripb")
                 && specs.iter().any(|spec| spec.id == "tlc")
                 && specs.iter().any(|spec| spec.id == "kodkod")
                 && specs.iter().any(|spec| spec.id == "miplib")
                 && specs.iter().any(|spec| spec.id == "ipopt")
                 && specs.iter().any(|spec| spec.id == "osqp")
                 && specs.iter().any(|spec| spec.id == "cbmc")
+                && specs.iter().any(|spec| spec.id == "ebmc")
+                && specs.iter().any(|spec| spec.id == "klee")
                 && specs.iter().any(|spec| spec.id == "java-pathfinder")
                 && specs.iter().any(|spec| spec.id == "boogie")
                 && specs.iter().any(|spec| spec.id == "creusot")
+                && specs.iter().any(|spec| spec.id == "mirai")
                 && specs.iter().any(|spec| spec.id == "simpy")
                 && specs.iter().any(|spec| spec.id == "agentpy")
                 && specs.iter().any(|spec| spec.id == "cloudsim")
@@ -6503,7 +6669,7 @@ impl Driver {
                 && specs.iter().any(|spec| spec.id == "protoc")
                 && specs.iter().any(|spec| spec.id == "apache-avro")
                 && specs.iter().any(|spec| spec.id == "frictionless"),
-            "checked MiniZinc, Z3, DRAT, TLC, MIPLIB, Ipopt, OSQP, software verifiers, simulation engines, API/data validators, XML, CSV, Protobuf, Avro, and Frictionless".to_string(),
+            "checked MiniZinc, Z3/OptiMathSAT, MiniSat/Glucose/MapleSAT/Varisat/MaxHS/RoundingSat, DRAT/FRAT/VeriPB, TLC, MIPLIB, Ipopt, OSQP, software verifiers, simulation engines, API/data validators, XML, CSV, Protobuf, Avro, and Frictionless".to_string(),
         );
 
         let minizinc_payload = minizinc_validation_request_to_json(&MiniZincValidationRequest {
@@ -6640,7 +6806,16 @@ impl Driver {
         let generic_smt_sat_payload = serde_json::json!({
             "script": "(check-sat)\n",
         });
-        for tool in ["cvc5", "bitwuzla", "boolector"] {
+        for tool in [
+            "cvc5",
+            "bitwuzla",
+            "boolector",
+            "mathsat",
+            "optimathsat",
+            "opensmt",
+            "smtinterpol",
+            "princess",
+        ] {
             let registered_smt_run = self.run_python_json(
                 "model_validation_reference.py",
                 &["--tool", tool],
@@ -6661,7 +6836,17 @@ impl Driver {
         let generic_smt_unsat_payload = serde_json::json!({
             "script": "(assert false)\n(check-sat)\n",
         });
-        for tool in ["cvc5", "yices", "bitwuzla", "boolector"] {
+        for tool in [
+            "cvc5",
+            "yices",
+            "bitwuzla",
+            "boolector",
+            "mathsat",
+            "optimathsat",
+            "opensmt",
+            "smtinterpol",
+            "princess",
+        ] {
             let registered_smt_unsat_run = self.run_python_json(
                 "model_validation_reference.py",
                 &["--tool", tool],
@@ -6724,8 +6909,16 @@ impl Driver {
         for (tool, payload, expected) in [
             ("cadical", &dimacs_bridge_payload, "sat"),
             ("cryptominisat", &dimacs_bridge_payload, "sat"),
+            ("minisat", &dimacs_bridge_payload, "sat"),
+            ("glucose", &dimacs_bridge_payload, "sat"),
+            ("maplesat", &dimacs_bridge_payload, "sat"),
+            ("varisat", &dimacs_bridge_payload, "sat"),
             ("cadical", &unsat_dimacs_bridge_payload, "unsat"),
             ("cryptominisat", &unsat_dimacs_bridge_payload, "unsat"),
+            ("minisat", &unsat_dimacs_bridge_payload, "unsat"),
+            ("glucose", &unsat_dimacs_bridge_payload, "unsat"),
+            ("maplesat", &unsat_dimacs_bridge_payload, "unsat"),
+            ("varisat", &unsat_dimacs_bridge_payload, "unsat"),
         ] {
             let registered_sat_run = self.run_python_json(
                 "model_validation_reference.py",
@@ -6741,6 +6934,64 @@ impl Driver {
                     registered_sat_run["status"].as_str().unwrap_or(""),
                     registered_sat_run["verdict"].as_str().unwrap_or(""),
                     registered_sat_run["validator"].as_str().unwrap_or("")
+                ),
+            );
+        }
+
+        let wcnf_bridge_payload = serde_json::json!({
+            "kind": "wcnf-validation",
+            "wcnf": "p wcnf 2 3 10\n10 1 0\n3 -1 2 0\n2 -2 0\n",
+        });
+        for tool in ["open-wbo", "maxhs"] {
+            let registered_wcnf_run = self.run_python_json(
+                "model_validation_reference.py",
+                &["--tool", tool],
+                &wcnf_bridge_payload.to_string(),
+            );
+            self.check(
+                format!("External validation {tool} WCNF registered-tool optimal payload"),
+                registered_wcnf_run["status"].as_str() == Some("ok")
+                    && registered_wcnf_run["verdict"].as_str() == Some("optimal")
+                    && registered_wcnf_run["message"]
+                        .as_str()
+                        .is_some_and(|message| message.contains("optimum=2")),
+                format!(
+                    "status={} verdict={} validator={} message={}",
+                    registered_wcnf_run["status"].as_str().unwrap_or(""),
+                    registered_wcnf_run["verdict"].as_str().unwrap_or(""),
+                    registered_wcnf_run["validator"].as_str().unwrap_or(""),
+                    registered_wcnf_run["message"].as_str().unwrap_or("")
+                ),
+            );
+        }
+
+        let opb_unsat_bridge_payload = serde_json::json!({
+            "kind": "opb-validation",
+            "opb": "1 x1 >= 1;\n-1 x1 >= 0;\n",
+        });
+        let opb_sat_bridge_payload = serde_json::json!({
+            "kind": "opb-validation",
+            "opb": "1 x1 >= 0;\n",
+        });
+        for (tool, payload, expected) in [
+            ("roundingsat", &opb_unsat_bridge_payload, "unsat"),
+            ("roundingsat", &opb_sat_bridge_payload, "sat"),
+        ] {
+            let registered_opb_run = self.run_python_json(
+                "model_validation_reference.py",
+                &["--tool", tool],
+                &payload.to_string(),
+            );
+            self.check(
+                format!("External validation {tool} OPB registered-tool {expected} payload"),
+                registered_opb_run["status"].as_str() == Some("ok")
+                    && registered_opb_run["verdict"].as_str() == Some(expected),
+                format!(
+                    "status={} verdict={} validator={} message={}",
+                    registered_opb_run["status"].as_str().unwrap_or(""),
+                    registered_opb_run["verdict"].as_str().unwrap_or(""),
+                    registered_opb_run["validator"].as_str().unwrap_or(""),
+                    registered_opb_run["message"].as_str().unwrap_or("")
                 ),
             );
         }
@@ -6790,6 +7041,76 @@ impl Driver {
                 invalid_proof_bridge_run["status"].as_str().unwrap_or(""),
                 invalid_proof_bridge_run["verdict"].as_str().unwrap_or(""),
                 invalid_proof_bridge_run["message"].as_str().unwrap_or("")
+            ),
+        );
+
+        let frat_proof_bridge_payload = serde_json::json!({
+            "kind": "proof-validation",
+            "format": "frat",
+            "cnf": "p cnf 1 2\n1 0\n-1 0\n",
+            "proof": "a 1 0\n",
+        });
+        let frat_proof_bridge_run = self.run_python_json(
+            "proof_validation_reference.py",
+            &["--tool", "frat"],
+            &frat_proof_bridge_payload.to_string(),
+        );
+        self.check(
+            "External validation FRAT proof bridge valid payload",
+            frat_proof_bridge_run["status"].as_str() == Some("ok")
+                && frat_proof_bridge_run["verdict"].as_str() == Some("valid")
+                && frat_proof_bridge_run["cnf_status"].as_str() == Some("unsat"),
+            format!(
+                "status={} verdict={} validator={}",
+                frat_proof_bridge_run["status"].as_str().unwrap_or(""),
+                frat_proof_bridge_run["verdict"].as_str().unwrap_or(""),
+                frat_proof_bridge_run["validator"].as_str().unwrap_or("")
+            ),
+        );
+
+        let veripb_bridge_payload = serde_json::json!({
+            "kind": "pseudo-boolean-proof-validation",
+            "opb": "1 x1 >= 1;\n-1 x1 >= 0;\n",
+            "proof": "rup contradiction\n",
+        });
+        let veripb_bridge_run = self.run_python_json(
+            "proof_validation_reference.py",
+            &["--tool", "veripb"],
+            &veripb_bridge_payload.to_string(),
+        );
+        self.check(
+            "External validation VeriPB proof bridge valid payload",
+            veripb_bridge_run["status"].as_str() == Some("ok")
+                && veripb_bridge_run["verdict"].as_str() == Some("valid")
+                && veripb_bridge_run["pb_status"].as_str() == Some("unsat"),
+            format!(
+                "status={} verdict={} validator={}",
+                veripb_bridge_run["status"].as_str().unwrap_or(""),
+                veripb_bridge_run["verdict"].as_str().unwrap_or(""),
+                veripb_bridge_run["validator"].as_str().unwrap_or("")
+            ),
+        );
+
+        let invalid_veripb_bridge_payload = serde_json::json!({
+            "kind": "pseudo-boolean-proof-validation",
+            "opb": "1 x1 >= 0;\n",
+            "proof": "rup contradiction\n",
+        });
+        let invalid_veripb_bridge_run = self.run_python_json(
+            "proof_validation_reference.py",
+            &["--tool", "veripb"],
+            &invalid_veripb_bridge_payload.to_string(),
+        );
+        self.check(
+            "External validation VeriPB proof bridge invalid payload",
+            invalid_veripb_bridge_run["status"].as_str() == Some("ok")
+                && invalid_veripb_bridge_run["verdict"].as_str() == Some("invalid")
+                && invalid_veripb_bridge_run["pb_status"].as_str() == Some("sat"),
+            format!(
+                "status={} verdict={} message={}",
+                invalid_veripb_bridge_run["status"].as_str().unwrap_or(""),
+                invalid_veripb_bridge_run["verdict"].as_str().unwrap_or(""),
+                invalid_veripb_bridge_run["message"].as_str().unwrap_or("")
             ),
         );
 
@@ -7133,6 +7454,22 @@ impl Driver {
                 }),
             ),
             (
+                "mirai",
+                serde_json::json!({
+                    "kind": "program-verifier-validation",
+                    "language": "mirai",
+                    "source": "fn smoke() { assert!(1 + 1 == 2); }\n",
+                }),
+            ),
+            (
+                "ebmc",
+                serde_json::json!({
+                    "kind": "program-verifier-validation",
+                    "language": "ebmc",
+                    "source": "#include <assert.h>\nint main() { int x = 1; assert(x == 1); return 0; }\n",
+                }),
+            ),
+            (
                 "esbmc",
                 serde_json::json!({
                     "kind": "program-verifier-validation",
@@ -7146,6 +7483,14 @@ impl Driver {
                     "kind": "program-verifier-validation",
                     "language": "cpachecker",
                     "source": "#include <assert.h>\nint main() { int x = 1; assert(x == 1); return 0; }\n",
+                }),
+            ),
+            (
+                "klee",
+                serde_json::json!({
+                    "kind": "program-verifier-validation",
+                    "language": "klee",
+                    "source": "#include <assert.h>\nint main() { int x = 0; assert(x >= 0); return 0; }\n",
                 }),
             ),
             (
@@ -17255,6 +17600,7 @@ impl Driver {
         self.validate_set_cover();
         self.validate_facility_location();
         self.validate_graph_coloring();
+        self.validate_weighted_independent_set();
         self.validate_weighted_max_sat();
         self.validate_lp();
         self.validate_ip_mip();

@@ -66,6 +66,9 @@ const SHOT_KEEPER_BEAT_MIN_PROBABILITY: f64 = 0.30;
 const SHOT_BAILOUT_NEAR_GOAL_YARDS: f64 = 12.0;
 const SHOT_BAILOUT_DISPOSSESSION_RISK: f64 = 0.80;
 const SHOT_BAILOUT_ON_FRAME_PROBABILITY: f64 = 0.20;
+const POSSESSION_CHASE_MIN_BALL_RELOCATION_YARDS: f64 = 0.90;
+const POSSESSION_CHASE_MIN_ACTIVE_DEFENDERS: usize = 2;
+const POSSESSION_CHASE_MIN_CREDIT: f64 = 0.035;
 const CENTER_REF_BALL_CLEARANCE_YARDS: f64 = 7.0;
 const ASSISTANT_REF_BALL_CLEARANCE_YARDS: f64 = 4.0;
 const LIVE_HTTP_MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
@@ -4574,6 +4577,14 @@ pub struct MatchStats {
     pub fouls_home: u32,
     pub fouls_away: u32,
     pub tackles: u32,
+    #[serde(default)]
+    pub defensive_chase_load_home: f64,
+    #[serde(default)]
+    pub defensive_chase_load_away: f64,
+    #[serde(default)]
+    pub possession_chase_advantage_home: f64,
+    #[serde(default)]
+    pub possession_chase_advantage_away: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -6457,6 +6468,188 @@ fn completed_pass_reward(team: Team, origin: Vec2, target: Vec2, field_length: f
         (PassDirectionBucket::Backward, true) => 2.0,
         (PassDirectionBucket::Backward, false) => 4.0,
     }
+}
+
+#[derive(Clone, Debug, Default)]
+struct PossessionChaseSignal {
+    possession_team: Team,
+    defending_team: Team,
+    attacking_load: f64,
+    defensive_load: f64,
+    attacking_credit: f64,
+    defender_penalties: Vec<(usize, f64)>,
+}
+
+fn snapshot_player<'a>(snapshot: &'a WorldSnapshot, player_id: usize) -> Option<&'a PlayerSnapshot> {
+    snapshot.players.iter().find(|player| player.id == player_id)
+}
+
+fn player_motion_distance(before: &WorldSnapshot, after: &WorldSnapshot, player_id: usize) -> f64 {
+    let Some(before_player) = snapshot_player(before, player_id) else {
+        return 0.0;
+    };
+    let before_position = before
+        .player_position(player_id)
+        .unwrap_or(before_player.position);
+    let after_position = after
+        .player_position(player_id)
+        .or_else(|| snapshot_player(after, player_id).map(|player| player.position))
+        .unwrap_or(before_position);
+    before_position.distance(after_position)
+}
+
+fn player_motion_load(before: &WorldSnapshot, after: &WorldSnapshot, player_id: usize) -> f64 {
+    let distance = player_motion_distance(before, after, player_id);
+    if distance <= 1e-9 {
+        return 0.0;
+    }
+    let dt = before.dt_seconds.max(1e-6);
+    let speed_yps = distance / dt;
+    let acceleration = after
+        .player_acceleration(player_id)
+        .or_else(|| snapshot_player(after, player_id).map(|player| player.acceleration))
+        .unwrap_or_else(Vec2::zero)
+        .len();
+    let gait_multiplier = snapshot_player(after, player_id)
+        .map(|player| match player.movement_gait {
+            MovementGait::Sprint => 1.28,
+            MovementGait::Run => 1.16,
+            MovementGait::Jog => 1.08,
+            MovementGait::SideStep | MovementGait::BackSkip | MovementGait::Skip => 1.04,
+            MovementGait::Walk | MovementGait::BackWalk => 0.92,
+            MovementGait::Stand => 0.70,
+        })
+        .unwrap_or(1.0);
+    let speed_cost = 1.0 + (speed_yps / 8.0).powi(2).clamp(0.0, 1.15) * 0.32;
+    distance * gait_multiplier * speed_cost + acceleration * dt * 0.035
+}
+
+fn player_normalized_last_action(player: &PlayerSnapshot) -> &str {
+    player
+        .last_decision
+        .as_ref()
+        .map(|decision| normalize_soccer_action_label(&decision.action))
+        .unwrap_or("hold")
+}
+
+fn team_average_defensive_depth(snapshot: &WorldSnapshot, team: Team) -> f64 {
+    let own_goal_y = team.other().goal_y(snapshot.field_length);
+    let mut total = 0.0;
+    let mut count = 0.0;
+    for player in snapshot.players.iter().filter(|player| player.team == team) {
+        let position = snapshot
+            .player_position(player.id)
+            .unwrap_or(player.position);
+        total += (position.y - own_goal_y).abs();
+        count += 1.0;
+    }
+    if count > 0.0 {
+        total / count
+    } else {
+        snapshot.field_length
+    }
+}
+
+fn possession_chase_signal(
+    before: &WorldSnapshot,
+    after: &WorldSnapshot,
+    possession_team: Team,
+) -> Option<PossessionChaseSignal> {
+    if before.controlled_possession_team() != Some(possession_team)
+        || after.controlled_possession_team() != Some(possession_team)
+    {
+        return None;
+    }
+
+    let ball_relocation = before.ball.position.distance(after.ball.position);
+    if ball_relocation < POSSESSION_CHASE_MIN_BALL_RELOCATION_YARDS {
+        return None;
+    }
+
+    let defending_team = possession_team.other();
+    let mut attacking_load = 0.0;
+    let mut defensive_load = 0.0;
+    let mut active_defender_loads = Vec::new();
+    let mut defender_speed_total = 0.0;
+    let mut defender_count = 0.0;
+
+    for player in &before.players {
+        let load = player_motion_load(before, after, player.id);
+        if player.team == possession_team {
+            attacking_load += load;
+            continue;
+        }
+        defensive_load += load;
+        defender_count += 1.0;
+        defender_speed_total += load / before.dt_seconds.max(1e-6);
+
+        let Some(after_player) = snapshot_player(after, player.id) else {
+            continue;
+        };
+        let action = player_normalized_last_action(after_player);
+        let before_position = before.player_position(player.id).unwrap_or(player.position);
+        let distance_to_ball = before_position.distance(before.ball.position);
+        let moved = player_motion_distance(before, after, player.id);
+        let speed_yps = moved / before.dt_seconds.max(1e-6);
+        let active_chase = matches!(action, "defend" | "tackle")
+            && distance_to_ball <= 38.0
+            && (speed_yps >= 1.15 || moved >= 0.45);
+        if active_chase {
+            active_defender_loads.push((player.id, load));
+        }
+    }
+
+    if active_defender_loads.len() < POSSESSION_CHASE_MIN_ACTIVE_DEFENDERS {
+        return None;
+    }
+
+    let average_defender_load_rate = if defender_count > 0.0 {
+        defender_speed_total / defender_count
+    } else {
+        0.0
+    };
+    let average_defensive_depth = team_average_defensive_depth(before, defending_team);
+    let compact_low_block =
+        average_defensive_depth <= 34.0 && average_defender_load_rate < 1.25;
+    if compact_low_block {
+        return None;
+    }
+
+    let load_advantage = defensive_load - attacking_load * 1.08;
+    if load_advantage <= 0.0 {
+        return None;
+    }
+
+    let lateral_switch_bonus =
+        1.0 + ((after.ball.position.x - before.ball.position.x).abs() / 26.0).clamp(0.0, 0.45);
+    let attacking_credit =
+        (load_advantage / 11.0 * 0.070 * lateral_switch_bonus).clamp(0.0, 0.48);
+    if attacking_credit < POSSESSION_CHASE_MIN_CREDIT {
+        return None;
+    }
+
+    let active_load_total = active_defender_loads
+        .iter()
+        .map(|(_, load)| *load)
+        .sum::<f64>()
+        .max(1e-6);
+    let defender_penalties = active_defender_loads
+        .into_iter()
+        .filter_map(|(player_id, load)| {
+            let share = load / active_load_total;
+            let amount = -(attacking_credit * 0.78 * share).clamp(0.015, 0.16);
+            (amount.abs() >= 0.015).then_some((player_id, amount))
+        })
+        .collect::<Vec<_>>();
+
+    Some(PossessionChaseSignal {
+        possession_team,
+        defending_team,
+        attacking_load,
+        defensive_load,
+        attacking_credit,
+        defender_penalties,
+    })
 }
 
 fn soccer_transition_reward(

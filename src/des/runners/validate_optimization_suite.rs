@@ -17,6 +17,10 @@ use crate::des::general::advanced_optimization_models::{
     AntColonyTSPParams, ContinuousObjectiveName, ParetoPortfolioParams, ParticleSwarmParams,
     Point2, PortfolioAsset,
 };
+use crate::des::general::bin_packing::{
+    bin_packing_solution_feasible, build_sample_bin_packing_problem, solve_bin_packing_exact,
+    solve_bin_packing_first_fit_decreasing, BinPackingProblem, BinPackingStatus,
+};
 use crate::des::general::classical_optimization_models::{
     run_auction_assignment, run_flow_shop_exact, run_flow_shop_neh, run_hungarian_assignment,
     run_job_shop_dispatch, run_job_shop_exact, run_vrp_exact, run_vrp_nearest_neighbor,
@@ -36,6 +40,10 @@ use crate::des::general::cp_sat::{
 use crate::des::general::external_assignment_reference::{
     solve_assignment_with_external_reference, ExternalAssignmentReferenceOptions,
     ExternalAssignmentReferenceStatus,
+};
+use crate::des::general::external_bin_packing_reference::{
+    solve_bin_packing_with_external_reference, ExternalBinPackingReferenceBin,
+    ExternalBinPackingReferenceOptions, ExternalBinPackingReferenceStatus,
 };
 use crate::des::general::external_linear_cli::{
     external_linear_cli_command, probe_external_linear_cli_solver, solve_ipmip_with_external_cli,
@@ -78,9 +86,6 @@ use crate::des::general::external_scheduling_reference::{
 use crate::des::general::external_tsp_reference::{
     solve_tsp_with_external_reference, ExternalTspReferenceOptions, ExternalTspReferenceStatus,
 };
-use crate::des::general::genetic_tsp::{
-    build_pentagon_tsp, held_karp_exact, is_permutation, tour_length,
-};
 use crate::des::general::external_validation_tools::{
     dimacs_cnf_to_string, external_benchmark_manifest_to_json,
     external_validation_artifact_cli_args, external_validation_consensus_report_to_json,
@@ -100,6 +105,9 @@ use crate::des::general::external_validation_tools::{
     ExternalValidationTextVerdict, JsonSchemaValidationRequest, MiniZincValidationRequest,
     PrismModule, PrismValidationModel, SimulationMetricExpectation, SimulationValidationRequest,
     SmtDeclaration, SmtLibValidationScript, SmtSort, TlaValidationModule,
+};
+use crate::des::general::genetic_tsp::{
+    build_pentagon_tsp, held_karp_exact, is_permutation, tour_length,
 };
 use crate::des::general::ip_mip_des::{
     build_absolute_value_penalty_ip, build_binary_knapsack_ip, build_binary_product_gate_ip,
@@ -728,6 +736,40 @@ impl Driver {
         true
     }
 
+    fn bin_packing_external_bins_feasible(
+        &self,
+        problem: &BinPackingProblem,
+        bins: &[ExternalBinPackingReferenceBin],
+    ) -> bool {
+        if bins.is_empty() {
+            return problem.items.is_empty();
+        }
+        let mut seen = HashSet::new();
+        for bin in bins {
+            if bin.load > problem.capacity + 1e-8 {
+                return false;
+            }
+            let mut load = 0.0;
+            for item_id in &bin.item_ids {
+                if !seen.insert(item_id.clone()) {
+                    return false;
+                }
+                let Some(item) = problem
+                    .items
+                    .iter()
+                    .find(|item| item.id.as_str() == item_id.as_str())
+                else {
+                    return false;
+                };
+                load += item.weight;
+            }
+            if (load - bin.load).abs() > 1e-8 * 1.0_f64.max(load.abs()) {
+                return false;
+            }
+        }
+        seen.len() == problem.items.len()
+    }
+
     fn check_cp_reference_optimal(
         &mut self,
         label: &str,
@@ -879,6 +921,96 @@ impl Driver {
             _ => println!(
                 "  SKIP  Assignment SciPy linear_sum_assignment objective: status={:?} message={}",
                 reference.scipy_status, reference.message
+            ),
+        }
+    }
+
+    fn validate_bin_packing(&mut self) {
+        println!("\n-- Bin packing: exact/FFD vs OR-Tools CP-SAT bridge --");
+        let problem = build_sample_bin_packing_problem();
+        let exact = solve_bin_packing_exact(&problem);
+        let ffd = solve_bin_packing_first_fit_decreasing(&problem);
+        self.check(
+            "Bin-packing exact native optimum",
+            exact.status == BinPackingStatus::Optimal
+                && exact.objective == Some(3)
+                && bin_packing_solution_feasible(&problem, &exact),
+            format!(
+                "status={} objective={:?} bins={:?} lower_bound={} total_weight={:.10}",
+                exact.status.as_str(),
+                exact.objective,
+                exact.bins,
+                exact.lower_bound_bins,
+                exact.total_weight
+            ),
+        );
+        self.check(
+            "Bin-packing FFD native feasibility",
+            ffd.status == BinPackingStatus::Feasible
+                && bin_packing_solution_feasible(&problem, &ffd)
+                && ffd.objective >= exact.objective,
+            format!(
+                "status={} objective={:?} bins={:?}",
+                ffd.status.as_str(),
+                ffd.objective,
+                ffd.bins
+            ),
+        );
+
+        let reference = solve_bin_packing_with_external_reference(
+            &problem,
+            &ExternalBinPackingReferenceOptions::default(),
+        );
+        self.check(
+            "Bin-packing exact/reference bridge status optimal",
+            reference.status == ExternalBinPackingReferenceStatus::Optimal,
+            format!(
+                "status={} solver={} message={}",
+                reference.status.as_str(),
+                reference.solver,
+                reference.message
+            ),
+        );
+        self.close(
+            "Bin-packing exact/reference objective",
+            exact.objective.unwrap_or(usize::MAX) as f64,
+            reference.objective.unwrap_or(usize::MAX) as f64,
+            0.0,
+        );
+        self.check(
+            "Bin-packing exact/reference feasibility",
+            self.bin_packing_external_bins_feasible(&problem, &reference.bins),
+            format!(
+                "objective={:?} bins={:?} lower_bound={:?}",
+                reference.objective, reference.bins, reference.lower_bound_bins
+            ),
+        );
+
+        match (
+            reference.ortools_status.as_deref(),
+            reference.ortools_objective,
+        ) {
+            (Some("optimal"), Some(objective)) => {
+                self.close(
+                    "Bin-packing OR-Tools CP-SAT objective",
+                    exact.objective.unwrap_or(usize::MAX) as f64,
+                    objective as f64,
+                    0.0,
+                );
+                self.check(
+                    "Bin-packing OR-Tools CP-SAT feasibility",
+                    self.bin_packing_external_bins_feasible(&problem, &reference.ortools_bins),
+                    format!(
+                        "objective={:?} bins={:?} bound={:?}",
+                        reference.ortools_objective,
+                        reference.ortools_bins,
+                        reference.ortools_objective_bound
+                    ),
+                );
+            }
+            _ => println!(
+                "  SKIP  Bin-packing OR-Tools CP-SAT objective: status={:?} message={}",
+                reference.ortools_status, reference.message
             ),
         }
     }
@@ -16220,6 +16352,7 @@ impl Driver {
 
     fn run_all(&mut self) {
         self.validate_assignment();
+        self.validate_bin_packing();
         self.validate_lp();
         self.validate_ip_mip();
         self.validate_external_solver_clis();

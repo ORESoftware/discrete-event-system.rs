@@ -23,6 +23,7 @@ pub mod random_variables;
 pub mod value_iteration;
 
 pub mod big_data;
+pub mod bin_packing;
 pub mod evolution;
 pub mod genetic_tsp;
 pub mod incremental_lp;
@@ -94,6 +95,7 @@ pub mod control_systems;
 pub mod do_audit;
 pub mod equation_to_stations;
 pub mod external_assignment_reference;
+pub mod external_bin_packing_reference;
 pub mod external_linear_cli;
 pub mod external_max_flow_reference;
 pub mod external_min_cost_flow_reference;

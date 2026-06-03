@@ -197,7 +197,12 @@ pub fn solve_bin_packing_exact(p: &BinPackingProblem) -> BinPackingSolution {
         &mut best_bins,
         &mut best_count,
     );
-    build_solution(p, BinPackingStatus::Optimal, best_bins, "exact branch-and-bound")
+    build_solution(
+        p,
+        BinPackingStatus::Optimal,
+        best_bins,
+        "exact branch-and-bound",
+    )
 }
 
 pub fn bin_packing_solution_feasible(p: &BinPackingProblem, solution: &BinPackingSolution) -> bool {

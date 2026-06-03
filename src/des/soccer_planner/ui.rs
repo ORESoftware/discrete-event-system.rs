@@ -11,8 +11,41 @@ pub fn planner_page_html() -> String {
     let default_json = serde_json::to_string_pretty(&default_planner_request())
         .unwrap_or_else(|_| "{}".to_string());
     let default_escaped = default_json.replace("</script", "<\\/script");
+    let git_commit = planner_git_commit();
+    let git_commit_short = short_git_commit(git_commit);
 
-    include_str!("planner_ui.html").replace("__DEFAULT_CONFIG__", &default_escaped)
+    include_str!("planner_ui.html")
+        .replace("__DEFAULT_CONFIG__", &default_escaped)
+        .replace("__PLANNER_VERSION__", &html_escape(planner_version()))
+        .replace("__PLANNER_GIT_COMMIT__", &html_escape(git_commit))
+        .replace(
+            "__PLANNER_GIT_COMMIT_SHORT__",
+            &html_escape(git_commit_short),
+        )
+}
+
+fn planner_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+fn planner_git_commit() -> &'static str {
+    option_env!("DES_ENGINE_GIT_COMMIT").unwrap_or("unknown")
+}
+
+fn short_git_commit(commit: &str) -> &str {
+    if commit == "unknown" {
+        commit
+    } else {
+        &commit[..commit.len().min(12)]
+    }
+}
+
+fn html_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 /// Serialize a planner response for the JSON API (animations as JSON objects).
@@ -87,6 +120,15 @@ mod tests {
         assert_eq!(req.default_max_contiguous_blocks, 4);
         assert_eq!(req.default_max_bench_blocks, 3);
         assert_eq!(req.solver_max_nodes, 20_000);
+    }
+
+    #[test]
+    fn planner_page_includes_build_metadata() {
+        let html = planner_page_html();
+        assert!(html.contains(&format!("data-version=\"{}\"", env!("CARGO_PKG_VERSION"))));
+        assert!(html.contains("id=\"buildInfo\""));
+        assert!(!html.contains("__PLANNER_VERSION__"));
+        assert!(!html.contains("__PLANNER_GIT_COMMIT"));
     }
 
     #[test]

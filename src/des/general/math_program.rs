@@ -1052,6 +1052,13 @@ impl MathProgram {
         BoolLiteral { var, value: false }
     }
 
+    pub fn negated_lit(literal: BoolLiteral) -> BoolLiteral {
+        BoolLiteral {
+            var: literal.var,
+            value: !literal.value,
+        }
+    }
+
     pub fn add_boolean_and(
         &mut self,
         name: impl Into<String>,
@@ -1448,16 +1455,44 @@ impl MathProgram {
         Ok(self.general_constraints.len() - 1)
     }
 
+    pub fn add_literal_implication(
+        &mut self,
+        name: impl Into<String>,
+        antecedent: BoolLiteral,
+        consequent: BoolLiteral,
+    ) -> Result<usize, MathProgramError> {
+        self.add_boolean_clause(name, vec![Self::negated_lit(antecedent), consequent])
+    }
+
+    pub fn add_literal_equivalence(
+        &mut self,
+        name: impl Into<String>,
+        left: BoolLiteral,
+        right: BoolLiteral,
+    ) -> Result<Vec<usize>, MathProgramError> {
+        self.validate_boolean_clause_args(&[left, right])?;
+        let name = name.into();
+        let forward = self.add_literal_implication(format!("{name}__forward"), left, right)?;
+        let reverse = self.add_literal_implication(format!("{name}__reverse"), right, left)?;
+        Ok(vec![forward, reverse])
+    }
+
     pub fn add_binary_implication(
         &mut self,
         name: impl Into<String>,
         antecedent: usize,
         consequent: usize,
     ) -> Result<usize, MathProgramError> {
-        self.add_boolean_clause(
-            name,
-            vec![Self::not_lit(antecedent), Self::bool_lit(consequent)],
-        )
+        self.add_literal_implication(name, Self::bool_lit(antecedent), Self::bool_lit(consequent))
+    }
+
+    pub fn add_binary_equivalence(
+        &mut self,
+        name: impl Into<String>,
+        left: usize,
+        right: usize,
+    ) -> Result<Vec<usize>, MathProgramError> {
+        self.add_literal_equivalence(name, Self::bool_lit(left), Self::bool_lit(right))
     }
 
     pub fn add_integer_product(
@@ -1913,6 +1948,169 @@ impl MathProgram {
                 intervals,
             });
         Ok(self.general_constraints.len() - 1)
+    }
+
+    /// Reify finite-domain membership for an integer-valued linear expression:
+    /// `literal <=> coeffs * x in intervals`.
+    pub fn add_reified_linear_domain(
+        &mut self,
+        name: impl Into<String>,
+        literal: BoolLiteral,
+        coeffs: Vec<(usize, f64)>,
+        intervals: Vec<(i64, i64)>,
+    ) -> Result<Vec<usize>, MathProgramError> {
+        let intervals = intervals
+            .into_iter()
+            .map(|(lower, upper)| LinearDomainInterval { lower, upper })
+            .collect::<Vec<_>>();
+        self.validate_boolean_clause_args(&[literal])?;
+        self.validate_linear_domain_args(&coeffs, &intervals)?;
+        let complement_intervals =
+            self.linear_not_in_domain_intervals("reified linear-domain", &coeffs, &intervals)?;
+        let complement_intervals = complement_intervals
+            .into_iter()
+            .map(|(lower, upper)| LinearDomainInterval { lower, upper })
+            .collect::<Vec<_>>();
+
+        let name = name.into();
+        let true_idx = self.general_constraints.len();
+        self.general_constraints
+            .push(GeneralConstraint::EnforcedLinearDomain {
+                name: format!("{name}__true"),
+                enforcement: vec![literal],
+                coeffs: coeffs.clone(),
+                intervals,
+            });
+        let false_idx = self.general_constraints.len();
+        self.general_constraints
+            .push(GeneralConstraint::EnforcedLinearDomain {
+                name: format!("{name}__false"),
+                enforcement: vec![Self::negated_lit(literal)],
+                coeffs,
+                intervals: complement_intervals,
+            });
+        Ok(vec![true_idx, false_idx])
+    }
+
+    /// Reify finite-domain exclusion for an integer-valued linear expression:
+    /// `literal <=> coeffs * x not in intervals`.
+    pub fn add_reified_linear_not_in_domain(
+        &mut self,
+        name: impl Into<String>,
+        literal: BoolLiteral,
+        coeffs: Vec<(usize, f64)>,
+        intervals: Vec<(i64, i64)>,
+    ) -> Result<Vec<usize>, MathProgramError> {
+        self.add_reified_linear_domain(name, Self::negated_lit(literal), coeffs, intervals)
+    }
+
+    /// Reify a finite-domain linear disequality:
+    /// `literal <=> coeffs * x != forbidden_value`.
+    pub fn add_reified_linear_not_equal(
+        &mut self,
+        name: impl Into<String>,
+        literal: BoolLiteral,
+        coeffs: Vec<(usize, f64)>,
+        forbidden_value: i64,
+    ) -> Result<Vec<usize>, MathProgramError> {
+        self.add_reified_linear_not_in_domain(
+            name,
+            literal,
+            coeffs,
+            vec![(forbidden_value, forbidden_value)],
+        )
+    }
+
+    /// Restrict an integer-valued linear expression outside a finite union of
+    /// forbidden integer intervals.
+    ///
+    /// This complements [`Self::add_linear_domain`]: the helper computes the
+    /// finite integer expression bounds, removes the forbidden interval union,
+    /// and lowers the remaining allowed intervals through exact finite-domain
+    /// MIP rows.
+    pub fn add_linear_not_in_domain(
+        &mut self,
+        name: impl Into<String>,
+        coeffs: Vec<(usize, f64)>,
+        forbidden_intervals: Vec<(i64, i64)>,
+    ) -> Result<usize, MathProgramError> {
+        let forbidden_intervals = forbidden_intervals
+            .into_iter()
+            .map(|(lower, upper)| LinearDomainInterval { lower, upper })
+            .collect::<Vec<_>>();
+        let intervals = self.linear_not_in_domain_intervals(
+            "linear-not-in-domain",
+            &coeffs,
+            &forbidden_intervals,
+        )?;
+        self.add_linear_domain(name, coeffs, intervals)
+    }
+
+    /// Enforced variant of [`Self::add_linear_not_in_domain`].
+    ///
+    /// The domain-complement restriction is active only when every enforcement
+    /// literal is true.
+    pub fn add_enforced_linear_not_in_domain(
+        &mut self,
+        name: impl Into<String>,
+        enforcement: Vec<BoolLiteral>,
+        coeffs: Vec<(usize, f64)>,
+        forbidden_intervals: Vec<(i64, i64)>,
+    ) -> Result<usize, MathProgramError> {
+        if enforcement.is_empty() {
+            return Err(MathProgramError::Unsupported(
+                "enforced linear-not-in-domain constraints require at least one enforcement literal"
+                    .to_string(),
+            ));
+        }
+        self.validate_boolean_clause_args(&enforcement)?;
+        let forbidden_intervals = forbidden_intervals
+            .into_iter()
+            .map(|(lower, upper)| LinearDomainInterval { lower, upper })
+            .collect::<Vec<_>>();
+        let intervals = self.linear_not_in_domain_intervals(
+            "enforced linear-not-in-domain",
+            &coeffs,
+            &forbidden_intervals,
+        )?;
+        self.add_enforced_linear_domain(name, enforcement, coeffs, intervals)
+    }
+
+    /// Restrict an integer-valued linear expression away from one forbidden value.
+    ///
+    /// This is a CP-SAT-style convenience over
+    /// [`Self::add_linear_not_in_domain`].
+    pub fn add_linear_not_equal(
+        &mut self,
+        name: impl Into<String>,
+        coeffs: Vec<(usize, f64)>,
+        forbidden_value: i64,
+    ) -> Result<usize, MathProgramError> {
+        let intervals =
+            self.linear_not_equal_intervals("linear-not-equal", &coeffs, forbidden_value)?;
+        self.add_linear_domain(name, coeffs, intervals)
+    }
+
+    /// Enforced variant of [`Self::add_linear_not_equal`].
+    ///
+    /// The disequality is active only when every enforcement literal is true.
+    pub fn add_enforced_linear_not_equal(
+        &mut self,
+        name: impl Into<String>,
+        enforcement: Vec<BoolLiteral>,
+        coeffs: Vec<(usize, f64)>,
+        forbidden_value: i64,
+    ) -> Result<usize, MathProgramError> {
+        if enforcement.is_empty() {
+            return Err(MathProgramError::Unsupported(
+                "enforced linear-not-equal constraints require at least one enforcement literal"
+                    .to_string(),
+            ));
+        }
+        self.validate_boolean_clause_args(&enforcement)?;
+        let intervals =
+            self.linear_not_equal_intervals("enforced linear-not-equal", &coeffs, forbidden_value)?;
+        self.add_enforced_linear_domain(name, enforcement, coeffs, intervals)
     }
 
     /// Add the CP-SAT-style channeling constraint
@@ -3445,6 +3643,126 @@ impl MathProgram {
         }
         self.validate_boolean_clause_args(enforcement)?;
         self.validate_linear_domain_args(coeffs, intervals)
+    }
+
+    fn linear_not_equal_intervals(
+        &self,
+        kind: &str,
+        coeffs: &[(usize, f64)],
+        forbidden_value: i64,
+    ) -> Result<Vec<(i64, i64)>, MathProgramError> {
+        self.linear_not_in_domain_intervals(
+            kind,
+            coeffs,
+            &[LinearDomainInterval::exact(forbidden_value)],
+        )
+    }
+
+    fn linear_not_in_domain_intervals(
+        &self,
+        kind: &str,
+        coeffs: &[(usize, f64)],
+        forbidden_intervals: &[LinearDomainInterval],
+    ) -> Result<Vec<(i64, i64)>, MathProgramError> {
+        if forbidden_intervals.is_empty() {
+            return Err(MathProgramError::Unsupported(format!(
+                "{kind} constraints require at least one forbidden interval"
+            )));
+        }
+        if forbidden_intervals.len() > 4096 {
+            return Err(MathProgramError::Unsupported(format!(
+                "{kind} exact MIP lowering is limited to 4096 forbidden intervals, got {}",
+                forbidden_intervals.len()
+            )));
+        }
+        for interval in forbidden_intervals {
+            if interval.lower > interval.upper {
+                return Err(MathProgramError::InvalidBound(format!(
+                    "{kind} forbidden interval [{}, {}] has lower bound above upper bound",
+                    interval.lower, interval.upper
+                )));
+            }
+        }
+
+        let (lower, upper) = self.integer_linear_expression_bounds(kind, coeffs)?;
+        let forbidden_intervals = normalized_forbidden_intervals(forbidden_intervals, lower, upper);
+        if forbidden_intervals.is_empty() {
+            return Ok(vec![(lower, upper)]);
+        }
+
+        let mut intervals = Vec::new();
+        let mut next_lower = lower;
+        let mut covered_to_upper = false;
+        for interval in forbidden_intervals {
+            if next_lower < interval.lower {
+                intervals.push((next_lower, interval.lower.saturating_sub(1)));
+            }
+            if interval.upper == i64::MAX {
+                covered_to_upper = true;
+                break;
+            }
+            next_lower = interval.upper + 1;
+        }
+        if !covered_to_upper && next_lower <= upper {
+            intervals.push((next_lower, upper));
+        }
+
+        if intervals.is_empty() {
+            return Err(MathProgramError::Unsupported(format!(
+                "{kind} excludes every integer value in its expression domain [{lower}, {upper}]"
+            )));
+        }
+        if intervals.len() > 4096 {
+            return Err(MathProgramError::Unsupported(format!(
+                "{kind} exact MIP lowering is limited to 4096 allowed intervals after complementing, got {}",
+                intervals.len()
+            )));
+        }
+        Ok(intervals)
+    }
+
+    fn integer_linear_expression_bounds(
+        &self,
+        kind: &str,
+        coeffs: &[(usize, f64)],
+    ) -> Result<(i64, i64), MathProgramError> {
+        if coeffs.is_empty() {
+            return Err(MathProgramError::Unsupported(format!(
+                "{kind} constraints require at least one coefficient"
+            )));
+        }
+        validate_coeffs(self.variables.len(), coeffs)?;
+        let mut lower = 0.0;
+        let mut upper = 0.0;
+        for &(idx, coef) in coeffs {
+            if !is_integer_value(coef) {
+                return Err(MathProgramError::Unsupported(format!(
+                    "{kind} coefficient {coef} on `{}` must be integer-valued",
+                    self.variables[idx].name
+                )));
+            }
+            let (var_lower, var_upper) = integer_bounds(&self.variables[idx]).ok_or_else(|| {
+                MathProgramError::Unsupported(format!(
+                    "{kind} variable `{}` must be finite-domain integer or binary",
+                    self.variables[idx].name
+                ))
+            })?;
+            if coef >= 0.0 {
+                lower += coef * var_lower as f64;
+                upper += coef * var_upper as f64;
+            } else {
+                lower += coef * var_upper as f64;
+                upper += coef * var_lower as f64;
+            }
+        }
+        let lower = finite_integer_linear_bound(kind, "lower", lower)?;
+        let upper = finite_integer_linear_bound(kind, "upper", upper)?;
+        if lower > upper {
+            return Err(MathProgramError::InvalidBound(format!(
+                "{kind} expression lower bound {lower} is above upper bound {upper}"
+            )));
+        }
+        Ok((lower, upper))
     }
 
     fn validate_map_domain_args(
@@ -5316,6 +5634,7 @@ pub struct MathProgramExportVariableExpansion {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MathProgramExportRowKind {
     LinearConstraint,
+    QuadraticConstraint,
     LazyConstraint,
     Generated,
 }
@@ -6017,6 +6336,88 @@ pub fn cross_check_math_program_conflict_with_external(
     })
 }
 
+pub fn find_math_program_assumption_unsat_core(
+    program: &MathProgram,
+    assumptions: &[BoolLiteral],
+    solve_opts: &MathProgramSolveOptions,
+    core_opts: &MathProgramAssumptionCoreOptions,
+) -> Result<MathProgramAssumptionCore, MathProgramError> {
+    program.validate()?;
+    validate_math_program_assumptions(program, assumptions)?;
+
+    let mut active = vec![true; assumptions.len()];
+    let initial_subsystem = build_assumption_subsystem(program, assumptions, &active)?;
+    let initial = solve_math_program(&initial_subsystem, solve_opts)?;
+    if initial.status != MathProgramStatus::Infeasible {
+        return Ok(MathProgramAssumptionCore {
+            status: initial.status,
+            assumptions: Vec::new(),
+            subsystem: initial_subsystem,
+            minimal: false,
+            solver: "des-assumption-core".to_string(),
+            message: Some(
+                "assumptions do not make the model infeasible under feasibility probing"
+                    .to_string(),
+            ),
+        });
+    }
+
+    let mut subsystem = initial_subsystem;
+    let mut checks = 0usize;
+    let mut limited = false;
+    for i in 0..assumptions.len() {
+        if checks >= core_opts.max_candidate_checks {
+            limited = true;
+            break;
+        }
+        active[i] = false;
+        let trial = build_assumption_subsystem(program, assumptions, &active)?;
+        let trial_solution = solve_math_program(&trial, solve_opts)?;
+        checks += 1;
+        if trial_solution.status == MathProgramStatus::Infeasible {
+            subsystem = trial;
+        } else {
+            active[i] = true;
+        }
+    }
+
+    let core_assumptions = active_assumptions(assumptions, &active);
+    Ok(MathProgramAssumptionCore {
+        status: MathProgramStatus::Infeasible,
+        assumptions: core_assumptions,
+        subsystem,
+        minimal: !limited,
+        solver: "des-assumption-core".to_string(),
+        message: Some(format!(
+            "assumptions={}, core={}, checks={}, minimal={}",
+            assumptions.len(),
+            active.iter().filter(|&&is_active| is_active).count(),
+            checks,
+            !limited
+        )),
+    })
+}
+
+pub fn cross_check_math_program_assumption_core_with_external(
+    program: &MathProgram,
+    assumptions: &[BoolLiteral],
+    internal_opts: &MathProgramSolveOptions,
+    external_opts: &ExternalMathProgramOptions,
+    core_opts: &MathProgramAssumptionCoreOptions,
+) -> Result<MathProgramAssumptionCoreCrossCheck, MathProgramError> {
+    let internal =
+        find_math_program_assumption_unsat_core(program, assumptions, internal_opts, core_opts)?;
+    let external = solve_math_program_external_scipy(&internal.subsystem, external_opts)?;
+    let status_agree = internal.status == external.status;
+    let within_tolerance = status_agree && internal.status == MathProgramStatus::Infeasible;
+    Ok(MathProgramAssumptionCoreCrossCheck {
+        internal,
+        external,
+        status_agree,
+        within_tolerance,
+    })
+}
+
 pub fn solve_math_program_feas_relaxation(
     program: &MathProgram,
     solve_opts: &MathProgramSolveOptions,
@@ -6182,19 +6583,20 @@ impl MathProgramMpsExport {
     }
 }
 
-/// Export a linear or exactly lowered MIP facade model as CPLEX LP text.
+/// Export a linear, continuous-QP, or exactly lowered MIP facade model as CPLEX
+/// LP text.
 ///
-/// The export intentionally does not attempt to serialize continuous quadratic,
-/// quadratic-constraint, conic, or hierarchical multi-objective models into a
-/// linear format. Those should use the native solve APIs or solver-specific
-/// nonlinear file formats instead.
+/// Continuous quadratic objectives use the CPLEX LP quadratic objective syntax.
+/// Quadratic constraints, conic constraints, and hierarchical multi-objective
+/// models should use the native solve APIs or MPS nonlinear sections instead.
 pub fn export_math_program_cplex_lp(
     program: &MathProgram,
 ) -> Result<MathProgramCplexLpExport, MathProgramError> {
-    let parts = math_program_linear_text_export_parts(program, "CPLEX LP export")?;
+    let parts = math_program_linear_text_export_parts(program, "CPLEX LP export", true, false)?;
     let text = render_cplex_lp(
         parts.sense,
         &parts.objective,
+        &parts.quadratic_objective,
         &parts.variable_names,
         &parts.rows,
         &parts.constraint_names,
@@ -6213,19 +6615,22 @@ pub fn export_math_program_cplex_lp(
     })
 }
 
-/// Export a linear or exactly lowered MIP facade model as free MPS text.
+/// Export a linear, continuous-QP, or exactly lowered MIP facade model as free
+/// MPS text.
 ///
-/// MPS is intentionally limited to the same linear/compiled-MIP surface as the
-/// CPLEX LP export. Continuous quadratic, quadratic-constraint, conic, and
-/// hierarchical multi-objective models should use the native solve APIs or
-/// solver-specific nonlinear file formats instead.
+/// Continuous quadratic objectives and constraints use the extended `QUADOBJ`
+/// and `QCMATRIX` sections. Conic constraints and hierarchical multi-objective
+/// models should use the native solve APIs or solver-specific nonlinear file
+/// formats instead.
 pub fn export_math_program_mps(
     program: &MathProgram,
 ) -> Result<MathProgramMpsExport, MathProgramError> {
-    let parts = math_program_linear_text_export_parts(program, "MPS export")?;
+    let parts = math_program_linear_text_export_parts(program, "MPS export", true, true)?;
     let text = render_mps(
         parts.sense,
         &parts.objective,
+        &parts.quadratic_objective,
+        &parts.quadratic_constraints,
         &parts.variable_names,
         &parts.rows,
         &parts.constraint_names,
@@ -6248,6 +6653,8 @@ pub fn export_math_program_mps(
 struct LinearTextExportParts {
     sense: LpSense,
     objective: Vec<f64>,
+    quadratic_objective: Vec<QuadraticObjectiveTerm>,
+    quadratic_constraints: Vec<MpsQuadraticConstraintExport>,
     variable_names: Vec<String>,
     rows: Vec<CplexLpExportRow>,
     constraint_names: Vec<String>,
@@ -6260,9 +6667,17 @@ struct LinearTextExportParts {
     original_variable_count: usize,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct MpsQuadraticConstraintExport {
+    row_name: String,
+    terms: Vec<QuadraticConstraintTerm>,
+}
+
 fn math_program_linear_text_export_parts(
     program: &MathProgram,
     format_name: &str,
+    allow_quadratic_objective: bool,
+    allow_quadratic_constraints: bool,
 ) -> Result<LinearTextExportParts, MathProgramError> {
     program.validate()?;
     if !program.secondary_objectives.is_empty() {
@@ -6270,9 +6685,19 @@ fn math_program_linear_text_export_parts(
             "{format_name} does not support hierarchical multi-objective models"
         )));
     }
-    if program.has_quadratic_constraints() || program.has_conic_constraints() {
+    if program.has_conic_constraints() {
         return Err(MathProgramError::Unsupported(format!(
             "{format_name} supports linear and exactly lowered MIP models only"
+        )));
+    }
+    if program.has_quadratic_constraints() && !allow_quadratic_constraints {
+        return Err(MathProgramError::Unsupported(format!(
+            "{format_name} does not support quadratic constraints"
+        )));
+    }
+    if program.has_quadratic_constraints() && program.has_discrete_features() {
+        return Err(MathProgramError::Unsupported(format!(
+            "{format_name} supports quadratic constraints only for pure continuous models"
         )));
     }
 
@@ -6307,6 +6732,8 @@ fn math_program_linear_text_export_parts(
         let mut parts = LinearTextExportParts {
             sense: compiled.problem.sense,
             objective: compiled.problem.c,
+            quadratic_objective: Vec::new(),
+            quadratic_constraints: Vec::new(),
             variable_names,
             rows,
             constraint_names,
@@ -6322,9 +6749,21 @@ fn math_program_linear_text_export_parts(
         return Ok(parts);
     }
 
-    if program.has_quadratic_objective() {
+    let quadratic_objective = if program.has_quadratic_objective() {
+        if allow_quadratic_objective {
+            program.quadratic_objective.clone()
+        } else {
+            return Err(MathProgramError::Unsupported(format!(
+                "{format_name} does not support continuous quadratic objectives"
+            )));
+        }
+    } else {
+        Vec::new()
+    };
+
+    if program.has_quadratic_objective() && program.has_discrete_features() {
         return Err(MathProgramError::Unsupported(format!(
-            "{format_name} does not support continuous quadratic objectives"
+            "{format_name} supports quadratic objectives only for pure continuous models"
         )));
     }
 
@@ -6335,10 +6774,12 @@ fn math_program_linear_text_export_parts(
         .collect::<Vec<_>>();
     let variable_names =
         sanitize_cplex_lp_names(Some(&raw_variable_names), program.variables.len(), "x");
-    let rows = original_linear_export_rows(program)?;
+    let rows = original_linear_export_rows(program, allow_quadratic_constraints)?;
     let raw_constraint_names = rows.iter().map(|row| row.name.clone()).collect::<Vec<_>>();
     let constraint_names = sanitize_cplex_lp_names(Some(&raw_constraint_names), rows.len(), "c");
     let row_mappings = export_row_mappings(&rows, &constraint_names)?;
+    let quadratic_constraints =
+        mps_quadratic_constraint_exports(program, &rows, &constraint_names)?;
     let lower = program
         .variables
         .iter()
@@ -6359,6 +6800,8 @@ fn math_program_linear_text_export_parts(
     let mut parts = LinearTextExportParts {
         sense: program.sense.to_lp(),
         objective,
+        quadratic_objective,
+        quadratic_constraints,
         variable_names,
         rows,
         constraint_names,
@@ -6505,9 +6948,17 @@ struct CplexLpExportRow {
 
 fn original_linear_export_rows(
     program: &MathProgram,
+    include_quadratic_constraints: bool,
 ) -> Result<Vec<CplexLpExportRow>, MathProgramError> {
     let n = program.variables.len();
-    let mut rows = Vec::with_capacity(program.constraints.len() + program.lazy_constraints.len());
+    let quadratic_count = if include_quadratic_constraints {
+        program.quadratic_constraints.len()
+    } else {
+        0
+    };
+    let mut rows = Vec::with_capacity(
+        program.constraints.len() + quadratic_count + program.lazy_constraints.len(),
+    );
     for (idx, row) in program.constraints.iter().enumerate() {
         rows.push(CplexLpExportRow {
             name: row.name.clone(),
@@ -6519,6 +6970,20 @@ fn original_linear_export_rows(
             source_name: row.name.clone(),
             multiplier: 1.0,
         });
+    }
+    if include_quadratic_constraints {
+        for (idx, row) in program.quadratic_constraints.iter().enumerate() {
+            rows.push(CplexLpExportRow {
+                name: row.name.clone(),
+                coeffs: dense_row(n, &row.linear_terms),
+                sense: row.sense,
+                rhs: row.rhs,
+                source_kind: MathProgramExportRowKind::QuadraticConstraint,
+                source_index: Some(idx),
+                source_name: row.name.clone(),
+                multiplier: 1.0,
+            });
+        }
     }
     for (idx, row) in program.lazy_constraints.iter().enumerate() {
         rows.push(CplexLpExportRow {
@@ -6596,6 +7061,7 @@ fn compiled_mip_export_rows(
 fn render_cplex_lp(
     sense: LpSense,
     objective: &[f64],
+    quadratic_objective: &[QuadraticObjectiveTerm],
     variable_names: &[String],
     rows: &[CplexLpExportRow],
     constraint_names: &[String],
@@ -6651,7 +7117,11 @@ fn render_cplex_lp(
         LpSense::Min => "Minimize\n",
     });
     out.push_str(" obj: ");
-    out.push_str(&cplex_lp_expr(objective, variable_names)?);
+    out.push_str(&cplex_lp_objective_expr(
+        objective,
+        quadratic_objective,
+        variable_names,
+    )?);
     out.push('\n');
     out.push_str("Subject To\n");
     if rows.is_empty() {
@@ -6757,6 +7227,8 @@ fn render_cplex_lp(
 fn render_mps(
     sense: LpSense,
     objective: &[f64],
+    quadratic_objective: &[QuadraticObjectiveTerm],
+    quadratic_constraints: &[MpsQuadraticConstraintExport],
     variable_names: &[String],
     rows: &[CplexLpExportRow],
     constraint_names: &[String],
@@ -6884,6 +7356,8 @@ fn render_mps(
         let hi = upper.and_then(|values| values[idx]);
         append_mps_bound_rows(&mut out, name, lo, hi)?;
     }
+    append_mps_quadratic_objective(&mut out, quadratic_objective, variable_names)?;
+    append_mps_quadratic_constraints(&mut out, quadratic_constraints, variable_names)?;
     out.push_str("ENDATA\n");
     Ok(out)
 }
@@ -7053,6 +7527,182 @@ fn append_mps_bound_row(
     Ok(())
 }
 
+fn append_mps_quadratic_objective(
+    out: &mut String,
+    terms: &[QuadraticObjectiveTerm],
+    variable_names: &[String],
+) -> Result<(), MathProgramError> {
+    let entries = mps_quadratic_objective_entries(terms, variable_names.len())?;
+    if entries.is_empty() {
+        return Ok(());
+    }
+    out.push_str("QUADOBJ\n");
+    for ((left, right), coefficient) in entries {
+        out.push_str("    ");
+        out.push_str(&variable_names[left]);
+        out.push_str("  ");
+        out.push_str(&variable_names[right]);
+        out.push_str("  ");
+        out.push_str(&mps_number(coefficient)?);
+        out.push('\n');
+    }
+    Ok(())
+}
+
+fn mps_quadratic_objective_entries(
+    terms: &[QuadraticObjectiveTerm],
+    variable_count: usize,
+) -> Result<BTreeMap<(usize, usize), f64>, MathProgramError> {
+    let mut entries = BTreeMap::new();
+    for (term_idx, term) in terms.iter().enumerate() {
+        if term.var_i >= variable_count || term.var_j >= variable_count {
+            return Err(MathProgramError::BadIndex(format!(
+                "MPS export quadratic objective term {term_idx} references {} and {} with {variable_count} variables",
+                term.var_i, term.var_j
+            )));
+        }
+        if !term.coeff.is_finite() {
+            return Err(MathProgramError::NonFinite(format!(
+                "MPS export quadratic objective coefficient for term {term_idx}"
+            )));
+        }
+        let (left, right) = if term.var_i <= term.var_j {
+            (term.var_i, term.var_j)
+        } else {
+            (term.var_j, term.var_i)
+        };
+        let coefficient = if left == right {
+            2.0 * term.coeff
+        } else {
+            term.coeff
+        };
+        if !coefficient.is_finite() {
+            return Err(MathProgramError::NonFinite(format!(
+                "MPS export quadratic objective coefficient for term {term_idx}"
+            )));
+        }
+        if coefficient.abs() > 1e-12 {
+            *entries.entry((left, right)).or_insert(0.0) += coefficient;
+        }
+    }
+    entries.retain(|_, coefficient| coefficient.abs() > 1e-12);
+    Ok(entries)
+}
+
+fn mps_quadratic_constraint_exports(
+    program: &MathProgram,
+    rows: &[CplexLpExportRow],
+    constraint_names: &[String],
+) -> Result<Vec<MpsQuadraticConstraintExport>, MathProgramError> {
+    if rows.len() != constraint_names.len() {
+        return Err(MathProgramError::BadIndex(format!(
+            "MPS quadratic constraint export has {} rows but {} constraint names",
+            rows.len(),
+            constraint_names.len()
+        )));
+    }
+    let mut exports = Vec::new();
+    for (row, row_name) in rows.iter().zip(constraint_names) {
+        if row.source_kind != MathProgramExportRowKind::QuadraticConstraint {
+            continue;
+        }
+        let source_index = row.source_index.ok_or_else(|| {
+            MathProgramError::BadIndex(format!(
+                "quadratic export row `{}` is missing a source index",
+                row.name
+            ))
+        })?;
+        let quadratic = program
+            .quadratic_constraints
+            .get(source_index)
+            .ok_or_else(|| {
+                MathProgramError::BadIndex(format!(
+                    "quadratic export row `{}` references missing source {source_index}",
+                    row.name
+                ))
+            })?;
+        exports.push(MpsQuadraticConstraintExport {
+            row_name: row_name.clone(),
+            terms: quadratic.quadratic_terms.clone(),
+        });
+    }
+    Ok(exports)
+}
+
+fn append_mps_quadratic_constraints(
+    out: &mut String,
+    constraints: &[MpsQuadraticConstraintExport],
+    variable_names: &[String],
+) -> Result<(), MathProgramError> {
+    for constraint in constraints {
+        let entries = mps_quadratic_constraint_entries(&constraint.terms, variable_names.len())?;
+        if entries.is_empty() {
+            continue;
+        }
+        out.push_str("QCMATRIX   ");
+        out.push_str(&constraint.row_name);
+        out.push('\n');
+        for ((left, right), coefficient) in entries {
+            out.push_str("    ");
+            out.push_str(&variable_names[left]);
+            out.push_str("  ");
+            out.push_str(&variable_names[right]);
+            out.push_str("  ");
+            out.push_str(&mps_number(coefficient)?);
+            out.push('\n');
+        }
+    }
+    Ok(())
+}
+
+fn mps_quadratic_constraint_entries(
+    terms: &[QuadraticConstraintTerm],
+    variable_count: usize,
+) -> Result<BTreeMap<(usize, usize), f64>, MathProgramError> {
+    let mut unordered = BTreeMap::new();
+    for (term_idx, term) in terms.iter().enumerate() {
+        if term.var_i >= variable_count || term.var_j >= variable_count {
+            return Err(MathProgramError::BadIndex(format!(
+                "MPS export quadratic constraint term {term_idx} references {} and {} with {variable_count} variables",
+                term.var_i, term.var_j
+            )));
+        }
+        if !term.coeff.is_finite() {
+            return Err(MathProgramError::NonFinite(format!(
+                "MPS export quadratic constraint coefficient for term {term_idx}"
+            )));
+        }
+        let (left, right) = if term.var_i <= term.var_j {
+            (term.var_i, term.var_j)
+        } else {
+            (term.var_j, term.var_i)
+        };
+        if term.coeff.abs() > 1e-12 {
+            *unordered.entry((left, right)).or_insert(0.0) += term.coeff;
+        }
+    }
+
+    let mut entries = BTreeMap::new();
+    for ((left, right), coefficient) in unordered {
+        if coefficient.abs() <= 1e-12 {
+            continue;
+        }
+        if left == right {
+            entries.insert((left, right), coefficient);
+        } else {
+            let half = coefficient / 2.0;
+            if !half.is_finite() {
+                return Err(MathProgramError::NonFinite(
+                    "MPS export quadratic constraint coefficient".to_string(),
+                ));
+            }
+            entries.insert((left, right), half);
+            entries.insert((right, left), half);
+        }
+    }
+    Ok(entries)
+}
+
 fn mps_number(value: f64) -> Result<String, MathProgramError> {
     if !value.is_finite() {
         return Err(MathProgramError::NonFinite(format!(
@@ -7060,6 +7710,81 @@ fn mps_number(value: f64) -> Result<String, MathProgramError> {
         )));
     }
     Ok(format!("{value:.17e}"))
+}
+
+fn cplex_lp_objective_expr(
+    linear: &[f64],
+    quadratic: &[QuadraticObjectiveTerm],
+    names: &[String],
+) -> Result<String, MathProgramError> {
+    let linear_expr = cplex_lp_expr(linear, names)?;
+    if quadratic.is_empty() {
+        return Ok(linear_expr);
+    }
+
+    let quadratic_expr = cplex_lp_quadratic_expr(quadratic, names)?;
+    if quadratic_expr.is_empty() {
+        return Ok(linear_expr);
+    }
+    if linear.iter().any(|coef| coef.abs() > 1e-12) {
+        Ok(format!("{linear_expr} + [ {quadratic_expr} ] / 2"))
+    } else {
+        Ok(format!("[ {quadratic_expr} ] / 2"))
+    }
+}
+
+fn cplex_lp_quadratic_expr(
+    terms: &[QuadraticObjectiveTerm],
+    names: &[String],
+) -> Result<String, MathProgramError> {
+    let mut parts = Vec::new();
+    for (term_idx, term) in terms.iter().enumerate() {
+        if term.var_i >= names.len() || term.var_j >= names.len() {
+            return Err(MathProgramError::BadIndex(format!(
+                "LP export quadratic objective term {term_idx} references {} and {} with {} variables",
+                term.var_i,
+                term.var_j,
+                names.len()
+            )));
+        }
+        let doubled = 2.0 * term.coeff;
+        if !doubled.is_finite() {
+            return Err(MathProgramError::NonFinite(format!(
+                "LP export quadratic objective coefficient for term {term_idx}"
+            )));
+        }
+        if doubled.abs() <= 1e-12 {
+            continue;
+        }
+
+        let body =
+            cplex_lp_quadratic_term_body(doubled.abs(), &names[term.var_i], &names[term.var_j])?;
+        if parts.is_empty() {
+            parts.push(if doubled < 0.0 {
+                format!("- {body}")
+            } else {
+                body
+            });
+        } else if doubled < 0.0 {
+            parts.push(format!("- {body}"));
+        } else {
+            parts.push(format!("+ {body}"));
+        }
+    }
+    Ok(parts.join(" "))
+}
+
+fn cplex_lp_quadratic_term_body(
+    coefficient: f64,
+    left_name: &str,
+    right_name: &str,
+) -> Result<String, MathProgramError> {
+    let product = format!("{left_name} * {right_name}");
+    if (coefficient - 1.0).abs() <= 1e-12 {
+        Ok(product)
+    } else {
+        Ok(format!("{} {product}", cplex_lp_number(coefficient)?))
+    }
 }
 
 fn cplex_lp_expr(coeffs: &[f64], names: &[String]) -> Result<String, MathProgramError> {
@@ -7261,6 +7986,67 @@ fn validate_conflict_refinement_scope(program: &MathProgram) -> Result<(), MathP
         ));
     }
     Ok(())
+}
+
+fn validate_math_program_assumptions(
+    program: &MathProgram,
+    assumptions: &[BoolLiteral],
+) -> Result<(), MathProgramError> {
+    if assumptions.is_empty() {
+        return Err(MathProgramError::Unsupported(
+            "assumption core refinement requires at least one Boolean assumption".to_string(),
+        ));
+    }
+    program.validate_boolean_clause_args(assumptions)
+}
+
+fn build_assumption_subsystem(
+    program: &MathProgram,
+    assumptions: &[BoolLiteral],
+    active: &[bool],
+) -> Result<MathProgram, MathProgramError> {
+    if active.len() != assumptions.len() {
+        return Err(MathProgramError::BadIndex(format!(
+            "assumption active mask length {} does not match {} assumptions",
+            active.len(),
+            assumptions.len()
+        )));
+    }
+
+    let mut subsystem = program.clone();
+    subsystem.sense = ObjectiveSense::Min;
+    subsystem.objective_offset = 0.0;
+    subsystem.quadratic_objective.clear();
+    subsystem.secondary_objectives.clear();
+    for var in &mut subsystem.variables {
+        var.obj = 0.0;
+    }
+
+    for (idx, (&literal, &is_active)) in assumptions.iter().zip(active).enumerate() {
+        if !is_active {
+            continue;
+        }
+        let value = if literal.value { 1.0 } else { 0.0 };
+        let suffix = if literal.value { "true" } else { "false" };
+        subsystem.add_constraint(
+            format!(
+                "__assumption_{idx}_{}_is_{suffix}",
+                program.variables[literal.var].name
+            ),
+            vec![(literal.var, 1.0)],
+            RowSense::Eq,
+            value,
+        )?;
+    }
+    Ok(subsystem)
+}
+
+fn active_assumptions(assumptions: &[BoolLiteral], active: &[bool]) -> Vec<BoolLiteral> {
+    assumptions
+        .iter()
+        .zip(active)
+        .filter_map(|(&assumption, &is_active)| is_active.then_some(assumption))
+        .collect()
 }
 
 fn conflict_candidates(program: &MathProgram) -> Vec<ConflictCandidate> {
@@ -16277,6 +17063,52 @@ fn is_integer_value(value: f64) -> bool {
     value.is_finite() && (value - value.round()).abs() <= 1e-9
 }
 
+fn finite_integer_linear_bound(
+    kind: &str,
+    bound_name: &str,
+    value: f64,
+) -> Result<i64, MathProgramError> {
+    if !value.is_finite() || value < i64::MIN as f64 || value > i64::MAX as f64 {
+        return Err(MathProgramError::InvalidBound(format!(
+            "{kind} computed non-finite or out-of-range {bound_name} expression bound {value}"
+        )));
+    }
+    let rounded = value.round();
+    if (value - rounded).abs() > 1e-6 {
+        return Err(MathProgramError::InvalidBound(format!(
+            "{kind} computed non-integer {bound_name} expression bound {value}"
+        )));
+    }
+    Ok(rounded as i64)
+}
+
+fn normalized_forbidden_intervals(
+    intervals: &[LinearDomainInterval],
+    domain_lower: i64,
+    domain_upper: i64,
+) -> Vec<LinearDomainInterval> {
+    let mut clipped = intervals
+        .iter()
+        .filter_map(|interval| {
+            let lower = interval.lower.max(domain_lower);
+            let upper = interval.upper.min(domain_upper);
+            (lower <= upper).then_some(LinearDomainInterval { lower, upper })
+        })
+        .collect::<Vec<_>>();
+    clipped.sort_by_key(|interval| (interval.lower, interval.upper));
+
+    let mut merged: Vec<LinearDomainInterval> = Vec::new();
+    for interval in clipped {
+        match merged.last_mut() {
+            Some(last) if interval.lower <= last.upper.saturating_add(1) => {
+                last.upper = last.upper.max(interval.upper);
+            }
+            _ => merged.push(interval),
+        }
+    }
+    merged
+}
+
 fn linear_bounds(program: &MathProgram, coeffs: &[(usize, f64)]) -> Option<(f64, f64)> {
     let mut lo = 0.0;
     let mut hi = 0.0;
@@ -16813,6 +17645,129 @@ mod tests {
     }
 
     #[test]
+    fn cplex_lp_export_preserves_continuous_quadratic_objective() {
+        let mut p = MathProgram::new(ObjectiveSense::Min);
+        let x = p
+            .add_continuous_var("qp x", -4.0, Some(0.0), Some(5.0))
+            .unwrap();
+        let y = p
+            .add_continuous_var("qp y", 1.0, Some(-2.0), Some(3.0))
+            .unwrap();
+        p.add_quadratic_objective_term(x, x, 1.0).unwrap();
+        p.add_quadratic_objective_term(x, y, -3.0).unwrap();
+        p.add_constraint("qp-balance", vec![(x, 1.0), (y, -1.0)], RowSense::Le, 4.0)
+            .unwrap();
+
+        let export = export_math_program_cplex_lp(&p).unwrap();
+        assert!(!export.is_mip);
+        assert_eq!(export.original_variable_count, 2);
+        assert_eq!(export.variable_names, vec!["qp_x", "qp_y"]);
+        assert_eq!(export.original_variable_expansions.len(), 2);
+        assert_eq!(export.row_mappings.len(), 1);
+        assert_eq!(export.row_mappings[0].source_name, "qp-balance");
+        assert!(export.text.contains("Minimize\n"));
+        assert!(export.text.contains(
+            "obj: - 4.00000000000000000e0 qp_x + qp_y + [ 2.00000000000000000e0 qp_x * qp_x - 6.00000000000000000e0 qp_x * qp_y ] / 2"
+        ));
+        assert!(export.text.contains("qp_balance: qp_x - qp_y <= 4."));
+        assert!(export.text.contains("-2.00000000000000000e0 <= qp_y <= 3."));
+        assert!(export.text.ends_with("End\n"));
+
+        let mps_export = export_math_program_mps(&p).unwrap();
+        assert!(!mps_export.is_mip);
+        assert_eq!(mps_export.original_variable_count, 2);
+        assert_eq!(mps_export.variable_names, vec!["qp_x", "qp_y"]);
+        assert_eq!(mps_export.original_variable_expansions.len(), 2);
+        assert_eq!(mps_export.row_mappings.len(), 1);
+        assert!(mps_export.text.contains("OBJSENSE\n MIN\n"));
+        assert!(mps_export.text.contains("QUADOBJ\n"));
+        assert!(mps_export
+            .text
+            .contains("qp_x  qp_x  2.00000000000000000e0"));
+        assert!(mps_export
+            .text
+            .contains("qp_x  qp_y  -3.00000000000000000e0"));
+        assert!(mps_export.text.ends_with("ENDATA\n"));
+    }
+
+    #[test]
+    fn mps_export_preserves_continuous_quadratic_constraints() {
+        let mut p = MathProgram::new(ObjectiveSense::Min);
+        let x = p
+            .add_continuous_var("qcp x", 0.0, Some(0.0), Some(5.0))
+            .unwrap();
+        let y = p
+            .add_continuous_var("qcp y", 1.0, Some(0.0), Some(20.0))
+            .unwrap();
+        p.add_constraint("fix-qcp-x", vec![(x, 1.0)], RowSense::Eq, 3.0)
+            .unwrap();
+        p.add_quadratic_constraint(
+            "qcp-epigraph-square",
+            vec![(x, x, 1.0)],
+            vec![(y, -1.0)],
+            RowSense::Le,
+            0.0,
+        )
+        .unwrap();
+
+        let export = export_math_program_mps(&p).unwrap();
+        assert!(!export.is_mip);
+        assert_eq!(export.original_variable_count, 2);
+        assert_eq!(export.variable_names, vec!["qcp_x", "qcp_y"]);
+        assert_eq!(export.original_variable_expansions.len(), 2);
+        assert_eq!(export.row_mappings.len(), 2);
+        assert_eq!(export.row_mappings[0].exported_name, "fix_qcp_x");
+        assert_eq!(
+            export.row_mappings[0].source_kind,
+            MathProgramExportRowKind::LinearConstraint
+        );
+        assert_eq!(export.row_mappings[1].exported_name, "qcp_epigraph_square");
+        assert_eq!(
+            export.row_mappings[1].source_kind,
+            MathProgramExportRowKind::QuadraticConstraint
+        );
+        assert_eq!(export.row_mappings[1].source_index, Some(0));
+        assert_eq!(export.row_mappings[1].source_name, "qcp-epigraph-square");
+        assert!(export.text.contains("OBJSENSE\n MIN\n"));
+        assert!(export
+            .text
+            .contains("ROWS\n N  OBJ\n E  fix_qcp_x\n L  qcp_epigraph_square\n"));
+        assert!(export
+            .text
+            .contains("qcp_epigraph_square  -1.00000000000000000e0"));
+        assert!(export.text.contains("QCMATRIX   qcp_epigraph_square\n"));
+        assert!(export.text.contains("qcp_x  qcp_x  1.00000000000000000e0"));
+        assert!(export.text.contains("BOUNDS\n"));
+        assert!(export.text.ends_with("ENDATA\n"));
+    }
+
+    #[test]
+    fn mps_quadratic_constraint_entries_split_off_diagonal_terms() {
+        let terms = vec![
+            QuadraticConstraintTerm {
+                var_i: 0,
+                var_j: 1,
+                coeff: 3.0,
+            },
+            QuadraticConstraintTerm {
+                var_i: 1,
+                var_j: 0,
+                coeff: 1.0,
+            },
+            QuadraticConstraintTerm {
+                var_i: 1,
+                var_j: 1,
+                coeff: 2.0,
+            },
+        ];
+
+        let entries = mps_quadratic_constraint_entries(&terms, 2).unwrap();
+        assert_eq!(entries.get(&(0, 1)).copied(), Some(2.0));
+        assert_eq!(entries.get(&(1, 0)).copied(), Some(2.0));
+        assert_eq!(entries.get(&(1, 1)).copied(), Some(2.0));
+    }
+
+    #[test]
     fn cplex_lp_export_emits_compiled_mip_with_generated_columns() {
         let mut p = MathProgram::new(ObjectiveSense::Max);
         let open = p.add_binary_var("open-a", 4.0).unwrap();
@@ -17003,7 +17958,7 @@ mod tests {
         p.add_constraint("fix-shifted", vec![(shifted, 1.0)], RowSense::Eq, 5.0)
             .unwrap();
 
-        let parts = math_program_linear_text_export_parts(&p, "test export").unwrap();
+        let parts = math_program_linear_text_export_parts(&p, "test export", false, false).unwrap();
         let offset_idx = parts
             .variable_names
             .iter()
@@ -17087,6 +18042,50 @@ mod tests {
             item,
             MathProgramConflictItem::LinearConstraint { name, .. } if name == "redundant-floor"
         )));
+    }
+
+    #[test]
+    fn assumption_core_drops_redundant_binary_literals() {
+        let mut p = MathProgram::new(ObjectiveSense::Min);
+        let a = p.add_binary_var("assume-a", 0.0).unwrap();
+        let b = p.add_binary_var("assume-b", 0.0).unwrap();
+        let noise = p.add_binary_var("irrelevant", 0.0).unwrap();
+        p.add_constraint(
+            "assumptions-at-most-one",
+            vec![(a, 1.0), (b, 1.0)],
+            RowSense::Le,
+            1.0,
+        )
+        .unwrap();
+
+        let assumptions = vec![
+            MathProgram::bool_lit(a),
+            MathProgram::bool_lit(b),
+            MathProgram::not_lit(noise),
+        ];
+        let core = find_math_program_assumption_unsat_core(
+            &p,
+            &assumptions,
+            &MathProgramSolveOptions::default(),
+            &MathProgramAssumptionCoreOptions::default(),
+        )
+        .unwrap();
+
+        assert_eq!(core.status, MathProgramStatus::Infeasible);
+        assert!(core.minimal);
+        assert_eq!(
+            core.assumptions,
+            vec![MathProgram::bool_lit(a), MathProgram::bool_lit(b)]
+        );
+        assert_eq!(
+            core.subsystem
+                .constraints
+                .iter()
+                .filter(|row| row.name.starts_with("__assumption_"))
+                .count(),
+            2
+        );
+        assert!(!core.assumptions.contains(&MathProgram::not_lit(noise)));
     }
 
     #[test]
@@ -17519,6 +18518,62 @@ mod tests {
     }
 
     #[test]
+    fn reified_linear_domain_links_literal_to_interval_membership() {
+        let mut p = MathProgram::new(ObjectiveSense::Max);
+        let x = p.add_integer_var("x", 1.0, Some(0.0), Some(5.0)).unwrap();
+        let in_domain = p.add_binary_var("in-domain", 10.0).unwrap();
+        let forced_x = p
+            .add_integer_var("forced-x", 0.0, Some(0.0), Some(5.0))
+            .unwrap();
+        let forced_in_domain = p.add_binary_var("forced-in-domain", 7.0).unwrap();
+        let outside_x = p
+            .add_integer_var("outside-x", 1.0, Some(0.0), Some(5.0))
+            .unwrap();
+        let outside_domain = p.add_binary_var("outside-domain", 10.0).unwrap();
+
+        p.add_reified_linear_domain(
+            "x-in-domain",
+            MathProgram::bool_lit(in_domain),
+            vec![(x, 1.0)],
+            vec![(1, 2), (4, 4)],
+        )
+        .unwrap();
+        p.add_constraint(
+            "force-outside-domain",
+            vec![(forced_x, 1.0)],
+            RowSense::Eq,
+            5.0,
+        )
+        .unwrap();
+        p.add_reified_linear_domain(
+            "forced-x-in-domain",
+            MathProgram::bool_lit(forced_in_domain),
+            vec![(forced_x, 1.0)],
+            vec![(1, 2), (4, 4)],
+        )
+        .unwrap();
+        p.add_constraint("outside-x-cap", vec![(outside_x, 1.0)], RowSense::Le, 4.0)
+            .unwrap();
+        p.add_reified_linear_not_in_domain(
+            "outside-x-not-in-domain",
+            MathProgram::bool_lit(outside_domain),
+            vec![(outside_x, 1.0)],
+            vec![(1, 3)],
+        )
+        .unwrap();
+
+        let sol = solve_math_program(&p, &MathProgramSolveOptions::default()).unwrap();
+        assert_eq!(sol.status, MathProgramStatus::Optimal);
+        assert_close(sol.x[x], 4.0);
+        assert_close(sol.x[in_domain], 1.0);
+        assert_close(sol.x[forced_x], 5.0);
+        assert_close(sol.x[forced_in_domain], 0.0);
+        assert_close(sol.x[outside_x], 4.0);
+        assert_close(sol.x[outside_domain], 1.0);
+        assert_close(sol.objective, 28.0);
+    }
+
+    #[test]
     fn semi_continuous_variable_is_zero_or_inside_interval() {
         let mut p = MathProgram::new(ObjectiveSense::Min);
         let x = p.add_semi_continuous_var("x", 1.0, 5.0, 10.0).unwrap();
@@ -17695,6 +18750,37 @@ mod tests {
         assert_close(sol.x[signed_or], 0.0);
         assert_close(sol.x[signed_xor], 1.0);
         assert_close(sol.objective, 7.0);
+    }
+
+    #[test]
+    fn signed_literal_implication_and_equivalence_lower_to_clauses() {
+        let mut p = MathProgram::new(ObjectiveSense::Max);
+        let a = p.add_binary_var("a", 0.0).unwrap();
+        let b = p.add_binary_var("b", 0.0).unwrap();
+        let blocked = p.add_binary_var("blocked", 9.0).unwrap();
+        let equivalent = p.add_binary_var("equivalent", 0.0).unwrap();
+        p.add_constraint("force-a", vec![(a, 1.0)], RowSense::Eq, 1.0)
+            .unwrap();
+        p.add_constraint("force-b-off", vec![(b, 1.0)], RowSense::Eq, 0.0)
+            .unwrap();
+        p.add_literal_implication(
+            "not-b-implies-not-blocked",
+            MathProgram::not_lit(b),
+            MathProgram::not_lit(blocked),
+        )
+        .unwrap();
+        p.add_literal_equivalence(
+            "a-equivalent-equivalent",
+            MathProgram::bool_lit(a),
+            MathProgram::bool_lit(equivalent),
+        )
+        .unwrap();
+
+        let sol = solve_math_program(&p, &MathProgramSolveOptions::default()).unwrap();
+        assert_eq!(sol.status, MathProgramStatus::Optimal);
+        assert_close(sol.x[blocked], 0.0);
+        assert_close(sol.x[equivalent], 1.0);
+        assert_close(sol.objective, 0.0);
     }
 
     #[test]
@@ -18476,6 +19562,126 @@ mod tests {
         assert_close(sol.x[inactive_gate], 0.0);
         assert_close(sol.x[inactive_x], 5.0);
         assert_close(sol.objective, 45.0);
+    }
+
+    #[test]
+    fn linear_not_equal_helpers_exclude_forbidden_integer_values() {
+        let mut p = MathProgram::new(ObjectiveSense::Max);
+        let x = p.add_integer_var("x", 1.0, Some(0.0), Some(4.0)).unwrap();
+        let active_gate = p.add_binary_var("active-gate", 0.0).unwrap();
+        let active_y = p
+            .add_integer_var("active-y", 1.0, Some(0.0), Some(4.0))
+            .unwrap();
+        let inactive_gate = p.add_binary_var("inactive-gate", 0.0).unwrap();
+        let inactive_z = p
+            .add_integer_var("inactive-z", 1.0, Some(0.0), Some(4.0))
+            .unwrap();
+
+        p.add_constraint("cap-x", vec![(x, 1.0)], RowSense::Le, 3.0)
+            .unwrap();
+        p.add_linear_not_equal("x-not-three", vec![(x, 1.0)], 3)
+            .unwrap();
+        p.add_constraint(
+            "force-active-gate",
+            vec![(active_gate, 1.0)],
+            RowSense::Eq,
+            1.0,
+        )
+        .unwrap();
+        p.add_constraint("cap-active-y", vec![(active_y, 1.0)], RowSense::Le, 2.0)
+            .unwrap();
+        p.add_enforced_linear_not_equal(
+            "active-y-not-two",
+            vec![MathProgram::bool_lit(active_gate)],
+            vec![(active_y, 1.0)],
+            2,
+        )
+        .unwrap();
+        p.add_constraint(
+            "force-inactive-gate",
+            vec![(inactive_gate, 1.0)],
+            RowSense::Eq,
+            0.0,
+        )
+        .unwrap();
+        p.add_constraint("cap-inactive-z", vec![(inactive_z, 1.0)], RowSense::Le, 2.0)
+            .unwrap();
+        p.add_enforced_linear_not_equal(
+            "inactive-z-not-two",
+            vec![MathProgram::bool_lit(inactive_gate)],
+            vec![(inactive_z, 1.0)],
+            2,
+        )
+        .unwrap();
+
+        let sol = solve_math_program(&p, &MathProgramSolveOptions::default()).unwrap();
+        assert_eq!(sol.status, MathProgramStatus::Optimal);
+        assert_close(sol.x[x], 2.0);
+        assert_close(sol.x[active_gate], 1.0);
+        assert_close(sol.x[active_y], 1.0);
+        assert_close(sol.x[inactive_gate], 0.0);
+        assert_close(sol.x[inactive_z], 2.0);
+        assert_close(sol.objective, 5.0);
+    }
+
+    #[test]
+    fn linear_not_in_domain_helpers_exclude_forbidden_interval_unions() {
+        let mut p = MathProgram::new(ObjectiveSense::Max);
+        let x = p.add_integer_var("x", 1.0, Some(0.0), Some(6.0)).unwrap();
+        let active_gate = p.add_binary_var("active-gate", 0.0).unwrap();
+        let active_y = p
+            .add_integer_var("active-y", 1.0, Some(0.0), Some(6.0))
+            .unwrap();
+        let inactive_gate = p.add_binary_var("inactive-gate", 0.0).unwrap();
+        let inactive_z = p
+            .add_integer_var("inactive-z", 1.0, Some(0.0), Some(6.0))
+            .unwrap();
+
+        p.add_constraint("cap-x", vec![(x, 1.0)], RowSense::Le, 5.0)
+            .unwrap();
+        p.add_linear_not_in_domain("x-not-in-domain", vec![(x, 1.0)], vec![(2, 3), (5, 5)])
+            .unwrap();
+        p.add_constraint(
+            "force-active-gate",
+            vec![(active_gate, 1.0)],
+            RowSense::Eq,
+            1.0,
+        )
+        .unwrap();
+        p.add_constraint("cap-active-y", vec![(active_y, 1.0)], RowSense::Le, 5.0)
+            .unwrap();
+        p.add_enforced_linear_not_in_domain(
+            "active-y-not-in-domain",
+            vec![MathProgram::bool_lit(active_gate)],
+            vec![(active_y, 1.0)],
+            vec![(1, 2), (4, 5)],
+        )
+        .unwrap();
+        p.add_constraint(
+            "force-inactive-gate",
+            vec![(inactive_gate, 1.0)],
+            RowSense::Eq,
+            0.0,
+        )
+        .unwrap();
+        p.add_constraint("cap-inactive-z", vec![(inactive_z, 1.0)], RowSense::Le, 5.0)
+            .unwrap();
+        p.add_enforced_linear_not_in_domain(
+            "inactive-z-not-in-domain",
+            vec![MathProgram::bool_lit(inactive_gate)],
+            vec![(inactive_z, 1.0)],
+            vec![(1, 2), (4, 5)],
+        )
+        .unwrap();
+
+        let sol = solve_math_program(&p, &MathProgramSolveOptions::default()).unwrap();
+        assert_eq!(sol.status, MathProgramStatus::Optimal);
+        assert_close(sol.x[x], 4.0);
+        assert_close(sol.x[active_gate], 1.0);
+        assert_close(sol.x[active_y], 3.0);
+        assert_close(sol.x[inactive_gate], 0.0);
+        assert_close(sol.x[inactive_z], 5.0);
+        assert_close(sol.objective, 12.0);
     }
 
     #[test]
@@ -19369,6 +20575,45 @@ mod tests {
         assert!(conflict.within_tolerance);
         assert!(conflict.internal.minimal);
         assert_eq!(conflict.internal.items.len(), 2);
+
+        let mut assumption_model = MathProgram::new(ObjectiveSense::Min);
+        let assume_a = assumption_model.add_binary_var("assume-a", 0.0).unwrap();
+        let assume_b = assumption_model.add_binary_var("assume-b", 0.0).unwrap();
+        let assume_noise = assumption_model
+            .add_binary_var("assume-noise", 0.0)
+            .unwrap();
+        assumption_model
+            .add_constraint(
+                "assumption-at-most-one",
+                vec![(assume_a, 1.0), (assume_b, 1.0)],
+                RowSense::Le,
+                1.0,
+            )
+            .unwrap();
+        let assumption_core = cross_check_math_program_assumption_core_with_external(
+            &assumption_model,
+            &[
+                MathProgram::bool_lit(assume_a),
+                MathProgram::bool_lit(assume_b),
+                MathProgram::not_lit(assume_noise),
+            ],
+            &MathProgramSolveOptions::default(),
+            &highs_cli,
+            &MathProgramAssumptionCoreOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            assumption_core.external.status,
+            MathProgramStatus::Infeasible
+        );
+        assert!(assumption_core.within_tolerance);
+        assert_eq!(
+            assumption_core.internal.assumptions,
+            vec![
+                MathProgram::bool_lit(assume_a),
+                MathProgram::bool_lit(assume_b)
+            ]
+        );
 
         let mut relax_model = MathProgram::new(ObjectiveSense::Min);
         let relax_x = relax_model

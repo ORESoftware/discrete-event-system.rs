@@ -45,6 +45,11 @@ use crate::des::general::external_bin_packing_reference::{
     solve_bin_packing_with_external_reference, ExternalBinPackingReferenceBin,
     ExternalBinPackingReferenceOptions, ExternalBinPackingReferenceStatus,
 };
+use crate::des::general::external_cp_sat_reference::{
+    external_cp_sat_reference_solver_specs, solve_cp_assignment_with_external_reference,
+    solve_cp_sat_json_with_external_reference, ExternalCpSatReferenceFamily,
+    ExternalCpSatReferenceOptions, ExternalCpSatReferenceSolver, ExternalCpSatReferenceStatus,
+};
 use crate::des::general::external_facility_location_reference::{
     solve_facility_location_with_external_reference, ExternalFacilityLocationReferenceOptions,
     ExternalFacilityLocationReferenceStatus,
@@ -58,9 +63,10 @@ use crate::des::general::external_knapsack_reference::{
     ExternalKnapsackReferenceStatus,
 };
 use crate::des::general::external_linear_cli::{
-    external_linear_cli_command, probe_external_linear_cli_solver, solve_ipmip_with_external_cli,
-    solve_lp_with_external_cli, solve_multi_objective_ipmip_with_external_cli,
-    ExternalLinearCliBranchRule, ExternalLinearCliKind, ExternalLinearCliLpAlgorithm,
+    external_linear_cli_command, external_linear_cli_solver_specs,
+    probe_external_linear_cli_solver, solve_ipmip_with_external_cli, solve_lp_with_external_cli,
+    solve_multi_objective_ipmip_with_external_cli, ExternalLinearCliBranchRule,
+    ExternalLinearCliKind, ExternalLinearCliLicenseClass, ExternalLinearCliLpAlgorithm,
     ExternalLinearCliMipSwitch, ExternalLinearCliModelFormat, ExternalLinearCliNodeSelection,
     ExternalLinearCliOptions, ExternalLinearCliPresolve, ExternalLinearCliProbeStatus,
     ExternalLinearCliSolver, ExternalLinearCliStatus,
@@ -83,18 +89,27 @@ use crate::des::general::external_nonlinear_reference::{
     ExternalNonlinearBenchmarkObjective, ExternalNonlinearReferenceOptions,
     ExternalNonlinearReferenceStatus,
 };
+use crate::des::general::external_nonlinear_validation_reference::{
+    external_nonlinear_validation_reference_solver_specs,
+    solve_nonlinear_validation_json_with_external_reference,
+    ExternalNonlinearValidationReferenceFamily, ExternalNonlinearValidationReferenceOptions,
+    ExternalNonlinearValidationReferenceSolver, ExternalNonlinearValidationReferenceStatus,
+};
 use crate::des::general::external_optimization_ecosystem as legacy_external_optimization_ecosystem;
 use crate::des::general::external_optimization_tools::{
-    external_optimization_comparison_report_to_json, external_optimization_tool_specs,
+    external_optimization_comparison_report_to_json,
+    external_optimization_ecosystem_reference_invocation, external_optimization_tool_specs,
     external_optimization_tools, probe_external_optimization_tool,
     run_external_optimization_comparison, ExternalOptimizationAdapterInvocation,
     ExternalOptimizationAdapterOptions, ExternalOptimizationExactness, ExternalOptimizationFamily,
     ExternalOptimizationLanguage, ExternalOptimizationProbeStatus, ExternalOptimizationTool,
 };
 use crate::des::general::external_quadratic_reference::{
-    solve_miqp_with_external_reference, solve_qcp_with_external_reference,
-    solve_qp_with_external_reference, solve_socp_with_external_reference,
-    ExternalQuadraticReferenceOptions, ExternalQuadraticReferenceStatus,
+    external_quadratic_reference_solver_specs, solve_miqp_with_external_reference,
+    solve_qcp_with_external_reference, solve_qp_with_external_reference,
+    solve_socp_with_external_reference, ExternalQuadraticReferenceFamily,
+    ExternalQuadraticReferenceOptions, ExternalQuadraticReferenceSolver,
+    ExternalQuadraticReferenceStatus,
 };
 use crate::des::general::external_routing_reference::{
     solve_cvrp_with_external_reference, ExternalRoutingReferenceOptions,
@@ -117,23 +132,26 @@ use crate::des::general::external_tsp_reference::{
 };
 use crate::des::general::external_validation_tools::{
     dimacs_cnf_to_string, external_benchmark_manifest_to_json,
-    external_validation_artifact_cli_args, external_validation_consensus_report_to_json,
-    external_validation_default_artifact_cli_args, external_validation_default_file_cli_args,
-    external_validation_default_text_cli_args, external_validation_tool_specs,
-    infer_external_validation_text_verdict, json_schema_validation_request_to_json,
-    minizinc_validation_request_to_json, prism_validation_model_to_string,
-    prism_validation_properties_to_string, probe_external_validation_tool,
-    run_external_validation_artifact_cli, run_external_validation_consensus,
-    run_external_validation_file_cli, run_external_validation_text_cli,
+    external_simulation_validation_tool_specs, external_validation_artifact_cli_args,
+    external_validation_consensus_report_to_json, external_validation_default_artifact_cli_args,
+    external_validation_default_file_cli_args, external_validation_default_text_cli_args,
+    external_validation_tool_specs, infer_external_validation_text_verdict,
+    json_schema_validation_request_to_json, minizinc_validation_request_to_json,
+    prism_validation_model_to_string, prism_validation_properties_to_string,
+    probe_external_validation_tool, run_external_validation_artifact_cli,
+    run_external_validation_consensus, run_external_validation_file_cli,
+    run_external_validation_text_cli, run_simulation_validation_with_external_reference,
     simulation_validation_request_to_json, smtlib_validation_script_to_string,
     tla_validation_module_to_string, DimacsCnf, ExternalBenchmarkManifest,
-    ExternalBenchmarkManifestEntry, ExternalValidationArtifact,
-    ExternalValidationArtifactCliOptions, ExternalValidationCliInvocation,
-    ExternalValidationFamily, ExternalValidationFileCliOptions, ExternalValidationProbeStatus,
-    ExternalValidationRunStatus, ExternalValidationTextCliOptions, ExternalValidationTextFormat,
-    ExternalValidationTextVerdict, JsonSchemaValidationRequest, MiniZincValidationRequest,
-    PrismModule, PrismValidationModel, SimulationMetricExpectation, SimulationValidationRequest,
-    SmtDeclaration, SmtLibValidationScript, SmtSort, TlaValidationModule,
+    ExternalBenchmarkManifestEntry, ExternalSimulationValidationReferenceOptions,
+    ExternalSimulationValidationStatus, ExternalSimulationValidationVerdict,
+    ExternalValidationArtifact, ExternalValidationArtifactCliOptions,
+    ExternalValidationCliInvocation, ExternalValidationFamily, ExternalValidationFileCliOptions,
+    ExternalValidationProbeStatus, ExternalValidationRunStatus, ExternalValidationTextCliOptions,
+    ExternalValidationTextFormat, ExternalValidationTextVerdict, JsonSchemaValidationRequest,
+    MiniZincValidationRequest, PrismModule, PrismValidationModel, SimulationMetricExpectation,
+    SimulationValidationRequest, SmtDeclaration, SmtLibValidationScript, SmtSort,
+    TlaValidationModule,
 };
 use crate::des::general::external_weighted_independent_set_reference::{
     solve_weighted_independent_set_with_external_reference,
@@ -2040,6 +2058,41 @@ impl Driver {
         );
         self.max_abs_close("LP OR-Tools GLOP x", &internal.x, &glop.x, 1e-8);
 
+        let pdlp = solve_lp_external(
+            &lp,
+            &ExternalSolverOptions {
+                method: Some("pdlp".to_string()),
+                ..Default::default()
+            },
+        );
+        if pdlp.solver == "ortools:pdlp" {
+            self.check(
+                "LP OR-Tools PDLP status optimal",
+                internal.status == LPStatus::Optimal && pdlp.status == LPStatus::Optimal,
+                format!(
+                    "internal={:?} external={:?} solver={}",
+                    internal.status, pdlp.status, pdlp.solver
+                ),
+            );
+            self.close(
+                "LP OR-Tools PDLP objective",
+                internal.objective,
+                pdlp.objective,
+                1e-7,
+            );
+            self.max_abs_close("LP OR-Tools PDLP x", &internal.x, &pdlp.x, 1e-6);
+        } else {
+            self.check(
+                "LP OR-Tools PDLP bridge fallback solves same input",
+                pdlp.status == LPStatus::Optimal
+                    && (pdlp.objective - internal.objective).abs() <= 1e-9,
+                format!(
+                    "solver={} status={:?} objective={} expected={}",
+                    pdlp.solver, pdlp.status, pdlp.objective, internal.objective
+                ),
+            );
+        }
+
         let range_lp = GeneralLinearLPProblem {
             base: LPProblem {
                 sense: Sense::Max,
@@ -2418,6 +2471,71 @@ impl Driver {
         let mip_solvers = ["highs", "glpk", "scip", "cbc"];
         let commercial_lp_solvers = ["gurobi", "cplex", "xpress", "lindo"];
         let commercial_mip_solvers = ["gurobi", "cplex", "xpress", "lindo"];
+        let cli_specs = external_linear_cli_solver_specs();
+        let open_source_spec_count = cli_specs
+            .iter()
+            .filter(|spec| spec.license_class == ExternalLinearCliLicenseClass::OpenSource)
+            .count();
+        let commercial_spec_count = cli_specs
+            .iter()
+            .filter(|spec| spec.license_class == ExternalLinearCliLicenseClass::Commercial)
+            .count();
+        self.check(
+            "External solver CLI manifest covers all local bridge solvers",
+            cli_specs.len() == ExternalLinearCliSolver::all().len()
+                && open_source_spec_count == 5
+                && commercial_spec_count == 4
+                && cli_specs.iter().all(|spec| {
+                    !spec.command_aliases.is_empty()
+                        && !spec.command_env_vars.is_empty()
+                        && !spec.command_dir_env_vars.is_empty()
+                }),
+            format!(
+                "specs={} open_source={} commercial={}",
+                cli_specs.len(),
+                open_source_spec_count,
+                commercial_spec_count
+            ),
+        );
+        self.check(
+            "External solver CLI manifest open-source LP/MIP coverage",
+            ExternalLinearCliSolver::open_source_lp()
+                .iter()
+                .all(|solver| {
+                    cli_specs.iter().any(|spec| {
+                        spec.solver == *solver
+                            && spec.license_class == ExternalLinearCliLicenseClass::OpenSource
+                            && spec.supports_lp
+                    })
+                })
+                && ExternalLinearCliSolver::open_source_mip()
+                    .iter()
+                    .all(|solver| {
+                        cli_specs.iter().any(|spec| {
+                            spec.solver == *solver
+                                && spec.license_class == ExternalLinearCliLicenseClass::OpenSource
+                                && spec.supports_mip
+                        })
+                    }),
+            format!("lp={:?} mip={:?}", lp_solvers, mip_solvers),
+        );
+        self.check(
+            "External solver CLI manifest optional commercial coverage",
+            ExternalLinearCliSolver::optional_commercial_mip()
+                .iter()
+                .all(|solver| {
+                    cli_specs.iter().any(|spec| {
+                        spec.solver == *solver
+                            && spec.license_class == ExternalLinearCliLicenseClass::Commercial
+                            && spec.supports_lp
+                            && spec.supports_mip
+                    })
+                }),
+            format!(
+                "lp={:?} mip={:?}",
+                commercial_lp_solvers, commercial_mip_solvers
+            ),
+        );
 
         for solver in ExternalLinearCliSolver::open_source_lp().iter().copied() {
             let probe = probe_external_linear_cli_solver(
@@ -6083,7 +6201,7 @@ impl Driver {
         let current_tools = external_optimization_tools();
         self.check(
             "External optimization ecosystem registry covers requested tools",
-            current_tools.len() == 80 && specs.len() == current_tools.len(),
+            current_tools.len() == 88 && specs.len() == current_tools.len(),
             format!("tools={} specs={}", current_tools.len(), specs.len()),
         );
         let legacy_tools = legacy_external_optimization_ecosystem::ExternalOptimizationTool::all();
@@ -6097,7 +6215,7 @@ impl Driver {
                             == legacy_external_optimization_ecosystem::ExternalOptimizationEcosystem::Python
                     })
                     .count()
-                    == 18
+                    == 20
                 && legacy_tools
                     .iter()
                     .any(|tool| tool.as_str() == "hexaly" && tool.ecosystem().as_str() == "native"),
@@ -6134,7 +6252,7 @@ impl Driver {
             .count();
         self.check(
             "External optimization ecosystem registry Python/Julia/native split",
-            python_count == 18 && julia_count == 1 && native_count == 41,
+            python_count == 20 && julia_count == 1 && native_count == 47,
             format!("python={python_count} julia={julia_count} native={native_count}"),
         );
         self.check(
@@ -6164,6 +6282,14 @@ impl Driver {
                     && spec.family == ExternalOptimizationFamily::PlanningMetaheuristic
                     && spec.exactness == ExternalOptimizationExactness::Heuristic
             }) && specs.iter().any(|spec| {
+                spec.tool == ExternalOptimizationTool::FastDownward
+                    && spec.family == ExternalOptimizationFamily::AiPlanning
+                    && spec.exactness == ExternalOptimizationExactness::Exact
+            }) && specs.iter().any(|spec| {
+                spec.tool == ExternalOptimizationTool::Enhsp
+                    && spec.family == ExternalOptimizationFamily::AiPlanning
+                    && spec.exactness == ExternalOptimizationExactness::Heuristic
+            }) && specs.iter().any(|spec| {
                 spec.tool == ExternalOptimizationTool::Pyomo
                     && spec.family == ExternalOptimizationFamily::LinearMip
                     && spec.exactness == ExternalOptimizationExactness::ModelingLayer
@@ -6171,6 +6297,22 @@ impl Driver {
                 spec.tool == ExternalOptimizationTool::HighsCli
                     && spec.family == ExternalOptimizationFamily::LinearMip
                     && spec.exactness == ExternalOptimizationExactness::Exact
+            }) && specs.iter().any(|spec| {
+                spec.tool == ExternalOptimizationTool::SoplexCli
+                    && spec.family == ExternalOptimizationFamily::LinearMip
+                    && spec.exactness == ExternalOptimizationExactness::Exact
+            }) && specs.iter().any(|spec| {
+                spec.tool == ExternalOptimizationTool::LpSolveCli
+                    && spec.family == ExternalOptimizationFamily::LinearMip
+                    && spec.exactness == ExternalOptimizationExactness::Exact
+            }) && specs.iter().any(|spec| {
+                spec.tool == ExternalOptimizationTool::OrToolsGlop
+                    && spec.family == ExternalOptimizationFamily::LinearMip
+                    && spec.exactness == ExternalOptimizationExactness::Numerical
+            }) && specs.iter().any(|spec| {
+                spec.tool == ExternalOptimizationTool::OrToolsPdlp
+                    && spec.family == ExternalOptimizationFamily::LinearMip
+                    && spec.exactness == ExternalOptimizationExactness::Numerical
             }) && specs.iter().any(|spec| {
                 spec.tool == ExternalOptimizationTool::Cvxpy
                     && spec.family == ExternalOptimizationFamily::ConvexOptimization
@@ -6208,7 +6350,104 @@ impl Driver {
                     && spec.family == ExternalOptimizationFamily::NonlinearOptimization
                     && spec.exactness == ExternalOptimizationExactness::ModelingLayer
             }),
-            "checked Choco, CPMpy, clingo, Open-WBO, OptaPlanner, Timefold, Pyomo, HiGHS CLI, CVXPY, PySCIPOpt, Hexaly, argmin, Ipopt, MOSEK, Z3, OptiMathSAT, and CasADi classifications".to_string(),
+            "checked Choco, CPMpy, clingo, Open-WBO, OptaPlanner, Timefold, PDDL planners, Pyomo, HiGHS/SoPlex/lp_solve CLI, OR-Tools GLOP/PDLP, CVXPY, PySCIPOpt, Hexaly, argmin, Ipopt, MOSEK, Z3, OptiMathSAT, and CasADi classifications".to_string(),
+        );
+        let cp_specs = external_cp_sat_reference_solver_specs();
+        let direct_cp_specs = cp_specs
+            .iter()
+            .filter(|spec| spec.supports_cp_sat_json)
+            .count();
+        let ecosystem_cp_specs = cp_specs
+            .iter()
+            .filter(|spec| spec.supports_ecosystem_cp_assignment)
+            .count();
+        self.check(
+            "External CP-SAT reference registry splits direct and ecosystem contracts",
+            cp_specs.len() == 18
+                && direct_cp_specs == 3
+                && ecosystem_cp_specs == 15
+                && cp_specs.iter().any(|spec| {
+                    spec.solver == ExternalCpSatReferenceSolver::OrToolsCpSat
+                        && spec.family == ExternalCpSatReferenceFamily::CpSatScript
+                        && spec.supports_cp_sat_json
+                })
+                && cp_specs.iter().any(|spec| {
+                    spec.solver == ExternalCpSatReferenceSolver::ChocoSolver
+                        && spec.family == ExternalCpSatReferenceFamily::EcosystemReference
+                        && spec.supports_ecosystem_cp_assignment
+                }),
+            format!(
+                "cp_specs={} direct={} ecosystem={}",
+                cp_specs.len(),
+                direct_cp_specs,
+                ecosystem_cp_specs
+            ),
+        );
+        let cp_sat_smoke = serde_json::json!({
+            "variables": [
+                {"name": "x", "domain": [0, 1]},
+                {"name": "y", "domain": [0, 1]}
+            ],
+            "constraints": [
+                {
+                    "kind": "linear",
+                    "terms": [
+                        {"var": 0, "coeff": 1},
+                        {"var": 1, "coeff": 1}
+                    ],
+                    "sense": "eq",
+                    "rhs": 1
+                }
+            ],
+            "objective": {
+                "sense": "min",
+                "terms": [
+                    {"var": 0, "coeff": 1},
+                    {"var": 1, "coeff": 2}
+                ]
+            }
+        });
+        let cp_sat_reference = solve_cp_sat_json_with_external_reference(
+            &cp_sat_smoke,
+            &ExternalCpSatReferenceOptions {
+                solver: ExternalCpSatReferenceSolver::PythonEnumeration,
+                ..Default::default()
+            },
+        );
+        self.check(
+            "External CP-SAT direct JSON bridge solves same-input smoke model",
+            cp_sat_reference.status == ExternalCpSatReferenceStatus::Optimal
+                && cp_sat_reference.assignment == vec![1, 0]
+                && cp_sat_reference.objective == Some(1.0),
+            format!(
+                "status={} assignment={:?} objective={:?} backend={}",
+                cp_sat_reference.status.as_str(),
+                cp_sat_reference.assignment,
+                cp_sat_reference.objective,
+                cp_sat_reference.backend
+            ),
+        );
+        let cp_assignment_smoke = serde_json::json!({
+            "kind": "ecosystem-cp-assignment",
+            "costs": [[9, 2, 7], [6, 4, 3], [5, 8, 1]],
+            "all_different": true
+        });
+        let cp_assignment_reference = solve_cp_assignment_with_external_reference(
+            &cp_assignment_smoke,
+            ExternalCpSatReferenceSolver::ChocoSolver,
+        );
+        self.check(
+            "External CP ecosystem bridge solves assignment smoke model",
+            cp_assignment_reference.status == ExternalCpSatReferenceStatus::Optimal
+                && cp_assignment_reference.assignment == vec![1, 0, 2]
+                && cp_assignment_reference.objective == Some(9.0),
+            format!(
+                "status={} assignment={:?} objective={:?} backend={}",
+                cp_assignment_reference.status.as_str(),
+                cp_assignment_reference.assignment,
+                cp_assignment_reference.objective,
+                cp_assignment_reference.backend
+            ),
         );
         let comparison_input = serde_json::json!({
             "status": "optimal",
@@ -6253,27 +6492,7 @@ impl Driver {
             ),
         );
 
-        let python = std::env::var("PYTHON_BIN").unwrap_or_else(|_| "python3".to_string());
-        let ecosystem_script = self
-            .root
-            .join("scripts")
-            .join("optimization_ecosystem_reference.py");
-        let ecosystem_working_dir = self.root.clone();
-        let ecosystem_invocation =
-            |label: &str, tool: ExternalOptimizationTool| ExternalOptimizationAdapterInvocation {
-                label: label.to_string(),
-                options: ExternalOptimizationAdapterOptions {
-                    tool,
-                    command_path: Some(PathBuf::from(&python)),
-                    working_dir: Some(ecosystem_working_dir.clone()),
-                    extra_args: vec![
-                        ecosystem_script.to_string_lossy().to_string(),
-                        "--tool".to_string(),
-                        tool.as_str().to_string(),
-                    ],
-                    ..Default::default()
-                },
-            };
+        let ecosystem_invocation = external_optimization_ecosystem_reference_invocation;
 
         let cp_payload = serde_json::json!({
             "kind": "ecosystem-cp-assignment",
@@ -6363,6 +6582,14 @@ impl Driver {
                 ecosystem_invocation("python-mip-reference", ExternalOptimizationTool::PythonMip),
                 ecosystem_invocation("gurobipy-reference", ExternalOptimizationTool::GurobiPy),
                 ecosystem_invocation("docplex-reference", ExternalOptimizationTool::Docplex),
+                ecosystem_invocation(
+                    "ortools-glop-reference",
+                    ExternalOptimizationTool::OrToolsGlop,
+                ),
+                ecosystem_invocation(
+                    "ortools-pdlp-reference",
+                    ExternalOptimizationTool::OrToolsPdlp,
+                ),
                 ecosystem_invocation("jump-reference", ExternalOptimizationTool::Jump),
                 ecosystem_invocation("ampl-reference", ExternalOptimizationTool::Ampl),
                 ecosystem_invocation("gams-reference", ExternalOptimizationTool::Gams),
@@ -6421,6 +6648,13 @@ impl Driver {
                     ExternalOptimizationTool::OptaPlanner,
                 ),
                 ecosystem_invocation("timefold-reference", ExternalOptimizationTool::Timefold),
+                ecosystem_invocation(
+                    "fast-downward-reference",
+                    ExternalOptimizationTool::FastDownward,
+                ),
+                ecosystem_invocation("lpg-td-reference", ExternalOptimizationTool::LpgTd),
+                ecosystem_invocation("optic-reference", ExternalOptimizationTool::Optic),
+                ecosystem_invocation("enhsp-reference", ExternalOptimizationTool::Enhsp),
                 ecosystem_invocation("hexaly-reference", ExternalOptimizationTool::Hexaly),
             ],
             1e-9,
@@ -6587,7 +6821,7 @@ impl Driver {
         let specs = external_validation_tool_specs();
         self.check(
             "External validation registry covers recommended tools",
-            specs.len() == 206,
+            specs.len() == 259,
             format!("tools={}", specs.len()),
         );
         for (family, expected_at_least) in [
@@ -6612,6 +6846,53 @@ impl Driver {
         self.check(
             "External validation registry representative coverage",
             specs.iter().any(|spec| spec.id == "minizinc")
+                && specs.iter().any(|spec| spec.id == "choco-solver")
+                && specs.iter().any(|spec| spec.id == "jacop")
+                && specs.iter().any(|spec| spec.id == "ibm-cp-optimizer")
+                && specs.iter().any(|spec| spec.id == "ortools-java")
+                && specs.iter().any(|spec| spec.id == "ojalgo")
+                && specs.iter().any(|spec| spec.id == "optaplanner")
+                && specs.iter().any(|spec| spec.id == "timefold")
+                && specs.iter().any(|spec| spec.id == "jmetal")
+                && specs.iter().any(|spec| spec.id == "moea-framework")
+                && specs.iter().any(|spec| spec.id == "ecj")
+                && specs.iter().any(|spec| spec.id == "good-lp")
+                && specs.iter().any(|spec| spec.id == "lp-modeler")
+                && specs.iter().any(|spec| spec.id == "rust-linprog")
+                && specs.iter().any(|spec| spec.id == "argmin")
+                && specs.iter().any(|spec| spec.id == "nlopt-rs")
+                && specs.iter().any(|spec| spec.id == "nlopt")
+                && specs.iter().any(|spec| spec.id == "highs-rust")
+                && specs.iter().any(|spec| spec.id == "scip-rust")
+                && specs.iter().any(|spec| spec.id == "cbc-rust")
+                && specs.iter().any(|spec| spec.id == "pyomo")
+                && specs.iter().any(|spec| spec.id == "pyscipopt")
+                && specs.iter().any(|spec| spec.id == "python-mip")
+                && specs.iter().any(|spec| spec.id == "gurobipy")
+                && specs.iter().any(|spec| spec.id == "docplex")
+                && specs.iter().any(|spec| spec.id == "ortools-python")
+                && specs.iter().any(|spec| spec.id == "ortools-cp-sat")
+                && specs.iter().any(|spec| spec.id == "ortools-glop")
+                && specs.iter().any(|spec| spec.id == "ortools-pdlp")
+                && specs.iter().any(|spec| spec.id == "scipy-optimize")
+                && specs.iter().any(|spec| spec.id == "highs-cli")
+                && specs.iter().any(|spec| spec.id == "glpk-cli")
+                && specs.iter().any(|spec| spec.id == "scip-cli")
+                && specs.iter().any(|spec| spec.id == "cbc-cli")
+                && specs.iter().any(|spec| spec.id == "clp-cli")
+                && specs.iter().any(|spec| spec.id == "soplex-cli")
+                && specs.iter().any(|spec| spec.id == "qsopt-ex-cli")
+                && specs.iter().any(|spec| spec.id == "lp-solve-cli")
+                && specs.iter().any(|spec| spec.id == "gurobi-cli")
+                && specs.iter().any(|spec| spec.id == "cplex-cli")
+                && specs.iter().any(|spec| spec.id == "xpress-cli")
+                && specs.iter().any(|spec| spec.id == "lindo-cli")
+                && specs.iter().any(|spec| spec.id == "ampl")
+                && specs.iter().any(|spec| spec.id == "hexaly")
+                && specs.iter().any(|spec| spec.id == "neos")
+                && specs.iter().any(|spec| spec.id == "pddl-val")
+                && specs.iter().any(|spec| spec.id == "fast-downward")
+                && specs.iter().any(|spec| spec.id == "enhsp")
                 && specs.iter().any(|spec| spec.id == "z3")
                 && specs.iter().any(|spec| spec.id == "optimathsat")
                 && specs.iter().any(|spec| spec.id == "minisat")
@@ -6628,6 +6909,7 @@ impl Driver {
                 && specs.iter().any(|spec| spec.id == "miplib")
                 && specs.iter().any(|spec| spec.id == "ipopt")
                 && specs.iter().any(|spec| spec.id == "osqp")
+                && specs.iter().any(|spec| spec.id == "cvxopt")
                 && specs.iter().any(|spec| spec.id == "cbmc")
                 && specs.iter().any(|spec| spec.id == "ebmc")
                 && specs.iter().any(|spec| spec.id == "klee")
@@ -6658,7 +6940,7 @@ impl Driver {
                 && specs.iter().any(|spec| spec.id == "protoc")
                 && specs.iter().any(|spec| spec.id == "apache-avro")
                 && specs.iter().any(|spec| spec.id == "frictionless"),
-            "checked MiniZinc, Z3/OptiMathSAT, MiniSat/Glucose/MapleSAT/Varisat/MaxHS/RoundingSat, DRAT/FRAT/VeriPB, TLC, MIPLIB, Ipopt, OSQP, software verifiers, simulation engines, API/data validators, XML, CSV, Protobuf, Avro, and Frictionless".to_string(),
+            "checked MiniZinc, Choco/JaCoP/CP Optimizer/OR-Tools Java/Python/CP-SAT/ojAlgo, OptaPlanner/Timefold, jMetal/MOEA/ECJ, good_lp/lp-modeler/rust-linprog/argmin/NLopt/HiGHS/SCIP/CBC Rust bindings, PySCIPOpt/Python-MIP/gurobipy/DOcplex, HiGHS/GLPK/SCIP/CBC/CLP/SoPlex/QSopt_ex/lp_solve/Gurobi/CPLEX/Xpress/LINDO CLI adapters, Pyomo/AMPL/NEOS, PDDL planning validators, Z3/OptiMathSAT, MiniSat/Glucose/MapleSAT/Varisat/MaxHS/RoundingSat, clingo ASP, DRAT/FRAT/VeriPB, TLC, MIPLIB, Ipopt, OSQP, software verifiers, simulation engines, API/data validators, XML, CSV, Protobuf, Avro, and Frictionless".to_string(),
         );
 
         let minizinc_payload = minizinc_validation_request_to_json(&MiniZincValidationRequest {
@@ -6731,7 +7013,13 @@ impl Driver {
         let minizinc_registered_tool_payload = serde_json::json!({
             "model": "var 0..5: x; constraint x >= 1; solve satisfy;"
         });
-        for tool in ["flatzinc", "gecode", "chuffed", "minizinc-solution-checker"] {
+        for tool in [
+            "flatzinc",
+            "gecode",
+            "chuffed",
+            "ortools-cp-sat",
+            "minizinc-solution-checker",
+        ] {
             let registered_tool_run = self.run_python_json(
                 "model_validation_reference.py",
                 &["--tool", tool],
@@ -6751,6 +7039,39 @@ impl Driver {
                     registered_tool_run["validator"].as_str().unwrap_or("")
                 ),
             );
+        }
+        if let Some(clingo) = specs.iter().find(|spec| spec.id == "clingo") {
+            let clingo_probe = probe_external_validation_tool(clingo);
+            if clingo_probe.status == ExternalValidationProbeStatus::Ready {
+                let clingo_payload = serde_json::json!({
+                    "kind": "asp-validation",
+                    "program": "1 { choose(a); choose(b) } 1.\n#show choose/1.",
+                });
+                let clingo_run = self.run_python_json(
+                    "model_validation_reference.py",
+                    &["--tool", "clingo"],
+                    &clingo_payload.to_string(),
+                );
+                self.check(
+                    "External validation clingo ASP registered-tool payload",
+                    clingo_run["status"].as_str() == Some("ok")
+                        && clingo_run["verdict"].as_str() == Some("sat")
+                        && clingo_run["stdout"]
+                            .as_str()
+                            .is_some_and(|stdout| stdout.contains("choose(")),
+                    format!(
+                        "status={} verdict={} validator={}",
+                        clingo_run["status"].as_str().unwrap_or(""),
+                        clingo_run["verdict"].as_str().unwrap_or(""),
+                        clingo_run["validator"].as_str().unwrap_or("")
+                    ),
+                );
+            } else {
+                println!(
+                    "  SKIP  clingo ASP registered-tool payload: {}",
+                    clingo_probe.message
+                );
+            }
         }
 
         let smt_bridge_payload = serde_json::json!({
@@ -7819,6 +8140,63 @@ impl Driver {
                 nonlinear_run["solver"].as_str().unwrap_or("")
             ),
         );
+        let nlp_solver_specs = external_nonlinear_validation_reference_solver_specs();
+        self.check(
+            "External nonlinear validation Rust manifest covers registered solvers",
+            nlp_solver_specs.len() == ExternalNonlinearValidationReferenceSolver::all().len()
+                && nlp_solver_specs
+                    .iter()
+                    .filter(|spec| {
+                        spec.family == ExternalNonlinearValidationReferenceFamily::ScipyBridge
+                    })
+                    .count()
+                    == 10
+                && nlp_solver_specs
+                    .iter()
+                    .filter(|spec| {
+                        spec.family == ExternalNonlinearValidationReferenceFamily::PackageBridge
+                    })
+                    .count()
+                    == 3
+                && nlp_solver_specs.iter().any(|spec| {
+                    spec.solver == ExternalNonlinearValidationReferenceSolver::Ipopt
+                        && spec.id == "ipopt"
+                })
+                && nlp_solver_specs.iter().any(|spec| {
+                    spec.solver == ExternalNonlinearValidationReferenceSolver::Casadi
+                        && spec.id == "casadi"
+                }),
+            format!("solvers={}", nlp_solver_specs.len()),
+        );
+        for solver in [
+            ExternalNonlinearValidationReferenceSolver::Ipopt,
+            ExternalNonlinearValidationReferenceSolver::Knitro,
+            ExternalNonlinearValidationReferenceSolver::Copt,
+            ExternalNonlinearValidationReferenceSolver::Casadi,
+            ExternalNonlinearValidationReferenceSolver::NloptCli,
+        ] {
+            let rust_nonlinear_run = solve_nonlinear_validation_json_with_external_reference(
+                nonlinear_payload.clone(),
+                &ExternalNonlinearValidationReferenceOptions { solver },
+            );
+            self.check(
+                format!(
+                    "External nonlinear validation Rust {} registered solver",
+                    solver.as_arg()
+                ),
+                rust_nonlinear_run.status == ExternalNonlinearValidationReferenceStatus::Optimal
+                    && rust_nonlinear_run.x.len() == 2
+                    && rust_nonlinear_run
+                        .objective
+                        .is_some_and(|objective| objective.abs() <= 1e-6),
+                format!(
+                    "status={} objective={} solver={}",
+                    rust_nonlinear_run.status.as_str(),
+                    rust_nonlinear_run.objective.unwrap_or(f64::NAN),
+                    rust_nonlinear_run.solver
+                ),
+            );
+        }
         for solver in [
             "ipopt",
             "bonmin",
@@ -8478,53 +8856,86 @@ impl Driver {
             ),
         );
 
+        let simulation_engine_specs = external_simulation_validation_tool_specs();
+        self.check(
+            "External simulation validation Rust manifest covers engine families",
+            simulation_engine_specs.len() >= 40
+                && simulation_engine_specs
+                    .iter()
+                    .any(|spec| spec.id == "simpy")
+                && simulation_engine_specs.iter().any(|spec| spec.id == "sumo")
+                && simulation_engine_specs
+                    .iter()
+                    .any(|spec| spec.id == "energyplus")
+                && simulation_engine_specs
+                    .iter()
+                    .any(|spec| spec.id == "openmodelica")
+                && simulation_engine_specs
+                    .iter()
+                    .any(|spec| spec.id == "fmi-fmu")
+                && simulation_engine_specs
+                    .iter()
+                    .any(|spec| spec.id == "mujoco")
+                && simulation_engine_specs.iter().any(|spec| spec.id == "mesa")
+                && simulation_engine_specs
+                    .iter()
+                    .any(|spec| spec.id == "simgrid")
+                && simulation_engine_specs
+                    .iter()
+                    .any(|spec| spec.id == "neqsim")
+                && simulation_engine_specs
+                    .iter()
+                    .any(|spec| spec.id == "anylogic")
+                && simulation_engine_specs
+                    .iter()
+                    .any(|spec| spec.id == "arena"),
+            format!("simulation_engines={}", simulation_engine_specs.len()),
+        );
+        let simulation_bridge_request = SimulationValidationRequest {
+            engine_id: "simpy".to_string(),
+            model_format: "json-event-network".to_string(),
+            model: serde_json::json!({
+                "servers": 1,
+                "arrival_times": [0.0, 1.0, 2.0],
+                "service_times": [1.0, 1.0, 1.0]
+            }),
+            scenario: Some(serde_json::json!({"horizon": 10.0})),
+            expected_trace_properties: vec![
+                "queue_length_never_negative".to_string(),
+                "departures_after_arrivals".to_string(),
+            ],
+            metric_expectations: vec![
+                SimulationMetricExpectation {
+                    name: "mean_wait".to_string(),
+                    target: 0.0,
+                    tolerance: 1e-9,
+                    comparison: "within-absolute".to_string(),
+                },
+                SimulationMetricExpectation {
+                    name: "jobs_completed".to_string(),
+                    target: 3.0,
+                    tolerance: 1e-9,
+                    comparison: "equal".to_string(),
+                },
+            ],
+        };
         let simulation_bridge_payload =
-            simulation_validation_request_to_json(&SimulationValidationRequest {
-                engine_id: "simpy".to_string(),
-                model_format: "json-event-network".to_string(),
-                model: serde_json::json!({
-                    "servers": 1,
-                    "arrival_times": [0.0, 1.0, 2.0],
-                    "service_times": [1.0, 1.0, 1.0]
-                }),
-                scenario: Some(serde_json::json!({"horizon": 10.0})),
-                expected_trace_properties: vec![
-                    "queue_length_never_negative".to_string(),
-                    "departures_after_arrivals".to_string(),
-                ],
-                metric_expectations: vec![
-                    SimulationMetricExpectation {
-                        name: "mean_wait".to_string(),
-                        target: 0.0,
-                        tolerance: 1e-9,
-                        comparison: "within-absolute".to_string(),
-                    },
-                    SimulationMetricExpectation {
-                        name: "jobs_completed".to_string(),
-                        target: 3.0,
-                        tolerance: 1e-9,
-                        comparison: "equal".to_string(),
-                    },
-                ],
-            });
-        let simulation_bridge_run = self.run_python_json(
-            "simulation_validation_reference.py",
-            &["--engine", "simpy"],
-            &simulation_bridge_payload.to_string(),
+            simulation_validation_request_to_json(&simulation_bridge_request);
+        let simulation_bridge_run = run_simulation_validation_with_external_reference(
+            &simulation_bridge_request,
+            &ExternalSimulationValidationReferenceOptions::default(),
         );
         self.check(
-            "External validation simulation bridge valid payload",
-            simulation_bridge_run["status"].as_str() == Some("ok")
-                && simulation_bridge_run["verdict"].as_str() == Some("valid")
-                && simulation_bridge_run["metrics"]["mean_wait"].as_f64() == Some(0.0)
-                && simulation_bridge_run["trace"]
-                    .as_array()
-                    .is_some_and(|trace| trace.len() == 9),
+            "External validation simulation Rust bridge valid payload",
+            simulation_bridge_run.status == ExternalSimulationValidationStatus::Ok
+                && simulation_bridge_run.verdict == ExternalSimulationValidationVerdict::Valid
+                && simulation_bridge_run.metrics.get("mean_wait").copied() == Some(0.0)
+                && simulation_bridge_run.trace.len() == 9,
             format!(
                 "status={} verdict={} simulator={}",
-                simulation_bridge_run["status"].as_str().unwrap_or(""),
-                simulation_bridge_run["verdict"].as_str().unwrap_or(""),
-                simulation_bridge_run["simulator"].as_str().unwrap_or("")
+                simulation_bridge_run.status.as_str(),
+                simulation_bridge_run.verdict.as_str(),
+                simulation_bridge_run.simulator
             ),
         );
         for engine in ["plant-simulation", "extendsim", "gpss-world", "simulink"] {
@@ -8549,52 +8960,45 @@ impl Driver {
             );
         }
 
-        let invalid_simulation_bridge_payload =
-            simulation_validation_request_to_json(&SimulationValidationRequest {
-                engine_id: "simpy".to_string(),
-                model_format: "json-event-network".to_string(),
-                model: serde_json::json!({
-                    "servers": 1,
-                    "arrival_times": [0.0, 1.0, 2.0],
-                    "service_times": [1.0, 1.0, 1.0]
-                }),
-                scenario: Some(serde_json::json!({"horizon": 10.0})),
-                expected_trace_properties: vec!["queue_length_never_negative".to_string()],
-                metric_expectations: vec![SimulationMetricExpectation {
-                    name: "mean_wait".to_string(),
-                    target: 2.0,
-                    tolerance: 0.1,
-                    comparison: "within-absolute".to_string(),
-                }],
-            });
-        let invalid_simulation_bridge_run = self.run_python_json(
-            "simulation_validation_reference.py",
-            &["--engine", "simpy"],
-            &invalid_simulation_bridge_payload.to_string(),
+        let invalid_simulation_bridge_request = SimulationValidationRequest {
+            engine_id: "simpy".to_string(),
+            model_format: "json-event-network".to_string(),
+            model: serde_json::json!({
+                "servers": 1,
+                "arrival_times": [0.0, 1.0, 2.0],
+                "service_times": [1.0, 1.0, 1.0]
+            }),
+            scenario: Some(serde_json::json!({"horizon": 10.0})),
+            expected_trace_properties: vec!["queue_length_never_negative".to_string()],
+            metric_expectations: vec![SimulationMetricExpectation {
+                name: "mean_wait".to_string(),
+                target: 2.0,
+                tolerance: 0.1,
+                comparison: "within-absolute".to_string(),
+            }],
+        };
+        let invalid_simulation_bridge_run = run_simulation_validation_with_external_reference(
+            &invalid_simulation_bridge_request,
+            &ExternalSimulationValidationReferenceOptions {
+                engine_id: Some("arena".to_string()),
+            },
         );
         self.check(
-            "External validation simulation bridge invalid payload",
-            invalid_simulation_bridge_run["status"].as_str() == Some("ok")
-                && invalid_simulation_bridge_run["verdict"].as_str() == Some("invalid")
-                && invalid_simulation_bridge_run["checks"]
-                    .as_array()
-                    .is_some_and(|checks| {
-                        checks.iter().any(|check| {
-                            check["name"].as_str() == Some("mean_wait")
-                                && check["passed"].as_bool() == Some(false)
-                        })
-                    }),
+            "External validation simulation Rust bridge invalid payload",
+            invalid_simulation_bridge_run.status == ExternalSimulationValidationStatus::Ok
+                && invalid_simulation_bridge_run.verdict
+                    == ExternalSimulationValidationVerdict::Invalid
+                && invalid_simulation_bridge_run.simulator.contains("arena")
+                && invalid_simulation_bridge_run.checks.iter().any(|check| {
+                    check["name"].as_str() == Some("mean_wait")
+                        && check["passed"].as_bool() == Some(false)
+                }),
             format!(
-                "status={} verdict={} message={}",
-                invalid_simulation_bridge_run["status"]
-                    .as_str()
-                    .unwrap_or(""),
-                invalid_simulation_bridge_run["verdict"]
-                    .as_str()
-                    .unwrap_or(""),
-                invalid_simulation_bridge_run["message"]
-                    .as_str()
-                    .unwrap_or("")
+                "status={} verdict={} simulator={} message={}",
+                invalid_simulation_bridge_run.status.as_str(),
+                invalid_simulation_bridge_run.verdict.as_str(),
+                invalid_simulation_bridge_run.simulator,
+                invalid_simulation_bridge_run.message
             ),
         );
 
@@ -13742,6 +14146,36 @@ impl Driver {
 
     fn validate_qp(&mut self) {
         println!("\n-- QP: active-set solver vs QP reference bridge --");
+        let qp_solver_specs = external_quadratic_reference_solver_specs();
+        self.check(
+            "QP Rust reference solver manifest covers optional backends",
+            qp_solver_specs.len() == ExternalQuadraticReferenceSolver::all().len()
+                && qp_solver_specs
+                    .iter()
+                    .filter(|spec| spec.family == ExternalQuadraticReferenceFamily::Cvxpy)
+                    .count()
+                    == 6
+                && qp_solver_specs
+                    .iter()
+                    .filter(|spec| spec.family == ExternalQuadraticReferenceFamily::RegisteredConic)
+                    .count()
+                    == 5
+                && qp_solver_specs.iter().any(|spec| {
+                    spec.solver == ExternalQuadraticReferenceSolver::Mosek
+                        && spec.supports_qp
+                        && spec.supports_socp
+                        && spec.supports_qcp
+                        && !spec.supports_miqp
+                })
+                && qp_solver_specs.iter().any(|spec| {
+                    spec.solver == ExternalQuadraticReferenceSolver::Copt
+                        && spec.supports_qp
+                        && spec.supports_socp
+                        && spec.supports_qcp
+                        && !spec.supports_miqp
+                }),
+            format!("solvers={}", qp_solver_specs.len()),
+        );
         let qp = self.sample_qp();
         let internal = solve_qp_active_set(&qp, QPOptions::default());
         let qp_json = serde_json::json!({
@@ -13775,8 +14209,8 @@ impl Driver {
         );
         self.max_abs_close("QP x", &internal.x, &reference.x, 1e-7);
         for solver in [
-            "osqp", "cvxpy", "scs", "clarabel", "ecos", "qpoases", "proxqp", "cosmo", "sdpa",
-            "csdp",
+            "osqp", "cvxpy", "scs", "clarabel", "ecos", "mosek", "copt", "qpoases", "proxqp",
+            "cosmo", "sdpa", "csdp",
         ] {
             let value =
                 self.run_python_json_lenient("qp_reference.py", &["--solver", solver], &qp_json);
@@ -13806,6 +14240,60 @@ impl Driver {
                 println!(
                     "  SKIP  QP optional {solver}: {}",
                     optional_reference.solver
+                );
+            }
+        }
+        for solver in [
+            ExternalQuadraticReferenceSolver::Osqp,
+            ExternalQuadraticReferenceSolver::Cvxpy,
+            ExternalQuadraticReferenceSolver::Scs,
+            ExternalQuadraticReferenceSolver::Clarabel,
+            ExternalQuadraticReferenceSolver::Ecos,
+            ExternalQuadraticReferenceSolver::Mosek,
+            ExternalQuadraticReferenceSolver::Copt,
+            ExternalQuadraticReferenceSolver::Qpoases,
+            ExternalQuadraticReferenceSolver::Proxqp,
+            ExternalQuadraticReferenceSolver::Cosmo,
+            ExternalQuadraticReferenceSolver::Sdpa,
+            ExternalQuadraticReferenceSolver::Csdp,
+        ] {
+            let optional_qp = solve_qp_with_external_reference(
+                &qp,
+                &ExternalQuadraticReferenceOptions {
+                    solver,
+                    ..Default::default()
+                },
+            );
+            let recognized = matches!(
+                optional_qp.status,
+                ExternalQuadraticReferenceStatus::Optimal
+                    | ExternalQuadraticReferenceStatus::Unavailable
+            );
+            self.check(
+                format!("QP Rust optional {} bridge recognized", solver.as_arg()),
+                recognized,
+                format!(
+                    "status={} solver={} message={}",
+                    optional_qp.status.as_str(),
+                    optional_qp.solver,
+                    optional_qp.message
+                ),
+            );
+            if optional_qp.status == ExternalQuadraticReferenceStatus::Optimal {
+                let objective_check = format!("QP Rust optional {} objective", solver.as_arg());
+                self.close(
+                    &objective_check,
+                    internal.objective,
+                    optional_qp.objective.unwrap_or(f64::NAN),
+                    1e-4,
+                );
+                let x_check = format!("QP Rust optional {} x", solver.as_arg());
+                self.max_abs_close(&x_check, &internal.x, &optional_qp.x, 1e-4);
+            } else {
+                println!(
+                    "  SKIP  QP Rust optional {}: {}",
+                    solver.as_arg(),
+                    optional_qp.message
                 );
             }
         }

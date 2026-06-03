@@ -2361,13 +2361,18 @@ fn pivot(t: &mut Vec<Vec<f64>>, basis: &mut [usize], pivot_row: usize, pivot_col
 /// enumeration for small validation models.
 const DEFAULT_SCRIPT: &str = "scripts/lp_solve.py";
 
-fn external_solver_label(method: &str) -> String {
+fn ortools_linear_method(method: &str) -> Option<&'static str> {
     let normalized = method.to_ascii_lowercase().replace('_', "-");
-    if matches!(
-        normalized.as_str(),
-        "glop" | "ortools-glop" | "ortools:glop"
-    ) {
-        "ortools:glop".to_string()
+    match normalized.as_str() {
+        "glop" | "ortools-glop" | "ortools:glop" => Some("glop"),
+        "pdlp" | "ortools-pdlp" | "ortools:pdlp" => Some("pdlp"),
+        _ => None,
+    }
+}
+
+fn external_solver_label(method: &str) -> String {
+    if let Some(method) = ortools_linear_method(method) {
+        format!("ortools:{method}")
     } else {
         format!("scipy:{method}")
     }
@@ -2381,7 +2386,7 @@ fn external_solver_label(method: &str) -> String {
 /// `std::process::Command` captures the full output.
 #[derive(Clone, Debug, Default)]
 pub struct ExternalSolverOptions {
-    /// External LP method: SciPy linprog methods (`"highs"`, `"highs-ds"`, `"highs-ipm"`) or OR-Tools `"glop"`. Default `"highs"`.
+    /// External LP method: SciPy linprog methods (`"highs"`, `"highs-ds"`, `"highs-ipm"`) or OR-Tools `"glop"`/`"pdlp"`. Default `"highs"`.
     pub method: Option<String>,
     /// Override the python executable. Defaults to `PYTHON`, then `PYTHON_BIN`, then `"python3"`.
     pub python: Option<String>,
@@ -2622,6 +2627,7 @@ impl LpSolverOptions {
 ///   LP_SOLVER=scipy:simplex         legacy scipy simplex
 ///   LP_SOLVER=scipy:interior-point  legacy scipy interior-point
 ///   LP_SOLVER=ortools:glop          OR-Tools GLOP linear solver
+///   LP_SOLVER=ortools:pdlp          OR-Tools PDLP first-order LP solver
 /// ```
 #[derive(Clone, Debug, Default)]
 pub struct LPSolver {
@@ -2665,8 +2671,9 @@ impl Transform<LPProblem, LPSolution> for LPSolver {
             ));
             return fallback;
         }
-        if choice == "ortools:glop" || choice == "glop" {
-            let ext = ExternalSolver::new(self.opts.external(Some("glop".to_string()))).run(&input);
+        if let Some(method) = ortools_linear_method(choice) {
+            let ext =
+                ExternalSolver::new(self.opts.external(Some(method.to_string()))).run(&input);
             if ext.status != LPStatus::NumericalError {
                 return ext;
             }
@@ -3182,6 +3189,53 @@ mod tests {
             (actual - expected).abs() < TOL,
             "actual={actual}, expected={expected}"
         );
+    }
+
+    #[test]
+    fn external_solver_labels_cover_ortools_linear_engines() {
+        assert_eq!(external_solver_label("glop"), "ortools:glop");
+        assert_eq!(external_solver_label("ortools:GLOP"), "ortools:glop");
+        assert_eq!(external_solver_label("pdlp"), "ortools:pdlp");
+        assert_eq!(external_solver_label("ortools-PDLP"), "ortools:pdlp");
+        assert_eq!(external_solver_label("highs"), "scipy:highs");
+    }
+
+    #[test]
+    fn external_solver_can_call_installed_ortools_linear_engines() {
+        let Some(python) = std::env::var_os("ORES_ORTOOLS_PYTHON") else {
+            eprintln!("skipping real OR-Tools LP bridge check; set ORES_ORTOOLS_PYTHON");
+            return;
+        };
+        let p = LPProblem {
+            sense: Sense::Max,
+            c: vec![1.0, 1.0],
+            a_ub: Some(vec![vec![1.0, 0.0], vec![0.0, 1.0]]),
+            b_ub: Some(vec![4.0, 3.0]),
+            ..Default::default()
+        };
+
+        for (method, expected_solver, tol) in [
+            ("glop", "ortools:glop", 1e-9),
+            ("pdlp", "ortools:pdlp", 1e-6),
+        ] {
+            let sol = solve_lp_external(
+                &p,
+                &ExternalSolverOptions {
+                    method: Some(method.to_string()),
+                    python: Some(python.to_string_lossy().to_string()),
+                    ..Default::default()
+                },
+            );
+            assert_eq!(sol.status, LPStatus::Optimal, "{method}: {:?}", sol.message);
+            assert_eq!(sol.solver, expected_solver);
+            assert!(
+                (sol.objective - 7.0).abs() <= tol,
+                "{method}: objective={}",
+                sol.objective
+            );
+            assert!((sol.x[0] - 4.0).abs() <= tol, "{method}: x={:?}", sol.x);
+            assert!((sol.x[1] - 3.0).abs() <= tol, "{method}: x={:?}", sol.x);
+        }
     }
 
     #[test]

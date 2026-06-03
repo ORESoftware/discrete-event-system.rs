@@ -3,7 +3,7 @@
 
 The Rust optimization suite already cross-checks through Python APIs such as
 SciPy and OR-Tools. This bridge exercises actual command-line solvers
-(`highs`, `glpsol`, `scip`, `cbc`, LP-only `clp`, and optional commercial
+(`highs`, `glpsol`, `scip`, `cbc`, LP-only `clp`/`soplex`, `lp_solve`, and optional commercial
 CLIs such as `gurobi_cl`, `cplex`, FICO Xpress `optimizer`, and LINDO
 `runlindo`) on the same small validation models by writing a solver-readable
 LP/MPS file, invoking the solver, and parsing the primal solution.
@@ -34,6 +34,8 @@ COMMAND_ALIASES = {
     "scip": ["scip"],
     "cbc": ["cbc"],
     "clp": ["clp"],
+    "soplex": ["soplex"],
+    "lp-solve": ["lp_solve", "lp-solve", "lpsolve"],
     "gurobi": ["gurobi_cl"],
     "cplex": ["cplex"],
     "xpress": ["optimizer", "xpress"],
@@ -46,6 +48,8 @@ COMMAND_ENV_VARS = {
     "scip": ["SCIP_CMD", "ORES_SCIP_CMD", "ORES_SCIP_BIN", "DES_SCIP_BIN", "SCIP_BIN"],
     "cbc": ["CBC_CMD", "ORES_CBC_CMD", "ORES_CBC_BIN", "DES_CBC_BIN", "CBC_BIN"],
     "clp": ["CLP_CMD", "ORES_CLP_CMD", "ORES_CLP_BIN", "DES_CLP_BIN", "CLP_BIN"],
+    "soplex": ["SOPLEX_CMD", "ORES_SOPLEX_CMD", "ORES_SOPLEX_BIN", "DES_SOPLEX_BIN", "SOPLEX_BIN"],
+    "lp-solve": ["LP_SOLVE_CMD", "LPSOLVE_CMD", "ORES_LP_SOLVE_CMD", "ORES_LPSOLVE_BIN", "DES_LPSOLVE_BIN", "LPSOLVE_BIN"],
     "gurobi": ["GUROBI_CL_CMD", "GUROBI_CMD", "ORES_GUROBI_CMD", "ORES_GUROBI_BIN", "DES_GUROBI_BIN", "GUROBI_BIN"],
     "cplex": ["CPLEX_CMD", "ORES_CPLEX_CMD", "ORES_CPLEX_BIN", "DES_CPLEX_BIN", "CPLEX_BIN"],
     "xpress": ["XPRESS_CMD", "XPRESS_OPTIMIZER_CMD", "ORES_XPRESS_CMD", "ORES_XPRESS_BIN", "DES_XPRESS_BIN", "XPRESS_BIN"],
@@ -58,6 +62,8 @@ COMMAND_DIR_ENV_VARS = {
     "scip": ["SCIPOPTDIR", "SCIP_DIR", "SCIP_HOME"],
     "cbc": ["CBC_DIR", "CBC_HOME", "COINOR_DIR", "COINOR_HOME"],
     "clp": ["CLP_DIR", "CLP_HOME", "COINOR_DIR", "COINOR_HOME"],
+    "soplex": ["SOPLEX_DIR", "SOPLEX_HOME"],
+    "lp-solve": ["LP_SOLVE_DIR", "LPSOLVE_DIR", "LP_SOLVE_HOME", "LPSOLVE_HOME"],
     "gurobi": ["GUROBI_HOME"],
     "cplex": ["CPLEX_STUDIO_DIR", "CPLEX_HOME"],
     "xpress": ["XPRESSDIR", "XPRESS_DIR", "XPRESS_HOME"],
@@ -70,6 +76,8 @@ SUPPORTED_SOLVERS = {
     "scip",
     "cbc",
     "clp",
+    "soplex",
+    "lp-solve",
     "gurobi",
     "cplex",
     "xpress",
@@ -627,6 +635,41 @@ def write_cplex_lp(
     return names
 
 
+def write_lpsolve_lp(
+    path: str,
+    sense: str,
+    c: Sequence[float],
+    le_rows: Sequence[Sequence[float]],
+    le_rhs: Sequence[float],
+    eq_rows: Sequence[Sequence[float]],
+    eq_rhs: Sequence[float],
+    lbs: Sequence[Optional[float]],
+    ubs: Sequence[Optional[float]],
+    integer_vars: Sequence[bool],
+) -> list[str]:
+    n = len(c)
+    names = [var_name(i) for i in range(n)]
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(("max: " if sense == "max" else "min: ") + term_expr(c, names) + ";\n")
+        for i, (row, rhs) in enumerate(zip(le_rows, le_rhs)):
+            f.write(f"c{i}: {term_expr(row, names)} <= {float(rhs):.12g};\n")
+        for i, (row, rhs) in enumerate(zip(eq_rows, eq_rhs)):
+            f.write(f"e{i}: {term_expr(row, names)} = {float(rhs):.12g};\n")
+        if not le_rows and not eq_rows:
+            f.write(f"c0: 0 {names[0] if names else 'x0'} <= 0;\n")
+        for i, name in enumerate(names):
+            lb = lbs[i]
+            ub = ubs[i]
+            if lb is not None and math.isfinite(float(lb)):
+                f.write(f"{name} >= {float(lb):.12g};\n")
+            if ub is not None and math.isfinite(float(ub)):
+                f.write(f"{name} <= {float(ub):.12g};\n")
+        integer_names = [name for name, is_int in zip(names, integer_vars) if is_int]
+        if integer_names:
+            f.write("int " + ", ".join(integer_names) + ";\n")
+    return names
+
+
 def write_free_mps(
     path: str,
     sense: str,
@@ -1129,6 +1172,50 @@ def parse_lindo_solution(path: str, n: int) -> tuple[str, list[float]]:
     return status, x
 
 
+def parse_lp_solve_solution(path: str, n: int) -> tuple[str, list[float]]:
+    x = [0.0] * n
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        text = f.read()
+    lower = text.lower()
+    if "infeasible" in lower or "no feasible" in lower:
+        status = "infeasible"
+    elif "unbounded" in lower:
+        status = "unbounded"
+    elif "value of objective function" in lower or "actual values of the variables" in lower:
+        status = "optimal"
+    else:
+        status = "unknown"
+
+    for line in text.splitlines():
+        parsed = _parse_named_value_line(line, n)
+        if parsed is not None:
+            idx, value = parsed
+            x[idx] = value
+    return status, x
+
+
+def parse_soplex_solution(path: str, n: int, stdout: str, stderr: str) -> tuple[str, list[float]]:
+    x = [0.0] * n
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        text = f.read()
+    lower = f"{stdout}\n{stderr}\n{text}".lower()
+    if "infeasible" in lower:
+        status = "infeasible"
+    elif "unbounded" in lower:
+        status = "unbounded"
+    elif "problem is solved [optimal]" in lower or "primal solution" in lower:
+        status = "optimal"
+    else:
+        status = "unknown"
+
+    for line in text.splitlines():
+        parsed = _parse_named_value_line(line, n)
+        if parsed is not None:
+            idx, value = parsed
+            x[idx] = value
+    return status, x
+
+
 def _parse_named_value_line(line: str, n: int) -> Optional[tuple[int, float]]:
     match = re.search(r"\bx(\d+)\b", line, flags=re.IGNORECASE)
     if match is None:
@@ -1190,6 +1277,7 @@ def parse_solver_version(solver: str, stdout: str, stderr: str) -> Optional[str]
         "scip": [(r"\bSCIP version\s+([0-9][^\s\[]*)", "SCIP")],
         "cbc": [(r"\bVersion:\s+([0-9][^\s,]*)", "CBC")],
         "clp": [(r"\bCoin LP version\s+([0-9][^\s,]*)", "CLP")],
+        "soplex": [(r"\bSoPlex version\s+([0-9][^\s,]*)", "SoPlex")],
         "gurobi": [(r"\bGurobi Optimizer version\s+([0-9][^\s,]*)", "Gurobi")],
         "cplex": [(r"\b(?:IBM ILOG )?CPLEX(?: Optimizer)?(?: Interactive Optimizer)?\s+([0-9][^\s,]*)", "CPLEX")],
         "xpress": [(r"\bXpress(?: Optimizer)?\s+([0-9][^\s,]*)", "Xpress")],
@@ -1212,6 +1300,7 @@ def probe_solver_version(solver: str) -> Optional[str]:
         "scip": ["--version"],
         "cbc": ["-version"],
         "clp": ["-version"],
+        "soplex": ["-v0"],
         "gurobi": ["--version"],
     }.get(solver)
     if version_args is None:
@@ -1315,6 +1404,11 @@ def parse_lp_iterations(solver: str, kind: str, stdout: str, stderr: str) -> dic
     elif solver in {"cbc", "clp"}:
         for line in text.splitlines():
             match = re.search(r"-\s+(\d+)\s+iterations\b", line.strip(), flags=re.IGNORECASE)
+            if match is not None:
+                iterations = int(match.group(1))
+    elif solver == "soplex":
+        for line in text.splitlines():
+            match = re.search(r"\bIterations\s*:\s*(\d+)\b", line.strip(), flags=re.IGNORECASE)
             if match is not None:
                 iterations = int(match.group(1))
 
@@ -2198,6 +2292,32 @@ def run_solver(
             "-basisOut",
             solution_path + ".basis",
         ]
+    elif solver == "soplex":
+        cmd = [
+            command,
+            "-v3",
+            f"-t{float(time_limit):.17g}",
+            f"-x={solution_path}",
+            *(
+                ["-f" + f"{float(primal_feasibility_tolerance):.17g}"]
+                if primal_feasibility_tolerance is not None
+                else []
+            ),
+            *(
+                ["-o" + f"{float(dual_feasibility_tolerance):.17g}"]
+                if dual_feasibility_tolerance is not None
+                else []
+            ),
+            *(["-s0"] if presolve == "off" else ["-s1"] if presolve == "on" else []),
+            model_path,
+        ]
+    elif solver == "lp-solve":
+        cmd = [
+            command,
+            "-timeout",
+            str(max(1, int(math.ceil(time_limit)))),
+            model_path,
+        ]
     elif solver == "gurobi":
         cmd = [
             command,
@@ -2286,6 +2406,9 @@ def run_solver(
         automatic_solution_path = os.path.splitext(model_path)[0] + ".sol"
         if os.path.exists(automatic_solution_path):
             shutil.copyfile(automatic_solution_path, solution_path)
+    if solver == "lp-solve":
+        with open(solution_path, "w", encoding="utf-8") as f:
+            f.write(run.stdout)
     return run.stdout, run.stderr
 
 
@@ -2580,8 +2703,8 @@ def solve(
         dual_feasibility_tolerance = normalized_tolerance(dual_feasibility_tolerance)
         integer_feasibility_tolerance = None
     elif kind == "mip":
-        if solver == "clp":
-            return status_payload("unavailable", "clp:cli", "CLP is LP-only")
+        if solver in {"clp", "soplex"}:
+            return status_payload("unavailable", f"{solver}:cli", f"{solver} is LP-only")
         sense, c, a_ub, b_ub, lbs, ubs, integer_vars = normalize_mip(raw)
         a_eq, b_eq = [], []
         node_limit = normalized_node_limit(node_limit)
@@ -2673,7 +2796,9 @@ def solve(
     mip_start_objective = dot(c, mip_start) if kind == "mip" and mip_start is not None else None
 
     with tempfile.TemporaryDirectory(prefix="ores-linear-cli-") as tmp:
-        effective_model_format = "mps" if solver == "lindo" else model_format
+        effective_model_format = (
+            "mps" if solver == "lindo" else "lp" if solver == "lp-solve" else model_format
+        )
         extension = "mps" if effective_model_format == "mps" else "lp"
         model_path = os.path.join(tmp, f"model.{extension}")
         solution_path = (
@@ -2696,6 +2821,19 @@ def solve(
                 ubs,
                 integer_vars,
                 include_objsense=solver != "glpk",
+            )
+        elif solver == "lp-solve":
+            write_lpsolve_lp(
+                model_path,
+                sense,
+                c,
+                a_ub,
+                b_ub,
+                a_eq,
+                b_eq,
+                lbs,
+                ubs,
+                integer_vars,
             )
         else:
             write_cplex_lp(model_path, sense, c, a_ub, b_ub, a_eq, b_eq, lbs, ubs, integer_vars)
@@ -2777,6 +2915,10 @@ def solve(
             status, x = parse_xpress_solution(solution_path, len(c))
         elif solver == "lindo":
             status, x = parse_lindo_solution(solution_path, len(c))
+        elif solver == "lp-solve":
+            status, x = parse_lp_solve_solution(solution_path, len(c))
+        elif solver == "soplex":
+            status, x = parse_soplex_solution(solution_path, len(c), stdout, stderr)
         else:
             status, x, certificate_fields = parse_cbc_solution(
                 solution_path,

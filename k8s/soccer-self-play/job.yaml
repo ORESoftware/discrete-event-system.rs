@@ -1,0 +1,94 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: soccer-self-play
+  namespace: soccer-learning
+  labels:
+    app.kubernetes.io/name: soccer-self-play
+spec:
+  completionMode: Indexed
+  completions: 1
+  parallelism: 1
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: soccer-self-play
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: learner
+          image: ghcr.io/ores/discrete-event-system.rs:soccer-learning
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -lc
+          args:
+            - |
+              set -eu
+              run_id="${SOCCER_RUN_ID}"
+              shard_dir="/work/out/soccer-self-play/${run_id}/shard-${SOCCER_SHARD_INDEX}-of-${SOCCER_SHARD_COUNT}"
+              mkdir -p "$shard_dir"
+              export SOCCER_ARTIFACT_PATH="$shard_dir/artifact.json"
+              export SOCCER_EPISODE_LOG_PATH="$shard_dir/episodes.jsonl"
+              exec /usr/local/bin/main_soccer_learning_run
+          env:
+            - name: SOCCER_RUN_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['batch.kubernetes.io/controller-uid']
+            - name: SOCCER_SHARD_INDEX
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.annotations['batch.kubernetes.io/job-completion-index']
+            - name: SOCCER_SHARD_COUNT
+              value: "1"
+            - name: SOCCER_GAMES
+              value: "100"
+            - name: SOCCER_HALVES
+              value: "2"
+            - name: SOCCER_HALF_MINUTES
+              value: "45"
+            - name: SOCCER_PERIOD_BREAK_RECOVERY_SECONDS
+              value: "900"
+            - name: SOCCER_DT_SECONDS
+              value: "1.0"
+            - name: SOCCER_LEARNING_INTERVAL_TICKS
+              value: "4"
+            - name: SOCCER_CHECKPOINT_INTERVAL_GAMES
+              value: "10"
+            - name: SOCCER_ARTIFACT_MAX_ENTRIES_PER_POLICY
+              value: "10000"
+            - name: SOCCER_ATTACK_SPACING_DELTA_WEIGHT
+              value: "0.22"
+            - name: SOCCER_ATTACK_SPACING_SCORE_WEIGHT
+              value: "0.06"
+            - name: SOCCER_ATTACK_WIDTH_DELTA_WEIGHT
+              value: "0.52"
+            - name: SOCCER_ATTACK_WIDTH_SCORE_WEIGHT
+              value: "0.14"
+            - name: SOCCER_ATTACK_FLANK_LANE_WEIGHT
+              value: "0.28"
+            - name: SOCCER_DEFENSE_SPACING_DELTA_WEIGHT
+              value: "0.08"
+            - name: SOCCER_DEFENSE_SPACING_SCORE_WEIGHT
+              value: "0.04"
+            - name: SOCCER_DEFENSE_CONTRACT_DELTA_WEIGHT
+              value: "0.42"
+            - name: SOCCER_DEFENSE_COMPACTNESS_SCORE_WEIGHT
+              value: "0.14"
+          resources:
+            requests:
+              cpu: "1"
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          volumeMounts:
+            - name: soccer-self-play-out
+              mountPath: /work/out
+      volumes:
+        - name: soccer-self-play-out
+          persistentVolumeClaim:
+            claimName: soccer-self-play-out

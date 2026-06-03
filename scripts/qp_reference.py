@@ -34,6 +34,7 @@ CVXPY_SOLVER_ALIASES = {
     "copt": "COPT",
 }
 
+CVXPY_REFERENCE_SOLVERS = ("cvxpy", "scs", "clarabel", "ecos", "mosek", "copt")
 REGISTERED_CONIC_REFERENCE_SOLVERS = ("qpoases", "proxqp", "cosmo", "sdpa", "csdp")
 
 
@@ -1269,7 +1270,7 @@ def main() -> int:
             result = scipy_socp_reference(qp)
             if args.solver != "auto" and result is None:
                 result = {"status": "unavailable", "solver": "scipy:SLSQP-socp", "x": [], "objective": None, "message": "scipy is not installed"}
-        if result is None and args.solver in ("auto", "cvxpy", "scs", "clarabel", "ecos"):
+        if result is None and args.solver in ("auto", *CVXPY_REFERENCE_SOLVERS):
             result = cvxpy_socp_reference(qp, args.solver if args.solver != "auto" else "cvxpy")
             if args.solver != "auto" and result is None:
                 result = unavailable_reference(f"cvxpy:{args.solver}", "cvxpy is not installed")
@@ -1284,7 +1285,7 @@ def main() -> int:
             result = scipy_qcp_reference(qp)
             if args.solver != "auto" and result is None:
                 result = {"status": "unavailable", "solver": "scipy:SLSQP-qcp", "x": [], "objective": None, "message": "scipy is not installed"}
-        if result is None and args.solver in ("auto", "cvxpy", "scs", "clarabel", "ecos"):
+        if result is None and args.solver in ("auto", *CVXPY_REFERENCE_SOLVERS):
             result = cvxpy_qcp_reference(qp, args.solver if args.solver != "auto" else "cvxpy")
             if args.solver != "auto" and result is None:
                 result = unavailable_reference(f"cvxpy:{args.solver}", "cvxpy is not installed")
@@ -1306,7 +1307,7 @@ def main() -> int:
         result = osqp_reference(qp)
         if args.solver != "auto" and result is None:
             result = unavailable_reference("osqp", "osqp is not installed")
-    if result is None and args.solver in ("auto", "cvxpy", "scs", "clarabel", "ecos"):
+    if result is None and args.solver in ("auto", *CVXPY_REFERENCE_SOLVERS):
         result = cvxpy_reference(qp, args.solver if args.solver != "auto" else "cvxpy")
         if args.solver != "auto" and result is None:
             result = unavailable_reference(f"cvxpy:{args.solver}", "cvxpy is not installed")

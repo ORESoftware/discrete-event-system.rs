@@ -14237,6 +14237,129 @@ mod tests {
     }
 
     #[test]
+    fn external_cli_facade_cross_checks_conflict_relaxation_pool_and_clp_lp() {
+        if std::process::Command::new("highs")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping MathProgram external CLI facade test; highs is not installed");
+            return;
+        }
+
+        let highs_cli = ExternalMathProgramOptions {
+            method: Some("highs:cli".to_string()),
+            time_limit_ms: Some(5_000.0),
+            ..Default::default()
+        };
+
+        let mut conflict_model = MathProgram::new(ObjectiveSense::Min);
+        let conflict_x = conflict_model
+            .add_continuous_var("x", 0.0, None, None)
+            .unwrap();
+        let conflict_y = conflict_model
+            .add_continuous_var("y", 0.0, Some(0.0), None)
+            .unwrap();
+        conflict_model
+            .add_constraint("x-at-least-two", vec![(conflict_x, 1.0)], RowSense::Ge, 2.0)
+            .unwrap();
+        conflict_model
+            .add_constraint("x-at-most-one", vec![(conflict_x, 1.0)], RowSense::Le, 1.0)
+            .unwrap();
+        conflict_model
+            .add_constraint("redundant-y", vec![(conflict_y, 1.0)], RowSense::Ge, 0.0)
+            .unwrap();
+
+        let conflict = cross_check_math_program_conflict_with_external(
+            &conflict_model,
+            &MathProgramSolveOptions::default(),
+            &highs_cli,
+            &MathProgramConflictOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(conflict.external.status, MathProgramStatus::Infeasible);
+        assert!(conflict.within_tolerance);
+        assert!(conflict.internal.minimal);
+        assert_eq!(conflict.internal.items.len(), 2);
+
+        let mut relax_model = MathProgram::new(ObjectiveSense::Min);
+        let relax_x = relax_model
+            .add_continuous_var("x", 0.0, Some(2.0), None)
+            .unwrap();
+        relax_model
+            .add_constraint("cap", vec![(relax_x, 1.0)], RowSense::Le, 1.0)
+            .unwrap();
+        let relaxation = cross_check_math_program_feas_relaxation_with_external(
+            &relax_model,
+            &MathProgramSolveOptions::default(),
+            &highs_cli,
+            &MathProgramFeasRelaxOptions {
+                linear_penalty: 10.0,
+                bound_penalty: 1.0,
+                ..Default::default()
+            },
+            1e-7,
+        )
+        .unwrap();
+        assert_eq!(relaxation.external.status, MathProgramStatus::Optimal);
+        assert!(relaxation.within_tolerance);
+        assert_close(relaxation.internal.violation_objective, 1.0);
+
+        let mut pool_model = MathProgram::new(ObjectiveSense::Max);
+        let pool_a = pool_model.add_binary_var("a", 4.0).unwrap();
+        let pool_b = pool_model.add_binary_var("b", 2.0).unwrap();
+        let pool_c = pool_model.add_binary_var("c", 1.0).unwrap();
+        pool_model
+            .add_constraint(
+                "choose-at-most-two",
+                vec![(pool_a, 1.0), (pool_b, 1.0), (pool_c, 1.0)],
+                RowSense::Le,
+                2.0,
+            )
+            .unwrap();
+        let pool = cross_check_math_program_solution_pool_with_external(
+            &pool_model,
+            &MathProgramSolveOptions::default(),
+            &highs_cli,
+            &MathProgramSolutionPoolOptions {
+                max_solutions: 3,
+                ..Default::default()
+            },
+            1e-7,
+        )
+        .unwrap();
+        assert!(pool.within_tolerance);
+        assert!(pool.len_agree);
+        assert_eq!(pool.external.solutions.len(), 3);
+
+        if std::process::Command::new("clp")
+            .arg("-version")
+            .output()
+            .is_ok()
+        {
+            let mut lp = MathProgram::new(ObjectiveSense::Max);
+            let x = lp.add_continuous_var("x", 1.0, Some(0.0), None).unwrap();
+            lp.add_constraint("cap", vec![(x, 1.0)], RowSense::Le, 1.0)
+                .unwrap();
+            let clp = cross_check_math_program_with_external(
+                &lp,
+                &MathProgramSolveOptions::default(),
+                &ExternalMathProgramOptions {
+                    method: Some("clp:cli".to_string()),
+                    time_limit_ms: Some(5_000.0),
+                    ..Default::default()
+                },
+                1e-7,
+            )
+            .unwrap();
+            assert_eq!(clp.external.status, MathProgramStatus::Optimal);
+            assert_eq!(clp.external.solver, "clp:cli");
+            assert!(clp.within_tolerance);
+            assert_close(clp.external.objective, 1.0);
+        }
+    }
+
+    #[test]
     fn binary_quadratic_objective_lowers_to_product_variable() {
         let mut p = MathProgram::new(ObjectiveSense::Max);
         let a = p.add_binary_var("a", 3.0).unwrap();

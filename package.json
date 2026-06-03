@@ -1,0 +1,14 @@
+{
+  "name": "discrete-event-system-rs-html-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:html": "npm run test:playwright && npm run test:puppeteer",
+    "test:playwright": "node tests/playwright-html-pages.mjs",
+    "test:puppeteer": "node tests/puppeteer-html-pages.mjs"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.53.0",
+    "puppeteer-core": "^24.10.2"
+  }
+}

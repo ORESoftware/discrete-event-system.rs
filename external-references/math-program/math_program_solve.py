@@ -20,16 +20,49 @@ COMMAND_ALIASES = {
     "highs": ["highs"],
     "scip": ["scip"],
     "cbc": ["cbc"],
+    "clp": ["clp"],
+    "soplex": ["soplex"],
+    "lp-solve": ["lp_solve", "lp-solve", "lpsolve"],
 }
 
 COMMAND_ENV_VARS = {
-    "glpk": ["GLPSOL_CMD", "GLPK_CMD", "ORES_GLPK_CMD"],
-    "highs": ["HIGHS_CMD", "ORES_HIGHS_CMD"],
-    "scip": ["SCIP_CMD", "ORES_SCIP_CMD"],
-    "cbc": ["CBC_CMD", "ORES_CBC_CMD"],
+    "glpk": ["GLPSOL_CMD", "GLPK_CMD", "ORES_GLPK_CMD", "ORES_GLPK_BIN"],
+    "highs": ["HIGHS_CMD", "ORES_HIGHS_CMD", "ORES_HIGHS_BIN"],
+    "scip": ["SCIP_CMD", "ORES_SCIP_CMD", "ORES_SCIP_BIN"],
+    "cbc": ["CBC_CMD", "ORES_CBC_CMD", "ORES_CBC_BIN"],
+    "clp": ["CLP_CMD", "ORES_CLP_CMD", "ORES_CLP_BIN"],
+    "soplex": ["SOPLEX_CMD", "ORES_SOPLEX_CMD", "ORES_SOPLEX_BIN"],
+    "lp-solve": ["LP_SOLVE_CMD", "LPSOLVE_CMD", "ORES_LP_SOLVE_CMD", "ORES_LPSOLVE_BIN"],
 }
 
 COMMERCIAL_LINEAR_CLI_SOLVERS = {"gurobi", "cplex", "xpress", "lindo"}
+LINEAR_CLI_BACKEND_SOLVERS = COMMERCIAL_LINEAR_CLI_SOLVERS | {
+    "highs",
+    "glpk",
+    "scip",
+    "cbc",
+    "clp",
+    "soplex",
+    "lp-solve",
+}
+LINEAR_CLI_DIRECT_ALIASES = {
+    "highs": "highs",
+    "highs-cli": "highs",
+    "glpsol": "glpk",
+    "glpk-cli": "glpk",
+    "scip": "scip",
+    "scip-cli": "scip",
+    "cbc": "cbc",
+    "cbc-cli": "cbc",
+    "clp": "clp",
+    "clp-cli": "clp",
+    "soplex": "soplex",
+    "soplex-cli": "soplex",
+    "lp-solve": "lp-solve",
+    "lp-solve-cli": "lp-solve",
+    "lpsolve": "lp-solve",
+    "lpsolve-cli": "lp-solve",
+}
 
 
 def _command_for(solver: str) -> str:
@@ -526,22 +559,24 @@ def solve_linear_cli_bridge(
     return result
 
 
+def _linear_cli_bridge_solver(family: str, backend: str, integer: bool) -> str | None:
+    solver = LINEAR_CLI_DIRECT_ALIASES.get(family)
+    if solver is None and backend == "cli" and family in LINEAR_CLI_BACKEND_SOLVERS:
+        solver = family
+    if solver == "clp" and integer:
+        return None
+    return solver
+
+
 def solve_lp(payload: dict[str, Any], method: str) -> dict[str, Any]:
     family, backend = _solver_backend(method)
     if family == "ortools":
         return solve_ortools(payload, backend, integer=False)
-    if backend == "cli" and family in COMMERCIAL_LINEAR_CLI_SOLVERS:
+    cli_solver = _linear_cli_bridge_solver(family, backend, integer=False)
+    if cli_solver is not None:
         return solve_linear_cli_bridge(
-            payload["lp"], "lp", family, _external_options(payload)
+            payload["lp"], "lp", cli_solver, _external_options(payload)
         )
-    if family in {"highs-cli", "highs"}:
-        return solve_highs_cli(payload["lp"], integer=False, options=_external_options(payload))
-    if family in {"cbc-cli", "cbc"}:
-        return solve_cbc_cli(payload["lp"], integer=False, options=_external_options(payload))
-    if family in {"glpk-cli", "glpsol"}:
-        return solve_glpsol_cli(payload["lp"], integer=False, options=_external_options(payload))
-    if family in {"scip-cli", "scip"}:
-        return solve_scip_cli(payload["lp"], integer=False, options=_external_options(payload))
     if family == "gurobi":
         return solve_gurobi_lp(payload)
     if family == "cplex":
@@ -867,18 +902,11 @@ def solve_mip(payload: dict[str, Any], method: str) -> dict[str, Any]:
         if normalized_backend in {"CP-SAT", "CPSAT"}:
             return solve_ortools_cp_sat(payload)
         return solve_ortools(payload, backend, integer=True)
-    if backend == "cli" and family in COMMERCIAL_LINEAR_CLI_SOLVERS:
+    cli_solver = _linear_cli_bridge_solver(family, backend, integer=True)
+    if cli_solver is not None:
         return solve_linear_cli_bridge(
-            payload["mip"], "mip", family, _external_options(payload)
+            payload["mip"], "mip", cli_solver, _external_options(payload)
         )
-    if family in {"highs-cli", "highs"}:
-        return solve_highs_cli(payload["mip"], integer=True, options=_external_options(payload))
-    if family in {"cbc-cli", "cbc"}:
-        return solve_cbc_cli(payload["mip"], integer=True, options=_external_options(payload))
-    if family in {"glpk-cli", "glpsol"}:
-        return solve_glpsol_cli(payload["mip"], integer=True, options=_external_options(payload))
-    if family in {"scip-cli", "scip"}:
-        return solve_scip_cli(payload["mip"], integer=True, options=_external_options(payload))
     if family == "gurobi":
         return solve_gurobi_mip(payload)
     if family == "cplex":

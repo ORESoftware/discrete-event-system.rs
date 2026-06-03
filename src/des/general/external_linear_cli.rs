@@ -76,10 +76,43 @@ pub enum ExternalLinearCliSolver {
     Scip,
     Cbc,
     Clp,
+    Soplex,
+    LpSolve,
     Gurobi,
     Cplex,
     Xpress,
     Lindo,
+}
+
+/// Broad licensing/install class for a local CLI solver.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExternalLinearCliLicenseClass {
+    OpenSource,
+    Commercial,
+}
+
+impl ExternalLinearCliLicenseClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ExternalLinearCliLicenseClass::OpenSource => "open-source",
+            ExternalLinearCliLicenseClass::Commercial => "commercial",
+        }
+    }
+}
+
+/// Server/UI-facing manifest entry for one locally installed solver CLI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExternalLinearCliSolverSpec {
+    pub solver: ExternalLinearCliSolver,
+    pub id: &'static str,
+    pub display_name: &'static str,
+    pub license_class: ExternalLinearCliLicenseClass,
+    pub command_aliases: &'static [&'static str],
+    pub command_env_vars: &'static [&'static str],
+    pub command_dir_env_vars: &'static [&'static str],
+    pub supports_lp: bool,
+    pub supports_mip: bool,
+    pub notes: &'static str,
 }
 
 /// MIP branching rule requested from CLI solvers that expose a comparable knob.
@@ -151,6 +184,22 @@ impl ExternalLinearCliMipSwitch {
 }
 
 impl ExternalLinearCliSolver {
+    pub fn all() -> &'static [ExternalLinearCliSolver] {
+        &[
+            ExternalLinearCliSolver::Highs,
+            ExternalLinearCliSolver::Glpk,
+            ExternalLinearCliSolver::Scip,
+            ExternalLinearCliSolver::Cbc,
+            ExternalLinearCliSolver::Clp,
+            ExternalLinearCliSolver::Soplex,
+            ExternalLinearCliSolver::LpSolve,
+            ExternalLinearCliSolver::Gurobi,
+            ExternalLinearCliSolver::Cplex,
+            ExternalLinearCliSolver::Xpress,
+            ExternalLinearCliSolver::Lindo,
+        ]
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             ExternalLinearCliSolver::Highs => "highs",
@@ -158,10 +207,82 @@ impl ExternalLinearCliSolver {
             ExternalLinearCliSolver::Scip => "scip",
             ExternalLinearCliSolver::Cbc => "cbc",
             ExternalLinearCliSolver::Clp => "clp",
+            ExternalLinearCliSolver::Soplex => "soplex",
+            ExternalLinearCliSolver::LpSolve => "lp-solve",
             ExternalLinearCliSolver::Gurobi => "gurobi",
             ExternalLinearCliSolver::Cplex => "cplex",
             ExternalLinearCliSolver::Xpress => "xpress",
             ExternalLinearCliSolver::Lindo => "lindo",
+        }
+    }
+
+    pub fn display_name(self) -> &'static str {
+        match self {
+            ExternalLinearCliSolver::Highs => "HiGHS",
+            ExternalLinearCliSolver::Glpk => "GLPK",
+            ExternalLinearCliSolver::Scip => "SCIP",
+            ExternalLinearCliSolver::Cbc => "COIN-OR CBC",
+            ExternalLinearCliSolver::Clp => "COIN-OR CLP",
+            ExternalLinearCliSolver::Soplex => "SoPlex",
+            ExternalLinearCliSolver::LpSolve => "lp_solve",
+            ExternalLinearCliSolver::Gurobi => "Gurobi Optimizer",
+            ExternalLinearCliSolver::Cplex => "IBM ILOG CPLEX",
+            ExternalLinearCliSolver::Xpress => "FICO Xpress",
+            ExternalLinearCliSolver::Lindo => "LINDO Systems",
+        }
+    }
+
+    pub fn license_class(self) -> ExternalLinearCliLicenseClass {
+        match self {
+            ExternalLinearCliSolver::Highs
+            | ExternalLinearCliSolver::Glpk
+            | ExternalLinearCliSolver::Scip
+            | ExternalLinearCliSolver::Cbc
+            | ExternalLinearCliSolver::Clp
+            | ExternalLinearCliSolver::Soplex
+            | ExternalLinearCliSolver::LpSolve => ExternalLinearCliLicenseClass::OpenSource,
+            ExternalLinearCliSolver::Gurobi
+            | ExternalLinearCliSolver::Cplex
+            | ExternalLinearCliSolver::Xpress
+            | ExternalLinearCliSolver::Lindo => ExternalLinearCliLicenseClass::Commercial,
+        }
+    }
+
+    pub fn notes(self) -> &'static str {
+        match self {
+            ExternalLinearCliSolver::Highs => {
+                "Modern open-source LP/MIP solver; preferred open-source CLI for same-input LP/MIP cross-checks."
+            }
+            ExternalLinearCliSolver::Glpk => {
+                "Open-source LP/MIP solver via glpsol; useful for independent GNU MathProg/LP sanity checks."
+            }
+            ExternalLinearCliSolver::Scip => {
+                "Powerful open-source/source-available MIP/constraint solver; strong cross-checker for hard integer models."
+            }
+            ExternalLinearCliSolver::Cbc => {
+                "COIN-OR open-source MIP solver; useful legacy and regression cross-check target."
+            }
+            ExternalLinearCliSolver::Clp => {
+                "COIN-OR open-source LP solver; LP-only bridge target for simplex-style comparisons."
+            }
+            ExternalLinearCliSolver::Soplex => {
+                "ZIB SoPlex LP solver; LP-only bridge target with floating-point and rational solve modes."
+            }
+            ExternalLinearCliSolver::LpSolve => {
+                "Open-source LP/MIP solver with a compact LP-file CLI; useful legacy and lightweight cross-check target."
+            }
+            ExternalLinearCliSolver::Gurobi => {
+                "Commercial LP/MIP solver exposed only when installed locally and licensed."
+            }
+            ExternalLinearCliSolver::Cplex => {
+                "Commercial IBM LP/MIP solver exposed only when installed locally and licensed."
+            }
+            ExternalLinearCliSolver::Xpress => {
+                "Commercial FICO LP/MIP solver exposed only when installed locally and licensed."
+            }
+            ExternalLinearCliSolver::Lindo => {
+                "Commercial LINDO Systems LP/MIP solver exposed only when installed locally and licensed."
+            }
         }
     }
 
@@ -173,6 +294,8 @@ impl ExternalLinearCliSolver {
             ExternalLinearCliSolver::Scip => &["scip"],
             ExternalLinearCliSolver::Cbc => &["cbc"],
             ExternalLinearCliSolver::Clp => &["clp"],
+            ExternalLinearCliSolver::Soplex => &["soplex"],
+            ExternalLinearCliSolver::LpSolve => &["lp_solve", "lp-solve", "lpsolve"],
             ExternalLinearCliSolver::Gurobi => &["gurobi_cl"],
             ExternalLinearCliSolver::Cplex => &["cplex"],
             ExternalLinearCliSolver::Xpress => &["optimizer", "xpress"],
@@ -223,6 +346,21 @@ impl ExternalLinearCliSolver {
                 "DES_CLP_BIN",
                 "CLP_BIN",
             ],
+            ExternalLinearCliSolver::Soplex => &[
+                "SOPLEX_CMD",
+                "ORES_SOPLEX_CMD",
+                "ORES_SOPLEX_BIN",
+                "DES_SOPLEX_BIN",
+                "SOPLEX_BIN",
+            ],
+            ExternalLinearCliSolver::LpSolve => &[
+                "LP_SOLVE_CMD",
+                "LPSOLVE_CMD",
+                "ORES_LP_SOLVE_CMD",
+                "ORES_LPSOLVE_BIN",
+                "DES_LPSOLVE_BIN",
+                "LPSOLVE_BIN",
+            ],
             ExternalLinearCliSolver::Gurobi => &[
                 "GUROBI_CL_CMD",
                 "GUROBI_CMD",
@@ -270,6 +408,13 @@ impl ExternalLinearCliSolver {
             ExternalLinearCliSolver::Scip => &["SCIPOPTDIR", "SCIP_DIR", "SCIP_HOME"],
             ExternalLinearCliSolver::Cbc => &["CBC_DIR", "CBC_HOME", "COINOR_DIR", "COINOR_HOME"],
             ExternalLinearCliSolver::Clp => &["CLP_DIR", "CLP_HOME", "COINOR_DIR", "COINOR_HOME"],
+            ExternalLinearCliSolver::Soplex => &["SOPLEX_DIR", "SOPLEX_HOME"],
+            ExternalLinearCliSolver::LpSolve => &[
+                "LP_SOLVE_DIR",
+                "LPSOLVE_DIR",
+                "LP_SOLVE_HOME",
+                "LPSOLVE_HOME",
+            ],
             ExternalLinearCliSolver::Gurobi => &["GUROBI_HOME"],
             ExternalLinearCliSolver::Cplex => &["CPLEX_STUDIO_DIR", "CPLEX_HOME"],
             ExternalLinearCliSolver::Xpress => &["XPRESSDIR", "XPRESS_DIR", "XPRESS_HOME"],
@@ -290,6 +435,8 @@ impl ExternalLinearCliSolver {
                     | ExternalLinearCliSolver::Scip
                     | ExternalLinearCliSolver::Cbc
                     | ExternalLinearCliSolver::Clp
+                    | ExternalLinearCliSolver::Soplex
+                    | ExternalLinearCliSolver::LpSolve
                     | ExternalLinearCliSolver::Gurobi
                     | ExternalLinearCliSolver::Cplex
                     | ExternalLinearCliSolver::Xpress
@@ -301,6 +448,7 @@ impl ExternalLinearCliSolver {
                     | ExternalLinearCliSolver::Glpk
                     | ExternalLinearCliSolver::Scip
                     | ExternalLinearCliSolver::Cbc
+                    | ExternalLinearCliSolver::LpSolve
                     | ExternalLinearCliSolver::Gurobi
                     | ExternalLinearCliSolver::Cplex
                     | ExternalLinearCliSolver::Xpress
@@ -317,6 +465,8 @@ impl ExternalLinearCliSolver {
             ExternalLinearCliSolver::Scip,
             ExternalLinearCliSolver::Cbc,
             ExternalLinearCliSolver::Clp,
+            ExternalLinearCliSolver::Soplex,
+            ExternalLinearCliSolver::LpSolve,
         ]
     }
 
@@ -327,6 +477,7 @@ impl ExternalLinearCliSolver {
             ExternalLinearCliSolver::Glpk,
             ExternalLinearCliSolver::Scip,
             ExternalLinearCliSolver::Cbc,
+            ExternalLinearCliSolver::LpSolve,
         ]
     }
 
@@ -339,6 +490,50 @@ impl ExternalLinearCliSolver {
             ExternalLinearCliSolver::Lindo,
         ]
     }
+
+    pub fn spec(self) -> ExternalLinearCliSolverSpec {
+        ExternalLinearCliSolverSpec {
+            solver: self,
+            id: self.as_str(),
+            display_name: self.display_name(),
+            license_class: self.license_class(),
+            command_aliases: self.command_aliases(),
+            command_env_vars: self.command_env_vars(),
+            command_dir_env_vars: self.command_dir_env_vars(),
+            supports_lp: self.supports_kind(ExternalLinearCliKind::Lp),
+            supports_mip: self.supports_kind(ExternalLinearCliKind::Mip),
+            notes: self.notes(),
+        }
+    }
+}
+
+pub fn external_linear_cli_solver_specs() -> Vec<ExternalLinearCliSolverSpec> {
+    ExternalLinearCliSolver::all()
+        .iter()
+        .copied()
+        .map(ExternalLinearCliSolver::spec)
+        .collect()
+}
+
+pub fn external_linear_cli_solver_manifest() -> Value {
+    Value::Array(
+        external_linear_cli_solver_specs()
+            .into_iter()
+            .map(|spec| {
+                json!({
+                    "id": spec.id,
+                    "displayName": spec.display_name,
+                    "licenseClass": spec.license_class.as_str(),
+                    "commandAliases": spec.command_aliases,
+                    "commandEnvVars": spec.command_env_vars,
+                    "commandDirEnvVars": spec.command_dir_env_vars,
+                    "supportsLp": spec.supports_lp,
+                    "supportsMip": spec.supports_mip,
+                    "notes": spec.notes,
+                })
+            })
+            .collect(),
+    )
 }
 
 /// Availability/probe status for a local solver CLI.
@@ -1908,13 +2103,16 @@ fn option_strings(values: Option<&Vec<String>>) -> Value {
 #[cfg(test)]
 mod tests {
     use crate::des::general::external_linear_cli::{
-        external_linear_cli_command_with_options, find_command_in_install_dir,
-        ipmip_problem_to_cli_json, ipmip_problem_to_cplex_lp_string, ipmip_problem_to_mps_string,
-        lp_problem_to_cli_json, lp_problem_to_cplex_lp_string, lp_problem_to_mps_string,
-        multi_objective_ipmip_problem_to_cli_json, normalized_node_limit, normalized_random_seed,
-        normalized_relative_gap, normalized_threads, solver_command_env_var, ExternalLinearCliKind,
-        ExternalLinearCliModelFormat, ExternalLinearCliOptions, ExternalLinearCliProbeStatus,
-        ExternalLinearCliSolver, ExternalLinearCliStatus,
+        external_linear_cli_command, external_linear_cli_command_with_options,
+        external_linear_cli_solver_manifest, external_linear_cli_solver_specs,
+        find_command_in_install_dir, ipmip_problem_to_cli_json, ipmip_problem_to_cplex_lp_string,
+        ipmip_problem_to_mps_string, lp_problem_to_cli_json, lp_problem_to_cplex_lp_string,
+        lp_problem_to_mps_string, multi_objective_ipmip_problem_to_cli_json, normalized_node_limit,
+        normalized_random_seed, normalized_relative_gap, normalized_threads,
+        solve_ipmip_with_external_cli, solve_lp_with_external_cli, solver_command_env_var,
+        ExternalLinearCliKind, ExternalLinearCliLicenseClass, ExternalLinearCliModelFormat,
+        ExternalLinearCliOptions, ExternalLinearCliProbeStatus, ExternalLinearCliSolver,
+        ExternalLinearCliStatus,
     };
     use crate::des::general::ip_mip_des::{
         BranchOrCutConstraint, ConstraintKind, IPMIPProblem, LexicographicObjective,
@@ -2173,6 +2371,7 @@ mod tests {
 
     #[test]
     fn solver_aliases_and_kind_support_match_bridge_contract() {
+        assert_eq!(ExternalLinearCliSolver::all().len(), 11);
         assert_eq!(ExternalLinearCliSolver::Glpk.command_aliases(), &["glpsol"]);
         assert_eq!(
             ExternalLinearCliSolver::Highs.command_env_vars(),
@@ -2226,6 +2425,27 @@ mod tests {
             ]
         );
         assert_eq!(
+            ExternalLinearCliSolver::Soplex.command_env_vars(),
+            &[
+                "SOPLEX_CMD",
+                "ORES_SOPLEX_CMD",
+                "ORES_SOPLEX_BIN",
+                "DES_SOPLEX_BIN",
+                "SOPLEX_BIN"
+            ]
+        );
+        assert_eq!(
+            ExternalLinearCliSolver::LpSolve.command_env_vars(),
+            &[
+                "LP_SOLVE_CMD",
+                "LPSOLVE_CMD",
+                "ORES_LP_SOLVE_CMD",
+                "ORES_LPSOLVE_BIN",
+                "DES_LPSOLVE_BIN",
+                "LPSOLVE_BIN"
+            ]
+        );
+        assert_eq!(
             ExternalLinearCliSolver::Gurobi.command_env_vars(),
             &[
                 "GUROBI_CL_CMD",
@@ -2273,6 +2493,12 @@ mod tests {
         assert!(ExternalLinearCliSolver::Lindo
             .command_dir_env_vars()
             .contains(&"LINDOAPI_HOME"));
+        assert!(ExternalLinearCliSolver::LpSolve
+            .command_dir_env_vars()
+            .contains(&"LP_SOLVE_HOME"));
+        assert!(ExternalLinearCliSolver::Soplex
+            .command_dir_env_vars()
+            .contains(&"SOPLEX_HOME"));
         assert_eq!(
             ExternalLinearCliSolver::Xpress.command_aliases(),
             &["optimizer", "xpress"]
@@ -2281,14 +2507,89 @@ mod tests {
             ExternalLinearCliSolver::Lindo.command_aliases(),
             &["runlindo", "lindo", "lindoapi"]
         );
+        assert_eq!(
+            ExternalLinearCliSolver::LpSolve.command_aliases(),
+            &["lp_solve", "lp-solve", "lpsolve"]
+        );
+        assert_eq!(
+            ExternalLinearCliSolver::Soplex.command_aliases(),
+            &["soplex"]
+        );
         assert!(ExternalLinearCliSolver::Highs.supports_kind(ExternalLinearCliKind::Lp));
         assert!(ExternalLinearCliSolver::Highs.supports_kind(ExternalLinearCliKind::Mip));
         assert!(ExternalLinearCliSolver::Clp.supports_kind(ExternalLinearCliKind::Lp));
         assert!(!ExternalLinearCliSolver::Clp.supports_kind(ExternalLinearCliKind::Mip));
+        assert!(ExternalLinearCliSolver::Soplex.supports_kind(ExternalLinearCliKind::Lp));
+        assert!(!ExternalLinearCliSolver::Soplex.supports_kind(ExternalLinearCliKind::Mip));
+        assert!(ExternalLinearCliSolver::LpSolve.supports_kind(ExternalLinearCliKind::Lp));
+        assert!(ExternalLinearCliSolver::LpSolve.supports_kind(ExternalLinearCliKind::Mip));
         assert!(ExternalLinearCliSolver::Lindo.supports_kind(ExternalLinearCliKind::Lp));
         assert!(ExternalLinearCliSolver::Lindo.supports_kind(ExternalLinearCliKind::Mip));
         assert!(ExternalLinearCliSolver::Xpress.supports_kind(ExternalLinearCliKind::Lp));
         assert!(ExternalLinearCliSolver::Xpress.supports_kind(ExternalLinearCliKind::Mip));
+    }
+
+    #[test]
+    fn solver_manifest_matches_bridge_contract() {
+        let specs = external_linear_cli_solver_specs();
+        assert_eq!(specs.len(), 11);
+        assert_eq!(
+            specs
+                .iter()
+                .filter(|spec| spec.license_class == ExternalLinearCliLicenseClass::OpenSource)
+                .count(),
+            7
+        );
+        assert_eq!(
+            specs
+                .iter()
+                .filter(|spec| spec.license_class == ExternalLinearCliLicenseClass::Commercial)
+                .count(),
+            4
+        );
+
+        let highs = ExternalLinearCliSolver::Highs.spec();
+        assert_eq!(highs.id, "highs");
+        assert_eq!(highs.display_name, "HiGHS");
+        assert_eq!(highs.license_class.as_str(), "open-source");
+        assert!(highs.command_aliases.contains(&"highs"));
+        assert!(highs.command_env_vars.contains(&"ORES_HIGHS_BIN"));
+        assert!(highs.command_dir_env_vars.contains(&"HIGHS_HOME"));
+        assert!(highs.supports_lp);
+        assert!(highs.supports_mip);
+
+        let clp = ExternalLinearCliSolver::Clp.spec();
+        assert_eq!(clp.display_name, "COIN-OR CLP");
+        assert!(clp.supports_lp);
+        assert!(!clp.supports_mip);
+
+        let soplex = ExternalLinearCliSolver::Soplex.spec();
+        assert_eq!(soplex.id, "soplex");
+        assert!(soplex.command_env_vars.contains(&"SOPLEX_CMD"));
+        assert!(soplex.supports_lp);
+        assert!(!soplex.supports_mip);
+
+        let lindo = ExternalLinearCliSolver::Lindo.spec();
+        assert_eq!(
+            lindo.license_class,
+            ExternalLinearCliLicenseClass::Commercial
+        );
+        assert!(lindo.command_env_vars.contains(&"LINDOAPI_CMD"));
+        assert!(lindo.command_dir_env_vars.contains(&"LINDOAPI_HOME"));
+        assert!(lindo.supports_lp);
+        assert!(lindo.supports_mip);
+
+        let manifest = external_linear_cli_solver_manifest();
+        let items = manifest.as_array().expect("manifest array");
+        assert_eq!(items.len(), 11);
+        assert!(items.iter().any(|item| {
+            item.get("id").and_then(|value| value.as_str()) == Some("cbc")
+                && item
+                    .get("commandAliases")
+                    .and_then(|value| value.as_array())
+                    .is_some_and(|aliases| aliases.iter().any(|alias| alias == "cbc"))
+                && item.get("supportsMip").and_then(|value| value.as_bool()) == Some(true)
+        }));
     }
 
     #[test]
@@ -2315,6 +2616,100 @@ mod tests {
             solver_command_env_var(ExternalLinearCliSolver::Glpk),
             "ORES_GLPK_BIN"
         );
+    }
+
+    #[test]
+    fn installed_open_source_cli_solvers_cross_check_same_input_smoke_models() {
+        let lp = super::external_linear_cli_smoke_lp();
+        let mut lp_checked = 0;
+        for solver in ExternalLinearCliSolver::open_source_lp().iter().copied() {
+            let Some(command) = external_linear_cli_command(solver) else {
+                eprintln!("SKIP LP {}: command not installed", solver.as_str());
+                continue;
+            };
+            let solution = solve_lp_with_external_cli(
+                &lp,
+                &ExternalLinearCliOptions {
+                    solver,
+                    command_path: Some(command.clone()),
+                    time_limit_secs: Some(2.0),
+                    ..Default::default()
+                },
+            );
+            assert_eq!(
+                solution.status,
+                ExternalLinearCliStatus::Optimal,
+                "LP {} via {:?}: {}",
+                solver.as_str(),
+                command,
+                solution.message
+            );
+            assert_eq!(solution.solver, format!("{}:cli", solver.as_str()));
+            assert_eq!(solution.x.len(), 1, "LP {} x length", solver.as_str());
+            assert!(
+                (solution.x[0] - 1.0).abs() <= 1.0e-8,
+                "LP {} x={:?}",
+                solver.as_str(),
+                solution.x
+            );
+            assert!(
+                solution
+                    .objective
+                    .is_some_and(|objective| (objective - 1.0).abs() <= 1.0e-8),
+                "LP {} objective={:?}",
+                solver.as_str(),
+                solution.objective
+            );
+            lp_checked += 1;
+        }
+
+        let mip = super::external_linear_cli_smoke_mip();
+        let mut mip_checked = 0;
+        for solver in ExternalLinearCliSolver::open_source_mip().iter().copied() {
+            let Some(command) = external_linear_cli_command(solver) else {
+                eprintln!("SKIP MIP {}: command not installed", solver.as_str());
+                continue;
+            };
+            let solution = solve_ipmip_with_external_cli(
+                &mip,
+                &ExternalLinearCliOptions {
+                    solver,
+                    command_path: Some(command.clone()),
+                    time_limit_secs: Some(2.0),
+                    random_seed: Some(7),
+                    ..Default::default()
+                },
+            );
+            assert_eq!(
+                solution.status,
+                ExternalLinearCliStatus::Optimal,
+                "MIP {} via {:?}: {}",
+                solver.as_str(),
+                command,
+                solution.message
+            );
+            assert_eq!(solution.solver, format!("{}:cli", solver.as_str()));
+            assert_eq!(solution.x.len(), 1, "MIP {} x length", solver.as_str());
+            assert!(
+                (solution.x[0] - 1.0).abs() <= 1.0e-8,
+                "MIP {} x={:?}",
+                solver.as_str(),
+                solution.x
+            );
+            assert!(
+                solution
+                    .objective
+                    .is_some_and(|objective| (objective - 1.0).abs() <= 1.0e-8),
+                "MIP {} objective={:?}",
+                solver.as_str(),
+                solution.objective
+            );
+            mip_checked += 1;
+        }
+
+        if lp_checked == 0 && mip_checked == 0 {
+            eprintln!("SKIP open-source CLI same-input smoke: no solver commands installed");
+        }
     }
 
     #[test]

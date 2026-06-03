@@ -11242,6 +11242,74 @@ impl Driver {
             ),
         }
 
+        let mut tolerant_lp = MathProgram::new(MathObjectiveSense::Max);
+        let tolerant_lp_y = tolerant_lp
+            .add_continuous_var("tolerant-lp-y", 0.0, Some(0.0), Some(10.0))
+            .expect("tolerant LP y");
+        let tolerant_lp_z = tolerant_lp
+            .add_continuous_var("tolerant-lp-z", 0.0, Some(0.0), Some(10.0))
+            .expect("tolerant LP z");
+        tolerant_lp
+            .add_constraint(
+                "tolerant-lp-capacity",
+                vec![(tolerant_lp_y, 1.0), (tolerant_lp_z, 1.0)],
+                RowSense::Le,
+                10.0,
+            )
+            .expect("tolerant LP capacity");
+        tolerant_lp
+            .add_secondary_objective_with_tolerances(
+                "prefer-y-with-degradation",
+                MathObjectiveSense::Max,
+                10,
+                1.0,
+                1.0,
+                0.1,
+                vec![(tolerant_lp_y, 1.0)],
+            )
+            .expect("tolerant LP y objective");
+        tolerant_lp
+            .add_secondary_objective(
+                "prefer-z-after-degradation",
+                MathObjectiveSense::Max,
+                1,
+                1.0,
+                vec![(tolerant_lp_z, 1.0)],
+            )
+            .expect("tolerant LP z objective");
+        match cross_check_math_program_with_external(&tolerant_lp, &solve_opts, &external_opts, 1e-7)
+        {
+            Ok(report) => self.check(
+                "MathProgram hierarchical LP tolerance same-input HiGHS cross-check",
+                report.within_tolerance
+                    && report.internal.status == MathProgramStatus::Optimal
+                    && report.external.status == MathProgramStatus::Optimal
+                    && report.internal.solver.starts_with("des-hierarchical(")
+                    && report.external.solver.starts_with("external-hierarchical(")
+                    && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && (report.internal.x[tolerant_lp_y] - 8.0).abs() <= 1e-7
+                    && (report.internal.x[tolerant_lp_z] - 2.0).abs() <= 1e-7,
+                format!(
+                    "internal={:?} external={:?} solvers=({},{}) obj_diff={:?} x_diff={:?} x={:?} messages=({:?},{:?})",
+                    report.internal.status,
+                    report.external.status,
+                    report.internal.solver,
+                    report.external.solver,
+                    report.objective_abs_diff,
+                    report.max_x_abs_diff,
+                    report.internal.x,
+                    report.internal.message,
+                    report.external.message
+                ),
+            ),
+            Err(err) => self.check(
+                "MathProgram hierarchical LP tolerance same-input HiGHS cross-check",
+                false,
+                format!("{err:?}"),
+            ),
+        }
+
         let mut basis_math_lp = MathProgram::new(MathObjectiveSense::Max);
         let basis_x = basis_math_lp
             .add_continuous_var("x", 3.0, Some(0.0), None)

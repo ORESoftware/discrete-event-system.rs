@@ -498,6 +498,15 @@ fn player_max_contiguous_on_field(problem: &SoccerProblem, p: usize) -> Option<u
         .filter(|&limit| limit >= 1)
 }
 
+fn player_max_contiguous_bench(problem: &SoccerProblem, p: usize) -> Option<usize> {
+    problem
+        .max_contiguous_bench
+        .as_ref()
+        .and_then(|limits| limits.get(p))
+        .copied()
+        .filter(|&limit| limit >= 1)
+}
+
 /// Effective score for `(player, position)` in period `t` given the full lineup
 /// (applies synergy overrides on top of the base affinity tensor).
 pub fn effective_cell_affinity(
@@ -587,6 +596,7 @@ pub fn evaluate_schedule(problem: &SoccerProblem, schedule: &Schedule) -> Schedu
     }
     let consecutive_on_field_violations = consecutive_on_field_violations(problem, schedule);
     let min_contiguous_on_field_violations = min_contiguous_on_field_violations(problem, schedule);
+    let max_contiguous_bench_violations = max_contiguous_bench_violations(problem, schedule);
     let total_subs = count_subs(problem, schedule);
     let subs_ok = problem
         .min_subs_per_game
@@ -599,12 +609,13 @@ pub fn evaluate_schedule(problem: &SoccerProblem, schedule: &Schedule) -> Schedu
     ScheduleEvaluation {
         affinity_sum: total,
         per_period_affinity: per_period,
-        fairness_ok: fairness_violations.is_empty(),
+        fairness_ok: fairness_violations.is_empty() && max_contiguous_bench_violations.is_empty(),
         fairness_violations,
         stamina_ok: consecutive_on_field_violations.is_empty()
             && min_contiguous_on_field_violations.is_empty(),
         consecutive_on_field_violations,
         min_contiguous_on_field_violations,
+        max_contiguous_bench_violations,
         subs_ok,
         total_subs,
         bench_counts,

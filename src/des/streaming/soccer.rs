@@ -51,7 +51,9 @@ impl StreamingSoccerPlanner {
                     "synergies": self.request.synergies.len(),
                     "minSubsPerGame": self.request.min_subs_per_game,
                     "maxSubsPerGame": self.request.max_subs_per_game,
-                    "maxConsecutiveOnField": self.request.max_consecutive_on_field
+                    "defaultMinContiguousBlocks": self.request.default_min_contiguous_blocks,
+                    "defaultMaxContiguousBlocks": self.request.default_max_contiguous_blocks,
+                    "defaultMaxBenchBlocks": self.request.default_max_bench_blocks
                 })
             }
             Err(err) => error_frame(err),
@@ -125,8 +127,8 @@ impl StreamingModel for StreamingSoccerPlanner {
                 ),
                 StreamOp::new(
                     "set_match",
-                    "Set periods, minutesPerPeriod, maxSubsPerGame, maxConsecutiveOnField, seed, and solver budgets.",
-                    json!({"op":"set_match","numPeriods":4,"minutesPerPeriod":10,"maxConsecutiveOnField":3}),
+                    "Set match length, substitution bounds, default contiguous 5-minute block limits, seed, and solver budgets.",
+                    json!({"op":"set_match","numPeriods":2,"minutesPerPeriod":45,"defaultMinContiguousBlocks":1,"defaultMaxContiguousBlocks":4,"defaultMaxBenchBlocks":3}),
                 ),
                 StreamOp::new(
                     "set_formation",
@@ -136,7 +138,7 @@ impl StreamingModel for StreamingSoccerPlanner {
                 StreamOp::new(
                     "add_player",
                     "Add a player variable. Alias: add_variable.",
-                    json!({"op":"add_player","name":"Guest 13","status":"guest"}),
+                    json!({"op":"add_player","name":"Guest 13","status":"guest","minContiguousBlocks":1,"maxContiguousBlocks":4,"maxBenchBlocks":3}),
                 ),
                 StreamOp::new(
                     "remove_player",
@@ -165,8 +167,8 @@ impl StreamingModel for StreamingSoccerPlanner {
                 ),
                 StreamOp::new(
                     "add_synergy",
-                    "Add an auxiliary chemistry variable and linking constraints.",
-                    json!({"op":"add_synergy","player":9,"position":10,"partnerPlayer":7,"partnerPosition":6,"scoreWith":0.92,"scoreWithout":0.78}),
+                    "Add bidirectional auxiliary chemistry variables and linking constraints.",
+                    json!({"op":"add_synergy","player":9,"position":10,"partnerPlayer":7,"partnerPosition":6,"scoreWith":0.92,"scoreWithout":0.78,"partnerScoreWith":0.9,"partnerScoreWithout":0.76}),
                 ),
                 StreamOp::new(
                     "snapshot",

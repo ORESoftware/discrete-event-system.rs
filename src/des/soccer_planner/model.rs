@@ -8,6 +8,9 @@ use crate::des::general::soccer_rotation::{
     parse_outfield_formation, PlayerStatus, PositionSynergyRule,
 };
 
+pub const CONTIGUOUS_BLOCK_MINUTES: usize = 5;
+pub const MAX_CONTIGUOUS_BLOCKS: usize = 18;
+
 /// One player row in the planner UI.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -23,6 +26,15 @@ pub struct PlannerPlayer {
     pub banned_positions: Vec<usize>,
     /// If set, player is locked to this position index for the whole match.
     pub fixed_position: Option<usize>,
+    /// Optional player-specific minimum contiguous 5-minute blocks per stint.
+    #[serde(default)]
+    pub min_contiguous_blocks: Option<usize>,
+    /// Optional player-specific maximum contiguous 5-minute blocks per stint.
+    #[serde(default)]
+    pub max_contiguous_blocks: Option<usize>,
+    /// Optional player-specific maximum contiguous 5-minute blocks on bench.
+    #[serde(default)]
+    pub max_bench_blocks: Option<usize>,
 }
 
 /// Chemistry rule: conditional position score.
@@ -35,6 +47,10 @@ pub struct PlannerSynergy {
     pub partner_position: usize,
     pub score_with: f64,
     pub score_without: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partner_score_with: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partner_score_without: Option<f64>,
 }
 
 /// Full planner configuration POSTed from the UI.
@@ -52,8 +68,15 @@ pub struct PlannerRequest {
     pub max_subs_per_game: usize,
     #[serde(default = "default_min_subs")]
     pub min_subs_per_game: usize,
-    #[serde(default = "default_stamina")]
-    pub max_consecutive_on_field: usize,
+    #[serde(default = "default_min_contiguous_blocks")]
+    pub default_min_contiguous_blocks: usize,
+    #[serde(
+        default = "default_max_contiguous_blocks",
+        alias = "maxConsecutiveOnField"
+    )]
+    pub default_max_contiguous_blocks: usize,
+    #[serde(default = "default_max_bench_blocks")]
+    pub default_max_bench_blocks: usize,
     pub players: Vec<PlannerPlayer>,
     #[serde(default)]
     pub synergies: Vec<PlannerSynergy>,
@@ -83,12 +106,18 @@ fn default_minutes() -> usize {
     45
 }
 fn default_max_subs() -> usize {
-    7
+    119
 }
 fn default_min_subs() -> usize {
     0
 }
-fn default_stamina() -> usize {
+fn default_min_contiguous_blocks() -> usize {
+    1
+}
+fn default_max_contiguous_blocks() -> usize {
+    4
+}
+fn default_max_bench_blocks() -> usize {
     3
 }
 fn default_seed() -> u32 {
@@ -139,7 +168,7 @@ pub fn default_planner_request() -> PlannerRequest {
         if best > 0 {
             scores[best - 1] = 0.58;
         }
-        // GK slot only for player 0 by default.
+        // Player 1 starts as the strongest GK option, but GK is rotatable.
         if p == 0 {
             scores.fill(0.2);
             scores[0] = 0.95;
@@ -149,12 +178,11 @@ pub fn default_planner_request() -> PlannerRequest {
             name: format!("Player{}", p + 1),
             status: "available".to_string(),
             position_scores: scores,
-            banned_positions: if p == 0 {
-                (1..num_positions).collect()
-            } else {
-                vec![0]
-            },
-            fixed_position: if p == 0 { Some(0) } else { None },
+            banned_positions: Vec::new(),
+            fixed_position: None,
+            min_contiguous_blocks: None,
+            max_contiguous_blocks: None,
+            max_bench_blocks: None,
         });
     }
 
@@ -168,15 +196,19 @@ pub fn default_planner_request() -> PlannerRequest {
         partner_position: cm_pos,
         score_with: 0.92,
         score_without: 0.78,
+        partner_score_with: Some(0.9),
+        partner_score_without: Some(0.76),
     }];
 
     PlannerRequest {
         outfield_formation: outfield,
         num_periods: 2,
         minutes_per_period: 45,
-        max_subs_per_game: 7,
+        max_subs_per_game: 119,
         min_subs_per_game: 0,
-        max_consecutive_on_field: 3,
+        default_min_contiguous_blocks: 1,
+        default_max_contiguous_blocks: 4,
+        default_max_bench_blocks: 3,
         players,
         synergies,
         seed: 4242,
@@ -209,8 +241,34 @@ pub fn synergy_to_rule(s: &PlannerSynergy) -> PositionSynergyRule {
     }
 }
 
+pub fn synergy_to_rules(s: &PlannerSynergy) -> Vec<PositionSynergyRule> {
+    let mut rules = vec![synergy_to_rule(s)];
+    if let (Some(score_with), Some(score_without)) = (s.partner_score_with, s.partner_score_without)
+    {
+        rules.push(PositionSynergyRule {
+            player: s.partner_player,
+            position: s.partner_position,
+            partner_player: s.player,
+            partner_position: s.position,
+            score_with: score_with.clamp(0.0, 1.0),
+            score_without: score_without.clamp(0.0, 1.0),
+        });
+    }
+    rules
+}
+
 pub fn planner_position_count(req: &PlannerRequest) -> usize {
     formation_with_gk(&req.outfield_formation).iter().sum()
+}
+
+pub fn planner_block_count(req: &PlannerRequest) -> usize {
+    let total_minutes = req
+        .num_periods
+        .max(1)
+        .saturating_mul(req.minutes_per_period.max(1));
+    total_minutes
+        .div_ceil(CONTIGUOUS_BLOCK_MINUTES)
+        .clamp(1, MAX_CONTIGUOUS_BLOCKS)
 }
 
 pub fn normalize_planner_request(req: &mut PlannerRequest) {
@@ -222,7 +280,16 @@ pub fn normalize_planner_request(req: &mut PlannerRequest) {
     if req.min_subs_per_game > req.max_subs_per_game {
         req.min_subs_per_game = req.max_subs_per_game;
     }
-    req.max_consecutive_on_field = req.max_consecutive_on_field.max(1);
+    req.default_min_contiguous_blocks = req
+        .default_min_contiguous_blocks
+        .clamp(1, MAX_CONTIGUOUS_BLOCKS);
+    req.default_max_contiguous_blocks = req
+        .default_max_contiguous_blocks
+        .clamp(1, MAX_CONTIGUOUS_BLOCKS);
+    if req.default_min_contiguous_blocks > req.default_max_contiguous_blocks {
+        req.default_max_contiguous_blocks = req.default_min_contiguous_blocks;
+    }
+    req.default_max_bench_blocks = req.default_max_bench_blocks.clamp(1, MAX_CONTIGUOUS_BLOCKS);
     req.solver_time_limit_ms = req.solver_time_limit_ms.max(250.0);
     req.solver_max_nodes = req.solver_max_nodes.max(1);
     req.solver_max_ticks = req.solver_max_ticks.max(1);
@@ -246,6 +313,21 @@ pub fn normalize_planner_request(req: &mut PlannerRequest) {
         if player.fixed_position.map(|p| p >= n_pos).unwrap_or(false) {
             player.fixed_position = None;
         }
+        if let Some(v) = player.min_contiguous_blocks {
+            player.min_contiguous_blocks = Some(v.clamp(1, MAX_CONTIGUOUS_BLOCKS));
+        }
+        if let Some(v) = player.max_contiguous_blocks {
+            player.max_contiguous_blocks = Some(v.clamp(1, MAX_CONTIGUOUS_BLOCKS));
+        }
+        if let Some(v) = player.max_bench_blocks {
+            player.max_bench_blocks = Some(v.clamp(1, MAX_CONTIGUOUS_BLOCKS));
+        }
+        if let (Some(min), Some(max)) = (player.min_contiguous_blocks, player.max_contiguous_blocks)
+        {
+            if min > max {
+                player.max_contiguous_blocks = Some(min);
+            }
+        }
     }
     req.synergies.retain(|s| {
         s.player < req.players.len()
@@ -256,6 +338,8 @@ pub fn normalize_planner_request(req: &mut PlannerRequest) {
     for s in &mut req.synergies {
         s.score_with = s.score_with.clamp(0.0, 1.0);
         s.score_without = s.score_without.clamp(0.0, 1.0);
+        s.partner_score_with = s.partner_score_with.map(|v| v.clamp(0.0, 1.0));
+        s.partner_score_without = s.partner_score_without.map(|v| v.clamp(0.0, 1.0));
     }
 }
 
@@ -312,6 +396,9 @@ fn default_new_player(req: &PlannerRequest, name: String, status: String) -> Pla
         position_scores: vec![0.5; n_pos],
         banned_positions: Vec::new(),
         fixed_position: None,
+        min_contiguous_blocks: None,
+        max_contiguous_blocks: None,
+        max_bench_blocks: None,
     }
 }
 
@@ -360,8 +447,21 @@ pub fn apply_planner_stream_command(
             if let Some(v) = value_usize(command, "minSubsPerGame") {
                 req.min_subs_per_game = v;
             }
-            if let Some(v) = value_usize(command, "maxConsecutiveOnField") {
-                req.max_consecutive_on_field = v;
+            if let Some(v) = value_usize(command, "defaultMinContiguousBlocks")
+                .or_else(|| value_usize(command, "minContiguousBlocks"))
+            {
+                req.default_min_contiguous_blocks = v;
+            }
+            if let Some(v) = value_usize(command, "defaultMaxContiguousBlocks")
+                .or_else(|| value_usize(command, "maxConsecutiveOnField"))
+                .or_else(|| value_usize(command, "maxContiguousBlocks"))
+            {
+                req.default_max_contiguous_blocks = v;
+            }
+            if let Some(v) = value_usize(command, "defaultMaxBenchBlocks")
+                .or_else(|| value_usize(command, "maxBenchBlocks"))
+            {
+                req.default_max_bench_blocks = v;
             }
             if let Some(v) = value_usize(command, "seed") {
                 req.seed = v as u32;
@@ -415,6 +515,24 @@ pub fn apply_planner_stream_command(
                     .and_then(Value::as_u64)
                     .map(|n| n as usize);
             }
+            if command.get("minContiguousBlocks").is_some() {
+                player.min_contiguous_blocks = command
+                    .get("minContiguousBlocks")
+                    .and_then(Value::as_u64)
+                    .map(|n| n as usize);
+            }
+            if command.get("maxContiguousBlocks").is_some() {
+                player.max_contiguous_blocks = command
+                    .get("maxContiguousBlocks")
+                    .and_then(Value::as_u64)
+                    .map(|n| n as usize);
+            }
+            if command.get("maxBenchBlocks").is_some() {
+                player.max_bench_blocks = command
+                    .get("maxBenchBlocks")
+                    .and_then(Value::as_u64)
+                    .map(|n| n as usize);
+            }
             req.players.push(player);
         }
         "remove_player" | "remove_variable" => {
@@ -443,6 +561,24 @@ pub fn apply_planner_stream_command(
             if command.get("fixedPosition").is_some() {
                 player.fixed_position = command
                     .get("fixedPosition")
+                    .and_then(Value::as_u64)
+                    .map(|n| n as usize);
+            }
+            if command.get("minContiguousBlocks").is_some() {
+                player.min_contiguous_blocks = command
+                    .get("minContiguousBlocks")
+                    .and_then(Value::as_u64)
+                    .map(|n| n as usize);
+            }
+            if command.get("maxContiguousBlocks").is_some() {
+                player.max_contiguous_blocks = command
+                    .get("maxContiguousBlocks")
+                    .and_then(Value::as_u64)
+                    .map(|n| n as usize);
+            }
+            if command.get("maxBenchBlocks").is_some() {
+                player.max_bench_blocks = command
+                    .get("maxBenchBlocks")
                     .and_then(Value::as_u64)
                     .map(|n| n as usize);
             }
@@ -538,6 +674,8 @@ pub fn apply_planner_stream_command(
                         .ok_or_else(|| "add_synergy needs `partnerPosition`".to_string())?,
                     score_with: value_f64(command, "scoreWith").unwrap_or(0.9),
                     score_without: value_f64(command, "scoreWithout").unwrap_or(0.7),
+                    partner_score_with: value_f64(command, "partnerScoreWith"),
+                    partner_score_without: value_f64(command, "partnerScoreWithout"),
                 }
             };
             req.synergies.push(synergy);

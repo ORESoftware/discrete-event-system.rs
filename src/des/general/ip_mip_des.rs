@@ -8116,6 +8116,28 @@ mod tests {
     }
 
     #[test]
+    fn external_lp_backend_requires_explicit_opt_in() {
+        let p = build_binary_knapsack_ip(vec![60.0, 100.0, 120.0], vec![10.0, 20.0, 30.0], 50.0);
+        let result = std::panic::catch_unwind(|| {
+            solve_ipmip_with_des(
+                p,
+                IPMIPSolveOptions {
+                    lp_algorithm: Some(LpRelaxationAlgorithm::Concrete(
+                        ConcreteLpRelaxationAlgorithm::ExternalHighs,
+                    )),
+                    allow_external_solvers: Some(false),
+                    ..Default::default()
+                },
+            )
+        });
+
+        assert!(
+            result.is_err(),
+            "external LP backend should be rejected unless allow_external_solvers is true"
+        );
+    }
+
+    #[test]
     fn mip_start_seeds_incumbent_when_feasible() {
         let p = build_binary_knapsack_ip(vec![60.0, 100.0, 120.0], vec![10.0, 20.0, 30.0], 50.0);
         let sol = solve_ipmip_with_des(

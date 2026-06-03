@@ -6,11 +6,11 @@
 //! match simulator used as the evaluator.
 //!
 //! The problem: a configurable roster (default 12; e.g. 11 or 13), 7 on field,
-//! the rest on bench, a match split into T periods. For each (player, position,
-//! period) there is an affinity in [0, 1].
+//! the rest on bench, a match split into T time slots. For each (player,
+//! position, time slot) there is an affinity in [0, 1].
 //! Fairness constraint: no player may be benched two periods in a row.
 //! Stamina constraint (optional): no player may stay on the field for more than
-//! `max_consecutive_on_field` consecutive periods. Goal: pick a schedule that
+//! the configured consecutive time-slot limit. Goal: pick a schedule that
 //! maximises total affinity (and simulated goal differential).
 //!
 //! ## Conversion notes (per the TS "RUST MIGRATION" header)
@@ -84,6 +84,16 @@ pub struct SoccerProblem {
     /// Max consecutive periods any single player may stay on the field. `None`
     /// disables the stamina constraint (the historical behaviour).
     pub max_consecutive_on_field: Option<usize>,
+    /// Optional per-player minimum contiguous on-field run lengths.
+    pub min_contiguous_on_field: Option<Vec<usize>>,
+    /// Optional per-player maximum contiguous on-field run lengths. When set,
+    /// this overrides [`Self::max_consecutive_on_field`] for the listed players.
+    pub max_contiguous_on_field: Option<Vec<usize>>,
+    /// Optional per-player maximum contiguous bench run lengths.
+    pub max_contiguous_bench: Option<Vec<usize>>,
+    /// Enforce the legacy rule that a player may not be benched in two
+    /// consecutive schedule slots.
+    pub enforce_no_consecutive_bench: bool,
     /// Max substitution events (players subbed off) across the whole match.
     pub max_subs_per_game: Option<usize>,
     /// Min substitution events (players subbed off) across the whole match.
@@ -222,6 +232,10 @@ pub fn build_sample_soccer_problem(opts: &AffinityBuilderOptions) -> SoccerProbl
         num_periods,
         bench_size,
         max_consecutive_on_field,
+        min_contiguous_on_field: None,
+        max_contiguous_on_field: None,
+        max_contiguous_bench: None,
+        enforce_no_consecutive_bench: true,
         max_subs_per_game: None,
         min_subs_per_game: None,
         affinity: aff,
@@ -372,6 +386,31 @@ pub struct ConsecutiveOnFieldViolation {
     pub length: usize,
 }
 
+/// A stint-length violation: a player leaves the field before the configured
+/// minimum contiguous on-field run length.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MinContiguousOnFieldViolation {
+    pub player_id: usize,
+    /// First period/time slot of the too-short on-field run (0-based).
+    pub start_period: usize,
+    /// Number of consecutive periods/time slots on the field.
+    pub length: usize,
+    /// Configured minimum run length for this player.
+    pub min_length: usize,
+}
+
+/// A bench-run violation: a player stays on the bench longer than allowed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MaxContiguousBenchViolation {
+    pub player_id: usize,
+    /// First period/time slot of the over-long bench run (0-based).
+    pub start_period: usize,
+    /// Number of consecutive periods/time slots on the bench.
+    pub length: usize,
+    /// Configured maximum bench run length for this player.
+    pub max_length: usize,
+}
+
 /// The deterministic evaluation of a schedule.
 #[derive(Clone, Debug)]
 pub struct ScheduleEvaluation {
@@ -382,6 +421,8 @@ pub struct ScheduleEvaluation {
     /// `true` when there is no stamina cap, or no run exceeds it.
     pub stamina_ok: bool,
     pub consecutive_on_field_violations: Vec<ConsecutiveOnFieldViolation>,
+    pub min_contiguous_on_field_violations: Vec<MinContiguousOnFieldViolation>,
+    pub max_contiguous_bench_violations: Vec<MaxContiguousBenchViolation>,
     /// `true` when there is no substitution bound violation.
     pub subs_ok: bool,
     pub total_subs: usize,
@@ -436,6 +477,34 @@ fn player_can_play_position(problem: &SoccerProblem, p: usize, pos: usize) -> bo
             .map(|fixed| fixed == pos)
             .unwrap_or(true)
         && !player_banned_from_position(problem, p, pos)
+}
+
+fn player_min_contiguous_on_field(problem: &SoccerProblem, p: usize) -> Option<usize> {
+    problem
+        .min_contiguous_on_field
+        .as_ref()
+        .and_then(|limits| limits.get(p))
+        .copied()
+        .filter(|&limit| limit > 1)
+}
+
+fn player_max_contiguous_on_field(problem: &SoccerProblem, p: usize) -> Option<usize> {
+    problem
+        .max_contiguous_on_field
+        .as_ref()
+        .and_then(|limits| limits.get(p))
+        .copied()
+        .or(problem.max_consecutive_on_field)
+        .filter(|&limit| limit >= 1)
+}
+
+fn player_max_contiguous_bench(problem: &SoccerProblem, p: usize) -> Option<usize> {
+    problem
+        .max_contiguous_bench
+        .as_ref()
+        .and_then(|limits| limits.get(p))
+        .copied()
+        .filter(|&limit| limit >= 1)
 }
 
 /// Effective score for `(player, position)` in period `t` given the full lineup
@@ -503,17 +572,19 @@ pub fn evaluate_schedule(problem: &SoccerProblem, schedule: &Schedule) -> Schedu
         total += s;
     }
     let mut fairness_violations: Vec<FairnessViolation> = Vec::new();
-    for t in 0..t_count.saturating_sub(1) {
-        for &p in &schedule.bench[t] {
-            if !player_is_fieldable(problem, p) {
-                continue;
-            }
-            if schedule.bench[t + 1].contains(&p) {
-                fairness_violations.push(FairnessViolation {
-                    player_id: p,
-                    period_a: t,
-                    period_b: t + 1,
-                });
+    if problem.enforce_no_consecutive_bench {
+        for t in 0..t_count.saturating_sub(1) {
+            for &p in &schedule.bench[t] {
+                if !player_is_fieldable(problem, p) {
+                    continue;
+                }
+                if schedule.bench[t + 1].contains(&p) {
+                    fairness_violations.push(FairnessViolation {
+                        player_id: p,
+                        period_a: t,
+                        period_b: t + 1,
+                    });
+                }
             }
         }
     }
@@ -524,6 +595,8 @@ pub fn evaluate_schedule(problem: &SoccerProblem, schedule: &Schedule) -> Schedu
         }
     }
     let consecutive_on_field_violations = consecutive_on_field_violations(problem, schedule);
+    let min_contiguous_on_field_violations = min_contiguous_on_field_violations(problem, schedule);
+    let max_contiguous_bench_violations = max_contiguous_bench_violations(problem, schedule);
     let total_subs = count_subs(problem, schedule);
     let subs_ok = problem
         .min_subs_per_game
@@ -536,10 +609,13 @@ pub fn evaluate_schedule(problem: &SoccerProblem, schedule: &Schedule) -> Schedu
     ScheduleEvaluation {
         affinity_sum: total,
         per_period_affinity: per_period,
-        fairness_ok: fairness_violations.is_empty(),
+        fairness_ok: fairness_violations.is_empty() && max_contiguous_bench_violations.is_empty(),
         fairness_violations,
-        stamina_ok: consecutive_on_field_violations.is_empty(),
+        stamina_ok: consecutive_on_field_violations.is_empty()
+            && min_contiguous_on_field_violations.is_empty(),
         consecutive_on_field_violations,
+        min_contiguous_on_field_violations,
+        max_contiguous_bench_violations,
         subs_ok,
         total_subs,
         bench_counts,
@@ -553,10 +629,6 @@ pub fn consecutive_on_field_violations(
     problem: &SoccerProblem,
     schedule: &Schedule,
 ) -> Vec<ConsecutiveOnFieldViolation> {
-    let limit = match problem.max_consecutive_on_field {
-        Some(limit) => limit,
-        None => return Vec::new(),
-    };
     let t_count = problem.num_periods;
     let mut on_field = vec![vec![false; problem.num_players]; t_count];
     for t in 0..t_count {
@@ -568,6 +640,9 @@ pub fn consecutive_on_field_violations(
     }
     let mut violations: Vec<ConsecutiveOnFieldViolation> = Vec::new();
     for p in 0..problem.num_players {
+        let Some(limit) = player_max_contiguous_on_field(problem, p) else {
+            continue;
+        };
         let mut run = 0usize;
         let mut run_start = 0usize;
         for t in 0..t_count {
@@ -592,6 +667,111 @@ pub fn consecutive_on_field_violations(
                 player_id: p,
                 start_period: run_start,
                 length: run,
+            });
+        }
+    }
+    violations
+}
+
+/// Find every run where a player stays on the field for fewer than their
+/// configured minimum contiguous slots. Empty when all minimums are one slot.
+pub fn min_contiguous_on_field_violations(
+    problem: &SoccerProblem,
+    schedule: &Schedule,
+) -> Vec<MinContiguousOnFieldViolation> {
+    let t_count = problem.num_periods;
+    let mut on_field = vec![vec![false; problem.num_players]; t_count];
+    for t in 0..t_count {
+        for &p in &schedule.assignment[t] {
+            if p >= 0 && (p as usize) < problem.num_players {
+                on_field[t][p as usize] = true;
+            }
+        }
+    }
+    let mut violations: Vec<MinContiguousOnFieldViolation> = Vec::new();
+    for p in 0..problem.num_players {
+        let Some(limit) = player_min_contiguous_on_field(problem, p) else {
+            continue;
+        };
+        let mut run = 0usize;
+        let mut run_start = 0usize;
+        for t in 0..t_count {
+            if on_field[t][p] {
+                if run == 0 {
+                    run_start = t;
+                }
+                run += 1;
+            } else if run > 0 {
+                if run < limit {
+                    violations.push(MinContiguousOnFieldViolation {
+                        player_id: p,
+                        start_period: run_start,
+                        length: run,
+                        min_length: limit,
+                    });
+                }
+                run = 0;
+            }
+        }
+        if run > 0 && run < limit {
+            violations.push(MinContiguousOnFieldViolation {
+                player_id: p,
+                start_period: run_start,
+                length: run,
+                min_length: limit,
+            });
+        }
+    }
+    violations
+}
+
+/// Find every run where a player stays on the bench for more than their
+/// configured maximum contiguous bench slots. Empty when no cap is configured.
+pub fn max_contiguous_bench_violations(
+    problem: &SoccerProblem,
+    schedule: &Schedule,
+) -> Vec<MaxContiguousBenchViolation> {
+    let t_count = problem.num_periods;
+    let mut on_field = vec![vec![false; problem.num_players]; t_count];
+    for t in 0..t_count {
+        for &p in &schedule.assignment[t] {
+            if p >= 0 && (p as usize) < problem.num_players {
+                on_field[t][p as usize] = true;
+            }
+        }
+    }
+    let mut violations: Vec<MaxContiguousBenchViolation> = Vec::new();
+    for p in 0..problem.num_players {
+        let Some(limit) = player_max_contiguous_bench(problem, p) else {
+            continue;
+        };
+        let mut run = 0usize;
+        let mut run_start = 0usize;
+        for t in 0..t_count {
+            let is_benched = player_is_fieldable(problem, p) && !on_field[t][p];
+            if is_benched {
+                if run == 0 {
+                    run_start = t;
+                }
+                run += 1;
+            } else {
+                if run > limit {
+                    violations.push(MaxContiguousBenchViolation {
+                        player_id: p,
+                        start_period: run_start,
+                        length: run,
+                        max_length: limit,
+                    });
+                }
+                run = 0;
+            }
+        }
+        if run > limit {
+            violations.push(MaxContiguousBenchViolation {
+                player_id: p,
+                start_period: run_start,
+                length: run,
+                max_length: limit,
             });
         }
     }
@@ -755,7 +935,8 @@ impl<'a> Transform<&'a SoccerProblem, Schedule> for PolicyGreedyHungarian {
 
 /// Greedy fairness-aware per-period Hungarian assignment.
 pub fn policy_greedy_hungarian(problem: &SoccerProblem, opts: &GreedyHungarianOptions) -> Schedule {
-    let fairness_aware = opts.fairness_aware.unwrap_or(true);
+    let fairness_aware =
+        opts.fairness_aware.unwrap_or(true) && problem.enforce_no_consecutive_bench;
     let t_count = problem.num_periods;
     let mut assignment: Vec<Vec<i64>> = Vec::new();
     let mut bench: Vec<Vec<usize>> = Vec::new();
@@ -891,6 +1072,7 @@ pub fn policy_greedy_feasible_schedule(problem: &SoccerProblem) -> Option<Schedu
     let mut prev_bench: HashSet<usize> = HashSet::new();
     let mut prev_on: HashSet<usize> = HashSet::new();
     let mut consecutive_on = vec![0usize; problem.num_players];
+    let mut consecutive_bench = vec![0usize; problem.num_players];
 
     for t in 0..problem.num_periods {
         let mut selected: Vec<usize> = Vec::new();
@@ -909,11 +1091,59 @@ pub fn policy_greedy_feasible_schedule(problem: &SoccerProblem) -> Option<Schedu
             return None;
         }
 
+        let mut must_continue: Vec<usize> = prev_on
+            .iter()
+            .copied()
+            .filter(|&p| {
+                !selected_set.contains(&p)
+                    && player_is_fieldable(problem, p)
+                    && player_min_contiguous_on_field(problem, p)
+                        .map(|limit| consecutive_on[p] > 0 && consecutive_on[p] < limit)
+                        .unwrap_or(false)
+            })
+            .collect();
+        must_continue.sort_by(|&a, &b| {
+            best_eligible_position_score(problem, b, t)
+                .unwrap_or(f64::NEG_INFINITY)
+                .partial_cmp(
+                    &best_eligible_position_score(problem, a, t).unwrap_or(f64::NEG_INFINITY),
+                )
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.cmp(&b))
+        });
+        for p in must_continue {
+            if selected.len() >= problem.num_positions {
+                return None;
+            }
+            if best_eligible_position_score(problem, p, t).is_some() {
+                selected.push(p);
+                selected_set.insert(p);
+            } else {
+                return None;
+            }
+        }
+
         let mut must_play: Vec<usize> = prev_bench
             .iter()
             .copied()
-            .filter(|&p| player_is_fieldable(problem, p) && !selected_set.contains(&p))
+            .filter(|&p| {
+                !selected_set.contains(&p)
+                    && player_is_fieldable(problem, p)
+                    && player_max_contiguous_bench(problem, p)
+                        .map(|limit| consecutive_bench[p] >= limit)
+                        .unwrap_or(false)
+            })
             .collect();
+        if problem.enforce_no_consecutive_bench {
+            must_play.extend(
+                prev_bench
+                    .iter()
+                    .copied()
+                    .filter(|&p| player_is_fieldable(problem, p) && !selected_set.contains(&p)),
+            );
+            must_play.sort_unstable();
+            must_play.dedup();
+        }
         must_play.sort_by(|&a, &b| {
             best_eligible_position_score(problem, b, t)
                 .unwrap_or(f64::NEG_INFINITY)
@@ -943,15 +1173,15 @@ pub fn policy_greedy_feasible_schedule(problem: &SoccerProblem) -> Option<Schedu
             let Some(best) = best_eligible_position_score(problem, p, t) else {
                 continue;
             };
-            if problem
-                .max_consecutive_on_field
+            if player_max_contiguous_on_field(problem, p)
                 .map(|limit| consecutive_on[p] >= limit)
                 .unwrap_or(false)
             {
                 continue;
             }
             let continuity = if prev_on.contains(&p) { 0.05 } else { 0.0 };
-            candidates.push((p, best + continuity));
+            let fatigue_penalty = 0.25 * consecutive_on[p] as f64;
+            candidates.push((p, best + continuity - fatigue_penalty));
         }
         candidates.sort_by(|a, b| {
             b.1.partial_cmp(&a.1)
@@ -979,8 +1209,14 @@ pub fn policy_greedy_feasible_schedule(problem: &SoccerProblem) -> Option<Schedu
         for p in 0..problem.num_players {
             if used.contains(&p) {
                 consecutive_on[p] += 1;
+                consecutive_bench[p] = 0;
             } else {
                 consecutive_on[p] = 0;
+                if player_is_fieldable(problem, p) {
+                    consecutive_bench[p] += 1;
+                } else {
+                    consecutive_bench[p] = 0;
+                }
             }
         }
         prev_on = used;
@@ -1307,25 +1543,27 @@ pub fn build_soccer_lp(problem: &SoccerProblem) -> LPProblem {
         }
     }
     // (3) Σ_pos x_{p,pos,t} + Σ_pos x_{p,pos,t+1} ≥ 1  ->  ≤ form with negative RHS.
-    for p in 0..p_count {
-        if !player_is_fieldable(problem, p) {
-            continue;
-        }
-        for t in 0..t_count.saturating_sub(1) {
-            let mut row = vec![0.0; n];
-            for pos in 0..k {
-                row[idx(p, pos, t)] -= 1.0;
-                row[idx(p, pos, t + 1)] -= 1.0;
+    if problem.enforce_no_consecutive_bench {
+        for p in 0..p_count {
+            if !player_is_fieldable(problem, p) {
+                continue;
             }
-            a_ub.push(row);
-            b_ub.push(-1.0);
+            for t in 0..t_count.saturating_sub(1) {
+                let mut row = vec![0.0; n];
+                for pos in 0..k {
+                    row[idx(p, pos, t)] -= 1.0;
+                    row[idx(p, pos, t + 1)] -= 1.0;
+                }
+                a_ub.push(row);
+                b_ub.push(-1.0);
+            }
         }
     }
     // (4) Stamina: over any window of (M+1) periods a player is on field ≤ M
     //     times, i.e. Σ_{τ=t0}^{t0+M} Σ_pos x_{p,pos,τ} ≤ M.
-    if let Some(m) = problem.max_consecutive_on_field {
-        if m >= 1 && t_count > m {
-            for p in 0..p_count {
+    for p in 0..p_count {
+        if let Some(m) = player_max_contiguous_on_field(problem, p) {
+            if t_count > m {
                 for t0 in 0..=(t_count - (m + 1)) {
                     let mut row = vec![0.0; n];
                     for dt in 0..=m {
@@ -1337,6 +1575,66 @@ pub fn build_soccer_lp(problem: &SoccerProblem) -> LPProblem {
                     a_ub.push(row);
                     b_ub.push(m as f64);
                 }
+            }
+        }
+    }
+    // (4b) Max bench run: over any window of (B+1) slots a fieldable player
+    //      must appear on field at least once.
+    for p in 0..p_count {
+        if !player_is_fieldable(problem, p) {
+            continue;
+        }
+        if let Some(bmax) = player_max_contiguous_bench(problem, p) {
+            if t_count > bmax {
+                for t0 in 0..=(t_count - (bmax + 1)) {
+                    let mut row = vec![0.0; n];
+                    for dt in 0..=bmax {
+                        let t = t0 + dt;
+                        for pos in 0..k {
+                            row[idx(p, pos, t)] -= 1.0;
+                        }
+                    }
+                    a_ub.push(row);
+                    b_ub.push(-1.0);
+                }
+            }
+        }
+    }
+    // (5) Min stint length: when a player starts a run, they must remain on
+    //     field for their configured minimum contiguous slots.
+    for p in 0..p_count {
+        let Some(m) = player_min_contiguous_on_field(problem, p) else {
+            continue;
+        };
+        for t0 in 0..t_count {
+            if t0 + m <= t_count {
+                for tau in (t0 + 1)..(t0 + m) {
+                    let mut row = vec![0.0; n];
+                    for pos in 0..k {
+                        row[idx(p, pos, t0)] += 1.0;
+                        if t0 > 0 {
+                            row[idx(p, pos, t0 - 1)] -= 1.0;
+                        }
+                        row[idx(p, pos, tau)] -= 1.0;
+                    }
+                    a_ub.push(row);
+                    b_ub.push(0.0);
+                }
+            } else if t0 > 0 {
+                let mut row = vec![0.0; n];
+                for pos in 0..k {
+                    row[idx(p, pos, t0)] += 1.0;
+                    row[idx(p, pos, t0 - 1)] -= 1.0;
+                }
+                a_ub.push(row);
+                b_ub.push(0.0);
+            } else {
+                let mut row = vec![0.0; n];
+                for pos in 0..k {
+                    row[idx(p, pos, t0)] = 1.0;
+                }
+                a_ub.push(row);
+                b_ub.push(0.0);
             }
         }
     }
@@ -1606,44 +1904,46 @@ pub fn build_soccer_ipmip(problem: &SoccerProblem) -> SoccerIPMIPModel {
     }
 
     // (3) Fairness: a player may not be benched in two consecutive periods.
-    for p in 0..p_count {
-        if !player_is_fieldable(problem, p) {
-            continue;
-        }
-        for t in 0..t_count.saturating_sub(1) {
-            let mut row = vec![0.0; n];
-            for pos in 0..k {
-                row[idx(p, pos, t)] -= 1.0;
-                row[idx(p, pos, t + 1)] -= 1.0;
+    if problem.enforce_no_consecutive_bench {
+        for p in 0..p_count {
+            if !player_is_fieldable(problem, p) {
+                continue;
             }
-            let row_index = a.len();
-            a.push(row);
-            b.push(-1.0);
-            con_names.push(format!(
-                "no_consecutive_bench_{}_T{}_{}",
-                player_name(p),
-                t + 1,
-                t + 2
-            ));
-            constraint_nodes.push(ConstraintNode {
-                row_index,
-                node_id: format!("station:fairness:{}:T{}-{}", player_name(p), t + 1, t + 2),
-                label: Some(format!(
-                    "{} plays in period {} or {}",
+            for t in 0..t_count.saturating_sub(1) {
+                let mut row = vec![0.0; n];
+                for pos in 0..k {
+                    row[idx(p, pos, t)] -= 1.0;
+                    row[idx(p, pos, t + 1)] -= 1.0;
+                }
+                let row_index = a.len();
+                a.push(row);
+                b.push(-1.0);
+                con_names.push(format!(
+                    "no_consecutive_bench_{}_T{}_{}",
                     player_name(p),
                     t + 1,
                     t + 2
-                )),
-            });
+                ));
+                constraint_nodes.push(ConstraintNode {
+                    row_index,
+                    node_id: format!("station:fairness:{}:T{}-{}", player_name(p), t + 1, t + 2),
+                    label: Some(format!(
+                        "{} plays in period {} or {}",
+                        player_name(p),
+                        t + 1,
+                        t + 2
+                    )),
+                });
+            }
         }
     }
 
     // (4) Stamina: a player may stay on field at most M consecutive periods.
     //     For every window [t0, t0+M], Σ_{τ} Σ_pos x[p,pos,τ] ≤ M so each
     //     player must sit at least once inside any (M+1)-period window.
-    if let Some(m) = problem.max_consecutive_on_field {
-        if m >= 1 && t_count > m {
-            for p in 0..p_count {
+    for p in 0..p_count {
+        if let Some(m) = player_max_contiguous_on_field(problem, p) {
+            if t_count > m {
                 for t0 in 0..=(t_count - (m + 1)) {
                     let mut row = vec![0.0; n];
                     for dt in 0..=m {
@@ -1677,6 +1977,123 @@ pub fn build_soccer_ipmip(problem: &SoccerProblem) -> SoccerIPMIPModel {
                         )),
                     });
                 }
+            }
+        }
+    }
+
+    // (4b) Max bench run: in any (B+1)-slot window, the player appears on field
+    //      at least once.
+    for p in 0..p_count {
+        if !player_is_fieldable(problem, p) {
+            continue;
+        }
+        if let Some(bmax) = player_max_contiguous_bench(problem, p) {
+            if t_count > bmax {
+                for t0 in 0..=(t_count - (bmax + 1)) {
+                    let mut row = vec![0.0; n];
+                    for dt in 0..=bmax {
+                        let t = t0 + dt;
+                        for pos in 0..k {
+                            row[idx(p, pos, t)] -= 1.0;
+                        }
+                    }
+                    let row_index = a.len();
+                    a.push(row);
+                    b.push(-1.0);
+                    con_names.push(format!(
+                        "max_contig_bench_{}_T{}_{}",
+                        player_name(p),
+                        t0 + 1,
+                        t0 + bmax + 1
+                    ));
+                    constraint_nodes.push(ConstraintNode {
+                        row_index,
+                        node_id: format!(
+                            "station:bench-run:{}:T{}-{}",
+                            player_name(p),
+                            t0 + 1,
+                            t0 + bmax + 1
+                        ),
+                        label: Some(format!(
+                            "{} plays at least once in periods {}-{}",
+                            player_name(p),
+                            t0 + 1,
+                            t0 + bmax + 1
+                        )),
+                    });
+                }
+            }
+        }
+    }
+
+    // (4c) Min stint length: if a player starts in T, they stay on through the
+    //      configured minimum contiguous time slots. Late starts that cannot
+    //      satisfy the minimum are disallowed.
+    for p in 0..p_count {
+        let Some(m) = player_min_contiguous_on_field(problem, p) else {
+            continue;
+        };
+        for t0 in 0..t_count {
+            if t0 + m <= t_count {
+                for tau in (t0 + 1)..(t0 + m) {
+                    let mut row = vec![0.0; n];
+                    for pos in 0..k {
+                        row[idx(p, pos, t0)] += 1.0;
+                        if t0 > 0 {
+                            row[idx(p, pos, t0 - 1)] -= 1.0;
+                        }
+                        row[idx(p, pos, tau)] -= 1.0;
+                    }
+                    let row_index = a.len();
+                    a.push(row);
+                    b.push(0.0);
+                    con_names.push(format!(
+                        "min_contig_on_field_{}_T{}_T{}",
+                        player_name(p),
+                        t0 + 1,
+                        tau + 1
+                    ));
+                    constraint_nodes.push(ConstraintNode {
+                        row_index,
+                        node_id: format!(
+                            "station:min-stint:{}:T{}-{}",
+                            player_name(p),
+                            t0 + 1,
+                            tau + 1
+                        ),
+                        label: Some(format!(
+                            "{} continues from period {} through {}",
+                            player_name(p),
+                            t0 + 1,
+                            tau + 1
+                        )),
+                    });
+                }
+            } else {
+                let mut row = vec![0.0; n];
+                for pos in 0..k {
+                    row[idx(p, pos, t0)] += 1.0;
+                    if t0 > 0 {
+                        row[idx(p, pos, t0 - 1)] -= 1.0;
+                    }
+                }
+                let row_index = a.len();
+                a.push(row);
+                b.push(0.0);
+                con_names.push(format!(
+                    "min_contig_no_late_start_{}_T{}",
+                    player_name(p),
+                    t0 + 1
+                ));
+                constraint_nodes.push(ConstraintNode {
+                    row_index,
+                    node_id: format!("station:min-stint:{}:T{}", player_name(p), t0 + 1),
+                    label: Some(format!(
+                        "{} cannot start a short stint in period {}",
+                        player_name(p),
+                        t0 + 1
+                    )),
+                });
             }
         }
     }
@@ -2222,7 +2639,25 @@ fn has_planner_only_constraints(problem: &SoccerProblem) -> bool {
         .as_ref()
         .map(|rules| !rules.is_empty())
         .unwrap_or(false);
+    let has_min_contiguous = problem
+        .min_contiguous_on_field
+        .as_ref()
+        .map(|limits| limits.iter().any(|&limit| limit > 1))
+        .unwrap_or(false);
+    let has_max_contiguous = problem
+        .max_contiguous_on_field
+        .as_ref()
+        .map(|limits| limits.iter().any(|&limit| limit >= 1))
+        .unwrap_or(false);
+    let has_max_bench = problem
+        .max_contiguous_bench
+        .as_ref()
+        .map(|limits| limits.iter().any(|&limit| limit >= 1))
+        .unwrap_or(false);
     problem.max_consecutive_on_field.is_some()
+        || has_min_contiguous
+        || has_max_contiguous
+        || has_max_bench
         || problem.max_subs_per_game.is_some()
         || problem.min_subs_per_game.is_some()
         || has_unavailable
@@ -2635,12 +3070,45 @@ mod tests {
     //! respects the no-consecutive-bench fairness constraint.
 
     use super::*;
+    use crate::des::general::ip_mip_des::IPMIPStatus;
+    use crate::des::general::lp::{solve_lp_internal, InternalSimplexOptions};
 
     fn problem() -> SoccerProblem {
         build_sample_soccer_problem(&AffinityBuilderOptions {
             seed: Some(7),
             ..Default::default()
         })
+    }
+
+    fn tiny_internal_solver_problem() -> SoccerProblem {
+        SoccerProblem {
+            num_players: 3,
+            num_positions: 2,
+            num_periods: 2,
+            bench_size: 1,
+            max_consecutive_on_field: None,
+            min_contiguous_on_field: Some(vec![1, 1, 1]),
+            max_contiguous_on_field: Some(vec![2, 2, 2]),
+            max_contiguous_bench: Some(vec![2, 2, 2]),
+            enforce_no_consecutive_bench: false,
+            max_subs_per_game: Some(2),
+            min_subs_per_game: Some(0),
+            affinity: vec![
+                vec![vec![1.0, 1.0], vec![0.1, 0.1]],
+                vec![vec![0.1, 0.1], vec![1.0, 1.0]],
+                vec![vec![0.7, 0.7], vec![0.7, 0.7]],
+            ],
+            player_names: Some(vec![
+                "Keeper".to_string(),
+                "Wing".to_string(),
+                "Flex".to_string(),
+            ]),
+            position_names: Some(vec!["GK".to_string(), "RF".to_string()]),
+            player_status: None,
+            fixed_position: None,
+            banned_positions: None,
+            synergy_rules: None,
+        }
     }
 
     #[test]
@@ -2698,6 +3166,95 @@ mod tests {
     }
 
     #[test]
+    fn soccer_lp_relaxation_solves_with_internal_simplex() {
+        let p = tiny_internal_solver_problem();
+        let lp = build_soccer_lp(&p);
+        let sol = solve_lp_internal(
+            &lp,
+            &InternalSimplexOptions {
+                max_iter: Some(200),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(sol.status, LPStatus::Optimal, "message={:?}", sol.message);
+        assert_eq!(sol.solver, "internal");
+        assert!((sol.objective - 4.0).abs() < 1e-6, "z={}", sol.objective);
+    }
+
+    #[test]
+    fn soccer_ipmip_policy_uses_internal_branch_and_cut_only() {
+        let p = tiny_internal_solver_problem();
+        let result = policy_ipmip_feasible(
+            &p,
+            &SoccerIPMIPPolicyOptions {
+                time_limit_ms: Some(5_000.0),
+                max_nodes: Some(20),
+                max_ticks: Some(500),
+                lp_max_iters: Some(200),
+                lp_algorithm: Some(LpRelaxationAlgorithm::Concrete(
+                    ConcreteLpRelaxationAlgorithm::InternalSimplex,
+                )),
+                max_cut_rounds: Some(0),
+                fallback_to_mdp: Some(false),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(result.mip.status, IPMIPStatus::Optimal);
+        assert!(!result.used_fallback, "reason={:?}", result.fallback_reason);
+        assert_eq!(result.mip.solver_kind, "in-house-branch-and-cut");
+        assert!(result.mip.in_house_only);
+        assert!(!result.mip.uses_external_solvers);
+        assert_eq!(
+            result
+                .mip
+                .lp_algorithm_usage
+                .get(&ConcreteLpRelaxationAlgorithm::InternalSimplex)
+                .copied()
+                .unwrap_or(0),
+            result.mip.lp_solves as u64
+        );
+        assert!(
+            result
+                .mip
+                .topology
+                .iter()
+                .any(|node| node.id == "ip-lp-relaxation"
+                    && node.role.contains("stationary LP solver block")),
+            "topology={:?}",
+            result.mip.topology
+        );
+    }
+
+    #[test]
+    fn soccer_ipmip_model_exposes_movable_and_station_metadata_for_solver_tab() {
+        let p = tiny_internal_solver_problem();
+        let model = build_soccer_ipmip(&p);
+        let variables = model.ip.variable_nodes.as_ref().expect("variable nodes");
+        let constraints = model
+            .ip
+            .constraint_nodes
+            .as_ref()
+            .expect("constraint nodes");
+
+        assert_eq!(
+            variables.len(),
+            p.num_players * p.num_positions * p.num_periods
+        );
+        assert!(variables.len() < model.ip.c.len());
+        assert!(variables
+            .iter()
+            .any(|node| node.node_id.starts_with("movable:Keeper:")));
+        assert!(constraints
+            .iter()
+            .any(|node| node.node_id.starts_with("station:eligibility:Keeper:")));
+        assert!(constraints
+            .iter()
+            .any(|node| node.node_id.starts_with("station:position:GK:")));
+    }
+
+    #[test]
     fn match_sim_is_deterministic_for_seed() {
         let p = problem();
         let sched = policy_greedy_hungarian(&p, &GreedyHungarianOptions::default());
@@ -2732,6 +3289,10 @@ mod tests {
             num_periods: 3,
             bench_size: 1,
             max_consecutive_on_field: Some(1),
+            min_contiguous_on_field: None,
+            max_contiguous_on_field: None,
+            max_contiguous_bench: None,
+            enforce_no_consecutive_bench: true,
             max_subs_per_game: None,
             min_subs_per_game: None,
             affinity: vec![vec![vec![0.0; 3]; 1]; 2],
@@ -2755,6 +3316,58 @@ mod tests {
         let mut uncapped = problem.clone();
         uncapped.max_consecutive_on_field = None;
         assert!(consecutive_on_field_violations(&uncapped, &schedule).is_empty());
+    }
+
+    #[test]
+    fn max_bench_blocks_allow_repeated_short_bench_stints() {
+        let mut problem = SoccerProblem {
+            num_players: 2,
+            num_positions: 1,
+            num_periods: 8,
+            bench_size: 1,
+            max_consecutive_on_field: None,
+            min_contiguous_on_field: None,
+            max_contiguous_on_field: None,
+            max_contiguous_bench: Some(vec![2, 2]),
+            enforce_no_consecutive_bench: false,
+            max_subs_per_game: None,
+            min_subs_per_game: None,
+            affinity: vec![vec![vec![0.0; 8]; 1]; 2],
+            player_names: None,
+            position_names: None,
+            player_status: None,
+            fixed_position: None,
+            banned_positions: None,
+            synergy_rules: None,
+        };
+        let repeated_short_stints = Schedule {
+            assignment: vec![
+                vec![0],
+                vec![1],
+                vec![1],
+                vec![0],
+                vec![0],
+                vec![1],
+                vec![1],
+                vec![0],
+            ],
+            bench: vec![
+                vec![1],
+                vec![0],
+                vec![0],
+                vec![1],
+                vec![1],
+                vec![0],
+                vec![0],
+                vec![1],
+            ],
+        };
+        assert!(max_contiguous_bench_violations(&problem, &repeated_short_stints).is_empty());
+
+        problem.max_contiguous_bench = Some(vec![1, 1]);
+        let violations = max_contiguous_bench_violations(&problem, &repeated_short_stints);
+        assert_eq!(violations.len(), 3);
+        assert!(violations.iter().all(|v| v.length == 2));
     }
 
     /// Turning on the stamina cap adds exactly one rolling window row per player

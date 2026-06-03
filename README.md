@@ -418,14 +418,17 @@ Gurobi, CPLEX, and Xpress APIs plus commercial CLI solves for Gurobi, CPLEX,
 Xpress, and LINDO/RunLindo. The public
 `des::general::external_linear_cli` module exposes the same local CLI path to
 library callers while keeping all solver executables out of version control;
-use `probe_external_linear_cli_solver` to distinguish
-not-installed tools from bridge-unsupported tools and ready smoke-tested
-solvers, with CLI results and probes reporting solver version metadata when the
-executable exposes it. The CLI bridge and `math_program` oracle both discover solver commands
-on `PATH` or from local env vars: `HIGHS_CMD`, `GLPSOL_CMD`/`GLPK_CMD`,
-`SCIP_CMD`, `CBC_CMD`, `CLP_CMD`, `GUROBI_CL_CMD`/`GUROBI_CMD`, `CPLEX_CMD`,
-`XPRESS_CMD`, or `RUNLINDO_CMD`/`LINDO_CMD` (each also has an `ORES_*_CMD` form for
-project-specific overrides). The companion
+callers can set `ExternalLinearCliOptions::command_path`, solver-specific
+`*_CMD`/`ORES_*_CMD` variables, or the `ORES_<SOLVER>_BIN`,
+`DES_<SOLVER>_BIN`, and `<SOLVER>_BIN` overrides used by the bridge. Use
+`probe_external_linear_cli_solver` to distinguish not-installed tools from
+bridge-unsupported tools and ready smoke-tested solvers, with CLI results and
+probes reporting solver version metadata when the executable exposes it. The
+same module exports `lp_problem_to_cplex_lp_string`,
+`ipmip_problem_to_cplex_lp_string`, `lp_problem_to_mps_string`, and
+`ipmip_problem_to_mps_string`; set
+`ExternalLinearCliOptions::model_format = ExternalLinearCliModelFormat::Mps` to
+run supported CLI bridges through MPS instead of CPLEX LP syntax. The companion
 `des::general::external_optimization_ecosystem` module
 keeps Java/Rust ecosystem integrations non-vendored too: set
 `CHOCO_SOLVER_CLASSPATH`, `JACOP_CLASSPATH`, `IBM_CP_OPTIMIZER_CLASSPATH`,
@@ -435,13 +438,36 @@ or set `GOOD_LP_CARGO_MANIFEST`, `LP_MODELER_CARGO_MANIFEST`,
 `RUST_LINPROG_CARGO_MANIFEST`, `ARGMIN_CARGO_MANIFEST`,
 `NLOPT_RS_CARGO_MANIFEST`, `HIGHS_RS_CARGO_MANIFEST`,
 `SCIP_RS_CARGO_MANIFEST`, or `CBC_RS_CARGO_MANIFEST` to a local `Cargo.toml`
-using that crate/binding. The scale runner compares native LP/MIP solvers with installed
-open-source engines and writes `out/external/optimization-scale/scale-report.json`:
+using that crate/binding.
+
+The broader `des::general::external_optimization_tools` module retains
+JSON-adapter comparison helpers for local Java/Rust ecosystem wrappers and
+skips adapters that are not configured.
+
+For model/output validation beyond optimization, `des::general::external_validation_tools`
+registers local adapter hooks for MiniZinc/FlatZinc, SMT/SAT solvers and
+proof checkers, formal model checkers, benchmark corpora, nonlinear/global
+solvers, convex/QP/conic references, simulation engines, and output validators.
+Adapter commands use `ORES_<TOOL>_ADAPTER`; datasets use
+`ORES_<TOOL>_DATA_DIR`; schemas use `ORES_<TOOL>_SPEC`; Java tools use
+`ORES_<TOOL>_CLASSPATH`; Python/Rust bindings can be declared with
+`ORES_<TOOL>_PYTHON` or `ORES_<TOOL>_CRATE`. The module also includes concrete
+request/export builders for common cross-validation formats plus stdin, file,
+artifact, and consensus CLI runners. The companion reference scripts cover QP,
+nonlinear/global validation, model validation, proof validation, formal and
+benchmark validation, output validation, and simulation validation with local
+executables when available and dependency-free fallbacks for small smoke cases.
+
+The scale runner compares native LP/MIP solvers with installed open-source
+engines and writes `out/external/optimization-scale/scale-report.json`; use
+`SCALE_LP_CLI_SOLVERS`, `SCALE_MIP_CLI_SOLVERS`, and `SCALE_CLI_FORMATS=lp,mps`
+to route the public Rust CLI bridge through selected local executables:
 
 ```sh
 PYTHON_BIN=/path/to/python cargo run --bin validate_optimization_scale
 SCALE_LP_SIZES=8,16,24 SCALE_MIP_SIZES=8,12,16 cargo run --bin validate_optimization_scale
 SCALE_MIP_SOLVERS=highs,cbc,gurobi,cplex cargo run --bin validate_optimization_scale
+SCALE_LP_CLI_SOLVERS=highs,glpk,scip,cbc,clp SCALE_MIP_CLI_SOLVERS=highs,glpk,scip,cbc SCALE_CLI_FORMATS=mps cargo run --bin validate_optimization_scale
 ```
 
 ### PyDy / OpenMDAO-style coverage

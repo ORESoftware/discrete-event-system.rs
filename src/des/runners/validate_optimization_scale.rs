@@ -14,6 +14,10 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
+use crate::des::general::external_linear_cli::{
+    solve_ipmip_with_external_cli, solve_lp_with_external_cli, ExternalLinearCliModelFormat,
+    ExternalLinearCliOptions, ExternalLinearCliSolver, ExternalLinearCliStatus,
+};
 use crate::des::general::ip_mip_des::{
     build_binary_knapsack_ip, solve_ipmip_with_des, ConcreteLpRelaxationAlgorithm, IPMIPProblem,
     IPMIPSolveOptions, IPMIPStatus, LpRelaxationAlgorithm,
@@ -165,6 +169,87 @@ impl Driver {
         });
     }
 
+    fn run_lp_cli_case(
+        &mut self,
+        n: usize,
+        solver: ExternalLinearCliSolver,
+        model_format: ExternalLinearCliModelFormat,
+    ) {
+        let m = (n / 2).max(2);
+        let problem = build_resource_lp(n, m);
+        let native_t0 = Instant::now();
+        let native = solve_lp_internal(
+            &problem,
+            &InternalSimplexOptions {
+                max_iter: Some(20_000),
+                tol: Some(1e-8),
+            },
+        );
+        let native_ms = native_t0.elapsed().as_secs_f64() * 1000.0;
+        let external = solve_lp_with_external_cli(
+            &problem,
+            &ExternalLinearCliOptions {
+                solver,
+                time_limit_secs: Some(10.0),
+                model_format,
+                ..Default::default()
+            },
+        );
+        if external.status == ExternalLinearCliStatus::Unavailable {
+            println!(
+                "  SKIP  LP resource n={n} rust-cli {} {}: {}",
+                solver.as_str(),
+                model_format.as_str(),
+                external.message
+            );
+            return;
+        }
+        let external_objective = external.objective.unwrap_or(f64::NAN);
+        let case = format!(
+            "LP n={n} rust-cli {} {}",
+            solver.as_str(),
+            model_format.as_str()
+        );
+        self.check(
+            format!("{case} statuses optimal"),
+            native.status == LPStatus::Optimal
+                && external.status == ExternalLinearCliStatus::Optimal,
+            format!(
+                "native={} external={} solver={} message={}",
+                native.status.as_str(),
+                external.status.as_str(),
+                external.solver,
+                external.message
+            ),
+        );
+        let objective_tol = match solver {
+            ExternalLinearCliSolver::Cbc | ExternalLinearCliSolver::Clp => 1e-6,
+            _ => 1e-7,
+        };
+        self.close(
+            format!("{case} objective"),
+            native.objective,
+            external_objective,
+            objective_tol,
+        );
+        self.rows.push(ScaleRow {
+            family: "lp-resource-rust-cli".to_string(),
+            size: n,
+            constraints: m,
+            native_solver: native.solver,
+            external_solver: format!("{}:{}", external.solver, model_format.as_str()),
+            native_status: native.status.as_str().to_string(),
+            external_status: external.status.as_str().to_string(),
+            native_objective: native.objective,
+            external_objective,
+            objective_abs_diff: (native.objective - external_objective).abs(),
+            native_ms,
+            external_ms: external.elapsed_ms,
+            native_nodes: None,
+            native_lp_solves: None,
+        });
+    }
+
     fn run_mip_case(&mut self, n: usize, solver: &str) {
         let problem = build_scale_knapsack(n);
         let native_t0 = Instant::now();
@@ -223,6 +308,91 @@ impl Driver {
             objective_abs_diff: (native.z - external_objective).abs(),
             native_ms,
             external_ms,
+            native_nodes: Some(native.nodes_explored),
+            native_lp_solves: Some(native.lp_solves),
+        });
+    }
+
+    fn run_mip_cli_case(
+        &mut self,
+        n: usize,
+        solver: ExternalLinearCliSolver,
+        model_format: ExternalLinearCliModelFormat,
+    ) {
+        let problem = build_scale_knapsack(n);
+        let native_t0 = Instant::now();
+        let native = solve_ipmip_with_des(
+            problem.clone(),
+            IPMIPSolveOptions {
+                lp_algorithm: Some(LpRelaxationAlgorithm::Concrete(
+                    ConcreteLpRelaxationAlgorithm::InternalSimplex,
+                )),
+                max_cut_rounds: Some(1),
+                max_nodes: Some(25_000),
+                max_ticks: Some(250_000),
+                ..Default::default()
+            },
+        );
+        let native_ms = native_t0.elapsed().as_secs_f64() * 1000.0;
+        let external = solve_ipmip_with_external_cli(
+            &problem,
+            &ExternalLinearCliOptions {
+                solver,
+                time_limit_secs: Some(10.0),
+                node_limit: Some(100_000),
+                relative_gap: Some(0.0),
+                threads: Some(1),
+                random_seed: Some(7),
+                model_format,
+                ..Default::default()
+            },
+        );
+        if external.status == ExternalLinearCliStatus::Unavailable {
+            println!(
+                "  SKIP  MIP knapsack n={n} rust-cli {} {}: {}",
+                solver.as_str(),
+                model_format.as_str(),
+                external.message
+            );
+            return;
+        }
+        let external_objective = external.objective.unwrap_or(f64::NAN);
+        let case = format!(
+            "MIP knapsack n={n} rust-cli {} {}",
+            solver.as_str(),
+            model_format.as_str()
+        );
+        self.check(
+            format!("{case} statuses optimal"),
+            native.status == IPMIPStatus::Optimal
+                && external.status == ExternalLinearCliStatus::Optimal,
+            format!(
+                "native={} external={} solver={} message={}",
+                native.status.as_str(),
+                external.status.as_str(),
+                external.solver,
+                external.message
+            ),
+        );
+        self.close(
+            format!("{case} objective"),
+            native.z,
+            external_objective,
+            1e-7,
+        );
+        self.rows.push(ScaleRow {
+            family: "mip-binary-knapsack-rust-cli".to_string(),
+            size: n,
+            constraints: problem.a.len(),
+            native_solver: native.solver_kind.to_string(),
+            external_solver: format!("{}:{}", external.solver, model_format.as_str()),
+            native_status: native.status.as_str().to_string(),
+            external_status: external.status.as_str().to_string(),
+            native_objective: native.z,
+            external_objective,
+            objective_abs_diff: (native.z - external_objective).abs(),
+            native_ms,
+            external_ms: external.elapsed_ms,
             native_nodes: Some(native.nodes_explored),
             native_lp_solves: Some(native.lp_solves),
         });
@@ -304,6 +474,63 @@ impl Driver {
             }
             std::process::exit(1);
         }
+    }
+}
+
+fn external_solver_from_name(name: &str) -> Option<ExternalLinearCliSolver> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "highs" => Some(ExternalLinearCliSolver::Highs),
+        "glpk" | "glpsol" => Some(ExternalLinearCliSolver::Glpk),
+        "scip" => Some(ExternalLinearCliSolver::Scip),
+        "cbc" => Some(ExternalLinearCliSolver::Cbc),
+        "clp" => Some(ExternalLinearCliSolver::Clp),
+        "gurobi" | "gurobi_cl" => Some(ExternalLinearCliSolver::Gurobi),
+        "cplex" => Some(ExternalLinearCliSolver::Cplex),
+        "xpress" | "optimizer" => Some(ExternalLinearCliSolver::Xpress),
+        "lindo" | "runlindo" | "lindoapi" => Some(ExternalLinearCliSolver::Lindo),
+        _ => None,
+    }
+}
+
+fn parse_external_solver_list(
+    env_name: &str,
+    defaults: &[ExternalLinearCliSolver],
+) -> Vec<ExternalLinearCliSolver> {
+    let Ok(raw) = std::env::var(env_name) else {
+        return defaults.to_vec();
+    };
+    let values: Vec<ExternalLinearCliSolver> = raw
+        .split(',')
+        .filter_map(external_solver_from_name)
+        .collect();
+    if values.is_empty() {
+        defaults.to_vec()
+    } else {
+        values
+    }
+}
+
+fn model_format_from_name(name: &str) -> Option<ExternalLinearCliModelFormat> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "lp" | "cplex-lp" | "cplex_lp" => Some(ExternalLinearCliModelFormat::CplexLp),
+        "mps" => Some(ExternalLinearCliModelFormat::Mps),
+        _ => None,
+    }
+}
+
+fn parse_model_format_list(
+    env_name: &str,
+    defaults: &[ExternalLinearCliModelFormat],
+) -> Vec<ExternalLinearCliModelFormat> {
+    let Ok(raw) = std::env::var(env_name) else {
+        return defaults.to_vec();
+    };
+    let values: Vec<ExternalLinearCliModelFormat> =
+        raw.split(',').filter_map(model_format_from_name).collect();
+    if values.is_empty() {
+        defaults.to_vec()
+    } else {
+        values
     }
 }
 
@@ -405,6 +632,16 @@ pub fn run() {
     let mip_sizes = parse_size_list("SCALE_MIP_SIZES", &[8, 12, 16]);
     let lp_methods = parse_solver_list("SCALE_LP_METHODS", &["highs", "glop"]);
     let mip_solvers = parse_solver_list("SCALE_MIP_SOLVERS", &["highs", "cbc"]);
+    let lp_cli_solvers = parse_external_solver_list(
+        "SCALE_LP_CLI_SOLVERS",
+        ExternalLinearCliSolver::open_source_lp(),
+    );
+    let mip_cli_solvers = parse_external_solver_list(
+        "SCALE_MIP_CLI_SOLVERS",
+        ExternalLinearCliSolver::open_source_mip(),
+    );
+    let cli_formats =
+        parse_model_format_list("SCALE_CLI_FORMATS", &[ExternalLinearCliModelFormat::Mps]);
 
     let mut driver = Driver::new();
 
@@ -413,12 +650,22 @@ pub fn run() {
         for method in &lp_methods {
             driver.run_lp_case(n, method);
         }
+        for &solver in &lp_cli_solvers {
+            for &model_format in &cli_formats {
+                driver.run_lp_cli_case(n, solver, model_format);
+            }
+        }
     }
 
     println!("\n-- MIP binary-knapsack family --");
     for &n in &mip_sizes {
         for solver in &mip_solvers {
             driver.run_mip_case(n, solver);
+        }
+        for &solver in &mip_cli_solvers {
+            for &model_format in &cli_formats {
+                driver.run_mip_cli_case(n, solver, model_format);
+            }
         }
     }
 

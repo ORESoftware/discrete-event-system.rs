@@ -500,6 +500,19 @@ fn with_opts(mut spec: Value, opts: Value) -> Value {
     spec
 }
 
+fn write_jsonl_values(
+    path: impl AsRef<std::path::Path>,
+    frames: &[Value],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut jsonl = String::new();
+    for frame in frames {
+        jsonl.push_str(&serde_json::to_string(frame)?);
+        jsonl.push('\n');
+    }
+    std::fs::write(path, jsonl)?;
+    Ok(())
+}
+
 fn generate_decision_pages() -> Result<(), Box<dyn std::error::Error>> {
     use crate::des::decision::{machine_maintenance_mdp, tiger_pomdp};
     use crate::des::exec::{
@@ -531,12 +544,17 @@ fn generate_decision_pages() -> Result<(), Box<dyn std::error::Error>> {
 
     let hybrid = registry.run("hybrid", &json!({ "demo": "bouncing-ball" }))?;
     std::fs::write("out/decision/hybrid.html", hybrid.to_player_html())?;
+    std::fs::write("out/decision/hybrid.frames.jsonl", hybrid.to_jsonl())?;
 
     for demo in ["signal-chain", "mixer", "queue-line"] {
         let studio = registry.run("studio", &json!({ "demo": demo }))?;
         std::fs::write(
             format!("out/decision/studio-{demo}.html"),
             studio.to_player_html(),
+        )?;
+        std::fs::write(
+            format!("out/decision/studio-{demo}.frames.jsonl"),
+            studio.to_jsonl(),
         )?;
     }
 
@@ -546,6 +564,7 @@ fn generate_decision_pages() -> Result<(), Box<dyn std::error::Error>> {
     let mut studio_exec = StudioExecutive::from_demo(demo);
     let routed = studio_exec.run();
     std::fs::write("out/decision/exec-routed.html", routed.to_player_html())?;
+    std::fs::write("out/decision/exec-routed.frames.jsonl", routed.to_jsonl())?;
 
     let (compiled, opts) = hybrid_demos::closed_loop()?;
     let mut hybrid_exec = HybridExecutive::new(
@@ -651,9 +670,11 @@ fn generate_hybrid_pages() -> Result<(), Box<dyn std::error::Error>> {
             ),
         ],
     );
+    let closed_loop_frames = trace.to_jsonl_frames();
+    write_jsonl_values("out/hybrid/closed-loop.frames.jsonl", &closed_loop_frames)?;
     std::fs::write(
         "out/hybrid/closed-loop.html",
-        render(&m, trace.to_jsonl_frames()),
+        render(&m, closed_loop_frames),
     )?;
 
     let (compiled, opts) = demos::bouncing_ball()?;
@@ -671,9 +692,14 @@ fn generate_hybrid_pages() -> Result<(), Box<dyn std::error::Error>> {
             30.0,
         )],
     );
+    let bouncing_ball_frames = ball_frames(&trace);
+    write_jsonl_values(
+        "out/hybrid/bouncing-ball.frames.jsonl",
+        &bouncing_ball_frames,
+    )?;
     std::fs::write(
         "out/hybrid/bouncing-ball.html",
-        render(&m, ball_frames(&trace)),
+        render(&m, bouncing_ball_frames),
     )?;
     Ok(())
 }
@@ -716,6 +742,7 @@ fn generate_plugin_pages() -> Result<(), Box<dyn std::error::Error>> {
         title: None,
     };
     let queue_frames = queue_demo_frames();
+    write_jsonl_values("out/plugin/queue.frames.jsonl", &queue_frames)?;
     std::fs::write(
         "out/plugin/queue.html",
         render_player_html(

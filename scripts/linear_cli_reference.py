@@ -41,15 +41,15 @@ COMMAND_ALIASES = {
 }
 
 COMMAND_ENV_VARS = {
-    "glpk": ["GLPSOL_CMD", "GLPK_CMD", "ORES_GLPK_CMD"],
-    "highs": ["HIGHS_CMD", "ORES_HIGHS_CMD"],
-    "scip": ["SCIP_CMD", "ORES_SCIP_CMD"],
-    "cbc": ["CBC_CMD", "ORES_CBC_CMD"],
-    "clp": ["CLP_CMD", "ORES_CLP_CMD"],
-    "gurobi": ["GUROBI_CL_CMD", "GUROBI_CMD", "ORES_GUROBI_CMD"],
-    "cplex": ["CPLEX_CMD", "ORES_CPLEX_CMD"],
-    "xpress": ["XPRESS_CMD", "XPRESS_OPTIMIZER_CMD", "ORES_XPRESS_CMD"],
-    "lindo": ["RUNLINDO_CMD", "LINDO_CMD", "LINDOAPI_CMD", "ORES_LINDO_CMD"],
+    "glpk": ["GLPSOL_CMD", "GLPK_CMD", "ORES_GLPK_CMD", "ORES_GLPK_BIN", "DES_GLPK_BIN", "GLPK_BIN"],
+    "highs": ["HIGHS_CMD", "ORES_HIGHS_CMD", "ORES_HIGHS_BIN", "DES_HIGHS_BIN", "HIGHS_BIN"],
+    "scip": ["SCIP_CMD", "ORES_SCIP_CMD", "ORES_SCIP_BIN", "DES_SCIP_BIN", "SCIP_BIN"],
+    "cbc": ["CBC_CMD", "ORES_CBC_CMD", "ORES_CBC_BIN", "DES_CBC_BIN", "CBC_BIN"],
+    "clp": ["CLP_CMD", "ORES_CLP_CMD", "ORES_CLP_BIN", "DES_CLP_BIN", "CLP_BIN"],
+    "gurobi": ["GUROBI_CL_CMD", "GUROBI_CMD", "ORES_GUROBI_CMD", "ORES_GUROBI_BIN", "DES_GUROBI_BIN", "GUROBI_BIN"],
+    "cplex": ["CPLEX_CMD", "ORES_CPLEX_CMD", "ORES_CPLEX_BIN", "DES_CPLEX_BIN", "CPLEX_BIN"],
+    "xpress": ["XPRESS_CMD", "XPRESS_OPTIMIZER_CMD", "ORES_XPRESS_CMD", "ORES_XPRESS_BIN", "DES_XPRESS_BIN", "XPRESS_BIN"],
+    "lindo": ["RUNLINDO_CMD", "LINDO_CMD", "LINDOAPI_CMD", "ORES_LINDO_CMD", "ORES_LINDO_BIN", "DES_LINDO_BIN", "LINDO_BIN"],
 }
 
 SUPPORTED_SOLVERS = {
@@ -63,6 +63,15 @@ SUPPORTED_SOLVERS = {
     "xpress",
     "lindo",
 }
+
+
+def solver_env_names(solver: str) -> list[str]:
+    upper = solver.upper().replace("-", "_")
+    return [
+        f"ORES_{upper}_BIN",
+        f"DES_{upper}_BIN",
+        f"{upper}_BIN",
+    ]
 
 
 def basis_status_from_token(token: object) -> Optional[str]:
@@ -617,6 +626,7 @@ def write_free_mps(
     lbs: Sequence[Optional[float]],
     ubs: Sequence[Optional[float]],
     integer_vars: Sequence[bool],
+    include_objsense: bool = True,
 ) -> list[str]:
     n = len(c)
     names = [var_name(i) for i in range(n)]
@@ -627,8 +637,9 @@ def write_free_mps(
 
     with open(path, "w", encoding="utf-8") as f:
         f.write("NAME          ORESCLI\n")
-        f.write("OBJSENSE\n")
-        f.write(" MAX\n" if sense == "max" else " MIN\n")
+        if include_objsense:
+            f.write("OBJSENSE\n")
+            f.write(" MAX\n" if sense == "max" else " MIN\n")
         f.write("ROWS\n")
         f.write(" N  OBJ\n")
         for row_sense, row_name, _, _ in rows:
@@ -985,6 +996,41 @@ def parse_named_solution(path: str, n: int, default_status: str = "optimal") -> 
                 idx = int(parts[0][1:])
                 if 0 <= idx < n and _is_number(parts[1]):
                     x[idx] = float(parts[1])
+    return status, x
+
+
+def parse_report_solution(path: str, n: int, default_status: str = "optimal") -> tuple[str, list[float]]:
+    x = [0.0] * n
+    status = default_status
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            stripped = line.strip()
+            lower = stripped.lower()
+            if not stripped:
+                continue
+            if "infeasible" in lower and "not infeasible" not in lower:
+                status = "infeasible"
+            elif "unbounded" in lower:
+                status = "unbounded"
+            elif "optimal" in lower or "global optimum" in lower:
+                status = default_status
+
+            parts = stripped.replace(":", " ").split()
+            for pos, token in enumerate(parts):
+                name = token.rstrip(",;")
+                if not (name.startswith("x") and name[1:].isdigit()):
+                    continue
+                idx = int(name[1:])
+                if not 0 <= idx < n:
+                    break
+                for value_token in parts[pos + 1 :]:
+                    value = value_token.strip(",;")
+                    if value == "*" or value in ("=", ":"):
+                        continue
+                    if _is_number(value):
+                        x[idx] = float(value)
+                        break
+                break
     return status, x
 
 
@@ -1754,6 +1800,9 @@ def solver_command(solver: str) -> Optional[str]:
         configured = os.environ.get(env_var)
         if configured and configured.strip():
             configured_any = True
+            expanded = os.path.expanduser(configured)
+            if os.path.isfile(expanded) and os.access(expanded, os.X_OK):
+                return expanded
             resolved = shutil.which(configured)
             if resolved is not None:
                 return resolved
@@ -1773,6 +1822,7 @@ def run_solver(
     model_path: str,
     solution_path: str,
     time_limit: float,
+    model_format: str,
     node_limit: Optional[int] = None,
     solution_limit: Optional[int] = None,
     relative_gap: Optional[float] = None,
@@ -1797,6 +1847,7 @@ def run_solver(
     command = solver_command(solver)
     if command is None:
         raise ValueError(f"{solver} executable not found")
+    input_text = None
     if solver == "highs":
         start_path = None
         if kind == "mip" and mip_start is not None and mip_start_objective is not None:
@@ -1862,11 +1913,14 @@ def run_solver(
         if presolve is not None:
             cmd.extend(["--presolve", "choose" if presolve == "auto" else presolve])
     elif solver == "glpk":
+        format_arg = "--freemps" if model_format == "mps" else "--lp"
+        sense_arg = "--max" if sense == "max" else "--min"
         if kind == "lp":
             cmd = [
                 command,
-                "--lp",
+                format_arg,
                 model_path,
+                sense_arg,
                 "--output",
                 solution_path + ".report",
                 "--write",
@@ -1885,8 +1939,9 @@ def run_solver(
         else:
             cmd = [
                 command,
-                "--lp",
+                format_arg,
                 model_path,
+                sense_arg,
                 "-o",
                 solution_path,
                 "--tmlim",
@@ -2011,6 +2066,8 @@ def run_solver(
             "-seconds",
             str(time_limit),
         ]
+        if model_format == "mps":
+            cmd.append("-max" if sense == "max" else "-min")
         if random_seed is not None:
             cmd.extend(["-randomS", str(int(random_seed)), "-randomC", str(int(random_seed))])
         if threads is not None:
@@ -2071,6 +2128,7 @@ def run_solver(
             model_path,
             "-seconds",
             str(time_limit),
+            *(["-max" if sense == "max" else "-min"] if model_format == "mps" else []),
             "-printingOptions",
             "all",
             *(["-presolve", presolve] if presolve in {"on", "off"} else []),
@@ -2146,7 +2204,8 @@ def run_solver(
                 f.write(f"RANDOMSEED = {int(random_seed)}\n")
             if presolve is not None:
                 f.write(f"PRESOLVE = {-1 if presolve == 'auto' else 1 if presolve == 'on' else 0}\n")
-            f.write(f"readprob -l {model_path}\n")
+            read_flag = "-m" if model_format == "mps" else "-l"
+            f.write(f"readprob {read_flag} {model_path}\n")
             f.write("mipoptimize\n" if kind == "mip" else "lpoptimize\n")
             f.write(f"writesol {solution_path} -npa\n")
             f.write("quit\n")
@@ -2167,10 +2226,16 @@ def run_solver(
     run = subprocess.run(
         cmd,
         text=True,
+        input=input_text,
         capture_output=True,
         check=False,
         cwd=os.path.dirname(model_path),
+        timeout=max(5.0, float(time_limit) + 5.0),
     )
+    if solver == "lindo" and not os.path.exists(solution_path):
+        automatic_solution_path = os.path.splitext(model_path)[0] + ".sol"
+        if os.path.exists(automatic_solution_path):
+            shutil.copyfile(automatic_solution_path, solution_path)
     return run.stdout, run.stderr
 
 
@@ -2179,6 +2244,7 @@ def solve_solution_pool(
     raw: dict,
     time_limit: float,
     solution_pool_size: int,
+    model_format: str = "lp",
     node_limit: Optional[int] = None,
     solution_limit: Optional[int] = None,
     relative_gap: Optional[float] = None,
@@ -2223,6 +2289,7 @@ def solve_solution_pool(
             solver,
             working,
             time_limit,
+            model_format=model_format,
             node_limit=node_limit,
             solution_limit=solution_limit,
             relative_gap=relative_gap,
@@ -2421,6 +2488,7 @@ def solve(
     solver: str,
     raw: dict,
     time_limit: float,
+    model_format: str = "lp",
     node_limit: Optional[int] = None,
     solution_limit: Optional[int] = None,
     relative_gap: Optional[float] = None,
@@ -2449,6 +2517,8 @@ def solve(
             f"{solver}:cli",
             f"{solver} executable found, but this bridge does not yet know the non-interactive solve command",
         )
+    if model_format not in {"lp", "mps"}:
+        raise ValueError("model_format must be 'lp' or 'mps'")
 
     if kind == "lp":
         lp = raw.get("lp", raw)
@@ -2527,23 +2597,24 @@ def solve(
                 raw,
                 time_limit,
                 solution_pool_size,
-                node_limit,
-                solution_limit,
-                relative_gap,
-                absolute_gap,
-                objective_limit,
-                primal_feasibility_tolerance,
-                dual_feasibility_tolerance,
-                integer_feasibility_tolerance,
-                threads,
-                random_seed,
-                presolve,
-                cuts,
-                heuristics,
-                branch_rule,
-                branch_priorities,
-                node_selection,
-                mip_start,
+                model_format=model_format,
+                node_limit=node_limit,
+                solution_limit=solution_limit,
+                relative_gap=relative_gap,
+                absolute_gap=absolute_gap,
+                objective_limit=objective_limit,
+                primal_feasibility_tolerance=primal_feasibility_tolerance,
+                dual_feasibility_tolerance=dual_feasibility_tolerance,
+                integer_feasibility_tolerance=integer_feasibility_tolerance,
+                threads=threads,
+                random_seed=random_seed,
+                presolve=presolve,
+                cuts=cuts,
+                heuristics=heuristics,
+                branch_rule=branch_rule,
+                branch_priorities=branch_priorities,
+                node_selection=node_selection,
+                mip_start=mip_start,
             )
     else:
         raise ValueError("kind must be 'lp' or 'mip'")
@@ -2552,17 +2623,31 @@ def solve(
     mip_start_objective = dot(c, mip_start) if kind == "mip" and mip_start is not None else None
 
     with tempfile.TemporaryDirectory(prefix="ores-linear-cli-") as tmp:
-        if solver == "lindo":
-            model_path = os.path.join(tmp, "model.mps")
-            solution_path = os.path.join(tmp, "model.sol")
-            write_free_mps(model_path, sense, c, a_ub, b_ub, a_eq, b_eq, lbs, ubs, integer_vars)
-        else:
-            model_path = os.path.join(tmp, "model.lp")
-            solution_path = (
-                os.path.join(tmp, "xpress_solution")
-                if solver == "xpress"
-                else os.path.join(tmp, f"{solver}.sol")
+        effective_model_format = "mps" if solver == "lindo" else model_format
+        extension = "mps" if effective_model_format == "mps" else "lp"
+        model_path = os.path.join(tmp, f"model.{extension}")
+        solution_path = (
+            os.path.join(tmp, "xpress_solution")
+            if solver == "xpress"
+            else os.path.join(tmp, "model.sol")
+            if solver == "lindo"
+            else os.path.join(tmp, f"{solver}.sol")
+        )
+        if effective_model_format == "mps":
+            write_free_mps(
+                model_path,
+                sense,
+                c,
+                a_ub,
+                b_ub,
+                a_eq,
+                b_eq,
+                lbs,
+                ubs,
+                integer_vars,
+                include_objsense=solver != "glpk",
             )
+        else:
             write_cplex_lp(model_path, sense, c, a_ub, b_ub, a_eq, b_eq, lbs, ubs, integer_vars)
         stdout, stderr = run_solver(
             solver,
@@ -2571,6 +2656,7 @@ def solve(
             model_path,
             solution_path,
             time_limit,
+            effective_model_format,
             node_limit,
             solution_limit,
             relative_gap,
@@ -2777,6 +2863,7 @@ def main() -> int:
     parser.add_argument("--kind", choices=["lp", "mip"], required=True)
     parser.add_argument("--solver", choices=sorted(COMMAND_ALIASES.keys()), required=True)
     parser.add_argument("--problem")
+    parser.add_argument("--model-format", choices=["lp", "mps"], default="lp")
     parser.add_argument("--time-limit", type=float, default=10.0)
     parser.add_argument("--node-limit", type=int)
     parser.add_argument("--solution-limit", type=int)
@@ -2811,6 +2898,7 @@ def main() -> int:
                     args.solver,
                     raw,
                     args.time_limit,
+                    args.model_format,
                     args.node_limit,
                     args.solution_limit,
                     args.relative_gap,

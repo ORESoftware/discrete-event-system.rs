@@ -9723,6 +9723,18 @@ pub fn run_default_simulation() -> SimulationTrace {
     run_simulation(MatchConfig::default(), 5)
 }
 
+fn run_site_simulation() -> SimulationTrace {
+    run_simulation(
+        MatchConfig {
+            duration_seconds: 60.0,
+            learning_enabled: false,
+            learning_logging_enabled: false,
+            ..MatchConfig::default()
+        },
+        2,
+    )
+}
+
 pub fn run_simulation(config: MatchConfig, record_every_ticks: u64) -> SimulationTrace {
     let mut sim = SoccerMatch::default_11v11(config.clone());
     let mut frames = vec![sim.to_frame()];
@@ -10252,15 +10264,28 @@ pub fn soccer_simulation_page_html(trace: &SimulationTrace) -> String {
     include_str!("soccer_ui.html").replace("__SOCCER_TRACE__", &json)
 }
 
+fn match_frames_jsonl(frames: &[MatchFrame]) -> Result<String, serde_json::Error> {
+    let mut jsonl = String::new();
+    for frame in frames {
+        jsonl.push_str(&serde_json::to_string(frame)?);
+        jsonl.push('\n');
+    }
+    Ok(jsonl)
+}
+
 pub fn soccer_live_page_html() -> String {
     include_str!("soccer_live_ui.html").to_string()
 }
 
 pub fn write_soccer_artifacts() {
-    let trace = run_default_simulation();
+    let trace = run_site_simulation();
     let ui_path = std::path::Path::new("out/soccer-sim.html");
+    let frames_path = std::path::Path::new("out/soccer-sim.frames.jsonl");
     let _ = std::fs::create_dir_all("out");
     let _ = std::fs::write(ui_path, soccer_simulation_page_html(&trace));
+    if let Ok(jsonl) = match_frames_jsonl(&trace.frames) {
+        let _ = std::fs::write(frames_path, jsonl);
+    }
     let learning_config = MatchConfig {
         duration_seconds: 12.0,
         seed: MatchConfig::default().seed + 1,
@@ -10288,6 +10313,7 @@ pub fn write_soccer_artifacts() {
         let _ = std::fs::write(self_play_path, json);
     }
     println!("# Soccer simulation UI: {}", ui_path.display());
+    println!("# Soccer simulation frames: {}", frames_path.display());
     println!("# Soccer Q-policy artifact: {}", policy_path.display());
     println!(
         "# Soccer self-play team-policy artifact: {}",

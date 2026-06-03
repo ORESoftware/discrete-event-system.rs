@@ -147,18 +147,26 @@ pub fn write_studio_player_html(
 
     let mut paths = Vec::new();
 
+    let run_artifact = studio_run_artifact(spec)?;
     let run_path = studio_dir.join("run-player.html");
-    fs::write(&run_path, studio_run_artifact(spec)?.to_player_html())?;
+    fs::write(&run_path, run_artifact.to_player_html())?;
     paths.push(run_path);
+    let run_frames_path = studio_dir.join("run-player.frames.jsonl");
+    fs::write(&run_frames_path, run_artifact.to_jsonl())?;
 
+    let n2_artifact = n2_analysis_artifact(spec);
     let n2_path = studio_dir.join("n2-player.html");
-    fs::write(&n2_path, n2_analysis_artifact(spec).to_player_html())?;
+    fs::write(&n2_path, n2_artifact.to_player_html())?;
     paths.push(n2_path);
+    let n2_frames_path = studio_dir.join("n2-player.frames.jsonl");
+    fs::write(&n2_frames_path, n2_artifact.to_jsonl())?;
 
     if let Some(artifact) = first_design_sweep_artifact(spec)? {
         let sweep_path = studio_dir.join("sweep-player.html");
         fs::write(&sweep_path, artifact.to_player_html())?;
         paths.push(sweep_path);
+        let sweep_frames_path = studio_dir.join("sweep-player.frames.jsonl");
+        fs::write(&sweep_frames_path, artifact.to_jsonl())?;
     }
 
     Ok(paths)

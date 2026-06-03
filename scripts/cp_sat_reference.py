@@ -181,42 +181,80 @@ def circuit_complete_ok(selected: Sequence[dict], nodes: Sequence[int]) -> bool:
 
 
 def multiple_circuit_complete_ok(selected: Sequence[dict], nodes: Sequence[int]) -> bool:
-    if 0 not in nodes:
+    node_set = set(nodes)
+    if 0 not in node_set:
         return False
-    depot_out = sum(1 for arc in selected if int(arc["tail"]) == 0)
-    depot_in = sum(1 for arc in selected if int(arc["head"]) == 0)
-    if depot_out != depot_in:
-        return False
+    incoming = {node: 0 for node in nodes}
+    outgoing = {node: 0 for node in nodes}
+    next_node = {}
 
+    for arc in selected:
+        tail = int(arc["tail"])
+        head = int(arc["head"])
+        if tail not in node_set or head not in node_set or (tail == 0 and head == 0):
+            return False
+        outgoing[tail] += 1
+        incoming[head] += 1
+        if tail != 0 and tail != head:
+            if tail in next_node:
+                return False
+            next_node[tail] = head
+
+    if outgoing.get(0, 0) != incoming.get(0, 0):
+        return False
     for node in nodes:
         if node == 0:
             continue
-        outgoing = [arc for arc in selected if int(arc["tail"]) == node]
-        inbound = [arc for arc in selected if int(arc["head"]) == node]
-        if len(outgoing) != 1 or len(inbound) != 1:
+        if outgoing[node] != 1 or incoming[node] != 1:
             return False
 
     for start in nodes:
         if start == 0:
             continue
-        first = next((arc for arc in selected if int(arc["tail"]) == start), None)
-        if first is None:
-            return False
-        if int(first["head"]) == start:
-            continue
+        seen = set()
         current = start
-        seen = []
-        while True:
+        while current in next_node:
             if current == 0:
                 break
             if current in seen:
                 return False
-            seen.append(current)
-            next_arc = next((arc for arc in selected if int(arc["tail"]) == current), None)
-            if next_arc is None:
+            seen.add(current)
+            current = next_node[current]
+            if current not in node_set:
                 return False
-            current = int(next_arc["head"])
+
     return True
+
+
+def multiple_circuit_has_closed_subtour(selected: Sequence[dict], nodes: Sequence[int]) -> bool:
+    node_set = set(nodes)
+    next_node = {}
+    for arc in selected:
+        tail = int(arc["tail"])
+        head = int(arc["head"])
+        if tail not in node_set or head not in node_set or (tail == 0 and head == 0):
+            return True
+        if tail == 0 or tail == head:
+            continue
+        if tail in next_node:
+            return True
+        next_node[tail] = head
+
+    for start in nodes:
+        if start == 0:
+            continue
+        seen = set()
+        current = start
+        while current in next_node:
+            if current == 0:
+                break
+            if current in seen:
+                return True
+            seen.add(current)
+            current = next_node[current]
+            if current not in node_set:
+                return True
+    return False
 
 
 def reservoir_complete_ok(events: Sequence[tuple[int, int]], min_level: int, max_level: int) -> bool:
@@ -633,6 +671,14 @@ def partial_ok(model: dict, partial: Sequence[Optional[int]]) -> bool:
                     for arc in arcs
                     if int(arc["head"]) == node and literal_truth(partial, arc["literal"]) is True
                 )
+                if node == 0:
+                    if any(
+                        int(arc["tail"]) == 0
+                        and int(arc["head"]) == 0
+                        and literal_truth(partial, arc["literal"]) is True
+                        for arc in arcs
+                    ):
+                        return False
                 possible_out = sum(
                     1
                     for arc in arcs
@@ -657,6 +703,8 @@ def partial_ok(model: dict, partial: Sequence[Optional[int]]) -> bool:
                     selected.append(arc)
                 elif truth is None:
                     all_bound = False
+            if multiple_circuit_has_closed_subtour(selected, nodes):
+                return False
             if all_bound and not multiple_circuit_complete_ok(selected, nodes):
                 return False
         elif kind == "allowed_assignments":

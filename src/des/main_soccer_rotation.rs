@@ -448,14 +448,21 @@ fn run_with_defaults(defaults: &SoccerRunDefaults) {
             .collect()
     };
 
-    // LP upper bound for context.
-    let lp = policy_lp_relaxed(&problem);
-    println!(
-        "# LP relaxation upper bound on total deterministic affinity = {:.4}",
-        lp.lp_value
-    );
-    println!("# (solved via {}, {} iterations)", lp.solver, lp.iters);
-    println!();
+    let should_solve_lp_context = std::env::var("SOCCER_SHOW_LP_BOUND").as_deref() == Ok("1")
+        || filtered.iter().any(|p| p.name == "LP-relaxation");
+    if should_solve_lp_context {
+        // LP upper bound for context.
+        let lp = policy_lp_relaxed(&problem);
+        println!(
+            "# LP relaxation upper bound on total deterministic affinity = {:.4}",
+            lp.lp_value
+        );
+        println!("# (solved via {}, {} iterations)", lp.solver, lp.iters);
+        println!();
+    } else {
+        println!("# LP relaxation upper bound skipped (set SOCCER_SHOW_LP_BOUND=1 to include it)");
+        println!();
+    }
 
     let mut aggs: Vec<MatchAggregate> = Vec::new();
     for p in &filtered {

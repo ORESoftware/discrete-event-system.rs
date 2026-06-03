@@ -203,7 +203,12 @@ pub fn solve_set_cover_greedy(p: &SetCoverProblem) -> SetCoverSolution {
         selected.push(chosen.index);
         covered |= chosen.mask;
     }
-    build_solution(p, SetCoverStatus::Feasible, selected, "greedy weighted set cover")
+    build_solution(
+        p,
+        SetCoverStatus::Feasible,
+        selected,
+        "greedy weighted set cover",
+    )
 }
 
 pub fn solve_set_cover_exact(p: &SetCoverProblem) -> SetCoverSolution {
@@ -255,7 +260,12 @@ pub fn solve_set_cover_exact(p: &SetCoverProblem) -> SetCoverSolution {
         &mut best_indices,
         &mut best_cost,
     );
-    build_solution(p, SetCoverStatus::Optimal, best_indices, "exact branch-and-bound")
+    build_solution(
+        p,
+        SetCoverStatus::Optimal,
+        best_indices,
+        "exact branch-and-bound",
+    )
 }
 
 pub fn set_cover_solution_feasible(p: &SetCoverProblem, solution: &SetCoverSolution) -> bool {
@@ -287,7 +297,11 @@ pub fn set_cover_solution_feasible(p: &SetCoverProblem, solution: &SetCoverSolut
     if covered != universe {
         return false;
     }
-    let reported = solution.covered_elements.iter().cloned().collect::<HashSet<_>>();
+    let reported = solution
+        .covered_elements
+        .iter()
+        .cloned()
+        .collect::<HashSet<_>>();
     reported == universe
         && solution
             .objective
@@ -364,9 +378,7 @@ fn exact_search(
         let candidates = covering_sets[element_idx]
             .iter()
             .copied()
-            .filter(|idx| {
-                !current.contains(idx) && by_index[idx].mask & !covered != 0
-            })
+            .filter(|idx| !current.contains(idx) && by_index[idx].mask & !covered != 0)
             .collect::<Vec<_>>();
         if chosen_element.is_none() || candidates.len() < chosen_candidates.len() {
             chosen_element = Some(element_idx);

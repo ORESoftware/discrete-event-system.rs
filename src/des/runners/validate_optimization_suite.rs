@@ -45,6 +45,14 @@ use crate::des::general::external_bin_packing_reference::{
     solve_bin_packing_with_external_reference, ExternalBinPackingReferenceBin,
     ExternalBinPackingReferenceOptions, ExternalBinPackingReferenceStatus,
 };
+use crate::des::general::external_facility_location_reference::{
+    solve_facility_location_with_external_reference, ExternalFacilityLocationReferenceOptions,
+    ExternalFacilityLocationReferenceStatus,
+};
+use crate::des::general::external_graph_coloring_reference::{
+    solve_graph_coloring_with_external_reference, ExternalGraphColoringReferenceOptions,
+    ExternalGraphColoringReferenceStatus,
+};
 use crate::des::general::external_linear_cli::{
     external_linear_cli_command, probe_external_linear_cli_solver, solve_ipmip_with_external_cli,
     solve_lp_with_external_cli, solve_multi_objective_ipmip_with_external_cli,
@@ -84,6 +92,10 @@ use crate::des::general::external_scheduling_reference::{
     solve_flow_shop_with_external_reference, solve_job_shop_with_external_reference,
     ExternalSchedulingReferenceOptions, ExternalSchedulingReferenceStatus,
 };
+use crate::des::general::external_set_cover_reference::{
+    solve_set_cover_with_external_reference, ExternalSetCoverReferenceOptions,
+    ExternalSetCoverReferenceStatus,
+};
 use crate::des::general::external_tsp_reference::{
     solve_tsp_with_external_reference, ExternalTspReferenceOptions, ExternalTspReferenceStatus,
 };
@@ -107,8 +119,18 @@ use crate::des::general::external_validation_tools::{
     PrismModule, PrismValidationModel, SimulationMetricExpectation, SimulationValidationRequest,
     SmtDeclaration, SmtLibValidationScript, SmtSort, TlaValidationModule,
 };
+use crate::des::general::facility_location::{
+    build_sample_facility_location_problem, facility_location_solution_feasible,
+    solve_facility_location_exact, solve_facility_location_greedy, FacilityLocationAssignment,
+    FacilityLocationProblem, FacilityLocationSolution, FacilityLocationStatus,
+};
 use crate::des::general::genetic_tsp::{
     build_pentagon_tsp, held_karp_exact, is_permutation, tour_length,
+};
+use crate::des::general::graph_coloring::{
+    build_sample_graph_coloring_problem, graph_coloring_solution_feasible,
+    solve_graph_coloring_exact, solve_graph_coloring_greedy, GraphColoringProblem,
+    GraphColoringSolution, GraphColoringStatus,
 };
 use crate::des::general::ip_mip_des::{
     build_absolute_value_penalty_ip, build_binary_knapsack_ip, build_binary_product_gate_ip,
@@ -162,6 +184,10 @@ use crate::des::general::qp::{
     solve_socp_pattern_search, MIQPOptions, MixedIntegerQuadraticProgram, QPOptions, QPStatus,
     QcpOptions, QcpStatus, QuadraticConstraint, QuadraticProgram, QuadraticallyConstrainedProgram,
     SecondOrderCone, SecondOrderConeProgram, SocpOptions, SocpStatus,
+};
+use crate::des::general::set_cover::{
+    build_sample_set_cover_problem, set_cover_solution_feasible, solve_set_cover_exact,
+    solve_set_cover_greedy, SetCoverProblem, SetCoverStatus,
 };
 
 #[derive(Clone, Debug)]
@@ -771,6 +797,77 @@ impl Driver {
         seen.len() == problem.items.len()
     }
 
+    fn set_cover_external_solution_feasible(
+        &self,
+        problem: &SetCoverProblem,
+        selected_indices: &[usize],
+        selected_ids: &[String],
+        covered_elements: &[String],
+        objective: Option<f64>,
+    ) -> bool {
+        if selected_indices.len() != selected_ids.len() {
+            return false;
+        }
+        let mut seen = HashSet::new();
+        let mut covered = HashSet::new();
+        let mut cost = 0.0;
+        for (&idx, id) in selected_indices.iter().zip(selected_ids) {
+            let Some(set) = problem.sets.get(idx) else {
+                return false;
+            };
+            if set.id.as_str() != id.as_str() || !seen.insert(idx) {
+                return false;
+            }
+            cost += set.cost;
+            covered.extend(set.elements.iter().cloned());
+        }
+        let universe = problem.universe.iter().cloned().collect::<HashSet<_>>();
+        let reported = covered_elements.iter().cloned().collect::<HashSet<_>>();
+        covered == universe
+            && reported == universe
+            && objective.is_some_and(|value| (value - cost).abs() <= 1e-8 * 1.0_f64.max(cost.abs()))
+    }
+
+    fn facility_location_external_solution_feasible(
+        &self,
+        problem: &FacilityLocationProblem,
+        open_facility_indices: &[usize],
+        open_facility_ids: &[String],
+        assignments: &[FacilityLocationAssignment],
+        objective: Option<f64>,
+    ) -> bool {
+        facility_location_solution_feasible(
+            problem,
+            &FacilityLocationSolution {
+                status: FacilityLocationStatus::Feasible,
+                open_facility_indices: open_facility_indices.to_vec(),
+                open_facility_ids: open_facility_ids.to_vec(),
+                assignments: assignments.to_vec(),
+                objective,
+                message: "external facility-location solution".to_string(),
+            },
+        )
+    }
+
+    fn graph_coloring_external_solution_feasible(
+        &self,
+        problem: &GraphColoringProblem,
+        color_indices: &[usize],
+        color_names: &[String],
+        used_color_count: Option<usize>,
+    ) -> bool {
+        graph_coloring_solution_feasible(
+            problem,
+            &GraphColoringSolution {
+                status: GraphColoringStatus::Feasible,
+                color_indices: color_indices.to_vec(),
+                color_names: color_names.to_vec(),
+                used_color_count,
+                message: "external graph-coloring solution".to_string(),
+            },
+        )
+    }
+
     fn check_cp_reference_optimal(
         &mut self,
         label: &str,
@@ -1011,6 +1108,310 @@ impl Driver {
             }
             _ => println!(
                 "  SKIP  Bin-packing OR-Tools CP-SAT objective: status={:?} message={}",
+                reference.ortools_status, reference.message
+            ),
+        }
+    }
+
+    fn validate_set_cover(&mut self) {
+        println!("\n-- Set cover: exact/greedy vs OR-Tools CP-SAT bridge --");
+        let problem = build_sample_set_cover_problem();
+        let exact = solve_set_cover_exact(&problem);
+        let greedy = solve_set_cover_greedy(&problem);
+        self.check(
+            "Set-cover exact native optimum",
+            exact.status == SetCoverStatus::Optimal
+                && exact
+                    .objective
+                    .is_some_and(|value| (value - 7.0).abs() <= 1e-10)
+                && set_cover_solution_feasible(&problem, &exact),
+            format!(
+                "status={} objective={:?} selected={:?}",
+                exact.status.as_str(),
+                exact.objective,
+                exact.selected_set_ids
+            ),
+        );
+        self.check(
+            "Set-cover greedy native feasibility",
+            greedy.status == SetCoverStatus::Feasible
+                && set_cover_solution_feasible(&problem, &greedy)
+                && greedy.objective >= exact.objective,
+            format!(
+                "status={} objective={:?} selected={:?}",
+                greedy.status.as_str(),
+                greedy.objective,
+                greedy.selected_set_ids
+            ),
+        );
+
+        let reference = solve_set_cover_with_external_reference(
+            &problem,
+            &ExternalSetCoverReferenceOptions::default(),
+        );
+        self.check(
+            "Set-cover exact/reference bridge status optimal",
+            reference.status == ExternalSetCoverReferenceStatus::Optimal,
+            format!(
+                "status={} solver={} message={}",
+                reference.status.as_str(),
+                reference.solver,
+                reference.message
+            ),
+        );
+        self.close(
+            "Set-cover exact/reference objective",
+            exact.objective.unwrap_or(f64::NAN),
+            reference.objective.unwrap_or(f64::NAN),
+            1e-9,
+        );
+        self.check(
+            "Set-cover exact/reference feasibility",
+            self.set_cover_external_solution_feasible(
+                &problem,
+                &reference.selected_set_indices,
+                &reference.selected_set_ids,
+                &reference.covered_elements,
+                reference.objective,
+            ),
+            format!(
+                "objective={:?} selected={:?}",
+                reference.objective, reference.selected_set_ids
+            ),
+        );
+
+        match (
+            reference.ortools_status.as_deref(),
+            reference.ortools_objective,
+        ) {
+            (Some("optimal"), Some(objective)) => {
+                self.close(
+                    "Set-cover OR-Tools CP-SAT objective",
+                    exact.objective.unwrap_or(f64::NAN),
+                    objective,
+                    1e-9,
+                );
+                self.check(
+                    "Set-cover OR-Tools CP-SAT feasibility",
+                    self.set_cover_external_solution_feasible(
+                        &problem,
+                        &reference.ortools_selected_set_indices,
+                        &reference.ortools_selected_set_ids,
+                        &reference.ortools_covered_elements,
+                        reference.ortools_objective,
+                    ),
+                    format!(
+                        "objective={:?} selected={:?} bound={:?}",
+                        reference.ortools_objective,
+                        reference.ortools_selected_set_ids,
+                        reference.ortools_objective_bound
+                    ),
+                );
+            }
+            _ => println!(
+                "  SKIP  Set-cover OR-Tools CP-SAT objective: status={:?} message={}",
+                reference.ortools_status, reference.message
+            ),
+        }
+    }
+
+    fn validate_facility_location(&mut self) {
+        println!("\n-- Facility location: exact/heuristic vs OR-Tools CP-SAT bridge --");
+        let problem = build_sample_facility_location_problem();
+        let exact = solve_facility_location_exact(&problem);
+        let greedy = solve_facility_location_greedy(&problem);
+        self.check(
+            "Facility-location exact native optimum",
+            exact.status == FacilityLocationStatus::Optimal
+                && exact
+                    .objective
+                    .is_some_and(|value| (value - 28.0).abs() <= 1e-10)
+                && exact.open_facility_ids == vec!["North".to_string(), "South".to_string()]
+                && facility_location_solution_feasible(&problem, &exact),
+            format!(
+                "status={} objective={:?} open={:?}",
+                exact.status.as_str(),
+                exact.objective,
+                exact.open_facility_ids
+            ),
+        );
+        self.check(
+            "Facility-location greedy native feasibility",
+            greedy.status == FacilityLocationStatus::Feasible
+                && facility_location_solution_feasible(&problem, &greedy)
+                && greedy.objective >= exact.objective,
+            format!(
+                "status={} objective={:?} open={:?}",
+                greedy.status.as_str(),
+                greedy.objective,
+                greedy.open_facility_ids
+            ),
+        );
+
+        let reference = solve_facility_location_with_external_reference(
+            &problem,
+            &ExternalFacilityLocationReferenceOptions::default(),
+        );
+        self.check(
+            "Facility-location exact/reference bridge status optimal",
+            reference.status == ExternalFacilityLocationReferenceStatus::Optimal,
+            format!(
+                "status={} solver={} message={}",
+                reference.status.as_str(),
+                reference.solver,
+                reference.message
+            ),
+        );
+        self.close(
+            "Facility-location exact/reference objective",
+            exact.objective.unwrap_or(f64::NAN),
+            reference.objective.unwrap_or(f64::NAN),
+            1e-9,
+        );
+        self.check(
+            "Facility-location exact/reference feasibility",
+            self.facility_location_external_solution_feasible(
+                &problem,
+                &reference.open_facility_indices,
+                &reference.open_facility_ids,
+                &reference.assignments,
+                reference.objective,
+            ),
+            format!(
+                "objective={:?} open={:?}",
+                reference.objective, reference.open_facility_ids
+            ),
+        );
+
+        match (
+            reference.ortools_status.as_deref(),
+            reference.ortools_objective,
+        ) {
+            (Some("optimal"), Some(objective)) => {
+                self.close(
+                    "Facility-location OR-Tools CP-SAT objective",
+                    exact.objective.unwrap_or(f64::NAN),
+                    objective,
+                    1e-9,
+                );
+                self.check(
+                    "Facility-location OR-Tools CP-SAT feasibility",
+                    self.facility_location_external_solution_feasible(
+                        &problem,
+                        &reference.ortools_open_facility_indices,
+                        &reference.ortools_open_facility_ids,
+                        &reference.ortools_assignments,
+                        reference.ortools_objective,
+                    ),
+                    format!(
+                        "objective={:?} open={:?} bound={:?}",
+                        reference.ortools_objective,
+                        reference.ortools_open_facility_ids,
+                        reference.ortools_objective_bound
+                    ),
+                );
+            }
+            _ => println!(
+                "  SKIP  Facility-location OR-Tools CP-SAT objective: status={:?} message={}",
+                reference.ortools_status, reference.message
+            ),
+        }
+    }
+
+    fn validate_graph_coloring(&mut self) {
+        println!("\n-- Graph coloring: DSATUR/greedy vs OR-Tools CP-SAT bridge --");
+        let problem = build_sample_graph_coloring_problem();
+        let exact = solve_graph_coloring_exact(&problem);
+        let greedy = solve_graph_coloring_greedy(&problem);
+        self.check(
+            "Graph-coloring exact native chromatic number",
+            exact.status == GraphColoringStatus::Optimal
+                && exact.used_color_count == Some(3)
+                && graph_coloring_solution_feasible(&problem, &exact),
+            format!(
+                "status={} colors={:?} assignment={:?}",
+                exact.status.as_str(),
+                exact.used_color_count,
+                exact.color_indices
+            ),
+        );
+        self.check(
+            "Graph-coloring greedy native feasibility",
+            greedy.status == GraphColoringStatus::Feasible
+                && graph_coloring_solution_feasible(&problem, &greedy)
+                && greedy.used_color_count >= exact.used_color_count,
+            format!(
+                "status={} colors={:?} assignment={:?}",
+                greedy.status.as_str(),
+                greedy.used_color_count,
+                greedy.color_indices
+            ),
+        );
+
+        let reference = solve_graph_coloring_with_external_reference(
+            &problem,
+            &ExternalGraphColoringReferenceOptions::default(),
+        );
+        self.check(
+            "Graph-coloring exact/reference bridge status optimal",
+            reference.status == ExternalGraphColoringReferenceStatus::Optimal,
+            format!(
+                "status={} solver={} message={}",
+                reference.status.as_str(),
+                reference.solver,
+                reference.message
+            ),
+        );
+        self.close(
+            "Graph-coloring exact/reference objective",
+            exact.used_color_count.unwrap_or(usize::MAX) as f64,
+            reference.objective.unwrap_or(f64::NAN),
+            0.0,
+        );
+        self.check(
+            "Graph-coloring exact/reference feasibility",
+            self.graph_coloring_external_solution_feasible(
+                &problem,
+                &reference.color_indices,
+                &reference.color_names,
+                reference.used_color_count,
+            ),
+            format!(
+                "objective={:?} colors={:?} assignment={:?}",
+                reference.objective, reference.used_color_count, reference.color_indices
+            ),
+        );
+
+        match (
+            reference.ortools_status.as_deref(),
+            reference.ortools_objective,
+        ) {
+            (Some("optimal"), Some(objective)) => {
+                self.close(
+                    "Graph-coloring OR-Tools CP-SAT objective",
+                    exact.used_color_count.unwrap_or(usize::MAX) as f64,
+                    objective,
+                    0.0,
+                );
+                self.check(
+                    "Graph-coloring OR-Tools CP-SAT feasibility",
+                    self.graph_coloring_external_solution_feasible(
+                        &problem,
+                        &reference.ortools_color_indices,
+                        &reference.ortools_color_names,
+                        reference.ortools_used_color_count,
+                    ),
+                    format!(
+                        "objective={:?} colors={:?} assignment={:?} bound={:?}",
+                        reference.ortools_objective,
+                        reference.ortools_used_color_count,
+                        reference.ortools_color_indices,
+                        reference.ortools_objective_bound
+                    ),
+                );
+            }
+            _ => println!(
+                "  SKIP  Graph-coloring OR-Tools CP-SAT objective: status={:?} message={}",
                 reference.ortools_status, reference.message
             ),
         }
@@ -16375,6 +16776,9 @@ impl Driver {
     fn run_all(&mut self) {
         self.validate_assignment();
         self.validate_bin_packing();
+        self.validate_set_cover();
+        self.validate_facility_location();
+        self.validate_graph_coloring();
         self.validate_lp();
         self.validate_ip_mip();
         self.validate_external_solver_clis();

@@ -14,7 +14,9 @@ use std::time::Instant;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::des::general::classical_optimization_models::{JobShopJob, ScheduledOperation};
+use crate::des::general::classical_optimization_models::{
+    FlowShopJob, JobShopJob, ScheduledOperation,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExternalSchedulingReferenceSolver {
@@ -73,10 +75,12 @@ impl ExternalSchedulingReferenceStatus {
 pub struct ExternalJobShopReferenceSolution {
     pub status: ExternalSchedulingReferenceStatus,
     pub solver: String,
+    pub sequence: Vec<String>,
     pub schedule: Vec<ScheduledOperation>,
     pub makespan: Option<f64>,
     pub total_flow_time: Option<f64>,
     pub ortools_status: Option<String>,
+    pub ortools_sequence: Vec<String>,
     pub ortools_makespan: Option<f64>,
     pub ortools_total_flow_time: Option<f64>,
     pub ortools_schedule: Vec<ScheduledOperation>,
@@ -88,12 +92,15 @@ pub struct ExternalJobShopReferenceSolution {
 struct SchedulingReferencePayload {
     status: String,
     solver: Option<String>,
+    sequence: Option<Vec<String>>,
     schedule: Option<Vec<ScheduledOperationPayload>>,
     makespan: Option<f64>,
     #[serde(rename = "totalFlowTime")]
     total_flow_time: Option<f64>,
     #[serde(rename = "ortoolsStatus")]
     ortools_status: Option<String>,
+    #[serde(rename = "ortoolsSequence")]
+    ortools_sequence: Option<Vec<String>>,
     #[serde(rename = "ortoolsMakespan")]
     ortools_makespan: Option<f64>,
     #[serde(rename = "ortoolsTotalFlowTime")]
@@ -141,10 +148,12 @@ fn unavailable(message: impl Into<String>, elapsed_ms: f64) -> ExternalJobShopRe
     ExternalJobShopReferenceSolution {
         status: ExternalSchedulingReferenceStatus::Unavailable,
         solver: "external-scheduling-reference".to_string(),
+        sequence: Vec::new(),
         schedule: Vec::new(),
         makespan: None,
         total_flow_time: None,
         ortools_status: None,
+        ortools_sequence: Vec::new(),
         ortools_makespan: None,
         ortools_total_flow_time: None,
         ortools_schedule: Vec::new(),
@@ -160,10 +169,12 @@ fn numerical_error(
     ExternalJobShopReferenceSolution {
         status: ExternalSchedulingReferenceStatus::NumericalError,
         solver: "external-scheduling-reference".to_string(),
+        sequence: Vec::new(),
         schedule: Vec::new(),
         makespan: None,
         total_flow_time: None,
         ortools_status: None,
+        ortools_sequence: Vec::new(),
         ortools_makespan: None,
         ortools_total_flow_time: None,
         ortools_schedule: Vec::new(),
@@ -228,6 +239,7 @@ fn run_scheduling_reference_json(
             solver: parsed
                 .solver
                 .unwrap_or_else(|| "external-scheduling-reference".to_string()),
+            sequence: parsed.sequence.unwrap_or_default(),
             schedule: parsed
                 .schedule
                 .unwrap_or_default()
@@ -237,6 +249,7 @@ fn run_scheduling_reference_json(
             makespan: parsed.makespan,
             total_flow_time: parsed.total_flow_time,
             ortools_status: parsed.ortools_status,
+            ortools_sequence: parsed.ortools_sequence.unwrap_or_default(),
             ortools_makespan: parsed.ortools_makespan,
             ortools_total_flow_time: parsed.ortools_total_flow_time,
             ortools_schedule: parsed
@@ -270,6 +283,7 @@ pub fn solve_job_shop_with_external_reference(
 ) -> ExternalJobShopReferenceSolution {
     run_scheduling_reference_json(
         json!({
+            "kind": "job-shop",
             "jobs": jobs.iter().map(|job| json!({
                 "id": &job.id,
                 "due": job.due,
@@ -277,6 +291,23 @@ pub fn solve_job_shop_with_external_reference(
                     "machine": &op.machine,
                     "duration": op.duration,
                 })).collect::<Vec<_>>(),
+            })).collect::<Vec<_>>(),
+        }),
+        opts,
+    )
+}
+
+pub fn solve_flow_shop_with_external_reference(
+    jobs: &[FlowShopJob],
+    opts: &ExternalSchedulingReferenceOptions,
+) -> ExternalJobShopReferenceSolution {
+    run_scheduling_reference_json(
+        json!({
+            "kind": "flow-shop",
+            "jobs": jobs.iter().map(|job| json!({
+                "id": &job.id,
+                "due": job.due,
+                "processingTimes": &job.processing_times,
             })).collect::<Vec<_>>(),
         }),
         opts,

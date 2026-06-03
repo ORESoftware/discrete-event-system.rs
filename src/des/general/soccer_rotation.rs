@@ -725,6 +725,59 @@ pub fn min_contiguous_on_field_violations(
     violations
 }
 
+/// Find every run where a player stays on the bench for more than their
+/// configured maximum contiguous bench slots. Empty when no cap is configured.
+pub fn max_contiguous_bench_violations(
+    problem: &SoccerProblem,
+    schedule: &Schedule,
+) -> Vec<MaxContiguousBenchViolation> {
+    let t_count = problem.num_periods;
+    let mut on_field = vec![vec![false; problem.num_players]; t_count];
+    for t in 0..t_count {
+        for &p in &schedule.assignment[t] {
+            if p >= 0 && (p as usize) < problem.num_players {
+                on_field[t][p as usize] = true;
+            }
+        }
+    }
+    let mut violations: Vec<MaxContiguousBenchViolation> = Vec::new();
+    for p in 0..problem.num_players {
+        let Some(limit) = player_max_contiguous_bench(problem, p) else {
+            continue;
+        };
+        let mut run = 0usize;
+        let mut run_start = 0usize;
+        for t in 0..t_count {
+            let is_benched = player_is_fieldable(problem, p) && !on_field[t][p];
+            if is_benched {
+                if run == 0 {
+                    run_start = t;
+                }
+                run += 1;
+            } else {
+                if run > limit {
+                    violations.push(MaxContiguousBenchViolation {
+                        player_id: p,
+                        start_period: run_start,
+                        length: run,
+                        max_length: limit,
+                    });
+                }
+                run = 0;
+            }
+        }
+        if run > limit {
+            violations.push(MaxContiguousBenchViolation {
+                player_id: p,
+                start_period: run_start,
+                length: run,
+                max_length: limit,
+            });
+        }
+    }
+    violations
+}
+
 /// `PureTransform<ProblemScheduleInput, string | null>`.
 pub struct ValidateScheduleStructure;
 
@@ -1502,6 +1555,28 @@ pub fn build_soccer_lp(problem: &SoccerProblem) -> LPProblem {
                     }
                     a_ub.push(row);
                     b_ub.push(m as f64);
+                }
+            }
+        }
+    }
+    // (4b) Max bench run: over any window of (B+1) slots a fieldable player
+    //      must appear on field at least once.
+    for p in 0..p_count {
+        if !player_is_fieldable(problem, p) {
+            continue;
+        }
+        if let Some(bmax) = player_max_contiguous_bench(problem, p) {
+            if t_count > bmax {
+                for t0 in 0..=(t_count - (bmax + 1)) {
+                    let mut row = vec![0.0; n];
+                    for dt in 0..=bmax {
+                        let t = t0 + dt;
+                        for pos in 0..k {
+                            row[idx(p, pos, t)] -= 1.0;
+                        }
+                    }
+                    a_ub.push(row);
+                    b_ub.push(-1.0);
                 }
             }
         }

@@ -429,6 +429,8 @@
         </select>
         <button id="pass">Pass</button>
         <button id="shoot">Shoot</button>
+        <button id="clearanceAction">Clear</button>
+        <button id="routeOneAction">Route 1</button>
       </div>
       <div class="section">Agent State</div>
       <div class="metric"><span>Selected</span><b id="agentSelected">Autonomous</b></div>
@@ -543,6 +545,8 @@ const slots = document.getElementById("slots");
 const slotPick = document.getElementById("slotPick");
 const targetPick = document.getElementById("targetPick");
 const passFlight = document.getElementById("passFlight");
+const clearanceActionButton = document.getElementById("clearanceAction");
+const routeOneActionButton = document.getElementById("routeOneAction");
 const surfacePreset = document.getElementById("surfacePreset");
 const dragRange = document.getElementById("dragRange");
 const dragNumber = document.getElementById("dragNumber");
@@ -1520,6 +1524,47 @@ function drawPitch(r) {
   const boxH = r.h * 0.14;
   ctx.strokeRect(r.x + (r.w - boxW) / 2, r.y, boxW, boxH);
   ctx.strokeRect(r.x + (r.w - boxW) / 2, r.y + r.h - boxH, boxW, boxH);
+  drawGoalPosts(r);
+}
+function drawGoalPosts(r) {
+  const fieldWidth = Number(state?.config?.fieldWidthYards || 80);
+  const goalWidth = Number(state?.config?.goalWidthYards || 8);
+  const centerX = r.x + r.w * 0.5;
+  const halfGoalPx = r.w * (goalWidth / fieldWidth) * 0.5;
+  const postRadius = 4;
+  const goalDepth = 9;
+  const topY = r.y;
+  const bottomY = r.y + r.h;
+  const posts = [
+    {x: centerX - halfGoalPx, y: topY, dir: -1},
+    {x: centerX + halfGoalPx, y: topY, dir: -1},
+    {x: centerX - halfGoalPx, y: bottomY, dir: 1},
+    {x: centerX + halfGoalPx, y: bottomY, dir: 1},
+  ];
+
+  ctx.save();
+  ctx.strokeStyle = "rgba(255,255,255,.88)";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(centerX - halfGoalPx, topY);
+  ctx.lineTo(centerX - halfGoalPx, topY - goalDepth);
+  ctx.lineTo(centerX + halfGoalPx, topY - goalDepth);
+  ctx.lineTo(centerX + halfGoalPx, topY);
+  ctx.moveTo(centerX - halfGoalPx, bottomY);
+  ctx.lineTo(centerX - halfGoalPx, bottomY + goalDepth);
+  ctx.lineTo(centerX + halfGoalPx, bottomY + goalDepth);
+  ctx.lineTo(centerX + halfGoalPx, bottomY);
+  ctx.stroke();
+  ctx.fillStyle = "#ffffff";
+  for (const post of posts) {
+    ctx.beginPath();
+    ctx.arc(post.x, post.y, postRadius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(17,32,38,.55)";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+  ctx.restore();
 }
 function drawPitchGridOverlay(r) {
   const level = gridOverlayLevel.value;
@@ -2115,20 +2160,23 @@ function setPassTarget(playerId) {
   render();
   return true;
 }
-function queueInput(pass = false, shoot = false, slot = Number(slotPick.value || 0)) {
+function queueInput(pass = false, shoot = false, slot = Number(slotPick.value || 0), action = null) {
   const playerId = selectedPlayerId(slot);
   if (playerId == null) return false;
   const map = CONTROLLER_KEYMAPS[slot] || CONTROLLER_KEYMAPS[0];
+  const normalizedAction = action == null ? null : normalizeUiActionLabel(action);
+  const actionIsPass = normalizedAction === "pass" || normalizedAction === "aerial-pass";
   queuedInputs.push({
     controllerSlot: slot,
     playerId,
     seq: ++inputSeq,
     axis: axisFromKeys(map),
     sprint: keys.has(map.sprint),
-    pass,
-    passFlight: pass ? passFlight.value : "floor",
-    shoot,
-    targetPlayer: pass ? passTargetForSlot(slot) : null
+    pass: pass || actionIsPass,
+    passFlight: normalizedAction === "aerial-pass" ? "aerial" : pass ? passFlight.value : "floor",
+    shoot: shoot || normalizedAction === "shoot",
+    action: normalizedAction,
+    targetPlayer: (pass || actionIsPass) ? passTargetForSlot(slot) : null
   });
   return true;
 }
@@ -2538,8 +2586,8 @@ async function stepOnce(options = {}) {
     stepping = false;
   }
 }
-async function submitInputOnly(pass = false, shoot = false) {
-  if (!queueInput(pass, shoot)) {
+async function submitInputOnly(pass = false, shoot = false, action = null) {
+  if (!queueInput(pass, shoot, Number(slotPick.value || 0), action)) {
     statusEl.textContent = "autonomous";
     return;
   }
@@ -2563,6 +2611,8 @@ resetMatchButton.addEventListener("click", () => resetMatch().catch(e => statusE
 document.getElementById("step").addEventListener("click", () => stepOnce({manual: true}).catch(e => statusEl.textContent = e.message));
 document.getElementById("pass").addEventListener("click", () => submitInputOnly(true, false).catch(e => statusEl.textContent = e.message));
 document.getElementById("shoot").addEventListener("click", () => submitInputOnly(false, true).catch(e => statusEl.textContent = e.message));
+clearanceActionButton.addEventListener("click", () => submitInputOnly(false, false, "clearance").catch(e => statusEl.textContent = e.message));
+routeOneActionButton.addEventListener("click", () => submitInputOnly(false, false, "route-one").catch(e => statusEl.textContent = e.message));
 exportPolicyButton.addEventListener("click", () => exportTeamPolicy().catch(e => statusEl.textContent = e.message));
 importPolicyButton.addEventListener("click", () => policyFile.click());
 replayMomentsButton.addEventListener("click", () => replayMomentPolicy().catch(e => statusEl.textContent = e.message));
@@ -2669,6 +2719,14 @@ window.addEventListener("keydown", e => {
     return;
   }
   if (isFormEditingTarget(e.target)) return;
+  if (e.code === "KeyC" || e.code === "KeyR") {
+    e.preventDefault();
+    const action = e.code === "KeyC" ? "clearance" : "route-one";
+    if (!e.repeat && !queueInput(false, false, activeSlot, action)) {
+      statusEl.textContent = `slot ${activeSlot + 1} autonomous`;
+    }
+    return;
+  }
   keys.add(e.code);
   const actionSlot = CONTROLLER_KEYMAPS.findIndex(map => map.action === e.code);
   if (actionSlot >= 0 && actionSlot < humanSlotCount()) {

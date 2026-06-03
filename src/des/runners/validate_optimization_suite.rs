@@ -220,10 +220,11 @@ use crate::des::general::math_program::{
     export_math_program_cplex_lp, export_math_program_mps, map_math_program_export_solution,
     map_math_program_lp_row_certificates, map_math_program_lp_variable_certificates,
     solve_math_program, solve_math_program_external_scipy, solve_math_program_solution_pool,
-    ExternalMathProgramOptions, MathProgram, MathProgramConflictItem, MathProgramConflictOptions,
-    MathProgramCrossCheck, MathProgramExportRowKind, MathProgramExportVariableExpansion,
-    MathProgramFeasRelaxOptions, MathProgramSolutionPoolOptions, MathProgramSolveOptions,
-    MathProgramStatus, ObjectiveSense as MathObjectiveSense, RowSense,
+    ExternalMathProgramOptions, GlobalCardinalityCount, MathProgram, MathProgramConflictItem,
+    MathProgramConflictOptions, MathProgramCrossCheck, MathProgramExportRowKind,
+    MathProgramExportVariableExpansion, MathProgramFeasRelaxOptions,
+    MathProgramSolutionPoolOptions, MathProgramSolveOptions, MathProgramStatus,
+    ObjectiveSense as MathObjectiveSense, RowSense,
 };
 use crate::des::general::max_flow::{
     build_textbook_max_flow_problem, solve_max_flow, MaxFlowEdgeFlow, MaxFlowStatus,
@@ -12834,10 +12835,14 @@ impl Driver {
             )
             .expect("false-active indicator");
 
+        let false_indicator_highs_opts = ExternalMathProgramOptions {
+            presolve: Some(ExternalLinearCliPresolve::Off),
+            ..external_opts.clone()
+        };
         match cross_check_math_program_with_external(
             &false_indicator_mip,
             &solve_opts,
-            &external_opts,
+            &false_indicator_highs_opts,
             1e-7,
         ) {
             Ok(report) => self.check(
@@ -12847,11 +12852,14 @@ impl Driver {
                     && report.external.status == MathProgramStatus::Optimal
                     && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
                     && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
+                    && report.external.control_feedback.as_ref().is_some_and(|feedback| {
+                        feedback.presolve.as_deref() == Some("off")
+                    })
                     && (report.internal.objective - 2.0).abs() <= 1e-7
                     && (report.internal.x[false_indicator_x] - 2.0).abs() <= 1e-7
                     && report.internal.x[false_indicator_b].abs() <= 1e-7,
                 format!(
-                    "internal={:?} external={:?} obj_diff={:?} x_diff={:?} objective={} x={:?} violations=({:?},{:?})",
+                    "internal={:?} external={:?} obj_diff={:?} x_diff={:?} objective={} x={:?} violations=({:?},{:?}) control_feedback={:?}",
                     report.internal.status,
                     report.external.status,
                     report.objective_abs_diff,
@@ -12859,7 +12867,8 @@ impl Driver {
                     report.internal.objective,
                     report.internal.x,
                     report.internal_max_violation,
-                    report.external_max_violation
+                    report.external_max_violation,
+                    report.external.control_feedback
                 ),
             ),
             Err(err) => self.check(
@@ -12914,6 +12923,27 @@ impl Driver {
         let logic_xor = general_mip
             .add_binary_var("logic-xor", 1.0)
             .expect("logic xor");
+        let signed_logic_and = general_mip
+            .add_binary_var("signed-logic-and", 1.0)
+            .expect("signed logic and");
+        let signed_logic_or = general_mip
+            .add_binary_var("signed-logic-or", 1.0)
+            .expect("signed logic or");
+        let signed_logic_xor = general_mip
+            .add_binary_var("signed-logic-xor", 1.0)
+            .expect("signed logic xor");
+        let signed_logic_count = general_mip
+            .add_integer_var("signed-logic-count", 2.0, Some(0.0), Some(3.0))
+            .expect("signed logic count");
+        let reified_threshold = general_mip
+            .add_binary_var("reified-logic-threshold", 3.0)
+            .expect("reified logic threshold");
+        let reified_equality = general_mip
+            .add_binary_var("reified-logic-equality", 5.0)
+            .expect("reified logic equality");
+        let linear_domain_value = general_mip
+            .add_integer_var("linear-domain-value", 6.0, Some(0.0), Some(5.0))
+            .expect("linear domain value");
         general_mip
             .add_constraint("fix-logic-a", vec![(logic_a, 1.0)], RowSense::Eq, 1.0)
             .expect("fix logic a");
@@ -12933,8 +12963,74 @@ impl Driver {
             .add_binary_xor("logical-xor", logic_xor, vec![logic_a, logic_b, logic_c])
             .expect("logical xor");
         general_mip
+            .add_boolean_and(
+                "signed-logical-and",
+                signed_logic_and,
+                vec![
+                    MathProgram::bool_lit(logic_a),
+                    MathProgram::not_lit(logic_b),
+                    MathProgram::bool_lit(logic_c),
+                ],
+            )
+            .expect("signed logical and");
+        general_mip
+            .add_boolean_or(
+                "signed-logical-or",
+                signed_logic_or,
+                vec![
+                    MathProgram::not_lit(logic_a),
+                    MathProgram::bool_lit(logic_b),
+                ],
+            )
+            .expect("signed logical or");
+        general_mip
+            .add_boolean_xor(
+                "signed-logical-xor",
+                signed_logic_xor,
+                vec![
+                    MathProgram::bool_lit(logic_a),
+                    MathProgram::not_lit(logic_b),
+                    MathProgram::bool_lit(logic_c),
+                ],
+            )
+            .expect("signed logical xor");
+        general_mip
             .add_exactly_k("logical-exactly-two", vec![logic_a, logic_b, logic_c], 2)
             .expect("logical cardinality");
+        general_mip
+            .add_boolean_count(
+                "signed-logical-count",
+                vec![
+                    MathProgram::bool_lit(logic_a),
+                    MathProgram::not_lit(logic_b),
+                    MathProgram::bool_lit(logic_c),
+                ],
+                signed_logic_count,
+            )
+            .expect("signed logical count");
+        general_mip
+            .add_reified_le_constraint(
+                "reified-logic-threshold",
+                MathProgram::bool_lit(reified_threshold),
+                vec![(logic_a, 1.0), (logic_c, 1.0)],
+                2.0,
+            )
+            .expect("reified logic threshold");
+        general_mip
+            .add_reified_eq_constraint(
+                "reified-logic-equality",
+                MathProgram::bool_lit(reified_equality),
+                vec![(logic_a, 1.0), (logic_c, 1.0)],
+                2.0,
+            )
+            .expect("reified logic equality");
+        general_mip
+            .add_linear_domain(
+                "linear-expression-domain",
+                vec![(linear_domain_value, 1.0)],
+                vec![(1, 2), (4, 4)],
+            )
+            .expect("linear expression domain");
         general_mip
             .add_binary_implication("logical-implication", logic_a, logic_c)
             .expect("logical implication");
@@ -13092,6 +13188,22 @@ impl Driver {
             .add_l1_norm("l1-norm-constraint", l1_norm, vec![l1_x, l1_y])
             .expect("l1 norm constraint");
 
+        let l0_x = general_mip
+            .add_integer_var("l0-x", 10.0, Some(-1.0), Some(1.0))
+            .expect("l0 x");
+        let l0_y = general_mip
+            .add_integer_var("l0-y", -5.0, Some(0.0), Some(1.0))
+            .expect("l0 y");
+        let l0_z = general_mip
+            .add_integer_var("l0-z", 2.0, Some(0.0), Some(2.0))
+            .expect("l0 z");
+        let l0_norm = general_mip
+            .add_integer_var("l0-norm", 4.0, Some(0.0), Some(3.0))
+            .expect("l0 norm");
+        general_mip
+            .add_l0_norm("l0-norm-constraint", l0_norm, vec![l0_x, l0_y, l0_z])
+            .expect("l0 norm constraint");
+
         let linf_x = general_mip
             .add_continuous_var("linf-x", 0.0, Some(-4.0), Some(4.0))
             .expect("linf x");
@@ -13136,13 +13248,20 @@ impl Driver {
                         && report
                             .external_max_violation
                             .is_some_and(|violation| violation <= 1e-7)
-                        && (report.internal.objective - 28.0).abs() <= 1e-7
+                        && (report.internal.objective - 90.0).abs() <= 1e-7
                         && (report.internal.x[logic_a] - 1.0).abs() <= 1e-7
                         && report.internal.x[logic_b].abs() <= 1e-7
                         && (report.internal.x[logic_c] - 1.0).abs() <= 1e-7
                         && report.internal.x[logic_and].abs() <= 1e-7
                         && (report.internal.x[logic_or] - 1.0).abs() <= 1e-7
                         && report.internal.x[logic_xor].abs() <= 1e-7
+                        && (report.internal.x[signed_logic_and] - 1.0).abs() <= 1e-7
+                        && report.internal.x[signed_logic_or].abs() <= 1e-7
+                        && (report.internal.x[signed_logic_xor] - 1.0).abs() <= 1e-7
+                        && (report.internal.x[signed_logic_count] - 3.0).abs() <= 1e-7
+                        && (report.internal.x[reified_threshold] - 1.0).abs() <= 1e-7
+                        && (report.internal.x[reified_equality] - 1.0).abs() <= 1e-7
+                        && (report.internal.x[linear_domain_value] - 4.0).abs() <= 1e-7
                         && (report.internal.x[enforced_x] - 4.0).abs() <= 1e-7
                         && (report.internal.x[product_result] - 6.0).abs() <= 1e-7
                         && (report.internal.x[div_quotient] - 2.0).abs() <= 1e-7
@@ -13151,6 +13270,10 @@ impl Driver {
                         && (report.internal.x[max_result] - 2.0).abs() <= 1e-7
                         && (report.internal.x[min_result] - 1.0).abs() <= 1e-7
                         && (report.internal.x[l1_norm] - 5.0).abs() <= 1e-7
+                        && (report.internal.x[l0_x] - 1.0).abs() <= 1e-7
+                        && report.internal.x[l0_y].abs() <= 1e-7
+                        && (report.internal.x[l0_z] - 2.0).abs() <= 1e-7
+                        && (report.internal.x[l0_norm] - 2.0).abs() <= 1e-7
                         && (report.internal.x[linf_norm] - 3.0).abs() <= 1e-7,
                     format!(
                         "internal={:?} external={:?} obj_diff={:?} x_diff={:?} objective={} x={:?} violations=({:?},{:?})",
@@ -13197,13 +13320,20 @@ impl Driver {
                     && report
                         .external_max_violation
                         .is_some_and(|violation| violation <= 1e-7)
-                    && (report.internal.objective - 28.0).abs() <= 1e-7
+                    && (report.internal.objective - 90.0).abs() <= 1e-7
                     && (report.internal.x[logic_a] - 1.0).abs() <= 1e-7
                     && report.internal.x[logic_b].abs() <= 1e-7
                     && (report.internal.x[logic_c] - 1.0).abs() <= 1e-7
                     && report.internal.x[logic_and].abs() <= 1e-7
                     && (report.internal.x[logic_or] - 1.0).abs() <= 1e-7
                     && report.internal.x[logic_xor].abs() <= 1e-7
+                    && (report.internal.x[signed_logic_and] - 1.0).abs() <= 1e-7
+                    && report.internal.x[signed_logic_or].abs() <= 1e-7
+                    && (report.internal.x[signed_logic_xor] - 1.0).abs() <= 1e-7
+                    && (report.internal.x[signed_logic_count] - 3.0).abs() <= 1e-7
+                    && (report.internal.x[reified_threshold] - 1.0).abs() <= 1e-7
+                    && (report.internal.x[reified_equality] - 1.0).abs() <= 1e-7
+                    && (report.internal.x[linear_domain_value] - 4.0).abs() <= 1e-7
                     && (report.internal.x[enforced_x] - 4.0).abs() <= 1e-7
                     && (report.internal.x[product_result] - 6.0).abs() <= 1e-7
                     && (report.internal.x[div_quotient] - 2.0).abs() <= 1e-7
@@ -13212,6 +13342,10 @@ impl Driver {
                     && (report.internal.x[max_result] - 2.0).abs() <= 1e-7
                     && (report.internal.x[min_result] - 1.0).abs() <= 1e-7
                     && (report.internal.x[l1_norm] - 5.0).abs() <= 1e-7
+                    && (report.internal.x[l0_x] - 1.0).abs() <= 1e-7
+                    && report.internal.x[l0_y].abs() <= 1e-7
+                    && (report.internal.x[l0_z] - 2.0).abs() <= 1e-7
+                    && (report.internal.x[l0_norm] - 2.0).abs() <= 1e-7
                     && (report.internal.x[linf_norm] - 3.0).abs() <= 1e-7,
                 format!(
                     "internal={:?} external={:?} obj_diff={:?} x_diff={:?} objective={} x={:?} violations=({:?},{:?}) solver={} message={:?}",
@@ -13243,11 +13377,19 @@ impl Driver {
                     && export.original_variable_expansions.len() == general_original_var_count
                     && export.row_mappings.len() == export.constraint_names.len()
                     && has_generated("logical-and")
+                    && has_generated("signed-logical-and")
+                    && has_generated("signed-logical-or")
+                    && has_generated("signed-logical-xor")
+                    && has_generated("signed-logical-count")
+                    && has_generated("reified-logic-threshold")
+                    && has_generated("reified-logic-equality")
+                    && has_generated("linear-expression-domain")
                     && has_generated("active-enforced-cap")
                     && has_generated("integer-product")
                     && has_generated("integer-division")
                     && has_generated("absolute-value")
                     && has_generated("maximum")
+                    && has_generated("l0-norm-constraint")
                     && has_generated("linf-norm-constraint")
                     && export.text.contains("Maximize\n")
                     && export.text.contains("Subject To\n")
@@ -13303,11 +13445,19 @@ impl Driver {
                     && export.original_variable_expansions.len() == general_original_var_count
                     && export.row_mappings.len() == export.constraint_names.len()
                     && has_generated("logical-and")
+                    && has_generated("signed-logical-and")
+                    && has_generated("signed-logical-or")
+                    && has_generated("signed-logical-xor")
+                    && has_generated("signed-logical-count")
+                    && has_generated("reified-logic-threshold")
+                    && has_generated("reified-logic-equality")
+                    && has_generated("linear-expression-domain")
                     && has_generated("active-enforced-cap")
                     && has_generated("integer-product")
                     && has_generated("integer-division")
                     && has_generated("absolute-value")
                     && has_generated("maximum")
+                    && has_generated("l0-norm-constraint")
                     && has_generated("linf-norm-constraint")
                     && export.text.contains("OBJSENSE\n MAX\n")
                     && export.text.contains("ROWS\n N  OBJ\n")
@@ -14028,6 +14178,66 @@ impl Driver {
             .add_all_different("permute", vec![all_diff_x0, all_diff_x1, all_diff_x2])
             .expect("all-different");
 
+        let count_x0 = table_mip
+            .add_integer_var("count-x0", 100.0, Some(0.0), Some(2.0))
+            .expect("count x0");
+        let count_x1 = table_mip
+            .add_integer_var("count-x1", 10.0, Some(0.0), Some(2.0))
+            .expect("count x1");
+        let count_x2 = table_mip
+            .add_integer_var("count-x2", 1.0, Some(0.0), Some(2.0))
+            .expect("count x2");
+        let count_x3 = table_mip
+            .add_integer_var("count-x3", 0.0, Some(0.0), Some(2.0))
+            .expect("count x3");
+        table_mip
+            .add_global_cardinality(
+                "global-counts",
+                vec![count_x0, count_x1, count_x2, count_x3],
+                vec![
+                    GlobalCardinalityCount::exact(2, 1),
+                    GlobalCardinalityCount::exact(1, 2),
+                    GlobalCardinalityCount::range(0, None, Some(1)),
+                ],
+            )
+            .expect("global cardinality");
+        let count_ones = table_mip
+            .add_integer_var("count-ones", 30.0, Some(0.0), Some(4.0))
+            .expect("count ones");
+        table_mip
+            .add_value_count(
+                "count-ones-value",
+                vec![count_x0, count_x1, count_x2, count_x3],
+                1,
+                count_ones,
+            )
+            .expect("value count");
+
+        let literal_a = table_mip
+            .add_binary_var("literal-a", 10.0)
+            .expect("literal a");
+        let literal_b = table_mip
+            .add_binary_var("literal-b", -3.0)
+            .expect("literal b");
+        let literal_c = table_mip
+            .add_binary_var("literal-c", -4.0)
+            .expect("literal c");
+        let literal_d = table_mip
+            .add_binary_var("literal-d", 4.0)
+            .expect("literal d");
+        table_mip
+            .add_literal_exactly_k(
+                "signed-literal-exactly-two",
+                vec![
+                    MathProgram::bool_lit(literal_a),
+                    MathProgram::not_lit(literal_b),
+                    MathProgram::bool_lit(literal_c),
+                    MathProgram::not_lit(literal_d),
+                ],
+                2,
+            )
+            .expect("signed literal cardinality");
+
         let allowed_x = table_mip
             .add_integer_var("allowed-x", 10.0, Some(0.0), Some(2.0))
             .expect("allowed x");
@@ -14147,6 +14357,15 @@ impl Driver {
                         && (report.internal.x[all_diff_x0] - 2.0).abs() <= 1e-7
                         && (report.internal.x[all_diff_x1] - 1.0).abs() <= 1e-7
                         && report.internal.x[all_diff_x2].abs() <= 1e-7
+                        && (report.internal.x[count_x0] - 2.0).abs() <= 1e-7
+                        && (report.internal.x[count_x1] - 1.0).abs() <= 1e-7
+                        && (report.internal.x[count_x2] - 1.0).abs() <= 1e-7
+                        && report.internal.x[count_x3].abs() <= 1e-7
+                        && (report.internal.x[count_ones] - 2.0).abs() <= 1e-7
+                        && (report.internal.x[literal_a] - 1.0).abs() <= 1e-7
+                        && report.internal.x[literal_b].abs() <= 1e-7
+                        && report.internal.x[literal_c].abs() <= 1e-7
+                        && (report.internal.x[literal_d] - 1.0).abs() <= 1e-7
                         && (report.internal.x[allowed_x] - 1.0).abs() <= 1e-7
                         && (report.internal.x[allowed_y] - 1.0).abs() <= 1e-7
                         && (report.internal.x[forbidden_x] - 1.0).abs() <= 1e-7
@@ -14202,6 +14421,15 @@ impl Driver {
                     && (report.internal.x[all_diff_x0] - 2.0).abs() <= 1e-7
                     && (report.internal.x[all_diff_x1] - 1.0).abs() <= 1e-7
                     && report.internal.x[all_diff_x2].abs() <= 1e-7
+                    && (report.internal.x[count_x0] - 2.0).abs() <= 1e-7
+                    && (report.internal.x[count_x1] - 1.0).abs() <= 1e-7
+                    && (report.internal.x[count_x2] - 1.0).abs() <= 1e-7
+                    && report.internal.x[count_x3].abs() <= 1e-7
+                    && (report.internal.x[count_ones] - 2.0).abs() <= 1e-7
+                    && (report.internal.x[literal_a] - 1.0).abs() <= 1e-7
+                    && report.internal.x[literal_b].abs() <= 1e-7
+                    && report.internal.x[literal_c].abs() <= 1e-7
+                    && (report.internal.x[literal_d] - 1.0).abs() <= 1e-7
                     && (report.internal.x[allowed_x] - 1.0).abs() <= 1e-7
                     && (report.internal.x[allowed_y] - 1.0).abs() <= 1e-7
                     && (report.internal.x[forbidden_x] - 1.0).abs() <= 1e-7

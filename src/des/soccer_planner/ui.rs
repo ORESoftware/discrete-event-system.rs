@@ -81,8 +81,10 @@ mod tests {
         let req = default_planner_request();
         assert_eq!(req.outfield_formation, vec![4, 4, 2]);
         assert_eq!(req.players.len(), 18);
-        assert_eq!(req.max_subs_per_game, 7);
+        assert_eq!(req.max_subs_per_game, 119);
         assert_eq!(req.min_subs_per_game, 0);
+        assert_eq!(req.default_min_contiguous_blocks, 1);
+        assert_eq!(req.default_max_contiguous_blocks, 4);
         assert_eq!(req.solver_max_nodes, 20_000);
     }
 

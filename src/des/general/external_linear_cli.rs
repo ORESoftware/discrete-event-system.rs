@@ -2,9 +2,10 @@
 //!
 //! This module exposes a Rust-facing interface for solver executables that are
 //! installed locally (for example through Homebrew) without vendoring any
-//! external binaries into the repository. HiGHS plain LP/MIP solves run through
-//! a native Rust CLI path; the broader solver-specific command lines and parsers
-//! still live in `scripts/linear_cli_reference.py` as a compatibility bridge.
+//! external binaries into the repository. HiGHS, GLPK, CBC, and CLP plain solves
+//! run through native Rust CLI paths; the broader solver-specific command lines
+//! and parsers still live in `scripts/linear_cli_reference.py` as a
+//! compatibility bridge.
 
 use std::fs;
 use std::io::Write;
@@ -879,6 +880,19 @@ struct RawExternalLinearCliPoolMember {
     objective: f64,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct PlainLinearCliModel {
+    sense: Sense,
+    c: Vec<f64>,
+    le_rows: Vec<Vec<f64>>,
+    le_rhs: Vec<f64>,
+    eq_rows: Vec<Vec<f64>>,
+    eq_rhs: Vec<f64>,
+    lbs: Vec<Option<f64>>,
+    ubs: Vec<Option<f64>>,
+    integer_vars: Vec<bool>,
+}
+
 /// Serialize an [`LPProblem`] into the JSON contract accepted by
 /// `scripts/linear_cli_reference.py`.
 pub fn lp_problem_to_cli_json(problem: &LPProblem) -> Value {
@@ -1555,6 +1569,9 @@ pub fn solve_linear_cli_json(
     let t0 = Instant::now();
     let solver_name = opts.solver.as_str();
     let bridge_solver = format!("{solver_name}:cli");
+    if let Some(solution) = solve_native_plain_cli_json_direct(kind, &problem_json, opts, t0) {
+        return solution;
+    }
     let stdin_json = match serde_json::to_string(&problem_json) {
         Ok(stdin_json) => stdin_json,
         Err(err) => {
@@ -1815,7 +1832,6 @@ fn should_use_native_highs_cli(
     opts: &ExternalLinearCliOptions,
 ) -> bool {
     if opts.solver != ExternalLinearCliSolver::Highs
-        || opts.python.is_some()
         || opts.script_path.is_some()
         || opts.solution_pool_size.is_some()
         || opts.solution_limit.is_some()
@@ -1876,7 +1892,6 @@ fn solve_ipmip_with_native_highs_cli(
 
 fn should_use_native_glpk_cli(opts: &ExternalLinearCliOptions) -> bool {
     opts.solver == ExternalLinearCliSolver::Glpk
-        && opts.python.is_none()
         && opts.script_path.is_none()
         && opts.lp_algorithm.is_none()
         && opts.max_nodes.is_none()
@@ -1968,6 +1983,500 @@ fn should_use_native_cbc_cli(opts: &ExternalLinearCliOptions) -> bool {
         && opts.branch_priorities.is_none()
         && opts.node_selection.is_none()
         && opts.mip_start.is_none()
+}
+
+fn solve_native_plain_cli_json_direct(
+    kind: ExternalLinearCliKind,
+    problem_json: &Value,
+    opts: &ExternalLinearCliOptions,
+    t0: Instant,
+) -> Option<ExternalLinearCliSolution> {
+    let use_highs = should_use_native_highs_cli(kind, opts);
+    let use_glpk = should_use_native_glpk_cli(opts);
+    if !use_highs && !use_glpk {
+        return None;
+    }
+
+    let solver = format!("{}:cli", opts.solver.as_str());
+    let model = match plain_linear_model_from_cli_json(kind, problem_json) {
+        Ok(Some(model)) => model,
+        Ok(None) => return None,
+        Err(message) => {
+            return Some(external_cli_failure(
+                ExternalLinearCliStatus::NumericalError,
+                solver,
+                message,
+                elapsed_ms(t0),
+            ));
+        }
+    };
+
+    let include_objsense = opts.solver != ExternalLinearCliSolver::Glpk;
+    let model_text = plain_linear_model_to_string(&model, opts.model_format, include_objsense);
+    let solution = match opts.solver {
+        ExternalLinearCliSolver::Highs => solve_native_highs_cli_model(
+            kind,
+            &model_text,
+            model.c.len(),
+            model.le_rows.len(),
+            model.eq_rows.len(),
+            &model.c,
+            opts,
+        ),
+        ExternalLinearCliSolver::Glpk => solve_native_glpk_cli_model(
+            kind,
+            model.sense,
+            &model_text,
+            model.c.len(),
+            model.le_rows.len(),
+            model.eq_rows.len(),
+            &model.c,
+            opts,
+        ),
+        _ => return None,
+    };
+    Some(solution)
+}
+
+fn plain_linear_model_from_cli_json(
+    kind: ExternalLinearCliKind,
+    problem_json: &Value,
+) -> Result<Option<PlainLinearCliModel>, String> {
+    match kind {
+        ExternalLinearCliKind::Lp => plain_linear_lp_model_from_cli_json(problem_json).map(Some),
+        ExternalLinearCliKind::Mip => plain_linear_mip_model_from_cli_json(problem_json),
+    }
+}
+
+fn plain_linear_lp_model_from_cli_json(
+    problem_json: &Value,
+) -> Result<PlainLinearCliModel, String> {
+    let lp = problem_json.get("lp").unwrap_or(problem_json);
+    let object = lp
+        .as_object()
+        .ok_or_else(|| "LP payload must be a JSON object".to_string())?;
+    let c = required_f64_array(object, "c")?;
+    let n = c.len();
+    let sense = parse_cli_sense(object.get("sense"))?;
+    let mut le_rows = optional_f64_matrix(object, &["A_ub", "a_ub"])?;
+    let mut le_rhs = optional_f64_array(object, &["b_ub"])?;
+    let mut eq_rows = optional_f64_matrix(object, &["A_eq", "a_eq"])?;
+    let mut eq_rhs = optional_f64_array(object, &["b_eq"])?;
+    append_linear_constraint_rows(
+        object.get("linear_constraints"),
+        n,
+        &mut le_rows,
+        &mut le_rhs,
+        &mut eq_rows,
+        &mut eq_rhs,
+    )?;
+    let lbs = optional_bound_array(object.get("lb"), n, Some(0.0), false, "lb")?;
+    let ubs = optional_bound_array(object.get("ub"), n, None, false, "ub")?;
+    validate_plain_linear_model_dimensions(n, &le_rows, &le_rhs, &eq_rows, &eq_rhs, &lbs, &ubs)?;
+    Ok(PlainLinearCliModel {
+        sense,
+        c,
+        le_rows,
+        le_rhs,
+        eq_rows,
+        eq_rhs,
+        lbs,
+        ubs,
+        integer_vars: vec![false; n],
+    })
+}
+
+fn plain_linear_mip_model_from_cli_json(
+    problem_json: &Value,
+) -> Result<Option<PlainLinearCliModel>, String> {
+    let object = problem_json
+        .as_object()
+        .ok_or_else(|| "MIP payload must be a JSON object".to_string())?;
+    for key in [
+        "indicators",
+        "sos",
+        "semi_variables",
+        "pwl",
+        "quadratic_objective",
+        "abs",
+        "maximums",
+        "minimums",
+        "logical",
+        "l1_norms",
+        "linf_norms",
+        "products",
+        "multi_objectives",
+    ] {
+        if json_field_has_content(object.get(key)) {
+            return Ok(None);
+        }
+    }
+
+    let c = required_f64_array(object, "c")?;
+    let n = c.len();
+    let sense = parse_cli_sense(object.get("sense"))?;
+    let mut le_rows = optional_f64_matrix(object, &["a"])?;
+    let mut le_rhs = optional_f64_array(object, &["b"])?;
+    let mut eq_rows = Vec::new();
+    let mut eq_rhs = Vec::new();
+    append_linear_constraint_rows(
+        object.get("linear_constraints"),
+        n,
+        &mut le_rows,
+        &mut le_rhs,
+        &mut eq_rows,
+        &mut eq_rhs,
+    )?;
+    append_lazy_constraint_rows(object.get("lazy_constraints"), n, &mut le_rows, &mut le_rhs)?;
+    let lbs = optional_bound_array(object.get("lb"), n, Some(0.0), true, "lb")?;
+    let ubs = optional_bound_array(object.get("ub"), n, None, false, "ub")?;
+    let integer_vars = optional_bool_array(object.get("integer_vars"), n, false, "integer_vars")?;
+    validate_plain_linear_model_dimensions(n, &le_rows, &le_rhs, &eq_rows, &eq_rhs, &lbs, &ubs)?;
+    Ok(Some(PlainLinearCliModel {
+        sense,
+        c,
+        le_rows,
+        le_rhs,
+        eq_rows,
+        eq_rhs,
+        lbs,
+        ubs,
+        integer_vars,
+    }))
+}
+
+fn plain_linear_model_to_string(
+    model: &PlainLinearCliModel,
+    model_format: ExternalLinearCliModelFormat,
+    include_objsense: bool,
+) -> String {
+    match model_format {
+        ExternalLinearCliModelFormat::CplexLp => cplex_lp_string(
+            model.sense,
+            &model.c,
+            &model.le_rows,
+            &model.le_rhs,
+            &model.eq_rows,
+            &model.eq_rhs,
+            &model.lbs,
+            &model.ubs,
+            &model.integer_vars,
+        ),
+        ExternalLinearCliModelFormat::Mps => mps_string(
+            model.sense,
+            &model.c,
+            &model.le_rows,
+            &model.le_rhs,
+            &model.eq_rows,
+            &model.eq_rhs,
+            &model.lbs,
+            &model.ubs,
+            &model.integer_vars,
+            include_objsense,
+        ),
+    }
+}
+
+fn parse_cli_sense(value: Option<&Value>) -> Result<Sense, String> {
+    let Some(value) = value else {
+        return Ok(Sense::Max);
+    };
+    let Some(text) = value.as_str() else {
+        return Err("sense must be a string".to_string());
+    };
+    match text.trim().to_ascii_lowercase().as_str() {
+        "max" | "maximize" => Ok(Sense::Max),
+        "min" | "minimize" => Ok(Sense::Min),
+        other => Err(format!("unknown objective sense '{other}'")),
+    }
+}
+
+fn required_f64_array(
+    object: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<Vec<f64>, String> {
+    let Some(value) = object.get(key) else {
+        return Err(format!("missing required array '{key}'"));
+    };
+    f64_array_from_value(value, key)
+}
+
+fn optional_f64_array(
+    object: &serde_json::Map<String, Value>,
+    keys: &[&str],
+) -> Result<Vec<f64>, String> {
+    for key in keys {
+        if let Some(value) = object.get(*key) {
+            if value.is_null() {
+                return Ok(Vec::new());
+            }
+            return f64_array_from_value(value, key);
+        }
+    }
+    Ok(Vec::new())
+}
+
+fn optional_f64_matrix(
+    object: &serde_json::Map<String, Value>,
+    keys: &[&str],
+) -> Result<Vec<Vec<f64>>, String> {
+    for key in keys {
+        if let Some(value) = object.get(*key) {
+            if value.is_null() {
+                return Ok(Vec::new());
+            }
+            let Some(rows) = value.as_array() else {
+                return Err(format!("{key} must be an array of rows"));
+            };
+            return rows
+                .iter()
+                .enumerate()
+                .map(|(idx, row)| f64_array_from_value(row, &format!("{key}[{idx}]")))
+                .collect();
+        }
+    }
+    Ok(Vec::new())
+}
+
+fn f64_array_from_value(value: &Value, key: &str) -> Result<Vec<f64>, String> {
+    let Some(values) = value.as_array() else {
+        return Err(format!("{key} must be an array"));
+    };
+    values
+        .iter()
+        .enumerate()
+        .map(|(idx, value)| {
+            value
+                .as_f64()
+                .filter(|value| value.is_finite())
+                .ok_or_else(|| format!("{key}[{idx}] must be a finite number"))
+        })
+        .collect()
+}
+
+fn optional_bound_array(
+    value: Option<&Value>,
+    n: usize,
+    default: Option<f64>,
+    null_means_default: bool,
+    name: &str,
+) -> Result<Vec<Option<f64>>, String> {
+    let Some(value) = value else {
+        return Ok(vec![default; n]);
+    };
+    if value.is_null() {
+        return Ok(vec![default; n]);
+    }
+    let Some(values) = value.as_array() else {
+        return Err(format!("{name} must be an array"));
+    };
+    if values.len() != n {
+        return Err(format!(
+            "{name} length {} does not match variable count {n}",
+            values.len()
+        ));
+    }
+    values
+        .iter()
+        .enumerate()
+        .map(|(idx, value)| {
+            if value.is_null() {
+                return Ok(if null_means_default { default } else { None });
+            }
+            value
+                .as_f64()
+                .filter(|value| value.is_finite())
+                .map(Some)
+                .ok_or_else(|| format!("{name}[{idx}] must be finite or null"))
+        })
+        .collect()
+}
+
+fn optional_bool_array(
+    value: Option<&Value>,
+    n: usize,
+    default: bool,
+    name: &str,
+) -> Result<Vec<bool>, String> {
+    let Some(value) = value else {
+        return Ok(vec![default; n]);
+    };
+    if value.is_null() {
+        return Ok(vec![default; n]);
+    }
+    let Some(values) = value.as_array() else {
+        return Err(format!("{name} must be an array"));
+    };
+    if values.len() != n {
+        return Err(format!(
+            "{name} length {} does not match variable count {n}",
+            values.len()
+        ));
+    }
+    values
+        .iter()
+        .enumerate()
+        .map(|(idx, value)| {
+            value
+                .as_bool()
+                .ok_or_else(|| format!("{name}[{idx}] must be a boolean"))
+        })
+        .collect()
+}
+
+fn append_linear_constraint_rows(
+    value: Option<&Value>,
+    n: usize,
+    le_rows: &mut Vec<Vec<f64>>,
+    le_rhs: &mut Vec<f64>,
+    eq_rows: &mut Vec<Vec<f64>>,
+    eq_rhs: &mut Vec<f64>,
+) -> Result<(), String> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    if value.is_null() {
+        return Ok(());
+    }
+    let Some(rows) = value.as_array() else {
+        return Err("linear_constraints must be an array".to_string());
+    };
+    for (idx, row_value) in rows.iter().enumerate() {
+        let Some(row_object) = row_value.as_object() else {
+            return Err(format!("linear_constraints[{idx}] must be an object"));
+        };
+        let row = required_f64_array(row_object, "coefs")?;
+        if row.len() != n {
+            return Err(format!(
+                "linear_constraints[{idx}] coefficient length {} does not match variable count {n}",
+                row.len()
+            ));
+        }
+        let lower = optional_f64_field(
+            row_object.get("lower"),
+            &format!("linear_constraints[{idx}].lower"),
+        )?;
+        let upper = optional_f64_field(
+            row_object.get("upper"),
+            &format!("linear_constraints[{idx}].upper"),
+        )?;
+        if lower.is_none() && upper.is_none() {
+            return Err(format!(
+                "linear_constraints[{idx}] needs a lower or upper bound"
+            ));
+        }
+        if let (Some(lower), Some(upper)) = (lower, upper) {
+            if lower > upper + 1.0e-9 {
+                return Err(format!("linear_constraints[{idx}] lower exceeds upper"));
+            }
+            if (lower - upper).abs() <= 1.0e-9 {
+                eq_rows.push(row);
+                eq_rhs.push(upper);
+                continue;
+            }
+        }
+        if let Some(upper) = upper {
+            le_rows.push(row.clone());
+            le_rhs.push(upper);
+        }
+        if let Some(lower) = lower {
+            le_rows.push(row.iter().map(|value| -*value).collect());
+            le_rhs.push(-lower);
+        }
+    }
+    Ok(())
+}
+
+fn append_lazy_constraint_rows(
+    value: Option<&Value>,
+    n: usize,
+    le_rows: &mut Vec<Vec<f64>>,
+    le_rhs: &mut Vec<f64>,
+) -> Result<(), String> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    if value.is_null() {
+        return Ok(());
+    }
+    let Some(rows) = value.as_array() else {
+        return Err("lazy_constraints must be an array".to_string());
+    };
+    for (idx, row_value) in rows.iter().enumerate() {
+        let Some(row_object) = row_value.as_object() else {
+            return Err(format!("lazy_constraints[{idx}] must be an object"));
+        };
+        let row = required_f64_array(row_object, "coefs")?;
+        if row.len() != n {
+            return Err(format!(
+                "lazy_constraints[{idx}] coefficient length {} does not match variable count {n}",
+                row.len()
+            ));
+        }
+        let rhs = required_f64_field(
+            row_object.get("rhs"),
+            &format!("lazy_constraints[{idx}].rhs"),
+        )?;
+        le_rows.push(row);
+        le_rhs.push(rhs);
+    }
+    Ok(())
+}
+
+fn optional_f64_field(value: Option<&Value>, name: &str) -> Result<Option<f64>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    required_f64_field(Some(value), name).map(Some)
+}
+
+fn required_f64_field(value: Option<&Value>, name: &str) -> Result<f64, String> {
+    let Some(value) = value else {
+        return Err(format!("missing required number '{name}'"));
+    };
+    value
+        .as_f64()
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| format!("{name} must be a finite number"))
+}
+
+fn validate_plain_linear_model_dimensions(
+    n: usize,
+    le_rows: &[Vec<f64>],
+    le_rhs: &[f64],
+    eq_rows: &[Vec<f64>],
+    eq_rhs: &[f64],
+    lbs: &[Option<f64>],
+    ubs: &[Option<f64>],
+) -> Result<(), String> {
+    if le_rows.len() != le_rhs.len() {
+        return Err("inequality matrix/RHS length mismatch".to_string());
+    }
+    if eq_rows.len() != eq_rhs.len() {
+        return Err("equality matrix/RHS length mismatch".to_string());
+    }
+    if lbs.len() != n || ubs.len() != n {
+        return Err("bound vector length mismatch".to_string());
+    }
+    for row in le_rows.iter().chain(eq_rows) {
+        if row.len() != n {
+            return Err("constraint row length mismatch".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn json_field_has_content(value: Option<&Value>) -> bool {
+    match value {
+        None | Some(Value::Null) => false,
+        Some(Value::Array(values)) => !values.is_empty(),
+        Some(Value::Object(values)) => !values.is_empty(),
+        Some(Value::String(value)) => !value.is_empty(),
+        Some(_) => true,
+    }
 }
 
 fn solve_lp_with_native_cbc_cli(
@@ -4232,36 +4741,43 @@ fn push_mps_column(
     eq_rows: &[Vec<f64>],
     eq_names: &[String],
 ) {
+    let mut emitted = false;
     if obj_coeff.abs() > 1.0e-12 {
         out.push_str(&format!(
             "    {name:<8}  OBJ       {}\n",
             fmt_lp_number(obj_coeff)
         ));
+        emitted = true;
     }
     for (row, row_name) in le_rows.iter().zip(le_names) {
-        push_mps_row_coef(out, name, row_name, row);
+        emitted |= push_mps_row_coef(out, name, row_name, row);
     }
     for (row, row_name) in eq_rows.iter().zip(eq_names) {
-        push_mps_row_coef(out, name, row_name, row);
+        emitted |= push_mps_row_coef(out, name, row_name, row);
+    }
+    if !emitted {
+        out.push_str(&format!("    {name:<8}  OBJ       0\n"));
     }
 }
 
-fn push_mps_row_coef(out: &mut String, col_name: &str, row_name: &str, row: &[f64]) {
+fn push_mps_row_coef(out: &mut String, col_name: &str, row_name: &str, row: &[f64]) -> bool {
     let Some(var_idx) = col_name
         .strip_prefix('x')
         .and_then(|idx| idx.parse::<usize>().ok())
     else {
-        return;
+        return false;
     };
     let Some(&coef) = row.get(var_idx) else {
-        return;
+        return false;
     };
     if coef.abs() > 1.0e-12 {
         out.push_str(&format!(
             "    {col_name:<8}  {row_name:<8}  {}\n",
             fmt_lp_number(coef)
         ));
+        return true;
     }
+    false
 }
 
 fn is_binary_bound(
@@ -4885,6 +5401,26 @@ mod tests {
     }
 
     #[test]
+    fn mps_export_keeps_bound_only_columns_defined() {
+        let p = IPMIPProblem {
+            sense: Sense::Min,
+            c: vec![1.0, 0.0, 0.0],
+            a: vec![vec![1.0, 1.0, 0.0]],
+            b: vec![1.0],
+            integer_vars: vec![true, true, true],
+            ub: Some(vec![1.0, 1.0, 1.0]),
+            var_names: None,
+            con_names: None,
+            lazy_constraints: None,
+            variable_nodes: None,
+            constraint_nodes: None,
+        };
+        let text = ipmip_problem_to_mps_string(&p);
+        assert!(text.contains("    x2        OBJ       0\n"));
+        assert!(text.contains(" BV BND1      x2\n"));
+    }
+
+    #[test]
     fn ipmip_mps_export_marks_integers_and_binaries() {
         let p = IPMIPProblem {
             sense: Sense::Max,
@@ -5159,6 +5695,128 @@ ENDATA
         );
         assert_eq!(normalized_random_seed(Some(i32::MAX as u32 + 1)), None);
         assert_eq!(normalized_random_seed(None), None);
+    }
+
+    #[test]
+    fn native_highs_plain_lp_succeeds_without_python_bridge() {
+        let Some(command) = external_linear_cli_command(ExternalLinearCliSolver::Highs) else {
+            eprintln!("SKIP direct HiGHS LP solve: highs command not installed");
+            return;
+        };
+        let solution = solve_lp_with_external_cli(
+            &super::external_linear_cli_smoke_lp(),
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Highs,
+                command_path: Some(command),
+                python: Some("/definitely/not-a-python-for-highs-direct".to_string()),
+                time_limit_secs: Some(2.0),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            solution.status,
+            ExternalLinearCliStatus::Optimal,
+            "{}",
+            solution.message
+        );
+        assert_eq!(solution.solver, "highs:cli");
+        assert_eq!(solution.x, vec![1.0]);
+        assert!(solution
+            .objective
+            .is_some_and(|objective| (objective - 1.0).abs() <= 1.0e-8));
+    }
+
+    #[test]
+    fn native_glpk_plain_lp_succeeds_without_python_bridge() {
+        let Some(command) = external_linear_cli_command(ExternalLinearCliSolver::Glpk) else {
+            eprintln!("SKIP direct GLPK LP solve: glpsol command not installed");
+            return;
+        };
+        let solution = solve_lp_with_external_cli(
+            &super::external_linear_cli_smoke_lp(),
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Glpk,
+                command_path: Some(command),
+                python: Some("/definitely/not-a-python-for-glpk-direct".to_string()),
+                model_format: ExternalLinearCliModelFormat::Mps,
+                time_limit_secs: Some(2.0),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            solution.status,
+            ExternalLinearCliStatus::Optimal,
+            "{}",
+            solution.message
+        );
+        assert_eq!(solution.solver, "glpk:cli");
+        assert_eq!(solution.x, vec![1.0]);
+        assert!(solution
+            .objective
+            .is_some_and(|objective| (objective - 1.0).abs() <= 1.0e-8));
+    }
+
+    #[test]
+    fn native_highs_json_plain_lp_succeeds_without_python_bridge() {
+        let Some(command) = external_linear_cli_command(ExternalLinearCliSolver::Highs) else {
+            eprintln!("SKIP direct HiGHS JSON LP solve: highs command not installed");
+            return;
+        };
+        let payload = lp_problem_to_cli_json(&super::external_linear_cli_smoke_lp());
+        let solution = super::solve_linear_cli_json(
+            ExternalLinearCliKind::Lp,
+            payload,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Highs,
+                command_path: Some(command),
+                python: Some("/definitely/not-a-python-for-highs-json-direct".to_string()),
+                time_limit_secs: Some(2.0),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            solution.status,
+            ExternalLinearCliStatus::Optimal,
+            "{}",
+            solution.message
+        );
+        assert_eq!(solution.solver, "highs:cli");
+        assert_eq!(solution.x, vec![1.0]);
+        assert!(solution
+            .objective
+            .is_some_and(|objective| (objective - 1.0).abs() <= 1.0e-8));
+    }
+
+    #[test]
+    fn native_glpk_json_plain_mip_succeeds_without_python_bridge() {
+        let Some(command) = external_linear_cli_command(ExternalLinearCliSolver::Glpk) else {
+            eprintln!("SKIP direct GLPK JSON MIP solve: glpsol command not installed");
+            return;
+        };
+        let payload = ipmip_problem_to_cli_json(&super::external_linear_cli_smoke_mip());
+        let solution = super::solve_linear_cli_json(
+            ExternalLinearCliKind::Mip,
+            payload,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Glpk,
+                command_path: Some(command),
+                python: Some("/definitely/not-a-python-for-glpk-json-direct".to_string()),
+                model_format: ExternalLinearCliModelFormat::Mps,
+                time_limit_secs: Some(2.0),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            solution.status,
+            ExternalLinearCliStatus::Optimal,
+            "{}",
+            solution.message
+        );
+        assert_eq!(solution.solver, "glpk:cli");
+        assert_eq!(solution.x, vec![1.0]);
+        assert!(solution
+            .objective
+            .is_some_and(|objective| (objective - 1.0).abs() <= 1.0e-8));
     }
 
     #[test]

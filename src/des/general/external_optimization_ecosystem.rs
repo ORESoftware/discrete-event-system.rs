@@ -265,7 +265,9 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::OptaPlanner => {
                 &["org.optaplanner.core.api.solver.SolverFactory"]
             }
-            ExternalOptimizationTool::Timefold => &["ai.timefold.solver.core.api.solver.SolverFactory"],
+            ExternalOptimizationTool::Timefold => {
+                &["ai.timefold.solver.core.api.solver.SolverFactory"]
+            }
             ExternalOptimizationTool::JMetal => &["org.uma.jmetal.algorithm.Algorithm"],
             ExternalOptimizationTool::MoeaFramework => &["org.moeaframework.Executor"],
             ExternalOptimizationTool::Ecj => &["ec.Evolve"],
@@ -527,7 +529,10 @@ fn probe_julia_tool(tool: ExternalOptimizationTool) -> ExternalOptimizationProbe
             env_var,
             Some(project.to_string_lossy().to_string()),
             elapsed_ms(t0),
-            format!("configured Julia project/runtime for {}", tool.display_name()),
+            format!(
+                "configured Julia project/runtime for {}",
+                tool.display_name()
+            ),
         );
     }
     probe_result(
@@ -741,10 +746,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ecosystem_tool_metadata_covers_java_and_rust() {
+    fn ecosystem_tool_metadata_covers_supported_languages() {
+        assert_eq!(ExternalOptimizationTool::all().len(), 32);
         assert_eq!(
             ExternalOptimizationTool::ChocoSolver.ecosystem(),
             ExternalOptimizationEcosystem::Java
+        );
+        assert_eq!(
+            ExternalOptimizationTool::Pyomo.ecosystem(),
+            ExternalOptimizationEcosystem::Python
+        );
+        assert_eq!(
+            ExternalOptimizationTool::Jump.ecosystem(),
+            ExternalOptimizationEcosystem::Julia
+        );
+        assert_eq!(
+            ExternalOptimizationTool::Ampl.ecosystem(),
+            ExternalOptimizationEcosystem::Native
         );
         assert_eq!(
             ExternalOptimizationTool::GoodLp.ecosystem(),
@@ -754,12 +772,24 @@ mod tests {
             ExternalOptimizationTool::ChocoSolver.env_var(),
             "CHOCO_SOLVER_CLASSPATH"
         );
+        assert_eq!(ExternalOptimizationTool::Cvxpy.env_var(), "CVXPY_PYTHON");
+        assert_eq!(ExternalOptimizationTool::Hexaly.env_var(), "HEXALY_DIR");
         assert!(ExternalOptimizationTool::OjAlgo
             .java_probe_classes()
             .contains(&"org.ojalgo.optimisation.ExpressionsBasedModel"));
+        assert!(ExternalOptimizationTool::Timefold
+            .java_probe_classes()
+            .contains(&"ai.timefold.solver.core.api.solver.SolverFactory"));
+        assert!(ExternalOptimizationTool::GurobiPy
+            .python_modules()
+            .contains(&"gurobipy"));
+        assert!(ExternalOptimizationTool::Hexaly
+            .native_command_aliases()
+            .contains(&"hexaly"));
         assert!(ExternalOptimizationTool::HighsRust
             .rust_dependency_names()
             .contains(&"highs-sys"));
+        assert_eq!(ExternalOptimizationEcosystem::Python.as_str(), "python");
     }
 
     #[test]

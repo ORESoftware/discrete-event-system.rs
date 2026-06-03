@@ -59,6 +59,7 @@ use crate::des::general::external_nonlinear_reference::{
     ExternalNonlinearBenchmarkObjective, ExternalNonlinearReferenceOptions,
     ExternalNonlinearReferenceStatus,
 };
+use crate::des::general::external_optimization_ecosystem as legacy_external_optimization_ecosystem;
 use crate::des::general::external_optimization_tools::{
     external_optimization_comparison_report_to_json, external_optimization_tool_specs,
     external_optimization_tools, probe_external_optimization_tool,
@@ -77,9 +78,6 @@ use crate::des::general::external_scheduling_reference::{
 };
 use crate::des::general::external_tsp_reference::{
     solve_tsp_with_external_reference, ExternalTspReferenceOptions, ExternalTspReferenceStatus,
-};
-use crate::des::general::genetic_tsp::{
-    build_pentagon_tsp, held_karp_exact, is_permutation, tour_length,
 };
 use crate::des::general::external_validation_tools::{
     dimacs_cnf_to_string, external_benchmark_manifest_to_json,
@@ -100,6 +98,9 @@ use crate::des::general::external_validation_tools::{
     ExternalValidationTextVerdict, JsonSchemaValidationRequest, MiniZincValidationRequest,
     PrismModule, PrismValidationModel, SimulationMetricExpectation, SimulationValidationRequest,
     SmtDeclaration, SmtLibValidationScript, SmtSort, TlaValidationModule,
+};
+use crate::des::general::genetic_tsp::{
+    build_pentagon_tsp, held_karp_exact, is_permutation, tour_length,
 };
 use crate::des::general::ip_mip_des::{
     build_absolute_value_penalty_ip, build_binary_knapsack_ip, build_binary_product_gate_ip,
@@ -5120,6 +5121,27 @@ impl Driver {
                 "tools={} specs={}",
                 external_optimization_tools().len(),
                 specs.len()
+            ),
+        );
+        let legacy_tools = legacy_external_optimization_ecosystem::ExternalOptimizationTool::all();
+        self.check(
+            "External optimization legacy probe registry synchronized",
+            legacy_tools.len() == external_optimization_tools().len()
+                && legacy_tools
+                    .iter()
+                    .filter(|tool| {
+                        tool.ecosystem()
+                            == legacy_external_optimization_ecosystem::ExternalOptimizationEcosystem::Python
+                    })
+                    .count()
+                    == 10
+                && legacy_tools
+                    .iter()
+                    .any(|tool| tool.as_str() == "hexaly" && tool.ecosystem().as_str() == "native"),
+            format!(
+                "legacy_tools={} current_tools={}",
+                legacy_tools.len(),
+                external_optimization_tools().len()
             ),
         );
         let java_count = specs

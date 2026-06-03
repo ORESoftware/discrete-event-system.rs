@@ -13,7 +13,7 @@ use std::fs;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::sync::{mpsc, Arc, Condvar, Mutex, RwLock};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::des::general::general::fisher_yates_shuffle;
+use crate::des::general::neural_network::{ActivationName, FeedForwardNetwork, RandomNetworkSpec};
 use crate::des::general::prng::{mulberry32, SeededRandom};
 use crate::des::shared::capabilities::RandomSource;
 
@@ -133,6 +134,13 @@ const SOCCER_MOMENT_FEATURE_FRAME_SAMPLES: usize = 8;
 const SOCCER_MOMENT_REPLAY_SHOT_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_PASS_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_DRIBBLE_REWARD: f64 = 15.0;
+const SOCCER_NEURAL_FEATURE_DIM: usize = 32;
+const DEFAULT_SOCCER_NEURAL_LEARNING_RATE: f64 = 0.015;
+const DEFAULT_SOCCER_NEURAL_BATCH_SIZE: usize = 16;
+const DEFAULT_SOCCER_NEURAL_TRAIN_EVERY_TICKS: usize = 4;
+const DEFAULT_SOCCER_NEURAL_MAX_BATCHES_PER_TICK: usize = 2;
+const DEFAULT_SOCCER_NEURAL_HIDDEN_UNITS: usize = 24;
+const DEFAULT_SOCCER_NEURAL_TARGET_SCALE: f64 = 30.0;
 
 fn default_ball_drag_per_tick() -> f64 {
     DEFAULT_BALL_DRAG_PER_TICK
@@ -208,6 +216,34 @@ fn default_learning_logging_enabled() -> bool {
 
 fn default_learning_interval_ticks() -> usize {
     1
+}
+
+fn default_neural_learning_config() -> SoccerNeuralLearningConfig {
+    SoccerNeuralLearningConfig::default()
+}
+
+fn default_soccer_neural_learning_rate() -> f64 {
+    DEFAULT_SOCCER_NEURAL_LEARNING_RATE
+}
+
+fn default_soccer_neural_batch_size() -> usize {
+    DEFAULT_SOCCER_NEURAL_BATCH_SIZE
+}
+
+fn default_soccer_neural_train_every_ticks() -> usize {
+    DEFAULT_SOCCER_NEURAL_TRAIN_EVERY_TICKS
+}
+
+fn default_soccer_neural_max_batches_per_tick() -> usize {
+    DEFAULT_SOCCER_NEURAL_MAX_BATCHES_PER_TICK
+}
+
+fn default_soccer_neural_hidden_units() -> usize {
+    DEFAULT_SOCCER_NEURAL_HIDDEN_UNITS
+}
+
+fn default_soccer_neural_target_scale() -> f64 {
+    DEFAULT_SOCCER_NEURAL_TARGET_SCALE
 }
 
 fn default_period_count() -> usize {
@@ -5330,6 +5366,8 @@ pub struct BallAgent {
     pub holder: Option<usize>,
     pub last_touch_team: Option<Team>,
     pub last_decision: Option<BallDecisionTrace>,
+    #[serde(default)]
+    untargeted_long_ball_launcher: Option<(usize, u64)>,
 }
 
 impl BallAgent {
@@ -5355,6 +5393,7 @@ impl BallAgent {
             holder: state.holder,
             last_touch_team: state.last_touch_team,
             last_decision: None,
+            untargeted_long_ball_launcher: None,
         }
     }
 
@@ -5433,6 +5472,17 @@ impl BallAgent {
         }
     }
 
+    fn untargeted_long_ball_launch_exclusion(
+        &self,
+        current_tick: u64,
+        pending_pass: Option<&PendingPass>,
+    ) -> Option<usize> {
+        self.untargeted_long_ball_team(pending_pass)?;
+        self.untargeted_long_ball_launcher
+            .filter(|(_, launch_tick)| current_tick <= *launch_tick)
+            .map(|(player_id, _)| player_id)
+    }
+
     fn run_time_step(
         &mut self,
         context: BallStepContext<'_>,
@@ -5455,6 +5505,7 @@ impl BallAgent {
                     self.record_decision(context.tick, "held");
                 }
             }
+            self.untargeted_long_ball_launcher = None;
             return BallStepOutcome::None;
         }
 
@@ -5487,6 +5538,7 @@ impl BallAgent {
             self.velocity = Vec2::zero();
             self.curl_acceleration = Vec2::zero();
             self.altitude_yards = 0.0;
+            self.untargeted_long_ball_launcher = None;
         }
 
         if let Some(shot) = context.pending_shot.as_ref() {
@@ -5762,6 +5814,8 @@ impl BallAgent {
         }
 
         let loose_long_ball_team = self.untargeted_long_ball_team(context.pending_pass.as_ref());
+        let same_tick_long_ball_launcher =
+            self.untargeted_long_ball_launch_exclusion(context.tick, context.pending_pass.as_ref());
         if let Some((holder, holder_team)) = nearest_ball_controller_for(
             context.tick,
             self.position,
@@ -5769,12 +5823,14 @@ impl BallAgent {
             context.players,
             context.pending_pass.as_ref(),
             loose_long_ball_team,
+            same_tick_long_ball_launcher,
             self.altitude_yards,
             rng,
         ) {
             self.holder = Some(holder);
             self.last_touch_team = Some(holder_team);
             self.curl_acceleration = Vec2::zero();
+            self.untargeted_long_ball_launcher = None;
             self.record_decision(context.tick, "controlled");
             let possession_result = match context.pending_pass {
                 Some(pass) if pass.team == holder_team => {
@@ -6196,6 +6252,89 @@ fn default_tactical_learning_weights() -> SoccerTacticalLearningWeights {
     SoccerTacticalLearningWeights::default()
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SoccerNeuralLearningBackend {
+    #[default]
+    Inline,
+    Threaded,
+}
+
+impl SoccerNeuralLearningBackend {
+    fn as_str(self) -> &'static str {
+        match self {
+            SoccerNeuralLearningBackend::Inline => "inline",
+            SoccerNeuralLearningBackend::Threaded => "threaded",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerNeuralLearningConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub backend: SoccerNeuralLearningBackend,
+    #[serde(default = "default_soccer_neural_learning_rate")]
+    pub learning_rate: f64,
+    #[serde(default = "default_soccer_neural_batch_size")]
+    pub batch_size: usize,
+    #[serde(default = "default_soccer_neural_train_every_ticks")]
+    pub train_every_ticks: usize,
+    #[serde(default = "default_soccer_neural_max_batches_per_tick")]
+    pub max_batches_per_tick: usize,
+    #[serde(default = "default_soccer_neural_hidden_units")]
+    pub hidden_units: usize,
+    #[serde(default = "default_soccer_neural_target_scale")]
+    pub target_scale: f64,
+}
+
+impl Default for SoccerNeuralLearningConfig {
+    fn default() -> Self {
+        SoccerNeuralLearningConfig {
+            enabled: false,
+            backend: SoccerNeuralLearningBackend::Inline,
+            learning_rate: DEFAULT_SOCCER_NEURAL_LEARNING_RATE,
+            batch_size: DEFAULT_SOCCER_NEURAL_BATCH_SIZE,
+            train_every_ticks: DEFAULT_SOCCER_NEURAL_TRAIN_EVERY_TICKS,
+            max_batches_per_tick: DEFAULT_SOCCER_NEURAL_MAX_BATCHES_PER_TICK,
+            hidden_units: DEFAULT_SOCCER_NEURAL_HIDDEN_UNITS,
+            target_scale: DEFAULT_SOCCER_NEURAL_TARGET_SCALE,
+        }
+    }
+}
+
+impl SoccerNeuralLearningConfig {
+    fn sanitized_batch_size(&self) -> usize {
+        self.batch_size.max(1)
+    }
+
+    fn sanitized_train_every_ticks(&self) -> usize {
+        self.train_every_ticks.max(1)
+    }
+
+    fn sanitized_max_batches_per_tick(&self) -> usize {
+        self.max_batches_per_tick.max(1)
+    }
+
+    fn sanitized_learning_rate(&self) -> f64 {
+        if self.learning_rate.is_finite() {
+            self.learning_rate.max(0.0)
+        } else {
+            DEFAULT_SOCCER_NEURAL_LEARNING_RATE
+        }
+    }
+
+    fn sanitized_target_scale(&self) -> f64 {
+        if self.target_scale.is_finite() && self.target_scale.abs() > 1e-9 {
+            self.target_scale.abs()
+        } else {
+            DEFAULT_SOCCER_NEURAL_TARGET_SCALE
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MatchConfig {
@@ -6230,6 +6369,8 @@ pub struct MatchConfig {
     pub learning_interval_ticks: usize,
     #[serde(default = "default_tactical_learning_weights")]
     pub tactical_learning: SoccerTacticalLearningWeights,
+    #[serde(default = "default_neural_learning_config")]
+    pub neural_learning: SoccerNeuralLearningConfig,
     pub max_human_players: usize,
     pub seed: u32,
 }
@@ -6255,6 +6396,7 @@ impl Default for MatchConfig {
             learning_logging_enabled: true,
             learning_interval_ticks: 1,
             tactical_learning: SoccerTacticalLearningWeights::default(),
+            neural_learning: SoccerNeuralLearningConfig::default(),
             max_human_players: 4,
             seed: 2026,
         }
@@ -6262,6 +6404,19 @@ impl Default for MatchConfig {
 }
 
 impl MatchConfig {
+    pub fn live_gameplay() -> Self {
+        MatchConfig {
+            learning_enabled: false,
+            learning_logging_enabled: false,
+            neural_learning: SoccerNeuralLearningConfig {
+                enabled: false,
+                ..SoccerNeuralLearningConfig::default()
+            },
+            max_human_players: 4,
+            ..MatchConfig::default()
+        }
+    }
+
     pub fn half_count(&self) -> u8 {
         self.halves.max(1)
     }
@@ -10854,6 +11009,10 @@ pub struct SoccerBallSurfaceResponse {
 pub struct SoccerLearningRuntimeRequest {
     pub learning_enabled: Option<bool>,
     pub learning_logging_enabled: Option<bool>,
+    #[serde(default)]
+    pub neural_learning_enabled: Option<bool>,
+    #[serde(default)]
+    pub neural_learning_backend: Option<SoccerNeuralLearningBackend>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -11392,6 +11551,24 @@ pub struct SoccerLearningSnapshot {
     pub away_policy_target_entries: usize,
     #[serde(default)]
     pub away_policy_target_visits: u64,
+    #[serde(default)]
+    pub neural_learning_enabled: bool,
+    #[serde(default)]
+    pub neural_learning_backend: String,
+    #[serde(default)]
+    pub neural_learning_training_steps: usize,
+    #[serde(default)]
+    pub neural_learning_samples: usize,
+    #[serde(default)]
+    pub neural_learning_pending_batches: usize,
+    #[serde(default)]
+    pub neural_learning_dropped_batches: usize,
+    #[serde(default)]
+    pub neural_learning_parameter_count: usize,
+    #[serde(default)]
+    pub neural_learning_last_loss: Option<f64>,
+    #[serde(default)]
+    pub neural_learning_average_loss: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -11424,7 +11601,7 @@ impl Default for SoccerLiveServerConfig {
         SoccerLiveServerConfig {
             host: "127.0.0.1".to_string(),
             port: 5055,
-            match_config: MatchConfig::default(),
+            match_config: MatchConfig::live_gameplay(),
             policy_disk_path: DEFAULT_LIVE_TEAM_POLICY_PATH.to_string(),
             moment_disk_path: DEFAULT_LIVE_MOMENT_WINDOWS_PATH.to_string(),
             autoload_team_policy: true,
@@ -11796,6 +11973,338 @@ fn read_soccer_team_policy_artifact(path: &Path) -> Result<SoccerTeamPolicyArtif
         .map_err(|err| format!("parse team policy artifact: {err}"))
 }
 
+#[derive(Clone, Debug)]
+struct SoccerNeuralTrainingSample {
+    input: Vec<f64>,
+    target: f64,
+}
+
+#[derive(Clone, Debug)]
+struct SoccerNeuralTrainingResult {
+    samples: usize,
+    loss: f64,
+    parameter_count: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+struct SoccerNeuralLearningStatsState {
+    training_steps: usize,
+    samples: usize,
+    pending_batches: usize,
+    dropped_batches: usize,
+    parameter_count: usize,
+    last_loss: Option<f64>,
+    loss_sum: f64,
+    loss_count: usize,
+}
+
+impl SoccerNeuralLearningStatsState {
+    fn record_result(&mut self, result: SoccerNeuralTrainingResult) {
+        self.training_steps = self.training_steps.saturating_add(1);
+        self.samples = self.samples.saturating_add(result.samples);
+        self.parameter_count = result.parameter_count;
+        self.last_loss = Some(result.loss);
+        self.loss_sum += result.loss;
+        self.loss_count = self.loss_count.saturating_add(1);
+        self.pending_batches = self.pending_batches.saturating_sub(1);
+    }
+
+    fn average_loss(&self) -> Option<f64> {
+        (self.loss_count > 0).then(|| self.loss_sum / self.loss_count as f64)
+    }
+}
+
+struct SoccerNeuralLearningWorker {
+    sender: mpsc::Sender<Vec<SoccerNeuralTrainingSample>>,
+    receiver: mpsc::Receiver<SoccerNeuralTrainingResult>,
+}
+
+struct SoccerNeuralLearner {
+    backend: SoccerNeuralLearningBackend,
+    inline_network: Option<FeedForwardNetwork>,
+    worker: Option<SoccerNeuralLearningWorker>,
+    stats: SoccerNeuralLearningStatsState,
+}
+
+impl SoccerNeuralLearner {
+    fn new(config: &MatchConfig) -> Self {
+        let neural_config = &config.neural_learning;
+        let network = build_soccer_neural_network(neural_config, config.seed);
+        let parameter_count = network.num_parameters();
+        let stats = SoccerNeuralLearningStatsState {
+            parameter_count,
+            ..SoccerNeuralLearningStatsState::default()
+        };
+        match neural_config.backend {
+            SoccerNeuralLearningBackend::Inline => SoccerNeuralLearner {
+                backend: SoccerNeuralLearningBackend::Inline,
+                inline_network: Some(network),
+                worker: None,
+                stats,
+            },
+            SoccerNeuralLearningBackend::Threaded => SoccerNeuralLearner {
+                backend: SoccerNeuralLearningBackend::Threaded,
+                inline_network: None,
+                worker: Some(spawn_soccer_neural_learning_worker(
+                    network,
+                    neural_config.sanitized_learning_rate(),
+                )),
+                stats,
+            },
+        }
+    }
+
+    fn drain_results(&mut self) {
+        if let Some(worker) = &self.worker {
+            while let Ok(result) = worker.receiver.try_recv() {
+                self.stats.record_result(result);
+            }
+        }
+    }
+
+    fn submit_samples(
+        &mut self,
+        samples: Vec<SoccerNeuralTrainingSample>,
+        config: &SoccerNeuralLearningConfig,
+    ) {
+        self.drain_results();
+        if samples.is_empty() {
+            return;
+        }
+        let learning_rate = config.sanitized_learning_rate();
+        if learning_rate <= 0.0 {
+            return;
+        }
+        let batch_size = config.sanitized_batch_size();
+        let max_batches = config.sanitized_max_batches_per_tick();
+        match self.backend {
+            SoccerNeuralLearningBackend::Inline => {
+                if let Some(network) = &mut self.inline_network {
+                    for batch in samples.chunks(batch_size).take(max_batches) {
+                        let pairs = batch
+                            .iter()
+                            .map(|sample| (sample.input.clone(), vec![sample.target]))
+                            .collect::<Vec<_>>();
+                        let loss = network.train_batch(&pairs, learning_rate);
+                        self.stats.record_result(SoccerNeuralTrainingResult {
+                            samples: batch.len(),
+                            loss,
+                            parameter_count: network.num_parameters(),
+                        });
+                    }
+                }
+            }
+            SoccerNeuralLearningBackend::Threaded => {
+                if let Some(worker) = &self.worker {
+                    for batch in samples.chunks(batch_size).take(max_batches) {
+                        if worker.sender.send(batch.to_vec()).is_ok() {
+                            self.stats.pending_batches =
+                                self.stats.pending_batches.saturating_add(1);
+                        } else {
+                            self.stats.dropped_batches =
+                                self.stats.dropped_batches.saturating_add(1);
+                        }
+                    }
+                }
+            }
+        }
+        self.drain_results();
+    }
+}
+
+fn spawn_soccer_neural_learning_worker(
+    mut network: FeedForwardNetwork,
+    learning_rate: f64,
+) -> SoccerNeuralLearningWorker {
+    let (sample_tx, sample_rx) = mpsc::channel::<Vec<SoccerNeuralTrainingSample>>();
+    let (result_tx, result_rx) = mpsc::channel::<SoccerNeuralTrainingResult>();
+    thread::spawn(move || {
+        while let Ok(batch) = sample_rx.recv() {
+            if batch.is_empty() {
+                continue;
+            }
+            let pairs = batch
+                .iter()
+                .map(|sample| (sample.input.clone(), vec![sample.target]))
+                .collect::<Vec<_>>();
+            let loss = network.train_batch(&pairs, learning_rate);
+            let _ = result_tx.send(SoccerNeuralTrainingResult {
+                samples: batch.len(),
+                loss,
+                parameter_count: network.num_parameters(),
+            });
+        }
+    });
+    SoccerNeuralLearningWorker {
+        sender: sample_tx,
+        receiver: result_rx,
+    }
+}
+
+fn build_soccer_neural_network(
+    config: &SoccerNeuralLearningConfig,
+    seed: u32,
+) -> FeedForwardNetwork {
+    let mut rng = mulberry32(seed ^ 0x5A17_5EED);
+    FeedForwardNetwork::random(
+        &RandomNetworkSpec {
+            input_dim: SOCCER_NEURAL_FEATURE_DIM,
+            hidden_layers: vec![config.hidden_units.max(2)],
+            output_dim: 1,
+            hidden_activation: ActivationName::Tanh,
+            output_activation: ActivationName::Linear,
+            weight_scale: Some(0.05),
+        },
+        &mut rng,
+    )
+}
+
+fn soccer_neural_bool(value: bool) -> f64 {
+    if value {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+fn soccer_neural_scaled(value: f64, scale: f64) -> f64 {
+    if !value.is_finite() || scale.abs() <= 1e-9 {
+        return 0.0;
+    }
+    (value / scale).clamp(-1.0, 1.0)
+}
+
+fn soccer_neural_bin(value: u8, max_value: f64) -> f64 {
+    (f64::from(value) / max_value.max(1.0)).clamp(0.0, 1.0)
+}
+
+fn soccer_neural_team_feature(team: Team) -> f64 {
+    match team {
+        Team::Home => 1.0,
+        Team::Away => -1.0,
+    }
+}
+
+fn soccer_neural_role_feature(role: PlayerRole) -> f64 {
+    match role {
+        PlayerRole::Goalkeeper => 0.0,
+        PlayerRole::Defender => 1.0 / 3.0,
+        PlayerRole::Midfielder => 2.0 / 3.0,
+        PlayerRole::Forward => 1.0,
+    }
+}
+
+fn soccer_neural_phase_feature(phase: TacticalPhase) -> f64 {
+    match phase {
+        TacticalPhase::Kickoff => 0.0,
+        TacticalPhase::HomeBuildUp => 0.2,
+        TacticalPhase::AwayBuildUp => 0.4,
+        TacticalPhase::HomeAttack => 0.6,
+        TacticalPhase::AwayAttack => 0.8,
+        TacticalPhase::Transition => 1.0,
+    }
+}
+
+fn soccer_neural_facing_feature(facing: FacingBucket) -> f64 {
+    match facing {
+        FacingBucket::Unknown => 0.0,
+        FacingBucket::North => 1.0 / 8.0,
+        FacingBucket::NorthEast => 2.0 / 8.0,
+        FacingBucket::East => 3.0 / 8.0,
+        FacingBucket::SouthEast => 4.0 / 8.0,
+        FacingBucket::South => 5.0 / 8.0,
+        FacingBucket::SouthWest => 6.0 / 8.0,
+        FacingBucket::West => 7.0 / 8.0,
+        FacingBucket::NorthWest => 1.0,
+    }
+}
+
+fn soccer_neural_action_hash(action: &str) -> f64 {
+    let mut hash = 2_166_136_261_u32;
+    for byte in normalize_soccer_action_label(action).as_bytes() {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(16_777_619);
+    }
+    (f64::from(hash) / f64::from(u32::MAX)) * 2.0 - 1.0
+}
+
+fn soccer_neural_action_family_features(action: &str) -> (f64, f64, f64) {
+    let action = normalize_soccer_action_label(action);
+    let attack = matches!(
+        action,
+        "shoot"
+            | "dribble"
+            | "pass"
+            | "aerial-pass"
+            | "route-one"
+            | "first-time-shot"
+            | "first-time-header"
+            | "first-time-pass"
+            | "clearance"
+    );
+    let defense = matches!(action, "tackle" | "defend" | "defend-shape" | "defend-roam");
+    let support = matches!(
+        action,
+        "support-shape" | "support-roam" | "recover" | "space" | "control-touch"
+    );
+    (
+        soccer_neural_bool(attack),
+        soccer_neural_bool(defense),
+        soccer_neural_bool(support),
+    )
+}
+
+fn soccer_neural_transition_features(transition: &SoccerLearningTransition) -> Vec<f64> {
+    let state = SoccerQStateKey::from_transition(transition);
+    let (action_attack, action_defense, action_support) =
+        soccer_neural_action_family_features(&transition.action);
+    let features = vec![
+        soccer_neural_team_feature(transition.team),
+        soccer_neural_role_feature(transition.role),
+        soccer_neural_phase_feature(state.phase),
+        f64::from(state.possession_relative).clamp(-1.0, 1.0),
+        soccer_neural_scaled(f64::from(state.score_diff_bucket), 5.0),
+        soccer_neural_bool(state.has_ball),
+        soccer_neural_bool(state.visible_ball),
+        soccer_neural_bool(state.shot_lane_open),
+        soccer_neural_scaled(
+            state.ball_zone_x as f64,
+            PITCH_MACRO_GRID_COLUMNS as f64 - 1.0,
+        ),
+        soccer_neural_scaled(state.ball_zone_y as f64, PITCH_MACRO_GRID_ROWS as f64 - 1.0),
+        soccer_neural_scaled(
+            state.player_fine_cell_id as f64,
+            (PITCH_FINE_GRID_COLUMNS * PITCH_FINE_GRID_ROWS) as f64 - 1.0,
+        ),
+        soccer_neural_scaled(
+            state.player_tactical_cell_id as f64,
+            (PITCH_TACTICAL_GRID_COLUMNS * PITCH_TACTICAL_GRID_ROWS) as f64 - 1.0,
+        ),
+        soccer_neural_facing_feature(state.receive_facing),
+        soccer_neural_facing_feature(state.action_facing),
+        soccer_neural_bin(state.visible_pass_options_bin, 5.0),
+        soccer_neural_bin(state.visible_aerial_pass_options_bin, 5.0),
+        soccer_neural_bin(state.expected_pass_completion_bin, 5.0),
+        soccer_neural_bin(state.expected_aerial_pass_completion_bin, 5.0),
+        soccer_neural_bin(state.shot_on_frame_probability_bin, 5.0),
+        soccer_neural_bin(state.shot_beat_goalkeeper_probability_bin, 5.0),
+        soccer_neural_bin(state.shot_block_probability_bin, 5.0),
+        soccer_neural_bin(state.immediate_dispossession_risk_bin, 5.0),
+        soccer_neural_bin(state.pressure_bin, 5.0),
+        soccer_neural_bin(state.fatigue_bin, 5.0),
+        soccer_neural_bin(state.open_space_bin, 5.0),
+        soccer_neural_bin(state.skill_stamina_bin, 5.0),
+        soccer_neural_bin(state.skill_dribbling_bin, 5.0),
+        soccer_neural_bin(state.skill_defending_bin, 5.0),
+        soccer_neural_action_hash(&transition.action),
+        action_attack,
+        action_defense,
+        action_support,
+    ];
+    debug_assert_eq!(features.len(), SOCCER_NEURAL_FEATURE_DIM);
+    features
+}
+
 pub struct SoccerMatch {
     pub config: MatchConfig,
     pub tick: u64,
@@ -11811,6 +12320,7 @@ pub struct SoccerMatch {
     pub learning_transitions: Vec<SoccerLearningTransition>,
     pub learned_policy: Option<SoccerQPolicy>,
     pub team_policies: Option<SoccerTeamQPolicies>,
+    neural_learner: Option<SoccerNeuralLearner>,
     pub human_inputs: SharedHumanInputs,
     pub central_brain: CentralBrain,
     rng: SeededRandom,
@@ -11903,6 +12413,11 @@ impl SoccerMatch {
             learning_transitions: Vec::new(),
             learned_policy: None,
             team_policies: None,
+            neural_learner: if config.learning_enabled && config.neural_learning.enabled {
+                Some(SoccerNeuralLearner::new(&config))
+            } else {
+                None
+            },
             human_inputs: SharedHumanInputs::new(),
             central_brain: CentralBrain::default(),
             rng,
@@ -12021,6 +12536,7 @@ impl SoccerMatch {
                 )
             })
             .unwrap_or((0, 0, 0, 0, 0, 0, 0, 0));
+        let neural_stats = self.neural_learner.as_ref().map(|learner| &learner.stats);
 
         SoccerLearningSnapshot {
             total_transitions: self.learning_transitions.len(),
@@ -12041,6 +12557,24 @@ impl SoccerMatch {
             away_policy_visits,
             away_policy_target_entries,
             away_policy_target_visits,
+            neural_learning_enabled: self.config.learning_enabled
+                && self.config.neural_learning.enabled,
+            neural_learning_backend: self.config.neural_learning.backend.as_str().to_string(),
+            neural_learning_training_steps: neural_stats
+                .map(|stats| stats.training_steps)
+                .unwrap_or(0),
+            neural_learning_samples: neural_stats.map(|stats| stats.samples).unwrap_or(0),
+            neural_learning_pending_batches: neural_stats
+                .map(|stats| stats.pending_batches)
+                .unwrap_or(0),
+            neural_learning_dropped_batches: neural_stats
+                .map(|stats| stats.dropped_batches)
+                .unwrap_or(0),
+            neural_learning_parameter_count: neural_stats
+                .map(|stats| stats.parameter_count)
+                .unwrap_or(0),
+            neural_learning_last_loss: neural_stats.and_then(|stats| stats.last_loss),
+            neural_learning_average_loss: neural_stats.and_then(|stats| stats.average_loss()),
         }
     }
 
@@ -12461,9 +12995,25 @@ impl SoccerMatch {
     ) -> SoccerLearningRuntimeResponse {
         if let Some(enabled) = request.learning_enabled {
             self.config.learning_enabled = enabled;
+            if !enabled {
+                self.config.neural_learning.enabled = false;
+                self.neural_learner = None;
+            }
         }
         if let Some(enabled) = request.learning_logging_enabled {
             self.config.learning_logging_enabled = enabled;
+        }
+        if let Some(enabled) = request.neural_learning_enabled {
+            self.config.neural_learning.enabled = enabled;
+            if !enabled {
+                self.neural_learner = None;
+            }
+        }
+        if let Some(backend) = request.neural_learning_backend {
+            if self.config.neural_learning.backend != backend {
+                self.config.neural_learning.backend = backend;
+                self.neural_learner = None;
+            }
         }
         SoccerLearningRuntimeResponse {
             config: self.config.clone(),
@@ -12575,6 +13125,123 @@ impl SoccerMatch {
                 .and_then(|target| snapshot.player_position(target));
         }
         plan
+    }
+
+    fn ensure_neural_learner(&mut self) {
+        if !self.config.learning_enabled || !self.config.neural_learning.enabled {
+            self.neural_learner = None;
+            return;
+        }
+        let backend = self.config.neural_learning.backend;
+        let needs_new = self
+            .neural_learner
+            .as_ref()
+            .map_or(true, |learner| learner.backend != backend);
+        if needs_new {
+            self.neural_learner = Some(SoccerNeuralLearner::new(&self.config));
+        }
+    }
+
+    fn neural_learning_due(&self, learning_due: bool) -> bool {
+        if !learning_due || !self.config.learning_enabled || !self.config.neural_learning.enabled {
+            return false;
+        }
+        let interval = self.config.neural_learning.sanitized_train_every_ticks();
+        interval <= 1 || self.is_done() || self.tick as usize % interval == 0
+    }
+
+    fn neural_training_samples_for(
+        &self,
+        transitions: &[SoccerLearningTransition],
+    ) -> Vec<SoccerNeuralTrainingSample> {
+        if transitions.is_empty() {
+            return Vec::new();
+        }
+        let target_scale = self.config.neural_learning.sanitized_target_scale();
+        let mut tick_rewards: BTreeMap<u64, (f64, u32, f64, u32)> = BTreeMap::new();
+        if self.team_policies.is_some() {
+            for transition in transitions {
+                let entry = tick_rewards.entry(transition.tick).or_default();
+                match transition.team {
+                    Team::Home => {
+                        entry.0 += transition.reward;
+                        entry.1 += 1;
+                    }
+                    Team::Away => {
+                        entry.2 += transition.reward;
+                        entry.3 += 1;
+                    }
+                }
+            }
+        }
+        transitions
+            .iter()
+            .map(|transition| {
+                let adjusted_reward = if let Some((home_sum, home_count, away_sum, away_count)) =
+                    tick_rewards.get(&transition.tick).copied()
+                {
+                    let home_avg = if home_count == 0 {
+                        0.0
+                    } else {
+                        home_sum / f64::from(home_count)
+                    };
+                    let away_avg = if away_count == 0 {
+                        0.0
+                    } else {
+                        away_sum / f64::from(away_count)
+                    };
+                    let opponent_avg = match transition.team {
+                        Team::Home => away_avg,
+                        Team::Away => home_avg,
+                    };
+                    transition.reward - opponent_avg
+                } else {
+                    transition.reward
+                };
+                let next_state = SoccerQStateKey::from_next_transition(transition);
+                let (gamma, max_next) = self
+                    .team_policies
+                    .as_ref()
+                    .map(|policies| {
+                        let policy = policies.policy(transition.team);
+                        (
+                            policy.options.gamma.clamp(0.0, 0.999),
+                            if transition.done {
+                                0.0
+                            } else {
+                                policy.best_value_hierarchical(&next_state).unwrap_or(0.0)
+                            },
+                        )
+                    })
+                    .or_else(|| {
+                        self.learned_policy.as_ref().map(|policy| {
+                            (
+                                policy.options.gamma.clamp(0.0, 0.999),
+                                if transition.done {
+                                    0.0
+                                } else {
+                                    policy.best_value_hierarchical(&next_state).unwrap_or(0.0)
+                                },
+                            )
+                        })
+                    })
+                    .unwrap_or((SoccerQPolicyOptions::default().gamma, 0.0));
+                SoccerNeuralTrainingSample {
+                    input: soccer_neural_transition_features(transition),
+                    target: (adjusted_reward + gamma * max_next) / target_scale,
+                }
+            })
+            .collect()
+    }
+
+    fn train_neural_value_model(&mut self, samples: Vec<SoccerNeuralTrainingSample>) {
+        if samples.is_empty() {
+            return;
+        }
+        self.ensure_neural_learner();
+        if let Some(learner) = &mut self.neural_learner {
+            learner.submit_samples(samples, &self.config.neural_learning);
+        }
     }
 
     pub fn controller_yield_stats(&self) -> ControllerYieldStats {
@@ -12702,6 +13369,11 @@ impl SoccerMatch {
                 if !self.deferred_reward_transitions.is_empty() {
                     new_transitions.extend(self.deferred_reward_transitions.drain(..));
                 }
+                let neural_samples = if self.neural_learning_due(learning_due) {
+                    self.neural_training_samples_for(&new_transitions)
+                } else {
+                    Vec::new()
+                };
                 if self.config.learning_enabled {
                     if let Some(team_policies) = &mut self.team_policies {
                         team_policies.train_adversarial(&new_transitions);
@@ -12709,6 +13381,7 @@ impl SoccerMatch {
                     if let Some(policy) = &mut self.learned_policy {
                         policy.train(&new_transitions);
                     }
+                    self.train_neural_value_model(neural_samples);
                 }
                 if self.config.learning_logging_enabled {
                     self.learning_transitions.extend(new_transitions);
@@ -13799,6 +14472,8 @@ impl SoccerMatch {
             self.pending_pass.as_ref(),
             self.ball
                 .untargeted_long_ball_team(self.pending_pass.as_ref()),
+            self.ball
+                .untargeted_long_ball_launch_exclusion(self.tick, self.pending_pass.as_ref()),
             self.ball.altitude_yards,
             &mut self.rng,
         )
@@ -14873,6 +15548,7 @@ impl SoccerMatch {
         self.ball.curl_acceleration = Vec2::zero();
         self.ball.altitude_yards = 0.05;
         self.ball.last_touch_team = Some(player_team);
+        self.ball.untargeted_long_ball_launcher = Some((player_id, self.tick));
         self.players[player_id].incoming_ball = None;
         self.pending_pass = None;
         self.pending_shot = None;
@@ -21045,12 +21721,16 @@ fn nearest_ball_controller_for(
     players: &[PlayerAgent],
     pending_pass: Option<&PendingPass>,
     loose_long_ball_team: Option<Team>,
+    same_tick_long_ball_launcher: Option<usize>,
     ball_altitude_yards: f64,
     rng: &mut SeededRandom,
 ) -> Option<(usize, Team)> {
     let ball_speed = ball_velocity.len();
     let mut candidates = Vec::new();
     for p in players {
+        if same_tick_long_ball_launcher == Some(p.id) {
+            continue;
+        }
         if let Some(pass) = pending_pass {
             if current_tick <= pass.launch_tick && p.id == pass.from {
                 continue;
@@ -25054,6 +25734,90 @@ mod tests {
     }
 
     #[test]
+    fn neural_learning_trains_inline_alongside_team_q_policy() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.2,
+            max_human_players: 0,
+            neural_learning: SoccerNeuralLearningConfig {
+                enabled: true,
+                backend: SoccerNeuralLearningBackend::Inline,
+                train_every_ticks: 1,
+                batch_size: 8,
+                max_batches_per_tick: 2,
+                hidden_units: 8,
+                ..SoccerNeuralLearningConfig::default()
+            },
+            seed: 15071,
+            ..Default::default()
+        })
+        .with_team_policies(SoccerTeamQPolicies::new(SoccerQPolicyOptions::default()));
+
+        sim.run_time_step();
+        sim.run_time_step();
+
+        let learning = sim.learning_snapshot();
+        assert!(learning.team_policies_enabled);
+        assert!(learning.home_policy_entries + learning.away_policy_entries > 0);
+        assert!(learning.neural_learning_enabled);
+        assert_eq!(learning.neural_learning_backend, "inline");
+        assert!(learning.neural_learning_training_steps > 0);
+        assert!(learning.neural_learning_samples > 0);
+        assert!(learning.neural_learning_parameter_count > 0);
+        assert!(learning.neural_learning_last_loss.is_some());
+    }
+
+    #[test]
+    fn neural_learning_trains_on_threaded_backend() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.4,
+            max_human_players: 0,
+            neural_learning: SoccerNeuralLearningConfig {
+                enabled: true,
+                backend: SoccerNeuralLearningBackend::Threaded,
+                train_every_ticks: 1,
+                batch_size: 8,
+                max_batches_per_tick: 2,
+                hidden_units: 8,
+                ..SoccerNeuralLearningConfig::default()
+            },
+            seed: 15072,
+            ..Default::default()
+        })
+        .with_team_policies(SoccerTeamQPolicies::new(SoccerQPolicyOptions::default()));
+
+        for _ in 0..4 {
+            sim.run_time_step();
+        }
+        for _ in 0..40 {
+            if let Some(learner) = &mut sim.neural_learner {
+                learner.drain_results();
+            }
+            if sim.learning_snapshot().neural_learning_training_steps > 0 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+
+        let learning = sim.learning_snapshot();
+        assert!(learning.neural_learning_enabled);
+        assert_eq!(learning.neural_learning_backend, "threaded");
+        assert!(learning.neural_learning_training_steps > 0);
+        assert!(learning.neural_learning_samples > 0);
+        assert!(learning.neural_learning_parameter_count > 0);
+        assert!(learning.neural_learning_last_loss.is_some());
+    }
+
+    #[test]
+    fn live_gameplay_defaults_disable_learning_work() {
+        let config = SoccerLiveServerConfig::default().match_config;
+
+        assert_eq!(config.human_slots(), 4);
+        assert!(!config.learning_enabled);
+        assert!(!config.learning_logging_enabled);
+        assert!(!config.neural_learning.enabled);
+    }
+
+    #[test]
     fn dense_reward_discourages_still_holder_and_rewards_forward_progression() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             duration_seconds: 0.1,
@@ -27459,6 +28223,7 @@ mod tests {
                 &sim.players,
                 None,
                 Some(Team::Home),
+                None,
                 0.14,
                 &mut rng,
             ) {

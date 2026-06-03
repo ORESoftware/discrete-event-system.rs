@@ -4181,6 +4181,1598 @@ pub fn external_simulation_validation_reference_script() -> PathBuf {
         .join("simulation_validation_reference.py")
 }
 
+const EVENT_SIMULATION_ENGINES: &[&str] = &[
+    "simpy",
+    "salabim",
+    "simmer",
+    "jaamsim",
+    "anylogic",
+    "simio",
+    "simul8",
+    "arena",
+    "flexsim",
+    "plant-simulation",
+    "extendsim",
+    "gpss-world",
+    "simulink",
+    "ptolemy-ii",
+];
+
+const MOBILITY_SIMULATION_ENGINES: &[&str] = &[
+    "ns-3", "ns3", "omnetpp", "omnet++", "sumo", "matsim", "carla",
+];
+
+const ENERGY_SIMULATION_ENGINES: &[&str] = &[
+    "energyplus",
+    "openstudio",
+    "openmodelica",
+    "fmi-fmu",
+    "fmi",
+    "fmu",
+    "omsimulator",
+    "simulink",
+    "gridlabd",
+    "opendss",
+    "pandapower",
+];
+
+const PHYSICS_SIMULATION_ENGINES: &[&str] = &[
+    "gazebo",
+    "webots",
+    "mujoco",
+    "drake",
+    "pybullet",
+    "carla",
+    "isaac-sim",
+    "airsim",
+];
+
+const AGENT_SIMULATION_ENGINES: &[&str] = &[
+    "mesa",
+    "repast",
+    "repast-simphony",
+    "mason",
+    "netlogo",
+    "agentpy",
+];
+
+const DISTRIBUTED_SIMULATION_ENGINES: &[&str] =
+    &["simgrid", "cloudsim", "batsim", "gem5", "ptolemy-ii"];
+
+const PROCESS_SIMULATION_ENGINES: &[&str] =
+    &["neqsim", "dwsim", "cape-open", "copasi", "tellurium"];
+
+#[derive(Clone, Debug)]
+struct RustSimulationJob {
+    arrival: f64,
+    start: f64,
+    departure: f64,
+    wait: f64,
+}
+
+#[derive(Clone, Debug)]
+struct RustSimulationTraceEvent {
+    time: f64,
+    event: &'static str,
+    job: usize,
+    server: Option<usize>,
+}
+
+#[derive(Clone, Debug)]
+struct RustMobilityVehicle {
+    depart: f64,
+    arrival: f64,
+    travel_time: f64,
+}
+
+#[derive(Clone, Debug)]
+struct RustMobilityTraceEvent {
+    time: f64,
+    event: &'static str,
+    vehicle: usize,
+    segment: Option<usize>,
+}
+
+#[derive(Clone, Debug)]
+struct RustAgentSimulation {
+    trace: Vec<Value>,
+    metrics: BTreeMap<String, f64>,
+    interactions: Vec<Value>,
+}
+
+fn finite_simulation_float(value: Option<&Value>, default: Option<f64>) -> Result<f64, String> {
+    let Some(value) = value else {
+        return default.ok_or_else(|| "expected finite number".to_string());
+    };
+    let out = match value {
+        Value::Number(number) => number
+            .as_f64()
+            .ok_or_else(|| "expected finite number".to_string())?,
+        Value::String(text) => text
+            .parse::<f64>()
+            .map_err(|_| "expected finite number".to_string())?,
+        _ => return Err("expected finite number".to_string()),
+    };
+    if out.is_finite() {
+        Ok(out)
+    } else {
+        Err("expected finite number".to_string())
+    }
+}
+
+fn simulation_i64(value: Option<&Value>, default: i64) -> Result<i64, String> {
+    let Some(value) = value else {
+        return Ok(default);
+    };
+    match value {
+        Value::Number(number) => number
+            .as_i64()
+            .or_else(|| number.as_u64().and_then(|value| i64::try_from(value).ok()))
+            .or_else(|| number.as_f64().map(|value| value as i64))
+            .ok_or_else(|| "expected integer".to_string()),
+        Value::String(text) => text
+            .parse::<i64>()
+            .map_err(|_| "expected integer".to_string()),
+        _ => Err("expected integer".to_string()),
+    }
+}
+
+fn simulation_usize(value: Option<&Value>, default: usize) -> Result<usize, String> {
+    let Some(value) = value else {
+        return Ok(default);
+    };
+    let raw = match value {
+        Value::Number(number) => number
+            .as_i64()
+            .or_else(|| number.as_u64().and_then(|value| i64::try_from(value).ok()))
+            .or_else(|| number.as_f64().map(|value| value as i64))
+            .ok_or_else(|| "expected integer".to_string())?,
+        Value::String(text) => text
+            .parse::<i64>()
+            .map_err(|_| "expected integer".to_string())?,
+        _ => return Err("expected integer".to_string()),
+    };
+    usize::try_from(raw).map_err(|_| "expected non-negative integer".to_string())
+}
+
+fn simulation_float_array(value: Option<&Value>) -> Result<Option<Vec<f64>>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let values = value
+        .as_array()
+        .ok_or_else(|| "expected numeric array".to_string())?
+        .iter()
+        .map(|item| finite_simulation_float(Some(item), None))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Some(values))
+}
+
+fn simulation_object_or_empty(
+    value: Option<&Value>,
+) -> Result<&serde_json::Map<String, Value>, String> {
+    static EMPTY: std::sync::OnceLock<serde_json::Map<String, Value>> = std::sync::OnceLock::new();
+    match value {
+        Some(Value::Object(object)) => Ok(object),
+        Some(_) => Err("simulation model must be an object".to_string()),
+        None => Ok(EMPTY.get_or_init(serde_json::Map::new)),
+    }
+}
+
+fn python_round_to_i64(value: f64) -> i64 {
+    let floor = value.floor();
+    let frac = value - floor;
+    if (frac - 0.5).abs() <= 1e-12 {
+        let floor_i = floor as i64;
+        if floor_i % 2 == 0 {
+            floor_i
+        } else {
+            floor_i + 1
+        }
+    } else {
+        value.round() as i64
+    }
+}
+
+fn value_truthy(value: Option<&Value>) -> bool {
+    match value {
+        Some(Value::Bool(value)) => *value,
+        Some(Value::Number(number)) => number.as_f64().is_some_and(|value| value != 0.0),
+        Some(Value::String(text)) => !text.is_empty(),
+        Some(Value::Array(values)) => !values.is_empty(),
+        Some(Value::Object(values)) => !values.is_empty(),
+        Some(Value::Null) | None => false,
+    }
+}
+
+fn stream_endpoint_matches(
+    stream: &serde_json::Map<String, Value>,
+    key: &str,
+    alias: &str,
+) -> bool {
+    match stream.get(key) {
+        None | Some(Value::Null) => true,
+        Some(Value::String(text)) => text.is_empty() || text == alias,
+        _ => false,
+    }
+}
+
+fn normalize_event_simulation_model(model: &Value) -> Result<(usize, Vec<f64>, Vec<f64>), String> {
+    let model = model
+        .as_object()
+        .ok_or_else(|| "simulation model must be an object".to_string())?;
+    let servers = simulation_usize(model.get("servers"), 1)?;
+    if servers == 0 {
+        return Err("servers must be positive".to_string());
+    }
+
+    let arrivals = simulation_float_array(model.get("arrival_times"))?;
+    let services = simulation_float_array(model.get("service_times"))?;
+    let (arrivals, services) = match (arrivals, services) {
+        (Some(arrivals), Some(services)) => (arrivals, services),
+        _ => {
+            let jobs = simulation_usize(model.get("jobs"), 5)?;
+            let interarrival = finite_simulation_float(model.get("interarrival_time"), Some(1.0))?;
+            let service_time = finite_simulation_float(model.get("service_time"), Some(1.0))?;
+            (
+                (0..jobs)
+                    .map(|idx| idx as f64 * interarrival)
+                    .collect::<Vec<_>>(),
+                vec![service_time; jobs],
+            )
+        }
+    };
+    if arrivals.len() != services.len() {
+        return Err("arrival_times and service_times length mismatch".to_string());
+    }
+    if services.iter().any(|service| *service < 0.0) {
+        return Err("service times must be non-negative".to_string());
+    }
+    if arrivals.windows(2).any(|window| window[0] > window[1]) {
+        return Err("arrival_times must be sorted".to_string());
+    }
+    Ok((servers, arrivals, services))
+}
+
+fn simulate_event_network_with_rust(
+    model: &Value,
+) -> Result<(Vec<RustSimulationJob>, Vec<Value>, BTreeMap<String, f64>), String> {
+    let (servers, arrivals, services) = normalize_event_simulation_model(model)?;
+    let mut available_at = vec![0.0; servers];
+    let mut jobs = Vec::with_capacity(arrivals.len());
+    let mut trace = Vec::with_capacity(arrivals.len() * 3);
+    for (job, (&arrival, &service)) in arrivals.iter().zip(&services).enumerate() {
+        let server = available_at
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(idx, _)| idx)
+            .unwrap_or(0);
+        let start = arrival.max(available_at[server]);
+        let departure = start + service;
+        available_at[server] = departure;
+        let wait = start - arrival;
+        jobs.push(RustSimulationJob {
+            arrival,
+            start,
+            departure,
+            wait,
+        });
+        trace.push(RustSimulationTraceEvent {
+            time: arrival,
+            event: "arrival",
+            job,
+            server: None,
+        });
+        trace.push(RustSimulationTraceEvent {
+            time: start,
+            event: "service_start",
+            job,
+            server: Some(server),
+        });
+        trace.push(RustSimulationTraceEvent {
+            time: departure,
+            event: "departure",
+            job,
+            server: Some(server),
+        });
+    }
+    trace.sort_by(|a, b| {
+        a.time
+            .partial_cmp(&b.time)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.event.cmp(b.event))
+            .then_with(|| a.job.cmp(&b.job))
+    });
+    let trace = trace
+        .into_iter()
+        .map(|event| {
+            let mut item = serde_json::Map::new();
+            item.insert("time".to_string(), json!(event.time));
+            item.insert("event".to_string(), json!(event.event));
+            item.insert("job".to_string(), json!(event.job));
+            if let Some(server) = event.server {
+                item.insert("server".to_string(), json!(server));
+            }
+            Value::Object(item)
+        })
+        .collect::<Vec<_>>();
+
+    let waits = jobs.iter().map(|job| job.wait).collect::<Vec<_>>();
+    let sojourns = jobs
+        .iter()
+        .map(|job| job.departure - job.arrival)
+        .collect::<Vec<_>>();
+    let mut metrics = BTreeMap::new();
+    metrics.insert("jobs_completed".to_string(), jobs.len() as f64);
+    metrics.insert(
+        "mean_wait".to_string(),
+        if waits.is_empty() {
+            0.0
+        } else {
+            waits.iter().sum::<f64>() / waits.len() as f64
+        },
+    );
+    metrics.insert(
+        "max_wait".to_string(),
+        waits.iter().copied().fold(0.0_f64, f64::max),
+    );
+    metrics.insert(
+        "mean_sojourn".to_string(),
+        if sojourns.is_empty() {
+            0.0
+        } else {
+            sojourns.iter().sum::<f64>() / sojourns.len() as f64
+        },
+    );
+    metrics.insert(
+        "makespan".to_string(),
+        jobs.iter().map(|job| job.departure).fold(0.0_f64, f64::max),
+    );
+    let service_sum = services.iter().sum::<f64>();
+    let horizon = available_at
+        .iter()
+        .copied()
+        .fold(0.0_f64, f64::max)
+        .max(1.0);
+    metrics.insert(
+        "utilization_lower_bound".to_string(),
+        service_sum / (servers as f64 * horizon),
+    );
+    Ok((jobs, trace, metrics))
+}
+
+fn simulate_mobility_network_with_rust(
+    model: &Value,
+) -> Result<(Vec<RustMobilityVehicle>, Vec<Value>, BTreeMap<String, f64>), String> {
+    let model = model
+        .as_object()
+        .ok_or_else(|| "simulation model must be an object".to_string())?;
+    let routes = model
+        .get("routes")
+        .and_then(Value::as_array)
+        .filter(|routes| !routes.is_empty())
+        .ok_or_else(|| "mobility model needs non-empty routes".to_string())?;
+
+    let mut vehicles = Vec::with_capacity(routes.len());
+    let mut trace = Vec::new();
+    for (vehicle, route) in routes.iter().enumerate() {
+        let route = route
+            .as_object()
+            .ok_or_else(|| "each mobility route must be an object".to_string())?;
+        let depart = finite_simulation_float(route.get("depart"), Some(0.0))?;
+        let segments = route
+            .get("segments")
+            .or_else(|| route.get("travel_times"))
+            .and_then(Value::as_array)
+            .filter(|segments| !segments.is_empty())
+            .ok_or_else(|| "each mobility route needs segments or travel_times".to_string())?;
+        let mut travel_time = 0.0;
+        let mut time = depart;
+        trace.push(RustMobilityTraceEvent {
+            time,
+            event: "vehicle_depart",
+            vehicle,
+            segment: None,
+        });
+        for (segment, value) in segments.iter().enumerate() {
+            let segment_time = if let Some(segment) = value.as_object() {
+                finite_simulation_float(segment.get("travel_time"), Some(0.0))?
+            } else {
+                finite_simulation_float(Some(value), None)?
+            };
+            if segment_time < 0.0 {
+                return Err("travel times must be non-negative".to_string());
+            }
+            travel_time += segment_time;
+            time += segment_time;
+            trace.push(RustMobilityTraceEvent {
+                time,
+                event: "segment_arrive",
+                vehicle,
+                segment: Some(segment),
+            });
+        }
+        vehicles.push(RustMobilityVehicle {
+            depart,
+            arrival: time,
+            travel_time,
+        });
+        trace.push(RustMobilityTraceEvent {
+            time,
+            event: "vehicle_arrive",
+            vehicle,
+            segment: None,
+        });
+    }
+    trace.sort_by(|a, b| {
+        a.time
+            .partial_cmp(&b.time)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.event.cmp(b.event))
+            .then_with(|| a.vehicle.cmp(&b.vehicle))
+    });
+    let trace = trace
+        .into_iter()
+        .map(|event| {
+            let mut item = serde_json::Map::new();
+            item.insert("time".to_string(), json!(event.time));
+            item.insert("event".to_string(), json!(event.event));
+            item.insert("vehicle".to_string(), json!(event.vehicle));
+            if let Some(segment) = event.segment {
+                item.insert("segment".to_string(), json!(segment));
+            }
+            Value::Object(item)
+        })
+        .collect::<Vec<_>>();
+
+    let travel_times = vehicles
+        .iter()
+        .map(|vehicle| vehicle.travel_time)
+        .collect::<Vec<_>>();
+    let mut metrics = BTreeMap::new();
+    metrics.insert("vehicles_completed".to_string(), vehicles.len() as f64);
+    metrics.insert(
+        "mean_travel_time".to_string(),
+        travel_times.iter().sum::<f64>() / travel_times.len() as f64,
+    );
+    metrics.insert(
+        "max_travel_time".to_string(),
+        travel_times
+            .iter()
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max),
+    );
+    metrics.insert(
+        "min_travel_time".to_string(),
+        travel_times.iter().copied().fold(f64::INFINITY, f64::min),
+    );
+    metrics.insert(
+        "last_arrival".to_string(),
+        vehicles
+            .iter()
+            .map(|vehicle| vehicle.arrival)
+            .fold(f64::NEG_INFINITY, f64::max),
+    );
+    Ok((vehicles, trace, metrics))
+}
+
+fn simulate_energy_balance_with_rust(
+    model: &Value,
+    scenario: &Value,
+) -> Result<(Vec<Value>, BTreeMap<String, f64>), String> {
+    let model = model
+        .as_object()
+        .ok_or_else(|| "simulation model must be an object".to_string())?;
+    let scenario = simulation_object_or_empty(Some(scenario))?;
+    let zone_values = model
+        .get("zones")
+        .and_then(Value::as_array)
+        .filter(|zones| !zones.is_empty())
+        .cloned()
+        .unwrap_or_else(|| vec![Value::Object(model.clone())]);
+    let horizon = finite_simulation_float(
+        scenario.get("horizon"),
+        Some(finite_simulation_float(model.get("horizon"), Some(4.0))?),
+    )?;
+    let step = finite_simulation_float(
+        scenario.get("step"),
+        Some(finite_simulation_float(model.get("step"), Some(1.0))?),
+    )?;
+    if horizon <= 0.0 || step <= 0.0 {
+        return Err("energy horizon and step must be positive".to_string());
+    }
+    let steps = python_round_to_i64(horizon / step).max(1) as usize;
+    let mut trace = Vec::new();
+    let mut final_errors = Vec::new();
+    let mut energy_kwh = 0.0;
+    let mut min_temp = f64::INFINITY;
+    let mut max_temp = f64::NEG_INFINITY;
+    for (zone, value) in zone_values.iter().enumerate() {
+        let zone_model = value
+            .as_object()
+            .ok_or_else(|| "energy zone must be an object".to_string())?;
+        let mut temp = finite_simulation_float(zone_model.get("initial_temp"), Some(20.0))?;
+        let setpoint = finite_simulation_float(zone_model.get("setpoint"), Some(21.0))?;
+        let outdoor = finite_simulation_float(zone_model.get("outdoor_temp"), Some(10.0))?;
+        let ua = finite_simulation_float(zone_model.get("ua"), Some(0.2))?;
+        let heat_capacity = finite_simulation_float(zone_model.get("heat_capacity"), Some(5.0))?;
+        let hvac_power = finite_simulation_float(zone_model.get("hvac_power"), Some(4.0))?;
+        let internal_gain = finite_simulation_float(zone_model.get("internal_gain"), Some(0.0))?;
+        if heat_capacity <= 0.0 {
+            return Err("heat_capacity must be positive".to_string());
+        }
+        for step_idx in 0..steps {
+            let error = setpoint - temp;
+            let hvac = (error * hvac_power).clamp(-hvac_power, hvac_power);
+            temp += ((ua * (outdoor - temp)) + internal_gain + hvac) * step / heat_capacity;
+            energy_kwh += hvac.abs() * step;
+            min_temp = min_temp.min(temp);
+            max_temp = max_temp.max(temp);
+            trace.push(json!({
+                "time": (step_idx + 1) as f64 * step,
+                "event": "zone_temperature",
+                "zone": zone,
+                "temperature": temp,
+                "hvac": hvac,
+            }));
+        }
+        final_errors.push((temp - setpoint).abs());
+    }
+    let mut metrics = BTreeMap::new();
+    metrics.insert("energy_kwh".to_string(), energy_kwh);
+    metrics.insert(
+        "max_abs_setpoint_error".to_string(),
+        final_errors.iter().copied().fold(0.0_f64, f64::max),
+    );
+    metrics.insert(
+        "min_temperature".to_string(),
+        if min_temp.is_finite() { min_temp } else { 0.0 },
+    );
+    metrics.insert(
+        "max_temperature".to_string(),
+        if max_temp.is_finite() { max_temp } else { 0.0 },
+    );
+    metrics.insert("zones".to_string(), zone_values.len() as f64);
+    Ok((trace, metrics))
+}
+
+fn simulate_physics_trajectory_with_rust(
+    model: &Value,
+    scenario: &Value,
+) -> Result<(Vec<Value>, BTreeMap<String, f64>), String> {
+    let model = model
+        .as_object()
+        .ok_or_else(|| "simulation model must be an object".to_string())?;
+    let scenario = simulation_object_or_empty(Some(scenario))?;
+    let dt = finite_simulation_float(
+        scenario.get("dt"),
+        Some(finite_simulation_float(model.get("dt"), Some(0.1))?),
+    )?;
+    let steps = simulation_i64(scenario.get("steps").or_else(|| model.get("steps")), 10)?;
+    if dt <= 0.0 || steps <= 0 {
+        return Err("trajectory dt and steps must be positive".to_string());
+    }
+    let mut position = finite_simulation_float(model.get("initial_position"), Some(0.0))?;
+    let mut velocity = finite_simulation_float(model.get("initial_velocity"), Some(0.0))?;
+    let acceleration = finite_simulation_float(
+        model.get("acceleration"),
+        Some(finite_simulation_float(
+            model.get("acceleration_command"),
+            Some(0.0),
+        )?),
+    )?;
+    let floor = match model.get("floor") {
+        Some(value) => finite_simulation_float(Some(value), None)?,
+        None => f64::NEG_INFINITY,
+    };
+    let mut trace = vec![json!({
+        "time": 0.0,
+        "event": "state",
+        "position": position,
+        "velocity": velocity,
+    })];
+    let mut positions = vec![position];
+    let mut path_length = 0.0;
+    for step_idx in 0..steps as usize {
+        let previous = position;
+        velocity += acceleration * dt;
+        position += velocity * dt;
+        if position < floor {
+            position = floor;
+            velocity = velocity.max(0.0);
+        }
+        path_length += (position - previous).abs();
+        positions.push(position);
+        trace.push(json!({
+            "time": (step_idx + 1) as f64 * dt,
+            "event": "state",
+            "position": position,
+            "velocity": velocity,
+        }));
+    }
+    let mut metrics = BTreeMap::new();
+    metrics.insert("final_position".to_string(), position);
+    metrics.insert("final_velocity".to_string(), velocity);
+    metrics.insert(
+        "max_position".to_string(),
+        positions.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+    );
+    metrics.insert(
+        "min_position".to_string(),
+        positions.iter().copied().fold(f64::INFINITY, f64::min),
+    );
+    metrics.insert("path_length".to_string(), path_length);
+    Ok((trace, metrics))
+}
+
+fn simulate_agent_based_with_rust(
+    model: &Value,
+    scenario: &Value,
+) -> Result<RustAgentSimulation, String> {
+    let model = model
+        .as_object()
+        .ok_or_else(|| "simulation model must be an object".to_string())?;
+    let scenario = simulation_object_or_empty(Some(scenario))?;
+    let agents = model
+        .get("agents")
+        .and_then(Value::as_array)
+        .filter(|agents| !agents.is_empty())
+        .ok_or_else(|| "agent-based model needs non-empty agents".to_string())?;
+    let steps = simulation_i64(scenario.get("steps").or_else(|| model.get("steps")), 1)?;
+    if steps < 0 {
+        return Err("agent-based steps must be non-negative".to_string());
+    }
+    let interactions = match model.get("interactions").or_else(|| model.get("edges")) {
+        Some(Value::Array(values)) => values.clone(),
+        Some(Value::Null) | None => Vec::new(),
+        Some(_) => return Err("agent-based interactions must be an array".to_string()),
+    };
+    let mut trace = Vec::with_capacity(steps as usize + 1);
+    for step in 0..=steps as usize {
+        trace.push(json!({
+            "time": step as f64,
+            "event": "step",
+            "agents": agents.len(),
+        }));
+    }
+    let stateful_agents = agents
+        .iter()
+        .filter(|agent| {
+            agent
+                .as_object()
+                .is_some_and(|agent| value_truthy(agent.get("state").or_else(|| agent.get("type"))))
+        })
+        .count();
+    let mut metrics = BTreeMap::new();
+    metrics.insert("agents".to_string(), agents.len() as f64);
+    metrics.insert("steps".to_string(), steps as f64);
+    metrics.insert("interactions".to_string(), interactions.len() as f64);
+    metrics.insert("stateful_agents".to_string(), stateful_agents as f64);
+    Ok(RustAgentSimulation {
+        trace,
+        metrics,
+        interactions,
+    })
+}
+
+fn simulate_distributed_system_with_rust(
+    model: &Value,
+) -> Result<(Vec<Value>, BTreeMap<String, f64>), String> {
+    let model = model
+        .as_object()
+        .ok_or_else(|| "simulation model must be an object".to_string())?;
+    let hosts = model
+        .get("hosts")
+        .and_then(Value::as_array)
+        .filter(|hosts| !hosts.is_empty())
+        .ok_or_else(|| "distributed-system model needs non-empty hosts".to_string())?;
+    let links = model
+        .get("links")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "distributed-system links must be an array".to_string())?;
+    let tasks = model
+        .get("tasks")
+        .or_else(|| model.get("workloads"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| "distributed-system tasks/workloads must be an array".to_string())?;
+    let mut total_capacity = 0.0;
+    let mut min_bandwidth = f64::INFINITY;
+    let mut total_work = 0.0;
+    for host in hosts {
+        let host = host
+            .as_object()
+            .ok_or_else(|| "distributed-system host must be an object".to_string())?;
+        total_capacity += finite_simulation_float(
+            host.get("capacity"),
+            Some(finite_simulation_float(host.get("cores"), Some(1.0))?),
+        )?;
+    }
+    for link in links {
+        let link = link
+            .as_object()
+            .ok_or_else(|| "distributed-system link must be an object".to_string())?;
+        min_bandwidth =
+            min_bandwidth.min(finite_simulation_float(link.get("bandwidth"), Some(0.0))?);
+    }
+    for task in tasks {
+        let task = task
+            .as_object()
+            .ok_or_else(|| "distributed-system task must be an object".to_string())?;
+        total_work += finite_simulation_float(
+            task.get("work"),
+            Some(finite_simulation_float(task.get("duration"), Some(0.0))?),
+        )?;
+    }
+    let mut metrics = BTreeMap::new();
+    metrics.insert("hosts".to_string(), hosts.len() as f64);
+    metrics.insert("links".to_string(), links.len() as f64);
+    metrics.insert("tasks".to_string(), tasks.len() as f64);
+    metrics.insert("total_capacity".to_string(), total_capacity);
+    metrics.insert(
+        "min_bandwidth".to_string(),
+        if min_bandwidth.is_finite() {
+            min_bandwidth
+        } else {
+            0.0
+        },
+    );
+    metrics.insert("total_work".to_string(), total_work);
+    Ok((
+        vec![json!({
+            "time": 0.0,
+            "event": "distributed_model_loaded",
+            "hosts": hosts.len(),
+            "tasks": tasks.len(),
+        })],
+        metrics,
+    ))
+}
+
+fn simulate_process_flow_with_rust(
+    model: &Value,
+) -> Result<(Vec<Value>, BTreeMap<String, f64>), String> {
+    let model = model
+        .as_object()
+        .ok_or_else(|| "simulation model must be an object".to_string())?;
+    let units = model
+        .get("units")
+        .and_then(Value::as_array)
+        .filter(|units| !units.is_empty())
+        .ok_or_else(|| "process-flow model needs non-empty units".to_string())?;
+    let streams = model
+        .get("streams")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "process-flow streams must be an array".to_string())?;
+    let mut inlet = 0.0;
+    let mut outlet = 0.0;
+    let mut min_flow = f64::INFINITY;
+    for stream in streams {
+        let stream = stream
+            .as_object()
+            .ok_or_else(|| "process-flow stream must be an object".to_string())?;
+        let flow = if stream.contains_key("flow") {
+            finite_simulation_float(stream.get("flow"), None)?
+        } else {
+            finite_simulation_float(stream.get("mass_flow"), Some(0.0))?
+        };
+        min_flow = min_flow.min(flow);
+        if stream_endpoint_matches(stream, "to", "sink") {
+            outlet += flow;
+        }
+        if stream_endpoint_matches(stream, "from", "source") {
+            inlet += flow;
+        }
+    }
+    let mut metrics = BTreeMap::new();
+    metrics.insert("units".to_string(), units.len() as f64);
+    metrics.insert("streams".to_string(), streams.len() as f64);
+    metrics.insert("inlet_flow".to_string(), inlet);
+    metrics.insert("outlet_flow".to_string(), outlet);
+    metrics.insert("mass_balance_error".to_string(), (inlet - outlet).abs());
+    metrics.insert(
+        "min_stream_flow".to_string(),
+        if min_flow.is_finite() { min_flow } else { 0.0 },
+    );
+    Ok((
+        vec![json!({
+            "time": 0.0,
+            "event": "process_model_loaded",
+            "units": units.len(),
+            "streams": streams.len(),
+        })],
+        metrics,
+    ))
+}
+
+fn check_event_trace_property(name: &str, jobs: &[RustSimulationJob]) -> Value {
+    let passed = match name {
+        "queue_length_never_negative" => jobs.iter().all(|job| job.wait >= -1e-9),
+        "departures_after_arrivals" => jobs.iter().all(|job| job.departure + 1e-9 >= job.arrival),
+        "service_starts_after_arrivals" => jobs.iter().all(|job| job.start + 1e-9 >= job.arrival),
+        "single_station_fcfs" => jobs
+            .windows(2)
+            .all(|window| window[0].start <= window[1].start + 1e-9),
+        _ => {
+            return json!({
+                "name": name,
+                "passed": false,
+                "message": "unknown trace property",
+            })
+        }
+    };
+    json!({
+        "name": name,
+        "passed": passed,
+        "message": "",
+    })
+}
+
+fn check_mobility_trace_property(name: &str, vehicles: &[RustMobilityVehicle]) -> Value {
+    let passed = match name {
+        "departures_before_arrivals" => vehicles
+            .iter()
+            .all(|vehicle| vehicle.arrival + 1e-9 >= vehicle.depart),
+        "travel_times_nonnegative" => vehicles.iter().all(|vehicle| vehicle.travel_time >= -1e-9),
+        "vehicles_complete" => vehicles.iter().all(|vehicle| vehicle.arrival.is_finite()),
+        _ => {
+            return json!({
+                "name": name,
+                "passed": false,
+                "message": "unknown mobility property",
+            })
+        }
+    };
+    json!({
+        "name": name,
+        "passed": passed,
+        "message": "",
+    })
+}
+
+fn check_energy_trace_property(
+    name: &str,
+    trace: &[Value],
+    metrics: &BTreeMap<String, f64>,
+) -> Value {
+    let passed = match name {
+        "energy_nonnegative" => metrics.get("energy_kwh").copied().unwrap_or(0.0) >= -1e-9,
+        "temperatures_finite" => trace.iter().all(|event| {
+            event
+                .get("temperature")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0)
+                .is_finite()
+        }),
+        "temperature_within_bounds" => {
+            metrics.get("min_temperature").copied().unwrap_or(0.0) >= -100.0
+                && metrics.get("max_temperature").copied().unwrap_or(0.0) <= 100.0
+        }
+        _ => {
+            return json!({
+                "name": name,
+                "passed": false,
+                "message": "unknown energy property",
+            })
+        }
+    };
+    json!({
+        "name": name,
+        "passed": passed,
+        "message": "",
+    })
+}
+
+fn check_physics_trace_property(
+    name: &str,
+    trace: &[Value],
+    metrics: &BTreeMap<String, f64>,
+) -> Value {
+    let passed = match name {
+        "positions_finite" => trace.iter().all(|event| {
+            event
+                .get("position")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0)
+                .is_finite()
+        }),
+        "velocities_finite" => trace.iter().all(|event| {
+            event
+                .get("velocity")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0)
+                .is_finite()
+        }),
+        "path_length_nonnegative" => metrics.get("path_length").copied().unwrap_or(0.0) >= -1e-9,
+        "stays_above_floor" => {
+            let floor = trace
+                .iter()
+                .filter_map(|event| event.get("position").and_then(Value::as_f64))
+                .fold(0.0_f64, f64::min);
+            floor >= -1e-9
+        }
+        _ => {
+            return json!({
+                "name": name,
+                "passed": false,
+                "message": "unknown physics property",
+            })
+        }
+    };
+    json!({
+        "name": name,
+        "passed": passed,
+        "message": "",
+    })
+}
+
+fn check_agent_trace_property(name: &str, simulation: &RustAgentSimulation) -> Value {
+    let passed = match name {
+        "agents_nonempty" => simulation.metrics.get("agents").copied().unwrap_or(0.0) > 0.0,
+        "states_present" => {
+            simulation
+                .metrics
+                .get("stateful_agents")
+                .copied()
+                .unwrap_or(0.0)
+                == simulation.metrics.get("agents").copied().unwrap_or(0.0)
+        }
+        "steps_nonnegative" => simulation.metrics.get("steps").copied().unwrap_or(0.0) >= 0.0,
+        "interactions_reference_agents" => {
+            let count = simulation.metrics.get("agents").copied().unwrap_or(0.0) as i64;
+            simulation.interactions.iter().all(|edge| {
+                let Some(edge) = edge.as_object() else {
+                    return false;
+                };
+                let Ok(src) = simulation_i64(edge.get("source").or_else(|| edge.get("from")), -1)
+                else {
+                    return false;
+                };
+                let Ok(dst) = simulation_i64(edge.get("target").or_else(|| edge.get("to")), -1)
+                else {
+                    return false;
+                };
+                src >= 0 && dst >= 0 && src < count && dst < count
+            })
+        }
+        _ => {
+            return json!({
+                "name": name,
+                "passed": false,
+                "message": "unknown agent-based property",
+            })
+        }
+    };
+    json!({
+        "name": name,
+        "passed": passed,
+        "message": "",
+    })
+}
+
+fn check_distributed_trace_property(name: &str, metrics: &BTreeMap<String, f64>) -> Value {
+    let passed = match name {
+        "hosts_have_capacity" => metrics.get("total_capacity").copied().unwrap_or(0.0) > 0.0,
+        "links_nonnegative" => metrics.get("min_bandwidth").copied().unwrap_or(0.0) >= 0.0,
+        "tasks_schedulable" => {
+            metrics.get("tasks").copied().unwrap_or(0.0) == 0.0
+                || metrics.get("total_capacity").copied().unwrap_or(0.0) > 0.0
+        }
+        _ => {
+            return json!({
+                "name": name,
+                "passed": false,
+                "message": "unknown distributed-system property",
+            })
+        }
+    };
+    json!({
+        "name": name,
+        "passed": passed,
+        "message": "",
+    })
+}
+
+fn check_process_trace_property(name: &str, metrics: &BTreeMap<String, f64>) -> Value {
+    let passed = match name {
+        "units_present" => metrics.get("units").copied().unwrap_or(0.0) > 0.0,
+        "streams_nonnegative" => metrics.get("min_stream_flow").copied().unwrap_or(0.0) >= -1e-9,
+        "mass_balance_closed" => {
+            metrics
+                .get("mass_balance_error")
+                .copied()
+                .unwrap_or(f64::INFINITY)
+                <= 1e-9
+        }
+        _ => {
+            return json!({
+                "name": name,
+                "passed": false,
+                "message": "unknown process-flow property",
+            })
+        }
+    };
+    json!({
+        "name": name,
+        "passed": passed,
+        "message": "",
+    })
+}
+
+fn check_simulation_metric_expectation(
+    expectation: &Value,
+    metrics: &BTreeMap<String, f64>,
+) -> Value {
+    let name = expectation
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let comparison = expectation
+        .get("comparison")
+        .and_then(Value::as_str)
+        .unwrap_or("within-absolute");
+    let target = match finite_simulation_float(expectation.get("target"), Some(0.0)) {
+        Ok(target) => target,
+        Err(message) => {
+            return json!({
+                "name": name,
+                "passed": false,
+                "actual": null,
+                "target": 0.0,
+                "message": message,
+            })
+        }
+    };
+    let tolerance = match finite_simulation_float(expectation.get("tolerance"), Some(0.0)) {
+        Ok(tolerance) => tolerance.abs(),
+        Err(message) => {
+            return json!({
+                "name": name,
+                "passed": false,
+                "actual": null,
+                "target": target,
+                "message": message,
+            })
+        }
+    };
+    let Some(actual) = metrics.get(name).copied() else {
+        return json!({
+            "name": name,
+            "passed": false,
+            "actual": null,
+            "target": target,
+            "message": "metric missing",
+        });
+    };
+    let passed = match comparison {
+        "within-absolute" => (actual - target).abs() <= tolerance,
+        "less-equal" | "at-most" | "<=" => actual <= target + tolerance,
+        "greater-equal" | "at-least" | ">=" => actual + tolerance >= target,
+        "equal" | "==" => (actual - target).abs() <= tolerance,
+        _ => {
+            return json!({
+                "name": name,
+                "passed": false,
+                "actual": actual,
+                "target": target,
+                "message": format!("unknown comparison {comparison:?}"),
+            })
+        }
+    };
+    json!({
+        "name": name,
+        "passed": passed,
+        "actual": actual,
+        "target": target,
+        "tolerance": tolerance,
+        "comparison": comparison,
+        "message": "",
+    })
+}
+
+fn simulation_reference_run(
+    engine_id: String,
+    simulator: String,
+    status: ExternalSimulationValidationStatus,
+    verdict: ExternalSimulationValidationVerdict,
+    message: String,
+    metrics: BTreeMap<String, f64>,
+    checks: Vec<Value>,
+    trace: Vec<Value>,
+    elapsed_ms: f64,
+) -> ExternalSimulationValidationReferenceRun {
+    let raw = json!({
+        "status": status.as_str(),
+        "verdict": verdict.as_str(),
+        "simulator": simulator,
+        "message": message,
+        "metrics": metrics,
+        "checks": checks,
+        "trace": trace,
+    });
+    ExternalSimulationValidationReferenceRun {
+        engine_id,
+        simulator: raw["simulator"]
+            .as_str()
+            .unwrap_or("simulation")
+            .to_string(),
+        status,
+        verdict,
+        metrics: raw["metrics"]
+            .as_object()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|(key, value)| value.as_f64().map(|value| (key.clone(), value)))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        checks: raw["checks"].as_array().cloned().unwrap_or_default(),
+        trace: raw["trace"].as_array().cloned().unwrap_or_default(),
+        message: raw["message"].as_str().unwrap_or("").to_string(),
+        raw,
+        elapsed_ms,
+    }
+}
+
+fn failed_rust_simulation_reference_run(
+    engine_id: String,
+    message: String,
+    elapsed_ms: f64,
+) -> ExternalSimulationValidationReferenceRun {
+    simulation_reference_run(
+        engine_id.clone(),
+        engine_id,
+        ExternalSimulationValidationStatus::Failed,
+        ExternalSimulationValidationVerdict::Failure,
+        message,
+        BTreeMap::new(),
+        Vec::new(),
+        Vec::new(),
+        elapsed_ms,
+    )
+}
+
+fn run_event_simulation_validation_with_rust_reference(
+    payload: &Value,
+    engine_id: String,
+    started: Instant,
+) -> ExternalSimulationValidationReferenceRun {
+    let engine = engine_id.to_ascii_lowercase();
+    let default_model = json!({});
+    let model = payload.get("model").unwrap_or(&default_model);
+    let (jobs, trace, metrics) = match simulate_event_network_with_rust(model) {
+        Ok(simulation) => simulation,
+        Err(message) => {
+            return failed_rust_simulation_reference_run(
+                engine_id,
+                message,
+                started.elapsed().as_secs_f64() * 1000.0,
+            )
+        }
+    };
+    let simulator = if EVENT_SIMULATION_ENGINES.contains(&engine.as_str()) {
+        format!("rust:single-station-des-for-{engine}")
+    } else {
+        "rust:single-station-des".to_string()
+    };
+
+    let mut checks = Vec::new();
+    if let Some(properties) = payload
+        .get("expected_trace_properties")
+        .and_then(Value::as_array)
+    {
+        for property in properties {
+            checks.push(check_event_trace_property(
+                property.as_str().unwrap_or(""),
+                &jobs,
+            ));
+        }
+    }
+    if let Some(expectations) = payload.get("metric_expectations").and_then(Value::as_array) {
+        for expectation in expectations {
+            checks.push(check_simulation_metric_expectation(expectation, &metrics));
+        }
+    }
+    let verdict = if checks
+        .iter()
+        .all(|check| check.get("passed").and_then(Value::as_bool) == Some(true))
+    {
+        ExternalSimulationValidationVerdict::Valid
+    } else {
+        ExternalSimulationValidationVerdict::Invalid
+    };
+    simulation_reference_run(
+        engine_id,
+        simulator,
+        ExternalSimulationValidationStatus::Ok,
+        verdict,
+        String::new(),
+        metrics,
+        checks,
+        trace,
+        started.elapsed().as_secs_f64() * 1000.0,
+    )
+}
+
+fn run_mobility_simulation_validation_with_rust_reference(
+    payload: &Value,
+    engine_id: String,
+    started: Instant,
+) -> ExternalSimulationValidationReferenceRun {
+    let engine = engine_id.to_ascii_lowercase();
+    let default_model = json!({});
+    let model = payload.get("model").unwrap_or(&default_model);
+    let (vehicles, trace, metrics) = match simulate_mobility_network_with_rust(model) {
+        Ok(simulation) => simulation,
+        Err(message) => {
+            return failed_rust_simulation_reference_run(
+                engine_id,
+                message,
+                started.elapsed().as_secs_f64() * 1000.0,
+            )
+        }
+    };
+    let simulator = if MOBILITY_SIMULATION_ENGINES.contains(&engine.as_str()) {
+        format!("rust:mobility-network-for-{engine}")
+    } else {
+        "rust:mobility-network".to_string()
+    };
+
+    let mut checks = Vec::new();
+    if let Some(properties) = payload
+        .get("expected_trace_properties")
+        .and_then(Value::as_array)
+    {
+        for property in properties {
+            checks.push(check_mobility_trace_property(
+                property.as_str().unwrap_or(""),
+                &vehicles,
+            ));
+        }
+    }
+    if let Some(expectations) = payload.get("metric_expectations").and_then(Value::as_array) {
+        for expectation in expectations {
+            checks.push(check_simulation_metric_expectation(expectation, &metrics));
+        }
+    }
+    let verdict = if checks
+        .iter()
+        .all(|check| check.get("passed").and_then(Value::as_bool) == Some(true))
+    {
+        ExternalSimulationValidationVerdict::Valid
+    } else {
+        ExternalSimulationValidationVerdict::Invalid
+    };
+    simulation_reference_run(
+        engine_id,
+        simulator,
+        ExternalSimulationValidationStatus::Ok,
+        verdict,
+        String::new(),
+        metrics,
+        checks,
+        trace,
+        started.elapsed().as_secs_f64() * 1000.0,
+    )
+}
+
+fn run_energy_simulation_validation_with_rust_reference(
+    payload: &Value,
+    engine_id: String,
+    started: Instant,
+) -> ExternalSimulationValidationReferenceRun {
+    let engine = engine_id.to_ascii_lowercase();
+    let default_model = json!({});
+    let default_scenario = json!({});
+    let model = payload.get("model").unwrap_or(&default_model);
+    let scenario = payload.get("scenario").unwrap_or(&default_scenario);
+    let (trace, metrics) = match simulate_energy_balance_with_rust(model, scenario) {
+        Ok(simulation) => simulation,
+        Err(message) => {
+            return failed_rust_simulation_reference_run(
+                engine_id,
+                message,
+                started.elapsed().as_secs_f64() * 1000.0,
+            )
+        }
+    };
+    let simulator = if ENERGY_SIMULATION_ENGINES.contains(&engine.as_str()) {
+        format!("rust:energy-balance-for-{engine}")
+    } else {
+        "rust:energy-balance".to_string()
+    };
+    let mut checks = Vec::new();
+    if let Some(properties) = payload
+        .get("expected_trace_properties")
+        .and_then(Value::as_array)
+    {
+        for property in properties {
+            checks.push(check_energy_trace_property(
+                property.as_str().unwrap_or(""),
+                &trace,
+                &metrics,
+            ));
+        }
+    }
+    if let Some(expectations) = payload.get("metric_expectations").and_then(Value::as_array) {
+        for expectation in expectations {
+            checks.push(check_simulation_metric_expectation(expectation, &metrics));
+        }
+    }
+    let verdict = if checks
+        .iter()
+        .all(|check| check.get("passed").and_then(Value::as_bool) == Some(true))
+    {
+        ExternalSimulationValidationVerdict::Valid
+    } else {
+        ExternalSimulationValidationVerdict::Invalid
+    };
+    simulation_reference_run(
+        engine_id,
+        simulator,
+        ExternalSimulationValidationStatus::Ok,
+        verdict,
+        String::new(),
+        metrics,
+        checks,
+        trace,
+        started.elapsed().as_secs_f64() * 1000.0,
+    )
+}
+
+fn run_physics_simulation_validation_with_rust_reference(
+    payload: &Value,
+    engine_id: String,
+    started: Instant,
+) -> ExternalSimulationValidationReferenceRun {
+    let engine = engine_id.to_ascii_lowercase();
+    let default_model = json!({});
+    let default_scenario = json!({});
+    let model = payload.get("model").unwrap_or(&default_model);
+    let scenario = payload.get("scenario").unwrap_or(&default_scenario);
+    let (trace, metrics) = match simulate_physics_trajectory_with_rust(model, scenario) {
+        Ok(simulation) => simulation,
+        Err(message) => {
+            return failed_rust_simulation_reference_run(
+                engine_id,
+                message,
+                started.elapsed().as_secs_f64() * 1000.0,
+            )
+        }
+    };
+    let simulator = if PHYSICS_SIMULATION_ENGINES.contains(&engine.as_str()) {
+        format!("rust:physics-trajectory-for-{engine}")
+    } else {
+        "rust:physics-trajectory".to_string()
+    };
+    let mut checks = Vec::new();
+    if let Some(properties) = payload
+        .get("expected_trace_properties")
+        .and_then(Value::as_array)
+    {
+        for property in properties {
+            checks.push(check_physics_trace_property(
+                property.as_str().unwrap_or(""),
+                &trace,
+                &metrics,
+            ));
+        }
+    }
+    if let Some(expectations) = payload.get("metric_expectations").and_then(Value::as_array) {
+        for expectation in expectations {
+            checks.push(check_simulation_metric_expectation(expectation, &metrics));
+        }
+    }
+    let verdict = if checks
+        .iter()
+        .all(|check| check.get("passed").and_then(Value::as_bool) == Some(true))
+    {
+        ExternalSimulationValidationVerdict::Valid
+    } else {
+        ExternalSimulationValidationVerdict::Invalid
+    };
+    simulation_reference_run(
+        engine_id,
+        simulator,
+        ExternalSimulationValidationStatus::Ok,
+        verdict,
+        String::new(),
+        metrics,
+        checks,
+        trace,
+        started.elapsed().as_secs_f64() * 1000.0,
+    )
+}
+
+fn run_agent_simulation_validation_with_rust_reference(
+    payload: &Value,
+    engine_id: String,
+    started: Instant,
+) -> ExternalSimulationValidationReferenceRun {
+    let engine = engine_id.to_ascii_lowercase();
+    let default_model = json!({});
+    let default_scenario = json!({});
+    let model = payload.get("model").unwrap_or(&default_model);
+    let scenario = payload.get("scenario").unwrap_or(&default_scenario);
+    let simulation = match simulate_agent_based_with_rust(model, scenario) {
+        Ok(simulation) => simulation,
+        Err(message) => {
+            return failed_rust_simulation_reference_run(
+                engine_id,
+                message,
+                started.elapsed().as_secs_f64() * 1000.0,
+            )
+        }
+    };
+    let simulator = if AGENT_SIMULATION_ENGINES.contains(&engine.as_str()) {
+        format!("rust:agent-based-for-{engine}")
+    } else {
+        "rust:agent-based".to_string()
+    };
+    let mut checks = Vec::new();
+    if let Some(properties) = payload
+        .get("expected_trace_properties")
+        .and_then(Value::as_array)
+    {
+        for property in properties {
+            checks.push(check_agent_trace_property(
+                property.as_str().unwrap_or(""),
+                &simulation,
+            ));
+        }
+    }
+    if let Some(expectations) = payload.get("metric_expectations").and_then(Value::as_array) {
+        for expectation in expectations {
+            checks.push(check_simulation_metric_expectation(
+                expectation,
+                &simulation.metrics,
+            ));
+        }
+    }
+    let verdict = if checks
+        .iter()
+        .all(|check| check.get("passed").and_then(Value::as_bool) == Some(true))
+    {
+        ExternalSimulationValidationVerdict::Valid
+    } else {
+        ExternalSimulationValidationVerdict::Invalid
+    };
+    simulation_reference_run(
+        engine_id,
+        simulator,
+        ExternalSimulationValidationStatus::Ok,
+        verdict,
+        String::new(),
+        simulation.metrics,
+        checks,
+        simulation.trace,
+        started.elapsed().as_secs_f64() * 1000.0,
+    )
+}
+
+fn run_distributed_simulation_validation_with_rust_reference(
+    payload: &Value,
+    engine_id: String,
+    started: Instant,
+) -> ExternalSimulationValidationReferenceRun {
+    let engine = engine_id.to_ascii_lowercase();
+    let default_model = json!({});
+    let model = payload.get("model").unwrap_or(&default_model);
+    let (trace, metrics) = match simulate_distributed_system_with_rust(model) {
+        Ok(simulation) => simulation,
+        Err(message) => {
+            return failed_rust_simulation_reference_run(
+                engine_id,
+                message,
+                started.elapsed().as_secs_f64() * 1000.0,
+            )
+        }
+    };
+    let simulator = if DISTRIBUTED_SIMULATION_ENGINES.contains(&engine.as_str()) {
+        format!("rust:distributed-system-for-{engine}")
+    } else {
+        "rust:distributed-system".to_string()
+    };
+    let mut checks = Vec::new();
+    if let Some(properties) = payload
+        .get("expected_trace_properties")
+        .and_then(Value::as_array)
+    {
+        for property in properties {
+            checks.push(check_distributed_trace_property(
+                property.as_str().unwrap_or(""),
+                &metrics,
+            ));
+        }
+    }
+    if let Some(expectations) = payload.get("metric_expectations").and_then(Value::as_array) {
+        for expectation in expectations {
+            checks.push(check_simulation_metric_expectation(expectation, &metrics));
+        }
+    }
+    let verdict = if checks
+        .iter()
+        .all(|check| check.get("passed").and_then(Value::as_bool) == Some(true))
+    {
+        ExternalSimulationValidationVerdict::Valid
+    } else {
+        ExternalSimulationValidationVerdict::Invalid
+    };
+    simulation_reference_run(
+        engine_id,
+        simulator,
+        ExternalSimulationValidationStatus::Ok,
+        verdict,
+        String::new(),
+        metrics,
+        checks,
+        trace,
+        started.elapsed().as_secs_f64() * 1000.0,
+    )
+}
+
+fn run_process_simulation_validation_with_rust_reference(
+    payload: &Value,
+    engine_id: String,
+    started: Instant,
+) -> ExternalSimulationValidationReferenceRun {
+    let engine = engine_id.to_ascii_lowercase();
+    let default_model = json!({});
+    let model = payload.get("model").unwrap_or(&default_model);
+    let (trace, metrics) = match simulate_process_flow_with_rust(model) {
+        Ok(simulation) => simulation,
+        Err(message) => {
+            return failed_rust_simulation_reference_run(
+                engine_id,
+                message,
+                started.elapsed().as_secs_f64() * 1000.0,
+            )
+        }
+    };
+    let simulator = if PROCESS_SIMULATION_ENGINES.contains(&engine.as_str()) {
+        format!("rust:process-flow-for-{engine}")
+    } else {
+        "rust:process-flow".to_string()
+    };
+    let mut checks = Vec::new();
+    if let Some(properties) = payload
+        .get("expected_trace_properties")
+        .and_then(Value::as_array)
+    {
+        for property in properties {
+            checks.push(check_process_trace_property(
+                property.as_str().unwrap_or(""),
+                &metrics,
+            ));
+        }
+    }
+    if let Some(expectations) = payload.get("metric_expectations").and_then(Value::as_array) {
+        for expectation in expectations {
+            checks.push(check_simulation_metric_expectation(expectation, &metrics));
+        }
+    }
+    let verdict = if checks
+        .iter()
+        .all(|check| check.get("passed").and_then(Value::as_bool) == Some(true))
+    {
+        ExternalSimulationValidationVerdict::Valid
+    } else {
+        ExternalSimulationValidationVerdict::Invalid
+    };
+    simulation_reference_run(
+        engine_id,
+        simulator,
+        ExternalSimulationValidationStatus::Ok,
+        verdict,
+        String::new(),
+        metrics,
+        checks,
+        trace,
+        started.elapsed().as_secs_f64() * 1000.0,
+    )
+}
+
 pub fn run_simulation_validation_with_external_reference(
     request: &SimulationValidationRequest,
     options: &ExternalSimulationValidationReferenceOptions,
@@ -4205,6 +5797,28 @@ pub fn run_simulation_validation_json_with_external_reference(
         })
         .unwrap_or_else(|| "builtin".to_string());
     let started = Instant::now();
+    let model_format = payload
+        .get("model_format")
+        .and_then(Value::as_str)
+        .unwrap_or("json-event-network");
+    if model_format == "json-event-network" {
+        return run_event_simulation_validation_with_rust_reference(payload, engine_id, started);
+    } else if model_format == "json-mobility-network" {
+        return run_mobility_simulation_validation_with_rust_reference(payload, engine_id, started);
+    } else if model_format == "json-energy-balance" {
+        return run_energy_simulation_validation_with_rust_reference(payload, engine_id, started);
+    } else if model_format == "json-physics-trajectory" {
+        return run_physics_simulation_validation_with_rust_reference(payload, engine_id, started);
+    } else if model_format == "json-agent-based" {
+        return run_agent_simulation_validation_with_rust_reference(payload, engine_id, started);
+    } else if model_format == "json-distributed-system" {
+        return run_distributed_simulation_validation_with_rust_reference(
+            payload, engine_id, started,
+        );
+    } else if model_format == "json-process-flow" {
+        return run_process_simulation_validation_with_rust_reference(payload, engine_id, started);
+    }
+
     let python = env::var_os("PYTHON_BIN")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("python3"));
@@ -6016,6 +7630,7 @@ mod tests {
         prism_validation_model_to_string, prism_validation_properties_to_string,
         run_external_validation_artifact_cli, run_external_validation_consensus,
         run_external_validation_file_cli, run_external_validation_text_cli,
+        run_simulation_validation_json_with_external_reference,
         run_simulation_validation_with_external_reference, simulation_validation_request_to_json,
         smtlib_validation_script_to_string, tla_validation_module_to_string, DimacsCnf, DimacsWcnf,
         DimacsWeightedClause, ExternalBenchmarkManifest, ExternalBenchmarkManifestEntry,
@@ -7042,6 +8657,9 @@ mod tests {
             valid_run.verdict,
             ExternalSimulationValidationVerdict::Valid
         );
+        assert!(valid_run
+            .simulator
+            .starts_with("rust:single-station-des-for-simpy"));
         assert_eq!(valid_run.metrics.get("jobs_completed").copied(), Some(3.0));
         assert_eq!(valid_run.trace.len(), 9);
 
@@ -7063,11 +8681,225 @@ mod tests {
             invalid_run.verdict,
             ExternalSimulationValidationVerdict::Invalid
         );
+        assert!(invalid_run
+            .simulator
+            .starts_with("rust:single-station-des-for-arena"));
         assert!(invalid_run.simulator.contains("arena"));
         assert!(invalid_run
             .checks
             .iter()
             .any(|check| check["name"] == "mean_wait" && check["passed"] == false));
+    }
+
+    #[test]
+    fn simulation_validation_reference_wrapper_runs_mobility_in_rust() {
+        let payload = json!({
+            "kind": "simulation-validation",
+            "engine": "sumo",
+            "model_format": "json-mobility-network",
+            "model": {
+                "routes": [
+                    {"depart": 0.0, "travel_times": [2.0, 3.0]},
+                    {"depart": 1.0, "segments": [{"travel_time": 1.5}, {"travel_time": 2.5}]}
+                ]
+            },
+            "expected_trace_properties": [
+                "departures_before_arrivals",
+                "travel_times_nonnegative",
+                "vehicles_complete"
+            ],
+            "metric_expectations": [
+                {"name": "vehicles_completed", "target": 2.0, "tolerance": 1e-9, "comparison": "equal"},
+                {"name": "mean_travel_time", "target": 4.5, "tolerance": 1e-9, "comparison": "within-absolute"}
+            ]
+        });
+        let run = run_simulation_validation_json_with_external_reference(
+            &payload,
+            &ExternalSimulationValidationReferenceOptions::default(),
+        );
+        assert_eq!(run.status, ExternalSimulationValidationStatus::Ok);
+        assert_eq!(run.verdict, ExternalSimulationValidationVerdict::Valid);
+        assert!(run.simulator.starts_with("rust:mobility-network-for-sumo"));
+        assert_eq!(run.metrics.get("mean_travel_time").copied(), Some(4.5));
+        assert_eq!(run.metrics.get("vehicles_completed").copied(), Some(2.0));
+        assert_eq!(run.trace.len(), 8);
+    }
+
+    #[test]
+    fn simulation_validation_reference_wrapper_runs_remaining_formats_in_rust() {
+        let energy_payload = json!({
+            "kind": "simulation-validation",
+            "engine": "energyplus",
+            "model_format": "json-energy-balance",
+            "model": {
+                "initial_temp": 20.0,
+                "setpoint": 21.0,
+                "outdoor_temp": 10.0,
+                "ua": 0.1,
+                "heat_capacity": 10.0,
+                "hvac_power": 2.0,
+                "internal_gain": 0.1
+            },
+            "scenario": {"horizon": 2.0, "step": 1.0},
+            "expected_trace_properties": [
+                "energy_nonnegative",
+                "temperatures_finite",
+                "temperature_within_bounds"
+            ],
+            "metric_expectations": [
+                {"name": "zones", "target": 1.0, "tolerance": 1e-9, "comparison": "equal"},
+                {"name": "energy_kwh", "target": 0.0, "tolerance": 10.0, "comparison": "greater-equal"}
+            ]
+        });
+        let energy_run = run_simulation_validation_json_with_external_reference(
+            &energy_payload,
+            &ExternalSimulationValidationReferenceOptions::default(),
+        );
+        assert_eq!(energy_run.status, ExternalSimulationValidationStatus::Ok);
+        assert_eq!(
+            energy_run.verdict,
+            ExternalSimulationValidationVerdict::Valid
+        );
+        assert!(energy_run
+            .simulator
+            .starts_with("rust:energy-balance-for-energyplus"));
+        assert_eq!(energy_run.metrics.get("zones").copied(), Some(1.0));
+
+        let physics_payload = json!({
+            "kind": "simulation-validation",
+            "engine": "mujoco",
+            "model_format": "json-physics-trajectory",
+            "model": {
+                "initial_position": 0.0,
+                "initial_velocity": 0.0,
+                "acceleration": 1.0,
+                "floor": 0.0
+            },
+            "scenario": {"dt": 0.5, "steps": 4},
+            "expected_trace_properties": [
+                "positions_finite",
+                "velocities_finite",
+                "path_length_nonnegative",
+                "stays_above_floor"
+            ],
+            "metric_expectations": [
+                {"name": "final_position", "target": 2.5, "tolerance": 1e-9, "comparison": "within-absolute"},
+                {"name": "final_velocity", "target": 2.0, "tolerance": 1e-9, "comparison": "within-absolute"}
+            ]
+        });
+        let physics_run = run_simulation_validation_json_with_external_reference(
+            &physics_payload,
+            &ExternalSimulationValidationReferenceOptions::default(),
+        );
+        assert_eq!(physics_run.status, ExternalSimulationValidationStatus::Ok);
+        assert_eq!(
+            physics_run.verdict,
+            ExternalSimulationValidationVerdict::Valid
+        );
+        assert!(physics_run
+            .simulator
+            .starts_with("rust:physics-trajectory-for-mujoco"));
+        assert_eq!(
+            physics_run.metrics.get("final_position").copied(),
+            Some(2.5)
+        );
+        assert_eq!(
+            physics_run.metrics.get("final_velocity").copied(),
+            Some(2.0)
+        );
+
+        let agent_payload = json!({
+            "kind": "simulation-validation",
+            "engine": "mesa",
+            "model_format": "json-agent-based",
+            "model": {
+                "agents": [{"state": "idle"}, {"state": "busy"}],
+                "interactions": [{"source": 0, "target": 1}]
+            },
+            "scenario": {"steps": 2},
+            "expected_trace_properties": [
+                "agents_nonempty",
+                "states_present",
+                "interactions_reference_agents"
+            ]
+        });
+        let agent_run = run_simulation_validation_json_with_external_reference(
+            &agent_payload,
+            &ExternalSimulationValidationReferenceOptions::default(),
+        );
+        assert_eq!(agent_run.status, ExternalSimulationValidationStatus::Ok);
+        assert_eq!(
+            agent_run.verdict,
+            ExternalSimulationValidationVerdict::Valid
+        );
+        assert!(agent_run.simulator.starts_with("rust:agent-based-for-mesa"));
+        assert_eq!(agent_run.metrics.get("agents").copied(), Some(2.0));
+
+        let distributed_payload = json!({
+            "kind": "simulation-validation",
+            "engine": "simgrid",
+            "model_format": "json-distributed-system",
+            "model": {
+                "hosts": [{"capacity": 4}],
+                "links": [{"bandwidth": 10}],
+                "tasks": [{"work": 3}]
+            },
+            "expected_trace_properties": [
+                "hosts_have_capacity",
+                "links_nonnegative",
+                "tasks_schedulable"
+            ]
+        });
+        let distributed_run = run_simulation_validation_json_with_external_reference(
+            &distributed_payload,
+            &ExternalSimulationValidationReferenceOptions::default(),
+        );
+        assert_eq!(
+            distributed_run.status,
+            ExternalSimulationValidationStatus::Ok
+        );
+        assert_eq!(
+            distributed_run.verdict,
+            ExternalSimulationValidationVerdict::Valid
+        );
+        assert!(distributed_run
+            .simulator
+            .starts_with("rust:distributed-system-for-simgrid"));
+        assert_eq!(distributed_run.metrics.get("hosts").copied(), Some(1.0));
+
+        let process_payload = json!({
+            "kind": "simulation-validation",
+            "engine": "neqsim",
+            "model_format": "json-process-flow",
+            "model": {
+                "units": [{"name": "mixer"}],
+                "streams": [
+                    {"from": "source", "to": "mixer", "flow": 5},
+                    {"from": "mixer", "to": "sink", "flow": 5}
+                ]
+            },
+            "expected_trace_properties": [
+                "units_present",
+                "streams_nonnegative",
+                "mass_balance_closed"
+            ]
+        });
+        let process_run = run_simulation_validation_json_with_external_reference(
+            &process_payload,
+            &ExternalSimulationValidationReferenceOptions::default(),
+        );
+        assert_eq!(process_run.status, ExternalSimulationValidationStatus::Ok);
+        assert_eq!(
+            process_run.verdict,
+            ExternalSimulationValidationVerdict::Valid
+        );
+        assert!(process_run
+            .simulator
+            .starts_with("rust:process-flow-for-neqsim"));
+        assert_eq!(
+            process_run.metrics.get("mass_balance_error").copied(),
+            Some(0.0)
+        );
     }
 
     #[test]

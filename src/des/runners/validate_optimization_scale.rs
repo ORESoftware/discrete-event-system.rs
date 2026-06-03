@@ -9,14 +9,17 @@
 #![allow(dead_code)]
 
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
 use std::time::Instant;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::des::general::cp_sat::{
     solve_cp_model, CpConstraint, CpModel, CpObjective, CpSolution, CpSolveOptions, CpStatus,
     CpVariable, LinearSense, LinearTerm, ObjectiveSense,
+};
+use crate::des::general::external_cp_sat_reference::{
+    cp_sat_model_to_reference_json, solve_cp_sat_json_with_external_reference,
+    ExternalCpSatReferenceOptions, ExternalCpSatReferenceSolver,
 };
 use crate::des::general::external_linear_cli::{
     solve_ipmip_with_external_cli, solve_lp_with_external_cli, ExternalLinearCliModelFormat,
@@ -70,15 +73,7 @@ struct ScaleReport {
     rows: Vec<ScaleRow>,
 }
 
-#[derive(Debug, Deserialize)]
-struct LinearCliReference {
-    status: String,
-    solver: String,
-    objective: Option<f64>,
-    message: String,
-}
-
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 struct CpSatReference {
     status: String,
     assignment: Vec<i64>,
@@ -288,10 +283,23 @@ impl Driver {
             },
         );
         let native_ms = native_t0.elapsed().as_secs_f64() * 1000.0;
-        let external_t0 = Instant::now();
-        let external = self.run_linear_cli_reference("mip", solver, &mip_json(&problem));
-        let external_ms = external_t0.elapsed().as_secs_f64() * 1000.0;
-        if external.status == "unavailable" {
+        let Some(external_solver) = external_solver_from_name(solver) else {
+            println!("  SKIP  MIP knapsack n={n} solver={solver}: unknown external solver");
+            return;
+        };
+        let external = solve_ipmip_with_external_cli(
+            &problem,
+            &ExternalLinearCliOptions {
+                solver: external_solver,
+                time_limit_secs: Some(10.0),
+                node_limit: Some(100_000),
+                relative_gap: Some(0.0),
+                threads: Some(1),
+                random_seed: Some(7),
+                ..Default::default()
+            },
+        );
+        if external.status == ExternalLinearCliStatus::Unavailable {
             println!(
                 "  SKIP  MIP knapsack n={n} solver={solver}: {}",
                 external.message
@@ -302,11 +310,12 @@ impl Driver {
         let case = format!("MIP knapsack n={n} solver={solver}");
         self.check(
             format!("{case} statuses optimal"),
-            native.status == IPMIPStatus::Optimal && external.status == "optimal",
+            native.status == IPMIPStatus::Optimal
+                && external.status == ExternalLinearCliStatus::Optimal,
             format!(
                 "native={} external={} solver={} message={}",
                 native.status.as_str(),
-                external.status,
+                external.status.as_str(),
                 external.solver,
                 external.message
             ),
@@ -324,12 +333,12 @@ impl Driver {
             native_solver: native.solver_kind.to_string(),
             external_solver: external.solver,
             native_status: native.status.as_str().to_string(),
-            external_status: external.status,
+            external_status: external.status.as_str().to_string(),
             native_objective: native.z,
             external_objective,
             objective_abs_diff: (native.z - external_objective).abs(),
             native_ms,
-            external_ms,
+            external_ms: external.elapsed_ms,
             native_nodes: Some(native.nodes_explored),
             native_lp_solves: Some(native.lp_solves),
         });
@@ -426,7 +435,7 @@ impl Driver {
         let native = solve_cp_model(&model, CpSolveOptions::default());
         let native_ms = native_t0.elapsed().as_secs_f64() * 1000.0;
         let external_t0 = Instant::now();
-        let external = self.run_cp_sat_reference(&cp_model_json(&model));
+        let external = self.run_cp_sat_reference(&model);
         let external_ms = external_t0.elapsed().as_secs_f64() * 1000.0;
         if external.status == "unavailable" {
             println!(
@@ -489,78 +498,26 @@ impl Driver {
         });
     }
 
-    fn run_linear_cli_reference(
-        &self,
-        kind: &str,
-        solver: &str,
-        stdin_json: &str,
-    ) -> LinearCliReference {
-        use std::io::Write;
-
-        let python = std::env::var("PYTHON")
-            .or_else(|_| std::env::var("PYTHON_BIN"))
-            .unwrap_or_else(|_| "python3".to_string());
-        let script = self.root.join("scripts").join("linear_cli_reference.py");
-        let mut child = Command::new(&python)
-            .arg(&script)
-            .arg("--kind")
-            .arg(kind)
-            .arg("--solver")
-            .arg(solver)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap_or_else(|e| panic!("failed to start linear_cli_reference.py: {e}"));
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(stdin_json.as_bytes())
-                .expect("write linear CLI stdin");
+    fn run_cp_sat_reference(&self, model: &CpModel) -> CpSatReference {
+        let run = solve_cp_sat_json_with_external_reference(
+            &cp_sat_model_to_reference_json(model),
+            &ExternalCpSatReferenceOptions {
+                solver: scale_cp_reference_solver(),
+                ..Default::default()
+            },
+        );
+        CpSatReference {
+            status: run.status.as_str().to_string(),
+            assignment: run.assignment,
+            objective: run.objective.map(|objective| objective.round() as i64),
+            nodes: run.nodes.and_then(|nodes| usize::try_from(nodes).ok()),
+            solver: run.backend,
+            message: if run.message.is_empty() {
+                None
+            } else {
+                Some(run.message)
+            },
         }
-        let output = child
-            .wait_with_output()
-            .expect("wait for linear CLI reference");
-        if !output.status.success() {
-            panic!(
-                "linear_cli_reference.py failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        serde_json::from_slice(&output.stdout).expect("parse linear CLI reference JSON")
-    }
-
-    fn run_cp_sat_reference(&self, stdin_json: &str) -> CpSatReference {
-        use std::io::Write;
-
-        let python = std::env::var("PYTHON")
-            .or_else(|_| std::env::var("PYTHON_BIN"))
-            .unwrap_or_else(|_| "python3".to_string());
-        let script = self.root.join("scripts").join("cp_sat_reference.py");
-        let mut child = Command::new(&python)
-            .arg(&script)
-            .arg("--solver")
-            .arg("ortools")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap_or_else(|e| panic!("failed to start cp_sat_reference.py: {e}"));
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(stdin_json.as_bytes())
-                .expect("write CP-SAT reference stdin");
-        }
-        let output = child.wait_with_output().expect("wait for CP-SAT reference");
-        if let Ok(parsed) = serde_json::from_slice::<CpSatReference>(&output.stdout) {
-            return parsed;
-        }
-        if !output.status.success() {
-            panic!(
-                "cp_sat_reference.py failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        serde_json::from_slice(&output.stdout).expect("parse CP-SAT reference JSON")
     }
 
     fn write_report(
@@ -649,6 +606,39 @@ fn parse_external_solver_list(
     } else {
         values
     }
+}
+
+fn cp_reference_solver_from_name(name: &str) -> Option<ExternalCpSatReferenceSolver> {
+    let key = name.trim().to_ascii_lowercase();
+    let solver = match key.as_str() {
+        "rust" | "rust-enumeration" | "rust_enumeration" => {
+            ExternalCpSatReferenceSolver::RustEnumeration
+        }
+        "python" | "fallback" | "python-enumeration" | "python_enumeration" => {
+            ExternalCpSatReferenceSolver::PythonEnumeration
+        }
+        "ortools" | "ortools-cp-sat" | "ortools_cp_sat" | "cp-sat" | "cp_sat" => {
+            ExternalCpSatReferenceSolver::OrToolsCpSat
+        }
+        "auto" => ExternalCpSatReferenceSolver::Auto,
+        _ => ExternalCpSatReferenceSolver::all()
+            .iter()
+            .copied()
+            .find(|solver| solver.as_arg() == key)?,
+    };
+    if solver.supports_cp_sat_json() {
+        Some(solver)
+    } else {
+        None
+    }
+}
+
+fn scale_cp_reference_solver() -> ExternalCpSatReferenceSolver {
+    std::env::var("SCALE_CP_SOLVER")
+        .ok()
+        .as_deref()
+        .and_then(cp_reference_solver_from_name)
+        .unwrap_or(ExternalCpSatReferenceSolver::RustEnumeration)
 }
 
 fn model_format_from_name(name: &str) -> Option<ExternalLinearCliModelFormat> {
@@ -765,62 +755,6 @@ fn build_cp_permutation_model(n: usize) -> CpModel {
                 .collect(),
         }),
     }
-}
-
-fn mip_json(problem: &IPMIPProblem) -> String {
-    serde_json::json!({
-        "sense": problem.sense.as_str(),
-        "c": &problem.c,
-        "a": &problem.a,
-        "b": &problem.b,
-        "integer_vars": &problem.integer_vars,
-        "ub": &problem.ub,
-        "var_names": &problem.var_names,
-        "con_names": &problem.con_names,
-    })
-    .to_string()
-}
-
-fn cp_model_json(model: &CpModel) -> String {
-    let variables: Vec<_> = model
-        .variables
-        .iter()
-        .map(|v| serde_json::json!({"name": v.name, "domain": v.domain}))
-        .collect();
-    let constraints: Vec<_> = model
-        .constraints
-        .iter()
-        .map(|c| match c {
-            CpConstraint::AllDifferent(vars) => {
-                serde_json::json!({"kind": "all_different", "vars": vars})
-            }
-            CpConstraint::Linear { terms, sense, rhs } => serde_json::json!({
-                "kind": "linear",
-                "terms": terms.iter().map(|t| serde_json::json!({
-                    "var": t.var,
-                    "coeff": t.coeff,
-                })).collect::<Vec<_>>(),
-                "sense": sense.as_str(),
-                "rhs": rhs,
-            }),
-            _ => panic!("scale CP-SAT JSON only supports generated all-different/linear models"),
-        })
-        .collect();
-    let objective = model.objective.as_ref().map(|obj| {
-        serde_json::json!({
-            "sense": obj.sense.as_str(),
-            "terms": obj.terms.iter().map(|t| serde_json::json!({
-                "var": t.var,
-                "coeff": t.coeff,
-            })).collect::<Vec<_>>(),
-        })
-    });
-    serde_json::json!({
-        "variables": variables,
-        "constraints": constraints,
-        "objective": objective,
-    })
-    .to_string()
 }
 
 fn compact_assignment(solution: &CpSolution) -> String {

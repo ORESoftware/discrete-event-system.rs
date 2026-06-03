@@ -47,9 +47,10 @@ use crate::des::general::external_bin_packing_reference::{
     ExternalBinPackingReferenceStatus,
 };
 use crate::des::general::external_cp_sat_reference::{
-    external_cp_sat_reference_solver_specs, solve_cp_assignment_with_external_reference,
-    solve_cp_sat_json_with_external_reference, ExternalCpSatReferenceFamily,
-    ExternalCpSatReferenceOptions, ExternalCpSatReferenceSolver, ExternalCpSatReferenceStatus,
+    cp_sat_model_to_reference_json_string, external_cp_sat_reference_solver_specs,
+    solve_cp_assignment_with_external_reference, solve_cp_sat_json_with_external_reference,
+    ExternalCpSatReferenceFamily, ExternalCpSatReferenceOptions, ExternalCpSatReferenceSolver,
+    ExternalCpSatReferenceStatus,
 };
 use crate::des::general::external_facility_location_reference::{
     solve_facility_location_with_external_reference, ExternalFacilityLocationReferenceOptions,
@@ -21373,403 +21374,7 @@ impl Driver {
         println!("\n-- CP-SAT: finite-domain solver vs CP reference bridge --");
         let model = self.sample_cp_model();
         let internal = solve_cp_model(&model, CpSolveOptions::default());
-        let variables: Vec<_> = model
-            .variables
-            .iter()
-            .map(|v| serde_json::json!({"name": v.name, "domain": v.domain}))
-            .collect();
-        let constraints: Vec<_> = model
-            .constraints
-            .iter()
-            .map(|c| match c {
-                CpConstraint::Linear { terms, sense, rhs } => serde_json::json!({
-                    "kind": "linear",
-                    "terms": terms.iter().map(|t| serde_json::json!({"var": t.var, "coeff": t.coeff})).collect::<Vec<_>>(),
-                    "sense": sense.as_str(),
-                    "rhs": rhs,
-                }),
-                CpConstraint::LinearDomain { terms, intervals } => serde_json::json!({
-                    "kind": "linear_domain",
-                    "terms": terms.iter().map(|t| serde_json::json!({"var": t.var, "coeff": t.coeff})).collect::<Vec<_>>(),
-                    "intervals": intervals.iter().map(|interval| serde_json::json!({
-                        "lb": interval.lb,
-                        "ub": interval.ub,
-                    })).collect::<Vec<_>>(),
-                }),
-                CpConstraint::EnforcedLinearDomain {
-                    enforcement,
-                    terms,
-                    intervals,
-                } => serde_json::json!({
-                    "kind": "enforced_linear_domain",
-                    "enforcement": enforcement.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
-                    "terms": terms.iter().map(|t| serde_json::json!({"var": t.var, "coeff": t.coeff})).collect::<Vec<_>>(),
-                    "intervals": intervals.iter().map(|interval| serde_json::json!({
-                        "lb": interval.lb,
-                        "ub": interval.ub,
-                    })).collect::<Vec<_>>(),
-                }),
-                CpConstraint::MapDomain {
-                    var,
-                    bools,
-                    offset,
-                } => serde_json::json!({
-                    "kind": "map_domain",
-                    "var": var,
-                    "bools": bools,
-                    "offset": offset,
-                }),
-                CpConstraint::EnforcedLinear {
-                    enforcement,
-                    terms,
-                    sense,
-                    rhs,
-                } => serde_json::json!({
-                    "kind": "enforced_linear",
-                    "enforcement": enforcement.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
-                    "terms": terms.iter().map(|t| serde_json::json!({"var": t.var, "coeff": t.coeff})).collect::<Vec<_>>(),
-                    "sense": sense.as_str(),
-                    "rhs": rhs,
-                }),
-                CpConstraint::EnforcedBoolOr {
-                    enforcement,
-                    literals,
-                } => serde_json::json!({
-                    "kind": "enforced_bool_or",
-                    "enforcement": enforcement.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
-                    "literals": literals.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
-                }),
-                CpConstraint::EnforcedBoolAnd {
-                    enforcement,
-                    literals,
-                } => serde_json::json!({
-                    "kind": "enforced_bool_and",
-                    "enforcement": enforcement.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
-                    "literals": literals.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
-                }),
-                CpConstraint::EnforcedBoolXor {
-                    enforcement,
-                    literals,
-                } => serde_json::json!({
-                    "kind": "enforced_bool_xor",
-                    "enforcement": enforcement.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
-                    "literals": literals.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
-                }),
-                CpConstraint::EnforcedAtMostOne {
-                    enforcement,
-                    literals,
-                } => serde_json::json!({
-                    "kind": "enforced_at_most_one",
-                    "enforcement": enforcement.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
-                    "literals": literals.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
-                }),
-                CpConstraint::EnforcedAtLeastOne {
-                    enforcement,
-                    literals,
-                } => serde_json::json!({
-                    "kind": "enforced_at_least_one",
-                    "enforcement": enforcement.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
-                    "literals": literals.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
-                }),
-                CpConstraint::EnforcedExactlyOne {
-                    enforcement,
-                    literals,
-                } => serde_json::json!({
-                    "kind": "enforced_exactly_one",
-                    "enforcement": enforcement.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
-                    "literals": literals.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
-                }),
-                CpConstraint::AllDifferent(vars) => {
-                    serde_json::json!({"kind": "all_different", "vars": vars})
-                }
-                CpConstraint::BoolOr(lits) => serde_json::json!({
-                    "kind": "bool_or",
-                    "literals": lits.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
-                }),
-                CpConstraint::BoolAnd(lits) => serde_json::json!({
-                    "kind": "bool_and",
-                    "literals": lits.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
-                }),
-                CpConstraint::BoolXor(lits) => serde_json::json!({
-                    "kind": "bool_xor",
-                    "literals": lits.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
-                }),
-                CpConstraint::AtMostOne(lits) => serde_json::json!({
-                    "kind": "at_most_one",
-                    "literals": lits.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
-                }),
-                CpConstraint::AtLeastOne(lits) => serde_json::json!({
-                    "kind": "at_least_one",
-                    "literals": lits.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
-                }),
-                CpConstraint::ExactlyOne(lits) => serde_json::json!({
-                    "kind": "exactly_one",
-                    "literals": lits.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
-                }),
-                CpConstraint::Implication {
-                    antecedent,
-                    consequent,
-                } => serde_json::json!({
-                    "kind": "implication",
-                    "antecedent": {"var": antecedent.var, "positive": antecedent.positive},
-                    "consequent": {"var": consequent.var, "positive": consequent.positive},
-                }),
-                CpConstraint::Circuit(arcs) => serde_json::json!({
-                    "kind": "circuit",
-                    "arcs": arcs.iter().map(|arc| serde_json::json!({
-                        "tail": arc.tail,
-                        "head": arc.head,
-                        "literal": {"var": arc.literal.var, "positive": arc.literal.positive},
-                    })).collect::<Vec<_>>(),
-                }),
-                CpConstraint::MultipleCircuit(arcs) => serde_json::json!({
-                    "kind": "multiple_circuit",
-                    "arcs": arcs.iter().map(|arc| serde_json::json!({
-                        "tail": arc.tail,
-                        "head": arc.head,
-                        "literal": {"var": arc.literal.var, "positive": arc.literal.positive},
-                    })).collect::<Vec<_>>(),
-                }),
-                CpConstraint::AllowedAssignments { vars, tuples } => serde_json::json!({
-                    "kind": "allowed_assignments",
-                    "vars": vars,
-                    "tuples": tuples,
-                }),
-                CpConstraint::ForbiddenAssignments { vars, tuples } => serde_json::json!({
-                    "kind": "forbidden_assignments",
-                    "vars": vars,
-                    "tuples": tuples,
-                }),
-                CpConstraint::EnforcedAllowedAssignments {
-                    enforcement,
-                    vars,
-                    tuples,
-                } => serde_json::json!({
-                    "kind": "enforced_allowed_assignments",
-                    "enforcement": enforcement.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
-                    "vars": vars,
-                    "tuples": tuples,
-                }),
-                CpConstraint::EnforcedForbiddenAssignments {
-                    enforcement,
-                    vars,
-                    tuples,
-                } => serde_json::json!({
-                    "kind": "enforced_forbidden_assignments",
-                    "enforcement": enforcement.iter().map(|lit| serde_json::json!({"var": lit.var, "positive": lit.positive})).collect::<Vec<_>>(),
-                    "vars": vars,
-                    "tuples": tuples,
-                }),
-                CpConstraint::Inverse { direct, inverse } => serde_json::json!({
-                    "kind": "inverse",
-                    "direct": direct,
-                    "inverse": inverse,
-                }),
-                CpConstraint::MaxEquality { target, vars } => serde_json::json!({
-                    "kind": "max_equality",
-                    "target": target,
-                    "vars": vars,
-                }),
-                CpConstraint::MinEquality { target, vars } => serde_json::json!({
-                    "kind": "min_equality",
-                    "target": target,
-                    "vars": vars,
-                }),
-                CpConstraint::AbsEquality { target, var } => serde_json::json!({
-                    "kind": "abs_equality",
-                    "target": target,
-                    "var": var,
-                }),
-                CpConstraint::MultiplicationEquality { target, vars } => serde_json::json!({
-                    "kind": "multiplication_equality",
-                    "target": target,
-                    "vars": vars,
-                }),
-                CpConstraint::DivisionEquality {
-                    target,
-                    numerator,
-                    denominator,
-                } => serde_json::json!({
-                    "kind": "division_equality",
-                    "target": target,
-                    "numerator": numerator,
-                    "denominator": denominator,
-                }),
-                CpConstraint::ModuloEquality {
-                    target,
-                    var,
-                    modulus,
-                } => serde_json::json!({
-                    "kind": "modulo_equality",
-                    "target": target,
-                    "var": var,
-                    "modulus": modulus,
-                }),
-                CpConstraint::Automaton(automaton) => serde_json::json!({
-                    "kind": "automaton",
-                    "vars": automaton.vars,
-                    "starting_state": automaton.starting_state,
-                    "final_states": automaton.final_states,
-                    "transitions": automaton.transitions.iter().map(|transition| serde_json::json!({
-                        "tail": transition.tail,
-                        "label": transition.label,
-                        "head": transition.head,
-                    })).collect::<Vec<_>>(),
-                }),
-                CpConstraint::Element(element) => serde_json::json!({
-                    "kind": "element",
-                    "index": element.index,
-                    "values": &element.values,
-                    "target": element.target,
-                }),
-                CpConstraint::VariableElement(element) => serde_json::json!({
-                    "kind": "variable_element",
-                    "index": element.index,
-                    "vars": &element.vars,
-                    "target": element.target,
-                }),
-                CpConstraint::Alternative(alternative) => serde_json::json!({
-                    "kind": "alternative",
-                    "start": alternative.start,
-                    "duration": alternative.duration,
-                    "end": alternative.end,
-                    "presence": alternative.presence.as_ref().map(|lit| serde_json::json!({
-                        "var": lit.var,
-                        "positive": lit.positive,
-                    })),
-                    "alternatives": alternative.alternatives.iter().map(|interval| serde_json::json!({
-                        "start": interval.start,
-                        "duration": interval.duration,
-                        "end": interval.end,
-                        "presence": interval.presence.as_ref().map(|lit| serde_json::json!({
-                            "var": lit.var,
-                            "positive": lit.positive,
-                        })),
-                        "name": interval.name,
-                    })).collect::<Vec<_>>(),
-                    "name": alternative.name,
-                }),
-                CpConstraint::NoOverlap(intervals) => serde_json::json!({
-                    "kind": "no_overlap",
-                    "intervals": intervals.iter().map(|interval| serde_json::json!({
-                        "start": interval.start,
-                        "duration": interval.duration,
-                        "presence": interval.presence.as_ref().map(|lit| serde_json::json!({
-                            "var": lit.var,
-                            "positive": lit.positive,
-                        })),
-                        "name": interval.name,
-                    })).collect::<Vec<_>>(),
-                }),
-                CpConstraint::NoOverlapVariable(intervals) => serde_json::json!({
-                    "kind": "no_overlap_variable",
-                    "intervals": intervals.iter().map(|interval| serde_json::json!({
-                        "start": interval.start,
-                        "duration": interval.duration,
-                        "end": interval.end,
-                        "presence": interval.presence.as_ref().map(|lit| serde_json::json!({
-                            "var": lit.var,
-                            "positive": lit.positive,
-                        })),
-                        "name": interval.name,
-                    })).collect::<Vec<_>>(),
-                }),
-                CpConstraint::NoOverlap2D(rectangles) => serde_json::json!({
-                    "kind": "no_overlap_2d",
-                    "rectangles": rectangles.iter().map(|rectangle| serde_json::json!({
-                        "x_start": rectangle.x_start,
-                        "y_start": rectangle.y_start,
-                        "width": rectangle.width,
-                        "height": rectangle.height,
-                        "presence": rectangle.presence.as_ref().map(|lit| serde_json::json!({
-                            "var": lit.var,
-                            "positive": lit.positive,
-                        })),
-                        "name": rectangle.name,
-                    })).collect::<Vec<_>>(),
-                }),
-                CpConstraint::NoOverlap2DVariable(rectangles) => serde_json::json!({
-                    "kind": "no_overlap_2d_variable",
-                    "rectangles": rectangles.iter().map(|rectangle| serde_json::json!({
-                        "x_start": rectangle.x_start,
-                        "x_size": rectangle.x_size,
-                        "x_end": rectangle.x_end,
-                        "y_start": rectangle.y_start,
-                        "y_size": rectangle.y_size,
-                        "y_end": rectangle.y_end,
-                        "presence": rectangle.presence.as_ref().map(|lit| serde_json::json!({
-                            "var": lit.var,
-                            "positive": lit.positive,
-                        })),
-                        "name": rectangle.name,
-                    })).collect::<Vec<_>>(),
-                }),
-                CpConstraint::Cumulative {
-                    intervals,
-                    capacity,
-                } => serde_json::json!({
-                    "kind": "cumulative",
-                    "capacity": capacity,
-                    "intervals": intervals.iter().map(|interval| serde_json::json!({
-                        "start": interval.start,
-                        "duration": interval.duration,
-                        "demand": interval.demand,
-                        "presence": interval.presence.as_ref().map(|lit| serde_json::json!({
-                            "var": lit.var,
-                            "positive": lit.positive,
-                        })),
-                        "name": interval.name,
-                    })).collect::<Vec<_>>(),
-                }),
-                CpConstraint::CumulativeVariable {
-                    intervals,
-                    capacity,
-                } => serde_json::json!({
-                    "kind": "cumulative_variable",
-                    "capacity": capacity,
-                    "intervals": intervals.iter().map(|interval| serde_json::json!({
-                        "start": interval.start,
-                        "duration": interval.duration,
-                        "end": interval.end,
-                        "demand": interval.demand,
-                        "presence": interval.presence.as_ref().map(|lit| serde_json::json!({
-                            "var": lit.var,
-                            "positive": lit.positive,
-                        })),
-                        "name": interval.name,
-                    })).collect::<Vec<_>>(),
-                }),
-                CpConstraint::Reservoir {
-                    events,
-                    min_level,
-                    max_level,
-                } => serde_json::json!({
-                    "kind": "reservoir",
-                    "min_level": min_level,
-                    "max_level": max_level,
-                    "events": events.iter().map(|event| serde_json::json!({
-                        "time": event.time,
-                        "level_change": event.level_change,
-                        "active": event.active.as_ref().map(|lit| serde_json::json!({
-                            "var": lit.var,
-                            "positive": lit.positive,
-                        })),
-                    })).collect::<Vec<_>>(),
-                }),
-            })
-            .collect();
-        let objective = model.objective.as_ref().map(|obj| {
-            serde_json::json!({
-                "sense": obj.sense.as_str(),
-                "terms": obj.terms.iter().map(|t| serde_json::json!({"var": t.var, "coeff": t.coeff})).collect::<Vec<_>>()
-            })
-        });
-        let model_json = serde_json::json!({
-            "variables": variables,
-            "constraints": constraints,
-            "objective": objective,
-        })
-        .to_string();
+        let model_json = cp_sat_model_to_reference_json_string(&model);
         let value = self.run_cp_sat_rust_json(&["--solver", "auto"], &model_json);
         let reference: CpReference = serde_json::from_value(value).expect("parse CP reference");
         self.check(
@@ -21832,27 +21437,7 @@ impl Driver {
         };
         let variable_element_internal =
             solve_cp_model(&variable_element_model, CpSolveOptions::default());
-        let variable_element_json = serde_json::json!({
-            "variables": [
-                {"name": "choice", "domain": [0, 1]},
-                {"name": "expensive", "domain": [4]},
-                {"name": "cheap", "domain": [1, 3]},
-                {"name": "selected", "domain": [1, 2, 3, 4]},
-            ],
-            "constraints": [
-                {
-                    "kind": "variable_element",
-                    "index": 0,
-                    "vars": [1, 2],
-                    "target": 3,
-                },
-            ],
-            "objective": {
-                "sense": "min",
-                "terms": [{"var": 3, "coeff": 1}],
-            },
-        })
-        .to_string();
+        let variable_element_json = cp_sat_model_to_reference_json_string(&variable_element_model);
         let value = self.run_cp_sat_rust_json(&["--solver", "auto"], &variable_element_json);
         let variable_element_reference: CpReference =
             serde_json::from_value(value).expect("parse variable-element CP reference");
@@ -21914,25 +21499,7 @@ impl Driver {
                 max_solutions: 4,
             },
         );
-        let enumeration_json = serde_json::json!({
-            "variables": [
-                {"name": "x", "domain": [0, 1]},
-                {"name": "y", "domain": [0, 1]},
-            ],
-            "constraints": [
-                {
-                    "kind": "linear",
-                    "terms": [
-                        {"var": 0, "coeff": 1},
-                        {"var": 1, "coeff": 1},
-                    ],
-                    "sense": "le",
-                    "rhs": 1,
-                },
-            ],
-            "objective": serde_json::Value::Null,
-        })
-        .to_string();
+        let enumeration_json = cp_sat_model_to_reference_json_string(&enumeration_model);
         let value = self.run_cp_sat_rust_json(
             &["--solver", "auto", "--enumerate-solutions", "4"],
             &enumeration_json,
@@ -22161,46 +21728,8 @@ impl Driver {
         };
         let optional_interval_internal =
             solve_cp_model(&optional_interval_model, CpSolveOptions::default());
-        let optional_interval_json = serde_json::json!({
-            "variables": [
-                {"name": "required_start", "domain": [0]},
-                {"name": "optional_start", "domain": [0]},
-                {"name": "use_optional", "domain": [0, 1]},
-            ],
-            "constraints": [
-                {
-                    "kind": "no_overlap",
-                    "intervals": [
-                        {"start": 0, "duration": 3, "name": "required"},
-                        {
-                            "start": 1,
-                            "duration": 2,
-                            "presence": {"var": 2, "positive": true},
-                            "name": "optional",
-                        },
-                    ],
-                },
-                {
-                    "kind": "cumulative",
-                    "capacity": 2,
-                    "intervals": [
-                        {"start": 0, "duration": 3, "demand": 2, "name": "required_resource"},
-                        {
-                            "start": 1,
-                            "duration": 2,
-                            "demand": 1,
-                            "presence": {"var": 2, "positive": true},
-                            "name": "optional_resource",
-                        },
-                    ],
-                },
-            ],
-            "objective": {
-                "sense": "min",
-                "terms": [{"var": 2, "coeff": 1}],
-            },
-        })
-        .to_string();
+        let optional_interval_json =
+            cp_sat_model_to_reference_json_string(&optional_interval_model);
         let value = self.run_cp_sat_rust_json(&["--solver", "auto"], &optional_interval_json);
         let optional_interval_reference: CpReference =
             serde_json::from_value(value).expect("parse optional interval CP reference");
@@ -22286,43 +21815,8 @@ impl Driver {
         };
         let variable_interval_internal =
             solve_cp_model(&variable_interval_model, CpSolveOptions::default());
-        let variable_interval_json = serde_json::json!({
-            "variables": [
-                {"name": "task_a_start", "domain": [0]},
-                {"name": "task_a_duration", "domain": [2]},
-                {"name": "task_a_end", "domain": [2]},
-                {"name": "task_b_start", "domain": [0, 1, 2]},
-                {"name": "task_b_duration", "domain": [1, 2]},
-                {"name": "task_b_end", "domain": [1, 2, 3, 4]},
-            ],
-            "constraints": [
-                {
-                    "kind": "no_overlap_variable",
-                    "intervals": [
-                        {
-                            "start": 0,
-                            "duration": 1,
-                            "end": 2,
-                            "name": "task_a",
-                        },
-                        {
-                            "start": 3,
-                            "duration": 4,
-                            "end": 5,
-                            "name": "task_b",
-                        },
-                    ],
-                },
-            ],
-            "objective": {
-                "sense": "min",
-                "terms": [
-                    {"var": 3, "coeff": 1},
-                    {"var": 4, "coeff": 1},
-                ],
-            },
-        })
-        .to_string();
+        let variable_interval_json =
+            cp_sat_model_to_reference_json_string(&variable_interval_model);
         let value = self.run_cp_sat_rust_json(&["--solver", "auto"], &variable_interval_json);
         let variable_interval_reference: CpReference =
             serde_json::from_value(value).expect("parse variable interval CP reference");
@@ -22441,54 +21935,7 @@ impl Driver {
             }),
         };
         let alternative_internal = solve_cp_model(&alternative_model, CpSolveOptions::default());
-        let alternative_json = serde_json::json!({
-            "variables": [
-                {"name": "job_start", "domain": [0, 1]},
-                {"name": "job_duration", "domain": [2, 3]},
-                {"name": "job_end", "domain": [2, 3, 4]},
-                {"name": "fast_start", "domain": [0, 1]},
-                {"name": "fast_duration", "domain": [2]},
-                {"name": "fast_end", "domain": [2, 3]},
-                {"name": "use_fast", "domain": [0, 1]},
-                {"name": "slow_start", "domain": [0, 1]},
-                {"name": "slow_duration", "domain": [3]},
-                {"name": "slow_end", "domain": [3, 4]},
-                {"name": "use_slow", "domain": [0, 1]},
-            ],
-            "constraints": [
-                {
-                    "kind": "alternative",
-                    "start": 0,
-                    "duration": 1,
-                    "end": 2,
-                    "alternatives": [
-                        {
-                            "start": 3,
-                            "duration": 4,
-                            "end": 5,
-                            "presence": {"var": 6, "positive": true},
-                            "name": "fast",
-                        },
-                        {
-                            "start": 7,
-                            "duration": 8,
-                            "end": 9,
-                            "presence": {"var": 10, "positive": true},
-                            "name": "slow",
-                        },
-                    ],
-                    "name": "job_modes",
-                },
-            ],
-            "objective": {
-                "sense": "min",
-                "terms": [
-                    {"var": 1, "coeff": 10},
-                    {"var": 0, "coeff": 1},
-                ],
-            },
-        })
-        .to_string();
+        let alternative_json = cp_sat_model_to_reference_json_string(&alternative_model);
         let value = self.run_cp_sat_rust_json(&["--solver", "auto"], &alternative_json);
         let alternative_reference: CpReference =
             serde_json::from_value(value).expect("parse alternative CP reference");
@@ -22607,57 +22054,8 @@ impl Driver {
         };
         let variable_no_overlap_2d_internal =
             solve_cp_model(&variable_no_overlap_2d_model, CpSolveOptions::default());
-        let variable_no_overlap_2d_json = serde_json::json!({
-            "variables": [
-                {"name": "box_a_x_start", "domain": [0]},
-                {"name": "box_a_x_size", "domain": [2]},
-                {"name": "box_a_x_end", "domain": [2]},
-                {"name": "box_a_y_start", "domain": [0]},
-                {"name": "box_a_y_size", "domain": [2]},
-                {"name": "box_a_y_end", "domain": [2]},
-                {"name": "box_b_x_start", "domain": [0, 1, 2]},
-                {"name": "box_b_x_size", "domain": [1, 2]},
-                {"name": "box_b_x_end", "domain": [1, 2, 3, 4]},
-                {"name": "box_b_y_start", "domain": [0, 1, 2]},
-                {"name": "box_b_y_size", "domain": [1, 2]},
-                {"name": "box_b_y_end", "domain": [1, 2, 3, 4]},
-            ],
-            "constraints": [
-                {
-                    "kind": "no_overlap_2d_variable",
-                    "rectangles": [
-                        {
-                            "x_start": 0,
-                            "x_size": 1,
-                            "x_end": 2,
-                            "y_start": 3,
-                            "y_size": 4,
-                            "y_end": 5,
-                            "name": "box_a",
-                        },
-                        {
-                            "x_start": 6,
-                            "x_size": 7,
-                            "x_end": 8,
-                            "y_start": 9,
-                            "y_size": 10,
-                            "y_end": 11,
-                            "name": "box_b",
-                        },
-                    ],
-                },
-            ],
-            "objective": {
-                "sense": "min",
-                "terms": [
-                    {"var": 6, "coeff": 10},
-                    {"var": 9, "coeff": 1},
-                    {"var": 7, "coeff": 1},
-                    {"var": 10, "coeff": 1},
-                ],
-            },
-        })
-        .to_string();
+        let variable_no_overlap_2d_json =
+            cp_sat_model_to_reference_json_string(&variable_no_overlap_2d_model);
         let value = self.run_cp_sat_rust_json(&["--solver", "auto"], &variable_no_overlap_2d_json);
         let variable_no_overlap_2d_reference: CpReference =
             serde_json::from_value(value).expect("parse variable no-overlap-2d CP reference");
@@ -22767,51 +22165,8 @@ impl Driver {
         };
         let variable_cumulative_internal =
             solve_cp_model(&variable_cumulative_model, CpSolveOptions::default());
-        let variable_cumulative_json = serde_json::json!({
-            "variables": [
-                {"name": "task_a_start", "domain": [0]},
-                {"name": "task_a_duration", "domain": [3]},
-                {"name": "task_a_end", "domain": [3]},
-                {"name": "task_a_demand", "domain": [2]},
-                {"name": "task_b_start", "domain": [0, 1, 2, 3]},
-                {"name": "task_b_duration", "domain": [1, 2]},
-                {"name": "task_b_end", "domain": [1, 2, 3, 4, 5]},
-                {"name": "task_b_demand", "domain": [1, 2]},
-                {"name": "capacity", "domain": [3, 4]},
-            ],
-            "constraints": [
-                {
-                    "kind": "cumulative_variable",
-                    "capacity": 8,
-                    "intervals": [
-                        {
-                            "start": 0,
-                            "duration": 1,
-                            "end": 2,
-                            "demand": 3,
-                            "name": "task_a",
-                        },
-                        {
-                            "start": 4,
-                            "duration": 5,
-                            "end": 6,
-                            "demand": 7,
-                            "name": "task_b",
-                        },
-                    ],
-                },
-            ],
-            "objective": {
-                "sense": "min",
-                "terms": [
-                    {"var": 8, "coeff": 100},
-                    {"var": 4, "coeff": 1},
-                    {"var": 5, "coeff": 1},
-                    {"var": 7, "coeff": 1},
-                ],
-            },
-        })
-        .to_string();
+        let variable_cumulative_json =
+            cp_sat_model_to_reference_json_string(&variable_cumulative_model);
         let value = self.run_cp_sat_rust_json(&["--solver", "auto"], &variable_cumulative_json);
         let variable_cumulative_reference: CpReference =
             serde_json::from_value(value).expect("parse variable cumulative CP reference");
@@ -23241,57 +22596,7 @@ impl Driver {
         };
         let enforced_bool_internal =
             solve_cp_model(&enforced_bool_model, CpSolveOptions::default());
-        let enforced_bool_json = serde_json::json!({
-            "variables": [
-                {"name": "active_gate", "domain": [0, 1]},
-                {"name": "inactive_gate", "domain": [0, 1]},
-                {"name": "x", "domain": [0, 1]},
-                {"name": "y", "domain": [0, 1]},
-                {"name": "inactive_x", "domain": [0, 1]},
-                {"name": "inactive_y", "domain": [0, 1]},
-            ],
-            "constraints": [
-                {
-                    "kind": "bool_or",
-                    "literals": [{"var": 0, "positive": true}],
-                },
-                {
-                    "kind": "bool_or",
-                    "literals": [{"var": 1, "positive": false}],
-                },
-                {
-                    "kind": "enforced_bool_or",
-                    "enforcement": [{"var": 0, "positive": true}],
-                    "literals": [
-                        {"var": 2, "positive": true},
-                        {"var": 3, "positive": true},
-                    ],
-                },
-                {
-                    "kind": "enforced_bool_and",
-                    "enforcement": [{"var": 0, "positive": true}],
-                    "literals": [{"var": 3, "positive": true}],
-                },
-                {
-                    "kind": "enforced_bool_and",
-                    "enforcement": [{"var": 1, "positive": true}],
-                    "literals": [
-                        {"var": 4, "positive": true},
-                        {"var": 5, "positive": true},
-                    ],
-                },
-            ],
-            "objective": {
-                "sense": "min",
-                "terms": [
-                    {"var": 2, "coeff": 1},
-                    {"var": 3, "coeff": 1},
-                    {"var": 4, "coeff": 1},
-                    {"var": 5, "coeff": 1},
-                ],
-            },
-        })
-        .to_string();
+        let enforced_bool_json = cp_sat_model_to_reference_json_string(&enforced_bool_model);
         let value = self.run_cp_sat_rust_json(&["--solver", "auto"], &enforced_bool_json);
         let enforced_bool_reference: CpReference =
             serde_json::from_value(value).expect("parse enforced-bool CP reference");
@@ -23423,61 +22728,7 @@ impl Driver {
             }),
         };
         let at_least_one_internal = solve_cp_model(&at_least_one_model, CpSolveOptions::default());
-        let at_least_one_json = serde_json::json!({
-            "variables": [
-                {"name": "active_gate", "domain": [0, 1]},
-                {"name": "inactive_gate", "domain": [0, 1]},
-                {"name": "x", "domain": [0, 1]},
-                {"name": "y", "domain": [0, 1]},
-                {"name": "z", "domain": [0, 1]},
-                {"name": "required", "domain": [0, 1]},
-                {"name": "inactive_x", "domain": [0, 1]},
-                {"name": "inactive_y", "domain": [0, 1]},
-            ],
-            "constraints": [
-                {
-                    "kind": "bool_or",
-                    "literals": [{"var": 0, "positive": true}],
-                },
-                {
-                    "kind": "bool_or",
-                    "literals": [{"var": 1, "positive": false}],
-                },
-                {
-                    "kind": "at_least_one",
-                    "literals": [{"var": 5, "positive": true}],
-                },
-                {
-                    "kind": "enforced_at_least_one",
-                    "enforcement": [{"var": 0, "positive": true}],
-                    "literals": [
-                        {"var": 2, "positive": true},
-                        {"var": 3, "positive": true},
-                        {"var": 4, "positive": true},
-                    ],
-                },
-                {
-                    "kind": "enforced_at_least_one",
-                    "enforcement": [{"var": 1, "positive": true}],
-                    "literals": [
-                        {"var": 6, "positive": true},
-                        {"var": 7, "positive": true},
-                    ],
-                },
-            ],
-            "objective": {
-                "sense": "min",
-                "terms": [
-                    {"var": 2, "coeff": 3},
-                    {"var": 3, "coeff": 2},
-                    {"var": 4, "coeff": 1},
-                    {"var": 5, "coeff": 1},
-                    {"var": 6, "coeff": 1},
-                    {"var": 7, "coeff": 1},
-                ],
-            },
-        })
-        .to_string();
+        let at_least_one_json = cp_sat_model_to_reference_json_string(&at_least_one_model);
         let value = self.run_cp_sat_rust_json(&["--solver", "auto"], &at_least_one_json);
         let at_least_one_reference: CpReference =
             serde_json::from_value(value).expect("parse at-least-one CP reference");
@@ -23577,52 +22828,8 @@ impl Driver {
         };
         let enforced_linear_domain_internal =
             solve_cp_model(&enforced_linear_domain_model, CpSolveOptions::default());
-        let enforced_linear_domain_json = serde_json::json!({
-            "variables": [
-                {"name": "active_gate", "domain": [0, 1]},
-                {"name": "inactive_gate", "domain": [0, 1]},
-                {"name": "x", "domain": [0, 1, 2, 3, 4]},
-                {"name": "y", "domain": [0, 1, 2, 3, 4]},
-                {"name": "free", "domain": [0, 1, 2]},
-            ],
-            "constraints": [
-                {
-                    "kind": "bool_or",
-                    "literals": [{"var": 0, "positive": true}],
-                },
-                {
-                    "kind": "bool_or",
-                    "literals": [{"var": 1, "positive": false}],
-                },
-                {
-                    "kind": "enforced_linear_domain",
-                    "enforcement": [{"var": 0, "positive": true}],
-                    "terms": [
-                        {"var": 2, "coeff": 1},
-                        {"var": 3, "coeff": 1},
-                    ],
-                    "intervals": [
-                        {"lb": 3, "ub": 3},
-                        {"lb": 7, "ub": 7},
-                    ],
-                },
-                {
-                    "kind": "enforced_linear_domain",
-                    "enforcement": [{"var": 1, "positive": true}],
-                    "terms": [{"var": 4, "coeff": 1}],
-                    "intervals": [{"lb": 2, "ub": 2}],
-                },
-            ],
-            "objective": {
-                "sense": "min",
-                "terms": [
-                    {"var": 2, "coeff": 10},
-                    {"var": 3, "coeff": 1},
-                    {"var": 4, "coeff": 1},
-                ],
-            },
-        })
-        .to_string();
+        let enforced_linear_domain_json =
+            cp_sat_model_to_reference_json_string(&enforced_linear_domain_model);
         let value = self.run_cp_sat_rust_json(&["--solver", "auto"], &enforced_linear_domain_json);
         let enforced_linear_domain_reference: CpReference =
             serde_json::from_value(value).expect("parse enforced-linear-domain CP reference");
@@ -23777,70 +22984,8 @@ impl Driver {
         };
         let enforced_cardinality_internal =
             solve_cp_model(&enforced_cardinality_model, CpSolveOptions::default());
-        let enforced_cardinality_json = serde_json::json!({
-            "variables": [
-                {"name": "active_gate", "domain": [0, 1]},
-                {"name": "inactive_gate", "domain": [0, 1]},
-                {"name": "x", "domain": [0, 1]},
-                {"name": "y", "domain": [0, 1]},
-                {"name": "z", "domain": [0, 1]},
-                {"name": "inactive_x", "domain": [0, 1]},
-                {"name": "inactive_y", "domain": [0, 1]},
-            ],
-            "constraints": [
-                {
-                    "kind": "bool_or",
-                    "literals": [{"var": 0, "positive": true}],
-                },
-                {
-                    "kind": "bool_or",
-                    "literals": [{"var": 1, "positive": false}],
-                },
-                {
-                    "kind": "enforced_exactly_one",
-                    "enforcement": [{"var": 0, "positive": true}],
-                    "literals": [
-                        {"var": 2, "positive": true},
-                        {"var": 3, "positive": true},
-                    ],
-                },
-                {
-                    "kind": "enforced_bool_xor",
-                    "enforcement": [{"var": 0, "positive": true}],
-                    "literals": [
-                        {"var": 3, "positive": true},
-                        {"var": 4, "positive": true},
-                    ],
-                },
-                {
-                    "kind": "enforced_at_most_one",
-                    "enforcement": [{"var": 0, "positive": true}],
-                    "literals": [
-                        {"var": 2, "positive": true},
-                        {"var": 4, "positive": true},
-                    ],
-                },
-                {
-                    "kind": "enforced_exactly_one",
-                    "enforcement": [{"var": 1, "positive": true}],
-                    "literals": [
-                        {"var": 5, "positive": true},
-                        {"var": 6, "positive": true},
-                    ],
-                },
-            ],
-            "objective": {
-                "sense": "min",
-                "terms": [
-                    {"var": 2, "coeff": 1},
-                    {"var": 3, "coeff": 1},
-                    {"var": 4, "coeff": 1},
-                    {"var": 5, "coeff": 1},
-                    {"var": 6, "coeff": 1},
-                ],
-            },
-        })
-        .to_string();
+        let enforced_cardinality_json =
+            cp_sat_model_to_reference_json_string(&enforced_cardinality_model);
         let value = self.run_cp_sat_rust_json(&["--solver", "auto"], &enforced_cardinality_json);
         let enforced_cardinality_reference: CpReference =
             serde_json::from_value(value).expect("parse enforced-cardinality CP reference");
@@ -23947,54 +23092,7 @@ impl Driver {
         };
         let enforced_table_internal =
             solve_cp_model(&enforced_table_model, CpSolveOptions::default());
-        let enforced_table_json = serde_json::json!({
-            "variables": [
-                {"name": "active_gate", "domain": [0, 1]},
-                {"name": "inactive_gate", "domain": [0, 1]},
-                {"name": "x", "domain": [0, 1]},
-                {"name": "y", "domain": [0, 1]},
-                {"name": "inactive_x", "domain": [0, 1]},
-                {"name": "inactive_y", "domain": [0, 1]},
-            ],
-            "constraints": [
-                {
-                    "kind": "bool_or",
-                    "literals": [{"var": 0, "positive": true}],
-                },
-                {
-                    "kind": "bool_or",
-                    "literals": [{"var": 1, "positive": false}],
-                },
-                {
-                    "kind": "enforced_allowed_assignments",
-                    "enforcement": [{"var": 0, "positive": true}],
-                    "vars": [2, 3],
-                    "tuples": [[0, 1], [1, 0]],
-                },
-                {
-                    "kind": "enforced_forbidden_assignments",
-                    "enforcement": [{"var": 0, "positive": true}],
-                    "vars": [2, 3],
-                    "tuples": [[0, 1]],
-                },
-                {
-                    "kind": "enforced_forbidden_assignments",
-                    "enforcement": [{"var": 1, "positive": true}],
-                    "vars": [4, 5],
-                    "tuples": [[0, 0]],
-                },
-            ],
-            "objective": {
-                "sense": "min",
-                "terms": [
-                    {"var": 2, "coeff": 1},
-                    {"var": 3, "coeff": 1},
-                    {"var": 4, "coeff": 1},
-                    {"var": 5, "coeff": 1},
-                ],
-            },
-        })
-        .to_string();
+        let enforced_table_json = cp_sat_model_to_reference_json_string(&enforced_table_model);
         let value = self.run_cp_sat_rust_json(&["--solver", "auto"], &enforced_table_json);
         let enforced_table_reference: CpReference =
             serde_json::from_value(value).expect("parse enforced-table CP reference");
@@ -24388,19 +23486,7 @@ impl Driver {
             objective: None,
         };
         let feasible_internal = solve_cp_model(&feasible_model, CpSolveOptions::default());
-        let feasible_json = serde_json::json!({
-            "variables": [{"name": "x", "domain": [0, 1]}],
-            "constraints": [
-                {
-                    "kind": "linear",
-                    "terms": [{"var": 0, "coeff": 1}],
-                    "sense": "ge",
-                    "rhs": 1,
-                },
-            ],
-            "objective": serde_json::Value::Null,
-        })
-        .to_string();
+        let feasible_json = cp_sat_model_to_reference_json_string(&feasible_model);
         let value = self.run_cp_sat_rust_json(&["--solver", "auto"], &feasible_json);
         let feasible_reference: CpReference =
             serde_json::from_value(value).expect("parse feasible CP reference");
@@ -24444,25 +23530,7 @@ impl Driver {
             objective: None,
         };
         let infeasible_internal = solve_cp_model(&infeasible_model, CpSolveOptions::default());
-        let infeasible_json = serde_json::json!({
-            "variables": [{"name": "x", "domain": [0, 1]}],
-            "constraints": [
-                {
-                    "kind": "linear",
-                    "terms": [{"var": 0, "coeff": 1}],
-                    "sense": "eq",
-                    "rhs": 0,
-                },
-                {
-                    "kind": "linear",
-                    "terms": [{"var": 0, "coeff": 1}],
-                    "sense": "eq",
-                    "rhs": 1,
-                },
-            ],
-            "objective": serde_json::Value::Null,
-        })
-        .to_string();
+        let infeasible_json = cp_sat_model_to_reference_json_string(&infeasible_model);
         let value = self.run_cp_sat_rust_json(&["--solver", "auto"], &infeasible_json);
         let infeasible_reference: CpReference =
             serde_json::from_value(value).expect("parse infeasible CP reference");

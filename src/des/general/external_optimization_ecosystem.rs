@@ -16,6 +16,9 @@ use std::time::Instant;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExternalOptimizationEcosystem {
     Java,
+    Python,
+    Julia,
+    Native,
     Rust,
 }
 
@@ -23,6 +26,9 @@ impl ExternalOptimizationEcosystem {
     pub fn as_str(self) -> &'static str {
         match self {
             ExternalOptimizationEcosystem::Java => "java",
+            ExternalOptimizationEcosystem::Python => "python",
+            ExternalOptimizationEcosystem::Julia => "julia",
+            ExternalOptimizationEcosystem::Native => "native",
             ExternalOptimizationEcosystem::Rust => "rust",
         }
     }
@@ -35,11 +41,26 @@ pub enum ExternalOptimizationTool {
     JaCoP,
     IbmCpOptimizer,
     OptaPlanner,
+    Timefold,
     JMetal,
     MoeaFramework,
     Ecj,
     OjAlgo,
     OrToolsJava,
+    Pyomo,
+    Pulp,
+    Cvxpy,
+    Cvxopt,
+    PyScipOpt,
+    PythonMip,
+    GurobiPy,
+    Docplex,
+    OrToolsPython,
+    ScipyOptimize,
+    Jump,
+    Ampl,
+    Gams,
+    Hexaly,
     GoodLp,
     LpModeler,
     RustLinprog,
@@ -57,11 +78,26 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::JaCoP,
             ExternalOptimizationTool::IbmCpOptimizer,
             ExternalOptimizationTool::OptaPlanner,
+            ExternalOptimizationTool::Timefold,
             ExternalOptimizationTool::JMetal,
             ExternalOptimizationTool::MoeaFramework,
             ExternalOptimizationTool::Ecj,
             ExternalOptimizationTool::OjAlgo,
             ExternalOptimizationTool::OrToolsJava,
+            ExternalOptimizationTool::Pyomo,
+            ExternalOptimizationTool::Pulp,
+            ExternalOptimizationTool::Cvxpy,
+            ExternalOptimizationTool::Cvxopt,
+            ExternalOptimizationTool::PyScipOpt,
+            ExternalOptimizationTool::PythonMip,
+            ExternalOptimizationTool::GurobiPy,
+            ExternalOptimizationTool::Docplex,
+            ExternalOptimizationTool::OrToolsPython,
+            ExternalOptimizationTool::ScipyOptimize,
+            ExternalOptimizationTool::Jump,
+            ExternalOptimizationTool::Ampl,
+            ExternalOptimizationTool::Gams,
+            ExternalOptimizationTool::Hexaly,
             ExternalOptimizationTool::GoodLp,
             ExternalOptimizationTool::LpModeler,
             ExternalOptimizationTool::RustLinprog,
@@ -79,11 +115,26 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::JaCoP => "jacop",
             ExternalOptimizationTool::IbmCpOptimizer => "ibm-cp-optimizer",
             ExternalOptimizationTool::OptaPlanner => "optaplanner",
+            ExternalOptimizationTool::Timefold => "timefold",
             ExternalOptimizationTool::JMetal => "jmetal",
             ExternalOptimizationTool::MoeaFramework => "moea-framework",
             ExternalOptimizationTool::Ecj => "ecj",
             ExternalOptimizationTool::OjAlgo => "ojalgo",
             ExternalOptimizationTool::OrToolsJava => "ortools-java",
+            ExternalOptimizationTool::Pyomo => "pyomo",
+            ExternalOptimizationTool::Pulp => "pulp",
+            ExternalOptimizationTool::Cvxpy => "cvxpy",
+            ExternalOptimizationTool::Cvxopt => "cvxopt",
+            ExternalOptimizationTool::PyScipOpt => "pyscipopt",
+            ExternalOptimizationTool::PythonMip => "python-mip",
+            ExternalOptimizationTool::GurobiPy => "gurobipy",
+            ExternalOptimizationTool::Docplex => "docplex",
+            ExternalOptimizationTool::OrToolsPython => "ortools-python",
+            ExternalOptimizationTool::ScipyOptimize => "scipy-optimize",
+            ExternalOptimizationTool::Jump => "jump",
+            ExternalOptimizationTool::Ampl => "ampl",
+            ExternalOptimizationTool::Gams => "gams",
+            ExternalOptimizationTool::Hexaly => "hexaly",
             ExternalOptimizationTool::GoodLp => "good-lp",
             ExternalOptimizationTool::LpModeler => "lp-modeler",
             ExternalOptimizationTool::RustLinprog => "rust-linprog",
@@ -101,11 +152,26 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::JaCoP => "JaCoP",
             ExternalOptimizationTool::IbmCpOptimizer => "IBM ILOG CP Optimizer",
             ExternalOptimizationTool::OptaPlanner => "OptaPlanner",
+            ExternalOptimizationTool::Timefold => "Timefold Solver",
             ExternalOptimizationTool::JMetal => "jMetal",
             ExternalOptimizationTool::MoeaFramework => "MOEA Framework",
             ExternalOptimizationTool::Ecj => "ECJ",
             ExternalOptimizationTool::OjAlgo => "ojAlgo",
             ExternalOptimizationTool::OrToolsJava => "Google OR-Tools Java",
+            ExternalOptimizationTool::Pyomo => "Pyomo",
+            ExternalOptimizationTool::Pulp => "PuLP",
+            ExternalOptimizationTool::Cvxpy => "CVXPY",
+            ExternalOptimizationTool::Cvxopt => "CVXOPT",
+            ExternalOptimizationTool::PyScipOpt => "PySCIPOpt",
+            ExternalOptimizationTool::PythonMip => "Python-MIP",
+            ExternalOptimizationTool::GurobiPy => "gurobipy",
+            ExternalOptimizationTool::Docplex => "DOcplex",
+            ExternalOptimizationTool::OrToolsPython => "Google OR-Tools Python",
+            ExternalOptimizationTool::ScipyOptimize => "SciPy optimize",
+            ExternalOptimizationTool::Jump => "JuMP",
+            ExternalOptimizationTool::Ampl => "AMPL",
+            ExternalOptimizationTool::Gams => "GAMS",
+            ExternalOptimizationTool::Hexaly => "Hexaly Optimizer",
             ExternalOptimizationTool::GoodLp => "good_lp",
             ExternalOptimizationTool::LpModeler => "lp-modeler",
             ExternalOptimizationTool::RustLinprog => "rust-linprog",
@@ -123,11 +189,26 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::JaCoP
             | ExternalOptimizationTool::IbmCpOptimizer
             | ExternalOptimizationTool::OptaPlanner
+            | ExternalOptimizationTool::Timefold
             | ExternalOptimizationTool::JMetal
             | ExternalOptimizationTool::MoeaFramework
             | ExternalOptimizationTool::Ecj
             | ExternalOptimizationTool::OjAlgo
             | ExternalOptimizationTool::OrToolsJava => ExternalOptimizationEcosystem::Java,
+            ExternalOptimizationTool::Pyomo
+            | ExternalOptimizationTool::Pulp
+            | ExternalOptimizationTool::Cvxpy
+            | ExternalOptimizationTool::Cvxopt
+            | ExternalOptimizationTool::PyScipOpt
+            | ExternalOptimizationTool::PythonMip
+            | ExternalOptimizationTool::GurobiPy
+            | ExternalOptimizationTool::Docplex
+            | ExternalOptimizationTool::OrToolsPython
+            | ExternalOptimizationTool::ScipyOptimize => ExternalOptimizationEcosystem::Python,
+            ExternalOptimizationTool::Jump => ExternalOptimizationEcosystem::Julia,
+            ExternalOptimizationTool::Ampl
+            | ExternalOptimizationTool::Gams
+            | ExternalOptimizationTool::Hexaly => ExternalOptimizationEcosystem::Native,
             ExternalOptimizationTool::GoodLp
             | ExternalOptimizationTool::LpModeler
             | ExternalOptimizationTool::RustLinprog
@@ -145,11 +226,26 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::JaCoP => "JACOP_CLASSPATH",
             ExternalOptimizationTool::IbmCpOptimizer => "IBM_CP_OPTIMIZER_CLASSPATH",
             ExternalOptimizationTool::OptaPlanner => "OPTAPLANNER_CLASSPATH",
+            ExternalOptimizationTool::Timefold => "TIMEFOLD_CLASSPATH",
             ExternalOptimizationTool::JMetal => "JMETAL_CLASSPATH",
             ExternalOptimizationTool::MoeaFramework => "MOEA_FRAMEWORK_CLASSPATH",
             ExternalOptimizationTool::Ecj => "ECJ_CLASSPATH",
             ExternalOptimizationTool::OjAlgo => "OJALGO_CLASSPATH",
             ExternalOptimizationTool::OrToolsJava => "ORTOOLS_JAVA_CLASSPATH",
+            ExternalOptimizationTool::Pyomo => "PYOMO_PYTHON",
+            ExternalOptimizationTool::Pulp => "PULP_PYTHON",
+            ExternalOptimizationTool::Cvxpy => "CVXPY_PYTHON",
+            ExternalOptimizationTool::Cvxopt => "CVXOPT_PYTHON",
+            ExternalOptimizationTool::PyScipOpt => "PYSCIPOPT_PYTHON",
+            ExternalOptimizationTool::PythonMip => "PYTHON_MIP_PYTHON",
+            ExternalOptimizationTool::GurobiPy => "GUROBIPY_PYTHON",
+            ExternalOptimizationTool::Docplex => "DOCPLEX_PYTHON",
+            ExternalOptimizationTool::OrToolsPython => "ORTOOLS_PYTHON_PYTHON",
+            ExternalOptimizationTool::ScipyOptimize => "SCIPY_OPTIMIZE_PYTHON",
+            ExternalOptimizationTool::Jump => "JUMP_JULIA",
+            ExternalOptimizationTool::Ampl => "AMPL_DIR",
+            ExternalOptimizationTool::Gams => "GAMS_DIR",
+            ExternalOptimizationTool::Hexaly => "HEXALY_DIR",
             ExternalOptimizationTool::GoodLp => "GOOD_LP_CARGO_MANIFEST",
             ExternalOptimizationTool::LpModeler => "LP_MODELER_CARGO_MANIFEST",
             ExternalOptimizationTool::RustLinprog => "RUST_LINPROG_CARGO_MANIFEST",
@@ -169,6 +265,9 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::OptaPlanner => {
                 &["org.optaplanner.core.api.solver.SolverFactory"]
             }
+            ExternalOptimizationTool::Timefold => {
+                &["ai.timefold.solver.core.api.solver.SolverFactory"]
+            }
             ExternalOptimizationTool::JMetal => &["org.uma.jmetal.algorithm.Algorithm"],
             ExternalOptimizationTool::MoeaFramework => &["org.moeaframework.Executor"],
             ExternalOptimizationTool::Ecj => &["ec.Evolve"],
@@ -177,6 +276,31 @@ impl ExternalOptimizationTool {
                 "com.google.ortools.Loader",
                 "com.google.ortools.sat.CpModel",
             ],
+            _ => &[],
+        }
+    }
+
+    pub fn python_modules(self) -> &'static [&'static str] {
+        match self {
+            ExternalOptimizationTool::Pyomo => &["pyomo.environ"],
+            ExternalOptimizationTool::Pulp => &["pulp"],
+            ExternalOptimizationTool::Cvxpy => &["cvxpy"],
+            ExternalOptimizationTool::Cvxopt => &["cvxopt"],
+            ExternalOptimizationTool::PyScipOpt => &["pyscipopt"],
+            ExternalOptimizationTool::PythonMip => &["mip"],
+            ExternalOptimizationTool::GurobiPy => &["gurobipy"],
+            ExternalOptimizationTool::Docplex => &["docplex.mp.model"],
+            ExternalOptimizationTool::OrToolsPython => &["ortools.sat.python.cp_model"],
+            ExternalOptimizationTool::ScipyOptimize => &["scipy.optimize"],
+            _ => &[],
+        }
+    }
+
+    pub fn native_command_aliases(self) -> &'static [&'static str] {
+        match self {
+            ExternalOptimizationTool::Ampl => &["ampl"],
+            ExternalOptimizationTool::Gams => &["gams"],
+            ExternalOptimizationTool::Hexaly => &["hexaly", "localsolver"],
             _ => &[],
         }
     }
@@ -237,6 +361,9 @@ pub fn probe_external_optimization_tool(
 ) -> ExternalOptimizationProbe {
     match tool.ecosystem() {
         ExternalOptimizationEcosystem::Java => probe_java_tool(tool),
+        ExternalOptimizationEcosystem::Python => probe_python_tool(tool),
+        ExternalOptimizationEcosystem::Julia => probe_julia_tool(tool),
+        ExternalOptimizationEcosystem::Native => probe_native_tool(tool),
         ExternalOptimizationEcosystem::Rust => probe_rust_tool(tool),
     }
 }
@@ -327,6 +454,136 @@ fn probe_java_tool(tool: ExternalOptimizationTool) -> ExternalOptimizationProbe 
             tool.display_name(),
             tool.java_probe_classes(),
             last_error
+        ),
+    )
+}
+
+fn probe_python_tool(tool: ExternalOptimizationTool) -> ExternalOptimizationProbe {
+    let t0 = Instant::now();
+    let env_var = tool.env_var();
+    let python = env::var_os(env_var)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .and_then(|path| find_command_path(&path))
+        .or_else(|| find_first_command(&["python3", "python"]));
+    let Some(python) = python else {
+        return probe_result(
+            tool,
+            ExternalOptimizationProbeStatus::NotConfigured,
+            None,
+            env_var,
+            None,
+            elapsed_ms(t0),
+            format!(
+                "set {env_var} to a Python interpreter with {} installed",
+                tool.display_name()
+            ),
+        );
+    };
+    for module in tool.python_modules() {
+        match Command::new(&python)
+            .arg("-c")
+            .arg(format!("import {module}"))
+            .output()
+        {
+            Ok(output) if output.status.success() => {
+                return probe_result(
+                    tool,
+                    ExternalOptimizationProbeStatus::Ready,
+                    Some(python),
+                    env_var,
+                    Some(module.to_string()),
+                    elapsed_ms(t0),
+                    format!(
+                        "Python interpreter can import module '{module}' for {}",
+                        tool.display_name()
+                    ),
+                );
+            }
+            Ok(_) | Err(_) => {}
+        }
+    }
+    probe_result(
+        tool,
+        ExternalOptimizationProbeStatus::NotConfigured,
+        Some(python),
+        env_var,
+        None,
+        elapsed_ms(t0),
+        format!(
+            "{} Python modules {:?} are not importable; set {env_var}",
+            tool.display_name(),
+            tool.python_modules()
+        ),
+    )
+}
+
+fn probe_julia_tool(tool: ExternalOptimizationTool) -> ExternalOptimizationProbe {
+    let t0 = Instant::now();
+    let env_var = tool.env_var();
+    if let Some(project) = env::var_os(env_var).filter(|value| !value.is_empty()) {
+        return probe_result(
+            tool,
+            ExternalOptimizationProbeStatus::Ready,
+            find_first_command(&["julia"]),
+            env_var,
+            Some(project.to_string_lossy().to_string()),
+            elapsed_ms(t0),
+            format!(
+                "configured Julia project/runtime for {}",
+                tool.display_name()
+            ),
+        );
+    }
+    probe_result(
+        tool,
+        ExternalOptimizationProbeStatus::NotConfigured,
+        find_first_command(&["julia"]),
+        env_var,
+        None,
+        elapsed_ms(t0),
+        format!(
+            "set {env_var} to a Julia project or environment with {}",
+            tool.display_name()
+        ),
+    )
+}
+
+fn probe_native_tool(tool: ExternalOptimizationTool) -> ExternalOptimizationProbe {
+    let t0 = Instant::now();
+    let env_var = tool.env_var();
+    if let Some(dir) = env::var_os(env_var).filter(|value| !value.is_empty()) {
+        return probe_result(
+            tool,
+            ExternalOptimizationProbeStatus::Ready,
+            find_first_command(tool.native_command_aliases()),
+            env_var,
+            Some(dir.to_string_lossy().to_string()),
+            elapsed_ms(t0),
+            format!("configured native installation for {}", tool.display_name()),
+        );
+    }
+    if let Some(command) = find_first_command(tool.native_command_aliases()) {
+        return probe_result(
+            tool,
+            ExternalOptimizationProbeStatus::Ready,
+            Some(command),
+            env_var,
+            None,
+            elapsed_ms(t0),
+            format!("found native command for {}", tool.display_name()),
+        );
+    }
+    probe_result(
+        tool,
+        ExternalOptimizationProbeStatus::NotConfigured,
+        None,
+        env_var,
+        None,
+        elapsed_ms(t0),
+        format!(
+            "set {env_var} to a local installation directory for {}",
+            tool.display_name()
         ),
     )
 }
@@ -457,6 +714,14 @@ fn find_first_command(aliases: &[&str]) -> Option<PathBuf> {
     aliases.iter().find_map(|alias| find_command(alias))
 }
 
+fn find_command_path(path: &Path) -> Option<PathBuf> {
+    if path.components().count() > 1 {
+        executable_file(path).then(|| path.to_path_buf())
+    } else {
+        path.to_str().and_then(find_command)
+    }
+}
+
 fn find_command(alias: &str) -> Option<PathBuf> {
     let alias_path = Path::new(alias);
     if alias_path.components().count() > 1 {
@@ -481,10 +746,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ecosystem_tool_metadata_covers_java_and_rust() {
+    fn ecosystem_tool_metadata_covers_supported_languages() {
+        assert_eq!(ExternalOptimizationTool::all().len(), 32);
         assert_eq!(
             ExternalOptimizationTool::ChocoSolver.ecosystem(),
             ExternalOptimizationEcosystem::Java
+        );
+        assert_eq!(
+            ExternalOptimizationTool::Pyomo.ecosystem(),
+            ExternalOptimizationEcosystem::Python
+        );
+        assert_eq!(
+            ExternalOptimizationTool::Jump.ecosystem(),
+            ExternalOptimizationEcosystem::Julia
+        );
+        assert_eq!(
+            ExternalOptimizationTool::Ampl.ecosystem(),
+            ExternalOptimizationEcosystem::Native
         );
         assert_eq!(
             ExternalOptimizationTool::GoodLp.ecosystem(),
@@ -494,12 +772,24 @@ mod tests {
             ExternalOptimizationTool::ChocoSolver.env_var(),
             "CHOCO_SOLVER_CLASSPATH"
         );
+        assert_eq!(ExternalOptimizationTool::Cvxpy.env_var(), "CVXPY_PYTHON");
+        assert_eq!(ExternalOptimizationTool::Hexaly.env_var(), "HEXALY_DIR");
         assert!(ExternalOptimizationTool::OjAlgo
             .java_probe_classes()
             .contains(&"org.ojalgo.optimisation.ExpressionsBasedModel"));
+        assert!(ExternalOptimizationTool::Timefold
+            .java_probe_classes()
+            .contains(&"ai.timefold.solver.core.api.solver.SolverFactory"));
+        assert!(ExternalOptimizationTool::GurobiPy
+            .python_modules()
+            .contains(&"gurobipy"));
+        assert!(ExternalOptimizationTool::Hexaly
+            .native_command_aliases()
+            .contains(&"hexaly"));
         assert!(ExternalOptimizationTool::HighsRust
             .rust_dependency_names()
             .contains(&"highs-sys"));
+        assert_eq!(ExternalOptimizationEcosystem::Python.as_str(), "python");
     }
 
     #[test]

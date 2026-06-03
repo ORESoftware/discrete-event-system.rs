@@ -67,6 +67,7 @@ use crate::des::general::external_nonlinear_reference::{
     ExternalNonlinearBenchmarkObjective, ExternalNonlinearReferenceOptions,
     ExternalNonlinearReferenceStatus,
 };
+use crate::des::general::external_optimization_ecosystem as legacy_external_optimization_ecosystem;
 use crate::des::general::external_optimization_tools::{
     external_optimization_comparison_report_to_json, external_optimization_tool_specs,
     external_optimization_tools, probe_external_optimization_tool,
@@ -5252,6 +5253,27 @@ impl Driver {
                 "tools={} specs={}",
                 external_optimization_tools().len(),
                 specs.len()
+            ),
+        );
+        let legacy_tools = legacy_external_optimization_ecosystem::ExternalOptimizationTool::all();
+        self.check(
+            "External optimization legacy probe registry synchronized",
+            legacy_tools.len() == external_optimization_tools().len()
+                && legacy_tools
+                    .iter()
+                    .filter(|tool| {
+                        tool.ecosystem()
+                            == legacy_external_optimization_ecosystem::ExternalOptimizationEcosystem::Python
+                    })
+                    .count()
+                    == 10
+                && legacy_tools
+                    .iter()
+                    .any(|tool| tool.as_str() == "hexaly" && tool.ecosystem().as_str() == "native"),
+            format!(
+                "legacy_tools={} current_tools={}",
+                legacy_tools.len(),
+                external_optimization_tools().len()
             ),
         );
         let java_count = specs

@@ -175,6 +175,19 @@ const OUTPUT_VALIDATOR_CAPS: &[ExternalValidationCapability] =
 
 const EMPTY_ALIASES: &[&str] = &[];
 const MZN_FORMATS: &[&str] = &["mzn", "dzn", "fzn", "ozn"];
+const CP_MODEL_FORMATS: &[&str] = &[
+    "mzn",
+    "dzn",
+    "fzn",
+    "essence",
+    "essence-param",
+    "eprime",
+    "xcsp3",
+    "xml",
+    "py",
+    "json",
+];
+const ASP_FORMATS: &[&str] = &["lp", "asp", "clingo", "dlv", "json"];
 const SMT_FORMATS: &[&str] = &["smt2"];
 const SAT_FORMATS: &[&str] = &["cnf", "wcnf"];
 const PROOF_FORMATS: &[&str] = &["drat", "lrat", "grat"];
@@ -281,6 +294,98 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         notes: "Lazy-clause-generation FlatZinc backend for CP cross-checks",
     },
     ExternalValidationToolSpec {
+        id: "cpmpy",
+        display_name: "CPMpy",
+        env_key: "CPMPY",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
+        command_aliases: &["cpmpy-adapter", "cpm-py-adapter"],
+        capabilities: MINIZINC_CAPS,
+        input_formats: CP_MODEL_FORMATS,
+        notes: "Python CP modeling layer for solver-agnostic constraint model cross-checks",
+    },
+    ExternalValidationToolSpec {
+        id: "pycsp3",
+        display_name: "PyCSP3",
+        env_key: "PYCSP3",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
+        command_aliases: &["pycsp3", "pycsp3-adapter"],
+        capabilities: MINIZINC_CAPS,
+        input_formats: CP_MODEL_FORMATS,
+        notes: "Python/XCSP3 modeling layer for constraint-problem validation",
+    },
+    ExternalValidationToolSpec {
+        id: "conjure",
+        display_name: "Conjure",
+        env_key: "CONJURE",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["conjure"],
+        capabilities: MINIZINC_CAPS,
+        input_formats: CP_MODEL_FORMATS,
+        notes: "Essence constraint-modeling frontend for generating independent solver models",
+    },
+    ExternalValidationToolSpec {
+        id: "savile-row",
+        display_name: "Savile Row",
+        env_key: "SAVILE_ROW",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::Java,
+        artifact_kind: ExternalValidationArtifactKind::JavaClasspath,
+        command_aliases: &["savilerow", "savile-row", "SavileRow"],
+        capabilities: MINIZINC_CAPS,
+        input_formats: CP_MODEL_FORMATS,
+        notes: "Constraint-model reformulation tool for Essence Prime and SAT/SMT/MIP backends",
+    },
+    ExternalValidationToolSpec {
+        id: "picat",
+        display_name: "Picat",
+        env_key: "PICAT",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["picat"],
+        capabilities: MINIZINC_CAPS,
+        input_formats: CP_MODEL_FORMATS,
+        notes: "Logic-based CP/MIP/SAT programming language for independent model checks",
+    },
+    ExternalValidationToolSpec {
+        id: "clingo",
+        display_name: "clingo",
+        env_key: "CLINGO",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["clingo"],
+        capabilities: &[
+            ExternalValidationCapability::CompileModel,
+            ExternalValidationCapability::SolveModel,
+            ExternalValidationCapability::CheckSatisfiability,
+        ],
+        input_formats: ASP_FORMATS,
+        notes: "Answer-set programming solver for combinatorial logic-model cross-checks",
+    },
+    ExternalValidationToolSpec {
+        id: "clingcon",
+        display_name: "clingcon",
+        env_key: "CLINGCON",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["clingcon"],
+        capabilities: &[
+            ExternalValidationCapability::CompileModel,
+            ExternalValidationCapability::SolveModel,
+            ExternalValidationCapability::CheckSatisfiability,
+        ],
+        input_formats: ASP_FORMATS,
+        notes: "Answer-set and finite-domain constraint solver in the Potassco ecosystem",
+    },
+    ExternalValidationToolSpec {
         id: "z3",
         display_name: "Z3",
         env_key: "Z3",
@@ -375,6 +480,42 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         capabilities: SAT_CAPS,
         input_formats: SAT_FORMATS,
         notes: "SAT solver for CNF/XOR-heavy Boolean encodings",
+    },
+    ExternalValidationToolSpec {
+        id: "sat4j",
+        display_name: "SAT4J",
+        env_key: "SAT4J",
+        family: ExternalValidationFamily::SatSolver,
+        runtime: ExternalValidationRuntime::Java,
+        artifact_kind: ExternalValidationArtifactKind::JavaClasspath,
+        command_aliases: &["sat4j", "sat4j-sat"],
+        capabilities: SAT_CAPS,
+        input_formats: SAT_FORMATS,
+        notes: "Java SAT and pseudo-Boolean solver library for JVM-side validation",
+    },
+    ExternalValidationToolSpec {
+        id: "pysat",
+        display_name: "PySAT",
+        env_key: "PYSAT",
+        family: ExternalValidationFamily::SatSolver,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
+        command_aliases: &["pysat-adapter", "python-sat-adapter"],
+        capabilities: SAT_CAPS,
+        input_formats: SAT_FORMATS,
+        notes: "Python SAT toolkit wrapping multiple SAT solvers and cardinality encodings",
+    },
+    ExternalValidationToolSpec {
+        id: "open-wbo",
+        display_name: "Open-WBO",
+        env_key: "OPEN_WBO",
+        family: ExternalValidationFamily::SatSolver,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["open-wbo", "open-wbo_static"],
+        capabilities: SAT_CAPS,
+        input_formats: SAT_FORMATS,
+        notes: "MaxSAT solver for weighted-CNF objective and feasibility cross-checks",
     },
     ExternalValidationToolSpec {
         id: "drat-trim",
@@ -1301,6 +1442,30 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         notes: "Python discrete-event simulation package",
     },
     ExternalValidationToolSpec {
+        id: "ciw",
+        display_name: "Ciw",
+        env_key: "CIW",
+        family: ExternalValidationFamily::SimulationEngine,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
+        command_aliases: &["ciw-adapter"],
+        capabilities: SIMULATION_CAPS,
+        input_formats: SIMPY_FORMATS,
+        notes: "Python queueing-network and discrete-event simulation package",
+    },
+    ExternalValidationToolSpec {
+        id: "simulus",
+        display_name: "simulus",
+        env_key: "SIMULUS",
+        family: ExternalValidationFamily::SimulationEngine,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
+        command_aliases: &["simulus-adapter"],
+        capabilities: SIMULATION_CAPS,
+        input_formats: SIMPY_FORMATS,
+        notes: "Python discrete-event simulation engine with process and event APIs",
+    },
+    ExternalValidationToolSpec {
         id: "simmer",
         display_name: "simmer",
         env_key: "SIMMER",
@@ -1323,6 +1488,30 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         capabilities: SIMULATION_CAPS,
         input_formats: JAVA_SIM_FORMATS,
         notes: "Java discrete-event simulation engine",
+    },
+    ExternalValidationToolSpec {
+        id: "desmo-j",
+        display_name: "DESMO-J",
+        env_key: "DESMO_J",
+        family: ExternalValidationFamily::SimulationEngine,
+        runtime: ExternalValidationRuntime::Java,
+        artifact_kind: ExternalValidationArtifactKind::JavaClasspath,
+        command_aliases: &["desmoj-adapter"],
+        capabilities: SIMULATION_CAPS,
+        input_formats: JAVA_SIM_FORMATS,
+        notes: "Java object-oriented discrete-event simulation framework",
+    },
+    ExternalValidationToolSpec {
+        id: "simsharp",
+        display_name: "SimSharp",
+        env_key: "SIMSHARP",
+        family: ExternalValidationFamily::SimulationEngine,
+        runtime: ExternalValidationRuntime::GenericAdapter,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["simsharp-adapter"],
+        capabilities: SIMULATION_CAPS,
+        input_formats: JAVA_SIM_FORMATS,
+        notes: ".NET discrete-event simulation adapter for cross-language queueing checks",
     },
     ExternalValidationToolSpec {
         id: "ns3",
@@ -3886,6 +4075,16 @@ pub fn external_validation_artifact_env_names(tool: &ExternalValidationToolSpec)
         "minizinc" | "flatzinc" | "minizinc-solution-checker" => {
             names.push("MINIZINC_HOME".to_string());
         }
+        "cpmpy" => names.push("CPMPY_PYTHON".to_string()),
+        "pycsp3" => names.push("PYCSP3_PYTHON".to_string()),
+        "conjure" => names.push("CONJURE_HOME".to_string()),
+        "savile-row" => names.push("SAVILEROW_HOME".to_string()),
+        "picat" => names.push("PICAT_HOME".to_string()),
+        "clingo" => names.push("CLINGO_HOME".to_string()),
+        "clingcon" => names.push("CLINGCON_HOME".to_string()),
+        "sat4j" => names.push("SAT4J_HOME".to_string()),
+        "pysat" => names.push("PYSAT_PYTHON".to_string()),
+        "open-wbo" => names.push("OPEN_WBO_HOME".to_string()),
         "ipopt" => names.push("IPOPT_DIR".to_string()),
         "bonmin" => names.push("BONMIN_DIR".to_string()),
         "couenne" => names.push("COUENNE_DIR".to_string()),
@@ -3903,6 +4102,10 @@ pub fn external_validation_artifact_env_names(tool: &ExternalValidationToolSpec)
         "ultimate-automizer" => names.push("ULTIMATE_HOME".to_string()),
         "sumo" => names.push("SUMO_HOME".to_string()),
         "omnetpp" => names.push("OMNETPP_ROOT".to_string()),
+        "ciw" => names.push("CIW_PYTHON".to_string()),
+        "simulus" => names.push("SIMULUS_PYTHON".to_string()),
+        "desmo-j" => names.push("DESMOJ_HOME".to_string()),
+        "simsharp" => names.push("SIMSHARP_HOME".to_string()),
         "energyplus" => names.push("ENERGYPLUS_HOME".to_string()),
         "openmodelica" => names.push("OPENMODELICAHOME".to_string()),
         "simulink" => names.push("MATLAB_ROOT".to_string()),
@@ -3934,6 +4137,16 @@ pub fn external_validation_command_dir_env_names(tool: &ExternalValidationToolSp
     }
     for name in match tool.id {
         "minizinc" | "flatzinc" | "minizinc-solution-checker" => &["MINIZINC_HOME"][..],
+        "cpmpy" => &["CPMPY_HOME", "CPMPY_DIR"],
+        "pycsp3" => &["PYCSP3_HOME", "PYCSP3_DIR"],
+        "conjure" => &["CONJURE_HOME", "CONJURE_DIR"],
+        "savile-row" => &["SAVILE_ROW_HOME", "SAVILE_ROW_DIR", "SAVILEROW_HOME"],
+        "picat" => &["PICAT_HOME", "PICAT_DIR"],
+        "clingo" => &["CLINGO_HOME", "CLINGO_DIR", "POTASSCO_HOME"],
+        "clingcon" => &["CLINGCON_HOME", "CLINGCON_DIR", "POTASSCO_HOME"],
+        "sat4j" => &["SAT4J_HOME", "SAT4J_DIR"],
+        "pysat" => &["PYSAT_HOME", "PYSAT_DIR"],
+        "open-wbo" => &["OPEN_WBO_HOME", "OPEN_WBO_DIR", "OPENWBO_HOME"],
         "tlc" => &["TLC_HOME", "TLA_TOOLS_DIR"],
         "apalache" => &["APALACHE_HOME", "APALACHE_DIR"],
         "alloy" => &["ALLOY_HOME", "ALLOY_DIR"],
@@ -3987,7 +4200,11 @@ pub fn external_validation_command_dir_env_names(tool: &ExternalValidationToolSp
         "openmodelica" => &["OPENMODELICAHOME", "OPENMODELICA_HOME"],
         "simulink" => &["MATLAB_ROOT", "MATLAB_HOME"],
         "gazebo" => &["GAZEBO_HOME", "GZ_HOME"],
+        "ciw" => &["CIW_HOME", "CIW_DIR"],
+        "simulus" => &["SIMULUS_HOME", "SIMULUS_DIR"],
         "jaamsim" => &["JAAMSIM_HOME", "JAAMSIM_DIR"],
+        "desmo-j" => &["DESMO_J_HOME", "DESMO_J_DIR", "DESMOJ_HOME"],
+        "simsharp" => &["SIMSHARP_HOME", "SIMSHARP_DIR"],
         "matsim" => &["MATSIM_HOME", "MATSIM_DIR"],
         "ptolemy-ii" => &["PTII", "PTOLEMY_HOME", "PTOLEMY_II_HOME"],
         "repast" => &["REPAST_HOME", "REPAST_DIR"],
@@ -4461,13 +4678,28 @@ mod tests {
     #[test]
     fn registry_covers_recommended_validation_layers() {
         let tools = external_validation_tool_specs();
-        assert_eq!(tools.len(), 176);
+        assert_eq!(tools.len(), 190);
         assert!(tools
             .iter()
             .any(|tool| tool.id == "minizinc" && tool.input_formats.contains(&"mzn")));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "cpmpy" && tool.family == ExternalValidationFamily::ConstraintModeling
+        }));
+        assert!(tools
+            .iter()
+            .any(|tool| { tool.id == "conjure" && tool.input_formats.contains(&"essence") }));
+        assert!(tools
+            .iter()
+            .any(|tool| { tool.id == "clingo" && tool.input_formats.contains(&"asp") }));
         assert!(tools
             .iter()
             .any(|tool| { tool.id == "z3" && tool.family == ExternalValidationFamily::SmtSolver }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "sat4j" && tool.family == ExternalValidationFamily::SatSolver
+        }));
+        assert!(tools
+            .iter()
+            .any(|tool| { tool.id == "open-wbo" && tool.input_formats.contains(&"wcnf") }));
         assert!(tools.iter().any(|tool| {
             tool.id == "drat-trim" && tool.family == ExternalValidationFamily::ProofChecker
         }));
@@ -4529,6 +4761,12 @@ mod tests {
         }));
         assert!(tools.iter().any(|tool| {
             tool.id == "agentpy" && tool.family == ExternalValidationFamily::SimulationEngine
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "ciw" && tool.family == ExternalValidationFamily::SimulationEngine
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "desmo-j" && tool.runtime == ExternalValidationRuntime::Java
         }));
         assert!(tools.iter().any(|tool| {
             tool.id == "simgrid" && tool.family == ExternalValidationFamily::SimulationEngine
@@ -4637,6 +4875,23 @@ mod tests {
         let minizinc = find_external_validation_tool("minizinc").unwrap();
         assert!(external_validation_command_dir_env_names(minizinc)
             .contains(&"MINIZINC_HOME".to_string()));
+        let cpmpy = find_external_validation_tool("cpmpy").unwrap();
+        assert_eq!(
+            external_validation_artifact_env_names(cpmpy)[0],
+            "ORES_CPMPY_PYTHON"
+        );
+        assert!(
+            external_validation_command_dir_env_names(cpmpy).contains(&"CPMPY_HOME".to_string())
+        );
+        let conjure = find_external_validation_tool("conjure").unwrap();
+        assert!(external_validation_command_dir_env_names(conjure)
+            .contains(&"ORES_CONJURE_DIR".to_string()));
+        assert!(external_validation_command_dir_env_names(conjure)
+            .contains(&"CONJURE_HOME".to_string()));
+        let open_wbo = find_external_validation_tool("open_wbo").unwrap();
+        assert_eq!(open_wbo.id, "open-wbo");
+        assert!(external_validation_command_dir_env_names(open_wbo)
+            .contains(&"OPEN_WBO_HOME".to_string()));
         let copt = find_external_validation_tool("copt").unwrap();
         assert!(external_validation_command_dir_env_names(copt).contains(&"COPT_HOME".to_string()));
         let mosek = find_external_validation_tool("mosek").unwrap();
@@ -4656,6 +4911,11 @@ mod tests {
         let jaamsim = find_external_validation_tool("jaamsim").unwrap();
         assert!(external_validation_command_dir_env_names(jaamsim)
             .contains(&"JAAMSIM_HOME".to_string()));
+        let desmoj = find_external_validation_tool("desmo_j").unwrap();
+        assert_eq!(desmoj.id, "desmo-j");
+        assert!(
+            external_validation_command_dir_env_names(desmoj).contains(&"DESMOJ_HOME".to_string())
+        );
         let proverif = find_external_validation_tool("proverif").unwrap();
         assert!(external_validation_command_dir_env_names(proverif)
             .contains(&"PROVERIF_HOME".to_string()));

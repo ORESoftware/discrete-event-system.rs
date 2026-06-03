@@ -3,8 +3,8 @@
 
 This script is intentionally small and dependency-free. It gives the Rust
 adapter runner a concrete local command for representative Java/Rust ecosystem
-families while real Choco, JaCoP, OptaPlanner, jMetal, good_lp, argmin, NLopt,
-and similar wrappers remain opt-in local executables.
+families while real Choco, JaCoP, CPMpy, clingo, Open-WBO, good_lp, argmin,
+NLopt, and similar wrappers remain opt-in local executables.
 """
 
 from __future__ import annotations
@@ -26,6 +26,16 @@ CP_TOOLS = {
     "ibm-cp-optimizer",
     "ortools-java",
     "ortools-python",
+    "cpmpy",
+    "pycsp3",
+    "conjure",
+    "savile-row",
+    "picat",
+    "clingo",
+    "clingcon",
+    "sat4j",
+    "pysat",
+    "open-wbo",
 }
 PLANNING_TOOLS = {"optaplanner", "timefold"}
 MULTIOBJECTIVE_TOOLS = {"jmetal", "moea-framework", "ecj"}

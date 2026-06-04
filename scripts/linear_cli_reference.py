@@ -1300,6 +1300,41 @@ def parse_qsopt_ex_solution(
     return status, x, fields
 
 
+def parse_qsopt_ex_basis(path: str, n: int, le_count: int, eq_count: int) -> dict[str, object]:
+    var_basis: list[Optional[str]] = [None] * n
+    row_basis: list[Optional[str]] = ["basic"] * (le_count + eq_count)
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) < 3 or parts[0].upper() not in {"XL", "XU"}:
+                continue
+            var_name, row_name = parts[1], parts[2]
+            if var_name.startswith("x") and var_name[1:].isdigit():
+                idx = int(var_name[1:])
+                if 0 <= idx < n:
+                    var_basis[idx] = "basic"
+            row_idx = _basis_row_index(row_name, le_count, eq_count)
+            if row_idx is not None:
+                row_basis[row_idx] = "at_upper"
+
+    fields: dict[str, object] = {}
+    if all(status is not None for status in var_basis):
+        fields["varBasis"] = [str(status) for status in var_basis if status is not None]
+    if all(status is not None for status in row_basis):
+        fields["rowBasis"] = [str(status) for status in row_basis if status is not None]
+    return fields
+
+
+def _basis_row_index(name: str, le_count: int, eq_count: int) -> Optional[int]:
+    if name.startswith("c") and name[1:].isdigit():
+        idx = int(name[1:])
+        return idx if 0 <= idx < le_count else None
+    if name.startswith("e") and name[1:].isdigit():
+        idx = int(name[1:])
+        return le_count + idx if 0 <= idx < eq_count else None
+    return None
+
+
 def _parse_named_value_line(line: str, n: int) -> Optional[tuple[int, float]]:
     return _parse_prefixed_value_line(line, "x", n)
 
@@ -1380,6 +1415,7 @@ def parse_solver_version(solver: str, stdout: str, stderr: str) -> Optional[str]
         "cbc": [(r"\bVersion:\s+([0-9][^\s,]*)", "CBC")],
         "clp": [(r"\bCoin LP version\s+([0-9][^\s,]*)", "CLP")],
         "soplex": [(r"\bSoPlex version\s+([0-9][^\s,]*)", "SoPlex")],
+        "qsopt-ex": [(r"\bUsing QSopt_ex\s+([0-9][^\s,]*)", "QSopt_ex")],
         "gurobi": [(r"\bGurobi Optimizer version\s+([0-9][^\s,]*)", "Gurobi")],
         "cplex": [(r"\b(?:IBM ILOG )?CPLEX(?: Optimizer)?(?: Interactive Optimizer)?\s+([0-9][^\s,]*)", "CPLEX")],
         "xpress": [(r"\bXpress(?: Optimizer)?\s+([0-9][^\s,]*)", "Xpress")],
@@ -1403,6 +1439,7 @@ def probe_solver_version(solver: str) -> Optional[str]:
         "cbc": ["-version"],
         "clp": ["-version"],
         "soplex": ["-v0"],
+        "qsopt-ex": ["--version"],
         "gurobi": ["--version"],
     }.get(solver)
     if version_args is None:
@@ -2446,6 +2483,8 @@ def run_solver(
             "-L",
             "-O",
             solution_path,
+            "-b",
+            solution_path + ".basis",
             model_path,
         ]
     elif solver == "lp-solve":
@@ -3091,6 +3130,11 @@ def solve(
                 stdout,
                 stderr,
             )
+            basis_path = solution_path + ".basis"
+            if os.path.exists(basis_path):
+                certificate_fields.update(
+                    parse_qsopt_ex_basis(basis_path, len(c), len(a_ub), len(a_eq))
+                )
         else:
             status, x, certificate_fields = parse_cbc_solution(
                 solution_path,

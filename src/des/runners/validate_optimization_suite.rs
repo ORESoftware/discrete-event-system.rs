@@ -1293,8 +1293,14 @@ impl Driver {
                 hungarian.assignment, reference.assignment
             ),
         );
-        match (reference.ortools_status.as_deref(), reference.ortools_objective) {
-            (Some("optimal"), Some(objective)) => {
+        let ortools_reference = solve_assignment_with_external_reference(
+            &cost,
+            &ExternalAssignmentReferenceOptions {
+                solver: ExternalAssignmentReferenceSolver::OrTools,
+            },
+        );
+        match (ortools_reference.status, ortools_reference.objective) {
+            (ExternalAssignmentReferenceStatus::Optimal, Some(objective)) => {
                 self.close(
                     "Assignment OR-Tools SimpleLinearSumAssignment objective",
                     hungarian.objective,
@@ -1303,20 +1309,26 @@ impl Driver {
                 );
                 self.check(
                     "Assignment OR-Tools SimpleLinearSumAssignment assignment",
-                    reference.ortools_assignment == hungarian.assignment,
+                    ortools_reference.assignment == hungarian.assignment,
                     format!(
                         "native={:?} ortools={:?}",
-                        hungarian.assignment, reference.ortools_assignment
+                        hungarian.assignment, ortools_reference.assignment
                     ),
                 );
             }
             _ => println!(
-                "  SKIP  Assignment OR-Tools SimpleLinearSumAssignment objective: no OR-Tools sidecar in solver={} message={}",
-                reference.solver, reference.message
+                "  SKIP  Assignment OR-Tools SimpleLinearSumAssignment objective: status={} solver={} message={}",
+                ortools_reference.status.as_str(), ortools_reference.solver, ortools_reference.message
             ),
         }
-        match (reference.scipy_status.as_deref(), reference.scipy_objective) {
-            (Some("optimal"), Some(objective)) => {
+        let scipy_reference = solve_assignment_with_external_reference(
+            &cost,
+            &ExternalAssignmentReferenceOptions {
+                solver: ExternalAssignmentReferenceSolver::Scipy,
+            },
+        );
+        match (scipy_reference.status, scipy_reference.objective) {
+            (ExternalAssignmentReferenceStatus::Optimal, Some(objective)) => {
                 self.close(
                     "Assignment SciPy linear_sum_assignment objective",
                     hungarian.objective,
@@ -1325,16 +1337,16 @@ impl Driver {
                 );
                 self.check(
                     "Assignment SciPy linear_sum_assignment assignment",
-                    reference.scipy_assignment == hungarian.assignment,
+                    scipy_reference.assignment == hungarian.assignment,
                     format!(
                         "native={:?} scipy={:?}",
-                        hungarian.assignment, reference.scipy_assignment
+                        hungarian.assignment, scipy_reference.assignment
                     ),
                 );
             }
             _ => println!(
-                "  SKIP  Assignment SciPy linear_sum_assignment objective: no SciPy sidecar in solver={} message={}",
-                reference.solver, reference.message
+                "  SKIP  Assignment SciPy linear_sum_assignment objective: status={} solver={} message={}",
+                scipy_reference.status.as_str(), scipy_reference.solver, scipy_reference.message
             ),
         }
     }
@@ -1402,11 +1414,14 @@ impl Driver {
             ),
         );
 
-        match (
-            reference.ortools_status.as_deref(),
-            reference.ortools_objective,
-        ) {
-            (Some("optimal"), Some(objective)) => {
+        let ortools_reference = solve_bin_packing_with_external_reference(
+            &problem,
+            &ExternalBinPackingReferenceOptions {
+                solver: ExternalBinPackingReferenceSolver::OrTools,
+            },
+        );
+        match (ortools_reference.status, ortools_reference.objective) {
+            (ExternalBinPackingReferenceStatus::Optimal, Some(objective)) => {
                 self.close(
                     "Bin-packing OR-Tools CP-SAT objective",
                     exact.objective.unwrap_or(usize::MAX) as f64,
@@ -1415,18 +1430,20 @@ impl Driver {
                 );
                 self.check(
                     "Bin-packing OR-Tools CP-SAT feasibility",
-                    self.bin_packing_external_bins_feasible(&problem, &reference.ortools_bins),
+                    self.bin_packing_external_bins_feasible(&problem, &ortools_reference.bins),
                     format!(
                         "objective={:?} bins={:?} bound={:?}",
-                        reference.ortools_objective,
-                        reference.ortools_bins,
-                        reference.ortools_objective_bound
+                        ortools_reference.objective,
+                        ortools_reference.bins,
+                        ortools_reference.ortools_objective_bound
                     ),
                 );
             }
             _ => println!(
-                "  SKIP  Bin-packing OR-Tools CP-SAT objective: no OR-Tools sidecar in solver={} message={}",
-                reference.solver, reference.message
+                "  SKIP  Bin-packing OR-Tools CP-SAT objective: status={} solver={} message={}",
+                ortools_reference.status.as_str(),
+                ortools_reference.solver,
+                ortools_reference.message
             ),
         }
     }
@@ -1507,11 +1524,14 @@ impl Driver {
             ),
         );
 
-        match (
-            reference.ortools_status.as_deref(),
-            reference.ortools_objective,
-        ) {
-            (Some("optimal"), Some(objective)) => {
+        let ortools_reference = solve_knapsack_with_external_reference(
+            &problem,
+            &ExternalKnapsackReferenceOptions {
+                solver: ExternalKnapsackReferenceSolver::OrTools,
+            },
+        );
+        match (ortools_reference.status, ortools_reference.objective) {
+            (ExternalKnapsackReferenceStatus::Optimal, Some(objective)) => {
                 self.close(
                     "Knapsack OR-Tools CP-SAT objective",
                     exact.total_value,
@@ -1522,24 +1542,26 @@ impl Driver {
                     "Knapsack OR-Tools CP-SAT feasibility",
                     self.knapsack_external_solution_feasible(
                         &problem,
-                        &reference.ortools_selected_item_indices,
-                        &reference.ortools_selected_item_ids,
-                        reference.ortools_total_weight,
-                        reference.ortools_total_value,
+                        &ortools_reference.selected_item_indices,
+                        &ortools_reference.selected_item_ids,
+                        ortools_reference.total_weight,
+                        ortools_reference.total_value,
                     ),
                     format!(
                         "objective={:?} weight={:?} value={:?} items={:?} bound={:?}",
-                        reference.ortools_objective,
-                        reference.ortools_total_weight,
-                        reference.ortools_total_value,
-                        reference.ortools_selected_item_ids,
-                        reference.ortools_objective_bound
+                        ortools_reference.objective,
+                        ortools_reference.total_weight,
+                        ortools_reference.total_value,
+                        ortools_reference.selected_item_ids,
+                        ortools_reference.ortools_objective_bound
                     ),
                 );
             }
             _ => println!(
-                "  SKIP  Knapsack OR-Tools CP-SAT objective: no OR-Tools sidecar in solver={} message={}",
-                reference.solver, reference.message
+                "  SKIP  Knapsack OR-Tools CP-SAT objective: status={} solver={} message={}",
+                ortools_reference.status.as_str(),
+                ortools_reference.solver,
+                ortools_reference.message
             ),
         }
     }
@@ -1613,11 +1635,14 @@ impl Driver {
             ),
         );
 
-        match (
-            reference.ortools_status.as_deref(),
-            reference.ortools_objective,
-        ) {
-            (Some("optimal"), Some(objective)) => {
+        let ortools_reference = solve_set_cover_with_external_reference(
+            &problem,
+            &ExternalSetCoverReferenceOptions {
+                solver: ExternalSetCoverReferenceSolver::OrTools,
+            },
+        );
+        match (ortools_reference.status, ortools_reference.objective) {
+            (ExternalSetCoverReferenceStatus::Optimal, Some(objective)) => {
                 self.close(
                     "Set-cover OR-Tools CP-SAT objective",
                     exact.objective.unwrap_or(f64::NAN),
@@ -1628,22 +1653,24 @@ impl Driver {
                     "Set-cover OR-Tools CP-SAT feasibility",
                     self.set_cover_external_solution_feasible(
                         &problem,
-                        &reference.ortools_selected_set_indices,
-                        &reference.ortools_selected_set_ids,
-                        &reference.ortools_covered_elements,
-                        reference.ortools_objective,
+                        &ortools_reference.selected_set_indices,
+                        &ortools_reference.selected_set_ids,
+                        &ortools_reference.covered_elements,
+                        ortools_reference.objective,
                     ),
                     format!(
                         "objective={:?} selected={:?} bound={:?}",
-                        reference.ortools_objective,
-                        reference.ortools_selected_set_ids,
-                        reference.ortools_objective_bound
+                        ortools_reference.objective,
+                        ortools_reference.selected_set_ids,
+                        ortools_reference.ortools_objective_bound
                     ),
                 );
             }
             _ => println!(
-                "  SKIP  Set-cover OR-Tools CP-SAT objective: no OR-Tools sidecar in solver={} message={}",
-                reference.solver, reference.message
+                "  SKIP  Set-cover OR-Tools CP-SAT objective: status={} solver={} message={}",
+                ortools_reference.status.as_str(),
+                ortools_reference.solver,
+                ortools_reference.message
             ),
         }
     }
@@ -1720,11 +1747,14 @@ impl Driver {
             ),
         );
 
-        match (
-            reference.ortools_status.as_deref(),
-            reference.ortools_objective,
-        ) {
-            (Some("optimal"), Some(objective)) => {
+        let ortools_reference = solve_facility_location_with_external_reference(
+            &problem,
+            &ExternalFacilityLocationReferenceOptions {
+                solver: ExternalFacilityLocationReferenceSolver::OrTools,
+            },
+        );
+        match (ortools_reference.status, ortools_reference.objective) {
+            (ExternalFacilityLocationReferenceStatus::Optimal, Some(objective)) => {
                 self.close(
                     "Facility-location OR-Tools CP-SAT objective",
                     exact.objective.unwrap_or(f64::NAN),
@@ -1735,22 +1765,22 @@ impl Driver {
                     "Facility-location OR-Tools CP-SAT feasibility",
                     self.facility_location_external_solution_feasible(
                         &problem,
-                        &reference.ortools_open_facility_indices,
-                        &reference.ortools_open_facility_ids,
-                        &reference.ortools_assignments,
-                        reference.ortools_objective,
+                        &ortools_reference.open_facility_indices,
+                        &ortools_reference.open_facility_ids,
+                        &ortools_reference.assignments,
+                        ortools_reference.objective,
                     ),
                     format!(
                         "objective={:?} open={:?} bound={:?}",
-                        reference.ortools_objective,
-                        reference.ortools_open_facility_ids,
-                        reference.ortools_objective_bound
+                        ortools_reference.objective,
+                        ortools_reference.open_facility_ids,
+                        ortools_reference.ortools_objective_bound
                     ),
                 );
             }
             _ => println!(
-                "  SKIP  Facility-location OR-Tools CP-SAT objective: no OR-Tools sidecar in solver={} message={}",
-                reference.solver, reference.message
+                "  SKIP  Facility-location OR-Tools CP-SAT objective: status={} solver={} message={}",
+                ortools_reference.status.as_str(), ortools_reference.solver, ortools_reference.message
             ),
         }
     }
@@ -1823,11 +1853,14 @@ impl Driver {
             ),
         );
 
-        match (
-            reference.ortools_status.as_deref(),
-            reference.ortools_objective,
-        ) {
-            (Some("optimal"), Some(objective)) => {
+        let ortools_reference = solve_graph_coloring_with_external_reference(
+            &problem,
+            &ExternalGraphColoringReferenceOptions {
+                solver: ExternalGraphColoringReferenceSolver::OrTools,
+            },
+        );
+        match (ortools_reference.status, ortools_reference.objective) {
+            (ExternalGraphColoringReferenceStatus::Optimal, Some(objective)) => {
                 self.close(
                     "Graph-coloring OR-Tools CP-SAT objective",
                     exact.used_color_count.unwrap_or(usize::MAX) as f64,
@@ -1838,22 +1871,24 @@ impl Driver {
                     "Graph-coloring OR-Tools CP-SAT feasibility",
                     self.graph_coloring_external_solution_feasible(
                         &problem,
-                        &reference.ortools_color_indices,
-                        &reference.ortools_color_names,
-                        reference.ortools_used_color_count,
+                        &ortools_reference.color_indices,
+                        &ortools_reference.color_names,
+                        ortools_reference.used_color_count,
                     ),
                     format!(
                         "objective={:?} colors={:?} assignment={:?} bound={:?}",
-                        reference.ortools_objective,
-                        reference.ortools_used_color_count,
-                        reference.ortools_color_indices,
-                        reference.ortools_objective_bound
+                        ortools_reference.objective,
+                        ortools_reference.used_color_count,
+                        ortools_reference.color_indices,
+                        ortools_reference.ortools_objective_bound
                     ),
                 );
             }
             _ => println!(
-                "  SKIP  Graph-coloring OR-Tools CP-SAT objective: no OR-Tools sidecar in solver={} message={}",
-                reference.solver, reference.message
+                "  SKIP  Graph-coloring OR-Tools CP-SAT objective: status={} solver={} message={}",
+                ortools_reference.status.as_str(),
+                ortools_reference.solver,
+                ortools_reference.message
             ),
         }
     }
@@ -1931,11 +1966,14 @@ impl Driver {
             ),
         );
 
-        match (
-            reference.ortools_status.as_deref(),
-            reference.ortools_objective,
-        ) {
-            (Some("optimal"), Some(objective)) => {
+        let ortools_reference = solve_weighted_independent_set_with_external_reference(
+            &problem,
+            &ExternalWeightedIndependentSetReferenceOptions {
+                solver: ExternalWeightedIndependentSetReferenceSolver::OrTools,
+            },
+        );
+        match (ortools_reference.status, ortools_reference.objective) {
+            (ExternalWeightedIndependentSetReferenceStatus::Optimal, Some(objective)) => {
                 self.close(
                     "Weighted independent set OR-Tools CP-SAT objective",
                     exact.total_weight,
@@ -1946,22 +1984,22 @@ impl Driver {
                     "Weighted independent set OR-Tools CP-SAT feasibility",
                     self.weighted_independent_set_external_solution_feasible(
                         &problem,
-                        &reference.ortools_selected_vertex_indices,
-                        &reference.ortools_selected_vertex_ids,
-                        reference.ortools_total_weight,
+                        &ortools_reference.selected_vertex_indices,
+                        &ortools_reference.selected_vertex_ids,
+                        ortools_reference.total_weight,
                     ),
                     format!(
                         "objective={:?} weight={:?} vertices={:?} bound={:?}",
-                        reference.ortools_objective,
-                        reference.ortools_total_weight,
-                        reference.ortools_selected_vertex_ids,
-                        reference.ortools_objective_bound
+                        ortools_reference.objective,
+                        ortools_reference.total_weight,
+                        ortools_reference.selected_vertex_ids,
+                        ortools_reference.ortools_objective_bound
                     ),
                 );
             }
             _ => println!(
-                "  SKIP  Weighted independent set OR-Tools CP-SAT objective: no OR-Tools sidecar in solver={} message={}",
-                reference.solver, reference.message
+                "  SKIP  Weighted independent set OR-Tools CP-SAT objective: status={} solver={} message={}",
+                ortools_reference.status.as_str(), ortools_reference.solver, ortools_reference.message
             ),
         }
     }
@@ -2035,11 +2073,14 @@ impl Driver {
             ),
         );
 
-        match (
-            reference.ortools_status.as_deref(),
-            reference.ortools_objective,
-        ) {
-            (Some("optimal"), Some(objective)) => {
+        let ortools_reference = solve_weighted_max_sat_with_external_reference(
+            &problem,
+            &ExternalWeightedMaxSatReferenceOptions {
+                solver: ExternalWeightedMaxSatReferenceSolver::OrTools,
+            },
+        );
+        match (ortools_reference.status, ortools_reference.objective) {
+            (ExternalWeightedMaxSatReferenceStatus::Optimal, Some(objective)) => {
                 self.close(
                     "Weighted Max-SAT OR-Tools CP-SAT objective",
                     exact.satisfied_soft_weight.unwrap_or(f64::NAN),
@@ -2050,22 +2091,22 @@ impl Driver {
                     "Weighted Max-SAT OR-Tools CP-SAT feasibility",
                     self.weighted_max_sat_external_solution_feasible(
                         &problem,
-                        &reference.ortools_assignment,
-                        reference.ortools_objective,
-                        &reference.ortools_satisfied_clause_ids,
-                        &reference.ortools_violated_hard_clause_ids,
+                        &ortools_reference.assignment,
+                        ortools_reference.objective,
+                        &ortools_reference.satisfied_clause_ids,
+                        &ortools_reference.violated_hard_clause_ids,
                     ),
                     format!(
                         "objective={:?} assignment={:?} bound={:?}",
-                        reference.ortools_objective,
-                        reference.ortools_assignment,
-                        reference.ortools_objective_bound
+                        ortools_reference.objective,
+                        ortools_reference.assignment,
+                        ortools_reference.ortools_objective_bound
                     ),
                 );
             }
             _ => println!(
-                "  SKIP  Weighted Max-SAT OR-Tools CP-SAT objective: no OR-Tools sidecar in solver={} message={}",
-                reference.solver, reference.message
+                "  SKIP  Weighted Max-SAT OR-Tools CP-SAT objective: status={} solver={} message={}",
+                ortools_reference.status.as_str(), ortools_reference.solver, ortools_reference.message
             ),
         }
     }
@@ -19162,11 +19203,14 @@ impl Driver {
             &reference.node_balance,
             1e-9,
         );
-        match (
-            reference.ortools_status.as_deref(),
-            reference.ortools_max_flow,
-        ) {
-            (Some("optimal"), Some(value)) => {
+        let ortools_reference = solve_max_flow_with_external_reference(
+            &p,
+            &ExternalMaxFlowReferenceOptions {
+                solver: ExternalMaxFlowReferenceSolver::OrTools,
+            },
+        );
+        match (ortools_reference.status, ortools_reference.max_flow) {
+            (ExternalMaxFlowReferenceStatus::Optimal, Some(value)) => {
                 self.close(
                     "Max-flow OR-Tools SimpleMaxFlow value",
                     flow.max_flow,
@@ -19176,7 +19220,7 @@ impl Driver {
                 self.close(
                     "Max-flow OR-Tools SimpleMaxFlow min-cut capacity",
                     flow.max_flow,
-                    reference.ortools_min_cut.capacity,
+                    ortools_reference.min_cut.capacity,
                     1e-9,
                 );
                 self.check(
@@ -19185,18 +19229,20 @@ impl Driver {
                         flow.num_nodes,
                         flow.source,
                         flow.sink,
-                        &reference.ortools_edge_flows,
+                        &ortools_reference.edge_flows,
                         value,
                     ),
                     format!(
                         "flows={:?} balance={:?}",
-                        reference.ortools_edge_flows, reference.ortools_node_balance
+                        ortools_reference.edge_flows, ortools_reference.node_balance
                     ),
                 );
             }
             _ => println!(
-                "  SKIP  Max-flow OR-Tools SimpleMaxFlow value: no OR-Tools sidecar in solver={} message={}",
-                reference.solver, reference.message
+                "  SKIP  Max-flow OR-Tools SimpleMaxFlow value: status={} solver={} message={}",
+                ortools_reference.status.as_str(),
+                ortools_reference.solver,
+                ortools_reference.message
             ),
         }
     }
@@ -19307,11 +19353,14 @@ impl Driver {
             &reference.node_balance,
             1e-8,
         );
-        match (
-            reference.ortools_status.as_deref(),
-            reference.ortools_objective,
-        ) {
-            (Some("optimal"), Some(objective)) => {
+        let ortools_reference = solve_min_cost_flow_with_external_reference(
+            &p,
+            &ExternalMinCostFlowReferenceOptions {
+                solver: ExternalMinCostFlowReferenceSolver::OrTools,
+            },
+        );
+        match (ortools_reference.status, ortools_reference.objective) {
+            (ExternalMinCostFlowReferenceStatus::Optimal, Some(objective)) => {
                 self.close(
                     "Min-cost-flow OR-Tools SimpleMinCostFlow objective",
                     flow.total_cost,
@@ -19325,8 +19374,8 @@ impl Driver {
                         .iter()
                         .map(|arc| arc.flow)
                         .collect::<Vec<_>>(),
-                    &reference
-                        .ortools_flows
+                    &ortools_reference
+                        .flows
                         .iter()
                         .map(|arc| arc.flow)
                         .collect::<Vec<_>>(),
@@ -19335,13 +19384,15 @@ impl Driver {
                 self.max_abs_close(
                     "Min-cost-flow OR-Tools SimpleMinCostFlow node balance",
                     &p.supplies,
-                    &reference.ortools_node_balance,
+                    &ortools_reference.node_balance,
                     1e-8,
                 );
             }
             _ => println!(
-                "  SKIP  Min-cost-flow OR-Tools SimpleMinCostFlow objective: no OR-Tools sidecar in solver={} message={}",
-                reference.solver, reference.message
+                "  SKIP  Min-cost-flow OR-Tools SimpleMinCostFlow objective: status={} solver={} message={}",
+                ortools_reference.status.as_str(),
+                ortools_reference.solver,
+                ortools_reference.message
             ),
         }
     }
@@ -19414,11 +19465,14 @@ impl Driver {
             ),
         );
 
-        match (
-            reference.ortools_status.as_deref(),
-            reference.ortools_objective,
-        ) {
-            (Some("optimal"), Some(objective)) => {
+        let ortools_reference = solve_minimum_spanning_tree_with_external_reference(
+            &problem,
+            &ExternalMinimumSpanningTreeReferenceOptions {
+                solver: ExternalMinimumSpanningTreeReferenceSolver::OrTools,
+            },
+        );
+        match (ortools_reference.status, ortools_reference.objective) {
+            (ExternalMinimumSpanningTreeReferenceStatus::Optimal, Some(objective)) => {
                 self.close(
                     "MST OR-Tools CP-SAT objective",
                     kruskal.total_weight.unwrap_or(f64::NAN),
@@ -19429,21 +19483,23 @@ impl Driver {
                     "MST OR-Tools CP-SAT feasibility",
                     self.minimum_spanning_tree_external_solution_feasible(
                         &problem,
-                        &reference.ortools_selected_edge_indices,
-                        &reference.ortools_selected_edge_ids,
-                        reference.ortools_total_weight,
+                        &ortools_reference.selected_edge_indices,
+                        &ortools_reference.selected_edge_ids,
+                        ortools_reference.total_weight,
                     ),
                     format!(
                         "objective={:?} edges={:?} bound={:?}",
-                        reference.ortools_objective,
-                        reference.ortools_selected_edge_ids,
-                        reference.ortools_objective_bound
+                        ortools_reference.objective,
+                        ortools_reference.selected_edge_ids,
+                        ortools_reference.ortools_objective_bound
                     ),
                 );
             }
             _ => println!(
-                "  SKIP  MST OR-Tools CP-SAT objective: no OR-Tools sidecar in solver={} message={}",
-                reference.solver, reference.message
+                "  SKIP  MST OR-Tools CP-SAT objective: status={} solver={} message={}",
+                ortools_reference.status.as_str(),
+                ortools_reference.solver,
+                ortools_reference.message
             ),
         }
     }
@@ -19550,11 +19606,14 @@ impl Driver {
                 1e-8,
             );
         }
-        match (
-            reference.ortools_status.as_deref(),
-            reference.ortools_objective,
-        ) {
-            (Some("optimal"), Some(objective)) => {
+        let ortools_reference = solve_tsp_with_external_reference(
+            &instance.distance,
+            &ExternalTspReferenceOptions {
+                solver: ExternalTspReferenceSolver::OrTools,
+            },
+        );
+        match (ortools_reference.status, ortools_reference.objective) {
+            (ExternalTspReferenceStatus::Optimal, Some(objective)) => {
                 self.close(
                     "TSP OR-Tools Routing objective",
                     exact.length,
@@ -19563,13 +19622,15 @@ impl Driver {
                 );
                 self.check(
                     "TSP OR-Tools Routing tour feasibility",
-                    is_permutation(&reference.ortools_tour, instance.n),
-                    format!("tour={:?}", reference.ortools_tour),
+                    is_permutation(&ortools_reference.tour, instance.n),
+                    format!("tour={:?}", ortools_reference.tour),
                 );
             }
             _ => println!(
-                "  SKIP  TSP OR-Tools Routing objective: no OR-Tools sidecar in solver={} message={}",
-                reference.solver, reference.message
+                "  SKIP  TSP OR-Tools Routing objective: status={} solver={} message={}",
+                ortools_reference.status.as_str(),
+                ortools_reference.solver,
+                ortools_reference.message
             ),
         }
     }
@@ -19675,19 +19736,46 @@ impl Driver {
                 && reference.routes.iter().all(|route| route.distance >= 0.0),
             format!("routes={:?}", reference.routes),
         );
-        match (
-            reference.ortools_status.as_deref(),
-            reference.ortools_objective,
-        ) {
-            (Some("optimal"), Some(objective)) => self.close(
-                "CVRP OR-Tools Routing objective",
-                exact.total_distance,
-                objective,
-                1e-6,
-            ),
+        let ortools_reference = solve_cvrp_with_external_reference(
+            Point { x: 0.0, y: 0.0 },
+            &customers,
+            5.0,
+            &ExternalRoutingReferenceOptions {
+                solver: ExternalRoutingReferenceSolver::OrTools,
+            },
+        );
+        match (ortools_reference.status, ortools_reference.objective) {
+            (ExternalRoutingReferenceStatus::Optimal, Some(objective)) => {
+                self.close(
+                    "CVRP OR-Tools Routing objective",
+                    exact.total_distance,
+                    objective,
+                    1e-6,
+                );
+                self.check(
+                    "CVRP OR-Tools Routing route feasibility",
+                    ortools_reference
+                        .routes
+                        .iter()
+                        .all(|route| route.load <= 5.0 + 1e-9)
+                        && ortools_reference
+                            .routes
+                            .iter()
+                            .map(|route| route.customers.len())
+                            .sum::<usize>()
+                            == customers.len()
+                        && ortools_reference
+                            .routes
+                            .iter()
+                            .all(|route| route.distance >= 0.0),
+                    format!("routes={:?}", ortools_reference.routes),
+                );
+            }
             _ => println!(
-                "  SKIP  CVRP OR-Tools Routing objective: no OR-Tools sidecar in solver={} message={}",
-                reference.solver, reference.message
+                "  SKIP  CVRP OR-Tools Routing objective: status={} solver={} message={}",
+                ortools_reference.status.as_str(),
+                ortools_reference.solver,
+                ortools_reference.message
             ),
         }
     }
@@ -19759,11 +19847,14 @@ impl Driver {
             ),
         );
 
-        match (
-            external.ortools_status.as_deref(),
-            external.ortools_makespan,
-        ) {
-            (Some("optimal"), Some(makespan)) => {
+        let ortools_external = solve_job_shop_with_external_reference(
+            &jobs,
+            &ExternalSchedulingReferenceOptions {
+                solver: ExternalSchedulingReferenceSolver::OrTools,
+            },
+        );
+        match (ortools_external.status, ortools_external.makespan) {
+            (ExternalSchedulingReferenceStatus::Optimal, Some(makespan)) => {
                 self.close(
                     "Job-shop OR-Tools CP-SAT makespan",
                     exact.makespan,
@@ -19772,17 +19863,19 @@ impl Driver {
                 );
                 self.check(
                     "Job-shop OR-Tools CP-SAT feasibility",
-                    self.job_shop_schedule_feasible(&jobs, &external.ortools_schedule),
+                    self.job_shop_schedule_feasible(&jobs, &ortools_external.schedule),
                     format!(
                         "ortools_ops={} ortools_total_flow={:?}",
-                        external.ortools_schedule.len(),
-                        external.ortools_total_flow_time
+                        ortools_external.schedule.len(),
+                        ortools_external.total_flow_time
                     ),
                 );
             }
             _ => println!(
-                "  SKIP  Job-shop OR-Tools CP-SAT makespan: no OR-Tools sidecar in solver={} message={}",
-                external.solver, external.message
+                "  SKIP  Job-shop OR-Tools CP-SAT makespan: status={} solver={} message={}",
+                ortools_external.status.as_str(),
+                ortools_external.solver,
+                ortools_external.message
             ),
         }
     }
@@ -19863,11 +19956,14 @@ impl Driver {
             ),
         );
 
-        match (
-            external.ortools_status.as_deref(),
-            external.ortools_makespan,
-        ) {
-            (Some("optimal"), Some(makespan)) => {
+        let ortools_external = solve_flow_shop_with_external_reference(
+            &jobs,
+            &ExternalSchedulingReferenceOptions {
+                solver: ExternalSchedulingReferenceSolver::OrTools,
+            },
+        );
+        match (ortools_external.status, ortools_external.makespan) {
+            (ExternalSchedulingReferenceStatus::Optimal, Some(makespan)) => {
                 self.close(
                     "Flow-shop OR-Tools CP-SAT makespan",
                     exact.makespan,
@@ -19878,20 +19974,22 @@ impl Driver {
                     "Flow-shop OR-Tools CP-SAT feasibility",
                     self.flow_shop_schedule_feasible(
                         &jobs,
-                        &external.ortools_schedule,
-                        &external.ortools_sequence,
+                        &ortools_external.schedule,
+                        &ortools_external.sequence,
                     ),
                     format!(
                         "sequence={:?} ortools_ops={} ortools_total_flow={:?}",
-                        external.ortools_sequence,
-                        external.ortools_schedule.len(),
-                        external.ortools_total_flow_time
+                        ortools_external.sequence,
+                        ortools_external.schedule.len(),
+                        ortools_external.total_flow_time
                     ),
                 );
             }
             _ => println!(
-                "  SKIP  Flow-shop OR-Tools CP-SAT makespan: no OR-Tools sidecar in solver={} message={}",
-                external.solver, external.message
+                "  SKIP  Flow-shop OR-Tools CP-SAT makespan: status={} solver={} message={}",
+                ortools_external.status.as_str(),
+                ortools_external.solver,
+                ortools_external.message
             ),
         }
     }
@@ -20000,6 +20098,66 @@ impl Driver {
                     "y_scenarios={} values={} n_scenarios={} n_second={}",
                     reference.y_by_scenario.len(),
                     reference.scenario_values.len(),
+                    scenarios.len(),
+                    problem.q_second.len()
+                ),
+            );
+        }
+
+        let scipy_reference = solve_stochastic_lp_with_external_reference(
+            &problem,
+            &scenarios,
+            &ExternalStochasticLpReferenceOptions {
+                solver: ExternalStochasticLpReferenceSolver::Scipy,
+            },
+        );
+        if scipy_reference.status == ExternalStochasticLpReferenceStatus::Unavailable {
+            println!(
+                "  SKIP  Stochastic LP SciPy HiGHS bridge status optimal: {}",
+                scipy_reference.message
+            );
+        } else {
+            self.check(
+                "Stochastic LP SciPy HiGHS bridge status optimal",
+                scipy_reference.status == ExternalStochasticLpReferenceStatus::Optimal,
+                format!(
+                    "status={} solver={} message={} iterations={:?}",
+                    scipy_reference.status.as_str(),
+                    scipy_reference.solver,
+                    scipy_reference.message,
+                    scipy_reference.iterations
+                ),
+            );
+            self.close(
+                "Stochastic LP monolithic/SciPy objective",
+                monolithic.objective,
+                scipy_reference.objective.unwrap_or(f64::NAN),
+                1e-8,
+            );
+            self.close(
+                "Stochastic LP monolithic/SciPy expected recourse",
+                monolithic.expected_q,
+                scipy_reference.expected_q.unwrap_or(f64::NAN),
+                1e-8,
+            );
+            self.max_abs_close(
+                "Stochastic LP monolithic/SciPy x",
+                &monolithic.x,
+                &scipy_reference.x,
+                1e-7,
+            );
+            self.check(
+                "Stochastic LP SciPy scenario recourse shape",
+                scipy_reference.y_by_scenario.len() == scenarios.len()
+                    && scipy_reference.scenario_values.len() == scenarios.len()
+                    && scipy_reference
+                        .y_by_scenario
+                        .iter()
+                        .all(|y| y.len() == problem.q_second.len()),
+                format!(
+                    "y_scenarios={} values={} n_scenarios={} n_second={}",
+                    scipy_reference.y_by_scenario.len(),
+                    scipy_reference.scenario_values.len(),
                     scenarios.len(),
                     problem.q_second.len()
                 ),

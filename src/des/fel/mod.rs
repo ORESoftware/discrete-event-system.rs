@@ -13,7 +13,7 @@
 //!   entity engine (calls it, does not modify it).
 //! * [`compare`] — runs both against the closed-form analytical M/M/1 and reports
 //!   accuracy and work performed.
-//! * [`elevator`] — a next-event single-car elevator under a LOOK policy (a new
+//! * [`elevator`] — a next-event elevator bank under a shared LOOK policy (a
 //!   FEL model that does *not* touch the existing time-stepped elevator), plus
 //!   canonical MDP/POMDP formulations of elevator dispatch that run on the
 //!   first-class model citizens.

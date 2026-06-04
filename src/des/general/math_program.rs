@@ -9081,7 +9081,7 @@ fn solve_math_program_external_scipy_single_objective(
     let mip_gap = original_mip_gap(best_bound, objective)
         .or_else(|| raw_mip_gap.and_then(|gap| gap.is_finite().then_some(gap.max(0.0))));
 
-    Ok(MathProgramSolution {
+    let mut solution = MathProgramSolution {
         status,
         x,
         objective,
@@ -9121,7 +9121,9 @@ fn solve_math_program_external_scipy_single_objective(
             .get("message")
             .and_then(Value::as_str)
             .map(str::to_string),
-    })
+    };
+    infer_missing_external_lp_basis(program, &mut solution)?;
+    Ok(solution)
 }
 
 fn should_fallback_highs_default_to_cli(
@@ -9996,6 +9998,130 @@ fn parse_external_status(raw: &Value) -> MathProgramStatus {
 
 fn finite_option(value: f64) -> Option<f64> {
     value.is_finite().then_some(value)
+}
+
+fn infer_missing_external_lp_basis(
+    program: &MathProgram,
+    solution: &mut MathProgramSolution,
+) -> Result<(), MathProgramError> {
+    if solution.status != MathProgramStatus::Optimal
+        || (solution.var_basis.is_some() && solution.row_basis.is_some())
+        || program.has_discrete_features()
+        || program.has_quadratic_objective()
+        || program.has_quadratic_constraints()
+        || program.has_conic_constraints()
+    {
+        return Ok(());
+    }
+
+    let lp = program.to_lp_problem()?;
+    let Some(reduced_costs) = solution.reduced_costs.as_deref() else {
+        return Ok(());
+    };
+    let dual_ub = solution.dual_ub.as_deref().unwrap_or(&[]);
+    let dual_eq = solution.dual_eq.as_deref().unwrap_or(&[]);
+    let (var_basis, row_basis) = infer_lp_basis_from_complementarity(
+        &solution.x,
+        lp.lb.as_deref(),
+        lp.ub.as_deref(),
+        lp.a_ub.as_deref().unwrap_or(&[]),
+        lp.b_ub.as_deref().unwrap_or(&[]),
+        dual_ub,
+        lp.a_eq.as_deref().unwrap_or(&[]),
+        lp.b_eq.as_deref().unwrap_or(&[]),
+        dual_eq,
+        reduced_costs,
+    );
+    if solution.var_basis.is_none() {
+        solution.var_basis = var_basis;
+    }
+    if solution.row_basis.is_none() {
+        solution.row_basis = row_basis;
+    }
+    Ok(())
+}
+
+fn infer_lp_basis_from_complementarity(
+    x: &[f64],
+    lower_bounds: Option<&[Option<f64>]>,
+    upper_bounds: Option<&[Option<f64>]>,
+    le_rows: &[Vec<f64>],
+    le_rhs: &[f64],
+    dual_ub: &[f64],
+    eq_rows: &[Vec<f64>],
+    eq_rhs: &[f64],
+    dual_eq: &[f64],
+    reduced_costs: &[f64],
+) -> (Option<Vec<String>>, Option<Vec<String>>) {
+    const TOL: f64 = 1.0e-6;
+    if x.len() != reduced_costs.len()
+        || le_rows.len() != le_rhs.len()
+        || le_rows.len() != dual_ub.len()
+        || eq_rows.len() != eq_rhs.len()
+        || eq_rows.len() != dual_eq.len()
+    {
+        return (None, None);
+    }
+
+    let mut var_basis = Vec::with_capacity(x.len());
+    for (idx, (&value, &reduced_cost)) in x.iter().zip(reduced_costs).enumerate() {
+        let lower = lp_lower_bound_at(lower_bounds, idx);
+        let upper = lp_upper_bound_at(upper_bounds, idx);
+        let at_lower = lower.is_some_and(|bound| (value - bound).abs() <= TOL);
+        let at_upper = upper.is_some_and(|bound| (value - bound).abs() <= TOL);
+        let fixed = lower
+            .zip(upper)
+            .is_some_and(|(lower, upper)| (lower - upper).abs() <= TOL);
+        let status = if fixed && (at_lower || at_upper) {
+            "fixed"
+        } else if at_lower && reduced_cost.abs() > TOL {
+            "at_lower"
+        } else if at_upper && reduced_cost.abs() > TOL {
+            "at_upper"
+        } else if !at_lower && !at_upper && reduced_cost.abs() <= TOL {
+            "basic"
+        } else {
+            return (None, None);
+        };
+        var_basis.push(status.to_string());
+    }
+
+    let mut row_basis = Vec::with_capacity(le_rows.len() + eq_rows.len());
+    for ((row, &rhs), &dual) in le_rows.iter().zip(le_rhs).zip(dual_ub) {
+        let slack = rhs - dot(row, x);
+        if slack < -TOL {
+            return (Some(var_basis), None);
+        }
+        if slack.abs() <= TOL {
+            if dual.abs() > TOL {
+                row_basis.push("at_upper".to_string());
+            } else {
+                return (Some(var_basis), None);
+            }
+        } else {
+            row_basis.push("basic".to_string());
+        }
+    }
+    for (row, &rhs) in eq_rows.iter().zip(eq_rhs) {
+        if (dot(row, x) - rhs).abs() > TOL {
+            return (Some(var_basis), None);
+        }
+        row_basis.push("fixed".to_string());
+    }
+
+    (Some(var_basis), Some(row_basis))
+}
+
+fn lp_lower_bound_at(bounds: Option<&[Option<f64>]>, index: usize) -> Option<f64> {
+    bounds
+        .and_then(|bounds| bounds.get(index).copied())
+        .unwrap_or(Some(0.0))
+}
+
+fn lp_upper_bound_at(bounds: Option<&[Option<f64>]>, index: usize) -> Option<f64> {
+    bounds
+        .and_then(|bounds| bounds.get(index).copied())
+        .unwrap_or(None)
 }
 
 fn encode_external_math_program_options(
@@ -17950,6 +18076,73 @@ mod tests {
         assert_eq!(vars[1].value, Some(0.0));
         assert_eq!(vars[1].reduced_cost, Some(-1.25));
         assert_eq!(vars[1].basis.as_deref(), Some("at_lower"));
+    }
+
+    #[test]
+    fn external_lp_basis_inference_fills_missing_pdlp_style_basis() {
+        let mut p = MathProgram::new(ObjectiveSense::Max);
+        let x = p.add_continuous_var("x", 3.0, Some(0.0), None).unwrap();
+        let y = p.add_continuous_var("y", 4.0, Some(0.0), None).unwrap();
+        p.add_constraint("c0", vec![(x, 1.0), (y, 2.0)], RowSense::Le, 14.0)
+            .unwrap();
+        p.add_constraint("c1", vec![(x, 3.0), (y, -1.0)], RowSense::Ge, 0.0)
+            .unwrap();
+        p.add_constraint("c2", vec![(x, 1.0), (y, -1.0)], RowSense::Le, 2.0)
+            .unwrap();
+
+        let mut solution = MathProgramSolution {
+            status: MathProgramStatus::Optimal,
+            x: vec![6.0, 4.0],
+            objective: 34.0,
+            best_bound: None,
+            mip_gap: None,
+            nodes_explored: None,
+            first_branch_variable: None,
+            solver_version: None,
+            iterations: None,
+            control_feedback: None,
+            dual_ub: Some(vec![7.0 / 3.0, 0.0, 2.0 / 3.0]),
+            dual_eq: Some(Vec::new()),
+            reduced_costs: Some(vec![0.0, 0.0]),
+            var_basis: None,
+            row_basis: None,
+            unbounded_ray: None,
+            infeasibility_certificate: None,
+            solver: "ortools:pdlp".to_string(),
+            message: None,
+        };
+
+        super::infer_missing_external_lp_basis(&p, &mut solution).unwrap();
+        assert_eq!(
+            solution.var_basis,
+            Some(vec!["basic".to_string(), "basic".to_string()])
+        );
+        assert_eq!(
+            solution.row_basis,
+            Some(vec![
+                "at_upper".to_string(),
+                "basic".to_string(),
+                "at_upper".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn external_lp_basis_inference_leaves_degenerate_rows_unreported() {
+        let (var_basis, row_basis) = super::infer_lp_basis_from_complementarity(
+            &[1.0],
+            None,
+            None,
+            &[vec![1.0]],
+            &[1.0],
+            &[0.0],
+            &[],
+            &[],
+            &[],
+            &[0.0],
+        );
+        assert_eq!(var_basis, Some(vec!["basic".to_string()]));
+        assert_eq!(row_basis, None);
     }
 
     #[test]

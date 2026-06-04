@@ -2365,13 +2365,21 @@ fn solve_lp_with_native_scip_cli(
         ExternalLinearCliModelFormat::CplexLp => lp_problem_to_cplex_lp_string(problem),
         ExternalLinearCliModelFormat::Mps => lp_problem_to_mps_string(problem),
     };
+    let le_rows = problem.a_ub.as_deref().unwrap_or(&[]);
+    let le_rhs = problem.b_ub.as_deref().unwrap_or(&[]);
+    let eq_rows = problem.a_eq.as_deref().unwrap_or(&[]);
+    let eq_rhs = problem.b_eq.as_deref().unwrap_or(&[]);
     solve_native_scip_cli_model(
         ExternalLinearCliKind::Lp,
         &model_text,
         problem.c.len(),
         problem.sense,
-        problem.a_ub.as_deref().unwrap_or(&[]),
-        problem.a_eq.as_deref().unwrap_or(&[]),
+        le_rows,
+        le_rhs,
+        eq_rows,
+        eq_rhs,
+        problem.lb.as_deref(),
+        problem.ub.as_deref(),
         &problem.c,
         opts,
     )
@@ -2392,6 +2400,10 @@ fn solve_ipmip_with_native_scip_cli(
         problem.sense,
         &[],
         &[],
+        &[],
+        &[],
+        None,
+        None,
         &problem.c,
         opts,
     )
@@ -2403,7 +2415,11 @@ fn solve_native_scip_cli_model(
     variable_count: usize,
     sense: Sense,
     le_rows: &[Vec<f64>],
+    le_rhs: &[f64],
     eq_rows: &[Vec<f64>],
+    eq_rhs: &[f64],
+    lower_bounds: Option<&[Option<f64>]>,
+    upper_bounds: Option<&[Option<f64>]>,
     objective_coefficients: &[f64],
     opts: &ExternalLinearCliOptions,
 ) -> ExternalLinearCliSolution {
@@ -2547,7 +2563,18 @@ fn solve_native_scip_cli_model(
     let objective = dot_f64(objective_coefficients, &parsed.x);
     let quality = parse_scip_mip_quality(kind, objective, &stdout, &stderr);
     let certificate = (kind == ExternalLinearCliKind::Lp).then(|| {
-        parse_scip_lp_certificate_fields(&stdout, sense, objective_coefficients, le_rows, eq_rows)
+        parse_scip_lp_certificate_fields(
+            &stdout,
+            sense,
+            objective_coefficients,
+            le_rows,
+            le_rhs,
+            eq_rows,
+            eq_rhs,
+            lower_bounds,
+            upper_bounds,
+            &parsed.x,
+        )
     });
     ExternalLinearCliSolution {
         status,
@@ -2597,9 +2624,13 @@ fn solve_native_scip_cli_model(
         dual_eq: certificate
             .as_ref()
             .and_then(|fields| fields.dual_eq.clone()),
-        reduced_costs: certificate.and_then(|fields| fields.reduced_costs),
-        var_basis: None,
-        row_basis: None,
+        reduced_costs: certificate
+            .as_ref()
+            .and_then(|fields| fields.reduced_costs.clone()),
+        var_basis: certificate
+            .as_ref()
+            .and_then(|fields| fields.var_basis.clone()),
+        row_basis: certificate.and_then(|fields| fields.row_basis),
         iterations: None,
         elapsed_ms: elapsed,
         message: parsed.status,
@@ -2781,7 +2812,11 @@ fn solve_native_plain_cli_json_direct(
             model.c.len(),
             model.sense,
             &model.le_rows,
+            &model.le_rhs,
             &model.eq_rows,
+            &model.eq_rhs,
+            Some(&model.lbs),
+            Some(&model.ubs),
             &model.c,
             opts,
         ),
@@ -3435,10 +3470,14 @@ fn solve_lp_with_native_lp_solve_cli(
     opts: &ExternalLinearCliOptions,
 ) -> ExternalLinearCliSolution {
     let model_text = lp_problem_to_lpsolve_lp_string(problem);
+    let le_count = problem.a_ub.as_ref().map_or(0, Vec::len);
+    let eq_count = problem.a_eq.as_ref().map_or(0, Vec::len);
     solve_native_lp_solve_cli_model(
         ExternalLinearCliKind::Lp,
         &model_text,
         problem.c.len(),
+        le_count,
+        eq_count,
         &problem.c,
         opts,
     )
@@ -3453,6 +3492,8 @@ fn solve_ipmip_with_native_lp_solve_cli(
         ExternalLinearCliKind::Mip,
         &model_text,
         problem.c.len(),
+        ipmip_total_le_row_count(problem),
+        0,
         &problem.c,
         opts,
     )
@@ -3462,6 +3503,8 @@ fn solve_native_lp_solve_cli_model(
     kind: ExternalLinearCliKind,
     model_text: &str,
     variable_count: usize,
+    le_count: usize,
+    eq_count: usize,
     objective_coefficients: &[f64],
     opts: &ExternalLinearCliOptions,
 ) -> ExternalLinearCliSolution {
@@ -3479,7 +3522,8 @@ fn solve_native_lp_solve_cli_model(
     };
 
     let model_path = native_lp_solve_temp_path("model", "lp");
-    let cleanup_paths = vec![model_path.clone()];
+    let basis_path = native_lp_solve_temp_path("basis", "bas");
+    let cleanup_paths = vec![model_path.clone(), basis_path.clone()];
     if let Err(err) = fs::write(&model_path, model_text) {
         cleanup_native_lp_solve_temp_files(&cleanup_paths);
         return external_cli_failure(
@@ -3497,7 +3541,9 @@ fn solve_native_lp_solve_cli_model(
     command
         .arg("-timeout")
         .arg(glpk_time_limit_arg(opts.time_limit_secs));
-    if kind == ExternalLinearCliKind::Mip {
+    if kind == ExternalLinearCliKind::Lp {
+        command.arg("-S4").arg("-wbas").arg(&basis_path);
+    } else if kind == ExternalLinearCliKind::Mip {
         command.arg("-v5").arg("-S2");
         if let Some(relative_gap) = normalized_relative_gap(opts.relative_gap) {
             command.arg("-gr").arg(format!("{relative_gap:.17}"));
@@ -3533,6 +3579,15 @@ fn solve_native_lp_solve_cli_model(
         .or_else(|| probe_lp_solve_solver_version(&command_path));
     let parsed =
         parse_native_lp_solve_solution_text(&format!("{stdout}\n{stderr}"), variable_count);
+    let certificate = (kind == ExternalLinearCliKind::Lp).then(|| {
+        parse_native_lp_solve_lp_certificate_fields(
+            &format!("{stdout}\n{stderr}"),
+            basis_path.as_path(),
+            variable_count,
+            le_count,
+            eq_count,
+        )
+    });
     cleanup_native_lp_solve_temp_files(&cleanup_paths);
 
     let status = classify_native_linear_status(&parsed.status, &stdout, &stderr);
@@ -3598,11 +3653,21 @@ fn solve_native_lp_solve_cli_model(
         node_selection: None,
         mip_start_accepted: None,
         mip_start_objective: None,
-        dual_ub: None,
-        dual_eq: None,
-        reduced_costs: None,
-        var_basis: None,
-        row_basis: None,
+        dual_ub: certificate
+            .as_ref()
+            .and_then(|fields| fields.dual_ub.clone()),
+        dual_eq: certificate
+            .as_ref()
+            .and_then(|fields| fields.dual_eq.clone()),
+        reduced_costs: certificate
+            .as_ref()
+            .and_then(|fields| fields.reduced_costs.clone()),
+        var_basis: certificate
+            .as_ref()
+            .and_then(|fields| fields.var_basis.clone()),
+        row_basis: certificate
+            .as_ref()
+            .and_then(|fields| fields.row_basis.clone()),
         iterations: None,
         elapsed_ms: elapsed,
         message: parsed.status,
@@ -4710,6 +4775,15 @@ struct ParsedNativeLpSolveSolution {
 }
 
 #[derive(Default)]
+struct NativeLpSolveCertificateFields {
+    reduced_costs: Option<Vec<f64>>,
+    dual_ub: Option<Vec<f64>>,
+    dual_eq: Option<Vec<f64>>,
+    var_basis: Option<Vec<String>>,
+    row_basis: Option<Vec<String>>,
+}
+
+#[derive(Default)]
 struct HighsMipQuality {
     best_bound: Option<f64>,
     mip_gap: Option<f64>,
@@ -5173,6 +5247,8 @@ struct ScipLpCertificateFields {
     dual_ub: Option<Vec<f64>>,
     dual_eq: Option<Vec<f64>>,
     reduced_costs: Option<Vec<f64>>,
+    var_basis: Option<Vec<String>>,
+    row_basis: Option<Vec<String>>,
 }
 
 fn parse_scip_lp_certificate_fields(
@@ -5180,7 +5256,12 @@ fn parse_scip_lp_certificate_fields(
     _sense: Sense,
     objective_coefficients: &[f64],
     le_rows: &[Vec<f64>],
+    le_rhs: &[f64],
     eq_rows: &[Vec<f64>],
+    eq_rhs: &[f64],
+    lower_bounds: Option<&[Option<f64>]>,
+    upper_bounds: Option<&[Option<f64>]>,
+    x: &[f64],
 ) -> ScipLpCertificateFields {
     let mut dual_ub = vec![0.0; le_rows.len()];
     let mut dual_eq = vec![0.0; eq_rows.len()];
@@ -5209,11 +5290,111 @@ fn parse_scip_lp_certificate_fields(
     let reduced_costs = saw_dual.then(|| {
         reduced_costs_from_row_duals(objective_coefficients, le_rows, &dual_ub, eq_rows, &dual_eq)
     });
+    let (var_basis, row_basis) = reduced_costs
+        .as_deref()
+        .map(|reduced_costs| {
+            infer_lp_basis_from_complementarity(
+                x,
+                lower_bounds,
+                upper_bounds,
+                le_rows,
+                le_rhs,
+                &dual_ub,
+                eq_rows,
+                eq_rhs,
+                reduced_costs,
+            )
+        })
+        .unwrap_or((None, None));
     ScipLpCertificateFields {
         dual_ub: saw_dual.then_some(dual_ub),
         dual_eq: saw_dual.then_some(dual_eq),
         reduced_costs,
+        var_basis,
+        row_basis,
     }
+}
+
+fn infer_lp_basis_from_complementarity(
+    x: &[f64],
+    lower_bounds: Option<&[Option<f64>]>,
+    upper_bounds: Option<&[Option<f64>]>,
+    le_rows: &[Vec<f64>],
+    le_rhs: &[f64],
+    dual_ub: &[f64],
+    eq_rows: &[Vec<f64>],
+    eq_rhs: &[f64],
+    reduced_costs: &[f64],
+) -> (Option<Vec<String>>, Option<Vec<String>>) {
+    const TOL: f64 = 1.0e-7;
+    if x.len() != reduced_costs.len()
+        || le_rows.len() != le_rhs.len()
+        || le_rows.len() != dual_ub.len()
+        || eq_rows.len() != eq_rhs.len()
+    {
+        return (None, None);
+    }
+
+    let mut var_basis = Vec::with_capacity(x.len());
+    for (idx, (&value, &reduced_cost)) in x.iter().zip(reduced_costs).enumerate() {
+        let lower = lp_lower_bound_at(lower_bounds, idx);
+        let upper = lp_upper_bound_at(upper_bounds, idx);
+        let at_lower = lower.is_some_and(|bound| (value - bound).abs() <= TOL);
+        let at_upper = upper.is_some_and(|bound| (value - bound).abs() <= TOL);
+        let fixed = lower
+            .zip(upper)
+            .is_some_and(|(lower, upper)| (lower - upper).abs() <= TOL);
+        let status = if fixed && (at_lower || at_upper) {
+            "fixed"
+        } else if at_lower && reduced_cost.abs() > TOL {
+            "at_lower"
+        } else if at_upper && reduced_cost.abs() > TOL {
+            "at_upper"
+        } else if !at_lower && !at_upper && reduced_cost.abs() <= TOL {
+            "basic"
+        } else {
+            return (None, None);
+        };
+        var_basis.push(status.to_string());
+    }
+
+    let mut row_basis = Vec::with_capacity(le_rows.len() + eq_rows.len());
+    for ((row, &rhs), &dual) in le_rows.iter().zip(le_rhs).zip(dual_ub) {
+        let activity = dot_f64(row, x);
+        let slack = rhs - activity;
+        if slack < -TOL {
+            return (Some(var_basis), None);
+        }
+        if slack.abs() <= TOL {
+            if dual.abs() > TOL {
+                row_basis.push("at_upper".to_string());
+            } else {
+                return (Some(var_basis), None);
+            }
+        } else {
+            row_basis.push("basic".to_string());
+        }
+    }
+    for (row, &rhs) in eq_rows.iter().zip(eq_rhs) {
+        if (dot_f64(row, x) - rhs).abs() > TOL {
+            return (Some(var_basis), None);
+        }
+        row_basis.push("fixed".to_string());
+    }
+
+    (Some(var_basis), Some(row_basis))
+}
+
+fn lp_lower_bound_at(bounds: Option<&[Option<f64>]>, index: usize) -> Option<f64> {
+    bounds
+        .and_then(|bounds| bounds.get(index).copied())
+        .unwrap_or(Some(0.0))
+}
+
+fn lp_upper_bound_at(bounds: Option<&[Option<f64>]>, index: usize) -> Option<f64> {
+    bounds
+        .and_then(|bounds| bounds.get(index).copied())
+        .unwrap_or(None)
 }
 
 fn reduced_costs_from_row_duals(
@@ -5571,12 +5752,145 @@ fn parse_native_lp_solve_solution_text(
         parsed.status = "optimal".to_string();
     }
 
+    let mut in_variable_values = false;
     for line in text.lines() {
-        if let Some((index, value)) = parse_named_variable_value_line(line.trim(), variable_count) {
+        let stripped = line.trim();
+        let lowered = stripped.to_ascii_lowercase();
+        if lowered.starts_with("actual values of the variables") {
+            in_variable_values = true;
+            continue;
+        }
+        if lowered.starts_with("actual values of the constraints")
+            || lowered.starts_with("objective function limits")
+            || lowered.starts_with("dual values")
+            || lowered.starts_with("cpu time")
+        {
+            in_variable_values = false;
+        }
+        if !in_variable_values {
+            continue;
+        }
+        if let Some((index, value)) = parse_named_variable_value_line(stripped, variable_count) {
             parsed.x[index] = value;
         }
     }
     parsed
+}
+
+fn parse_native_lp_solve_lp_certificate_fields(
+    text: &str,
+    basis_path: &Path,
+    variable_count: usize,
+    le_count: usize,
+    eq_count: usize,
+) -> NativeLpSolveCertificateFields {
+    let mut row_duals = vec![None::<f64>; le_count + eq_count];
+    let mut reduced_costs = vec![None::<f64>; variable_count];
+    let mut in_dual_table = false;
+
+    for line in text.lines() {
+        let stripped = line.trim();
+        if stripped.is_empty() {
+            continue;
+        }
+        let lowered = stripped.to_ascii_lowercase();
+        if lowered.starts_with("dual values with") {
+            in_dual_table = true;
+            continue;
+        }
+        if in_dual_table && lowered.starts_with("dual value") {
+            continue;
+        }
+
+        let parts = stripped.split_whitespace().collect::<Vec<_>>();
+        if parts.len() < 2 {
+            continue;
+        }
+        if let Some(index) = basis_row_index(parts[0], le_count, eq_count) {
+            if let Some(value) = parse_f64_token(parts[1]) {
+                row_duals[index] = Some(clean_certificate_value(value));
+            }
+        } else if let Some(index) =
+            highs_variable_index(parts[0]).filter(|index| *index < variable_count)
+        {
+            let numeric_tokens = parts
+                .iter()
+                .skip(1)
+                .filter_map(|token| parse_f64_token(token))
+                .collect::<Vec<_>>();
+            let value = if in_dual_table {
+                numeric_tokens.first().copied()
+            } else {
+                numeric_tokens.get(1).copied()
+            };
+            if let Some(value) = value {
+                reduced_costs[index] = Some(clean_certificate_value(value));
+            }
+        }
+    }
+
+    let (var_basis, row_basis) = if basis_path.exists() {
+        match fs::read_to_string(basis_path) {
+            Ok(text) => parse_native_lp_solve_basis_text(&text, variable_count, le_count, eq_count),
+            Err(_) => (None, None),
+        }
+    } else {
+        (None, None)
+    };
+
+    NativeLpSolveCertificateFields {
+        reduced_costs: all_some_f64(&reduced_costs),
+        dual_ub: all_some_f64(&row_duals[..le_count]),
+        dual_eq: all_some_f64(&row_duals[le_count..]),
+        var_basis,
+        row_basis,
+    }
+}
+
+fn parse_native_lp_solve_basis_text(
+    text: &str,
+    variable_count: usize,
+    le_count: usize,
+    eq_count: usize,
+) -> (Option<Vec<String>>, Option<Vec<String>>) {
+    let mut var_basis = vec![None::<String>; variable_count];
+    let mut row_basis = vec![Some("basic".to_string()); le_count];
+    row_basis.extend((0..eq_count).map(|_| Some("fixed".to_string())));
+
+    for line in text.lines() {
+        let parts = line.split_whitespace().collect::<Vec<_>>();
+        if parts.is_empty() || matches!(parts[0], "NAME" | "ENDATA") {
+            continue;
+        }
+        let code = parts[0].to_ascii_uppercase();
+        if parts.len() >= 2 && parts[1].starts_with('x') {
+            if let Some(index) =
+                highs_variable_index(parts[1]).filter(|index| *index < variable_count)
+            {
+                let status = match code.as_str() {
+                    "BS" | "XL" | "XU" => Some("basic"),
+                    "LL" => Some("at_lower"),
+                    "UL" => Some("at_upper"),
+                    "FX" => Some("fixed"),
+                    "FR" => Some("free"),
+                    _ => None,
+                };
+                if let Some(status) = status {
+                    var_basis[index] = Some(status.to_string());
+                }
+            }
+        }
+        if matches!(code.as_str(), "XL" | "XU") && parts.len() >= 3 {
+            if let Some(index) = basis_row_index(parts[2], le_count, eq_count) {
+                if parts[2].starts_with('c') {
+                    let status = if code == "XL" { "at_upper" } else { "at_lower" };
+                    row_basis[index] = Some(status.to_string());
+                }
+            }
+        }
+    }
+
+    (all_some_string(&var_basis), all_some_string(&row_basis))
 }
 
 fn parse_named_variable_value_line(line: &str, variable_count: usize) -> Option<(usize, f64)> {
@@ -7873,7 +8187,12 @@ c2                                  0.666666666666667
             Sense::Max,
             &[3.0, 4.0],
             &[vec![1.0, 2.0], vec![-3.0, 1.0], vec![1.0, -1.0]],
+            &[14.0, 0.0, 2.0],
             &[],
+            &[],
+            None,
+            None,
+            &[6.0, 4.0],
         );
         let dual_ub = fields.dual_ub.unwrap();
         assert!((dual_ub[0] - 7.0 / 3.0).abs() <= 1e-8);
@@ -7881,6 +8200,18 @@ c2                                  0.666666666666667
         assert!((dual_ub[2] - 2.0 / 3.0).abs() <= 1e-8);
         assert_eq!(fields.dual_eq, Some(Vec::new()));
         assert_eq!(fields.reduced_costs, Some(vec![0.0, 0.0]));
+        assert_eq!(
+            fields.var_basis,
+            Some(vec!["basic".to_string(), "basic".to_string()])
+        );
+        assert_eq!(
+            fields.row_basis,
+            Some(vec![
+                "at_upper".to_string(),
+                "basic".to_string(),
+                "at_upper".to_string()
+            ])
+        );
     }
 
     #[test]
@@ -7892,11 +8223,38 @@ x0                                                  2 \t(obj:1)
 
 e0                                                  1*
 ";
-        let fields =
-            super::parse_scip_lp_certificate_fields(stdout, Sense::Max, &[1.0], &[], &[vec![1.0]]);
+        let fields = super::parse_scip_lp_certificate_fields(
+            stdout,
+            Sense::Max,
+            &[1.0],
+            &[],
+            &[],
+            &[vec![1.0]],
+            &[2.0],
+            None,
+            None,
+            &[2.0],
+        );
         assert_eq!(fields.dual_ub, Some(Vec::new()));
         assert_eq!(fields.dual_eq, Some(vec![1.0]));
         assert_eq!(fields.reduced_costs, Some(vec![0.0]));
+    }
+
+    #[test]
+    fn inferred_lp_basis_leaves_degenerate_rows_unreported() {
+        let (var_basis, row_basis) = super::infer_lp_basis_from_complementarity(
+            &[1.0],
+            None,
+            None,
+            &[vec![1.0]],
+            &[1.0],
+            &[0.0],
+            &[],
+            &[],
+            &[0.0],
+        );
+        assert_eq!(var_basis, Some(vec!["basic".to_string()]));
+        assert_eq!(row_basis, None);
     }
 
     #[test]
@@ -7934,6 +8292,10 @@ Value of objective function: 12.00000000
 Actual values of the variables:
 x0                              4
 x1                              0
+
+Dual values with from - till limits:
+                           Dual value            From            Till
+x0                                  0          -1e+30           1e+30
 ";
         let parsed = super::parse_native_lp_solve_solution_text(stdout, 2);
         assert_eq!(parsed.status, "optimal");
@@ -7942,6 +8304,74 @@ x1                              0
             super::parse_lp_solve_solver_version(stdout),
             Some("lp_solve 5.5.2.14".to_string())
         );
+    }
+
+    #[test]
+    fn native_lp_solve_lp_certificate_parser_reads_duals_reduced_costs_and_basis() {
+        let stdout = "\
+Value of objective function: 34.00000000
+
+Actual values of the variables:
+x0                              6
+x1                              4
+
+Dual values with from - till limits:
+                           Dual value            From            Till
+c0                           2.333333               2           1e+30
+c1                                  0          -1e+30           1e+30
+c2                          0.6666667              -4              14
+x0                                  0          -1e+30           1e+30
+x1                                  0          -1e+30           1e+30
+";
+        let basis_text = "\
+NAME           Rows 3 Cols 2 Iters 3
+ XL x0        c0
+ XL x1        c2
+ENDATA
+";
+        let basis_path = super::native_lp_solve_temp_path("test-basis", "bas");
+        std::fs::write(&basis_path, basis_text).unwrap();
+        let fields =
+            super::parse_native_lp_solve_lp_certificate_fields(stdout, &basis_path, 2, 3, 0);
+        let _ = std::fs::remove_file(&basis_path);
+
+        assert_eq!(fields.dual_ub, Some(vec![2.333333, 0.0, 0.6666667]));
+        assert_eq!(fields.dual_eq, Some(Vec::new()));
+        assert_eq!(fields.reduced_costs, Some(vec![0.0, 0.0]));
+        assert_eq!(
+            fields.var_basis,
+            Some(vec!["basic".to_string(), "basic".to_string()])
+        );
+        assert_eq!(
+            fields.row_basis,
+            Some(vec![
+                "at_upper".to_string(),
+                "basic".to_string(),
+                "at_upper".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn native_lp_solve_certificate_parser_reads_duals_and_reduced_costs() {
+        let stdout = "\
+c0                              2.5
+e0                             -1.0
+x0                              4 0.25
+x1                              0 -0.5
+";
+        let fields = super::parse_native_lp_solve_lp_certificate_fields(
+            stdout,
+            std::path::Path::new("/tmp/des-rs-missing-lp-solve-test.bas"),
+            2,
+            1,
+            1,
+        );
+        assert_eq!(fields.dual_ub, Some(vec![2.5]));
+        assert_eq!(fields.dual_eq, Some(vec![-1.0]));
+        assert_eq!(fields.reduced_costs, Some(vec![0.25, -0.5]));
+        assert_eq!(fields.var_basis, None);
+        assert_eq!(fields.row_basis, None);
     }
 
     #[test]

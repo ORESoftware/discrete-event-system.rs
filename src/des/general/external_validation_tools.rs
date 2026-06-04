@@ -6407,6 +6407,912 @@ pub fn run_proof_validation_json_with_rust_reference(payload: &Value, tool: &str
     }
 }
 
+fn formal_benchmark_check(name: &str, passed: bool, message: &str) -> Value {
+    json!({
+        "name": name,
+        "passed": passed,
+        "message": if passed { "" } else { message },
+    })
+}
+
+fn formal_benchmark_verdict(checks: &[Value]) -> &'static str {
+    if !checks.is_empty()
+        && checks
+            .iter()
+            .all(|check| check["passed"].as_bool() == Some(true))
+    {
+        "valid"
+    } else {
+        "invalid"
+    }
+}
+
+fn formal_benchmark_result(
+    status: &str,
+    verdict: &str,
+    validator: &str,
+    message: impl Into<String>,
+    checks: Vec<Value>,
+) -> Value {
+    json!({
+        "status": status,
+        "verdict": verdict,
+        "validator": validator,
+        "message": message.into(),
+        "checks": checks,
+        "stdout": "",
+        "stderr": "",
+    })
+}
+
+fn formal_benchmark_strings(payload: &Value, keys: &[&str]) -> Vec<String> {
+    for key in keys {
+        match payload.get(*key) {
+            Some(Value::String(text)) => return vec![text.clone()],
+            Some(Value::Array(items)) => {
+                return items
+                    .iter()
+                    .map(|item| {
+                        item.as_str()
+                            .map(str::to_string)
+                            .unwrap_or_else(|| item.to_string())
+                    })
+                    .collect();
+            }
+            _ => {}
+        }
+    }
+    Vec::new()
+}
+
+fn formal_benchmark_text(payload: &Value, keys: &[&str]) -> String {
+    formal_benchmark_strings(payload, keys)
+        .into_iter()
+        .next()
+        .unwrap_or_default()
+}
+
+fn formal_benchmark_balanced(text: &str, left: char, right: char) -> bool {
+    let mut depth = 0_i32;
+    for ch in text.chars() {
+        if ch == left {
+            depth += 1;
+        } else if ch == right {
+            depth -= 1;
+            if depth < 0 {
+                return false;
+            }
+        }
+    }
+    depth == 0
+}
+
+fn formal_contains_word(text: &str, word: &str) -> bool {
+    text.split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '-')
+        .any(|part| part.eq_ignore_ascii_case(word))
+}
+
+fn formal_line_starts_with(text: &str, prefix: &str) -> bool {
+    let prefix = prefix.to_ascii_lowercase();
+    text.lines()
+        .any(|line| line.trim_start().to_ascii_lowercase().starts_with(&prefix))
+}
+
+fn formal_tla_module_name(module: &str) -> Option<String> {
+    module.lines().find_map(|line| {
+        let line = line.trim();
+        let rest = line.strip_prefix("----")?.trim();
+        let rest = rest.strip_prefix("MODULE")?.trim();
+        let name = rest.strip_suffix("----")?.trim();
+        if name
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_')
+        {
+            Some(name.to_string())
+        } else {
+            None
+        }
+    })
+}
+
+fn formal_validate_tla(payload: &Value) -> Value {
+    let module = formal_benchmark_text(payload, &["module", "model", "text"]);
+    let expected_invariants = formal_benchmark_strings(payload, &["expected_invariants"]);
+    let expected_temporal = formal_benchmark_strings(payload, &["expected_temporal_properties"]);
+    let module_name = formal_tla_module_name(&module);
+    let mut checks = vec![
+        formal_benchmark_check(
+            "module-header",
+            module_name.is_some(),
+            "missing TLA+ module header",
+        ),
+        formal_benchmark_check(
+            "module-terminator",
+            module.trim_end().ends_with("===="),
+            "missing final ====",
+        ),
+        formal_benchmark_check(
+            "init-definition",
+            module.contains("Init =="),
+            "missing Init definition",
+        ),
+        formal_benchmark_check(
+            "next-definition",
+            module.contains("Next =="),
+            "missing Next definition",
+        ),
+        formal_benchmark_check(
+            "spec-definition",
+            module.contains("Spec =="),
+            "missing Spec definition",
+        ),
+    ];
+    for invariant in expected_invariants {
+        checks.push(formal_benchmark_check(
+            &format!("invariant:{invariant}"),
+            module.contains(&format!("{invariant} ==")),
+            "invariant definition missing",
+        ));
+    }
+    for temporal in expected_temporal {
+        checks.push(formal_benchmark_check(
+            &format!("temporal:{temporal}"),
+            module.contains(&format!("{temporal} ==")),
+            "temporal property definition missing",
+        ));
+    }
+    let verdict = formal_benchmark_verdict(&checks);
+    formal_benchmark_result(
+        "ok",
+        verdict,
+        "builtin:tla-structural",
+        module_name
+            .map(|name| format!("module={name}"))
+            .unwrap_or_default(),
+        checks,
+    )
+}
+
+fn formal_validate_prism(payload: &Value) -> Value {
+    let model = formal_benchmark_text(payload, &["model", "module", "text"]);
+    let properties = formal_benchmark_text(payload, &["properties", "props"]);
+    let model_type = model
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let module_count = model
+        .lines()
+        .filter(|line| {
+            let line = line.trim_start().to_ascii_lowercase();
+            line.starts_with("module ") && !line.starts_with("endmodule")
+        })
+        .count();
+    let endmodule_count = model
+        .lines()
+        .filter(|line| line.trim().eq_ignore_ascii_case("endmodule"))
+        .count();
+    let checks = vec![
+        formal_benchmark_check(
+            "model-type",
+            matches!(model_type.as_str(), "dtmc" | "ctmc" | "mdp" | "pta"),
+            "unknown PRISM model type",
+        ),
+        formal_benchmark_check("module-present", module_count > 0, "no PRISM module found"),
+        formal_benchmark_check(
+            "module-balanced",
+            module_count == endmodule_count,
+            "module/endmodule count mismatch",
+        ),
+        formal_benchmark_check(
+            "command-present",
+            model.contains("->"),
+            "no transition command found",
+        ),
+        formal_benchmark_check(
+            "properties-present",
+            !properties.trim().is_empty(),
+            "no PRISM properties supplied",
+        ),
+    ];
+    let verdict = formal_benchmark_verdict(&checks);
+    formal_benchmark_result("ok", verdict, "builtin:prism-structural", "", checks)
+}
+
+fn formal_validate_promela(payload: &Value) -> Value {
+    let model = formal_benchmark_text(payload, &["model", "promela", "text"]);
+    let properties = formal_benchmark_strings(payload, &["properties", "ltl"]);
+    let expected_ltl = formal_benchmark_strings(payload, &["expected_ltl_properties"]);
+    let mut checks = vec![
+        formal_benchmark_check(
+            "process-present",
+            formal_contains_word(&model, "init") || formal_contains_word(&model, "proctype"),
+            "missing init/proctype",
+        ),
+        formal_benchmark_check(
+            "braces-balanced",
+            formal_benchmark_balanced(&model, '{', '}'),
+            "Promela braces are not balanced",
+        ),
+        formal_benchmark_check(
+            "statement-terminator",
+            model.contains(';') || model.contains("->"),
+            "no Promela statements found",
+        ),
+    ];
+    for property in properties {
+        let property_lower = property.to_ascii_lowercase();
+        checks.push(formal_benchmark_check(
+            &format!("ltl:{}", property.chars().take(24).collect::<String>()),
+            property_lower.contains("ltl") || property.contains("<>") || property.contains("[]"),
+            "malformed LTL property",
+        ));
+    }
+    for name in expected_ltl {
+        checks.push(formal_benchmark_check(
+            &format!("expected-ltl:{name}"),
+            model.contains(&name),
+            "expected LTL property missing",
+        ));
+    }
+    let verdict = formal_benchmark_verdict(&checks);
+    formal_benchmark_result("ok", verdict, "builtin:promela-structural", "", checks)
+}
+
+fn formal_validate_smv(payload: &Value) -> Value {
+    let model = formal_benchmark_text(payload, &["model", "smv", "text"]);
+    let properties = formal_benchmark_strings(payload, &["properties"]).join("\n");
+    let combined = format!("{model}\n{properties}").to_ascii_uppercase();
+    let checks = vec![
+        formal_benchmark_check(
+            "module-main",
+            formal_line_starts_with(&model, "MODULE main"),
+            "missing MODULE main",
+        ),
+        formal_benchmark_check(
+            "var-section",
+            formal_line_starts_with(&model, "VAR"),
+            "missing VAR section",
+        ),
+        formal_benchmark_check(
+            "state-update",
+            formal_line_starts_with(&model, "ASSIGN")
+                || formal_line_starts_with(&model, "INIT")
+                || formal_line_starts_with(&model, "TRANS"),
+            "missing ASSIGN/INIT/TRANS section",
+        ),
+        formal_benchmark_check(
+            "property-present",
+            ["CTLSPEC", "LTLSPEC", "INVARSPEC", "SPEC"]
+                .iter()
+                .any(|token| combined.contains(token)),
+            "missing nuXmv/SMV property",
+        ),
+    ];
+    let verdict = formal_benchmark_verdict(&checks);
+    formal_benchmark_result("ok", verdict, "builtin:smv-structural", "", checks)
+}
+
+fn formal_validate_cbmc(payload: &Value) -> Value {
+    let source = formal_benchmark_text(payload, &["source", "model", "c", "text"]);
+    let expected_assertions = formal_benchmark_strings(payload, &["expected_assertions"]);
+    let mut checks = vec![
+        formal_benchmark_check(
+            "main-function",
+            source.contains(" main(") || source.contains(" main ("),
+            "missing main function",
+        ),
+        formal_benchmark_check(
+            "braces-balanced",
+            formal_benchmark_balanced(&source, '{', '}'),
+            "C braces are not balanced",
+        ),
+        formal_benchmark_check(
+            "assertion-present",
+            source.contains("__CPROVER_assert")
+                || source.contains("assert(")
+                || source.contains("assert ("),
+            "missing C/CBMC assertion",
+        ),
+    ];
+    for assertion in expected_assertions {
+        checks.push(formal_benchmark_check(
+            &format!("assertion:{assertion}"),
+            source.contains(&assertion),
+            "expected assertion text missing",
+        ));
+    }
+    let verdict = formal_benchmark_verdict(&checks);
+    formal_benchmark_result("ok", verdict, "builtin:cbmc-structural", "", checks)
+}
+
+fn formal_validate_alloy(payload: &Value) -> Value {
+    let model = formal_benchmark_text(payload, &["model", "alloy", "text"]);
+    let commands = formal_benchmark_strings(payload, &["commands", "properties"]).join("\n");
+    let combined = format!("{model}\n{commands}").to_ascii_lowercase();
+    let model_lower = model.to_ascii_lowercase();
+    let checks = vec![
+        formal_benchmark_check(
+            "module-or-signature",
+            model_lower.contains("module ") || model_lower.contains("sig "),
+            "missing module/sig",
+        ),
+        formal_benchmark_check(
+            "signature-present",
+            model_lower.contains("sig "),
+            "missing Alloy signature",
+        ),
+        formal_benchmark_check(
+            "braces-balanced",
+            formal_benchmark_balanced(&model, '{', '}'),
+            "Alloy braces are not balanced",
+        ),
+        formal_benchmark_check(
+            "predicate-or-fact",
+            ["pred ", "fact ", "assert "]
+                .iter()
+                .any(|token| model_lower.contains(token)),
+            "missing pred/fact/assert",
+        ),
+        formal_benchmark_check(
+            "command-present",
+            combined.contains("run ") || combined.contains("check "),
+            "missing run/check command",
+        ),
+    ];
+    let verdict = formal_benchmark_verdict(&checks);
+    formal_benchmark_result("ok", verdict, "builtin:alloy-structural", "", checks)
+}
+
+fn formal_validate_uppaal(payload: &Value) -> Value {
+    let model = formal_benchmark_text(payload, &["model", "xml", "text"]);
+    let queries = formal_benchmark_strings(payload, &["queries", "properties", "query"]).join("\n");
+    let checks = vec![
+        formal_benchmark_check(
+            "nta-root",
+            model.contains("<nta") && model.contains("</nta>"),
+            "missing UPPAAL nta root",
+        ),
+        formal_benchmark_check(
+            "template-present",
+            model.contains("<template") && model.contains("</template>"),
+            "missing template",
+        ),
+        formal_benchmark_check(
+            "location-present",
+            model.contains("<location"),
+            "missing location",
+        ),
+        formal_benchmark_check(
+            "transition-present",
+            model.contains("<transition"),
+            "missing transition",
+        ),
+        formal_benchmark_check(
+            "query-present",
+            !queries.trim().is_empty(),
+            "missing UPPAAL query",
+        ),
+        formal_benchmark_check(
+            "query-operator",
+            ["A[]", "E[]", "A<>", "E<>", "A []", "E []", "A <>", "E <>"]
+                .iter()
+                .any(|token| queries.contains(token)),
+            "missing UPPAAL temporal operator",
+        ),
+    ];
+    let verdict = formal_benchmark_verdict(&checks);
+    formal_benchmark_result("ok", verdict, "builtin:uppaal-structural", "", checks)
+}
+
+fn formal_validate_mcrl2(payload: &Value) -> Value {
+    let spec = formal_benchmark_text(payload, &["model", "mcrl2", "spec", "text"]);
+    let properties = formal_benchmark_strings(payload, &["properties", "formulae"]).join("\n");
+    let checks = vec![
+        formal_benchmark_check(
+            "action-section",
+            formal_line_starts_with(&spec, "act"),
+            "missing mCRL2 act section",
+        ),
+        formal_benchmark_check(
+            "process-section",
+            formal_line_starts_with(&spec, "proc"),
+            "missing mCRL2 proc section",
+        ),
+        formal_benchmark_check(
+            "init-section",
+            formal_line_starts_with(&spec, "init"),
+            "missing mCRL2 init section",
+        ),
+        formal_benchmark_check(
+            "semicolon-present",
+            spec.contains(';'),
+            "missing mCRL2 statement terminators",
+        ),
+        formal_benchmark_check(
+            "property-or-modal-operator",
+            !properties.trim().is_empty()
+                || ["[", "<", "mu ", "nu "]
+                    .iter()
+                    .any(|token| spec.contains(token)),
+            "missing mCRL2 modal property/formula",
+        ),
+    ];
+    let verdict = formal_benchmark_verdict(&checks);
+    formal_benchmark_result("ok", verdict, "builtin:mcrl2-structural", "", checks)
+}
+
+fn formal_validate_maude(payload: &Value) -> Value {
+    let module = formal_benchmark_text(payload, &["model", "maude", "module", "text"]);
+    let commands = formal_benchmark_strings(payload, &["commands", "properties"]).join("\n");
+    let lower = module.to_ascii_lowercase();
+    let checks = vec![
+        formal_benchmark_check(
+            "module-header",
+            (lower.contains("mod ") || lower.contains("fmod ")) && lower.contains(" is"),
+            "missing Maude module header",
+        ),
+        formal_benchmark_check(
+            "module-terminator",
+            lower.contains("endfm") || lower.contains("endm"),
+            "missing Maude module terminator",
+        ),
+        formal_benchmark_check(
+            "operator-or-rule",
+            ["op ", "eq ", "rl ", "crl "]
+                .iter()
+                .any(|token| lower.contains(token)),
+            "missing Maude op/equation/rule",
+        ),
+        formal_benchmark_check(
+            "brackets-balanced",
+            formal_benchmark_balanced(&module, '[', ']'),
+            "Maude brackets are not balanced",
+        ),
+        formal_benchmark_check(
+            "command-present",
+            !commands.trim().is_empty()
+                || ["search", "red", "rew"]
+                    .iter()
+                    .any(|token| lower.contains(token)),
+            "missing Maude command/search",
+        ),
+    ];
+    let verdict = formal_benchmark_verdict(&checks);
+    formal_benchmark_result("ok", verdict, "builtin:maude-structural", "", checks)
+}
+
+fn formal_validate_program_verifier(payload: &Value, tool: &str) -> Value {
+    let source = formal_benchmark_text(payload, &["source", "model", "program", "spec", "text"]);
+    let language = model_validation_normalized_tool(
+        payload
+            .get("language")
+            .and_then(Value::as_str)
+            .unwrap_or(tool),
+    );
+    let contract_text =
+        formal_benchmark_strings(payload, &["contracts", "properties", "expected_contracts"])
+            .join("\n");
+    let combined = format!("{source}\n{contract_text}");
+    let combined_lower = combined.to_ascii_lowercase();
+    let source_lower = source.to_ascii_lowercase();
+    let has_contract = [
+        "requires",
+        "ensures",
+        "invariant",
+        "assert",
+        "assume",
+        "lemma",
+        "theorem",
+        "goal",
+        "predicate",
+        "claim",
+    ]
+    .iter()
+    .any(|token| formal_contains_word(&combined_lower, token))
+        || source.contains("/*@")
+        || source.contains("//@")
+        || source.contains("#[kani::proof]");
+    let mut checks = vec![
+        formal_benchmark_check(
+            "source-present",
+            !source.trim().is_empty(),
+            "missing program/verifier source",
+        ),
+        formal_benchmark_check(
+            "braces-balanced",
+            formal_benchmark_balanced(&source, '{', '}'),
+            "program braces are not balanced",
+        ),
+        formal_benchmark_check(
+            "contract-or-assertion",
+            has_contract,
+            "missing contract/assertion/proof obligation",
+        ),
+    ];
+    match language.as_str() {
+        "dafny" => {
+            checks.push(formal_benchmark_check(
+                "dafny-declaration",
+                ["method", "function", "predicate", "lemma", "class"]
+                    .iter()
+                    .any(|token| formal_contains_word(&source_lower, token)),
+                "missing Dafny declaration",
+            ));
+            checks.push(formal_benchmark_check(
+                "dafny-spec",
+                ["requires", "ensures", "invariant", "assert"]
+                    .iter()
+                    .any(|token| formal_contains_word(&combined_lower, token)),
+                "missing Dafny specification",
+            ));
+        }
+        "why3" | "whyml" => {
+            checks.push(formal_benchmark_check(
+                "why3-module",
+                source_lower.contains("module "),
+                "missing Why3 module",
+            ));
+            checks.push(formal_benchmark_check(
+                "why3-obligation",
+                ["goal", "lemma", "let", "requires", "ensures", "invariant"]
+                    .iter()
+                    .any(|token| formal_contains_word(&combined_lower, token)),
+                "missing Why3 proof obligation",
+            ));
+        }
+        "frama-c" | "framac" => {
+            let has_c_function = source.lines().any(|line| {
+                let line = line.trim_start();
+                ["int ", "void ", "double ", "float ", "char "]
+                    .iter()
+                    .any(|prefix| line.starts_with(prefix))
+                    && line.contains('(')
+            });
+            checks.push(formal_benchmark_check(
+                "c-function",
+                has_c_function,
+                "missing C function",
+            ));
+            checks.push(formal_benchmark_check(
+                "acsl-contract",
+                source.contains("/*@") || source.contains("//@"),
+                "missing ACSL annotation",
+            ));
+        }
+        "kani" | "mirai" | "rust" => {
+            checks.push(formal_benchmark_check(
+                "rust-function",
+                source_lower.contains("fn "),
+                "missing Rust function",
+            ));
+            checks.push(formal_benchmark_check(
+                "rust-harness-or-assert",
+                source.contains("#[kani::proof]")
+                    || source_lower.contains("kani::")
+                    || source.contains("assert!"),
+                "missing Rust verifier harness/assertion",
+            ));
+        }
+        "ebmc" | "esbmc" | "cbmc" | "cpa-checker" | "cpachecker" | "jbmc" | "klee" => {
+            checks.push(formal_benchmark_check(
+                "bounded-model-assertion",
+                source.contains("__CPROVER_assert")
+                    || source.contains("assert(")
+                    || source.contains("assert ("),
+                "missing bounded-model-checker assertion",
+            ));
+        }
+        "coq" | "isabelle" | "lean" | "pvs" | "acl2" => {
+            checks.push(formal_benchmark_check(
+                "proof-declaration",
+                ["Theorem", "Lemma", "theorem", "lemma", "Definition", "def"]
+                    .iter()
+                    .any(|token| source.contains(token)),
+                "missing proof assistant theorem/lemma",
+            ));
+        }
+        _ => {}
+    }
+    let verdict = formal_benchmark_verdict(&checks);
+    formal_benchmark_result(
+        "ok",
+        verdict,
+        "builtin:program-verifier-structural",
+        language,
+        checks,
+    )
+}
+
+fn formal_validate_security_protocol(payload: &Value, tool: &str) -> Value {
+    let model = formal_benchmark_text(payload, &["model", "protocol", "source", "spec", "text"]);
+    let properties =
+        formal_benchmark_strings(payload, &["properties", "queries", "lemmas"]).join("\n");
+    let combined = format!("{model}\n{properties}");
+    let lower = combined.to_ascii_lowercase();
+    let model_lower = model.to_ascii_lowercase();
+    let mut checks = vec![
+        formal_benchmark_check(
+            "model-present",
+            !model.trim().is_empty(),
+            "missing security-protocol model",
+        ),
+        formal_benchmark_check(
+            "braces-balanced",
+            formal_benchmark_balanced(&model, '{', '}'),
+            "protocol braces are not balanced",
+        ),
+        formal_benchmark_check(
+            "actor-or-process",
+            ["role", "process", "principal", "rule", "protocol", "theory"]
+                .iter()
+                .any(|token| formal_contains_word(&model_lower, token)),
+            "missing role/process/rule/protocol declaration",
+        ),
+        formal_benchmark_check(
+            "query-or-lemma",
+            [
+                "query",
+                "lemma",
+                "claim",
+                "confidentiality",
+                "authentication",
+                "secrecy",
+            ]
+            .iter()
+            .any(|token| formal_contains_word(&lower, token) || lower.contains(token)),
+            "missing security query/lemma/claim",
+        ),
+    ];
+    match tool {
+        "tamarin" => {
+            checks.push(formal_benchmark_check(
+                "tamarin-theory",
+                model_lower.contains("theory ") && model_lower.contains(" begin"),
+                "missing theory begin",
+            ));
+            checks.push(formal_benchmark_check(
+                "tamarin-end",
+                formal_contains_word(&model_lower, "end"),
+                "missing theory end",
+            ));
+            checks.push(formal_benchmark_check(
+                "tamarin-rule",
+                model_lower.contains("rule "),
+                "missing Tamarin rule",
+            ));
+        }
+        "proverif" | "cryptoverif" | "deepsec" => {
+            checks.push(formal_benchmark_check(
+                "applied-pi-shape",
+                ["free", "fun", "event", "query", "process"]
+                    .iter()
+                    .any(|token| formal_contains_word(&lower, token)),
+                "missing applied-pi/protocol declarations",
+            ));
+        }
+        "scyther" => {
+            checks.push(formal_benchmark_check(
+                "scyther-protocol",
+                model_lower.contains("protocol "),
+                "missing protocol declaration",
+            ));
+            checks.push(formal_benchmark_check(
+                "scyther-role",
+                model_lower.contains("role "),
+                "missing role declaration",
+            ));
+            checks.push(formal_benchmark_check(
+                "scyther-claim",
+                lower.contains("claim"),
+                "missing claim",
+            ));
+        }
+        "verifpal" => {
+            checks.push(formal_benchmark_check(
+                "verifpal-query",
+                lower.contains("queries") || lower.contains("confidentiality?"),
+                "missing Verifpal query block",
+            ));
+        }
+        _ => {}
+    }
+    let verdict = formal_benchmark_verdict(&checks);
+    formal_benchmark_result(
+        "ok",
+        verdict,
+        "builtin:security-protocol-structural",
+        tool,
+        checks,
+    )
+}
+
+fn formal_validate_benchmark_manifest(payload: &Value) -> Value {
+    let suite = payload
+        .get("suite")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    let entries = payload.get("entries");
+    let require_paths = payload
+        .get("require_paths")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let root_dir = payload
+        .get("root_dir")
+        .and_then(Value::as_str)
+        .unwrap_or(".");
+    let mut checks = vec![
+        formal_benchmark_check(
+            "suite-present",
+            !suite.is_empty(),
+            "missing benchmark suite",
+        ),
+        formal_benchmark_check(
+            "entries-array",
+            entries.is_some_and(Value::is_array),
+            "entries must be an array",
+        ),
+    ];
+    let mut names = BTreeMap::<String, ()>::new();
+    if let Some(entries) = entries.and_then(Value::as_array) {
+        checks.push(formal_benchmark_check(
+            "entries-nonempty",
+            !entries.is_empty(),
+            "manifest has no entries",
+        ));
+        for (idx, entry) in entries.iter().enumerate() {
+            let Some(entry_obj) = entry.as_object() else {
+                checks.push(formal_benchmark_check(
+                    &format!("entry:{idx}:object"),
+                    false,
+                    "entry must be an object",
+                ));
+                continue;
+            };
+            let name = entry_obj
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            let family = entry_obj
+                .get("family")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            let format = entry_obj
+                .get("format")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase();
+            let path = entry_obj
+                .get("path")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            checks.push(formal_benchmark_check(
+                &format!("entry:{idx}:name"),
+                !name.is_empty(),
+                "missing entry name",
+            ));
+            checks.push(formal_benchmark_check(
+                &format!("entry:{idx}:family"),
+                !family.is_empty(),
+                "missing entry family",
+            ));
+            checks.push(formal_benchmark_check(
+                &format!("entry:{idx}:format"),
+                !format.is_empty(),
+                "missing entry format",
+            ));
+            checks.push(formal_benchmark_check(
+                &format!("entry:{idx}:path"),
+                !path.is_empty(),
+                "missing entry path",
+            ));
+            let unique = name.is_empty() || !names.contains_key(name);
+            checks.push(formal_benchmark_check(
+                &format!("entry:{idx}:unique"),
+                unique,
+                "duplicate entry name",
+            ));
+            if !name.is_empty() {
+                names.insert(name.to_string(), ());
+            }
+            if !format.is_empty() {
+                checks.push(formal_benchmark_check(
+                    &format!("entry:{idx}:format-known"),
+                    matches!(
+                        format.as_str(),
+                        "lp" | "mps" | "nl" | "osil" | "json" | "dzn" | "qplib" | "cnf" | "fzn"
+                    ),
+                    &format!("unrecognized benchmark format {format:?}"),
+                ));
+            }
+            if require_paths && !path.is_empty() {
+                checks.push(formal_benchmark_check(
+                    &format!("entry:{idx}:path-exists"),
+                    Path::new(root_dir).join(path).is_file(),
+                    &format!(
+                        "benchmark file not found: {}",
+                        Path::new(root_dir).join(path).display()
+                    ),
+                ));
+            }
+        }
+    }
+    let verdict = formal_benchmark_verdict(&checks);
+    formal_benchmark_result("ok", verdict, "builtin:benchmark-manifest", "", checks)
+}
+
+pub fn run_formal_benchmark_validation_json_with_rust_reference(
+    payload: &Value,
+    tool: &str,
+) -> Value {
+    let tool = model_validation_normalized_tool(tool);
+    let kind = payload
+        .get("kind")
+        .and_then(Value::as_str)
+        .map(model_validation_normalized_tool)
+        .unwrap_or_default();
+    match (kind.as_str(), tool.as_str()) {
+        ("tla-validation" | "tla-plus-validation", _) | (_, "tlc" | "apalache" | "tla") => {
+            formal_validate_tla(payload)
+        }
+        ("prism-validation" | "prism-model-validation", _) | (_, "prism" | "storm") => {
+            formal_validate_prism(payload)
+        }
+        ("alloy-validation" | "kodkod-validation", _) | (_, "alloy" | "kodkod") => {
+            formal_validate_alloy(payload)
+        }
+        ("promela-validation" | "spin-validation", _) | (_, "spin") => {
+            formal_validate_promela(payload)
+        }
+        ("smv-validation" | "nuxmv-validation", _) | (_, "nuxmv") => formal_validate_smv(payload),
+        ("uppaal-validation" | "uppaal-xml-validation", _) | (_, "uppaal") => {
+            formal_validate_uppaal(payload)
+        }
+        ("cbmc-validation" | "c-bounded-model-validation", _) | (_, "cbmc") => {
+            formal_validate_cbmc(payload)
+        }
+        ("program-verifier-validation" | "deductive-verification", _)
+        | (
+            _,
+            "dafny" | "frama-c" | "framac" | "why3" | "whyml" | "kani" | "mirai" | "ebmc" | "esbmc"
+            | "cpa-checker" | "cpachecker" | "jbmc" | "klee" | "coq" | "isabelle" | "lean" | "pvs"
+            | "acl2",
+        ) => formal_validate_program_verifier(payload, &tool),
+        ("security-protocol-validation" | "protocol-verification", _)
+        | (
+            _,
+            "tamarin" | "proverif" | "cryptoverif" | "deepsec" | "scyther" | "verifpal" | "sapic"
+            | "sapic-plus",
+        ) => formal_validate_security_protocol(payload, &tool),
+        ("mcrl2-validation" | "mcrl2-spec-validation", _) | (_, "mcrl2") => {
+            formal_validate_mcrl2(payload)
+        }
+        ("maude-validation" | "maude-module-validation", _) | (_, "maude") => {
+            formal_validate_maude(payload)
+        }
+        ("external-benchmark-manifest", _)
+        | (
+            _,
+            "benchmark" | "miplib" | "qplib" | "minlplib" | "netlib-lp" | "csplib" | "or-library"
+            | "tsplib" | "vrplib" | "minizinc-challenge",
+        ) => formal_validate_benchmark_manifest(payload),
+        _ => formal_benchmark_result(
+            "unavailable",
+            "unknown",
+            &tool,
+            format!("unknown formal/benchmark payload kind {kind:?}"),
+            Vec::new(),
+        ),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct SimulationMetricExpectation {
     pub name: String,

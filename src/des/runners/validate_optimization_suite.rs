@@ -74,7 +74,8 @@ use crate::des::general::external_linear_cli::{
     solve_indicator_ipmip_with_external_cli, solve_ipmip_with_external_cli,
     solve_lower_bounded_ipmip_with_external_cli, solve_lp_with_external_cli,
     solve_multi_objective_ipmip_with_external_cli, solve_pwl_ipmip_with_external_cli,
-    solve_quadratic_objective_ipmip_with_external_cli, solve_source_ipmip_with_external_cli,
+    solve_quadratic_objective_ipmip_with_external_cli, solve_semi_ipmip_with_external_cli,
+    solve_sos_ipmip_with_external_cli, solve_source_ipmip_with_external_cli,
     sos_ipmip_problem_to_cli_json, source_ipmip_problem_to_cli_json, ExternalLinearCliBranchRule,
     ExternalLinearCliKind, ExternalLinearCliLicenseClass, ExternalLinearCliLpAlgorithm,
     ExternalLinearCliMipSwitch, ExternalLinearCliModelFormat, ExternalLinearCliNodeSelection,
@@ -154,8 +155,9 @@ use crate::des::general::external_validation_tools::{
     prism_validation_model_to_string, prism_validation_properties_to_string,
     probe_external_validation_tool, run_external_validation_artifact_cli,
     run_external_validation_consensus, run_external_validation_file_cli,
-    run_external_validation_text_cli, run_model_validation_json_with_rust_reference,
-    run_output_validation_json_with_rust_reference, run_proof_validation_json_with_rust_reference,
+    run_external_validation_text_cli, run_formal_benchmark_validation_json_with_rust_reference,
+    run_model_validation_json_with_rust_reference, run_output_validation_json_with_rust_reference,
+    run_proof_validation_json_with_rust_reference,
     run_simulation_validation_json_with_external_reference,
     run_simulation_validation_with_external_reference, simulation_validation_request_to_json,
     smtlib_validation_script_to_string, tla_validation_module_to_string, DimacsCnf,
@@ -2917,10 +2919,413 @@ impl Driver {
         stdin_json: &str,
         extra_args: &[&str],
     ) -> LinearCliReference {
-        let mut args = vec!["--kind", kind, "--solver", solver];
-        args.extend_from_slice(extra_args);
-        let value = self.run_python_json("linear_cli_reference.py", &args, stdin_json);
-        serde_json::from_value(value).expect("parse linear CLI reference")
+        let solver = Self::parse_external_linear_cli_solver(solver);
+        let opts = Self::parse_external_linear_cli_options(solver, extra_args);
+        let payload: serde_json::Value =
+            serde_json::from_str(stdin_json).expect("parse linear CLI problem JSON");
+        let solution = match Self::parse_external_linear_cli_kind(kind) {
+            ExternalLinearCliKind::Lp => {
+                let problem = Self::lp_problem_from_linear_cli_json(&payload);
+                solve_lp_with_external_cli(&problem, &opts)
+            }
+            ExternalLinearCliKind::Mip => {
+                let problem = Self::ipmip_problem_from_linear_cli_json(&payload);
+                solve_ipmip_with_external_cli(&problem, &opts)
+            }
+        };
+        Self::linear_cli_reference_from_solution(solution)
+    }
+
+    fn parse_external_linear_cli_kind(kind: &str) -> ExternalLinearCliKind {
+        match kind.trim().to_ascii_lowercase().as_str() {
+            "lp" => ExternalLinearCliKind::Lp,
+            "mip" | "ipmip" | "ip-mip" => ExternalLinearCliKind::Mip,
+            other => panic!("unsupported linear CLI kind '{other}'"),
+        }
+    }
+
+    fn parse_external_linear_cli_solver(solver: &str) -> ExternalLinearCliSolver {
+        let normalized = solver.trim().to_ascii_lowercase().replace('_', "-");
+        ExternalLinearCliSolver::all()
+            .iter()
+            .copied()
+            .find(|candidate| {
+                candidate.as_str() == normalized
+                    || candidate
+                        .command_aliases()
+                        .iter()
+                        .any(|alias| alias.to_ascii_lowercase().replace('_', "-") == normalized)
+            })
+            .unwrap_or_else(|| panic!("unsupported linear CLI solver '{solver}'"))
+    }
+
+    fn parse_external_linear_cli_options(
+        solver: ExternalLinearCliSolver,
+        extra_args: &[&str],
+    ) -> ExternalLinearCliOptions {
+        let mut opts = ExternalLinearCliOptions {
+            solver,
+            ..Default::default()
+        };
+        let mut idx = 0usize;
+        while idx < extra_args.len() {
+            let flag = extra_args[idx];
+            let value = extra_args
+                .get(idx + 1)
+                .unwrap_or_else(|| panic!("missing value for linear CLI option {flag}"));
+            match flag {
+                "--model-format" => {
+                    opts.model_format = match *value {
+                        "lp" | "cplex-lp" => ExternalLinearCliModelFormat::CplexLp,
+                        "mps" => ExternalLinearCliModelFormat::Mps,
+                        other => panic!("unsupported linear CLI model format '{other}'"),
+                    };
+                }
+                "--time-limit" => opts.time_limit_secs = Some(Self::parse_f64_arg(flag, value)),
+                "--node-limit" => {
+                    let limit = Self::parse_u64_arg(flag, value);
+                    opts.node_limit = Some(limit as usize);
+                    opts.max_nodes = Some(limit);
+                }
+                "--solution-limit" => opts.solution_limit = Some(Self::parse_u64_arg(flag, value)),
+                "--solution-pool-size" => {
+                    opts.solution_pool_size = Some(Self::parse_u64_arg(flag, value));
+                }
+                "--relative-gap" => opts.relative_gap = Some(Self::parse_f64_arg(flag, value)),
+                "--absolute-gap" => opts.absolute_gap = Some(Self::parse_f64_arg(flag, value)),
+                "--objective-limit" => {
+                    opts.objective_limit = Some(Self::parse_f64_arg(flag, value))
+                }
+                "--primal-feasibility-tolerance" => {
+                    opts.primal_feasibility_tolerance = Some(Self::parse_f64_arg(flag, value));
+                }
+                "--dual-feasibility-tolerance" => {
+                    opts.dual_feasibility_tolerance = Some(Self::parse_f64_arg(flag, value));
+                }
+                "--integer-feasibility-tolerance" => {
+                    opts.integer_feasibility_tolerance = Some(Self::parse_f64_arg(flag, value));
+                }
+                "--lp-algorithm" => {
+                    opts.lp_algorithm = Some(match *value {
+                        "simplex" => ExternalLinearCliLpAlgorithm::Simplex,
+                        "ipm" | "interior-point" => ExternalLinearCliLpAlgorithm::Ipm,
+                        other => panic!("unsupported linear CLI LP algorithm '{other}'"),
+                    });
+                }
+                "--threads" => opts.threads = Some(Self::parse_u64_arg(flag, value) as u32),
+                "--random-seed" => opts.random_seed = Some(Self::parse_u64_arg(flag, value)),
+                "--presolve" => opts.presolve = Some(Self::parse_external_linear_presolve(value)),
+                "--cuts" => opts.cuts = Some(Self::parse_external_linear_mip_switch(value)),
+                "--heuristics" => {
+                    opts.heuristics = Some(Self::parse_external_linear_mip_switch(value));
+                }
+                "--branch-rule" => {
+                    opts.branch_rule = Some(match *value {
+                        "first-fractional" => ExternalLinearCliBranchRule::FirstFractional,
+                        "most-fractional" => ExternalLinearCliBranchRule::MostFractional,
+                        other => panic!("unsupported linear CLI branch rule '{other}'"),
+                    });
+                }
+                "--branch-priorities" => {
+                    opts.branch_priorities =
+                        Some(serde_json::from_str(value).expect("parse branch priorities JSON"));
+                }
+                "--node-selection" => {
+                    opts.node_selection = Some(match *value {
+                        "dfs" => ExternalLinearCliNodeSelection::Dfs,
+                        "best-bound" => ExternalLinearCliNodeSelection::BestBound,
+                        other => panic!("unsupported linear CLI node selection '{other}'"),
+                    });
+                }
+                "--mip-start" => {
+                    opts.mip_start =
+                        Some(serde_json::from_str(value).expect("parse MIP start JSON"));
+                }
+                other => panic!("unsupported linear CLI option '{other}'"),
+            }
+            idx += 2;
+        }
+        opts
+    }
+
+    fn parse_external_linear_presolve(value: &str) -> ExternalLinearCliPresolve {
+        match value {
+            "auto" => ExternalLinearCliPresolve::Auto,
+            "on" => ExternalLinearCliPresolve::On,
+            "off" => ExternalLinearCliPresolve::Off,
+            other => panic!("unsupported linear CLI presolve mode '{other}'"),
+        }
+    }
+
+    fn parse_external_linear_mip_switch(value: &str) -> ExternalLinearCliMipSwitch {
+        match value {
+            "auto" => ExternalLinearCliMipSwitch::Auto,
+            "on" => ExternalLinearCliMipSwitch::On,
+            "off" => ExternalLinearCliMipSwitch::Off,
+            other => panic!("unsupported linear CLI MIP switch '{other}'"),
+        }
+    }
+
+    fn parse_f64_arg(flag: &str, value: &str) -> f64 {
+        value
+            .parse::<f64>()
+            .unwrap_or_else(|err| panic!("parse {flag} value '{value}' as f64: {err}"))
+    }
+
+    fn parse_u64_arg(flag: &str, value: &str) -> u64 {
+        value
+            .parse::<u64>()
+            .unwrap_or_else(|err| panic!("parse {flag} value '{value}' as u64: {err}"))
+    }
+
+    fn lp_problem_from_linear_cli_json(payload: &serde_json::Value) -> LPProblem {
+        let lp = payload.get("lp").unwrap_or(payload);
+        LPProblem {
+            sense: Self::sense_from_linear_cli_json(lp),
+            c: Self::required_f64_vec(lp, "c"),
+            a_ub: Self::optional_f64_matrix(lp, "a_ub"),
+            b_ub: Self::optional_f64_vec(lp, "b_ub"),
+            a_eq: Self::optional_f64_matrix(lp, "a_eq"),
+            b_eq: Self::optional_f64_vec(lp, "b_eq"),
+            lb: Self::optional_optional_f64_vec(lp, "lb"),
+            ub: Self::optional_optional_f64_vec(lp, "ub"),
+            var_names: Self::optional_string_vec(lp, "var_names"),
+            con_names: Self::optional_string_vec(lp, "con_names"),
+        }
+    }
+
+    fn ipmip_problem_from_linear_cli_json(payload: &serde_json::Value) -> IPMIPProblem {
+        IPMIPProblem {
+            sense: Self::sense_from_linear_cli_json(payload),
+            c: Self::required_f64_vec(payload, "c"),
+            a: Self::required_f64_matrix(payload, "a"),
+            b: Self::required_f64_vec(payload, "b"),
+            integer_vars: Self::required_bool_vec(payload, "integer_vars"),
+            ub: Self::optional_f64_vec(payload, "ub"),
+            var_names: Self::optional_string_vec(payload, "var_names"),
+            con_names: Self::optional_string_vec(payload, "con_names"),
+            lazy_constraints: None,
+            variable_nodes: None,
+            constraint_nodes: None,
+        }
+    }
+
+    fn sense_from_linear_cli_json(payload: &serde_json::Value) -> Sense {
+        match payload
+            .get("sense")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("max")
+        {
+            "max" => Sense::Max,
+            "min" => Sense::Min,
+            other => panic!("unsupported linear CLI sense '{other}'"),
+        }
+    }
+
+    fn required_f64_vec(payload: &serde_json::Value, field: &str) -> Vec<f64> {
+        payload
+            .get(field)
+            .unwrap_or_else(|| panic!("missing linear CLI field '{field}'"))
+            .as_array()
+            .unwrap_or_else(|| panic!("linear CLI field '{field}' must be an array"))
+            .iter()
+            .map(|value| {
+                value
+                    .as_f64()
+                    .unwrap_or_else(|| panic!("linear CLI field '{field}' must contain numbers"))
+            })
+            .collect()
+    }
+
+    fn optional_f64_vec(payload: &serde_json::Value, field: &str) -> Option<Vec<f64>> {
+        match payload.get(field) {
+            None | Some(serde_json::Value::Null) => None,
+            Some(_) => Some(Self::required_f64_vec(payload, field)),
+        }
+    }
+
+    fn required_f64_matrix(payload: &serde_json::Value, field: &str) -> Vec<Vec<f64>> {
+        payload
+            .get(field)
+            .unwrap_or_else(|| panic!("missing linear CLI field '{field}'"))
+            .as_array()
+            .unwrap_or_else(|| panic!("linear CLI field '{field}' must be a matrix"))
+            .iter()
+            .map(|row| {
+                row.as_array()
+                    .unwrap_or_else(|| panic!("linear CLI matrix '{field}' must contain arrays"))
+                    .iter()
+                    .map(|value| {
+                        value.as_f64().unwrap_or_else(|| {
+                            panic!("linear CLI matrix '{field}' must contain numbers")
+                        })
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn optional_f64_matrix(payload: &serde_json::Value, field: &str) -> Option<Vec<Vec<f64>>> {
+        match payload.get(field) {
+            None | Some(serde_json::Value::Null) => None,
+            Some(_) => Some(Self::required_f64_matrix(payload, field)),
+        }
+    }
+
+    fn required_bool_vec(payload: &serde_json::Value, field: &str) -> Vec<bool> {
+        payload
+            .get(field)
+            .unwrap_or_else(|| panic!("missing linear CLI field '{field}'"))
+            .as_array()
+            .unwrap_or_else(|| panic!("linear CLI field '{field}' must be an array"))
+            .iter()
+            .map(|value| {
+                value
+                    .as_bool()
+                    .unwrap_or_else(|| panic!("linear CLI field '{field}' must contain booleans"))
+            })
+            .collect()
+    }
+
+    fn optional_optional_f64_vec(
+        payload: &serde_json::Value,
+        field: &str,
+    ) -> Option<Vec<Option<f64>>> {
+        match payload.get(field) {
+            None | Some(serde_json::Value::Null) => None,
+            Some(value) => Some(
+                value
+                    .as_array()
+                    .unwrap_or_else(|| panic!("linear CLI field '{field}' must be an array"))
+                    .iter()
+                    .map(|entry| {
+                        if entry.is_null() {
+                            None
+                        } else {
+                            Some(entry.as_f64().unwrap_or_else(|| {
+                                panic!("linear CLI field '{field}' must contain numbers or null")
+                            }))
+                        }
+                    })
+                    .collect(),
+            ),
+        }
+    }
+
+    fn optional_string_vec(payload: &serde_json::Value, field: &str) -> Option<Vec<String>> {
+        match payload.get(field) {
+            None | Some(serde_json::Value::Null) => None,
+            Some(value) => Some(
+                value
+                    .as_array()
+                    .unwrap_or_else(|| panic!("linear CLI field '{field}' must be an array"))
+                    .iter()
+                    .map(|entry| {
+                        entry
+                            .as_str()
+                            .unwrap_or_else(|| {
+                                panic!("linear CLI field '{field}' must contain strings")
+                            })
+                            .to_string()
+                    })
+                    .collect(),
+            ),
+        }
+    }
+
+    fn linear_cli_reference_from_solution(
+        solution: ExternalLinearCliSolution,
+    ) -> LinearCliReference {
+        LinearCliReference {
+            status: solution.status.as_str().to_string(),
+            solver: solution.solver,
+            solver_version: solution.solver_version,
+            x: solution.x,
+            objective: solution.objective,
+            objective_values: solution.objective_values,
+            lp_algorithm: solution.lp_algorithm,
+            best_bound: solution.best_bound,
+            solution_limit: solution.solution_limit,
+            solution_pool_size: solution.solution_pool_size,
+            solutions: solution.solutions.map(|solutions| {
+                solutions
+                    .into_iter()
+                    .map(|solution| LinearCliPoolMember {
+                        x: solution.x,
+                        objective: solution.objective,
+                    })
+                    .collect()
+            }),
+            exhausted: solution.exhausted,
+            mip_gap: solution.mip_gap,
+            absolute_gap: solution.absolute_gap,
+            objective_limit: solution.objective_limit,
+            primal_feasibility_tolerance: solution.primal_feasibility_tolerance,
+            dual_feasibility_tolerance: solution.dual_feasibility_tolerance,
+            integer_feasibility_tolerance: solution.integer_feasibility_tolerance,
+            nodes_explored: solution.nodes_explored,
+            threads: solution.threads,
+            random_seed: solution.random_seed,
+            presolve: solution.presolve,
+            cuts: solution.cuts,
+            heuristics: solution.heuristics,
+            branch_rule: solution.branch_rule,
+            branch_priorities_accepted: solution.branch_priorities_accepted,
+            branch_priority_count: solution.branch_priority_count,
+            node_selection: solution.node_selection,
+            mip_start_accepted: solution.mip_start_accepted,
+            mip_start_objective: solution.mip_start_objective,
+            dual_ub: solution.dual_ub,
+            dual_eq: solution.dual_eq,
+            reduced_costs: solution.reduced_costs,
+            var_basis: solution.var_basis,
+            row_basis: solution.row_basis,
+            iterations: solution.iterations,
+            message: solution.message,
+        }
+    }
+
+    fn external_mip_reference_options(solver: ExternalLinearCliSolver) -> ExternalLinearCliOptions {
+        ExternalLinearCliOptions {
+            solver,
+            time_limit_secs: Some(5.0),
+            ..Default::default()
+        }
+    }
+
+    fn mip_reference_from_external_solution(solution: ExternalLinearCliSolution) -> MipReference {
+        MipReference {
+            result: MipReferenceInner {
+                status: solution.status.as_str().to_string(),
+                solver: solution.solver,
+                x: Some(solution.x),
+                objective: solution.objective,
+                objective_values: solution.objective_values,
+                solutions: solution.solutions.map(|solutions| {
+                    solutions
+                        .into_iter()
+                        .map(|solution| MipPoolReferenceSolution {
+                            x: solution.x,
+                            objective: solution.objective,
+                        })
+                        .collect()
+                }),
+                exhausted: solution.exhausted,
+            },
+        }
+    }
+
+    fn solve_mip_reference(problem: &IPMIPProblem) -> MipReference {
+        Self::mip_reference_from_external_solution(solve_ipmip_with_external_cli(
+            problem,
+            &Self::external_mip_reference_options(ExternalLinearCliSolver::Highs),
+        ))
+    }
+
+    fn solve_mip_pool_reference(problem: &IPMIPProblem, pool_size: u64) -> MipReference {
+        let mut opts = Self::external_mip_reference_options(ExternalLinearCliSolver::Cbc);
+        opts.solution_pool_size = Some(pool_size);
+        Self::mip_reference_from_external_solution(solve_ipmip_with_external_cli(problem, &opts))
     }
 
     fn check_source_ipmip_external_cli(
@@ -7496,11 +7901,8 @@ impl Driver {
             "expected_invariants": ["Invariant1"],
             "expected_temporal_properties": ["TemporalProperty1"],
         });
-        let tla_bridge_run = self.run_python_json(
-            "formal_benchmark_validation_reference.py",
-            &["--tool", "tla"],
-            &tla_bridge_payload.to_string(),
-        );
+        let tla_bridge_run =
+            run_formal_benchmark_validation_json_with_rust_reference(&tla_bridge_payload, "tla");
         self.check(
             "External validation TLA bridge valid payload",
             tla_bridge_run["status"].as_str() == Some("ok")
@@ -7514,11 +7916,8 @@ impl Driver {
             ),
         );
         for tool in ["tlc", "apalache"] {
-            let registered_tla_run = self.run_python_json(
-                "formal_benchmark_validation_reference.py",
-                &["--tool", tool],
-                &tla_bridge_payload.to_string(),
-            );
+            let registered_tla_run =
+                run_formal_benchmark_validation_json_with_rust_reference(&tla_bridge_payload, tool);
             self.check(
                 format!("External validation {tool} TLA registered-tool payload"),
                 registered_tla_run["status"].as_str() == Some("ok")
@@ -7538,10 +7937,9 @@ impl Driver {
             "model": prism,
             "properties": prism_props,
         });
-        let prism_bridge_run = self.run_python_json(
-            "formal_benchmark_validation_reference.py",
-            &["--tool", "prism"],
-            &prism_bridge_payload.to_string(),
+        let prism_bridge_run = run_formal_benchmark_validation_json_with_rust_reference(
+            &prism_bridge_payload,
+            "prism",
         );
         self.check(
             "External validation PRISM bridge valid payload",
@@ -7564,10 +7962,9 @@ impl Driver {
             "properties": ["ltl eventually_done { <> done }"],
             "expected_ltl_properties": ["eventually_done"],
         });
-        let promela_bridge_run = self.run_python_json(
-            "formal_benchmark_validation_reference.py",
-            &["--tool", "spin"],
-            &promela_bridge_payload.to_string(),
+        let promela_bridge_run = run_formal_benchmark_validation_json_with_rust_reference(
+            &promela_bridge_payload,
+            "spin",
         );
         self.check(
             "External validation SPIN/Promela bridge valid payload",
@@ -7587,11 +7984,8 @@ impl Driver {
             "model": "MODULE main\nVAR\n  s : boolean;\nASSIGN\n  init(s) := FALSE;\n  next(s) := TRUE;\n",
             "properties": ["INVARSPEC s"],
         });
-        let smv_bridge_run = self.run_python_json(
-            "formal_benchmark_validation_reference.py",
-            &["--tool", "nuxmv"],
-            &smv_bridge_payload.to_string(),
-        );
+        let smv_bridge_run =
+            run_formal_benchmark_validation_json_with_rust_reference(&smv_bridge_payload, "nuxmv");
         self.check(
             "External validation nuXmv/SMV bridge valid payload",
             smv_bridge_run["status"].as_str() == Some("ok")
@@ -7610,11 +8004,8 @@ impl Driver {
             "source": "#include <assert.h>\nint main() {\n  int x = 1;\n  assert(x >= 0);\n  return 0;\n}\n",
             "expected_assertions": ["x >= 0"],
         });
-        let cbmc_bridge_run = self.run_python_json(
-            "formal_benchmark_validation_reference.py",
-            &["--tool", "cbmc"],
-            &cbmc_bridge_payload.to_string(),
-        );
+        let cbmc_bridge_run =
+            run_formal_benchmark_validation_json_with_rust_reference(&cbmc_bridge_payload, "cbmc");
         self.check(
             "External validation CBMC bridge valid payload",
             cbmc_bridge_run["status"].as_str() == Some("ok")
@@ -7633,10 +8024,9 @@ impl Driver {
             "model": "module smoke\nsig Node { next: lone Node }\npred someNode { some Node }\n",
             "commands": ["run someNode for 3"],
         });
-        let alloy_bridge_run = self.run_python_json(
-            "formal_benchmark_validation_reference.py",
-            &["--tool", "alloy"],
-            &alloy_bridge_payload.to_string(),
+        let alloy_bridge_run = run_formal_benchmark_validation_json_with_rust_reference(
+            &alloy_bridge_payload,
+            "alloy",
         );
         self.check(
             "External validation Alloy bridge valid payload",
@@ -7656,10 +8046,9 @@ impl Driver {
             "model": "module smoke\nsig Node { next: lone Node }\npred someNode { some Node }\n",
             "commands": ["run someNode for 3"],
         });
-        let kodkod_bridge_run = self.run_python_json(
-            "formal_benchmark_validation_reference.py",
-            &["--tool", "kodkod"],
-            &kodkod_bridge_payload.to_string(),
+        let kodkod_bridge_run = run_formal_benchmark_validation_json_with_rust_reference(
+            &kodkod_bridge_payload,
+            "kodkod",
         );
         self.check(
             "External validation Kodkod bridge registered-tool payload",
@@ -7679,10 +8068,9 @@ impl Driver {
             "model": "<nta><template><name>P</name><location id=\"id0\"/><init ref=\"id0\"/><transition><source ref=\"id0\"/><target ref=\"id0\"/></transition></template></nta>",
             "queries": ["A[] not deadlock"],
         });
-        let uppaal_bridge_run = self.run_python_json(
-            "formal_benchmark_validation_reference.py",
-            &["--tool", "uppaal"],
-            &uppaal_bridge_payload.to_string(),
+        let uppaal_bridge_run = run_formal_benchmark_validation_json_with_rust_reference(
+            &uppaal_bridge_payload,
+            "uppaal",
         );
         self.check(
             "External validation UPPAAL bridge valid payload",
@@ -7702,10 +8090,9 @@ impl Driver {
             "model": "act a;\nproc P = a . P;\ninit P;\n",
             "properties": ["[true*]<a>true"],
         });
-        let mcrl2_bridge_run = self.run_python_json(
-            "formal_benchmark_validation_reference.py",
-            &["--tool", "mcrl2"],
-            &mcrl2_bridge_payload.to_string(),
+        let mcrl2_bridge_run = run_formal_benchmark_validation_json_with_rust_reference(
+            &mcrl2_bridge_payload,
+            "mcrl2",
         );
         self.check(
             "External validation mCRL2 bridge valid payload",
@@ -7725,10 +8112,9 @@ impl Driver {
             "model": "mod COUNTER is\n  sort Nat .\n  op zero : -> Nat .\n  eq zero = zero .\nendm\n",
             "commands": ["red zero ."],
         });
-        let maude_bridge_run = self.run_python_json(
-            "formal_benchmark_validation_reference.py",
-            &["--tool", "maude"],
-            &maude_bridge_payload.to_string(),
+        let maude_bridge_run = run_formal_benchmark_validation_json_with_rust_reference(
+            &maude_bridge_payload,
+            "maude",
         );
         self.check(
             "External validation Maude bridge valid payload",
@@ -7748,10 +8134,9 @@ impl Driver {
             "language": "dafny",
             "source": "method Inc(x: int) returns (y: int)\n  ensures y > x\n{\n  y := x + 1;\n  assert y > x;\n}\n",
         });
-        let program_verifier_run = self.run_python_json(
-            "formal_benchmark_validation_reference.py",
-            &["--tool", "dafny"],
-            &program_verifier_payload.to_string(),
+        let program_verifier_run = run_formal_benchmark_validation_json_with_rust_reference(
+            &program_verifier_payload,
+            "dafny",
         );
         self.check(
             "External validation program-verifier bridge valid payload",
@@ -7881,11 +8266,8 @@ impl Driver {
                 }),
             ),
         ] {
-            let registered_program_verifier_run = self.run_python_json(
-                "formal_benchmark_validation_reference.py",
-                &["--tool", tool],
-                &payload.to_string(),
-            );
+            let registered_program_verifier_run =
+                run_formal_benchmark_validation_json_with_rust_reference(&payload, tool);
             self.check(
                 format!("External validation {tool} program-verifier registered-tool payload"),
                 registered_program_verifier_run["status"].as_str() == Some("ok")
@@ -7911,10 +8293,9 @@ impl Driver {
             "kind": "security-protocol-validation",
             "model": "theory Smoke begin\nrule Send:\n  [ Fr(~n) ] --[ Secret(~n) ]-> [ Out(~n) ]\nlemma secrecy: all-traces \"All n #i. Secret(n) @ #i ==> not (Ex #j. K(n) @ #j)\"\nend\n",
         });
-        let security_protocol_run = self.run_python_json(
-            "formal_benchmark_validation_reference.py",
-            &["--tool", "tamarin"],
-            &security_protocol_payload.to_string(),
+        let security_protocol_run = run_formal_benchmark_validation_json_with_rust_reference(
+            &security_protocol_payload,
+            "tamarin",
         );
         self.check(
             "External validation security-protocol bridge valid payload",
@@ -7976,11 +8357,8 @@ impl Driver {
                 }),
             ),
         ] {
-            let registered_security_run = self.run_python_json(
-                "formal_benchmark_validation_reference.py",
-                &["--tool", tool],
-                &payload.to_string(),
-            );
+            let registered_security_run =
+                run_formal_benchmark_validation_json_with_rust_reference(&payload, tool);
             self.check(
                 format!("External validation {tool} security-protocol registered-tool payload"),
                 registered_security_run["status"].as_str() == Some("ok")
@@ -8044,10 +8422,9 @@ impl Driver {
                 schema_payload["kind"], simulation_payload["kind"], benchmark_payload["kind"]
             ),
         );
-        let benchmark_bridge_run = self.run_python_json(
-            "formal_benchmark_validation_reference.py",
-            &["--tool", "benchmark"],
-            &benchmark_payload.to_string(),
+        let benchmark_bridge_run = run_formal_benchmark_validation_json_with_rust_reference(
+            &benchmark_payload,
+            "benchmark",
         );
         self.check(
             "External validation benchmark manifest bridge valid payload",
@@ -8080,10 +8457,9 @@ impl Driver {
                     {"name": "sample", "family": family, "format": format, "path": path}
                 ]
             });
-            let registered_benchmark_run = self.run_python_json(
-                "formal_benchmark_validation_reference.py",
-                &["--tool", tool],
-                &registered_benchmark_payload.to_string(),
+            let registered_benchmark_run = run_formal_benchmark_validation_json_with_rust_reference(
+                &registered_benchmark_payload,
+                tool,
             );
             self.check(
                 format!("External validation benchmark {tool} registered-tool payload"),
@@ -8108,10 +8484,9 @@ impl Driver {
                 {"name": "duplicate", "family": "mip", "format": "bogus", "path": "b.foo"}
             ],
         });
-        let invalid_benchmark_bridge_run = self.run_python_json(
-            "formal_benchmark_validation_reference.py",
-            &["--tool", "benchmark"],
-            &invalid_benchmark_bridge_payload.to_string(),
+        let invalid_benchmark_bridge_run = run_formal_benchmark_validation_json_with_rust_reference(
+            &invalid_benchmark_bridge_payload,
+            "benchmark",
         );
         self.check(
             "External validation benchmark manifest bridge invalid payload",
@@ -17217,35 +17592,13 @@ impl Driver {
             .join("optimization-suite");
         std::fs::create_dir_all(&out_dir).expect("create optimization-suite out dir");
         let problem_path = out_dir.join("knapsack-problem.json");
-        let reference_path = out_dir.join("knapsack-reference.json");
         let problem_json = ipmip_problem_to_cli_json(&p);
         std::fs::write(
             &problem_path,
             serde_json::to_string_pretty(&problem_json).expect("serialize MIP problem"),
         )
         .expect("write MIP problem");
-        let script = self.root.join("scripts").join("ip_mip_reference.py");
-        let python = std::env::var("PYTHON_BIN").unwrap_or_else(|_| "python3".to_string());
-        let output = Command::new(&python)
-            .arg(&script)
-            .arg("--problem")
-            .arg(&problem_path)
-            .arg("--out")
-            .arg(&reference_path)
-            .arg("--solver")
-            .arg("auto")
-            .output()
-            .expect("run MIP reference");
-        if !output.status.success() {
-            panic!(
-                "ip_mip_reference failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        let reference: MipReference = serde_json::from_slice(
-            &std::fs::read(&reference_path).expect("read MIP reference JSON"),
-        )
-        .expect("parse MIP reference JSON");
+        let reference = Self::solve_mip_reference(&p);
         self.check(
             "IP/MIP statuses optimal",
             internal.status == IPMIPStatus::Optimal && reference.result.status == "optimal",
@@ -17294,7 +17647,6 @@ impl Driver {
             },
         );
         let pool_problem_path = out_dir.join("solution-pool-problem.json");
-        let pool_reference_path = out_dir.join("solution-pool-reference.json");
         let pool_problem_json = ipmip_problem_to_cli_json(&pool_problem);
         std::fs::write(
             &pool_problem_path,
@@ -17302,28 +17654,7 @@ impl Driver {
                 .expect("serialize solution-pool MIP problem"),
         )
         .expect("write solution-pool MIP problem");
-        let output = Command::new(&python)
-            .arg(&script)
-            .arg("--problem")
-            .arg(&pool_problem_path)
-            .arg("--out")
-            .arg(&pool_reference_path)
-            .arg("--solver")
-            .arg("auto")
-            .arg("--pool-size")
-            .arg("4")
-            .output()
-            .expect("run solution-pool MIP reference");
-        if !output.status.success() {
-            panic!(
-                "ip_mip_reference solution pool failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        let pool_reference: MipReference = serde_json::from_slice(
-            &std::fs::read(&pool_reference_path).expect("read solution-pool MIP reference JSON"),
-        )
-        .expect("parse solution-pool MIP reference JSON");
+        let pool_reference = Self::solve_mip_pool_reference(&pool_problem, 4);
         let pool_reference_solutions = pool_reference.result.solutions.as_deref().unwrap_or(&[]);
         self.check(
             "IP/MIP solution-pool statuses optimal",
@@ -17836,7 +18167,6 @@ impl Driver {
                 },
             );
             let status_problem_path = out_dir.join(format!("mip-{case_name}-problem.json"));
-            let status_reference_path = out_dir.join(format!("mip-{case_name}-reference.json"));
             let status_json = serde_json::json!({
                 "sense": status_mip.sense.as_str(),
                 "c": &status_mip.c,
@@ -17852,26 +18182,7 @@ impl Driver {
                 serde_json::to_string_pretty(&status_json).expect("serialize status MIP problem"),
             )
             .expect("write status MIP problem");
-            let output = Command::new(&python)
-                .arg(&script)
-                .arg("--problem")
-                .arg(&status_problem_path)
-                .arg("--out")
-                .arg(&status_reference_path)
-                .arg("--solver")
-                .arg("auto")
-                .output()
-                .expect("run status MIP reference");
-            if !output.status.success() {
-                panic!(
-                    "status ip_mip_reference failed: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
-            }
-            let status_reference: MipReference = serde_json::from_slice(
-                &std::fs::read(&status_reference_path).expect("read status MIP reference JSON"),
-            )
-            .expect("parse status MIP reference JSON");
+            let status_reference = Self::solve_mip_reference(&status_mip);
             self.check(
                 format!("IP/MIP {case_name} status internal/reference"),
                 status_internal.status == expected_status
@@ -17898,33 +18209,18 @@ impl Driver {
             },
         );
         let lower_problem_path = out_dir.join("lower-bounded-production-problem.json");
-        let lower_reference_path = out_dir.join("lower-bounded-production-reference.json");
         let lower_json = lower_bounded_ipmip_problem_to_cli_json(&lower_problem);
         std::fs::write(
             &lower_problem_path,
             serde_json::to_string_pretty(&lower_json).expect("serialize lower-bounded MIP problem"),
         )
         .expect("write lower-bounded MIP problem");
-        let output = Command::new(&python)
-            .arg(&script)
-            .arg("--problem")
-            .arg(&lower_problem_path)
-            .arg("--out")
-            .arg(&lower_reference_path)
-            .arg("--solver")
-            .arg("auto")
-            .output()
-            .expect("run lower-bounded MIP reference");
-        if !output.status.success() {
-            panic!(
-                "lower-bounded ip_mip_reference failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        let lower_reference: MipReference = serde_json::from_slice(
-            &std::fs::read(&lower_reference_path).expect("read lower-bounded MIP reference JSON"),
-        )
-        .expect("parse lower-bounded MIP reference JSON");
+        let lower_reference = Self::mip_reference_from_external_solution(
+            solve_lower_bounded_ipmip_with_external_cli(
+                &lower_problem,
+                &Self::external_mip_reference_options(ExternalLinearCliSolver::Highs),
+            ),
+        );
         self.check(
             "IP/MIP lower-bounded statuses optimal",
             lower_internal.status == IPMIPStatus::Optimal
@@ -17958,7 +18254,6 @@ impl Driver {
             },
         );
         let general_problem_path = out_dir.join("general-linear-rows-problem.json");
-        let general_reference_path = out_dir.join("general-linear-rows-reference.json");
         let general_json = general_linear_ipmip_problem_to_cli_json(&general_problem);
         std::fs::write(
             &general_problem_path,
@@ -17966,27 +18261,12 @@ impl Driver {
                 .expect("serialize general-linear MIP problem"),
         )
         .expect("write general-linear MIP problem");
-        let output = Command::new(&python)
-            .arg(&script)
-            .arg("--problem")
-            .arg(&general_problem_path)
-            .arg("--out")
-            .arg(&general_reference_path)
-            .arg("--solver")
-            .arg("auto")
-            .output()
-            .expect("run general-linear MIP reference");
-        if !output.status.success() {
-            panic!(
-                "general-linear ip_mip_reference failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        let general_reference: MipReference = serde_json::from_slice(
-            &std::fs::read(&general_reference_path)
-                .expect("read general-linear MIP reference JSON"),
-        )
-        .expect("parse general-linear MIP reference JSON");
+        let general_reference = Self::mip_reference_from_external_solution(
+            solve_general_linear_ipmip_with_external_cli(
+                &general_problem,
+                &Self::external_mip_reference_options(ExternalLinearCliSolver::Highs),
+            ),
+        );
         self.check(
             "IP/MIP general-linear statuses optimal",
             general_internal.status == IPMIPStatus::Optimal
@@ -18021,33 +18301,17 @@ impl Driver {
             },
         );
         let indicator_problem_path = out_dir.join("fixed-charge-indicator-problem.json");
-        let indicator_reference_path = out_dir.join("fixed-charge-indicator-reference.json");
         let indicator_json = indicator_ipmip_problem_to_cli_json(&indicator);
         std::fs::write(
             &indicator_problem_path,
             serde_json::to_string_pretty(&indicator_json).expect("serialize indicator MIP problem"),
         )
         .expect("write indicator MIP problem");
-        let output = Command::new(&python)
-            .arg(&script)
-            .arg("--problem")
-            .arg(&indicator_problem_path)
-            .arg("--out")
-            .arg(&indicator_reference_path)
-            .arg("--solver")
-            .arg("auto")
-            .output()
-            .expect("run indicator MIP reference");
-        if !output.status.success() {
-            panic!(
-                "indicator ip_mip_reference failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        let indicator_reference: MipReference = serde_json::from_slice(
-            &std::fs::read(&indicator_reference_path).expect("read indicator MIP reference JSON"),
-        )
-        .expect("parse indicator MIP reference JSON");
+        let indicator_reference =
+            Self::mip_reference_from_external_solution(solve_indicator_ipmip_with_external_cli(
+                &indicator,
+                &Self::external_mip_reference_options(ExternalLinearCliSolver::Highs),
+            ));
         self.check(
             "IP/MIP indicator statuses optimal",
             indicator_internal.status == IPMIPStatus::Optimal
@@ -18089,33 +18353,17 @@ impl Driver {
                 },
             );
             let sos_problem_path = out_dir.join(format!("{case_name}-problem.json"));
-            let sos_reference_path = out_dir.join(format!("{case_name}-reference.json"));
             let sos_json = sos_ipmip_problem_to_cli_json(&sos_problem);
             std::fs::write(
                 &sos_problem_path,
                 serde_json::to_string_pretty(&sos_json).expect("serialize SOS MIP problem"),
             )
             .expect("write SOS MIP problem");
-            let output = Command::new(&python)
-                .arg(&script)
-                .arg("--problem")
-                .arg(&sos_problem_path)
-                .arg("--out")
-                .arg(&sos_reference_path)
-                .arg("--solver")
-                .arg("auto")
-                .output()
-                .expect("run SOS MIP reference");
-            if !output.status.success() {
-                panic!(
-                    "SOS ip_mip_reference failed for {case_name}: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
-            }
-            let sos_reference: MipReference = serde_json::from_slice(
-                &std::fs::read(&sos_reference_path).expect("read SOS MIP reference JSON"),
-            )
-            .expect("parse SOS MIP reference JSON");
+            let sos_reference =
+                Self::mip_reference_from_external_solution(solve_sos_ipmip_with_external_cli(
+                    &sos_problem,
+                    &Self::external_mip_reference_options(ExternalLinearCliSolver::Highs),
+                ));
             self.check(
                 &format!("IP/MIP {case_name} statuses optimal"),
                 sos_internal.status == IPMIPStatus::Optimal
@@ -18158,7 +18406,6 @@ impl Driver {
                 },
             );
             let semi_problem_path = out_dir.join(format!("{case_name}-problem.json"));
-            let semi_reference_path = out_dir.join(format!("{case_name}-reference.json"));
             let semi_json = semi_ipmip_problem_to_cli_json(&semi_problem);
             std::fs::write(
                 &semi_problem_path,
@@ -18166,27 +18413,11 @@ impl Driver {
                     .expect("serialize semi-variable MIP problem"),
             )
             .expect("write semi-variable MIP problem");
-            let output = Command::new(&python)
-                .arg(&script)
-                .arg("--problem")
-                .arg(&semi_problem_path)
-                .arg("--out")
-                .arg(&semi_reference_path)
-                .arg("--solver")
-                .arg("auto")
-                .output()
-                .expect("run semi-variable MIP reference");
-            if !output.status.success() {
-                panic!(
-                    "semi-variable ip_mip_reference failed for {case_name}: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
-            }
-            let semi_reference: MipReference = serde_json::from_slice(
-                &std::fs::read(&semi_reference_path)
-                    .expect("read semi-variable MIP reference JSON"),
-            )
-            .expect("parse semi-variable MIP reference JSON");
+            let semi_reference =
+                Self::mip_reference_from_external_solution(solve_semi_ipmip_with_external_cli(
+                    &semi_problem,
+                    &Self::external_mip_reference_options(ExternalLinearCliSolver::Highs),
+                ));
             self.check(
                 &format!("IP/MIP {case_name} statuses optimal"),
                 semi_internal.status == IPMIPStatus::Optimal
@@ -18226,33 +18457,17 @@ impl Driver {
             },
         );
         let pwl_problem_path = out_dir.join("piecewise-linear-reward-problem.json");
-        let pwl_reference_path = out_dir.join("piecewise-linear-reward-reference.json");
         let pwl_json = pwl_ipmip_problem_to_cli_json(&pwl_problem);
         std::fs::write(
             &pwl_problem_path,
             serde_json::to_string_pretty(&pwl_json).expect("serialize PWL MIP problem"),
         )
         .expect("write PWL MIP problem");
-        let output = Command::new(&python)
-            .arg(&script)
-            .arg("--problem")
-            .arg(&pwl_problem_path)
-            .arg("--out")
-            .arg(&pwl_reference_path)
-            .arg("--solver")
-            .arg("auto")
-            .output()
-            .expect("run PWL MIP reference");
-        if !output.status.success() {
-            panic!(
-                "PWL ip_mip_reference failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        let pwl_reference: MipReference = serde_json::from_slice(
-            &std::fs::read(&pwl_reference_path).expect("read PWL MIP reference JSON"),
-        )
-        .expect("parse PWL MIP reference JSON");
+        let pwl_reference =
+            Self::mip_reference_from_external_solution(solve_pwl_ipmip_with_external_cli(
+                &pwl_problem,
+                &Self::external_mip_reference_options(ExternalLinearCliSolver::Highs),
+            ));
         self.check(
             "IP/MIP piecewise-linear-reward statuses optimal",
             pwl_internal.status == IPMIPStatus::Optimal && pwl_reference.result.status == "optimal",
@@ -18290,33 +18505,17 @@ impl Driver {
             },
         );
         let abs_problem_path = out_dir.join("absolute-value-penalty-problem.json");
-        let abs_reference_path = out_dir.join("absolute-value-penalty-reference.json");
         let abs_json = source_ipmip_problem_to_cli_json(&abs_problem);
         std::fs::write(
             &abs_problem_path,
             serde_json::to_string_pretty(&abs_json).expect("serialize abs-value MIP problem"),
         )
         .expect("write abs-value MIP problem");
-        let output = Command::new(&python)
-            .arg(&script)
-            .arg("--problem")
-            .arg(&abs_problem_path)
-            .arg("--out")
-            .arg(&abs_reference_path)
-            .arg("--solver")
-            .arg("auto")
-            .output()
-            .expect("run abs-value MIP reference");
-        if !output.status.success() {
-            panic!(
-                "abs-value ip_mip_reference failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        let abs_reference: MipReference = serde_json::from_slice(
-            &std::fs::read(&abs_reference_path).expect("read abs-value MIP reference JSON"),
-        )
-        .expect("parse abs-value MIP reference JSON");
+        let abs_reference =
+            Self::mip_reference_from_external_solution(solve_source_ipmip_with_external_cli(
+                &abs_problem,
+                &Self::external_mip_reference_options(ExternalLinearCliSolver::Highs),
+            ));
         self.check(
             "IP/MIP abs-value statuses optimal",
             abs_internal.status == IPMIPStatus::Optimal && abs_reference.result.status == "optimal",
@@ -18363,33 +18562,17 @@ impl Driver {
             },
         );
         let maximum_problem_path = out_dir.join("maximum-peak-problem.json");
-        let maximum_reference_path = out_dir.join("maximum-peak-reference.json");
         let maximum_json = source_ipmip_problem_to_cli_json(&maximum_problem);
         std::fs::write(
             &maximum_problem_path,
             serde_json::to_string_pretty(&maximum_json).expect("serialize maximum MIP problem"),
         )
         .expect("write maximum MIP problem");
-        let output = Command::new(&python)
-            .arg(&script)
-            .arg("--problem")
-            .arg(&maximum_problem_path)
-            .arg("--out")
-            .arg(&maximum_reference_path)
-            .arg("--solver")
-            .arg("auto")
-            .output()
-            .expect("run maximum MIP reference");
-        if !output.status.success() {
-            panic!(
-                "maximum ip_mip_reference failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        let maximum_reference: MipReference = serde_json::from_slice(
-            &std::fs::read(&maximum_reference_path).expect("read maximum MIP reference JSON"),
-        )
-        .expect("parse maximum MIP reference JSON");
+        let maximum_reference =
+            Self::mip_reference_from_external_solution(solve_source_ipmip_with_external_cli(
+                &maximum_problem,
+                &Self::external_mip_reference_options(ExternalLinearCliSolver::Highs),
+            ));
         self.check(
             "IP/MIP maximum statuses optimal",
             maximum_internal.status == IPMIPStatus::Optimal
@@ -18437,33 +18620,17 @@ impl Driver {
             },
         );
         let minimum_problem_path = out_dir.join("minimum-floor-problem.json");
-        let minimum_reference_path = out_dir.join("minimum-floor-reference.json");
         let minimum_json = source_ipmip_problem_to_cli_json(&minimum_problem);
         std::fs::write(
             &minimum_problem_path,
             serde_json::to_string_pretty(&minimum_json).expect("serialize minimum MIP problem"),
         )
         .expect("write minimum MIP problem");
-        let output = Command::new(&python)
-            .arg(&script)
-            .arg("--problem")
-            .arg(&minimum_problem_path)
-            .arg("--out")
-            .arg(&minimum_reference_path)
-            .arg("--solver")
-            .arg("auto")
-            .output()
-            .expect("run minimum MIP reference");
-        if !output.status.success() {
-            panic!(
-                "minimum ip_mip_reference failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        let minimum_reference: MipReference = serde_json::from_slice(
-            &std::fs::read(&minimum_reference_path).expect("read minimum MIP reference JSON"),
-        )
-        .expect("parse minimum MIP reference JSON");
+        let minimum_reference =
+            Self::mip_reference_from_external_solution(solve_source_ipmip_with_external_cli(
+                &minimum_problem,
+                &Self::external_mip_reference_options(ExternalLinearCliSolver::Highs),
+            ));
         self.check(
             "IP/MIP minimum statuses optimal",
             minimum_internal.status == IPMIPStatus::Optimal
@@ -18511,33 +18678,17 @@ impl Driver {
             },
         );
         let logical_problem_path = out_dir.join("logical-gate-problem.json");
-        let logical_reference_path = out_dir.join("logical-gate-reference.json");
         let logical_json = source_ipmip_problem_to_cli_json(&logical_problem);
         std::fs::write(
             &logical_problem_path,
             serde_json::to_string_pretty(&logical_json).expect("serialize logical MIP problem"),
         )
         .expect("write logical MIP problem");
-        let output = Command::new(&python)
-            .arg(&script)
-            .arg("--problem")
-            .arg(&logical_problem_path)
-            .arg("--out")
-            .arg(&logical_reference_path)
-            .arg("--solver")
-            .arg("auto")
-            .output()
-            .expect("run logical MIP reference");
-        if !output.status.success() {
-            panic!(
-                "logical ip_mip_reference failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        let logical_reference: MipReference = serde_json::from_slice(
-            &std::fs::read(&logical_reference_path).expect("read logical MIP reference JSON"),
-        )
-        .expect("parse logical MIP reference JSON");
+        let logical_reference =
+            Self::mip_reference_from_external_solution(solve_source_ipmip_with_external_cli(
+                &logical_problem,
+                &Self::external_mip_reference_options(ExternalLinearCliSolver::Highs),
+            ));
         self.check(
             "IP/MIP logical statuses optimal",
             logical_internal.status == IPMIPStatus::Optimal
@@ -18584,33 +18735,17 @@ impl Driver {
             },
         );
         let l1_problem_path = out_dir.join("l1-norm-deviation-problem.json");
-        let l1_reference_path = out_dir.join("l1-norm-deviation-reference.json");
         let l1_json = source_ipmip_problem_to_cli_json(&l1_problem);
         std::fs::write(
             &l1_problem_path,
             serde_json::to_string_pretty(&l1_json).expect("serialize L1 norm MIP problem"),
         )
         .expect("write L1 norm MIP problem");
-        let output = Command::new(&python)
-            .arg(&script)
-            .arg("--problem")
-            .arg(&l1_problem_path)
-            .arg("--out")
-            .arg(&l1_reference_path)
-            .arg("--solver")
-            .arg("auto")
-            .output()
-            .expect("run L1 norm MIP reference");
-        if !output.status.success() {
-            panic!(
-                "L1 norm ip_mip_reference failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        let l1_reference: MipReference = serde_json::from_slice(
-            &std::fs::read(&l1_reference_path).expect("read L1 norm MIP reference JSON"),
-        )
-        .expect("parse L1 norm MIP reference JSON");
+        let l1_reference =
+            Self::mip_reference_from_external_solution(solve_source_ipmip_with_external_cli(
+                &l1_problem,
+                &Self::external_mip_reference_options(ExternalLinearCliSolver::Highs),
+            ));
         self.check(
             "IP/MIP L1 norm statuses optimal",
             l1_internal.status == IPMIPStatus::Optimal && l1_reference.result.status == "optimal",
@@ -18657,33 +18792,17 @@ impl Driver {
             },
         );
         let linf_problem_path = out_dir.join("linf-norm-deviation-problem.json");
-        let linf_reference_path = out_dir.join("linf-norm-deviation-reference.json");
         let linf_json = source_ipmip_problem_to_cli_json(&linf_problem);
         std::fs::write(
             &linf_problem_path,
             serde_json::to_string_pretty(&linf_json).expect("serialize Linf norm MIP problem"),
         )
         .expect("write Linf norm MIP problem");
-        let output = Command::new(&python)
-            .arg(&script)
-            .arg("--problem")
-            .arg(&linf_problem_path)
-            .arg("--out")
-            .arg(&linf_reference_path)
-            .arg("--solver")
-            .arg("auto")
-            .output()
-            .expect("run Linf norm MIP reference");
-        if !output.status.success() {
-            panic!(
-                "Linf norm ip_mip_reference failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        let linf_reference: MipReference = serde_json::from_slice(
-            &std::fs::read(&linf_reference_path).expect("read Linf norm MIP reference JSON"),
-        )
-        .expect("parse Linf norm MIP reference JSON");
+        let linf_reference =
+            Self::mip_reference_from_external_solution(solve_source_ipmip_with_external_cli(
+                &linf_problem,
+                &Self::external_mip_reference_options(ExternalLinearCliSolver::Highs),
+            ));
         self.check(
             "IP/MIP Linf norm statuses optimal",
             linf_internal.status == IPMIPStatus::Optimal
@@ -18734,34 +18853,17 @@ impl Driver {
                 },
             );
             let product_problem_path = out_dir.join(format!("product-{product_name}-problem.json"));
-            let product_reference_path =
-                out_dir.join(format!("product-{product_name}-reference.json"));
             let product_json = source_ipmip_problem_to_cli_json(&product_problem);
             std::fs::write(
                 &product_problem_path,
                 serde_json::to_string_pretty(&product_json).expect("serialize product MIP problem"),
             )
             .expect("write product MIP problem");
-            let output = Command::new(&python)
-                .arg(&script)
-                .arg("--problem")
-                .arg(&product_problem_path)
-                .arg("--out")
-                .arg(&product_reference_path)
-                .arg("--solver")
-                .arg("auto")
-                .output()
-                .expect("run product MIP reference");
-            if !output.status.success() {
-                panic!(
-                    "product {product_name} ip_mip_reference failed: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
-            }
-            let product_reference: MipReference = serde_json::from_slice(
-                &std::fs::read(&product_reference_path).expect("read product MIP reference JSON"),
-            )
-            .expect("parse product MIP reference JSON");
+            let product_reference =
+                Self::mip_reference_from_external_solution(solve_source_ipmip_with_external_cli(
+                    &product_problem,
+                    &Self::external_mip_reference_options(ExternalLinearCliSolver::Highs),
+                ));
             self.check(
                 format!("IP/MIP product {product_name} statuses optimal"),
                 product_internal.status == IPMIPStatus::Optimal
@@ -18810,7 +18912,6 @@ impl Driver {
             },
         );
         let quadratic_problem_path = out_dir.join("quadratic-objective-mix-problem.json");
-        let quadratic_reference_path = out_dir.join("quadratic-objective-mix-reference.json");
         let quadratic_json = quadratic_objective_ipmip_problem_to_cli_json(&quadratic_problem);
         std::fs::write(
             &quadratic_problem_path,
@@ -18818,27 +18919,12 @@ impl Driver {
                 .expect("serialize quadratic-objective MIP problem"),
         )
         .expect("write quadratic-objective MIP problem");
-        let output = Command::new(&python)
-            .arg(&script)
-            .arg("--problem")
-            .arg(&quadratic_problem_path)
-            .arg("--out")
-            .arg(&quadratic_reference_path)
-            .arg("--solver")
-            .arg("auto")
-            .output()
-            .expect("run quadratic-objective MIP reference");
-        if !output.status.success() {
-            panic!(
-                "quadratic-objective ip_mip_reference failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        let quadratic_reference: MipReference = serde_json::from_slice(
-            &std::fs::read(&quadratic_reference_path)
-                .expect("read quadratic-objective MIP reference JSON"),
-        )
-        .expect("parse quadratic-objective MIP reference JSON");
+        let quadratic_reference = Self::mip_reference_from_external_solution(
+            solve_quadratic_objective_ipmip_with_external_cli(
+                &quadratic_problem,
+                &Self::external_mip_reference_options(ExternalLinearCliSolver::Highs),
+            ),
+        );
         self.check(
             "IP/MIP quadratic objective statuses optimal",
             quadratic_internal.status == IPMIPStatus::Optimal
@@ -18886,7 +18972,6 @@ impl Driver {
             },
         );
         let source_problem_path = out_dir.join("source-feature-mix-problem.json");
-        let source_reference_path = out_dir.join("source-feature-mix-reference.json");
         let source_json = source_ipmip_problem_to_cli_json(&source_problem);
         std::fs::write(
             &source_problem_path,
@@ -18894,26 +18979,11 @@ impl Driver {
                 .expect("serialize source-feature MIP problem"),
         )
         .expect("write source-feature MIP problem");
-        let output = Command::new(&python)
-            .arg(&script)
-            .arg("--problem")
-            .arg(&source_problem_path)
-            .arg("--out")
-            .arg(&source_reference_path)
-            .arg("--solver")
-            .arg("auto")
-            .output()
-            .expect("run source-feature MIP reference");
-        if !output.status.success() {
-            panic!(
-                "source-feature ip_mip_reference failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        let source_reference: MipReference = serde_json::from_slice(
-            &std::fs::read(&source_reference_path).expect("read source-feature MIP reference JSON"),
-        )
-        .expect("parse source-feature MIP reference JSON");
+        let source_reference =
+            Self::mip_reference_from_external_solution(solve_source_ipmip_with_external_cli(
+                &source_problem,
+                &Self::external_mip_reference_options(ExternalLinearCliSolver::Highs),
+            ));
         self.check(
             "IP/MIP source-feature-mix statuses optimal",
             source_internal.status == IPMIPStatus::Optimal
@@ -18959,7 +19029,6 @@ impl Driver {
             },
         );
         let multi_problem_path = out_dir.join("lexicographic-choice-problem.json");
-        let multi_reference_path = out_dir.join("lexicographic-choice-reference.json");
         let multi_json = multi_objective_ipmip_problem_to_cli_json(&multi_problem);
         std::fs::write(
             &multi_problem_path,
@@ -18967,26 +19036,12 @@ impl Driver {
                 .expect("serialize multi-objective MIP problem"),
         )
         .expect("write multi-objective MIP problem");
-        let output = Command::new(&python)
-            .arg(&script)
-            .arg("--problem")
-            .arg(&multi_problem_path)
-            .arg("--out")
-            .arg(&multi_reference_path)
-            .arg("--solver")
-            .arg("auto")
-            .output()
-            .expect("run multi-objective MIP reference");
-        if !output.status.success() {
-            panic!(
-                "multi-objective ip_mip_reference failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        let multi_reference: MipReference = serde_json::from_slice(
-            &std::fs::read(&multi_reference_path).expect("read multi-objective MIP reference JSON"),
-        )
-        .expect("parse multi-objective MIP reference JSON");
+        let multi_reference = Self::mip_reference_from_external_solution(
+            solve_multi_objective_ipmip_with_external_cli(
+                &multi_problem,
+                &Self::external_mip_reference_options(ExternalLinearCliSolver::Highs),
+            ),
+        );
         self.check(
             "IP/MIP lexicographic-choice statuses optimal",
             multi_internal.status == IPMIPStatus::Optimal

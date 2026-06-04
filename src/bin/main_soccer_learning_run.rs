@@ -10,8 +10,9 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use des_engine::des::general::soccer::{
     soccer_moment_records_from_jsonl, soccer_moment_records_to_learning_dataset,
-    soccer_self_play_default_learned_params_path, MatchConfig, SoccerMatch, SoccerQEntry,
-    SoccerQPolicy, SoccerQPolicyOptions, SoccerQTargetEntry, SoccerSelfPlayEpisodeSummary,
+    soccer_self_play_default_learned_params_path, MatchConfig, SoccerMatch, SoccerMomentWindow,
+    SoccerNeuralLearningBackend, SoccerNeuralLearningConfig, SoccerQEntry, SoccerQPolicy,
+    SoccerQPolicyOptions, SoccerQTargetEntry, SoccerSelfPlayEpisodeSummary,
     SoccerSelfPlayLearnedParams, SoccerSelfPlayTrainingArtifact, SoccerTacticalLearningWeights,
     SoccerTeamPolicyArtifact, SoccerTeamQPolicies,
 };
@@ -56,6 +57,114 @@ fn env_f64_alias(primary: &str, alias: &str, default: f64) -> f64 {
         .ok()
         .and_then(|value| value.parse::<f64>().ok())
         .unwrap_or(default)
+}
+
+fn env_usize_alias(primary: &str, alias: &str, default: usize) -> usize {
+    std::env::var(primary)
+        .or_else(|_| std::env::var(alias))
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(default)
+}
+
+fn env_bool_alias(primary: &str, alias: &str, default: bool) -> bool {
+    std::env::var(primary)
+        .or_else(|_| std::env::var(alias))
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "y" | "on"
+            )
+        })
+        .unwrap_or(default)
+}
+
+fn neural_backend_label(backend: SoccerNeuralLearningBackend) -> &'static str {
+    match backend {
+        SoccerNeuralLearningBackend::Inline => "inline",
+        SoccerNeuralLearningBackend::Threaded => "threaded",
+    }
+}
+
+fn env_neural_learning_backend(
+    default: SoccerNeuralLearningBackend,
+) -> SoccerNeuralLearningBackend {
+    let raw = std::env::var("SOCCER_NEURAL_LEARNING_BACKEND")
+        .or_else(|_| std::env::var("SOCCER_NEURAL_BACKEND"))
+        .ok();
+    match raw
+        .as_deref()
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("threaded") | Some("thread") | Some("worker") => SoccerNeuralLearningBackend::Threaded,
+        Some("inline") | Some("sync") => SoccerNeuralLearningBackend::Inline,
+        _ => default,
+    }
+}
+
+fn env_neural_learning_config() -> SoccerNeuralLearningConfig {
+    let default = SoccerNeuralLearningConfig::default();
+    SoccerNeuralLearningConfig {
+        enabled: env_bool_alias(
+            "SOCCER_NEURAL_LEARNING_ENABLED",
+            "SOCCER_NEURAL_LEARNING",
+            default.enabled,
+        ),
+        backend: env_neural_learning_backend(default.backend),
+        learning_rate: env_f64_alias(
+            "SOCCER_NEURAL_LEARNING_RATE",
+            "SOCCER_NEURAL_RATE",
+            default.learning_rate,
+        ),
+        batch_size: env_usize_alias(
+            "SOCCER_NEURAL_BATCH_SIZE",
+            "SOCCER_NEURAL_LEARNING_BATCH_SIZE",
+            default.batch_size,
+        ),
+        train_every_ticks: env_usize_alias(
+            "SOCCER_NEURAL_TRAIN_EVERY_TICKS",
+            "SOCCER_NEURAL_LEARNING_TRAIN_EVERY_TICKS",
+            default.train_every_ticks,
+        ),
+        max_batches_per_tick: env_usize_alias(
+            "SOCCER_NEURAL_MAX_BATCHES_PER_TICK",
+            "SOCCER_NEURAL_LEARNING_MAX_BATCHES_PER_TICK",
+            default.max_batches_per_tick,
+        ),
+        hidden_units: env_usize_alias(
+            "SOCCER_NEURAL_HIDDEN_UNITS",
+            "SOCCER_NEURAL_LEARNING_HIDDEN_UNITS",
+            default.hidden_units,
+        ),
+        target_scale: env_f64_alias(
+            "SOCCER_NEURAL_TARGET_SCALE",
+            "SOCCER_NEURAL_LEARNING_TARGET_SCALE",
+            default.target_scale,
+        ),
+        max_pending_batches: env_usize_alias(
+            "SOCCER_NEURAL_MAX_PENDING_BATCHES",
+            "SOCCER_NEURAL_LEARNING_MAX_PENDING_BATCHES",
+            default.max_pending_batches,
+        ),
+        replay_capacity: env_usize_alias(
+            "SOCCER_NEURAL_REPLAY_CAPACITY",
+            "SOCCER_NEURAL_LEARNING_REPLAY_CAPACITY",
+            default.replay_capacity,
+        ),
+        replay_samples_per_tick: env_usize_alias(
+            "SOCCER_NEURAL_REPLAY_SAMPLES_PER_TICK",
+            "SOCCER_NEURAL_LEARNING_REPLAY_SAMPLES_PER_TICK",
+            default.replay_samples_per_tick,
+        ),
+        target_clip: env_f64_alias(
+            "SOCCER_NEURAL_TARGET_CLIP",
+            "SOCCER_NEURAL_LEARNING_TARGET_CLIP",
+            default.target_clip,
+        ),
+    }
 }
 
 fn q_entry_order(a: &SoccerQEntry, b: &SoccerQEntry) -> std::cmp::Ordering {
@@ -376,6 +485,7 @@ fn run_game(
     episode: usize,
     config: MatchConfig,
     starting_policies: SoccerTeamQPolicies,
+    adversarial_moment_windows: Vec<SoccerMomentWindow>,
     print_progress: bool,
 ) -> Result<CompletedGame, String> {
     let started = Instant::now();
@@ -383,6 +493,9 @@ fn run_game(
     let episode_seed = config.seed as u64;
     let progress_interval = (total_ticks / 9).max(1);
     let mut sim = SoccerMatch::default_11v11(config).with_team_policies(starting_policies);
+    for window in adversarial_moment_windows {
+        sim.remember_adversarial_moment_window(window);
+    }
 
     for tick_idx in 0..total_ticks {
         sim.run_time_step();
@@ -656,6 +769,18 @@ fn run() -> Result<(), Box<dyn Error>> {
         gamma: env_f64("SOCCER_GAMMA", 0.96),
     };
     let tactical_learning = env_tactical_learning_weights();
+    let neural_learning = env_neural_learning_config();
+    let default_config = MatchConfig::default();
+    let adversarial_embedding_exploitation_enabled = env_bool_alias(
+        "SOCCER_ADVERSARIAL_EMBEDDING_EXPLOITATION_ENABLED",
+        "SOCCER_ADVERSARIAL_EMBEDDINGS",
+        default_config.adversarial_embedding_exploitation_enabled,
+    );
+    let adversarial_embedding_memory_limit = env_usize_alias(
+        "SOCCER_ADVERSARIAL_EMBEDDING_MEMORY_LIMIT",
+        "SOCCER_ADVERSARIAL_MOMENT_MEMORY_LIMIT",
+        default_config.adversarial_embedding_memory_limit,
+    );
     let config = MatchConfig {
         dt_seconds,
         duration_seconds: minutes * 60.0,
@@ -665,9 +790,12 @@ fn run() -> Result<(), Box<dyn Error>> {
         learning_logging_enabled,
         learning_interval_ticks,
         tactical_learning: tactical_learning.clone(),
+        neural_learning: neural_learning.clone(),
+        adversarial_embedding_exploitation_enabled,
+        adversarial_embedding_memory_limit,
         max_human_players: 0,
         seed: effective_seed,
-        ..MatchConfig::default()
+        ..default_config
     };
     let run_id = std::env::var("SOCCER_RUN_ID").unwrap_or_else(|_| default_run_id());
     let run_dir = PathBuf::from(
@@ -708,6 +836,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut policies = load_initial_policies(resume_artifact.as_deref(), options.clone())?;
     let mut moment_replay_records = 0usize;
     let mut moment_replay_transitions = 0usize;
+    let mut adversarial_moment_windows = Vec::new();
     if let Some(path) = moment_replay_path.as_deref() {
         let raw = fs::read_to_string(path)?;
         let mut records = soccer_moment_records_from_jsonl(&raw).map_err(invalid_data)?;
@@ -722,6 +851,10 @@ fn run() -> Result<(), Box<dyn Error>> {
         .map_err(invalid_data)?;
         moment_replay_records = records.len();
         moment_replay_transitions = replay_dataset.transitions.len();
+        adversarial_moment_windows = records
+            .iter()
+            .map(|record| record.window.clone())
+            .collect::<Vec<_>>();
         for _ in 0..moment_replay_passes {
             policies.train_adversarial(&replay_dataset.transitions);
         }
@@ -789,6 +922,27 @@ fn run() -> Result<(), Box<dyn Error>> {
         tactical_learning.defense_contract_delta_weight,
         tactical_learning.defense_compactness_score_weight,
     );
+    println!(
+        "neural_learning enabled={} backend={} learning_rate={:.5} batch_size={} train_every_ticks={} max_batches_per_tick={} hidden_units={} target_scale={:.3} max_pending_batches={} replay_capacity={} replay_samples_per_tick={} target_clip={:.3}",
+        neural_learning.enabled,
+        neural_backend_label(neural_learning.backend),
+        neural_learning.learning_rate,
+        neural_learning.batch_size,
+        neural_learning.train_every_ticks,
+        neural_learning.max_batches_per_tick,
+        neural_learning.hidden_units,
+        neural_learning.target_scale,
+        neural_learning.max_pending_batches,
+        neural_learning.replay_capacity,
+        neural_learning.replay_samples_per_tick,
+        neural_learning.target_clip,
+    );
+    println!(
+        "adversarial_embedding enabled={} memory_limit={} preloaded_windows={}",
+        adversarial_embedding_exploitation_enabled,
+        adversarial_embedding_memory_limit,
+        adversarial_moment_windows.len(),
+    );
     println!("game seed score shots on_target passes_completed/pass_attempted interceptions");
 
     let started = Instant::now();
@@ -821,9 +975,16 @@ fn run() -> Result<(), Box<dyn Error>> {
             let mut episode_config = config.clone();
             episode_config.seed = effective_seed.wrapping_add(episode as u32);
             let starting_policies = batch_start_policies.clone();
+            let adversarial_moment_windows = adversarial_moment_windows.clone();
             let print_progress = true;
             handles.push(thread::spawn(move || {
-                run_game(episode, episode_config, starting_policies, print_progress)
+                run_game(
+                    episode,
+                    episode_config,
+                    starting_policies,
+                    adversarial_moment_windows,
+                    print_progress,
+                )
             }));
         }
 

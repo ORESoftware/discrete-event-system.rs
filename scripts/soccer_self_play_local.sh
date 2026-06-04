@@ -28,6 +28,20 @@ export SOCCER_DEFENSE_SPACING_DELTA_WEIGHT="${SOCCER_DEFENSE_SPACING_DELTA_WEIGH
 export SOCCER_DEFENSE_SPACING_SCORE_WEIGHT="${SOCCER_DEFENSE_SPACING_SCORE_WEIGHT:-0.04}"
 export SOCCER_DEFENSE_CONTRACT_DELTA_WEIGHT="${SOCCER_DEFENSE_CONTRACT_DELTA_WEIGHT:-0.42}"
 export SOCCER_DEFENSE_COMPACTNESS_SCORE_WEIGHT="${SOCCER_DEFENSE_COMPACTNESS_SCORE_WEIGHT:-0.14}"
+export SOCCER_NEURAL_LEARNING_ENABLED="${SOCCER_NEURAL_LEARNING_ENABLED:-false}"
+export SOCCER_NEURAL_LEARNING_BACKEND="${SOCCER_NEURAL_LEARNING_BACKEND:-inline}"
+export SOCCER_NEURAL_LEARNING_RATE="${SOCCER_NEURAL_LEARNING_RATE:-0.015}"
+export SOCCER_NEURAL_BATCH_SIZE="${SOCCER_NEURAL_BATCH_SIZE:-16}"
+export SOCCER_NEURAL_TRAIN_EVERY_TICKS="${SOCCER_NEURAL_TRAIN_EVERY_TICKS:-4}"
+export SOCCER_NEURAL_MAX_BATCHES_PER_TICK="${SOCCER_NEURAL_MAX_BATCHES_PER_TICK:-2}"
+export SOCCER_NEURAL_HIDDEN_UNITS="${SOCCER_NEURAL_HIDDEN_UNITS:-24}"
+export SOCCER_NEURAL_TARGET_SCALE="${SOCCER_NEURAL_TARGET_SCALE:-30}"
+export SOCCER_NEURAL_MAX_PENDING_BATCHES="${SOCCER_NEURAL_MAX_PENDING_BATCHES:-32}"
+export SOCCER_NEURAL_REPLAY_CAPACITY="${SOCCER_NEURAL_REPLAY_CAPACITY:-512}"
+export SOCCER_NEURAL_REPLAY_SAMPLES_PER_TICK="${SOCCER_NEURAL_REPLAY_SAMPLES_PER_TICK:-16}"
+export SOCCER_NEURAL_TARGET_CLIP="${SOCCER_NEURAL_TARGET_CLIP:-3}"
+export SOCCER_ADVERSARIAL_EMBEDDING_EXPLOITATION_ENABLED="${SOCCER_ADVERSARIAL_EMBEDDING_EXPLOITATION_ENABLED:-true}"
+export SOCCER_ADVERSARIAL_EMBEDDING_MEMORY_LIMIT="${SOCCER_ADVERSARIAL_EMBEDDING_MEMORY_LIMIT:-64}"
 
 shards="${SOCCER_SHARDS:-1}"
 parallel_shards="${SOCCER_PARALLEL_SHARDS:-1}"
@@ -49,7 +63,13 @@ if (( build_release != 0 )); then
   cargo build --release --bin main_soccer_learning_run
 fi
 
-binary="${SOCCER_BINARY:-target/release/main_soccer_learning_run}"
+if [[ -n "${SOCCER_BINARY:-}" ]]; then
+  binary="$SOCCER_BINARY"
+elif (( build_release != 0 )); then
+  binary="target/release/main_soccer_learning_run"
+else
+  binary="target/debug/main_soccer_learning_run"
+fi
 mkdir -p "$out_root"
 
 printf 'run_id=%s\n' "$run_id" > "$out_root/run.env"
@@ -74,6 +94,26 @@ printf 'defense_spacing_delta_weight=%s\n' "$SOCCER_DEFENSE_SPACING_DELTA_WEIGHT
 printf 'defense_spacing_score_weight=%s\n' "$SOCCER_DEFENSE_SPACING_SCORE_WEIGHT" >> "$out_root/run.env"
 printf 'defense_contract_delta_weight=%s\n' "$SOCCER_DEFENSE_CONTRACT_DELTA_WEIGHT" >> "$out_root/run.env"
 printf 'defense_compactness_score_weight=%s\n' "$SOCCER_DEFENSE_COMPACTNESS_SCORE_WEIGHT" >> "$out_root/run.env"
+printf 'neural_learning_enabled=%s\n' "$SOCCER_NEURAL_LEARNING_ENABLED" >> "$out_root/run.env"
+printf 'neural_learning_backend=%s\n' "$SOCCER_NEURAL_LEARNING_BACKEND" >> "$out_root/run.env"
+printf 'neural_learning_rate=%s\n' "$SOCCER_NEURAL_LEARNING_RATE" >> "$out_root/run.env"
+printf 'neural_batch_size=%s\n' "$SOCCER_NEURAL_BATCH_SIZE" >> "$out_root/run.env"
+printf 'neural_train_every_ticks=%s\n' "$SOCCER_NEURAL_TRAIN_EVERY_TICKS" >> "$out_root/run.env"
+printf 'neural_max_batches_per_tick=%s\n' "$SOCCER_NEURAL_MAX_BATCHES_PER_TICK" >> "$out_root/run.env"
+printf 'neural_hidden_units=%s\n' "$SOCCER_NEURAL_HIDDEN_UNITS" >> "$out_root/run.env"
+printf 'neural_target_scale=%s\n' "$SOCCER_NEURAL_TARGET_SCALE" >> "$out_root/run.env"
+printf 'neural_max_pending_batches=%s\n' "$SOCCER_NEURAL_MAX_PENDING_BATCHES" >> "$out_root/run.env"
+printf 'neural_replay_capacity=%s\n' "$SOCCER_NEURAL_REPLAY_CAPACITY" >> "$out_root/run.env"
+printf 'neural_replay_samples_per_tick=%s\n' "$SOCCER_NEURAL_REPLAY_SAMPLES_PER_TICK" >> "$out_root/run.env"
+printf 'neural_target_clip=%s\n' "$SOCCER_NEURAL_TARGET_CLIP" >> "$out_root/run.env"
+printf 'adversarial_embedding_exploitation_enabled=%s\n' "$SOCCER_ADVERSARIAL_EMBEDDING_EXPLOITATION_ENABLED" >> "$out_root/run.env"
+printf 'adversarial_embedding_memory_limit=%s\n' "$SOCCER_ADVERSARIAL_EMBEDDING_MEMORY_LIMIT" >> "$out_root/run.env"
+if [[ -n "${SOCCER_MOMENT_REPLAY_PATH:-}" ]]; then
+  printf 'moment_replay_path=%s\n' "$SOCCER_MOMENT_REPLAY_PATH" >> "$out_root/run.env"
+fi
+printf 'moment_replay_limit=%s\n' "${SOCCER_MOMENT_REPLAY_LIMIT:-0}" >> "$out_root/run.env"
+printf 'moment_replay_passes=%s\n' "${SOCCER_MOMENT_REPLAY_PASSES:-1}" >> "$out_root/run.env"
+printf 'moment_replay_reward_scale=%s\n' "${SOCCER_MOMENT_REPLAY_REWARD_SCALE:-1.0}" >> "$out_root/run.env"
 printf 'shards=%s\n' "$shards" >> "$out_root/run.env"
 printf 'parallel_shards=%s\n' "$parallel_shards" >> "$out_root/run.env"
 

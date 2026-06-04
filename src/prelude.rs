@@ -82,3 +82,6 @@ pub use crate::des::plugin::{
 
 // Service self-description for embedding servers.
 pub use crate::des::service::{DesExtension, ServiceBuilder, ServiceDescriptor};
+
+// Course-aligned operations-research kernels.
+pub use crate::des::operations_research;

@@ -2767,13 +2767,7 @@ fn solve_native_plain_cli_json_direct(
     let use_clp = kind == ExternalLinearCliKind::Lp && should_use_native_clp_cli(opts);
     let use_soplex = kind == ExternalLinearCliKind::Lp && should_use_native_soplex_cli(opts);
     let use_lp_solve = should_use_native_lp_solve_cli(kind, opts);
-    if !use_highs
-        && !use_glpk
-        && !use_scip
-        && !use_cbc
-        && !use_clp
-        && !use_soplex
-        && !use_lp_solve
+    if !use_highs && !use_glpk && !use_scip && !use_cbc && !use_clp && !use_soplex && !use_lp_solve
     {
         return None;
     }

@@ -995,8 +995,10 @@ fn run() -> Result<(), Box<dyn Error>> {
         env_bool("SOCCER_WRITE_CHECKPOINT_ARTIFACTS", write_final_artifacts)?;
     let print_progress = env_bool("SOCCER_PRINT_PROGRESS", false)?;
     let print_completed_games = env_bool("SOCCER_PRINT_COMPLETED_GAMES", true)?;
-    let episode_log_flush_interval_games =
-        env_usize("SOCCER_EPISODE_LOG_FLUSH_INTERVAL_GAMES", parallel_games.max(1))?;
+    let episode_log_flush_interval_games = env_usize(
+        "SOCCER_EPISODE_LOG_FLUSH_INTERVAL_GAMES",
+        parallel_games.max(1),
+    )?;
     let pg_policy_version_interval_games = env_usize(
         "SOCCER_POSTGRES_POLICY_VERSION_INTERVAL_GAMES",
         parallel_games.max(1),
@@ -1434,8 +1436,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             }
         }
 
-        if let (Some(store), Some(experiment_id)) =
-            (pg_store.as_mut(), pg_experiment_id.as_deref())
+        if let (Some(store), Some(experiment_id)) = (pg_store.as_mut(), pg_experiment_id.as_deref())
         {
             if !pg_completed_batch.is_empty() {
                 let runner_id = soccer_learning_pg_runner_id(&run_id, shard_index, shard_count);

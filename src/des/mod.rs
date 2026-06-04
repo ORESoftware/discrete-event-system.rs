@@ -5,6 +5,7 @@
 
 pub mod general;
 pub mod html_index;
+pub mod operations_research;
 pub mod shared;
 
 // Entity framework (queueing-network model). `abstract` is a reserved keyword,

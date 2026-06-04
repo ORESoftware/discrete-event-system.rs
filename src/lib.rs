@@ -117,20 +117,22 @@ pub mod des;
 pub mod prelude;
 
 pub use des::{
-    acausal, authoring, decision, equation, fel, hybrid, model, plugin, service, streaming, studio,
+    acausal, authoring, decision, equation, fel, hybrid, model, operations_research, plugin,
+    service, streaming, studio,
 };
 
 /// Stable SDK-facing exports for embedders (servers, desktop apps, CLIs).
 pub mod sdk {
     pub use crate::{
-        acausal, authoring, decision, equation, fel, hybrid, model, plugin, service, streaming,
-        studio,
+        acausal, authoring, decision, equation, fel, hybrid, model, operations_research, plugin,
+        service, streaming, studio,
     };
 
     /// Modules intended to be treated as the public SDK surface.
     pub const SDK_MODULES: &[&str] = &[
         "service",
         "model",
+        "operations_research",
         "acausal",
         "authoring",
         "streaming",
@@ -169,5 +171,6 @@ mod tests {
         assert!(surface.modules.contains(&"streaming"));
         assert!(surface.modules.contains(&"equation"));
         assert!(surface.modules.contains(&"plugin"));
+        assert!(surface.modules.contains(&"operations_research"));
     }
 }

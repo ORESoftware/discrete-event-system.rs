@@ -10,9 +10,15 @@ export SOCCER_SHARDS="${SOCCER_SHARDS:-1}"
 export SOCCER_PARALLEL_SHARDS="${SOCCER_PARALLEL_SHARDS:-$SOCCER_SHARDS}"
 export SOCCER_RUN_ID="${SOCCER_RUN_ID:-overnight-$(date -u +%Y%m%dT%H%M%SZ)}"
 export SOCCER_OUT_ROOT="${SOCCER_OUT_ROOT:-$repo_dir/out/soccer-self-play/$SOCCER_RUN_ID}"
-export SOCCER_BINARY="${SOCCER_BINARY:-target/release/main_soccer_learning_run}"
 
 build_release="${SOCCER_BUILD_RELEASE:-1}"
+if [[ -n "${SOCCER_BINARY:-}" ]]; then
+  export SOCCER_BINARY
+elif (( build_release != 0 )); then
+  export SOCCER_BINARY="target/release/main_soccer_learning_run"
+else
+  export SOCCER_BINARY="target/debug/main_soccer_learning_run"
+fi
 mkdir -p "$SOCCER_OUT_ROOT"
 
 if (( build_release != 0 )); then
@@ -20,7 +26,10 @@ if (( build_release != 0 )); then
 fi
 
 export SOCCER_BUILD_RELEASE=0
-export -p | grep 'declare -x SOCCER_' > "$SOCCER_OUT_ROOT/launch.env" || true
+export -p \
+  | grep 'declare -x SOCCER_' \
+  | grep -v 'declare -x SOCCER_DATABASE_URL=' \
+  > "$SOCCER_OUT_ROOT/launch.env" || true
 
 label="com.ores.soccer-self-play.$SOCCER_RUN_ID"
 printf '%s\n' "$label" > "$SOCCER_OUT_ROOT/launchd.label"

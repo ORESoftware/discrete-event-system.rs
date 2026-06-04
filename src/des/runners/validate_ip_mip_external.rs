@@ -3,8 +3,8 @@
 //!
 //! The default path uses the Rust `external_linear_cli` adapter to serialize the
 //! same source model and call installed open-source/commercial CLIs. The older
-//! `scripts/ip_mip_reference.py` bridge remains as an explicit fallback for
-//! environments without a local solver command.
+//! `scripts/ip_mip_reference.py` bridge remains only behind the explicit
+//! `IP_MIP_EXTERNAL_BRIDGE=python` compatibility switch.
 
 #![allow(dead_code)]
 
@@ -18,9 +18,14 @@ use crate::des::general::external_linear_cli::{
     indicator_ipmip_problem_to_cli_json, ipmip_problem_to_cli_json,
     lower_bounded_ipmip_problem_to_cli_json, multi_objective_ipmip_problem_to_cli_json,
     pwl_ipmip_problem_to_cli_json, quadratic_objective_ipmip_problem_to_cli_json,
-    semi_ipmip_problem_to_cli_json, solve_linear_cli_json, sos_ipmip_problem_to_cli_json,
-    source_ipmip_problem_to_cli_json, ExternalLinearCliKind, ExternalLinearCliOptions,
-    ExternalLinearCliSolution, ExternalLinearCliSolver, ExternalLinearCliStatus,
+    semi_ipmip_problem_to_cli_json, solve_general_linear_ipmip_with_external_cli,
+    solve_indicator_ipmip_with_external_cli, solve_ipmip_with_external_cli,
+    solve_lower_bounded_ipmip_with_external_cli, solve_multi_objective_ipmip_with_external_cli,
+    solve_pwl_ipmip_with_external_cli, solve_quadratic_objective_ipmip_with_external_cli,
+    solve_semi_ipmip_with_external_cli, solve_sos_ipmip_with_external_cli,
+    solve_source_ipmip_with_external_cli, sos_ipmip_problem_to_cli_json,
+    source_ipmip_problem_to_cli_json, ExternalLinearCliOptions, ExternalLinearCliSolution,
+    ExternalLinearCliSolver,
 };
 use crate::des::general::ip_mip_des::{
     build_absolute_value_penalty_ip, build_binary_knapsack_ip, build_binary_product_gate_ip,
@@ -122,56 +127,55 @@ impl Driver {
         solver: &str,
     ) -> ExternalPayload {
         let problem_value = ipmip_problem_to_cli_json(problem);
-        self.run_external_value(name, &problem_value, solver)
+        self.run_external_solution(name, &problem_value, solver, |opts| {
+            solve_ipmip_with_external_cli(problem, opts)
+        })
     }
 
-    fn run_external_value(
+    fn run_external_solution<F>(
         &mut self,
         name: &str,
         problem: &serde_json::Value,
         solver: &str,
-    ) -> ExternalPayload {
+        solve: F,
+    ) -> ExternalPayload
+    where
+        F: FnOnce(&ExternalLinearCliOptions) -> ExternalLinearCliSolution,
+    {
         let problem_path = self.write_problem_value(name, problem);
-        if !force_python_reference() {
-            match select_cli_solver(solver) {
-                Some((cli_solver, command)) => {
-                    println!(
-                        "  external rust-cli: solver={} command={}",
-                        cli_solver.as_str(),
-                        command.display()
-                    );
-                    let solution = solve_linear_cli_json(
-                        ExternalLinearCliKind::Mip,
-                        problem.clone(),
-                        &ExternalLinearCliOptions {
-                            solver: cli_solver,
-                            command_path: Some(command),
-                            time_limit_secs: Some(10.0),
-                            random_seed: Some(7),
-                            threads: Some(1),
-                            ..Default::default()
-                        },
-                    );
-                    if solution.status != ExternalLinearCliStatus::Unavailable {
-                        return payload_from_cli_solution(solution);
-                    }
-                }
-                None if !is_auto_solver_request(solver) => {
-                    return ExternalPayload {
-                        result: ExternalResultInner {
-                            status: "unavailable".to_string(),
-                            solver: solver.to_string(),
-                            message: Some(format!(
-                                "no installed command found for requested solver `{solver}`"
-                            )),
-                            ..Default::default()
-                        },
-                    };
-                }
-                None => {}
-            }
+        if force_python_reference() {
+            return self.run_python_external_path(name, problem_path, solver);
         }
-        self.run_python_external_path(name, problem_path, solver)
+        match select_cli_solver(solver) {
+            Some((cli_solver, command)) => {
+                println!(
+                    "  external rust-cli: solver={} command={}",
+                    cli_solver.as_str(),
+                    command.display()
+                );
+                let solution = solve(&ExternalLinearCliOptions {
+                    solver: cli_solver,
+                    command_path: Some(command),
+                    time_limit_secs: Some(10.0),
+                    random_seed: Some(7),
+                    threads: Some(1),
+                    ..Default::default()
+                });
+                payload_from_cli_solution(solution)
+            }
+            None => ExternalPayload {
+                result: ExternalResultInner {
+                    status: "unavailable".to_string(),
+                    solver: solver.to_string(),
+                    message: Some(if is_auto_solver_request(solver) {
+                        "no installed Rust CLI solver found; set IP_MIP_EXTERNAL_BRIDGE=python to use the compatibility Python reference".to_string()
+                    } else {
+                        format!("no installed command found for requested solver `{solver}`")
+                    }),
+                    ..Default::default()
+                },
+            },
+        }
     }
 
     fn run_python_external_path(
@@ -276,7 +280,9 @@ impl Driver {
         let linearized = linearize_indicator_problem(&problem);
         let solver = std::env::var("IP_MIP_EXTERNAL_SOLVER").unwrap_or_else(|_| "auto".to_string());
         let external_problem = indicator_ipmip_problem_to_cli_json(&problem);
-        let external = self.run_external_value(name, &external_problem, &solver);
+        let external = self.run_external_solution(name, &external_problem, &solver, |opts| {
+            solve_indicator_ipmip_with_external_cli(&problem, opts)
+        });
         self.compare(name, &linearized, &internal, &external);
     }
 
@@ -296,7 +302,9 @@ impl Driver {
         let linearized = linearize_sos_problem(&problem);
         let solver = std::env::var("IP_MIP_EXTERNAL_SOLVER").unwrap_or_else(|_| "auto".to_string());
         let external_problem = sos_ipmip_problem_to_cli_json(&problem);
-        let external = self.run_external_value(name, &external_problem, &solver);
+        let external = self.run_external_solution(name, &external_problem, &solver, |opts| {
+            solve_sos_ipmip_with_external_cli(&problem, opts)
+        });
         self.compare(name, &linearized, &internal, &external);
     }
 
@@ -316,7 +324,9 @@ impl Driver {
         let linearized = linearize_semi_problem(&problem);
         let solver = std::env::var("IP_MIP_EXTERNAL_SOLVER").unwrap_or_else(|_| "auto".to_string());
         let external_problem = semi_ipmip_problem_to_cli_json(&problem);
-        let external = self.run_external_value(name, &external_problem, &solver);
+        let external = self.run_external_solution(name, &external_problem, &solver, |opts| {
+            solve_semi_ipmip_with_external_cli(&problem, opts)
+        });
         self.compare(name, &linearized, &internal, &external);
     }
 
@@ -335,7 +345,9 @@ impl Driver {
         );
         let solver = std::env::var("IP_MIP_EXTERNAL_SOLVER").unwrap_or_else(|_| "auto".to_string());
         let external_problem = lower_bounded_ipmip_problem_to_cli_json(&problem);
-        let external = self.run_external_value(name, &external_problem, &solver);
+        let external = self.run_external_solution(name, &external_problem, &solver, |opts| {
+            solve_lower_bounded_ipmip_with_external_cli(&problem, opts)
+        });
         self.compare_with_lb(name, &problem, &internal, &external);
     }
 
@@ -355,7 +367,9 @@ impl Driver {
         let linearized = linearize_general_linear_problem(&problem);
         let solver = std::env::var("IP_MIP_EXTERNAL_SOLVER").unwrap_or_else(|_| "auto".to_string());
         let external_problem = general_linear_ipmip_problem_to_cli_json(&problem);
-        let external = self.run_external_value(name, &external_problem, &solver);
+        let external = self.run_external_solution(name, &external_problem, &solver, |opts| {
+            solve_general_linear_ipmip_with_external_cli(&problem, opts)
+        });
         self.compare(name, &linearized, &internal, &external);
     }
 
@@ -375,7 +389,9 @@ impl Driver {
         let linearized = linearize_pwl_problem(&problem);
         let solver = std::env::var("IP_MIP_EXTERNAL_SOLVER").unwrap_or_else(|_| "auto".to_string());
         let external_problem = pwl_ipmip_problem_to_cli_json(&problem);
-        let external = self.run_external_value(name, &external_problem, &solver);
+        let external = self.run_external_solution(name, &external_problem, &solver, |opts| {
+            solve_pwl_ipmip_with_external_cli(&problem, opts)
+        });
         self.compare(name, &linearized, &internal, &external);
     }
 
@@ -399,7 +415,9 @@ impl Driver {
         let (linearized, _, original_vars) = linearize_quadratic_objective_problem(&problem);
         let solver = std::env::var("IP_MIP_EXTERNAL_SOLVER").unwrap_or_else(|_| "auto".to_string());
         let external_problem = quadratic_objective_ipmip_problem_to_cli_json(&problem);
-        let external = self.run_external_value(name, &external_problem, &solver);
+        let external = self.run_external_solution(name, &external_problem, &solver, |opts| {
+            solve_quadratic_objective_ipmip_with_external_cli(&problem, opts)
+        });
         self.compare_source_mapped(name, &linearized, original_vars, &internal, &external);
     }
 
@@ -419,7 +437,9 @@ impl Driver {
         let (linearized, _, original_vars) = linearize_source_ipmip_problem(&problem);
         let solver = std::env::var("IP_MIP_EXTERNAL_SOLVER").unwrap_or_else(|_| "auto".to_string());
         let external_problem = source_ipmip_problem_to_cli_json(&problem);
-        let external = self.run_external_value(name, &external_problem, &solver);
+        let external = self.run_external_solution(name, &external_problem, &solver, |opts| {
+            solve_source_ipmip_with_external_cli(&problem, opts)
+        });
         self.compare_source_mapped(name, &linearized, original_vars, &internal, &external);
     }
 
@@ -442,7 +462,9 @@ impl Driver {
         );
         let solver = std::env::var("IP_MIP_EXTERNAL_SOLVER").unwrap_or_else(|_| "auto".to_string());
         let external_problem = multi_objective_ipmip_problem_to_cli_json(&problem);
-        let external = self.run_external_value(name, &external_problem, &solver);
+        let external = self.run_external_solution(name, &external_problem, &solver, |opts| {
+            solve_multi_objective_ipmip_with_external_cli(&problem, opts)
+        });
         self.check(
             &format!("{name}: external reference available"),
             external.result.status != "unavailable",

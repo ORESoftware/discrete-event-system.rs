@@ -10,10 +10,15 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use des_engine::des::general::soccer::{
     soccer_moment_records_from_jsonl, soccer_moment_records_to_learning_dataset, MatchConfig,
-    SoccerMatch, SoccerQEntry, SoccerQPolicy, SoccerQPolicyOptions, SoccerQTargetEntry,
+    SoccerMatch, SoccerMomentWindow, SoccerNeuralLearningBackend, SoccerNeuralLearningConfig,
+    SoccerQEntry, SoccerQPolicy, SoccerQPolicyOptions, SoccerQTargetEntry,
     SoccerSelfPlayEpisodeSummary, SoccerSelfPlayLearnedParams, SoccerSelfPlayTrainingArtifact,
     SoccerTacticalLearningWeights, SoccerTeamPolicyArtifact, SoccerTeamQPolicies,
 };
+use des_engine::des::soccer_learning::{
+    soccer_learning_run_score, soccer_policy_delta_entries, SoccerLearningCompletedGame,
+};
+use des_engine::des::soccer_learning_pg::SoccerLearningPgStore;
 use serde::Serialize;
 
 fn env_value(name: &str) -> Option<String> {
@@ -71,6 +76,109 @@ fn env_f64_alias(primary: &str, alias: &str, default: f64) -> Result<f64, Box<dy
     } else {
         env_f64(alias, default)
     }
+}
+
+fn env_usize_alias(primary: &str, alias: &str, default: usize) -> Result<usize, Box<dyn Error>> {
+    if env_value(primary).is_some() {
+        env_usize(primary, default)
+    } else {
+        env_usize(alias, default)
+    }
+}
+
+fn env_bool_alias(primary: &str, alias: &str, default: bool) -> Result<bool, Box<dyn Error>> {
+    if env_value(primary).is_some() {
+        env_bool(primary, default)
+    } else {
+        env_bool(alias, default)
+    }
+}
+
+fn neural_backend_label(backend: SoccerNeuralLearningBackend) -> &'static str {
+    match backend {
+        SoccerNeuralLearningBackend::Inline => "inline",
+        SoccerNeuralLearningBackend::Threaded => "threaded",
+    }
+}
+
+fn env_neural_learning_backend(
+    default: SoccerNeuralLearningBackend,
+) -> Result<SoccerNeuralLearningBackend, Box<dyn Error>> {
+    let Some(value) =
+        env_value("SOCCER_NEURAL_LEARNING_BACKEND").or_else(|| env_value("SOCCER_NEURAL_BACKEND"))
+    else {
+        return Ok(default);
+    };
+    match value.to_ascii_lowercase().as_str() {
+        "threaded" | "thread" | "worker" => Ok(SoccerNeuralLearningBackend::Threaded),
+        "inline" | "sync" => Ok(SoccerNeuralLearningBackend::Inline),
+        _ => Err(invalid_data(format!(
+            "SOCCER_NEURAL_LEARNING_BACKEND must be inline or threaded, got {value:?}"
+        ))
+        .into()),
+    }
+}
+
+fn env_neural_learning_config() -> Result<SoccerNeuralLearningConfig, Box<dyn Error>> {
+    let default = SoccerNeuralLearningConfig::default();
+    Ok(SoccerNeuralLearningConfig {
+        enabled: env_bool_alias(
+            "SOCCER_NEURAL_LEARNING_ENABLED",
+            "SOCCER_NEURAL_LEARNING",
+            default.enabled,
+        )?,
+        backend: env_neural_learning_backend(default.backend)?,
+        learning_rate: env_f64_alias(
+            "SOCCER_NEURAL_LEARNING_RATE",
+            "SOCCER_NEURAL_RATE",
+            default.learning_rate,
+        )?,
+        batch_size: env_usize_alias(
+            "SOCCER_NEURAL_BATCH_SIZE",
+            "SOCCER_NEURAL_LEARNING_BATCH_SIZE",
+            default.batch_size,
+        )?,
+        train_every_ticks: env_usize_alias(
+            "SOCCER_NEURAL_TRAIN_EVERY_TICKS",
+            "SOCCER_NEURAL_LEARNING_TRAIN_EVERY_TICKS",
+            default.train_every_ticks,
+        )?,
+        max_batches_per_tick: env_usize_alias(
+            "SOCCER_NEURAL_MAX_BATCHES_PER_TICK",
+            "SOCCER_NEURAL_LEARNING_MAX_BATCHES_PER_TICK",
+            default.max_batches_per_tick,
+        )?,
+        hidden_units: env_usize_alias(
+            "SOCCER_NEURAL_HIDDEN_UNITS",
+            "SOCCER_NEURAL_LEARNING_HIDDEN_UNITS",
+            default.hidden_units,
+        )?,
+        target_scale: env_f64_alias(
+            "SOCCER_NEURAL_TARGET_SCALE",
+            "SOCCER_NEURAL_LEARNING_TARGET_SCALE",
+            default.target_scale,
+        )?,
+        max_pending_batches: env_usize_alias(
+            "SOCCER_NEURAL_MAX_PENDING_BATCHES",
+            "SOCCER_NEURAL_LEARNING_MAX_PENDING_BATCHES",
+            default.max_pending_batches,
+        )?,
+        replay_capacity: env_usize_alias(
+            "SOCCER_NEURAL_REPLAY_CAPACITY",
+            "SOCCER_NEURAL_LEARNING_REPLAY_CAPACITY",
+            default.replay_capacity,
+        )?,
+        replay_samples_per_tick: env_usize_alias(
+            "SOCCER_NEURAL_REPLAY_SAMPLES_PER_TICK",
+            "SOCCER_NEURAL_LEARNING_REPLAY_SAMPLES_PER_TICK",
+            default.replay_samples_per_tick,
+        )?,
+        target_clip: env_f64_alias(
+            "SOCCER_NEURAL_TARGET_CLIP",
+            "SOCCER_NEURAL_LEARNING_TARGET_CLIP",
+            default.target_clip,
+        )?,
+    })
 }
 
 fn q_entry_order(a: &SoccerQEntry, b: &SoccerQEntry) -> std::cmp::Ordering {
@@ -400,6 +508,14 @@ struct RunManifest {
     moment_replay_transitions: usize,
     moment_replay_passes: usize,
     moment_replay_reward_scale: f64,
+    postgres_enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    postgres_experiment_slug: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    postgres_experiment_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    postgres_last_policy_version_id: Option<String>,
+    postgres_persisted_games: usize,
     write_game_artifacts: bool,
     game_artifact_mode: String,
     game_artifacts: Vec<GameManifestEntry>,
@@ -520,6 +636,7 @@ fn run_game(
     episode: usize,
     config: MatchConfig,
     starting_policies: SoccerTeamQPolicies,
+    adversarial_moment_windows: Vec<SoccerMomentWindow>,
     print_progress: bool,
 ) -> Result<CompletedGame, String> {
     let started = Instant::now();
@@ -527,6 +644,9 @@ fn run_game(
     let episode_seed = config.seed as u64;
     let progress_interval = (total_ticks / 9).max(1);
     let mut sim = SoccerMatch::default_11v11(config).with_team_policies(starting_policies);
+    for window in adversarial_moment_windows {
+        sim.remember_adversarial_moment_window(window);
+    }
 
     for tick_idx in 0..total_ticks {
         sim.run_time_step();
@@ -615,6 +735,49 @@ fn merge_team_policy_delta(
 ) {
     merge_policy_delta(&mut dst.home, &before.home, &after.home);
     merge_policy_delta(&mut dst.away, &before.away, &after.away);
+}
+
+fn soccer_learning_completed_game_from_completed(
+    game: &CompletedGame,
+    starting_policies: &SoccerTeamQPolicies,
+) -> SoccerLearningCompletedGame {
+    let summary = game.episode_summary.summary.clone();
+    let score = soccer_learning_run_score(&summary);
+    let delta = soccer_policy_delta_entries(starting_policies, &game.policies, &score);
+    SoccerLearningCompletedGame {
+        episode: game.episode_summary.episode,
+        seed: game.episode_summary.seed,
+        summary,
+        episode_summary: game.episode_summary.clone(),
+        policies: game.policies.clone(),
+        score,
+        delta,
+        elapsed_seconds: game.elapsed_seconds,
+    }
+}
+
+fn soccer_learning_pg_version_label(run_id: &str, shard_index: usize, episode: usize) -> String {
+    let suffix = format!("-s{:03}-e{:06}", shard_index, episode + 1);
+    let max_prefix_len = 160usize.saturating_sub(suffix.len());
+    let mut prefix = run_id
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | ':' | '/' | '-'))
+        .take(max_prefix_len)
+        .collect::<String>();
+    if prefix.is_empty() {
+        prefix.push_str("run");
+    }
+    format!("{prefix}{suffix}")
+}
+
+fn soccer_learning_pg_runner_id(run_id: &str, shard_index: usize, shard_count: usize) -> String {
+    let suffix = format!("-shard-{}-of-{}", shard_index, shard_count);
+    let max_prefix_len = 200usize.saturating_sub(suffix.len());
+    let mut prefix = run_id.chars().take(max_prefix_len).collect::<String>();
+    if prefix.is_empty() {
+        prefix.push_str("soccer-self-play");
+    }
+    format!("{prefix}{suffix}")
 }
 
 fn print_completed_game(game: &CompletedGame) {
@@ -729,6 +892,11 @@ fn run_manifest(
     moment_replay_transitions: usize,
     moment_replay_passes: usize,
     moment_replay_reward_scale: f64,
+    postgres_enabled: bool,
+    postgres_experiment_slug: Option<String>,
+    postgres_experiment_id: Option<String>,
+    postgres_last_policy_version_id: Option<String>,
+    postgres_persisted_games: usize,
     write_game_artifacts: bool,
     game_artifact_mode: &str,
     game_artifacts: Vec<GameManifestEntry>,
@@ -759,6 +927,11 @@ fn run_manifest(
         moment_replay_transitions,
         moment_replay_passes,
         moment_replay_reward_scale,
+        postgres_enabled,
+        postgres_experiment_slug,
+        postgres_experiment_id,
+        postgres_last_policy_version_id,
+        postgres_persisted_games,
         write_game_artifacts,
         game_artifact_mode: game_artifact_mode.to_string(),
         game_artifacts,
@@ -838,6 +1011,18 @@ fn run() -> Result<(), Box<dyn Error>> {
     } else {
         0.0
     };
+    let neural_learning = env_neural_learning_config()?;
+    let default_config = MatchConfig::default();
+    let adversarial_embedding_exploitation_enabled = env_bool_alias(
+        "SOCCER_ADVERSARIAL_EMBEDDING_EXPLOITATION_ENABLED",
+        "SOCCER_ADVERSARIAL_EMBEDDINGS",
+        default_config.adversarial_embedding_exploitation_enabled,
+    )?;
+    let adversarial_embedding_memory_limit = env_usize_alias(
+        "SOCCER_ADVERSARIAL_EMBEDDING_MEMORY_LIMIT",
+        "SOCCER_ADVERSARIAL_MOMENT_MEMORY_LIMIT",
+        default_config.adversarial_embedding_memory_limit,
+    )?;
     let config = MatchConfig {
         dt_seconds,
         duration_seconds: minutes * 60.0,
@@ -850,9 +1035,12 @@ fn run() -> Result<(), Box<dyn Error>> {
         learning_logging_enabled,
         learning_interval_ticks,
         tactical_learning: tactical_learning.clone(),
+        neural_learning: neural_learning.clone(),
+        adversarial_embedding_exploitation_enabled,
+        adversarial_embedding_memory_limit,
         max_human_players: 0,
         seed: effective_seed,
-        ..MatchConfig::default()
+        ..default_config
     };
     let run_id = env_value("SOCCER_RUN_ID").unwrap_or_else(default_run_id);
     let run_dir = PathBuf::from(
@@ -884,9 +1072,52 @@ fn run() -> Result<(), Box<dyn Error>> {
     let manifest_path = run_dir.join("manifest.json");
     let resume_artifact =
         env_value("SOCCER_RESUME_ARTIFACT").or_else(|| env_value("SOCCER_RESUME_ARTIFACT_PATH"));
+    let mut pg_store = SoccerLearningPgStore::connect_from_env().map_err(invalid_data)?;
+    let mut pg_experiment_slug = None::<String>;
+    let mut pg_experiment_id = None::<String>;
+    let mut pg_base_policy_version_id = None::<String>;
+    let mut pg_last_policy_version_id = None::<String>;
+    let mut pg_generation = 0i32;
+    let mut pg_persisted_games = 0usize;
     let mut policies = load_initial_policies(resume_artifact.as_deref(), options.clone())?;
+    if let Some(store) = pg_store.as_mut() {
+        let experiment_slug =
+            env_value("SOCCER_EXPERIMENT_SLUG").unwrap_or_else(|| "soccer-self-play".to_string());
+        let experiment_name =
+            env_value("SOCCER_EXPERIMENT_NAME").unwrap_or_else(|| "Soccer self-play".to_string());
+        let experiment_id = store
+            .ensure_experiment(&experiment_slug, &experiment_name, &config)
+            .map_err(invalid_data)?;
+        if resume_artifact.is_none() {
+            if let Some(version) = store
+                .load_latest_active_policy(&experiment_id, options.clone(), options.clone())
+                .map_err(invalid_data)?
+            {
+                println!(
+                    "postgres_resume_policy experiment={} policy_version={} generation={}",
+                    experiment_slug, version.id, version.generation
+                );
+                policies = version.policies;
+                pg_base_policy_version_id = Some(version.id.clone());
+                pg_last_policy_version_id = Some(version.id);
+                pg_generation = version.generation;
+            }
+        }
+        println!(
+            "postgres_enabled experiment={} experiment_id={} base_policy_version={} generation={}",
+            experiment_slug,
+            experiment_id,
+            pg_base_policy_version_id.as_deref().unwrap_or("none"),
+            pg_generation
+        );
+        pg_experiment_slug = Some(experiment_slug);
+        pg_experiment_id = Some(experiment_id);
+    } else {
+        println!("postgres_enabled=false");
+    }
     let mut moment_replay_records = 0usize;
     let mut moment_replay_transitions = 0usize;
+    let mut adversarial_moment_windows = Vec::new();
     if let Some(path) = moment_replay_path.as_deref() {
         let raw = fs::read_to_string(path)?;
         let mut records = soccer_moment_records_from_jsonl(&raw).map_err(invalid_data)?;
@@ -901,6 +1132,10 @@ fn run() -> Result<(), Box<dyn Error>> {
         .map_err(invalid_data)?;
         moment_replay_records = records.len();
         moment_replay_transitions = replay_dataset.transitions.len();
+        adversarial_moment_windows = records
+            .iter()
+            .map(|record| record.window.clone())
+            .collect::<Vec<_>>();
         for _ in 0..moment_replay_passes {
             policies.train_adversarial(&replay_dataset.transitions);
         }
@@ -969,6 +1204,27 @@ fn run() -> Result<(), Box<dyn Error>> {
         tactical_learning.defense_contract_delta_weight,
         tactical_learning.defense_compactness_score_weight,
     );
+    println!(
+        "neural_learning enabled={} backend={} learning_rate={:.5} batch_size={} train_every_ticks={} max_batches_per_tick={} hidden_units={} target_scale={:.3} max_pending_batches={} replay_capacity={} replay_samples_per_tick={} target_clip={:.3}",
+        neural_learning.enabled,
+        neural_backend_label(neural_learning.backend),
+        neural_learning.learning_rate,
+        neural_learning.batch_size,
+        neural_learning.train_every_ticks,
+        neural_learning.max_batches_per_tick,
+        neural_learning.hidden_units,
+        neural_learning.target_scale,
+        neural_learning.max_pending_batches,
+        neural_learning.replay_capacity,
+        neural_learning.replay_samples_per_tick,
+        neural_learning.target_clip,
+    );
+    println!(
+        "adversarial_embedding enabled={} memory_limit={} preloaded_windows={}",
+        adversarial_embedding_exploitation_enabled,
+        adversarial_embedding_memory_limit,
+        adversarial_moment_windows.len(),
+    );
     println!("game seed score shots on_target passes_completed/pass_attempted interceptions");
 
     let started = Instant::now();
@@ -1001,9 +1257,16 @@ fn run() -> Result<(), Box<dyn Error>> {
             let mut episode_config = config.clone();
             episode_config.seed = effective_seed.wrapping_add(episode as u32);
             let starting_policies = batch_start_policies.clone();
+            let adversarial_moment_windows = adversarial_moment_windows.clone();
             let print_progress = true;
             handles.push(thread::spawn(move || {
-                run_game(episode, episode_config, starting_policies, print_progress)
+                run_game(
+                    episode,
+                    episode_config,
+                    starting_policies,
+                    adversarial_moment_windows,
+                    print_progress,
+                )
             }));
         }
 
@@ -1018,11 +1281,62 @@ fn run() -> Result<(), Box<dyn Error>> {
         completed_games.sort_by_key(|game| game.episode_summary.episode);
 
         let merge_deltas = completed_games.len() > 1;
+        let pg_batch_base_policy_version_id = pg_base_policy_version_id.clone();
         for game in completed_games {
+            let completed_learning_game =
+                soccer_learning_completed_game_from_completed(&game, &batch_start_policies);
             if merge_deltas {
                 merge_team_policy_delta(&mut policies, &batch_start_policies, &game.policies);
             } else {
                 policies = game.policies.clone();
+            }
+            if let (Some(store), Some(experiment_id)) =
+                (pg_store.as_mut(), pg_experiment_id.as_deref())
+            {
+                let next_generation = pg_generation.saturating_add(1);
+                let version_label = soccer_learning_pg_version_label(
+                    &run_id,
+                    shard_index,
+                    game.episode_summary.episode,
+                );
+                let output_policy_version_id = store
+                    .insert_policy_version(
+                        experiment_id,
+                        pg_batch_base_policy_version_id.as_deref(),
+                        next_generation,
+                        &version_label,
+                        "merge",
+                        "active",
+                        &config,
+                        options.clone(),
+                        options.clone(),
+                        &policies,
+                        completed_learning_game.score.match_fitness,
+                    )
+                    .map_err(invalid_data)?;
+                let runner_id = soccer_learning_pg_runner_id(&run_id, shard_index, shard_count);
+                let run_row_id = store
+                    .insert_completed_run(
+                        experiment_id,
+                        &runner_id,
+                        pg_batch_base_policy_version_id.as_deref(),
+                        Some(&output_policy_version_id),
+                        &completed_learning_game,
+                    )
+                    .map_err(invalid_data)?;
+                println!(
+                    "postgres_persisted_game episode={} shard={}/{} run_id={} policy_version={} generation={}",
+                    game.episode_summary.episode + 1,
+                    shard_index,
+                    shard_count,
+                    run_row_id,
+                    output_policy_version_id,
+                    next_generation
+                );
+                pg_base_policy_version_id = Some(output_policy_version_id.clone());
+                pg_last_policy_version_id = Some(output_policy_version_id);
+                pg_generation = next_generation;
+                pg_persisted_games += 1;
             }
             print_completed_game(&game);
 
@@ -1139,6 +1453,11 @@ fn run() -> Result<(), Box<dyn Error>> {
                     0
                 },
                 moment_replay_reward_scale,
+                pg_store.is_some(),
+                pg_experiment_slug.clone(),
+                pg_experiment_id.clone(),
+                pg_last_policy_version_id.clone(),
+                pg_persisted_games,
                 write_game_artifacts,
                 &game_artifact_mode,
                 manifest_games.clone(),
@@ -1197,6 +1516,11 @@ fn run() -> Result<(), Box<dyn Error>> {
             0
         },
         moment_replay_reward_scale,
+        pg_store.is_some(),
+        pg_experiment_slug.clone(),
+        pg_experiment_id.clone(),
+        pg_last_policy_version_id.clone(),
+        pg_persisted_games,
         write_game_artifacts,
         &game_artifact_mode,
         manifest_games,

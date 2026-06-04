@@ -8,8 +8,9 @@
 //!   3. A small in-process primal-dual interior-point method
 //!      (`InternalInteriorPointSolver` / `solve_lp_internal_ipm`) for smooth
 //!      educational solves on medium-small dense LPs.
-//!   4. An external scipy.optimize.linprog dispatcher (`ExternalSolver` /
-//!      `solve_lp_external`) that shells out via `std::process::Command`.
+//!   4. An external LP dispatcher (`ExternalSolver` / `solve_lp_external`) that
+//!      prefers the Rust local CLI bridge for supported solvers and keeps the
+//!      legacy Python bridge for explicit SciPy/OR-Tools compatibility.
 //!   5. `LPSolver` / `solve_lp`: selects a solver via the `LP_SOLVER` env var,
 //!      defaulting to the native internal simplex. Explicit external choices
 //!      fall back to the internal simplex if the bridge is unavailable.
@@ -30,13 +31,15 @@
 //!     (`solve_lp`, `solve_lp_internal`, `solve_lp_external`, `lp_to_string`)
 //!     because other modules import them as the stable public API.
 //!
-//! NOTE on JSON: the TS migration header suggested `serde`, but `serde` /
-//! `serde_json` are NOT available deps in this crate, so the external bridge
-//! uses a small hand-rolled JSON encoder (request) and parser (response)
-//! contained in this file. See the flag in the porting summary.
+//! NOTE on JSON: the legacy Python bridge keeps the small hand-rolled JSON
+//! encoder/parser in this file for compatibility with the original TS port.
 
 use std::time::Instant;
 
+use crate::des::general::external_linear_cli::{
+    solve_lp_with_external_cli, ExternalLinearCliLpAlgorithm, ExternalLinearCliOptions,
+    ExternalLinearCliSolver, ExternalLinearCliStatus,
+};
 use crate::des::shared::linalg::{LinearSystem, Matrix, Vector};
 use crate::des::shared::transform::Transform;
 
@@ -3682,9 +3685,9 @@ fn pivot(t: &mut Vec<Vec<f64>>, basis: &mut [usize], pivot_row: usize, pivot_col
 // External-solver dispatcher.
 // -----------------------------------------------------------------------------
 
-/// Default path to the repository-local Python LP bridge. The bridge supports
-/// SciPy/HiGHS and OR-Tools GLOP, and falls back to dependency-free vertex
-/// enumeration for small validation models.
+/// Default path to the repository-local Python LP bridge. This is retained for
+/// explicit SciPy/OR-Tools compatibility; supported HiGHS calls use the Rust
+/// local CLI bridge by default when no Python/script override is supplied.
 const DEFAULT_SCRIPT: &str = "scripts/lp_solve.py";
 
 fn ortools_linear_method(method: &str) -> Option<&'static str> {
@@ -3704,7 +3707,108 @@ fn external_solver_label(method: &str) -> String {
     }
 }
 
-/// Configuration for the external Python LP bridge. TS `interface ExternalSolverOptions`.
+fn lp_external_bridge_forced_python() -> bool {
+    std::env::var("LP_EXTERNAL_BRIDGE")
+        .or_else(|_| std::env::var("ORES_LP_EXTERNAL_BRIDGE"))
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "python" | "py" | "legacy-python" | "legacy"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn rust_external_lp_cli_options(
+    method: &str,
+    opts: &ExternalSolverOptions,
+) -> Option<ExternalLinearCliOptions> {
+    if opts.python.is_some() || opts.script.is_some() || lp_external_bridge_forced_python() {
+        return None;
+    }
+    let normalized = method.trim().to_ascii_lowercase().replace('_', "-");
+    let lp_algorithm = match normalized.as_str() {
+        "highs" | "scipy:highs" => None,
+        "highs-ds" | "scipy:highs-ds" => Some(ExternalLinearCliLpAlgorithm::Simplex),
+        "highs-ipm" | "scipy:highs-ipm" => Some(ExternalLinearCliLpAlgorithm::Ipm),
+        _ => return None,
+    };
+    Some(ExternalLinearCliOptions {
+        solver: ExternalLinearCliSolver::Highs,
+        lp_algorithm,
+        ..ExternalLinearCliOptions::default()
+    })
+}
+
+fn lp_status_from_external_cli_status(status: ExternalLinearCliStatus) -> LPStatus {
+    match status {
+        ExternalLinearCliStatus::Optimal => LPStatus::Optimal,
+        ExternalLinearCliStatus::Feasible => LPStatus::IterLimit,
+        ExternalLinearCliStatus::Infeasible => LPStatus::Infeasible,
+        ExternalLinearCliStatus::Unbounded => LPStatus::Unbounded,
+        ExternalLinearCliStatus::Unavailable
+        | ExternalLinearCliStatus::NumericalError
+        | ExternalLinearCliStatus::Unknown => LPStatus::NumericalError,
+    }
+}
+
+fn lp_solution_from_external_cli(
+    requested_solver: &str,
+    solution: crate::des::general::external_linear_cli::ExternalLinearCliSolution,
+    t0: Instant,
+) -> LPSolution {
+    let status = lp_status_from_external_cli_status(solution.status);
+    let mut message = if solution.message.is_empty() {
+        None
+    } else {
+        Some(solution.message.clone())
+    };
+    if solution.status == ExternalLinearCliStatus::Unavailable {
+        message = Some(format!(
+            "Rust local CLI bridge unavailable for {requested_solver}: {}",
+            solution.message
+        ));
+    }
+    if status == LPStatus::Optimal && solution.objective.is_none() {
+        return LPSolution {
+            status: LPStatus::NumericalError,
+            x: Vec::new(),
+            objective: f64::NAN,
+            dual_ub: None,
+            dual_eq: None,
+            reduced_costs: None,
+            var_basis: None,
+            row_basis: None,
+            unbounded_ray: None,
+            infeasibility_certificate: None,
+            iters: None,
+            solver: requested_solver.to_string(),
+            elapsed_ms: ms_since(t0),
+            message: Some(format!(
+                "Rust local CLI bridge for {requested_solver} returned optimal without objective"
+            )),
+        };
+    }
+    LPSolution {
+        status,
+        x: solution.x,
+        objective: solution.objective.unwrap_or(f64::NAN),
+        dual_ub: solution.dual_ub,
+        dual_eq: solution.dual_eq,
+        reduced_costs: solution.reduced_costs,
+        var_basis: solution.var_basis,
+        row_basis: solution.row_basis,
+        unbounded_ray: None,
+        infeasibility_certificate: None,
+        iters: solution.iterations.map(|iters| iters as usize),
+        solver: requested_solver.to_string(),
+        elapsed_ms: solution.elapsed_ms,
+        message,
+    }
+}
+
+/// Configuration for the external LP bridge. TS `interface ExternalSolverOptions`.
 ///
 /// `method` is modelled as a free `String` (rather than a closed enum) to
 /// faithfully reproduce the TS behaviour where external methods can be passed
@@ -3722,7 +3826,7 @@ pub struct ExternalSolverOptions {
     pub max_buffer: Option<usize>,
 }
 
-/// External Python LP dispatcher as a transform. Returns status
+/// External LP dispatcher as a transform. Returns status
 /// `NumericalError` if the requested solver / python is unavailable (or the process fails /
 /// emits unparseable output) — use `LPSolver` for graceful fallback.
 #[derive(Clone, Debug, Default)]
@@ -3746,6 +3850,10 @@ impl ExternalSolver {
             .clone()
             .unwrap_or_else(|| "highs".to_string());
         let requested_solver = external_solver_label(&method);
+        if let Some(cli_opts) = rust_external_lp_cli_options(&method, &self.opts) {
+            let solution = solve_lp_with_external_cli(p, &cli_opts);
+            return lp_solution_from_external_cli(&requested_solver, solution, t0);
+        }
         let python = self
             .opts
             .python
@@ -4543,6 +4651,76 @@ mod tests {
         assert_eq!(external_solver_label("pdlp"), "ortools:pdlp");
         assert_eq!(external_solver_label("ortools-PDLP"), "ortools:pdlp");
         assert_eq!(external_solver_label("highs"), "scipy:highs");
+    }
+
+    #[test]
+    fn rust_external_lp_cli_options_cover_highs_without_python_override() {
+        if lp_external_bridge_forced_python() {
+            eprintln!("skipping Rust LP CLI option test because LP_EXTERNAL_BRIDGE=python");
+            return;
+        }
+
+        let opts = ExternalSolverOptions::default();
+        let highs = rust_external_lp_cli_options("highs", &opts).expect("highs should map");
+        assert_eq!(highs.solver, ExternalLinearCliSolver::Highs);
+        assert_eq!(highs.lp_algorithm, None);
+
+        let dual_simplex =
+            rust_external_lp_cli_options("highs-ds", &opts).expect("highs-ds should map");
+        assert_eq!(dual_simplex.solver, ExternalLinearCliSolver::Highs);
+        assert_eq!(
+            dual_simplex.lp_algorithm,
+            Some(ExternalLinearCliLpAlgorithm::Simplex)
+        );
+
+        let ipm = rust_external_lp_cli_options("highs_ipm", &opts).expect("highs-ipm should map");
+        assert_eq!(ipm.solver, ExternalLinearCliSolver::Highs);
+        assert_eq!(ipm.lp_algorithm, Some(ExternalLinearCliLpAlgorithm::Ipm));
+
+        let python_opts = ExternalSolverOptions {
+            python: Some("python3".to_string()),
+            ..Default::default()
+        };
+        assert!(rust_external_lp_cli_options("highs", &python_opts).is_none());
+
+        let script_opts = ExternalSolverOptions {
+            script: Some("scripts/lp_solve.py".to_string()),
+            ..Default::default()
+        };
+        assert!(rust_external_lp_cli_options("highs", &script_opts).is_none());
+    }
+
+    #[test]
+    fn external_solver_can_call_installed_highs_cli_without_python_bridge() {
+        if lp_external_bridge_forced_python() {
+            eprintln!("skipping real HiGHS CLI check because LP_EXTERNAL_BRIDGE=python");
+            return;
+        }
+        let Ok(output) = std::process::Command::new("highs")
+            .arg("--version")
+            .output()
+        else {
+            eprintln!("skipping real HiGHS CLI check; highs is not on PATH");
+            return;
+        };
+        if !output.status.success() {
+            eprintln!("skipping real HiGHS CLI check; highs --version failed");
+            return;
+        }
+
+        let p = LPProblem {
+            sense: Sense::Max,
+            c: vec![1.0, 1.0],
+            a_ub: Some(vec![vec![1.0, 0.0], vec![0.0, 1.0]]),
+            b_ub: Some(vec![4.0, 3.0]),
+            ..Default::default()
+        };
+        let sol = solve_lp_external(&p, &ExternalSolverOptions::default());
+        assert_eq!(sol.status, LPStatus::Optimal, "{:?}", sol.message);
+        assert_eq!(sol.solver, "scipy:highs");
+        assert!((sol.objective - 7.0).abs() <= 1e-7, "{sol:?}");
+        assert!((sol.x[0] - 4.0).abs() <= 1e-7, "{:?}", sol.x);
+        assert!((sol.x[1] - 3.0).abs() <= 1e-7, "{:?}", sol.x);
     }
 
     #[test]

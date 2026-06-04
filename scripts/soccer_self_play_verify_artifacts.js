@@ -186,7 +186,7 @@ for (const shardDir of shardDirs) {
   const shardName = path.basename(shardDir);
   const artifacts = [
     ["final", path.join(shardDir, "artifact.json")],
-    ["checkpoint", path.join(shardDir, "artifact.json.checkpoint.json")],
+    ["checkpoint", path.join(shardDir, "checkpoint-policy.json")],
   ].filter(([, artifactPath]) => fs.existsSync(artifactPath));
 
   if (artifacts.length === 0) {

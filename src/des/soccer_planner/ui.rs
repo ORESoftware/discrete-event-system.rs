@@ -20,7 +20,7 @@ pub fn planner_page_html() -> String {
         .replace("__PLANNER_GIT_COMMIT__", &html_escape(git_commit))
         .replace(
             "__PLANNER_GIT_COMMIT_SHORT__",
-            &html_escape(git_commit_short),
+            &html_escape(&git_commit_short),
         )
 }
 
@@ -32,11 +32,11 @@ fn planner_git_commit() -> &'static str {
     option_env!("DES_ENGINE_GIT_COMMIT").unwrap_or("unknown")
 }
 
-fn short_git_commit(commit: &str) -> &str {
+fn short_git_commit(commit: &str) -> String {
     if commit == "unknown" {
-        commit
+        commit.to_string()
     } else {
-        &commit[..commit.len().min(12)]
+        commit.chars().take(12).collect()
     }
 }
 
@@ -46,6 +46,7 @@ fn html_escape(value: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 /// Serialize a planner response for the JSON API (animations as JSON objects).
@@ -129,6 +130,20 @@ mod tests {
         assert!(html.contains("id=\"buildInfo\""));
         assert!(!html.contains("__PLANNER_VERSION__"));
         assert!(!html.contains("__PLANNER_GIT_COMMIT"));
+    }
+
+    #[test]
+    fn commit_display_helpers_are_safe_for_untrusted_labels() {
+        assert_eq!(
+            short_git_commit("abcdef1234567890"),
+            "abcdef123456".to_string()
+        );
+        let accented = "\u{e9}".repeat(13);
+        assert_eq!(short_git_commit(&accented), "\u{e9}".repeat(12));
+        assert_eq!(
+            html_escape("<tag attr='x'>&\""),
+            "&lt;tag attr=&#39;x&#39;&gt;&amp;&quot;".to_string()
+        );
     }
 
     #[test]

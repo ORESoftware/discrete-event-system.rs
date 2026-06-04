@@ -26,7 +26,10 @@ if (( build_release != 0 )); then
 fi
 
 export SOCCER_BUILD_RELEASE=0
-export -p | grep 'declare -x SOCCER_' > "$SOCCER_OUT_ROOT/launch.env" || true
+export -p \
+  | grep 'declare -x SOCCER_' \
+  | grep -v 'declare -x SOCCER_DATABASE_URL=' \
+  > "$SOCCER_OUT_ROOT/launch.env" || true
 
 label="com.ores.soccer-self-play.$SOCCER_RUN_ID"
 printf '%s\n' "$label" > "$SOCCER_OUT_ROOT/launchd.label"

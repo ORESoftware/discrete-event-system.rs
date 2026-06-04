@@ -208,6 +208,8 @@ fn solve_delivery_planner_inner(
                 solution_limit: None,
                 objective_limit: None,
                 verbose: Some(false),
+                cancel_flag: None,
+                take_next_incumbent_signal: None,
                 mip_start: None,
             },
         )

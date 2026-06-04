@@ -5,8 +5,8 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_dir="$(cd "$script_dir/.." && pwd)"
 cd "$repo_dir"
 
-if [[ -n "${SOCCER_ARTIFACT_PATH:-}" || -n "${SOCCER_EPISODE_LOG_PATH:-}" || -n "${SOCCER_LEARNED_PARAMS_PATH:-}" ]]; then
-  echo "SOCCER_ARTIFACT_PATH, SOCCER_EPISODE_LOG_PATH, and SOCCER_LEARNED_PARAMS_PATH are managed per shard by this launcher." >&2
+if [[ -n "${SOCCER_RUN_DIR:-}" || -n "${SOCCER_ARTIFACT_PATH:-}" || -n "${SOCCER_CHECKPOINT_ARTIFACT_PATH:-}" || -n "${SOCCER_EPISODE_LOG_PATH:-}" || -n "${SOCCER_LEARNED_PARAMS_PATH:-}" ]]; then
+  echo "SOCCER_RUN_DIR, SOCCER_ARTIFACT_PATH, SOCCER_CHECKPOINT_ARTIFACT_PATH, SOCCER_EPISODE_LOG_PATH, and SOCCER_LEARNED_PARAMS_PATH are managed per shard by this launcher." >&2
   echo "Use SOCCER_OUT_ROOT or SOCCER_RUN_ID to choose the output namespace." >&2
   exit 2
 fi
@@ -15,7 +15,7 @@ export SOCCER_GAMES="${SOCCER_GAMES:-100}"
 export SOCCER_HALVES="${SOCCER_HALVES:-2}"
 export SOCCER_HALF_MINUTES="${SOCCER_HALF_MINUTES:-45}"
 export SOCCER_PERIOD_BREAK_RECOVERY_SECONDS="${SOCCER_PERIOD_BREAK_RECOVERY_SECONDS:-900}"
-export SOCCER_DT_SECONDS="${SOCCER_DT_SECONDS:-1.0}"
+export SOCCER_DT_SECONDS="${SOCCER_DT_SECONDS:-0.2}"
 export SOCCER_LEARNING_INTERVAL_TICKS="${SOCCER_LEARNING_INTERVAL_TICKS:-4}"
 export SOCCER_CHECKPOINT_INTERVAL_GAMES="${SOCCER_CHECKPOINT_INTERVAL_GAMES:-10}"
 export SOCCER_ARTIFACT_MAX_ENTRIES_PER_POLICY="${SOCCER_ARTIFACT_MAX_ENTRIES_PER_POLICY:-10000}"
@@ -72,6 +72,19 @@ else
 fi
 mkdir -p "$out_root"
 
+postgres_database_url_present=false
+for postgres_env_name in \
+  SOCCER_DATABASE_URL \
+  AGENT_TASKS_RDS_DATABASE_URL \
+  RDS_DATABASE_URL \
+  DATABASE_URL \
+  PG_DATABASE_URL; do
+  if [[ -n "${!postgres_env_name:-}" ]]; then
+    postgres_database_url_present=true
+    break
+  fi
+done
+
 printf 'run_id=%s\n' "$run_id" > "$out_root/run.env"
 printf 'games=%s\n' "$SOCCER_GAMES" >> "$out_root/run.env"
 printf 'halves=%s\n' "$SOCCER_HALVES" >> "$out_root/run.env"
@@ -84,7 +97,11 @@ printf 'dt_seconds=%s\n' "$SOCCER_DT_SECONDS" >> "$out_root/run.env"
 printf 'learning_interval_ticks=%s\n' "$SOCCER_LEARNING_INTERVAL_TICKS" >> "$out_root/run.env"
 printf 'checkpoint_interval_games=%s\n' "$SOCCER_CHECKPOINT_INTERVAL_GAMES" >> "$out_root/run.env"
 printf 'artifact_max_entries_per_policy=%s\n' "$SOCCER_ARTIFACT_MAX_ENTRIES_PER_POLICY" >> "$out_root/run.env"
+printf 'artifact_file=artifact.json\n' >> "$out_root/run.env"
+printf 'checkpoint_policy_file=checkpoint-policy.json\n' >> "$out_root/run.env"
 printf 'learned_params_file=learned-params.json\n' >> "$out_root/run.env"
+printf 'episode_log_file=episodes.jsonl\n' >> "$out_root/run.env"
+printf 'manifest_file=manifest.json\n' >> "$out_root/run.env"
 printf 'attack_spacing_delta_weight=%s\n' "$SOCCER_ATTACK_SPACING_DELTA_WEIGHT" >> "$out_root/run.env"
 printf 'attack_spacing_score_weight=%s\n' "$SOCCER_ATTACK_SPACING_SCORE_WEIGHT" >> "$out_root/run.env"
 printf 'attack_width_delta_weight=%s\n' "$SOCCER_ATTACK_WIDTH_DELTA_WEIGHT" >> "$out_root/run.env"
@@ -114,6 +131,10 @@ fi
 printf 'moment_replay_limit=%s\n' "${SOCCER_MOMENT_REPLAY_LIMIT:-0}" >> "$out_root/run.env"
 printf 'moment_replay_passes=%s\n' "${SOCCER_MOMENT_REPLAY_PASSES:-1}" >> "$out_root/run.env"
 printf 'moment_replay_reward_scale=%s\n' "${SOCCER_MOMENT_REPLAY_REWARD_SCALE:-1.0}" >> "$out_root/run.env"
+printf 'postgres_enabled=%s\n' "$postgres_database_url_present" >> "$out_root/run.env"
+printf 'postgres_database_url_present=%s\n' "$postgres_database_url_present" >> "$out_root/run.env"
+printf 'postgres_experiment_slug=%s\n' "${SOCCER_EXPERIMENT_SLUG:-soccer-self-play}" >> "$out_root/run.env"
+printf 'postgres_experiment_name=%s\n' "${SOCCER_EXPERIMENT_NAME:-Soccer self-play}" >> "$out_root/run.env"
 printf 'shards=%s\n' "$shards" >> "$out_root/run.env"
 printf 'parallel_shards=%s\n' "$parallel_shards" >> "$out_root/run.env"
 
@@ -122,13 +143,20 @@ run_shard() {
   local shard_dir="$out_root/shard-${shard_index}-of-${shards}"
   mkdir -p "$shard_dir"
   printf 'starting shard %s/%s -> %s\n' "$shard_index" "$shards" "$shard_dir"
-  SOCCER_SHARD_INDEX="$shard_index" \
+  if SOCCER_SHARD_INDEX="$shard_index" \
     SOCCER_SHARD_COUNT="$shards" \
+    SOCCER_RUN_DIR="$shard_dir" \
     SOCCER_ARTIFACT_PATH="$shard_dir/artifact.json" \
+    SOCCER_CHECKPOINT_ARTIFACT_PATH="$shard_dir/checkpoint-policy.json" \
     SOCCER_LEARNED_PARAMS_PATH="$shard_dir/learned-params.json" \
     SOCCER_EPISODE_LOG_PATH="$shard_dir/episodes.jsonl" \
-    "$binary" > "$shard_dir/stdout.log" 2> "$shard_dir/stderr.log"
-  printf 'finished shard %s/%s -> %s\n' "$shard_index" "$shards" "$shard_dir"
+    "$binary" > "$shard_dir/stdout.log" 2> "$shard_dir/stderr.log"; then
+    printf 'finished shard %s/%s -> %s\n' "$shard_index" "$shards" "$shard_dir"
+  else
+    local shard_status="$?"
+    printf 'failed shard %s/%s -> %s exit=%s\n' "$shard_index" "$shards" "$shard_dir" "$shard_status" >&2
+    return "$shard_status"
+  fi
 }
 
 status=0

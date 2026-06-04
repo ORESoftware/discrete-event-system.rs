@@ -1446,9 +1446,11 @@ def parse_lp_iterations(solver: str, kind: str, stdout: str, stderr: str) -> dic
 def parse_mip_quality(
     solver: str,
     kind: str,
+    status: str,
     objective: Optional[float],
     stdout: str,
     stderr: str,
+    node_limit: Optional[int] = None,
 ) -> dict:
     if kind != "mip":
         return {}
@@ -1503,6 +1505,31 @@ def parse_mip_quality(
                 value = _first_float_after_colon(stripped)
                 if value is not None:
                     mip_gap = value / 100.0 if "%" in stripped else value
+    elif solver == "lp-solve":
+        for line in text.splitlines():
+            stripped = line.strip()
+            match = re.search(
+                r"\b(?:feasible|optimal)\s+solution\b.*?\b(\d+)\s+nodes?\s+\(gap\s+([^)]+)\)",
+                stripped,
+                flags=re.IGNORECASE,
+            )
+            if match is None:
+                continue
+            nodes_explored = int(match.group(1))
+            value = _first_float(match.group(2))
+            if value is not None:
+                mip_gap = value / 100.0 if "%" in match.group(2) else value
+        if node_limit is not None:
+            nodes_explored = None
+
+    exact_optimal = mip_gap is None or abs(mip_gap) <= 1e-12
+    if status == "optimal" and exact_optimal and objective is not None and math.isfinite(objective):
+        if best_bound is None:
+            best_bound = objective
+        if mip_gap is None:
+            mip_gap = 0.0
+        if absolute_gap is None:
+            absolute_gap = 0.0
 
     if best_bound is not None and math.isfinite(best_bound):
         fields["bestBound"] = best_bound
@@ -2350,6 +2377,28 @@ def run_solver(
             command,
             "-timeout",
             str(max(1, int(math.ceil(time_limit)))),
+            *(["-v5", "-S2"] if kind == "mip" else []),
+            *(
+                ["-gr", f"{float(relative_gap):.17g}"]
+                if kind == "mip" and relative_gap is not None
+                else []
+            ),
+            *(
+                ["-ga", f"{float(absolute_gap):.17g}"]
+                if kind == "mip" and absolute_gap is not None
+                else []
+            ),
+            *(
+                ["-o", f"{float(objective_limit):.17g}"]
+                if kind == "mip" and objective_limit is not None
+                else []
+            ),
+            *(
+                ["-e", f"{float(integer_feasibility_tolerance):.17g}"]
+                if kind == "mip" and integer_feasibility_tolerance is not None
+                else []
+            ),
+            *(["-presolve"] if presolve == "on" else []),
             model_path,
         ]
     elif solver == "gurobi":
@@ -3079,7 +3128,17 @@ def solve(
             stderr,
         )
     )
-    result.update(parse_mip_quality(solver, kind, objective, stdout, stderr))
+    result.update(
+        parse_mip_quality(
+            solver,
+            kind,
+            classified,
+            objective,
+            stdout,
+            stderr,
+            node_limit,
+        )
+    )
     return result
 
 

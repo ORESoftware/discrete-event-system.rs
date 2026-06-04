@@ -9,7 +9,7 @@ export SOCCER_GAMES="${SOCCER_GAMES:-100}"
 export SOCCER_HALVES="${SOCCER_HALVES:-2}"
 export SOCCER_MINUTES="${SOCCER_MINUTES:-90}"
 export SOCCER_PERIOD_BREAK_RECOVERY_SECONDS="${SOCCER_PERIOD_BREAK_RECOVERY_SECONDS:-900}"
-export SOCCER_DT_SECONDS="${SOCCER_DT_SECONDS:-1.0}"
+export SOCCER_DT_SECONDS="${SOCCER_DT_SECONDS:-0.2}"
 export SOCCER_LEARNING_INTERVAL_TICKS="${SOCCER_LEARNING_INTERVAL_TICKS:-4}"
 export SOCCER_SEED="${SOCCER_SEED:-2026}"
 export SOCCER_ALPHA="${SOCCER_ALPHA:-0.20}"
@@ -92,4 +92,4 @@ fi
   --server-artifact-path "$server_artifact_path" \
   --server-learned-params-path "$server_learned_params_path" \
   --auth-header-name "$auth_header_name" \
-  --auth-value "$auth_value"
+  --auth-env-name DES_RS_AUTH

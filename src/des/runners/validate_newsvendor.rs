@@ -5,145 +5,65 @@
 //! simulation ≈ Bellman value; and a Python (scipy/numpy) cross-check.
 //! Driver → [`run`].
 //!
-//! PORT NOTES — wire to real modules:
+//! PORT NOTES:
 //!   * `crate::des::main_newsvendor::{analytical_optimal_q, brute_search_optimal_q,
 //!     demand_poisson_pmf, demand_uniform_pmf, expected_profit, mdp_optimal_q,
-//!     NewsvendorParams, simulate}` (TS `main-newsvendor`; may need porting).
+//!     NewsvendorParams, simulate}`.
 //!   * `crate::des::main_inventory_mdp::{detect_policy_structure, inventory_mdp_spec,
 //!     InventoryParams, simulate_inventory_mdp}` (present as `main_inventory_mdp.rs`).
 //!   * `crate::des::general::value_iteration::{value_iteration, VIOptions, MDPSpec}`
 //!     (present).
-//!   * Python reference via `std::process::Command`; JSON parse needs `serde_json`
-//!     (NOT in Cargo.toml) — `run_python` therefore always returns `None` (SKIP),
-//!     matching the TS "reference not runnable" branch.
+//!   * Optional Python reference via `std::process::Command` is only attempted
+//!     when `NEWSVENDOR_PY` is explicitly set. JSON parsing is not wired here,
+//!     so the default path stays Rust-only and prints the same SKIP branch.
 
 #![allow(dead_code, unused_variables, unused_mut, unused_imports)]
 
 use std::path::PathBuf;
 use std::process::Command;
 
-// =============================================================================
-// Stubbed newsvendor / inventory-MDP / VI layer (mirrors real signatures).
-// =============================================================================
+use crate::des::general::value_iteration::{value_iteration, VIOptions};
+use crate::des::main_inventory_mdp::{
+    demand_poisson_pmf as inventory_demand_poisson_pmf, detect_policy_structure,
+    inventory_mdp_spec, simulate_inventory_mdp, DemandDist as InventoryDemandDist, InventoryParams,
+    PolicyKind,
+};
+use crate::des::main_newsvendor::{
+    analytical_optimal_q, brute_search_optimal_q,
+    demand_poisson_pmf as newsvendor_demand_poisson_pmf,
+    demand_uniform_pmf as newsvendor_demand_uniform_pmf, expected_profit, mdp_optimal_q,
+    DemandDist as NewsvendorDemandDist, NewsvendorParams,
+};
 
-#[derive(Clone, Debug, Default)]
-struct NewsvendorParams {
-    unit_cost: f64,
-    unit_price: f64,
-    unit_salvage: f64,
-    demand: Vec<f64>,
-    q_max: usize,
-}
-
-#[derive(Clone, Debug, Default)]
-struct AnalyticalResult {
-    q_star: i64,
-    critical_ratio: f64,
-}
-#[derive(Clone, Debug, Default)]
-struct BruteResult {
-    q_star: usize,
-    profile_ep: Vec<f64>,
-}
-#[derive(Clone, Debug, Default)]
-struct MdpQResult {
-    q_star: i64,
-    v0: f64,
-}
-
-fn demand_poisson_pmf(_lambda: f64, q_max: usize) -> Vec<f64> {
-    vec![0.0; q_max + 1]
-}
-fn demand_uniform_pmf(_a: usize, _b: usize, q_max: usize) -> Vec<f64> {
-    vec![0.0; q_max + 1]
-}
-fn analytical_optimal_q(_p: &NewsvendorParams) -> AnalyticalResult {
-    AnalyticalResult {
-        q_star: 0,
-        critical_ratio: 0.0,
-    }
-}
-fn brute_search_optimal_q(p: &NewsvendorParams) -> BruteResult {
-    BruteResult {
-        q_star: 0,
-        profile_ep: vec![0.0; p.q_max + 1],
-    }
-}
-fn mdp_optimal_q(_p: &NewsvendorParams) -> MdpQResult {
-    MdpQResult { q_star: 0, v0: 0.0 }
-}
-fn expected_profit(_q: i64, _p: &NewsvendorParams) -> f64 {
-    0.0
-}
-
-#[derive(Clone, Debug, Default)]
-struct InventoryParams {
-    x_max: usize,
-    a_max: usize,
-    demand: Vec<f64>,
-    unit_cost: f64,
-    fixed_cost: f64,
-    unit_price: f64,
-    hold_cost: f64,
-    lost_cost: f64,
-    gamma: f64,
-}
-
-#[derive(Clone, Debug, Default)]
-struct MdpSpec {
-    n: usize,
-}
-fn inventory_mdp_spec(p: &InventoryParams) -> MdpSpec {
-    MdpSpec { n: p.x_max + 1 }
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-struct ViOptions {
-    gamma: f64,
-    tol: f64,
-}
-#[derive(Clone, Debug, Default)]
-struct ViResult {
-    policy: Vec<i64>,
-    v: Vec<f64>,
-}
-fn value_iteration(spec: &MdpSpec, _opts: ViOptions) -> ViResult {
-    ViResult {
-        policy: vec![0; spec.n],
-        v: vec![0.0; spec.n],
+fn inventory_demand_from_newsvendor(demand: &NewsvendorDemandDist) -> InventoryDemandDist {
+    InventoryDemandDist {
+        pmf: demand.pmf.clone(),
     }
 }
 
-#[derive(Clone, Debug, Default)]
-struct PolicyStructure {
-    kind: String,
-    s: i64,
-    reorder_point: i64,
-}
-fn detect_policy_structure(_policy: &[i64]) -> PolicyStructure {
-    // PORT NOTE: real classifier inspects the policy for base-stock vs (s,S).
-    PolicyStructure {
-        kind: "base-stock".to_string(),
-        s: 0,
-        reorder_point: 0,
+fn policy_kind_label(kind: &PolicyKind) -> &'static str {
+    match kind {
+        PolicyKind::BaseStock => "base-stock",
+        PolicyKind::SS => "s-S",
+        PolicyKind::Irregular => "irregular",
     }
 }
 
-#[derive(Clone, Debug, Default)]
-struct SimResult {
-    mean_reward: f64,
-}
-fn simulate_inventory_mdp<F: Fn(usize) -> i64>(
-    _p: &InventoryParams,
-    _policy: F,
-    _days: usize,
-    _seed: u64,
-    _x0: usize,
-) -> SimResult {
-    SimResult { mean_reward: 0.0 }
+fn policy_as_i64(policy: &[i32]) -> Vec<i64> {
+    policy
+        .iter()
+        .map(|&value| i64::from(value.max(0)))
+        .collect()
 }
 
-// Python reference (always None — see module PORT NOTES).
+fn policy_as_usize(policy: &[i32]) -> Vec<usize> {
+    policy
+        .iter()
+        .map(|&value| usize::try_from(value.max(0)).unwrap_or(0))
+        .collect()
+}
+
+// Optional Python reference (always None — see module PORT NOTES).
 struct PyNewsvendor {
     q_star: i64,
     expected_profit_at_qstar: f64,
@@ -158,7 +78,7 @@ struct PyJson {
 }
 
 fn run_python(args: &[&str]) -> Option<PyJson> {
-    let python = std::env::var("NEWSVENDOR_PY").unwrap_or_else(|_| "python3".to_string());
+    let python = std::env::var("NEWSVENDOR_PY").ok()?;
     let script: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("external-references")
         .join("newsvendor")
@@ -224,7 +144,7 @@ pub fn run() {
                 unit_cost: 0.5,
                 unit_price: 1.0,
                 unit_salvage: 0.1,
-                demand: demand_poisson_pmf(50.0, 125),
+                demand: newsvendor_demand_poisson_pmf(50.0, 125),
                 q_max: 125,
             },
         ),
@@ -234,7 +154,7 @@ pub fn run() {
                 unit_cost: 0.3,
                 unit_price: 2.0,
                 unit_salvage: 0.0,
-                demand: demand_poisson_pmf(20.0, 60),
+                demand: newsvendor_demand_poisson_pmf(20.0, 60),
                 q_max: 60,
             },
         ),
@@ -244,7 +164,7 @@ pub fn run() {
                 unit_cost: 0.9,
                 unit_price: 1.0,
                 unit_salvage: 0.7,
-                demand: demand_poisson_pmf(100.0, 200),
+                demand: newsvendor_demand_poisson_pmf(100.0, 200),
                 q_max: 200,
             },
         ),
@@ -254,7 +174,7 @@ pub fn run() {
                 unit_cost: 0.5,
                 unit_price: 1.0,
                 unit_salvage: 0.1,
-                demand: demand_uniform_pmf(10, 30, 40),
+                demand: newsvendor_demand_uniform_pmf(10, 30, 40),
                 q_max: 40,
             },
         ),
@@ -275,8 +195,12 @@ pub fn run() {
             b.profile_ep[b.q_star],
             m.v0
         );
-        c.check("analytical q* ≡ brute q*", a.q_star == b.q_star as i64, "");
-        c.check("analytical q* ≡ MDP q*", a.q_star == m.q_star, "");
+        c.check("analytical q* ≡ brute q*", a.q_star == b.q_star, "");
+        c.check(
+            "analytical q* ≡ MDP q*",
+            usize::try_from(m.q_star).ok() == Some(a.q_star),
+            "",
+        );
         c.check(
             "E[profit] analytical ≡ brute",
             approx(
@@ -302,7 +226,7 @@ pub fn run() {
         let ip = InventoryParams {
             x_max: np.q_max,
             a_max: np.q_max,
-            demand: np.demand.clone(),
+            demand: inventory_demand_from_newsvendor(&np.demand),
             unit_cost: np.unit_cost,
             fixed_cost: 0.0,
             unit_price: np.unit_price,
@@ -312,10 +236,11 @@ pub fn run() {
         };
         let spec = inventory_mdp_spec(&ip);
         let result = value_iteration(
-            &spec,
-            ViOptions {
+            spec,
+            VIOptions {
                 gamma: 0.0,
                 tol: 1e-12,
+                ..Default::default()
             },
         );
         let policy_at_zero = result.policy[0];
@@ -326,7 +251,7 @@ pub fn run() {
         );
         c.check(
             "γ=0 multi-period MDP π(0) = newsvendor q*",
-            policy_at_zero == newsvendor_q_star,
+            usize::try_from(policy_at_zero).ok() == Some(newsvendor_q_star),
             "",
         );
     }
@@ -337,7 +262,7 @@ pub fn run() {
     let inv_base = InventoryParams {
         x_max: 50,
         a_max: 50,
-        demand: demand_poisson_pmf(20.0, 50),
+        demand: inventory_demand_poisson_pmf(20.0, 50),
         unit_cost: 1.0,
         fixed_cost: 0.0,
         unit_price: 2.0,
@@ -351,25 +276,32 @@ pub fn run() {
         params.fixed_cost = 0.0;
         let spec = inventory_mdp_spec(&params);
         let result = value_iteration(
-            &spec,
-            ViOptions {
+            spec,
+            VIOptions {
                 gamma: params.gamma,
                 tol: 1e-9,
+                ..Default::default()
             },
         );
-        let policy: Vec<i64> = result.policy.iter().map(|&v| v.max(0)).collect();
+        let policy = policy_as_i64(&result.policy);
         let st = detect_policy_structure(&policy);
         println!(
             "  fixedCost = 0:  structure={}  S*={}  s*={}",
-            st.kind, st.s, st.reorder_point
+            policy_kind_label(&st.kind),
+            st.s_level,
+            st.reorder_point
         );
         c.check(
             "fixedCost=0 ⇒ base-stock policy",
-            st.kind == "base-stock",
+            matches!(st.kind, PolicyKind::BaseStock),
             "",
         );
-        c.check("base-stock S* > 0", st.s > 0, "");
-        c.check("base-stock S* ≤ xMax", st.s <= params.x_max as i64, "");
+        c.check("base-stock S* > 0", st.s_level > 0, "");
+        c.check(
+            "base-stock S* ≤ xMax",
+            st.s_level <= params.x_max as i64,
+            "",
+        );
     }
 
     {
@@ -377,23 +309,30 @@ pub fn run() {
         params.fixed_cost = 10.0;
         let spec = inventory_mdp_spec(&params);
         let result = value_iteration(
-            &spec,
-            ViOptions {
+            spec,
+            VIOptions {
                 gamma: params.gamma,
                 tol: 1e-9,
+                ..Default::default()
             },
         );
-        let policy: Vec<i64> = result.policy.iter().map(|&v| v.max(0)).collect();
+        let policy = policy_as_i64(&result.policy);
         let st = detect_policy_structure(&policy);
         println!(
             "  fixedCost = 10: structure={}  S*={}  s*={}",
-            st.kind, st.s, st.reorder_point
+            policy_kind_label(&st.kind),
+            st.s_level,
+            st.reorder_point
         );
-        c.check("fixedCost>0 ⇒ (s, S) policy", st.kind == "s-S", "");
+        c.check(
+            "fixedCost>0 ⇒ (s, S) policy",
+            matches!(st.kind, PolicyKind::SS),
+            "",
+        );
         c.check(
             "s* < S* − 1 (gap due to setup cost)",
-            st.reorder_point < st.s - 1,
-            &format!("s={} S={}", st.reorder_point, st.s),
+            st.reorder_point < st.s_level - 1,
+            &format!("s={} S={}", st.reorder_point, st.s_level),
         );
     }
 
@@ -407,19 +346,24 @@ pub fn run() {
             p.fixed_cost = k;
             let spec = inventory_mdp_spec(&p);
             let r = value_iteration(
-                &spec,
-                ViOptions {
+                spec,
+                VIOptions {
                     gamma: p.gamma,
                     tol: 1e-9,
+                    ..Default::default()
                 },
             );
-            let policy: Vec<i64> = r.policy.iter().map(|&v| v.max(0)).collect();
+            let policy = policy_as_i64(&r.policy);
             let st = detect_policy_structure(&policy);
-            let gap = st.s - st.reorder_point;
+            let gap = st.s_level - st.reorder_point;
             gaps.push(gap);
             println!(
                 "    {:>2}      {:>3}   {:>3}     {:>3}      {}",
-                k as i64, st.s, st.reorder_point, gap, st.kind
+                k as i64,
+                st.s_level,
+                st.reorder_point,
+                gap,
+                policy_kind_label(&st.kind)
             );
         }
         let mut monotonic = true;
@@ -440,16 +384,16 @@ pub fn run() {
         params.gamma = 0.95;
         let spec = inventory_mdp_spec(&params);
         let result = value_iteration(
-            &spec,
-            ViOptions {
+            spec,
+            VIOptions {
                 gamma: params.gamma,
                 tol: 1e-9,
+                ..Default::default()
             },
         );
-        let policy: Vec<i64> = result.policy.iter().map(|&v| v.max(0)).collect();
+        let policy = policy_as_usize(&result.policy);
         let days = 50000usize;
-        let policy_clone = policy.clone();
-        let sim = simulate_inventory_mdp(&params, move |x| policy_clone[x], days, 42, 0);
+        let sim = simulate_inventory_mdp(&params, &policy, days, 42, 0);
         let expected_avg = result.v[0] * (1.0 - params.gamma);
         println!(
             "    V(0) = {:.3},  V(0)·(1−γ) = {:.3}",
@@ -480,7 +424,11 @@ pub fn run() {
                     "  newsvendor: TS q*={} EP={:.4};  Py q*={} EP={:.4}",
                     ts_result.q_star, ts_ep, py.newsvendor.q_star, py.newsvendor.expected_profit_at_qstar
                 );
-                c.check("newsvendor q* matches Python", ts_result.q_star == py.newsvendor.q_star, "");
+                c.check(
+                    "newsvendor q* matches Python",
+                    i64::try_from(ts_result.q_star).ok() == Some(py.newsvendor.q_star),
+                    "",
+                );
                 c.check(
                     "newsvendor E[profit] matches Python within 1e-6",
                     approx(ts_ep, py.newsvendor.expected_profit_at_qstar, 1e-6),
@@ -494,7 +442,7 @@ pub fn run() {
         let params = InventoryParams {
             x_max: 50,
             a_max: 50,
-            demand: demand_poisson_pmf(20.0, 51),
+            demand: inventory_demand_poisson_pmf(20.0, 51),
             unit_cost: 1.0,
             fixed_cost: 10.0,
             unit_price: 2.0,
@@ -504,13 +452,14 @@ pub fn run() {
         };
         let spec = inventory_mdp_spec(&params);
         let ts_result = value_iteration(
-            &spec,
-            ViOptions {
+            spec,
+            VIOptions {
                 gamma: params.gamma,
                 tol: 1e-9,
+                ..Default::default()
             },
         );
-        let ts_policy: Vec<i64> = ts_result.policy.iter().map(|&v| v.max(0)).collect();
+        let ts_policy = policy_as_i64(&ts_result.policy);
         let py = run_python(&[
             "--multi", "--lambda", "20", "--c", "1.0", "--K", "10", "--p", "2.0", "--h", "0.1",
             "--L", "0.5", "--gamma", "0.95", "--x-max", "50", "--a-max", "50",

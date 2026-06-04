@@ -10,12 +10,15 @@ FROM debian:bookworm-slim
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
+    && mkdir -p /data/soccer-learning \
+    && chmod 777 /data/soccer-learning \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /work
 COPY --from=builder /src/target/release/main_soccer_learning_run /usr/local/bin/main_soccer_learning_run
 
 ENV SOCCER_GAMES=100 \
+    SOCCER_RUN_DIR=/data/soccer-learning/default \
     SOCCER_HALVES=2 \
     SOCCER_HALF_MINUTES=45 \
     SOCCER_PERIOD_BREAK_RECOVERY_SECONDS=900 \

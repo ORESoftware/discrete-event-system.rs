@@ -9,75 +9,89 @@ use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use des_engine::des::general::soccer::{
-    soccer_moment_records_from_jsonl, soccer_moment_records_to_learning_dataset,
-    soccer_self_play_default_learned_params_path, MatchConfig, SoccerMatch, SoccerMomentWindow,
-    SoccerNeuralLearningBackend, SoccerNeuralLearningConfig, SoccerQEntry, SoccerQPolicy,
-    SoccerQPolicyOptions, SoccerQTargetEntry, SoccerSelfPlayEpisodeSummary,
-    SoccerSelfPlayLearnedParams, SoccerSelfPlayTrainingArtifact, SoccerTacticalLearningWeights,
-    SoccerTeamPolicyArtifact, SoccerTeamQPolicies,
+    soccer_moment_records_from_jsonl, soccer_moment_records_to_learning_dataset, MatchConfig,
+    SoccerMatch, SoccerMomentWindow, SoccerNeuralLearningBackend, SoccerNeuralLearningConfig,
+    SoccerQEntry, SoccerQPolicy, SoccerQPolicyOptions, SoccerQTargetEntry,
+    SoccerSelfPlayEpisodeSummary, SoccerSelfPlayLearnedParams, SoccerSelfPlayTrainingArtifact,
+    SoccerTacticalLearningWeights, SoccerTeamPolicyArtifact, SoccerTeamQPolicies,
 };
+use des_engine::des::soccer_learning::{
+    soccer_learning_run_score, soccer_policy_delta_entries, SoccerLearningCompletedGame,
+};
+use des_engine::des::soccer_learning_pg::SoccerLearningPgStore;
 use serde::Serialize;
 
-fn env_usize(name: &str, default: usize) -> usize {
+fn env_value(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(default)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
-fn env_u32(name: &str, default: u32) -> u32 {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.parse::<u32>().ok())
-        .unwrap_or(default)
+fn env_usize(name: &str, default: usize) -> Result<usize, Box<dyn Error>> {
+    let Some(value) = env_value(name) else {
+        return Ok(default);
+    };
+    value.parse::<usize>().map_err(|_| {
+        invalid_data(format!("{name} must be an unsigned integer, got {value:?}")).into()
+    })
 }
 
-fn env_f64(name: &str, default: f64) -> f64 {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.parse::<f64>().ok())
-        .unwrap_or(default)
+fn env_u32(name: &str, default: u32) -> Result<u32, Box<dyn Error>> {
+    let Some(value) = env_value(name) else {
+        return Ok(default);
+    };
+    value
+        .parse::<u32>()
+        .map_err(|_| invalid_data(format!("{name} must be a u32, got {value:?}")).into())
 }
 
-fn env_bool(name: &str, default: bool) -> bool {
-    std::env::var(name)
-        .ok()
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "y" | "on"
-            )
-        })
-        .unwrap_or(default)
+fn env_f64(name: &str, default: f64) -> Result<f64, Box<dyn Error>> {
+    let Some(value) = env_value(name) else {
+        return Ok(default);
+    };
+    let parsed = value
+        .parse::<f64>()
+        .map_err(|_| invalid_data(format!("{name} must be a finite number, got {value:?}")))?;
+    if !parsed.is_finite() {
+        return Err(invalid_data(format!("{name} must be finite, got {value:?}")).into());
+    }
+    Ok(parsed)
 }
 
-fn env_f64_alias(primary: &str, alias: &str, default: f64) -> f64 {
-    std::env::var(primary)
-        .or_else(|_| std::env::var(alias))
-        .ok()
-        .and_then(|value| value.parse::<f64>().ok())
-        .unwrap_or(default)
+fn env_bool(name: &str, default: bool) -> Result<bool, Box<dyn Error>> {
+    let Some(value) = env_value(name) else {
+        return Ok(default);
+    };
+    match value.to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "y" | "on" => Ok(true),
+        "0" | "false" | "no" | "n" | "off" => Ok(false),
+        _ => Err(invalid_data(format!("{name} must be a boolean, got {value:?}")).into()),
+    }
 }
 
-fn env_usize_alias(primary: &str, alias: &str, default: usize) -> usize {
-    std::env::var(primary)
-        .or_else(|_| std::env::var(alias))
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(default)
+fn env_f64_alias(primary: &str, alias: &str, default: f64) -> Result<f64, Box<dyn Error>> {
+    if env_value(primary).is_some() {
+        env_f64(primary, default)
+    } else {
+        env_f64(alias, default)
+    }
 }
 
-fn env_bool_alias(primary: &str, alias: &str, default: bool) -> bool {
-    std::env::var(primary)
-        .or_else(|_| std::env::var(alias))
-        .ok()
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "y" | "on"
-            )
-        })
-        .unwrap_or(default)
+fn env_usize_alias(primary: &str, alias: &str, default: usize) -> Result<usize, Box<dyn Error>> {
+    if env_value(primary).is_some() {
+        env_usize(primary, default)
+    } else {
+        env_usize(alias, default)
+    }
+}
+
+fn env_bool_alias(primary: &str, alias: &str, default: bool) -> Result<bool, Box<dyn Error>> {
+    if env_value(primary).is_some() {
+        env_bool(primary, default)
+    } else {
+        env_bool(alias, default)
+    }
 }
 
 fn neural_backend_label(backend: SoccerNeuralLearningBackend) -> &'static str {
@@ -89,82 +103,82 @@ fn neural_backend_label(backend: SoccerNeuralLearningBackend) -> &'static str {
 
 fn env_neural_learning_backend(
     default: SoccerNeuralLearningBackend,
-) -> SoccerNeuralLearningBackend {
-    let raw = std::env::var("SOCCER_NEURAL_LEARNING_BACKEND")
-        .or_else(|_| std::env::var("SOCCER_NEURAL_BACKEND"))
-        .ok();
-    match raw
-        .as_deref()
-        .map(str::trim)
-        .map(str::to_ascii_lowercase)
-        .as_deref()
-    {
-        Some("threaded") | Some("thread") | Some("worker") => SoccerNeuralLearningBackend::Threaded,
-        Some("inline") | Some("sync") => SoccerNeuralLearningBackend::Inline,
-        _ => default,
+) -> Result<SoccerNeuralLearningBackend, Box<dyn Error>> {
+    let Some(value) =
+        env_value("SOCCER_NEURAL_LEARNING_BACKEND").or_else(|| env_value("SOCCER_NEURAL_BACKEND"))
+    else {
+        return Ok(default);
+    };
+    match value.to_ascii_lowercase().as_str() {
+        "threaded" | "thread" | "worker" => Ok(SoccerNeuralLearningBackend::Threaded),
+        "inline" | "sync" => Ok(SoccerNeuralLearningBackend::Inline),
+        _ => Err(invalid_data(format!(
+            "SOCCER_NEURAL_LEARNING_BACKEND must be inline or threaded, got {value:?}"
+        ))
+        .into()),
     }
 }
 
-fn env_neural_learning_config() -> SoccerNeuralLearningConfig {
+fn env_neural_learning_config() -> Result<SoccerNeuralLearningConfig, Box<dyn Error>> {
     let default = SoccerNeuralLearningConfig::default();
-    SoccerNeuralLearningConfig {
+    Ok(SoccerNeuralLearningConfig {
         enabled: env_bool_alias(
             "SOCCER_NEURAL_LEARNING_ENABLED",
             "SOCCER_NEURAL_LEARNING",
             default.enabled,
-        ),
-        backend: env_neural_learning_backend(default.backend),
+        )?,
+        backend: env_neural_learning_backend(default.backend)?,
         learning_rate: env_f64_alias(
             "SOCCER_NEURAL_LEARNING_RATE",
             "SOCCER_NEURAL_RATE",
             default.learning_rate,
-        ),
+        )?,
         batch_size: env_usize_alias(
             "SOCCER_NEURAL_BATCH_SIZE",
             "SOCCER_NEURAL_LEARNING_BATCH_SIZE",
             default.batch_size,
-        ),
+        )?,
         train_every_ticks: env_usize_alias(
             "SOCCER_NEURAL_TRAIN_EVERY_TICKS",
             "SOCCER_NEURAL_LEARNING_TRAIN_EVERY_TICKS",
             default.train_every_ticks,
-        ),
+        )?,
         max_batches_per_tick: env_usize_alias(
             "SOCCER_NEURAL_MAX_BATCHES_PER_TICK",
             "SOCCER_NEURAL_LEARNING_MAX_BATCHES_PER_TICK",
             default.max_batches_per_tick,
-        ),
+        )?,
         hidden_units: env_usize_alias(
             "SOCCER_NEURAL_HIDDEN_UNITS",
             "SOCCER_NEURAL_LEARNING_HIDDEN_UNITS",
             default.hidden_units,
-        ),
+        )?,
         target_scale: env_f64_alias(
             "SOCCER_NEURAL_TARGET_SCALE",
             "SOCCER_NEURAL_LEARNING_TARGET_SCALE",
             default.target_scale,
-        ),
+        )?,
         max_pending_batches: env_usize_alias(
             "SOCCER_NEURAL_MAX_PENDING_BATCHES",
             "SOCCER_NEURAL_LEARNING_MAX_PENDING_BATCHES",
             default.max_pending_batches,
-        ),
+        )?,
         replay_capacity: env_usize_alias(
             "SOCCER_NEURAL_REPLAY_CAPACITY",
             "SOCCER_NEURAL_LEARNING_REPLAY_CAPACITY",
             default.replay_capacity,
-        ),
+        )?,
         replay_samples_per_tick: env_usize_alias(
             "SOCCER_NEURAL_REPLAY_SAMPLES_PER_TICK",
             "SOCCER_NEURAL_LEARNING_REPLAY_SAMPLES_PER_TICK",
             default.replay_samples_per_tick,
-        ),
+        )?,
         target_clip: env_f64_alias(
             "SOCCER_NEURAL_TARGET_CLIP",
             "SOCCER_NEURAL_LEARNING_TARGET_CLIP",
             default.target_clip,
-        ),
-    }
+        )?,
+    })
 }
 
 fn q_entry_order(a: &SoccerQEntry, b: &SoccerQEntry) -> std::cmp::Ordering {
@@ -212,46 +226,46 @@ fn compact_training_artifact_for_export(
     export
 }
 
-fn env_tactical_learning_weights() -> SoccerTacticalLearningWeights {
+fn env_tactical_learning_weights() -> Result<SoccerTacticalLearningWeights, Box<dyn Error>> {
     let default = SoccerTacticalLearningWeights::default();
-    SoccerTacticalLearningWeights {
+    Ok(SoccerTacticalLearningWeights {
         attack_spacing_delta_weight: env_f64(
             "SOCCER_ATTACK_SPACING_DELTA_WEIGHT",
             default.attack_spacing_delta_weight,
-        ),
+        )?,
         attack_spacing_score_weight: env_f64(
             "SOCCER_ATTACK_SPACING_SCORE_WEIGHT",
             default.attack_spacing_score_weight,
-        ),
+        )?,
         attack_width_delta_weight: env_f64(
             "SOCCER_ATTACK_WIDTH_DELTA_WEIGHT",
             default.attack_width_delta_weight,
-        ),
+        )?,
         attack_width_score_weight: env_f64(
             "SOCCER_ATTACK_WIDTH_SCORE_WEIGHT",
             default.attack_width_score_weight,
-        ),
+        )?,
         attack_flank_lane_weight: env_f64(
             "SOCCER_ATTACK_FLANK_LANE_WEIGHT",
             default.attack_flank_lane_weight,
-        ),
+        )?,
         defense_spacing_delta_weight: env_f64(
             "SOCCER_DEFENSE_SPACING_DELTA_WEIGHT",
             default.defense_spacing_delta_weight,
-        ),
+        )?,
         defense_spacing_score_weight: env_f64(
             "SOCCER_DEFENSE_SPACING_SCORE_WEIGHT",
             default.defense_spacing_score_weight,
-        ),
+        )?,
         defense_contract_delta_weight: env_f64(
             "SOCCER_DEFENSE_CONTRACT_DELTA_WEIGHT",
             default.defense_contract_delta_weight,
-        ),
+        )?,
         defense_compactness_score_weight: env_f64(
             "SOCCER_DEFENSE_COMPACTNESS_SCORE_WEIGHT",
             default.defense_compactness_score_weight,
-        ),
-    }
+        )?,
+    })
 }
 
 fn artifact_minutes_label(minutes: f64) -> String {
@@ -262,37 +276,153 @@ fn artifact_minutes_label(minutes: f64) -> String {
     }
 }
 
-fn default_artifact_path(
+fn default_artifact_path_in_run_dir(
+    run_dir: &Path,
     games: usize,
     minutes: f64,
     shard_index: usize,
     shard_count: usize,
-) -> String {
-    if shard_count > 1 {
+) -> PathBuf {
+    let minutes = artifact_minutes_label(minutes);
+    let file_name = if shard_count > 1 {
         format!(
-            "out/soccer-mdp-pomdp-self-play-shard-{}-of-{}-{}x{}.json",
-            shard_index,
-            shard_count,
-            games,
-            artifact_minutes_label(minutes)
+            "final-policy-shard-{}-of-{}-{}x{}.json",
+            shard_index, shard_count, games, minutes
         )
     } else {
-        format!(
-            "out/soccer-mdp-pomdp-self-play-{}x{}.json",
-            games,
-            artifact_minutes_label(minutes)
-        )
-    }
+        "final-policy.json".to_string()
+    };
+    run_dir.join(file_name)
 }
 
-fn write_episode_log(log: &mut Option<std::fs::File>, episode: &SoccerSelfPlayEpisodeSummary) {
-    let Some(file) = log.as_mut() else {
-        return;
-    };
-    if serde_json::to_writer(&mut *file, episode).is_ok() {
-        let _ = writeln!(file);
-        let _ = file.flush();
+fn validate_run_settings(
+    games: usize,
+    halves: usize,
+    half_minutes: f64,
+    minutes: f64,
+    period_break_recovery_seconds: f64,
+    dt_seconds: f64,
+    learning_interval_ticks: usize,
+    parallel_games: usize,
+    shard_seed_stride: u32,
+    options: &SoccerQPolicyOptions,
+    tactical_learning: &SoccerTacticalLearningWeights,
+) -> Result<(), Box<dyn Error>> {
+    if games == 0 {
+        return Err(invalid_data("SOCCER_GAMES must be at least 1").into());
     }
+    if !(1..=8).contains(&halves) {
+        return Err(invalid_data("SOCCER_HALVES must be between 1 and 8").into());
+    }
+    if !half_minutes.is_finite() || half_minutes <= 0.0 || half_minutes > 120.0 {
+        return Err(invalid_data("SOCCER_HALF_MINUTES must be finite and in (0, 120]").into());
+    }
+    if !minutes.is_finite() || minutes <= 0.0 || minutes > 24.0 * 60.0 {
+        return Err(invalid_data("SOCCER_MINUTES must be finite and in (0, 1440]").into());
+    }
+    if env_value("SOCCER_MINUTES").is_some() {
+        let expected = half_minutes * halves as f64;
+        if (minutes - expected).abs() > 1e-6 {
+            return Err(invalid_data(format!(
+                "SOCCER_MINUTES ({minutes}) must equal SOCCER_HALF_MINUTES * SOCCER_HALVES ({expected})"
+            ))
+            .into());
+        }
+    }
+    if !period_break_recovery_seconds.is_finite()
+        || !(0.0..=60.0 * 60.0).contains(&period_break_recovery_seconds)
+    {
+        return Err(invalid_data(
+            "SOCCER_PERIOD_BREAK_RECOVERY_SECONDS must be finite and in [0, 3600]",
+        )
+        .into());
+    }
+    if !dt_seconds.is_finite() || !(0.01..=5.0).contains(&dt_seconds) {
+        return Err(invalid_data("SOCCER_DT_SECONDS must be finite and in [0.01, 5.0]").into());
+    }
+    if learning_interval_ticks == 0 {
+        return Err(invalid_data("SOCCER_LEARNING_INTERVAL_TICKS must be at least 1").into());
+    }
+    if !(1..=100).contains(&parallel_games) {
+        return Err(invalid_data("SOCCER_PARALLEL_GAMES must be between 1 and 100").into());
+    }
+    if shard_seed_stride == 0 {
+        return Err(invalid_data("SOCCER_SHARD_SEED_STRIDE must be at least 1").into());
+    }
+    validate_soccer_q_policy_options_for_runner(options)?;
+    validate_tactical_learning_weights(tactical_learning)?;
+    Ok(())
+}
+
+fn validate_soccer_q_policy_options_for_runner(
+    options: &SoccerQPolicyOptions,
+) -> Result<(), Box<dyn Error>> {
+    if !options.alpha.is_finite() || !(0.0..=1.0).contains(&options.alpha) {
+        return Err(invalid_data("SOCCER_ALPHA must be finite and in [0, 1]").into());
+    }
+    if !options.gamma.is_finite() || !(0.0..=1.0).contains(&options.gamma) {
+        return Err(invalid_data("SOCCER_GAMMA must be finite and in [0, 1]").into());
+    }
+    Ok(())
+}
+
+fn validate_tactical_learning_weights(
+    tactical_learning: &SoccerTacticalLearningWeights,
+) -> Result<(), Box<dyn Error>> {
+    let weights = [
+        (
+            "SOCCER_ATTACK_SPACING_DELTA_WEIGHT",
+            tactical_learning.attack_spacing_delta_weight,
+        ),
+        (
+            "SOCCER_ATTACK_SPACING_SCORE_WEIGHT",
+            tactical_learning.attack_spacing_score_weight,
+        ),
+        (
+            "SOCCER_ATTACK_WIDTH_DELTA_WEIGHT",
+            tactical_learning.attack_width_delta_weight,
+        ),
+        (
+            "SOCCER_ATTACK_WIDTH_SCORE_WEIGHT",
+            tactical_learning.attack_width_score_weight,
+        ),
+        (
+            "SOCCER_ATTACK_FLANK_LANE_WEIGHT",
+            tactical_learning.attack_flank_lane_weight,
+        ),
+        (
+            "SOCCER_DEFENSE_SPACING_DELTA_WEIGHT",
+            tactical_learning.defense_spacing_delta_weight,
+        ),
+        (
+            "SOCCER_DEFENSE_SPACING_SCORE_WEIGHT",
+            tactical_learning.defense_spacing_score_weight,
+        ),
+        (
+            "SOCCER_DEFENSE_CONTRACT_DELTA_WEIGHT",
+            tactical_learning.defense_contract_delta_weight,
+        ),
+        (
+            "SOCCER_DEFENSE_COMPACTNESS_SCORE_WEIGHT",
+            tactical_learning.defense_compactness_score_weight,
+        ),
+    ];
+    for (name, value) in weights {
+        if !value.is_finite() {
+            return Err(invalid_data(format!("{name} must be finite")).into());
+        }
+    }
+    Ok(())
+}
+
+fn write_episode_log(
+    file: &mut std::fs::File,
+    episode: &SoccerSelfPlayEpisodeSummary,
+) -> Result<(), Box<dyn Error>> {
+    serde_json::to_writer(&mut *file, episode)?;
+    writeln!(file)?;
+    file.flush()?;
+    Ok(())
 }
 fn action_summary(entries: &[SoccerQEntry]) -> Vec<(String, u64, f64)> {
     let mut by_action: BTreeMap<String, (u64, f64)> = BTreeMap::new();
@@ -354,14 +484,21 @@ struct GameManifestEntry {
 struct RunManifest {
     run_id: String,
     run_dir: String,
+    game_dir: String,
     games: usize,
     parallel_games: usize,
+    shard_index: usize,
+    shard_count: usize,
+    base_seed: u32,
+    effective_seed: u32,
     config: MatchConfig,
     options: SoccerQPolicyOptions,
     final_artifact_path: String,
     learned_params_path: String,
     checkpoint_artifact_path: String,
+    episode_log_path: String,
     checkpoint_interval_games: usize,
+    artifact_max_entries_per_policy: usize,
     max_policy_entries_per_team: usize,
     max_policy_target_entries_per_team: usize,
     min_policy_visits: u32,
@@ -371,6 +508,14 @@ struct RunManifest {
     moment_replay_transitions: usize,
     moment_replay_passes: usize,
     moment_replay_reward_scale: f64,
+    postgres_enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    postgres_experiment_slug: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    postgres_experiment_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    postgres_last_policy_version_id: Option<String>,
+    postgres_persisted_games: usize,
     write_game_artifacts: bool,
     game_artifact_mode: String,
     game_artifacts: Vec<GameManifestEntry>,
@@ -415,12 +560,15 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), Box<dyn Error>
         fs::create_dir_all(parent)?;
     }
     let mut tmp_name = path.as_os_str().to_os_string();
-    tmp_name.push(".tmp");
+    tmp_name.push(format!(".tmp-{}", std::process::id()));
     let tmp_path = PathBuf::from(tmp_name);
     let result = (|| -> Result<(), Box<dyn Error>> {
         let file = fs::File::create(&tmp_path)?;
-        let writer = BufWriter::new(file);
-        serde_json::to_writer(writer, value)?;
+        let mut writer = BufWriter::new(file);
+        serde_json::to_writer(&mut writer, value)?;
+        writer.flush()?;
+        let file = writer.into_inner()?;
+        file.sync_all()?;
         Ok(())
     })();
     if let Err(err) = result {
@@ -428,6 +576,9 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), Box<dyn Error>
         return Err(err);
     }
     fs::rename(&tmp_path, path)?;
+    if let Some(parent) = path.parent() {
+        let _ = fs::File::open(parent).and_then(|dir| dir.sync_all());
+    }
     Ok(())
 }
 
@@ -586,6 +737,49 @@ fn merge_team_policy_delta(
     merge_policy_delta(&mut dst.away, &before.away, &after.away);
 }
 
+fn soccer_learning_completed_game_from_completed(
+    game: &CompletedGame,
+    starting_policies: &SoccerTeamQPolicies,
+) -> SoccerLearningCompletedGame {
+    let summary = game.episode_summary.summary.clone();
+    let score = soccer_learning_run_score(&summary);
+    let delta = soccer_policy_delta_entries(starting_policies, &game.policies, &score);
+    SoccerLearningCompletedGame {
+        episode: game.episode_summary.episode,
+        seed: game.episode_summary.seed,
+        summary,
+        episode_summary: game.episode_summary.clone(),
+        policies: game.policies.clone(),
+        score,
+        delta,
+        elapsed_seconds: game.elapsed_seconds,
+    }
+}
+
+fn soccer_learning_pg_version_label(run_id: &str, shard_index: usize, episode: usize) -> String {
+    let suffix = format!("-s{:03}-e{:06}", shard_index, episode + 1);
+    let max_prefix_len = 160usize.saturating_sub(suffix.len());
+    let mut prefix = run_id
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | ':' | '/' | '-'))
+        .take(max_prefix_len)
+        .collect::<String>();
+    if prefix.is_empty() {
+        prefix.push_str("run");
+    }
+    format!("{prefix}{suffix}")
+}
+
+fn soccer_learning_pg_runner_id(run_id: &str, shard_index: usize, shard_count: usize) -> String {
+    let suffix = format!("-shard-{}-of-{}", shard_index, shard_count);
+    let max_prefix_len = 200usize.saturating_sub(suffix.len());
+    let mut prefix = run_id.chars().take(max_prefix_len).collect::<String>();
+    if prefix.is_empty() {
+        prefix.push_str("soccer-self-play");
+    }
+    format!("{prefix}{suffix}")
+}
+
 fn print_completed_game(game: &CompletedGame) {
     let stats = &game.episode_summary.summary.stats;
     println!(
@@ -675,14 +869,21 @@ fn self_play_artifact_from_policies(
 fn run_manifest(
     run_id: &str,
     run_dir: &Path,
+    game_dir: &Path,
     games: usize,
     parallel_games: usize,
+    shard_index: usize,
+    shard_count: usize,
+    base_seed: u32,
+    effective_seed: u32,
     config: MatchConfig,
     options: SoccerQPolicyOptions,
     final_artifact_path: &Path,
     learned_params_path: &Path,
     checkpoint_artifact_path: &Path,
+    episode_log_path: &Path,
     checkpoint_interval_games: usize,
+    artifact_max_entries_per_policy: usize,
     max_policy_entries_per_team: usize,
     max_policy_target_entries_per_team: usize,
     min_policy_visits: u32,
@@ -691,6 +892,11 @@ fn run_manifest(
     moment_replay_transitions: usize,
     moment_replay_passes: usize,
     moment_replay_reward_scale: f64,
+    postgres_enabled: bool,
+    postgres_experiment_slug: Option<String>,
+    postgres_experiment_id: Option<String>,
+    postgres_last_policy_version_id: Option<String>,
+    postgres_persisted_games: usize,
     write_game_artifacts: bool,
     game_artifact_mode: &str,
     game_artifacts: Vec<GameManifestEntry>,
@@ -698,14 +904,21 @@ fn run_manifest(
     RunManifest {
         run_id: run_id.to_string(),
         run_dir: run_dir.display().to_string(),
+        game_dir: game_dir.display().to_string(),
         games,
         parallel_games,
+        shard_index,
+        shard_count,
+        base_seed,
+        effective_seed,
         config,
         options,
         final_artifact_path: final_artifact_path.display().to_string(),
         learned_params_path: learned_params_path.display().to_string(),
         checkpoint_artifact_path: checkpoint_artifact_path.display().to_string(),
+        episode_log_path: episode_log_path.display().to_string(),
         checkpoint_interval_games,
+        artifact_max_entries_per_policy,
         max_policy_entries_per_team,
         max_policy_target_entries_per_team,
         min_policy_visits,
@@ -714,6 +927,11 @@ fn run_manifest(
         moment_replay_transitions,
         moment_replay_passes,
         moment_replay_reward_scale,
+        postgres_enabled,
+        postgres_experiment_slug,
+        postgres_experiment_id,
+        postgres_last_policy_version_id,
+        postgres_persisted_games,
         write_game_artifacts,
         game_artifact_mode: game_artifact_mode.to_string(),
         game_artifacts,
@@ -721,69 +939,96 @@ fn run_manifest(
 }
 
 fn run() -> Result<(), Box<dyn Error>> {
-    let games = env_usize("SOCCER_GAMES", 100);
-    let halves = env_usize("SOCCER_HALVES", 2).max(1);
-    let half_minutes = env_f64("SOCCER_HALF_MINUTES", 45.0);
-    let minutes = env_f64("SOCCER_MINUTES", half_minutes * halves as f64);
+    let games = env_usize("SOCCER_GAMES", 100)?;
+    let halves = env_usize("SOCCER_HALVES", 2)?;
+    let half_minutes = env_f64("SOCCER_HALF_MINUTES", 45.0)?;
+    let minutes = env_f64("SOCCER_MINUTES", half_minutes * halves as f64)?;
     let effective_minutes = minutes;
     let period_break_recovery_seconds = env_f64_alias(
         "SOCCER_PERIOD_BREAK_RECOVERY_SECONDS",
         "SOCCER_HALFTIME_RECOVERY_SECONDS",
         900.0,
-    );
-    let dt_seconds = env_f64("SOCCER_DT_SECONDS", 0.2);
-    let learning_interval_ticks = env_usize("SOCCER_LEARNING_INTERVAL_TICKS", 4).max(1);
-    let parallel_games = env_usize("SOCCER_PARALLEL_GAMES", 1).max(1);
-    let checkpoint_interval_games = env_usize("SOCCER_CHECKPOINT_INTERVAL_GAMES", 10);
+    )?;
+    let dt_seconds = env_f64("SOCCER_DT_SECONDS", 0.2)?;
+    let learning_interval_ticks = env_usize("SOCCER_LEARNING_INTERVAL_TICKS", 4)?;
+    let parallel_games = env_usize("SOCCER_PARALLEL_GAMES", 1)?;
+    let checkpoint_interval_games = env_usize("SOCCER_CHECKPOINT_INTERVAL_GAMES", 10)?;
     let artifact_max_entries_per_policy =
-        env_usize("SOCCER_ARTIFACT_MAX_ENTRIES_PER_POLICY", 10_000);
-    let max_policy_entries_per_team = env_usize("SOCCER_MAX_POLICY_ENTRIES_PER_TEAM", 0);
+        env_usize("SOCCER_ARTIFACT_MAX_ENTRIES_PER_POLICY", 10_000)?;
+    let max_policy_entries_per_team = env_usize("SOCCER_MAX_POLICY_ENTRIES_PER_TEAM", 0)?;
     let max_policy_target_entries_per_team = env_usize(
         "SOCCER_MAX_POLICY_TARGET_ENTRIES_PER_TEAM",
         max_policy_entries_per_team,
-    );
-    let min_policy_visits = env_u32("SOCCER_MIN_POLICY_VISITS", 0);
-    let moment_replay_path = std::env::var("SOCCER_MOMENT_REPLAY_PATH")
-        .ok()
-        .map(|path| path.trim().to_string())
-        .filter(|path| !path.is_empty());
-    let moment_replay_limit = env_usize("SOCCER_MOMENT_REPLAY_LIMIT", 0);
-    let moment_replay_passes = env_usize("SOCCER_MOMENT_REPLAY_PASSES", 1).max(1);
-    let moment_replay_reward_scale = env_f64("SOCCER_MOMENT_REPLAY_REWARD_SCALE", 1.0);
-    let write_game_artifacts = env_bool("SOCCER_WRITE_GAME_ARTIFACTS", true);
-    let game_artifact_mode = std::env::var("SOCCER_GAME_ARTIFACT_MODE")
-        .unwrap_or_else(|_| "summary".to_string())
-        .trim()
+    )?;
+    let min_policy_visits = env_u32("SOCCER_MIN_POLICY_VISITS", 0)?;
+    let moment_replay_path = env_value("SOCCER_MOMENT_REPLAY_PATH");
+    let moment_replay_limit = env_usize("SOCCER_MOMENT_REPLAY_LIMIT", 0)?;
+    let moment_replay_passes = env_usize("SOCCER_MOMENT_REPLAY_PASSES", 1)?;
+    let moment_replay_reward_scale = env_f64("SOCCER_MOMENT_REPLAY_REWARD_SCALE", 1.0)?;
+    let write_game_artifacts = env_bool("SOCCER_WRITE_GAME_ARTIFACTS", true)?;
+    let game_artifact_mode = env_value("SOCCER_GAME_ARTIFACT_MODE")
+        .unwrap_or_else(|| "summary".to_string())
         .to_ascii_lowercase();
-    let learning_logging_enabled = env_bool("SOCCER_LEARNING_LOGGING", false);
-    let shard_index = env_usize("SOCCER_SHARD_INDEX", 0);
-    let shard_count = env_usize("SOCCER_SHARD_COUNT", 1).max(1);
+    if !matches!(game_artifact_mode.as_str(), "summary" | "full") {
+        return Err(invalid_data("SOCCER_GAME_ARTIFACT_MODE must be summary or full").into());
+    }
+    if moment_replay_passes == 0 {
+        return Err(invalid_data("SOCCER_MOMENT_REPLAY_PASSES must be at least 1").into());
+    }
+    let learning_logging_enabled = env_bool("SOCCER_LEARNING_LOGGING", false)?;
+    let shard_index = env_usize("SOCCER_SHARD_INDEX", 0)?;
+    let shard_count = env_usize("SOCCER_SHARD_COUNT", 1)?;
+    if shard_count == 0 {
+        return Err(invalid_data("SOCCER_SHARD_COUNT must be at least 1").into());
+    }
     if shard_index >= shard_count {
         return Err(invalid_data("SOCCER_SHARD_INDEX must be less than SOCCER_SHARD_COUNT").into());
     }
-    let seed = env_u32("SOCCER_SEED", 2026);
-    let shard_seed_stride = env_u32("SOCCER_SHARD_SEED_STRIDE", 1_000_000);
+    let seed = env_u32("SOCCER_SEED", 2026)?;
+    let shard_seed_stride = env_u32("SOCCER_SHARD_SEED_STRIDE", 1_000_000)?;
     let effective_seed = seed.wrapping_add((shard_index as u32).wrapping_mul(shard_seed_stride));
     let options = SoccerQPolicyOptions {
-        alpha: env_f64("SOCCER_ALPHA", 0.20),
-        gamma: env_f64("SOCCER_GAMMA", 0.96),
+        alpha: env_f64("SOCCER_ALPHA", 0.20)?,
+        gamma: env_f64("SOCCER_GAMMA", 0.96)?,
     };
-    let tactical_learning = env_tactical_learning_weights();
-    let neural_learning = env_neural_learning_config();
+    let tactical_learning = env_tactical_learning_weights()?;
+    validate_run_settings(
+        games,
+        halves,
+        half_minutes,
+        minutes,
+        period_break_recovery_seconds,
+        dt_seconds,
+        learning_interval_ticks,
+        parallel_games,
+        shard_seed_stride,
+        &options,
+        &tactical_learning,
+    )?;
+    let half_duration_seconds = half_minutes * 60.0;
+    let halftime_fatigue_recovery = if half_duration_seconds > 0.0 {
+        (period_break_recovery_seconds / half_duration_seconds).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let neural_learning = env_neural_learning_config()?;
     let default_config = MatchConfig::default();
     let adversarial_embedding_exploitation_enabled = env_bool_alias(
         "SOCCER_ADVERSARIAL_EMBEDDING_EXPLOITATION_ENABLED",
         "SOCCER_ADVERSARIAL_EMBEDDINGS",
         default_config.adversarial_embedding_exploitation_enabled,
-    );
+    )?;
     let adversarial_embedding_memory_limit = env_usize_alias(
         "SOCCER_ADVERSARIAL_EMBEDDING_MEMORY_LIMIT",
         "SOCCER_ADVERSARIAL_MOMENT_MEMORY_LIMIT",
         default_config.adversarial_embedding_memory_limit,
-    );
+    )?;
     let config = MatchConfig {
         dt_seconds,
         duration_seconds: minutes * 60.0,
+        halves: halves as u8,
+        half_duration_seconds,
+        halftime_fatigue_recovery,
         period_count: halves,
         period_break_recovery_seconds,
         learning_enabled: true,
@@ -797,29 +1042,25 @@ fn run() -> Result<(), Box<dyn Error>> {
         seed: effective_seed,
         ..default_config
     };
-    let run_id = std::env::var("SOCCER_RUN_ID").unwrap_or_else(|_| default_run_id());
+    let run_id = env_value("SOCCER_RUN_ID").unwrap_or_else(default_run_id);
     let run_dir = PathBuf::from(
-        std::env::var("SOCCER_RUN_DIR")
-            .unwrap_or_else(|_| format!("out/soccer-learning-runs/{run_id}")),
+        env_value("SOCCER_RUN_DIR").unwrap_or_else(|| format!("out/soccer-learning-runs/{run_id}")),
     );
     let game_dir = run_dir.join("games");
-    let final_artifact_path = PathBuf::from(
-        std::env::var("SOCCER_ARTIFACT_PATH")
-            .unwrap_or_else(|_| default_artifact_path(games, minutes, shard_index, shard_count)),
-    );
-    let default_learned_params_path =
-        soccer_self_play_default_learned_params_path(&final_artifact_path.display().to_string());
-    let learned_params_path = PathBuf::from(
-        std::env::var("SOCCER_LEARNED_PARAMS_PATH").unwrap_or(default_learned_params_path),
-    );
-    let checkpoint_artifact_path = PathBuf::from(
-        std::env::var("SOCCER_CHECKPOINT_ARTIFACT_PATH")
-            .unwrap_or_else(|_| format!("{}.checkpoint.json", final_artifact_path.display())),
-    );
-    let episode_log_path = PathBuf::from(
-        std::env::var("SOCCER_EPISODE_LOG_PATH")
-            .unwrap_or_else(|_| format!("{}.episodes.jsonl", final_artifact_path.display())),
-    );
+    let final_artifact_path = env_value("SOCCER_ARTIFACT_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            default_artifact_path_in_run_dir(&run_dir, games, minutes, shard_index, shard_count)
+        });
+    let learned_params_path = env_value("SOCCER_LEARNED_PARAMS_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| run_dir.join("learned-params.json"));
+    let checkpoint_artifact_path = env_value("SOCCER_CHECKPOINT_ARTIFACT_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| run_dir.join("checkpoint-policy.json"));
+    let episode_log_path = env_value("SOCCER_EPISODE_LOG_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| run_dir.join("episodes.jsonl"));
     if let Some(parent) = episode_log_path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -827,13 +1068,53 @@ fn run() -> Result<(), Box<dyn Error>> {
         .create(true)
         .write(true)
         .truncate(true)
-        .open(&episode_log_path)
-        .ok();
+        .open(&episode_log_path)?;
     let manifest_path = run_dir.join("manifest.json");
-    let resume_artifact = std::env::var("SOCCER_RESUME_ARTIFACT")
-        .or_else(|_| std::env::var("SOCCER_RESUME_ARTIFACT_PATH"))
-        .ok();
+    let resume_artifact =
+        env_value("SOCCER_RESUME_ARTIFACT").or_else(|| env_value("SOCCER_RESUME_ARTIFACT_PATH"));
+    let mut pg_store = SoccerLearningPgStore::connect_from_env().map_err(invalid_data)?;
+    let mut pg_experiment_slug = None::<String>;
+    let mut pg_experiment_id = None::<String>;
+    let mut pg_base_policy_version_id = None::<String>;
+    let mut pg_last_policy_version_id = None::<String>;
+    let mut pg_generation = 0i32;
+    let mut pg_persisted_games = 0usize;
     let mut policies = load_initial_policies(resume_artifact.as_deref(), options.clone())?;
+    if let Some(store) = pg_store.as_mut() {
+        let experiment_slug =
+            env_value("SOCCER_EXPERIMENT_SLUG").unwrap_or_else(|| "soccer-self-play".to_string());
+        let experiment_name =
+            env_value("SOCCER_EXPERIMENT_NAME").unwrap_or_else(|| "Soccer self-play".to_string());
+        let experiment_id = store
+            .ensure_experiment(&experiment_slug, &experiment_name, &config)
+            .map_err(invalid_data)?;
+        if resume_artifact.is_none() {
+            if let Some(version) = store
+                .load_latest_active_policy(&experiment_id, options.clone(), options.clone())
+                .map_err(invalid_data)?
+            {
+                println!(
+                    "postgres_resume_policy experiment={} policy_version={} generation={}",
+                    experiment_slug, version.id, version.generation
+                );
+                policies = version.policies;
+                pg_base_policy_version_id = Some(version.id.clone());
+                pg_last_policy_version_id = Some(version.id);
+                pg_generation = version.generation;
+            }
+        }
+        println!(
+            "postgres_enabled experiment={} experiment_id={} base_policy_version={} generation={}",
+            experiment_slug,
+            experiment_id,
+            pg_base_policy_version_id.as_deref().unwrap_or("none"),
+            pg_generation
+        );
+        pg_experiment_slug = Some(experiment_slug);
+        pg_experiment_id = Some(experiment_id);
+    } else {
+        println!("postgres_enabled=false");
+    }
     let mut moment_replay_records = 0usize;
     let mut moment_replay_transitions = 0usize;
     let mut adversarial_moment_windows = Vec::new();
@@ -891,6 +1172,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     println!("artifact={}", final_artifact_path.display());
     println!("learned_params={}", learned_params_path.display());
     println!("manifest={}", manifest_path.display());
+    println!("episode_log={}", episode_log_path.display());
     if checkpoint_interval_games == 0 {
         println!("checkpoint_artifact=disabled");
     } else {
@@ -999,11 +1281,62 @@ fn run() -> Result<(), Box<dyn Error>> {
         completed_games.sort_by_key(|game| game.episode_summary.episode);
 
         let merge_deltas = completed_games.len() > 1;
+        let pg_batch_base_policy_version_id = pg_base_policy_version_id.clone();
         for game in completed_games {
+            let completed_learning_game =
+                soccer_learning_completed_game_from_completed(&game, &batch_start_policies);
             if merge_deltas {
                 merge_team_policy_delta(&mut policies, &batch_start_policies, &game.policies);
             } else {
                 policies = game.policies.clone();
+            }
+            if let (Some(store), Some(experiment_id)) =
+                (pg_store.as_mut(), pg_experiment_id.as_deref())
+            {
+                let next_generation = pg_generation.saturating_add(1);
+                let version_label = soccer_learning_pg_version_label(
+                    &run_id,
+                    shard_index,
+                    game.episode_summary.episode,
+                );
+                let output_policy_version_id = store
+                    .insert_policy_version(
+                        experiment_id,
+                        pg_batch_base_policy_version_id.as_deref(),
+                        next_generation,
+                        &version_label,
+                        "merge",
+                        "active",
+                        &config,
+                        options.clone(),
+                        options.clone(),
+                        &policies,
+                        completed_learning_game.score.match_fitness,
+                    )
+                    .map_err(invalid_data)?;
+                let runner_id = soccer_learning_pg_runner_id(&run_id, shard_index, shard_count);
+                let run_row_id = store
+                    .insert_completed_run(
+                        experiment_id,
+                        &runner_id,
+                        pg_batch_base_policy_version_id.as_deref(),
+                        Some(&output_policy_version_id),
+                        &completed_learning_game,
+                    )
+                    .map_err(invalid_data)?;
+                println!(
+                    "postgres_persisted_game episode={} shard={}/{} run_id={} policy_version={} generation={}",
+                    game.episode_summary.episode + 1,
+                    shard_index,
+                    shard_count,
+                    run_row_id,
+                    output_policy_version_id,
+                    next_generation
+                );
+                pg_base_policy_version_id = Some(output_policy_version_id.clone());
+                pg_last_policy_version_id = Some(output_policy_version_id);
+                pg_generation = next_generation;
+                pg_persisted_games += 1;
             }
             print_completed_game(&game);
 
@@ -1043,7 +1376,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             let mut manifest_entry = game_manifest_entry(&game, game_artifact_path);
             manifest_entry.artifact_kind = game_artifact_kind;
             manifest_games.push(manifest_entry);
-            write_episode_log(&mut episode_log, &game.episode_summary);
+            write_episode_log(&mut episode_log, &game.episode_summary)?;
             episode_summaries.push(game.episode_summary);
         }
 
@@ -1093,14 +1426,21 @@ fn run() -> Result<(), Box<dyn Error>> {
             let checkpoint_manifest = run_manifest(
                 &run_id,
                 &run_dir,
+                &game_dir,
                 games,
                 parallel_games,
+                shard_index,
+                shard_count,
+                seed,
+                effective_seed,
                 config.clone(),
                 options.clone(),
                 &final_artifact_path,
                 &learned_params_path,
                 &checkpoint_artifact_path,
+                &episode_log_path,
                 checkpoint_interval_games,
+                artifact_max_entries_per_policy,
                 max_policy_entries_per_team,
                 max_policy_target_entries_per_team,
                 min_policy_visits,
@@ -1113,6 +1453,11 @@ fn run() -> Result<(), Box<dyn Error>> {
                     0
                 },
                 moment_replay_reward_scale,
+                pg_store.is_some(),
+                pg_experiment_slug.clone(),
+                pg_experiment_id.clone(),
+                pg_last_policy_version_id.clone(),
+                pg_persisted_games,
                 write_game_artifacts,
                 &game_artifact_mode,
                 manifest_games.clone(),
@@ -1144,14 +1489,21 @@ fn run() -> Result<(), Box<dyn Error>> {
     let manifest = run_manifest(
         &run_id,
         &run_dir,
+        &game_dir,
         games,
         parallel_games,
+        shard_index,
+        shard_count,
+        seed,
+        effective_seed,
         config.clone(),
         options,
         &final_artifact_path,
         &learned_params_path,
         &checkpoint_artifact_path,
+        &episode_log_path,
         checkpoint_interval_games,
+        artifact_max_entries_per_policy,
         max_policy_entries_per_team,
         max_policy_target_entries_per_team,
         min_policy_visits,
@@ -1164,6 +1516,11 @@ fn run() -> Result<(), Box<dyn Error>> {
             0
         },
         moment_replay_reward_scale,
+        pg_store.is_some(),
+        pg_experiment_slug.clone(),
+        pg_experiment_id.clone(),
+        pg_last_policy_version_id.clone(),
+        pg_persisted_games,
         write_game_artifacts,
         &game_artifact_mode,
         manifest_games,
@@ -1185,6 +1542,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     println!("artifact={}", final_artifact_path.display());
     println!("learned_params={}", learned_params_path.display());
     println!("manifest={}", manifest_path.display());
+    println!("episode_log={}", episode_log_path.display());
     println!(
         "aggregate goals_per_game={:.2} home_goals={} away_goals={} shots_per_game={:.2} on_target_rate={:.2} pass_completion={:.2} interceptions_per_game={:.2}",
         (total_home_goals + total_away_goals) as f64 / game_count,

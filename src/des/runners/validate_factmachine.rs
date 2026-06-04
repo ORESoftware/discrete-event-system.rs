@@ -5,179 +5,56 @@
 //! Tiger POMDP exact-VI vs QMDP, and binary-vs-scalar market contrast.
 //! Driver → [`run`].
 //!
-//! PORT NOTES — wire to real modules:
-//!   * `crate::des::general::belief::{DiscreteBelief, brier_score}` (DiscreteBelief
-//!     and `brier_score` are ported faithfully here).
-//!   * `crate::des::general::pomdp::{QMDPSolver, POMDPSpec, pomdp_exact_finite_horizon}`.
-//!   * `crate::des::main_factmachine::{default_params, FactMachineParams, run_factmachine}`.
-//!   * Python (scipy/numpy) reference via `std::process::Command`; JSON parse needs
-//!     `serde_json` (absent) → `run_python` returns `None` (SKIP), matching the TS.
+//! PORT NOTES:
+//!   * Uses the real Rust belief, POMDP/Tiger, and FactMachine modules.
+//!   * Optional Python (scipy/numpy) reference via `std::process::Command` is
+//!     only attempted when `FACTMACHINE_PY` is explicitly set. JSON parsing is
+//!     not wired here, so the default path stays Rust-only and skips the
+//!     external reference.
 
-#![allow(dead_code, unused_variables, unused_mut, unused_imports)]
+#![allow(dead_code)]
 
 use std::process::Command;
 
-// =============================================================================
-// Belief filter (faithful).
-// =============================================================================
+use crate::des::general::belief::{brier_score, BinaryOutcome, DiscreteBelief};
+use crate::des::general::pomdp::{pomdp_exact_finite_horizon, MDPVIOptions, QMDPSolver};
+use crate::des::general::tiger_pomdp::{build_tiger_spec, TigerOpts};
+use crate::des::main_factmachine::{
+    default_params, run_fact_machine as run_fact_machine_model, FactMachineParams,
+    FactMachineResult, MarketType, Policy, ResolutionMode,
+};
 
-#[derive(Clone, Debug)]
-struct DiscreteBelief {
-    states: Vec<f64>,
-    weights: Vec<f64>,
+fn run_fact_machine(params: &FactMachineParams) -> FactMachineResult {
+    run_fact_machine_model(params.clone())
 }
 
-impl DiscreteBelief {
-    fn new(states: Vec<f64>) -> Self {
-        let n = states.len();
-        DiscreteBelief {
-            states,
-            weights: vec![1.0 / n as f64; n],
-        }
-    }
-    fn with_weights(states: Vec<f64>, weights: Vec<f64>) -> Self {
-        DiscreteBelief { states, weights }
-    }
-    fn update<F: Fn(f64) -> f64>(&mut self, likelihood: F) {
-        let mut sum = 0.0;
-        for i in 0..self.states.len() {
-            self.weights[i] *= likelihood(self.states[i]);
-            sum += self.weights[i];
-        }
-        if sum > 0.0 {
-            for w in self.weights.iter_mut() {
-                *w /= sum;
-            }
-        }
-    }
-    fn mean(&self) -> f64 {
-        self.states
-            .iter()
-            .zip(self.weights.iter())
-            .map(|(s, w)| s * w)
-            .sum()
+fn policy_from_label(label: &str) -> Policy {
+    match label {
+        "random" => Policy::Random,
+        "hold" => Policy::Hold,
+        "myopic" => Policy::Myopic,
+        "oracle" => Policy::Oracle,
+        _ => Policy::Qmdp,
     }
 }
 
-fn brier_score(p: f64, outcome: f64) -> f64 {
-    (p - outcome) * (p - outcome)
-}
-
-// =============================================================================
-// Stubbed POMDP layer.
-// =============================================================================
-
-#[derive(Clone, Debug, Default)]
-struct PomdpSpec {
-    states: Vec<String>,
-    actions: Vec<String>,
-    observations: Vec<String>,
-    discount: f64,
-}
-
-struct ExactPomdp {
-    listen_index: usize,
-}
-
-impl ExactPomdp {
-    fn v(&self, _belief: &[f64]) -> f64 {
-        0.0
-    }
-    fn act(&self, _belief: &DiscreteBelief) -> usize {
-        self.listen_index
+fn market_type_from_label(label: &str) -> MarketType {
+    match label {
+        "scalar" => MarketType::Scalar,
+        _ => MarketType::Binary,
     }
 }
 
-fn pomdp_exact_finite_horizon(spec: &PomdpSpec, _horizon: usize) -> ExactPomdp {
-    ExactPomdp {
-        listen_index: spec.actions.iter().position(|a| a == "listen").unwrap_or(0),
-    }
-}
-
-struct QmdpSolver {
-    listen_index: usize,
-}
-
-impl QmdpSolver {
-    fn new(spec: &PomdpSpec, _tol: f64, _max_iter: usize) -> Self {
-        QmdpSolver {
-            listen_index: spec.actions.iter().position(|a| a == "listen").unwrap_or(0),
-        }
-    }
-    fn q_belief(&self, _belief: &DiscreteBelief, _a: usize) -> f64 {
-        0.0
-    }
-    fn act(&self, _belief: &DiscreteBelief) -> usize {
-        self.listen_index
-    }
-}
-
-// =============================================================================
-// Stubbed FactMachine sim.
-// =============================================================================
-
-#[derive(Clone, Debug)]
-struct FactMachineParams {
-    seed: u64,
-    true_theta: f64,
-    t: usize,
-    policy: &'static str,
-    resolution_mode: &'static str,
-    late_flip: bool,
-    late_flip_multiplier: f64,
-    market_type: &'static str,
-    theta_bins: usize,
-    k_noise: f64,
-    fee: f64,
-    n_voters: usize,
-}
-
-fn default_params() -> FactMachineParams {
-    FactMachineParams {
-        seed: 0,
-        true_theta: 0.5,
-        t: 24,
-        policy: "hold",
-        resolution_mode: "bernoulli",
-        late_flip: false,
-        late_flip_multiplier: 1.0,
-        market_type: "binary",
-        theta_bins: 21,
-        k_noise: 20.0,
-        fee: 0.0,
-        n_voters: 51,
-    }
-}
-
-#[derive(Clone, Debug, Default)]
-struct FmResult {
-    belief_mean: Vec<f64>,
-    final_outcome: f64,
-    pnl: f64,
-    belief_var: Vec<f64>,
-    price_history: Vec<Vec<f64>>,
-}
-
-fn run_fact_machine(p: &FactMachineParams) -> FmResult {
-    // PORT NOTE: real impl runs the DES POMDP with seeded noise traders. Stub
-    // returns a uniform-prior trajectory so structural checks stay sound.
-    let bins = if p.market_type == "scalar" {
-        p.theta_bins
+fn binary_outcome(outcome: i32) -> BinaryOutcome {
+    if outcome == 0 {
+        BinaryOutcome::Zero
     } else {
-        2
-    };
-    let uniform = vec![1.0 / bins as f64; bins];
-    FmResult {
-        belief_mean: vec![0.5; p.t + 1],
-        final_outcome: 0.0,
-        pnl: 0.0,
-        belief_var: vec![0.25; p.t + 1],
-        price_history: vec![uniform; p.t + 1],
+        BinaryOutcome::One
     }
 }
 
 // =============================================================================
-// Python reference (always None — see module PORT NOTES).
+// Optional Python reference (always None — see module PORT NOTES).
 // =============================================================================
 
 struct PyJson {
@@ -189,7 +66,7 @@ struct PyJson {
 }
 
 fn run_python(env: &[(&str, String)]) -> Option<PyJson> {
-    let python = std::env::var("FACTMACHINE_PY").unwrap_or_else(|_| "python3".to_string());
+    let python = std::env::var("FACTMACHINE_PY").ok()?;
     let script = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("external-references")
         .join("factmachine")
@@ -268,11 +145,11 @@ pub fn run() {
         match py {
             None => println!("  SKIP    scipy/numpy reference unavailable"),
             Some(py) => {
-                let mut b = DiscreteBelief::new(states.clone());
+                let mut b = DiscreteBelief::new(states.clone(), None);
                 let mut ts_means: Vec<f64> = vec![b.mean()];
                 for &(y, n) in &obs {
-                    b.update(|theta| {
-                        let q = theta * informedness + 0.5 * (1.0 - informedness);
+                    b.update(|theta, _| {
+                        let q = *theta * informedness + 0.5 * (1.0 - informedness);
                         (y as f64 * f64::max(1e-300, q).ln()
                             + (n - y) as f64 * f64::max(1e-300, 1.0 - q).ln())
                         .exp()
@@ -327,16 +204,16 @@ pub fn run() {
             None => println!("  SKIP    scipy reference unavailable"),
             Some(py) => {
                 let mut params = default_params();
-                params.resolution_mode = "majority";
+                params.resolution_mode = ResolutionMode::Majority;
                 params.n_voters = 51;
                 let nn = params.n_voters as i64;
-                let half = params.n_voters / 2;
+                let half = nn / 2;
                 let pwin_ts = |theta: f64| -> f64 {
                     let mut p = 0.0;
                     let mut log_p = nn as f64 * f64::max(1e-300, 1.0 - theta).ln();
                     let mut lcoef = 0.0;
                     for k in 0..=nn {
-                        if k as usize > half {
+                        if k > half {
                             p += (lcoef + log_p).exp();
                         }
                         if k < nn {
@@ -367,17 +244,17 @@ pub fn run() {
         let t = 24usize;
         let mut brier_by_t = vec![0.0; t + 1];
         for r in 0..n_reps {
-            let seed = 17 + r as u64;
+            let seed = 17 + r as u32;
             let true_theta = 0.05 + 0.9 * (r as f64 / n_reps as f64);
             let mut params = default_params();
             params.seed = seed;
             params.true_theta = true_theta;
-            params.t = t;
-            params.policy = "hold";
-            params.resolution_mode = "bernoulli";
+            params.t = t as i64;
+            params.policy = Policy::Hold;
+            params.resolution_mode = ResolutionMode::Bernoulli;
             let r1 = run_fact_machine(&params);
             for tt in 0..=t {
-                brier_by_t[tt] += brier_score(r1.belief_mean[tt], r1.final_outcome);
+                brier_by_t[tt] += brier_score(r1.belief_mean[tt], binary_outcome(r1.final_outcome));
             }
         }
         for tt in 0..=t {
@@ -419,10 +296,10 @@ pub fn run() {
             let mut sum_sq = 0.0;
             for r in 0..n_reps {
                 let mut params = default_params();
-                params.seed = 5000 + r as u64;
+                params.seed = 5000 + r as u32;
                 params.true_theta = 0.65;
-                params.policy = policy;
-                params.resolution_mode = "bernoulli";
+                params.policy = policy_from_label(policy);
+                params.resolution_mode = ResolutionMode::Bernoulli;
                 let out = run_fact_machine(&params);
                 sum += out.pnl;
                 sum_sq += out.pnl * out.pnl;
@@ -490,13 +367,13 @@ pub fn run() {
         let mut baseline_pnl = 0.0;
         let mut flip_pnl = 0.0;
         for r in 0..n_reps {
-            let seed = 700 + r as u64;
+            let seed = 700 + r as u32;
             let mut p1 = default_params();
             p1.seed = seed;
             p1.true_theta = true_theta;
-            p1.t = t;
-            p1.policy = "myopic";
-            p1.resolution_mode = "bernoulli";
+            p1.t = t as i64;
+            p1.policy = Policy::Myopic;
+            p1.resolution_mode = ResolutionMode::Bernoulli;
             p1.late_flip = false;
             let mut p2 = p1.clone();
             p2.late_flip = true;
@@ -546,22 +423,13 @@ pub fn run() {
         "\n=== STUDY 6: Cassandra \"Tiger\" POMDP — exact VI agrees with QMDP at flat prior ==="
     );
     {
-        // PORT NOTE: transition/observation/reward closures omitted in the stub spec.
-        let spec = PomdpSpec {
-            states: vec!["TL".to_string(), "TR".to_string()],
-            actions: vec![
-                "open-left".to_string(),
-                "open-right".to_string(),
-                "listen".to_string(),
-            ],
-            observations: vec!["hear-left".to_string(), "hear-right".to_string()],
-            discount: 0.95,
-        };
+        let spec = build_tiger_spec(&TigerOpts::default());
+        let spec_qmdp = build_tiger_spec(&TigerOpts::default());
         let exact = pomdp_exact_finite_horizon(&spec, 4);
         let flat = vec![0.5, 0.5];
-        let v_exact = exact.v(&flat);
-        let qm = QmdpSolver::new(&spec, 1e-10, 5000);
-        let belief = DiscreteBelief::with_weights(vec![0.0, 1.0], flat.clone());
+        let v_exact = exact.value(&flat);
+        let qm = QMDPSolver::new(spec_qmdp, &MDPVIOptions::default());
+        let belief = DiscreteBelief::new(spec.states.clone(), Some(&flat));
         let v_qmdp = qm
             .q_belief(&belief, 0)
             .max(qm.q_belief(&belief, 1))
@@ -580,7 +448,7 @@ pub fn run() {
         );
         c.check(
             "QMDP policy at flat prior chooses 'listen'",
-            spec.actions[qm.act(&belief)] == "listen",
+            qm.spec.actions[qm.act(&belief, None, 0.0)] == "listen",
             "",
         );
     }
@@ -605,12 +473,12 @@ pub fn run() {
             let mut sum_belief_var = 0.0;
             for r in 0..n_reps {
                 let mut params = default_params();
-                params.seed = 9000 + r as u64;
+                params.seed = 9000 + r as u32;
                 params.true_theta = true_theta;
-                params.t = t;
-                params.policy = policy;
-                params.market_type = market;
-                params.resolution_mode = "majority";
+                params.t = t as i64;
+                params.policy = policy_from_label(policy);
+                params.market_type = market_type_from_label(market);
+                params.resolution_mode = ResolutionMode::Majority;
                 params.theta_bins = 21;
                 params.k_noise = 20.0;
                 params.fee = 0.01;
@@ -674,12 +542,12 @@ pub fn run() {
             p.seed = 1234;
             p.true_theta = 0.6;
             p.t = 12;
-            p.market_type = "binary";
-            p.resolution_mode = "majority";
-            p.policy = "hold";
+            p.market_type = MarketType::Binary;
+            p.resolution_mode = ResolutionMode::Majority;
+            p.policy = Policy::Hold;
             let r1 = run_fact_machine(&p);
             let mut p2 = p.clone();
-            p2.market_type = "scalar";
+            p2.market_type = MarketType::Scalar;
             let r2 = run_fact_machine(&p2);
             let mut max_diff = 0.0_f64;
             for tt in 0..=t {
@@ -736,14 +604,14 @@ pub fn run() {
         let h_reps = 200usize;
         for r in 0..h_reps {
             let mut pb = default_params();
-            pb.seed = 200 + r as u64;
+            pb.seed = 200 + r as u32;
             pb.true_theta = 0.5;
-            pb.t = t;
-            pb.policy = "hold";
-            pb.market_type = "binary";
-            pb.resolution_mode = "majority";
+            pb.t = t as i64;
+            pb.policy = Policy::Hold;
+            pb.market_type = MarketType::Binary;
+            pb.resolution_mode = ResolutionMode::Majority;
             let mut ps = pb.clone();
-            ps.market_type = "scalar";
+            ps.market_type = MarketType::Scalar;
             let rb = run_fact_machine(&pb);
             let rs = run_fact_machine(&ps);
             let phb = &rb.price_history[t];

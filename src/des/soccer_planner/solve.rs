@@ -2,6 +2,10 @@
 //! render pitch + solver animations for the interactive UI.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64},
+    Arc,
+};
 use std::time::Instant;
 
 use crate::des::animation::frame_recorder::{FrameRecorder, FrameRecorderOpts};
@@ -65,6 +69,12 @@ pub struct PlannerAlternative {
     pub total_subs: usize,
     pub assignment: Vec<Vec<i64>>,
     pub bench: Vec<Vec<usize>>,
+}
+
+#[derive(Clone, Default)]
+pub struct PlannerSolveControls {
+    pub cancel_flag: Option<Arc<AtomicBool>>,
+    pub take_next_incumbent_signal: Option<Arc<AtomicU64>>,
 }
 
 #[derive(Clone, Debug)]
@@ -925,12 +935,20 @@ fn render_error_solver_animation(error: &str, elapsed_ms: f64) -> Animation {
 
 /// Solve the planner request and render both animations.
 pub fn solve_planner(req: &PlannerRequest) -> PlannerResponse {
-    solve_planner_inner(req, true)
+    solve_planner_inner(req, true, PlannerSolveControls::default())
+}
+
+/// Solve the planner request with cooperative backend controls.
+pub fn solve_planner_with_controls(
+    req: &PlannerRequest,
+    controls: PlannerSolveControls,
+) -> PlannerResponse {
+    solve_planner_inner(req, true, controls)
 }
 
 /// Solve the planner request without rendering animation payloads.
 pub fn solve_planner_summary(req: &PlannerRequest) -> PlannerResponse {
-    solve_planner_inner(req, false)
+    solve_planner_inner(req, false, PlannerSolveControls::default())
 }
 
 fn response_from_schedule(
@@ -1052,7 +1070,11 @@ fn response_from_schedule(
     }
 }
 
-fn solve_planner_inner(req: &PlannerRequest, render_animations: bool) -> PlannerResponse {
+fn solve_planner_inner(
+    req: &PlannerRequest,
+    render_animations: bool,
+    controls: PlannerSolveControls,
+) -> PlannerResponse {
     let formation = formation_with_gk(&req.outfield_formation);
     match build_problem_from_request(req) {
         Err(e) => {
@@ -1120,6 +1142,8 @@ fn solve_planner_inner(req: &PlannerRequest, render_animations: bool) -> Planner
                 lp_max_iters: Some(req.solver_lp_max_iters),
                 heuristic_passes: Some(req.solver_heuristic_passes),
                 fallback_to_mdp: Some(req.fallback_to_mdp),
+                cancel_flag: controls.cancel_flag.clone(),
+                take_next_incumbent_signal: controls.take_next_incumbent_signal.clone(),
                 ..Default::default()
             };
             let result = match catch_unwind(AssertUnwindSafe(|| {
@@ -1345,6 +1369,7 @@ mod tests {
     use super::{
         build_problem_from_request, solve_planner, solve_planner_summary, PlannerResponse,
     };
+    use crate::des::animation::types::Shape;
     use crate::des::general::ip_mip_des::validate_ipmip_problem;
     use crate::des::general::soccer_rotation::build_soccer_ipmip;
     use crate::des::soccer_planner::{default_planner_request, PlannerPlayer, PlannerRequest};
@@ -1416,6 +1441,27 @@ mod tests {
         assert_eq!(resp.bench.len(), 18);
     }
 
+    fn solver_animation_contains_text(resp: &PlannerResponse, needle: &str) -> bool {
+        resp.solver_animation.frames.iter().any(|frame| {
+            frame
+                .caption
+                .as_deref()
+                .is_some_and(|caption| caption.contains(needle))
+                || frame.shapes.iter().any(|shape| match shape {
+                    Shape::Text(text) => text.text.contains(needle),
+                    Shape::Rect(rect) => rect
+                        .label
+                        .as_deref()
+                        .is_some_and(|label| label.contains(needle)),
+                    Shape::Circle(circle) => circle
+                        .label
+                        .as_deref()
+                        .is_some_and(|label| label.contains(needle)),
+                    _ => false,
+                })
+        })
+    }
+
     #[test]
     fn default_planner_request_solves() {
         let req = default_planner_request();
@@ -1459,6 +1505,34 @@ mod tests {
             .solver_notes
             .iter()
             .any(|note| note.contains("Branch-and-bound completed")));
+    }
+
+    #[test]
+    fn forced_branch_and_cut_solver_tab_renders_internal_backend() {
+        let resp = solve_planner(&tiny_branch_and_cut_request());
+
+        assert!(
+            resp.ok,
+            "branch-and-cut planner solve failed: {:?}",
+            resp.error
+        );
+        assert!(!resp.used_fallback, "fallback={:?}", resp.fallback_reason);
+        assert_eq!(
+            resp.solver_animation.title.as_deref(),
+            Some("IP/MIP branch-and-cut")
+        );
+        assert_eq!(
+            resp.solver_animation.subtitle.as_deref(),
+            Some("IP/MIP branch-and-cut")
+        );
+        assert!(
+            solver_animation_contains_text(&resp, "internal-simplex"),
+            "solver tab should show the internal LP backend"
+        );
+        assert!(
+            solver_animation_contains_text(&resp, "LP Relaxation"),
+            "solver tab should show the LP-relaxation station label"
+        );
     }
 
     #[test]

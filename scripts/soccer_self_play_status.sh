@@ -68,7 +68,7 @@ for shard_dir in "$run_dir"/shard-*-of-*; do
   episode_log="$shard_dir/episodes.jsonl"
   artifact="$shard_dir/artifact.json"
   learned_params="$shard_dir/learned-params.json"
-  checkpoint_artifact="$shard_dir/artifact.json.checkpoint.json"
+  checkpoint_artifact="$shard_dir/checkpoint-policy.json"
 
   completed_games="0"
   if [[ -f "$episode_log" ]]; then

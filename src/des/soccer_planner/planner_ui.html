@@ -663,6 +663,105 @@ function logSolver(s) {
   logStream('solver ' + line);
 }
 
+function safeJson(value) {
+  try {
+    const text = JSON.stringify(value);
+    return text === undefined ? String(value) : text;
+  } catch (_) {
+    return String(value);
+  }
+}
+
+function errorText(value) {
+  if (value == null) return '';
+  if (typeof value === 'string') return value;
+  if (value instanceof Error) return value.message || value.name || 'Error';
+  if (typeof value === 'object') {
+    if (value.error != null) return errorText(value.error);
+    if (value.message != null) return String(value.message);
+  }
+  return safeJson(value);
+}
+
+function describeThrown(value) {
+  if (value instanceof Error) {
+    const detail = {name: value.name || 'Error', message: value.message || ''};
+    if (value.cause !== undefined) detail.cause = describeThrown(value.cause);
+    return detail;
+  }
+  return value && typeof value === 'object' ? value : {message: String(value)};
+}
+
+function responseSnippet(text, max) {
+  const s = String(text || '').replace(/\s+/g, ' ').trim();
+  return s.length > (max || 1200) ? s.slice(0, max || 1200) + '...' : s;
+}
+
+function parseJsonBody(text) {
+  if (!String(text || '').trim()) return null;
+  return JSON.parse(text);
+}
+
+function normalizeApiPayload(payload, response, label) {
+  let data = payload;
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    data = {ok: response.ok, value: data};
+  }
+  if (data.httpStatus == null) data.httpStatus = response.status;
+  if (data.httpStatusText == null) data.httpStatusText = response.statusText;
+  if (data.contentType == null) data.contentType = response.headers.get('content-type') || '';
+  if (data.url == null) data.url = response.url;
+  if (!response.ok && data.ok !== false) data.ok = false;
+  if (!response.ok && !data.error) data.error = `${label} failed with HTTP ${response.status} ${response.statusText || ''}`.trim();
+  return data;
+}
+
+async function readJsonResponse(response, label) {
+  const text = await response.text();
+  if (!text.trim()) {
+    return normalizeApiPayload({ok:false, error:`${label} returned an empty response`}, response, label);
+  }
+  try {
+    return normalizeApiPayload(parseJsonBody(text), response, label);
+  } catch (e) {
+    return normalizeApiPayload({
+      ok: false,
+      error: `${label} returned malformed or non-JSON data`,
+      parseError: describeThrown(e),
+      bodySnippet: responseSnippet(text)
+    }, response, label);
+  }
+}
+
+function payloadFromTextResponse(response, text, label) {
+  try {
+    return normalizeApiPayload(parseJsonBody(text), response, label);
+  } catch (e) {
+    return normalizeApiPayload({
+      ok: false,
+      error: `${label} returned malformed or non-JSON data`,
+      parseError: describeThrown(e),
+      bodySnippet: responseSnippet(text)
+    }, response, label);
+  }
+}
+
+function networkFailurePayload(label, url, error) {
+  return {
+    ok: false,
+    error: `${label} did not receive a JSON response from the backend`,
+    kind: 'network',
+    url,
+    exception: describeThrown(error),
+    hint: 'The request may have been closed by the browser, gateway, or backend before a JSON body was returned.'
+  };
+}
+
+function logApiFailure(label, payload) {
+  logSolver(`${label}: ${errorText(payload) || 'request failed'}`);
+  logSolver(`${label} details: ${safeJson(payload)}`);
+}
+
 function resetSolverLog(label) {
   stopSolverProgress();
   solverStartedAt = performance.now();
@@ -779,7 +878,7 @@ function appendSolutionLog(data) {
 }
 
 function failureStatus(data, label) {
-  const base = data?.error || 'solver could not produce a feasible schedule';
+  const base = errorText(data?.error) || 'solver could not produce a feasible schedule';
   return `${label}: ${base}${data?.suggestedFix ? ' Best guess: ' + data.suggestedFix : ''}`;
 }
 
@@ -1073,12 +1172,14 @@ async function solveViaJson() {
   }
   setBusy(true, 'Solving via JSON endpoint...');
   startSolverProgress('json solve');
+  const url = apiPath('solve');
   try {
-    const r = await fetch(apiPath('solve'), {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(state)});
-    const data = await r.json();
+    const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(state)});
+    const data = await readJsonResponse(r, 'JSON solve');
     stopSolverProgress();
     if (!data.ok) {
       receiveSolution(data);
+      logApiFailure('solve failed', data);
       setStatus('err', failureStatus(data, 'Solve failed'));
       return;
     }
@@ -1086,8 +1187,9 @@ async function solveViaJson() {
     setStatus('ok', `Solved: affinity ${data.affinity.toFixed(2)}, subs ${data.totalSubs}/${subsLimitLabel()}, ${data.numVariables} vars, ${data.numConstraints} constraints.`);
   } catch (e) {
     stopSolverProgress();
-    logSolver('solve failed: ' + e.message);
-    setStatus('err', 'Solve failed: ' + e.message);
+    const payload = networkFailurePayload('JSON solve', url, e);
+    logApiFailure('solve failed', payload);
+    setStatus('err', failureStatus(payload, 'Solve failed'));
   } finally {
     setBusy(false);
   }
@@ -1117,27 +1219,59 @@ async function solveViaStream() {
   const body = ['{"op":"init","request":' + JSON.stringify(state) + '}'].concat(lines, ['{"op":"solve","includeAnimations":true}']).join('\n') + '\n';
   setBusy(true, 'Solving via JSONL stream...');
   startSolverProgress('jsonl stream solve');
+  const url = apiPath('stream');
   try {
-    const r = await fetch(apiPath('stream'), {method:'POST', headers:{'Content-Type':'application/x-ndjson'}, body});
+    const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/x-ndjson'}, body});
     const text = await r.text();
     stopSolverProgress();
+    if (!r.ok) {
+      const payload = payloadFromTextResponse(r, text, 'JSONL stream solve');
+      logStream(text.trim() || safeJson(payload));
+      logApiFailure('stream solve failed', payload);
+      setStatus('err', failureStatus(payload, 'Stream solve failed'));
+      return;
+    }
     logStream(text.trim() || '(empty stream response)');
-    const frames = text.split(/\n+/).filter(Boolean).map(line => JSON.parse(line));
+    let frames;
+    try {
+      frames = text.split(/\n+/).filter(Boolean).map((line, index) => {
+        try { return JSON.parse(line); }
+        catch (e) {
+          throw {
+            ok: false,
+            error: `JSONL stream solve returned malformed JSON at line ${index + 1}`,
+            parseError: describeThrown(e),
+            line: responseSnippet(line),
+            bodySnippet: responseSnippet(text)
+          };
+        }
+      });
+    } catch (e) {
+      const payload = e && typeof e === 'object' ? e : {ok:false, error:errorText(e), exception:describeThrown(e)};
+      logApiFailure('stream solve failed', payload);
+      setStatus('err', failureStatus(payload, 'Stream solve failed'));
+      return;
+    }
     const sol = frames.reverse().find(f => f.event === 'solution');
     if (!sol || !sol.response || !sol.response.ok) {
       if (sol?.response) {
         receiveSolution(sol.response);
+        logApiFailure('stream solve failed', sol.response);
         setStatus('err', failureStatus(sol.response, 'Stream solve failed'));
         return;
       }
-      throw new Error(sol?.response?.error || 'stream solve failed');
+      const payload = {ok:false, error: sol?.response?.error || 'stream solve failed', lastFrame: frames[0] || null};
+      logApiFailure('stream solve failed', payload);
+      setStatus('err', failureStatus(payload, 'Stream solve failed'));
+      return;
     }
     receiveSolution(sol.response);
     setStatus('ok', `Stream solved: ${sol.variables} vars, ${sol.constraints} constraints.`);
   } catch (e) {
     stopSolverProgress();
-    logSolver('stream solve failed: ' + e.message);
-    setStatus('err', 'Stream solve failed: ' + e.message);
+    const payload = networkFailurePayload('JSONL stream solve', url, e);
+    logApiFailure('stream solve failed', payload);
+    setStatus('err', failureStatus(payload, 'Stream solve failed'));
   } finally {
     setBusy(false);
   }

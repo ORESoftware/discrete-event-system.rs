@@ -3,7 +3,7 @@
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
 };
 use std::time::Instant;
@@ -24,6 +24,8 @@ use super::model::{
     parse_player_status, planner_block_count, synergy_to_rules, PlannerRequest,
     CONTIGUOUS_BLOCK_MINUTES,
 };
+
+static PLANNER_ANIMATION_PATH_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Outcome of a planner solve (internal; use [`super::ui::planner_response_to_json`] for API).
 #[derive(Clone, Debug)]
@@ -564,6 +566,15 @@ fn to_scene_solution(
     }
 }
 
+fn planner_frames_path(kind: &str) -> std::path::PathBuf {
+    let serial = PLANNER_ANIMATION_PATH_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let out_dir = std::env::temp_dir()
+        .join("des_soccer_planner")
+        .join(format!("{}-{serial}", std::process::id()));
+    let _ = std::fs::create_dir_all(&out_dir);
+    out_dir.join(format!("planner-{kind}.frames.jsonl"))
+}
+
 fn render_pitch_animation(
     problem: &SoccerProblem,
     schedule: &Schedule,
@@ -571,9 +582,7 @@ fn render_pitch_animation(
     minutes_per_period: usize,
     seed: u32,
 ) -> Animation {
-    let out_dir = std::env::temp_dir().join("des_soccer_planner");
-    let _ = std::fs::create_dir_all(&out_dir);
-    let frames_path = out_dir.join("planner-pitch.frames.jsonl");
+    let frames_path = planner_frames_path("pitch");
     let mut rec = FrameRecorder::new(FrameRecorderOpts {
         frames_path: frames_path.to_string_lossy().into_owned(),
         width: pitch_scene::STAGE_W,
@@ -703,9 +712,7 @@ fn render_solver_animation(result: &SoccerIPMIPPolicyResult) -> Animation {
 }
 
 fn render_solver_scene_animation(sol: &solver_scene::IPMIPSolution, subtitle: &str) -> Animation {
-    let out_dir = std::env::temp_dir().join("des_soccer_planner");
-    let _ = std::fs::create_dir_all(&out_dir);
-    let frames_path = out_dir.join("planner-solver.frames.jsonl");
+    let frames_path = planner_frames_path("solver");
     let mut rec = FrameRecorder::new(FrameRecorderOpts {
         frames_path: frames_path.to_string_lossy().into_owned(),
         width: solver_scene::SOCCER_IPMIP_SOLVER_W,

@@ -3104,7 +3104,7 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         family: ExternalValidationFamily::OutputDataValidator,
         runtime: ExternalValidationRuntime::GenericAdapter,
         artifact_kind: ExternalValidationArtifactKind::SchemaOrSpecPath,
-        command_aliases: &["xmlschema", "xsd-validator"],
+        command_aliases: &["xmlschema", "xmlschema-validate", "xsd-validator"],
         capabilities: OUTPUT_VALIDATOR_CAPS,
         input_formats: XML_OUTPUT_FORMATS,
         notes: "XSD/XML Schema validation adapter for structured XML run artifacts",
@@ -9239,7 +9239,7 @@ pub fn run_simulation_validation_json_with_python_reference(
         }
     };
 
-    if let Some(stdin) = child.stdin.as_mut() {
+    if let Some(mut stdin) = child.stdin.take() {
         if let Err(e) = stdin.write_all(payload.to_string().as_bytes()) {
             return ExternalSimulationValidationReferenceRun {
                 engine_id,
@@ -11613,6 +11613,9 @@ mod tests {
         }));
         assert!(tools.iter().any(|tool| {
             tool.id == "xml-schema" && tool.family == ExternalValidationFamily::OutputDataValidator
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "xml-schema" && tool.command_aliases.contains(&"xmlschema-validate")
         }));
         assert!(tools.iter().any(|tool| {
             tool.id == "jing" && tool.family == ExternalValidationFamily::OutputDataValidator

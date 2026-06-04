@@ -582,7 +582,7 @@ fn run_set_cover_reference_json(
             )
         }
     };
-    if let Some(stdin) = child.stdin.as_mut() {
+    if let Some(mut stdin) = child.stdin.take() {
         if let Err(err) = stdin.write_all(payload.to_string().as_bytes()) {
             return numerical_error(
                 format!("failed to write set_cover_reference.py stdin: {err}"),
@@ -745,5 +745,33 @@ mod tests {
 
         assert!(timed_out);
         assert!(!output.status.success());
+    }
+
+    #[test]
+    fn set_cover_python_bridge_wait_observes_closed_stdin() {
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("cat >/dev/null; printf done")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn stdin reader");
+        child
+            .stdin
+            .as_mut()
+            .expect("stdin")
+            .write_all(
+                b"{\"universe\":[\"A\"],\"sets\":[{\"id\":\"S\",\"cost\":1,\"elements\":[\"A\"]}]}",
+            )
+            .expect("write stdin");
+        drop(child.stdin.take());
+
+        let (output, timed_out) =
+            wait_for_set_cover_reference_output(child, 1_000).expect("closed stdin output");
+
+        assert!(!timed_out);
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "done");
     }
 }

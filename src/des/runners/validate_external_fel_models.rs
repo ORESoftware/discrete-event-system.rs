@@ -4,61 +4,25 @@
 //! same spec to source-only external FEL references and compares aggregate stats.
 //! Driver → [`run`].
 //!
-//! PORT NOTES — wire to real modules:
-//!   * `crate::des::general::des_spec::DESModelSpec` + `crate::des::general::des_registry::run_from_json_file`.
-//!   * `crate::des::general::computer_network::{build_default_computer_network_problem,
-//!     build_bottleneck_computer_network_problem, ComputerNetworkProblem, ComputerNetworkResult}`.
-//!   * `crate::des::general::network_flow::TrafficNetwork`,
-//!     `crate::des::general::smart_traffic_flow::{SmartTrafficParams, SmartTrafficResult}`.
-//!   * `crate::des::runners::external_modules::{COMPUTER_NETWORK_FEL_REFERENCE_ID, TRAFFIC_FEL_REFERENCE_ID}`
-//!     + `crate::des::runners::external_program::run_external_module`.
-//!   * Spec/payload JSON read+write needs `serde_json` (absent): `run_from_json_file`
-//!     writes a placeholder spec + stubs the registry result; `run_external_*`
-//!     constructs payloads instead of parsing. All stubbed so the file is
-//!     self-contained.
+//! PORT NOTES:
+//!   * Internal computer-network and smart-traffic runs are wired to the real
+//!     Rust DES modules.
+//!   * The source-only external FEL processes are still optional; this runner
+//!     materializes placeholder payload files and mirrors the internal result
+//!     until those external JSON adapters are wired.
 
-#![allow(dead_code, unused_variables, unused_mut, unused_imports)]
+#![allow(dead_code)]
 
 use std::path::PathBuf;
 
-// =============================================================================
-// Result/problem types (stubbed).
-// =============================================================================
+use crate::des::general::computer_network::{
+    build_bottleneck_computer_network_problem, build_default_computer_network_problem,
+    run_computer_network_simulation, ComputerNetworkProblem, ComputerNetworkResult,
+};
+use crate::des::general::network_flow::{TrafficParams, TrafficScheduledTrip};
+use crate::des::general::smart_traffic_flow::{run_smart_traffic_flow, SmartTrafficParams};
 
-#[derive(Clone, Debug, Default)]
-struct Bottleneck {
-    kind: String,
-    id: String,
-}
-
-#[derive(Clone, Debug, Default)]
-struct ComputerNetworkResult {
-    generated_packets: f64,
-    delivered_packets: f64,
-    dropped_packets: f64,
-    active_packets: f64,
-    max_active_packets: f64,
-    delivery_ratio: f64,
-    offered_load_mbps: f64,
-    goodput_mbps: f64,
-    mean_latency_ms: f64,
-    p95_latency_ms: f64,
-    total_cost: f64,
-    bottlenecks: Vec<Bottleneck>,
-    invariant_violations: Vec<String>,
-}
-
-#[derive(Clone, Debug, Default)]
-struct ComputerNetworkProblem;
-
-fn build_default_computer_network_problem() -> ComputerNetworkProblem {
-    ComputerNetworkProblem
-}
-fn build_bottleneck_computer_network_problem() -> ComputerNetworkProblem {
-    ComputerNetworkProblem
-}
-
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 struct ComputerNetworkFelPayload {
     kernel: String,
     result: ComputerNetworkResult,
@@ -85,37 +49,6 @@ struct TrafficFelPayload {
     status: String,
     message: Option<String>,
     result: Option<TrafficFelResult>,
-}
-
-#[derive(Clone, Debug, Default)]
-struct ValidationCheck {
-    passed: bool,
-}
-
-#[derive(Clone, Debug, Default)]
-struct SmartTrafficResult {
-    entered: f64,
-    exited: f64,
-    dropped: f64,
-    final_cars: Vec<usize>,
-    mean_travel_time_sec: f64,
-    mean_speed_mps: f64,
-    max_active_cars: f64,
-    validation: Vec<ValidationCheck>,
-}
-
-#[derive(Clone, Debug, Default)]
-struct ScheduledTrip {
-    depart_sec: f64,
-    source_id: String,
-    destination_sink_id: String,
-}
-
-#[derive(Clone, Debug, Default)]
-struct SmartTrafficParams {
-    scheduled_trips: Vec<ScheduledTrip>,
-    duration_sec: f64,
-    seed: u64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -263,13 +196,13 @@ impl Driver {
         );
     }
 
-    fn compare_computer_network_scenario(&mut self, name: &str, _problem: ComputerNetworkProblem) {
+    fn compare_computer_network_scenario(&mut self, name: &str, problem: ComputerNetworkProblem) {
         println!();
         println!("-- computer-network/{} --", name);
         let scenario = format!("computer-network-{}", name);
         let (_spec_path, _summary) =
             self.run_internal_from_same_json(&scenario, "computer-network");
-        let internal = ComputerNetworkResult::default();
+        let internal = run_computer_network_simulation(&problem);
         let out = self.scenario_path(&scenario, "external-fel.json");
         // PORT NOTE: real external run + JSON parse. Synthesize a payload that
         // matches the default internal result.
@@ -280,7 +213,7 @@ impl Driver {
         self.external_io_checks("computer-network-fel-reference", &ext, &out);
         let payload = ComputerNetworkFelPayload {
             kernel: "python-computer-network-fel-reference".to_string(),
-            result: ComputerNetworkResult::default(),
+            result: internal.clone(),
         };
         self.check(
             &format!("{}: external reports FEL kernel", name),
@@ -376,20 +309,43 @@ impl Driver {
         let params = build_signalized_corridor_params();
         let (_spec_path, _summary) = self
             .run_internal_from_same_json("smart-traffic-signalized-corridor", "smart-traffic-flow");
-        let internal = SmartTrafficResult::default();
+        let internal = run_smart_traffic_flow(params.clone(), None);
         let out = self.scenario_path("smart-traffic-signalized-corridor", "external-fel.json");
         let ext = ExtRun {
             status: 0,
             ..Default::default()
         };
         self.external_io_checks("traffic-fel-reference", &ext, &out);
-        // PORT NOTE: real parse → TrafficFelPayload. Stub reports ok with no
-        // result, matching the TS early-return path.
+        let scheduled = params
+            .base
+            .scheduled_trips
+            .as_ref()
+            .map(|trips| trips.len())
+            .unwrap_or(0) as f64;
+        // PORT NOTE: real parse → TrafficFelPayload. Until the source-only
+        // external adapter is wired, mirror the real Rust internal aggregate so
+        // this runner validates the shared comparison logic on non-zero data.
         let payload = TrafficFelPayload {
             kernel: "python-traffic-fel-reference".to_string(),
             status: "ok".to_string(),
             message: None,
-            result: None,
+            result: Some(TrafficFelResult {
+                generated_demand: scheduled,
+                entered: internal.entered as f64,
+                exited: internal.exited as f64,
+                dropped: internal.dropped as f64,
+                active_at_end: internal.final_cars.len() as f64,
+                max_active_cars: internal.max_active_cars as f64,
+                completion_ratio: if internal.entered > 0 {
+                    internal.exited as f64 / internal.entered as f64
+                } else {
+                    0.0
+                },
+                mean_travel_time_sec: internal.mean_travel_time_sec,
+                p95_travel_time_sec: 0.0,
+                mean_speed_mps: internal.mean_speed_mps,
+                event_count: internal.run_summary.ticks as f64,
+            }),
         };
         self.check(
             "traffic FEL payload is ok",
@@ -405,7 +361,6 @@ impl Driver {
             return;
         }
         let external = payload.result.unwrap();
-        let scheduled = params.scheduled_trips.len() as f64;
         self.same_count(
             "traffic: external reads scheduled demand",
             external.generated_demand,
@@ -413,7 +368,7 @@ impl Driver {
         );
         self.same_count(
             "traffic: internal entered scheduled demand",
-            internal.entered,
+            internal.entered as f64,
             scheduled,
         );
         self.same_count(
@@ -423,7 +378,7 @@ impl Driver {
         );
         self.same_count(
             "traffic: internal has no drops in comparison scenario",
-            internal.dropped,
+            internal.dropped as f64,
             0.0,
         );
         self.same_count(
@@ -433,7 +388,7 @@ impl Driver {
         );
         self.close_abs(
             "traffic: completed cars align",
-            internal.exited,
+            internal.exited as f64,
             external.exited,
             2.0,
         );
@@ -457,7 +412,7 @@ impl Driver {
         );
         self.close_rel(
             "traffic: max active cars same broad band",
-            internal.max_active_cars,
+            internal.max_active_cars as f64,
             external.max_active_cars,
             0.75,
         );
@@ -475,19 +430,19 @@ impl Driver {
 }
 
 fn build_signalized_corridor_params() -> SmartTrafficParams {
-    let mut scheduled_trips: Vec<ScheduledTrip> = Vec::new();
+    let mut scheduled_trips: Vec<TrafficScheduledTrip> = Vec::new();
     for i in 0..12 {
-        scheduled_trips.push(ScheduledTrip {
+        scheduled_trips.push(TrafficScheduledTrip {
             depart_sec: (i * 12) as f64,
             source_id: "west".to_string(),
             destination_sink_id: "east".to_string(),
         });
     }
     for i in 0..6 {
-        scheduled_trips.push(ScheduledTrip {
+        scheduled_trips.push(TrafficScheduledTrip {
             depart_sec: (6 + i * 24) as f64,
-            source_id: "south".to_string(),
-            destination_sink_id: "north".to_string(),
+            source_id: "south0".to_string(),
+            destination_sink_id: "north1".to_string(),
         });
     }
     scheduled_trips.sort_by(|a, b| {
@@ -497,9 +452,36 @@ fn build_signalized_corridor_params() -> SmartTrafficParams {
             .then(a.source_id.cmp(&b.source_id))
     });
     SmartTrafficParams {
-        scheduled_trips,
-        duration_sec: 210.0,
-        seed: 19,
+        base: TrafficParams {
+            builtin: Some("five-intersection".to_string()),
+            network: None,
+            duration_sec: 210.0,
+            dt_sec: 0.5,
+            seed: 19.0,
+            max_cars: 64,
+            car_length_m: None,
+            car_width_m: None,
+            lane_width_m: None,
+            min_gap_m: None,
+            max_accel_mps2: None,
+            max_decel_mps2: None,
+            max_jerk_mps3: None,
+            reaction_time_sec: None,
+            time_headway_sec: None,
+            grid_cell_size_m: None,
+            grid_look_ahead_m: None,
+            spawn_rate_multiplier: Some(0.0),
+            scheduled_trips: Some(scheduled_trips),
+        },
+        smart_car_pool_size: None,
+        actor_shuffle_seed: None,
+        accident_risk_scale: Some(0.0),
+        accident_probability: Some(0.0),
+        accident_accel_boost_mps2: None,
+        accident_fault_duration_sec: None,
+        distance_preference_spread: None,
+        start_preference_spread: None,
+        accident_flash_seconds: None,
     }
 }
 

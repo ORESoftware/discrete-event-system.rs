@@ -1,0 +1,100 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dd-soccer-learning-rds-smoke
+  namespace: default
+  labels:
+    app: dd-soccer-learning-rds-smoke
+    app.kubernetes.io/name: dd-soccer-learning-rds-smoke
+    app.kubernetes.io/part-of: des-soccer-learning
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: dd-soccer-learning-rds-smoke
+  template:
+    metadata:
+      labels:
+        app: dd-soccer-learning-rds-smoke
+        app.kubernetes.io/name: dd-soccer-learning-rds-smoke
+        app.kubernetes.io/part-of: des-soccer-learning
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 20
+      containers:
+        - name: soccer-learning
+          image: 710156900967.dkr.ecr.us-east-1.amazonaws.com/des-soccer-learning:codex-rds-smoke-20260604
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -lc
+          args:
+            - |
+              if /usr/local/bin/main_soccer_learning_run; then
+                echo "soccer learning smoke complete; keeping pod alive for log inspection"
+                sleep 86400
+              else
+                status=$?
+                echo "soccer learning smoke failed with status ${status}" >&2
+                exit "${status}"
+              fi
+          env:
+            - name: SOCCER_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: dd-remote-rest-api-secrets
+                  key: RDS_DATABASE_URL
+            - name: SOCCER_RUN_ID
+              value: codex-k8s-pg-smoke-20260604
+            - name: SOCCER_EXPERIMENT_SLUG
+              value: soccer-self-play
+            - name: SOCCER_EXPERIMENT_NAME
+              value: Soccer self-play
+            - name: SOCCER_GAMES
+              value: "3"
+            - name: SOCCER_PARALLEL_GAMES
+              value: "3"
+            - name: SOCCER_HALVES
+              value: "2"
+            - name: SOCCER_HALF_MINUTES
+              value: "45"
+            - name: SOCCER_MINUTES
+              value: "90"
+            - name: SOCCER_PERIOD_BREAK_RECOVERY_SECONDS
+              value: "900"
+            - name: SOCCER_DT_SECONDS
+              value: "5"
+            - name: SOCCER_LEARNING_INTERVAL_TICKS
+              value: "4"
+            - name: SOCCER_CHECKPOINT_INTERVAL_GAMES
+              value: "3"
+            - name: SOCCER_GAME_ARTIFACT_MODE
+              value: summary
+            - name: SOCCER_WRITE_GAME_ARTIFACTS
+              value: "false"
+            - name: SOCCER_RUN_DIR
+              value: /tmp/soccer-learning
+            - name: SOCCER_ARTIFACT_PATH
+              value: /tmp/soccer-learning/artifact.json
+            - name: SOCCER_CHECKPOINT_ARTIFACT_PATH
+              value: /tmp/soccer-learning/checkpoint.json
+            - name: SOCCER_EPISODE_LOG_PATH
+              value: /tmp/soccer-learning/episodes.jsonl
+            - name: SOCCER_LEARNED_PARAMS_PATH
+              value: /tmp/soccer-learning/learned-params.json
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

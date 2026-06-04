@@ -4,88 +4,50 @@
 //! Dijkstra's refusal of negative weights, Bellman-Ford negative-cycle
 //! detection, iteration bounds, and wave-count ordering. Driver → [`run`].
 //!
-//! PORT NOTES — wire to the already-ported `crate::des::general::shortest_path_des`
-//! (present), which exposes identical symbols:
-//!   * `Graph { num_nodes, edges: Vec<Vec<Edge{to, weight}>> }`, `Edge`.
-//!   * `build_small_chain_graph() -> Graph`,
-//!     `build_random_graph(n, density, wmin, wmax, seed) -> Graph`.
-//!   * `shortest_path_bellman_ford_des(&Graph, source) -> SPResult`
-//!     (`distance`, `iterations`, `has_negative_cycle_from_source`, `waves_emitted`).
-//!   * `shortest_path_dijkstra_des(&Graph, source) -> SPResult` (panics/Err on
-//!     negative weight). Stub returns `Result` so Study 3 can detect the throw.
+//! The runner now delegates to `crate::des::general::shortest_path_des`.
 
-#![allow(dead_code, unused_variables, unused_mut, unused_imports)]
+#![allow(dead_code)]
 
-#[derive(Clone, Copy, Debug)]
-struct Edge {
-    to: usize,
-    weight: f64,
-}
+use std::panic::{catch_unwind, AssertUnwindSafe};
 
-#[derive(Clone, Debug, Default)]
-struct Graph {
-    num_nodes: usize,
-    edges: Vec<Vec<Edge>>,
-}
+use crate::des::general::shortest_path_des::{
+    build_random_graph as build_random_graph_model,
+    build_small_chain_graph as build_small_chain_graph_model,
+    shortest_path_bellman_ford_des as shortest_path_bellman_ford_des_model,
+    shortest_path_dijkstra_des as shortest_path_dijkstra_des_model, BellmanFordOptions, Edge,
+    Graph, SPResult,
+};
+use crate::des::shared::capabilities::SeededRandom;
 
-#[derive(Clone, Debug, Default)]
-struct BfResult {
-    distance: Vec<f64>,
-    iterations: usize,
-    has_negative_cycle_from_source: bool,
-    waves_emitted: usize,
-}
-
-#[derive(Clone, Debug, Default)]
-struct DijkstraResult {
-    distance: Vec<f64>,
-    waves_emitted: usize,
-}
+type BfResult = SPResult;
+type DijkstraResult = SPResult;
 
 fn build_small_chain_graph() -> Graph {
-    // PORT NOTE: real graph in `shortest_path_des`. 5-node chain s→a→b→c→t.
-    Graph {
-        num_nodes: 5,
-        edges: vec![
-            vec![Edge { to: 1, weight: 1.0 }],
-            vec![Edge { to: 2, weight: 2.0 }],
-            vec![Edge { to: 3, weight: 2.0 }],
-            vec![Edge { to: 4, weight: 1.0 }],
-            vec![],
-        ],
-    }
+    build_small_chain_graph_model()
 }
 
-fn build_random_graph(n: usize, _density: f64, _wmin: f64, _wmax: f64, _seed: u32) -> Graph {
-    // PORT NOTE: real impl samples a seeded random non-negative graph.
-    Graph {
-        num_nodes: n,
-        edges: vec![vec![]; n],
-    }
+fn build_random_graph(n: usize, density: f64, wmin: f64, wmax: f64, seed: u32) -> Graph {
+    let mut rng = SeededRandom::new(seed);
+    build_random_graph_model(n, density, wmin, wmax, &mut rng)
 }
 
-fn shortest_path_bellman_ford_des(g: &Graph, _source: usize) -> BfResult {
-    // PORT NOTE: real DES Bellman-Ford relaxation with wave accounting.
-    BfResult {
-        distance: vec![0.0; g.num_nodes],
-        iterations: 0,
-        has_negative_cycle_from_source: false,
-        waves_emitted: 0,
-    }
+fn shortest_path_bellman_ford_des(g: &Graph, source: usize) -> BfResult {
+    shortest_path_bellman_ford_des_model(g, source, BellmanFordOptions::default())
 }
 
-fn shortest_path_dijkstra_des(g: &Graph, _source: usize) -> Result<DijkstraResult, String> {
-    // Faithful: Dijkstra rejects negative weights (TS throws an Error).
-    for adj in &g.edges {
-        for e in adj {
-            if e.weight < 0.0 {
-                return Err("Dijkstra does not support negative edge weights".to_string());
-            }
-        }
-    }
-    Ok(DijkstraResult {
-        distance: vec![0.0; g.num_nodes],
-        waves_emitted: 0,
+fn shortest_path_dijkstra_des(g: &Graph, source: usize) -> Result<DijkstraResult, String> {
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        shortest_path_dijkstra_des_model(g, source, BellmanFordOptions::default())
+    }));
+    std::panic::set_hook(previous_hook);
+    result.map_err(|panic| {
+        panic
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_string())
+            .or_else(|| panic.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "Dijkstra rejected graph".to_string())
     })
 }
 
@@ -200,6 +162,8 @@ pub fn run() {
                 vec![Edge { to: 2, weight: 1.0 }],
                 vec![],
             ],
+            coordinates: None,
+            node_names: None,
         };
         let threw = shortest_path_dijkstra_des(&g, 0).is_err();
         c.check("Dijkstra throws on negative-weight edge", threw, "");
@@ -228,6 +192,8 @@ pub fn run() {
                 }],
                 vec![Edge { to: 1, weight: 1.0 }],
             ],
+            coordinates: None,
+            node_names: None,
         };
         let bf = shortest_path_bellman_ford_des(&g, 0);
         c.check(
@@ -237,20 +203,18 @@ pub fn run() {
         );
     }
 
-    println!("\nStudy 5 — Bellman-Ford terminates in ≤ |V|-1 iterations on positive-weight graphs");
+    println!("\nStudy 5 — Bellman-Ford terminates within |V| DES ticks on positive-weight graphs");
     {
         for n in [5usize, 10, 20, 30] {
             let g = build_random_graph(n, 0.3, 1.0, 5.0, 42 + n as u32);
             let bf = shortest_path_bellman_ford_des(&g, 0);
             c.check(
                 &format!(
-                    "n={}: Bellman-Ford ran in {} iterations (≤ {})",
-                    n,
-                    bf.iterations,
-                    n - 1
+                    "n={}: Bellman-Ford ran in {} DES ticks (≤ {})",
+                    n, bf.iterations, n
                 ),
                 bf.iterations <= n,
-                &format!("iterations={}, |V|-1={}", bf.iterations, n - 1),
+                &format!("iterations={}, |V|={}", bf.iterations, n),
             );
         }
     }

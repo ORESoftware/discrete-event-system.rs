@@ -5,165 +5,20 @@
 //! t-tests on time-averaged populations plus one deterministic ODE run.
 //! Top-level `main()` → [`run`].
 //!
-//! PORT NOTES — wire to the already-ported sibling runner modules (present in
-//! this same `runners/` directory; need `mod.rs` wiring which is out of scope):
-//!   * `super::types::{default_config, RunResult, COMPARTMENT_ORDER}`.
-//!   * `super::fel_runner::run_fel_once`, `super::per_individual_runner::run_per_individual_once`,
-//!     `super::gillespie_runner::run_gillespie_once`, `super::ode_runner::run_ode_once`.
-//!   * `super::stats::{mean, stddev, welch}`.
-//! `mean`/`stddev`/`welch`/`erf` are reproduced faithfully here; the four kernels
-//! are stubbed with matching signatures (they return empty maps → printed zeros).
+//! The runner delegates to the shared SEIR runner modules and statistics helpers.
 
-#![allow(dead_code, unused_variables, unused_mut, unused_imports)]
+#![allow(dead_code)]
 
-use std::collections::HashMap;
 use std::time::Instant;
 
-// =============================================================================
-// Stats helpers (faithful copies of `stats.rs`).
-// =============================================================================
-
-fn mean(xs: &[f64]) -> f64 {
-    if xs.is_empty() {
-        return f64::NAN;
-    }
-    xs.iter().sum::<f64>() / xs.len() as f64
-}
-
-fn sample_variance(xs: &[f64]) -> f64 {
-    if xs.len() < 2 {
-        return 0.0;
-    }
-    let m = mean(xs);
-    xs.iter().map(|&x| (x - m) * (x - m)).sum::<f64>() / (xs.len() as f64 - 1.0)
-}
-
-fn stddev(xs: &[f64]) -> f64 {
-    sample_variance(xs).sqrt()
-}
-
-#[derive(Clone, Copy, Debug)]
-struct WelchResult {
-    t: f64,
-    p_value_two_sided: f64,
-    reject95: bool,
-    reject99: bool,
-}
-
-fn welch(a: &[f64], b: &[f64]) -> WelchResult {
-    let m_a = mean(a);
-    let m_b = mean(b);
-    let v_a = sample_variance(a);
-    let v_b = sample_variance(b);
-    let n_a = a.len() as f64;
-    let n_b = b.len() as f64;
-    let se_sq = v_a / n_a + v_b / n_b;
-    let t = if se_sq > 0.0 {
-        (m_a - m_b) / se_sq.sqrt()
-    } else {
-        0.0
-    };
-    let p = if se_sq > 0.0 {
-        2.0 * (1.0 - normal_cdf(t.abs()))
-    } else {
-        1.0
-    };
-    WelchResult {
-        t,
-        p_value_two_sided: p,
-        reject95: t.abs() > 1.96,
-        reject99: t.abs() > 2.58,
-    }
-}
-
-fn normal_cdf(x: f64) -> f64 {
-    0.5 * (1.0 + erf(x / std::f64::consts::SQRT_2))
-}
-
-fn erf(x: f64) -> f64 {
-    let (a1, a2, a3, a4, a5, p) = (
-        0.254829592,
-        -0.284496736,
-        1.421413741,
-        -1.453152027,
-        1.061405429,
-        0.3275911,
-    );
-    let sign = if x < 0.0 { -1.0 } else { 1.0 };
-    let ax = x.abs();
-    let t = 1.0 / (1.0 + p * ax);
-    let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-ax * ax).exp();
-    sign * y
-}
-
-// =============================================================================
-// Config + RunResult (faithful subset of `types.rs`).
-// =============================================================================
-
-#[derive(Clone, Copy, Debug)]
-struct Probabilities {
-    asymptomatic_share: f64,
-    hospitalization_given_symptom: f64,
-    case_fatality_given_hospital: f64,
-}
-
-#[derive(Clone, Debug)]
-struct SimConfig {
-    step_size: f64,
-    horizon_days: f64,
-    phase1_days: f64,
-    source_cap: f64,
-    probabilities: Probabilities,
-}
-
-fn default_config() -> SimConfig {
-    SimConfig {
-        step_size: 1.0,
-        horizon_days: 1200.0,
-        phase1_days: 800.0,
-        source_cap: 500.0,
-        probabilities: Probabilities {
-            asymptomatic_share: 0.40,
-            hospitalization_given_symptom: 0.20,
-            case_fatality_given_hospital: 0.12,
-        },
-    }
-}
-
-const COMPARTMENT_ORDER: [&str; 7] = ["S", "E", "I-P", "I-A", "I-S", "I-H", "R"];
-
-#[derive(Clone, Copy, Debug, Default)]
-struct Totals {
-    created: f64,
-    absorbed: f64,
-}
-
-#[derive(Clone, Debug, Default)]
-struct RunResult {
-    totals: Totals,
-    split_probs: HashMap<String, HashMap<String, f64>>,
-    time_avg_populations: HashMap<String, f64>,
-    elapsed_ms: u128,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-struct RunOpts {
-    seed: u64,
-    service_individual: bool,
-}
-
-fn run_per_individual_once(_cfg: &SimConfig, _opts: RunOpts) -> RunResult {
-    RunResult::default()
-}
-fn run_fel_once(_cfg: &SimConfig, _opts: RunOpts) -> RunResult {
-    RunResult::default()
-}
-fn run_gillespie_once(_cfg: &SimConfig, _opts: RunOpts) -> RunResult {
-    RunResult::default()
-}
-fn run_ode_once(_cfg: &SimConfig) -> RunResult {
-    RunResult::default()
-}
+use crate::des::runners::fel_runner::run_fel_once;
+use crate::des::runners::gillespie_runner::run_gillespie_once;
+use crate::des::runners::ode_runner::run_ode_once;
+use crate::des::runners::per_individual_runner::run_per_individual_once;
+use crate::des::runners::stats::{mean, stddev, welch};
+use crate::des::runners::types::{
+    default_config, RunOpts, RunResult, ServiceDiscipline, COMPARTMENT_ORDER,
+};
 
 // =============================================================================
 // Formatting helpers.
@@ -251,27 +106,28 @@ pub fn run() {
     for i in 0..n {
         pi_runs.push(run_per_individual_once(
             &cfg,
-            RunOpts {
-                seed: 0xC0000 + i as u64,
-                service_individual: false,
+            &RunOpts {
+                seed: Some(0xC0000 + i as u64),
+                ..Default::default()
             },
         ));
         fel_runs.push(run_fel_once(
             &default_cfg,
-            RunOpts {
-                seed: 0xD0000 + i as u64,
-                service_individual: true,
+            &RunOpts {
+                seed: Some(0xD0000 + i as u64),
+                service: Some(ServiceDiscipline::Individual),
+                ..Default::default()
             },
         ));
         ssa_runs.push(run_gillespie_once(
             &default_cfg,
-            RunOpts {
-                seed: 0xE0000 + i as u64,
-                service_individual: false,
+            &RunOpts {
+                seed: Some(0xE0000 + i as u64),
+                ..Default::default()
             },
         ));
     }
-    let ode = run_ode_once(&default_cfg);
+    let ode = run_ode_once(&default_cfg, &RunOpts::default());
     let elapsed = t0.elapsed().as_millis();
 
     println!("total wall: {} ms", elapsed);

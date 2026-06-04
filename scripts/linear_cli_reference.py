@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+from fractions import Fraction
 import json
 import math
 import os
@@ -1220,30 +1221,92 @@ def parse_soplex_solution(path: str, n: int, stdout: str, stderr: str) -> tuple[
     return status, x
 
 
-def parse_qsopt_ex_solution(path: str, n: int, stdout: str, stderr: str) -> tuple[str, list[float]]:
+def parse_qsopt_ex_solution(
+    path: str,
+    n: int,
+    le_count: int,
+    eq_count: int,
+    stdout: str,
+    stderr: str,
+) -> tuple[str, list[float], dict[str, object]]:
     x = [0.0] * n
+    reduced_costs = [0.0] * n
+    row_duals = [0.0] * (le_count + eq_count)
+    saw_reduced_costs = False
+    saw_pi = False
     with open(path, "r", encoding="utf-8", errors="replace") as f:
         text = f.read()
-    lower = f"{stdout}\n{stderr}\n{text}".lower()
-    if "infeasible" in lower:
+    solution_lower = text.lower()
+    combined_lower = f"{stdout}\n{stderr}\n{text}".lower()
+    if "status optimal" in solution_lower or "problem solved exactly" in combined_lower:
+        status = "optimal"
+    elif "status infeasible" in solution_lower or "infeasible" in combined_lower:
         status = "infeasible"
-    elif "unbounded" in lower:
+    elif "status unbounded" in solution_lower or "unbounded" in combined_lower:
         status = "unbounded"
-    elif "optimal" in lower or "objective" in lower or "primal solution" in lower:
+    elif "optimal" in solution_lower or "objective" in solution_lower or "primal solution" in solution_lower:
         status = "optimal"
     else:
         status = "unknown"
 
+    section: Optional[str] = None
     for line in text.splitlines():
-        parsed = _parse_named_value_line(line, n)
-        if parsed is not None:
-            idx, value = parsed
-            x[idx] = value
-    return status, x
+        stripped = line.strip()
+        upper = stripped.upper()
+        if upper == "VARS:":
+            section = "vars"
+            continue
+        if upper.startswith(("REDUCED COST", "PI", "SLACK")):
+            section = (
+                "reduced"
+                if upper.startswith("REDUCED COST")
+                else "pi"
+                if upper.startswith("PI")
+                else None
+            )
+            saw_reduced_costs = saw_reduced_costs or section == "reduced"
+            saw_pi = saw_pi or section == "pi"
+            continue
+        if section is None:
+            continue
+        if section == "vars":
+            parsed = _parse_named_value_line(line, n)
+            if parsed is not None:
+                idx, value = parsed
+                x[idx] = value
+        elif section == "reduced":
+            parsed = _parse_prefixed_value_line(line, "x", n)
+            if parsed is not None:
+                idx, value = parsed
+                reduced_costs[idx] = value
+        elif section == "pi":
+            parsed = _parse_prefixed_value_line(line, "c", le_count)
+            if parsed is not None:
+                idx, value = parsed
+                row_duals[idx] = value
+                continue
+            parsed = _parse_prefixed_value_line(line, "e", eq_count)
+            if parsed is not None:
+                idx, value = parsed
+                row_duals[le_count + idx] = value
+
+    fields: dict[str, object] = {}
+    if saw_reduced_costs:
+        fields["reducedCosts"] = reduced_costs
+    if saw_pi and le_count:
+        fields["dualUB"] = row_duals[:le_count]
+    if saw_pi and eq_count:
+        fields["dualEQ"] = row_duals[le_count:]
+    return status, x, fields
 
 
 def _parse_named_value_line(line: str, n: int) -> Optional[tuple[int, float]]:
-    match = re.search(r"\bx(\d+)\b", line, flags=re.IGNORECASE)
+    return _parse_prefixed_value_line(line, "x", n)
+
+
+def _parse_prefixed_value_line(line: str, prefix: str, n: int) -> Optional[tuple[int, float]]:
+    escaped_prefix = re.escape(prefix)
+    match = re.search(rf"\b{escaped_prefix}(\d+)\b", line, flags=re.IGNORECASE)
     if match is None:
         return None
     idx = int(match.group(1))
@@ -1252,13 +1315,16 @@ def _parse_named_value_line(line: str, n: int) -> Optional[tuple[int, float]]:
     after = line[match.end() :]
     for token in re.split(r"[\s,;:=]+", after):
         token = token.strip()
-        if _is_number(token):
-            return idx, float(token)
+        value = _parse_number_token(token)
+        if value is not None:
+            return idx, value
     before = line[: match.start()]
     numeric_before = [
-        float(token)
+        value
         for token in re.split(r"[\s,;:=]+", before)
-        if token.strip() and _is_number(token.strip())
+        if token.strip()
+        for value in [_parse_number_token(token.strip())]
+        if value is not None
     ]
     if numeric_before:
         return idx, numeric_before[-1]
@@ -1280,11 +1346,21 @@ def _split_xpress_solution_line(line: str) -> list[str]:
 
 
 def _is_number(text: str) -> bool:
+    return _parse_number_token(text) is not None
+
+
+def _parse_number_token(text: str) -> Optional[float]:
+    stripped = text.strip()
+    if not stripped:
+        return None
     try:
-        float(text)
-        return True
+        value = float(stripped)
     except ValueError:
-        return False
+        try:
+            value = float(Fraction(stripped))
+        except (ValueError, ZeroDivisionError):
+            return None
+    return value if math.isfinite(value) else None
 
 
 def stripped_starts(text: str, prefixes: Sequence[str]) -> bool:
@@ -3007,7 +3083,14 @@ def solve(
         elif solver == "soplex":
             status, x = parse_soplex_solution(solution_path, len(c), stdout, stderr)
         elif solver == "qsopt-ex":
-            status, x = parse_qsopt_ex_solution(solution_path, len(c), stdout, stderr)
+            status, x, certificate_fields = parse_qsopt_ex_solution(
+                solution_path,
+                len(c),
+                len(a_ub),
+                len(a_eq),
+                stdout,
+                stderr,
+            )
         else:
             status, x, certificate_fields = parse_cbc_solution(
                 solution_path,

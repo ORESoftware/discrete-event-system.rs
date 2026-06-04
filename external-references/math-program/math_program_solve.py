@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+from fractions import Fraction
 import json
 import math
 import os
@@ -46,6 +47,8 @@ COMMAND_ENV_VARS = {
 
 COMMERCIAL_LINEAR_CLI_SOLVERS = {"gurobi", "cplex", "xpress", "lindo"}
 CP_SAT_INTEGER_TOL = 1e-6
+CP_SAT_CONTINUOUS_SCALE = 1000
+CP_SAT_MAX_DENOMINATOR = 1_000_000
 LINEAR_CLI_BACKEND_SOLVERS = COMMERCIAL_LINEAR_CLI_SOLVERS | {
     "highs",
     "glpk",
@@ -478,6 +481,79 @@ def _integer_value(value: Any, name: str) -> int:
     if not math.isfinite(numeric) or abs(numeric - rounded) > CP_SAT_INTEGER_TOL:
         raise RuntimeError(f"CP-SAT oracle requires integer-scaled {name}, got {value}")
     return int(rounded)
+
+
+def _fraction_value(value: Any, name: str) -> Fraction:
+    numeric = float(value)
+    if not math.isfinite(numeric):
+        raise RuntimeError(f"CP-SAT oracle requires finite {name}, got {value}")
+    fraction = Fraction(str(numeric)).limit_denominator(CP_SAT_MAX_DENOMINATOR)
+    if abs(float(fraction) - numeric) > CP_SAT_INTEGER_TOL:
+        raise RuntimeError(f"CP-SAT oracle cannot rationally scale {name}, got {value}")
+    return fraction
+
+
+def _lcm_values(values: list[int]) -> int:
+    result = 1
+    for value in values:
+        result = math.lcm(result, value)
+    return result
+
+
+def _scaled_integer_value(value: Any, scale: int, name: str) -> int:
+    return _integer_value(float(value) * scale, name)
+
+
+def _cp_sat_variable_scales(
+    integer_vars: list[bool],
+    upper: list[Any | None],
+    start: list[float] | None,
+) -> list[int]:
+    scales = []
+    for i, is_integer in enumerate(integer_vars):
+        if is_integer:
+            scales.append(1)
+            continue
+        denominators = [CP_SAT_CONTINUOUS_SCALE]
+        if i < len(upper) and upper[i] is not None:
+            denominators.append(_fraction_value(upper[i], f"upper bound {i}").denominator)
+        if start is not None:
+            denominators.append(_fraction_value(start[i], f"MIP start {i}").denominator)
+        scales.append(_lcm_values(denominators))
+    return scales
+
+
+def _cp_sat_scaled_linear(
+    row: list[float],
+    bound: float,
+    variable_scales: list[int],
+    label: str,
+) -> tuple[list[int], int]:
+    terms: list[Fraction] = []
+    denominators = [_fraction_value(bound, f"{label} bound").denominator]
+    for var_index, scale in enumerate(variable_scales):
+        coef = row[var_index] if var_index < len(row) else 0.0
+        term = _fraction_value(coef, f"{label} coefficient {var_index}") / scale
+        terms.append(term)
+        if term:
+            denominators.append(term.denominator)
+    multiplier = _lcm_values(denominators)
+    scaled_terms = [int(term * multiplier) for term in terms]
+    scaled_bound = int(_fraction_value(bound, f"{label} bound") * multiplier)
+    return scaled_terms, scaled_bound
+
+
+def _cp_sat_scaled_objective(
+    coefficients: list[float],
+    variable_scales: list[int],
+) -> tuple[list[int], int]:
+    terms = [
+        _fraction_value(coef, f"objective coefficient {i}") / scale
+        for i, (coef, scale) in enumerate(zip(coefficients, variable_scales))
+    ]
+    multiplier = _lcm_values([term.denominator for term in terms if term] or [1])
+    scaled_terms = [int(term * multiplier) for term in terms]
+    return scaled_terms, multiplier
 
 
 def _mip_start(problem: dict[str, Any]) -> list[float] | None:
@@ -1286,39 +1362,46 @@ def solve_ortools_cp_sat(payload: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError(f"OR-Tools CP-SAT unavailable: {exc}") from exc
 
     mip = payload["mip"]
-    c = [_integer_value(v, f"objective coefficient {i}") for i, v in enumerate(mip.get("c", []))]
+    c = [float(v) for v in mip.get("c", [])]
     integer_vars = [bool(v) for v in mip.get("integerVars", [])]
-    if len(integer_vars) != len(c) or not all(integer_vars):
-        raise RuntimeError("CP-SAT oracle requires every compiled variable to be integer")
+    if len(integer_vars) != len(c):
+        raise RuntimeError("CP-SAT oracle requires one integrality flag per compiled variable")
 
     upper = mip.get("ub") or [None] * len(c)
+    start = _mip_start(mip)
+    variable_scales = _cp_sat_variable_scales(integer_vars, upper, start)
     model = cp_model.CpModel()
     variables = []
-    for i in range(len(c)):
+    for i, scale in enumerate(variable_scales):
         if i >= len(upper) or upper[i] is None:
             raise RuntimeError(f"CP-SAT oracle requires finite upper bound for variable {i}")
-        hi = _integer_value(upper[i], f"upper bound {i}")
+        hi = _scaled_integer_value(upper[i], scale, f"upper bound {i}")
         if hi < 0:
             raise RuntimeError(f"CP-SAT oracle requires non-negative upper bound for variable {i}")
         variables.append(model.NewIntVar(0, hi, f"x{i}"))
 
     for row_index, (row, bound) in enumerate(_mip_rows(mip)):
+        scaled_row, scaled_bound = _cp_sat_scaled_linear(
+            row,
+            bound,
+            variable_scales,
+            f"row {row_index}",
+        )
         terms = []
-        for var_index, (var, coef) in enumerate(zip(variables, row)):
-            coef_i = _integer_value(coef, f"row {row_index} coefficient {var_index}")
+        for var, coef_i in zip(variables, scaled_row):
             if coef_i:
                 terms.append(coef_i * var)
-        model.Add(sum(terms) <= _integer_value(bound, f"row {row_index} bound"))
+        model.Add(sum(terms) <= scaled_bound)
 
-    objective_terms = [coef * var for coef, var in zip(c, variables) if coef]
+    objective_coefficients, objective_scale = _cp_sat_scaled_objective(c, variable_scales)
+    objective_terms = [coef * var for coef, var in zip(objective_coefficients, variables) if coef]
     if mip.get("sense", "max") == "max":
         model.Maximize(sum(objective_terms))
     else:
         model.Minimize(sum(objective_terms))
-    start = _mip_start(mip)
     if start is not None:
-        for i, (var, value) in enumerate(zip(variables, start)):
-            model.AddHint(var, _integer_value(value, f"MIP start {i}"))
+        for i, (var, value, scale) in enumerate(zip(variables, start, variable_scales)):
+            model.AddHint(var, _scaled_integer_value(value, scale, f"MIP start {i}"))
 
     solver = cp_model.CpSolver()
     options = _external_options(payload)
@@ -1340,16 +1423,25 @@ def solve_ortools_cp_sat(payload: dict[str, Any]) -> dict[str, Any]:
         cp_model.UNKNOWN: "numerical-error",
     }.get(status_code, "numerical-error")
     status = _limited_status(status, options)
-    x = [float(solver.Value(var)) for var in variables] if status in {"optimal", "iter-limit"} else []
-    objective_value = float(solver.ObjectiveValue()) if status in {"optimal", "iter-limit"} else None
+    x = (
+        [float(solver.Value(var)) / scale for var, scale in zip(variables, variable_scales)]
+        if status in {"optimal", "iter-limit"}
+        else []
+    )
+    objective_value = sum(coef * value for coef, value in zip(c, x)) if x else None
+    scaling_note = (
+        "; scaled continuous variables"
+        if any(scale != 1 for scale in variable_scales)
+        else ""
+    )
     parsed = {
         "status": status,
         "x": x,
         "objective": objective_value,
-        "message": f"ortools:CP-SAT status={status_code}",
+        "message": f"ortools:CP-SAT status={status_code}{scaling_note}",
     }
     if status in {"optimal", "iter-limit"}:
-        best_bound = float(solver.BestObjectiveBound())
+        best_bound = float(solver.BestObjectiveBound()) / objective_scale
         parsed.update(
             _quality_fields(
                 best_bound=best_bound,
